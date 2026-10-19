@@ -192,10 +192,11 @@ export const RUNTIME_LOGINS: Readonly<Record<RuntimeKind, readonly string[]>> = 
 
 /**
  * The login a parsed `claude auth status` answer names, as the preflight reads it (and the wizard's Claude step):
- * 'none' unless it says it is signed in, 'unknown' when it is signed in but names no method.
+ * 'none' unless it says it is signed in (`loggedIn` exactly true: "false" or 1 is not), 'unknown' when it is signed
+ * in but names no method.
  */
 export function loginMethod(j: { loggedIn?: unknown; authMethod?: unknown }): string {
-  if (!j.loggedIn) return 'none';
+  if (j.loggedIn !== true) return 'none';
   return typeof j.authMethod === 'string' && j.authMethod ? j.authMethod : 'unknown';
 }
 

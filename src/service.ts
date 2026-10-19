@@ -72,6 +72,13 @@ export const logPath = (root: string) => join(projectStateDir(root), 'events.db'
 export const serviceLabel = (cfg: Config) => `dev.${BRAND.cli}.${cfg.project.project.name.replace(/[^A-Za-z0-9-]/g, '-')}`;
 
 /**
+ * The whole environment a local coordinator's service starts with, so its agent runs too: PATH reaching the prefix's
+ * bin, where local init installs tools (src/tool-path.ts), and HOME; nothing else from the shell that ran `up`.
+ * WHY one function (#738): the wizard's Claude step asks `claude` with exactly this (src/setup-steps.ts probeEnv).
+ */
+export const localServiceEnv = (env: NodeJS.ProcessEnv = process.env): { PATH: string; HOME: string } => ({ PATH: toolPath(env.PATH ?? '', env), HOME: env.HOME ?? '' });
+
+/**
  * The coordinator's service for a checkout (local mode), as `up` installs it and the first-run page's Start does:
  * one spec, so the two can't start it differently.
  */
@@ -84,7 +91,7 @@ export function localServiceSpec(root: string, cfg: Config, env: NodeJS.ProcessE
     workingDir: root,
     logFile: join(projectStateDir(root), 'coordinator.log'),
     // PATH reaches the prefix's bin, where local init installs tools (src/tool-path.ts), as `up` has always set it.
-    env: { PATH: toolPath(env.PATH ?? '', env), HOME: env.HOME ?? '' },
+    env: localServiceEnv(env),
   };
 }
 
@@ -162,7 +169,7 @@ export function writeInstanceHooks(i: Pick<Instance, 'home' | 'config'>): string
  * only the owner sets, with credentials.sh); otherwise the agent user's Claude subscription login. The repo's own
  * agent_runtime doesn't decide this for an instance. The key never enters an environment (instanceEnv strips it).
  */
-export function instanceRuntime(i: Pick<Instance, 'credentials'>): { runtime: 'cli' | 'api_key'; apiKeyFile?: string } {
+export function instanceRuntime(i: { credentials: { agent_api_key?: string | undefined } }): { runtime: 'cli' | 'api_key'; apiKeyFile?: string } {
   return i.credentials.agent_api_key ? { runtime: 'api_key', apiKeyFile: i.credentials.agent_api_key } : { runtime: 'cli' };
 }
 

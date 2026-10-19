@@ -29,7 +29,7 @@ import { findTool, withToolPath } from './tool-path.js';
 import { FULL_RUN_LOCK } from './testrun/run.js';
 import { modelWarnings } from './model-routing.js';
 import { ENGINE_CURRENT, UPDATES_CONFIG } from './updates.js';
-import { instanceUnit, serviceLabel } from './service.js';
+import { instanceRuntime, instanceUnit, localServiceEnv, serviceLabel } from './service.js';
 import { asRoot, etcPath, unitPath } from './os/system-paths.js';
 import { ciChoiceProblem } from './ci-choice.js';
 import { CI_NONE_MEANS, ciIsNone, requiredFor } from './ci-none.js';
@@ -63,8 +63,14 @@ export interface ProbeRunOptions {
   agentRuntime?: RuntimeKind;
 }
 
-/** The environment a probe runs a command with: this process's (tools on PATH), or the agents' own for a runtime. */
-export const probeEnv = (o: ProbeRunOptions = {}): NodeJS.ProcessEnv => (o.agentRuntime ? outboundEnv(agentAuthEnv(withToolPath(), o.agentRuntime)) : withToolPath());
+/**
+ * The environment a probe runs a command with: this process's (tools on PATH), or, for the Claude step, what a local
+ * agent run of that kind gives claude. That is the local service's own environment (src/service.ts
+ * localServiceEnv: PATH and HOME only, never this shell's), then the runner's (agentAuthEnv, outboundEnv).
+ * WHY (#738 round 2): through 1a5edc71 the step started from this process's environment, so a key or a
+ * CLAUDE_CONFIG_DIR only in init's or doctor's shell passed the step while every run of the service stopped.
+ */
+export const probeEnv = (o: ProbeRunOptions = {}): NodeJS.ProcessEnv => (o.agentRuntime ? outboundEnv(agentAuthEnv(localServiceEnv(), o.agentRuntime)) : withToolPath());
 
 /** What the detectors may ask of the machine: read-only commands and the service manager. Tests stand in for it. */
 export interface SetupProbe {
@@ -169,6 +175,8 @@ export interface SetupContext {
 export interface Detected {
   done: boolean;
   detail: string;
+  /** The fix for this state when it isn't the step's own (#738: an API-key project's Claude step offers no sign-in). */
+  fix?: Fix;
 }
 
 /** How the first-run page fixes a step that isn't done. */
@@ -277,6 +285,15 @@ function agentLogin(k: Checking): Detected | null {
   const when = s.at ? ` at ${s.at}` : '';
   // WHY (#463): signed in per claude auth status is not proof the API takes the login; the real call is, when made.
   if (u.loggedIn && u.apiOk === false) return no(`${u.user} is signed in per claude auth status, but the API refused the login on a minimal real call${when}: ${u.apiError ?? 'no answer'}`);
+  // WHY (#738): the login must be one the instance's runtime runs on (src/runner.ts RUNTIME_LOGINS), as the
+  // preflight checks it; an API key instance is one whose credentials.yaml names agent_api_key (instanceRuntime).
+  if (u.loggedIn) {
+    const i = k.inst();
+    if (isErr(i)) return no(`${u.user} is signed in per claude auth status${when}, but which login its agents need can't be told: ${i.error}`);
+    const kind = instanceRuntime(i).runtime;
+    const method = u.authMethod ?? 'unknown';
+    if (!RUNTIME_LOGINS[kind].includes(method)) return no(`${u.user} is signed in${u.authMethod ? ` (${u.authMethod})` : ' with no login method recorded'}, per claude auth status as that user${when}, but the agents would refuse it: the instance runs ${kind === 'api_key' ? 'on an API key (credentials.yaml agent_api_key)' : 'on a Claude subscription login'}, which takes only ${RUNTIME_LOGINS[kind].join(' or ')}, so every run would stop with auth_mismatch`);
+  }
   if (u.loggedIn) return ok(`${u.user} is signed in${u.authMethod ? ` (${u.authMethod})` : ''}, per claude auth status as that user${when}${u.tokenId ? `; token ${u.tokenId}` : ''}`);
   return no(`${u.user}: ${u.error ?? 'not signed in'}, per claude auth status as that user${when}`);
 }
@@ -405,7 +422,10 @@ export function detectClaudeLogin(p: Pick<SetupProbe, 'which' | 'run'>, runtime:
   // INVARIANT (#738): the method as the runner's preflight reads it (loginMethod), checked against the same table.
   const method = parsed ? loginMethod(parsed) : r.status === 0 ? 'unknown' : 'none';
   const needs = `agent_runtime.kind is ${runtime.kind} (${RUNTIME_FROM[runtime.source]}), which runs only on ${RUNTIME_WANTS[runtime.kind]}`;
-  const refuse = (detail: string) => ({ ...no(`${detail}. To fix: ${runtimeFix(runtime)}`), mismatch: true as const });
+  // An API-key project has no sign-in to offer: the page's Sign in would start a subscription login it refuses.
+  const keyFix: Fix = { kind: 'terminal', command: `"apiKeyHelper": "cat -- ${runtime.keyFile ?? '<your key file>'}"`, why: "an API key has no sign-in: claude reads it from your key file through apiKeyHelper, a line in your own Claude settings (~/.claude/settings.json), which this page never writes" };
+  const fixed = <T extends Detected>(d: T): T => (runtime.kind === 'api_key' ? { ...d, fix: keyFix } : d);
+  const refuse = (detail: string) => fixed({ ...no(`${detail}. To fix: ${runtimeFix(runtime)}`), mismatch: true as const });
   if (r.status !== 0 || method === 'none') return runtime.kind === 'cli' ? no('not signed in, per `claude auth status`') : refuse(`not signed in, per \`claude auth status\`: ${needs}`);
   const shown = method.replace(/[^A-Za-z0-9._-]/g, '?').slice(0, 40);
   const how = `signed in${method !== 'unknown' ? ` (${shown})` : ' with no login method named'}, per \`claude auth status\``;
@@ -413,7 +433,7 @@ export function detectClaudeLogin(p: Pick<SetupProbe, 'which' | 'run'>, runtime:
   const identity = JSON.stringify([runtime.kind, method, parsed?.email ?? null, parsed?.orgId ?? null]);
   const prove = () => proveClaudeLogin({ run: (cmd, args) => p.run(cmd, args, as) });
   const proof = memo ? memo(identity, prove) : prove();
-  return proof.done ? ok(`${how}; ${proof.detail}`) : no(`${how}, but the API refused it: ${proof.detail}`);
+  return fixed(proof.done ? ok(`${how}; ${proof.detail}`) : no(`${how}, but the API refused it: ${proof.detail}`));
 }
 
 /** How long the dashboard keeps a login's proof: an answered call, and a refused one (Re-check always calls again). */
@@ -1315,7 +1335,7 @@ export function checkSetup(c: SetupContext, p: SetupProbe, o: { cache?: DetectCa
       o.cache?.set(s.id, { at: t, key, r });
     }
     if (!r) continue;
-    steps.push({ id: s.id, group: s.group, rows: s.rows, title: s.title, optional: s.optional, walk: !!s.walk?.includes(c.mode), reach: s.reach, done: r.done, detail: r.detail, today: s.today, fix: s.fix, automation: s.automation ?? null, skipped: !!c.skipped?.includes(s.id), network: !!s.network, checkedAt: new Date(at).toISOString() });
+    steps.push({ id: s.id, group: s.group, rows: s.rows, title: s.title, optional: s.optional, walk: !!s.walk?.includes(c.mode), reach: s.reach, done: r.done, detail: r.detail, today: s.today, fix: r.fix ?? s.fix, automation: s.automation ?? null, skipped: !!c.skipped?.includes(s.id), network: !!s.network, checkedAt: new Date(at).toISOString() });
   }
   const groups: GroupView[] = GROUPS.filter((g) => g.modes.includes(c.mode))
     .map((g) => {

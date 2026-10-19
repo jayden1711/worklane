@@ -13,7 +13,8 @@ import { tmpdir } from 'node:os';
 import { delimiter, dirname, join } from 'node:path';
 import { BRAND } from '../src/brand.js';
 import { emptyAutoConfig, SETUP_BRANCH } from '../src/auto-config.js';
-import { loadConfigAt } from '../src/config/load.js';
+import { loadConfig, loadConfigAt } from '../src/config/load.js';
+import { localServiceSpec } from '../src/service.js';
 import { doctor } from '../src/doctor.js';
 import { projectStateDir } from '../src/guardrails/context.js';
 import { firstRunLiveView, initCommand, localInitFile, newState, readInitState, setupContext, type InitArgs, type InitIo } from '../src/init.js';
@@ -320,6 +321,49 @@ test('#738: a held draft (the first-run page) decides the kind before the config
   assert.match(sub.detail, /agent_runtime\.kind is api_key \(the drafted config\)[\s\S]*or set agent_runtime\.kind to cli in the draft's config\.yaml on the first-run page/);
 });
 
+test("#738 round 2: an API-key project's card offers the apiKeyHelper line, never a subscription Sign in; a subscription project keeps Sign in", () => {
+  const p = newProject();
+  const k = keyFile();
+  const state = newState('local', p.root, REPO, null);
+  state.agentRuntime = { kind: 'api_key', keyFile: k.file } as never;
+  const card = (s: typeof state | null, method: string) => {
+    const view = checkSetup(setupContext(s, { mode: 'local', root: p.root, repo: REPO, instance: null, stateDir: projectStateDir(p.root), policyFile: null }), world({ method }).probe);
+    return view.groups.flatMap((g) => g.steps).find((x) => x.id === 'claude-login')!;
+  };
+  for (const method of ['claude.ai', 'api_key_helper']) {
+    const c = card(state, method);
+    assert.equal(c.fix.kind, 'terminal', `${method}: ${JSON.stringify(c.fix)}`);
+    assert.equal((c.fix as { command: string }).command, `"apiKeyHelper": "cat -- ${k.file}"`);
+  }
+  assert.equal(card(null, 'claude.ai').fix.kind, 'signin', 'a subscription project: Sign in, as before');
+  assert.equal(card(null, 'api_key').fix.kind, 'signin');
+});
+
+test('#738 round 2: server mode, the recorded login of the agent user must be one the instance runs on (agent_api_key: an API key)', () => {
+  const machine = mkdtempSync(join(tmpdir(), 'cr-machine-'));
+  const accountDir = join(machine, 'claude-account');
+  mkdirSync(accountDir);
+  const root = existingProject('cli');
+  const home = mkdtempSync(join(tmpdir(), 'cr-inst-'));
+  const keyed = { home, credentials: { github: { kind: 'app' as const, key_path: join(home, 'app.pem') }, agent_api_key: join(home, 'key') } };
+  const plain = { home, credentials: { github: { kind: 'app' as const, key_path: join(home, 'app.pem') } } };
+  const step = (method: string | null, facts: typeof keyed | typeof plain) => {
+    const agent = { instance: 'shop', kind: 'agent', user: 'wl-shop-agent', stored: true, logged_in: true, ...(method ? { auth_method: method } : {}), token_id: '0123abcd' };
+    writeFileSync(join(accountDir, 'status.json'), JSON.stringify({ at: '2026-10-19T10:00:00Z', users: [agent] }));
+    const ctx = { ...setupContext(null, { mode: 'server', root, repo: REPO, instance: 'shop', stateDir: projectStateDir(root), policyFile: null }), machine: { claudeAccountDir: accountDir }, instanceFacts: () => facts };
+    return checkSetup(ctx, world({ method: null }).probe).groups.flatMap((g) => g.steps).find((s) => s.id === 'claude-token')!;
+  };
+  const refused = step('claude.ai', keyed);
+  assert.equal(refused.done, false, refused.detail);
+  assert.match(refused.detail, /but the agents would refuse it: the instance runs on an API key \(credentials\.yaml agent_api_key\), which takes only api_key or api_key_helper/);
+  assert.equal(step('api_key_helper', keyed).done, true);
+  assert.equal(step('api_key_helper', plain).done, false, 'a subscription instance refuses an API-key login');
+  assert.equal(step(null, plain).done, false, 'a record that names no method: not done');
+  const same = step('claude.ai', plain);
+  assert.equal(same.done, true, same.detail);
+  assert.equal(same.detail, 'wl-shop-agent is signed in (claude.ai), per claude auth status as that user at 2026-10-19T10:00:00Z; token 0123abcd', 'a matching login reads as before');
+});
+
 // ---------- the wizard and the runner agree, with a fake claude on PATH and a scratch HOME ----------
 
 /** A fake claude: signs in as a key in its environment would (ANTHROPIC_API_KEY, then CLAUDE_CODE_OAUTH_TOKEN), else as its home says. */
@@ -331,12 +375,15 @@ function fakeClaude(): { dir: string; bin: string } {
     `#!/usr/bin/env node
 const fs = require('node:fs'), path = require('node:path');
 const state = path.join(process.env.HOME || '/nonexistent', '.fake-claude');
-const read = (f) => { try { return fs.readFileSync(path.join(state, f), 'utf8').trim(); } catch { return null; } };
+const dir = process.env.CLAUDE_CONFIG_DIR ? path.join(process.env.CLAUDE_CONFIG_DIR, 'fake') : state;
+const read = (f) => { try { return fs.readFileSync(path.join(dir, f), 'utf8').trim(); } catch { return null; } };
 const a = process.argv.slice(2);
 const method = process.env.ANTHROPIC_API_KEY ? 'api_key' : process.env.CLAUDE_CODE_OAUTH_TOKEN ? 'oauth_token' : read('method');
 if (a[0] === 'auth' && a[1] === 'status') {
   if (read('plain')) { console.log('Logged in as someone'); process.exit(0); }
   if (read('noflag')) { console.log(JSON.stringify({ authMethod: 'claude.ai' })); process.exit(0); }
+  if (read('strflag')) { console.log(JSON.stringify({ loggedIn: 'false', authMethod: 'claude.ai' })); process.exit(0); }
+  if (read('oneflag')) { console.log(JSON.stringify({ loggedIn: 1, authMethod: 'claude.ai' })); process.exit(0); }
   if (!method) { console.log(JSON.stringify({ loggedIn: false, authMethod: 'none' })); process.exit(1); }
   console.log(JSON.stringify({ loggedIn: true, authMethod: method })); process.exit(0);
 }
@@ -354,41 +401,56 @@ setTimeout(() => process.exit(0), 200);
 
 const runReq = (cwd: string): RunRequest => ({ role: 'worker', prompt: 'p', cwd, model: 'm', allowedTools: [], maxTurns: 1, maxBudgetUsd: 0.01, stallMs: 30_000, timeoutMs: 30_000 });
 
-test('#738: the step is done exactly when the runner would start a run on that login (a fake claude on PATH, a scratch HOME)', { skip: posixOnly }, async () => {
+test("#738: the step is done exactly when the local service's runs would start on that login (a fake claude on PATH, a scratch HOME)", { skip: posixOnly }, async (t) => {
   const fake = fakeClaude();
-  // [kind, the login in claude's home, an environment the person's shell has, done/starts?]
+  // [kind, the login claude finds (in its home, or under the shell's CLAUDE_CONFIG_DIR), what else the person's
+  // shell has, done/starts?]. The runner is the local service's: its base is localServiceSpec's environment, PATH and
+  // HOME only, as `up` and the first-run page's Start install it (src/service.ts).
   const cases: ['cli' | 'api_key', string | null, Record<string, string>, boolean][] = [
     ['cli', 'claude.ai', {}, true],
     ['cli', 'claude.ai', { ANTHROPIC_API_KEY: 'sk-ant-env-key-738' }, true],
     ['cli', null, { CLAUDE_CODE_OAUTH_TOKEN: 'env-token-738' }, false],
     ['cli', null, { ANTHROPIC_API_KEY: 'sk-ant-env-key-738' }, false],
+    ['cli', 'cfgdir', {}, false],
     ['cli', 'api_key_helper', {}, false],
     ['cli', 'stand-in', {}, false],
     ['cli', 'plain', {}, false],
     ['cli', 'noflag', {}, false],
+    ['cli', 'strflag', {}, false],
+    ['cli', 'oneflag', {}, false],
     ['api_key', 'api_key_helper', {}, true],
-    ['api_key', null, { ANTHROPIC_API_KEY: 'sk-ant-env-key-738' }, true],
+    ['api_key', null, { ANTHROPIC_API_KEY: 'sk-ant-env-key-738' }, false],
     ['api_key', 'claude.ai', {}, false],
   ];
   const saved = { ...process.env };
   try {
-    for (const [kind, login, extra, expected] of cases) {
+    // One subtest per case, so each is reported on its own (and in a fail-without run).
+    for (const [kind, login, extra, expected] of cases) await t.test(`${kind}, ${login ?? 'no login'} ${JSON.stringify(Object.keys(extra))}`, async () => {
       const home = mkdtempSync(join(tmpdir(), 'cr-home-'));
       mkdirSync(join(home, '.fake-claude'));
-      if (login === 'plain' || login === 'noflag') writeFileSync(join(home, '.fake-claude', login), '1');
+      const shellOnly: Record<string, string> = {};
+      if (login === 'cfgdir') {
+        // claude.ai only under a CLAUDE_CONFIG_DIR the shell has; the service never gets that variable.
+        const cfgDir = mkdtempSync(join(tmpdir(), 'cr-cfgdir-'));
+        mkdirSync(join(cfgDir, 'fake'));
+        writeFileSync(join(cfgDir, 'fake', 'method'), 'claude.ai');
+        shellOnly.CLAUDE_CONFIG_DIR = cfgDir;
+      } else if (['plain', 'noflag', 'strflag', 'oneflag'].includes(login ?? '')) writeFileSync(join(home, '.fake-claude', login!), '1');
       else if (login) writeFileSync(join(home, '.fake-claude', 'method'), login);
-      const env: NodeJS.ProcessEnv = { PATH: [fake.dir, dirname(process.execPath), '/usr/bin', '/bin'].join(delimiter), HOME: home, [`${BRAND.envPrefix}_PREFIX`]: join(home, '.local'), ...extra };
+      const env: NodeJS.ProcessEnv = { PATH: [fake.dir, dirname(process.execPath), '/usr/bin', '/bin'].join(delimiter), HOME: home, [`${BRAND.envPrefix}_PREFIX`]: join(home, '.local'), ...extra, ...shellOnly };
       for (const k of Object.keys(process.env)) if (/^(ANTHROPIC_|CLAUDE_CODE_OAUTH_TOKEN$|CLAUDE_CONFIG_DIR$)/.test(k)) delete process.env[k];
       Object.assign(process.env, env);
       const root = existingProject(kind);
       const view = checkSetup(setupContext(null, { mode: 'local', root, repo: REPO, instance: null, stateDir: projectStateDir(root), policyFile: null }), systemProbe());
       const step = view.groups.flatMap((g) => g.steps).find((s) => s.id === 'claude-login')!;
-      const r = await new CliRunner(kind, { ...process.env }, fake.bin, undefined, undefined, undefined, { budgetMs: 0, sleep: async () => false }).run(runReq(root));
+      const service = localServiceSpec(root, loadConfig(root)).env!;
+      assert.deepEqual(Object.keys(service).sort(), ['HOME', 'PATH'], "the local service's whole environment");
+      const r = await new CliRunner(kind, service, fake.bin, undefined, undefined, undefined, { budgetMs: 0, sleep: async () => false }).run(runReq(root));
       const label = `${kind}, ${login ?? 'no login'} ${JSON.stringify(Object.keys(extra))}`;
       assert.equal(r.reason !== 'auth_mismatch', expected, `${label}: the runner ${r.reason}: ${r.detail}`);
       assert.equal(step.done, expected, `${label}: the step says ${step.detail}`);
       if (kind === 'cli' && login === 'claude.ai') assert.equal(step.detail, SUBSCRIPTION_DONE, `${label}: the login the agents get, not the shell's key`);
-    }
+    });
   } finally {
     for (const k of Object.keys(process.env)) if (!(k in saved)) delete process.env[k];
     Object.assign(process.env, saved);
