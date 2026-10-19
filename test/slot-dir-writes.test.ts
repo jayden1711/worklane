@@ -8,13 +8,18 @@
 // Two checks:
 // - A lint over src/. Every module that names a slot-dir path, or hands one to another module, is reviewed in
 //   REVIEWED below, so a new one fails here until someone has read it. Only writeSlotFile writes, and it only a new
-//   temp file of its own. A writer, and a module that only reads there or hands the path on, writes no file but
-//   through it, whatever the path: no fs write (under any name: renamed, destructured, fs['...']), and no call of a
-//   function that writes a file named from one of its parameters. A module that also writes files elsewhere (its
-//   state dir, a worktree) lists each of its own fs writes in its review, by function and target, once someone has
-//   read it; any other fs write in it fails here. Anywhere, a write of a path built from a slot-dir name is reported.
+//   temp file of its own, through the descriptor of its exclusive open. A writer, and a module that only reads there
+//   or hands the path on, writes no file but through it, whatever the path: no fs write (under any name: renamed,
+//   destructured, fs['...'], `const w = fs.writeFileSync`), and no call of a function or method that writes a file
+//   named from one of its parameters. A module that also writes files elsewhere (its state dir, a worktree) lists
+//   each of its own fs writes in its review, by function and target, with how many there are, once someone has read
+//   it; any other fs write in it fails here. Anywhere, a write of a path built from a slot-dir name (or from a local
+//   holding one: `const d = o.slotsDir`) is reported.
 //   Not caught: such a module calling another module's writing function with a slot-dir path that came in as a
-//   parameter (each such module is listed `mixed` below).
+//   parameter (each such module is listed `mixed` below); a method called on a value not traced to its module (a
+//   parameter, a property such as `this.store`, a call's result), unless the path it is given is built from a
+//   slot-dir name; a slot-dir path kept in a property under another
+//   name (`this.dir = o.slotsDir`); an fs function reached other than through a declaration or an import.
 // - Each writer, run against a temp slot dir in which every file is 0444 (what a removal leaves): it still succeeds,
 //   and the file's content is replaced. A 0444 temp file at the pid-only name a writer used before doesn't stop it.
 import assert from 'node:assert/strict';
@@ -48,10 +53,11 @@ const HELPER = 'src/slot-file.ts';
  * helper: HELPER. writer: writes slot-dir files, through the helper. passes: reads there, or hands the path on. Each
  * of these writes nothing else: any other write in it is reported, a call of a function that writes included.
  * mixed: hands the path on, and writes files elsewhere (its state dir, a worktree). Each of its own fs writes is
- * listed in `elsewhere` (`<function>: <call>(<target>)` → what it writes), once read; a call there of a function
- * that writes is reported when its path is built from a slot-dir name.
+ * listed in `elsewhere` (`<function>: <call>(<target>)` → how many such calls there are, and what they write), once
+ * read: one more than listed is reported, so a second write with the same text isn't let through by the first's
+ * entry. A call there of a function that writes is reported when its path is built from a slot-dir name.
  */
-type Review = { kind: 'helper' | 'writer' | 'passes'; why: string } | { kind: 'mixed'; why: string; elsewhere: Record<string, string> };
+type Review = { kind: 'helper' | 'writer' | 'passes'; why: string } | { kind: 'mixed'; why: string; elsewhere: Record<string, readonly [count: number, what: string]> };
 
 /** Every src/ module that names a slot-dir path, hands one on, or is handed one. Add a module only after reading every write in it. */
 const REVIEWED: Record<string, Review> = {
@@ -67,9 +73,9 @@ const REVIEWED: Record<string, Review> = {
     kind: 'mixed',
     why: 'hands its slot dir to waitTestSlot (testrun/slots.ts)',
     elsewhere: {
-      'runTestRun: writeFileSync(join(d.logDir, id, `fetch-${i + 1}.log`))': "a fetch step's log, in the log dir",
-      'runTestRun: writeFileSync(join(d.logDir, id, `setup-${i + 1}.log`))': "a setup step's log, in the log dir",
-      'runTestRun: writeFileSync(join(d.logDir, logRef))': "a tier's log, in the log dir",
+      'runTestRun: writeFileSync(join(d.logDir, id, `fetch-${i + 1}.log`))': [1, "a fetch step's log, in the log dir"],
+      'runTestRun: writeFileSync(join(d.logDir, id, `setup-${i + 1}.log`))': [1, "a setup step's log, in the log dir"],
+      'runTestRun: writeFileSync(join(d.logDir, logRef))': [1, "a tier's log, in the log dir"],
     },
   },
   'src/testrun/measure.ts': { kind: 'mixed', why: 'reads the held test slots; hands its slot dir to run.ts (runTestRun writes its logs in the log dir)', elsewhere: {} },
@@ -87,19 +93,19 @@ const REVIEWED: Record<string, Review> = {
     kind: 'mixed',
     why: 'defines the slot-dir paths',
     elsewhere: {
-      'writeAgentReadable: writeFileSync(file)': 'its caller\'s file (a task file, in the state dir)',
-      'writeGroupOnly: writeFileSync(file)': "its caller's file (in the state dir)",
-      'writeOwnerOnly: writeFileSync(tmp)': "its caller's file, through a temp file",
-      'writeExecutable: writeFileSync(tmp)': 'a git hook or a launcher, through a temp file',
-      'installOwnerOnlySecret: writeFileSync(tmp)': "a secret in the user's own 0700 dir",
-      'installSecretFor: writeFileSync(tmp)': "a secret in a user's 0700 dir",
-      'installService: writeFileSync(path)': 'a launchd plist or a systemd user unit',
-      'replaceFileAtomically: writeFileSync(tmp)': "its caller's file, through a temp file",
+      'writeAgentReadable: writeFileSync(file)': [1, "its caller's file (a task file, in the state dir)"],
+      'writeGroupOnly: writeFileSync(file)': [1, "its caller's file (in the state dir)"],
+      'writeOwnerOnly: writeFileSync(tmp)': [1, "its caller's file, through a temp file"],
+      'writeExecutable: writeFileSync(tmp)': [1, 'a git hook or a launcher, through a temp file'],
+      'installOwnerOnlySecret: writeFileSync(tmp)': [1, "a secret in the user's own 0700 dir"],
+      'installSecretFor: writeFileSync(tmp)': [1, "a secret in a user's 0700 dir"],
+      'installService: writeFileSync(path)': [2, 'a launchd plist, or a systemd user unit'],
+      'replaceFileAtomically: writeFileSync(tmp)': [1, "its caller's file, through a temp file"],
     },
   },
   'src/os/system-paths.ts': { kind: 'passes', why: 'testSlotsRefusal compares the slot dir with the test machine; writes nothing' },
   'src/cores.ts': { kind: 'passes', why: 'reads slotStatus' },
-  'src/coordinator.ts': { kind: 'mixed', why: 'hands its slot dir to slots.ts, incidents and post.ts', elsewhere: { 'reproduce: cpSync(join(workerPath, s.test_path))': 'the reproduction test, into the worker worktree' } },
+  'src/coordinator.ts': { kind: 'mixed', why: 'hands its slot dir to slots.ts, incidents and post.ts', elsewhere: { 'reproduce: cpSync(join(workerPath, s.test_path))': [1, 'the reproduction test, into the worker worktree'] } },
   'src/coordinator/shared.ts': { kind: 'passes', why: 'the slotsDir option' },
   'src/coordinator/base.ts': { kind: 'mixed', why: 'reads STOP, the drain and slotStatus; writes the task file and live state (state dir) through os/index.ts', elsewhere: {} },
   'src/coordinator/landing.ts': { kind: 'mixed', why: 'fullRunLock; worktrees through the worktree manager', elsewhere: {} },
@@ -109,10 +115,10 @@ const REVIEWED: Record<string, Review> = {
     kind: 'mixed',
     why: 'reads slots, STOP and incidents; hands its slot dir to healthView (health.ts) for the GitHub budget',
     elsewhere: {
-      'dashboardToken: writeFileSync(f)': 'the dashboard token, in the state dir',
-      'fileDraft: writeFileSync(filedPath(opts.stateDir, id))': "a chat draft's filed marker, in the state dir",
-      'startDashboard: writeFileSync(join(opts.stateDir, SKIPS_FILE))': 'the skipped setup steps, in the state dir',
-      'startDashboard: writeFileSync(viewsFile)': 'dashboard-views.json, in the state dir',
+      'dashboardToken: writeFileSync(f)': [1, 'the dashboard token, in the state dir'],
+      'fileDraft: writeFileSync(filedPath(opts.stateDir, id))': [2, "a chat draft's filed marker (while filing, then filed), in the state dir"],
+      'startDashboard: writeFileSync(join(opts.stateDir, SKIPS_FILE))': [1, 'the skipped setup steps, in the state dir'],
+      'startDashboard: writeFileSync(viewsFile)': [1, 'dashboard-views.json, in the state dir'],
     },
   },
   'src/disk-guard.ts': { kind: 'passes', why: 'hands an incidents dir to the incident store' },
@@ -121,21 +127,21 @@ const REVIEWED: Record<string, Review> = {
     kind: 'mixed',
     why: 'a temp slot dir for a demo coordinator (its config.json through writeSlotFile)',
     elsewhere: {
-      "agents: writeFileSync(join(req.cwd, 'test', 'repro-qty.test.js'))": "a scripted agent's edit, in its worktree",
-      'agents: writeFileSync(p)': "a scripted agent's edit, in its worktree",
-      "agents: writeFileSync(join(req.cwd, 'README.md'))": "a scripted agent's edit, in its worktree",
-      "agents: writeFileSync(join(req.cwd, 'migrations', '001_orders.sql'))": "a scripted agent's edit, in its worktree",
-      'seedDemo: cpSync(seed)': 'the demo project, copied from the example',
-      "seedDemo: writeFileSync(join(seed, '.gitignore'))": 'the demo project',
-      "seedDemo: writeFileSync(join(seed, 'test', 'legacy.test.js'))": 'the demo project',
-      'seedDemo: writeFileSync(cfgFile)': "the demo project's config",
-      'seedDemo: writeFileSync(dep)': "the demo project's deploy config",
+      "agents: writeFileSync(join(req.cwd, 'test', 'repro-qty.test.js'))": [1, "a scripted agent's edit, in its worktree"],
+      'agents: writeFileSync(p)': [1, "a scripted agent's edit, in its worktree"],
+      "agents: writeFileSync(join(req.cwd, 'README.md'))": [1, "a scripted agent's edit, in its worktree"],
+      "agents: writeFileSync(join(req.cwd, 'migrations', '001_orders.sql'))": [1, "a scripted agent's edit, in its worktree"],
+      'seedDemo: cpSync(seed)': [1, 'the demo project, copied from the example'],
+      "seedDemo: writeFileSync(join(seed, '.gitignore'))": [1, 'the demo project'],
+      "seedDemo: writeFileSync(join(seed, 'test', 'legacy.test.js'))": [1, 'the demo project'],
+      'seedDemo: writeFileSync(cfgFile)': [1, "the demo project's config"],
+      'seedDemo: writeFileSync(dep)': [1, "the demo project's deploy config"],
     },
   },
   'src/harness-evals/replay.ts': {
     kind: 'mixed',
     why: 'a temp slot dir for a replay coordinator (its config.json through writeSlotFile)',
-    elsewhere: { 'edit: writeFileSync(f)': "the scratch clone's config", 'overlayHarnessConfig: writeFileSync(f.to)': "the scratch clone's harness config" },
+    elsewhere: { 'edit: writeFileSync(f)': [1, "the scratch clone's config"], 'overlayHarnessConfig: writeFileSync(f.to)': [1, "the scratch clone's harness config"] },
   },
 };
 
@@ -159,16 +165,27 @@ const calleeRoot = (e: ts.Expression): string | null => ((ts.isPropertyAccessExp
 /** Calls that build a path from their arguments: a slot-dir name inside one is still this argument's. */
 const PATH_CALLS = new Set(['join', 'resolve', 'dirname', 'String']);
 
+/** A local holding a slot-dir path under a name of its own (`const d = o.slotsDir`), and where that name applies. */
+interface SlotLocal {
+  name: string;
+  scope: ts.Node;
+}
+
+/** `x` used as a name, not as a property (`o.x`) or a key (`{ x: 1 }`). */
+const usedAsName = (x: ts.Identifier) => !(ts.isPropertyAccessExpression(x.parent) && x.parent.name === x) && !(ts.isPropertyAssignment(x.parent) && x.parent.name === x);
+
 /**
- * Whether an argument carries a slot-dir name: directly, or through a path built from one (`pathCalls`: the path
- * builders' names in this module, renamed imports included). A nested call of anything else, and a function's body,
- * are their own: each such call is checked where it is.
+ * Whether an argument carries a slot-dir name: directly, through a path built from one (`m.pathCalls`: the path
+ * builders' names in its module, renamed imports included), or through a local that holds one (`m.slotLocals`). A
+ * nested call of anything else, and a function's body, are their own: each such call is checked where it is.
  */
-function mentionsSlot(n: ts.Node, pathCalls: ReadonlySet<string> = PATH_CALLS): boolean {
+function mentionsSlot(n: ts.Node, m?: Pick<Mod, 'pathCalls' | 'slotLocals'>): boolean {
+  const pathCalls = m?.pathCalls ?? PATH_CALLS;
   let hit = false;
   const visit = (x: ts.Node) => {
     if (hit || ts.isFunctionLike(x)) return;
     if ((ts.isIdentifier(x) || ts.isPrivateIdentifier(x)) && SLOT_NAMES.has(x.text.replace(/^#/, ''))) hit = true;
+    else if (ts.isIdentifier(x) && usedAsName(x) && m?.slotLocals.some((l) => l.name === x.text && x.pos >= l.scope.pos && x.end <= l.scope.end)) hit = true;
     else if ((ts.isCallExpression(x) || ts.isNewExpression(x)) && !pathCalls.has(calleeName(x.expression) ?? '')) visit(x.expression);
     else ts.forEachChild(x, visit);
   };
@@ -257,10 +274,32 @@ interface Mod {
   imported: Map<string, { mod: string; name: string }>;
   /** A namespace import of a src/ module: the module. */
   namespaces: Map<string, string>;
-  /** An fs function under its local name (`import { writeFileSync as put }`, `const { writeFileSync: put } = fs`): its fs name. */
+  /**
+   * An fs function under its local name (`import { writeFileSync as put }`, `const { writeFileSync: put } = fs`,
+   * `const put = fs.writeFileSync`): its fs name.
+   */
   fsAlias: Map<string, string>;
   /** The path builders' local names (`import { join as j }` included). */
   pathCalls: Set<string>;
+  /** Locals that hold a slot-dir path, or a path built from one (`const d = o.slotsDir`, `const { slotsDir: d } = o`). */
+  slotLocals: SlotLocal[];
+  /** Classes and object literals declared here, by name: their methods are this module's. */
+  objects: Set<string>;
+  /** A local holding an instance or an alias of a class or object (`const st = new Store()`): the module of its methods. */
+  instances: Map<string, string>;
+}
+
+/**
+ * The module whose methods a value has, when this lint can tell: `this`, a class or object declared or imported
+ * here (`Store`, `store`), a new one (`new Store()`), or a local holding one. A parameter, a property
+ * (`this.store`) or a call's result is not traced.
+ */
+function moduleOf(m: Mod, e: ts.Expression): string | null {
+  if (e.kind === ts.SyntaxKind.ThisKeyword) return m.file;
+  if (ts.isParenthesizedExpression(e)) return moduleOf(m, e.expression);
+  if (ts.isNewExpression(e)) return moduleOf(m, e.expression);
+  if (!ts.isIdentifier(e)) return null;
+  return m.imported.get(e.text)?.mod ?? m.instances.get(e.text) ?? (m.objects.has(e.text) ? m.file : null);
 }
 
 /** Parsed once per text: each test lints all of src/ with a file or two changed. */
@@ -269,7 +308,7 @@ const parsed = new Map<string, Mod>();
 function parseMod(file: string, text: string): Mod {
   const hit = parsed.get(file);
   if (hit?.text === text) return hit;
-  const m: Mod = { file, text, src: ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS), imported: new Map(), namespaces: new Map(), fsAlias: new Map(), pathCalls: new Set(PATH_CALLS) };
+  const m: Mod = { file, text, src: ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS), imported: new Map(), namespaces: new Map(), fsAlias: new Map(), pathCalls: new Set(PATH_CALLS), slotLocals: [], objects: new Set(), instances: new Map() };
   /** fs imported whole (`import * as fs`, `import fs`): destructuring it names fs functions. */
   const fsWhole = new Set<string>();
   for (const s of m.src.statements) {
@@ -289,15 +328,70 @@ function parseMod(file: string, text: string): Mod {
     for (const e of named) m.imported.set(e.local, { mod, name: e.name });
     if (s.importClause.name) m.imported.set(s.importClause.name.text, { mod, name: 'default' });
   }
-  const destructured = (n: ts.Node) => {
-    if (ts.isVariableDeclaration(n) && ts.isObjectBindingPattern(n.name) && n.initializer && ts.isIdentifier(n.initializer) && fsWhole.has(n.initializer.text)) {
-      for (const e of n.name.elements) if (ts.isIdentifier(e.name)) m.fsAlias.set(e.name.text, e.propertyName ? e.propertyName.getText() : e.name.text);
-    }
-    ts.forEachChild(n, destructured);
+  /** The fs function an expression is (`fs.writeFileSync`, `fs['writeFileSync']`, a local alias, `….bind(fs)`), or null. */
+  const fsFunction = (e: ts.Expression): string | null => {
+    if (ts.isCallExpression(e) && ts.isPropertyAccessExpression(e.expression) && e.expression.name.text === 'bind') return fsFunction(e.expression.expression);
+    if (ts.isIdentifier(e)) return m.fsAlias.get(e.text) ?? null;
+    const root = calleeRoot(e);
+    return root && fsWhole.has(root) ? calleeName(e) : null;
   };
-  destructured(m.src);
+  const objects = (n: ts.Node) => {
+    if ((ts.isClassDeclaration(n) && n.name) || (ts.isVariableDeclaration(n) && ts.isIdentifier(n.name) && n.initializer && (ts.isObjectLiteralExpression(n.initializer) || ts.isClassExpression(n.initializer)))) m.objects.add((n.name as ts.Identifier).text);
+    ts.forEachChild(n, objects);
+  };
+  objects(m.src);
+  const aliases = (n: ts.Node) => {
+    if (ts.isVariableDeclaration(n) && n.initializer) {
+      if (ts.isObjectBindingPattern(n.name) && ts.isIdentifier(n.initializer) && fsWhole.has(n.initializer.text)) {
+        for (const e of n.name.elements) if (ts.isIdentifier(e.name)) m.fsAlias.set(e.name.text, e.propertyName ? e.propertyName.getText() : e.name.text);
+      }
+      const fn = ts.isIdentifier(n.name) ? fsFunction(n.initializer) : null;
+      if (fn) m.fsAlias.set((n.name as ts.Identifier).text, fn);
+      const owner = ts.isIdentifier(n.name) && (ts.isNewExpression(n.initializer) || ts.isIdentifier(n.initializer)) ? moduleOf(m, n.initializer) : null;
+      if (owner) m.instances.set((n.name as ts.Identifier).text, owner);
+    }
+    ts.forEachChild(n, aliases);
+  };
+  aliases(m.src);
+  m.slotLocals = slotLocals(m);
   parsed.set(file, m);
   return m;
+}
+
+/** The nearest function (or the module) a node is in: where a local declared there is seen. */
+function scopeOf(n: ts.Node): ts.Node {
+  for (let p = n.parent; p; p = p.parent) if (ts.isFunctionLike(p) || ts.isSourceFile(p)) return p;
+  return n.getSourceFile();
+}
+
+/**
+ * The locals in a module that hold a slot-dir path: initialized from a slot-dir name (or from such a local), or
+ * destructured from one (`const { slotsDir: d } = o`). Repeated until nothing new is found.
+ */
+function slotLocals(m: Pick<Mod, 'src' | 'pathCalls'>): SlotLocal[] {
+  const decls: ts.VariableDeclaration[] = [];
+  const out: SlotLocal[] = [];
+  const collect = (n: ts.Node) => {
+    if (ts.isVariableDeclaration(n)) {
+      decls.push(n);
+      if (ts.isObjectBindingPattern(n.name)) {
+        for (const e of n.name.elements) if (ts.isIdentifier(e.name) && SLOT_NAMES.has((e.propertyName ?? e.name).getText())) out.push({ name: e.name.text, scope: scopeOf(n) });
+      }
+    }
+    ts.forEachChild(n, collect);
+  };
+  collect(m.src);
+  const known = new Set<ts.VariableDeclaration>();
+  for (let changed = true; changed; ) {
+    changed = false;
+    for (const d of decls) {
+      if (known.has(d) || !ts.isIdentifier(d.name) || !d.initializer || !mentionsSlot(d.initializer, { pathCalls: m.pathCalls, slotLocals: out })) continue;
+      known.add(d);
+      out.push({ name: d.name.text, scope: scopeOf(d) });
+      changed = true;
+    }
+  }
+  return out;
 }
 
 /** A parameter a file name is built from: its index, and the option it is read from (`o.dir`), if one. */
@@ -306,8 +400,15 @@ interface Param {
   prop?: string;
 }
 
-/** Functions that write a file named from one of their parameters: module → function name → that parameter. */
-type Writers = Map<string, Map<string, Param>>;
+/**
+ * Functions that write a file named from one of their parameters: module → function name → that parameter. `fns`:
+ * plain functions. `methods`: a class's or an object literal's methods, called on a value `moduleOf` traces to the
+ * module (`new Store().save(…)`, `store.save(…)`, `this.save(…)`).
+ */
+interface Writers {
+  fns: Map<string, Map<string, Param>>;
+  methods: Map<string, Map<string, Param>>;
+}
 
 /** A write call: an fs write, or a writer function's (`via`: its module). `target`: the argument it writes. */
 interface Write {
@@ -330,8 +431,8 @@ function writeOf(m: Mod, call: ts.CallExpression, writers: Writers): Write | nul
   const name = calleeName(e);
   if (!name) return null;
   const base = (n: string): Write | null => (WRITE_CALLS.has(n) && fsWrites(call, n) ? { name: n, target: { i: baseTarget(n) }, via: null } : null);
-  const wrapped = (mod: string, n: string): Write | null => {
-    const p = writers.get(mod)?.get(n);
+  const wrapped = (mod: string, n: string, kind: 'fns' | 'methods' = 'fns'): Write | null => {
+    const p = writers[kind].get(mod)?.get(n);
     return p === undefined ? null : { name: n, target: p, via: mod };
   };
   if (ts.isIdentifier(e)) {
@@ -343,13 +444,24 @@ function writeOf(m: Mod, call: ts.CallExpression, writers: Writers): Write | nul
   }
   const root = calleeRoot(e);
   const ns = root ? m.namespaces.get(root) : undefined;
-  return ns ? wrapped(ns, name) : base(name);
+  if (ns) return wrapped(ns, name);
+  const owner = ts.isPropertyAccessExpression(e) || ts.isElementAccessExpression(e) ? moduleOf(m, e.expression) : null;
+  return (owner ? wrapped(owner, name, 'methods') : null) ?? base(name);
 }
 
-/** A named function: `function f() {}`, or `const f = () => {}` / `function () {}`. */
-function namedFunction(n: ts.Node): { name: string; fn: ts.SignatureDeclaration } | null {
-  if (ts.isFunctionDeclaration(n) && n.name && n.body) return { name: n.name.text, fn: n };
-  if (ts.isVariableDeclaration(n) && ts.isIdentifier(n.name) && n.initializer && (ts.isArrowFunction(n.initializer) || ts.isFunctionExpression(n.initializer))) return { name: n.name.text, fn: n.initializer };
+const isFunctionValue = (e: ts.Node | undefined): e is ts.ArrowFunction | ts.FunctionExpression => !!e && (ts.isArrowFunction(e) || ts.isFunctionExpression(e));
+
+/**
+ * A named function: `function f() {}`, or `const f = () => {}` / `function () {}`; or a method (`method: true`): a
+ * class's or an object literal's (`save() {}`, `save = () => {}`, `save: () => {}`).
+ */
+function namedFunction(n: ts.Node): { name: string; fn: ts.SignatureDeclaration; method: boolean } | null {
+  if (ts.isFunctionDeclaration(n) && n.name && n.body) return { name: n.name.text, fn: n, method: false };
+  if (ts.isVariableDeclaration(n) && ts.isIdentifier(n.name) && isFunctionValue(n.initializer)) return { name: n.name.text, fn: n.initializer, method: false };
+  const key = (ts.isMethodDeclaration(n) || ts.isPropertyDeclaration(n) || ts.isPropertyAssignment(n)) && (ts.isIdentifier(n.name) || ts.isStringLiteralLike(n.name) || ts.isPrivateIdentifier(n.name)) ? n.name.text : null;
+  if (key === null) return null;
+  if (ts.isMethodDeclaration(n) && n.body) return { name: key, fn: n, method: true };
+  if ((ts.isPropertyDeclaration(n) || ts.isPropertyAssignment(n)) && isFunctionValue(n.initializer)) return { name: key, fn: n.initializer, method: true };
   return null;
 }
 
@@ -403,14 +515,14 @@ function fromParams(fn: ts.SignatureDeclaration): Map<string, Param> {
  * writeSlotFile is the one allowed write.
  */
 function deriveWriters(mods: Mod[]): Writers {
-  const writers: Writers = new Map();
+  const writers: Writers = { fns: new Map(), methods: new Map() };
   for (let changed = true; changed; ) {
     changed = false;
     for (const m of mods) {
       if (m.file === HELPER) continue;
       const visit = (n: ts.Node) => {
         const f = namedFunction(n);
-        if (f && !writers.get(m.file)?.has(f.name)) {
+        if (f && !writers[f.method ? 'methods' : 'fns'].get(m.file)?.has(f.name)) {
           const from = fromParams(f.fn);
           let written: Param | undefined;
           const scan = (x: ts.Node) => {
@@ -424,8 +536,9 @@ function deriveWriters(mods: Mod[]): Writers {
           };
           ts.forEachChild(f.fn, scan);
           if (written !== undefined) {
-            if (!writers.has(m.file)) writers.set(m.file, new Map());
-            writers.get(m.file)!.set(f.name, written);
+            const kind = writers[f.method ? 'methods' : 'fns'];
+            if (!kind.has(m.file)) kind.set(m.file, new Map());
+            kind.get(m.file)!.set(f.name, written);
             changed = true;
           }
         }
@@ -457,15 +570,29 @@ function lintSlotWrites(files: Map<string, string>): Finding[] {
     const { file, src } = m;
     const review = REVIEWED[file];
     const at = (n: ts.Node, what: string) => out.push({ file, line: src.getLineAndCharacterOfPosition(n.getStart(src)).line + 1, what });
-    const seen = new Set<string>();
+    /** In a mixed module: how many times each listed write was found so far. */
+    const seen = new Map<string, number>();
     const fds = file === HELPER ? exclusiveFds(m, writers) : new Set<string>();
     let slot = false;
     const visit = (n: ts.Node) => {
       if ((ts.isIdentifier(n) || ts.isPrivateIdentifier(n)) && SLOT_NAMES.has(n.text.replace(/^#/, ''))) slot = true;
       if (ts.isCallExpression(n) || ts.isNewExpression(n)) {
         const args = n.arguments ?? [];
-        const hands = args.some((a) => mentionsSlot(a, m.pathCalls));
+        const hands = args.some((a) => mentionsSlot(a, m));
         const w = ts.isCallExpression(n) ? writeOf(m, n, writers) : null;
+        if (!w && ts.isCallExpression(n) && ts.isPropertyAccessExpression(n.expression)) {
+          // A method called on a value not traced to its module: a writing method by that name anywhere, given a
+          // slot-dir path, is reported (its other calls can't be told apart from any other method's).
+          const name = n.expression.name.text;
+          for (const [mod, ms] of writers.methods) {
+            const p = ms.get(name);
+            const t = p ? targetOf(n, { name, target: p, via: mod }) : undefined;
+            if (t && mentionsSlot(t, m)) {
+              at(n, `${name}(${t.getText()}) on a path built from a slot-dir name, and a method by that name in ${mod} writes the file it is given: write it with writeSlotFile (${HELPER})`);
+              break;
+            }
+          }
+        }
         if (file === HELPER && ts.isCallExpression(n)) {
           const name = calleeName(n.expression) ?? '';
           const fsName = ts.isIdentifier(n.expression) ? m.fsAlias.get(name) : name;
@@ -478,25 +605,32 @@ function lintSlotWrites(files: Map<string, string>): Finding[] {
           if (file === HELPER) {
             const why = w.via ? `${what} in the helper: it writes only through fs, a new temp file of its own` : helperWrite(n, w.name, fds);
             if (why) at(n, why);
-          } else if (t && mentionsSlot(t, m.pathCalls)) at(n, `${what} on a path built from a slot-dir name: write it with writeSlotFile (${HELPER})`);
+          } else if (t && mentionsSlot(t, m)) at(n, `${what} on a path built from a slot-dir name: write it with writeSlotFile (${HELPER})`);
           else if (review?.kind === 'mixed') {
+            const listed = review.elsewhere[key]?.[0] ?? 0;
+            const found = (seen.get(key) ?? 0) + 1;
             if (w.via) {
               // another function's write: checked above, by its path
-            } else if (key in review.elsewhere) seen.add(key);
+            } else if (found <= listed) seen.set(key, found);
+            else if (listed > 0) at(n, `${key} is listed as a write elsewhere ${listed} time(s), and this is one more: read it, then raise its count in REVIEWED`);
             else at(n, `${key} writes directly, and is not listed: list it as a write elsewhere in REVIEWED once read (the slot dir is written only through writeSlotFile, ${HELPER})`);
           } else if (review) at(n, `${key} writes directly: this module writes no file but through writeSlotFile (${HELPER})`);
         }
         if (hands) {
-          const called = calleeName(n.expression);
-          const root = calleeRoot(n.expression);
-          const mod = ts.isIdentifier(n.expression) && called ? m.imported.get(called)?.mod : root ? m.namespaces.get(root) : undefined;
+          const e = n.expression;
+          const root = calleeRoot(e);
+          const mod = ts.isIdentifier(e) ? m.imported.get(e.text)?.mod : ts.isPropertyAccessExpression(e) || ts.isElementAccessExpression(e) ? ((root ? m.namespaces.get(root) : undefined) ?? moduleOf(m, e.expression)) : undefined;
           if (mod && !REVIEWED[mod]) at(n, `hands a slot-dir path to ${mod}, which is not reviewed: add it to REVIEWED after reading its writes`);
         }
       }
       ts.forEachChild(n, visit);
     };
     visit(src);
-    for (const key of Object.keys(review?.kind === 'mixed' ? review.elsewhere : {})) if (!seen.has(key)) out.push({ file, line: 0, what: `${key}: listed as a write elsewhere but not found: drop it from REVIEWED` });
+    for (const [key, [listed]] of Object.entries(review?.kind === 'mixed' ? review.elsewhere : {})) {
+      const found = seen.get(key) ?? 0;
+      if (found === 0) out.push({ file, line: 0, what: `${key}: listed as a write elsewhere but not found: drop it from REVIEWED` });
+      else if (found < listed) out.push({ file, line: 0, what: `${key}: listed as a write elsewhere ${listed} times but found ${found}: lower its count in REVIEWED` });
+    }
     if (slot && !review) out.push({ file, line: 0, what: 'names a slot-dir path but is not reviewed: add it to REVIEWED after reading its writes' });
   }
   return out;
@@ -539,10 +673,14 @@ test("lint: a reviewed writer that writes directly is reported, even a temp file
   files.set('src/watchdog/incidents.ts', mutant);
   const found = lines(lintSlotWrites(files), 'src/watchdog/incidents.ts');
   assert.match(found[0] ?? '', /writeIncidents: writeFileSync\(tmp\) writes directly: this module writes no file but through writeSlotFile/);
-  // writeIncidents now writes a file named from its dir: each call of it (and of withIncidents) is a write too.
+  // writeIncidents now writes a file named from its dir: each call of it (and of withIncidents) is a write too. In
+  // withIncidents, its dir is `const d = incidentsDir(dir)`: a local that holds a slot-dir path.
   assert.deepEqual(
     found.slice(1).map((l) => l.replace(/^\d+: /, '')),
-    ['withIncidents: writeIncidents(d)', 'raiseIncident: withIncidents(o.dir)', 'resolveIncident: withIncidents(o.dir)'].map((w) => `${w} writes directly: this module writes no file but through writeSlotFile (${HELPER})`),
+    [
+      `writeIncidents(d) on a path built from a slot-dir name: write it with writeSlotFile (${HELPER})`,
+      ...['raiseIncident: withIncidents(o.dir)', 'resolveIncident: withIncidents(o.dir)'].map((w) => `${w} writes directly: this module writes no file but through writeSlotFile (${HELPER})`),
+    ],
   );
 });
 
@@ -642,6 +780,72 @@ test('lint: a writer of a writer, a local helper, a computed fs key, destructure
   assert.match(found[1]!, /put\(qjoin\(slotsDir, 'b'\)\) on a path built from a slot-dir name/);
   assert.match(found[2]!, /writeFileSync\(qjoin\(slotsDir, 'c'\)\) on a path built from a slot-dir name/);
   assert.match(found[3]!, /writeFileSync\(qjoin\(slotsDir, 'd'\)\) on a path built from a slot-dir name/, 'a destructured fs function is still a write');
+});
+
+test("lint: a class's methods that write their parameter (a method, a property arrow) are writes where they are called (#766 review, probe A)", () => {
+  const files = srcFiles();
+  files.set('src/fixture-store.ts', ["import { appendFileSync, writeFileSync } from 'node:fs';", 'export class Store {', '  save(file: string) {', "    writeFileSync(file, 'x');", '  }', "  put = (f: string) => appendFileSync(f, 'x');", '  again(file: string) {', '    this.save(file);', '  }', '}', ''].join('\n'));
+  files.set(
+    'src/slots.ts',
+    `${files.get('src/slots.ts')!}\nimport { Store } from './fixture-store.js';\nexport const pa = () => new Store().save(join(slotsDir(), 'a.json'));\nconst st = new Store();\nexport const pa2 = (dir: string) => st.save(join(dir, 'a2.json'));\nexport const pa3 = (dir: string) => (st.put(join(dir, 'a3.json')), st.again(join(dir, 'a4.json')));\nexport const pa4 = (o: { st: Store }) => o.st.save(join(slotsDir(), 'a5.json'));\n`,
+  );
+  const found = lines(lintSlotWrites(files), 'src/slots.ts').map((l) => l.replace(/^\d+: /, ''));
+  assert.deepEqual(found, [
+    `save(join(slotsDir(), 'a.json')) on a path built from a slot-dir name: write it with writeSlotFile (${HELPER})`,
+    'hands a slot-dir path to src/fixture-store.ts, which is not reviewed: add it to REVIEWED after reading its writes',
+    `pa2: save(join(dir, 'a2.json')) writes directly: this module writes no file but through writeSlotFile (${HELPER})`,
+    `pa3: put(join(dir, 'a3.json')) writes directly: this module writes no file but through writeSlotFile (${HELPER})`,
+    `pa3: again(join(dir, 'a4.json')) writes directly: this module writes no file but through writeSlotFile (${HELPER})`,
+    // o.st is not traced to its module: a slot-dir path given to a writing method by that name is still reported.
+    `save(join(slotsDir(), 'a5.json')) on a path built from a slot-dir name, and a method by that name in src/fixture-store.ts writes the file it is given: write it with writeSlotFile (${HELPER})`,
+  ]);
+});
+
+test("lint: an object literal's methods that write their parameter are writes where they are called (#766 review, probe B)", () => {
+  const files = srcFiles();
+  files.set('src/fixture-obj.ts', ["import { writeFileSync } from 'node:fs';", "export const store = { save(f: string) { writeFileSync(f, 'x'); }, put: (f: string) => writeFileSync(f, 'y') };", ''].join('\n'));
+  files.set('src/slots.ts', `${files.get('src/slots.ts')!}\nimport { store } from './fixture-obj.js';\nexport const pb = () => store.save(join(slotsDir(), 'b.json'));\nexport const pb2 = (dir: string) => store.put(join(dir, 'b2.json'));\n`);
+  const found = lines(lintSlotWrites(files), 'src/slots.ts').map((l) => l.replace(/^\d+: /, ''));
+  assert.deepEqual(found, [
+    `save(join(slotsDir(), 'b.json')) on a path built from a slot-dir name: write it with writeSlotFile (${HELPER})`,
+    'hands a slot-dir path to src/fixture-obj.ts, which is not reviewed: add it to REVIEWED after reading its writes',
+    `pb2: put(join(dir, 'b2.json')) writes directly: this module writes no file but through writeSlotFile (${HELPER})`,
+  ]);
+});
+
+test('lint: a slot dir copied to a local first (const d = o.slotsDir, or destructured) is still a slot-dir path (#766 review, probe D)', () => {
+  const files = srcFiles();
+  files.set(
+    'src/dashboard.ts',
+    `${files.get('src/dashboard.ts')!}\nimport { writeGroupOnly as wgo } from './os/index.js';\nimport { join as pj } from 'node:path';\nexport function gapD(o: { slotsDir: string }) {\n  const d = o.slotsDir;\n  const f = pj(d, 'd2.json');\n  wgo(pj(d, 'd.json'), '{}');\n  wgo(f, '{}');\n}\nexport function gapD2(o: { slotsDir: string }) {\n  const { slotsDir: e } = o;\n  wgo(pj(e, 'e.json'), '{}');\n}\nexport function notD(d: string) {\n  wgo(pj(d, 'state.json'), '{}');\n}\n`,
+  );
+  const found = lines(lintSlotWrites(files), 'src/dashboard.ts').map((l) => l.replace(/^\d+: /, ''));
+  assert.deepEqual(
+    found,
+    [`writeGroupOnly(pj(d, 'd.json'))`, 'writeGroupOnly(f)', `writeGroupOnly(pj(e, 'e.json'))`].map((w) => `${w} on a path built from a slot-dir name: write it with writeSlotFile (${HELPER})`),
+    "a local's name in another function is not the slot dir",
+  );
+});
+
+test('lint: an fs function bound to a local (const w = fs.writeFileSync) is still a write (#766 review, probe E)', () => {
+  const files = srcFiles();
+  files.set(
+    'src/slots.ts',
+    `${files.get('src/slots.ts')!}\nimport * as fsx from 'node:fs';\nexport const pe = (dir: string) => {\n  const w = fsx.writeFileSync;\n  w(dir + '/e.json', '');\n};\nconst a2 = fsx['appendFileSync'].bind(fsx);\nconst a3 = a2;\nexport const pe2 = (dir: string) => a3(dir + '/e2.json', '');\n`,
+  );
+  const found = lines(lintSlotWrites(files), 'src/slots.ts').map((l) => l.replace(/^\d+: /, ''));
+  assert.deepEqual(found, [`pe: writeFileSync(dir + '/e.json') writes directly: this module writes no file but through writeSlotFile (${HELPER})`, `pe2: appendFileSync(dir + '/e2.json') writes directly: this module writes no file but through writeSlotFile (${HELPER})`]);
+});
+
+test('lint: a write in a module that writes elsewhere is counted: one more than listed is reported, even with the same text', () => {
+  const files = srcFiles();
+  const before = files.get('src/harness-evals/replay.ts')!;
+  const mutant = before.replace('    writeFileSync(f, d.toString());\n', '    writeFileSync(f, d.toString());\n    writeFileSync(f, d.toString());\n');
+  assert.notEqual(mutant, before, 'the mutation applies');
+  files.set('src/harness-evals/replay.ts', mutant);
+  assert.deepEqual(lines(lintSlotWrites(files), 'src/harness-evals/replay.ts'), [
+    `${before.slice(0, before.indexOf('    writeFileSync(f, d.toString());\n')).split('\n').length + 1}: edit: writeFileSync(f) is listed as a write elsewhere 1 time(s), and this is one more: read it, then raise its count in REVIEWED`,
+  ]);
 });
 
 test('lint: in the helper, a write to the descriptor of its own exclusive open is allowed; a chmod by name, and a write to any other descriptor, are reported', () => {
