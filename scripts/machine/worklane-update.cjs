@@ -462,6 +462,26 @@ async function readOrRefusal(deps, url) {
   return json === null || json === undefined ? { refused: 'transient' } : { json };
 }
 
+/** How many pages of a branch's rules are read before the answer is taken as none (as the engine's checkApps). */
+const RULES_PAGES_MAX = 10;
+
+/**
+ * #727: the rules on branch `b` (encoded), as the engine reads them: 100 a page, the next page while one is full, up to
+ * RULES_PAGES_MAX. { list } when read to the end; { refused: 'denied' } when page 1 was refused for permission or 404
+ * (the owner's decision (a) applies to page 1 only); else { unread: true }: a later page refused or not a list, page 1
+ * refused otherwise, or still full past the cap. A rule on an unread page could pin a check, so unread waits.
+ */
+async function branchRules(deps, api, b) {
+  const list = [];
+  for (let page = 1; page <= RULES_PAGES_MAX; page++) {
+    const got = await readOrRefusal(deps, `${api}/rules/branches/${b}?per_page=100${page > 1 ? `&page=${page}` : ''}`);
+    if (!Array.isArray(got.json)) return page === 1 && got.refused === 'denied' ? { refused: 'denied' } : { unread: true };
+    list.push(...got.json);
+    if (got.json.length < 100) return { list };
+  }
+  return { unread: true };
+}
+
 /** Each check's App as the branch's classic protection (get a branch) and its rulesets name it; -1 or none: any source. */
 function ruleApps(branch, rules) {
   const named = [];
@@ -530,10 +550,10 @@ async function checkPins(deps, cfg, api) {
   if (required.some((n) => !hasOwn(own, n) && !hasOwn(ENGINE_CHECK_SOURCES, n))) {
     const b = encodeURIComponent(cfg.branch || 'main');
     const branch = await readOrRefusal(deps, `${api}/branches/${b}`);
-    const ruleset = await readOrRefusal(deps, `${api}/rules/branches/${b}`);
+    const ruleset = await branchRules(deps, api, b);
     const branchRead = !!branch.json && typeof branch.json === 'object';
-    const rulesRead = Array.isArray(ruleset.json);
-    rules = ruleApps(branchRead ? branch.json : null, rulesRead ? ruleset.json : []);
+    const rulesRead = Array.isArray(ruleset.list);
+    rules = ruleApps(branchRead ? branch.json : null, rulesRead ? ruleset.list : []);
     // WHY (the owner's decision (a), 2026-10-19): a read refused for permission or 404 means "no App named" only while
     // no required check is pinned (by updates.json, the engine's own sources or what was read), so a bare-names install
     // installs as on main. A 5xx or a rate limit, or any refusal with a required check pinned, waits.
@@ -2233,12 +2253,16 @@ function realDeps(print = (line) => process.stdout.write(`${line}\n`), files = {
     fetchRead: async (url) => {
       const r = await fetch(url, { headers: { accept: 'application/vnd.github+json', 'user-agent': 'worklane-update' } });
       if (r.ok) return { json: await r.json() };
-      let message = '';
+      // WHY: as the engine's req: the body as JSON when it parses, else its text, and its message (classifyGitHubError).
+      // A rate limit known only by a plain-text body must stay transient, never read as a permission refusal.
+      const text = await r.text();
+      let body = text;
       try {
-        message = (await r.json()).message;
+        body = text ? JSON.parse(text) : '';
       } catch {
-        // WHY: no JSON body; the status and headers still tell the refusal
+        // WHY: not JSON; the raw text is the message
       }
+      const message = body && typeof body === 'object' && 'message' in body ? String(body.message) : String(body ?? '');
       return { refused: refusalKind(r.status, (h) => r.headers.get(h), message) };
     },
     slots: () => {

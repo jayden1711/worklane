@@ -49,7 +49,7 @@ function gitHub(o: { runs: Run[]; workflowRuns?: unknown[] | null; rules?: unkno
     if (url.startsWith(`${API}/commits/${SHA}/check-runs`)) return { total_count: o.runs.length, check_runs: o.runs.map(checkRun) };
     if (url.startsWith(`${API}/commits/${SHA}/status?`)) return o.statuses === null ? null : { state: 'success', total_count: (o.statuses ?? []).length, statuses: o.statuses ?? [] };
     if (url.startsWith(`${API}/actions/runs?head_sha=${SHA}`)) return o.workflowRuns === null ? null : { workflow_runs: o.workflowRuns ?? [] };
-    if (url === `${API}/rules/branches/main`) return o.rules === null ? null : (o.rules ?? []);
+    if (url === `${API}/rules/branches/main?per_page=100`) return o.rules === null ? null : (o.rules ?? []);
     if (url === `${API}/branches/main`) return { name: 'main', protection: { enabled: false, required_status_checks: { checks: [] } } };
     return null;
   };
@@ -101,7 +101,7 @@ test("a required check nothing pins (not the engine's, none in updates.json, non
     const pinned = await choose({ required_checks: ['test'] }, gh);
     const before = await choose({ required_checks: ['test'] }, { ...gh, deps: { ...gh.deps, pinChecks: undefined } });
     assert.deepEqual(pinned, before, JSON.stringify(runs));
-    assert.ok(gh.calls.includes('/rules/branches/main'), "the branch's rules were asked");
+    assert.ok(gh.calls.includes('/rules/branches/main?per_page=100'), "the branch's rules were asked");
   }
   assert.equal((await choose({ required_checks: ['test'] }, gitHub({ runs: [{ name: 'test', suite: 1, app: 4242 }] }))).chosen, true, 'installed, as before');
   // An invalid updates.json pin refuses, never falls back to the name.
@@ -265,7 +265,7 @@ test("round 8: with no required check pinned (a bare `custom`, no rules App), 11
   const fetchJson = async (url: string) => {
     calls.push(url.replace(API, '').replace(/\?.*/, ''));
     if (url.startsWith(`${API}/commits/${SHA}/check-runs`)) return { total_count: 1100, check_runs: page(Number(new URL(url).searchParams.get('page') ?? '1')) };
-    if (url === `${API}/rules/branches/main`) return [];
+    if (url === `${API}/rules/branches/main?per_page=100`) return [];
     if (url === `${API}/branches/main`) return { name: 'main', protection: { enabled: false } };
     return null;
   };
@@ -380,38 +380,53 @@ test('the installed updater always judges by source: realDeps turns it on', () =
   assert.equal(u.realDeps(() => undefined, { log: join(dir, 'l'), state: join(dir, 's'), held: join(dir, 'h'), drain: join(dir, 'd') }).pinChecks, true);
 });
 
-test("the owner's decision (a): a branch read refused for permission or 404 is 'no App named' while no required check is pinned (installs, as main); a 5xx or rate limit waits; with a check pinned, it waits", async () => {
-  // Through realDeps' own reads, over a stand-in GitHub (globalThis.fetch): `ci` and `lint` pass from App 2222.
+const asJson = (body: unknown, status = 200, headers: Record<string, string> = {}) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json', ...headers } });
+const asText = (body: string, status: number) => new Response(body, { status, headers: { 'content-type': 'text/plain' } });
+
+/**
+ * chooseCommit through realDeps' own reads, over a stand-in GitHub (globalThis.fetch): `ci` and `lint` pass from App
+ * 2222; `branch` and `rules` answer those reads (`rules` gets the page asked, 1 when none). Every rules URL asked is kept.
+ */
+async function viaRealDeps(cfg: Cfg, branch: () => Response, rules: (page: number) => Response, asked: string[] = []): Promise<string> {
   const dir = mkdtempSync(join(tmpdir(), 'update-pins-'));
   const real = u.realDeps(() => undefined, { log: join(dir, 'l'), state: join(dir, 's'), held: join(dir, 'h'), drain: join(dir, 'd') }) as Deps;
-  const json = (body: unknown, status = 200, headers: Record<string, string> = {}) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json', ...headers } });
-  const refusals: [string, () => Response, boolean][] = [
-    ['a permission 403', () => json({ message: 'Resource not accessible by integration' }, 403), true],
-    ['a 404', () => json({ message: 'Not Found' }, 404), true],
-    ['a 500', () => json({ message: 'boom' }, 500), false],
-    ['a rate-limited 403', () => json({ message: 'API rate limit exceeded for 203.0.113.7.' }, 403, { 'x-ratelimit-remaining': '0', 'x-ratelimit-reset': '4102444800' }), false],
-  ];
-  // `rulesToo`: the rules read is refused the same way (a token that can read neither); else it answers none.
-  const verdict = async (refusal: () => Response, cfg: Cfg, rulesToo: boolean) => {
-    const was = globalThis.fetch;
-    globalThis.fetch = (async (url: string) => {
-      if (url.startsWith(`${API}/commits/${SHA}/check-runs`)) return json({ total_count: 2, check_runs: [checkRun({ name: 'ci', suite: 2, app: 2222 }, 1), checkRun({ name: 'lint', suite: 2, app: 2222 }, 2)] });
-      if (url.startsWith(`${API}/commits/${SHA}/status`)) return json({ state: 'success', total_count: 0, statuses: [] });
-      if (url.startsWith(`${API}/actions/runs?head_sha=${SHA}`)) return json({ workflow_runs: [] });
-      if (url === `${API}/branches/main`) return refusal();
-      if (url === `${API}/rules/branches/main`) return rulesToo ? refusal() : json([]);
-      return json({ message: 'Not Found' }, 404);
-    }) as typeof fetch;
-    try {
-      let clock = Date.parse('2026-10-18T12:00:00Z');
-      const r = await u.chooseCommit({ ...real, now: () => clock, sleep: async (ms: number) => void (clock += ms) }, cfg, API, [{ sha: SHA, date: '2026-10-18T11:59:00Z' }], null);
-      return r.chosen ? 'installs' : r.wait ? 'waits' : `refused: ${r.skipped[0]?.reason ?? r.reason ?? ''}`;
-    } finally {
-      globalThis.fetch = was;
+  const was = globalThis.fetch;
+  globalThis.fetch = (async (url: string) => {
+    if (url.startsWith(`${API}/commits/${SHA}/check-runs`)) return asJson({ total_count: 2, check_runs: [checkRun({ name: 'ci', suite: 2, app: 2222 }, 1), checkRun({ name: 'lint', suite: 2, app: 2222 }, 2)] });
+    if (url.startsWith(`${API}/commits/${SHA}/status`)) return asJson({ state: 'success', total_count: 0, statuses: [] });
+    if (url.startsWith(`${API}/actions/runs?head_sha=${SHA}`)) return asJson({ workflow_runs: [] });
+    if (url === `${API}/branches/main`) return branch();
+    if (url === `${API}/rules/branches/main` || url.startsWith(`${API}/rules/branches/main?`)) {
+      asked.push(url.replace(API, ''));
+      return rules(Number(new URL(url).searchParams.get('page') ?? '1'));
     }
-  };
+    return asJson({ message: 'Not Found' }, 404);
+  }) as typeof fetch;
+  try {
+    let clock = Date.parse('2026-10-18T12:00:00Z');
+    const r = await u.chooseCommit({ ...real, now: () => clock, sleep: async (ms: number) => void (clock += ms) }, cfg, API, [{ sha: SHA, date: '2026-10-18T11:59:00Z' }], null);
+    return r.chosen ? 'installs' : r.wait ? 'waits' : `refused: ${r.skipped[0]?.reason ?? r.reason ?? ''}`;
+  } finally {
+    globalThis.fetch = was;
+  }
+}
+
+test("the owner's decision (a): a branch read refused for permission or 404 is 'no App named' while no required check is pinned (installs, as main); a 5xx or rate limit waits; with a check pinned, it waits", async () => {
+  const refusals: [string, () => Response, boolean][] = [
+    ['a permission 403', () => asJson({ message: 'Resource not accessible by integration' }, 403), true],
+    ['a 404', () => asJson({ message: 'Not Found' }, 404), true],
+    ['a 500', () => asJson({ message: 'boom' }, 500), false],
+    ['a rate-limited 403', () => asJson({ message: 'API rate limit exceeded for 203.0.113.7.' }, 403, { 'x-ratelimit-remaining': '0', 'x-ratelimit-reset': '4102444800' }), false],
+    // Round 10: a body that isn't JSON is the message, as the engine's req reads it (bced7581 read it as no message,
+    // so a rate limit known only by its text was a permission refusal, and a bare install installed).
+    ['a rate-limited 403 whose body is plain text', () => asText('API rate limit exceeded for 203.0.113.7.', 403), false],
+    ['a secondary-rate-limited 403 whose body is plain text', () => asText('You have exceeded a secondary rate limit. Please wait a few minutes before you try again.', 403), false],
+    ['a permission 403 whose body is plain text', () => asText('Forbidden', 403), true],
+  ];
   const bare: Cfg = { branch: 'main', required_checks: ['ci', 'lint'] };
   const pinned: Cfg = { branch: 'main', required_checks: ['ci', 'lint'], required_check_sources: { ci: { app_id: 2222 } } };
+  // `rulesToo`: the rules read is refused the same way (a token that can read neither); else it answers none.
+  const verdict = (refusal: () => Response, cfg: Cfg, rulesToo: boolean) => viaRealDeps(cfg, refusal, () => (rulesToo ? refusal() : asJson([])));
   for (const rulesToo of [false, true]) {
     for (const [what, refusal, noApp] of refusals) {
       const how = `${what}${rulesToo ? ', the rules read refused too' : ''}`;
@@ -419,4 +434,24 @@ test("the owner's decision (a): a branch read refused for permission or 404 is '
       assert.equal(await verdict(refusal, pinned, rulesToo), 'waits', `a check pinned, ${how}: fail closed, as before`);
     }
   }
+});
+
+test('round 10: the rules read pages as the engine does (100 a page, the next while full, up to 10): a pin on page 2 is kept; a later page refused or unanswered, or past 10, waits', async () => {
+  const bare: Cfg = { branch: 'main', required_checks: ['ci', 'lint'] };
+  const branch = () => asJson({ name: 'main', protection: { enabled: false } });
+  const filler = (page: number) => Array.from({ length: 100 }, (_, i) => ({ type: 'deletion', ruleset_id: page * 1000 + i }));
+  // A ruleset pins `ci` to App 4242; `ci` passes only from App 2222.
+  const pin = { type: 'required_status_checks', ruleset_id: 1, parameters: { required_status_checks: [{ context: 'ci', integration_id: 4242 }] } };
+  const asked: string[] = [];
+  assert.equal(await viaRealDeps(bare, branch, (p) => asJson(p === 1 ? filler(1) : []), asked), 'installs', 'page 1 full, page 2 empty: no pin, as main');
+  assert.ok(asked.some((a) => a.includes('per_page=100')), `100 a page: ${asked.join(', ')}`);
+  assert.equal(await viaRealDeps(bare, branch, (p) => asJson(p === 1 ? filler(1) : [pin])), 'waits', 'a pin on page 2 is kept: `ci` from App 2222 is another source, so it waits for App 4242 (0b6e7a9d installed)');
+  const later: [string, (p: number) => Response][] = [
+    ['page 2 refused for permission', (p) => (p === 1 ? asJson(filler(1)) : asJson({ message: 'Resource not accessible by integration' }, 403))],
+    ['page 2 a 404', (p) => (p === 1 ? asJson(filler(1)) : asJson({ message: 'Not Found' }, 404))],
+    ['page 2 a 500', (p) => (p === 1 ? asJson(filler(1)) : asJson({ message: 'boom' }, 500))],
+    ['page 2 not a list', (p) => (p === 1 ? asJson(filler(1)) : asJson({ message: 'odd' }))],
+    ['every page full, past 10', (p) => asJson(filler(p))],
+  ];
+  for (const [what, rules] of later) assert.equal(await viaRealDeps(bare, branch, rules), 'waits', `${what}: unread, so it waits (decision (a) is page 1's only)`);
 });
