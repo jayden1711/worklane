@@ -233,15 +233,32 @@ export async function runInstanceCoordinator(name: string, opts: { once?: boolea
   if (warn) console.error(warn.replaceAll('**', ''));
   // App tokens renew themselves every hour; only a personal access token can expire on its owner.
   const expiry = i.credentials.github.kind === 'app' ? undefined : scope.expiresAt;
+  // The App's own bot user, read once with the App's credentials: the commit identity when instance.yaml sets none, and
+  // (#733) the one account a merge whose record a crash cut off is taken for, never from commit_identity. A token install
+  // has none, and a failed lookup leaves none: such merges then stay unaccounted (the stop, and the owner's review), and
+  // the coordinator records that reconciliation is off until a restart.
+  let appBot: Awaited<ReturnType<typeof appBotIdentity>> | null = null;
+  let appBotError: string | null = null;
+  if (gh.kind === 'app') {
+    try {
+      appBot = await appBotIdentity({ appId: gh.app_id, installationId: gh.installation_id, keyPath: gh.key_path }, fetch, githubApi());
+    } catch (e) {
+      appBotError = (e as Error).message;
+    }
+  }
   // Every commit carries one identity: instance.yaml's, else the App's bot, never one an agent picks.
   let identity: CommitIdentity;
-  try {
-    identity = i.commitIdentity ?? (gh.kind === 'app' ? await appBotIdentity({ appId: gh.app_id, installationId: gh.installation_id, keyPath: gh.key_path }, fetch, githubApi()) : { name: `${BRAND.cli}-${i.name}`, email: `${BRAND.cli}-${i.name}@users.noreply.invalid` });
-  } catch (e) {
-    console.error(`instance ${name} not started: no commit identity (${(e as Error).message}); set commit_identity in instance.yaml`);
-    return 1;
-  }
+  if (i.commitIdentity) identity = i.commitIdentity;
+  else if (gh.kind === 'app') {
+    if (!appBot) {
+      console.error(`instance ${name} not started: no commit identity (${appBotError ?? 'no App bot user'}); set commit_identity in instance.yaml`);
+      return 1;
+    }
+    identity = { name: appBot.name, email: appBot.email };
+  } else identity = { name: `${BRAND.cli}-${i.name}`, email: `${BRAND.cli}-${i.name}@users.noreply.invalid` };
   console.error(`commits as: ${identity.name} <${identity.email}>`);
+  const engineBot = appBot ? { login: appBot.name, id: appBot.id } : null;
+  if (appBotError) console.error(`the App's bot user could not be read (${appBotError}): merge reconciliation is off until a restart reads it`);
   // Whose repo this is, for the self-modification locks (#665): root's word only (src/managed-apps.ts), asked again for
   // every review level, so root's change applies without a restart. The repo is instance.yaml's, outside the repo.
   const lockScope = ((inst: string, repo: string) => () => readLockScope(inst, repo).scope)(i.name, i.repo.repo);
@@ -254,7 +271,7 @@ export async function runInstanceCoordinator(name: string, opts: { once?: boolea
   // The main watch (GitHub only), and whose PRs get the full run: both from repo permissions, read with the instance's own token.
   const roleOf = cachedRoles(repoPermission({ repo: i.repo.repo, token: tokens, api: githubApi() }));
   const watchApi = new GitHubMainWatchApi(i.repo.repo, tokens, fetch, githubApi());
-  const mainWatch = i.config.project.backlog === 'github' ? { api: watchApi, setting: () => loadInstance(name).policy.main_watch } : undefined;
+  const mainWatch = i.config.project.backlog === 'github' ? { api: watchApi, setting: () => loadInstance(name).policy.main_watch, engineBot, ...(appBotError ? { engineBotError: appBotError } : {}) } : undefined;
   // Every merge to the default branch, posted in the ops channel (src/merge-posts.ts): GitHub only.
   const mergePosts = i.config.project.backlog === 'github' ? { api: new GitHubMergePostsApi(i.repo.repo, tokens, fetch, githubApi()) } : undefined;
   // CI timings for the metrics (src/ci-metrics.ts): GitHub only, read-only.
