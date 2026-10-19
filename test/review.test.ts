@@ -252,22 +252,33 @@ test("only root's file reader and the review levels name the managed-app scope",
 
 /** A string naming root's reader's module as code would load it (relative or not; `.js`, `.mjs`, `.cjs` or none). */
 const LOCK_SCOPE_MODULE = /(?:^|[/\\])managed-apps(?:\.[cm]?js)?$/;
+/** Whether `s` names that module, read as a module path is: any `?…` or `#…` cut off, and %-escapes decoded. */
+const namesLockScopeModule = (s: string): boolean => {
+  let path = s.replace(/[?#][\s\S]*$/, '');
+  try {
+    path = decodeURIComponent(path);
+  } catch {
+    // A malformed escape: as written.
+  }
+  return LOCK_SCOPE_MODULE.test(s) || LOCK_SCOPE_MODULE.test(path);
+};
 
 /**
- * The readLockScope lint for one source file (`file` its repo path, `text` its source): every way the file could hand
- * root's reader something but the instance and its repo. Empty means clean. It takes source as data, so a fixture test
- * feeds it exactly what the repo walk does (#771), and it parses every file it is given: no pre-filter by text, which
- * an escaped name or a computed key would get past. Outside the reader's own module (src/managed-apps.ts):
+ * The lock-scope module's edge, for one source file (`file` its repo path, `text` its source). Empty means clean. It
+ * takes source as data, so a fixture test feeds it exactly what the repo walk does (#771), and it parses every file it
+ * is given: no pre-filter by text, which an escaped name would get past. Outside the module itself (src/managed-apps.ts):
  * - the module is reached only by a static named import or a named re-export. Never `import * as`, a default or
- *   side-effect import, `export *`, `export * as`, `import()`, `require()` or any other string naming it, so no file
- *   holds a namespace object to index with a computed key;
- * - readLockScope (escaped or not) is only imported under its own name and called with exactly two non-spread
- *   arguments. Never aliased, passed on, named in a string, or used as a value.
- * Out of its reach: a module specifier built at run time, eval, and code run by path.
+ *   side-effect import, `export *`, `export * as`, `import()`, `require()` or any other string naming it (escapes
+ *   decoded, a query or fragment cut off, %-escapes decoded), so no file holds a namespace object to walk;
+ * - no module path has `?`, `#` or `%` in it (src/ uses none), which can name the same module in a form this can't match;
+ * - `import()`, `require()`, `<x>.require()` and `createRequire(…)(…)` take a plain string (a template with no `${}`
+ *   is one), so the module they load is one this can read.
+ * The call's shape isn't checked: readLockScope takes the instance and its repo and nothing else (#747).
+ * Out of its reach: `require` (or createRequire's function) under another name, called with a path built at run time;
+ * eval and new Function; and code run by path (a child process, or a file loaded by a path this can't read).
  */
 export function lockScopeFindings(file: string, text: string): string[] {
   if (file === 'src/managed-apps.ts') return [];
-  const NAME = 'readLockScope';
   const kind = /\.[cm]?js$/.test(file) ? ts.ScriptKind.JS : file.endsWith('x') ? ts.ScriptKind.TSX : ts.ScriptKind.TS;
   const sf = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true, kind);
   const out: string[] = [];
@@ -279,23 +290,22 @@ export function lockScopeFindings(file: string, text: string): string[] {
     if (c && !c.name && c.namedBindings && ts.isNamedImports(c.namedBindings)) namedOnly.add((s as ts.ImportDeclaration).moduleSpecifier);
     if (ts.isExportDeclaration(s) && s.moduleSpecifier && s.exportClause && ts.isNamedExports(s.exportClause)) namedOnly.add(s.moduleSpecifier);
   }
+  const named = (e: ts.Expression, name: string) => (ts.isIdentifier(e) && e.text === name) || (ts.isPropertyAccessExpression(e) && e.name.text === name);
+  /** A call that loads a module: import(…), require(…), <x>.require(…), createRequire(…)(…). */
+  const loads = (c: ts.CallExpression) => c.expression.kind === ts.SyntaxKind.ImportKeyword || named(c.expression, 'require') || (ts.isCallExpression(c.expression) && named(c.expression.expression, 'createRequire'));
+  // Every module path: a static import's or export's, import = require()'s, and a loading call's plain string.
+  const paths = new Set<ts.Node>();
   const visit = (n: ts.Node): void => {
-    if (ts.isStringLiteralLike(n) && n.text === NAME) at(n, `${NAME} by name`);
-    if (ts.isStringLiteralLike(n) && LOCK_SCOPE_MODULE.test(n.text) && !namedOnly.has(n)) at(n.parent, `its module reached other than by a static named import`);
-    const named = ts.isIdentifier(n) && n.text === NAME;
-    if (named) {
-      const p = n.parent;
-      if (ts.isImportSpecifier(p)) {
-        if (p.propertyName) at(p, `${NAME} imported under another name`);
-      } else if (ts.isExportSpecifier(p)) {
-        at(p, `${NAME} passed on`);
-      } else {
-        // The callee, alone or as `ns.readLockScope`: the call must name exactly the instance and its repo.
-        const callee = ts.isPropertyAccessExpression(p) && p.name === n ? p : n;
-        const call = callee.parent;
-        if (!(ts.isCallExpression(call) && call.expression === callee)) at(n, `${NAME} used as a value, not called`);
-        else if (call.arguments.length !== 2 || call.arguments.some((a) => ts.isSpreadElement(a))) at(call, `${NAME} called with ${call.arguments.length} argument(s), not exactly (instance, repo)`);
-      }
+    if ((ts.isImportDeclaration(n) || ts.isExportDeclaration(n)) && n.moduleSpecifier) paths.add(n.moduleSpecifier);
+    if (ts.isExternalModuleReference(n)) paths.add(n.expression);
+    if (ts.isCallExpression(n) && loads(n)) {
+      const a = n.arguments[0];
+      if (a && (ts.isStringLiteral(a) || ts.isNoSubstitutionTemplateLiteral(a))) paths.add(a);
+      else at(n, 'a module loaded by a path that is not a plain string');
+    }
+    if (ts.isStringLiteralLike(n)) {
+      if (paths.has(n) && /[?#%]/.test(n.text)) at(n, 'a module path with ?, # or %');
+      if (namesLockScopeModule(n.text) && !namedOnly.has(n)) at(n.parent, 'its module reached other than by a static named import');
     }
     ts.forEachChild(n, visit);
   };
@@ -303,82 +313,96 @@ export function lockScopeFindings(file: string, text: string): string[] {
   return out;
 }
 
-// WHY (#747): readLockScope's third argument (another file, another root uid) is for tests. A src/ caller that passed
-// one could point the reader at a file root doesn't own, or count another user as root, and turn the engine-source
-// locks off where root never said so. The literal lint above doesn't see that, so every src/ file but the reader's
-// own module reaches it only by a plain import and calls it with exactly the instance and its repo.
-test("src/ reaches root's reader (readLockScope) only by a plain import, and calls it with exactly the instance and its repo", () => {
+// WHY (#747): the coordinator's lock scope must be root's word alone. readLockScope takes only the instance and its
+// repo, but a file holding the module's namespace (or loading it by a path this can't read) is one this lint can't
+// follow, so every src/ file but the module's own reaches it only by a static named import.
+test("src/ reaches root's reader's module (src/managed-apps.ts) only by a static named import", () => {
   const src = join(repoDir, 'src');
   const files = (readdirSync(src, { recursive: true }) as string[]).filter((p) => /\.([cm]?ts|tsx|[cm]?js)$/.test(p)).map((p) => `src/${p.split(sep).join('/')}`);
   assert.ok(files.length > 100, `${files.length} files`);
   // Every file, through the same function the fixtures below go through.
   assert.deepEqual(files.flatMap((p) => lockScopeFindings(p, readFileSync(join(repoDir, p), 'utf8'))), []);
-  // The walk sees the reader's real caller: the coordinator's start-up, which a third argument there would fail.
+  // The walk sees the reader's real caller: the coordinator's start-up, which a namespace import there would fail.
   assert.ok(files.includes('src/service.ts'));
   const service = readFileSync(join(repoDir, 'src/service.ts'), 'utf8');
-  const widened = service.replace('readLockScope(i.name, i.repo.repo)', 'readLockScope(i.name, i.repo.repo, { rootUid: 1000 })');
-  assert.notEqual(widened, service, "the coordinator's start-up calls readLockScope(i.name, i.repo.repo)");
-  assert.match(lockScopeFindings('src/service.ts', widened).join('\n'), /src\/service\.ts:\d+: readLockScope called with 3 argument\(s\)/);
+  const widened = service.replace("import { readLockScope } from './managed-apps.js';", "import * as lockScope from './managed-apps.js';");
+  assert.notEqual(widened, service, "the coordinator's start-up imports { readLockScope } from './managed-apps.js'");
+  assert.match(lockScopeFindings('src/service.ts', widened).join('\n'), /src\/service\.ts:\d+: its module reached other than by a static named import/);
 });
 
 const IMPORTED = "import { readLockScope } from './managed-apps.js';\n";
 const NAMESPACE = "import * as m from './managed-apps.js';\n";
-const CALL = /readLockScope called with \d+ argument\(s\), not exactly \(instance, repo\)/;
-const VALUE = /readLockScope used as a value, not called/;
-const BY_NAME = /readLockScope by name/;
 const MODULE = /its module reached other than by a static named import/;
-/** What the readLockScope lint must refuse, and why: each a fixture, so none is ever planted in src/ (#771). */
-const LOCK_SCOPE_BAD: [string, string, RegExp][] = [
-  ['a third argument: another root uid', `${IMPORTED}readLockScope(i.name, i.repo.repo, { rootUid: process.getuid?.() ?? 0 });`, CALL],
-  ['a third argument: another file', "readLockScope(i.name, i.repo.repo, { file: '/tmp/apps.json' });", CALL],
-  ['one argument', 'readLockScope(i.name);', CALL],
-  ['a spread', 'readLockScope(...args);', CALL],
-  ['through a namespace, three arguments', 'm.readLockScope(a, b, o);', CALL],
-  ['an aliased import', "import { readLockScope as r } from './managed-apps.js';", /readLockScope imported under another name/],
-  ['an aliased import by a string name', "import { 'readLockScope' as r } from './managed-apps.js';", BY_NAME],
-  ['a named re-export', "export { readLockScope } from './managed-apps.js';", /readLockScope passed on/],
-  ['a reference', 'const r = readLockScope;', VALUE],
-  ['passed as a value', 'call(readLockScope);', VALUE],
-  ['.call', 'readLockScope.call(null, a, b, o);', VALUE],
-  ['destructured', 'const { readLockScope: r } = m;', VALUE],
-  ['a string key', "m['readLockScope'](a, b, o);", BY_NAME],
-  // What the version before this one missed (PR #765's round-1 review): its file pre-filter, and the module edge.
-  ['a unicode-escaped name, three arguments', `${IMPORTED}readLock\\u0053cope(a, b, { rootUid: 1000 });`, CALL],
-  ['the escaped name alone in the file, through a namespace', `${NAMESPACE}m.readLock\\u0053cope(a, b, { rootUid: 1000 });`, MODULE],
-  ['a \\x escape in a string key', `${NAMESPACE}m['readLock\\x53cope'](a, b, { rootUid: 1000 });`, MODULE],
-  ['a \\u escape in a string key', `${NAMESPACE}m['readLock\\u0053cope'](a, b, { rootUid: 1000 });`, MODULE],
-  ['a concatenated key', `${NAMESPACE}m['readLock' + 'Scope'](a, b, { rootUid: 1000 });`, MODULE],
-  ['a template key', `${NAMESPACE}m[\`readLock\${'Scope'}\`](a, b, { rootUid: 1000 });`, MODULE],
-  ['a key built at run time', `${NAMESPACE}const k = ['readLock', 'Scope'].join('');\nm[k](a, b, { rootUid: 1000 });`, MODULE],
-  ['Object.values on the namespace', `${NAMESPACE}Object.values(m).find((f) => f.length === 3)(a, b, { rootUid: 1000 });`, MODULE],
-  ['import(), a named property', "const m = await import('./managed-apps.js');\nm.readLockScope(a, b, { rootUid: 1000 });", MODULE],
-  ['import(), a computed key', "const m = await import('./managed-apps.js');\nm['readLock' + 'Scope'](a, b, { rootUid: 1000 });", MODULE],
-  ['import(), destructured', "const { readLockScope: r } = await import('./managed-apps.js');\nr(a, b, { rootUid: 1000 });", MODULE],
+const MARKS = /a module path with \?, # or %/;
+const NOT_PLAIN = /a module loaded by a path that is not a plain string/;
+/** What the lint must refuse, and why: each a fixture, so none is ever planted in src/ (#771). The file is src/x.ts unless named. */
+export const LOCK_SCOPE_BAD: [string, string, RegExp, string?][] = [
+  // PR #765's round-1 review: the module edge.
+  ['the escaped name alone in the file, through a namespace', `${NAMESPACE}m.readLock\\u0053cope(a, b);`, MODULE],
+  ['a \\x escape in a string key', `${NAMESPACE}m['readLock\\x53cope'](a, b);`, MODULE],
+  ['a concatenated key', `${NAMESPACE}m['readLock' + 'Scope'](a, b);`, MODULE],
+  ['a template key', `${NAMESPACE}m[\`readLock\${'Scope'}\`](a, b);`, MODULE],
+  ['a key built at run time', `${NAMESPACE}const k = ['readLock', 'Scope'].join('');\nm[k](a, b);`, MODULE],
+  ['Object.values on the namespace', `${NAMESPACE}Object.values(m).find((f) => f.length === 2)(a, b);`, MODULE],
+  ['import(), a named property', "const m = await import('./managed-apps.js');\nm.readLockScope(a, b);", MODULE],
+  ['import(), destructured', "const { readLockScope: r } = await import('./managed-apps.js');\nr(a, b);", MODULE],
+  ['import(), a template with no ${}', 'const m = await import(`./managed-apps.js`);', MODULE],
   ['export *', "export * from './managed-apps.js';", MODULE],
   ['export * as', "export * as lockScope from './managed-apps.js';", MODULE],
-  ['require(), a named property', "const m = require('./managed-apps.js');\nm.readLockScope(a, b, { rootUid: 1000 });", MODULE],
-  ['require(), a computed key', "const m = require('./managed-apps.js');\nm['readLock' + 'Scope'](a, b, { rootUid: 1000 });", MODULE],
-  ['require(), destructured', "const { readLockScope } = require('./managed-apps.js');\nreadLockScope(a, b, { rootUid: 1000 });", MODULE],
+  ['require(), a named property', "const m = require('./managed-apps.js');\nm.readLockScope(a, b);", MODULE],
+  ['require(), destructured', "const { readLockScope } = require('./managed-apps.js');", MODULE],
+  ['require() in a .cjs file', "const m = require('./managed-apps.cjs');", MODULE, 'src/x.cjs'],
+  ['globalThis.require()', "const m = globalThis.require('./managed-apps.js');", MODULE],
+  ['module.require()', "const m = module.require('./managed-apps.js');", MODULE],
   ['createRequire', "const m = createRequire(import.meta.url)('./managed-apps.js');", MODULE],
   ['import = require()', "import m = require('./managed-apps.js');", MODULE],
   ['a default import', "import m from './managed-apps.js';", MODULE],
   ['a side-effect import', "import './managed-apps.js';", MODULE],
+  ['import attributes', "import * as m from './managed-apps.js' with { type: 'js' };", MODULE],
   ['a namespace import from a subfolder, its specifier escaped', "import * as m from '../managed\\x2dapps.js';", MODULE],
+  ['a variable holding the path', "const p = './managed-apps.js';\nconst m = await import(p);", MODULE],
+  ['new URL()', "const u = new URL('./managed-apps.js', import.meta.url);", MODULE],
+  // PR #765's round-2 review: plain strings Node loads as the module itself.
+  ['a query', "import * as m from './managed-apps.js?x';\nm['readLock' + 'Scope'](a, b);", MARKS],
+  ['a fragment', "import * as m from './managed-apps.js#x';\nm['readLock' + 'Scope'](a, b);", MARKS],
+  ['a %-escape', "import * as m from './managed%2Dapps.js';\nm['readLock' + 'Scope'](a, b);", MARKS],
+  ['import() with a query', "const m = await import('./managed-apps.js?x');", MARKS],
+  ['export * as, with a query', "export * as ns from './managed-apps.js?x';", MARKS],
+  ['a named import with a query', "import { readLockScope } from './managed-apps.js?x';", MARKS],
+  ['a namespace import with a query: also the module, read as a path', "import * as m from './managed-apps.js?x';", MODULE],
+  ['a namespace import with a %-escape: also the module, read as a path', "import * as m from './managed%2Dapps.js';", MODULE],
+  // PR #765's round-2 review: a path built at run time.
+  ['import(), concatenated', "const m = await import('./managed-' + 'apps.js');", NOT_PLAIN],
+  ['import(), a template with ${}', "const m = await import(`./managed-${'apps'}.js`);", NOT_PLAIN],
+  ['globalThis.require(), concatenated', "const m = globalThis.require('./managed-' + 'apps.js');", NOT_PLAIN],
+  ['module.require(), concatenated', "const m = module.require('./managed-' + 'apps.js');", NOT_PLAIN],
+  ['require() in a .cjs file, concatenated', "const m = require('./managed-' + 'apps.js');", NOT_PLAIN, 'src/x.cjs'],
+  ['createRequire, concatenated', "const m = createRequire(import.meta.url)('./managed-' + 'apps.js');", NOT_PLAIN],
+  ['import(), a variable', 'const m = await import(spec);', NOT_PLAIN],
+  ['import(), a tagged template', 'const m = await import(String.raw`./managed-apps.js`);', NOT_PLAIN],
+  ['require() with no path', 'const m = require();', NOT_PLAIN],
 ];
 /** What it must let through. */
-const LOCK_SCOPE_GOOD: [string, string][] = [
+export const LOCK_SCOPE_GOOD: [string, string, string?][] = [
   ['the plain import and two-argument calls', `${IMPORTED}readLockScope(i.name, i.repo.repo);\nconst f = () => readLockScope(a, b).scope;`],
+  // Once imported, the function takes the instance and its repo and nothing else, so what a file does with it is no matter.
+  ['the imported function passed around', `${IMPORTED}const r = readLockScope;\nr.call(null, a, b);\ncall(readLockScope);`],
   ['other names, imported, typed and passed on by name', "import { githubRepoOf } from './managed-apps.js';\nimport type { LockScope } from '../managed-apps.js';\nexport { githubRepoOf } from './managed-apps.js';"],
   ["strings naming the module's neighbours", "const a = 'scripts/setup/managed-apps.sh', b = etcPath('managed-apps.json'), c = 'src/managed-apps.ts';"],
   ['a dynamic import of another module', "const { runBroker } = await import('./mcp/service.js');"],
+  ['a dynamic import of another module, a template with no ${}', 'const m = await import(`./plugins/cli.js`);'],
+  ['require() of a package', "const { Client } = require('pg');"],
+  ['require() in a .cjs file', "const fs = require('node:fs');", 'src/x.cjs'],
+  ['an import type', "let e: import('./experiments.js').ExperimentHost;"],
+  ["a '?', '#' or '%' in a string that is no module path", "const q = 'which repo? #747, 100%';"],
 ];
 
-test('the readLockScope lint, fed fixtures: every reach past a plain import and a two-argument call is refused, and those pass', () => {
-  for (const [what, code] of LOCK_SCOPE_GOOD) assert.deepEqual(lockScopeFindings('src/x.ts', code), [], what);
-  // The reader's own module defines and uses it as it likes.
-  assert.deepEqual(lockScopeFindings('src/managed-apps.ts', `${NAMESPACE}export function readLockScope(a, b, o) {}\nreadLockScope(a, b, o);`), []);
-  for (const [what, code, why] of LOCK_SCOPE_BAD) {
-    const found = lockScopeFindings('src/x.ts', code);
+test('the lock-scope module lint, fed fixtures: every reach past a static named import, or by a path it can\'t read, is refused, and those pass', () => {
+  for (const [what, code, file] of LOCK_SCOPE_GOOD) assert.deepEqual(lockScopeFindings(file ?? 'src/x.ts', code), [], what);
+  // The module itself defines and uses it as it likes.
+  assert.deepEqual(lockScopeFindings('src/managed-apps.ts', `${NAMESPACE}export function readLockScope(a, b) {}\nreadLockScope(a, b);`), []);
+  for (const [what, code, why, file] of LOCK_SCOPE_BAD) {
+    const found = lockScopeFindings(file ?? 'src/x.ts', code);
     assert.match(found.join('\n'), why, `${what}: ${found.join('; ') || 'nothing found'}`);
   }
 });
