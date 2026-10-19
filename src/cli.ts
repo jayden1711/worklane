@@ -202,7 +202,9 @@ usage: ${BRAND.cli} <command> [options]
                                    root's testrun-gpu.json lists (docs/test-runs.md "GPU")
   stuck-scan [--instance name]     read-only: how many recorded runs the stuck-run guard would have
                                    flagged or stopped (run as the coordinator user)
-  decide <id> <option>             answer a decision (also: a writer comments /${BRAND.cli} <option>)
+  decide <id> <option> [--instance name]
+                                   answer a decision as the owner (root or the coordinator user only;
+                                   also: a comment /${BRAND.cli} <option> by whoever may answer its kind)
   labels                           create the backlog labels on the GitHub repo
   discord channels [--instance name] [--json]
                                    read-only: the text and announcement channels the instance's bot can see,
@@ -1070,19 +1072,32 @@ async function main(argv: string[]): Promise<number> {
         console.error('usage: decide <decision-id> <option>');
         return 2;
       }
-      const log = new EventLog(logPath(root));
+      // WHY (#715): only root or the coordinator user may answer from here, checked before anything is read; the
+      // answer is the instance's owner's, through the one decide path (src/decide.ts), audited with the OS user.
+      const { cliDecideRefusal, answerDecision } = await import('./decide.js');
+      const { currentUser, fileAccess, isRoot, userUid } = await import('./os/index.js');
+      const { coordinatorUser } = await import('./setup/app-manifest.js');
+      const user = currentUser();
+      const caller = { user, uid: user ? userUid(user) : null, root: isRoot() };
+      const localDb = logPath(root);
+      const db = instanceOpt ? null : fileAccess(localDb);
+      const refused = cliDecideRefusal(caller, { instance: instanceOpt ?? null, coordinatorUser: instanceOpt ? coordinatorUser(instanceOpt) : null, logUid: db?.kind === 'file' ? db.uid : null });
+      if (refused) {
+        console.error(`decide: refused: ${refused}`);
+        return 1;
+      }
+      const target = instanceOpt
+        ? (() => { const i = loadInstance(instanceOpt); return { db: join(i.stateDir, 'events.db'), cfg: i.config }; })()
+        : { db: localDb, cfg: loadConfig(root) };
+      const log = new EventLog(target.db);
       try {
-        const q = log.read(0, ['decision.asked']).find((e) => (e.payload as { id: string }).id === id)?.payload as { options: string[] } | undefined;
-        if (!q) {
-          console.error(`no decision ${id}`);
-          return 1;
+        const owner = target.cfg.project.owners.default;
+        const r = answerDecision(log, { id, answer, who: { login: owner, role: 'owner', via: 'cli' }, instance: instanceOpt ?? null, repo: target.cfg.project.project.repo, audit: { os_user: caller.user } });
+        if (!r.ok) {
+          console.error(r.error);
+          return r.status === 400 ? 2 : 1;
         }
-        if (!q.options.includes(answer)) {
-          console.error(`options are: ${q.options.join(', ')}`);
-          return 2;
-        }
-        log.append('decision.answered', { id, by: instanceId(), answer }, instanceId(), 'human');
-        console.log(`recorded: ${id} -> ${answer} (the coordinator acts on its next tick)`);
+        console.log(`recorded: ${id} -> ${answer}, as @${owner} (the coordinator acts on its next tick)`);
         return 0;
       } finally {
         log.close();

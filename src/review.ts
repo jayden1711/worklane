@@ -1,8 +1,8 @@
 // Risk-based review levels, computed by code from what a change touches.
 // The highest matching level wins; a failed or low-confidence evaluator
 // verdict bumps it up one; an agent can raise its own level, never lower it.
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { spawnSync } from 'node:child_process';
+import { posix } from 'node:path';
 import type { ReviewConfig } from './config/schema.js';
 import { globToRegExp } from './guardrails/glob.js';
 import { BRAND } from './brand.js';
@@ -207,20 +207,28 @@ export interface LevelResult {
 }
 
 /**
- * Money paths from the project's source of truth. A pattern containing
- * regex literals (/.../) yields those; otherwise each line is a glob.
+ * Money paths from the project's source of truth, as `rev` has it: the default branch's ref (`<remote>/<branch>`),
+ * read with git from `repo`, as review.yaml itself is (src/config/live.ts). Never a working tree: the coordinator's
+ * is never checked out again after its clone, so a list read there misses every path main added since (#715).
+ * The list file itself is a money path too: a change to it waits for the owner like the paths it names, in every
+ * repo, wherever its name would otherwise put it (docs, for a .txt). A pattern containing regex literals (/.../)
+ * yields those; otherwise each line is a glob.
  */
-export function loadMoneyPaths(root: string, src: ReviewConfig['money_path_source']): RegExp[] {
+export function loadMoneyPaths(repo: string, src: ReviewConfig['money_path_source'], rev: string): RegExp[] {
   if (!src) return [];
-  let text = readFileSync(join(root, src.file), 'utf8');
+  const file = posix.normalize(src.file).replace(/^\.\//, '');
+  const shown = spawnSync('git', ['show', `${rev}:${file}`], { cwd: repo, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 16 * 1024 * 1024 });
+  if (shown.status !== 0) throw new Error(`money_path_source: ${file} isn't readable at ${rev}: ${(shown.stderr || shown.error?.message || '').trim().split('\n')[0]}`);
+  let text = shown.stdout;
   if (src.pattern) {
     const m = text.match(new RegExp(src.pattern));
     if (!m) throw new Error(`money_path_source: pattern not found in ${src.file}`);
     text = m[1] ?? m[0];
   }
+  const self = new RegExp(`^${file.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`);
   const literals = [...text.matchAll(/\/((?:\\\/|[^/\n])+)\/([gimsuy]*)/g)].map((m) => new RegExp(m[1]!, m[2]!.replace('g', '')));
-  if (literals.length) return literals;
-  return text.split('\n').map((l) => l.trim()).filter((l) => l && !l.startsWith('#')).map((g) => globToRegExp(g));
+  if (literals.length) return [self, ...literals];
+  return [self, ...text.split('\n').map((l) => l.trim()).filter((l) => l && !l.startsWith('#')).map((g) => globToRegExp(g))];
 }
 
 export function computeLevel(input: LevelInput, cfg: ReviewConfig, extraCategories: Record<string, string[]> = {}): LevelResult {

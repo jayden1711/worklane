@@ -748,6 +748,12 @@ export const DEFAULT_GENERATED = ['**/*.min.js', '**/*.min.css', '**/*.map', '**
 export const ReviewConfig = z.strictObject({
   version: z.literal(1),
   money_path_source: z.strictObject({ file: z.string().min(1), pattern: regex.optional() }).optional(),
+  /**
+   * Who may approve a high-risk merge (a `land` decision, or a PR waiting for the owner), on every surface
+   * (src/dashboard-auth.ts mayAnswerKind; #715). Absent: the instance's owners (admin on the repo) only. `land: writers`:
+   * its writers too. Read from the default branch, like the rest of this file, so only a merged change sets it.
+   */
+  approvals: z.strictObject({ land: z.enum(['owners', 'writers']) }).optional(),
   /** Path categories (globs) the levels can name; a built-in category of the same name is replaced. */
   categories: z.record(z.string(), z.array(z.string())).default({}),
   levels: z.strictObject({

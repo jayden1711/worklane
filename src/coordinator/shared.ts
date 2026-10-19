@@ -67,6 +67,12 @@ export interface CoordinatorDeps {
   reviewPollMs?: number;
   /** The instance policy's auto-merge kill switch, read on every decision (absent or throwing: off). */
   autoMerge?: () => boolean;
+  /**
+   * An instance's policy.yaml writers_approve_land, read on every approval (#715): off, throwing or absent, and writers
+   * never approve a high-risk merge, whatever review.yaml says (fail closed). A local site, which has no policy, is
+   * given `() => true` (service.ts runSite), so its review.yaml decides.
+   */
+  writersApproveLand?: () => boolean;
   /** The instance's settings (policy.yaml), read every tick; absent: the repo's config as is. */
   settings?: () => { settings: InstanceSettings; error: string | null };
   /**

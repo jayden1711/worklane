@@ -169,6 +169,15 @@ export function startConfig(o: { repo: string; remote: string; fallback: Config;
     if (extra.length) throw new ConfigInvalid(extra);
     return { cfg, tree, note: null };
   } catch (e) {
-    return { cfg: o.fallback, tree: configTree(o.repo, 'HEAD'), note: `${BRAND.configDir}/ at ${o.remote}/${branch} is invalid, started with the checkout's: ${(e as Error).message.slice(0, 1000)}` };
+    // WHY (#715): the checkout's config as committed (the default branch as the clone last saw it), never its working
+    // tree, where a hand edit could loosen the policy the merges are judged by; the working tree only when HEAD has none valid.
+    const why = `${BRAND.configDir}/ at ${o.remote}/${branch} is invalid, started with the checkout's: ${(e as Error).message.slice(0, 1000)}`;
+    try {
+      const committed = loadConfigAt(o.repo, 'HEAD');
+      if (!(o.check?.(committed) ?? []).length) return { cfg: committed, tree: configTree(o.repo, 'HEAD'), note: why };
+    } catch {
+      // none valid at HEAD either
+    }
+    return { cfg: o.fallback, tree: configTree(o.repo, 'HEAD'), note: why };
   }
 }

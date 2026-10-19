@@ -12,7 +12,8 @@ import type { EventLog } from '../events/log.js';
 import type { EventPayload, StoredEvent } from '../events/types.js';
 import { agentReadableDir, cpuCount, diskFree, groupOnlyDir, machineLoad, writeAgentReadable, writeGroupOnly } from '../os/index.js';
 import { currentCoreShare, envWithCores, withCores } from '../cores.js';
-import { type ChangeFile } from '../review.js';
+import { loadMoneyPaths, type ChangeFile } from '../review.js';
+import type { ReviewConfig } from '../config/schema.js';
 import { changeFiles } from './change-files.js';
 import type { DecisionContext } from '../decision-context.js';
 import { DEFAULT_COMMIT_IDENTITY, type AgentRunner, type CommitIdentity, type RunRequest, type RunResult } from '../runner.js';
@@ -265,6 +266,29 @@ export abstract class CoordinatorBase {
 
   protected get branch() {
     return this.d.cfg.project.project.default_branch;
+  }
+
+  /**
+   * The money paths as the default branch says them now: the list read at <remote>/<branch> (refreshed by every
+   * fetch), never from this checkout's working tree, which is as old as the clone (#715). The one way the coordinator
+   * reads them.
+   */
+  protected moneyPaths(src: ReviewConfig['money_path_source'] = this.d.cfg.review?.money_path_source): RegExp[] {
+    return loadMoneyPaths(this.d.repo, src, `refs/remotes/${this.remote}/${this.branch}`);
+  }
+
+  /**
+   * Who may approve a high-risk merge, for the one rule (dashboard-auth.ts mayAnswerKind): review.yaml's `approvals`
+   * from the default branch (the live config), writers only while root's policy lets them, read now (#715).
+   */
+  protected approvals(): ReviewConfig['approvals'] {
+    const a = this.d.cfg.review?.approvals;
+    if (a?.land !== 'writers') return a;
+    try {
+      return this.d.writersApproveLand?.() === true ? a : undefined;
+    } catch {
+      return undefined;
+    }
   }
 
   /** What every push checks: the default branch is never pushed (only the direct land passes `directLand`); a refusal is recorded. */

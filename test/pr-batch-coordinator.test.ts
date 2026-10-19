@@ -4,9 +4,12 @@ import { addStartGate, clearStartGates, passGate } from '../src/testrun/gate.js'
 import { GATE_MODES, guardGate } from './gate-helpers.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { rmSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import type { EventPayload } from '../src/events/types.js';
 import type { TestRuns, TestRunRequest } from '../src/coordinator/pr-batch.js';
 import type { PrTestRuns } from '../src/coordinator/test-runs.js';
+import type { RoleOf } from '../src/dashboard-auth.js';
 import { approve, changeOnMain, lastOf, openPr, passing, skip, type Fixture, type OpenPr } from './repro-state-graph/harness.js';
 
 const full = { name: 'full', source: 'check_run' as const, status: 'completed', conclusion: 'success', id: 2 };
@@ -45,9 +48,9 @@ function batching(cfg: Fixture['cfg'], edit?: (cfg: Fixture['cfg']) => void) {
   edit?.(cfg);
 }
 
-async function batched(o: { ok?: boolean; wired?: boolean; edit?: (cfg: Fixture['cfg']) => void; holdFirst?: boolean; prTestRuns?: PrTestRuns; gated?: boolean } = {}) {
+async function batched(o: { ok?: boolean; wired?: boolean; edit?: (cfg: Fixture['cfg']) => void; holdFirst?: boolean; prTestRuns?: PrTestRuns; gated?: boolean; roleOf?: RoleOf; writersApproveLand?: () => boolean } = {}) {
   const s = service(o.ok ?? true, { holdFirst: o.holdFirst ?? false, gated: o.gated ?? false });
-  const t = await openPr({ 'evaluator-verdict': approve() }, { autoMerge: () => true, edit: (cfg) => batching(cfg, o.edit), deps: o.wired === false ? {} : { testRuns: s.t, ...(o.prTestRuns ? { prTestRuns: o.prTestRuns } : {}) } });
+  const t = await openPr({ 'evaluator-verdict': approve() }, { autoMerge: () => true, edit: (cfg) => batching(cfg, o.edit), deps: { ...(o.roleOf ? { roleOf: o.roleOf } : {}), ...(o.writersApproveLand ? { writersApproveLand: o.writersApproveLand } : {}), ...(o.wired === false ? {} : { testRuns: s.t, ...(o.prTestRuns ? { prTestRuns: o.prTestRuns } : {}) }) } });
   s.bind(t.f.backlog);
   return { t, s };
 }
@@ -174,6 +177,36 @@ test("batching: an approved high-risk PR merges on the main its batch tested; on
   assert.equal(built.base, moved, 'on the moved main');
   assert.ok(t.pr().merged, 'then merged');
   assert.equal(t.f.log.read(0, ['merge.done']).length, 1);
+});
+
+test("batching: an owner's approving review merges nothing while auto-merge is stopped, as from Discord; once an admin clears the stop it merges (#715)", { skip }, async () => {
+  const { t } = await batched({ edit: highRisk });
+  await fastGreen(t);
+  assert.ok(!t.pr().merged && t.pr().labels.includes('needs-owner'));
+  const stop = join(t.f.stateDir, 'auto-merge-stopped.json');
+  writeFileSync(stop, JSON.stringify({ reason: 'main went red after #1' }));
+  approveAsOwner(t);
+  await settle(t, 2);
+  assert.ok(!t.pr().merged, 'an approval never overrides a stopped auto-merge');
+  assert.equal(t.f.log.read(0, ['merge.done']).length, 0);
+  rmSync(stop);
+  await settle(t, 2);
+  assert.ok(t.pr().merged, 'merged once the stop is cleared');
+});
+
+test("batching: the issue's owner approving by review merges only if the one rule lets their repo role approve a high-risk merge (#715)", { skip }, async () => {
+  // The issue's owner is only a writer on the repo: their review approves nothing, as on every other surface.
+  const { t } = await batched({ edit: highRisk, roleOf: async () => 'writer' });
+  await fastGreen(t);
+  approveAsOwner(t);
+  await settle(t, 2);
+  assert.ok(!t.pr().merged, "a writer's review doesn't merge a high-risk PR");
+  // review.yaml on main lets writers, and root's switch does too: it merges.
+  const lets = await batched({ edit: (cfg) => (highRisk(cfg), (cfg.review!.approvals = { land: 'writers' })), roleOf: async () => 'writer', writersApproveLand: () => true });
+  await fastGreen(lets.t);
+  approveAsOwner(lets.t);
+  await settle(lets.t, 2);
+  assert.ok(lets.t.pr().merged);
 });
 
 test('batching: a commit that lands on main between a green batch and its merge sends the PR back to be tested again', { skip }, async () => {
