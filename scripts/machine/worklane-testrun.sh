@@ -1083,6 +1083,18 @@ userns_ok() {
   fi
 }
 
+# Why this machine can't have the wrapper at all, or nothing when it can: its unshare (read, never run here) takes no
+# --map-current-user or --keep-caps (util-linux older than 2.38), or there's no setpriv. test-user.sh's
+# userns_unsupported_why asks the same of unshare --help.
+userns_unsupported() {
+  local u
+  u="$(command -v unshare || true)"
+  if [ -z "$u" ]; then echo "no unshare"
+  elif ! grep -qaF 'map-current-user' "$u" || ! grep -qaF 'keep-caps' "$u"; then echo "$u takes no --map-current-user or --keep-caps"
+  elif ! command -v setpriv >/dev/null; then echo "no setpriv"
+  fi
+}
+
 # Whether user <u> is the test user of an instance on this machine: wl-test-<name>, <name> a valid instance name
 # (instance_name_problem: so never instance test's wl-test-agent, wl-test-eval or wl-test-mcp, which the bare pattern
 # wl-test-* would take), and test-user.sh install has made that instance's $BASE/<name>. test-user.sh's is_test_user is
@@ -1564,12 +1576,16 @@ check() {
   rm -f "$err"
   # Its own user namespace (#545): only the test user's uid mapped, to itself. Without the wrapper a note, never a FAIL:
   # a helper the updater put in place before test-user.sh install ran again runs as before #545, and must keep working.
+  # On a machine that can't have the wrapper, a second note, userns-unsupported: the engine reads that one line
+  # (src/testrun/host.ts) and shows it in red on doctor and the Machine page, and nothing that turns test runs off reads it.
   if userns_ok; then
     p="$(id -u "$user")"
     if grep -qx "uid_map $p $p 1" <<<"$out"; then echo "PASS a sandboxed run is in a user namespace of its own (only $user's uid mapped, to itself)"
     else echo "FAIL a sandboxed run isn't in a user namespace of its own: $(grep '^uid_map ' <<<"$out" || echo "no uid_map line")"; fail=1; fi
   else
     echo "NOTE a sandboxed run shares the host's user namespace ($USERNS_WHY), so it can join the namespaces of $user's rootless Docker (docs/test-runs.md, \"Known gap\")"
+    p="$(userns_unsupported)"
+    [ -z "$p" ] || echo "NOTE userns-unsupported: this machine's unshare can't be the test runs' wrapper ($p): install util-linux 2.38 or later and setpriv, then run scripts/setup/test-user.sh install $name again"
   fi
   [ "$fail" -eq 0 ] && echo "OK" || echo "FAILED"
   return "$fail"

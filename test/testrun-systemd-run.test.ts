@@ -160,11 +160,12 @@ test('the sandbox host reads what the helper prints for it from stdout, whatever
  * The helper's own check(), run with its real body and probe_passed, and stand-ins for everything that needs root:
  * exec_run prints the probe's stdout and systemd-run's stderr as real systemd 255 does.
  */
-function helperCheck(execRun: string, extra = 'userns_ok() { USERNS_WHY="no wrapper here (a stand-in)"; return 1; }') {
+function helperCheck(execRun: string, extra = 'userns_ok() { USERNS_WHY="no wrapper here (a stand-in)"; return 1; }\nuserns_unsupported() { :; }') {
   const src = readFileSync(helperSrc, 'utf8');
   const body = (name: string) => src.slice(src.indexOf(`${name}() {`), src.indexOf('\n}\n', src.indexOf(`${name}() {`)) + 3);
   const stubs = [
     'user=wl-test-shop',
+    'name=shop',
     'store=/nonexistent/store',
     'runuser() { shift 3; "$@"; }',
     'die() { echo "$*" >&2; exit 2; }',
@@ -218,4 +219,19 @@ test('#545: the helper\'s check: with the wrapper, a run in a user namespace of 
   assert.equal(r.status, 0, r.stdout + r.stderr);
   assert.match(r.stdout, /^NOTE a sandboxed run shares the host's user namespace \(no wrapper here \(a stand-in\)\), so it can join the namespaces of wl-test-shop's rootless Docker/m);
   assert.doesNotMatch(r.stdout, /^FAIL/m);
+  assert.doesNotMatch(r.stdout, /userns-unsupported/, 'a machine that can have the wrapper (install not yet run again) says no more');
+});
+
+test('#545 round 9 (c): on a machine that can\'t have the wrapper, the helper\'s check adds NOTE userns-unsupported with the fix, and still passes (test runs stay on); with the wrapper, never', { skip: !posix && 'bash' }, () => {
+  const probe = 'cat "$0/probe.stdout"; echo "uid_map 0 0 4294967295"; return 0';
+  const old = 'userns_ok() { USERNS_WHY="no wrapper here (a stand-in)"; return 1; }\nuserns_unsupported() { echo "/usr/bin/unshare takes no --map-current-user or --keep-caps"; }';
+  let r = helperCheck(probe, old);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.match(r.stdout, /^OK$/m);
+  assert.doesNotMatch(r.stdout, /^FAIL/m);
+  assert.ok(r.stdout.split('\n').includes("NOTE userns-unsupported: this machine's unshare can't be the test runs' wrapper (/usr/bin/unshare takes no --map-current-user or --keep-caps): install util-linux 2.38 or later and setpriv, then run scripts/setup/test-user.sh install shop again"), r.stdout);
+  const own = 'userns_ok() { return 0; }\nuserns_unsupported() { echo "never asked"; }\nid() { if [ "$1" = -u ]; then echo 1003; else echo wl-test-shop; fi; }';
+  r = helperCheck('cat "$0/probe.stdout"; echo "uid_map 1003 1003 1"; return 0', own);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.doesNotMatch(r.stdout, /userns-unsupported|never asked/);
 });

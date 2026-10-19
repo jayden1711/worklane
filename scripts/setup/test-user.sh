@@ -244,12 +244,21 @@ userns_acl_ok() {
   [ -z "$(wrapper_acl_problem "$acl")" ]
 }
 
-# Whether this machine's unshare can be the wrapper: the helper's prelude needs --map-current-user and --keep-caps
-# (util-linux 2.38 or later), and setpriv beside it.
-userns_supported() {
-  local help
+# Why this machine's unshare can't be the wrapper, or nothing when it can: the helper's prelude needs
+# --map-current-user and --keep-caps (util-linux 2.38 or later), and setpriv beside it. The helper's userns_unsupported
+# asks the same of the file (it never runs it).
+userns_unsupported_why() {
+  local help v
   help="$(unshare --help 2>/dev/null || true)"
-  grep -q -- '--map-current-user' <<<"$help" && grep -q -- '--keep-caps' <<<"$help" && command -v setpriv >/dev/null 2>&1
+  if ! grep -q -- '--map-current-user' <<<"$help" || ! grep -q -- '--keep-caps' <<<"$help"; then
+    v="$(unshare --version 2>/dev/null | head -n 1 || true)"
+    echo "${v:-no unshare}: no --map-current-user or --keep-caps"
+  elif ! command -v setpriv >/dev/null 2>&1; then echo "no setpriv"
+  fi
+}
+
+userns_supported() {
+  [ -z "$(userns_unsupported_why)" ]
 }
 
 # The test users on this machine, one a line: this instance's (its directory may not be there yet on a first install),
@@ -399,26 +408,48 @@ service_checks() {
   if systemctl is-active -q "$docker_unit_name"; then echo "PASS $docker_unit_name is active"; else echo "FAIL $docker_unit_name is not active (journalctl -u $docker_unit_name)"; fail=1; fi
   docker_cgroup_check || fail=1
   if [ -x "$helper" ] && cmp -s "$helper" "$machine_dir/worklane-testrun.sh"; then echo "PASS $helper matches this checkout's"; else echo "FAIL $helper is missing or differs from scripts/machine/worklane-testrun.sh (run install)"; fail=1; fi
-  # Each run's own user namespace (#545): the helper's own check (below) proves a run is in one.
-  if ! userns_supported; then echo "NOTE this machine's unshare can't be the test runs' wrapper (it needs util-linux 2.38 or later, and setpriv): runs share the host's user namespace"
-  elif [ ! -f "$userns_bin" ] || [ -L "$userns_bin" ] || [ "$(stat -c '%U:%G' "$userns_bin")" != root:root ]; then
-    echo "FAIL $userns_bin is missing or not root:root, so runs share the host's user namespace (run install)"; fail=1
-  elif ! userns_acl_ok; then
-    echo "FAIL $userns_bin may be run by others than the test users, or not by $user: $(getfacl -cp "$userns_bin" 2>/dev/null | tr '\n' ' ') (run install)"; fail=1
-  else echo "PASS $userns_bin is root:root, and only the test users may run it"; fi
+  userns_check "${1:-}" || fail=1
   return "$fail"
 }
 
+# Each run's own user namespace (#545): the wrapper as install puts it (the helper's own check, after, proves a run is
+# in one). [standalone]: check run by hand (the check command, and nothing else, passes it), where a machine whose
+# unshare can't be the wrapper is a FAIL naming the fix. Elsewhere (install's own check) a NOTE: a FAIL there would exit
+# install 1, and the machine's test runs go on as they did before #545 (the helper's check, which keeps test runs on,
+# prints only a NOTE too; doctor and the Machine page show that NOTE in red).
+userns_check() {
+  local why
+  why="$(userns_unsupported_why)"
+  if [ -n "$why" ]; then
+    why="this machine's unshare can't be the test runs' wrapper ($why): install util-linux 2.38 or later and setpriv, then run test-user.sh install $name again"
+    if [ "${1:-}" = standalone ]; then echo "FAIL $why"; return 1; fi
+    echo "NOTE $why. Until then runs share the host's user namespace (docs/test-runs.md, \"Known gap\")"
+  elif [ ! -f "$userns_bin" ] || [ -L "$userns_bin" ] || [ "$(stat -c '%U:%G' "$userns_bin")" != root:root ]; then
+    echo "FAIL $userns_bin is missing or not root:root, so runs share the host's user namespace (run install)"; return 1
+  elif ! userns_acl_ok; then
+    echo "FAIL $userns_bin may be run by others than the test users, or not by $user: $(getfacl -cp "$userns_bin" 2>/dev/null | tr '\n' ' ') (run install)"; return 1
+  else echo "PASS $userns_bin is root:root, and only the test users may run it"; fi
+}
+
+# [standalone]: run by hand (the check command); see userns_check. Install runs it without, and stops on a FAIL.
 check_cmd() {
-  local fail=0
+  local fail=0 mode="${1:-}" out rc=0
   id -u "$user" >/dev/null 2>&1 || { echo "FAIL no user $user; run install first"; exit 1; }
   say "boundaries, as $user"
   access_checks || fail=1
   say "caps, Docker, the helper"
-  service_checks || fail=1
+  service_checks "$mode" || fail=1
   say "inside the sandbox a run gets (the helper's own check)"
   # As root, not as whoever ran sudo: the helper reads SUDO_USER as its caller, and refuses anyone but wl-<name>.
-  env -u SUDO_USER "$helper" "$name" check || fail=1
+  out="$(env -u SUDO_USER "$helper" "$name" check)" || rc=$?
+  printf '%s\n' "$out"
+  [ "$rc" -eq 0 ] || fail=1
+  # WHY: the helper's check passes where a run shares the host's user namespace (a NOTE: its check keeps test runs on).
+  # By hand, that is a FAIL whatever the reason, so this check never ends OK while the route #545 closes is open. The
+  # machine's unshare is userns_check's FAIL already.
+  if [ "$mode" = standalone ] && [ "$rc" -eq 0 ] && userns_supported && ! grep -q '^PASS a sandboxed run is in a user namespace of its own' <<<"$out"; then
+    echo "FAIL a sandboxed run shares the host's user namespace (the helper's NOTE above says why), so it can join the namespaces of $user's rootless Docker: fix that, then run test-user.sh install $name again"; fail=1
+  fi
   [ "$fail" -eq 0 ] && echo "OK: all checks passed" || echo "FAILED: see the FAIL lines above" >&2
   return "$fail"
 }
@@ -570,7 +601,7 @@ remove_cmd() {
 
 case "$cmd" in
   install) install_cmd ;;
-  check) check_cmd ;;
+  check) check_cmd standalone ;;
   remove) remove_cmd ;;
   update-helper) update_helper_cmd ;;
 esac
