@@ -9,10 +9,12 @@
 // and errors) reaches the comment only through `lit` or `fenced`: a code span or block with no backtick inside, so
 // GitHub shows it as typed. No HTML (<br>, <img>, <details>), no link or image, no @mention, no emphasis, and no new
 // line: it can't forge a packet line, hide one or push the summary off the screen. Lengths are measured on that final
-// text. test/review-packet.test.ts pins what this module may import and call.
+// text. An eval target names a role or skill by its changed path's folder, so it is shown as shownPath shows a path
+// (#683) before `lit`. test/review-packet.test.ts pins what this module may import and call.
 import { BRAND } from '../brand.js';
 import type { DoneWhenList } from '../backlog/types.js';
 import type { EventPayload } from '../events/types.js';
+import { shownPath } from '../path-text.js';
 import type { RiskClass } from '../pr-rules.js';
 import { receiptLines, receiptSummary, type CheckRecord } from '../receipts.js';
 
@@ -73,10 +75,10 @@ const score = (s: { passed: number; total: number } | null) => (s ? `${s.passed}
 function evalsLine(evals: PacketInput['evals']): string | null {
   if (!evals.length) return null;
   const each = evals.map((r) => {
-    if (r.error) return `${lit(r.target, 50)}: not evaluated`;
+    if (r.error) return `${lit(shownPath(r.target), 50)}: not evaluated`;
     const h = r.held_out;
     const held = h === undefined ? '' : h === null ? ', held-out none' : `, held-out ${score(h.base)} → ${score(h.result)}${h.dropped ? ' LOWER' : ''}`;
-    return `${lit(r.target, 50)} ${score(r.base)} → ${score(r.result)}${r.dropped ? ' LOWER' : ''}${held}`;
+    return `${lit(shownPath(r.target), 50)} ${score(r.base)} → ${score(r.result)}${r.dropped ? ' LOWER' : ''}${held}`;
   });
   const line = (n: number) => `**Evals:** ${each.slice(0, n).join('; ')}${n < each.length ? `; ${each.length - n} more` : ''}`;
   let n = each.length;
@@ -91,11 +93,11 @@ function evalDetails(evals: PacketInput['evals']): string[] {
   return [
     `**Instruction evals** (base → head; ~$${total.toFixed(2)}, the CLI's cost estimate):`,
     ...evals.map((r) => {
-      if (r.error) return `- ${lit(r.target, 200)}: not evaluated: ${lit(r.error, 300)}`;
+      if (r.error) return `- ${lit(shownPath(r.target), 200)}: not evaluated: ${lit(r.error, 300)}`;
       const changed = r.changes.filter((c) => !(c.base === 'pass' && c.head === 'pass')).map((c) => `case ${lit(c.id, 80)} ${lit(c.base, 20)} → ${lit(c.head, 20)}`);
       const h = r.held_out;
       const held = h === undefined ? '' : h === null ? `; held-out: none${r.held_out_error ? ` (${lit(r.held_out_error, 300)})` : ''}` : `; held-out ${score(h.base)} → ${score(h.result)}${h.dropped ? ', **lower**' : ''}${h.incomplete ? ', incomplete (cost cap)' : ''}`;
-      return `- ${lit(r.target, 200)}: visible ${score(r.base)} → ${score(r.result)}${r.dropped ? ', **lower**' : ''}${r.incomplete ? ', incomplete (cost cap)' : ''}${changed.length ? `; ${changed.join(', ')}` : ''}${held}${r.samples ? `, ${r.samples} sample(s) per case` : ''} (~$${r.cost_usd.toFixed(2)})`;
+      return `- ${lit(shownPath(r.target), 200)}: visible ${score(r.base)} → ${score(r.result)}${r.dropped ? ', **lower**' : ''}${r.incomplete ? ', incomplete (cost cap)' : ''}${changed.length ? `; ${changed.join(', ')}` : ''}${held}${r.samples ? `, ${r.samples} sample(s) per case` : ''} (~$${r.cost_usd.toFixed(2)})`;
     }),
   ];
 }

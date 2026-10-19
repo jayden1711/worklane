@@ -17,10 +17,11 @@
 // the state is never written in place: a new copy (0660) is renamed over it. No subdirectory either: one made by one
 // user would follow that user's umask and could shut the others out.
 import { createHash, randomBytes } from 'node:crypto';
-import { chmodSync, linkSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { linkSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { tryLock, type Lock } from '../locks.js';
 import { slotsDir } from '../os/index.js';
+import { writeSlotFile } from '../slot-file.js';
 
 /** How long take() waits out a pause or an exhausted budget before refusing (the caller sees GitHub's own kind of error). */
 export const DEFAULT_MAX_WAIT_MS = 10_000;
@@ -233,15 +234,7 @@ export class GitHubBudget {
       const s = this.read(now);
       const out = fn(s, now);
       mkdirSync(this.dir, { recursive: true });
-      const tmp = `${this.file}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`;
-      try {
-        writeFileSync(tmp, JSON.stringify(s));
-        chmodSync(tmp, 0o660);
-        renameSync(tmp, this.file);
-      } catch (e) {
-        rmSync(tmp, { force: true });
-        throw e;
-      }
+      writeSlotFile(this.file, JSON.stringify(s), { mode: 0o660, exactMode: true });
       return out;
     } catch {
       return null;

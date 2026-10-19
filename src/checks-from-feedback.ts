@@ -14,6 +14,7 @@
 import { createHash } from 'node:crypto';
 import { parse as parseYaml } from 'yaml';
 import { CORRECTION_KINDS, correctionsFromEvents, correctionWords, type CorrectionKind } from './corrections.js';
+import { shownPath, shownPaths } from './path-text.js';
 
 type Ev = { id?: number; ts: string; type: string; payload: unknown };
 
@@ -257,13 +258,13 @@ const under = (dir: string, p: string) => p.startsWith(`${dir}/`);
 export function checkDraft(mode: CheckMode, files: { path: string; status: string; content: string }[]): { ok: true } | { ok: false; why: string } {
   if (!files.length) return { ok: false, why: 'the run left no files' };
   const removed = files.filter((f) => f.status.startsWith('D'));
-  if (removed.length) return { ok: false, why: `a check proposal only adds or edits files; it removed ${removed.map((f) => f.path).join(', ')}` };
+  if (removed.length) return { ok: false, why: `a check proposal only adds or edits files; it removed ${shownPaths(removed.map((f) => f.path))}` };
   if (mode.kind === 'test') {
     const outside = files.filter((f) => !isTestFile(f.path));
-    return outside.length ? { ok: false, why: `only test files may change; it changed ${outside.map((f) => f.path).join(', ')}` } : { ok: true };
+    return outside.length ? { ok: false, why: `only test files may change; it changed ${shownPaths(outside.map((f) => f.path))}` } : { ok: true };
   }
   const outside = files.filter((f) => !under(mode.ruleDir, f.path) && !under(mode.testDir, f.path) && !(mode.addTestDir && f.path === mode.sgconfig));
-  if (outside.length) return { ok: false, why: `only ${mode.ruleDir}/ and ${mode.testDir}/ may change; it changed ${outside.map((f) => f.path).join(', ')}` };
+  if (outside.length) return { ok: false, why: `only ${mode.ruleDir}/ and ${mode.testDir}/ may change; it changed ${shownPaths(outside.map((f) => f.path))}` };
   const yamlOf = (f: { path: string; content: string }) => {
     try {
       return (parseYaml(f.content) ?? {}) as Record<string, unknown>;
@@ -274,7 +275,7 @@ export function checkDraft(mode: CheckMode, files: { path: string; status: strin
   const rules = files.filter((f) => under(mode.ruleDir, f.path) && /\.ya?ml$/.test(f.path)).map((f) => ({ f, y: yamlOf(f) }));
   const bad = rules.find((r) => !r.y || typeof r.y.id !== 'string' || typeof r.y.language !== 'string' || !r.y.rule || typeof r.y.rule !== 'object' || typeof r.y.message !== 'string');
   if (!rules.length) return { ok: false, why: `no rule YAML in ${mode.ruleDir}/` };
-  if (bad) return { ok: false, why: `${bad.f.path} isn't an ast-grep rule (it needs id, language, rule and message)` };
+  if (bad) return { ok: false, why: `${shownPath(bad.f.path)} isn't an ast-grep rule (it needs id, language, rule and message)` };
   const ids = new Set(rules.map((r) => r.y!.id as string));
   const tests = files.filter((f) => under(mode.testDir, f.path) && /\.ya?ml$/.test(f.path)).map((f) => yamlOf(f));
   const cases = (v: unknown) => Array.isArray(v) && v.length > 0 && v.every((x) => typeof x === 'string' && x.trim());

@@ -50,7 +50,8 @@ test('per credential: what is left and when it resets per resource, the back-off
   await takes(busy, 'backlog', 1, 'graphql');
   await takes(busy, 'updates', 1);
   const limited = budgetFor('ghp_secret-token-limited', dir);
-  window(limited, 'core', 10, at(600));
+  const resetLimited = at(600);
+  window(limited, 'core', 10, resetLimited);
   await takes(limited, 'backlog', 4);
   const before = Date.now();
   limited.pause('secondary_rate_limited', 120);
@@ -64,7 +65,7 @@ test('per credential: what is left and when it resets per resource, the back-off
   assert.deepEqual(first!.backoff?.kind, 'secondary_rate_limited');
   const until = Date.parse(first!.backoff!.until);
   assert.ok(until >= before + 119_000 && until <= Date.now() + 121_000, `back-off until ${first!.backoff!.until}`);
-  assert.deepEqual(first!.resources, [{ resource: 'core', limit: 5000, remaining: 6, resetAt: new Date(at(600) * 1000).toISOString() }]);
+  assert.deepEqual(first!.resources, [{ resource: 'core', limit: 5000, remaining: 6, resetAt: new Date(resetLimited * 1000).toISOString() }]);
   assert.deepEqual(first!.top, [{ consumer: 'backlog', calls: 4 }]);
   assert.equal(first!.calls, 4);
   // The other: each resource, and its consumers over every resource, most first.

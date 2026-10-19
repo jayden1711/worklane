@@ -7,10 +7,11 @@
 //   <dir>/full-run.lock      at most one full test run on the machine
 //   <dir>/STOP               emergency stop: while it exists, every agent halts and no new one starts
 // A lock file holds {pid, owner, acquiredAt}; a dead pid means the slot is free.
-import { mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tryLock, type Lock, type LockInfo } from './locks.js';
 import { pidAlive, slotsConfigPath, slotsDir } from './os/index.js';
+import { writeSlotFile } from './slot-file.js';
 import { drainHoldLine, updateDrain } from './update-drain.js';
 
 export const DEFAULT_MAX_AGENTS = 2;
@@ -122,9 +123,7 @@ export function emergencyStop(dir = slotsDir()): EmergencyStop | null {
 /** Halt every agent on the machine, across instances and harnesses, until resumed. */
 export function stopAll(by: string, reason: string, dir = slotsDir()): void {
   mkdirSync(dir, { recursive: true });
-  const tmp = join(dir, `.STOP.${process.pid}.tmp`);
-  writeFileSync(tmp, JSON.stringify({ by, at: new Date().toISOString(), reason }));
-  renameSync(tmp, join(dir, 'STOP'));
+  writeSlotFile(join(dir, 'STOP'), JSON.stringify({ by, at: new Date().toISOString(), reason }));
 }
 
 export function resumeAll(dir = slotsDir()): boolean {
