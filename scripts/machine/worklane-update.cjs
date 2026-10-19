@@ -440,6 +440,28 @@ function checkPinOf(name, own, rules) {
   return hasOwn(rules, name) ? { app_id: rules[name] } : null;
 }
 
+/**
+ * #727: how GitHub refused a read, as the engine's classifyGitHubError tells it: 'denied' for a 404 or a 403 that isn't
+ * a rate limit (no permission), else 'transient' (a 5xx, a primary or secondary rate limit, anything else).
+ */
+function refusalKind(status, header, message) {
+  if (status === 404) return 'denied';
+  if (status !== 403) return 'transient';
+  const msg = String(message || '').toLowerCase();
+  if (msg.includes('secondary rate limit') || msg.includes('api rate limit exceeded') || header('x-ratelimit-remaining') === '0') return 'transient';
+  return 'denied';
+}
+
+/**
+ * #727: a read whose kind of refusal matters: { json } when GitHub answered, else { refused: refusalKind }. Deps with no
+ * fetchRead (tests' stand-ins) have only fetchJson, whose null is any refusal: read as 'transient', so it waits.
+ */
+async function readOrRefusal(deps, url) {
+  if (deps.fetchRead) return deps.fetchRead(url);
+  const json = await deps.fetchJson(url);
+  return json === null || json === undefined ? { refused: 'transient' } : { json };
+}
+
 /** Each check's App as the branch's classic protection (get a branch) and its rulesets name it; -1 or none: any source. */
 function ruleApps(branch, rules) {
   const named = [];
@@ -507,10 +529,16 @@ async function checkPins(deps, cfg, api) {
   let rulesUnread = false;
   if (required.some((n) => !hasOwn(own, n) && !hasOwn(ENGINE_CHECK_SOURCES, n))) {
     const b = encodeURIComponent(cfg.branch || 'main');
-    const branch = await deps.fetchJson(`${api}/branches/${b}`);
-    const ruleset = await deps.fetchJson(`${api}/rules/branches/${b}`);
-    rulesUnread = !branch || !Array.isArray(ruleset);
-    rules = ruleApps(branch, ruleset);
+    const branch = await readOrRefusal(deps, `${api}/branches/${b}`);
+    const ruleset = await readOrRefusal(deps, `${api}/rules/branches/${b}`);
+    const branchRead = !!branch.json && typeof branch.json === 'object';
+    const rulesRead = Array.isArray(ruleset.json);
+    rules = ruleApps(branchRead ? branch.json : null, rulesRead ? ruleset.json : []);
+    // WHY (the owner's decision (a), 2026-10-19): a read refused for permission or 404 means "no App named" only while
+    // no required check is pinned (by updates.json, the engine's own sources or what was read), so a bare-names install
+    // installs as on main. A 5xx or a rate limit, or any refusal with a required check pinned, waits.
+    const deniedOnly = (branchRead || branch.refused === 'denied') && (rulesRead || ruleset.refused === 'denied');
+    rulesUnread = !(branchRead && rulesRead) && !(deniedOnly && !required.some((n) => checkPinOf(n, own, rules)));
   }
   // Unread rules: whether a required check is pinned is unknown, so it is taken as pinned (the commit waits anyway).
   if (rulesUnread) return { forSha: async () => ({ noAnswer: "the branch's rules" }), rulesUnread, pinned: true };
@@ -2200,6 +2228,18 @@ function realDeps(print = (line) => process.stdout.write(`${line}\n`), files = {
     fetchJson: async (url) => {
       const r = await fetch(url, { headers: { accept: 'application/vnd.github+json', 'user-agent': 'worklane-update' } });
       return r.ok ? r.json() : null;
+    },
+    // #727: the branch rules' reads, where a permission refusal differs from a transient one (readOrRefusal).
+    fetchRead: async (url) => {
+      const r = await fetch(url, { headers: { accept: 'application/vnd.github+json', 'user-agent': 'worklane-update' } });
+      if (r.ok) return { json: await r.json() };
+      let message = '';
+      try {
+        message = (await r.json()).message;
+      } catch {
+        // WHY: no JSON body; the status and headers still tell the refusal
+      }
+      return { refused: refusalKind(r.status, (h) => r.headers.get(h), message) };
     },
     slots: () => {
       let names = [];

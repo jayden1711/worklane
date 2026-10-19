@@ -379,3 +379,44 @@ test('the installed updater always judges by source: realDeps turns it on', () =
   const dir = mkdtempSync(join(tmpdir(), 'update-pins-'));
   assert.equal(u.realDeps(() => undefined, { log: join(dir, 'l'), state: join(dir, 's'), held: join(dir, 'h'), drain: join(dir, 'd') }).pinChecks, true);
 });
+
+test("the owner's decision (a): a branch read refused for permission or 404 is 'no App named' while no required check is pinned (installs, as main); a 5xx or rate limit waits; with a check pinned, it waits", async () => {
+  // Through realDeps' own reads, over a stand-in GitHub (globalThis.fetch): `ci` and `lint` pass from App 2222.
+  const dir = mkdtempSync(join(tmpdir(), 'update-pins-'));
+  const real = u.realDeps(() => undefined, { log: join(dir, 'l'), state: join(dir, 's'), held: join(dir, 'h'), drain: join(dir, 'd') }) as Deps;
+  const json = (body: unknown, status = 200, headers: Record<string, string> = {}) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json', ...headers } });
+  const refusals: [string, () => Response, boolean][] = [
+    ['a permission 403', () => json({ message: 'Resource not accessible by integration' }, 403), true],
+    ['a 404', () => json({ message: 'Not Found' }, 404), true],
+    ['a 500', () => json({ message: 'boom' }, 500), false],
+    ['a rate-limited 403', () => json({ message: 'API rate limit exceeded for 203.0.113.7.' }, 403, { 'x-ratelimit-remaining': '0', 'x-ratelimit-reset': '4102444800' }), false],
+  ];
+  // `rulesToo`: the rules read is refused the same way (a token that can read neither); else it answers none.
+  const verdict = async (refusal: () => Response, cfg: Cfg, rulesToo: boolean) => {
+    const was = globalThis.fetch;
+    globalThis.fetch = (async (url: string) => {
+      if (url.startsWith(`${API}/commits/${SHA}/check-runs`)) return json({ total_count: 2, check_runs: [checkRun({ name: 'ci', suite: 2, app: 2222 }, 1), checkRun({ name: 'lint', suite: 2, app: 2222 }, 2)] });
+      if (url.startsWith(`${API}/commits/${SHA}/status`)) return json({ state: 'success', total_count: 0, statuses: [] });
+      if (url.startsWith(`${API}/actions/runs?head_sha=${SHA}`)) return json({ workflow_runs: [] });
+      if (url === `${API}/branches/main`) return refusal();
+      if (url === `${API}/rules/branches/main`) return rulesToo ? refusal() : json([]);
+      return json({ message: 'Not Found' }, 404);
+    }) as typeof fetch;
+    try {
+      let clock = Date.parse('2026-10-18T12:00:00Z');
+      const r = await u.chooseCommit({ ...real, now: () => clock, sleep: async (ms: number) => void (clock += ms) }, cfg, API, [{ sha: SHA, date: '2026-10-18T11:59:00Z' }], null);
+      return r.chosen ? 'installs' : r.wait ? 'waits' : `refused: ${r.skipped[0]?.reason ?? r.reason ?? ''}`;
+    } finally {
+      globalThis.fetch = was;
+    }
+  };
+  const bare: Cfg = { branch: 'main', required_checks: ['ci', 'lint'] };
+  const pinned: Cfg = { branch: 'main', required_checks: ['ci', 'lint'], required_check_sources: { ci: { app_id: 2222 } } };
+  for (const rulesToo of [false, true]) {
+    for (const [what, refusal, noApp] of refusals) {
+      const how = `${what}${rulesToo ? ', the rules read refused too' : ''}`;
+      assert.equal(await verdict(refusal, bare, rulesToo), noApp ? 'installs' : 'waits', `bare, ${how} (12148c19 waited on every refusal)`);
+      assert.equal(await verdict(refusal, pinned, rulesToo), 'waits', `a check pinned, ${how}: fail closed, as before`);
+    }
+  }
+});
