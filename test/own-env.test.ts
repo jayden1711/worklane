@@ -131,24 +131,30 @@ test('the types: an EnvSource and an OwnEnv are read only through get(), and a r
 // The backstop lint
 
 /**
- * The modules whose every environment read goes through src/os/own-env.ts (#786). Not yet here, each until the PR named
- * edits it no more: src/os/index.ts and src/os/system-paths.ts's testSlotsRefusal (#818), src/service.ts (#819),
- * src/hook.ts, src/guardrails/context.ts and src/mcp/connector.ts (#785), src/cli.ts (#743).
+ * The modules that never read process.env directly (#786); the lint sees process.env only, not a parameter read raw.
+ * Not yet here, each until the PR named edits it no more: src/os/index.ts (#818, stateDir), src/service.ts (#819),
+ * src/hook.ts, src/guardrails/context.ts and src/mcp/connector.ts (#785), src/cli.ts (#743, #769, #803, #836).
  */
 export const OWN_ENV_MODULES: readonly string[] = [
   'src/avatars.ts',
   'src/browser/run.ts',
+  'src/cli-agents.ts',
   'src/coordinator/browser.ts',
   'src/desktop.ts',
   'src/held-out.ts',
   'src/init.ts',
   'src/instance.ts',
   'src/managed-apps.ts',
+  'src/mcp/npm.ts',
   'src/os/own-env.ts',
   'src/os/system-paths.ts',
   'src/plugins/cli.ts',
+  'src/plugins/fetch.ts',
+  'src/runner.ts',
   'src/setup/app-manifest.ts',
+  'src/skilleval.ts',
   'src/spend-gate.ts',
+  'src/testrun/host.ts',
   'src/tool-path.ts',
 ];
 

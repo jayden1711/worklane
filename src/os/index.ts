@@ -859,9 +859,10 @@ export function commandBash(): string {
   let found: string | null = null;
   if (process.platform === 'win32') {
     const git = which('git');
+    const env = ownEnv();
     const candidates = [
-      process.env.CLAUDE_CODE_GIT_BASH_PATH,
-      join(process.env.ProgramFiles ?? 'C:\\Program Files', 'Git', 'bin', 'bash.exe'),
+      env.get('CLAUDE_CODE_GIT_BASH_PATH'),
+      join(env.get('ProgramFiles') ?? 'C:\\Program Files', 'Git', 'bin', 'bash.exe'),
       // ...\Git\cmd\git.exe -> ...\Git\bin\bash.exe
       git ? join(dirname(dirname(git)), 'bin', 'bash.exe') : undefined,
     ];
