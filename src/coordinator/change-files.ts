@@ -434,17 +434,21 @@ export function sizeFiles(cwd: string, base: string, head: string, o: { renames?
 /**
  * The text of each of `paths` that is a file in `rev`'s tree, keyed by path; a path that isn't there is left out. For
  * the merge decision's check for a weakened test, lint or guard (src/merge-policy-weakening.ts), which compares a
- * changed file before and after. Paths are from the top of the repo. Throws when git fails.
+ * changed file before and after. Paths are from the top of the repo. A blob over `maxBytes` isn't read: its path is
+ * in `tooBig` with its size. Throws when git fails.
  */
-export function filesAt(cwd: string, rev: string, paths: string[]): Map<string, string> {
-  const out = new Map<string, string>();
-  if (!paths.length) return out;
-  // -z: "mode SP type SP object TAB path NUL" for each path in the tree.
-  for (const rec of fields(must(runBytes(cwd, ['ls-tree', '-z', '--full-tree', rev, '--', ...paths])))) {
+export function filesAt(cwd: string, rev: string, paths: string[], maxBytes = Infinity): { texts: Map<string, string>; tooBig: Map<string, number> } {
+  const texts = new Map<string, string>();
+  const tooBig = new Map<string, number>();
+  if (!paths.length) return { texts, tooBig };
+  // -z -l: "mode SP type SP object SP+ size TAB path NUL" for each path in the tree.
+  for (const rec of fields(must(runBytes(cwd, ['ls-tree', '-z', '-l', '--full-tree', rev, '--', ...paths])))) {
     const tab = rec.indexOf(9);
-    const [, type, sha] = rec.subarray(0, Math.max(tab, 0)).toString('latin1').split(' ');
+    const [, type, sha, size] = rec.subarray(0, Math.max(tab, 0)).toString('latin1').split(/ +/);
     if (tab === -1 || type !== 'blob' || !sha) continue;
-    out.set(nameOf(rec.subarray(tab + 1)), must(run(cwd, ['cat-file', 'blob', sha])));
+    const path = nameOf(rec.subarray(tab + 1));
+    if (Number(size) > maxBytes) tooBig.set(path, Number(size));
+    else texts.set(path, must(run(cwd, ['cat-file', 'blob', sha])));
   }
-  return out;
+  return { texts, tooBig };
 }

@@ -103,6 +103,11 @@ export const CHECK_TABLES: readonly CheckTable[] = [
   { path: 'src/merge-policy-weakening.ts', table: 'NOT_A_CHECK', kind: 'never-grow' },
   { path: 'src/merge-policy-weakening.ts', table: 'LINT_TESTS', kind: 'never-shrink' },
   { path: 'src/merge-policy-weakening.ts', table: 'SIZE_CAP', kind: 'never-shrink' },
+  { path: 'src/merge-policy-weakening.ts', table: 'PARSE_BUDGET', kind: 'never-shrink' },
+  { path: 'src/merge-policy-weakening.ts', table: 'MAX_DEPTH', kind: 'never-shrink' },
+  { path: 'src/merge-policy-weakening.ts', table: 'MAX_KEY', kind: 'never-shrink' },
+  { path: 'src/merge-policy-weakening.ts', table: 'WORK_PER_CHAR', kind: 'never-shrink' },
+  { path: 'src/merge-policy-weakening.ts', table: 'NOT_A_LINT', kind: 'never-grow' },
 ];
 
 /**
@@ -123,6 +128,8 @@ export const NOT_A_CHECK: readonly { path: string; table: string; why: string }[
  */
 export const LINT_TESTS: readonly string[] = [
   'test/pipefail.test.ts',
+  'test/brand.test.ts',
+  'test/testrun-gpu.test.ts',
   'test/boundaries.test.ts',
   'test/web-key-in-url.test.ts',
   'test/self-hosted-guard.test.ts',
@@ -132,6 +139,13 @@ export const LINT_TESTS: readonly string[] = [
   'test/change-files-renames.test.ts',
   'test/slot-dir-writes.test.ts',
   'test/slot-path.test.ts',
+  'test/claude-credential-guard.test.ts',
+  'test/download-retry.test.ts',
+  'test/owner-terminal-removed.test.ts',
+  'test/testrun-measure.test.ts',
+  'test/update-helpers.test.ts',
+  'test/web-buttons.test.ts',
+  'test/superfan.test.ts',
 ];
 
 /**
@@ -140,7 +154,25 @@ export const LINT_TESTS: readonly string[] = [
  * LINT_TESTS).
  */
 export const lintShaped = (text: string): boolean =>
-  /\b(?:readdir|opendir|glob)(?:Sync)?\s*\(|\bwalk\w*\s*\(/.test(text) && /\b(?:repoRoot|repoDir)\b/.test(text) && /['"`/](?:src|scripts|web|test)['"`/]/.test(text);
+  /\b(?:readdir|opendir|glob)(?:Sync)?\s*\(|\bwalk\w*\s*\(/.test(text) && /\b(?:repoRoot|repoDir|rootDir)\b|import\.meta\.url|__dirname|process\.cwd\(\)/.test(text) && /['"`/](?:src|scripts|web|test)['"`/]/.test(text);
+
+/**
+ * Tests that list `src/` or `scripts/` files but aren't held as lint tests, each with why: a big suite of ordinary
+ * tests with one source check among them (that check's regex lines still hold: the file reads as lintShaped), or one
+ * locked as a test of the harness controls. test/merge-policy.test.ts fails on a test that lists them and is in
+ * neither this list nor LINT_TESTS; adding here takes one out of that test, so this list never grows without the owner.
+ */
+export const NOT_A_LINT: readonly { path: string; why: string }[] = [
+  { path: 'test/avatars.test.ts', why: 'the avatar suite; one test walks web/src (its regex lines hold, lintShaped)' },
+  { path: 'test/bench.test.ts', why: 'the bench suite; one test reads scripts/bench for a word (its regex lines hold, lintShaped)' },
+  { path: 'test/feature-map.test.ts', why: "the feature map's suite: it lists web/src/pages to match the map, no rule over code" },
+  { path: 'test/merge-policy.test.ts', why: 'this hold\'s own tests: fixtures name readdir in strings; locked (the tests of the harness controls)' },
+  { path: 'test/package-files.test.ts', why: 'locked (the tests of the harness controls)' },
+  { path: 'test/push-check.test.ts', why: 'locked (the tests of the harness controls)' },
+  { path: 'test/push-gate-hook.test.ts', why: 'locked (the tests of the harness controls)' },
+  { path: 'test/review.test.ts', why: 'locked (the tests of the harness controls); its lock-scope lint tables are registered' },
+  { path: 'test/web-render.test.ts', why: 'the web render suite; one test walks web/src (its regex lines hold, lintShaped)' },
+];
 
 /** The words in a table's name that say it allows, exempts, skips or rules something. */
 const CHECK_TABLE_NAME = /ALLOW|EXEMPT|EXCEPT|SKIP|OUTSIDE|IGNORE|KNOWN|REVIEWED|PERMIT|BASELINE|LEGACY|WAIVE|NOT_YET|ONLY|GOOD|BAD|RULES|WORDS|PATTERNS|DENY|BANNED|FORBIDDEN|NEVER|GUARD/;
@@ -199,6 +231,23 @@ export const GUARD_FILES: readonly string[] = [
   '**/.mypy.ini',
   '**/.stylelintrc*',
   '**/.markdownlint*',
+  // Shared CI steps, more test runners and linters, who must review, and the project lints of the PR-gate tier.
+  '.github/actions/**',
+  '.github/CODEOWNERS',
+  'CODEOWNERS',
+  'docs/CODEOWNERS',
+  '**/vite.config.*',
+  '**/vitest.config.*',
+  '**/cypress.config.*',
+  '**/.lintstagedrc*',
+  '**/lint-staged.config.*',
+  '**/.semgrep.y*ml',
+  '.semgrep/**',
+  '**/.rubocop.yml',
+  '**/deno.json*',
+  `${BRAND.configDir}/checks/**`,
+  // Which test files a PR's CI runs (the engine's).
+  'scripts/ci/**',
   'src/merge-policy*',
   'src/coordinator/merge-flow*',
   'src/coordinator/change-files.ts',
@@ -229,16 +278,23 @@ export const TEST_PATHS: readonly string[] = ['test/**', 'tests/**', 'spec/**', 
 
 /** Inline marks that turn a lint or type check off for a line or a file. */
 /**
- * The most characters of a file the hold parses. Over it, the file holds unread (fail closed), so a huge test file
- * can't keep the merge decision busy on every poll. Measured: the parse of a file at the cap takes well under a second.
+ * The most characters of a file the hold reads. Over it, the file holds unread (fail closed): filesAt doesn't even read
+ * its blob. Under it, the parse is bounded by steps (WORK_PER_CHAR), nesting (MAX_DEPTH) and key length (MAX_KEY), and
+ * a file past any of them holds unread too.
  */
 export const SIZE_CAP = 500_000;
+/** The most characters the hold parses across one change's test files; past it, the rest hold unread. */
+export const PARSE_BUDGET = 2_000_000;
 
 export const SUPPRESSION: readonly string[] = [
   '@ts-ignore', '@ts-expect-error', '@ts-nocheck', 'eslint-disable', 'biome-ignore', 'istanbul ignore', 'c8 ignore', 'v8 ignore',
   'noqa', 'type: ignore', 'pragma: no cover', 'nosec', 'NOLINT', 'gitleaks:allow', 'nolint',
   'pylint: disable', 'mypy: ignore', 'rubocop:disable', 'phpcs:ignore', 'shellcheck disable', 'deno-lint-ignore', '#[allow(',
+  '#![allow(', '@SuppressWarnings', 'nosemgrep', 'NOSONAR', 'stylelint-disable', 'tslint:disable', 'oxlint-disable', 'pyright: ignore',
+  'yamllint disable', 'hadolint ignore',
 ];
+/** ESLint's inline config that turns a rule off: `/* eslint no-eval: "off" *\/`, `/* eslint eqeqeq: 0 *\/`. */
+const ESLINT_OFF = String.raw`\beslint\s+[\w@/-]+\s*:\s*["']?(?:off|0)\b`;
 
 /** Globs that name the engine's own source: they hold only in the engine's repo (as review.ts engineSourceGlob). */
 const ENGINE_ONLY = (glob: string) => engineSourceGlob(glob);
@@ -269,6 +325,8 @@ interface Scanned {
   comment: Uint8Array;
   /** How many regex literals it has. */
   regexes: number;
+  /** Its brackets' matches, once found (pairsOf). */
+  pairs?: Pairs;
   /** False when a string, template, regex or comment never ends. */
   ok: boolean;
 }
@@ -370,22 +428,50 @@ function scan(src: string): Scanned {
 
 const OPEN: Record<string, string> = { '(': ')', '[': ']', '{': '}' };
 
-/** The index of the bracket that closes the one at `at` (in the scanned code), or -1. */
-function closeOf(code: string, at: number): number {
-  const stack: string[] = [];
-  for (let i = at; i < code.length; i++) {
+/**
+ * Work done parsing, in steps (characters read, brackets jumped): every loop here adds to it. testFacts stops at a
+ * budget per file and holds the file unread past it, so no file under SIZE_CAP can keep the merge decision busy.
+ */
+let work = 0;
+
+/** Each bracket's match, found in one pass per text: the closer of an opener (or -1), and each position's innermost opener. */
+interface Pairs {
+  close: Int32Array;
+  inner: Int32Array;
+  maxDepth: number;
+}
+// Kept on the scanned text itself: keyed by the string, every lookup would compare a long text by its content.
+function pairsOf(s: Scanned): Pairs {
+  if (s.pairs) return s.pairs;
+  const { code } = s;
+  const close = new Int32Array(code.length).fill(-1);
+  const inner = new Int32Array(code.length + 1).fill(-1);
+  const stack: number[] = [];
+  let maxDepth = 0;
+  for (let i = 0; i < code.length; i++) {
     const c = code[i]!;
-    if (OPEN[c]) stack.push(OPEN[c]);
-    else if (c === ')' || c === ']' || c === '}') {
-      if (stack.pop() !== c) return -1;
-      if (!stack.length) return i;
+    inner[i] = stack.length ? stack[stack.length - 1]! : -1;
+    if (OPEN[c]) {
+      stack.push(i);
+      if (stack.length > maxDepth) maxDepth = stack.length;
+    } else if (c === ')' || c === ']' || c === '}') {
+      const o = stack.pop();
+      if (o !== undefined && OPEN[code[o]!] === c) close[o] = i;
+      else if (o !== undefined) stack.push(o);
     }
   }
-  return -1;
+  work += code.length;
+  return (s.pairs = { close, inner, maxDepth });
+}
+
+/** The index of the bracket that closes the one at `at` (in the scanned code), or -1. */
+function closeOf(s: Scanned, at: number): number {
+  return OPEN[s.code[at] ?? ''] ? pairsOf(s).close[at]! : -1;
 }
 
 /** Text compared as it reads: comments out, whitespace collapsed, none around punctuation, no trailing comma. */
 function textOf(s: Scanned, from: number, to: number): string {
+  work += Math.max(0, to - from);
   let out = '';
   for (let i = from; i < to; i++) if (!s.comment[i]) out += s.src[i];
   return out
@@ -395,29 +481,33 @@ function textOf(s: Scanned, from: number, to: number): string {
     .trim();
 }
 
-/** Where code at depth 0 next has one of `stops`, from `from` up to `to` (or `to`). */
-function depthZero(code: string, from: number, to: number, stops: string): number {
-  let depth = 0;
+/** Where code at depth 0 next has one of `stops`, from `from` up to `to` (or `to`): a bracketed span is jumped. */
+function depthZero(s: Scanned, from: number, to: number, stops: string): number {
+  const { code } = s;
+  const { close } = pairsOf(s);
   for (let i = from; i < to; i++) {
+    work++;
     const c = code[i]!;
-    if (OPEN[c]) depth++;
-    else if (c === ')' || c === ']' || c === '}') {
-      if (depth === 0) return i;
-      depth--;
-    } else if (depth === 0 && stops.includes(c)) return i;
+    if (OPEN[c]) {
+      const j = close[i]!;
+      if (j === -1 || j >= to) return to;
+      i = j;
+    } else if (c === ')' || c === ']' || c === '}') return i;
+    else if (stops.includes(c)) return i;
   }
   return to;
 }
 
 /** A call's chain after its `)`: `.toBe(1)`, `.not.toThrow()`, `.to.be.true`. Returns where the chain ends. */
-function chainEnd(code: string, at: number): number {
+function chainEnd(s: Scanned, at: number): number {
+  const { code } = s;
   let end = at;
   for (;;) {
     const m = /^\s*(?:\.\s*[A-Za-z_$][\w$]*\s*)+/.exec(code.slice(end, end + 400));
     if (!m) return end;
     const after = end + m[0].length;
     if (code[after] === '(') {
-      const close = closeOf(code, after);
+      const close = closeOf(s,after);
       if (close === -1) return -1;
       end = close + 1;
     } else return after;
@@ -431,46 +521,79 @@ const EXIT = /(?<![\w$.])(?:return|continue|break|throw)(?![\w$])/g;
 /** How many characters of a header, a lead or a first argument go into an assertion's key. */
 const HEAD = 400;
 /** A skip or todo called in a test's body: `t.skip()`, `t.todo('x')`, `this.skip()`, `context.skip()`. */
-const BODY_SKIP = /(?<![\w$.])[A-Za-z_$][\w$]*\s*\.\s*(?:skip|todo)\s*\(/g;
+const BODY_SKIP = /(?<![\w$.])([A-Za-z_$][\w$]*)\s*\.\s*(?:skip|todo)\s*\(/g;
 /** A block or call header that makes what's inside it conditional: an `if`, a loop, a `try`, `&&`, `||`, `?`. */
 const CONTROL = /(?<![\w$.])(?:if|else|for|while|do|switch|case|try|catch|finally)(?![\w$])|&&|\|\||\?\?|\?/;
 
 /** Local functions whose body asserts: a call to one counts as an assertion. */
-function assertingFunctions(s: Scanned, asserts: RegExp): Set<string> {
+function assertingFunctions(s: Scanned, assertAt: number[]): Set<string> {
   const out = new Set<string>();
   const decl = /(?<![\w$.])(?:function\s*\*?\s*([A-Za-z_$][\w$]*)\s*\(|(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?(?:function\b[^(]*\(|\(|[A-Za-z_$][\w$]*\s*=>))/g;
   const { code } = s;
   for (const m of code.matchAll(decl)) {
+    work += 8;
     const name = m[1] ?? m[2]!;
     let at = m.index + m[0].length;
     // Past the parameters, then the body: a block, or an arrow's expression up to its statement's end.
     if (code[at - 1] === '(') {
-      const close = closeOf(code, at - 1);
+      const close = closeOf(s,at - 1);
       if (close === -1) continue;
       at = close + 1;
     }
     const arrow = /^[^{;]*?=>\s*/.exec(code.slice(at, at + 400));
     if (arrow) at += arrow[0].length;
     const open = arrow && code[at] !== '{' ? -1 : code.indexOf('{', at);
-    const end = open === -1 ? depthZero(code, at, code.length, ';,') : closeOf(code, open);
-    if (end !== -1 && new RegExp(asserts.source).test(code.slice(at, Math.min(end, at + 20_000)))) out.add(name);
+    const end = open === -1 ? depthZero(s,at, code.length, ';,') : closeOf(s,open);
+    // Whether an assertion starts inside the body: a binary search of their sorted starts, not a scan of the body.
+    if (end !== -1 && firstAtOrAfter(assertAt, at) < assertAt.length && assertAt[firstAtOrAfter(assertAt, at)]! < end) out.add(name);
   }
   return out;
+}
+
+/** The index of the first of the sorted `xs` at or after `at`. */
+function firstAtOrAfter(xs: readonly number[], at: number): number {
+  let lo = 0;
+  let hi = xs.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (xs[mid]! < at) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo;
 }
 
 interface TestFacts {
   /** Each assertion: where it sits and its text. */
   assertions: string[];
-  /** Each test: its title, and how it runs (its .skip/.only/.todo and its options, and those of the tests around it). */
-  tests: { title: string; runs: string }[];
+  /** Each test: its title, how it runs (its .skip/.only/.todo, its options, what is around it), and where its call is. */
+  tests: { title: string; runs: string; from: number; to: number }[];
   /** The line of each skip, todo or only mark outside any test's call (a `t.skip()` in a body, an options const). */
   looseSkips: string[];
-  /** What the assertions call: each import from an assertion module, and each line that declares, assigns or patches one of their names. */
-  bindings: string[];
+  /** Each name an assertion or a test call is made by, and what binds it (`assert` from `node:assert/strict:default`). */
+  imports: Map<string, string>;
+  /** Each line that declares, assigns or patches one of those names (a shadow, `assert.equal = () => {}`). */
+  rebinds: string[];
+  /** The rows of each literal table a test loops over (`for (const c of CASES)`), by its name. */
+  caseTables: Map<string, string[]>;
   /** How many times the file exits or aborts the process (`process.exit(`, `process.exitCode =`, ...). */
   aborts: number;
+  /** The names it declares (`const x`, `function f`), and every word its code uses (strings and comments out). */
+  locals: Set<string>;
+  words: Set<string>;
+  /** Why it couldn't be read, when ok is false. */
+  why?: string;
   ok: boolean;
 }
+
+/** The deepest bracket nesting a test file may have; past it, it holds unread (no real test is this deep). */
+const MAX_DEPTH = 100;
+/** The longest a test's or an assertion's context may read, in characters; past it, the file holds unread. */
+const MAX_KEY = 8_000;
+/** The parse steps a file may take, per character of it plus a floor; past it, the file holds unread. */
+const WORK_PER_CHAR = 40;
+const WORK_FLOOR = 2_000_000;
+/** The names a test call is made by. */
+const TEST_NAMES = /^(?:test|it|describe|suite|context|before|after|beforeEach|afterEach|beforeAll|afterAll)$/;
 
 /** Modules whose every import is an assertion; and those (test runners) where only `expect`, `assert` and `should` are. */
 const ASSERT_MODULE = /^(?:node:)?assert(?:\/strict)?$|^(?:chai|power-assert|uvu\/assert|should|expect)$/;
@@ -482,223 +605,316 @@ const ABORT = /\bprocess\s*\.\s*(?:exit|abort|reallyExit)\s*\(|\bprocess\s*\.\s*
  * the lines that bind them: imports from assertion modules (also `require`), and any line that declares, assigns or
  * patches one of those names or `assert`/`expect` themselves.
  */
-function assertionNames(s: Scanned): { roots: Set<string>; bindings: string[] } {
+function assertionNames(s: Scanned): { roots: Set<string>; imports: Map<string, string>; rebinds: string[] } {
   const { src, code } = s;
   const roots = new Set(['assert', 'expect']);
-  const bindings: string[] = [];
+  // What binds each assertion or test-call name: `module:imported name`. A name added is new, not a change.
+  const imports = new Map<string, string>();
   // Imports: read from the source (a specifier is a string), only where the statement itself is code.
   for (const m of src.matchAll(/(?<![\w$.])import\s+(?!type\b)([^'";]+?)\s+from\s*(['"])([^'"\n]+)\2|(?<![\w$.])(?:const|let|var)\s+([^=;]+?)\s*=\s*require\s*\(\s*(['"])([^'"\n]+)\5\s*\)/g)) {
+    work += m[0].length;
     if (code[m.index] !== src[m.index] || s.comment[m.index]) continue;
     const spec = m[3] ?? m[6]!;
     const clause = (m[1] ?? m[4]!).trim();
     const all = ASSERT_MODULE.test(spec);
-    if (!all && !RUNNER_MODULE.test(spec)) continue;
-    const names: string[] = [];
+    const runner = RUNNER_MODULE.test(spec);
     const named = /\{([^}]*)\}/.exec(clause);
     for (const part of (named?.[1] ?? '').split(',')) {
       const p = /^\s*(?:type\s+)?([\w$]+)(?:\s*(?:as|:)\s*([\w$]+))?\s*$/.exec(part);
-      if (p && (all || /^(?:expect|assert|should)$/.test(p[1]!))) names.push(p[2] ?? p[1]!);
+      if (!p) continue;
+      const local = p[2] ?? p[1]!;
+      // A test-call name from any module (`import { skip as test } from 'node:test'`, or a swap to a local no-op).
+      if (TEST_NAMES.test(local) || all || (runner && /^(?:expect|assert|should)$/.test(p[1]!))) imports.set(local, `${spec}:${p[1]}`);
+      if (all || (runner && /^(?:expect|assert|should)$/.test(p[1]!))) roots.add(local);
     }
     const plain = clause.replace(/\{[^}]*\}/, '').replace(/\*\s*as\s+/, '').split(',').map((x) => x.trim()).filter((x) => /^[\w$]+$/.test(x));
-    if (all) names.push(...plain);
-    for (const n of names) roots.add(n);
-    if (names.length || all) bindings.push(textOf(s, m.index, m.index + m[0].length));
+    for (const n of plain) {
+      if (all) roots.add(n);
+      if (all || TEST_NAMES.test(n)) imports.set(n, `${spec}:default`);
+    }
   }
   // Destructured from an assertion: `const { equal, ok: isOk } = assert`.
   const rootRe = () => [...roots].map((r) => r.replace(/\$/g, '\\$')).join('|');
-  for (const m of code.matchAll(new RegExp(`(?<![\\w$.])(?:const|let|var)\\s*\\{([^}]*)\\}\\s*=\\s*(?:${rootRe()})(?![\\w$])`, 'g'))) {
+  for (const m of code.matchAll(new RegExp(`(?<![\\w$.])(?:const|let|var)\\s*\\{([^}]*)\\}\\s*=\\s*(${rootRe()})(?![\\w$])`, 'g'))) {
     for (const part of m[1]!.split(',')) {
       const p = /^\s*([\w$]+)(?:\s*:\s*([\w$]+))?\s*$/.exec(part);
-      if (p) roots.add(p[2] ?? p[1]!);
+      if (!p) continue;
+      roots.add(p[2] ?? p[1]!);
+      imports.set(p[2] ?? p[1]!, `${m[2]}.${p[1]}`);
     }
-    bindings.push(textOf(s, m.index, m.index + m[0].length));
   }
-  // Any line that declares, assigns or patches one of them: a shadow (`const assert = ...`), `assert.equal = () => {}`.
-  const names = rootRe();
-  const rebinds = new RegExp(
-    `(?<![\\w$.])(?:const|let|var|function|class)\\s+(?:${names})(?![\\w$])|(?<![\\w$.])(?:${names})(?:\\s*\\.\\s*[\\w$]+)*\\s*=(?![=>])|\\b(?:Object\\s*\\.\\s*(?:assign|defineProperty|setPrototypeOf)|mock\\s*\\.\\s*method|vi\\s*\\.\\s*spyOn|jest\\s*\\.\\s*spyOn|sinon\\s*\\.\\s*(?:stub|replace))\\s*\\(\\s*(?:${names})(?![\\w$])`,
+  // Any line that declares, assigns or patches one of them or a test-call name: a shadow (`const assert = ...`,
+  // `function test() {}`), `assert.equal = () => {}`.
+  // (A loop's variable, `for (const it of list)`, shadows nothing a test is made by outside the loop.)
+  const names = `${rootRe()}|test|it|describe|suite`;
+  const rebindRe = new RegExp(
+    `(?<![\\w$.])(?<!for\\s*\\(\\s*)(?:const|let|var|function|class)\\s+(?:${names})(?![\\w$])|(?<![\\w$.])(?:${names})(?:\\s*\\.\\s*[\\w$]+)*\\s*=(?![=>])|\\b(?:Object\\s*\\.\\s*(?:assign|defineProperty|setPrototypeOf)|mock\\s*\\.\\s*method|vi\\s*\\.\\s*spyOn|jest\\s*\\.\\s*spyOn|sinon\\s*\\.\\s*(?:stub|replace))\\s*\\(\\s*(?:${names})(?![\\w$])`,
     'g',
   );
-  for (const m of code.matchAll(rebinds)) bindings.push(lineAt(src, m.index));
-  return { roots, bindings };
+  const rebinds = [...code.matchAll(rebindRe)].map((m) => lineAt(src, m.index));
+  work += code.length;
+  return { roots, imports, rebinds };
 }
 
 /** The line of `src` that `at` is on, trimmed. */
 const lineAt = (src: string, at: number) => src.slice(src.lastIndexOf('\n', at - 1) + 1, (src.indexOf('\n', at) + 1 || src.length + 1) - 1).trim();
 
 /** The assertions, tests and skip marks of a JavaScript or TypeScript test file. */
-export function testFacts(text: string): TestFacts {
+export function testFacts(text: string, tableNames: ReadonlySet<string> = new Set()): TestFacts {
+  const facts: TestFacts = { assertions: [], tests: [], looseSkips: [], imports: new Map(), rebinds: [], caseTables: new Map(), aborts: 0, locals: new Set(), words: new Set(), ok: true };
+  const fail = (why: string): TestFacts => ({ ...facts, ok: false, why });
+  // Every step counts against this file's budget: past it, the file holds unread (a crafted file can't stall this).
+  const started = work;
+  const budget = WORK_FLOOR + WORK_PER_CHAR * text.length;
+  const over = () => work - started > budget;
   const s = scan(text);
-  const facts: TestFacts = { assertions: [], tests: [], looseSkips: [], bindings: [], aborts: 0, ok: s.ok };
-  if (!s.ok) return facts;
+  work += text.length;
+  if (!s.ok) return fail('a string, template, regex or comment never ends');
   const { code } = s;
-  const { roots, bindings } = assertionNames(s);
-  // The names the file declares (`const X = ...`), and what each holds (read once, bounded): an assertion or a loop
-  // around a test that names one carries its value, so changing `const EXPECTED = 2` or shrinking `const CASES = [...]`
-  // changes the assertion or the test.
-  // Which one a name means is scoped: the last declaration of it before the use inside the same top-level statement
-  // (a const in the test itself), else one at the top level of the file; never another test's.
-  const depth = new Int32Array(code.length + 1);
-  for (let k = 0, d = 0; k < code.length; k++) {
-    const c = code[k]!;
-    if (c === ')' || c === ']' || c === '}') d = Math.max(0, d - 1);
-    depth[k] = d;
-    if (OPEN[c]) d++;
-  }
+  const { close, inner, maxDepth } = pairsOf(s);
+  if (maxDepth > MAX_DEPTH) return fail(`brackets nest ${maxDepth} deep, over ${MAX_DEPTH}`);
+  const { roots, imports, rebinds } = assertionNames(s);
+  facts.imports = imports;
+  facts.rebinds = rebinds;
+  facts.aborts = [...code.matchAll(ABORT)].length;
+  facts.words = new Set(code.match(/[A-Za-z_$][\w$]*/g) ?? []);
+  facts.locals = new Set([...code.matchAll(/(?<![\w$.])(?:const|let|var|function)\s+([A-Za-z_$][\w$]*)/g)].map((m) => m[1]!));
+  work += code.length * 2;
+
+  // The names the file declares (`const X = ...`), and what each holds (read once per declaration, bounded): an
+  // assertion carries the literal value of each const it names (`const EXPECTED = 2` changed changes it); how a test
+  // runs carries the value of each const its options or the code around it name (`{ skip: SKIP_SLOW }`). Which
+  // declaration a name means is scoped: the last before the use inside the same top-level statement, else the file's
+  // top-level one; never another test's.
   const declarations = new Map<string, number[]>();
-  for (const m of code.matchAll(/(?<![\w$.])(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*(?::[^=;]*)?=/g)) (declarations.get(m[1]!) ?? declarations.set(m[1]!, []).get(m[1]!)!).push(m.index);
+  const topLevel = new Map<string, number>();
+  for (const m of code.matchAll(/(?<![\w$.])(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*(?::[^=;]*)?=/g)) {
+    (declarations.get(m[1]!) ?? declarations.set(m[1]!, []).get(m[1]!)!).push(m.index);
+    if (inner[m.index] === -1 && !topLevel.has(m[1]!)) topLevel.set(m[1]!, m.index);
+  }
+  const outermost = (at: number) => {
+    let t = inner[at]!;
+    while (t !== -1 && inner[t]! !== -1) t = inner[t]!;
+    return t;
+  };
+  const declFor = (name: string, at: number, top: number): number | undefined => {
+    const all = declarations.get(name);
+    if (!all) return undefined;
+    const k = firstAtOrAfter(all, at) - 1;
+    return k >= 0 && all[k]! > top ? all[k] : topLevel.get(name);
+  };
   const values = new Map<number, string>();
-  const valueAt = (at: number) => {
-    let v = values.get(at);
+  const valueOf = (decl: number) => {
+    let v = values.get(decl);
     if (v === undefined) {
-      // A literal only (an expected value, a case table): a module, a client or a call's result is no expectation.
-      const span = spanFrom(s, at);
-      const text = span ? textOf(s, span[0], Math.min(span[1], span[0] + HEAD)) : '';
-      values.set(at, (v = /^(?:[[{'"`/\d]|-\d|true\b|false\b|null\b|undefined\b|new (?:Set|Map)\()/.test(text) ? text : ''));
+      const span = spanFrom(s, decl);
+      values.set(decl, (v = span ? textOf(s, span[0], Math.min(span[1], span[0] + HEAD)) : ''));
     }
     return v;
   };
-  const uses = (text: string, at: number, top: number) => {
+  const literal = (v: string) => /^(?:[[{'"`/\d]|-\d|true\b|false\b|null\b|undefined\b|new (?:Set|Map)\()/.test(v);
+  const collection = (v: string) => /^(?:[[{]|new (?:Set|Map)\()/.test(v);
+  const uses = (t: string, at: number, top: number, onlyLiterals: boolean) => {
+    work += t.length;
     const out: string[] = [];
-    for (const n of new Set(text.match(/(?<![\w$.])[A-Za-z_$][\w$]*/g) ?? [])) {
-      if (roots.has(n)) continue;
-      const all = declarations.get(n) ?? [];
-      const local = all.filter((p) => p < at && p > top).at(-1);
-      const decl = local ?? all.find((p) => depth[p] === 0);
-      if (decl !== undefined && valueAt(decl)) out.push(`${n}=${valueAt(decl)}`);
+    for (const n of new Set(t.match(/(?<![\w$.])[A-Za-z_$][\w$]*/g) ?? [])) {
+      // A registered check table is the table rule's to judge (an allowlist entry taken out is a tightening).
+      if (roots.has(n) || tableNames.has(n)) continue;
+      const d = declFor(n, at, top);
+      if (d === undefined) continue;
+      const v = valueOf(d);
+      if (v && (!onlyLiterals || literal(v))) out.push(`${n}=${v}`);
     }
     return out.length ? ` | uses ${out.join(' ')}` : '';
   };
-  facts.bindings = bindings;
-  facts.aborts = [...code.matchAll(ABORT)].length;
-  // Each test call: where its `(` is, its title, and how it runs: the call's modifiers, every argument after the title
-  // that isn't its function (an options object; a same-file const holding one, read as its value), whether its
-  // function is a generator (never run), and the skip or todo calls in its body (`t.skip()`, `this.skip()`).
-  const calls = new Map<number, { start: number; title: string; runs: string }>();
-  const headers: [number, number][] = [];
+
+  // Each test call: its title, how it runs on its own (its .skip/.only/.todo; every argument after the title that isn't
+  // its function, with the value of each const named there; a generator body, which never runs), and where it is.
+  const calls = new Map<number, { start: number; end: number; title: string; own: string }>();
+  const headers: number[][] = [];
   for (const m of code.matchAll(TITLE_CALL)) {
+    if (over()) return fail('too much to read');
     const open = m.index + m[0].length - 1;
-    const close = closeOf(code, open);
-    if (close === -1) {
-      facts.ok = false;
-      return facts;
-    }
+    const end = close[open]!;
+    if (end === -1) return fail('a test call never closes');
+    const top = outermost(m.index);
     const args: string[] = [];
-    let fnAt = close;
-    for (let at = open + 1; at < close; ) {
-      const end = depthZero(code, at, close, ',');
-      if (/=>|^\s*(?:async\s+)?function\b/.test(code.slice(at, end))) {
-        fnAt = Math.min(fnAt, at);
+    let fnAt = end;
+    for (let at = open + 1; at < end; ) {
+      const e = depthZero(s,at, end, ',');
+      if (/=>|^\s*(?:async\s+)?function\b/.test(code.slice(at, Math.min(e, at + 300)))) {
+        fnAt = at;
         break;
       }
-      const arg = textOf(s, at, end);
-      const ref = args.length && /^[A-Za-z_$][\w$]*$/.test(arg) ? tableSpan(s, arg) : null;
-      args.push(ref ? `${arg}=${textOf(s, ref[0], ref[1])}` : arg);
-      at = end + 1;
+      const arg = textOf(s, at, Math.min(e, at + HEAD * 4));
+      args.push(args.length ? `${arg}${uses(arg, m.index, top, false)}` : arg);
+      at = e + 1;
     }
     const mods = /\.\s*(only|skip|todo)\b/.exec(m[0])?.[1] ?? '';
-    const body = code.slice(fnAt, close);
-    const generator = /^\s*(?:async\s+)?function\s*\*/.test(body) ? 'generator' : '';
-    const bodySkips = [...body.matchAll(BODY_SKIP)].length;
-    calls.set(open, { start: m.index, title: args[0] ?? '', runs: [mods, ...args.slice(1), generator, bodySkips ? `body skips ${bodySkips}` : ''].filter(Boolean).join(' ') });
+    const generator = /^\s*(?:async\s+)?function\s*\*/.test(code.slice(fnAt, fnAt + 60)) ? 'generator' : '';
+    calls.set(open, { start: m.index, end, title: args[0] ?? '', own: [mods, ...args.slice(1), generator].filter(Boolean).join(' ') });
     headers.push([m.index, fnAt]);
   }
-  // A `skip:` key counts only in an object (`{ skip: ... }`), not as a parameter's type (`(only: number)`).
-  const inObject = (at: number) => {
-    let depth = 0;
-    for (let j = at - 1; j >= 0; j--) {
-      const c = code[j]!;
-      if (c === ')' || c === ']' || c === '}') depth++;
-      else if (OPEN[c] && depth-- === 0) return c === '{';
-    }
-    return false;
+  // A skip or todo called in a test's own body (`t.skip()`, `this.skip()`), counted for the innermost test call around
+  // it: a new test with a skip of its own changes no other test.
+  const bodySkips = new Map<number, number>();
+  for (const m of code.matchAll(BODY_SKIP)) {
+    if (TEST_NAMES.test(m[1]!)) continue;
+    let t = inner[m.index]!;
+    while (t !== -1 && !calls.has(t)) t = inner[t]!;
+    if (t !== -1) bodySkips.set(t, (bodySkips.get(t) ?? 0) + 1);
+  }
+  const ownRuns = (open: number) => {
+    const c = calls.get(open)!;
+    const n = bodySkips.get(open);
+    return [c.own, n ? `body skips ${n}` : ''].filter(Boolean).join(' ');
   };
-  facts.looseSkips = [...code.matchAll(SKIP_MARK)]
-    .filter((m) => !headers.some(([a, b]) => m.index >= a && m.index < b) && (!m[0].endsWith(':') || inObject(m.index)))
-    .map((m) => lineAt(text, m.index));
+  // A skip, todo or only outside any test call's head (an options const, a `t.skip()` in a body); a `skip:` key counts
+  // only in an object (`{ skip: ... }`), not as a parameter's type (`(only: number)`).
+  const headStarts = headers.map((h) => h[0]!);
+  for (const m of code.matchAll(SKIP_MARK)) {
+    const k = firstAtOrAfter(headStarts, m.index + 1) - 1;
+    const inHead = k >= 0 && m.index < headers[k]![1]!;
+    if (!inHead && (!m[0].endsWith(':') || code[inner[m.index]!] === '{')) facts.looseSkips.push(lineAt(text, m.index));
+  }
+
   // Assertion starts: assert*/expect calls, calls by another name an assertion module gave, and calls to a local
   // function that asserts.
   const aliases = [...roots].filter((r) => r !== 'assert' && r !== 'expect').map((h) => h.replace(/\$/g, '\\$'));
   const anyAssert = new RegExp(aliases.length ? `${ASSERT_CALL.source}|(?<![\\w$.])(?:${aliases.join('|')})(?:\\s*\\.\\s*[A-Za-z_$][\\w$]*)*\\s*\\(` : ASSERT_CALL.source, 'g');
-  const helpers = assertingFunctions(s, anyAssert);
   const starts: number[] = [...code.matchAll(anyAssert)].map((m) => m.index);
+  const helpers = assertingFunctions(s, starts);
   if (helpers.size) {
-    const names = [...helpers].map((h) => h.replace(/\$/g, '\\$')).join('|');
-    for (const m of code.matchAll(new RegExp(`(?<![\\w$.])(?:${names})\\s*\\(`, 'g'))) {
-      if (!/(?:function\s*\*?|const|let|var)\s*$/.test(code.slice(Math.max(0, m.index - 12), m.index))) starts.push(m.index);
+    for (const m of code.matchAll(/(?<![\w$.])([A-Za-z_$][\w$]*)\s*\(/g)) {
+      if (helpers.has(m[1]!) && !/(?:function\s*\*?|const|let|var)\s*$/.test(code.slice(Math.max(0, m.index - 12), m.index))) starts.push(m.index);
     }
+    starts.sort((a, b) => a - b);
   }
-  starts.sort((a, b) => a - b);
-  // Where each return/break/continue/throw is, to count those before a position by binary search (linear time).
+  work += code.length * 4;
+  if (over()) return fail('too much to read');
+
+  // Where each return/break/continue/throw is, to count those before a position by binary search.
   const exitAt = [...code.matchAll(EXIT)].map((m) => m.index);
-  const exitsBefore = (to: number) => {
-    let lo = 0;
-    let hi = exitAt.length;
-    while (lo < hi) {
-      const mid = (lo + hi) >> 1;
-      if (exitAt[mid]! < to) lo = mid + 1;
-      else hi = mid;
+  // One pass. Each open bracket's context is built once, from its parent's: where (the headers and first arguments
+  // around an assertion) and ctx (what is around a test call: every header, with the value of each const named there;
+  // a test call around it as a mark filled in at the end with how that test runs). A case table a header names is
+  // kept as its rows (facts.caseTables), so a row added changes nothing and a row gone or changed holds.
+  interface Open {
+    at: number;
+    seg: number;
+    parent: Open | undefined;
+    header?: string;
+    where?: string;
+    ctx?: string;
+  }
+  const headerOf = (b: Open) => (b.header ??= textOf(s, Math.max(b.seg, b.at - HEAD), b.at).slice(-200));
+  const firstArg = (b: Open) => textOf(s, b.at + 1, Math.min(depthZero(s,b.at + 1, close[b.at]! === -1 ? code.length : close[b.at]!, ','), b.at + 1 + HEAD));
+  const whereOf = (b: Open): string => {
+    if (b.where === undefined) {
+      // A test call around it, and that test's own function, aren't part of it: its title, .skip/.only/.todo, a
+      // generator body and a describe around it are how the test runs (the test's own reason), and a renamed or
+      // regrouped test changes no assertion.
+      const testLevel = calls.has(b.at) || (code[b.at] === '{' && b.parent !== undefined && calls.has(b.parent.at));
+      const piece = testLevel ? '' : code[b.at] === '(' ? `${headerOf(b)}(${firstArg(b)}` : `${headerOf(b)}${code[b.at]}`;
+      const up = b.parent ? whereOf(b.parent) : '';
+      b.where = piece ? (up ? `${up} > ${piece}` : piece) : up;
     }
-    return lo;
+    return b.where;
   };
-  // Each open `(`'s first argument ends at its first comma at depth 0 (or its end): found once per bracket.
-  const firstComma = new Map<number, number>();
-  const firstArgEnd = (at: number, upTo: number) => {
-    let end = firstComma.get(at);
-    if (end === undefined) firstComma.set(at, (end = depthZero(code, at + 1, code.length, ',')));
-    return Math.min(end, upTo);
+  const ctxOf = (b: Open): string => {
+    if (b.ctx === undefined) {
+      let piece: string;
+      if (calls.has(b.at)) piece = `\u0001${b.at}\u0001`;
+      else {
+        const h = headerOf(b);
+        const top = outermost(b.at);
+        const named: string[] = [];
+        for (const n of new Set(h.match(/(?<![\w$.])[A-Za-z_$][\w$]*/g) ?? [])) {
+          const d = declFor(n, b.at, top);
+          if (d === undefined) continue;
+          const v = valueOf(d);
+          if (!collection(v)) {
+            if (v) named.push(`${n}=${v}`);
+          } else if (!facts.caseTables.has(n)) {
+            // Its rows: the literal's top-level elements, each whole (`[2, 4]` to `[4, 2]` is a row changed).
+            const span = spanFrom(s, d);
+            const rows: string[] = [];
+            const lit = span ? span[0] + (/^new (?:Set|Map)\(\s*/.exec(code.slice(span[0], span[0] + 20))?.[0].length ?? 0) : -1;
+            if (span && (code[lit] === '[' || code[lit] === '{') && close[lit]! !== -1) {
+              for (let at = lit + 1; at < close[lit]!; ) {
+                const e = depthZero(s, at, close[lit]!, ',');
+                const row = textOf(s, at, Math.min(e, at + HEAD));
+                if (row) rows.push(row);
+                at = e + 1;
+              }
+            }
+            facts.caseTables.set(n, rows);
+          }
+        }
+        piece = `${h}${code[b.at]}${named.length ? ` | uses ${named.join(' ')}` : ''}`;
+      }
+      b.ctx = b.parent ? `${ctxOf(b.parent)} > ${piece}` : piece;
+    }
+    return b.ctx;
   };
-  // One pass: the brackets open at each start, each with the text before it (its header).
-  // A bracket's header is read only when something inside it needs it, once.
-  const stack: { at: number; seg: number; text?: string }[] = [];
-  const headerOf = (b: { at: number; seg: number; text?: string }) => (b.text ??= textOf(s, Math.max(b.seg, b.at - HEAD), b.at).slice(-200));
+  const raw: { open: number; title: string; ctx: string; lead: string }[] = [];
+  let top: Open | undefined;
   let seg = 0;
   let next = 0;
   let coveredTo = -1;
   for (let i = 0; i < code.length; i++) {
+    if ((i & 4095) === 0 && over()) return fail('too much to read');
     const call = calls.get(i);
     if (call) {
-      // A test inside a skipped describe is skipped too, and one inside an `if`, a loop, a `try` or a condition runs
-      // only as that allows; so does one led into by `x &&` or `cond ?`: all of that is part of how it runs.
-      const top = stack[0]?.at ?? -1;
-      const around = stack.map((b) => calls.get(b.at)?.runs ?? (CONTROL.test(headerOf(b)) ? `${headerOf(b)}${uses(headerOf(b), b.at, top)}` : '')).filter(Boolean);
-      const lead = textOf(s, Math.max(seg, call.start - HEAD), call.start);
-      facts.tests.push({ title: call.title, runs: [...around, lead ? `lead ${lead}` : '', call.runs].filter(Boolean).join(' > ') });
+      const ctx = top ? ctxOf(top) : '';
+      if (ctx.length > MAX_KEY) return fail(`a test's context is over ${MAX_KEY} characters`);
+      raw.push({ open: i, title: call.title, ctx, lead: textOf(s, Math.max(seg, call.start - HEAD), call.start) });
     }
     while (next < starts.length && starts[next] === i) {
       next++;
       if (i < coveredTo) continue;
       const open = code.indexOf('(', i);
-      const close = closeOf(code, open);
-      const end = close === -1 ? -1 : chainEnd(code, close + 1);
-      if (end === -1) {
-        facts.ok = false;
-        return facts;
-      }
+      const end = closeOf(s,open) === -1 ? -1 : chainEnd(s,closeOf(s,open) + 1);
+      if (end === -1) return fail('an assertion never closes');
       coveredTo = end;
-      // Each text read here is bounded (HEAD characters), so a huge argument or segment can't make this quadratic.
-      const where = stack.map((b) => (code[b.at] === '(' ? `${headerOf(b)}(${textOf(s, b.at + 1, Math.min(firstArgEnd(b.at, i), b.at + 1 + HEAD))}` : `${headerOf(b)}${code[b.at]}`));
-      const from = stack[0]?.at ?? 0;
-      const exits = exitsBefore(i) - exitsBefore(from);
+      const where = top ? whereOf(top) : '';
+      if (where.length > MAX_KEY) return fail(`an assertion's context is over ${MAX_KEY} characters`);
+      let outer = top;
+      while (outer?.parent) outer = outer.parent;
+      const exits = firstAtOrAfter(exitAt, i) - firstAtOrAfter(exitAt, outer?.at ?? 0);
       // What leads into it within its own statement: `await`, `void`, `if (x)`, `x &&`, `const later = () =>`.
       const lead = textOf(s, Math.max(seg, i - HEAD), i).slice(-200);
-      const text = textOf(s, i, end);
-      facts.assertions.push(`${where.join(' > ')} | exits ${exits} | ${lead ? `${lead} ` : ''}${text}${uses(text, i, stack[0]?.at ?? -1)}`);
+      const body = textOf(s, i, end);
+      facts.assertions.push(`${where} | exits ${exits} | ${lead ? `${lead} ` : ''}${body}${uses(body, i, outer?.at ?? -1, true)}`);
     }
     const c = code[i]!;
     if (OPEN[c]) {
-      stack.push({ at: i, seg });
+      top = { at: i, seg, parent: top };
       seg = i + 1;
     } else if (c === ')' || c === ']' || c === '}') {
-      const b = stack.pop();
-      if (!b) {
-        facts.ok = false;
-        return facts;
-      }
-      seg = c === '}' ? i + 1 : b.seg;
+      if (!top) return fail('a bracket closes that never opened');
+      seg = c === '}' ? i + 1 : top.seg;
+      top = top.parent;
     } else if (c === ',' || c === ';') seg = i + 1;
   }
-  return facts;
+  work += code.length;
+  // How each test runs: what is around it (each test call around it filled in with how that one runs on its own),
+  // what leads into it (`x && test(...)`), and how it runs on its own.
+  for (const r of raw) {
+    const around = r.ctx.replace(/\u0001(\d+)\u0001/g, (_, n: string) => ownRuns(Number(n)));
+    const runs = [around, r.lead ? `lead ${r.lead}` : '', ownRuns(r.open)].filter(Boolean).join(' > ');
+    if (runs.length > MAX_KEY * 2) return fail(`a test's context is over ${MAX_KEY} characters`);
+    const c = calls.get(r.open)!;
+    facts.tests.push({ title: r.title, runs, from: c.start, to: c.end + 1 });
+  }
+  return over() ? fail('too much to read') : facts;
+}
+
+/** The parse steps testFacts takes on a text (for the budget's tests). */
+export function testFactsWork(text: string): { work: number; ok: boolean; why?: string } {
+  const before = work;
+  const f = testFacts(text);
+  return { work: work - before, ok: f.ok, ...(f.why ? { why: f.why } : {}) };
 }
 
 // ---- Tables: a `const NAME = <literal>` read as its leaf entries (an object's entries keyed by their path).
@@ -727,12 +943,12 @@ function spanFrom(s: Scanned, at: number): [number, number] | null {
   // A literal ends at its closing bracket (with any `as const` after it); anything else at the statement's end.
   let start = i + 1;
   while (start < s.code.length && /\s/.test(s.code[start]!)) start++;
-  const close = s.code[start] === '[' || s.code[start] === '{' ? closeOf(s.code, start) : -1;
-  if (close === -1) return [start, depthZero(s.code, start, s.code.length, ';')];
+  const close = s.code[start] === '[' || s.code[start] === '{' ? closeOf(s,start) : -1;
+  if (close === -1) return [start, depthZero(s,start, s.code.length, ';')];
   const tail = /^\s*(?:as\s+const|satisfies\s+[\w$.<>[\], ]+)?/.exec(s.code.slice(close + 1, close + 200))!;
   // The literal goes on into a call or an operator (`[...].slice(1)`, `[...].filter(f)`, `[...] || []`): the whole
   // statement is the value, one entry, so changing what follows the literal changes the table.
-  if (/^\s*(?:[.[(?|&+*/%-])/.test(s.code.slice(close + 1 + tail[0].length, close + 220))) return [start, depthZero(s.code, start, s.code.length, ';')];
+  if (/^\s*(?:[.[(?|&+*/%-])/.test(s.code.slice(close + 1 + tail[0].length, close + 220))) return [start, depthZero(s,start, s.code.length, ';')];
   return [start, close + 1 + tail[0].length];
 }
 
@@ -746,20 +962,20 @@ function leaves(s: Scanned, from: number, to: number, prefix: string, out: strin
   if (tail) to -= tail[0].length;
   // A wrapper around one literal: new Set([...]), new Map([...]), Object.freeze({...}).
   const wrap = /^(?:new\s+)?[\w$.]+\s*(?:<[^()]*>)?\s*\(/.exec(code.slice(from, to));
-  if (wrap && closeOf(code, from + wrap[0].length - 1) === to - 1) {
+  if (wrap && closeOf(s,from + wrap[0].length - 1) === to - 1) {
     let inner = from + wrap[0].length;
     while (inner < to && /\s/.test(code[inner]!)) inner++;
-    const innerEnd = code[inner] === '[' || code[inner] === '{' ? closeOf(code, inner) : -1;
+    const innerEnd = code[inner] === '[' || code[inner] === '{' ? closeOf(s,inner) : -1;
     if (innerEnd !== -1 && !code.slice(innerEnd + 1, to - 1).trim()) return leaves(s, inner, innerEnd + 1, prefix, out, depth);
   }
   const first = code[from];
-  if ((first === '[' || first === '{') && closeOf(code, from) === to - 1) {
+  if ((first === '[' || first === '{') && closeOf(s,from) === to - 1) {
     for (let at = from + 1; at < to - 1; ) {
-      const end = depthZero(code, at, to - 1, ',');
+      const end = depthZero(s,at, to - 1, ',');
       if (code.slice(at, end).trim()) {
         if (first === '[') leaves(s, at, end, prefix, out, depth);
         else {
-          const colon = depthZero(code, at, end, ':');
+          const colon = depthZero(s,at, end, ':');
           if (colon < end && !code.slice(at, colon).trim().startsWith('...')) leaves(s, colon + 1, end, `${prefix}${textOf(s, at, colon)}.`, out, depth);
           else leaves(s, at, end, prefix, out, depth);
         }
@@ -877,18 +1093,19 @@ const codeLine = (l: string) => {
 };
 
 // Each mark as a whole word where it starts or ends with one (`nosec`, never the start of `noseccomp`).
-const MARK = new RegExp(SUPPRESSION.map((m) => `${/^\w/.test(m) ? '\\b' : ''}${m.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}${/\w$/.test(m) ? '\\b' : ''}`).join('|'), 'g');
+const MARK = new RegExp(`${SUPPRESSION.map((m) => `${/^\w/.test(m) ? '\\b' : ''}${m.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}${/\w$/.test(m) ? '\\b' : ''}`).join('|')}|${ESLINT_OFF}`, 'g');
 /**
- * The suppression marks of one added or removed line: in a comment. In JavaScript or TypeScript, only where the line
- * read alone has a comment (a mark inside a string, a lint's own test fixture, isn't one); elsewhere after a comment
- * start of any common language.
+ * The suppression marks of one added or removed line. In JavaScript or TypeScript, anywhere but inside a string (a
+ * lint's own test fixture names them in strings): a comment, or a bare line inside a block comment that started on an
+ * earlier line. In any other language, anywhere (an annotation like `@SuppressWarnings` is no comment).
  */
 function marksIn(path: string, line: string): string[] {
   if (JS.test(path)) {
     const s = scan(line);
-    return [...line.matchAll(MARK)].filter((m) => s.comment[m.index] === 1 || /^\s*\*/.test(line)).map(() => line.trim());
+    const inString = (at: number) => s.code[at] !== s.src[at] && s.comment[at] !== 1;
+    return [...line.matchAll(MARK)].filter((m) => !inString(m.index)).map(() => line.trim());
   }
-  return /(?:\/\/|\/\*|^\s*\*|#|<!--|--|;)/.test(line) && new RegExp(MARK.source).test(line) ? [line.trim()] : [];
+  return new RegExp(MARK.source).test(line) ? [line.trim()] : [];
 }
 const isRunnerTest = (p: string) => /\.(?:test|spec)\.[cm]?[jt]sx?$/.test(p) || p.includes('__tests__/');
 const dir = (p: string) => p.slice(0, p.lastIndexOf('/') + 1);
@@ -940,6 +1157,11 @@ function renamedOnly(a: string, b: string, r: { gone: Set<string>; came: Set<str
 
 /** A line added to a guard that can skip or switch something off. */
 const BYPASS = /\b(?:return|break|continue|catch|exit|skip|ignore|allow|allowed|disable|disabled|off|false|warn|none|optional)\b|process\.env|\|\||&&|\?\?/;
+/**
+ * A line added to a lint test that can let a file or a finding through: control flow and filtering only (a value word
+ * like `false` or `none` is a lint test's fixture data, not a switch).
+ */
+const LINT_BYPASS = /(?<![\w$.])(?:return|break|continue|if|skip|ignore|exclude|filter|splice|delete)(?![\w$])|process\.env|\|\||&&|\?\?/;
 /** Docs: neither code nor a test. */
 const isDoc = (p: string) => /\.(?:md|txt)$/i.test(p) || p.startsWith('docs/');
 
@@ -956,13 +1178,13 @@ export function weakeningReasons(i: WeakeningInput): string[] {
   // Whether the change also changes code (not only tests and docs): then a changed assertion holds too, not only a
   // lost one (the issue's "when the PR also touches src/", widened to any code: a fixture, a config, a script).
   const codeChanged = i.files.some((f) => !isTest(f.path) && !isDoc(f.path));
-  // Whether a changed (not only a lost) assertion or test title holds. With code changed, as the issue scopes it. Holding
-  // it in a tests-only change too (a reworded or swapped assertion, the counts kept) is an open owner decision: this
-  // one line is where it goes.
-  const changedHolds = codeChanged;
+  // Whether a changed (not only a lost) assertion holds. Owner's decision (2026-10-19): in every change, tests-only ones
+  // too, since changing an existing assertion's expected value or matcher is how a regression gets hidden. An added
+  // assertion and a pure rename don't wait (renamedOnly). A test's title changed still holds only with code changed.
+  const changedHolds = true;
   const isAllowFile = matcher(NEVER_GROW_FILES, i.scope);
   const tables = CHECK_TABLES.filter((t) => holds(t.path, i.scope));
-  // A file over SIZE_CAP isn't parsed (reading it is slow, on the merge decision's path): it holds as unread.
+  // A file over SIZE_CAP isn't read (filesAt skips its blob), nor parsed: it holds as unread.
   const read = (side: 'before' | 'after', path: string): string | null | undefined => {
     try {
       const text = i[side](path);
@@ -971,10 +1193,30 @@ export function weakeningReasons(i: WeakeningInput): string[] {
         return undefined;
       }
       return text;
-    } catch {
-      hit('unreadable', path);
+    } catch (e) {
+      hit('unreadable', path, String((e as Error).message ?? e).slice(0, 100));
       return undefined;
     }
+  };
+  // Each test file's facts, parsed once, within one budget for the whole change: past PARSE_BUDGET characters, the
+  // rest hold unread, so a change of many big test files can't keep the merge decision busy.
+  let parsed = 0;
+  const factsCache = new Map<string, TestFacts | null | undefined>();
+  const factsOf = (side: 'before' | 'after', path: string): TestFacts | null | undefined => {
+    const k = `${side}\u0000${path}`;
+    if (factsCache.has(k)) return factsCache.get(k);
+    const text = read(side, path);
+    let out: TestFacts | null | undefined = text === undefined ? undefined : text === null ? null : undefined;
+    if (typeof text === 'string') {
+      parsed += text.length;
+      if (parsed > PARSE_BUDGET) hit('unreadable', path, `over the change's parse budget of ${PARSE_BUDGET} characters: not read`);
+      else {
+        out = testFacts(text, new Set(tables.filter((t) => t.path === path).map((t) => t.table)));
+        if (!out.ok) hit('unreadable', path, out.why ?? 'not readable');
+      }
+    }
+    factsCache.set(k, out);
+    return out;
   };
 
   // Tests in JavaScript or TypeScript: pooled over the change, so a test moved between files is the same test.
@@ -1016,8 +1258,28 @@ export function weakeningReasons(i: WeakeningInput): string[] {
         // (a config, a workflow, a hook): any added line, since an exclude, an ignore pattern, an allowlist path or an
         // `if:` loosens with no word a list could name (fail closed).
         const newLines = missing((lines.added ?? []).flatMap(codeLine), (lines.removed ?? []).flatMap(codeLine));
-        // A lint test: an added line with an exit or an off switch too (`if (f.includes('legacy')) continue;`).
-        const bypasses = isGuard(f.path) && !engineSourceGlob(f.path) ? newLines : newLines.filter((l) => BYPASS.test(l));
+        // A lint test: an added line with an exit or an off switch too (`if (f.includes('legacy')) continue;`), unless it
+        // sits in a test call the change adds (a new test of the lint, `assert.equal(x, false)`, loosens nothing).
+        // Nor in a function the change declares (a new helper: an existing line that starts using it is a line changed).
+        let inNewTests: string[] = [];
+        if (lintTest && JS.test(f.path)) {
+          const before = factsOf('before', f.path);
+          const now = factsOf('after', f.path);
+          const was = new Set((before?.tests ?? []).map((t) => t.title));
+          const text = read('after', f.path) ?? '';
+          const spans = (now?.tests ?? []).filter((t) => !was.has(t.title)).map((t): [number, number] => [t.from, t.to]);
+          if (now && before) {
+            const s = scan(text);
+            for (const name of [...now.locals].filter((n) => !before.locals.has(n))) {
+              const m = new RegExp(`(?<![\\w$.])(?:function\\s*\\*?\\s*${name.replace(/\$/g, '\\$')}\\s*\\(|(?:const|let|var)\\s+${name.replace(/\$/g, '\\$')}\\s*(?::[^=;]*)?=)`).exec(s.code);
+              if (!m) continue;
+              const body = m[0].startsWith('function') ? closeOf(s, s.code.indexOf('{', closeOf(s, m.index + m[0].length - 1) + 1)) + 1 : spanFrom(s, m.index)?.[1];
+              if (body && body > m.index) spans.push([m.index, body]);
+            }
+          }
+          inNewTests = spans.flatMap(([a, b]) => text.slice(a, b).split('\n').flatMap(codeLine));
+        }
+        const bypasses = isGuard(f.path) && !engineSourceGlob(f.path) ? newLines : missing(newLines.filter((l) => (isGuard(f.path) ? BYPASS : LINT_BYPASS).test(l)), inNewTests);
         for (const l of [...removed, ...bypasses].slice(0, 3)) hit('guard-lines', f.path, l);
       }
     }
@@ -1059,12 +1321,10 @@ export function weakeningReasons(i: WeakeningInput): string[] {
     const a = read('after', f.path);
     if (b === undefined || a === undefined) continue;
     const runner = isRunnerTest(f.path) ? 'test file' : 'helper';
-    const facts = { before: b === null ? null : testFacts(b), after: a === null ? null : testFacts(a) };
-    // A file it can't read after the change holds, and so does one it couldn't read before: it can't tell what went.
-    if (facts.before?.ok === false || facts.after?.ok === false) {
-      hit('unreadable', f.path);
-      continue;
-    }
+    const facts = { before: factsOf('before', f.path), after: factsOf('after', f.path) };
+    // A file it can't read (or parse, or fit in the budget) on either side holds (factsOf said why): it can't tell
+    // what went.
+    if (facts.before === undefined || facts.after === undefined || facts.before?.ok === false || facts.after?.ok === false) continue;
     // A lint by its shape that isn't registered: a regex line removed or changed (its rule loosened) holds.
     if (!lintTest && b !== null && linesKnown && lintShaped(b)) {
       const regexLines = missing((lines.removed ?? []).flatMap(codeLine), (lines.added ?? []).flatMap(codeLine)).filter((l) => scan(l).regexes > 0 || /\bRegExp\s*\(/.test(l));
@@ -1087,8 +1347,19 @@ export function weakeningReasons(i: WeakeningInput): string[] {
     // An existing file whose assertions now call something else (a changed assert import, a shadow, a patch), or
     // that now exits the process early.
     if (facts.before && facts.after) {
-      const changed = [...missing(facts.before.bindings, facts.after.bindings), ...missing(facts.after.bindings, facts.before.bindings)];
-      for (const l of changed.slice(0, 3)) hit('test-binding', f.path, l);
+      // An assertion or test-call name bound to something else, or unbound while still called (a name only added, or
+      // dropped with its last use, changes nothing); a new line that shadows or patches one.
+      for (const [name, from] of facts.before.imports) {
+        const to = facts.after.imports.get(name);
+        if (to === from) continue;
+        if (to !== undefined || new RegExp(`(?<![\\w$.])${name.replace(/\$/g, '\\$')}\\s*[.(]`).test(a ?? '')) hit('test-binding', f.path, `${name}: ${from} -> ${to ?? 'nothing'}`);
+      }
+      for (const l of missing(facts.after.rebinds, facts.before.rebinds).slice(0, 3)) hit('test-binding', f.path, l);
+      // A case table a test loops over that lost or changed a row (a row added runs more).
+      for (const [name, rows] of facts.before.caseTables) {
+        const now = facts.after.caseTables.get(name);
+        if (now) for (const row of missing(rows, now).slice(0, 3)) hit('test-skip', f.path, `${name}: ${row}`);
+      }
       // A fixture (a server a test starts, its own process) may exit; a test or its helper may not.
       if (facts.after.aborts > facts.before.aborts && !/(?:^|\/)fixtures\//.test(f.path)) hit('test-abort', f.path);
     }
@@ -1109,21 +1380,22 @@ export function weakeningReasons(i: WeakeningInput): string[] {
     const title = k.slice(0, k.indexOf(' | runs '));
     const shown = title.slice(title.indexOf(' | ') + 3);
     if (titlesAfter.has(title)) hit('test-skip', where.get(`title ${title}`) ?? '?', shown);
-    else if (changedHolds || fewerTests) hit('test-removed', where.get(`title ${title}`) ?? '?', shown);
+    else if (codeChanged || fewerTests) hit('test-removed', where.get(`title ${title}`) ?? '?', shown);
   }
   if (changedHolds || pools.after.assertions.length < pools.before.assertions.length) {
     // An assertion whose only change is a rename the change also makes in its code (`totalCents` to `totalInCents`
     // in src/ and in the test) is the same assertion: its expectation, literals and shape are as they were.
-    const renames = codeRenames(i.files.filter((f) => !isTest(f.path) && !isDoc(f.path)));
+    // Also a rename of a test's own local (`got` to `actual`), declared in the test before and after: never a name
+    // the test imports (swapping the unit under test is no rename).
+    const code = codeRenames(i.files.filter((f) => !isTest(f.path) && !isDoc(f.path)));
+    const tests = codeRenames(i.files.filter((f) => isTest(f.path) && JS.test(f.path)));
+    const locals = (side: 'before' | 'after') => new Set(i.files.filter((f) => isTest(f.path) && JS.test(f.path)).flatMap((f) => [...(factsCache.get(`${side}\u0000${f.path}`)?.locals ?? [])]));
+    const [localBefore, localAfter] = [locals('before'), locals('after')];
+    const renames = { gone: new Set([...code.gone, ...[...tests.gone].filter((n) => localBefore.has(n))]), came: new Set([...code.came, ...[...tests.came].filter((n) => localAfter.has(n))]) };
     const gone = missing(pools.before.assertions, pools.after.assertions);
     const left = missing(pools.after.assertions, pools.before.assertions);
     // Each test file's code words after the change (strings and comments out), for "is the old name still used".
-    const after = new Map<string, Set<string>>();
-    const usedAfter = (path: string) => {
-      let ids = after.get(path);
-      if (!ids) after.set(path, (ids = new Set((scan(read('after', path) ?? '').code.match(TOKEN) ?? []).filter((t) => IDENT.test(t)))));
-      return ids;
-    };
+    const usedAfter = (path: string) => factsCache.get(`after\u0000${path}`)?.words ?? new Set<string>();
     for (const x of gone) {
       const path = where.get(x) ?? '';
       const same = left.findIndex((y) => renamedOnly(x, y, renames, (name) => usedAfter(path).has(name)));
@@ -1151,9 +1423,15 @@ const needsText = (path: string, scope: LockScope | undefined) => (matcher(TEST_
 export function weakeningOf(cwd: string, base: string, head: string, files: ChangeFile[], scope: LockScope | undefined): string[] {
   try {
     const paths = files.map((f) => f.path).filter((p) => !isNonUtf8Path(p) && needsText(p, scope));
-    const before = filesAt(cwd, base, paths);
-    const after = filesAt(cwd, head, paths);
-    return weakeningReasons({ files, before: (p) => before.get(p) ?? null, after: (p) => after.get(p) ?? null, scope });
+    // A blob over the cap (in bytes, never fewer than its characters) isn't read at all: it holds unread.
+    const side = (rev: string) => {
+      const { texts, tooBig } = filesAt(cwd, rev, paths, SIZE_CAP);
+      return (p: string) => {
+        if (tooBig.has(p)) throw new Error(`${tooBig.get(p)} bytes, over the cap: not read`);
+        return texts.get(p) ?? null;
+      };
+    };
+    return weakeningReasons({ files, before: side(base), after: side(head), scope });
   } catch (e) {
     return [`${WEAKENING_REASON}the check for a removed or weakened test, lint or guard could not run (${escapedPath(String((e as Error).message ?? e).slice(0, 200))})`];
   }

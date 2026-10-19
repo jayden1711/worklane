@@ -506,12 +506,20 @@ test('weakening: a rename the code makes too, applied in its assertions, is no c
   assert.deepEqual(kinds(weakens({ 'src/math.ts': MATH.replace('export const add', 'export const equal = 1;\nexport const add'), 'test/math.test.ts': MATH_TEST }, { 'src/math.ts': swap, 'test/math.test.ts': MATH_TEST.replace('assert.equal(sub(3, 1), 2)', 'assert.ok(sub(3, 1), 2)') })), [ASSERTION]);
 });
 
-test('weakening: in a change of tests only, fewer assertions or tests hold; a reworded assertion does not (the issue: changed ones wait when code changes too)', () => {
-  const only = (t: string) => kinds(weakens({ 'test/math.test.ts': MATH_TEST }, { 'test/math.test.ts': t }));
+test("weakening (owner's decision, 2026-10-19): in a change of tests only, an assertion's expected value or matcher changed waits; an added assertion or a pure rename doesn't", () => {
+  const only = (t: string, base = MATH_TEST) => kinds(weakens({ 'test/math.test.ts': base }, { 'test/math.test.ts': t }));
   assert.deepEqual(only(MATH_TEST.replace('  assert.equal(add(1, 2), 3);\n', '')), [ASSERTION]);
   assert.deepEqual(only(MATH_TEST.replace(/test\('subtracts'[\s\S]*$/, '')), ['removes or renames a test', ASSERTION]);
-  assert.deepEqual(only(MATH_TEST.replace('assert.equal(add(1, 2), 3)', 'assert.equal(add(2, 1), 3)')), []);
+  assert.deepEqual(only(MATH_TEST.replace('assert.equal(sub(3, 1), 2)', 'assert.equal(sub(3, 1), 3)')), [ASSERTION], 'expected value changed');
+  assert.deepEqual(only(MATH_TEST.replace('assert.equal(sub(3, 1), 2)', 'assert.ok(sub(3, 1))')), [ASSERTION], 'matcher loosened');
+  assert.deepEqual(only(MATH_TEST.replace('assert.equal(add(1, 2), 3)', 'assert.equal(add(2, 1), 3)')), [ASSERTION], 'reworded');
+  // Added assertions, a renamed test, a test's own local renamed: no wait.
+  assert.deepEqual(only(MATH_TEST.replace('  assert.equal(sub(3, 1), 2);', '  assert.equal(sub(3, 1), 2);\n  assert.equal(sub(1, 1), 0);')), []);
   assert.deepEqual(only(MATH_TEST.replace("test('adds'", "test('adds two numbers'")), []);
+  const local = MATH_TEST.replace('  assert.equal(add(1, 2), 3);', '  const got = add(1, 2);\n  assert.equal(got, 3);');
+  assert.deepEqual(only(local.replaceAll('got', 'actual'), local), []);
+  // A "rename" to a name the unit under test is imported by is a swap, not a rename.
+  assert.deepEqual(only(MATH_TEST.replace('assert.equal(add(1, 2), 3)', 'assert.equal(sub(1, 2), 3)').replace('{ add, sub }', '{ sub }')), [ASSERTION]);
 });
 
 test('weakening: a skip, todo or only on an existing test holds, so does a skipped describe around it or a changed skip condition; a new test with its own skip does not', () => {
@@ -604,7 +612,8 @@ test("weakening (adversarial pass): an assertion called by another name, a shado
   assert.deepEqual(only(`${MATH_TEST}process.exitCode = 0;\nprocess.exit(0);\n`), ['makes an existing test file exit or abort the process']);
   // A lint test's own logic beside its table (its rule widened): holds; an allowlist entry taken out still doesn't.
   const lint = `${CLOCK_LINT}const READ = /Date\\.now\\(\\)/;\ntest('no clock', () => {\n  assert.deepEqual(found(READ, ALLOWED), []);\n});\n`;
-  assert.deepEqual(only(lint.replace('/Date\\.now\\(\\)/', '/Date\\.never\\(\\)/'), lint, 'test/no-clock-helpers.test.ts'), ['removes or changes code in a guard or lint']);
+  // (The regex is a literal the assertion names, so the assertion's matcher changed too: owner's decision.)
+  assert.deepEqual(only(lint.replace('/Date\\.now\\(\\)/', '/Date\\.never\\(\\)/'), lint, 'test/no-clock-helpers.test.ts'), [ASSERTION, 'removes or changes code in a guard or lint']);
   assert.deepEqual(only(lint.replace("  'test/a.test.ts': 1,\n", ''), lint, 'test/no-clock-helpers.test.ts'), []);
   // An entry added behind a spread or a name of another const in the same file.
   const spread = "const MORE = { 'test/x.test.ts': 1 };\nconst ALLOWED: Record<string, number> = {\n  ...MORE,\n  'test/a.test.ts': 1,\n};\n";
@@ -656,8 +665,32 @@ test('weakening (round 2, #4): a lint test\'s rule loosened holds, registered or
   assert.ok(weakening.LINT_TESTS?.length, 'LINT_TESTS registers the lint tests');
   for (const p of weakening.LINT_TESTS) {
     assert.ok(existsSync(join(repoRoot, p)), `${p} is a real file`);
-    assert.ok(weakening.lintShaped(readFileSync(join(repoRoot, p), 'utf8')), `${p} reads as a lint`);
+    const text = readFileSync(join(repoRoot, p), 'utf8');
+    assert.ok(weakening.lintShaped(text) || LISTS_SOURCES.test(text), `${p} reads as a lint`);
   }
+});
+
+/**
+ * A test that lists `src/` or `scripts/` files: a directory listing (`readdir`, `glob`, a walk, `git ls-files`) whose
+ * line names one of them. A word list, not a proof: a listing built elsewhere and passed in gets past it.
+ */
+const LISTS_SOURCES = /(?:\b(?:readdir|opendir|glob)(?:Sync)?|\bwalk\w*)\s*\([^\n]*['"`/](?:src|scripts)\b|ls-files[^\n]*\b(?:src|scripts)\b/;
+
+test('weakening (round 3, #3): every test that lists src/ or scripts/ files is a registered lint test or says why it is not', () => {
+  const files: string[] = [];
+  const walk = (d: string) => {
+    for (const e of readdirSync(join(repoRoot, d), { withFileTypes: true })) {
+      if (e.isDirectory()) {
+        if (e.name !== 'fixtures' && e.name !== 'node_modules') walk(join(d, e.name));
+      } else if (/\.test\.ts$/.test(e.name)) files.push(join(d, e.name).split('\\').join('/'));
+    }
+  };
+  walk('test');
+  const named = new Set([...(weakening.LINT_TESTS ?? []), ...(weakening.NOT_A_LINT ?? []).map((x) => x.path)]);
+  const lists = files.filter((f) => LISTS_SOURCES.test(readFileSync(join(repoRoot, f), 'utf8')));
+  assert.ok(lists.length > 10, `${lists.length} tests list sources`);
+  assert.deepEqual(lists.filter((f) => !named.has(f)), [], 'add each to LINT_TESTS (it checks a rule over those files) or to NOT_A_LINT with why');
+  for (const x of weakening.NOT_A_LINT ?? []) assert.ok(lists.includes(x.path) && !(weakening.LINT_TESTS ?? []).includes(x.path), `${x.path}: NOT_A_LINT names only a listing test that isn't in LINT_TESTS`);
 });
 
 test('weakening (round 2, #5): a registered table narrowed by a call on its literal or where it is used holds', () => {
@@ -684,9 +717,9 @@ test('weakening (adversarial pass, round 2): an expected value changed in a cons
   assert.deepEqual(kinds(weakens({ 'test/math.test.ts': cases }, { 'test/math.test.ts': cases.replace('[[1, 2], [2, 4]]', '[[1, 2]]') })), [SKIP]);
   // A lint that walks with fs.promises.readdir, its rule loosened; a registered lint with a file skipped by an inserted line.
   const walker = "import { readdir } from 'node:fs/promises';\nimport { repoRoot } from './helpers.js';\ntest('no eval', async () => {\n  for (const f of await readdir(join(repoRoot, 'src'))) assert.doesNotMatch(read(f), /\\beval\\(/);\n});\n";
-  assert.deepEqual(kinds(weakens({ 'test/no-eval.test.ts': walker }, { 'test/no-eval.test.ts': walker.replace('/\\beval\\(/', '/\\beval\\(\\)/') })), ['removes or changes code in a guard or lint']);
+  assert.deepEqual(kinds(weakens({ 'test/no-eval.test.ts': walker }, { 'test/no-eval.test.ts': walker.replace('/\\beval\\(/', '/\\beval\\(\\)/') })), [ASSERTION, 'removes or changes code in a guard or lint']);
   const pipefail = "import { readdirSync } from 'node:fs';\nimport { repoRoot } from './helpers.js';\nconst files = readdirSync(join(repoRoot, 'scripts'));\nfor (const f of files) {\n  test(f, () => assert.doesNotMatch(read(f), /shell:\\s*true/));\n}\n";
-  assert.deepEqual(kinds(weakens({ 'test/pipefail.test.ts': pipefail }, { 'test/pipefail.test.ts': pipefail.replace('for (const f of files) {', "for (const f of files) {\n  if (f.includes('legacy')) continue;") })), ['removes or changes code in a guard or lint']);
+  assert.deepEqual(kinds(weakens({ 'test/pipefail.test.ts': pipefail }, { 'test/pipefail.test.ts': pipefail.replace('for (const f of files) {', "for (const f of files) {\n  if (f.includes('legacy')) continue;") })), [ASSERTION, 'removes or changes code in a guard or lint']);
   // More configs a check reads, and more inline markers.
   for (const [path, was, now] of [
     ['.husky/pre-commit', 'npm run lint\n', 'npm run lint || true\n'],
@@ -724,6 +757,112 @@ test('weakening (round 2, #8): a file over SIZE_CAP holds unread, before any par
 test('weakening (round 2, #9): a doc that names a suppression is no suppression', () => {
   assert.deepEqual(weakens({ 'README.md': '# x\n' }, { 'README.md': '# x\nAdd `// eslint-disable-next-line` only with a reason; `# noqa` too.\n' }), []);
   assert.deepEqual(weakens({ 'docs/lint.md': '# x\n' }, { 'docs/lint.md': '# x\n- `// @ts-ignore`: never; use `@ts-expect-error` with why.\n' }), []);
+});
+
+/** `make(n)` for the largest n whose text fits in SIZE_CAP. */
+function atCap(make: (n: number) => string): string {
+  let n = 1;
+  while (make(n * 2).length <= weakening.SIZE_CAP) n *= 2;
+  for (let step = n >> 1; step >= 1; step >>= 1) if (make(n + step).length <= weakening.SIZE_CAP) n += step;
+  return make(n);
+}
+
+test('weakening (round 3, #1): no file under the cap can stall the parse: steps stay a fixed multiple of its size, and past a limit it holds unread', () => {
+  const head = "import { test, describe } from 'node:test';\nimport assert from 'node:assert/strict';\n";
+  const shapes: [string, (n: number) => string][] = [
+    ['many tests', (n) => head + "test('t', () => {\n  assert.equal(f(1), 2);\n});\n".repeat(n)],
+    ['one test, many assertions', (n) => `${head}test('all', () => {\n${'  assert.equal(f(1), 2);\n'.repeat(n)}});\n`],
+    ['nested describes', (n) => `${head}${"describe('d', () => {\n".repeat(n)}test('t', () => { assert.ok(1); });\n${'});\n'.repeat(n)}`],
+    ['nested calls with long first arguments, then assertions', (n) => `${head}${`f(${'x'.repeat(400)}, () => {\n`.repeat(45)}${'  assert.equal(f(1), 2);\n'.repeat(n)}${'});\n'.repeat(45)}`],
+    ['tests naming one huge options const', (n) => `${head}const OPTS = { timeout: 1, note: '${'x'.repeat(200_000)}' };\n${"test('t', OPTS, () => { assert.ok(1); });\n".repeat(n)}`],
+    ['nested ifs around tests', (n) => `${head}${'if (a) {\n'.repeat(2000)}${"test('t', () => { assert.ok(1); });\n".repeat(n)}${'}\n'.repeat(2000)}`],
+    ['many consts, then one brace', (n) => `${head}${'const a = (1);\n'.repeat(n)}{\n`],
+  ];
+  for (const [name, make] of shapes) {
+    const text = atCap(make);
+    const r = weakening.testFactsWork(text);
+    assert.ok(r.work <= 20 * text.length, `${name}: ${r.work} steps for ${text.length} characters`);
+    if (!r.ok) assert.match(r.why ?? '', /deep|over \d+ characters|too much/, name);
+  }
+  // Past MAX_DEPTH it holds unread, without parsing on.
+  const deep = weakening.testFactsWork(atCap(shapes[2]![1]));
+  assert.deepEqual([deep.ok, /deep/.test(deep.why ?? '')], [false, true]);
+});
+
+test('weakening (round 3, #1): one change parses at most PARSE_BUDGET characters; the rest hold unread', () => {
+  const text = atCap((n) => "import assert from 'node:assert/strict';\n" + "test('t', () => {\n  assert.equal(f(1), 2);\n});\n".repeat(n));
+  const files: ChangeFile[] = Array.from({ length: 20 }, (_, k) => ({ path: `test/f${k}.test.ts`, added: 1, removed: 1, addedLines: ['x'], removedLines: ['y'] }));
+  const r = weakeningReasons({ files, before: () => text, after: () => text, scope: undefined });
+  assert.deepEqual(kinds(r), ["can't read a file to check it, so it may weaken a check"]);
+  assert.match(r[0]!, /parse budget/);
+});
+
+test('weakening (round 3, #1): weakeningOf never reads a blob over the cap', () => {
+  const dir = exampleProject().dir;
+  const g = (...a: string[]) => execFileSync('git', a, { cwd: dir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+  mkdirSync(join(dir, 'test'), { recursive: true });
+  writeFileSync(join(dir, 'test', 'big.test.ts'), `${MATH_TEST}${'// pad\n'.repeat(Math.ceil(weakening.SIZE_CAP / 7))}`);
+  g('add', '-A');
+  g('commit', '-q', '-m', 'big');
+  const base = g('rev-parse', 'HEAD');
+  writeFileSync(join(dir, 'test', 'big.test.ts'), MATH_TEST);
+  g('commit', '-q', '-am', 'small');
+  const r = weakeningOf(dir, base, g('rev-parse', 'HEAD'), [{ path: 'test/big.test.ts', added: 1, removed: 1, addedLines: ['x'], removedLines: ['y'] }], undefined);
+  assert.equal(r.length, 1);
+  assert.match(r[0]!, /bytes, over the cap: not read/);
+});
+
+test('weakening (round 3, #2): a skip through a const in the options, a test name bound to a skip or a no-op, and a test wrapped in a function nothing calls hold, tests only too', () => {
+  const only = (t: string, base = MATH_TEST) => kinds(weakens({ 'test/math.test.ts': base }, { 'test/math.test.ts': t }));
+  const slow = MATH_TEST.replace("test('adds', () =>", "const SKIP_SLOW = false;\ntest('adds', { skip: SKIP_SLOW }, () =>");
+  assert.deepEqual(only(slow.replace('SKIP_SLOW = false', 'SKIP_SLOW = true'), slow), [SKIP], 'flipped');
+  assert.deepEqual(only(slow.replace('SKIP_SLOW = false', 'SKIP_SLOW = !process.env.FULL'), slow), [SKIP], 'made conditional');
+  const BINDING = "changes what an existing test file's assertions call: an assert import, or a name that shadows or patches one";
+  assert.deepEqual(only(MATH_TEST.replace("import { test } from 'node:test';", "import { skip as test } from 'node:test';")), [BINDING], 'skip as test');
+  assert.deepEqual(only(MATH_TEST.replace("import { test } from 'node:test';", "import { test } from './noop.js';")), [BINDING], 'a local no-op');
+  assert.deepEqual(only(MATH_TEST.replace("test('subtracts'", "function never() {\ntest('subtracts'").replace(/\n$/, '\n}\n')), [ASSERTION, SKIP], 'wrapped, never called (its assertions are now inside that function too)');
+});
+
+test('weakening (round 3, #4): a suppression in a block comment, ESLint inline config turning a rule off, and each other marker holds', () => {
+  const app = 'export const x = 1;\n';
+  const SUPPRESS = 'adds an inline lint or type-check suppression';
+  const js = (added: string) => kinds(weakens({ 'src/a.ts': app }, { 'src/a.ts': `${added}\n${app}` }));
+  assert.deepEqual(js(`/*\n${['eslint', 'disable'].join('-')}\n*/`), [SUPPRESS], 'a bare line in a block comment');
+  assert.deepEqual(js(`/* eslint no-eval: "off" */`), [SUPPRESS]);
+  assert.deepEqual(js('/* eslint eqeqeq: 0 */'), [SUPPRESS]);
+  for (const [path, line] of [
+    ['src/a.ts', `// ${['NOSO', 'NAR'].join('')}`],
+    ['src/a.ts', `// ${['nosem', 'grep'].join('')}`],
+    ['src/a.ts', `/* ${['stylelint', 'disable'].join('-')} */`],
+    ['src/a.ts', `// ${['tslint', 'disable'].join(':')}`],
+    ['src/a.ts', `// ${['oxlint', 'disable'].join('-')}`],
+    ['src/lib.rs', `#![${'allow'}(clippy::all)]`],
+    ['src/A.java', `@${'Suppress'}Warnings("unchecked")`],
+    ['tools/a.py', `x = 1  # ${['pyright', ' ignore'].join(':')}`],
+    ['ci.yml', `# ${['yamllint', 'disable'].join(' ')}`],
+    ['Dockerfile', `# ${['hadolint', 'ignore'].join(' ')}=DL3008`],
+  ]) assert.deepEqual(kinds(weakens({ [path!]: 'a\n' }, { [path!]: `a\n${line}\n` })), [SUPPRESS], `${path}: ${line}`);
+});
+
+test('weakening (round 3, #5): shared CI actions, more runner and linter configs, CODEOWNERS, the project lints and the engine\'s CI scripts are guard files', () => {
+  const GUARD = 'removes or changes code in a guard or lint';
+  for (const path of ['.github/actions/test/action.yml', 'vite.config.ts', 'cypress.config.ts', '.lintstagedrc.json', 'lint-staged.config.js', '.semgrep.yml', '.semgrep/rules.yml', '.rubocop.yml', 'deno.json', '.github/CODEOWNERS', `${BRAND.configDir}/checks/lint.mjs`, 'scripts/ci/affected.mjs']) {
+    assert.deepEqual(kinds(weakens({ [path]: 'one\ntwo\n' }, { [path]: 'one\n' })), [GUARD], path);
+  }
+  // In an app repo, the engine's CI scripts are its own code; the rest still hold.
+  assert.deepEqual(weakens({ 'scripts/ci/affected.mjs': 'one\ntwo\n' }, { 'scripts/ci/affected.mjs': 'one\n' }, 'managed-app'), []);
+  assert.deepEqual(kinds(weakens({ '.github/actions/test/action.yml': 'run: npm test\n' }, { '.github/actions/test/action.yml': 'run: true\n' }, 'managed-app')), [GUARD]);
+});
+
+test('weakening (round 3, #6): only adding tests never waits: a new test with its own t.skip() in an existing describe, a row added to a case table, a new test in a lint test file', () => {
+  const only = (t: string, base: string, path = 'test/math.test.ts') => weakens({ [path]: base }, { [path]: t });
+  const suite = "describe('math', () => {\n  it('adds', () => {\n    assert.equal(add(1, 2), 3);\n  });\n});\n";
+  assert.deepEqual(only(suite.replace('});\n});', "});\n  it('on linux', (t) => {\n    if (process.platform !== 'linux') t.skip('linux only');\n    assert.equal(add(2, 2), 4);\n  });\n});"), suite), []);
+  const cases = "const CASES = [[1, 2], [2, 4]];\nfor (const [x, y] of CASES) {\n  test(`doubles ${x}`, () => {\n    assert.equal(add(x, x), y);\n  });\n}\n";
+  assert.deepEqual(only(cases.replace('[[1, 2], [2, 4]]', '[[1, 2], [2, 4], [3, 6]]'), cases), []);
+  assert.deepEqual(kinds(only(cases.replace('[[1, 2], [2, 4]]', '[[1, 2], [4, 2]]'), cases)), [SKIP], 'a row changed');
+  const lint = "import { readdirSync } from 'node:fs';\nimport { repoRoot } from './helpers.js';\nconst files = readdirSync(join(repoRoot, 'scripts'));\ntest('pipefail', () => {\n  assert.deepEqual(files.filter((f) => /shell:\\s*true/.test(read(f))), []);\n});\n";
+  assert.deepEqual(only(`${lint}test('reads a file', () => {\n  assert.equal(read('x').includes('shell'), false);\n});\n`, lint, 'test/pipefail.test.ts'), []);
 });
 
 test("weakening: an inline lint or type-check suppression added holds; one in a string (a lint's own fixture) or a word that only starts like one does not", () => {
