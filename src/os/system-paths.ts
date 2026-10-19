@@ -21,7 +21,7 @@
 // a non-zero exit naming the variable, before anything starts), and systemPath() throws, so no import can read a
 // moved path either. The service modes refuse it even in a marked process (serviceModeRefusal).
 import { lstatSync, readFileSync } from 'node:fs';
-import { isAbsolute, join } from 'node:path';
+import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { BRAND } from '../brand.js';
 
 /** The variable that moves every system location under one directory (tests only; test/isolate.ts). */
@@ -29,11 +29,24 @@ export const SYSTEM_ROOT_VAR = `${BRAND.envPrefix}_SYSTEM_ROOT`;
 /** The test preload's per-run token: 64 hex characters, also written to TEST_MARK_FILE inside the root. */
 export const TEST_TOKEN_VAR = `${BRAND.envPrefix}_TEST_ISOLATION`;
 export const TEST_MARK_FILE = '.test-isolation';
+/** The test preload's machine: the directory that holds this test process's home, state, slots and system root. */
+export const TEST_MACHINE_VAR = `${BRAND.envPrefix}_TEST_MACHINE`;
+/**
+ * Set in the environment of a test run, and so of every process it starts that keeps the environment (markTestRun):
+ * a child a test starts is a test run too, even one that drops NODE_TEST_CONTEXT (childEnv) or that node's runner
+ * didn't start.
+ */
+export const TEST_RUN_VAR = `${BRAND.envPrefix}_TEST_RUN`;
 /** Set by systemd in every process a unit starts (and inherited by its children). */
 export const SYSTEMD_MARKERS = ['INVOCATION_ID', 'JOURNAL_STREAM'] as const;
 
 export class SystemRootRefused extends Error {
   override name = 'SystemRootRefused';
+}
+
+/** A slot directory a test run may not use (testSlotsRefusal): thrown by slotsDir() before anything is opened. */
+export class TestSlotsRefused extends Error {
+  override name = 'TestSlotsRefused';
 }
 
 const currentUid = (): number | null => (typeof process.getuid === 'function' ? process.getuid() : null);
@@ -64,6 +77,77 @@ export function systemRootRefusal(env: NodeJS.ProcessEnv = process.env, uid: num
     return no('it holds no test mark');
   }
   return null;
+}
+
+type Proc = { argv: readonly string[]; execArgv: readonly string[] };
+
+/**
+ * Why this process counts as a test run, or null when it doesn't (every real machine's engine): node's test runner
+ * started it (NODE_TEST_CONTEXT in a file's process, --test in the runner's own), its main module is a test file, the
+ * test preload marked it, or a test run started it (TEST_RUN_VAR, markTestRun). The engine never starts itself any of
+ * these ways, and never sets one of these variables outside a test run.
+ */
+export function testRunSign(env: NodeJS.ProcessEnv = process.env, proc: Proc = process): string | null {
+  if (env.NODE_TEST_CONTEXT !== undefined) return 'NODE_TEST_CONTEXT is set';
+  if (proc.execArgv.includes('--test')) return 'node runs with --test';
+  if (/\.test\.[cm]?[jt]s$/.test(proc.argv[1] ?? '')) return `its main module is a test file (${proc.argv[1]})`;
+  for (const k of [TEST_RUN_VAR, TEST_TOKEN_VAR, TEST_MACHINE_VAR]) if (env[k] !== undefined) return `${k} is set`;
+  return null;
+}
+
+/**
+ * Marks `env` as a test run's when this process is one (testRunSign), so what is started with it is one too: a child
+ * started the engine's way (childEnv drops NODE_TEST_CONTEXT), or by a test file node's runner didn't start (run
+ * directly, or --experimental-test-isolation=none, where only the runner's own execArgv says --test). Outside a test
+ * run (`sign`, this process's own, null) it changes nothing. Returns `env`.
+ *
+ * LIMIT: a child started with an environment built from scratch carries no mark, and is a test run only by how node
+ * started it.
+ */
+export function markTestRun(env: NodeJS.ProcessEnv, sign: string | null = testRunSign()): NodeJS.ProcessEnv {
+  if (sign !== null) env[TEST_RUN_VAR] = '1';
+  return env;
+}
+// WHY: a child that inherits this process's environment (spawn without `env`) carries the mark from the start.
+markTestRun(process.env);
+
+/**
+ * Why `dir` may not be this process's slot directory, or null when it may: always null outside a test run
+ * (testRunSign). In a test run, only a directory inside the test machine (test/isolate.ts) is: one of this user's alone
+ * that the preload names in TEST_MACHINE_VAR, and that holds the preload's system root with its mark for this run's
+ * token (systemRootRefusal), so a stray TEST_MACHINE_VAR naming any directory of the user's (say, the home) is no test
+ * machine. So a test file that forgot the preload, or a test that pointed AGENT_SLOTS_DIR elsewhere, fails before it
+ * opens anything in the machine's own slot directory (#669): slotsDir() throws TestSlotsRefused.
+ *
+ * THREAT: accidents, not a hostile test: a test that builds a machine of its own (a directory, a root and a mark with
+ * a token it chose) on purpose gets it. `dir` is compared as written (symlinks not followed): it may not exist yet.
+ */
+export function testSlotsRefusal(dir: string | undefined, env: NodeJS.ProcessEnv = process.env, proc: Proc = process, uid: number | null = currentUid()): string | null {
+  const sign = testRunSign(env, proc);
+  if (!sign) return null;
+  const machine = env[TEST_MACHINE_VAR];
+  const no = (why: string) => `this is a test run (${sign}), and the slot directory isn't the test machine's: ${why}. Run tests with the isolation preloaded (node --import ./dist/test/isolate.js --test <file>, or npm test), or pass a directory of the test's own.`;
+  if (!machine) return no(`${TEST_MACHINE_VAR} is unset, so the test isolation isn't loaded`);
+  if (!isAbsolute(machine)) return no(`${TEST_MACHINE_VAR} (${machine}) is not an absolute path`);
+  try {
+    const d = lstatSync(machine);
+    if (!d.isDirectory() || (process.platform !== 'win32' && ((uid !== null && d.uid !== uid) || (d.mode & 0o022) !== 0))) return no(`${TEST_MACHINE_VAR} (${machine}) isn't a directory of this user's alone`);
+  } catch {
+    return no(`${TEST_MACHINE_VAR} (${machine}) doesn't exist`);
+  }
+  const root = env[SYSTEM_ROOT_VAR];
+  if (!root || !inside(machine, root)) return no(`${TEST_MACHINE_VAR} (${machine}) doesn't hold the test preload's system root (${SYSTEM_ROOT_VAR})`);
+  const unmarked = systemRootRefusal(env, uid);
+  if (unmarked) return no(`${TEST_MACHINE_VAR} (${machine}) isn't this run's test machine: ${unmarked}`);
+  if (!dir) return no('AGENT_SLOTS_DIR is unset, so it would be the machine\'s own');
+  if (!inside(machine, dir)) return no(`${dir} is outside ${machine}`);
+  return null;
+}
+
+/** Whether `p` is strictly inside `dir`, as written (no symlink followed). */
+function inside(dir: string, p: string): boolean {
+  const r = relative(dir, resolve(p));
+  return !(r === '' || r === '..' || r.startsWith(`..${sep}`) || isAbsolute(r));
 }
 
 let decided: { key: string; refusal: string | null } | null = null;
