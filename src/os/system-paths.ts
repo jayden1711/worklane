@@ -125,7 +125,9 @@ markTestRun(process.env);
  * opens anything in the machine's own slot directory (#669): slotsDir() throws TestSlotsRefused.
  *
  * THREAT: accidents, not a hostile test: a test that builds a machine of its own (a directory, a root and a mark with
- * a token it chose) on purpose gets it. `dir` is compared as written (symlinks not followed): it may not exist yet.
+ * a token it chose) on purpose gets it. `dir` is compared as written: it may not exist yet. Each part of it that
+ * exists inside the machine is lstat'ed, never followed, and a symlink among them is refused (#818), so no link in the
+ * machine leads a test to a directory outside it.
  */
 export function testSlotsRefusal(dir: string | undefined, env: NodeJS.ProcessEnv = process.env, proc: Proc = process, uid: number | null = currentUid()): string | null {
   return outsideTestMachine({ what: 'slot directory', unset: "AGENT_SLOTS_DIR is unset, so it would be the machine's own", fix: "pass a directory of the test's own" }, dir, env, proc, uid);
@@ -136,13 +138,15 @@ export function testSlotsRefusal(dir: string | undefined, env: NodeJS.ProcessEnv
  * (testSlotsRefusal), so stateDir() throws TestStateRefused in a test run for anything outside the test machine
  * (#815): <PREFIX>_STATE_DIR pointed elsewhere, or unset with the home's (XDG_STATE_HOME, or HOME's .local/state)
  * outside it, as in a test file run without the preload, or a test's child that inherited a real HOME. Always null
- * outside a test run: the engine's state dir is what it always was. `dir` is compared as written (nothing is opened
- * or followed there): the only files read are the test machine's own (its directory, its system root and its mark).
+ * outside a test run: the engine's state dir is what it always was. Nothing outside the test machine is looked at:
+ * the only paths lstat'ed or read are the machine's own (its directory, its system root and mark, the parts of `dir`
+ * inside it).
  *
- * One difference: a service mode a test starts (`dashboard --hub`, `--hub-setup`) runs without the system root
- * (serviceModeRefusal; test/isolate.ts serviceModeEnv), so it can't show its test machine through the root's mark.
- * Then, and only for the state dir, the machine shows it with its own mark: the same token in TEST_MARK_FILE in the
- * machine directory itself, a file of this user's alone (test/isolate.ts writes both). Without either mark: refused.
+ * EXCEPTION (owner-accepted, 2026-10-19, #818): a service mode a test starts (`dashboard --hub`, `--hub-setup`) runs
+ * without the system root (serviceModeRefusal; test/isolate.ts serviceModeEnv), so it can't show its test machine
+ * through the root's mark. Then, and only for the state dir, the machine shows it with its own mark: the same token
+ * in TEST_MARK_FILE in the machine directory itself, a file of this user's alone (test/isolate.ts writes both). As
+ * with the root's mark, never as root or in a process systemd started. Without either mark: refused.
  */
 export function testStateRefusal(dir: string, env: NodeJS.ProcessEnv = process.env, proc: Proc = process, uid: number | null = currentUid()): string | null {
   return outsideTestMachine({ what: 'state directory', unset: `${BRAND.envPrefix}_STATE_DIR is unset`, fix: `set ${BRAND.envPrefix}_STATE_DIR to a directory of the test's own`, rootless: true }, dir, env, proc, uid);
@@ -153,6 +157,10 @@ export function testStateRefusal(dir: string, env: NodeJS.ProcessEnv = process.e
  * TEST_TOKEN_VAR), or null when it does.
  */
 function machineMarkRefusal(machine: string, env: NodeJS.ProcessEnv, uid: number | null): string | null {
+  // As the root's mark is never honoured (systemRootRefusal): not as root, not in a process systemd started.
+  if (uid === 0) return `${SYSTEM_ROOT_VAR} is unset, and this process runs as root`;
+  const sd = SYSTEMD_MARKERS.find((k) => env[k] !== undefined);
+  if (sd) return `${SYSTEM_ROOT_VAR} is unset, and systemd started this process (${sd} is set)`;
   const token = env[TEST_TOKEN_VAR];
   if (!token || !/^[0-9a-f]{64}$/.test(token)) return `${SYSTEM_ROOT_VAR} is unset, and ${TEST_TOKEN_VAR} doesn't carry the test preload's token`;
   const mark = join(machine, TEST_MARK_FILE);
@@ -191,6 +199,28 @@ function outsideTestMachine(o: { what: string; unset: string; fix: string; rootl
   }
   if (!dir) return no(o.unset);
   if (!inside(machine, dir)) return no(`${dir} is outside ${machine}`);
+  const link = linkInside(machine, dir);
+  if (link) return no(link);
+  return null;
+}
+
+/**
+ * Why a path inside `machine` may lead out of it, or null: a symlink at any part of it from the machine down, or a
+ * part that can't be looked at. Each part is lstat'ed (never followed), only inside the machine, stopping at the
+ * first one that doesn't exist yet (#818: fail closed on a link to the person's own state).
+ */
+function linkInside(machine: string, dir: string): string | null {
+  let p = machine;
+  for (const part of relative(machine, resolve(dir)).split(sep)) {
+    p = join(p, part);
+    try {
+      if (lstatSync(p).isSymbolicLink()) return `${p} is a symlink: no path inside the test machine may lead out of it`;
+    } catch (e) {
+      const code = (e as NodeJS.ErrnoException).code;
+      if (code === 'ENOENT' || code === 'ENOTDIR') return null;
+      return `${p} can't be looked at (${code ?? 'error'})`;
+    }
+  }
   return null;
 }
 

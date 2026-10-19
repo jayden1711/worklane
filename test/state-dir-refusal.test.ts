@@ -11,7 +11,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { chmodSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readlinkSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, relative, isAbsolute } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -206,6 +206,28 @@ test('in this test process the state dir is the test machine\'s, and one pointed
   assert.equal(stateDir(), isolatedEnv[STATE]);
 });
 
+test('a symlink inside the test machine never leads the state or slot dir out of it: refused, the link never followed (#818)', { skip: process.platform === 'win32' && 'POSIX symlinks' }, () => {
+  const engine = { argv: [process.execPath, join(repoRoot, 'dist', 'src', 'cli.js')], execArgv: [] as string[] };
+  const uid = process.getuid!();
+  const marked = { PATH: '/usr/bin', NODE_TEST_CONTEXT: 'child-v8', [TEST_MACHINE_VAR]: testMachine, [SYSTEM_ROOT_VAR]: isolatedEnv[SYSTEM_ROOT_VAR], [TEST_TOKEN_VAR]: process.env[TEST_TOKEN_VAR] };
+  const base = mkdtempSync(join(tmpdir(), 'link-'));
+  // A dangling link to a stand-in outside the machine (never made), and one to a directory inside it.
+  symlinkSync(join(standIn(), 'state'), join(base, 'out'));
+  mkdirSync(join(base, 'real'));
+  symlinkSync(join(base, 'real'), join(base, 'in'));
+  for (const [what, dir] of [['a link out, then below it', join(base, 'out', 'state')], ['the link itself', join(base, 'out')], ['a link to inside', join(base, 'in', 'state')]] as const) {
+    assert.match(testStateRefusal(dir, marked, engine, uid) ?? '', /is a symlink: no path inside the test machine may lead out of it/, what);
+    assert.match(testSlotsRefusal(dir, marked, engine, uid) ?? '', /is a symlink: no path inside the test machine may lead out of it/, `slots: ${what}`);
+  }
+  // No link on the way: as before, whether the dir exists or not.
+  assert.equal(testStateRefusal(join(base, 'real', 'state'), marked, engine, uid), null);
+  assert.equal(testSlotsRefusal(join(base, 'real'), marked, engine, uid), null);
+  // stateDir() itself, in a scratch child behind the probe's wrappers: refused, and nothing outside the machine touched.
+  const r = probe(testRunEnv({ [STATE]: join(base, 'out', 'state') }), dirname(readlinkSync(join(base, 'out'))));
+  assert.equal(r.error?.name, 'TestStateRefused');
+  assert.match(r.error!.message, /is a symlink/);
+});
+
 test('testStateRefusal: never outside a test run, whatever the directory; in one, only inside a marked test machine (#815)', { skip: process.platform === 'win32' && 'POSIX owners and modes' }, () => {
   const engine = { argv: [process.execPath, join(repoRoot, 'dist', 'src', 'cli.js'), 'coordinator', 'run'], execArgv: [] as string[] };
   // Strings only: outside a test run nothing is looked at.
@@ -227,6 +249,11 @@ test('testStateRefusal: never outside a test run, whatever the directory; in one
   assert.match(testStateRefusal(join(testMachine, '..', 'x'), rootless, engine, uid) ?? '', /is outside/);
   assert.match(testStateRefusal(join(testMachine, 'u', 'state'), { ...rootless, [TEST_TOKEN_VAR]: 'b'.repeat(64) }, engine, uid) ?? '', /doesn't match its own test mark/);
   assert.match(testStateRefusal(join(testMachine, 'u', 'state'), { ...rootless, [TEST_TOKEN_VAR]: undefined }, engine, uid) ?? '', /doesn't carry the test preload's token/);
+  // As the root's mark: never in a process systemd started, never as root (#818 round 2).
+  for (const k of ['INVOCATION_ID', 'JOURNAL_STREAM']) {
+    assert.match(testStateRefusal(join(testMachine, 'u', 'state'), { ...rootless, [k]: 'c'.repeat(32) }, engine, uid) ?? '', new RegExp(`systemd started this process \\(${k} is set\\)`), k);
+  }
+  assert.notEqual(testStateRefusal(join(testMachine, 'u', 'state'), rootless, engine, 0), null, 'as root');
   // A stray value naming a directory of this user's alone (as a home is), with no mark of its own, is no machine.
   const stray = mkdtempSync(join(tmpdir(), 'stray-machine-'));
   chmodSync(stray, 0o700);
