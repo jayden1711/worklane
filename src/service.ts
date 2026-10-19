@@ -71,11 +71,7 @@ export const instanceId = () => `${userInfo().username}@${hostname().split('.')[
 export const logPath = (root: string) => join(projectStateDir(root), 'events.db');
 export const serviceLabel = (cfg: Config) => `dev.${BRAND.cli}.${cfg.project.project.name.replace(/[^A-Za-z0-9-]/g, '-')}`;
 
-/**
- * The whole environment a local coordinator's service starts with, so its agent runs too: PATH reaching the prefix's
- * bin, where local init installs tools (src/tool-path.ts), and HOME; nothing else from the shell that ran `up`.
- * WHY one function (#738): the wizard's Claude step asks `claude` with exactly this (src/setup-steps.ts probeEnv).
- */
+/** A local coordinator unit's own variables, on top of what its service manager gives it; the Claude step uses it too (#738). */
 export const localServiceEnv = (env: NodeJS.ProcessEnv = process.env): { PATH: string; HOME: string } => ({ PATH: toolPath(env.PATH ?? '', env), HOME: env.HOME ?? '' });
 
 /**

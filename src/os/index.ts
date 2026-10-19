@@ -902,12 +902,8 @@ export function serviceRunning(label: string): boolean | null {
 }
 
 /**
- * The variables among `names` that this user's service manager gives every service it starts, local mode's
- * coordinator among them. A unit's own Environment= lines come on top of these. On Linux it is systemd's user manager
- * (`systemctl --user show-environment`: environment.d, set-environment, session imports); on macOS, launchd's
- * (`launchctl getenv`).
- * WHY (#738): the wizard's Claude step judges the login with what the service's runs get, not with its own shell.
- * An error when it can't be read. The error never carries a value: these can be credentials.
+ * Which of `names` this user's service manager gives every service it starts (#738): systemd's user manager on Linux,
+ * launchd on macOS. An error when it can't be read; an error never carries a value (these can be credentials).
  */
 export function serviceManagerEnv(names: readonly string[], o: { platform?: NodeJS.Platform; run?: (cmd: string, args: string[]) => string } = {}): { env: Record<string, string> } | { error: string } {
   const platform = o.platform ?? process.platform;
@@ -937,7 +933,7 @@ export function serviceManagerEnv(names: readonly string[], o: { platform?: Node
       const k = eq > 0 ? line.slice(0, eq) : '';
       if (!names.includes(k)) continue;
       const v = line.slice(eq + 1);
-      // systemd shell-quotes a value it can't print plainly ($'...'): not read here, so not guessed.
+      // A value systemd quoted ($'...') is not guessed.
       if (v.startsWith("$'") || v.startsWith('"') || v.startsWith("'")) return { error: `the user service manager sets ${k} in a quoted form this check doesn't read` };
       if (v) env[k] = v;
     }

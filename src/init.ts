@@ -36,7 +36,7 @@ import { describeInstall, httpDownload, INSTALLABLE, installPlan, installTool, t
 import { srvCheckoutPath, varLibPath } from './os/system-paths.js';
 import { ciChoiceProblem } from './ci-choice.js';
 import { ProjectConfig } from './config/schema.js';
-import { parse as parseYaml, parseDocument } from 'yaml';
+import { parse as parseYaml } from 'yaml';
 
 export { MODES, type Mode, type RunResult };
 export type StepId = 'tools' | 'claude' | 'github' | 'repo-config' | 'coordinator' | 'protection' | 'discord' | 'tailscale';
@@ -80,10 +80,7 @@ export interface InitState {
   handoffDetail?: Record<string, string>;
   /** Local mode: auto-config's answers, open questions, command results and setup PR (src/auto-config.ts). */
   autoConfig?: AutoConfigState;
-  /**
-   * Local mode, a new project (#738): the Claude login chosen for the agents, which the setup PR writes as
-   * agent_runtime.kind. An API key is kept as its file's path, never the key; nothing here goes into the repo.
-   */
+  /** Local, a new project (#738): the chosen login; an API key as its file's path, never the key. */
   agentRuntime?: RuntimeChoice;
   updatedAt: string;
   finishedAt: string | null;
@@ -155,7 +152,6 @@ export function unavailableIn(mode: Mode, has: (cmd: string) => boolean = (c) =>
 export interface InitIo {
   which(cmd: string): string | null;
   run(cmd: string, args: string[], o?: ProbeRunOptions): RunResult;
-  /** The login variables this user's service manager gives the coordinator's service (#738); absent: none. */
   serviceManagerEnv?(): { env: Record<string, string> } | { error: string };
   /** Run a command on the person's terminal (a login): its exit status. */
   interactive(cmd: string, args: string[]): Promise<number>;
@@ -303,12 +299,11 @@ async function coordinator(c: InitContext, act: boolean): Promise<StepResult> {
   return handoff(c, 'coordinator', act);
 }
 
-/** `--answer` ids for the Claude step's choice (#738): the login the agents use, and an API key's file. */
+/** `--answer` ids for the Claude step's choice (#738). */
 export const RUNTIME_ANSWER = 'agent-runtime';
 export const KEY_FILE_ANSWER = 'api-key-file';
 const RUNTIME_ANSWERS: Record<string, RuntimeKind> = { subscription: 'cli', api_key: 'api_key' };
 
-/** The agent_runtime a local checkout's agents run with, as the Claude step checks it (src/setup-steps.ts agentRuntimeOf). */
 const runtimeOf = (c: InitContext) =>
   agentRuntimeOf({ root: c.root!, runtimeChoice: c.state.agentRuntime, draftConfig: c.state.autoConfig?.draft?.yaml['config.yaml'] }, () => {
     try {
@@ -321,9 +316,8 @@ const runtimeOf = (c: InitContext) =>
 const claudeStatus = (c: InitContext) => detectClaudeLogin(c.io, runtimeOf(c));
 
 /**
- * Why a file can't be the agents' API key file (null: it can): an absolute plain path (apiKeyHelper's rule, so it
- * can't become a command), a regular file this user owns, open to no one else. It is never opened: only its owner and
- * mode are looked at. WHY: a path that fails the shape check is not shown back, in case the key itself was given.
+ * Why a file can't be the API key file (null: it can): a plain absolute path (apiKeyHelperCommand's rule), a regular
+ * file this user owns, open to no one else. Never opened. A bad path is not shown back: it may be the key itself.
  */
 export function keyFileProblem(file: string, uid: number | undefined = process.getuid?.()): string | null {
   try {
@@ -333,20 +327,19 @@ export function keyFileProblem(file: string, uid: number | undefined = process.g
   }
   const shown = redactString(file);
   const a = fileAccess(file);
-  if (a.kind === 'unsupported') return 'an API key file needs POSIX file modes: local mode runs on macOS, Linux or WSL2';
-  if (a.kind === 'hidden') return `${shown} can't be reached as this user`;
+  if (a.kind === 'unsupported') return 'a key file needs POSIX file modes';
+  if (a.kind === 'hidden') return `${shown} can't be reached`;
   if (a.kind === 'missing') return `no file at ${shown}`;
   try {
     if (!statSync(file).isFile()) return `${shown} is not a regular file`;
   } catch {
     return `no file at ${shown}`;
   }
-  if (uid !== undefined && a.uid !== uid) return `${shown} is not yours (its owner is uid ${a.uid}): the key file must be one you own`;
+  if (uid !== undefined && a.uid !== uid) return `${shown} is not yours (owner uid ${a.uid})`;
   if (a.openToOthers) return `${shown} is open to others (mode ${a.mode}): run \`chmod 600 ${shown}\`, then choose it again`;
   return null;
 }
 
-/** An answer to the Claude step's choice (--answer, or the terminal), recorded in init's state; a failed step when it can't be. */
 function recordRuntime(c: InitContext, kind: RuntimeKind, keyFile: string | undefined): StepResult | null {
   if (kind === 'cli') {
     c.state.agentRuntime = { kind: 'cli' };
@@ -359,11 +352,11 @@ function recordRuntime(c: InitContext, kind: RuntimeKind, keyFile: string | unde
   return null;
 }
 
-/** The two choices, on the terminal (a new project, nothing chosen yet). Enter, or no answer: the subscription, as before. */
+/** The two choices on the terminal; Enter or no answer: the subscription, as before. */
 async function askRuntime(c: InitContext): Promise<StepResult | null> {
   c.io.say('   How should the agents reach Claude?');
-  c.io.say(`     1)  ${RUNTIME_CHOICE_LABEL.cli}: your own \`claude auth login\`, through Anthropic's sign-in (the default)`);
-  c.io.say(`     2)  ${RUNTIME_CHOICE_LABEL.api_key}: a file you own that holds the key; claude reads it through apiKeyHelper, and the key itself is never asked for or kept`);
+  c.io.say(`     1)  ${RUNTIME_CHOICE_LABEL.cli} (\`claude auth login\`; the default)`);
+  c.io.say(`     2)  ${RUNTIME_CHOICE_LABEL.api_key}, in a file you own (only its path is asked for)`);
   const a = ((await c.io.ask('   1 or 2 [1]: ')) ?? '').trim();
   if (a === '') return null;
   if (a === '1') return recordRuntime(c, 'cli', undefined);
@@ -374,7 +367,7 @@ async function askRuntime(c: InitContext): Promise<StepResult | null> {
 
 async function claude(c: InitContext, act: boolean): Promise<StepResult> {
   if (c.mode === 'server') return handoff(c, 'claude', act);
-  // WHY (#738): an existing project's agent_runtime is its config's, changed only through a reviewed PR; never here.
+  // WHY (#738): an existing project's agent_runtime changes only through a reviewed PR.
   const configured = existsSync(join(c.root!, BRAND.configDir, 'config.yaml'));
   const given = c.answers?.[RUNTIME_ANSWER];
   if (given !== undefined) {
@@ -398,7 +391,7 @@ async function claude(c: InitContext, act: boolean): Promise<StepResult> {
     const again = claudeStatus(c);
     if (again.done) return asStep(again);
   }
-  // An API key has no login to open: claude reads it through apiKeyHelper, and the detail says how.
+  // An API key has no login to open (apiKeyHelper; the detail says how).
   const rt = runtimeOf(c);
   if ('error' in rt || rt.kind === 'api_key') return asStep(claudeStatus(c));
   c.io.say('   opening the Claude login (claude auth login)');
@@ -406,30 +399,20 @@ async function claude(c: InitContext, act: boolean): Promise<StepResult> {
   return asStep(claudeStatus(c));
 }
 
-/**
- * The setup PR's config.yaml with the wizard's choice (#738): agent_runtime.kind and nothing else. The key file's
- * path stays in init's state: it is this machine's, and never goes into the repo.
- */
+/** The setup PR's config.yaml with the chosen agent_runtime.kind (#738); the key file's path never goes there. */
 export function setRuntimeKind(cfgDir: string, kind: RuntimeKind): void {
   const file = join(cfgDir, 'config.yaml');
   const lines = readFileSync(file, 'utf8').split('\n');
-  const note = kind === 'api_key' ? 'api_key: claude billed to an API key, read from your key file through apiKeyHelper (chosen in init) | cli: your Claude subscription' : 'cli: your Claude subscription | api_key: claude billed to an API key';
-  // One line changed, the rest of the file as scaffolded: the kind under agent_runtime.
+  // One line changed: the kind under agent_runtime. Checked after, or nothing is proposed (fail closed).
   const start = lines.findIndex((l) => /^agent_runtime:\s*(#.*)?$/.test(l));
-  let set = false;
   for (let i = start + 1; start >= 0 && i < lines.length && /^(\s+\S|\s*$)/.test(lines[i]!); i++) {
     const m = /^(\s+kind:\s*)[A-Za-z_]+\s*(#.*)?$/.exec(lines[i]!);
-    if (!m) continue;
-    lines[i] = `${m[1]}${kind.padEnd(20)}# ${note}`;
-    set = true;
-    break;
+    if (m) {
+      lines[i] = `${m[1]}${kind.padEnd(20)}# api_key: an API key, through apiKeyHelper | cli: your Claude subscription`;
+      break;
+    }
   }
-  const text = set ? lines.join('\n') : (() => {
-    const doc = parseDocument(lines.join('\n'));
-    doc.setIn(['agent_runtime', 'kind'], kind);
-    return String(doc);
-  })();
-  // Checked, not assumed: the file says this kind now, or nothing is proposed (auto-config reports the error).
+  const text = lines.join('\n');
   const got = ProjectConfig.safeParse(parseYaml(text));
   if (!got.success || got.data.agent_runtime.kind !== kind) throw new Error(`couldn't set agent_runtime.kind: ${kind} in the drafted config.yaml`);
   writeFileSync(file, text);
@@ -466,7 +449,7 @@ export const autoConfig: AutoConfig = async (c) => {
     io: { git: (args, cwd) => c.io.run('git', args, { cwd }), gh: (args, cwd) => c.io.run('gh', args, { cwd }), ask: (q) => (c.interactive ? c.io.ask(q) : Promise.resolve(null)), say: c.io.say },
     save: () => c.save?.(),
     ...(c.hold ? { hold: true } : {}),
-    // #738: an API key chosen in the Claude step: the setup PR sets agent_runtime.kind for it (the subscription is the template's own).
+    // #738: an API key chosen: the setup PR sets agent_runtime.kind (cli is the template's).
     ...(c.state.agentRuntime?.kind === 'api_key' ? { adjust: (cfgDir: string) => setRuntimeKind(cfgDir, 'api_key') } : {}),
   });
   if (r.kind === 'drafted') return { status: 'done', detail: r.detail };
@@ -856,7 +839,6 @@ export function setupContext(state: InitState | null, o: { mode: Mode; root: str
     openQuestions: state?.autoConfig?.questions.length ?? 0,
     setupPr: state?.autoConfig?.pr?.url ?? serverPr,
     ...(state?.mode === 'server' ? { handoff: state.handoff, handoffDetail: state.handoffDetail ?? {} } : {}),
-    // #738: what the Claude step checks the login against before the config is in the checkout.
     ...(o.mode === 'local' ? { runtimeChoice: state?.agentRuntime, draftConfig: state?.autoConfig?.draft?.yaml['config.yaml'] } : {}),
   };
 }

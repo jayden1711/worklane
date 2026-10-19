@@ -204,7 +204,7 @@ test('#738 acceptance 3: choosing "API key" makes the setup PR write agent_runti
   assert.deepEqual(readInitState(localInitFile(q.root))!.agentRuntime, { kind: 'api_key', keyFile: k2.file });
   assert.equal(claudeStep(q.root).status, 'done', claudeStep(q.root).detail);
   assert.ok(tty.asked.some((a) => /the path of the file that holds the key \(the path, not the key\)/.test(a)), tty.asked.join('\n'));
-  assert.match(tty.out(), /1\) {2}your Claude subscription[\s\S]*2\) {2}an API key/);
+  assert.match(tty.out(), /1\) {2}your Claude subscription[\s\S]*2\) {2}an API key, in a file you own \(only its path is asked for\)/);
 });
 
 test('#738 acceptance 3: a key file that could leak is refused, and a key given where a path belongs is never echoed or kept', { skip: posixOnly }, async () => {
@@ -390,7 +390,7 @@ test("#738 round 3: when the user service manager can't be read, the step is not
     checkSetup(setupContext(null, { mode: 'local', root, repo: REPO, instance: null, stateDir: projectStateDir(root), policyFile: null }), systemProbe()).groups.flatMap((g) => g.steps).find((s) => s.id === 'claude-login')!,
   );
   assert.equal(step.done, false, step.detail);
-  assert.match(step.detail, /can't tell which Claude login the coordinator's service gives its agents: it inherits CLAUDE_CONFIG_DIR, ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN, CLAUDE_CODE_OAUTH_TOKEN from this user's service manager, and that couldn't be read \(systemctl --user show-environment failed: Failed to connect to bus: No medium found\)/);
+  assert.match(step.detail, /can't tell which login the coordinator's service gets: its service manager can't be read \(systemctl --user show-environment failed: Failed to connect to bus: No medium found\)/);
 });
 
 test('#738 round 3: server mode while the setup PR waits (the checkout has no valid config): a matching record reads as on main, read from credentials.yaml alone', () => {

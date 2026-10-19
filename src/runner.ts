@@ -180,31 +180,19 @@ const PASS_THROUGH = ['CLAUDE_CONFIG_DIR', 'PATH', 'HOME', 'USER', 'LOGNAME', 'S
 /** An agent_runtime kind (config.yaml agent_runtime.kind; `sdk` is read as api_key). */
 export type RuntimeKind = 'cli' | 'api_key';
 
-/**
- * The `claude auth status` methods each runtime kind runs on: the preflight below refuses a run on any other login
- * (auth_mismatch, "no silent billing switch"). The wizard's Claude step reads this same table (src/setup-steps.ts),
- * so it can never call a login done that the agents would refuse (#738).
- */
+/** The `claude auth status` methods each kind runs on; the preflight below and the wizard's Claude step read this one table (#738). */
 export const RUNTIME_LOGINS: Readonly<Record<RuntimeKind, readonly string[]>> = {
   cli: ['claude.ai', 'oauth_token'],
   api_key: ['api_key', 'api_key_helper'],
 };
 
-/**
- * The login a parsed `claude auth status` answer names, as the preflight reads it (and the wizard's Claude step):
- * 'none' unless it says it is signed in (`loggedIn` exactly true: "false" or 1 is not), 'unknown' when it is signed
- * in but names no method.
- */
+/** The login a `claude auth status` answer names: 'none' unless `loggedIn` is exactly true, 'unknown' with no method. */
 export function loginMethod(j: { loggedIn?: unknown; authMethod?: unknown }): string {
   if (j.loggedIn !== true) return 'none';
   return typeof j.authMethod === 'string' && j.authMethod ? j.authMethod : 'unknown';
 }
 
-/**
- * What of `base` reaches claude in an agent run, before the harness's own variables: the pass-through list, and for
- * api_key the key (local runs only). What claude signs in with comes from this alone, so the wizard's Claude step
- * asks `claude auth status` with it too (src/setup-steps.ts) and sees the login the agents would get.
- */
+/** What of `base` reaches claude in an agent run (the pass-through list; for api_key, local runs, the key); the Claude step uses it too. */
 export function agentAuthEnv(base: NodeJS.ProcessEnv, runtime: 'cli' | 'api_key'): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {};
   for (const k of PASS_THROUGH) if (base[k] !== undefined) env[k] = base[k];
