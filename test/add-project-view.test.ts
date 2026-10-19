@@ -3,7 +3,8 @@
 // follows the real run: the coordinator's add_project.step events and asks, in the script's order.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { spawn, type ChildProcess, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { once } from 'node:events';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -90,9 +91,16 @@ test("the server refuses an Add project submit from an instance owner who isn't 
 /**
  * add-project.sh as the helper runs it, played by a script: its progress lines, then the claude-token step waiting
  * for root to install the login on the machine (issue #711: no dashboard takes the token), with the retry.
+ *
+ * It holds at claude-token:started until the test releases it with a message on its IPC channel (its stdin can't do
+ * it: the coordinator closes that at once). WHY: it used to end 200 ms after that line on a timer, and on a slow CI
+ * runner it had ended before the test's first look, so the run read `failed` where the test expects `running`. Held,
+ * the run is `running` for as long as the test looks, however slow the machine. If the test goes away without
+ * releasing it, the channel closes and it exits.
  */
 const FAKE_HELPER = `
 const out = (o) => process.stdout.write(JSON.stringify(o) + '\\n');
+process.on('disconnect', () => process.exit(1));
 out({ step: 'instance', state: 'started', detail: '' });
 out({ step: 'instance', state: 'done', detail: 'users there' });
 out({ step: 'app', state: 'started', detail: '' });
@@ -100,13 +108,18 @@ out({ step: 'app', state: 'ask', detail: 'create the App', ask: { kind: 'approve
 out({ step: 'app', state: 'ask', detail: 'install the App', ask: { kind: 'approve_link', title: 'Install shop-app on acme/shop only', detail: 'Only that repo.', url: 'https://github.com/apps/shop-app/installations/new' } });
 out({ step: 'app', state: 'done', detail: 'the App is set up' });
 out({ step: 'claude-token', state: 'started', detail: '' });
-setTimeout(() => {
+process.once('message', () => {
   out({ step: 'claude-token', state: 'waiting', detail: "the agents' Claude login, which only root installs, on this machine: sudo bash credentials.sh shop claude", retry: 'sudo bash add-project.sh shop acme/shop, once that is done' });
   process.exit(3);
-}, 200);
+});
 `;
 
-test('a machine owner submit is accepted, and the view follows the coordinator: its steps in order, both GitHub links; the Claude login waits for root, never a paste box', { skip: !posix && 'a stand-in helper' }, async () => {
+/**
+ * Submit, let the coordinator run the stand-in helper, and follow the run in the view. `slowRunner` plays a CI runner
+ * that stalls right after the helper starts: the test's first look comes only once the helper has ended, or after a
+ * second if it is still alive. A helper that ends on its own timer fails that (the flake on CI); a held one doesn't.
+ */
+async function followTheRun(slowRunner: boolean) {
   const s = await dashboard(['example-owner']);
   try {
     const ok = await s.post({ name: 'shop', repo: 'acme/shop' });
@@ -119,18 +132,31 @@ test('a machine owner submit is accepted, and the view follows the coordinator: 
 
     // The coordinator takes it and runs the (stand-in) helper.
     const log = new EventLog(s.eventsDb);
+    let child: ChildProcess | undefined;
     try {
-      const helper = () => spawn(process.execPath, ['-e', FAKE_HELPER], { stdio: ['pipe', 'pipe', 'pipe'] });
+      // stdio 3 is the IPC channel the test releases the helper on; the coordinator uses only 0-2.
+      const helper = () => (child = spawn(process.execPath, ['-e', FAKE_HELPER], { stdio: ['pipe', 'pipe', 'pipe', 'ipc'] })) as ChildProcessWithoutNullStreams;
       assert.equal(runMachineRequests({ log, ownersFile: s.ownersFile, instance: 'demo', spawn: helper }), 1);
       const run = runningAddProjects.get(ok.body.request!.id)!;
+      if (slowRunner) {
+        let timer: NodeJS.Timeout | undefined;
+        await Promise.race([once(child!, 'close'), new Promise((res) => (timer = setTimeout(res, 1000)))]);
+        clearTimeout(timer);
+      }
       for (let i = 0; i < 300 && !v.runs[0]!.steps.some((x) => x.step === 'claude-token' && x.state !== 'pending'); i++) {
         v = await s.get();
         await new Promise((res) => setTimeout(res, 10));
       }
+      // Seen while the helper is alive, held at the claude-token step.
+      assert.equal(child!.exitCode, null, 'the helper is still running');
+      assert.equal(v.runs[0]!.steps.find((x) => x.step === 'claude-token')!.state, 'started');
       assert.equal(v.runs[0]!.status, 'running');
       assert.deepEqual(v.runs[0]!.asks.filter((a) => a.kind === 'approve_link').map((a) => a.url), ['https://hub.example.test/setup/app-manifest/start/amf-1', 'https://github.com/apps/shop-app/installations/new'], 'both GitHub links, in order');
+      // Now let it reach the claude-token wait and end.
+      child!.send('release');
       await run;
     } finally {
+      child?.kill();
       log.close();
     }
     v = await s.get();
@@ -146,4 +172,7 @@ test('a machine owner submit is accepted, and the view follows the coordinator: 
   } finally {
     await s.d.close();
   }
-});
+}
+
+test('a machine owner submit is accepted, and the view follows the coordinator: its steps in order, both GitHub links; the Claude login waits for root, never a paste box', { skip: !posix && 'a stand-in helper' }, () => followTheRun(false));
+test('the same on a slow runner, whose first look at the view comes late: the run is still seen running while the helper is alive', { skip: !posix && 'a stand-in helper' }, () => followTheRun(true));
