@@ -1,8 +1,8 @@
 // auto_merge OFF on a single machine (#726; the owner's structural decision of 2026-10-19, and principle 2: OFF can
 // never be blocked or undone): root's kill switch for one instance, in root's record directory (/etc/<cli>/policy-root).
 //
-//   - A switch is any `<instance>.auto-merge-off*`; each OFF leaves one of its own name (armOne), by rename from an
-//     armed one or the disarmed spare (`<instance>.auto-merge-spare`): no new space, no lock, no read of policy.yaml.
+//   - A switch is any `<instance>.auto-merge-off*`; each OFF leaves one of its own name (armOne), moving an armed one
+//     or the disarmed spare (`<instance>.auto-merge-spare`): no new space, no lock, no read of policy.yaml.
 //     The engine checks them BEFORE it reads the policy (autoMergeKilled); a directory it can't read counts as off.
 //   - Only root's `set on` removes switches: the ones it saw before it waited for the lock, each by name, so no OFF
 //     that said done is undone.
