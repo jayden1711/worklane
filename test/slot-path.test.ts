@@ -17,9 +17,9 @@
 // - the value at run time: fs, path.join, String() and a template literal refuse it, nothing prints its path, an
 //   error from a slot file names no path, and a forged one (its prototype, its constructor, a Proxy) is refused.
 import assert from 'node:assert/strict';
-import { appendFileSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
-import { join, posix, relative, sep } from 'node:path';
+import { dirname, join, posix, relative, sep } from 'node:path';
 import { test } from 'node:test';
 import { inspect } from 'node:util';
 import ts from 'typescript';
@@ -146,6 +146,23 @@ test('tsc: a slot path reaches no writer but writeSlotFile, through a mixed modu
   assert.deepEqual(other, [], 'and nothing else in either file fails');
 });
 
+test("tsc: slotsDir takes no system, through .call or an alias either (#806 round-3 review, the mark oracle)", () => {
+  const files = srcFiles();
+  const before = files.get('src/slots.ts')!;
+  const cases = [
+    "export const m1772 = (g: string) => sd772.call(undefined, { dir: g, config: '' });",
+    "export const m2772 = (g: string) => f772({ dir: g, config: '' });",
+    "export const m3772 = (g: string) => Reflect.apply(sd772, undefined, [{ dir: g, config: '' }]) as unknown;",
+  ];
+  const head = ["import { slotsDir as sd772 } from './os/index.js';", 'const f772 = sd772;'];
+  files.set('src/slots.ts', `${before}\n${head.join('\n')}\n${cases.join('\n')}\n`);
+  const start = before.split('\n').length + 1 + head.length;
+  const errors = errorsIn(program(files), 'src/slots.ts');
+  // .call and the alias fail to compile; Reflect.apply's arguments are `any`, and at run time slotsDir ignores them
+  // (the run-time test below).
+  assert.deepEqual([0, 1].filter((i) => !errors.some((d) => d.line === start + i)), [], errors.map((d) => `${d.line}: TS${d.code} ${d.text}`).join('\n'));
+});
+
 test('tsc: the same fixtures with a plain path where the slot dir was compile (a control: the fixture text is valid TypeScript)', () => {
   const { files } = withFixtures("'/a/state/dir'", "'/a/state/dir'");
   const p = program(files);
@@ -164,8 +181,12 @@ interface Finding {
 const HELPER = 'src/slot-file.ts';
 /** The module that makes slot paths (slotPathOf), and the only one that reads where the slot dir is. */
 const MAKER = 'src/os/index.ts';
-/** Names only the maker uses: slotPathOf and slotDirAt make a slot path from a string. */
-const MAKER_ONLY = new Set(['slotPathOf', 'slotDirAt']);
+/**
+ * Names only the maker uses: slotPathOf and slotDirAt make a slot path from a string; slotsDirFor is slotsDir with a
+ * `system` of the caller's (tests'), so any mention of it elsewhere (a call, an alias, `.call`, a callback) is
+ * reported, not only a call with an argument (#806 round-3 review, the mark oracle).
+ */
+const MAKER_ONLY = new Set(['slotPathOf', 'slotDirAt', 'slotsDirFor']);
 /** Where the slot dir's location may be read: the maker, and the system paths it reads it from. */
 const SLOT_SOURCES = new Set([MAKER, 'src/os/system-paths.ts']);
 const SOURCE_NAMES = new Set(['AGENT_SLOTS_DIR', 'SYSTEM_SLOTS', 'devSlotsPath', 'unguardedSlotsDir']);
@@ -203,6 +224,8 @@ function slotPathMakers(files: Map<string, string>): Finding[] {
       const name = nameText(n);
       if (name && MAKER_ONLY.has(name) && file !== MAKER) at(n, `${name}: only ${MAKER} makes a slot path`);
       if (ts.isImportDeclaration(n) && ts.isStringLiteral(n.moduleSpecifier) && whole(n.moduleSpecifier.text) && n.importClause?.namedBindings && ts.isNamespaceImport(n.importClause.namedBindings)) at(n, `import * from ${n.moduleSpecifier.text}: import its functions by name`);
+      // A re-export of the whole module is the same namespace, one import away (#806 round-3 review, A8).
+      if (ts.isExportDeclaration(n) && n.moduleSpecifier && ts.isStringLiteral(n.moduleSpecifier) && whole(n.moduleSpecifier.text) && (!n.exportClause || ts.isNamespaceExport(n.exportClause))) at(n, `export *${n.exportClause ? ' as' : ''} from ${n.moduleSpecifier.text}: re-export its functions by name`);
       if (ts.isCallExpression(n)) {
         const a = n.arguments[0];
         if (n.expression.kind === ts.SyntaxKind.ImportKeyword && a && ts.isStringLiteralLike(a) && whole(a.text)) at(n, 'import() of slot-file.js or os/index.js: import its functions by name');
@@ -383,6 +406,12 @@ test('the maker check: another module making a slot path, opening one, passing s
     [MAKER, "import { slotPathOf } from '../slot-file.js';\nexport const f = slotPathOf('/x');\nexport const m = (dir: string) => slotsDir({ dir, config: '' });\n"],
     ['src/os/system-paths.ts', "import * as os from './index.js';\nexport const n = () => os.slotsDir({ dir: '/x', config: '' });\n"],
     ['src/os/stats.ts', "import * as sf from '../slot-file.js';\nexport const o = (g: string) => (sf as unknown as Record<string, (d: string) => unknown>)['slotPath' + 'Of']!(g);\nexport const p = () => import('../slot-file.js');\nexport const q = () => import('./index.js');\n"],
+    // #806 round 3, A8 through a re-export: the re-export is reported; the module that uses it imports a name from a
+    // module that is neither, which the check can't follow (its source is reported instead).
+    ['src/reexp.ts', "export * as osns from './os/index.js';\nexport * from './os/index.js';\nexport * from './slot-file.js';\nexport { slotsDirFor } from './os/index.js';\n"],
+    ['src/use-reexp.ts', "import { osns } from './reexp.js';\nimport * as r from './reexp.js';\nexport const s = (g: string) => (osns as unknown as Record<string, (d: string) => unknown>)['slot' + 'DirAt']!(g) === (r as unknown as Record<string, (d: string) => unknown>)['slot' + 'DirAt']!(g);\n"],
+    // The mark oracle: slotsDirFor in any form outside os/index.ts (slotsDir itself takes no argument now).
+    ['src/github/budget.ts', "import { slotsDirFor, slotsDir } from '../os/index.js';\nconst f = slotsDirFor;\nexport const t = (dir: string) => [slotsDirFor.call(undefined, { dir, config: '' }), [{ dir, config: '' }].map(f), slotsDir()];\n"],
   ]);
   assert.deepEqual(show(slotPathMakers(files)).map((l) => l.replace(/^(.*?:\d+: [^:]*?)(: |\(…|\(\{).*$/, '$1')), [
     'src/cores.ts:1: slotPathOf',
@@ -402,6 +431,13 @@ test('the maker check: another module making a slot path, opening one, passing s
     'src/os/stats.ts:1: import * from ../slot-file.js',
     'src/os/stats.ts:3: import() of slot-file.js or os/index.js',
     'src/os/stats.ts:4: import() of slot-file.js or os/index.js',
+    'src/reexp.ts:1: export * as from ./os/index.js',
+    'src/reexp.ts:2: export * from ./os/index.js',
+    'src/reexp.ts:3: export * from ./slot-file.js',
+    'src/reexp.ts:4: slotsDirFor',
+    'src/github/budget.ts:1: slotsDirFor',
+    'src/github/budget.ts:2: slotsDirFor',
+    'src/github/budget.ts:3: slotsDirFor',
   ]);
   // cores.ts:2 (`mk(…)`, the renamed import) is the import's line: the name is caught where it is imported.
 });
@@ -702,6 +738,44 @@ test('run time: no descriptor of a slot path leaves the helper, so /proc/self/fd
   const r = os.readRegularFile(f, 100);
   assert.equal(r.kind === 'file' && r.text, '{"a":1}');
   assert.equal(os.readRegularFile(d, 100).kind, 'not-file');
+});
+
+test('run time: no call of slotsDir, however made, marks a guess as the system slot dir (#806 round-3 review, the mark oracle)', async () => {
+  const os = (await import('../src/os/index.js')) as Os;
+  const real = process.env.AGENT_SLOTS_DIR!;
+  const before = typeof os.updateDrainPath();
+  const loose = os.slotsDir as unknown as (s?: unknown) => unknown;
+  const right = { dir: real, config: '' };
+  loose.call(undefined, right);
+  loose(right);
+  [right].map(loose);
+  Reflect.apply(loose, undefined, [right]);
+  assert.equal(before, 'object');
+  assert.equal(typeof os.updateDrainPath(), before, "updateDrainPath's type doesn't change with a right guess");
+  assert.throws(() => {
+    (os.SYSTEM_SLOTS as { dir: string }).dir = real;
+  }, TypeError, 'SYSTEM_SLOTS is frozen: no module points it at a guess');
+});
+
+test("run time: the machine's own system slot dir is still the system one: root's drain file and the system config (principle 3)", async () => {
+  const os = (await import('../src/os/index.js')) as Os;
+  const saved = process.env.AGENT_SLOTS_DIR;
+  delete process.env.AGENT_SLOTS_DIR;
+  const madeConfigDir = !existsSync(dirname(os.SYSTEM_SLOTS.config));
+  try {
+    mkdirSync(os.SYSTEM_SLOTS.dir, { recursive: true });
+    const d = os.slotsDir();
+    assert.equal(d, os.slotDirAt(os.SYSTEM_SLOTS.dir));
+    assert.equal(os.updateDrainPath(), os.UPDATE_DRAIN_FILE);
+    assert.equal(os.slotsConfigPath(), os.slotsConfigPath(d));
+    mkdirSync(dirname(os.SYSTEM_SLOTS.config), { recursive: true });
+    writeFileSync(os.SYSTEM_SLOTS.config, '{}');
+    assert.equal(os.slotsConfigPath(), os.SYSTEM_SLOTS.config);
+  } finally {
+    process.env.AGENT_SLOTS_DIR = saved;
+    rmSync(os.SYSTEM_SLOTS.dir, { recursive: true, force: true });
+    rmSync(madeConfigDir ? dirname(os.SYSTEM_SLOTS.config) : os.SYSTEM_SLOTS.config, { recursive: true, force: true });
+  }
 });
 
 test("run time: updateDrainPath and slotsConfigPath never compare a caller's system with the slot path (#806 review, A3)", async () => {

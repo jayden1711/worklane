@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { machineCap, slotStatus, tryAgentSlot } from '../src/slots.js';
-import { slotDirAt, slotsConfigPath, slotsDir as machineSlotsDir } from '../src/os/index.js';
+import { slotDirAt, slotsConfigPath, slotsDirFor as machineSlotsDir } from '../src/os/index.js';
 import { devSlotsPath } from '../src/os/system-paths.js';
 import { slotFile } from '../src/slot-file.js';
 import { repoRoot } from './helpers.js';
@@ -74,7 +74,10 @@ test('slot locations: durable system paths when present, env overrides, the old 
     mkdirSync(join(root, 'etc'));
     writeFileSync(system.config, JSON.stringify({ max_agents: 6 }));
     assert.equal(slotsConfigPath(system.dir, system), system.config);
-    assert.equal(slotsConfigPath(machineSlotsDir(system), system), system.config, 'the system dir as a slot path: its system config');
+    // A test's own `system` never marks a slot path as the system dir (#806 round 3: no caller's path is compared with
+    // the slot dir), so the slot-path form keeps the dir's own config; the machine's SYSTEM_SLOTS does mark one
+    // (test/slot-path.test.ts, "the machine's own system slot dir").
+    assert.equal(slotsConfigPath(machineSlotsDir(system), system), slotFile(slotDirAt(system.dir), 'config.json'), 'a slot path from a test system is no system dir');
     assert.equal(slotsConfigPath('/some/other/dir', system), '/some/other/dir/config.json', 'a custom slot dir keeps its own config');
     // Inside the test machine: in a test run, a slot directory outside it is refused (#669).
     process.env.AGENT_SLOTS_DIR = join(root, 'custom-slots');

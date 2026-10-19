@@ -769,7 +769,8 @@ export function childEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv 
  * cleaned of old files by tmp cleaners (systemd-tmpfiles after about 30
  * days), which would drop the cap and lock files of a long-running machine.
  */
-export const SYSTEM_SLOTS = { dir: varLibPath('agent-slots'), config: etcPath('slots.json') };
+// Frozen: a module that set SYSTEM_SLOTS.dir to a guess would have slotsDir mark the slot dir by it (#806 round 4).
+export const SYSTEM_SLOTS = Object.freeze({ dir: varLibPath('agent-slots'), config: etcPath('slots.json') });
 
 /**
  * The engine updater's drain flag (scripts/machine/<cli>-update.cjs, src/update-drain.ts): with the system slot
@@ -784,7 +785,10 @@ export function updateDrainPath(dir: SlotPathLike = slotsDir(), system = SYSTEM_
   return isSystemSlots(dir, system) ? UPDATE_DRAIN_FILE : slotFile(dir, 'update-drain.json');
 }
 
-/** The slot paths slotsDir made for its system directory: set when made, never by comparing with a caller's path. */
+/**
+ * The slot paths slotsDir made for the machine's system directory (SYSTEM_SLOTS, this module's own): set when made,
+ * never by comparing with a path or a `system` a caller passed (#806 review, A3 and the round-3 mark oracle).
+ */
 const systemSlotDirs = new WeakSet<SlotPath>();
 
 /**
@@ -803,12 +807,22 @@ const isSystemSlots = (dir: SlotPathLike, system: typeof SYSTEM_SLOTS) => (typeo
  * TestSlotsRefused before a file is opened (src/os/system-paths.ts testSlotsRefusal), so no test reaches the machine's
  * own slots, STOP, budgets or incidents through a default. Outside a test run, as always.
  */
-export function slotsDir(system = SYSTEM_SLOTS): SlotPath {
+export function slotsDir(): SlotPath {
+  return slotsDirFor(SYSTEM_SLOTS);
+}
+
+/**
+ * slotsDir with the system locations a test gives (test/slots.test.ts): the seam has its own name, which no src/
+ * module but this one may name (test/slot-path.test.ts), so slotsDir itself takes nothing a caller could choose.
+ * Only the machine's own SYSTEM_SLOTS marks a slot path as the system dir: a caller's `system` never does, so no
+ * call of this tells a module whether a guess is the slot dir (#806 round-3 review).
+ */
+export function slotsDirFor(system: typeof SYSTEM_SLOTS): SlotPath {
   const dir = unguardedSlotsDir(system);
   const refusal = testSlotsRefusal(dir);
   if (refusal) throw new TestSlotsRefused(refusal);
   const p = slotPathOf(dir);
-  if (dir === system.dir) systemSlotDirs.add(p);
+  if (system === SYSTEM_SLOTS && dir === SYSTEM_SLOTS.dir) systemSlotDirs.add(p);
   return p;
 }
 
