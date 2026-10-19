@@ -28,6 +28,7 @@ const kill = killModule as unknown as {
   idDir?: (id: string, d?: string) => string;
   aliasInstance?: (from: string, to: string, d?: string) => string;
   sharedWith?: (n: string, d?: string) => string[];
+  sweepOrphanIds?: (d?: string) => void;
 };
 /** The directory an instance's switches live in (round 9: by its id), or '' when it has none. */
 function switchDir(name: string, dir = POLICY_ROOT_DIR): string {
@@ -767,4 +768,40 @@ test("an OFF's mint that failed or was killed before its link leaves an id direc
   assert.equal(existsSync(join(byId, old)), false, 'an hour-old orphan goes');
   assert.equal(existsSync(join(byId, fresh)), true, "a fresh one stays (another OFF's, between its directory and its link)");
   assert.equal(existsSync(switchDir('swo')), true, "a pointer's own directory stays");
+});
+
+test("a rename landing inside the orphan sweep (after it listed root's pointers, before it read the old name's) never drops the live id: the renamed instance stays on and its writers go on (#726 round 12)", { skip }, () => {
+  // Through 28c54dc9 the sweep read the old name's pointer gone, took the id for an orphan and dropped its directory.
+  const m = machineInstance('swr');
+  ownPolicy('swr', m.deps);
+  setPolicy('swr', 'auto_merge', 'on', null, m.deps);
+  assert.equal(autoMergeKilled('swr'), false, 'on before the rename');
+  const live = switchDir('swr');
+  const twoHoursAgo = new Date(Date.now() - 2 * 3600_000);
+  utimesSync(live, twoHoursAgo, twoHoursAgo);
+  const fs = createRequire(import.meta.url)('node:fs') as Record<string, unknown>;
+  const orig = { readdirSync: fs.readdirSync };
+  let renamed = false;
+  fs.readdirSync = (p: unknown, ...r: unknown[]) => {
+    const got = (orig.readdirSync as (...a: unknown[]) => unknown)(p, ...r);
+    if (!renamed && String(p) === POLICY_ROOT_DIR) {
+      renamed = true; // instance-rename.sh: the new name aliased to the id, then the old pointer removed
+      kill.aliasInstance!('swr', 'swr2');
+      unlinkSync(join(POLICY_ROOT_DIR, 'swr.id'));
+    }
+    return got;
+  };
+  syncBuiltinESMExports();
+  try {
+    kill.sweepOrphanIds!();
+  } finally {
+    Object.assign(fs, orig);
+    syncBuiltinESMExports();
+  }
+  assert.ok(renamed, 'the rename ran inside the sweep');
+  assert.equal(existsSync(live), true, 'the live id directory stays');
+  assert.equal(switchDir('swr2'), live);
+  assert.equal(autoMergeKilled('swr2'), false, 'the renamed instance is still on');
+  setPolicy('swr2', 'auto_merge', 'off', null, m.deps);
+  assert.equal(autoMergeKilled('swr2'), true, 'and its OFF goes on');
 });

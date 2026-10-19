@@ -311,13 +311,21 @@ export function retakeId(instance: string, dir = POLICY_ROOT_DIR, at = new Date(
   fsyncPath(dir);
 }
 
-/** Id directories no pointer names, over an hour old (an OFF's mint that failed or was killed before its link): gone. */
+/**
+ * Id directories no pointer names, over an hour old (an OFF's mint that failed or was killed before its link): gone.
+ * A pointer listed but gone when read means a rename is under way (alias, then the old pointer removed), and the new
+ * name may not have been listed: nothing is dropped this time (#726 round 12).
+ */
 export function sweepOrphanIds(dir = POLICY_ROOT_DIR): void {
   let names: string[];
-  let ids: Set<string>;
+  const ids = new Set<string>();
   try {
     names = readdirSync(join(dir, 'by_id'));
-    ids = new Set(readdirSync(dir).filter((n) => n.endsWith('.id')).map((n) => instanceId(n.slice(0, -3), dir)).flatMap((p) => (p && 'id' in p ? [p.id] : [])));
+    for (const n of readdirSync(dir).filter((n) => n.endsWith('.id'))) {
+      const p = instanceId(n.slice(0, -3), dir);
+      if (p === null) return;
+      if ('id' in p) ids.add(p.id);
+    }
   } catch {
     return;
   }
