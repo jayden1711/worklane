@@ -202,16 +202,30 @@ echo ran`);
     symlinkSync(bashPath, join(proc, '4242', 'exe'));
   };
   procNs(true);
-  /** The wrapper: ok (root's here: this user's, 0755, taking both options), or one that is wrong in one way. */
-  const userns = (kind: 'ok' | 'old' | 'mode' | 'link') => {
+  /** The wrapper: ok (root's here: this user's; its ACL lets only the test users run it; it takes both options), or one
+   * wrong in one way. Running it leaves a mark (ran): the helper itself never runs it. */
+  const aclFile = join(dir, 'acl');
+  const ranMark = join(dir, 'userns-ran');
+  const acls = {
+    ok: `user::rwx\nuser:${me}:r-x\nuser:wl-test-other:r-x\t#effective:r-x\ngroup::---\nmask::r-x\nother::---\n`,
+    world: `user::rwx\nuser:${me}:r-x\ngroup::---\nmask::r-x\nother::r-x\n`,
+    group: `user::rwx\nuser:${me}:r-x\ngroup::r-x\nmask::r-x\nother::---\n`,
+    namedGroup: `user::rwx\nuser:${me}:r-x\ngroup::---\ngroup:staff:r-x\nmask::r-x\nother::---\n`,
+    stranger: `user::rwx\nuser:${me}:r-x\nuser:gpuagent:r-x\ngroup::---\nmask::r-x\nother::---\n`,
+    noMe: `user::rwx\nuser:wl-test-other:r-x\ngroup::---\nmask::r-x\nother::---\n`,
+  } as const;
+  stub('getfacl', `[ -e '${usernsBin}' ] || exit 1; cat '${aclFile}'`);
+  const userns = (kind: 'ok' | 'old' | 'link' | Exclude<keyof typeof acls, 'ok'>) => {
     rmSync(usernsBin, { force: true });
+    writeFileSync(aclFile, kind in acls ? acls[kind as keyof typeof acls] : acls.ok);
     if (kind === 'link') {
       symlinkSync(real('true')!, usernsBin);
       return;
     }
-    const opts = kind === 'old' ? 'echo " -r, --map-root-user"' : 'echo " -c, --map-current-user    map current user to itself"; echo " --keep-caps               retain capabilities"';
-    writeFileSync(usernsBin, `#!/bin/sh\n[ "$1" = --help ] && { ${opts}; }\nexit 0\n`);
-    chmodSync(usernsBin, kind === 'mode' ? 0o775 : 0o755);
+    // util-linux's unshare names its options in its binary; an older one has neither of the two.
+    const opts = kind === 'old' ? '# map-root-user' : '# map-current-user keep-caps';
+    writeFileSync(usernsBin, `#!/bin/sh\n${opts}\ntouch '${ranMark}'\nexit 0\n`);
+    chmodSync(usernsBin, 0o700);
   };
   const helper = join(dir, 'worklane-testrun');
   writeFileSync(helper, src);
@@ -254,6 +268,7 @@ echo ran`);
   const netCalls = () => calls().filter((a) => a.some((x) => /^--unit=worklane-test-shop_[a-z0-9-]+_net_\d+$/.test(x))).map(withProps);
   return {
     dir, base, file, slirp, run, exec, mkRun, grant, lastProps, netCalls, binds, bin, usernsBin, proc, procNs, userns,
+    usernsRan: () => existsSync(ranMark),
     noSeccomp: () => writeFileSync(join(dir, 'noseccomp'), ''),
     /** kernel.apparmor_restrict_unprivileged_userns, and whether the wrapper's profile is loaded. */
     restrict: (on: boolean, loaded: boolean) => {
@@ -448,9 +463,9 @@ test('a slirp4netns without seccomp support: no run gets the network and the fet
 });
 
 /** What a run's unit runs before its own command when it has a user namespace of its own (#545). */
-const usernsArgv = (h: ReturnType<typeof netHelper>, dollar = '$') => [
+const usernsArgv = (h: ReturnType<typeof netHelper>, dollar = '$', aa = false) => [
   h.usernsBin, '--user', '--map-current-user', '--net', '--keep-caps', '--', '/bin/sh', '-c',
-  `${join(h.bin, 'ip')} link set lo up && exec ${join(h.bin, 'setpriv')} --inh-caps=-all --ambient-caps=-all --bounding-set=-all -- "${dollar}@"`, 'sh',
+  `${join(h.bin, 'ip')} link set lo up && exec ${join(h.bin, 'setpriv')} --inh-caps=-all --ambient-caps=-all --bounding-set=-all${aa ? ' --apparmor-profile=unconfined' : ''} -- "${dollar}@"`, 'sh',
 ];
 
 test('#545: with the wrapper, a run\'s unit makes the run a user and network namespace of its own (its uid mapped to itself, lo up, every capability dropped) before its command; without a usable one, the command alone, as before', { skip: !posix && 'bash' }, () => {
@@ -478,22 +493,30 @@ test('#545: with the wrapper, a run\'s unit makes the run a user and network nam
     h.exec('fast-u-3', [], 'echo hi');
     assert.deepEqual(h.lastProps().argv.slice(-15, -5), usernsArgv(h, '$$'));
     h.sysd(255);
-    // Not root's own 0755, a symlink, an unshare without --map-current-user and --keep-caps: the command alone.
-    for (const kind of ['mode', 'link', 'old'] as const) {
+    // A symlink, an unshare without --map-current-user and --keep-caps, or one others than the test users may run: the
+    // command alone (the wrapper is never used where its userns allowance would reach anyone else).
+    for (const kind of ['link', 'old', 'world', 'group', 'namedGroup', 'stranger', 'noMe'] as const) {
       h.userns(kind);
-      const x = h.exec(`fast-u-${kind}`, [], 'echo hi');
+      const x = h.exec(`fast-u-${kind.toLowerCase()}`, [], 'echo hi');
       assert.equal(x.status, 0, `${kind}: ${x.stderr}`);
       assert.deepEqual(h.lastProps().argv.slice(-5), ['/bin/bash', '-o', 'pipefail', '-c', 'echo hi'], kind);
       assert.ok(!h.lastProps().argv.includes(h.usernsBin), kind);
     }
-    // Where the kernel restricts user namespaces, only with its AppArmor profile loaded.
+    // Where the kernel restricts user namespaces, only with its AppArmor profile loaded; and then the command leaves
+    // the profile for the unconfined label (setpriv --apparmor-profile=unconfined), so it doesn't keep its allowance.
     h.userns('ok');
     h.restrict(true, false);
     h.exec('fast-u-4', [], 'echo hi');
     assert.ok(!h.lastProps().argv.includes(h.usernsBin), 'restricted, no profile: the command alone');
     h.restrict(true, true);
     h.exec('fast-u-5', [], 'echo hi');
-    assert.deepEqual(h.lastProps().argv.slice(-15, -5), usernsArgv(h), 'restricted, the profile loaded');
+    assert.deepEqual(h.lastProps().argv.slice(-15, -5), usernsArgv(h, '$', true), 'restricted, the profile loaded: the command leaves it');
+    // The profile loaded where the restriction is off: it is left all the same.
+    h.restrict(false, true);
+    h.exec('fast-u-6', [], 'echo hi');
+    assert.deepEqual(h.lastProps().argv.slice(-15, -5), usernsArgv(h, '$', true));
+    // The helper reads the wrapper; it never runs it (as root, on a real machine).
+    assert.equal(h.usernsRan(), false, 'the helper ran the wrapper');
   } finally {
     h.done();
   }
@@ -515,7 +538,7 @@ test('#545: a granted run\'s slirp4netns runs as the test user, with no capabili
     assert.ok(net.argv.includes(`--uid=${me}`) && net.argv.includes(`--gid=${me}`), `as the test user: ${net.argv.join(' ')}`);
     assert.deepEqual(net.argv.slice(-9), [h.slirp, '--configure', '--mtu=65520', '--disable-host-loopback', '--enable-seccomp', `--userns-path=${join(h.proc, '4242', 'ns', 'user')}`, '--netns-type=path', join(h.proc, '4242', 'ns', 'net'), 'tap0']);
     assert.ok(!net.argv.includes('--enable-sandbox'), 'slirp4netns\'s own sandbox needs root (its unit\'s does that job)');
-    for (const p of ['CapabilityBoundingSet=', 'NoNewPrivileges=yes', 'ProtectSystem=strict', 'ProtectHome=yes', 'PrivateTmp=yes', 'TemporaryFileSystem=/etc:ro', 'TemporaryFileSystem=/run:ro', 'RestrictAddressFamilies=AF_INET AF_INET6 AF_NETLINK', 'SystemCallFilter=~kill tkill tgkill rt_sigqueueinfo rt_tgsigqueueinfo pidfd_send_signal', 'NFTSet=cgroup:inet:worklane_egress:egress_ok']) {
+    for (const p of ['CapabilityBoundingSet=', 'NoNewPrivileges=yes', 'ProtectSystem=strict', 'ProtectHome=yes', 'PrivateTmp=yes', 'TemporaryFileSystem=/etc:ro', 'TemporaryFileSystem=/run:ro', 'RestrictAddressFamilies=AF_INET AF_INET6 AF_NETLINK', 'SystemCallFilter=~kill tkill tgkill rt_sigqueueinfo rt_tgsigqueueinfo pidfd_send_signal', 'SystemCallFilter=~@debug process_vm_readv process_vm_writev', 'NFTSet=cgroup:inet:worklane_egress:egress_ok']) {
       assert.ok(net.props.includes(p), `${p} in ${net.props.join(' | ')}`);
     }
     assert.ok(!net.props.some((p) => p.startsWith('CapabilityBoundingSet=CAP')), 'no capability at all');
@@ -604,13 +627,38 @@ test('#545: the helper\'s egress names and egress_docker_mode are lib.sh\'s, wor
   assert.match(check, /printf "uid_map %s %s %s\\n" \$\(cat \/proc\/self\/uid_map\)/);
 });
 
-test('#545: test-user.sh installs the wrapper (a copy of unshare, root:root 0755) and its AppArmor profile where user namespaces are restricted; --print shows the profile; remove takes both away with the last test user', { skip: !posix && 'bash' }, () => {
+test('#545: test-user.sh installs the wrapper (a copy of unshare, root:root 0700, run by the test users alone through its ACL) and its AppArmor profile where user namespaces are restricted; check verifies the ACL; --print shows the profile; remove takes both away with the last test user', { skip: !posix && 'bash' }, () => {
   const r = spawnSync('bash', [join(repoRoot, 'scripts', 'setup', 'test-user.sh'), '--print', 'install', 'shop'], { encoding: 'utf8' });
   assert.equal(r.status, 0, r.stderr);
   assert.match(r.stdout, /^profile worklane-testrun-userns \/usr\/local\/libexec\/worklane-testrun-userns flags=\(unconfined\) \{\n {2}userns,\n {2}include if exists <local\/worklane-testrun-userns>\n\}$/m);
   const tu = readFileSync(join(repoRoot, 'scripts', 'setup', 'test-user.sh'), 'utf8');
   const install = tu.slice(tu.indexOf('install_userns() {'), tu.indexOf('\n}\n', tu.indexOf('install_userns() {')));
-  assert.match(install, /install -o root -g root -m 0755 "\$\(command -v unshare\)" "\$userns_bin\.tmp"\n\s+mv -f "\$userns_bin\.tmp" "\$userns_bin"/);
+  assert.match(install, /install -o root -g root -m 0700 "\$\(command -v unshare\)" "\$userns_bin\.tmp"\n\s+for u in \$\(test_users\); do setfacl -m "u:\$u:r-x" "\$userns_bin\.tmp"; done\n\s+mv -f "\$userns_bin\.tmp" "\$userns_bin"/);
+  assert.doesNotMatch(tu, /-m 0755 "\$\(command -v unshare\)"/, 'never world-executable');
+  assert.match(tu, /test_users\(\) \{ getent passwd \| awk -F: '\$1 ~ \/\^wl-test-\[a-z\]\[a-z0-9-\]\*\$\/ \{ print \$1 \}'; \}/);
+  // remove drops the user's entry before its uid goes.
+  assert.match(tu, /setfacl -x "u:\$user" "\$userns_bin"/);
+  // check: test-user.sh's userns_acl_ok, run on getfacl's output for each case (the helper checks the same, below).
+  const fn = tu.slice(tu.indexOf('userns_acl_ok() {'), tu.indexOf('\n}\n', tu.indexOf('userns_acl_ok() {')) + 3);
+  const ok = (acl: string) => spawnSync('bash', ['-c', `set -euo pipefail\nuser=wl-test-shop\nuserns_bin=/x\ngetfacl() { printf '%s' "$ACL"; }\n${fn}userns_acl_ok`], { encoding: 'utf8', env: { PATH: '/usr/bin:/bin', ACL: acl } }).status === 0;
+  assert.equal(ok('user::rwx\nuser:wl-test-shop:r-x\nuser:wl-test-other:r-x\t#effective:r-x\ngroup::---\nmask::r-x\nother::---\n'), true);
+  for (const bad of [
+    'user::rwx\nuser:wl-test-shop:r-x\ngroup::---\nmask::r-x\nother::r-x\n',
+    'user::rwx\nuser:wl-test-shop:r-x\ngroup::r-x\nmask::r-x\nother::---\n',
+    'user::rwx\nuser:wl-test-shop:r-x\ngroup::---\ngroup:staff:r-x\nmask::r-x\nother::---\n',
+    'user::rwx\nuser:wl-test-shop:r-x\nuser:wl-ci:r-x\ngroup::---\nmask::r-x\nother::---\n',
+    'user::rwx\nuser:wl-test-shop:r-x\nuser:1234:r-x\ngroup::---\nmask::r-x\nother::---\n',
+    'user::rwx\nuser:wl-test-other:r-x\ngroup::---\nmask::r-x\nother::---\n',
+    'user::rwx\nuser:wl-test-shop:r--\ngroup::---\nmask::r-x\nother::---\n',
+  ]) assert.equal(ok(bad), false, bad);
+  // The helper's own check of the same (wrapper_acl_problem), on the same cases.
+  const src = readFileSync(helperSrc, 'utf8');
+  const hf = src.slice(src.indexOf('wrapper_acl_problem() {'), src.indexOf('\n}\n', src.indexOf('wrapper_acl_problem() {')) + 3);
+  const problem = (acl: string) => spawnSync('bash', ['-c', `set -euo pipefail\nuser=wl-test-shop\n${hf}wrapper_acl_problem "$ACL"`], { encoding: 'utf8', env: { PATH: '/usr/bin:/bin', ACL: acl } }).stdout.trim();
+  assert.equal(problem('user::rwx\nuser:wl-test-shop:r-x\nuser:wl-test-other:r-x\t#effective:r-x\ngroup::---\nmask::r-x\nother::---\n'), '');
+  assert.match(problem('user::rwx\nuser:wl-test-shop:r-x\ngroup::---\nmask::r-x\nother::r-x\n'), /every user may run it/);
+  assert.match(problem('user::rwx\nuser:wl-test-shop:r-x\nuser:wl-ci:r-x\ngroup::---\nmask::r-x\nother::---\n'), /wl-ci, not a test user, may run it/);
+  assert.match(problem('user::rwx\nuser:wl-test-shop:r--\ngroup::---\nmask::r-x\nother::---\n'), /wl-test-shop may not run it/);
   assert.match(install, /kernel\.apparmor_restrict_unprivileged_userns[\s\S]*apparmor_parser -r "\/etc\/apparmor\.d\/\$userns_profile"/);
   assert.match(tu, /\n {2}install_userns\n/, 'install calls it');
   assert.match(tu, /rm -f \/etc\/systemd\/system\/worklane-test\.slice "\$helper" "\$userns_bin"/);

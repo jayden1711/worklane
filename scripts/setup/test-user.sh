@@ -199,6 +199,17 @@ profile $userns_profile $userns_bin flags=(unconfined) {
 EOF
 }
 
+# Whether only the test users (this one among them) may run the wrapper: its ACL has no group or other permission and
+# names no user but wl-test-* ones (the helper's wrapper_acl_problem checks the same before every run).
+userns_acl_ok() {
+  local acl others
+  acl="$(getfacl -cp "$userns_bin" 2>/dev/null | sed 's/[[:space:]].*//')" || return 1
+  grep -qx 'group::---' <<<"$acl" && grep -qx 'other::---' <<<"$acl" || return 1
+  ! grep -q '^group:[^:]' <<<"$acl" || return 1
+  others="$(grep '^user:[^:]' <<<"$acl" | grep -vE '^user:wl-test-[a-z][a-z0-9-]*:' || true)"
+  [ -z "$others" ] && grep -qE "^user:$user:..x\$" <<<"$acl"
+}
+
 # Whether this machine's unshare can be the wrapper: the helper's prelude needs --map-current-user and --keep-caps
 # (util-linux 2.38 or later), and setpriv beside it.
 userns_supported() {
@@ -207,17 +218,24 @@ userns_supported() {
   grep -q -- '--map-current-user' <<<"$help" && grep -q -- '--keep-caps' <<<"$help" && command -v setpriv >/dev/null 2>&1
 }
 
-# The wrapper (a copy of this machine's unshare), atomically, root:root 0755; and its AppArmor profile where user
-# namespaces are restricted. On a machine whose unshare is too old, a note: the helper then runs each run in the host's
-# user namespace, as before #545, and its check says so.
+# The test users on this machine (wl-test-<name>), one a line: the only users the wrapper's ACL lets run it.
+test_users() { getent passwd | awk -F: '$1 ~ /^wl-test-[a-z][a-z0-9-]*$/ { print $1 }'; }
+
+# The wrapper (a copy of this machine's unshare), atomically: root:root 0700, and an ACL entry letting each test user
+# (and nobody else) run it. WHY: where user namespaces are restricted its AppArmor profile lets whoever runs it make one,
+# so no other user, and no NoNewPrivileges unit (a DynamicUser one included), may run it. And its AppArmor profile where
+# user namespaces are restricted. On a machine whose unshare is too old, a note: the helper then runs each run in the
+# host's user namespace, as before #545, and its check says so.
 install_userns() {
+  local u
   if ! userns_supported; then
     echo "note: this machine's unshare ($(unshare --version 2>/dev/null | head -n 1)) has no --map-current-user or --keep-caps, or there's no setpriv: test runs share the host's user namespace (docs/test-runs.md, \"Known gap\")"
     return 0
   fi
-  install -o root -g root -m 0755 "$(command -v unshare)" "$userns_bin.tmp"
+  install -o root -g root -m 0700 "$(command -v unshare)" "$userns_bin.tmp"
+  for u in $(test_users); do setfacl -m "u:$u:r-x" "$userns_bin.tmp"; done
   mv -f "$userns_bin.tmp" "$userns_bin"
-  echo "installed $userns_bin (a copy of $(command -v unshare))"
+  echo "installed $userns_bin (a copy of $(command -v unshare)), root:root 0700; the test users may run it: $(test_users | paste -sd' ' -)"
   if [ "$(sysctl -n kernel.apparmor_restrict_unprivileged_userns 2>/dev/null || echo 0)" = 1 ]; then
     userns_apparmor_profile > "/etc/apparmor.d/.$userns_profile.tmp"
     apparmor_parser -Q "/etc/apparmor.d/.$userns_profile.tmp" || { rm -f "/etc/apparmor.d/.$userns_profile.tmp"; echo "AppArmor profile $userns_profile refused; nothing installed" >&2; exit 1; }
@@ -345,8 +363,11 @@ service_checks() {
   if [ -x "$helper" ] && cmp -s "$helper" "$machine_dir/worklane-testrun.sh"; then echo "PASS $helper matches this checkout's"; else echo "FAIL $helper is missing or differs from scripts/machine/worklane-testrun.sh (run install)"; fail=1; fi
   # Each run's own user namespace (#545): the helper's own check (below) proves a run is in one.
   if ! userns_supported; then echo "NOTE this machine's unshare can't be the test runs' wrapper (it needs util-linux 2.38 or later, and setpriv): runs share the host's user namespace"
-  elif [ -f "$userns_bin" ] && [ ! -L "$userns_bin" ] && [ "$(stat -c '%U:%G %a' "$userns_bin")" = "root:root 755" ]; then echo "PASS $userns_bin is root:root 0755"
-  else echo "FAIL $userns_bin is missing or not root:root 0755, so runs share the host's user namespace (run install)"; fail=1; fi
+  elif [ ! -f "$userns_bin" ] || [ -L "$userns_bin" ] || [ "$(stat -c '%U:%G' "$userns_bin")" != root:root ]; then
+    echo "FAIL $userns_bin is missing or not root:root, so runs share the host's user namespace (run install)"; fail=1
+  elif ! userns_acl_ok; then
+    echo "FAIL $userns_bin may be run by others than the test users, or not by $user: $(getfacl -cp "$userns_bin" 2>/dev/null | tr '\n' ' ') (run install)"; fail=1
+  else echo "PASS $userns_bin is root:root, and only the test users may run it"; fi
   return "$fail"
 }
 
@@ -494,6 +515,8 @@ remove_cmd() {
   systemctl disable --now "$docker_unit_name" 2>/dev/null || true
   rm -f "/etc/systemd/system/$docker_unit_name"
   for p in "${deny_acl[@]}"; do [ -e "$p" ] && setfacl -x "u:$user" "$p" 2>/dev/null || true; done
+  # Its entry in the wrapper's ACL too, before its uid is gone (a later user given that uid gets no entry).
+  if [ -f "$userns_bin" ]; then setfacl -x "u:$user" "$userns_bin" 2>/dev/null || true; fi
   rm -rf --one-file-system "$root"
   if id -u "$user" >/dev/null 2>&1; then userdel -r "$user" 2>/dev/null || userdel "$user"; fi
   if [ -z "$(ls -A /var/lib/worklane-test 2>/dev/null)" ]; then

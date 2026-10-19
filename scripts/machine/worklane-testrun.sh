@@ -33,9 +33,10 @@
 # The run's Postgres has no network either (docker run --network none): it is reached on its Unix socket only.
 #
 # A run's own user namespace (#545, docs/test-runs.md "Network"): every exec and fetch unit starts with a fixed wrapper
-# ($USERNS, a root-owned copy of util-linux's unshare that test-user.sh install puts there, with an AppArmor profile
-# where user namespaces are restricted) that makes the run a user and network namespace of its own, the test user's uid
-# mapped to itself alone, brings its loopback up and drops every capability before the run's command (userns_argv). So a
+# ($USERNS, a root-owned copy of util-linux's unshare that test-user.sh install puts there, that only the test users may
+# run, with an AppArmor profile where user namespaces are restricted) that makes the run a user and network namespace of
+# its own, the test user's uid mapped to itself alone, brings its loopback up and drops every capability, and the
+# profile, before the run's command (userns_argv). So a
 # run's processes can't join, ptrace or open /proc/<pid>/... of any process outside it, the test user's rootless Docker
 # included: the kernel wants CAP_SYS_ADMIN (to join) or CAP_SYS_PTRACE (the rest) in that process's user namespace, and
 # a run has neither there. Without the wrapper (a helper the updater put in place before test-user.sh install ran
@@ -151,10 +152,14 @@ SLIRP_SANDBOX=(-p NoNewPrivileges=yes -p TemporaryFileSystem=/etc:ro -p Temporar
 # as that namespace's owner (the kernel gives the owner every capability in it) and makes tap0 there; in the host's it
 # has none. slirp4netns's own --enable-sandbox fails as an ordinary user (setegid(0), measured in #543's CI spike), so
 # its unit's sandbox does that job: the whole file system read-only, no /home, a private /tmp, an empty /etc (but its
-# resolv.conf) and /run. Its socket families and its signal filter are root's slirp's.
+# resolv.conf) and /run. Its socket families and its signal filter are root's slirp's. WHY no ptrace-class call
+# (@debug: ptrace, pidfd_getfd; and process_vm_readv/writev): as the test user in the host's user namespace it owns
+# rootless Docker's user namespace too, and the kernel gives an owner every capability there; this keeps a slirp4netns
+# that a run's packets took over from driving dockerd, whatever slirp4netns's own seccomp list holds.
 SLIRP_USER_SANDBOX=(-p NoNewPrivileges=yes -p ProtectSystem=strict -p ProtectHome=yes -p PrivateTmp=yes
   -p TemporaryFileSystem=/etc:ro -p TemporaryFileSystem=/run:ro
-  -p "SystemCallFilter=~kill tkill tgkill rt_sigqueueinfo rt_tgsigqueueinfo pidfd_send_signal" -p SystemCallErrorNumber=EPERM
+  -p "SystemCallFilter=~kill tkill tgkill rt_sigqueueinfo rt_tgsigqueueinfo pidfd_send_signal"
+  -p "SystemCallFilter=~@debug process_vm_readv process_vm_writev" -p SystemCallErrorNumber=EPERM
   -p ProtectKernelTunables=yes -p ProtectKernelModules=yes -p ProtectControlGroups=yes -p RestrictSUIDSGID=yes -p LockPersonality=yes
   -p CapabilityBoundingSet= -p "RestrictAddressFamilies=AF_INET AF_INET6 AF_NETLINK")
 # A run's own user and network namespace (the header, userns_argv): the wrapper test-user.sh install puts here (root's,
@@ -1040,37 +1045,73 @@ slirp_ok() {
   "$SLIRP" --version 2>/dev/null | grep -q '^libseccomp: [0-9]' || { NET_WHY="$SLIRP has no seccomp support (its --version names no libseccomp): install the distribution's build (apt-get install slirp4netns), then try again"; return 1; }
 }
 
-# Whether this machine has the wrapper for a run's own user namespace, usable: root's own regular file, 0755, an unshare
-# that takes --map-current-user and --keep-caps (util-linux 2.38 or later), setpriv and ip to go with it, and, where the
-# kernel restricts user namespaces, its AppArmor profile loaded. Else USERNS_WHY says why not, and a run shares the
-# host's user namespace, as before #545.
+# Whether this machine has the wrapper for a run's own user namespace, usable: root's own regular file that only the
+# test users may run (wrapper_acl_problem), an unshare that takes --map-current-user and --keep-caps (util-linux 2.38 or
+# later; read from the file, never run here), setpriv and ip to go with it, and, where the kernel restricts user
+# namespaces, its AppArmor profile loaded (USERNS_AA 1 when it is: the run's command then leaves it, userns_argv).
+# Else USERNS_WHY says why not, and a run shares the host's user namespace, as before #545.
 USERNS_WHY=
+USERNS_AA=0
 IP_BIN=
 SETPRIV_BIN=
 userns_ok() {
-  local got help
+  local got acl
+  USERNS_AA=0
   if [ -L "$USERNS" ] || [ ! -f "$USERNS" ]; then USERNS_WHY="no $USERNS (scripts/setup/test-user.sh install puts it there)"; return 1; fi
-  got="$(stat -c '%U %a' -- "$USERNS")"
-  [ "$got" = "$(id -un) 755" ] || { USERNS_WHY="$USERNS is $got, not $(id -un)'s and 0755"; return 1; }
-  help="$("$USERNS" --help 2>/dev/null || true)"
-  if ! grep -q -- '--map-current-user' <<<"$help" || ! grep -q -- '--keep-caps' <<<"$help"; then USERNS_WHY="$USERNS takes no --map-current-user or --keep-caps (util-linux 2.38 or later has both)"; return 1; fi
+  got="$(stat -c '%U' -- "$USERNS")"
+  [ "$got" = "$(id -un)" ] || { USERNS_WHY="$USERNS is $got's, not $(id -un)'s"; return 1; }
+  acl="$(getfacl -cp -- "$USERNS" 2>/dev/null)" || { USERNS_WHY="can't read $USERNS's ACL (getfacl; apt-get install acl)"; return 1; }
+  got="$(wrapper_acl_problem "$acl")"
+  [ -z "$got" ] || { USERNS_WHY="$USERNS: $got (scripts/setup/test-user.sh install sets it)"; return 1; }
+  if ! grep -qaF 'map-current-user' "$USERNS" || ! grep -qaF 'keep-caps' "$USERNS"; then USERNS_WHY="$USERNS takes no --map-current-user or --keep-caps (util-linux 2.38 or later has both)"; return 1; fi
   IP_BIN="$(command -v ip || true)"; SETPRIV_BIN="$(command -v setpriv || true)"
   [ -n "$IP_BIN" ] && [ -n "$SETPRIV_BIN" ] || { USERNS_WHY="no ip or setpriv on this machine (iproute2, util-linux)"; return 1; }
-  if [ "$(cat "$USERNS_RESTRICT" 2>/dev/null || true)" = 1 ] && ! grep -q "^$USERNS_PROFILE " "$AA_PROFILES" 2>/dev/null; then
+  if grep -q "^$USERNS_PROFILE " "$AA_PROFILES" 2>/dev/null; then USERNS_AA=1
+  elif [ "$(cat "$USERNS_RESTRICT" 2>/dev/null || true)" = 1 ]; then
     USERNS_WHY="user namespaces are restricted here ($USERNS_RESTRICT is 1) and the AppArmor profile $USERNS_PROFILE isn't loaded (scripts/setup/test-user.sh install loads it)"; return 1
   fi
+}
+
+# Why the wrapper's ACL (getfacl -cp, given) lets anyone but the test users run it; empty when it doesn't. WHY: where the
+# kernel restricts user namespaces, its AppArmor profile lets whoever runs it make one, so every other user, and every
+# NoNewPrivileges unit (DynamicUser and the like), must not be able to run it at all: the owner (root), this instance's
+# test user (who must be able to), other instances' test users (test-user.sh install lists each), no group, nobody else.
+wrapper_acl_problem() {
+  local l who perm mine=0
+  while IFS= read -r l; do
+    l="${l%%[[:space:]]*}"
+    case "$l" in
+      '' | user::* | mask::*) ;;
+      user:*:*) who="${l#user:}"; perm="${who##*:}"; who="${who%:*}"
+        if [ "$who" = "$user" ]; then [[ "$perm" == *x ]] && mine=1
+        elif [[ ! "$who" =~ ^wl-test-[a-z][a-z0-9-]*$ ]]; then echo "$who, not a test user, may run it"; return 0; fi ;;
+      group::---) ;;
+      group:*) echo "a group may run it ($l)"; return 0 ;;
+      other::---) ;;
+      other:*) echo "every user may run it ($l)"; return 0 ;;
+      *) echo "an ACL entry this helper doesn't know: $l"; return 0 ;;
+    esac
+  done <<<"$1"
+  [ "$mine" -eq 1 ] || echo "$user may not run it"
+  return 0
 }
 
 # The start of a run's unit's command when it gets a user namespace of its own (userns_ok), as USERNS_ARGV; the run's
 # own argv (bash and its command) follows it. As the test user: the wrapper makes a user and a network namespace,
 # the test user's uid (and gid) mapped to itself alone, and keeps the capabilities that gives it in the new namespace
 # (--keep-caps) only for ip to bring the loopback up; setpriv then drops every one (inheritable, ambient, bounding) and
-# runs the command, which has none, in any namespace. && : if ip fails, the command never runs. <systemd version>: the
-# script's "$@" goes to systemd as the command does (systemd_command), so it is never expanded.
+# runs the command, which starts with none in its namespace or any other. && : if ip fails, the command never runs.
+# Where the wrapper's AppArmor profile is loaded (USERNS_AA), setpriv also has the command leave it for the unconfined
+# label (--apparmor-profile=unconfined), as every run was before #545. WHY: an unconfined-mode profile keeps its label
+# across exec, so without this the run's whole command tree would keep the profile's userns allowance, and where the
+# kernel restricts user namespaces could make more with capabilities in them; with it, such a namespace gets the
+# kernel's restricted treatment, as before (the test-run CI job asserts both ways). <systemd version>: the script's "$@"
+# goes to systemd as the command does (systemd_command), so it is never expanded.
 USERNS_ARGV=()
 userns_argv() {
-  local v="$1" s
-  s="$(systemd_command "$v" "$IP_BIN link set lo up && exec $SETPRIV_BIN --inh-caps=-all --ambient-caps=-all --bounding-set=-all -- \"\$@\"")"
+  local v="$1" s aa=""
+  [ "$USERNS_AA" != 1 ] || aa=" --apparmor-profile=unconfined"
+  s="$(systemd_command "$v" "$IP_BIN link set lo up && exec $SETPRIV_BIN --inh-caps=-all --ambient-caps=-all --bounding-set=-all$aa -- \"\$@\"")"
   USERNS_ARGV=("$USERNS" --user --map-current-user --net --keep-caps -- /bin/sh -c "${s#*$'\n'}" sh)
 }
 
