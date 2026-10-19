@@ -4,7 +4,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { createRequire, syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -481,8 +481,11 @@ test("root's id pointer can't be turned against OFF: one that is no plain file, 
     make(T);
     assert.equal(autoMergeKilled('pt', T), true, `${what}: off`);
     if (what !== 'an id whose directory is missing') {
+      // Round 11: the message says what is true there: it reads off already, and --retake is the fix (it was
+      // "couldn't be armed ... can still merge on its own", which was false for a pointer that reads off).
       const r = offOnFullDisk('pt', { presence: () => 'exists', markerDir: T });
-      assert.ok(r instanceof Error && /pt's auto_merge switch couldn't be armed/.test(r.message), `${what}: got ${String(r)}`);
+      assert.ok(r instanceof Error && /pt\.id can't be used .*pt's auto_merge reads off already.*policy own pt --retake/.test(r.message), `${what}: got ${String(r)}`);
+      assert.equal(autoMergeKilled('pt', T), true, `${what}: still off`);
     }
   }
   // A shared id: OFF on either name turns both off; root's ON on one is refused (it would clear the other's OFF).
@@ -686,4 +689,82 @@ test("a taken-over instance whose pointer is gone: an admin's --retake makes its
   assert.equal(autoMergeKilled('lpr'), true, 'retake keeps it off');
   setPolicy('lpr', 'auto_merge', 'on', null, mr.deps);
   assert.equal(autoMergeKilled('lpr'), false, "root's `set on` turns it on");
+});
+
+/** A taken-over instance that said OFF, then lost its id directory (the pointer still names it): it reads off. */
+function lostDir(name: string) {
+  const m = machineInstance(name);
+  ownPolicy(name, m.deps);
+  setPolicy(name, 'auto_merge', 'on', null, m.deps);
+  setPolicy(name, 'auto_merge', 'off', null, m.deps);
+  const d = switchDir(name);
+  rmSync(d, { recursive: true });
+  assert.equal(autoMergeKilled(name), true, 'its id directory gone: off');
+  return { m, d };
+}
+
+test("a taken-over instance whose id directory is gone is never made ON again by a writer re-creating it empty: the helper's set-policy of any key, `own` without a flag, an admin's `policy set`, `alias` and `set on` leave it off, and doctor says so (#726 round 11)", { skip }, () => {
+  const { m, d } = lostDir('ldir');
+  // Through 56b37300 each of these made `by_id/<id>` again with only a spare, and auto_merge read on.
+  setPolicy('ldir', 'budget.daily_usd', '40', 'wl-ldir', m.deps);
+  assert.equal(autoMergeKilled('ldir'), true, "the helper's set-policy budget");
+  setPolicy('ldir', 'settings.workers', '1', 'wl-ldir', m.deps);
+  assert.equal(autoMergeKilled('ldir'), true, "the helper's set-policy settings.workers");
+  setPolicy('ldir', 'budget.daily_usd', '45', null, m.deps);
+  assert.equal(autoMergeKilled('ldir'), true, "an admin's policy set");
+  assert.throws(() => ownPolicy('ldir', m.deps), /by_id\/[0-9a-f]{32} is gone.*policy own ldir --retake/, 'add-project\'s rerun: own, no flag');
+  assert.throws(() => kill.aliasInstance!('ldir', 'ldirn'), /is gone.*--retake/, "a rename's start");
+  assert.throws(() => setPolicy('ldir', 'auto_merge', 'on', null, m.deps), /is gone.*--retake/, "root's set on");
+  assert.equal(existsSync(d), false, 'never made again empty');
+  assert.equal(autoMergeKilled('ldir'), true);
+  // doctor: a failure, naming the fix.
+  writeFileSync(join(m.dir, 'instance.yaml'), `version: 1\nname: ldir\nrepos:\n  - path: "x"\n    repo: example/ldir\n`);
+  const c = policyRootChecks(join(m.home, '.local', 'state', BRAND.cli, 'instances'), { machine: true }).find((x) => x.name === 'auto_merge id ldir');
+  assert.equal(c?.level, 'fail');
+  assert.match(c!.detail, /is gone: auto_merge reads off.*policy own ldir --retake/);
+});
+
+test('a taken-over instance whose id directory is gone: an OFF puts it back with a switch armed, never empty (a full disk fails visibly, still off); an admin\'s --retake puts it back armed, and a garbled pointer\'s --retake gives a new armed id (#726 round 11)', { skip }, () => {
+  const { m, d } = lostDir('ldo');
+  // A full disk: no room for the spare in the temp directory: visible, nothing put in place, still off.
+  const r = offOnFullDisk('ldo', m.deps);
+  assert.ok(r instanceof Error && /couldn't be armed/.test(r.message), `got ${String(r)}`);
+  assert.equal(existsSync(d), false);
+  assert.equal(autoMergeKilled('ldo'), true);
+  // With room: done, the directory back with a switch armed (through 56b37300: ENOENT, "free space").
+  assert.equal(setPolicy('ldo', 'auto_merge', 'off', 'wl-ldo', m.deps).to, false);
+  assert.ok(readdirSync(d).some((f) => f.startsWith('auto-merge-off')), 'armed');
+  assert.equal(autoMergeKilled('ldo'), true);
+  // --retake over a missing directory: back, armed; then root's set on turns it on.
+  const { m: m2, d: d2 } = lostDir('ldr');
+  ownPolicy('ldr', m2.deps, { retake: true });
+  assert.ok(readdirSync(d2).some((f) => f.startsWith('auto-merge-off')), 'armed');
+  assert.equal(autoMergeKilled('ldr'), true);
+  setPolicy('ldr', 'auto_merge', 'on', null, m2.deps);
+  assert.equal(autoMergeKilled('ldr'), false);
+  // A garbled pointer: --retake (named by doctor) now works: a new id, armed, off.
+  const m3 = machineInstance('ldg');
+  ownPolicy('ldg', m3.deps);
+  writeFileSync(join(POLICY_ROOT_DIR, 'ldg.id'), 'garbled\n');
+  assert.equal(autoMergeKilled('ldg'), true);
+  ownPolicy('ldg', m3.deps, { retake: true });
+  assert.ok(kill.instanceId!('ldg') && 'id' in kill.instanceId!('ldg')!, 'a usable pointer');
+  assert.equal(autoMergeKilled('ldg'), true, 'kept off');
+});
+
+test("an OFF's mint that failed or was killed before its link leaves an id directory no pointer names: the next `own` sweeps it once an hour old, never a fresh one (#726 round 11)", { skip }, () => {
+  const m = machineInstance('swo');
+  ownPolicy('swo', m.deps);
+  const byId = join(POLICY_ROOT_DIR, 'by_id');
+  const [old, fresh] = ['aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa01', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa02'];
+  for (const n of [old, fresh]) {
+    mkdirSync(join(byId, n));
+    writeFileSync(join(byId, n, 'auto-merge-spare'), '');
+  }
+  const twoHoursAgo = new Date(Date.now() - 2 * 3600_000);
+  utimesSync(join(byId, old), twoHoursAgo, twoHoursAgo);
+  ownPolicy('swo', m.deps);
+  assert.equal(existsSync(join(byId, old)), false, 'an hour-old orphan goes');
+  assert.equal(existsSync(join(byId, fresh)), true, "a fresh one stays (another OFF's, between its directory and its link)");
+  assert.equal(existsSync(switchDir('swo')), true, "a pointer's own directory stays");
 });
