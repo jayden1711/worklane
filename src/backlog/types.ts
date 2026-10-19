@@ -46,7 +46,7 @@ export interface Backlog {
   checks(sha: string): Promise<CommitCheck[]>;
   /**
    * #727: the App GitHub's branch protection or ruleset requires for each required check on `branch`. Present only
-   * where checks come from GitHub, and then every check judged must come from its pinned source (src/check-source.ts).
+   * where checks come from GitHub, and then every pinned check judged must come from its source (src/check-source.ts).
    */
   checkApps?(branch: string): Promise<GithubCheckApps>;
   /** Take a draft PR out of draft. */

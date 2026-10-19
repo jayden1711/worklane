@@ -2,7 +2,12 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { GitHubBacklog } from '../src/backlog/github.js';
 import type { CommitCheck } from '../src/backlog/types.js';
-import { readiness, requiredOutcomes } from '../src/pr-watch.js';
+import { readiness as judgeReadiness, requiredOutcomes as judgeOutcomes } from '../src/pr-watch.js';
+import { asJudged } from './helpers.js';
+
+// The judging functions take JudgedChecks (#727): these fixtures stand for checks already judged.
+const readiness = (o: Omit<Parameters<typeof judgeReadiness>[0], 'checks'> & { checks: CommitCheck[] }) => judgeReadiness({ ...o, checks: asJudged(o.checks) });
+const requiredOutcomes = (required: string[], checks: CommitCheck[]) => judgeOutcomes(required, asJudged(checks));
 
 const HEAD = 'a'.repeat(40);
 const run = (name: string, conclusion: string | null, status = 'completed', id = 1): CommitCheck => ({ name, source: 'check_run', status, conclusion, id });

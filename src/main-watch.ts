@@ -61,7 +61,9 @@ export interface CheckRunAt {
   conclusion: string | null;
   startedAt: string | null;
   completedAt: string | null;
-  /** The GitHub App that posted it, and its check suite (#727: what its source is judged by). */
+  /** Its id and page, the GitHub App that posted it, and its check suite (#727: what its source is judged by). */
+  id?: number;
+  url?: string;
   app?: number;
   suite?: number;
 }
@@ -268,24 +270,25 @@ export function judge(sha: string, f: Facts, o: { branch: string; required: stri
   }
   if (!o.required.length) return { done: true, accounted: false, number, reason: `${who}, but no required_checks are configured to judge it by` };
   if (!f.runs) return { done: false, need: { call: 'runs', sha: head } };
-  let runs = f.runs;
-  let statuses = f.statuses ?? null;
-  const pins = o.pins;
-  if (pins) {
-    // #727: only a run from its name's pinned source counts, and a status never does (src/check-source.ts).
-    const pinned = (n: string) => pinOf(n, pins.configured, pins.github);
-    if (f.sources === undefined && o.required.some((n) => 'workflow' in (pinned(n) ?? {}))) return { done: false, need: { call: 'sources', sha: head } };
-    runs = f.runs.filter((r) => {
-      const pin = pinned(r.name);
-      const workflow = r.suite === undefined ? undefined : (f.sources?.[String(r.suite)] ?? null);
-      return pin !== null && fromPinnedSource({ source: 'check_run', ...(r.app !== undefined ? { app: r.app } : {}), ...(workflow !== undefined ? { workflow } : {}) }, pin, { repo: pins.repo, sha: head });
-    });
-    statuses = [];
-  }
-  let out = outcomesAt(o.required, runs, statuses, at);
+  let out = outcomesAt(o.required, f.runs, f.statuses ?? null, at);
   if (out.some((c) => c.outcome === 'unknown')) {
     if (!f.statuses) return { done: false, need: { call: 'statuses', sha: head } };
-    out = outcomesAt(o.required, runs, f.statuses, at);
+    out = outcomesAt(o.required, f.runs, f.statuses, at);
+  }
+  const pins = o.pins;
+  if (pins) {
+    // #727 (src/check-source.ts): a pinned check counts only from a run of its pinned source (a status never does),
+    // and still not when the check as judged by name isn't a pass. An unpinned one is judged by name, as before.
+    const pinned = (n: string) => pinOf(n, pins.configured, pins.github);
+    if (f.sources === undefined && o.required.some((n) => 'workflow' in (pinned(n) ?? {}))) return { done: false, need: { call: 'sources', sha: head } };
+    const runs = f.runs.filter((r) => {
+      const pin = pinned(r.name);
+      const workflow = r.suite === undefined ? undefined : (f.sources?.[String(r.suite)] ?? null);
+      const c = { source: 'check_run' as const, ...(r.app !== undefined ? { app: r.app } : {}), ...(workflow !== undefined ? { workflow } : {}), ...(r.id !== undefined ? { id: r.id } : {}), ...(r.url !== undefined ? { url: r.url } : {}) };
+      return pin !== null && fromPinnedSource(c, pin, { repo: pins.repo, sha: head });
+    });
+    const fromPin = outcomesAt(o.required, runs, [], at);
+    out = out.map((byName, i) => (pinned(byName.name) === null || (fromPin[i]!.outcome === 'pass' && byName.outcome !== 'pass') ? byName : fromPin[i]!));
   }
   const bad = out.filter((c) => c.outcome !== 'pass');
   if (bad.length) return { done: true, accounted: false, number, reason: `${who} into ${o.branch} with required checks not green on ${head.slice(0, 8)} at merge time: ${bad.map((c) => `${c.name} ${c.outcome}`).join(', ')}` };

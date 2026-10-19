@@ -2,7 +2,7 @@
 // main's checks after a merge (revert on red).
 import { startRefusal, TestRunHeld } from '../testrun/gate.js';
 import { CI_NONE_MAIN_WATCH, ciIsNone, headChecks, requiredFor } from '../ci-none.js';
-import { PinnedChecks } from '../check-source.js';
+import { PinnedChecks, type JudgedChecks } from '../check-source.js';
 import type { Coordinator } from '../coordinator.js';
 import { spawnSync } from 'node:child_process';
 import { readFileSync, existsSync } from 'node:fs';
@@ -1202,7 +1202,7 @@ export abstract class MergeFlow extends FixRuns {
    * checks left out. A verdict on the head the harness merged the default branch into (a clean stale-PR merge-in,
    * src/pr-hygiene.ts) holds for the merge-in; its required checks still have to pass on it.
    */
-  prReadiness(n: number, head: string, checks: CommitCheck[], except: string[] = []): Readiness {
+  prReadiness(n: number, head: string, checks: JudgedChecks, except: string[] = []): Readiness {
     const v = this.events(n).filter((e) => e.type === 'eval.verdict').at(-1)?.payload as EventPayload<'eval.verdict'> | undefined;
     const judged = v && carriedHead(this.mergeInsOf(), null, head) === v.head ? head : v?.head;
     // No CI (src/ci-none.ts): the test-run checks from this instance's event log, never GitHub's of the same name.
@@ -1216,7 +1216,7 @@ export abstract class MergeFlow extends FixRuns {
   }
 
   /** The checks on a PR's head as the merge policy judges them: GitHub's, or under No CI the event log's test runs in place of any of their names. */
-  protected async headChecksOf(sha: string): Promise<CommitCheck[]> {
+  protected async headChecksOf(sha: string): Promise<JudgedChecks> {
     return headChecks({ project: this.d.cfg.project, tests: this.d.cfg.tests, github: await this.pinned.of(sha), events: () => this.testRunEvents(), sha });
   }
 

@@ -50,13 +50,15 @@ export class GitHubMainWatchApi implements MainWatchApi {
   }
 
   async checkRuns(sha: string): Promise<CheckRunAt[]> {
-    const r = await this.json<{ check_runs: { name: string; status: string; conclusion: string | null; started_at?: string | null; completed_at?: string | null; app?: { id?: number } | null; check_suite?: { id?: number } | null }[] }>(`/repos/${this.repo}/commits/${sha}/check-runs?filter=all&per_page=100`, `the check runs on ${sha.slice(0, 8)}`);
+    const r = await this.json<{ check_runs: { id?: number; html_url?: string | null; name: string; status: string; conclusion: string | null; started_at?: string | null; completed_at?: string | null; app?: { id?: number } | null; check_suite?: { id?: number } | null }[] }>(`/repos/${this.repo}/commits/${sha}/check-runs?filter=all&per_page=100`, `the check runs on ${sha.slice(0, 8)}`);
     return r.check_runs.map((c) => ({
       name: c.name,
       status: c.status,
       conclusion: c.conclusion,
       startedAt: c.started_at ?? null,
       completedAt: c.completed_at ?? null,
+      ...(typeof c.id === 'number' ? { id: c.id } : {}),
+      ...(typeof c.html_url === 'string' ? { url: c.html_url } : {}),
       ...(typeof c.app?.id === 'number' ? { app: c.app.id } : {}),
       ...(typeof c.check_suite?.id === 'number' ? { suite: c.check_suite.id } : {}),
     }));
@@ -68,8 +70,8 @@ export class GitHubMainWatchApi implements MainWatchApi {
     if (res.status === 403 || res.status === 404) return null;
     if (!res.ok) throw new Error(`GitHub ${res.status} reading the workflow runs on ${sha.slice(0, 8)}`);
     const out: Record<string, WorkflowSource> = {};
-    for (const w of ((await res.json()) as { workflow_runs?: { check_suite_id?: number; path?: string; head_sha?: string; repository?: { full_name?: string } }[] }).workflow_runs ?? []) {
-      if (typeof w.check_suite_id === 'number' && typeof w.path === 'string' && typeof w.head_sha === 'string' && typeof w.repository?.full_name === 'string') out[String(w.check_suite_id)] = { path: w.path, repo: w.repository.full_name, sha: w.head_sha };
+    for (const w of ((await res.json()) as { workflow_runs?: { id?: number; check_suite_id?: number; path?: string; head_sha?: string; repository?: { full_name?: string } }[] }).workflow_runs ?? []) {
+      if (typeof w.id === 'number' && typeof w.check_suite_id === 'number' && typeof w.path === 'string' && typeof w.head_sha === 'string' && typeof w.repository?.full_name === 'string') out[String(w.check_suite_id)] = { run: w.id, path: w.path, repo: w.repository.full_name, sha: w.head_sha };
     }
     return out;
   }

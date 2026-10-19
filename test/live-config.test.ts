@@ -14,6 +14,7 @@ import { rolePrompt } from '../src/roles.js';
 import { FakeRunner } from '../src/runner.js';
 import { openIncidents, raiseIncident, readIncidents, resolveIncident } from '../src/watchdog/incidents.js';
 import { coordinator, fixture, git, passing, type Fixture } from './repro-state-graph/harness.js';
+import { asJudged } from './helpers.js';
 
 const ident = ['-c', 'user.email=ada@example.com', '-c', 'user.name=Ada', '-c', 'commit.gpgsign=false'];
 const CONFIG = join(BRAND.configDir, 'config.yaml');
@@ -38,7 +39,7 @@ function world() {
     git(person, 'push', '-q', 'origin', 'main');
     return git(person, 'rev-parse', 'HEAD');
   };
-  const required = () => c.prReadiness(1, 'a'.repeat(40), passing).checks.map((x) => x.name);
+  const required = () => c.prReadiness(1, 'a'.repeat(40), asJudged(passing)).checks.map((x) => x.name);
   return { f, c, push, required, raised, resolved };
 }
 

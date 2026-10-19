@@ -7,11 +7,13 @@ import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { GitHubBacklog } from '../src/backlog/github.js';
 import type { CommitCheck } from '../src/backlog/types.js';
-import { checkSourceDoctor, githubCheckApps, governanceRefusal, PinnedChecks, pinOf, type CheckPin } from '../src/check-source.js';
+import { checkSourceDoctor } from '../src/check-pin-block.js';
+import { githubCheckApps, governanceRefusal, PinnedChecks, pinOf, type CheckPin } from '../src/check-source.js';
 import { ProjectConfig } from '../src/config/schema.js';
 import { GitHubMainWatchApi } from '../src/github/main-watch-api.js';
 import { readiness } from '../src/pr-watch.js';
-import { repoRoot } from './helpers.js';
+import { asJudged, repoRoot } from './helpers.js';
+import { RAW_READS_ALLOWED, rawCheckReads, typeErrors } from './raw-check-reads.js';
 
 const HEAD = 'a'.repeat(40);
 const OTHER = 'b'.repeat(40);
@@ -20,8 +22,10 @@ const SPOOF_APP = 2222;
 const ACTIONS = 15368;
 const approved = { head: HEAD, approved: true };
 
-type Run = { id: number; name: string; app: number; suite: number; status?: string; conclusion?: string | null };
-const checkRun = (r: Run) => ({ id: r.id, name: r.name, status: r.status ?? 'completed', conclusion: r.conclusion === undefined ? 'success' : r.conclusion, html_url: `https://github.example/o/r/runs/${r.id}`, app: { id: r.app, slug: r.app === ACTIONS ? 'github-actions' : `app-${r.app}` }, check_suite: { id: r.suite } });
+// An Actions check run's page is its own job in its suite's workflow run (run id = suite * 10 here, as workflowRun
+// makes it); `page` overrides that, e.g. for a check run made through the API.
+type Run = { id: number; name: string; app: number; suite: number; status?: string; conclusion?: string | null; page?: string };
+const checkRun = (r: Run) => ({ id: r.id, name: r.name, status: r.status ?? 'completed', conclusion: r.conclusion === undefined ? 'success' : r.conclusion, html_url: r.page ?? (r.app === ACTIONS ? `https://github.com/o/r/actions/runs/${r.suite * 10}/job/${r.id}` : `https://github.example/o/r/runs/${r.id}`), app: { id: r.app, slug: r.app === ACTIONS ? 'github-actions' : `app-${r.app}` }, check_suite: { id: r.suite } });
 const workflowRun = (suite: number, path: string, o: { repo?: string; sha?: string } = {}) => ({ id: suite * 10, check_suite_id: suite, path, head_sha: o.sha ?? HEAD, repository: { full_name: o.repo ?? 'o/r' } });
 
 /** A stand-in GitHub REST API for repo o/r, branch main: check runs, statuses, workflow runs, protection and rules. */
@@ -71,6 +75,12 @@ test('a check pinned to a workflow file and posted by another workflow (or a run
   assert.deepEqual(outcomes(await from([])), ['test missing'], 'a suite with no workflow run (a check run made through the API)');
   assert.deepEqual(outcomes(await from(403)), ['test missing'], 'Actions unreadable: no source, fail closed');
   assert.deepEqual(outcomes(await from([workflowRun(70, '.github/workflows/ci.yml')])), ['test pass']);
+  // A check run in the pinned workflow's own suite that isn't one of its run's jobs (made through the API with the
+  // run's token, guess: its page is /o/r/runs/<id>, not .../actions/runs/700/job/<id>) doesn't count.
+  for (const page of ['https://github.com/o/r/runs/1', 'https://github.com/o/r/actions/runs/999/job/1', 'https://github.com/o/r/actions/runs/700/job/2', 'not a url']) {
+    const r = await judged(github({ runs: [{ id: 1, name: 'test', app: ACTIONS, suite: 70, page }], workflowRuns: [workflowRun(70, '.github/workflows/ci.yml')] }), pin);
+    assert.deepEqual(outcomes(r), ['test missing'], page);
+  }
   // Any App but Actions has no workflow run, however its check is named.
   assert.deepEqual(outcomes(await judged(github({ runs: [{ id: 1, name: 'test', app: SPOOF_APP, suite: 70 }], workflowRuns: [workflowRun(70, '.github/workflows/ci.yml')] }), pin)), ['test missing']);
 });
@@ -80,17 +90,31 @@ test('a commit status with a pinned check name is missing: statuses carry no App
   for (const pin of [{ app_id: CI_APP }, { workflow: '.github/workflows/ci.yml' }]) assert.deepEqual(outcomes(await judged(gh, { test: pin })), ['test missing']);
 });
 
-test("a check with no recorded source takes the App GitHub's protection or ruleset requires; with neither, it is refused", async () => {
+test("pinning never turns a check that wasn't a pass into one: another App's failing same-name check still fails it", async () => {
+  const pin = { test: { app_id: CI_APP } };
+  // The reviewer's fixture: an unpinned App's failing `test` listed before the pinned App's passing one.
+  const r = await judged(github({ runs: [{ id: 1, name: 'test', app: SPOOF_APP, suite: 10, conclusion: 'failure' }, { id: 2, name: 'test', app: CI_APP, suite: 11 }] }), pin);
+  assert.deepEqual(outcomes(r), ['test fail']);
+  assert.equal(r.ready, false);
+  assert.deepEqual(r.failed, [{ name: 'test', outcome: 'fail' }], "the blocking check has no id or link: it isn't the pinned run, so no fix run reads or reruns it");
+  // A pending one from anywhere still holds it too; the pinned App's own failure stands as it is.
+  assert.deepEqual(outcomes(await judged(github({ runs: [{ id: 1, name: 'test', app: SPOOF_APP, suite: 10, status: 'in_progress', conclusion: null }, { id: 2, name: 'test', app: CI_APP, suite: 11 }] }), pin)), ['test pending']);
+  assert.deepEqual((await judged(github({ runs: [{ id: 2, name: 'test', app: CI_APP, suite: 11, conclusion: 'failure' }] }), pin)).failed, [{ name: 'test', outcome: 'fail', id: 2, url: 'https://github.example/o/r/runs/2' }]);
+});
+
+test("a check with no recorded source takes the App GitHub's protection or ruleset requires; with neither, it is judged by name as before", async () => {
   const runs = [{ id: 1, name: 'test', app: SPOOF_APP, suite: 10 }, { id: 2, name: 'lint', app: CI_APP, suite: 11 }];
   const classic = { protection: { enabled: true, required_status_checks: { checks: [{ context: 'test', app_id: CI_APP }, { context: 'lint', app_id: CI_APP }] } } };
   assert.deepEqual(outcomes(await judged(github({ runs, branch: classic }), {}, ['test', 'lint'])), ['test missing', 'lint pass'], 'classic protection names the App');
   const ruleset = [{ type: 'required_status_checks', parameters: { required_status_checks: [{ context: 'test', integration_id: CI_APP }, { context: 'lint', integration_id: CI_APP }] } }];
   assert.deepEqual(outcomes(await judged(github({ runs, rules: ruleset }), {}, ['test', 'lint'])), ['test missing', 'lint pass'], 'a ruleset names the App');
-  // GitHub requires the checks from any source (no App named, -1, or no rulesets on this plan): refused, fail closed.
+  // GitHub requires the checks from any source (no App named, -1, or no rulesets on this plan): judged by name, exactly
+  // as without pins (the owner's choice for existing installs, 2026-10-19).
   const anySource = { protection: { enabled: true, required_status_checks: { checks: [{ context: 'lint', app_id: null }, { context: 'test', app_id: -1 }] } } };
-  const none = await judged(github({ runs, branch: anySource, rules: 403 }), {}, ['test', 'lint']);
-  assert.deepEqual(outcomes(none), ['test missing', 'lint missing']);
-  assert.equal(none.ready, false);
+  const gh = github({ runs, branch: anySource, rules: 403 });
+  const none = await judged(gh, {}, ['test', 'lint']);
+  assert.deepEqual(outcomes(none), ['test pass', 'lint pass']);
+  assert.deepEqual(none, readiness({ required: ['test', 'lint'], checks: asJudged(await gh.backlog.checks(HEAD)), head: HEAD, evaluated: approved }), 'the same as judging the raw checks by name');
   // A recorded source wins over GitHub's.
   assert.deepEqual(outcomes(await judged(github({ runs, branch: classic }), { lint: { app_id: SPOOF_APP } }, ['lint'])), ['lint missing']);
 });
@@ -117,7 +141,7 @@ test('without GitHub (no checkApps) every check is judged by name exactly as bef
   for (const [required, checks] of cases) {
     const pinned = new PinnedChecks({ backlog: { checks: async () => checks }, branch: () => 'main', repo: () => 'o/r', configured: () => ({}) });
     assert.equal(pinned.enforced, false);
-    assert.deepEqual(readiness({ required, checks: await pinned.of(HEAD), head: HEAD, evaluated: approved }), readiness({ required, checks, head: HEAD, evaluated: approved }));
+    assert.deepEqual(readiness({ required, checks: await pinned.of(HEAD), head: HEAD, evaluated: approved }), readiness({ required, checks: asJudged(checks), head: HEAD, evaluated: approved }));
   }
 });
 
@@ -148,7 +172,7 @@ test('GitHub checks carry who posted each check run, and the workflow run behind
   assert.deepEqual(
     checks.map((c) => ({ name: c.name, app: c.app, workflow: c.workflow })),
     [
-      { name: 'test', app: ACTIONS, workflow: { path: '.github/workflows/ci.yml', repo: 'o/r', sha: HEAD } },
+      { name: 'test', app: ACTIONS, workflow: { run: 700, path: '.github/workflows/ci.yml', repo: 'o/r', sha: HEAD } },
       { name: 'lint', app: CI_APP, workflow: undefined },
     ],
   );
@@ -164,8 +188,8 @@ test("the main watch's GitHub calls carry each run's App and suite, and the work
     return new Response('{}', { status: 404 });
   }) as typeof fetch;
   const api = new GitHubMainWatchApi('o/r', async () => 't', f);
-  assert.deepEqual((await api.checkRuns(HEAD)).map((r) => [r.app, r.suite]), [[ACTIONS, 70]]);
-  assert.deepEqual(await api.runSources(HEAD), { '70': { path: '.github/workflows/ci.yml', repo: 'o/r', sha: HEAD } });
+  assert.deepEqual((await api.checkRuns(HEAD)).map((r) => [r.app, r.suite, r.id, r.url]), [[ACTIONS, 70, 1, 'https://github.com/o/r/actions/runs/700/job/1']]);
+  assert.deepEqual(await api.runSources(HEAD), { '70': { run: 700, path: '.github/workflows/ci.yml', repo: 'o/r', sha: HEAD } });
   const denied = new GitHubMainWatchApi('o/r', async () => 't', (async () => new Response('{}', { status: 403 })) as typeof fetch);
   assert.equal(await denied.runSources(HEAD), null);
 });
@@ -175,13 +199,14 @@ test('turning governance mode on with any bare-name required check is refused, n
   assert.equal(governanceRefusal(['test'], { test: { workflow: '.github/workflows/ci.yml' } }), null);
 });
 
-test('doctor names each required check with no recorded source, and how to pin it', () => {
+test('doctor names each required check with no recorded source, judged by name, with the block that pins it', () => {
   const project = { land_mode: 'pr', required_checks: ['test', 'lint'], required_check_sources: { test: { app_id: CI_APP } } };
-  const d = checkSourceDoctor(project);
+  const workflows = { '.github/workflows/ci.yml': 'jobs:\n  lint:\n    runs-on: ubuntu-latest\n' };
+  const d = checkSourceDoctor(project, workflows, null);
   assert.equal(d.level, 'warn');
-  assert.match(d.detail, /^no source recorded for lint: .*refused \(missing: no PR is ready\).*required_check_sources/);
-  assert.equal(checkSourceDoctor({ ...project, required_check_sources: { ...project.required_check_sources, lint: { workflow: '.github/workflows/ci.yml' } } }).level, 'ok');
-  assert.equal(checkSourceDoctor({ ...project, land_mode: 'direct' }).level, 'ok');
+  assert.match(d.detail, /^no source recorded for lint: each is judged by name .*\nrequired_check_sources:\n {2}"lint": \{ workflow: "\.github\/workflows\/ci\.yml" \}/);
+  assert.equal(checkSourceDoctor({ ...project, required_check_sources: { ...project.required_check_sources, lint: { workflow: '.github/workflows/ci.yml' } } }, workflows, null).level, 'ok');
+  assert.equal(checkSourceDoctor({ ...project, land_mode: 'direct' }, workflows, null).level, 'ok');
 });
 
 test('config.yaml required_check_sources: an App id or a workflow file under .github/workflows/, nothing else', () => {
@@ -191,7 +216,79 @@ test('config.yaml required_check_sources: an App id or a workflow file under .gi
   for (const bad of [{ test: { app_id: 0 } }, { test: { workflow: 'ci.yml' } }, { test: { workflow: '.github/workflows/../x.yml' } }, { test: { app_id: 1, workflow: '.github/workflows/ci.yml' } }, { test: 'ci' }]) assert.equal(parse(bad), false, JSON.stringify(bad));
 });
 
-test("nothing in src/ judges GitHub's checks raw: only check-source.ts reads Backlog.checks (canary.ts reports, never gates)", () => {
+// The reviewer's 12 raw reads (round 1), each in a module typed as src/ would type it. The text-only check below
+// catches 1 of them; the type-based scan must catch all 12.
+const FIXTURE_PRELUDE = [
+  "import type { Backlog } from '../src/backlog/types.js';",
+  "import { GitHubBacklog } from '../src/backlog/github.js';",
+  "import type { MainWatchApi } from '../src/main-watch.js';",
+  'declare const repo: string;',
+  'declare const token: () => string;',
+  'declare const api: MainWatchApi;',
+  'declare const deps: object;',
+  'declare class FixForward { constructor(o: object); }',
+  'export class Reader {',
+  '  constructor(private readonly d: { backlog: Backlog; github: Backlog }) {}',
+  '  async f(sha: string): Promise<unknown> {',
+].join('\n');
+const RAW_FIXTURES: Record<string, string> = {
+  'direct call (control)': 'const c = await this.d.backlog.checks(sha);',
+  'alias variable': 'const b = this.d.backlog;\nconst c = await b.checks(sha);',
+  'method reference as a dep': 'new FixForward({ ...deps, checks: this.d.backlog.checks.bind(this.d.backlog) });',
+  'unbound reference': 'const read = this.d.backlog.checks;',
+  destructured: 'const { checks } = this.d.backlog;\nawait checks.call(this.d.backlog, sha);',
+  'optional chaining': 'await this.d.backlog?.checks(sha);',
+  'bracket access': "await this.d.backlog['checks'](sha);",
+  'line break before call': 'await this.d.backlog\n  .checks(sha);',
+  'space before paren': 'await this.d.backlog.checks (sha);',
+  'differently named receiver': 'await this.d.github.checks(sha);',
+  'GitHubBacklog instance named gh': 'const gh = new GitHubBacklog(repo, token);\nawait gh.checks(sha);',
+  'main watch api raw runs (not Backlog)': 'const runs = await api.checkRuns(sha);',
+};
+const fixture = (body: string) => `${FIXTURE_PRELUDE}\n${body}\nreturn null;\n  }\n}\n`;
+
+test('the raw-read scan catches every spelling of a raw read of GitHub\'s checks (the reviewer\'s 12), and nothing else', () => {
+  const files = Object.fromEntries(Object.values(RAW_FIXTURES).map((body, i) => [`test/raw-fixture-${i}.ts`, fixture(body)]));
+  files['test/raw-fixture-clean.ts'] = fixture("const r = { checks: [1] };\nconst n = r.checks.length + [{ checks: 2 }][0]!.checks;\nconst { checks } = r;\nreturn [n, checks, this.d.backlog.pullRequest];");
+  const hits = rawCheckReads(files);
+  for (const [i, name] of Object.keys(RAW_FIXTURES).entries()) assert.ok(hits.some((h) => h.file === `test/raw-fixture-${i}.ts`), `caught: ${name}`);
+  assert.deepEqual(hits.filter((h) => h.file === 'test/raw-fixture-clean.ts'), [], 'a `checks` that is not GitHub\'s is not a raw read');
+  // The old text-only check (kept below) catches only the plain call.
+  assert.equal(Object.values(RAW_FIXTURES).filter((body) => /backlog\.checks\(/.test(body)).length, 1);
+});
+
+test("src/ reads GitHub's checks raw only where RAW_READS_ALLOWED says why (check-source.ts, the main watch, the canary)", () => {
+  const files = (d: string): string[] => readdirSync(d).flatMap((n) => (statSync(join(d, n)).isDirectory() ? files(join(d, n)) : n.endsWith('.ts') ? [join(d, n)] : []));
+  const src = Object.fromEntries(files(join(repoRoot, 'src')).map((p) => [relative(repoRoot, p).split('\\').join('/'), readFileSync(p, 'utf8')]));
+  const hits = rawCheckReads(src);
+  assert.deepEqual(hits.filter((h) => !Object.hasOwn(RAW_READS_ALLOWED, h.file)), [], 'a raw read outside the allowed files');
+  assert.deepEqual([...new Set(hits.map((h) => h.file))].sort(), Object.keys(RAW_READS_ALLOWED).sort(), 'an allowed file that no longer reads them raw');
+});
+
+test("a raw Backlog.checks answer doesn't compile where checks are judged: readiness, requiredOutcomes, headChecks, mayMerge, prReadiness, fix-forward's reader", () => {
+  const body = [
+    "import type { Backlog } from '../src/backlog/types.js';",
+    "import { readiness, requiredOutcomes } from '../src/pr-watch.js';",
+    "import { headChecks } from '../src/ci-none.js';",
+    "import { mayMerge } from '../src/coordinator/pr-batch.js';",
+    "import type { FixForwardDeps } from '../src/coordinator/fix-forward.js';",
+    "import type { MergeFlow } from '../src/coordinator/merge-flow.js';",
+    'export async function f(backlog: Backlog, flow: MergeFlow, sha: string) {',
+    '  const raw = await backlog.checks(sha);',
+    "  readiness({ required: ['ci'], checks: raw, head: sha, evaluated: null });",
+    "  requiredOutcomes(['ci'], raw);",
+    "  headChecks({ project: {}, tests: {}, github: raw, events: () => [], sha });",
+    "  mayMerge({ events: [], number: 1, head: sha, checks: raw, fastChecks: ['ci'] });",
+    '  flow.prReadiness(1, sha, raw);',
+    "  const reader: FixForwardDeps['checks'] = (s) => backlog.checks(s);",
+    '  return reader;',
+    '}',
+  ].join('\n');
+  const errors = typeErrors({ 'test/raw-judged-fixture.ts': body });
+  for (const line of [9, 10, 11, 12, 13, 14]) assert.ok(errors.some((e) => e.startsWith(`test/raw-judged-fixture.ts:${line}:`)), `line ${line} doesn't compile: ${errors.join('\n')}`);
+});
+
+test("nothing in src/ judges GitHub's checks raw: only check-source.ts reads Backlog.checks (canary.ts: see RAW_READS_ALLOWED)", () => {
   const files = (d: string): string[] => readdirSync(d).flatMap((n) => (statSync(join(d, n)).isDirectory() ? files(join(d, n)) : n.endsWith('.ts') ? [join(d, n)] : []));
   const raw = files(join(repoRoot, 'src'))
     .filter((p) => /backlog\.checks\(/.test(readFileSync(p, 'utf8')))

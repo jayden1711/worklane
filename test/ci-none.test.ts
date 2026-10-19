@@ -16,7 +16,7 @@ import { readiness } from '../src/pr-watch.js';
 import { FakeRunner } from '../src/runner.js';
 import { TestRunConfig } from '../src/testrun/config.js';
 import { coordinator, fixture } from './repro-state-graph/harness.js';
-import { exampleProject, repoRoot } from './helpers.js';
+import { asJudged, exampleProject, repoRoot } from './helpers.js';
 
 const HEAD = 'a'.repeat(40);
 const OTHER = 'b'.repeat(40);
@@ -48,7 +48,7 @@ test('No CI: the required checks are every test_run tier\'s check, as the test r
 
 test("No CI: a test-run check passes only from this instance's log, on exactly this head, with every one of its tiers passed", () => {
   const l = log();
-  const ready = () => readiness({ required: ['fast'], checks: headChecks({ project: none, tests, github: [], events: l.events, sha: HEAD }), head: HEAD, evaluated: approved });
+  const ready = () => readiness({ required: ['fast'], checks: headChecks({ project: none, tests, github: asJudged([]), events: l.events, sha: HEAD }), head: HEAD, evaluated: approved });
   assert.deepEqual(ready().reasons, ['fast: missing']);
   l.finished(OTHER, 'done', [['unit', true], ['lint', true]]);
   assert.deepEqual(ready().reasons, ['fast: missing'], 'another commit\'s run says nothing about this head');
@@ -66,7 +66,7 @@ test("No CI: a test-run check passes only from this instance's log, on exactly t
 
 test('No CI: a GitHub check named like a test-run check counts for nothing, passing or failing; other GitHub checks are left as they are', () => {
   const l = log();
-  const spoof = [gh('fast'), gh('test-run/suite'), gh('lint-bot', 'failure')];
+  const spoof = asJudged([gh('fast'), gh('test-run/suite'), gh('lint-bot', 'failure')]);
   const judged = headChecks({ project: none, tests, github: spoof, events: l.events, sha: HEAD });
   assert.deepEqual(judged, [gh('lint-bot', 'failure')], 'the same-named GitHub checks are gone');
   const r = readiness({ required: requiredFor(none, tests), checks: judged, head: HEAD, evaluated: approved });
@@ -74,7 +74,7 @@ test('No CI: a GitHub check named like a test-run check counts for nothing, pass
   assert.deepEqual(r.reasons, ['fast: missing', 'test-run/suite: missing']);
   // And a red one on GitHub can't block a green local run either: GitHub runs nothing a PR waits on.
   l.finished(HEAD, 'done', [['unit', true], ['lint', true], ['suite', true]]);
-  const green = readiness({ required: requiredFor(none, tests), checks: headChecks({ project: none, tests, github: [gh('fast', 'failure')], events: l.events, sha: HEAD }), head: HEAD, evaluated: approved });
+  const green = readiness({ required: requiredFor(none, tests), checks: headChecks({ project: none, tests, github: asJudged([gh('fast', 'failure')]), events: l.events, sha: HEAD }), head: HEAD, evaluated: approved });
   assert.equal(green.ready, true, green.reasons.join('; '));
   // ci: github: GitHub's checks as they are, the log never read.
   let read = 0;
@@ -85,7 +85,7 @@ test('No CI: a GitHub check named like a test-run check counts for nothing, pass
 test('No CI: the evaluator still decides; a passed test run alone is never ready', () => {
   const l = log();
   l.finished(HEAD, 'done', [['unit', true], ['lint', true]]);
-  const checks = headChecks({ project: none, tests, github: [], events: l.events, sha: HEAD });
+  const checks = headChecks({ project: none, tests, github: asJudged([]), events: l.events, sha: HEAD });
   assert.deepEqual(readiness({ required: ['fast'], checks, head: HEAD, evaluated: null }).reasons, ['no evaluator verdict']);
   assert.match(readiness({ required: ['fast'], checks, head: HEAD, evaluated: { head: OTHER, approved: true } }).reasons.join(), /is not the commit the evaluator approved/);
   assert.match(readiness({ required: ['fast'], checks, head: HEAD, evaluated: { head: HEAD, approved: false } }).reasons.join(), /did not approve/);
@@ -122,14 +122,14 @@ test("the coordinator under No CI: ready only on its own log's test run of the e
   f.cfg.tests.test_run = tests.test_run;
   const c = coordinator(f, new FakeRunner(() => ({ structured: {} })), { prPollMs: 0 });
   f.log.append('eval.verdict', { issue: 1, head: HEAD, patch_hash: 'x', patch_correct: true, test_correct: true, confidence: 'high', advice: '' }, 'alice');
-  const spoof = [gh('fast'), gh('test-run/suite')];
+  const spoof = asJudged([gh('fast'), gh('test-run/suite')]);
   const r1 = c.prReadiness(1, HEAD, spoof);
   assert.equal(r1.ready, false);
   assert.deepEqual(r1.reasons, ['fast: missing', 'test-run/suite: missing']);
   f.log.append('testrun.finished', { id: 'r1', sha: HEAD, kind: 'fast', prs: [1], ok: true, outcome: 'done', results: [{ tier: 'unit', ok: true }, { tier: 'lint', ok: true }], detail: '' }, 'alice');
   // Batching's except (the full checks come from the batch), as the PR watch passes it.
-  assert.equal(c.prReadiness(1, HEAD, [], ['test-run/suite']).ready, true);
-  assert.deepEqual(c.prReadiness(1, HEAD, []).reasons, ['test-run/suite: missing'], 'the full tier is still required outside a batch');
+  assert.equal(c.prReadiness(1, HEAD, asJudged([]), ['test-run/suite']).ready, true);
+  assert.deepEqual(c.prReadiness(1, HEAD, asJudged([])).reasons, ['test-run/suite: missing'], 'the full tier is still required outside a batch');
   assert.match(CI_NONE_MAIN_WATCH, /main watch can't judge merges by checks/);
 });
 

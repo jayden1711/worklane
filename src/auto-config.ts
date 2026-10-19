@@ -14,6 +14,7 @@ import { existsSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'no
 import { join } from 'node:path';
 import { stringify } from 'yaml';
 import { BRAND } from './brand.js';
+import { pinNewConfig } from './check-pin-block.js';
 import { loadConfig } from './config/load.js';
 import { TestsConfig } from './config/schema.js';
 import { sh } from './coordinator/shared.js';
@@ -718,6 +719,7 @@ async function propose(o: AutoConfigOptions, p: Plan, path: string, branch: stri
   const cfgDir = join(path, BRAND.configDir);
   if (existsSync(cfgDir)) rmSync(cfgDir, { recursive: true, force: true });
   scaffoldConfig(cfgDir, { name: o.repo.split('/')[1]!, repo: o.repo, defaultBranch: branch, ...(owner ? { owner } : {}) });
+  pinNewConfig(cfgDir);
   try {
     writeFileSync(join(cfgDir, 'tests.yaml'), draftTests(p, o.state.verified));
     o.adjust?.(cfgDir);
@@ -828,6 +830,7 @@ export async function proposeHeldDraft(o: Pick<AutoConfigOptions, 'io' | 'repo' 
     const cfgDir = join(path, BRAND.configDir);
     if (existsSync(cfgDir)) rmSync(cfgDir, { recursive: true, force: true });
     scaffoldConfig(cfgDir, { name: o.repo.split('/')[1]!, repo: o.repo, defaultBranch: d.branch, ...(d.owner ? { owner: d.owner } : {}) });
+    pinNewConfig(cfgDir);
     for (const [f, text] of Object.entries(d.yaml)) {
       if (!/^[A-Za-z0-9_-]+\.ya?ml$/.test(f)) return { kind: 'failed', detail: `not a config file name: ${f.slice(0, 60)}` };
       writeFileSync(join(cfgDir, f), text);

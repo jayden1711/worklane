@@ -6,6 +6,7 @@
 import { HeldTime, startRefusal, TestRunHeld } from '../testrun/gate.js';
 import { BRAND } from '../brand.js';
 import type { Backlog, CommitCheck } from '../backlog/types.js';
+import type { JudgedChecks } from '../check-source.js';
 import type { EventLog } from '../events/log.js';
 import type { EventPayload, EventType, StoredEvent } from '../events/types.js';
 import { nextStep, type BisectVerdict } from '../bisect.js';
@@ -49,7 +50,7 @@ export interface FixForwardDeps {
    * The checks on a commit as the harness judges them: GitHub's only from their pinned sources (#727,
    * src/check-source.ts), and under No CI the event log's test runs. Required, so nothing here reads GitHub's raw.
    */
-  checks: (sha: string) => Promise<CommitCheck[]>;
+  checks: (sha: string) => Promise<JudgedChecks>;
   /** A probe not done in this many minutes counts as untestable (config.yaml flaky.rerun_timeout_min). */
   probeTimeoutMin: () => number;
   testRuns: TestRuns | null;
@@ -85,7 +86,7 @@ export class FixForward {
   constructor(private readonly d: FixForwardDeps) {}
 
   /** A commit's checks, as the harness judges them. */
-  private checksOf(sha: string): Promise<CommitCheck[]> {
+  private checksOf(sha: string): Promise<JudgedChecks> {
     return this.d.checks(sha);
   }
 

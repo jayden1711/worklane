@@ -121,7 +121,8 @@ export const ProjectConfig = z.strictObject({
    * #727: where each required check (by name) must come from: the GitHub App that posts it (`app_id`), or the Actions
    * workflow file that runs it (`workflow`, under .github/workflows/, run in this repo for the commit judged). A check
    * of that name from anything else, or a commit status, counts as missing. A check not listed takes the App GitHub's
-   * branch protection or ruleset requires for it, and is refused (missing) when neither names one: src/check-source.ts.
+   * branch protection or ruleset requires for it, and is judged by name alone when neither names one (doctor prints a
+   * block that pins them): src/check-source.ts.
    */
   required_check_sources: z
     .record(z.string().min(1), z.union([z.strictObject({ app_id: z.number().int().positive() }), z.strictObject({ workflow: z.string().regex(/^\.github\/workflows\/[^/]+\.ya?ml$/) })]))
