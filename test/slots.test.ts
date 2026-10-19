@@ -6,7 +6,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { machineCap, slotStatus, tryAgentSlot } from '../src/slots.js';
-import { slotsConfigPath, slotsDir as machineSlotsDir } from '../src/os/index.js';
+import { slotDirAt, slotsConfigPath, slotsDir as machineSlotsDir } from '../src/os/index.js';
+import { devSlotsPath } from '../src/os/system-paths.js';
+import { slotFile } from '../src/slot-file.js';
 import { repoRoot } from './helpers.js';
 import { onRealMachine } from './isolate.js';
 
@@ -62,18 +64,22 @@ test('slot locations: durable system paths when present, env overrides, the old 
   delete process.env.AGENT_SLOTS_CONFIG;
   try {
     // The machine's /var/tmp, inside the test's own root (test/isolate.ts): a test never uses the real one.
-    assert.equal(onRealMachine(machineSlotsDir(system)), '/var/tmp/agent-slots', 'no system dir: the development default');
+    // slotsDir() is a slot path (#772): one value per path, so it equals slotDirAt of the path it names.
+    assert.equal(onRealMachine(devSlotsPath()), '/var/tmp/agent-slots');
+    assert.equal(machineSlotsDir(system), slotDirAt(devSlotsPath()), 'no system dir: the development default');
     mkdirSync(system.dir, { recursive: true });
-    assert.equal(machineSlotsDir(system), system.dir, 'the durable dir when it exists');
+    assert.equal(machineSlotsDir(system), slotDirAt(system.dir), 'the durable dir when it exists');
     assert.equal(slotsConfigPath(system.dir, system), join(system.dir, 'config.json'), 'no system config yet');
+    assert.equal(slotsConfigPath(machineSlotsDir(system), system), slotFile(slotDirAt(system.dir), 'config.json'), 'no system config yet (a slot path)');
     mkdirSync(join(root, 'etc'));
     writeFileSync(system.config, JSON.stringify({ max_agents: 6 }));
     assert.equal(slotsConfigPath(system.dir, system), system.config);
+    assert.equal(slotsConfigPath(machineSlotsDir(system), system), system.config, 'the system dir as a slot path: its system config');
     assert.equal(slotsConfigPath('/some/other/dir', system), '/some/other/dir/config.json', 'a custom slot dir keeps its own config');
     // Inside the test machine: in a test run, a slot directory outside it is refused (#669).
     process.env.AGENT_SLOTS_DIR = join(root, 'custom-slots');
     process.env.AGENT_SLOTS_CONFIG = system.config;
-    assert.equal(machineSlotsDir(system), join(root, 'custom-slots'));
+    assert.equal(machineSlotsDir(system), slotDirAt(join(root, 'custom-slots')));
     const custom = mkdtempSync(join(tmpdir(), 'slots-'));
     assert.equal(machineCap(custom), 6, 'the configured file is read wherever it lives');
   } finally {

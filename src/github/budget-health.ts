@@ -15,9 +15,8 @@
 // INVARIANT: total. Anyone who can write the slot directory writes these files, so whatever they hold, the view is
 // built without a throw and every number in it is a safe integer JSON carries as one (never Infinity or NaN, which
 // JSON turns into null). A fault anyway gives a view with an error, never a failed /api/health.
-import { lstatSync, readdirSync } from 'node:fs';
-import { join } from 'node:path';
 import { readRegularFile, slotsDir } from '../os/index.js';
+import { listSlotDir, lstatSlotFile, slotFile, type SlotPathLike } from '../slot-file.js';
 import { sanitize, type PauseKind } from './budget.js';
 
 export const BUDGET_HEALTH_LIMITS = {
@@ -86,7 +85,7 @@ const capped = (a: number, b: number) => Math.min(Number.MAX_SAFE_INTEGER, a + b
 const iso = (ms: number): string | null => (Number.isFinite(ms) && Math.abs(ms) <= 8.64e15 ? new Date(ms).toISOString() : null);
 
 /** One state file, read without the lock; null when refused. */
-function readState(file: string, now: number): Omit<BudgetCredentialHealth, 'id' | 'updatedAt'> | null {
+function readState(file: SlotPathLike, now: number): Omit<BudgetCredentialHealth, 'id' | 'updatedAt'> | null {
   const r = readRegularFile(file, BUDGET_HEALTH_LIMITS.fileBytes);
   if (r.kind !== 'file') return null;
   let raw: unknown;
@@ -125,19 +124,19 @@ function readState(file: string, now: number): Omit<BudgetCredentialHealth, 'id'
 /** The smallest share left over the resources whose limit and remaining are known (1 when none is). */
 const leftShare = (c: Omit<BudgetCredentialHealth, 'id'>) => Math.min(1, ...c.resources.filter((r) => r.limit && r.remaining !== null).map((r) => r.remaining! / r.limit!));
 
-function read(dir: string, now: number): GitHubBudgetHealth | null {
+function read(dir: SlotPathLike, now: number): GitHubBudgetHealth | null {
   let names: string[];
   try {
-    names = readdirSync(dir).filter((n) => STATE_FILE.test(n));
+    names = listSlotDir(dir).filter((n) => STATE_FILE.test(n));
   } catch {
     return null;
   }
   if (!names.length) return null;
-  const files: { file: string; mtimeMs: number }[] = [];
+  const files: { file: SlotPathLike; mtimeMs: number }[] = [];
   for (const name of names.sort().slice(0, BUDGET_HEALTH_LIMITS.scan)) {
-    const file = join(dir, name);
+    const file = slotFile(dir, name);
     try {
-      const m = lstatSync(file).mtimeMs;
+      const m = lstatSlotFile(file).mtimeMs;
       // An implausible time (far future, not a number) sorts last and shows as not known.
       files.push({ file, mtimeMs: Number.isFinite(m) && m <= now + MAX_FUTURE_MS ? m : Number.NEGATIVE_INFINITY });
     } catch {
@@ -162,7 +161,7 @@ function read(dir: string, now: number): GitHubBudgetHealth | null {
  * The budgets in `dir` (the machine's slot directory by default), most pressing first: a back-off, then the least
  * left. Null when there is no budget file at all (nothing has called GitHub through the budget yet). Never throws.
  */
-export function githubBudgetHealth(dir?: string, now = Date.now()): GitHubBudgetHealth | null {
+export function githubBudgetHealth(dir?: SlotPathLike, now = Date.now()): GitHubBudgetHealth | null {
   try {
     return read(dir ?? slotsDir(), now);
   } catch (e) {

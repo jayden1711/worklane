@@ -9,6 +9,7 @@ import { BRAND } from '../brand.js';
 import { outboundEnv } from '../network.js';
 import { safeProjectEnv } from '../project-env.js';
 import { withoutPushGateHatch } from '../guardrails/push-hook.js';
+import { openSlotFileToRead, slotFile, slotPathOf, statfsSlotDir, type SlotPath, type SlotPathLike } from '../slot-file.js';
 import { devSlotsPath, etcPath, markTestRun, testSlotsRefusal, TestSlotsRefused, varLibPath } from './system-paths.js';
 
 export type OsKind = 'macos' | 'linux' | 'windows-wsl' | 'windows';
@@ -375,12 +376,13 @@ export function fileAccess(file: string): { kind: 'missing' } | { kind: 'hidden'
  * checked is what is read. Refused (by kind): no such file, unreadable, a symlink, not a regular file, or over
  * `maxBytes`. Native Windows has no owners to check: unsupported.
  */
-export function readRegularFile(file: string, maxBytes: number): { kind: 'missing' | 'hidden' | 'unsupported' | 'symlink' | 'not-file' } | { kind: 'too-big'; size: number } | { kind: 'file'; uid: number; mode: string; text: string } {
+export function readRegularFile(file: SlotPathLike, maxBytes: number): { kind: 'missing' | 'hidden' | 'unsupported' | 'symlink' | 'not-file' } | { kind: 'too-big'; size: number } | { kind: 'file'; uid: number; mode: string; text: string } {
   if (process.platform === 'win32') return { kind: 'unsupported' };
   let fd: number;
   try {
-    // INVARIANT: O_NOFOLLOW, so a symlink is refused rather than followed (#391 follow-up).
-    fd = openSync(file, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | (fsConstants.O_NONBLOCK ?? 0));
+    // INVARIANT: O_NOFOLLOW, so a symlink is refused rather than followed (#391 follow-up). The open is
+    // src/slot-file.ts's (O_RDONLY | O_NOFOLLOW | O_NONBLOCK), so a slot path (#772) can be read here too.
+    fd = openSlotFileToRead(file);
   } catch (e) {
     const code = (e as NodeJS.ErrnoException).code;
     if (code === 'ELOOP' || code === 'EMLINK') return { kind: 'symlink' };
@@ -792,21 +794,37 @@ export const SYSTEM_SLOTS = { dir: varLibPath('agent-slots'), config: etcPath('s
  * it (the slot directory itself is group-writable); with any other slot directory (development, tests), inside it.
  */
 export const UPDATE_DRAIN_FILE = varLibPath('update-drain.json');
-export function updateDrainPath(dir = slotsDir(), system = SYSTEM_SLOTS): string {
-  return dir === system.dir ? UPDATE_DRAIN_FILE : join(dir, 'update-drain.json');
+export function updateDrainPath(dir?: SlotPath, system?: typeof SYSTEM_SLOTS): SlotPathLike;
+export function updateDrainPath(dir: string, system?: typeof SYSTEM_SLOTS): string;
+export function updateDrainPath(dir: SlotPathLike, system?: typeof SYSTEM_SLOTS): SlotPathLike;
+export function updateDrainPath(dir: SlotPathLike = slotsDir(), system = SYSTEM_SLOTS): SlotPathLike {
+  return isSystemSlots(dir, system) ? UPDATE_DRAIN_FILE : slotFile(dir, 'update-drain.json');
 }
 
+/** Whether `dir` is the system slot directory (a slot path is one value per path: src/slot-file.ts). */
+const isSystemSlots = (dir: SlotPathLike, system: typeof SYSTEM_SLOTS) => dir === (typeof dir === 'string' ? system.dir : slotPathOf(system.dir));
+
 /**
+ * The machine's slot directory, as a slot path (#772): only src/slot-file.ts reads, writes or removes what it names,
+ * so it can't reach any other writer. This module is the only one that makes one (test/slot-path.test.ts), and the
+ * only one that reads where it is (AGENT_SLOTS_DIR, SYSTEM_SLOTS).
+ *
  * INVARIANT (#669): in a test run, only a directory inside the test machine (test/isolate.ts); anything else throws
  * TestSlotsRefused before a file is opened (src/os/system-paths.ts testSlotsRefusal), so no test reaches the machine's
  * own slots, STOP, budgets or incidents through a default. Outside a test run, as always.
  */
-export function slotsDir(system = SYSTEM_SLOTS): string {
+export function slotsDir(system = SYSTEM_SLOTS): SlotPath {
   const dir = unguardedSlotsDir(system);
   const refusal = testSlotsRefusal(dir);
   if (refusal) throw new TestSlotsRefused(refusal);
-  return dir;
+  return slotPathOf(dir);
 }
+
+/**
+ * A slot directory of a caller's own, as a slot path: a demo's or a replay's coordinator, which gets its own slot dir
+ * in its state dir. In src/, only demo.ts and harness-evals/replay.ts call this (test/slot-path.test.ts).
+ */
+export const slotDirAt = (dir: string): SlotPath => slotPathOf(dir);
 
 function unguardedSlotsDir(system: typeof SYSTEM_SLOTS): string {
   if (process.env.AGENT_SLOTS_DIR) return process.env.AGENT_SLOTS_DIR;
@@ -820,10 +838,13 @@ function unguardedSlotsDir(system: typeof SYSTEM_SLOTS): string {
  * set; else the system config file when the system slot directory is in
  * use and the file exists; else config.json in the slot directory.
  */
-export function slotsConfigPath(dir = slotsDir(), system = SYSTEM_SLOTS): string {
+export function slotsConfigPath(dir?: SlotPath, system?: typeof SYSTEM_SLOTS): SlotPathLike;
+export function slotsConfigPath(dir: string, system?: typeof SYSTEM_SLOTS): string;
+export function slotsConfigPath(dir: SlotPathLike, system?: typeof SYSTEM_SLOTS): SlotPathLike;
+export function slotsConfigPath(dir: SlotPathLike = slotsDir(), system = SYSTEM_SLOTS): SlotPathLike {
   if (process.env.AGENT_SLOTS_CONFIG) return process.env.AGENT_SLOTS_CONFIG;
-  if (dir === system.dir && existsSync(system.config)) return system.config;
-  return join(dir, 'config.json');
+  if (isSystemSlots(dir, system) && existsSync(system.config)) return system.config;
+  return slotFile(dir, 'config.json');
 }
 
 export interface ServiceSpec {
@@ -1086,8 +1107,8 @@ export function executableName(base: string): string {
 }
 
 /** Free disk on the volume holding `path`: percent and GB. */
-export function diskFree(path: string): { freePct: number; freeGb: number; totalGb: number } {
-  const st = statfsSync(path);
+export function diskFree(path: SlotPathLike): { freePct: number; freeGb: number; totalGb: number } {
+  const st = statfsSlotDir(path); // statfsSync, through src/slot-file.ts so the slot dir (#772) can be measured too
   const total = st.blocks * st.bsize;
   const free = st.bavail * st.bsize;
   return { freePct: total ? (free / total) * 100 : 0, freeGb: free / 1e9, totalGb: total / 1e9 };

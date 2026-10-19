@@ -1,11 +1,10 @@
 // Crash-safe file locks: a lock is a file, created atomically, holding the
 // owner's pid. A lock whose owner is dead is stale and can be taken over.
 // Liveness, not a timeout, decides staleness (precedent: claude-code-merge-queue).
+// A lock in the slot dir is a slot path (#772): every file operation on it here goes through src/slot-file.ts.
 import { createHash } from 'node:crypto';
-import { mkdirSync, readFileSync, unlinkSync } from 'node:fs';
-import { dirname } from 'node:path';
 import { pidAlive } from './os/index.js';
-import { writeSlotFile } from './slot-file.js';
+import { makeSlotDir, readSlotFile, removeSlotFile, slotParent, slotSibling, writeSlotFile, type SlotPathLike } from './slot-file.js';
 
 export interface LockInfo {
   pid: number;
@@ -16,13 +15,13 @@ export interface LockInfo {
 }
 
 export interface Lock {
-  path: string;
+  path: SlotPathLike;
   release(): void;
 }
 
-function readLock(path: string): LockInfo | null {
+function readLock(path: SlotPathLike): LockInfo | null {
   try {
-    return JSON.parse(readFileSync(path, 'utf8')) as LockInfo;
+    return JSON.parse(readSlotFile(path)) as LockInfo;
   } catch {
     return null;
   }
@@ -66,8 +65,8 @@ export interface TakeoverHooks {
   taking?(): void;
 }
 
-export function tryLock(path: string, owner: string, hooks: TakeoverHooks = {}, extra: Pick<LockInfo, 'limit_ms'> = {}): { lock: Lock } | { holder: LockInfo | null } {
-  mkdirSync(dirname(path), { recursive: true });
+export function tryLock(path: SlotPathLike, owner: string, hooks: TakeoverHooks = {}, extra: Pick<LockInfo, 'limit_ms'> = {}): { lock: Lock } | { holder: LockInfo | null } {
+  makeSlotDir(slotParent(path));
   const info: LockInfo = { pid: process.pid, owner, acquiredAt: new Date().toISOString(), ...extra };
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
@@ -77,7 +76,7 @@ export function tryLock(path: string, owner: string, hooks: TakeoverHooks = {}, 
           path,
           release() {
             const cur = readLock(path);
-            if (cur?.pid === process.pid && cur.acquiredAt === info.acquiredAt) unlinkSync(path);
+            if (cur?.pid === process.pid && cur.acquiredAt === info.acquiredAt) removeSlotFile(path);
           },
         },
       };
@@ -90,7 +89,7 @@ export function tryLock(path: string, owner: string, hooks: TakeoverHooks = {}, 
     if (holder && pidAlive(holder.pid)) return { holder };
     // Stale (dead owner, or unreadable): claim this exact stale lock before touching it.
     hooks.inspected?.();
-    const claim = `${path}.${createHash('sha256').update(seen).digest('hex').slice(0, 16)}.claim`;
+    const claim = slotSibling(path, `.${createHash('sha256').update(seen).digest('hex').slice(0, 16)}.claim`);
     try {
       writeSlotFile(claim, JSON.stringify({ pid: process.pid, at: Date.now() }), { replace: false });
     } catch (e) {
@@ -109,22 +108,22 @@ export function tryLock(path: string, owner: string, hooks: TakeoverHooks = {}, 
   return { holder: readLock(path) };
 }
 
-function claimAbandoned(claim: string): boolean {
+function claimAbandoned(claim: SlotPathLike): boolean {
   const c = parseLock(readFileSafe(claim) ?? '') as { pid?: number; at?: number } | null;
   return !c || typeof c.pid !== 'number' || !pidAlive(c.pid) || Date.now() - (c.at ?? 0) > CLAIM_ABANDONED_MS;
 }
 
-function unlinkQuiet(path: string): void {
+function unlinkQuiet(path: SlotPathLike): void {
   try {
-    unlinkSync(path);
+    removeSlotFile(path);
   } catch {
     // already gone
   }
 }
 
-function readFileSafe(path: string): string | null {
+function readFileSafe(path: SlotPathLike): string | null {
   try {
-    return readFileSync(path, 'utf8');
+    return readSlotFile(path);
   } catch {
     return null;
   }
@@ -140,7 +139,7 @@ function parseLock(text: string): LockInfo | null {
 
 /** Wait up to waitMs for the lock. Never returns "success" without holding it. */
 export async function acquireLock(
-  path: string,
+  path: SlotPathLike,
   owner: string,
   waitMs: number,
   pollMs = 250,
