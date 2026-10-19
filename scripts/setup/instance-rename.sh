@@ -134,11 +134,14 @@ if [ -n "$abort" ]; then
   exec 9> "$ADD_PROJECT_LOCK"
   flock -n 9 || refuse "an add-project, instance-remove or instance-rename is running on this machine; wait for it to finish"
   say "abort: $new goes, $old's records and unit come back"
+  # An auto_merge off given during the rename armed the new name: it comes back with the old one, before the new one goes.
+  carry_auto_merge_off "$new" "$old"
   if done_step records; then records rekey "$new" "$old" "$ARCHIVE/$new-abort-$(date -u +%Y%m%dT%H%M%SZ).records.json"; [ ! -f "/var/lib/worklane/init/$old.json" ] || chgrp "wl-$old" "/var/lib/worklane/init/$old.json"; fi
   # <new> never ran: its history is <old>'s, exported already.
   if done_step users; then flock -u 9; bash "$here/instance-remove.sh" "$new" --yes --exported "$(sed -n 's/^bundle=//p' "$progress" | tail -1)"; flock -n 9 || refuse "lost the lock"; fi
   if [ -f "$parked" ]; then mv -f "$parked" "$unit"; systemctl daemon-reload; echo "put back $unit ($old stays stopped: sudo systemctl start worklane-$old.service)"; fi
   rm -f "$progress"
+  rename_forward_done "$old"
   echo "aborted: $old is as it was, stopped; $new is gone"
   exit 0
 fi
@@ -197,6 +200,8 @@ fi
 install -d -o root -g root -m 0700 "$RENAMES" "$ARCHIVE"
 [ -n "$started" ] || printf 'repo=%s\n' "$repo" > "$progress"
 chmod 0600 "$progress"
+# From here until the old name's removal is done: an auto_merge off given to the old name arms the new name too.
+rename_forward "$old" "$new"
 step_failed() {
   local s="$1"
   echo >&2
@@ -370,6 +375,8 @@ step_remove() {
 
 drops="$(dropped)"
 for s in "${STEPS[@]}"; do run_step "$s"; done
+# The old name is gone (its user last): an auto_merge off can no longer name it, so no forward is needed.
+rename_forward_done "$old"
 printf 'at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$progress"
 mark done
 printf '{"at":%s,"by":%s,"what":"instance.renamed","from":%s,"to":%s}\n' "$(json_str "$(date -u +%Y-%m-%dT%H:%M:%SZ)")" "$(json_str "${SUDO_USER:-root}")" "$(json_str "$old")" "$(json_str "$new")" >> "$MACHINE_CHANGES"

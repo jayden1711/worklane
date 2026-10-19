@@ -4,7 +4,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, utimesSync, writeFileSync } from 'node:fs';
 import { createRequire, syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -212,7 +212,9 @@ test("`set on` on a full filesystem is refused before it changes anything (it ne
   assert.equal(autoMergeKilled(name), true, 'OFF on a full filesystem after ON');
 });
 
-test('repeated auto_merge OFFs (a coordinator looping the helper\'s set-policy) never add files to root\'s directory: one switch, moved to each new name, and the spare (#726 round 5 adversarial pass)', { skip }, () => {
+// Sequential only; many at once: "many OFFs at once (12 processes)" below. (Through 10ca8a1d this title claimed
+// "never add files" for any repetition; concurrent OFFs did add files then.)
+test('auto_merge OFFs one after another (a coordinator looping the helper\'s set-policy) add no files to root\'s directory: one switch, moved to each new name, and the spare (#726 round 5 adversarial pass)', { skip }, () => {
   const name = 'loop';
   const m = machineInstance(name);
   ownPolicy(name, m.deps);
@@ -240,4 +242,161 @@ test('a rename never loses an OFF: one given to the old name after the home step
   const rename = spawnSync('cat', [join(repoRoot, 'scripts', 'setup', 'instance-rename.sh')], { encoding: 'utf8' }).stdout;
   assert.match(rename, /\n {2}carry_auto_merge_off "\$old" "\$new"\n {2}bash "\$here\/service\.sh" "\$new"/);
   assert.match(rename, /\n {2}carry_auto_merge_off "\$old" "\$new"\n {2}bash "\$here\/instance-remove\.sh" "\$old" --yes/);
+});
+
+/** A full filesystem in root's directory, stood in: every create there fails `code` (rename and unlink still work). */
+function fullDisk(code = 'ENOSPC'): () => void {
+  const fs = createRequire(import.meta.url)('node:fs') as Record<string, unknown>;
+  const orig = { writeFileSync: fs.writeFileSync, openSync: fs.openSync };
+  const err = () => Object.assign(new Error(`${code}: no space left on device`), { code });
+  fs.writeFileSync = (p: unknown, ...r: unknown[]) => {
+    if (String(p).includes('/policy-root')) throw err();
+    return (orig.writeFileSync as (...a: unknown[]) => unknown)(p, ...r);
+  };
+  fs.openSync = (p: unknown, flag?: unknown, ...r: unknown[]) => {
+    if (String(p).includes('/policy-root') && (typeof flag === 'string' ? /[wa]/.test(flag) : typeof flag === 'number' && (flag & 0o100) !== 0)) throw err();
+    return (orig.openSync as (...a: unknown[]) => unknown)(p, flag, ...r);
+  };
+  syncBuiltinESMExports();
+  return () => {
+    Object.assign(fs, orig);
+    syncBuiltinESMExports();
+  };
+}
+
+test("while a rename runs, an OFF given to the old name at any step (before or after each carry, and inside the old name's removal after the last carry) turns the new name off too, with no new space (#726 round 6)", { skip }, () => {
+  const steps = ['park', 'export', 'users', 'home', 'checkout', 'import', 'records', 'services', 'keep', 'remove: after the carry, inside instance-remove'];
+  for (const [i, step] of steps.entries()) {
+    const T = join(realpathSync(mkdtempSync(join(tmpdir(), 'rename-fwd-'))), 'policy-root');
+    mkdirSync(T, { mode: 0o755 });
+    const [oldName, newName] = [`old${i}`, `new${i}`];
+    const deps: PolicyRootDeps = { uid: () => me, markerDir: T };
+    const run = (script: string) => spawnSync('bash', ['-c', `source "$1"; POLICY_ROOT_DIR="$2"; own_policy() { :; }; ${script}`, '_', lib, T], { encoding: 'utf8' });
+    // The old name, taken over: its spare. The rename's start: root's forward record, and a spare for the new name.
+    writeFileSync(join(T, `${oldName}.auto-merge-spare`), '');
+    const fwd = run(`rename_forward ${oldName} ${newName}`);
+    assert.equal(fwd.status, 0, `${step}: ${fwd.stderr}`);
+    if (i >= steps.indexOf('home')) run(`carry_policy_root ${oldName} ${newName}`);
+    if (i >= steps.indexOf('services')) run(`carry_auto_merge_off ${oldName} ${newName}`);
+    if (step.startsWith('remove')) {
+      run(`carry_auto_merge_off ${oldName} ${newName}`);
+      // instance-remove.sh: the registry's glob takes the old name's switches before its user goes.
+      run(`rm -f "$POLICY_ROOT_DIR/${oldName}".auto-merge-*`);
+    }
+    assert.equal(autoMergeKilled(newName, T), false, `${step}: on before the OFF`);
+    // With every create in root's directory failing: the new name's OFF uses its spare.
+    const restore = fullDisk();
+    try {
+      setPolicy(oldName, 'auto_merge', 'off', `wl-${oldName}`, deps);
+    } finally {
+      restore();
+    }
+    // The old name too, where it still can be (inside its removal, with its spare gone and no room, it can't: parked).
+    if (!step.startsWith('remove')) assert.equal(autoMergeKilled(oldName, T), true, step);
+    assert.equal(autoMergeKilled(newName, T), true, `${step}: the instance that runs is off`);
+    // The rename done (or aborted): the forward goes.
+    assert.equal(run(`rename_forward_done ${oldName}`).status, 0);
+    assert.equal(existsSync(join(T, `${oldName}.rename-to`)), false);
+  }
+  // instance-rename.sh writes it before its first step, and removes it after the last (the old name's removal) and on --abort.
+  const rename = spawnSync('cat', [join(repoRoot, 'scripts', 'setup', 'instance-rename.sh')], { encoding: 'utf8' }).stdout;
+  assert.match(rename, /\nrename_forward "\$old" "\$new"\n[\s\S]*?\nfor s in "\$\{STEPS\[@\]\}"; do run_step "\$s"; done\n[^\n]*\nrename_forward_done "\$old"\n/);
+  assert.match(rename, /say "abort: [^\n]*\n[^\n]*\n {2}carry_auto_merge_off "\$new" "\$old"\n[\s\S]*?instance-remove\.sh" "\$new"[\s\S]*?rm -f "\$progress"\n {2}rename_forward_done "\$old"\n/, '--abort carries the OFF back to the old name before the new one goes, and ends the forward');
+});
+
+test('many OFFs at once (12 processes) never add files, never report a failure, and leave auto_merge off (#726 round 6)', { skip }, async () => {
+  const name = 'many';
+  const m = machineInstance(name);
+  ownPolicy(name, m.deps);
+  setPolicy(name, 'auto_merge', 'off', null, m.deps);
+  const files = () => readdirSync(POLICY_ROOT_DIR).filter((f) => f.startsWith(`${name}.auto-merge`)).length;
+  const before = files();
+  const child = join(m.T, 'off-loop.mjs');
+  writeFileSync(child, `const a = JSON.parse(process.argv[2]);
+${depsLine}
+const { setPolicy } = await import(a.module);
+let failed = 0; const why = [];
+for (let i = 0; i < a.n; i++) { try { setPolicy(a.name, 'auto_merge', 'off', 'wl-' + a.name, d); } catch (e) { failed++; if (why.length < 3) why.push(e.message); } }
+console.log(JSON.stringify({ failed, why }));
+`);
+  const runs = Array.from({ length: 12 }, () => new Promise<{ code: number | null; out: string }>((res) => {
+    const c = spawn(process.execPath, [child, childArgs(name, m, { n: 300 })], { stdio: ['ignore', 'pipe', 'ignore'] });
+    let out = '';
+    c.stdout.on('data', (b: Buffer) => (out += b.toString()));
+    c.on('exit', (code) => res({ code, out }));
+  }));
+  const results = await Promise.all(runs);
+  const failures = results.map((r) => JSON.parse(r.out.trim().split('\n').pop() || '{"failed":-1}') as { failed: number; why: string[] });
+  assert.deepEqual(results.map((r) => r.code), Array(12).fill(0));
+  assert.deepEqual(failures.filter((f) => f.failed !== 0), [], 'no OFF reported a failure');
+  assert.equal(files(), before, 'no file added');
+  assert.equal(autoMergeKilled(name), true);
+});
+
+test('an OFF that loses a race to another OFF is done, not failed: its switch moved on before its fsync, or the spare taken on a full filesystem (#726 round 6)', { skip }, () => {
+  const fs = createRequire(import.meta.url)('node:fs') as Record<string, unknown>;
+  const rename = fs.renameSync as (a: string, b: string) => void;
+  // (1) Another OFF moves this OFF's switch on, between its rename and its fsync.
+  {
+    const name = 'race-fsync';
+    const m = machineInstance(name);
+    ownPolicy(name, m.deps);
+    let nested = false;
+    fs.renameSync = (a: string, b: string) => {
+      rename(a, b);
+      if (!nested && String(b).includes(`${name}.auto-merge-off.`)) {
+        nested = true;
+        setPolicy(name, 'auto_merge', 'off', `wl-${name}`, m.deps);
+      }
+    };
+    syncBuiltinESMExports();
+    try {
+      assert.deepEqual(setPolicy(name, 'auto_merge', 'off', `wl-${name}`, m.deps), { key: 'auto_merge', from: null, to: false });
+    } finally {
+      fs.renameSync = rename;
+      syncBuiltinESMExports();
+    }
+    assert.ok(nested);
+    assert.equal(autoMergeKilled(name), true);
+  }
+  // (2) Full filesystem, no switch, one spare: another OFF takes the spare first.
+  {
+    const name = 'race-spare';
+    const m = machineInstance(name);
+    ownPolicy(name, m.deps);
+    let nested = false;
+    fs.renameSync = (a: string, b: string) => {
+      if (!nested && String(a).endsWith(`${name}.auto-merge-spare`)) {
+        nested = true;
+        setPolicy(name, 'auto_merge', 'off', `wl-${name}`, m.deps); // takes the spare
+      }
+      rename(a, b);
+    };
+    syncBuiltinESMExports();
+    const restore = fullDisk();
+    try {
+      assert.deepEqual(setPolicy(name, 'auto_merge', 'off', `wl-${name}`, m.deps), { key: 'auto_merge', from: null, to: false });
+    } finally {
+      restore();
+      fs.renameSync = rename;
+      syncBuiltinESMExports();
+    }
+    assert.ok(nested);
+    assert.equal(autoMergeKilled(name), true);
+  }
+});
+
+test("a temp file a root writer left (killed before its rename) is swept on root's next write there (#726 round 6)", { skip }, () => {
+  const name = 'sweep';
+  const m = machineInstance(name);
+  ownPolicy(name, m.deps);
+  const tmp = join(POLICY_ROOT_DIR, '.0123456789ab.auto-merge.tmp');
+  writeFileSync(tmp, 'auto_merge off since then\n');
+  const old = new Date(Date.now() - 600_000);
+  utimesSync(tmp, old, old);
+  const fresh = join(POLICY_ROOT_DIR, '.ba9876543210.auto-merge.tmp');
+  writeFileSync(fresh, ''); // another writer's, in flight: kept
+  setPolicy(name, 'auto_merge', 'off', null, m.deps);
+  assert.equal(existsSync(tmp), false, 'the stale one is gone');
+  assert.equal(existsSync(fresh), true, 'an in-flight one is kept');
 });
