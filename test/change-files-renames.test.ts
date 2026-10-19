@@ -620,7 +620,7 @@ test('no reason (computeLevel, mergeDecision, whyHighRisk, riskClassOf) or confl
   assert.deepEqual([...new Set(levels)], ['L3']);
   // An escaped path still names its file, and an ordinary name is shown as itself.
   const reasons = (p: string) => level([{ path: p, added: 1, removed: 0 }], engine).reasons;
-  assert.ok(reasons('src/re‮view.ts').includes('engine: "src/re\\u202eview.ts"'), reasons('src/re‮view.ts').join(' | '));
+  assert.ok(reasons('src/re\u202eview.ts').includes('engine: "src/re\\u202eview.ts"'), reasons('src/re\u202eview.ts').join(' | '));
   assert.ok(reasons('src/a\nb.ts').includes('engine: "src/a\\nb.ts"'), reasons('src/a\nb.ts').join(' | '));
   assert.ok(reasons('src/review.ts').includes('engine: src/review.ts'), reasons('src/review.ts').join(' | '));
   assert.ok(reasons('src/naïve.ts').includes('engine: src/naïve.ts'), reasons('src/naïve.ts').join(' | '));

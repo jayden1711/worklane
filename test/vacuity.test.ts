@@ -40,8 +40,8 @@ test('a test that asserts but never executes app code is vacuous, even if it imp
 
 test('the vacuity command prints "file: N assertion(s)", the name as shownPath shows it (#683)', () => {
   const { dir } = exampleProject();
-  copyFileSync(join(dir, 'test', 'price.test.js'), join(dir, 'test', 'a​b.test.js'));
-  const r = spawnSync(process.execPath, [engineCli, '--root', dir, 'vacuity', 'test/price.test.js', 'test/a​b.test.js'], { cwd: dir, encoding: 'utf8', timeout: 60_000 });
+  copyFileSync(join(dir, 'test', 'price.test.js'), join(dir, 'test', 'a\u200bb.test.js'));
+  const r = spawnSync(process.execPath, [engineCli, '--root', dir, 'vacuity', 'test/price.test.js', 'test/a\u200bb.test.js'], { cwd: dir, encoding: 'utf8', timeout: 60_000 });
   assert.equal(r.status, 0, r.stderr);
   const n = checkVacuity(dir, 'test/price.test.js', opts).assertions;
   assert.deepEqual(r.stdout.trimEnd().split('\n'), [`ok      test/price.test.js: ${n} assertion(s), touched 1 app file(s)`, `ok      "test/a\\u200bb.test.js": ${n} assertion(s), touched 1 app file(s)`]);
