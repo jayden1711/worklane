@@ -29,6 +29,8 @@ import { toolPath, toolPrefix } from './tool-path.js';
 import { scanPath } from './scan/secrets.js';
 import { runCommentCheck } from './comment-policy.js';
 import { checkVacuity } from './vacuity.js';
+import { changedNames } from './coordinator/change-files.js';
+import { shownPath } from './path-text.js';
 import { prodRead } from './prodread.js';
 import { listJobs, queueJob, runJob } from './queue.js';
 import { emergencyStop, resumeAll, slotStatus, stopAll } from './slots.js';
@@ -273,7 +275,8 @@ function option(args: string[], name: string): string | undefined {
 
 function changedTestFiles(root: string, globs: string[], branch: string): string[] {
   const base = execFileSync('git', ['merge-base', `origin/${branch}`, 'HEAD'], { cwd: root, encoding: 'utf8' }).trim();
-  const files = execFileSync('git', ['diff', '--name-only', '--diff-filter=AM', base], { cwd: root, encoding: 'utf8' }).split('\n').filter(Boolean);
+  // A renamed test file is an added one, and is checked (with renames on it was R, and skipped); a valid UTF-8 path as itself (#683).
+  const files = changedNames(root, ['--diff-filter=AM', base]);
   const res = globs.map((g) => globToRegExp(g));
   return files.filter((f) => res.some((re) => re.test(f)) && existsSync(join(root, f)));
 }
@@ -552,7 +555,7 @@ async function main(argv: string[]): Promise<number> {
       for (const f of files) {
         const r = checkVacuity(root, f, { assertionPattern: v.assertion_pattern, appPaths: v.app_paths, dynamic: v.dynamic, runOne: cfg.tests.runner.one });
         if (r.vacuous) bad++;
-        console.log(`${r.vacuous ? 'VACUOUS' : 'ok     '} ${f}: ${r.assertions} assertion(s)${r.touched ? `, touched ${r.touched.length} app file(s)` : ''}${r.why.length ? ` (${r.why.join('; ')})` : ''}`);
+        console.log(`${r.vacuous ? 'VACUOUS' : 'ok     '} ${shownPath(f)}: ${r.assertions} assertion(s)${r.touched ? `, touched ${r.touched.length} app file(s)` : ''}${r.why.length ? ` (${r.why.join('; ')})` : ''}`);
       }
       if (!files.length) console.log('no test files to check');
       return bad ? 1 : 0;

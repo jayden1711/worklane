@@ -13,6 +13,7 @@ import type { EventPayload, StoredEvent } from '../events/types.js';
 import { agentReadableDir, cpuCount, diskFree, groupOnlyDir, machineLoad, writeAgentReadable, writeGroupOnly } from '../os/index.js';
 import { currentCoreShare, envWithCores, withCores } from '../cores.js';
 import { type ChangeFile } from '../review.js';
+import { changeFiles } from './change-files.js';
 import type { DecisionContext } from '../decision-context.js';
 import { DEFAULT_COMMIT_IDENTITY, type AgentRunner, type CommitIdentity, type RunRequest, type RunResult } from '../runner.js';
 import { writeLive } from '../console.js';
@@ -529,18 +530,12 @@ export abstract class CoordinatorBase {
     return [...latest.values()];
   }
 
-  /** Each file the change base..head touches, with its line counts and added and removed lines (for content checks). */
+  /**
+   * Each file the change base..head touches, with its line counts and added and removed lines (for content checks).
+   * A rename is its old path and its new path (./change-files.ts), so a lock on either one holds.
+   */
   protected changeFiles(cwd: string, base: string, head: string): ChangeFile[] {
-    return this.git(cwd, 'diff', '--numstat', `${base}..${head}`)
-      .split('\n')
-      .filter(Boolean)
-      .map((l) => {
-        const [a, r, p] = l.split('\t');
-        const diff = this.git(cwd, 'diff', '-U0', `${base}..${head}`, '--', p!).split('\n');
-        const added = diff.filter((x) => x.startsWith('+') && !x.startsWith('+++')).map((x) => x.slice(1));
-        const removed = diff.filter((x) => x.startsWith('-') && !x.startsWith('---')).map((x) => x.slice(1));
-        return { path: p!, added: Number(a) || 0, removed: Number(r) || 0, addedLines: added, removedLines: removed };
-      });
+    return changeFiles(cwd, base, head);
   }
 
   /**

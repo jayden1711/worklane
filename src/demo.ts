@@ -10,6 +10,7 @@ import { FileBacklog } from './backlog/file.js';
 import { recordBaseline } from './baseline.js';
 import { loadConfig } from './config/load.js';
 import { Coordinator } from './coordinator.js';
+import { changedNames } from './coordinator/change-files.js';
 import { EventLog } from './events/log.js';
 import { projectStateDir } from './guardrails/context.js';
 import { childEnv } from './os/index.js';
@@ -48,7 +49,7 @@ function agents() {
     }
     if (req.role === 'evaluator-verdict') {
       const base = /Base commit: ([0-9a-f]{40})/.exec(req.prompt)?.[1];
-      const files_reviewed = base ? git(req.cwd, 'diff', '--name-only', `${base}..HEAD`).split('\n').filter(Boolean) : [];
+      const files_reviewed = base ? changedNames(req.cwd, [`${base}..HEAD`]) : [];
       return { structured: { patch_correct: true, test_correct: true, confidence: 'high', advice: '', files_reviewed }, costUsd: 0.18 };
     }
     // workers
