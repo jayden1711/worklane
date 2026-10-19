@@ -261,10 +261,11 @@ const isSet = (state: string): boolean => state !== 'unspecified' && state !== '
 /**
  * Whether a path's attribute going from state `was` (base tree) to `now` (head tree), as `git check-attr` reports them,
  * can make a review see less of the file (#693, the outcome check). It judges the change, not the end state:
- * - `diff`: never when `now` is `set` (forced text) or `was` was `unset` (binary already). Otherwise yes when `was` was
- *   `set` (leaving a forced `diff`, even for a driver git ships, hands a file with a NUL byte back to "Binary files
- *   differ"), when `now` is `unset`, and when either side is a driver git doesn't ship (its binary or textconv
- *   setting lives in a config the review can't see: fails closed). Between `unspecified` and git's own drivers, no.
+ * - `diff`: never when `now` is `set` (forced text). Otherwise yes when either side is a driver git doesn't ship (its
+ *   binary or textconv setting lives in a config the review can't see: fails closed, even from `unset`, since a
+ *   textconv can show an empty diff where the base showed "Binary files differ"); no when `was` was `unset` (binary
+ *   already); yes when `was` was `set` (leaving a forced `diff`, even for a driver git ships, hands a file with a NUL
+ *   byte back to "Binary files differ") or `now` is `unset`. Between `unspecified` and git's own drivers, no.
  * - `binary`: yes when it becomes set.
  * - `text`: yes when it becomes unset (a plain `git diff` shows the same; kept fail-closed for other readers).
  * - `filter`, `working-tree-encoding`: yes when `now` sets one (a checkout gets other bytes than the blob).
@@ -276,9 +277,13 @@ export function attributeTransitionHides(attr: string, was: string, now: string)
   if (was === now) return false;
   switch (attr) {
     case 'diff': {
-      if (now === 'set' || was === 'unset') return false;
+      if (now === 'set') return false;
+      // A driver git doesn't ship, on either side, before the `unset` return: from binary to such a driver can show
+      // nothing at all (its textconv lives in a config the review can't see), so it fails closed (R21).
       const custom = (s: string) => isSet(s) && s !== 'set' && !BUILTIN_DIFF_DRIVERS.has(s);
-      return was === 'set' || now === 'unset' || custom(now) || custom(was);
+      if (custom(now) || custom(was)) return true;
+      if (was === 'unset') return false;
+      return was === 'set' || now === 'unset';
     }
     case 'binary':
       return isSet(now);

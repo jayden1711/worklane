@@ -1257,6 +1257,31 @@ test('the outcome check judges change, not just end state: leaving a forced `dif
   assert.equal(level(changeFiles(dir, base, head), plain).level, 'L1');
 });
 
+test('`diff` going from unset to a driver git doesn\'t ship is flagged: its config may show nothing where the base showed "Binary files differ" (R21, round 6)', () => {
+  const plain = ReviewConfig.parse({ version: 1, levels: { ...LEVELS, L3_human: { when: [], over_lines: 800 } } });
+  const forms = [
+    // U1: main has `*.sql diff=custom` then `*.sql -diff`; the change removes the `-diff`.
+    { what: 'removing a later -diff', before: { '.gitattributes': '*.sql diff=custom\n*.sql -diff\n' }, after: { '.gitattributes': '*.sql diff=custom\n' }, gone: [] as string[] },
+    // U2: the `-diff` is in db/.gitattributes; the change deletes that file.
+    { what: 'deleting the db/.gitattributes that holds the -diff', before: { '.gitattributes': '*.sql diff=custom\n', 'db/.gitattributes': '*.sql -diff\n' }, after: {}, gone: ['db/.gitattributes'] },
+  ];
+  for (const { what, before, after, gone } of forms) {
+    const { dir, base } = repo({ 'README.md': '# x\n', 'db/x.sql': 'select 1;\n', ...before });
+    write(dir, { ...after, 'db/x.sql': 'select 1;\nDROP TABLE users;\n' });
+    for (const p of gone) git(dir, 'rm', '-q', p);
+    const head = commit(dir, what);
+    // Why it fails closed: with a textconv for that driver, the head's diff of the file is empty, where the base's
+    // attributes showed "Binary files differ".
+    const view = (rev: string) => git(dir, '-c', 'core.attributesFile=/dev/null', '-c', 'diff.custom.textconv=grep -v DROP', `--attr-source=${rev}`, 'diff', `${base}..${head}`, '--', 'db/x.sql');
+    assert.match(view(base), /Binary files .* differ/, what);
+    assert.equal(view(head), '', what);
+    const files = changeFiles(dir, base, head);
+    const ga = files.find((f) => isGitattributesPath(f.path));
+    assert.ok(ga?.attributeOutcome?.includes('db/x.sql: diff unset -> custom'), `${what}: ${JSON.stringify(ga?.attributeOutcome)}`);
+    assert.ok(level(files, plain).categories['diff-hiding-attributes']?.length, what);
+  }
+});
+
 test('the line layer reads each line both git\'s way and any-whitespace\'s way, and flags it if either does (R17, round 5: 32840f0e\'s breadth)', () => {
   const seps = ['\v', '\f', ' ', '　', '﻿', ' '];
   const added = ['-diff', 'binary', 'linguist-generated', 'filter=lfs', 'working-tree-encoding=IBM037', 'diff=custom', '!diff', 'quiet'];
