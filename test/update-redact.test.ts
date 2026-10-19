@@ -53,7 +53,7 @@ function machine(o: { repoUrl?: string; build?: string; migrate?: string } = {})
       if (file === 'systemd-run' && o.build) throw new Error(o.build); // the build
       return '';
     },
-    fetchJson: async (url: string) => (url.includes('/compare/') ? { status: 'ahead', ahead_by: 1, behind_by: 0 } : { check_runs: [{ name: 'test', status: 'completed', conclusion: 'success', started_at: '1', id: 1, app: { id: 1 } }] }),
+    fetchJson: async (url: string) => (url.includes('/compare/') ? { status: 'ahead', ahead_by: 1, behind_by: 0 } : { check_runs: [{ name: 'test', status: 'completed', conclusion: 'success', started_at: '1', id: 1, app: { id: 1 } }], statuses: [] }),
     slots: () => [],
     alive: () => false,
     installTree: () => {},

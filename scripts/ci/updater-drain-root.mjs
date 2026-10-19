@@ -63,7 +63,7 @@ const deps = {
   fetchJson: async (url) =>
     url.includes('/compare/')
       ? { status: 'ahead', ahead_by: 1, behind_by: 0, total_commits: 1, commits: [{ sha: NEW, parents: [{ sha: OLD }], commit: { committer: { date: new Date(Date.now() - 600_000).toISOString() } } }] }
-      : { check_runs: [{ name: 'test', status: 'completed', conclusion: 'success', started_at: '1', id: 1, app: { id: 1 } }] },
+      : { check_runs: [{ name: 'test', status: 'completed', conclusion: 'success', started_at: '1', id: 1, app: { id: 1 } }], statuses: [] },
   installTree: () => {},
   syncHelpers: () => [],
   switchTo: (s) => (current = s),
