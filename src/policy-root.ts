@@ -235,9 +235,10 @@ export function ownPolicy(instance: string, d: PolicyRootDeps = {}, flags: OwnFl
     const loose = beyondCoordinator(policy, loadLimits(d.limitsPath ?? LIMITS_PATH));
     if (!written && loose.length && !flags.acceptLoose) throw new Error(`${file} is looser than its coordinator could make it (${loose.join('; ')}), so it is left as it is, not root's: a process running as its coordinator user may have written that. An admin checks it at a root shell, then changes it, or takes it over as it is with ${ownCommand(instance, ...(rec !== null ? (['--retake'] as const) : []), '--accept-loose')}`);
     // Its id and a disarmed kill switch first, so any auto_merge off from now on needs no new space
-    // (src/policy-kill.ts): with no room, nothing is taken over. A new id only on a first takeover, or an admin's
-    // --retake: a recorded instance with no pointer reads off, and the coordinator (no flag) can't turn that back on.
-    ensureSpare(instance, markers, rec === null || !!flags.retake);
+    // (src/policy-kill.ts): with no room, nothing is taken over. A new id only on a first takeover (with its spare), or
+    // an admin's --retake of a recorded instance whose pointer is gone: that one reads off, so its new id is made with
+    // a switch armed, and it stays off until root's `set on` (#726 round 10). The coordinator (no flag) mints nothing.
+    ensureSpare(instance, markers, rec === null ? 'spare' : flags.retake ? new Date() : false);
     replaceInOwnedDir({ dir, name: FILE, text, dirOwner: coordUid, uid: rootUid, gid: d.rootGid ?? 0, mode: 0o644 });
     writeRecord(markers, instance, { file, sha256: sha256(text) });
     return { file, keys: Object.fromEntries(WATCHED.map((k) => [k, policy[k]])), loose };
