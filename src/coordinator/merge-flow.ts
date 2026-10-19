@@ -564,7 +564,8 @@ export abstract class MergeFlow extends FixRuns {
       const approved = mergeApproval(this.d.log, number, pr.headSha);
       if (approved) return this.mergeApproved(w, pr, approved.by);
       // Batching: the owner's approval (a review) merges it, on exactly the main its batch tested.
-      if (batching && !this.emergencyInForce() && (await this.ownerApproved(w, pr))) await this.mergeTested(w, pr, 'approved');
+      // Capped as the Discord approval is (triesCapped): after 3 failed merge tries at this head, no more.
+      if (batching && !this.emergencyInForce() && (await this.ownerApproved(w, pr)) && !this.triesCapped(w, pr, `@${this.ownerOf(w.issue)}'s review`)) await this.mergeTested(w, pr, 'approved');
       return; // otherwise already waiting for the owner
     }
     const d = this.mergeDecisionFor(n, number, pr);
@@ -702,9 +703,7 @@ export abstract class MergeFlow extends FixRuns {
     if (this.emergencyInForce()) return;
     const stopped = this.autoMergeStopped();
     if (stopped) return hold(`approved by @${by}, but auto-merge is stopped: ${stopped}`.slice(0, 500));
-    // After 3 failed merge tries at this head (failedTries: merge calls that failed, never these holds, so a hold can't use
-    // up an owner's approval), no more tries; it waits for the owner. One fixed reason: recorded once, however many passes.
-    if (failedTries(this.d.log.read(0, [...ATTEMPT_EVENTS]), number, pr.headSha) >= 3) return hold(`approved by @${by}, but 3 merge tries at this head failed, so it isn't tried again`);
+    if (this.triesCapped(w, pr, `@${by}`)) return;
     if (pr.mergeableState === 'draft' || pr.mergeable === null || pr.mergeableState === 'unknown') return; // GitHub still computing: next poll
     if (this.mergeDeferred(number, pr.headSha)) return;
     if (isBehind(pr)) return this.deferMerge(w, pr, 'behind', `approved by @${by}, but GitHub requires it up to date with ${this.branch} first (mergeable_state behind)`);
@@ -723,6 +722,19 @@ export abstract class MergeFlow extends FixRuns {
     this.emit('merge.done', { issue: n, number, head: pr.headSha, sha: m.sha, url: pr.url, title: pr.title });
     this.prPolled.clear();
     await this.d.backlog.comment(number, `[${BRAND.cli}] Merged on @${by}'s approval (an owner, from Discord; audited) as \`${m.sha.slice(0, 8)}\`: a merge commit of the approved head \`${pr.headSha.slice(0, 8)}\`, its required checks green on it.`);
+  }
+
+  /**
+   * An owner's approval (from Discord, or a review with batching on) after 3 failed merge tries at this head
+   * (failedTries: merge calls that failed, never holds, so a hold can't use up the approval): no more tries; it waits
+   * for the owner. Recorded once (one fixed reason, however many passes). Whether it is capped.
+   */
+  private triesCapped(w: EventPayload<'pr.opened'>, pr: PullRequest, approvedBy: string): boolean {
+    if (failedTries(this.d.log.read(0, [...ATTEMPT_EVENTS]), w.number, pr.headSha) < 3) return false;
+    const why = `approved by ${approvedBy}, but 3 merge tries at this head failed, so it isn't tried again`.slice(0, 500);
+    const said = this.d.log.read(0, ['merge.failed']).some((e) => (e.payload as EventPayload<'merge.failed'>).number === w.number && (e.payload as EventPayload<'merge.failed'>).head === pr.headSha && (e.payload as EventPayload<'merge.failed'>).why === why);
+    if (!said) this.emit('merge.failed', { issue: w.issue, number: w.number, head: pr.headSha, why });
+    return true;
   }
 
   /** The owner's latest review on the PR approves it, given since this head was queued for a batch. */

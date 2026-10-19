@@ -565,6 +565,28 @@ test('on the approved path, holds never use up the approval: held once (GitHub: 
   );
 });
 
+test('batching on, the owner approves by a GitHub review: a merge call that always throws (403) is tried at most 3 times over 12 passes, then held once', { skip }, async () => {
+  const w = world({ batching: true, autoMerge: false });
+  const a = await w.pr('rho');
+  greenBatch(w, a);
+  const c = w.start();
+  await w.pass(c); // auto-merge off: the policy leaves it to the owner
+  assert.equal(w.forPr('merge.decided', a.number).at(-1)!.auto, false);
+  w.f.backlog.addReview(a.number, { author: 'example-owner', state: 'APPROVED', body: 'ok' });
+  let calls = 0;
+  w.f.backlog.mergePr = async () => {
+    calls++;
+    throw new Error('GitHub 403: Resource not accessible by integration');
+  };
+  const passes: string[] = [];
+  for (let i = 0; i < 12; i++) passes.push(await w.pass(c));
+  const capped = w.forPr('merge.failed', a.number).filter((x) => /approved by @example-owner's review, but 3 merge tries at this head failed/.test(String(x.why)));
+  assert.deepEqual(
+    { passes, calls, tries: w.trail(a.number).filter((t) => t === 'merge.attempted').length, capHolds: capped.length, merged: w.merged(a.number) },
+    { passes: Array(12).fill('ok'), calls: 3, tries: 3, capHolds: 1, merged: false },
+  );
+});
+
 test('a failed lookup of the App\'s bot user is recorded once: merge reconciliation is off until a restart', { skip }, async () => {
   const w = world();
   await w.pr('pi');
