@@ -129,6 +129,11 @@ export function importBundle(o: { file: string; stateDir: string; root: string |
         r.skipped.push({ path: f.path, why: "init's checklist from the other machine; run init here" });
         continue;
       }
+      // Removed with Siri (#743): an older bundle's device token store and gateway token are never brought back.
+      if (rel === 'siri-gateway-token' || rel.startsWith('siri/')) {
+        r.skipped.push({ path: f.path, why: 'Siri was removed; its tokens are not imported' });
+        continue;
+      }
       const to = join(o.stateDir, rel);
       mkdirSync(dirname(to), { recursive: true });
       writeGroupOnly(to, data);

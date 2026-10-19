@@ -50,8 +50,7 @@ import { ATTACHMENT_EXTENSIONS, AttachmentError, attachmentCaps, attachmentsFor,
 import { mayAnswer, type Backlog } from './backlog/types.js';
 import { FIRST_TASK_TEMPLATE, FirstTaskError, firstTaskBody, ignoredIssues, READY_LABEL, type IgnoredIssue } from './first-task.js';
 import { answerDecision, approvalsAt, auditWrite } from './decide.js';
-import { BY_VOICE, VOICE_MAX_CHARS, voiceClaim, voiceExclusion, voiceRefusal } from './voice.js';
-import { submitVoiceIntake, voiceIntakeRefusal } from './intake/voice.js';
+import { VOICE_REMOVED, voiceRequestRefusal } from './voice-removed.js';
 import { readRun, runsForIssue } from './run-record.js';
 import { decisionDetail, decisionDiff, prSections } from './decision-detail.js';
 import { emergencyStop, slotStatus, type EmergencyStop } from './slots.js';
@@ -128,9 +127,6 @@ import { asksFrom, ASK_EVENTS } from './console/asks.js';
 import { incidentsView } from './watchdog/view.js';
 import { effectiveRouting, ROUTING } from './routing.js';
 import { refuseKeyInUrl } from './dashboard-key-url.js';
-import { handleSiri, siriGatewayToken } from './siri/instance.js';
-import { siriDevicesRoute } from './siri/manage.js';
-import { RateLimits } from './siri/tokens.js';
 
 /**
  * What the Settings page shows: the config's shape and choices, read-only.
@@ -205,7 +201,7 @@ export interface DashboardOptions {
    * none when unset, so every person the hub names is refused.
    */
   roleOf?: RoleOf;
-  /** The instance's intake.yaml (in its home): voice intake is taken only when it turns voice on. None: no voice intake. */
+  /** The instance's intake.yaml (in its home); nothing here reads it since voice intake was removed (#743). */
   intakeFile?: string;
   /** The instance this server serves (recorded in the audit); none for a checkout. */
   instance?: string;
@@ -1041,13 +1037,10 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
     return Promise.reject(e);
   }
   const token = dashboardToken(opts.stateDir);
-  // Siri (src/siri/): a server instance's own gateway token, for the hub's Siri gateway only; never the dashboard token.
-  const siriToken = opts.instance ? siriGatewayToken(opts.stateDir, token) : null;
-  const siriLimits = new RateLimits();
   // Webhook automations (src/automations/webhook.ts): the instance's own hooks gateway token, for the hub's hooks
-  // gateway only; never the dashboard's or Siri's token.
+  // gateway only; never the dashboard's token.
   // Made for every instance (dashboards.sh waits for it), whether or not it has automations yet.
-  const hooksToken = opts.instance ? hooksGatewayToken(opts.stateDir, [token, ...(siriToken ? [siriToken] : [])]) : null;
+  const hooksToken = opts.instance ? hooksGatewayToken(opts.stateDir, [token]) : null;
   const webDir = opts.webDir ?? DEFAULT_WEB_DIR;
   const viewsFile = join(opts.stateDir, 'dashboard-views.json');
   /**
@@ -1333,7 +1326,6 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
     // Folds of the events alone, kept until the log changes (the projection's "today" is part of its key).
     const today = localDay();
     const p = snap.memo(`project ${today}`, (ev) => project(ev, today));
-    const posted = snap.memo('plan.posted', (ev) => ev.filter((e) => e.type === 'plan.posted').map((e) => e.payload as EventPayload<'plan.posted'>));
     const slots = slotStatus(opts.slotsDir);
     const mayLand = approvals();
     const full = {
@@ -1349,8 +1341,7 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
       ...p,
       // The Activity feed: a viewer's is built from the allowlisted events only, as /api/events gives them.
       activity: isWriter(who.role) ? p.activity : snap.memo('viewerActivity', viewerActivity),
-      // For an owner, why voice may never approve each one (src/voice.ts), so the page says so before anyone speaks.
-      decisions: p.decisions.map((d) => ({ ...d, canAnswer: mayAnswerKind(d.kind, who.role, mayLand), ...(isOwner(who.role) ? { voiceRefused: voiceExclusion(d, posted) } : {}) })),
+      decisions: p.decisions.map((d) => ({ ...d, canAnswer: mayAnswerKind(d.kind, who.role, mayLand) })),
       // Whether this viewer may read intake reports, so the page asks for them only when it will get them.
       canReadIntake: mayReadIntake(who.role),
       // Whether this viewer may read the throughput panel, so the page asks for it only when it will get it.
@@ -1407,19 +1398,13 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
   const server = createServer(async (req, res) => {
     const url = new URL(req.url ?? '/', 'http://127.0.0.1');
     // Every route, the page itself included: a key in the URL is refused, never accepted.
-    if (refuseKeyInUrl(url, res, [token, ...(siriToken ? [siriToken] : []), ...(hooksToken ? [hooksToken] : [])])) return;
+    if (refuseKeyInUrl(url, res, [token, ...(hooksToken ? [hooksToken] : [])])) return;
     try {
-      // Siri's three routes (src/siri/instance.ts), before and instead of the dashboard's own auth: only the Siri
-      // gateway token works there, and nothing under /api/siri falls through to any other route.
       // A webhook delivery (src/automations/webhook.ts), before and instead of the dashboard's own auth: only the hooks
       // gateway token works there, and nothing under /api/hooks falls through to any other route.
       if (url.pathname === '/api/hooks' || url.pathname.startsWith('/api/hooks/')) {
         if (!hooksToken || !opts.automationsFile) return json(res, 404, { error: 'not found' });
         return void (await handleHook(req, res, url, { stateDir: opts.stateDir, home: dirname(opts.automationsFile), automationsFile: opts.automationsFile, eventsDb: opts.eventsDb, gatewayToken: hooksToken, instance: opts.instance ?? '' }));
-      }
-      if (url.pathname === '/api/siri' || url.pathname.startsWith('/api/siri/')) {
-        if (!siriToken) return json(res, 404, { error: 'not found' });
-        return void (await handleSiri(req, res, url, { stateDir: opts.stateDir, instance: opts.instance ?? null, ...(opts.intakeFile ? { intakeFile: opts.intakeFile } : {}), eventsDb: opts.eventsDb, gatewayToken: siriToken, limits: siriLimits }));
       }
       // No key asked or given: `dashboard --detach` checks this is its checkout's dashboard by a proof of the key over
       // its nonce and the port it reached (src/dashboard-proof.ts). The key itself is never sent to a port (#448).
@@ -2770,52 +2755,24 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           return json(res, 200, { ok: true });
         }
         if (url.pathname === '/api/decide' && req.method === 'POST') {
-          const body = (await readBody(req)) as { id?: string; answer?: string; voice?: unknown };
-          // Said by voice (src/voice.ts): the claim only adds checks, here (an owner, a focused and visible tab) and in
-          // the decide path (approve only, never what voice may not approve). Every voice refusal is audited too.
-          const claim = voiceClaim(body);
+          const body = (await readBody(req)) as { id?: string; answer?: string };
+          // Said by voice (a tab still running the removed voice client): refused, never taken as a click (#743).
+          const byVoice = voiceRequestRefusal(body);
+          if (byVoice) return json(res, 410, { error: byVoice });
           const id = String(body.id ?? '');
-          const refusedByVoice = (status: number, error: string) => (audit(who, 'voice.refused', { action: 'decision.answered', id, why: error, by: BY_VOICE }), json(res, status, { error }));
-          if (claim.voice) {
-            const no = voiceRefusal(who, claim, repo);
-            if (no) return refusedByVoice(403, no);
-          }
           const log = new EventLog(opts.eventsDb);
           let r: ReturnType<typeof answerDecision>;
           try {
             // The one decide path (src/decide.ts): a chat-thread answer goes through it too.
-            r = answerDecision(log, { id, answer: String(body.answer ?? ''), who, instance: opts.instance ?? null, repo, approvals: approvals(), ...(claim.voice ? { voice: true } : {}) });
+            r = answerDecision(log, { id, answer: String(body.answer ?? ''), who, instance: opts.instance ?? null, repo, approvals: approvals() });
           } finally {
             log.close();
           }
-          if (!r.ok) return claim.voice ? refusedByVoice(r.status, r.error) : json(res, r.status, { error: r.error });
+          if (!r.ok) return json(res, r.status, { error: r.error });
           return json(res, 200, { ok: true, event: r.event });
         }
-        // A spoken idea the owner confirmed (src/intake/voice.ts): left for the coordinator's intake, which takes it
-        // through the same triage and approval as a Discord message. Voice only, owners only, focused and visible.
-        if (url.pathname === '/api/voice/intake' && req.method === 'POST') {
-          const body = (await readBody(req)) as { text?: unknown; voice?: unknown };
-          const claim = voiceClaim(body);
-          if (!claim.voice) return json(res, 400, { error: 'this route takes only spoken ideas; file anything else on GitHub or through the Ask panel' });
-          const no = voiceRefusal(who, claim, repo) ?? voiceIntakeRefusal(opts.intakeFile);
-          if (no) {
-            audit(who, 'voice.refused', { action: 'intake.voice', why: no, by: BY_VOICE });
-            return json(res, 403, { error: no });
-          }
-          const text = typeof body.text === 'string' ? body.text.trim() : '';
-          if (!text) return json(res, 400, { error: 'nothing was said' });
-          if (text.length > VOICE_MAX_CHARS) return json(res, 400, { error: `the idea is over ${VOICE_MAX_CHARS} characters` });
-          const { id: voiceId } = submitVoiceIntake({ stateDir: opts.stateDir, text, by: who.login });
-          // INVARIANT: the audit names the idea by its id and length only; its words stay in the instance's state.
-          audit(who, 'intake.voice', { id: voiceId, chars: text.length, by: BY_VOICE });
-          return json(res, 200, { ok: true, id: voiceId });
-        }
-        // Settings, Siri devices (src/siri/manage.ts): the list, a new token (shown once), revoke and unbind.
-        if (url.pathname === '/api/siri-devices' || url.pathname.startsWith('/api/siri-devices/')) {
-          const body = req.method === 'POST' ? ((await readBody(req)) as Record<string, unknown>) : {};
-          const a = siriDevicesRoute(who, req.method ?? 'GET', url.pathname, body && typeof body === 'object' ? body : {}, { stateDir: opts.stateDir, instance: opts.instance ?? null, ...(opts.intakeFile ? { intakeFile: opts.intakeFile } : {}), audit: (action, detail) => audit(who, action, detail) });
-          if (a) return json(res, a.status, a.body);
-        }
+        // The removed voice intake's route (#743): refused, nothing taken.
+        if (url.pathname.startsWith('/api/voice/')) return json(res, 410, { error: VOICE_REMOVED });
         if (url.pathname === '/api/views') {
           if (req.method === 'GET') return json(res, 200, existsSync(viewsFile) ? JSON.parse(readFileSync(viewsFile, 'utf8')) : []);
           if (req.method === 'PUT') {

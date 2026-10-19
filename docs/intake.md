@@ -44,8 +44,8 @@ issues, prompts or logs.
 Each source is an adapter with one job: produce `IncomingReport { source, sourceId, sender, text,
 receivedAt, thread? }` items and send short replies. Each is off by default and enabled per instance in the
 instance's `intake.yaml` (instance home, owned by the coordinator user, 0600), which also holds the trusted
-senders. The sources: the Discord bot, a Slack app (2.7), Linear issues (2.8), GitHub issues, in-product reports,
-production alerts and voice.
+senders. The sources: the Discord bot, a Slack app (2.7), Linear issues (2.8), GitHub issues, in-product reports
+and production alerts.
 
 ### 2.1 Chat bot (Discord)
 
@@ -497,35 +497,18 @@ don't wait for the intake pull (`src/coordinator/quick-replies.ts`):
   listing, commenting and labelling. With an App token, the `ready` the App adds doesn't make the issue
   actionable on its own (`actionable` wants a writer to add it), as for every issue intake files.
 
-### 2.5 Voice (the dashboard)
+### 2.5 and 2.6 Voice and Siri (removed)
 
-- An owner of the instance speaks an idea on the dashboard (the voice button beside Ask; web/src/voice/). It is
-  heard on their device (on-device recognition unless they allowed the browser's cloud fallback), shown on a
-  10-second banner (and read aloud when talk-back is on), and sent only on "confirm" said within the window or a
-  click on the banner; anything else said cancels it.
-- The dashboard's `POST /api/voice/intake` takes it only from an owner whose tab says it is focused and visible,
-  and only when `intake.yaml` has `voice.enabled: true`. It leaves the words in the instance's state
-  (`src/intake/voice.ts`); the audit names the idea by id and length, "by voice", never its words.
-- The voice source hands it to the same intake pass as a Discord message (`intakeReport`): redaction, caps, the
-  read-only triage run, dedupe and the policy. Its sender (`voice`, the owner's GitHub login) is never trusted:
-  its draft is an Inbox decision, like an untrusted Discord sender's. No reply goes anywhere; its outcome is on
-  the Intake page.
-- Spoken approvals ("approve <issue number>") go through the dashboard's one decide path. By voice, a decision can
-  only be approved, by an owner, from a focused and visible tab, and never one `src/voice.ts` excludes (a held
-  high-risk merge, a plan held for a high-risk reason, a delegation); those take a click.
-- Off by default twice: `voice.enabled` in `intake.yaml`, and each owner's own switch in Settings, Voice.
+Voice intake, spoken approvals and Siri were removed (#743, `src/voice-removed.ts`). What an install that had them on
+still holds gets less access, never more:
 
-### 2.6 Siri ("Hey Siri, tell")
-
-- A phone's Siri Shortcut posts what was said to the hub's Siri gateway, over the tailnet, with a device token an
-  owner made on the dashboard (docs/siri.md). The instance leaves it in the same voice inbox as 2.5
-  (`submitVoiceIntake`, sender `siri:<device name>`), so it goes through the same intake pass.
-- Never trusted: `trusted` has no voice or Siri list (a config error if one is added), so its draft is always an Inbox
-  decision for an owner or a writer. Even once approved, the App files it, so it isn't actionable until a writer adds
-  `ready`.
-- The audit names the device, its token id, its Tailscale node and the idea's id and length, never its words.
-- Off unless `siri.enabled` in `intake.yaml` (which also takes the voice source on for it). `siri.ask_model` and
-  `siri.ask_max_usd_per_day` are for "Hey Siri, ask" (docs/siri.md).
+- An `intake.yaml` that still has `voice:` or `siri:` loads as before (a leftover never turns intake off). Each key is
+  ignored and named as a warning, and `doctor` fails until it is deleted. No voice source is wired, and a voice report
+  already stored is taken from nobody (`isAllowed`).
+- The dashboard refuses, with 410, a decision answered with a `voice` field (a tab still running the old page): a
+  spoken approval never counts, not even as a click. `POST /api/voice/intake` is a 410 too, and nothing under
+  `/api/siri` or `/api/siri-devices` answers.
+- Every approval voice could give is a click on the dashboard, under the ordinary rules.
 
 ### 2.7 Slack
 

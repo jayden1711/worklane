@@ -67,7 +67,6 @@ worklane demo /tmp/worklane-demo
   - Test-run variables reach the sandbox on stdin, never in an argv.
   - gitleaks scans every agent commit and every session transcript.
 - **Signed updates.** On the release channel (a new install's default), the engine updater installs only a release tag whose signature verifies against `/etc/worklane/allowed_signers`. A signer is added only at a root shell; the dashboard can only stage one. An update waits for running work, and rolls back and holds the commit if a service or the test sandbox fails afterwards.
-- **Voice is off by default, for owners only, and heard on-device.** An owner can speak an idea or `approve <issue number>`. Nothing happens until they say "confirm" within 10 seconds or click the banner. A spoken idea goes through the same triage as a Discord message and becomes an Inbox decision. By voice, a decision can only be approved, never a held high-risk merge, a plan held for a high-risk reason, or a delegation; those take a click. The server checks all of this again ([intake.md](docs/intake.md#25-voice-the-dashboard)).
 - **Protected changes wait for a human.** Review levels come from what a change touches, so a docs fix can land on its own, while money-path and auth changes wait for an owner.
 - **Very little is blocked, and everything is verified.** Only a few things are refused outright: signing from a live wallet, writing to the production database. Everything else gets checks the harness runs itself.
 

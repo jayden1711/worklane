@@ -2,6 +2,16 @@
 
 Every release, newest first: the PRs merged since the previous one, and what changed in guardrails.
 
+## Unreleased (after v0.5.3)
+
+### Removals
+
+- **Voice intake, spoken approvals, the Ask panel's dictation, read-aloud and wake word, and Siri Shortcuts are removed (#743).** Every approval voice could give is a click on the dashboard, under the ordinary rules. Once this installs, nothing listens on the Siri gateway's port 4397, no Siri token works, and no spoken approval counts: a tab still running the old page gets a 410, never a click's approval. An `intake.yaml` with `voice:` or `siri:` still loads (intake stays on), and each key is ignored with a warning. **If you never turned voice or Siri on, there is nothing to do.** If you did, `worklane doctor` fails under "voice and Siri removed" and names each leftover until it is gone. Do these once, as root, in this order:
+  1. `sudo bash /opt/worklane/current/scripts/setup/tailscale.sh unserve-siri` takes the tailnet's 8443 forward away and leaves 443 and 8444 as they are.
+  2. Rerun `dashboards.sh` with the command doctor prints. It drops `--siri-port` from the hub's unit and deletes each instance's Siri device token store (`state/siri/`) and gateway token (`state/siri-gateway-token`). The `--siri` it passes is accepted and ignored.
+  3. Delete the `voice:` and `siri:` sections from each instance's `intake.yaml`.
+  4. In the Tailscale admin console, delete the ACL rule for port 8443. Remove the two Shortcuts from your phone.
+
 ## v0.5.3 (unreleased)
 
 ### Upgrading (from v0.5.2)

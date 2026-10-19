@@ -246,7 +246,8 @@ TAILSCALE_LOCK=/run/lock/worklane-tailscale.lock
 # The hub's sign-in port, the only one tailscale serve may forward to (dashboards.sh; never 4398, the break-glass).
 HUB_PORT=4399
 BREAK_GLASS_PORT=4398
-# The hub's Siri gateway (dashboards.sh --siri), and the tailnet HTTPS port tailscale.sh serve-siri publishes it on.
+# The removed Siri gateway's loopback port, and the tailnet HTTPS port an older install forwarded to it (#743):
+# tailscale.sh unserve-siri takes that forward away.
 SIRI_GATEWAY_PORT=4397
 SIRI_TAILNET_PORT=8443
 # The hub's hooks gateway for webhook automations (dashboards.sh --hooks), and the tailnet HTTPS port tailscale.sh
