@@ -7,7 +7,8 @@
 //   outside the test machine (testStateRefusal, testSlotsRefusal), before a caller can open it. onRealMachine can't
 //   guard them (neither is inside the system root), so the lint checks that each resolver still refuses, and reports
 //   every write built from one that doesn't.
-// And a test never writes what onRealMachine returns: that is the real machine's path.
+// And a test never writes the real machine's path: what onRealMachine returns, or asRoot.* and SYSTEM_ROOTS.*
+// (src/os/system-paths.ts: the locations as root sees them, never moved under the test's root).
 //
 // WHY: the suite runs on machines that run the engine. A test whose isolation slipped (a variable it changed, a file
 // run without the preload, a constant computed before the root moved) wrote the real machine's files through these
@@ -16,21 +17,29 @@
 //
 // How it finds them, through the compiler's symbols rather than text: a write is a call that the type checker
 // resolves to an fs function that creates, writes, moves or removes (node:fs, node:fs/promises; under any import
-// name, destructured or aliased), or to a function in src/ or test/ that hands one of its parameters to such a call
-// (found from the code, a writer of a writer included). What it writes is traced back through locals (`const f =
-// …`, later `f = …`), for-of variables and array callbacks (`[A, B].forEach((f) => …)`: the loop forms), destructuring,
-// path builders and any other call's arguments, a test helper's return value, and into src/: a declaration there
-// is a machine location when what it holds or returns is built from systemPath (MACHINE_PATHS, CONSOLE_SHELL,
-// unitPath, …), named by its declaration (aliases and namespace imports are the same name) and its property
-// (`MACHINE_PATHS.hubUnitFile`). A guard is an `onRealMachine(x)` call that runs whenever its statement does (the
-// statement itself, a const's initialiser, or inside one's arguments, as `assert.equal(onRealMachine(x), …)`; never
-// behind a condition, a short-circuit, an optional call or in another function), in a statement before the write in
-// the same block or one around it (a for-of body or a try block on the way), where `x` traces to the same name.
+// name, destructured or aliased; an open unless its flags are a read the lint can read: fail closed), or to a function
+// in src/ or test/ that hands one of its parameters to such a call (found from the code, a writer of a writer
+// included). What it writes is traced back through locals (`const f = …`, later `f = …`, `f ??= …`, destructuring
+// assignments), for-of variables, a callback's parameters (read as anything its call is given: `[A].forEach((f) => …)`,
+// `.then`, `Array.from`), a generator's yields, destructuring, defaults, path builders and any other call's arguments,
+// a test helper's return value, and into src/: a declaration there is a machine location when what it holds or
+// returns is built from systemPath on every branch (MACHINE_PATHS, CONSOLE_SHELL, unitPath, …), named by its
+// declaration (aliases and namespace imports are the same name) and its property (`MACHINE_PATHS.hubUnitFile`).
+//
+// A guard is an `onRealMachine(x)` call on the same name that always runs before the write: it runs whenever its
+// statement does (the statement itself, a const's initialiser, or inside one's arguments, as
+// `assert.equal(onRealMachine(x), …)`; never behind a condition, a short-circuit or logical assignment, an optional
+// call or in another function), and that statement comes first in a list of statements holding the write, directly
+// or inside plain `{ … }` blocks of it. Never out of a loop body (it may run zero times or break first), an if or
+// else branch, a try, catch or finally block, another case, a labelled block or a function; the one loop let through
+// is a for-of over a non-empty array literal whose body never breaks, continues or returns (it runs once per element).
 //
 // Not caught: a write by a child process or a shell script; an engine function that writes a machine location of
 // its own (the test names no path); a path passed through a property of an object the lint doesn't trace (`this.f`,
-// a parameter's field), a Map, or a closure's captured `let` assigned in another function; a guard on a different
-// value that happens to mention the same name (`onRealMachine(join(tmp, MACHINE_PATHS.x))`).
+// a parameter's field), a Map or Set, an iterator other than a generator's yields, a closure's captured `let`
+// assigned in another function, `.call`/`.apply`/`Reflect.apply`, or fs reached through `createRequire` or
+// `import()`; a guard on a different value that mentions the same name (`onRealMachine(join(tmp, MACHINE_PATHS.x))`),
+// or on another call of the same function (`etcPath('a')` covers `etcPath('b')`).
 import assert from 'node:assert/strict';
 import { join, relative, sep } from 'node:path';
 import { test } from 'node:test';
@@ -46,6 +55,8 @@ const SEEDS: Record<string, { file: string; family: Family; refusal?: { fn: stri
   slotsDir: { file: 'src/os/index.ts', family: 'slots', refusal: { fn: 'testSlotsRefusal', error: 'TestSlotsRefused' } },
 };
 const REFUSALS_FILE = 'src/os/system-paths.ts';
+/** In REFUSALS_FILE: the machine's locations as root sees them, never moved under the test's root. */
+const REAL_PATHS = new Set(['asRoot', 'SYSTEM_ROOTS']);
 /** The guard: test/isolate.ts onRealMachine. */
 const GUARD = { file: 'test/isolate.ts', fn: 'onRealMachine' };
 
@@ -57,9 +68,9 @@ const FS_WRITES: Record<string, readonly number[]> = {
   chmod: [0], chmodSync: [0], lchmod: [0], lchmodSync: [0], chown: [0], chownSync: [0], lchown: [0], lchownSync: [0],
   utimes: [0], utimesSync: [0], lutimes: [0], lutimesSync: [0], truncate: [0], truncateSync: [0], open: [0], openSync: [0], createWriteStream: [0],
 };
+/** open flags that never write. */
+const READ_FLAGS = new Set(['O_RDONLY', 'O_NOFOLLOW', 'O_NONBLOCK', 'O_CLOEXEC', 'O_DIRECTORY', 'O_NOATIME', 'O_NOCTTY', 'O_SYNC', 'O_DSYNC']);
 const FS_TYPES = /[\\/]@types[\\/]node[\\/]fs(?:[\\/]promises)?\.d\.ts$/;
-/** Array methods whose callback's first parameter is each element: `[A, B].forEach((f) => …)` is a loop over A and B. */
-const ELEMENT_CALLBACKS = new Set(['forEach', 'map', 'flatMap', 'filter', 'some', 'every', 'find', 'findLast']);
 
 /**
  * Where a value comes from: an engine-resolved path in src/ (`key`: its module and name, and the property read off it,
@@ -96,6 +107,24 @@ function lintMachineWrites(program: ts.Program, files: (rel: string) => boolean)
     return s?.valueDeclaration ?? s?.declarations?.[0];
   };
   const isFn = (e: ts.Node | undefined): e is ts.ArrowFunction | ts.FunctionExpression => !!e && (ts.isArrowFunction(e) || ts.isFunctionExpression(e));
+  /**
+   * Whether numeric open flags are built only from node's read-only constants (by symbol: `fsConstants.O_NOFOLLOW`
+   * under any import name), `|`, `??` and 0, with O_RDONLY among them.
+   */
+  const readFlags = (f: ts.Expression): boolean => {
+    const names: string[] = [];
+    const ok = (e: ts.Expression): boolean => {
+      if (ts.isParenthesizedExpression(e)) return ok(e.expression);
+      if (ts.isBinaryExpression(e) && [ts.SyntaxKind.BarToken, ts.SyntaxKind.QuestionQuestionToken].includes(e.operatorToken.kind)) return ok(e.left) && ok(e.right);
+      if (ts.isNumericLiteral(e)) return e.text === '0';
+      const id = ts.isPropertyAccessExpression(e) ? e.name : ts.isIdentifier(e) ? e : undefined;
+      const d = id ? declOf(id) : undefined;
+      if (!id || !d || !READ_FLAGS.has(id.text) || !/[\\/]@types[\\/]node[\\/]/.test(d.getSourceFile().fileName)) return false;
+      names.push(id.text);
+      return true;
+    };
+    return ok(f) && names.includes('O_RDONLY');
+  };
   /** The function a call calls: by the callee's symbol (cheap), else by the checker's resolved signature. */
   const calleeMemo = new Map<ts.Node, ts.SignatureDeclaration | undefined>();
   const calleeDecl = (c: ts.CallExpression | ts.NewExpression): ts.SignatureDeclaration | undefined => {
@@ -114,14 +143,14 @@ function lintMachineWrites(program: ts.Program, files: (rel: string) => boolean)
     calleeMemo.set(c, out);
     return out;
   };
-  /** A function's returned expressions (its concise body, or each `return x` outside nested functions). */
+  /** A function's returned expressions (its concise body, each `return x`, and a generator's `yield x`, outside nested functions). */
   const returnsOf = (fn: ts.SignatureDeclaration): ts.Expression[] => {
     const body = (fn as { body?: ts.Node }).body;
     if (!body) return [];
     if (!ts.isBlock(body)) return [body as ts.Expression];
     const out: ts.Expression[] = [];
     const visit = (x: ts.Node) => {
-      if (ts.isReturnStatement(x) && x.expression) out.push(x.expression);
+      if ((ts.isReturnStatement(x) || ts.isYieldExpression(x)) && x.expression) out.push(x.expression);
       if (!ts.isFunctionLike(x)) ts.forEachChild(x, visit);
     };
     ts.forEachChild(body, visit);
@@ -187,18 +216,27 @@ function lintMachineWrites(program: ts.Program, files: (rel: string) => boolean)
       return [{ key: `${o.key}.${name}`, families: o.families, decl: o.decl }];
     });
 
-  // Assignments to a local after its declaration (`f = …`), by declaration, per file.
+  // Assignments to a local after its declaration (`f = …`, `f ??= …`, and each name in a destructuring assignment
+  // `[f] = …` / `({ f } = …)`, which takes the whole right side), by declaration, per file.
   const assigned = new Map<ts.SourceFile, Map<ts.Node, ts.Expression[]>>();
   const assignmentsTo = (d: ts.Node): ts.Expression[] => {
     const sf = d.getSourceFile();
     let m = assigned.get(sf);
     if (!m) {
       const mm = new Map<ts.Node, ts.Expression[]>();
+      const add = (id: ts.Identifier, rhs: ts.Expression) => {
+        const t = declOf(id);
+        if (t) mm.set(t, [...(mm.get(t) ?? []), rhs]);
+      };
+      const names = (lhs: ts.Node, rhs: ts.Expression) => {
+        if (ts.isIdentifier(lhs)) add(lhs, rhs);
+        else if (ts.isShorthandPropertyAssignment(lhs)) add(lhs.name, rhs);
+        else if (ts.isPropertyAssignment(lhs)) names(lhs.initializer, rhs);
+        else if (ts.isBinaryExpression(lhs) && lhs.operatorToken.kind === ts.SyntaxKind.EqualsToken) names(lhs.left, rhs); // a default
+        else if (ts.isArrayLiteralExpression(lhs) || ts.isObjectLiteralExpression(lhs) || ts.isSpreadElement(lhs) || ts.isSpreadAssignment(lhs) || ts.isParenthesizedExpression(lhs)) ts.forEachChild(lhs, (c) => names(c, rhs));
+      };
       const visit = (x: ts.Node) => {
-        if (ts.isBinaryExpression(x) && x.operatorToken.kind === ts.SyntaxKind.EqualsToken && ts.isIdentifier(x.left)) {
-          const t = declOf(x.left);
-          if (t) mm.set(t, [...(mm.get(t) ?? []), x.right]);
-        }
+        if (ts.isBinaryExpression(x) && x.operatorToken.kind >= ts.SyntaxKind.FirstAssignment && x.operatorToken.kind <= ts.SyntaxKind.LastAssignment) names(x.left, x.right);
         ts.forEachChild(x, visit);
       };
       visit(sf);
@@ -207,14 +245,20 @@ function lintMachineWrites(program: ts.Program, files: (rel: string) => boolean)
     return m.get(d) ?? [];
   };
 
-  /** A parameter's origins: itself, and each element when its function is an array callback (`[A, B].forEach((f) => …)`). */
+  /**
+   * A parameter's origins: itself, its default, and, when its function is a callback passed to a call, whatever that
+   * call is given: the value it is called on and its other arguments (`[A, B].forEach((f) => …)`,
+   * `Promise.resolve(A).then((p) => …)`, `Array.from([A], (p) => …)`, `new Promise(…)`). A callback's parameters are
+   * the call's to choose, so it is read as any of them (fail closed).
+   */
   const paramOrigins = (p: ts.ParameterDeclaration): Origin[] => {
     const fn = p.parent;
     const call = fn.parent;
     // A default (`p = CONSOLE_SHELL`) is where it comes from when a call leaves it out.
     const own: Origin[] = [{ param: p }, ...(p.initializer ? origins(p.initializer) : [])];
-    if (isFn(fn) && fn.parameters[0] === p && call && ts.isCallExpression(call) && call.arguments[0] === fn && ts.isPropertyAccessExpression(call.expression) && ELEMENT_CALLBACKS.has(call.expression.name.text)) {
-      return [...own, ...origins(call.expression.expression)];
+    if (isFn(fn) && call && (ts.isCallExpression(call) || ts.isNewExpression(call)) && call.arguments?.some((a) => a === fn)) {
+      const on = ts.isPropertyAccessExpression(call.expression) || ts.isElementAccessExpression(call.expression) ? origins(call.expression.expression) : [];
+      return [...own, ...on, ...call.arguments.filter((a) => a !== fn).flatMap((a) => origins(a))];
     }
     return own;
   };
@@ -222,6 +266,8 @@ function lintMachineWrites(program: ts.Program, files: (rel: string) => boolean)
   const byDecl = new Map<ts.Node, Origin[]>();
   /** Where a name's value comes from. */
   function declOrigins(d: ts.Declaration): Origin[] {
+    // The machine's locations as root sees them, never moved (asRoot, SYSTEM_ROOTS): the real machine's.
+    if (rel(d) === REFUSALS_FILE && REAL_PATHS.has(nameOf(d))) return [{ real: true }];
     if (inSrc(d)) {
       const f = families(d);
       if (f.size) return [{ key: keyOf(d), families: f, decl: d }];
@@ -334,10 +380,11 @@ function lintMachineWrites(program: ts.Program, files: (rel: string) => boolean)
       const at = FS_WRITES[name];
       if (!at) return [];
       if (name === 'open' || name === 'openSync') {
-        // A read: no flags, a string flag without w, a, x or +, or numeric flags naming O_RDONLY and no write flag.
+        // A read: no flags, a string flag without w, a, x or +, or numeric flags built only from O_RDONLY and the
+        // other read-only constants (`O_RDONLY | O_NOFOLLOW | (O_NONBLOCK ?? 0)`). Anything else (a variable, a
+        // call, a write constant) is a write: fail closed.
         const f = c.arguments[1];
-        const named: string[] = f && !ts.isStringLiteralLike(f) ? (f.getText().match(/\bO_[A-Z]+\b/g) ?? []) : [];
-        if (!f || (ts.isStringLiteralLike(f) && !/[wax+]/.test(f.text)) || (named.includes('O_RDONLY') && !named.some((x) => /^O_(WRONLY|RDWR|CREAT|TRUNC|APPEND)$/.test(x)))) return [];
+        if (!f || (ts.isStringLiteralLike(f) && !/[wax+]/.test(f.text)) || readFlags(f)) return [];
       }
       return at.flatMap((i) => (c.arguments[i] ? [{ node: c.arguments[i]!, os: origins(c.arguments[i]!) }] : []));
     }
@@ -398,21 +445,40 @@ function lintMachineWrites(program: ts.Program, files: (rel: string) => boolean)
         p = p.parent.parent;
         break;
       }
-      const shortCircuit = ts.isBinaryExpression(p) && p.right === x && [ts.SyntaxKind.AmpersandAmpersandToken, ts.SyntaxKind.BarBarToken, ts.SyntaxKind.QuestionQuestionToken].includes(p.operatorToken.kind);
+      const shortCircuit = ts.isBinaryExpression(p) && p.right === x && [ts.SyntaxKind.AmpersandAmpersandToken, ts.SyntaxKind.BarBarToken, ts.SyntaxKind.QuestionQuestionToken, ts.SyntaxKind.AmpersandAmpersandEqualsToken, ts.SyntaxKind.BarBarEqualsToken, ts.SyntaxKind.QuestionQuestionEqualsToken].includes(p.operatorToken.kind);
       const optional = (ts.isCallExpression(p) || ts.isPropertyAccessExpression(p) || ts.isElementAccessExpression(p)) && (p.questionDotToken !== undefined || (p.flags & ts.NodeFlags.OptionalChain) !== 0);
       const part = ts.isCallExpression(p) || ts.isNewExpression(p) || ts.isParenthesizedExpression(p) || ts.isAsExpression(p) || ts.isNonNullExpression(p) || ts.isPropertyAccessExpression(p) || ts.isElementAccessExpression(p) || ts.isTemplateSpan(p) || ts.isTemplateExpression(p) || ts.isArrayLiteralExpression(p) || ts.isAwaitExpression(p) || ts.isVoidExpression(p) || (ts.isBinaryExpression(p) && !shortCircuit);
       if (!part || optional) return null;
     }
     return { s: x.parent as ts.Statement, keys: new Set(origins(c.arguments[0]).flatMap((o) => ('key' in o ? [o.key] : []))) };
   };
-  /** Whether a guard statement runs, unconditionally, before `n` and around it: its parents up to one that holds `n` are blocks, for-of bodies and try blocks. */
+  /**
+   * Whether a guard statement always runs before `n` gets to run: it comes first in a list of statements that holds
+   * `n` (a block, a file, a case clause), directly or inside plain `{ … }` blocks of that list. Never out of a loop
+   * body (it may run zero times, or break first), an if or else branch, a try, catch or finally block, another case,
+   * a labelled block or a function. One loop is let through: a for-of over an array literal of one or more elements
+   * (no spread) whose body has no break, continue or return, which runs its body once per element, every time
+   * (`for (const p of [A, B]) onRealMachine(p);`).
+   */
+  const unrolled = (loop: ts.Node): boolean => {
+    if (!ts.isForOfStatement(loop)) return false;
+    const arr = bare(loop.expression);
+    if (!ts.isArrayLiteralExpression(arr) || arr.elements.length === 0 || arr.elements.some((e) => ts.isSpreadElement(e) || ts.isOmittedExpression(e))) return false;
+    let jumps = false;
+    const scan = (x: ts.Node) => {
+      if (ts.isBreakStatement(x) || ts.isContinueStatement(x) || ts.isReturnStatement(x)) jumps = true;
+      if (!ts.isFunctionLike(x)) ts.forEachChild(x, scan);
+    };
+    scan(loop.statement);
+    return !jumps;
+  };
   const guards = (g: ts.Statement, n: ts.Node): boolean => {
     if (g.getEnd() > n.getStart()) return false;
     const holds = (p: ts.Node) => p.pos <= n.pos && n.end <= p.end && p.getSourceFile() === n.getSourceFile();
+    const list = (p: ts.Node) => ts.isBlock(p) || ts.isSourceFile(p) || ts.isCaseClause(p) || ts.isDefaultClause(p) || ts.isModuleBlock(p);
     for (let p: ts.Node = g.parent; ; p = p.parent) {
-      if (holds(p)) return true;
-      const ok = ts.isBlock(p) && (ts.isBlock(p.parent) || ts.isSourceFile(p.parent) || (ts.isTryStatement(p.parent) && p.parent.tryBlock === p) || ts.isForOfStatement(p.parent));
-      if (!(ok || ts.isForOfStatement(p))) return false;
+      if (holds(p)) return list(p);
+      if (!((ts.isBlock(p) && (list(p.parent) || unrolled(p.parent))) || unrolled(p))) return false;
     }
   };
 
@@ -430,7 +496,7 @@ function lintMachineWrites(program: ts.Program, files: (rel: string) => boolean)
       if (ts.isCallExpression(x)) {
         for (const { node, os } of writes(x)) {
           const at = (what: string) => out.push({ file: rel(sf), line: sf.getLineAndCharacterOfPosition(x.getStart()).line + 1, what: `${x.expression.getText()}(${node.getText()}): ${what}` });
-          if (os.some((o) => 'real' in o)) at(`${GUARD.fn} gives the real machine's path: a test never creates, writes or removes it`);
+          if (os.some((o) => 'real' in o)) at(`the real machine's path (what ${GUARD.fn} gives, or asRoot and SYSTEM_ROOTS): a test never creates, writes or removes it`);
           const seen = new Set<string>();
           for (const o of os) {
             if (!('key' in o) || seen.has(o.key)) continue;
@@ -532,8 +598,76 @@ test('lint: an unguarded write, move or removal of a machine location is reporte
   assert.match(at(17)[0] ?? '', /writeOwnerOnly\(p\): CONSOLE_SHELL is a machine location/, found);
   assert.match(at(20)[0] ?? '', /writeFile\(later\): unitPath is a machine location/, found);
   assert.match(at(21).join('\n') + at(22).join('\n'), /wipe\(MACHINE_PATHS\.hubUnitFile\): MACHINE_PATHS\.hubUnitFile is a machine location/, found);
-  assert.deepEqual(at(23).map((l) => l.replace(/^.*?: /, '')), ["writeFileSync(onRealMachine(CONSOLE_SHELL)): onRealMachine gives the real machine's path: a test never creates, writes or removes it"], found);
+  assert.deepEqual(at(23).map((l) => l.replace(/^.*?: /, '')), ["writeFileSync(onRealMachine(CONSOLE_SHELL)): the real machine's path (what onRealMachine gives, or asRoot and SYSTEM_ROOTS): a test never creates, writes or removes it"], found);
   assert.equal(lines.length, 9, found);
+});
+
+/** Fixture lines: each write marked `// R` must be reported, each marked `// OK` must not; returns the found text. */
+function marked(name: string, body: string[]): string {
+  const text = [...head, ...body, ''].join('\n');
+  const found = lintFixtures({ [name]: text });
+  const lines = text.split('\n');
+  const want = lines.flatMap((l, i) => (/\/\/ R\b/.test(l) ? [i + 1] : []));
+  const got = [...new Set(found.split('\n').filter(Boolean).map((l) => Number(l.split(':')[1])))];
+  assert.deepEqual(got, want, `${found}\n\nexpected at: ${want.map((i) => `${i}: ${lines[i - 1]}`).join('\n')}`);
+  return found;
+}
+
+test('lint (#818 round 2): a guard that looks valid but may not run before the write is no guard, in every control-flow shape', () => {
+  marked('test/fixture-f.test.ts', [
+    'let ok: unknown;',
+    'export function s1() { for (const _ of [] as string[]) onRealMachine(CONSOLE_SHELL); rmSync(CONSOLE_SHELL); } // R: an empty loop',
+    'export function s2() { for (const f of [CONSOLE_SHELL]) { if (f) break; onRealMachine(f); } rmSync(CONSOLE_SHELL); } // R: a break first',
+    'export function s3(n: number) { while (n-- > 0) { onRealMachine(CONSOLE_SHELL); } rmSync(CONSOLE_SHELL); } // R: while',
+    'export function s4(n: number) { do { onRealMachine(CONSOLE_SHELL); } while (n-- > 0); rmSync(CONSOLE_SHELL); } // R: do-while (runs once, still not taken)',
+    'export function s5(n: number) { if (n) { onRealMachine(CONSOLE_SHELL); } rmSync(CONSOLE_SHELL); } // R: if',
+    'export function s6(n: number) { if (n) { void 0; } else { onRealMachine(CONSOLE_SHELL); } rmSync(CONSOLE_SHELL); } // R: else',
+    'export function s7(n: number) { if (n) onRealMachine(CONSOLE_SHELL); else rmSync(CONSOLE_SHELL); } // R: the other branch',
+    'export function s8() { try { onRealMachine(CONSOLE_SHELL); } catch { void 0; } rmSync(CONSOLE_SHELL); } // R: a swallowed throw',
+    'export function s9() { try { void 0; } catch { onRealMachine(CONSOLE_SHELL); } rmSync(CONSOLE_SHELL); } // R: catch',
+    'export function s10() { try { void 0; } finally { onRealMachine(CONSOLE_SHELL); } rmSync(CONSOLE_SHELL); } // R: finally (not taken)',
+    'export function s11(n: number) { switch (n) { case 1: onRealMachine(CONSOLE_SHELL); case 2: rmSync(CONSOLE_SHELL); } } // R: another case',
+    'export function s12(n: number) { lbl: { if (n) break lbl; onRealMachine(CONSOLE_SHELL); } rmSync(CONSOLE_SHELL); } // R: a labelled block',
+    'export function s13(a: number[]) { a.forEach(() => { onRealMachine(CONSOLE_SHELL); return; }); rmSync(CONSOLE_SHELL); } // R: a callback',
+    'export function s14() { ok ||= onRealMachine(CONSOLE_SHELL); rmSync(CONSOLE_SHELL); } // R: ||=',
+    'export function s15() { ok &&= onRealMachine(CONSOLE_SHELL); rmSync(CONSOLE_SHELL); } // R: &&=',
+    'export function s16() { ok ??= onRealMachine(CONSOLE_SHELL); rmSync(CONSOLE_SHELL); } // R: ??=',
+    'export function s17(n: number) { void (n ? onRealMachine(CONSOLE_SHELL) : 0); rmSync(CONSOLE_SHELL); } // R: a conditional',
+    'export function s18() { (() => { onRealMachine(CONSOLE_SHELL); })(); rmSync(CONSOLE_SHELL); } // R: another function (not taken)',
+    'export async function s19() { await Promise.resolve().then(() => onRealMachine(CONSOLE_SHELL)); rmSync(CONSOLE_SHELL); } // R: a .then callback',
+    'export function s20() { rmSync(CONSOLE_SHELL); onRealMachine(CONSOLE_SHELL); } // R: after the write',
+    'export function v1(n: number) { switch (n) { case 1: onRealMachine(CONSOLE_SHELL); rmSync(CONSOLE_SHELL); } } // OK: the same case',
+    'export function v2() { { onRealMachine(CONSOLE_SHELL); } rmSync(CONSOLE_SHELL); } // OK: a plain block',
+    'export function v3(n: number) { if (n) { onRealMachine(CONSOLE_SHELL); rmSync(CONSOLE_SHELL); } } // OK: the same branch',
+    'export function v4() { for (const f of [CONSOLE_SHELL]) { onRealMachine(f); rmSync(f); } } // OK: the same loop body',
+    'export function v5() { ok = onRealMachine(CONSOLE_SHELL); rmSync(CONSOLE_SHELL); } // OK: a plain assignment',
+    'export function v6() { for (const f of [CONSOLE_SHELL, MACHINE_PATHS.helper]) onRealMachine(f); rmSync(CONSOLE_SHELL); } // OK: once per element of a literal',
+    'export function v7() { for (const f of [CONSOLE_SHELL]) { void f; onRealMachine(f); } mkdirSync(CONSOLE_SHELL); } // OK: the same, in braces',
+    'export function s21() { for (const f of [CONSOLE_SHELL]) { if (!f) continue; onRealMachine(f); } rmSync(CONSOLE_SHELL); } // R: a continue first',
+    'export function s22(list: string[]) { for (const f of list) onRealMachine(f); rmSync(CONSOLE_SHELL); } // R: not a literal',
+    'export function s23() { for (const f of [...[CONSOLE_SHELL]]) onRealMachine(f); rmSync(CONSOLE_SHELL); } // R: a spread',
+    'export function s24() { for (const f of [CONSOLE_SHELL]) { if (f) onRealMachine(f); } rmSync(CONSOLE_SHELL); } // R: a condition in the body',
+  ]);
+});
+
+test('lint (#818 round 2): the never-moved real paths (asRoot, SYSTEM_ROOTS) are the real machine\'s; .then, Array.from, generators and destructuring assignments are traced; an open with flags it can\'t read is a write', () => {
+  const found = marked('test/fixture-g.test.ts', [
+    "import { asRoot, SYSTEM_ROOTS } from '../src/os/system-paths.js';",
+    "import { constants, openSync } from 'node:fs';",
+    "export function r1() { writeFileSync(asRoot.etc('x.json'), ''); } // R: asRoot",
+    "export function r2() { mkdirSync(join(SYSTEM_ROOTS.varTmp, 'agent-slots')); } // R: SYSTEM_ROOTS",
+    'export function r3() { void Promise.resolve(CONSOLE_SHELL).then((p) => rmSync(p)); } // R: .then',
+    'export function r4() { Array.from([CONSOLE_SHELL], (p) => rmSync(p)); } // R: Array.from',
+    'function* g() { yield CONSOLE_SHELL; }',
+    'export function r5() { for (const f of g()) rmSync(f); } // R: a generator',
+    "export function r6() { let d = ''; [d] = [CONSOLE_SHELL]; rmSync(d); } // R: a destructuring assignment",
+    "export function r7() { let e = ''; ({ e } = { e: CONSOLE_SHELL }); rmSync(e); } // R: an object one",
+    'export function r8(w: number) { openSync(CONSOLE_SHELL, constants.O_RDONLY | w); } // R: flags with a variable',
+    'export function r9() { openSync(CONSOLE_SHELL, constants.O_RDONLY | constants.O_WRONLY); } // R: a write flag',
+    'export function r10() { openSync(CONSOLE_SHELL, constants.O_RDONLY | constants.O_NOFOLLOW | (constants.O_NONBLOCK ?? 0)); } // OK: a read',
+    "export function r11() { openSync(CONSOLE_SHELL, 'r'); } // OK: a read",
+  ]);
+  assert.match(found, /asRoot\.etc\('x\.json'\)\): the real machine's path/);
 });
 
 test("lint: a machine location reaches a write through a test's object, an array's element, a parameter's default or a destructured name", () => {
@@ -574,11 +708,11 @@ test("lint: what onRealMachine gives is the real path only as a path's start: un
   assert.deepEqual(found.split('\n').map((l) => l.split(':')[1]), ['14', '15'], found);
 });
 
-test('lint: a guard counts only on the same name, before the write, in its block or one around it (a for-of body, a try block), never under a condition or in another function', () => {
+test('lint: a guard counts only on the same name, before the write, in a list of statements that holds it, never under a condition or in another function', () => {
   const found = lintFixtures({
     'test/fixture-b.test.ts': [
       ...head,
-      'for (const f of [MACHINE_PATHS.hubUnitFile, CONSOLE_SHELL]) onRealMachine(f);', // 11: module level, both
+      'onRealMachine(MACHINE_PATHS.hubUnitFile); onRealMachine(CONSOLE_SHELL);', // 11: module level, both
       'export function guarded() {',
       '  for (const f of [MACHINE_PATHS.hubUnitFile, CONSOLE_SHELL]) rmSync(f, { force: true });', // 13: ok
       '  try {',
