@@ -2489,9 +2489,28 @@ test('#711: no page source sends to a removed credential route, or asks the swit
     const s = readFileSync(f, 'utf8');
     for (const route of REMOVED_CREDENTIAL_PATHS) if (s.includes(route)) found.push(`${f}: ${route}`);
     // The machine requests the server half refuses: a switch (it waits for a token) and a relayed sign-in.
-    if (/action: 'switch'|claudeAccountAction\('switch'\)|claudeProfileAction\('login'/.test(s)) found.push(`${f}: starts a switch or a relayed sign-in`);
+    if (startsRefused(s, 'switch')) found.push(`${f}: starts a switch`);
+    if (startsRefused(s, 'login')) found.push(`${f}: starts a relayed sign-in`);
   }
   assert.deepEqual(found, []);
+});
+
+/**
+ * Whether a page source asks the machine to start `action`: a call with it as an argument (`act('switch')`,
+ * `claudeAccountAction('switch')`, `run(() => claudeProfileAction('login', n))`), or an `action` typed or set to it
+ * (`action: 'status' | 'switch'`, `{ action: 'switch' }`). Not a step or op name that only displays one.
+ */
+function startsRefused(s: string, action: string): boolean {
+  const lit = `['"\`]${action}['"\`]`;
+  const call = new RegExp(`\\b(?:act|run|claudeAccountAction|claudeProfileAction)\\(\\s*${lit}`);
+  const typed = new RegExp(`\\baction\\??\\s*:\\s*(?:['"\`][\\w-]+['"\`]\\s*\\|\\s*)*${lit}`);
+  return call.test(s) || typed.test(s);
+}
+
+test("#711: the page-source scan flags each way #749's page started a switch or a relayed sign-in, and not a step or op that names one", () => {
+  for (const s of ["onClick={() => void act('switch')}", "const act = async (action: 'status' | 'switch') => {", "export const claudeAccountAction = (action: 'status' | 'switch') => api()", "claudeAccountAction('switch')", "body: JSON.stringify({ action: 'switch' })"]) assert.ok(startsRefused(s, 'switch'), s);
+  for (const s of ["if (n) void run(() => claudeProfileAction('login', n));", "export const claudeProfileAction = (action: 'use' | 'remove' | 'login', profile: string) => api()"]) assert.ok(startsRefused(s, 'login'), s);
+  for (const s of ["step: 'switch' | 'pause' | 'token'", "Pick<ClaudeAccountData, 'switch' | 'requests'>", "op: 'profile-add' | 'use' | 'remove' | 'login';", "const act = async (action: 'status') => {"]) assert.ok(!startsRefused(s, 'switch') && !startsRefused(s, 'login'), s);
 });
 
 test('Claude account: a machine owner sees each agent user and the switch step by step, never a token box (#711); anyone else nothing', () => {
