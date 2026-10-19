@@ -348,7 +348,6 @@ test('placeholder text is AA on every light background a field can have', () => 
 const RING_OWED: Record<string, string> = {
   'web/src/components/FirstTask.tsx:8: focus:shadow-[0_0_0_1px_var(--blue)]': 'after #664 / #633 merge',
   'web/src/pages/Board.tsx:268: focus:shadow-[0_0_0_1px_var(--blue)]': 'after #664 / #633 merge',
-  'web/src/pages/Decisions.tsx:304: ring-blue': 'the selected decision: switched in #664',
 };
 
 test('focus and selection rings use the ring token, not the accent', () => {
