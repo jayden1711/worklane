@@ -164,7 +164,9 @@ test('add-project runs the steps in order, one JSON line per change on stdout, a
   // The machine helper and the dashboards, with the instance already there and the new one; the hub's settings kept.
   const calls = m.calls();
   assert.ok(calls.includes('machine-helper alpha old'), calls.join('\n'));
-  assert.ok(calls.includes('dashboards --client-id Iv1.signin0001 --public-url https://hub.example.test --console-user admin --console-devices tag:owner alpha old'), calls.join('\n'));
+  // An older hub unit (the removed owner terminal's --console-user and --console-devices): its devices are kept as the
+  // machine devices, and its console user is dropped (#742).
+  assert.ok(calls.includes('dashboards --client-id Iv1.signin0001 --public-url https://hub.example.test --machine-devices tag:owner alpha old'), calls.join('\n'));
   assert.deepEqual(calls.filter((c) => !c.startsWith('machine-helper') && !c.startsWith('dashboards')), ['instance alpha', 'ensure_instance_home alpha example/alpha', 'app app-manifest alpha example/alpha --ask-lines --timeout 15', 'install_claude_token wl-alpha-agent', 'checkout alpha example/alpha', 'service alpha']);
   // The token on root's stdin reached the agent's own credentials, and no output.
   assert.match(readFileSync(join(m.T, 'homes', 'wl-alpha-agent', '.claude', '.credentials.json'), 'utf8'), new RegExp(TOKEN));
@@ -333,7 +335,7 @@ test('a second project is unchanged: with a hub on the machine, the hub is never
   const r = m.run();
   assert.equal(r.status, 0, r.stderr);
   assert.ok(!m.calls().some((c) => c.includes('--no-instances')), m.calls().join('\n'));
-  assert.ok(m.calls().includes('dashboards --client-id Iv1.signin0001 --public-url https://hub.example.test --console-user admin --console-devices tag:owner alpha old'), "the hub's own settings, not the stored ones");
+  assert.ok(m.calls().includes('dashboards --client-id Iv1.signin0001 --public-url https://hub.example.test --machine-devices tag:owner alpha old'), "the hub's own settings, not the stored ones");
   const down = machine();
   rmSync(join(down.T, 'homes', 'wl-dash', '.local', 'state', 'worklane', 'dashboard-hub', 'dashboard-token'));
   mkdirSync(join(down.T, 'homes', 'wl-dash', '.config', 'dashboard-signin'), { recursive: true });

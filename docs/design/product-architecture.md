@@ -93,7 +93,7 @@ GitHub is polled, never a webhook: the App manifest has no webhook (measured: `s
 
 ### 2.3 Why the coordinator stays one process per instance
 
-The event log is one SQLite file with one writer, and the engine's design says one coordinator per repo per instance (measured: docs/design.md:64-86). **Proposal:** keep SQLite on a persistent volume, one replica, `Recreate` update strategy. A server database (Postgres) would need a client library, which is a new runtime dependency (measured: the runtime dependencies are `@anthropic-ai/sandbox-runtime`, `ws`, `yaml` and `zod`, `package.json:62-67`; docs/design.md:48 still says two), so it is an owner decision and not proposed now.
+The event log is one SQLite file with one writer, and the engine's design says one coordinator per repo per instance (measured: docs/design.md:64-86). **Proposal:** keep SQLite on a persistent volume, one replica, `Recreate` update strategy. A server database (Postgres) would need a client library, which is a new runtime dependency (measured: the runtime dependencies are `@anthropic-ai/sandbox-runtime`, `yaml` and `zod`, `package.json:61-65`, as docs/design.md:48 says; `ws` went with the owner terminal, #742), so it is an owner decision and not proposed now.
 
 ### 2.4 One codebase, selected by config
 

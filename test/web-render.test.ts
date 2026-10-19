@@ -85,7 +85,6 @@ interface Render {
   tailscaleStepEnded(prev: unknown, next: unknown): boolean;
   accountBusy(d: unknown, now?: number): boolean;
   addProjectInvalid(name: string, repo: string): string | null;
-  keyData(e: { key: string; ctrlKey: boolean; metaKey: boolean; altKey: boolean }): string | null;
   renderRunsRefused(message: string): string;
   runsRefused(message: string): string | null;
   runsRefusal(state: unknown): string | null;
@@ -2197,9 +2196,6 @@ test('the setup console shows each ask with its status; answer controls only whe
   assert.match(html, /data-testid="ask-answered"[^>]*>approved by @olive \(owner\)/);
   const viewer = r.renderSetup({ role: 'viewer', login: 'vic', asks: asks.map((a) => ({ ...a, canAnswer: false })) });
   assert.doesNotMatch(viewer, /data-testid="ask-secret"|data-testid="ask-run"|data-testid="ask-option"/);
-  assert.equal(r.keyData({ key: 'Enter', ctrlKey: false, metaKey: false, altKey: false }), '\r');
-  assert.equal(r.keyData({ key: 'c', ctrlKey: true, metaKey: false, altKey: false }), '\x03');
-  assert.equal(r.keyData({ key: 'Shift', ctrlKey: false, metaKey: false, altKey: false }), null);
 });
 
 const CLAUDE_ASK = { id: 'ask-000000000009', instance: 'demo', title: "The Claude login for demo's agents", detail: 'Paste the token claude setup-token prints.', createdAt: '2026-10-12T10:00:00Z', createdBy: 'add-project', cancelled: null, kind: 'paste_secret', where: "wl-demo-agent's Claude login", status: 'open', answer: null, canAnswer: true, request: null };
@@ -2251,7 +2247,7 @@ test("Add project: enabled for a machine owner on an allowed device; otherwise d
   assert.doesNotMatch(enabled, /data-testid="add-project-disabled"/);
   const cases: [string, ReturnType<typeof ownerRequester>, RegExp][] = [
     ['an instance-only owner', ownerRequester('ivy'), /machine owners: @ada, @olu\); @ivy isn(&#x27;|')t one/],
-    ['a disallowed device', { ...ownerRequester('ada'), deviceOk: false }, /one of the console(&#x27;|')s allowed devices/],
+    ['a disallowed device', { ...ownerRequester('ada'), deviceOk: false }, /one of the machine(&#x27;|')s allowed devices \(dashboards\.sh --machine-devices\)/],
   ];
   for (const [who, requester, why] of cases) {
     const html = view(requester);
@@ -2965,7 +2961,7 @@ test('Tailscale and HTTPS: a machine owner sees the state, the four steps with w
   assert.equal([...done.matchAll(/Run again…/g)].length, 4);
   // Off an allowed device: read-only, and it says why.
   const away = r.renderTailscaleSetup(tailscaleView({ status: none, dir: dirOf([]), events: [], who: { role: 'owner', requester: { login: 'ada', breakGlass: false, deviceOk: false } }, instance: 'shop', ownersFile }));
-  assert.match(away, /data-testid="tailscale-disabled"[^>]*>Read-only: a machine change needs one of the console&#x27;s allowed devices/);
+  assert.match(away, /data-testid="tailscale-disabled"[^>]*>Read-only: a machine change needs one of the machine&#x27;s allowed devices \(dashboards\.sh --machine-devices\)/);
   assert.equal([...away.matchAll(/<button[^>]*disabled=""[^>]*data-testid="tailscale-step-run"/g)].length, 4);
   // Funnel: shown read-only. Off: it says nothing here turns it on. Already on: said in red, and neither later step can be asked for.
   assert.match(done, /data-testid="tailscale-funnel" data-funnel="off"[^>]*>Funnel \(the public internet\): off\. Nothing here turns it on/);

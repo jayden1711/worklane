@@ -394,7 +394,8 @@ test('public-url: the hub\'s URL becomes this machine\'s tailnet name through da
   m.set('serve.json', serving(HUB));
   const r = m.run(['public-url']);
   assert.equal(r.status, 0, r.stdout + r.stderr);
-  assert.deepEqual(m.lines('dashboards-calls'), [`--client-id Iv1.signin0001 --public-url https://${NAME} --console-user admin --console-devices tag:owner-laptop,box alpha beta`]);
+  // An older unit's --console-devices goes on as the machine devices; its --console-user is dropped (#742).
+  assert.deepEqual(m.lines('dashboards-calls'), [`--client-id Iv1.signin0001 --public-url https://${NAME} --machine-devices tag:owner-laptop,box alpha beta`]);
   assert.equal(m.steps().at(-1)!.detail, `the hub's URL is now https://${NAME} (it was https://hub.example.test). To sign in there, set the sign-in App's callback URL to exactly https://${NAME}/auth/callback`);
   assert.equal(JSON.parse(m.run(['status', '--json']).stdout).hub_url, `https://${NAME}`);
   // Again: already that URL, dashboards.sh isn't run.

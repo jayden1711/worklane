@@ -140,7 +140,7 @@ test('the registry check sees a new feature\'s per-instance root records, in a s
 });
 
 test('instance-remove.sh and the registry are reachable from no sudoers rule and no machine helper command', () => {
-  for (const f of ['scripts/machine/worklane-machine.cjs', 'scripts/setup/machine-helper.sh', 'scripts/setup/test-user.sh', 'scripts/setup/console-shell.sh']) {
+  for (const f of ['scripts/machine/worklane-machine.cjs', 'scripts/setup/machine-helper.sh', 'scripts/setup/test-user.sh']) {
     const src = readFileSync(join(repoRoot, f), 'utf8');
     assert.doesNotMatch(src, /instance-(remove|rename|records)/, `${f} names the removal`);
   }
@@ -165,7 +165,7 @@ test('instance-rename.sh takes two names (the new one as add-project takes it) a
   }
 });
 
-test("the hub's settings kept for a rewrite: client id, URL, console user and devices, and both gateways", { skip: !posix && 'bash' }, () => {
+test("the hub's settings kept for a rewrite: client id, URL, machine devices, and both gateways; an older unit's console devices kept as them, its console user dropped", { skip: !posix && 'bash' }, () => {
   const dir = mkdtempSync(join(tmpdir(), 'hub-'));
   const unit = join(dir, 'hub.service');
   const keep = (exec: string) => {
@@ -174,7 +174,8 @@ test("the hub's settings kept for a rewrite: client id, URL, console user and de
     assert.equal(r.status, 0, r.stderr);
     return r.stdout.trim().split('\n');
   };
-  assert.deepEqual(keep(`/usr/local/bin/${cli} dashboard --hub a=/x --service --client-id Iv1.abc --public-url https://h.example --signin-dir /d --siri-port 4397 --hooks-port 4396 --console-user admin --console-devices tag:me`), ['--client-id', 'Iv1.abc', '--public-url', 'https://h.example', '--console-user', 'admin', '--console-devices', 'tag:me', '--siri', '--hooks']);
+  assert.deepEqual(keep(`/usr/local/bin/${cli} dashboard --hub a=/x --service --client-id Iv1.abc --public-url https://h.example --signin-dir /d --siri-port 4397 --hooks-port 4396 --machine-devices tag:me,box`), ['--client-id', 'Iv1.abc', '--public-url', 'https://h.example', '--machine-devices', 'tag:me,box', '--siri', '--hooks']);
+  assert.deepEqual(keep(`/usr/local/bin/${cli} dashboard --hub a=/x --service --client-id Iv1.abc --public-url https://h.example --signin-dir /d --siri-port 4397 --hooks-port 4396 --console-user admin --console-devices tag:me`), ['--client-id', 'Iv1.abc', '--public-url', 'https://h.example', '--machine-devices', 'tag:me', '--siri', '--hooks']);
   assert.deepEqual(keep(`/usr/local/bin/${cli} dashboard --hub a=/x --service --client-id Iv1.abc --public-url https://h.example --signin-dir /d`), ['--client-id', 'Iv1.abc', '--public-url', 'https://h.example']);
 });
 

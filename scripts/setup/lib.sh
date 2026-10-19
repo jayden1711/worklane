@@ -9,6 +9,41 @@ as_root() {
 # A user's home directory, from the passwd database: never assumed to be /home/<user>.
 home_of() { getent passwd "$1" | cut -d: -f6; }
 
+# The host's egress rule (egress-firewall.sh): its nftables table, and the set of cgroups exempt from it. A unit whose
+# NFTSet= names the set (test-user.sh's Docker unit) has its cgroup added by systemd while it runs. Named once here, so
+# the rule and the units that join it can't disagree.
+EGRESS_TABLE=worklane_egress
+EGRESS_SET=egress_ok
+# NFTSet= is in systemd 255 and later; on an older one nothing can fill the set, so test users stay opt-in there.
+EGRESS_NFTSET_SYSTEMD=255
+# The rule's record: the uids it covers, its flags, and whether test users' Docker may be exempt. Root's: /etc/worklane
+# is root's, 0755, and no sandbox user may enter it (test-user.sh denies it to the test user).
+EGRESS_RECORD=/etc/worklane/egress.users
+# Whether test users' Docker may be exempt from the host egress rule (the set, #543), from the rule's record $1:
+# "exempt", or "dropped" once a rule this install loaded covered test users with no exception for their Docker.
+#   - the record's "# docker: dropped" or "# docker: exempt" line (apply writes one; dropped wins);
+#   - else a record from before #543: "# --with-test-users" in it means dropped; none, exempt (test users weren't covered);
+#   - no record (no rule was ever applied, or revert removed it): exempt. A record it can't read: dropped.
+# WHY: where a rule covered test users and their Docker had no exception (apply --with-test-users before #543, or on a
+# systemd older than 255), all of Docker's traffic was dropped, and so was every route out through it: a run that joins
+# Docker's namespaces got nowhere. The exception reopens that route (docs/test-runs.md, "Known gap"), and nothing may
+# reopen a route an install had closed. Such an install keeps dropping Docker's traffic, whatever the flags, until revert.
+egress_docker_mode() {
+  local rec
+  [ -e "$1" ] || { echo exempt; return 0; }
+  rec="$(cat "$1" 2>/dev/null)" || { echo dropped; return 0; }
+  if grep -qx '# docker: dropped' <<<"$rec"; then echo dropped
+  elif grep -qx '# docker: exempt' <<<"$rec"; then echo exempt
+  elif grep -qx '# --with-test-users' <<<"$rec"; then echo dropped
+  else echo exempt; fi
+}
+# systemd's major version (systemctl's first line, "systemd 255 (...)"); 0 when it can't be read.
+systemd_major() {
+  local v
+  v="$(systemctl --version 2>/dev/null | sed -n '1s/^systemd \([0-9][0-9]*\).*/\1/p' || true)"
+  echo "${v:-0}"
+}
+
 # A JSON string (for the scripts that print JSON lines): backslashes and quotes escaped, newlines as \n, other control characters dropped.
 json_str() {
   local s="$1"
@@ -242,17 +277,19 @@ hub_option() {
   [ -f "$HUB_UNIT" ] || return 0
   sed -n 's/^ExecStart=.* '"$1"' \([^ ]*\).*$/\1/p' "$HUB_UNIT" | head -1
 }
+# The hub's machine devices: its --machine-devices, else an older unit's --console-devices, the same list (#742).
+hub_machine_devices() { local v; v="$(hub_option --machine-devices)"; [ -n "$v" ] || v="$(hub_option --console-devices)"; printf '%s' "$v"; }
 # The instances the hub serves (its --hub <name>=<state>,...), one per line.
 hub_instances() { hub_option --hub | tr ',' '\n' | sed 's/=.*$//' | grep -E '^[a-z][a-z0-9-]{0,20}$' || true; }
 
 # The hub's own settings, to run dashboards.sh again with another list of instances and nothing else changed: one word
-# a line (its sign-in App's client id, its URL, the owner terminal's user and devices, --siri and --hooks when it has
-# those gateways).
+# a line (its sign-in App's client id, its URL, its machine devices, --siri and --hooks when it has those gateways).
+# An older unit's --console-devices (the removed owner terminal's list) is kept as the machine devices; its
+# --console-user is dropped (#742).
 hub_keep_args() {
   local v
   printf '%s\n' --client-id "$(hub_option --client-id)" --public-url "$(hub_option --public-url)"
-  v="$(hub_option --console-user)"; [ -z "$v" ] || printf '%s\n' --console-user "$v"
-  v="$(hub_option --console-devices)"; [ -z "$v" ] || printf '%s\n' --console-devices "$v"
+  v="$(hub_machine_devices)"; [ -z "$v" ] || printf '%s\n' --machine-devices "$v"
   [ -z "$(hub_option --siri-port)" ] || printf '%s\n' --siri
   [ -z "$(hub_option --hooks-port)" ] || printf '%s\n' --hooks
 }
@@ -755,7 +792,7 @@ unit_start() { systemctl start "$1"; }
 # (ci-batch.yml). A pull request needn't run the slow ones, so main is where they gate, and only a batched commit
 # can be installed. Pull-request-only checks (dco) are left out: they're always "skipped" on main, and the updater
 # refuses a skipped required check. A test derives this list from the workflows.
-UPDATE_DEFAULT_CHECKS=("Claude sign-in probe (real users)" "add-project (real systemd)" "agentshield" "bootstrap (macos-latest)" "bootstrap (ubuntu-latest)" "bootstrap (windows-wsl)" "denylist" "desktop" "push-gate" "scan" "test (ubuntu-latest, 22)" "test (ubuntu-latest, 24)" "test-run sandbox (real systemd)" "wizard end to end (real systemd)")
+UPDATE_DEFAULT_CHECKS=("Claude sign-in probe (real users)" "add-project (real systemd)" "agentshield" "bootstrap (macos-latest)" "bootstrap (ubuntu-latest)" "bootstrap (windows-wsl)" "denylist" "desktop" "egress firewall (real systemd)" "push-gate" "scan" "test (ubuntu-latest, 22)" "test (ubuntu-latest, 24)" "test-run sandbox (real systemd)" "wizard end to end (real systemd)")
 
 # updates.json for the engine updater, off: the repo to follow, then each required check as its own argument.
 updates_config_json() {
@@ -763,18 +800,10 @@ updates_config_json() {
   node -e 'const [repo, ...checks] = process.argv.slice(1); process.stdout.write(JSON.stringify({ enabled: false, channel: "release", allowed_signers: "/etc/worklane/allowed_signers", repo_url: repo, branch: "main", required_checks: checks.filter((s) => s.trim()) }, null, 2) + "\n")' "$@"
 }
 
-# The sudoers rule for the dashboard's owner terminal: the hub's viewer user may run the console shell as the
-# admin user, with exactly `check` or `shell`, and nothing else; never as root. sudo inside that shell still
-# asks for the admin's password (the rule is NOPASSWD only for the console shell itself).
+# The removed owner terminal's root files (#742), which an older install has and dashboards.sh removes: its console
+# shell, and the sudoers rule that let the hub's viewer user run it as the admin user. Nothing installs them now.
 CONSOLE_SHELL=/usr/local/libexec/worklane-console-shell
-CONSOLE_SUDOERS=/etc/sudoers.d/worklane-console   # what install_sudoers worklane-console writes
-console_sudoers() {
-  local viewer="$1" admin="$2"
-  [[ "$viewer" =~ ^wl-[a-z][a-z0-9-]{0,20}$ ]] || { echo "console_sudoers: $viewer is not a viewer user" >&2; return 1; }
-  [[ "$admin" =~ ^[a-z_][a-z0-9_-]{0,31}$ && "$admin" != root && "$admin" != "$viewer" ]] || { echo "console_sudoers: $admin can't be the console user" >&2; return 1; }
-  printf '# The dashboard hub (%s) may start the owner terminal as %s: the console shell, exactly check or shell.\n' "$viewer" "$admin"
-  printf '%s ALL=(%s) NOPASSWD: %s check, %s shell\n' "$viewer" "$admin" "$CONSOLE_SHELL" "$CONSOLE_SHELL"
-}
+CONSOLE_SUDOERS=/etc/sudoers.d/worklane-console
 
 # The machine owners (src/machine-owners.ts): the GitHub logins that may change the machine from the dashboard
 # (slot caps, engine updates), as opposed to an instance's owners. Root's file; every instance user reads it.
