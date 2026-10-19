@@ -7,7 +7,6 @@ import { mayAnswer, type Issue } from '../backlog/types.js';
 import { INTAKE_LABEL } from '../intake/github.js';
 import type { EventPayload } from '../events/types.js';
 import { ownerOnlyDir, writeOwnerOnly } from '../os/index.js';
-import { loadMoneyPaths } from '../review.js';
 import { intakeCaps, researchRepoAccess } from '../settings.js';
 import { isAllowed, isTrusted, type IncomingReport, type IntakeConfig } from '../intake/report.js';
 import { redactPii } from '../intake/redact.js';
@@ -267,7 +266,7 @@ export abstract class Intake extends QuickReplies {
   /** The project's money paths, for marking a draft that names one high-risk; none when unset or unreadable. */
   private intakeMoneyPaths(): RegExp[] {
     try {
-      return loadMoneyPaths(this.d.repo, this.d.cfg.review?.money_path_source);
+      return this.moneyPaths();
     } catch {
       return [];
     }

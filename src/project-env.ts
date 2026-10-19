@@ -10,6 +10,8 @@ const RESERVED_NAMES = [
   'TMPDIR', 'TMP', 'TEMP', 'XDG_.*',
   // Code that runs before any project command: shell startup, loaders, Node.
   'ENV', 'BASH_ENV', 'BASH_FUNC_.*', 'PS4', 'PROMPT_COMMAND', 'LD_.*', 'DYLD_.*', 'NODE_OPTIONS', 'NODE_PATH',
+  // How bash expands and runs words: never the project's (#713, the sandbox wrapper's own globs).
+  'SHELLOPTS', 'BASHOPTS', 'GLOBIGNORE', 'EXECIGNORE', 'BASH_.*',
   // Credentials and the agent's no-push setup, the agent runtime, sudo.
   'GIT_.*', 'GH_.*', 'GITHUB_.*', 'SSH_.*', 'CLAUDE_.*', 'ANTHROPIC_.*', 'SUDO_.*', `${BRAND.envPrefix}_.*`,
   // The sandbox's network proxy and trust store.
