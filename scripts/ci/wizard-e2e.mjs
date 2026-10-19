@@ -458,7 +458,7 @@ async function server() {
     return { why };
   });
 
-  await screen('screen 8: the instance\'s policy (budget changed, the change shown; root\'s file, so the dashboard writes nothing)', async () => {
+  await screen('screen 8: the instance\'s policy (budget changed, the change shown, then written by root\'s helper)', async () => {
     await open('/first-run?step=policy');
     const p = `${row('policy')} ${tid('first-run-fix-panel')}`;
     await waitFor(`${p} ${tid('policy-form')}`);
@@ -474,12 +474,19 @@ async function server() {
     await click(`${p} ${tid('policy-review')}`);
     const change = await waitText(`${p} ${tid('policy-confirming')}`, /budget\.daily_usd/);
     await click(`${p} ${tid('policy-confirm')}`);
-    // Issue #726: add-project.sh made policy.yaml root's (0644), so the dashboard refuses to write it, naming the root
-    // command; the file is unchanged and still root's.
-    const root = await waitText(`${p} ${tid('policy-result')}`, /is root's: an admin changes it at a root shell/);
-    assert.equal(sudoOk('cat', file), before, 'the dashboard wrote nothing');
+    // Issue #726: add-project.sh made policy.yaml root's (0644), so the dashboard writes nothing itself: the change goes
+    // to the coordinator, which runs the machine helper's set-policy (the engine as root); then the file has it, root's.
+    await waitText(`${p} ${tid('policy-result')}`, /written: .*budget\.daily_usd/);
+    await until('the coordinator to run set-policy through the helper', async () => /daily_usd: 30\b/.test(sudoOk('cat', file)), 120_000, 1000);
     assert.equal(stat(file), 'root 644');
-    return { refused: no, change: change.split('\n').find((l) => l.includes('daily_usd')), root, file: stat(file) };
+    // The helper itself, as the coordinator user through sudo: sandbox off and allow_same_user on are refused, nothing written.
+    const after = sudoOk('cat', file);
+    for (const [k, v] of [['sandbox', 'off'], ['allow_same_user', 'on'], ['land_mode', 'direct']]) {
+      const r = sh('sudo', ['-u', `wl-${instance}`, 'sudo', '-n', '/usr/local/libexec/worklane-machine', 'set-policy', k, v]);
+      assert.notEqual(r.status, 0, `set-policy ${k} ${v} ran: ${r.out}`);
+    }
+    assert.equal(sudoOk('cat', file), after, 'a refused set-policy wrote nothing');
+    return { refused: no, change: change.split('\n').find((l) => l.includes('daily_usd')), file: stat(file) };
   });
 
   // WHY skipped: since #387 the channel listing runs the engine's own CLI against Discord's API (a constant host); its
