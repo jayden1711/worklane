@@ -77,6 +77,18 @@ Every release, newest first: the PRs merged since the previous one, and what cha
 - **Money paths are read from the default branch (#715).** The `money_path_source` list is read at `origin/<default_branch>`, not the coordinator's working tree, so a path added on main since the clone counts at once. The list file itself is now a money path, so a PR that edits it waits for an owner. A coordinator that can't read the file on main fails exactly as a missing file did before. With main's config invalid or missing at start, the checkout's committed config runs, not a hand-edited working copy (the working copy only when nothing valid is committed, as on a first run).
 - **Main watch: one revert PR per trip, three a day (#602, #606).** When one cause trips several commits on an unprotected default branch, the main watch opens at most `config.yaml` `main_watch.revert_prs_per_trip` revert PRs for it (default 1), and at most `main_watch.revert_prs_per_day` (default 3) per instance in any 24 hours. A capped commit still trips: the stop and the alert are as before, and the alert says why it has no revert PR of its own. A required check with no run for `main_watch.dead_check_days` (default 7) is raised once, on the Machine page and in the ops channel.
 - **More changes wait for the owner in every managed repo** (the self-modification locks: #580, #584, #647, #658, #691, #765; renames and odd paths: #688; both under "Guardrail changes: what each one does"). The locks match by path, so in an app repo with its own files at a locked engine path (under `src/`, `scripts/`, `test/` or `docs/`: `src/hook.ts` and every module it imports, `src/review.ts`, `src/runner.ts`, `src/coordinator/**` and the like), PRs that touch those files now wait for the owner. **The default is to keep every lock and review those waits.** Naming a repo as a managed app is a separate loosening, root's alone to decide. It also lifts locks v0.5.2 already applied in that repo ("After install" lists them), so it is not the fix for these waits.
+- **A hardened bootstrap checks the engine's release tag at install time, before building it as root (#832).** `bootstrap.sh --hardened` now runs `engine.sh --release <tag> <commit>` with the pin from `scripts/bootstrap.sh`. Before anything is built, the tag is checked with the engine updater's own rules:
+  - origin's tag is resolved once, to one tag object;
+  - its SSH signature must verify against `.github/release-signers` in the checkout the script runs from;
+  - the object must name itself as that tag;
+  - its commit must be a release commit cut from main, and must equal the pinned `ENGINE_COMMIT`.
+
+  Then exactly that commit is built, never the tag name again. Until now origin's tag was checked out by name, so a tag moved by anyone with push access was built as root.
+
+  What changes for you:
+  - **Run the hardened bootstrap from a git clone of the engine repo**, so `.github/release-signers` is beside the scripts. Without that file it refuses: `no allowed signers file at …`.
+  - **Install a release by hand with `sudo bash scripts/setup/engine.sh --release vX.Y.Z <commit>`**, the two values from `scripts/bootstrap.sh`. A tag or branch by name alone (`engine.sh v0.5.2`) is refused. A commit by its id (`engine.sh <sha>`) works as before.
+  - Nothing changes on a machine that is already installed: the updater installs updates, not `engine.sh`.
 
 ### After install
 
