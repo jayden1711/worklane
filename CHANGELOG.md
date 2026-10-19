@@ -18,11 +18,15 @@ Every release, newest first: the PRs merged since the previous one, and what cha
 ### After install
 
 - **A machine whose hub unit has `--console-user` (it had the owner terminal):** rerun `dashboards.sh` as root, once, after the install: `sudo bash /opt/worklane/current/scripts/setup/dashboards.sh --machine-devices <the unit's --console-devices> --client-id <id> --public-url <url> <name>...` (the same command as under Upgrading). It deletes the console shell (by then the update's refusing stub) and its sudoers rule, and gives the hub its sandbox back. Until then, `doctor` fails with `owner terminal`. The engine update can't do this itself: the installed updater is the older one, and it never touches sudoers.
+- **Install this release's updater, so updates carry on once the `desktop` check stops running (#744).** Every install so far has `desktop` in `/etc/worklane/updates.json` `required_checks`. This release's updater no longer waits for that one retired check when a commit has no run of it. While CI still has the job, every commit gets a `desktop` run, and the updater judges it exactly as before. A later release removes the desktop window and its CI job, and from then on no commit has a `desktop` run.
+  - An update never replaces the updater itself, so rerun `updates.sh` as root, once, after the install: `sudo bash /opt/worklane/current/scripts/setup/updates.sh`. It installs this release's updater and keeps `updates.json` as it is (on or off, channel and checks included).
+  - A machine whose updater predates this release keeps waiting for `desktop` once the job is gone, so it installs nothing more (fail-closed). The journal says why: `required check "desktop" hasn't run on this commit`. Rerunning `updates.sh` from this release or a later one fixes it.
 - No new sudoers rules, so no machine-helper rerun.
 
 ### Guardrail changes
 
 - **Removed: a sudoers rule and a root helper (#742).** The owner terminal's rule (the hub's viewer user may run the console shell as the admin user) and the root-owned console shell are gone; `dashboards.sh` removes both from an older install on its next run, and nothing installs them. The console shell in the engine is now a stub that refuses every command, so the engine updater (old or new) replaces a live one with it on the first update; the updater still never installs it where it is absent and never touches sudoers. The hub's unit always keeps its full sandbox. The device allowlist for machine changes is unchanged, under its new name `--machine-devices`.
+- **The engine updater no longer waits for the retired `desktop` check when a commit has no run of it (#744).** It is the only name in the updater's own fixed list (`RETIRED_CHECKS` in `scripts/machine/worklane-update.cjs`). A `desktop` run that exists is judged as before: failed, skipped or cancelled refuses, and queued or running waits. A list of retired names alone, none of which ran on the commit, is refused, as an empty list is. Nothing changes while CI still runs the job. The window it tested was never built or installed by the updater.
 
 ## v0.5.2 (2026-10-17)
 

@@ -8,19 +8,15 @@
 //            (0600, never echoed), check each with `claude auth status` as that user, resume each instance whose
 //            users all passed. Each step change is a JSON line in <dir>/switch.jsonl.
 //
-// From the dashboard (the Machine page's Claude account panel, a machine owner's only), both are machine requests
-// (`claude-account status|switch`) that the coordinator runs through the machine helper. switch starts the script as
-// its own unit (it stops that coordinator too), so this side follows it by reading switch.jsonl, not the event log.
-// The token is pasted here, once the switch asks for it: stored for this coordinator user only (0400, the setup
-// console's secrets directory), read once by the script as root, and deleted. It is never in an event, a response,
-// a log line or an error.
+// From the dashboard (the Machine page's Claude account panel, a machine owner's only), status is a machine request
+// (`claude-account status`) that the coordinator runs through the machine helper. A switch takes a Claude credential,
+// which the dashboard never does (issue #711, docs/auth.md): a root admin runs it at a root shell on the machine, and
+// this side only follows it, by reading switch.jsonl.
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { BRAND } from './brand.js';
 import type { EventLog } from './events/log.js';
 import type { StoredEvent } from './events/types.js';
-import { installOwnerOnlySecret } from './os/index.js';
-import { secretsDir } from './console/secrets.js';
 import type { Role } from './console/asks.js';
 import { isMachineOwner, MACHINE_OWNERS_FILE, machineChangeRefusal, machineOwners, type MachineRequester } from './machine-owners.js';
 import { MachineRequestError, machineRequests, requestMachineChange, type MachineRequest } from './machine-requests.js';
@@ -28,14 +24,13 @@ import { varLibPath } from './os/system-paths.js';
 
 /** Where claude-account.sh writes status.json, switch.jsonl and paused (root's, 0644; lib.sh's CLAUDE_ACCOUNT_DIR). */
 export const CLAUDE_ACCOUNT_DIR = varLibPath('claude-account');
-/** The pasted token's file in this instance's secrets directory (lib.sh's CLAUDE_ACCOUNT_CREDENTIAL). */
-export const CLAUDE_ACCOUNT_CREDENTIAL = 'claude-account-token';
-/** A token from `claude setup-token` (lib.sh's claude_token_ok, install_claude_token's check). */
+/** A token from `claude setup-token`, as the root scripts take it at a root shell (lib.sh's claude_token_ok). */
 export const SETUP_TOKEN = /^sk-ant-oat[0-9]{2}-[A-Za-z0-9_-]{20,500}$/;
 /** A switch with no new line for this long has stopped (its unit ended without a last line): the longest a step waits is 30 minutes. */
 export const SWITCH_STALE_MS = 90 * 60_000;
 
-export const CLAUDE_ACCOUNT_ACTIONS = ['status', 'switch'] as const;
+/** What a dashboard may ask for: status only. Never switch, which takes a Claude credential (issue #711). */
+export const CLAUDE_ACCOUNT_ACTIONS = ['status'] as const;
 export type ClaudeAccountAction = (typeof CLAUDE_ACCOUNT_ACTIONS)[number];
 
 /** One agent user, as status.json has it. */
@@ -102,9 +97,7 @@ export interface SwitchView {
   status: 'running' | 'done' | 'failed' | 'stalled';
   /** Its last switch line's detail (how it ended, or what it is doing). */
   detail: string;
-  /** Where the token comes from: this instance's dashboard (its name), or a terminal (null). */
-  tokenFrom: string | null;
-  /** Waiting for the token: an ask line and nothing after it on the token step. */
+  /** Waiting for the token at the root shell it was started in: an ask line and nothing after it on the token step. */
   waitingForToken: boolean;
   token: SwitchLine | null;
   instances: SwitchInstance[];
@@ -209,12 +202,10 @@ export function switchView(lines: readonly SwitchLine[], now = Date.now()): Swit
   const end = [...ls].reverse().find((l) => l.step === 'switch' && (l.state === 'done' || l.state === 'failed')) ?? null;
   const last = ls.at(-1)!;
   const stalled = !end && now - Date.parse(last.at) > SWITCH_STALE_MS;
-  const from = /the token from the dashboard of ([a-z][a-z0-9-]{0,20})/.exec(ls[0]!.detail)?.[1] ?? null;
   return {
     startedAt: ls[0]!.at,
     status: end ? (end.state as 'done' | 'failed') : stalled ? 'stalled' : 'running',
     detail: (end ?? ls[0]!).detail,
-    tokenFrom: from,
     waitingForToken: !end && !stalled && token?.state === 'ask',
     token,
     instances: [...byName.values()],
@@ -240,7 +231,6 @@ export function claudeAccountView(o: { dir?: string; events: readonly StoredEven
   const why = claudeAccountGate(o.who, o.ownersFile ? { ownersFile: o.ownersFile } : {});
   const sw = switchView(readSwitchLines(o.dir), now);
   const requests = machineRequests(o.events).filter(isAccountRequest);
-  const busy = sw?.status === 'running' ? 'a switch is running' : requests.some((r) => open(r) && r.args[1] === 'switch') ? 'a switch is waiting for the coordinator' : null;
   return {
     machineOwner: mayViewClaudeAccount(o.who.requester, o.ownersFile),
     machineOwners: machineOwners(o.ownersFile ?? MACHINE_OWNERS_FILE),
@@ -248,10 +238,8 @@ export function claudeAccountView(o: { dir?: string; events: readonly StoredEven
     instance: o.instance,
     allowed: why === null,
     why,
-    canSwitch: why === null && !busy,
-    busy,
-    /** Whether this person may paste the token here now: the switch is waiting for it, from this instance. */
-    canPasteToken: why === null && !!sw?.waitingForToken && sw.tokenFrom === o.instance,
+    /** A switch a root admin runs on the machine, while it runs (the page says so; it never takes the token). */
+    busy: sw?.status === 'running' ? 'a switch is running on the machine' : null,
     status: readAccountStatus(o.dir),
     switch: sw,
     requests: requests.slice(-10).reverse(),
@@ -261,44 +249,14 @@ export function claudeAccountView(o: { dir?: string; events: readonly StoredEven
 export type ClaudeAccountData = ReturnType<typeof claudeAccountView>;
 
 /**
- * Record `claude-account status|switch` for the coordinator to run through the machine helper: the same gate as any
- * machine change (src/machine-requests.ts), and one switch at a time (none waiting for the coordinator, none running).
+ * Record `claude-account status` for the coordinator to run through the machine helper: the same gate as any machine
+ * change (src/machine-requests.ts), one at a time. Never a switch: it takes a Claude credential, a root admin's at a
+ * root shell on the machine (issue #711).
  */
-export function requestClaudeAccount(log: EventLog, r: { action: unknown; requester: MachineRequester; dir?: string; ownersFile?: string; now?: number }): MachineRequest {
-  if (!(CLAUDE_ACCOUNT_ACTIONS as readonly unknown[]).includes(r.action)) throw new MachineRequestError('action is status or switch');
+export function requestClaudeAccount(log: EventLog, r: { action: unknown; requester: MachineRequester; ownersFile?: string }): MachineRequest {
+  if (!(CLAUDE_ACCOUNT_ACTIONS as readonly unknown[]).includes(r.action)) throw new MachineRequestError("action is status; a switch to another account is a root admin's, at a root shell on the machine (claude-account.sh switch)");
   const action = r.action as ClaudeAccountAction;
   const pending = machineRequests(log.read(0, ['machine.requested', 'machine.started', 'machine.finished'])).find((x) => isAccountRequest(x) && open(x) && x.args[1] === action);
   if (pending) throw new MachineRequestError(`a claude-account ${action} is already ${pending.status === 'pending' ? 'waiting for the coordinator' : 'running'}`, 409);
-  if (action === 'switch' && switchView(readSwitchLines(r.dir), r.now)?.status === 'running') throw new MachineRequestError('a Claude account switch is running on this machine; wait for it to end', 409);
   return requestMachineChange(log, { args: ['claude-account', action], requester: r.requester, via: 'claude-account', ...(r.ownersFile ? { ownersFile: r.ownersFile } : {}) });
-}
-
-export class ClaudeTokenError extends Error {
-  constructor(
-    message: string,
-    readonly status: 400 | 403 | 409 = 400,
-  ) {
-    super(message);
-  }
-}
-
-/**
- * Store the pasted token for the running switch: only while it waits for one from this instance, only a token from
- * claude setup-token, for this coordinator user only (0400). Every error is a fixed text: never the value.
- * Returns the file's path.
- */
-export function storeSwitchToken(o: { value: string; instance: string; who: { role: Role | null; requester: MachineRequester }; dir?: string; home?: string; ownersFile?: string; now?: number }): string {
-  const why = claudeAccountGate(o.who, o.ownersFile ? { ownersFile: o.ownersFile } : {});
-  if (why) throw new ClaudeTokenError(why, 403);
-  const sw = switchView(readSwitchLines(o.dir), o.now);
-  if (!sw || !sw.waitingForToken) throw new ClaudeTokenError('no Claude account switch is waiting for a token', 409);
-  if (sw.tokenFrom !== o.instance) throw new ClaudeTokenError(`the switch takes its token from ${sw.tokenFrom ? `${sw.tokenFrom}'s dashboard` : 'the terminal it was started in'}, not this one`, 409);
-  const value = o.value.trim();
-  if (!SETUP_TOKEN.test(value)) throw new ClaudeTokenError('that is not a token from claude setup-token (it starts sk-ant-oat01-); nothing stored');
-  try {
-    return installOwnerOnlySecret(secretsDir(o.instance, o.home), CLAUDE_ACCOUNT_CREDENTIAL, value);
-  } catch (e) {
-    // The OS error names the path, never the value; keep its first line.
-    throw new ClaudeTokenError(`couldn't store the token: ${String((e as Error).message).split('\n')[0]}`);
-  }
 }

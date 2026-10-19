@@ -158,7 +158,7 @@ export type Fix =
   | { kind: 'start' }
   /** WHY: a step the dashboard does itself (src/setup-actions.ts): its plan shown first, then confirmed by an owner. */
   | { kind: 'action'; action: string; label: string }
-  /** WHY: the Claude sign-in (src/claude-signin.ts): local mode relays `claude auth login`; a server pastes a setup token. */
+  /** WHY: the Claude sign-in (src/claude-signin.ts): local mode relays `claude auth login`; a server only shows what root runs on the machine. */
   | { kind: 'signin'; label: string }
   /** WHY: a fix that needs values (the policy's): a form on the page, its change shown before it is written. */
   | { kind: 'form'; form: 'policy' | 'repo-config' | 'setup-origin' | 'setup-config' | 'first-task'; label: string }
@@ -527,9 +527,10 @@ export const SETUP_STEPS: readonly SetupStep[] = [
     modes: ['server'],
     optional: false,
     reach: 'all',
-    today: "Run `claude setup-token` on a machine signed in to the agents' Claude account, then paste the token it prints: in Add project's paste box, or at credentials.sh <name> claude's hidden prompt (as root).",
-    fix: { kind: 'signin', label: 'Paste the token' },
-    automation: 'scripts/setup/credentials.sh <name> claude (paste the token claude setup-token prints at its hidden prompt), or scripts/setup/add-project.sh <name> <owner/repo> (its claude-token step)',
+    // Issue #711: never through the dashboard, which never takes a Claude credential; root installs it on the machine.
+    today: "As root on the machine: run `claude setup-token` on a machine signed in to the agents' Claude account, then paste the token it prints at credentials.sh <name> claude's hidden prompt; or sign in there as the agent user (sudo -u wl-<name>-agent -i claude auth login). The dashboard never takes the token.",
+    fix: { kind: 'signin', label: 'Show how' },
+    automation: 'scripts/setup/credentials.sh <name> claude (paste the token claude setup-token prints at its hidden prompt), or scripts/setup/add-project.sh <name> <owner/repo> at a root shell (its claude-token step)',
     detect: (k) => {
       const i = k.inst();
       // WHY: add-project and credentials.sh keep the login in the agent user's own home, out of this user's sight;

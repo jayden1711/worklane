@@ -854,7 +854,6 @@ test('no fresh sign-in: a session signed in days ago (still within 12 h idle / 7
       ['machine settings', 'machine', { what: 'slots', value: 4 }],
       ['add project', 'machine/add-project', { name: 'gamma', repo: 'example/gamma' }],
       ['Claude account status', 'machine/claude-account', { action: 'status' }],
-      ['Claude account token paste', 'claude-account/token', { value: `sk-ant-oat01-${'Q'.repeat(40)}` }],
       ['root step run', `asks/${step.id}/run`, {}],
     ];
     for (const [what, path, body] of actions) {
@@ -874,7 +873,9 @@ test('no fresh sign-in: a session signed in days ago (still within 12 h idle / 7
     }
     // Every one of them is on record: the audit, and the root step's machine request names who asked.
     const audited = s.a.log.read(0, ['dashboard.audit']).map((e) => e.payload as { login: string; via: string; action: string });
-    for (const action of ['machine.changed', 'machine.add_project', 'machine.claude_account', 'claude_account.token']) {
+    // Issue #711: the token paste is gone, for this machine owner too: 410, nothing stored or audited.
+    assert.equal((await post(ada, 'claude-account/token', { value: `sk-ant-oat01-${'Q'.repeat(40)}` })).status, 410);
+    for (const action of ['machine.changed', 'machine.add_project', 'machine.claude_account']) {
       assert.ok(audited.some((a) => a.login === 'ada' && a.via === 'session' && a.action === action), `${action} audited: ${audited.map((a) => a.action).join(', ')}`);
     }
     assert.ok(audited.some((a) => a.login === 'ivy' && a.action === 'machine.add_project_refused'), 'a refused add-project is audited too');

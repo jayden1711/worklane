@@ -9,7 +9,7 @@ import { createRequire } from 'node:module';
 import { appendFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { accountSwitchedAt, CLAUDE_PROFILE_CREDENTIAL, latestSwitch, profileLogin, profilesTable, readProfileOps, recordProfileSwitches, requestProfileOp, resolveLogin } from '../src/claude-profiles.js';
+import { accountSwitchedAt, latestSwitch, profileLogin, profilesTable, readProfileOps, recordProfileSwitches, requestProfileOp, resolveLogin } from '../src/claude-profiles.js';
 import { secretsDir } from '../src/console/secrets.js';
 import { checkRootStep, profileStepOk } from '../src/console/root-steps.js';
 import { runMachineRequests } from '../src/coordinator/machine-requests.js';
@@ -85,10 +85,13 @@ test('a profile step is a machine request with exactly its arguments, one at a t
     for (const [args, why] of [
       [{ action: 'use', profile: 'Work' }, /profile's name/],
       [{ action: 'use', profile: '../x' }, /profile's name/],
-      [{ action: 'profile-add', profile: 'default' }, /never added, signed in or removed/],
-      [{ action: 'remove', profile: 'default' }, /never added, signed in or removed/],
-      [{ action: 'switch', profile: 'work' }, /profile-add, login, use or remove/],
+      [{ action: 'remove', profile: 'default' }, /never removed/],
+      [{ action: 'switch', profile: 'work' }, /action is use or remove/],
+      // Issue #711: adding an account, or signing one in, takes a Claude credential: never from a dashboard.
+      [{ action: 'profile-add', profile: 'work' }, /root admin's, at a root shell on the machine/],
+      [{ action: 'login', profile: 'work' }, /root admin's, at a root shell on the machine/],
     ] as const) assert.throws(() => requestProfileOp(log, { ...args, who, dir, ownersFile: owners }), why, JSON.stringify(args));
+    assert.deepEqual(machineRequests(log.read(0)), [], 'nothing recorded for any of them');
     const r = requestProfileOp(log, { action: 'use', profile: 'work', who, dir, ownersFile: owners });
     // No instance: the helper takes the asking coordinator's from sudo.
     assert.deepEqual(r.args, ['claude-account', 'use', 'work']);
@@ -107,9 +110,10 @@ test('a profile step is a machine request with exactly its arguments, one at a t
 
 test("the allowlist and the helper take the same profile steps, and no other", () => {
   const helper = createRequire(import.meta.url)(join(repoRoot, 'scripts', 'machine', 'worklane-machine.cjs')) as { parseClaudeProfile: (a: string[]) => unknown };
-  const good = [['profile-add', 'work'], ['remove', 'work'], ['use', 'work'], ['use', 'default'], ['login', 'work']];
-  // Never an instance (another one, or "all"), never confirm-profile, never the script's own flags.
-  const bad = [['profile-add', 'default'], ['remove', 'default'], ['profile-add'], ['profile-add', 'Work'], ['profile-add', 'work', 'alpha'], ['remove', 'work', 'alpha'], ['use'], ['use', 'work', 'alpha'], ['use', 'default', 'alpha'], ['use', 'work', 'all'], ['use', 'work', 'alpha', 'beta'], ['use', '../x'], ['use', 'work', '--for'], ['use', 'work', '--for', 'beta'], ['use', `w${'x'.repeat(21)}`], ['switch', 'work'], ['confirm-profile', 'work'], ['login', 'default'], ['login', 'work', 'alpha'], ['login', 'work', '--for', 'beta'], ['login']];
+  const good = [['remove', 'work'], ['use', 'work'], ['use', 'default']];
+  // Never an instance (another one, or "all"), never confirm-profile, never the script's own flags. Never profile-add
+  // or login (issue #711): each takes a Claude credential, a root admin's at a root shell.
+  const bad = [['profile-add', 'work'], ['login', 'work'], ['profile-add', 'default'], ['remove', 'default'], ['profile-add'], ['profile-add', 'Work'], ['profile-add', 'work', 'alpha'], ['remove', 'work', 'alpha'], ['use'], ['use', 'work', 'alpha'], ['use', 'default', 'alpha'], ['use', 'work', 'all'], ['use', 'work', 'alpha', 'beta'], ['use', '../x'], ['use', 'work', '--for'], ['use', 'work', '--for', 'beta'], ['use', `w${'x'.repeat(21)}`], ['switch', 'work'], ['confirm-profile', 'work'], ['login', 'default'], ['login', 'work', 'alpha'], ['login', 'work', '--for', 'beta'], ['login']];
   for (const a of good) {
     assert.ok(profileStepOk(a), JSON.stringify(a));
     assert.ok(checkRootStep('claude-account', a).allowed, JSON.stringify(a));
@@ -120,8 +124,9 @@ test("the allowlist and the helper take the same profile steps, and no other", (
     assert.ok(!checkRootStep('claude-account', a).allowed, JSON.stringify(a));
     assert.equal(helper.parseClaudeProfile(['claude-account', ...a]), null, JSON.stringify(a));
   }
-  // The switch's own two are as they were.
-  for (const a of [['status'], ['switch']]) assert.ok(checkRootStep('claude-account', a).allowed);
+  // status as it was; never a switch (issue #711).
+  assert.ok(checkRootStep('claude-account', ['status']).allowed);
+  assert.ok(!checkRootStep('claude-account', ['switch']).allowed);
 });
 
 test('a finished switch asked from this dashboard is recorded once as account.switched: from, to, by, the result', () => {
@@ -308,14 +313,14 @@ test('the dashboard: only a machine owner on an allowed device starts a profile 
   const home = mkdtempSync(join(tmpdir(), 'cp-dash-home-'));
   mkdirSync(join(dir, 'state'), { recursive: true });
   const d = await startDashboard({ root, cfg, eventsDb, stateDir: join(dir, 'state'), user: 'example-owner', roleOf: exampleRoles, machineOwnersFile: owners, claudeAccountDir: acct, secretsHome: home, slotsDir: join(dir, 'slots') });
-  const tokenFile = join(secretsDir(instance, home), CLAUDE_PROFILE_CREDENTIAL);
+  // Where an earlier version stored a pasted profile token: nothing may ever be written there.
+  const tokenFile = join(secretsDir(instance, home), 'claude-profile-token');
   try {
     const base = d.url.split('/?')[0]!;
     const call = async (path: string, headers: Record<string, string>, body: unknown) => {
       const r = await fetch(`${base}${path}`, { method: 'POST', headers: { authorization: `Bearer ${d.token}`, 'content-type': 'application/json', ...headers }, body: JSON.stringify(body) });
       return { status: r.status, text: await r.text() };
     };
-    const add = (headers: Record<string, string>) => call('/api/claude-account/profile-add?profile=work', headers, { value: TOKEN });
     const use = (headers: Record<string, string>) => call('/api/machine/claude-profile', headers, { action: 'use', profile: 'work' });
     // Another instance, or every one, from this dashboard: refused for anyone, audited, nothing started.
     for (const instance of ['beta', 'all']) {
@@ -349,32 +354,39 @@ test('the dashboard: only a machine owner on an allowed device starts a profile 
       }
     };
     for (const [who, headers] of refusedBy) {
-      for (const send of [add, use]) {
-        const before = audits().length;
-        const r = await send(headers);
-        assert.equal(r.status, 403, `${who}: ${r.text}`);
-        assert.ok(!r.text.includes(TOKEN.slice(13)));
-        assert.equal(audits().length, before + 1, `${who}: audited`);
-        assert.equal(requests().length, 0, `${who}: nothing started`);
-        assert.ok(!existsSync(tokenFile), `${who}: no token stored`);
-      }
+      const before = audits().length;
+      const r = await use(headers);
+      assert.equal(r.status, 403, `${who}: ${r.text}`);
+      assert.equal(audits().length, before + 1, `${who}: audited`);
+      assert.equal(requests().length, 0, `${who}: nothing started`);
     }
     // An owner of this instance who isn't one of the machine's owners, on an allowed device.
     writeFileSync(owners, `${JSON.stringify({ owners: ['someone-else'] })}\n`);
-    for (const send of [add, use]) {
-      const before = audits().length;
-      assert.equal((await send(asDevicePerson('example-owner'))).status, 403, 'instance-only owner');
-      assert.equal(audits().length, before + 1);
-      assert.equal(requests().length, 0);
-      assert.ok(!existsSync(tokenFile));
-    }
-    // A machine owner on an allowed device: the token stored for the coordinator user only, and the step recorded.
+    const before = audits().length;
+    assert.equal((await use(asDevicePerson('example-owner'))).status, 403, 'instance-only owner');
+    assert.equal(audits().length, before + 1);
+    assert.equal(requests().length, 0);
     writeFileSync(owners, `${JSON.stringify({ owners: ['example-owner'] })}\n`);
-    const ok = await add(asDevicePerson('example-owner'));
+    // Issue #711: adding a profile from its token, or signing one in, is gone for everyone (410), a machine owner on
+    // an allowed device included; the body is never read, nothing is stored, nothing started.
+    for (const headers of [...refusedBy.values(), asDevicePerson('example-owner')]) {
+      for (const path of ['/api/claude-account/profile-add?profile=work', '/api/claude-account/login-code']) {
+        const r = await call(path, headers, { value: TOKEN });
+        assert.equal(r.status, 410, `${path}: ${r.text}`);
+        assert.ok(!r.text.includes(TOKEN.slice(13)));
+      }
+      for (const action of ['profile-add', 'login']) {
+        const r = await call('/api/machine/claude-profile', headers, { action, profile: 'work' });
+        assert.ok(r.status === 400 || r.status === 403, `${action}: ${r.status} ${r.text}`);
+      }
+      assert.ok(!existsSync(tokenFile) && !existsSync(join(secretsDir(instance, home), 'claude-login-code')), 'nothing stored');
+      assert.equal(requests().length, 0, 'nothing started');
+    }
+    // A machine owner on an allowed device: the step recorded.
+    const ok = await use(asDevicePerson('example-owner'));
     assert.equal(ok.status, 200, ok.text);
-    assert.ok(existsSync(tokenFile));
-    assert.deepEqual(requests().map((r) => [r.args, r.by]), [[['claude-account', 'profile-add', 'work'], 'example-owner']]);
-    // One at a time: the next is refused while that one waits, and its token isn't kept.
+    assert.deepEqual(requests().map((r) => [r.args, r.by]), [[['claude-account', 'use', 'work'], 'example-owner']]);
+    // One at a time: the next is refused while that one waits.
     const busy = await use(asDevicePerson('example-owner'));
     assert.equal(busy.status, 409, busy.text);
     const log = new EventLog(eventsDb);
@@ -402,120 +414,39 @@ test('the ops alert: each profile change in the machine change log is an alert f
 
 const SIGNIN_URL = 'https://claude.ai/oauth/authorize?code=true&client_id=x&response_type=code&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback&state=s';
 const CODE = 'abcdefghij0123456789#klmnopqrstuv9876543210';
-/** A relayed sign-in for alpha, as claude-account.sh login leaves it: waiting for the code, with its link. */
-function waitingSignin(o: { url?: string; codeDone?: boolean } = {}) {
-  const at = new Date().toISOString();
-  const op = (step: string, state: string) => ({ at, id: 'op-login', op: 'login', profile: 'work', step, state, for: 'alpha', detail: `${step} ${state}` });
-  const dir = accountDir({}, [op('login', 'started'), op('link', 'ask'), ...(o.codeDone ? [op('code', 'done')] : [])]);
-  writeFileSync(join(dir, 'login-url'), `${o.url ?? SIGNIN_URL}\n`, { mode: 0o400 });
-  return dir;
-}
 
-test("the relayed sign-in's link: only Anthropic's sign-in page whose redirect is its own code page; shown only while it waits for the code", async () => {
-  const { readSigninUrl, signinView } = await import('../src/claude-profiles.js');
-  assert.equal(readSigninUrl(waitingSignin()), SIGNIN_URL);
-  for (const url of [SIGNIN_URL.replace('platform.claude.com%2Foauth%2Fcode%2Fcallback', 'localhost%3A5555%2Fcallback'), SIGNIN_URL.replace('https://claude.ai', 'https://claude.ai.example.com'), SIGNIN_URL.replace('https:', 'http:'), 'https://claude.ai/login', 'javascript:alert(1)']) assert.equal(readSigninUrl(waitingSignin({ url })), null, url);
-  const v = signinView({ dir: waitingSignin(), instance: 'alpha' })!;
-  assert.deepEqual([v.waitingForCode, v.url], [true, SIGNIN_URL]);
-  assert.equal(signinView({ dir: waitingSignin(), instance: 'beta' }), null, "another instance's sign-in is not this dashboard's");
-  const after = signinView({ dir: waitingSignin({ codeDone: true }), instance: 'alpha' })!;
-  assert.deepEqual([after.waitingForCode, after.url], [false, null], 'the code taken: no link any more');
-});
-
-test('the code: stored for the coordinator user only while its sign-in waits, its shape only, and once: a second, or one after the code was taken, is refused', async () => {
-  const { storeLoginCode } = await import('../src/claude-profiles.js');
-  const owners = machineOwnersFile('ada');
-  const who = { role: 'owner' as const, requester: ownerRequester('ada') };
-  const home = mkdtempSync(join(tmpdir(), 'cp-code-home-'));
-  const dir = waitingSignin();
-  const status = (f: () => unknown) => {
-    try {
-      f();
-      return 200;
-    } catch (e) {
-      return (e as { status: number }).status;
-    }
-  };
-  assert.equal(status(() => storeLoginCode({ value: CODE, instance: 'alpha', who: { role: 'writer', requester: ownerRequester('ada') }, dir, home, ownersFile: owners })), 403);
-  assert.equal(status(() => storeLoginCode({ value: CODE, instance: 'alpha', who: { role: 'owner', requester: { login: 'ada', breakGlass: false, deviceOk: false } }, dir, home, ownersFile: owners })), 403);
-  assert.equal(status(() => storeLoginCode({ value: CODE, instance: 'beta', who, dir, home, ownersFile: owners })), 409, "beta's dashboard: no sign-in of its own waiting");
-  assert.equal(status(() => storeLoginCode({ value: 'not a code', instance: 'alpha', who, dir, home, ownersFile: owners })), 400);
-  const file = storeLoginCode({ value: CODE, instance: 'alpha', who, dir, home, ownersFile: owners });
-  assert.equal(statSync(file).mode & 0o777, 0o400);
-  assert.equal(status(() => storeLoginCode({ value: CODE, instance: 'alpha', who, dir, home, ownersFile: owners })), 409, 'a second code while the first waits: refused');
-  rmSync(file);
-  assert.equal(status(() => storeLoginCode({ value: CODE, instance: 'alpha', who, dir: waitingSignin({ codeDone: true }), home, ownersFile: owners })), 409, 'the code taken: the same code again is refused');
-});
-
-test('the dashboard: only a machine owner on an allowed device starts a sign-in or gives its code; every other request is refused (403), audited, and starts nothing; the code is in no event', { skip: !posix }, async () => {
+test("issue #711: a relayed sign-in an earlier version left waiting gets nothing from the dashboard: no link shown, no code taken, no new one started", { skip: !posix }, async () => {
   const dir = mkdtempSync(join(tmpdir(), 'cp-signin-dash-'));
   const { dir: root } = exampleProject();
   const cfg = loadConfig(root);
   const instance = cfg.project.project.name;
   const eventsDb = join(dir, 'events.db');
   new EventLog(eventsDb).close();
-  const owners = machineOwnersFile('example-owner', 'viewer-person', 'example-collaborator');
+  const owners = machineOwnersFile('example-owner');
   const at = new Date().toISOString();
   const acct = accountDir({}, [{ at, id: 'op-login', op: 'login', profile: 'work', step: 'login', state: 'started', for: instance, detail: '' }, { at, id: 'op-login', op: 'login', profile: 'work', step: 'link', state: 'ask', for: instance, detail: '' }]);
   writeFileSync(join(acct, 'login-url'), `${SIGNIN_URL}\n`);
   const home = mkdtempSync(join(tmpdir(), 'cp-signin-home-'));
   const d = await startDashboard({ root, cfg, eventsDb, stateDir: join(dir, 'state'), user: 'example-owner', roleOf: exampleRoles, machineOwnersFile: owners, claudeAccountDir: acct, secretsHome: home, slotsDir: join(dir, 'slots') });
-  const codeFile = join(secretsDir(instance, home), 'claude-login-code');
   try {
     const base = d.url.split('/?')[0]!;
-    const call = async (path: string, headers: Record<string, string>, body: unknown) => {
-      const r = await fetch(`${base}${path}`, { method: 'POST', headers: { authorization: `Bearer ${d.token}`, 'content-type': 'application/json', ...headers }, body: JSON.stringify(body) });
-      return { status: r.status, text: await r.text() };
-    };
-    const start = (h: Record<string, string>) => call('/api/machine/claude-profile', h, { action: 'login', profile: 'work' });
-    const code = (h: Record<string, string>) => call('/api/claude-account/login-code', h, { value: CODE });
-    const events = () => {
-      const log = new EventLog(eventsDb);
-      try {
-        return log.read(0);
-      } finally {
-        log.close();
-      }
-    };
-    const audits = () => events().filter((e) => e.type === 'dashboard.audit' || e.type === 'claude_account.refused').length;
-    const refused: [string, Record<string, string>][] = [
-      ['writer', asDevicePerson('example-collaborator')],
-      ['viewer', asDevicePerson('viewer-person')],
-      ['machine owner, disallowed device', asPerson('example-owner')],
-      ['no session', { 'x-forwarded-for': '192.0.2.9' }],
-    ];
-    for (const [who, h] of refused) {
-      for (const send of [start, code]) {
-        const before = audits();
-        const r = await send(h);
-        assert.equal(r.status, 403, `${who}: ${r.text}`);
-        assert.equal(audits(), before + 1, `${who}: audited`);
-        assert.equal(machineRequests(events()).length, 0, `${who}: no sign-in started`);
-        assert.ok(!existsSync(codeFile), `${who}: no code stored`);
-      }
+    const headers = { authorization: `Bearer ${d.token}`, 'content-type': 'application/json', ...asDevicePerson('example-owner') };
+    // The panel, to a machine owner on an allowed device: never the sign-in link.
+    const view = await (await fetch(`${base}/api/claude-account`, { headers })).text();
+    assert.ok(!view.includes('oauth/authorize') && !view.includes('"signin"'), view.slice(0, 300));
+    // The code: refused, whichever route it is sent to, and stored nowhere.
+    const code = await fetch(`${base}/api/claude-account/login-code`, { method: 'POST', headers, body: JSON.stringify({ value: CODE }) });
+    assert.equal(code.status, 410);
+    const start = await fetch(`${base}/api/machine/claude-profile`, { method: 'POST', headers, body: JSON.stringify({ action: 'login', profile: 'work' }) });
+    assert.equal(start.status, 400);
+    assert.ok(!existsSync(join(secretsDir(instance, home), 'claude-login-code')));
+    const log = new EventLog(eventsDb);
+    try {
+      assert.deepEqual(machineRequests(log.read(0)), [], 'no sign-in started');
+      assert.ok(!JSON.stringify(log.read(0)).includes(CODE.slice(0, 12)), 'the code is in no event');
+    } finally {
+      log.close();
     }
-    writeFileSync(owners, `${JSON.stringify({ owners: ['someone-else'] })}\n`);
-    for (const send of [start, code]) assert.equal((await send(asDevicePerson('example-owner'))).status, 403, 'instance-only owner');
-    assert.equal(machineRequests(events()).length, 0);
-    writeFileSync(owners, `${JSON.stringify({ owners: ['example-owner'] })}\n`);
-    // The view shows the link to a machine owner while it waits.
-    const view = await fetch(`${base}/api/claude-account`, { headers: { authorization: `Bearer ${d.token}`, ...asDevicePerson('example-owner') } });
-    const v = (await view.json()) as { signin: { waitingForCode: boolean; url: string } };
-    assert.deepEqual([v.signin.waitingForCode, v.signin.url], [true, SIGNIN_URL]);
-    const ok = await code(asDevicePerson('example-owner'));
-    assert.equal(ok.status, 200, ok.text);
-    assert.ok(existsSync(codeFile));
-    assert.equal((await code(asDevicePerson('example-owner'))).status, 409, 'once');
-    const all = JSON.stringify(events());
-    assert.ok(!all.includes(CODE.slice(0, 12)) && !all.includes(CODE.slice(-12)), 'the code is in no event, the audit included');
-    assert.ok(!ok.text.includes(CODE.slice(0, 12)));
-    // Starting one, once that one has ended: a machine request for this instance (the helper adds the instance from sudo).
-    rmSync(codeFile);
-    assert.equal((await start(asDevicePerson('example-owner'))).status, 409, 'one sign-in at a time');
-    appendFileSync(join(acct, 'profile-ops.jsonl'), `\n${JSON.stringify({ at, id: 'op-login', op: 'login', profile: 'work', step: 'login', state: 'failed', for: instance, detail: 'x' })}`);
-    const s = await start(asDevicePerson('example-owner'));
-    assert.equal(s.status, 200, s.text);
-    assert.deepEqual(machineRequests(events()).map((r) => r.args), [['claude-account', 'login', 'work']]);
   } finally {
     await d.close();
   }

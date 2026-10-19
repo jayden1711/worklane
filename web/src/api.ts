@@ -200,6 +200,13 @@ export interface HealthView {
   network?: { proxy: string | null; file: string; ca: { path: string; count: number; fingerprints: string[] } | null; error: string | null } | null;
   /** Root's provider hosts from providers.json (src/provider-hosts.ts) and each configured provider they refuse; null when no file and no provider (or for a viewer). */
   providerHosts?: { file: string; state: 'missing' | 'ok' | 'refused'; hosts: string[]; error: string | null; refused: { provider: string; reason: string }[] } | null;
+  /** The machine's shared GitHub API budget (src/github/budget-health.ts): per credential (numbered, never named by its token), what is left and when it resets, a back-off in force, the top consumers; null when none yet (or for a viewer). */
+  githubRate?: {
+    credentials: { id: string; resources: { resource: string; limit: number | null; remaining: number | null; resetAt: string | null }[]; backoff: { kind: 'rate_limited' | 'secondary_rate_limited'; until: string } | null; top: { consumer: string; calls: number | null }[]; calls: number | null; updatedAt: string | null }[];
+    notShown: number;
+    /** Why no budget is shown, when reading them failed. */
+    error?: string | null;
+  } | null;
   /** Links to the engine's docs; null when the package names no repository. */
   docs?: { backups: string | null };
   /** What conflict fixes, light checks and hotspot holds cost per merged PR, over the last week. */

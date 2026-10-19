@@ -8,8 +8,9 @@
 // passes through here: Claude Code stores its own login; this sees only the URL and what `claude auth status` says.
 // The URL is shown to the instance's owners only and is never in an event, the audit or a log line.
 //
-// Server mode: the agents' login is a token from `claude setup-token`, pasted once into the existing paste_secret
-// ask (add-project's claude-token step) or at credentials.sh's hidden prompt; claudeServerView says which applies.
+// Server mode: the agents' login is installed by root on the machine, never through the dashboard (issue #711, which
+// never takes a Claude credential): credentials.sh's hidden prompt for a token from `claude setup-token`, or a person
+// signing in to claude there as the agent user. claudeServerView shows the commands and what root last found.
 //
 // WHY the account email is labelled cached: `claude auth status` names the account from Claude Code's cached
 // profile (~/.claude.json), not from the token, so after a token change it can name the previous account (#341).
@@ -19,8 +20,6 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { BRAND } from './brand.js';
 import { readAccountStatus, CLAUDE_ACCOUNT_DIR } from './claude-account.js';
-import { CLAUDE_TOKEN_CREDENTIAL } from './coordinator/add-project.js';
-import { mayAnswerAsk, type Ask, type Role } from './console/asks.js';
 import { browserRelay, ownerOnlyDir } from './os/index.js';
 import { withToolPath } from './tool-path.js';
 import { outboundEnv } from './network.js';
@@ -239,30 +238,29 @@ export class ClaudeSignin {
   }
 }
 
-/** Server mode's panel: the open paste box (add-project's claude-token ask) and what claude-account status last found. */
+/** Server mode's panel: what claude-account status last found, and the root commands that install the login. */
 export interface ClaudeServerView {
   agentUser: string;
-  /** add-project's open claude-token ask for this instance, when one is waiting: the page shows its paste box. */
-  ask: (Ask & { canAnswer: boolean }) | null;
   /** The agent user, as claude-account.sh status last found it (status.json); null when it hasn't run. */
   status: { at: string; loggedIn: boolean; method: string | null; cachedAccount: string | null; installedAt: string | null } | null;
-  /** The terminal's way: the same token, at a hidden prompt (for automation: on stdin). */
+  /** The machine's way, as root: a token from claude setup-token at credentials.sh's hidden prompt. */
   command: string;
+  /** The same, signing in to the unmodified claude as the agent user, on the machine. */
+  signinCommand: string;
   /** The equivalent setup script, named on the screen and in the docs. */
   script: string;
 }
 
-export function claudeServerView(o: { instance: string; asks: readonly Ask[]; role: Role | null; engineRoot: string; accountDir?: string }): ClaudeServerView {
+export function claudeServerView(o: { instance: string; engineRoot: string; accountDir?: string }): ClaudeServerView {
   const agentUser = `wl-${o.instance}-agent`;
-  const open = [...o.asks].reverse().find((a) => a.kind === 'paste_secret' && a.status === 'open' && a.instance === o.instance && a.credential === CLAUDE_TOKEN_CREDENTIAL) ?? null;
   const all = readAccountStatus(o.accountDir ?? CLAUDE_ACCOUNT_DIR);
   const rec = all?.users.find((u) => u.instance === o.instance && u.kind === 'agent') ?? null;
   const script = `sudo bash ${join(o.engineRoot, 'scripts', 'setup', 'credentials.sh')} ${o.instance} claude`;
   return {
     agentUser,
-    ask: open ? { ...open, canAnswer: mayAnswerAsk(open, o.role) } : null,
     status: rec ? { at: all!.at, loggedIn: rec.loggedIn, method: rec.authMethod, cachedAccount: rec.loggedIn ? rec.account : null, installedAt: rec.installedAt } : null,
     command: `claude setup-token    # on a machine signed in to the account the agents should use\n${script}    # paste the token it printed (not shown)`,
+    signinCommand: `sudo -u ${agentUser} -i claude auth login    # on this machine: sign in through Anthropic's own page`,
     script,
   };
 }

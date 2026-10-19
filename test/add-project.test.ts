@@ -1,11 +1,12 @@
 // scripts/setup/add-project.sh, step by step, with every setup script it runs stood in for (the real ones run end to
 // end in CI's "add-project (real systemd)" job): the steps in order as JSON lines, each skipped on a rerun when done,
 // a failure stopping the run with its exact retry, every instance on the machine kept when the machine helper and
-// the dashboards are rerun, and the Claude token never echoed. Also the name and repo checks, the same in the
-// script, the helper and the engine.
+// the dashboards are rerun, and the Claude token taken only from root (a root shell's hidden prompt, or root's
+// stdin), never echoed; with none it waits for root, never a paste box (issue #711). Also the name and repo checks,
+// the same in the script, the helper and the engine.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
@@ -99,14 +100,45 @@ printf '[Service]\\nExecStart=/usr/local/bin/worklane dashboard --hub %s --servi
   const hubTok = join(T, 'homes', 'wl-dash', '.local', 'state', 'worklane', 'dashboard-hub');
   mkdirSync(hubTok, { recursive: true });
   writeFileSync(join(hubTok, 'dashboard-token'), 't');
+  // Without a terminal: root's automation, the token on stdin; or the machine helper, for a dashboard, with none.
   const run = (args: string[] = ['alpha', 'example/alpha'], input = `${TOKEN}\n`) => {
     const r = spawnSync('bash', [join(s, 'add-project.sh'), ...args], { encoding: 'utf8', input, env: { PATH: process.env.PATH ?? '/usr/bin:/bin', HOME: T } });
     const lines = r.stdout.split('\n').filter(Boolean);
-    return { ...r, lines, events: lines.map((l) => JSON.parse(l) as { step: string; state: string; detail: string; ask?: Record<string, string>; retry?: string }) };
+    return { ...r, lines, events: lines.map((l) => JSON.parse(l) as Step) };
+  };
+  // At a root shell (a terminal, util-linux script's pty): the token typed at the hidden prompt once it is shown, so
+  // nothing is typed before the prompt turns echo off.
+  const runTty = (token: string, args: string[] = ['alpha', 'example/alpha']) =>
+    new Promise<{ status: number | null; out: string; events: Step[] }>((resolve) => {
+      const cmd = ['bash', join(s, 'add-project.sh'), ...args].map((a) => `'${a}'`).join(' ');
+      const c = spawn('script', ['-qec', cmd, '/dev/null'], { env: { PATH: process.env.PATH ?? '/usr/bin:/bin', HOME: T } });
+      let out = '';
+      let typed = false;
+      const kill = setTimeout(() => c.kill(), 60_000);
+      c.stdout.on('data', (d: Buffer) => {
+        out += d.toString('utf8');
+        if (!typed && out.includes('Paste the token')) {
+          typed = true;
+          c.stdin.write(`${token}\r`);
+        }
+      });
+      c.on('close', (status) => {
+        clearTimeout(kill);
+        const lines = out.split('\n').map((l) => l.replace(/\r/g, '')).filter((l) => l.startsWith('{"step"'));
+        resolve({ status, out, events: lines.map((l) => JSON.parse(l) as Step) });
+      });
+    });
+  /** The agent user signed in already (root ran credentials.sh <name> claude, or claude auth login as it). */
+  const signedIn = (n = 'alpha') => {
+    mkdirSync(join(T, 'homes', `wl-${n}-agent`, '.claude'), { recursive: true });
+    writeFileSync(join(T, 'homes', `wl-${n}-agent`, '.claude', '.credentials.json'), JSON.stringify({ claudeAiOauth: { accessToken: 'sk-ant-oat01-installed-by-root' } }));
   };
   const calls = () => (existsSync(join(T, 'calls')) ? readFileSync(join(T, 'calls'), 'utf8').trim().split('\n').filter(Boolean) : []);
-  return { T, s, run, calls, instDir };
+  return { T, s, run, runTty, signedIn, calls, instDir };
 }
+type Step = { step: string; state: string; detail: string; ask?: Record<string, string>; retry?: string };
+/** util-linux's script, for a pty: what CI's Ubuntu has; elsewhere the terminal tests skip. */
+const hasScript = posix && spawnSync('script', ['-qec', 'true', '/dev/null'], { encoding: 'utf8' }).status === 0;
 
 test('add-project runs the steps in order, one JSON line per change on stdout, and keeps every instance on the machine', { skip: !posix }, () => {
   const m = machine();
@@ -117,11 +149,10 @@ test('add-project runs the steps in order, one JSON line per change on stdout, a
   const order = r.events.filter((e) => e.state === 'started').map((e) => e.step);
   assert.deepEqual(order, STEPS);
   for (const step of STEPS) assert.ok(r.events.some((e) => e.step === step && e.state === 'done'), `${step} done`);
-  // The App's click and the Claude token are asks, in their steps.
+  // The App's click is an ask, in its step; nothing asks a dashboard for the Claude token (issue #711).
   const asks = r.events.filter((e) => e.state === 'ask');
-  assert.deepEqual(asks.map((e) => [e.step, e.ask?.kind]), [['app', 'approve_link'], ['claude-token', 'paste_secret']]);
+  assert.deepEqual(asks.map((e) => [e.step, e.ask?.kind]), [['app', 'approve_link']]);
   assert.equal(asks[0]!.ask!.url, 'https://hub.example.test/setup/app-manifest/start/amf-1');
-  assert.equal(asks[1]!.ask!.credential, 'claude-token');
   // The default policy, shown for the owner.
   assert.match(r.events.find((e) => e.step === 'policy' && e.state === 'done')!.detail, /^auto_merge off, \$20\/day, 2 workers: change them/);
   // No test_run in the repo's tests.yaml: no test user.
@@ -133,9 +164,41 @@ test('add-project runs the steps in order, one JSON line per change on stdout, a
   // machine devices, and its console user is dropped (#742).
   assert.ok(calls.includes('dashboards --client-id Iv1.signin0001 --public-url https://hub.example.test --machine-devices tag:owner alpha old'), calls.join('\n'));
   assert.deepEqual(calls.filter((c) => !c.startsWith('machine-helper') && !c.startsWith('dashboards')), ['instance alpha', 'ensure_instance_home alpha example/alpha', 'app app-manifest alpha example/alpha --ask-lines --timeout 15', 'install_claude_token wl-alpha-agent', 'checkout alpha example/alpha', 'service alpha']);
-  // The token reached the agent's own credentials, and no output.
+  // The token on root's stdin reached the agent's own credentials, and no output.
   assert.match(readFileSync(join(m.T, 'homes', 'wl-alpha-agent', '.claude', '.credentials.json'), 'utf8'), new RegExp(TOKEN));
   assert.ok(!r.stdout.includes(TOKEN) && !r.stderr.includes(TOKEN), 'the token is never echoed');
+});
+
+test('at a root shell (a terminal), the claude-token step takes the token at its hidden prompt, for the agent user only, never echoed', { skip: !hasScript && 'no util-linux script for a terminal' }, async () => {
+  const m = machine();
+  const r = await m.runTty(TOKEN);
+  assert.equal(r.status, 0, r.out.slice(-2000));
+  assert.deepEqual(r.events.filter((e) => e.state === 'started').map((e) => e.step), STEPS);
+  assert.ok(m.calls().includes('install_claude_token wl-alpha-agent'));
+  assert.match(readFileSync(join(m.T, 'homes', 'wl-alpha-agent', '.claude', '.credentials.json'), 'utf8'), new RegExp(TOKEN));
+  assert.ok(!r.out.includes(TOKEN.slice(13)), 'the token is never echoed, not even by the terminal');
+  const none = await machine().runTty('');
+  assert.equal(none.status, 3);
+  assert.deepEqual([none.events.at(-1)!.step, none.events.at(-1)!.state], ['claude-token', 'waiting']);
+});
+
+test('issue #711: with no token (the machine helper, for a dashboard, gives no stdin) the claude-token step asks no paste box: it waits for root to install the login, and nothing is stored', { skip: !posix }, () => {
+  const m = machine();
+  const r = m.run(undefined, '');
+  assert.equal(r.status, 3, r.stderr);
+  const last = r.events.at(-1)!;
+  assert.deepEqual([last.step, last.state], ['claude-token', 'waiting']);
+  assert.match(last.detail, new RegExp(`only root installs, on this machine: sudo bash ${m.s}/credentials\\.sh alpha claude`));
+  assert.match(last.detail, /sudo -u wl-alpha-agent -i claude auth login/);
+  assert.equal(last.retry, `sudo bash ${m.s}/add-project.sh alpha example/alpha, once that is done (it skips the steps already done)`);
+  assert.ok(!r.events.some((e) => e.state === 'ask' && e.step === 'claude-token'), 'no paste box asked for');
+  assert.ok(!m.calls().some((c) => c.startsWith('install_claude_token')));
+  assert.ok(!existsSync(join(m.T, 'homes', 'wl-alpha-agent', '.claude', '.credentials.json')), 'nothing stored');
+  // Once root has installed it, the rerun goes on from there.
+  m.signedIn();
+  const again = m.run(undefined, '');
+  assert.equal(again.status, 0, again.stderr);
+  assert.match(again.events.find((e) => e.step === 'claude-token' && e.state === 'done')!.detail, /has a Claude login/);
 });
 
 test('a rerun skips every step already done, and asks for nothing', { skip: !posix }, () => {
@@ -196,15 +259,6 @@ test('regression (audit B4): a repo with no config: the service step waits for i
   assert.match(again.events.find((e) => e.step === 'app' && e.state === 'done')!.detail, /, made by hand \(credentials\.sh github-app\)$/);
   assert.deepEqual(m.calls().filter((c) => /^(checkout|service) /.test(c)), ['checkout alpha example/alpha', 'checkout alpha example/alpha', 'service alpha']);
   assert.ok(again.events.some((e) => e.step === 'dashboards' && e.state === 'done'));
-});
-
-test('no Claude token, or not one from claude setup-token: the step fails and nothing is stored', { skip: !posix }, () => {
-  const m = machine();
-  const none = m.run(undefined, '');
-  assert.equal(none.status, 1);
-  assert.deepEqual([none.events.at(-1)!.step, none.events.at(-1)!.state], ['claude-token', 'failed']);
-  assert.match(none.events.at(-1)!.detail, /no token came/);
-  assert.ok(!existsSync(join(m.T, 'homes', 'wl-alpha-agent', '.claude', '.credentials.json')));
 });
 
 // WHY: wizard screen 5 makes the manifest flow the App step's only way. A failure there must never send the owner off
