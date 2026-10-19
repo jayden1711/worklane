@@ -23,7 +23,7 @@ export interface SandboxState {
 
 export interface SandboxWatchDeps {
   /** The host's own check (RunHost.check). A check that throws didn't run, and so failed. */
-  check: () => Promise<{ ok: boolean; detail: string }>;
+  check: () => Promise<{ ok: boolean; detail: string; unsupported?: string }>;
   log: EventLog;
   actor: string;
   /** A line for the journal (default: stderr). */
@@ -78,13 +78,15 @@ export class SandboxWatch implements SandboxState {
     this.next = null;
     const now = this.d.now ?? Date.now;
     const say = this.d.say ?? ((line: string) => console.error(line));
-    const r = await this.d.check().catch((e: Error) => ({ ok: false, detail: `the check didn't run: ${e.message}` }));
+    const r: { ok: boolean; detail: string; unsupported?: string } = await this.d.check().catch((e: Error) => ({ ok: false, detail: `the check didn't run: ${e.message}` }));
     const detail = r.detail.slice(0, 2000);
+    // Shown only (doctor, the Machine page): never part of ok, and the state a run reads has no such field.
+    const unsupported = r.unsupported?.slice(0, 500);
     // WHY: one event per change, not one per check: the watchdog and the dashboard read the newest, and a sandbox
     // that stays broken for a day would otherwise write 288 identical events.
-    const key = `${r.ok} ${detail}`;
+    const key = `${r.ok} ${unsupported ?? ''} ${detail}`;
     if (key !== this.recorded) {
-      this.d.log.append('testrun.sandbox', { ok: r.ok, detail }, this.d.actor);
+      this.d.log.append('testrun.sandbox', { ok: r.ok, detail, ...(unsupported ? { unsupported } : {}) }, this.d.actor);
       this.recorded = key;
     }
     if (r.ok) {

@@ -13,12 +13,14 @@
 #
 # The one exception (#543): a socket in the cgroup of a unit in the set egress_ok may send out, whoever owns it. A unit
 # joins the set by NFTSet=cgroup:inet:worklane_egress:egress_ok, which systemd keeps up to date (adds the unit's cgroup
-# when it starts, removes it when it stops). Only test-user.sh's rootless Docker unit has it: Docker pulls a run's
-# database image (pinned by digest) as the test user, through its own slirp4netns in that unit. A test run's own units
-# don't, and their processes can't move into Docker's cgroup: its parent, worklane-test.slice, is root's. The egress CI
-# job asserts that a plain test-user unit's write of its own pid there is refused; a run's own /sys/fs/cgroup is
-# read-only too (ProtectControlGroups=; inferred, not run). They do share Docker's uid, though, and so can drive its
-# processes: docs/test-runs.md, "Known gap".
+# when it starts, removes it when it stops). Two kinds of unit have it: test-user.sh's rootless Docker unit (Docker
+# pulls a run's database image, pinned by digest, as the test user, through its own slirp4netns in that unit), and the
+# test-run helper's slirp4netns unit of a granted run or a fetch, as the test user (#545; never where the record says
+# dropped: there it is root's, outside the rule), whose own IPAddressDeny= keeps it to public addresses. A test run's own
+# units don't, and their processes can't move into Docker's cgroup: its parent, worklane-test.slice, is root's. The
+# egress CI job asserts that a plain test-user unit's write of its own pid there is refused; a run's own /sys/fs/cgroup
+# is read-only too (ProtectControlGroups=; inferred, not run). They do share Docker's uid, though: where a run has no
+# user namespace of its own (#545) it can drive Docker's processes: docs/test-runs.md, "Known gap".
 # WHY test users only with --with-test-users on a systemd older than 255: NFTSet= came in 255, so there nothing fills
 # the set and Docker couldn't pull; apply says so. With the flag they're covered there anyway, and Docker can't pull.
 # WHY no exception where this install's rule already covered test users without one (apply --with-test-users before
