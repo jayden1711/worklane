@@ -1597,6 +1597,32 @@ test("the first-run page: every setup step checked live, grouped, done or not do
   assert.doesNotMatch(r.renderFirstRunPage(asOwner), /first-run-refused/);
 });
 
+/** A local first run with each step before Start set done (or not), Start itself and every step after it not done. */
+function beforeStart(done: (id: string) => boolean) {
+  const f = firstRun(join(tmpdir(), 'no-such-init.json'), { root: '/r', repo: 'example-org/example-shop', instance: null });
+  const ids = f.setup!.groups.flatMap((g) => g.steps.map((s) => s.id));
+  const at = ids.indexOf('service');
+  assert.ok(at > 0 && ids.indexOf('first-task') > at, 'Start comes before Your first task, in screen order');
+  const before = new Set(ids.slice(0, at));
+  return { ...f, setup: { ...f.setup!, groups: f.setup!.groups.map((g) => ({ ...g, steps: g.steps.map((s) => ({ ...s, done: before.has(s.id) ? done(s.id) : false })) })) } };
+}
+const START_WARNING = /required steps? (isn(&#x27;|')t|aren(&#x27;|')t) done yet: the coordinator may stop at/;
+
+test('#741 the Start card counts only the steps before Start: every one of them done and Your first task not, it warns of nothing', () => {
+  const f = beforeStart(() => true);
+  const html = r.renderFirstRun(f);
+  assert.match(html, /data-step="first-task" data-status="todo"/, 'Your first task is not done');
+  assert.match(html, /data-testid="first-run-start-button"/);
+  assert.doesNotMatch(html, START_WARNING, 'a step that comes after Start is not one the coordinator stops at');
+});
+
+test('#741 the Start card still warns of a required step before Start that is not done, as before', () => {
+  const f = beforeStart((id) => id !== 'claude-login');
+  const html = r.renderFirstRun(f);
+  const start = html.slice(html.indexOf('data-testid="first-run-start"'));
+  assert.match(start, /1 required step isn(&#x27;|')t done yet: the coordinator may stop at it\./, 'Claude login, before Start, counts; Your first task, after it, does not');
+});
+
 test("the first-run page, a Fix the dashboard does itself: its plan shown first, then a confirmation; the owners only; why not, where it can't run", () => {
   const f = firstRun(join(tmpdir(), 'no-such-init.json'), { root: '/r', repo: 'example-org/example-shop', instance: null });
   const plans = {
