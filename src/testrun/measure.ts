@@ -21,6 +21,7 @@ import { checkHelper } from './helper.js';
 import type { RunHost } from './host.js';
 import { FULL_RUN_LOCK, runTestRun, type TestRunResult } from './run.js';
 import { testSlotsHeld } from './slots.js';
+import type { SlotPathLike } from '../slot-file.js';
 import { testRunStatus } from './status.js';
 
 /** A measure request refused before anything started. The message says why; nothing was made or called. */
@@ -89,7 +90,7 @@ export function planMeasure(c: TestRunConfig, req: { sha: string; tiers: string[
  * Why the machine isn't quiet enough to measure, or null when it is: a test run of this instance queued or running
  * (from its event log), any test slot held on the machine, or the full-run lock held (or a holder this can't rule out).
  */
-export function busyReason(events: readonly StoredEvent[], o: { slotsDir?: string; lockPath?: string } = {}): string | null {
+export function busyReason(events: readonly StoredEvent[], o: { slotsDir?: SlotPathLike; lockPath?: string } = {}): string | null {
   const st = testRunStatus(events);
   const inFlight = [...st.queue, ...st.running];
   if (inFlight.length) return `this instance has ${inFlight.length} test run(s) in flight (${inFlight.map((r) => `${r.id} ${r.state}`).join(', ')})`;
@@ -157,7 +158,7 @@ export interface MeasureDeps {
   logDir: string;
   sparseExclude?: readonly string[];
   lockPath?: string;
-  slotsDir?: string;
+  slotsDir?: SlotPathLike;
   slotPollMs?: number;
   lock?: (path: string, signal?: AbortSignal) => Promise<HeldFlock>;
   now?: () => number;

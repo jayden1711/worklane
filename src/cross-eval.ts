@@ -5,6 +5,7 @@
 // when the two verdicts disagree the change waits for a human with both reasons; it never approves anything. A change
 // that touches held-out eval cases or secrets is never sent to another provider. Pure: the coordinator runs it.
 import { providerOf } from './providers.js';
+import { shownPaths } from './path-text.js';
 
 export const CROSS_FAMILY_OFF = 'off';
 
@@ -32,9 +33,9 @@ const NEVER_SENT = /(^|\/)evals\/held-out\//;
  */
 export function crossFamilySkip(o: { paths: string[]; categories: Record<string, string[]> }): string | null {
   const held = o.paths.filter((p) => NEVER_SENT.test(p));
-  if (held.length) return `it touches held-out eval cases (${held.slice(0, 3).join(', ')}), which are never sent to another provider`;
+  if (held.length) return `it touches held-out eval cases (${shownPaths(held.slice(0, 3))}), which are never sent to another provider`;
   const secrets = o.categories.secrets ?? [];
-  if (secrets.length) return `it touches secrets (${secrets.slice(0, 3).join(', ')}), which are never sent to another provider`;
+  if (secrets.length) return `it touches secrets (${shownPaths(secrets.slice(0, 3))}), which are never sent to another provider`;
   return null;
 }
 

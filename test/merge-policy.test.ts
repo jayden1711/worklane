@@ -387,6 +387,7 @@ test("regression: a tests-only change to the tests' own machine, the slot-write 
     'test/isolate.ts',
     'test/isolate.test.ts',
     'test/slot-dir-writes.test.ts',
+    'test/slot-path.test.ts',
     'test/eval-roles.test.ts',
     'test/research.test.ts',
     'test/discord-chat.test.ts',

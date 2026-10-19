@@ -4,7 +4,8 @@
 // kill switch is off or auto-merge is stopped. "Ready" (required checks green
 // on the exact evaluated commit, evaluator approved) is decided before this.
 import { BRAND } from './brand.js';
-import { AGENT_INSTRUCTIONS, LOCKED_CATEGORIES, SELF_MODIFICATION, selfModificationPart, type LevelResult } from './review.js';
+import { shownPath } from './path-text.js';
+import { AGENT_INSTRUCTIONS, CONTROL_CHARACTER_PATH, DIFF_HIDING_ATTRIBUTES, INVISIBLE_CHARACTER_PATH, LOCKED_CATEGORIES, NON_ASCII_TOP_LEVEL_PATH, NON_UTF8_PATH, ODD_PATH_CATEGORIES, SELF_MODIFICATION, selfModificationPart, type LevelResult } from './review.js';
 
 export interface MergeVerdict {
   patch_correct: boolean;
@@ -93,8 +94,10 @@ export interface InstructionEvalResult {
 export function instructionEvalReasons(targets: string[], results: InstructionEvalResult[]): string[] {
   const out: string[] = [];
   const score = (s: { passed: number; total: number } | null) => (s ? `${s.passed}/${s.total}` : 'new');
-  for (const t of targets) {
-    const r = results.find((x) => x.target === t);
+  for (const target of targets) {
+    // A target names a role or skill by its changed path's folder: in a reason, as shownPath shows it (#683).
+    const t = shownPath(target);
+    const r = results.find((x) => x.target === target);
     if (!r) out.push(`eval: ${t} changed but was not evaluated`);
     else if (r.error) out.push(`eval: ${t} was not evaluated: ${r.error}`);
     else if (r.incomplete) out.push(`eval: ${t} is incomplete: the cost cap was reached (~$${r.cost_usd.toFixed(2)}), ${score(r.base)} → ${score(r.result)} on the cases that ran`);
@@ -102,7 +105,7 @@ export function instructionEvalReasons(targets: string[], results: InstructionEv
       const diff = r.changes.filter((c) => !(c.base === 'pass' && c.head === 'pass')).map((c) => `  - case ${c.id} "${c.title}": ${c.base} → ${c.head}`);
       out.push([`eval: ${t} scored lower, ${score(r.base)} → ${score(r.result)} (~$${r.cost_usd.toFixed(2)}):`, ...diff].join('\n'));
     }
-    if (!r || r.error || !t.startsWith('role ')) continue;
+    if (!r || r.error || !target.startsWith('role ')) continue;
     // A role's held-out score decides: without it, or with it incomplete or lower, the change waits.
     const h = r.held_out;
     if (!h) out.push(`eval: ${t} has no held-out score${r.held_out_error ? `: ${r.held_out_error}` : ' (the visible score alone never passes a role change)'}`);
@@ -145,20 +148,35 @@ const CATEGORY_WORDS: Record<string, string> = {
   migration: 'changes a database migration',
   'money-path': 'touches the money path',
   'deletes-data': 'deletes data',
+  [CONTROL_CHARACTER_PATH]: 'has a path with a control character',
+  [NON_UTF8_PATH]: "has a path that isn't valid UTF-8",
+  [INVISIBLE_CHARACTER_PATH]: 'has a path with an invisible or format character',
+  [NON_ASCII_TOP_LEVEL_PATH]: "has a top-level name that isn't ASCII",
+  [DIFF_HIDING_ATTRIBUTES]: 'changes a .gitattributes or .gitmodules in a way that can hide what a review sees (-diff, binary, linguist-generated, a filter, an encoding, a diff driver, a macro, a submodule ignore)',
 };
 
-const paths = (p: string[]) => `${p.slice(0, 3).join(', ')}${p.length > 3 ? ` and ${p.length - 3} more` : ''}`;
+/** A path as a reason shows it: src/path-text.ts shownPath, the one rule every reason, event and comment uses. */
+const shown = shownPath;
+const paths = (p: string[]) => `${p.slice(0, 3).map(shown).join(', ')}${p.length > 3 ? ` and ${p.length - 3} more` : ''}`;
+
+/**
+ * The floor: the locked categories, and a path with a control character, one that isn't valid UTF-8, one with an
+ * invisible or format character, or one whose top-level name isn't ASCII (review.ts ODD_PATH_CATEGORIES), and a
+ * .gitattributes mark that hides a file's diff (review.ts DIFF_HIDING_ATTRIBUTES), whatever any list says.
+ */
+const FLOOR = [...Object.keys(LOCKED_CATEGORIES), ...ODD_PATH_CATEGORIES, DIFF_HIDING_ATTRIBUTES];
 
 /**
  * The categories that always wait for a human: review.yaml's L3, CI config, the agents' own instructions (built in;
- * no review.yaml removes it), and the repo's merge.wait_categories.
+ * no review.yaml removes it), the odd paths (review.ts ODD_PATH_CATEGORIES: a control character, not valid UTF-8, an
+ * invisible or format character, a top-level name that isn't ASCII), and the repo's merge.wait_categories.
  */
 export function waitCategoriesOf(review: { levels: { L3_human: { when: string[] } }; merge: { wait_categories: string[] } }): string[] {
-  return [...new Set([...review.levels.L3_human.when, 'ci-config', ...Object.keys(LOCKED_CATEGORIES), ...review.merge.wait_categories])];
+  return [...new Set([...review.levels.L3_human.when, 'ci-config', ...FLOOR, ...review.merge.wait_categories])];
 }
 
-/** The categories a change waits on: the caller's list plus the locked ones (the floor, whatever list a caller passes). */
-const waitingOn = (waitCategories: string[]) => new Set([...waitCategories, ...Object.keys(LOCKED_CATEGORIES)]);
+/** The categories a change waits on: the caller's list plus the floor (whatever list a caller passes). */
+const waitingOn = (waitCategories: string[]) => new Set([...waitCategories, ...FLOOR]);
 
 /**
  * Why a change is high-risk, plainly, one line per category it touches, naming the first file in it: "changes the
@@ -172,7 +190,7 @@ export function whyHighRisk(o: { level: LevelResult; waitCategories: string[] })
     if (!hit?.length) continue;
     const first = hit[0]!;
     const words = c === SELF_MODIFICATION ? `changes ${selfModificationPart(first) ?? 'the harness itself'}` : (CATEGORY_WORDS[c] ?? `touches ${c}`);
-    out.push({ category: c, text: `${words}: ${first}${hit.length > 1 ? ` and ${hit.length - 1} more` : ''}` });
+    out.push({ category: c, text: `${words}: ${shown(first)}${hit.length > 1 ? ` and ${hit.length - 1} more` : ''}` });
   }
   return out;
 }

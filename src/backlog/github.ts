@@ -210,6 +210,9 @@ export class GitHubBacklog implements Backlog {
       ...(typeof p.body === 'string' ? { body: p.body } : {}),
       mergeable: p.mergeable ?? null,
       mergeableState: p.mergeable_state ?? 'unknown',
+      ...(p.merged && typeof p.merge_commit_sha === 'string' && p.merge_commit_sha ? { mergeCommit: p.merge_commit_sha } : {}),
+      ...(p.merged && p.merged_by?.login ? { mergedBy: { login: p.merged_by.login, bot: p.merged_by.type === 'Bot' || /\[bot\]$/.test(p.merged_by.login), ...(Number.isSafeInteger(p.merged_by.id) ? { id: p.merged_by.id! } : {}) } } : {}),
+      ...(p.merged && typeof p.merged_at === 'string' && p.merged_at ? { mergedAt: p.merged_at } : {}),
       ...(typeof p.additions === 'number' && typeof p.deletions === 'number'
         ? { stats: { additions: p.additions, deletions: p.deletions, files: p.changed_files ?? 0, comments: (p.comments ?? 0) + (p.review_comments ?? 0) } }
         : {}),
@@ -447,6 +450,9 @@ interface GhPull {
   draft?: boolean;
   state: string;
   merged?: boolean;
+  merge_commit_sha?: string | null;
+  merged_by?: { login?: string; type?: string; id?: number } | null;
+  merged_at?: string | null;
   title?: string;
   body?: string | null;
   mergeable?: boolean | null;

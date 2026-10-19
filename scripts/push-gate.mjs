@@ -51,7 +51,9 @@ function targets(argv) {
 function addedLines(sha) {
   const byFile = new Map();
   let file = null;
-  for (const l of git('show', '--format=', '-U0', '--no-color', '--no-ext-diff', '--no-renames', sha).split('\n')) {
+  // WHY: read as text whatever the attributes say: a `-diff` or `binary` mark in the pushed .gitattributes printed
+  // "Binary files differ", so a file added and deleted again within the push was never scanned (#693).
+  for (const l of git('-c', 'core.attributesFile=/dev/null', 'show', '--format=', '-U0', '--no-color', '--no-ext-diff', '--no-textconv', '--text', '--no-renames', sha).split('\n')) {
     if (l.startsWith('+++ ')) file = l === '+++ /dev/null' ? null : l.slice(6);
     else if (file && l.startsWith('+') && !SKIP.has(file)) byFile.set(file, `${byFile.get(file) ?? ''}${l.slice(1)}\n`);
   }

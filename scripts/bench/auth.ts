@@ -52,14 +52,29 @@ export function requireBenchUser(env: NodeJS.ProcessEnv = process.env, me: strin
   return user;
 }
 
-/** The environment the bench's own claude probes (auth status, --version) run with. */
-export const cliEnv = (env: NodeJS.ProcessEnv): NodeJS.ProcessEnv => ({ ...env, ...CLAUDE_ENV });
+/**
+ * Variables that reach this user's Docker daemon or its user services. The bench user's daemon can mount anything
+ * that user can read, its login included: never in an agent's or a probe's environment.
+ */
+export const DAEMON_VAR = /^(DOCKER_.*|XDG_RUNTIME_DIR|DBUS_SESSION_BUS_ADDRESS|CONTAINER_HOST)$/;
 
-/** The bench's agents: every run gets CLAUDE_ENV on top of its own variables. */
+/** The environment agents and probes are built on: this one without any way to the daemon or the user bus. */
+export function agentBase(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  return Object.fromEntries(Object.entries(env).filter(([k]) => !DAEMON_VAR.test(k)));
+}
+
+/** The environment the bench's own claude probes (auth status, --version) run with. */
+export const cliEnv = (env: NodeJS.ProcessEnv): NodeJS.ProcessEnv => ({ ...agentBase(env), ...CLAUDE_ENV });
+
+/**
+ * The bench's agents: every run gets CLAUDE_ENV, and a request's own variables never name the daemon. The inner
+ * runner is built on agentBase (agent.ts benchClaude; the engine's agentEnv keeps only its pass-through list).
+ */
 export class BenchAgentRunner implements AgentRunner {
   constructor(private inner: AgentRunner) {}
   run(req: RunRequest): Promise<RunResult> {
-    return this.inner.run({ ...req, env: { ...(req.env ?? {}), ...CLAUDE_ENV } });
+    const own = Object.fromEntries(Object.entries(req.env ?? {}).filter(([k]) => !DAEMON_VAR.test(k)));
+    return this.inner.run({ ...req, env: { ...own, ...CLAUDE_ENV } });
   }
 }
 
