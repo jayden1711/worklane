@@ -263,6 +263,8 @@ const STILL_LOCKED: [string, string][] = [
   // the coordinator's checkout), and the intake's trust and draft checks that the locked intake decision takes as input.
   ['src/stage-label.ts', 'what an agent run is given'], ['src/intake/triage.ts', 'what an agent run is given'],
   ['src/intake/report.ts', 'who may approve'],
+  // candidates() bounds which issue the untrusted intake agent may name; the locked intake decision relies on it.
+  ['src/intake/dedupe.ts', 'who may approve'],
   ['src/events/redact.ts', 'sign-in, credentials or secrets'],
   ['src/runner.ts', 'the evaluator and the agent runner'], ['src/sandbox.ts', 'the sandbox and test runs'],
 ];

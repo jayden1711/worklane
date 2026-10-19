@@ -337,9 +337,10 @@ export const SELF_MODIFICATION_PARTS: { what: string; globs: string[] }[] = [
   // src/events/redact.ts: the secret redaction of everything stored and of every chat reply (locked with the guard's
   // tree before #785, which no longer reaches it).
   { what: 'sign-in, credentials or secrets', globs: ['src/dashboard-auth*', 'src/github-app*', 'src/github-scope*', 'src/**/*secret*', 'src/console/terminal*', 'src/setup/app-manifest*', 'src/events/redact.ts'] },
-  // src/intake/report.ts: isTrusted and isAllowed, the intake's trust and admission inputs to src/intake/decide.ts
-  // (locked with the guard's tree before #785, which no longer reaches it).
-  { what: 'who may approve', globs: ['src/decide.ts', 'src/intake/decide.ts', 'src/intake/people.ts', 'src/machine-owners.ts', 'src/intake/report.ts'] },
+  // src/intake/report.ts: isTrusted and isAllowed, the intake's trust and admission inputs to src/intake/decide.ts;
+  // src/intake/dedupe.ts: candidates(), the bound on which issue the intake agent may name, which decide.ts relies on
+  // (both locked with the guard's tree before #785, which no longer reaches them).
+  { what: 'who may approve', globs: ['src/decide.ts', 'src/intake/decide.ts', 'src/intake/people.ts', 'src/machine-owners.ts', 'src/intake/report.ts', 'src/intake/dedupe.ts'] },
   // WHY: before this, these were the owner's call only where a repo's own review.yaml listed them (the engine's does, as
   // `engine`); a repo whose review.yaml didn't would have merged a change to the evaluator or the denylist on its own.
   { what: 'the evaluator and the agent runner', globs: ['src/roles.ts', 'src/coordinator.ts', 'src/runner.ts'] },
