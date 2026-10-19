@@ -15,8 +15,9 @@
 // latest run (by workflow run, then check run) and its newest check run must pass, so a later run of that file
 // supersedes its earlier failed or cancelled runs, but one file never supersedes another, and a re-run that failed
 // after a newer run passed still blocks. A pin to an App that isn't Actions can't be split by file, so every one of that
-// App's check runs of the name on the head must pass (GitHub's latest per check suite: a re-run in the same suite
-// replaces its failure; a second suite's failure blocks). Every check of its name from any OTHER source must pass too
+// App's check runs of the name on the head must pass, as GitHub lists them: the latest per check suite, so any later
+// same-name run that App puts in the same suite replaces the earlier one (a re-run, or a second pipeline of that App
+// on the same commit: the listing can't tell them apart), while a failure in another suite blocks. Every check of its name from any OTHER source must pass too
 // (another App, another workflow, a run for another head, a commit status). The one way this is looser than judging by
 // name: a pinned workflow file's later run on the head supersedes its own earlier failed or cancelled runs (the owner's
 // decision). Readiness and the main watch judge a pinned name through one function, pinnedVerdict, over the same
@@ -29,9 +30,11 @@
 // takes JudgedChecks, and readiness and requiredOutcomes check at run time that their input was made here
 // (assertJudged: a module-private WeakSet, the array and its checks frozen), so a cast, an `any` or a mutated array
 // throws. The one maker is PinnedChecks: it reads its facts itself, from the backlog and (under No CI) the event log it
-// is built over, and takes no checks, runs or events from a caller. test/raw-check-reads.ts flags any src/ use of it
-// outside merge-flow.ts (by the compiler's module resolution: re-exports, namespaces, dynamic imports, require), and
-// every cast or raw read around it (a lint: a stand-in backlog is the route left).
+// is built over, and takes no checks, runs or events from a caller. test/raw-check-reads.ts (makerUses) flags the
+// src/ routes to it outside merge-flow.ts that it lists (a name through any alias or barrel, export *, namespace and
+// dynamic imports, require(), a createRequire named as such), and every cast or raw read around it. A lint, with named
+// gaps: a PinnedChecks over a stand-in backlog (e7) reached by createRequire through a computed key, by
+// process.getBuiltinModule, by an import inside new Function, or by `this.pinned.constructor` in a subclass (m11-m14).
 import type { Backlog, CommitCheck } from './backlog/types.js';
 import { ciIsNone, localRunChecks, testRunCheckNames } from './ci-none.js';
 import type { ProjectConfig, TestsConfig } from './config/schema.js';
@@ -138,8 +141,8 @@ function worst<C extends Pick<CommitCheck, 'id' | 'status' | 'conclusion'>>(bad:
  * (one whose workflow run can't be read is a group of its own); every run of an App that isn't Actions in one group.
  * - A file's group: both the latest run (latestOwn) and the newest check run (the highest id: a re-run of an older
  *   workflow run is newer) must pass. One file never supersedes another, and a later re-run that failed blocks.
- * - The App group: every check run must pass (it can't be split by file, so no run of it supersedes another; a re-run
- *   GitHub lists in place of a failure, in the same check suite, is the one there is).
+ * - The App group: every check run listed must pass (it can't be split by file). GitHub lists the latest per check
+ *   suite, so a later same-name run the App puts in the same suite (a re-run or a second pipeline) replaces the earlier.
  * Returns the run that decides: a run that isn't a pass (worst), else the latest of all; undefined when there is none.
  */
 export function ownVerdict<C extends Pick<CommitCheck, 'id' | 'workflow' | 'status' | 'conclusion'>>(own: readonly C[]): C | undefined {
