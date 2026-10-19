@@ -721,9 +721,15 @@ test('regression: a run\'s ${...} is bash\'s, never systemd-run\'s (--expand-env
   const exec = src.slice(src.indexOf('exec_run() {'), src.indexOf('\n}\n', src.indexOf('exec_run() {')));
   assert.ok(exec.includes('cmd="$(systemd_command "$(systemd_version)" "$2")"'));
   assert.ok(exec.includes('  local -a run=(systemd-run --wait --pipe --collect ${noexpand[@]+"${noexpand[@]}"}'));
-  assert.ok(exec.includes('    /bin/bash -o pipefail -c "$cmd")\n'), 'the command goes as systemd_command made it');
+  assert.ok(exec.includes('    ${USERNS_ARGV[@]+"${USERNS_ARGV[@]}"} ${load[@]+"${load[@]}"} /bin/bash -o pipefail -c "$cmd")\n'), 'the command goes as systemd_command made it');
+  // The run's own user namespace's wrapper (#545) before it: its script goes through systemd_command too.
+  assert.ok(exec.includes('if userns_ok; then own=1; userns_argv "$(systemd_version)"; fi'));
+  const ua = src.slice(src.indexOf('userns_argv() {'), src.indexOf('\n}\n', src.indexOf('userns_argv() {')));
+  assert.match(ua, /s="\$\(systemd_command "\$v" /);
   // Run as built, on both paths (a GPU command's in the background, so a TERM can stop its unit first).
-  assert.ok(exec.includes('    "${run[@]}" || rc=$?\n') && exec.includes('    "${run[@]}" &\n'));
+  // Its stdin is /dev/null, or (#545 round 4, with the wrapper) the run's variables for the loader after setpriv.
+  assert.ok(exec.includes('    "${run[@]}" < "$stdin_file" || rc=$?\n') && exec.includes('    "${run[@]}" < "$stdin_file" &\n'));
+  assert.ok(exec.includes('  local stdin_file=/dev/null\n'));
 });
 
 test('a directory left out: the helper takes exactly what the engine\'s config takes', { skip: !posix && 'bash' }, () => {
