@@ -301,8 +301,9 @@ valid_env() {
   # glibc's unsafe-environment list (what it ignores for a setuid program: these steer its loader, gconv, locales,
   # malloc, resolver and time zones), libmount's own, and LANGUAGE. WHY (round 4): no step of a run that holds a
   # capability ever gets a run's variable (USERNS_LOAD); this keeps them out besides. LANG, LC_* and TZ stay a run's to
-  # set here, as before (the engine refuses them for a project; a test keeps TZ=UTC accepted): they name a locale or a
-  # zone, not a path, and reach no privileged step anyway.
+  # set here, as before, though glibc reads TZ (TZ=/path, TZ=:/path) as a file: by design no step that holds a
+  # capability gets them (the loader runs after setpriv), the engine refuses them for a project (projectEnvProblem),
+  # and an existing test keeps TZ=UTC accepted here.
   if [[ "$k" =~ ^(GCONV_PATH|GETCONF_DIR|GLIBC_TUNABLES|HOSTALIASES|LOCALDOMAIN|LOCPATH|MALLOC_.*|NIS_PATH|NLSPATH|RESOLV_HOST_CONF|RES_OPTIONS|TZDIR|LIBMOUNT_.*|LANGUAGE)$ ]]; then die "--env $k: steers the C library or libmount, never a run's to set"; fi
   if [ "$k" != DATABASE_URL ] && [[ "$(printf %s "$k" | tr '[:lower:]' '[:upper:]')" =~ TOKEN|SECRET|PASSW|API_?KEY|PRIVATE_?KEY|CREDENTIAL|AUTH|COOKIE ]]; then die "--env $k: looks like a secret; a test run gets none"; fi
 }
