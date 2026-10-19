@@ -225,7 +225,7 @@ export const renderTestRuns = (data: TestRunsData, compact = false) => renderToS
 export { elapsed } from './pages/Board';
 export const renderSetup = (data: AsksView) => renderToStaticMarkup(<SetupConsoleView data={data} />);
 export const renderAddProject = (data: AddProjectData, picker?: RepoPickerData | null) => renderToStaticMarkup(<AddProjectView data={data} picker={picker === undefined ? null : picker} />);
-export { addProjectInvalid } from './api';
+export { addProjectInvalid, CLAUDE_CREDENTIAL_NAMES, isClaudeCredential } from './api';
 /** The Claude account panel; `scope`: the hub page's instance scope, as ClaudeAccountPanel passes it (absent: off a hub). */
 export const renderClaudeAccount = (data: ClaudeAccountData, now?: number, scope?: InstanceScope | null) => renderToStaticMarkup(<ClaudeAccountView data={data} scope={scope ?? null} {...(now !== undefined ? { now } : {})} />);
 /** What the Machine page shows anyone the Claude account panel refuses: whether an account is set, from their state. */

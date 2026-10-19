@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { addProject, addProjectInvalid, answerAsk, apiPath, getAddProject, getAddProjectRepos, getAsks, openSetupLink, pasteSecret, pendingSetupLink, runRootStep, liveStream, type AddProjectData, type AddProjectRun, type AddProjectStep, type Ask, type AsksView, type RepoPickerData } from '../api';
+import { addProject, addProjectInvalid, answerAsk, apiPath, getAddProject, getAddProjectRepos, getAsks, isClaudeCredential, openSetupLink, pasteSecret, pendingSetupLink, runRootStep, liveStream, type AddProjectData, type AddProjectRun, type AddProjectStep, type Ask, type AsksView, type RepoPickerData } from '../api';
 import { ago, Badge, Button, Card, cx, Empty } from '../components/ui';
 import { navigate } from '../App';
 import { Header } from '../components/Header';
@@ -19,6 +19,8 @@ function Status({ a }: { a: Ask }) {
 export function SecretForm({ a, onDone }: { a: Ask & { kind: 'paste_secret' }; onDone: (err: string | null) => void }) {
   const field = useRef<HTMLInputElement>(null);
   const [busy, setBusy] = useState(false);
+  // Never a box for a Claude credential, whoever draws this form (issue #711).
+  if (isClaudeCredential(a.credential)) return null;
   const send = async () => {
     const el = field.current;
     if (!el || !el.value) return;
@@ -49,6 +51,25 @@ export function SecretForm({ a, onDone }: { a: Ask & { kind: 'paste_secret' }; o
   );
 }
 
+/**
+ * An ask for a Claude credential, left open by an earlier version (add-project's claude-token): this page never takes
+ * one (issue #711), so it names what a root admin runs on the machine instead, the same commands as Sign in to Claude.
+ */
+function ClaudeLoginRoot({ instance, open }: { instance: string; open: boolean }) {
+  const code = 'block overflow-x-auto whitespace-pre font-mono text-[12px] text-ink';
+  const agent = `wl-${instance}-agent`;
+  return (
+    <div className="mt-1.5 space-y-1.5 text-[12px] text-ink-3" data-testid="ask-claude-root">
+      <p>{`This page never takes a Claude credential${open ? ', so there is nothing to paste here' : ''}. A root admin installs the agents' Claude login on the machine: either sign in as ${agent}, through Anthropic's own page,`}</p>
+      <code className={code} data-testid="ask-claude-login-command">{`sudo -u ${agent} -i claude auth login`}</code>
+      <p>
+        or run <code>claude setup-token</code> on a machine signed in to the account the agents should use, then paste what it prints at the hidden prompt of (from the engine's folder):
+      </p>
+      <code className={code} data-testid="ask-claude-credentials-command">{`sudo bash scripts/setup/credentials.sh ${instance} claude`}</code>
+    </div>
+  );
+}
+
 /** One ask: what it needs, its status, and, when this person may answer it, how. */
 export function AskCard({ a, onChanged }: { a: Ask; onChanged?: () => void }) {
   const [err, setErr] = useState<string | null>(null);
@@ -66,6 +87,7 @@ export function AskCard({ a, onChanged }: { a: Ask; onChanged?: () => void }) {
     }
   };
   const can = a.status === 'open' && a.canAnswer;
+  const claude = a.kind === 'paste_secret' && isClaudeCredential(a.credential);
   return (
     <Card className="p-4" data-testid="ask-card" data-ask={a.id} data-status={a.status}>
       <div className="flex flex-wrap items-center gap-2 text-[12px] text-ink-3">
@@ -76,7 +98,8 @@ export function AskCard({ a, onChanged }: { a: Ask; onChanged?: () => void }) {
       </div>
       <div className="mt-2 text-[14px] font-medium text-ink">{a.title}</div>
       <p className="mt-1 whitespace-pre-wrap text-[13px] leading-relaxed text-ink-2">{a.detail}</p>
-      {a.kind === 'paste_secret' && (
+      {a.kind === 'paste_secret' && claude && <ClaudeLoginRoot instance={a.instance} open={a.status === 'open'} />}
+      {a.kind === 'paste_secret' && !claude && (
         <p className="mt-1.5 text-[12px] text-ink-3">
           Credential <code>{a.credential}</code>, for {a.where}. It goes to this instance's credential store (0400, its coordinator user only) and is never shown again.
         </p>
@@ -95,7 +118,7 @@ export function AskCard({ a, onChanged }: { a: Ask; onChanged?: () => void }) {
           {a.request && a.status === 'open' && <span className="mt-1 block" data-testid="ask-request">Machine request: {a.request.status === 'pending' ? 'waiting for the coordinator' : a.request.status}{a.request.detail ? ` (${a.request.detail})` : ''}</span>}
         </p>
       )}
-      {can && a.kind === 'paste_secret' && <SecretForm a={a} onDone={(e) => (e ? setErr(e) : onChanged?.())} />}
+      {can && a.kind === 'paste_secret' && !claude && <SecretForm a={a} onDone={(e) => (e ? setErr(e) : onChanged?.())} />}
       {can && a.kind === 'approve_link' && (
         <div className="mt-3 flex gap-2">
           <Button size="sm" disabled={!!busy} onClick={() => void act('approved', () => answerAsk(a.id, 'approved'))}>
@@ -125,7 +148,7 @@ export function AskCard({ a, onChanged }: { a: Ask; onChanged?: () => void }) {
           </Button>
         </div>
       )}
-      {a.status === 'open' && !a.canAnswer && <p className="mt-2 text-[12px] text-ink-3">Waiting on the owner{a.kind === 'question' && a.writersMayAnswer ? ' or a writer' : ''}.</p>}
+      {a.status === 'open' && !a.canAnswer && !claude && <p className="mt-2 text-[12px] text-ink-3">Waiting on the owner{a.kind === 'question' && a.writersMayAnswer ? ' or a writer' : ''}.</p>}
       {a.answer && (
         <p className="mt-2 text-[12px] text-ink-3" data-testid="ask-answered">
           {a.answer.answer} by @{a.answer.by} ({a.answer.role}) {ago(a.answer.at)}
@@ -140,7 +163,7 @@ export function AskCard({ a, onChanged }: { a: Ask; onChanged?: () => void }) {
 const STEP_LABEL: Record<string, string> = {
   instance: 'Instance users and folders',
   app: 'GitHub App (create, then install)',
-  'claude-token': "The agent's Claude token",
+  'claude-token': "The agent's Claude login (root installs it on the machine)",
   checkout: 'Checkout of the repo',
   policy: 'Default policy',
   service: 'Coordinator service',
