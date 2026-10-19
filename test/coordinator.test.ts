@@ -2566,6 +2566,8 @@ test('auto-merge stop: main red after an auto-merge (green before it) stops auto
   // Survives a restart: a new coordinator still sees the stop.
   const again = new Coordinator({ cfg: t.f.cfg, log: t.f.log, backlog: t.f.backlog, runner: agents(), repo: t.f.repo, instance: 'alice', stateDir: t.f.stateDir, slotsDir: t.f.slotsDir, machine: t.f.machine, prPollMs: 0, autoMerge: () => true });
   assert.ok(again.autoMergeStopped());
+  // Precondition (#776): main is green on its tip again before the operator's hand deletion resumes it.
+  t.f.backlog.setChecks(git(t.f.repo, 'ls-remote', 'origin', 'refs/heads/main').split('\t')[0]!, passing);
   rmSync(join(t.f.stateDir, 'auto-merge-stopped.json'));
   await again.tick();
   assert.ok(t.f.log.read(0, ['merge.resumed']).length === 1, 'the operator cleared it');

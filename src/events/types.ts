@@ -668,8 +668,9 @@ export const EventSchemas = {
   /**
    * Auto-merge stopped for this instance (until an admin resumes it); `revert` is the revert PR, if one was opened. `by`:
    * what stopped it (src/auto-merge-resume.ts; absent on older events, which wait for green main as these do).
+   * `restored`: the stop file was deleted by hand while main wasn't green, so it was written back, and why.
    */
-  'merge.stopped': z.strictObject({ reason: z.string(), number: z.number().int().positive().nullable(), sha: sha.nullable(), revert: z.string().nullable(), by: z.enum(['red_main', 'main_watch', 'owner']).optional() }),
+  'merge.stopped': z.strictObject({ reason: z.string(), number: z.number().int().positive().nullable(), sha: sha.nullable(), revert: z.string().nullable(), by: z.enum(['red_main', 'main_watch', 'owner']).optional(), restored: z.string().optional() }),
   'merge.resumed': z.strictObject({ detail: z.string() }),
   /**
    * Main watch (src/main-watch.ts): how the default branch is guarded. github: GitHub enforces its protection;

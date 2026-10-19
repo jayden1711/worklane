@@ -41,6 +41,7 @@ import { lit, reviewPacket, type PacketInput } from './review-packet.js';
 import { MERGEABLE_RECHECK_MS, TIP_CHECK_MS, DEFAULT_REVIEW, lockScopeOf } from './shared.js';
 import { LIGHT_PENDING_CAP, MAIN_CHECKS_MIN_POLLS, MAIN_CHECKS_TIMEOUT_MS, MERGEABLE_CAP, PollCounter, pollsFor } from './wait-caps.js';
 import { ATTEMPT_EVENTS, failedTries, openAttempt, reconcileMerge } from '../merge-policy-reconcile.js';
+import { measureMain, stopWaitsForGreen, type MainState } from '../auto-merge-resume.js';
 
 export abstract class MergeFlow extends FixRuns {
   /** Defined in a later part (or in Coordinator); declared here for the calls in this one. */
@@ -361,7 +362,13 @@ export abstract class MergeFlow extends FixRuns {
 
   /** Why auto-merge is stopped for this instance, or null. Persisted in a file only the operator clears. */
   autoMergeStopped(): string | null {
-    if (!existsSync(this.stopFile)) return null;
+    if (!existsSync(this.stopFile)) {
+      // #776: a stop the default branch caused, its file deleted by hand, holds until watchMerges logs merge.resumed
+      // (main measured green) or writes it back; nothing merges in between, whatever step runs first.
+      const last = this.d.log.read(0, ['merge.stopped', 'merge.resumed']).at(-1);
+      if (last?.type !== 'merge.stopped' || !stopWaitsForGreen((last.payload as EventPayload<'merge.stopped'>).by)) return null;
+      return `the stop file was deleted by hand; auto-merge stays stopped until ${this.branch} is measured green on its tip (${(last.payload as EventPayload<'merge.stopped'>).reason})`;
+    }
     try {
       return String((JSON.parse(readFileSync(this.stopFile, 'utf8')) as { reason?: string }).reason ?? 'stopped');
     } catch {
@@ -828,7 +835,7 @@ export abstract class MergeFlow extends FixRuns {
    */
   protected async watchMerges() {
     const stopped = this.d.log.read(0, ['merge.stopped', 'merge.resumed']).at(-1);
-    if (stopped?.type === 'merge.stopped' && !existsSync(this.stopFile)) this.emit('merge.resumed', { detail: 'the operator cleared the stop' });
+    if (stopped?.type === 'merge.stopped' && !existsSync(this.stopFile)) await this.stopGoneByHand(stopped.id, stopped.payload as EventPayload<'merge.stopped'>);
     const judged = new Set(this.d.log.read(0, ['merge.main_result']).map((e) => (e.payload as { sha: string }).sha));
     const now = Date.now();
     for (const e of this.d.log.read(0, ['merge.done'])) {
@@ -914,6 +921,37 @@ export abstract class MergeFlow extends FixRuns {
   private stopFor(reason: string, number: number | null, sha: string, revert: string | null) {
     writeGroupOnly(this.stopFile, JSON.stringify({ reason, by: 'red_main', number, sha, revert, at: new Date().toISOString() }, null, 2));
     this.emit('merge.stopped', { reason, number, sha, revert, by: 'red_main' });
+  }
+
+  /** The default branch's required checks on its tip now (src/auto-merge-resume.ts): what a stop waits for. */
+  private async mainNow(): Promise<MainState> {
+    return measureMain({
+      branch: this.branch,
+      required: this.requiredChecks(),
+      tip: () => {
+        const r = spawnSync('git', ['ls-remote', this.remote, `refs/heads/${this.branch}`], { cwd: this.d.repo, encoding: 'utf8' });
+        return r.status === 0 ? (r.stdout.split(/\s/)[0] ?? null) : null;
+      },
+      checks: (sha) => this.headChecksOf(sha),
+    });
+  }
+
+  /**
+   * The stop file is gone and no resume was logged: deleted by hand (#776). A stop the default branch caused waits for
+   * green main on every surface, so it is written back (`restored`) unless main's required checks are green on its tip
+   * now; the dashboard's acknowledgement is the way past a main that isn't. Any other stop resumes as before.
+   */
+  private async stopGoneByHand(id: number, p: EventPayload<'merge.stopped'>) {
+    if (!stopWaitsForGreen(p.by)) return this.emit('merge.resumed', { detail: 'the operator cleared the stop' });
+    const main = await this.mainNow();
+    // The dashboard removes the file before it logs merge.resumed: a resume (or a new stop) since means it wasn't a hand.
+    const last = this.d.log.read(0, ['merge.stopped', 'merge.resumed']).at(-1);
+    if (last?.id !== id || existsSync(this.stopFile)) return;
+    if (main.green) return this.emit('merge.resumed', { detail: `the operator cleared the stop by hand, with ${this.branch} green on ${main.tip.slice(0, 8)}` });
+    const by = p.by ?? (p.reason.startsWith('main watch: ') ? 'main_watch' : 'red_main');
+    const restored = `the stop file was deleted by hand while ${main.why}, so it was written back; an admin resumes on the dashboard once ${this.branch} is green, or with an acknowledgement there`;
+    writeGroupOnly(this.stopFile, JSON.stringify({ reason: p.reason, by, number: p.number, sha: p.sha, revert: p.revert, at: new Date().toISOString(), restored }, null, 2));
+    this.emit('merge.stopped', { reason: p.reason, number: p.number, sha: p.sha, revert: p.revert, by, restored });
   }
 
   /**

@@ -220,6 +220,7 @@ const redMainStop = (w: ReturnType<typeof world>) => {
   (w.c as unknown as { stopFor(reason: string, n: number | null, sha: string, revert: string | null): void }).stopFor(`main's required checks failed (ci) on \`${tip.slice(0, 8)}\``, null, tip, null);
   return tip;
 };
+const watchMerges = (w: ReturnType<typeof world>) => (w.c as unknown as { watchMerges(): Promise<void> }).watchMerges();
 /** The last event of `type`, whole (its actor and time too). */
 const f776Last = (w: ReturnType<typeof world>, type: 'merge.resumed' | 'merge.stopped') => w.f.log.read(0, [type]).at(-1)!;
 
@@ -377,6 +378,59 @@ test('resume (#776): a stop changed while main is measured is not resumed: the n
   assert.match(!r.ok ? r.error : '', /the stop changed/);
   assert.match(readFileSync(stopFile(w.f), 'utf8'), /a newer commit/);
   assert.equal(of(w.f, 'merge.resumed').length, 0);
+});
+
+test('resume (#776): a stop file deleted by hand while main is still red is written back (same rule as the dashboard); with main green on its tip it resumes', async () => {
+  const w = world();
+  await w.watch(2);
+  const tip = redMainStop(w);
+  w.f.backlog.setChecks(tip, failing(4));
+  unlinkSync(stopFile(w.f));
+  // Before the coordinator's next look at main (a merge step runs before it in a tick), the stop still holds.
+  assert.match(w.c.autoMergeStopped() ?? '', /deleted by hand; auto-merge stays stopped until main is measured green/);
+  await watchMerges(w);
+  assert.ok(existsSync(stopFile(w.f)), 'written back');
+  const back = JSON.parse(readFileSync(stopFile(w.f), 'utf8')) as { by: string; reason: string; restored: string };
+  assert.equal(back.by, 'red_main');
+  assert.match(back.reason, /required checks failed/);
+  assert.match(back.restored, /deleted by hand while .*not all green \(ci: fail\).*acknowledgement/);
+  assert.match(of<EventPayload<'merge.stopped'>>(w.f, 'merge.stopped').at(-1)!.restored ?? '', /deleted by hand/);
+  assert.equal(of(w.f, 'merge.resumed').length, 0, 'not resumed');
+  assert.notEqual(w.c.autoMergeStopped(), null);
+  // Again on the next pass: nothing more (the stop is in force).
+  await watchMerges(w);
+  assert.equal(of(w.f, 'merge.stopped').length, 2);
+  // Main green on its tip: a hand deletion resumes, as before, and says main was green.
+  w.f.backlog.setChecks(tip, passing);
+  unlinkSync(stopFile(w.f));
+  await watchMerges(w);
+  assert.ok(!existsSync(stopFile(w.f)));
+  assert.match(of<EventPayload<'merge.resumed'>>(w.f, 'merge.resumed').at(-1)!.detail, new RegExp(`by hand, with main green on ${tip.slice(0, 8)}`));
+  assert.equal(w.c.autoMergeStopped(), null);
+});
+
+test("resume (#776): the main watch's stop deleted by hand comes back as the main watch's (its alert stays); a dashboard resume logged while main is measured is never undone", async () => {
+  const w = world();
+  await w.watch(2);
+  w.commit('direct.txt');
+  git(w.person, 'push', '-q', 'origin', 'main');
+  await w.watch(4);
+  unlinkSync(stopFile(w.f));
+  await watchMerges(w);
+  assert.equal((JSON.parse(readFileSync(stopFile(w.f), 'utf8')) as { by: string }).by, 'main_watch');
+  assert.ok(protectionState({ stateDir: w.f.stateDir, repo: w.f.cfg.project.project.repo, events: w.f.log.read(0), role: 'owner' }).alert, 'the alert (and its resume) still shows');
+  // The dashboard's acknowledged resume: the file goes, then merge.resumed is logged. A coordinator pass that sees the
+  // file gone first, and the resume logged while it measures main, leaves it resumed.
+  const c = w.c as unknown as { headChecksOf(sha: string): Promise<unknown> };
+  const read = c.headChecksOf.bind(c);
+  c.headChecksOf = async (sha) => {
+    w.f.log.append('merge.resumed', { detail: '@example-owner cleared the stop on the dashboard, acknowledging ...' }, 'example-owner', 'human');
+    return read(sha);
+  };
+  unlinkSync(stopFile(w.f));
+  await watchMerges(w);
+  assert.ok(!existsSync(stopFile(w.f)), 'the acknowledged resume stands');
+  assert.equal(w.c.autoMergeStopped(), null);
 });
 
 /** A test-run service whose full runs pass, posting the `full` check on each head as the App would. */
@@ -592,9 +646,11 @@ test('main watch caps: at most 3 revert PRs a day on an instance, across a resta
   git(w.person, 'push', '-q', 'origin', 'main');
   await w.watch(15);
   assert.equal(reverts(w.f).length, 3);
-  // A restart, then an admin clears the stop.
+  // A restart, then an admin clears the stop. Precondition (#776): main is green on its tip, measured on the next pass.
   w.restart();
+  w.f.backlog.setChecks(git(w.f.remote, 'rev-parse', 'main'), passing);
   unlinkSync(stopFile(w.f));
+  await watchMerges(w);
   assert.equal(w.c.autoMergeStopped(), null);
   const fourth = w.commit('d4.txt');
   git(w.person, 'push', '-q', 'origin', 'main');
