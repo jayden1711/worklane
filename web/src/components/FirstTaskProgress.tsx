@@ -19,7 +19,7 @@ export function FirstTaskCard({ t }: { t: FirstTaskProgress }) {
       <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
         <div className="text-[13px] font-medium text-ink">First task</div>
         <span className="font-mono text-[12px] text-ink-3">#{t.issue}</span>
-        <span className="text-[11.5px] text-ink-3">filed {ago(t.filedAt)}</span>
+        {t.filedAt && <span className="text-[11.5px] text-ink-3">filed {ago(t.filedAt)}</span>}
       </div>
       {t.blocked && (
         <p className="text-[12.5px] text-orange" data-testid="first-task-blocked">

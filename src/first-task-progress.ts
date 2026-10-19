@@ -1,5 +1,5 @@
 // WHY (#741): the First task card: the filed issue's own events as stages; no event, waiting. Fixed words only.
-import type { StoredEvent } from './events/types.js';
+import { EventSchemas, type StoredEvent } from './events/types.js';
 import { holdsInWords, type HoldWords } from './hold-words.js';
 
 /** src/service.ts's tick (a test keeps them equal). */
@@ -23,11 +23,11 @@ export interface Stage {
 }
 export interface FirstTaskProgress {
   issue: number;
-  filedAt: string;
+  filedAt: string | null;
   pr: { number: number; url: string | null } | null;
   stages: Stage[];
-  blocked: { at: string } | null;
-  question: { at: string } | null;
+  blocked: { at: string | null } | null;
+  question: { at: string | null } | null;
   holds: HoldWords[];
   outcome: 'open' | 'merged' | 'held' | 'closed' | 'landed' | 'blocked';
 }
@@ -36,12 +36,16 @@ type E = StoredEvent | null | undefined;
 const pl = (e: StoredEvent) => e.payload as unknown as Record<string, unknown>;
 const issueOf = (e: StoredEvent) => (typeof pl(e).issue === 'number' ? (pl(e).issue as number) : null);
 const TITLE: Record<StageId, string> = { claimed: 'Claimed', worker: 'Worker', evaluator: 'Evaluator', pr: 'PR opened', checks: 'Checks', merge: 'Merged' };
-const S = (id: StageId, state: StageState, detail: string, e: E = null, estimate: Estimate | null = null): Stage => ({ id, title: TITLE[id], state, detail, at: e?.ts ?? null, estimate });
+const S = (id: StageId, state: StageState, detail: string, e: E = null, estimate: Estimate | null = null): Stage => ({ id, title: TITLE[id], state, detail, at: time(e?.ts), estimate });
 
 const GUESS: Estimate = { basis: 'guess', text: '15-60 minutes from the claim to a PR, for these stages together; nothing times them' };
 
-/** An enum word, or "unknown": never free text. */
-const word = (x: unknown) => (typeof x === 'string' && /^[a-z_]{1,30}$/.test(x) ? x.replace(/_/g, ' ') : 'unknown');
+/** A member of the schema's own enum, or "unknown": never a forged row's words. */
+const word = (x: unknown, of: readonly string[]) => (of.includes(x as string) ? (x as string).replace(/_/g, ' ') : 'unknown');
+const REASONS = EventSchemas['run.finished'].shape.reason.options;
+const CONFIDENCE = EventSchemas['eval.verdict'].shape.confidence.options;
+const pos = (x: unknown) => (Number.isSafeInteger(x) && (x as number) > 0 ? (x as number) : null);
+const time = (t: unknown) => (typeof t === 'string' && !Number.isNaN(Date.parse(t)) ? new Date(Date.parse(t)).toISOString() : null);
 
 /** GitHub's https page of exactly that PR in `repo`, else null. */
 function prLink(url: unknown, n: number, repo: string | null | undefined): string | null {
@@ -58,8 +62,8 @@ function prLink(url: unknown, n: number, repo: string | null | undefined): strin
 export function firstTaskFiled(events: readonly StoredEvent[]): { issue: number; id: number; at: string } | null {
   for (let i = events.length - 1; i >= 0; i--) {
     const e = events[i]!;
-    const n = e.type === 'dashboard.audit' && pl(e).action === FIRST_TASK_FILED ? (pl(e).detail as { issue?: unknown } | undefined)?.issue : null;
-    if (typeof n === 'number' && Number.isInteger(n) && n > 0) return { issue: n, id: e.id, at: e.ts };
+    const n = pos(e.type === 'dashboard.audit' && pl(e).action === FIRST_TASK_FILED ? (pl(e).detail as { issue?: unknown } | undefined)?.issue : null);
+    if (n) return { issue: n, id: e.id, at: e.ts };
   }
   return null;
 }
@@ -80,7 +84,7 @@ export function firstTaskProgress(events: readonly StoredEvent[], o: { local: bo
   // A verdict counts only for the worker's latest attempt.
   const verdict = last((e) => e.type === 'eval.verdict' && after(e, wStart));
   const opened = of('pr.opened');
-  const pr = opened && Number.isInteger(pl(opened).number) ? (pl(opened).number as number) : null;
+  const pr = opened ? pos(pl(opened).number) : null;
   const ofPr = (type: string) => (pr === null ? null : of(type, (p) => p.number === pr));
   const [status, merged, closed] = ['pr.status', 'merge.done', 'pr.closed'].map(ofPr);
   // A decision or failed merge counts only at the PR's latest head.
@@ -96,11 +100,12 @@ export function firstTaskProgress(events: readonly StoredEvent[], o: { local: bo
     claim ? S('claimed', 'done', 'the coordinator took it', claim) : S('claimed', 'waiting', 'not claimed yet: the coordinator takes it on a tick while it is running', null, { basis: 'tick', text: `within about ${(COORDINATOR_TICK_MS + COORDINATOR_TICK_JITTER_MS) / 1000} s of the coordinator running: it looks for work every ${COORDINATOR_TICK_MS / 1000} s, plus up to ${COORDINATOR_TICK_JITTER_MS / 1000} s` }),
   ];
   const wEst = GUESS;
-  const reason = wEnd ? String(pl(wEnd).reason) : '';
-  stages.push(!wStart ? S('worker', 'waiting', 'not started yet', null, wEst) : !after(wEnd, wStart) ? S('worker', 'running', `attempt ${Math.trunc(Number(pl(wStart).attempt)) || 1} started; no finish recorded yet`, wStart, wEst) : reason === 'succeeded' ? S('worker', 'done', 'finished its change', wEnd) : S('worker', 'failed', `its run ended: ${word(reason)}`, wEnd));
+  const reason = wEnd ? pl(wEnd).reason : '';
+  const attempt = wStart ? pos(pl(wStart).attempt) : null;
+  stages.push(!wStart ? S('worker', 'waiting', 'not started yet', null, wEst) : !after(wEnd, wStart) ? S('worker', 'running', `${attempt ? `attempt ${attempt} ` : ''}started; no finish recorded yet`, wStart, wEst) : reason === 'succeeded' ? S('worker', 'done', 'finished its change', wEnd) : S('worker', 'failed', `its run ended: ${word(reason, REASONS)}`, wEnd));
   const v = verdict ? pl(verdict) : null;
   const ok = v?.patch_correct === true && v.test_correct === true;
-  stages.push(v ? S('evaluator', ok ? 'done' : 'failed', `${ok ? 'approved' : 'did not approve it'}, confidence ${word(v.confidence)}`, verdict) : S('evaluator', 'waiting', "no verdict yet: it checks the worker's change once the worker finishes", null, GUESS));
+  stages.push(v ? S('evaluator', ok ? 'done' : 'failed', `${ok ? 'approved' : 'did not approve it'}, confidence ${word(v.confidence, CONFIDENCE)}`, verdict) : S('evaluator', 'waiting', "no verdict yet: it checks the worker's change once the worker finishes", null, GUESS));
   stages.push(opened ? S('pr', 'done', `PR #${pr}`, opened) : landed ? S('pr', 'done', 'no PR: landed directly on the default branch', landed) : S('pr', 'waiting', 'no PR yet: one opens after the evaluator approves', null, GUESS));
   const cEst: Estimate = { basis: 'none', text: "no estimate: it depends on this repo's CI" };
   if (!opened || !status) stages.push(S('checks', 'waiting', opened ? 'no check results recorded yet' : landed ? 'none: no PR' : 'after the PR opens', null, landed && !opened ? null : cEst));
@@ -124,7 +129,7 @@ export function firstTaskProgress(events: readonly StoredEvent[], o: { local: bo
     stages.push(S('merge', 'held', 'held: it waits for you', decided, { basis: 'none', text: 'no estimate: it waits until a person merges it' }));
   } else stages.push(decided ? S('merge', 'running', 'the merge policy will merge it', decided, { basis: 'none', text: 'no estimate: it merges on a later pass of the PR watch' }) : S('merge', 'waiting', stale ? 'a new head: it waits for its checks and a fresh decision' : opened ? 'no merge decision yet: it comes once the checks are green' : 'after the PR'));
   // A block: fixed words (its reason can hold run output).
-  const blocked = block && after(block, claim) && after(block, wStart) ? { at: block.ts } : null;
+  const blocked = block && after(block, claim) && after(block, wStart) ? { at: time(block.ts) } : null;
   if (blocked && outcome === 'open') outcome = 'blocked';
-  return { issue: n, filedAt: filed.at, pr: pr === null ? null : { number: pr, url: prLink(pl(opened!).url, pr, o.repo) }, stages, blocked, question: asked ? { at: asked.ts } : null, holds, outcome };
+  return { issue: n, filedAt: time(filed.at), pr: pr === null ? null : { number: pr, url: prLink(pl(opened!).url, pr, o.repo) }, stages, blocked, question: asked ? { at: time(asked.ts) } : null, holds, outcome };
 }
