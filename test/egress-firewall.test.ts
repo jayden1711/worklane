@@ -19,12 +19,15 @@ const script = join(setup, 'egress-firewall.sh');
 /**
  * A bin dir first on PATH: getent lists a machine's users, systemctl --version says `systemd`. The rule's record, which
  * --print reads, is a file of the test's own (EGRESS_RECORD_PRINT, honoured with --print only), absent unless `record`
- * is given: never the machine's /etc/worklane/egress.users.
+ * is given: never the machine's /etc/worklane/egress.users. So is the subordinate uid file (EGRESS_SUBUID_PRINT), absent
+ * unless `subuid` is given: never the machine's /etc/subuid.
  */
-function machine(systemd: number, record?: string) {
+function machine(systemd: number, record?: string, subuid?: string) {
   const dir = mkdtempSync(join(tmpdir(), 'egress-'));
   const rec = join(dir, 'egress.users');
   if (record !== undefined) writeFileSync(rec, record);
+  const sub = join(dir, 'subuid');
+  if (subuid !== undefined) writeFileSync(sub, subuid);
   const bin = join(dir, 'bin');
   mkdirSync(bin);
   const stub = (n: string, body: string) => {
@@ -34,7 +37,7 @@ function machine(systemd: number, record?: string) {
   const users = ['root:x:0:0::/root:/bin/bash', 'wl-shop:x:1000:1000::/srv/home-shop:/bin/bash', 'wl-exp-shop:x:1001:1001::/:/usr/sbin/nologin', 'wl-score-shop:x:1002:1002::/:/usr/sbin/nologin', 'wl-test-shop:x:1003:1003::/var/lib/worklane-test/shop:/usr/sbin/nologin', 'wl-test-a-b:x:1004:1004::/:/usr/sbin/nologin'];
   stub('getent', `[ "$1" = passwd ] && printf '%s\\n' ${users.map((u) => `'${u}'`).join(' ')}`);
   stub('systemctl', `[ "$1" = --version ] && { echo "systemd ${systemd} (${systemd}.4-1ubuntu8)"; echo "+PAM +AUDIT"; exit 0; }; exit 0`);
-  const run = (cmd: string, args: string[]) => spawnSync('bash', [cmd, ...args], { encoding: 'utf8', env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, EGRESS_RECORD_PRINT: rec } });
+  const run = (cmd: string, args: string[]) => spawnSync('bash', [cmd, ...args], { encoding: 'utf8', env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, EGRESS_RECORD_PRINT: rec, EGRESS_SUBUID_PRINT: sub } });
   return { dir, run, done: () => rmSync(dir, { recursive: true, force: true }) };
 }
 
@@ -373,6 +376,146 @@ test('the record: one with no read permission counts as dropped, whatever it say
   }, 'the record is mode 000');
 });
 
+// #740: test-user.sh gives the test user a subordinate uid range (/etc/subuid) for rootless Docker. A process in its
+// user namespace can take any uid of it, and its socket in the host's network namespace is owned by that uid, so the
+// drop names every covered user's ranges, not only the user's own uid.
+const SUBUID = [
+  'wl-shop:100000:65536', // the coordinator's: never covered
+  'wl-test-shop:165536:65536', // by name
+  '1004:231072:65536', // wl-test-a-b's, by uid
+  'wl-test-a-b:296608:1', // a second range, of one uid
+  'wl-test-shop:abc:5', // malformed: no range
+  'wl-test-shop:400000:0', // no uids: no range
+  'nobody:500000:65536',
+  '',
+].join('\n');
+const DROP_740 = 'meta skuid { 1001, 1002, 1003, 1004, 165536-231071, 231072-296607, 296608 } oifname != "lo" counter drop';
+
+test('subordinate uids (#740): the drop names each covered user\'s ranges after the uids; the exception still comes first', { skip: !posix && 'bash' }, () => {
+  const m = machine(255, undefined, SUBUID);
+  try {
+    const r = m.run(script, ['--print']);
+    assert.equal(r.status, 0, r.stderr);
+    // The rule is the same as without subordinate uids, but for the drop's elements.
+    assert.equal(r.stdout, RULE_255.replace(/^ {4}meta skuid .*$/m, `    ${DROP_740}`));
+    assert.equal(m.run(script, ['--print', '--with-test-users']).stdout, r.stdout);
+    // The coordinator's range is never in it, nor anyone else's who isn't covered.
+    assert.doesNotMatch(r.stdout, /\b100000\b|\b500000\b|\b400000\b/);
+    // Docker's exception (its cgroup, whatever uid owns the socket) is still matched before the drop.
+    const accept = r.stdout.indexOf('socket cgroupv2 level 3 @egress_ok accept');
+    assert.ok(accept > 0 && accept < r.stdout.indexOf('meta skuid'), 'the exception comes before the drop');
+  } finally {
+    m.done();
+  }
+});
+
+test('subordinate uids (#740): only covered users\' ranges; experiment users\' too; an install that dropped Docker drops them, with no exception', { skip: !posix && 'bash' }, () => {
+  // systemd 252, no flag: test users aren't covered, so neither are their ranges; an experiment user's range is.
+  let m = machine(252, undefined, `${SUBUID}wl-exp-shop:600000:10\n`);
+  try {
+    assert.match(m.run(script, ['--print']).stdout, /^ {4}meta skuid \{ 1001, 1002, 600000-600009 \} oifname != "lo" counter drop$/m);
+    assert.match(m.run(script, ['--print', '--with-test-users']).stdout, /^ {4}meta skuid \{ 1001, 1002, 1003, 1004, 165536-231071, 231072-296607, 296608, 600000-600009 \} oifname/m);
+  } finally {
+    m.done();
+  }
+  // Dropped (a pre-#543 record with the flag): the ranges are dropped too, and Docker still has no exception.
+  m = machine(255, '# --with-test-users\n1001\n1002\n1003\n1004\n', SUBUID);
+  try {
+    const r = m.run(script, ['--print']);
+    assert.equal(r.status, 0, r.stderr);
+    assert.ok(r.stdout.includes(`    ${DROP_740}\n`), r.stdout);
+    assert.doesNotMatch(r.stdout, /egress_ok|cgroupv2/);
+  } finally {
+    m.done();
+  }
+  // No subordinate uid file at all: the rule is as before #740.
+  m = machine(255);
+  try {
+    assert.equal(m.run(script, ['--print']).stdout, RULE_255);
+  } finally {
+    m.done();
+  }
+});
+
+test('subordinate uids (#740): overlapping ranges are merged, so nft gets no conflicting intervals', { skip: !posix && 'bash' }, () => {
+  const m = machine(255, undefined, 'wl-test-shop:165536:65536\nwl-test-a-b:200000:65536\nwl-test-a-b:210000:10\n');
+  try {
+    assert.match(m.run(script, ['--print']).stdout, /^ {4}meta skuid \{ 1001, 1002, 1003, 1004, 165536-265535 \} oifname/m);
+  } finally {
+    m.done();
+  }
+});
+
+test('subordinate uids (#740): a covered user\'s range holding a user\'s own uid is refused, nothing printed (it would cut that user off)', { skip: !posix && 'bash' }, () => {
+  for (const [sub, hit] of [
+    ['wl-test-shop:999:10\n', /wl-shop \(uid 1000\) in 999-1008/],
+    ['wl-test-a-b:0:1\n', /root \(uid 0\) in 0-0/],
+  ] as const) {
+    const m = machine(255, undefined, sub);
+    try {
+      const r = m.run(script, ['--print']);
+      assert.equal(r.status, 1, sub);
+      assert.equal(r.stdout, '', 'no rule');
+      assert.match(r.stderr, /^refusing: a covered user's subordinate uids \(.*subuid\) hold a user's own uid: .*nothing changed$/m);
+      assert.match(r.stderr, hit);
+    } finally {
+      m.done();
+    }
+  }
+  // apply refuses before it writes anything.
+  const sh = readFileSync(script, 'utf8');
+  const apply = sh.slice(sh.indexOf('apply_cmd() {'), sh.indexOf('\n}\n', sh.indexOf('apply_cmd() {')));
+  assert.ok(apply.indexOf('subuids_ok || exit 1') >= 0 && apply.indexOf('subuids_ok || exit 1') < apply.indexOf('install -d'), 'apply checks before it writes');
+});
+
+test('subordinate uids (#740): check reads the drop\'s elements however nft lists them', { skip: !posix && 'bash' }, () => {
+  const drop = (els: string) => `table inet worklane_egress {\n\tchain out {\n\t\ttype filter hook output priority filter; policy accept;\n\t\tmeta skuid ${els} oifname != "lo" counter packets 5 bytes 300 drop\n\t}\n}`;
+  const cases: [string, number, number, boolean][] = [
+    [drop('{ 1003, 165536-231071 }'), 165536, 231071, true],
+    [drop('{ 1003, 165536-231071 }'), 165536, 231072, false],
+    [drop('{ 1003, 165536-231071 }'), 1003, 1003, true],
+    [drop('{ 1003, 165536-231071 }'), 1004, 1004, false],
+    [drop('{ 1003, 165536-200000, 200001-231071 }'), 165536, 231071, true],
+    [drop('{ 1003-1004, 165536-296607 }'), 231072, 296607, true],
+    [drop('{ 1003, 165536-200000, 200002-231071 }'), 165536, 231071, false],
+    [drop('1003'), 165536, 231071, false],
+    [drop('1003'), 1003, 1003, true],
+    ['table inet worklane_egress {\n}', 1003, 1003, false],
+  ];
+  const r = withFunctions(['skuid_holds'], {}, cases.map(([t, lo, hi]) => `if skuid_holds '${t}' ${lo} ${hi}; then echo yes; else echo no; fi`).join('\n'));
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(r.stdout.trim().split('\n'), cases.map(([, , , want]) => (want ? 'yes' : 'no')));
+});
+
+test('subordinate uids (#740): check fails where the loaded drop misses a covered user\'s range (a rule from before #740), and probes the range as its first uid', { skip: !posix && 'bash' }, () => {
+  const dir = mkdtempSync(join(tmpdir(), 'egress-check-'));
+  try {
+    writeFileSync(join(dir, 'egress.users'), '# docker: dropped\n1003\n');
+    writeFileSync(join(dir, 'subuid'), 'wl-test-shop:165536:65536\nwl-shop:100000:65536\n');
+    const run = (els: string) => {
+      writeFileSync(join(dir, 'table'), `table inet worklane_egress {\n\tchain out {\n\t\tmeta skuid ${els} oifname != "lo" counter packets 0 bytes 0 drop\n\t}\n}\n`);
+      return withFunctions(['subuid_entries', 'skuid_holds', 'check_cmd'], {}, `MARK='${dir}/egress.users' SUBUID='${dir}/subuid' nftset= mode=dropped sysd=255 EGRESS_NFTSET_SYSTEMD=255 LEVEL=3
+nft() { cat '${dir}/table'; }
+getent() { [ "$2" = 1003 ] && echo 'wl-test-shop:x:1003:1003::/:/usr/sbin/nologin'; }
+runuser() { return 1; }
+setpriv() { echo "setpriv $*" >> '${dir}/setpriv'; return 1; }
+if check_cmd; then echo rc=0; else echo rc=1; fi`);
+    };
+    let r = run('{ 1003, 165536-231071 }');
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /^PASS wl-test-shop's subordinate uids 165536-231071 are covered$/m);
+    assert.match(r.stdout, /^PASS uid 165536 \(wl-test-shop's subordinate\) can't reach 1\.1\.1\.1:443$/m);
+    assert.match(r.stdout, /^rc=0$/m);
+    assert.match(readFileSync(join(dir, 'setpriv'), 'utf8'), /^setpriv --reuid=165536 --regid=165536 --clear-groups -- timeout 5 bash -c /m);
+    assert.doesNotMatch(r.stdout, /100000/, 'the coordinator\'s range is no covered user\'s');
+    r = run('1003');
+    assert.match(r.stdout, /^FAIL wl-test-shop's subordinate uids 165536-231071 \(.*subuid\) are not covered: run apply again$/m);
+    assert.match(r.stdout, /^rc=1$/m);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('egress-firewall.sh refuses bad arguments', { skip: !posix && 'bash' }, () => {
   const m = machine(255);
   try {
@@ -504,4 +647,35 @@ test('egress-real-systemd.sh (#545): the default join probe is asserted refused 
   // The helper this job installs is put back on any exit.
   const cleanup = sh.slice(sh.indexOf('\ncleanup() {'), sh.indexOf('\n}\n', sh.indexOf('\ncleanup() {')));
   assert.match(cleanup, /sudo install -o root -g root -m 0755 scripts\/machine\/worklane-testrun\.sh "\$H"/);
+});
+
+test('egress-real-systemd.sh (#740): a unit as the test user\'s subordinate uids reaches the stand-in with no rule and under the pre-#543 rule, and nothing with the rule on or after the upgrade', () => {
+  const sh = readFileSync(ciScript, 'utf8');
+  // The same probe and unit as as_test, as a subordinate uid; the first and the last of the range.
+  assert.match(sh, /\nas_sub\(\) \{ local uid="\$1"; shift; sudo systemd-run --wait --pipe --quiet --collect --slice=worklane-test\.slice -p PrivateNetwork=no -p RuntimeMaxSec=30 \/usr\/bin\/setpriv --reuid="\$uid" --regid="\$uid" --clear-groups -- \/usr\/bin\/python3 "\$t\/probe\.py" "\$@" < \/dev\/null; \}\n/);
+  const fn = sh.slice(sh.indexOf('\nsub_probe() {'), sh.indexOf('\n}\n', sh.indexOf('\nsub_probe() {')));
+  assert.match(fn, /for uid in "\$SUB_LO" "\$SUB_HI"; do/);
+  assert.match(fn, /\[ "\$got" = OK \] \|\| fail /);
+  assert.match(fn, /\[ "\$got" != OK \] \|\| fail /);
+  // In the job's order: before any rule (OK), the rule on (dropped), the pre-#543 rule (OK: the fail-without), after the
+  // upgrade (dropped).
+  const at = (s: string) => {
+    const i = sh.indexOf(s);
+    assert.ok(i >= 0, s);
+    return i;
+  };
+  const steps = [
+    at('\nsub_probe OK "no rule"\n'),
+    at('\nsudo bash "$EF" apply | tee "$t/apply.log"\n'),
+    at('\nsub_probe dropped "the rule on"\n'),
+    at('\nsudo bash "$t/pre543/scripts/setup/egress-firewall.sh" apply --with-test-users'),
+    at('\nsub_probe OK "the pre-#543 rule (own uid only)"\n'),
+    at('\nassert_dropped "after the upgrade"\n'),
+    at('\nsub_probe dropped "after the upgrade (Docker dropped)"\n'),
+  ];
+  assert.deepEqual([...steps].sort((a, b) => a - b), steps);
+  assert.ok(sh.indexOf('\nsub_probe OK "no rule"\n') > sh.indexOf('\necho "== before: no egress rule'), 'before the first apply');
+  // apply's check names the range and probes it, by default and after the upgrade.
+  assert.match(sh, /grep -qx "PASS \$U's subordinate uids \$SUB_LO-\$SUB_HI are covered" "\$t\/apply\.log" \|\| fail /);
+  assert.match(sh, /grep -qx "PASS \$U's subordinate uids \$SUB_LO-\$SUB_HI are covered" "\$t\/upgrade-apply\.log" \|\| fail /);
 });

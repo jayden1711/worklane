@@ -6,7 +6,9 @@
 #   before:    a test-user unit with no PrivateNetwork reaches the stand-in (so a drop below is the rule's doing).
 #   apply:     test users covered by default (systemd 255 here); Docker, started before the set existed, is put in it.
 #   refused:   a test-user process (a unit as wl-test-ci in worklane-test.slice, no PrivateNetwork) is dropped; its own
-#              loopback works.
+#              loopback works. So is the same unit as the first and the last uid of wl-test-ci's subordinate range
+#              (/etc/subuid, which a process in its user namespace can take, #740), and that reached the stand-in with
+#              no rule.
 #   cgroup:    the same kind of unit can't move itself into Docker's cgroup: its write of its own pid to cgroup.procs of
 #              Docker's unit and of its daemon subgroup is refused (a plain permission check; the job fails if it isn't).
 #   pull:      a real rootless docker pull of the database image, with the rule on.
@@ -29,7 +31,9 @@
 #              and a Docker unit with no NFTSet=) keeps dropping their Docker after the new test-user.sh install and
 #              apply: no NFTSet=, no cgroup accept, the pull dropped, and the join probe, run before and after, reaches
 #              the stand-in from nowhere it didn't before (asserted: the job fails if any blocked attempt opens, or if
-#              any join, through any thread, reaches it after). Before the after-upgrade probe, Docker is restarted
+#              any join, through any thread, reaches it after). The pre-#543 rule (wl-test-ci's own uid only) lets a
+#              unit as its subordinate uid out (asserted: the fail-without for #740); after the upgrade it's dropped.
+#              Before the after-upgrade probe, Docker is restarted
 #              (at most 3 times) while no test-user thread is in a non-host netns; each look goes in the job summary,
 #              and if it restarted, no NFTSet=, no cgroup exception and the dropped pull are asserted again after.
 # Usage: bash scripts/ci/egress-real-systemd.sh   (as the runner user, with sudo)
@@ -106,6 +110,26 @@ echo "stand-in: $PUB:$PORT"
 
 # A test-user process outside any run's sandbox: a unit as wl-test-ci in worklane-test.slice, no PrivateNetwork.
 as_test() { sudo systemd-run --wait --pipe --quiet --collect --uid="$U" --gid="$U" --slice=worklane-test.slice -p PrivateNetwork=no -p RuntimeMaxSec=30 /usr/bin/python3 "$t/probe.py" "$@" < /dev/null; }
+# The same unit and probe as a uid of the test user's subordinate range (#740): <uid> <probe args>. WHY setpriv, not
+# --uid=: these uids have no user database entry, which systemd looks the uid up in (inferred). The socket's owner is
+# that uid, as for a process in the test user's user namespace that took it (inferred: the kernel maps it the same way).
+as_sub() { local uid="$1"; shift; sudo systemd-run --wait --pipe --quiet --collect --slice=worklane-test.slice -p PrivateNetwork=no -p RuntimeMaxSec=30 /usr/bin/setpriv --reuid="$uid" --regid="$uid" --clear-groups -- /usr/bin/python3 "$t/probe.py" "$@" < /dev/null; }
+# wl-test-ci's first subordinate uid range (test-user.sh install gave it one): its first and last uid.
+read -r SUB_LO SUB_N < <(awk -F: -v u="$U" -v i="$(id -u "$U")" '($1 == u || $1 == i) && $3 > 0 { print $2, $3; exit }' /etc/subuid) || true
+[ -n "${SUB_LO:-}" ] || fail "$U has no subordinate uid range in /etc/subuid"
+SUB_HI=$((SUB_LO + SUB_N - 1))
+echo "$U's subordinate uids: $SUB_LO-$SUB_HI"
+# Each of the range's first and last uid, as a unit in worklane-test.slice: <want: OK or dropped> <when>.
+sub_probe() {
+  local want="$1" when="$2" uid got
+  for uid in "$SUB_LO" "$SUB_HI"; do
+    got="$(as_sub "$uid" "$PUB" "$PORT")"
+    echo "  $when: a unit as $U's subordinate uid $uid -> $PUB: $got"
+    summary "- $when: a unit as $U's subordinate uid $uid -> $PUB: $got"
+    if [ "$want" = OK ]; then [ "$got" = OK ] || fail "$when: a unit as $U's subordinate uid $uid can't reach $PUB ($got): this probe can't tell"
+    else [ "$got" != OK ] || fail "$when: a unit as $U's subordinate uid $uid reached $PUB"; fi
+  done
+}
 dk() { sudo -u "$U" env HOME=/var/lib/worklane-test/ci/docker-home DOCKER_HOST=unix:///run/worklane-test-ci-docker/docker.sock /opt/worklane-test/docker/docker "$@"; }
 # Docker answers on its socket again (after a restart), within 60 s, or the job fails. WHY sudo test: its runtime
 # directory is the test user's, 0700, so the runner user can't see the socket (a plain [ -S ] never passed).
@@ -117,6 +141,8 @@ pull() { dk rmi -f "$DB_IMAGE" > /dev/null 2>&1 || true; timeout "$1" sudo -u "$
 echo "== before: no egress rule; a test-user unit reaches the stand-in"
 sudo nft list table inet worklane_egress > /dev/null 2>&1 && fail "an egress table is loaded already"
 [ "$(as_test "$PUB" "$PORT")" = OK ] || fail "with no rule, the test-user unit can't reach $PUB: this probe can't tell"
+summary "### #740: a unit as $U's subordinate uids ($SUB_LO-$SUB_HI), with no exception (asserted)"
+sub_probe OK "no rule"
 systemctl cat "$DU" | grep '^NFTSet=' || fail "$DU has no NFTSet="
 sudo journalctl --no-pager -o cat -u "$DU" | grep -i nft || echo "(the Docker unit's journal says nothing of nft)"
 
@@ -124,6 +150,8 @@ echo "== apply: test users covered by default; Docker, started before the set ex
 sudo bash "$EF" apply | tee "$t/apply.log"
 tail -n 1 "$t/apply.log" | grep -qx OK || fail "apply's check didn't pass"
 grep -qx "PASS $U ($(id -u "$U")) is covered" "$t/apply.log" || fail "$U isn't covered by default"
+grep -qx "PASS $U's subordinate uids $SUB_LO-$SUB_HI are covered" "$t/apply.log" || fail "$U's subordinate uids aren't covered by default"
+grep -qx "PASS uid $SUB_LO ($U's subordinate) can't reach 1.1.1.1:443" "$t/apply.log" || fail "check didn't probe $U's subordinate uids"
 grep -q "^exempt: $DU (NFTSet=): its cgroup " "$t/apply.log" || fail "apply didn't put the running Docker in the set"
 grep -qx "PASS $DU may pull images (its cgroup is in the set egress_ok)" "$t/apply.log" || fail "check didn't find Docker in the set"
 sudo nft list table inet worklane_egress | tee "$t/table"
@@ -135,6 +163,8 @@ got="$(as_test "$PUB" "$PORT")"
 echo "  wl-test-ci unit -> $PUB: $got"
 [ "$got" != OK ] || fail "a test-user process reached $PUB with the rule on"
 [ "$(as_test lo)" = OK ] || fail "the test user's own loopback doesn't work under the rule"
+summary "### #740: the same units with the rule on (the default install: Docker's cgroup exempt, these units not in it)"
+sub_probe dropped "the rule on"
 python3 "$t/probe.py" "$PUB" "$PORT" | grep -qx OK || fail "the rule blocked the runner user too"
 
 echo "== cgroup: a test-user unit can't move itself into Docker's cgroup (asserted)"
@@ -454,6 +484,9 @@ sudo nft list table inet worklane_egress | tee "$t/old-table"
 if grep -Eq 'socket cgroupv2|egress_ok' "$t/old-table"; then fail "the pre-#543 rule has a cgroup exception: this step can't tell"; fi
 if pull 90 2> /dev/null; then fail "Docker pulled under the pre-#543 opt-in: there was no closed route to keep closed"; fi
 echo "  before: Docker's pull was dropped"
+# The fail-without for #740: that rule drops $U's own uid only, as main's did until #740.
+summary "### #740: the same units under the pre-#543 opt-in's rule ($U's own uid only), then after the upgrade (asserted)"
+sub_probe OK "the pre-#543 rule (own uid only)"
 join_probe old
 JOIN_INFO_OLD="$JOIN_INFO"
 echo "  the new test-user.sh install (it loads the rule again), then the new apply, with no flags"
@@ -479,6 +512,8 @@ assert_dropped() {
   echo "  $when: Docker's pull was dropped"
 }
 assert_dropped "after the upgrade"
+grep -qx "PASS $U's subordinate uids $SUB_LO-$SUB_HI are covered" "$t/upgrade-apply.log" || fail "after the upgrade $U's subordinate uids aren't covered"
+sub_probe dropped "after the upgrade (Docker dropped)"
 summary "### #543 upgrade: a thread to join before the after-upgrade probe (Docker restarted, at most 3 times, while none is in a non-host netns)"
 await_netns_thread new
 join_probe new

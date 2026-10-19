@@ -8,6 +8,7 @@ import { asks } from '../console/asks.js';
 import { secretsDir } from '../console/secrets.js';
 import type { Config } from '../config/load.js';
 import type { EventLog } from '../events/log.js';
+import { changedNamesOrNull } from '../coordinator/change-files.js';
 import { classifyGitHubError } from '../github/errors.js';
 import { checkNamesFor, postChecks, startTestRun, type TestRunResult } from '../testrun/index.js';
 import type { IncidentSink } from '../usage-limit.js';
@@ -43,8 +44,9 @@ export function gateGit(repo: string, remote: string, main: string, deploy: stri
       return r.status === 0 ? r.stdout.trim() || null : null;
     },
     changed: (from, to) => {
-      const r = from ? git('diff', '--name-only', '-z', `${from}..${to}`) : git('diff-tree', '--no-commit-id', '--name-only', '-r', '-z', '-m', '--first-parent', to);
-      return r.status === 0 ? r.stdout.split('\0').filter(Boolean) : [];
+      // A rename as both its paths: test selection runs everything when a changed file is gone (#683).
+      const o = { timeout: 180_000 };
+      return (from ? changedNamesOrNull(repo, [`${from}..${to}`], o) : changedNamesOrNull(repo, ['--no-commit-id', '-r', '-m', '--first-parent', to], { ...o, tree: true })) ?? [];
     },
   };
 }

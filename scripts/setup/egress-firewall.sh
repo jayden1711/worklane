@@ -13,18 +13,24 @@
 #
 # The one exception (#543): a socket in the cgroup of a unit in the set egress_ok may send out, whoever owns it. A unit
 # joins the set by NFTSet=cgroup:inet:worklane_egress:egress_ok, which systemd keeps up to date (adds the unit's cgroup
-# when it starts, removes it when it stops). Only test-user.sh's rootless Docker unit has it: Docker pulls a run's
-# database image (pinned by digest) as the test user, through its own slirp4netns in that unit. A test run's own units
-# don't, and their processes can't move into Docker's cgroup: its parent, worklane-test.slice, is root's. The egress CI
-# job asserts that a plain test-user unit's write of its own pid there is refused; a run's own /sys/fs/cgroup is
-# read-only too (ProtectControlGroups=; inferred, not run). They do share Docker's uid, though, and so can drive its
-# processes: docs/test-runs.md, "Known gap".
+# when it starts, removes it when it stops). Two kinds of unit have it: test-user.sh's rootless Docker unit (Docker
+# pulls a run's database image, pinned by digest, as the test user, through its own slirp4netns in that unit), and the
+# test-run helper's slirp4netns unit of a granted run or a fetch, as the test user (#545; never where the record says
+# dropped: there it is root's, outside the rule), whose own IPAddressDeny= keeps it to public addresses. A test run's own
+# units don't, and their processes can't move into Docker's cgroup: its parent, worklane-test.slice, is root's. The
+# egress CI job asserts that a plain test-user unit's write of its own pid there is refused; a run's own /sys/fs/cgroup
+# is read-only too (ProtectControlGroups=; inferred, not run). They do share Docker's uid, though: where a run has no
+# user namespace of its own (#545) it can drive Docker's processes: docs/test-runs.md, "Known gap".
 # WHY test users only with --with-test-users on a systemd older than 255: NFTSet= came in 255, so there nothing fills
 # the set and Docker couldn't pull; apply says so. With the flag they're covered there anyway, and Docker can't pull.
 # WHY no exception where this install's rule already covered test users without one (apply --with-test-users before
 # #543, or on a systemd older than 255): there all of their Docker's traffic was dropped, and the exception would reopen
 # the routes out through Docker that this closed. The record (/etc/worklane/egress.users, root's) says so with
 # "# docker: dropped", and every later apply keeps it, whatever its flags, until revert (lib.sh egress_docker_mode).
+# WHY each covered user's subordinate uids too (#740): test-user.sh gives the test user a range in /etc/subuid (root's)
+# for rootless Docker. A process in that user's user namespace can take any uid of it, and a socket it makes in the
+# host's network namespace is owned there by that uid, not the user's own, so a drop by the user's uid alone misses it.
+# The drop names every range; the exception above still comes first, so Docker's pulls are as before.
 # Re-run apply after adding an instance (experiments.sh install does, with the flags it was applied with): the rule
 # names users by uid.
 source "$(dirname "$0")/lib.sh"
@@ -49,8 +55,10 @@ SET="$EGRESS_SET"
 RULES=/etc/worklane/egress.nft
 UNIT=/etc/systemd/system/worklane-egress.service
 MARK="$EGRESS_RECORD"
-# --print changes nothing, so a test may point it at a record of its own.
+SUBUID=/etc/subuid
+# --print changes nothing, so a test may point it at a record (and a subordinate uid file) of its own.
 [ -z "$print" ] || MARK="${EGRESS_RECORD_PRINT:-$MARK}"
+[ -z "$print" ] || SUBUID="${EGRESS_SUBUID_PRINT:-$SUBUID}"
 # WHY level 3 (measured on real systemd 255, #543's CI spike): systemd nests a dashed slice under its prefix, so a unit
 # in worklane-test.slice is /worklane.slice/worklane-test.slice/<unit>, level 3. Its subgroups (Docker's daemon, each
 # container) are below it, so the unit is still their level-3 ancestor. Level 2 is the slice, which NFTSet= never adds.
@@ -90,12 +98,39 @@ why_not_tests() {
   fi
 }
 
-# The covered users' uids, one a line: wl-exp-*, wl-score-*, and wl-test-* (on systemd 255 or later, or with
-# --with-test-users).
-covered() {
+# The covered users, <name>:<uid> one a line, by uid: wl-exp-*, wl-score-*, and wl-test-* (on systemd 255 or later, or
+# with --with-test-users).
+covered_users() {
   local pat='^wl-(exp|score)-[a-z][a-z0-9-]{0,20}$'
   [ -z "$with_tests" ] || pat='^wl-(exp|score|test)-[a-z][a-z0-9-]{0,20}$'
-  getent passwd | awk -F: -v p="$pat" '$1 ~ p { print $3 }' | sort -n
+  getent passwd | awk -F: -v p="$pat" '$1 ~ p { print $1 ":" $3 }' | sort -t: -k2,2n
+}
+# The covered users' uids, one a line.
+covered() { covered_users | cut -d: -f2; }
+
+# The subordinate uid ranges ($SUBUID, root's) of the users <name>:<uid> on stdin, "<name> <first> <last>" one a line,
+# by first uid. An entry names its user by name or by uid; a malformed one (or one of 0 uids) is no range.
+subuid_entries() {
+  if [ ! -e "$SUBUID" ]; then cat > /dev/null; return 0; fi
+  awk -F: 'NR == FNR { name[$1] = $1; name[$2] = $1; next }
+    ($1 in name) && $2 ~ /^[0-9]+$/ && $3 ~ /^[0-9]+$/ && $3 > 0 { print name[$1], $2, $2 + $3 - 1 }' - "$SUBUID" |
+    sort -n -k2,2 -k3,3
+}
+# The ranges "<first> <last>" on stdin as the rule's elements, one a line: overlapping ones merged, "<first>-<last>"
+# (or one uid).
+merged() {
+  awk '{ if (n && $1 <= hi) { if ($2 > hi) hi = $2 } else { if (n) print (lo == hi ? lo : lo "-" hi); lo = $1 + 0; hi = $2 + 0; n = 1 } }
+    END { if (n) print (lo == hi ? lo : lo "-" hi) }'
+}
+# Refuses (nothing changed) when a covered user's subordinate uids hold the uid of any user in the passwd database
+# (root, the coordinator, another sandbox user): the drop would cut that user off too, and a sandbox user able to take
+# it is a hole of its own. test-user.sh gives ranges from 100000 up, above every other range, so it never makes one.
+subuids_ok() {
+  local hit
+  hit="$(getent passwd | awk -F: 'NR == FNR { split($0, r, " "); lo[NR] = r[1]; hi[NR] = r[2]; n = NR; next }
+    { for (i = 1; i <= n; i++) if ($3 + 0 >= lo[i] && $3 + 0 <= hi[i]) print $1 " (uid " $3 ") in " lo[i] "-" hi[i] }' \
+    <(covered_users | subuid_entries | cut -d' ' -f2,3) - | paste -sd, - | sed 's/,/, /g')"
+  [ -z "$hit" ] || { echo "refusing: a covered user's subordinate uids ($SUBUID) hold a user's own uid: $hit. The drop would cut that user off too: fix $SUBUID, then run this again; nothing changed" >&2; return 1; }
 }
 
 # The rule file, loaded in one transaction: the table, the set and the chain made if they aren't there, the chain's
@@ -104,7 +139,8 @@ covered() {
 # (as this file did before #543) empties it, and those units could send nothing until they restarted.
 rules() {
   local uids chain='type filter hook output priority 0; policy accept;'
-  uids="$(covered | paste -sd, - | sed 's/,/, /g')"
+  # The covered uids, then their subordinate uid ranges (#740).
+  uids="$( { covered; covered_users | subuid_entries | cut -d' ' -f2,3 | merged; } | paste -sd, - | sed 's/,/, /g')"
   printf 'table inet %s {\n' "$TABLE"
   [ -z "$nftset" ] || printf '  set %s {\n    type cgroupsv2\n  }\n' "$SET"
   printf '  chain out {\n    %s\n  }\n}\nflush chain inet %s out\ntable inet %s {\n  chain out {\n    %s\n' "$chain" "$TABLE" "$TABLE" "$chain"
@@ -131,7 +167,7 @@ WantedBy=multi-user.target
 EOF
 }
 
-if [ -n "$print" ]; then why_not_tests; rules; exit 0; fi
+if [ -n "$print" ]; then why_not_tests; subuids_ok || exit 1; rules; exit 0; fi
 as_root "${all_args[@]}"
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 command -v nft >/dev/null 2>&1 || { echo "no nft on this machine: apt-get install -y nftables, then run this again" >&2; exit 1; }
@@ -173,6 +209,7 @@ apply_cmd() {
   local tmp
   why_not_tests
   [ -n "$(covered)" ] || echo "note: no sandbox user exists yet; the rule is loaded empty until you run this again after experiments.sh install"
+  subuids_ok || exit 1
   install -d -o root -g root -m 0755 /etc/worklane
   # A dotted temp file, validated by nft itself, then moved into place and loaded.
   tmp="/etc/worklane/.egress.nft.tmp"
@@ -183,7 +220,7 @@ apply_cmd() {
   mv -f "/etc/worklane/.egress.users.tmp" "$MARK"
   mv -f "$tmp" "$RULES"
   nft -f "$RULES"
-  echo "loaded $RULES: $(covered | wc -l) user(s) may send nothing but loopback"
+  echo "loaded $RULES: $(covered | wc -l) user(s), and $(covered_users | subuid_entries | wc -l) range(s) of their subordinate uids, may send nothing but loopback"
   [ -z "$nftset" ] || join_running
   unit > "/etc/systemd/system/.worklane-egress.service.tmp"; chmod 0644 "/etc/systemd/system/.worklane-egress.service.tmp"
   mv -f "/etc/systemd/system/.worklane-egress.service.tmp" "$UNIT"
@@ -219,8 +256,16 @@ docker_check() {
   return "$fail"
 }
 
-# PASS when the table is loaded, names every covered user, and each one's connection out is refused or never answered;
-# and where the set is in it, each test user's Docker is exempt.
+# Whether the loaded rule $1's meta skuid drop holds every uid from $2 to $3, however nft lists its elements (one uid,
+# a set of uids and ranges, ranges split or merged).
+skuid_holds() {
+  sed -En 's/.*meta skuid \{? *([^}]*[0-9]) *\}? oifname.*/\1/p' <<<"$1" | tr ',' '\n' | tr -d ' \t' |
+    awk -F- 'NF { print $1, (NF > 1 ? $2 : $1) }' | sort -n -k1,1 |
+    awk -v lo="$2" -v hi="$3" 'BEGIN { c = lo + 0 } $1 + 0 <= c && $2 + 0 >= c { c = $2 + 1 } END { exit !(c > hi + 0) }'
+}
+
+# PASS when the table is loaded, names every covered user and their subordinate uids, and a connection out as each one
+# is refused or never answered; and where the set is in it, each test user's Docker is exempt.
 check_cmd() {
   local fail=0 uid u loaded
   loaded="$(nft list table inet "$TABLE" 2>/dev/null || true)"
@@ -234,6 +279,13 @@ check_cmd() {
     if grep -Eq "skuid \\{[^}]*\\b$uid\\b" <<<"$loaded" || grep -Eq "skuid $uid\\b" <<<"$loaded"; then echo "PASS $u ($uid) is covered"; else echo "FAIL $u ($uid) is not covered: run apply again"; fail=1; continue; fi
     if runuser -u "$u" -- timeout 5 bash -c 'exec 3<>/dev/tcp/1.1.1.1/443' 2>/dev/null; then echo "FAIL $u reached 1.1.1.1:443"; fail=1; else echo "PASS $u can't reach 1.1.1.1:443"; fi
   done
+  # Their subordinate uids (#740): in the drop, and a process as the first of each range can't get out either.
+  local name lo hi
+  while read -r name lo hi; do
+    [ -n "$name" ] || continue
+    if skuid_holds "$loaded" "$lo" "$hi"; then echo "PASS $name's subordinate uids $lo-$hi are covered"; else echo "FAIL $name's subordinate uids $lo-$hi ($SUBUID) are not covered: run apply again"; fail=1; continue; fi
+    if setpriv --reuid="$lo" --regid="$lo" --clear-groups -- timeout 5 bash -c 'exec 3<>/dev/tcp/1.1.1.1/443' 2>/dev/null; then echo "FAIL uid $lo ($name's subordinate) reached 1.1.1.1:443"; fail=1; else echo "PASS uid $lo ($name's subordinate) can't reach 1.1.1.1:443"; fi
+  done < <(for uid in $uids; do getent passwd "$uid" | awk -F: '{ print $1 ":" $3 }'; done | subuid_entries)
   if [ -n "$nftset" ]; then
     if grep -q "socket cgroupv2 level $LEVEL @$SET accept" <<<"$loaded"; then
       echo "PASS the exception: a unit's cgroup in the set $SET (NFTSet=) may send out"

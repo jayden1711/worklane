@@ -190,12 +190,14 @@ function reach(source: string, allowed: string[]): string[] {
   visit(src);
   return out;
 }
-const PACKET_ALLOWED = ['../brand.js:BRAND', '../backlog/types.js:DoneWhenList', '../events/types.js:EventPayload', '../pr-rules.js:RiskClass', '../receipts.js:receiptLines', '../receipts.js:receiptSummary', '../receipts.js:CheckRecord'];
+const PACKET_ALLOWED = ['../brand.js:BRAND', '../backlog/types.js:DoneWhenList', '../events/types.js:EventPayload', '../path-text.js:shownPath', '../pr-rules.js:RiskClass', '../receipts.js:receiptLines', '../receipts.js:receiptSummary', '../receipts.js:CheckRecord'];
 
 test('no new approval path: the packet and the receipts it uses are text from the record, and reach nothing that approves, merges, runs or calls out', () => {
   const packet = readFileSync(join(repoRoot, 'src', 'coordinator', 'review-packet.ts'), 'utf8');
   assert.deepEqual(reach(packet, PACKET_ALLOWED), []);
   assert.deepEqual(reach(readFileSync(join(repoRoot, 'src', 'receipts.ts'), 'utf8'), ['./backlog/types.js:DoneWhenList']), []);
+  // How a path reads (an eval target, #683): text only, it imports nothing.
+  assert.deepEqual(reach(readFileSync(join(repoRoot, 'src', 'path-text.ts'), 'utf8'), []), []);
   // The check itself catches each way past it an evaluator found, and the obvious others.
   const bypasses: Record<string, string> = {
     'a shell helper from an allowed-looking module': packet.replace("import type { RiskClass } from '../pr-rules.js';", "import type { RiskClass } from '../pr-rules.js';\nimport { sh } from './shared.js';"),
