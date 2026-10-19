@@ -39,7 +39,11 @@ function stateFile(dir: string, key: string, body: unknown): string {
   return f;
 }
 
-test('per credential: what is left and when it resets per resource, the back-off in force, and the top consumers; numbered, never named by the token', async () => {
+test('per credential: what is left and when it resets per resource, the back-off in force, and the top consumers; numbered, never named by the token', async (ctx) => {
+  // A fixed clock, 1 ms before a second boundary: the setup below crosses it (#687). The test read the clock for
+  // a reset time twice, once to set it and once to expect it, and failed whenever a second ticked in between.
+  const boundary = Math.ceil(Date.now() / 1000) * 1000 + 1000;
+  ctx.mock.timers.enable({ apis: ['Date'], now: boundary - 1 });
   const dir = slots();
   const busy = budgetFor('ghs_secret-token-busy', dir);
   const resetCore = at(1800);
@@ -53,6 +57,7 @@ test('per credential: what is left and when it resets per resource, the back-off
   const resetLimited = at(600);
   window(limited, 'core', 10, resetLimited);
   await takes(limited, 'backlog', 4);
+  ctx.mock.timers.tick(2); // the next second
   const before = Date.now();
   limited.pause('secondary_rate_limited', 120);
 
