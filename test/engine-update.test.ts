@@ -79,10 +79,14 @@ test('a retired check (desktop, #744) an existing updates.json still requires: n
   assert.deepEqual(u.evaluateChecks([ok('test'), ok('desktop', { conclusion: 'failure' })], req), { ok: false, final: true, reason: 'required check "desktop" ended failure' });
   assert.deepEqual(u.evaluateChecks([ok('test'), ok('desktop', { conclusion: 'skipped' })], req), { ok: false, final: true, reason: 'required check "desktop" was skipped' }, 'it ran: skipped still refuses');
   assert.equal(u.evaluateChecks([ok('test'), ok('desktop', { status: 'in_progress', conclusion: null })], req).final, false, 'it is running: waited for');
+  // While CI still has the job, every commit gets a run, and it is judged exactly as before.
+  assert.deepEqual(u.evaluateChecks([ok('test'), ok('desktop')], req), { ok: true }, 'it ran green: installs as before');
+  assert.deepEqual(u.evaluateChecks([ok('test'), ok('desktop', { status: 'queued', conclusion: null })], req), { ok: false, final: false, reason: 'required check "desktop" is queued' }, 'it is queued: waited for');
   // The other required checks lose nothing.
   assert.match(u.evaluateChecks([ok('desktop')], req).reason!, /"test" hasn't run/);
   // Retired names alone are no gate: refused as an empty list is, never installed on nothing.
   assert.deepEqual(u.evaluateChecks([ok('test')], ['desktop']), { ok: false, final: true, reason: 'no required checks configured in updates.json but retired ones (desktop): add the checks to require at a root shell (updates.sh --add-check)' });
+  assert.deepEqual(u.evaluateChecks([ok('test'), ok('desktop', { conclusion: 'failure' })], ['desktop']), { ok: false, final: true, reason: 'required check "desktop" ended failure' }, 'retired names alone, and it ran: judged as before');
   assert.deepEqual(u.RETIRED_CHECKS, ['desktop'], 'a fixed list in the installed updater, never read from the commit it judges');
 });
 
