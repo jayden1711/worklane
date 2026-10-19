@@ -231,6 +231,7 @@ export async function replayTask(t: LoadedTask, o: ReplayOptions): Promise<Repla
 
     const cfg = loadConfig(root);
     const state = join(dir, 'state');
+    // The replay's own slot dir, in its state dir: a plain path (src/slot-file.ts takes one), not the machine's.
     const slots = join(state, 'slots');
     mkdirSync(slots, { recursive: true });
     writeSlotFile(join(slots, 'config.json'), JSON.stringify({ max_agents: 1 }));

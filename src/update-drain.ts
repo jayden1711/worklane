@@ -12,8 +12,8 @@
 // before the drain began and is still queued for its slot is stopped at tryTestSlot (src/testrun/slots.ts), which reads
 // it under the slot directory's lock: the updater's flag write and a slot take can't cross there. Agents and the
 // full-run lock read it at tryAgentSlot and fullRunLock (src/slots.ts).
-import { readFileSync } from 'node:fs';
 import { slotsDir, updateDrainPath } from './os/index.js';
+import { readSlotFile, type SlotPathLike } from './slot-file.js';
 
 export interface UpdateDrain {
   /** When the drain began. */
@@ -28,10 +28,10 @@ export interface UpdateDrain {
 export const DRAIN_TTL_MAX_MS = 4 * 3600_000;
 
 /** The drain in force now, or null: none, unreadable, expired, or with an expiry too far ahead to be the updater's. */
-export function updateDrain(dir = slotsDir(), now = Date.now()): UpdateDrain | null {
+export function updateDrain(dir: SlotPathLike = slotsDir(), now = Date.now()): UpdateDrain | null {
   let j: Record<string, unknown>;
   try {
-    j = JSON.parse(readFileSync(updateDrainPath(dir), 'utf8')) as Record<string, unknown>;
+    j = JSON.parse(readSlotFile(updateDrainPath(dir))) as Record<string, unknown>;
   } catch {
     return null;
   }

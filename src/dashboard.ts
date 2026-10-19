@@ -76,6 +76,7 @@ import { isMachineOwner, MACHINE_OWNERS_FILE, machineChangeRefusal, machineOwner
 import { MachineRequestError, machineRequests, requestAddProject, requestMachineChange, requestPolicyChange, settingArgs, MACHINE_EVENTS, type MachineRequest } from './machine-requests.js';
 import { ENGINE_CURRENT, installedEngine, lastCheck, UPDATES_CONFIG, UPDATES_LOG, UPDATES_STATE, updateLog, updatesPanel, updateSettings, type UpdatesDrain } from './updates.js';
 import { updateDrain } from './update-drain.js';
+import type { SlotPathLike } from './slot-file.js';
 import { updaterPlan, updaterSetup } from './updater-setup.js';
 import { applySettings, changeSetting, currentValue, loadLimits, SETTING_KEYS, SettingsError, type SettingKey } from './settings.js';
 import { researchForRun } from './research.js';
@@ -183,7 +184,7 @@ export function settingsView(cfg: Config, routing = routingInEffect({ cfg, polic
 
 
 /** The updater's drain in force now (src/update-drain.ts), with what is still finishing; null when none. Read-only. */
-export function drainView(dir?: string, now = Date.now()): UpdatesDrain | null {
+export function drainView(dir?: SlotPathLike, now = Date.now()): UpdatesDrain | null {
   const d = updateDrain(dir, now);
   if (!d) return null;
   const slots = slotStatus(dir);
@@ -223,7 +224,7 @@ export interface DashboardOptions {
   /** Reads a unit's journal; journalctl as this user when unset. */
   journalReader?: JournalReader;
   /** The machine's slots directory (agent slots and the emergency STOP file); the usual one when unset. */
-  slotsDir?: string;
+  slotsDir?: SlotPathLike;
   /**
    * Who this instance's coordinator is on the machine (its user@host, which starts its test slots' owner); this
    * process's when unset (an instance's dashboard runs as its coordinator user). Tests set it.

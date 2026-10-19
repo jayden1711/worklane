@@ -12,6 +12,7 @@ import type { MachineChange } from '../machine.js';
 import { project } from '../projection.js';
 import { openIncidents, raiseIncident, readIncidents, resolveIncident, type Incident, type Severity, type WatchdogKind } from './incidents.js';
 import { asRoot } from '../os/system-paths.js';
+import type { SlotPathLike } from '../slot-file.js';
 import { authHoldsOf, authIncidentKey, authIncidentOwnerDetail, authIncidentText } from '../claude-auth-failure.js';
 
 export interface Finding {
@@ -35,7 +36,7 @@ export interface Scope {
 }
 
 /** Raise every finding and resolve every open incident in scope that wasn't found. */
-export function reconcile(findings: Finding[], scope: Scope, o: { dir?: string; now?: Date } = {}): { raised: Incident[]; resolved: Incident[] } {
+export function reconcile(findings: Finding[], scope: Scope, o: { dir?: SlotPathLike; now?: Date } = {}): { raised: Incident[]; resolved: Incident[] } {
   const raised: Incident[] = [];
   const resolved: Incident[] = [];
   const opts = { ...(o.dir ? { dir: o.dir } : {}), ...(o.now ? { now: o.now } : {}) };

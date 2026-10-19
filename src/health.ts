@@ -14,6 +14,7 @@ import { directLandProblem } from './direct-land.js';
 import { networkHealth, type NetworkHealth } from './network.js';
 import { providerHostsHealth, type ProviderHostsHealth } from './provider-hosts.js';
 import { githubBudgetHealth, type GitHubBudgetHealth } from './github/budget-health.js';
+import type { SlotPathLike } from './slot-file.js';
 
 export type { MachineStats } from './os/stats.js';
 
@@ -215,7 +216,7 @@ export function suggestions(v: Omit<HealthView, 'suggestions' | 'offsiteBackup' 
 }
 
 /** The whole health view. */
-export function healthView(events: StoredEvent[], machine: MachineStats | null, o: { cores?: number | null; today?: string; diskLabels?: Record<string, string>; now?: Date; /** The machine's update log; read from its file when not given. */ updates?: UpdateEntry[]; /** The network line; read from root's network.json when not given. */ network?: HealthView['network']; /** The instance's agents.yaml, whose providers the provider-hosts line checks against root's providers.json (read now). */ agents?: Parameters<typeof providerHostsHealth>[0]; /** The slot directory whose GitHub budgets are shown; the machine's when not given. */ slotsDir?: string | undefined; /** The GitHub budget line; read from the slot directory when not given (null: a caller that only wants the suggestions). */ githubRate?: HealthView['githubRate'] } = {}): HealthView {
+export function healthView(events: StoredEvent[], machine: MachineStats | null, o: { cores?: number | null; today?: string; diskLabels?: Record<string, string>; now?: Date; /** The machine's update log; read from its file when not given. */ updates?: UpdateEntry[]; /** The network line; read from root's network.json when not given. */ network?: HealthView['network']; /** The instance's agents.yaml, whose providers the provider-hosts line checks against root's providers.json (read now). */ agents?: Parameters<typeof providerHostsHealth>[0]; /** The slot directory whose GitHub budgets are shown; the machine's when not given. */ slotsDir?: SlotPathLike | undefined; /** The GitHub budget line; read from the slot directory when not given (null: a caller that only wants the suggestions). */ githubRate?: HealthView['githubRate'] } = {}): HealthView {
   const started = [...events].reverse().find((e) => e.type === 'coordinator.started')?.payload as { instance?: string } | undefined;
   const since = new Date((o.now ?? new Date()).getTime() - MERGE_DAYS * 86_400_000);
   const base = { instance: started?.instance ?? null, machine, cores: o.cores ?? null, checks: checkTimings(events), usage: { days: usageByDay(events), quotaNote: QUOTA_NOTE }, offsiteBackup: offsiteStatus(events, o.now), merge: mergeMetrics(events, { since }), updateHold: heldUpdate(o.updates ?? updateLog()) };

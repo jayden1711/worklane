@@ -246,6 +246,8 @@ done
 mlog() { printf '{"at":%s,"by":%s,"what":"instance.removed","from":%s,"to":""}\n' "$(json_str "$(date -u +%Y-%m-%dT%H:%M:%SZ)")" "$(json_str "${SUDO_USER:-root}")" "$(json_str "$1")" >> "$MACHINE_CHANGES"; chmod 0644 "$MACHINE_CHANGES"; }
 # Its users' uids, for what they leave behind in the machine's shared places once they're gone (below).
 removed_homes=""
+# Its auto_merge id (root's pointer goes with the items below; the id's switches at the end, when no name points at it).
+rm_id="$(instance_id_of "$name")"
 # Kept in the archive until the removal ends, so a rerun after its users are gone still knows their uids.
 uids_file="$ARCHIVE/$name.uids"
 my_uids="$(for line in "${ITEMS[@]}"; do IFS=$'\t' read -r k w _ <<<"$line"; [ "$k" = user ] && user_exists "$w" && id -u "$w"; done; true)"
@@ -350,12 +352,12 @@ if hub_instances | grep -qx "$name"; then
     echo "the hub served $name alone: left as it is (it shows $name as unreachable); the next add-project rewrites it"
   fi
 fi
-# Last, with its users gone: root's forward records that name it (a rename of it, or to it: instance-rename.sh), so
-# none outlives it and forwards a later instance's auto_merge off; then any kill switch or spare an auto_merge off
-# given to it inside this removal left (one forwarded while its user was going): nothing can name it after this.
-say "root's auto_merge records of $name"
-while IFS= read -r f; do [ -z "$f" ] || { rm -f -- "$f"; echo "removed $f"; }; done < <(forward_records_of "$name")
-if compgen -G "$POLICY_ROOT_DIR/$name.auto-merge-*" >/dev/null; then rm -f -- "$POLICY_ROOT_DIR/$name".auto-merge-*; echo "removed $POLICY_ROOT_DIR/$name.auto-merge-*"; fi
+# Last: its id's kill switches, once no name points at that id (its pointer went with the registry's items, after its
+# users). A rename's other name still points at it, so they stay that name's (#726 round 9).
+if [ -n "$rm_id" ] && ! id_in_use "$rm_id" && [ -e "$POLICY_ROOT_DIR/by_id/$rm_id" ]; then
+  rm -rf --one-file-system -- "$POLICY_ROOT_DIR/by_id/$rm_id"
+  echo "removed $POLICY_ROOT_DIR/by_id/$rm_id ($name's auto_merge switches; no name points at them now)"
+fi
 if [ "${planned:-0}" -gt 0 ] || [ -n "$bundle" ]; then mlog "$name"; fi
 echo
 echo "removed $name. Its history: ${bundle:-exported by an earlier run (in $ARCHIVE)}; what the shared files held: $kept${exp_kept:+; its experiment records: $exp_kept}"

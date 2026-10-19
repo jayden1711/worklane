@@ -15,7 +15,7 @@ import { loadConfig } from '../src/config/load.js';
 import { EventLog } from '../src/events/log.js';
 import { instanceAutoMerge, loadInstanceSetup, readPolicy } from '../src/instance.js';
 import { processIdentity } from '../src/os/index.js';
-import { armedSwitches, autoMergeKilled, killAutoMerge, killSwitchPath, spareSwitchPath } from '../src/policy-kill.js';
+import { aliasInstance, armedSwitches, autoMergeKilled, idDir, instanceId, killAutoMerge } from '../src/policy-kill.js';
 import { applyPolicy, POLICY_KEYS, PolicyEditError, policyForm } from '../src/policy-edit.js';
 import { changeSetting, SETTING_KEYS, settingsReader, SettingsError } from '../src/settings.js';
 import { decodePolicyValue, encodePolicyValue, HELPER_ONLY, POLICY_ROOT_DIR, POLICY_SET_KEYS, readPolicyChecked, setPolicyRootUid } from '../src/policy-gate.js';
@@ -585,8 +585,10 @@ test("rename: a recorded instance's policy.yaml is root's and recorded under the
   const n = machineInstance('newname', readFileSync(o.file, 'utf8'));
   const calls = join(n.T, 'calls');
   const carry = (from: string, to: string) => spawnSync('bash', ['-c', 'source "$1"; POLICY_ROOT_DIR="$2"; CALLS="$3"; own_policy() { echo "own_policy $*" >> "$CALLS"; }; carry_policy_root "$4" "$5"', '_', lib, markers, calls, from, to], { encoding: 'utf8' });
-  // Root's auto_merge kill switch under the old name: carried too, so a rename never turns auto_merge back on.
-  writeFileSync(join(markers, 'oldname.auto-merge-off'), 'auto_merge off\n', { mode: 0o644 });
+  // Root's auto_merge kill switch armed under the old name: the rename's start points the new name at the same id
+  // (round 9), so it is the new name's too, and a rename never turns auto_merge back on.
+  killAutoMerge('oldname', markers);
+  aliasInstance('oldname', 'newname', markers);
   assert.equal(carry('oldname', 'newname').status, 0);
   assert.equal(readFileSync(calls, 'utf8'), 'own_policy newname\n');
   assert.equal(autoMergeKilled('newname', markers), true);
@@ -836,14 +838,21 @@ test("auto_merge off is root's kill switch alone: it opens no policy.yaml and no
   }
   assert.ok(touched.length > 0);
   assert.deepEqual(touched.filter((p) => /policy\.yaml$|\.lock$/.test(p) || p === m.dir || p.startsWith(`${m.dir}/`)), [], 'no policy.yaml, no lock, nothing in the instance home');
-  // The switch: root's (the stand-in), 0644, in root's 0755 directory: the coordinator user can't write there.
+  // The switch: root's (the stand-in), 0644, in root's 0755 directories (the id's, under root's record directory),
+  // reached through root's 0644 pointer: the coordinator user can't write any of them.
   const switches = armedSwitches('kill');
   assert.equal(switches.length, 1, 'one switch, of its own');
-  const flag = join(POLICY_ROOT_DIR, switches[0]!);
-  assert.ok(flag.startsWith(`${killSwitchPath('kill')}.`));
+  const flag = switches[0]!;
+  const id = instanceId('kill');
+  assert.ok(id && 'id' in id);
+  const d = idDir(id.id);
+  assert.ok(flag.startsWith(join(d, 'auto-merge-off.')));
   assert.equal(statSync(flag).mode & 0o777, 0o644);
   assert.equal(statSync(flag).uid, me);
   assert.equal(statSync(POLICY_ROOT_DIR).mode & 0o777, 0o755);
+  assert.equal(statSync(d).mode & 0o777, 0o755);
+  assert.equal(statSync(join(POLICY_ROOT_DIR, 'by_id')).mode & 0o777, 0o755);
+  assert.equal(statSync(join(POLICY_ROOT_DIR, 'kill.id')).mode & 0o777, 0o644);
   assert.equal(asRoot(() => readPolicy(m.file)).policy?.auto_merge, false);
   assert.equal(asRoot(() => policyForm(m.file)).fields.find((f) => f.key === 'auto_merge')!.value, false, 'the form shows off');
   // Root's ON clears it (a coordinator's ON is refused by #770's HELPER_ONLY).
@@ -854,11 +863,11 @@ test("auto_merge off is root's kill switch alone: it opens no policy.yaml and no
   // A name that isn't an instance's never names a file (a path outside root's directory, a user that doesn't exist).
   const users = { ...m.deps, uid: (u: string) => (u === 'wl-kill' ? me : null) };
   for (const bad of ['../kill', 'kill/x', '.', 'Kill', 'nouser']) assert.throws(() => setPolicy(bad, 'auto_merge', 'off', 'wl-kill', users), /not an instance name|no instance/, bad);
-  assert.equal(existsSync(join(POLICY_ROOT_DIR, '..', 'kill.auto-merge-off')), false);
+  assert.equal(existsSync(join(POLICY_ROOT_DIR, '..', 'kill.id')), false);
   assert.throws(() => killAutoMerge('../kill'), /not an instance name/);
   // Anything at an armed name counts as off (fail closed): a link, a directory, a name that says "disarmed". Only the
   // spare's own name is never counted, and a spare beside a switch hides nothing.
-  assert.equal(existsSync(spareSwitchPath('kill')), true, 'a disarmed spare is there for the next OFF');
+  assert.equal(existsSync(join(d, 'auto-merge-spare')), true, 'a disarmed spare is there for the next OFF');
   assert.equal(autoMergeKilled('kill'), false);
   symlinkSync('/nonexistent', flag);
   assert.equal(autoMergeKilled('kill'), true);
@@ -866,6 +875,6 @@ test("auto_merge off is root's kill switch alone: it opens no policy.yaml and no
   mkdirSync(flag);
   assert.equal(autoMergeKilled('kill'), true);
   renameSync(flag, join(m.T, 'gone-dir'));
-  writeFileSync(`${killSwitchPath('kill')}.disarmed`, '');
+  writeFileSync(join(d, 'auto-merge-off.disarmed'), '');
   assert.equal(autoMergeKilled('kill'), true, 'an armed name, whatever follows');
 });

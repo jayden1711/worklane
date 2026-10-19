@@ -9,6 +9,7 @@ import { BRAND } from '../brand.js';
 import { outboundEnv } from '../network.js';
 import { safeProjectEnv } from '../project-env.js';
 import { withoutPushGateHatch } from '../guardrails/push-hook.js';
+import { readRegularSlotFile, slotFile, slotPathOf, statfsSlotDir, type SlotPath, type SlotPathLike } from '../slot-file.js';
 import { devSlotsPath, etcPath, markTestRun, testSlotsRefusal, TestSlotsRefused, varLibPath } from './system-paths.js';
 
 export type OsKind = 'macos' | 'linux' | 'windows-wsl' | 'windows';
@@ -387,28 +388,12 @@ export function fileAccess(file: string): { kind: 'missing' } | { kind: 'hidden'
  * checked is what is read. Refused (by kind): no such file, unreadable, a symlink, not a regular file, or over
  * `maxBytes`. Native Windows has no owners to check: unsupported.
  */
-export function readRegularFile(file: string, maxBytes: number): { kind: 'missing' | 'hidden' | 'unsupported' | 'symlink' | 'not-file' } | { kind: 'too-big'; size: number } | { kind: 'file'; uid: number; mode: string; text: string } {
+export function readRegularFile(file: SlotPathLike, maxBytes: number): { kind: 'missing' | 'hidden' | 'unsupported' | 'symlink' | 'not-file' } | { kind: 'too-big'; size: number } | { kind: 'file'; uid: number; mode: string; text: string } {
   if (process.platform === 'win32') return { kind: 'unsupported' };
-  let fd: number;
-  try {
-    // INVARIANT: O_NOFOLLOW, so a symlink is refused rather than followed (#391 follow-up).
-    fd = openSync(file, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | (fsConstants.O_NONBLOCK ?? 0));
-  } catch (e) {
-    const code = (e as NodeJS.ErrnoException).code;
-    if (code === 'ELOOP' || code === 'EMLINK') return { kind: 'symlink' };
-    return code === 'EACCES' || code === 'EPERM' ? { kind: 'hidden' } : { kind: 'missing' };
-  }
-  try {
-    const s = fstatSync(fd);
-    if (!s.isFile()) return { kind: 'not-file' };
-    if (s.size > maxBytes) return { kind: 'too-big', size: s.size };
-    const buf = Buffer.alloc(maxBytes + 1);
-    const n = readSync(fd, buf, 0, maxBytes + 1, 0);
-    if (n > maxBytes) return { kind: 'too-big', size: n };
-    return { kind: 'file', uid: s.uid, mode: (s.mode & 0o777).toString(8).padStart(4, '0'), text: buf.subarray(0, n).toString('utf8') };
-  } finally {
-    closeSync(fd);
-  }
+  // INVARIANT: O_NOFOLLOW, so a symlink is refused rather than followed (#391 follow-up). The open, the checks and the
+  // read are src/slot-file.ts's, so a slot path (#772) can be read too, and no descriptor of one (whose
+  // /proc/self/fd link names its path: #806 review, A2) ever leaves that module.
+  return readRegularSlotFile(file, maxBytes);
 }
 
 /** Whether an OS user exists on this machine (POSIX; always false on native Windows). */
@@ -823,7 +808,8 @@ export function childEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv 
  * cleaned of old files by tmp cleaners (systemd-tmpfiles after about 30
  * days), which would drop the cap and lock files of a long-running machine.
  */
-export const SYSTEM_SLOTS = { dir: varLibPath('agent-slots'), config: etcPath('slots.json') };
+// Frozen: a module that set SYSTEM_SLOTS.dir to a guess would have slotsDir mark the slot dir by it (#806 round 4).
+export const SYSTEM_SLOTS = Object.freeze({ dir: varLibPath('agent-slots'), config: etcPath('slots.json') });
 
 /**
  * The engine updater's drain flag (scripts/machine/<cli>-update.cjs, src/update-drain.ts): with the system slot
@@ -831,20 +817,67 @@ export const SYSTEM_SLOTS = { dir: varLibPath('agent-slots'), config: etcPath('s
  * it (the slot directory itself is group-writable); with any other slot directory (development, tests), inside it.
  */
 export const UPDATE_DRAIN_FILE = varLibPath('update-drain.json');
-export function updateDrainPath(dir = slotsDir(), system = SYSTEM_SLOTS): string {
-  return dir === system.dir ? UPDATE_DRAIN_FILE : join(dir, 'update-drain.json');
+export function updateDrainPath(dir?: SlotPath, system?: typeof SYSTEM_SLOTS): SlotPathLike;
+export function updateDrainPath(dir: string, system?: typeof SYSTEM_SLOTS): string;
+export function updateDrainPath(dir: SlotPathLike, system?: typeof SYSTEM_SLOTS): SlotPathLike;
+export function updateDrainPath(dir: SlotPathLike = slotsDir(), system = SYSTEM_SLOTS): SlotPathLike {
+  return isSystemSlots(dir, system) ? UPDATE_DRAIN_FILE : slotFile(dir, 'update-drain.json');
 }
 
 /**
+ * The slot paths slotsDir made for the machine's system directory (SYSTEM_SLOTS, this module's own): set when made,
+ * never by comparing with a path or a `system` a caller passed (#806 review, A3 and the round-3 mark oracle).
+ */
+const systemSlotDirs = new WeakSet<SlotPath>();
+
+/**
+ * Whether `dir` is the system slot directory. A slot path is, when slotsDir made it as one. It is never compared with
+ * a caller's `system`: that would let any module test a guessed path against the slot dir (#806 review, A3). A plain
+ * string is compared as written: it is the caller's own path, and says nothing about the slot dir.
+ */
+const isSystemSlots = (dir: SlotPathLike, system: typeof SYSTEM_SLOTS) => (typeof dir === 'string' ? dir === system.dir : systemSlotDirs.has(dir));
+
+/**
+ * The machine's slot directory, as a slot path (#772): only src/slot-file.ts reads, writes or removes what it names,
+ * so it can't reach any other writer. This module is the only one that makes one (test/slot-path.test.ts), and the
+ * only one that reads where it is (AGENT_SLOTS_DIR, SYSTEM_SLOTS).
+ *
  * INVARIANT (#669): in a test run, only a directory inside the test machine (test/isolate.ts); anything else throws
  * TestSlotsRefused before a file is opened (src/os/system-paths.ts testSlotsRefusal), so no test reaches the machine's
  * own slots, STOP, budgets or incidents through a default. Outside a test run, as always.
  */
-export function slotsDir(system = SYSTEM_SLOTS): string {
+export function slotsDir(): SlotPath {
+  const dir = resolvedSlotsDir(SYSTEM_SLOTS);
+  // One value while the slot dir stays where it is, so slotsDir() === slotsDir() (the budget's prune throttle keys
+  // on it). It is this function's own: every other slot path, whatever path it names, is a fresh value equal to none
+  // (src/slot-file.ts), so no caller can test a guess against this one (#806 round 6).
+  if (current?.dir !== dir) {
+    const p = slotPathOf(dir);
+    if (dir === SYSTEM_SLOTS.dir) systemSlotDirs.add(p);
+    current = { dir, p };
+  }
+  return current.p;
+}
+
+/** The slot dir slotsDir resolved last, and its value. */
+let current: { dir: string; p: SlotPath } | undefined;
+
+/** The slot dir for `system`, refused in a test run unless it is inside the test machine (#669). */
+function resolvedSlotsDir(system: typeof SYSTEM_SLOTS): string {
   const dir = unguardedSlotsDir(system);
   const refusal = testSlotsRefusal(dir);
   if (refusal) throw new TestSlotsRefused(refusal);
   return dir;
+}
+
+/**
+ * slotsDir with the system locations a test gives (test/slots.test.ts): the seam has its own name, which no src/
+ * module but this one may name (test/slot-path.test.ts), so slotsDir itself takes nothing a caller could choose.
+ * It gives a fresh value every call, equal to no other slot path, and never marks one as the system dir: only
+ * slotsDir does, for the machine's own SYSTEM_SLOTS (#806 rounds 3 and 6).
+ */
+export function slotsDirFor(system: typeof SYSTEM_SLOTS): SlotPath {
+  return slotPathOf(resolvedSlotsDir(system));
 }
 
 function unguardedSlotsDir(system: typeof SYSTEM_SLOTS): string {
@@ -859,10 +892,13 @@ function unguardedSlotsDir(system: typeof SYSTEM_SLOTS): string {
  * set; else the system config file when the system slot directory is in
  * use and the file exists; else config.json in the slot directory.
  */
-export function slotsConfigPath(dir = slotsDir(), system = SYSTEM_SLOTS): string {
+export function slotsConfigPath(dir?: SlotPath, system?: typeof SYSTEM_SLOTS): SlotPathLike;
+export function slotsConfigPath(dir: string, system?: typeof SYSTEM_SLOTS): string;
+export function slotsConfigPath(dir: SlotPathLike, system?: typeof SYSTEM_SLOTS): SlotPathLike;
+export function slotsConfigPath(dir: SlotPathLike = slotsDir(), system = SYSTEM_SLOTS): SlotPathLike {
   if (process.env.AGENT_SLOTS_CONFIG) return process.env.AGENT_SLOTS_CONFIG;
-  if (dir === system.dir && existsSync(system.config)) return system.config;
-  return join(dir, 'config.json');
+  if (isSystemSlots(dir, system) && existsSync(system.config)) return system.config;
+  return slotFile(dir, 'config.json');
 }
 
 export interface ServiceSpec {
@@ -1125,8 +1161,8 @@ export function executableName(base: string): string {
 }
 
 /** Free disk on the volume holding `path`: percent and GB. */
-export function diskFree(path: string): { freePct: number; freeGb: number; totalGb: number } {
-  const st = statfsSync(path);
+export function diskFree(path: SlotPathLike): { freePct: number; freeGb: number; totalGb: number } {
+  const st = statfsSlotDir(path); // statfsSync, through src/slot-file.ts so the slot dir (#772) can be measured too
   const total = st.blocks * st.bsize;
   const free = st.bavail * st.bsize;
   return { freePct: total ? (free / total) * 100 : 0, freeGb: free / 1e9, totalGb: total / 1e9 };

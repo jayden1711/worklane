@@ -133,26 +133,15 @@ if [ -n "$abort" ]; then
   done_step services && refuse "$new has started already: rename it back instead (instance-rename.sh $new $old)"
   exec 9> "$ADD_PROJECT_LOCK"
   flock -n 9 || refuse "an add-project, instance-remove or instance-rename is running on this machine; wait for it to finish"
-  # Nothing changes while anything of <new> can run (a services step that failed after service.sh started its
-  # coordinator): the abort would take <new>'s auto_merge switches from a running instance (#726 round 8).
-  running="$(instance_can_run "$new")"
-  if [ -n "$running" ]; then
-    echo "refused: $new can run, so it may have run already; nothing changed:" >&2
-    printf '%s\n' "$running" | sed 's/^/  /' >&2
-    echo "Finish the rename instead (fix the failed step, then: sudo bash $here/instance-rename.sh $old $new --yes); to go back, rename it back once it is done. To stop $new meanwhile: sudo systemctl disable --now worklane-$new.service worklane-dashboard-$new.service" >&2
-    exit 1
-  fi
   say "abort: $new goes, $old's records and unit come back"
-  # The forward ends first: from here an auto_merge off given to the old name arms the old name alone, and says done
-  # only once it is (src/policy-kill.ts). One given during the rename armed the new name too: moved back to the old
-  # name (no new space), before the new one goes. A move that fails stops here (errexit), before the new name's go.
-  rename_forward_done "$old"
-  move_auto_merge_off "$new" "$old"
+  # Root's auto_merge switches need nothing: both names share one id (instance_alias), so an OFF given to either during
+  # the rename is the old name's already. <new>'s pointer goes with <new> (instance-remove.sh, which refuses while it
+  # runs: its pointer then stays, and it reads the shared switches), or below when it has no user yet.
   if done_step records; then records rekey "$new" "$old" "$ARCHIVE/$new-abort-$(date -u +%Y%m%dT%H%M%SZ).records.json"; [ ! -f "/var/lib/worklane/init/$old.json" ] || chgrp "wl-$old" "/var/lib/worklane/init/$old.json"; fi
   # <new> never ran: its history is <old>'s, exported already.
   if done_step users; then flock -u 9; bash "$here/instance-remove.sh" "$new" --yes --exported "$(sed -n 's/^bundle=//p' "$progress" | tail -1)"; flock -n 9 || refuse "lost the lock"
-  # No user of <new>'s yet, so nothing of it runs: the spare rename_forward made for it goes (instance-remove.sh takes it otherwise).
-  else rm -f -- "$POLICY_ROOT_DIR/$new".auto-merge-*; fi
+  # No user of <new>'s yet, so nothing of it runs: its pointer goes (instance-remove.sh takes it otherwise).
+  else rm -f -- "$POLICY_ROOT_DIR/$new.id"; fi
   if [ -f "$parked" ]; then mv -f "$parked" "$unit"; systemctl daemon-reload; echo "put back $unit ($old stays stopped: sudo systemctl start worklane-$old.service)"; fi
   rm -f "$progress"
   echo "aborted: $old is as it was, stopped; $new is gone"
@@ -213,14 +202,15 @@ fi
 install -d -o root -g root -m 0700 "$RENAMES" "$ARCHIVE"
 [ -n "$started" ] || printf 'repo=%s\n' "$repo" > "$progress"
 chmod 0600 "$progress"
-# From here until the old name's removal is done: an auto_merge off given to the old name arms the new name too.
-# (Not again on a rerun once that removal is done: it would make a record and a spare for a name that is gone.)
-done_step remove || rename_forward "$old" "$new"
+# From here both names are one instance's auto_merge switches: the new name's id pointer holds the old one's id (made
+# now, with its spare, if the old name had none), so the rename never carries, forwards or moves a switch. Not again
+# on a rerun once the old name's removal is done (it would make a pointer for a name that is gone).
+done_step remove || instance_alias "$old" "$new"
 step_failed() {
   local s="$1"
   echo >&2
   echo "the rename stopped at step $s (above). Go on, once that is fixed: sudo bash $here/instance-rename.sh $old $new --yes" >&2
-  if ! done_step services && [ -z "$(instance_can_run "$new")" ]; then echo "Or undo it all ($new removed, $old as it was, stopped): sudo bash $here/instance-rename.sh $old $new --abort" >&2
+  if ! done_step services; then echo "Or undo it all ($new removed, $old as it was, stopped): sudo bash $here/instance-rename.sh $old $new --abort" >&2
   else echo "$new runs already: to go back, rename it back once this one is done (instance-rename.sh $new $old)" >&2; fi
 }
 run_step() {
@@ -353,8 +343,6 @@ step_services() {
   v="$(old_limit MemoryHigh)"; [[ "$v" =~ ^[0-9]+[KMGT]?$|^[0-9]+%$|^infinity$ ]] && args+=(--memory-high "$v")
   v="$(old_limit CPUWeight)"; [[ "$v" =~ ^[0-9]+$ ]] && args+=(--cpu-weight "$v")
   v="$(old_limit TasksMax)"; [[ "$v" =~ ^[0-9]+$ ]] && args+=(--tasks-max "$v")
-  # An auto_merge off given to the old name since the home step: the new name's too, before its coordinator starts.
-  carry_auto_merge_off "$old" "$new"
   bash "$here/service.sh" "$new" "${args[@]}"
   names="$({ helper_instances; echo "$new"; } | sort -u | while read -r n; do if user_exists "wl-$n"; then echo "$n"; fi; done | tr '\n' ' ')"
   # shellcheck disable=SC2086 # one word per instance name
@@ -380,8 +368,6 @@ step_keep() {
 step_remove() {
   # instance-remove.sh takes the same machine lock: let go of it for the removal, and take it back after.
   flock -u 9
-  # Any auto_merge off given to the old name until now: the new name's too, before the old name's switches go.
-  carry_auto_merge_off "$old" "$new"
   bash "$here/instance-remove.sh" "$old" --yes
   flock -n 9 || { echo "another add-project, instance-remove or instance-rename took the machine lock"; return 1; }
   rm -f "$parked"
@@ -389,8 +375,6 @@ step_remove() {
 
 drops="$(dropped)"
 for s in "${STEPS[@]}"; do run_step "$s"; done
-# The old name is gone (its user last): an auto_merge off can no longer name it, so no forward is needed.
-rename_forward_done "$old"
 printf 'at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$progress"
 mark done
 printf '{"at":%s,"by":%s,"what":"instance.renamed","from":%s,"to":%s}\n' "$(json_str "$(date -u +%Y-%m-%dT%H:%M:%SZ)")" "$(json_str "${SUDO_USER:-root}")" "$(json_str "$old")" "$(json_str "$new")" >> "$MACHINE_CHANGES"

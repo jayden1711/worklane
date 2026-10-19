@@ -484,8 +484,12 @@ test("the policy step's text says auto_merge off while root's kill switch is arm
   writeFileSync(file, readFileSync(file, 'utf8').replace('auto_merge: false', 'auto_merge: true'));
   const detail = () => m.run().events.find((e) => e.step === 'policy' && e.state === 'done')!.detail;
   assert.match(detail(), /^auto_merge on, /, 'no switch: as policy.yaml says');
-  mkdirSync(join(m.T, 'policy-root'), { recursive: true });
-  writeFileSync(join(m.T, 'policy-root', 'alpha.auto-merge-off.1700000000000-42-abcd'), '');
+  // Root's id pointer and an armed switch in that id's directory (src/policy-kill.ts, round 9).
+  const id = '0123456789abcdef0123456789abcdef';
+  mkdirSync(join(m.T, 'policy-root', 'by_id', id), { recursive: true });
+  writeFileSync(join(m.T, 'policy-root', 'alpha.id'), `${id}\n`);
+  assert.match(detail(), /^auto_merge on, /, 'an id with no switch armed: as policy.yaml says');
+  writeFileSync(join(m.T, 'policy-root', 'by_id', id, 'auto-merge-off.1700000000000-42-abcd'), '');
   assert.match(detail(), /^auto_merge off \(root's kill switch\), /);
 });
 

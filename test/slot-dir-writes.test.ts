@@ -48,6 +48,7 @@ import { test } from 'node:test';
 import { pathToFileURL } from 'node:url';
 import ts from 'typescript';
 import type { SlotWrite, writeSlotFile } from '../src/slot-file.js';
+import { readSlotFile, type SlotPathLike } from '../src/slot-file.js';
 import { GitHubBudget } from '../src/github/budget.js';
 import { IntakeConfig } from '../src/intake/report.js';
 import { claimDiscord } from '../src/intake/discord-claims.js';
@@ -733,7 +734,10 @@ test("lint: a reviewed writer that writes directly is reported, even a temp file
 test('lint: a write in a pass-through module from a parameter (budget-health read(), #676) is reported', () => {
   const files = srcFiles();
   const before = files.get('src/github/budget-health.ts')!;
-  const mutant = before.replace('    const file = join(dir, name);\n', "    const file = join(dir, name);\n    writeFileSync(join(dir, name), '{}');\n").replace("import { lstatSync, readdirSync } from 'node:fs';", "import { lstatSync, readdirSync, writeFileSync } from 'node:fs';");
+  // Since #772 budget-health reads through src/slot-file.ts and imports no fs: the mutant brings its own import.
+  const anchors = ['    const file = slotFile(dir, name);\n', "import { readRegularFile, slotsDir } from '../os/index.js';\n"];
+  for (const a of anchors) assert.equal(before.split(a).length, 2, `the mutation's anchor is in budget-health.ts once: ${a}`);
+  const mutant = before.replace(anchors[0]!, `${anchors[0]!}    writeFileSync(join(dir, name), '{}');\n`).replace(anchors[1]!, `import { writeFileSync } from 'node:fs';\nimport { join } from 'node:path';\n${anchors[1]!}`);
   assert.notEqual(mutant, before, 'the mutation applies');
   files.set('src/github/budget-health.ts', mutant);
   const found = lines(lintSlotWrites(files), 'src/github/budget-health.ts');
@@ -1017,7 +1021,7 @@ const leftoverTemp = (path: string) => {
   chmodSync(path, 0o444);
 };
 
-const json = (p: string) => JSON.parse(readFileSync(p, 'utf8')) as Record<string, unknown>;
+const json = (p: SlotPathLike) => JSON.parse(readSlotFile(p)) as Record<string, unknown>;
 
 /** The temp files in a dir: none is left once a write is done (a leftover planted by the test aside). */
 const temps = (dir: string) => readdirSync(dir).filter((f) => f.endsWith('.tmp')).sort();

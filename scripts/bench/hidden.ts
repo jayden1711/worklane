@@ -61,8 +61,46 @@ export function taskView(row: TaskRow, key: string): TaskView {
 /** The fields no container, agent or evaluator may see (design section 6.1), plus the instance id (it names the upstream PR). */
 export const HIDDEN_FIELDS = ['patch', 'test_patch', 'FAIL_TO_PASS', 'PASS_TO_PASS', 'hints_text', 'instance_id', 'difficulty'] as const;
 
-/** A patch's added lines (`+x`, not the `+++ b/file` header), without the `+`. */
-const isAdded = (l: string) => l.startsWith('+') && !l.startsWith('+++ ');
+/** A hunk's header, `@@ -a,b +c,d @@`: b and d (1 when left out) are its old-side and new-side line counts. */
+const HUNK = /^@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@/;
+
+/**
+ * Which lines of a patch are added lines (`+x`).
+ * INVARIANT: a `+++ ` line is a file name only right after its file's `--- ` line, outside any hunk (#797).
+ * In a hunk it is an added line starting "++ ". A hunk ends where its counts say, so a `--- ` line in it opens no header.
+ * One with no name after it is added too, as it was before (#804): git never writes it, so treating it as added fails closed.
+ * `main` is what 682c8ce5 read as added: every `+` line but a name-like one (plusName). `added` holds all of those.
+ */
+function addedLines(lines: readonly string[]): { added: boolean[]; main: boolean[] } {
+  let old = 0;
+  let neu = 0;
+  let afterOldName = false;
+  const step = (l: string, nameLine: boolean, plusName: boolean): boolean => {
+    if (old > 0 || neu > 0) {
+      if (l.startsWith('+')) return (neu--, true);
+      if (l.startsWith('-')) return (old--, false);
+      // A context line; a blank one may have lost its leading space (CR too).
+      if (l.startsWith(' ') || l.trimEnd() === '') return (old--, neu--, false);
+      if (l.startsWith('\\')) return false;
+      // WHY: a line no hunk holds (a hand-cut patch's counts ran long): the hunk ends here, and this line is read as outside one.
+      old = neu = 0;
+    }
+    const h = HUNK.exec(l);
+    if (h) [old, neu] = [Number(h[1] ?? 1), Number(h[2] ?? 1)];
+    else if (l.startsWith('--- ')) afterOldName = true;
+    return !h && l.startsWith('+') && !(nameLine && plusName);
+  };
+  const added: boolean[] = [];
+  const main: boolean[] = [];
+  for (const l of lines) {
+    const nameLine = afterOldName;
+    afterOldName = false;
+    const plusName = l.trimEnd().startsWith('+++ ');
+    main.push(l.startsWith('+') && !plusName);
+    added.push(step(l, nameLine, plusName));
+  }
+  return { added, main };
+}
 
 /**
  * Pieces of a hidden value the argv scan looks for: the whole value (at least 8 characters), each added line of a
@@ -70,10 +108,11 @@ const isAdded = (l: string) => l.startsWith('+') && !l.startsWith('+++ ');
  */
 function pieces(field: (typeof HIDDEN_FIELDS)[number], value: string): string[] {
   if (field === 'patch' || field === 'test_patch') {
-    return value
-      .split('\n')
+    const lines = value.split('\n');
+    const { added } = addedLines(lines);
+    return lines
       // Added lines only: a removed line is in the base commit, which the container already holds.
-      .filter(isAdded)
+      .filter((_, i) => added[i])
       .map((l) => l.slice(1).trim())
       .filter((l) => l.length >= 24);
   }
@@ -150,12 +189,43 @@ function windows(lines: readonly string[], imports?: readonly boolean[]): string
 const IMPORT = /^(import\s+\S|from\s+\S+\s+import\b)/;
 /** Whether an import statement is still open: inside `from a import (` until its `)`, or after a trailing `\`. */
 type ImportOpen = 'paren' | 'slash' | undefined;
+/** A line inside an open `from a import (`: names (`a`, `a as b`) and commas, maybe its `)`, maybe a comment. */
+const NAME = String.raw`[A-Za-z_]\w*(?:\s+as\s+[A-Za-z_]\w*)?`;
+const PAREN_NAMES = new RegExp(String.raw`^(?:${NAME}\s*,\s*)*(?:${NAME}\s*)?\)?\s*(?:#.*)?$`);
 /** Whether `line` is part of an import statement, given what is open above it; and what is open after it. */
-function importStep(line: string, open: ImportOpen): [boolean, ImportOpen] {
+type ImportStep = (line: string, open: ImportOpen) => [boolean, ImportOpen];
+/** Outside a paren: an import's first line, or a line after a trailing `\`. */
+const openStep = (t: string, open: ImportOpen): [boolean, ImportOpen] =>
+  open !== 'slash' && !IMPORT.test(t) ? [false, undefined] : [true, t.endsWith('\\') ? 'slash' : t.includes('(') && !t.includes(')') ? 'paren' : undefined];
+/** WHY: only names or the `)` go on in an open paren; any other line (code, a stray "(" in a comment) ends it (#804). */
+const namesStep: ImportStep = (line, open) => {
   const t = line.trim();
-  if (open === 'paren') return [true, t.includes(')') ? undefined : 'paren'];
-  if (open !== 'slash' && !IMPORT.test(t)) return [false, undefined];
-  return [true, t.endsWith('\\') ? 'slash' : t.includes('(') && !t.includes(')') ? 'paren' : undefined];
+  return open === 'paren' && PAREN_NAMES.test(t) ? [true, t.includes(')') ? undefined : 'paren'] : openStep(t, open);
+};
+/** 682c8ce5's rule: an open paren goes on through any line until one holding `)`. */
+const mainStep: ImportStep = (line, open) => {
+  const t = line.trim();
+  return open === 'paren' ? [true, t.includes(')') ? undefined : 'paren'] : openStep(t, open);
+};
+
+/**
+ * Whether each line of a patch is an import line, read with `step` from the new side (context and `added` lines). A
+ * removed line is skipped; any other line (a hunk or file header) closes what is open.
+ */
+function importLines(lines: readonly string[], added: readonly boolean[], step: ImportStep): boolean[] {
+  let open: ImportOpen;
+  return lines.map((raw, i) => {
+    const l = raw.trimEnd();
+    if (l === '') return false;
+    if (!added[i] && !l.startsWith(' ')) {
+      if (!l.startsWith('-')) open = undefined;
+      return false;
+    }
+    if (l.slice(1).trim() === '') return false;
+    let isImport: boolean;
+    [isImport, open] = step(l.slice(1), open);
+    return isImport;
+  });
 }
 
 /**
@@ -169,29 +239,27 @@ function testPatchRuns(patch: string): Set<string> {
   const out = new Set<string>();
   let run: string[] = [];
   let imports: boolean[] = [];
-  let open: ImportOpen;
   const flush = () => {
     for (const w of windows(run, imports)) out.add(w);
     run = [];
     imports = [];
   };
-  for (const raw of patch.split('\n')) {
+  const lines = patch.split('\n');
+  const { added, main } = addedLines(lines);
+  // INVARIANT: an import line here is one under 682c8ce5's rule (its added lines) too, so no window it refused is left out (#804).
+  const strict = importLines(lines, added, namesStep);
+  const loose = importLines(lines, main, mainStep);
+  for (const [i, raw] of lines.entries()) {
     const l = raw.trimEnd();
     if (l === '') continue;
-    const added = isAdded(l);
-    if (!added) flush();
-    if (!added && !l.startsWith(' ')) {
-      // A removed line isn't on the new side; a hunk or file header starts a new one.
-      if (!l.startsWith('-')) open = undefined;
+    if (!added[i]) {
+      flush();
       continue;
     }
     const line = l.slice(1);
     if (line.trim() === '') continue;
-    let isImport: boolean;
-    [isImport, open] = importStep(line, open);
-    if (!added) continue;
     run.push(line);
-    imports.push(isImport);
+    imports.push(strict[i]! && loose[i]!);
   }
   flush();
   return out;

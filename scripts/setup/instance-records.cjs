@@ -89,9 +89,9 @@ const ITEMS = [
   { kind: 'user', rename: 'new', what: 'wl-<name>-eval', by: 'instance.sh --eval' },
   { kind: 'user', rename: 'new', what: 'wl-<name>-agent', by: 'instance.sh' },
   { kind: 'user', rename: 'new', what: 'wl-<name>', by: 'instance.sh (its home: the instance state, its App key and credentials)' },
-  // After the instance's users (#726 round 7): while wl-<name> is there it can still start, so an auto_merge off for it
-  // must still find its switch or its spare (no new space); once wl-<name> is gone, nothing runs under the name.
-  { kind: 'glob', rename: 'new', what: '/etc/worklane/policy-root/<name>.auto-merge-', by: "worklane policy set <name> auto_merge off (root's kill switches, <name>.auto-merge-off.*: auto_merge off whatever policy.yaml says) and root's disarmed spare (<name>.auto-merge-spare); instance-rename.sh carries the switches to the new name, at its home step, before the new service starts and before the old name's removal" },
+  // After the instance's users (#726): while wl-<name> is there it can still start, so an auto_merge off for it must
+  // still find its id. Its id's switches (policy-root/by_id/<id>/) go at the removal's end, once no name points at them.
+  { kind: 'path', rename: 'new', what: '/etc/worklane/policy-root/<name>.id', by: "worklane policy own, or the first auto_merge off (root's pointer to the instance's id: its kill switches live in policy-root/by_id/<id>/); instance-rename.sh points the new name at the same id at its start (policy alias), so no switch is ever carried" },
   { kind: 'group', rename: 'new', what: 'wl-<name>-work', by: 'instance.sh' },
   { kind: 'group', rename: 'drop', note: "its MCP broker isn't moved: mcp-broker.sh <new>, then install its servers' secrets again", what: 'wl-<name>-mcpc', by: "mcp-broker.sh (the broker's client socket)" },
   { kind: 'group', rename: 'drop', note: "its MCP broker isn't moved: mcp-broker.sh <new>, then install its servers' secrets again", what: 'wl-<name>-mcpctl', by: "mcp-broker.sh (the broker's control socket)" },
