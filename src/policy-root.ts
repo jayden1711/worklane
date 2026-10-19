@@ -280,9 +280,7 @@ export function setPolicy(instance: string, key: string, arg: string, by: string
   const markers = d.markerDir ?? POLICY_ROOT_DIR;
   // auto_merge off: root's kill switch alone (src/policy-kill.ts), before any lock or read of policy.yaml, so nothing
   // (another writer's lock, a stale one, a huge or corrupt policy.yaml) can hold it up. Its `from` is unknown: unread.
-  // A name with root's forward record (a rename in progress, or one left behind) is reached even once its user is
-  // gone (inside its removal): the OFF goes on to the name it forwards to. Done only when every name it reached that
-  // can still start (its coordinator user is there) is armed; otherwise refused, naming each (KillSwitchError).
+  // A name with a forward record is reached even once its user is gone (killAutoMerge says when it is done).
   if (key === 'auto_merge' && value === false) {
     const uid = d.uid ?? userUid;
     const canStart = (name: string) => uid(`wl-${name}`) !== null;
