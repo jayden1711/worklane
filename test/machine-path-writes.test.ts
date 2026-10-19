@@ -49,7 +49,17 @@
 // another index (`const [x] = c ? [X] : [Y]`, `const [x] = [Y, X]`); a guard on a for-of variable covering a write to
 // another element in the same body; a property reassigned before the guard (`o.p = Y`, also through an alias,
 // Object.assign or Object.defineProperty); a src object's property mutated (MACHINE_PATHS isn't frozen); and
-// resolve(X, <absolute>) or join(X, '..', …) as the guard. Each is a GAP fixture below, missed today.
+// resolve(X, <absolute>) or join(X, '..', …) as the guard. Each is a GAP fixture below, missed today. Also not
+// caught (#818 final check): the real path joined under '/' (`join('/', onRealMachine(X))`, also through a parameter
+// defaulting to '/'), which the "under a test's own root" exception lets through; a write that climbs out of
+// stateDir() or slotsDir() with '..' parts (`join(stateDir(), '..', '..', 'x')`: the runtime refusal checks the dir,
+// not paths built on it, and the lint leaves the state and slot families to it); and literal real paths
+// ('/var/tmp/agent-slots/x', `join(homedir(), …)`), outside the engine-resolved locations it models.
+//
+// This lint is a BACKSTOP, not the protection. By design: stateDir() and slotsDir() refuse at run time in a test run
+// (testStateRefusal, testSlotsRefusal, with their '..' and symlink refusals), and every machine location the engine
+// resolves is moved into the test machine by the preload's system root (test/isolate.ts). The paths the preload never
+// moves (asRoot.*, SYSTEM_ROOTS.*, what onRealMachine returns) have no run-time refusal behind them: only this lint.
 import assert from 'node:assert/strict';
 import { join, relative, sep } from 'node:path';
 import { test } from 'node:test';
@@ -748,6 +758,8 @@ test('lint (#818 round 4): the known gaps stay named: each GAP line is missed to
     'export function g10() { rmSync.call(null, CONSOLE_SHELL); } // GAP: .call',
     'export function g11() { Reflect.apply(rmSync, null, [CONSOLE_SHELL]); } // GAP: Reflect.apply',
     "export function g12() { onRealMachine(unitPath('a')); rmSync(unitPath('b')); } // GAP: another call of the same function",
+    "export function g13() { mkdirSync(join('/', onRealMachine(CONSOLE_SHELL))); } // GAP: the real path under '/' (a12: the 'under a test's own root' exception)",
+    "export function g14() { rmSync(join(stateDir(), '..', '..', '..', 'x')); } // GAP: climbing out of the state dir with '..' (s1: the refusal checks the dir, not paths built on it)",
   ]);
 });
 
