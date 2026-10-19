@@ -36,7 +36,7 @@ export function policyRootChecks(dir = instancesDir(), o: { machine?: boolean; m
     else if (!id && policyRootRequired(name, markers)) idCheck('fail', `no ${ptr} for a policy root took over: auto_merge reads off until an admin runs ${ownCommand(name, '--retake')}`);
     else if (id) {
       const shared = sharedWith(name, markers);
-      if (shared.length) idCheck('warn', `${shared.join(', ')} shares ${name}'s id: auto_merge off for either turns both off, and root's set on is refused. Expected while a rename runs; otherwise an admin finishes it or undoes it (instance-rename.sh --yes or --abort)`);
+      if (shared.length) idCheck('warn', `${shared.join(', ')} shares ${name}'s id: auto_merge off for either turns both off, and root's set on is refused. Expected while a rename runs: an admin finishes it or undoes it (instance-rename.sh --yes or --abort). With no rename under way (a removal that stopped before its pointer went): an admin reruns instance-remove.sh for the name that is gone, or removes its pointer (${markers}/<that name>.id)`);
     }
   }
   return out;

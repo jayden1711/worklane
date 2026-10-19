@@ -615,3 +615,75 @@ test("lib.sh auto_merge_killed (add-project's text) reads root's switches as the
     chmodSync(T, 0o755);
   }
 });
+
+/** A taken-over instance that said OFF (an admin's `set on`, then an OFF), then lost its id pointer: it reads off. */
+function lostPointer(name: string) {
+  const m = machineInstance(name);
+  ownPolicy(name, m.deps);
+  setPolicy(name, 'auto_merge', 'on', null, m.deps);
+  setPolicy(name, 'auto_merge', 'off', null, m.deps);
+  unlinkSync(join(POLICY_ROOT_DIR, `${name}.id`));
+  assert.equal(autoMergeKilled(name), true, 'taken over, no pointer: off');
+  return m;
+}
+
+test("a taken-over instance whose pointer is gone: `policy alias` (a rename's start) refuses it, naming the admin's --retake, and it stays off (#726 round 10)", { skip }, () => {
+  lostPointer('lpa');
+  assert.throws(() => kill.aliasInstance!('lpa', 'lpb'), /lpa was taken over .* no .*lpa\.id.*policy own lpa --retake/);
+  assert.equal(existsSync(join(POLICY_ROOT_DIR, 'lpb.id')), false);
+  assert.equal(existsSync(join(POLICY_ROOT_DIR, 'lpa.id')), false);
+  assert.equal(autoMergeKilled('lpa'), true);
+});
+
+test('a taken-over instance whose pointer is gone: an OFF with room for a directory and a pointer but not for the switch fails visibly and links no pointer, so it stays off (#726 round 10)', { skip }, () => {
+  // Through 2597efc5 the pointer was linked first, naming an empty id, and auto_merge read on.
+  const m = lostPointer('lpc');
+  const fs = createRequire(import.meta.url)('node:fs') as Record<string, unknown>;
+  const orig = { writeFileSync: fs.writeFileSync };
+  fs.writeFileSync = (p: unknown, ...r: unknown[]) => {
+    if (String(p).includes('/by_id/')) throw Object.assign(new Error('ENOSPC: no space left on device'), { code: 'ENOSPC' });
+    return (orig.writeFileSync as (...a: unknown[]) => unknown)(p, ...r);
+  };
+  syncBuiltinESMExports();
+  try {
+    assert.throws(() => setPolicy('lpc', 'auto_merge', 'off', null, m.deps), /couldn't be armed .*ENOSPC/);
+  } finally {
+    Object.assign(fs, orig);
+    syncBuiltinESMExports();
+  }
+  assert.equal(existsSync(join(POLICY_ROOT_DIR, 'lpc.id')), false, 'no pointer linked');
+  assert.equal(autoMergeKilled('lpc'), true, 'still off');
+});
+
+test('a taken-over instance whose pointer is gone: an OFF SIGKILLed right after linking its new pointer, or right before, leaves it off (#726 round 10)', { skip }, () => {
+  for (const when of ['after the link', 'before the link']) {
+    const name = when.startsWith('after') ? 'lpk' : 'lpj';
+    const mk = lostPointer(name);
+    const child = join(mk.T, 'off-kill.mjs');
+    writeFileSync(child, `import { createRequire, syncBuiltinESMExports } from 'node:module';
+const a = JSON.parse(process.argv[2]);
+${depsLine}
+const fs = createRequire(import.meta.url)('node:fs');
+const { setPolicy } = await import(a.module);
+const link = fs.linkSync;
+fs.linkSync = (from, to) => {
+  if (a.when === 'before' && String(to).endsWith('/' + a.name + '.id')) process.kill(process.pid, 'SIGKILL');
+  link(from, to);
+  if (String(to).endsWith('/' + a.name + '.id')) process.kill(process.pid, 'SIGKILL');
+};
+syncBuiltinESMExports();
+setPolicy(a.name, 'auto_merge', 'off', null, d);
+`);
+    const r = spawnSync(process.execPath, [child, childArgs(name, mk, { when: when.split(' ')[0] })], { encoding: 'utf8' });
+    assert.equal(r.signal, 'SIGKILL', `${when}: ${r.stderr}`);
+    assert.equal(autoMergeKilled(name), true, `SIGKILL ${when}: still off`);
+  }
+});
+
+test("a taken-over instance whose pointer is gone: an admin's --retake makes its new id with a switch armed, so it stays off until root's own `set on` (#726 round 10)", { skip }, () => {
+  const mr = lostPointer('lpr');
+  ownPolicy('lpr', mr.deps, { retake: true });
+  assert.equal(autoMergeKilled('lpr'), true, 'retake keeps it off');
+  setPolicy('lpr', 'auto_merge', 'on', null, mr.deps);
+  assert.equal(autoMergeKilled('lpr'), false, "root's `set on` turns it on");
+});

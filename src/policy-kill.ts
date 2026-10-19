@@ -175,37 +175,8 @@ function linkPointer(instance: string, id: string, dir: string): string {
   return p.id;
 }
 
-/** A new id for an instance with no pointer: its directory first, then the pointer (another writer's, if it won). */
-function mintId(instance: string, dir: string): string {
-  recordDir(dir);
-  const id = randomBytes(16).toString('hex');
-  recordDir(idDir(id, dir));
-  const got = linkPointer(instance, id, dir);
-  if (got !== id) {
-    try {
-      rmdirSync(idDir(id, dir)); // another writer's pointer won: ours is empty and no one's
-    } catch {
-      // not empty, or gone: nothing points at it
-    }
-  }
-  return got;
-}
-
-/** The instance's id, minting one when it has no pointer and `mint` allows; refused on a pointer that can't be used. */
-export function ensureId(instance: string, dir = POLICY_ROOT_DIR, mint = true): string {
-  if (!fileName(instance)) throw new Error(`${instance}: not an instance name`);
-  const p = instanceId(instance, dir);
-  if (p && 'problem' in p) throw new Error(`root's ${idPointerPath(instance, dir)} can't be used (${p.problem}): auto_merge reads off while it is so`);
-  if (p) return p.id;
-  if (!mint) throw new Error(`no ${idPointerPath(instance, dir)} for an instance root took over: auto_merge reads off until an admin runs \`policy own ${instance} --retake\``);
-  return mintId(instance, dir);
-}
-
-/** Root keeps a disarmed spare in each id's directory (`own`, `set`, before `set on`, a rename's start), so OFF needs no space. */
-export function ensureSpare(instance: string, dir = POLICY_ROOT_DIR, mint = false): void {
-  const d = idDir(ensureId(instance, dir, mint), dir);
-  recordDir(d);
-  sweepTemps(d);
+/** A disarmed spare in an id's directory (none written when one is there). */
+function writeSpare(d: string): void {
   try {
     writeFileSync(join(d, 'auto-merge-spare'), 'disarmed: auto_merge off renames this into auto-merge-off.<id>\n', { mode: 0o644, flag: 'wx' });
     chmodSync(join(d, 'auto-merge-spare'), 0o644);
@@ -213,15 +184,74 @@ export function ensureSpare(instance: string, dir = POLICY_ROOT_DIR, mint = fals
     if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e;
   }
 }
+/** An id directory no pointer names (ours, made by a mint that lost or failed): gone. */
+function dropDir(d: string): void {
+  try {
+    for (const n of readdirSync(d)) unlinkSync(join(d, n));
+    rmdirSync(d);
+  } catch {
+    // gone already; nothing points at it
+  }
+}
 
 /**
- * A rename's start (instance-rename.sh, as root): the new name's pointer holds the old name's id (minted, with its
- * spare, if the old name had none), so both names are the same instance's switches from here on. Refused when the
- * new name already points elsewhere.
+ * A new id for an instance with no pointer (#726 round 10). Its directory is complete BEFORE the pointer is linked:
+ * the spare always, and for an OFF (`armAt`) the switch armed from it. So a full disk or a crash before the link
+ * leaves no pointer (a taken-over instance then reads off), and after it the pointer names a complete directory: no
+ * ordering leaves a taken-over instance reading on. If another writer's pointer won the link, its id is the
+ * instance's: an OFF arms there too, and our directory goes.
+ */
+function mintId(instance: string, dir: string, armAt: Date | null): string {
+  recordDir(dir);
+  const id = randomBytes(16).toString('hex');
+  const d = idDir(id, dir);
+  try {
+    recordDir(d);
+    writeSpare(d);
+    if (armAt) armOne(d, armAt);
+  } catch (e) {
+    dropDir(d);
+    throw e;
+  }
+  const got = linkPointer(instance, id, dir);
+  if (got !== id) {
+    dropDir(d);
+    if (armAt) armOne(idDir(got, dir), armAt);
+  }
+  return got;
+}
+
+/**
+ * The instance's id. With no pointer: `mint` false refuses (a taken-over instance's lost pointer reads off until an
+ * admin's --retake); 'spare' makes one with its spare; a Date makes one with a switch armed at that time.
+ */
+export function ensureId(instance: string, dir = POLICY_ROOT_DIR, mint: false | 'spare' | Date = 'spare'): string {
+  if (!fileName(instance)) throw new Error(`${instance}: not an instance name`);
+  const p = instanceId(instance, dir);
+  if (p && 'problem' in p) throw new Error(`root's ${idPointerPath(instance, dir)} can't be used (${p.problem}): auto_merge reads off while it is so`);
+  if (p) return p.id;
+  if (mint === false) throw new Error(`no ${idPointerPath(instance, dir)} for an instance root took over: auto_merge reads off until an admin runs \`policy own ${instance} --retake\``);
+  return mintId(instance, dir, mint === 'spare' ? null : mint);
+}
+
+/** Root keeps a disarmed spare in each id's directory (`own`, `set`, before `set on`, a rename's start), so OFF needs no space. */
+export function ensureSpare(instance: string, dir = POLICY_ROOT_DIR, mint: false | 'spare' | Date = false): void {
+  const d = idDir(ensureId(instance, dir, mint), dir);
+  recordDir(d);
+  sweepTemps(d);
+  writeSpare(d);
+}
+
+/**
+ * A rename's start (instance-rename.sh, as root): the new name's pointer holds the old name's id (made, with its
+ * spare, if the old name had none and root never took it over), so both names are the same instance's switches from
+ * here on. Refused when the new name already points elsewhere, and when the old name was taken over but its pointer
+ * is gone: it reads off, and a new id would read on (#726 round 10).
  */
 export function aliasInstance(from: string, to: string, dir = POLICY_ROOT_DIR): string {
   if (!fileName(to)) throw new Error(`${to}: not an instance name`);
-  const id = ensureId(from, dir, true);
+  if (instanceId(from, dir) === null && recorded(from, dir)) throw new Error(`${from} was taken over (root's record is there) but has no ${idPointerPath(from, dir)}, so auto_merge reads off; a new id would read on. An admin runs \`policy own ${from} --retake\` first (it keeps auto_merge off)`);
+  const id = ensureId(from, dir, 'spare');
   ensureSpare(from, dir);
   const got = linkPointer(to, id, dir);
   if (got !== id) throw new Error(`${idPointerPath(to, dir)} holds another id: ${to} is in use`);
@@ -274,16 +304,17 @@ export class KillSwitchError extends Error {
 }
 
 /**
- * Turn this instance's auto_merge off (as root): its id (a new one only when it has no pointer yet: needs space), then
- * a switch armed in that id's directory by armOne, then a new spare if space allows. Every name pointing at the id
- * (a rename's two) is off at once. No lock, no policy.yaml.
+ * Turn this instance's auto_merge off (as root): a switch armed in its id's directory by armOne; with no pointer yet,
+ * a new id whose switch is armed before its pointer is linked (mintId: needs space). Then a new spare if space
+ * allows. Every name pointing at the id (a rename's two) is off at once. No lock, no policy.yaml.
  */
 export function killAutoMerge(instance: string, dir = POLICY_ROOT_DIR, at = new Date()): void {
   if (!fileName(instance)) throw new Error(`${instance}: not an instance name`);
-  let d: string;
   try {
-    d = idDir(ensureId(instance, dir, true), dir);
-    armOne(d, at);
+    const p = instanceId(instance, dir);
+    if (p && 'problem' in p) throw new Error(`root's ${idPointerPath(instance, dir)} can't be used (${p.problem}); auto_merge reads off while it is so`);
+    if (p) armOne(idDir(p.id, dir), at);
+    else ensureId(instance, dir, at);
   } catch (e) {
     throw new KillSwitchError(instance, (e as Error).message);
   }
