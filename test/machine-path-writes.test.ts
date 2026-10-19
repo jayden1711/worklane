@@ -26,7 +26,9 @@
 // returns is built from systemPath on every branch (MACHINE_PATHS, CONSOLE_SHELL, unitPath, …), named by its
 // declaration (aliases and namespace imports are the same name) and its property (`MACHINE_PATHS.hubUnitFile`).
 //
-// A guard is an `onRealMachine(x)` call on the same name that always runs before the write: it runs whenever its
+// A guard is an `onRealMachine(x)` call whose `x` surely is the same name, whatever value it has then (every branch,
+// every value a local or a for-of `let` is given; a `yield`, an index or a parameter is surely nothing), that always
+// runs before the write: it runs whenever its
 // statement does (the statement itself, a const's initialiser, or inside one's arguments, as
 // `assert.equal(onRealMachine(x), …)`; never behind a condition, a short-circuit or logical assignment, an optional
 // call or in another function), and that statement comes first in a list of statements holding the write, directly
@@ -286,7 +288,8 @@ function lintMachineWrites(program: ts.Program, files: (rel: string) => boolean)
     else if (ts.isVariableDeclaration(v)) {
       const list = v.parent;
       const loop = ts.isVariableDeclarationList(list) ? list.parent : undefined;
-      if (loop && ts.isForOfStatement(loop)) out = pick(origins(loop.expression));
+      // Each element, and anything the body assigns to it (`for (let p of …) { p = X; … }`).
+      if (loop && ts.isForOfStatement(loop)) out = pick([...origins(loop.expression), ...assignmentsTo(d).flatMap((e) => origins(e))]);
       else if (loop && ts.isForInStatement(loop)) out = [];
       else out = pick([...(v.initializer ? origins(v.initializer) : []), ...assignmentsTo(d).flatMap((e) => origins(e))]);
     } else if (ts.isShorthandPropertyAssignment(v)) out = origins(v.name);
@@ -432,6 +435,57 @@ function lintMachineWrites(program: ts.Program, files: (rel: string) => boolean)
   }
   for (const [name, s] of Object.entries(SEEDS)) if (s.refusal && !selfGuarded.has(s.family)) selfGuarded.set(s.family, `${name}() is not in ${s.file} any more: the lint can't see its refusal`);
 
+  type KeyOrigin = Extract<Origin, { key: string }>;
+  const keysOf = (os: Origin[]): KeyOrigin[] => os.filter((o): o is KeyOrigin => 'key' in o);
+  const both = (a: KeyOrigin[], b: KeyOrigin[]) => a.filter((o) => b.some((p) => p.key === o.key));
+  const PATH_TYPES = /[\\/]@types[\\/]node[\\/]path\.d\.ts$/;
+  /**
+   * The machine locations a guard's argument surely is, whatever value it has when the guard runs (where `origins`
+   * is every location it may be): a branch (`n ? A : B`), a local assigned more than one value, or a value the lint
+   * can't follow (a `yield`, an index, a parameter) is surely none of them unless every way agrees (#818 round 3).
+   * A for-of variable never assigned in its body is each element in turn: each is surely checked, once.
+   */
+  const surelyMemo = new Map<ts.Node, KeyOrigin[]>();
+  function surely(e0: ts.Expression): KeyOrigin[] {
+    const e = bare(e0);
+    const hit = surelyMemo.get(e);
+    if (hit) return hit;
+    surelyMemo.set(e, []); // in progress
+    let out: KeyOrigin[] = [];
+    if (ts.isConditionalExpression(e)) out = both(surely(e.whenTrue), surely(e.whenFalse));
+    else if (ts.isBinaryExpression(e) && [ts.SyntaxKind.QuestionQuestionToken, ts.SyntaxKind.BarBarToken, ts.SyntaxKind.AmpersandAmpersandToken].includes(e.operatorToken.kind)) out = both(surely(e.left), surely(e.right));
+    else if (ts.isIdentifier(e)) {
+      const d = declOf(e);
+      if (d && inSrc(d) && families(d).size) out = [{ key: keyOf(d), families: families(d), decl: d }];
+      else if (d && ts.isVariableDeclaration(d)) {
+        const loop = ts.isVariableDeclarationList(d.parent) ? d.parent.parent : undefined;
+        const later = assignmentsTo(d);
+        if (loop && ts.isForOfStatement(loop)) {
+          const arr = bare(loop.expression);
+          out = later.length ? [] : ts.isArrayLiteralExpression(arr) ? arr.elements.flatMap((x) => (ts.isSpreadElement(x) || ts.isOmittedExpression(x) ? [] : surely(x))) : keysOf(origins(loop.expression));
+        } else if (!(loop && ts.isForInStatement(loop))) {
+          const values = [...(d.initializer ? [d.initializer] : []), ...later];
+          out = values.length ? values.map(surely).reduce(both) : [];
+        }
+      } else if (d && ts.isBindingElement(d) && !assignmentsTo(d).length) out = keysOf(declOrigins(d));
+      else if (d && !inSrc(d) && ts.isPropertyAssignment(d)) out = surely(d.initializer);
+    } else if (ts.isPropertyAccessExpression(e)) {
+      const own = declOf(e.name);
+      const base = surely(e.expression);
+      if (own && !inSrc(own) && ours(own) && ts.isPropertyAssignment(own)) out = surely(own.initializer);
+      else if (base.length) out = keysOf(refine(base, e.name.text));
+      else if (own && inSrc(own) && families(own).size) out = [{ key: keyOf(own), families: families(own), decl: own }];
+    } else if (ts.isCallExpression(e)) {
+      const d = calleeDecl(e);
+      const first = e.arguments[0];
+      if (d && inSrc(d) && families(d).size) out = [{ key: keyOf(d), families: families(d), decl: d }];
+      // A path built on it (`dirname(X)`, `join(X, …)`) is inside the root only if X is.
+      else if (d && first && ((PATH_TYPES.test(d.getSourceFile().fileName) && ['join', 'resolve', 'dirname', 'normalize'].includes(nameOf(d))) || (d.getSourceFile().isDeclarationFile && nameOf(d) === 'String'))) out = surely(first);
+    } else if (ts.isTemplateExpression(e) && e.head.text === '' && e.templateSpans.length === 1 && e.templateSpans[0]!.literal.text === '') out = surely(e.templateSpans[0]!.expression);
+    surelyMemo.set(e, out);
+    return out;
+  }
+
   // The guards, per file: each onRealMachine(x) call, what x traces to, and the statement it runs in whenever that
   // statement runs: the call is the statement, a `const` initialiser, or an argument, operand or part of one (as in
   // `assert.equal(onRealMachine(x), …)`), never behind a condition, a short-circuit, an optional call or a function.
@@ -451,7 +505,7 @@ function lintMachineWrites(program: ts.Program, files: (rel: string) => boolean)
       const part = ts.isCallExpression(p) || ts.isNewExpression(p) || ts.isParenthesizedExpression(p) || ts.isAsExpression(p) || ts.isNonNullExpression(p) || ts.isPropertyAccessExpression(p) || ts.isElementAccessExpression(p) || ts.isTemplateSpan(p) || ts.isTemplateExpression(p) || ts.isArrayLiteralExpression(p) || ts.isAwaitExpression(p) || ts.isVoidExpression(p) || (ts.isBinaryExpression(p) && !shortCircuit);
       if (!part || optional) return null;
     }
-    return { s: x.parent as ts.Statement, keys: new Set(origins(c.arguments[0]).flatMap((o) => ('key' in o ? [o.key] : []))) };
+    return { s: x.parent as ts.Statement, keys: new Set(surely(c.arguments[0]).map((o) => o.key)) };
   };
   /**
    * Whether a guard statement always runs before `n` gets to run: it comes first in a list of statements that holds
@@ -655,6 +709,14 @@ test('lint (#818 round 2): a guard that looks valid but may not run before the w
     'export function s24() { for (const f of [CONSOLE_SHELL]) { if (f) onRealMachine(f); } rmSync(CONSOLE_SHELL); } // R: a condition in the body',
     'export function s25() { early(); onRealMachine(CONSOLE_SHELL); function early() { rmSync(CONSOLE_SHELL); } } // R: a hoisted function, called before the guard',
     'export function v8() { onRealMachine(CONSOLE_SHELL); const late = () => rmSync(CONSOLE_SHELL); late(); } // OK: an arrow defined after the guard',
+    "export function m1(n: number) { const x = n ? CONSOLE_SHELL : unitPath('y'); onRealMachine(x); rmSync(CONSOLE_SHELL); } // R: the guard only may be on it (a branch)",
+    "export function m2() { let x = CONSOLE_SHELL; x = unitPath('y'); onRealMachine(x); rmSync(CONSOLE_SHELL); } // R: a reassigned local",
+    "export function m3() { for (let p of [CONSOLE_SHELL]) { p = unitPath('y'); onRealMachine(p); } rmSync(CONSOLE_SHELL); } // R: a reassigned for-of let",
+    'export function* m4() { for (const p of [(yield CONSOLE_SHELL) as string]) onRealMachine(p); rmSync(CONSOLE_SHELL); } // R: a yield element',
+    "export function m5() { for (let p of ['/tmp/x']) { p = CONSOLE_SHELL; rmSync(p); } } // R: written through a for-of let assigned in its body",
+    'export function v9() { const x = CONSOLE_SHELL; onRealMachine(x); rmSync(CONSOLE_SHELL); } // OK: a const that surely is it',
+    'export function v10() { onRealMachine(dirname(CONSOLE_SHELL)); rmSync(CONSOLE_SHELL); } // OK: its directory',
+    'export function v11(n: number) { onRealMachine(n ? CONSOLE_SHELL : `${CONSOLE_SHELL}`); rmSync(CONSOLE_SHELL); } // OK: both branches are it',
   ]);
 });
 
