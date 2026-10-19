@@ -49,7 +49,7 @@ import { mayDownload, mayRemove, sharers } from './chat-conversations.js';
 import { ATTACHMENT_EXTENSIONS, AttachmentError, attachmentCaps, attachmentsFor, attachmentBytes, attachmentView, downloadHeaders, MAX_ATTACHMENTS, readAttachment, removeAttachment, SCANNED_KINDS, storeUpload, type AttachmentCaps } from './chat-attachments.js';
 import { mayAnswer, type Backlog } from './backlog/types.js';
 import { FIRST_TASK_TEMPLATE, FirstTaskError, firstTaskBody, ignoredIssues, READY_LABEL, type IgnoredIssue } from './first-task.js';
-import { answerDecision, auditWrite } from './decide.js';
+import { answerDecision, approvalsAt, auditWrite } from './decide.js';
 import { BY_VOICE, VOICE_MAX_CHARS, voiceClaim, voiceExclusion, voiceRefusal } from './voice.js';
 import { submitVoiceIntake, voiceIntakeRefusal } from './intake/voice.js';
 import { readRun, runsForIssue } from './run-record.js';
@@ -1080,6 +1080,18 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
     return peopleOf({ owners: opts.cfg.project.owners, tasks: p.tasks, decisions: p.decisions }).has(l);
   };
   const repo = opts.cfg.project.project.repo;
+  /** The default branch as this checkout last fetched it: where the money paths and who may approve are read (#715). */
+  const mainRef = () => `origin/${opts.cfg.project.project.default_branch}`;
+  /** Who may approve a high-risk merge: main's review.yaml, writers only where the instance's policy.yaml lets them (unreadable: not). */
+  const approvals = () => {
+    let policyLetsWriters = !opts.policyFile;
+    try {
+      if (opts.policyFile) policyLetsWriters = readPolicy(opts.policyFile).policy?.writers_approve_land === true;
+    } catch {
+      policyLetsWriters = false;
+    }
+    return approvalsAt(opts.root, mainRef(), policyLetsWriters);
+  };
   /** The machine's slot holders as this instance may show them: its own, and the rest as held elsewhere. */
   const holder = ownHolders({ project: opts.cfg.project.project.name, actor: opts.actor ?? instanceId() });
   /** The first-run page's live checks, kept between polls: local checks for 10 s, GitHub's for 2 min (its rate limit is shared). */
@@ -1323,6 +1335,7 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
     const p = snap.memo(`project ${today}`, (ev) => project(ev, today));
     const posted = snap.memo('plan.posted', (ev) => ev.filter((e) => e.type === 'plan.posted').map((e) => e.payload as EventPayload<'plan.posted'>));
     const slots = slotStatus(opts.slotsDir);
+    const mayLand = approvals();
     const full = {
       brand: { name: BRAND.name, cli: BRAND.cli },
       setupMode: !!opts.setupMode,
@@ -1337,7 +1350,7 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
       // The Activity feed: a viewer's is built from the allowlisted events only, as /api/events gives them.
       activity: isWriter(who.role) ? p.activity : snap.memo('viewerActivity', viewerActivity),
       // For an owner, why voice may never approve each one (src/voice.ts), so the page says so before anyone speaks.
-      decisions: p.decisions.map((d) => ({ ...d, canAnswer: mayAnswerKind(d.kind, who.role), ...(isOwner(who.role) ? { voiceRefused: voiceExclusion(d, posted) } : {}) })),
+      decisions: p.decisions.map((d) => ({ ...d, canAnswer: mayAnswerKind(d.kind, who.role, mayLand), ...(isOwner(who.role) ? { voiceRefused: voiceExclusion(d, posted) } : {}) })),
       // Whether this viewer may read intake reports, so the page asks for them only when it will get them.
       canReadIntake: mayReadIntake(who.role),
       // Whether this viewer may read the throughput panel, so the page asks for it only when it will get it.
@@ -1987,7 +2000,7 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
         if (url.pathname.startsWith('/api/decisions/') && req.method === 'GET') {
           const [raw = '', part, ...more] = url.pathname.slice('/api/decisions/'.length).split('/');
           if (more.length || (part !== undefined && part !== 'diff' && part !== 'pr')) return json(res, 404, { error: 'no such view' });
-          const detail = decisionDetail(decodeURIComponent(raw), { events: eventCache.all(), role: who.role, prs: eventCache.memo('prsView', prsView).prs, root: opts.root, review: opts.cfg.review, runs: (n) => (part === undefined ? runsForIssue(opts.stateDir, n) : []) });
+          const detail = decisionDetail(decodeURIComponent(raw), { events: eventCache.all(), role: who.role, prs: eventCache.memo('prsView', prsView).prs, root: opts.root, mainRef: mainRef(), approvals: approvals(), review: opts.cfg.review, runs: (n) => (part === undefined ? runsForIssue(opts.stateDir, n) : []) });
           if (!detail) return json(res, 404, { error: 'no such decision' });
           if (part === undefined) return json(res, 200, detail);
           if (part === 'diff') {
@@ -2771,7 +2784,7 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           let r: ReturnType<typeof answerDecision>;
           try {
             // The one decide path (src/decide.ts): a chat-thread answer goes through it too.
-            r = answerDecision(log, { id, answer: String(body.answer ?? ''), who, instance: opts.instance ?? null, repo, ...(claim.voice ? { voice: true } : {}) });
+            r = answerDecision(log, { id, answer: String(body.answer ?? ''), who, instance: opts.instance ?? null, repo, approvals: approvals(), ...(claim.voice ? { voice: true } : {}) });
           } finally {
             log.close();
           }

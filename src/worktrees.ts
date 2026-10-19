@@ -6,7 +6,8 @@ import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmdirSync,
 import { join, resolve } from 'node:path';
 import { BRAND } from './brand.js';
 import { checkoutSparse } from './checkout.js';
-import { groupOnlyDir, projectCommand, writeGroupOnly } from './os/index.js';
+import { redactString } from './events/redact.js';
+import { groupOnlyDir, projectCommand, writeGroupOnly, type ProjectRunAs } from './os/index.js';
 
 export interface WorktreeOptions {
   repo: string;
@@ -14,7 +15,7 @@ export interface WorktreeOptions {
   stateDir: string;
   setup: string[];
   /** Setup steps (e.g. npm ci) run the project's own scripts, so they run as the agent user when there is one. */
-  runAs?: { user: string; home: string };
+  runAs?: ProjectRunAs;
   /** The project's own variables (tests.yaml env). */
   env?: Record<string, string>;
   /** The instance's dependency-cache variables (dep-cache.ts), set for setup steps after the project's own. */
@@ -40,20 +41,10 @@ function setOwned(o: WorktreeOptions, list: string[]) {
 const git = (cwd: string, ...args: string[]) => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 
 /**
- * What Claude Code's sandbox leaves in a worktree. It protects some paths
- * from writes inside the working directory; on Linux it does that by
- * mounting over them, so a protected path that doesn't exist yet is first
- * created, empty, as the mount point, and stays after the run.
- *
- * Two kinds:
- * - Files and folders at the worktree root, from the sandbox's own list
- *   (in Claude Code 2.1.282: .gitconfig, .gitmodules, shell startup files,
- *   .ripgreprc, .mcp.json, .vscode, .idea), plus the other shell files.
- * - Anything under .claude/. Claude Code protects more of it with each
- *   version (commands, agents, launch.json, loop.md, output-styles,
- *   routines, scheduled_tasks.json, ...), so it is covered as a whole
- *   rather than by name. .claude/ is harness config: agents edit tracked
- *   files there through review, and never add new ones.
+ * What Claude Code's sandbox leaves in a worktree: on Linux it protects paths by mounting over them, so a missing one
+ * is created empty as the mount point and stays. Root files from its list (.gitconfig, .gitmodules, shell startup
+ * files, .ripgreprc, .mcp.json, .vscode, .idea), and anything under .claude/ as a whole (harness config: agents edit
+ * tracked files there through review and never add new ones).
  */
 export const SANDBOX_ROOT_PLACEHOLDERS = [
   '.gitconfig', '.gitmodules', '.bashrc', '.bash_profile', '.zshrc', '.zprofile', '.profile', '.ripgreprc', '.mcp.json', '.vscode', '.idea',
@@ -63,12 +54,7 @@ const PROTECTED_DIR = '.claude';
 const EXCLUDE_MARKER = `# ${BRAND.cli}: empty mount points Claude Code's sandbox leaves in worktrees; never commit them`;
 const EXCLUDE_END = `# ${BRAND.cli}: end`;
 
-/**
- * Keep the sandbox's placeholders out of anything an agent can commit: an
- * exclude block in the repo's shared info/exclude (it covers every
- * worktree), rewritten each time so it follows this list. Exclusion only
- * affects untracked files: changes to tracked ones still show.
- */
+/** Keep the sandbox's placeholders out of commits: a block in the shared info/exclude (untracked files only). */
 export function excludeSandboxPlaceholders(repo: string): void {
   const file = join(resolve(repo, git(repo, 'rev-parse', '--git-common-dir')), 'info', 'exclude');
   const lines = (existsSync(file) ? readFileSync(file, 'utf8') : '').split('\n');
@@ -158,7 +144,7 @@ export async function createWorktreeAsync(o: WorktreeOptions, name: string, bran
         resolve({ status, stderr });
       });
     });
-    if (r.status !== 0) setupErrors.push(`${step}: exit ${r.status} ${r.stderr.trim().split('\n').pop() ?? ''}`);
+    if (r.status !== 0) setupErrors.push(`${step}: exit ${r.status} ${redactString(r.stderr).trim().split('\n').pop() ?? ''}`);
   }
   return { path, setupErrors };
 }
@@ -169,8 +155,10 @@ export function createWorktree(o: WorktreeOptions, name: string, branch: string,
   const setupErrors: string[] = [];
   for (const step of o.setup) {
     const { file, args, env } = projectCommand(step, o.runAs, { ...o.env, ...o.cacheEnv });
-    const r = spawnSync(file, args, { cwd: path, encoding: 'utf8', env, timeout: 900_000 });
-    if (r.status !== 0) setupErrors.push(`${step}: exit ${r.status} ${(r.stderr || '').trim().split('\n').pop() ?? ''}`);
+    // No stdin (a setup step reads none): never a socket, which bash's rshd check treats as a remote login.
+    const r = spawnSync(file, args, { cwd: path, encoding: 'utf8', env, timeout: 900_000, stdio: ['ignore', 'pipe', 'pipe'] });
+    // A setup step's words go into events and prompts: credential-shaped text redacted (#713).
+    if (r.status !== 0) setupErrors.push(`${step}: exit ${r.status} ${redactString(r.stderr || '').trim().split('\n').pop() ?? ''}`);
   }
   return { path, setupErrors };
 }

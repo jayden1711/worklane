@@ -15,7 +15,7 @@ import { claim, release, renew, type Lease } from './claims.js';
 import type { EventPayload, EventType } from './events/types.js';
 import { globToRegExp } from './guardrails/glob.js';
 import { isProtectedPath } from './guardrails/engine.js';
-import { computeLevel, loadMoneyPaths, type ChangeFile, type Level } from './review.js';
+import { computeLevel, type ChangeFile, type Level } from './review.js';
 import { shownPath, shownPaths } from './path-text.js';
 import { changeContext, investigationContext, summaryContext } from './decision-context.js';
 import { oneParagraph, RISK_CLASSES, sizeFiles, sizeVerdict, type RiskClass } from './pr-rules.js';
@@ -1050,7 +1050,7 @@ export class Coordinator extends AutomationRuns {
         // task goes on with the next attempt on the build's Anthropic model.
         // WHY: item 38. A cli: build rejected for any reason (a protected path among them) still moves the task to Anthropic.
         const built = 'rejected' in change ? (out.provider?.startsWith('cli:') ? this.changeFiles(path, base, head) : null) : change.files;
-        const hostedWhy = built ? builtChangeRefusal(out.provider, { files: built, labels: issue.labels, moneyPaths: () => loadMoneyPaths(this.d.repo, this.d.cfg.review?.money_path_source), review: this.d.cfg.review ?? DEFAULT_REVIEW, guardrails: this.d.cfg.guardrails, scope: lockScopeOf(this.d) }) : null;
+        const hostedWhy = built ? builtChangeRefusal(out.provider, { files: built, labels: issue.labels, moneyPaths: () => this.moneyPaths(), review: this.d.cfg.review ?? DEFAULT_REVIEW, guardrails: this.d.cfg.guardrails, scope: lockScopeOf(this.d) }) : null;
         if (hostedWhy) {
           noOpenModel = true;
           this.emit('provider.fallback', { issue: n, role: 'worker', provider: out.provider!, reason: hostedWhy, model: buildRoute(this.d.cfg, issue.labels, attempt + 1, true).model });
@@ -1080,7 +1080,7 @@ export class Coordinator extends AutomationRuns {
         if (optimizing && !(await this.optimizeGate(n, optimizing, path, base, head))) return;
         // A change to the agents' own instructions is evaluated before it can land (the merge policy reads the result).
         if (verdict.patch_correct) await this.instructionEvals(n, path, base, head, change.files.map((f) => f.path));
-        const levelInput = { files: change.files, labels: issue.labels, moneyPaths: loadMoneyPaths(this.d.repo, this.d.cfg.review?.money_path_source), scope: lockScopeOf(this.d), verdict, ...(verdict.unread.length ? { requested: 'L3' as Level } : out.raise || change.tampered.length || repro?.unavailable ? { requested: out.raise ?? ('L2' as Level) } : {}) };
+        const levelInput = { files: change.files, labels: issue.labels, moneyPaths: this.moneyPaths(), scope: lockScopeOf(this.d), verdict, ...(verdict.unread.length ? { requested: 'L3' as Level } : out.raise || change.tampered.length || repro?.unavailable ? { requested: out.raise ?? ('L2' as Level) } : {}) };
         const lvl = computeLevel(levelInput, this.d.cfg.review ?? DEFAULT_REVIEW);
         // Safety floor: in direct mode a change the evaluator rejected never lands without the owner. Not a
         // setting: no config, policy or review level can lower it. (PR mode needs the approval at the head anyway.)
@@ -1653,7 +1653,7 @@ export class Coordinator extends AutomationRuns {
     // The model is chosen in code from the change's level; a cheap verdict that isn't a confident pass is judged
     // once more by the evaluator role's model. What the run read comes from its record, not from its own list.
     const judged = await judge({
-      level: evalLevel({ files, labels: issue.labels, moneyPaths: () => loadMoneyPaths(this.d.repo, this.d.cfg.review?.money_path_source), review: this.d.cfg.review ?? DEFAULT_REVIEW, tampered, scope: lockScopeOf(this.d) }),
+      level: evalLevel({ files, labels: issue.labels, moneyPaths: () => this.moneyPaths(), review: this.d.cfg.review ?? DEFAULT_REVIEW, tampered, scope: lockScopeOf(this.d) }),
       strongModel: role.model,
       routing: evalRouting(this.d.cfg.agents),
       changed,
@@ -1744,7 +1744,7 @@ export class Coordinator extends AutomationRuns {
     const review: ReviewConfig = this.d.cfg.review ?? DEFAULT_REVIEW;
     let categories: Record<string, string[]> = {};
     try {
-      categories = computeLevel({ files, labels: issue.labels, moneyPaths: loadMoneyPaths(this.d.repo, review.money_path_source), scope: lockScopeOf(this.d) }, review).categories;
+      categories = computeLevel({ files, labels: issue.labels, moneyPaths: this.moneyPaths(review.money_path_source), scope: lockScopeOf(this.d) }, review).categories;
     } catch {
       return notRun('the change could not be classified, so it is not sent to another provider');
     }
@@ -1784,7 +1784,7 @@ export class Coordinator extends AutomationRuns {
   private protectedSurface(issue: Issue, files: ChangeFile[]): string[] {
     const review: ReviewConfig = this.d.cfg.review ?? DEFAULT_REVIEW;
     try {
-      const level = computeLevel({ files, labels: issue.labels, moneyPaths: loadMoneyPaths(this.d.repo, review.money_path_source), scope: lockScopeOf(this.d) }, review);
+      const level = computeLevel({ files, labels: issue.labels, moneyPaths: this.moneyPaths(review.money_path_source), scope: lockScopeOf(this.d) }, review);
       return whyHighRisk({ level, waitCategories: waitCategoriesOf(review) }).map((w) => w.text);
     } catch (e) {
       return [`could not be classified (${(e as Error).message.slice(0, 200)}), so it counts as protected`];
