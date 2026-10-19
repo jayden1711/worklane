@@ -53,6 +53,9 @@ ensure_instance_home() {
   echo "ensure_instance_home $*" >> "$T/calls"
 }
 claude_login_ok() { :; }
+# The engine's \`policy own\` (as root; test/policy-edit.test.ts runs it with stand-ins): recorded, and then root's.
+own_policy() { echo "own_policy $1" >> "$T/owned"; touch "$T/owned-$1"; }
+policy_root_ok() { [ -e "$T/owned-$1" ]; }
 install_claude_token() {
   mkdir -p "$T/homes/$1/.claude"
   { printf '{"claudeAiOauth":{"accessToken":"'; cat; printf '"}}'; } > "$T/homes/$1/.claude/.credentials.json"
@@ -402,4 +405,22 @@ test('the sudoers rule lets coordinators run add-project only with its two argum
   for (const n of NAMES_OK) assert.match(`add-project ${n} example/alpha`, re);
   for (const repo of REPOS_OK) assert.match(`add-project alpha ${repo}`, re);
   for (const a of ['add-project alpha', 'add-project alpha example/alpha extra', 'add-project Alpha example/alpha', 'add-project alpha a/b/c', 'add-project alpha a;id/b', 'add-project -x a/b']) assert.doesNotMatch(a, re, a);
+});
+
+test("the policy step makes the instance's policy.yaml root's, and a rerun on an earlier install (its coordinator's file) does it then (#726)", { skip: !posix && 'bash' }, () => {
+  const m = machine();
+  const owned = () => (existsSync(join(m.T, 'owned')) ? readFileSync(join(m.T, 'owned'), 'utf8').trim().split('\n') : []);
+  assert.equal(m.run().status, 0);
+  assert.deepEqual(owned(), ['own_policy alpha'], 'a new install: root\'s from the start');
+  // Root's already: done, not taken over again.
+  assert.equal(m.run().status, 0);
+  assert.deepEqual(owned(), ['own_policy alpha']);
+  // An install from before: the same policy.yaml, its coordinator user's. The rerun makes it root's, content and all.
+  rmSync(join(m.T, 'owned-alpha'));
+  const before = readFileSync(join(m.instDir('alpha'), 'policy.yaml'), 'utf8');
+  const r = m.run();
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(owned(), ['own_policy alpha', 'own_policy alpha']);
+  assert.ok(r.events.some((e) => e.step === 'policy' && e.state === 'done' && / policy set alpha /.test(e.detail)), JSON.stringify(r.events));
+  assert.equal(readFileSync(join(m.instDir('alpha'), 'policy.yaml'), 'utf8'), before, 'the setup step itself never rewrites it');
 });

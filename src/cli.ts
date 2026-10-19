@@ -140,6 +140,9 @@ usage: ${BRAND.cli} <command> [options]
   slots                            machine-wide agent slots in use (all harnesses) and the cap
   plugins show --instance name     the instance's approved plugins (root's allowlist, checked);
                                    fetch, stage, confirm and remove are root's (scripts/setup/plugins.sh)
+  policy own <instance> | policy set <instance> <key> <value>
+                                   root: make a machine instance's policy.yaml root's (its content
+                                   kept), or change one key of it (the machine helper's set-policy)
   stop-all [reason]                emergency stop: halt every agent on this machine, across
                                    instances; tasks requeue. resume-all lifts it
   coordinator run [--once] [--instance name]
@@ -753,6 +756,11 @@ async function main(argv: string[]): Promise<number> {
     case 'plugins': {
       const { pluginsCommand } = await import('./plugins/cli.js');
       return pluginsCommand(sub, rest, instanceOpt);
+    }
+
+    case 'policy': {
+      const { policyCommand } = await import('./policy-root.js');
+      return policyCommand(sub, rest);
     }
 
     case 'slots': {

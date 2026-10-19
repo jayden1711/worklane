@@ -280,6 +280,8 @@ step_home() {
     echo "carried $from -> $to"
   done <<<"$named"
   find "$(inst_dir "$new")" -maxdepth 1 -type f -exec chown -h "wl-$new:wl-$new" {} +
+  # The old name's policy.yaml was root's (issue #726): the new name's is too, from the start, its content as carried.
+  if [ -f "$POLICY_ROOT_DIR/$old" ]; then own_policy "$new"; fi
   # The agents' Claude logins and account profiles (claude-account.sh's dirs), each the new user's own.
   copy_as "$oa/.claude/.credentials.json" "$na/.claude/.credentials.json" "wl-$new-agent"
   copy_as "$oa/.claude-profiles" "$na/.claude-profiles" "wl-$new-agent"

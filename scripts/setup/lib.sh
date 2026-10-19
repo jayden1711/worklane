@@ -527,6 +527,14 @@ ensure_instance_home() {
   ' "$name" "$SRV_ROOT/$name/${repo#*/}" "$repo" "$(home_of "wl-$name-agent")"
 }
 
+# An instance's policy.yaml, root's (issue #726): the engine, as root, makes it root's 0644 with its content kept (read
+# without following a link the coordinator could plant), records it in $POLICY_ROOT_DIR, and prints the isolation and
+# merge keys for whoever runs setup to check. From then on the engine refuses it if it stops being root's.
+POLICY_ROOT_DIR=/etc/worklane/policy-root
+own_policy() { "$ENGINE_CLI" policy own "$1"; }
+# Whether instance $1's policy.yaml ($2) is root's already, as recorded: a regular file root's, 0644, one name.
+policy_root_ok() { [ -f "$POLICY_ROOT_DIR/$1" ] && [ ! -L "$2" ] && [ "$(stat -c '%u %a %h' -- "$2" 2>/dev/null)" = "0 644 1" ]; }
+
 # Every user an instance's agents or evals run as (each coordinator's instance.yaml run_as), one per line: never
 # a GPU lock's holder (testrun-gpu.sh) or a member of the GPU's device group (gpu-devices.sh).
 run_as_users() {

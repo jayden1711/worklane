@@ -4,11 +4,13 @@
 // lanes, allowlists) are never editable here: loosening them is a root-shell decision.
 import { readFileSync } from 'node:fs';
 import { parseDocument } from 'yaml';
+import { BRAND } from './brand.js';
 import type { Config } from './config/load.js';
 import { EventLog } from './events/log.js';
 import { policyViolations, PolicyFile } from './instance.js';
 import { replaceFileAtomically } from './os/index.js';
 import { loadLimits, settingsProblems } from './settings.js';
+import { readPolicyChecked } from './policy-gate.js';
 
 export const POLICY_KEYS = ['budget.daily_usd', 'agents.max_workers', 'land_mode', 'auto_merge', 'main_watch', 'automations.enabled'] as const;
 export type PolicyKey = (typeof POLICY_KEYS)[number];
@@ -35,11 +37,13 @@ export class PolicyEditError extends Error {}
 
 const get = (p: PolicyFile, k: PolicyKey): number | boolean | string => (k === 'budget.daily_usd' ? p.budget.daily_usd : k === 'agents.max_workers' ? p.agents.max_workers : k === 'automations.enabled' ? p.automations.enabled : p[k]);
 
-function read(path: string): { doc: ReturnType<typeof parseDocument>; policy: PolicyFile } {
-  const doc = parseDocument(readFileSync(path, 'utf8'));
+function read(path: string): { doc: ReturnType<typeof parseDocument>; policy: PolicyFile; root: boolean } {
+  const checked = readPolicyChecked(path);
+  if (checked && 'refused' in checked) throw new PolicyEditError(checked.refused);
+  const doc = parseDocument(checked ? checked.text : readFileSync(path, 'utf8'));
   const r = PolicyFile.safeParse(doc.toJS());
   if (!r.success) throw new PolicyEditError(`${path} is invalid: ${r.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ')}`);
-  return { doc, policy: r.data };
+  return { doc, policy: r.data, root: !!checked };
 }
 
 export function policyForm(path: string, limitsPath?: string): PolicyFormView {
@@ -78,10 +82,10 @@ export interface PolicyChange {
 }
 
 /** The change these values make, or why it is refused; nothing is written. */
-export function planPolicy(o: { path: string; cfg: Config; values: Record<string, unknown>; limitsPath?: string }): { changes: PolicyChange[]; text: string } {
+export function planPolicy(o: { path: string; cfg: Config; values: Record<string, unknown>; limitsPath?: string }): { changes: PolicyChange[]; text: string; root: boolean } {
   const unknown = Object.keys(o.values).filter((k) => !(POLICY_KEYS as readonly string[]).includes(k));
   if (unknown.length) throw new PolicyEditError(`not editable here: ${unknown.join(', ')}; the form changes ${POLICY_KEYS.join(', ')}`);
-  const { doc, policy } = read(o.path);
+  const { doc, policy, root } = read(o.path);
   const changes: PolicyChange[] = [];
   for (const k of POLICY_KEYS) {
     if (!(k in o.values) || o.values[k] === get(policy, k)) continue;
@@ -98,12 +102,16 @@ export function planPolicy(o: { path: string; cfg: Config; values: Record<string
   // INVARIANT: a policy the repo's config already loosens would stop the instance from loading at its next start.
   problems.push(...policyViolations(o.cfg, parsed.data).map((v) => `${v.file} ${v.path}: ${v.message}`));
   if (problems.length) throw new PolicyEditError(`refused: ${problems.join('; ')}`);
-  return { changes, text: doc.toString() };
+  return { changes, text: doc.toString(), root };
 }
 
-/** Write a confirmed change: the plan again (the file may have changed since), atomically, 0600, and logged. */
+/**
+ * Write a confirmed change: the plan again (the file may have changed since), atomically, 0600, and logged. A root
+ * policy.yaml (src/policy-gate.ts) is never written here: refused, naming the root command.
+ */
 export function applyPolicy(o: { path: string; cfg: Config; values: Record<string, unknown>; eventsDb: string; by: string; limitsPath?: string }): PolicyChange[] {
   const plan = planPolicy(o);
+  if (plan.root) throw new PolicyEditError(`${o.path} is root's: an admin changes it at a root shell (sudo ${BRAND.cli} policy set <instance> <key> <value>)`);
   replaceFileAtomically(o.path, plan.text, 0o600);
   const log = new EventLog(o.eventsDb);
   try {

@@ -19,6 +19,7 @@ Every release, newest first: the PRs merged since the previous one, and what cha
 
 ### Guardrail changes
 
+- **Single machine: each instance's `policy.yaml` is root's, and changes only through root's helper (#726).** Before, the coordinator user owned it, so anything running as that user could turn `sandbox` off or set `allow_same_user`. Setup now makes it root's (0644, its content kept, its isolation and merge keys printed) and records that; the engine then refuses a `policy.yaml` that isn't root's alone, and the instance stops instead (doctor fails, naming `sudo worklane policy own <name>`). The dashboard never writes a root `policy.yaml`; root changes one key at a time with `sudo worklane policy set <name> <key> <value>`, which never takes `sandbox` or `allow_same_user`. An existing install reads its `policy.yaml` as before until an admin reruns `add-project.sh <name> <owner/repo>` (or runs `sudo worklane policy own <name>`); doctor warns until then.
 - **The engine updater no longer waits for the retired `desktop` check when a commit has no run of it (#744).** It is the only name in the updater's own fixed list (`RETIRED_CHECKS` in `scripts/machine/worklane-update.cjs`). A `desktop` run that exists is judged as before: failed, skipped or cancelled refuses, and queued or running waits. A list of retired names alone, none of which ran on the commit, is refused, as an empty list is. Nothing changes while CI still runs the job. The window it tested was never built or installed by the updater.
 
 ## v0.5.2 (2026-10-17)
