@@ -1,8 +1,9 @@
 // auto_merge OFF on a single machine (#726; the owner's structural decision of 2026-10-19, and principle 2: OFF can
 // never be blocked or undone): root's kill switch for one instance, in root's record directory (/etc/<cli>/policy-root).
 //
-//   - A switch is any file whose name starts with `<instance>.auto-merge-off`: each OFF arms one of its own,
-//     `<instance>.auto-merge-off.<id>`. The engine checks for any BEFORE it reads the policy (autoMergeKilled): while
+//   - A switch is any file whose name starts with `<instance>.auto-merge-off`: each OFF leaves one under a new name of
+//     its own, `<instance>.auto-merge-off.<id>` (moving an armed one there, or the spare, by rename; so repeated OFFs
+//     never add files). The engine checks for any BEFORE it reads the policy (autoMergeKilled): while
 //     one is there, auto_merge is off, whatever policy.yaml says. Any error reading the directory but "no such
 //     directory" counts as off.
 //   - Turning auto_merge off never takes root's policy lock and never reads or parses policy.yaml, and needs no new
@@ -117,12 +118,23 @@ export function killAutoMerge(instance: string, dir = POLICY_ROOT_DIR, at = new 
   if (!fileName(instance)) throw new Error(`${instance}: not an instance name`);
   recordDir(dir);
   const to = `${killSwitchPath(instance, dir)}.${at.getTime()}-${process.pid}-${randomBytes(4).toString('hex')}`;
-  try {
-    renameSync(spareSwitchPath(instance, dir), to);
-  } catch (e) {
-    if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e;
-    writeNew(dir, to, `auto_merge off since ${at.toISOString()}\n`);
+  // An armed switch there already is moved to the new name (a switch stays visible throughout, and a `set on` that saw
+  // it under its old name can no longer clear it); else the disarmed spare; else a new file. Renames need no new
+  // space, and repeated OFFs never add files (THREAT: a coordinator looping set-policy auto_merge off would fill
+  // root's filesystem with switches).
+  let armedIt = false;
+  for (let i = 0; i < 4 && !armedIt; i++) {
+    const now = armed(instance, dir);
+    const from = now && now.length ? join(dir, now[0]!) : spareSwitchPath(instance, dir);
+    try {
+      renameSync(from, to);
+      armedIt = true;
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e;
+      if (from === spareSwitchPath(instance, dir)) break; // no switch and no spare
+    }
   }
+  if (!armedIt) writeNew(dir, to, `auto_merge off since ${at.toISOString()}\n`);
   fsyncPath(to);
   fsyncPath(dir);
   try {

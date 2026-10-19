@@ -4,7 +4,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, writeFileSync } from 'node:fs';
 import { createRequire, syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -92,11 +92,16 @@ const fs = createRequire(import.meta.url)('node:fs');
 const { setPolicy } = await import(a.module);
 const orig = { renameSync: fs.renameSync, unlinkSync: fs.unlinkSync };
 let offDone = false;
+// After OFF has said done: killed at ON's first step on a switch, right after it, whether it worked or not.
 for (const n of ['renameSync', 'unlinkSync']) fs[n] = (...args) => {
-  const r = orig[n](...args);
-  if (!offDone && n === 'renameSync' && args[1] === 'policy.yaml') { setPolicy(a.name, 'auto_merge', 'off', 'wl-' + a.name, d); offDone = true; }
-  else if (offDone && String(args[0]).includes('auto-merge-off')) process.kill(process.pid, 'SIGKILL');
-  return r;
+  const clearing = offDone && String(args[0]).includes('auto-merge-off');
+  try {
+    const r = orig[n](...args);
+    if (!offDone && n === 'renameSync' && args[1] === 'policy.yaml') { setPolicy(a.name, 'auto_merge', 'off', 'wl-' + a.name, d); offDone = true; }
+    return r;
+  } finally {
+    if (clearing) process.kill(process.pid, 'SIGKILL');
+  }
 };
 syncBuiltinESMExports();
 setPolicy(a.name, 'auto_merge', 'on', null, d);
@@ -165,6 +170,18 @@ test('auto_merge off needs no new space: with every create in root\'s directory 
     }
     assert.equal(autoMergeKilled(name), true, `${code}: the engine reads off`);
   }
+});
+
+test('repeated auto_merge OFFs (a coordinator looping the helper\'s set-policy) never add files to root\'s directory: one switch, moved to each new name, and the spare (#726 round 5 adversarial pass)', { skip }, () => {
+  const name = 'loop';
+  const m = machineInstance(name);
+  ownPolicy(name, m.deps);
+  const files = () => readdirSync(POLICY_ROOT_DIR).filter((f) => f.startsWith(`${name}.`)).length;
+  setPolicy(name, 'auto_merge', 'off', `wl-${name}`, m.deps);
+  const after1 = files();
+  for (let i = 0; i < 50; i++) setPolicy(name, 'auto_merge', 'off', `wl-${name}`, m.deps);
+  assert.equal(files(), after1, 'no new file per OFF');
+  assert.equal(autoMergeKilled(name), true);
 });
 
 test('a rename never loses an OFF: one given to the old name after the home step is carried again before the new service starts and before the old name\'s removal (#726 round 5)', { skip: process.platform === 'win32' && 'bash' }, () => {
