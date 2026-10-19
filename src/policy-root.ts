@@ -21,7 +21,7 @@ import { PolicyFile } from './instance.js';
 import { instanceNameOk } from './instance-name.js';
 import { isRoot, processIdentity, UNKNOWN_IDENTITY, userHomeDir, userPresence, userUid } from './os/index.js';
 import { readInOwnedDir, replaceInOwnedDir } from './os/root-file.js';
-import { aliasInstance, armedSwitches, clearKillSwitches, ensureSpare, instanceId, killAutoMerge, recordDir, sharedWith } from './policy-kill.js';
+import { aliasInstance, armedSwitches, clearKillSwitches, ensureSpare, instanceId, killAutoMerge, recordDir, retakeId, sharedWith, sweepOrphanIds } from './policy-kill.js';
 import { CEILING_KEYS, ceilingProblem, decodePolicyValue, HELPER_ONLY, ownCommand, POLICY_ROOT_DIR, POLICY_SET_KEYS, policyRecord, type PolicyRecord, readPolicyChecked, recordText, sha256 } from './policy-gate.js';
 import { type Limits, LIMITS_PATH, loadLimits, settingsProblems } from './settings.js';
 
@@ -245,7 +245,11 @@ export function ownPolicy(instance: string, d: PolicyRootDeps = {}, flags: OwnFl
     // (src/policy-kill.ts): with no room, nothing is taken over. A new id only on a first takeover (with its spare), or
     // an admin's --retake of a recorded instance whose pointer is gone: that one reads off, so its new id is made with
     // a switch armed, and it stays off until root's `set on` (#726 round 10). The coordinator (no flag) mints nothing.
-    ensureSpare(instance, markers, rec === null ? 'spare' : flags.retake ? new Date() : false);
+    // Round 11: --retake handles every broken id state (a missing directory, a pointer that can't be used) the same
+    // way, armed; any other writer refuses a missing directory (ensureSpare). Orphan id directories go here too.
+    if (flags.retake) retakeId(instance, markers);
+    else ensureSpare(instance, markers, rec === null ? 'spare' : false);
+    sweepOrphanIds(markers);
     replaceInOwnedDir({ dir, name: FILE, text, dirOwner: coordUid, uid: rootUid, gid: d.rootGid ?? 0, mode: 0o644 });
     // Root's ceilings (#726 round 10): kept on a rerun of content root wrote; else the values taken over now.
     const keep = written && !flags.retake && !flags.acceptLoose && rec !== null && !('problem' in rec) && rec.ceilings;

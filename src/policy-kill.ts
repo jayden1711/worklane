@@ -194,6 +194,47 @@ function dropDir(d: string): void {
   }
 }
 
+/** Whether id `id`'s directory is missing (anything else at it, or a stat error, counts as there: armOne then fails visibly). */
+function dirMissing(id: string, dir: string): boolean {
+  try {
+    lstatSync(idDir(id, dir));
+    return false;
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code === 'ENOENT';
+  }
+}
+
+/**
+ * Put id `id`'s directory in place only complete (#726 rounds 10 and 11): a temp directory gets the spare and, for an
+ * OFF or a --retake (`armAt`), the switch armed from it, and is then renamed into place, so `by_id/<id>` never
+ * appears empty, and a crash or full disk before the rename leaves it missing (read off). `by_id` is fsynced after.
+ * False when another writer's directory got there first.
+ */
+function placeDir(id: string, dir: string, armAt: Date | null): boolean {
+  const byId = join(dir, 'by_id');
+  recordDir(byId);
+  const tmp = join(byId, `.${process.pid}-${randomBytes(6).toString('hex')}.dir.tmp`);
+  try {
+    recordDir(tmp);
+    writeSpare(tmp);
+    if (armAt) armOne(tmp, armAt);
+    renameSync(tmp, idDir(id, dir));
+  } catch (e) {
+    dropDir(tmp);
+    const code = (e as NodeJS.ErrnoException).code;
+    if (code === 'ENOTEMPTY' || code === 'EEXIST') return false;
+    throw e;
+  }
+  fsyncPath(byId);
+  return true;
+}
+
+/** Arm a switch in id `id`'s directory; a missing one is put back armed (placeDir), never empty. */
+function armIn(id: string, dir: string, at: Date): void {
+  if (dirMissing(id, dir) && placeDir(id, dir, at)) return;
+  armOne(idDir(id, dir), at);
+}
+
 /**
  * A new id for an instance with no pointer (#726 round 10). Its directory is complete BEFORE the pointer is linked:
  * the spare always, and for an OFF (`armAt`) the switch armed from it. So a full disk or a crash before the link
@@ -204,19 +245,17 @@ function dropDir(d: string): void {
 function mintId(instance: string, dir: string, armAt: Date | null): string {
   recordDir(dir);
   const id = randomBytes(16).toString('hex');
-  const d = idDir(id, dir);
+  placeDir(id, dir, armAt);
+  let got: string;
   try {
-    recordDir(d);
-    writeSpare(d);
-    if (armAt) armOne(d, armAt);
+    got = linkPointer(instance, id, dir);
   } catch (e) {
-    dropDir(d);
+    dropDir(idDir(id, dir));
     throw e;
   }
-  const got = linkPointer(instance, id, dir);
   if (got !== id) {
-    dropDir(d);
-    if (armAt) armOne(idDir(got, dir), armAt);
+    dropDir(idDir(id, dir));
+    if (armAt) armIn(got, dir, armAt);
   }
   return got;
 }
@@ -228,18 +267,68 @@ function mintId(instance: string, dir: string, armAt: Date | null): string {
 export function ensureId(instance: string, dir = POLICY_ROOT_DIR, mint: false | 'spare' | Date = 'spare'): string {
   if (!fileName(instance)) throw new Error(`${instance}: not an instance name`);
   const p = instanceId(instance, dir);
-  if (p && 'problem' in p) throw new Error(`root's ${idPointerPath(instance, dir)} can't be used (${p.problem}): auto_merge reads off while it is so`);
+  if (p && 'problem' in p) throw new Error(`root's ${idPointerPath(instance, dir)} can't be used (${p.problem}): auto_merge reads off until an admin runs \`policy own ${instance} --retake\``);
   if (p) return p.id;
   if (mint === false) throw new Error(`no ${idPointerPath(instance, dir)} for an instance root took over: auto_merge reads off until an admin runs \`policy own ${instance} --retake\``);
   return mintId(instance, dir, mint === 'spare' ? null : mint);
 }
 
-/** Root keeps a disarmed spare in each id's directory (`own`, `set`, before `set on`, a rename's start), so OFF needs no space. */
+/**
+ * Root keeps a disarmed spare in each id's directory (`own`, `set`, before `set on`, a rename's start), so OFF needs
+ * no space. A missing id directory (it reads off) is never made again here (#726 round 11): refused, naming --retake.
+ */
 export function ensureSpare(instance: string, dir = POLICY_ROOT_DIR, mint: false | 'spare' | Date = false): void {
-  const d = idDir(ensureId(instance, dir, mint), dir);
-  recordDir(d);
-  sweepTemps(d);
-  writeSpare(d);
+  const id = ensureId(instance, dir, mint);
+  if (dirMissing(id, dir)) throw new Error(`root's ${idDir(id, dir)} is gone, so auto_merge reads off: an admin runs \`policy own ${instance} --retake\` (it keeps auto_merge off)`);
+  sweepTemps(idDir(id, dir));
+  writeSpare(idDir(id, dir));
+}
+
+/**
+ * An admin's `policy own --retake` (#726 rounds 10 and 11): whatever state the id is in, after it the instance has a
+ * complete id, and auto_merge stays off where it read off. A healthy id gets its spare; a missing directory is put
+ * back with a switch armed; a missing pointer, or one that can't be used, is replaced by a new id with a switch armed
+ * (the new pointer renamed over the old one).
+ */
+export function retakeId(instance: string, dir = POLICY_ROOT_DIR, at = new Date()): void {
+  if (!fileName(instance)) throw new Error(`${instance}: not an instance name`);
+  const p = instanceId(instance, dir);
+  if (p && 'id' in p) {
+    if (dirMissing(p.id, dir)) placeDir(p.id, dir, at);
+    ensureSpare(instance, dir);
+    return;
+  }
+  if (!p) {
+    ensureId(instance, dir, at);
+    return;
+  }
+  const id = randomBytes(16).toString('hex');
+  placeDir(id, dir, at);
+  const ptr = idPointerPath(instance, dir);
+  if (lstatSync(ptr).isDirectory()) rmdirSync(ptr);
+  renameSync(tempFile(dir, 'id', `${id}\n`), ptr);
+  fsyncPath(ptr);
+  fsyncPath(dir);
+}
+
+/** Id directories no pointer names, over an hour old (an OFF's mint that failed or was killed before its link): gone. */
+export function sweepOrphanIds(dir = POLICY_ROOT_DIR): void {
+  let names: string[];
+  let ids: Set<string>;
+  try {
+    names = readdirSync(join(dir, 'by_id'));
+    ids = new Set(readdirSync(dir).filter((n) => n.endsWith('.id')).map((n) => instanceId(n.slice(0, -3), dir)).flatMap((p) => (p && 'id' in p ? [p.id] : [])));
+  } catch {
+    return;
+  }
+  for (const n of names) {
+    try {
+      const old = Date.now() - statSync(join(dir, 'by_id', n)).mtimeMs > 3_600_000;
+      if (old && (ID.test(n) ? !ids.has(n) : /^\.\d+-[0-9a-f]{12}\.dir\.tmp$/.test(n))) dropDir(join(dir, 'by_id', n));
+    } catch {
+      // gone already
+    }
+  }
 }
 
 /**
@@ -310,10 +399,11 @@ export class KillSwitchError extends Error {
  */
 export function killAutoMerge(instance: string, dir = POLICY_ROOT_DIR, at = new Date()): void {
   if (!fileName(instance)) throw new Error(`${instance}: not an instance name`);
+  const p = instanceId(instance, dir);
+  // It reads off already (fail closed), and that is the truth to say: no switch is armed, and none is needed to stop merges.
+  if (p && 'problem' in p) throw new Error(`root's ${idPointerPath(instance, dir)} can't be used (${p.problem}), so ${instance}'s auto_merge reads off already; no switch could be armed for it. An admin runs \`policy own ${instance} --retake\`, which keeps it off`);
   try {
-    const p = instanceId(instance, dir);
-    if (p && 'problem' in p) throw new Error(`root's ${idPointerPath(instance, dir)} can't be used (${p.problem}); auto_merge reads off while it is so`);
-    if (p) armOne(idDir(p.id, dir), at);
+    if (p) armIn(p.id, dir, at);
     else ensureId(instance, dir, at);
   } catch (e) {
     throw new KillSwitchError(instance, (e as Error).message);

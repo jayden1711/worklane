@@ -110,14 +110,11 @@ test('the scan finds the paths the engine reads relative to itself', () => {
  * smaller margin keeps an accidental jump such as a sourcemap or a stray file visible). Raising it is allowed, on
  * purpose: in the PR that grows the package, with the new `npm pack --dry-run --json` numbers and why in its body.
  * Never to get a PR green without looking at what grew.
- * #726 (#769): measured on the PR merged with main d4b45039, the UI built: 1,920,084 and 5,997,443 bytes (+17,926
- * and +63,032 over main, all five new modules of root's policy.yaml and kill switch: policy-root, policy-kill,
- * policy-gate, os/root-file, doctor-policy-root, and their callers); + 2%, rounded up to 1,000 (the owner's practice).
- * #726 (#770, on #769): 1,925,610 and 6,017,511 bytes (+20,068 unpacked over #769: the dashboard's route through
- * root's helper and root's ceilings in policy-gate, policy-edit, settings, dashboard, policy-root, machine-requests,
- * root-steps and machine, and the first-run Policy form's chunk +1,106); + 2%, rounded up to 1,000.
+ * #726 (#769): measured on the PR merged with main d4b45039, the UI built: 1,921,370 and 6,002,028 bytes (+19,212
+ * and +67,617 over main, all five new modules of root's policy.yaml and kill switch: policy-root, policy-kill,
+ * policy-gate, os/root-file, doctor-policy-root, and their callers); + 2%, rounded up to 10,000 (the owner's practice).
  */
-const PACKAGE_BUDGET = { size: 1_965_000, unpackedSize: 6_138_000 };
+const PACKAGE_BUDGET = { size: 1_960_000, unpackedSize: 6_130_000 };
 
 /** Whether a pack's sizes fit the budget; the reasons when not, each saying how to raise it on purpose. */
 function overBudget(p: { size: number; unpackedSize: number }, budget = PACKAGE_BUDGET): string[] {
