@@ -42,14 +42,11 @@ export function writeSlotFile(file: string, data: string, o: SlotWrite = {}): vo
 function tempWith(file: string, data: string, mode: number, exact: number | undefined): string {
   for (let attempt = 0; ; attempt++) {
     const tmp = `${file}.${process.pid}.${randomBytes(8).toString('hex')}.tmp`;
-    let fd: number;
+    let created = false;
     try {
-      fd = openSync(tmp, 'wx', mode);
-    } catch (e) {
-      if ((e as NodeJS.ErrnoException).code === 'EEXIST' && attempt < 2) continue; // someone else's: not ours to touch
-      throw e; // not created: nothing of ours to remove
-    }
-    try {
+      // A const bound straight to the exclusive open: the lint lets the helper write only to such a descriptor.
+      const fd = openSync(tmp, 'wx', mode);
+      created = true;
       try {
         if (exact !== undefined) fchmodSync(fd, exact);
         writeFileSync(fd, data);
@@ -58,6 +55,10 @@ function tempWith(file: string, data: string, mode: number, exact: number | unde
       }
       return tmp;
     } catch (e) {
+      if (!created) {
+        if ((e as NodeJS.ErrnoException).code === 'EEXIST' && attempt < 2) continue; // someone else's: not ours to touch
+        throw e; // not created: nothing of ours to remove
+      }
       rmSync(tmp, { force: true }); // created, then the write (or the close) failed
       throw e;
     }
