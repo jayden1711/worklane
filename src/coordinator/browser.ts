@@ -1,15 +1,8 @@
-// The coordinator's browser checks (Track B), for verify(): which flows run (src/browser/gate.ts), each run and
-// judged (src/browser/check.ts), recorded as checks with kind 'browser', and the PR's BROWSER CHECKS section.
-//
-// A flow the issue asks for is a check like any other: unavailable (no app, no browser) fails the attempt, as
-// verify() fails anything that isn't a pass. A flow run only because the change touched ui_paths is held to its
-// result too, except that with no browser on the machine it is listed and skipped: a project's UI changes don't
-// all stop because one machine lacks Chrome, and the PR says so.
-//
-// Each flow is first run at the base commit the change is measured against (a worktree of its own, the app
-// started there), so only console errors and failed requests the change adds count against it. A baseline that
-// can't be had (the app won't start at base) is said in the evidence, and the flow is judged with none: every
-// error counts, never a silent pass. Baselines are cached per (base, flow), so a retry doesn't rerun them.
+// The coordinator's browser checks (Track B) for verify(): which flows run, each run and judged, recorded as checks
+// of kind 'browser', and the PR's BROWSER CHECKS section. An asked-for flow that is unavailable fails the attempt; one
+// run because the change touched ui_paths is listed and skipped when the machine has no browser. Each flow first runs
+// at the base commit, so only errors the change adds count; with no baseline every error counts, never a silent pass.
+// Baselines are cached per (base, flow).
 import { join } from 'node:path';
 import type { DoneWhenList } from '../backlog/types.js';
 import type { AppConfig } from '../config/schema.js';
@@ -19,7 +12,7 @@ import { browserEvidenceLines } from '../browser/evidence.js';
 import { askedFlows, browserGate, type BrowserGate } from '../browser/gate.js';
 import { runFlow, type FlowEvidence } from '../browser/run.js';
 import { BRAND } from '../brand.js';
-import type { RunAs } from '../runner.js';
+import type { ProjectRunAs } from '../os/index.js';
 import { createWorktreeAsync, removeWorktree, type WorktreeOptions } from '../worktrees.js';
 
 /** A flow's run at the base commit: its evidence, or why there is none. */
@@ -45,7 +38,7 @@ export function baselineSource(o: {
   remove: () => void;
   outDir: string;
   chrome: string;
-  runAs?: RunAs;
+  runAs?: ProjectRunAs;
   run?: typeof runFlow;
 }): BaselineSource {
   const run = o.run ?? runFlow;
@@ -62,7 +55,8 @@ export function baselineSource(o: {
       if ('error' in t) r = { unavailable: t.error };
       else {
         try {
-          const ev = await run({ app: o.app, flow, cwd: t.path, outDir: join(o.outDir, flow), chrome: o.chrome, ...(o.runAs ? { runAs: { user: o.runAs.user, home: o.runAs.home } } : {}) });
+          // The whole runAs, its hide list too: the app is a project command like any check (#713).
+          const ev = await run({ app: o.app, flow, cwd: t.path, outDir: join(o.outDir, flow), chrome: o.chrome, ...(o.runAs ? { runAs: o.runAs } : {}) });
           r = 'skipped' in ev ? { unavailable: ev.skipped } : { evidence: ev };
         } catch (e) {
           const setup = t.setupErrors.length ? ` (its setup failed: ${t.setupErrors.join('; ').slice(0, 300)})` : '';
@@ -105,7 +99,7 @@ export interface BrowserChecks {
 }
 
 /** Baselines from a worktree of the project at `base` (named `name`, set up like any task's), always removed. */
-export function worktreeBaseline(o: { wt: WorktreeOptions; name: string; base: string; app: AppConfig; cache: Map<string, BaselineRun>; outDir: string; chrome: string; runAs?: RunAs }): BaselineSource {
+export function worktreeBaseline(o: { wt: WorktreeOptions; name: string; base: string; app: AppConfig; cache: Map<string, BaselineRun>; outDir: string; chrome: string; runAs?: ProjectRunAs }): BaselineSource {
   return baselineSource({
     ...o,
     open: () => createWorktreeAsync(o.wt, o.name, `${BRAND.cli}/${o.name}`, o.base),
@@ -129,7 +123,7 @@ export async function browserChecks(o: {
   cwd: string;
   /** Where each flow's evidence (its screenshot) goes. */
   outDir: string;
-  runAs?: RunAs;
+  runAs?: ProjectRunAs;
   /** Tests: null means no browser on this machine. */
   chrome?: string | null;
   run?: typeof runBrowserCheck;
@@ -155,7 +149,7 @@ export async function browserChecks(o: {
         outDir: join(o.outDir, flow),
         baseline: before,
         chrome,
-        ...(o.runAs ? { runAs: { user: o.runAs.user, home: o.runAs.home } } : {}),
+        ...(o.runAs ? { runAs: o.runAs } : {}),
       });
       if (b && 'unavailable' in b && result.evidence) result.tail += `\nnote: no baseline at base ${source!.base.slice(0, 12)} (${b.unavailable}), so every error was counted as new`;
       results.push({ flow, result, before, ...(b && 'unavailable' in b ? { baselineUnavailable: b.unavailable } : {}) });
