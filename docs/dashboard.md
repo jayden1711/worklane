@@ -191,13 +191,13 @@ A request through an ssh tunnel, or on the break-glass port 4398, can't be tied 
 
 The Setup console no longer opens a terminal (#742). It was a login shell as the machine's admin user, which the hub's viewer user started through a sudoers rule and a root-installed console shell, and it made the hub's unit drop its sandbox. For a shell on the machine, use ssh; the break-glass (port 4398, through ssh) stays.
 
-An install that had it (`--console-user` in the hub's unit, or `/usr/local/libexec/worklane-console-shell` present) keeps its root files until root runs `dashboards.sh` again. Until then, the Setup console shows its owner a notice, and `doctor` warns. The rerun:
+An install that had it (`--console-user` in the hub's unit, or `/usr/local/libexec/worklane-console-shell` present) keeps its sudoers rule until root runs `dashboards.sh` again. The first engine update replaces the console shell with a stub that refuses every command (the updater keeps each root helper the machine has in step, with its owner and mode), so the rule then reaches only that stub. Until the rerun, the Setup console shows its owner a notice, and `doctor` fails (`owner terminal`, exit 1) with the rerun first. The rerun:
 
 ```bash
 sudo bash scripts/setup/dashboards.sh --machine-devices <the devices the unit's --console-devices lists> --client-id <id> --public-url https://<machine>.<tailnet>.ts.net <name> [<name>...]
 ```
 
-removes the console shell and its sudoers rule (`/etc/sudoers.d/worklane-console`) and writes the hub's unit with its full sandbox. An older command line still runs: `--console-user` is accepted and ignored, and `--console-devices` is read as `--machine-devices`, with no device added.
+removes the console shell (or its stub) and its sudoers rule (`/etc/sudoers.d/worklane-console`) and writes the hub's unit with its full sandbox. An older command line still runs: `--console-user` is accepted and ignored, and `--console-devices` is read as `--machine-devices`, with no device added.
 
 ## Machine owners
 
@@ -465,7 +465,7 @@ The actions on a card follow your role there, and each is refused again by the r
 | Answer the open decision | – | where the decision rules allow (not plans) | yes |
 | Approve a high-risk landing, or Merge a high-risk PR left to you on GitHub | – | – (403) | yes |
 
-A viewer's board leaves out everything about runs and agents (the run, its resource use, the diff, comments and checks): the card is an allowlist of fields (`VIEWER_CARD_FIELDS` in `src/board.ts`), so a field added later stays hidden from viewers until someone puts it there. A steer message is the one console action writers have: the dashboard (`console.ts`) and the coordinator apply the same rule (`mayRequest`), and stopping a run, asks, root steps and the terminal stay the owner's. Every answer and message is recorded in the audit under its sender's login and role.
+A viewer's board leaves out everything about runs and agents (the run, its resource use, the diff, comments and checks): the card is an allowlist of fields (`VIEWER_CARD_FIELDS` in `src/board.ts`), so a field added later stays hidden from viewers until someone puts it there. A steer message is the one console action writers have: the dashboard (`console.ts`) and the coordinator apply the same rule (`mayRequest`), and stopping a run, asks and root steps stay the owner's. Every answer and message is recorded in the audit under its sender's login and role.
 
 ## Extend: Plugins
 

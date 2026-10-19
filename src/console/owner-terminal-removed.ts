@@ -9,10 +9,12 @@
 // So the Setup page (an owner's) and doctor say so, and how to remove them, while any of it is there.
 import { existsSync, readFileSync } from 'node:fs';
 import { BRAND } from '../brand.js';
-import { libexecPath, unitPath } from '../os/system-paths.js';
+import { asRoot, libexecPath, unitPath } from '../os/system-paths.js';
 
 /** The removed terminal's root-installed console shell (scripts/setup/lib.sh CONSOLE_SHELL): what dashboards.sh removes. */
 export const CONSOLE_SHELL = libexecPath('console-shell');
+/** The one root step that removes what is left: the same command as CHANGELOG's v0.5.3 "After install". */
+export const OWNER_TERMINAL_RERUN = `sudo bash ${asRoot.opt('current/scripts/setup/dashboards.sh')} --machine-devices <the hub unit's --console-devices> --client-id <id> --public-url <url> <instance>...`;
 /** The hub's unit, as dashboards.sh writes it (src/setup-steps.ts MACHINE_PATHS.hubUnitFile). */
 const HUB_UNIT_FILE = unitPath(`${BRAND.cli}-dashboard-hub.service`);
 
@@ -32,6 +34,8 @@ export function ownerTerminalLeftovers(o: TerminalPaths = {}): string[] {
   }
   if (/^ExecStart=.* --console-user \S/m.test(unit)) out.push("the dashboard hub's unit still names a console user and runs without its sandbox (NoNewPrivileges, ProtectSystem=strict, ProtectHome=read-only)");
   const shell = o.consoleShell ?? CONSOLE_SHELL;
+  // An older engine updater replaces it with a stub that refuses everything (scripts/machine/worklane-console-shell.sh);
+  // the sudoers rule naming it stays until the rerun either way, so it is said the same.
   if (existsSync(shell)) out.push(`the console shell ${shell} is still installed, with the sudoers rule that lets the hub's user start it as the admin user`);
   return out;
 }
@@ -40,5 +44,5 @@ export function ownerTerminalLeftovers(o: TerminalPaths = {}): string[] {
 export function ownerTerminalNotice(o: TerminalPaths = {}): string | null {
   const left = ownerTerminalLeftovers(o);
   if (!left.length) return null;
-  return `The owner terminal has been removed from the dashboard, but this machine still has it set up: ${left.join('; and ')}. As root, run dashboards.sh again with the hub's instances, and the devices its unit lists now (--console-devices) as --machine-devices (sudo bash scripts/setup/dashboards.sh --machine-devices <tags,names> <name>...): it removes the console shell and its sudoers rule and gives the hub its sandbox back. For a shell on this machine, use ssh; the break-glass (port 4398, through ssh) still works.`;
+  return `The owner terminal has been removed from the dashboard, but this machine still has it set up: ${left.join('; and ')}. As root, run dashboards.sh again with the hub's instances, and the devices its unit lists now (--console-devices) as --machine-devices (${OWNER_TERMINAL_RERUN}): it removes the console shell and its sudoers rule and gives the hub its sandbox back. For a shell on this machine, use ssh; the break-glass (port 4398, through ssh) still works.`;
 }

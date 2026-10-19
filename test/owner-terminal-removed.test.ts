@@ -1,15 +1,17 @@
 // #742: the browser owner terminal is removed, with its sudoers rule and its root console shell. What an existing
 // install relies on stays: the machine devices (an older --console-devices list, read as them, never more) still gate
 // machine changes from the page, and the break-glass stays. While an install still has the terminal's root files or
-// a hub unit without its sandbox, the Setup page (an owner's) and doctor say so and how to remove them; a rerun of
-// dashboards.sh, run here in a temporary root with stand-ins for systemd, sudo and setfacl (no real sudo), removes
-// them and gives the hub its sandbox back.
+// a hub unit without its sandbox, the Setup page (an owner's) says so and doctor fails, with how to remove them; a
+// rerun of dashboards.sh, run here in a temporary root with stand-ins for systemd, sudo and setfacl (no real sudo),
+// removes them and gives the hub its sandbox back. Before that rerun, an engine update replaces the live console shell
+// with a stub that refuses everything.
 import { before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { request, type IncomingMessage } from 'node:http';
+import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -17,7 +19,7 @@ import { loadConfig } from '../src/config/load.js';
 import { startDashboard } from '../src/dashboard.js';
 import * as hub from '../src/dashboard-hub.js';
 import { deviceRefusal } from '../src/console/terminal-devices.js';
-import { CONSOLE_SHELL, ownerTerminalLeftovers } from '../src/console/owner-terminal-removed.js';
+import { CONSOLE_SHELL, OWNER_TERMINAL_RERUN, ownerTerminalLeftovers } from '../src/console/owner-terminal-removed.js';
 import { doctor } from '../src/doctor.js';
 import { MACHINE_PATHS } from '../src/setup-steps.js';
 import type { Role } from '../src/console/asks.js';
@@ -108,7 +110,7 @@ async function site(roles: Record<string, Role>) {
   return { d, asks };
 }
 
-test('deprecation: on an install with a console user, the Setup page shows its owner the notice, and doctor warns; none once it is gone', async () => {
+test('deprecation: on an install with a console user, the Setup page shows its owner the notice, and doctor fails with the rerun first; none once it is gone', async () => {
   const s = await site({ olive: 'owner', wendy: 'writer' });
   const { dir: root } = exampleProject();
   try {
@@ -121,8 +123,11 @@ test('deprecation: on an install with a console user, the Setup page shows its o
     assert.deepEqual((await s.asks('wendy')).notices ?? [], [], "a writer isn't shown the machine's root files");
     const html = r.renderSetup({ role: 'owner', login: 'olive', asks: [], notices: [notice] });
     assert.match(html, /data-testid="setup-notice"[^>]*>[\s\S]*The owner terminal has been removed/);
+    // Loud: doctor fails (exit 1, src/cli.ts) while the sudoers rule may still be there, and the rerun comes first.
     const check = doctor(root).find((c) => c.name === 'owner terminal');
-    assert.deepEqual([check?.level, check?.detail], ['warn', notice]);
+    assert.equal(check?.level, 'fail', 'doctor fails, not warns');
+    assert.equal(check?.detail, `run as root, once: ${OWNER_TERMINAL_RERUN}\n${notice}`);
+    assert.match(OWNER_TERMINAL_RERUN, /^sudo bash \/opt\/\S+\/current\/scripts\/setup\/dashboards\.sh --machine-devices /);
     // Only the unit left (the shell already removed by hand): still said, since the hub runs without its sandbox.
     rmSync(CONSOLE_SHELL);
     assert.match((await s.asks('olive')).notices?.[0] ?? '', /still names a console user/);
@@ -227,10 +232,68 @@ test('a dashboards.sh rerun on an install that had a console user: the console s
     assert.equal(readFileSync(m.paths.unit, 'utf8'), unit, 'the same unit again');
   }
   // --console-user alone is accepted and ignored: it turns nothing on.
+  // (The stub an engine update leaves in the console shell's place is deleted the same way: the next test.)
   const m = machine();
   const out = m.run(['--client-id', 'Iv1.signin0001', '--public-url', 'https://hub.example.test', '--console-user', 'admin', 'alpha']);
   assert.equal(out.status, 0, out.stderr);
   assert.match(out.stderr, /--console-user is ignored: the owner terminal is removed/);
   assert.match(readFileSync(m.paths.unit, 'utf8'), /^NoNewPrivileges=yes$/m);
   assert.doesNotMatch(readFileSync(m.paths.unit, 'utf8'), /--console-user|--machine-devices/);
+});
+
+type Helper = { dest: string; src: string; check: 'bash' | 'node' };
+/**
+ * The console shell's entry in HELPERS as v0.5.0 to v0.5.2's updater has it (worklane-update.cjs before #742). That
+ * installed updater, not this engine's, runs the first upgrade to this engine: the updater never updates itself.
+ */
+const OLD_UPDATER_ENTRY: Helper = { dest: '/usr/local/libexec/worklane-console-shell', src: 'scripts/machine/worklane-console-shell.sh', check: 'bash' };
+/** The live console shell's behaviour, as console-shell.sh installed it: `check` says password-required when sudo asks. */
+const OLD_SHELL = '#!/bin/bash\ncase "${1:-}" in\n  check) if sudo -n true; then echo passwordless; exit 3; fi; echo password-required ;;\n  shell) sudo -k; exec /bin/bash --login -i ;;\n  *) exit 2 ;;\nesac\n';
+
+test('upgrade: the updater replaces a live console shell with a stub that refuses every subcommand, with no root step; a dashboards.sh rerun still deletes it and its sudoers rule, and no update puts it back', { skip: !posix && 'bash' }, () => {
+  const updater = createRequire(import.meta.url)(join(repoRoot, 'scripts', 'machine', 'worklane-update.cjs')) as { syncHelpers(engineDir: string, helpers: Helper[]): { path: string; state: string }[]; HELPERS: Helper[] };
+  const m = machine();
+  writeFileSync(m.paths.unit, OLD_HUB_UNIT);
+  writeFileSync(m.paths.shell, OLD_SHELL);
+  chmodSync(m.paths.shell, 0o755);
+  writeFileSync(m.paths.sudoers, 'wl-dash ALL=(admin) NOPASSWD: /usr/local/libexec/worklane-console-shell check, /usr/local/libexec/worklane-console-shell shell\n', { mode: 0o440 });
+  const before = statSync(m.paths.shell);
+  // The old updater's step: its own entry, with this engine as the new tree (/opt/<cli>/<sha> is a clone of this
+  // checkout), and syncHelpers as #742 leaves it (only HELPERS changes in that file). Only the destination is moved
+  // into the temporary root.
+  const sync = (entry: Helper) => updater.syncHelpers(repoRoot, [{ ...entry, dest: m.paths.shell }]);
+  assert.deepEqual(sync(OLD_UPDATER_ENTRY), [{ path: m.paths.shell, state: 'updated' }], 'the old updater replaces it');
+  const after = statSync(m.paths.shell);
+  assert.equal(readFileSync(m.paths.shell, 'utf8'), readFileSync(join(repoRoot, OLD_UPDATER_ENTRY.src), 'utf8'), 'with the stub');
+  assert.equal(after.mode & 0o7777, 0o755, "the installed file's mode");
+  assert.deepEqual([after.uid, after.gid], [before.uid, before.gid], "the installed file's owner");
+  // This engine's updater keeps the same entry, so the stub stays in step whichever updater runs.
+  assert.deepEqual(updater.HELPERS.find((h) => h.src === OLD_UPDATER_ENTRY.src), OLD_UPDATER_ENTRY);
+  assert.deepEqual(sync(OLD_UPDATER_ENTRY), [{ path: m.paths.shell, state: 'same' }]);
+
+  // The stub, run as the sudoers rule allowed (and with anything else): refused, nothing on stdout (the old hub opened
+  // its terminal only on "password-required"), the rerun named, and nothing run: a stand-in sudo and bash log any call.
+  const bin = join(m.T, 'stub-bin');
+  const log = join(m.T, 'stub-calls');
+  mkdirSync(bin);
+  for (const c of ['sudo', 'bash', 'id']) {
+    writeFileSync(join(bin, c), `#!/bin/sh\necho "${c} $*" >> ${JSON.stringify(log)}\nexit 1\n`);
+    chmodSync(join(bin, c), 0o755);
+  }
+  for (const args of [['check'], ['shell'], [], ['--help'], ['check', 'extra'], ['shell', '-c', 'id']]) {
+    const r = spawnSync(m.paths.shell, args, { encoding: 'utf8', input: 'id\n', env: { PATH: `${bin}:/usr/bin:/bin`, HOME: m.T }, timeout: 10_000 });
+    assert.equal(r.status, 3, `${args.join(' ') || '(none)'}: refused`);
+    assert.equal(r.stdout, '', `${args.join(' ') || '(none)'}: nothing on stdout`);
+    assert.match(r.stderr, /^refusing: the owner terminal is removed .*rerun dashboards\.sh .*sudo bash \/opt\/\S+\/current\/scripts\/setup\/dashboards\.sh --machine-devices /);
+  }
+  assert.equal(existsSync(log), false, 'the stub runs nothing');
+
+  // The rerun deletes the stub and the sudoers rule, as it deleted the live shell; no updater installs it again.
+  const out = m.run(['--client-id', 'Iv1.signin0001', '--public-url', 'https://hub.example.test', '--console-user', 'admin', '--console-devices', 'tag:owner-laptop,box', 'alpha']);
+  assert.equal(out.status, 0, out.stderr);
+  assert.equal(existsSync(m.paths.shell), false, 'no stub');
+  assert.equal(existsSync(m.paths.sudoers), false, 'no console sudoers file');
+  assert.deepEqual(sync(OLD_UPDATER_ENTRY), [{ path: m.paths.shell, state: 'absent' }], 'an absent helper is never installed');
+  assert.equal(existsSync(m.paths.shell), false);
+  assert.deepEqual(ownerTerminalLeftovers({ hubUnitFile: m.paths.unit, consoleShell: m.paths.shell }), []);
 });
