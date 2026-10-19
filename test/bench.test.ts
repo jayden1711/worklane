@@ -1131,14 +1131,20 @@ test('the sandbox confirmation removes its sentinels on SIGINT and SIGTERM', { s
     );
     const child = spawn(process.execPath, [script, JSON.stringify(input)], { stdio: ['ignore', 'pipe', 'inherit'] });
     const ended = new Promise<[number | null, NodeJS.Signals | null]>((r) => child.on('exit', (code, signal) => r([code, signal])));
-    await new Promise<void>((resolve, reject) => {
-      child.stdout!.on('data', (b: Buffer) => String(b).includes('asked') && resolve());
-      void ended.then(([code, signal]) => reject(new Error(`the check ended before its model call: ${code} ${signal}`)));
-    });
-    for (const f of ['.netrc', '.npmrc', '.pypirc']) assert.ok(existsSync(join(home, f)), `${sig}: the ${f} sentinel was in place`);
-    assert.equal(readdirSync(join(home, '.claude')).length, 1, `${sig}: and the one under ~/.claude`);
-    child.kill(sig);
-    const [, signal] = await ended;
+    let signal: NodeJS.Signals | null = null;
+    try {
+      await new Promise<void>((resolve, reject) => {
+        child.stdout!.on('data', (b: Buffer) => String(b).includes('asked') && resolve());
+        void ended.then(([code, s]) => reject(new Error(`the check ended before its model call: ${code} ${s}`)));
+      });
+      for (const f of ['.netrc', '.npmrc', '.pypirc']) assert.ok(existsSync(join(home, f)), `${sig}: the ${f} sentinel was in place`);
+      assert.equal(readdirSync(join(home, '.claude')).length, 1, `${sig}: and the one under ~/.claude`);
+      child.kill(sig);
+      [, signal] = await ended;
+    } finally {
+      // Whatever failed above, the child (which never ends by itself) must not outlive the test.
+      if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+    }
     assert.equal(signal, sig, `${sig}: the signal still ends the process`);
     for (const f of ['.netrc', '.npmrc', '.pypirc', '.claude.json']) assert.ok(!existsSync(join(home, f)), `${sig}: no ${f} left`);
     assert.deepEqual(readdirSync(join(home, '.claude')), [], `${sig}: nothing left under ~/.claude`);
