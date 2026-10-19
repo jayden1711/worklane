@@ -113,8 +113,11 @@ test('the scan finds the paths the engine reads relative to itself', () => {
  * #726 (#769): measured on the PR merged with main d4b45039, the UI built: 1,921,370 and 6,002,028 bytes (+19,212
  * and +67,617 over main, all five new modules of root's policy.yaml and kill switch: policy-root, policy-kill,
  * policy-gate, os/root-file, doctor-policy-root, and their callers); + 2%, rounded up to 10,000 (the owner's practice).
+ * #726 (#770, on #769 and main d4b45039): 1,927,095 and 6,023,211 bytes (+21,183 unpacked over #769: the dashboard's
+ * route through root's helper and its tighten-only rule in policy-gate, policy-edit, policy-root, settings, dashboard,
+ * machine-requests, root-steps, machine and setup-steps, and the web UI +1,149); + 2%, rounded up to 10,000.
  */
-const PACKAGE_BUDGET = { size: 1_960_000, unpackedSize: 6_130_000 };
+const PACKAGE_BUDGET = { size: 1_970_000, unpackedSize: 6_150_000 };
 
 /** Whether a pack's sizes fit the budget; the reasons when not, each saying how to raise it on purpose. */
 function overBudget(p: { size: number; unpackedSize: number }, budget = PACKAGE_BUDGET): string[] {
