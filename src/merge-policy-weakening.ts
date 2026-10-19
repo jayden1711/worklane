@@ -323,6 +323,7 @@ const KINDS = {
   'table-shrunk': "removes or changes an entry in a check's rules or a guard's list",
   'table-grown': 'adds or changes an entry in an allowlist, exception or good-fixture list',
   'allow-file': 'adds an entry to an allowlist file',
+  'table-used': "changes a check's or guard's table outside its own list",
   'guard-lines': 'removes or changes a line of a guard or lint',
   marker: 'adds a line with a skip, only or lint or type-check suppression mark',
 } as const;
@@ -353,6 +354,29 @@ const entry = (l: string) => {
 };
 
 const brackets = (l: string, set: string) => [...l].filter((c) => set.includes(c)).length;
+/** A line without its `//` and `/* *\/` comments (never inside a string): one pass, so a bracket in a comment opens nothing. */
+export function withoutComments(l: string): string {
+  let out = '';
+  let quote = '';
+  for (let k = 0; k < l.length; k++) {
+    const c = l[k]!;
+    if (quote) {
+      out += c;
+      if (c === '\\') out += l[++k] ?? '';
+      else if (c === quote) quote = '';
+    } else if (c === '\\') out += c + (l[++k] ?? ''); // an escape, as in a regex literal's `\/`
+    else if (c === '/' && l[k + 1] === '/') break;
+    else if (c === '/' && l[k + 1] === '*') {
+      const end = l.indexOf('*/', k + 2);
+      if (end === -1) break;
+      k = end + 1;
+    } else {
+      if (c === "'" || c === '"' || c === '`') quote = c;
+      out += c;
+    }
+  }
+  return out;
+}
 
 /**
  * A registered table's lines (as entries, blanks left out), or null when the text doesn't declare it. It is declared
@@ -376,8 +400,9 @@ export function tableLines(text: string, table: string): string[] | null {
   // Its value: what follows the `=` (not an arrow's `=>`), or a JSON key's `:`. The list's opening bracket must be
   // there: a declaring line with none after it (a type, `= // see [docs]` with the list below) isn't read.
   const json = first.trimStart().startsWith('"');
-  const eq = json ? first.indexOf('":') + 1 : first.search(/=(?!>)/);
-  const value = eq < 1 ? '' : first.slice(eq + 1);
+  const code = json ? first : withoutComments(first);
+  const eq = json ? code.indexOf('":') + 1 : code.search(/=(?!>)/);
+  const value = eq < 1 ? '' : code.slice(eq + 1);
   if (!brackets(value, '[({')) throw new Error(`${table}: no bracket opens its list on the line that declares it`);
   if (brackets(value, '[({') === brackets(value, '])}')) {
     // A one-line table: nothing of it may follow on a deeper line (`= new Set()` with `.add(...)` below).
@@ -503,6 +528,15 @@ export function weakeningReasons(i: WeakeningInput): string[] {
     }
     if (t.kind === 'never-grow') for (const l of missing(now, was)) hit('table-grown', t.path, `${t.table}: ${l}`);
     else for (const l of missing(was, now)) hit('table-shrunk', t.path, `${t.table}: ${l}`);
+    // An added line that names the table outside its own lines (`NAME[k] = v`, `Object.assign(NAME, ...)`,
+    // `NAME.push(...)`, `{ ...NAME, ... }`) can grow or narrow it where the reader doesn't look: it waits. A plain
+    // identifier match; a JSON table is data, never used by name in its file.
+    if (t.path.endsWith('.json')) continue;
+    const names = new RegExp(`(?<![\\w$])${t.table}(?![\\w$])`);
+    const own = new Set(now);
+    for (const l of i.files.find((f) => f.path === t.path)?.addedLines ?? []) {
+      if (names.test(l) && !own.has(entry(l))) hit('table-used', t.path, `${t.table}: ${l.trim()}`);
+    }
   }
 
   const out: string[] = [];

@@ -699,6 +699,26 @@ test('weakening: a registered table waits on an entry added to an allowlist, or 
   // change waits.
   // Round 7's review: a declaring line whose brackets balance but hold no list after the `=` (a type, a comment, an
   // empty constructor), with the list on the next lines: unreadable, the change waits.
+  // Round 8's review: a bracket in a comment opens nothing, even with the list on the next line at the same indent.
+  const commented = "const ALLOWED = // see [docs]\n[\n  'a',\n];\nconst BAD_SHAPE = [];\n";
+  assert.deepEqual(kinds(weakensRaw({ 'test/instance-name.test.ts': commented }, { 'test/instance-name.test.ts': commented.replace("  'a',\n", "  'a',\n  'b',\n") })), [UNREADABLE], 'a bracket in a comment');
+  const inString = "const ALLOWED = ['// not a comment', 'a'];\nconst BAD_SHAPE = [];\n";
+  assert.deepEqual(kinds(weakensRaw({ 'test/instance-name.test.ts': inString }, { 'test/instance-name.test.ts': `${inString}// a note\n` })), [], 'a // inside a string is no comment');
+  // Round 8's review: a registered allowlist grown by a line outside its literal (index assignment, Object.assign,
+  // .push, .add, a spread declared again) waits: in a registered table's file, an added line that names the table
+  // outside the table's own lines.
+  const clock = "const ALLOWED: Record<string, number> = {\n  'test/a.test.ts': 1,\n};\nconst files = ['x'];\n";
+  for (const line of ["ALLOWED['test/c.test.ts'] = 1;", "Object.assign(ALLOWED, { 'test/c.test.ts': 1 });", "(ALLOWED as unknown as string[]).push('test/c.test.ts');", "new Set(Object.keys(ALLOWED)).add('test/c.test.ts');", "const ALLOWED_TOO = { ...ALLOWED, 'test/c.test.ts': 1 };"]) {
+    assert.deepEqual(kinds(weakensRaw({ 'test/no-clock-helpers.test.ts': clock }, { 'test/no-clock-helpers.test.ts': `${clock}${line}\n` })), ['changes a check\'s or guard\'s table outside its own list'], line);
+  }
+  for (const path of ['test/change-files-renames.test.ts', 'test/no-wall-clock-durations.test.ts']) {
+    const table = path.includes('renames') ? 'OUTSIDE_THE_HELPER' : 'ALLOWED';
+    const others = weakening.CHECK_TABLES.filter((x) => x.path === path && x.table !== table).map((x) => `const ${x.table} = [];\n`).join('');
+    const text = `const ${table} = {\n  a: 1,\n};\n${others}`;
+    assert.ok(kinds(weakensRaw({ [path]: text }, { [path]: `${text}${table}.b = 2;\n` })).includes("changes a check's or guard's table outside its own list"), path);
+  }
+  // An added line inside the table's own literal is read as an entry, not as a use.
+  assert.deepEqual(kinds(weakensRaw({ 'test/no-clock-helpers.test.ts': clock }, { 'test/no-clock-helpers.test.ts': clock.replace("  'test/a.test.ts': 1,\n", "  'test/a.test.ts': 1,\n  'test/b.test.ts': 1,\n") })), [GROWN]);
   for (const decl of ['const ALLOWED: string[] =\n  [', 'const ALLOWED = // see [docs]\n  [', 'const ALLOWED = new Set()\n  .add(']) {
     const close = decl.endsWith('(') ? '  );' : '  ];';
     const text = `${decl}\n    'a',\n${close}\nconst BAD_SHAPE = [];\n`;
@@ -904,7 +924,9 @@ test('weakening backstop: each registered table is found where it is registered,
     const lines = text.split('\n');
     const at = lines.findIndex((l) => new RegExp(`^\\s*(?:export\\s+)?(?:(?:const|let|var)\\s+${t.table}|"${t.table}"\\s*:)(?![\\w$])`).test(l));
     const line = lines[at]!;
-    const value = line.slice(line.search(/=(?!>)|":/) + 1);
+    // Comments stripped first (round 8's review): a bracket in a comment opens nothing.
+    const code = line.trimStart().startsWith('"') ? line : weakening.withoutComments(line);
+    const value = code.slice(code.search(/=(?!>)|":/) + 1);
     const count = (s: string, set: string) => [...s].filter((c) => set.includes(c)).length;
     assert.ok(count(value, '[({') > 0 && count(value, '[({') === count(value, '])}'), `${t.path} ${t.table}: its list is on its declaring line`);
     const next = lines.slice(at + 1).find((l) => l.trim());
