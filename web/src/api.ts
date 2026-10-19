@@ -1262,6 +1262,8 @@ export interface FirstRunPolicy {
   fields: FirstRunPolicyField[];
   fixed: { key: string; value: unknown }[];
   error: string | null;
+  /** With an error, on a machine instance whose policy is root's: auto_merge off is still on offer (root's kill switch). */
+  canTurnOff?: boolean;
 }
 export interface PolicyChange {
   key: string;

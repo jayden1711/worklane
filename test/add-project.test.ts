@@ -455,7 +455,7 @@ test("the policy step names the dashboard's route only where root's helper has i
   const old = machine();
   writeFileSync(join(old.T, 'old-sudo'), '');
   const d = detail(old);
-  assert.match(d, /workers: change them as root with \S+ policy set alpha <key> <value> \(this machine's sudo is older than 1\.9\.10, so the dashboard can't\)$/);
+  assert.match(d, /workers: change them as root with \S+ policy set alpha <key> <value> \(this machine's sudo is older than 1\.9\.10, so the dashboard only turns auto_merge off, land_mode to pr and main_watch to auto\)$/);
   assert.doesNotMatch(d, /dashboard's Settings/);
 });
 

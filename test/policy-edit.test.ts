@@ -205,7 +205,8 @@ test("a dashboard change to auto_merge (turning it off) and a Settings change st
   const asked: string[][] = [];
   const request = (args: string[]) => (asked.push(args), requestPolicyChange(log, { args, by: 'olive', breakGlass: false }).id);
   asRoot(() => {
-    assert.deepEqual(applyPolicy({ path: m.file, cfg, values: { auto_merge: false }, eventsDb: join(m.T, 'events.db'), by: 'olive', request }), [{ key: 'auto_merge', from: true, to: false }]);
+    // auto_merge off alone on a root policy: asked for without reading policy.yaml, so its `from` is unknown (null).
+    assert.deepEqual(applyPolicy({ path: m.file, cfg, values: { auto_merge: false }, eventsDb: join(m.T, 'events.db'), by: 'olive', request }), [{ key: 'auto_merge', from: null, to: false }]);
     assert.ok(changeSetting({ policyPath: m.file, cfg, eventsDb: join(m.T, 'events.db'), key: 'workers', value: 1, by: cfg.project.owners.default, owner: true, request }).requested);
   });
   assert.deepEqual(asked, [['set-policy', 'auto_merge', 'off'], ['set-policy', 'settings.workers', '1']]);
@@ -221,7 +222,8 @@ test("a dashboard change to auto_merge (turning it off) and a Settings change st
   assert.equal(statSync(m.file).mode & 0o777, 0o644);
   assert.match(readFileSync(m.file, 'utf8'), /# the operator's own notes stay/);
   const changed = log.read(0, ['settings.changed']).map((e) => e.payload as { key: string; from: unknown; to: unknown; by: string });
-  assert.deepEqual(changed.map((c) => [c.key, c.from, c.to, c.by]), [['policy.auto_merge', true, false, 'olive'], ['workers', null, 1, 'olive']]);
+  // auto_merge off is root's kill switch: policy.yaml is never read, so its `from` is unknown (null).
+  assert.deepEqual(changed.map((c) => [c.key, c.from, c.to, c.by]), [['policy.auto_merge', null, false, 'olive'], ['workers', null, 1, 'olive']]);
 });
 
 test("auto_merge on is root's alone (#770, the owner's decision): the dashboard never asks for it, the coordinator refuses a forged request, and the helper refuses it; off is taken everywhere", { skip }, () => {
@@ -309,7 +311,36 @@ test("turning auto_merge off (and land_mode back to pr, main_watch back to auto)
   assert.equal(quietly(() => policyCommand('set', ['oldoff', 'auto_merge', 'off'], m.deps, true)).code, 0);
   assert.equal(asRoot(() => readPolicy(m.file).policy)!.auto_merge, false);
   setPolicy('oldoff', 'auto_merge', 'on', null, m.deps);
-  assert.deepEqual(setPolicy('oldoff', 'auto_merge', 'off', 'wl-oldoff', m.deps), { key: 'auto_merge', from: true, to: false });
+  assert.deepEqual(setPolicy('oldoff', 'auto_merge', 'off', 'wl-oldoff', m.deps), { key: 'auto_merge', from: null, to: false });
+});
+
+test("auto_merge OFF from the dashboard works with root's lock held by a live writer, with one a dead writer left, with an oversized and with a corrupt policy.yaml: through root's helper to the kill switch, and the engine reads off in all four (#726 round 4)", { skip }, () => {
+  const states: [string, (m: ReturnType<typeof machineInstance>) => () => void][] = [
+    ['off-live', () => { const h = liveHolder(); writeFileSync(join(POLICY_ROOT_DIR, '.off-live.lock'), h.line); return h.stop; }],
+    ['off-dead', () => { const r = spawnSync(process.execPath, ['-e', '']); writeFileSync(join(POLICY_ROOT_DIR, '.off-dead.lock'), `${r.pid} gone\n`); return () => {}; }],
+    ['off-huge', (m) => { coordinatorWrites(m, `${POLICY}# ${'x'.repeat(2 * 1024 * 1024)}\n`); return () => {}; }],
+    ['off-corrupt', (m) => { coordinatorWrites(m, 'version: 1\nbudget: [ {{{ :\n'); return () => {}; }],
+  ];
+  for (const [name, plant] of states) {
+    const m = machineInstance(name);
+    ownPolicy(name, m.deps);
+    setPolicy(name, 'auto_merge', 'on', null, m.deps); // an admin's, at a root shell
+    const done = plant(m);
+    try {
+      const log = new EventLog(':memory:');
+      const request = (args: string[]) => requestPolicyChange(log, { args, by: 'olive', breakGlass: false }).id;
+      // The Policy form asks for it without reading policy.yaml.
+      assert.deepEqual(asRoot(() => applyPolicy({ path: m.file, cfg, values: { auto_merge: false }, eventsDb: join(m.T, 'e.db'), by: 'olive', request })), [{ key: 'auto_merge', from: null, to: false }], name);
+      // The coordinator runs it through root's helper (its own argument check, then `policy set` as root).
+      const calls: string[][] = [];
+      assert.equal(runMachineRequests({ log, instance: name, exec: helperStandIn(name, { ...m.deps, lockWaitMs: 100 }, calls) }), 1, name);
+      assert.deepEqual(machineRequests(log.read(0)).map((r) => r.status), ['done'], name);
+      assert.equal(autoMergeKilled(name), true, name);
+      assert.equal(instanceAutoMerge(name, m.instances), false, `${name}: the engine reads off`);
+    } finally {
+      done();
+    }
+  }
 });
 
 test("on a sudo older than 1.9.10 (helper-rules.json leaves set-policy out), Settings and the Policy form refuse up front, naming the root command, and record no request", { skip }, () => {
@@ -720,7 +751,7 @@ ownPolicy(a.name, { home: () => a.home, uid: () => a.uid, rootUid: a.uid, rootGi
   assert.deepEqual(setPolicy('died', 'auto_merge', 'off', 'wl-died', { ...m.deps, lockWaitMs: 100 }), { key: 'auto_merge', from: null, to: false });
   assert.equal(autoMergeKilled('died'), true);
   // The next root writer breaks the dead holder's lock and goes on (here: an admin retaking the file, checked).
-  ownPolicy('died', { ...m.deps, lockWaitMs: 100 }, { retake: true });
+  ownPolicy('died', { ...m.deps, lockWaitMs: 100 }, { retake: true, acceptLoose: true });
   assert.equal(existsSync(lock), false);
   assert.equal(asRoot(() => readPolicy(m.file)).policy?.auto_merge, false, 'still off: only an admin turns it on');
 });

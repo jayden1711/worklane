@@ -7,12 +7,51 @@ import { Button, cx } from './ui';
 const field = 'h-8 rounded-control bg-field px-2.5 font-mono text-[13px] text-ink shadow-hairline outline-none focus:shadow-[0_0_0_1px_var(--ring)] disabled:opacity-60';
 const show = (v: unknown) => (v === null || v === undefined ? 'not set' : Array.isArray(v) ? v.join(', ') || 'none' : String(v));
 
+/** auto_merge off, asked of the coordinator (root's helper writes the kill switch), when the form itself can't load. */
+function OffAnyway() {
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  const off = async () => {
+    setBusy(true);
+    setMsg(null);
+    try {
+      const r = await changePolicy({ auto_merge: false }, true);
+      setMsg({ ok: true, text: `${r.queued ? 'queued for the coordinator' : 'written'}: auto_merge off` });
+    } catch (e) {
+      setMsg({ ok: false, text: (e as Error).message });
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="space-y-1">
+      <Button size="sm" variant="outline" why={busy && 'Asking…'} onClick={() => void off()} data-testid="policy-off">
+        Turn auto-merge off
+      </Button>
+      {msg && (
+        <p className={cx('break-words text-[12.5px]', msg.ok ? 'text-green' : 'text-red')} data-testid="policy-off-result">
+          {msg.text}
+        </p>
+      )}
+    </div>
+  );
+}
+
 export function PolicyForm({ p, canEdit, initialChanges = null, onDone }: { p: FirstRunPolicy; canEdit: boolean; initialChanges?: PolicyChange[] | null; onDone?: () => void }) {
   const [values, setValues] = useState<Record<string, number | boolean | string>>(() => Object.fromEntries(p.fields.map((f) => [f.key, f.value])));
   const [changes, setChanges] = useState<PolicyChange[] | null>(initialChanges);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
-  if (p.error) return <p className="break-words text-[12.5px] text-red" data-testid="policy-error">{p.error}</p>;
+  if (p.error)
+    return (
+      <div className="space-y-2">
+        <p className="break-words text-[12.5px] text-red" data-testid="policy-error">
+          {p.error}
+        </p>
+        {/* Turning auto_merge off works whatever is wrong with the file: root's kill switch never reads it (#726). */}
+        {p.canTurnOff && canEdit && <OffAnyway />}
+      </div>
+    );
   const set = (k: string, v: number | boolean | string) => {
     setValues({ ...values, [k]: v });
     setChanges(null);

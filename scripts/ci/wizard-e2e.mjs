@@ -492,7 +492,14 @@ async function server() {
       assert.notEqual(r.status, 0, `set-policy ${k} ${v} ran: ${r.out}`);
     }
     assert.equal(sudoOk('cat', file), after, 'a refused set-policy wrote nothing');
-    return { refused: no, change: change.split('\n').find((l) => l.includes('daily_usd')), file: stat(file) };
+    // auto_merge off, through the helper's literal rule as the coordinator user: root's kill switch (#726 round 4),
+    // written with no lock and no read of policy.yaml, which it leaves as it was.
+    const off = sh('sudo', ['-u', `wl-${instance}`, 'sudo', '-n', '/usr/local/libexec/worklane-machine', 'set-policy', 'auto_merge', 'off']);
+    assert.equal(off.status, 0, `set-policy auto_merge off: ${off.out}`);
+    const kill = `/etc/worklane/policy-root/${instance}.auto-merge-off`;
+    assert.equal(stat(kill), 'root 644');
+    assert.equal(sudoOk('cat', file), after, 'auto_merge off never touches policy.yaml');
+    return { refused: no, change: change.split('\n').find((l) => l.includes('daily_usd')), file: stat(file), killSwitch: stat(kill) };
   });
 
   // WHY skipped: since #387 the channel listing runs the engine's own CLI against Discord's API (a constant host); its

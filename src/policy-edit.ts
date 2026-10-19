@@ -10,7 +10,7 @@ import { policyViolations, PolicyFile } from './instance.js';
 import { MACHINE_HELPER } from './machine.js';
 import { replaceFileAtomically } from './os/index.js';
 import { loadLimits, settingsProblems } from './settings.js';
-import { DASHBOARD_TIGHTEN_ONLY, decodePolicyValue, encodePolicyValue, HELPER_ONLY, ownCommand, policyHelperMissing, policyInstance, policySetCommand, policySetOk, readPolicyChecked } from './policy-gate.js';
+import { DASHBOARD_TIGHTEN_ONLY, decodePolicyValue, encodePolicyValue, HELPER_ONLY, ownCommand, policyHelperMissing, policyInstance, policyRecord, policySetCommand, policySetOk, readPolicyChecked } from './policy-gate.js';
 import { autoMergeKilled } from './policy-kill.js';
 
 /**
@@ -18,6 +18,11 @@ import { autoMergeKilled } from './policy-kill.js';
  * instance not taken over yet (the machine helper is installed), root takes it over first; elsewhere (a laptop, cloud
  * or VM install) an admin edits policy.yaml, or its Helm value.
  */
+/** The values say exactly one thing: auto_merge off. */
+const offOnly = (values: Record<string, unknown>) => Object.keys(values).length === 1 && values.auto_merge === false;
+/** Root's record covers this instance (or can't be read: either way root's): its auto_merge off is the kill switch's. */
+const rootRecorded = (path: string) => policyRecord(policyInstance(path)) !== null;
+
 function adminRoute(path: string, key: string, arg: string, root: boolean, machine: boolean): string {
   const instance = policyInstance(path);
   if (root) return policySetCommand(instance, key, arg);
@@ -51,6 +56,11 @@ export interface PolicyFormView {
   /** INVARIANT: shown read-only; this form never writes them. */
   fixed: { key: string; value: unknown }[];
   error: string | null;
+  /**
+   * With an error, on a machine instance root's record covers: auto_merge off is still on offer (root's kill switch,
+   * which never reads policy.yaml). Turning auto_merge off works whatever is wrong with the file.
+   */
+  canTurnOff?: boolean;
 }
 
 export class PolicyEditError extends Error {}
@@ -75,7 +85,7 @@ export function policyForm(path: string, limitsPath?: string, machine = existsSy
     ({ policy, root } = read(path));
     limits = loadLimits(limitsPath);
   } catch (e) {
-    return { fields: [], fixed: [], error: (e as Error).message.split('\n')[0] ?? 'unreadable' };
+    return { fields: [], fixed: [], error: (e as Error).message.split('\n')[0] ?? 'unreadable', ...(rootRecorded(path) ? { canTurnOff: true } : {}) };
   }
   // A HELPER_ONLY key only toward its one value here, on a root policy; auto_merge (DASHBOARD_TIGHTEN_ONLY) on every
   // install. Any other value is an admin's, named as its route.
@@ -115,6 +125,9 @@ export interface PolicyChange {
 export function planPolicy(o: { path: string; cfg: Config; values: Record<string, unknown>; limitsPath?: string; helperRulesFile?: string; machine?: boolean }): { changes: PolicyChange[]; text: string; root: boolean } {
   const unknown = Object.keys(o.values).filter((k) => !(POLICY_KEYS as readonly string[]).includes(k));
   if (unknown.length) throw new PolicyEditError(`not editable here: ${unknown.join(', ')}; the form changes ${POLICY_KEYS.join(', ')}`);
+  // auto_merge off alone, on a machine instance root's record covers: never read policy.yaml for it (#726 round 4):
+  // root's helper writes the kill switch, so no lock, no oversized, corrupt or replaced policy.yaml can hold it up.
+  if (offOnly(o.values) && rootRecorded(o.path)) return { changes: [{ key: 'auto_merge', from: null, to: false }], text: '', root: true };
   const { doc, policy, root } = read(o.path);
   const changes: PolicyChange[] = [];
   for (const k of POLICY_KEYS) {

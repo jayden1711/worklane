@@ -1680,6 +1680,12 @@ test("the first-run page, Policy form: each key with its bounds and why, the iso
   assert.match(off, /data-key="auto_merge"[\s\S]*?type="checkbox"[^>]*disabled=""[\s\S]*?data-testid="policy-root-only"[^>]*>Here only false; anything else is an admin(&#x27;|')s: <code[^>]*>sudo engine policy set shop auto_merge on</);
   assert.match(off, /data-key="land_mode"[\s\S]*?<select[^>]*disabled=""[\s\S]*?<\/select>/);
   assert.doesNotMatch(off.match(/data-key="land_mode"[\s\S]*?<\/select>/)![0], /direct/, 'no loosening offered');
+  // A policy that can't be read on a machine instance root's record covers: why, and "Turn auto-merge off" all the same.
+  const broken = { fields: [], fixed: [], error: 'refused: it is 2097200 bytes, over 262144', canTurnOff: true };
+  const offAnyway = r.renderFirstRun({ ...f, policy: broken, canAct: true }, { open: 'policy' });
+  assert.match(offAnyway, /data-testid="policy-error"[^>]*>refused: it is 2097200 bytes[\s\S]*?data-testid="policy-off"[^>]*>Turn auto-merge off</);
+  assert.doesNotMatch(r.renderFirstRun({ ...f, policy: { ...broken, canTurnOff: false }, canAct: true }, { open: 'policy' }), /policy-off/);
+  assert.doesNotMatch(r.renderFirstRun({ ...f, policy: broken, canAct: false }, { open: 'policy' }), /policy-off/, 'owners only');
   const on = r.renderFirstRun({ ...f, policy: rootPolicy(true), canAct: true }, { open: 'policy' });
   assert.match(on, /data-key="auto_merge"[\s\S]*?type="checkbox"/);
   assert.doesNotMatch(on.match(/data-key="auto_merge"[\s\S]*?type="checkbox"[^>]*>/)![0], /disabled/, 'turning it off stays on offer');
