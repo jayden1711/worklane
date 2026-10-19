@@ -33,6 +33,7 @@
 // or inside plain `{ … }` blocks of it. Never out of a loop body (it may run zero times or break first), an if or
 // else branch, a try, catch or finally block, another case, a labelled block or a function; the one loop let through
 // is a for-of over a non-empty array literal whose body never breaks, continues or returns (it runs once per element).
+// And never for a write inside a function declaration below that list: it is hoisted, so it may run before the guard.
 //
 // Not caught: a write by a child process or a shell script; an engine function that writes a machine location of
 // its own (the test names no path); a path passed through a property of an object the lint doesn't trace (`this.f`,
@@ -476,8 +477,13 @@ function lintMachineWrites(program: ts.Program, files: (rel: string) => boolean)
     if (g.getEnd() > n.getStart()) return false;
     const holds = (p: ts.Node) => p.pos <= n.pos && n.end <= p.end && p.getSourceFile() === n.getSourceFile();
     const list = (p: ts.Node) => ts.isBlock(p) || ts.isSourceFile(p) || ts.isCaseClause(p) || ts.isDefaultClause(p) || ts.isModuleBlock(p);
+    // A function declaration between the list and the write is hoisted: it can be called before the guard runs.
+    const hoisted = (l: ts.Node) => {
+      for (let q = n.parent; q && q !== l; q = q.parent) if (ts.isFunctionDeclaration(q)) return true;
+      return false;
+    };
     for (let p: ts.Node = g.parent; ; p = p.parent) {
-      if (holds(p)) return list(p);
+      if (holds(p)) return list(p) && !hoisted(p);
       if (!((ts.isBlock(p) && (list(p.parent) || unrolled(p.parent))) || unrolled(p))) return false;
     }
   };
@@ -647,6 +653,8 @@ test('lint (#818 round 2): a guard that looks valid but may not run before the w
     'export function s22(list: string[]) { for (const f of list) onRealMachine(f); rmSync(CONSOLE_SHELL); } // R: not a literal',
     'export function s23() { for (const f of [...[CONSOLE_SHELL]]) onRealMachine(f); rmSync(CONSOLE_SHELL); } // R: a spread',
     'export function s24() { for (const f of [CONSOLE_SHELL]) { if (f) onRealMachine(f); } rmSync(CONSOLE_SHELL); } // R: a condition in the body',
+    'export function s25() { early(); onRealMachine(CONSOLE_SHELL); function early() { rmSync(CONSOLE_SHELL); } } // R: a hoisted function, called before the guard',
+    'export function v8() { onRealMachine(CONSOLE_SHELL); const late = () => rmSync(CONSOLE_SHELL); late(); } // OK: an arrow defined after the guard',
   ]);
 });
 
@@ -714,7 +722,7 @@ test('lint: a guard counts only on the same name, before the write, in a list of
       ...head,
       'onRealMachine(MACHINE_PATHS.hubUnitFile); onRealMachine(CONSOLE_SHELL);', // 11: module level, both
       'export function guarded() {',
-      '  for (const f of [MACHINE_PATHS.hubUnitFile, CONSOLE_SHELL]) rmSync(f, { force: true });', // 13: ok
+      '  for (const f of [MACHINE_PATHS.hubUnitFile, CONSOLE_SHELL]) rmSync(f, { force: true });', // 13: reported: a function declaration is hoisted, so a module-level guard before it may run after it
       '  try {',
       "    onRealMachine(SYSTEM_SLOTS.dir);",
       "    writeFileSync(join(SYSTEM_SLOTS.dir, 'x'), '');", // 16: ok
@@ -744,8 +752,8 @@ test('lint: a guard counts only on the same name, before the write, in a list of
     ].join('\n'),
   });
   const lines = found.split('\n').map((l) => l.replace(/^test\/fixture-b\.test\.ts:/, ''));
-  assert.deepEqual(lines.map((l) => Number(l.split(':')[0])), [18, 21, 23, 24, 33, 35], found);
-  assert.match(lines[0]!, /SYSTEM_SLOTS\.config is a machine location/);
+  assert.deepEqual([...new Set(lines.map((l) => Number(l.split(':')[0])))], [13, 18, 21, 23, 24, 33, 35], found);
+  assert.match(lines.find((l) => l.startsWith('18:')) ?? '', /SYSTEM_SLOTS\.config is a machine location/);
 });
 
 test("lint: the state and slot dirs need no onRealMachine while their resolvers refuse in a test run; without the refusal each write built from one is reported", () => {
