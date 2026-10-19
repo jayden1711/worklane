@@ -15,6 +15,7 @@ import { EventLog } from './events/log.js';
 import { projectStateDir } from './guardrails/context.js';
 import { childEnv } from './os/index.js';
 import { DEFAULT_COMMIT_IDENTITY, FakeRunner, type RunRequest } from './runner.js';
+import { writeSlotFile } from './slot-file.js';
 
 const git = (cwd: string, ...a: string[]) => execFileSync('git', a, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 
@@ -116,7 +117,7 @@ export async function seedDemo(dir: string): Promise<{ root: string; eventsDb: s
   recordBaseline(log, 'demo', git(root, 'rev-parse', 'HEAD'), run.status, `${run.stdout}${run.stderr}`, cfg.tests.failures);
   const slots = join(state, 'demo-slots');
   mkdirSync(slots, { recursive: true });
-  writeFileSync(join(slots, 'config.json'), JSON.stringify({ max_agents: 4 }));
+  writeSlotFile(join(slots, 'config.json'), JSON.stringify({ max_agents: 4 }));
   const c = new Coordinator({ cfg, log, backlog, runner: agents(), repo: root, instance: 'demo@local', stateDir: state, slotsDir: slots, maxAttempts: 2, machine: { load: () => 1, disk: () => ({ freePct: 80, totalGb: 500 }) } });
   log.append('coordinator.started', { instance: 'demo@local', pid: process.pid, version: 'demo' }, 'demo@local');
   for (let i = 0; i < ISSUES.length + 3; i++) {

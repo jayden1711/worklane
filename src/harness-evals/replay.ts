@@ -17,6 +17,7 @@ import type { CoordinatorDeps } from '../coordinator/shared.js';
 import { EventLog } from '../events/log.js';
 import type { EventPayload, EventType } from '../events/types.js';
 import { DEFAULT_COMMIT_IDENTITY, type AgentRunner, type RunRequest, type RunResult } from '../runner.js';
+import { writeSlotFile } from '../slot-file.js';
 import { round, scoreReplay, totals, type TaskScore } from './score.js';
 import { issueBody, type LoadedTask } from './tasks.js';
 
@@ -232,7 +233,7 @@ export async function replayTask(t: LoadedTask, o: ReplayOptions): Promise<Repla
     const state = join(dir, 'state');
     const slots = join(state, 'slots');
     mkdirSync(slots, { recursive: true });
-    writeFileSync(join(slots, 'config.json'), JSON.stringify({ max_agents: 1 }));
+    writeSlotFile(join(slots, 'config.json'), JSON.stringify({ max_agents: 1 }));
     log = new EventLog(join(state, 'events.db'));
     const backlog = new FileBacklog(join(state, 'backlog.json'));
     const owner = cfg.project.owners.default;
