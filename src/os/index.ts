@@ -10,6 +10,7 @@ import { outboundEnv } from '../network.js';
 import { safeProjectEnv } from '../project-env.js';
 import { withoutPushGateHatch } from '../guardrails/push-hook.js';
 import { devSlotsPath, etcPath, markTestRun, testSlotsRefusal, TestSlotsRefused, varLibPath } from './system-paths.js';
+import { testStateRefusal, TestStateRefused } from './system-paths.js';
 
 export type OsKind = 'macos' | 'linux' | 'windows-wsl' | 'windows';
 export type OsSetting = 'auto' | 'macos' | 'linux' | 'windows-wsl';
@@ -334,8 +335,21 @@ export function canRunAgents(os: OsKind): boolean {
   return os !== 'windows';
 }
 
-/** Machine-local state (event log, fingerprints, findings). Never inside a repo. */
+/**
+ * Machine-local state (event log, fingerprints, findings). Never inside a repo.
+ *
+ * INVARIANT (#815): in a test run, only a directory inside the test machine (test/isolate.ts); anything else throws
+ * TestStateRefused before a file is opened (src/os/system-paths.ts testStateRefusal), so no test reaches the person's
+ * own state dir through a default it fell through to. Outside a test run, as always.
+ */
 export function stateDir(): string {
+  const dir = unguardedStateDir();
+  const refusal = testStateRefusal(dir);
+  if (refusal) throw new TestStateRefused(refusal);
+  return dir;
+}
+
+function unguardedStateDir(): string {
   const override = process.env[`${BRAND.envPrefix}_STATE_DIR`];
   if (override) return override;
   if (process.platform === 'darwin') return join(homedir(), 'Library', 'Application Support', BRAND.cli);
