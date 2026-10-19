@@ -474,7 +474,10 @@ test('egress-real-systemd.sh: the restarts come right before the after-upgrade p
   assert.ok(sh.indexOf('\nassert_dropped "after the upgrade"\n') >= 0 && sh.indexOf('\nassert_dropped "after the upgrade"\n') < at, 'the dropped state asserted before the restarts');
   assert.match(sh.slice(at), /\nif \[ "\$DOCKER_RESTARTS" -gt 0 \]; then\n(?: {2}#.*\n)* {2}assert_dropped "after the upgrade and /);
   assert.match(sh, /\n\[ -s "\$t\/threads-new" \] \|\| fail "after the upgrade /);
-  assert.match(sh, /\ngrep -q "\^the containers' netns \(pid \[0-9\]\*, tid \[0-9\]\*, net:\\\[\[0-9\]\*\\\]\): joined; " "\$t\/join-new-run\.out" \|\| fail /);
+  // The no-join check: a run joins nothing since #545 (its own user namespace), so the plain test-user unit must join one
+  // (else the probe can't tell), and the run must join none.
+  assert.match(sh, /\ngrep -q "\^the containers' netns \(pid \[0-9\]\*, tid \[0-9\]\*, net:\\\[\[0-9\]\*\\\]\): joined; " "\$t\/join-new-plain\.out" \|\| fail /);
+  assert.match(sh, /\nif grep -q ": joined; " "\$t\/join-new-run\.out"; then fail /);
   // Every join, through every thread, before and after, still reaches nothing.
   assert.match(sh, /if grep -q -- "-> \$PUB: OK\\\$" "\$t\/join-old-\$w\.out"; then fail /);
   assert.match(sh, /if grep -q -- "-> \$PUB: OK\\\$" "\$t\/join-new-\$w\.out"; then fail /);
@@ -483,4 +486,22 @@ test('egress-real-systemd.sh: the restarts come right before the after-upgrade p
   assert.match(fn, /systemctl cat "\$DU" \| grep '\^NFTSet='; then fail/);
   assert.match(fn, /grep -Eq 'socket cgroupv2\|egress_ok' "\$t\/new-table"; then fail/);
   assert.match(fn, /if pull 90 2> \/dev\/null; then fail/);
+});
+
+test('egress-real-systemd.sh (#545): the default join probe is asserted refused from a run, with a plain unit showing the route is there, and fails without #545 (the helper before it lets the run out)', () => {
+  const sh = readFileSync(ciScript, 'utf8');
+  const at = sh.indexOf('\nawait_netns_thread default\njoin_probe default\n');
+  assert.ok(at >= 0, 'a thread to join, then the default probe');
+  const after = sh.slice(at);
+  assert.match(after, /\nif grep -q ": joined; -> \$PUB: OK\$" "\$t\/join-default-run\.out"; then\n[\s\S]*?\n {2}fail "a test run joined Docker's namespaces and reached /);
+  assert.match(after, /\nif grep -q ": joined; " "\$t\/join-default-run\.out"; then fail /);
+  assert.match(after, /\ngrep -q "\^the containers' netns \(pid \[0-9\]\*, tid \[0-9\]\*, net:\\\[\[0-9\]\*\\\]\): joined; -> \$PUB: OK\$" "\$t\/join-default-plain\.out" \|\| fail /);
+  // The fail-without: main before #545's helper installed, the same probe, which must reach the stand-in; then this one back.
+  const pre = after.indexOf('sudo install -o root -g root -m 0755 "$t/helper-pre545.sh" "$H"\nawait_netns_thread pre545\njoin_probe pre545\nsudo install -o root -g root -m 0755 scripts/machine/worklane-testrun.sh "$H"\n');
+  assert.ok(pre > 0, 'the old helper, probed, then this one back');
+  assert.match(after.slice(pre), /\ngrep -q "\^the containers' netns \(pid \[0-9\]\*, tid \[0-9\]\*, net:\\\[\[0-9\]\*\\\]\): joined; -> \$PUB: OK\$" "\$t\/join-pre545-run\.out" \|\| fail /);
+  assert.match(sh, /^PRE545=[0-9a-f]{40}$/m);
+  // The helper this job installs is put back on any exit.
+  const cleanup = sh.slice(sh.indexOf('\ncleanup() {'), sh.indexOf('\n}\n', sh.indexOf('\ncleanup() {')));
+  assert.match(cleanup, /sudo install -o root -g root -m 0755 scripts\/machine\/worklane-testrun\.sh "\$H"/);
 });

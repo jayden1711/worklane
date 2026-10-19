@@ -17,6 +17,10 @@
 #   fetch:   npm reaches the public stand-in only, never the host's loopback (slirp's gateway) or its LAN address, with no grant;
 #            the wipe stops its unit.
 #   db:      the run's Postgres container reaches nothing (--network none); the helper before reached the public one.
+#   #545:    a granted run is in a user namespace of its own (only the test user's uid, mapped to itself; no capability
+#            in any set) and its slirp4netns runs as the test user (its unit's User= and its process), not root; the
+#            fetch's too. The helper before #545 ($PRE545) ran it as root, in the host's user namespace (fail-without).
+#            The test user's slirp sandbox (SLIRP_USER_SANDBOX) refuses an abstract Unix socket, as root's does.
 # Usage: bash scripts/ci/testrun-network-real-systemd.sh <other instance>   (as the runner user, with sudo; DB_IMAGE set)
 set -euo pipefail
 I2="${1:?the other instance}"
@@ -24,6 +28,9 @@ I2="${1:?the other instance}"
 H=/usr/local/libexec/worklane-testrun
 OLD=213b99dd61982fc1c7ac3f5133dbc10f222e8697
 GRANTED_OLD=5498300b06fbd564f3664baded6d3852ef6a7330
+# main before #545 (with #543's egress rule): its helper runs a granted run's slirp4netns as root, and the run in the
+# host's user namespace.
+PRE545=689854dea0f90f963cf4f80f8bbc1945aaae1cbf
 PUB=198.51.100.7
 HUB=4399
 DASH=4310
@@ -186,6 +193,61 @@ for x in "$UPSTREAM:53" "$UPSTREAM:80"; do [ "$(got net-granted "$x")" != OK ] |
 # Never the host's loopback (the hub, the dashboard, any service there), its LAN address or slirp's alias for it.
 [ "$(seen)" = "pub:$PUB " ] || fail "the listeners saw $(seen), not the public stand-in alone"
 echo "  the granted run reached: $(seen)(dns: $(got net-granted dns))"
+
+echo "== #545: a granted run in a user namespace of its own, and its slirp4netns as the test user, not root"
+# The run prints its own view (its uid map, its capability sets, the public stand-in), then holds its unit 6 s while
+# its network unit's User=, its slirp4netns process's owner and the run's main process's user namespace are read.
+cat > "$t/own.sh" <<'EOF'
+printf 'uid_map %s %s %s\n' $(cat /proc/self/uid_map)
+grep -E '^Cap(Inh|Prm|Eff|Bnd|Amb):' /proc/self/status
+python3 -c 'import socket, sys; socket.create_connection((sys.argv[1], int(sys.argv[2])), 3).close(); print("pub OK")' "$1" "$2" || echo "pub refused"
+sleep 6
+EOF
+ownsh="printf %s $(base64 -w0 < "$t/own.sh") | base64 -d > \"\$TMPDIR/o.sh\" && bash \"\$TMPDIR/o.sh\" $PUB $PP"
+own_ns() { # <id>: a granted run of ci's e2e; its output and what was read while it ran, in $t/<id>.out
+  local id="$1" pid u="" ru main i
+  mkrun ci "$id"
+  : > "$t/seen"
+  as_ ci exec "$id" 60 --network e2e -- "$ownsh" < /dev/null > "$t/$id.out" 2> "$t/$id.err" &
+  pid=$!
+  for i in $(seq 100); do
+    u="$(systemctl list-units --plain --no-legend --full "worklane-test-ci_${id}_net_*" | awk '{ print $1 }' | head -n 1)"
+    if [ -n "$u" ] && [ "$(systemctl show -p MainPID --value "$u" 2>/dev/null || echo 0)" != 0 ]; then break; fi
+    u=""; sleep 0.1
+  done
+  [ -n "$u" ] || { wait "$pid" || true; cat "$t/$id.err" >&2; fail "$id: no network unit came up"; }
+  ru="$(systemctl list-units --plain --no-legend --full "worklane-test-ci_${id}_[0-9]*.service" | awk '{ print $1 }' | head -n 1)"
+  main="$(systemctl show -p MainPID --value "$ru")"
+  {
+    echo "slirp_unit_user $(systemctl show -p User --value "$u")"
+    echo "slirp_proc_user $(ps -o user= -p "$(systemctl show -p MainPID --value "$u")" | tr -d ' ')"
+    if [ "$(sudo readlink "/proc/$main/ns/user")" = "$(sudo readlink /proc/1/ns/user)" ]; then echo "run_userns host"; else echo "run_userns own"; fi
+  } >> "$t/$id.ns"
+  wait "$pid" || { cat "$t/$id.err" >&2; fail "$id exited non-zero"; }
+  cat "$t/$id.ns" >> "$t/$id.out"
+  sed "s/^/  $id: /" "$t/$id.out"
+  as_ ci wipe "$id" > /dev/null
+}
+tu_uid="$(id -u wl-test-ci)"
+own_ns net-own
+for x in "uid_map $tu_uid $tu_uid 1" "slirp_unit_user wl-test-ci" "slirp_proc_user wl-test-ci" "run_userns own" "pub OK"; do
+  grep -qx "$x" "$t/net-own.out" || fail "the granted run (#545): no line \"$x\""
+done
+for c in CapInh CapPrm CapEff CapBnd CapAmb; do
+  grep -qE "^$c:[[:space:]]+0+$" "$t/net-own.out" || fail "the granted run (#545) has a capability: $(grep "^$c:" "$t/net-own.out")"
+done
+[ "$(seen)" = "pub:$PUB " ] || fail "the granted run (#545): the listeners saw $(seen), not the public stand-in alone"
+echo "  fail-without: the helper before #545 ($PRE545) runs the run in the host's user namespace and its slirp4netns as root"
+git fetch -q --depth=1 origin "$PRE545"
+git show "$PRE545:scripts/machine/worklane-testrun.sh" > "$t/helper-pre545.sh"
+sudo install -o root -g root -m 0755 "$t/helper-pre545.sh" "$H"
+own_ns net-own-old
+sudo install -o root -g root -m 0755 scripts/machine/worklane-testrun.sh "$H"
+for x in "uid_map 0 0 4294967295" "slirp_unit_user " "slirp_proc_user root" "run_userns host" "pub OK"; do
+  grep -qx "$x" "$t/net-own-old.out" || fail "the helper before #545: no line \"$x\": this probe can't tell"
+done
+: > "$t/seen"
+
 echo "== slirp4netns's sandbox: no Unix socket at all, so no host abstract socket (owner's RestrictAddressFamilies)"
 # A stand-in for a host service on an abstract Unix socket (not a file: an empty /etc and /run don't hide it).
 cat > "$t/abstract.py" <<'EOF'
@@ -220,6 +282,18 @@ sleep 0.3
 echo "  the same with AF_UNIX allowed: $got_out; the stand-in saw: $(seen)"
 [ "$got_out" = "abstract OK" ] && [ "$(seen)" = "abstract:standin " ] || fail "with AF_UNIX allowed the probe didn't connect ($got_out; $(seen)): this probe can't tell"
 : > "$t/seen"
+# The test user's slirp sandbox (#545), as slirp_start passes it (SLIRP_USER_SANDBOX), as the test user: the same.
+eval "$(sed -n '/^SLIRP_USER_SANDBOX=(/,/)$/p' scripts/machine/worklane-testrun.sh)"
+[ "${#SLIRP_USER_SANDBOX[@]}" -gt 10 ] || fail "SLIRP_USER_SANDBOX wasn't read from the helper"
+got_in="$(sudo systemd-run --wait --pipe --quiet --collect --uid=wl-test-ci --gid=wl-test-ci "${SLIRP_USER_SANDBOX[@]}" /usr/bin/python3 -c "$abstract_probe" < /dev/null)"
+echo "  in the test user's slirp sandbox: $got_in; the stand-in saw: $(seen)"
+[ "$got_in" = "abstract EAFNOSUPPORT" ] || fail "in the test user's slirp sandbox the probe got: $got_in"
+[ -z "$(seen)" ] || fail "the stand-in saw $(seen)"
+got_out="$(sudo systemd-run --wait --pipe --quiet --collect --uid=wl-test-ci --gid=wl-test-ci "${SLIRP_USER_SANDBOX[@]}" -p RestrictAddressFamilies=AF_UNIX /usr/bin/python3 -c "$abstract_probe" < /dev/null)"
+sleep 0.3
+echo "  the same with AF_UNIX allowed: $got_out; the stand-in saw: $(seen)"
+[ "$got_out" = "abstract OK" ] && [ "$(seen)" = "abstract:standin " ] || fail "as the test user with AF_UNIX allowed the probe didn't connect ($got_out; $(seen)): this probe can't tell"
+: > "$t/seen"
 echo "== fail-without: this PR's helper before the owner's change ($GRANTED_OLD: the host's namespace) let a granted run reach the hub"
 git fetch -q --depth=1 origin "$GRANTED_OLD"
 git show "$GRANTED_OLD:scripts/machine/worklane-testrun.sh" > "$t/helper-granted-old.sh"
@@ -251,7 +325,11 @@ fetch_from() { # <id> <address:port> <want: none|seen>: a lockfile pinning one t
   : > "$t/seen"
   as_ ci fetch "$id" npm npm "$key" 300 < /dev/null > "$t/$id.out" 2>&1 &
   pid=$!
+  NETUSER=none
   for i in $(seq 40); do
+    # Its network unit's User= (#545: the test user's), read while it runs.
+    nu="$(systemctl list-units --plain --no-legend --full "worklane-test-ci_${id}_net_*" | awk '{ print $1 }' | head -n 1)"
+    if [ -n "$nu" ] && [ "$NETUSER" = none ]; then NETUSER="$(systemctl show -p User --value "$nu")"; fi
     { [ "$want" = seen ] && grep -q "^pub:" "$t/seen"; } && break
     if ! kill -0 "$pid" 2>/dev/null; then break; fi
     sleep 0.5
@@ -270,6 +348,8 @@ fetch_from net-fetch-lan "$lan:$P" none
 [ -z "$(seen)" ] || fail "the fetch reached the host's LAN address: $(seen)"
 fetch_from net-fetch-pub "$PUB:$PP" seen
 [ "$(seen)" = "pub:$PUB " ] || { cat "$t/net-fetch-pub.out" >&2; fail "the fetch didn't reach the public stand-in: $(seen)"; }
+echo "  the fetch's slirp4netns unit ran as: ${NETUSER:-root (no User=)}"
+[ "$NETUSER" = wl-test-ci ] || fail "the fetch's slirp4netns unit ran as ${NETUSER:-root (no User=)}, not wl-test-ci (#545)"
 
 echo "== db: the run's Postgres container reaches nothing; the helper before let it out"
 dk() { sudo -u wl-test-ci env HOME=/var/lib/worklane-test/ci/docker-home DOCKER_HOST=unix:///run/worklane-test-ci-docker/docker.sock /opt/worklane-test/docker/docker "$@"; }
