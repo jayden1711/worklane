@@ -757,6 +757,45 @@ function marksIn(path: string, line: string): string[] {
 }
 const isRunnerTest = (p: string) => /\.(?:test|spec)\.[cm]?[jt]sx?$/.test(p) || p.includes('__tests__/');
 const dir = (p: string) => p.slice(0, p.lastIndexOf('/') + 1);
+const TOKEN = /[A-Za-z_$][\w$]*|\d[\w.]*|'(?:\\.|[^'\\])*'|"(?:\\.|[^"\\])*"|`(?:\\.|[^`\\])*`|\S/g;
+const IDENT = /^[A-Za-z_$][\w$]*$/;
+/** Names an assertion is made of: never a rename (`equal` to `ok` changes what it checks). */
+const ASSERT_WORD = /^(?:assert\w*|expect\w*|should|ok|equal|notEqual|deepEqual|notDeepEqual|strictEqual|notStrictEqual|deepStrictEqual|notDeepStrictEqual|match|doesNotMatch|throws|doesNotThrow|rejects|doesNotReject|fail|ifError|to|not|be|includes?|contains?|equals?|true|false|null|undefined|NaN|Infinity|await|void|return|if|else|try|catch|finally|for|while|do|switch|case|typeof|instanceof|new|delete|in|of|async|function|const|let|var)$/;
+
+/** A matcher by family (`.toBe`, `.isTrue`, `.hasProperty`): an assertion's name only after a `.`, so `total` and `isSum` can be renamed. */
+const MATCHER = /^(?:to|is|has)[A-Z]\w*$/;
+
+/** The identifier renames code made: names gone from its removed lines paired with names new in its added lines. */
+function codeRenames(files: ChangeFile[]): { gone: Set<string>; came: Set<string> } {
+  const ids = (ls: string[] | undefined) => new Set((ls ?? []).flatMap((l) => l.match(TOKEN) ?? []).filter((t) => IDENT.test(t)));
+  const removed = new Set(files.flatMap((f) => [...ids(f.removedLines)]));
+  const added = new Set(files.flatMap((f) => [...ids(f.addedLines)]));
+  return { gone: new Set([...removed].filter((x) => !added.has(x))), came: new Set([...added].filter((x) => !removed.has(x))) };
+}
+
+/**
+ * Whether assertion `b` is assertion `a` with only identifiers renamed, each one a rename the code made (its old name
+ * gone from the code, its new one new there), the same old name always to the same new one, and never an assertion's
+ * own name. Literals, punctuation and shape are the same.
+ */
+function renamedOnly(a: string, b: string, r: { gone: Set<string>; came: Set<string> }): boolean {
+  const ta = a.match(TOKEN) ?? [];
+  const tb = b.match(TOKEN) ?? [];
+  if (ta.length !== tb.length || !r.gone.size) return false;
+  const map = new Map<string, string>();
+  let renamed = false;
+  for (let k = 0; k < ta.length; k++) {
+    const [x, y] = [ta[k]!, tb[k]!];
+    if (x === y) continue;
+    const member = ta[k - 1] === '.' || tb[k - 1] === '.';
+    if (!IDENT.test(x) || !IDENT.test(y) || ASSERT_WORD.test(x) || ASSERT_WORD.test(y) || (member && (MATCHER.test(x) || MATCHER.test(y))) || !r.gone.has(x) || !r.came.has(y)) return false;
+    if ((map.get(x) ?? y) !== y) return false;
+    map.set(x, y);
+    renamed = true;
+  }
+  return renamed;
+}
+
 /** A line added to a guard that can skip or switch something off. */
 const BYPASS = /\b(?:return|break|continue|catch|exit|skip|ignore|allow|allowed|disable|disabled|off|false|warn|none|optional)\b|process\.env|\|\||&&|\?\?/;
 /** Docs: neither code nor a test. */
@@ -896,7 +935,16 @@ export function weakeningReasons(i: WeakeningInput): string[] {
     else if (codeChanged || fewerTests) hit('test-removed', where.get(`title ${title}`) ?? '?', shown);
   }
   if (codeChanged || pools.after.assertions.length < pools.before.assertions.length) {
-    for (const x of missing(pools.before.assertions, pools.after.assertions)) hit('test-assertion', where.get(x) ?? '?', x.slice(x.lastIndexOf(' | ') + 3));
+    // An assertion whose only change is a rename the change also makes in its code (`totalCents` to `totalInCents`
+    // in src/ and in the test) is the same assertion: its expectation, literals and shape are as they were.
+    const renames = codeRenames(i.files.filter((f) => !isTest(f.path) && !isDoc(f.path)));
+    const gone = missing(pools.before.assertions, pools.after.assertions);
+    const left = missing(pools.after.assertions, pools.before.assertions);
+    for (const x of gone) {
+      const same = left.findIndex((y) => renamedOnly(x, y, renames));
+      if (same !== -1) left.splice(same, 1);
+      else hit('test-assertion', where.get(x) ?? '?', x.slice(x.lastIndexOf(' | ') + 3));
+    }
   }
 
   const out: string[] = [];

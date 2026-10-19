@@ -492,6 +492,18 @@ test('weakening: with code changed too, an assertion removed, loosened, widened,
   assert.deepEqual(kinds(weakens({ 'src/math.ts': MATH, 'test/math.test.ts': helper }, { 'src/math.ts': MATH_CHANGED, 'test/math.test.ts': helper.replace('  sums(4);\n', '') })), [ASSERTION]);
 });
 
+test('weakening: a rename the code makes too, applied in its assertions, is no change; a rename only in the test, or of what an assertion checks with, is', () => {
+  // `total`, `isSum`: plain names that only start like a matcher (toBe, isTrue).
+  const RENAMED = MATH.replaceAll('add', 'total').replaceAll('sub', 'isSum');
+  const renamedTest = MATH_TEST.replaceAll('add(', 'total(').replaceAll('sub(', 'isSum(').replace('{ add, sub }', '{ total, isSum }');
+  assert.deepEqual(weakens({ 'src/math.ts': MATH, 'test/math.test.ts': MATH_TEST }, { 'src/math.ts': RENAMED, 'test/math.test.ts': renamedTest }), []);
+  // The code doesn't rename it (a code change elsewhere): the test's call now names something else.
+  assert.deepEqual(kinds(weakens({ 'src/math.ts': MATH, 'test/math.test.ts': MATH_TEST }, { 'src/math.ts': MATH_CHANGED, 'test/math.test.ts': renamedTest })), [ASSERTION]);
+  // `equal` to `ok` is never a rename, whatever the code does.
+  const swap = MATH.replace('export const add', 'export const ok = 1;\nexport const add').replace('a - b', 'b - a');
+  assert.deepEqual(kinds(weakens({ 'src/math.ts': MATH.replace('export const add', 'export const equal = 1;\nexport const add'), 'test/math.test.ts': MATH_TEST }, { 'src/math.ts': swap, 'test/math.test.ts': MATH_TEST.replace('assert.equal(sub(3, 1), 2)', 'assert.ok(sub(3, 1), 2)') })), [ASSERTION]);
+});
+
 test('weakening: in a change of tests only, fewer assertions or tests hold; a reworded assertion does not (the issue: changed ones wait when code changes too)', () => {
   const only = (t: string) => kinds(weakens({ 'test/math.test.ts': MATH_TEST }, { 'test/math.test.ts': t }));
   assert.deepEqual(only(MATH_TEST.replace('  assert.equal(add(1, 2), 3);\n', '')), [ASSERTION]);
