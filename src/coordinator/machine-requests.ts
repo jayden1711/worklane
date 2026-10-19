@@ -25,10 +25,6 @@ export interface MachineRequestDeps {
   ownersFile?: string;
   /** How a streamed command (add-project) starts; sudo -n by default (src/coordinator/add-project.ts). */
   spawn?: SpawnHelper;
-  /** This user's home (where the dashboard stores a pasted secret); the process's own when unset (tests). */
-  home?: string;
-  /** How often a streamed command's ask is checked for its answer. */
-  pollMs?: number;
 }
 
 /**
@@ -97,7 +93,7 @@ export function runMachineRequests(d: MachineRequestDeps): number {
     if (!c.allowed) continue; // unreachable: machineRefusal checked the same
     if (c.rule.streams) {
       // Minutes long, with asks on the way: run alongside the ticks, each step relayed as it comes.
-      const run = runAddProject({ log: d.log, instance: d.instance, ...(d.spawn ? { spawn: d.spawn } : {}), ...(d.home ? { home: d.home } : {}), ...(d.pollMs ? { pollMs: d.pollMs } : {}), ...(d.now ? { now: d.now } : {}) }, r).finally(() => runningAddProjects.delete(r.id));
+      const run = runAddProject({ log: d.log, instance: d.instance, ...(d.spawn ? { spawn: d.spawn } : {}) }, r).finally(() => runningAddProjects.delete(r.id));
       runningAddProjects.set(r.id, run);
       ran++;
       continue;

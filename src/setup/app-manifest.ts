@@ -25,6 +25,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { BRAND } from '../brand.js';
+import { CREDENTIAL_REFUSED, holdsClaudeCredential } from '../claude-credential-guard.js';
 import { GITHUB_API, GITHUB_WEB } from '../github-hosts.js';
 import type { Asks } from '../console/asks.js';
 import { CALLBACK_PATH } from '../dashboard-auth.js';
@@ -411,12 +412,15 @@ async function readJsonBody(req: IncomingMessage): Promise<Record<string, unknow
     if (size > 8_000) throw new FlowError('body too large');
     chunks.push(c as Buffer);
   }
+  let v: unknown;
   try {
-    const v = chunks.length ? JSON.parse(Buffer.concat(chunks).toString('utf8')) : {};
-    return v && typeof v === 'object' ? (v as Record<string, unknown>) : {};
+    v = chunks.length ? JSON.parse(Buffer.concat(chunks).toString('utf8')) : {};
   } catch {
     throw new FlowError('the body must be JSON');
   }
+  // INVARIANT (issue #711): no route takes a Claude credential.
+  if (holdsClaudeCredential(v)) throw new FlowError(CREDENTIAL_REFUSED);
+  return v && typeof v === 'object' ? (v as Record<string, unknown>) : {};
 }
 
 /**

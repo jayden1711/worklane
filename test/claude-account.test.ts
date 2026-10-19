@@ -1,13 +1,13 @@
-// The Claude account switch, the engine's half (src/claude-account.ts): only a machine owner sees the panel; a
-// refresh or a switch is a machine request with the same gate as any machine change, one switch at a time; the
-// coordinator runs it through the machine helper; the token is taken only while the switch waits for it, from the
-// instance it asked, only a setup token, stored for this user only, and never in a response, an event or the audit.
+// The Claude account panel, the engine's half (src/claude-account.ts): only a machine owner sees it; a refresh is a
+// machine request with the same gate as any machine change; the coordinator runs it through the machine helper. A
+// switch to another account is a root admin's at a root shell (issue #711): the dashboard never takes its token, so
+// neither a switch request nor the token route exists, and a switch's progress is only shown.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { CLAUDE_ACCOUNT_CREDENTIAL, ClaudeTokenError, claudeAccountView, requestClaudeAccount, storeSwitchToken, switchedOnto, switchView, readSwitchLines, type SwitchLine, type SwitchState } from '../src/claude-account.js';
+import { claudeAccountView, requestClaudeAccount, switchedOnto, switchView, readSwitchLines, type SwitchLine, type SwitchState } from '../src/claude-account.js';
 import { secretsDir } from '../src/console/secrets.js';
 import { checkRootStep } from '../src/console/root-steps.js';
 import { runMachineRequests } from '../src/coordinator/machine-requests.js';
@@ -52,7 +52,7 @@ test('switchedOnto: only an instance whose users all got the new token, passed t
 
 test('switchView folds the lines per instance and user, and knows when it waits for the token, ended or stalled', () => {
   const v = switchView(readSwitchLines(switchDir(WAITING)))!;
-  assert.deepEqual([v.status, v.waitingForToken, v.tokenFrom, v.instances.map((i) => i.name)], ['running', true, 'alpha', ['alpha', 'beta']]);
+  assert.deepEqual([v.status, v.waitingForToken, v.instances.map((i) => i.name)], ['running', true, ['alpha', 'beta']]);
   const ended = switchView(readSwitchLines(switchDir([...WAITING, { step: 'token', state: 'done', detail: 'received' }, { step: 'check', state: 'failed', instance: 'beta', user: 'wl-beta-agent', detail: 'not logged in' }, { step: 'resume', state: 'failed', instance: 'beta', detail: 'not resumed' }, { step: 'switch', state: 'failed', detail: 'not resumed: beta' }])))!;
   assert.deepEqual([ended.status, ended.waitingForToken, ended.detail], ['failed', false, 'not resumed: beta']);
   assert.deepEqual(ended.instances[1]!.users, [{ user: 'wl-beta-agent', install: null, check: ended.lines[5] }]);
@@ -60,61 +60,51 @@ test('switchView folds the lines per instance and user, and knows when it waits 
   assert.equal(switchView([]), null);
 });
 
-test('a refresh or a switch is a machine request for a machine owner only, on an allowed device; one switch at a time', () => {
+test('a refresh is a machine request for a machine owner only, on an allowed device; one at a time', () => {
   const owners = machineOwnersFile('ada');
   const log = new EventLog(':memory:');
-  const dir = mkdtempSync(join(tmpdir(), 'claude-account-none-'));
-  const ask = (login: string, action: unknown = 'switch', extra: Partial<ReturnType<typeof ownerRequester>> = {}, d = dir) => () => requestClaudeAccount(log, { action, requester: { ...ownerRequester(login), ...extra }, dir: d, ownersFile: owners });
+  const ask = (login: string, action: unknown = 'status', extra: Partial<ReturnType<typeof ownerRequester>> = {}) => () => requestClaudeAccount(log, { action, requester: { ...ownerRequester(login), ...extra }, ownersFile: owners });
   const refused = (f: () => unknown, status: number, re: RegExp) => assert.throws(f, (e: Error) => e instanceof MachineRequestError && e.status === status && re.test(e.message), re.source);
   refused(ask('ivy'), 403, /@ivy isn't one/);
-  refused(ask('ada', 'switch', { deviceOk: false }), 403, /allowed devices/);
-  refused(ask('ada', 'rm -rf'), 400, /status or switch/);
+  refused(ask('ada', 'status', { deviceOk: false }), 403, /allowed devices/);
+  refused(ask('ada', 'rm -rf'), 400, /action is status/);
   const r = ask('ada')();
-  assert.deepEqual([r.args, r.via, r.status], [['claude-account', 'switch'], 'claude-account', 'pending']);
+  assert.deepEqual([r.args, r.via, r.status], [['claude-account', 'status'], 'claude-account', 'pending']);
   refused(ask('ada'), 409, /already waiting for the coordinator/);
-  assert.equal(ask('ada', 'status')().args[1], 'status', 'a refresh meanwhile is fine');
-  log.append('machine.finished', { id: r.id, outcome: 'done', detail: 'started' }, 'alpha', 'coordinator');
-  refused(ask('ada', 'switch', {}, switchDir(WAITING)), 409, /switch is running on this machine/);
-  // The helper's allowlist has exactly the two.
-  assert.ok(checkRootStep('claude-account', ['switch']).allowed && checkRootStep('claude-account', ['status']).allowed);
-  for (const a of [[], ['switch', 'x'], ['Switch'], ['--token-from']]) assert.ok(!checkRootStep('claude-account', a).allowed, JSON.stringify(a));
+  // The helper's allowlist has status, and never switch.
+  assert.ok(checkRootStep('claude-account', ['status']).allowed);
+  for (const a of [[], ['switch'], ['switch', 'x'], ['Switch'], ['--token-from']]) assert.ok(!checkRootStep('claude-account', a).allowed, JSON.stringify(a));
 });
 
-test('the coordinator runs the request through the machine helper, and refuses one by someone who is not a machine owner', () => {
+test('issue #711: a switch is never asked for from a dashboard: it takes a Claude credential, a root admin\'s at a root shell', () => {
+  const owners = machineOwnersFile('ada');
+  const log = new EventLog(':memory:');
+  assert.throws(
+    () => requestClaudeAccount(log, { action: 'switch', requester: ownerRequester('ada'), ownersFile: owners }),
+    (e: Error) => e instanceof MachineRequestError && e.status === 400 && /root admin's, at a root shell/.test(e.message),
+  );
+  assert.deepEqual(machineRequests(log.read(0)), [], 'nothing recorded');
+  // A switch an earlier version recorded, still pending when the engine was updated: the coordinator refuses it,
+  // and never runs the helper.
+  const calls: string[][] = [];
+  log.append('machine.requested', { id: 'mr-aaaaaaaaaaaa', args: ['claude-account', 'switch'], by: 'ada', via: 'claude-account', ask: null }, 'ada', 'human');
+  runMachineRequests({ log, instance: 'alpha', ownersFile: owners, exec: (file, args) => (calls.push([file, ...args]), 'ran') });
+  assert.deepEqual(calls, []);
+  assert.deepEqual(machineRequests(log.read(0)).map((r) => [r.args[1], r.status]), [['switch', 'refused']]);
+});
+
+test('the coordinator runs the refresh through the machine helper, and refuses one by someone who is not a machine owner', () => {
   const owners = machineOwnersFile('ada');
   const log = new EventLog(':memory:');
   const calls: string[][] = [];
-  log.append('machine.requested', { id: 'mr-aaaaaaaaaaaa', args: ['claude-account', 'switch'], by: 'ada', via: 'claude-account', ask: null }, 'ada', 'human');
-  log.append('machine.requested', { id: 'mr-bbbbbbbbbbbb', args: ['claude-account', 'switch'], by: 'ivy', via: 'claude-account', ask: null }, 'ivy', 'human');
-  runMachineRequests({ log, instance: 'alpha', ownersFile: owners, exec: (file, args) => (calls.push([file, ...args]), 'started the Claude account switch') });
-  assert.deepEqual(calls, [['sudo', '-n', MACHINE_HELPER, 'claude-account', 'switch']]);
+  log.append('machine.requested', { id: 'mr-aaaaaaaaaaaa', args: ['claude-account', 'status'], by: 'ada', via: 'claude-account', ask: null }, 'ada', 'human');
+  log.append('machine.requested', { id: 'mr-bbbbbbbbbbbb', args: ['claude-account', 'status'], by: 'ivy', via: 'claude-account', ask: null }, 'ivy', 'human');
+  runMachineRequests({ log, instance: 'alpha', ownersFile: owners, exec: (file, args) => (calls.push([file, ...args]), '{"users":[]}') });
+  assert.deepEqual(calls, [['sudo', '-n', MACHINE_HELPER, 'claude-account', 'status']]);
   assert.deepEqual(machineRequests(log.read(0)).map((r) => [r.by, r.status]), [['ada', 'done'], ['ivy', 'refused']]);
 });
 
-test('the token is taken only while the switch waits for it from this instance, only a setup token, for this user only', { skip: !posix }, () => {
-  const owners = machineOwnersFile('ada');
-  const home = mkdtempSync(join(tmpdir(), 'claude-account-home-'));
-  const who: { role: 'owner' | 'writer'; requester: ReturnType<typeof ownerRequester> } = { role: 'owner', requester: ownerRequester('ada') };
-  const store = (dir: string, value = TOKEN, instance = 'alpha', w = who) => () => storeSwitchToken({ value, instance, who: w, dir, home, ownersFile: owners });
-  const refused = (f: () => unknown, status: number, re: RegExp) =>
-    assert.throws(f, (e: Error) => {
-      assert.ok(!e.message.includes(TOKEN.slice(13)) && !e.message.includes('not-a-token'), 'the value is never in an error');
-      return e instanceof ClaudeTokenError && e.status === status && re.test(e.message);
-    }, re.source);
-  refused(store(mkdtempSync(join(tmpdir(), 'none-'))), 409, /no Claude account switch is waiting/);
-  const waiting = switchDir(WAITING);
-  refused(store(waiting, TOKEN, 'beta'), 409, /alpha's dashboard, not this one/);
-  refused(store(waiting, TOKEN, 'alpha', { role: 'owner', requester: ownerRequester('ivy') }), 403, /@ivy isn't one/);
-  refused(store(waiting, TOKEN, 'alpha', { role: 'writer', requester: ownerRequester('ada') }), 403, /only an owner of this instance/);
-  refused(store(waiting, `not-a-token-${'x'.repeat(30)}`), 400, /not a token from claude setup-token/);
-  const file = store(waiting)();
-  assert.equal(file, join(secretsDir('alpha', home), CLAUDE_ACCOUNT_CREDENTIAL));
-  assert.equal(readFileSync(file, 'utf8'), TOKEN);
-  assert.equal(statSync(file).mode & 0o777, 0o400);
-  refused(store(switchDir(WAITING, null)), 409, /the terminal it was started in/);
-});
-
-test('the dashboard: the panel is a machine owner\'s only; the token goes nowhere but its file', { skip: !posix }, async () => {
+test('the dashboard: the panel is a machine owner\'s only; the old token route is gone and stores nothing', { skip: !posix }, async () => {
   const dir = mkdtempSync(join(tmpdir(), 'claude-account-dash-'));
   const { dir: root } = exampleProject();
   const cfg = loadConfig(root);
@@ -138,45 +128,44 @@ test('the dashboard: the panel is a machine owner\'s only; the token goes nowher
     writeFileSync(owners, `${JSON.stringify({ owners: ['example-owner'] })}\n`);
     const view = await call('/api/claude-account', asDevicePerson('example-owner'));
     assert.equal(view.status, 200);
-    const v = JSON.parse(view.text) as { machineOwner: boolean; allowed: boolean; canPasteToken: boolean; status: { users: { account: string; tokenId: string }[] }; switch: { waitingForToken: boolean } };
-    assert.deepEqual([v.machineOwner, v.allowed, v.canPasteToken, v.switch.waitingForToken, v.status.users[0]!.account, v.status.users[0]!.tokenId], [true, true, true, true, 'agents@example.com', '0123abcd']);
-    // Off an allowed device: sees it, read-only.
-    const stale = JSON.parse((await call('/api/claude-account', asPerson('example-owner'))).text) as { allowed: boolean; canPasteToken: boolean };
-    assert.deepEqual([stale.allowed, stale.canPasteToken], [false, false]);
+    const v = JSON.parse(view.text) as { machineOwner: boolean; allowed: boolean; canPasteToken?: boolean; status: { users: { account: string; tokenId: string }[] }; switch: { waitingForToken: boolean } };
+    assert.deepEqual([v.machineOwner, v.allowed, v.switch.waitingForToken, v.status.users[0]!.account, v.status.users[0]!.tokenId], [true, true, true, 'agents@example.com', '0123abcd']);
+    assert.equal(v.canPasteToken, undefined, 'a switch waiting for its token is shown, never offered a paste box');
 
-    // The token: refused for a writer before its body is read, and for a bad one; stored for a machine owner.
-    assert.equal((await call('/api/claude-account/token', asDevicePerson('example-collaborator'), { value: TOKEN })).status, 403);
-    const bad = await call('/api/claude-account/token', asDevicePerson('example-owner'), { value: `not-a-token-${'y'.repeat(30)}` });
-    assert.equal(bad.status, 400);
-    assert.ok(!bad.text.includes('not-a-token'));
-    const ok = await call('/api/claude-account/token', asDevicePerson('example-owner'), { value: TOKEN });
-    assert.equal(ok.status, 200, ok.text);
-    assert.ok(!ok.text.includes(TOKEN));
-    const file = join(secretsDir(cfg.project.project.name, home), CLAUDE_ACCOUNT_CREDENTIAL);
-    assert.equal(readFileSync(file, 'utf8'), TOKEN);
-    // A switch from the dashboard, recorded for the coordinator.
-    const sw = await call('/api/machine/claude-account', asDevicePerson('example-owner'), { action: 'status' });
-    assert.equal(sw.status, 200, sw.text);
+    // Issue #711: the token route is gone (410) for everyone, a machine owner on an allowed device included, and its
+    // body is never read: nothing is stored, audited or recorded.
+    for (const who of [asDevicePerson('example-owner'), asDevicePerson('example-collaborator'), {}]) {
+      const r = await call('/api/claude-account/token', who, { value: TOKEN });
+      assert.equal(r.status, 410, r.text);
+      assert.ok(!r.text.includes(TOKEN.slice(13)));
+    }
+    assert.ok(!existsSync(secretsDir(cfg.project.project.name, home)) || readdirSync(secretsDir(cfg.project.project.name, home)).length === 0, 'nothing stored');
+    // A switch is refused; a refresh is recorded for the coordinator.
+    const sw = await call('/api/machine/claude-account', asDevicePerson('example-owner'), { action: 'switch' });
+    assert.equal(sw.status, 400, sw.text);
+    const st = await call('/api/machine/claude-account', asDevicePerson('example-owner'), { action: 'status' });
+    assert.equal(st.status, 200, st.text);
     const log = new EventLog(eventsDb);
     try {
       const all = JSON.stringify(log.read(0));
       assert.ok(!all.includes(TOKEN.slice(13)), 'the token is in no event, the audit included');
-      assert.ok(log.read(0).some((e) => e.type === 'dashboard.audit' && (e.payload as { action: string }).action === 'claude_account.token'));
+      assert.ok(!log.read(0).some((e) => e.type === 'dashboard.audit' && (e.payload as { action: string }).action === 'claude_account.token'));
       assert.deepEqual(machineRequests(log.read(0)).map((r) => r.args), [['claude-account', 'status']]);
     } finally {
       log.close();
     }
-    // A writer can't start one.
-    assert.equal((await call('/api/machine/claude-account', asDevicePerson('example-collaborator'), { action: 'switch' })).status, 403);
+    // A writer can't ask for anything.
+    assert.equal((await call('/api/machine/claude-account', asDevicePerson('example-collaborator'), { action: 'status' })).status, 403);
   } finally {
     await d.close();
   }
 });
 
-test('the view: a machine owner may switch when nothing runs; anyone else gets nothing to act on', () => {
+test('the view: a machine owner may act; anyone else gets nothing to act on; nothing offers a paste box', () => {
   const owners = machineOwnersFile('ada');
   const v = claudeAccountView({ dir: mkdtempSync(join(tmpdir(), 'claude-account-empty-')), events: [], who: { role: 'owner', requester: ownerRequester('ada') }, instance: 'alpha', ownersFile: owners });
-  assert.deepEqual([v.machineOwner, v.allowed, v.canSwitch, v.status, v.switch], [true, true, true, null, null]);
+  assert.deepEqual([v.machineOwner, v.allowed, v.status, v.switch], [true, true, null, null]);
   const other = claudeAccountView({ dir: switchDir(WAITING), events: [], who: { role: 'owner', requester: ownerRequester('ivy') }, instance: 'alpha', ownersFile: owners });
-  assert.deepEqual([other.machineOwner, other.allowed, other.canSwitch, other.canPasteToken], [false, false, false, false]);
+  assert.deepEqual([other.machineOwner, other.allowed], [false, false]);
+  for (const x of [v, other]) assert.ok(!('canPasteToken' in x) && !('canSwitch' in x), 'nothing to paste a token into, nor a switch to start');
 });

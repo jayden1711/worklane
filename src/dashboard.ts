@@ -120,10 +120,10 @@ import { INTAKE_FILE } from './intake/config.js';
 import { checkRootStep } from './console/root-steps.js';
 import { handleProfileRoute, isProfileRoute, refuseUnidentified } from './claude-profiles-routes.js';
 import { accountSet, profilesView } from './claude-profiles.js';
-import { CLAUDE_ACCOUNT_DIR, claudeAccountGate, claudeAccountView, ClaudeTokenError, mayViewClaudeAccount, requestClaudeAccount, storeSwitchToken } from './claude-account.js';
+import { CLAUDE_ACCOUNT_DIR, claudeAccountGate, claudeAccountView, mayViewClaudeAccount, requestClaudeAccount } from './claude-account.js';
+import { ClaudeCredentialRefused, CREDENTIAL_ROUTE_GONE, refuseClaudeCredential, REMOVED_CREDENTIAL_PATHS } from './claude-credential-guard.js';
 import { isTailscaleAction, mayViewTailscale, noTailscaleView, requestTailscale, stepsStamp, TAILSCALE_DIR, tailscaleStatus, tailscaleView, type TailscaleStatus } from './tailscale-setup.js';
-import { readSecretBody } from './console/secrets.js';
-import { AskError, asksFrom, ASK_EVENTS } from './console/asks.js';
+import { asksFrom, ASK_EVENTS } from './console/asks.js';
 import { incidentsView } from './watchdog/view.js';
 import { effectiveRouting, ROUTING } from './routing.js';
 import { refuseKeyInUrl } from './dashboard-key-url.js';
@@ -1028,7 +1028,8 @@ async function readBody(req: IncomingMessage): Promise<unknown> {
     if (size > 64_000) throw new Error('body too large');
     chunks.push(c as Buffer);
   }
-  return chunks.length ? JSON.parse(Buffer.concat(chunks).toString('utf8')) : {};
+  // INVARIANT (issue #711): no route takes a Claude credential, whatever it is for (src/claude-credential-guard.ts).
+  return refuseClaudeCredential(chunks.length ? (JSON.parse(Buffer.concat(chunks).toString('utf8')) as unknown) : {});
 }
 
 export function startDashboard(opts: DashboardOptions): Promise<{ server: Server; url: string; keyFile: string; token: string; close: () => Promise<void> }> {
@@ -1425,6 +1426,11 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
         return json(res, 200, { file, copy: copyFileCommand(file) });
       }
       if (url.pathname.startsWith('/api/')) {
+        // Where earlier versions took a Claude credential (issue #711): gone, for everyone, the body never read.
+        if (REMOVED_CREDENTIAL_PATHS.has(url.pathname)) {
+          req.resume();
+          return json(res, 410, { error: CREDENTIAL_ROUTE_GONE });
+        }
         const id = await identify(req, url);
         // The hub asks this of each instance, to list only the ones the person has a role on.
         if (!('status' in id)) resolved.set(req, { login: id.login, role: id.role, csrfOk: true, breakGlass: id.via === 'break-glass', deviceOk: id.deviceOk });
@@ -1458,7 +1464,7 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
         )
           return;
         if (req.method === 'POST' && isProfileRoute(url.pathname)) {
-          const r = await handleProfileRoute(req, url, who, { eventsDb: opts.eventsDb, instance: opts.instance ?? opts.cfg.project.project.name, repo, accountDir: opts.claudeAccountDir ?? CLAUDE_ACCOUNT_DIR, ...(opts.machineOwnersFile ? { ownersFile: opts.machineOwnersFile } : {}), ...(opts.secretsHome ? { secretsHome: opts.secretsHome } : {}), audit, readBody });
+          const r = await handleProfileRoute(req, url, who, { eventsDb: opts.eventsDb, instance: opts.instance ?? opts.cfg.project.project.name, repo, accountDir: opts.claudeAccountDir ?? CLAUDE_ACCOUNT_DIR, ...(opts.machineOwnersFile ? { ownersFile: opts.machineOwnersFile } : {}), audit, readBody });
           return json(res, r.status, r.body);
         }
         // Accept a commit as a bootstrap merge (src/main-watch.ts acceptMerge): an admin's only, like clearing the stop,
@@ -2035,12 +2041,12 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           } catch {
             // no stats: the view says unknown
           }
-          const view = healthView(eventCache.all(), stats, { cores: cpuCount(), diskLabels: { [opts.root]: 'the checkout', [opts.stateDir]: 'the state dir' }, agents: opts.cfg.agents });
+          const view = healthView(eventCache.all(), stats, { cores: cpuCount(), diskLabels: { [opts.root]: 'the checkout', [opts.stateDir]: 'the state dir' }, agents: opts.cfg.agents, slotsDir: opts.slotsDir });
           // Costs are the owners' and writers': a viewer's usage per day has no estimated cost.
           const usage = isWriter(who.role) ? view.usage : { ...view.usage, days: view.usage.days.map(({ estimatedUsd: _cost, ...d }) => d) };
           // WHY: the proxy's internal host, root's provider hosts and each provider's host are the machine's network
-          // layout: writers only, as costs are.
-          return json(res, 200, { ...view, usage, network: isWriter(who.role) ? view.network : null, providerHosts: isWriter(who.role) ? view.providerHosts : null, docs: { backups: docsUrl('backups') } });
+          // layout: writers only, as costs are. So is the GitHub budget: what is left and which loops use it.
+          return json(res, 200, { ...view, usage, network: isWriter(who.role) ? view.network : null, providerHosts: isWriter(who.role) ? view.providerHosts : null, githubRate: isWriter(who.role) ? view.githubRate : null, docs: { backups: docsUrl('backups') } });
         }
         // The watchdog's incidents about this instance and the machine (src/watchdog/), and this instance's status
         // dot. Everyone with a role reads it; a viewer gets the allowlisted fields only (no detail, tried or fix). An
@@ -2321,13 +2327,11 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           }
         }
         // Sign in to Claude (src/claude-signin.ts). Local: the relayed `claude auth login`, its link for the owners only.
-        // Server: the agents' token goes into add-project's paste box (the existing paste_secret ask) or credentials.sh.
+        // Server: root installs the agents' login on the machine (credentials.sh, or claude auth login as the agent
+        // user); the page shows those commands and the status only: it never takes a Claude credential (issue #711).
         if (url.pathname === '/api/first-run/claude-signin' && req.method === 'GET') {
           if (!isWriter(who.role)) return json(res, 403, { error: writersOnly('the first-run checklist is', who) });
-          if (opts.instance) {
-            const asks = asksFrom(eventCache.all().filter((e) => (ASK_EVENTS as readonly string[]).includes(e.type)));
-            return json(res, 200, { mode: 'server', canAct: isOwnerHere, ...claudeServerView({ instance: opts.instance, asks, role: who.role, engineRoot: engineRoot(), ...(opts.claudeAccountDir ? { accountDir: opts.claudeAccountDir } : {}) }) });
-          }
+          if (opts.instance) return json(res, 200, { mode: 'server', canAct: isOwnerHere, ...claudeServerView({ instance: opts.instance, engineRoot: engineRoot(), ...(opts.claudeAccountDir ? { accountDir: opts.claudeAccountDir } : {}) }) });
           return json(res, 200, { mode: 'local', canAct: isOwnerHere, ...signin.view(isOwnerHere) });
         }
         if ((url.pathname === '/api/first-run/claude-signin' || url.pathname === '/api/first-run/claude-signin/cancel') && req.method === 'POST') {
@@ -2338,8 +2342,8 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
             return json(res, status, { error });
           };
           if (!isOwnerHere) return refused(403, `only the instance's owners (admin on ${repo}) may sign this machine in to Claude; @${who.login} is a ${who.role}`);
-          // INVARIANT: a server's agents never sign in through the dashboard's own claude: their login is a pasted setup token.
-          if (opts.instance) return refused(409, "a server instance's agents sign in with a token from claude setup-token, pasted into Add project's paste box or credentials.sh's hidden prompt; the dashboard never runs claude auth login there");
+          // INVARIANT: a server's agents never sign in through the dashboard: root installs their login on the machine.
+          if (opts.instance) return refused(409, "a server instance's agents are signed in by root on the machine: a token from claude setup-token at credentials.sh's hidden prompt, or claude auth login run there as the agent user; the dashboard never takes a Claude credential, nor runs claude auth login there");
           if (cancel) {
             if (!signin.cancel(`cancelled by @${who.login}`)) return refused(409, 'no Claude sign-in is running');
             audit(who, 'first_run.claude_signin_cancelled', {});
@@ -2641,7 +2645,8 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           return json(res, 200, { ok: true, pending: true, request: r });
         }
         // The agents' Claude account (src/claude-account.ts): the machine owners' panel. Each agent user's account and
-        // expiry, and the switch, followed from claude-account.sh's own progress file. Hidden from everyone else.
+        // expiry, and a switch a root admin runs, followed from claude-account.sh's own progress file. Hidden from
+        // everyone else. It shows status only: it never takes a Claude credential (issue #711).
         const accountRequester = { login: who.login, breakGlass: who.via === 'break-glass', deviceOk: who.deviceOk };
         const accountDir = opts.claudeAccountDir ?? CLAUDE_ACCOUNT_DIR;
         const ownersOpt = opts.machineOwnersFile ? { ownersFile: opts.machineOwnersFile } : {};
@@ -2653,18 +2658,19 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           const everAllowed = claudeAccountGate({ role: who.role, requester: { ...accountRequester, deviceOk: true } }, ownersOpt) === null;
           return json(res, 200, { ...claudeAccountView({ dir: accountDir, events, who: { role: who.role, requester: accountRequester }, instance: opts.instance ?? opts.cfg.project.project.name, ...ownersOpt }), everAllowed, ...profilesView(accountDir, Date.now(), opts.instance ?? opts.cfg.project.project.name, pauseOf(eventCache.all())) });
         }
-        // Refresh the status, or start a switch: a machine request the coordinator runs through the machine helper.
+        // Refresh the status: a machine request the coordinator runs through the machine helper. A switch takes a
+        // Claude credential, so it is a root admin's at a root shell, never asked for here (issue #711).
         if (url.pathname === '/api/machine/claude-account' && req.method === 'POST') {
           const body = ((await readBody(req)) ?? {}) as { action?: unknown };
           const action = String(body.action ?? '').slice(0, 20);
           if (!isOwnerHere) {
             audit(who, 'machine.claude_account_refused', { action, why: 'not an owner here' });
-            return json(res, 403, { error: `only the instance's owners (admin on ${repo}) who are machine owners may switch the Claude account; @${who.login} is a ${who.role}` });
+            return json(res, 403, { error: `only the instance's owners (admin on ${repo}) who are machine owners may refresh the Claude account; @${who.login} is a ${who.role}` });
           }
           const log = new EventLog(opts.eventsDb);
           let r: MachineRequest;
           try {
-            r = requestClaudeAccount(log, { action: body.action, requester: accountRequester, dir: accountDir, ...ownersOpt });
+            r = requestClaudeAccount(log, { action: body.action, requester: accountRequester, ...ownersOpt });
           } catch (e) {
             if (e instanceof MachineRequestError) {
               auditWrite(log, who, opts.instance ?? null, 'machine.claude_account_refused', { action, why: e.message.slice(0, 300) });
@@ -2714,23 +2720,6 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           tailscaleCache = null;
           audit(who, 'machine.tailscale', { action, request: r.id });
           return json(res, 200, { ok: true, pending: true, request: r });
-        }
-        // The new account's token, for the running switch: its own body handling, so the value never reaches readBody,
-        // an error, an event or the audit (which records only that it was stored).
-        if (url.pathname === '/api/claude-account/token' && req.method === 'POST') {
-          if (!isOwnerHere) {
-            req.resume();
-            return json(res, 403, { error: `only the instance's owners who are machine owners may paste the token; @${who.login} is a ${who.role}` });
-          }
-          try {
-            const value = await readSecretBody(req);
-            storeSwitchToken({ value, instance: opts.instance ?? opts.cfg.project.project.name, who: { role: who.role, requester: accountRequester }, dir: accountDir, ...(opts.secretsHome ? { home: opts.secretsHome } : {}), ...ownersOpt });
-          } catch (e) {
-            if (e instanceof ClaudeTokenError || e instanceof AskError) return json(res, e.status, { error: e.message });
-            return json(res, 500, { error: "the token couldn't be stored" });
-          }
-          audit(who, 'claude_account.token', { stored: true });
-          return json(res, 200, { ok: true });
         }
         if (url.pathname === '/api/checks' && req.method === 'GET') {
           const issue = Number(url.searchParams.get('issue'));
@@ -2827,7 +2816,7 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
       }
       serveStatic(webDir, url, res);
     } catch (e) {
-      json(res, 500, { error: (e as Error).message });
+      json(res, e instanceof ClaudeCredentialRefused ? e.status : 500, { error: (e as Error).message });
     }
   });
 

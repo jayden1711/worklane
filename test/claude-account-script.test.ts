@@ -3,8 +3,8 @@
 // polls after SIGTERM, or never) and claude (signed in when its user's credentials hold a setup token). The real
 // install_claude_token writes each user's login. Checked: the pause and the wait with its timeout, the token for every
 // agent and eval user at 0600 and in no output, `claude auth status` as each user, an instance whose check fails left
-// paused, the rerun, the token from a dashboard, status, and the account Claude Code cached for the old login dropped
-// with each token installed (#341).
+// paused, the rerun, never a token from a dashboard (#711), status, and the account Claude Code cached for the old
+// login dropped with each token installed (#341).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
@@ -205,7 +205,7 @@ test('switch pauses every instance, installs the token for each agent and eval u
   for (const f of ['switch.jsonl', 'status.json', 'paused']) assert.equal(statSync(join(m.T, 'var', f)).mode & 0o777, 0o644, f);
   // The engine folds the same lines into the dashboard's step view.
   const v = switchView(readSwitchLines(join(m.T, 'var')))!;
-  assert.deepEqual([v.status, v.waitingForToken, v.tokenFrom], ['done', false, null]);
+  assert.deepEqual([v.status, v.waitingForToken], ['done', false]);
   assert.deepEqual(v.instances.map((i) => [i.name, i.users.map((u) => u.user), i.resume?.state]), [['alpha', ['wl-alpha-agent', 'wl-alpha-eval'], 'done'], ['beta', ['wl-beta-agent'], 'done']]);
 });
 
@@ -493,34 +493,64 @@ test('no token, or not one from claude setup-token: nothing is installed, and ea
   }
 });
 
-test("from the dashboard: the token is taken from the asking instance's secrets, once, and a link is refused", { skip: !posix }, () => {
+test('issue #711: a switch never takes its token from a dashboard: --token-from (what an earlier machine helper passed) is refused before anything runs, and the file is never read', { skip: !posix }, () => {
   const m = machine();
   const dir = join(m.T, 'homes', 'wl-alpha', '.config', 'alpha-secrets');
   mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, 'claude-account-token'), TOKEN, { mode: 0o400 });
-  const r = m.run(['switch', '--json', '--token-from', 'alpha'], '');
-  assert.equal(r.status, 0, r.stderr + r.stdout);
-  assert.match(r.events.find((e) => e.step === 'token' && e.state === 'ask')!.detail, /in alpha's dashboard/);
-  assert.ok(!existsSync(join(dir, 'claude-account-token')), 'deleted once read');
-  assert.equal((JSON.parse(readFileSync(m.cred('wl-beta-agent'), 'utf8')) as { claudeAiOauth: { accessToken: string } }).claudeAiOauth.accessToken, TOKEN);
-  assert.equal(switchView(readSwitchLines(join(m.T, 'var')))!.tokenFrom, 'alpha');
-  assert.ok(!leaked(m.outputs(r)));
+  for (const args of [['switch', '--json', '--token-from', 'alpha'], ['switch', '--json', '--token-from', 'alpha', '--token-timeout', '1'], ['switch', '--json', '--for', 'alpha']]) {
+    const r = m.run(args, '');
+    assert.equal(r.status, 2, `${args.join(' ')}: ${r.stderr}`);
+    assert.ok(!leaked(m.outputs(r)));
+  }
+  assert.deepEqual(m.calls(), [], 'nothing paused, nothing installed');
+  assert.ok(m.active('alpha') && m.active('beta'));
+  for (const u of ['wl-alpha-agent', 'wl-alpha-eval', 'wl-beta-agent']) assert.equal((JSON.parse(readFileSync(m.cred(u), 'utf8')) as { claudeAiOauth: { accessToken: string } }).claudeAiOauth.accessToken, OLD, u);
+});
 
-  // A link in its place (to a file root can read) is never read; nothing pasted in time: the switch resumes, unchanged.
-  const m2 = machine();
-  const dir2 = join(m2.T, 'homes', 'wl-alpha', '.config', 'alpha-secrets');
-  mkdirSync(dir2, { recursive: true });
-  writeFileSync(join(m2.T, 'elsewhere'), TOKEN);
-  symlinkSync(join(m2.T, 'elsewhere'), join(dir2, 'claude-account-token'));
-  const r2 = m2.run(['switch', '--json', '--token-from', 'alpha'], '');
-  assert.equal(r2.status, 1);
-  assert.equal(r2.events.find((e) => e.step === 'token' && e.state !== 'ask')!.state, 'failed');
-  assert.equal((JSON.parse(readFileSync(m2.cred('wl-beta-agent'), 'utf8')) as { claudeAiOauth: { accessToken: string } }).claudeAiOauth.accessToken, OLD);
-  const m3 = machine();
-  const r3 = m3.run(['switch', '--json', '--token-from', 'alpha', '--token-timeout', '1'], '');
-  assert.equal(r3.status, 1);
-  assert.match(r3.events.find((e) => e.step === 'token' && e.state === 'failed')!.detail, /no token came/);
-  assert.ok(m3.active('alpha') && m3.active('beta'));
+test("issue #711: any run removes, unread and as the coordinator user, what an earlier dashboard stored for this script, from every *-secrets dir in that user's ~/.config (add-project's token went to the asker's <new>-secrets); regular files only, no link followed", { skip: !posix }, () => {
+  const m = machine();
+  const cfgA = join(m.T, 'homes', 'wl-alpha', '.config');
+  const cfgB = join(m.T, 'homes', 'wl-beta', '.config');
+  const dir = join(cfgA, 'alpha-secrets');
+  const beta = join(cfgB, 'beta-secrets');
+  // Add project "gamma" asked from alpha's dashboard: the dashboard stored the token in alpha's home, under gamma's
+  // name (secretsDir(<new instance>, <asking coordinator's home>)), where it stays if add-project stopped first.
+  const gamma = join(cfgA, 'gamma-secrets');
+  for (const d of [dir, beta, gamma, join(gamma, 'deeper'), join(cfgA, 'notes')]) mkdirSync(d, { recursive: true });
+  for (const f of ['claude-account-token', 'claude-profile-token', 'claude-token']) writeFileSync(join(dir, f), TOKEN, { mode: 0o400 });
+  writeFileSync(join(gamma, 'claude-token'), TOKEN, { mode: 0o400 });
+  writeFileSync(join(beta, 'claude-login-code'), 'abcdefghij0123456789#klmnopqrstuv9876543210', { mode: 0o400 });
+  // Kept: another secret; the same name outside a *-secrets dir, or deeper in one.
+  writeFileSync(join(beta, 'intake-discord'), 'another secret, kept');
+  writeFileSync(join(gamma, 'intake-discord'), 'another secret, kept');
+  writeFileSync(join(cfgA, 'notes', 'claude-token'), 'not a secrets dir, kept');
+  writeFileSync(join(gamma, 'deeper', 'claude-token'), 'deeper, kept');
+  // Links are never followed: a link in one's place, and a *-secrets dir that is a link to a dir elsewhere.
+  writeFileSync(join(m.T, 'elsewhere'), 'not ours');
+  symlinkSync(join(m.T, 'elsewhere'), join(beta, 'claude-account-token'));
+  const outside = join(m.T, 'outside');
+  mkdirSync(outside);
+  writeFileSync(join(outside, 'claude-token'), 'not ours either');
+  symlinkSync(outside, join(cfgB, 'linked-secrets'));
+  writeFileSync(join(m.T, 'var', 'login-url'), 'https://claude.ai/oauth/authorize?x=1\n');
+  const r = m.run(['status', '--json'], '');
+  assert.ok(r.status === 0 || r.status === 1, r.stderr);
+  for (const f of ['claude-account-token', 'claude-profile-token', 'claude-token']) assert.ok(!existsSync(join(dir, f)), f);
+  assert.ok(!existsSync(join(gamma, 'claude-token')), "add-project's token, in the asker's <new>-secrets: removed");
+  assert.ok(!existsSync(join(beta, 'claude-login-code')));
+  assert.equal(readFileSync(join(beta, 'claude-account-token'), 'utf8'), 'not ours', 'a link is not a regular file: left, and its target untouched');
+  assert.equal(readFileSync(join(outside, 'claude-token'), 'utf8'), 'not ours either', 'a linked *-secrets dir is never entered');
+  for (const f of [join(beta, 'intake-discord'), join(gamma, 'intake-discord')]) assert.equal(readFileSync(f, 'utf8'), 'another secret, kept', 'only those four names');
+  assert.equal(readFileSync(join(cfgA, 'notes', 'claude-token'), 'utf8'), 'not a secrets dir, kept');
+  assert.equal(readFileSync(join(gamma, 'deeper', 'claude-token'), 'utf8'), 'deeper, kept');
+  assert.ok(!existsSync(join(m.T, 'var', 'login-url')));
+  assert.ok(m.calls().some((c) => c.startsWith(`sudo -H -u wl-alpha find -P ${cfgA} `)), 'as that coordinator user, never as root');
+  assert.ok(m.calls().some((c) => c.startsWith(`sudo -H -u wl-beta find -P ${cfgB} `)));
+  assert.match(r.stderr, new RegExp(`removed ${join(gamma, 'claude-token').replace(/[.*+?^$()|[\]\\]/g, '\\$&')}, unread`));
+  // None of them was read into a login.
+  for (const u of ['wl-alpha-agent', 'wl-beta-agent']) assert.equal((JSON.parse(readFileSync(m.cred(u), 'utf8')) as { claudeAiOauth: { accessToken: string } }).claudeAiOauth.accessToken, OLD, u);
+  assert.ok(!leaked(m.outputs(r)));
 });
 
 test('status names each agent user\'s account, token id and expiry, and fails while one is signed out', { skip: !posix }, () => {
@@ -609,7 +639,7 @@ test('issue #463: with no token, an instance whose current login the API refuses
 
 test('bad arguments are refused before anything runs', { skip: !posix }, () => {
   const m = machine();
-  for (const a of [[], ['swap'], ['switch', '--timeout', 'x'], ['switch', 'Bad'], ['switch', '--token-from', 'a;b'], ['status', 'Bad'], ['switch', '--nope']]) {
+  for (const a of [[], ['swap'], ['switch', '--timeout', 'x'], ['switch', 'Bad'], ['switch', '--token-from', 'a;b'], ['switch', '--token-from', 'alpha'], ['login', 'work', '--for', 'alpha'], ['status', 'Bad'], ['switch', '--nope']]) {
     const r = m.run(a);
     assert.equal(r.status, 2, JSON.stringify(a));
   }

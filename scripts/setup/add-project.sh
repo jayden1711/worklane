@@ -12,8 +12,11 @@
 #                   On a machine's first project there is no hub yet: this step starts it alone first
 #                   (dashboards.sh --no-instances), with the sign-in App the hub's setup mode stored
 #                   (dashboards.sh --setup); without one it stops, naming that command.
-#   claude-token    the agent's Claude login: the token `claude setup-token` prints, pasted (or on stdin), stored for
-#                   wl-<name>-agent only. Never echoed or logged.
+#   claude-token    the agent's Claude login: the token `claude setup-token` prints, pasted at the hidden prompt of a
+#                   root shell on this machine (or on root's stdin, for automation), stored for wl-<name>-agent only,
+#                   never echoed or logged. With none (the machine helper, for a dashboard, gives no stdin) the step
+#                   waits (exit 3) for root to install the login (credentials.sh <name> claude): a dashboard never
+#                   takes a Claude credential (issue #711).
 #   checkout        checkout.sh <name> <owner/repo>; a repo with no config gets auto-config's setup PR (through the App)
 #   policy          the default policy, auto_merge off, $20/day, 2 workers, shown for you to change
 #   service         service.sh <name>, once the checkout has its config: for a setup PR, it waits (up to --timeout
@@ -26,7 +29,7 @@
 #
 # Output: stdout is one JSON line per step change, and nothing else:
 #   {"step":"checkout","state":"started|done|failed|ask|waiting","detail":"...","ask":{...},"retry":"..."}
-# "ask" lines carry what the step waits for (a GitHub link to approve, the Claude token); a "failed" line names the
+# "ask" lines carry what the step waits for (a GitHub link to approve); a "failed" line names the
 # exact retry; a "waiting" line what it waits for that only time or someone else settles (the setup PR's merge). The
 # steps' own output goes to stderr. It stops at the first failure, exit 1, or at a step still waiting, exit 3.
 #
@@ -167,9 +170,10 @@ done_claude_token() {
   echo "$agent has a Claude login"
 }
 do_claude_token() {
-  local token="" title="The Claude login for $name's agents"
-  local detail="On a machine signed in to the Claude account the agents should use, run claude setup-token and paste the token it prints. It is stored for $agent only, never shown or logged."
-  emit claude-token ask "$title" "{\"kind\":\"paste_secret\",\"credential\":\"claude-token\",\"title\":$(json_str "$title"),\"detail\":$(json_str "$detail")}"
+  local token=""
+  # Issue #711: the token comes only from root on this machine: the hidden prompt at a root shell, or stdin from root's
+  # own automation. Never from a dashboard: the machine helper gives this script no stdin, and the coordinator writes
+  # none. With none, the step waits for root to install the login, and a rerun picks up here.
   if [ -t 0 ]; then
     read -rsp "Paste the token from claude setup-token, then Enter (it is not shown): " token || true
     echo
@@ -177,7 +181,10 @@ do_claude_token() {
     IFS= read -r token || true
   fi
   token="$(printf '%s' "$token" | tr -d '[:space:]')"
-  [ -n "$token" ] || { echo "no token came (run claude setup-token and paste what it prints)"; return 1; }
+  if [ -z "$token" ]; then
+    echo "waiting: the agents' Claude login, which only root installs, on this machine: sudo bash $here/credentials.sh $name claude (it asks for the token claude setup-token prints, not shown), or sign in as $agent there (sudo -u $agent -i claude auth login)"
+    exit 3
+  fi
   printf '%s' "$token" | install_claude_token "$agent"
   token=""
   claude_login_ok "$agent" || { echo "claude auth status, as $agent, says it isn't signed in with that token"; return 1; }
