@@ -20,11 +20,17 @@ Every release, newest first: the PRs merged since the previous one, and what cha
   - each run variable the sandbox helper is given.
 
   So a config that sets, for example, `MALLOC_ARENA_MAX` or `TZDIR` is valid on v0.5.2 and fails the config check on this release. Before installing, remove these names from the config on the default branch.
-- **In a test run that has a user namespace of its own (#780), any project variable bash treats as its own is left out, with a note.** The step that hands a run its variables (a bash, after every capability is dropped) decides this on the bash it runs under, never from a list: it doesn't pass on a name that bash holds as integer, read-only, an array or a nameref, or sets itself, or one it couldn't export with the value given. For each, the run's stderr says `worklane-testrun: not set: <NAME> is the shell's own`, and the run goes on. Measured on bash 5.2.21, these lose the project's value this way, though v0.5.2 handed it to the run's bash: `SHELLOPTS`, `BASHOPTS`, `UID`, `EUID`, `PPID`, `BASH_VERSINFO`, `GROUPS`, `FUNCNAME`, `DIRSTACK`, `BASH_ARGC`, `BASH_ARGV`, `BASH_SOURCE`, `BASH_LINENO`, `BASH_ALIASES`, `BASH_CMDS` and `PIPESTATUS`. So do the names bash sets itself, such as `HOSTNAME`, `SHLVL`, `PWD`, `OSTYPE`, `RANDOM`, `SECONDS`, `OPTIND` and `SRANDOM`. Other bash versions may differ. Measured with a fixture of that step, what a child of the run's commands then sees:
-  - `SHELLOPTS` and `BASHOPTS`: bash's default options, so the project's (`xtrace`, `extglob`, ...) lose their effect;
-  - `UID` and `EUID`: the run's real uid, where v0.5.2 passed the project's value on;
-  - `HOSTNAME`: bash's own, where v0.5.2 passed the project's value on;
-  - the rest of the sixteen above: nothing, where v0.5.2 handed the project's value to the run's bash.
+- **In a test run that has a user namespace of its own (#780), any project variable bash treats as its own is left out, with a note.** The step that hands a run its variables (a bash, after every capability is dropped) decides this on the bash it runs under, never from a list. It doesn't pass on a name that:
+  - bash holds as integer, read-only, an array or a nameref;
+  - bash sets itself, or holds with a value other than the one its starting environment gave;
+  - or it couldn't export with the value given.
+
+  For each, the run's stderr says `worklane-testrun: not set: <NAME> is the shell's own`, and the run goes on.
+  - **Measured on bash 5.2.21, these lose the project's value this way, though v0.5.2 handed it to the run's bash:** `SHELLOPTS`, `BASHOPTS`, `UID`, `EUID`, `PPID`, `BASH_VERSINFO`, `GROUPS`, `FUNCNAME`, `DIRSTACK`, `BASH_ARGC`, `BASH_ARGV`, `BASH_SOURCE`, `BASH_LINENO`, `BASH_ALIASES`, `BASH_CMDS` and `PIPESTATUS`.
+  - **So do the names bash sets itself:** `HOSTNAME`, `SHLVL`, `OSTYPE`, `RANDOM`, `SECONDS`, `OPTIND`, `SRANDOM` and the like. `SHLVL` is always noted, since bash raises it at every start.
+  - **`PWD` depends on the shell that runs before the loader** (the machine's `/bin/sh`). Where that shell exports it, as dash and bash do, the project's value is handed over, and the run's bash then resets a wrong one to the real directory, as v0.5.2's did. Where it doesn't, `PWD` is noted.
+  - Other bash versions may differ.
+  - **What the run's commands see then** (measured with a fixture of that step, behind dash): a child of the run's commands gets **none** of `SHELLOPTS`, `BASHOPTS`, `UID`, `EUID`, `HOSTNAME`, `GROUPS`, `PPID` or `BASH_VERSINFO` from the project, where v0.5.2 passed most of them on. The run's bash itself has its own values, so the project's options (`xtrace`, `extglob`) have no effect and `$UID` is the real uid.
 
 ### After install
 

@@ -486,7 +486,7 @@ const usernsArgv = (h: ReturnType<typeof netHelper>, dollar = '$', aa = false) =
   // Round 4: the loader, after setpriv, gives the command the run's variables from its stdin.
   '/bin/bash', '-c', LOADER.replaceAll('$', () => dollar), 'load',
 ];
-const LOADER = 'declare -A WORKLANE_e=() WORKLANE_s=() WORKLANE_o=(); while IFS= read -r -d "" WORKLANE_kv; do WORKLANE_o["${WORKLANE_kv%%=*}"]=1; done < "/proc/$$/environ"; while IFS= read -r -d "" WORKLANE_kv; do WORKLANE_n="${WORKLANE_kv%%=*}"; WORKLANE_e["$WORKLANE_n"]="${WORKLANE_kv#*=}"; if [[ "${!WORKLANE_n@a}" == *[iraAn]* ]] || { [[ -v $WORKLANE_n ]] && [[ -z "${WORKLANE_o[$WORKLANE_n]-}" ]]; }; then WORKLANE_s["$WORKLANE_n"]=1; else export "$WORKLANE_kv" 2> /dev/null; WORKLANE_o["$WORKLANE_n"]=1; fi; done; for WORKLANE_n in "${!WORKLANE_e[@]}"; do WORKLANE_a="${!WORKLANE_n@a}"; if [[ -n "${WORKLANE_s[$WORKLANE_n]-}" || "$WORKLANE_a" != *x* || "$WORKLANE_a" == *[aAn]* || "${!WORKLANE_n}" != "${WORKLANE_e[$WORKLANE_n]}" ]]; then echo "worklane-testrun: not set: $WORKLANE_n is the shell\'s own" >&2; fi; done; exec "$@" < /dev/null';
+const LOADER = 'declare -A WORKLANE_e=() WORKLANE_s=() WORKLANE_o=(); while IFS= TMOUT= read -r -d "" WORKLANE_kv; do WORKLANE_o["${WORKLANE_kv%%=*}"]="${WORKLANE_kv#*=}"; done < "/proc/$$/environ"; while IFS= TMOUT= read -r -d "" WORKLANE_kv; do WORKLANE_n="${WORKLANE_kv%%=*}"; WORKLANE_e["$WORKLANE_n"]="${WORKLANE_kv#*=}"; if [[ "${!WORKLANE_n@a}" == *[iraAn]* ]] || { [[ -v $WORKLANE_n ]] && { [[ -z "${WORKLANE_o[$WORKLANE_n]+set}" ]] || [[ "${!WORKLANE_n}" != "${WORKLANE_o[$WORKLANE_n]}" ]]; }; }; then WORKLANE_s["$WORKLANE_n"]=1; else export "$WORKLANE_kv" 2> /dev/null; WORKLANE_o["$WORKLANE_n"]="${WORKLANE_kv#*=}"; fi; done; for WORKLANE_n in "${!WORKLANE_e[@]}"; do WORKLANE_a="${!WORKLANE_n@a}"; if [[ -n "${WORKLANE_s[$WORKLANE_n]-}" || "$WORKLANE_a" != *x* || "$WORKLANE_a" == *[aAn]* || "${!WORKLANE_n}" != "${WORKLANE_e[$WORKLANE_n]}" ]]; then echo "worklane-testrun: not set: $WORKLANE_n is the shell\'s own" >&2; fi; done; exec "$@" < /dev/null';
 
 /** The prelude part of the newest run unit's command: the usernsArgv-long slice before bash and its 4 arguments. */
 const prelude = (h: ReturnType<typeof netHelper>) => h.lastProps().argv.slice(-(usernsArgv(h).length + 5), -5);
@@ -663,6 +663,56 @@ test('#545 round 4: no variable of the run\'s reaches a step that holds a capabi
     assert.match(l.stderr, /not set: SHELLOPTS is the shell's own/);
   } finally {
     h.done();
+  }
+});
+
+/** Every variable in the bash manual (the round-7 reviewer's list), CI (one the unit sets) and a plain name. */
+const BASH_MANUAL_NAMES = ['BASH', 'BASHOPTS', 'BASHPID', 'BASH_ALIASES', 'BASH_ARGC', 'BASH_ARGV', 'BASH_ARGV0', 'BASH_CMDS', 'BASH_COMMAND', 'BASH_COMPAT',
+  'BASH_EXECUTION_STRING', 'BASH_LINENO', 'BASH_LOADABLES_PATH', 'BASH_MONOSECONDS', 'BASH_REMATCH', 'BASH_SOURCE', 'BASH_SUBSHELL',
+  'BASH_TRAPSIG', 'BASH_VERSINFO', 'BASH_VERSION', 'BASH_XTRACEFD', 'CDPATH', 'CHILD_MAX', 'COLUMNS', 'COMP_CWORD', 'COMP_KEY', 'COMP_LINE',
+  'COMP_POINT', 'COMP_TYPE', 'COMP_WORDBREAKS', 'COMP_WORDS', 'COMPREPLY', 'COPROC', 'DIRSTACK', 'EMACS', 'EPOCHREALTIME', 'EPOCHSECONDS', 'EUID',
+  'EXECIGNORE', 'FCEDIT', 'FIGNORE', 'FUNCNAME', 'FUNCNEST', 'GLOBIGNORE', 'GLOBSORT', 'GROUPS', 'histchars', 'HISTCMD', 'HISTCONTROL', 'HISTFILE',
+  'HISTFILESIZE', 'HISTIGNORE', 'HISTSIZE', 'HISTTIMEFORMAT', 'HOSTFILE', 'HOSTNAME', 'HOSTTYPE', 'IGNOREEOF', 'INPUTRC', 'INSIDE_EMACS', 'LANG',
+  'LC_ALL', 'LC_COLLATE', 'LC_CTYPE', 'LC_MESSAGES', 'LC_NUMERIC', 'LC_TIME', 'LINENO', 'LINES', 'MACHTYPE', 'MAIL', 'MAILCHECK', 'MAILPATH', 'MAPFILE',
+  'OLDPWD', 'OPTARG', 'OPTERR', 'OPTIND', 'OSTYPE', 'PIPESTATUS', 'POSIXLY_CORRECT', 'PPID', 'PROMPT_DIRTRIM', 'PS0', 'PS1', 'PS2', 'PS3', 'PWD', 'RANDOM',
+  'READLINE_ARGUMENT', 'READLINE_LINE', 'READLINE_MARK', 'READLINE_POINT', 'REPLY', 'SECONDS', 'SHELLOPTS', 'SHLVL', 'SRANDOM', 'TEXTDOMAIN',
+  'TEXTDOMAINDIR', 'TIMEFORMAT', 'TMOUT', 'UID', '_', 'CI', 'PLAIN'];
+
+test('#545 round 8: behind no prelude, a bash one and a dash one, each of the bash manual\'s variables is handed over with exactly its value XOR noted (SHLVL and PWD included); a project\'s TMOUT drops no later name', { skip: !posix && 'bash' }, () => {
+  const h = netHelper();
+  const home = tmp('loader-home-');
+  try {
+    h.userns('ok');
+    assert.equal(h.execEnv('fast-l-8', [], 'true', { FOO: 'x' }).status, 0);
+    const argv = h.lastProps().argv;
+    const loader = argv[argv.indexOf('load') - 1]!;
+    const printenv = real('printenv')!;
+    const dash = real('dash');
+    // The unit's own environment (the helper's --setenv), then the shell before the loader, as the prelude's
+    // `sh -c '... && exec setpriv ... -- "$@"'` has it: none, bash, dash. Each built explicitly, never this machine's /bin/sh.
+    const preludes: Array<[string, string[]]> = [['none', []], ['bash', ['/bin/bash', '-c', 'true && exec "$@"', 'sh']], ...(dash ? [['dash', [dash, '-c', 'true && exec "$@"', 'sh']] as [string, string[]]] : [])];
+    const findings: string[] = [];
+    for (const [pre, shell] of preludes) {
+      for (const n of BASH_MANUAL_NAMES) {
+        const r = spawnSync('/usr/bin/env', ['-i', 'PATH=/usr/local/bin:/usr/bin:/bin', `HOME=${home}`, 'LANG=C.UTF-8', 'CI=1', ...shell, '/bin/bash', '-c', loader, 'load', printenv, n], { encoding: 'utf8', input: `${n}=12345\0`, cwd: home });
+        const isNoted = new RegExp(`^worklane-testrun: not set: ${n} is the shell's own$`, 'm').test(r.stderr);
+        const handed = r.status === 0 && r.stdout === '12345\n';
+        if (isNoted === handed) findings.push(`${pre} ${n}: noted ${isNoted}, handed over ${handed} (child [${r.stdout.trim()}])`);
+        if (!isNoted && r.stdout !== '' && !handed) findings.push(`${pre} ${n}: handed over a changed value [${r.stdout.trim()}]`);
+      }
+      // SHLVL: bash raises it at every start and exec lowers it, so it is always noted, behind any shell.
+      const s = spawnSync('/usr/bin/env', ['-i', 'PATH=/usr/bin:/bin', ...shell, '/bin/bash', '-c', loader, 'load', printenv, 'SHLVL'], { encoding: 'utf8', input: 'SHLVL=5\0' });
+      assert.match(s.stderr, /not set: SHLVL is the shell's own/, `${pre}: SHLVL noted`);
+    }
+    assert.deepEqual(findings, []);
+    // TMOUT first, from a pipe: every later name still arrives, with no note.
+    const many = Array.from({ length: 250 }, (_, i) => `N${i}=v${i}`);
+    const t = spawnSync('/usr/bin/env', ['-i', 'PATH=/usr/bin:/bin', '/bin/bash', '-c', loader, 'load', '/usr/bin/env'], { encoding: 'utf8', input: ['TMOUT=0.000001', ...many].map((v) => `${v}\0`).join('') });
+    assert.equal(t.stdout.split('\n').filter((l) => /^N\d+=v\d+$/.test(l)).length, 250, t.stderr);
+    assert.doesNotMatch(t.stderr, /not set: N\d+/);
+  } finally {
+    h.done();
+    rmSync(home, { recursive: true, force: true });
   }
 });
 

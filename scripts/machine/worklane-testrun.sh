@@ -1141,11 +1141,14 @@ wrapper_acl_problem() {
 # exports each, and runs the command with /dev/null as its stdin, as before. All decided on the bash it runs under,
 # never from a list kept here (round 7):
 #   - a name this bash already holds as integer, read-only, an array or a nameref (${!name@a} has i, r, a, A or n:
-#     RANDOM, OPTIND, UID, GROUPS, ...), or one it set itself, not from the environment it started with
-#     (/proc/$$/environ: SHLVL, HOSTNAME, PWD, OSTYPE, ...), is never assigned. WHY: assigning an integer one evaluates
-#     the value as arithmetic, and a[$(...)] in it runs code (measured on bash 5.2: OPTIND, RANDOM, SRANDOM, HISTCMD),
-#     which bash importing the same value from its environment, as before #545, didn't; and bash changes some of its
-#     own on the way to the command (exec lowers SHLVL), so a check here couldn't vouch for them;
+#     RANDOM, OPTIND, UID, GROUPS, ...), or one it set itself, or whose value it changed from the one the environment it
+#     started with gave (/proc/$$/environ, names and values: SHLVL, which bash raises at every start, HOSTNAME, OSTYPE,
+#     _, ...), is never assigned. WHY: assigning an integer one evaluates the value as arithmetic, and a[$(...)] in it
+#     runs code (measured on bash 5.2: OPTIND, RANDOM, SRANDOM, HISTCMD), which bash importing the same value from its
+#     environment, as before #545, didn't; and bash changes its own names on the way to the command (exec lowers SHLVL
+#     and sets _), so a check here couldn't vouch for them. A name the environment gave and bash kept as it was (PWD
+#     where the shell before this one exported it, CI, LANG) is the project's to replace, as with EnvironmentFile=;
+#   - its reads take no timeout (TMOUT=): a project's TMOUT would otherwise end them early on a pipe;
 #   - then each name it was given must be exported, not an array or a nameref, and hold the last value given
 #     (${!name@a}, ${!name}: no child per name).
 # A name that fails either (bash's own: read-only like SHELLOPTS, arrays like FUNCNAME, dynamic like SECONDS) gets a
@@ -1161,7 +1164,7 @@ userns_argv() {
   # locale's) reaches them.
   s="$(systemd_command "$v" "$ENV_BIN -i $IP_BIN link set lo up < /dev/null && $ENV_BIN -i $MOUNT_BIN --bind /dev/null $USERNS < /dev/null && exec $SETPRIV_BIN --inh-caps=-all --ambient-caps=-all --bounding-set=-all$aa -- \"\$@\"")"
   USERNS_ARGV=("$USERNS" --user --map-current-user --net --mount --keep-caps -- /bin/sh -c "${s#*$'\n'}" sh)
-  s="$(systemd_command "$v" 'declare -A WORKLANE_e=() WORKLANE_s=() WORKLANE_o=(); while IFS= read -r -d "" WORKLANE_kv; do WORKLANE_o["${WORKLANE_kv%%=*}"]=1; done < "/proc/$$/environ"; while IFS= read -r -d "" WORKLANE_kv; do WORKLANE_n="${WORKLANE_kv%%=*}"; WORKLANE_e["$WORKLANE_n"]="${WORKLANE_kv#*=}"; if [[ "${!WORKLANE_n@a}" == *[iraAn]* ]] || { [[ -v $WORKLANE_n ]] && [[ -z "${WORKLANE_o[$WORKLANE_n]-}" ]]; }; then WORKLANE_s["$WORKLANE_n"]=1; else export "$WORKLANE_kv" 2> /dev/null; WORKLANE_o["$WORKLANE_n"]=1; fi; done; for WORKLANE_n in "${!WORKLANE_e[@]}"; do WORKLANE_a="${!WORKLANE_n@a}"; if [[ -n "${WORKLANE_s[$WORKLANE_n]-}" || "$WORKLANE_a" != *x* || "$WORKLANE_a" == *[aAn]* || "${!WORKLANE_n}" != "${WORKLANE_e[$WORKLANE_n]}" ]]; then echo "worklane-testrun: not set: $WORKLANE_n is the shell'"'"'s own" >&2; fi; done; exec "$@" < /dev/null')"
+  s="$(systemd_command "$v" 'declare -A WORKLANE_e=() WORKLANE_s=() WORKLANE_o=(); while IFS= TMOUT= read -r -d "" WORKLANE_kv; do WORKLANE_o["${WORKLANE_kv%%=*}"]="${WORKLANE_kv#*=}"; done < "/proc/$$/environ"; while IFS= TMOUT= read -r -d "" WORKLANE_kv; do WORKLANE_n="${WORKLANE_kv%%=*}"; WORKLANE_e["$WORKLANE_n"]="${WORKLANE_kv#*=}"; if [[ "${!WORKLANE_n@a}" == *[iraAn]* ]] || { [[ -v $WORKLANE_n ]] && { [[ -z "${WORKLANE_o[$WORKLANE_n]+set}" ]] || [[ "${!WORKLANE_n}" != "${WORKLANE_o[$WORKLANE_n]}" ]]; }; }; then WORKLANE_s["$WORKLANE_n"]=1; else export "$WORKLANE_kv" 2> /dev/null; WORKLANE_o["$WORKLANE_n"]="${WORKLANE_kv#*=}"; fi; done; for WORKLANE_n in "${!WORKLANE_e[@]}"; do WORKLANE_a="${!WORKLANE_n@a}"; if [[ -n "${WORKLANE_s[$WORKLANE_n]-}" || "$WORKLANE_a" != *x* || "$WORKLANE_a" == *[aAn]* || "${!WORKLANE_n}" != "${WORKLANE_e[$WORKLANE_n]}" ]]; then echo "worklane-testrun: not set: $WORKLANE_n is the shell'"'"'s own" >&2; fi; done; exec "$@" < /dev/null')"
   USERNS_LOAD=(/bin/bash -c "${s#*$'\n'}" load)
 }
 
