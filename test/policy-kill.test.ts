@@ -11,7 +11,8 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { BRAND } from '../src/brand.js';
 import { processIdentity } from '../src/os/index.js';
-import { autoMergeKilled, POLICY_ROOT_DIR } from '../src/policy-kill.js';
+import { policyRootChecks } from '../src/doctor-policy-root.js';
+import { autoMergeKilled, POLICY_ROOT_DIR, renameForwardPath } from '../src/policy-kill.js';
 import { ownPolicy, setPolicy, type PolicyRootDeps } from '../src/policy-root.js';
 import { repoRoot } from './helpers.js';
 
@@ -265,12 +266,14 @@ function fullDisk(code = 'ENOSPC'): () => void {
 }
 
 test("while a rename runs, an OFF given to the old name at any step (before or after each carry, and inside the old name's removal after the last carry) turns the new name off too, with no new space (#726 round 6)", { skip }, () => {
-  const steps = ['park', 'export', 'users', 'home', 'checkout', 'import', 'records', 'services', 'keep', 'remove: after the carry, inside instance-remove'];
+  const steps = ['park', 'export', 'users', 'home', 'checkout', 'import', 'records', 'services', 'keep', 'remove: after the carry, inside instance-remove, its users there', 'remove: inside instance-remove, its users and then its switches gone'];
   for (const [i, step] of steps.entries()) {
     const T = join(realpathSync(mkdtempSync(join(tmpdir(), 'rename-fwd-'))), 'policy-root');
     mkdirSync(T, { mode: 0o755 });
     const [oldName, newName] = [`old${i}`, `new${i}`];
-    const deps: PolicyRootDeps = { uid: () => me, markerDir: T };
+    // Round 7: inside the old name's removal its user goes before its switches (the registry's order, below).
+    const usersGone = step.includes('users and then');
+    const deps: PolicyRootDeps = { uid: (u) => (usersGone && u === `wl-${oldName}` ? null : me), markerDir: T };
     const run = (script: string) => spawnSync('bash', ['-c', `source "$1"; POLICY_ROOT_DIR="$2"; own_policy() { :; }; ${script}`, '_', lib, T], { encoding: 'utf8' });
     // The old name, taken over: its spare. The rename's start: root's forward record, and a spare for the new name.
     writeFileSync(join(T, `${oldName}.auto-merge-spare`), '');
@@ -278,21 +281,19 @@ test("while a rename runs, an OFF given to the old name at any step (before or a
     assert.equal(fwd.status, 0, `${step}: ${fwd.stderr}`);
     if (i >= steps.indexOf('home')) run(`carry_policy_root ${oldName} ${newName}`);
     if (i >= steps.indexOf('services')) run(`carry_auto_merge_off ${oldName} ${newName}`);
-    if (step.startsWith('remove')) {
-      run(`carry_auto_merge_off ${oldName} ${newName}`);
-      // instance-remove.sh: the registry's glob takes the old name's switches before its user goes.
-      run(`rm -f "$POLICY_ROOT_DIR/${oldName}".auto-merge-*`);
-    }
+    if (step.startsWith('remove')) run(`carry_auto_merge_off ${oldName} ${newName}`);
+    // instance-remove.sh: the registry's glob takes the old name's switches once its users are gone.
+    if (usersGone) run(`rm -f "$POLICY_ROOT_DIR/${oldName}".auto-merge-*`);
     assert.equal(autoMergeKilled(newName, T), false, `${step}: on before the OFF`);
-    // With every create in root's directory failing: the new name's OFF uses its spare.
+    // With every create in root's directory failing: each name's OFF uses its spare.
     const restore = fullDisk();
     try {
       setPolicy(oldName, 'auto_merge', 'off', `wl-${oldName}`, deps);
     } finally {
       restore();
     }
-    // The old name too, where it still can be (inside its removal, with its spare gone and no room, it can't: parked).
-    if (!step.startsWith('remove')) assert.equal(autoMergeKilled(oldName, T), true, step);
+    // The old name too, while it can still start (its user there); once its user and switches are gone, nothing runs as it.
+    if (!usersGone) assert.equal(autoMergeKilled(oldName, T), true, step);
     assert.equal(autoMergeKilled(newName, T), true, `${step}: the instance that runs is off`);
     // The rename done (or aborted): the forward goes.
     assert.equal(run(`rename_forward_done ${oldName}`).status, 0);
@@ -301,7 +302,13 @@ test("while a rename runs, an OFF given to the old name at any step (before or a
   // instance-rename.sh writes it before its first step, and removes it after the last (the old name's removal) and on --abort.
   const rename = spawnSync('cat', [join(repoRoot, 'scripts', 'setup', 'instance-rename.sh')], { encoding: 'utf8' }).stdout;
   assert.match(rename, /\nrename_forward "\$old" "\$new"\n[\s\S]*?\nfor s in "\$\{STEPS\[@\]\}"; do run_step "\$s"; done\n[^\n]*\nrename_forward_done "\$old"\n/);
-  assert.match(rename, /say "abort: [^\n]*\n[^\n]*\n {2}carry_auto_merge_off "\$new" "\$old"\n[\s\S]*?instance-remove\.sh" "\$new"[\s\S]*?rm -f "\$progress"\n {2}rename_forward_done "\$old"\n/, '--abort carries the OFF back to the old name before the new one goes, and ends the forward');
+  // Round 7: --abort ends the forward FIRST, then moves the new name's switches back (no new space), then the new name
+  // goes. (Through ae00a348 it carried back first and ended the forward last: an OFF in between said done while the
+  // old name came back on.)
+  assert.match(rename, /say "abort: [^\n]*\n(?: {2}#[^\n]*\n)* {2}rename_forward_done "\$old"\n {2}move_auto_merge_off "\$new" "\$old"\n[\s\S]*?instance-remove\.sh" "\$new"/, '--abort ends the forward, then moves the OFF back to the old name, before the new one goes');
+  const abortAt = rename.indexOf('if [ -n "$abort" ]; then');
+  const abortBlock = rename.slice(abortAt, rename.indexOf('\nfi\n', abortAt));
+  assert.equal(abortBlock.match(/rename_forward_done/g)?.length, 1, '--abort ends the forward once, first');
 });
 
 test('many OFFs at once (12 processes) never add files, never report a failure, and leave auto_merge off (#726 round 6)', { skip }, async () => {
@@ -386,17 +393,187 @@ test('an OFF that loses a race to another OFF is done, not failed: its switch mo
   }
 });
 
-test("a temp file a root writer left (killed before its rename) is swept on root's next write there (#726 round 6)", { skip }, () => {
+test("a temp file a root writer left (killed before its rename) is swept on root's next write there; a stalled writer's never is (#726 rounds 6 and 7)", { skip }, () => {
   const name = 'sweep';
   const m = machineInstance(name);
   ownPolicy(name, m.deps);
-  const tmp = join(POLICY_ROOT_DIR, '.0123456789ab.auto-merge.tmp');
-  writeFileSync(tmp, 'auto_merge off since then\n');
-  const old = new Date(Date.now() - 600_000);
-  utimesSync(tmp, old, old);
-  const fresh = join(POLICY_ROOT_DIR, '.ba9876543210.auto-merge.tmp');
-  writeFileSync(fresh, ''); // another writer's, in flight: kept
+  // A file's mtime set to a wall time some while ago (not a duration).
+  const tenMinutesAgo = new Date(Date.now() - 600_000);
+  const twoDaysAgo = new Date(Date.now() - 2 * 24 * 3600_000);
+  const age = (p: string, t: Date) => utimesSync(p, t, t);
+  // A writer that is gone (a process that ran and exited): its temp file goes at once.
+  const dead = spawnSync(process.execPath, ['-e', 'console.log(process.pid)'], { encoding: 'utf8' });
+  const deadPid = Number(dead.stdout.trim());
+  assert.ok(deadPid > 0);
+  const killed = join(POLICY_ROOT_DIR, `.${deadPid}-0123456789ab.auto-merge.tmp`);
+  writeFileSync(killed, 'auto_merge off since then\n');
+  // A writer still alive (this process), stalled ten minutes between its write and its rename: kept.
+  const stalled = join(POLICY_ROOT_DIR, `.${process.pid}-ba9876543210.auto-merge.tmp`);
+  writeFileSync(stalled, '');
+  age(stalled, tenMinutesAgo);
+  // A name with no pid (round 6's), ten minutes old: kept (its writer can't be told gone); two days old: gone.
+  const noPid = join(POLICY_ROOT_DIR, '.00112233aabb.auto-merge.tmp');
+  writeFileSync(noPid, '');
+  age(noPid, tenMinutesAgo);
+  const ancient = join(POLICY_ROOT_DIR, `.${process.pid}-ccddeeff0011.auto-merge.tmp`);
+  writeFileSync(ancient, '');
+  age(ancient, twoDaysAgo);
   setPolicy(name, 'auto_merge', 'off', null, m.deps);
-  assert.equal(existsSync(tmp), false, 'the stale one is gone');
-  assert.equal(existsSync(fresh), true, 'an in-flight one is kept');
+  assert.equal(existsSync(killed), false, "a gone writer's is swept");
+  assert.equal(existsSync(stalled), true, "a live writer's, stalled, is kept (through ae00a348 a minute old was swept)");
+  assert.equal(existsSync(noPid), true, 'one with no pid is kept until a day old');
+  assert.equal(existsSync(ancient), false, 'anything a day old is swept');
+});
+
+/** A rename's stand-in directory for root's records, with lib.sh's own functions to run against it. */
+function renameDir(tag: string) {
+  const T = join(realpathSync(mkdtempSync(join(tmpdir(), `rename-${tag}-`))), 'policy-root');
+  mkdirSync(T, { mode: 0o755 });
+  const run = (script: string) => spawnSync('bash', ['-c', `source "$1"; POLICY_ROOT_DIR="$2"; own_policy() { :; }; ${script}`, '_', lib, T], { encoding: 'utf8' });
+  return { T, run };
+}
+/** setPolicy's OFF on a full filesystem (every create in root's directory failing): 'done', or the error. */
+function offOnFullDisk(name: string, deps: PolicyRootDeps): 'done' | Error {
+  const restore = fullDisk();
+  try {
+    setPolicy(name, 'auto_merge', 'off', null, deps);
+    return 'done';
+  } catch (e) {
+    return e as Error;
+  } finally {
+    restore();
+  }
+}
+
+test('OFF says done only when every name it reached that can still start is armed, and tries every name before it reports (#726 round 7)', { skip }, () => {
+  // A rename of an old name root never took over, its spare gone (or a rename started before rename_forward made
+  // one): on a full filesystem the old name can't be armed. It can still start (its user is there), so OFF fails,
+  // naming it, and the new name is armed all the same. (Through ae00a348 this said done, the old name left on.)
+  const { T, run } = renameDir('strict');
+  assert.equal(run('rename_forward olds news').status, 0);
+  run('rm -f "$POLICY_ROOT_DIR/olds.auto-merge-spare"');
+  const r = offOnFullDisk('olds', { uid: () => me, markerDir: T });
+  assert.ok(r instanceof Error, 'never done while olds can start with auto_merge on');
+  assert.match(r.message, /olds's auto_merge switch couldn't be armed .*so olds can still merge on its own.*policy set olds auto_merge off/);
+  assert.doesNotMatch(r.message, /news's/, 'only the name still on is named');
+  assert.equal(autoMergeKilled('news', T), true, 'every name tried before it reports: the new one is armed');
+  // The same OFF with room: done, both armed.
+  const { T: T2, run: run2 } = renameDir('strict-room');
+  assert.equal(run2('rename_forward olds news').status, 0);
+  setPolicy('olds', 'auto_merge', 'off', null, { uid: () => me, markerDir: T2 });
+  assert.equal(autoMergeKilled('olds', T2), true);
+  assert.equal(autoMergeKilled('news', T2), true);
+  // rename_forward gives the old name a spare too (root took it over or not), so on a full disk both are done.
+  const { T: T3, run: run3 } = renameDir('strict-spare');
+  assert.equal(run3('rename_forward olds news').status, 0);
+  assert.equal(existsSync(join(T3, 'olds.auto-merge-spare')), true);
+  assert.equal(offOnFullDisk('olds', { uid: () => me, markerDir: T3 }), 'done');
+  assert.equal(autoMergeKilled('olds', T3), true);
+  assert.equal(autoMergeKilled('news', T3), true);
+});
+
+test('--abort on a full filesystem: an OFF on the old name at each point either leaves it off at the end or fails visibly, never done with it on (#726 round 7)', { skip }, () => {
+  // The abort, as instance-rename.sh runs it (its order is held below): the forward ends; the new name's switches move
+  // back to the old name; the new name goes (instance-remove.sh's glob).
+  const points = ['before the abort', 'after the forward ends', 'after the move back', 'after the new name goes'];
+  for (const spare of [true, false]) {
+    for (const [i, point] of points.entries()) {
+      const { T, run } = renameDir(`abort${i}`);
+      assert.equal(run('rename_forward olda newa').status, 0);
+      // 1a: an old name with no spare (one root never took over, in a rename begun without one); 1b: with its spare.
+      if (!spare) run('rm -f "$POLICY_ROOT_DIR/olda.auto-merge-spare"');
+      const deps: PolicyRootDeps = { uid: (u) => (i >= 3 && u === 'wl-newa' ? null : me), markerDir: T };
+      const steps = ['rename_forward_done olda', 'move_auto_merge_off newa olda', 'rm -f "$POLICY_ROOT_DIR/newa".auto-merge-*'];
+      for (const s of steps.slice(0, i)) assert.equal(run(s).status, 0, s);
+      const r = offOnFullDisk('olda', deps);
+      for (const s of steps.slice(i)) assert.equal(run(s).status, 0, s);
+      const off = autoMergeKilled('olda', T);
+      assert.ok(off || r instanceof Error, `${spare ? '1b' : '1a'} ${point}: said done (${r}) and olda came back with auto_merge on`);
+      if (spare) {
+        assert.equal(r, 'done', `1b ${point}`);
+        assert.equal(off, true, `1b ${point}: olda is off`);
+      } else assert.match(String(r), /olda's auto_merge switch couldn't be armed/, `1a ${point}: fails visibly, naming olda`);
+    }
+  }
+  // An OFF during the rename, then the abort: the move back needs no space, and the old name ends off.
+  const { T, run } = renameDir('abort-after');
+  assert.equal(run('rename_forward oldb newb').status, 0);
+  assert.equal(offOnFullDisk('oldb', { uid: () => me, markerDir: T }), 'done');
+  run('rm -f "$POLICY_ROOT_DIR/oldb".auto-merge-off*'); // even with the old name's own switch lost: the new name's comes back
+  for (const s of ['rename_forward_done oldb', 'move_auto_merge_off newb oldb', 'rm -f "$POLICY_ROOT_DIR/newb".auto-merge-*']) {
+    const restore = fullDisk();
+    try {
+      assert.equal(run(s).status, 0, s);
+    } finally {
+      restore();
+    }
+  }
+  assert.equal(autoMergeKilled('oldb', T), true);
+  assert.equal(readdirSync(T).filter((f) => f.startsWith('newb.')).length, 0);
+});
+
+test("a forward record left behind (a stopped or killed rename, or naming no instance) never makes OFF refuse; inside the old name's removal, with its user gone, OFF reaches the new name (#726 round 7)", { skip }, () => {
+  // A stale record, the old name running again (its user there, its spare), the new name gone (no user, no spare).
+  {
+    const { T, run } = renameDir('stale');
+    assert.equal(run('rename_forward oldc newc').status, 0);
+    run('rm -f "$POLICY_ROOT_DIR/newc".auto-merge-*');
+    assert.equal(offOnFullDisk('oldc', { uid: (u) => (u === 'wl-newc' ? null : me), markerDir: T }), 'done');
+    assert.equal(autoMergeKilled('oldc', T), true);
+  }
+  // A record naming no instance there ever was.
+  {
+    const { T } = renameDir('ghost');
+    writeFileSync(join(T, 'oldd.auto-merge-spare'), '');
+    writeFileSync(join(T, 'oldd.rename-to'), 'nosuch\n');
+    assert.equal(offOnFullDisk('oldd', { uid: (u) => (u === 'wl-nosuch' ? null : me), markerDir: T }), 'done');
+    assert.equal(autoMergeKilled('oldd', T), true);
+  }
+  // Inside instance-remove.sh <old>: its user gone, then its switches (the glob), the record still there.
+  {
+    const { T, run } = renameDir('inremove');
+    assert.equal(run('rename_forward olde newe').status, 0);
+    run('rm -f "$POLICY_ROOT_DIR/olde".auto-merge-*');
+    const deps: PolicyRootDeps = { uid: (u) => (u === 'wl-olde' ? null : me), markerDir: T };
+    assert.equal(offOnFullDisk('olde', deps), 'done', 'not "no instance olde" (through ae00a348 it was)');
+    assert.equal(autoMergeKilled('newe', T), true, 'the new name, which runs, is off');
+    // Once the removal took the record too: nothing names olde, and saying so is the truth.
+    run('rm -f "$POLICY_ROOT_DIR/olde.rename-to"');
+    assert.throws(() => setPolicy('olde', 'auto_merge', 'off', null, deps), /no instance olde/);
+  }
+  // instance-remove.sh <name> removes root's forward records that name it, either way, and none other.
+  {
+    const { T, run } = renameDir('records');
+    writeFileSync(join(T, 'aaa.rename-to'), 'bbb\n');
+    writeFileSync(join(T, 'ccc.rename-to'), 'aaa\n');
+    writeFileSync(join(T, 'ddd.rename-to'), 'eee\n');
+    writeFileSync(join(T, 'fff.rename-to'), 'aaab\n');
+    const got = run('forward_records_of aaa');
+    assert.equal(got.status, 0);
+    assert.deepEqual(got.stdout.trim().split('\n').sort(), [join(T, 'aaa.rename-to'), join(T, 'ccc.rename-to')]);
+  }
+  const remove = spawnSync('cat', [join(repoRoot, 'scripts', 'setup', 'instance-remove.sh')], { encoding: 'utf8' }).stdout;
+  const items = remove.indexOf('for line in "${ITEMS[@]}"; do\n  IFS=$\'\\t\' read -r k w when _');
+  const records = remove.indexOf('done < <(forward_records_of "$name")');
+  const sweep = remove.indexOf('rm -f -- "$POLICY_ROOT_DIR/$name".auto-merge-*');
+  assert.ok(items > 0 && records > items && sweep > records, "instance-remove.sh: after its items (its users), the forward records, then any switch an OFF left inside the removal");
+  // The registry: the kill switches' glob goes after the instance's coordinator user, so while that user is there
+  // (the name can still start) an OFF still finds its switch or its spare.
+  const items2 = spawnSync(process.execPath, [join(repoRoot, 'scripts', 'setup', 'instance-records.cjs'), 'items', 'zed'], { encoding: 'utf8' }).stdout.split('\n');
+  const user = items2.findIndex((l) => l.startsWith('user\twl-zed\t') || l === 'user\twl-zed');
+  const glob = items2.findIndex((l) => l.startsWith('glob\t') &&l.includes('policy-root/zed.auto-merge-'));
+  assert.ok(user >= 0 && glob > user, `the switches' glob comes after wl-zed (${user}, ${glob})`);
+});
+
+test("doctor reports root's forward record of an instance (a rename stopped, or one a crash left) (#726 round 7)", { skip }, () => {
+  const name = 'fwddoc';
+  const m = machineInstance(name);
+  ownPolicy(name, m.deps);
+  writeFileSync(join(m.dir, 'instance.yaml'), `version: 1\nname: ${name}\nrepos:\n  - path: "x"\n    repo: example/${name}\n`);
+  const instances = join(m.home, '.local', 'state', BRAND.cli, 'instances');
+  assert.deepEqual(policyRootChecks(instances, { machine: true }).filter((c) => c.name.startsWith('rename record')), []);
+  writeFileSync(renameForwardPath(name), 'fwdnew\n');
+  const c = policyRootChecks(instances, { machine: true }).find((x) => x.name === `rename record ${name}`);
+  assert.equal(c?.level, 'warn');
+  assert.match(c!.detail, /fwddoc is being renamed to fwdnew, so auto_merge off for fwddoc turns fwdnew's off too.*--abort/);
 });

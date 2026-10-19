@@ -134,14 +134,18 @@ if [ -n "$abort" ]; then
   exec 9> "$ADD_PROJECT_LOCK"
   flock -n 9 || refuse "an add-project, instance-remove or instance-rename is running on this machine; wait for it to finish"
   say "abort: $new goes, $old's records and unit come back"
-  # An auto_merge off given during the rename armed the new name: it comes back with the old one, before the new one goes.
-  carry_auto_merge_off "$new" "$old"
+  # The forward ends first: from here an auto_merge off given to the old name arms the old name alone, and says done
+  # only once it is (src/policy-kill.ts). One given during the rename armed the new name too: moved back to the old
+  # name (no new space), before the new one goes. A move that fails stops here (errexit), before the new name's go.
+  rename_forward_done "$old"
+  move_auto_merge_off "$new" "$old"
   if done_step records; then records rekey "$new" "$old" "$ARCHIVE/$new-abort-$(date -u +%Y%m%dT%H%M%SZ).records.json"; [ ! -f "/var/lib/worklane/init/$old.json" ] || chgrp "wl-$old" "/var/lib/worklane/init/$old.json"; fi
   # <new> never ran: its history is <old>'s, exported already.
-  if done_step users; then flock -u 9; bash "$here/instance-remove.sh" "$new" --yes --exported "$(sed -n 's/^bundle=//p' "$progress" | tail -1)"; flock -n 9 || refuse "lost the lock"; fi
+  if done_step users; then flock -u 9; bash "$here/instance-remove.sh" "$new" --yes --exported "$(sed -n 's/^bundle=//p' "$progress" | tail -1)"; flock -n 9 || refuse "lost the lock"
+  # No user of <new>'s yet, so nothing of it runs: the spare rename_forward made for it goes (instance-remove.sh takes it otherwise).
+  else rm -f -- "$POLICY_ROOT_DIR/$new".auto-merge-*; fi
   if [ -f "$parked" ]; then mv -f "$parked" "$unit"; systemctl daemon-reload; echo "put back $unit ($old stays stopped: sudo systemctl start worklane-$old.service)"; fi
   rm -f "$progress"
-  rename_forward_done "$old"
   echo "aborted: $old is as it was, stopped; $new is gone"
   exit 0
 fi

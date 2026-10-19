@@ -581,21 +581,41 @@ auto_merge_killed() {
 # and again right before the old name's removal. An OFF given to the old name while the rename runs reaches the new name
 # through rename_forward instead (src/policy-kill.ts arms both). (Through 10ca8a1d this comment claimed the carries alone
 # covered any point of the rename; an OFF during step keep, or inside the old name's removal, wasn't carried.)
-# While a rename of $1 to $2 runs, root's forward record: an auto_merge off given to $1 arms $2's switch too, from $2's
-# spare (made here, so that OFF needs no new space). Written before the rename's first step; removed by
-# rename_forward_done once the old name's removal is done (its user, which OFF checks, goes last), or on --abort.
+# While a rename of $1 to $2 runs, root's forward record: an auto_merge off given to $1 arms $1's switch and $2's too,
+# each from its spare (both made here, so that OFF needs no new space, whether root took $1's policy over or not).
+# Written before the rename's first step; removed by instance-remove.sh $1 once $1's user is gone, and by
+# rename_forward_done after it; on --abort, first of all (before the carry back). (Through ae00a348, --abort removed it
+# last, so an OFF between its carry back and the new name's removal said done while the old name came back on.)
 rename_forward() {
   mkdir -p "$POLICY_ROOT_DIR" && chmod 0755 "$POLICY_ROOT_DIR"
+  [ -e "$POLICY_ROOT_DIR/$1.auto-merge-spare" ] || install -m 0644 /dev/null "$POLICY_ROOT_DIR/$1.auto-merge-spare"
   [ -e "$POLICY_ROOT_DIR/$2.auto-merge-spare" ] || install -m 0644 /dev/null "$POLICY_ROOT_DIR/$2.auto-merge-spare"
   printf '%s\n' "$2" > "$POLICY_ROOT_DIR/.$1.rename-to.tmp"
   chmod 0644 "$POLICY_ROOT_DIR/.$1.rename-to.tmp"
   mv -f "$POLICY_ROOT_DIR/.$1.rename-to.tmp" "$POLICY_ROOT_DIR/$1.rename-to"
 }
 rename_forward_done() { rm -f "$POLICY_ROOT_DIR/$1.rename-to"; }
+# Root's forward records that name instance $1, either way ($1.rename-to, and any whose new name is $1): gone with $1
+# (instance-remove.sh, once $1's users are), so none outlives the rename or removal that it was for.
+forward_records_of() {
+  local f
+  [ ! -e "$POLICY_ROOT_DIR/$1.rename-to" ] || echo "$POLICY_ROOT_DIR/$1.rename-to"
+  for f in "$POLICY_ROOT_DIR"/*.rename-to; do
+    if [ -f "$f" ] && [ "$(head -c 64 "$f" | tr -d '[:space:]')" = "$1" ]; then echo "$f"; fi
+  done
+  return 0
+}
 carry_auto_merge_off() {
   local f
   for f in "$POLICY_ROOT_DIR/$1".auto-merge-off*; do
     if [ -e "$f" ] || [ -L "$f" ]; then install -m 0644 /dev/null "$POLICY_ROOT_DIR/$2.auto-merge-off.from-$1${f#"$POLICY_ROOT_DIR/$1".auto-merge-off}"; fi
+  done
+}
+# The same, moving each switch (a rename: no new space) where $1 goes and never runs (--abort, before services).
+move_auto_merge_off() {
+  local f
+  for f in "$POLICY_ROOT_DIR/$1".auto-merge-off*; do
+    if [ -e "$f" ] || [ -L "$f" ]; then mv -f "$f" "$POLICY_ROOT_DIR/$2.auto-merge-off.from-$1${f#"$POLICY_ROOT_DIR/$1".auto-merge-off}"; fi
   done
 }
 # Never with a flag: the machine helper reaches this as root (add-project's rerun), so it takes over only what the
