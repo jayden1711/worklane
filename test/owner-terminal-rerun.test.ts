@@ -164,15 +164,22 @@ test("doctor: a value dashboards.sh would refuse gives only the placeholder, and
     ['a reserved instance name (wl-test-<x> is a test user)', with_({ hub: `test-${MARK}=/s` })],
     ['an option that is an Object prototype key', with_({ extra: 'constructor x' })],
   );
+  // Every case is checked, and every one that fails is named (not only the first).
+  const bad: string[] = [];
   for (const [what, text] of cases) {
     const { check, first } = doctorOn(text);
-    assert.equal(check?.level, 'fail', `${what}: doctor still fails`);
-    assert.ok(first.startsWith('run as root, once, with each <...> and [...] filled in from the ExecStart of /etc/systemd/system/'), `${what}: ${JSON.stringify(first)}`);
-    assert.ok(first.endsWith(`): ${OWNER_TERMINAL_RERUN}`), `${what}: the placeholder version, whole`);
-    assert.doesNotMatch(check!.detail, /--client-id '|--machine-devices '|-- '/, `${what}: no part of an exact command`);
-    assert.ok(!check!.detail.includes(MARK), `${what}: no unit text in doctor's output: ${JSON.stringify(check!.detail)}`);
-    assert.doesNotMatch(check!.detail, UNSAFE, `${what}: no control, backtick or non-ASCII character in doctor's output`);
+    const wrong = [
+      check?.level !== 'fail' && 'doctor does not fail',
+      !first.startsWith('run as root, once, with each <...> and [...] filled in from the ExecStart of /etc/systemd/system/') && 'not the placeholder',
+      !first.endsWith(`): ${OWNER_TERMINAL_RERUN}`) && 'not the whole placeholder',
+      /--client-id '|--machine-devices '|-- '/.test(check?.detail ?? '') && 'part of an exact command',
+      (check?.detail ?? '').includes(MARK) && 'unit text in the output',
+      UNSAFE.test(check?.detail ?? '') && 'a control, backtick or non-ASCII character in the output',
+    ].filter(Boolean);
+    if (wrong.length) bad.push(`${what}: ${wrong.join(', ')}`);
   }
+  assert.deepEqual(bad, [], `of ${cases.length} cases`);
+  assert.equal(cases.length, 29, 'every case ran');
 });
 
 test("the patterns doctor holds each printed value to are dashboards.sh's own, read from it", async () => {
