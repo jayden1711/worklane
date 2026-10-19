@@ -29,7 +29,7 @@ import { spawnSync } from 'node:child_process';
 import type { SizeFile } from '../pr-rules.js';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { attributeStateHides, isGitattributesPath, isGitmodulesPath, macrosDefined, OUTCOME_ATTRIBUTES, type ChangeFile } from '../review.js';
+import { attributeTransitionHides, isGitattributesPath, isGitmodulesPath, macrosDefined, OUTCOME_ATTRIBUTES, type ChangeFile } from '../review.js';
 
 const MAX_BUFFER = 256 * 1024 * 1024;
 
@@ -235,7 +235,8 @@ export function changeFiles(cwd: string, base: string, head: string): ChangeFile
 function attributeMacros(cwd: string, rev: string): string[] {
   const out: string[] = [];
   // -z: "mode SP type SP object TAB path NUL" for each file of the tree.
-  for (const rec of fields(must(runBytes(cwd, ['ls-tree', '-r', '-z', rev, '--'])))) {
+  // --full-tree: the whole tree, whatever directory `cwd` is in.
+  for (const rec of fields(must(runBytes(cwd, ['ls-tree', '-r', '-z', '--full-tree', rev, '--'])))) {
     const tab = rec.indexOf(9);
     const [, type, sha] = rec.subarray(0, tab).toString('latin1').split(' ');
     if (type !== 'blob' || !sha || !isGitattributesPath(rec.subarray(tab + 1).toString('latin1'))) continue;
@@ -275,7 +276,8 @@ function infoAttributesInUse(cwd: string): boolean {
 
 /** Every path of `rev`'s tree, as bytes keyed by their latin1 reading (`ls-tree -r -z --name-only`). */
 function treePaths(cwd: string, rev: string): Map<string, Buffer> {
-  return new Map(fields(must(runBytes(cwd, ['ls-tree', '-r', '-z', '--name-only', rev, '--']))).filter((b) => b.length).map((b) => [b.toString('latin1'), b]));
+  // --full-tree: every path from the top, whatever directory `cwd` is in (a subdirectory would list only its own).
+  return new Map(fields(must(runBytes(cwd, ['ls-tree', '-r', '-z', '--full-tree', '--name-only', rev, '--']))).filter((b) => b.length).map((b) => [b.toString('latin1'), b]));
 }
 
 /**
@@ -302,12 +304,16 @@ function attributeStates(cwd: string, rev: string, paths: Buffer[]): Map<string,
 /**
  * What a change does to attributes, as git itself judges it (the outcome check, #693): every path of either tree (a
  * deletion, an addition and both sides of a rename included) is asked of the base tree and of the head tree, and each
- * attribute whose state differs and now hides the file (review.ts attributeStateHides) is listed (`path: diff
- * unspecified -> unset`). git parses the .gitattributes, so no line format of ours can disagree with it: macros, quoting,
+ * attribute whose change from base to head can make a review see less (review.ts attributeTransitionHides: a forced
+ * `diff` left, for one) is listed (`path: diff unspecified -> unset`). git parses the .gitattributes, so no line format of ours can disagree with it: macros, quoting,
  * BOMs and whitespace are all git's. null when git can't judge (older than MIN_GIT_FOR_ATTRIBUTE_SOURCE, a rule in
  * `$GIT_DIR/info/attributes`, or a failure), which review.ts counts as hiding.
  */
-export function attributeOutcome(cwd: string, base: string, head: string): string[] | null {
+export function attributeOutcome(at: string, base: string, head: string): string[] | null {
+  // From the top of the work tree: check-attr reads its paths relative to the directory it runs in.
+  const cdup = runStatus(at, ['rev-parse', '--show-cdup']);
+  if (cdup.status !== 0) return null;
+  const cwd = resolve(at, cdup.stdout.trim());
   const v = gitVersion(cwd);
   const [major, minor] = MIN_GIT_FOR_ATTRIBUTE_SOURCE;
   if (!v || v[0] < major || (v[0] === major && v[1] < minor)) return null;
@@ -323,7 +329,7 @@ export function attributeOutcome(cwd: string, base: string, head: string): strin
     for (const attr of OUTCOME_ATTRIBUTES) {
       const was = before.get(key)?.get(attr) ?? 'unspecified';
       const now = after.get(key)?.get(attr) ?? 'unspecified';
-      if (now === was || !attributeStateHides(attr, now)) continue;
+      if (!attributeTransitionHides(attr, was, now)) continue;
       // The first OUTCOME_SHOWN, then a count: a `*` mark on a big tree hides every path (100,000 measured).
       if (out.length < OUTCOME_SHOWN) out.push(`${nameOf(bytes)}: ${attr} ${was} -> ${now}`);
       else more++;
