@@ -6,6 +6,7 @@ import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmdirSync,
 import { join, resolve } from 'node:path';
 import { BRAND } from './brand.js';
 import { checkoutSparse } from './checkout.js';
+import { redactString } from './events/redact.js';
 import { groupOnlyDir, projectCommand, writeGroupOnly } from './os/index.js';
 
 export interface WorktreeOptions {
@@ -158,7 +159,7 @@ export async function createWorktreeAsync(o: WorktreeOptions, name: string, bran
         resolve({ status, stderr });
       });
     });
-    if (r.status !== 0) setupErrors.push(`${step}: exit ${r.status} ${r.stderr.trim().split('\n').pop() ?? ''}`);
+    if (r.status !== 0) setupErrors.push(`${step}: exit ${r.status} ${redactString(r.stderr).trim().split('\n').pop() ?? ''}`);
   }
   return { path, setupErrors };
 }
@@ -170,7 +171,8 @@ export function createWorktree(o: WorktreeOptions, name: string, branch: string,
   for (const step of o.setup) {
     const { file, args, env } = projectCommand(step, o.runAs, { ...o.env, ...o.cacheEnv });
     const r = spawnSync(file, args, { cwd: path, encoding: 'utf8', env, timeout: 900_000 });
-    if (r.status !== 0) setupErrors.push(`${step}: exit ${r.status} ${(r.stderr || '').trim().split('\n').pop() ?? ''}`);
+    // A setup step's words go into events and prompts: credential-shaped text redacted (#713).
+    if (r.status !== 0) setupErrors.push(`${step}: exit ${r.status} ${redactString(r.stderr || '').trim().split('\n').pop() ?? ''}`);
   }
   return { path, setupErrors };
 }

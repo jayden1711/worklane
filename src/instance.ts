@@ -222,7 +222,7 @@ export type CredentialsFile = z.infer<typeof CredentialsFile>;
 
 export interface Instance {
   name: string;
-  runAs: { user: string; home: string; claudeConfigDir?: string; path?: string } | null;
+  runAs: { user: string; home: string; claudeConfigDir?: string; path?: string; hide?: readonly string[] } | null;
   /** Set in instance.yaml; otherwise resolved at start (the App's bot identity). */
   commitIdentity?: { name: string; email: string };
   evalAs: { user: string; home: string; path?: string } | null;
@@ -299,7 +299,8 @@ export function loadInstance(instanceName: string, dir = instancesDir()): Instan
     throw new ConfigInvalid([{ file: join(home, 'instance.yaml'), path: 'run_as.eval_user', message: 'a lane runs as eval, so set eval_user and eval_home' }]);
   }
   const path = inst.run_as?.path ?? defaultAgentPath();
-  const runAs = inst.run_as ? { user: inst.run_as.agent_user, home: inst.run_as.agent_home, path, ...(inst.run_as.claude_config_dir ? { claudeConfigDir: inst.run_as.claude_config_dir } : {}) } : null;
+  const ccd = inst.run_as?.claude_config_dir;
+  const runAs = inst.run_as ? { user: inst.run_as.agent_user, home: inst.run_as.agent_home, path, ...(ccd ? { claudeConfigDir: ccd } : {}), hide: projectCommandHides(home, repo.path, credentials, ccd) } : null;
   let evalAs: { user: string; home: string; path: string } | null = null;
   if (inst.run_as?.eval_user) {
     const evalHome = inst.run_as.eval_home ?? resolveHome(inst.run_as.eval_user);
@@ -485,8 +486,20 @@ export function loadInstanceSetup(instanceName: string, dir = instancesDir()): {
   const policy = readYaml(PolicyFile, join(home, 'policy.yaml'), errors);
   const credentials = readYaml(CredentialsFile, join(home, 'credentials.yaml'), errors);
   if (errors.length || !inst || !policy || !credentials) throw new ConfigInvalid(errors);
-  const runAs = inst.run_as ? { user: inst.run_as.agent_user, home: inst.run_as.agent_home, path: inst.run_as.path ?? defaultAgentPath() } : null;
-  return { home, stateDir: join(home, 'state'), repo: { ...inst.repos[0]!, path: resolve(home, inst.repos[0]!.path) }, credentials, policy, runAs };
+  const repoPath = resolve(home, inst.repos[0]!.path);
+  const runAs = inst.run_as ? { user: inst.run_as.agent_user, home: inst.run_as.agent_home, path: inst.run_as.path ?? defaultAgentPath(), hide: projectCommandHides(home, repoPath, credentials, inst.run_as.claude_config_dir) } : null;
+  return { home, stateDir: join(home, 'state'), repo: { ...inst.repos[0]!, path: repoPath }, credentials, policy, runAs };
+}
+
+/**
+ * The paths a project command run as the agent user never sees, beyond the agent's own ~/.claude* (src/os
+ * projectCommand hides those itself): the instance home (the coordinator's), a Claude config dir set elsewhere, and
+ * every credential file credentials.yaml names. Never a directory that holds the checkout: its commands run there.
+ */
+export function projectCommandHides(instanceHome: string, repoPath: string, c: CredentialsFile, claudeConfigDir?: string): string[] {
+  const named = [instanceHome, claudeConfigDir, c.github.kind === 'app' ? c.github.key_path : c.github.path, c.claude?.config_dir, c.eval_key, c.agent_api_key, ...Object.values(c.provider_keys ?? {}), ...Object.values(c.intake ?? {})];
+  const holdsRepo = (p: string) => repoPath === p || repoPath.startsWith(p.endsWith('/') ? p : `${p}/`);
+  return [...new Set(named.filter((p): p is string => typeof p === 'string' && isAbsolute(p)).map((p) => resolve(p)))].filter((p) => !holdsRepo(p));
 }
 
 /** How an instance's GitHub App was made, as its setup recorded it (beside the App's key): the manifest flow, or by hand. */

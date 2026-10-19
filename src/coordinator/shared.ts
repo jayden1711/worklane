@@ -8,6 +8,7 @@ import { type Backlog, type Issue } from '../backlog/types.js';
 import { claim, release } from '../claims.js';
 import type { EventLog } from '../events/log.js';
 import type { EventPayload } from '../events/types.js';
+import { redactString } from '../events/redact.js';
 import type { SuiteOptions } from '../harness-evals/replay.js';
 import { killTree, killTreeAs, projectCommand, spawnDetached } from '../os/index.js';
 import { type AgentRunner, type CommitIdentity, type RunAs, type RunControl } from '../runner.js';
@@ -222,7 +223,9 @@ export function sh(command: string, cwd: string, timeoutMs = COMMAND_TIMEOUT_MS,
     const finish = (code: number | null) => {
       clearTimeout(timer);
       signal?.removeEventListener('abort', kill);
-      resolveRun({ code: timedOut ? null : code, tail: out.trim().split('\n').slice(-20).join('\n'), out });
+      // Project code printed it: credential-shaped text never reaches an event or a prompt (#713).
+      const clean = redactString(out);
+      resolveRun({ code: timedOut ? null : code, tail: clean.trim().split('\n').slice(-20).join('\n'), out: clean });
     };
     child.on('error', () => finish(null));
     child.on('close', (code) => finish(code));

@@ -10,6 +10,7 @@ import { join } from 'node:path';
 import { childEnv, machineLoad, pidAlive, projectCommand } from './os/index.js';
 import { fullRunLock } from './slots.js';
 import { EventLog } from './events/log.js';
+import { redactString } from './events/redact.js';
 import { recordBaseline } from './baseline.js';
 import { removeWorktree } from './worktrees.js';
 
@@ -36,8 +37,8 @@ export interface Job {
     cleanup?: { repo: string; root: string; stateDir: string; name: string };
   };
   result?: string;
-  /** The project's suite runs agent-written code: as the instance's agent user, when there is one. */
-  runAs?: { user: string; home: string };
+  /** The project's suite runs agent-written code: as the instance's agent user, when there is one, in its sandbox. */
+  runAs?: { user: string; home: string; path?: string; hide?: readonly string[] };
 }
 
 const jobsDir = (stateDir: string) => join(stateDir, 'jobs');
@@ -127,7 +128,8 @@ export async function runJob(stateDir: string, id: string, pollMs = 30_000): Pro
         const b = job.after.baseline;
         const log = new EventLog(b.eventsDb);
         try {
-          const r = recordBaseline(log, b.actor, b.sha, code, readFileSync(job.log, 'utf8'), { section: b.section, item: b.item });
+          // The suite's output is project code's: credential-shaped text redacted before it is read into events (#713).
+          const r = recordBaseline(log, b.actor, b.sha, code, redactString(readFileSync(job.log, 'utf8')), { section: b.section, item: b.item });
           // A red baseline run is the expected case: the job succeeded if the baseline was recorded.
           update(r.ok ? { status: 'passed', result: `baseline recorded at ${b.sha.slice(0, 8)}: ${r.failing.length} failing` } : { status: 'error', result: `baseline NOT recorded: ${r.why}` });
         } finally {

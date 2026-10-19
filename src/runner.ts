@@ -238,6 +238,8 @@ export interface RunAs {
   claudeConfigDir?: string;
   /** PATH for project commands run as this user (instance.yaml run_as.path; default: defaultAgentPath()). */
   path?: string;
+  /** What project commands run as this user never see, besides its Claude logins (projectCommandHides, src/instance.ts). */
+  hide?: readonly string[];
 }
 
 /**

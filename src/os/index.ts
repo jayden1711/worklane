@@ -590,12 +590,6 @@ export function asUser(user: string, file: string, args: string[], env: NodeJS.P
 }
 
 /**
- * How to spawn a project command (a check, a test suite, a setup step):
- * under bash with pipefail, and as the instance's agent user when there is
- * one, with a clean environment. Project commands run code agents wrote, so
- * they never run as the user that holds the instance's credentials.
- */
-/**
  * A command wrapped to record its largest single process's peak memory (a test worker's), where the OS can:
  * GNU time on Linux writes the peak resident size in KB to `outFile`. Elsewhere the command is unchanged and
  * nothing is recorded (peakMemoryMb then reads null).
@@ -664,10 +658,53 @@ export function homeOf(user: string, platform: NodeJS.Platform = process.platfor
   return null;
 }
 
-export function projectCommand(command: string, runAs?: { user: string; home: string; path?: string }, projectEnv: Record<string, string> = {}): { file: string; args: string[]; env: NodeJS.ProcessEnv } {
+/** Bubblewrap at its fixed, root-owned path: never PATH's, where a directory the agent user can write could hold a fake. */
+export const PROJECT_SANDBOX_TOOL = '/usr/bin/bwrap';
+/** The exit code of a project command whose sandbox couldn't start: nothing of the command ran. */
+export const SANDBOX_UNAVAILABLE = 125;
+export const SANDBOX_FIX = 'install bubblewrap and its AppArmor rule with scripts/setup/machine.sh, then check with scripts/setup/check.sh <name>';
+
+// Run as the agent user, before any project code: hides each path given (after `--` comes the command) and every
+// ~/.claude* login, profile and settings file and ~/.config/*-claude-key (credentials.sh's API key), each resolved
+// through its symlinks: an empty tmpfs over a directory, /dev/null over a file. Its own PID namespace and /proc, so no
+// process outside it (a `claude` holding a login) can be read through /proc/<pid>. The devices and network stay
+// (GPU checks, installs). A tool that can't start is refused with SANDBOX_UNAVAILABLE, before the command runs.
+const LINUX_SANDBOX = [
+  'b=$1 h=$2; shift 2; hide=()',
+  'add() { local r; r=$(PATH=/usr/bin:/bin readlink -f -- "$1" 2>/dev/null) || return 0',
+  '  if [ -d "$r" ]; then hide+=(--tmpfs "$r"); elif [ -e "$r" ]; then hide+=(--ro-bind /dev/null "$r"); fi; }',
+  'for p in "$h"/.claude* "$h"/.config/*-claude-key; do add "$p"; done',
+  'while [ "$#" -gt 0 ] && [ "$1" != -- ]; do add "$1"; shift; done; shift',
+  'box=(--dev-bind / / --unshare-user --unshare-pid --die-with-parent --proc /proc)',
+  `if ! err=$("$b" "\${box[@]}" -- /bin/sh -c : 2>&1); then printf '%s\\n' "project command not run: its sandbox didn't start ($err); ${SANDBOX_FIX}" >&2; exit ${SANDBOX_UNAVAILABLE}; fi`,
+  'exec "$b" "${box[@]}" "${hide[@]}" -- "$@"',
+].join('\n');
+
+/** macOS's sandbox profile for a project command: everything allowed but reading or writing the hidden paths. */
+export function seatbeltProfile(home: string, hide: readonly string[]): string {
+  const bad = [home, ...hide].find((p) => !/^\/[^"\\\n]*$/.test(p));
+  if (bad !== undefined) throw new Error(`can't sandbox a project command around ${JSON.stringify(bad)}: not a plain absolute path`);
+  const re = (s: string) => s.replace(/[.*+?^$()[\]{}|]/g, '\\$&');
+  const h = re(home.replace(/\/$/, ''));
+  const rules = [`(regex #"^${h}/\\.claude")`, `(regex #"^${h}/\\.config/[^/]*-claude-key(/|$)")`, ...hide.map((p) => `(subpath "${p}")`)];
+  return `(version 1)\n(allow default)\n(deny file-read* file-write* ${rules.join(' ')})\n`;
+}
+
+/**
+ * How to spawn a project command (a check, a test suite, a setup step, a full run, an app): under bash with pipefail,
+ * with a clean environment. With `runAs`, as the instance's agent user and always inside a sandbox that hides the
+ * agent's Claude logins and profiles, its API key and every path in `runAs.hide` (issue #713): Linux's bubblewrap,
+ * macOS's sandbox-exec. There is no way to run one as the agent user without it; `sandboxTool` is for tests.
+ */
+export function projectCommand(command: string, runAs?: { user: string; home: string; path?: string; hide?: readonly string[] }, projectEnv: Record<string, string> = {}, o: { sandboxTool?: string } = {}): { file: string; args: string[]; env: NodeJS.ProcessEnv } {
   const [file, args] = shellCommand(command);
   const own = safeProjectEnv(projectEnv);
   if (!runAs) return { file, args, env: childEnv(own) };
+  const hide = (runAs.hide ?? []).filter((p) => p.startsWith('/'));
+  if (!runAs.home.startsWith('/')) throw new Error(`the agent user's home must be an absolute path: ${runAs.home}`);
+  if (process.platform !== 'linux' && process.platform !== 'darwin') throw new Error('running a project command as the agent user needs macOS or Linux, for its sandbox');
+  const boxed: [string, string[]] =
+    process.platform === 'darwin' ? ['/usr/bin/sandbox-exec', ['-p', seatbeltProfile(runAs.home, hide), file, ...args]] : [file, ['-c', LINUX_SANDBOX, 'sandbox', o.sandboxTool ?? PROJECT_SANDBOX_TOOL, runAs.home, ...hide, '--', file, ...args]];
   const env = {
     ...own,
     HOME: runAs.home,
@@ -686,7 +723,7 @@ export function projectCommand(command: string, runAs?: { user: string; home: st
     GIT_CONFIG_VALUE_1: '*',
   };
   // INVARIANT: a proxy only from root's network.json, as for every child (src/network.ts).
-  const [f, a] = asUser(runAs.user, file, args, outboundEnv(env));
+  const [f, a] = asUser(runAs.user, boxed[0], boxed[1], outboundEnv(env));
   return { file: f, args: a, env: { PATH: process.env.PATH ?? '/usr/bin:/bin' } };
 }
 

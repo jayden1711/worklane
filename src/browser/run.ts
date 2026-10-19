@@ -9,6 +9,7 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { AppConfig, FlowStep } from '../config/schema.js';
+import { redactString } from '../events/redact.js';
 import { killTree, killTreeAs, projectCommand, spawnDetached } from '../os/index.js';
 import { browserTimeouts, findChrome, launchChrome, portInUse, sleep, stopTree, track, until, type Cdp } from './cdp.js';
 import { targetExpr } from './targets.js';
@@ -221,7 +222,8 @@ export async function runFlow(o: { app: AppConfig; flow: string; cwd: string; ou
       o.app.start.ready.timeout_s * 1000,
       250,
     ).catch((e: Error) => {
-      throw new Error(`${e.message}\nthe app said:\n${appOut.trim().split('\n').slice(-20).join('\n') || '(nothing)'}`);
+      // The app's words are project code's: credential-shaped text redacted before any event or prompt (#713).
+      throw new Error(`${e.message}\nthe app said:\n${redactString(appOut).trim().split('\n').slice(-20).join('\n') || '(nothing)'}`);
     });
     ev = await drive({ ...o, chrome, steps, base, allow: isLocal, t0 });
     return ev;
