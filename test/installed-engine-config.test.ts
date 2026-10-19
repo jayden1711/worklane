@@ -109,29 +109,51 @@ function fixture() {
   const pin = (tag: string, commit: string) => onMain({ 'scripts/bootstrap.sh': bootFor(tag, commit) });
   /** A PR: `files` committed on main's tip, as its merge commit would carry them. */
   const pr = (files: Record<string, string>) => commitOn('main', files, 'pr');
-  const run = (head: string, base = 'main') => {
-    const r = spawnSync(process.execPath, [SCRIPT, '--base', base, '--head', head], { cwd: repo, env, encoding: 'utf8' });
+  const run = (head: string, base = 'main', extra: Record<string, string> = {}, args: string[] = []) => {
+    const r = spawnSync(process.execPath, [SCRIPT, '--base', base, '--head', head, ...args], { cwd: repo, env: { ...env, ...extra }, encoding: 'utf8' });
     return { code: r.status, out: r.stdout + r.stderr };
   };
-  /** The workflow's own step, as Actions runs it, on the merge commit `head` (HEAD^1 its base) in the fixture. */
-  const runStep = (head: string, step: string) => {
+  /**
+   * The workflow's job, as Actions runs its `run:` steps in order, on the merge commit `head` (HEAD^1 its base) in the
+   * fixture: one RUNNER_TEMP, each step's own `env:` (the token rendered as `token`, the PR as 7), and the job stops at
+   * the first step that fails.
+   */
+  const runSteps = (head: string, steps: { run?: string; env?: Record<string, string> }[], token = '') => {
     sh('git', ['checkout', '-q', '--detach', head]);
     const runnerTemp = mkdtempSync(join(dir, 'runner-'));
-    const r = spawnSync('bash', ['--noprofile', '--norc', '-eo', 'pipefail', '-c', step], { cwd: repo, env: { ...env, RUNNER_TEMP: runnerTemp, PATH: `${dirname(process.execPath)}:${process.env.PATH ?? ''}` }, encoding: 'utf8' });
-    return { code: r.status, out: r.stdout + r.stderr };
+    const render = (v: string) => v.replace('${{ github.token }}', token).replace('${{ github.event.pull_request.number }}', '7');
+    let out = '';
+    for (const s of steps.filter((x) => x.run)) {
+      const stepEnv = Object.fromEntries(Object.entries(s.env ?? {}).map(([k, v]) => [k, render(String(v))]));
+      const r = spawnSync('bash', ['--noprofile', '--norc', '-eo', 'pipefail', '-c', s.run!], { cwd: repo, env: { ...env, ...stepEnv, RUNNER_TEMP: runnerTemp, PATH: `${dirname(process.execPath)}:${process.env.PATH ?? ''}` }, encoding: 'utf8' });
+      out += r.stdout + r.stderr;
+      if (r.status !== 0) return { code: r.status, out };
+    }
+    return { code: 0, out };
   };
-  /** The same run, not blocking this process, so a stand-in GitHub API served from it can answer. */
+  /**
+   * A run as the workflow makes it, not blocking this process so a stand-in GitHub API served from it can answer: the
+   * label step (`--read-rollback-label`, with the API's token), then the engine step (`--rollback-verdict`, no token).
+   */
   const runAsync = (head: string, extra: Record<string, string>, base = 'main') =>
     new Promise<{ code: number | null; out: string }>((resolve) => {
-      const c = spawn(process.execPath, [SCRIPT, '--base', base, '--head', head], { cwd: repo, env: { ...env, ...extra } });
+      const verdict = join(mkdtempSync(join(dir, 'verdict-')), 'rollback.json');
+      const c = spawn(process.execPath, [SCRIPT, '--read-rollback-label', verdict], { cwd: repo, env: { ...env, ...extra } });
       let out = '';
       c.stdout.on('data', (d) => (out += d));
       c.stderr.on('data', (d) => (out += d));
-      c.on('close', (code) => resolve({ code, out }));
+      c.on('close', () => {
+        const r = run(head, base, {}, ['--rollback-verdict', verdict]);
+        resolve({ code: r.code, out: out + r.out });
+      });
     });
   const done = () => rmSync(dir, { recursive: true, force: true });
-  return { repo, owner, stranger, signersFor, sh, release, onMain, pin, pr, run, runAsync, runStep, done };
+  return { repo, owner, stranger, signersFor, sh, release, onMain, pin, pr, run, runAsync, runSteps, done };
 }
+
+type Step = { name?: string; uses?: string; run?: string; if?: unknown; env?: Record<string, string> };
+/** The workflow's job steps, as the file has them. */
+const jobSteps = () => (parse(workflow()) as { jobs: Record<string, { steps: Step[] }> }).jobs['installed-engine-config']!.steps;
 
 /**
  * A stand-in GitHub API for one PR (repo-owner/engine #7): its timeline and its current labels, as `state` says at
@@ -478,30 +500,74 @@ test("a rollback passes only with the repository owner's engine-rollback label, 
 
 test("the workflow's step judges a moved pin with the base's copy of the check's script", { skip }, () => {
   const f = fixture();
-  const steps = (parse(workflow()) as { jobs: Record<string, { steps: { run?: string }[] }> }).jobs['installed-engine-config']!.steps;
-  const step = steps.find((s) => s.run?.includes('installed-engine-config.mjs'))!.run!;
+  const steps = jobSteps();
   f.onMain({ ...checkScripts(), '.worklane/config.yaml': 'name: demo\nrequired_checks: [test]\n' });
   f.pin('v1.0.0', f.release('v1.0.0', ['name', 'required_checks'], f.owner));
   const v2 = f.release('v1.1.0', ['name'], f.owner);
-  const r = f.runStep(f.pr({ 'scripts/bootstrap.sh': bootFor('v1.1.0', v2), 'scripts/ci/installed-engine-config.mjs': 'process.exit(0);\n' }), step);
+  const r = f.runSteps(f.pr({ 'scripts/bootstrap.sh': bootFor('v1.1.0', v2), 'scripts/ci/installed-engine-config.mjs': 'process.exit(0);\n' }), steps);
   refused(r, /Unrecognized key: "required_checks"[\s\S]*refused by the engine this change pins, v1\.1\.0/);
   // Nor can it change how the pin is read.
   const lib = 'export const readPin = () => ({ tag: "v1.0.0", commit: "" });\nexport const writePin = () => "";\nexport const releaseProblem = () => null;\n';
-  refused(f.runStep(f.pr({ 'scripts/bootstrap.sh': bootFor('v1.1.0', v2), 'scripts/lib/engine-pin.mjs': lib }), step), /refused by the engine this change pins, v1\.1\.0/);
+  refused(f.runSteps(f.pr({ 'scripts/bootstrap.sh': bootFor('v1.1.0', v2), 'scripts/lib/engine-pin.mjs': lib }), steps), /refused by the engine this change pins, v1\.1\.0/);
+  // A rollback through the job's steps: the label step reads nothing it can use (no API here), so the engine step
+  // refuses, naming the verdict it was handed.
+  const v09 = f.release('v0.9.0', ['name', 'required_checks'], f.owner);
+  refused(f.runSteps(f.pr({ 'scripts/bootstrap.sh': bootFor('v0.9.0', v09) }), steps, 'stand-in-token'), /older than v1\.0\.0[\s\S]*can't read the PR's labels/);
   f.done();
+});
+
+test('the token stays in the label step: the step that loads an engine refuses to hold one, and gets only the verdict', { skip }, async () => {
+  const f = fixture();
+  const v11 = f.release('v1.1.0', ['name'], f.owner);
+  const v12 = f.release('v1.2.0', ['name'], f.owner);
+  f.pin('v1.2.0', v12);
+  const back = f.pr({ 'scripts/bootstrap.sh': bootFor('v1.1.0', v11) });
+  // The engine step with a token in its environment: refused before anything is read or fetched.
+  for (const name of ['GITHUB_TOKEN', 'GH_TOKEN']) refused(f.run(back, 'main', { [name]: 'stand-in-token' }), new RegExp(`this step loads an engine, so it must not hold a GitHub token \\(${name} is set\\)`));
+  // The label step writes only a verdict, and fetches no engine.
+  const api = await fakeApi({ timeline: [labelEvent('labeled', 'repo-owner', '2026-10-19T10:00:00Z')], labels: ['engine-rollback'] });
+  try {
+    const verdict = join(mkdtempSync(join(tmpdir(), 'verdict-')), 'rollback.json');
+    const r = await new Promise<{ code: number | null; out: string }>((resolve) => {
+      const c = spawn(process.execPath, [SCRIPT, '--read-rollback-label', verdict], { cwd: f.repo, env: { HOME: f.repo, GH_TOKEN: '', ...api.env, PATH: dirname(process.execPath) } });
+      let out = '';
+      c.stdout.on('data', (d) => (out += d));
+      c.stderr.on('data', (d) => (out += d));
+      c.on('close', (code) => resolve({ code, out }));
+    });
+    assert.equal(r.code, 0, r.out);
+    assert.doesNotMatch(r.out, /verified|loads with/, 'no engine in the label step');
+    const v = JSON.parse(readFileSync(verdict, 'utf8')) as Record<string, unknown>;
+    assert.deepEqual(Object.keys(v).sort(), ['line', 'ok', 'reason']);
+    assert.equal(v.ok, true);
+    assert.match(String(v.line), /was last applied by @repo-owner \(the repository owner\) at 2026-10-19T10:00:00Z/);
+    assert.doesNotMatch(readFileSync(verdict, 'utf8'), /stand-in-token/, 'the token is never in the verdict');
+    // The engine step reads it, with no token, and lets the rollback through.
+    const ok = f.run(back, 'main', {}, ['--rollback-verdict', verdict]);
+    assert.equal(ok.code, 0, ok.out);
+    assert.match(ok.out, /rollback allowed: engine-rollback on PR #7 was last applied by @repo-owner/);
+    // A verdict file that is missing, unreadable or not a verdict: no override.
+    for (const body of [null, '', 'not json', '{"ok":"yes","line":"x","reason":""}', '{"ok":true}']) {
+      const file = join(mkdtempSync(join(tmpdir(), 'verdict-')), 'rollback.json');
+      if (body !== null) writeFileSync(file, body);
+      refused(f.run(back, 'main', {}, ['--rollback-verdict', file]), /can't read the PR's labels: no usable rollback verdict/);
+    }
+  } finally {
+    await api.close();
+    f.done();
+  }
 });
 
 test("the workflow's step runs the base's copy of the check's script: a PR that rewrites the script to pass is still refused", { skip }, () => {
   const f = fixture();
-  const steps = (parse(workflow()) as { jobs: Record<string, { steps: { run?: string }[] }> }).jobs['installed-engine-config']!.steps;
-  const step = steps.find((s) => s.run?.includes('installed-engine-config.mjs'))!.run!;
+  const steps = jobSteps();
   f.onMain(checkScripts());
   f.pin('v1.0.0', f.release('v1.0.0', ['name'], f.owner));
   const bad = { '.worklane/config.yaml': 'name: demo\nrequired_check_sources: {}\n' };
-  const r = f.runStep(f.pr({ ...bad, 'scripts/ci/installed-engine-config.mjs': 'process.exit(0);\n' }), step);
+  const r = f.runSteps(f.pr({ ...bad, 'scripts/ci/installed-engine-config.mjs': 'process.exit(0);\n' }), steps);
   refused(r, /Unrecognized key: "required_check_sources"[\s\S]*refused by the installed engine v1\.0\.0/);
-  // A valid change passes through the same step.
-  const ok = f.runStep(f.pr({ '.worklane/config.yaml': 'name: other\n' }), step);
+  // A valid change passes through the same steps.
+  const ok = f.runSteps(f.pr({ '.worklane/config.yaml': 'name: other\n' }), steps);
   assert.equal(ok.code, 0, ok.out);
   assert.match(ok.out, /loads with the installed engine v1\.0\.0/);
   f.done();
@@ -519,11 +585,22 @@ test("the workflow runs the check on every pull request that changes .worklane/ 
   assert.deepEqual(wf.permissions, { contents: 'read', issues: 'read', 'pull-requests': 'read' });
   const job = wf.jobs['installed-engine-config']!;
   assert.equal(job.if, undefined, 'no condition on the job');
-  const steps = job.steps.filter((s) => s.run?.includes('installed-engine-config.mjs')) as { run?: string; if?: unknown; env?: Record<string, string> }[];
-  assert.equal(steps.length, 1);
-  assert.equal(steps[0]!.if, undefined, 'no condition on the step');
-  assert.deepEqual(steps[0]!.env, { GITHUB_TOKEN: '${{ github.token }}', PR_NUMBER: '${{ github.event.pull_request.number }}' }, "the workflow's own read-only token and the PR's number, nothing else");
-  assert.match(steps[0]!.run!, /git archive HEAD\^1 scripts/, "the base's copy of the check");
-  assert.match(steps[0]!.run!, /--base HEAD\^1 --head HEAD/);
+  assert.equal((job as { env?: unknown }).env, undefined, 'nothing set for every step of the job');
+  const steps = jobSteps();
+  for (const s of steps) assert.equal(s.if, undefined, `no condition on ${s.name ?? s.uses}`);
+  const label = steps.filter((s) => s.run?.includes('--read-rollback-label'));
+  const engine = steps.filter((s) => s.run?.includes('--base HEAD^1 --head HEAD'));
+  assert.equal(label.length, 1, 'one step reads the rollback label');
+  assert.equal(engine.length, 1, 'one step loads the engines');
+  assert.ok(steps.indexOf(label[0]!) < steps.indexOf(engine[0]!), 'the label is read first');
+  // The token: in the label step only, which runs no engine. The engine step gets only the verdict file.
+  assert.deepEqual(label[0]!.env, { GITHUB_TOKEN: '${{ github.token }}', PR_NUMBER: '${{ github.event.pull_request.number }}' }, "the workflow's own read-only token and the PR's number, nothing else");
+  assert.doesNotMatch(label[0]!.run!, /--base|--head/, 'the label step loads no engine');
+  assert.equal(engine[0]!.env, undefined, 'the engine step has no env of its own: no token');
+  assert.doesNotMatch(engine[0]!.run!, /token|secrets\.|GITHUB_TOKEN|GH_TOKEN/i, 'nor in its script');
+  assert.match(engine[0]!.run!, /--rollback-verdict "\$RUNNER_TEMP\/rollback\.json"/);
+  for (const s of [...label, ...engine]) assert.match(s.run!, /git archive HEAD\^1 scripts/, "the base's copy of the check");
+  for (const s of steps.filter((x) => x.uses)) assert.equal(s.env, undefined, `${s.uses}: no token`);
+  assert.equal([...text.matchAll(/github\.token|secrets\./g)].length, 1, 'the token is named once, in the label step');
   assert.doesNotMatch(text, /labels/, 'no label can skip it');
 });

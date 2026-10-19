@@ -8,7 +8,10 @@ name: installed-engine-config
 # that can't load this repo's config fails here too.
 # A moved pin must also be newer than the base's (full semver). Going back is allowed only as a recorded rollback: the
 # repository owner applies the engine-rollback label to the PR, and the script reads who applied it from the PR's
-# timeline with this workflow's read-only token and prints it (that is why it may read issues and pull requests). It
+# timeline with this workflow's read-only token and prints it (that is why it may read issues and pull requests). The
+# token is in the label step's environment only, and that step loads no engine and runs no child process; it hands the
+# engine step a verdict file, never the token. The engine step refuses to start with a token in its environment
+# (#825 round 4: a token deleted from a process's environment stays readable in /proc/<pid>/environ). It
 # doesn't run on a label change (#615: only ci-slow-full-ci.yml hears a label, test/ci-slow-trigger.test.ts): after
 # applying the label, the owner re-runs this check, which reads the timeline as it is then.
 # It fails closed when the version can't be found or its tag doesn't verify. There is no skip: a PR meant to land
@@ -48,12 +51,24 @@ jobs:
       # The base's copy of the check's script (and the scripts it uses) when it has one, so a PR can't loosen the
       # script it is judged by. Not this workflow file: that is the PR's own (see the header). The engine's tag is
       # fetched by the script, anonymously: the repository is public.
-      - name: the changed config loads with the installed engine
-        # Read-only (the permissions above), and only for a rollback: the PR's timeline. The script takes it out of its
-        # environment before any engine's code is loaded.
+      # The owner's rollback label, read from the PR's timeline with the read-only token (the permissions above). The
+      # token is in this step's environment only: it loads no engine and runs no child process, and writes only the
+      # verdict (who applied the label and when, or why there is no override) for the next step.
+      - name: the owner's rollback label
         env:
           GITHUB_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          check=scripts/ci/installed-engine-config.mjs
+          if git cat-file -e "HEAD^1:$check" 2>/dev/null; then
+            mkdir -p "$RUNNER_TEMP/base-label"
+            git archive HEAD^1 scripts | tar -x -C "$RUNNER_TEMP/base-label"
+            check="$RUNNER_TEMP/base-label/$check"
+          fi
+          node "$check" --read-rollback-label "$RUNNER_TEMP/rollback.json"
+      # Loads the engines, runs git and npm: no token in its environment (the script refuses to start with one), only
+      # the verdict file.
+      - name: the changed config loads with the installed engine
         run: |
           check=scripts/ci/installed-engine-config.mjs
           if git cat-file -e "HEAD^1:$check" 2>/dev/null; then
@@ -61,4 +76,4 @@ jobs:
             git archive HEAD^1 scripts | tar -x -C "$RUNNER_TEMP/base"
             check="$RUNNER_TEMP/base/$check"
           fi
-          node "$check" --base HEAD^1 --head HEAD
+          node "$check" --base HEAD^1 --head HEAD --rollback-verdict "$RUNNER_TEMP/rollback.json"

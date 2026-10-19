@@ -30,14 +30,18 @@
 //
 // A moved pin must be newer than the base's, by full semver (owner, 2026-10-19). An older version, the same version at
 // another commit, or a base pin whose version can't be told is a rollback: refused unless the repository owner applied
-// the engine-rollback label to the PR (read from its timeline with the workflow's read-only token, and printed, so the
-// run records who and when). A label by anyone else, or a timeline it can't read, is no override.
+// the engine-rollback label to the PR, and printed, so the run records who and when. A label by anyone else, or a
+// timeline it can't read, is no override. The label is read from the PR's timeline with the workflow's read-only token
+// in a step of its own, which loads no engine:
+//
+//   node scripts/ci/installed-engine-config.mjs --read-rollback-label <file>     (CI: the token in this step only)
+//   node scripts/ci/installed-engine-config.mjs --base <rev> --head <rev> --rollback-verdict <file>   (no token)
 //
 // A change that touches neither .worklane/ nor the pin has nothing to load: it prints so and exits 0, before fetching
 // any engine (the workflow's paths filter already skips most such PRs; this keeps the script right without it).
 // Exit 1: refused, or it couldn't check.
 import { execFileSync, spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -51,17 +55,11 @@ const FULL_COMMIT = /^[0-9a-f]{40}$/;
 // The repository owner's word that a moved pin may go back (a deliberate rollback): this label on the PR, last applied
 // by the owner (upgradeOrOwnerRollback).
 const ROLLBACK_LABEL = 'engine-rollback';
-// What ownerRollback reads, taken out of the environment at once: no engine's code loaded below, and no child process
-// (git, npm), ever sees the token.
-const GH = {
-  api: (process.env.GITHUB_API_URL || 'https://api.github.com').replace(/\/+$/, ''),
-  token: process.env.GITHUB_TOKEN || '',
-  repo: process.env.GITHUB_REPOSITORY || '',
-  owner: process.env.GITHUB_REPOSITORY_OWNER || '',
-  pr: process.env.PR_NUMBER || '',
-};
-delete process.env.GITHUB_TOKEN;
-delete process.env.GH_TOKEN;
+// The token never shares a process with an engine (#825 round 4): deleting it from process.env doesn't take it out of
+// /proc/<pid>/environ, which the loaded engine and every child (git, npm) could still read. So the label is read in a
+// step of its own, `--read-rollback-label <file>`, which loads no engine and writes only a verdict; the step that loads
+// engines refuses to start with a token in its environment, and reads that verdict file (`--rollback-verdict <file>`).
+const TOKEN_VARS = ['GITHUB_TOKEN', 'GH_TOKEN'];
 // The only pin lines a moved pin may have (strictPin): ASCII, nothing after the value.
 const PIN_LINE = { ENGINE_TAG: /^ENGINE_TAG=v[0-9]+\.[0-9]+\.[0-9]+$/, ENGINE_COMMIT: /^ENGINE_COMMIT=[0-9a-f]{40}$/ };
 const PIN_FORM = { ENGINE_TAG: 'vX.Y.Z', ENGINE_COMMIT: '<40 hex digits>' };
@@ -88,7 +86,8 @@ const has = (rev, path) => git('cat-file', '-e', `${rev}:${path}`).status === 0;
 const lastLine = (s) => String(s ?? '').trim().split('\n').filter(Boolean).slice(-1)[0] ?? '';
 
 try {
-  await main();
+  if (opt('read-rollback-label')) await writeRollbackVerdict(opt('read-rollback-label'));
+  else await main();
 } catch (e) {
   if (!(e instanceof Refused)) throw e;
   console.error(`installed-engine-config: refused: ${e.message}`);
@@ -96,7 +95,10 @@ try {
 }
 
 async function main() {
-  if (!opt('base') || !opt('head')) fail('usage: installed-engine-config.mjs --base <rev> --head <rev>');
+  if (!opt('base') || !opt('head')) fail('usage: installed-engine-config.mjs --base <rev> --head <rev> [--rollback-verdict <file>]');
+  for (const name of TOKEN_VARS) {
+    if (process.env[name]) fail(`this step loads an engine, so it must not hold a GitHub token (${name} is set): read the rollback label in a step of its own (--read-rollback-label)`);
+  }
   const base = gitText('rev-parse', '-q', '--verify', `${opt('base')}^{commit}`);
   const head = gitText('rev-parse', '-q', '--verify', `${opt('head')}^{commit}`);
   if (!base) fail(`no commit ${opt('base')} here to compare against`);
@@ -233,18 +235,54 @@ async function upgradeOrOwnerRollback(moved, base) {
   else if (compare(now, was) < 0) why = `the engine this change pins, ${moved.tag}, is older than ${moved.before.tag}, the pin in ${at}`;
   else if (compare(now, was) === 0) why = `this change pins ${moved.tag} again, at ${moved.commit}, not ${moved.before.commit}`;
   if (!why) return;
-  const owner = await ownerRollback();
+  const owner = rollbackVerdict(opt('rollback-verdict'));
   if (!owner.ok) fail(`${why}: a rollback needs the repository owner's ${ROLLBACK_LABEL} label on the PR, and ${owner.reason}`);
   say(`${why}; rollback allowed: ${owner.line}`);
+}
+
+/**
+ * The verdict the label step wrote (writeRollbackVerdict): { ok: true, line } only for a file that is exactly a
+ * verdict saying so; anything else (no file given, unreadable, not JSON, another shape) is no override.
+ */
+function rollbackVerdict(file) {
+  const none = (why) => ({ ok: false, reason: `can't read the PR's labels: no usable rollback verdict (${why})` });
+  if (!file) return none('none was handed to this step: --rollback-verdict');
+  let v;
+  try {
+    v = JSON.parse(readFileSync(file, 'utf8'));
+  } catch (e) {
+    return none(`${file}: ${e.code ?? e.message}`);
+  }
+  if (!v || typeof v !== 'object' || typeof v.ok !== 'boolean' || typeof v.line !== 'string' || typeof v.reason !== 'string') return none(`${file} isn't a verdict`);
+  if (v.ok !== true) return { ok: false, reason: v.reason };
+  if (!v.line) return none(`${file} names no one`);
+  return { ok: true, line: v.line };
+}
+
+/**
+ * The label step (`--read-rollback-label <file>`): it loads no engine and runs no child process. It asks GitHub
+ * (ownerRollback) and writes only the verdict, { ok, line, reason }, never the token. It exits 0 whatever the answer:
+ * the verdict matters only to a rollback, and "no override" is the safe answer for one.
+ */
+async function writeRollbackVerdict(file) {
+  const v = await ownerRollback();
+  const verdict = { ok: v.ok === true, line: v.ok ? v.line : '', reason: v.ok ? '' : v.reason };
+  writeFileSync(file, `${JSON.stringify(verdict)}\n`, { mode: 0o600 });
+  say(`rollback label: ${verdict.ok ? verdict.line : verdict.reason}`);
 }
 
 /**
  * Whether the repository owner allowed a rollback on this PR: the PR's timeline (GitHub's API, with the workflow's
  * read-only token) shows the engine-rollback label last applied, not removed, by the login GITHUB_REPOSITORY_OWNER
  * names, and the PR carries it now. Anything else, including an API it can't read, is { ok: false, reason }.
+ * Only the label step calls it.
  */
 async function ownerRollback() {
-  const { api, token, repo, owner, pr } = GH;
+  const api = (process.env.GITHUB_API_URL || 'https://api.github.com').replace(/\/+$/, '');
+  const token = process.env.GITHUB_TOKEN || '';
+  const repo = process.env.GITHUB_REPOSITORY || '';
+  const owner = process.env.GITHUB_REPOSITORY_OWNER || '';
+  const pr = process.env.PR_NUMBER || '';
   if (!token || !/^[\w.-]+\/[\w.-]+$/.test(repo) || !/^[1-9][0-9]*$/.test(pr) || !owner || repo.split('/')[0] !== owner) {
     return { ok: false, reason: "can't read the PR's labels: this run has no token, repository, owner or PR number" };
   }
