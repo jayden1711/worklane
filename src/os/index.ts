@@ -9,7 +9,7 @@ import { BRAND } from '../brand.js';
 import { outboundEnv } from '../network.js';
 import { safeProjectEnv } from '../project-env.js';
 import { withoutPushGateHatch } from '../guardrails/push-hook.js';
-import { devSlotsPath, etcPath, varLibPath } from './system-paths.js';
+import { devSlotsPath, etcPath, markTestRun, testSlotsRefusal, TestSlotsRefused, varLibPath } from './system-paths.js';
 
 export type OsKind = 'macos' | 'linux' | 'windows-wsl' | 'windows';
 export type OsSetting = 'auto' | 'macos' | 'linux' | 'windows-wsl';
@@ -767,6 +767,9 @@ export function childEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv 
   delete env.NODE_TEST_CONTEXT;
   // INVARIANT: no redirecting variable from the engine's environment or `extra`; a proxy only from root's network.json.
   outboundEnv(env);
+  // WHY: in a test run, what it starts is one too (#669): dropping NODE_TEST_CONTEXT must not make a test's child the
+  // engine's own. Outside a test run nothing is added.
+  markTestRun(env);
   // WHY: project commands run code an agent wrote; the push gate's hatch in the engine's own environment stops here.
   return withoutPushGateHatch(env);
 }
@@ -793,7 +796,19 @@ export function updateDrainPath(dir = slotsDir(), system = SYSTEM_SLOTS): string
   return dir === system.dir ? UPDATE_DRAIN_FILE : join(dir, 'update-drain.json');
 }
 
+/**
+ * INVARIANT (#669): in a test run, only a directory inside the test machine (test/isolate.ts); anything else throws
+ * TestSlotsRefused before a file is opened (src/os/system-paths.ts testSlotsRefusal), so no test reaches the machine's
+ * own slots, STOP, budgets or incidents through a default. Outside a test run, as always.
+ */
 export function slotsDir(system = SYSTEM_SLOTS): string {
+  const dir = unguardedSlotsDir(system);
+  const refusal = testSlotsRefusal(dir);
+  if (refusal) throw new TestSlotsRefused(refusal);
+  return dir;
+}
+
+function unguardedSlotsDir(system: typeof SYSTEM_SLOTS): string {
   if (process.env.AGENT_SLOTS_DIR) return process.env.AGENT_SLOTS_DIR;
   if (process.platform === 'win32') return join(process.env.ProgramData ?? 'C:\\ProgramData', 'agent-slots');
   if (existsSync(system.dir)) return system.dir;

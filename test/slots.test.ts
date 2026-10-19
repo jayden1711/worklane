@@ -70,9 +70,10 @@ test('slot locations: durable system paths when present, env overrides, the old 
     writeFileSync(system.config, JSON.stringify({ max_agents: 6 }));
     assert.equal(slotsConfigPath(system.dir, system), system.config);
     assert.equal(slotsConfigPath('/some/other/dir', system), '/some/other/dir/config.json', 'a custom slot dir keeps its own config');
-    process.env.AGENT_SLOTS_DIR = '/custom/slots';
+    // Inside the test machine: in a test run, a slot directory outside it is refused (#669).
+    process.env.AGENT_SLOTS_DIR = join(root, 'custom-slots');
     process.env.AGENT_SLOTS_CONFIG = system.config;
-    assert.equal(machineSlotsDir(system), '/custom/slots');
+    assert.equal(machineSlotsDir(system), join(root, 'custom-slots'));
     const custom = mkdtempSync(join(tmpdir(), 'slots-'));
     assert.equal(machineCap(custom), 6, 'the configured file is read wherever it lives');
   } finally {
