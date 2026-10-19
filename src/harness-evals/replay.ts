@@ -17,8 +17,7 @@ import type { CoordinatorDeps } from '../coordinator/shared.js';
 import { EventLog } from '../events/log.js';
 import type { EventPayload, EventType } from '../events/types.js';
 import { DEFAULT_COMMIT_IDENTITY, type AgentRunner, type RunRequest, type RunResult } from '../runner.js';
-import { makeSlotDir, slotFile, writeSlotFile } from '../slot-file.js';
-import { slotDirAt } from '../os/index.js';
+import { writeSlotFile } from '../slot-file.js';
 import { round, scoreReplay, totals, type TaskScore } from './score.js';
 import { issueBody, type LoadedTask } from './tasks.js';
 
@@ -232,9 +231,10 @@ export async function replayTask(t: LoadedTask, o: ReplayOptions): Promise<Repla
 
     const cfg = loadConfig(root);
     const state = join(dir, 'state');
-    const slots = slotDirAt(join(state, 'slots'));
-    makeSlotDir(slots);
-    writeSlotFile(slotFile(slots, 'config.json'), JSON.stringify({ max_agents: 1 }));
+    // The replay's own slot dir, in its state dir: a plain path (src/slot-file.ts takes one), not the machine's.
+    const slots = join(state, 'slots');
+    mkdirSync(slots, { recursive: true });
+    writeSlotFile(join(slots, 'config.json'), JSON.stringify({ max_agents: 1 }));
     log = new EventLog(join(state, 'events.db'));
     const backlog = new FileBacklog(join(state, 'backlog.json'));
     const owner = cfg.project.owners.default;

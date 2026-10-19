@@ -6,8 +6,9 @@
 //   forms #766's lint doesn't resolve (U4 to U6b, B10c, R8): each fails to compile, and the same text with a plain
 //   path compiles (a control).
 // - checks over src/, each tested against fixture text fed to its own function:
-//   - only src/os/index.ts makes a slot path (slotPathOf), and only demo.ts and replay.ts ask it for one of their own
-//     (slotDirAt);
+//   - only src/os/index.ts makes a slot path (slotPathOf, slotDirAt), only the OS layer passes slotsDir a `system`,
+//     and nothing outside it imports the helper or os/index.js whole;
+//   - nothing reads private fields or the heap from inside the process (node:inspector, a heap snapshot);
 //   - only src/os/index.ts and src/os/system-paths.ts read where the slot dir is (AGENT_SLOTS_DIR, SYSTEM_SLOTS, the
 //     `agent-slots` name);
 //   - no cast to or from a slot path, and no string conversion of one (a template literal, String(), `+`);
@@ -163,8 +164,10 @@ interface Finding {
 const HELPER = 'src/slot-file.ts';
 /** The module that makes slot paths (slotPathOf), and the only one that reads where the slot dir is. */
 const MAKER = 'src/os/index.ts';
-/** Callers of slotDirAt in src/: a coordinator with a slot dir of its own, in its own state dir. */
-const OWN_SLOT_DIRS = new Set(['src/demo.ts', 'src/harness-evals/replay.ts']);
+/** Names only the maker uses: slotPathOf and slotDirAt make a slot path from a string. */
+const MAKER_ONLY = new Set(['slotPathOf', 'slotDirAt']);
+/** The OS layer: its modules may name slotsDir's `system` seam and import each other whole. */
+const OS_LAYER = /^src\/os\//;
 /** Where the slot dir's location may be read: the maker, and the system paths it reads it from. */
 const SLOT_SOURCES = new Set([MAKER, 'src/os/system-paths.ts']);
 const SOURCE_NAMES = new Set(['AGENT_SLOTS_DIR', 'SYSTEM_SLOTS', 'devSlotsPath', 'unguardedSlotsDir']);
@@ -173,19 +176,62 @@ const parse = (file: string, text: string) => ts.createSourceFile(file, text, ts
 const lineOf = (sf: ts.SourceFile, n: ts.Node) => sf.getLineAndCharacterOfPosition(n.getStart(sf)).line + 1;
 const nameText = (n: ts.Node): string | null => (ts.isIdentifier(n) || ts.isPrivateIdentifier(n) ? n.text : ts.isStringLiteralLike(n) ? n.text : null);
 
-/** Who makes a slot path: slotPathOf only in the maker (and the helper, which defines it), slotDirAt only in OWN_SLOT_DIRS. */
+/** The helper or the OS layer's index, by an import's specifier: a namespace of either reads MAKER_ONLY by a computed name. */
+const WHOLE_MODULES = /(^|\/)(slot-file|os\/index)\.js$/;
+
+/**
+ * Who makes a slot path, or a way to its path. MAKER_ONLY names only in the maker (and the helper, which defines
+ * them). slotsDir's `system` argument only in the OS layer: with any other, slotsDir would make a slot path of any
+ * directory (#806 review, A3). No `import *` or `import()` of the helper or of os/index.js outside the OS layer.
+ */
 function slotPathMakers(files: Map<string, string>): Finding[] {
   const out: Finding[] = [];
   for (const [file, text] of files) {
     if (file === HELPER) continue;
     const sf = parse(file, text);
+    const os = OS_LAYER.test(file);
+    const at = (n: ts.Node, what: string) => out.push({ file, line: lineOf(sf, n), what });
+    /** The names slotsDir goes by here: its own, and any it is imported as. */
+    const slotsDirNames = new Set(['slotsDir']);
+    const collect = (n: ts.Node) => {
+      if (ts.isImportSpecifier(n) && (n.propertyName ?? n.name).text === 'slotsDir') slotsDirNames.add(n.name.text);
+      ts.forEachChild(n, collect);
+    };
+    collect(sf);
     const visit = (n: ts.Node) => {
       const name = nameText(n);
-      if (name === 'slotPathOf' && file !== MAKER) out.push({ file, line: lineOf(sf, n), what: `slotPathOf: only ${MAKER} makes a slot path` });
-      if (name === 'slotDirAt' && file !== MAKER && !OWN_SLOT_DIRS.has(file)) out.push({ file, line: lineOf(sf, n), what: `slotDirAt: only ${[...OWN_SLOT_DIRS].join(' and ')} make a slot dir of their own` });
-      // A namespace import of the helper reads any of its exports by a computed name: slotPathOf too.
-      if (ts.isImportDeclaration(n) && ts.isStringLiteral(n.moduleSpecifier) && /(^|\/)slot-file\.js$/.test(n.moduleSpecifier.text) && n.importClause?.namedBindings && ts.isNamespaceImport(n.importClause.namedBindings)) out.push({ file, line: lineOf(sf, n), what: 'import * from slot-file.js: import its functions by name' });
-      if (ts.isCallExpression(n) && n.expression.kind === ts.SyntaxKind.ImportKeyword && /slot-file/.test(n.arguments[0]?.getText(sf) ?? '')) out.push({ file, line: lineOf(sf, n), what: 'import() of slot-file.js: import its functions by name' });
+      if (name && MAKER_ONLY.has(name) && file !== MAKER) at(n, `${name}: only ${MAKER} makes a slot path`);
+      if (!os && ts.isImportDeclaration(n) && ts.isStringLiteral(n.moduleSpecifier) && WHOLE_MODULES.test(n.moduleSpecifier.text) && n.importClause?.namedBindings && ts.isNamespaceImport(n.importClause.namedBindings)) at(n, `import * from ${n.moduleSpecifier.text}: import its functions by name`);
+      if (ts.isCallExpression(n)) {
+        if (n.expression.kind === ts.SyntaxKind.ImportKeyword && /slot-file|os\/index/.test(n.arguments[0]?.getText(sf) ?? '') && !os) at(n, 'import() of slot-file.js or os/index.js: import its functions by name');
+        const callee = ts.isIdentifier(n.expression) ? n.expression.text : ts.isPropertyAccessExpression(n.expression) ? n.expression.name.text : null;
+        const isSlotsDir = ts.isIdentifier(n.expression) ? slotsDirNames.has(n.expression.text) : callee === 'slotsDir';
+        if (isSlotsDir && n.arguments.length > 0 && !os) at(n, `${n.getText(sf).slice(0, 60)}: slotsDir's system argument is the OS layer's (with any other, it makes a slot path of any directory)`);
+      }
+      ts.forEachChild(n, visit);
+    };
+    visit(sf);
+  }
+  return out;
+}
+
+const INSPECTORS = new Set(['inspector', 'node:inspector', 'inspector/promises', 'node:inspector/promises']);
+const HEAP_SNAPSHOTS = new Set(['getHeapSnapshot', 'writeHeapSnapshot']);
+
+/**
+ * What reads a value's private fields from inside the process (#806 review, A4): the inspector (its
+ * Runtime.getProperties lists them) and a heap snapshot (it holds every string). Neither is used in src/.
+ */
+function introspection(files: Map<string, string>): Finding[] {
+  const out: Finding[] = [];
+  for (const [file, text] of files) {
+    const sf = parse(file, text);
+    const at = (n: ts.Node, what: string) => out.push({ file, line: lineOf(sf, n), what });
+    const visit = (n: ts.Node) => {
+      const spec = (ts.isImportDeclaration(n) || ts.isExportDeclaration(n)) && n.moduleSpecifier && ts.isStringLiteral(n.moduleSpecifier) ? n.moduleSpecifier.text : ts.isCallExpression(n) && n.expression.kind === ts.SyntaxKind.ImportKeyword && n.arguments[0] && ts.isStringLiteralLike(n.arguments[0]) ? n.arguments[0].text : null;
+      if (spec && INSPECTORS.has(spec)) at(n, `${spec}: reads private fields (a slot path's included) from inside the process`);
+      const name = ts.isIdentifier(n) ? n.text : null;
+      if (name && HEAP_SNAPSHOTS.has(name) && !(ts.isPropertyAccessExpression(n.parent) && n.parent.expression === n)) at(n, `${name}: a heap snapshot holds every string, a slot path's included`);
       ts.forEachChild(n, visit);
     };
     visit(sf);
@@ -272,9 +318,13 @@ function slotPathConversions(p: ts.Program, only?: Set<string>): Finding[] {
 
 const show = (f: Finding[]) => f.map((x) => `${x.file}:${x.line}: ${x.what}`);
 
-test('src/: only os/index.ts makes a slot path, only demo.ts and replay.ts ask for one of their own, and only the OS layer reads where the slot dir is', () => {
+test('src/: only os/index.ts makes a slot path or opens one, no module passes slotsDir a system, and only the OS layer reads where the slot dir is', () => {
   const files = srcFiles();
   assert.deepEqual(show([...slotPathMakers(files), ...rawSlotSources(files)]), []);
+});
+
+test('src/: nothing reads private fields or the heap from inside the process (node:inspector, a heap snapshot)', () => {
+  assert.deepEqual(show(introspection(srcFiles())), []);
 });
 
 test('src/: no cast to or from a slot path, and no conversion of one to a string', () => {
@@ -285,22 +335,34 @@ test('src/: fs is reached only through imports tsc types (no require, createRequ
   assert.deepEqual(show(untypedFs(srcFiles())), []);
 });
 
-test('the maker check: another module making a slot path, or reading the helper by a computed name, is reported', () => {
+test('the maker check: another module making a slot path, opening one, passing slotsDir a system, or reading the helper or os/index.js by a computed name, is reported', () => {
   const files = new Map([
     ['src/cores.ts', "import { slotPathOf as mk } from './slot-file.js';\nexport const a = mk('/var/lib/x/agent-slots');\n"],
     ['src/dashboard.ts', "import { slotDirAt } from './os/index.js';\nexport const b = slotDirAt('/x');\n"],
     ['src/health.ts', "import * as sf from './slot-file.js';\nexport const c = (sf as Record<string, (d: string) => unknown>)['slotPath' + 'Of']!('/x');\nexport const d = import('./slot-file.js');\n"],
+    // demo.ts names no exception now (#806 review, principle 9): its own slot dir is a plain path.
     ['src/demo.ts', "import { slotDirAt } from './os/index.js';\nexport const e = slotDirAt('/demo');\n"],
-    [MAKER, "import { slotPathOf } from '../slot-file.js';\nexport const f = slotPathOf('/x');\n"],
+    // A3: slotsDir with a system of the caller's, under its own name and renamed; and the A8 namespace route.
+    ['src/slots.ts', "import { slotsDir, slotsDir as sd } from './os/index.js';\nexport const h = (dir: string) => slotsDir({ dir, config: '' });\nexport const i = (dir: string) => sd({ dir, config: '' });\nexport const j = () => slotsDir();\n"],
+    ['src/health2.ts', "import * as os from './os/index.js';\nexport const k = (g: string) => (os as unknown as Record<string, (d: string) => unknown>)['slot' + 'DirAt']!(g) === os.slotsDir();\nexport const l = (dir: string) => os.slotsDir({ dir, config: '' });\n"],
+    [MAKER, "import { slotPathOf } from '../slot-file.js';\nexport const f = slotPathOf('/x');\nexport const m = (dir: string) => slotsDir({ dir, config: '' });\n"],
+    ['src/os/system-paths.ts', "import * as os from './index.js';\nexport const n = () => os.slotsDir({ dir: '/x', config: '' });\n"],
   ]);
-  assert.deepEqual(show(slotPathMakers(files)), [
-    'src/cores.ts:1: slotPathOf: only src/os/index.ts makes a slot path',
-    'src/dashboard.ts:1: slotDirAt: only src/demo.ts and src/harness-evals/replay.ts make a slot dir of their own',
-    'src/dashboard.ts:2: slotDirAt: only src/demo.ts and src/harness-evals/replay.ts make a slot dir of their own',
-    'src/health.ts:1: import * from slot-file.js: import its functions by name',
-    'src/health.ts:3: import() of slot-file.js: import its functions by name',
+  assert.deepEqual(show(slotPathMakers(files)).map((l) => l.replace(/^(.*?:\d+: [^:]*?)(: |\(…|\(\{).*$/, '$1')), [
+    'src/cores.ts:1: slotPathOf',
+    'src/dashboard.ts:1: slotDirAt',
+    'src/dashboard.ts:2: slotDirAt',
+    'src/health.ts:1: import * from ./slot-file.js',
+    'src/health.ts:3: import() of slot-file.js or os/index.js',
+    'src/demo.ts:1: slotDirAt',
+    'src/demo.ts:2: slotDirAt',
+    'src/slots.ts:2: slotsDir',
+    'src/slots.ts:3: sd',
+    'src/health2.ts:1: import * from ./os/index.js',
+    'src/health2.ts:3: os.slotsDir',
   ]);
-  // cores.ts:2 (`mk(…)`, the renamed import) is the import's line: the name is caught where it is imported.
+  // cores.ts:2 (`mk(…)`, the renamed import) is the import's line: the name is caught where it is imported. The OS
+  // layer (os/index.ts, os/system-paths.ts) may pass a system and import its index whole.
 });
 
 test('the source check: the slot dir\'s location read anywhere but the OS layer is reported (env, SYSTEM_SLOTS, the name)', () => {
@@ -378,6 +440,34 @@ test('the conversion check: casts to or from a slot path and its conversions to 
     `${FIX}:7: a cast`,
     `${FIX}:8: a cast`,
     `${FIX}:9: a cast`,
+  ]);
+});
+
+test('the introspection check: node:inspector and heap snapshots are reported (#806 review, A4)', () => {
+  const files = new Map([
+    [
+      'src/cores.ts',
+      [
+        "import { Session } from 'node:inspector';",
+        "import * as ip from 'inspector/promises';",
+        "import v8, { writeHeapSnapshot } from 'node:v8';",
+        'export const a = () => v8.getHeapSnapshot();',
+        'export const b = () => writeHeapSnapshot();',
+        "export const c = async () => import('node:inspector');",
+        "export { Session as S2 } from 'inspector';",
+        "export const ok = (s: string) => s === 'inspector';",
+        'void [Session, ip];',
+      ].join('\n'),
+    ],
+  ]);
+  assert.deepEqual(show(introspection(files)).map((l) => l.replace(/^(.*?:\d+: .*?): (reads|a heap) .*$/, '$1')), [
+    'src/cores.ts:1: node:inspector',
+    'src/cores.ts:2: inspector/promises',
+    'src/cores.ts:3: writeHeapSnapshot',
+    'src/cores.ts:4: getHeapSnapshot',
+    'src/cores.ts:5: writeHeapSnapshot',
+    'src/cores.ts:6: node:inspector',
+    'src/cores.ts:7: inspector',
   ]);
 });
 
@@ -507,4 +597,100 @@ test('run time: a patched Map, WeakSet or Object.prototype is never handed a slo
     delete (Object.prototype as Record<string, unknown>)[dir];
   }
   assert.deepEqual(seen.filter((x) => typeof x === 'string' && x.includes(dir.slice(1))), []);
+});
+
+test("run time: no sibling of the slot dir itself, so slotFileName can't give the slot dir's own name (#806 review, A1)", async () => {
+  const sf = (await import('../src/slot-file.js')) as SlotFile;
+  const os = (await import('../src/os/index.js')) as Os;
+  const d = os.slotsDir();
+  assert.throws(() => sf.slotFileName(sf.slotSibling(d, '-x')), TypeError);
+  assert.throws(() => sf.slotSibling(d, '.claim'), TypeError, 'a sibling only of a named file');
+  // Beside a named file it is what tryLock's claim and the budget's move-aside need.
+  const lock = sf.slotFile(d, 'x.lock');
+  assert.equal(sf.slotFileName(sf.slotSibling(lock, '.abc.claim')), 'x.lock.abc.claim');
+  assert.equal(sf.slotFileName(sf.slotSibling(sf.slotSibling(lock, '.a'), '.b')), 'x.lock.a.b');
+});
+
+test('run time: no descriptor of a slot path leaves the helper, so /proc/self/fd names none (#806 review, A2)', async () => {
+  const sf = (await import('../src/slot-file.js')) as SlotFile;
+  const os = (await import('../src/os/index.js')) as Os;
+  const d = os.slotsDir();
+  // Every export, called with the slot dir (and a name where it takes one): none returns a number (a descriptor).
+  const numbers: string[] = [];
+  for (const [k, f] of Object.entries(sf)) {
+    if (typeof f !== 'function' || k === 'writeSlotFile' || k === 'removeSlotFile' || k === 'renameSlotFile' || k === 'linkSlotFile') continue;
+    try {
+      if (typeof (f as (...a: unknown[]) => unknown)(d, 'x', 10) === 'number') numbers.push(k);
+    } catch {
+      // refused, or not for a directory
+    }
+  }
+  assert.deepEqual(numbers, [], 'no export hands out a descriptor');
+  // readRegularFile still reads a slot file, and refuses a symlink, as before.
+  const f = sf.slotFile(d, 'regular.json');
+  sf.writeSlotFile(f, '{"a":1}');
+  const r = os.readRegularFile(f, 100);
+  assert.equal(r.kind === 'file' && r.text, '{"a":1}');
+  assert.equal(os.readRegularFile(d, 100).kind, 'not-file');
+});
+
+test("run time: updateDrainPath and slotsConfigPath never compare a caller's system with the slot path (#806 review, A3)", async () => {
+  const os = (await import('../src/os/index.js')) as Os;
+  const real = process.env.AGENT_SLOTS_DIR!;
+  const config = join(mkdtempSync(join(real, 'cfg-')), 'slots.json');
+  writeFileSync(config, '{}');
+  // A guess that is right: before, each gave a string (the system's) for it and a slot path for a wrong guess.
+  const guess = { dir: real, config };
+  assert.notEqual(typeof os.updateDrainPath(os.slotsDir(), guess), 'string', 'updateDrainPath answers nothing about the guess');
+  assert.notEqual(typeof os.slotsConfigPath(os.slotsDir(), guess), 'string', 'slotsConfigPath answers nothing about the guess');
+  // A string is the caller's own path: compared as written, as before.
+  assert.equal(os.slotsConfigPath(real, guess), config);
+});
+
+test('run time: a patched String.prototype or Array.prototype method is never handed the slot dir (#806 review, A5)', async () => {
+  const sf = (await import('../src/slot-file.js')) as SlotFile;
+  const os = (await import('../src/os/index.js')) as Os;
+  const dir = process.env.AGENT_SLOTS_DIR!;
+  sf.makeSlotDir(os.slotsDir());
+  const includes = String.prototype.includes;
+  const holds = (v: unknown): boolean => typeof v === 'string' && (Reflect.apply(includes, v, [dir]) as boolean);
+  const hits = new Set<string>();
+  let busy = false;
+  const saved: [Record<string, unknown>, string, unknown][] = [];
+  for (const proto of [String.prototype, Array.prototype] as unknown as Record<string, unknown>[]) {
+    for (const k of Object.getOwnPropertyNames(proto)) {
+      const f = proto[k];
+      if (typeof f !== 'function' || k === 'constructor' || k === 'toString' || k === 'valueOf') continue;
+      saved.push([proto, k, f]);
+      proto[k] = function (this: unknown, ...a: unknown[]) {
+        if (!busy) {
+          busy = true;
+          try {
+            let seen = holds(this);
+            for (let i = 0; i < a.length && !seen; i++) seen = holds(a[i]);
+            if (!seen && globalThis.Array.isArray(this)) for (let i = 0; i < (this as unknown[]).length && !seen; i++) seen = holds((this as unknown[])[i]);
+            if (seen) hits.add(k);
+          } finally {
+            busy = false;
+          }
+        }
+        return Reflect.apply(f as (...x: unknown[]) => unknown, this, a);
+      };
+    }
+  }
+  try {
+    const d = os.slotsDir();
+    const f = sf.slotFile(d, 'patched.json');
+    sf.writeSlotFile(f, 'v');
+    sf.readSlotFile(f);
+    sf.listSlotDir(d);
+    sf.slotFileName(sf.slotSibling(f, '.x'));
+    os.updateDrainPath();
+    os.slotsConfigPath();
+    os.readRegularFile(f, 100);
+    os.diskFree(d);
+  } finally {
+    for (const [proto, k, f] of saved) proto[k] = f;
+  }
+  assert.deepEqual([...hits], []);
 });

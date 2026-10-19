@@ -9,7 +9,7 @@ import { BRAND } from '../brand.js';
 import { outboundEnv } from '../network.js';
 import { safeProjectEnv } from '../project-env.js';
 import { withoutPushGateHatch } from '../guardrails/push-hook.js';
-import { openSlotFileToRead, slotFile, slotPathOf, statfsSlotDir, type SlotPath, type SlotPathLike } from '../slot-file.js';
+import { readRegularSlotFile, slotFile, slotPathOf, statfsSlotDir, type SlotPath, type SlotPathLike } from '../slot-file.js';
 import { devSlotsPath, etcPath, markTestRun, testSlotsRefusal, TestSlotsRefused, varLibPath } from './system-paths.js';
 
 export type OsKind = 'macos' | 'linux' | 'windows-wsl' | 'windows';
@@ -378,27 +378,10 @@ export function fileAccess(file: string): { kind: 'missing' } | { kind: 'hidden'
  */
 export function readRegularFile(file: SlotPathLike, maxBytes: number): { kind: 'missing' | 'hidden' | 'unsupported' | 'symlink' | 'not-file' } | { kind: 'too-big'; size: number } | { kind: 'file'; uid: number; mode: string; text: string } {
   if (process.platform === 'win32') return { kind: 'unsupported' };
-  let fd: number;
-  try {
-    // INVARIANT: O_NOFOLLOW, so a symlink is refused rather than followed (#391 follow-up). The open is
-    // src/slot-file.ts's (O_RDONLY | O_NOFOLLOW | O_NONBLOCK), so a slot path (#772) can be read here too.
-    fd = openSlotFileToRead(file);
-  } catch (e) {
-    const code = (e as NodeJS.ErrnoException).code;
-    if (code === 'ELOOP' || code === 'EMLINK') return { kind: 'symlink' };
-    return code === 'EACCES' || code === 'EPERM' ? { kind: 'hidden' } : { kind: 'missing' };
-  }
-  try {
-    const s = fstatSync(fd);
-    if (!s.isFile()) return { kind: 'not-file' };
-    if (s.size > maxBytes) return { kind: 'too-big', size: s.size };
-    const buf = Buffer.alloc(maxBytes + 1);
-    const n = readSync(fd, buf, 0, maxBytes + 1, 0);
-    if (n > maxBytes) return { kind: 'too-big', size: n };
-    return { kind: 'file', uid: s.uid, mode: (s.mode & 0o777).toString(8).padStart(4, '0'), text: buf.subarray(0, n).toString('utf8') };
-  } finally {
-    closeSync(fd);
-  }
+  // INVARIANT: O_NOFOLLOW, so a symlink is refused rather than followed (#391 follow-up). The open, the checks and the
+  // read are src/slot-file.ts's, so a slot path (#772) can be read too, and no descriptor of one (whose
+  // /proc/self/fd link names its path: #806 review, A2) ever leaves that module.
+  return readRegularSlotFile(file, maxBytes);
 }
 
 /** Whether an OS user exists on this machine (POSIX; always false on native Windows). */
@@ -801,8 +784,15 @@ export function updateDrainPath(dir: SlotPathLike = slotsDir(), system = SYSTEM_
   return isSystemSlots(dir, system) ? UPDATE_DRAIN_FILE : slotFile(dir, 'update-drain.json');
 }
 
-/** Whether `dir` is the system slot directory (a slot path is one value per path: src/slot-file.ts). */
-const isSystemSlots = (dir: SlotPathLike, system: typeof SYSTEM_SLOTS) => dir === (typeof dir === 'string' ? system.dir : slotPathOf(system.dir));
+/** The slot paths slotsDir made for its system directory: set when made, never by comparing with a caller's path. */
+const systemSlotDirs = new WeakSet<SlotPath>();
+
+/**
+ * Whether `dir` is the system slot directory. A slot path is, when slotsDir made it as one. It is never compared with
+ * a caller's `system`: that would let any module test a guessed path against the slot dir (#806 review, A3). A plain
+ * string is compared as written: it is the caller's own path, and says nothing about the slot dir.
+ */
+const isSystemSlots = (dir: SlotPathLike, system: typeof SYSTEM_SLOTS) => (typeof dir === 'string' ? dir === system.dir : systemSlotDirs.has(dir));
 
 /**
  * The machine's slot directory, as a slot path (#772): only src/slot-file.ts reads, writes or removes what it names,
@@ -817,12 +807,14 @@ export function slotsDir(system = SYSTEM_SLOTS): SlotPath {
   const dir = unguardedSlotsDir(system);
   const refusal = testSlotsRefusal(dir);
   if (refusal) throw new TestSlotsRefused(refusal);
-  return slotPathOf(dir);
+  const p = slotPathOf(dir);
+  if (dir === system.dir) systemSlotDirs.add(p);
+  return p;
 }
 
 /**
- * A slot directory of a caller's own, as a slot path: a demo's or a replay's coordinator, which gets its own slot dir
- * in its state dir. In src/, only demo.ts and harness-evals/replay.ts call this (test/slot-path.test.ts).
+ * A directory of a caller's own, as a slot path: for tests, to compare with slotsDir() (one value per path). No src/
+ * module but this one names it (test/slot-path.test.ts); a demo's or replay's own slot dir is a plain string.
  */
 export const slotDirAt = (dir: string): SlotPath => slotPathOf(dir);
 

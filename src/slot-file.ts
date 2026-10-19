@@ -10,7 +10,7 @@
 // name for a symlink at any moment, and a chmod by name would follow it to a file of the writer's own.
 //
 // A slot-dir path is a SlotPath (#772), never a string: an opaque value that only this module turns back into the
-// path. os/index.ts makes the slot dir one (slotsDir, slotDirAt), slotFile names a file in it, and only the
+// path. os/index.ts makes the slot dir one (slotsDir; slotDirAt for tests), slotFile names a file in it, and only the
 // functions here read, list, remove or write what one names. So tsc rejects a slot path handed to any other writer
 // (writeFileSync, writeGroupOnly, path.join, a method of another module, through `.call` too), whatever the call
 // chain; and at run time the value is an object whose path no one else can read: fs and path.join refuse it, and
@@ -20,7 +20,7 @@
 // A function here also takes a plain string (a path outside the slot dir, or a test's own dir): a string carries no
 // slot path, so it changes nothing above. An error from a slot path's file operation keeps its code, never the path.
 import { randomBytes } from 'node:crypto';
-import { closeSync, fchmodSync, constants, existsSync, linkSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, statfsSync, statSync, writeFileSync } from 'node:fs';
+import { closeSync, fchmodSync, constants, existsSync, fstatSync, linkSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, rmSync, statfsSync, statSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 
 declare const SLOT_PATH: unique symbol;
@@ -73,8 +73,12 @@ Object.freeze(Box);
 const made: Record<string, SlotPath> = Object.create(null) as Record<string, SlotPath>;
 const box = (path: string): SlotPath => (made[path] ??= new Box(MINT, path) as unknown as SlotPath);
 
-/** Slot paths named by slotFile or slotSibling: the only ones whose name slotFileName gives (never a directory's). */
-const named = new WeakSet<object>();
+/**
+ * A slot path made by slotFile or slotSibling: its own name and the directory it is in, kept when it is made. So
+ * slotFileName and makeSlotFileDir never take a path apart (path.basename and dirname call methods a module could
+ * patch: #806 review, A5), and a directory (the slot dir) has no name here at all.
+ */
+const fileOf = new WeakMap<object, { name: string; dir: SlotPath }>();
 
 /** The path a slot path names (a string is its own). Private: no export hands one out. */
 const raw = (p: SlotPathLike): string => (typeof p === 'string' ? p : pathOf(p as unknown as Box));
@@ -84,7 +88,9 @@ const raw = (p: SlotPathLike): string => (typeof p === 'string' ? p : pathOf(p a
  * caller made for a coordinator of its own (slotDirAt): test/slot-path.test.ts fails on any other caller in src/.
  */
 export function slotPathOf(dir: string): SlotPath {
-  if (typeof dir !== 'string' || !dir || dir.includes('\0')) throw new TypeError('a slot dir is a non-empty path');
+  // No method is called on the path (a patched String.prototype.includes would be handed it): a NUL in it is refused by
+  // fs at its first use.
+  if (typeof dir !== 'string' || !dir) throw new TypeError('a slot dir is a non-empty path');
   return box(dir);
 }
 
@@ -94,26 +100,35 @@ function plainName(name: string, what: string): string {
   return name;
 }
 
-const like = (from: SlotPathLike, path: string): SlotPathLike => (typeof from === 'string' ? path : box(path));
-const nameOf = (p: SlotPathLike): SlotPathLike => {
-  if (typeof p !== 'string') named.add(p);
+/** A slot path for the file `name` in `dir`, built by concatenation alone: no method is handed the path (A5). */
+const fileIn = (dir: SlotPath, name: string): SlotPath => {
+  const p = box(`${raw(dir)}/${name}`);
+  if (!fileOf.has(p)) fileOf.set(p, { name, dir });
   return p;
 };
 
-/** The file `name` in the directory `dir`. A slot dir gives a slot path, a string a string. */
+/** The file `name` in the directory `dir`. A slot dir gives a slot path, a string a string (path.join, as before). */
 export function slotFile(dir: SlotPath, name: string): SlotPath;
 export function slotFile(dir: string, name: string): string;
 export function slotFile(dir: SlotPathLike, name: string): SlotPathLike;
 export function slotFile(dir: SlotPathLike, name: string): SlotPathLike {
-  return nameOf(like(dir, join(raw(dir), plainName(name, 'a slot file'))));
+  const n = plainName(name, 'a slot file');
+  return typeof dir === 'string' ? join(dir, n) : fileIn(dir, n);
 }
 
-/** The file beside `file` named `file` + `suffix` (a lock's takeover claim, a file moved aside). */
+/**
+ * The file beside `file` named `file` + `suffix` (a lock's takeover claim, a file moved aside). Only beside a file
+ * slotFile or slotSibling named: beside the slot dir itself, slotFileName would give the slot dir's own name.
+ */
 export function slotSibling(file: SlotPath, suffix: string): SlotPath;
 export function slotSibling(file: string, suffix: string): string;
 export function slotSibling(file: SlotPathLike, suffix: string): SlotPathLike;
 export function slotSibling(file: SlotPathLike, suffix: string): SlotPathLike {
-  return nameOf(like(file, `${raw(file)}${plainName(suffix, 'a suffix')}`));
+  const s = plainName(suffix, 'a suffix');
+  if (typeof file === 'string') return `${file}${s}`;
+  const f = fileOf.get(file);
+  if (!f) throw new TypeError(`${OPAQUE}; a sibling is only of a file named by slotFile`);
+  return fileIn(f.dir, `${f.name}${s}`);
 }
 
 // Nothing here gives a slot path's parent: a value for a directory above the slot dir could be listed, and its
@@ -121,11 +136,13 @@ export function slotSibling(file: SlotPathLike, suffix: string): SlotPathLike {
 
 /**
  * The file's own name, without its directory: only for a slot path made by slotFile or slotSibling, whose name its
- * caller gave. Never a directory's (the slot dir), so no name of where the slot dir is comes out.
+ * caller gave. Never a directory's (the slot dir), and never a name the caller didn't give (#806 review, A1).
  */
 export function slotFileName(file: SlotPathLike): string {
-  if (typeof file !== 'string' && !named.has(file)) throw new TypeError(OPAQUE);
-  return basename(raw(file));
+  if (typeof file === 'string') return basename(file);
+  const f = fileOf.get(file);
+  if (!f) throw new TypeError(OPAQUE);
+  return f.name;
 }
 
 /** Run `fileOp` on the path; for a slot path, an error keeps its code and loses the path (its message, `path`, `dest`). */
@@ -160,14 +177,46 @@ export const slotFileExists = (file: SlotPathLike): boolean => onPath(file, (f) 
 /** The directory, and its parents, if missing. */
 export const makeSlotDir = (dir: SlotPathLike): void => void onPath(dir, (d) => mkdirSync(d, { recursive: true }));
 /** The directory `file` is in, and its parents, if missing. */
-export const makeSlotFileDir = (file: SlotPathLike): void => void onPath(file, (f) => mkdirSync(dirname(f), { recursive: true }));
+export function makeSlotFileDir(file: SlotPathLike): void {
+  if (typeof file === 'string') return void mkdirSync(dirname(file), { recursive: true });
+  const f = fileOf.get(file);
+  if (!f) throw new TypeError(`${OPAQUE}; only a file named by slotFile has a directory here`);
+  makeSlotDir(f.dir);
+}
 /** Remove a file (`force`: no error when it is missing). */
 export const removeSlotFile = (file: SlotPathLike, o: { force?: boolean } = {}): void => onPath(file, (f) => rmSync(f, { force: o.force === true }));
 export const renameSlotFile = (from: SlotPathLike, to: SlotPathLike): void => onPaths(from, to, (a, b) => renameSync(a, b));
 /** A hard link `to` the file at `from` (EEXIST when `to` exists). */
 export const linkSlotFile = (from: SlotPathLike, to: SlotPathLike): void => onPaths(from, to, (a, b) => linkSync(a, b));
-/** A read-only descriptor of the file, a symlink refused (ELOOP) and a FIFO never waited on; the caller closes it. */
-export const openSlotFileToRead = (file: SlotPathLike): number => onPath(file, (f) => openSync(f, constants.O_RDONLY | constants.O_NOFOLLOW | (constants.O_NONBLOCK ?? 0)));
+/** What readRegularSlotFile found (os/index.ts readRegularFile adds `unsupported`, native Windows). */
+export type RegularRead = { kind: 'missing' | 'hidden' | 'unsupported' | 'symlink' | 'not-file' } | { kind: 'too-big'; size: number } | { kind: 'file'; uid: number; mode: string; text: string };
+
+/**
+ * A regular file's owner, mode and text, read through one descriptor opened read-only without following a symlink
+ * and without waiting on a FIFO, so what is checked is what is read (os/index.ts readRegularFile, POSIX). The
+ * descriptor is closed here: one handed out would name its path through /proc/self/fd (#806 review, A2).
+ */
+export function readRegularSlotFile(file: SlotPathLike, maxBytes: number): RegularRead {
+  let rfd: number;
+  try {
+    rfd = onPath(file, (f) => openSync(f, constants.O_RDONLY | constants.O_NOFOLLOW | (constants.O_NONBLOCK ?? 0)));
+  } catch (e) {
+    const code = (e as NodeJS.ErrnoException).code;
+    if (code === 'ELOOP' || code === 'EMLINK') return { kind: 'symlink' };
+    return code === 'EACCES' || code === 'EPERM' ? { kind: 'hidden' } : { kind: 'missing' };
+  }
+  try {
+    const s = fstatSync(rfd);
+    if (!s.isFile()) return { kind: 'not-file' };
+    if (s.size > maxBytes) return { kind: 'too-big', size: s.size };
+    const buf = Buffer.alloc(maxBytes + 1);
+    const n = readSync(rfd, buf, 0, maxBytes + 1, 0);
+    if (n > maxBytes) return { kind: 'too-big', size: n };
+    return { kind: 'file', uid: s.uid, mode: (s.mode & 0o777).toString(8).padStart(4, '0'), text: buf.subarray(0, n).toString('utf8') };
+  } finally {
+    closeSync(rfd);
+  }
+}
 /** The file system the directory is on. */
 export const statfsSlotDir = (dir: SlotPathLike) => onPath(dir, (d) => statfsSync(d));
 
