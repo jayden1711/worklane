@@ -512,8 +512,8 @@ test("the workflow runs the check on every pull request that changes .worklane/ 
   const wf = parse(text) as { on: Record<string, Record<string, unknown>>; permissions: Record<string, string>; jobs: Record<string, { if?: unknown; steps: { run?: string; if?: unknown }[] }> };
   assert.deepEqual(Object.keys(wf.on), ['pull_request']);
   assert.deepEqual(wf.on.pull_request!.paths, ['.worklane/**', 'scripts/bootstrap.sh'], 'every PR that changes .worklane/ or the file holding the engine pin, and only those');
-  // Each push, and each label change (the owner's engine-rollback label re-runs it, and so does its removal).
-  assert.deepEqual(wf.on.pull_request!.types, ['opened', 'synchronize', 'reopened', 'labeled', 'unlabeled'], 'each push to such a PR, and each label change');
+  // Each push. Never a label change (#615, test/ci-slow-trigger.test.ts): the owner re-runs it after the rollback label.
+  assert.deepEqual(wf.on.pull_request!.types, ['opened', 'synchronize', 'reopened'], 'each push to such a PR');
   assert.equal(wf.on.pull_request!['paths-ignore'], undefined);
   // Read-only: the code, and the PR's timeline and labels (the rollback override). Nothing it can write.
   assert.deepEqual(wf.permissions, { contents: 'read', issues: 'read', 'pull-requests': 'read' });
