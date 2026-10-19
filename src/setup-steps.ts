@@ -275,6 +275,17 @@ export interface Checking {
 }
 
 const ok = (detail: string): Detected => ({ done: true, detail });
+/**
+ * Server: doctor's warning when root's claude-account record has no line for this instance's agent user. The step
+ * then keeps main's verdict, without a login method to check (#738; the owner's option (a), 2026-10-19).
+ */
+export function agentRecordWarning(c: SetupContext): string | null {
+  if (c.mode !== 'server' || !c.instance) return null;
+  const m = { ...MACHINE_PATHS, ...c.machine };
+  if (readAccountStatus(m.claudeAccountDir)?.users.some((x) => x.instance === c.instance && x.kind === 'agent')) return null;
+  return `no Claude account recorded for ${c.instance}; the setup step can't check its login method. As root: sudo bash ${m.engine}/scripts/setup/claude-account.sh status ${c.instance}`;
+}
+
 /** Server: credentials.yaml alone (its repo config isn't valid while the setup PR waits), or the stand-in facts. */
 function agentCredentials(k: Checking): { agent_api_key?: string | undefined } | { error: string } {
   if (k.c.instanceFacts) {

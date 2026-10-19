@@ -16,7 +16,7 @@ import { emptyAutoConfig, SETUP_BRANCH } from '../src/auto-config.js';
 import { loadConfig, loadConfigAt } from '../src/config/load.js';
 import { localServiceSpec } from '../src/service.js';
 import { initInstance } from '../src/instance.js';
-import { doctor } from '../src/doctor.js';
+import { doctor, setupChecks } from '../src/doctor.js';
 import { projectStateDir } from '../src/guardrails/context.js';
 import { firstRunLiveView, initCommand, localInitFile, newState, readInitState, setupContext, type InitArgs, type InitIo } from '../src/init.js';
 import { CliRunner, type RunRequest } from '../src/runner.js';
@@ -413,6 +413,29 @@ test('#738 round 3: server mode while the setup PR waits (the checkout has no va
   writeFileSync(creds, `${readFileSync(creds, 'utf8')}agent_api_key: ${JSON.stringify(join(dir, 'gamma', 'agent-key'))}\n`);
   assert.equal(step('api_key_helper').done, true, step('api_key_helper').detail);
   assert.match(step('claude.ai').detail, /the instance runs on an API key \(credentials\.yaml agent_api_key\)/);
+});
+
+test("#738, the owner's option (a): a server with no claude-account record keeps main's verdict, and doctor warns that the login method can't be checked", () => {
+  const accountDir = join(mkdtempSync(join(tmpdir(), 'cr-machine-')), 'claude-account');
+  const cfgDir = mkdtempSync(join(tmpdir(), 'cr-agent-claude-'));
+  const facts = { home: mkdtempSync(join(tmpdir(), 'cr-inst-')), credentials: { github: { kind: 'app' as const, key_path: '/nowhere/app.pem' }, claude: { config_dir: cfgDir } } };
+  const root = existingProject('cli');
+  const scratch = { [`${BRAND.envPrefix}_MACHINE_INIT_DIR`]: mkdtempSync(join(tmpdir(), 'cr-init-')), [`${BRAND.envPrefix}_INSTANCES_DIR`]: mkdtempSync(join(tmpdir(), 'cr-instances-')) };
+  const lines = () => withEnv(scratch, () => setupChecks(root, { mode: 'server', instance: 'shop', initIo: world({ method: null }).io, context: { machine: { claudeAccountDir: accountDir, engine: '/opt/engine/current' }, instanceFacts: () => facts } }));
+  const named = (ls: ReturnType<typeof lines>, name: string) => ls.find((l) => l.name === name);
+  // No record: the step as on main (done, the stored login), and doctor's warning with the root command.
+  const none = lines();
+  assert.deepEqual([named(none, 'setup step claude-token')?.level, named(none, 'setup step claude-token')?.detail], ['ok', `The agents' Claude login (server mode): the agents' Claude login is stored (${cfgDir})`]);
+  assert.deepEqual(named(none, 'setup claude-account record'), { name: 'setup claude-account record', level: 'warn', detail: "no Claude account recorded for shop; the setup step can't check its login method. As root: sudo bash /opt/engine/current/scripts/setup/claude-account.sh status shop" });
+  // A record for this instance's agent user: no warning, and its method is checked.
+  mkdirSync(accountDir, { recursive: true });
+  writeFileSync(join(accountDir, 'status.json'), JSON.stringify({ at: '2026-10-19T10:00:00Z', users: [{ instance: 'shop', kind: 'agent', user: 'wl-shop-agent', stored: true, logged_in: true, auth_method: 'claude.ai', token_id: '0123abcd' }] }));
+  const recorded = lines();
+  assert.equal(named(recorded, 'setup claude-account record'), undefined);
+  assert.equal(named(recorded, 'setup step claude-token')?.level, 'ok');
+  // Another instance's record, or the eval user's, is not this one's: the warning stays.
+  writeFileSync(join(accountDir, 'status.json'), JSON.stringify({ at: '2026-10-19T10:00:00Z', users: [{ instance: 'other', kind: 'agent', user: 'wl-other-agent', stored: true, logged_in: true, auth_method: 'claude.ai' }, { instance: 'shop', kind: 'eval', user: 'wl-shop-eval', stored: true, logged_in: true, auth_method: 'claude.ai' }] }));
+  assert.equal(named(lines(), 'setup claude-account record')?.level, 'warn');
 });
 
 test("#738 round 3: a key file path read back from init's state is shown only when it is a plain absolute path", () => {
