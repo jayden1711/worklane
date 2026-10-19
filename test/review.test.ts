@@ -272,10 +272,16 @@ const namesLockScopeModule = (s: string): boolean => {
  *   decoded, a query or fragment cut off, %-escapes decoded), so no file holds a namespace object to walk;
  * - no module path has `?`, `#` or `%` in it (src/ uses none), which can name the same module in a form this can't match;
  * - `import()`, `require()`, `<x>.require()` and `createRequire(…)(…)` take a plain string (a template with no `${}`
- *   is one), so the module they load is one this can read.
+ *   is one), so the module they load is one this can read;
+ * - `require` and `createRequire` (a name, or a property's name) stand only as the direct callee of a call whose first
+ *   argument is a plain string. Never parenthesized, after a comma, as `.call`/`.apply`/`.bind`'s object, passed as
+ *   an argument, held in a variable, destructured, renamed on import or imported at all, so neither reaches a call
+ *   this can't see under its own name (src/ uses neither but as a plain-string call).
  * The call's shape isn't checked: readLockScope takes the instance and its repo and nothing else (#747).
- * Out of its reach: `require` (or createRequire's function) under another name, called with a path built at run time;
- * eval and new Function; and code run by path (a child process, or a file loaded by a path this can't read).
+ * Out of its reach: `require`/`createRequire` reached by a computed key (`globalThis['req' + 'uire']`); the function
+ * a plain-string `createRequire('…')` returns, held under another name and called with a path built at run time;
+ * another loader (`Module._load` and the like); eval and new Function; and code run by path (a child process, or a
+ * file loaded by a path this can't read).
  */
 export function lockScopeFindings(file: string, text: string): string[] {
   if (file === 'src/managed-apps.ts') return [];
@@ -293,6 +299,13 @@ export function lockScopeFindings(file: string, text: string): string[] {
   const named = (e: ts.Expression, name: string) => (ts.isIdentifier(e) && e.text === name) || (ts.isPropertyAccessExpression(e) && e.name.text === name);
   /** A call that loads a module: import(…), require(…), <x>.require(…), createRequire(…)(…). */
   const loads = (c: ts.CallExpression) => c.expression.kind === ts.SyntaxKind.ImportKeyword || named(c.expression, 'require') || (ts.isCallExpression(c.expression) && named(c.expression.expression, 'createRequire'));
+  const plain = (a: ts.Expression | undefined) => !!a && (ts.isStringLiteral(a) || ts.isNoSubstitutionTemplateLiteral(a));
+  /** `require`/`createRequire` as anything but the direct callee of a plain-string call: `n` the name, `ref` what it names. */
+  const looseLoader = (n: ts.Identifier): ts.Node | null => {
+    const ref = ts.isPropertyAccessExpression(n.parent) && n.parent.name === n ? n.parent : n;
+    const call = ref.parent;
+    return ts.isCallExpression(call) && call.expression === ref && plain(call.arguments[0]) ? null : ref;
+  };
   // Every module path: a static import's or export's, import = require()'s, and a loading call's plain string.
   const paths = new Set<ts.Node>();
   const visit = (n: ts.Node): void => {
@@ -300,8 +313,12 @@ export function lockScopeFindings(file: string, text: string): string[] {
     if (ts.isExternalModuleReference(n)) paths.add(n.expression);
     if (ts.isCallExpression(n) && loads(n)) {
       const a = n.arguments[0];
-      if (a && (ts.isStringLiteral(a) || ts.isNoSubstitutionTemplateLiteral(a))) paths.add(a);
+      if (plain(a)) paths.add(a!);
       else at(n, 'a module loaded by a path that is not a plain string');
+    }
+    if (ts.isIdentifier(n) && (n.text === 'require' || n.text === 'createRequire')) {
+      const loose = looseLoader(n);
+      if (loose) at(loose.parent ?? loose, 'require or createRequire other than called directly with a plain string');
     }
     if (ts.isStringLiteralLike(n)) {
       if (paths.has(n) && /[?#%]/.test(n.text)) at(n, 'a module path with ?, # or %');
@@ -335,6 +352,8 @@ const NAMESPACE = "import * as m from './managed-apps.js';\n";
 const MODULE = /its module reached other than by a static named import/;
 const MARKS = /a module path with \?, # or %/;
 const NOT_PLAIN = /a module loaded by a path that is not a plain string/;
+const LOOSE = /require or createRequire other than called directly with a plain string/;
+const BUILT = "'./managed-' + 'apps.js'";
 /** What the lint must refuse, and why: each a fixture, so none is ever planted in src/ (#771). The file is src/x.ts unless named. */
 export const LOCK_SCOPE_BAD: [string, string, RegExp, string?][] = [
   // PR #765's round-1 review: the module edge.
@@ -381,6 +400,23 @@ export const LOCK_SCOPE_BAD: [string, string, RegExp, string?][] = [
   ['import(), a variable', 'const m = await import(spec);', NOT_PLAIN],
   ['import(), a tagged template', 'const m = await import(String.raw`./managed-apps.js`);', NOT_PLAIN],
   ['require() with no path', 'const m = require();', NOT_PLAIN],
+  // PR #765's round-3 review: require reached other than as a plain-string call's callee, with a path built at run time.
+  ['(require)()', `const m = (require)(${BUILT});`, LOOSE],
+  ['(require)() in a .cjs file', `const m = (require)(${BUILT});`, LOOSE, 'src/x.cjs'],
+  ['(0, require)()', `const m = (0, require)(${BUILT});`, LOOSE],
+  ['require.call()', `const m = require.call(null, ${BUILT});`, LOOSE],
+  ['require.apply()', `const m = require.apply(null, [${BUILT}]);`, LOOSE],
+  ['require.bind()', `const m = require.bind(null)(${BUILT});`, LOOSE],
+  ['Reflect.apply(require)', `const m = Reflect.apply(require, null, [${BUILT}]);`, LOOSE],
+  ['require in a variable', `const r = require;\nconst m = r(${BUILT});`, LOOSE],
+  ['require passed as an argument', `const m = load(require, ${BUILT});`, LOOSE],
+  ['require in an object', `const o = { r: require };\nconst m = o.r(${BUILT});`, LOOSE],
+  ['require destructured off module', `const { require: r } = module;\nconst m = r(${BUILT});`, LOOSE],
+  ['module.require.call()', `const m = module.require.call(module, ${BUILT});`, LOOSE],
+  ['(module.require)()', `const m = (module.require)(${BUILT});`, LOOSE],
+  ["createRequire's function in a variable", `const r = createRequire(import.meta.url);\nconst m = r(${BUILT});`, LOOSE],
+  ['createRequire renamed on import', `import { createRequire as cr } from 'node:module';\nconst m = cr(import.meta.url)(${BUILT});`, LOOSE],
+  ['createRequire passed as an argument', `const m = load(createRequire, ${BUILT});`, LOOSE],
 ];
 /** What it must let through. */
 export const LOCK_SCOPE_GOOD: [string, string, string?][] = [
