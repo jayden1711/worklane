@@ -27,7 +27,9 @@
 import { Buffer, isUtf8 } from 'node:buffer';
 import { spawnSync } from 'node:child_process';
 import type { SizeFile } from '../pr-rules.js';
-import { isGitattributesPath, isGitmodulesPath, macroDefined, type ChangeFile } from '../review.js';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { attributeStateHides, isGitattributesPath, isGitmodulesPath, macrosDefined, OUTCOME_ATTRIBUTES, type ChangeFile } from '../review.js';
 
 const MAX_BUFFER = 256 * 1024 * 1024;
 
@@ -215,7 +217,13 @@ export function changeFiles(cwd: string, base: string, head: string): ChangeFile
   // harmless-looking name a macro shadows (`[attr]eol -diff` on main, then `*.job eol`) is read as the macro.
   if (files.some((f) => isGitattributesPath(f.path))) {
     const macros = [...new Set([...attributeMacros(cwd, base), ...attributeMacros(cwd, head)])];
-    for (const f of files) if (isGitattributesPath(f.path)) f.attributeMacros = macros;
+    // And git judges the outcome itself: every path's attributes on the base tree against the head tree.
+    const outcome = attributeOutcome(cwd, base, head);
+    for (const f of files) {
+      if (!isGitattributesPath(f.path)) continue;
+      f.attributeMacros = macros;
+      f.attributeOutcome = outcome;
+    }
   }
   // A .gitmodules is read by git's own config parser on both sides (review.ts hidesSubmodules): an `ignore` already on
   // main that the change moves onto a new link (by editing `path`) counts as much as one the change adds.
@@ -231,13 +239,102 @@ function attributeMacros(cwd: string, rev: string): string[] {
     const tab = rec.indexOf(9);
     const [, type, sha] = rec.subarray(0, tab).toString('latin1').split(' ');
     if (type !== 'blob' || !sha || !isGitattributesPath(rec.subarray(tab + 1).toString('latin1'))) continue;
-    for (const line of must(runBytes(cwd, ['cat-file', 'blob', sha])).toString('utf8').split('\n')) {
-      const name = macroDefined(line);
-      if (name) out.push(name);
-    }
+    for (const line of must(runBytes(cwd, ['cat-file', 'blob', sha])).toString('utf8').split('\n')) out.push(...macrosDefined(line));
   }
   return out;
 }
+
+/**
+ * `git check-attr --source=<tree>` came in git 2.40: an older git can't judge a tree's attributes, so the outcome
+ * check fails closed. Not exported: this module exports functions only (a test holds it).
+ */
+const MIN_GIT_FOR_ATTRIBUTE_SOURCE: readonly [number, number] = [2, 40];
+
+/** The running git's major and minor version (`git version 2.43.0`), or null when it can't be read. Asked each time: it's one spawn, only when a .gitattributes changes. */
+function gitVersion(cwd: string): [number, number] | null {
+  const m = /git version (\d+)\.(\d+)/.exec(runStatus(cwd, ['version']).stdout);
+  return m ? [Number(m[1]), Number(m[2])] : null;
+}
+
+/**
+ * Whether the repo's `$GIT_DIR/info/attributes` holds any rule. It outranks every tree's .gitattributes (measured:
+ * `* diff` there turned a base tree's `-diff` into `set`), so with one, a tree's change can be masked and the outcome
+ * check can't judge.
+ */
+function infoAttributesInUse(cwd: string): boolean {
+  const r = runStatus(cwd, ['rev-parse', '--git-path', 'info/attributes']);
+  if (r.status !== 0) return true;
+  let text: string;
+  try {
+    text = readFileSync(resolve(cwd, r.stdout.trim()), 'utf8');
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code !== 'ENOENT';
+  }
+  return text.split('\n').some((l) => l.replace(/^[ \t\r\n]*/, '') !== '' && !l.replace(/^[ \t\r\n]*/, '').startsWith('#'));
+}
+
+/** Every path of `rev`'s tree, as bytes keyed by their latin1 reading (`ls-tree -r -z --name-only`). */
+function treePaths(cwd: string, rev: string): Map<string, Buffer> {
+  return new Map(fields(must(runBytes(cwd, ['ls-tree', '-r', '-z', '--name-only', rev, '--']))).filter((b) => b.length).map((b) => [b.toString('latin1'), b]));
+}
+
+/**
+ * Each path's state of every OUTCOME_ATTRIBUTES attribute in `rev`'s tree, as git itself reads the tree's
+ * .gitattributes (`check-attr --source=<rev> -z --stdin`): no user attributes file (GIT), no system one
+ * (GIT_ATTR_NOSYSTEM), and the worktree's .gitattributes not read (measured). Keyed by the path's latin1 reading, then
+ * the attribute; null when git fails.
+ */
+function attributeStates(cwd: string, rev: string, paths: Buffer[]): Map<string, Map<string, string>> | null {
+  const input = Buffer.concat(paths.flatMap((p) => [p, Buffer.from([0])]));
+  const r = spawnSync('git', withGit(['check-attr', `--source=${rev}`, '-z', '--stdin', ...OUTCOME_ATTRIBUTES]), { cwd, input, encoding: 'buffer', maxBuffer: MAX_BUFFER, env: { ...process.env, GIT_ATTR_NOSYSTEM: '1' } });
+  if (r.error || r.status !== 0) return null;
+  const out = new Map<string, Map<string, string>>();
+  // -z: "path NUL attribute NUL state NUL" for each path and attribute.
+  const parts = fields(r.stdout);
+  for (let i = 0; i + 2 < parts.length; i += 3) {
+    const key = parts[i]!.toString('latin1');
+    if (!out.has(key)) out.set(key, new Map());
+    out.get(key)!.set(parts[i + 1]!.toString('latin1'), parts[i + 2]!.toString('utf8'));
+  }
+  return out;
+}
+
+/**
+ * What a change does to attributes, as git itself judges it (the outcome check, #693): every path of either tree (a
+ * deletion, an addition and both sides of a rename included) is asked of the base tree and of the head tree, and each
+ * attribute whose state differs and now hides the file (review.ts attributeStateHides) is listed (`path: diff
+ * unspecified -> unset`). git parses the .gitattributes, so no line format of ours can disagree with it: macros, quoting,
+ * BOMs and whitespace are all git's. null when git can't judge (older than MIN_GIT_FOR_ATTRIBUTE_SOURCE, a rule in
+ * `$GIT_DIR/info/attributes`, or a failure), which review.ts counts as hiding.
+ */
+export function attributeOutcome(cwd: string, base: string, head: string): string[] | null {
+  const v = gitVersion(cwd);
+  const [major, minor] = MIN_GIT_FOR_ATTRIBUTE_SOURCE;
+  if (!v || v[0] < major || (v[0] === major && v[1] < minor)) return null;
+  if (infoAttributesInUse(cwd)) return null;
+  const all = new Map([...treePaths(cwd, base), ...treePaths(cwd, head)]);
+  const paths = [...all.values()];
+  const before = attributeStates(cwd, base, paths);
+  const after = attributeStates(cwd, head, paths);
+  if (!before || !after) return null;
+  const out: string[] = [];
+  let more = 0;
+  for (const [key, bytes] of all) {
+    for (const attr of OUTCOME_ATTRIBUTES) {
+      const was = before.get(key)?.get(attr) ?? 'unspecified';
+      const now = after.get(key)?.get(attr) ?? 'unspecified';
+      if (now === was || !attributeStateHides(attr, now)) continue;
+      // The first OUTCOME_SHOWN, then a count: a `*` mark on a big tree hides every path (100,000 measured).
+      if (out.length < OUTCOME_SHOWN) out.push(`${nameOf(bytes)}: ${attr} ${was} -> ${now}`);
+      else more++;
+    }
+  }
+  if (more) out.push(`and ${more} more`);
+  return out;
+}
+
+/** How many of the outcome check's findings are listed by name. */
+const OUTCOME_SHOWN = 10;
 
 /** git's exit status and stdout, for the calls whose status is an answer (`cat-file -e`, `config --get-regexp`). */
 function runStatus(cwd: string, args: string[]): { status: number | null; stdout: string } {

@@ -71,23 +71,39 @@ export const ODD_PATH_CATEGORIES: readonly string[] = [CONTROL_CHARACTER_PATH, N
  * file). Taking away a line that turned one of those off (`*.sql -filter`), or a macro definition, counts too. A
  * changed .gitmodules whose base or head sets any `ignore` to anything but `none`, as git's own config parser reads it
  * (or that git can't parse), counts the same: it hides submodule links, including one an existing `ignore = all` is
- * moved onto by editing `path`. Any spelling a file system opens as either file (`.GitAttributes`, a trailing dot,
- * an 8.3 short name) counts. The harness's own readers ignore attributes and submodule
+ * moved onto by editing `path`. Any name git's own fsck treats as either file (`.GitAttributes`, a trailing dot, an
+ * 8.3 or fall-back short name) counts. Above those line checks, git judges the outcome itself (ChangeFile
+ * attributeOutcome): any path whose attributes in the head tree now hide it, by git's own reading of every
+ * .gitattributes, flags the change, whatever its lines look like. The harness's own readers ignore attributes and submodule
  * settings (coordinator/change-files.ts), but the owner reviewing on GitHub and a checkout don't, so such a change is
  * always L3 and never auto-merges (merge-policy.ts waitCategoriesOf), whatever review.yaml says (#693). Fails
  * closed: only the names below pass.
  */
 export const DIFF_HIDING_ATTRIBUTES = 'diff-hiding-attributes';
 
+/** From `i` on, only spaces and periods, then the end or an NTFS stream (`:...`). */
+const trailingOnly = (s: string, i: number): boolean => /^[ .]*(?::|$)/.test(s.slice(i));
+
 /**
- * Whether a path's last segment is `.<name>` as a file system may open it: any case, trailing dots or spaces, an NTFS
- * stream (`.gitattributes::$DATA`), or an 8.3 short name (`GITATT~1`, `GI7D29~1`), the forms git's own
- * is_ntfs_dotgitattributes / is_ntfs_dotgitmodules know. Fails closed: such a name is judged as the real file.
+ * Whether a path's last segment is `.<name>` as a file system may open it. Fails closed: such a name is judged as the
+ * real file. The forms, as git documents its own check (is_ntfs_dotgitattributes / is_ntfs_dotgitmodules) and as `git
+ * fsck --strict` classifies names (measured in test/change-files-renames.test.ts against git itself):
+ * - `.<name>` in any case, then only spaces or periods, then the end or an NTFS stream (`.gitattributes::$DATA`);
+ * - the 8.3 short name: the first 6 letters of the name, `~`, a digit 1-4 (`GITATT~1`), then the same tail;
+ * - the fall-back short name NTFS makes from a hash, 8 characters long: k (0 to 6) ASCII characters that are the first k
+ *   of `hash` in any case, then `~`, a digit 1-9 and digits to the 8th character (`GI7D29~1`, `gi7eb~10`, `g~123456`),
+ *   then the same tail.
+ * Written here from that description, not from git's source.
  */
-function isDotFile(path: string, name: string, shortHash: string): boolean {
-  const base = (path.split('/').pop() ?? '').toLowerCase();
-  const tail = '[ .]*(?::.*)?$';
-  return new RegExp(`^\\.${name}${tail}`).test(base) || new RegExp(`^${name.slice(0, 6)}~[1-4]${tail}`).test(base) || new RegExp(`^${shortHash}~[1-9]${tail}`).test(base);
+function isDotFile(path: string, name: string, hash: string): boolean {
+  const base = path.split('/').pop() ?? '';
+  const lower = base.toLowerCase();
+  if (lower.startsWith(`.${name}`) && trailingOnly(lower, name.length + 1)) return true;
+  if (new RegExp(`^${name.slice(0, 6)}~[1-4]`).test(lower) && trailingOnly(lower, 8)) return true;
+  const k = base.indexOf('~');
+  if (k < 0 || k > 6 || base.length < 8) return false;
+  const prefix = base.slice(0, k);
+  return /^[\x00-\x7f]*$/.test(prefix) && prefix.toLowerCase() === hash.slice(0, k) && /^[1-9][0-9]*$/.test(base.slice(k + 1, 8)) && trailingOnly(base, 8);
 }
 /** A .gitattributes in any directory, in any case or other spelling a file system opens as one. */
 export const isGitattributesPath = (path: string): boolean => isDotFile(path, 'gitattributes', 'gi7d29');
@@ -132,21 +148,30 @@ function cUnquote(s: string): { value: string; rest: string } | null {
   return null;
 }
 
+/** git's blanks in a .gitattributes line (attr.c): only these are skipped before a comment or a quoted pattern. */
+const GIT_BLANK = /^[ \t\r\n]*/;
+
 /**
  * A .gitattributes line as git's attr.c parse_attr_line reads it: its pattern (C-unquoted when it starts with `"`)
  * and what follows it; null for a blank line or a comment; 'unreadable' when a quoted pattern can't be unquoted.
- * Whitespace is JavaScript's (a superset of git's blanks), so a line splits into at least git's attributes.
+ * Before the pattern only git's blanks are skipped (a leading NBSP, U+3000 or `\v` is part of the pattern to git, so
+ * `<NBSP>#* -diff` is a pattern with `-diff`, not a comment). After it, attributes split on any JavaScript whitespace,
+ * which reads at least the attributes git reads. A line that starts with a BOM is judged both ways by the callers
+ * (lineForms): git strips one only on a file's first line.
  */
 function attrLine(line: string): { pattern: string; rest: string } | 'unreadable' | null {
-  const t = line.replace(/^﻿/, '').trimStart();
+  const t = line.replace(GIT_BLANK, '');
   if (!t || t.startsWith('#')) return null;
   if (t.startsWith('"')) {
     const u = cUnquote(t);
     return u ? { pattern: u.value, rest: u.rest } : 'unreadable';
   }
-  const m = /^(\S+)([\s\S]*)$/.exec(t)!;
+  const m = /^([^ \t\r\n]+)([\s\S]*)$/.exec(t)!;
   return { pattern: m[1]!, rest: m[2]! };
 }
+
+/** A line as git may read it: itself, and without a leading BOM too (git drops one on line 1 only). */
+const lineForms = (line: string): string[] => (line.startsWith('﻿') ? [line, line.slice(1)] : [line]);
 
 /** The attributes of a .gitattributes line: what follows its pattern (or `[attr]name`); none for a blank line or a comment. */
 function attributesOf(line: string): { sign: string; name: string; value: string | undefined }[] {
@@ -162,24 +187,31 @@ function attributesOf(line: string): { sign: string; name: string; value: string
  * A macro definition, or a line that may be one: its pattern, unquoted as git does (`"[attr] eol" -diff` is a macro to
  * git), starts with `[`, or it is quoted and can't be unquoted. Fails closed.
  */
-const isMacroDefinition = (line: string): boolean => {
-  const p = attrLine(line);
-  return p === 'unreadable' || (p !== null && p.pattern.startsWith('['));
-};
+const isMacroDefinition = (line: string): boolean =>
+  lineForms(line).some((l) => {
+    const p = attrLine(l);
+    return p === 'unreadable' || (p !== null && p.pattern.startsWith('['));
+  });
 
 /**
- * The macro a .gitattributes line defines, as git reads it: `[attr]` then optional blanks then the name, from the
- * unquoted pattern; '*' (every name) when the line may define one whose name can't be read (fails closed); null when it
- * defines none.
+ * The macros a .gitattributes line defines, as git reads it: `[attr]` then optional blanks then the name, from the
+ * unquoted pattern; '*' (every name) when the line may define one whose name can't be read (fails closed). Both forms
+ * of a line with a leading BOM count.
  */
-export function macroDefined(line: string): string | null {
-  const p = attrLine(line);
-  if (p === null) return null;
-  if (p === 'unreadable') return '*';
-  if (!p.pattern.startsWith('[')) return null;
-  const m = /^\[attr\][ \t\r\n]*([^ \t\r\n]+)/.exec(p.pattern);
-  return m ? m[1]! : '*';
+export function macrosDefined(line: string): string[] {
+  return lineForms(line).flatMap((l) => {
+    const p = attrLine(l);
+    if (p === null) return [];
+    if (p === 'unreadable') return ['*'];
+    if (!p.pattern.startsWith('[')) return [];
+    const m = /^\[attr\][ \t\r\n]*([^ \t\r\n]+)/.exec(p.pattern);
+    return [m ? m[1]! : '*'];
+  });
 }
+
+/** Whether a line uses a name the base or head tree defines as a macro (`*`: a definition whose name can't be read). */
+const usesMacro = (line: string, macros: readonly string[]): boolean =>
+  lineForms(line).some((l) => attributesOf(l).some(({ name }) => macros.includes(name) || macros.includes('*')));
 
 /**
  * Whether a line a change adds to a .gitattributes can hide or change what a review sees (fails closed). `macros`: the
@@ -187,30 +219,62 @@ export function macroDefined(line: string): string | null {
  * means a definition whose name couldn't be read, so every attribute counts as one.
  */
 export function hidesDiff(line: string, macros: readonly string[] = []): boolean {
-  if (isMacroDefinition(line)) return true;
-  return attributesOf(line).some(({ sign, name, value }) => {
-    if (macros.includes(name) || macros.includes('*')) return true;
-    if (HARMLESS_ATTRIBUTES.has(name)) return false;
-    // `diff` set (always text), unspecified, or a driver git ships; `-diff` and any other driver hide or change lines.
-    if (name === 'diff') return sign === '-' || (value !== undefined && !BUILTIN_DIFF_DRIVERS.has(value));
-    // Turning GitHub's fold off, or a filter off, shows more.
-    if ((name === 'linguist-generated' && (sign !== '' || value === 'false')) || (name === 'filter' && sign !== '')) return false;
-    return true;
-  });
+  if (isMacroDefinition(line) || usesMacro(line, macros)) return true;
+  return lineForms(line).some((l) =>
+    attributesOf(l).some(({ sign, name, value }) => {
+      if (HARMLESS_ATTRIBUTES.has(name)) return false;
+      // `diff` set (always text), unspecified, or a driver git ships; `-diff` and any other driver hide or change lines.
+      if (name === 'diff') return sign === '-' || (value !== undefined && !BUILTIN_DIFF_DRIVERS.has(value));
+      // Turning GitHub's fold off, or a filter off, shows more.
+      if ((name === 'linguist-generated' && (sign !== '' || value === 'false')) || (name === 'filter' && sign !== '')) return false;
+      return true;
+    }),
+  );
 }
 
 /**
  * Whether a line a change takes out of a .gitattributes had turned off something that hides (`*.sql -filter`, `*.sql
- * diff`), or defined a macro (the lines that use it now mean something else).
+ * diff`), defined a macro (the lines that use it now mean something else), or used one (`*.ts showme`, where a macro on
+ * main turns the diff back on: taking it away lets an earlier `-diff` hide the file). `macros` as for hidesDiff.
  */
-export function unhidLine(line: string): boolean {
-  if (isMacroDefinition(line)) return true;
-  return attributesOf(line).some(({ sign, name, value }) => {
-    if (HARMLESS_ATTRIBUTES.has(name)) return false;
-    if (name === 'diff') return sign === '!' || (sign === '' && value === undefined);
-    return sign !== '' || value === 'false';
-  });
+export function unhidLine(line: string, macros: readonly string[] = []): boolean {
+  if (isMacroDefinition(line) || usesMacro(line, macros)) return true;
+  return lineForms(line).some((l) =>
+    attributesOf(l).some(({ sign, name, value }) => {
+      if (HARMLESS_ATTRIBUTES.has(name)) return false;
+      if (name === 'diff') return sign === '!' || (sign === '' && value === undefined);
+      return sign !== '' || value === 'false';
+    }),
+  );
 }
+
+/**
+ * Whether an attribute's state, as `git check-attr` reports it, can hide or change what a review of the file sees:
+ * `diff` unset (binary) or set to a driver git doesn't ship, `binary` set, `text` unset, a `filter` or a
+ * `working-tree-encoding` (a checkout gets other bytes than the blob), `linguist-generated` (GitHub folds the file).
+ * `merge` and git's own diff drivers change nothing a review reads.
+ */
+export function attributeStateHides(attr: string, state: string): boolean {
+  const set = state !== 'unspecified' && state !== 'unset';
+  switch (attr) {
+    case 'diff':
+      return state === 'unset' || (set && state !== 'set' && !BUILTIN_DIFF_DRIVERS.has(state));
+    case 'binary':
+      return state === 'set';
+    case 'text':
+      return state === 'unset';
+    case 'filter':
+    case 'working-tree-encoding':
+      return set;
+    case 'linguist-generated':
+      return set && state !== 'false';
+    default:
+      return false;
+  }
+}
+
+/** The attributes the outcome check asks git about (coordinator/change-files.ts attributeOutcome). */
+export const OUTCOME_ATTRIBUTES = ['diff', 'binary', 'text', 'merge', 'filter', 'working-tree-encoding', 'linguist-generated'] as const;
 
 /**
  * Whether a changed .gitmodules can hide a submodule's changes from `git diff` and `git status`, from what git's own
@@ -358,6 +422,13 @@ export interface ChangeFile {
    * head side (null for a key with no value); null when git can't parse a side (#693).
    */
   submoduleIgnores?: (string | null)[] | null;
+  /**
+   * On a .gitattributes only: what git itself says the change does to attributes (coordinator/change-files.ts
+   * attributeOutcome): each path whose state of an OUTCOME_ATTRIBUTES attribute differs between the base and head trees
+   * and now hides it (`path: diff unspecified -> unset`); null when git can't judge (too old for `check-attr --source`,
+   * a `$GIT_DIR/info/attributes` that would mask the trees, or a failure), which counts as hiding (#693).
+   */
+  attributeOutcome?: string[] | null;
 }
 
 export interface LevelInput {
@@ -412,8 +483,14 @@ export function computeLevel(input: LevelInput, cfg: ReviewConfig, extraCategori
     if (isNonUtf8Path(f.path)) add(NON_UTF8_PATH, f.path);
     if (hasInvisibleCharacter(f.path)) add(INVISIBLE_CHARACTER_PATH, f.path);
     if (hasNonAsciiTopLevel(f.path)) add(NON_ASCII_TOP_LEVEL_PATH, f.path);
-    // A .gitattributes read by anything but changeFiles has no macro list: every name may be a macro (fails closed).
-    if (isGitattributesPath(f.path) && ((f.addedLines ?? []).some((l) => hidesDiff(l, f.attributeMacros ?? ['*'])) || (f.removedLines ?? []).some(unhidLine))) add(DIFF_HIDING_ATTRIBUTES, f.path);
+    // Two layers. The outcome: git itself (check-attr on the base and head trees) found a path whose attributes now
+    // hide it, or couldn't judge (null). The lines: what the change adds or takes away. A .gitattributes read by
+    // anything but changeFiles has no macro list, so every name may be a macro (fails closed).
+    if (isGitattributesPath(f.path)) {
+      const macros = f.attributeMacros ?? ['*'];
+      const outcome = f.attributeOutcome === null || (f.attributeOutcome?.length ?? 0) > 0;
+      if (outcome || (f.addedLines ?? []).some((l) => hidesDiff(l, macros)) || (f.removedLines ?? []).some((l) => unhidLine(l, macros))) add(DIFF_HIDING_ATTRIBUTES, f.path);
+    }
     if (isGitmodulesPath(f.path) && hidesSubmodules(f)) add(DIFF_HIDING_ATTRIBUTES, f.path);
   }
   const lines = input.files.reduce((n, f) => n + f.added + f.removed, 0);
