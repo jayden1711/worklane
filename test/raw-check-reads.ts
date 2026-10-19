@@ -160,6 +160,48 @@ export function judgedCasts(files: Record<string, string>, root = repoRoot): { f
   return out;
 }
 
+/**
+ * The JudgedChecks makers and the only src/ files that may use them (besides check-source.ts itself): a caller
+ * elsewhere could brand data from anywhere (withTestRuns' `local`, or a PinnedChecks over a stand-in backlog).
+ */
+export const MAKERS_ALLOWED: Record<string, string[]> = {
+  withTestRuns: ['src/ci-none.ts'],
+  PinnedChecks: ['src/coordinator/merge-flow.ts'],
+};
+
+/** Each reference in `files` to a JudgedChecks maker (withTestRuns, PinnedChecks; aliases and re-exports too) outside the files MAKERS_ALLOWED names. */
+export function makerUses(files: Record<string, string>, root = repoRoot): { file: string; line: number; maker: string }[] {
+  const { byPath, program } = programOf(files, root);
+  const checker = program.getTypeChecker();
+  const out: { file: string; line: number; maker: string }[] = [];
+  for (const path of byPath.keys()) {
+    const sf = program.getSourceFile(path);
+    if (!sf) continue;
+    const file = relative(root, path).split('\\').join('/');
+    if (file === 'src/check-source.ts') continue;
+    const visit = (node: ts.Node): void => {
+      // A namespace import or a dynamic import of check-source.ts reaches the makers by a string key (`cs['withTestRuns']`), which no identifier names.
+      const spec = ts.isImportDeclaration(node) && node.importClause?.namedBindings && ts.isNamespaceImport(node.importClause.namedBindings) ? node.moduleSpecifier : ts.isCallExpression(node) && node.expression.kind === ts.SyntaxKind.ImportKeyword ? node.arguments[0] : undefined;
+      if (spec && (!ts.isStringLiteralLike(spec) || /(^|\/)check-source(\.js)?$/.test(spec.text))) {
+        out.push({ file, line: sf.getLineAndCharacterOfPosition(node.getStart(sf)).line + 1, maker: '* (namespace or dynamic import)' });
+      }
+      if (ts.isIdentifier(node)) {
+        let sym = checker.getSymbolAtLocation(node);
+        if (sym && sym.flags & ts.SymbolFlags.Alias) sym = checker.getAliasedSymbol(sym);
+        const decl = sym?.declarations?.[0];
+        const from = decl ? relative(root, decl.getSourceFile().fileName).split('\\').join('/') : '';
+        const maker = sym?.name;
+        if (from === 'src/check-source.ts' && maker && Object.hasOwn(MAKERS_ALLOWED, maker) && !MAKERS_ALLOWED[maker]!.includes(file)) {
+          out.push({ file, line: sf.getLineAndCharacterOfPosition(node.getStart(sf)).line + 1, maker });
+        }
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(sf);
+  }
+  return out;
+}
+
 /** Each import in `files` (static, re-export or dynamic) of a module under test/: src/ never ships with test/. */
 export function testImports(files: Record<string, string>, root = repoRoot): { file: string; spec: string }[] {
   const testDir = resolve(root, 'test');

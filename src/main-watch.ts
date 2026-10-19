@@ -202,14 +202,17 @@ export function outcomesAt(required: string[], runs: CheckRunAt[], statuses: Sta
 }
 
 /**
- * #727: a pinned check's outcome at merge time `at` (the owner's rule, 2026-10-19):
- * - `own`, its pinned source's runs: only the latest started by then counts, by the runs' own order (the later
- *   workflow run, then the later check run, as a re-run attempt is; never the list's order), so a later run of that
- *   source supersedes its earlier or cancelled ones; none: missing;
- * - when that one passed, any run of the name from another source (`other`: another App, another workflow, a run for
- *   another head) that isn't a pass then, or the name's latest commit status that isn't success, blocks it.
+ * #727: a pinned check's outcome at merge time `at` (the owner's rule, 2026-10-19, fail-closed as in
+ * src/check-source.ts ownVerdict):
+ * - `own`, its pinned source's runs started by then, grouped by workflow file (an Actions run whose workflow can't be
+ *   read is its own group; an App that isn't Actions is one group). In every group both the latest run (by the runs'
+ *   own order: the later workflow run, then the later check run) and the newest check run (the highest id, as a re-run
+ *   of an older workflow run is) must have passed by then. So a later run of a file supersedes its own earlier or
+ *   cancelled ones, one file never supersedes another, and a later re-run that failed blocks. None: missing;
+ * - then any run of the name from another source (`other`: another App, another workflow, a run for another head)
+ *   that isn't a pass then, or the name's latest commit status that isn't success, blocks it.
  */
-export function pinnedAt(own: CheckRunAt[], other: CheckRunAt[], statuses: StatusAt[], at: string, workflowOf: (r: CheckRunAt) => { run: number } | null | undefined = () => undefined): Outcome {
+export function pinnedAt(own: CheckRunAt[], other: CheckRunAt[], statuses: StatusAt[], at: string, workflowOf: (r: CheckRunAt) => { run: number; path?: string } | null | undefined = () => undefined): Outcome {
   const t = Date.parse(at);
   const started = (r: CheckRunAt) => {
     const s = Date.parse(r.startedAt ?? r.completedAt ?? '');
@@ -221,10 +224,22 @@ export function pinnedAt(own: CheckRunAt[], other: CheckRunAt[], statuses: Statu
     return r.conclusion === 'success' ? 'pass' : 'fail';
   };
   const key = (r: CheckRunAt): [number, number, number] => [workflowOf(r)?.run ?? -1, r.id ?? -1, Date.parse(r.startedAt ?? r.completedAt ?? '')];
-  const latest = own.filter(started).sort((a, b) => key(b)[0] - key(a)[0] || key(b)[1] - key(a)[1] || key(b)[2] - key(a)[2])[0];
-  if (!latest) return 'missing';
-  const mine = state(latest);
-  if (mine !== 'pass') return mine;
+  const mineAt = own.filter(started);
+  if (!mineAt.length) return 'missing';
+  const groups = new Map<string, CheckRunAt[]>();
+  mineAt.forEach((r, i) => {
+    const w = workflowOf(r);
+    const g = w ? `file ${w.path ?? `run ${w.run}`}` : w === null ? `unread ${r.id ?? `#${i}`}` : 'app';
+    groups.set(g, [...(groups.get(g) ?? []), r]);
+  });
+  for (const g of groups.values()) {
+    const latest = [...g].sort((a, b) => key(b)[0] - key(a)[0] || key(b)[1] - key(a)[1] || key(b)[2] - key(a)[2])[0]!;
+    const newest = [...g].sort((a, b) => key(b)[1] - key(a)[1] || key(b)[2] - key(a)[2])[0]!;
+    for (const r of [latest, newest]) {
+      const s = state(r);
+      if (s !== 'pass') return s;
+    }
+  }
   for (const r of other.filter(started)) {
     const s = state(r);
     if (s !== 'pass') return s;

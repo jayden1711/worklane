@@ -9,29 +9,54 @@
 //   2. else the App GitHub's own branch protection (app_id) or ruleset (integration_id) requires for that name;
 //   3. else none: the check is judged by name, exactly as before pins (the owner's choice, 2026-10-19: an existing
 //      install keeps working), and doctor names it (checkSourceDoctor).
-// A commit status never satisfies a pin: statuses carry no App. Pinning only ever turns a match into missing. A pinned
-// check is the LATEST run from its pinned source on the commit (a later run of that source supersedes its earlier or
-// cancelled ones), and it passes only when that run passes and every check of its name from any OTHER source passes too
-// (another App, another workflow, a run for another head, a commit status): the owner's rule, 2026-10-19.
+// A commit status never satisfies a pin: statuses carry no App. The owner's rule, 2026-10-19, with its round-5
+// tightening: a pinned check's own source is grouped by workflow file (one group for an App that isn't Actions), and in
+// each group both its latest run (by workflow run, then check run) and its newest check run must pass, so a later run of
+// that file supersedes its earlier failed or cancelled runs, but one file never supersedes another, and a re-run that
+// failed after a newer run passed still blocks. Every check of its name from any OTHER source must pass too (another
+// App, another workflow, a run for another head, a commit status). The one way this is looser than judging by name:
+// a pinned file's later run on the head supersedes its own earlier failed or cancelled runs (the owner's decision).
 // Gating PRs nobody here wrote is governance mode's job (#704): it refuses to turn on while any required check is
 // unpinned (governanceRefusal). An existing install is protected once its owner pins its checks in config.yaml.
 // Without GitHub (a file backlog: Backlog.checkApps absent) nobody else can post a check, and names match as before.
 // INVARIANT: every judgement (pr-watch.ts readiness and requiredOutcomes, ci-none.ts headChecks, pr-batch.ts mayMerge,
-// fix-forward's checks) takes JudgedChecks, which only PinnedChecks.of makes, so a raw Backlog.checks read can't
-// reach one and compile without a cast or an `any`. test/raw-check-reads.ts flags those (casts, `any`/`never` values,
-// generics and type predicates into JudgedChecks, raw reads however spelled): a lint, not a run-time guarantee.
+// fix-forward's checks) takes JudgedChecks, and readiness, requiredOutcomes and withTestRuns check at run time that
+// their input was made here (assertJudged: a module-private WeakSet, the array and its checks frozen), so a cast, an
+// `any` or a mutated array throws. The two makers are PinnedChecks.of and withTestRuns; test/raw-check-reads.ts flags
+// any src/ caller of either outside merge-flow.ts and ci-none.ts, and every cast or raw read around them (a lint).
 import type { Backlog, CommitCheck } from './backlog/types.js';
 
 declare const JUDGED: unique symbol;
 /** GitHub's checks on a commit as the engine judges them (pinned): only PinnedChecks.of and withTestRuns make one. */
 export type JudgedChecks = readonly CommitCheck[] & { readonly [JUDGED]: true };
-const judged = (c: readonly CommitCheck[]): JudgedChecks => c as JudgedChecks;
+/** Every JudgedChecks this module made: a cast can't add to it. */
+const made = new WeakSet<object>();
+/** A frozen copy of `c`, each check frozen too, recorded as made here. */
+const judged = (c: readonly CommitCheck[]): JudgedChecks => {
+  const copy = Object.freeze(
+    c.map((x) => {
+      const o: CommitCheck = { ...x };
+      if (x.workflow) o.workflow = Object.freeze({ ...x.workflow });
+      return Object.freeze(o);
+    }),
+  );
+  made.add(copy);
+  return copy as unknown as JudgedChecks;
+};
+
+/** Throws unless `checks` is a JudgedChecks this module made (never a cast, an `any` or a copy of one). */
+export function assertJudged(checks: unknown): asserts checks is JudgedChecks {
+  if (typeof checks !== 'object' || checks === null || !made.has(checks) || !Object.isFrozen(checks)) {
+    throw new Error('checks to judge must come from PinnedChecks.of (src/check-source.ts): this array was not made there');
+  }
+}
 
 /**
  * No CI (src/ci-none.ts): the judged checks with every one named like a test-run check taken out, and the event log's
  * test-run checks (this instance's own runs, never GitHub's) in their place.
  */
 export function withTestRuns(github: JudgedChecks, names: ReadonlySet<string>, local: CommitCheck[]): JudgedChecks {
+  assertJudged(github);
   return judged([...github.filter((c) => !names.has(c.name)), ...local]);
 }
 
@@ -95,11 +120,34 @@ export function latestOwn<C extends Pick<CommitCheck, 'id' | 'workflow'>>(own: r
 }
 
 /**
+ * What decides a pinned source on a commit, failing closed: its runs grouped by workflow file (an Actions run whose
+ * workflow can't be read is a group of its own; an App that isn't Actions is one group), and in every group both the
+ * latest run (latestOwn) and the newest check run (the highest id: a re-run of an older workflow run is newer) must
+ * pass. One file never supersedes another, and a later re-run that failed blocks. Returns the run that decides: the
+ * first group's run that isn't a pass, else the latest of all; undefined when there is none.
+ */
+export function ownVerdict<C extends Pick<CommitCheck, 'id' | 'workflow' | 'status' | 'conclusion'>>(own: readonly C[]): C | undefined {
+  const groups = new Map<string, C[]>();
+  own.forEach((c, i) => {
+    const key = c.workflow ? `file ${c.workflow.path}` : c.workflow === null ? `unread ${c.id ?? `#${i}`}` : 'app';
+    groups.set(key, [...(groups.get(key) ?? []), c]);
+  });
+  const ok = (c: C) => c.status === 'completed' && c.conclusion === 'success';
+  for (const g of groups.values()) {
+    const latest = latestOwn(g)!;
+    const newest = [...g].sort((a, b) => (b.id ?? -1) - (a.id ?? -1))[0]!;
+    if (!ok(latest)) return latest;
+    if (!ok(newest)) return newest;
+  }
+  return latestOwn(own);
+}
+
+/**
  * The checks on commit `sha` as judged. An unpinned name's checks stay as they are: judged by name, as before pins.
- * A pinned name has the latest run from its pinned source (latestOwn: a later run of that source supersedes its
- * earlier or cancelled ones on this head), or none (missing). When that one passes but any check of that name from any
- * other source doesn't (another App, another workflow, a run for another head, a commit status), the first such
- * check's state stands instead, without its id or link (it isn't the pinned run): the owner's rule, 2026-10-19.
+ * A pinned name has its pinned source's deciding run (ownVerdict: per workflow file, the latest and the newest must
+ * pass), or none (missing). When that passes but any check of that name from any other source doesn't (another App,
+ * another workflow, a run for another head, a commit status), the first such check's state stands instead, without its
+ * id or link (it isn't the pinned run): the owner's rule, 2026-10-19.
  */
 export function pinnedChecks(checks: readonly CommitCheck[], o: { configured: Record<string, CheckPin>; github: GithubCheckApps | null; repo: string; sha: string }): CommitCheck[] {
   const out: CommitCheck[] = [];
@@ -111,7 +159,7 @@ export function pinnedChecks(checks: readonly CommitCheck[], o: { configured: Re
       continue;
     }
     const own = checks.filter((c) => c.name === name && fromPinnedSource(c, pin, o));
-    const fromPin = latestOwn(own);
+    const fromPin = ownVerdict(own);
     if (!fromPin) continue;
     const bad = passed(fromPin) ? checks.find((c) => c.name === name && !own.includes(c) && !passed(c)) : undefined;
     out.push(bad ? { name, source: bad.source, status: bad.status, conclusion: bad.conclusion } : fromPin);
