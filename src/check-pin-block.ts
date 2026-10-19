@@ -165,8 +165,12 @@ export function workflowCheckNames(w: Pick<Workflows, 'files' | 'skipped'>): { b
   return { byName, unmapped };
 }
 
-/** Whether `name` can be a key in required_check_sources (the schema refuses __proto__; YAML a key over 1024 chars). */
-const usable = (name: string) => name.length > 0 && name.length <= NAME_MAX && name !== '__proto__';
+/**
+ * Whether `name` can be a key in required_check_sources: YAML refuses a key over 1024 chars, and the schema any key its
+ * record would drop (asked of the schema itself, parsed as YAML and JSON parse it: an own key).
+ */
+const keyKept = (name: string) => ProjectConfig.shape.required_check_sources.safeParse(JSON.parse(`{${JSON.stringify(name)}: {"app_id": 1}}`)).success;
+const usable = (name: string) => name.length > 0 && name.length <= NAME_MAX && keyKept(name);
 
 /** Each name's pin, with its evidence, or why it needs a manual choice. `tip`: null when it couldn't be read. */
 export function pinPlan(o: { names: string[]; workflows: Workflows | null; tip: Tip | null }): PinPlan {
@@ -176,7 +180,7 @@ export function pinPlan(o: { names: string[]; workflows: Workflows | null; tip: 
   const plan: PinPlan = { pins: [], manual: [], unmapped };
   for (const name of [...new Set(o.names)]) {
     if (!usable(name)) {
-      plan.manual.push({ name: name.slice(0, 80), why: `can't be a key in required_check_sources (${name === '__proto__' ? 'the name __proto__' : `${name.length} characters`})` });
+      plan.manual.push({ name: name.slice(0, 80), why: `can't be a key in required_check_sources (${name.length > NAME_MAX ? `${name.length} characters` : `the name ${name}, which the schema refuses`})` });
       continue;
     }
     const files = [...(byName.get(name) ?? [])].sort();
