@@ -2,6 +2,7 @@
 import type { AutomationsPolicy } from '../automations/schema.js';
 import type { Get } from '../automations/github.js';
 import type { IncidentSink } from '../usage-limit.js';
+import type { SlotPathLike } from '../slot-file.js';
 import { spawn } from 'node:child_process';
 import type { Config, ConfigError } from '../config/load.js';
 import { type Backlog, type Issue } from '../backlog/types.js';
@@ -38,7 +39,7 @@ export interface CoordinatorDeps {
   instance: string;
   stateDir: string;
   /** Slot directory override (tests). */
-  slotsDir?: string;
+  slotsDir?: SlotPathLike;
   /**
    * Where task files go when agents run as their own user: a directory the agent user can read but not
    * write (group `gid`, 2750; files 0640), outside the worktree. Without it, task files stay in stateDir.

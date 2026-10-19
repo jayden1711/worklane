@@ -5,7 +5,7 @@
 // on the exact evaluated commit, evaluator approved) is decided before this.
 import { BRAND } from './brand.js';
 import { shownPath } from './path-text.js';
-import { AGENT_INSTRUCTIONS, CONTROL_CHARACTER_PATH, INVISIBLE_CHARACTER_PATH, LOCKED_CATEGORIES, NON_ASCII_TOP_LEVEL_PATH, NON_UTF8_PATH, ODD_PATH_CATEGORIES, SELF_MODIFICATION, selfModificationPart, type LevelResult } from './review.js';
+import { AGENT_INSTRUCTIONS, CONTROL_CHARACTER_PATH, DIFF_HIDING_ATTRIBUTES, INVISIBLE_CHARACTER_PATH, LOCKED_CATEGORIES, NON_ASCII_TOP_LEVEL_PATH, NON_UTF8_PATH, ODD_PATH_CATEGORIES, SELF_MODIFICATION, selfModificationPart, type LevelResult } from './review.js';
 
 export interface MergeVerdict {
   patch_correct: boolean;
@@ -152,6 +152,7 @@ const CATEGORY_WORDS: Record<string, string> = {
   [NON_UTF8_PATH]: "has a path that isn't valid UTF-8",
   [INVISIBLE_CHARACTER_PATH]: 'has a path with an invisible or format character',
   [NON_ASCII_TOP_LEVEL_PATH]: "has a top-level name that isn't ASCII",
+  [DIFF_HIDING_ATTRIBUTES]: 'changes a .gitattributes or .gitmodules in a way that can hide what a review sees (-diff, binary, linguist-generated, a filter, an encoding, a diff driver, a macro, a submodule ignore)',
 };
 
 /** A path as a reason shows it: src/path-text.ts shownPath, the one rule every reason, event and comment uses. */
@@ -160,10 +161,10 @@ const paths = (p: string[]) => `${p.slice(0, 3).map(shown).join(', ')}${p.length
 
 /**
  * The floor: the locked categories, and a path with a control character, one that isn't valid UTF-8, one with an
- * invisible or format character, or one whose top-level name isn't ASCII (review.ts ODD_PATH_CATEGORIES), whatever
- * any list says.
+ * invisible or format character, or one whose top-level name isn't ASCII (review.ts ODD_PATH_CATEGORIES), and a
+ * .gitattributes mark that hides a file's diff (review.ts DIFF_HIDING_ATTRIBUTES), whatever any list says.
  */
-const FLOOR = [...Object.keys(LOCKED_CATEGORIES), ...ODD_PATH_CATEGORIES];
+const FLOOR = [...Object.keys(LOCKED_CATEGORIES), ...ODD_PATH_CATEGORIES, DIFF_HIDING_ATTRIBUTES];
 
 /**
  * The categories that always wait for a human: review.yaml's L3, CI config, the agents' own instructions (built in;

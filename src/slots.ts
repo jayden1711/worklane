@@ -7,18 +7,17 @@
 //   <dir>/full-run.lock      at most one full test run on the machine
 //   <dir>/STOP               emergency stop: while it exists, every agent halts and no new one starts
 // A lock file holds {pid, owner, acquiredAt}; a dead pid means the slot is free.
-import { mkdirSync, readdirSync, readFileSync, rmSync } from 'node:fs';
-import { join } from 'node:path';
+// <dir> is a slot path (#772): every file operation on it goes through src/slot-file.ts.
 import { tryLock, type Lock, type LockInfo } from './locks.js';
 import { pidAlive, slotsConfigPath, slotsDir } from './os/index.js';
-import { writeSlotFile } from './slot-file.js';
+import { listSlotDir, makeSlotDir, readSlotFile, removeSlotFile, slotFile, writeSlotFile, type SlotPathLike } from './slot-file.js';
 import { drainHoldLine, updateDrain } from './update-drain.js';
 
 export const DEFAULT_MAX_AGENTS = 2;
 
-export function machineCap(dir = slotsDir()): number {
+export function machineCap(dir: SlotPathLike = slotsDir()): number {
   try {
-    const n = (JSON.parse(readFileSync(slotsConfigPath(dir), 'utf8')) as { max_agents?: unknown }).max_agents;
+    const n = (JSON.parse(readSlotFile(slotsConfigPath(dir))) as { max_agents?: unknown }).max_agents;
     return typeof n === 'number' && Number.isInteger(n) && n >= 1 ? n : DEFAULT_MAX_AGENTS;
   } catch {
     return DEFAULT_MAX_AGENTS;
@@ -35,11 +34,11 @@ const pause = (ms: number) => Atomics.wait(new Int32Array(new SharedArrayBuffer(
  * every instance and harness. Counting and taking happen under one directory
  * lock, so two processes can't both see room for the last slot.
  */
-export function tryAgentSlot(owner: string, dir = slotsDir()): Lock | null {
+export function tryAgentSlot(owner: string, dir: SlotPathLike = slotsDir()): Lock | null {
   if (emergencyStop(dir)) return null;
   let guard: Lock | null = null;
   for (let i = 0; i < 200 && !guard; i++) {
-    const r = tryLock(join(dir, 'slots.lock'), owner);
+    const r = tryLock(slotFile(dir, 'slots.lock'), owner);
     if ('lock' in r) guard = r.lock;
     else pause(10);
   }
@@ -50,7 +49,7 @@ export function tryAgentSlot(owner: string, dir = slotsDir()): Lock | null {
     if (updateDrain(dir)) return null;
     if (slotStatus(dir).agents.length >= machineCap(dir)) return null;
     for (let i = 0; i < SLOT_INDEX_LIMIT; i++) {
-      const r = tryLock(join(dir, `agent-${i}.lock`), owner);
+      const r = tryLock(slotFile(dir, `agent-${i}.lock`), owner);
       if ('lock' in r) return r.lock;
     }
     return null;
@@ -63,8 +62,8 @@ export function tryAgentSlot(owner: string, dir = slotsDir()): Lock | null {
  * Take the machine's full-run lock, waiting up to waitMs. Never while the updater drains the machine
  * (src/update-drain.ts): the drain is checked before every try, and a wait that ends inside one says so as its holder.
  */
-export async function fullRunLock(owner: string, waitMs: number, dir = slotsDir(), pollMs = 1000): Promise<{ lock: Lock } | { holder: LockInfo | null }> {
-  const path = join(dir, 'full-run.lock');
+export async function fullRunLock(owner: string, waitMs: number, dir: SlotPathLike = slotsDir(), pollMs = 1000): Promise<{ lock: Lock } | { holder: LockInfo | null }> {
+  const path = slotFile(dir, 'full-run.lock');
   const deadline = Date.now() + waitMs;
   for (;;) {
     const drain = updateDrain(dir);
@@ -81,10 +80,10 @@ export interface SlotStatus {
 }
 
 /** Live holders only; stale files (dead pids) don't count. */
-export function slotStatus(dir = slotsDir()): SlotStatus {
+export function slotStatus(dir: SlotPathLike = slotsDir()): SlotStatus {
   const read = (f: string): LockInfo | null => {
     try {
-      const info = JSON.parse(readFileSync(join(dir, f), 'utf8')) as LockInfo;
+      const info = JSON.parse(readSlotFile(slotFile(dir, f))) as LockInfo;
       return pidAlive(info.pid) ? info : null;
     } catch {
       return null;
@@ -92,7 +91,7 @@ export function slotStatus(dir = slotsDir()): SlotStatus {
   };
   let files: string[] = [];
   try {
-    files = readdirSync(dir);
+    files = listSlotDir(dir);
   } catch {
     // no slots dir yet: nothing held
   }
@@ -111,9 +110,9 @@ export interface EmergencyStop {
 }
 
 /** The emergency stop in force on this machine, if any. */
-export function emergencyStop(dir = slotsDir()): EmergencyStop | null {
+export function emergencyStop(dir: SlotPathLike = slotsDir()): EmergencyStop | null {
   try {
-    return JSON.parse(readFileSync(join(dir, 'STOP'), 'utf8')) as EmergencyStop;
+    return JSON.parse(readSlotFile(slotFile(dir, 'STOP'))) as EmergencyStop;
   } catch (e) {
     // Present but unreadable still means stop.
     return (e as NodeJS.ErrnoException).code === 'ENOENT' ? null : { by: '?', at: '', reason: 'unreadable STOP file' };
@@ -121,14 +120,14 @@ export function emergencyStop(dir = slotsDir()): EmergencyStop | null {
 }
 
 /** Halt every agent on the machine, across instances and harnesses, until resumed. */
-export function stopAll(by: string, reason: string, dir = slotsDir()): void {
-  mkdirSync(dir, { recursive: true });
-  writeSlotFile(join(dir, 'STOP'), JSON.stringify({ by, at: new Date().toISOString(), reason }));
+export function stopAll(by: string, reason: string, dir: SlotPathLike = slotsDir()): void {
+  makeSlotDir(dir);
+  writeSlotFile(slotFile(dir, 'STOP'), JSON.stringify({ by, at: new Date().toISOString(), reason }));
 }
 
-export function resumeAll(dir = slotsDir()): boolean {
+export function resumeAll(dir: SlotPathLike = slotsDir()): boolean {
   try {
-    rmSync(join(dir, 'STOP'));
+    removeSlotFile(slotFile(dir, 'STOP'));
     return true;
   } catch {
     return false;
