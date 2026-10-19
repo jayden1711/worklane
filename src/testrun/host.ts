@@ -223,6 +223,23 @@ function parseTips(out: string): string[] {
   return out.split('\n').map((l) => l.trim()).filter((l) => FULL_SHA.test(l));
 }
 
+/**
+ * The sandbox check's result. `unsupported`: this machine can't give a run a user namespace of its own (its unshare
+ * is older than util-linux 2.38, or there's no setpriv), with the fix. INVARIANT: only shown (doctor, the Machine page,
+ * health); `ok` never depends on it, and nothing that turns test runs off or rolls an update back reads it.
+ */
+export interface SandboxCheck {
+  ok: boolean;
+  detail: string;
+  unsupported?: string;
+}
+
+/** The sandbox helper's check's `NOTE userns-unsupported: <why and fix>` line, or null. */
+export function usernsUnsupported(stdout: string): string | null {
+  const m = /^NOTE userns-unsupported: (.+)$/m.exec(stdout);
+  return m ? m[1]!.trim().slice(0, 500) : null;
+}
+
 export interface RunHost {
   readonly kind: 'sandbox' | 'local';
   /**
@@ -253,7 +270,7 @@ export interface RunHost {
    */
   exec(id: string, command: string, env: Record<string, string>, timeoutMs: number, signal?: AbortSignal, o?: ExecOptions): Promise<ExecResult>;
   /** The sandbox's own boundary check; a check that can't run is not ok. */
-  check(): Promise<{ ok: boolean; detail: string }>;
+  check(): Promise<SandboxCheck>;
   /** Remove everything of the run: its processes, containers, volumes and files. `left`: what is still there. */
   wipe(id: string): Promise<{ ok: boolean; left: string[] }>;
   /** The helper's protocol version (./helper.ts); null when it has none or couldn't be asked, with its stderr. */
@@ -478,7 +495,8 @@ export function sandboxHost(instance: string, helper = SANDBOX_HELPER, sudo = 's
     async check() {
       const r = await call(['check'], { timeoutMs: 300_000 });
       const fails = r.stdout.split('\n').filter((l) => l.startsWith('FAIL'));
-      return { ok: r.code === 0 && /^OK$/m.test(r.stdout) && !fails.length, detail: (fails.length ? fails.join('\n') : r.code === 0 ? 'all checks passed' : `the check didn't run: ${r.out.trim().slice(-300)}`).slice(0, 2000) };
+      const unsupported = usernsUnsupported(r.stdout);
+      return { ok: r.code === 0 && /^OK$/m.test(r.stdout) && !fails.length, detail: (fails.length ? fails.join('\n') : r.code === 0 ? 'all checks passed' : `the check didn't run: ${r.out.trim().slice(-300)}`).slice(0, 2000), ...(unsupported ? { unsupported } : {}) };
     },
     async wipe(id) {
       checkId(id);
