@@ -1,7 +1,8 @@
 // Root's provider hosts (#392): a provider's base_url sends its key and every prompt to a host root allows in
 // /etc/<cli>/providers.json, or nowhere. The file's checks (root's, not writable by others, bounded, this shape), the
 // exact host and port match, the URL's shape at config load, the fallback when the coordinator resolves a run, the
-// runner's own check right before claude would start, what is said at start, and the refusal logged once.
+// runner's own check right before claude would start, what is said at start, the refusal logged once, and the Health
+// page's line (owners and writers only).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
@@ -11,10 +12,13 @@ import { loadConfig } from '../src/config/load.js';
 import { AgentsConfig } from '../src/config/schema.js';
 import { resolveProvider } from '../src/coordinator/providers.js';
 import { InstanceSettings } from '../src/instance.js';
-import { baseUrlProblem, logRefusalOnce, machineProviderHosts, PROVIDER_HOSTS_LIMITS, providerHostRefusal, providerHostsAtStart, readProviderHosts, type ProviderHosts } from '../src/provider-hosts.js';
+import { startDashboard } from '../src/dashboard.js';
+import { EventLog } from '../src/events/log.js';
+import { healthView } from '../src/health.js';
+import { baseUrlProblem, ENTRY_REFUSALS, type EntryRefusal, logRefusalOnce, machineProviderHosts, PROVIDER_HOSTS_LIMITS, providerHostEntry, providerHostRefusal, providerHostsAtStart, providerHostsHealth, readProviderHosts, type ProviderHosts } from '../src/provider-hosts.js';
 import { PROVIDER_GATE_FILE } from '../src/providers.js';
 import { CliRunner, type RunRequest } from '../src/runner.js';
-import { allowProviderHosts, exampleProject } from './helpers.js';
+import { allowProviderHosts, asPerson, exampleProject, exampleRoles } from './helpers.js';
 
 const posix = process.platform !== 'win32';
 const me = typeof process.getuid === 'function' ? process.getuid() : 0;
@@ -259,4 +263,170 @@ test('a refusal is logged once per provider and reason', () => {
   logRefusalOnce('hosted:once', 'y is not allowed', log);
   logRefusalOnce('local-once', 'x is not allowed', log);
   assert.deepEqual(lines, ['provider hosted:once refused: x is not allowed', 'provider hosted:once refused: y is not allowed', 'provider local-once refused: x is not allowed']);
+});
+
+// ---- the Health page's line: root's hosts and each configured provider they refuse, for the owners and writers only
+
+test("the Health line: root's hosts, or why there are none, and each configured provider outside them; nothing when there is no file and no provider", () => {
+  const agents = AgentsConfig.parse({ ...base, providers: { local: { base_url: 'http://127.0.0.1:8080', credential: 'local', model: 'm' }, hosted: { glm: GLM } } });
+  assert.deepEqual(providerHostsHealth(agents, ok('127.0.0.1:8080')), { ...ok('127.0.0.1:8080'), refused: [{ provider: 'hosted:glm', reason: 'open.example.com is not an allowed provider host (127.0.0.1:8080, from /etc/x/providers.json)' }] });
+  assert.deepEqual(providerHostsHealth(agents, ok('127.0.0.1:8080', 'open.example.com')), { ...ok('127.0.0.1:8080', 'open.example.com'), refused: [] });
+  const missing: ProviderHosts = { file: '/etc/x/providers.json', state: 'missing', hosts: [], error: null };
+  const off = [{ provider: 'local', reason: 'no provider host is allowed on this machine' }, { provider: 'hosted:glm', reason: 'no provider host is allowed on this machine' }];
+  assert.deepEqual(providerHostsHealth(agents, missing), { ...missing, refused: off });
+  const bad: ProviderHosts = { file: '/etc/x/providers.json', state: 'refused', hosts: [], error: '/etc/x/providers.json: is not JSON; no provider host is allowed' };
+  assert.deepEqual(providerHostsHealth(agents, bad), { ...bad, refused: off });
+  assert.equal(providerHostsHealth(AgentsConfig.parse(base), missing), null, 'no provider and no file: nothing to show');
+  assert.deepEqual(providerHostsHealth(AgentsConfig.parse(base), ok('127.0.0.1:8080')), { ...ok('127.0.0.1:8080'), refused: [] }, 'a file and no provider: its hosts');
+});
+
+test("the health view carries the line, read from root's file now against the instance's providers", { skip: !posix && 'root-owned files are POSIX' }, () => {
+  const saved = { ...machineProviderHosts };
+  try {
+    const f = allowProviderHosts('127.0.0.1:8080');
+    const agents = AgentsConfig.parse({ ...base, providers: { hosted: { glm: GLM } } });
+    assert.deepEqual(healthView([], null, { updates: [], network: null, agents }).providerHosts, { file: f, state: 'ok', hosts: ['127.0.0.1:8080'], error: null, refused: [{ provider: 'hosted:glm', reason: `open.example.com is not an allowed provider host (127.0.0.1:8080, from ${f})` }] });
+    allowProviderHosts('open.example.com');
+    assert.deepEqual(healthView([], null, { updates: [], network: null, agents }).providerHosts?.refused, [], 'a change to the file shows on the next read');
+    machineProviderHosts.file = join(tmpdir(), 'no-such-dir', 'providers.json');
+    assert.equal(healthView([], null, { updates: [], network: null }).providerHosts, null, 'no file and no provider');
+  } finally {
+    Object.assign(machineProviderHosts, saved);
+  }
+});
+
+/**
+ * Entries root might mistype with a credential in them: each must refuse the file without the credential in the refusal.
+ * From the eighth on, they pass the host[:port] shape. Five are refused only when WHATWG URL decodes them to a user,
+ * query or a forbidden code point: percent-encoded, fullwidth (U+FF1A, U+FF20), small (U+FE6B) and a NUL (round 3 of
+ * #675). Then three are a key=value pair that URL keeps in a host (`&` and `=` aren't forbidden in one), plainly,
+ * percent-encoded or fullwidth (U+FF06, U+FF1D), then two tokens with `_`, which URL also keeps: all five are refused
+ * as not a host name or address, showing nothing (round 4).
+ */
+const SECRET_ENTRIES = [
+  'alice:s3cret@api.example.com',
+  'https://alice:s3cret@h/',
+  '*.h?token=s3cret',
+  'api.example.com?key=s3cret',
+  'api.example.com#s3cret',
+  'api.example.com/s3cret',
+  `s3cret${'a'.repeat(300)}`,
+  'alice%3As3cret%40api.example.com',
+  'api.example.com%3Fkey%3Ds3cret',
+  'alice：s3cret＠api.example.com',
+  'alice﹫s3cret.example.com',
+  'api.example.com\u0000s3cret',
+  'api.example.com%26key%3Ds3cret',
+  'api.example.com＆key＝s3cret',
+  'api.example.com&key=s3cret',
+  'ghp_S3cretT0ken',
+  'sk_live_s3cret',
+];
+
+test('a refused entry is named by its position, never quoted while it could hold a credential: not in the refusal, nor at start', { skip: !posix && 'root-owned files are POSIX' }, () => {
+  const agents = AgentsConfig.parse({ ...base, providers: { hosted: { glm: GLM } } });
+  for (const entry of SECRET_ENTRIES) {
+    const r = readProviderHosts(hostsFile({ hosts: ['ok.example.com', entry] }), { ownerUid: me });
+    assert.equal(r.state, 'refused', entry);
+    assert.doesNotMatch(r.error!, /s3cret/, entry);
+    assert.match(r.error!, /hosts entry 2\b/, entry);
+    assert.doesNotMatch(providerHostsAtStart(agents, r).join('\n'), /s3cret/, entry);
+  }
+  // A key that isn't a plain word isn't quoted either; one that is, still is.
+  const key = readProviderHosts(hostsFile({ hosts: ['ok.example.com'], 'https://alice:s3cret@h/': true }), { ownerUid: me });
+  assert.match(key.error!, /an unknown key, not shown/);
+  assert.doesNotMatch(key.error!, /s3cret/);
+  // Only the host WHATWG URL parsed from an entry is shown, to say what to write instead; never the entry as written.
+  assert.match(readProviderHosts(hostsFile({ hosts: ['API.example.com'] }), { ownerUid: me }).error!, /: hosts entry 1 must be written as a URL normalises it: "api\.example\.com"; no provider host/);
+});
+
+/** Entries that reach each way an entry is refused, most with a credential-like marker; typed so a new way needs entries here. */
+const BY_REFUSAL: Record<EntryRefusal, unknown[]> = {
+  'not-a-string': ['', 7, null, ['s3cret'], { user: 's3cret' }],
+  'too-long': [`s3cret${'a'.repeat(300)}`, `alice:s3cret@${'a'.repeat(250)}`],
+  wildcard: ['*.h?token=s3cret', 'alice:s3cret@*.example.com'],
+  'not-host-port': ['alice:s3cret@api.example.com', 'https://alice:s3cret@h/', 'api.example.com?key=s3cret', 'api.example.com#s3cret', 'api.example.com/s3cret', '[alice:s3cret@::1]', 'api.example.com:8080@s3cret', 'api.example.com\u0000@s3cret'],
+  'not-a-host': ['alice%3As3cret%40api.example.com', 'api.example.com%3Fkey%3Ds3cret', 'alice：s3cret＠api.example.com', 'alice＠api.example.com？key＝s3cret', 'alice﹫s3cret.example.com', 'api.example.com\u0000s3cret', 'api.example.com^s3cret', 'api.example.com%2Fs3cret', 'api.example.com%26key%3Ds3cret', 'api.example.com＆key＝s3cret', 'api.example.com&key=s3cret', 'ghp_S3cretT0ken', 'sk_live_s3cret'],
+  'not-normalised': ['S3CRET.example.com', 'ｓ３ｃｒｅｔ.example.com', '%73%33cret.example.com', 'API.Example.COM:8443', '127.1'],
+  'bad-port': ['s3cret.example.com:0', 's3cret.example.com:080', 'api.example.com:99999', '[::1]:65536'],
+};
+
+test('every way an entry is refused shows no part of the entry: only its position and, at most, the host URL parsed from it', { skip: !posix && 'root-owned files are POSIX' }, () => {
+  assert.deepEqual(Object.keys(BY_REFUSAL).sort(), [...ENTRY_REFUSALS].sort(), 'an entry for every way');
+  const agents = AgentsConfig.parse({ ...base, providers: { hosted: { glm: GLM } } });
+  for (const why of ENTRY_REFUSALS) {
+    const texts = new Set<string>();
+    for (const entry of BY_REFUSAL[why]) {
+      const e = providerHostEntry(entry);
+      assert.ok('refused' in e && e.refused === why, `${JSON.stringify(entry)} is refused as ${why}: ${JSON.stringify(e)}`);
+      // The one thing a refusal may show is the host WHATWG URL parses from the entry, worked out here independently.
+      if (e.host !== null) assert.equal(e.host, new URL(`https://${String(entry).replace(/:\d+$/, '')}/`).hostname, `${why}: ${JSON.stringify(entry)}`);
+      const f = hostsFile({ hosts: ['ok.example.com', entry] });
+      const r = readProviderHosts(f, { ownerUid: me });
+      assert.equal(r.state, 'refused');
+      assert.match(r.error!, /: hosts entry 2\b/, `${why}: ${JSON.stringify(entry)}`);
+      const health = providerHostsHealth(agents, r)!;
+      // Every place the refusal goes: the file's error, the start-up lines, the coordinator's and runner's reason, the Health line.
+      const outputs = [r.error!, ...providerHostsAtStart(agents, r), providerHostRefusal(GLM.base_url, r)!, health.error!, ...health.refused.map((x) => x.reason)];
+      // With the parsed host taken out, nothing of the entry is left: not the marker, nor the entry itself.
+      const hide = (out: string) => (e.host === null ? out : out.split(JSON.stringify(e.host)).join('"<host>"'));
+      for (const out of outputs) {
+        assert.doesNotMatch(hide(out), /s3cret/i, `${why}: ${JSON.stringify(entry)} -> ${out}`);
+        if (typeof entry === 'string' && entry) assert.ok(!hide(out).includes(entry), `${why}: ${JSON.stringify(entry)} -> ${out}`);
+      }
+      texts.add(hide(r.error!.slice(f.length)));
+    }
+    // One fixed text per way, whatever the entry: nothing in it comes from what root wrote.
+    assert.equal(texts.size, 1, `${why}: ${[...texts].join(' | ')}`);
+  }
+});
+
+test("GET /api/health: a writer is never sent a credential from a mistyped entry in root's file", { skip: !posix && 'root-owned files are POSIX' }, async () => {
+  const saved = { ...machineProviderHosts };
+  const { dir: root } = exampleProject();
+  const cfg = loadConfig(root);
+  cfg.agents = AgentsConfig.parse({ ...base, providers: { hosted: { glm: GLM } } });
+  const stateDir = mkdtempSync(join(tmpdir(), 'prov-health-'));
+  const db = join(stateDir, 'events.db');
+  new EventLog(db).close();
+  const d = await startDashboard({ root, cfg, eventsDb: db, stateDir, user: 'example-owner', roleOf: exampleRoles, slotsDir: join(stateDir, 'slots'), pollMs: 50 });
+  try {
+    const url = `${d.url.split('/?')[0]!}/api/health`;
+    for (const entry of SECRET_ENTRIES) {
+      allowProviderHosts('ok.example.com', entry);
+      for (const who of ['example-collaborator', 'example-owner']) {
+        const text = await (await fetch(url, { headers: { authorization: `Bearer ${d.token}`, ...asPerson(who) } })).text();
+        assert.doesNotMatch(text, /s3cret/, `${who}: ${entry}`);
+        assert.match(text, /hosts entry 2/, `${who}: the refusal is there (${entry})`);
+      }
+    }
+  } finally {
+    Object.assign(machineProviderHosts, saved);
+    await d.close();
+  }
+});
+
+test('GET /api/health: the owners and writers get the provider hosts line; a viewer gets none of it, nor any host in it', { skip: !posix && 'root-owned files are POSIX' }, async () => {
+  const saved = { ...machineProviderHosts };
+  const { dir: root } = exampleProject();
+  const cfg = loadConfig(root);
+  cfg.agents = AgentsConfig.parse({ ...base, providers: { local: { base_url: 'http://127.0.0.1:8080', credential: 'local', model: 'small-1' }, hosted: { glm: GLM } } });
+  const stateDir = mkdtempSync(join(tmpdir(), 'prov-health-'));
+  const db = join(stateDir, 'events.db');
+  new EventLog(db).close();
+  const d = await startDashboard({ root, cfg, eventsDb: db, stateDir, user: 'example-owner', roleOf: exampleRoles, slotsDir: join(stateDir, 'slots'), pollMs: 50 });
+  try {
+    const f = allowProviderHosts('127.0.0.1:8080');
+    const url = `${d.url.split('/?')[0]!}/api/health`;
+    const get = async (who: string) => (await fetch(url, { headers: { authorization: `Bearer ${d.token}`, ...asPerson(who) } })).json() as Promise<{ providerHosts?: unknown }>;
+    for (const who of ['example-collaborator', 'example-owner']) {
+      assert.deepEqual((await get(who)).providerHosts, { file: f, state: 'ok', hosts: ['127.0.0.1:8080'], error: null, refused: [{ provider: 'hosted:glm', reason: `open.example.com is not an allowed provider host (127.0.0.1:8080, from ${f})` }] }, who);
+    }
+    const viewer = await get('someone-else');
+    assert.equal(viewer.providerHosts, null, 'a viewer gets no provider hosts');
+    assert.doesNotMatch(JSON.stringify(viewer), /127\.0\.0\.1|open\.example\.com|providers\.json/, "no host, nor the file, anywhere in a viewer's health");
+  } finally {
+    Object.assign(machineProviderHosts, saved);
+    await d.close();
+  }
 });

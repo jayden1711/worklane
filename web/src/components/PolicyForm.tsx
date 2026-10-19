@@ -4,7 +4,7 @@ import { useState } from 'react';
 import { changePolicy, type FirstRunPolicy, type PolicyChange } from '../api';
 import { Button, cx } from './ui';
 
-const field = 'h-8 rounded-control bg-field px-2.5 font-mono text-[13px] text-ink shadow-hairline outline-none focus:shadow-[0_0_0_1px_var(--blue)] disabled:opacity-60';
+const field = 'h-8 rounded-control bg-field px-2.5 font-mono text-[13px] text-ink shadow-hairline outline-none focus:shadow-[0_0_0_1px_var(--ring)] disabled:opacity-60';
 const show = (v: unknown) => (v === null || v === undefined ? 'not set' : Array.isArray(v) ? v.join(', ') || 'none' : String(v));
 
 export function PolicyForm({ p, canEdit, initialChanges = null, onDone }: { p: FirstRunPolicy; canEdit: boolean; initialChanges?: PolicyChange[] | null; onDone?: () => void }) {

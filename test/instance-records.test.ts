@@ -219,6 +219,7 @@ function machine(): string {
   put(`/var/lib/${cli}/agent-slots/incidents.json`, { incidents: [inc('1', 'alpha', `${cli}-alpha.service`), inc('2', 'alpha-2', `${cli}-alpha-2.service`), inc('3', null, 'disk'), inc('4', 'alpha', 'alpha#12')], posts: ['p'] });
   put(`/var/lib/${cli}/plugins/pending.json`, { version: 1, entries: [{ instance: 'alpha', id: 'kit', roles: ['worker'], digest: 'd1', staged_at: 'now' }, { instance: 'alpha-2', id: 'kit', roles: ['worker'], digest: 'd2', staged_at: 'now' }] });
   put(`/var/lib/${cli}/pending-signers.json`, { pending: [{ principal: 'a@example.com', key: 'k1', instance: 'alpha', at: 'now' }, { principal: 'b@example.com', key: 'k2', instance: 'beta', at: 'now' }] });
+  put(`/etc/${cli}/managed-apps.json`, `${JSON.stringify({ version: 1, apps: { alpha: 'o/shop', 'alpha-2': 'o/site' } })}\n`);
   return root;
 }
 const read = (root: string, p: string) => JSON.parse(readFileSync(join(root, p), 'utf8'));
@@ -227,10 +228,13 @@ test("remove takes out exactly alpha's records, never alpha-2's or beta's, and k
   const root = machine();
   const archive = join(root, 'archive', 'alpha.records.json');
   const planned = reg.plan(NAME, root);
-  assert.deepEqual(Object.keys(planned).sort(), ['canary', 'claude-paused', 'claude-profiles', 'claude-status', 'gpu', 'incidents', 'pending-signers', 'plugin-pending', 'testrun-net']);
+  assert.deepEqual(Object.keys(planned).sort(), ['canary', 'claude-paused', 'claude-profiles', 'claude-status', 'gpu', 'incidents', 'managed-apps', 'pending-signers', 'plugin-pending', 'testrun-net']);
   const taken = reg.remove(NAME, archive, root);
   // The GPU grant is testrun-gpu.sh's to take out (its strict form): planned, never written here.
-  assert.deepEqual(Object.keys(taken).sort(), ['canary', 'claude-paused', 'claude-profiles', 'claude-status', 'incidents', 'pending-signers', 'plugin-pending']);
+  assert.deepEqual(Object.keys(taken).sort(), ['canary', 'claude-paused', 'claude-profiles', 'claude-status', 'incidents', 'managed-apps', 'pending-signers', 'plugin-pending']);
+  // Root's word that alpha's repo is an app goes with alpha; alpha-2's stays, in the form the engine reads.
+  assert.equal(readFileSync(join(root, `/etc/${cli}/managed-apps.json`), 'utf8'), '{"version":1,"apps":{"alpha-2":"o/site"}}\n');
+  assert.deepEqual(taken['managed-apps'], { alpha: 'o/shop' });
   assert.deepEqual(read(root, `/var/lib/${cli}/plugins/pending.json`), { version: 1, entries: [{ instance: 'alpha-2', id: 'kit', roles: ['worker'], digest: 'd2', staged_at: 'now' }] }, "another instance's staged plugin stays");
   assert.deepEqual(read(root, `/etc/${cli}/testrun-gpu.json`).instances, { alpha: { devices: [0] }, 'alpha-2': { devices: [1] } });
 

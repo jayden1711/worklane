@@ -676,8 +676,11 @@ export const EventSchemas = {
    * the revert PR reverts the commits from `sha` through this one (a rebase-merged PR's), not `sha` alone.
    */
   'main_watch.unaccounted': z.strictObject({ sha, url: z.string(), reason: z.string(), number: z.number().int().positive().nullable(), revert: z.string().nullable(), trip: z.string().optional(), no_revert: z.string().nullable().optional(), revert_through: sha.optional() }),
-  /** A required check with no run on any commit the main watch judged since `since`: raised once, cleared when one appears. */
-  'main_watch.dead_check': z.strictObject({ check: z.string(), since: z.string(), state: z.enum(['raised', 'cleared']) }),
+  /**
+   * A required check with no run on any commit the main watch judged since `since`: raised once, cleared when one
+   * appears. `workflow`, on a raise: the Actions workflow that would post it is disabled (its `state`, as GitHub says).
+   */
+  'main_watch.dead_check': z.strictObject({ check: z.string(), since: z.string(), state: z.enum(['raised', 'cleared']), workflow: z.strictObject({ name: z.string(), path: z.string(), state: z.string() }).optional() }),
   /**
    * An unaccounted commit that landed without a PR (src/direct-push-alert.ts): `direct`, GitHub's commit-to-PR link
    * has no merged PR for it; `rewrite`, a force-push. `pusher`: a GitHub login only (`pusher_from`: the push's actor,

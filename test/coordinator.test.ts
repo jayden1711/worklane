@@ -26,7 +26,8 @@ import { childEnv, which } from '../src/os/index.js';
 import { findChrome, freePort, portInUse } from '../src/browser/cdp.js';
 import { AppConfig } from '../src/config/schema.js';
 import { repoRoot, STDIN_LINE } from './helpers.js';
-import { SELF_MODIFICATION, SELF_MODIFICATION_PARTS } from '../src/review.js';
+import { SELF_MODIFICATION, SELF_MODIFICATION_PARTS, type LockScope } from '../src/review.js';
+import { HOOK_IMPORTS } from '../src/hook-imports.js';
 import { globToRegExp } from '../src/guardrails/glob.js';
 import { isProtectedPath } from '../src/guardrails/engine.js';
 import { IntakeConfig, type IncomingReport, type IntakeSource } from '../src/intake/report.js';
@@ -1672,7 +1673,7 @@ const failing = (id: number) => [{ name: 'ci', source: 'check_run' as const, sta
 const passing = [{ name: 'ci', source: 'check_run' as const, status: 'completed', conclusion: 'success', id: 1 }];
 
 /** PR mode with one required check and fix runs on; runs the task until its PR is open. */
-async function openPr(over: Partial<Record<string, (r: RunRequest) => object>> = {}, opts: { fixes?: boolean; autoMerge?: () => boolean; edit?: (cfg: ReturnType<typeof fixture>['cfg']) => void; body?: string; approveLanding?: boolean; filed?: (f: ReturnType<typeof fixture>, n: number) => void } = {}) {
+async function openPr(over: Partial<Record<string, (r: RunRequest) => object>> = {}, opts: { fixes?: boolean; autoMerge?: () => boolean; edit?: (cfg: ReturnType<typeof fixture>['cfg']) => void; body?: string; approveLanding?: boolean; filed?: (f: ReturnType<typeof fixture>, n: number) => void; lockScope?: () => LockScope } = {}) {
   const f = fixture();
   f.cfg.project.land_mode = 'pr';
   f.cfg.project.required_checks = ['ci'];
@@ -1681,7 +1682,7 @@ async function openPr(over: Partial<Record<string, (r: RunRequest) => object>> =
   const n = f.backlog.open({ title: 'Totals count negative quantities', body: opts.body ?? BUG, author: 'example-owner', labels: ['ready'] });
   opts.filed?.(f, n);
   const runner = agents(over);
-  const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner, repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: f.machine, prPollMs: 0, ...(opts.autoMerge ? { autoMerge: opts.autoMerge } : {}) });
+  const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner, repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: f.machine, prPollMs: 0, ...(opts.autoMerge ? { autoMerge: opts.autoMerge } : {}), ...(opts.lockScope ? { lockScope: opts.lockScope } : {}) });
   await c.tick();
   await c.idle();
   await c.tick();
@@ -2135,6 +2136,10 @@ test('self-modification: a harness PR touching only one of the harness\'s own co
   const body = 'Tighten one of the controls.\n\n```done_when\n- command: node --test\n```\n';
   for (const part of SELF_MODIFICATION_PARTS) {
     for (const glob of part.globs) {
+      // The guard's import tree (src/hook-imports.ts) is some 60 exact paths of one part, each taking the same way
+      // through this flow: its first stands for them here. test/review.test.ts and test/merge-policy.test.ts check
+      // every one of them through computeLevel and the merge decision.
+      if (HOOK_IMPORTS.includes(glob) && glob !== HOOK_IMPORTS[0]) continue;
       // A glob with no file yet (the owner's own, e.g. a study's definition) is an exact path: the change adds it.
       const path = files.find((f) => globToRegExp(glob).test(f)) ?? (glob.includes('*') ? undefined : glob)!;
       let attempt = 0;
@@ -2176,6 +2181,34 @@ test('self-modification: a harness PR touching only one of the harness\'s own co
       assert.deepEqual(d.why, [...ci, { category: SELF_MODIFICATION, text: `changes ${part.what}: ${path}` }], path);
       assert.ok(!t.pr().merged && t.f.log.read(0, ['merge.done']).length === 0, `${path}: never auto-merged`);
     }
+  }
+});
+
+// WHY (#665): the engine's locks matched a managed app's own src/contract.ts as "the agents' tool guard". Only root's
+// word, through the coordinator's lockScope (src/managed-apps.ts), makes it the app's own code.
+test("regression: a managed app's PR touching its own src/contract.ts is app code where root says so; without root's word, or when asking fails, it waits as the engine's tool guard", { skip }, async () => {
+  const worker = (req: RunRequest) => {
+    writeFileSync(join(req.cwd, 'src', 'contract.ts'), 'export const terms = 1;\n');
+    commitAll(req.cwd, 'Add the contract terms');
+    return { summary: 'added src/contract.ts' };
+  };
+  const body = 'Write down the contract terms.\n\n```done_when\n- command: node --test\n```\n';
+  const levelOf = (t: Awaited<ReturnType<typeof openPr>>) => t.f.log.read(0, ['review.level_set']).at(-1)!.payload as { level: string; reasons: string[] };
+  const app = await openPr({ worker, 'evaluator-verdict': approve() }, { body, lockScope: () => 'managed-app' });
+  assert.deepEqual((lastOf(app.f.log, 'change.proposed') as { files: string[] }).files, ['src/contract.ts']);
+  assert.equal(levelOf(app).level, 'L1', levelOf(app).reasons.join('; '));
+  assert.ok(!levelOf(app).reasons.some((r) => r.startsWith(SELF_MODIFICATION)), levelOf(app).reasons.join('; '));
+  // The review packet's risk class at the head reads the same scope (merge-flow.ts packetFacts): held here only by
+  // its size, the app's own change is logic, not "protected" as the engine's tool guard.
+  const held = await openPr({ worker, 'evaluator-verdict': approve() }, { body, lockScope: () => 'managed-app', autoMerge: () => true, edit: (cfg) => void (cfg.review!.merge.max_lines = 0) });
+  await green(held);
+  const packet = (await held.f.backlog.comments(held.opened.number)).map((x) => x.body).find((b) => /waits for you/.test(b));
+  assert.ok(packet, 'the review packet is posted');
+  assert.match(packet, /\*\*Risk class:\*\* logic\b/);
+  for (const lockScope of [undefined, () => { throw new Error("root's file can't be read"); }]) {
+    const t = await openPr({ worker, 'evaluator-verdict': approve() }, { body, ...(lockScope ? { lockScope } : {}), approveLanding: true });
+    assert.equal(levelOf(t).level, 'L3', `${lockScope ? 'asking fails' : 'no lockScope'}: ${levelOf(t).reasons.join('; ')}`);
+    assert.ok(levelOf(t).reasons.includes(`${SELF_MODIFICATION}: src/contract.ts`), levelOf(t).reasons.join('; '));
   }
 });
 

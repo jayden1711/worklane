@@ -824,3 +824,70 @@ install_machine_owners() {
   mv -f "$tmp" "$file"
   echo "machine owners ($file): $json"
 }
+
+# Root's word on which instances' repos are managed apps, not the engine (src/managed-apps.ts, managed-apps.sh): for
+# those, the self-modification locks on the engine's own source paths stand aside. Root's file; every instance user
+# reads it; none can change it. Missing, malformed, or not naming an instance with its repo: every lock applies.
+MANAGED_APPS=/etc/worklane/managed-apps.json
+# What the engine updates from: the repo it names is the engine's, never a managed app.
+UPDATES_JSON=/etc/worklane/updates.json
+# The file's new text, {"version":1,"apps":{"<instance>":"<owner/repo>",...}} (names sorted), from the current one:
+#   managed_apps_json <file> add <instance> <owner/repo> <updates.json> <engine package.json>
+#   managed_apps_json <file> remove <instance>
+# Refuses (exit 2), changing nothing: a current file that isn't in this form, a bad name or repo, adding the engine's
+# own repo (the engine package.json's repository.url, or updates.json's repo_url), and adding anything when either of
+# those can't be told (no updates.json, not JSON, or no GitHub repo named).
+managed_apps_json() {
+  case "${2:-}" in
+    add) need_instance_name "${3:-}"; repo_ok "${4:-}" || { echo "repo ${4:-}: a GitHub owner/name" >&2; return 2; } ;;
+    remove) need_instance_name "${3:-}" ;;
+    *) echo "managed_apps_json: add or remove" >&2; return 2 ;;
+  esac
+  node -e '
+    const fs = require("fs");
+    const [file, op, inst, repo, updates, pkg] = process.argv.slice(1);
+    const fail = (m) => { process.stderr.write(m + "\n"); process.exit(2); };
+    let cur = { version: 1, apps: {} };
+    if (fs.existsSync(file)) {
+      try { cur = JSON.parse(fs.readFileSync(file, "utf8")); } catch { fail(file + ": not JSON: fix it or remove it first"); }
+      const ok = cur && typeof cur === "object" && Object.keys(cur).sort().join() === "apps,version" && cur.version === 1 && cur.apps && typeof cur.apps === "object" && !Array.isArray(cur.apps) && Object.values(cur.apps).every((r) => typeof r === "string");
+      if (!ok) fail(file + ": not in the form managed-apps.sh writes: fix it or remove it first");
+    }
+    const apps = Object.assign(Object.create(null), cur.apps);
+    if (op === "add") {
+      // Which repo is the engine: the engine package.json repository.url and updates.json repo_url, both required
+      // (src/managed-apps.ts engineRepos reads the same two). Either one missing or unreadable: refuse, never skip.
+      const gh = (url) => { const m = /github\.com[/:]([^/\s]+\/[^/\s]+?)(?:\.git)?\/?$/i.exec(String(url || "")); return m ? m[1].toLowerCase() : null; };
+      let p;
+      try { p = JSON.parse(fs.readFileSync(pkg, "utf8")); } catch { fail("the engine package.json (" + pkg + ") cannot be read, so which repo is the engine cannot be told: run this from the engine checkout"); }
+      const own = gh(p && p.repository && (typeof p.repository === "string" ? p.repository : p.repository.url));
+      if (!own) fail("the engine package.json (" + pkg + ") names no GitHub repository, so which repo is the engine cannot be told");
+      if (!updates || !fs.existsSync(updates)) fail("no " + updates + ", so the repo the engine updates from cannot be told: set up updates.sh first");
+      let u;
+      try { u = JSON.parse(fs.readFileSync(updates, "utf8")); } catch { fail(updates + ": not JSON, so the engine repo it names cannot be told apart: fix it first"); }
+      const followed = gh(u && u.repo_url);
+      if (!followed) fail(updates + ": its repo_url names no GitHub repo, so the engine repo cannot be told apart: fix it first");
+      if (repo.toLowerCase() === own) fail(repo + " is the engine own repo (" + pkg + " repository): the engine, never a managed app");
+      if (repo.toLowerCase() === followed) fail(repo + " is the repo the engine on this machine updates from (" + updates + "): the engine, never a managed app");
+      apps[inst] = repo;
+    } else delete apps[inst];
+    const sorted = {};
+    for (const k of Object.keys(apps).sort()) sorted[k] = apps[k];
+    process.stdout.write(JSON.stringify({ version: 1, apps: sorted }) + "\n");
+  ' "$1" "$2" "$3" "${4:-}" "${5:-}" "${6:-}"
+}
+# Write the managed apps file, root:root 0644: a dotted temp name next to it, then moved into place.
+#   install_managed_apps <file> add <instance> <owner/repo> <updates.json> <engine package.json>
+#   install_managed_apps <file> remove <instance>
+install_managed_apps() {
+  local file="$1" json tmp
+  json="$(managed_apps_json "$@")" || return 2
+  [ -d "$(dirname "$file")" ] || { echo "no $(dirname "$file"); run machine.sh first" >&2; return 1; }
+  tmp="$(dirname "$file")/.$(basename "$file").tmp"
+  rm -f "$tmp"
+  printf '%s\n' "$json" > "$tmp"
+  chown root:root "$tmp"
+  chmod 0644 "$tmp"
+  mv -f "$tmp" "$file"
+  echo "managed apps ($file): $json"
+}

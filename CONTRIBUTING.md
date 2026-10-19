@@ -16,6 +16,8 @@ Signed-off-by: Your Name <you@example.com>
 
 `git commit -s` adds it. CI rejects pull requests with unsigned commits (`npm run check:dco -- origin/main` checks locally).
 
+The sign-off is the repo's only attribution. A commit message with a `Co-Authored-By` trailer (any address) or a coding tool's "Generated with" line is refused by the push gate, and a PR body with one fails the `new-deps` check. The harness's own agents run with attribution turned off.
+
 ## Licensing of borrowed code
 
 - The project is Apache-2.0.

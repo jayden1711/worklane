@@ -37,7 +37,8 @@ export interface PacketInput {
   receipts: { checks: CheckRecord[]; doneWhen: DoneWhenList; unverified: string[]; head?: string | undefined } | null;
 }
 
-const cut = (s: string, max: number) => (s.length > max ? `${s.slice(0, max - 1)}…` : s);
+/** `s` in at most `max` characters, ending in "…" when cut; never half an emoji (a lone high surrogate) before it. */
+const cut = (s: string, max: number) => (s.length > max ? `${s.slice(0, max - 1).replace(/[\uD800-\uDBFF]$/, '')}…` : s);
 const short = (sha: string) => sha.slice(0, 8);
 /**
  * Text from the record as GitHub shows it verbatim: one line (whitespace folded), backticks turned into quotes, cut to

@@ -58,7 +58,7 @@ test("an objection is the owner's or a writer's /<cli> object comment after the 
 });
 
 const review = loadConfig(exampleProject().dir).review!;
-const hold = (p: { files: string[]; design_change?: boolean; design_reason?: string }, exists = (_: string) => true) => planHoldReasons({ ...plan, design_change: false, ...p }, { review, moneyPaths: [], existsAtBase: exists });
+const hold = (p: { files: string[]; design_change?: boolean; design_reason?: string }, exists = (_: string) => true) => planHoldReasons({ ...plan, design_change: false, ...p }, { review, moneyPaths: [], existsAtBase: exists, scope: undefined });
 
 test("a plan touching an L3 path is held, judged with the merge policy's own categories", () => {
   assert.deepEqual(hold({ files: ['migrations/002_orders.sql', 'src/price.js'] }), ['high-risk: migration (migrations/002_orders.sql)']);
@@ -69,7 +69,7 @@ test('a design-level plan is held: its own flag, a dependency manifest, or a new
   assert.deepEqual(hold({ files: ['src/price.js'], design_change: true, design_reason: 'adds a public --currency option' }), ['design: the plan flagged a design change: adds a public --currency option']);
   assert.deepEqual(hold({ files: ['package.json', 'src/price.js'] }), ['design: dependency manifests change (package.json)']);
   assert.deepEqual(hold({ files: ['billing/invoice.js'] }, (d) => d !== 'billing'), ['design: new top-level module (billing/)']);
-  assert.deepEqual(planHoldReasons({ ...plan, files: ['src/price.js'] }, { review, moneyPaths: [], existsAtBase: () => true }), ['design: the plan gave no design-change answer']);
+  assert.deepEqual(planHoldReasons({ ...plan, files: ['src/price.js'] }, { review, moneyPaths: [], existsAtBase: () => true, scope: undefined }), ['design: the plan gave no design-change answer']);
 });
 
 test('an ordinary plan is not held: post and proceed', () => {

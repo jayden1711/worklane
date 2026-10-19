@@ -24,7 +24,7 @@ export function KeyForm({ hub, initialError = null, onKept = () => window.locati
       <label className="block text-[12.5px] font-medium text-ink" htmlFor="dash-key">
         Dashboard key
       </label>
-      <input id="dash-key" type="password" autoComplete="off" spellCheck={false} value={key} onChange={(e) => setKey(e.target.value)} data-testid="key-input" className="h-9 w-full rounded-control border border-line bg-canvas px-3 text-[13px] text-ink outline-none focus:border-ink-3" />
+      <input id="dash-key" type="password" autoComplete="off" spellCheck={false} value={key} onChange={(e) => setKey(e.target.value)} data-testid="key-input" className="h-9 w-full rounded-control border border-line-strong dark:border-line bg-canvas px-3 text-[13px] text-ink outline-none focus:border-ink-3" />
       <div className="flex flex-wrap items-center gap-3">
         <button type="submit" disabled={busy || !key.trim()} data-testid="key-submit" className="flex h-9 items-center justify-center rounded-control bg-ink px-4 text-[13.5px] font-medium text-surface hover:opacity-90 disabled:opacity-50">
           Open
@@ -71,7 +71,7 @@ export function KeyHelp({ help }: { help: KeyHelpData }) {
             <button
               type="button"
               data-testid="key-help-copy"
-              className="shrink-0 rounded-control border border-line px-2 py-0.5 text-[12px] text-ink hover:bg-surface"
+              className="shrink-0 rounded-control border border-line-strong dark:border-line px-2 py-0.5 text-[12px] text-ink hover:bg-surface"
               onClick={() => void navigator.clipboard?.writeText(help.copy!).then(() => setCopied(true), () => setCopied(false))}
             >
               {copied ? 'Copied' : 'Copy command'}

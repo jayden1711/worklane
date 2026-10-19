@@ -14,7 +14,7 @@ import { computeLevel } from '../src/review.js';
 
 const review = ReviewConfig.parse(DEFAULT_REVIEW);
 const classOf = (paths: string[], moneyPaths: RegExp[] = []) =>
-  riskClassOf({ paths, level: computeLevel({ files: paths.map((path) => ({ path, added: 1, removed: 0 })), labels: [], moneyPaths }, review), waitCategories: waitCategoriesOf(review) });
+  riskClassOf({ paths, level: computeLevel({ files: paths.map((path) => ({ path, added: 1, removed: 0 })), labels: [], moneyPaths, scope: undefined }, review), waitCategories: waitCategoriesOf(review) });
 
 const GOOD = `${prBodyHead({ intent: 'Totals ignore orders with a zero or negative quantity.', cls: 'logic', why: [] })}\n\nCloses #7\n`;
 
