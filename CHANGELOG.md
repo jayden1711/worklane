@@ -19,7 +19,7 @@ Every release, newest first: the PRs merged since the previous one, and what cha
 
 ### Guardrail changes
 
-- **The engine updater no longer waits for the retired `desktop` check when a commit has no run of it (#744).** It is the only name in the updater's own fixed list (`RETIRED_CHECKS` in `scripts/machine/worklane-update.cjs`). A `desktop` run that exists is judged as before: failed, skipped or cancelled refuses, and queued or running waits. A list of retired names alone is refused, as an empty list is. Nothing changes while CI still runs the job. The window it tested was never built or installed by the updater.
+- **The engine updater no longer waits for the retired `desktop` check when a commit has no run of it (#744).** It is the only name in the updater's own fixed list (`RETIRED_CHECKS` in `scripts/machine/worklane-update.cjs`). A `desktop` run that exists is judged as before: failed, skipped or cancelled refuses, and queued or running waits. A list of retired names alone, none of which ran on the commit, is refused, as an empty list is. Nothing changes while CI still runs the job. The window it tested was never built or installed by the updater.
 
 ## v0.5.2 (2026-10-17)
 
