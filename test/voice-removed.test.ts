@@ -13,7 +13,6 @@ import { gzipSync } from 'node:zlib';
 import { loadConfig } from '../src/config/load.js';
 import { startDashboard } from '../src/dashboard.js';
 import { startHub } from '../src/dashboard-hub.js';
-import { SIRI_PORT_OPTION, UNSERVE_SIRI, voiceSiriLeftoverCheck } from '../src/doctor-voice-removed.js';
 import { EventLog } from '../src/events/log.js';
 import { loadIntakeConfig } from '../src/intake/config.js';
 import { intakeForInstance } from '../src/intake/wire.js';
@@ -22,6 +21,7 @@ import { SIRI_PORT_IGNORED, VOICE_REMOVED } from '../src/voice-removed.js';
 import { asPerson, exampleProject, exampleRoles, repoRoot } from './helpers.js';
 
 const OWNER = 'example-owner';
+const SIRI_PORT_OPTION = '--siri-port';
 const TAB = { focused: true, visible: true };
 /** What an install with voice and Siri on had in its intake.yaml. */
 const OLD_INTAKE = 'version: 1\nvoice:\n  enabled: true\nsiri:\n  enabled: true\n  ask_model: haiku\n  ask_max_usd_per_day: 1\n';
@@ -179,7 +179,9 @@ test("upgrade: an older export's Siri token store is never imported (its gateway
   assert.deepEqual(r2.skipped.filter((s) => /Siri was removed/.test(s.why)).map((s) => s.path).sort(), ['state/siri-gateway-token', 'state/siri/devices.json']);
 });
 
-test('doctor: fails naming each voice or Siri leftover and the step that removes it; says nothing on a clean machine', () => {
+test('doctor: fails naming each voice or Siri leftover and the step that removes it; says nothing on a clean machine', async () => {
+  // Loaded here, so each test above runs on its own against an older engine too (the fail-without run).
+  const { UNSERVE_SIRI, voiceSiriLeftoverCheck } = await import('../src/doctor-voice-removed.js');
   const T = mkdtempSync(join(tmpdir(), 'voice-removed-doctor-'));
   const uid = process.getuid?.() ?? 0;
   const state = join(T, 'alpha-state');
