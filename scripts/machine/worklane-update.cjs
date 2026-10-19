@@ -74,10 +74,10 @@
 // helper, the GPU device fixer, the experiments helper: HELPERS below) follow the engine. The removed owner
 // terminal's console shell (#742) is now a stub that refuses everything (scripts/machine/worklane-console-shell.sh):
 // this updater and older ones replace a live one with it, and a dashboards.sh rerun deletes it and its sudoers rule;
-// once deleted, it is never installed again. With the engine's services stopped, just before the switch, each helper this machine has is replaced by the new engine's
-// copy when the two differ (atomically: a checked temp file beside it, renamed over it, with the installed file's
-// owner and mode; sudoers is never touched; a helper the machine doesn't
-// have is never installed). An engine and its helpers then always speak the same protocol. If one can't be replaced,
+// once deleted, it is never installed again. With the engine's services stopped, just before the switch, each
+// helper this machine has is replaced by the new engine's copy when the two differ (atomically: a checked temp file
+// beside it, renamed over it, with the installed file's owner and mode; sudoers is never touched; a helper the
+// machine doesn't have is never installed). An engine and its helpers then always speak the same protocol. If one can't be replaced,
 // the update is rolled back and held, like a failed migration. Every rollback puts the old engine's helpers back.
 // Every attempt, install, refusal, rollback and canary is one JSON line in /var/lib/worklane/updates.jsonl (a wait
 // or refusal once per commit and reason). Every run also prints one line to stdout, the journal: the result, and for
