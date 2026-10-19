@@ -26,8 +26,12 @@ export const MANAGED_APPS_FILE = () => etcPath('managed-apps.json');
 /** The root script that changes it, as a root shell runs it. */
 export const MANAGED_APPS_SCRIPT = 'scripts/setup/managed-apps.sh';
 
-/** A GitHub owner/name, as scripts/setup/lib.sh repo_ok takes it. */
-const REPO = /^[A-Za-z0-9](?:-?[A-Za-z0-9]){0,38}\/[A-Za-z0-9_.-]{1,100}$/;
+/**
+ * A GitHub owner/name exactly as scripts/setup/lib.sh repo_ok takes it (a test runs both on the same strings): the
+ * owner a GitHub login (github_login_ok: at most 39 letters, digits and single inner hyphens), the name at most 100
+ * letters, digits, '.', '_' and '-', and not '.' or '..'.
+ */
+const REPO = /^(?=[A-Za-z0-9-]{1,39}\/)[A-Za-z0-9](?:-?[A-Za-z0-9])*\/(?!\.\.?$)[A-Za-z0-9_.-]{1,100}$/;
 
 /**
  * One of root's /etc files, read as every root file is (readRegularFile: O_NOFOLLOW, a regular file, at most 64 KB)
@@ -67,7 +71,9 @@ export function readManagedApps(file = MANAGED_APPS_FILE(), rootUid = 0): { apps
  */
 export function githubRepoOf(url: string): string | null {
   const m = /github\.com[/:]([^/\s]+\/[^/\s]+?)(?:\.git)?\/?$/i.exec(url);
-  return m && REPO.test(m[1]!) ? m[1]! : null;
+  // WHY (owner decision 2026-10-18): GitHub has no repo named '.git' (nor '.' or '..', which REPO refuses), and a
+  // remote URL naming one must not reach install's config or setup's state as a repo.
+  return m && REPO.test(m[1]!) && !/\/\.git$/i.test(m[1]!) ? m[1]! : null;
 }
 
 /** The installed engine's package.json (dist/src/ -> the package root): root installs it, no repo's content says it. */

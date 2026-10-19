@@ -98,6 +98,24 @@ test("a managed apps file root can't vouch for, or not in the script's form, nam
   if (me !== 0) assert.equal(readLockScope('shop', 'example-org/shop', { file: rootFile(body), rootUid: 0 }).scope, 'engine');
 });
 
+// WHY (#747): the engine's repo pattern said it took a repo "as lib.sh repo_ok takes it", but it took '.', '..' and
+// owners longer than GitHub's 39 characters, which repo_ok refuses. Both now run on the same strings and agree.
+test("root's file takes exactly the repos lib.sh repo_ok takes", { skip: !posix && 'bash' }, () => {
+  const repos = [
+    'example-org/shop', 'a/b', 'example-org/site.github.io', 'example-org/.git', 'example-org/...', 'example-org/_x',
+    'example-org/.', 'example-org/..', 'example-org', 'example-org/', '/shop', 'example-org/shop/x', 'example-org/a b',
+    '-x/shop', 'x-/shop', 'a--b/shop', 'bad_owner/shop',
+    `${'a'.repeat(39)}/shop`, `${'a'.repeat(40)}/shop`, `${'a-'.repeat(19)}a/shop`, `${'a-'.repeat(20)}a/shop`,
+    `example-org/${'n'.repeat(100)}`, `example-org/${'n'.repeat(101)}`,
+  ];
+  for (const repo of repos) {
+    const sh = spawnSync('bash', ['-c', 'source "$1"; repo_ok "$2"', '_', join(setup, 'lib.sh'), repo], { encoding: 'utf8', env: { PATH: '/usr/bin:/bin' } });
+    assert.ok(sh.status === 0 || sh.status === 1, `${repo}: ${sh.stderr}`);
+    const read = readManagedApps(rootFile(`${JSON.stringify({ version: 1, apps: { shop: repo } })}\n`), me);
+    assert.equal(read.problem === null, sh.status === 0, `${repo}: repo_ok ${sh.status === 0 ? 'takes' : 'refuses'} it; the engine ${read.problem ?? 'takes it'}`);
+  }
+});
+
 // WHY (#665 review): root marking the engine's own repo as an app (a slip at add, a hand edit) turned the in-code
 // engine-source locks off for it. The reader itself refuses that repo, and every app when it can't tell which it is.
 test("the engine's own repo is never a managed app, whatever root's file says: the installed package.json's repository, and updates.json's repo_url", { skip: !posix && 'owners and modes' }, () => {
@@ -213,6 +231,10 @@ test('one githubRepoOf: install\'s origin, setup\'s origin step and the engine\'
     ['https://github.com/example-org/shop/', 'example-org/shop'],
     ['https://GitHub.com/Example-Org/Shop.git', 'Example-Org/Shop'],
     ['https://github.com/bad_owner/shop.git', null],
+    // Names GitHub has no repo under (owner decision 2026-10-18): install's old parser refused them, and still none.
+    ['https://github.com/example-org/.', null],
+    ['https://github.com/example-org/..', null],
+    ['https://github.com/example-org/.git', null],
     ['https://github.com/example-org/shop/tree', null],
     ['https://git.example.org/example-org/shop.git', null],
     ['/srv/git/shop.git', null],
