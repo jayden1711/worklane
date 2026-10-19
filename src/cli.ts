@@ -30,6 +30,7 @@ import { scanPath } from './scan/secrets.js';
 import { runCommentCheck } from './comment-policy.js';
 import { checkVacuity } from './vacuity.js';
 import { changedNames } from './coordinator/change-files.js';
+import { shownPath } from './path-text.js';
 import { prodRead } from './prodread.js';
 import { listJobs, queueJob, runJob } from './queue.js';
 import { emergencyStop, resumeAll, slotStatus, stopAll } from './slots.js';
@@ -545,7 +546,7 @@ async function main(argv: string[]): Promise<number> {
       for (const f of files) {
         const r = checkVacuity(root, f, { assertionPattern: v.assertion_pattern, appPaths: v.app_paths, dynamic: v.dynamic, runOne: cfg.tests.runner.one });
         if (r.vacuous) bad++;
-        console.log(`${r.vacuous ? 'VACUOUS' : 'ok     '} ${f}: ${r.assertions} assertion(s)${r.touched ? `, touched ${r.touched.length} app file(s)` : ''}${r.why.length ? ` (${r.why.join('; ')})` : ''}`);
+        console.log(`${r.vacuous ? 'VACUOUS' : 'ok     '} ${shownPath(f)}:${r.assertions} assertion(s)${r.touched ? `, touched ${r.touched.length} app file(s)` : ''}${r.why.length ? ` (${r.why.join('; ')})` : ''}`);
       }
       if (!files.length) console.log('no test files to check');
       return bad ? 1 : 0;

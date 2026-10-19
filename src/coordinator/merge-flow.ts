@@ -12,6 +12,7 @@ import { type CommitCheck, type DoneWhenList, type PullRequest } from '../backlo
 import type { EventPayload, StoredEvent } from '../events/types.js';
 import { writeGroupOnly } from '../os/index.js';
 import { computeLevel, loadMoneyPaths } from '../review.js';
+import { shownPaths } from '../path-text.js';
 import type { Episode } from '../fix-forward.js';
 import { instructionTargets } from '../skilleval.js';
 import { checkedPush } from '../push-check.js';
@@ -1148,7 +1149,7 @@ export abstract class MergeFlow extends FixRuns {
         else if (!m.clean) {
           abortMerge(path);
           outcome = 'conflict';
-          detail = `conflicts in ${Object.keys(m.conflicted).join(', ')}`;
+          detail = `conflicts in ${shownPaths(Object.keys(m.conflicted))}`;
         } else {
           const r = await this.project(this.d.cfg.tests.runner.changed, path);
           outcome = lightOutcome({ merged: true, fastPassed: r.code === 0 });

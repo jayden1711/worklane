@@ -7,6 +7,11 @@ import type { ReviewConfig } from './config/schema.js';
 import { globToRegExp } from './guardrails/glob.js';
 import { BRAND } from './brand.js';
 import { HOOK_IMPORTS } from './hook-imports.js';
+import { hasControlCharacter, hasInvisibleCharacter, hasNonAsciiTopLevel, isNonUtf8Path, shownPath, shownPaths } from './path-text.js';
+
+// The odd-name tests and how a reason shows a path live in src/path-text.ts (one module the merge policy, the conflict
+// fix and the coordinator share); re-exported here for the callers that read them with the review levels.
+export { escapedPath, hasControlCharacter, hasInvisibleCharacter, hasNonAsciiTopLevel, isNonUtf8Path, shownPath, shownPaths } from './path-text.js';
 
 export type Level = 'L0' | 'L1' | 'L2' | 'L3';
 const ORDER: Level[] = ['L0', 'L1', 'L2', 'L3'];
@@ -25,8 +30,6 @@ export const AGENT_INSTRUCTIONS = 'agent-instructions';
  * never auto-merges (merge-policy.ts waitCategoriesOf), whatever review.yaml says (#683).
  */
 export const CONTROL_CHARACTER_PATH = 'control-character-path';
-/** Whether a path holds a control character (Unicode Cc: U+0000 to U+001F and U+007F to U+009F). */
-export const hasControlCharacter = (path: string): boolean => /\p{Cc}/u.test(path);
 
 /**
  * A changed path whose name isn't valid UTF-8 (a byte like 0xff). It can't be read as itself: every reader decodes
@@ -35,12 +38,6 @@ export const hasControlCharacter = (path: string): boolean => /\p{Cc}/u.test(pat
  * (merge-policy.ts waitCategoriesOf), whatever review.yaml says (#683).
  */
 export const NON_UTF8_PATH = 'non-utf8-path';
-/**
- * Whether a path, as read, came from a name that isn't valid UTF-8: it holds U+FFFD, which is what any UTF-8 decode
- * (the helper's, or a plain `encoding: 'utf8'`) makes of a bad byte. A name with a real U+FFFD in it counts too; the
- * owner looks at it.
- */
-export const isNonUtf8Path = (path: string): boolean => path.includes('�');
 
 /**
  * A changed path with an invisible or format character in it: a bidi override or isolate (`docs/<U+202E>dm.exe.md`
@@ -50,12 +47,6 @@ export const isNonUtf8Path = (path: string): boolean => path.includes('�');
  * whatever review.yaml says (#683, the owner's call).
  */
 export const INVISIBLE_CHARACTER_PATH = 'invisible-character-path';
-/**
- * Whether a path holds a Unicode format character (General Category Cf: bidi controls, zero-width characters, the
- * soft hyphen, ...) or a default-ignorable code point (Default_Ignorable_Code_Point: Cf's invisible kin outside it,
- * like U+034F or the Hangul fillers, and the variation selectors). Both are Unicode properties, not a hand list.
- */
-export const hasInvisibleCharacter = (path: string): boolean => /[\p{Cf}\p{Default_Ignorable_Code_Point}]/u.test(path);
 
 /**
  * A changed path whose first segment (its top-level directory, or a file at the root) has a character outside ASCII:
@@ -64,13 +55,6 @@ export const hasInvisibleCharacter = (path: string): boolean => /[\p{Cf}\p{Defau
  * and never auto-merges (merge-policy.ts waitCategoriesOf), whatever review.yaml says (#683, the owner's call).
  */
 export const NON_ASCII_TOP_LEVEL_PATH = 'non-ascii-top-level-path';
-export const hasNonAsciiTopLevel = (path: string): boolean => /[^\x00-\x7f]/.test(path.split('/')[0]!);
-
-/**
- * A path as a reason shows it when it can read as another: JSON-quoted with every character outside printable ASCII
- * written as \uXXXX, so an invisible or look-alike character shows as what it is (`"ѕrc/x.ts"`).
- */
-export const escapedPath = (path: string): string => JSON.stringify(path).replace(/[^\x20-\x7e]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`);
 
 /** The categories of a path nothing should have to read around: always L3, always waits, never loosened. */
 export const ODD_PATH_CATEGORIES: readonly string[] = [CONTROL_CHARACTER_PATH, NON_UTF8_PATH, INVISIBLE_CHARACTER_PATH, NON_ASCII_TOP_LEVEL_PATH];
@@ -90,7 +74,8 @@ export const SELF_MODIFICATION_PARTS: { what: string; globs: string[] }[] = [
   { what: 'the main watch', globs: ['src/main-watch*', 'src/github/main-watch-api*'] },
   { what: 'the push guard', globs: ['src/push-guard*', 'src/push-check*'] },
   { what: 'the updater', globs: ['src/updates*', `scripts/machine/${BRAND.cli}-update*`] },
-  { what: 'the review levels', globs: [`${BRAND.configDir}/review.yaml`, 'src/review.ts'] },
+  // src/path-text.ts holds the odd-name tests computeLevel raises on (moved out of src/review.ts, #683), so it stays locked with it.
+  { what: 'the review levels', globs: [`${BRAND.configDir}/review.yaml`, 'src/review.ts', 'src/path-text.ts'] },
   { what: 'the guardrails', globs: [`${BRAND.configDir}/guardrails.yaml`, 'src/guardrails/**'] },
   { what: 'the machine setup', globs: ['scripts/setup/**', 'scripts/machine/**'] },
   { what: 'the CI workflows', globs: ['.github/workflows/**'] },
@@ -271,27 +256,31 @@ export function computeLevel(input: LevelInput, cfg: ReviewConfig, extraCategori
   if (allLow && lines <= (L.L0_auto.max_lines ?? Infinity)) reasons.push(`only docs/tests, ${lines} lines`);
   else raise('L1', allLow ? `docs/tests but ${lines} lines (> ${L.L0_auto.max_lines})` : 'touches app code');
   // A category listed for L1 (e.g. docs, for a site whose docs are its product) always gets the evaluator.
-  if (level === 'L0') for (const c of L.L1_evaluator.when) if (categories[c]?.length) raise('L1', `${c}: ${(categories[c] ?? []).slice(0, 3).join(', ')}`);
+  // Every path in a reason as shownPath shows it (#683): reasons reach the PR body, events, the owner's question and
+  // hold comments, so no control, format or invisible character in a name reaches them raw.
+  const named = (c: string) => `${c}: ${shownPaths((categories[c] ?? []).slice(0, 3))}`;
+  if (level === 'L0') for (const c of L.L1_evaluator.when) if (categories[c]?.length) raise('L1', named(c));
 
   const l1Limits = (L.L1_evaluator.max_lines !== undefined && lines > L.L1_evaluator.max_lines) || (L.L1_evaluator.max_files !== undefined && input.files.length > L.L1_evaluator.max_files);
   if (l1Limits && (categories['app-non-money'] ?? []).length) {
     add('app-non-money-large', '*');
     raise('L2', `large app change: ${lines} lines, ${input.files.length} files`);
   }
-  for (const c of L.L2_notify.when) if (c !== 'app-non-money-large' && categories[c]?.length) raise('L2', `${c}: ${(categories[c] ?? []).slice(0, 3).join(', ')}`);
-  for (const c of L.L3_human.when) if (categories[c]?.length) raise('L3', `${c}: ${(categories[c] ?? []).slice(0, 3).join(', ')}`);
-  for (const c of ALWAYS_L3) if (!L.L3_human.when.includes(c) && categories[c]?.length) raise('L3', `${c}: ${(categories[c] ?? []).slice(0, 3).join(', ')}`);
+  for (const c of L.L2_notify.when) if (c !== 'app-non-money-large' && categories[c]?.length) raise('L2', named(c));
+  for (const c of L.L3_human.when) if (categories[c]?.length) raise('L3', named(c));
+  for (const c of ALWAYS_L3) if (!L.L3_human.when.includes(c) && categories[c]?.length) raise('L3', named(c));
   if (L.L3_human.over_lines !== undefined && lines > L.L3_human.over_lines) raise('L3', `${lines} lines (> ${L.L3_human.over_lines})`);
-  // Quoted (JSON) in the reason, so the control character itself never reaches a comment or a log line.
+  // The odd names, each as shownPath shows it: a control, invisible or format character, or a top-level name outside
+  // ASCII, escaped (\uXXXX), so the character shows as what it is and never reaches a comment or a log line raw; a
+  // name that isn't valid UTF-8, quoted.
   const odd = categories[CONTROL_CHARACTER_PATH] ?? [];
-  if (odd.length) raise('L3', `path with a control character: ${odd.slice(0, 3).map((p) => JSON.stringify(p)).join(', ')}`);
+  if (odd.length) raise('L3', `path with a control character: ${odd.slice(0, 3).map(shownPath).join(', ')}`);
   const notUtf8 = categories[NON_UTF8_PATH] ?? [];
-  if (notUtf8.length) raise('L3', `path that isn't valid UTF-8: ${notUtf8.slice(0, 3).map((p) => JSON.stringify(p)).join(', ')}`);
-  // Escaped (\uXXXX), so the reason shows the character instead of hiding it or reordering the line around it.
+  if (notUtf8.length) raise('L3', `path that isn't valid UTF-8: ${notUtf8.slice(0, 3).map(shownPath).join(', ')}`);
   const invisible = categories[INVISIBLE_CHARACTER_PATH] ?? [];
-  if (invisible.length) raise('L3', `path with an invisible or format character: ${invisible.slice(0, 3).map(escapedPath).join(', ')}`);
+  if (invisible.length) raise('L3', `path with an invisible or format character: ${invisible.slice(0, 3).map(shownPath).join(', ')}`);
   const lookalike = categories[NON_ASCII_TOP_LEVEL_PATH] ?? [];
-  if (lookalike.length) raise('L3', `top-level name that isn't ASCII: ${lookalike.slice(0, 3).map(escapedPath).join(', ')}`);
+  if (lookalike.length) raise('L3', `top-level name that isn't ASCII: ${lookalike.slice(0, 3).map(shownPath).join(', ')}`);
 
   if (input.verdict && (!input.verdict.patch_correct || !input.verdict.test_correct || input.verdict.confidence === 'low')) {
     const from = level;

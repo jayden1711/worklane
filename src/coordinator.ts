@@ -16,6 +16,7 @@ import type { EventPayload, EventType } from './events/types.js';
 import { globToRegExp } from './guardrails/glob.js';
 import { isProtectedPath } from './guardrails/engine.js';
 import { computeLevel, loadMoneyPaths, type ChangeFile, type Level } from './review.js';
+import { shownPath, shownPaths } from './path-text.js';
 import { changeContext, investigationContext, summaryContext } from './decision-context.js';
 import { oneParagraph, RISK_CLASSES, sizeFiles, sizeVerdict, type RiskClass } from './pr-rules.js';
 import { evalLevel, judge } from './coordinator/eval-routing.js';
@@ -1088,7 +1089,7 @@ export class Coordinator extends AutomationRuns {
           lvl.reasons.push('the evaluator rejected the patch: held for the owner (safety floor)');
         }
         if (plan && (await this.planObjected(n, owner, planComments))) return;
-        this.emit('review.level_set', { issue: n, head, level: lvl.level, reasons: [...lvl.reasons, ...(verdict.unread.length ? [`evaluator did not read: ${verdict.unread.slice(0, 10).join(', ')}${verdict.unread.length > 10 ? ` and ${verdict.unread.length - 10} more` : ''}`] : []), ...change.tampered.map((t) => `tamper guard: ${t}`), ...(repro?.unavailable ? [`no reproduction: ${repro.unavailable}`] : [])] });
+        this.emit('review.level_set', { issue: n, head, level: lvl.level, reasons: [...lvl.reasons, ...(verdict.unread.length ? [`evaluator did not read: ${shownPaths(verdict.unread.slice(0, 10))}${verdict.unread.length > 10 ? ` and ${verdict.unread.length - 10} more` : ''}`] : []), ...change.tampered.map((t) => `tamper guard: ${t}`), ...(repro?.unavailable ? [`no reproduction: ${repro.unavailable}`] : [])] });
         await this.d.backlog.removeLabel(n, 'agent:working');
         await this.d.backlog.addLabels(n, ['in-review', `review:${lvl.level}`]);
         if (lvl.level === 'L3') {
@@ -1287,7 +1288,7 @@ export class Coordinator extends AutomationRuns {
       if (r.reason !== 'succeeded' || !s) return unavailable(`evaluator run ${r.reason}`);
       if (s.not_reproducible || !s.test_path) return unavailable(s.not_reproducible ?? 'no test path');
       const changed = changedNames(path, [base]).concat(untrackedNames(path));
-      if (changed.some((f) => f !== s.test_path)) return unavailable(`repro run changed more than the test: ${changed.join(', ')}`);
+      if (changed.some((f) => f !== s.test_path)) return unavailable(`repro run changed more than the test: ${shownPaths(changed)}`);
       if (!existsSync(join(path, s.test_path))) return unavailable(`test ${s.test_path} not found`);
       const one = this.d.cfg.tests.runner.one;
       if (!one) return unavailable('tests.yaml runner.one is not set');
@@ -1476,7 +1477,7 @@ export class Coordinator extends AutomationRuns {
       const baseText = at(base, t.file) ?? builtIn;
       const headText = at(head, t.file) ?? builtIn;
       if (headText === null) {
-        record({ ...none, error: `${t.file} is removed; nothing to evaluate` });
+        record({ ...none, error: `${shownPath(t.file)} is removed; nothing to evaluate` });
         continue;
       }
       const casesMd = at(head, t.cases) ?? at(base, t.cases) ?? (t.role ? engineRoleCases(t.role) : null);
@@ -1508,7 +1509,7 @@ export class Coordinator extends AutomationRuns {
       } catch {
         // deleted
       }
-      if (blob !== repro.hash) return { rejected: `modified the frozen reproduction test ${repro.path}` };
+      if (blob !== repro.hash) return { rejected: `modified the frozen reproduction test ${shownPath(repro.path)}` };
     }
     if (this.git(path, 'status', '--porcelain')) return { rejected: 'uncommitted changes left in the worktree; commit your work' };
     // Every commit carries the harness identity: an agent never commits as a person (or anyone else).
@@ -1522,7 +1523,7 @@ export class Coordinator extends AutomationRuns {
     const workerFiles = repro?.path ? names.filter((f) => f !== repro.path) : names;
     if (!workerFiles.length) return { rejected: 'no changes committed' };
     const prot = names.filter((f) => isProtectedPath(f, this.d.cfg.guardrails));
-    if (prot.length) return { rejected: `changes protected harness files: ${prot.join(', ')}` };
+    if (prot.length) return { rejected: `changes protected harness files: ${shownPaths(prot)}` };
     const scan = await scanRange(path, `${base}..${head}`);
     if (scan.status === 'leaks') return { rejected: `secret scan found ${scan.findings.length} possible secret(s) in the change` };
     if (scan.status === 'unavailable') return { rejected: `secret scan could not run (${scan.error}); not accepting an unscanned change` };
@@ -1549,9 +1550,10 @@ export class Coordinator extends AutomationRuns {
       } catch {
         // new file
       }
-      if (before !== null && after === null) tampered.push(`deleted test ${f.path}`);
-      if (after !== null && /\.(skip|only|todo)\s*\(|\bxit\s*\(|\bxdescribe\s*\(/.test((f.addedLines ?? []).join('\n'))) tampered.push(`skipped/focused tests in ${f.path}`);
-      if (before !== null && after !== null && countAssertions(after, pattern) < countAssertions(before, pattern)) tampered.push(`fewer assertions in ${f.path}`);
+      // Text for the owner, events and the evaluator: the path as shownPath shows it (#683).
+      if (before !== null && after === null) tampered.push(`deleted test ${shownPath(f.path)}`);
+      if (after !== null && /\.(skip|only|todo)\s*\(|\bxit\s*\(|\bxdescribe\s*\(/.test((f.addedLines ?? []).join('\n'))) tampered.push(`skipped/focused tests in ${shownPath(f.path)}`);
+      if (before !== null && after !== null && countAssertions(after, pattern) < countAssertions(before, pattern)) tampered.push(`fewer assertions in ${shownPath(f.path)}`);
     }
     const added = files.reduce((s, f) => s + f.added, 0);
     const removed = files.reduce((s, f) => s + f.removed, 0);
@@ -1837,7 +1839,7 @@ export class Coordinator extends AutomationRuns {
       .filter((p) => p.number === number && p.head === pr.headSha && p.main_sha === mainSha)
       .at(-1);
     if (done?.outcome === 'merge') return 'merge';
-    if (done?.outcome === 'hold') return { hold: `combined with ${baseRef} at ${mainSha.slice(0, 8)} (which changed ${plan.overlap.slice(0, 3).join(', ')}), the fast tests fail: ${done.detail.split('\n').filter(Boolean).slice(-3).join(' / ').slice(0, 400)}` };
+    if (done?.outcome === 'hold') return { hold: `combined with ${baseRef} at ${mainSha.slice(0, 8)} (which changed ${shownPaths(plan.overlap.slice(0, 3))}), the fast tests fail: ${done.detail.split('\n').filter(Boolean).slice(-3).join(' / ').slice(0, 400)}` };
     if (done?.outcome === 'conflict') return 'conflict'; // GitHub should report it next, and the conflict path take it (capped in mergeOrWait)
     if (!this.lightRunning.has(number) && !this.active.has(w.issue)) {
       // Debounced: a burst of moves of main checks at most twice, then the newest main once the window allows.

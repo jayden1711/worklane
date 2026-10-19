@@ -10,6 +10,7 @@ import { BRAND } from '../brand.js';
 import { astGrepConfig, CHECK_SCHEMA, checkBrief, checkDraft, CHECKS_LABEL, clusterSightings, DEFAULT_SG_TEST_DIR, pathsIn, planProposals, proposalHistory, proposalIssueBody, proposalPrBody, readCheckAnswer, repoUrl, SGCONFIG_FILES, sightingsFromEvents, type CheckMode, type Constraint } from '../checks-from-feedback.js';
 import type { EventPayload } from '../events/types.js';
 import { FEEDBACK_CHECK_BRANCH_PREFIX } from '../merge-policy.js';
+import { shownPath, shownPaths } from '../path-text.js';
 import { checkedPush } from '../push-check.js';
 import { rolePrompt } from '../roles.js';
 import { removeSandboxPlaceholders } from '../worktrees.js';
@@ -57,7 +58,7 @@ export abstract class ChecksFromFeedback extends Optimizer {
     const keys = c.sightings.map((s) => s.key);
     const isProtected = this.protectedPath();
     const touched = this.evidencePaths(c).filter(isProtected);
-    if (touched.length) return this.fileIssue(c, keys, `the evidence is about ${touched.slice(0, 5).join(', ')}`, null);
+    if (touched.length) return this.fileIssue(c, keys, `the evidence is about ${shownPaths(touched.slice(0, 5))}`, null);
     const left = this.d.cfg.agents.daily_budget_usd - this.spentToday();
     if (left <= 0) return;
     this.git(this.d.repo, 'fetch', '-q', this.remote, this.branch);
@@ -95,9 +96,9 @@ export abstract class ChecksFromFeedback extends Optimizer {
       const files = changedStatuses(dir, ['--cached']).map(({ status, path }) => ({ status, path, content: status.startsWith('D') ? '' : readFileSync(join(dir, path), 'utf8') }));
       const ok = checkDraft(mode, files);
       if (!ok.ok) return drop(`the draft was refused: ${ok.why}`, true);
-      const draft = files.map((f) => `\`${f.path}\`:\n\n\`\`\`\n${f.content.slice(0, 4000)}\n\`\`\``).join('\n\n');
+      const draft = files.map((f) => `\`${shownPath(f.path)}\`:\n\n\`\`\`\n${f.content.slice(0, 4000)}\n\`\`\``).join('\n\n');
       const inProtected = files.map((f) => f.path).filter(isProtected);
-      if (inProtected.length) return this.fileIssue(c, keys, `the check itself would go in ${inProtected.join(', ')}`, draft);
+      if (inProtected.length) return this.fileIssue(c, keys, `the check itself would go in ${shownPaths(inProtected)}`, draft);
       this.git(dir, '-c', `user.name=${this.identity.name}`, '-c', `user.email=${this.identity.email}`, '-c', 'commit.gpgsign=false', 'commit', '-q', '-s', '-m', `${a.title}\n\nA check proposed from repeated feedback (constraint ${c.id}, seen ${c.sightings.length} times).`);
       const head = this.git(dir, 'rev-parse', 'HEAD');
       const branch = `${FEEDBACK_CHECK_BRANCH_PREFIX}${c.id}`;

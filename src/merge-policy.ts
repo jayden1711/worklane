@@ -4,7 +4,8 @@
 // kill switch is off or auto-merge is stopped. "Ready" (required checks green
 // on the exact evaluated commit, evaluator approved) is decided before this.
 import { BRAND } from './brand.js';
-import { AGENT_INSTRUCTIONS, CONTROL_CHARACTER_PATH, escapedPath, hasControlCharacter, hasInvisibleCharacter, hasNonAsciiTopLevel, INVISIBLE_CHARACTER_PATH, isNonUtf8Path, LOCKED_CATEGORIES, NON_ASCII_TOP_LEVEL_PATH, NON_UTF8_PATH, ODD_PATH_CATEGORIES, SELF_MODIFICATION, selfModificationPart, type LevelResult } from './review.js';
+import { shownPath } from './path-text.js';
+import { AGENT_INSTRUCTIONS, CONTROL_CHARACTER_PATH, INVISIBLE_CHARACTER_PATH, LOCKED_CATEGORIES, NON_ASCII_TOP_LEVEL_PATH, NON_UTF8_PATH, ODD_PATH_CATEGORIES, SELF_MODIFICATION, selfModificationPart, type LevelResult } from './review.js';
 
 export interface MergeVerdict {
   patch_correct: boolean;
@@ -93,8 +94,10 @@ export interface InstructionEvalResult {
 export function instructionEvalReasons(targets: string[], results: InstructionEvalResult[]): string[] {
   const out: string[] = [];
   const score = (s: { passed: number; total: number } | null) => (s ? `${s.passed}/${s.total}` : 'new');
-  for (const t of targets) {
-    const r = results.find((x) => x.target === t);
+  for (const target of targets) {
+    // A target names a role or skill by its changed path's folder: in a reason, as shownPath shows it (#683).
+    const t = shownPath(target);
+    const r = results.find((x) => x.target === target);
     if (!r) out.push(`eval: ${t} changed but was not evaluated`);
     else if (r.error) out.push(`eval: ${t} was not evaluated: ${r.error}`);
     else if (r.incomplete) out.push(`eval: ${t} is incomplete: the cost cap was reached (~$${r.cost_usd.toFixed(2)}), ${score(r.base)} → ${score(r.result)} on the cases that ran`);
@@ -102,7 +105,7 @@ export function instructionEvalReasons(targets: string[], results: InstructionEv
       const diff = r.changes.filter((c) => !(c.base === 'pass' && c.head === 'pass')).map((c) => `  - case ${c.id} "${c.title}": ${c.base} → ${c.head}`);
       out.push([`eval: ${t} scored lower, ${score(r.base)} → ${score(r.result)} (~$${r.cost_usd.toFixed(2)}):`, ...diff].join('\n'));
     }
-    if (!r || r.error || !t.startsWith('role ')) continue;
+    if (!r || r.error || !target.startsWith('role ')) continue;
     // A role's held-out score decides: without it, or with it incomplete or lower, the change waits.
     const h = r.held_out;
     if (!h) out.push(`eval: ${t} has no held-out score${r.held_out_error ? `: ${r.held_out_error}` : ' (the visible score alone never passes a role change)'}`);
@@ -151,13 +154,8 @@ const CATEGORY_WORDS: Record<string, string> = {
   [NON_ASCII_TOP_LEVEL_PATH]: "has a top-level name that isn't ASCII",
 };
 
-/**
- * A path as a reason shows it: escaped (review.ts escapedPath) when it holds an invisible or format character or its
- * top-level name isn't ASCII, so the character shows as what it is; quoted (JSON) when it holds a control character,
- * so a newline can't start a line of its own, or a U+FFFD (a name that isn't valid UTF-8), so it reads as the odd name
- * it is.
- */
-const shown = (p: string) => (hasInvisibleCharacter(p) || hasNonAsciiTopLevel(p) ? escapedPath(p) : hasControlCharacter(p) || isNonUtf8Path(p) ? JSON.stringify(p) : p);
+/** A path as a reason shows it: src/path-text.ts shownPath, the one rule every reason, event and comment uses. */
+const shown = shownPath;
 const paths = (p: string[]) => `${p.slice(0, 3).map(shown).join(', ')}${p.length > 3 ? ` and ${p.length - 3} more` : ''}`;
 
 /**

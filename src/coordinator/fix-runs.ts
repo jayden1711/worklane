@@ -11,7 +11,7 @@ import type { EventPayload, StoredEvent } from '../events/types.js';
 import { computeLevel, loadMoneyPaths } from '../review.js';
 import { issueBrief, rolePrompt, VERDICT_SCHEMA, WORKER_SCHEMA } from '../roles.js';
 import { checkedPush } from '../push-check.js';
-import { conflictBrief, conflictFixesUsed, conflictVerdictSchema, conflictWaitReasons, outsideHunks, parseConflicts, type Side } from '../conflicts.js';
+import { conflictBrief, conflictFixComment, conflictFixesUsed, conflictVerdictSchema, conflictWaitReasons, outsideHunks, parseConflicts, type Side } from '../conflicts.js';
 import { mergeBaseInto, resolutionStrays, stagedBlobs } from '../merge-base.js';
 import { changedNames } from './change-files.js';
 import { type Readiness } from '../pr-watch.js';
@@ -599,7 +599,7 @@ export abstract class FixRuns extends Landing {
       }
       if (!push.ok) return await give(`the branch moved while the fix ran (someone pushed), so the harness didn't push over it: ${push.error.split('\n').pop()}`);
       finished = { outcome: 'pushed', head, files, waits_owner: reasons.length > 0, reasons, detail: summary.slice(0, 1000) };
-      await this.d.backlog.comment(number, `[${BRAND.cli}] Conflicted with ${baseRef} (\`${baseSha.slice(0, 8)}\`)${files.length ? ` in ${files.join(', ')}` : ''}. Conflict fix ${attempt} merged it in and pushed \`${head.slice(0, 8)}\`: ${summary}${reasons.length ? `\n\nThis one waits for a human: ${reasons.join('; ')}.` : ''}`);
+      await this.d.backlog.comment(number, conflictFixComment({ cli: BRAND.cli, baseRef, baseSha, files, attempt, head, summary, reasons }));
     } catch (e) {
       if (!(e instanceof Halted) && !(e instanceof StoppedByOwner)) throw e;
       finished = { outcome: 'no_push', head: null, files, waits_owner: false, reasons: [], detail: e instanceof StoppedByOwner || e instanceof UsagePaused || e instanceof AuthPaused || e instanceof ShuttingDown ? e.message : 'stopped by an emergency stop' };

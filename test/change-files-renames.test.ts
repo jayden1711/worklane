@@ -20,9 +20,15 @@ import { isProtectedPath } from '../src/guardrails/engine.js';
 import { globToRegExp } from '../src/guardrails/glob.js';
 // A namespace import, so the file still loads against a merge-base.ts without the stray check's helpers (fail-without).
 import * as mergeBase from '../src/merge-base.js';
-import { mergeDecision, waitCategoriesOf } from '../src/merge-policy.js';
+// A namespace import, so the file still loads against a conflicts.ts without the comment builder (fail-without).
+import * as conflicts from '../src/conflicts.js';
+import { instructionEvalReasons, mergeDecision, waitCategoriesOf, whyHighRisk } from '../src/merge-policy.js';
+import { checkDraft } from '../src/checks-from-feedback.js';
+import { crossFamilySkip } from '../src/cross-eval.js';
+import { revertFirstReasons } from '../src/fix-forward.js';
+import { lightCheckPlan } from '../src/light-check.js';
 import { riskClassOf, sizeFiles, sizeVerdict } from '../src/pr-rules.js';
-import { computeLevel, type ChangeFile, type LevelInput } from '../src/review.js';
+import { computeLevel, selfModificationPart, type ChangeFile, type LevelInput } from '../src/review.js';
 import { repoRoot } from './helpers.js';
 
 const git = (cwd: string, ...a: string[]) => execFileSync('git', a, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
@@ -85,6 +91,9 @@ const LEVELS = {
 const cfg = ReviewConfig.parse({ version: 1, levels: LEVELS });
 // The engine's own repo: no lock scope given (`as`, so this still compiles once #691 makes the scope a required key).
 const level = (files: ChangeFile[], c = cfg) => computeLevel({ files, labels: [] as string[], moneyPaths: [] as RegExp[] } as LevelInput, c);
+
+/** A string as a reason shows an odd path: JSON-quoted, every character outside printable ASCII as \uXXXX. */
+const esc = (s: string) => JSON.stringify(s).replace(/[^\x20-\x7e]/g, (ch) => `\\u${ch.charCodeAt(0).toString(16).padStart(4, '0')}`);
 
 /** A test file of `n` assertions, long enough that a small edit keeps it a rename (over git's 50% similarity). */
 const testFile = (n: number) => `import assert from 'node:assert/strict';\n${Array.from({ length: n }, (_, i) => `test('case ${i}', () => assert.equal(f(${i}), ${i * 2}));`).join('\n')}\n`;
@@ -183,7 +192,8 @@ test('the inspect guard refuses a protected path with an odd byte in its name, r
     const head = commit(dir, `add ${p}`);
     got.push(await inspect(dir, base, head).then((r) => r.rejected ?? JSON.stringify(r), (e: Error) => e.message));
   }
-  assert.deepEqual(got, odd.map((p) => `changes protected harness files: ${p}`));
+  // The tab, a control character, shows escaped (round 5); the others as themselves.
+  assert.deepEqual(got, odd.map((p) => `changes protected harness files: ${p.includes('\t') ? esc(p) : p}`));
 });
 
 test('conflict fix: a resolver\'s edit to lib/naïve.ts, which the merge brought in cleanly, is a stray', () => {
@@ -288,7 +298,8 @@ test('a changed path with a control character is L3 "path with a control charact
     odd.map((p) => ({
       path: p,
       level: 'L3',
-      reason: `path with a control character: ${JSON.stringify(p)}`,
+      // Escaped: JSON.stringify alone left DEL and a C1 control (NEL) raw (round 5).
+      reason: `path with a control character: ${esc(p)}`,
       cls: 'protected',
       auto: false,
       // The built-in protected paths alone: only the one under .claude/ (the roles are the agents' own to edit).
@@ -309,7 +320,7 @@ test('a newline path committed to a repo comes out of changeFiles as itself and 
   const files = changeFiles(dir, base, head);
   assert.deepEqual(files.map((f) => f.path), ['.claude/skills/a\nb/SKILL.md']);
   assert.equal(level(files, engine).level, 'L3');
-  assert.deepEqual(await inspect(dir, base, head), { rejected: 'changes protected harness files: .claude/skills/a\nb/SKILL.md' });
+  assert.deepEqual(await inspect(dir, base, head), { rejected: 'changes protected harness files: ".claude/skills/a\\nb/SKILL.md"' });
 });
 
 // ---- A name that isn't valid UTF-8 can't be read as itself, so it waits for the owner
@@ -542,6 +553,130 @@ test('ordinary odd names get normal review: an accent below the top level, a quo
   const head = renameWithEdit(dir, 'docs/guide.md', 'web/guide.md', (t) => t);
   assert.deepEqual(each(judgeRange(dir, base, head)), normal);
   assert.deepEqual(brief(judgeRange(dir, base, head)), Array(3).fill(['L0', 'docs-only', true]));
+});
+
+// ---- A changed path in text: every reason, event, question and comment shows it escaped, never raw (round 5)
+
+/** What no reason, event, question or comment may carry raw: a control (Cc), format (Cf) or default-ignorable character. */
+const RAW = /[\p{Cc}\p{Cf}\p{Default_Ignorable_Code_Point}]/u;
+/**
+ * The round-4 probe's characters: the bidi overrides and isolates, the zero-width ones, U+2060, U+FEFF, U+00AD and the
+ * rest of its Cf and default-ignorable list; and control characters: a raw newline, a tab, a CR, U+0001, an escape,
+ * DEL and two C1 controls (NEL, CSI), which JSON.stringify leaves raw.
+ */
+const ODD_CHARS = [
+  0x202a, 0x202b, 0x202c, 0x202d, 0x202e, 0x2066, 0x2067, 0x2068, 0x2069, 0x200b, 0x200c, 0x200d, 0x200e, 0x200f, 0x061c, 0x2060, 0x2061, 0x2064, 0xfeff, 0x00ad, 0x034f, 0x115f, 0x1160,
+  0x3164, 0xffa0, 0x17b4, 0x180b, 0x180e, 0xfe00, 0xfe0f, 0xe0100, 0xe01ef, 0xe0001, 0xe0041, 0x1d173, 0xfff9, 0x0600,
+  0x0a, 0x09, 0x0d, 0x01, 0x1b, 0x7f, 0x85, 0x9b,
+].map((c) => String.fromCodePoint(c));
+/**
+ * Each character in paths that land in different reasons: docs, app code, the engine's own src/ (and the review
+ * levels), CI workflows (several categories at once), a dependency manifest (L2), a migration, a role (an
+ * instructions target), and a top-level name.
+ */
+const oddPaths = (c: string) => [`docs/a${c}b.md`, `web/a${c}b.ts`, `src/re${c}view.ts`, `.github/workflows/c${c}i.yml`, `lib/a${c}b/package.json`, `db/migrations/0${c}1.sql`, `${BRAND.configDir}/roles/a${c}b.md`, `${c}src/x.ts`];
+
+/** Which strings from `source` carry a raw character, shown escaped so a failure reads. */
+function rawIn(found: Record<string, string[]>, source: string, texts: string[]) {
+  const bad = texts.filter((t) => RAW.test(t)).map(esc);
+  if (bad.length) (found[source] ??= []).push(...bad.slice(0, 2));
+}
+
+test('no reason (computeLevel, mergeDecision, whyHighRisk, riskClassOf) or conflict-fix text carries a raw control, format or invisible character from a changed path', () => {
+  const engine = ReviewConfig.parse(parse(readFileSync(join(repoRoot, BRAND.configDir, 'review.yaml'), 'utf8')));
+  // A review.yaml whose L1 list names docs, so a docs path gets the per-category L1 reason too.
+  const docsL1 = ReviewConfig.parse({ version: 1, levels: { ...LEVELS, L1_evaluator: { ...LEVELS.L1_evaluator, when: ['app-non-money', 'docs'] } } });
+  const verdict = { patch_correct: true, test_correct: true, confidence: 'high' as const, design_change: false };
+  const found: Record<string, string[]> = {};
+  const levels: string[] = [];
+  for (const c of ODD_CHARS) {
+    const all = oddPaths(c);
+    // Each path on its own, and all of them in one change (so a reason lists several).
+    for (const paths of [...all.map((p) => [p]), all]) {
+      const files = paths.map((path) => ({ path, added: 1, removed: 0, addedLines: ['x'] }));
+      // merge-flow's new-top-level reading: the first segment of a path in a directory.
+      const newTopLevel = [...new Set(paths.map((p) => p.split('/')).filter((s) => s.length > 1).map((s) => `${s[0]}/`))];
+      for (const cf of [engine, cfg, docsL1]) {
+        const lvl = level(files, cf);
+        levels.push(lvl.level);
+        const waitCategories = waitCategoriesOf(cf);
+        rawIn(found, 'computeLevel', lvl.reasons);
+        const d = mergeDecision({ branch: 'b', openedByHarness: true, policyOn: true, repoOn: true, stopped: null, level: lvl, waitCategories, limits: { max_lines: 800, max_files: 20 }, lines: files.length, files: files.length, verdict: { ...verdict, unread: paths }, newTopLevel, ciFixRuns: 0, foreignPush: false, pushLimitHit: false });
+        rawIn(found, 'mergeDecision', [...d.reasons, ...d.why.map((w) => w.text)]);
+        rawIn(found, 'whyHighRisk', whyHighRisk({ level: lvl, waitCategories: [] }).map((w) => w.text));
+        rawIn(found, 'riskClassOf', riskClassOf({ paths, level: lvl, waitCategories }).why);
+        // The conflict fix: what it changed outside the hunks, and why it waits (a level's reasons as it passes them).
+        const marked = 'a\n<<<<<<< ours\nx\n=======\ny\n>>>>>>> theirs\nb\n';
+        const outside = conflicts.outsideHunks(Object.fromEntries(paths.map((p, i) => [p, marked + (i % 2 ? 'z\n' : '')])), Object.fromEntries(paths.map((p, i) => [p, i % 3 === 0 ? null : i % 3 === 1 ? marked : 'a\nq\nb\n'])), paths);
+        rawIn(found, 'outsideHunks', outside);
+        rawIn(found, 'conflictWaitReasons', conflicts.conflictWaitReasons({ outside, riskCategories: lvl.reasons, evaluator: { approved: true, confidence: 'high', bothSidesKept: true } }));
+      }
+    }
+  }
+  assert.deepEqual(found, {});
+  // The levels are as before: every one of these paths is L3 (its odd character), alone or together.
+  assert.deepEqual([...new Set(levels)], ['L3']);
+  // An escaped path still names its file, and an ordinary name is shown as itself.
+  const reasons = (p: string) => level([{ path: p, added: 1, removed: 0 }], engine).reasons;
+  assert.ok(reasons('src/re‮view.ts').includes('engine: "src/re\\u202eview.ts"'), reasons('src/re‮view.ts').join(' | '));
+  assert.ok(reasons('src/a\nb.ts').includes('engine: "src/a\\nb.ts"'), reasons('src/a\nb.ts').join(' | '));
+  assert.ok(reasons('src/review.ts').includes('engine: src/review.ts'), reasons('src/review.ts').join(' | '));
+  assert.ok(reasons('src/naïve.ts').includes('engine: src/naïve.ts'), reasons('src/naïve.ts').join(' | '));
+});
+
+test('the conflict fix\'s PR comment shows each conflicted file escaped, and its hold reasons with them', () => {
+  const engine = ReviewConfig.parse(parse(readFileSync(join(repoRoot, BRAND.configDir, 'review.yaml'), 'utf8')));
+  const comment = (conflicts as unknown as { conflictFixComment?: (o: { cli: string; baseRef: string; baseSha: string; files: string[]; attempt: number; head: string; summary: string; reasons: string[] }) => string }).conflictFixComment;
+  assert.equal(typeof comment, 'function', 'conflicts.conflictFixComment builds the comment');
+  const found: Record<string, string[]> = {};
+  for (const c of ODD_CHARS) {
+    const files = oddPaths(c);
+    const lvl = level(files.map((path) => ({ path, added: 1, removed: 0 })), engine);
+    const outside = conflicts.outsideHunks({}, {}, files);
+    const reasons = conflicts.conflictWaitReasons({ outside, riskCategories: lvl.reasons, evaluator: { approved: true, confidence: 'high', bothSidesKept: true } });
+    const text = comment!({ cli: BRAND.cli, baseRef: 'main', baseSha: 'a'.repeat(40), files, attempt: 1, head: 'b'.repeat(40), summary: 'kept both sides', reasons });
+    // Its one line break is its own, between the summary and the hold reasons.
+    const parts = text.split('\n\nThis one waits for a human: ');
+    assert.equal(parts.length, 2, text);
+    rawIn(found, 'conflict-fix comment', parts);
+  }
+  assert.deepEqual(found, {});
+  // An ordinary name as itself.
+  assert.equal(comment!({ cli: 'x', baseRef: 'main', baseSha: 'a'.repeat(40), files: ['lib/naïve.ts'], attempt: 2, head: 'b'.repeat(40), summary: 's', reasons: [] }), `[x] Conflicted with main (\`aaaaaaaa\`) in lib/naïve.ts. Conflict fix 2 merged it in and pushed \`bbbbbbbb\`: s`);
+});
+
+test('inspect\'s "changes protected harness files" shows each odd name escaped', { skip: process.platform !== 'linux' && 'control characters in file names: Linux only' }, async () => {
+  const { dir, base } = repo({ 'README.md': '# x\n' });
+  write(dir, Object.fromEntries(ODD_CHARS.map((c) => [`.claude/agents/a${c}b.md`, 'Be careful.\n'])));
+  const head = commit(dir, 'add agents');
+  const got = await inspect(dir, base, head).then((r) => r.rejected ?? JSON.stringify(r), (e: Error) => e.message);
+  assert.ok(got.startsWith('changes protected harness files: '), got);
+  const found: Record<string, string[]> = {};
+  rawIn(found, 'inspect', [got]);
+  assert.deepEqual(found, {});
+  // Every one of them is named (escaped), none dropped.
+  assert.equal(got.split(', ').length, ODD_CHARS.length, got);
+});
+
+test('the other reasons that name a changed path show it escaped: instruction evals, the cross-family skip, fix-forward\'s revert-first, a check draft, the combined-state plan', () => {
+  const found: Record<string, string[]> = {};
+  for (const c of ODD_CHARS) {
+    const p = `src/a${c}b.ts`;
+    rawIn(found, 'instructionEvalReasons', instructionEvalReasons([`role a${c}b`, `skill a${c}b`], []));
+    rawIn(found, 'crossFamilySkip', [crossFamilySkip({ paths: [`evals/held-out/a${c}b.json`], categories: {} }) ?? '', crossFamilySkip({ paths: [p], categories: { secrets: [p] } }) ?? '']);
+    rawIn(found, 'revertFirstReasons', revertFirstReasons({ files: [p], globs: ['src/**'], categories: { migration: [p], secrets: [p], auth: [p], 'money-path': [p] } }));
+    const draft = (files: { path: string; status: string }[]) => checkDraft({ kind: 'test' }, files.map((f) => ({ ...f, content: 'x' })));
+    rawIn(found, 'checkDraft', [draft([{ path: p, status: 'D' }]), draft([{ path: p, status: 'A' }])].map((r) => (r.ok ? '' : r.why)));
+    rawIn(found, 'lightCheckPlan', [lightCheckPlan({ enabled: true, mainChanged: [p], prFiles: [p], imports: {} }).why]);
+  }
+  assert.deepEqual(found, {});
+});
+
+test('the odd-name tests and how text shows a path (src/path-text.ts) are locked with the review levels', () => {
+  assert.equal(selfModificationPart('src/path-text.ts'), 'the review levels');
+  // A review.yaml with no L3 category for it: the lock alone makes it L3.
+  const plain = ReviewConfig.parse({ version: 1, levels: { ...LEVELS, L3_human: { when: [], over_lines: 800 } } });
+  assert.equal(level([{ path: 'src/path-text.ts', added: 1, removed: 0 }], plain).level, 'L3');
 });
 
 // ---- One way to list changed names or counts
