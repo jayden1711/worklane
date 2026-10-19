@@ -274,7 +274,7 @@ assert.equal(owner(STATE), '0:0 644');
 updaterRun();
 for (let i = 0; i < 20 && signersIncidents().length; i++) await new Promise((r) => setTimeout(r, 250));
 assert.deepEqual(signersIncidents(), []);
-assert.deepEqual(verify('v1.0.1'), { ok: true, base: main });
+assert.deepEqual(verify('v1.0.1'), { ok: true, base: main, object: git('rev-parse', 'refs/tags/v1.0.1'), commit: git('rev-parse', 'refs/tags/v1.0.1^{commit}') });
 ok('discard-update-signer', 'other@example.com', 'ssh-ed25519', other.pub);
 assert.deepEqual(pending(), []);
 ok('stage-update-signer', 'other@example.com', 'ssh-ed25519', other.pub);
@@ -497,7 +497,7 @@ const rollbackRun = async () => {
     held: () => (existsSync(HELD) ? JSON.parse(readFileSync(HELD, 'utf8')) : null),
     installed: () => current,
     installedVersion: () => '1.0.0',
-    verifyRelease: () => ({ ok: true, base: 'c'.repeat(40) }),
+    verifyRelease: () => ({ ok: true, base: 'c'.repeat(40), object: '3'.repeat(40), commit: rollbackSha }),
     exec: (file, args) => (file === 'git' && args.includes('--tags') ? `${'3'.repeat(40)}\trefs/tags/v1.0.9\n${rollbackSha}\trefs/tags/v1.0.9^{}\n` : file === 'git' ? `${rollbackSha}\trefs/heads/main\n` : file === 'systemctl' && args[0] === 'list-units' ? 'worklane-ci-standin.service loaded active running x\n' : file === 'systemctl' && args[0] === 'show' ? 'ActiveState=active\nSubState=running\nNRestarts=0\nResult=success\n' : ''),
     fetchJson: async (url) => (url.includes('/compare/') ? { status: 'ahead', behind_by: 0, ahead_by: 1, total_commits: 1, commits: [{ sha: rollbackSha, parents: [{ sha: current }], commit: { committer: { date: new Date(0).toISOString() } } }] } : { check_runs: (JSON.parse(readFileSync(CONFIG, 'utf8')).required_checks || []).map((name, id) => ({ name, status: 'completed', conclusion: 'success', started_at: '1', id })) }),
     slots: () => [],

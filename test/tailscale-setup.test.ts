@@ -199,7 +199,7 @@ test('a step is a machine request of two fixed words: gated, one at a time, only
   try {
     for (const bad of ['status', 'logout', 'up --auth-key=tskey-auth-kExample-abcdef', '', null, ['up'], { action: 'up' }, 'UP']) refused(() => ask(bad), 400, /action is one of install, up, serve, public-url/);
     refused(() => ask('up', { login: 'ivy' }), 403, /@ivy isn't one/);
-    refused(() => ask('up', { deviceOk: false }), 403, /needs one of the console's allowed devices/);
+    refused(() => ask('up', { deviceOk: false }), 403, /needs one of the machine's allowed devices/);
     refused(() => ask('up', { status: null }), 409, /no tailscale setup script/);
     // Only a step the machine is ready for.
     refused(() => ask('up', { status: NONE }), 409, /not yet: install Tailscale first/);

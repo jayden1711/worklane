@@ -25,7 +25,7 @@ on:
       job:
         description: The slow job to run (all of them for a batch)
         type: choice
-        options: [all, bootstrap, bootstrap-windows, testrun-real-systemd, add-project-real-systemd, auth-probe-real-users, wizard-e2e-real-systemd]
+        options: [all, bootstrap, bootstrap-windows, testrun-real-systemd, add-project-real-systemd, auth-probe-real-users, egress-real-systemd, wizard-e2e-real-systemd]
         default: all
       sha:
         description: The commit to test; empty for the commit the run is on. A bisect step names it, and the run refuses any other.
@@ -2905,7 +2905,7 @@ jobs:
           t="$(mktemp -d /tmp/wl-probe-XXXXXX)"
           mkdir -p "$t/node_modules"
           cp -r dist package.json "$t/"
-          cp -r node_modules/ws node_modules/yaml node_modules/zod "$t/node_modules/"
+          cp -r node_modules/yaml node_modules/zod "$t/node_modules/"
           cp scripts/ci/auth-probe-real-users.mjs "$t/"
           chmod -R a+rX "$t"
           a="$(getent passwd wl-probe-agent | cut -d: -f6)"
@@ -3278,3 +3278,47 @@ jobs:
           name: wizard-e2e-screenshots
           path: ${{ runner.temp }}/wiz/browser/*.png
           if-no-files-found: ignore
+
+  egress-real-systemd:
+    # The host egress rule (scripts/setup/egress-firewall.sh, #543) on real systemd and nft, with a test user's real
+    # rootless Docker (test-user.sh install): test users covered by default; a test-user process dropped; Docker's
+    # image pull the one exception (its unit's NFTSet=), kept across a reload and a restart; without NFTSet= the pull
+    # is dropped; a test-user unit can't move itself into Docker's cgroup. Measured and put in the job summary either
+    # way, whether a test run can join Docker's user+net namespaces. And an install that covered test users before #543
+    # (the pre-#543 egress-firewall.sh's apply --with-test-users) keeps dropping their Docker after the new install and apply: no route the
+    # join probe found blocked before opens. scripts/ci/egress-real-systemd.sh has the steps and assertions.
+    name: egress firewall (real systemd)
+    needs: scope
+    if: ${{ !cancelled() && contains(needs.scope.outputs.run, ' egress-real-systemd ') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: a coordinator user and the full-run lock (what instance.sh and the machine script make), and nft
+        run: |
+          sudo useradd --create-home --shell /bin/bash wl-ci
+          sudo chmod 0750 "$(getent passwd wl-ci | cut -d: -f6)"
+          sudo install -o root -g root -m 0644 /dev/null /run/lock/worklane-full-run.lock
+          command -v nft > /dev/null 2>&1 || sudo apt-get install -y -q nftables > /dev/null
+      - name: test-user.sh install (its rootless Docker, before any egress rule)
+        run: |
+          n="$(nproc)"
+          sudo bash scripts/setup/test-user.sh install ci --cpus "$((n - 2))-$((n - 1))" --memory-max 2G | tee "$RUNNER_TEMP/install.log"
+          tail -n 5 "$RUNNER_TEMP/install.log" | grep -qx 'OK: all checks passed'
+          grep -qx 'NFTSet=cgroup:inet:worklane_egress:egress_ok' /etc/systemd/system/worklane-test-ci-docker.service
+      - name: the database image, pinned to the digest it has today
+        run: |
+          docker pull -q postgres:17-alpine
+          echo "DB_IMAGE=$(docker image inspect --format '{{index .RepoDigests 0}}' postgres:17-alpine)" >> "$GITHUB_ENV"
+      - name: "egress on real systemd: test users covered by default and dropped; a real rootless pull with the rule on; the set kept across a reload and a restart (the old delete-table reload emptied it); no pull without NFTSet=; no move into Docker's cgroup; whether a run can join Docker's namespaces (measured); a pre-#543 --with-test-users install keeps Docker dropped"
+        run: bash scripts/ci/egress-real-systemd.sh
+      - name: the rule, Docker and its journal, on failure
+        if: failure()
+        run: |
+          sudo nft list ruleset || true
+          systemctl cat worklane-test-ci-docker.service || true
+          systemctl show -p ControlGroup worklane-test-ci-docker.service || true
+          sudo journalctl --no-pager -n 80 -u worklane-test-ci-docker.service || true

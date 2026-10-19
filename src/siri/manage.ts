@@ -34,7 +34,7 @@ function enabled(intakeFile: string | undefined): boolean {
 export function createRefusal(who: SiriManager, instance: string | null): string | null {
   if (!instance) return 'Siri devices are made on a server instance, behind the hub';
   if (who.role !== 'owner') return `only the instance's owners make Siri tokens; @${who.login} is a ${who.role}`;
-  if (who.via !== 'break-glass' && !who.deviceOk) return "a Siri token is a credential: make it from one of the console's allowed Tailscale devices (dashboards.sh --console-devices), or on the machine";
+  if (who.via !== 'break-glass' && !who.deviceOk) return "a Siri token is a credential: make it from one of the machine's allowed Tailscale devices (dashboards.sh --machine-devices), or on the machine";
   return null;
 }
 
