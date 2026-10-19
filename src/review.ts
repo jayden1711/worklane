@@ -271,6 +271,8 @@ export const SELF_MODIFICATION_PARTS: { what: string; globs: string[] }[] = [
       'test/main-watch.test.ts', 'test/main-watch-coordinator.test.ts', 'test/denylist.test.ts', 'test/dco.test.ts', 'test/package-files.test.ts',
       // Root's managed-apps reader's fail-closed cases and the script's refusals (#665).
       'test/managed-apps.test.ts',
+      // The merge reconciliation's cases: only the engine's own App's merge is reconciled, never another's (#733).
+      'test/merge-idempotent.test.ts',
     ],
   },
   { what: 'the release procedure and the design rules', globs: ['docs/releasing.md', 'docs/design.md'] },
