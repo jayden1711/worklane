@@ -135,7 +135,7 @@ The First run page (`/first-run`) lists every setup step, each with its state ch
 |---|---|---|
 | **Tools** | both | Installs a missing gitleaks, Claude Code or gh, from pinned, checksummed downloads (on a server, the install command already did this) |
 | **Sign in to Claude** | local | Runs `claude auth login` for you and relays its sign-in page as a button; Claude Code keeps its own login |
-| **The agents' Claude login** | server | A paste box for the token `claude setup-token` prints, for the agent user only; it is never shown again |
+| **The agents' Claude login** | server | Whether the agent user is signed in, and the root commands that sign it in on the machine (`credentials.sh <name> claude`, or `claude auth login` as the agent user). The page never takes the token ([auth.md](auth.md)) |
 | **Connect GitHub** | local | Runs `gh auth login --web` and shows its one-time code with a link to GitHub's device page |
 | **GitHub origin, default branch** | local | Picks the repo's GitHub origin and sets the default branch, for a checkout that lacks them |
 | **The agents' GitHub App** | server | Opens the Setup console's **Add project** (below) |
@@ -179,7 +179,7 @@ Some steps have no button, because they can't be one:
 
 To set up another repo on the same machine, run `worklane dashboard --detach` in it, or `worklane init <repo>`, or the install script again with that repo.
 
-**On a server,** a project is an instance. The Setup console's **Add project** makes one: you type a name and pick the repo. The App comes from GitHub's manifest flow (two clicks on GitHub, installed on that one repo only), and you paste the agents' Claude token into a password box. The view follows each step live. If a step fails, it names the step and the command to retry it. Only an owner of the instance who is also a machine owner, signed in, on one of the owner terminal's allowed devices, can use it. The same steps at a root shell: `sudo bash scripts/setup/add-project.sh <name> <owner/repo>`. See [dashboard.md](dashboard.md#add-project).
+**On a server,** a project is an instance. The Setup console's **Add project** makes one: you type a name and pick the repo. The App comes from GitHub's manifest flow (two clicks on GitHub, installed on that one repo only). The agents' Claude login is never taken by the dashboard: a root admin signs them in on the machine (`sudo bash scripts/setup/credentials.sh <name> claude`, or `sudo -u wl-<name>-agent -i claude auth login`; see [auth.md](auth.md)), and Add project waits for it. The view follows each step live. If a step fails, it names the step and the command to retry it. Only an owner of the instance who is also a machine owner, signed in, on one of the owner terminal's allowed devices, can use it. The same steps at a root shell: `sudo bash scripts/setup/add-project.sh <name> <owner/repo>`. See [dashboard.md](dashboard.md#add-project).
 
 To see everything work without a repo of your own, try the demo. It uses scripted agents and needs no login:
 

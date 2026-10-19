@@ -2320,9 +2320,8 @@ test('Add project: the steps show in the script order as they arrive, and its as
   a.create({ kind: 'paste_secret', instance: 'shop', title: "The agent's Claude token", detail: 'x', credential: 'claude-token', where: 'the agent user only' }, 'setup');
   v = render();
   assert.equal((v.run.match(/data-testid="ask-card"/g) ?? []).length, 3, 'both GitHub links and the token ask');
-  const secret = v.run.match(/<input[^>]*data-testid="ask-secret"[^>]*>/)?.[0] ?? '';
-  assert.match(secret, /type="password"/, "the token goes through the dashboard's paste box");
-  assert.doesNotMatch(secret, /value=/);
+  // The token's ask, as an earlier version opened it: nobody may answer it (issue #711), so no paste box is drawn.
+  assert.doesNotMatch(v.run, /data-testid="ask-secret"/, "no paste box for a Claude credential's ask");
 
   for (const s of order.slice(2)) step(s, 'done');
   log.append('machine.finished', { id: 'mr-0000000000aa', outcome: 'done', detail: 'shop added' }, 'demo', 'coordinator');
@@ -2493,27 +2492,25 @@ test('#562: after an instance and then All instances, the sidebar header and the
   for (const id of ['claude-profile-use-here', 'claude-signin', 'claude-profile-add', 'claude-failover']) assert.match(back.account, new RegExp(`data-testid="${id}"`), `${id}: offered for a`);
 });
 
-test('Claude account: a machine owner sees each agent user and the switch step by step, with the token box only where it is taken; anyone else nothing', () => {
+test('Claude account: a machine owner sees each agent user and the switch step by step, never a token box (#711); anyone else nothing', () => {
   const ownersFile = machineOwnersFile('ada');
   const dir = mkdtempSync(join(tmpdir(), 'claude-account-render-'));
   const at = new Date().toISOString();
   writeFileSync(join(dir, 'status.json'), JSON.stringify({ at, users: [{ instance: 'shop', kind: 'agent', user: 'wl-shop-agent', stored: true, logged_in: true, auth_method: 'claude.ai', account: 'agents@example.com', token_id: '0123abcd', expires_at: new Date(Date.now() + 200 * 86_400_000).toISOString() }, { instance: 'shop', kind: 'eval', user: 'wl-shop-eval', stored: false, logged_in: false, auth_method: 'none', error: 'claude auth status says it is not logged in' }] }));
   const lines = (more: object[]) =>
-    writeFileSync(join(dir, 'switch.jsonl'), [{ step: 'switch', state: 'started', detail: '2 instance(s): shop web; the token from the dashboard of shop' }, { step: 'pause', state: 'done', instance: 'shop', detail: 'starts no more runs' }, { step: 'pause', state: 'done', instance: 'web', detail: 'starts no more runs' }, { step: 'token', state: 'ask', detail: 'paste it' }, ...more].map((l) => JSON.stringify({ at, ...l })).join('\n') + '\n');
+    writeFileSync(join(dir, 'switch.jsonl'), [{ step: 'switch', state: 'started', detail: '2 instance(s): shop web; the token from this terminal' }, { step: 'pause', state: 'done', instance: 'shop', detail: 'starts no more runs' }, { step: 'pause', state: 'done', instance: 'web', detail: 'starts no more runs' }, { step: 'token', state: 'ask', detail: 'paste it' }, ...more].map((l) => JSON.stringify({ at, ...l })).join('\n') + '\n');
   const view = (login: string, instance = 'shop') => claudeAccountView({ dir, events: [], who: { role: 'owner', requester: ownerRequester(login) }, instance, ownersFile });
   lines([]);
   const html = r.renderClaudeAccount(view('ada'));
-  for (const id of ['claude-account', 'claude-account-users', 'claude-account-refresh', 'claude-account-switch', 'claude-switch', 'claude-switch-token']) assert.match(html, new RegExp(`data-testid="${id}"`), id);
+  for (const id of ['claude-account', 'claude-account-users', 'claude-account-refresh', 'claude-switch']) assert.match(html, new RegExp(`data-testid="${id}"`), id);
+  assert.doesNotMatch(html, /data-testid="claude-switch-token"/, 'a switch a root admin runs waits for its token at that shell: no box here');
   assert.match(html, /data-testid="claude-account-user" data-user="wl-shop-agent" data-signed-in="yes"/);
   assert.match(html, /agents@example\.com/);
   assert.match(html, /token 0123abcd/);
   assert.match(html, /data-user="wl-shop-eval" data-signed-in="no"[\s\S]*not logged in/);
   assert.deepEqual([...html.matchAll(/data-testid="claude-switch-step" data-phase="([a-z]+)"/g)].map((m) => m[1]), ['running', 'running', 'pending', 'pending'], 'pause (runs finishing), token waiting, check, resume');
-  assert.match(html, /<button[^>]*disabled=""[^>]*data-testid="claude-account-switch"/, 'no second switch while one runs');
-  // In another instance's dashboard the box isn't there: it says where to paste it.
-  const elsewhere = r.renderClaudeAccount(view('ada', 'web'));
-  assert.doesNotMatch(elsewhere, /data-testid="claude-switch-token"/);
-  assert.match(elsewhere, /data-testid="claude-switch-token-elsewhere">Paste it in shop&#x27;s dashboard/);
+  // In any instance's dashboard: no box.
+  assert.doesNotMatch(r.renderClaudeAccount(view('ada', 'web')), /data-testid="claude-switch-token"/);
   // Each instance's result as it comes: one resumed, one left paused.
   lines([{ step: 'token', state: 'done', detail: 'received' }, { step: 'wait', state: 'done', instance: 'shop', detail: 'finished' }, { step: 'wait', state: 'done', instance: 'web', detail: 'finished' }, { step: 'install', state: 'done', instance: 'shop', user: 'wl-shop-agent', detail: 'stored' }, { step: 'check', state: 'done', instance: 'shop', user: 'wl-shop-agent', detail: 'signed in' }, { step: 'check', state: 'failed', instance: 'web', user: 'wl-web-agent', detail: 'not logged in' }, { step: 'resume', state: 'done', instance: 'shop', detail: 'running again' }, { step: 'resume', state: 'failed', instance: 'web', detail: 'not resumed: its auth check failed' }, { step: 'switch', state: 'failed', detail: 'not resumed: web' }]);
   const done = r.renderClaudeAccount(view('ada'));

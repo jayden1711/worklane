@@ -87,7 +87,10 @@ test("the server refuses an Add project submit from an instance owner who isn't 
   }
 });
 
-/** add-project.sh as the helper runs it, played by a script: its progress lines, then the token on stdin. */
+/**
+ * add-project.sh as the helper runs it, played by a script: its progress lines, then the claude-token step waiting
+ * for root to install the login on the machine (issue #711: no dashboard takes the token), with the retry.
+ */
 const FAKE_HELPER = `
 const out = (o) => process.stdout.write(JSON.stringify(o) + '\\n');
 out({ step: 'instance', state: 'started', detail: '' });
@@ -96,16 +99,14 @@ out({ step: 'app', state: 'started', detail: '' });
 out({ step: 'app', state: 'ask', detail: 'create the App', ask: { kind: 'approve_link', title: 'Create shop-app on GitHub', detail: 'Approve it.', url: 'https://hub.example.test/setup/app-manifest/start/amf-1' } });
 out({ step: 'app', state: 'ask', detail: 'install the App', ask: { kind: 'approve_link', title: 'Install shop-app on acme/shop only', detail: 'Only that repo.', url: 'https://github.com/apps/shop-app/installations/new' } });
 out({ step: 'app', state: 'done', detail: 'the App is set up' });
-out({ step: 'claude-token', state: 'ask', detail: 'token', ask: { kind: 'paste_secret', credential: 'claude-token', title: "The Claude login for shop's agents", detail: 'Paste it.' } });
-process.stdin.on('data', () => {});
-process.stdin.on('end', () => {
-  out({ step: 'claude-token', state: 'done', detail: 'stored' });
-  out({ step: 'checkout', state: 'failed', detail: 'the clone was refused', retry: 'sudo bash add-project.sh shop acme/shop' });
-  process.exit(1);
-});
+out({ step: 'claude-token', state: 'started', detail: '' });
+setTimeout(() => {
+  out({ step: 'claude-token', state: 'waiting', detail: "the agents' Claude login, which only root installs, on this machine: sudo bash credentials.sh shop claude", retry: 'sudo bash add-project.sh shop acme/shop, once that is done' });
+  process.exit(3);
+}, 200);
 `;
 
-test('a machine owner submit is accepted, and the view follows the coordinator: its steps in order, both GitHub links and the token ask', { skip: !posix && 'a stand-in helper' }, async () => {
+test('a machine owner submit is accepted, and the view follows the coordinator: its steps in order, both GitHub links; the Claude login waits for root, never a paste box', { skip: !posix && 'a stand-in helper' }, async () => {
   const s = await dashboard(['example-owner']);
   try {
     const ok = await s.post({ name: 'shop', repo: 'acme/shop' });
@@ -120,31 +121,25 @@ test('a machine owner submit is accepted, and the view follows the coordinator: 
     const log = new EventLog(s.eventsDb);
     try {
       const helper = () => spawn(process.execPath, ['-e', FAKE_HELPER], { stdio: ['pipe', 'pipe', 'pipe'] });
-      assert.equal(runMachineRequests({ log, ownersFile: s.ownersFile, instance: 'demo', spawn: helper, home: s.home, pollMs: 20 }), 1);
+      assert.equal(runMachineRequests({ log, ownersFile: s.ownersFile, instance: 'demo', spawn: helper }), 1);
       const run = runningAddProjects.get(ok.body.request!.id)!;
-      let secret: View['runs'][0]['asks'][0] | undefined;
-      for (let i = 0; i < 300 && !secret; i++) {
+      for (let i = 0; i < 300 && !v.runs[0]!.steps.some((x) => x.step === 'claude-token' && x.state !== 'pending'); i++) {
         v = await s.get();
-        secret = v.runs[0]!.asks.find((a) => a.kind === 'paste_secret' && a.status === 'open');
-        if (!secret) await new Promise((res) => setTimeout(res, 10));
+        await new Promise((res) => setTimeout(res, 10));
       }
-      assert.ok(secret, 'the token ask shows in the view');
       assert.equal(v.runs[0]!.status, 'running');
-      assert.deepEqual(v.runs[0]!.steps.slice(0, 4).map((x) => `${x.step}:${x.state}`), ['instance:done', 'app:done', 'claude-token:ask', 'checkout:pending']);
       assert.deepEqual(v.runs[0]!.asks.filter((a) => a.kind === 'approve_link').map((a) => a.url), ['https://hub.example.test/setup/app-manifest/start/amf-1', 'https://github.com/apps/shop-app/installations/new'], 'both GitHub links, in order');
-      assert.ok(secret.canAnswer, 'the owner may paste it');
-      // The owner pastes the token through the dashboard's paste box; the coordinator hands it to the script.
-      const pasted = await fetch(`${s.d.url.split('/?')[0]}/api/asks/${secret.id}/secret`, { method: 'POST', headers: { authorization: `Bearer ${s.d.token}`, 'content-type': 'application/json', ...asDevicePerson('example-owner') }, body: JSON.stringify({ value: `sk-ant-oat01-${'Z'.repeat(40)}` }) });
-      assert.equal(pasted.status, 200, await pasted.text());
       await run;
     } finally {
       log.close();
     }
     v = await s.get();
     const r = v.runs[0]!;
-    assert.deepEqual(r.steps.map((x) => `${x.step}:${x.state}`), ['instance:done', 'app:done', 'claude-token:done', 'checkout:failed', 'policy:pending', 'service:pending', 'test-user:pending', 'machine-helper:pending', 'dashboards:pending']);
-    assert.deepEqual([r.status, r.failedStep, r.steps[3]!.retry], ['failed', 'checkout', 'sudo bash add-project.sh shop acme/shop']);
-    assert.equal(r.asks.length, 3);
+    assert.deepEqual(r.steps.map((x) => `${x.step}:${x.state}`), ['instance:done', 'app:done', 'claude-token:waiting', 'checkout:pending', 'policy:pending', 'service:pending', 'test-user:pending', 'machine-helper:pending', 'dashboards:pending']);
+    assert.equal(r.status, 'failed');
+    assert.match(r.steps[2]!.detail, /the agents' Claude login, which only root installs, on this machine: sudo bash credentials\.sh shop claude/);
+    assert.equal(r.asks.length, 2, 'the two GitHub links: no paste box');
+    assert.ok(r.asks.every((a) => a.kind !== 'paste_secret'));
     assert.equal(v.allowed, true, 'the next one may start');
     const audit = s.events().filter((e) => e.type === 'dashboard.audit').map((e) => (e.payload as unknown as { action: string }).action);
     assert.ok(audit.includes('machine.add_project'), 'the submit is audited');
