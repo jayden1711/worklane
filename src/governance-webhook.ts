@@ -13,8 +13,14 @@
 // label, sender or text from the payload leaves this module, so a forged, replayed or stale delivery can at most make
 // the gate re-read a PR through the API, which decides on what the API says (#704: "webhooks are hints, not data").
 //
-// The delivery-id window is defence in depth only (the gate re-reads anyway): an id is remembered REPLAY_KEEP_MS,
-// at most REPLAY_MAX of them, and only after its signature passed, so a forged delivery can't spend a real id.
+// INVARIANT: GitHub signs the body only, never the headers: anyone holding one captured delivery can resend it with
+// any event name or delivery id. So no header is ever echoed (every `why` is a fixed text), and the event must fit the
+// body's shape: a captured PR body resent as `status` or a check event is refused, never widened to a repo-wide wake.
+//
+// The delivery-id window only drops GitHub's own redeliveries (an id is remembered REPLAY_KEEP_MS, at most REPLAY_MAX
+// of them, and only after its signature passed, so a forged delivery can't spend a real id). It does not stop a
+// deliberate replay under fresh ids: that only wakes the same PR again, and S9's rate limit and per-PR coalescing bound
+// it (#704).
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import type { IncomingHttpHeaders, IncomingMessage, ServerResponse } from 'node:http';
 import { holdsClaudeCredential } from './claude-credential-guard.js';
@@ -152,7 +158,8 @@ function verify(o: DeliveryInput): Received | Verified {
   const now = o.now ?? Date.now();
   const event = header(o.headers, GITHUB_HEADERS.event);
   if (event === 'ping') return no(200, 'ping');
-  if (!(WAKE_EVENTS as readonly string[]).includes(event)) return no(400, `${event || 'no event'} is not an event that wakes the gate`);
+  // INVARIANT: a fixed text: the event header is unsigned, so it is never echoed (#842 round 1).
+  if (!(WAKE_EVENTS as readonly string[]).includes(event)) return no(400, 'not an event that wakes the gate');
   const delivery = header(o.headers, GITHUB_HEADERS.delivery);
   if (!DELIVERY.test(delivery)) return no(400, 'its delivery id is not a GUID');
   if (o.window.seen(delivery, now)) return no(200, 'that delivery id was seen');
@@ -164,7 +171,29 @@ function verify(o: DeliveryInput): Received | Verified {
     return no(400, 'its body is not JSON');
   }
   if (!payload) return no(400, 'its body is not a JSON object');
+  if (!fits(event as WakeEvent, payload)) return no(400, "its body is not that event's");
   return { event: event as WakeEvent, payload };
+}
+
+/**
+ * Whether the body has the event's shape (GitHub's top-level keys for it). WHY: the event header isn't signed, so a
+ * captured PR body resent as `status` or a check event would otherwise wake the whole repo. A PR's and a review's bodies
+ * both name one PR, so either passes as the other: that can't widen a wake.
+ */
+function fits(event: WakeEvent, p: Record<string, unknown>): boolean {
+  const has = (k: string) => obj(p[k]) !== null;
+  const text = (k: string) => typeof p[k] === 'string';
+  switch (event) {
+    case 'pull_request':
+    case 'pull_request_review':
+      return has('pull_request') && !has('check_run') && !has('check_suite');
+    case 'check_run':
+      return has('check_run') && !has('check_suite') && !has('pull_request');
+    case 'check_suite':
+      return has('check_suite') && !has('check_run') && !has('pull_request');
+    case 'status':
+      return text('sha') && text('state') && text('context') && !has('pull_request') && !has('check_run') && !has('check_suite');
+  }
 }
 
 function wakesOf(v: Verified, repo: string): Received {
@@ -194,17 +223,26 @@ async function readDelivery(req: IncomingMessage, o: Omit<DeliveryInput, 'body' 
 
 const BODIES: Record<number, string> = { 200: '{"ok":true}', 202: '{"accepted":true}', 400: '{"error":"bad request"}', 401: '{"error":"refused"}', 405: '{"error":"POST only"}', 413: '{"error":"too long"}', 503: '{"error":"unavailable"}' };
 
-/** A delivery over HTTP: answers it and hands each wake to `wake`. Always ends the request. */
+/**
+ * A delivery over HTTP: answers it and hands each wake to `wake`. Always ends the request and never rejects: a client
+ * that drops mid-body (or a throwing `wake` or `log`) ends with the request and response destroyed.
+ */
 export async function handleGithubWebhook(req: IncomingMessage, res: ServerResponse, ctx: { secret: () => string | null; repo: string; window: DeliveryWindow; wake: (w: PrWake) => void; log?: (why: string) => void; now?: () => number }): Promise<void> {
   const send = (status: number, after?: () => void) => {
     res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', ...(after ? { connection: 'close' } : {}) });
     res.end(BODIES[status] ?? '{}', after);
   };
-  if (req.method !== 'POST') return send(405);
-  const r = await readDelivery(req, { secret: ctx.secret(), repo: ctx.repo, window: ctx.window, now: ctx.now?.() ?? Date.now() });
-  // WHY: stop reading an oversized body: answer, then drop the connection.
-  if (r === null) return send(413, () => req.destroy());
-  ctx.log?.(r.why);
-  for (const w of r.wakes) ctx.wake(w);
-  send(r.status);
+  try {
+    if (req.method !== 'POST') return send(405);
+    const r = await readDelivery(req, { secret: ctx.secret(), repo: ctx.repo, window: ctx.window, now: ctx.now?.() ?? Date.now() });
+    // WHY: stop reading an oversized body: answer, then drop the connection.
+    if (r === null) return send(413, () => req.destroy());
+    ctx.log?.(r.why);
+    for (const w of r.wakes) ctx.wake(w);
+    send(r.status);
+  } catch {
+    // WHY: a rejected promise here could end the process (#842 round 1): drop this request instead.
+    req.destroy();
+    res.destroy();
+  }
 }

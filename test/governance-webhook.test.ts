@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHmac, randomBytes } from 'node:crypto';
 import { createServer, request } from 'node:http';
-import type { AddressInfo } from 'node:net';
+import { connect, type AddressInfo } from 'node:net';
 import { BODY_MAX, DeliveryWindow, GITHUB_HEADERS, handleGithubWebhook, isWake, PRS_PER_DELIVERY, PrWake, receiveDelivery, REPLAY_KEEP_MS, WAKE_EVENTS } from '../src/governance-webhook.js';
 
 const SECRET = 'a-webhook-secret-of-some-length';
@@ -138,6 +138,68 @@ test('#711: a signed delivery that holds a Claude credential is refused after it
   assert.ok(!r.why.includes(token), 'the refusal never quotes it');
   // Unsigned, it is refused for its signature first, unread.
   assert.equal(recv('pull_request', leaky, { sig: sign('{}') }).status, 401);
+});
+
+test('no unsigned header is ever echoed: a refusal is a fixed text, whatever the event header holds', () => {
+  // WHY: GitHub signs the body only; anyone with one captured signed body can put any text in the headers.
+  const token = `sk-ant-oat01-${randomBytes(24).toString('hex')}`;
+  for (const event of [token, 'x'.repeat(8000), `push\n${token}`]) {
+    const r = recv(event, prPayload());
+    assert.equal(r.status, 400);
+    assert.equal(r.why, 'not an event that wakes the gate');
+  }
+  const longId = recv('pull_request', prPayload(), { delivery: token });
+  assert.ok(!longId.why.includes(token));
+  assert.ok(longId.why.length < 100);
+});
+
+test("the event header must fit the body's shape: a captured body resent as another event is refused", () => {
+  const pull = prPayload();
+  const review = { action: 'submitted', review: { state: 'approved' }, pull_request: { number: 5 }, repository: repoOf() };
+  const run = { action: 'completed', check_run: { pull_requests: [{ number: 3 }] }, repository: repoOf() };
+  const suite = { action: 'completed', check_suite: { pull_requests: [{ number: 9 }] }, repository: repoOf() };
+  const status = { sha: 'd'.repeat(40), state: 'success', context: 'ci', repository: repoOf() };
+  const bodies: Record<string, unknown> = { pull_request: pull, pull_request_review: review, check_run: run, check_suite: suite, status };
+  // A PR's and a review's bodies both name one PR: either sent as the other wakes that same PR, never more.
+  const onePr = new Set(['pull_request', 'pull_request_review']);
+  for (const [event, body] of Object.entries(bodies))
+    for (const as of WAKE_EVENTS) {
+      const r = recv(as, body);
+      if (as === event) assert.equal(r.wakes.length, 1, `${event} as itself wakes`);
+      else if (onePr.has(as) && onePr.has(event)) assert.deepEqual(plain(r.wakes), plain(recv(event, body).wakes), `${event} as ${as}: the same one PR`);
+      else {
+        assert.equal(r.status, 400, `${event} sent as ${as}`);
+        assert.equal(r.wakes.length, 0, `${event} sent as ${as}`);
+      }
+    }
+});
+
+test('a client that drops the connection mid-body: the handler settles, never rejects', async () => {
+  const settled: string[] = [];
+  const server = createServer((req, res) => {
+    handleGithubWebhook(req, res, { secret: () => SECRET, repo: REPO, window: new DeliveryWindow(), wake: () => {} }).then(
+      () => settled.push('resolved'),
+      (e: Error) => settled.push(`rejected: ${e.message}`),
+    );
+  });
+  await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+  const port = (server.address() as AddressInfo).port;
+  try {
+    await new Promise<void>((resolve) => {
+      const s = connect(port, '127.0.0.1', () => {
+        s.write(`POST / HTTP/1.1\r\nhost: x\r\ncontent-type: application/json\r\ncontent-length: 1000\r\n${GITHUB_HEADERS.event}: pull_request\r\n\r\n${'{'.repeat(100)}`);
+        setTimeout(() => {
+          s.destroy();
+          resolve();
+        }, 50);
+      });
+    });
+    for (let i = 0; i < 100 && settled.length === 0; i++) await new Promise((r) => setTimeout(r, 20));
+    assert.deepEqual(settled, ['resolved']);
+  } finally {
+    server.closeAllConnections();
+    await new Promise<void>((r) => server.close(() => r()));
+  }
 });
 
 test('the delivery window is bounded: the oldest ids go first', () => {
