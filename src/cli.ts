@@ -22,7 +22,7 @@ import { evaluate } from './guardrails/engine.js';
 import { globToRegExp } from './guardrails/glob.js';
 import { findProjectRoot, hookProcess, readStdin } from './hook.js';
 import { agentSettingsPath, guardrailSettings } from './agent-settings.js';
-import { install, installCheckoutPrePush, installGitHook, invokedEngine } from './install.js';
+import { install, installCheckoutPrePush, installGitHook, invokedEngine, migrateLegacyHooks } from './install.js';
 import { recordPushBlocked } from './push-guard.js';
 import { homeDir } from './os/index.js';
 import { toolPath, toolPrefix } from './tool-path.js';
@@ -185,8 +185,9 @@ usage: ${BRAND.cli} <command> [options]
                                    (the engine updater runs this as the instance's user) whether test runs are
                                    configured, and the test sandbox check's last result at a coordinator start
   migrate [--instance name]        apply pending config and state migrations, each file backed up first
-                                   (doctor lists them; the coordinator won't start while any is pending)
-  status                           what's running, waiting and spent, from the event log
+                                   (doctor lists them; the coordinator won't start while any is pending); with
+                                   --instance, also moves agent hooks still on the CLI's \`hook\` to the guard's own entry
+  status                          what's running, waiting and spent, from the event log
   testrun measure --instance name --tier t[,t...] --set KEY=V1,V2,... [--sha commit] [--json]
                                    (as the instance's coordinator user) one sandboxed test run per value of a
                                    key tests.yaml test_run env already has, in sequence, through the same
@@ -356,11 +357,19 @@ async function main(argv: string[]): Promise<number> {
         else console.error(`migration failed: ${(e as Error).message}`);
         return 1;
       }
+      // An instance's agent settings from before the guard had its own entry (#665): its hooks move to it (#747). Never
+      // fails the migrate; its backup joins the others, so the updater's rollback puts it back with them.
+      const settings = instanceOpt ? agentSettingsPath(join(instancesDir(), instanceOpt)) : null;
+      const hooks = settings ? migrateLegacyHooks(settings) : { events: [], backup: null, left: [] };
+      const hooksMade = settings && hooks.backup ? [{ kind: 'hooks' as const, path: settings, backup: hooks.backup }] : [];
       if (json) {
-        console.log(JSON.stringify({ ok: true, applied: r.applied.map((p) => ({ kind: p.kind, path: p.path, from: p.from, to: p.to })), made: r.made }));
+        const applied = [...r.applied.map((p) => ({ kind: p.kind, path: p.path, from: p.from, to: p.to })), ...(hooksMade.length ? [{ kind: 'hooks', path: settings, events: hooks.events }] : [])];
+        console.log(JSON.stringify({ ok: true, applied, made: [...r.made, ...hooksMade], ...(hooks.left.length ? { hooks_left: hooks.left } : {}) }));
         return 0;
       }
-      if (!r.applied.length) console.log('nothing to migrate: config and state are at the current versions');
+      if (hooksMade.length) console.log(`moved ${settings}'s ${hooks.events.join(', ')} hooks from the CLI's \`hook\` to the guard's own entry; backup ${hooks.backup}`);
+      for (const l of hooks.left) console.log(`hooks not moved: ${l}`);
+      if (!r.applied.length && !hooksMade.length) console.log('nothing to migrate: config and state are at the current versions');
       for (const [k, p] of r.applied.entries()) console.log(`migrated ${p.path}: ${p.kind} version ${p.from} -> ${p.to} (${p.steps.join('; ')}); backup ${r.backups[k]}`);
       if (r.applied.some((p) => p.kind === 'config' && !p.path.startsWith(instanceOpt ? join(instancesDir(), instanceOpt) : '\0'))) console.log(`the repo's ${BRAND.configDir}/ changed: commit it in a PR`);
       return 0;

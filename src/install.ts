@@ -10,7 +10,7 @@ import { execFileSync } from 'node:child_process';
 import { chmodSync, cpSync, existsSync, mkdirSync, readFileSync, readlinkSync, renameSync, writeFileSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { agentSettingsPath, HOOK_MARKER, type HookEntry, type Settings } from './agent-settings.js';
+import { agentSettingsPath, HOOK_MARKER, installCommand, type HookEntry, type Settings } from './agent-settings.js';
 import { BRAND } from './brand.js';
 import { loadConfig, type Config } from './config/load.js';
 import { instancesDir, policiesForRepo } from './instance.js';
@@ -61,6 +61,106 @@ export function hookCommand(engineCli: string, event: string): string {
       ? `echo '{"systemMessage": "${missingEngineWarning(enginePath)}", "hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": "${missingEngineWarning(enginePath)} Mention this to the user once."}}'`
       : ':';
   return `E="${enginePath}"; if [ -f "$E" ]; then ${run}; elif [ "${agentVar}" = 1 ]; then echo "${BRAND.cli}: engine missing at $E, agent sessions are blocked" >&2; exit 2; else ${human}; fi`;
+}
+
+/**
+ * A hook command install wrote before #665 (the CLI's `hook <event>`), as the guard's own entry would run it: the
+ * engine file and the event, and the command with only those two parts changed. Null when it isn't in that form.
+ */
+function forwardOfCliHook(command: string, engine: string): { event: string; moved: string } | null {
+  // The old run step, read here and never written: node on $E, the CLI's `hook` command, the event; exactly once.
+  const run = /( node "\$E") hook (pre-tool-use|session-start|session-end|post-tool-use) \|\|/g;
+  const runs = [...command.matchAll(run)];
+  if (runs.length !== 1 || !command.startsWith(`E="${engine}"; `)) return null;
+  const moved = `E="${hookEntry(engine)}"; ${command.slice(`E="${engine}"; `.length)}`.replace(run, '$1 $2 ||');
+  return { event: runs[0]![2]!, moved };
+}
+
+/** Our hook commands in settings, each with the engine file it runs (its `E="..."`). */
+const ourHooks = (s: Settings) =>
+  Object.values(s.hooks ?? {})
+    .flat()
+    .flatMap((e) => e?.hooks ?? [])
+    .filter((h) => typeof h?.command === 'string' && h.command.includes(HOOK_MARKER))
+    .map((h) => ({ h, engine: h.command.match(/E="([^"]+)"/)?.[1] ?? '' }));
+
+/**
+ * The hook events in these settings whose guard still runs through the CLI (`cli.js hook <event>`, an install before
+ * #665) rather than its own entry (src/hook-main.ts): the CLI isn't locked as the guard is, and loads far more.
+ */
+export function legacyHookEvents(s: Settings): string[] {
+  return ourHooks(s)
+    .filter(({ engine }) => /(^|[/\\])cli\.js$/.test(engine))
+    .map(({ h, engine }) => forwardOfCliHook(h.command, engine)?.event ?? 'a hook not in the form install wrote');
+}
+
+/** Doctor's line for an instance's agent settings still on the CLI's `hook` (none when there are none). */
+export function legacyHookChecks(s: Settings, instance: string, checkout: string): { name: string; level: 'warn'; detail: string }[] {
+  const events = legacyHookEvents(s);
+  if (!events.length) return [];
+  return [
+    {
+      name: `agent hooks ${instance}`,
+      level: 'warn',
+      detail: `${events.join(', ')}: the guard runs through the CLI (\`cli.js hook\`, an install from before the guard had its own entry), which isn't locked as the guard is. As its coordinator user, run \`${BRAND.cli} migrate --instance ${instance}\` (the engine updater does this at each install) or \`${installCommand(instance, checkout)}\``,
+    },
+  ];
+}
+
+/**
+ * An instance's agent settings, moved from the CLI's `hook <event>` to the guard's own entry (#747): each hook command
+ * that install wrote before #665 becomes what install writes now (hookCommand) for the same engine, and nothing else in
+ * the file changes. "Wrote before #665" is exact: moving its engine file and its run step to the guard's own entry
+ * (forwardOfCliHook) must give hookCommand's text, character for character, so a command changed by hand stays. A
+ * command is moved only when the guard's own entry is there beside its cli.js, so a hook never comes to name a file
+ * that isn't there. The file is backed up first, beside it (0600, as install writes it).
+ * WHY never throws: the engine updater runs this through `migrate`, and a settings file it can't move must not hold an
+ * engine update (it never did before); `left` says why, and doctor keeps saying so.
+ * INVARIANT: only an exact match moves, to the same checks with the same fail-closed exits; the guard is the same
+ * function (hookProcess) either way. No hook is added, dropped or loosened.
+ */
+export function migrateLegacyHooks(file: string, now = new Date()): { events: string[]; backup: string | null; left: string[] } {
+  const none = (left: string[] = []) => ({ events: [], backup: null, left });
+  if (!existsSync(file)) return none();
+  let text: string;
+  let s: Settings;
+  try {
+    text = readFileSync(file, 'utf8');
+    s = JSON.parse(text) as Settings;
+    if (!s || typeof s !== 'object' || Array.isArray(s)) return none([`${file}: not a JSON object`]);
+  } catch (e) {
+    return none([`${file}: ${(e as Error).message}`]);
+  }
+  const events: string[] = [];
+  const left: string[] = [];
+  try {
+    for (const { h, engine } of ourHooks(s)) {
+      if (!/(^|[/\\])cli\.js$/.test(engine)) continue;
+      const f = forwardOfCliHook(h.command, engine);
+      const target = f ? hookCommand(engine, f.event) : null;
+      if (!f || !target || f.moved !== target) {
+        left.push(`${file}: a hook command that runs ${engine} isn't one install wrote; re-run install`);
+        continue;
+      }
+      if (!isAbsolute(engine) || !existsSync(hookEntry(engine))) {
+        left.push(`${file}: ${f.event}: no ${HOOK_ENTRY} beside ${engine} yet`);
+        continue;
+      }
+      h.command = target;
+      events.push(f.event);
+    }
+  } catch (e) {
+    return none([...left, `${file}: ${(e as Error).message}; unchanged`]);
+  }
+  if (!events.length) return none(left);
+  const backup = `${file}.bak-hooks-${now.toISOString().replace(/[:.]/g, '-')}`;
+  try {
+    writeOwnerOnly(backup, text);
+    writeOwnerOnly(file, JSON.stringify(s, null, 2) + '\n');
+  } catch (e) {
+    return none([...left, `${file}: couldn't be rewritten (${(e as Error).message}); unchanged`]);
+  }
+  return { events, backup, left };
 }
 
 /** Engine entry as Claude Code should call it: relative to $CLAUDE_PROJECT_DIR when inside the project. */
