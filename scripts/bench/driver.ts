@@ -4,7 +4,8 @@
 // claude.ai login, when the srt sandbox probe reaches a daemon socket or a credential file (probe.ts), on a Docker
 // daemon that isn't rootless, with research-on-demand able to run, or when a probe container's memory, CPU or pids
 // limit doesn't read back. Its first model call is the sandbox confirmation (confirm.ts): Claude Code itself tries
-// the same in its own sandbox, on sentinels; a leak refuses the run. Per task: a fresh container (its limits read back
+// the same with the agents' lane, on sentinels, recording per attempt whether its permission layer or its OS sandbox
+// refused it; a leak refuses the run. Per task: a fresh container (its limits read back
 // first), the task's run (RunTask: the engine's PR-mode loop, wired in the follow-up PR) under the driver's own
 // wall-clock cap, which every agent run and container command of the task gets (none starts after it, and the
 // driver waits for those in flight before it records the task's spend or starts the next), its patches exported, its
@@ -12,12 +13,16 @@
 // stopped, every later task is "not run (usage limit)", and the aggregate says the run is partial.
 //
 // Where an agent may write: its Bash commands, only where the sandbox lets them (Claude Code's default: the working
-// folder and the temp folder). Its Edit, Write, MultiEdit and NotebookEdit tools run outside the sandbox, as the bench
-// user, and the lane's deny list covers reads only: pre-approved without a scope, they could change any file the bench
-// user can, ~/.profile and ~/.bashrc included, which a login shell then runs outside every sandbox with the daemon and
-// the login in reach. So every run goes through the task's meter (usage.ts scopeEditTools, owner's decision of
-// 2026-10-18): those tools are pre-approved only inside the task's own folder (a bare name is scoped there), and a run
-// that grants them anywhere else is refused, unstarted. Claude Code asks before any other file edit, and the bench
+// folder and the temp folder, plus the paths of Edit allow rules, per its sandboxing docs, inferred). Its Edit, Write,
+// MultiEdit and NotebookEdit tools run outside the sandbox, as the bench user, and the lane's deny list covers reads
+// only: pre-approved without a scope, they could change unprotected files the bench user owns, such as
+// ~/.docker/config.json (a credsStore helper the driver's own docker would run), ~/.config/systemd/user/ or
+// ~/.local/bin/ (dontAsk denies writes to protected paths such as ~/.profile, ~/.bashrc and ~/.claude/ even with an
+// allow rule, per its permission-modes docs, inferred). So every run goes through the task's meter (usage.ts
+// scopeEditTools, owner's decisions of 2026-10-18 and 2026-10-19): those tools are pre-approved only inside the run's
+// own working folder, which must be in the task's folder (a bare name is scoped there, so the allow rule adds no
+// sandbox write path beyond the default), and a run that grants them anywhere else, or whose working folder is outside
+// the task's, is refused, unstarted. Claude Code asks before any other file edit, and the bench
 // runs in dontAsk mode, which refuses what would ask. What the driver reads back after a task is built not to trust
 // that folder either: patches come from the clone's objects only, in a repo the driver makes, with no config but its
 // own (grade.ts exportPatch).
@@ -32,7 +37,7 @@ import { isMode, MODE_MAX_USD, PER_TASK_MAX_USD, type Caps } from './caps.js';
 import type { LaneInput } from './agent.js';
 import type { Login } from './auth.js';
 import { confirmSandbox, type SandboxConfirmation } from './confirm.js';
-import type { ProbeReport } from './probe.js';
+import { SRT_LABEL, type ProbeReport } from './probe.js';
 import { Docker, LimitsNotApplied, TaskRunner, type DockerOptions, type Limits, type TaskContainer } from './container.js';
 import { exportPatch, runDir } from './grade.js';
 import type { BenchLayout } from './paths.js';
@@ -81,7 +86,10 @@ export interface TaskContext {
   signal: AbortSignal;
   /** The task's commands: `docker exec` into its container, nothing else. */
   exec: TaskRunner;
-  /** The task's own folder on the host (its clone, local remote and engine state): the only place its agents' file-writing tools may write. */
+  /**
+   * The task's own folder on the host (its clone, local remote and engine state). Every agent run's working folder must
+   * be in it, and the run's file-writing tools are confined to that working folder.
+   */
   workDir: string;
   settings: InstanceSettings;
 }
@@ -187,12 +195,13 @@ export async function runBench(o: BenchOptions): Promise<Aggregate> {
   writeOwnerOnly(join(dir, 'sandbox.json'), JSON.stringify(sandbox, null, 2) + '\n');
   if (confirmation.status === 'leaked') throw new Error(`not run: ${confirmation.detail} (${join(dir, 'sandbox.json')})`);
   if (confirmation.status === 'model declined') o.say?.(`WARNING: ${confirmation.detail}`);
+  else if (!confirmation.os_sandbox_read_deny) o.say?.(`WARNING: ${confirmation.detail}. The OS sandbox's own read-deny rests on the srt probe: ${SRT_LABEL}`);
 
   const results: TaskResult[] = [];
   let limitsFailed: string | null = null;
   let halted: string | null = null;
   const wallMs = o.taskWallMs ?? TASK_WALL_MS;
-  const meta = () => ({ run: o.runId, claude_version: claudeVersion, subscription_type: login.subscription_type, caps: o.caps, total_tasks: o.tasks.length, limits, task_wall_ms: wallMs, stopped: meter.limited ? ('usage_limit' as const) : halted ? ('halted' as const) : null, stop_detail: meter.limited?.detail ?? halted ?? null, sandbox: { probe, confirmation: { status: confirmation.status, detail: confirmation.detail, model: confirmation.model, usage_equivalent_usd: check.spent, attempts: confirmation.attempts, skipped: confirmation.skipped } } });
+  const meta = () => ({ run: o.runId, claude_version: claudeVersion, subscription_type: login.subscription_type, caps: o.caps, total_tasks: o.tasks.length, limits, task_wall_ms: wallMs, stopped: meter.limited ? ('usage_limit' as const) : halted ? ('halted' as const) : null, stop_detail: meter.limited?.detail ?? halted ?? null, sandbox: { probe, confirmation: { status: confirmation.status, detail: confirmation.detail, model: confirmation.model, usage_equivalent_usd: check.spent, attempts: confirmation.attempts, os_sandbox_read_deny: confirmation.os_sandbox_read_deny, extra_calls: confirmation.extra_calls, skipped: confirmation.skipped } } });
   const write = () => {
     const agg = aggregate(meta(), results);
     writeOwnerOnly(join(dir, 'results.json'), JSON.stringify({ claude_version: claudeVersion, subscription_type: login.subscription_type, limits, sandbox, results }, null, 2) + '\n');

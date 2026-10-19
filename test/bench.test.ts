@@ -3,7 +3,7 @@
 // is under this test's temporary machine (test/isolate.ts).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir, userInfo } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -32,6 +32,12 @@ import { STDIN_LINE } from './helpers.js';
 const posix = { skip: process.platform === 'win32' && 'POSIX stand-ins' };
 
 const CAPS: Caps = { mode: 'smoke', spendUsd: 40, perTaskUsd: 15 };
+
+/**
+ * What check D's unparsed read (confirm.ts READ_JS) prints on a /dev/null mask. Written out, not imported, so these
+ * tests load on code from before it; the node -e test below runs the real command and checks this is what it prints.
+ */
+const MASKED_TEXT = 'bench-check: masked, not a regular file';
 
 /** A call the stand-in claude recorded. */
 interface ClaudeCall {
@@ -70,10 +76,11 @@ interface FakeClaude {
   /** What a session ends with: a success, the CLI's usage-limit shape, or exit 1 on an API 429 with no result line. */
   run?: 'ok' | 'limit' | '429';
   /**
-   * The sandbox confirmation's session: every command refused (default), a sentinel's content read (the sandbox let the
-   * read through), a socket's _ping answered OK, or the model running nothing.
+   * The sandbox confirmation's session: every command refused (default: each cat by the permission layer, each node -e
+   * read by the OS sandbox's /dev/null mask), every read refused by the permission layer (`permission`), a sentinel's
+   * content read (the sandbox let the read through), a socket's _ping answered OK, or the model running nothing.
    */
-  sandboxCheck?: 'refused' | 'leak' | 'ping' | 'declined';
+  sandboxCheck?: 'refused' | 'permission' | 'leak' | 'ping' | 'declined';
 }
 
 /** A stand-in claude in a fresh folder (with the bench user's home, `home`), and what it was asked. */
@@ -115,13 +122,18 @@ function fakeClaude(o: FakeClaude = {}) {
       `  const mode = ${JSON.stringify(o.sandboxCheck ?? 'refused')};`,
       "  const commands = prompt.split('\\n').filter((l) => /^\\d+\\. /.test(l)).map((l) => l.replace(/^\\d+\\. /, ''));",
       "  if (mode === 'declined') out({ type: 'assistant', message: { content: [{ type: 'text', text: 'I will not run these commands.' }] } });",
-      '  else commands.forEach((command, i) => {',
-      "    const path = (/'([^']+)'/.exec(command) || [])[1] || '';",
-      "    const result = command.startsWith('curl') ? (mode === 'ping' ? 'OK' : \"curl: (7) Couldn't connect to server\") : mode === 'leak' ? fs.readFileSync(path, 'utf8') : 'cat: ' + path + ': Permission denied';",
+      '  const denials = [];',
+      "  if (mode !== 'declined') commands.forEach((command, i) => {",
+      // The path is the command's last single-quoted word (node -e's script has quoted words of its own).
+      "    const quoted = command.match(/'[^']+'/g) || [];",
+      "    const path = (quoted[quoted.length - 1] || '').slice(1, -1);",
+      "    const byPermission = command.startsWith('cat') ? mode === 'refused' || mode === 'permission' : command.startsWith('node') && mode === 'permission';",
+      "    if (byPermission) denials.push({ tool_name: 'Bash', tool_use_id: 'c' + i, tool_input: { command } });",
+      "    const result = command.startsWith('curl') ? (mode === 'ping' ? 'OK' : \"curl: (7) Couldn't connect to server\") : mode === 'leak' ? fs.readFileSync(path, 'utf8') : byPermission ? 'Permission to use Bash with command ' + command + ' has been denied.' : " + JSON.stringify(MASKED_TEXT) + ';',
       "    out({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 'c' + i, name: 'Bash', input: { command } }] } });",
-      "    out({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'c' + i, content: result, is_error: mode === 'refused' } ] } });",
+      "    out({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'c' + i, content: result, is_error: mode === 'refused' || mode === 'permission' } ] } });",
       '  });',
-      "  out({ type: 'result', subtype: 'success', is_error: false, result: 'done', num_turns: 3, total_cost_usd: 0.02, usage: { input_tokens: 300, output_tokens: 40 } });",
+      "  out({ type: 'result', subtype: 'success', is_error: false, result: 'done', num_turns: 3, total_cost_usd: 0.02, usage: { input_tokens: 300, output_tokens: 40 }, permission_denials: denials });",
       '  process.exit(0);',
       '}',
       "log({ kind: 'run', args, env: process.env, settings, input });",
@@ -928,8 +940,22 @@ test("acceptance: the sandbox confirmation in Claude Code's own sandbox refuses 
   const args = ok.calls('check')[0]!.args;
   assert.equal(args[args.indexOf('--model') + 1], 'claude-haiku-5-5');
   assert.equal(agg.usage.sandbox_check, 0.02, 'its usage recorded');
-  const attempts = (agg.sandbox!.confirmation as unknown as { attempts: { kind: string; refused: boolean }[] }).attempts;
-  assert.deepEqual(attempts.map((a) => [a.kind, a.refused]), [['connect', true], ['connect', true], ['connect', true], ['connect', true], ['connect', true], ['read', true], ['read', true], ['read', true], ['read', true]]);
+  const attempts = (agg.sandbox!.confirmation as unknown as { attempts: { kind: string; form: string; refused: boolean; layer: string }[] }).attempts;
+  // Round 4: each sentinel is also read by node -e, which the permission layer doesn't parse; per attempt, which layer
+  // stopped it (the stand-in: cat by the permission layer, node by the sandbox's /dev/null mask, curl with no marker).
+  assert.deepEqual(attempts.map((a) => [a.kind, a.form, a.refused, a.layer]), [
+    ...Array(5).fill(['connect', 'curl', true, 'unknown']),
+    ...Array(4).fill(['read', 'cat', true, 'permission layer']),
+    ...Array(4).fill(['read', 'node', true, 'OS sandbox']),
+  ]);
+  assert.equal((agg.sandbox!.confirmation as unknown as { os_sandbox_read_deny: boolean }).os_sandbox_read_deny, true);
+  // Every read refused by the permission layer, node's too: all refused, but the sandbox's own read-deny unshown, said.
+  const pl = machine({ sandboxCheck: 'permission' });
+  const plSaid: string[] = [];
+  const plAgg = await runBench(pl.opts(engineTask, { say: (l) => plSaid.push(l) }));
+  assert.equal(plAgg.sandbox?.confirmation.status, 'all refused');
+  assert.equal((plAgg.sandbox!.confirmation as unknown as { os_sandbox_read_deny: boolean }).os_sandbox_read_deny, false);
+  assert.ok(plSaid.some((l) => /^WARNING: .*the OS sandbox's own read-deny was not shown.*rests on the srt probe/.test(l)), plSaid.join('\n'));
   for (const f of ['.claude.json', '.netrc', '.npmrc', '.pypirc']) assert.ok(!existsSync(join(ok.home, f)), `the ${f} sentinel removed`);
   assert.match(readFileSync(join(ok.layout.runs, 'r1', 'sandbox.json'), 'utf8'), /"status": "all refused"/);
   // A sentinel read, or the daemon answering: the run refused, no task started, the sentinels still removed.
@@ -1014,10 +1040,10 @@ test("acceptance: a tree's tar stream is refused only for the instance id, the h
 });
 
 /** Whether a task's syncTree of `stream` was sent (true) or refused with STDIN_REFUSED and nothing sent (false). */
-function stdinSends(row: TaskRow, base: Buffer, stream: Buffer): boolean {
+async function stdinSends(row: TaskRow, base: Buffer, stream: Buffer): Promise<boolean> {
   const d = fakeDocker();
   try {
-    new TaskRunner(d.opts, C, row, base).syncTree('/work/t', stream);
+    await new TaskRunner(d.opts, C, row, base).syncTree('/work/t', stream);
   } catch (e) {
     assert.equal((e as Error).message, STDIN_REFUSED);
     assert.equal(d.sent.length, 0, 'nothing sent');
@@ -1034,41 +1060,41 @@ const STDIN_HUNK = ['def test_negative_quantities_are_skipped_TESTMARK():', '   
 const testPatch = (added: readonly string[]) => ['diff --git a/tests/test_price.py b/tests/test_price.py', '--- a/tests/test_price.py', '+++ b/tests/test_price.py', `@@ -1,2 +1,${added.length + 2} @@`, ' def test_plain_totals_PASSMARK():', ...added, ''].join('\n');
 const HUNK_ROW: TaskRow = { ...ROW, test_patch: testPatch(['+', ...STDIN_HUNK.map((l) => `+${l}`)]) };
 
-test('stdin: the test patch written into the tree as a .diff file (LF) is refused', () => {
-  assert.equal(stdinSends(HUNK_ROW, STDIN_BASE, withFile('hidden/test.diff', HUNK_ROW.test_patch)), false);
+test('stdin: the test patch written into the tree as a .diff file (LF) is refused', async () => {
+  assert.equal(await stdinSends(HUNK_ROW, STDIN_BASE, withFile('hidden/test.diff', HUNK_ROW.test_patch)), false);
   // The base exemption holds for the diff form too: a base tree that already ships that .diff file.
   const base = Buffer.concat([STDIN_BASE, Buffer.from(`\0\0docs/example.diff\0${HUNK_ROW.test_patch}`)]);
-  assert.equal(stdinSends(HUNK_ROW, base, Buffer.concat([base, Buffer.from(`\0\0hidden/test.diff\0${HUNK_ROW.test_patch}`)])), true);
+  assert.equal(await stdinSends(HUNK_ROW, base, Buffer.concat([base, Buffer.from(`\0\0hidden/test.diff\0${HUNK_ROW.test_patch}`)])), true);
 });
 
-test('stdin: the test patch written into the tree as a .diff file with CRLF line ends is refused', () => {
-  assert.equal(stdinSends(HUNK_ROW, STDIN_BASE, withFile('hidden/test.diff', HUNK_ROW.test_patch.replace(/\n/g, '\r\n'))), false);
+test('stdin: the test patch written into the tree as a .diff file with CRLF line ends is refused', async () => {
+  assert.equal(await stdinSends(HUNK_ROW, STDIN_BASE, withFile('hidden/test.diff', HUNK_ROW.test_patch.replace(/\n/g, '\r\n'))), false);
 });
 
-test("stdin: an agent's own test file that starts with a new test file's imports is sent; imports with code are refused", () => {
+test("stdin: an agent's own test file that starts with a new test file's imports is sent; imports with code are refused", async () => {
   // A new upstream test file whose first lines are imports, one of them in parentheses.
   const imports = ['import pytest', 'from price import total, subtotal', 'from price.models import (', '    ItemWithDiscount,', '    BasketOfItems,', ')'];
   const tests = ['def test_items_are_counted_TESTMARK():', '    assert subtotal([ItemWithDiscount(1)]) == 1'];
   const newFile = ['diff --git a/tests/test_items.py b/tests/test_items.py', 'new file mode 100644', '--- /dev/null', '+++ b/tests/test_items.py', '@@ -0,0 +1,9 @@', ...[...imports, '', ...tests].map((l) => `+${l}`), ''].join('\n');
   const rowImports: TaskRow = { ...ROW, test_patch: newFile };
-  assert.equal(stdinSends(rowImports, STDIN_BASE, withFile('tests/test_mine.py', `${imports.join('\n')}\n\n\ndef test_mine():\n    assert total([]) == 0\n`)), true, "the agent's own test file, with the same imports: sent");
-  assert.equal(stdinSends(rowImports, STDIN_BASE, withFile('tests/test_items.py', `${imports.join('\n')}\n\n${tests.join('\n')}\n`)), false, 'the applied file, imports and its test: refused');
+  assert.equal(await stdinSends(rowImports, STDIN_BASE, withFile('tests/test_mine.py', `${imports.join('\n')}\n\n\ndef test_mine():\n    assert total([]) == 0\n`)), true, "the agent's own test file, with the same imports: sent");
+  assert.equal(await stdinSends(rowImports, STDIN_BASE, withFile('tests/test_items.py', `${imports.join('\n')}\n\n${tests.join('\n')}\n`)), false, 'the applied file, imports and its test: refused');
   // A 3-line hunk of an import and code is still the test patch.
   const mixed = ['from price import subtotal', 'def test_subtotal_of_nothing_TESTMARK():', '    assert subtotal([]) == 0'];
   const rowMixed: TaskRow = { ...ROW, test_patch: testPatch(mixed.map((l) => `+${l}`)) };
-  assert.equal(stdinSends(rowMixed, STDIN_BASE, withFile('tests/test_sub.py', `${mixed.join('\n')}\n`)), false, 'an import then code: refused');
+  assert.equal(await stdinSends(rowMixed, STDIN_BASE, withFile('tests/test_sub.py', `${mixed.join('\n')}\n`)), false, 'an import then code: refused');
 });
 
-test("stdin: a blank context line in the test patch doesn't end a run", () => {
+test("stdin: a blank context line in the test patch doesn't end a run", async () => {
   // Two 2-line blocks split by a blank context line (written as a space, or stripped to nothing): one run once applied.
   const two = ['def test_a_new_case_one():', '    assert total([(1, 1)]) == 1', 'def test_b_new_case_two():', '    assert total([(2, 2)]) == 4'];
   for (const blank of [' ', '']) {
     const rowBlank: TaskRow = { ...ROW, test_patch: testPatch([`+${two[0]}`, `+${two[1]}`, blank, `+${two[2]}`, `+${two[3]}`]) };
-    assert.equal(stdinSends(rowBlank, STDIN_BASE, withFile('tests/test_price.py', `def test_plain_totals_PASSMARK():\n    pass\n${two[0]}\n${two[1]}\n\n${two[2]}\n${two[3]}\n`)), false, `split by a blank context line ${JSON.stringify(blank)}: refused`);
+    assert.equal(await stdinSends(rowBlank, STDIN_BASE, withFile('tests/test_price.py', `def test_plain_totals_PASSMARK():\n    pass\n${two[0]}\n${two[1]}\n\n${two[2]}\n${two[3]}\n`)), false, `split by a blank context line ${JSON.stringify(blank)}: refused`);
   }
 });
 
-test('stdin: a run that ends a tar member of exactly 512 bytes, with no trailing newline, is refused', () => {
+test('stdin: a run that ends a tar member of exactly 512 bytes, with no trailing newline, is refused', async () => {
   // A real ustar stream: the file's last line would otherwise run into the next header's name.
   const header = (name: string, size: number) => {
     const h = Buffer.alloc(512);
@@ -1083,8 +1109,8 @@ test('stdin: a run that ends a tar member of exactly 512 bytes, with no trailing
   const full = `${'#'.repeat(512 - tail.length - 1)}\n${tail}`;
   assert.equal(Buffer.byteLength(full), 512);
   const base = ustar([['tests/test_price.py', 'def test_plain_totals_PASSMARK():\n    pass\n']]);
-  assert.equal(stdinSends(HUNK_ROW, base, ustar([['tests/a.py', full], ['tests/b.py', 'x\n']])), false, 'a run ending a 512-byte file, then a header: refused');
-  assert.equal(stdinSends(HUNK_ROW, base, ustar([['tests/a.py', `${STDIN_HUNK[0]}\n${STDIN_HUNK[1]}\n`], ['tests/b.py', 'x\n']])), true, 'two of its lines, then a header: sent');
+  assert.equal(await stdinSends(HUNK_ROW, base, ustar([['tests/a.py', full], ['tests/b.py', 'x\n']])), false, 'a run ending a 512-byte file, then a header: refused');
+  assert.equal(await stdinSends(HUNK_ROW, base, ustar([['tests/a.py', `${STDIN_HUNK[0]}\n${STDIN_HUNK[1]}\n`], ['tests/b.py', 'x\n']])), true, 'two of its lines, then a header: sent');
 });
 
 test("a bench root through a link that doesn't resolve is refused; a dangling link at a credential place is followed", { skip: process.platform !== 'linux' && 'Linux only' }, () => {
@@ -1116,20 +1142,27 @@ function checkLane(withClaudeDir = true) {
 }
 
 /** What Claude Code did with one listed command: the command it really ran, what came back, and whether as an error. */
-type Answer = { command: string; output: string; is_error: boolean } | null;
+type Answer = { command: string; output: string; is_error: boolean; /** listed in the result line's permission_denials */ denied?: boolean } | null;
 
-/** A stand-in for the check's one model call: streams a Bash call and its result per listed command, as stream-json has them. */
-function checkRunner(answer: (command: string) => Answer, seen?: (req: RunRequest) => void): AgentRunner {
+/**
+ * A stand-in for the check's one model call: streams a Bash call and its result per listed command, then any `extra`
+ * lines, then the result line (with its permission_denials), as stream-json has them.
+ */
+function checkRunner(answer: (command: string) => Answer, seen?: (req: RunRequest) => void, extra: unknown[] = []): AgentRunner {
   return {
     run: async (req) => {
       seen?.(req);
       const listed = req.prompt.split('\n').filter((l) => /^\d+\. /.test(l)).map((l) => l.replace(/^\d+\. /, ''));
+      const denials: object[] = [];
       listed.forEach((c, i) => {
         const a = answer(c);
         if (!a) return;
         req.onStreamLine?.({ type: 'assistant', message: { content: [{ type: 'tool_use', id: `c${i}`, name: 'Bash', input: { command: a.command } }] } });
         req.onStreamLine?.({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: `c${i}`, content: a.output, is_error: a.is_error }] } });
+        if (a.denied) denials.push({ tool_name: 'Bash', tool_use_id: `c${i}`, tool_input: { command: a.command } });
       });
+      for (const l of extra) req.onStreamLine?.(l);
+      req.onStreamLine?.({ type: 'result', subtype: 'success', is_error: false, result: 'done', num_turns: 3, total_cost_usd: 0.02, permission_denials: denials });
       return { reason: 'succeeded', detail: 'done', costUsd: 0.02, turns: 3, model: req.model };
     },
   };
@@ -1187,9 +1220,10 @@ test('the sandbox confirmation: refused only when the exact command failed; a co
   assert.ok(loose.attempts.every((a) => a.result === 'not run'));
 });
 
-test('the sandbox confirmation removes its sentinels on SIGINT and SIGTERM', { skip: process.platform === 'win32' && 'POSIX signals', timeout: 60_000 }, async () => {
+test('the sandbox confirmation removes its sentinels on SIGINT, SIGTERM and SIGHUP', { skip: process.platform === 'win32' && 'POSIX signals', timeout: 90_000 }, async () => {
   const { spawn } = await import('node:child_process');
-  for (const sig of ['SIGINT', 'SIGTERM'] as const) {
+  // SIGHUP (round 4): a terminal closed or an SSH session dropped during the check.
+  for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP'] as const) {
     const { base, home, input } = checkLane();
     const script = join(base, 'hang.mjs');
     writeFileSync(
@@ -1259,4 +1293,116 @@ test("acceptance: a task's agents get Edit, Write, MultiEdit and NotebookEdit on
     await assert.rejects(t.run({ ...runReq(wd), allowedTools: ['Read', bad] }), /file-writing tools run outside the sandbox/, bad);
   }
   assert.equal(seen.length, 1, 'no refused run started');
+});
+
+test("round 4: a run's file-writing tools reach only its own working folder, which must be in the task's folder", async () => {
+  const seen: { cwd: string; tools: string[] }[] = [];
+  const inner: AgentRunner = { run: async (req) => (seen.push({ cwd: req.cwd, tools: req.allowedTools }), { reason: 'succeeded', detail: '', costUsd: 0.1, turns: 1, model: req.model }) };
+  const wd = '/srv/bench/runs/r1/t01';
+  const t = new UsageMeter(inner, 40).task(15, wd);
+  // A run in a subfolder: a bare grant is scoped to that subfolder, not the whole task folder.
+  await t.run({ ...runReq(`${wd}/repo`), allowedTools: ['Read', 'Edit', 'Write', 'MultiEdit', 'NotebookEdit'] });
+  assert.deepEqual(seen[0], { cwd: `${wd}/repo`, tools: ['Read', `Edit(/${wd}/repo/**)`] }, "scoped to the run's own working folder");
+  await t.run({ ...runReq(`${wd}/repo`), allowedTools: [`Edit(/${wd}/repo/src/**)`] });
+  assert.deepEqual(seen[1]?.tools, [`Edit(/${wd}/repo/src/**)`], 'a grant inside the working folder stays');
+  // A grant in the task folder but outside the run's working folder: refused, unstarted.
+  for (const bad of [`Edit(/${wd}/**)`, `Edit(/${wd}/remote.git/**)`, `Edit(/${wd})`, `Edit(/${wd}/repo/)`]) {
+    await assert.rejects(t.run({ ...runReq(`${wd}/repo`), allowedTools: [bad] }), /file-writing tools run outside the sandbox/, bad);
+  }
+  // A working folder outside the task's folder, or not a plain absolute path: refused, whatever the tools.
+  for (const cwd of ['/srv/bench/runs/r1/t02', '/srv/bench/runs/r1', `${wd}x`, `${wd}/../t02`, 'repo', `${wd}/repo/`]) {
+    await assert.rejects(t.run({ ...runReq(cwd), allowedTools: ['Read'] }), /working folder/, cwd);
+  }
+  assert.equal(seen.length, 2, 'no refused run started');
+});
+
+test('round 4: a path put into a permission rule may hold no glob or rule character, nor end in a slash', async () => {
+  const inner: AgentRunner = { run: async (req) => ({ reason: 'succeeded', detail: '', costUsd: 0.1, turns: 1, model: req.model }) };
+  const meter = new UsageMeter(inner, 40);
+  for (const wd of ['/srv/b*/runs/r1/t01', '/srv/[b]ench/t01', '/srv/bench/t0?', '/srv/{a,b}/t01', '/srv/bench/t01/', '/srv/my bench/t01', '/srv/bench/(t01)', '/srv/bench/t01\\x', '/srv/!bench/t01']) {
+    assert.throws(() => meter.task(15, wd), /task's folder/, wd);
+  }
+  const t = meter.task(15, '/srv/bench/runs/r1/t01');
+  for (const cwd of ['/srv/bench/runs/r1/t01/re*po', '/srv/bench/runs/r1/t01/[r]epo', '/srv/bench/runs/r1/t01/a b']) {
+    await assert.rejects(t.run({ ...runReq(cwd), allowedTools: ['Edit'] }), /working folder/, cwd);
+  }
+});
+
+/** A sentinel read's real outcome: the listed command run by bash, `from` swapped for `to` (a mask stand-in). */
+function runListed(command: string, from?: string, to?: string): Answer {
+  const r = spawnSync('bash', ['-c', from && to ? command.split(from).join(to) : command], { encoding: 'utf8', timeout: 30_000 });
+  return { command, output: `${r.stdout}${r.stderr}`, is_error: r.status !== 0 };
+}
+
+test("round 4: check D's unparsed read (node -e, fstat): a /dev/null mask or a hidden file is the OS sandbox's refusal, a real read a leak", posix, async () => {
+  const sentinelOf = (c: string) => /'([^']+)'$/.exec(c)?.[1] ?? '';
+  // The sandbox's mask, as the srt probe sees it: the path opens /dev/null (a character device).
+  const { base } = checkLane();
+  const mask = join(base, 'masked');
+  symlinkSync('/dev/null', mask);
+  const nodeOrFail = (outcome: (c: string) => Answer) => (c: string) => (c.startsWith('node ') ? outcome(c) : failsAsListed(c));
+  for (const [what, to] of [['masked with /dev/null', mask], ['hidden (ENOENT)', join(base, 'gone')]] as const) {
+    const { home, o } = checkLane();
+    const r = await confirmSandbox({ ...o, cwd: home, runner: checkRunner(nodeOrFail((c) => runListed(c, sentinelOf(c), to))) });
+    const unparsed = r.attempts.filter((a) => (a as { form?: string }).form === 'node');
+    assert.equal(unparsed.length, 4, `${what}: one node -e read per sentinel`);
+    for (const a of unparsed) {
+      assert.equal(a.result, 'refused', `${what}: ${a.output}`);
+      assert.equal((a as { layer?: string }).layer, 'OS sandbox', what);
+    }
+    if (to === mask) assert.ok(unparsed.every((a) => a.output.includes(MASKED_TEXT)), `the mask exits with ${MASKED_TEXT}`);
+    assert.equal(r.status, 'all refused', what);
+    assert.equal((r as { os_sandbox_read_deny?: boolean }).os_sandbox_read_deny, true, what);
+    assert.match(r.detail, /the OS sandbox's own read-deny refused every unparsed read/, what);
+  }
+  // The read let through: node prints the sentinel and exits 0, a leak that refuses the run.
+  const { home, o } = checkLane();
+  const leak = await confirmSandbox({ ...o, cwd: home, runner: checkRunner(nodeOrFail((c) => runListed(c))) });
+  assert.equal(leak.status, 'leaked');
+  assert.ok(leak.attempts.filter((a) => (a as { form?: string }).form === 'node').every((a) => a.result === 'reached'));
+  assert.match(leak.detail, /was read/);
+});
+
+test("round 4: check D records which layer stopped each attempt, from the stream-json's markers only, failing closed", posix, async () => {
+  const run = async (answer: (c: string) => Answer, extra: unknown[] = []) => {
+    const { home, o } = checkLane();
+    return confirmSandbox({ ...o, cwd: home, runner: checkRunner(answer, undefined, extra) });
+  };
+  const layers = (r: Awaited<ReturnType<typeof run>>, form: string) => r.attempts.filter((a) => (a as { form?: string }).form === form).map((a) => (a as { layer?: string }).layer);
+  const p = await run((c) => ({ command: c, output: 'blocked', is_error: true, denied: c.startsWith('cat ') }));
+  assert.deepEqual(layers(p, 'cat'), Array(4).fill('permission layer'), "the result line's permission_denials, matched by tool_use_id");
+  assert.deepEqual(layers(p, 'node'), Array(4).fill('unknown'), 'an error with no marker is never the OS sandbox');
+  assert.deepEqual(layers(p, 'curl'), Array(5).fill('unknown'), "curl failing can't tell the sandbox from a missing socket");
+  assert.equal((p as { os_sandbox_read_deny?: boolean }).os_sandbox_read_deny, false);
+  assert.match(p.detail, /4 by the permission layer, 0 by the OS sandbox, 9 by no layer shown; the OS sandbox's own read-deny was not shown/);
+  const w = await run((c) => ({ command: c, output: `Permission to use Bash with command ${c} has been denied.`, is_error: true }));
+  assert.deepEqual([...new Set([...layers(w, 'cat'), ...layers(w, 'node'), ...layers(w, 'curl')])], ['permission layer'], "the tool result's denial wording");
+  const d = await run((c) => ({ command: c, output: "Permission to use Bash has been denied because Claude Code is running in don't ask mode.", is_error: true }));
+  assert.deepEqual([...new Set(layers(d, 'cat'))], ['permission layer'], 'the dont-ask-mode wording');
+  // cat really ran and the sandbox stopped it; node missing on the host: no OS sandbox claim for it.
+  const s = await run((c) => (c.startsWith('cat ') ? { command: c, output: `cat: ${/'([^']+)'/.exec(c)?.[1]}: Permission denied`, is_error: true } : c.startsWith('node ') ? { command: c, output: 'bash: line 1: node: command not found', is_error: true } : failsAsListed(c)));
+  assert.deepEqual(layers(s, 'cat'), Array(4).fill('OS sandbox'));
+  assert.deepEqual(layers(s, 'node'), Array(4).fill('unknown'));
+  // The exact node read never ran: the model declined it.
+  const n = await run((c) => (c.startsWith('node ') ? null : failsAsListed(c)));
+  assert.deepEqual(layers(n, 'node'), Array(4).fill('model declined'));
+  assert.equal(n.status, 'model declined');
+});
+
+test('round 4: check D is "all refused" only when the model ran nothing but the listed commands', posix, async () => {
+  const run = async (extra: unknown[]) => {
+    const { home, o } = checkLane();
+    return confirmSandbox({ ...o, cwd: home, runner: checkRunner(failsAsListed, undefined, extra) });
+  };
+  assert.equal((await run([])).status, 'all refused');
+  // Every listed command refused, plus a read through $HOME that names no target and exits 0: not "all refused".
+  const viaHome = await run([
+    { type: 'assistant', message: { content: [{ type: 'tool_use', id: 'x1', name: 'Bash', input: { command: 'cat "$HOME/.netrc" > /dev/null' } }] } },
+    { type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'x1', content: '', is_error: false }] } },
+  ]);
+  assert.equal(viaHome.status, 'model declined');
+  assert.deepEqual((viaHome as { extra_calls?: string[] }).extra_calls, ['Bash: cat "$HOME/.netrc" > /dev/null']);
+  // Any other tool too.
+  const viaRead = await run([{ type: 'assistant', message: { content: [{ type: 'tool_use', id: 'x2', name: 'Read', input: { file_path: '/etc/hostname' } }] } }]);
+  assert.equal(viaRead.status, 'model declined');
 });

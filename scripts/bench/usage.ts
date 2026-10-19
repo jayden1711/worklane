@@ -6,9 +6,13 @@
 // (classifyTransient): its `rate_limited`, and a failed run on a 429 with no result line too. No retry at all: the
 // bench's runner is built with retries off (agent.ts), and should any runner start to wait out a transient error
 // anyway, the meter aborts that wait (a rate limit stops the bench; anything else ends that run).
-// It also confines the file-writing tools (owner, 2026-10-18): Edit, Write, MultiEdit and NotebookEdit run outside the
-// sandbox, as the bench user, so a run may have them pre-approved only inside its task's own working folder
-// (scopeEditTools); any other grant of them refuses the run.
+// It also confines the file-writing tools (owner, 2026-10-18 and 2026-10-19): Edit, Write, MultiEdit and NotebookEdit
+// run outside the sandbox, as the bench user, so a run may have them pre-approved only inside its own working folder
+// (its cwd), which must itself be inside the task's folder (scopeEditTools). Not the whole task folder: an Edit allow
+// rule also widens where sandboxed Bash may write (Claude Code's sandboxing docs, inferred), and the sandbox protects
+// .claude/ and .git/ hooks and config only in and above the working folder. Any other grant of them, or a cwd outside
+// the task's folder, refuses the run. A path put into a rule must hold no glob or rule-syntax character
+// (RULE_UNSAFE): refused, never escaped, since the escaping rules of Claude Code's rule globs aren't documented.
 import { isAbsolute, posix } from 'node:path';
 import { classifyTransient, type AgentRunner, type RunRequest, type RunResult, type TerminalReason } from '../../src/runner.js';
 
@@ -28,15 +32,35 @@ function toolNames(entry: string): string[] {
 }
 
 /**
- * `allowed` with every file-writing tool confined to `workDir`, the task's own folder: a bare Edit, Write, MultiEdit or
- * NotebookEdit becomes `Edit(/<workDir>/**)` (Claude Code's Edit rules cover all its file-editing tools; an absolute
- * path is written with a leading //), and `Edit(/<p>)` or `Edit(/<p>/**)` stays when p is a plain, normalized path in
- * `workDir`. Refuses (throws) any other grant of them: another folder, a relative, home-relative or globbed path, a
- * qualified Write, MultiEdit or NotebookEdit, or one in an entry that names several tools.
+ * Characters a path put into a permission rule may not hold: glob syntax (`*`, `?`, `[`, `]`, `{`, `}`, `!`), the rule's
+ * own parentheses, a backslash, and the separators an allowed-tools list splits on (a comma, whitespace).
  */
-export function scopeEditTools(allowed: readonly string[], workDir: string): string[] {
-  if (!isAbsolute(workDir) || posix.normalize(workDir) !== workDir || workDir === '/') throw new Error(`the task's working folder ${workDir} must be a normalized absolute path`);
-  const scoped = `Edit(/${workDir}/**)`;
+export const RULE_UNSAFE = /[*?[\]{}!()\\,\s]/;
+
+/** Refuses (throws) unless `p` is a plain path a rule can hold: absolute, normalized, no trailing slash, not `/`. */
+function rulePath(p: string, what: string): string {
+  if (typeof p !== 'string' || !isAbsolute(p) || posix.normalize(p) !== p || p.endsWith('/') || RULE_UNSAFE.test(p)) {
+    throw new Error(`${what} ${JSON.stringify(p)} must be a normalized absolute path with no trailing slash and no glob or rule character (${RULE_UNSAFE.source})`);
+  }
+  return p;
+}
+
+const within = (p: string, dir: string) => p === dir || p.startsWith(`${dir}/`);
+
+/**
+ * `allowed` with every file-writing tool confined to `cwd`, the run's own working folder, which must be in `workDir`,
+ * the task's folder: a bare Edit, Write, MultiEdit or NotebookEdit becomes `Edit(/<cwd>/**)` (Claude Code's Edit rules
+ * cover all its file-editing tools; an absolute path is written with a leading //), and `Edit(/<p>)` or
+ * `Edit(/<p>/**)` stays when p is a plain, normalized path in `cwd`. Refuses (throws) a `cwd` outside `workDir`, a
+ * path with a glob or rule character (RULE_UNSAFE) or a trailing slash, and any other grant of them: another folder,
+ * a relative, home-relative or globbed path, a qualified Write, MultiEdit or NotebookEdit, or one in an entry that
+ * names several tools.
+ */
+export function scopeEditTools(allowed: readonly string[], workDir: string, cwd: string = workDir): string[] {
+  rulePath(workDir, "the task's folder");
+  rulePath(cwd, "the run's working folder");
+  if (!within(cwd, workDir)) throw new Error(`not started: the run's working folder ${cwd} is outside the task's folder ${workDir}`);
+  const scoped = `Edit(/${cwd}/**)`;
   const out: string[] = [];
   for (const entry of allowed) {
     const names = toolNames(entry);
@@ -45,7 +69,7 @@ export function scopeEditTools(allowed: readonly string[], workDir: string): str
       out.push(entry);
       continue;
     }
-    const refuse = (why: string) => new Error(`not started: allowed tool ${JSON.stringify(entry)} ${why}; file-writing tools run outside the sandbox, so they are allowed only in the task's own folder (${scoped})`);
+    const refuse = (why: string) => new Error(`not started: allowed tool ${JSON.stringify(entry)} ${why}; file-writing tools run outside the sandbox, so they are allowed only in the run's own working folder (${scoped})`);
     if (names.length !== 1) throw refuse('names several tools in one entry');
     const m = /^([A-Za-z]+)(?:\((.*)\))?$/s.exec(entry.trim());
     if (!m || !EDIT_TOOLS.includes(m[1]!)) throw refuse('is not one tool name');
@@ -54,8 +78,7 @@ export function scopeEditTools(allowed: readonly string[], workDir: string): str
       continue;
     }
     const path = m[1] === 'Edit' && m[2].startsWith('//') ? m[2].slice(1).replace(/\/\*\*$/, '') : null;
-    const inside = (p: string) => p === workDir || p.startsWith(`${workDir}/`);
-    if (!path || /[*?[\]{}]/.test(path) || posix.normalize(path) !== path || !inside(path)) throw refuse(`reaches outside ${workDir}`);
+    if (!path || RULE_UNSAFE.test(path) || path.endsWith('/') || posix.normalize(path) !== path || !within(path, cwd)) throw refuse(`reaches outside ${cwd}`);
     out.push(entry.trim());
   }
   return [...new Set(out)];
@@ -95,8 +118,8 @@ export class UsageMeter {
     return this.stop.signal;
   }
   /**
-   * The runner one task's agents get. `workDir` is the task's own folder: the only place its runs may have the
-   * file-writing tools (scopeEditTools). `signal` is the task's own stop (the driver's wall-clock cap): every run gets
+   * The runner one task's agents get. `workDir` is the task's own folder: every run's working folder must be in it,
+   * and its file-writing tools are confined to that working folder (scopeEditTools). `signal` is the task's own stop (the driver's wall-clock cap): every run gets
    * it, whatever the task passes, and once it fires no run starts.
    */
   task(perTaskUsd: number, workDir: string, signal?: AbortSignal): TaskMeter {
@@ -137,15 +160,18 @@ export class TaskMeter implements AgentRunner {
   constructor(
     private m: UsageMeter,
     readonly perTaskUsd: number,
-    /** The task's own folder: where its runs' file-writing tools are confined. */
+    /** The task's own folder: every run's working folder must be in it. */
     readonly workDir: string,
     private stop?: AbortSignal,
   ) {
     scopeEditTools([], workDir);
   }
-  /** Throws (refuses the run, unstarted) when its allowed tools grant a file-writing tool outside the task's folder. */
+  /**
+   * Throws (refuses the run, unstarted) when its working folder is outside the task's folder, or its allowed tools
+   * grant a file-writing tool outside that working folder.
+   */
   async run(req: RunRequest): Promise<RunResult> {
-    const allowedTools = scopeEditTools(req.allowedTools, this.workDir);
+    const allowedTools = scopeEditTools(req.allowedTools, this.workDir, req.cwd);
     req = { ...req, allowedTools };
     const refused = (reason: TerminalReason, detail: string): RunResult => ({ reason, detail, costUsd: 0, turns: 0, model: req.model });
     if (this.m.limited) return refused('rate_limited', `not started: the bench stopped at a usage limit (${this.m.limited.detail})`);
