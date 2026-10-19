@@ -234,7 +234,7 @@ export interface SandboxCheck {
   unsupported?: string;
 }
 
-/** The helper check's `NOTE userns-unsupported: <why and fix>` line (scripts/machine/worklane-testrun.sh), or null. */
+/** The sandbox helper's check's `NOTE userns-unsupported: <why and fix>` line, or null. */
 export function usernsUnsupported(stdout: string): string | null {
   const m = /^NOTE userns-unsupported: (.+)$/m.exec(stdout);
   return m ? m[1]!.trim().slice(0, 500) : null;
