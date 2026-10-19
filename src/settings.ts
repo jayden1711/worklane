@@ -4,23 +4,24 @@
 // the instance's dashboard changes them through changeSetting, which only the
 // owner may call. Bounds come from a machine-wide, root-owned limits file the
 // dashboard can't write; a value outside them is refused, never clamped.
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { parseDocument } from 'yaml';
+import { parse, parseDocument } from 'yaml';
 import { z } from 'zod';
 import { BRAND } from './brand.js';
 import type { Config } from './config/load.js';
 import { EventLog } from './events/log.js';
 import { InstanceSettings, PolicyFile } from './instance.js';
 import { replaceFileAtomically } from './os/index.js';
-import { INTAKE_DEFAULT_CAPS, type IntakeCaps } from './intake/report.js';
+import { INTAKE_DEFAULT_CAPS, IntakeConfig, type IntakeCaps } from './intake/report.js';
 import { INTAKE_FILE, loadIntakeConfig } from './intake/config.js';
+import { readInOwnedDir } from './os/root-file.js';
 import { RESEARCH_DEFAULT_CAPS, type ResearchCaps } from './research.js';
 import { ROUTING_ALIASES } from './routing.js';
 import { attachmentCaps } from './chat-attachments.js';
 import type { StuckMode } from './stuck.js';
 import { etcPath } from './os/system-paths.js';
-import { adminRoute, decodePolicyValue, encodePolicyValue, policyHelperMissing, policyInstance, policySetCommand, policySetOk, readPolicyChecked, tightenProblem } from './policy-gate.js';
+import { adminRoute, decodePolicyValue, encodePolicyValue, policyHelperMissing, policyInstance, policyRootUid, policySetCommand, policySetOk, readPolicyChecked, tightenProblem } from './policy-gate.js';
 import { MACHINE_HELPER } from './machine.js';
 
 /** The machine's bounds on instance settings: root-owned, outside every instance's home. */
@@ -184,6 +185,29 @@ export function intakeFileCaps(policyPath: string): IntakeCaps | null {
 }
 
 /**
+ * The intake caps beside a root policy.yaml, as root's `policy set` reads them (#726 rounds 12 and 13): intake.yaml
+ * read as policy.yaml is read there (never through a link, one name, the coordinator's or root's, size-capped); the
+ * engine's defaults when there is none; null when it can't be read that way or isn't valid (fail closed). Settings
+ * uses it for a root policy too, so it never queues what root's helper refuses.
+ */
+export function intakeCapsBeside(dir: string, coordUid: number, rootUid: number): IntakeCaps | null {
+  try {
+    const r = IntakeConfig.safeParse(parse(readInOwnedDir(dir, INTAKE_FILE, coordUid, [coordUid, rootUid])));
+    return r.success ? r.data.caps : null;
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code === 'ENOENT' ? INTAKE_DEFAULT_CAPS : null;
+  }
+}
+/** intakeCapsBeside for a root policy.yaml, read by the dashboard (its coordinator user owns the directory). */
+function rootIntakeCaps(policyPath: string): IntakeCaps | null {
+  try {
+    return intakeCapsBeside(realpathSync(dirname(policyPath)), process.getuid?.() ?? 0, policyRootUid());
+  } catch {
+    return null;
+  }
+}
+
+/**
  * The value of a CEILING_KEYS key in effect, as root's `policy set` can tell it without the repo's config (#726 rounds
  * 11 and 12): the file's value; else the engine's default where the repo's config can't change it (for the intake
  * caps, intake.yaml's: `intake`, null when it can't be read); else, for workers and the daily budget, the policy's own
@@ -311,7 +335,10 @@ export function changeSetting(o: { policyPath: string; cfg: Config; eventsDb: st
     if (!policySetOk([`settings.${key}`, arg])) throw new SettingsError(`refused: settings.${key} ${arg} is root's to set, at a root shell (${root})`);
     // Up front, nothing asked: root's own check on the coordinator's route (round 12), so nothing is queued that
     // root's helper would refuse (a tightening it can't prove: ci_repair's cap or run windows the repo's config sets).
-    const unproven = tightenProblem(`settings.${key}`, decodePolicyValue(`settings.${key}`, arg), rootInEffect(`settings.${key}`, before, intake), root);
+    // intake.yaml as root's helper reads it, not as the engine's loader does (round 13: a link, a second name or an
+    // oversized file loads there but not for root).
+    const rootIntake = key.startsWith('intake.') ? rootIntakeCaps(o.policyPath) : null;
+    const unproven = tightenProblem(`settings.${key}`, decodePolicyValue(`settings.${key}`, arg), rootInEffect(`settings.${key}`, before, rootIntake), root);
     if (unproven) throw new SettingsError(`refused: ${unproven}`);
     // Up front, nothing recorded: on a sudo whose rule leaves set-policy out, a request would only fail at the helper.
     const missing = policyHelperMissing(o.helperRulesFile, [`settings.${key}`, arg]);

@@ -15,7 +15,7 @@
 import { chmodSync, closeSync, openSync, readFileSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync, writeSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { join } from 'node:path';
-import { parse, parseDocument } from 'yaml';
+import { parseDocument } from 'yaml';
 import { BRAND } from './brand.js';
 import { PolicyFile } from './instance.js';
 import { instanceNameOk } from './instance-name.js';
@@ -23,9 +23,7 @@ import { isRoot, processIdentity, UNKNOWN_IDENTITY, userHomeDir, userPresence, u
 import { readInOwnedDir, replaceInOwnedDir } from './os/root-file.js';
 import { aliasInstance, armedSwitches, clearKillSwitches, ensureSpare, instanceId, killAutoMerge, recordDir, retakeId, sharedWith, sweepOrphanIds } from './policy-kill.js';
 import { decodePolicyValue, HELPER_ONLY, ownCommand, POLICY_ROOT_DIR, POLICY_SET_KEYS, policyRecord, type PolicyRecord, policySetCommand, readPolicyChecked, recordText, sha256, tightenProblem } from './policy-gate.js';
-import { type Limits, LIMITS_PATH, loadLimits, rootInEffect, settingsProblems } from './settings.js';
-import { INTAKE_DEFAULT_CAPS, IntakeConfig, type IntakeCaps } from './intake/report.js';
-import { INTAKE_FILE } from './intake/config.js';
+import { intakeCapsBeside, type Limits, LIMITS_PATH, loadLimits, rootInEffect, settingsProblems } from './settings.js';
 
 const FILE = 'policy.yaml';
 const LOCK_WAIT_MS = 10_000;
@@ -75,19 +73,6 @@ function setIn(o: Record<string, unknown>, path: string[], v: unknown): void {
     at = at[k] as Record<string, unknown>;
   }
   at[path[path.length - 1]!] = v;
-}
-/**
- * The intake caps the engine applies beside root's policy.yaml (#726 round 12): intake.yaml's, read as policy.yaml is
- * read there (never through a link, one name, the coordinator's or root's, size-capped); the engine's defaults when
- * there is none; null when it can't be read or isn't valid, so root can't tell what applies (fail closed).
- */
-function intakeCapsBeside(dir: string, coordUid: number, rootUid: number): IntakeCaps | null {
-  try {
-    const r = IntakeConfig.safeParse(parse(readInOwnedDir(dir, INTAKE_FILE, coordUid, [coordUid, rootUid])));
-    return r.success ? r.data.caps : null;
-  } catch (e) {
-    return (e as NodeJS.ErrnoException).code === 'ENOENT' ? INTAKE_DEFAULT_CAPS : null;
-  }
 }
 const shown = (v: unknown) => (v === undefined ? '(none)' : typeof v === 'object' && v !== null ? JSON.stringify(v) : String(v));
 /** Every place `b` differs from `a`, as `path: b's value`. */

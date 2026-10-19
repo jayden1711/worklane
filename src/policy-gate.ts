@@ -70,6 +70,8 @@ let rootUid = 0;
 export function setPolicyRootUid(uid: number): void {
   rootUid = uid;
 }
+/** That uid, for a check that must read a file as root's helper will (src/settings.ts). */
+export const policyRootUid = (): number => rootUid;
 
 /**
  * The root shell command that makes an instance's policy.yaml root's, keeping its content and showing its keys. A

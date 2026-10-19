@@ -1011,6 +1011,30 @@ test("root's `policy set` on the coordinator's route compares an intake cap with
   assert.equal(setPolicy('pint', 'settings.intake.drafts_per_day', '3', 'wl-pint', m.deps).to, 3, "policy.yaml's own value: still provable");
 });
 
+// Through e386a668 Settings read intake.yaml with the engine's loader (links followed, no size cap) and queued a
+// lowering root's helper then refused ("intake.yaml beside it doesn't load"), for each of these shapes.
+const INTAKE_CAPS = 'version: 1\ncaps: { drafts_per_day: 5, reports_per_sender_per_day: 3, max_usd_per_day: 1 }\n';
+const INTAKE_SHAPES: [string, (dir: string, T: string) => void][] = [
+  ['a symlink', (dir, T) => (writeFileSync(join(T, 'real-intake.yaml'), INTAKE_CAPS, { mode: 0o600 }), symlinkSync(join(T, 'real-intake.yaml'), join(dir, 'intake.yaml')))],
+  ['a dangling symlink', (dir, T) => symlinkSync(join(T, 'no-such-intake.yaml'), join(dir, 'intake.yaml'))],
+  ['a hard link', (dir, T) => (writeFileSync(join(dir, 'intake.yaml'), INTAKE_CAPS, { mode: 0o600 }), linkSync(join(dir, 'intake.yaml'), join(T, 'second-name.yaml')))],
+  ["a file over root's size cap", (dir) => writeFileSync(join(dir, 'intake.yaml'), `${INTAKE_CAPS}${'# padding\n'.repeat(210_000)}`, { mode: 0o600 })],
+];
+for (const [i, [what, make]] of INTAKE_SHAPES.entries()) {
+  test(`on a root policy, Settings reads intake.yaml as root's helper will (no link, one name, root's size cap) before it asks: ${what} is refused up front, naming root's command, and nothing is queued (#726 round 13)`, { skip }, () => {
+    const name = `ish${i}`;
+    const m = machineInstance(name);
+    ownPolicy(name, m.deps);
+    make(m.dir, m.T);
+    const asked: string[][] = [];
+    const request = (args: string[]) => (asked.push(args), String(asked.length));
+    assert.throws(() => asRoot(() => changeSetting({ policyPath: m.file, cfg, eventsDb: join(m.T, 'e.db'), key: 'intake.drafts_per_day', value: 4, by: cfg.project.owners.default, owner: true, request })), new RegExp(`intake\\.drafts_per_day 4: .*intake\\.yaml.*policy set ${name} settings\\.intake\\.drafts_per_day 4`), what);
+    assert.equal(asked.length, 0, `${what}: nothing asked`);
+    // Root's helper route agrees: it would refuse the same change.
+    assert.throws(() => setPolicy(name, 'settings.intake.drafts_per_day', '4', `wl-${name}`, m.deps), /intake\.yaml/, `${what}: root`);
+  });
+}
+
 test("an install root never took over (a laptop, cloud or VM; a machine not taken over yet) also only tightens from the dashboard: each loosening key's raise is refused, naming that install's route; lowering is written (#726 round 11, the owner's decision of 2026-10-19)", { skip }, () => {
   for (const machine of [false, true]) {
     const u = machineInstance(`unr${machine ? 'm' : 'l'}`);
