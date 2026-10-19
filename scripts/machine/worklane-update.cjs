@@ -24,7 +24,8 @@
 //     older fully green commit goes in at once. Otherwise a busy main, whose tip is rarely the batched commit, would keep every batched one waiting.
 // Either way it installs only if:
 //   - every check on it is complete and green, and every required check (updates.json
-//     required_checks) ran and succeeded: a missing, pending, failed or skipped one refuses it;
+//     required_checks) ran and succeeded: a missing, pending, failed or skipped one refuses it (a retired check,
+//     one CI no longer runs at all, isn't waited for when it's missing: RETIRED_CHECKS);
 //   - the machine is quiet: no agent slot or full-run lock is held and no emergency stop is on.
 // Drain: a machine that is never quiet (one instance running long test tiers back to back) would starve updates for
 // good. So once an update has waited updates.json "drain_after_minutes" (default 60) for a busy machine, the updater
@@ -433,7 +434,16 @@ async function chooseCommit(deps, cfg, api, cands, held) {
 
 const GREEN = new Set(['success', 'neutral', 'skipped']);
 /**
- * Every check on the commit complete and green, and every required check present and successful.
+ * Checks the engine's CI no longer runs at all, whose names an existing updates.json may still require (an earlier
+ * UPDATE_DEFAULT_CHECKS listed them): desktop, the desktop window's job, removed with the window (#744). Such a check
+ * with no run on a commit isn't waited for, since no commit will ever get one; one that did run is judged like any
+ * other required check. A fixed list in this installed file, never read from the commit being judged, and it only
+ * ever covers a check of something the updater doesn't build or install (BUILD_SCRIPT never built the window).
+ */
+const RETIRED_CHECKS = Object.freeze(['desktop']);
+/**
+ * Every check on the commit complete and green, and every required check present and successful (a retired one only
+ * when it ran: RETIRED_CHECKS).
  * final: true when waiting can't fix it (failed, skipped required); false when it may (pending, missing).
  * idle: true when a required check hasn't run and every check that is on the commit is complete: nothing in flight
  * will bring it (a slow check that only runs in batches, on a commit with no batch).
@@ -445,7 +455,10 @@ function evaluateChecks(runs, required) {
     const prev = latest.get(r.name);
     if (!prev || (r.started_at || '') > (prev.started_at || '') || ((r.started_at || '') === (prev.started_at || '') && r.id > prev.id)) latest.set(r.name, r);
   }
-  for (const name of required) {
+  const live = required.filter((name) => !RETIRED_CHECKS.includes(name) || latest.has(name));
+  // WHY: a list of retired names alone would otherwise pass on any green commit, with nothing actually required.
+  if (live.length === 0) return { ok: false, final: true, reason: `no required checks configured in updates.json but retired ones (${required.join(', ')}): add the checks to require at a root shell (updates.sh --add-check)` };
+  for (const name of live) {
     const r = latest.get(name);
     if (!r) return { ok: false, final: false, idle: [...latest.values()].every((x) => x.status === 'completed'), reason: `required check "${name}" hasn't run on this commit` };
     if (r.status !== 'completed') return { ok: false, final: false, reason: `required check "${name}" is ${r.status}` };
@@ -1661,5 +1674,5 @@ if (require.main === module) {
     },
   );
 }
-module.exports = { slotPid, drainStep, drainDeadline, drainAfterMs, inFlight, reopen, DRAIN, DRAIN_TTL_MS, DRAIN_INSTALL_TTL_MS, DRAIN_MARGIN_MS, redactDeep, appendLog, sandboxOnTimeout, sandboxCommand, parseSandbox, sandboxVerdict, sandboxWaitMs, verifySandbox, SANDBOX_INCIDENT, SANDBOX_POLL_MS, stuckStep, stuckAlertMs, STUCK_INCIDENT, IDLE_AFTER_MS, journalLine, makeNote, realDeps, chooseCommit, checkRunsOf, firstParentLine, lookbackOf, pendingWaitMs, saveJson, CHECKS_SPACING_MS, VERDICT_TTL_MS, syncHelpers, HELPERS, canaryConfig, canaryCommand, dailyDue, DAY_MS, channelOf, newer, parseTags, newestRelease, verifyRelease, parseInstance, migrateCommand, restoreCommand, parseMigrate, repoFromUrl, fastForward, evaluateChecks, quiet, parseUnits, parseShow, health, redact, buildCommand, binTargets, binProblems, installTree, run, BUILD_SCRIPT, HEALTH_MS, STABLE_MS };
+module.exports = { slotPid, drainStep, drainDeadline, drainAfterMs, inFlight, reopen, DRAIN, DRAIN_TTL_MS, DRAIN_INSTALL_TTL_MS, DRAIN_MARGIN_MS, redactDeep, appendLog, sandboxOnTimeout, sandboxCommand, parseSandbox, sandboxVerdict, sandboxWaitMs, verifySandbox, SANDBOX_INCIDENT, SANDBOX_POLL_MS, stuckStep, stuckAlertMs, STUCK_INCIDENT, IDLE_AFTER_MS, journalLine, makeNote, realDeps, chooseCommit, checkRunsOf, firstParentLine, lookbackOf, pendingWaitMs, saveJson, CHECKS_SPACING_MS, VERDICT_TTL_MS, syncHelpers, HELPERS, canaryConfig, canaryCommand, dailyDue, DAY_MS, channelOf, newer, parseTags, newestRelease, verifyRelease, parseInstance, migrateCommand, restoreCommand, parseMigrate, repoFromUrl, fastForward, evaluateChecks, RETIRED_CHECKS, quiet, parseUnits, parseShow, health, redact, buildCommand, binTargets, binProblems, installTree, run, BUILD_SCRIPT, HEALTH_MS, STABLE_MS };
 Object.assign(module.exports, { SIGNERS_STATE, SIGNERS_INCIDENT, signersDigest, readSignersState, checkSigners, expectSigners, recordSigners, signersHold, acknowledgeSigners, takeAcknowledged, signersChangeText });

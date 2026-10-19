@@ -53,14 +53,12 @@ case ",$o," in *,ro,*) ;; *) echo "/sys/fs/cgroup is not read-only in the broker
 wait_status() { for _ in $(seq 90); do [ "$(sudo jq -r '.id + " " + .state' "$st" 2>/dev/null)" = "$1 running" ] || [ "$(sudo jq -r .id "$st" 2>/dev/null)" != "$1" ] || break; sleep 2; done; sudo jq -c . "$st"; }
 digest() { (cd / && sudo -u "wl-$name" /usr/local/bin/node --input-type=module -e "import {approvalDigest} from '$E/plugins/approval.js'; import {readPreview, recordOf} from '$E/plugins/root-ops.js'; const p = readPreview(process.argv[1], process.argv[2]); console.log(approvalDigest(recordOf(p, ['builder'], {network: [], secrets: []})))" "$name" "$id"); }
 confirm() { printf '%s\n' "$id" | sudo script -qec "bash /opt/worklane/current/scripts/setup/plugins.sh confirm $name $id $1" /dev/null | tail -n 1; }
-# WHY: a failed preview's reason (say "plugin escape has no MCP server kernel", from a fixture older than the step) is
-# only in its unit's journal (worklane-machine starts mcp-preview as worklane-plugin-fetch-<instance>); without this,
-# the step went on to readPreview's misleading "no preview of escape-kernel for ci: fetch it first" (#631).
-preview_done() { [ "$(sudo jq -r '.id + " " + .state' "$st" 2>/dev/null)" = "$1 done" ] && return 0; { sudo journalctl -u "worklane-plugin-fetch-$name.service" --no-pager | tail -n 30 >&2; } || true; echo "the preview of $1 didn't finish: $(sudo jq -c . "$st" 2>/dev/null || echo 'no status')" >&2; return 1; }
+# A failed preview stops here with its real reason, the one check every MCP preview in the job uses (#631, #677).
+. "$(dirname "${BASH_SOURCE[0]}")/preview-done.sh"
 
 # The kernel server: previewed in quarantine, approved (no network, no secrets), then started by the broker.
 sudo -u "wl-$name" sudo -n "$HELPER" mcp-preview "$id" escape kernel && wait_status "$id"
-preview_done "$id"
+preview_done "$name" "$id"
 d="$(digest)"
 sudo -u "wl-$name" sudo -n "$HELPER" mcp-stage "$id" "$d" builder none none
 confirm "$d" | grep -q "confirmed $id for $name"
