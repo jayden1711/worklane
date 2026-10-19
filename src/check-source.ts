@@ -8,11 +8,11 @@
 //      workflow run for the very commit judged, as one of that run's own jobs);
 //   2. else the App GitHub's own branch protection (app_id) or ruleset (integration_id) requires for that name;
 //   3. else none: the check is judged by name, exactly as before pins (the owner's choice, 2026-10-19: an existing
-//      install keeps working), and doctor names it (checkSourceDoctor).
+//      install keeps working), and doctor prints a paste-ready pin block for it (src/check-pin-block.ts).
 // A commit status never satisfies a pin: statuses carry no App. Pinning only ever turns a match into missing: a
 // same-name check that isn't a pass as judged by name (any source) still blocks the pinned one's pass.
 // Gating PRs nobody here wrote is governance mode's job (#704): it refuses to turn on while any required check is
-// unpinned (governanceRefusal). An existing install is protected once its owner pins its checks in config.yaml.
+// unpinned (governanceRefusal). An existing install is protected once its owner pastes doctor's block.
 // Without GitHub (a file backlog: Backlog.checkApps absent) nobody else can post a check, and names match as before.
 // INVARIANT: every judgement (pr-watch.ts readiness and requiredOutcomes, ci-none.ts headChecks, pr-batch.ts mayMerge,
 // fix-forward's checks) takes JudgedChecks, which only PinnedChecks.of makes, so a raw Backlog.checks read can't
@@ -145,17 +145,6 @@ export function unrecorded(required: string[], configured: Record<string, CheckP
 export function governanceRefusal(required: string[], configured: Record<string, CheckPin>): string | null {
   const bare = unrecorded(required, configured);
   return bare.length ? `governance mode needs every required check pinned to its source in config.yaml required_check_sources; not pinned: ${bare.join(', ')}` : null;
-}
-
-/** doctor's line: each required check with no pin in config.yaml (judged by name), and how to pin it. */
-export function checkSourceDoctor(p: { land_mode: string; ci?: string | undefined; required_checks: string[]; required_check_sources: Record<string, CheckPin> }): { level: 'ok' | 'warn'; detail: string } {
-  if (p.land_mode !== 'pr' || p.ci === 'none' || !p.required_checks.length) return { level: 'ok', detail: 'no required GitHub checks to pin' };
-  const bare = unrecorded(p.required_checks, p.required_check_sources);
-  if (!bare.length) return { level: 'ok', detail: `every required check is pinned to its source: ${p.required_checks.join(', ')}` };
-  return {
-    level: 'warn',
-    detail: `no source recorded for ${bare.join(', ')}: each is judged by name (any App or workflow posting that name counts) unless GitHub's branch protection or ruleset names its App. Pin each in config.yaml required_check_sources, e.g. ${JSON.stringify(bare[0])}: { workflow: .github/workflows/<file>.yml } or { app_id: <the App's id> }`,
-  };
 }
 
 /** How long GitHub's answer on which App each check needs is kept before it is asked again. */
