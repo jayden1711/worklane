@@ -63,7 +63,10 @@ CONSOLE_SHELL="$T/libexec/worklane-console-shell" CONSOLE_SUDOERS="$T/sudoers.d/
   for (const f of ['client-secret', 'session-secret']) writeFileSync(join(signin, f), 'x');
   writeFileSync(join(hubState, 'dashboard-token'), 'x');
   const paths = { unit: join(T, 'units', 'worklane-dashboard-hub.service'), shell: join(T, 'libexec', 'worklane-console-shell'), sudoers: join(T, 'sudoers.d', 'worklane-console'), calls, state };
-  const env = { PATH: process.env.PATH ?? '/usr/bin:/bin', HOME: T };
+  // dashboards.sh's mktemp -d goes under the root too, not the machine's /tmp.
+  const tmp = join(T, 'tmp');
+  mkdirSync(tmp);
+  const env = { PATH: process.env.PATH ?? '/usr/bin:/bin', HOME: T, TMPDIR: tmp };
   const run = (args: string[]) => spawnSync('bash', [join(s, 'dashboards.sh'), ...args], { encoding: 'utf8', env, timeout: 60_000 });
   /** A command line as the owner pastes it into a root shell: `sudo bash /opt/<cli>/current/...` runs this root's dashboards.sh. */
   const paste = (command: string) => spawnSync('bash', ['-c', command], { encoding: 'utf8', cwd: T, env: { ...env, PATH: `${join(T, 'cmd-bin')}:${env.PATH}` }, timeout: 60_000 });
