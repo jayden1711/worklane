@@ -2,6 +2,7 @@
 import type { AutomationsPolicy } from '../automations/schema.js';
 import type { Get } from '../automations/github.js';
 import type { IncidentSink } from '../usage-limit.js';
+import type { SlotPathLike } from '../slot-file.js';
 import { spawn } from 'node:child_process';
 import type { Config, ConfigError } from '../config/load.js';
 import { type Backlog, type Issue } from '../backlog/types.js';
@@ -25,6 +26,7 @@ import type { JournalRead } from '../superfan/digest.js';
 import type { Previews } from '../preview/previews.js';
 import { DEFAULT_GENERATED } from '../config/schema.js';
 import type { LockScope } from '../review.js';
+import { shownPath } from '../path-text.js';
 
 export interface CoordinatorDeps {
   cfg: Config;
@@ -37,7 +39,7 @@ export interface CoordinatorDeps {
   instance: string;
   stateDir: string;
   /** Slot directory override (tests). */
-  slotsDir?: string;
+  slotsDir?: SlotPathLike;
   /**
    * Where task files go when agents run as their own user: a directory the agent user can read but not
    * write (group `gid`, 2750; files 0640), outside the worktree. Without it, task files stay in stateDir.
@@ -142,8 +144,13 @@ export interface CoordinatorDeps {
   /**
    * The main watch (src/main-watch.ts): its GitHub calls, and the instance policy's main_watch (auto: on when GitHub
    * doesn't protect the default branch; off). Absent: no watch (no GitHub, e.g. a file backlog).
+   * `engineBot` (#733): the GitHub App's own bot user, which makes this instance's merges: its login (`<slug>[bot]`) and
+   * numeric id, read with the App's credentials (appBotIdentity), never from commit_identity. A merge whose record a
+   * crash cut off counts as the engine's (reconciled) only when GitHub's merged_by is exactly this user. Absent or null
+   * (a token install, the lookup failed, or no GitHub): never, so such a merge stays unaccounted. `engineBotError`: why
+   * the lookup failed at start; the PR watch records once that reconciliation is off until a restart.
    */
-  mainWatch?: { api: MainWatchApi; setting?: () => 'auto' | 'off'; now?: () => number };
+  mainWatch?: { api: MainWatchApi; setting?: () => 'auto' | 'off'; now?: () => number; engineBot?: { login: string; id: number } | null; engineBotError?: string };
   /**
    * Merge posts (src/merge-posts.ts): every merge to the default branch posted in intake.yaml's discord.ops_channel
    * (discord.post_merges). Its GitHub calls. Absent: none (no GitHub, e.g. a file backlog).
@@ -333,7 +340,7 @@ export function evalLines(results: EventPayload<'instructions.eval'>[]): string[
       const what = r.error ? `not evaluated: ${r.error}` : `visible ${score(r.base)} → ${score(r.result)}${r.dropped ? ', **lower**' : ''}${r.incomplete ? ', incomplete (cost cap)' : ''}${changed.length ? `; ${changed.join(', ')}` : ''}`;
       const h = r.held_out;
       const held = r.error || h === undefined ? '' : h === null ? `; held-out: none${r.held_out_error ? ` (${r.held_out_error})` : ''}` : `; held-out ${score(h.base)} → ${score(h.result)}${h.dropped ? ', **lower**' : ''}${h.incomplete ? ', incomplete (cost cap)' : ''}`;
-      return `- ${r.target}: ${what}${held}${r.samples ? `, ${r.samples} sample(s) per case` : ''} (~$${r.cost_usd.toFixed(2)})`;
+      return `- ${shownPath(r.target)}: ${what}${held}${r.samples ? `, ${r.samples} sample(s) per case` : ''} (~$${r.cost_usd.toFixed(2)})`;
     }),
   ];
 }

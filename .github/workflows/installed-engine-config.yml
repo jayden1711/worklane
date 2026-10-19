@@ -1,0 +1,48 @@
+name: installed-engine-config
+# #810: a pull request that changes .worklane/ has its config, as its merge commit carries it, loaded with the engine
+# release this repo's machines run (the pin in scripts/bootstrap.sh on the base, its signed tag verified against the
+# base's .github/release-signers), with that release's own loader and schema. A key that engine refuses fails this
+# check, naming the key and the version (scripts/ci/installed-engine-config.mjs).
+# It fails closed when the version can't be found or its tag doesn't verify. There is no skip: a PR meant to land
+# after an engine upgrade stays a draft until main's pin includes it, then passes on its next push.
+# It runs only on a pull request that changes .worklane/ (the paths filter), so it is in no required list
+# (test/update-checks.test.ts: those hold exactly the checks every PR runs). Making it required is the owner's
+# change: GitHub leaves a required check pending on a PR its paths filter skips, so that change drops the filter
+# (the script itself passes a PR with no .worklane/ change at once) and adds it to .worklane/config.yaml's
+# required_checks and the main ruleset together. Until then this check is advisory: a red run does not block a merge.
+# This file itself runs from the PR's merge commit, as every pull_request workflow does, so a PR can edit it to skip
+# the check; only the step's scripts come from the base. What stops that is .github/** being owner-merged.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - '.worklane/**'
+concurrency:
+  group: installed-engine-config-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+permissions:
+  contents: read
+jobs:
+  installed-engine-config:
+    runs-on: ubuntu-latest
+    steps:
+      # The PR's merge commit and its base (HEAD^1). The PR's config is only data here: it is read with git show.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+      # The base's copy of the check's script (and the scripts it uses) when it has one, so a PR can't loosen the
+      # script it is judged by. Not this workflow file: that is the PR's own (see the header). The engine's tag is
+      # fetched by the script, anonymously: the repository is public.
+      - name: the changed config loads with the installed engine
+        run: |
+          check=scripts/ci/installed-engine-config.mjs
+          if git cat-file -e "HEAD^1:$check" 2>/dev/null; then
+            mkdir -p "$RUNNER_TEMP/base"
+            git archive HEAD^1 scripts | tar -x -C "$RUNNER_TEMP/base"
+            check="$RUNNER_TEMP/base/$check"
+          fi
+          node "$check" --base HEAD^1 --head HEAD

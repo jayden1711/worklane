@@ -816,6 +816,12 @@ export class MainWatch {
     }
     if (s.mode !== 'main_watch') return;
     if (this.deadChecks(s)) writeWatchState(this.d.stateFile, s);
+    // #733: the harness's merge recorded after its commit went pending (a merge.done reconciled after a crash) is still its own.
+    const late = s.pending && !s.pending.facts.harness ? this.d.harnessMerge(s.pending.sha) : null;
+    if (late && s.pending) {
+      s.pending.facts.harness = late;
+      writeWatchState(this.d.stateFile, s);
+    }
     if (!s.pending) {
       // A fetch (git, not the API) at most as often as a call, too.
       if (this.now - this.listedAt < MAIN_WATCH_CALL_MS) return;

@@ -15,8 +15,9 @@ import { redactString } from './events/redact.js';
 import { loadConfig, type Config } from './config/load.js';
 import { hookChecks, type Settings } from './agent-settings.js';
 import { loadFingerprintSets } from './guardrails/context.js';
-import { GIT_HOOK_MARKER, githubRepoOf } from './install.js';
+import { GIT_HOOK_MARKER } from './install.js';
 import { instancesDir, loadInstance, readPolicy } from './instance.js';
+import { githubRepoOf } from './managed-apps.js';
 import { INTAKE_FILE, loadIntakeConfig } from './intake/config.js';
 import { MACHINE_HELPER } from './machine.js';
 import { MACHINE_OWNERS_FILE, readMachineOwners } from './machine-owners.js';
@@ -574,7 +575,7 @@ export const SETUP_STEPS: readonly SetupStep[] = [
     automation: 'git remote add origin https://github.com/<owner>/<name>.git, then git fetch origin',
     detect: (k) => {
       const url = k.p.run('git', ['remote', 'get-url', 'origin'], { cwd: k.c.root });
-      const r = url.status === 0 ? githubRepoOf(url.stdout) : null;
+      const r = url.status === 0 ? githubRepoOf(url.stdout.trim()) : null;
       return r ? ok(`origin is github.com/${r}`) : no(url.status === 0 ? `origin isn't on GitHub (${url.stdout.trim()})` : 'no GitHub origin on this checkout');
     },
   },
@@ -586,7 +587,7 @@ export const SETUP_STEPS: readonly SetupStep[] = [
     modes: ['server'],
     optional: false,
     reach: 'all',
-    today: '`dashboards.sh --setup --public-url <url>` starts the hub in setup mode: open the URL, paste the one-time setup token from the file it names, and make the sign-in App through GitHub\'s manifest flow; setup mode then turns itself off, and `dashboards.sh <name>...` starts the hub with it. With no https origin yet, `dashboards.sh --setup --loopback` serves the same page on 127.0.0.1 only (an ssh tunnel reaches it), and its App step shows Tailscale and HTTPS (screen 7) first. By hand instead: make the App on GitHub, `credentials.sh dashboard-signin`, then `dashboards.sh --client-id <id> --public-url <url> <name>`.',
+    today: '`dashboards.sh --setup --public-url <url>` starts the hub in setup mode: open the URL, paste the one-time setup token from the file it names, and make the sign-in App through GitHub\'s manifest flow; setup mode then turns itself off, and `dashboards.sh <name>...` starts the hub with it. With no https origin yet, `dashboards.sh --setup --loopback` serves the same page on 127.0.0.1 only (an ssh tunnel reaches it), and its App step shows Tailscale and HTTPS (screen 7) first. By hand instead: make the App on GitHub, `credentials.sh dashboard-signin`, then the `dashboards.sh` command it prints (for a hub already set up, the one that keeps its machine devices, `--siri` and `--hooks`).',
     fix: { kind: 'terminal', command: 'sudo bash scripts/setup/dashboards.sh --setup --public-url https://<machine>.<tailnet>.ts.net', why: "root makes the hub's user and its setup-mode service; the page it serves, behind a one-time setup token from a root-only file, makes the sign-in App on GitHub" },
     detect: (k) => {
       const up = k.p.systemUnitActive(HUB_UNIT);

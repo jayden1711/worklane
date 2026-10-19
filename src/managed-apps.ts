@@ -16,26 +16,68 @@
 // INVARIANT: fails closed. No file; one that isn't root's regular file alone (a symlink, another owner, writable by its
 // group or others, too big, unreadable); one not in exactly the script's form; one that doesn't name this instance
 // with this repo; or no telling which repo is the engine (engineRepos): the engine's scope, and every lock applies.
-import { existsSync, readFileSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { instanceNameOk } from './instance-name.js';
 import { readRegularFile } from './os/index.js';
-import { etcPath } from './os/system-paths.js';
+import { SYSTEM_ROOT_VAR, etcPath, systemRootRefusal } from './os/system-paths.js';
 import type { LockScope } from './review.js';
 
 export const MANAGED_APPS_FILE = () => etcPath('managed-apps.json');
 /** The root script that changes it, as a root shell runs it. */
 export const MANAGED_APPS_SCRIPT = 'scripts/setup/managed-apps.sh';
 
-/** A GitHub owner/name, as scripts/setup/lib.sh repo_ok takes it. */
-const REPO = /^[A-Za-z0-9](?:-?[A-Za-z0-9]){0,38}\/[A-Za-z0-9_.-]{1,100}$/;
+/** The test preload's mark (test/isolate.ts ISOLATED): an own property of globalThis, set by code in the process (rootUid). */
+const TEST_PRELOAD = Symbol.for('test-isolation');
 
-/** The instances root names as managed apps, each with its repo; none, with why, when the file can't be trusted. */
-export function readManagedApps(file = MANAGED_APPS_FILE(), rootUid = 0): { apps: Record<string, string>; problem: string | null } {
-  const none = (problem: string | null) => ({ apps: {}, problem });
+/**
+ * The owner root's files must have: uid 0. Only in a test process (the test preload ran in it, and its system root is
+ * honoured: systemRootRefusal) is it this user's, who stands in for root there: root's files are then inside the
+ * test's own system root (etcPath), all of them this user's.
+ * WHY (#747, owner decision 2026-10-18): the tests passed readLockScope another root uid and another file, through a
+ * parameter that any src/ caller could pass too, and that a polluted Object.prototype filled in. There is no such
+ * parameter now, and no variable for it: a polluted Object.prototype can't set an own property of globalThis, and the
+ * engine's package ships no test code (package.json files: dist/src, not dist/test). Only code running in the process
+ * can set the mark: planted src/ code, a dependency, or code an environment variable makes the process load (a
+ * NODE_OPTIONS --import/--require/loader, LD_PRELOAD) or node's own --import names. Such code also needs a system
+ * root of this user's alone with a mark matching its token, both variables, and, under systemd, to delete the systemd
+ * markers. It could as well patch this check or the scope itself, so the mark gives it nothing new.
+ * INVARIANT: 0 in every process where no code set the mark; 0 as root, while a systemd marker is set, or with a system
+ * root that isn't marked (systemRootRefusal), mark or not.
+ */
+function rootUid(): number {
+  const uid = typeof process.getuid === 'function' ? process.getuid() : 0;
+  if (uid === 0 || !Object.hasOwn(globalThis, TEST_PRELOAD) || !process.env[SYSTEM_ROOT_VAR] || systemRootRefusal() !== null) return 0;
+  return uid;
+}
+
+/**
+ * A GitHub owner/name exactly as scripts/setup/lib.sh repo_ok takes it (a test runs both on the same strings): the
+ * owner a GitHub login (github_login_ok: at most 39 letters, digits and single inner hyphens), the name at most 100
+ * letters, digits, '.', '_' and '-', and not '.' or '..'.
+ */
+const REPO = /^(?=[A-Za-z0-9-]{1,39}\/)[A-Za-z0-9](?:-?[A-Za-z0-9])*\/(?!\.\.?$)[A-Za-z0-9_.-]{1,100}$/;
+
+/**
+ * One of root's /etc files, read as every root file is (readRegularFile: O_NOFOLLOW, a regular file, at most 64 KB)
+ * and only when it is root's alone: owned by root (rootUid), not writable by its group or others. Otherwise why not.
+ */
+function readRootFile(file: string): { kind: 'file'; text: string } | { kind: 'missing' } | { kind: 'bad'; problem: string } {
   const f = readRegularFile(file, 64 * 1024);
+  if (f.kind === 'missing') return { kind: 'missing' };
+  if (f.kind !== 'file') return { kind: 'bad', problem: `${file}: ${f.kind}` };
+  if (f.uid !== rootUid() || Number.parseInt(f.mode, 8) & 0o022) return { kind: 'bad', problem: `${file} isn't root's alone (owner uid ${f.uid}, mode ${f.mode})` };
+  return { kind: 'file', text: f.text };
+}
+
+/**
+ * The instances root names as managed apps, each with its repo; none, with why, when the file can't be trusted.
+ * `file` is only for reading another copy in root's form; readLockScope reads root's own (MANAGED_APPS_FILE) alone.
+ */
+export function readManagedApps(file = MANAGED_APPS_FILE()): { apps: Record<string, string>; problem: string | null } {
+  const none = (problem: string | null) => ({ apps: {}, problem });
+  const f = readRootFile(file);
   if (f.kind === 'missing') return none(null);
-  if (f.kind !== 'file') return none(`${file}: ${f.kind}`);
-  if (f.uid !== rootUid || Number.parseInt(f.mode, 8) & 0o022) return none(`${file} isn't root's alone (owner uid ${f.uid}, mode ${f.mode})`);
+  if (f.kind !== 'file') return none(f.problem);
   let v: unknown;
   try {
     v = JSON.parse(f.text);
@@ -49,10 +91,16 @@ export function readManagedApps(file = MANAGED_APPS_FILE(), rootUid = 0): { apps
   return { apps: apps as Record<string, string>, problem: null };
 }
 
-/** A GitHub owner/name from a repo URL (https or ssh; with or without .git or a trailing slash), or null. */
+/**
+ * A GitHub owner/name from a repo URL (https or ssh; with or without .git or a trailing slash), or null.
+ * The one parser (#747): install's origin (gitRemoteRepo) and setup's origin step use it too, each trimming git's
+ * answer first. Not trimmed here: for the engine's repos (engineRepos), a URL it doesn't take means every lock.
+ */
 export function githubRepoOf(url: string): string | null {
   const m = /github\.com[/:]([^/\s]+\/[^/\s]+?)(?:\.git)?\/?$/i.exec(url);
-  return m && REPO.test(m[1]!) ? m[1]! : null;
+  // WHY (owner decision 2026-10-18): GitHub has no repo named '.git' (nor '.' or '..', which REPO refuses), and a
+  // remote URL naming one must not reach install's config or setup's state as a repo.
+  return m && REPO.test(m[1]!) && !/\/\.git$/i.test(m[1]!) ? m[1]! : null;
 }
 
 /** The installed engine's package.json (dist/src/ -> the package root): root installs it, no repo's content says it. */
@@ -67,6 +115,8 @@ const UPDATES_FILE = () => etcPath('updates.json');
  * says so and the caller holds every lock.
  * WHY (#665, owner decision 2026-10-18): a missing updates.json is "can't tell", not "package.json alone tells": the
  * package field is inside the engine's repo, so alone it let the engine's code under another repo name be an app.
+ * WHY (#747): its presence decides whether any managed app can exist, so it is read as root's other files are
+ * (readRootFile): a symlink, a non-regular or oversized file, or one not root's alone is "can't tell" too.
  */
 export function engineRepos(): { repos: string[]; problem: string | null } {
   let pkg: unknown;
@@ -80,10 +130,12 @@ export function engineRepos(): { repos: string[]; problem: string | null } {
   const own = githubRepoOf(url);
   if (!own) return { repos: [], problem: `the engine's package.json names no GitHub repository (${JSON.stringify(url)})` };
   const updates = UPDATES_FILE();
-  if (!existsSync(updates)) return { repos: [own], problem: `${updates} doesn't exist, so the repo the engine updates from can't be told` };
+  const f = readRootFile(updates);
+  if (f.kind === 'missing') return { repos: [own], problem: `${updates} doesn't exist, so the repo the engine updates from can't be told` };
+  if (f.kind !== 'file') return { repos: [own], problem: `${f.problem}, so the repo the engine updates from can't be told` };
   let u: unknown;
   try {
-    u = JSON.parse(readFileSync(updates, 'utf8'));
+    u = JSON.parse(f.text);
   } catch (e) {
     return { repos: [own], problem: `${updates} can't be read as JSON (${(e as Error).message})` };
   }
@@ -97,12 +149,14 @@ export function engineRepos(): { repos: string[]; problem: string | null } {
  * instance with exactly this repo (GitHub names compare without case), and that repo isn't the engine's own
  * (engineRepos); otherwise the engine's. `why` says which, for the coordinator's start-up line.
  * INVARIANT: never throws; any error is the engine's scope.
+ * INVARIANT (#747): it takes the instance and its repo, nothing else: which file, and whose it must be, are root's
+ * (MANAGED_APPS_FILE, rootUid), never a caller's.
  */
-export function readLockScope(instance: string, repo: string, o: { file?: string; rootUid?: number } = {}): { scope: LockScope; why: string } {
+export function readLockScope(instance: string, repo: string): { scope: LockScope; why: string } {
   const engine = (why: string) => ({ scope: 'engine' as const, why: `every self-modification lock applies: ${why}` });
   try {
-    const file = o.file ?? MANAGED_APPS_FILE();
-    const { apps, problem } = readManagedApps(file, o.rootUid ?? 0);
+    const file = MANAGED_APPS_FILE();
+    const { apps, problem } = readManagedApps(file);
     if (problem) return engine(problem);
     const named = Object.hasOwn(apps, instance) ? apps[instance] : undefined;
     if (named === undefined) return engine(`${file} doesn't name instance ${instance} as a managed app`);

@@ -174,8 +174,10 @@ answers aloud at a viewer's level, with a per-device token an owner makes in Set
 A machine change from the page (below) must come from one of the machine devices: the Tailscale devices the owner lists in the hub's unit, as root on the machine:
 
 ```bash
-sudo bash scripts/setup/dashboards.sh --machine-devices tag:owner-laptop,my-phone --client-id <the App's client id> --public-url https://<machine>.<tailnet>.ts.net <name> [<name>...]
+sudo bash scripts/setup/dashboards.sh --machine-devices tag:owner-laptop,my-phone --client-id <the App's client id> --public-url https://<machine>.<tailnet>.ts.net [--siri if the hub's unit has --siri-port] [--hooks if it has --hooks-port] <name> [<name>...]
 ```
+
+On a hub already set up, keep `--siri` and `--hooks` when its unit (`/etc/systemd/system/worklane-dashboard-hub.service`) has `--siri-port` and `--hooks-port`: leaving one out turns that gateway off.
 
 `--machine-devices` takes Tailscale tags (`tag:...`) and/or MagicDNS node names, comma-separated. Prefer tags that only you can assign in your tailnet policy, because a node can be renamed. The list lives in the hub's systemd unit on the machine, never in a repository. With no list, every device is refused, and only the break-glass may change the machine. The hub keeps its full sandbox (`NoNewPrivileges`, `ProtectSystem=strict`, `ProtectHome=read-only`, `PrivateTmp`) either way. Add project, a rerun through Tailscale setup and instance removal keep the list as the hub's unit has it.
 
@@ -206,7 +208,7 @@ Leaving out `--siri` or `--hooks` that the unit has turns that gateway off (`das
 The machine itself (the agent and test-run slot caps, engine updates) belongs to its machine owners, a list of GitHub logins, not to each instance's owners:
 
 ```bash
-sudo bash scripts/setup/dashboards.sh --machine-owner <login>[,<login>...] [--machine-devices ...] --client-id <id> --public-url https://<machine>.<tailnet>.ts.net <name> [<name>...]
+sudo bash scripts/setup/dashboards.sh --machine-owner <login>[,<login>...] [--machine-devices <the hub unit's, if it has one>] --client-id <id> --public-url https://<machine>.<tailnet>.ts.net [--siri if the hub's unit has --siri-port] [--hooks if it has --hooks-port] <name> [<name>...]
 ```
 
 The list goes to `/etc/worklane/machine-owners.json` (`{"owners": ["<login>", ...]}`, root:root 0644; `src/machine-owners.ts`). A rerun without `--machine-owner` keeps it. A machine change from the dashboard (Settings, or a root step) needs all of:
@@ -295,7 +297,13 @@ It's visible only to machine owners: the server sends everyone else none of its 
 | Install Tailscale | `tailscale install` | Tailscale's apt repository for this distribution, its signing key checked against the fingerprint pinned in `scripts/setup/lib.sh`, then the pinned version of the package. No install script. A tailscale already there is left alone. | `sudo bash scripts/setup/tailscale.sh install` |
 | Log this machine in | `tailscale up` | `tailscale up` with no auth key. It prints a login link and waits 10 minutes. | `sudo bash scripts/setup/tailscale.sh up` |
 | Put the hub on HTTPS | `tailscale serve` | `tailscale serve --bg --https=443 http://127.0.0.1:4399`, and nothing else. | `sudo bash scripts/setup/tailscale.sh serve` |
-| Set the hub's public URL | `tailscale public-url` | `dashboards.sh` with the hub's own settings and `--public-url https://<this machine's tailnet name>`. | `sudo bash scripts/setup/tailscale.sh public-url`, or `sudo bash scripts/setup/dashboards.sh --client-id <id> --public-url https://<name> <instance>...` |
+| Set the hub's public URL | `tailscale public-url` | `dashboards.sh` with the hub's own settings and `--public-url https://<this machine's tailnet name>`. | `sudo bash scripts/setup/tailscale.sh public-url`, or `dashboards.sh` by hand (below) |
+
+By hand, the URL step is dashboards.sh with every setting the hub's unit has, so that it turns nothing off: leaving out `--siri` or `--hooks` drops that gateway's port and its token's ACL. The screen shows the exact command, built from the hub's unit (`/etc/systemd/system/worklane-dashboard-hub.service`) with every value quoted, when it can read the unit exactly; otherwise this one, with each `<...>` and `[...]` filled in from the unit's `ExecStart`:
+
+```
+sudo bash /opt/worklane/current/scripts/setup/dashboards.sh [--machine-devices <the hub unit's --console-devices or --machine-devices, if it has one>] --client-id <its --client-id> --public-url https://<name> [--siri if it has --siri-port] [--hooks if it has --hooks-port] <each instance name in its --hub>...
+```
 
 The dashboard never runs any of it: the coordinator runs the machine helper, which takes exactly those four commands (two fixed words each; no auth key, flag, URL or port can be passed) and starts the step as its own unit, `worklane-tailscale.service`. The card follows the step from the script's progress file, `/var/lib/worklane/tailscale/steps.jsonl`.
 

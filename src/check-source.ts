@@ -144,16 +144,24 @@ function worst<C extends Pick<CommitCheck, 'id' | 'status' | 'conclusion'>>(bad:
  *   workflow run is newer) must pass. One file never supersedes another, and a later re-run that failed blocks.
  * - The App group: its latest check run of the name on the head (the highest id) decides, in whatever check suite: a
  *   later pipeline or re-run of that App supersedes its earlier ones (the owner's decision, round 8).
+ * - An Actions run whose workflow runs weren't read at all (`workflow` absent: a read made as for a bare name) can't
+ *   be put in a file's group, and never in the App group (round 9: that would let `evil.yml` supersede `ci.yml`): the
+ *   verdict waits on it (reported as still running), never a pass.
  * Returns the run that decides: a run that isn't a pass (worst), else the latest of all; undefined when there is none.
  */
-export function ownVerdict<C extends Pick<CommitCheck, 'id' | 'workflow' | 'status' | 'conclusion'>>(own: readonly C[]): C | undefined {
+export function ownVerdict<C extends Pick<CommitCheck, 'id' | 'workflow' | 'status' | 'conclusion' | 'app'>>(own: readonly C[]): C | undefined {
   const groups = new Map<string, C[]>();
+  const bad: C[] = [];
   own.forEach((c, i) => {
-    const key = c.workflow ? `file ${c.workflow.path}` : c.workflow === null ? `unread ${c.id ?? `#${i}`}` : 'app';
+    if (c.app === ACTIONS_APP_ID && c.workflow === undefined) {
+      bad.push({ ...c, status: 'in_progress', conclusion: null });
+      return;
+    }
+    // Only a run of an App that isn't Actions is in the App group.
+    const key = c.workflow ? `file ${c.workflow.path}` : c.app === ACTIONS_APP_ID || c.workflow === null ? `unread ${c.id ?? `#${i}`}` : 'app';
     groups.set(key, [...(groups.get(key) ?? []), c]);
   });
   const ok = (c: C) => c.status === 'completed' && c.conclusion === 'success';
-  const bad: C[] = [];
   for (const [key, g] of groups) {
     const newest = [...g].sort((a, b) => (b.id ?? -1) - (a.id ?? -1))[0]!;
     const decide = key === 'app' ? [newest] : [latestOwn(g)!, newest];
@@ -281,7 +289,9 @@ export class PinnedChecks {
     // #727: the reads a pinned check needs (more pages, failing closed) only when a required check is pinned, or may
     // be (GitHub's rules not read yet). With every required check bare, exactly main's reads, so main's verdict.
     const required = this.d.required?.();
-    const pinned = !required || apps === null || required.some((n) => pinOf(n, configured, apps) !== null);
+    // Round 9: any pin at all (config.yaml's, or an App GitHub's rules name for any check), not only a required name's,
+    // so a judge of a name outside `required` (fix-forward's episode names) still gets the pinned reads.
+    const pinned = !required || apps === null || Object.keys(configured).length > 0 || Object.keys(apps).length > 0 || required.some((n) => pinOf(n, configured, apps) !== null);
     const all = await this.d.backlog.checks(sha, { pinned });
     return this.withLocal(pinnedChecks(all, { configured, github: apps, repo: this.d.repo(), sha }), sha);
   }

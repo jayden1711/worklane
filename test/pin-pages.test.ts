@@ -7,7 +7,7 @@ import { GitHubBacklog } from '../src/backlog/github.js';
 import { PinnedChecks } from '../src/check-source.js';
 import { GitHubMainWatchApi } from '../src/github/main-watch-api.js';
 import { TooManyPages } from '../src/main-watch.js';
-import { readiness } from '../src/pr-watch.js';
+import { readiness, requiredOutcomes } from '../src/pr-watch.js';
 
 const HEAD = 'a'.repeat(40);
 const PINNED_APP = 1111;
@@ -129,4 +129,78 @@ test("the main watch's check runs: nothing pinned, the first page only, as main;
   assert.ok(e instanceof TooManyPages, String(e));
   assert.equal(e.read.length, 1000);
   assert.equal(e.read.filter((r) => 'extra' in r).length, 900, 'pages 2 to 10 are extra: judged by name, only page 1, as main read it');
+});
+
+test("round 9: a rate-limited rules read never drops a ruleset's pin: after an answer the pin is kept, and before one the rules stay unknown", async () => {
+  // The ruleset pins `ci` to App 1111; the commit carries only App 2222's passing `ci`. `rules` answers in turn.
+  const ruleset = json([{ type: 'required_status_checks', parameters: { required_status_checks: [{ context: 'ci', integration_id: PINNED_APP }] } }]);
+  const verdicts = async (answers: (() => Response)[]) => {
+    let n = 0;
+    let clock = 0;
+    const f = (async (url: string) => {
+      const u = new URL(url);
+      if (u.pathname === `/repos/o/r/commits/${HEAD}/check-runs`) return json({ check_runs: [run(1, 'ci', OTHER_APP)] });
+      if (u.pathname === `/repos/o/r/commits/${HEAD}/status`) return json({ statuses: [] });
+      if (u.pathname === '/repos/o/r/branches/main') return json({ name: 'main', protection: { enabled: false } });
+      if (u.pathname === '/repos/o/r/rules/branches/main') return answers[Math.min(n++, answers.length - 1)]!();
+      return json({ message: 'Not Found' }, 404);
+    }) as typeof fetch;
+    const t = `tok-${++token}`;
+    const pinned = new PinnedChecks({ backlog: new GitHubBacklog('o/r', () => t, f), branch: () => 'main', repo: () => 'o/r', configured: () => ({}), required: () => ['ci'], now: () => clock });
+    const out: string[] = [];
+    for (let i = 0; i < answers.length; i++) {
+      try {
+        const r = readiness({ required: ['ci'], checks: await pinned.of(HEAD), head: HEAD, evaluated: { head: HEAD, approved: true } });
+        out.push(r.ready ? 'ready' : r.reasons.join('; '));
+      } catch {
+        out.push('waits'); // a read threw (a secondary limit pauses every call on the token): not ready this tick
+      }
+      clock += 11 * 60_000; // past the 10-minute cache: GitHub's rules are asked again
+    }
+    return out;
+  };
+  const secondary = () => json({ message: 'You have exceeded a secondary rate limit' }, 403);
+  // Answered, then rate-limited: the pin is kept, so App 2222's `ci` is still missing (ff971e5e: READY).
+  assert.deepEqual(await verdicts([() => ruleset.clone(), RATE_LIMITED]), ['ci: missing', 'ci: missing']);
+  // Answered, then a secondary limit: never READY (ff971e5e: READY).
+  assert.ok(!(await verdicts([() => ruleset.clone(), secondary])).includes('ready'));
+  // Rate-limited or secondary from the start: the rules are unknown, so `ci` is missing or the read waits (ff971e5e: READY).
+  assert.deepEqual(await verdicts([RATE_LIMITED]), ['ci: missing']);
+  assert.ok(!(await verdicts([secondary])).includes('ready'));
+  // A 403 for permission or a 404 on the first page: no rulesets (GitHub Free), as before: by name, READY.
+  assert.deepEqual(await verdicts([NO_ACCESS]), ['ready']);
+  assert.deepEqual(await verdicts([() => json({ message: 'Not Found' }, 404)]), ['ready']);
+});
+
+test("round 9: an Actions-App pin whose workflow runs weren't read never passes: ci.yml failed, then evil.yml passed, judged outside `required` (fix-forward's episode names)", async () => {
+  // GitHub's rules pin `ci` to GitHub Actions (15368). `required` doesn't name `ci` (as when required_checks dropped it,
+  // and fix-forward judges the names its episode started with): ff971e5e read as for a bare name, so the two runs fell
+  // into one App group and evil.yml's later pass decided.
+  const ruleset = () => json([{ type: 'required_status_checks', parameters: { required_status_checks: [{ context: 'ci', integration_id: 15368 }] } }]);
+  const actions = (id: number, suite: number, conclusion: string) => ({ id, name: 'ci', status: 'completed', conclusion, html_url: `https://github.com/o/r/actions/runs/${suite * 10}/job/${id}`, app: { id: 15368, slug: 'github-actions' }, check_suite: { id: suite } });
+  const wf = (suite: number, path: string) => ({ id: suite * 10, html_url: `https://github.com/o/r/actions/runs/${suite * 10}`, check_suite_id: suite, path, head_sha: HEAD, repository: { full_name: 'o/r' } });
+  const f = (async (url: string) => {
+    const u = new URL(url);
+    if (u.pathname === `/repos/o/r/commits/${HEAD}/check-runs`) return json({ check_runs: [actions(1, 10, 'failure'), actions(2, 20, 'success')] });
+    if (u.pathname === `/repos/o/r/commits/${HEAD}/status`) return json({ statuses: [] });
+    if (u.pathname === '/repos/o/r/actions/runs') return json({ workflow_runs: [wf(10, '.github/workflows/ci.yml'), wf(20, '.github/workflows/evil.yml')] });
+    if (u.pathname === '/repos/o/r/branches/main') return json({ name: 'main', protection: { enabled: false } });
+    if (u.pathname === '/repos/o/r/rules/branches/main') return ruleset();
+    return json({ message: 'Not Found' }, 404);
+  }) as typeof fetch;
+  const t = `tok-${++token}`;
+  const pinned = new PinnedChecks({ backlog: new GitHubBacklog('o/r', () => t, f), branch: () => 'main', repo: () => 'o/r', configured: () => ({}), required: () => ['lint'] });
+  // The judgement fix-forward makes: requiredOutcomes(ep.started.failed, checks).
+  assert.deepEqual(requiredOutcomes(['ci'], await pinned.of(HEAD)).map((c) => c.outcome), ['fail'], 'ci.yml failed: blocked (ff971e5e: pass)');
+});
+
+test("round 9: ownVerdict never puts an Actions run in the App group: one whose workflow runs weren't read waits", async () => {
+  const { ownVerdict } = await import('../src/check-source.js');
+  const actions = (id: number, conclusion: string) => ({ id, name: 'ci', source: 'check_run' as const, status: 'completed', conclusion, app: 15368 });
+  // No `workflow` at all (not read): its file is unknown, so whether a later run supersedes can't be told: it waits,
+  // never a pass, even when every run passed.
+  assert.equal(ownVerdict([actions(1, 'failure'), actions(2, 'success')])?.status, 'in_progress');
+  assert.equal(ownVerdict([actions(2, 'success')])?.status, 'in_progress', 'waits');
+  // A non-Actions App's runs are its App group: the latest decides (the owner's decision).
+  assert.equal(ownVerdict([{ ...actions(1, 'failure'), app: 1111 }, { ...actions(2, 'success'), app: 1111 }])?.conclusion, 'success');
 });

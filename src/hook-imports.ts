@@ -62,6 +62,7 @@ export const HOOK_IMPORTS: readonly string[] = [
   'src/routing.ts',
   'src/run-feed.ts',
   'src/run-record.ts',
+  'src/slot-file.ts',
   'src/stage-label.ts',
   'src/stuck.ts',
   'src/tool-path.ts',
