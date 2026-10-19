@@ -1,12 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { BRAND } from '../src/brand.js';
 import { MANAGED_APPS_FILE, engineRepos, githubRepoOf, readLockScope, readManagedApps } from '../src/managed-apps.js';
-import { etcPath } from '../src/os/system-paths.js';
+import { SYSTEM_ROOT_VAR, TEST_MACHINE_VAR, TEST_MARK_FILE, TEST_RUN_VAR, TEST_TOKEN_VAR, etcPath } from '../src/os/system-paths.js';
 import { lockScopeOf } from '../src/coordinator/shared.js';
 import { evalLevel } from '../src/coordinator/eval-routing.js';
 import { ReviewConfig } from '../src/config/schema.js';
@@ -24,7 +24,28 @@ const rootFile = (body: string, mode = 0o644) => {
   chmodSync(f, mode);
   return f;
 };
-const scope = (file: string, instance = 'shop', repo = 'example-org/shop') => readLockScope(instance, repo, { file, rootUid: me });
+/**
+ * Runs `fn` with `file` (a file, a symlink or a directory, as made here) as root's own managed apps file, under the
+ * isolate's etc root, then takes it away. readLockScope reads that one alone (#747): it takes no file.
+ */
+function asRootsFile<T>(file: string, fn: () => T): T {
+  const apps = MANAGED_APPS_FILE();
+  mkdirSync(dirname(apps), { recursive: true });
+  const st = lstatSync(file, { throwIfNoEntry: false });
+  if (st?.isSymbolicLink()) symlinkSync(readlinkSync(file), apps);
+  else if (st?.isDirectory()) mkdirSync(apps);
+  else if (st) {
+    writeFileSync(apps, readFileSync(file));
+    chmodSync(apps, st.mode & 0o777);
+  }
+  try {
+    return fn();
+  } finally {
+    rmSync(apps, { recursive: true, force: true });
+  }
+}
+/** The lock scope with `file` as root's file. In a test process, this user stands in for root (managed-apps.ts rootUid). */
+const scope = (file: string, instance = 'shop', repo = 'example-org/shop') => asRootsFile(file, () => readLockScope(instance, repo));
 /** Root's updates.json as scripts/setup/updates.sh writes it: the repo the engine on this machine updates from. */
 const ENGINE_UPDATES = `${JSON.stringify({ enabled: true, repo_url: 'https://github.com/example-org/engine.git', branch: 'main' })}\n`;
 /** Runs `fn` with `body` as root's updates.json (under the isolate's etc root), then takes it away again. */
@@ -49,7 +70,7 @@ test("root's managed apps file is the engine's /etc path, and the setup scripts 
 
 test("a managed app only where root's file names the instance with exactly its repo; anything else is the engine's (every lock)", { skip: !posix && 'owners and modes' }, () => {
   const good = rootFile('{"version":1,"apps":{"shop":"example-org/shop","docs-site":"example-org/site"}}\n');
-  assert.deepEqual(readManagedApps(good, me), { apps: { shop: 'example-org/shop', 'docs-site': 'example-org/site' }, problem: null });
+  assert.deepEqual(readManagedApps(good), { apps: { shop: 'example-org/shop', 'docs-site': 'example-org/site' }, problem: null });
   // Root's updates.json says which repo is the engine; only then is any repo an app.
   withUpdates(ENGINE_UPDATES, () => {
     assert.equal(scope(good).scope, 'managed-app');
@@ -62,7 +83,7 @@ test("a managed app only where root's file names the instance with exactly its r
   assert.equal(scope(good, 'constructor').scope, 'engine', 'only its own names');
   // No file: the engine's, and that's not a problem with the file.
   const none = join(dir(), 'managed-apps.json');
-  assert.deepEqual(readManagedApps(none, me), { apps: {}, problem: null });
+  assert.deepEqual(readManagedApps(none), { apps: {}, problem: null });
   assert.equal(scope(none).scope, 'engine');
 });
 
@@ -87,15 +108,14 @@ test("a managed apps file root can't vouch for, or not in the script's form, nam
   mkdirSync(folder);
   cases.push(['a directory', folder, /not-file|missing/]);
   for (const [what, file, why] of cases) {
-    const r = readManagedApps(file, me);
+    const r = readManagedApps(file);
     assert.deepEqual(r.apps, {}, what);
     assert.match(r.problem ?? '', why, what);
     const s = scope(file);
     assert.equal(s.scope, 'engine', what);
     assert.match(s.why, /^every self-modification lock applies/, what);
   }
-  // A file this user owns is not root's: as root's file, it names nothing.
-  if (me !== 0) assert.equal(readLockScope('shop', 'example-org/shop', { file: rootFile(body), rootUid: 0 }).scope, 'engine');
+  // A file this user owns, outside a test process, is not root's: see "outside a test process" below.
 });
 
 // WHY (#747): the engine's repo pattern said it took a repo "as lib.sh repo_ok takes it", but it took '.', '..' and
@@ -111,7 +131,7 @@ test("root's file takes exactly the repos lib.sh repo_ok takes", { skip: !posix 
   for (const repo of repos) {
     const sh = spawnSync('bash', ['-c', 'source "$1"; repo_ok "$2"', '_', join(setup, 'lib.sh'), repo], { encoding: 'utf8', env: { PATH: '/usr/bin:/bin' } });
     assert.ok(sh.status === 0 || sh.status === 1, `${repo}: ${sh.stderr}`);
-    const read = readManagedApps(rootFile(`${JSON.stringify({ version: 1, apps: { shop: repo } })}\n`), me);
+    const read = readManagedApps(rootFile(`${JSON.stringify({ version: 1, apps: { shop: repo } })}\n`));
     assert.equal(read.problem === null, sh.status === 0, `${repo}: repo_ok ${sh.status === 0 ? 'takes' : 'refuses'} it; the engine ${read.problem ?? 'takes it'}`);
   }
 });
@@ -124,12 +144,12 @@ test("the engine's own repo is never a managed app, whatever root's file says: t
   const own = githubRepoOf(pkgUrl);
   assert.ok(own, `the engine's package.json names its GitHub repo: ${pkgUrl}`);
   for (const repo of [own, own.toUpperCase()]) {
-    const s = withUpdates(ENGINE_UPDATES, () => readLockScope('engine', repo, { file: naming('engine', repo), rootUid: me }));
+    const s = withUpdates(ENGINE_UPDATES, () => scope(naming('engine', repo), 'engine', repo));
     assert.equal(s.scope, 'engine', repo);
     assert.match(s.why, /is the engine's own repo/, repo);
   }
   // No updates.json: which repo the engine updates from can't be told, so no repo is an app (every lock applies).
-  assert.match(engineRepos(me).problem ?? '', /updates\.json doesn't exist/);
+  assert.match(engineRepos().problem ?? '', /updates\.json doesn't exist/);
   const noUpdates = scope(naming('shop', 'example-org/shop'));
   assert.equal(noUpdates.scope, 'engine');
   assert.match(noUpdates.why, /which repo is the engine can't be told: .*updates\.json doesn't exist/);
@@ -139,8 +159,8 @@ test("the engine's own repo is never a managed app, whatever root's file says: t
     // The repo root's updater follows, in an ssh URL with another case.
     writeFileSync(updates, `${JSON.stringify({ enabled: true, repo_url: 'ssh://github.com/Example-Org/Engine.git' })}\n`);
     chmodSync(updates, 0o644);
-    assert.deepEqual(engineRepos(me), { repos: [own, 'Example-Org/Engine'], problem: null });
-    const e = readLockScope('engine', 'example-org/engine', { file: naming('engine', 'example-org/engine'), rootUid: me });
+    assert.deepEqual(engineRepos(), { repos: [own, 'Example-Org/Engine'], problem: null });
+    const e = scope(naming('engine', 'example-org/engine'), 'engine', 'example-org/engine');
     assert.equal(e.scope, 'engine');
     assert.match(e.why, /example-org\/engine is the engine's own repo/);
     assert.equal(scope(naming('shop', 'example-org/shop')).scope, 'managed-app', 'another repo is still an app');
@@ -166,11 +186,11 @@ test("the engine's own repo is never a managed app, whatever root's file says: t
 test("no updates.json: the engine's code under another repo name is never a managed app, every lock applies", { skip: !posix && 'owners and modes' }, () => {
   assert.equal(existsSync(etcPath('updates.json')), false, 'root has no updates.json here');
   const fork = rootFile(`${JSON.stringify({ version: 1, apps: { fork: 'someone/engine-fork' } })}\n`);
-  const s = readLockScope('fork', 'someone/engine-fork', { file: fork, rootUid: me });
+  const s = scope(fork, 'fork', 'someone/engine-fork');
   assert.equal(s.scope, 'engine', s.why);
   assert.match(s.why, /^every self-modification lock applies: which repo is the engine can't be told: .*updates\.json doesn't exist/);
   // The same root file, once root's updates.json names the engine's repo: an app. Only the missing file held the locks.
-  withUpdates(ENGINE_UPDATES, () => assert.equal(readLockScope('fork', 'someone/engine-fork', { file: fork, rootUid: me }).scope, 'managed-app'));
+  withUpdates(ENGINE_UPDATES, () => assert.equal(scope(fork, 'fork', 'someone/engine-fork').scope, 'managed-app'));
 });
 
 // WHY (#747): updates.json's presence decides whether any managed app can exist, but it was read with existsSync and
@@ -193,25 +213,82 @@ test("an updates.json root can't vouch for (a symlink, not a regular file, too b
   for (const [what, make, why] of cases) {
     make();
     try {
-      const e = engineRepos(me);
+      const e = engineRepos();
       assert.match(e.problem ?? '', why, what);
       assert.match(e.problem ?? '', /so the repo the engine updates from can't be told/, what);
-      const s = readLockScope('shop', 'example-org/shop', { file: app, rootUid: me });
+      const s = scope(app);
       assert.equal(s.scope, 'engine', what);
       assert.match(s.why, /which repo is the engine can't be told/, what);
     } finally {
       rmSync(updates, { recursive: true, force: true });
     }
   }
-  // Another owner's: as root's, it names nothing (this user stands in for someone other than root).
-  if (me !== 0) {
-    withUpdates(ENGINE_UPDATES, () => {
-      assert.match(engineRepos(0).problem ?? '', /isn't root's alone \(owner uid \d+, mode 0644\)/);
-      assert.equal(readLockScope('shop', 'example-org/shop', { file: rootFile(readFileSync(app, 'utf8')), rootUid: 0 }).scope, 'engine');
-    });
-  }
+  // Another owner's (this user's, outside a test process): see "outside a test process" below.
   // The same root file with root's own updates.json: an app. Only the file root couldn't vouch for held the locks.
-  withUpdates(ENGINE_UPDATES, () => assert.equal(readLockScope('shop', 'example-org/shop', { file: app, rootUid: me }).scope, 'managed-app'));
+  withUpdates(ENGINE_UPDATES, () => assert.equal(scope(app).scope, 'managed-app'));
+});
+
+// WHY (#747, owner decision 2026-10-18): readLockScope took a third argument, for the tests, with another file and
+// another root uid. Any src/ caller could pass it, and a polluted Object.prototype filled it in for the plain
+// two-argument call. It takes the instance and its repo and nothing else: root's file is MANAGED_APPS_FILE, and root
+// is uid 0 everywhere but a process the test preload ran in, whose system root is honoured (rootUid).
+test("readLockScope takes the instance and its repo, nothing else: Object.prototype can't hand it another file or root", { skip: !posix && 'owners and modes' }, () => {
+  assert.equal(readLockScope.length, 2);
+  // Elsewhere, a file this user owns that names the app: what the old third argument's `file` could point at.
+  const elsewhere = rootFile(`${JSON.stringify({ version: 1, apps: { shop: 'example-org/shop' } })}\n`);
+  withUpdates(ENGINE_UPDATES, () => {
+    assert.equal(existsSync(MANAGED_APPS_FILE()), false, 'root has no managed apps file here');
+    const clean = readLockScope('shop', 'example-org/shop');
+    assert.equal(clean.scope, 'engine');
+    assert.match(clean.why, /doesn't name instance shop/);
+    const proto = Object.prototype as Record<string, unknown>;
+    proto.file = elsewhere;
+    proto.rootUid = me;
+    try {
+      assert.deepEqual(readLockScope('shop', 'example-org/shop'), clean, 'the same answer, polluted or not');
+    } finally {
+      delete proto.file;
+      delete proto.rootUid;
+    }
+  });
+});
+
+// The other side of rootUid (#747): outside a test process, root is uid 0, whatever the environment says. A node
+// process the test preload didn't run in gets every variable the preload sets, a system root with this run's mark,
+// and a polluted Object.prototype (the preload's own mark among it), and still holds this user's files as not root's.
+test("outside a test process, root's files must be uid 0's, whatever the environment: this user's are refused", { skip: (!posix && 'owners and modes') || (me === 0 && 'runs as root') }, () => {
+  const machine = dir();
+  const root = join(machine, 'root');
+  mkdirSync(root, { mode: 0o700 });
+  const token = 'a'.repeat(64);
+  writeFileSync(join(root, TEST_MARK_FILE), `${token}\n`, { mode: 0o600 });
+  // Root's two files, as the scripts write them, but this user's: what a test process takes as root's.
+  const etc = join(root, onRealMachine(dirname(MANAGED_APPS_FILE())));
+  mkdirSync(etc, { recursive: true });
+  for (const [name, body] of [['managed-apps.json', `${JSON.stringify({ version: 1, apps: { shop: 'example-org/shop' } })}\n`], ['updates.json', ENGINE_UPDATES]]) {
+    writeFileSync(join(etc, name!), body!, { mode: 0o644 });
+    chmodSync(join(etc, name!), 0o644);
+  }
+  const elsewhere = rootFile(`${JSON.stringify({ version: 1, apps: { shop: 'example-org/shop' } })}\n`);
+  const child = [
+    'const m = await import(process.argv[1]);',
+    'const p = Object.prototype;',
+    "p.file = process.argv[2]; p.rootUid = Number(process.argv[3]); p[Symbol.for('test-isolation')] = 'x';",
+    "console.log(JSON.stringify({ scope: m.readLockScope('shop', 'example-org/shop'), apps: m.readManagedApps(), engine: m.engineRepos(), file: m.MANAGED_APPS_FILE() }));",
+  ].join('\n');
+  const env: NodeJS.ProcessEnv = { PATH: process.env.PATH, HOME: join(machine, 'home'), [SYSTEM_ROOT_VAR]: root, [TEST_TOKEN_VAR]: token, [TEST_MACHINE_VAR]: machine, [TEST_RUN_VAR]: '1' };
+  const r = spawnSync(process.execPath, ['--input-type=module', '-e', child, new URL('../src/managed-apps.js', import.meta.url).href, elsewhere, String(me)], { encoding: 'utf8', env });
+  assert.equal(r.status, 0, r.stderr);
+  const out = JSON.parse(r.stdout) as { scope: { scope: string; why: string }; apps: { problem: string | null }; engine: { problem: string | null }; file: string };
+  // It read the marked root's files (no machine's own), and took neither as root's.
+  assert.equal(out.file, join(etc, 'managed-apps.json'));
+  const notRoots = new RegExp(`isn't root's alone \\(owner uid ${me}, mode 0644\\)`);
+  assert.match(out.apps.problem ?? '', notRoots);
+  assert.match(out.engine.problem ?? '', notRoots);
+  assert.equal(out.scope.scope, 'engine', out.scope.why);
+  assert.match(out.scope.why, notRoots);
+  // In this test process (the preload ran here), the same files in the same form are root's: an app.
+  withUpdates(ENGINE_UPDATES, () => assert.equal(scope(join(etc, 'managed-apps.json')).scope, 'managed-app'));
 });
 
 // WHY (#747): install.ts and managed-apps.ts each had a githubRepoOf, and they disagreed: install's refused a dot in
@@ -255,11 +332,18 @@ test('one githubRepoOf: install\'s origin, setup\'s origin step and the engine\'
   }
 });
 
-test("readLockScope never throws: a read that fails is the engine's scope, so the coordinator's start-up line can't crash", { skip: process.platform !== 'linux' && '/proc/self/mem' }, () => {
-  // /proc/self/mem: this user's regular file, 0600, that open and fstat accept and whose read at offset 0 fails (EIO).
-  const s = readLockScope('shop', 'example-org/shop', { file: '/proc/self/mem', rootUid: me });
+test("readLockScope never throws: a read that fails is the engine's scope, so the coordinator's start-up line can't crash", () => {
+  // A system root whose mark no longer matches: root's file's path itself throws (systemPath, SystemRootRefused).
+  const token = process.env[TEST_TOKEN_VAR];
+  process.env[TEST_TOKEN_VAR] = '0'.repeat(64);
+  let s: ReturnType<typeof readLockScope>;
+  try {
+    s = readLockScope('shop', 'example-org/shop');
+  } finally {
+    process.env[TEST_TOKEN_VAR] = token;
+  }
   assert.equal(s.scope, 'engine');
-  assert.match(s.why, /^every self-modification lock applies: root's managed apps file couldn't be read \(.*EIO/);
+  assert.match(s.why, /^every self-modification lock applies: root's managed apps file couldn't be read \(.*doesn't match its test mark/);
 });
 
 test("the coordinator's lock scope: the engine's when it is given none, or asking for it fails", () => {
@@ -305,7 +389,7 @@ test('managed-apps.sh writes root:root 0644 in exactly the form the engine reads
   assert.equal((statSync(s.file).mode & 0o777).toString(8), '644', 'set, not inherited from umask 000');
   assert.deepEqual([...new Set(readFileSync(s.chownLog, 'utf8').trim().split('\n'))], [`root:root ${join(dirname(s.file), '.managed-apps.json.tmp')}`], 'root:root, on the temp file before it is moved into place');
   // The engine reads root's updates.json at its /etc path (here the isolate's), not the script's stand-in.
-  assert.equal(withUpdates(readFileSync(s.updates, 'utf8'), () => readLockScope('shop', 'example-org/shop', { file: s.file, rootUid: me }).scope), 'managed-app', 'the engine reads what the script wrote');
+  assert.equal(withUpdates(readFileSync(s.updates, 'utf8'), () => scope(s.file).scope), 'managed-app', 'the engine reads what the script wrote');
   const before = readFileSync(s.file, 'utf8');
   // The engine's own repo (updates.json's), in any case or URL form: never a managed app.
   for (const repo of ['example-org/engine', 'Example-Org/Engine']) {
@@ -352,7 +436,7 @@ test('managed-apps.sh writes root:root 0644 in exactly the form the engine reads
   // remove takes one back (and again is nothing to do).
   for (let i = 0; i < 2; i++) assert.equal(s.run('remove', 'shop').status, 0);
   assert.equal(readFileSync(s.file, 'utf8'), '{"version":1,"apps":{"docs-site":"example-org/site"}}\n');
-  const removed = withUpdates(readFileSync(s.updates, 'utf8'), () => readLockScope('shop', 'example-org/shop', { file: s.file, rootUid: me }));
+  const removed = withUpdates(readFileSync(s.updates, 'utf8'), () => scope(s.file));
   assert.equal(removed.scope, 'engine');
   assert.match(removed.why, /doesn't name instance shop/, 'engine because it was removed, not for want of updates.json');
   // A file not in its form: it stops, changing nothing.
