@@ -256,10 +256,11 @@ export function ownPolicy(instance: string, d: PolicyRootDeps = {}, flags: OwnFl
     const policy = parsePolicy(text, file);
     const loose = beyondCoordinator(policy, loadLimits(d.limitsPath ?? LIMITS_PATH));
     if (!written && loose.length && !flags.acceptLoose) throw new Error(`${file} is looser than its coordinator could make it (${loose.join('; ')}), so it is left as it is, not root's: a process running as its coordinator user may have written that. An admin checks it at a root shell, then changes it, or takes it over as it is with ${ownCommand(instance, ...(rec !== null ? (['--retake'] as const) : []), '--accept-loose')}`);
+    // A disarmed kill switch first, so any auto_merge off from now on needs no new space (src/policy-kill.ts): with no
+    // room for it, nothing is taken over.
+    ensureSpare(instance, markers);
     replaceInOwnedDir({ dir, name: FILE, text, dirOwner: coordUid, uid: rootUid, gid: d.rootGid ?? 0, mode: 0o644 });
     writeRecord(markers, instance, { file, sha256: sha256(text) });
-    // A disarmed kill switch, so a later auto_merge off needs no new space (src/policy-kill.ts).
-    ensureSpare(instance, markers);
     return { file, keys: Object.fromEntries(WATCHED.map((k) => [k, policy[k]])), loose };
   });
 }
@@ -303,12 +304,22 @@ export function setPolicy(instance: string, key: string, arg: string, by: string
     const next = parsePolicy(out, file);
     const problems = limitProblems(next, loadLimits(d.limitsPath ?? LIMITS_PATH));
     if (problems.length) throw new Error(`refused: ${problems.join('; ')}`);
+    const on = key === 'auto_merge' && value === true;
+    // auto_merge on: the spare first, before anything changes, so the next auto_merge off needs no new space; with no
+    // room for it, ON is refused and auto_merge stays off. Any other change: a spare if there is room.
+    if (on) ensureSpare(instance, markers);
+    else {
+      try {
+        ensureSpare(instance, markers);
+      } catch {
+        // no room: OFF still moves an armed switch, or writes one where there is space
+      }
+    }
     replaceInOwnedDir({ dir, name: FILE, text: out, dirOwner: coordUid, uid: rootUid, gid: d.rootGid ?? 0, mode: 0o644 });
     writeRecord(markers, instance, { file, sha256: sha256(out) });
     // auto_merge on (root's alone; a coordinator's was refused above): the switches it saw go, last, each by its own
     // name, so auto_merge reads off until policy.yaml says on, and any an OFF armed since stays.
-    if (key === 'auto_merge' && value === true) clearKillSwitches(instance, seen, markers);
-    else ensureSpare(instance, markers);
+    if (on) clearKillSwitches(seen, markers);
     return { key, from, to: value };
   });
 }

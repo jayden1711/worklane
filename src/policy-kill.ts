@@ -19,7 +19,7 @@
 //
 // INVARIANT: this module imports nothing that reads policy.yaml or takes root's lock (test/policy-edit.test.ts holds
 // its imports to node's own modules and the pure ones below).
-import { chmodSync, closeSync, fsyncSync, mkdirSync, openSync, readdirSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, closeSync, fsyncSync, lstatSync, mkdirSync, openSync, readdirSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { join, relative, sep } from 'node:path';
 import { etcPath } from './os/system-paths.js';
@@ -102,6 +102,12 @@ export function ensureSpare(instance: string, dir = POLICY_ROOT_DIR): void {
   if (!fileName(instance)) return;
   recordDir(dir);
   try {
+    lstatSync(spareSwitchPath(instance, dir));
+    return; // there already
+  } catch {
+    // none yet
+  }
+  try {
     writeFileSync(spareSwitchPath(instance, dir), 'disarmed: auto_merge off renames this into <instance>.auto-merge-off.<id>\n', { mode: 0o644, flag: 'wx' });
     chmodSync(spareSwitchPath(instance, dir), 0o644);
   } catch (e) {
@@ -149,9 +155,9 @@ export function killAutoMerge(instance: string, dir = POLICY_ROOT_DIR, at = new 
  * Root's `policy set <instance> auto_merge on` only (src/policy-root.ts, inside its lock, after it wrote
  * policy.yaml): the switches it saw before it waited for the lock go, each by its own name, and nothing else. A
  * switch an OFF armed since has a name ON never saw, so it stays: no OFF that said done is ever undone, part way or
- * whole. Then a spare for the next OFF.
+ * whole. ON made sure of a spare before it changed anything (src/policy-root.ts), so the next OFF needs no new space.
  */
-export function clearKillSwitches(instance: string, seen: readonly string[], dir = POLICY_ROOT_DIR): void {
+export function clearKillSwitches(seen: readonly string[], dir = POLICY_ROOT_DIR): void {
   for (const name of seen) {
     try {
       unlinkSync(join(dir, name));
@@ -159,5 +165,4 @@ export function clearKillSwitches(instance: string, seen: readonly string[], dir
       if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e;
     }
   }
-  ensureSpare(instance, dir);
 }
