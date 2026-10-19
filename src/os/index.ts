@@ -808,29 +808,38 @@ const isSystemSlots = (dir: SlotPathLike, system: typeof SYSTEM_SLOTS) => (typeo
  * own slots, STOP, budgets or incidents through a default. Outside a test run, as always.
  */
 export function slotsDir(): SlotPath {
-  return slotsDirFor(SYSTEM_SLOTS);
+  const dir = resolvedSlotsDir(SYSTEM_SLOTS);
+  // One value while the slot dir stays where it is, so slotsDir() === slotsDir() (the budget's prune throttle keys
+  // on it). It is this function's own: every other slot path, whatever path it names, is a fresh value equal to none
+  // (src/slot-file.ts), so no caller can test a guess against this one (#806 round 6).
+  if (current?.dir !== dir) {
+    const p = slotPathOf(dir);
+    if (dir === SYSTEM_SLOTS.dir) systemSlotDirs.add(p);
+    current = { dir, p };
+  }
+  return current.p;
+}
+
+/** The slot dir slotsDir resolved last, and its value. */
+let current: { dir: string; p: SlotPath } | undefined;
+
+/** The slot dir for `system`, refused in a test run unless it is inside the test machine (#669). */
+function resolvedSlotsDir(system: typeof SYSTEM_SLOTS): string {
+  const dir = unguardedSlotsDir(system);
+  const refusal = testSlotsRefusal(dir);
+  if (refusal) throw new TestSlotsRefused(refusal);
+  return dir;
 }
 
 /**
  * slotsDir with the system locations a test gives (test/slots.test.ts): the seam has its own name, which no src/
  * module but this one may name (test/slot-path.test.ts), so slotsDir itself takes nothing a caller could choose.
- * Only the machine's own SYSTEM_SLOTS marks a slot path as the system dir: a caller's `system` never does, so no
- * call of this tells a module whether a guess is the slot dir (#806 round-3 review).
+ * It gives a fresh value every call, equal to no other slot path, and never marks one as the system dir: only
+ * slotsDir does, for the machine's own SYSTEM_SLOTS (#806 rounds 3 and 6).
  */
 export function slotsDirFor(system: typeof SYSTEM_SLOTS): SlotPath {
-  const dir = unguardedSlotsDir(system);
-  const refusal = testSlotsRefusal(dir);
-  if (refusal) throw new TestSlotsRefused(refusal);
-  const p = slotPathOf(dir);
-  if (system === SYSTEM_SLOTS && dir === SYSTEM_SLOTS.dir) systemSlotDirs.add(p);
-  return p;
+  return slotPathOf(resolvedSlotsDir(system));
 }
-
-/**
- * A directory of a caller's own, as a slot path: for tests, to compare with slotsDir() (one value per path). No src/
- * module but this one names it (test/slot-path.test.ts); a demo's or replay's own slot dir is a plain string.
- */
-export const slotDirAt = (dir: string): SlotPath => slotPathOf(dir);
 
 function unguardedSlotsDir(system: typeof SYSTEM_SLOTS): string {
   if (process.env.AGENT_SLOTS_DIR) return process.env.AGENT_SLOTS_DIR;

@@ -10,7 +10,7 @@
 // name for a symlink at any moment, and a chmod by name would follow it to a file of the writer's own.
 //
 // A slot-dir path is a SlotPath (#772), never a string: an opaque value that only this module turns back into the
-// path. os/index.ts makes the slot dir one (slotsDir; slotDirAt for tests), slotFile names a file in it, and only the
+// path. os/index.ts makes the slot dir one (slotsDir), slotFile names a file in it, and only the
 // functions here read, list, remove or write what one names. So tsc rejects a slot path handed to any other writer
 // (writeFileSync, writeGroupOnly, path.join, a method of another module, through `.call` too), whatever the call
 // chain; and at run time the value is an object whose path no one else can read: fs and path.join refuse it, and
@@ -67,11 +67,12 @@ Object.freeze(Box.prototype);
 Object.freeze(Box);
 
 /**
- * One value per path, so two slot paths for one place are the same value (`===`, a Map key). A plain object without
- * a prototype, not a Map: no method another module could patch (Map.prototype.get) is ever handed a path.
+ * A fresh value on every mint, never one shared per path: two slot paths for one place are different values. So
+ * identity (`===`, `Object.is`, a Map, Set or WeakMap key) tells no caller whether a path it chose is the slot dir:
+ * `slotPathOf(guess) === slotsDir()` is false whatever the guess (#806 round 6). No table is kept, so there is no
+ * size or cache timing to read either. os/index.ts keeps the one slot dir it resolves, so slotsDir() is one value.
  */
-const made: Record<string, SlotPath> = Object.create(null) as Record<string, SlotPath>;
-const box = (path: string): SlotPath => (made[path] ??= new Box(MINT, path) as unknown as SlotPath);
+const box = (path: string): SlotPath => new Box(MINT, path) as unknown as SlotPath;
 
 /**
  * A slot path made by slotFile or slotSibling: its own name and the directory it is in, kept when it is made. So
@@ -84,8 +85,9 @@ const fileOf = new WeakMap<object, { name: string; dir: SlotPath }>();
 const raw = (p: SlotPathLike): string => (typeof p === 'string' ? p : pathOf(p as unknown as Box));
 
 /**
- * The slot dir as a slot path. Only src/os/index.ts calls this, with the directory it resolved (slotsDir) or one a
- * caller made for a coordinator of its own (slotDirAt): test/slot-path.test.ts fails on any other caller in src/.
+ * A directory as a slot path: a new value every time, equal (`===`) to no other. Only src/os/index.ts calls this in
+ * src/, with the directory it resolved (slotsDir) or a test's system dir (slotsDirFor): test/slot-path.test.ts
+ * reports any other caller. Even one would learn nothing: the value it gets is equal to no slot path but itself.
  */
 export function slotPathOf(dir: string): SlotPath {
   // No method is called on the path (a patched String.prototype.includes would be handed it): a NUL in it is refused by
@@ -103,7 +105,7 @@ function plainName(name: string, what: string): string {
 /** A slot path for the file `name` in `dir`, built by concatenation alone: no method is handed the path (A5). */
 const fileIn = (dir: SlotPath, name: string): SlotPath => {
   const p = box(`${raw(dir)}/${name}`);
-  if (!fileOf.has(p)) fileOf.set(p, { name, dir });
+  fileOf.set(p, { name, dir });
   return p;
 };
 

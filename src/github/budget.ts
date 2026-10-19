@@ -108,7 +108,7 @@ export interface BudgetOptions {
   pollMs?: number;
 }
 
-/** By directory: a slot path is one value per path (src/slot-file.ts), so it keys as the path did. */
+/** By directory: slotsDir() is one value while the slot dir stays put (src/os/index.ts), so it keys as the path did. */
 const lastPrune = new Map<SlotPathLike, number>();
 
 export class GitHubBudget {

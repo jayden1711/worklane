@@ -6,10 +6,13 @@
 //   forms #766's lint doesn't resolve (U4 to U6b, B10c, R8): each fails to compile, and the same text with a plain
 //   path compiles (a control).
 // - checks over src/, each tested against fixture text fed to its own function:
-//   - only src/os/index.ts makes a slot path (slotPathOf, slotDirAt) or names the test seam slotsDirFor; slotsDir
-//     takes no argument; no module but the helper imports or re-exports the helper or os/index.js whole; every module
-//     specifier is one this check resolves exactly (no import-equals, query, hash, %-encoding, absolute path or URL);
-//     and src/ holds no symlink;
+//   - only src/os/index.ts makes a slot path (slotPathOf) or names the test seam slotsDirFor; slotsDir takes no
+//     argument; no module but the helper imports or re-exports the helper or os/index.js whole; every specifier is a
+//     plain relative path to an existing src/ module or a builtin or dependency name (no import-equals, query, hash,
+//     %-encoding, absolute path, URL, path out of src/ or package `..`; "resolves exactly" was false through ef30db6e,
+//     #806 round 5); no eval, Function, node:vm or Worker but from a src/ module; and src/ holds no symlink. These are
+//     defence in depth: what keeps a guess from being tested against the slot dir is the design (no slot path is equal
+//     to another: the run-time tests), not these checks;
 //   - nothing patches a built-in prototype or Error.prepareStackTrace in its plain forms;
 //   - nothing reads private fields or the heap from inside the process (node:inspector, a heap snapshot);
 //   - only src/os/index.ts and src/os/system-paths.ts read where the slot dir is (AGENT_SLOTS_DIR, SYSTEM_SLOTS, the
@@ -21,8 +24,8 @@
 //   error from a slot file names no path, and a forged one (its prototype, its constructor, a Proxy) is refused.
 import assert from 'node:assert/strict';
 import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
-import { createRequire } from 'node:module';
-import { dirname, join, posix, relative, sep } from 'node:path';
+import { createRequire, isBuiltin } from 'node:module';
+import { basename, dirname, join, posix, relative, sep } from 'node:path';
 import { test } from 'node:test';
 import { inspect } from 'node:util';
 import ts from 'typescript';
@@ -227,23 +230,56 @@ const PLAIN_SPECIFIER = /^(\.\.?(\/[A-Za-z0-9_.-]+)+|(node:)?@?[A-Za-z0-9][A-Za-
 /** The src/ path an import's specifier in `file` names (`./index.js` in src/os/ is src/os/index.js), or null. */
 const target = (file: string, spec: string) => (spec.startsWith('.') ? posix.normalize(posix.join(posix.dirname(file), spec)) : null);
 
+/** The src/ modules on disk, as `src/…/x.ts` (read once). */
+let srcOnDisk: ReadonlySet<string> | undefined;
+const knownSrc = (): ReadonlySet<string> => (srcOnDisk ??= new Set(srcFiles().keys()));
+
+/** Package names src/ may import: package.json `dependencies` (#806 round-5 review, B4). */
+const DEPENDENCIES = new Set(Object.keys((JSON.parse(readFileSync(join(repoRoot, 'package.json'), 'utf8')) as { dependencies?: Record<string, string> }).dependencies ?? {}));
+
+/**
+ * Why a plain specifier doesn't name a module this check knows, or null when it does (#806 round-5 review):
+ * - a relative one must name an existing src/ module, its `.js` standing for that module's `.ts`, in exact case. A
+ *   path out of src/ (`../../dist/src/…`, `../test/…`) is resolved by Node against dist/src/, where the check can't
+ *   follow it;
+ * - a package one is `node:<builtin>`, a builtin, or a package.json dependency, with no `.` or `..` segment (a
+ *   package's subpath can walk out of its directory: `@scope/pkg/../../../dist/src/os/index.js`).
+ */
+function unknownTarget(file: string, spec: string, known: ReadonlySet<string>): string | null {
+  const t = target(file, spec);
+  if (t !== null) {
+    if (!t.startsWith('src/') || !t.endsWith('.js')) return 'names no src/ module (Node resolves it against dist/src/, out of what this check reads)';
+    return known.has(`${t.slice(0, -3)}.ts`) ? null : 'names no existing src/ module (exact case, its .js for the .ts)';
+  }
+  const parts = spec.split('/');
+  if (parts.some((p) => p === '.' || p === '..')) return 'a package path with a . or .. segment can walk out of the package';
+  const name = spec.startsWith('node:') ? spec.slice(5) : spec.startsWith('@') ? parts.slice(0, 2).join('/') : parts[0]!;
+  if (spec.startsWith('node:') ? isBuiltin(spec) : isBuiltin(name) || DEPENDENCIES.has(name)) return null;
+  return 'is no builtin and no package.json dependency';
+}
+
 /**
  * Who makes a slot path, or a way to its path, in every src/ module but the helper (no scope for the OS layer: #806
  * round-2 review, principle 9). MAKER_ONLY names only in the maker (and the helper, which defines them). No call
  * passes slotsDir an argument (its `system` would make a slot path of any directory: A3). No `import *` or `import()`
  * of the helper or of os/index.js.
  */
-function slotPathMakers(files: Map<string, string>): Finding[] {
+function slotPathMakers(files: Map<string, string>, known: ReadonlySet<string> = new Set([...knownSrc(), ...[...files.keys()].filter((f) => f.endsWith('.ts'))])): Finding[] {
   const out: Finding[] = [];
   for (const [file, text] of files) {
     if (file === HELPER) continue;
     const sf = parse(file, text);
     const whole = (spec: string) => WHOLE_MODULES.has(target(file, spec) ?? '');
-    // Fail closed on what `target` doesn't resolve the way Node does (#806 round-4 review): a specifier in any form
-    // that isn't a plain relative path or a package name. `?x`/`#x` load a second instance of a module; an absolute
-    // path, a `file:` URL or %-encoding name a module by another spelling.
+    // Report what `target` doesn't resolve the way Node does (#806 round-4 review): a specifier in any form that isn't a
+    // plain relative path or a package name (`?x`/`#x` load a second instance of a module; an absolute path, a `file:`
+    // URL or %-encoding name a module by another spelling), and a plain one that names no module this check reads
+    // (round-5 review: a path out of src/, or a package path walking out of its package).
     const plainOnly = (n: ts.Node, spec: string) => {
       if (!PLAIN_SPECIFIER.test(spec)) at(n, `${JSON.stringify(spec)}: a module specifier this check can't resolve exactly (a query, a hash, %-encoding, an absolute path or a URL): use a plain relative path or a package name`);
+      else {
+        const why = unknownTarget(file, spec, known);
+        if (why) at(n, `${JSON.stringify(spec)}: ${why}`);
+      }
     };
     const at = (n: ts.Node, what: string) => out.push({ file, line: lineOf(sf, n), what });
     /** The names slotsDir goes by here: its own, and any it is imported as. */
@@ -306,6 +342,42 @@ function builtinPatches(files: Map<string, string>): Finding[] {
       else if (ts.isIdentifier(n) && !(ts.isPropertyAccessExpression(n.parent) && n.parent.name === n)) found = PROTO_NAMES.has(n.text);
       else if (ts.isStringLiteralLike(n) && !(ts.isElementAccessExpression(n.parent) && n.parent.argumentExpression === n)) found = hit(n.text);
       if (found) out.push({ file, line: lineOf(sf, n), what: `${n.getText(sf).slice(0, 60)}: reaches a built-in's prototype or V8's stack hook, where a getter or method is handed the paths fs is given` });
+      ts.forEachChild(n, visit);
+    };
+    visit(sf);
+  }
+  return out;
+}
+
+/**
+ * Code that loads code the specifier check never sees (#806 round-5 review, D1 to D4): `eval`, `Function` (called,
+ * constructed or passed on), `node:vm`, and a Worker but one started from `new URL('<a plain relative path to an
+ * existing src/ module>', import.meta.url)` without `eval`. src/ has none but setup-steps.ts's setup-worker Worker.
+ * Not seen (Known gaps; closed by design instead: no slot path compares equal to another): a function's
+ * `.constructor`, `globalThis['ev' + 'al']`.
+ */
+function dynamicCode(files: Map<string, string>, known: ReadonlySet<string> = new Set([...knownSrc(), ...[...files.keys()].filter((f) => f.endsWith('.ts'))])): Finding[] {
+  const out: Finding[] = [];
+  for (const [file, text] of files) {
+    const sf = parse(file, text);
+    const at = (n: ts.Node, what: string) => out.push({ file, line: lineOf(sf, n), what });
+    const isName = (n: ts.Identifier) => !(ts.isPropertyAccessExpression(n.parent) && n.parent.name === n) && !(ts.isPropertyAssignment(n.parent) && n.parent.name === n) && !ts.isTypeReferenceNode(n.parent);
+    /** A Worker's script is `new URL('<plain relative path to a known src/ module>', import.meta.url)`. */
+    const knownScript = (a: ts.Expression | undefined) => {
+      if (!a || !ts.isNewExpression(a) || !ts.isIdentifier(a.expression) || a.expression.text !== 'URL') return false;
+      const [p, b] = a.arguments ?? [];
+      return !!p && ts.isStringLiteralLike(p) && PLAIN_SPECIFIER.test(p.text) && p.text.startsWith('.') && unknownTarget(file, p.text, known) === null && !!b && b.getText(sf) === 'import.meta.url';
+    };
+    const visit = (n: ts.Node) => {
+      if (ts.isIdentifier(n) && (n.text === 'eval' || n.text === 'Function') && isName(n)) at(n, `${n.text}: runs code this check can't see (it can load any module)`);
+      if (ts.isPropertyAccessExpression(n) && (n.name.text === 'eval' || n.name.text === 'Function') && ts.isIdentifier(n.expression) && ['globalThis', 'global', 'window', 'self'].includes(n.expression.text)) at(n, `${n.getText(sf)}: runs code this check can't see`);
+      const spec = (ts.isImportDeclaration(n) || ts.isExportDeclaration(n)) && n.moduleSpecifier && ts.isStringLiteral(n.moduleSpecifier) ? n.moduleSpecifier.text : ts.isCallExpression(n) && n.expression.kind === ts.SyntaxKind.ImportKeyword && n.arguments[0] && ts.isStringLiteralLike(n.arguments[0]) ? n.arguments[0].text : null;
+      if (spec === 'vm' || spec === 'node:vm') at(n, `${spec}: runs code this check can't see`);
+      if (ts.isNewExpression(n) && (ts.isIdentifier(n.expression) ? n.expression.text : ts.isPropertyAccessExpression(n.expression) ? n.expression.name.text : '') === 'Worker') {
+        const [script, opts] = n.arguments ?? [];
+        const evalOpt = !!opts && ts.isObjectLiteralExpression(opts) && opts.properties.some((p) => p.name?.getText(sf) === 'eval' || ts.isSpreadAssignment(p));
+        if (!knownScript(script) || evalOpt || (opts && !ts.isObjectLiteralExpression(opts))) at(n, `${n.getText(sf).slice(0, 60)}: a Worker runs a src/ module only, from new URL('./<module>.js', import.meta.url), without eval`);
+      }
       ts.forEachChild(n, visit);
     };
     visit(sf);
@@ -509,6 +581,51 @@ test("the maker check: a specifier it can't resolve exactly, in any form, and ev
   assert.deepEqual([...new Set(found)], [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 16, 17]);
 });
 
+test("the maker check: a plain specifier that names no module it reads is reported: out of src/, into test/, a package's .. (#806 round-5 review, B1 B3 B4 C1)", () => {
+  const lines = [
+    "import * as b1 from '../../dist/src/os/index.js';",
+    "import * as b3 from '../../dist/src/slot-file.js';",
+    "export const b2 = () => import('../../dist/src/os/index.js');",
+    "import * as b4 from '@anthropic-ai/sandbox-runtime/../../../dist/src/os/index.js';",
+    "import * as c1 from '../test/launder-r5.js';",
+    "import * as e1 from './OS/index.js';",
+    "import pkg from '../package.json';",
+    "import lodash from 'lodash';",
+    "import { slotsDir } from './os/index.js';",
+    "import { parse } from 'yaml'; import { z } from 'zod'; import { SandboxManager } from '@anthropic-ai/sandbox-runtime'; import { join } from 'node:path'; import { EventEmitter } from 'events';",
+    'void [b1, b3, b4, c1, e1, pkg, lodash, slotsDir, parse, z, SandboxManager, join, EventEmitter];',
+  ];
+  const found = slotPathMakers(new Map([['src/cores.ts', lines.join('\n')]])).map((x) => x.line);
+  // Lines 9 and 10 (an existing src/ module; dependencies and builtins) are not reported.
+  assert.deepEqual([...new Set(found)], [1, 2, 3, 4, 5, 6, 7, 8]);
+});
+
+test('src/: no eval, Function, node:vm, or Worker but from a src/ module (#806 round-5 review, D1 to D4)', () => {
+  assert.deepEqual(show(dynamicCode(srcFiles())), []);
+});
+
+test('the dynamic-code check: eval, Function, node:vm and Workers from a string, a data: URL or eval are reported; F1 and F2 are not (closed by design)', () => {
+  const lines = [
+    "export const d1 = (u: string) => eval('import(u)') as unknown;",
+    "export const d2 = (u: string) => new Function('u', 'return import(u)')(u) as unknown;",
+    "import { Worker } from 'node:worker_threads';",
+    "export const d3 = (u: string) => new Worker('import(process.argv[2])', { eval: true, argv: [u] });",
+    "export const d4 = () => new Worker(new URL('data:text/javascript,import(\"x\")'));",
+    "import * as vm from 'node:vm';",
+    "export const d5 = (u: string) => globalThis.eval(u) as unknown;",
+    "export const d6 = () => new Worker(new URL('./setup-worker.js', import.meta.url), { eval: true });",
+    "export const d7 = () => new Worker(new URL('../../dist/src/setup-worker.js', import.meta.url));",
+    "export const ok = () => new Worker(new URL('./setup-worker.js', import.meta.url), { workerData: 1 });",
+    "export const f1 = (u: string) => (async () => 0).constructor('u', 'return import(u)')(u) as unknown;",
+    "export const f2 = (u: string) => (globalThis as unknown as Record<string, (s: string) => unknown>)['ev' + 'al']!(`import(${JSON.stringify(u)})`);",
+    'void vm;',
+  ];
+  const found = dynamicCode(new Map([['src/setup-steps.ts', lines.join('\n')]])).map((x) => x.line);
+  // Line 3 (worker_threads itself) and 10 (a src/ module, no eval) are not reported; 11 and 12 (F1, F2) aren't either:
+  // no name gives them away. They reach no oracle: a slot path compares equal to no other (the run-time tests).
+  assert.deepEqual([...new Set(found)], [1, 2, 4, 5, 6, 7, 8, 9]);
+});
+
 test('src/: no symlink (a module the checks would know by one name, loaded by another)', () => {
   assert.deepEqual(symlinksUnder(join(repoRoot, 'src')), []);
 });
@@ -667,7 +784,7 @@ test('run time: fs, path.join, String() and a template literal refuse a slot pat
   const sf = (await import('../src/slot-file.js')) as SlotFile;
   const os = (await import('../src/os/index.js')) as Os;
   const dir = mkdtempSync(join(process.env.AGENT_SLOTS_DIR!, 'opaque-'));
-  const p = sf.slotFile(os.slotDirAt(dir), 'f.json') as unknown;
+  const p = sf.slotFile(sf.slotPathOf(dir), 'f.json') as unknown;
   const fs = createRequire(import.meta.url)('node:fs') as Record<string, (...a: unknown[]) => unknown>;
   const refused = (what: string, f: () => unknown) => assert.throws(f, (e: Error) => e instanceof TypeError || /ERR_INVALID_ARG/.test((e as NodeJS.ErrnoException).code ?? ''), what);
   refused('writeFileSync', () => writeFileSync(p as string, 'x'));
@@ -690,7 +807,7 @@ test('run time: a forged slot path is refused (a plain object, its prototype, it
   const sf = (await import('../src/slot-file.js')) as SlotFile;
   const os = (await import('../src/os/index.js')) as Os;
   const dir = mkdtempSync(join(process.env.AGENT_SLOTS_DIR!, 'forged-'));
-  const real = os.slotDirAt(dir) as unknown as object;
+  const real = sf.slotPathOf(dir) as unknown as object;
   const Ctor = (real as { constructor: new (...a: unknown[]) => object }).constructor;
   const forged: [string, () => unknown][] = [
     ['a plain object', () => ({})],
@@ -711,12 +828,12 @@ test('run time: an error from a slot file keeps its code and names no path', asy
   const sf = (await import('../src/slot-file.js')) as SlotFile;
   const os = (await import('../src/os/index.js')) as Os;
   const dir = mkdtempSync(join(process.env.AGENT_SLOTS_DIR!, 'errors-'));
-  const missing = sf.slotFile(os.slotDirAt(dir), 'missing.json');
+  const missing = sf.slotFile(sf.slotPathOf(dir), 'missing.json');
   const failures: [string, () => unknown][] = [
     ['readSlotFile', () => sf.readSlotFile(missing)],
     ['removeSlotFile', () => sf.removeSlotFile(missing)],
-    ['renameSlotFile', () => sf.renameSlotFile(missing, sf.slotFile(os.slotDirAt(dir), 'other.json'))],
-    ['writeSlotFile into a missing dir', () => sf.writeSlotFile(sf.slotFile(sf.slotFile(os.slotDirAt(dir), 'no-dir'), 'f.json'), 'x')],
+    ['renameSlotFile', () => sf.renameSlotFile(missing, sf.slotFile(sf.slotPathOf(dir), 'other.json'))],
+    ['writeSlotFile into a missing dir', () => sf.writeSlotFile(sf.slotFile(sf.slotFile(sf.slotPathOf(dir), 'no-dir'), 'f.json'), 'x')],
   ];
   for (const [what, f] of failures) {
     assert.throws(f, (e: NodeJS.ErrnoException) => {
@@ -731,13 +848,12 @@ test('run time: an error from a slot file keeps its code and names no path', asy
   assert.throws(() => sf.readSlotFile(join(dir, 'missing.json')), (e: NodeJS.ErrnoException) => e.path === join(dir, 'missing.json'));
 });
 
-test('run time: a slot file name is one plain name, and a slot path is one value per path', async () => {
+test('run time: a slot file name is one plain name, and every slot path is a fresh value (#806 round 6)', async () => {
   const sf = (await import('../src/slot-file.js')) as SlotFile;
-  const os = (await import('../src/os/index.js')) as Os;
-  const d = os.slotDirAt(mkdtempSync(join(process.env.AGENT_SLOTS_DIR!, 'names-')));
+  const d = sf.slotPathOf(mkdtempSync(join(process.env.AGENT_SLOTS_DIR!, 'names-')));
   for (const bad of ['', '.', '..', '../x', 'a/b', 'a\\b', 'a\0b']) assert.throws(() => sf.slotFile(d, bad), TypeError, JSON.stringify(bad));
   assert.throws(() => sf.slotSibling(d, '/../x'), TypeError);
-  assert.equal(sf.slotFile(d, 'a'), sf.slotFile(d, 'a'));
+  assert.notEqual(sf.slotFile(d, 'a'), sf.slotFile(d, 'a'), 'two slot paths for one file are two values');
   assert.equal(sf.slotFileName(sf.slotFile(d, 'a.lock')), 'a.lock');
   sf.writeSlotFile(sf.slotFile(d, 'a'), 'text');
   assert.equal(sf.readSlotFile(sf.slotFile(d, 'a')), 'text');
@@ -773,7 +889,7 @@ test('run time: a patched Map, WeakSet or Object.prototype is never handed a slo
   WeakSet.prototype.add = spy(saved.add);
   Object.defineProperty(Object.prototype, dir, { configurable: true, get: () => seen.push('a lookup on Object.prototype') });
   try {
-    const d = os.slotDirAt(dir);
+    const d = sf.slotPathOf(dir);
     const f = sf.slotFile(sf.slotFile(d, 'x.json') && d, 'y.json');
     sf.writeSlotFile(f, 'v');
     sf.slotFileName(f);
@@ -820,6 +936,29 @@ test('run time: no descriptor of a slot path leaves the helper, so /proc/self/fd
   assert.equal(os.readRegularFile(d, 100).kind, 'not-file');
 });
 
+test('run time: no caller can learn whether a guessed path is the slot dir, by identity, keys or text (#806 round 6)', async () => {
+  const sf = (await import('../src/slot-file.js')) as SlotFile;
+  const os = (await import('../src/os/index.js')) as Os;
+  const real = process.env.AGENT_SLOTS_DIR!;
+  const d = os.slotsDir();
+  /** Everything a caller can ask of a minted value against slotsDir() without a file system: the same for any guess. */
+  const answers = (g: unknown) => {
+    const weak = new WeakMap<object, number>([[d as unknown as object, 1]]);
+    return [g === d, Object.is(g, d), new Set([g, d]).size, new Map<unknown, number>([[d, 1]]).get(g), weak.get(g as object), JSON.stringify(g), inspect(g, { showHidden: true, depth: 5 }), Reflect.ownKeys(g as object).length];
+  };
+  const mints: [string, (dir: string) => unknown][] = [
+    ['slotPathOf', (dir) => sf.slotPathOf(dir)],
+    ['slotsDirFor', (dir) => os.slotsDirFor({ dir, config: '' })],
+    ['slotFile of a mint', (dir) => sf.slotFile(sf.slotPathOf(dirname(dir)), basename(dir))],
+  ];
+  for (const [name, mint] of mints) {
+    const right = answers(mint(real));
+    assert.deepEqual(right, answers(mint(`${real}-not-it`)), `${name}: a right guess and a wrong one answer alike`);
+    assert.equal(right[0], false, `${name}: never === slotsDir()`);
+  }
+  assert.equal(os.slotsDir(), d, 'slotsDir() itself is one value while the slot dir stays put');
+});
+
 test('run time: no call of slotsDir, however made, marks a guess as the system slot dir (#806 round-3 review, the mark oracle)', async () => {
   const os = (await import('../src/os/index.js')) as Os;
   const real = process.env.AGENT_SLOTS_DIR!;
@@ -838,6 +977,7 @@ test('run time: no call of slotsDir, however made, marks a guess as the system s
 });
 
 test("run time: the machine's own system slot dir is still the system one: root's drain file and the system config (principle 3)", async () => {
+  const sf = (await import('../src/slot-file.js')) as SlotFile;
   const os = (await import('../src/os/index.js')) as Os;
   const saved = process.env.AGENT_SLOTS_DIR;
   delete process.env.AGENT_SLOTS_DIR;
@@ -845,9 +985,12 @@ test("run time: the machine's own system slot dir is still the system one: root'
   try {
     mkdirSync(os.SYSTEM_SLOTS.dir, { recursive: true });
     const d = os.slotsDir();
-    assert.equal(d, os.slotDirAt(os.SYSTEM_SLOTS.dir));
+    assert.equal(os.slotsDir(), d, 'slotsDir() is one value while the slot dir stays put');
+    // Where it points: a marker written through it is in SYSTEM_SLOTS.dir (a slot path has nothing else to compare).
+    sf.writeSlotFile(sf.slotFile(d, '.p3'), '');
+    assert.ok(existsSync(join(os.SYSTEM_SLOTS.dir, '.p3')), 'slotsDir() is the machine system dir');
     assert.equal(os.updateDrainPath(), os.UPDATE_DRAIN_FILE);
-    assert.equal(os.slotsConfigPath(), os.slotsConfigPath(d));
+    assert.equal(typeof os.slotsConfigPath(), 'object', 'no system config yet: config.json in the slot dir');
     mkdirSync(dirname(os.SYSTEM_SLOTS.config), { recursive: true });
     writeFileSync(os.SYSTEM_SLOTS.config, '{}');
     assert.equal(os.slotsConfigPath(), os.SYSTEM_SLOTS.config);
