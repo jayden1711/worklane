@@ -44,10 +44,21 @@ export function scrubTitle(title, denied) {
     .trim();
 }
 
-/** The PR a PR reverts, from its title ("Revert #N: ..." or GitHub's 'Revert "title" (#N)'), or null. */
-export function revertOf(pr) {
-  const m = /^Revert\b.*?#(\d+)/i.exec(pr.title ?? '');
-  return m ? Number(m[1]) : null;
+/**
+ * The PR a revert PR reverts, or null when its title doesn't start "Revert". GitHub's revert button titles it
+ * 'Revert "<original title>"', whose first #N can be any number the original title names, and writes the reverted
+ * PR in the body: "Reverts owner/repo#N". So the body's line is read first (only for this repo when `repo` is
+ * given; "Reverts #N" too), and the title's first #N ("Revert #N: ...") only when the body names none.
+ */
+export function revertOf(pr, repo) {
+  if (!/^Revert\b/i.test(pr.title ?? '')) return null;
+  // A PR never reverts itself: a number that is its own is read as none, so it stays listed in its group.
+  const other = (n) => (n === pr.number ? null : n);
+  for (const m of String(pr.body ?? '').matchAll(/^[ \t]*Reverts[ \t]+(?:([\w.-]+\/[\w.-]+))?#(\d+)\b/gim)) {
+    if (!m[1] || !repo || m[1].toLowerCase() === repo.toLowerCase()) return other(Number(m[2]));
+  }
+  const t = /^Revert\b.*?#(\d+)/i.exec(pr.title);
+  return t ? other(Number(t[1])) : null;
 }
 
 const isGuardrail = (pr) => (pr.files ?? []).some((f) => GUARDRAIL_PATHS.some((re) => re.test(f)));
@@ -61,16 +72,17 @@ export function groupOf(pr) {
 }
 
 /**
- * One release's changelog section. prs: { number, title, labels?, files? } in merge order. Every PR is listed
- * in its group; a PR that changed a guardrail file is also listed under "Guardrail changes" with those files.
+ * One release's changelog section. prs: { number, title, body?, labels?, files? } in merge order. Every PR is
+ * listed in its group; a PR that changed a guardrail file is also listed under "Guardrail changes" with those files.
  * A PR reverted within the same release is in no group: it and its revert are listed together under "Reverted in
- * this release" (a reland is a PR of its own and listed as usual).
+ * this release" (a reland is a PR of its own and listed as usual). `repo` (owner/repo): whose "Reverts" lines count.
  */
-export function changelogSection(version, date, prs) {
+export function changelogSection(version, date, prs, repo) {
   const line = (pr) => `- ${pr.title.replace(/\s*\(#\d+\)\s*$/, '')} (#${pr.number})`;
   const numbers = new Set(prs.map((pr) => pr.number));
-  const revertedBy = new Map(prs.filter((pr) => numbers.has(revertOf(pr))).map((pr) => [revertOf(pr), pr]));
-  const listed = prs.filter((pr) => !revertedBy.has(pr.number) && !numbers.has(revertOf(pr)));
+  const of = (pr) => revertOf(pr, repo);
+  const revertedBy = new Map(prs.filter((pr) => numbers.has(of(pr))).map((pr) => [of(pr), pr]));
+  const listed = prs.filter((pr) => !revertedBy.has(pr.number) && !numbers.has(of(pr)));
   const out = [`## v${version} (${date})`, ''];
   const groups = [['features', 'Features'], ['fixes', 'Fixes'], ['security', 'Security and guardrails']];
   for (const [key, heading] of groups) {
@@ -115,6 +127,11 @@ const isUnreleased = (h) => /\bunreleased\b/i.test(h);
 const versionIn = (h) => /^\[?v?(\d+\.\d+\.\d+)(?=[\s\])]|$)/i.exec(h)?.[1] ?? (isUnreleased(h) ? /(?<![\d.])(\d+\.\d+\.\d+)(?![\d.])/.exec(h)?.[1] : undefined) ?? null;
 /** A released section's heading: the version, then its date, as changelogSection writes it ("v0.5.2 (2026-10-17)"). */
 const isDated = (h) => !isUnreleased(h) && /^\[?v?\d+\.\d+\.\d+\]?[ \t]+\(\d{4}-\d{2}-\d{2}\)/i.test(h);
+/** Whether a part is a section that could hold this version's notes: its own, or an unreleased one with no version. */
+const isFor = (part, version) => {
+  const h = headingOf(part);
+  return h !== null && (isUnreleased(h) ? (versionIn(h) ?? version) === version : versionIn(h) === version);
+};
 
 /**
  * A section's hand-written notes: everything above the last NOTES_END line when it has one, else (a section
@@ -145,12 +162,8 @@ export function withSection(existing, version, section) {
   const head = '# Changelog\n\nEvery release, newest first: the PRs merged since the previous one, and what changed in guardrails.\n';
   const body = (existing ?? '').replace(new RegExp(`^# Changelog\\n[\\s\\S]*?(?:${SECTION_START.source}|(?![\\s\\S]))`, 'im'), '');
   const parts = body.split(SECTION_START);
-  const ours = (s) => {
-    const h = headingOf(s);
-    return h !== null && (isUnreleased(h) ? (versionIn(h) ?? version) === version : versionIn(h) === version);
-  };
-  const dated = parts.filter((s) => ours(s) && isDated(headingOf(s)));
-  const unreleased = parts.filter((s) => ours(s) && !isDated(headingOf(s)));
+  const dated = parts.filter((s) => isFor(s, version) && isDated(headingOf(s)));
+  const unreleased = parts.filter((s) => isFor(s, version) && !isDated(headingOf(s)));
   if (unreleased.length > 1 || (unreleased.length && dated.length)) {
     const names = [...unreleased, ...dated].map((s) => `"## ${headingOf(s)}"`).join(', ');
     throw new Error(`CHANGELOG.md has more than one section for v${version} (${names}): merge them into one by hand first`);
@@ -170,6 +183,30 @@ export function withSection(existing, version, section) {
     if (notesOf(full) !== notes) throw new Error(`v${version}: the section's notes wouldn't read back whole on a rerun; nothing written`);
   }
   return `${head}\n${full.trimEnd()}\n${kept.length ? `\n${kept.map((s) => s.trimEnd()).join('\n\n')}\n` : ''}`;
+}
+
+/**
+ * What the tag step tags with: { notes } (the version's section, without any NOTES_END line), or { problem }.
+ * Fails closed: the version must have exactly one section, with the dated heading changelogSection writes
+ * (`## vX.Y.Z (YYYY-MM-DD)`, a real date) and its generated lists, and nothing that could also be its notes (an
+ * `(unreleased)` heading for it, or `## Unreleased` with no version) anywhere in the file.
+ */
+export function tagNotes(changelog, version) {
+  const run = `run \`node scripts/release.mjs changelog ${version}\` and merge it first`;
+  const ours = String(changelog ?? '').split(SECTION_START).filter((s) => isFor(s, version));
+  if (!ours.length) return { problem: `CHANGELOG.md at HEAD has no v${version} section: ${run}` };
+  if (ours.length > 1) return { problem: `CHANGELOG.md at HEAD has more than one section for v${version} (${ours.map((s) => `"## ${headingOf(s)}"`).join(', ')}): merge them, then ${run}` };
+  const [section] = ours;
+  // The raw heading line, byte for byte as changelogSection writes it (one space, lowercase v, nothing after).
+  const first = section.split('\n')[0];
+  const date = new RegExp(`^## v${version.replace(/\./g, '\\.')} \\((\\d{4}-\\d{2}-\\d{2})\\)$`).exec(first)?.[1];
+  const when = date ? new Date(`${date}T00:00:00Z`) : null;
+  const real = when !== null && !Number.isNaN(when.getTime()) && when.toISOString().slice(0, 10) === date;
+  if (!real) return { problem: `CHANGELOG.md at HEAD has ${JSON.stringify(first)}, not the dated heading "## v${version} (YYYY-MM-DD)" the changelog step writes: ${run}` };
+  if (!/^### Guardrail changes[ \t]*$/m.test(section)) return { problem: `CHANGELOG.md at HEAD's v${version} section has no generated lists (no "### Guardrail changes"): ${run}` };
+  // The NOTES_END line withSection writes (blank line, the line, blank line) goes; nothing else in the notes changes.
+  const notes = section.replace(new RegExp(`\\n\\n${NOTES_END_LINE.source.replace(/^\^/, '')}(?=\\n)`, 'gm'), '').trimEnd();
+  return { notes };
 }
 
 /** The section for a version in a CHANGELOG.md, or null: the GitHub release notes. */

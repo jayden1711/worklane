@@ -11,7 +11,8 @@
 //     the generated lists go after it. Safe to rerun: the lists are rewritten and the notes kept (changelog.mjs).
 //   node scripts/release.mjs X.Y.Z
 //     On that merged commit: build, test, tag vX.Y.Z signed (`git tag -s`), verify the signature, and write
-//     the GitHub release notes (the changelog's section). Refuses without a signing key or a way to verify the
+//     the GitHub release notes (the changelog's section). Refuses unless that section is the dated one the
+//     changelog step writes (never `(unreleased)`: changelog.mjs tagNotes). Refuses without a signing key or a way to verify the
 //     signature (.github/release-signers, else gpg.ssh.allowedSignersFile), saying how to set one. The tag exists
 //     afterwards only if `git tag -v` passed: on any failure after it's made, it's deleted (#457).
 //
@@ -22,7 +23,7 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { changelogSection, prNumbers, scrubTitle, sectionFor, withSection } from './lib/changelog.mjs';
+import { changelogSection, prNumbers, scrubTitle, sectionFor, tagNotes, withSection } from './lib/changelog.mjs';
 import { loadRules, scanText } from './lib/denylist.mjs';
 import { treeDifferences } from './lib/release-tree.mjs';
 import { releaseSigners, signingProblem } from './lib/signing.mjs';
@@ -63,8 +64,9 @@ if (changelogOnly) {
   const repo = opt('repo') ?? /github\.com[:/](.+?)(?:\.git)?$/.exec(git('remote', 'get-url', 'origin'))?.[1];
   if (!repo) fail('which GitHub repo? pass --repo owner/repo');
   // --state all: a PR a batch merged is closed, not merged, on GitHub; its number came from main's history.
-  const listed = numbers.length ? JSON.parse(execFileSync('gh', ['pr', 'list', '--repo', repo, '--state', 'all', '--limit', '1000', '--json', 'number,title,labels,files'], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 })) : [];
-  const byNumber = new Map(listed.map((p) => [p.number, { number: p.number, title: p.title, labels: (p.labels ?? []).map((l) => l.name), files: (p.files ?? []).map((f) => f.path) }]));
+  // The body: where GitHub's revert button names the PR a revert reverts ("Reverts owner/repo#N").
+  const listed = numbers.length ? JSON.parse(execFileSync('gh', ['pr', 'list', '--repo', repo, '--state', 'all', '--limit', '1000', '--json', 'number,title,body,labels,files'], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 })) : [];
+  const byNumber = new Map(listed.map((p) => [p.number, { number: p.number, title: p.title, body: p.body ?? '', labels: (p.labels ?? []).map((l) => l.name), files: (p.files ?? []).map((f) => f.path) }]));
   // A title with a word the denylist refuses (an internal ticket key, say) is listed without it, and named here.
   const rules = loadRules('.');
   const denied = (text) => scanText(rules, 'CHANGELOG.md', text).length > 0;
@@ -75,7 +77,7 @@ if (changelogOnly) {
       if (title !== pr.title) console.log(`#${pr.number}: listed without a word the denylist refuses`);
       return { ...pr, title };
     });
-  const section = changelogSection(version, new Date().toISOString().slice(0, 10), prs);
+  const section = changelogSection(version, new Date().toISOString().slice(0, 10), prs, repo);
   const changelog = withSection(existsSync('CHANGELOG.md') ? readFileSync('CHANGELOG.md', 'utf8') : '', version, section);
   writeFileSync('CHANGELOG.md', changelog);
   const left = scanText(rules, 'CHANGELOG.md', sectionFor(changelog, version) ?? '');
@@ -104,13 +106,15 @@ try {
 }
 const signers = releaseSigners(cfg, repoSigners);
 if (signers.problem) fail(`refusing to tag ${tag}: ${signers.problem}`);
-let notes = null;
+let changelogAtHead = '';
 try {
-  notes = sectionFor(git('show', 'HEAD:CHANGELOG.md'), version);
+  changelogAtHead = git('show', 'HEAD:CHANGELOG.md');
 } catch {
   // no CHANGELOG.md at HEAD
 }
-if (!notes) fail(`CHANGELOG.md at HEAD has no v${version} section: run \`node scripts/release.mjs changelog ${version}\` and merge it first`);
+// INVARIANT: a tag's notes are a section the changelog step dated, never an (unreleased) one (#712).
+const { notes, problem: notesProblem } = tagNotes(changelogAtHead, version);
+if (!notes) fail(`refusing to tag v${version}: ${notesProblem}`);
 const head = git('rev-parse', 'HEAD');
 // Where to come back to: the branch if on one, else the exact commit (a detached start has no `-`).
 let back = head;

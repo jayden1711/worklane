@@ -137,6 +137,7 @@ Every release, newest first: the PRs merged since the previous one, and what cha
 ### Release tooling
 
 - **The changelog step keeps an unreleased section whole (#811).** `release.mjs changelog X.Y.Z` keeps every line of `## vX.Y.Z (unreleased)` (any case or spacing, or `## Unreleased`), whatever its headings are called, dates its heading and writes the generated lists after it; a rerun keeps the notes too. The notes no longer need to end with an empty generated heading. Two unreleased sections for the version, or one beside a dated one, are refused.
+- **A release can't be tagged from an undated changelog section, and a GitHub-button revert is listed against the right PR (#712).** `release.mjs X.Y.Z` refuses, before building or tagging, unless CHANGELOG.md has exactly one section for X.Y.Z, headed `## vX.Y.Z (YYYY-MM-DD)` as the changelog step writes it, with its generated lists: an `(unreleased)` heading is refused, so run the changelog step and merge it first (docs/releasing.md step 1). The changelog step reads which PR a revert reverts from GitHub's `Reverts owner/repo#N` line in its body (this repo only), and from its title only when the body has none, so a revert whose title quotes another PR number no longer lists the wrong PR as reverted.
 
 ## v0.5.2 (2026-10-17)
 
