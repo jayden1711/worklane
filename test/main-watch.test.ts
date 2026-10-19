@@ -267,6 +267,31 @@ test("main watch (#727, owner rule): a pinned check is its source's latest run o
   assert.equal(await verdict([ci(job(2, 21))], [{ context: 'ci', state: 'failure', createdAt: iso(T - 60_000) }]), 'ci fail');
 });
 
+test('main watch (#727): an Actions-App pin never lets one workflow file supersede another; a failed re-run of an older run blocks', async () => {
+  const repo = 'example-org/example-shop';
+  const page = (run: number) => `https://github.com/${repo}/actions/runs/${run}`;
+  const job = (suite: number, id: number) => ({ app: 15368, suite, id, url: `${page(suite * 100)}/job/${id}` });
+  const verdict = async (o: { github: Record<string, number>; config: string; files: Record<string, string>; runs: CheckRunAt[] }) => {
+    const s = await started({ pins: { sources: () => ({}), github: async () => o.github, repo }, config: o.config });
+    const m = s.w.mergedPr();
+    s.gh.pr(7, m.merge, m.head, iso(T), 'example-collaborator');
+    s.gh.roles.set('example-collaborator', 'writer');
+    s.gh.runs.set(m.head, o.runs);
+    s.gh.sources.set(m.head, Object.fromEntries(Object.entries(o.files).map(([suite, path]) => [suite, { run: Number(suite) * 100, url: page(Number(suite) * 100), path, repo, sha: m.head }])));
+    await run(s.gh, s.watch, 8);
+    return s.unaccounted[0]?.reason.replace(/^.*: /, '') ?? (s.checked.length ? 'accounted' : 'none');
+  };
+  // GitHub's rules pin `ci` to the Actions App; ci.yml is suite 1 (run 100), a PR-added evil.yml suite 2 (run 200).
+  const app = { github: { ci: 15368 }, config: 'required_checks: [ci]\n', files: { '1': '.github/workflows/ci.yml', '2': '.github/workflows/evil.yml' } };
+  assert.equal(await verdict({ ...app, runs: [ci({ ...job(1, 11), conclusion: 'failure' }), ci(job(2, 21))] }), 'ci fail');
+  assert.equal(await verdict({ ...app, runs: [ci({ ...job(1, 11), status: 'in_progress', conclusion: null, completedAt: null }), ci(job(2, 21))] }), 'ci pending');
+  assert.equal(await verdict({ ...app, runs: [ci(job(1, 11)), ci(job(2, 21))] }), 'accounted');
+  // A workflow pin: run 200 passed (check run 21), then run 100 was re-run and its newest attempt (check run 31) failed.
+  const wf = { github: {}, config: 'required_checks: [ci]\nrequired_check_sources:\n  ci: { workflow: .github/workflows/ci.yml }\n', files: { '1': '.github/workflows/ci.yml', '2': '.github/workflows/ci.yml' } };
+  assert.equal(await verdict({ ...wf, runs: [ci(job(2, 21)), ci({ ...job(1, 31), conclusion: 'failure' })] }), 'ci fail');
+  assert.equal(await verdict({ ...wf, runs: [ci({ ...job(1, 11), conclusion: 'cancelled' }), ci(job(2, 21))] }), 'accounted', "the owner's case 1 stays");
+});
+
 test("main watch (#727): while GitHub's rules have never answered, a merge waits to be judged: never by name, never unaccounted", async () => {
   let rules: Record<string, number> | null = null;
   const s = await started({ pins: { sources: () => ({}), github: async () => rules, repo: 'example-org/example-shop' }, config: 'required_checks: [ci]\n' });

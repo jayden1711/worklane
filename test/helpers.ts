@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { agentSettingsPath } from '../src/agent-settings.js';
 import type { CommitCheck } from '../src/backlog/types.js';
-import type { JudgedChecks } from '../src/check-source.js';
+import { PinnedChecks, withTestRuns, type JudgedChecks } from '../src/check-source.js';
 import { agentSettings } from '../src/install.js';
 import { machineProviderHosts } from '../src/provider-hosts.js';
 
@@ -19,8 +19,13 @@ if (/\.test\.js$/.test(process.argv[1] ?? '') && !(globalThis as Record<symbol, 
 export const repoRoot = fileURLToPath(new URL('../../', import.meta.url));
 export const engineCli = join(repoRoot, 'dist', 'src', 'cli.js');
 
-/** Fixture checks as already judged (#727: only PinnedChecks.of makes JudgedChecks in src/): for the judging functions' own tests. */
-export const asJudged = (checks: readonly CommitCheck[]): JudgedChecks => checks as JudgedChecks;
+/**
+ * Fixture checks as judged checks (#727): made through the real makers, since the judging functions check at run time
+ * that their input came from src/check-source.ts (a cast throws). One empty judged set, awaited once, and
+ * withTestRuns over it, so this stays sync.
+ */
+const EMPTY_JUDGED = await new PinnedChecks({ backlog: { checks: async () => [] }, branch: () => 'main', repo: () => 'o/r', configured: () => ({}) }).of('0'.repeat(40));
+export const asJudged = (checks: readonly CommitCheck[]): JudgedChecks => withTestRuns(EMPTY_JUDGED, new Set(), [...checks]);
 
 /** A throwaway git repo copied from examples/basic, with its own state dir. */
 export function exampleProject(): { dir: string; stateDir: string } {
