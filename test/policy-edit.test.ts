@@ -481,6 +481,40 @@ test("root's lock on an instance's policy: one a live writer holds makes `own` a
   assert.equal(existsSync(lock), false, 'released after set');
 });
 
+test("an auto_merge off that lands while an admin's `set on` is in flight wins: ON clears only the kill switch it saw when it started (#726 round 4 adversarial pass)", { skip }, () => {
+  for (const before of [false, true]) {
+    const name = before ? 'onrace-off' : 'onrace';
+    const m = machineInstance(name);
+    ownPolicy(name, m.deps);
+    if (before) setPolicy(name, 'auto_merge', 'off', null, m.deps); // a switch there already, which ON means to clear
+    // The OFF lands as ON renames its new policy.yaml into place: after ON's start, before its clear.
+    const fs = createRequire(import.meta.url)('node:fs') as typeof import('node:fs');
+    const rename = fs.renameSync;
+    let landed = false;
+    fs.renameSync = ((a: string, b: string) => {
+      const r = rename(a, b);
+      if (!landed && b === 'policy.yaml') {
+        landed = true;
+        setPolicy(name, 'auto_merge', 'off', `wl-${name}`, m.deps);
+      }
+      return r;
+    }) as typeof fs.renameSync;
+    syncBuiltinESMExports();
+    try {
+      setPolicy(name, 'auto_merge', 'on', null, m.deps);
+    } finally {
+      fs.renameSync = rename;
+      syncBuiltinESMExports();
+    }
+    assert.ok(landed, name);
+    assert.equal(autoMergeKilled(name), true, `${name}: the OFF that landed during ON stays`);
+    assert.equal(asRoot(() => readPolicy(m.file)).policy?.auto_merge, false, `${name}: the engine reads off`);
+    // An ON with no OFF in flight clears the switch it saw.
+    setPolicy(name, 'auto_merge', 'on', null, m.deps);
+    assert.equal(autoMergeKilled(name), false, name);
+  }
+});
+
 test("a lock a writer left empty (killed between creating it and writing its line) is live for a few seconds, then stale; a garbage one is stale; and `own` never clears root's kill switch (#726 round 4 adversarial pass)", { skip }, () => {
   const m = machineInstance('empty');
   ownPolicy('empty', m.deps);

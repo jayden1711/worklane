@@ -67,11 +67,34 @@ export function killAutoMerge(instance: string, dir = POLICY_ROOT_DIR, at = new 
   renameSync(tmp, killSwitchPath(instance, dir));
 }
 
-/** Root's `policy set <instance> auto_merge on` only (src/policy-root.ts, inside its lock): the kill switch goes. */
-export function clearKillSwitch(instance: string, dir = POLICY_ROOT_DIR): void {
+/** Which kill switch is there now (its inode), or null: what root's `set on` saw when it started (clearKillSwitch). */
+export function killSwitchSeen(instance: string, dir = POLICY_ROOT_DIR): number | null {
   try {
-    unlinkSync(killSwitchPath(instance, dir));
-  } catch (e) {
-    if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e;
+    return lstatSync(killSwitchPath(instance, dir)).ino;
+  } catch {
+    return null;
   }
+}
+
+/**
+ * Root's `policy set <instance> auto_merge on` only (src/policy-root.ts, inside its lock), after it wrote policy.yaml:
+ * the kill switch it saw when it started (`seen`, killSwitchSeen) goes, and only that one. THREAT: an OFF that lands
+ * while ON is in flight writes a new switch (a new inode); removing it would turn auto_merge back on after that OFF
+ * said done. So it is moved aside, checked, and put back when it isn't the one ON saw: the later OFF wins.
+ */
+export function clearKillSwitch(instance: string, seen: number | null, dir = POLICY_ROOT_DIR): void {
+  if (seen === null) return; // none when ON started: any switch there now is a later OFF's
+  const flag = killSwitchPath(instance, dir);
+  const aside = `${flag}.clearing.${randomBytes(6).toString('hex')}`;
+  try {
+    renameSync(flag, aside);
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === 'ENOENT') return;
+    throw e;
+  }
+  if (lstatSync(aside).ino !== seen) {
+    renameSync(aside, flag); // a later OFF's: back it goes (a still later one, if any, is newer still and stays off)
+    return;
+  }
+  unlinkSync(aside);
 }
