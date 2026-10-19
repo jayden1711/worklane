@@ -11,7 +11,7 @@ import type { ReviewConfig } from '../config/schema.js';
 import { type CommitCheck, type DoneWhenList, type PullRequest } from '../backlog/types.js';
 import type { EventPayload, StoredEvent } from '../events/types.js';
 import { writeGroupOnly } from '../os/index.js';
-import { computeLevel, loadMoneyPaths } from '../review.js';
+import { computeLevel } from '../review.js';
 import { shownPaths } from '../path-text.js';
 import type { Episode } from '../fix-forward.js';
 import { instructionTargets } from '../skilleval.js';
@@ -31,6 +31,7 @@ import { redactString } from '../events/redact.js';
 import { takeOpsPost } from '../watchdog/post.js';
 import { createWorktree, removeWorktree } from '../worktrees.js';
 import { approveMerge, mergeApproval } from '../decide.js';
+import { mayAnswerKind, type Role } from '../dashboard-auth.js';
 import type { ChatPerson } from '../intake/people.js';
 import { mayMerge, mergesPending, mergeTurn, PrBatcher, PR_BATCH_EVENTS } from './pr-batch.js';
 import { FixRuns } from './fix-runs.js';
@@ -106,7 +107,7 @@ export abstract class MergeFlow extends FixRuns {
       tiers: () => this.d.cfg.tests.test_run?.tiers ?? [],
       categories: (files) => {
         const review: ReviewConfig = this.d.cfg.review ?? DEFAULT_REVIEW;
-        return computeLevel({ files: files.map((path) => ({ path, added: 0, removed: 0 })), labels: [], moneyPaths: loadMoneyPaths(this.d.repo, review.money_path_source), scope: lockScopeOf(this.d) }, review).categories;
+        return computeLevel({ files: files.map((path) => ({ path, added: 0, removed: 0 })), labels: [], moneyPaths: this.moneyPaths(review.money_path_source), scope: lockScopeOf(this.d) }, review).categories;
       },
       revert: (o) => this.fixForwardRevert(o),
       giveUp: (o) => this.fixForwardGaveUp(o.ep, o.reason),
@@ -445,6 +446,10 @@ export abstract class MergeFlow extends FixRuns {
       await this.deferMerge(w, pr, 'behind', `GitHub requires it up to date with ${this.branch} first (mergeable_state behind)`);
       return null;
     }
+    // WHY (#715): the last thing before the merge call, on every path through this one door (the autonomous merge after
+    // its combined gate, mergeTested, mergeApproved): an emergency stop or an auto-merge stop raised during anything
+    // awaited above, or before it, holds the merge, an owner's approval included. Not merged this pass, nothing recorded.
+    if (this.emergencyInForce() || this.autoMergeStopped()) return null;
     let m: Awaited<ReturnType<typeof this.mergeOurs>>;
     try {
       m = await this.mergeOurs(pr);
@@ -499,7 +504,7 @@ export abstract class MergeFlow extends FixRuns {
     const base = mergeInBase(mergeIns, number, pr.headSha) ?? (this.events(n).filter((e) => e.type === 'issue.claimed').at(-1)!.payload as EventPayload<'issue.claimed'>).base;
     const files = this.changeFiles(this.d.repo, base, pr.headSha);
     const labels = (this.events(n).filter((e) => e.type === 'issue.seen').at(-1)?.payload as { labels?: string[] } | undefined)?.labels ?? [];
-    const level = computeLevel({ files, labels, moneyPaths: loadMoneyPaths(this.d.repo, review.money_path_source), scope: lockScopeOf(this.d) }, review);
+    const level = computeLevel({ files, labels, moneyPaths: this.moneyPaths(review.money_path_source), scope: lockScopeOf(this.d) }, review);
     const exists = (p: string) => spawnSync('git', ['cat-file', '-e', `${base}:${p}`], { cwd: this.d.repo }).status === 0;
     const newTopLevel = [...new Set(files.map((f) => f.path.split('/')).filter((s) => s.length > 1).map((s) => s[0]!))].filter((d) => !exists(d)).map((d) => `${d}/`);
     // The verdict on this head, or on the head the harness's merge-ins of the default branch were made on.
@@ -563,9 +568,10 @@ export abstract class MergeFlow extends FixRuns {
       // An owner's approval from a Discord thread at this very head: merged through the normal path below.
       const approved = mergeApproval(this.d.log, number, pr.headSha);
       if (approved) return this.mergeApproved(w, pr, approved.by);
-      // Batching: the owner's approval (a review) merges it, on exactly the main its batch tested.
+      // Batching: the owner's approval (a review) merges it, on exactly the main its batch tested. Never while
+      // auto-merge is stopped, as for a Discord approval (mergeApproved): an approval doesn't override the stop (#715).
       // Capped as the Discord approval is (triesCapped): after 3 failed merge tries at this head, no more.
-      if (batching && !this.emergencyInForce() && (await this.ownerApproved(w, pr)) && !this.triesCapped(w, pr, `@${this.ownerOf(w.issue)}'s review`)) await this.mergeTested(w, pr, 'approved');
+      if (batching && !this.emergencyInForce() && !this.autoMergeStopped() && (await this.ownerApproved(w, pr)) && !this.triesCapped(w, pr, `@${this.ownerOf(w.issue)}'s review`)) await this.mergeTested(w, pr, 'approved');
       return; // otherwise already waiting for the owner
     }
     const d = this.mergeDecisionFor(n, number, pr);
@@ -648,6 +654,9 @@ export abstract class MergeFlow extends FixRuns {
       if (how === 'approved') await this.d.backlog.comment(number, `[${BRAND.cli}] Approved, but not merged yet: ${turn.why}. It is tested again on the current ${this.branch} first, and merges once that passes.`);
       return;
     }
+    // Again right before merging (#715): the checks and the fetch above take time, and an emergency stop or an auto-merge
+    // stop raised meanwhile holds this merge too, an owner's approval (by review or from Discord) included.
+    if (this.emergencyInForce() || this.autoMergeStopped()) return;
     const m = await this.trainMerge(w, pr);
     if (!m) return;
     if (!m.ok) {
@@ -747,7 +756,12 @@ export abstract class MergeFlow extends FixRuns {
     if (!queued) return false;
     const owner = this.ownerOf(w.issue);
     const last = (await this.d.backlog.reviews(w.number)).filter((r) => r.author === owner && r.state !== 'COMMENTED').sort((a, b) => a.at.localeCompare(b.at)).at(-1);
-    return last?.state === 'APPROVED' && Date.parse(last.at) >= Date.parse(queued.ts);
+    if (!(last?.state === 'APPROVED' && Date.parse(last.at) >= Date.parse(queued.ts))) return false;
+    // The one rule for who may approve a high-risk merge (mayAnswerKind, #715): an area's owner who is only a writer
+    // on the repo approves it only where review.yaml on the default branch lets writers.
+    let role: Role | null = owner.toLowerCase() === this.d.cfg.project.owners.default.toLowerCase() ? 'owner' : 'writer';
+    if (this.d.roleOf) role = await this.d.roleOf(owner).catch(() => null);
+    return mayAnswerKind('land', role, this.approvals());
   }
 
   /**
@@ -793,7 +807,7 @@ export abstract class MergeFlow extends FixRuns {
       const base = mergeInBase(this.mergeInsOf(), w.number, head) ?? last<EventPayload<'issue.claimed'>>('issue.claimed')!.base;
       const files = this.changeFiles(this.d.repo, base, head);
       const labels = last<{ labels?: string[] }>('issue.seen')?.labels ?? [];
-      const level = computeLevel({ files, labels, moneyPaths: loadMoneyPaths(this.d.repo, review.money_path_source), scope: lockScopeOf(this.d) }, review);
+      const level = computeLevel({ files, labels, moneyPaths: this.moneyPaths(review.money_path_source), scope: lockScopeOf(this.d) }, review);
       const computed = riskClassOf({ paths: files.map((f) => f.path), level, waitCategories: waitCategoriesOf(review) });
       const cls = effectiveClass(computed.cls, this.claimedClass(n));
       risk = { cls, why: cls === computed.cls ? computed.why : [`raised from ${computed.cls} by the worker`, ...computed.why] };
@@ -1261,7 +1275,7 @@ export abstract class MergeFlow extends FixRuns {
     if (!claimed) return { checks: required, fast: false };
     const files = this.changeFiles(this.d.repo, claimed.base, head);
     const labels = (this.events(n).filter((e) => e.type === 'issue.seen').at(-1)?.payload as { labels?: string[] } | undefined)?.labels ?? [];
-    const level = computeLevel({ files, labels, moneyPaths: loadMoneyPaths(this.d.repo, review.money_path_source), scope: lockScopeOf(this.d) }, review);
+    const level = computeLevel({ files, labels, moneyPaths: this.moneyPaths(review.money_path_source), scope: lockScopeOf(this.d) }, review);
     const cls = effectiveClass(riskClassOf({ paths: files.map((f) => f.path), level, waitCategories: waitCategoriesOf(review) }).cls, this.claimedClass(n));
     return checksFor({ cls, required, docsOnlyChecks: review.docs_only_checks });
   }

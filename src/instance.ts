@@ -1,10 +1,5 @@
-// Instances: one per project, each with its own home outside any repo.
-//   <instances dir>/<name>/instance.yaml     which repo(s) this instance works
-//   <instances dir>/<name>/policy.yaml       operator policy: budget, limits, allowlists
-//   <instances dir>/<name>/credentials.yaml  references to credentials, never values
-//   <instances dir>/<name>/state/            event log, locks, worktree records
-// The repo's own config folder keeps project behavior (tests, review levels,
-// skills) and is reviewed like code; it may only tighten the instance policy.
+// Instances: one per project, each with a home outside any repo: instance.yaml (its repo), policy.yaml (operator
+// policy), credentials.yaml (references, never values), state/. The repo's config folder may only tighten the policy.
 import { AutomationsPolicy } from './automations/schema.js';
 import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
@@ -14,7 +9,7 @@ import { BRAND } from './brand.js';
 import { INSTANCE_FILE_NAME_MAX, instanceNameProblem } from './instance-name.js';
 import { CLI_AGENTS } from './providers.js';
 import { ConfigInvalid, loadConfig, type Config, type ConfigError } from './config/load.js';
-import { defaultAgentPath, homeOf, homesRoot, replaceFileAtomically, stateDir, userExists } from './os/index.js';
+import { defaultAgentPath, homeOf, homesRoot, normalAbsolute, normalHome, NOT_NORMAL_ABSOLUTE, replaceFileAtomically, stateDir, userExists, type ProjectRunAs } from './os/index.js';
 import type { RunAs } from './runner.js';
 import { homeCredentialStores, sandboxSettings } from './sandbox.js';
 import { RESEARCH_DIR, RESEARCH_LANE, RESEARCH_REPO_LANE, RESEARCH_ROOT_ENV } from './research.js';
@@ -34,6 +29,21 @@ const name = z.string().superRefine((s, ctx) => {
   if (why) ctx.addIssue({ code: 'custom', message: why });
 });
 
+// A configured path: normalAbsolute (as projectCommand checks), refused at load, never rewritten (#713). A relative
+// one depends on the coordinator's cwd, a lexical `..` can name another file than the kernel reaches, and the sandbox
+// hides each by this exact path.
+const path = z
+  .string()
+  .min(1)
+  .refine((p) => isAbsolute(p), { message: 'must be an absolute path' })
+  .refine((p) => !isAbsolute(p) || normalAbsolute(p), { message: `${NOT_NORMAL_ABSOLUTE}: name the real path` });
+/** A home: the same rule, but `/` is allowed (some users' home; never hidden). */
+const homePath = z
+  .string()
+  .min(1)
+  .refine((p) => isAbsolute(p), { message: 'must be an absolute path' })
+  .refine((p) => !isAbsolute(p) || normalHome(p), { message: `${NOT_NORMAL_ABSOLUTE}: name the real path` });
+
 export const InstanceFile = z.strictObject({
   version: z.literal(1),
   name,
@@ -45,12 +55,12 @@ export const InstanceFile = z.strictObject({
   run_as: z
     .strictObject({
       agent_user: z.string().regex(/^[a-z_][a-z0-9_-]{0,31}$/, 'a POSIX user name'),
-      agent_home: z.string().min(1),
-      claude_config_dir: z.string().min(1).optional(),
+      agent_home: homePath,
+      claude_config_dir: path.optional(),
       /** A second unprivileged user for lanes that run as `eval`: the only one able to read the eval key. */
       eval_user: z.string().regex(/^[a-z_][a-z0-9_-]{0,31}$/, 'a POSIX user name').optional(),
       /** Resolved from the system's user database when left out; required where it can't be. */
-      eval_home: z.string().min(1).optional(),
+      eval_home: homePath.optional(),
       /**
        * PATH for project commands run as the agent users (tests, checks, setup steps). The instance's owner sets it;
        * a repo's tests.yaml never can. Default: the system directories, plus Homebrew's on macOS.
@@ -145,6 +155,15 @@ export const PolicyFile = z.strictObject({
    */
   auto_merge: z.boolean().default(false),
   /**
+   * Whether the repo's review.yaml may let writers approve a high-risk merge (`approvals: { land: writers }`, #715).
+   * Off (the default): only the owners approve, whatever review.yaml says. Never settable from the dashboard (not a
+   * policy-edit.ts POLICY_KEYS key): root or the coordinator user edits this file today, root alone once #769 makes it
+   * root's. Read on every approval,
+   * so turning it off takes effect at once. WHY not a config refusal: turning it off must never stop an instance
+   * starting (a repo config refused at start, with its checkout's copy asking the same, would).
+   */
+  writers_approve_land: z.boolean().default(false),
+  /**
    * The main watch (src/main-watch.ts): auto, it guards the default branch whenever GitHub doesn't protect it (the
    * protection API answers 403 or 404); off, it doesn't. Read on every pass.
    */
@@ -174,7 +193,6 @@ export const PolicyFile = z.strictObject({
   pre_approved: z.array(z.string()).optional(),
 });
 
-const path = z.string().min(1);
 export const CredentialsFile = z.strictObject({
   version: z.literal(1),
   // A dedicated gh config dir (its own login) or a GitHub App key. Never the operator's personal login.
@@ -222,7 +240,8 @@ export type CredentialsFile = z.infer<typeof CredentialsFile>;
 
 export interface Instance {
   name: string;
-  runAs: { user: string; home: string; claudeConfigDir?: string; path?: string } | null;
+  /** `hide`: what its project commands' sandbox hides (projectCommandHides). */
+  runAs: { user: string; home: string; claudeConfigDir?: string; path?: string; hide: readonly string[] } | null;
   /** Set in instance.yaml; otherwise resolved at start (the App's bot identity). */
   commitIdentity?: { name: string; email: string };
   evalAs: { user: string; home: string; path?: string } | null;
@@ -299,11 +318,14 @@ export function loadInstance(instanceName: string, dir = instancesDir()): Instan
     throw new ConfigInvalid([{ file: join(home, 'instance.yaml'), path: 'run_as.eval_user', message: 'a lane runs as eval, so set eval_user and eval_home' }]);
   }
   const path = inst.run_as?.path ?? defaultAgentPath();
-  const runAs = inst.run_as ? { user: inst.run_as.agent_user, home: inst.run_as.agent_home, path, ...(inst.run_as.claude_config_dir ? { claudeConfigDir: inst.run_as.claude_config_dir } : {}) } : null;
+  const ccd = inst.run_as?.claude_config_dir;
+  const runAs = inst.run_as ? { user: inst.run_as.agent_user, home: inst.run_as.agent_home, path, ...(ccd ? { claudeConfigDir: ccd } : {}), hide: projectCommandHides(home, repo.path, credentials, ccd) } : null;
   let evalAs: { user: string; home: string; path: string } | null = null;
   if (inst.run_as?.eval_user) {
     const evalHome = inst.run_as.eval_home ?? resolveHome(inst.run_as.eval_user);
     if (!evalHome) throw new ConfigInvalid([{ file: join(home, 'instance.yaml'), path: 'run_as.eval_home', message: `can't find ${inst.run_as.eval_user}'s home on this machine; set eval_home` }]);
+    // The user database's answer is held to the same rule as a configured home: refused, never rewritten.
+    if (!normalHome(evalHome)) throw new ConfigInvalid([{ file: join(home, 'instance.yaml'), path: 'run_as.eval_home', message: `${inst.run_as.eval_user}'s home ${JSON.stringify(evalHome)} ${NOT_NORMAL_ABSOLUTE}; set eval_home to its real path` }]);
     evalAs = { user: inst.run_as.eval_user, home: evalHome, path };
   }
   return { name: instanceName, home, stateDir: join(home, 'state'), repo, policy, credentials, config, runAs, evalAs, ...(inst.commit_identity ? { commitIdentity: inst.commit_identity } : {}) };
@@ -478,15 +500,27 @@ export const instanceFilesProblem = (e: unknown): string => (e instanceof Config
  * credential references and policy. Server auto-config needs it (src/server-auto-config.ts); loadInstance needs the
  * repo config too.
  */
-export function loadInstanceSetup(instanceName: string, dir = instancesDir()): { home: string; stateDir: string; repo: { path: string; repo: string }; credentials: CredentialsFile; policy: PolicyFile; runAs: RunAs | null } {
+export function loadInstanceSetup(instanceName: string, dir = instancesDir()): { home: string; stateDir: string; repo: { path: string; repo: string }; credentials: CredentialsFile; policy: PolicyFile; runAs: (RunAs & ProjectRunAs) | null } {
   const home = join(dir, instanceName);
   const errors: ConfigError[] = [];
   const inst = readYaml(InstanceFile, join(home, 'instance.yaml'), errors);
   const policy = readYaml(PolicyFile, join(home, 'policy.yaml'), errors);
   const credentials = readYaml(CredentialsFile, join(home, 'credentials.yaml'), errors);
   if (errors.length || !inst || !policy || !credentials) throw new ConfigInvalid(errors);
-  const runAs = inst.run_as ? { user: inst.run_as.agent_user, home: inst.run_as.agent_home, path: inst.run_as.path ?? defaultAgentPath() } : null;
-  return { home, stateDir: join(home, 'state'), repo: { ...inst.repos[0]!, path: resolve(home, inst.repos[0]!.path) }, credentials, policy, runAs };
+  const repoPath = resolve(home, inst.repos[0]!.path);
+  const runAs = inst.run_as ? { user: inst.run_as.agent_user, home: inst.run_as.agent_home, path: inst.run_as.path ?? defaultAgentPath(), hide: projectCommandHides(home, repoPath, credentials, inst.run_as.claude_config_dir) } : null;
+  return { home, stateDir: join(home, 'state'), repo: { ...inst.repos[0]!, path: repoPath }, credentials, policy, runAs };
+}
+
+/**
+ * What a project command never sees beyond ~/.claude*: the instance home, a Claude config dir set elsewhere, every
+ * file credentials.yaml names. Never a directory holding the checkout, where commands run.
+ */
+export function projectCommandHides(instanceHome: string, repoPath: string, c: CredentialsFile, claudeConfigDir?: string): string[] {
+  const named = [instanceHome, claudeConfigDir, c.github.kind === 'app' ? c.github.key_path : c.github.path, c.claude?.config_dir, c.eval_key, c.agent_api_key, ...Object.values(c.provider_keys ?? {}), ...Object.values(c.intake ?? {})];
+  const holdsRepo = (p: string) => repoPath === p || repoPath.startsWith(p.endsWith('/') ? p : `${p}/`);
+  // As written, never dropped or rewritten: projectCommand refuses one not in normal form.
+  return [...new Set(named.filter((p): p is string => typeof p === 'string'))].filter((p) => !holdsRepo(p));
 }
 
 /** How an instance's GitHub App was made, as its setup recorded it (beside the App's key): the manifest flow, or by hand. */
@@ -503,9 +537,8 @@ export function readAppOrigin(keyPath: string): AppOrigin | null {
 }
 
 /**
- * Point an instance's credentials.yaml at its GitHub App, keeping its other settings, validated against the schema
- * before anything is written (0600, renamed into place), and record how the App was made beside its key. The one
- * writer of the App entry: credentials.sh github-app (`instance set-github-app`) and the manifest flow both come here.
+ * Point credentials.yaml at its GitHub App, validated before it is written (0600, renamed into place), recording how
+ * the App was made beside its key; the App entry's one writer (credentials.sh github-app, the manifest flow).
  */
 export function setGithubApp(file: string, app: { appId: number; installationId: number; keyPath: string }, origin: AppOrigin): void {
   const doc = parseDocument(existsSync(file) ? readFileSync(file, 'utf8') : 'version: 1\n');
@@ -520,11 +553,9 @@ export function setGithubApp(file: string, app: { appId: number; installationId:
 }
 
 /**
- * Point an instance's credentials.yaml at its chat bot's token file (intake.discord_token), keeping its other
- * settings, validated against the schema before anything is written (0600, renamed into place). The one writer of
- * that entry: credentials.sh intake-discord (`instance set-discord-token`) and the dashboard's pasted token both come
- * here. Only the file's path: the token is never read here. Refused: a path that isn't absolute, isn't a plain file,
- * or that its group or others can read (the token is the coordinator user's alone).
+ * Point credentials.yaml at the chat bot's token file (intake.discord_token), validated before it is written (0600,
+ * renamed into place); its one writer. Only the path: the token is never read. Refused: a path that isn't absolute,
+ * isn't a plain file, or that its group or others can read (the token is the coordinator user's alone).
  */
 export function setDiscordToken(file: string, tokenFile: string): void {
   setIntakeCredential(file, 'discord_token', tokenFile);
@@ -535,11 +566,9 @@ export const INTAKE_CREDENTIAL_KEYS = ['discord_token', 'slack_app_token', 'slac
 export type IntakeCredentialKey = (typeof INTAKE_CREDENTIAL_KEYS)[number];
 
 /**
- * Point an instance's credentials.yaml at one intake credential's file (intake.<key>), keeping its other settings,
- * validated before anything is written (0600, renamed into place). The one writer of those entries: credentials.sh
- * (`instance set-discord-token`, `instance set-intake-credential`) and the dashboard's paste box both come here. Only
- * the file's path: the secret is never read here. Refused: a path that isn't absolute, isn't a plain file, or that
- * its group or others can read (the secret is the coordinator user's alone).
+ * Point credentials.yaml at one intake credential's file (intake.<key>), validated before it is written (0600, renamed
+ * into place); their one writer. Only the path: the secret is never read. Refused: a path that isn't absolute, isn't
+ * a plain file, or that its group or others can read (the secret is the coordinator user's alone).
  */
 export function setIntakeCredential(file: string, key: IntakeCredentialKey, tokenFile: string): void {
   if (!INTAKE_CREDENTIAL_KEYS.includes(key)) throw new Error(`not an intake credential: ${String(key)}`);

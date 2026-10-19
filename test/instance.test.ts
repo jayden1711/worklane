@@ -247,9 +247,9 @@ test('instance init names the agent user the setup scripts create', () => {
 test('regression: an instance whose agent user does not exist on this machine is refused before it starts', { skip: process.platform === 'win32' && 'POSIX users' }, () => {
   const credentials = { version: 1, github: { kind: 'gh-config-dir', path: tmpdir() } };
   const problems = (runAs: Instance['runAs']) => instanceProblems({ credentials, runAs, evalAs: null } as unknown as Instance);
-  assert.deepEqual(problems({ user: 'wl-no-such-agent-user', home: '/home/wl-no-such-agent-user' }), ['agent user wl-no-such-agent-user (instance.yaml run_as) does not exist on this machine']);
-  assert.deepEqual(problems({ user: userInfo().username, home: join(tmpdir(), 'no-such-home') }), [`agent user ${userInfo().username}'s home ${join(tmpdir(), 'no-such-home')} not found`]);
-  assert.deepEqual(problems({ user: userInfo().username, home: homedir() }), []);
+  assert.deepEqual(problems({ user: 'wl-no-such-agent-user', home: '/home/wl-no-such-agent-user', hide: [] }), ['agent user wl-no-such-agent-user (instance.yaml run_as) does not exist on this machine']);
+  assert.deepEqual(problems({ user: userInfo().username, home: join(tmpdir(), 'no-such-home'), hide: [] }), [`agent user ${userInfo().username}'s home ${join(tmpdir(), 'no-such-home')} not found`]);
+  assert.deepEqual(problems({ user: userInfo().username, home: homedir(), hide: [] }), []);
 });
 
 const cliRun = (args: string[], env: NodeJS.ProcessEnv) => spawnSync(process.execPath, [join(repoRoot, 'dist', 'src', 'cli.js'), ...args], { encoding: 'utf8', env });

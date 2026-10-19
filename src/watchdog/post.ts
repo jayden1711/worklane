@@ -3,6 +3,7 @@
 // pass, oldest first. An incident resolved before its first post was ever sent is not posted at all (it came and
 // went inside the limit). Every post is redacted again here, and the bot's own token is never in one.
 import { readIncidents, redactIncidentText, withIncidents, type Incident } from './incidents.js';
+import type { SlotPathLike } from '../slot-file.js';
 
 /** At most this many posts per window, machine-wide. */
 export const RATE = { max: 5, windowMs: 10 * 60_000 } as const;
@@ -63,7 +64,7 @@ function pending(incidents: Incident[]): { id: string; what: 'raised' | 'resolve
  * Post what waits, within the rate limit. Only the one poster on the machine calls this (the watchdog's post lock),
  * so a post is never sent twice; its mark is written right after it went.
  */
-export async function postPending(o: { poster: Poster; dashboardUrl?: string | null; secrets?: string[]; dir?: string; now?: () => Date }): Promise<{ posted: number; waiting: number }> {
+export async function postPending(o: { poster: Poster; dashboardUrl?: string | null; secrets?: string[]; dir?: SlotPathLike; now?: () => Date }): Promise<{ posted: number; waiting: number }> {
   const now = o.now ?? (() => new Date());
   // Resolved before ever posted: nothing to say about it.
   withIncidents(o.dir, (f) => {
@@ -100,7 +101,7 @@ export async function postPending(o: { poster: Poster; dashboardUrl?: string | n
  * posts: true, and counted, when one may go now; false when the window is full (try again later). The one helper for
  * all of them, so they share the one window. `now`: a Date or epoch ms.
  */
-export function takeOpsPost(o: { dir?: string; now?: Date | number } = {}): boolean {
+export function takeOpsPost(o: { dir?: SlotPathLike; now?: Date | number } = {}): boolean {
   const t = o.now === undefined ? Date.now() : typeof o.now === 'number' ? o.now : o.now.getTime();
   return withIncidents(o.dir, (f) => {
     const recent = f.posts.filter((s) => t - Date.parse(s) < RATE.windowMs);
