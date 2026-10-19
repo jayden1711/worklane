@@ -14,7 +14,9 @@
 # nvidia_uvm's "add"), and that program sets every node it makes to root:root 0666, fixing any other mode back,
 # whatever the driver's options say. This runs after it, on the same events. A root NVML call later (nvidia-smi, the
 # nvidia-cdi-refresh unit at boot) puts nvidia-uvm, nvidia-uvm-tools and the nvidia-caps nodes back, so it runs again
-# after that unit.
+# after that unit. NVreg_ModifyDeviceFiles=0 (gpu-devices.sh apply --no-dynamic-nodes) does not stop that reset
+# (measured, #583: `sudo nvidia-smi -L` put nvidia-uvm and nvidia-uvm-tools back to root:root 0666 with it in effect):
+# after any root NVML call, root runs this again, then gpu-devices.sh check.
 set -uo pipefail
 export PATH=/usr/sbin:/usr/bin:/sbin:/bin
 GROUP=worklane-gpu-dev

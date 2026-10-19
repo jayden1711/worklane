@@ -1,11 +1,10 @@
 // Test-run slots: how many test runs go at once on the machine, across every instance. They are lease files in the
 // machine's slot directory (docs/slots.md), `test-<i>.lock`, beside the agents' and counted apart from them; the cap
 // is slots.json `max_test_runs`, a machine setting changed only through the machine helper (set-test-slots).
-import { readdirSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { tryLock, type Lock, type LockInfo } from '../locks.js';
 import { TEST_SLOTS_MAX, TEST_SLOTS_MIN } from '../machine.js';
 import { pidAlive, slotsConfigPath, slotsDir } from '../os/index.js';
+import { listSlotDir, readSlotFile, slotFile, type SlotPathLike } from '../slot-file.js';
 import { updateDrain } from '../update-drain.js';
 
 export { TEST_SLOTS_MAX, TEST_SLOTS_MIN };
@@ -14,9 +13,9 @@ export { TEST_SLOTS_MAX, TEST_SLOTS_MIN };
 export const DEFAULT_TEST_SLOTS = 2;
 const INDEX_LIMIT = 32;
 
-export function testSlotCap(dir = slotsDir()): number {
+export function testSlotCap(dir: SlotPathLike = slotsDir()): number {
   try {
-    const n = (JSON.parse(readFileSync(slotsConfigPath(dir), 'utf8')) as { max_test_runs?: unknown }).max_test_runs;
+    const n = (JSON.parse(readSlotFile(slotsConfigPath(dir))) as { max_test_runs?: unknown }).max_test_runs;
     return typeof n === 'number' && Number.isInteger(n) && n >= TEST_SLOTS_MIN && n <= TEST_SLOTS_MAX ? n : DEFAULT_TEST_SLOTS;
   } catch {
     return DEFAULT_TEST_SLOTS;
@@ -24,10 +23,10 @@ export function testSlotCap(dir = slotsDir()): number {
 }
 
 /** The live test-run slots (dead holders don't count). */
-export function testSlotsHeld(dir = slotsDir()): (LockInfo & { slot: string })[] {
+export function testSlotsHeld(dir: SlotPathLike = slotsDir()): (LockInfo & { slot: string })[] {
   let files: string[] = [];
   try {
-    files = readdirSync(dir);
+    files = listSlotDir(dir);
   } catch {
     return [];
   }
@@ -35,7 +34,7 @@ export function testSlotsHeld(dir = slotsDir()): (LockInfo & { slot: string })[]
   for (const f of files) {
     if (!/^test-\d+\.lock$/.test(f)) continue;
     try {
-      const info = JSON.parse(readFileSync(join(dir, f), 'utf8')) as LockInfo;
+      const info = JSON.parse(readSlotFile(slotFile(dir, f))) as LockInfo;
       if (pidAlive(info.pid)) out.push({ ...info, slot: f.replace('.lock', '') });
     } catch {
       // released in between
@@ -49,15 +48,15 @@ export function testSlotsHeld(dir = slotsDir()): (LockInfo & { slot: string })[]
  * counting and taking under the slot directory's lock. `limitMs`: the longest the run can take holding it, recorded in
  * the slot for the updater's drain to say when the machine will be quiet.
  */
-export function tryTestSlot(owner: string, dir = slotsDir(), limitMs?: number): Lock | null {
-  const guard = tryLock(join(dir, 'slots.lock'), owner);
+export function tryTestSlot(owner: string, dir: SlotPathLike = slotsDir(), limitMs?: number): Lock | null {
+  const guard = tryLock(slotFile(dir, 'slots.lock'), owner);
   if (!('lock' in guard)) return null;
   try {
     // INVARIANT: read under the slot directory's lock, so a drain the updater has written is never raced by a new run.
     if (updateDrain(dir)) return null;
     if (testSlotsHeld(dir).length >= testSlotCap(dir)) return null;
     for (let i = 0; i < INDEX_LIMIT; i++) {
-      const r = tryLock(join(dir, `test-${i}.lock`), owner, {}, limitMs !== undefined && Number.isFinite(limitMs) && limitMs > 0 ? { limit_ms: Math.round(limitMs) } : {});
+      const r = tryLock(slotFile(dir, `test-${i}.lock`), owner, {}, limitMs !== undefined && Number.isFinite(limitMs) && limitMs > 0 ? { limit_ms: Math.round(limitMs) } : {});
       if ('lock' in r) return r.lock;
     }
     return null;
@@ -67,7 +66,7 @@ export function tryTestSlot(owner: string, dir = slotsDir(), limitMs?: number): 
 }
 
 /** Wait for a test slot (and for any update drain to end), however long it takes; rejects only when `signal` aborts. */
-export async function waitTestSlot(owner: string, o: { dir?: string; pollMs?: number; signal?: AbortSignal; limitMs?: number } = {}): Promise<Lock> {
+export async function waitTestSlot(owner: string, o: { dir?: SlotPathLike; pollMs?: number; signal?: AbortSignal; limitMs?: number } = {}): Promise<Lock> {
   for (;;) {
     if (o.signal?.aborted) throw new Error('cancelled while waiting for a test slot');
     const s = tryTestSlot(owner, o.dir, o.limitMs);
