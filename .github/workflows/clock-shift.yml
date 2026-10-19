@@ -21,7 +21,7 @@ jobs:
   clock-shift:
     name: unit tests on a shifted clock
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 170
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -43,16 +43,21 @@ jobs:
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
       - run: npm run build
       - run: npm run build:web
+      # Each run finishes and names what failed: a test that hangs is cancelled after 10 minutes (--test-timeout) and
+      # named in the summary with its file, and a file whose tests are done exits even with a handle left open
+      # (--test-force-exit). A step that still runs too long stops on its own, and the next step runs anyway.
       - name: the tests, 45 days later
+        timeout-minutes: 75
         shell: bash
         env:
           CI_REQUIRE_WEB: '1'
           TEST_CLOCK_SHIFT: '+45d'
-        run: NODE_OPTIONS="--import=$PWD/dist/test/clock-shift.js" node --import ./dist/test/isolate.js --test "dist/test/**/*.test.js"
+        run: NODE_OPTIONS="--import=$PWD/dist/test/clock-shift.js" node --import ./dist/test/isolate.js --test --test-timeout=600000 --test-force-exit "dist/test/**/*.test.js"
       - name: the tests, 400 days later
         if: ${{ !cancelled() }}
+        timeout-minutes: 75
         shell: bash
         env:
           CI_REQUIRE_WEB: '1'
           TEST_CLOCK_SHIFT: '+400d'
-        run: NODE_OPTIONS="--import=$PWD/dist/test/clock-shift.js" node --import ./dist/test/isolate.js --test "dist/test/**/*.test.js"
+        run: NODE_OPTIONS="--import=$PWD/dist/test/clock-shift.js" node --import ./dist/test/isolate.js --test --test-timeout=600000 --test-force-exit "dist/test/**/*.test.js"
