@@ -18,7 +18,7 @@ import { ROUTING_ALIASES } from './routing.js';
 import { attachmentCaps } from './chat-attachments.js';
 import type { StuckMode } from './stuck.js';
 import { etcPath } from './os/system-paths.js';
-import { readPolicyChecked } from './policy-gate.js';
+import { encodePolicyValue, readPolicyChecked } from './policy-gate.js';
 
 /** The machine's bounds on instance settings: root-owned, outside every instance's home. */
 export const LIMITS_PATH = etcPath('limits.json');
@@ -235,9 +235,10 @@ export function researchCaps(s: InstanceSettings): ResearchCaps {
  * The new value is checked against the schema, the machine's limits and the policy's ceilings; refused,
  * nothing changes. Written atomically (a temp file beside policy.yaml, same owner, mode 0600, then a
  * rename), and recorded as settings.changed in the instance's event log. A root policy.yaml (src/policy-gate.ts) is
- * never written here: refused, naming the root command.
+ * never written here: the checked change is handed to `request` (root's helper's arguments), and its id returned;
+ * without one, refused, naming the root command.
  */
-export function changeSetting(o: { policyPath: string; cfg: Config; eventsDb: string; key: string; value: unknown; by: string; owner?: boolean; actor?: string; limitsPath?: string; now?: () => Date }): { from: unknown; to: unknown } {
+export function changeSetting(o: { policyPath: string; cfg: Config; eventsDb: string; key: string; value: unknown; by: string; owner?: boolean; actor?: string; limitsPath?: string; now?: () => Date; request?: (args: string[]) => string }): { from: unknown; to: unknown; requested?: string } {
   const owner = o.cfg.project.owners.default;
   const isOwner = o.owner ?? (!!o.by && o.by.toLowerCase() === owner.toLowerCase());
   if (!o.by || !isOwner) throw new SettingsError(`only the owner (@${owner}) may change settings; @${o.by || 'unknown'} may not`);
@@ -255,8 +256,14 @@ export function changeSetting(o: { policyPath: string; cfg: Config; eventsDb: st
   const problems = settingsProblems(parsed.data.settings, loadLimits(o.limitsPath), parsed.data);
   if (problems.length) throw new SettingsError(`refused: ${problems.join('; ')}`);
   const to = currentValue(o.cfg, parsed.data.settings, key);
-  // A root policy.yaml (src/policy-gate.ts) is never written here: root changes it.
-  if (checked) throw new SettingsError(`${o.policyPath} is root's: an admin changes it at a root shell (sudo ${BRAND.cli} policy set <instance> settings.${key} <value>)`);
+  // A root policy.yaml (src/policy-gate.ts) is never written here: the checked change goes to root's helper, which
+  // checks it again and writes it; the coordinator records settings.changed once it has run.
+  if (checked) {
+    const arg = encodePolicyValue(`settings.${key}`, o.value);
+    if (arg === null) throw new SettingsError(`refused: ${key} ${JSON.stringify(o.value)} can't be passed to root's helper`);
+    if (!o.request) throw new SettingsError(`${o.policyPath} is root's: an admin changes it at a root shell (sudo ${BRAND.cli} policy set <instance> settings.${key} ${arg})`);
+    return { from, to, requested: o.request(['set-policy', `settings.${key}`, arg]) };
+  }
   // Atomic: a temp file in the same directory, the original's owner, 0600; then rename over it.
   replaceFileAtomically(o.policyPath, doc.toString(), 0o600);
   const log = new EventLog(o.eventsDb);

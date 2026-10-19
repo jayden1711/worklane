@@ -424,3 +424,12 @@ test("the policy step makes the instance's policy.yaml root's, and a rerun on an
   assert.ok(r.events.some((e) => e.step === 'policy' && e.state === 'done' && / policy set alpha /.test(e.detail)), JSON.stringify(r.events));
   assert.equal(readFileSync(join(m.instDir('alpha'), 'policy.yaml'), 'utf8'), before, 'the setup step itself never rewrites it');
 });
+
+test('the sudoers rule lets coordinators run set-policy with one anchored pattern of plain words (#726)', { skip: !posix && 'bash' }, () => {
+  const r = spawnSync('bash', ['-c', 'source "$1"; machine_sudoers wl-alpha', '_', join(setupDir, 'lib.sh')], { encoding: 'utf8' });
+  assert.equal(r.status, 0, r.stderr);
+  const line = r.stdout.split('\n').find((l) => l.includes('set-policy'))!.trim().replace(/, \\$/, '');
+  const re = new RegExp(line.split(' ').slice(1).join(' '));
+  for (const a of ['set-policy auto_merge on', 'set-policy settings.workers 3', 'set-policy settings.run_windows 0900-1700+2200-0600']) assert.match(a, re, a);
+  for (const a of ['set-policy auto_merge', 'set-policy auto_merge on x', 'set-policy Auto on', 'set-policy auto_merge on;id', 'set-policy auto_merge {"x":1}']) assert.doesNotMatch(a, re, a);
+});

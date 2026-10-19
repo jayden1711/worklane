@@ -4,20 +4,29 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { linkSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { BRAND } from '../src/brand.js';
 import { loadConfig } from '../src/config/load.js';
+import { EventLog } from '../src/events/log.js';
 import { loadInstanceSetup, readPolicy } from '../src/instance.js';
 import { applyPolicy, POLICY_KEYS, PolicyEditError } from '../src/policy-edit.js';
 import { changeSetting, SETTING_KEYS, settingsReader, SettingsError } from '../src/settings.js';
-import { decodePolicyValue, POLICY_ROOT_DIR, POLICY_SET_KEYS, setPolicyRootUid } from '../src/policy-gate.js';
+import { decodePolicyValue, encodePolicyValue, POLICY_ROOT_DIR, POLICY_SET_KEYS, setPolicyRootUid } from '../src/policy-gate.js';
 import { ownPolicy, setPolicy, type PolicyRootDeps } from '../src/policy-root.js';
 import { policyRootChecks } from '../src/doctor-policy-root.js';
-import { exampleProject } from './helpers.js';
+import { checkRootStep } from '../src/console/root-steps.js';
+import { MACHINE_HELPER } from '../src/machine.js';
+import { MachineRequestError, machineRequests, requestPolicyChange } from '../src/machine-requests.js';
+import { runMachineRequests } from '../src/coordinator/machine-requests.js';
+import { exampleProject, repoRoot } from './helpers.js';
 
 const posix = process.platform !== 'win32';
 const skip = !posix && 'POSIX owners and modes';
+const helperSrc = join(repoRoot, 'scripts', 'machine', 'worklane-machine.cjs');
+const helper = createRequire(import.meta.url)(helperSrc) as { parsePolicySet: (a: string[]) => { key: string; value: string } | null; POLICY_SET_KEYS: Record<string, string> };
 const cfg = loadConfig(exampleProject().dir);
 const me = posix ? process.getuid!() : 0;
 const POLICY = `version: 1
@@ -48,6 +57,14 @@ function asRoot<R>(fn: () => R): R {
     setPolicyRootUid(0);
   }
 }
+/** The helper through sudo, stood in: its own argument check, then the engine's `policy set` as root with SUDO_USER wl-<name>. */
+const helperStandIn = (name: string, deps: PolicyRootDeps, calls: string[][]) => (file: string, args: string[]) => {
+  calls.push([file, ...args]);
+  assert.deepEqual(args.slice(0, 2), ['-n', MACHINE_HELPER]);
+  const p = helper.parsePolicySet(args.slice(2));
+  if (!p) throw Object.assign(new Error('usage'), { stderr: 'usage: worklane-machine ...' });
+  return JSON.stringify(asRoot(() => setPolicy(name, p.key, p.value, `wl-${name}`, deps)));
+};
 
 test('setup makes an existing coordinator-owned policy.yaml root\'s with its content unchanged, and shows a loose key', { skip }, () => {
   const loose = `${POLICY}sandbox: false\n`;
@@ -161,4 +178,71 @@ test('doctor: a machine install whose policy.yaml the coordinator can rewrite is
   const failed = policyRootChecks(m.instances, { machine: true })[0]!;
   assert.equal(failed.level, 'fail');
   assert.match(failed.detail, new RegExp(`sudo ${BRAND.cli} policy own doc.*won't start`));
+});
+
+test("a dashboard change to auto_merge (and a Settings change) still works, through root's helper", { skip }, () => {
+  const m = machineInstance('change');
+  ownPolicy('change', m.deps);
+  const log = new EventLog(':memory:');
+  const asked: string[][] = [];
+  const request = (args: string[]) => (asked.push(args), requestPolicyChange(log, { args, by: 'olive', breakGlass: false }).id);
+  asRoot(() => {
+    assert.deepEqual(applyPolicy({ path: m.file, cfg, values: { auto_merge: true }, eventsDb: join(m.T, 'events.db'), by: 'olive', request }), [{ key: 'auto_merge', from: false, to: true }]);
+    assert.ok(changeSetting({ policyPath: m.file, cfg, eventsDb: join(m.T, 'events.db'), key: 'workers', value: 1, by: cfg.project.owners.default, owner: true, request }).requested);
+  });
+  assert.deepEqual(asked, [['set-policy', 'auto_merge', 'on'], ['set-policy', 'settings.workers', '1']]);
+  assert.match(readFileSync(m.file, 'utf8'), /auto_merge: false/, 'the dashboard wrote nothing itself');
+  // The coordinator's next tick: each through the helper, as root.
+  const calls: string[][] = [];
+  assert.equal(runMachineRequests({ log, instance: 'change', exec: helperStandIn('change', m.deps, calls) }), 2);
+  assert.deepEqual(calls.map((c) => c.slice(3)), asked);
+  assert.deepEqual(machineRequests(log.read(0)).map((r) => r.status), ['done', 'done']);
+  const p = asRoot(() => readPolicy(m.file).policy)!;
+  assert.equal(p.auto_merge, true);
+  assert.equal(p.settings.workers, 1);
+  assert.equal(statSync(m.file).mode & 0o777, 0o644);
+  assert.match(readFileSync(m.file, 'utf8'), /# the operator's own notes stay/);
+  const changed = log.read(0, ['settings.changed']).map((e) => e.payload as { key: string; from: unknown; to: unknown; by: string });
+  assert.deepEqual(changed.map((c) => [c.key, c.from, c.to, c.by]), [['policy.auto_merge', false, true, 'olive'], ['workers', null, 1, 'olive']]);
+});
+
+test("root's helper refuses sandbox: false and allow_same_user: true from the dashboard (and a loosening of land_mode or main_watch)", { skip }, () => {
+  const loosen = [['sandbox', 'off'], ['allow_same_user', 'on'], ['land_mode', 'direct'], ['main_watch', 'off'], ['lanes', 'none'], ['network_allow', 'none']];
+  for (const [k, v] of loosen) {
+    assert.equal(helper.parsePolicySet(['set-policy', k!, v!]), null, `${k} ${v}`);
+    assert.equal(checkRootStep('set-policy', [k!, v!]).allowed, false, `${k} ${v}`);
+    // The helper itself, as a process: usage, nothing run.
+    const r = spawnSync(process.execPath, [helperSrc, 'set-policy', k!, v!], { encoding: 'utf8', env: { PATH: process.env.PATH ?? '', SUDO_USER: 'wl-loose' } });
+    assert.equal(r.status, 2, `${k} ${v}: ${r.stderr}`);
+    assert.match(r.stderr, /usage: /);
+  }
+  assert.ok(helper.parsePolicySet(['set-policy', 'land_mode', 'pr']) && helper.parsePolicySet(['set-policy', 'main_watch', 'auto']), 'tightening is taken');
+  const m = machineInstance('loose');
+  ownPolicy('loose', m.deps);
+  const text = readFileSync(m.file, 'utf8');
+  const log = new EventLog(':memory:');
+  assert.throws(() => requestPolicyChange(log, { args: ['set-policy', 'sandbox', 'off'], by: 'olive', breakGlass: false }), MachineRequestError);
+  // The Policy form refuses before asking anything.
+  let asked = 0;
+  asRoot(() => assert.throws(() => applyPolicy({ path: m.file, cfg, values: { land_mode: 'direct' }, eventsDb: join(m.T, 'e.db'), by: 'olive', request: () => String(++asked) }), /loosening it is an admin's/));
+  assert.equal(asked, 0);
+  // A request written to the log some other way: the coordinator refuses it, and never runs the helper.
+  log.append('machine.requested', { id: 'mr-x', args: ['set-policy', 'allow_same_user', 'on'], by: 'olive', via: 'policy', ask: null }, 'olive', 'human');
+  const calls: string[][] = [];
+  runMachineRequests({ log, instance: 'loose', exec: helperStandIn('loose', m.deps, calls) });
+  assert.deepEqual(calls, []);
+  assert.equal(machineRequests(log.read(0))[0]!.status, 'refused');
+  assert.equal(readFileSync(m.file, 'utf8'), text);
+});
+
+test("the machine helper's set-policy table is the engine's; a dashboard value passes as one plain word", () => {
+  assert.deepEqual(helper.POLICY_SET_KEYS, POLICY_SET_KEYS);
+  const windows = [{ from: '09:00', to: '17:00' }, { from: '22:00', to: '06:00' }];
+  assert.equal(encodePolicyValue('settings.run_windows', windows), '0900-1700+2200-0600');
+  assert.deepEqual(decodePolicyValue('settings.run_windows', encodePolicyValue('settings.run_windows', windows)!), windows);
+  assert.equal(encodePolicyValue('settings.run_windows', []), 'none');
+  assert.equal(encodePolicyValue('auto_merge', 'yes'), null);
+  assert.equal(encodePolicyValue('budget.daily_usd', 12.5), '12.5');
+  assert.equal(encodePolicyValue('sandbox', false), null);
+  for (const [k, v] of [['settings.workers', '3'], ['settings.run_windows', '0900-1700'], ['automations.enabled', 'off'], ['settings.stuck_guard', 'dry-run']]) assert.ok(helper.parsePolicySet(['set-policy', k!, v!]), `${k} ${v}`);
 });

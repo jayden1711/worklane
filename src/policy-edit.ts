@@ -10,7 +10,7 @@ import { EventLog } from './events/log.js';
 import { policyViolations, PolicyFile } from './instance.js';
 import { replaceFileAtomically } from './os/index.js';
 import { loadLimits, settingsProblems } from './settings.js';
-import { readPolicyChecked } from './policy-gate.js';
+import { encodePolicyValue, HELPER_ONLY, policySetOk, readPolicyChecked } from './policy-gate.js';
 
 export const POLICY_KEYS = ['budget.daily_usd', 'agents.max_workers', 'land_mode', 'auto_merge', 'main_watch', 'automations.enabled'] as const;
 export type PolicyKey = (typeof POLICY_KEYS)[number];
@@ -101,17 +101,29 @@ export function planPolicy(o: { path: string; cfg: Config; values: Record<string
   if (parsed.data.agents.max_workers > limits.workers.max) problems.push(`agents.max_workers ${parsed.data.agents.max_workers} is over ${limits.workers.max} (machine limits)`);
   // INVARIANT: a policy the repo's config already loosens would stop the instance from loading at its next start.
   problems.push(...policyViolations(o.cfg, parsed.data).map((v) => `${v.file} ${v.path}: ${v.message}`));
+  // A root policy.yaml (src/policy-gate.ts): only what root's helper takes, so a loosening is refused before anything is asked.
+  if (root) {
+    for (const c of changes) {
+      const arg = encodePolicyValue(c.key, c.to);
+      if (arg === null || !policySetOk([c.key, arg])) problems.push(`${c.key} ${String(c.to)}: ${Object.hasOwn(HELPER_ONLY, c.key) ? `loosening it is an admin's, at a root shell (sudo ${BRAND.cli} policy set <instance> ${c.key} ${String(c.to)}); here it may only be tightened` : "root's helper doesn't take that value"}`);
+    }
+  }
   if (problems.length) throw new PolicyEditError(`refused: ${problems.join('; ')}`);
   return { changes, text: doc.toString(), root };
 }
 
 /**
  * Write a confirmed change: the plan again (the file may have changed since), atomically, 0600, and logged. A root
- * policy.yaml (src/policy-gate.ts) is never written here: refused, naming the root command.
+ * policy.yaml (src/policy-gate.ts) is never written here: each change goes to `request` (root's helper's arguments),
+ * and the coordinator records settings.changed once the helper has run it; without one, refused.
  */
-export function applyPolicy(o: { path: string; cfg: Config; values: Record<string, unknown>; eventsDb: string; by: string; limitsPath?: string }): PolicyChange[] {
+export function applyPolicy(o: { path: string; cfg: Config; values: Record<string, unknown>; eventsDb: string; by: string; limitsPath?: string; request?: (args: string[]) => string }): PolicyChange[] {
   const plan = planPolicy(o);
-  if (plan.root) throw new PolicyEditError(`${o.path} is root's: an admin changes it at a root shell (sudo ${BRAND.cli} policy set <instance> <key> <value>)`);
+  if (plan.root) {
+    if (!o.request) throw new PolicyEditError(`${o.path} is root's: an admin changes it at a root shell (sudo ${BRAND.cli} policy set <instance> <key> <value>)`);
+    for (const c of plan.changes) o.request(['set-policy', c.key, encodePolicyValue(c.key, c.to)!]);
+    return plan.changes;
+  }
   replaceFileAtomically(o.path, plan.text, 0o600);
   const log = new EventLog(o.eventsDb);
   try {

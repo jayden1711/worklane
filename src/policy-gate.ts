@@ -6,7 +6,8 @@
 //     a file the coordinator user wrote in its place is never read, so the instance stops instead (fail closed);
 //   - the engine's own writers (the dashboard's Settings and Policy form) never write it; root changes one key of it
 //     at a time (`<cli> policy set`, the keys below), which never takes a loosening of land_mode or main_watch from a
-//     coordinator, nor sandbox or allow_same_user at all.
+//     coordinator, nor sandbox or allow_same_user at all. A dashboard change goes to root's machine helper
+//     (`<helper> set-policy <key> <value>`, through the coordinator), which runs it.
 // An instance with no such record (a laptop, a cloud or VM install, a machine whose setup hasn't run again since)
 // reads policy.yaml as before; doctor says when it is a machine install whose policy the coordinator can rewrite.
 import { readFileSync } from 'node:fs';
@@ -55,7 +56,7 @@ type Kind = 'number' | 'bool' | 'word' | 'windows';
 /**
  * Every key `<cli> policy set` changes (the Policy form's and the Settings page's), and how its value is written as one
  * plain word. Never sandbox, allow_same_user, lanes or the allowlists. test/policy-edit.test.ts holds this equal to
- * POLICY_KEYS plus settings.<SETTING_KEYS>.
+ * POLICY_KEYS plus settings.<SETTING_KEYS>, and to the machine helper's own copy.
  */
 export const POLICY_SET_KEYS: Readonly<Record<string, Kind>> = {
   'budget.daily_usd': 'number',
@@ -88,6 +89,22 @@ export const HELPER_ONLY: Readonly<Record<string, string>> = { land_mode: 'pr', 
 const NUMBER = /^(0|[1-9][0-9]{0,5})(\.[0-9]{1,2})?$/;
 const WINDOWS = /^(none|[0-2][0-9][0-5][0-9]-[0-2][0-9][0-5][0-9](\+[0-2][0-9][0-5][0-9]-[0-2][0-9][0-5][0-9]){0,7})$/;
 
+/** A value as the helper's argument (the inverse of decodePolicyValue), or null when it can't be one. */
+export function encodePolicyValue(key: string, value: unknown): string | null {
+  const kind = POLICY_SET_KEYS[key];
+  if (kind === 'bool') return typeof value === 'boolean' ? (value ? 'on' : 'off') : null;
+  if (kind === 'number') return typeof value === 'number' && NUMBER.test(String(value)) ? String(value) : null;
+  if (kind === 'word') return typeof value === 'string' && /^[a-z][a-z-]{0,15}$/.test(value) ? value : null;
+  if (kind === 'windows') {
+    if (!Array.isArray(value)) return null;
+    const hm = (s: unknown) => (typeof s === 'string' && /^\d\d:\d\d$/.test(s) ? s.replace(':', '') : null);
+    const parts = value.map((w: { from?: unknown; to?: unknown }) => (w && hm(w.from) && hm(w.to) ? `${hm(w.from)}-${hm(w.to)}` : null));
+    const out = parts.length ? parts.join('+') : 'none';
+    return parts.every((p) => p !== null) && WINDOWS.test(out) ? out : null;
+  }
+  return null;
+}
+
 /** The value a plain-word argument stands for (on|off, a number, a word, HHMM-HHMM+... or none), or undefined when it isn't one of its key's shape. */
 export function decodePolicyValue(key: string, arg: string): unknown {
   const kind = POLICY_SET_KEYS[key];
@@ -96,4 +113,15 @@ export function decodePolicyValue(key: string, arg: string): unknown {
   if (kind === 'word') return /^[a-z][a-z-]{0,15}$/.test(arg) ? arg : undefined;
   if (kind === 'windows') return WINDOWS.test(arg) ? (arg === 'none' ? [] : arg.split('+').map((w) => ({ from: `${w.slice(0, 2)}:${w.slice(2, 4)}`, to: `${w.slice(5, 7)}:${w.slice(7, 9)}` }))) : undefined;
   return undefined;
+}
+
+/**
+ * Whether `set-policy <key> <arg>` is a change root's machine helper takes for a dashboard: a known key, its shape, and
+ * never a loosening. The helper (scripts/machine/<cli>-machine.cjs) holds the same table, and checks it again.
+ */
+export function policySetOk(args: readonly string[]): boolean {
+  if (args.length !== 2) return false;
+  const [key, arg] = args as [string, string];
+  if (!Object.hasOwn(POLICY_SET_KEYS, key) || decodePolicyValue(key, arg) === undefined) return false;
+  return !Object.hasOwn(HELPER_ONLY, key) || HELPER_ONLY[key] === arg;
 }

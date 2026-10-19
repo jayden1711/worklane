@@ -27,6 +27,8 @@
 #     in the helper adds or changes an approved plugin: an admin confirms a staged one with plugins.sh confirm. And the MCP
 #     server steps: `mcp-fetch <id> <npm package> <x.y.z>`, `mcp-preview <id> <plugin> <server>`, `mcp-snapshot <id>` and
 #     `mcp-stage <id> sha256:<hex> <role+role> <host+host|none> <SECRET+SECRET|none>`, confirmed the same way.
+#     And `set-policy <key> <value>` (issue #726): one key of the asking coordinator's own root policy.yaml, through the
+#     installed engine as root; never sandbox or allow_same_user, and land_mode and main_watch only toward pr and auto.
 #   - Lets each coordinator user wl-<name> run exactly those 34 commands as root (sudoers,
 #     listed one by one), and add-project, stage-update-signer, discard-update-signer and the claude-account profile commands with arguments of their
 #     fixed shapes (a pattern each; sudo 1.9.10 or later). The dashboard viewer wl-dash gets nothing.
@@ -75,7 +77,7 @@ if sudo_regex_ok; then
   left_out='[]'
 else
   echo "REFUSED: the add-project, stage-update-signer, discard-update-signer and claude-account profile rules are NOT installed. This machine's sudo ($(sudo_version || echo unknown)) is older than $SUDO_REGEX_MIN, which would read their argument patterns as literal text. Every other rule is installed. The dashboard shows the root commands instead: add a project at a root shell with add-project.sh <name> <owner/repo>, and a release signer with updates.sh --signer." >&2
-  left_out='["add-project","stage-update-signer","discard-update-signer","claude-account-profiles","plugins"]'
+  left_out='["add-project","stage-update-signer","discard-update-signer","claude-account-profiles","plugins","set-policy"]'
 fi
 # For the dashboard (0644, written whole): which of the helper's commands this machine's sudo rule leaves out, so a
 # page shows the root command for them instead of a button that would only fail.
@@ -137,6 +139,13 @@ for u in "${users[@]}"; do
     for bad in "plugin-fetch kit http://example.com/o/kit $sha" "plugin-fetch kit https://example.com/o/kit main" "plugin-fetch Kit https://example.com/o/kit $sha" "plugin-fetch kit https://example.com/o/kit $sha a b" "plugin-fetch kit https://example.com/o/kit;id $sha" \
       "plugin-stage kit $dig" "plugin-stage kit sha256:abc builder" "plugin-stage kit $dig Builder" "plugin-stage kit $dig builder alpha" "plugin-confirm kit $dig" "plugin-remove" "plugin-remove kit alpha" "plugin-withdraw kit --instance alpha" "plugin-add kit" \
       "mcp-fetch notes notes-server latest" "mcp-fetch notes notes-server 1.2.3 x" "mcp-preview kit-notes kit notes alpha" "mcp-snapshot kit-notes alpha" "mcp-stage kit-notes $dig builder api.example.com" "mcp-stage kit-notes $dig builder x;id none" "mcp-confirm kit-notes $dig"; do
+      # shellcheck disable=SC2086 # each case is its words
+      if sudo -n -l -U "$u" "$MACHINE_HELPER" $bad >/dev/null 2>&1; then echo "FAIL: $u may run $bad" >&2; exit 1; fi
+    done
+  fi
+  if sudo_regex_ok; then
+    sudo -n -l -U "$u" "$MACHINE_HELPER" set-policy auto_merge on >/dev/null 2>&1 || { echo "FAIL: sudo $(sudo_version) should match the set-policy pattern, and $u can't run it" >&2; exit 1; }
+    for bad in "set-policy auto_merge" "set-policy auto_merge on x" "set-policy Auto on" "set-policy auto_merge ON" "set-policy auto_merge on;id"; do
       # shellcheck disable=SC2086 # each case is its words
       if sudo -n -l -U "$u" "$MACHINE_HELPER" $bad >/dev/null 2>&1; then echo "FAIL: $u may run $bad" >&2; exit 1; fi
     done
