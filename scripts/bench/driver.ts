@@ -1,0 +1,210 @@
+// The bench driver (#748): runs the task set under the caps, one task at a time, and leaves per-task results, the
+// exported patches and the aggregate in the run's folder. Before anything else (any container, any model call, any
+// write) it refuses to start without caps, as anyone but the bench user, on a CLI that isn't the pin, without a
+// subscription login, on a Docker daemon that isn't rootless, with research-on-demand able to run, or when a probe
+// container's memory, CPU or pids limit doesn't read back. Per task: a fresh container (its limits read back first),
+// the task's run (RunTask: the engine's PR-mode loop, wired in the follow-up PR) under the driver's own wall-clock
+// cap, its patches exported, its container removed. At the first usage limit it stops cleanly: the task in flight is
+// aborted and recorded as stopped, every later task is "not run (usage limit)", and the aggregate says the run is
+// partial.
+import { mkdirSync } from 'node:fs';
+import { join } from 'node:path';
+import { writeOwnerOnly } from '../../src/os/index.js';
+import type { AgentRunner } from '../../src/runner.js';
+import { researchCaps } from '../../src/settings.js';
+import type { InstanceSettings } from '../../src/instance.js';
+import { aggregate, type Aggregate } from './aggregate.js';
+import { MODE_MAX_USD, PER_TASK_MAX_USD, type Caps } from './caps.js';
+import type { Login } from './auth.js';
+import { Docker, LimitsNotApplied, TaskRunner, type DockerOptions, type Limits, type TaskContainer } from './container.js';
+import { exportPatch, runDir } from './grade.js';
+import type { BenchLayout } from './paths.js';
+import { taskView, type TaskRow, type TaskView } from './hidden.js';
+import { TASK_KEY } from './store.js';
+import { UsageMeter, type RunUsage } from './usage.js';
+
+/** The instance settings every task's coordinator gets: research-on-demand off (it could fetch the upstream fix). */
+export const BENCH_SETTINGS = { research: { max_searches_per_day: 0, max_fetches_per_day: 0, max_usd_per_day: 0 } } as InstanceSettings;
+
+/** Refuses (throws) unless every research cap in `s` is 0. */
+export function assertResearchOff(s: InstanceSettings): void {
+  const caps = researchCaps(s);
+  const on = Object.entries(caps).filter(([, v]) => v !== 0);
+  if (on.length) throw new Error(`research-on-demand must be off in the bench (its researcher could find the upstream fix): ${on.map(([k, v]) => `${k} ${v}`).join(', ')}`);
+}
+
+export interface BenchTask {
+  key: string;
+  row: TaskRow;
+  image: string;
+}
+
+/** A patch to export: the diff of `base`..`head` in the task's clone. */
+export interface Head {
+  label: string;
+  base: string;
+  head: string;
+}
+
+export interface TaskOutcome {
+  decision: 'auto-merge' | 'hold' | 'failed';
+  detail?: string;
+  /** The task's clone, where the heads are. */
+  repo?: string;
+  heads: Head[];
+}
+
+export interface TaskContext {
+  key: string;
+  /** What the agents and the container may know of the task. */
+  view: TaskView;
+  /** The task's agents: metered, capped, stopped at a usage limit. */
+  runner: AgentRunner;
+  /** Aborted at the first usage limit. */
+  signal: AbortSignal;
+  /** The task's commands: `docker exec` into its container, nothing else. */
+  exec: TaskRunner;
+  /** The task's own folder on the host (its clone, local remote and engine state). */
+  workDir: string;
+  settings: InstanceSettings;
+}
+
+export type RunTask = (ctx: TaskContext) => Promise<TaskOutcome>;
+
+export type TaskStatus = TaskOutcome['decision'] | 'error' | 'stopped (usage limit)' | 'not run (usage limit)' | 'not run (spend cap)' | 'not run (limits)';
+
+export interface TaskResult {
+  key: string;
+  status: TaskStatus;
+  detail?: string;
+  usage_equivalent_usd: number;
+  runs: RunUsage[];
+  patches: string[];
+  wall_ms: number;
+  /** The driver's wall-clock cap ended the task. */
+  wall_cap_hit?: boolean;
+  /** The limits its container had, read back before the task started. */
+  limits?: Limits;
+}
+
+export interface Preflight {
+  /** Throws unless this process runs as the bench user (auth.ts requireBenchUser). */
+  benchUser: () => string;
+  /** Throws unless claude --version is the pin; the version (auth.ts requireClaudePin). */
+  claudePin: () => string;
+  /** Throws unless claude reports a subscription login (auth.ts requireSubscription). */
+  subscription: () => Login;
+}
+
+/** The driver's own wall-clock cap per task, always enforced (the design's 3 h). */
+export const TASK_WALL_MS = 3 * 3600_000;
+
+export interface BenchOptions {
+  layout: BenchLayout;
+  runId: string;
+  caps: Caps;
+  tasks: BenchTask[];
+  preflight: Preflight;
+  /** The bench's agents (auth.ts benchClaude). */
+  runner: AgentRunner;
+  docker: DockerOptions;
+  runTask: RunTask;
+  settings?: InstanceSettings;
+  /** Per task (default TASK_WALL_MS). */
+  taskWallMs?: number;
+  /** Every container's memory, CPU and pids limits (container.ts limitsFrom); required. */
+  limits: Limits;
+  say?: (line: string) => void;
+}
+
+function checkCaps(c: Caps | undefined): asserts c is Caps {
+  if (!c || !(c.spendUsd > 0) || !(c.perTaskUsd > 0)) throw new Error('not run: the bench needs a spend cap (--spend <usd>) and a per-task cap');
+  if (!(c.mode in MODE_MAX_USD) || c.spendUsd > MODE_MAX_USD[c.mode] || c.perTaskUsd > PER_TASK_MAX_USD || c.perTaskUsd > c.spendUsd) throw new Error(`not run: caps over the owner's approval (${JSON.stringify(c)})`);
+}
+
+export async function runBench(o: BenchOptions): Promise<Aggregate> {
+  checkCaps(o.caps);
+  const settings = o.settings ?? BENCH_SETTINGS;
+  assertResearchOff(settings);
+  o.preflight.benchUser();
+  const claudeVersion = o.preflight.claudePin();
+  const login = o.preflight.subscription();
+  for (const t of o.tasks) if (!TASK_KEY.test(t.key)) throw new Error(`task key ${t.key} refused`);
+  const limits = o.limits;
+  if (!limits || !(limits.memoryBytes > 0 && limits.cpus > 0 && limits.pids > 0)) throw new Error('not run: every container needs a memory, CPU and pids limit');
+  const docker = new Docker(o.docker, limits);
+  docker.preflight();
+  // Fail closed before the first task: a container with the limits, read back from the daemon and its own cgroup.
+  if (o.tasks[0]) docker.probe({ name: `bench-${o.runId}-probe`, image: o.tasks[0].image });
+
+  const dir = runDir(o.layout, o.runId);
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const meter = new UsageMeter(o.runner, o.caps.spendUsd);
+  const results: TaskResult[] = [];
+  let limitsFailed: string | null = null;
+  const wallMs = o.taskWallMs ?? TASK_WALL_MS;
+  const write = () => {
+    const agg = aggregate({ run: o.runId, claude_version: claudeVersion, subscription_type: login.subscription_type, caps: o.caps, total_tasks: o.tasks.length, limits, task_wall_ms: wallMs, stopped: meter.limited ? 'usage_limit' : null, stop_detail: meter.limited?.detail ?? null }, results);
+    writeOwnerOnly(join(dir, 'results.json'), JSON.stringify({ claude_version: claudeVersion, subscription_type: login.subscription_type, limits, results }, null, 2) + '\n');
+    writeOwnerOnly(join(dir, 'aggregate.json'), JSON.stringify(agg, null, 2) + '\n');
+    return agg;
+  };
+
+  for (const t of o.tasks) {
+    const skip = meter.limited ? 'not run (usage limit)' : limitsFailed ? 'not run (limits)' : meter.left < 0.01 ? 'not run (spend cap)' : null;
+    if (skip) {
+      results.push({ key: t.key, status: skip, usage_equivalent_usd: 0, runs: [], patches: [], wall_ms: 0 });
+      continue;
+    }
+    o.say?.(`${t.key}: starting ($${meter.left.toFixed(2)} of $${o.caps.spendUsd} left)`);
+    const started = Date.now();
+    const workDir = join(dir, t.key);
+    mkdirSync(workDir, { recursive: true, mode: 0o700 });
+    const c: TaskContainer = { name: `bench-${o.runId}-${t.key}`, image: t.image };
+    const runner = meter.task(o.caps.perTaskUsd);
+    let status: TaskStatus = 'error';
+    let detail: string | undefined;
+    let applied = false;
+    const patches: string[] = [];
+    // The task's own stop: the wall-clock cap, or the run's usage limit.
+    const wall = new AbortController();
+    const signal = AbortSignal.any([meter.signal, wall.signal]);
+    let timer: NodeJS.Timeout | undefined;
+    const capped = new Promise<'wall'>((resolve) => {
+      timer = setTimeout(() => {
+        wall.abort();
+        resolve('wall');
+      }, wallMs);
+    });
+    try {
+      // Its limits read back before any agent or command runs: a limit that didn't apply stops the run here.
+      docker.start(c, t.row);
+      applied = true;
+      const out = await Promise.race([o.runTask({ key: t.key, view: taskView(t.row, t.key), runner, signal, exec: new TaskRunner(o.docker, c, t.row), workDir, settings }), capped]);
+      if (out === 'wall') {
+        status = 'failed';
+        detail = `the driver's wall-clock cap (${Math.round(wallMs / 60_000)} min) ended the task`;
+      } else {
+        status = out.decision;
+        detail = out.detail;
+        if (out.repo) for (const h of out.heads) patches.push(exportPatch({ layout: o.layout, runId: o.runId, key: t.key, label: h.label, repo: out.repo, base: h.base, head: h.head }));
+      }
+    } catch (e) {
+      if (e instanceof LimitsNotApplied) limitsFailed = e.message;
+      detail = (e as Error).message.slice(0, 500);
+    } finally {
+      clearTimeout(timer);
+      docker.stop(c);
+    }
+    if (meter.limited) {
+      status = 'stopped (usage limit)';
+      detail = meter.limited.detail;
+    }
+    results.push({ key: t.key, status, ...(detail ? { detail } : {}), usage_equivalent_usd: runner.spent, runs: runner.runs, patches: patches.map((p) => p.slice(dir.length + 1)), wall_ms: Date.now() - started, ...(wall.signal.aborted ? { wall_cap_hit: true } : {}), ...(applied ? { limits } : {}) });
+    o.say?.(`${t.key}: ${status} ($${runner.spent.toFixed(2)} usage-equivalent)`);
+    write();
+  }
+  const agg = write();
+  if (meter.limited) o.say?.(`stopped at a usage limit: ${meter.limited.detail}${meter.limited.reset_at ? ` (resets ${meter.limited.reset_at})` : ''}; no retry. The aggregate is partial.`);
+  return agg;
+}
