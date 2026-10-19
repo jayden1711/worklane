@@ -1165,8 +1165,10 @@ test('readiness and the main watch agree on every pinned case, under a workflow 
     { what: "the pinned pass, and the name's failing commit status", jobs: [{ id: 20, suite: 2 }], files: { 2: ciYml }, statuses: [{ context: 'ci', state: 'failure' }], expect: 'fail' },
   ];
   const app: Case[] = [
-    { what: 'owner 1 under a non-Actions App: suite 11 cancelled, suite 12 passed (no file to group by: fail closed)', jobs: [{ id: 10, suite: 11, app: NON_ACTIONS_APP, conclusion: 'cancelled' }, { id: 20, suite: 12, app: NON_ACTIONS_APP }], expect: 'fail' },
-    { what: 'owner 2 under a non-Actions App: suite 11 failed, suite 12 passed', jobs: [{ id: 10, suite: 11, app: NON_ACTIONS_APP, conclusion: 'failure' }, { id: 20, suite: 12, app: NON_ACTIONS_APP }], expect: 'fail' },
+    // Round 8, the owner's decision: the App's latest run decides, across suites (round 6 had these fail).
+    { what: 'owner 1 under a non-Actions App: suite 11 cancelled, then suite 12 passed', jobs: [{ id: 10, suite: 11, app: NON_ACTIONS_APP, conclusion: 'cancelled' }, { id: 20, suite: 12, app: NON_ACTIONS_APP }], expect: 'pass' },
+    { what: 'owner 2 under a non-Actions App: suite 11 failed, then suite 12 passed', jobs: [{ id: 10, suite: 11, app: NON_ACTIONS_APP, conclusion: 'failure' }, { id: 20, suite: 12, app: NON_ACTIONS_APP }], expect: 'pass' },
+    { what: 'a non-Actions App: suite 11 passed, then a later suite 12 failed', jobs: [{ id: 10, suite: 11, app: NON_ACTIONS_APP }, { id: 20, suite: 12, app: NON_ACTIONS_APP, conclusion: 'failure' }], expect: 'fail' },
     { what: 'a re-run in the same suite passed over its failure', jobs: [{ id: 10, suite: 11, app: NON_ACTIONS_APP, conclusion: 'failure' }, { id: 20, suite: 11, app: NON_ACTIONS_APP }], expect: 'pass' },
     { what: "owner 3 under a non-Actions App: its pass, and another App's failure", jobs: [{ id: 20, suite: 12, app: NON_ACTIONS_APP }, { id: 30, suite: 9, app: OTHER_APP, conclusion: 'failure' }], expect: 'fail' },
     { what: 'two suites of the App, both passed', jobs: [{ id: 10, suite: 11, app: NON_ACTIONS_APP }, { id: 20, suite: 12, app: NON_ACTIONS_APP }], expect: 'pass' },
@@ -1189,5 +1191,5 @@ test('readiness and the main watch agree on every pinned case, under a workflow 
       assert.equal(w, c.expect, `main watch, ${k.kind}: ${c.what}`);
     }
   }
-  assert.equal(rows.length, 22);
+  assert.equal(rows.length, 23);
 });
