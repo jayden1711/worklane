@@ -8,6 +8,8 @@
 import { BRAND } from '../brand.js';
 import type { AppConfig } from '../config/schema.js';
 import { BrowserDoneWhenItem } from '../contract.js';
+import { redactString } from '../events/redact.js';
+import type { ProjectRunAs } from '../os/index.js';
 import { runFlow, type FlowEvidence, type FlowRun } from './run.js';
 
 export { BrowserDoneWhenItem };
@@ -55,7 +57,8 @@ export function judgeFlow(ev: FlowEvidence, thresholds: AppConfig['thresholds'],
   if (ev.slowRequests.length) notes.push(`${ev.slowRequests.length} slow request(s), slowest ${Math.max(...ev.slowRequests.map((r) => r.ms))} ms`);
   if (ev.blockedRequests.length) notes.push(`${ev.blockedRequests.length} request(s) to other hosts refused`);
   for (const n of ev.notes ?? []) notes.push(`cleanup: ${n}`);
-  return { pass: reasons.length === 0, reasons, notes };
+  // Copied from the app's page and its steps: credential-shaped text never reaches a check's tail or a prompt (#713).
+  return { pass: reasons.length === 0, reasons: reasons.map((r) => redactString(r)), notes: notes.map((n) => redactString(n)) };
 }
 
 /** A browser check's result, in the shape of the coordinator's other checks, with its evidence. */
@@ -73,9 +76,10 @@ export interface BrowserCheckResult {
  * Run a `browser:` check: the flow from the project's app, judged. Unavailable (never passed) without an app or
  * a browser; failed for an unknown flow, or an app that doesn't start.
  */
-export async function runBrowserCheck(o: { item: BrowserDoneWhenItem; app: AppConfig | undefined; cwd: string; outDir: string; baseline?: FlowEvidence | null; chrome?: string | null; runAs?: { user: string; home: string } }): Promise<BrowserCheckResult> {
+export async function runBrowserCheck(o: { item: BrowserDoneWhenItem; app: AppConfig | undefined; cwd: string; outDir: string; baseline?: FlowEvidence | null; chrome?: string | null; runAs?: ProjectRunAs }): Promise<BrowserCheckResult> {
   const check = `browser ${o.item.browser}`;
-  const result = (status: BrowserCheckResult['status'], tail: string, evidence: FlowEvidence | null = null, verdict: BrowserVerdict | null = null): BrowserCheckResult => ({ check, status, kind: 'browser', exitCode: null, tail, evidence, verdict });
+  // The tail quotes the app and its page (console errors, step errors, its last words): project code's, so redacted (#713).
+  const result = (status: BrowserCheckResult['status'], tail: string, evidence: FlowEvidence | null = null, verdict: BrowserVerdict | null = null): BrowserCheckResult => ({ check, status, kind: 'browser', exitCode: null, tail: redactString(tail), evidence, verdict });
   if (!o.app) return result('unavailable', `no app is declared (${BRAND.configDir}/app.yaml), so there is nothing to run a browser check against`);
   if (!o.app.flows[o.item.browser]) return result('fail', `no flow "${o.item.browser}" in app.yaml (it has: ${Object.keys(o.app.flows).join(', ')})`);
   let run: FlowRun;
