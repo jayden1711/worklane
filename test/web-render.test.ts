@@ -1657,10 +1657,15 @@ test('#741 the First task card: the filed issue\'s stages from its events, its P
       ['pr.status', { issue: 7, number: 41, head: H, ready: true, reasons: [], checks: [{ name: 'test', outcome: 'pass' }] }],
       ['merge.decided', { issue: 7, number: 41, head: H, auto: false, reasons: ['auto-merge is off for this instance (policy.yaml auto_merge)', 'big: 500 changed lines (over 400)'] }],
     ]),
-    { local: true },
+    { local: true, repo: 'example-org/example-shop' },
   )!;
   const html = r.renderFirstRun({ ...f, firstTask: held });
-  assert.match(html, /data-testid="first-task-card" data-issue="7" data-outcome="held"[\s\S]*?#7[\s\S]*?Round totals/);
+  assert.match(html, /data-testid="first-task-card" data-issue="7" data-outcome="held"[\s\S]*?#7/);
+  // Read-only, and no free text: no control, and not even the issue's title.
+  const from = html.indexOf('data-testid="first-task-card"');
+  const card = html.slice(from, html.indexOf('data-testid="first-run-', from));
+  assert.ok(card.includes('first-task-hold'), 'the whole card, up to the next first-run section');
+  assert.doesNotMatch(card, /<button|<form|<input|<select|<textarea|Round totals/);
   assert.deepEqual([...html.matchAll(/data-testid="first-task-stage" data-stage="([a-z]+)" data-state="([a-z]+)"/g)].map((m) => `${m[1]}:${m[2]}`), ['claimed:done', 'worker:done', 'evaluator:done', 'pr:done', 'checks:done', 'merge:held']);
   assert.match(html, /data-stage="evaluator"[\s\S]*?approved, confidence high/);
   assert.match(html, /<a href="https:\/\/github\.com\/example-org\/example-shop\/pull\/41"[^>]*data-testid="first-task-pr-link">PR #41<\/a>/);

@@ -15,12 +15,13 @@ import { EventSchemas, type EventType, type StoredEvent } from '../src/events/ty
 import { COORDINATOR_TICK_JITTER_MS, COORDINATOR_TICK_MS, FIRST_TASK_FILED, firstTaskProgress, type FirstTaskProgress } from '../src/first-task-progress.js';
 import { projectStateDir } from '../src/guardrails/context.js';
 import { HOLD_KINDS, holdsInWords, holdWords } from '../src/hold-words.js';
-import { mergeDecision, type MergeInput } from '../src/merge-policy.js';
+import { HIGH_RISK_REASON, mergeDecision, type MergeInput } from '../src/merge-policy.js';
 import type { SetupProbe } from '../src/setup-steps.js';
 import { asPerson, exampleProject, exampleRoles, repoRoot } from './helpers.js';
 
 const H = 'abc1234';
-const PR_URL = (n: number) => `https://github.com/example-org/example-shop/pull/${n}`;
+const REPO = 'example-org/example-shop';
+const PR_URL = (n: number) => `https://github.com/${REPO}/pull/${n}`;
 
 /** Event payloads as the coordinator writes them (each parsed with its schema, so a fixture can't drift from it). */
 const P = {
@@ -94,11 +95,11 @@ test('#741 the filed issue followed to its PR: claimed, the worker, the verdict,
   const l = withEarlierTask();
   l.add('dashboard.audit', P.filed(7))('issue.seen', P.seen(7, 'Round totals'))('issue.claimed', P.claimed(7))('run.started', P.started(7));
   let p = firstTaskProgress(l.events, { local: true })!;
-  assert.equal(p.title, 'Round totals');
+  assert.doesNotMatch(JSON.stringify(p), /Round totals/, 'no free text: not even the title');
   assert.deepEqual(states(p), { claimed: 'done', worker: 'running', evaluator: 'waiting', pr: 'waiting', checks: 'waiting', merge: 'waiting' });
   assert.equal(stage(p, 'worker').estimate!.basis, 'guess', 'a running stage keeps its estimate');
   l.add('run.finished', P.finished(7))('eval.verdict', P.verdict(7))('pr.opened', P.opened(7, 41))('pr.status', P.status(7, 41, false, ['pass', 'pending']));
-  p = firstTaskProgress(l.events, { local: true })!;
+  p = firstTaskProgress(l.events, { local: true, repo: REPO })!;
   assert.deepEqual(states(p), { claimed: 'done', worker: 'done', evaluator: 'done', pr: 'done', checks: 'running', merge: 'waiting' });
   assert.equal(stage(p, 'evaluator').detail, 'approved, confidence high');
   assert.deepEqual(p.pr, { number: 41, url: PR_URL(41) });
@@ -130,7 +131,7 @@ test('#741 held: the merge stage says why in #706\'s plain words for each hold k
   assert.doesNotMatch(JSON.stringify(local), /only covers one path/);
 });
 
-test('#741 every hold reason the merge policy emits has plain words; an unknown one shows as its own text, never empty', () => {
+test('#741 every hold reason the merge policy emits has plain words; an unknown one shows fixed words, never its text', () => {
   const level = { level: 'L1' as const, reasons: [], categories: {} as Record<string, string[]> };
   const clean: MergeInput = { branch: 'feature/x', openedByHarness: true, policyOn: true, repoOn: true, stopped: null, level, waitCategories: ['auth'], limits: { max_lines: 400, max_files: 10 }, lines: 1, files: 1, verdict: { patch_correct: true, test_correct: true, confidence: 'high', design_change: false }, newTopLevel: [], ciFixRuns: 0, foreignPush: false, pushLimitHit: false };
   assert.deepEqual(mergeDecision(clean).reasons, [], 'the base input merges');
@@ -164,11 +165,10 @@ test('#741 every hold reason the merge policy emits has plain words; an unknown 
         kinds.add(w.kind);
       }
   }
-  assert.deepEqual([...kinds].sort(), [...HOLD_KINDS].sort(), 'every kind in the table is one the policy emits');
-  const unknown = holdWords('a reason added later: with its own text', { local: true });
-  assert.deepEqual(unknown.kind, 'other');
-  assert.equal(unknown.why, 'a reason added later: with its own text');
-  assert.ok(holdWords('', { local: false }).why.length > 0, 'never an empty line');
+  for (const k of kinds) assert.ok(HOLD_KINDS.includes(k as never), k);
+  const unknown = holdWords('a reason added later: /home/example/x with its own text', { local: true });
+  assert.deepEqual(unknown, { kind: 'other', why: 'Another reason (see the Board).', through: "Read the PR's hold comment and decide." }, 'fixed words, never the text');
+  assert.deepEqual(holdWords('', { local: false }), unknown, 'never an empty line');
   assert.deepEqual(holdsInWords(['big: 500 changed lines (over 400)', 'big: 20 files (over 10)'], { local: false }).length, 1);
 });
 
@@ -183,7 +183,7 @@ test('#741 for the filed issue only: another issue\'s events, an earlier event a
   l.add('issue.claimed', P.claimed(7))('run.started', P.started(7))('run.finished', P.finished(7))('eval.verdict', P.verdict(7))('pr.opened', P.opened(7, 41));
   // A merge, a decision and a status of another PR that name this issue (an older PR of it): not this PR's.
   l.add('merge.decided', P.decided(7, 42, ['big: 1 files (over 0)']))('pr.status', P.status(7, 42, true, ['pass']))('merge.done', P.done(7, 42));
-  p = firstTaskProgress(l.events, { local: true })!;
+  p = firstTaskProgress(l.events, { local: true, repo: REPO })!;
   assert.deepEqual(p.pr, { number: 41, url: PR_URL(41) });
   assert.deepEqual(states(p), { claimed: 'done', worker: 'done', evaluator: 'done', pr: 'done', checks: 'waiting', merge: 'waiting' });
   // The latest filing is the one followed.
@@ -209,7 +209,105 @@ test('#741 the PR link is GitHub\'s page of that PR in this repo, or none: never
     l.add('dashboard.audit', P.filed(7))('pr.opened', P.opened(7, 41, url));
     const p = firstTaskProgress(l.events, { local: true, repo: 'example-org/example-shop' })!;
     assert.deepEqual(p.pr, { number: 41, url: want }, url);
+    if (url === PR_URL(41)) assert.deepEqual(firstTaskProgress(l.events, { local: true })!.pr, { number: 41, url: null }, 'no repo given: no link (fail closed)');
   }
+});
+
+test('#741 a decision or a failed merge from an older head never stands: after a new push the merge stage waits for a fresh decision', () => {
+  const B = 'b0b0b0b';
+  const head = (h: string, ready: boolean, outcomes: ('pass' | 'fail' | 'pending')[]) => ({ ...P.status(7, 41, ready, outcomes), head: h });
+  // Held at head A; a review fix pushes B, whose checks are pending.
+  const held = log();
+  held.add('dashboard.audit', P.filed(7))('pr.opened', P.opened(7, 41))('pr.status', P.status(7, 41, true, ['pass']))('merge.decided', P.decided(7, 41, ['design: the evaluator flagged a design change']))('pr.status', head(B, false, ['pending']));
+  let p = firstTaskProgress(held.events, { local: true })!;
+  assert.equal(stage(p, 'merge').state, 'waiting');
+  assert.equal(stage(p, 'merge').detail, 'a new head: it waits for its checks and a fresh decision');
+  assert.deepEqual(p.holds, [], "A's reasons are not B's");
+  assert.equal(p.outcome, 'open');
+  // Auto at A; B's checks then fail: never "will merge it".
+  const auto = log();
+  auto.add('dashboard.audit', P.filed(7))('pr.opened', P.opened(7, 41))('pr.status', P.status(7, 41, true, ['pass']))('merge.decided', P.decided(7, 41, []))('merge.failed', { issue: 7, number: 41, head: H, why: 'x' })('pr.status', head(B, false, ['fail']));
+  p = firstTaskProgress(auto.events, { local: true })!;
+  assert.deepEqual([stage(p, 'checks').state, stage(p, 'merge').state], ['failed', 'waiting']);
+  assert.doesNotMatch(JSON.stringify(p), /will merge|merge try failed/);
+  // A decision at the new head counts again.
+  auto.add('merge.decided', { ...P.decided(7, 41, ['big: 1 files (over 0)']), head: B });
+  assert.equal(stage(firstTaskProgress(auto.events, { local: true })!, 'merge').state, 'held');
+});
+
+/** Hold reasons as merge.decided carries them today, beyond mergeDecision's: each with free text a card must not show. */
+const RAW_REASONS = [
+  "GitHub can't merge it cleanly (dirty)",
+  'merging failed 3 times: GitHub said 405 at /home/example/raw-a1',
+  'GitHub was still computing whether it can merge after 9 polls',
+  'merging the default branch into it conflicts, but GitHub still reports it mergeable after 9 polls',
+  "can't find where this PR branched from origin/main, so the combination can't be checked",
+  'combined with origin/main at abc12345 (which changed src/a.ts), the fast tests fail: ENOENT /home/example/raw-b2 / exit 1',
+  'docs-only fast path: the ruleset\'s required check(s) test (fail) did not pass on GitHub',
+  "conflict fix: the evaluator's confidence is medium, not high: evaluator text raw-c3",
+  'conflict fix: changed outside the conflicted hunks: src/raw-d4.ts',
+  'doubt: evaluator confidence medium: evaluator text raw-e5',
+];
+
+test('#741 the card shows no evaluator text, path or run detail: every hold kind merge.decided carries today has fixed words; a block is fixed words', () => {
+  const l = log();
+  l.add('dashboard.audit', P.filed(7))('issue.claimed', P.claimed(7))('run.started', P.started(7))('run.finished', P.finished(7))('eval.verdict', { ...P.verdict(7), advice: 'advice raw-f6' })('pr.opened', P.opened(7, 41))('pr.status', P.status(7, 41, true, ['pass']))('merge.decided', P.decided(7, 41, RAW_REASONS));
+  const p = firstTaskProgress(l.events, { local: true, repo: 'example-org/example-shop' })!;
+  assert.deepEqual(p.holds.map((h) => h.kind), ['cant-merge', 'merge-failed', 'mergeable-unknown', 'combined', 'ruleset', 'conflict-fix', 'doubt']);
+  assert.ok(!p.holds.some((h) => h.kind === 'other'), 'every kind has words');
+  assert.doesNotMatch(JSON.stringify(p), /raw-|\/home\/|ENOENT|evaluator text|origin\/main|src\//);
+  l.add('issue.blocked', { issue: 7, owner: 'example-owner', why: 'worker run ended: failed (ENOENT /home/example/raw-g7/.git)' });
+  assert.doesNotMatch(JSON.stringify(firstTaskProgress(l.events, { local: true })), /raw-|ENOENT|\/home\//);
+});
+
+/**
+ * A source scan (by design, #741 round 2): every hold reason a source of merge.decided writes must start with a prefix
+ * the words table knows, and every reason pushed from a variable must be one traced here. A new prefix, or a new
+ * source, fails this test until it has words. `src`: the source text (a fixture in the proof below).
+ */
+type Region = { file: string; fn: string | null; traced: string[] };
+const REASON_SOURCES: Region[] = [
+  { file: 'src/merge-policy.ts', fn: null, traced: ['{ category', '...riskAndDesignReasons(', '...(i.instructionEvals', '...(i.outsidePlan'] },
+  { file: 'src/coordinator/merge-flow.ts', fn: 'private async mergeOrWait(', traced: ['hold.why', 'why', 'gate.hold'] },
+  { file: 'src/coordinator.ts', fn: 'protected async combinedGate(', traced: [] },
+  { file: 'src/pr-rules.ts', fn: 'export function rulesetHold(', traced: [] },
+  { file: 'src/conflicts.ts', fn: 'export function conflictWaitReasons(', traced: [] },
+];
+function bodyOf(src: string, fn: string | null): string {
+  if (!fn) return src;
+  const at = src.indexOf(fn);
+  assert.ok(at >= 0, `${fn} is still there`);
+  const i = src.lastIndexOf('{', src.indexOf('\n', at));
+  for (let depth = 0, j = i; j < src.length; j++) {
+    depth += src[j] === '{' ? 1 : src[j] === '}' ? -1 : 0;
+    if (depth === 0) return src.slice(i, j + 1);
+  }
+  return src.slice(i);
+}
+function unworded(r: Region, src: string): string[] {
+  const body = bodyOf(src, r.fn).replaceAll('${HIGH_RISK_REASON}', HIGH_RISK_REASON);
+  const out: string[] = [];
+  const lit = /(?:\.push\(\s*\[?|\.map\(\(\w+\) => |\bconst why = |\bwhy: |\bhold: )([`'"])((?:(?!\1)[^\\$]|\\.|\$(?!\{))*)/g;
+  for (const m of body.matchAll(lit)) {
+    const prefix = m[2]!;
+    // A continuation line of a reason (an eval's "  - case ..." list), or a map that only passes text through
+    // (`${c.name} ...` inside a reason), never starts a reason.
+    if (prefix.startsWith('  - ') || (m[0].startsWith('.map') && !prefix)) continue;
+    if (holdWords(prefix, { local: false }).kind === 'other') out.push(`${r.file}: "${prefix}"`);
+  }
+  for (const m of body.matchAll(/\.push\(\s*(?![`'"[])([^)\n]*)/g)) if (!r.traced.some((t) => m[1]!.startsWith(t))) out.push(`${r.file}: untraced push(${m[1]})`);
+  return out;
+}
+
+test('#741 every hold reason any source of merge.decided writes has words (a source scan), and the scan catches a new prefix or source', () => {
+  for (const r of REASON_SOURCES) assert.deepEqual(unworded(r, readFileSync(join(repoRoot, r.file), 'utf8')), [], r.file);
+  // The proof, on fixture text (no repo file edited): a new prefix, and a reason pushed from a new variable.
+  const policy = REASON_SOURCES[0]!;
+  assert.deepEqual(unworded(policy, "if (x) reasons.push('stale: the base moved');"), ['src/merge-policy.ts: "stale: the base moved"']);
+  assert.deepEqual(unworded(policy, 'reasons.push(`stale: ${n} commits behind`);'), ['src/merge-policy.ts: "stale: "']);
+  const flow = REASON_SOURCES[1]!;
+  assert.deepEqual(unworded(flow, 'private async mergeOrWait(w) {\n  d.reasons.push(newWhy);\n}'), ['src/coordinator/merge-flow.ts: untraced push(newWhy)']);
+  assert.deepEqual(unworded(flow, 'private async mergeOrWait(w) {\n  const why = `held: ${x}`;\n}'), ['src/coordinator/merge-flow.ts: "held: "']);
 });
 
 test('#741 the card carries no run detail: not the worktree path, the run\'s error text, the evaluator\'s advice, nor who filed it', () => {
@@ -225,7 +323,7 @@ test('#741 no false progress: a retried worker makes the earlier verdict stale; 
   l.add('dashboard.audit', P.filed(7))('issue.claimed', P.claimed(7))('run.started', P.started(7))('run.finished', P.finished(7))('eval.verdict', P.verdict(7, false));
   let p = firstTaskProgress(l.events, { local: true })!;
   assert.equal(stage(p, 'evaluator').state, 'failed');
-  assert.equal(stage(p, 'evaluator').detail, 'did not approve it (confidence low)');
+  assert.equal(stage(p, 'evaluator').detail, 'did not approve it, confidence low');
   l.add('run.started', P.started(7, 2));
   p = firstTaskProgress(l.events, { local: true })!;
   assert.equal(stage(p, 'worker').state, 'running');
@@ -235,7 +333,8 @@ test('#741 no false progress: a retried worker makes the earlier verdict stale; 
   assert.equal(stage(firstTaskProgress(l.events, { local: true })!, 'worker').state, 'failed');
   l.add('issue.blocked', { issue: 7, owner: 'example-owner', why: 'the worker could not finish\nsecond line' });
   p = firstTaskProgress(l.events, { local: true })!;
-  assert.deepEqual(p.blocked && p.blocked.why, 'the worker could not finish');
+  assert.ok(p.blocked);
+  assert.doesNotMatch(JSON.stringify(p), /could not finish|second line/, 'the block is said in fixed words, never its reason');
   assert.equal(p.outcome, 'blocked');
   const c = log();
   c.add('dashboard.audit', P.filed(7))('pr.opened', P.opened(7, 41))('pr.status', P.status(7, 41, false, ['pass', 'fail']))('pr.closed', P.closed(7, 41, false));

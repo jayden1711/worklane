@@ -1218,11 +1218,10 @@ export const getFirstTask = () => api<FirstTaskInfo>('/api/first-run/first-task'
 /** #741: the first task's stages, from the engine's events only (src/first-task-progress.ts); an estimate always says its basis. */
 export interface FirstTaskProgress {
   issue: number;
-  title: string | null;
   filedAt: string;
   pr: { number: number; url: string | null } | null;
   stages: { id: 'claimed' | 'worker' | 'evaluator' | 'pr' | 'checks' | 'merge'; title: string; state: 'waiting' | 'running' | 'done' | 'failed' | 'held'; detail: string; at: string | null; estimate: { basis: 'tick' | 'guess' | 'none'; text: string } | null }[];
-  blocked: { why: string; at: string } | null;
+  blocked: { at: string } | null;
   question: { at: string } | null;
   /** The held PR's reasons in plain words (src/hold-words.ts): why it waits, and what lets it through. */
   holds: { kind: string; why: string; through: string }[];

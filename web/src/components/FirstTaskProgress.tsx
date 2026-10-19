@@ -19,12 +19,11 @@ export function FirstTaskCard({ t }: { t: FirstTaskProgress }) {
       <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
         <div className="text-[13px] font-medium text-ink">First task</div>
         <span className="font-mono text-[12px] text-ink-3">#{t.issue}</span>
-        {t.title && <span className="min-w-0 break-words text-[12.5px] text-ink-2">{t.title}</span>}
         <span className="text-[11.5px] text-ink-3">filed {ago(t.filedAt)}</span>
       </div>
       {t.blocked && (
-        <p className="break-words text-[12.5px] text-orange" data-testid="first-task-blocked">
-          Blocked: {t.blocked.why}. It waits for you on the Board.
+        <p className="text-[12.5px] text-orange" data-testid="first-task-blocked">
+          Blocked: it waits for you on the Board, which says why.
         </p>
       )}
       {t.question && (
