@@ -2905,7 +2905,7 @@ jobs:
           t="$(mktemp -d /tmp/wl-probe-XXXXXX)"
           mkdir -p "$t/node_modules"
           cp -r dist package.json "$t/"
-          cp -r node_modules/ws node_modules/yaml node_modules/zod "$t/node_modules/"
+          cp -r node_modules/yaml node_modules/zod "$t/node_modules/"
           cp scripts/ci/auth-probe-real-users.mjs "$t/"
           chmod -R a+rX "$t"
           a="$(getent passwd wl-probe-agent | cut -d: -f6)"

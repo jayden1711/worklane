@@ -72,10 +72,13 @@
 // rolls back as above (backups restored, the old engine, services restarted), holds the commit and raises a watchdog
 // incident. A daily canary that fails only raises the incident.
 // The root-owned helpers the setup scripts installed from scripts/machine/ (the test-run sandbox helper, the machine
-// helper, the console shell) follow the engine: with its services stopped, just before the switch, each one this
-// machine has is replaced by the new engine's copy when the two differ (atomically: a checked temp file beside it,
-// renamed over it, with the installed file's owner and mode; sudoers is never touched; a helper the machine doesn't
-// have is never installed). An engine and its helpers then always speak the same protocol. If one can't be replaced,
+// helper, the GPU device fixer, the experiments helper: HELPERS below) follow the engine. The removed owner
+// terminal's console shell (#742) is now a stub that refuses everything (scripts/machine/worklane-console-shell.sh):
+// this updater and older ones replace a live one with it, and a dashboards.sh rerun deletes it and its sudoers rule;
+// once deleted, it is never installed again. With the engine's services stopped, just before the switch, each
+// helper this machine has is replaced by the new engine's copy when the two differ (atomically: a checked temp file
+// beside it, renamed over it, with the installed file's owner and mode; sudoers is never touched; a helper the
+// machine doesn't have is never installed). An engine and its helpers then always speak the same protocol. If one can't be replaced,
 // the update is rolled back and held, like a failed migration. Every rollback puts the old engine's helpers back.
 // The updater itself (#760) follows only the release channel: never main, which has no signature to check. Once an
 // install from a release tag is healthy (services steady, sandbox verdicts in), it takes that release's updater: read
@@ -117,7 +120,7 @@ const BUILD_DIR = `/var/lib/${BUILD_STATE}`;
 const HELPERS = [
   { dest: '/usr/local/libexec/worklane-testrun', src: 'scripts/machine/worklane-testrun.sh', check: 'bash' }, // test-user.sh
   { dest: '/usr/local/libexec/worklane-machine', src: 'scripts/machine/worklane-machine.cjs', check: 'node' }, // machine-helper.sh
-  { dest: '/usr/local/libexec/worklane-console-shell', src: 'scripts/machine/worklane-console-shell.sh', check: 'bash' }, // console-shell.sh
+  { dest: '/usr/local/libexec/worklane-console-shell', src: 'scripts/machine/worklane-console-shell.sh', check: 'bash' }, // the removed owner terminal's, now a refusing stub (#742); dashboards.sh deletes it
   { dest: '/usr/local/libexec/worklane-gpu-devices', src: 'scripts/machine/worklane-gpu-devices.sh', check: 'bash' }, // gpu-devices.sh (run by udev)
   { dest: '/usr/local/libexec/worklane-exp', src: 'scripts/machine/worklane-exp.sh', check: 'bash' }, // experiments.sh
 ];

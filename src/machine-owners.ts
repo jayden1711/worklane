@@ -8,7 +8,8 @@
 // It's checked three times: by the dashboard before it records a machine request (src/machine-requests.ts), by
 // the coordinator again before it runs one (src/coordinator/machine-requests.ts: the request names who asked),
 // and never for the owner's break-glass (the token, on this machine only), which stays allowed. A machine change
-// also needs what the owner terminal needs: a signed-in session and an allowed console device.
+// also needs a signed-in session and one of the machine devices (dashboards.sh --machine-devices; an older hub unit's
+// --console-devices, the removed owner terminal's list, is read as these).
 //
 // Fails closed: no file, a file anyone but root (or this user) owns or may write, or one that doesn't parse, or
 // that names anything but GitHub logins, means no machine owners, so only the break-glass may change the machine.
@@ -59,7 +60,7 @@ export interface MachineRequester {
   login: string;
   /** The owner's break-glass (the token, on this machine only): allowed without the checks below. */
   breakGlass: boolean;
-  /** Whether the hub identified this request's Tailscale device as one allowed to open the console. */
+  /** Whether the hub identified this request's Tailscale device as one of the machine devices. */
   deviceOk: boolean;
 }
 
@@ -67,13 +68,13 @@ export interface MachineRequester {
 export const ownersText = (owners: string[]) => (owners.length ? owners.map((o) => `@${o}`).join(', ') : 'none set (an admin runs dashboards.sh --machine-owner <login>)');
 
 /**
- * Why this person may not ask for a machine change now; null when they may. The same device rule as the owner
- * terminal (src/console/terminal.ts): an allowed console device; on top, a machine owner. The break-glass is allowed.
+ * Why this person may not ask for a machine change now; null when they may: a machine owner, from one of the machine
+ * devices (src/console/terminal-devices.ts). The break-glass is allowed.
  */
 export function machineChangeRefusal(r: MachineRequester, o: { file?: string } = {}): string | null {
   if (r.breakGlass) return null;
   const file = o.file ?? MACHINE_OWNERS_FILE;
   if (!isMachineOwner(r.login, file)) return `only the machine's owners may change the machine (machine owners: ${ownersText(machineOwners(file))}); @${r.login} isn't one`;
-  if (!r.deviceOk) return "a machine change needs one of the console's allowed devices (dashboards.sh --console-devices, the same as the terminal); this request didn't come from one";
+  if (!r.deviceOk) return "a machine change needs one of the machine's allowed devices (dashboards.sh --machine-devices); this request didn't come from one";
   return null;
 }
