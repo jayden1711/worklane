@@ -298,18 +298,26 @@ test('the read cost: a commit where a pinned required check has no run at all re
   assert.deepEqual(all.calls.map((c) => c.replace(/\?.*/, '')), [`/commits/${SHA}/check-runs`, '/actions/runs', `/commits/${SHA}/status`]);
 });
 
-test('a pin to an App that is not Actions fails closed: every one of its check runs listed must pass', async () => {
+test("a pin to an App that is not Actions: the App's latest run decides, in any suite (the owner's decision, round 8); another App's failure refuses", async () => {
   const pin = { required_checks: ['scan'], required_check_sources: { scan: { app_id: 4242 } } };
   const verdict = async (runs: Run[]) => {
     const r = await choose(pin, gitHub({ runs }));
     return r.chosen ? 'installs' : (r.reason ?? '');
   };
-  // Its first suite cancelled or failed, its second passed: refused (no file to group by, so nothing supersedes).
-  assert.match(await verdict([{ name: 'scan', suite: 11, app: 4242, conclusion: 'cancelled' }, { name: 'scan', suite: 12, app: 4242 }]), /"scan" ended cancelled/);
-  assert.match(await verdict([{ name: 'scan', suite: 12, app: 4242 }, { name: 'scan', suite: 11, app: 4242, conclusion: 'failure' }]), /"scan" ended failure/);
-  // A re-run GitHub lists in place of the failure (the latest of its suite): installs; both suites passed: installs.
-  assert.equal(await verdict([{ name: 'scan', suite: 11, app: 4242 }]), 'installs');
+  // Its earlier suite cancelled or failed, a later suite passed: installs (round 6 refused these, fail closed).
+  assert.equal(await verdict([{ name: 'scan', suite: 11, app: 4242, conclusion: 'cancelled', id: 1 }, { name: 'scan', suite: 12, app: 4242, id: 2 }]), 'installs');
+  assert.equal(await verdict([{ name: 'scan', suite: 12, app: 4242, id: 2 }, { name: 'scan', suite: 11, app: 4242, conclusion: 'failure', id: 1 }]), 'installs');
+  // A later suite failed: refused. Another App's failure: refused.
+  assert.match(await verdict([{ name: 'scan', suite: 11, app: 4242, id: 1 }, { name: 'scan', suite: 12, app: 4242, conclusion: 'failure', id: 2 }]), /"scan" ended failure/);
+  assert.match(await verdict([{ name: 'scan', suite: 11, app: 4242, id: 1 }, { name: 'scan', suite: 13, app: 5555, conclusion: 'failure', id: 3 }]), /from another source ended failure/);
   assert.equal(await verdict([{ name: 'scan', suite: 11, app: 4242 }, { name: 'scan', suite: 12, app: 4242 }]), 'installs');
+});
+
+test("with a required check pinned, a refused status read (a 403 or 404 on page 1 included) waits: the updater's fetchJson gives no answer (the owner's decision)", async () => {
+  // realDeps' fetchJson answers null for any HTTP error; the stand-in's null is that answer.
+  const r = await u.chooseCommit(gitHub({ runs: [{ name: 'scan', suite: 2 }], workflowRuns: legit, statuses: null }).deps, { branch: 'main', required_checks: ['scan'] }, API, [{ sha: SHA, date: '2026-10-18T11:59:00Z' }], null);
+  assert.equal(r.wait?.sha, SHA);
+  assert.match(r.reason ?? '', /no answer for its commit statuses/);
 });
 
 test("updates.json required_check_sources pins a check (over the updater's own list); the branch rules' App pins one it doesn't name", async () => {

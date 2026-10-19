@@ -678,10 +678,10 @@ const RETIRED_CHECKS = Object.freeze(['desktop']);
  * wasn't read; one group for any other App). In each file's group the latest run (the later workflow run, then the
  * later check run, as a re-run attempt is) and the newest check run (the highest id: GitHub numbers check runs as it
  * makes them, a re-run's jobs included) must both pass. So one file never supersedes another, and a re-run of an
- * older run that failed after a newer run passed still refuses. An App that isn't Actions can't be split by file, so
- * every one of its check runs listed must pass (round 6, fail closed; GitHub lists the latest per check suite, so a
- * re-run in the same suite replaces its failure). Returns a run that doesn't pass (the same whatever the list order),
- * else the latest run of all.
+ * older run that failed after a newer run passed still refuses. An App that isn't Actions can't be split by file: its
+ * latest check run of the name (the highest id) decides, in whatever check suite, so a later pipeline or re-run of that
+ * App supersedes its earlier ones (the owner's decision, round 8; round 6 refused a failure in another suite). Returns
+ * a run that doesn't pass (the same whatever the list order), else the latest run of all.
  */
 function ownVerdict(own, pins) {
   const suite = (r) => pins.suites.get(r.check_suite && r.check_suite.id);
@@ -695,8 +695,9 @@ function ownVerdict(own, pins) {
   const ok = (r) => r.status === 'completed' && r.conclusion === 'success';
   const bad = [];
   for (const [key, g] of groups) {
-    // An App that isn't Actions can't be split by file: every one of its runs must pass (round 6, fail closed).
-    const decide = key === 'app' ? g : [g.reduce((a, b) => (later(b, a) ? b : a)), g.reduce((a, b) => ((b.id ?? -1) > (a.id ?? -1) ? b : a))];
+    // An App that isn't Actions can't be split by file: its latest run decides, in any suite (the owner, round 8).
+    const newest = g.reduce((a, b) => ((b.id ?? -1) > (a.id ?? -1) ? b : a));
+    const decide = key === 'app' ? [newest] : [g.reduce((a, b) => (later(b, a) ? b : a)), newest];
     bad.push(...decide.filter((r) => !ok(r)));
   }
   // The same run whatever the list order: a finished one (waiting can't fix it) before a running one, then the highest id.
