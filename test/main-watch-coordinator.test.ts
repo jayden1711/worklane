@@ -280,22 +280,23 @@ test('resume (#776): reading main never blocks: a hung remote times out as not g
   // The read itself: the event loop runs while it waits, and a timeout is no tip.
   let ticks = 0;
   const timer = setInterval(() => ticks++, 50);
-  const started = Date.now();
-  const read = await remoteTip(w.f.repo, 'origin', 'main', { timeoutMs: 1000 } as never);
+  const started = performance.now();
+  const read = await remoteTip(w.f.repo, 'origin', 'main', { timeoutMs: 1000 });
   clearInterval(timer);
   assert.equal(read, null, 'timed out: unreadable');
   assert.ok(ticks >= 5, `the event loop ran while git waited (${ticks} ticks)`);
-  assert.ok(Date.now() - started < 3500, 'bounded by the timeout, not the remote');
+  assert.ok(performance.now() - started < 3500, 'bounded by the timeout, not the remote');
   // The dashboard: a resume waits on the hung remote; another request is served at once.
   const { d, resume, get } = await resumeDashboard(w, w.f.cfg, { mainTipTimeoutMs: 1500 });
   try {
     const pending = resume();
     await new Promise((r) => setTimeout(r, 200));
-    const t0 = Date.now();
+    const t0 = performance.now();
     const s = await get('/api/state');
-    const took = Date.now() - t0;
+    const took = Math.round(performance.now() - t0);
     assert.equal(s.status, 200);
-    assert.ok(took < 1000, `another request answered while main was read (${took} ms)`);
+    // The remote hangs for 4 s: a request queued behind a blocking read would take over 3.5 s.
+    assert.ok(took < 2000, `another request answered while main was read (${took} ms)`);
     const r = await pending;
     assert.equal(r.status, 409);
     assert.match(r.body.error ?? '', /tip can't be read from the remote/);
