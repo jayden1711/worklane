@@ -6,7 +6,9 @@ import { execFileSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import type { WorkflowSource } from '../src/check-source.js';
+import { GitHubBacklog } from '../src/backlog/github.js';
+import { PinnedChecks, type CheckPin, type WorkflowSource } from '../src/check-source.js';
+import { readiness } from '../src/pr-watch.js';
 import type { Role } from '../src/dashboard-auth.js';
 import { GitHubMainWatchApi } from '../src/github/main-watch-api.js';
 import { acceptGit, acceptMerge, CONFIG_PATH, DEAD_CHECK_MS, disabledWorkflowFor, disabledWorkflowsOf, judge, LINK_LAG_MS, MAIN_WATCH_CALL_MS, MainWatch, outcomesAt, protectionView, readWatchState, repoGit, revertCapsAt, type Acceptance, type AcceptTarget, type CheckRunAt, type Compared, type MainWatchApi, type MainWatchDeps, type MergedPull, type ProtectionMode, type StatusAt, subjectPrNumber, tripOf, type Trip, type WatchGit, type WorkflowAt } from '../src/main-watch.js';
@@ -279,6 +281,9 @@ test('main watch (#727): an Actions-App pin never lets one workflow file superse
     s.gh.runs.set(m.head, o.runs);
     s.gh.sources.set(m.head, Object.fromEntries(Object.entries(o.files).map(([suite, path]) => [suite, { run: Number(suite) * 100, url: page(Number(suite) * 100), path, repo, sha: m.head }])));
     await run(s.gh, s.watch, 8);
+    // Round 6: the watch itself asked for the workflow runs (it used to under a workflow pin only, so under an
+    // Actions-App pin every run was its own group and these cases passed for the wrong reason).
+    assert.ok(s.gh.calls.some((c) => c.what.startsWith('sources ')), 'the watch read the workflow runs behind the Actions suites');
     return s.unaccounted[0]?.reason.replace(/^.*: /, '') ?? (s.checked.length ? 'accounted' : 'none');
   };
   // GitHub's rules pin `ci` to the Actions App; ci.yml is suite 1 (run 100), a PR-added evil.yml suite 2 (run 200).
@@ -1043,4 +1048,101 @@ test("GitHubMainWatchApi: compare reads GitHub's ahead/behind counts; a PR carri
   assert.deepEqual(await api.compare('a'.repeat(40), 'b'.repeat(40)), { status: 'ahead', aheadBy: 1, behindBy: 0 });
   assert.ok(urls[0]!.endsWith(`/repos/x/y/compare/${'a'.repeat(40)}...${'b'.repeat(40)}?per_page=1`), urls[0]);
   assert.equal((await api.pull(9)).commits, 3);
+});
+
+// #727 round 6: readiness and the main watch judge a pinned check through one function (pinnedVerdict) over the same
+// facts. One table, each case under a workflow pin, an Actions-App pin (GitHub's rules name 15368) and a pin to an App
+// that isn't Actions: readiness through PinnedChecks.of over GitHubBacklog's real requests, the watch through its own
+// request loop (it asks for each read itself, nothing handed in). Both must give the expected verdict.
+type Job = { id: number; suite: number; app?: number; conclusion?: string; status?: string };
+type Case = { what: string; jobs: Job[]; files?: Record<number, string>; statuses?: { context: string; state: string }[]; expect: 'pass' | 'fail' | 'pending' | 'missing' };
+const AGREE_REPO = 'example-org/example-shop';
+const OTHER_APP = 2222;
+const NON_ACTIONS_APP = 1111;
+const pageOf = (j: Job) => (j.app ?? ACTIONS_ID) === ACTIONS_ID ? `https://github.com/${AGREE_REPO}/actions/runs/${j.suite * 100}/job/${j.id}` : `https://github.example/${AGREE_REPO}/runs/${j.id}`;
+const ACTIONS_ID = 15368;
+
+/** Readiness's verdict for `ci` on `head`: GitHubBacklog's own requests over these answers (check runs as filter=latest lists them). */
+async function readinessVerdict(c: Case, head: string, pin: { configured: Record<string, CheckPin>; github: Record<string, number> }): Promise<string> {
+  const latest = new Map<number, Job>();
+  for (const j of c.jobs) if (!latest.has(j.suite) || latest.get(j.suite)!.id < j.id) latest.set(j.suite, j);
+  const answer = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status });
+  const f = (async (url: string) => {
+    const path = url.replace('https://api.github.com', '');
+    if (path.startsWith(`/repos/${AGREE_REPO}/commits/${head}/check-runs?filter=latest`)) {
+      const runs = [...latest.values()].map((j) => ({ id: j.id, name: 'ci', status: j.status ?? 'completed', conclusion: (j.status ?? 'completed') === 'completed' ? (j.conclusion ?? 'success') : null, html_url: pageOf(j), app: { id: j.app ?? ACTIONS_ID }, check_suite: { id: j.suite } }));
+      return answer({ total_count: runs.length, check_runs: runs });
+    }
+    if (path.startsWith(`/repos/${AGREE_REPO}/actions/runs?head_sha=${head}`)) {
+      const runs = Object.entries(c.files ?? {}).map(([suite, file]) => ({ id: Number(suite) * 100, html_url: `https://github.com/${AGREE_REPO}/actions/runs/${Number(suite) * 100}`, check_suite_id: Number(suite), path: file, head_sha: head, repository: { full_name: AGREE_REPO } }));
+      return answer({ total_count: runs.length, workflow_runs: runs });
+    }
+    if (path.startsWith(`/repos/${AGREE_REPO}/commits/${head}/status`)) return answer({ total_count: (c.statuses ?? []).length, statuses: c.statuses ?? [] });
+    if (path === `/repos/${AGREE_REPO}/branches/main`) return answer({ name: 'main', protection: { enabled: false } });
+    if (path.startsWith(`/repos/${AGREE_REPO}/rules/branches/main`)) return answer(Object.entries(pin.github).map(([context, id]) => ({ type: 'required_status_checks', parameters: { required_status_checks: [{ context, integration_id: id }] } })));
+    return answer({ message: 'Not Found' }, 404);
+  }) as typeof fetch;
+  const pinned = new PinnedChecks({ backlog: new GitHubBacklog(AGREE_REPO, () => 't', f), branch: () => 'main', repo: () => AGREE_REPO, configured: () => pin.configured });
+  const out = readiness({ required: ['ci'], checks: await pinned.of(head), head, evaluated: { head, approved: true } }).checks[0]!.outcome;
+  return out === 'pass' || out === 'pending' || out === 'missing' ? out : 'fail';
+}
+
+/** The main watch's verdict for `ci` on a merge whose PR head carries these runs, through its own request loop. */
+async function watchVerdict(c: Case, pin: { config: string; github: Record<string, number> }): Promise<string> {
+  const s = await started({ pins: { sources: () => ({}), github: async () => pin.github, repo: AGREE_REPO }, config: pin.config });
+  const m = s.w.mergedPr();
+  s.gh.pr(7, m.merge, m.head, iso(T), 'example-collaborator');
+  s.gh.roles.set('example-collaborator', 'writer');
+  // filter=all: every attempt, each started and finished before the merge, in id order.
+  s.gh.runs.set(
+    m.head,
+    c.jobs.map((j) => ci({ id: j.id, suite: j.suite, app: j.app ?? ACTIONS_ID, url: pageOf(j), status: j.status ?? 'completed', conclusion: (j.status ?? 'completed') === 'completed' ? (j.conclusion ?? 'success') : null, startedAt: iso(T - (60 - j.id) * 60_000), completedAt: (j.status ?? 'completed') === 'completed' ? iso(T - (59 - j.id) * 60_000) : null })),
+  );
+  s.gh.sources.set(m.head, Object.fromEntries(Object.entries(c.files ?? {}).map(([suite, path]) => [suite, { run: Number(suite) * 100, url: `https://github.com/${AGREE_REPO}/actions/runs/${Number(suite) * 100}`, path, repo: AGREE_REPO, sha: m.head }])));
+  s.gh.statuses.set(m.head, (c.statuses ?? []).map((x) => ({ ...x, createdAt: iso(T - 30 * 60_000) })));
+  await run(s.gh, s.watch, 10);
+  const why = s.unaccounted[0]?.reason;
+  if (!why) return s.checked.length ? 'pass' : 'none';
+  const hit = /: ci (\w+)$/.exec(why)?.[1];
+  return hit ?? why;
+}
+
+test('readiness and the main watch agree on every pinned case, under a workflow pin, an Actions-App pin and a non-Actions App pin (#727 round 6)', async () => {
+  const ciYml = '.github/workflows/ci.yml';
+  const actions: Case[] = [
+    { what: "owner 1: run 100 cancelled, then run 200 passed", jobs: [{ id: 10, suite: 1, conclusion: 'cancelled' }, { id: 20, suite: 2 }], files: { 1: ciYml, 2: ciYml }, expect: 'pass' },
+    { what: 'owner 2: run 100 failed, then run 200 passed', jobs: [{ id: 10, suite: 1, conclusion: 'failure' }, { id: 20, suite: 2 }], files: { 1: ciYml, 2: ciYml }, expect: 'pass' },
+    { what: "owner 3: the pinned pass, and another App's same-name failure", jobs: [{ id: 20, suite: 2 }, { id: 30, suite: 9, app: OTHER_APP, conclusion: 'failure' }], files: { 2: ciYml }, expect: 'fail' },
+    { what: 'tightening: run 200 passed, then run 100 re-run and failed', jobs: [{ id: 10, suite: 1 }, { id: 20, suite: 2 }, { id: 30, suite: 1, conclusion: 'failure' }], files: { 1: ciYml, 2: ciYml }, expect: 'fail' },
+    { what: 'a normal re-run: run 100 cancelled, run 200 failed then its re-run attempt passed', jobs: [{ id: 10, suite: 1, conclusion: 'cancelled' }, { id: 20, suite: 2, conclusion: 'failure' }, { id: 30, suite: 2 }], files: { 1: ciYml, 2: ciYml }, expect: 'pass' },
+    { what: 'a re-run attempt of the latest run still running', jobs: [{ id: 20, suite: 2, conclusion: 'failure' }, { id: 30, suite: 2, status: 'in_progress' }], files: { 2: ciYml }, expect: 'pending' },
+    { what: 'ci.yml failed, then a PR-added evil.yml passed later', jobs: [{ id: 10, suite: 1, conclusion: 'failure' }, { id: 20, suite: 3 }], files: { 1: ciYml, 3: '.github/workflows/evil.yml' }, expect: 'fail' },
+    { what: "the pinned pass, and the name's failing commit status", jobs: [{ id: 20, suite: 2 }], files: { 2: ciYml }, statuses: [{ context: 'ci', state: 'failure' }], expect: 'fail' },
+  ];
+  const app: Case[] = [
+    { what: 'owner 1 under a non-Actions App: suite 11 cancelled, suite 12 passed (no file to group by: fail closed)', jobs: [{ id: 10, suite: 11, app: NON_ACTIONS_APP, conclusion: 'cancelled' }, { id: 20, suite: 12, app: NON_ACTIONS_APP }], expect: 'fail' },
+    { what: 'owner 2 under a non-Actions App: suite 11 failed, suite 12 passed', jobs: [{ id: 10, suite: 11, app: NON_ACTIONS_APP, conclusion: 'failure' }, { id: 20, suite: 12, app: NON_ACTIONS_APP }], expect: 'fail' },
+    { what: 'a re-run in the same suite passed over its failure', jobs: [{ id: 10, suite: 11, app: NON_ACTIONS_APP, conclusion: 'failure' }, { id: 20, suite: 11, app: NON_ACTIONS_APP }], expect: 'pass' },
+    { what: "owner 3 under a non-Actions App: its pass, and another App's failure", jobs: [{ id: 20, suite: 12, app: NON_ACTIONS_APP }, { id: 30, suite: 9, app: OTHER_APP, conclusion: 'failure' }], expect: 'fail' },
+    { what: 'two suites of the App, both passed', jobs: [{ id: 10, suite: 11, app: NON_ACTIONS_APP }, { id: 20, suite: 12, app: NON_ACTIONS_APP }], expect: 'pass' },
+    { what: 'only an Actions run of the name', jobs: [{ id: 20, suite: 2 }], files: { 2: ciYml }, expect: 'missing' },
+  ];
+  const kinds = [
+    { kind: 'workflow pin', cases: actions, ready: { configured: { ci: { workflow: ciYml } }, github: {} }, watch: { config: `required_checks: [ci]\nrequired_check_sources:\n  ci: { workflow: ${ciYml} }\n`, github: {} } },
+    { kind: 'Actions-App pin', cases: actions, ready: { configured: {}, github: { ci: ACTIONS_ID } }, watch: { config: 'required_checks: [ci]\n', github: { ci: ACTIONS_ID } } },
+    { kind: 'non-Actions App pin', cases: app, ready: { configured: { ci: { app_id: NON_ACTIONS_APP } }, github: {} }, watch: { config: `required_checks: [ci]\nrequired_check_sources:\n  ci: { app_id: ${NON_ACTIONS_APP} }\n`, github: {} } },
+  ];
+  // Under a workflow pin evil.yml is another source (its pass can't count, ci.yml's failure stands): fail either way.
+  const rows: string[] = [];
+  for (const k of kinds) {
+    for (const c of k.cases) {
+      const head = 'f'.repeat(40);
+      const r = await readinessVerdict(c, head, k.ready);
+      const w = await watchVerdict(c, k.watch);
+      rows.push(`${k.kind} | ${c.what} | readiness ${r} | watch ${w}`);
+      assert.equal(r, c.expect, `readiness, ${k.kind}: ${c.what}`);
+      assert.equal(w, c.expect, `main watch, ${k.kind}: ${c.what}`);
+    }
+  }
+  assert.equal(rows.length, 22);
 });

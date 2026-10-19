@@ -21,6 +21,9 @@ const CONFIG = join(BRAND.configDir, 'config.yaml');
 const WORKER = join(BRAND.configDir, 'roles', 'worker.md');
 
 /** A person's clone of the remote: `push` edits config.yaml there and pushes it to main. */
+/** The harness's passing checks, judged once (made by PinnedChecks.of, #727). */
+const PASSING = await asJudged(passing);
+
 function world() {
   const f = fixture();
   f.cfg.project.land_mode = 'pr';
@@ -39,7 +42,7 @@ function world() {
     git(person, 'push', '-q', 'origin', 'main');
     return git(person, 'rev-parse', 'HEAD');
   };
-  const required = () => c.prReadiness(1, 'a'.repeat(40), asJudged(passing)).checks.map((x) => x.name);
+  const required = () => c.prReadiness(1, 'a'.repeat(40), PASSING).checks.map((x) => x.name);
   return { f, c, push, required, raised, resolved };
 }
 

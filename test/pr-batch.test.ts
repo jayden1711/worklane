@@ -304,15 +304,15 @@ test('the merge guard: a fast check passing on the head and a passing full run f
   const w = world(2);
   const f = fakeRuns(w);
   const { b } = batcher(w, f.t);
-  const fastOk = asJudged([{ name: 'fast', source: 'check_run' as const, status: 'completed', conclusion: 'success' }]);
+  const fastOk = await asJudged([{ name: 'fast', source: 'check_run' as const, status: 'completed', conclusion: 'success' }]);
   const events = () => w.log.read(0, [...PR_BATCH_EVENTS]);
   const head = w.prs.get(1)!.headSha;
   assert.equal(mayMerge({ events: events(), number: 1, head, checks: fastOk, fastChecks: ['fast'] }).ok, false, 'no batch yet');
   b.enqueue(entry(w, 1));
   await pass(b);
   assert.deepEqual(mayMerge({ events: events(), number: 1, head, checks: fastOk, fastChecks: ['fast'] }), { ok: true, batch: 'batch-1' });
-  assert.equal(mayMerge({ events: events(), number: 1, head, checks: asJudged([]), fastChecks: ['fast'] }).ok, false, 'fast check missing');
-  assert.equal(mayMerge({ events: events(), number: 1, head, checks: asJudged([{ ...fastOk[0]!, conclusion: 'failure' }]), fastChecks: ['fast'] }).ok, false, 'fast check red');
+  assert.equal(mayMerge({ events: events(), number: 1, head, checks: await asJudged([]), fastChecks: ['fast'] }).ok, false, 'fast check missing');
+  assert.equal(mayMerge({ events: events(), number: 1, head, checks: await asJudged([{ ...fastOk[0]!, conclusion: 'failure' }]), fastChecks: ['fast'] }).ok, false, 'fast check red');
   assert.equal(mayMerge({ events: events(), number: 1, head, checks: fastOk, fastChecks: [] }).ok, false, 'no fast check configured');
   assert.equal(mayMerge({ events: events(), number: 1, head: w.prs.get(2)!.headSha, checks: fastOk, fastChecks: ['fast'] }).ok, false, 'another head');
   assert.equal(mayMerge({ events: events(), number: 2, head: w.prs.get(2)!.headSha, checks: fastOk, fastChecks: ['fast'] }).ok, false, 'never batched');

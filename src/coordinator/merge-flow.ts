@@ -1,7 +1,7 @@
 // The merge-policy flow: watching opened PRs, the merge decision, waiting for the owner, the light check, and
 // main's checks after a merge (revert on red).
 import { startRefusal, TestRunHeld } from '../testrun/gate.js';
-import { CI_NONE_MAIN_WATCH, ciIsNone, headChecks, requiredFor } from '../ci-none.js';
+import { CI_NONE_MAIN_WATCH, ciIsNone, requiredFor } from '../ci-none.js';
 import { PinnedChecks, type JudgedChecks } from '../check-source.js';
 import type { Coordinator } from '../coordinator.js';
 import { spawnSync } from 'node:child_process';
@@ -49,9 +49,18 @@ export abstract class MergeFlow extends FixRuns {
   private fixForwardInst: FixForward | null = null;
   private pinnedInst: PinnedChecks | null = null;
 
-  /** GitHub's checks on a commit, only those from their pinned source (#727, src/check-source.ts): every judgement reads these. */
+  /**
+   * GitHub's checks on a commit, only those from their pinned source (#727, src/check-source.ts), and under No CI this
+   * instance's own test runs from its event log in place of their names (src/ci-none.ts): every judgement reads these.
+   */
   protected get pinned(): PinnedChecks {
-    this.pinnedInst ??= new PinnedChecks({ backlog: this.d.backlog, branch: () => this.branch, repo: () => this.d.cfg.project.project.repo, configured: () => this.d.cfg.project.required_check_sources });
+    this.pinnedInst ??= new PinnedChecks({
+      backlog: this.d.backlog,
+      branch: () => this.branch,
+      repo: () => this.d.cfg.project.project.repo,
+      configured: () => this.d.cfg.project.required_check_sources,
+      local: { project: () => this.d.cfg.project, tests: () => this.d.cfg.tests, log: this.d.log },
+    });
     return this.pinnedInst;
   }
 
@@ -1205,9 +1214,8 @@ export abstract class MergeFlow extends FixRuns {
   prReadiness(n: number, head: string, checks: JudgedChecks, except: string[] = []): Readiness {
     const v = this.events(n).filter((e) => e.type === 'eval.verdict').at(-1)?.payload as EventPayload<'eval.verdict'> | undefined;
     const judged = v && carriedHead(this.mergeInsOf(), null, head) === v.head ? head : v?.head;
-    // No CI (src/ci-none.ts): the test-run checks from this instance's event log, never GitHub's of the same name.
-    const judgedChecks = headChecks({ project: this.d.cfg.project, tests: this.d.cfg.tests, github: checks, events: () => this.testRunEvents(), sha: head });
-    return readiness({ required: this.requiredChecks().filter((c) => !except.includes(c)), checks: judgedChecks, head, evaluated: v ? { head: judged!, approved: v.patch_correct } : null });
+    // `checks` is PinnedChecks.of's: under No CI it already carries the event log's test runs, never GitHub's of their names.
+    return readiness({ required: this.requiredChecks().filter((c) => !except.includes(c)), checks, head, evaluated: v ? { head: judged!, approved: v.patch_correct } : null });
   }
 
   /** The checks a PR must pass: config.yaml required_checks, or under No CI every test-run tier's check (src/ci-none.ts). */
@@ -1217,12 +1225,7 @@ export abstract class MergeFlow extends FixRuns {
 
   /** The checks on a PR's head as the merge policy judges them: GitHub's, or under No CI the event log's test runs in place of any of their names. */
   protected async headChecksOf(sha: string): Promise<JudgedChecks> {
-    return headChecks({ project: this.d.cfg.project, tests: this.d.cfg.tests, github: await this.pinned.of(sha), events: () => this.testRunEvents(), sha });
-  }
-
-  /** The test runs' own records in this instance's event log: what No CI judges by. */
-  private testRunEvents() {
-    return this.d.log.read(0, ['testrun.queued', 'testrun.finished']);
+    return this.pinned.of(sha);
   }
 
   /** The stale-PR merge-ins this instance pushed (pr_hygiene.merged_in), oldest first. */
