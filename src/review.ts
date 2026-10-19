@@ -337,7 +337,9 @@ export const SELF_MODIFICATION_PARTS: { what: string; globs: string[] }[] = [
   // src/events/redact.ts: the secret redaction of everything stored and of every chat reply (locked with the guard's
   // tree before #785, which no longer reaches it).
   { what: 'sign-in, credentials or secrets', globs: ['src/dashboard-auth*', 'src/github-app*', 'src/github-scope*', 'src/**/*secret*', 'src/console/terminal*', 'src/setup/app-manifest*', 'src/events/redact.ts'] },
-  { what: 'who may approve', globs: ['src/decide.ts', 'src/intake/decide.ts', 'src/intake/people.ts', 'src/machine-owners.ts'] },
+  // src/intake/report.ts: isTrusted and isAllowed, the intake's trust and admission inputs to src/intake/decide.ts
+  // (locked with the guard's tree before #785, which no longer reaches it).
+  { what: 'who may approve', globs: ['src/decide.ts', 'src/intake/decide.ts', 'src/intake/people.ts', 'src/machine-owners.ts', 'src/intake/report.ts'] },
   // WHY: before this, these were the owner's call only where a repo's own review.yaml listed them (the engine's does, as
   // `engine`); a repo whose review.yaml didn't would have merged a change to the evaluator or the denylist on its own.
   { what: 'the evaluator and the agent runner', globs: ['src/roles.ts', 'src/coordinator.ts', 'src/runner.ts'] },
@@ -354,14 +356,16 @@ export const SELF_MODIFICATION_PARTS: { what: string; globs: string[] }[] = [
   { what: "the agents' tool guard's hook commands", globs: ['src/install.ts', 'src/instance.ts'] },
   // WHY (#785): these were locked only as modules the guard's import tree reached. The tree no longer reaches them, but
   // each still decides what an agent run gets: the settings that keep its hooks on, the bundles it may read, the
-  // plugins and MCP servers it loads, the hosts it may ask for, the stuck-run stop, and the role, lane and tools of the
-  // runs that read untrusted input (the research, intake, chat, replier and explainer run builders; #841 would let
-  // those five go). So they stay locked here, exactly as before; only the part that names them changed.
+  // plugins and MCP servers it loads, the hosts it may ask for, the stuck-run stop, the role, lane and tools of the
+  // runs that read untrusted text (the research, intake, chat, replier, explainer and stage-judge run builders; #841
+  // would let those six go), and the intake run's output schema and draft checks (src/intake/triage.ts). So they stay
+  // locked here, exactly as before; only the part that names them changed.
   {
     what: 'what an agent run is given',
     globs: [
       'src/agent-settings.ts', 'src/bundle.ts', 'src/domain-requests.ts', 'src/stuck.ts',
       'src/research.ts', 'src/intake/run.ts', 'src/intake/chat.ts', 'src/intake/replier.ts', 'src/intake/explain.ts',
+      'src/stage-label.ts', 'src/intake/triage.ts',
       'src/mcp/client.ts', 'src/mcp/connector.ts', 'src/mcp/snapshot.ts', 'src/plugins/approval.ts', 'src/plugins/run.ts', 'src/plugins/tree.ts',
     ],
   },

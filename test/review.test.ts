@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import * as nodeModule from 'node:module';
 import { tmpdir } from 'node:os';
 import { join, posix, sep } from 'node:path';
@@ -212,15 +212,36 @@ test("regression: the guard's process loads only modules of its pinned tree, and
     "process.on('exit', () => writeFileSync(process.env.GUARD_LOADS_LOG, [...seen].join('\\n')));",
   ].join('\n'));
   const dist = pathToFileURL(join(repoDir, 'dist', 'src')).href + '/';
-  for (const [event, input] of [['pre-tool-use', { cwd: dir, tool_name: 'Read', tool_input: { file_path: join(dir, 'x') } }], ['post-tool-use', { cwd: dir, tool_name: 'Edit' }], ['session-end', { cwd: dir }]] as const) {
-    const log = join(dir, `${event}.txt`);
-    const r = spawnSync(process.execPath, ['--import', pathToFileURL(preload).href, join(repoDir, 'dist', 'src', 'hook-main.js'), event], { input: JSON.stringify(input), encoding: 'utf8', env: { ...process.env, GUARD_LOADS_LOG: log, [`${BRAND.envPrefix}_AGENT`]: '1', [`${BRAND.envPrefix}_ROLE`]: 'researcher' } });
+  // WHY (#839 review): a lazy import loads only on the path that takes it, so the calls go past the guard's early exits:
+  // a project with a config (the config loader, the guardrails, the post-edit checks), and the research and chat lanes.
+  // The static pin above is what catches an import on a path no call here takes.
+  const project = join(dir, 'project');
+  cpSync(join(repoDir, 'examples', 'basic'), project, { recursive: true });
+  const bundle = join(dir, 'research', 'run-1');
+  mkdirSync(bundle, { recursive: true });
+  writeFileSync(join(bundle, 'research.json'), JSON.stringify({ blocklist: ['tracker.example'] }));
+  const P = BRAND.envPrefix;
+  const agent = (role: string | null, extra: Record<string, string> = {}) => ({ [`${P}_AGENT`]: '1', ...(role ? { [`${P}_ROLE`]: role } : {}), ...extra });
+  const calls: [string, string, Record<string, unknown>, Record<string, string>][] = [
+    ['no config', 'pre-tool-use', { cwd: dir, tool_name: 'Read', tool_input: { file_path: join(dir, 'x') } }, agent('researcher')],
+    ['a project, Bash', 'pre-tool-use', { cwd: project, tool_name: 'Bash', tool_input: { command: 'npm test' } }, agent(null)],
+    ['a project, a fetch', 'pre-tool-use', { cwd: project, tool_name: 'WebFetch', tool_input: { url: 'https://unlisted.example/' } }, agent(null)],
+    ['a project, a researcher', 'pre-tool-use', { cwd: project, tool_name: 'WebFetch', tool_input: { url: 'https://example.org/' } }, agent('researcher')],
+    ['the research lane', 'pre-tool-use', { cwd: bundle, tool_name: 'WebFetch', tool_input: { url: 'https://example.org/' } }, agent('researcher', { [`${P}_RESEARCH_ROOT`]: join(dir, 'research') })],
+    ['the intake lane', 'pre-tool-use', { cwd: bundle, tool_name: 'Read', tool_input: { file_path: join(bundle, 'research.json') } }, agent('intake', { [`${P}_RESEARCH_ROOT`]: join(dir, 'research') })],
+    ['the chat lane', 'pre-tool-use', { cwd: project, tool_name: 'Grep', tool_input: { pattern: 'x', path: 'src' } }, agent('channel-chat', { [`${P}_CHAT_ROOT`]: project })],
+    ['an edit in a project', 'post-tool-use', { cwd: project, tool_name: 'Edit', tool_input: { file_path: join(project, 'README.md') } }, agent(null)],
+    ['a session end', 'session-end', { cwd: project }, agent(null)],
+  ];
+  for (const [name, event, input, env] of calls) {
+    const log = join(dir, `${name.replaceAll(' ', '-').replaceAll(',', '')}.txt`);
+    const r = spawnSync(process.execPath, ['--import', pathToFileURL(preload).href, join(repoDir, 'dist', 'src', 'hook-main.js'), event], { input: JSON.stringify(input), encoding: 'utf8', env: { ...process.env, GUARD_LOADS_LOG: log, ...env } });
     assert.equal(r.error, undefined, String(r.error));
-    assert.ok(existsSync(log), `${event}: the guard's process ran with the watch (exit ${r.status}: ${r.stderr})`);
+    assert.ok(existsSync(log), `${name}: the guard's process ran with the watch (exit ${r.status}: ${r.stderr})`);
     const loaded = readFileSync(log, 'utf8').split('\n').filter((u) => u.startsWith(dist)).map((u) => `src/${u.slice(dist.length).replace(/\.js$/, '.ts')}`);
-    assert.ok(loaded.includes('src/hook-main.ts') && loaded.includes('src/hook.ts'), `${event}: the watch saw the guard load (${loaded.length} modules)`);
-    assert.deepEqual(loaded.filter((m) => !GUARD_TREE.includes(m)), [], `${event}: the guard's process loaded modules outside its pinned tree`);
-    assert.deepEqual(loaded.filter((m) => LEFT_THE_TREE.includes(m)), [], event);
+    assert.ok(loaded.includes('src/hook-main.ts') && loaded.includes('src/hook.ts'), `${name}: the watch saw the guard load (${loaded.length} modules)`);
+    assert.deepEqual(loaded.filter((m) => !GUARD_TREE.includes(m)), [], `${name}: the guard's process loaded modules outside its pinned tree`);
+    assert.deepEqual(loaded.filter((m) => LEFT_THE_TREE.includes(m)), [], name);
   }
 });
 
@@ -238,6 +259,10 @@ const STILL_LOCKED: [string, string][] = [
   ['src/research.ts', 'what an agent run is given'], ['src/intake/run.ts', 'what an agent run is given'],
   ['src/intake/chat.ts', 'what an agent run is given'], ['src/intake/replier.ts', 'what an agent run is given'],
   ['src/intake/explain.ts', 'what an agent run is given'],
+  // The stage judge's run builder (labelFailedRun: its role, tools, budget and schema, over agent-written text, run in
+  // the coordinator's checkout), and the intake's trust and draft checks that the locked intake decision takes as input.
+  ['src/stage-label.ts', 'what an agent run is given'], ['src/intake/triage.ts', 'what an agent run is given'],
+  ['src/intake/report.ts', 'who may approve'],
   ['src/events/redact.ts', 'sign-in, credentials or secrets'],
   ['src/runner.ts', 'the evaluator and the agent runner'], ['src/sandbox.ts', 'the sandbox and test runs'],
 ];
