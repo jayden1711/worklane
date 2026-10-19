@@ -12,15 +12,22 @@ import { dirname, join } from 'node:path';
 import { BRAND } from '../src/brand.js';
 import { loadConfig } from '../src/config/load.js';
 import { startDashboard } from '../src/dashboard.js';
-import { doctor } from '../src/doctor.js';
+import { doctor as engineDoctor } from '../src/doctor.js';
 import { projectStateDir } from '../src/guardrails/context.js';
 import { CI_CHOICE_EXIT, firstRunView, initCommand, localInitFile, readInitState, serverInitFile, stepsFor, unavailableIn, type InitArgs, type InitIo } from '../src/init.js';
 import { checksumOf, installPlan, PINS, type InstallableTool, type ToolInstall } from '../src/tool-install.js';
 import { launchdUnload, shareReadWithGroup, toolPlatform, which } from '../src/os/index.js';
 import { srvCheckoutPath } from '../src/os/system-paths.js';
 import { asPerson, engineCli, exampleProject, exampleRoles, repoRoot } from './helpers.js';
+import { HOST_TOOLS, hostToolStandIns, onStandIns, testPath } from './host-tools.js';
 
 const posix = process.platform === 'win32' && 'POSIX tools (tar, sh)';
+
+// #738, rule A: doctor's own checks run host tools (gitleaks, claude, gh, loginctl, systemctl) from PATH, so every
+// in-process doctor here runs with only recording stand-ins for them on PATH, never this machine's own.
+const hostBin = mkdtempSync(join(tmpdir(), 'init-host-tools-'));
+const hostTools = hostToolStandIns(hostBin, { tools: [...HOST_TOOLS, 'claude'], answers: { gitleaks: { version: '8.30.1\n' }, claude: { '--version': '2.1.296 (Claude Code)\n' } } });
+const doctor = (...a: Parameters<typeof engineDoctor>) => onStandIns(hostBin, () => engineDoctor(...a));
 process.env[`${BRAND.envPrefix}_STATE_DIR`] = mkdtempSync(join(tmpdir(), 'init-state-'));
 // Server mode's records: the machine's (/var/lib/... on a server), here a scratch directory.
 process.env[`${BRAND.envPrefix}_MACHINE_INIT_DIR`] = mkdtempSync(join(tmpdir(), 'init-machine-'));
@@ -420,6 +427,8 @@ test('doctor: every setup step of the registry checked live, and what the mode c
   const none = doctor(fresh, { initIo: t.io }).filter((x) => x.name.startsWith('setup') || x.level === 'off');
   assert.deepEqual(none.map((x) => [x.name, x.level]), [['setup', 'warn']]);
   assert.match(none[0]!.detail, /`worklane init --mode local\|server` walks the checklist/);
+  // In a marked test run, doctor never asks the service manager: its stand-ins saw no call (#738, rule A).
+  assert.deepEqual(hostTools.calls().filter((c) => c.tool === 'systemctl' || c.tool === 'launchctl'), []);
 });
 
 test('the dashboard first-run page: the checklist init recorded and what local mode lacks, for the owner and writers only', async () => {
@@ -427,6 +436,9 @@ test('the dashboard first-run page: the checklist init recorded and what local m
   const t = world({ claudeIn: false });
   await initCommand(t.args({ target: root }), t.io);
   const stateDir = projectStateDir(root);
+  // The page checks the steps live in a worker with the real probe: it inherits this PATH, only stand-ins (#738, rule A).
+  const savedPath = process.env.PATH;
+  process.env.PATH = testPath(hostBin);
   const d = await startDashboard({ root, cfg: loadConfig(root), eventsDb: join(stateDir, 'events.db'), stateDir, user: 'example-owner', roleOf: exampleRoles, slotsDir: mkdtempSync(join(tmpdir(), 'init-slots-')) });
   try {
     const base = d.url.split('/?')[0]!;
@@ -446,6 +458,7 @@ test('the dashboard first-run page: the checklist init recorded and what local m
     assert.match(((await v.json()) as { error: string }).error, /^the first-run checklist is for the instance's owners and writers/);
   } finally {
     await d.close();
+    process.env.PATH = savedPath;
   }
   // Never run here: all pending, no mode, and the command to start.
   const empty = firstRunView(join(mkdtempSync(join(tmpdir(), 'init-none-')), 'init.json'), { root: '/r', repo: 'o/r', instance: null });
@@ -459,11 +472,11 @@ test('init, end to end in local mode: the CLI with stand-in claude and gh, throu
   // gitleaks as the tools step and doctor ask it (installs are tested above, against their checksums).
   writeFileSync(join(bin, 'gitleaks'), '#!/bin/sh\necho 8.30.1\n');
   chmodSync(join(bin, 'gitleaks'), 0o755);
-  // #738: the Claude step reads the user service manager's environment (systemctl --user show-environment), which
-  // this test's bare environment has no bus for: a manager that sets none of the login variables. Anything else it is
-  // asked fails, as systemctl with no bus does.
-  writeFileSync(join(bin, 'systemctl'), '#!/bin/sh\nif [ "$1 $2" = "--user show-environment" ]; then echo "PATH=/usr/bin:/bin"; exit 0; fi\necho "Failed to connect to bus: No medium found" >&2\nexit 1\n');
-  chmodSync(join(bin, 'systemctl'), 0o755);
+  // #738, rule A: the CLI this test starts isn't a marked test run (its environment is built from scratch), and its
+  // PATH ends in /usr/bin:/bin, so every host tool init and doctor can run gets a recording stand-in here. systemctl
+  // answers the Claude step's `--user show-environment` as a manager that sets none of the login variables; any
+  // other call fails, as with no bus. gh and claude are scripts/ci/stand-ins'.
+  const tools = hostToolStandIns(bin, { tools: ['systemctl', 'launchctl', 'loginctl', 'docker', 'tailscale'], answers: { systemctl: { '--user show-environment': 'PATH=/usr/bin:/bin\n' } } });
   const home = mkdtempSync(join(tmpdir(), 'init-home-'));
   const env = { PATH: [bin, join(repoRoot, 'scripts', 'ci', 'stand-ins'), dirname(process.execPath), dirname(which('git')!), '/usr/bin', '/bin'].join(':'), HOME: home, [`${BRAND.envPrefix}_STATE_DIR`]: mkdtempSync(join(tmpdir(), 'init-e2e-state-')), [`${BRAND.envPrefix}_PREFIX`]: join(home, '.local') };
   const cli = (...a: string[]) => spawnSync(process.execPath, [engineCli, ...a], { encoding: 'utf8', env, stdio: ['ignore', 'pipe', 'pipe'] });
@@ -488,6 +501,11 @@ test('init, end to end in local mode: the CLI with stand-in claude and gh, throu
   const out = spawnSync(process.execPath, [engineCli, 'doctor', '--root', root], { encoding: 'utf8', env: { ...env, STANDIN_SIGNED_OUT: '1' } });
   assert.equal(out.status, 1);
   assert.match(out.stdout, /^FAIL {2}setup claude: Claude login \(local mode\): not signed in/m);
+  // The service manager's stand-ins were asked only read-only queries: the Claude step's environment, and (this child
+  // isn't a marked test run) whether the coordinator's unit is active. Never launchd, and nothing that changes a unit.
+  const manager = tools.calls().filter((c) => c.tool === 'systemctl' || c.tool === 'launchctl');
+  assert.ok(manager.some((c) => c.args.join(' ') === '--user show-environment'), JSON.stringify(manager));
+  assert.deepEqual(manager.filter((c) => !(c.tool === 'systemctl' && (c.args.join(' ') === '--user show-environment' || (c.args[0] === '--user' && c.args[1] === 'is-active' && c.args.length === 3)))), [], 'nothing beyond those queries');
 });
 
 test("down on a Mac: launchd still listing the agent after bootout (as on the macOS runner) is waited out, booted out again by its plist, and never reported gone while it isn't", () => {

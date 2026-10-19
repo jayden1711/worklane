@@ -8,7 +8,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { accessSync, chmodSync, constants as fsConstants, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { delimiter, dirname, join } from 'node:path';
 import { BRAND } from '../src/brand.js';
@@ -23,6 +23,7 @@ import { CliRunner, type RunRequest } from '../src/runner.js';
 import { checkSetup, checkSetupOffThread, MANAGER_LOGIN_VARS, systemProbe, type SetupProbe } from '../src/setup-steps.js';
 import { serviceManagerEnv } from '../src/os/index.js';
 import { exampleProject } from './helpers.js';
+import { HOST_TOOLS, hostToolStandIns, onPath, testPath } from './host-tools.js';
 
 const posixOnly = process.platform === 'win32' && 'POSIX stand-ins and file modes';
 process.env[`${BRAND.envPrefix}_STATE_DIR`] = mkdtempSync(join(tmpdir(), 'claude-runtime-state-'));
@@ -152,9 +153,12 @@ test('#738 acceptance 1: kind cli and a login claude reports as an API key: the 
   assert.equal(step.done, false, step.detail);
   assert.match(step.detail, /the agents would refuse it/);
   await initCommand(t.args(root), t.io);
-  const line = doctor(root, { initIo: t.io }).find((c) => c.name === 'setup step claude-login')!;
+  // doctor's own checks run host tools (gitleaks, claude, loginctl): only this test's stand-ins (rule A).
+  const fake = fakeClaude();
+  const line = withEnv({ PATH: testPath(fake.dir) }, () => doctor(root, { initIo: t.io })).find((c) => c.name === 'setup step claude-login')!;
   assert.equal(line.level, 'warn');
   assert.match(line.detail, /the agents would refuse it/);
+  assert.deepEqual(fake.tools.calls().filter((c) => c.tool === 'systemctl' || c.tool === 'launchctl'), [], 'the service manager was never asked');
 });
 
 test('#738 acceptance 2: kind cli and a subscription login: the step is done, as today, and asked as the agents ask', async () => {
@@ -276,7 +280,9 @@ test("#738 acceptance 4: the chosen key file's contents appear in no setup PR, e
   assert.ok(!t.out().includes(k.canary), 'not in what init printed');
   const live = await firstRunLiveView(localInitFile(p.root), { root: p.root, repo: REPO, instance: null, live: { probe: t.probe, stateDir: projectStateDir(p.root), policyFile: null } });
   assert.ok(!JSON.stringify(live).includes(k.canary), 'not in the first-run response');
-  assert.ok(!JSON.stringify(doctor(p.root, { initIo: t.io })).includes(k.canary), "not in doctor's lines");
+  const fake = fakeClaude();
+  assert.ok(!JSON.stringify(withEnv({ PATH: testPath(fake.dir) }, () => doctor(p.root, { initIo: t.io }))).includes(k.canary), "not in doctor's lines");
+  assert.deepEqual(fake.tools.calls().filter((c) => c.tool === 'systemctl' || c.tool === 'launchctl'), [], 'the service manager was never asked');
   // Events and every other machine-local record: the project's state dir, the engine's state dir, and the checkout.
   const roots = [projectStateDir(p.root), process.env[`${BRAND.envPrefix}_STATE_DIR`]!, p.root];
   for (const r of roots) assert.deepEqual(filesHolding(r, k.canary), [], `nothing under ${r} holds the key`);
@@ -405,46 +411,6 @@ test("#738: when the user service manager can't be read, the step is not done, s
   }
 });
 
-/**
- * The host tools the real probe (systemProbe, doctor, the dashboard's worker) can run, besides git and the fake
- * claude: each test that runs it with /usr/bin and /bin on PATH (for git) gets a stand-in for every one of these.
- */
-const HOST_TOOLS = ['systemctl', 'launchctl', 'loginctl', 'gh', 'docker', 'tailscale'] as const;
-
-/**
- * Recording stand-ins in `dir` for every HOST_TOOLS name: each call is one JSON line in `dir`'s record, and each
- * exits 1, as a tool that can't answer. So no test here reaches this machine's own tools (rule A), whatever the
- * engine under test does: a fail-without run against an engine without the guard included.
- */
-function hostToolStandIns(dir: string): { calls: () => { tool: string; args: string[] }[] } {
-  const record = join(dir, 'host-tool-calls.log');
-  writeFileSync(record, '');
-  for (const t of HOST_TOOLS) {
-    writeFileSync(join(dir, t), `#!/usr/bin/env node\nrequire('node:fs').appendFileSync(${JSON.stringify(record)}, JSON.stringify({ tool: ${JSON.stringify(t)}, args: process.argv.slice(2) }) + '\\n');\nprocess.exit(1);\n`);
-    chmodSync(join(dir, t), 0o755);
-  }
-  return { calls: () => readFileSync(record, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l) as { tool: string; args: string[] }) };
-}
-
-/** The PATH these tests run the real probe with: the fake dir first, then node, then the system's (git). */
-const testPath = (dir: string) => [dir, dirname(process.execPath), '/usr/bin', '/bin'].join(delimiter);
-
-/** Where `name` resolves on `path`, as exec finds it: the first executable file; null when none. */
-function onPath(name: string, path: string): string | null {
-  for (const d of path.split(delimiter)) {
-    const f = join(d, name);
-    try {
-      if (statSync(f).isFile()) {
-        accessSync(f, fsConstants.X_OK);
-        return f;
-      }
-    } catch {
-      // not here
-    }
-  }
-  return null;
-}
-
 test('#738: every host tool the real probe can run resolves to the test\'s own stand-in on the PATH these tests use, never to this machine\'s', { skip: posixOnly }, () => {
   const fake = fakeClaude();
   const path = testPath(fake.dir);
@@ -507,7 +473,10 @@ test("#738, the owner's option (a): a server with no claude-account record keeps
   const cfgDir = mkdtempSync(join(tmpdir(), 'cr-agent-claude-'));
   const facts = { home: mkdtempSync(join(tmpdir(), 'cr-inst-')), credentials: { github: { kind: 'app' as const, key_path: '/nowhere/app.pem' }, claude: { config_dir: cfgDir } } };
   const root = existingProject('cli');
-  const scratch = { [`${BRAND.envPrefix}_MACHINE_INIT_DIR`]: mkdtempSync(join(tmpdir(), 'cr-init-')), [`${BRAND.envPrefix}_INSTANCES_DIR`]: mkdtempSync(join(tmpdir(), 'cr-instances-')) };
+  // doctor's setup lines run the real probe's linger and unit checks: only this test's stand-ins (rule A).
+  const tools = mkdtempSync(join(tmpdir(), 'cr-tools-'));
+  hostToolStandIns(tools);
+  const scratch = { [`${BRAND.envPrefix}_MACHINE_INIT_DIR`]: mkdtempSync(join(tmpdir(), 'cr-init-')), [`${BRAND.envPrefix}_INSTANCES_DIR`]: mkdtempSync(join(tmpdir(), 'cr-instances-')), PATH: testPath(tools) };
   const lines = () => withEnv(scratch, () => setupChecks(root, { mode: 'server', instance: 'shop', initIo: world({ method: null }).io, context: { machine: { claudeAccountDir: accountDir, engine: '/opt/engine/current' }, instanceFacts: () => facts } }));
   const named = (ls: ReturnType<typeof lines>, name: string) => ls.find((l) => l.name === name);
   // No record: the step as on main (done, the stored login), and doctor's warning with the root command.
@@ -571,8 +540,9 @@ setTimeout(() => process.exit(0), 200);
 `,
   );
   chmodSync(bin, 0o755);
-  // Every host tool the real probe can run, beside the fake claude: never this machine's (rule A).
-  const tools = hostToolStandIns(dir);
+  // Every host tool the real probe and doctor can run, beside the fake claude: never this machine's (rule A).
+  // gitleaks answers its version, as doctor's check needs one.
+  const tools = hostToolStandIns(dir, { answers: { gitleaks: { version: '8.30.1\n' } } });
   return { dir, bin, tools };
 }
 
