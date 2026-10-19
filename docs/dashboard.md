@@ -295,7 +295,13 @@ It's visible only to machine owners: the server sends everyone else none of its 
 | Install Tailscale | `tailscale install` | Tailscale's apt repository for this distribution, its signing key checked against the fingerprint pinned in `scripts/setup/lib.sh`, then the pinned version of the package. No install script. A tailscale already there is left alone. | `sudo bash scripts/setup/tailscale.sh install` |
 | Log this machine in | `tailscale up` | `tailscale up` with no auth key. It prints a login link and waits 10 minutes. | `sudo bash scripts/setup/tailscale.sh up` |
 | Put the hub on HTTPS | `tailscale serve` | `tailscale serve --bg --https=443 http://127.0.0.1:4399`, and nothing else. | `sudo bash scripts/setup/tailscale.sh serve` |
-| Set the hub's public URL | `tailscale public-url` | `dashboards.sh` with the hub's own settings and `--public-url https://<this machine's tailnet name>`. | `sudo bash scripts/setup/tailscale.sh public-url`, or `sudo bash scripts/setup/dashboards.sh --client-id <id> --public-url https://<name> <instance>...` |
+| Set the hub's public URL | `tailscale public-url` | `dashboards.sh` with the hub's own settings and `--public-url https://<this machine's tailnet name>`. | `sudo bash scripts/setup/tailscale.sh public-url`, or `dashboards.sh` by hand (below) |
+
+By hand, the URL step is dashboards.sh with every setting the hub's unit has, so that it turns nothing off: leaving out `--siri` or `--hooks` drops that gateway's port and its token's ACL. The screen shows the exact command, built from the hub's unit (`/etc/systemd/system/worklane-dashboard-hub.service`) with every value quoted, when it can read the unit exactly; otherwise this one, with each `<...>` and `[...]` filled in from the unit's `ExecStart`:
+
+```
+sudo bash /opt/worklane/current/scripts/setup/dashboards.sh [--machine-devices <the hub unit's --console-devices or --machine-devices, if it has one>] --client-id <its --client-id> --public-url https://<name> [--siri if it has --siri-port] [--hooks if it has --hooks-port] <each instance name in its --hub>...
+```
 
 The dashboard never runs any of it: the coordinator runs the machine helper, which takes exactly those four commands (two fixed words each; no auth key, flag, URL or port can be passed) and starts the step as its own unit, `worklane-tailscale.service`. The card follows the step from the script's progress file, `/var/lib/worklane/tailscale/steps.jsonl`.
 

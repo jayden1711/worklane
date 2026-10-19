@@ -9,6 +9,7 @@ import { chmodSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { OWNER_TERMINAL_RERUN } from '../src/console/owner-terminal-removed.js';
 import { ownerTerminalCheck } from '../src/doctor.js';
+import { tailscaleSteps, type TailscaleStatus, type TailscaleStepView } from '../src/tailscale-setup.js';
 import { machine } from './dashboards-root.js';
 import { repoRoot } from './helpers.js';
 
@@ -195,4 +196,115 @@ test("the patterns doctor holds each printed value to are dashboards.sh's own, r
   // Instance names: dashboards.sh refuses each with need_instance_name (lib.sh instance_name_problem), which
   // test/instance-name.test.ts holds equal to src/instance-name.ts instanceNameOk, the rule parseHubUnit uses.
   assert.match(sh, /for name in "\$@"; do\n\s+need_instance_name "\$name"/);
+});
+
+// #767: the Tailscale setup's by-hand public-url command (tailscale.sh's header and the dashboard's Tailscale screen)
+// is dashboards.sh with the hub's settings and its new URL: it must keep the Siri and hooks gateways and the devices
+// too. Each shown command is filled in as an owner would, from the unit, pasted into bash and run against the real
+// dashboards.sh in a temporary root.
+
+/** The tailnet name the URL step gives the hub, and a status that is ready for that step. */
+const TAILNET = ['box', 'tail0example', 'ts', 'net'].join('.');
+const READY: TailscaleStatus = { installed: true, version: '1.0.0', pinnedVersion: '1.0.0', state: 'Running', name: TAILNET, https: true, serve: true, other443: false, breakGlassForwarded: false, funnel: false, hubUrl: 'https://hub.example.test' };
+/** SIRI_HOOKS_UNIT's settings, as an owner reads them off its ExecStart. */
+const HUB = { devices: 'tag:owner-laptop,box', clientId: 'Iv1.signin0001', siri: true, hooks: true, instances: ['alpha'] };
+
+/**
+ * A shown command with each <...> and [...] filled in from the hub's settings, the way its own words say to: a
+ * [--flag ...] is kept when the unit has that setting, each <...> becomes its value. Anything it can't fill throws.
+ */
+function fillIn(shown: string, url: string): string {
+  const q = (v: string) => `'${v}'`;
+  const filled = shown
+    .replace(/\[(--[a-z-]+)[^\]]*\]/g, (_, flag: string) => {
+      if (flag === '--machine-devices') return HUB.devices ? `--machine-devices ${q(HUB.devices)}` : '';
+      if (flag === '--siri') return HUB.siri ? '--siri' : '';
+      if (flag === '--hooks') return HUB.hooks ? '--hooks' : '';
+      throw new Error(`a [...] this test can't fill: ${flag}`);
+    })
+    .replace(/--client-id <[^>]*>/, `--client-id ${q(HUB.clientId)}`)
+    .replace(/--public-url https:\/\/<[^>]*>/, `--public-url ${q(url)}`)
+    .replace(/<[^>]*instance[^>]*>\.\.\./, HUB.instances.map(q).join(' '));
+  assert.ok(!/[<>[\]]/.test(filled), `everything filled in: ${filled}`);
+  return filled;
+}
+
+/** A temporary machine with SIRI_HOOKS_UNIT; its pasted `sudo bash` runs this root's dashboards.sh, as root's would. */
+function hubMachine() {
+  const m = machine();
+  writeFileSync(m.paths.unit, SIRI_HOOKS_UNIT);
+  chmodSync(m.paths.unit, 0o644);
+  // The installed engine's dashboards.sh, or the checkout's (scripts/setup/..., from the engine's root: the root here).
+  writeFileSync(
+    join(m.T, 'cmd-bin', 'sudo'),
+    `#!/usr/bin/env bash\n[ "$1" = bash ] && { [[ "$2" == /opt/*/current/scripts/setup/dashboards.sh ]] || [ "$2" = scripts/setup/dashboards.sh ]; } || { echo "not dashboards.sh: $*" >&2; exit 99; }\nshift 2\nexec bash ${JSON.stringify(join(m.T, 'scripts', 'setup', 'dashboards.sh'))} "$@"\n`,
+  );
+  chmodSync(join(m.T, 'cmd-bin', 'sudo'), 0o755);
+  return m;
+}
+
+/** Paste the command into bash; the hub's unit afterwards must have the new URL, both gateways and the devices. */
+function assertKeepsEverything(m: ReturnType<typeof hubMachine>, command: string, what: string) {
+  const out = m.paste(command);
+  assert.equal(out.status, 0, `${what}: ${command}\n${out.stdout}\n${out.stderr}`);
+  const execStart = readFileSync(m.paths.unit, 'utf8').split('\n').find((l) => l.startsWith('ExecStart=')) ?? '';
+  assert.match(execStart, / --hub alpha=\S+\/instances\/alpha\/state --service /, `${what}: its instance`);
+  assert.match(execStart, new RegExp(` --client-id Iv1\\.signin0001 --public-url https://${TAILNET.replaceAll('.', '\\.')} `), `${what}: the new URL`);
+  assert.match(execStart, / --siri-port 4397 --hooks-port 4396 --machine-devices tag:owner-laptop,box$/, `${what}: the gateways and the devices kept (${execStart})`);
+  const calls = readFileSync(m.paths.calls, 'utf8');
+  for (const t of ['siri-gateway-token', 'hooks-gateway-token']) {
+    assert.ok(calls.includes(`setfacl -m g:wl-dash:r-- ${join(m.paths.state, t)}\n`), `${what}: the viewer still reads ${t}`);
+    assert.ok(!calls.includes(`setfacl -x g:wl-dash ${join(m.paths.state, t)}`), `${what}: ${t}'s read not removed`);
+  }
+}
+
+test("tailscale.sh's by-hand public-url command, filled in from the unit and pasted, keeps the Siri and hooks gateways and the devices", { skip: !posix && 'bash' }, () => {
+  const sh = readFileSync(join(repoRoot, 'scripts', 'setup', 'tailscale.sh'), 'utf8');
+  // The header's command line under public-url: "The same as running, yourself ...:", then the command.
+  const shown = /The same as running, yourself[\s\S]*?\n#\s+(sudo bash \S*dashboards\.sh .*)\n/.exec(sh)?.[1];
+  assert.ok(shown, "tailscale.sh's header shows the dashboards.sh command");
+  assertKeepsEverything(hubMachine(), fillIn(shown, `https://${TAILNET}`), 'tailscale.sh');
+});
+
+test("the Tailscale screen's by-hand public-url command keeps the Siri and hooks gateways and the devices: exact from the unit, or the placeholder filled in", { skip: !posix && 'bash' }, () => {
+  /** The dashboards.sh part of the step's command: after "(the same as...: ", without the closing ")". */
+  const shownOn = (m: ReturnType<typeof hubMachine>, rootUid: number) => {
+    // Through a two-argument type: the same call compiles against an engine whose tailscaleSteps takes one (the
+    // fail-without run, which then reads no unit).
+    const steps: (s: TailscaleStatus | null, hub: { hubUnitFile: string; rootUid: number }) => TailscaleStepView[] = tailscaleSteps;
+    const step = steps(READY, { hubUnitFile: m.paths.unit, rootUid }).find((s) => s.id === 'public-url')!;
+    const at = step.command.indexOf('sudo bash ', 1);
+    assert.ok(at > 0 && step.command.endsWith(')'), step.command);
+    return step.command.slice(at, -1);
+  };
+  // The unit reads exactly: the exact command, every value quoted, nothing to fill in (fillIn leaves it as it is).
+  const exact = hubMachine();
+  const command = shownOn(exact, uid);
+  assertKeepsEverything(exact, fillIn(command, `https://${TAILNET}`), 'the command the screen shows for a unit it reads');
+  assert.equal(command, `sudo bash ${RERUN} --machine-devices 'tag:owner-laptop,box' --client-id 'Iv1.signin0001' --public-url 'https://${TAILNET}' --siri --hooks -- 'alpha'`);
+  // A unit it may not read exactly (not root's): the placeholder, which names --siri, --hooks and the devices.
+  const other = hubMachine();
+  assertKeepsEverything(other, fillIn(shownOn(other, uid + 1), `https://${TAILNET}`), 'the placeholder');
+});
+
+test('one placeholder for every hub rerun: the Tailscale one is the owner-terminal one with the new URL, and tailscale.sh and the docs hold it verbatim', async () => {
+  // A namespace import, so this file also compiles against an engine without them (the fail-without run).
+  const mod: Record<string, unknown> = await import('../src/console/owner-terminal-removed.js');
+  const placeholder = mod.hubRerunPlaceholder as ((url: string) => string) | undefined;
+  assert.ok(placeholder, 'owner-terminal-removed.ts exports hubRerunPlaceholder');
+  assert.equal(OWNER_TERMINAL_RERUN, placeholder('<its --public-url>'));
+  assert.equal(mod.TAILSCALE_PUBLIC_URL_RERUN, placeholder('https://<name>'));
+  const line = String(mod.TAILSCALE_PUBLIC_URL_RERUN);
+  for (const flag of ['[--machine-devices ', '[--siri ', '[--hooks ']) assert.ok(line.includes(flag), `it names ${flag}...]`);
+  const sh = readFileSync(join(repoRoot, 'scripts', 'setup', 'tailscale.sh'), 'utf8');
+  assert.ok(sh.includes(`\n#               ${line}\n`), 'tailscale.sh shows it, whole, on its own line');
+  const docs = readFileSync(join(repoRoot, 'docs', 'dashboard.md'), 'utf8');
+  assert.ok(docs.includes(`\n\`\`\`\n${line}\n\`\`\`\n`), 'docs/dashboard.md shows it, whole');
+  // A new URL dashboards.sh would refuse gives no exact command at all.
+  const rerun = mod.ownerTerminalRerun as (o: object, set: { publicUrl: string }) => { error?: string; command?: string };
+  const m = hubMachine();
+  for (const bad of [`https://${TAILNET}';id;'`, `http://${TAILNET}`, `https://${TAILNET}/x`]) {
+    const r = rerun({ hubUnitFile: m.paths.unit, rootUid: uid }, { publicUrl: bad });
+    assert.ok(r.error && !r.command, `${bad}: no command`);
+  }
 });

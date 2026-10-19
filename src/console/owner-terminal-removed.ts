@@ -9,7 +9,8 @@
 // So the Setup page (an owner's) and doctor say so, and how to remove them, while any of it is there. doctor gives the
 // exact rerun, built from the hub unit's own ExecStart, so that it keeps every setting the hub has (its devices, its
 // Siri and hooks gateways, its instances); everything else, and doctor when it can't read the unit, gives the one
-// placeholder version, OWNER_TERMINAL_RERUN.
+// placeholder version, OWNER_TERMINAL_RERUN. The Tailscale screen's public-url step shows its by-hand command the same
+// way (#767): exact from the unit with the new URL, or the placeholder.
 import { existsSync, readFileSync } from 'node:fs';
 import { BRAND } from '../brand.js';
 import { instanceNameOk } from '../instance-name.js';
@@ -23,12 +24,25 @@ const DASHBOARDS_SH = asRoot.opt('current/scripts/setup/dashboards.sh');
 /** The hub's unit as root sees it, for text only (lib.sh HUB_UNIT). */
 export const HUB_UNIT_AS_ROOT = `${SYSTEM_ROOTS.units}/${BRAND.cli}-dashboard-hub.service`;
 /**
+ * dashboards.sh again with every setting the hub's unit has (its devices, its sign-in App, its Siri and hooks gateways,
+ * its instances), each <...> and [...] filled in from the unit's ExecStart, and this --public-url. The one placeholder
+ * form of every rerun the engine shows: leaving out --siri or --hooks drops that gateway's port and its token's ACL
+ * (#752, #767).
+ */
+export const hubRerunPlaceholder = (publicUrl: string): string =>
+  `sudo bash ${DASHBOARDS_SH} [--machine-devices <the hub unit's --console-devices or --machine-devices, if it has one>] --client-id <its --client-id> --public-url ${publicUrl} [--siri if it has --siri-port] [--hooks if it has --hooks-port] <each instance name in its --hub>...`;
+/**
  * The one placeholder version of the root step that removes what is left, each <...> and [...] filled in from the hub
  * unit's ExecStart. CHANGELOG v0.5.3 (Upgrading and After install), docs/dashboard.md, the Setup notice and the
  * console shell stub's refusal each hold this text verbatim (test/owner-terminal-removed.test.ts). doctor gives it
  * only when it can't build the exact command (ownerTerminalRerun).
  */
-export const OWNER_TERMINAL_RERUN = `sudo bash ${DASHBOARDS_SH} [--machine-devices <the hub unit's --console-devices or --machine-devices, if it has one>] --client-id <its --client-id> --public-url <its --public-url> [--siri if it has --siri-port] [--hooks if it has --hooks-port] <each instance name in its --hub>...`;
+export const OWNER_TERMINAL_RERUN = hubRerunPlaceholder('<its --public-url>');
+/**
+ * What `tailscale.sh public-url` does, by hand: the hub's own settings and its new URL. tailscale.sh's header and
+ * docs/dashboard.md hold this text verbatim (test/owner-terminal-rerun.test.ts).
+ */
+export const TAILSCALE_PUBLIC_URL_RERUN = hubRerunPlaceholder('https://<name>');
 /** The hub's unit, as dashboards.sh writes it (src/setup-steps.ts MACHINE_PATHS.hubUnitFile). */
 const HUB_UNIT_FILE = unitPath(`${BRAND.cli}-dashboard-hub.service`);
 
@@ -188,8 +202,11 @@ export function parseHubUnit(text: string): HubSettings | { error: string } {
 /**
  * The exact rerun from the installed hub unit, read as root's other files are (src/managed-apps.ts): a regular file,
  * not a symlink, root's, writable by nobody else. Or why it can't be built, and then no command at all.
+ * `set.publicUrl`: the URL the hub gets instead of its unit's (tailscale.sh public-url), held to dashboards.sh's own
+ * pattern like every value.
  */
-export function ownerTerminalRerun(o: TerminalPaths = {}): { command: string } | { error: string } {
+export function ownerTerminalRerun(o: TerminalPaths = {}, set: { publicUrl?: string } = {}): { command: string } | { error: string } {
+  if (set.publicUrl !== undefined && !HUB_VALUE_PATTERNS.publicUrl.test(set.publicUrl)) return { error: "the new URL isn't one dashboards.sh takes (https://, then lowercase letters, digits, '.' and '-')" };
   const f = readRegularFile(o.hubUnitFile ?? HUB_UNIT_FILE, 64 * 1024);
   if (f.kind === 'missing') return { error: 'there is no hub unit' };
   if (f.kind === 'hidden') return { error: "it can't be read here (permission denied)" };
@@ -197,5 +214,5 @@ export function ownerTerminalRerun(o: TerminalPaths = {}): { command: string } |
   if (f.kind !== 'file') return { error: f.kind === 'too-big' ? 'it is too big' : f.kind === 'not-file' ? "it isn't a regular file" : "this OS can't read it as root's file" };
   if (f.uid !== (o.rootUid ?? 0) || Number.parseInt(f.mode, 8) & 0o022) return { error: `it isn't root's alone (owner uid ${f.uid}, mode ${f.mode})` };
   const s = parseHubUnit(f.text);
-  return 'error' in s ? s : { command: rerunCommand(s) };
+  return 'error' in s ? s : { command: rerunCommand({ ...s, publicUrl: set.publicUrl ?? s.publicUrl }) };
 }
