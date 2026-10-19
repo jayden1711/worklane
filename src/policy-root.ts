@@ -24,7 +24,7 @@ import { PolicyFile } from './instance.js';
 import { instanceNameOk } from './instance-name.js';
 import { isRoot, processIdentity, userHomeDir, userUid } from './os/index.js';
 import { readInOwnedDir, replaceInOwnedDir } from './os/root-file.js';
-import { clearKillSwitch, killAutoMerge, recordDir } from './policy-kill.js';
+import { clearKillSwitch, killAutoMerge, killSwitchSeen, recordDir } from './policy-kill.js';
 import { decodePolicyValue, HELPER_ONLY, ownCommand, POLICY_ROOT_DIR, POLICY_SET_KEYS, policyRecord, type PolicyRecord, readPolicyChecked, recordText, sha256 } from './policy-gate.js';
 import { type Limits, LIMITS_PATH, loadLimits, settingsProblems } from './settings.js';
 
@@ -272,6 +272,8 @@ export function setPolicy(instance: string, key: string, arg: string, by: string
   const { dir, file, coordUid } = instancePolicy(instance, d);
   if (policyRecord(instance, markers) === null) throw new Error(`${file} isn't root's yet: make it so first (${ownCommand(instance)})`);
   return withPolicyLock(markers, instance, d.lockWaitMs ?? LOCK_WAIT_MS, () => {
+    // auto_merge on: the kill switch there now, the only one it may clear (an OFF while it runs wins).
+    const seen = key === 'auto_merge' && value === true ? killSwitchSeen(instance, markers) : null;
     const rec = policyRecord(instance, markers);
     if (rec === null) throw new Error(`${file} isn't root's yet: make it so first (${ownCommand(instance)})`);
     if ('problem' in rec) throw new Error(`${file}: ${rec.problem}, so nothing is changed: an admin checks it, then ${ownCommand(instance, '--retake')}`);
@@ -287,9 +289,9 @@ export function setPolicy(instance: string, key: string, arg: string, by: string
     if (problems.length) throw new Error(`refused: ${problems.join('; ')}`);
     replaceInOwnedDir({ dir, name: FILE, text: out, dirOwner: coordUid, uid: rootUid, gid: d.rootGid ?? 0, mode: 0o644 });
     writeRecord(markers, instance, { file, sha256: sha256(out) });
-    // auto_merge on (root's alone; a coordinator's was refused above): the kill switch goes, last, so auto_merge reads
-    // off until policy.yaml says on.
-    if (key === 'auto_merge' && value === true) clearKillSwitch(instance, markers);
+    // auto_merge on (root's alone; a coordinator's was refused above): the kill switch it saw goes, last, so auto_merge
+    // reads off until policy.yaml says on; one an OFF wrote since stays.
+    if (key === 'auto_merge' && value === true) clearKillSwitch(instance, seen, markers);
     return { key, from, to: value };
   });
 }
