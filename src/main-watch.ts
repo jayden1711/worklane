@@ -144,9 +144,24 @@ export interface Facts {
   statuses?: StatusAt[];
   /** runSources(head): each check suite's workflow run, for a workflow-pinned check (#727). */
   sources?: Record<string, WorkflowSource> | null;
+  /** #727: the runs or statuses ran past the pages read (TooManyPages): a pinned check can't be judged from them. */
+  truncated?: string;
 }
 
-export type Need = { call: 'pulls' } | { call: 'pull'; number: number } | { call: 'compare'; base: string; head: string } | { call: 'role'; login: string } | { call: 'runs'; sha: string } | { call: 'statuses'; sha: string } | { call: 'sources'; sha: string } | { call: 'rules' };
+/**
+ * #727: a commit's check runs or statuses still ran past the pages read (src/github/main-watch-api.ts). `read` is what
+ * was read: by name it is judged as before (the first page), but a pinned check can't be, so the merge is unaccounted.
+ */
+export class TooManyPages extends Error {
+  constructor(
+    message: string,
+    readonly read: CheckRunAt[] | StatusAt[],
+  ) {
+    super(message);
+  }
+}
+
+export type Need ={ call: 'pulls' } | { call: 'pull'; number: number } | { call: 'compare'; base: string; head: string } | { call: 'role'; login: string } | { call: 'runs'; sha: string } | { call: 'statuses'; sha: string } | { call: 'sources'; sha: string } | { call: 'rules' };
 
 /** Required checks pinned to their source (#727, src/check-source.ts): config.yaml's at the commit, GitHub's, the repo. */
 export interface WatchPins {
@@ -248,6 +263,17 @@ export function checksAt(name: string, runs: CheckRunAt[], statuses: StatusAt[],
   return out;
 }
 
+/** A read of runs or statuses; past its pages (TooManyPages), what was read, with `facts.truncated` set to why. */
+async function pagesRead<T>(facts: Facts, read: () => Promise<T[]>): Promise<T[]> {
+  try {
+    return await read();
+  } catch (e) {
+    if (!(e instanceof TooManyPages)) throw e;
+    facts.truncated = e.message;
+    return e.read as T[];
+  }
+}
+
 /** A pinned name's outcome from its deciding check (pinnedVerdict): none is missing. */
 const outcomeOf = (c: CommitCheck | undefined): Outcome => (!c ? 'missing' : c.status !== 'completed' ? 'pending' : c.conclusion === 'success' ? 'pass' : 'fail');
 
@@ -340,6 +366,9 @@ export function judge(sha: string, f: Facts, o: { branch: string; required: stri
     // An Actions run is grouped by its workflow file, so its suite's workflow run is read, as readiness reads it.
     if (f.sources === undefined && f.runs.some((r) => pinnedNames.includes(r.name) && r.app === ACTIONS_APP_ID)) return { done: false, need: { call: 'sources', sha: head } };
     if (!f.statuses && pinnedNames.length) return { done: false, need: { call: 'statuses', sha: head } };
+    // More pages than the watch reads: an unread run or status could block a pinned check, so it can't be judged
+    // accounted. Unaccounted (a trip and an alert), never a stall: the watch goes on to the next merge.
+    if (f.truncated && pinnedNames.length) return { done: true, accounted: false, number, reason: `${who} into ${o.branch}, but its pinned required checks (${pinnedNames.join(', ')}) can't be judged on ${head.slice(0, 8)}: ${f.truncated}` };
     out = out.map((byName) => {
       const pin = pinned(byName.name);
       if (pin === null) return byName;
@@ -833,9 +862,9 @@ export class MainWatch {
       } else if (n.call === 'compare') p.facts.compare = { ...(await this.d.api.compare(n.base, n.head)), base: n.base, head: n.head };
       else if (n.call === 'pull') p.facts.pr = await this.d.api.pull(n.number);
       else if (n.call === 'role') p.facts.role = await this.d.api.role(n.login);
-      else if (n.call === 'runs') p.facts.runs = await this.d.api.checkRuns(n.sha);
+      else if (n.call === 'runs') p.facts.runs = await pagesRead(p.facts, () => this.d.api.checkRuns(n.sha));
       else if (n.call === 'sources') p.facts.sources = (await this.d.api.runSources?.(n.sha)) ?? null;
-      else if (n.call === 'statuses') p.facts.statuses = await this.d.api.statuses(n.sha);
+      else if (n.call === 'statuses') p.facts.statuses = await pagesRead(p.facts, () => this.d.api.statuses(n.sha));
       writeWatchState(this.d.stateFile, s);
       v = judge(p.sha, p.facts, ctx);
       if (!v.done) return;

@@ -11,6 +11,7 @@ import { PinnedChecks, type CheckPin, type WorkflowSource } from '../src/check-s
 import { readiness } from '../src/pr-watch.js';
 import type { Role } from '../src/dashboard-auth.js';
 import { GitHubMainWatchApi } from '../src/github/main-watch-api.js';
+import { TooManyPages } from '../src/main-watch.js';
 import { acceptGit, acceptMerge, CONFIG_PATH, DEAD_CHECK_MS, disabledWorkflowFor, disabledWorkflowsOf, judge, LINK_LAG_MS, MAIN_WATCH_CALL_MS, MainWatch, outcomesAt, protectionView, readWatchState, repoGit, revertCapsAt, type Acceptance, type AcceptTarget, type CheckRunAt, type Compared, type MainWatchApi, type MainWatchDeps, type MergedPull, type ProtectionMode, type StatusAt, subjectPrNumber, tripOf, type Trip, type WatchGit, type WorkflowAt } from '../src/main-watch.js';
 
 const git = (cwd: string, ...a: string[]) => execFileSync('git', a, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
@@ -1048,6 +1049,31 @@ test("GitHubMainWatchApi: compare reads GitHub's ahead/behind counts; a PR carri
   assert.deepEqual(await api.compare('a'.repeat(40), 'b'.repeat(40)), { status: 'ahead', aheadBy: 1, behindBy: 0 });
   assert.ok(urls[0]!.endsWith(`/repos/x/y/compare/${'a'.repeat(40)}...${'b'.repeat(40)}?per_page=1`), urls[0]);
   assert.equal((await api.pull(9)).commits, 3);
+});
+
+test('main watch (#727 round 7): past its page cap a pinned merge is unaccounted (a trip, never a stall), and the next merge is judged', async () => {
+  const config = 'required_checks: [ci]\nrequired_check_sources:\n  ci: { app_id: 1111 }\n';
+  const s = await started({ pins: { sources: () => ({}), github: async () => ({}), repo: 'example-org/example-shop' }, config });
+  const pinnedPass = ci({ id: 1, app: 1111, suite: 11, url: 'https://github.example/example-org/example-shop/runs/1' });
+  const first = s.w.mergedPr();
+  s.gh.pr(7, first.merge, first.head, iso(T), 'example-collaborator');
+  s.gh.roles.set('example-collaborator', 'writer');
+  const real = s.gh.api.checkRuns;
+  // The first merge's head carries more than 10 pages of check runs: the read gives up with what it read.
+  s.gh.api.checkRuns = async (sha) => {
+    if (sha === first.head) throw new TooManyPages(`more than 10 pages of check runs on ${sha.slice(0, 8)}`, [pinnedPass]);
+    return real(sha);
+  };
+  await run(s.gh, s.watch, 10);
+  assert.equal(s.unaccounted.length, 1, 'judged, not stalled (961ecbad threw on every step)');
+  assert.match(s.unaccounted[0]!.reason, /its pinned required checks \(ci\) can't be judged on .*: more than 10 pages of check runs/);
+  // The next merge is judged as usual.
+  const second = s.w.mergedPr();
+  s.gh.pr(8, second.merge, second.head, iso(T + 60_000), 'example-collaborator');
+  s.gh.runs.set(second.head, [pinnedPass]);
+  await run(s.gh, s.watch, 10);
+  assert.deepEqual(s.checked.map((c) => c.number), [8], 'the next merge is accounted');
+  assert.equal(s.unaccounted.length, 1);
 });
 
 // #727 round 6: readiness and the main watch judge a pinned check through one function (pinnedVerdict) over the same
