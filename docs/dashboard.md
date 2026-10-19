@@ -174,8 +174,10 @@ answers aloud at a viewer's level, with a per-device token an owner makes in Set
 A machine change from the page (below) must come from one of the machine devices: the Tailscale devices the owner lists in the hub's unit, as root on the machine:
 
 ```bash
-sudo bash scripts/setup/dashboards.sh --machine-devices tag:owner-laptop,my-phone --client-id <the App's client id> --public-url https://<machine>.<tailnet>.ts.net <name> [<name>...]
+sudo bash scripts/setup/dashboards.sh --machine-devices tag:owner-laptop,my-phone --client-id <the App's client id> --public-url https://<machine>.<tailnet>.ts.net [--siri if the hub's unit has --siri-port] [--hooks if it has --hooks-port] <name> [<name>...]
 ```
+
+On a hub already set up, keep `--siri` and `--hooks` when its unit (`/etc/systemd/system/worklane-dashboard-hub.service`) has `--siri-port` and `--hooks-port`: leaving one out turns that gateway off.
 
 `--machine-devices` takes Tailscale tags (`tag:...`) and/or MagicDNS node names, comma-separated. Prefer tags that only you can assign in your tailnet policy, because a node can be renamed. The list lives in the hub's systemd unit on the machine, never in a repository. With no list, every device is refused, and only the break-glass may change the machine. The hub keeps its full sandbox (`NoNewPrivileges`, `ProtectSystem=strict`, `ProtectHome=read-only`, `PrivateTmp`) either way. Add project, a rerun through Tailscale setup and instance removal keep the list as the hub's unit has it.
 
@@ -206,7 +208,7 @@ Leaving out `--siri` or `--hooks` that the unit has turns that gateway off (`das
 The machine itself (the agent and test-run slot caps, engine updates) belongs to its machine owners, a list of GitHub logins, not to each instance's owners:
 
 ```bash
-sudo bash scripts/setup/dashboards.sh --machine-owner <login>[,<login>...] [--machine-devices ...] --client-id <id> --public-url https://<machine>.<tailnet>.ts.net <name> [<name>...]
+sudo bash scripts/setup/dashboards.sh --machine-owner <login>[,<login>...] [--machine-devices <the hub unit's, if it has one>] --client-id <id> --public-url https://<machine>.<tailnet>.ts.net [--siri if the hub's unit has --siri-port] [--hooks if it has --hooks-port] <name> [<name>...]
 ```
 
 The list goes to `/etc/worklane/machine-owners.json` (`{"owners": ["<login>", ...]}`, root:root 0644; `src/machine-owners.ts`). A rerun without `--machine-owner` keeps it. A machine change from the dashboard (Settings, or a root step) needs all of:

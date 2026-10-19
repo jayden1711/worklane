@@ -23,26 +23,39 @@ export const CONSOLE_SHELL = libexecPath('console-shell');
 const DASHBOARDS_SH = asRoot.opt('current/scripts/setup/dashboards.sh');
 /** The hub's unit as root sees it, for text only (lib.sh HUB_UNIT). */
 export const HUB_UNIT_AS_ROOT = `${SYSTEM_ROOTS.units}/${BRAND.cli}-dashboard-hub.service`;
+/** The values a rerun sets anew instead of keeping the unit's: a new sign-in App's client id, a new URL. */
+export interface HubRerunValues {
+  clientId?: string | undefined;
+  publicUrl?: string | undefined;
+}
 /**
  * dashboards.sh again with every setting the hub's unit has (its devices, its sign-in App, its Siri and hooks gateways,
- * its instances), each <...> and [...] filled in from the unit's ExecStart, and this --public-url. The one placeholder
- * form of every rerun the engine shows: leaving out --siri or --hooks drops that gateway's port and its token's ACL
- * (#752, #767).
+ * its instances), each <...> and [...] filled in from the unit's ExecStart, and these values (text, or a <...> naming
+ * them) in place of its own. The one placeholder form of every rerun the engine shows: leaving out --siri or --hooks
+ * drops that gateway's port and its token's ACL (#752, #767). test/owner-terminal-rerun.test.ts scans src/, scripts/
+ * and docs/ for any other dashboards.sh command with --client-id that leaves them out.
  */
-export const hubRerunPlaceholder = (publicUrl: string): string =>
-  `sudo bash ${DASHBOARDS_SH} [--machine-devices <the hub unit's --console-devices or --machine-devices, if it has one>] --client-id <its --client-id> --public-url ${publicUrl} [--siri if it has --siri-port] [--hooks if it has --hooks-port] <each instance name in its --hub>...`;
+export const hubRerunPlaceholder = (set: HubRerunValues = {}): string =>
+  `sudo bash ${DASHBOARDS_SH} [--machine-devices <the hub unit's --console-devices or --machine-devices, if it has one>] --client-id ${set.clientId ?? '<its --client-id>'} --public-url ${set.publicUrl ?? '<its --public-url>'} [--siri if it has --siri-port] [--hooks if it has --hooks-port] <each instance name in its --hub>...`;
 /**
  * The one placeholder version of the root step that removes what is left, each <...> and [...] filled in from the hub
  * unit's ExecStart. CHANGELOG v0.5.3 (Upgrading and After install), docs/dashboard.md, the Setup notice and the
  * console shell stub's refusal each hold this text verbatim (test/owner-terminal-removed.test.ts). doctor gives it
  * only when it can't build the exact command (ownerTerminalRerun).
  */
-export const OWNER_TERMINAL_RERUN = hubRerunPlaceholder('<its --public-url>');
+export const OWNER_TERMINAL_RERUN = hubRerunPlaceholder();
+/** A new value that dashboards.sh wouldn't take, or none known, as the placeholder names it. */
+const NEW_VALUE_PLACEHOLDER: Required<HubRerunValues> = { clientId: "<the sign-in App's client id>", publicUrl: 'https://<name>' };
 /**
  * What `tailscale.sh public-url` does, by hand: the hub's own settings and its new URL. tailscale.sh's header and
  * docs/dashboard.md hold this text verbatim (test/owner-terminal-rerun.test.ts).
  */
-export const TAILSCALE_PUBLIC_URL_RERUN = hubRerunPlaceholder('https://<name>');
+export const TAILSCALE_PUBLIC_URL_RERUN = hubRerunPlaceholder({ publicUrl: NEW_VALUE_PLACEHOLDER.publicUrl });
+/**
+ * After a sign-in App's client secret is installed by hand on a machine whose hub is set up (credentials.sh
+ * dashboard-signin): the hub's own settings and that App's client id. credentials.sh holds this text verbatim.
+ */
+export const SIGNIN_APP_RERUN = hubRerunPlaceholder({ clientId: NEW_VALUE_PLACEHOLDER.clientId });
 /** The hub's unit, as dashboards.sh writes it (src/setup-steps.ts MACHINE_PATHS.hubUnitFile). */
 const HUB_UNIT_FILE = unitPath(`${BRAND.cli}-dashboard-hub.service`);
 
@@ -202,11 +215,12 @@ export function parseHubUnit(text: string): HubSettings | { error: string } {
 /**
  * The exact rerun from the installed hub unit, read as root's other files are (src/managed-apps.ts): a regular file,
  * not a symlink, root's, writable by nobody else. Or why it can't be built, and then no command at all.
- * `set.publicUrl`: the URL the hub gets instead of its unit's (tailscale.sh public-url), held to dashboards.sh's own
- * pattern like every value.
+ * `set`: values the hub gets instead of its unit's (a new URL for tailscale.sh public-url, a new sign-in App's client
+ * id), each held to dashboards.sh's own pattern like every value.
  */
-export function ownerTerminalRerun(o: TerminalPaths = {}, set: { publicUrl?: string } = {}): { command: string } | { error: string } {
+export function ownerTerminalRerun(o: TerminalPaths = {}, set: HubRerunValues = {}): { command: string } | { error: string } {
   if (set.publicUrl !== undefined && !HUB_VALUE_PATTERNS.publicUrl.test(set.publicUrl)) return { error: "the new URL isn't one dashboards.sh takes (https://, then lowercase letters, digits, '.' and '-')" };
+  if (set.clientId !== undefined && !HUB_VALUE_PATTERNS.clientId.test(set.clientId)) return { error: "the new client id isn't one dashboards.sh takes (letters, digits, '.', '_' and '-', 8 to 64)" };
   const f = readRegularFile(o.hubUnitFile ?? HUB_UNIT_FILE, 64 * 1024);
   if (f.kind === 'missing') return { error: 'there is no hub unit' };
   if (f.kind === 'hidden') return { error: "it can't be read here (permission denied)" };
@@ -214,5 +228,18 @@ export function ownerTerminalRerun(o: TerminalPaths = {}, set: { publicUrl?: str
   if (f.kind !== 'file') return { error: f.kind === 'too-big' ? 'it is too big' : f.kind === 'not-file' ? "it isn't a regular file" : "this OS can't read it as root's file" };
   if (f.uid !== (o.rootUid ?? 0) || Number.parseInt(f.mode, 8) & 0o022) return { error: `it isn't root's alone (owner uid ${f.uid}, mode ${f.mode})` };
   const s = parseHubUnit(f.text);
-  return 'error' in s ? s : { command: rerunCommand({ ...s, publicUrl: set.publicUrl ?? s.publicUrl }) };
+  return 'error' in s ? s : { command: rerunCommand({ ...s, clientId: set.clientId ?? s.clientId, publicUrl: set.publicUrl ?? s.publicUrl }) };
+}
+
+/**
+ * The rerun to show an owner when the hub gets these new values: the exact command from the installed unit when it
+ * reads exactly (ownerTerminalRerun), else the placeholder. A new value is written into the placeholder only when
+ * dashboards.sh would take it (HUB_VALUE_PATTERNS: nothing in it can quote, expand or control a terminal); else the
+ * placeholder names it (#767).
+ */
+export function hubRerunToShow(set: HubRerunValues, o: TerminalPaths = {}): { exact: boolean; command: string } {
+  const r = ownerTerminalRerun(o, set);
+  if ('command' in r) return { exact: true, command: r.command };
+  const taken = (k: keyof HubRerunValues) => (set[k] === undefined ? undefined : HUB_VALUE_PATTERNS[k].test(set[k]) ? set[k] : NEW_VALUE_PLACEHOLDER[k]);
+  return { exact: false, command: hubRerunPlaceholder({ clientId: taken('clientId'), publicUrl: taken('publicUrl') }) };
 }

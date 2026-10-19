@@ -26,7 +26,7 @@ import { isMachineOwner, MACHINE_OWNERS_FILE, machineChangeRefusal, machineOwner
 import { MACHINE_EVENTS, MachineRequestError, machineRequests, requestMachineChange, type MachineRequest } from './machine-requests.js';
 import { ENGINE_CURRENT } from './updates.js';
 import { varLibPath } from './os/system-paths.js';
-import { HUB_UNIT_AS_ROOT, hubRerunPlaceholder, ownerTerminalRerun, type TerminalPaths } from './console/owner-terminal-removed.js';
+import { HUB_UNIT_AS_ROOT, hubRerunToShow, type TerminalPaths } from './console/owner-terminal-removed.js';
 
 /** Where tailscale.sh writes steps.jsonl (root's, 0644) and, while `up` waits, login-url (0400, this coordinator's user; lib.sh's TAILSCALE_DIR). */
 export const TAILSCALE_DIR = varLibPath('tailscale');
@@ -213,14 +213,15 @@ export type HubUnitPaths = Pick<TerminalPaths, 'hubUnitFile' | 'rootUid'>;
  * The four steps against what the machine says now: which are done, which can run, and what each would change.
  * public-url's by-hand command is dashboards.sh with every setting the hub's unit has (its devices, its Siri and hooks
  * gateways, its instances) and the new URL: exact, every value quoted, when the unit reads exactly (as doctor's rerun,
- * #752); else the placeholder that names each of them, never one that leaves a gateway out (#767).
+ * #752); else the placeholder that names each of them, never one that leaves a gateway out (#767). The URL is in
+ * either only when dashboards.sh would take it (hubRerunToShow); else the placeholder says https://<name>.
  */
 export function tailscaleSteps(s: TailscaleStatus | null, hub: HubUnitPaths = {}): TailscaleStepView[] {
   const running = s?.state === 'Running' && !!s.name;
   const name = s?.name ?? '<this machine>.<tailnet>.ts.net';
   const url = `https://${name}`;
   const cmd = (a: TailscaleAction) => `sudo bash ${SCRIPT} ${a}`;
-  const rerun = s?.name ? ownerTerminalRerun(hub, { publicUrl: url }) : { error: 'not on a tailnet' };
+  const rerun = hubRerunToShow({ publicUrl: url }, hub);
   return [
     {
       id: 'install',
@@ -280,7 +281,7 @@ export function tailscaleSteps(s: TailscaleStatus | null, hub: HubUnitPaths = {}
         "the hub and each instance's dashboard restart: this page reloads, and a session signed in at the old URL ends",
         `then, on GitHub, set the sign-in App's callback URL to exactly ${url}/auth/callback: sign-in at the new URL fails until it is`,
       ],
-      command: `${cmd('public-url')}   (the same as${'command' in rerun ? `: ${rerun.command}` : `, with each <...> and [...] filled in from the ExecStart of ${HUB_UNIT_AS_ROOT}: ${hubRerunPlaceholder(url)}`})`,
+      command: `${cmd('public-url')}   (the same as${rerun.exact ? '' : `, with each <...> and [...] filled in from the ExecStart of ${HUB_UNIT_AS_ROOT}`}: ${rerun.command})`,
       link: null,
     },
   ];
