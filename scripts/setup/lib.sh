@@ -578,8 +578,10 @@ ensure_instance_home() {
 # merge keys for whoever runs setup to check. From then on the engine refuses it if it stops being root's.
 POLICY_ROOT_DIR=/etc/worklane/policy-root
 # Whether root's kill switch turns instance $1's auto_merge off: any file named <name>.auto-merge-off* (src/policy-kill.ts).
+# A directory that can't be listed counts as off, as the engine reads it (round 8: never "on" from an error).
 auto_merge_killed() {
   local f
+  [ ! -e "$POLICY_ROOT_DIR" ] || ls -A -- "$POLICY_ROOT_DIR" >/dev/null 2>&1 || return 0
   for f in "$POLICY_ROOT_DIR/$1".auto-merge-off*; do
     if [ -e "$f" ] || [ -L "$f" ]; then return 0; fi
   done

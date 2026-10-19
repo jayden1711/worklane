@@ -685,6 +685,7 @@ test("a carry or move of root's switches fails, stopping its step, when root's d
   try {
     assert.notEqual(run('carry_auto_merge_off cara carb').status, 0, 'carry: never "nothing to carry"');
     assert.notEqual(run('move_auto_merge_off cara carb').status, 0, 'move: the same');
+    assert.equal(run('auto_merge_killed zzz').status, 0, "add-project's text: off, as the engine reads an unlistable directory");
   } finally {
     chmodSync(T, 0o755);
   }
