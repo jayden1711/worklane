@@ -535,7 +535,18 @@ ensure_instance_home() {
 # without following a link the coordinator could plant), records it in $POLICY_ROOT_DIR, and prints the isolation and
 # merge keys for whoever runs setup to check. From then on the engine refuses it if it stops being root's.
 POLICY_ROOT_DIR=/etc/worklane/policy-root
+# Never with a flag: the machine helper reaches this as root (add-project's rerun), so it takes over only what the
+# coordinator could have set itself, or what root wrote; anything else is an admin's, at a root shell, with one of
+# policy own's flags, which no script here passes. test/policy-edit.test.ts holds this line, and that, as they are.
 own_policy() { "$ENGINE_CLI" policy own "$1"; }
+# A rename (instance-rename.sh): when the old name's policy.yaml was root's, the new name's is too, its content as
+# carried. The old name's record goes under the new name first, so `policy own` takes the carried file as content root
+# wrote (its sha256 is the record's), with no flag; one that changed since root wrote it is refused, the rename stops.
+carry_policy_root() {
+  [ -f "$POLICY_ROOT_DIR/$1" ] || return 0
+  install -m 0644 "$POLICY_ROOT_DIR/$1" "$POLICY_ROOT_DIR/$2"
+  own_policy "$2"
+}
 # Whether instance $1's policy.yaml ($2) is root's already, as recorded: a regular file root's, 0644, one name.
 policy_root_ok() { [ -f "$POLICY_ROOT_DIR/$1" ] && [ ! -L "$2" ] && [ "$(stat -c '%u %a %h' -- "$2" 2>/dev/null)" = "0 644 1" ]; }
 

@@ -444,10 +444,13 @@ async function server() {
     assert.ok(claude?.done, `the agents' Claude login reads not done: ${claude?.detail}`);
   });
 
-  await screen('screen 2 (server): the agents\' Claude login panel: no paste box open, the root command shown', async () => {
+  await screen('screen 2 (server): the agents\' Claude login panel: no paste box, the root commands shown', async () => {
     await open('/first-run?step=claude-token');
     const p = `${row('claude-token')} ${tid('first-run-fix-panel')}`;
-    await waitFor(`${p} ${tid('claude-signin-no-ask')}`);
+    await waitFor(`${p} ${tid('claude-signin-root')}`);
+    // Issue #711: the page never takes a Claude credential: no password field anywhere in the panel.
+    assert.equal(await evaluate(`!!${q(`${p} input[type="password"]`)}`), false, 'a paste box in the Claude login panel');
+    await waitText(`${p} ${tid('claude-signin-login-command')}`, /sudo -u wl-[a-z0-9-]+-agent -i claude auth login/);
     const cmd = await waitText(`${p} ${tid('claude-signin-command')}`, /credentials\.sh .* claude/);
     return { command: cmd, status: await text(`${p} ${tid('claude-signin-status')}`) };
   });

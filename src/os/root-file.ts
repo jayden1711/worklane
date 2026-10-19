@@ -8,8 +8,21 @@
 // owner's, and then works on names relative to it. It reads with O_NOFOLLOW and checks what it opened, and writes a new
 // file it created itself (O_EXCL, so never through a planted link) before renaming it over the old name. Whatever the
 // owner swaps in afterwards is the owner's own file, which readRootFile refuses.
-import { closeSync, constants, fchmodSync, fchownSync, fstatSync, fsyncSync, lstatSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeSync } from 'node:fs';
+import { closeSync, constants, fchmodSync, fchownSync, fstatSync, fsyncSync, lstatSync, openSync, readFileSync, readlinkSync, renameSync, statSync, unlinkSync, writeSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
+
+/**
+ * Where the file open on `fd` really is: the kernel's own path for it (Linux: /proc/self/fd/<fd>), with every link on
+ * the way resolved, whatever path opened it. Null where this OS has no such answer: a caller that must know refuses.
+ */
+export function openedPath(fd: number): string | null {
+  if (process.platform !== 'linux') return null;
+  try {
+    return readlinkSync(`/proc/self/fd/${fd}`);
+  } catch {
+    return null;
+  }
+}
 
 // O_NONBLOCK: a FIFO planted under the name opens at once instead of waiting for a writer (a regular file ignores it).
 const OPEN_READ = constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK;
@@ -26,10 +39,11 @@ function notRootsAlone(st: { isFile(): boolean; uid: number; mode: number; nlink
 
 /**
  * `file`'s text when it is root's alone (never through a link; the checks are on the file this process opened, so
- * nothing swapped in after them is read), else why it isn't. Native Windows has no such install: read as it is.
+ * nothing swapped in after them is read), and where the kernel says the opened file is (openedPath: a link in a
+ * directory on the way shows there); else why it isn't. Native Windows has no such install: read as it is.
  */
-export function readRootFile(file: string, rootUid = 0): { text: string } | { problem: string } {
-  if (process.platform === 'win32') return { text: readFileSync(file, 'utf8') };
+export function readRootFile(file: string, rootUid = 0): { text: string; at: string | null } | { problem: string } {
+  if (process.platform === 'win32') return { text: readFileSync(file, 'utf8'), at: null };
   let fd: number;
   try {
     fd = openSync(file, OPEN_READ);
@@ -39,7 +53,7 @@ export function readRootFile(file: string, rootUid = 0): { text: string } | { pr
   }
   try {
     const why = notRootsAlone(fstatSync(fd), rootUid);
-    return why ? { problem: `${file} ${why}` } : { text: readFileSync(fd, 'utf8') };
+    return why ? { problem: `${file} ${why}` } : { text: readFileSync(fd, 'utf8'), at: openedPath(fd) };
   } finally {
     closeSync(fd);
   }
