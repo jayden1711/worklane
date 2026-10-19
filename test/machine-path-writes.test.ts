@@ -22,9 +22,10 @@
 // path builders and any other call's arguments, a test helper's return value, and into src/: a declaration there
 // is a machine location when what it holds or returns is built from systemPath (MACHINE_PATHS, CONSOLE_SHELL,
 // unitPath, …), named by its declaration (aliases and namespace imports are the same name) and its property
-// (`MACHINE_PATHS.hubUnitFile`). A guard is an `onRealMachine(x)` statement, before the write in the same block or
-// one around it (a for-of body or a try block on the way; never under an if, a condition or another function),
-// where `x` traces to the same name.
+// (`MACHINE_PATHS.hubUnitFile`). A guard is an `onRealMachine(x)` call that runs whenever its statement does (the
+// statement itself, a const's initialiser, or inside one's arguments, as `assert.equal(onRealMachine(x), …)`; never
+// behind a condition, a short-circuit, an optional call or in another function), in a statement before the write in
+// the same block or one around it (a for-of body or a try block on the way), where `x` traces to the same name.
 //
 // Not caught: a write by a child process or a shell script; an engine function that writes a machine location of
 // its own (the test names no path); a path passed through a property of an object the lint doesn't trace (`this.f`,
@@ -210,10 +211,12 @@ function lintMachineWrites(program: ts.Program, files: (rel: string) => boolean)
   const paramOrigins = (p: ts.ParameterDeclaration): Origin[] => {
     const fn = p.parent;
     const call = fn.parent;
+    // A default (`p = CONSOLE_SHELL`) is where it comes from when a call leaves it out.
+    const own: Origin[] = [{ param: p }, ...(p.initializer ? origins(p.initializer) : [])];
     if (isFn(fn) && fn.parameters[0] === p && call && ts.isCallExpression(call) && call.arguments[0] === fn && ts.isPropertyAccessExpression(call.expression) && ELEMENT_CALLBACKS.has(call.expression.name.text)) {
-      return [{ param: p }, ...origins(call.expression.expression)];
+      return [...own, ...origins(call.expression.expression)];
     }
-    return [{ param: p }];
+    return own;
   };
 
   const byDecl = new Map<ts.Node, Origin[]>();
@@ -331,8 +334,10 @@ function lintMachineWrites(program: ts.Program, files: (rel: string) => boolean)
       const at = FS_WRITES[name];
       if (!at) return [];
       if (name === 'open' || name === 'openSync') {
+        // A read: no flags, a string flag without w, a, x or +, or numeric flags naming O_RDONLY and no write flag.
         const f = c.arguments[1];
-        if (!f || (ts.isStringLiteralLike(f) && !/[wax+]/.test(f.text))) return [];
+        const named: string[] = f && !ts.isStringLiteralLike(f) ? (f.getText().match(/\bO_[A-Z]+\b/g) ?? []) : [];
+        if (!f || (ts.isStringLiteralLike(f) && !/[wax+]/.test(f.text)) || (named.includes('O_RDONLY') && !named.some((x) => /^O_(WRONLY|RDWR|CREAT|TRUNC|APPEND)$/.test(x)))) return [];
       }
       return at.flatMap((i) => (c.arguments[i] ? [{ node: c.arguments[i]!, os: origins(c.arguments[i]!) }] : []));
     }
@@ -379,16 +384,29 @@ function lintMachineWrites(program: ts.Program, files: (rel: string) => boolean)
   }
   for (const [name, s] of Object.entries(SEEDS)) if (s.refusal && !selfGuarded.has(s.family)) selfGuarded.set(s.family, `${name}() is not in ${s.file} any more: the lint can't see its refusal`);
 
-  // The guards, per file: `onRealMachine(x);` statements and what x traces to.
-  const guardKeys = (s: ts.ExpressionStatement): Set<string> | null => {
-    const c = s.expression;
-    if (!ts.isCallExpression(c)) return null;
+  // The guards, per file: each onRealMachine(x) call, what x traces to, and the statement it runs in whenever that
+  // statement runs: the call is the statement, a `const` initialiser, or an argument, operand or part of one (as in
+  // `assert.equal(onRealMachine(x), …)`), never behind a condition, a short-circuit, an optional call or a function.
+  const guardOf = (c: ts.CallExpression): { s: ts.Statement; keys: Set<string> } | null => {
     const d = calleeDecl(c);
     if (!d || rel(d) !== GUARD.file || nameOf(d) !== GUARD.fn || !c.arguments[0]) return null;
-    return new Set(origins(c.arguments[0]).flatMap((o) => ('key' in o ? [o.key] : [])));
+    let x: ts.Node = c;
+    for (let p = x.parent; ; x = p, p = p.parent) {
+      if (ts.isExpressionStatement(p)) break;
+      if (ts.isVariableDeclaration(p) && p.initializer === x && ts.isVariableDeclarationList(p.parent) && ts.isVariableStatement(p.parent.parent)) {
+        x = p.parent;
+        p = p.parent.parent;
+        break;
+      }
+      const shortCircuit = ts.isBinaryExpression(p) && p.right === x && [ts.SyntaxKind.AmpersandAmpersandToken, ts.SyntaxKind.BarBarToken, ts.SyntaxKind.QuestionQuestionToken].includes(p.operatorToken.kind);
+      const optional = (ts.isCallExpression(p) || ts.isPropertyAccessExpression(p) || ts.isElementAccessExpression(p)) && (p.questionDotToken !== undefined || (p.flags & ts.NodeFlags.OptionalChain) !== 0);
+      const part = ts.isCallExpression(p) || ts.isNewExpression(p) || ts.isParenthesizedExpression(p) || ts.isAsExpression(p) || ts.isNonNullExpression(p) || ts.isPropertyAccessExpression(p) || ts.isElementAccessExpression(p) || ts.isTemplateSpan(p) || ts.isTemplateExpression(p) || ts.isArrayLiteralExpression(p) || ts.isAwaitExpression(p) || ts.isVoidExpression(p) || (ts.isBinaryExpression(p) && !shortCircuit);
+      if (!part || optional) return null;
+    }
+    return { s: x.parent as ts.Statement, keys: new Set(origins(c.arguments[0]).flatMap((o) => ('key' in o ? [o.key] : []))) };
   };
   /** Whether a guard statement runs, unconditionally, before `n` and around it: its parents up to one that holds `n` are blocks, for-of bodies and try blocks. */
-  const guards = (g: ts.ExpressionStatement, n: ts.Node): boolean => {
+  const guards = (g: ts.Statement, n: ts.Node): boolean => {
     if (g.getEnd() > n.getStart()) return false;
     const holds = (p: ts.Node) => p.pos <= n.pos && n.end <= p.end && p.getSourceFile() === n.getSourceFile();
     for (let p: ts.Node = g.parent; ; p = p.parent) {
@@ -401,12 +419,10 @@ function lintMachineWrites(program: ts.Program, files: (rel: string) => boolean)
   const out: Finding[] = [];
   for (const sf of program.getSourceFiles()) {
     if (sf.isDeclarationFile || !files(rel(sf))) continue;
-    const stmts: { s: ts.ExpressionStatement; keys: Set<string> }[] = [];
+    const stmts: { s: ts.Statement; keys: Set<string> }[] = [];
     const collect = (x: ts.Node) => {
-      if (ts.isExpressionStatement(x)) {
-        const keys = guardKeys(x);
-        if (keys) stmts.push({ s: x, keys });
-      }
+      const g = ts.isCallExpression(x) ? guardOf(x) : null;
+      if (g) stmts.push(g);
       ts.forEachChild(x, collect);
     };
     collect(sf);
@@ -520,6 +536,28 @@ test('lint: an unguarded write, move or removal of a machine location is reporte
   assert.equal(lines.length, 9, found);
 });
 
+test("lint: a machine location reaches a write through a test's object, an array's element, a parameter's default or a destructured name", () => {
+  const found = lintFixtures({
+    'test/fixture-e.test.ts': [
+      ...head,
+      'export function more(n: number) {',
+      '  const o = { p: CONSOLE_SHELL, q: `/tmp/x${n}` };',
+      '  rmSync(o.p);', // 13
+      '  rmSync(o.q);', // 14: not a machine location
+      '  const arr = [MACHINE_PATHS.hubUnitFile];',
+      '  rmSync(arr[n]!);', // 16
+      '  const drop = (p = SYSTEM_SLOTS.config) => rmSync(p);', // 17: its default
+      '  drop();',
+      '  const { dir } = SYSTEM_SLOTS;',
+      '  mkdirSync(dir);', // 20
+      '}',
+      '',
+    ].join('\n'),
+  });
+  assert.deepEqual(found.split('\n').map((l) => l.split(':')[1]), ['13', '16', '17', '20'], found);
+  assert.match(found, /:20: mkdirSync\(dir\): SYSTEM_SLOTS\.dir is a machine location/);
+});
+
 test("lint: what onRealMachine gives is the real path only as a path's start: under a test's own root it is the test's", () => {
   const found = lintFixtures({
     'test/fixture-d.test.ts': [
@@ -559,13 +597,20 @@ test('lint: a guard counts only on the same name, before the write, in its block
       '    onRealMachine(f);',
       "    writeFileSync(f, '');", // 28: ok, the loop form
       '  }',
+      '  const shown = [String(onRealMachine(MACHINE_PATHS.helper))];',
+      '  mkdirSync(MACHINE_PATHS.helper);', // 31: ok, a guard inside a const's initialiser
+      '  void (shown.length > 9 && onRealMachine(MACHINE_PATHS.allowedSigners));',
+      '  rmSync(MACHINE_PATHS.allowedSigners);', // 33: the guard is behind a short-circuit
+      "  JSON.parse('{}')?.x?.(onRealMachine(MACHINE_PATHS.fullRunLock));",
+      '  rmSync(MACHINE_PATHS.fullRunLock);', // 35: the guard is in an optional call
+      "  writeFileSync(MACHINE_PATHS.enginePackage, '');", // 36: not a machine location (the engine's package.json)
       '  void later;',
       '}',
       '',
     ].join('\n'),
   });
   const lines = found.split('\n').map((l) => l.replace(/^test\/fixture-b\.test\.ts:/, ''));
-  assert.deepEqual(lines.map((l) => Number(l.split(':')[0])), [18, 21, 23, 24], found);
+  assert.deepEqual(lines.map((l) => Number(l.split(':')[0])), [18, 21, 23, 24, 33, 35], found);
   assert.match(lines[0]!, /SYSTEM_SLOTS\.config is a machine location/);
 });
 
