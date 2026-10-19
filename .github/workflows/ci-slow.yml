@@ -2321,6 +2321,8 @@ jobs:
           wait_status() { for _ in $(seq 90); do [ "$(sudo jq -r '.id + " " + .state' "$st" 2>/dev/null)" = "$1 running" ] || [ "$(sudo jq -r .id "$st" 2>/dev/null)" != "$1" ] || break; sleep 2; done; sudo jq -c . "$st"; }
           digest() { (cd / && sudo -u wl-ci /usr/local/bin/node --input-type=module -e "import {approvalDigest} from '$E/plugins/approval.js'; import {readPreview, recordOf} from '$E/plugins/root-ops.js'; const p = readPreview('ci', process.argv[1]); const m = process.argv[3] ? {network: process.argv[3] === 'none' ? [] : process.argv[3].split('+'), secrets: process.argv[4] === 'none' ? [] : process.argv[4].split('+')} : undefined; console.log(approvalDigest(recordOf(p, process.argv[2].split('+'), m)))" "$@"); }
           confirm() { printf '%s\n' "$1" | sudo script -qec "bash /opt/worklane/current/scripts/setup/plugins.sh confirm ci $1 $2" /dev/null | tail -n 1; }
+          # preview_done: a failed preview stops right after its wait, with its unit's journal and status (#677).
+          . scripts/ci/preview-done.sh
           # The broker: its user, groups and unit.
           sudo bash scripts/setup/mcp-broker.sh ci | tee "$F/mcp-setup.log"
           systemctl is-active "worklane-mcp@ci"
@@ -2330,6 +2332,7 @@ jobs:
           sudo -u wl-ci sudo -n "$HELPER" plugin-fetch kit "$url" "$FIXTURE_SHA" test/fixtures/plugins/kit && wait_status kit
           d="$(digest kit builder)" && sudo -u wl-ci sudo -n "$HELPER" plugin-stage kit "$d" builder && confirm kit "$d"
           sudo -u wl-ci sudo -n "$HELPER" mcp-preview kit-notes kit notes && wait_status kit-notes
+          preview_done ci kit-notes
           p=/var/lib/worklane/plugins/previews/ci/kit-notes/preview.json
           jq -c '{snapshotError, tools: (.snapshot.tools // null | if . then map(.name) else . end)}' "$p"
           if ! jq -e '.snapshot' "$p" >/dev/null; then readlink -f /usr/local/bin/node; sudo find /var/lib/worklane/plugins/store/ci -maxdepth 4 -printf '%M %u:%g %p\n' | head -30; fi
@@ -2340,6 +2343,7 @@ jobs:
           sudo -u wl-ci sudo -n "$HELPER" plugin-fetch escape "$url" "$FIXTURE_SHA" test/fixtures/plugins/escape && wait_status escape
           d="$(digest escape builder)" && sudo -u wl-ci sudo -n "$HELPER" plugin-stage escape "$d" builder && confirm escape "$d"
           sudo -u wl-ci sudo -n "$HELPER" mcp-preview escape-probe escape probe && wait_status escape-probe
+          preview_done ci escape-probe
           tries="$(jq -r '.snapshot.tools[0].description' /var/lib/worklane/plugins/previews/ci/escape-probe/preview.json)"
           echo "$tries" | tr ' ' '\n'
           echo "$tries" | grep -q 'wl-ci-mcp/escaped=denied'
