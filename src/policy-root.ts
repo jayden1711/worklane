@@ -3,6 +3,9 @@
 //                                               root: make the instance's policy.yaml root's (0644), its content kept,
 //                                               and record it; prints the isolation and merge keys (setup's policy step)
 //   <cli> policy set <instance> <key> <value>   root: one change, checked
+//   <cli> policy check <instance>               read-only: 0 only when the engine's gate would read it (setup's
+//                                               policy step is done only then)
+// own and set hold root's lock on the instance (withPolicyLock) from their read to their record write.
 // The instance is the coordinator user wl-<instance>'s; its home comes from the user database, never an argument.
 // Asked through sudo by a coordinator user (SUDO_USER wl-...), a loosening of land_mode or main_watch is refused.
 //
@@ -12,7 +15,7 @@
 // lanes, allowlists, any key `policy set` doesn't take, a value over the machine's limits) is refused, and so is a
 // recorded policy that changed since root last wrote it (P5: an earlier root file put back). Those take an admin, at a
 // root shell, with --accept-loose or --retake. setup-scripts never pass either (test/policy-edit.test.ts holds that).
-import { chmodSync, mkdirSync, realpathSync, renameSync, writeFileSync } from 'node:fs';
+import { chmodSync, closeSync, mkdirSync, openSync, realpathSync, renameSync, unlinkSync, writeFileSync, writeSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { join, relative, sep } from 'node:path';
 import { parseDocument } from 'yaml';
@@ -21,10 +24,11 @@ import { PolicyFile } from './instance.js';
 import { instanceNameOk } from './instance-name.js';
 import { isRoot, userHomeDir, userUid } from './os/index.js';
 import { readInOwnedDir, replaceInOwnedDir } from './os/root-file.js';
-import { decodePolicyValue, HELPER_ONLY, ownCommand, POLICY_ROOT_DIR, POLICY_SET_KEYS, policyRecord, type PolicyRecord, recordText, sha256 } from './policy-gate.js';
+import { decodePolicyValue, HELPER_ONLY, ownCommand, POLICY_ROOT_DIR, POLICY_SET_KEYS, policyRecord, type PolicyRecord, readPolicyChecked, recordText, sha256 } from './policy-gate.js';
 import { type Limits, LIMITS_PATH, loadLimits, settingsProblems } from './settings.js';
 
 const FILE = 'policy.yaml';
+const LOCK_WAIT_MS = 10_000;
 /** The keys an admin should see whenever root takes a policy over: what isolates the agents, and what merges. */
 const WATCHED = ['sandbox', 'allow_same_user', 'land_mode', 'main_watch', 'auto_merge'] as const;
 
@@ -36,6 +40,8 @@ export interface PolicyRootDeps {
   rootGid?: number;
   markerDir?: string;
   limitsPath?: string;
+  /** How long a root writer waits for another's lock on the same instance (withPolicyLock); default 10 s. */
+  lockWaitMs?: number;
 }
 
 /** An instance's policy.yaml on this machine: its coordinator's instance home (real path), and that user's uid. */
@@ -101,7 +107,7 @@ export function beyondCoordinator(p: PolicyFile, limits: Limits): string[] {
  * Root's record of an instance, written whatever root's umask: the directory 0755 (each one made here too) and the
  * record 0644, so the coordinator user can always read it (an unreadable one refuses its policy).
  */
-function writeRecord(dir: string, instance: string, rec: PolicyRecord): void {
+function recordDir(dir: string): void {
   const made = mkdirSync(dir, { recursive: true, mode: 0o755 });
   if (made) {
     let p = made;
@@ -109,10 +115,48 @@ function writeRecord(dir: string, instance: string, rec: PolicyRecord): void {
     for (const s of relative(made, dir).split(sep).filter(Boolean)) chmodSync((p = join(p, s)), 0o755);
   }
   chmodSync(dir, 0o755);
+}
+
+function writeRecord(dir: string, instance: string, rec: PolicyRecord): void {
+  recordDir(dir);
   const tmp = join(dir, `.${instance}.${randomBytes(6).toString('hex')}.tmp`);
   writeFileSync(tmp, recordText(rec), { mode: 0o644, flag: 'wx' });
   chmodSync(tmp, 0o644);
   renameSync(tmp, join(dir, instance));
+}
+
+/**
+ * Run `fn` holding root's lock on one instance's policy: a file root creates (O_EXCL) in its own record directory,
+ * which the coordinator user can't create, remove or write. `own` and `set` hold it from their read of policy.yaml to
+ * their record write, so two root writers of one instance never interleave (THREAT: a coordinator's `set-policy`
+ * reading before an admin's `policy set` and writing after it would put back what the admin changed, and record it).
+ * Another holder: wait (bounded), then refuse, naming the lock, which a writer that stopped part way leaves behind.
+ */
+function withPolicyLock<T>(dir: string, instance: string, waitMs: number, fn: () => T): T {
+  recordDir(dir);
+  const lock = join(dir, `.${instance}.lock`);
+  const until = Date.now() + waitMs;
+  let fd: number;
+  for (;;) {
+    try {
+      fd = openSync(lock, 'wx', 0o600);
+      break;
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e;
+      if (Date.now() >= until) throw new Error(`another root change to ${instance}'s policy is in progress (${lock} exists), so nothing is changed: try again once it is done. If none runs, a change stopped part way left it: an admin checks the policy, removes ${lock}, and runs ${ownCommand(instance, '--retake')}`);
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+    }
+  }
+  try {
+    try {
+      writeSync(fd, `${process.pid}\n`);
+    } finally {
+      closeSync(fd);
+    }
+    return fn();
+  } finally {
+    unlinkSync(lock);
+  }
 }
 
 /** What an admin passed to `policy own`, having checked the file first (never setup: its own_policy passes neither). */
@@ -135,16 +179,18 @@ export function ownPolicy(instance: string, d: PolicyRootDeps = {}, flags: OwnFl
   const { dir, file, coordUid } = instancePolicy(instance, d);
   const rootUid = d.rootUid ?? 0;
   const markers = d.markerDir ?? POLICY_ROOT_DIR;
-  const text = readInOwnedDir(dir, FILE, coordUid, [coordUid, rootUid]);
-  const policy = parsePolicy(text, file);
-  const rec = policyRecord(instance, markers);
-  const written = rec !== null && !('problem' in rec) && rec.sha256 === sha256(text);
-  if (rec !== null && !written && !flags.retake) throw new Error(`${file} isn't what root last wrote there (${'problem' in rec ? rec.problem : 'its content changed since'}), so it is left as it is: a process running as its coordinator user may have put it there. An admin checks it at a root shell, then takes it over as it is with ${ownCommand(instance, '--retake')}`);
-  const loose = beyondCoordinator(policy, loadLimits(d.limitsPath ?? LIMITS_PATH));
-  if (!written && loose.length && !flags.acceptLoose) throw new Error(`${file} is looser than its coordinator could make it (${loose.join('; ')}), so it is left as it is, not root's: a process running as its coordinator user may have written that. An admin checks it at a root shell, then changes it, or takes it over as it is with ${ownCommand(instance, ...(rec !== null ? (['--retake'] as const) : []), '--accept-loose')}`);
-  replaceInOwnedDir({ dir, name: FILE, text, dirOwner: coordUid, uid: rootUid, gid: d.rootGid ?? 0, mode: 0o644 });
-  writeRecord(markers, instance, { file, sha256: sha256(text) });
-  return { file, keys: Object.fromEntries(WATCHED.map((k) => [k, policy[k]])), loose };
+  return withPolicyLock(markers, instance, d.lockWaitMs ?? LOCK_WAIT_MS, () => {
+    const text = readInOwnedDir(dir, FILE, coordUid, [coordUid, rootUid]);
+    const policy = parsePolicy(text, file);
+    const rec = policyRecord(instance, markers);
+    const written = rec !== null && !('problem' in rec) && rec.sha256 === sha256(text);
+    if (rec !== null && !written && !flags.retake) throw new Error(`${file} isn't what root last wrote there (${'problem' in rec ? rec.problem : 'its content changed since'}), so it is left as it is: a process running as its coordinator user may have put it there. An admin checks it at a root shell, then takes it over as it is with ${ownCommand(instance, '--retake')}`);
+    const loose = beyondCoordinator(policy, loadLimits(d.limitsPath ?? LIMITS_PATH));
+    if (!written && loose.length && !flags.acceptLoose) throw new Error(`${file} is looser than its coordinator could make it (${loose.join('; ')}), so it is left as it is, not root's: a process running as its coordinator user may have written that. An admin checks it at a root shell, then changes it, or takes it over as it is with ${ownCommand(instance, ...(rec !== null ? (['--retake'] as const) : []), '--accept-loose')}`);
+    replaceInOwnedDir({ dir, name: FILE, text, dirOwner: coordUid, uid: rootUid, gid: d.rootGid ?? 0, mode: 0o644 });
+    writeRecord(markers, instance, { file, sha256: sha256(text) });
+    return { file, keys: Object.fromEntries(WATCHED.map((k) => [k, policy[k]])), loose };
+  });
 }
 
 /**
@@ -161,27 +207,54 @@ export function setPolicy(instance: string, key: string, arg: string, by: string
   if (by && /^wl-/.test(by) && Object.hasOwn(HELPER_ONLY, key) && HELPER_ONLY[key] !== arg) throw new Error(`${key}: ${arg} loosens the instance, which is an admin's, at a root shell (sudo ${BRAND.cli} policy set ${instance} ${key} ${arg}); a dashboard may only tighten it`);
   const { dir, file, coordUid } = instancePolicy(instance, d);
   const markers = d.markerDir ?? POLICY_ROOT_DIR;
-  const rec = policyRecord(instance, markers);
-  if (rec === null) throw new Error(`${file} isn't root's yet: make it so first (${ownCommand(instance)})`);
-  if ('problem' in rec) throw new Error(`${file}: ${rec.problem}, so nothing is changed: an admin checks it, then ${ownCommand(instance, '--retake')}`);
-  const rootUid = d.rootUid ?? 0;
-  const text = readInOwnedDir(dir, FILE, coordUid, [rootUid]);
-  if (rec.file !== file || rec.sha256 !== sha256(text)) throw new Error(`${file} isn't what root last wrote there (an earlier or other file put back in its place), so nothing is changed: an admin checks it, then ${ownCommand(instance, '--retake')}`);
-  const doc = parseDocument(text);
-  const from = getIn(doc.toJS(), pathOf(key)) ?? null;
-  doc.setIn(pathOf(key), value);
-  const out = doc.toString();
-  const next = parsePolicy(out, file);
-  const problems = limitProblems(next, loadLimits(d.limitsPath ?? LIMITS_PATH));
-  if (problems.length) throw new Error(`refused: ${problems.join('; ')}`);
-  replaceInOwnedDir({ dir, name: FILE, text: out, dirOwner: coordUid, uid: rootUid, gid: d.rootGid ?? 0, mode: 0o644 });
-  writeRecord(markers, instance, { file, sha256: sha256(out) });
-  return { key, from, to: value };
+  if (policyRecord(instance, markers) === null) throw new Error(`${file} isn't root's yet: make it so first (${ownCommand(instance)})`);
+  return withPolicyLock(markers, instance, d.lockWaitMs ?? LOCK_WAIT_MS, () => {
+    const rec = policyRecord(instance, markers);
+    if (rec === null) throw new Error(`${file} isn't root's yet: make it so first (${ownCommand(instance)})`);
+    if ('problem' in rec) throw new Error(`${file}: ${rec.problem}, so nothing is changed: an admin checks it, then ${ownCommand(instance, '--retake')}`);
+    const rootUid = d.rootUid ?? 0;
+    const text = readInOwnedDir(dir, FILE, coordUid, [rootUid]);
+    if (rec.file !== file || rec.sha256 !== sha256(text)) throw new Error(`${file} isn't what root last wrote there (an earlier or other file put back in its place), so nothing is changed: an admin checks it, then ${ownCommand(instance, '--retake')}`);
+    const doc = parseDocument(text);
+    const from = getIn(doc.toJS(), pathOf(key)) ?? null;
+    doc.setIn(pathOf(key), value);
+    const out = doc.toString();
+    const next = parsePolicy(out, file);
+    const problems = limitProblems(next, loadLimits(d.limitsPath ?? LIMITS_PATH));
+    if (problems.length) throw new Error(`refused: ${problems.join('; ')}`);
+    replaceInOwnedDir({ dir, name: FILE, text: out, dirOwner: coordUid, uid: rootUid, gid: d.rootGid ?? 0, mode: 0o644 });
+    writeRecord(markers, instance, { file, sha256: sha256(out) });
+    return { key, from, to: value };
+  });
 }
 
-/** `<cli> policy own|set ...`, as root. `deps` and `root`: tests stand in for the machine and for root. */
+/**
+ * `policy check <instance>`, read-only: whether the engine's gate would read the instance's policy.yaml (root's
+ * record covers it, and it is exactly what root last wrote there: readPolicyChecked). null when it would; else why
+ * not. add-project's policy step is done only when this says so (lib.sh policy_root_ok), so the step and the gate
+ * never disagree.
+ */
+export function checkPolicy(instance: string, d: PolicyRootDeps = {}): string | null {
+  const { file } = instancePolicy(instance, d);
+  const r = readPolicyChecked(file, d.markerDir ?? POLICY_ROOT_DIR, instance, d.rootUid ?? 0);
+  if (r === null) return `${file} isn't root's yet: no record of it (${ownCommand(instance)})`;
+  return 'refused' in r ? r.refused : null;
+}
+
+/** `<cli> policy own|set|check ...`, as root (check reads only). `deps` and `root`: tests stand in for the machine and for root. */
 export function policyCommand(sub: string | undefined, rest: string[], deps: PolicyRootDeps = {}, root = isRoot()): number {
-  const usage = `usage: ${BRAND.cli} policy own <instance> [--retake] [--accept-loose] | policy set <instance> <key> <value>   (as root)`;
+  const usage = `usage: ${BRAND.cli} policy own <instance> [--retake] [--accept-loose] | policy set <instance> <key> <value>   (as root) | policy check <instance>`;
+  if (sub === 'check' && rest.length === 1 && !rest[0]!.startsWith('--')) {
+    try {
+      const why = checkPolicy(rest[0]!, deps);
+      if (why) console.error(why);
+      else console.log(`${rest[0]}: policy.yaml is root's, and what root last wrote there`);
+      return why ? 1 : 0;
+    } catch (e) {
+      console.error((e as Error).message);
+      return 1;
+    }
+  }
   if (!root) {
     console.error(`policy ${sub ?? ''} is root's: run it with sudo\n${usage}`);
     return 2;

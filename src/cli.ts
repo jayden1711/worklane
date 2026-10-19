@@ -143,6 +143,8 @@ usage: ${BRAND.cli} <command> [options]
                                    root: make a machine instance's policy.yaml root's (its content
                                    kept; a changed or loose one only with the flag, an admin's), or
                                    change one key of it (the machine helper's set-policy)
+  policy check <instance>          whether the engine would read that policy.yaml (root's, as root
+                                   last wrote it); reads only
   stop-all [reason]                emergency stop: halt every agent on this machine, across
                                    instances; tasks requeue. resume-all lifts it
   coordinator run [--once] [--instance name]

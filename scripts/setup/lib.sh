@@ -580,8 +580,10 @@ carry_policy_root() {
   install -m 0644 "$POLICY_ROOT_DIR/$1" "$POLICY_ROOT_DIR/$2"
   own_policy "$2"
 }
-# Whether instance $1's policy.yaml ($2) is root's already, as recorded: a regular file root's, 0644, one name.
-policy_root_ok() { [ -f "$POLICY_ROOT_DIR/$1" ] && [ ! -L "$2" ] && [ "$(stat -c '%u %a %h' -- "$2" 2>/dev/null)" = "0 644 1" ]; }
+# Whether instance $1's policy.yaml ($2) is root's already, as recorded: a regular file root's, 0644, one name, and the
+# engine's own gate would read it (`policy check`: the recorded file, with what root last wrote there). So the policy
+# step is done exactly when the coordinator can start on it; an earlier root file put back runs the step again.
+policy_root_ok() { [ -f "$POLICY_ROOT_DIR/$1" ] && [ ! -L "$2" ] && [ "$(stat -c '%u %a %h' -- "$2" 2>/dev/null)" = "0 644 1" ] && "$ENGINE_CLI" policy check "$1" >/dev/null 2>&1; }
 
 # Every user an instance's agents or evals run as (each coordinator's instance.yaml run_as), one per line: never
 # a GPU lock's holder (testrun-gpu.sh) or a member of the GPU's device group (gpu-devices.sh).
