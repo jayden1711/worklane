@@ -15,16 +15,16 @@
 // lanes, allowlists, any key `policy set` doesn't take, a value over the machine's limits) is refused, and so is a
 // recorded policy that changed since root last wrote it (P5: an earlier root file put back). Those take an admin, at a
 // root shell, with --accept-loose or --retake. setup-scripts never pass either (test/policy-edit.test.ts holds that).
-import { chmodSync, closeSync, linkSync, openSync, readFileSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync, writeSync } from 'node:fs';
+import { chmodSync, closeSync, openSync, readFileSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync, writeSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { join } from 'node:path';
 import { parseDocument } from 'yaml';
 import { BRAND } from './brand.js';
 import { PolicyFile } from './instance.js';
 import { instanceNameOk } from './instance-name.js';
-import { isRoot, processIdentity, userHomeDir, userUid } from './os/index.js';
+import { isRoot, processIdentity, UNKNOWN_IDENTITY, userHomeDir, userUid } from './os/index.js';
 import { readInOwnedDir, replaceInOwnedDir } from './os/root-file.js';
-import { clearKillSwitch, killAutoMerge, killSwitchSeen, recordDir } from './policy-kill.js';
+import { armedSwitches, clearKillSwitches, ensureSpare, killAutoMerge, recordDir } from './policy-kill.js';
 import { decodePolicyValue, HELPER_ONLY, ownCommand, POLICY_ROOT_DIR, POLICY_SET_KEYS, policyRecord, type PolicyRecord, readPolicyChecked, recordText, sha256 } from './policy-gate.js';
 import { type Limits, LIMITS_PATH, loadLimits, settingsProblems } from './settings.js';
 
@@ -191,26 +191,39 @@ function lockStale(text: string, lock: string): boolean {
   if (!Number.isInteger(pid) || pid <= 0) return true;
   const now = processIdentity(pid);
   if (now === null) return true;
+  // Fail closed: a holder that answers signal 0 but whose identity can't be read is live (OFF never waits for it).
+  if (now === UNKNOWN_IDENTITY) return false;
   const was = sp < 0 ? '' : text.trim().slice(sp + 1);
   return was !== '' && now !== was;
 }
 
-/** Break a stale lock: rename it aside, keep the rename only if it is the stale one, else put the lock back. */
+/**
+ * Break a stale lock. Breakers take turns through a second lock (`<lock>.break`, O_EXCL; one older than EMPTY_LOCK_MS
+ * is a breaker that died and goes), and under it the lock is removed only while it is still the stale one. The lock
+ * can't change under a breaker: no writer creates it while it is there, and its own holder is gone. So a fresh lock
+ * another writer took is never broken, and no third writer slips in between.
+ */
 function breakLock(lock: string, stale: string): void {
-  const aside = `${lock}.stale.${randomBytes(6).toString('hex')}`;
+  const brk = `${lock}.break`;
+  let fd: number;
   try {
-    renameSync(lock, aside);
-  } catch {
-    return; // another writer broke or released it first
-  }
-  if (readLock(aside) !== stale) {
+    fd = openSync(brk, 'wx', 0o600);
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e;
     try {
-      linkSync(aside, lock);
+      if (Date.now() - statSync(brk).mtimeMs > EMPTY_LOCK_MS) unlinkSync(brk);
     } catch {
-      // a third writer holds the name now; the lock moved aside stays its holder's own to release
+      // another breaker finished first
     }
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
+    return; // another breaker is at it: wait, and look again
   }
-  unlinkSync(aside);
+  closeSync(fd);
+  try {
+    if (readLock(lock) === stale) unlinkSync(lock);
+  } finally {
+    unlinkSync(brk);
+  }
 }
 
 /** What an admin passed to `policy own`, having checked the file first (never setup: its own_policy passes neither). */
@@ -245,6 +258,8 @@ export function ownPolicy(instance: string, d: PolicyRootDeps = {}, flags: OwnFl
     if (!written && loose.length && !flags.acceptLoose) throw new Error(`${file} is looser than its coordinator could make it (${loose.join('; ')}), so it is left as it is, not root's: a process running as its coordinator user may have written that. An admin checks it at a root shell, then changes it, or takes it over as it is with ${ownCommand(instance, ...(rec !== null ? (['--retake'] as const) : []), '--accept-loose')}`);
     replaceInOwnedDir({ dir, name: FILE, text, dirOwner: coordUid, uid: rootUid, gid: d.rootGid ?? 0, mode: 0o644 });
     writeRecord(markers, instance, { file, sha256: sha256(text) });
+    // A disarmed kill switch, so a later auto_merge off needs no new space (src/policy-kill.ts).
+    ensureSpare(instance, markers);
     return { file, keys: Object.fromEntries(WATCHED.map((k) => [k, policy[k]])), loose };
   });
 }
@@ -269,11 +284,12 @@ export function setPolicy(instance: string, key: string, arg: string, by: string
     killAutoMerge(instance, markers);
     return { key, from: null, to: false };
   }
+  // auto_merge on: the kill switches there now, before anything waits (root's lock included), are the only ones it may
+  // clear; an OFF that says done any time after this has a switch of its own, which stays.
+  const seen = key === 'auto_merge' && value === true ? armedSwitches(instance, markers) : [];
   const { dir, file, coordUid } = instancePolicy(instance, d);
   if (policyRecord(instance, markers) === null) throw new Error(`${file} isn't root's yet: make it so first (${ownCommand(instance)})`);
   return withPolicyLock(markers, instance, d.lockWaitMs ?? LOCK_WAIT_MS, () => {
-    // auto_merge on: the kill switch there now, the only one it may clear (an OFF while it runs wins).
-    const seen = key === 'auto_merge' && value === true ? killSwitchSeen(instance, markers) : null;
     const rec = policyRecord(instance, markers);
     if (rec === null) throw new Error(`${file} isn't root's yet: make it so first (${ownCommand(instance)})`);
     if ('problem' in rec) throw new Error(`${file}: ${rec.problem}, so nothing is changed: an admin checks it, then ${ownCommand(instance, '--retake')}`);
@@ -289,9 +305,10 @@ export function setPolicy(instance: string, key: string, arg: string, by: string
     if (problems.length) throw new Error(`refused: ${problems.join('; ')}`);
     replaceInOwnedDir({ dir, name: FILE, text: out, dirOwner: coordUid, uid: rootUid, gid: d.rootGid ?? 0, mode: 0o644 });
     writeRecord(markers, instance, { file, sha256: sha256(out) });
-    // auto_merge on (root's alone; a coordinator's was refused above): the kill switch it saw goes, last, so auto_merge
-    // reads off until policy.yaml says on; one an OFF wrote since stays.
-    if (key === 'auto_merge' && value === true) clearKillSwitch(instance, seen, markers);
+    // auto_merge on (root's alone; a coordinator's was refused above): the switches it saw go, last, each by its own
+    // name, so auto_merge reads off until policy.yaml says on, and any an OFF armed since stays.
+    if (key === 'auto_merge' && value === true) clearKillSwitches(instance, seen, markers);
+    else ensureSpare(instance, markers);
     return { key, from, to: value };
   });
 }

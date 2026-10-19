@@ -334,6 +334,8 @@ step_services() {
   v="$(old_limit MemoryHigh)"; [[ "$v" =~ ^[0-9]+[KMGT]?$|^[0-9]+%$|^infinity$ ]] && args+=(--memory-high "$v")
   v="$(old_limit CPUWeight)"; [[ "$v" =~ ^[0-9]+$ ]] && args+=(--cpu-weight "$v")
   v="$(old_limit TasksMax)"; [[ "$v" =~ ^[0-9]+$ ]] && args+=(--tasks-max "$v")
+  # An auto_merge off given to the old name since the home step: the new name's too, before its coordinator starts.
+  carry_auto_merge_off "$old" "$new"
   bash "$here/service.sh" "$new" "${args[@]}"
   names="$({ helper_instances; echo "$new"; } | sort -u | while read -r n; do if user_exists "wl-$n"; then echo "$n"; fi; done | tr '\n' ' ')"
   # shellcheck disable=SC2086 # one word per instance name
@@ -359,6 +361,8 @@ step_keep() {
 step_remove() {
   # instance-remove.sh takes the same machine lock: let go of it for the removal, and take it back after.
   flock -u 9
+  # Any auto_merge off given to the old name until now: the new name's too, before the old name's switches go.
+  carry_auto_merge_off "$old" "$new"
   bash "$here/instance-remove.sh" "$old" --yes
   flock -n 9 || { echo "another add-project, instance-remove or instance-rename took the machine lock"; return 1; }
   rm -f "$parked"
