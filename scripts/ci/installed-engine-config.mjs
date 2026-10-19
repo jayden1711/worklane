@@ -28,6 +28,11 @@
 // they were moves nothing. An engine chosen elsewhere in bootstrap.sh's code is not seen here: owner review of
 // scripts/** is what covers that.
 //
+// A moved pin must be newer than the base's, by full semver (owner, 2026-10-19). An older version, the same version at
+// another commit, or a base pin whose version can't be told is a rollback: refused unless the repository owner applied
+// the engine-rollback label to the PR (read from its timeline with the workflow's read-only token, and printed, so the
+// run records who and when). A label by anyone else, or a timeline it can't read, is no override.
+//
 // A change that touches neither .worklane/ nor the pin has nothing to load: it prints so and exits 0, before fetching
 // any engine (the workflow's paths filter already skips most such PRs; this keeps the script right without it).
 // Exit 1: refused, or it couldn't check.
@@ -43,6 +48,20 @@ const BOOTSTRAP = 'scripts/bootstrap.sh';
 const LOADER = 'dist/src/config/load.js';
 const VERSION_TAG = /^v\d+\.\d+\.\d+$/;
 const FULL_COMMIT = /^[0-9a-f]{40}$/;
+// The repository owner's word that a moved pin may go back (a deliberate rollback): this label on the PR, last applied
+// by the owner (upgradeOrOwnerRollback).
+const ROLLBACK_LABEL = 'engine-rollback';
+// What ownerRollback reads, taken out of the environment at once: no engine's code loaded below, and no child process
+// (git, npm), ever sees the token.
+const GH = {
+  api: (process.env.GITHUB_API_URL || 'https://api.github.com').replace(/\/+$/, ''),
+  token: process.env.GITHUB_TOKEN || '',
+  repo: process.env.GITHUB_REPOSITORY || '',
+  owner: process.env.GITHUB_REPOSITORY_OWNER || '',
+  pr: process.env.PR_NUMBER || '',
+};
+delete process.env.GITHUB_TOKEN;
+delete process.env.GH_TOKEN;
 // The only pin lines a moved pin may have (strictPin): ASCII, nothing after the value.
 const PIN_LINE = { ENGINE_TAG: /^ENGINE_TAG=v[0-9]+\.[0-9]+\.[0-9]+$/, ENGINE_COMMIT: /^ENGINE_COMMIT=[0-9a-f]{40}$/ };
 const PIN_FORM = { ENGINE_TAG: 'vX.Y.Z', ENGINE_COMMIT: '<40 hex digits>' };
@@ -94,7 +113,9 @@ async function main() {
     say(`no change under ${CONFIG_DIR}/ between ${base.slice(0, 12)} and ${head.slice(0, 12)}: nothing to load (the engine pin in ${BOOTSTRAP} didn't move)`);
     return;
   }
-  const yamlAtHead = [...entriesAt(head)].filter(([name]) => /\.ya?ml$/.test(name));
+  // A moved pin is an upgrade, or the owner's recorded rollback: decided before any engine is fetched.
+  if (moved) await upgradeOrOwnerRollback(moved, base);
+  const yamlAtHead =[...entriesAt(head)].filter(([name]) => /\.ya?ml$/.test(name));
   let refusals = 0;
   const refuse = (problems, why) => {
     for (const p of problems) {
@@ -183,7 +204,80 @@ function movedPin(base, head) {
     }
   }
   if (before && before.tag === pin.tag && before.commit === pin.commit) return null;
-  return { tag: pin.tag, commit: pin.commit, source: `the pin in ${at}` };
+  return { tag: pin.tag, commit: pin.commit, source: `the pin in ${at}`, before };
+}
+
+/** vMAJOR.MINOR.PATCH as three BigInts (no leading zeros, any size), or null: a version this check can't compare. */
+function semver(tag) {
+  const m = /^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/.exec(tag ?? '');
+  return m ? m.slice(1).map(BigInt) : null;
+}
+function compare(a, b) {
+  for (let i = 0; i < 3; i += 1) if (a[i] !== b[i]) return a[i] < b[i] ? -1 : 1;
+  return 0;
+}
+
+/**
+ * A moved pin must be an upgrade (#825, owner 2026-10-19): newer than the base's pin by full semver. An older
+ * version, the same version at another commit, or a base pin whose version can't be told is a rollback, allowed only
+ * by the repository owner's engine-rollback label on the PR (ownerRollback), and then printed, so the run records who
+ * and when. A head version that won't parse is refused whatever the label says.
+ */
+async function upgradeOrOwnerRollback(moved, base) {
+  const now = semver(moved.tag);
+  if (!now) fail(`the engine this change pins, ${moved.tag} isn't a version this check can compare (vMAJOR.MINOR.PATCH, no leading zeros)`);
+  const at = `${BOOTSTRAP} at ${base.slice(0, 12)}`;
+  const was = moved.before ? semver(moved.before.tag) : null;
+  let why = null;
+  if (!was) why = `can't tell which engine version ${at} pins, so this move can't be shown to be an upgrade`;
+  else if (compare(now, was) < 0) why = `the engine this change pins, ${moved.tag}, is older than ${moved.before.tag}, the pin in ${at}`;
+  else if (compare(now, was) === 0) why = `this change pins ${moved.tag} again, at ${moved.commit}, not ${moved.before.commit}`;
+  if (!why) return;
+  const owner = await ownerRollback();
+  if (!owner.ok) fail(`${why}: a rollback needs the repository owner's ${ROLLBACK_LABEL} label on the PR, and ${owner.reason}`);
+  say(`${why}; rollback allowed: ${owner.line}`);
+}
+
+/**
+ * Whether the repository owner allowed a rollback on this PR: the PR's timeline (GitHub's API, with the workflow's
+ * read-only token) shows the engine-rollback label last applied, not removed, by the login GITHUB_REPOSITORY_OWNER
+ * names, and the PR carries it now. Anything else, including an API it can't read, is { ok: false, reason }.
+ */
+async function ownerRollback() {
+  const { api, token, repo, owner, pr } = GH;
+  if (!token || !/^[\w.-]+\/[\w.-]+$/.test(repo) || !/^[1-9][0-9]*$/.test(pr) || !owner || repo.split('/')[0] !== owner) {
+    return { ok: false, reason: "can't read the PR's labels: this run has no token, repository, owner or PR number" };
+  }
+  const get = async (path) => {
+    const r = await fetch(`${api}${path}`, {
+      headers: { authorization: `Bearer ${token}`, accept: 'application/vnd.github+json', 'x-github-api-version': '2022-11-28' },
+      redirect: 'error',
+      signal: AbortSignal.timeout(30_000),
+    });
+    if (!r.ok) throw new Error(`GET ${path.split('?')[0]} answered ${r.status}`);
+    return { body: await r.json(), link: r.headers.get('link') || '' };
+  };
+  try {
+    const events = [];
+    for (let page = 1; ; page += 1) {
+      if (page > 50) throw new Error('the timeline runs past 50 pages');
+      const { body, link } = await get(`/repos/${repo}/issues/${pr}/timeline?per_page=100&page=${page}`);
+      if (!Array.isArray(body)) throw new Error('the timeline is not a list');
+      events.push(...body);
+      if (!/rel="next"/.test(link)) break;
+    }
+    const { body: issue } = await get(`/repos/${repo}/issues/${pr}`);
+    const present = Array.isArray(issue?.labels) && issue.labels.some((l) => l?.name === ROLLBACK_LABEL);
+    const changes = events.filter((e) => (e?.event === 'labeled' || e?.event === 'unlabeled') && e?.label?.name === ROLLBACK_LABEL);
+    if (changes.some((e) => Number.isNaN(Date.parse(e.created_at)))) throw new Error('a label event has no readable time');
+    const last = changes.map((e, i) => ({ e, i })).sort((x, y) => Date.parse(x.e.created_at) - Date.parse(y.e.created_at) || x.i - y.i).pop()?.e;
+    if (!present || !last || last.event !== 'labeled') return { ok: false, reason: `no ${ROLLBACK_LABEL} label on PR #${pr}` };
+    const who = last.actor?.login;
+    if (who !== owner) return { ok: false, reason: `${ROLLBACK_LABEL} on PR #${pr} was last applied by @${who ?? '(no one named)'}, not the repository owner @${owner}` };
+    return { ok: true, line: `${ROLLBACK_LABEL} on PR #${pr} was last applied by @${who} (the repository owner) at ${last.created_at}` };
+  } catch (e) {
+    return { ok: false, reason: `can't read the PR's labels: ${e.message}` };
+  }
 }
 
 /**

@@ -5,7 +5,9 @@
 // dist/src/config/load.js takes only the keys it knows, as the real schema's strict objects do.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
+import { createServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -44,7 +46,23 @@ const standIn = (known: string[], files = ['config.yaml', 'review.yaml']) => `ex
 
 function fixture() {
   const dir = mkdtempSync(join(tmpdir(), 'installed-engine-config-'));
-  const env = { ...process.env, HOME: dir, GIT_CONFIG_GLOBAL: join(dir, 'gitconfig'), GIT_CONFIG_NOSYSTEM: '1', GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@example.com', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@example.com' };
+  // No GitHub token, PR or API from this session reaches the script: the API is a dead local port unless a test serves one.
+  const env = {
+    ...process.env,
+    HOME: dir,
+    GIT_CONFIG_GLOBAL: join(dir, 'gitconfig'),
+    GIT_CONFIG_NOSYSTEM: '1',
+    GIT_AUTHOR_NAME: 't',
+    GIT_AUTHOR_EMAIL: 't@example.com',
+    GIT_COMMITTER_NAME: 't',
+    GIT_COMMITTER_EMAIL: 't@example.com',
+    GITHUB_TOKEN: '',
+    GH_TOKEN: '',
+    GITHUB_API_URL: 'http://127.0.0.1:9',
+    GITHUB_REPOSITORY: '',
+    GITHUB_REPOSITORY_OWNER: '',
+    PR_NUMBER: '',
+  };
   writeFileSync(env.GIT_CONFIG_GLOBAL, '');
   const repo = join(dir, 'repo');
   const sh = (cmd: string, args: string[], cwd = repo) => {
@@ -102,9 +120,44 @@ function fixture() {
     const r = spawnSync('bash', ['--noprofile', '--norc', '-eo', 'pipefail', '-c', step], { cwd: repo, env: { ...env, RUNNER_TEMP: runnerTemp, PATH: `${dirname(process.execPath)}:${process.env.PATH ?? ''}` }, encoding: 'utf8' });
     return { code: r.status, out: r.stdout + r.stderr };
   };
+  /** The same run, not blocking this process, so a stand-in GitHub API served from it can answer. */
+  const runAsync = (head: string, extra: Record<string, string>, base = 'main') =>
+    new Promise<{ code: number | null; out: string }>((resolve) => {
+      const c = spawn(process.execPath, [SCRIPT, '--base', base, '--head', head], { cwd: repo, env: { ...env, ...extra } });
+      let out = '';
+      c.stdout.on('data', (d) => (out += d));
+      c.stderr.on('data', (d) => (out += d));
+      c.on('close', (code) => resolve({ code, out }));
+    });
   const done = () => rmSync(dir, { recursive: true, force: true });
-  return { repo, owner, stranger, signersFor, sh, release, onMain, pin, pr, run, runStep, done };
+  return { repo, owner, stranger, signersFor, sh, release, onMain, pin, pr, run, runAsync, runStep, done };
 }
+
+/**
+ * A stand-in GitHub API for one PR (repo-owner/engine #7): its timeline and its current labels, as `state` says at
+ * each request, or `fail` (a status) for every request.
+ */
+async function fakeApi(state: { timeline: unknown[]; labels: string[]; fail?: number }) {
+  const seen: string[] = [];
+  const server = createServer((req, res) => {
+    seen.push(`${req.method} ${req.url} ${req.headers.authorization ?? ''}`);
+    const send = (status: number, body: unknown) => {
+      res.writeHead(status, { 'content-type': 'application/json' });
+      res.end(JSON.stringify(body));
+    };
+    if (state.fail) return send(state.fail, { message: 'stand-in failure' });
+    const path = (req.url ?? '').split('?')[0];
+    if (path === '/repos/repo-owner/engine/issues/7/timeline') return send(200, state.timeline);
+    if (path === '/repos/repo-owner/engine/issues/7') return send(200, { number: 7, labels: state.labels.map((name) => ({ name })) });
+    return send(404, { message: 'Not Found' });
+  });
+  await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+  const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  const env = { GITHUB_API_URL: url, GITHUB_TOKEN: 'stand-in-token', GITHUB_REPOSITORY: 'repo-owner/engine', GITHUB_REPOSITORY_OWNER: 'repo-owner', PR_NUMBER: '7' };
+  return { env, seen, close: () => new Promise<void>((r) => server.close(() => r())) };
+}
+/** A label event on the timeline. */
+const labelEvent = (event: 'labeled' | 'unlabeled', login: string, at: string, name = 'engine-rollback') => ({ event, label: { name }, actor: { login }, created_at: at });
 
 const workflow = () => readFileSync(join(repoRoot, '.github', 'workflows', 'installed-engine-config.yml'), 'utf8');
 /** The check's scripts as this checkout has them, to commit into a fixture's main. */
@@ -297,12 +350,11 @@ test("a moved pin fails closed: unsigned, another key, the PR's own signer, a mo
   // A signed tag whose commit carries no engine.
   f.sh('git', ['-c', 'gpg.format=ssh', '-c', `user.signingkey=${f.owner}`, 'tag', '-s', 'v1.1.5', '-m', 'v1.1.5', 'main']);
   refused(move('v1.1.5', f.sh('git', ['rev-parse', 'v1.1.5^{commit}'])), /the engine this change pins, v1\.1\.5 .* carries no dist\/src\/config\/load\.js/);
-  // A main whose own pin is malformed: a PR that moves it to a good release is still loaded with that release.
+  // A main whose own pin is malformed: its version can't be told, so a move from it is no upgrade it can show; refused
+  // without the owner's engine-rollback label (that case: the override test).
   f.onMain({ 'scripts/bootstrap.sh': `${BOOT}ENGINE_TAG=v1.0.0\n` });
   const v2 = f.release('v2.0.0', ['name'], f.owner);
-  const ok = move('v2.0.0', v2);
-  assert.equal(ok.code, 0, ok.out);
-  assert.match(ok.out, /loads with the engine this change pins, v2\.0\.0/);
+  refused(move('v2.0.0', v2), /can't tell which engine version scripts\/bootstrap\.sh at \w+ pins/);
   f.done();
 });
 
@@ -338,12 +390,90 @@ test('a pin line bash could read differently from the check fails closed; a base
     .map(({ what, r }) => `${what} (exit ${r.code}): ${r.out.trim().split('\n').pop()}`);
   assert.deepEqual(missed, [], `not refused as expected:\n${missed.join('\n')}`);
   assert.ok(!existsSync(join(f.repo, 'ran')), 'nothing in bootstrap.sh is run');
-  // main's own pin line carries a trailing NBSP: a PR that writes it cleanly is a move, so it is loaded.
+  // main's own pin line carries a trailing NBSP: a PR that writes it cleanly is a move (never "the same"), from a pin
+  // whose version can't be told: refused without the owner's engine-rollback label.
   f.onMain({ 'scripts/bootstrap.sh': boot.replace(tagLine, 'ENGINE_TAG=v1.0.0 \n') });
-  const ok = f.run(f.pr({ 'scripts/bootstrap.sh': boot }));
-  assert.equal(ok.code, 0, ok.out);
-  assert.match(ok.out, /loads with the engine this change pins, v1\.0\.0/);
+  refused(f.run(f.pr({ 'scripts/bootstrap.sh': boot })), /can't tell which engine version scripts\/bootstrap\.sh at \w+ pins/);
   f.done();
+});
+
+test('a moved pin must be newer than the base\'s, by full semver: an older one, the same version at another commit, or one that won\'t parse is refused', { skip }, () => {
+  const f = fixture();
+  const v19 = f.release('v1.9.0', ['name'], f.owner);
+  const v110 = f.release('v1.10.0', ['name'], f.owner);
+  f.pin('v1.9.0', v19);
+  const move = (tag: string, commit: string) => f.run(f.pr({ 'scripts/bootstrap.sh': bootFor(tag, commit) }));
+  // v1.10.0 is newer than v1.9.0 (not by string order).
+  const up = move('v1.10.0', v110);
+  assert.equal(up.code, 0, up.out);
+  assert.match(up.out, /loads with the engine this change pins, v1\.10\.0/);
+  f.pin('v1.10.0', v110);
+  refused(move('v1.9.0', v19), /the engine this change pins, v1\.9\.0, is older than v1\.10\.0, the pin in scripts\/bootstrap\.sh at \w+: a rollback needs the repository owner's engine-rollback label/);
+  // The same version at another commit.
+  const other = f.release('v1.10.1', ['name'], f.owner);
+  refused(move('v1.10.0', other), new RegExp(`pins v1\\.10\\.0 again, at ${other}, not ${v110}`));
+  // A version that won't parse as semver (a leading zero), even when newer by number.
+  refused(move('v1.010.0', other), /v1\.010\.0 isn't a version this check can compare \(vMAJOR\.MINOR\.PATCH, no leading zeros\)/);
+  // With no stand-in API (this session's token and PR never reach it), the label can't be read: no override.
+  refused(move('v1.9.0', v19), /can't read the PR's labels/);
+  f.done();
+});
+
+test("a rollback passes only with the repository owner's engine-rollback label, read from the PR's timeline and printed", { skip }, async () => {
+  const f = fixture();
+  const v11 = f.release('v1.1.0', ['name'], f.owner);
+  const v12 = f.release('v1.2.0', ['name'], f.owner);
+  f.pin('v1.2.0', v12);
+  const back = f.pr({ 'scripts/bootstrap.sh': bootFor('v1.1.0', v11) });
+  const state: { timeline: unknown[]; labels: string[]; fail?: number } = { timeline: [], labels: [] };
+  const api = await fakeApi(state);
+  try {
+    const run = () => f.runAsync(back, api.env);
+    // No label.
+    refused(await run(), /no engine-rollback label on PR #7/);
+    // Applied by the owner, and still there: the override, recorded in the output; the release is still verified and loaded.
+    state.timeline = [labelEvent('labeled', 'repo-owner', '2026-10-19T10:00:00Z')];
+    state.labels = ['engine-rollback'];
+    const ok = await run();
+    assert.equal(ok.code, 0, ok.out);
+    assert.match(ok.out, /rollback allowed: engine-rollback on PR #7 was last applied by @repo-owner \(the repository owner\) at 2026-10-19T10:00:00Z/);
+    assert.match(ok.out, /verified v1\.1\.0 /);
+    assert.match(ok.out, /loads with the engine this change pins, v1\.1\.0/);
+    assert.ok(api.seen.every((s) => s.endsWith('Bearer stand-in-token')), 'every request carries the workflow token');
+    // Applied by someone else.
+    state.timeline = [labelEvent('labeled', 'helper', '2026-10-19T10:00:00Z')];
+    refused(await run(), /engine-rollback on PR #7 was last applied by @helper, not the repository owner @repo-owner/);
+    // The owner's label, removed and re-added by someone else.
+    state.timeline = [labelEvent('labeled', 'repo-owner', '2026-10-19T10:00:00Z'), labelEvent('unlabeled', 'helper', '2026-10-19T10:01:00Z'), labelEvent('labeled', 'helper', '2026-10-19T10:02:00Z')];
+    refused(await run(), /last applied by @helper, not the repository owner/);
+    // Applied by the owner, then removed: not there now.
+    state.timeline = [labelEvent('labeled', 'repo-owner', '2026-10-19T10:00:00Z'), labelEvent('unlabeled', 'repo-owner', '2026-10-19T10:05:00Z')];
+    state.labels = [];
+    refused(await run(), /no engine-rollback label on PR #7/);
+    // The timeline says applied, the PR's labels say otherwise: not counted.
+    state.timeline = [labelEvent('labeled', 'repo-owner', '2026-10-19T10:00:00Z')];
+    refused(await run(), /no engine-rollback label on PR #7/);
+    // Another label by the owner doesn't count.
+    state.timeline = [labelEvent('labeled', 'repo-owner', '2026-10-19T10:00:00Z', 'rollback')];
+    state.labels = ['rollback'];
+    refused(await run(), /no engine-rollback label on PR #7/);
+    // The timeline can't be read.
+    state.fail = 500;
+    refused(await run(), /can't read the PR's labels: .*500/);
+    state.fail = 403;
+    refused(await run(), /can't read the PR's labels: .*403/);
+    delete state.fail;
+    // A base pin whose version can't be told, moved with the owner's label: allowed, and recorded.
+    state.timeline = [labelEvent('labeled', 'repo-owner', '2026-10-19T11:00:00Z')];
+    state.labels = ['engine-rollback'];
+    f.onMain({ 'scripts/bootstrap.sh': `${BOOT}ENGINE_TAG=v1.0.0\n` });
+    const fixed = await f.runAsync(f.pr({ 'scripts/bootstrap.sh': bootFor('v1.2.0', v12) }), api.env);
+    assert.equal(fixed.code, 0, fixed.out);
+    assert.match(fixed.out, /rollback allowed: engine-rollback on PR #7 was last applied by @repo-owner/);
+  } finally {
+    await api.close();
+    f.done();
+  }
 });
 
 test("the workflow's step judges a moved pin with the base's copy of the check's script", { skip }, () => {
@@ -382,14 +512,17 @@ test("the workflow runs the check on every pull request that changes .worklane/ 
   const wf = parse(text) as { on: Record<string, Record<string, unknown>>; permissions: Record<string, string>; jobs: Record<string, { if?: unknown; steps: { run?: string; if?: unknown }[] }> };
   assert.deepEqual(Object.keys(wf.on), ['pull_request']);
   assert.deepEqual(wf.on.pull_request!.paths, ['.worklane/**', 'scripts/bootstrap.sh'], 'every PR that changes .worklane/ or the file holding the engine pin, and only those');
-  assert.deepEqual(wf.on.pull_request!.types, ['opened', 'synchronize', 'reopened'], 'each push to such a PR');
+  // Each push, and each label change (the owner's engine-rollback label re-runs it, and so does its removal).
+  assert.deepEqual(wf.on.pull_request!.types, ['opened', 'synchronize', 'reopened', 'labeled', 'unlabeled'], 'each push to such a PR, and each label change');
   assert.equal(wf.on.pull_request!['paths-ignore'], undefined);
-  assert.deepEqual(wf.permissions, { contents: 'read' });
+  // Read-only: the code, and the PR's timeline and labels (the rollback override). Nothing it can write.
+  assert.deepEqual(wf.permissions, { contents: 'read', issues: 'read', 'pull-requests': 'read' });
   const job = wf.jobs['installed-engine-config']!;
   assert.equal(job.if, undefined, 'no condition on the job');
-  const steps = job.steps.filter((s) => s.run?.includes('installed-engine-config.mjs'));
+  const steps = job.steps.filter((s) => s.run?.includes('installed-engine-config.mjs')) as { run?: string; if?: unknown; env?: Record<string, string> }[];
   assert.equal(steps.length, 1);
   assert.equal(steps[0]!.if, undefined, 'no condition on the step');
+  assert.deepEqual(steps[0]!.env, { GITHUB_TOKEN: '${{ github.token }}', PR_NUMBER: '${{ github.event.pull_request.number }}' }, "the workflow's own read-only token and the PR's number, nothing else");
   assert.match(steps[0]!.run!, /git archive HEAD\^1 scripts/, "the base's copy of the check");
   assert.match(steps[0]!.run!, /--base HEAD\^1 --head HEAD/);
   assert.doesNotMatch(text, /labels/, 'no label can skip it');

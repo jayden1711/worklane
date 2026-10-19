@@ -6,6 +6,10 @@ name: installed-engine-config
 # #814: a pull request that moves that pin also has its .worklane/ (main's, when only the pin moves) loaded with the
 # engine it pins, that tag verified against the BASE's signers: every new bootstrap would install that engine, so one
 # that can't load this repo's config fails here too.
+# A moved pin must also be newer than the base's (full semver). Going back is allowed only as a recorded rollback: the
+# repository owner applies the engine-rollback label to the PR, and the script reads who applied it from the PR's
+# timeline with this workflow's read-only token and prints it. That is why it runs on a label change too, and why it
+# may read issues and pull requests.
 # It fails closed when the version can't be found or its tag doesn't verify. There is no skip: a PR meant to land
 # after an engine upgrade stays a draft until main's pin includes it, then passes on its next push.
 # It runs only on a pull request that changes .worklane/ or scripts/bootstrap.sh (the paths filter), so it is in no required list
@@ -17,7 +21,7 @@ name: installed-engine-config
 # the check; only the step's scripts come from the base. What stops that is .github/** being owner-merged.
 on:
   pull_request:
-    types: [opened, synchronize, reopened]
+    types: [opened, synchronize, reopened, labeled, unlabeled]
     paths:
       - '.worklane/**'
       - 'scripts/bootstrap.sh'
@@ -26,6 +30,8 @@ concurrency:
   cancel-in-progress: true
 permissions:
   contents: read
+  issues: read
+  pull-requests: read
 jobs:
   installed-engine-config:
     runs-on: ubuntu-latest
@@ -42,6 +48,11 @@ jobs:
       # script it is judged by. Not this workflow file: that is the PR's own (see the header). The engine's tag is
       # fetched by the script, anonymously: the repository is public.
       - name: the changed config loads with the installed engine
+        # Read-only (the permissions above), and only for a rollback: the PR's timeline. The script takes it out of its
+        # environment before any engine's code is loaded.
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           check=scripts/ci/installed-engine-config.mjs
           if git cat-file -e "HEAD^1:$check" 2>/dev/null; then
