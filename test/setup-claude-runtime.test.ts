@@ -8,7 +8,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { accessSync, chmodSync, constants as fsConstants, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { delimiter, dirname, join } from 'node:path';
 import { BRAND } from '../src/brand.js';
@@ -405,15 +405,64 @@ test("#738: when the user service manager can't be read, the step is not done, s
   }
 });
 
-test('#738: a test process never reaches this machine\'s service manager: a recording systemctl first on PATH sees no call from any entry point', { skip: posixOnly }, async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'cr-recording-'));
-  const record = join(dir, 'calls.log');
+/**
+ * The host tools the real probe (systemProbe, doctor, the dashboard's worker) can run, besides git and the fake
+ * claude: each test that runs it with /usr/bin and /bin on PATH (for git) gets a stand-in for every one of these.
+ */
+const HOST_TOOLS = ['systemctl', 'launchctl', 'loginctl', 'gh', 'docker', 'tailscale'] as const;
+
+/**
+ * Recording stand-ins in `dir` for every HOST_TOOLS name: each call is one JSON line in `dir`'s record, and each
+ * exits 1, as a tool that can't answer. So no test here reaches this machine's own tools (rule A), whatever the
+ * engine under test does: a fail-without run against an engine without the guard included.
+ */
+function hostToolStandIns(dir: string): { calls: () => { tool: string; args: string[] }[] } {
+  const record = join(dir, 'host-tool-calls.log');
   writeFileSync(record, '');
-  writeFileSync(join(dir, 'systemctl'), `#!/bin/sh\necho "$*" >> ${JSON.stringify(record)}\nexit 1\n`);
-  chmodSync(join(dir, 'systemctl'), 0o755);
+  for (const t of HOST_TOOLS) {
+    writeFileSync(join(dir, t), `#!/usr/bin/env node\nrequire('node:fs').appendFileSync(${JSON.stringify(record)}, JSON.stringify({ tool: ${JSON.stringify(t)}, args: process.argv.slice(2) }) + '\\n');\nprocess.exit(1);\n`);
+    chmodSync(join(dir, t), 0o755);
+  }
+  return { calls: () => readFileSync(record, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l) as { tool: string; args: string[] }) };
+}
+
+/** The PATH these tests run the real probe with: the fake dir first, then node, then the system's (git). */
+const testPath = (dir: string) => [dir, dirname(process.execPath), '/usr/bin', '/bin'].join(delimiter);
+
+/** Where `name` resolves on `path`, as exec finds it: the first executable file; null when none. */
+function onPath(name: string, path: string): string | null {
+  for (const d of path.split(delimiter)) {
+    const f = join(d, name);
+    try {
+      if (statSync(f).isFile()) {
+        accessSync(f, fsConstants.X_OK);
+        return f;
+      }
+    } catch {
+      // not here
+    }
+  }
+  return null;
+}
+
+test('#738: every host tool the real probe can run resolves to the test\'s own stand-in on the PATH these tests use, never to this machine\'s', { skip: posixOnly }, () => {
+  const fake = fakeClaude();
+  const path = testPath(fake.dir);
+  for (const t of HOST_TOOLS) assert.equal(onPath(t, path), join(fake.dir, t), `${t} resolves inside the fake dir`);
+  assert.equal(onPath('claude', path), fake.bin);
+  // The check itself: a fake dir with only claude in it (as before round 5) lets a tool this machine has through.
+  const bare = mkdtempSync(join(tmpdir(), 'cr-bare-'));
+  const host = HOST_TOOLS.filter((t) => onPath(t, ['/usr/bin', '/bin'].join(delimiter)) !== null);
+  for (const t of host) assert.notEqual(onPath(t, testPath(bare)), join(bare, t), `${t}: the check sees this machine's`);
+  assert.ok(host.every((t) => onPath(t, testPath(bare))?.startsWith('/usr/bin/') || onPath(t, testPath(bare))?.startsWith('/bin/')), JSON.stringify(host));
+});
+
+test('#738: a test process never reaches this machine\'s service manager: recording stand-ins first on PATH see no manager call from any entry point', { skip: posixOnly }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'cr-recording-'));
+  const tools = hostToolStandIns(dir);
   const root = existingProject('cli');
   const ctx = setupContext(null, { mode: 'local', root, repo: REPO, instance: null, stateDir: projectStateDir(root), policyFile: null });
-  const env = { PATH: [dir, dirname(process.execPath), '/usr/bin', '/bin'].join(delimiter) };
+  const env = { PATH: testPath(dir) };
   // The OS adapter itself, the real probe, doctor (with a stand-in io and without), and the dashboard's worker.
   const direct = withEnv(env, () => serviceManagerEnv(MANAGER_LOGIN_VARS));
   assert.ok('error' in direct && /a test run never reads this machine's user service manager/.test(direct.error), JSON.stringify(direct));
@@ -428,7 +477,7 @@ test('#738: a test process never reaches this machine\'s service manager: a reco
   } finally {
     process.env.PATH = saved;
   }
-  assert.equal(readFileSync(record, 'utf8'), '', 'no systemctl call of any kind');
+  assert.deepEqual(tools.calls().filter((c) => c.tool === 'systemctl' || c.tool === 'launchctl'), [], 'no service manager call of any kind');
 });
 
 test('#738 round 3: server mode while the setup PR waits (the checkout has no valid config): a matching record reads as on main, read from credentials.yaml alone', () => {
@@ -493,7 +542,7 @@ test("#738 round 3: a key file path read back from init's state is shown only wh
 // ---------- the wizard and the runner agree, with a fake claude on PATH and a scratch HOME ----------
 
 /** A fake claude: signs in as a key in its environment would (ANTHROPIC_API_KEY, then CLAUDE_CODE_OAUTH_TOKEN), else as its home says. */
-function fakeClaude(): { dir: string; bin: string } {
+function fakeClaude(): { dir: string; bin: string; tools: ReturnType<typeof hostToolStandIns> } {
   const dir = mkdtempSync(join(tmpdir(), 'cr-fake-claude-'));
   const bin = join(dir, 'claude');
   writeFileSync(
@@ -522,7 +571,9 @@ setTimeout(() => process.exit(0), 200);
 `,
   );
   chmodSync(bin, 0o755);
-  return { dir, bin };
+  // Every host tool the real probe can run, beside the fake claude: never this machine's (rule A).
+  const tools = hostToolStandIns(dir);
+  return { dir, bin, tools };
 }
 
 const runReq = (cwd: string): RunRequest => ({ role: 'worker', prompt: 'p', cwd, model: 'm', allowedTools: [], maxTurns: 1, maxBudgetUsd: 0.01, stallMs: 30_000, timeoutMs: 30_000 });
@@ -561,6 +612,7 @@ test("#738: the step is done exactly when the local service's runs would start o
     for (const [kind, login, extra, expected, manager] of cases) await t.test(`${kind}, ${login ?? 'no login'} ${JSON.stringify(Object.keys(extra))}${manager ? ` manager ${JSON.stringify(Object.keys(manager))}` : ''}`, async () => {
       const home = mkdtempSync(join(tmpdir(), 'cr-home-'));
       mkdirSync(join(home, '.fake-claude'));
+      const callsBefore = fake.tools.calls().length;
       const managerEnv: Record<string, string> = {};
       for (const [k, v] of Object.entries(manager ?? {})) {
         if (!v.startsWith('DIR:')) managerEnv[k] = v;
@@ -580,7 +632,7 @@ test("#738: the step is done exactly when the local service's runs would start o
         shellOnly.CLAUDE_CONFIG_DIR = cfgDir;
       } else if (['plain', 'noflag', 'strflag', 'oneflag'].includes(login ?? '')) writeFileSync(join(home, '.fake-claude', login!), '1');
       else if (login) writeFileSync(join(home, '.fake-claude', 'method'), login);
-      const env: NodeJS.ProcessEnv = { PATH: [fake.dir, dirname(process.execPath), '/usr/bin', '/bin'].join(delimiter), HOME: home, [`${BRAND.envPrefix}_PREFIX`]: join(home, '.local'), ...extra, ...shellOnly };
+      const env: NodeJS.ProcessEnv = { PATH: testPath(fake.dir), HOME: home, [`${BRAND.envPrefix}_PREFIX`]: join(home, '.local'), ...extra, ...shellOnly };
       for (const k of Object.keys(process.env)) if (/^(ANTHROPIC_|CLAUDE_CODE_OAUTH_TOKEN$|CLAUDE_CONFIG_DIR$)/.test(k)) delete process.env[k];
       Object.assign(process.env, env);
       const root = existingProject(kind);
@@ -596,6 +648,7 @@ test("#738: the step is done exactly when the local service's runs would start o
       assert.equal(step.done, expected, `${label}: the step says ${step.detail}`);
       if (kind === 'cli' && login === 'claude.ai' && !manager) assert.equal(step.detail, SUBSCRIPTION_DONE, `${label}: the login the agents get, not the shell's key`);
       for (const v of Object.values(managerEnv)) if (!v.startsWith('/')) assert.ok(!step.detail.includes(v), `${label}: a manager value is never shown`);
+      assert.deepEqual(fake.tools.calls().slice(callsBefore).filter((c) => c.tool === 'systemctl' || c.tool === 'launchctl'), [], `${label}: the service manager was never asked`);
     });
   } finally {
     for (const k of Object.keys(process.env)) if (!(k in saved)) delete process.env[k];
