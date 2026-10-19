@@ -2,6 +2,18 @@
 
 Every release, newest first: the PRs merged since the previous one, and what changed in guardrails.
 
+## v0.5.4 (unreleased)
+
+### Upgrading (from v0.5.3)
+
+- **Resuming auto-merge after a red main or the main watch waits for green main (#776).** The dashboard's "Clear and resume auto-merge" (and `POST /api/auto-merge/clear`) now resumes such a stop only when the default branch's required checks all pass on its current tip, read from the remote (`git ls-remote`) and measured at that moment. Otherwise it refuses (409) and offers a separate "Acknowledge and resume anyway" with a typed reason (at least 10 visible characters; control and format characters such as zero-width or bidi are refused), recorded in `merge.resumed` and the `auto_merge.cleared` audit with who, why and what main was. Deleting `auto-merge-stopped.json` by hand no longer resumes it either while main isn't green: the coordinator writes the stop back (`merge.stopped` with `restored`). What changes on upgrade:
+  - **No `required_checks` configured means main is never measured green,** so such a stop waits until you acknowledge it on the dashboard (before, a resume never looked at main).
+  - A stop already in force from an older engine has no `by` recorded and is treated as one the default branch caused: it waits the same way.
+  - Any other stop (`by: owner`) resumes as before.
+  - A red-main stop now has its own banner on every page (`auto-merge-stopped`), with the same resume and acknowledgement as the main watch's alert; before, only the main watch's stop had a button.
+
+### Guardrail changes
+
 ## v0.5.3 (2026-10-19)
 
 ### Upgrading (from v0.5.2)
@@ -76,11 +88,6 @@ Every release, newest first: the PRs merged since the previous one, and what cha
   - `<cli> decide` now runs only as root or the coordinator user (`sudo -u wl-<name> <cli> decide <id> <option> --instance <name>`; on a local checkout, the user whose event log it is). It records the instance's owner (`owners.default`) as who answered, audited via `cli` with the OS user. Anyone else is refused and nothing is written.
 - **Money paths are read from the default branch (#715).** The `money_path_source` list is read at `origin/<default_branch>`, not the coordinator's working tree, so a path added on main since the clone counts at once. The list file itself is now a money path, so a PR that edits it waits for an owner. A coordinator that can't read the file on main fails exactly as a missing file did before. With main's config invalid or missing at start, the checkout's committed config runs, not a hand-edited working copy (the working copy only when nothing valid is committed, as on a first run).
 - **Main watch: one revert PR per trip, three a day (#602, #606).** When one cause trips several commits on an unprotected default branch, the main watch opens at most `config.yaml` `main_watch.revert_prs_per_trip` revert PRs for it (default 1), and at most `main_watch.revert_prs_per_day` (default 3) per instance in any 24 hours. A capped commit still trips: the stop and the alert are as before, and the alert says why it has no revert PR of its own. A required check with no run for `main_watch.dead_check_days` (default 7) is raised once, on the Machine page and in the ops channel.
-- **Resuming auto-merge after a red main or the main watch waits for green main (#776).** The dashboard's "Clear and resume auto-merge" (and `POST /api/auto-merge/clear`) now resumes such a stop only when the default branch's required checks all pass on its current tip, read from the remote (`git ls-remote`) and measured at that moment. Otherwise it refuses (409) and offers a separate "Acknowledge and resume anyway" with a typed reason (at least 10 visible characters; control and format characters such as zero-width or bidi are refused), recorded in `merge.resumed` and the `auto_merge.cleared` audit with who, why and what main was. Deleting `auto-merge-stopped.json` by hand no longer resumes it either while main isn't green: the coordinator writes the stop back (`merge.stopped` with `restored`). What changes on upgrade:
-  - **No `required_checks` configured means main is never measured green,** so such a stop waits until you acknowledge it on the dashboard (before, a resume never looked at main).
-  - A stop already in force from an older engine has no `by` recorded and is treated as one the default branch caused: it waits the same way.
-  - Any other stop (`by: owner`) resumes as before.
-  - A red-main stop now has its own banner on every page (`auto-merge-stopped`), with the same resume and acknowledgement as the main watch's alert; before, only the main watch's stop had a button.
 - **More changes wait for the owner in every managed repo** (the self-modification locks: #580, #584, #647, #658, #691, #765; renames and odd paths: #688; both under "Guardrail changes: what each one does"). The locks match by path, so in an app repo with its own files at a locked engine path (under `src/`, `scripts/`, `test/` or `docs/`: `src/hook.ts` and every module it imports, `src/review.ts`, `src/runner.ts`, `src/coordinator/**` and the like), PRs that touch those files now wait for the owner. **The default is to keep every lock and review those waits.** Naming a repo as a managed app is a separate loosening, root's alone to decide. It also lifts locks v0.5.2 already applied in that repo ("After install" lists them), so it is not the fix for these waits.
 
 ### After install
