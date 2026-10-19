@@ -168,7 +168,8 @@ function mockClock(t: TestContext) {
   t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 0 });
   t.mock.method(performance, 'now', () => Date.now());
   return async <T>(work: () => Promise<T>): Promise<{ value: T; ms: number }> => {
-    const t0 = Date.now();
+    // performance.now, as captureShots reads it (here the mock clock): never a wall-clock duration (#582).
+    const t0 = performance.now();
     let settled = false;
     const running = work().finally(() => (settled = true));
     running.catch(() => {}); // surfaced by the await below
@@ -179,7 +180,7 @@ function mockClock(t: TestContext) {
       t.mock.timers.tick(1);
     }
     const value = await running;
-    return { value, ms: Date.now() - t0 };
+    return { value, ms: performance.now() - t0 };
   };
 }
 
