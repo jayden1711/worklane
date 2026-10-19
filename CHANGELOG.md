@@ -11,6 +11,12 @@ Every release, newest first: the PRs merged since the previous one, and what cha
   - A writer-authored intake issue with no checked draft kept (filed by an older engine, or after the instance's state dir was wiped or moved) is worked from its body, as before this release. It doesn't get the draft's `- repro: true` unless the body has it.
 - Any issue with more than one ```` ```done_when ```` block is now refused rather than worked from the first one (#643). On upgrade, check open `ready` issues for a second block.
 
+### After install
+
+- **Install this release's updater, so updates carry on once the `desktop` check stops running (#744).** Every install so far has `desktop` in `/etc/worklane/updates.json` `required_checks`. This release's updater no longer waits for that one retired check when a commit has no run of it. While CI still has the job, every commit gets a `desktop` run, and the updater judges it exactly as before. A later release removes the desktop window and its CI job, and from then on no commit has a `desktop` run.
+  - An update never replaces the updater itself, so rerun `updates.sh` as root, once, after the install: `sudo bash /opt/worklane/current/scripts/setup/updates.sh`. It installs this release's updater and keeps `updates.json` as it is (on or off, channel and checks included).
+  - A machine whose updater predates this release keeps waiting for `desktop` once the job is gone, so it installs nothing more (fail-closed). The journal says why: `required check "desktop" hasn't run on this commit`. Rerunning `updates.sh` from this release or a later one fixes it.
+
 ### Guardrail changes
 
 - none in this release
