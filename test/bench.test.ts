@@ -357,7 +357,7 @@ test('acceptance: the bench never retries a run: a 429 at startup is one session
   const c = fakeClaude({ run: '429' });
   const lane = benchLane({ home: c.home, runtimeDir: join(c.base, 'run-user'), heldOut: join(c.base, 'held'), state: join(c.base, 'state') });
   let retried = 0;
-  const started = Date.now();
+  const started = performance.now();
   // Bounded: an engine retry would wait a minute first; this stops it after 20 s.
   const r = await benchClaude(c.env, c.bin, lane).run({ ...runReq(c.base, AbortSignal.timeout(20_000)), onTransientRetry: () => retried++ });
   assert.equal(retried, 0, 'no transient wait started');
@@ -365,7 +365,7 @@ test('acceptance: the bench never retries a run: a 429 at startup is one session
   assert.equal(r.transient, true);
   assert.match(r.detail, /429/);
   assert.equal(c.calls('run').length, 1, 'one claude session');
-  assert.ok(Date.now() - started < 15_000, 'reported at once');
+  assert.ok(performance.now() - started < 15_000, 'reported at once');
 });
 
 test('the task runner sends docker exec into its own container only, with no mount flag; containers mount nothing', () => {
