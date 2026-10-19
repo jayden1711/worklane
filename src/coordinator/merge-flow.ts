@@ -12,11 +12,13 @@ import { type CommitCheck, type DoneWhenList, type PullRequest } from '../backlo
 import type { EventPayload, StoredEvent } from '../events/types.js';
 import { writeGroupOnly } from '../os/index.js';
 import { computeLevel, loadMoneyPaths } from '../review.js';
+import { shownPaths } from '../path-text.js';
 import type { Episode } from '../fix-forward.js';
 import { instructionTargets } from '../skilleval.js';
 import { checkedPush } from '../push-check.js';
 import { conflictTrigger } from '../conflicts.js';
 import { abortMerge, mergeBaseInto } from '../merge-base.js';
+import { changedNamesOrNull } from './change-files.js';
 import { lightOutcome } from '../light-check.js';
 import { readiness, requiredOutcomes, type Readiness } from '../pr-watch.js';
 import { checksFor, effectiveClass, riskClassOf, rulesetHold } from '../pr-rules.js';
@@ -89,7 +91,8 @@ export abstract class MergeFlow extends FixRuns {
         isAncestor: (a, b) => spawnSync('git', ['merge-base', '--is-ancestor', a, b], { cwd: this.d.repo }).status === 0,
         firstParents: (from, to) => (git('rev-list', '--first-parent', '--reverse', `${from}..${to}`) ?? '').split('\n').filter(Boolean),
         subject: (sha) => git('log', '-1', '--format=%s', sha) ?? '',
-        files: (sha) => (git('diff', '--name-only', `${sha}^1`, sha) ?? '').split('\n').filter(Boolean),
+        // A rename as both its paths and a valid UTF-8 path as itself, so a locked category on either one holds (#683).
+        files: (sha) => changedNamesOrNull(this.d.repo, [`${sha}^1`, sha]) ?? [],
         diff: (sha) => git('diff', `${sha}^1`, sha) ?? '',
       },
       config: () => this.d.cfg.project.fix_forward,
@@ -1197,7 +1200,7 @@ export abstract class MergeFlow extends FixRuns {
         else if (!m.clean) {
           abortMerge(path);
           outcome = 'conflict';
-          detail = `conflicts in ${Object.keys(m.conflicted).join(', ')}`;
+          detail = `conflicts in ${shownPaths(Object.keys(m.conflicted))}`;
         } else {
           const r = await this.project(this.d.cfg.tests.runner.changed, path);
           outcome = lightOutcome({ merged: true, fastPassed: r.code === 0 });

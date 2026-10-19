@@ -25,6 +25,7 @@ import type { JournalRead } from '../superfan/digest.js';
 import type { Previews } from '../preview/previews.js';
 import { DEFAULT_GENERATED } from '../config/schema.js';
 import type { LockScope } from '../review.js';
+import { shownPath } from '../path-text.js';
 
 export interface CoordinatorDeps {
   cfg: Config;
@@ -339,7 +340,7 @@ export function evalLines(results: EventPayload<'instructions.eval'>[]): string[
       const what = r.error ? `not evaluated: ${r.error}` : `visible ${score(r.base)} → ${score(r.result)}${r.dropped ? ', **lower**' : ''}${r.incomplete ? ', incomplete (cost cap)' : ''}${changed.length ? `; ${changed.join(', ')}` : ''}`;
       const h = r.held_out;
       const held = r.error || h === undefined ? '' : h === null ? `; held-out: none${r.held_out_error ? ` (${r.held_out_error})` : ''}` : `; held-out ${score(h.base)} → ${score(h.result)}${h.dropped ? ', **lower**' : ''}${h.incomplete ? ', incomplete (cost cap)' : ''}`;
-      return `- ${r.target}: ${what}${held}${r.samples ? `, ${r.samples} sample(s) per case` : ''} (~$${r.cost_usd.toFixed(2)})`;
+      return `- ${shownPath(r.target)}: ${what}${held}${r.samples ? `, ${r.samples} sample(s) per case` : ''} (~$${r.cost_usd.toFixed(2)})`;
     }),
   ];
 }

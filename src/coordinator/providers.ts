@@ -10,6 +10,7 @@ import { flockHeld } from '../os/index.js';
 import { gatePasses, healthCheck, providerOf, providerRefusal, tierRefusal, type CliAgentName, type ProviderConfig } from '../providers.js';
 import { logRefusalOnce, providerHostRefusal } from '../provider-hosts.js';
 import { isProtectedPath } from '../guardrails/engine.js';
+import { shownPaths } from '../path-text.js';
 import type { GuardrailsConfig } from '../config/schema.js';
 import type { RunRequest } from '../runner.js';
 import type { ReviewConfig } from '../config/schema.js';
@@ -88,7 +89,7 @@ function resolveCliAgent(req: RunRequest, route: NonNullable<RunRequest['route']
  */
 export function cliChangeRefusal(o: { files: ChangeFile[]; labels: string[]; moneyPaths: () => RegExp[]; review: ReviewConfig; guardrails: Pick<GuardrailsConfig, 'protected_paths'>; scope: LockScope | undefined }): string | null {
   const touched = o.files.map((f) => f.path).filter((p) => isProtectedPath(p, o.guardrails));
-  if (touched.length) return `another vendor's CLI changed a protected path (${touched.slice(0, 3).join(', ')}), which it may never do`;
+  if (touched.length) return `another vendor's CLI changed a protected path (${shownPaths(touched.slice(0, 3))}), which it may never do`;
   const hosted = hostedChangeRefusal(o);
   if (hosted) return hosted.replace('a hosted model', "another vendor's CLI");
   let lvl: ReturnType<typeof computeLevel>;

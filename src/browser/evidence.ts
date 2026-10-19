@@ -3,6 +3,7 @@
 // the recorded evidence alone; bounded, so a noisy app can't flood the description.
 import { basename } from 'node:path';
 import type { BrowserGate } from './gate.js';
+import { shownPath } from '../path-text.js';
 import type { BrowserCheckResult } from './check.js';
 import type { FlowEvidence, ShotView } from './run.js';
 
@@ -35,7 +36,7 @@ function listed<T>(label: string, items: T[], line: (x: T) => string): string[] 
  */
 export function browserEvidenceLines(o: { gate: BrowserGate; runs: { result: BrowserCheckResult; before?: FlowEvidence | null; base?: string; baselineUnavailable?: string }[] }): string[] {
   const out = ['### BROWSER CHECKS', `- Why: ${plain(o.gate.reason, 300)}`];
-  if (o.gate.uiFiles.length) out.push(`- UI files touched: ${o.gate.uiFiles.map((f) => `\`${plain(f, 120)}\``).join(', ')}`);
+  if (o.gate.uiFiles.length) out.push(`- UI files touched: ${o.gate.uiFiles.map((f) => `\`${plain(shownPath(f), 120)}\``).join(', ')}`);
   if (!o.gate.flows.length) return out;
   for (const { result: r, before, base, baselineUnavailable } of o.runs) {
     out.push(`- \`${plain(r.check, 80)}\`: ${r.status}`);

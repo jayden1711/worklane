@@ -16,6 +16,7 @@ import type { EventPayload, EventType } from './events/types.js';
 import { globToRegExp } from './guardrails/glob.js';
 import { isProtectedPath } from './guardrails/engine.js';
 import { computeLevel, loadMoneyPaths, type ChangeFile, type Level } from './review.js';
+import { shownPath, shownPaths } from './path-text.js';
 import { changeContext, investigationContext, summaryContext } from './decision-context.js';
 import { oneParagraph, RISK_CLASSES, sizeFiles, sizeVerdict, type RiskClass } from './pr-rules.js';
 import { evalLevel, judge } from './coordinator/eval-routing.js';
@@ -40,6 +41,7 @@ import { DEFAULT_HOTSPOTS, estimateFiles, fileIndex, holdReason, hotspotsIn, pic
 import { TaskGraph } from './coordinator/task-graph.js';
 import { bodyHash, childBody, GOAL_LABEL, GOAL_SPLIT_LABEL, GOAL_SPLIT_SCHEMA, readGoalSplit, splitComment } from './goal-split.js';
 import { changedFiles } from './merge-base.js';
+import { changedNames, diffStatText, rawChanges, untrackedNames } from './coordinator/change-files.js';
 import { importsOf, lightCheckPlan, lightCheckWait } from './light-check.js';
 import { readRun, runsForIssue } from './run-record.js';
 import { claimsOf, unbackedClaims, type CheckRecord } from './receipts.js';
@@ -98,9 +100,6 @@ type BuildOut = { stop: true } | { stop: false; stuck?: string; raise?: Level; n
 
 /** A failed worker run shorter than this that committed nothing never got to work. */
 export const STARTUP_FAILURE_SECS = 90;
-
-/** git's output as is (a -z listing keeps its NULs). */
-const execGit = (cwd: string, args: string[]) => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 64 * 1024 * 1024 });
 
 export class Coordinator extends AutomationRuns {
   // ---------------------------------------------------------------- tick
@@ -1090,7 +1089,7 @@ export class Coordinator extends AutomationRuns {
           lvl.reasons.push('the evaluator rejected the patch: held for the owner (safety floor)');
         }
         if (plan && (await this.planObjected(n, owner, planComments))) return;
-        this.emit('review.level_set', { issue: n, head, level: lvl.level, reasons: [...lvl.reasons, ...(verdict.unread.length ? [`evaluator did not read: ${verdict.unread.slice(0, 10).join(', ')}${verdict.unread.length > 10 ? ` and ${verdict.unread.length - 10} more` : ''}`] : []), ...change.tampered.map((t) => `tamper guard: ${t}`), ...(repro?.unavailable ? [`no reproduction: ${repro.unavailable}`] : [])] });
+        this.emit('review.level_set', { issue: n, head, level: lvl.level, reasons: [...lvl.reasons, ...(verdict.unread.length ? [`evaluator did not read: ${shownPaths(verdict.unread.slice(0, 10))}${verdict.unread.length > 10 ? ` and ${verdict.unread.length - 10} more` : ''}`] : []), ...change.tampered.map((t) => `tamper guard: ${t}`), ...(repro?.unavailable ? [`no reproduction: ${repro.unavailable}`] : [])] });
         await this.d.backlog.removeLabel(n, 'agent:working');
         await this.d.backlog.addLabels(n, ['in-review', `review:${lvl.level}`]);
         if (lvl.level === 'L3') {
@@ -1172,7 +1171,7 @@ export class Coordinator extends AutomationRuns {
     const earlier = sinceReset(this.events(n)).filter((e) => e.type === 'attempt.failed').map((e) => (e.payload as { fingerprint: string }).fingerprint).slice(0, -1);
     let changed = '';
     try {
-      changed = this.git(path, 'diff', '--stat', start).slice(0, 3000);
+      changed = diffStatText(path, start).slice(0, 3000);
     } catch {
       // no diff to show: the brief says so
     }
@@ -1288,8 +1287,8 @@ export class Coordinator extends AutomationRuns {
       };
       if (r.reason !== 'succeeded' || !s) return unavailable(`evaluator run ${r.reason}`);
       if (s.not_reproducible || !s.test_path) return unavailable(s.not_reproducible ?? 'no test path');
-      const changed = this.git(path, 'diff', '--name-only', base).split('\n').filter(Boolean).concat(this.git(path, 'ls-files', '--others', '--exclude-standard').split('\n').filter(Boolean));
-      if (changed.some((f) => f !== s.test_path)) return unavailable(`repro run changed more than the test: ${changed.join(', ')}`);
+      const changed = changedNames(path, [base]).concat(untrackedNames(path));
+      if (changed.some((f) => f !== s.test_path)) return unavailable(`repro run changed more than the test: ${shownPaths(changed)}`);
       if (!existsSync(join(path, s.test_path))) return unavailable(`test ${s.test_path} not found`);
       const one = this.d.cfg.tests.runner.one;
       if (!one) return unavailable('tests.yaml runner.one is not set');
@@ -1478,7 +1477,7 @@ export class Coordinator extends AutomationRuns {
       const baseText = at(base, t.file) ?? builtIn;
       const headText = at(head, t.file) ?? builtIn;
       if (headText === null) {
-        record({ ...none, error: `${t.file} is removed; nothing to evaluate` });
+        record({ ...none, error: `${shownPath(t.file)} is removed; nothing to evaluate` });
         continue;
       }
       const casesMd = at(head, t.cases) ?? at(base, t.cases) ?? (t.role ? engineRoleCases(t.role) : null);
@@ -1510,18 +1509,21 @@ export class Coordinator extends AutomationRuns {
       } catch {
         // deleted
       }
-      if (blob !== repro.hash) return { rejected: `modified the frozen reproduction test ${repro.path}` };
+      if (blob !== repro.hash) return { rejected: `modified the frozen reproduction test ${shownPath(repro.path)}` };
     }
     if (this.git(path, 'status', '--porcelain')) return { rejected: 'uncommitted changes left in the worktree; commit your work' };
     // Every commit carries the harness identity: an agent never commits as a person (or anyone else).
     const id = this.identity;
     const strangers = this.git(path, 'log', '--format=%h %an <%ae> / %cn <%ce>', `${base}..${head}`).split('\n').filter(Boolean).filter((l) => !l.endsWith(` ${id.name} <${id.email}> / ${id.name} <${id.email}>`));
     if (strangers.length) return { rejected: `commits must carry the harness identity ${id.name} <${id.email}>, which your environment already sets; never set GIT_AUTHOR_*/GIT_COMMITTER_*, user.name/user.email or --author. Recommit these without an identity of your own: ${strangers.slice(0, 5).join('; ')}` };
-    const names = this.git(path, 'diff', '--name-only', `${base}..${head}`).split('\n').filter(Boolean);
+    // A rename as both its paths, so moving a protected file away is still a change to it; a valid UTF-8 path as
+    // itself, so `.claude/agents/naïve.md` is protected and not the quoted string git would print without -z (any
+    // other name keeps its ASCII directories, its bad bytes read as U+FFFD) (#683).
+    const names = changedNames(path, [`${base}..${head}`]);
     const workerFiles = repro?.path ? names.filter((f) => f !== repro.path) : names;
     if (!workerFiles.length) return { rejected: 'no changes committed' };
     const prot = names.filter((f) => isProtectedPath(f, this.d.cfg.guardrails));
-    if (prot.length) return { rejected: `changes protected harness files: ${prot.join(', ')}` };
+    if (prot.length) return { rejected: `changes protected harness files: ${shownPaths(prot)}` };
     const scan = await scanRange(path, `${base}..${head}`);
     if (scan.status === 'leaks') return { rejected: `secret scan found ${scan.findings.length} possible secret(s) in the change` };
     if (scan.status === 'unavailable') return { rejected: `secret scan could not run (${scan.error}); not accepting an unscanned change` };
@@ -1548,9 +1550,10 @@ export class Coordinator extends AutomationRuns {
       } catch {
         // new file
       }
-      if (before !== null && after === null) tampered.push(`deleted test ${f.path}`);
-      if (after !== null && /\.(skip|only|todo)\s*\(|\bxit\s*\(|\bxdescribe\s*\(/.test((f.addedLines ?? []).join('\n'))) tampered.push(`skipped/focused tests in ${f.path}`);
-      if (before !== null && after !== null && countAssertions(after, pattern) < countAssertions(before, pattern)) tampered.push(`fewer assertions in ${f.path}`);
+      // Text for the owner, events and the evaluator: the path as shownPath shows it (#683).
+      if (before !== null && after === null) tampered.push(`deleted test ${shownPath(f.path)}`);
+      if (after !== null && /\.(skip|only|todo)\s*\(|\bxit\s*\(|\bxdescribe\s*\(/.test((f.addedLines ?? []).join('\n'))) tampered.push(`skipped/focused tests in ${shownPath(f.path)}`);
+      if (before !== null && after !== null && countAssertions(after, pattern) < countAssertions(before, pattern)) tampered.push(`fewer assertions in ${shownPath(f.path)}`);
     }
     const added = files.reduce((s, f) => s + f.added, 0);
     const removed = files.reduce((s, f) => s + f.removed, 0);
@@ -1817,10 +1820,11 @@ export class Coordinator extends AutomationRuns {
     const mb = this.gitOrNull(this.d.repo, 'merge-base', pr.headSha, mainSha);
     if (!mb) return { hold: `can't find where this PR branched from ${baseRef}, so the combination can't be checked` };
     const mainChanged = mb === mainSha ? [] : changedFiles(this.d.repo, mb, mainSha);
-    const prFiles = this.git(this.d.repo, 'diff', '--name-only', mb, pr.headSha).split('\n').filter(Boolean);
+    const prFiles = changedNames(this.d.repo, [mb, pr.headSha]);
     const imports: Record<string, string[]> = {};
     if (mainChanged.length) {
-      const tree = new Set(this.git(this.d.repo, 'ls-tree', '-r', '--name-only', pr.headSha).split('\n').filter(Boolean));
+      // -z, as prFiles: a valid UTF-8 path as itself, so an import of a file with an odd byte in its name still resolves.
+      const tree = new Set(execFileSync('git', ['ls-tree', '-r', '-z', '--name-only', pr.headSha], { cwd: this.d.repo, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 256 * 1024 * 1024 }).split('\0').filter(Boolean));
       for (const f of prFiles) {
         if (!/\.((m|c)?(j|t)sx?|py)$/.test(f)) continue;
         const r = spawnSync('git', ['show', `${pr.headSha}:${f}`], { cwd: this.d.repo, encoding: 'utf8' });
@@ -1835,7 +1839,7 @@ export class Coordinator extends AutomationRuns {
       .filter((p) => p.number === number && p.head === pr.headSha && p.main_sha === mainSha)
       .at(-1);
     if (done?.outcome === 'merge') return 'merge';
-    if (done?.outcome === 'hold') return { hold: `combined with ${baseRef} at ${mainSha.slice(0, 8)} (which changed ${plan.overlap.slice(0, 3).join(', ')}), the fast tests fail: ${done.detail.split('\n').filter(Boolean).slice(-3).join(' / ').slice(0, 400)}` };
+    if (done?.outcome === 'hold') return { hold: `combined with ${baseRef} at ${mainSha.slice(0, 8)} (which changed ${shownPaths(plan.overlap.slice(0, 3))}), the fast tests fail: ${done.detail.split('\n').filter(Boolean).slice(-3).join(' / ').slice(0, 400)}` };
     if (done?.outcome === 'conflict') return 'conflict'; // GitHub should report it next, and the conflict path take it (capped in mergeOrWait)
     if (!this.lightRunning.has(number) && !this.active.has(w.issue)) {
       // Debounced: a burst of moves of main checks at most twice, then the newest main once the window allows.
@@ -1958,7 +1962,7 @@ export class Coordinator extends AutomationRuns {
         this.git(path, 'add', '-A');
         const tree = this.git(path, 'write-tree');
         const commit = this.git(path, '-c', `user.name=${BRAND.cli}`, '-c', `user.email=${BRAND.cli}@localhost`, 'commit-tree', tree, '-p', parent, '-m', message);
-        return { commit, raw: execGit(path, ['diff', '--raw', '-z', '--no-renames', parent, commit]) };
+        return { commit, raw: rawChanges(path, [parent, commit]) };
       },
       bundle: (ref, commit) => {
         this.git(this.d.repo, 'update-ref', ref, commit);

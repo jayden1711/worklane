@@ -15,7 +15,8 @@
 // Budget: `daily_budget_usd` a day (UTC), its own, besides the instance's daily budget its runs also count against.
 // At 85% it says so once; at 100% it says so once and neither runs nor posts again until the next day.
 import { createHash } from 'node:crypto';
-import { readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
+import { writeSlotFile } from '../slot-file.js';
 import { buildDigest, type Cursor, type DigestItem, type DigestSources } from './digest.js';
 
 /** intake.yaml `superfan`, as the schema leaves it (src/intake/report.ts). */
@@ -65,15 +66,9 @@ export function readState(file: string, day: string): SuperfanState {
   }
 }
 
+/** The machine superfan's state is in the slot dir; an instance's, in its state dir. */
 function writeState(file: string, s: SuperfanState, mode: number) {
-  const tmp = `${file}.${process.pid}.tmp`;
-  try {
-    writeFileSync(tmp, JSON.stringify(s), { mode });
-    renameSync(tmp, file);
-  } catch (e) {
-    rmSync(tmp, { force: true });
-    throw e;
-  }
+  writeSlotFile(file, JSON.stringify(s), { mode });
 }
 
 export const VERDICT_SCHEMA = {
