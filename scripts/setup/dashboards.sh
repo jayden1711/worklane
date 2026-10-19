@@ -22,7 +22,7 @@
 #
 #   bash scripts/setup/dashboards.sh --setup --public-url https://<machine>.<tailnet>.ts.net      (first, once)
 #   bash scripts/setup/dashboards.sh --setup --loopback          (first, before the machine has an https origin)
-#   bash scripts/setup/dashboards.sh [--machine-owner <login>[,<login>...]] [--machine-devices <tags,names>] [--siri] [--client-id <id> --public-url https://<machine>.<tailnet>.ts.net] <name> [<name>...]
+#   bash scripts/setup/dashboards.sh [--machine-owner <login>[,<login>...]] [--machine-devices <tags,names>] [--siri] [--hooks] [--client-id <id> --public-url https://<machine>.<tailnet>.ts.net] <name> [<name>...]
 #
 #   --setup: before the sign-in App exists (the hub can't start without it). Starts the hub in setup mode
 #     (worklane-dashboard-hub-setup.service, as wl-dash, loopback port 4399, no instances): one page that makes the
@@ -68,7 +68,7 @@
 # Then: tailscale serve --bg --https=443 http://127.0.0.1:4399 (docs/dashboard.md).
 source "$(dirname "$0")/lib.sh"
 as_root "$@"
-usage="usage: dashboards.sh --setup (--public-url https://<machine>.<tailnet>.ts.net | --loopback) | dashboards.sh [--machine-owner <login>[,<login>...]] [--machine-devices <tags,names>] [--siri] [--hooks] [--client-id <sign-in App client id> --public-url https://<machine>.<tailnet>.ts.net] <name> [<name>...] | dashboards.sh --no-instances [--client-id <id> --public-url <url>]"
+usage="usage: dashboards.sh --setup (--public-url https://<machine>.<tailnet>.ts.net | --loopback) | dashboards.sh [--machine-owner <login>[,<login>...]] [--machine-devices <tags,names>] [--siri] [--hooks] [--client-id <sign-in App client id> --public-url https://<machine>.<tailnet>.ts.net] <name> [<name>...] | dashboards.sh [--machine-devices <tags,names>] [--siri] [--hooks] --no-instances [--client-id <id> --public-url <url>]"
 client_id="" public_url="" console_user="" machine_devices="" machine_owner="" machine_owner_set="" setup="" no_instances="" loopback="" siri="" hooks=""
 while [ "$#" -gt 0 ]; do
   case "$1" in

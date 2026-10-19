@@ -108,6 +108,25 @@ test("every section of the repo's CHANGELOG.md keeps its hand-written text when 
   }
 });
 
+/** The lines of a CHANGELOG's v<version> section that `release.mjs changelog` (withSection) would drop. */
+function droppedByRelease(text: string, version: string): string[] {
+  const after = c.sectionFor(c.withSection(text, version, c.changelogSection(version, '2026-12-31', [{ number: 1, title: 'A PR' }])), version)!.split('\n');
+  return c.sectionFor(text, version)!.split('\n').slice(1).filter((l) => l.trim() && !after.includes(l));
+}
+
+test('an unreleased section is all hand-written, so the release keeps every line of it, under any heading', () => {
+  // WHY: the check above reads only the lines above the first generated heading. Notes written by hand under a
+  // heading the tool also writes ("### Guardrail changes") sat below it, unchecked, and the release dropped them.
+  const unreleased = '# Changelog\n\n## v9.9.9 (unreleased)\n\n### Upgrading\n\n- a step\n\n### Guardrail changes\n\n- a hand-written guardrail note\n\n## v9.9.8 (2026-01-01)\n\n### Features\n\n- old (#1)\n';
+  assert.deepEqual(droppedByRelease(unreleased, '9.9.9'), ['- a hand-written guardrail note'], 'the fixture shows the drop this test exists for');
+  const fixed = unreleased.replace('### Guardrail changes\n', '### Guardrail changes: what each one does\n').replace('note\n\n## v9.9.8', 'note\n\n### Guardrail changes\n\n## v9.9.8');
+  assert.deepEqual(droppedByRelease(fixed, '9.9.9'), [], 'notes under a heading the tool never writes, ended by an empty generated heading, are all kept');
+  const text = readFileSync(join(repoRoot, 'CHANGELOG.md'), 'utf8');
+  for (const [, v] of text.matchAll(/^## v(\d+\.\d+\.\d+) \(unreleased\)/gm)) {
+    assert.deepEqual(droppedByRelease(text, v!), [], `v${v} (unreleased): the release would drop these lines; put them above the first "### Features", "### Fixes", "### Security and guardrails", "### Reverted in this release" or "### Guardrail changes" heading`);
+  }
+});
+
 test('a release section: each group, then guardrail changes with their files; written first in CHANGELOG.md, replacing a section of the same version', () => {
   const prs: Pr[] = [
     { number: 10, title: 'Dashboard: a chat panel (#10)', files: ['web/src/x.tsx'] },

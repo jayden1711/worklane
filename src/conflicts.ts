@@ -3,6 +3,7 @@
 // resolve only the conflicted hunks (knowing what both sides meant), and send
 // the result through the normal pipeline. These are the pure decisions; the
 // coordinator does the git work and the runs.
+import { shownPath } from './path-text.js';
 
 /** What to do about a PR's merge state. Only a real conflict starts a fix; "still computing" is polled again soon. */
 export type ConflictTrigger = { act: 'fix' } | { act: 'recheck'; why: string } | { act: 'none'; why: string };
@@ -104,21 +105,22 @@ export function conflictBrief(o: { baseRef: string; baseSha: string; strategy: '
 /**
  * Whether the resolution changed anything outside the conflicted hunks. `conflicted`: each conflicted file's
  * text with markers, as the merge left it. `resolved`: the same files after the fix. `otherChanged`: files
- * the fix changed that the merge had already merged cleanly (any is outside). Returns what was touched outside.
+ * the fix changed that the merge had already merged cleanly (any is outside). Returns what was touched outside, as
+ * text for the hold comment: each path as shownPath shows it (#683).
  */
 export function outsideHunks(conflicted: Record<string, string>, resolved: Record<string, string | null>, otherChanged: string[]): string[] {
-  const out = otherChanged.map((f) => `${f} (merged cleanly, then changed)`);
+  const out = otherChanged.map((f) => `${shownPath(f)} (merged cleanly, then changed)`);
   for (const [file, text] of Object.entries(conflicted)) {
     const after = resolved[file];
     if (after === null || after === undefined) {
-      out.push(`${file} (deleted)`);
+      out.push(`${shownPath(file)} (deleted)`);
       continue;
     }
     // Compared line by line with line endings dropped, so a CRLF file (or a resolution that wrote LF into one)
     // is judged on its content.
     const lines = linesOf(after);
     if (lines.some((l) => /^(<<<<<<<|>>>>>>>|\|\|\|\|\|\|\|)/.test(l) || l === '=======')) {
-      out.push(`${file} (conflict markers left)`);
+      out.push(`${shownPath(file)} (conflict markers left)`);
       continue;
     }
     // The merged lines outside the hunks, in order: the first run must open the resolution, the last close it,
@@ -149,9 +151,19 @@ export function outsideHunks(conflicted: Record<string, string>, resolved: Recor
     }
     if (pieces.length === 1) ok = lines.length === first.length && same(0, first);
     else if (ok) ok = lines.length - last.length >= at && same(lines.length - last.length, last);
-    if (!ok) out.push(`${file} (lines outside the conflicted hunks changed)`);
+    if (!ok) out.push(`${shownPath(file)} (lines outside the conflicted hunks changed)`);
   }
   return out;
+}
+
+/**
+ * The PR comment after a conflict fix pushed: which files conflicted (each as shownPath shows it, #683), what the fix
+ * pushed, and why it waits for a human, if it does (conflictWaitReasons).
+ */
+export function conflictFixComment(o: { cli: string; baseRef: string; baseSha: string; files: string[]; attempt: number; head: string; summary: string; reasons: string[] }): string {
+  const where = o.files.length ? ` in ${o.files.map(shownPath).join(', ')}` : '';
+  const waits = o.reasons.length ? `\n\nThis one waits for a human: ${o.reasons.join('; ')}.` : '';
+  return `[${o.cli}] Conflicted with ${o.baseRef} (\`${o.baseSha.slice(0, 8)}\`)${where}. Conflict fix ${o.attempt} merged it in and pushed \`${o.head.slice(0, 8)}\`: ${o.summary}${waits}`;
 }
 
 /** Why a resolved PR waits for the owner instead of auto-merging (empty: the merge policy decides as usual). */

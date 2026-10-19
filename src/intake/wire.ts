@@ -9,6 +9,7 @@ import { readFileSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { cachedRoles, repoPermission, type RoleOf } from '../dashboard-auth.js';
 import { slotsDir } from '../os/index.js';
+import type { SlotPathLike } from '../slot-file.js';
 import { INTAKE_FILE, loadIntakeConfig } from './config.js';
 import { claimDiscord } from './discord-claims.js';
 import { identifyGate, sessionStartLimit } from './discord-gate.js';
@@ -108,7 +109,7 @@ export function intakeForInstance(o: {
   /** Where every instance's home is (the clash check reads their intake.yaml); default the home's parent. */
   instancesDir?: string;
   /** The machine-wide directory for the identify gate and the bots' claims; default the agent slot directory. */
-  machineDir?: string;
+  machineDir?: SlotPathLike;
   /** Tests: the adapter's socket, fetch and timers, the gate's clock, and roles. */
   discord?: Pick<DiscordOptions, 'connect' | 'fetch' | 'setInterval' | 'clearInterval' | 'setTimeout'> & { now?: () => number; sleep?: (ms: number) => Promise<void>; alive?: (pid: number) => boolean };
   roleOf?: RoleOf;

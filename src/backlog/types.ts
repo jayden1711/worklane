@@ -99,6 +99,15 @@ export interface PullRequest {
   mergeable: boolean | null;
   /** clean | unstable | has_hooks | dirty (conflicts) | behind | blocked | draft | unknown */
   mergeableState: string;
+  /** A merged PR's merge commit, as GitHub reports it (merge_commit_sha); absent while it isn't merged. */
+  mergeCommit?: string;
+  /**
+   * Who merged it, as GitHub reports it (merged_by): a login, whether that account is a bot (an App), and its numeric
+   * user id (absent when GitHub gave none).
+   */
+  mergedBy?: { login: string; bot: boolean; id?: number };
+  /** When GitHub merged it (merged_at); absent while it isn't merged, or when GitHub gave none. */
+  mergedAt?: string;
   /** Its size and conversation as the tracker reports them (lines added and removed, files, comments and review comments); absent when it doesn't. */
   stats?: { additions: number; deletions: number; files: number; comments: number };
 }

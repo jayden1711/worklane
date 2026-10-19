@@ -86,6 +86,9 @@ export const CommentPolicyConfig = z
   })
   .prefault({});
 
+/** #727: config.yaml required_check_sources, by check name: an App id or an Actions workflow file. */
+const CHECK_SOURCES = z.record(z.string().min(1), z.union([z.strictObject({ app_id: z.number().int().positive() }), z.strictObject({ workflow: z.string().regex(/^\.github\/workflows\/[^/]+\.ya?ml$/) })]));
+
 export const ProjectConfig = z.strictObject({
   version: z.literal(1),
   project: z.strictObject({
@@ -125,9 +128,15 @@ export const ProjectConfig = z.strictObject({
    * block that pins them): src/check-source.ts.
    */
   required_check_sources: z.preprocess(
-    // WHY: a record drops a "__proto__" key, which would leave that check judged by name: refused instead.
-    (v) => (v && typeof v === 'object' && Object.hasOwn(v, '__proto__') ? 'a check named __proto__ cannot be pinned' : v),
-    z.record(z.string().min(1), z.union([z.strictObject({ app_id: z.number().int().positive() }), z.strictObject({ workflow: z.string().regex(/^\.github\/workflows\/[^/]+\.ya?ml$/) })])).default({}),
+    // WHY: a record drops some keys (the prototype's own name, as YAML or JSON parse it), which would leave that check
+    // judged by name: any key the record would drop is refused instead. Found by parsing, not by naming the key.
+    (v) => {
+      if (!v || typeof v !== 'object') return v;
+      const kept = CHECK_SOURCES.safeParse(v);
+      const lost = kept.success ? Object.keys(v).filter((k) => !Object.hasOwn(kept.data, k)) : [];
+      return lost.length ? `a check named ${lost.map((k) => JSON.stringify(k)).join(', ')} cannot be pinned` : v;
+    },
+    CHECK_SOURCES.default({}),
   ),
   /**
    * WHY (#469): which CI judges a PR. `github` (absent: the same): the required_checks above, as GitHub reports them.

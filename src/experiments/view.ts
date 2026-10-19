@@ -7,6 +7,7 @@ import { execFileSync } from 'node:child_process';
 import type { Role } from '../dashboard-auth.js';
 import type { EventLog } from '../events/log.js';
 import type { EventPayload, StoredEvent } from '../events/types.js';
+import { commitText } from '../coordinator/change-files.js';
 import { currentPin, readStudies, usedBy } from '../coordinator/experiments.js';
 import { BRAND } from '../brand.js';
 import { rootRefusal } from './approval.js';
@@ -59,7 +60,7 @@ const show = (repo: string) => (commit: string, path: string) => {
 const diffOf = (repo: string, commit: string | null): string[] => {
   if (!commit) return [];
   try {
-    return execFileSync('git', ['show', '--stat', '--patch', '--format=commit %H', commit], { cwd: repo, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: 16 * 1024 * 1024 }).split('\n').slice(0, 120);
+    return commitText(repo, commit).split('\n').slice(0, 120);
   } catch {
     return [`(the commit ${commit.slice(0, 12)} isn't in this checkout)`];
   }

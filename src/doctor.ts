@@ -11,7 +11,7 @@ import { ConfigInvalid, loadConfig, type Config } from './config/load.js';
 import { checkGuardrails } from './guardrails/check.js';
 import { loadFingerprintSets } from './guardrails/context.js';
 import { agentSettingsPath, hookChecks, installCommand, legacyProjectHooks, projectSettingsRefusal, type Settings } from './agent-settings.js';
-import { GIT_HOOK_MARKER } from './install.js';
+import { GIT_HOOK_MARKER, legacyHookChecks } from './install.js';
 import { instancesDir, loadInstance, policiesForRepo, policyViolations, readPolicy } from './instance.js';
 import { instanceTargets, planMigrations, projectConfigFiles, type Targets } from './migrations.js';
 import { projectStateDir } from './guardrails/context.js';
@@ -155,6 +155,7 @@ export function doctor(rootArg: string, opts: { agentshield?: boolean; /** A pol
       continue;
     }
     for (const c of hookChecks(s)) add(`agent hook ${name} ${c.event}`, c.ok ? 'ok' : 'fail', c.ok ? `${c.detail}, for agent runs only (${file})` : c.detail);
+    for (const c of legacyHookChecks(s, name, root)) add(c.name, c.level, c.detail);
     if (s.disableAllHooks !== false) add(`agent hooks ${name}`, 'fail', 'disableAllHooks is not pinned to false: a project file could turn the hooks off');
     const refusal = projectSettingsRefusal(root, s);
     if (refusal) add(`project settings`, 'fail', `${name}'s agent runs won't start: ${refusal}`);

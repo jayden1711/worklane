@@ -15,7 +15,7 @@
 // Budget: `daily_budget_usd` a day (UTC), its own, besides the instance's daily budget its runs also count against.
 // At 85% it says so once; at 100% it says so once and neither runs nor posts again until the next day.
 import { createHash } from 'node:crypto';
-import { readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { readSlotFile, writeSlotFile, type SlotPathLike } from '../slot-file.js';
 import { buildDigest, type Cursor, type DigestItem, type DigestSources } from './digest.js';
 
 /** intake.yaml `superfan`, as the schema leaves it (src/intake/report.ts). */
@@ -54,9 +54,9 @@ export interface SuperfanState {
 
 const empty = (day: string): SuperfanState => ({ cursor: null, lastPassAt: null, day, spentUsd: 0, alerted85: false, stopNoticed: false, posted: [], postShapes: [], filed: [] });
 
-export function readState(file: string, day: string): SuperfanState {
+export function readState(file: SlotPathLike, day: string): SuperfanState {
   try {
-    const j = JSON.parse(readFileSync(file, 'utf8')) as Partial<SuperfanState>;
+    const j = JSON.parse(readSlotFile(file)) as Partial<SuperfanState>;
     const s = { ...empty(day), ...j };
     // A new day: the budget and its notices start again; what was posted is still remembered.
     return s.day === day ? s : { ...s, day, spentUsd: 0, alerted85: false, stopNoticed: false };
@@ -65,15 +65,9 @@ export function readState(file: string, day: string): SuperfanState {
   }
 }
 
-function writeState(file: string, s: SuperfanState, mode: number) {
-  const tmp = `${file}.${process.pid}.tmp`;
-  try {
-    writeFileSync(tmp, JSON.stringify(s), { mode });
-    renameSync(tmp, file);
-  } catch (e) {
-    rmSync(tmp, { force: true });
-    throw e;
-  }
+/** The machine superfan's state is in the slot dir; an instance's, in its state dir. */
+function writeState(file: SlotPathLike, s: SuperfanState, mode: number) {
+  writeSlotFile(file, JSON.stringify(s), { mode });
 }
 
 export const VERDICT_SCHEMA = {
@@ -151,7 +145,7 @@ export interface SuperfanDeps {
   scope: 'instance' | 'machine';
   /** What it watches, in its posts and prompt: "instance <name>", "the machine's engine and updater". */
   watching: string;
-  stateFile: string;
+  stateFile: SlotPathLike;
   /** The state file's mode: 0o600 for an instance's, 0o660 for the machine's (in the shared slot directory). */
   stateMode?: number;
   settings: SuperfanSettings;
