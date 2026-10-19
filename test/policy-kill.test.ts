@@ -661,7 +661,7 @@ test("a forward record that can't be read, or names no other instance, is never 
     const { T } = renameDir('badrec');
     writeFileSync(join(T, 'recg.auto-merge-spare'), '');
     make(join(T, 'recg.rename-to'));
-    const r = offOnFullDisk('recg', { presence: () => 'exists', markerDir: T });
+    const r = offOnFullDisk('recg', { uid: () => me, presence: () => 'exists', markerDir: T });
     assert.ok(r instanceof Error && /recg\.rename-to can't be used/.test(r.message), `${what}: got ${String(r)}`);
     assert.equal(autoMergeKilled('recg', T), true, `${what}: the name given is armed all the same`);
   }
