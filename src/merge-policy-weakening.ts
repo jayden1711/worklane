@@ -264,6 +264,24 @@ const ASSET = /\.(?:png|jpe?g|gif|webp|avif|ico|bmp|tiff?|pdf|zip|gz|tgz|bz2|xz|
 const TEST_CODE = /\.(?:[cm]?[jt]sx?|py|go|rb|rs|java|kt|swift|php|cs|bats)$/;
 /** A test file's name from its first `.test.`/`.spec.` on (`.test.ts`), or its extension: what a runner selects it by. */
 const runnerSuffix = (p: string) => /(\.(?:test|spec)\..*|\.[^./]*)$/.exec(p.slice(p.lastIndexOf('/') + 1))?.[1] ?? '';
+/**
+ * The file names each runner selects by default: jest, vitest, mocha and node (`*.test.ts`, `*.spec.js`), pytest
+ * (`test_*.py`, `*_test.py`), go test, rspec and minitest, Surefire (`Test*.java`, `*Test.java`, `*Tests.java`,
+ * `*TestCase.java`, and Kotlin's), xUnit, XCTest and bats. A rename keeps a test running only within one of them.
+ */
+const RUNNER_NAMES: readonly RegExp[] = [
+  /\.(?:test|spec)\.[cm]?[jt]sx?$/, /^test_.*\.py$/, /_test\.py$/, /_test\.go$/, /_spec\.rb$/, /_test\.rb$/, /^test_.*\.rb$/,
+  /^Test.*\.(?:java|kt)$/, /Tests?\.(?:java|kt)$/, /TestCase\.(?:java|kt)$/, /Tests?\.cs$/, /Tests?\.swift$/, /\.bats$/,
+];
+const runnerOf = (p: string) => RUNNER_NAMES.findIndex((re) => re.test(p.slice(p.lastIndexOf('/') + 1)));
+/** The path up to its first test folder (`test/`, `tests/`, `spec/`, `Tests/`, `__tests__/`), or '' with none. */
+const testRoot = (p: string) => {
+  const parts = p.split('/');
+  const at = parts.findIndex((s, k) => k < parts.length - 1 && ['test', 'tests', 'spec', 'Tests', '__tests__'].includes(s));
+  return at === -1 ? '' : parts.slice(0, at + 1).join('/');
+};
+/** A folder a runner doesn't run tests from: fixtures, snapshots, test data, docs. */
+const NOT_RUN = /(?:^|\/)(?:fixtures|__fixtures__|__snapshots__|testdata|docs)\//;
 /** An expected output or fixture, whatever its extension. */
 const isFixture = (p: string) => /(?:^|\/)(?:fixtures|__snapshots__|testdata)\//.test(p) || p.endsWith('.snap') || !TEST_CODE.test(p);
 
@@ -346,10 +364,9 @@ const brackets = (l: string, set: string) => [...l].filter((c) => set.includes(c
  */
 export function tableLines(text: string, table: string): string[] | null {
   const lines = text.split('\n');
-  const declares = (l: string) => {
-    const t = l.trimStart().replace(/^export /, '');
-    return [`const ${table}`, `let ${table}`, `"${table}":`].some((h) => t.startsWith(h) && !/[\w$]/.test(t.charAt(h.length)));
-  };
+  // `const`, `let` or `var` with any spacing, or a JSON key; table names are plain identifiers.
+  const head = new RegExp(`^(?:export\\s+)?(?:(?:const|let|var)\\s+${table}|"${table}"\\s*:)(?![\\w$])`);
+  const declares = (l: string) => head.test(l.trimStart());
   const starts = lines.flatMap((l, k) => (declares(l) ? [k] : []));
   if (!starts.length) return null;
   if (starts.length > 1) throw new Error(`${table} is declared ${starts.length} times`);
@@ -389,11 +406,17 @@ export function weakeningReasons(i: WeakeningInput): string[] {
   const tables = CHECK_TABLES.filter((t) => holds(t.path, i.scope));
   // A test, guard, lint, allowlist or table file: its removed lines count, so its diff must be whole and text.
   const strict = (p: string) => isTest(p) || isGuard(p) || isAllow(p) || tables.some((t) => t.path === p);
-  // A pure rename of a test (#783's deliverable): the same blob at a new test path with the same runner suffix. Both
-  // paths count as nothing. Any other move is a delete and an add.
+  // A pure rename of a test (#783's deliverable): the same blob at a new path that the same runner still runs. Both
+  // paths count as nothing when the two names match the same runner's pattern with the same suffix, under the same
+  // test-folder root, the new one under no fixtures, snapshots, testdata or docs folder, and neither is a guard, lint,
+  // allowlist or table file. Any other move is a delete and an add.
   const renamed = new Set<string>();
+  const checkFile = (p: string) => isGuard(p) || isAllow(p) || tables.some((t) => t.path === p);
   for (const [from, to] of i.moved ?? []) {
-    if (isTest(from) && isTest(to) && runnerSuffix(from) === runnerSuffix(to)) renamed.add(from).add(to);
+    const runner = runnerOf(from);
+    if (runner === -1 || runnerOf(to) !== runner || runnerSuffix(from) !== runnerSuffix(to)) continue;
+    if (!isTest(from) || !isTest(to) || testRoot(from) !== testRoot(to) || NOT_RUN.test(to) || checkFile(from) || checkFile(to)) continue;
+    renamed.add(from).add(to);
   }
   const text = (l: string) => !l.includes('\0') && !l.includes('�');
   // Read: every file but a doc, a pure rename, and an asset that isn't text.
@@ -455,8 +478,17 @@ export function weakeningReasons(i: WeakeningInput): string[] {
     // A table only after the change is new (a new lint and its list): nothing was loosened. The backstop test keeps
     // every registered table on the default branch.
     if (was === null) continue;
-    if (now === null) hit('table-gone', t.path, t.table);
-    else if (t.kind === 'never-grow') for (const l of missing(now, was)) hit('table-grown', t.path, `${t.table}: ${l}`);
+    if (now === null) {
+      hit('table-gone', t.path, t.table);
+      continue;
+    }
+    // The line that declared it, removed or changed: what reads as the table after may not be it (a decoy). It waits.
+    const declaring = was[0]!;
+    if ((i.files.find((f) => f.path === t.path)?.removedLines ?? []).some((l) => entry(l) === declaring)) {
+      hit('unreadable', t.path, `${t.table}: the line that declares it is removed or changed`);
+      continue;
+    }
+    if (t.kind === 'never-grow') for (const l of missing(now, was)) hit('table-grown', t.path, `${t.table}: ${l}`);
     else for (const l of missing(was, now)) hit('table-shrunk', t.path, `${t.table}: ${l}`);
   }
 

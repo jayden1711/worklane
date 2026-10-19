@@ -565,7 +565,40 @@ test('weakening: a deleted test file waits; a pure rename does not, unless it le
   assert.deepEqual(kinds(weakens({ 'test/math.test.ts': MATH_TEST }, { 'test/math.test.ts': null })), [DELETED, ASSERTION]);
   // The same text at a new test path with the same runner suffix: a rename (#783's deliverable, owner's decision 1).
   assert.deepEqual(weakens({ 'test/math.test.ts': MATH_TEST }, { 'test/math.test.ts': null, 'test/sum.test.ts': MATH_TEST }), []);
-  assert.deepEqual(weakens({ 'test/unit/math.test.ts': MATH_TEST, 'test/unit/fixtures/a.json': '{ "a": 1 }\n' }, { 'test/unit/math.test.ts': null, 'test/unit/fixtures/a.json': null, 'test/core/math.test.ts': MATH_TEST, 'test/core/fixtures/a.json': '{ "a": 1 }\n' }), [], 'a folder moved');
+  assert.deepEqual(weakens({ 'test/unit/math.test.ts': MATH_TEST, 'test/unit/sum.test.ts': `${MATH_TEST}\n` }, { 'test/unit/math.test.ts': null, 'test/unit/sum.test.ts': null, 'test/core/math.test.ts': MATH_TEST, 'test/core/sum.test.ts': `${MATH_TEST}\n` }), [], 'a folder of tests moved');
+  // Round 5's review: a rename passes only within one runner's naming, under the same test-folder root, never into a
+  // fixtures, snapshots, testdata or docs folder.
+  const PY = 'def test_add():\n    assert add(1, 2) == 3\n';
+  const JAVA = 'class MathTest {\n  @Test\n  void adds() { assertEquals(3, add(1, 2)); }\n}\n';
+  const RB = "describe 'math' do\n  it 'adds' do\n    expect(add(1, 2)).to eq(3)\n  end\nend\n";
+  const moved = (from: string, to: string, text: string) => kinds(weakens({ [from]: text }, { [from]: null, [to]: text }));
+  for (const [from, to, text] of [
+    ['tests/test_sum.py', 'tests/test_total.py', PY],
+    ['src/test/java/MathTest.java', 'src/test/java/SumTest.java', JAVA],
+    ['spec/math_spec.rb', 'spec/sum_spec.rb', RB],
+    ['pkg/math_test.go', 'pkg/sum_test.go', 'func TestAdd(t *testing.T) {\n\tt.Fatal("x")\n}\n'],
+    ['web/src/a.test.tsx', 'web/src/b.test.tsx', MATH_TEST],
+  ] as [string, string, string][]) assert.deepEqual(moved(from, to, text), [], `${from} -> ${to}`);
+  for (const [from, to, text] of [
+    ['tests/test_math.py', 'tests/math.py', PY],
+    ['tests/test_math.py', 'tests/math_helpers.py', PY],
+    ['src/test/java/MathTest.java', 'src/test/java/MathCase.java', JAVA],
+    ['spec/math_spec.rb', 'spec/math.rb', RB],
+    ['test/x.test.ts', 'scripts/x.test.ts', MATH_TEST],
+    ['test/x.test.ts', 'docs/x.test.ts', MATH_TEST],
+    ['test/x.test.ts', 'test/fixtures/x.test.ts', MATH_TEST],
+    ['test/x.test.ts', 'test/__snapshots__/x.test.ts', MATH_TEST],
+    ['test/unit/fixtures/a.json', 'test/core/fixtures/a.json', '{ "a": 1 }\n'],
+  ] as [string, string, string][]) assert.ok(moved(from, to, text).includes(DELETED), `${from} -> ${to}: ${moved(from, to, text).join(' | ')}`);
+  // A guard, lint, allowlist or table file is never rename-exempt, even inside the test paths.
+  for (const [from, to, text] of [
+    ['tests/conftest.py', 'tests/old/conftest.py', 'def pytest_configure(config):\n    config.option.strict = True\n'],
+    ['test/tsconfig.json', 'test/old/tsconfig.json', '{\n  "compilerOptions": { "strict": true }\n}\n'],
+    ['test/jest.config.js', 'test/old/jest.config.js', 'module.exports = { testMatch: ["**/*.test.js"] };\n'],
+    ['test/brand.test.ts', 'test/brand-name.test.ts', MATH_TEST],
+    ['test/isolate.ts', 'test/isolate-old.ts', 'export const isolate = true;\n'],
+    ['test/no-clock-helpers.test.ts', 'test/no-clock-helpers2.test.ts', CLOCK_LINT],
+  ] as [string, string, string][]) assert.ok(moved(from, to, text).includes(GUARD) || moved(from, to, text).includes(GONE), `${from} -> ${to}: ${moved(from, to, text).join(' | ')}`);
   // Not a rename: the text edited, another runner suffix, out of the test paths.
   assert.deepEqual(kinds(weakens({ 'test/math.test.ts': MATH_TEST }, { 'test/math.test.ts': null, 'test/sum.test.ts': MATH_TEST.replace('3);', '4);') })), [DELETED, ASSERTION]);
   assert.deepEqual(kinds(weakens({ 'test/math.test.ts': MATH_TEST }, { 'test/math.test.ts': null, 'test/math.spec.ts': MATH_TEST })), [DELETED, ASSERTION]);
@@ -627,7 +660,8 @@ test('weakening: a registered table waits on an entry added to an allowlist, or 
   const both = `${bad}const REPOS_BAD = [];\n`;
   assert.deepEqual(kinds(weakensRaw({ 'test/add-project.test.ts': both }, { 'test/add-project.test.ts': both.replace('NAMES_BAD', 'NAMES_ODD') })), [GONE]);
   // A guard's list: its file is a guard file too.
-  assert.deepEqual(kinds(weakens({ 'src/delegation.ts': DELEGATION }, { 'src/delegation.ts': DELEGATION.replace("'money-path', ", '') })), [SHRUNK, GUARD]);
+  // (a one-line table: its declaring line changed, so it waits as unreadable, round 6)
+  assert.deepEqual(kinds(weakens({ 'src/delegation.ts': DELEGATION }, { 'src/delegation.ts': DELEGATION.replace("'money-path', ", '') })), [UNREADABLE, GUARD]);
   // The commands that run the checks: a script changed waits; a script added, or a dependency bumped, doesn't.
   const pkg = '{\n  "scripts": {\n    "test": "node --test",\n    "lint": "eslint ."\n  },\n  "dependencies": {\n    "a": "1.0.0"\n  }\n}\n';
   assert.deepEqual(kinds(weakens({ 'package.json': pkg }, { 'package.json': pkg.replace('"node --test"', '"true"') })), [SHRUNK]);
@@ -643,9 +677,20 @@ test('weakening: a registered table waits on an entry added to an allowlist, or 
   assert.deepEqual(kinds(weakensRaw({ 'test/add-project.test.ts': names }, { 'test/add-project.test.ts': names.replace("  '../up',\n];\nconst REPOS_BAD", "];\nconst REPOS_BAD") })), [UNREADABLE], 'a decoy, then an entry removed');
   assert.deepEqual(kinds(weakensRaw({ 'test/instance-name.test.ts': allowed }, { 'test/instance-name.test.ts': allowed.replace("  'a',\n", "  'a',\n'b',\n") })), [UNREADABLE], 'an entry at column 0');
   assert.deepEqual(kinds(weakensRaw({ 'test/instance-name.test.ts': allowed }, { 'test/instance-name.test.ts': allowed.replace("  'a',\n", "  'a',\n// fine\n  'b',\n") })), [UNREADABLE], 'a comment at column 0');
+  // Round 5's review: a decoy copy in a comment above, the real declaration made unreadable to a narrow reader (`var`,
+  // two spaces), and an entry added. `const`, `let` and `var` with any spacing declare a table, and a declaring line
+  // the change removes or changes makes it wait.
+  for (const real of ['var ALLOWED = [', 'const  ALLOWED = [', 'let\tALLOWED = [']) {
+    const head = `/*\nconst ALLOWED = [\n  'a',\n];\n*/\n${real}\n  'a',\n  'b',\n];\nconst BAD_SHAPE = [];\n`;
+    assert.deepEqual(kinds(weakensRaw({ 'test/instance-name.test.ts': allowed }, { 'test/instance-name.test.ts': head })), [UNREADABLE], `decoy + ${real}`);
+    assert.ok(weakensRaw({ 'test/instance-name.test.ts': allowed }, { 'test/instance-name.test.ts': allowed.replace('const ALLOWED = [', real) }).length, `${real} alone`);
+  }
+  const spaced = "var  ALLOWED = [\n  'a',\n];\nconst BAD_SHAPE = [];\n";
+  assert.deepEqual(kinds(weakensRaw({ 'test/instance-name.test.ts': spaced }, { 'test/instance-name.test.ts': spaced.replace("  'a',\n", "  'a',\n  'b',\n") })), [GROWN], '`var` with two spaces is read');
   // A one-line table is one line; its entries changing is a change.
   const one = "const ALLOWED = ['a'];\nconst BAD_SHAPE = [];\n";
-  assert.deepEqual(kinds(weakensRaw({ 'test/instance-name.test.ts': one }, { 'test/instance-name.test.ts': one.replace("['a']", "['a', 'b']") })), [GROWN]);
+  // Since round 6 its declaring line changing makes it wait as unreadable (a decoy can't stand in for it).
+  assert.deepEqual(kinds(weakensRaw({ 'test/instance-name.test.ts': one }, { 'test/instance-name.test.ts': one.replace("['a']", "['a', 'b']") })), [UNREADABLE]);
   // A table only after the change is new (a new lint and its allowlist): nothing to loosen. On neither side: nothing
   // to read (the backstop test keeps every registered table on the default branch).
   assert.deepEqual(weakensRaw({ 'test/slot-dir-writes.test.ts': 'const x = 1;\n' }, { 'test/slot-dir-writes.test.ts': "const x = 1;\nconst REVIEWED = {\n  'src/a.ts': 1,\n};\n" }), []);
@@ -895,7 +940,13 @@ test('acceptance (#783): a PR that only adds tests does not wait', () => {
 test('acceptance (#783): a PR that only renames a test file or a test folder (same content) does not wait; a rename with an edit does', () => {
   const pure = { auto: true, reasons: [], why: [] };
   assert.deepEqual(decideChange({ 'test/math.test.ts': MATH_TEST }, { 'test/math.test.ts': null, 'test/sum.test.ts': MATH_TEST }), pure);
-  assert.deepEqual(decideChange({ 'test/unit/math.test.ts': MATH_TEST, 'test/unit/fixtures/a.json': '{ "a": 1 }\n' }, { 'test/unit/math.test.ts': null, 'test/unit/fixtures/a.json': null, 'test/core/math.test.ts': MATH_TEST, 'test/core/fixtures/a.json': '{ "a": 1 }\n' }), pure);
+  assert.deepEqual(decideChange({ 'test/unit/math.test.ts': MATH_TEST, 'test/unit/sum.test.ts': `${MATH_TEST}\n` }, { 'test/unit/math.test.ts': null, 'test/unit/sum.test.ts': null, 'test/core/math.test.ts': MATH_TEST, 'test/core/sum.test.ts': `${MATH_TEST}\n` }), pure);
+  // A rename that takes a test out of what its runner runs (round 5's review) waits, through real git.
+  for (const to of ['scripts/math.test.ts', 'test/fixtures/math.test.ts', 'test/math-check.ts']) {
+    const d = decideChange({ 'test/math.test.ts': MATH_TEST }, { 'test/math.test.ts': null, [to]: MATH_TEST });
+    assert.equal(d.auto, false, to);
+    assert.ok(d.reasons.some((r) => r.startsWith(`${weakening.WEAKENING_REASON}${DELETED}`)), `${to}: ${d.reasons.join(' | ')}`);
+  }
   const edited = decideChange({ 'test/math.test.ts': MATH_TEST }, { 'test/math.test.ts': null, 'test/sum.test.ts': MATH_TEST.replace('assert.equal(sub(3, 1), 2)', 'assert.equal(sub(3, 1), 3)') });
   assert.equal(edited.auto, false);
   assert.ok(edited.reasons.some((r) => r.startsWith(`${weakening.WEAKENING_REASON}${DELETED}`)), edited.reasons.join(' | '));
