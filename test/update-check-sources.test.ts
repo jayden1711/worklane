@@ -22,18 +22,29 @@ const API = 'https://api.github.com/repos/example-org/engine';
 const SHA = 'a'.repeat(40);
 const OTHER = 'b'.repeat(40);
 const ACTIONS = 15368;
-type Run = { name: string; suite: number; app?: number; conclusion?: string };
-const checkRun = (r: Run, id: number) => ({ id, name: r.name, status: 'completed', conclusion: r.conclusion ?? 'success', started_at: '2026-10-18T10:00:00Z', app: { id: r.app ?? ACTIONS, slug: (r.app ?? ACTIONS) === ACTIONS ? 'github-actions' : `app-${r.app}` }, check_suite: { id: r.suite } });
-const workflowRun = (suite: number, path: string, o: { repo?: string; sha?: string } = {}) => ({ check_suite_id: suite, path, head_sha: o.sha ?? SHA, repository: { full_name: o.repo ?? 'example-org/engine' } });
+// An Actions check run's page is its own job in its suite's workflow run (run id = suite * 10 here, as workflowRun
+// makes it); `page` overrides that, e.g. for a check run made through the API into that suite.
+type Run = { name: string; suite: number; app?: number; conclusion?: string; page?: string; started?: string };
+const checkRun = (r: Run, id: number) => ({
+  id,
+  name: r.name,
+  status: 'completed',
+  conclusion: r.conclusion ?? 'success',
+  started_at: r.started ?? '2026-10-18T10:00:00Z',
+  html_url: r.page ?? `https://github.com/example-org/engine/actions/runs/${r.suite * 10}/job/${id}`,
+  app: { id: r.app ?? ACTIONS, slug: (r.app ?? ACTIONS) === ACTIONS ? 'github-actions' : `app-${r.app}` },
+  check_suite: { id: r.suite },
+});
+const workflowRun = (suite: number, path: string, o: { repo?: string; sha?: string } = {}) => ({ id: suite * 10, check_suite_id: suite, path, head_sha: o.sha ?? SHA, repository: { full_name: o.repo ?? 'example-org/engine' } });
 
 /** A GitHub that answers the updater's reads for commit SHA; `rules`: the branch's rulesets. Every URL asked is kept. */
-function gitHub(o: { runs: Run[]; workflowRuns?: unknown[] | null; rules?: unknown[] }) {
+function gitHub(o: { runs: Run[]; workflowRuns?: unknown[] | null; rules?: unknown[] | null }) {
   const calls: string[] = [];
   const fetchJson = async (url: string) => {
     calls.push(url.replace(API, ''));
     if (url.startsWith(`${API}/commits/${SHA}/check-runs`)) return { total_count: o.runs.length, check_runs: o.runs.map(checkRun) };
     if (url.startsWith(`${API}/actions/runs?head_sha=${SHA}`)) return o.workflowRuns === null ? null : { workflow_runs: o.workflowRuns ?? [] };
-    if (url === `${API}/rules/branches/main`) return o.rules ?? [];
+    if (url === `${API}/rules/branches/main`) return o.rules === null ? null : (o.rules ?? []);
     if (url === `${API}/branches/main`) return { name: 'main', protection: { enabled: false, required_status_checks: { checks: [] } } };
     return null;
   };
@@ -63,6 +74,10 @@ test('a same-name check from another workflow, a run for another commit, another
     ['the right file, in a fork', [{ name: 'test (ubuntu-latest, 22)', suite: 9 }, { name: 'scan', suite: 2 }], [...legit, workflowRun(9, '.github/workflows/ci.yml', { repo: 'someone/engine' })]],
     ['a check run with no workflow run (made through the API)', [{ name: 'test (ubuntu-latest, 22)', suite: 9 }, { name: 'scan', suite: 2 }], legit],
     ['another App', [{ name: 'test (ubuntu-latest, 22)', suite: 1, app: 4242 }, { name: 'scan', suite: 2 }], legit],
+    // Made through the API with a workflow's token, filed into ci.yml's own suite (guess, not measured): its page isn't
+    // one of that run's jobs.
+    ['a check run in the pinned suite that is not one of its jobs', [{ name: 'test (ubuntu-latest, 22)', suite: 1, page: 'https://github.com/example-org/engine/runs/5' }, { name: 'scan', suite: 2 }], legit],
+    ["a job of another run's page", [{ name: 'test (ubuntu-latest, 22)', suite: 1, page: 'https://github.com/example-org/engine/actions/runs/999/job/0' }, { name: 'scan', suite: 2 }], legit],
   ];
   for (const [what, runs, workflowRuns] of spoofs) {
     const r = await choose(engine, gitHub({ runs, workflowRuns }));
@@ -71,14 +86,31 @@ test('a same-name check from another workflow, a run for another commit, another
   }
 });
 
-test("a required check with no pinned source (not the engine's, none in updates.json, none in the branch rules) is refused", async () => {
-  const gh = gitHub({ runs: [{ name: 'test', suite: 1 }], workflowRuns: legit });
-  const r = await choose({ required_checks: ['test'] }, gh);
+test("a required check nothing pins (not the engine's, none in updates.json, none in the branch rules) is judged by name, exactly as before", async () => {
+  const cases: Run[][] = [[{ name: 'test', suite: 1, app: 4242 }], [{ name: 'test', suite: 1, app: 4242, conclusion: 'failure' }], []];
+  for (const runs of cases) {
+    const gh = gitHub({ runs, workflowRuns: legit });
+    const pinned = await choose({ required_checks: ['test'] }, gh);
+    const before = await choose({ required_checks: ['test'] }, { ...gh, deps: { ...gh.deps, pinChecks: undefined } });
+    assert.deepEqual(pinned, before, JSON.stringify(runs));
+    assert.ok(gh.calls.includes('/rules/branches/main'), "the branch's rules were asked");
+  }
+  assert.equal((await choose({ required_checks: ['test'] }, gitHub({ runs: [{ name: 'test', suite: 1, app: 4242 }] }))).chosen, true, 'installed, as before');
+  // An invalid updates.json pin refuses, never falls back to the name.
+  assert.match((await choose({ required_checks: ['scan'], required_check_sources: { scan: { workflow: 'gitleaks.yml' } } }, gitHub({ runs: [{ name: 'scan', suite: 2 }], workflowRuns: legit }))).reason ?? '', /invalid pin for "scan".*: refused/);
+});
+
+test("the branch's rules unread (a rate limit, say): a check they might pin waits, never judged by name and never refused", async () => {
+  const r = await u.chooseCommit(gitHub({ runs: [{ name: 'test', suite: 1, app: 4242 }], rules: null }).deps, { branch: 'main', required_checks: ['test'] }, API, [{ sha: SHA, date: '2026-10-18T11:59:00Z' }], null);
+  assert.equal(r.chosen, undefined);
+  assert.match(r.reason ?? '', /no answer for the branch's rules/);
+  assert.equal(r.wait?.sha, SHA, 'waits on the commit');
+});
+
+test("a pin never turns a fail into a pass: another App's newer failing run of a pinned check still refuses the commit", async () => {
+  const r = await choose(engine, gitHub({ runs: [{ name: 'test (ubuntu-latest, 22)', suite: 1 }, { name: 'test (ubuntu-latest, 22)', suite: 8, app: 4242, conclusion: 'failure', started: '2026-10-18T10:05:00Z' }, { name: 'scan', suite: 2 }], workflowRuns: legit }));
   assert.equal(r.chosen, false);
-  assert.match(r.reason ?? '', /required check\(s\) "test" have no pinned source .*: refused/);
-  assert.ok(gh.calls.includes('/rules/branches/main'), "the branch's rules were asked");
-  // An invalid updates.json pin pins nothing.
-  assert.match((await choose({ required_checks: ['scan'], required_check_sources: { scan: { workflow: 'gitleaks.yml' } } }, gitHub({ runs: [{ name: 'scan', suite: 2 }], workflowRuns: legit }))).reason ?? '', /"scan" have no pinned source/);
+  assert.match(r.reason ?? '', /check "test \(ubuntu-latest, 22\)" ended failure/);
 });
 
 test("updates.json required_check_sources pins a check (over the updater's own list); the branch rules' App pins one it doesn't name", async () => {
