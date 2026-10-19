@@ -7,9 +7,12 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileS
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CliRunner, type RunRequest } from '../src/runner.js';
-import { BENCH_USER_ENV, BenchAgentRunner, CLAUDE_PIN_ENV, requireBenchUser, requireClaudePin, requireSubscription } from '../scripts/bench/auth.js';
+import { benchClaude, benchLane } from '../scripts/bench/agent.js';
+import { agentBase, BENCH_USER_ENV, BenchAgentRunner, CLAUDE_PIN_ENV, requireBenchUser, requireClaudePin, requireSubscription } from '../scripts/bench/auth.js';
 import { capsFromArgs, type Caps } from '../scripts/bench/caps.js';
-import { benchRoot, BENCH_ROOT_ENV } from '../scripts/bench/paths.js';
+import { checkDockerArgs, Docker, LIMIT_ENV, limitsFrom, LimitsNotApplied, makeArgs, TaskRunner, type DockerCall, type Limits } from '../scripts/bench/container.js';
+import { taskView, type TaskRow } from '../scripts/bench/hidden.js';
+import { benchLayout, benchRoot, BENCH_ROOT_ENV } from '../scripts/bench/paths.js';
 import { UsageMeter } from '../scripts/bench/usage.js';
 import { STDIN_LINE } from './helpers.js';
 
@@ -167,4 +170,153 @@ test('the bench root stays out of credential stores, real state and checkouts', 
   assert.throws(() => benchRoot({ [BENCH_ROOT_ENV]: 'bench' }, home), /absolute/);
   mkdirSync(join(home, 'clone', '.git'), { recursive: true });
   assert.throws(() => benchRoot({ [BENCH_ROOT_ENV]: join(home, 'clone', 'bench') }, home), /inside a git checkout/);
+});
+
+/** A row whose hidden fields carry markers no visible text has. */
+const ROW: TaskRow = {
+  instance_id: 'example__proj-4242',
+  repo: 'example/proj',
+  base_commit: 'a'.repeat(40),
+  problem_statement: 'Totals are wrong for negative quantities\n\nCalling total() with a negative qty returns a negative sum.',
+  patch: 'diff --git a/src/price.py b/src/price.py\n-    return sum(c * q for c, q in items)\n+    return sum(c * q for c, q in items if q > 0)  # GOLDMARK_7731\n',
+  test_patch: 'diff --git a/tests/test_price.py b/tests/test_price.py\n+def test_negative_quantities_are_skipped_TESTMARK():\n+    assert total([(5, -1)]) == 0\n',
+  FAIL_TO_PASS: JSON.stringify(['tests/test_price.py::test_negative_quantities_are_skipped_TESTMARK']),
+  PASS_TO_PASS: JSON.stringify(['tests/test_price.py::test_plain_totals_PASSMARK']),
+  hints_text: 'HINTMARK: look at the generator in price.py',
+  difficulty: '<15 min fix',
+};
+const MARKS = ['GOLDMARK_7731', 'TESTMARK', 'PASSMARK', 'HINTMARK', 'example__proj-4242'];
+const HOST = { cpus: 16, memoryBytes: 39 * 1024 ** 3 };
+const LIMITS: Limits = limitsFrom({}, HOST);
+const C = { name: 'bench-r1-t01', image: 'swebench/example:latest' };
+
+interface FakeDocker {
+  rootless?: boolean;
+  /** Which limit the daemon (inspect) or the kernel (the cgroup files) didn't apply. */
+  dropped?: 'inspect-memory' | 'inspect-cpu' | 'cgroup-memory' | 'cgroup-pids';
+}
+
+/** An in-process docker that records every command and answers info, inspect and the cgroup files. */
+function fakeDocker(o: FakeDocker = {}) {
+  const sent: { args: string[]; input: string }[] = [];
+  const call: DockerCall = (_bin, args, opt) => {
+    sent.push({ args: [...args], input: opt.input?.toString('utf8') ?? '' });
+    const ok = (stdout = '') => ({ status: 0, stdout, stderr: '' });
+    if (args[0] === 'info') return ok(JSON.stringify(['name=seccomp,profile=builtin', ...(o.rootless === false ? [] : ['name=rootless']), 'name=cgroupns']));
+    if (args[0] === 'inspect') {
+      const mem = o.dropped === 'inspect-memory' ? 0 : LIMITS.memoryBytes;
+      return ok(JSON.stringify({ Memory: mem, MemorySwap: mem, NanoCpus: o.dropped === 'inspect-cpu' ? 0 : LIMITS.cpus * 1e9, PidsLimit: LIMITS.pids, NetworkMode: 'none' }));
+    }
+    if (args[0] === 'exec' && args.includes('/sys/fs/cgroup/memory.max')) {
+      return ok(`${o.dropped === 'cgroup-memory' ? 'max' : LIMITS.memoryBytes}\n${LIMITS.cpus * 100000} 100000\n${o.dropped === 'cgroup-pids' ? 'max' : LIMITS.pids}\n`);
+    }
+    return ok();
+  };
+  return { sent, opts: { docker: 'docker', call } };
+}
+
+test("an agent gets neither the Docker socket nor the daemon's or bus's variables, and its CLI never updates", posix, async () => {
+  const c = fakeClaude();
+  const runtime = join(c.base, 'run-user');
+  const layout = benchLayout(join(c.base, 'bench'));
+  // The bench user's shell as the README sets it up: the daemon and the user bus are reachable from it.
+  const env = { ...c.env, XDG_RUNTIME_DIR: runtime, DOCKER_HOST: `unix://${runtime}/docker.sock`, DOCKER_CONFIG: join(c.base, 'docker'), DBUS_SESSION_BUS_ADDRESS: `unix:path=${runtime}/bus` };
+  const agents = benchClaude(env, c.bin, benchLane({ home: process.env.HOME!, runtimeDir: runtime, heldOut: layout.heldOut, state: layout.state }));
+  assert.equal((await agents.run({ ...runReq(c.base), env: { DOCKER_HOST: 'unix:///elsewhere' } })).reason, 'succeeded');
+  requireSubscription(env, c.bin);
+  requireClaudePin(env, c.bin);
+  assert.deepEqual(c.calls().map((x) => x.kind).sort(), ['auth', 'auth', 'run', 'version']);
+  for (const x of c.calls()) {
+    for (const k of ['DOCKER_HOST', 'DOCKER_CONFIG', 'XDG_RUNTIME_DIR', 'DBUS_SESSION_BUS_ADDRESS']) assert.equal(x.env[k], undefined, `${x.kind}: ${k}`);
+    assert.equal(x.env.DISABLE_UPDATES, '1', `${x.kind}: DISABLE_UPDATES`);
+  }
+  const deny = c.calls('run')[0]!.settings.sandbox?.filesystem?.denyRead ?? [];
+  for (const p of [runtime, join(runtime, 'docker.sock'), '/run/docker.sock', '/var/run/docker.sock', join(process.env.HOME!, '.claude'), join(process.env.HOME!, '.claude.json'), layout.heldOut]) assert.ok(deny.includes(p), `sandbox denies ${p}`);
+  assert.equal(agentBase(env).XDG_RUNTIME_DIR, undefined);
+});
+
+test('the task runner sends docker exec into its own container only, with no mount flag; containers mount nothing', () => {
+  checkDockerArgs(['exec', '--workdir', '/work/t', 'bench-r1-t01', 'python', '-m', 'pytest', '-v', 'x.py'], ['exec']);
+  for (const bad of [
+    ['run', '--network', 'none', 'img'],
+    ['create', '--network', 'none', 'img'],
+    ['cp', 'x', 'bench-r1-t01:/x'],
+    ['rm', '--force', 'bench-r1-t01'],
+    ['exec', '-v', '/home:/h', 'bench-r1-t01', 'ls'],
+    ['exec', '--volume', '/home:/h', 'bench-r1-t01', 'ls'],
+    ['exec', '--mount', 'type=bind,src=/,dst=/h', 'bench-r1-t01', 'ls'],
+    ['exec', '--privileged', 'bench-r1-t01', 'ls'],
+    ['exec', '--user', '0', 'bench-r1-t01', 'ls'],
+    ['exec', '--env', 'DOCKER_HOST=unix:///x', 'bench-r1-t01', 'ls'],
+    ['exec', '--workdir', '/', 'bench-r1-t01', 'ls'],
+    ['exec', '--workdir', '/work', 'someone-else', 'ls'],
+  ]) assert.throws(() => checkDockerArgs(bad, ['exec']), /refused|only/, bad.join(' '));
+  for (const verb of ['create', 'run'] as const) {
+    const make = makeArgs(verb, C, LIMITS);
+    checkDockerArgs(make);
+    assert.ok(make.join(' ').includes('--network none'));
+    assert.ok(!make.some((a) => /^(-v|--volume|--mount|--privileged|--device|--cap-add)/.test(a)), 'no mount, device or privilege');
+    for (const extra of [['--mount', 'type=bind,src=/home,dst=/h'], ['-v', '/home:/h'], ['--privileged'], ['--network', 'host'], ['--network=bridge']]) {
+      assert.throws(() => checkDockerArgs([make[0]!, ...extra, ...make.slice(1)]), /refused/, extra.join(' '));
+    }
+    for (const limit of ['--memory', '--memory-swap', '--cpus', '--pids-limit']) {
+      const i = make.indexOf(limit);
+      assert.throws(() => checkDockerArgs([...make.slice(0, i), ...make.slice(i + 2)]), new RegExp(`without ${limit}`));
+    }
+  }
+  const d = fakeDocker();
+  new TaskRunner(d.opts, C, ROW).syncTree('/work/t', Buffer.from('tar'));
+  assert.deepEqual(d.sent[0]!.args.slice(0, 5), ['exec', '--interactive', '--workdir', '/work', 'bench-r1-t01']);
+});
+
+test('the Docker daemon must be rootless', () => {
+  assert.throws(() => new Docker(fakeDocker({ rootless: false }).opts, LIMITS).preflight(), /not rootless/);
+  new Docker(fakeDocker().opts, LIMITS).preflight();
+});
+
+test('every container gets memory (no extra swap), CPU and pids limits, read back from the daemon and its own cgroup', () => {
+  assert.deepEqual(LIMITS, { memoryBytes: 8 * 1024 ** 3, cpus: 4, pids: 4096 });
+  const d = fakeDocker();
+  const docker = new Docker(d.opts, LIMITS);
+  docker.probe({ ...C, name: 'bench-r1-probe' });
+  assert.deepEqual(d.sent.map((s) => s.args[0]), ['create', 'inspect', 'start', 'inspect', 'exec', 'rm'], 'created, read back, started, read back from its cgroup, removed');
+  docker.start(C, ROW);
+  assert.deepEqual(d.sent.slice(6).map((s) => s.args[0]), ['run', 'inspect', 'exec'], "a task's container is read back before anything runs in it");
+  for (const s of d.sent.filter((x) => x.args[0] === 'create' || x.args[0] === 'run')) {
+    const a = s.args.join(' ');
+    for (const f of [`--memory ${LIMITS.memoryBytes}b`, `--memory-swap ${LIMITS.memoryBytes}b`, '--cpus 4', '--pids-limit 4096']) assert.ok(a.includes(f), `${s.args[0]} has ${f}`);
+  }
+});
+
+test('a limit that did not apply refuses, naming the controller; the limits are required', () => {
+  for (const [dropped, controller] of [['inspect-memory', 'memory'], ['inspect-cpu', 'cpu'], ['cgroup-memory', 'memory \\(memory.max\\)'], ['cgroup-pids', 'pids \\(pids.max\\)']] as const) {
+    const d = fakeDocker({ dropped });
+    const docker = new Docker(d.opts, LIMITS);
+    assert.throws(() => docker.probe({ ...C, name: 'bench-r1-probe' }), (e: Error) => e instanceof LimitsNotApplied && new RegExp(`${controller}.*limit did not apply.*Delegate= drop-in`).test(e.message), dropped);
+    assert.equal(d.sent.at(-1)!.args[0], 'rm', `${dropped}: the probe container is removed`);
+    assert.throws(() => docker.start(C, ROW), LimitsNotApplied, `${dropped}: a task's container too`);
+  }
+  for (const [k, v, why] of [['memory', '0', /memory limit/], ['cpus', '0', /CPU limit/], ['pids', '', /pids limit/], ['cpus', '17', /over this machine's 16 CPUs/], ['memory', '32g', /over 75%/]] as const) {
+    assert.throws(() => limitsFrom({ [LIMIT_ENV[k]]: v }, HOST), why);
+  }
+  assert.deepEqual(limitsFrom({ [LIMIT_ENV.memory]: '4g', [LIMIT_ENV.cpus]: '2', [LIMIT_ENV.pids]: '512' }, HOST), { memoryBytes: 4 * 1024 ** 3, cpus: 2, pids: 512 });
+});
+
+test('acceptance: the hidden fields never reach a container', () => {
+  const view = JSON.stringify(taskView(ROW, 't01'));
+  for (const mark of MARKS) assert.ok(!view.includes(mark), `the task view has no ${mark}`);
+  const d = fakeDocker();
+  const docker = new Docker(d.opts, LIMITS);
+  docker.start(C, ROW);
+  const r = new TaskRunner(d.opts, C, ROW);
+  // A buggy caller that hands the container a hidden test name, or the gold line in a variable: refused, nothing sent.
+  const before = d.sent.length;
+  assert.throws(() => r.exec('/work/t', ['python', '-m', 'pytest', 'tests/test_price.py::test_negative_quantities_are_skipped_TESTMARK']), /hidden FAIL_TO_PASS/);
+  assert.throws(() => r.exec('/work/t', ['true'], { FIX: 'return sum(c * q for c, q in items if q > 0)  # GOLDMARK_7731' }), /hidden patch/);
+  assert.throws(() => r.exec('/work/t', ['echo', 'example__proj-4242']), /hidden instance_id/);
+  assert.equal(d.sent.length, before, 'nothing reached docker');
+  r.exec('/work/t', ['python', '-m', 'pytest', '-v', 'tests/test_price.py']);
+  assert.equal(d.sent.length, before + 1, 'the honest command went through');
+  const seen = JSON.stringify(d.sent);
+  for (const mark of MARKS) assert.ok(!seen.includes(mark), `no docker command carried ${mark}`);
 });
