@@ -11,9 +11,14 @@ Every release, newest first: the PRs merged since the previous one, and what cha
   - A writer-authored intake issue with no checked draft kept (filed by an older engine, or after the instance's state dir was wiped or moved) is worked from its body, as before this release. It doesn't get the draft's `- repro: true` unless the body has it.
 - Any issue with more than one ```` ```done_when ```` block is now refused rather than worked from the first one (#643). On upgrade, check open `ready` issues for a second block.
 
+### After install
+
+- **Rerun `updates.sh` as root, once, after the install, so this is the last updater that needs it (#760):** `sudo bash /opt/worklane/current/scripts/setup/updates.sh`. It installs this release's updater, records its version in `/var/lib/worklane/updater.json`, keeps the one it replaces as `/usr/local/libexec/worklane-update.prev`, and leaves `/etc/worklane/updates.json` as it is. From the next release on, an updater on the release channel replaces itself after each healthy install. An update can't do this first step: until root installs an updater that has this code, the running one doesn't know how. Without the rerun nothing changes: the old updater keeps installing releases and never replaces itself.
+- A machine on the main channel never replaces its updater (main has no signature to check), so updater changes still need this rerun there.
+
 ### Guardrail changes
 
-- none in this release
+- **The root updater replaces itself, on the release channel only (#760).** After a healthy install from a signed release tag, it takes that release's `scripts/machine/worklane-update.cjs`. It reads the file from the tag's commit in its root-owned verification clone after checking the tag's signature again, and only when the signed tag names itself and points at the engine just installed. Never from main, never from the build, and never an older or equal release than the running updater's recorded version, so an engine rollback doesn't take it back. The swap is atomic: a temp file, `node --check`, `root:root 0755`, read back as a regular file with the release's bytes, then renamed. Any failure leaves the running updater as it is and logs why. The previous one is kept as `/usr/local/libexec/worklane-update.prev` for a manual rollback (`sudo install -o root -g root -m 0755 /usr/local/libexec/worklane-update.prev /usr/local/libexec/worklane-update`). On by default; root turns it off with `sudo touch /etc/worklane/updater-no-self-update`. `updates.sh` no longer puts its updater over a newer one the updater took from a release.
 
 ## v0.5.2 (2026-10-17)
 
