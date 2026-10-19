@@ -12,6 +12,7 @@ import { tmpdir, userInfo } from 'node:os';
 import { join } from 'node:path';
 import { networkCheck } from '../src/doctor.js';
 import { TestRunConfig } from '../src/testrun/config.js';
+import { projectEnvProblem } from '../src/project-env.js';
 import { npmFetchScript, pipFetchScript, requirementsFileProblem } from '../src/testrun/fetch.js';
 import { localHost, postgresSocketUrl, sandboxHost } from '../src/testrun/host.js';
 import { networkFileText, networkLine, networkPolicy, networkRecord, networkSummaryLine, parseNetworkFile } from '../src/testrun/network.js';
@@ -121,9 +122,10 @@ function netHelper() {
   const sd = join(dir, 'sd');
   mkdirSync(sd);
   // systemd-run: its argv per call, and each BindReadOnlyPaths= source's content as it was then (the helper removes them after).
-  stub('systemd-run', `[ "$1" = --version ] && { echo "systemd 255 (test)"; exit 0; }
+  stub('systemd-run', `[ "$1" = --version ] && { echo "systemd $(cat '${join(dir, 'sysd')}' 2>/dev/null || echo 255) (test)"; exit 0; }
 n="$(date +%s%N)-$$"
 printf '%s\\n' "$@" > "${sd}/$n.argv"
+cat > "${sd}/$n.stdin"
 for a in "$@"; do case "$a" in BindReadOnlyPaths=*) f="\${a#BindReadOnlyPaths=}"; f="\${f%%:*}"; { echo "== $f"; cat "$f"; } >> "${sd}/$n.binds" ;; esac; done
 echo ran`);
   stub('chown', 'exit 0');
@@ -132,6 +134,7 @@ echo ran`);
   // ip: this host's addresses, a loopback and a public one.
   stub('ip', 'printf "1: lo    inet 127.0.0.1/8 scope host lo\\n2: eth0    inet 203.0.113.5/24 brd x scope global eth0\\n2: eth0    inet6 2001:db8::5/64 scope global\\n"');
   stub('getent', 'exit 0');
+  stub('setpriv', 'exit 0');
   stub('id', `[ "$1" = -un ] && { echo '${me}'; exit 0; }; exit 0`);
   stub('runuser', 'while [ "$1" != -- ]; do shift; done; shift; exec "$@"');
   stub('install', `a=(); while [ "$#" -gt 0 ]; do case "$1" in -o|-g) shift 2 ;; *) a+=("$1"); shift ;; esac; done; exec ${real('install')} "\${a[@]}"`);
@@ -174,6 +177,61 @@ echo ran`);
     assert.match(src, re);
     src = src.replace(re, to);
   }
+  // A run's own user namespace (#545): the wrapper (none until userns() makes one), the AppArmor sysctl and profile
+  // list, /proc (the run's main process 4242 and pid 1), and the egress rule's record. Replaced where the helper has
+  // them (an older helper, for a fail-without, has none).
+  const usernsBin = join(dir, 'userns');
+  const restrict = join(dir, 'restrict');
+  const profiles = join(dir, 'profiles');
+  const proc = join(dir, 'proc');
+  const record = join(dir, 'egress.users');
+  for (const [re, to] of [
+    [/^USERNS=\S+$/m, `USERNS=${usernsBin}`],
+    [/^USERNS_RESTRICT=\S+$/m, `USERNS_RESTRICT=${restrict}`],
+    [/^AA_PROFILES=\S+$/m, `AA_PROFILES=${profiles}`],
+    [/^PROC=\S+$/m, `PROC=${proc}`],
+    [/^EGRESS_RECORD=\S+$/m, `EGRESS_RECORD=${record}`],
+  ] as const) {
+    src = src.replace(re, to);
+  }
+  const bashPath = spawnSync('readlink', ['-f', '/bin/bash'], { encoding: 'utf8' }).stdout.trim();
+  /** The run's main process (4242) in a user namespace of its own (else the host's, as pid 1), running bash. */
+  const procNs = (own: boolean) => {
+    rmSync(proc, { recursive: true, force: true });
+    for (const p of ['1', '4242']) mkdirSync(join(proc, p, 'ns'), { recursive: true });
+    symlinkSync('user:[4026531837]', join(proc, '1', 'ns', 'user'));
+    symlinkSync(own ? 'user:[4026532999]' : 'user:[4026531837]', join(proc, '4242', 'ns', 'user'));
+    symlinkSync(bashPath, join(proc, '4242', 'exe'));
+  };
+  procNs(true);
+  /** The wrapper: ok (root's here: this user's; its ACL lets only the test users run it; it takes both options), or one
+   * wrong in one way. Running it leaves a mark (ran): the helper itself never runs it. */
+  const aclFile = join(dir, 'acl');
+  const ranMark = join(dir, 'userns-ran');
+  const acls = {
+    ok: `user::rwx\nuser:${me}:r-x\nuser:wl-test-other:r-x\t#effective:r-x\ngroup::---\nmask::r-x\nother::---\n`,
+    world: `user::rwx\nuser:${me}:r-x\ngroup::---\nmask::r-x\nother::r-x\n`,
+    group: `user::rwx\nuser:${me}:r-x\ngroup::r-x\nmask::r-x\nother::---\n`,
+    namedGroup: `user::rwx\nuser:${me}:r-x\ngroup::---\ngroup:staff:r-x\nmask::r-x\nother::---\n`,
+    stranger: `user::rwx\nuser:${me}:r-x\nuser:gpuagent:r-x\ngroup::---\nmask::r-x\nother::---\n`,
+    noMe: `user::rwx\nuser:wl-test-other:r-x\ngroup::---\nmask::r-x\nother::---\n`,
+  } as const;
+  stub('getfacl', `[ -e '${usernsBin}' ] || exit 1; cat '${aclFile}'`);
+  stub('mount', 'exit 0');
+  // Another instance's test user, wl-test-other: test-user.sh install made its directory.
+  mkdirSync(join(base, 'other'), { recursive: true });
+  const userns = (kind: 'ok' | 'old' | 'link' | Exclude<keyof typeof acls, 'ok'>) => {
+    rmSync(usernsBin, { force: true });
+    writeFileSync(aclFile, kind in acls ? acls[kind as keyof typeof acls] : acls.ok);
+    if (kind === 'link') {
+      symlinkSync(real('true')!, usernsBin);
+      return;
+    }
+    // util-linux's unshare names its options in its binary; an older one has neither of the two.
+    const opts = kind === 'old' ? '# map-root-user' : '# map-current-user keep-caps';
+    writeFileSync(usernsBin, `#!/bin/sh\n${opts}\ntouch '${ranMark}'\nexit 0\n`);
+    chmodSync(usernsBin, 0o700);
+  };
   const helper = join(dir, 'worklane-testrun');
   writeFileSync(helper, src);
   mkdirSync(tmpBase, { mode: 0o711 });
@@ -185,10 +243,22 @@ echo ran`);
     mkdirSync(join(tmpBase, h), { mode: 0o700 });
     chmodSync(join(tmpBase, h), 0o700);
   };
-  const run = (...args: string[]) => spawnSync('/bin/bash', [helper, 'shop', ...args], { encoding: 'utf8', input: '', env: { PATH: '/usr/bin:/bin' }, timeout: 60_000 });
+  const runIn = (input: string, ...args: string[]) => spawnSync('/bin/bash', [helper, 'shop', ...args], { encoding: 'utf8', input, env: { PATH: '/usr/bin:/bin' }, timeout: 60_000 });
+  const run = (...args: string[]) => runIn('', ...args);
   const exec = (id: string, opts: string[], cmd = 'true') => {
     mkRun(id);
     return run('exec', id, '60', ...opts, '--', cmd);
+  };
+  /** exec with the run's variables on stdin, as the engine sends them (NAME=value, each ended by a NUL). */
+  const execEnv = (id: string, opts: string[], cmd: string, vars: Record<string, string>) => {
+    mkRun(id);
+    return runIn(Object.entries(vars).map(([k, v]) => `${k}=${v}\0`).join(''), 'exec', id, '60', ...opts, '--', cmd);
+  };
+  /** What the newest run unit's systemd-run got on its stdin. */
+  const lastStdin = () => {
+    const f = spawnSync('ls', [sd], { encoding: 'utf8' }).stdout.split('\n').filter((x) => x.endsWith('.argv')).sort()
+      .filter((x) => !readFileSync(join(sd, x), 'utf8').split('\n').some((a) => /^--unit=worklane-test-shop_[a-z0-9-]+_net_/.test(a))).pop()!;
+    return readFileSync(join(sd, f.replace(/\.argv$/, '.stdin')), 'utf8');
   };
   const grant = (instances: Record<string, string[]>, mode = 0o644) => {
     writeFileSync(file, networkFileText({ instances }));
@@ -213,7 +283,20 @@ echo ran`);
   const lastProps = () => withProps(calls().filter((a) => !a.some((x) => /^--unit=worklane-test-shop_[a-z0-9-]+_net_/.test(x))).pop() ?? []);
   /** The network units' systemd-run calls (slirp_start), oldest first. */
   const netCalls = () => calls().filter((a) => a.some((x) => /^--unit=worklane-test-shop_[a-z0-9-]+_net_\d+$/.test(x))).map(withProps);
-  return { dir, base, file, slirp, run, exec, mkRun, grant, lastProps, netCalls, binds, noSeccomp: () => writeFileSync(join(dir, 'noseccomp'), ''), done: () => rmSync(dir, { recursive: true, force: true }) };
+  return {
+    dir, base, file, slirp, run, exec, execEnv, lastStdin, mkRun, grant, lastProps, netCalls, binds, bin, usernsBin, proc, procNs, userns,
+    usernsRan: () => existsSync(ranMark),
+    noSeccomp: () => writeFileSync(join(dir, 'noseccomp'), ''),
+    /** kernel.apparmor_restrict_unprivileged_userns, and whether the wrapper's profile is loaded. */
+    restrict: (on: boolean, loaded: boolean) => {
+      writeFileSync(restrict, on ? '1\n' : '0\n');
+      writeFileSync(profiles, `${loaded ? 'worklane-testrun-userns (unconfined)\n' : ''}worklane-test-rootlesskit (unconfined)\n`);
+    },
+    /** The host egress rule's record (egress-firewall.sh apply writes it), or none. */
+    record: (text: string | null) => (text === null ? rmSync(record, { force: true }) : writeFileSync(record, text)),
+    sysd: (v: number) => writeFileSync(join(dir, 'sysd'), String(v)),
+    done: () => rmSync(dir, { recursive: true, force: true }),
+  };
 }
 
 // The LAN ranges a granted run or a fetch never reaches (RFC 1918, RFC 6598, ULA), with link-local, multicast and
@@ -394,6 +477,414 @@ test('a slirp4netns without seccomp support: no run gets the network and the fet
   } finally {
     h.done();
   }
+});
+
+/** What a run's unit runs before its own command when it has a user namespace of its own (#545). */
+const usernsArgv = (h: ReturnType<typeof netHelper>, dollar = '$', aa = false) => [
+  h.usernsBin, '--user', '--map-current-user', '--net', '--mount', '--keep-caps', '--', '/bin/sh', '-c',
+  `${join(h.bin, 'env')} -i ${join(h.bin, 'ip')} link set lo up < /dev/null && ${join(h.bin, 'env')} -i ${join(h.bin, 'mount')} --bind /dev/null ${h.usernsBin} < /dev/null && exec ${join(h.bin, 'setpriv')} --inh-caps=-all --ambient-caps=-all --bounding-set=-all${aa ? ' --apparmor-profile=unconfined' : ''} -- "${dollar}@"`, 'sh',
+  // Round 4: the loader, after setpriv, gives the command the run's variables from its stdin.
+  '/bin/bash', '-c', LOADER.replaceAll('$', () => dollar), 'load',
+];
+const LOADER = 'declare -A WORKLANE_e=() WORKLANE_s=() WORKLANE_o=(); while IFS= TMOUT= read -r -d "" WORKLANE_kv; do WORKLANE_o["${WORKLANE_kv%%=*}"]="${WORKLANE_kv#*=}"; done < "/proc/$$/environ"; while IFS= TMOUT= read -r -d "" WORKLANE_kv; do WORKLANE_n="${WORKLANE_kv%%=*}"; WORKLANE_e["$WORKLANE_n"]="${WORKLANE_kv#*=}"; if [[ "${!WORKLANE_n@a}" == *[iraAn]* ]] || { [[ -v $WORKLANE_n ]] && { [[ -z "${WORKLANE_o[$WORKLANE_n]+set}" ]] || [[ "${!WORKLANE_n}" != "${WORKLANE_o[$WORKLANE_n]}" ]]; }; }; then WORKLANE_s["$WORKLANE_n"]=1; else export "$WORKLANE_kv" 2> /dev/null; WORKLANE_o["$WORKLANE_n"]="${WORKLANE_kv#*=}"; fi; done; for WORKLANE_n in "${!WORKLANE_e[@]}"; do WORKLANE_a="${!WORKLANE_n@a}"; if [[ -n "${WORKLANE_s[$WORKLANE_n]-}" || "$WORKLANE_a" != *x* || "$WORKLANE_a" == *[aAn]* || "${!WORKLANE_n}" != "${WORKLANE_e[$WORKLANE_n]}" ]]; then echo "worklane-testrun: not set: $WORKLANE_n is the shell\'s own" >&2; fi; done; exec "$@" < /dev/null';
+
+/** The prelude part of the newest run unit's command: the usernsArgv-long slice before bash and its 4 arguments. */
+const prelude = (h: ReturnType<typeof netHelper>) => h.lastProps().argv.slice(-(usernsArgv(h).length + 5), -5);
+
+test('#545: with the wrapper, a run\'s unit makes the run a user and network namespace of its own (its uid mapped to itself, lo up, every capability dropped) before its command; without a usable one, the command alone, as before', { skip: !posix && 'bash' }, () => {
+  const h = netHelper();
+  try {
+    // No wrapper (a helper the updater installed before test-user.sh install ran again): as before #545.
+    const before = h.exec('fast-u-0', [], 'echo hi');
+    assert.equal(before.status, 0, before.stderr);
+    assert.deepEqual(h.lastProps().argv.slice(-5), ['/bin/bash', '-o', 'pipefail', '-c', 'echo hi']);
+    assert.ok(!h.lastProps().argv.includes(h.usernsBin));
+    // The wrapper: the run's own namespaces first, then setpriv hands over to the command. Every other property as before.
+    h.userns('ok');
+    const r = h.exec('fast-u-1', [], 'echo hi');
+    assert.equal(r.status, 0, r.stderr);
+    const { argv, props } = h.lastProps();
+    assert.deepEqual(argv.slice(-(usernsArgv(h).length + 5)), [...usernsArgv(h), '/bin/bash', '-o', 'pipefail', '-c', 'echo hi']);
+    assert.ok(argv.includes('--expand-environment=no'), 'systemd 254 or later expands nothing of it');
+    const norm = (ps: string[]) => ps.map((p) => p.replace(/fast-u-\d/g, 'ID').replace(/\/t\/[0-9a-f]{8}/g, '/t/HASH'));
+    h.exec('fast-u-2', [], 'echo hi');
+    assert.deepEqual(norm(h.lastProps().props), norm(props), 'the same unit');
+    for (const p of [...NO_NET, 'NoNewPrivileges=yes', 'ProtectSystem=strict']) assert.ok(props.includes(p), p);
+    assert.ok(!props.some((p) => /^(AmbientCapabilities|CapabilityBoundingSet|User)=/.test(p)), 'the unit itself gets no capability');
+    // An older systemd expands $ in a command line: the wrapper's "$@" goes as "$$@", systemd's escape for a literal $.
+    h.sysd(253);
+    h.exec('fast-u-3', [], 'echo hi');
+    assert.deepEqual(prelude(h), usernsArgv(h, '$$'));
+    h.sysd(255);
+    // A symlink, an unshare without --map-current-user and --keep-caps, or one others than the test users may run: the
+    // command alone (the wrapper is never used where its userns allowance would reach anyone else).
+    for (const kind of ['link', 'old', 'world', 'group', 'namedGroup', 'stranger', 'noMe'] as const) {
+      h.userns(kind);
+      const x = h.exec(`fast-u-${kind.toLowerCase()}`, [], 'echo hi');
+      assert.equal(x.status, 0, `${kind}: ${x.stderr}`);
+      assert.deepEqual(h.lastProps().argv.slice(-5), ['/bin/bash', '-o', 'pipefail', '-c', 'echo hi'], kind);
+      assert.ok(!h.lastProps().argv.includes(h.usernsBin), kind);
+    }
+    // Where the kernel restricts user namespaces, only with its AppArmor profile loaded; and then the command leaves
+    // the profile for the unconfined label (setpriv --apparmor-profile=unconfined), so it doesn't keep its allowance.
+    h.userns('ok');
+    h.restrict(true, false);
+    h.exec('fast-u-4', [], 'echo hi');
+    assert.ok(!h.lastProps().argv.includes(h.usernsBin), 'restricted, no profile: the command alone');
+    h.restrict(true, true);
+    h.exec('fast-u-5', [], 'echo hi');
+    assert.deepEqual(prelude(h), usernsArgv(h, '$', true), 'restricted, the profile loaded: the command leaves it');
+    // The profile loaded where the restriction is off: it is left all the same.
+    h.restrict(false, true);
+    h.exec('fast-u-6', [], 'echo hi');
+    assert.deepEqual(prelude(h), usernsArgv(h, '$', true));
+    // The helper reads the wrapper; it never runs it (as root, on a real machine).
+    assert.equal(h.usernsRan(), false, 'the helper ran the wrapper');
+  } finally {
+    h.done();
+  }
+});
+
+test('#545: a granted run\'s slirp4netns runs as the test user, with no capability, joining the run\'s own namespaces by path, in the egress rule\'s set (systemd 255+); as root, as before, where the egress rule drops every test-user socket or the run has no namespace of its own', { skip: !posix && 'bash' }, () => {
+  const h = netHelper();
+  try {
+    h.grant({ shop: ['e2e'] });
+    h.userns('ok');
+    const me = userInfo().username;
+    const r = h.exec('fast-s-1', ['--network', 'e2e'], 'echo hi');
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stderr, /^worklane-testrun: network granted \(e2e; public addresses and the machine's DNS only\)\n/);
+    assert.deepEqual(prelude(h), usernsArgv(h), 'the run makes its own namespaces');
+    assert.match(h.lastProps().argv.at(-1)!, /^n=0; until grep -qs "\^tap0" \/proc\/net\/route; do .*; done; echo hi$/, 'and waits for its network in them');
+    let [net] = h.netCalls();
+    assert.ok(net, 'a network unit');
+    assert.ok(net.argv.includes(`--uid=${me}`) && net.argv.includes(`--gid=${me}`), `as the test user: ${net.argv.join(' ')}`);
+    assert.deepEqual(net.argv.slice(-9), [h.slirp, '--configure', '--mtu=65520', '--disable-host-loopback', '--enable-seccomp', `--userns-path=${join(h.proc, '4242', 'ns', 'user')}`, '--netns-type=path', join(h.proc, '4242', 'ns', 'net'), 'tap0']);
+    assert.ok(!net.argv.includes('--enable-sandbox'), 'slirp4netns\'s own sandbox needs root (its unit\'s does that job)');
+    for (const p of ['CapabilityBoundingSet=', 'NoNewPrivileges=yes', 'ProtectSystem=strict', 'ProtectHome=yes', 'PrivateTmp=yes', 'TemporaryFileSystem=/etc:ro', 'TemporaryFileSystem=/run:ro', 'RestrictAddressFamilies=AF_INET AF_INET6 AF_NETLINK', 'SystemCallFilter=~kill tkill tgkill rt_sigqueueinfo rt_tgsigqueueinfo pidfd_send_signal', 'SystemCallFilter=~@debug process_vm_readv process_vm_writev', 'NFTSet=cgroup:inet:worklane_egress:egress_ok']) {
+      assert.ok(net.props.includes(p), `${p} in ${net.props.join(' | ')}`);
+    }
+    assert.ok(!net.props.some((p) => p.startsWith('CapabilityBoundingSet=CAP')), 'no capability at all');
+    // The boundary is the same: its unit's address rules.
+    assert.ok(net.props.includes(`IPAddressDeny=127.0.0.0/8 ::1/128 ${LAN_DENY} 127.0.0.1/32 203.0.113.5/32 2001:db8::5/128`), net.props.join(' | '));
+    assert.ok(net.props.includes('IPAddressAllow=198.51.100.53'));
+    assert.ok(net.props.some((p) => /^BindsTo=worklane-test-shop_fast-s-1_\d+\.service$/.test(p)));
+    // systemd older than 255: no NFTSet= (it has none; the rule doesn't cover test users there without dropping them).
+    h.sysd(254);
+    h.exec('fast-s-2', ['--network', 'e2e']);
+    net = h.netCalls().at(-1)!;
+    assert.ok(net.argv.includes(`--uid=${me}`) && !net.props.some((p) => p.startsWith('NFTSet=')), net.props.join(' | '));
+    h.sysd(255);
+    // An install whose egress rule drops every socket of the test user's (its record says dropped, or a record from
+    // before #543 with --with-test-users): root's slirp4netns, exactly as before #545; the run still gets its own namespaces.
+    for (const rec of ['# docker: dropped\n1003\n', '# --with-test-users\n1003\n']) {
+      h.record(rec);
+      h.exec('fast-s-3', ['--network', 'e2e']);
+      net = h.netCalls().at(-1)!;
+      assert.deepEqual(net.argv.slice(-8), [h.slirp, '--configure', '--mtu=65520', '--disable-host-loopback', '--enable-sandbox', '--enable-seccomp', '4242', 'tap0'], rec);
+      assert.ok(!net.argv.some((a) => a.startsWith('--uid=')) && !net.props.some((p) => p.startsWith('NFTSet=')), rec);
+      assert.ok(net.props.includes('CapabilityBoundingSet=CAP_SYS_ADMIN CAP_SYS_PTRACE CAP_NET_ADMIN CAP_SYS_CHROOT CAP_SETPCAP CAP_NET_BIND_SERVICE'), rec);
+      assert.deepEqual(prelude(h), usernsArgv(h), `${rec}: the run's own namespaces still`);
+    }
+    h.record('# docker: exempt\n1003\n');
+    h.exec('fast-s-4', ['--network', 'e2e']);
+    assert.ok(h.netCalls().at(-1)!.argv.includes(`--uid=${me}`), 'exempt: the test user\'s');
+    // No wrapper: root's slirp4netns into the unit's namespace, as before.
+    h.record(null);
+    h.userns('old');
+    h.exec('fast-s-5', ['--network', 'e2e']);
+    net = h.netCalls().at(-1)!;
+    assert.deepEqual(net.argv.slice(-3), ['--enable-seccomp', '4242', 'tap0']);
+    assert.ok(!net.argv.some((a) => a.startsWith('--uid=')));
+  } finally {
+    h.done();
+  }
+});
+
+test('#545: the fetch gets its own namespaces and a test-user slirp4netns too; slirp4netns waits for the run\'s own user namespace, and never joins the unit\'s', { skip: !posix && 'bash' }, () => {
+  const h = netHelper();
+  try {
+    h.userns('ok');
+    h.mkRun('fast-w-1');
+    const key = 'e'.repeat(32);
+    mkdirSync(join(h.base, 'shop', 'cache', `npm-${key}`), { recursive: true });
+    const f = h.run('fetch', 'fast-w-1', 'npm', 'npm', key, '600');
+    assert.equal(f.status, 0, f.stderr);
+    const { argv } = h.lastProps();
+    const at = argv.indexOf(h.usernsBin);
+    assert.ok(at > 0, argv.join(' '));
+    // The fetch has no variable of the run's (only the helper's own --setenv), so no loader: the prelude, then bash.
+    const pre = usernsArgv(h).slice(0, -4);
+    const n = pre.length;
+    assert.deepEqual(argv.slice(at, at + n), pre);
+    assert.deepEqual(argv.slice(at + n, at + n + 4), ['/bin/bash', '-o', 'pipefail', '-c']);
+    assert.deepEqual(argv.slice(-2), ['fetch', join(h.base, 'shop', 'runs', 'fast-w-1', 'work')]);
+    const [net] = h.netCalls();
+    assert.ok(net && net.argv.includes(`--uid=${userInfo().username}`) && net.argv.includes('--netns-type=path'), net?.argv.join(' '));
+    // The run's main process still in the host's user namespace (the wrapper hasn't run yet, or failed): no slirp4netns
+    // is started on it, and the line says so (here the run's systemd-run is already over, so it isn't waited for).
+    h.procNs(false);
+    h.grant({ shop: ['e2e'] });
+    const r = h.exec('fast-w-2', ['--network', 'e2e']);
+    assert.match(r.stderr, /worklane-testrun: the run's network could not be started/);
+    assert.equal(h.netCalls().length, 1, 'no second network unit');
+  } finally {
+    h.done();
+  }
+});
+
+/** glibc's unsafe-environment list (what it ignores under AT_SECURE), libmount's and the locale's: never a run's to set. */
+const UNSAFE_ENV = ['GCONV_PATH', 'GETCONF_DIR', 'GLIBC_TUNABLES', 'HOSTALIASES', 'LOCALDOMAIN', 'LOCPATH', 'MALLOC_TRACE', 'MALLOC_ARENA_MAX', 'MALLOC_CHECK_', 'NIS_PATH', 'NLSPATH', 'RESOLV_HOST_CONF', 'RES_OPTIONS', 'TZDIR', 'LIBMOUNT_FSTAB', 'LIBMOUNT_DEBUG', 'LANGUAGE', 'TMPDIR', 'LD_PRELOAD', 'LD_LIBRARY_PATH', 'LD_AUDIT'];
+
+test('#545 round 4: no variable of the run\'s reaches a step that holds a capability: the unit gets none (no EnvironmentFile=), they come on its stdin, and a loader after setpriv exports them; without the wrapper, EnvironmentFile= as before', { skip: !posix && 'bash' }, () => {
+  const h = netHelper();
+  try {
+    const vars = { DATABASE_URL: 'postgres://u:CANARYPW@localhost/db', FOO: 'bar baz', SHELLOPTS: 'xtrace' };
+    // Without the wrapper: systemd reads the root-only file (EnvironmentFile=), and the unit's stdin is empty, as before.
+    let r = h.execEnv('fast-v-0', [], 'echo hi', vars);
+    assert.equal(r.status, 0, r.stderr);
+    assert.ok(h.lastProps().props.some((p) => p.startsWith('EnvironmentFile=')), 'legacy: EnvironmentFile=');
+    assert.equal(h.lastStdin(), '');
+    // With it: no EnvironmentFile=, no value anywhere in the argv; the helper's own --setenv only (fixed values).
+    h.userns('ok');
+    r = h.execEnv('fast-v-1', [], 'echo hi', vars);
+    assert.equal(r.status, 0, r.stderr);
+    const { argv, props } = h.lastProps();
+    assert.ok(!props.some((p) => p.startsWith('EnvironmentFile=')), props.join(' | '));
+    assert.ok(!argv.some((a) => a.includes('CANARYPW') || a.includes('bar baz') || a.includes('xtrace')), 'no value in any argv');
+    assert.deepEqual(argv.filter((a) => a.startsWith('--setenv=')).map((a) => a.slice('--setenv='.length).split('=')[0]), ['HOME', 'TMPDIR', 'TMP', 'TEMP', 'PATH', 'LANG', 'CI', 'USER', 'LOGNAME']);
+    // The privileged steps (the wrapper, sh, ip, mount, setpriv) are fixed text, then the loader, then the command.
+    assert.deepEqual(prelude(h), usernsArgv(h));
+    assert.equal(h.lastStdin(), 'DATABASE_URL=postgres://u:CANARYPW@localhost/db\0FOO=bar baz\0SHELLOPTS=xtrace\0', 'the variables, on the unit\'s stdin');
+    // The loader as built: exports each, notes a name bash keeps as its own, gives the command /dev/null as stdin.
+    const loader = argv[argv.indexOf('load') - 1]!;
+    const l = spawnSync('bash', ['-c', loader, 'load', 'bash', '-c', 'printf "%s|%s|" "$FOO" "$DATABASE_URL"; cat; echo end'], { encoding: 'utf8', input: h.lastStdin(), env: { PATH: '/usr/bin:/bin' } });
+    assert.equal(l.stdout, 'bar baz|postgres://u:CANARYPW@localhost/db|end\n');
+    assert.match(l.stderr, /not set: SHELLOPTS is the shell's own/);
+  } finally {
+    h.done();
+  }
+});
+
+/** Every variable in the bash manual (the round-7 reviewer's list), CI (one the unit sets) and a plain name. */
+const BASH_MANUAL_NAMES = ['BASH', 'BASHOPTS', 'BASHPID', 'BASH_ALIASES', 'BASH_ARGC', 'BASH_ARGV', 'BASH_ARGV0', 'BASH_CMDS', 'BASH_COMMAND', 'BASH_COMPAT',
+  'BASH_EXECUTION_STRING', 'BASH_LINENO', 'BASH_LOADABLES_PATH', 'BASH_MONOSECONDS', 'BASH_REMATCH', 'BASH_SOURCE', 'BASH_SUBSHELL',
+  'BASH_TRAPSIG', 'BASH_VERSINFO', 'BASH_VERSION', 'BASH_XTRACEFD', 'CDPATH', 'CHILD_MAX', 'COLUMNS', 'COMP_CWORD', 'COMP_KEY', 'COMP_LINE',
+  'COMP_POINT', 'COMP_TYPE', 'COMP_WORDBREAKS', 'COMP_WORDS', 'COMPREPLY', 'COPROC', 'DIRSTACK', 'EMACS', 'EPOCHREALTIME', 'EPOCHSECONDS', 'EUID',
+  'EXECIGNORE', 'FCEDIT', 'FIGNORE', 'FUNCNAME', 'FUNCNEST', 'GLOBIGNORE', 'GLOBSORT', 'GROUPS', 'histchars', 'HISTCMD', 'HISTCONTROL', 'HISTFILE',
+  'HISTFILESIZE', 'HISTIGNORE', 'HISTSIZE', 'HISTTIMEFORMAT', 'HOSTFILE', 'HOSTNAME', 'HOSTTYPE', 'IGNOREEOF', 'INPUTRC', 'INSIDE_EMACS', 'LANG',
+  'LC_ALL', 'LC_COLLATE', 'LC_CTYPE', 'LC_MESSAGES', 'LC_NUMERIC', 'LC_TIME', 'LINENO', 'LINES', 'MACHTYPE', 'MAIL', 'MAILCHECK', 'MAILPATH', 'MAPFILE',
+  'OLDPWD', 'OPTARG', 'OPTERR', 'OPTIND', 'OSTYPE', 'PIPESTATUS', 'POSIXLY_CORRECT', 'PPID', 'PROMPT_DIRTRIM', 'PS0', 'PS1', 'PS2', 'PS3', 'PWD', 'RANDOM',
+  'READLINE_ARGUMENT', 'READLINE_LINE', 'READLINE_MARK', 'READLINE_POINT', 'REPLY', 'SECONDS', 'SHELLOPTS', 'SHLVL', 'SRANDOM', 'TEXTDOMAIN',
+  'TEXTDOMAINDIR', 'TIMEFORMAT', 'TMOUT', 'UID', '_', 'CI', 'PLAIN'];
+
+test('#545 round 8: behind no prelude, a bash one and a dash one, each of the bash manual\'s variables is handed over with exactly its value XOR noted (SHLVL and PWD included); a project\'s TMOUT drops no later name', { skip: !posix && 'bash' }, () => {
+  const h = netHelper();
+  const home = tmp('loader-home-');
+  try {
+    h.userns('ok');
+    assert.equal(h.execEnv('fast-l-8', [], 'true', { FOO: 'x' }).status, 0);
+    const argv = h.lastProps().argv;
+    const loader = argv[argv.indexOf('load') - 1]!;
+    const printenv = real('printenv')!;
+    const dash = real('dash');
+    // The unit's own environment (the helper's --setenv), then the shell before the loader, as the prelude's
+    // `sh -c '... && exec setpriv ... -- "$@"'` has it: none, bash, dash. Each built explicitly, never this machine's /bin/sh.
+    const preludes: Array<[string, string[]]> = [['none', []], ['bash', ['/bin/bash', '-c', 'true && exec "$@"', 'sh']], ...(dash ? [['dash', [dash, '-c', 'true && exec "$@"', 'sh']] as [string, string[]]] : [])];
+    const findings: string[] = [];
+    for (const [pre, shell] of preludes) {
+      for (const n of BASH_MANUAL_NAMES) {
+        const r = spawnSync('/usr/bin/env', ['-i', 'PATH=/usr/local/bin:/usr/bin:/bin', `HOME=${home}`, 'LANG=C.UTF-8', 'CI=1', ...shell, '/bin/bash', '-c', loader, 'load', printenv, n], { encoding: 'utf8', input: `${n}=12345\0`, cwd: home });
+        const isNoted = new RegExp(`^worklane-testrun: not set: ${n} is the shell's own$`, 'm').test(r.stderr);
+        const handed = r.status === 0 && r.stdout === '12345\n';
+        if (isNoted === handed) findings.push(`${pre} ${n}: noted ${isNoted}, handed over ${handed} (child [${r.stdout.trim()}])`);
+        if (!isNoted && r.stdout !== '' && !handed) findings.push(`${pre} ${n}: handed over a changed value [${r.stdout.trim()}]`);
+      }
+      // SHLVL: bash raises it at every start and exec lowers it, so it is always noted, behind any shell.
+      const s = spawnSync('/usr/bin/env', ['-i', 'PATH=/usr/bin:/bin', ...shell, '/bin/bash', '-c', loader, 'load', printenv, 'SHLVL'], { encoding: 'utf8', input: 'SHLVL=5\0' });
+      assert.match(s.stderr, /not set: SHLVL is the shell's own/, `${pre}: SHLVL noted`);
+    }
+    assert.deepEqual(findings, []);
+    // TMOUT first, from a pipe: every later name still arrives, with no note.
+    const many = Array.from({ length: 250 }, (_, i) => `N${i}=v${i}`);
+    const t = spawnSync('/usr/bin/env', ['-i', 'PATH=/usr/bin:/bin', '/bin/bash', '-c', loader, 'load', '/usr/bin/env'], { encoding: 'utf8', input: ['TMOUT=0.000001', ...many].map((v) => `${v}\0`).join('') });
+    assert.equal(t.stdout.split('\n').filter((l) => /^N\d+=v\d+$/.test(l)).length, 250, t.stderr);
+    assert.doesNotMatch(t.stderr, /not set: N\d+/);
+  } finally {
+    h.done();
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+/** The sixteen names measured on bash 5.2 to reach a child on v0.5.2 but not through the loader (rounds 6-7). */
+const BASH_OWN_52 = ['SHELLOPTS', 'BASHOPTS', 'UID', 'EUID', 'PPID', 'BASH_VERSINFO', 'GROUPS', 'FUNCNAME', 'DIRSTACK', 'BASH_ARGC', 'BASH_ARGV', 'BASH_SOURCE', 'BASH_LINENO', 'BASH_ALIASES', 'BASH_CMDS', 'PIPESTATUS'];
+
+test('#545 round 7: the loader notes every variable it can\'t pass on, decided on the bash it runs under (no list); never assigns one bash holds as integer, read-only, array or nameref, so no value runs as arithmetic', { skip: !posix && 'bash' }, () => {
+  const h = netHelper();
+  const marks = tmp('loader-marks-');
+  try {
+    h.userns('ok');
+    assert.equal(h.execEnv('fast-l-1', [], 'true', { FOO: 'x' }).status, 0);
+    const argv = h.lastProps().argv;
+    const loader = argv[argv.indexOf('load') - 1]!;
+    // No hand-kept list of names in it.
+    for (const n of [...BASH_OWN_52, 'RANDOM', 'SRANDOM', 'OPTIND']) assert.ok(!new RegExp(`\\b${n}\\b`).test(loader), `the loader names ${n}`);
+    const load = (vars: string[], cmd = 'true') => spawnSync('bash', ['-c', loader, 'load', 'bash', '-c', cmd], { encoding: 'utf8', input: vars.map((v) => `${v}\0`).join(''), env: { PATH: '/usr/bin:/bin' } });
+    const noted = (stderr: string) => [...stderr.matchAll(/^worklane-testrun: not set: (\S+) is the shell's own$/gm)].map((m) => m[1]!).sort();
+    // The sixteen each get a note; an ordinary name gets none and reaches the command.
+    const r = load([...BASH_OWN_52.map((n) => `${n}=v`), 'PLAIN=ok'], 'printf %s "$PLAIN"');
+    assert.equal(r.stdout, 'ok');
+    assert.deepEqual(noted(r.stderr), [...BASH_OWN_52].sort());
+    // What the loader hands over is the environment the command starts with (the command is then the run's bash, which
+    // treats its own names as v0.5.2's did, given the same environment). Checked with printenv as the command itself.
+    const handed = (n: string) => spawnSync('bash', ['-c', loader, 'load', 'printenv', n], { encoding: 'utf8', input: `${n}=12345\0`, env: { PATH: '/usr/bin:/bin' } });
+    // Names special on some bash versions only (SRANDOM: 5.1 and later; EPOCHSECONDS, EPOCHREALTIME, BASH_ARGV0: 5.0
+    // and later; COMP_WORDBREAKS, BASHPID) are decided by the bash the loader runs under: each is either handed over
+    // with its value (and not noted) or noted (and not handed over), never lost silently, whatever bash runs this test.
+    for (const n of ['SRANDOM', 'EPOCHSECONDS', 'EPOCHREALTIME', 'BASH_ARGV0', 'COMP_WORDBREAKS', 'BASHPID', 'HOSTNAME', 'SHLVL', 'POSIXLY_CORRECT', 'BASH_COMPAT']) {
+      const x = handed(n);
+      const passed = x.stdout.trim() === '12345';
+      const isNoted = noted(x.stderr).includes(n);
+      assert.ok(passed !== isNoted, `${n}: handed over ${passed}, noted ${isNoted} (exactly one)`);
+    }
+    // A name the unit's own environment set before the loader (CI, LANG: the helper's --setenv) is the project's to
+    // replace, with no note, as with EnvironmentFile= before.
+    const pre = spawnSync('bash', ['-c', loader, 'load', 'printenv', 'CI', 'LANG'], { encoding: 'utf8', input: 'CI=0\0LANG=C\0', env: { PATH: '/usr/bin:/bin', CI: '1', LANG: 'C.UTF-8' } });
+    assert.equal(pre.stdout, '0\nC\n');
+    assert.deepEqual(noted(pre.stderr), []);
+    // Every one of the sixteen, the same way: noted, and not handed over.
+    for (const n of BASH_OWN_52) {
+      const x = handed(n);
+      assert.ok(x.stdout.trim() !== '12345' && noted(x.stderr).includes(n), `${n}: ${x.stdout} ${x.stderr}`);
+    }
+    // Values a bash integer variable would evaluate as arithmetic run nothing (bash's own import of them, as before #545, didn't either).
+    const evil = ['OPTIND', 'RANDOM', 'SRANDOM', 'HISTCMD', 'SECONDS', 'LINENO'].map((n) => `${n}=a[$(touch ${join(marks, n)})]`);
+    const e = load(evil);
+    assert.deepEqual(spawnSync('ls', [marks], { encoding: 'utf8' }).stdout.trim(), '', `no value ran: ${e.stderr}`);
+    // A duplicate: the last value wins, and is what's checked (no note).
+    const d = load(['D=1', 'D=2'], 'printf %s "$D"');
+    assert.equal(d.stdout, '2');
+    assert.deepEqual(noted(d.stderr), []);
+  } finally {
+    h.done();
+    rmSync(marks, { recursive: true, force: true });
+  }
+});
+
+test('#545 round 4: the helper (valid_env) and the engine (projectEnvProblem) refuse glibc\'s unsafe-environment list, libmount\'s and LANGUAGE', { skip: !posix && 'bash' }, () => {
+  const h = netHelper();
+  try {
+    for (const name of UNSAFE_ENV) {
+      const r = h.execEnv(`fast-x-${name.toLowerCase().replace(/_/g, '-').replace(/-+$/, '')}`, [], 'true', { [name]: '/x' });
+      assert.equal(r.status, 2, `${name}: ${r.stderr}`);
+      assert.match(r.stderr, new RegExp(`--env ${name}: (steers the C library or libmount|set by the sandbox)`), name);
+      assert.ok(projectEnvProblem(name) !== null, `projectEnvProblem ${name}`);
+    }
+    assert.equal(projectEnvProblem('WORKERS'), null, 'an ordinary name still passes');
+    assert.equal(h.execEnv('fast-x-ok', [], 'true', { WORKERS: '4' }).status, 0);
+  } finally {
+    h.done();
+  }
+});
+
+test('#545: the helper\'s egress names and egress_docker_mode are lib.sh\'s, word for word; its wrapper and profile are test-user.sh\'s', () => {
+  const src = readFileSync(helperSrc, 'utf8');
+  const lib = readFileSync(join(repoRoot, 'scripts', 'setup', 'lib.sh'), 'utf8');
+  const tu = readFileSync(join(repoRoot, 'scripts', 'setup', 'test-user.sh'), 'utf8');
+  for (const k of ['EGRESS_TABLE', 'EGRESS_SET', 'EGRESS_NFTSET_SYSTEMD', 'EGRESS_RECORD']) {
+    const re = new RegExp(`^${k}=(\\S+)$`, 'm');
+    assert.equal(re.exec(src)?.[1], re.exec(lib)?.[1], k);
+  }
+  const fn = (s: string) => s.slice(s.indexOf('egress_docker_mode() {'), s.indexOf('\n}\n', s.indexOf('egress_docker_mode() {')));
+  assert.ok(fn(src).length > 50);
+  assert.equal(fn(src), fn(lib));
+  assert.equal(/^USERNS=(\S+)$/m.exec(src)?.[1], /^userns_bin=(\S+)$/m.exec(tu)?.[1]);
+  assert.equal(/^USERNS_PROFILE=(\S+)$/m.exec(src)?.[1], /^userns_profile=(\S+)$/m.exec(tu)?.[1]);
+  // The helper's check: a run in its own user namespace, or a note (never a FAIL) where there is no wrapper, so a
+  // helper the updater installed before test-user.sh install ran again keeps test runs on.
+  const check = src.slice(src.indexOf('\ncheck() {'), src.indexOf('\n}\n', src.indexOf('\ncheck() {')));
+  assert.match(check, /if userns_ok; then\n[\s\S]*echo "PASS a sandboxed run is in a user namespace of its own[\s\S]*else\n\s+echo "NOTE a sandboxed run shares the host's user namespace/);
+  assert.match(check, /printf "uid_map %s %s %s\\n" \$\(cat \/proc\/self\/uid_map\)/);
+});
+
+test('#545: test-user.sh installs the wrapper (a copy of unshare, root:root 0700, run by the test users alone through its ACL) and its AppArmor profile where user namespaces are restricted; check verifies the ACL; --print shows the profile; remove takes both away with the last test user', { skip: !posix && 'bash' }, () => {
+  const r = spawnSync('bash', [join(repoRoot, 'scripts', 'setup', 'test-user.sh'), '--print', 'install', 'shop'], { encoding: 'utf8' });
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /^profile worklane-testrun-userns \/usr\/local\/libexec\/worklane-testrun-userns flags=\(unconfined\) \{\n {2}userns,\n {2}include if exists <local\/worklane-testrun-userns>\n\}$/m);
+  const tu = readFileSync(join(repoRoot, 'scripts', 'setup', 'test-user.sh'), 'utf8');
+  const install = tu.slice(tu.indexOf('install_userns() {'), tu.indexOf('\n}\n', tu.indexOf('install_userns() {')));
+  assert.match(install, /install -o root -g root -m 0700 "\$\(command -v unshare\)" "\$userns_bin\.tmp"\n\s+for u in \$\(test_users\); do setfacl -m "u:\$u:r-x" "\$userns_bin\.tmp"; done\n\s+mv -f "\$userns_bin\.tmp" "\$userns_bin"/);
+  assert.doesNotMatch(tu, /-m 0755 "\$\(command -v unshare\)"/, 'never world-executable');
+  // remove drops the user's entry before its uid goes.
+  assert.match(tu, /setfacl -x "u:\$user" "\$userns_bin"/);
+  assert.doesNotMatch(r.stdout, /worklane-testrun-userns[^\n]*0755/, '--print never says 0755 (round 3)');
+  assert.match(r.stdout, /worklane-testrun-userns: a copy of this machine's unshare \(util-linux 2\.38 or later\), root:root 0700, an ACL entry r-x for each test user/);
+});
+
+test('#545 round 3: who counts as a test user, and who may run or write the wrapper, is exact and the same in the helper and test-user.sh (install, check): never instance test\'s wl-test-agent, wl-test-eval or wl-test-mcp; nobody but root writes it', { skip: !posix && 'bash' }, () => {
+  const tu = readFileSync(join(repoRoot, 'scripts', 'setup', 'test-user.sh'), 'utf8');
+  const src = readFileSync(helperSrc, 'utf8');
+  const lib = readFileSync(join(repoRoot, 'scripts', 'setup', 'lib.sh'), 'utf8');
+  const fnOf = (s: string, name: string) => {
+    const at = s.indexOf(`\n${name}() {`);
+    assert.ok(at >= 0, `${name} is defined`);
+    return s.slice(at + 1, s.indexOf('\n}\n', at) + 3);
+  };
+  // The same rule, word for word.
+  for (const name of ['is_test_user', 'wrapper_acl_problem']) assert.equal(fnOf(tu, name), fnOf(src, name), name);
+  // Instances here: shop (this one), other, test; each a directory test-user.sh install made. agent has one too, so
+  // only the name rule keeps wl-test-agent out.
+  const base = tmp('acl-base-');
+  for (const n of ['shop', 'other', 'test', 'agent']) mkdirSync(join(base, n));
+  // An instance directory that is a symlink was never test-user.sh's: wl-test-link doesn't count.
+  symlinkSync(join(base, 'other'), join(base, 'link'));
+  const pw = ['wl-test', 'wl-test-agent', 'wl-test-eval', 'wl-test-mcp', 'wl-test-test', 'wl-test-other', 'wl-test-gone', 'wl-test-link', 'wl-ci'].map((u, i) => `${u}:x:${1001 + i}:${1001 + i}::/nonexistent:/usr/sbin/nologin`).join('\n');
+  const sh = (script: string, fns: string, call: string, acl = '') =>
+    spawnSync('bash', ['-c', `set -euo pipefail\nuser=wl-test-shop\nuserns_bin=/x\nBASE=${base}\ngetfacl() { printf '%s' "$ACL"; }\ngetent() { printf '%s\\n' "$PW"; }\n${fnOf(script === 'helper' ? src : lib, 'instance_name_problem')}${fns}${call}`], { encoding: 'utf8', env: { PATH: '/usr/bin:/bin', ACL: acl, PW: pw } });
+  try {
+    // test-user.sh install's list: this instance's test user and each other instance's, never instance test's other users.
+    const tuFns = ['is_test_user', 'wrapper_acl_problem', 'userns_acl_ok', 'test_users'].map((n) => fnOf(tu, n)).join('');
+    assert.deepEqual(sh('tu', tuFns, 'test_users').stdout.trim().split('\n'), ['wl-test-other', 'wl-test-shop', 'wl-test-test']);
+    const good = 'user::rwx\nuser:wl-test-shop:r-x\nuser:wl-test-other:r-x\t#effective:r-x\nuser:wl-test-test:r-x\ngroup::---\nmask::r-x\nother::---\n';
+    const base4 = 'user::rwx\nuser:wl-test-shop:r-x\ngroup::---\nmask::r-x\nother::---\n';
+    const bad: [string, RegExp][] = [
+      // The reviewer's fixtures (round 2): instance test's agent, MCP and eval users.
+      [`${base4}user:wl-test-agent:r-x\n`, /wl-test-agent, not the test user of an instance here, may run it/],
+      [`${base4}user:wl-test-mcp:r-x\n`, /wl-test-mcp, not the test user/],
+      [`${base4}user:wl-test-eval:r-x\n`, /wl-test-eval, not the test user/],
+      ['user::rwx\nuser:wl-test-shop:r-x\nuser:wl-test-other:rwx\ngroup::---\nmask::rwx\nother::---\n', /wl-test-other may write it/],
+      ['user::rwx\nuser:wl-test-shop:r-x\ngroup::---\nmask::rwx\nother::---\n', /mask lets a named entry write it/],
+      ['user::rwx\nuser:wl-test-shop:rwx\ngroup::---\nmask::r-x\nother::---\n', /wl-test-shop may write it/],
+      [`${base4}group:docker:---\n`, /a group may run it/],
+      [`${base4}user:4242:r-x\n`, /4242, not the test user/],
+      [`${base4}default:user::rwx\n`, /an ACL entry this helper doesn't know/],
+      [`${base4}user:wl-test-gone:r-x\n`, /wl-test-gone, not the test user/],
+      [`${base4}user:wl-test-link:r-x\n`, /wl-test-link, not the test user/],
+      [`${base4}user:wl-ci:r-x\n`, /wl-ci, not the test user/],
+      ['user::rwx\nuser:wl-test-shop:r-x\ngroup::---\nmask::r-x\nother::r-x\n', /every user may run it/],
+      ['user::rwx\nuser:wl-test-shop:r-x\ngroup::r-x\nmask::r-x\nother::---\n', /a group may run it/],
+      ['user::rwx\nuser:wl-test-shop:r--\ngroup::---\nmask::r-x\nother::---\n', /wl-test-shop may not run it/],
+      ['user::rwx\nuser:wl-test-other:r-x\ngroup::---\nmask::r-x\nother::---\n', /wl-test-shop may not run it/],
+    ];
+    const hFns = ['is_test_user', 'wrapper_acl_problem'].map((n) => fnOf(src, n)).join('');
+    assert.equal(sh('helper', hFns, 'wrapper_acl_problem "$ACL"', good).stdout.trim(), '', 'the helper takes the good ACL');
+    assert.equal(sh('tu', tuFns, 'userns_acl_ok', good).status, 0, 'test-user.sh check takes it');
+    for (const [acl, why] of bad) {
+      assert.match(sh('helper', hFns, 'wrapper_acl_problem "$ACL"', acl).stdout, why, `helper: ${acl}`);
+      assert.notEqual(sh('tu', tuFns, 'userns_acl_ok', acl).status, 0, `test-user.sh check: ${acl}`);
+    }
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test('#545: test-user.sh\'s install, remove and profile (continued)', { skip: !posix && 'bash' }, () => {
+  const tu = readFileSync(join(repoRoot, 'scripts', 'setup', 'test-user.sh'), 'utf8');
+  const install = tu.slice(tu.indexOf('install_userns() {'), tu.indexOf('\n}\n', tu.indexOf('install_userns() {')));
+  assert.match(install, /kernel\.apparmor_restrict_unprivileged_userns[\s\S]*apparmor_parser -r "\/etc\/apparmor\.d\/\$userns_profile"/);
+  assert.match(tu, /\n {2}install_userns\n/, 'install calls it');
+  assert.match(tu, /rm -f \/etc\/systemd\/system\/worklane-test\.slice "\$helper" "\$userns_bin"/);
+  assert.match(tu, /apparmor_parser -R "\/etc\/apparmor\.d\/\$userns_profile"/);
 });
 
 test('the helper\'s FETCH_NPM is the engine\'s npmFetchScript, byte for byte', () => {

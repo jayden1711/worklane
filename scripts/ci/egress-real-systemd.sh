@@ -17,12 +17,16 @@
 #   restart:   the set follows Docker through a restart, with no reload.
 #   no NFTSet: Docker's unit without NFTSet= can't pull, and check says why (fail-without); test-user.sh install puts it
 #              back, loads the rule again, and the pull works.
-#   join:      MEASURED, NOT ASSERTED: whether a test run (the real helper's exec, its real sandbox) can join the Docker
-#              daemon's user+net namespaces, and reach the stand-in from there (through Docker's exempt slirp4netns).
-#              The containers' netns is looked for in every thread of every test-user process, not only its main one,
-#              and joined through each such thread. The answer is printed and put in the job summary either way, and
-#              so is whether a join through a thread other than a main one gets out (Docker restarted until a start
-#              comes up where no main thread is in that netns).
+#   join:      ASSERTED REFUSED (#545): a test run (the real helper's exec, its real sandbox: a user namespace of its own)
+#              can't join the Docker daemon's user+net namespaces, nor the containers' netns through any thread of any
+#              test-user process, and so can't reach the stand-in through Docker's exempt slirp4netns. The containers'
+#              netns is looked for in every thread of every test-user process, not only its main one (Docker restarted,
+#              at most 3 times, until a thread is there), and joined through each such thread. A plain test-user unit
+#              (no run sandbox) must still join one and reach the stand-in, or the probe can't tell. Fail-without: the
+#              helper before #545 ($PRE545) lets the run join and reach it. Whether a join through a thread other than a
+#              main one gets out is still measured, not asserted (Docker restarted until such a start comes up).
+#   granted:   #545: a granted run's slirp4netns runs as the test user, its unit in the set, and the run reaches the
+#              stand-in through it; on the upgraded (dropped) install it is root's, as before, and the run still does.
 #   upgrade:   an install that covered test users before #543 (the pre-#543 egress-firewall.sh, apply --with-test-users,
 #              and a Docker unit with no NFTSet=) keeps dropping their Docker after the new test-user.sh install and
 #              apply: no NFTSet=, no cgroup accept, the pull dropped, and the join probe, run before and after, reaches
@@ -42,10 +46,14 @@ PUB=198.51.100.7
 EF=scripts/setup/egress-firewall.sh
 # main's commit before #543, whose egress-firewall.sh and lib.sh the upgrade step runs (the rule a machine had).
 PRE543=93fa37612bcdafe2f2cbe8426165ba1b29d99c63
+# main before #545 (#543 merged): its helper runs a test run in the host's user namespace (the join probe's fail-without).
+PRE545=689854dea0f90f963cf4f80f8bbc1945aaae1cbf
 t="$(mktemp -d)"
 chmod 0755 "$t"
 cleanup() {
   if [ -f "$t/pids" ]; then while read -r p; do sudo kill "$p" 2>/dev/null || true; done < "$t/pids"; fi
+  sudo install -o root -g root -m 0755 scripts/machine/worklane-testrun.sh "$H"
+  sudo bash scripts/setup/testrun-network.sh disable ci > /dev/null 2>&1 || true
   sudo ip netns del wleg 2>/dev/null || true
   sudo ip link del wleg0 2>/dev/null || true
   rm -rf "$t"
@@ -349,17 +357,75 @@ join_probe() {
 # out: they change when Docker restarts), sorted.
 opened() { { grep -- "-> $PUB: OK\$" "$1" || true; } | sed -E 's/ \(pid [0-9]+, tid [0-9]+, net:\[[0-9]+\]\)/ (a thread)/; s/: .*//' | sort -u; }
 
-echo "== join (measured, not asserted): can a test run join the Docker daemon's user+net namespaces?"
+# A granted run (#545) of ci's tier e2e (root's grant, testrun-network.sh): its probe to the stand-in, then it holds
+# its unit 4 s while its network unit's User= and whether that unit's cgroup is in the set are read. Its lines in
+# $t/granted-<tag>.out: the probe's answer, "net_user <User=>", "net_in_set yes|no".
+granted_run() {
+  local tag="$1" id="egress-granted-$1" r pid u="" i cmd
+  local id_=(-c user.email=ci@example.com -c user.name=ci -c commit.gpgsign=false)
+  sudo bash scripts/setup/testrun-network.sh enable ci --tiers e2e > /dev/null
+  r="$(mktemp -d)"
+  git init -q "$r" && date +%s%N > "$r/f" && git -C "$r" add -A && git -C "$r" "${id_[@]}" commit -q -m probe
+  for x in head base; do git -C "$r" update-ref "refs/worklane/test-run/$id/$x" HEAD; done
+  git -C "$r" bundle create --quiet "$r/b" "refs/worklane/test-run/$id/head" "refs/worklane/test-run/$id/base"
+  as_ create "$id" main "refs/worklane/test-run/$id/head" "refs/worklane/test-run/$id/base" "$(git -C "$r" rev-parse HEAD)" "$(git -C "$r" rev-parse HEAD)" < "$r/b" > /dev/null
+  rm -rf "$r"
+  # No ${...}: systemd would expand those.
+  cmd="printf %s $(base64 -w0 < "$t/probe.py") | base64 -d > \"\$TMPDIR/p.py\"; python3 \"\$TMPDIR/p.py\" $PUB $PORT; sleep 4"
+  as_ exec "$id" 120 --network e2e -- "$cmd" < /dev/null > "$t/granted-$tag.out" 2> "$t/granted-$tag.err" &
+  pid=$!
+  for i in $(seq 100); do
+    u="$(systemctl list-units --plain --no-legend --full "worklane-test-ci_${id}_net_*" | awk '{ print $1 }' | head -n 1)"
+    if [ -n "$u" ] && [ "$(systemctl show -p MainPID --value "$u" 2>/dev/null || echo 0)" != 0 ]; then break; fi
+    u=""; sleep 0.1
+  done
+  [ -n "$u" ] || { wait "$pid" || true; cat "$t/granted-$tag.err" >&2; fail "$tag: the granted run's network unit didn't come up"; }
+  {
+    echo "net_user $(systemctl show -p User --value "$u")"
+    if sudo nft list set inet worklane_egress egress_ok 2> /dev/null | grep -qF "\"$(systemctl show -p ControlGroup --value "$u" | sed 's#^/##')\""; then echo "net_in_set yes"; else echo "net_in_set no"; fi
+  } > "$t/granted-$tag.ns"
+  wait "$pid" || { cat "$t/granted-$tag.err" >&2; fail "$tag: the granted run exited non-zero"; }
+  cat "$t/granted-$tag.ns" >> "$t/granted-$tag.out"
+  sed "s/^/  granted run ($tag): /" "$t/granted-$tag.out"
+  as_ wipe "$id" > /dev/null
+}
+
+echo "== granted (#545): a granted run's slirp4netns is the test user's, in the set, and carries the run to the stand-in"
+granted_run exempt
+for x in OK "net_user $U" "net_in_set yes"; do grep -qx "$x" "$t/granted-exempt.out" || fail "the granted run (default install): no line \"$x\""; done
+summary "### #545: a granted run on the default install: $(tr '\n' ';' < "$t/granted-exempt.out")"
+
+echo "== join (asserted refused, #545): can a test run join the Docker daemon's user+net namespaces?"
+# A thread to join first (Docker restarted at most 3 times while none is there), so the plain unit's join can show the
+# route is there to be refused.
+summary "### #545: a thread to join before the default join probe (Docker restarted, at most 3 times, while none is in a non-host netns)"
+await_netns_thread default
 join_probe default
-summary "### #543: can a test run join the Docker daemon's namespaces? (measured on this runner)"
+summary "### #545: can a test run join the Docker daemon's namespaces? (asserted: no)"
 summary "$JOIN_INFO"
 while IFS= read -r l; do summary "- from a run (the helper's real exec sandbox): $l"; done < "$t/join-default-run.out"
 while IFS= read -r l; do summary "- from a plain test-user unit (no run sandbox): $l"; done < "$t/join-default-plain.out"
 if grep -q ": joined; -> $PUB: OK$" "$t/join-default-run.out"; then
   summary "ANSWER: a test run CAN get out through Docker's namespaces: $(grep ": joined; -> $PUB: OK$" "$t/join-default-run.out" | head -n 1)."
-else
-  summary "ANSWER: a test run can NOT get out through Docker's namespaces here (each attempt above was refused or reached nothing)."
+  fail "a test run joined Docker's namespaces and reached $PUB (#545): $(grep ": joined; -> $PUB: OK$" "$t/join-default-run.out" | head -n 1)"
 fi
+summary "ANSWER: a test run can NOT get out through Docker's namespaces here (each attempt above was refused or reached nothing)."
+# Every attempt from the run is refused outright (it has no capability in Docker's user namespace), not only unanswered.
+if grep -q ": joined; " "$t/join-default-run.out"; then fail "a test run joined one of Docker's namespaces (#545): $(grep ": joined; " "$t/join-default-run.out" | head -n 1)"; fi
+grep -q "^the daemon's user+net: refused: " "$t/join-default-run.out" || fail "the run's join probe didn't try the daemon's user+net namespaces"
+# The probe can tell: a plain test-user unit joins the containers' netns through a thread and reaches the stand-in.
+grep -q "^the containers' netns (pid [0-9]*, tid [0-9]*, net:\[[0-9]*\]): joined; -> $PUB: OK$" "$t/join-default-plain.out" || fail "no plain test-user unit reached $PUB through the containers' netns: this probe can't tell whether a run is refused"
+grep -q "^the containers' netns (pid [0-9]*, tid [0-9]*, net:\[[0-9]*\]): refused: " "$t/join-default-run.out" || fail "the run's join probe didn't try the containers' netns through a thread"
+echo "  fail-without: the helper before #545 ($PRE545) lets a run join the containers' netns and reach $PUB"
+git fetch -q --depth=1 origin "$PRE545"
+git show "$PRE545:scripts/machine/worklane-testrun.sh" > "$t/helper-pre545.sh"
+sudo install -o root -g root -m 0755 "$t/helper-pre545.sh" "$H"
+await_netns_thread pre545
+join_probe pre545
+sudo install -o root -g root -m 0755 scripts/machine/worklane-testrun.sh "$H"
+summary "### #545 fail-without: the helper before #545 ($PRE545), the same probe"
+while IFS= read -r l; do summary "- from a run: $l"; done < "$t/join-pre545-run.out"
+grep -q "^the containers' netns (pid [0-9]*, tid [0-9]*, net:\[[0-9]*\]): joined; -> $PUB: OK$" "$t/join-pre545-run.out" || fail "the helper before #545 didn't let a run reach $PUB through the containers' netns: this probe can't tell"
 
 echo "== join through a thread other than a main one (measured, not asserted), on the default (exempt) install"
 # Whether, on a Docker start where no test-user process's main thread is in a non-host netns (so a probe of
@@ -470,10 +536,17 @@ for w in run plain; do
   if grep -q -- "-> $PUB: OK\$" "$t/join-new-$w.out"; then fail "upgrade: from a $w, a join still reaches $PUB: $(opened "$t/join-new-$w.out")"; fi
 done
 # The probe has to have something to measure: some thread of a test-user process in a non-host netns (any thread, not
-# only a main one: which threads are there depends on the start), and the run joining it. Docker's restarts above
+# only a main one: which threads are there depends on the start), and a test-user process joining it. Docker's restarts above
 # (await_netns_thread) only give it more starts to find one on; this check is the same with or without them.
 [ -s "$t/threads-new" ] || fail "after the upgrade (and $DOCKER_RESTARTS Docker restart(s)) no thread of any $U process is in a non-host netns: this probe can't tell whether the containers' netns route is dropped"
-grep -q "^the containers' netns (pid [0-9]*, tid [0-9]*, net:\[[0-9]*\]): joined; " "$t/join-new-run.out" || fail "after the upgrade the run couldn't join any $U thread's non-host netns: this probe can't tell whether that route is dropped"
+# #545: a run joins none of them at all (its own user namespace), so the plain test-user unit is what shows the route is
+# there and dropped: it must join one (and, above, reach nothing).
+grep -q "^the containers' netns (pid [0-9]*, tid [0-9]*, net:\[[0-9]*\]): joined; " "$t/join-new-plain.out" || fail "after the upgrade the plain test-user unit couldn't join any $U thread's non-host netns: this probe can't tell whether that route is dropped"
+if grep -q ": joined; " "$t/join-new-run.out"; then fail "after the upgrade a run joined one of Docker's namespaces (#545): $(grep ": joined; " "$t/join-new-run.out" | head -n 1)"; fi
+echo "== granted (#545), the upgraded install (dropped): the granted run still reaches the stand-in, through root's slirp4netns as before"
+granted_run dropped
+for x in OK "net_user " "net_in_set no"; do grep -qx "$x" "$t/granted-dropped.out" || fail "the granted run (dropped install): no line \"$x\""; done
+summary "### #545: a granted run on the upgraded (dropped) install: $(tr '\n' ';' < "$t/granted-dropped.out")"
 sudo bash "$EF" check > "$t/check-upgrade.log" || { cat "$t/check-upgrade.log"; fail "check fails after the upgrade"; }
 cat "$t/check-upgrade.log"
 echo "OK: test users covered by default on real systemd; Docker's pull the one exception, kept across reloads and restarts; an install that covered test users before #543 keeps dropping their Docker"

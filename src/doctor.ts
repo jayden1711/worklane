@@ -24,6 +24,8 @@ import { lintSkills, skillLintReport, trackedSkills } from './skill-lint.js';
 import { initStateUnreadable, localInitFile, localRepo, readInitState, serverInitFile, setupContext, unavailableIn, type InitIo, type Mode } from './init.js';
 import { gpuCommands, gpuFilePath, gpuIndices, readGpuFile } from './testrun/gpu.js';
 import { networkCommands, networkFilePath, NETWORK_FILE_NAME, parseNetworkFile } from './testrun/network.js';
+import { usernsUnsupportedProblem } from './testrun/status.js';
+import { openReadOnly } from './events/read-only.js';
 import { checkSetup, groupLevel, GROUPS, stepLevel, systemProbe, type SetupContext, type SetupProbe } from './setup-steps.js';
 import { modelWarnings } from './model-routing.js';
 import { HUB_UNIT_AS_ROOT, OWNER_TERMINAL_RERUN, ownerTerminalNotice, ownerTerminalRerun, type TerminalPaths } from './console/owner-terminal-removed.js';
@@ -135,6 +137,8 @@ export function doctor(rootArg: string, opts: { agentshield?: boolean; /** A pol
     if (intake.state === 'off') add(`intake ${name}`, 'ok', `no ${INTAKE_FILE} in the instance home: intake is off`);
     else if (intake.state === 'invalid') add(`intake ${name}`, 'fail', `${intake.file} is invalid, so intake is off until it is fixed (\`${BRAND.cli} intake check --instance ${name}\` checks an edit):\n${intake.errors.join('\n')}`);
     else add(`intake ${name}`, intake.warnings.length ? 'warn' : 'ok', [`${INTAKE_FILE} valid: ${intake.summary.join('; ')}`, ...intake.warnings].join('\n'));
+    const userns = usernsCheck(name);
+    if (userns) out.push(userns);
     // An API-key instance: its key file is the agent user's alone.
     try {
       const inst = loadInstance(name);
@@ -244,6 +248,36 @@ export function doctor(rootArg: string, opts: { agentshield?: boolean; /** A pol
   if (cfg?.tests.test_run) out.push(networkCheck());
   if (opts.agentshield) out.push(agentShield(root));
   return out;
+}
+
+/**
+ * A failure when the instance's newest sandbox check (its coordinator's `testrun.sandbox` event) said this machine
+ * can't give a test run a user namespace of its own (util-linux older than 2.38, or no setpriv), with the fix; else
+ * nothing. Read-only: the event log is opened read-only, and one this user can't read (another user's state) or that
+ * has no such event says nothing. INVARIANT: shown only. No test run, install or update waits on doctor (its exit code
+ * is read by bootstrap.sh alone, after everything is installed, to print what's next), and this reads the same field
+ * the Machine page shows (src/testrun/status.ts), which the run gate and the updater never read.
+ */
+export function usernsCheck(instance: string, eventsDb = join(instancesDir(), instance, 'state', 'events.db')): DoctorCheck | null {
+  let payload: string | undefined;
+  try {
+    if (!existsSync(eventsDb)) return null;
+    const db = openReadOnly(eventsDb);
+    try {
+      payload = (db.prepare("SELECT payload FROM events WHERE type = 'testrun.sandbox' ORDER BY id DESC LIMIT 1").get() as { payload: string } | undefined)?.payload;
+    } finally {
+      db.close();
+    }
+  } catch {
+    return null;
+  }
+  let why: unknown;
+  try {
+    why = payload ? (JSON.parse(payload) as { unsupported?: unknown }).unsupported : undefined;
+  } catch {
+    return null;
+  }
+  return typeof why === 'string' && why ? { name: `test runs ${instance}`, level: 'fail', detail: usernsUnsupportedProblem(why) } : null;
 }
 
 /**
