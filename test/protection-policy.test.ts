@@ -157,19 +157,21 @@ function policyFixture() {
 
 test('the Policy form: each key with its bounds; Review shows the change and writes nothing; Confirm writes exactly it, keeps the comments, logs and audits it', async () => {
   const { dir, policyFile } = policyFixture();
+  // Automations on, so one confirm can tighten two keys (round 12: the form wrote and logged two until round 11).
+  appendFileSync(policyFile, 'automations: { enabled: true }\n');
   const s = await dashboard(dir, { instance: 'shop', policyFile, setupContext: { instanceFacts: () => ({ error: 'not here' }) } });
   try {
     const p = (await s.get()).policy!;
-    assert.deepEqual(p.fields.map((f) => [f.key, f.value]), [['budget.daily_usd', 50], ['agents.max_workers', 4], ['land_mode', 'pr'], ['auto_merge', false], ['main_watch', 'auto'], ['automations.enabled', false]]);
+    assert.deepEqual(p.fields.map((f) => [f.key, f.value]), [['budget.daily_usd', 50], ['agents.max_workers', 4], ['land_mode', 'pr'], ['auto_merge', false], ['main_watch', 'auto'], ['automations.enabled', true]]);
     assert.equal(p.fields[0]!.max, 100, "the machine's limit");
     assert.deepEqual(p.fixed.map((f) => f.key), ['sandbox', 'allow_same_user', 'lanes', 'network_allow', 'pre_approved']);
     const before = readFileSync(policyFile, 'utf8');
     // Round 11 (the owner's decision of 2026-10-19): the form only tightens, on this unrecorded install too; until
     // then this test raised the budget to 60 and turned automations on. A lowering is reviewed and written as before.
-    const preview = await s.post('/api/first-run/policy', 'example-owner', { values: { 'budget.daily_usd': 45, land_mode: 'pr' } });
+    const preview = await s.post('/api/first-run/policy', 'example-owner', { values: { 'budget.daily_usd': 45, 'automations.enabled': false, land_mode: 'pr' } });
     assert.equal(preview.status, 200);
     assert.equal(preview.body.confirmed, false);
-    assert.deepEqual(preview.body.changes, [{ key: 'budget.daily_usd', from: 50, to: 45 }]);
+    assert.deepEqual(preview.body.changes, [{ key: 'budget.daily_usd', from: 50, to: 45 }, { key: 'automations.enabled', from: true, to: false }]);
     assert.equal(readFileSync(policyFile, 'utf8'), before, 'Review writes nothing');
     assert.equal((await s.post('/api/first-run/policy', 'example-collaborator', { values: { auto_merge: true }, confirm: true })).status, 403);
     // auto_merge on is an admin's alone on every install, this unrecorded one too (#770): refused, nothing written.
@@ -177,17 +179,18 @@ test('the Policy form: each key with its bounds; Review shows the change and wri
     assert.equal(on.status, 400);
     assert.match(on.body.error!, /auto_merge true: that is an admin's alone, never this form's/);
     assert.equal(readFileSync(policyFile, 'utf8'), before);
-    const raise = await s.post('/api/first-run/policy', 'example-owner', { values: { 'budget.daily_usd': 60, 'automations.enabled': true }, confirm: true });
+    const raise = await s.post('/api/first-run/policy', 'example-owner', { values: { 'budget.daily_usd': 60, 'agents.max_workers': 5 }, confirm: true });
     assert.equal(raise.status, 400);
-    assert.match(raise.body.error!, /budget\.daily_usd 60 would loosen it \(now 50\).*automations\.enabled true would loosen it \(now false\)/);
+    assert.match(raise.body.error!, /budget\.daily_usd 60 would loosen it \(now 50\).*agents\.max_workers 5 would loosen it \(now 4\)/);
     assert.equal(readFileSync(policyFile, 'utf8'), before);
-    const ok = await s.post('/api/first-run/policy', 'example-owner', { values: { 'budget.daily_usd': 45 }, confirm: true });
+    const ok = await s.post('/api/first-run/policy', 'example-owner', { values: { 'budget.daily_usd': 45, 'automations.enabled': false }, confirm: true });
     assert.equal(ok.status, 200, JSON.stringify(ok.body));
     const after = readFileSync(policyFile, 'utf8');
     assert.match(after, /daily_usd: 45/);
+    assert.match(after, /enabled: false/);
     assert.match(after, /auto_merge: false/);
     assert.match(after, /# kept: a person wrote this/);
-    assert.deepEqual(s.events(['settings.changed']).map((e) => [e.key, e.to, e.by]), [['policy.budget.daily_usd', 45, 'example-owner']]);
+    assert.deepEqual(s.events(['settings.changed']).map((e) => [e.key, e.to, e.by]), [['policy.budget.daily_usd', 45, 'example-owner'], ['policy.automations.enabled', false, 'example-owner']]);
     assert.deepEqual(s.events(['dashboard.audit']).map((a) => a.action), ['first_run.policy_refused', 'first_run.policy_refused', 'first_run.policy_refused', 'first_run.policy']);
   } finally {
     await s.d.close();
