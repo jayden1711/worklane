@@ -67,13 +67,21 @@ function shiftFileTimes(ms: number): void {
   syncBuiltinESMExports();
 }
 
-/** Move this process's clock by `ms`. Date stays Date (instanceof, Date.parse, Date.UTC): only "now" changes. */
+/**
+ * Move this process's clock by `ms`. Date stays Date (instanceof, Date.parse, Date.UTC): only "now" changes.
+ * Date.now becomes an ordinary property holding the shifted clock, so a test can still replace it
+ * (`t.mock.method(Date, 'now', …)`) and have that take effect.
+ * INVARIANT: the shifted clock reads the real one captured here, never the current Date.now: a test's mock of
+ * Date.now that calls the clock it found there (`const wallReal = Date.now.bind(Date)`) would otherwise call itself
+ * without end (#687: test/dashboard-auth.test.ts hung the weekly job).
+ */
 function installClockShift(ms: number): void {
-  const now = () => RealDate.now() + ms;
+  const realNow = RealDate.now.bind(RealDate);
+  const now = () => realNow() + ms;
+  RealDate.now = now;
   globalThis.Date = new Proxy(RealDate, {
     construct: (target, args, newTarget) => Reflect.construct(target, args.length === 0 ? [now()] : args, newTarget),
     apply: () => new RealDate(now()).toString(),
-    get: (target, key, receiver) => (key === 'now' ? now : Reflect.get(target, key, receiver)),
   });
   shiftFileTimes(ms);
 }

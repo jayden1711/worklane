@@ -21,8 +21,9 @@ const shifted = (shift: string): NodeJS.ProcessEnv => ({ ...plain, TEST_CLOCK_SH
 /** This process's own shift: Date.now() less it is the real time. */
 const OWN_SHIFT_MS = _o?.includes('clock-shift') ? parseClockShift(_s) : 0;
 
-async function node(args: string[], env: NodeJS.ProcessEnv): Promise<{ code: number | null; out: string }> {
-  const p = spawn(process.execPath, args, { cwd: repoRoot, env, stdio: ['ignore', 'pipe', 'pipe'] });
+/** Node with these arguments; `timeout` ms, when given, ends one that runs longer (code null). */
+async function node(args: string[], env: NodeJS.ProcessEnv, timeout?: number): Promise<{ code: number | null; out: string }> {
+  const p = spawn(process.execPath, args, { cwd: repoRoot, env, stdio: ['ignore', 'pipe', 'pipe'], ...(timeout ? { timeout } : {}) });
   let out = '';
   p.stdout.on('data', (d: Buffer) => (out += d.toString()));
   p.stderr.on('data', (d: Buffer) => (out += d.toString()));
@@ -93,4 +94,32 @@ test('a test that only passes before a date fails on the shifted clock, and pass
   const late = await node([...TEST_PRELOAD, '--test', file], shifted('+45d'));
   assert.equal(late.code, 1, late.out);
   assert.match(late.out, /past the date/);
+});
+
+test('shifted: a test that mocks Date.now sees its mock, and a mock calling the clock it found there finishes', async () => {
+  // test/dashboard-auth.test.ts's pattern: under the shift it once called itself without end and hung the weekly job.
+  const dir = mkdtempSync(join(tmpdir(), 'clock-fixture-'));
+  writeFileSync(join(dir, 'package.json'), '{"type":"module"}\n');
+  const file = join(dir, 'mocks-now.test.js');
+  const late = Date.now() - OWN_SHIFT_MS + 45 * DAY - 2000;
+  writeFileSync(
+    file,
+    [
+      "import { test } from 'node:test';",
+      "import assert from 'node:assert/strict';",
+      "test('a fixed mock', (t) => { t.mock.method(Date, 'now', () => 12345); assert.equal(Date.now(), 12345); });",
+      'test(\'a mock on the clock it found\', (t) => {',
+      '  const wallReal = Date.now.bind(Date);',
+      `  assert.ok(wallReal() >= ${late}, 'the clock found is the shifted one');`,
+      "  t.mock.method(Date, 'now', () => wallReal() + 5000);",
+      '  const ahead = Date.now() - wallReal();',
+      '  assert.ok(ahead >= 4900 && ahead <= 5100, `mocked ahead by ${ahead}`);',
+      '});',
+      `test('the mocks are gone: the shifted clock again', () => assert.ok(Date.now() >= ${late}));`,
+      '',
+    ].join('\n'),
+  );
+  const r = await node([...TEST_PRELOAD, '--test', '--test-reporter=tap', file], shifted('+45d'), 60_000);
+  assert.equal(r.code, 0, r.out);
+  assert.match(r.out, /# pass 3/);
 });
