@@ -57,6 +57,7 @@ export const INVISIBLE_CHARACTER_PATH = 'invisible-character-path';
 export const NON_ASCII_TOP_LEVEL_PATH = 'non-ascii-top-level-path';
 
 /** The categories of a path nothing should have to read around: always L3, always waits, never loosened. */
+// check-table: never-shrink
 export const ODD_PATH_CATEGORIES: readonly string[] = [CONTROL_CHARACTER_PATH, NON_UTF8_PATH, INVISIBLE_CHARACTER_PATH, NON_ASCII_TOP_LEVEL_PATH];
 
 /**
@@ -322,6 +323,7 @@ export function hidesSubmodules(f: Pick<ChangeFile, 'submoduleIgnores'>): boolea
  * first part a file matches names it. Every glob matches a real file in the engine's repo (a test checks).
  */
 export const SELF_MODIFICATION = 'self-modification';
+// check-table: never-shrink
 export const SELF_MODIFICATION_PARTS: { what: string; globs: string[] }[] = [
   { what: 'the merge policy', globs: ['src/merge-policy*', 'src/coordinator/merge-flow*', 'src/pr-rules*'] },
   { what: 'the main watch', globs: ['src/main-watch*', 'src/github/main-watch-api*'] },
@@ -374,6 +376,7 @@ export const SELF_MODIFICATION_PARTS: { what: string; globs: string[] }[] = [
   { what: 'the experiment studies', globs: [`${BRAND.configDir}/experiments.yaml`] },
 ];
 
+// check-table: never-shrink
 export const LOCKED_CATEGORIES: Record<string, string[]> = {
   [AGENT_INSTRUCTIONS]: [`${BRAND.configDir}/roles/**`, `${BRAND.configDir}/skills/**`, 'AGENTS.md', '**/CLAUDE.md'],
   [SELF_MODIFICATION]: SELF_MODIFICATION_PARTS.flatMap((p) => p.globs),
@@ -406,6 +409,7 @@ export function lockedCategories(scope: LockScope | undefined): Record<string, s
 }
 
 /** Locked categories that are always L3, whatever review.yaml's levels list. */
+// check-table: never-shrink
 const ALWAYS_L3 = [SELF_MODIFICATION];
 
 /** What a change to this path changes, in plain words (the self-modification part it falls in, in this scope), or null. */

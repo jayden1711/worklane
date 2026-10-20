@@ -71,6 +71,7 @@ test("regression: a change to the agents' tool guard (src/hook.ts) is self-modif
 
 // WHY (#655): the guard's deny lists, the read-only agents' tool lists and refusals, and the task file's frozen and
 // hidden paths live beside src/hook.ts. Unlocked, a change to any of them widened what the guard allows at L1.
+// check-table: never-shrink
 const GUARD_MODULES = [
   'src/held-out-paths.ts', 'src/dashboard-key-paths.ts', 'src/experiments/paths.ts',
   'src/intake/run.ts', 'src/intake/chat.ts', 'src/research.ts', 'src/contract.ts',
@@ -154,6 +155,7 @@ test('the import reader sees every import form, and reports one it cannot name',
 // the guardrail rules' loader (src/config/load.ts, schema.ts), the chat reply's secret check (src/events/redact.ts) and
 // the live environment the guardrails key on (src/adapters/railway.ts): each could change what the guard allows at L1.
 /** The guard's code (src/hook.ts) and its process entry (src/hook-main.ts, what the installed hook commands run). */
+// check-table: never-shrink
 const GUARD_ENTRIES = ['src/hook.ts', 'src/hook-main.ts'];
 
 test("regression: every module in the agents' tool guard's import tree is self-modification, L3, with a review.yaml that lists no src/**", () => {
@@ -356,6 +358,7 @@ const NOT_PLAIN = /a module loaded by a path that is not a plain string/;
 const LOOSE = /require or createRequire other than called directly with a plain string/;
 const BUILT = "'./managed-' + 'apps.js'";
 /** What the lint must refuse, and why: each a fixture, so none is ever planted in src/ (#771). The file is src/x.ts unless named. */
+// check-table: never-shrink
 export const LOCK_SCOPE_BAD: [string, string, RegExp, string?][] = [
   // PR #765's round-1 review: the module edge.
   ['the escaped name alone in the file, through a namespace', `${NAMESPACE}m.readLock\\u0053cope(a, b);`, MODULE],
@@ -420,6 +423,7 @@ export const LOCK_SCOPE_BAD: [string, string, RegExp, string?][] = [
   ['createRequire passed as an argument', `const m = load(createRequire, ${BUILT});`, LOOSE],
 ];
 /** What it must let through. */
+// check-table: never-grow
 export const LOCK_SCOPE_GOOD: [string, string, string?][] = [
   ['the plain import and two-argument calls', `${IMPORTED}readLockScope(i.name, i.repo.repo);\nconst f = () => readLockScope(a, b).scope;`],
   // Once imported, the function takes the instance and its repo and nothing else, so what a file does with it is no matter.

@@ -3,6 +3,7 @@
 // WHY a list: the engine runs from its build, so the lock can't read the imports at run time. test/review.test.ts reads
 // them from the real source with TypeScript's own scan and fails, naming each module, on an import that isn't here or
 // an entry that is no longer imported. This file is the guard's own (src/hook*), so a change to it waits for the owner.
+// check-table: never-shrink
 export const HOOK_IMPORTS: readonly string[] = [
   'src/adapters/railway.ts',
   'src/agent-settings.ts',

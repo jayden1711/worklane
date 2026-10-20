@@ -1,3 +1,4 @@
+// lint-test
 // A slot-dir path is a SlotPath (#772): an opaque value that only src/slot-file.ts turns back into the path, so tsc
 // rejects one handed to any writer but writeSlotFile, whatever the call chain. This file holds that in place:
 // - tsc, fed source text (no file is written): a slot path passed through a `mixed` module's parameter to another
@@ -212,8 +213,10 @@ const MAKER = 'src/os/index.ts';
  * `system` of the caller's (tests'), so any mention of it elsewhere (a call, an alias, `.call`, a callback) is
  * reported, not only a call with an argument (#806 round-3 review, the mark oracle).
  */
+// check-table: never-shrink
 const MAKER_ONLY = new Set(['slotPathOf', 'slotDirAt', 'slotsDirFor']);
 /** Where the slot dir's location may be read: the maker, and the system paths it reads it from. */
+// check-table: never-grow
 const SLOT_SOURCES = new Set([MAKER, 'src/os/system-paths.ts']);
 const SOURCE_NAMES = new Set(['AGENT_SLOTS_DIR', 'SYSTEM_SLOTS', 'devSlotsPath', 'unguardedSlotsDir']);
 

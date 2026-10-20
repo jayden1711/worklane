@@ -7,9 +7,11 @@
 //   - a test file (TEST_PATHS): a removed line (a changed line is a removed one and an added one) with an assertion or
 //     a test on it (CHECK_LINE); a deleted test file;
 //   - a test's expected output (a snapshot, a fixture, any test file that isn't code): any removed line;
-//   - a guard or lint file (GUARD_FILES, LINT_TESTS): any removed line;
-//   - a registered table (CHECK_TABLES), its lines from its declaration to its close: a line gone from a rule list, a
-//     bad-fixture list or a guard's list (never-shrink), or new in an allowlist or exception list (never-grow);
+//   - a guard or lint file (GUARD_FILES, a lint test by its mark): any removed line;
+//   - a registered table (its mark, or CHECK_TABLES), its lines from its declaration to its close: a line gone from a
+//     rule list, a bad-fixture list or a guard's list (never-shrink), or new in an allowlist or exception list
+//     (never-grow); its name sets a floor its mark can only add to (ALLOW_NAMED, RULE_NAMED);
+//   - a registration mark the default branch has, gone or changed while what it registers is still there (#869);
 //   - an allowlist file (NEVER_GROW_FILES): any added line;
 //   - any file but docs: an added line with a skip, only or suppression marker on it (MARKERS, owner, 2026-10-19).
 // Other pure additions pass: an added assertion, test, rule or guard line never waits.
@@ -19,7 +21,7 @@
 // isn't text, a table it can't find or a git failure, the change waits. The engine's own source paths (ENGINE_ONLY)
 // stand aside in a managed app's repo, as the locks do there (src/review.ts lockedCategories).
 import { BRAND } from './brand.js';
-import { changedNames, exactMoves, filesAt } from './coordinator/change-files.js';
+import { changedNames, exactMoves, filesAt, filesWithText } from './coordinator/change-files.js';
 import { globToRegExp } from './guardrails/glob.js';
 import { escapedPath, isNonUtf8Path, shownPath } from './path-text.js';
 import { engineSourceGlob, LOCKED_CATEGORIES, lockedCategories, type ChangeFile, type LockScope } from './review.js';
@@ -35,90 +37,80 @@ export interface CheckTable {
 }
 
 /**
- * Every check table the hold reads. A lint test's allowlist (OUTSIDE_THE_HELPER, ALLOWED, REVIEWED, ...) is here
- * however its file is locked: a tests-only change that adds an entry would otherwise be L0. A backstop test in
- * test/merge-policy.test.ts fails on a check-shaped table in test/ or scripts/ that is neither here nor in its
- * NOT_A_CHECK, and on an entry here whose table the hold can't find.
+ * A check registers itself where it is declared (#869), so adding one never needs an edit here:
+ *   - a table: the line right before its `const`/`let`/`var` declaration is exactly TABLE_MARK and its kind
+ *     (`never-grow` for an allowlist, an exception list or good fixtures; `never-shrink` for rules, bad fixtures or a
+ *     guard's list);
+ *   - a lint test (one whose rules live in its code, so any line taken out of it waits, as from a guard file): a line
+ *     that is exactly LINT_MARK, near its top.
+ * Marks are read only in JS and TS files (MARKABLE), from the text before the change: what the default branch
+ * registers. A mark a change adds holds from the next change on; one it removes, changes or detaches from its table
+ * waits for the owner. A line that looks like a mark but isn't one registers nothing (the backstop test fails on it).
  */
-export const CHECK_TABLES: readonly CheckTable[] = [
-  // The lints' allowlists and good fixtures: adding to them is a loosening.
-  { path: 'test/change-files-renames.test.ts', table: 'OUTSIDE_THE_HELPER', kind: 'never-grow' },
-  { path: 'test/no-clock-helpers.test.ts', table: 'ALLOWED', kind: 'never-grow' },
-  { path: 'test/no-wall-clock-durations.test.ts', table: 'ALLOWED', kind: 'never-grow' },
-  { path: 'test/instance-name.test.ts', table: 'ALLOWED', kind: 'never-grow' },
-  { path: 'test/five-part-issues.test.ts', table: 'GOOD', kind: 'never-grow' },
-  { path: 'test/plugin-inspect.test.ts', table: 'GOOD', kind: 'never-grow' },
-  { path: 'scripts/setup/app-permissions.mjs', table: 'ALLOWED_UP_TO', kind: 'never-grow' },
-  { path: 'test/slot-path.test.ts', table: 'SLOT_SOURCES', kind: 'never-grow' },
-  { path: 'test/slot-dir-writes.test.ts', table: 'REVIEWED', kind: 'never-grow' },
-  { path: 'test/review.test.ts', table: 'LOCK_SCOPE_GOOD', kind: 'never-grow' },
-  { path: 'test/merge-policy.test.ts', table: 'NOT_YET_FILES', kind: 'never-grow' },
-  { path: 'test/merge-policy.test.ts', table: 'NOT_A_CHECK', kind: 'never-grow' },
-  { path: 'test/merge-policy.test.ts', table: 'NOT_A_LINT', kind: 'never-grow' },
-  { path: 'test/review-packet.test.ts', table: 'PACKET_ALLOWED', kind: 'never-grow' },
-  { path: 'test/owner-terminal-rerun.test.ts', table: 'FIRST_TIME_ONLY', kind: 'never-grow' },
-  { path: 'scripts/lib/denylist.mjs', table: 'SKIP', kind: 'never-grow' },
-  { path: 'src/guardrails/engine.ts', table: 'AGENT_EDITABLE', kind: 'never-grow' },
-  // The lints' rules and bad fixtures, and the guards' lists: taking one out is a loosening.
-  { path: 'test/change-files-renames.test.ts', table: 'READER_WORDS', kind: 'never-shrink' },
-  { path: 'test/review.test.ts', table: 'LOCK_SCOPE_BAD', kind: 'never-shrink' },
-  { path: 'test/review.test.ts', table: 'GUARD_MODULES', kind: 'never-shrink' },
-  { path: 'test/review.test.ts', table: 'GUARD_ENTRIES', kind: 'never-shrink' },
-  { path: 'test/slot-dir-writes.test.ts', table: 'SLOT_NAMES', kind: 'never-shrink' },
-  { path: 'test/slot-dir-writes.test.ts', table: 'WRITE_CALLS', kind: 'never-shrink' },
-  { path: 'test/slot-dir-writes.test.ts', table: 'CHMOD_BY_NAME', kind: 'never-shrink' },
-  { path: 'test/slot-dir-writes.test.ts', table: 'FD_WRITES', kind: 'never-shrink' },
-  { path: 'test/slot-path.test.ts', table: 'MAKER_ONLY', kind: 'never-shrink' },
-  { path: 'test/add-project.test.ts', table: 'NAMES_BAD', kind: 'never-shrink' },
-  { path: 'test/add-project.test.ts', table: 'REPOS_BAD', kind: 'never-shrink' },
-  { path: 'test/instance-name.test.ts', table: 'BAD_SHAPE', kind: 'never-shrink' },
-  { path: 'scripts/lib/changelog.mjs', table: 'GUARDRAIL_PATHS', kind: 'never-shrink' },
-  { path: 'test/machine-path-writes.test.ts', table: 'GUARD', kind: 'never-shrink' },
-  // The golden runner settings (#856): the deny list and hooks a run's --settings must carry.
-  { path: 'test/runner-golden.test.ts', table: 'GUARD', kind: 'never-shrink' },
-  // The guards' own tables (their files are guard files too; the table names what was taken out).
-  { path: 'src/review.ts', table: 'SELF_MODIFICATION_PARTS', kind: 'never-shrink' },
-  { path: 'src/review.ts', table: 'LOCKED_CATEGORIES', kind: 'never-shrink' },
-  { path: 'src/review.ts', table: 'ODD_PATH_CATEGORIES', kind: 'never-shrink' },
-  { path: 'src/review.ts', table: 'ALWAYS_L3', kind: 'never-shrink' },
-  { path: 'src/merge-policy.ts', table: 'FLOOR', kind: 'never-shrink' },
-  { path: 'src/hook-imports.ts', table: 'HOOK_IMPORTS', kind: 'never-shrink' },
-  { path: 'src/delegation.ts', table: 'NEVER_LOOSEN', kind: 'never-shrink' },
-  { path: 'src/guardrails/engine.ts', table: 'BUILTIN_PROTECTED', kind: 'never-shrink' },
-  { path: 'scripts/push-gate-hook.mjs', table: 'GATE_RULES', kind: 'never-shrink' },
-  { path: 'scripts/push-gate-hook.mjs', table: 'GATE_CODE', kind: 'never-shrink' },
-  { path: 'scripts/push-gate.mjs', table: 'ATTRIBUTION', kind: 'never-shrink' },
-  // The commands that run the checks: a script dropped or changed (a lint taken out of `npm test`) waits.
-  { path: 'package.json', table: 'scripts', kind: 'never-shrink' },
-];
+export const TABLE_MARK = '// check-table: ';
+export const LINT_MARK = '// lint-test';
+/** The files a mark is read in. */
+export const MARKABLE = /\.[cm]?[jt]sx?$/;
+/** A table name that says it allows or exempts something: never-grow, whatever its mark says. */
+export const ALLOW_NAMED = /ALLOW|EXEMPT|EXCEPT|SKIP|OUTSIDE|IGNORE|KNOWN|REVIEWED|PERMIT|BASELINE|LEGACY|WAIVE|NOT_YET|GOOD/;
+/**
+ * A table name that says it holds rules or a guard's list: never-shrink, whatever its mark says. A name of both kinds
+ * is held both ways. ONLY is neither (an allowlist of first-time-only files and a guard's maker-only list both use it).
+ */
+export const RULE_NAMED = /BAD|RULES|WORDS|PATTERNS|DENY|BANNED|FORBIDDEN|NEVER|GUARD/;
+/** A line that tries to be a mark (any comment opener, any spacing): it must be one exactly. */
+const MARKISH = /^(?:\/\/|\/\*|\*)\s*(?:check-table|lint-test)/;
+/** A declaration a table mark registers: its name, a plain identifier (as tableLines reads it). */
+const DECLARES = /^(?:export\s+)?(?:const|let|var)\s+([A-Za-z_]\w*)(?![\w$])/;
+
+/** What a file's marks register, and the lines that look like marks but register nothing (for the backstop). */
+export interface Registrations {
+  tables: { table: string; kind: TableKind }[];
+  lint: boolean;
+  problems: string[];
+}
+
+/** The marks in a file's text: the tables they register (with their kinds), whether it is a lint test, and odd marks. */
+export function registrationsOf(text: string): Registrations {
+  const out: Registrations = { tables: [], lint: false, problems: [] };
+  const lines = text.split('\n');
+  for (let k = 0; k < lines.length; k++) {
+    const t = lines[k]!.trim();
+    if (t === LINT_MARK) {
+      out.lint = true;
+      continue;
+    }
+    const kind = t.startsWith(TABLE_MARK) ? t.slice(TABLE_MARK.length) : null;
+    if (kind === 'never-grow' || kind === 'never-shrink') {
+      const name = DECLARES.exec(lines[k + 1]?.trimStart() ?? '')?.[1];
+      if (name) out.tables.push({ table: name, kind });
+      else out.problems.push(`line ${k + 1}: a table mark with no table declared on the next line`);
+    } else if (MARKISH.test(t)) out.problems.push(`line ${k + 1}: not a mark, so it registers nothing: ${t.slice(0, 80)}`);
+  }
+  return out;
+}
+
+/** The kinds a table is held by: its mark's, and its name's floor. A mark only adds to the floor. */
+export function heldKinds(table: string, kind: TableKind): Set<TableKind> {
+  const held = new Set<TableKind>([kind]);
+  if (ALLOW_NAMED.test(table)) held.add('never-grow');
+  if (RULE_NAMED.test(table)) held.add('never-shrink');
+  return held;
+}
 
 /**
- * Lint tests whose rules live in their code, not (only) in a registered table: any line removed from one holds, as
- * from a guard file. A backstop test in test/merge-policy.test.ts fails on a test that walks the sources and is in
- * neither this list nor its NOT_A_LINT.
+ * The check tables that can't carry a mark (not JS or TS): `package.json`'s scripts, the commands that run the checks
+ * (a script dropped or changed, a lint taken out of `npm test`, waits). Every other table registers itself by its mark.
+ * A backstop test in test/merge-policy.test.ts fails on a check-shaped table in test/ or scripts/ that is neither
+ * registered nor in its NOT_A_CHECK, on a registered table the hold can't find, and on a kind against its name.
  */
-export const LINT_TESTS: readonly string[] = [
-  'test/pipefail.test.ts',
-  'test/brand.test.ts',
-  'test/testrun-gpu.test.ts',
-  'test/boundaries.test.ts',
-  'test/web-key-in-url.test.ts',
-  'test/self-hosted-guard.test.ts',
-  'test/package-deps.test.ts',
-  'test/no-clock-helpers.test.ts',
-  'test/no-wall-clock-durations.test.ts',
-  'test/change-files-renames.test.ts',
-  'test/slot-dir-writes.test.ts',
-  'test/slot-path.test.ts',
-  'test/claude-credential-guard.test.ts',
-  'test/download-retry.test.ts',
-  'test/owner-terminal-removed.test.ts',
-  'test/testrun-measure.test.ts',
-  'test/update-helpers.test.ts',
-  'test/web-buttons.test.ts',
-  'test/superfan.test.ts',
-  'test/claude-accounts-retired.test.ts',
-];
+export const CHECK_TABLES: readonly CheckTable[] = [{ path: 'package.json', table: 'scripts', kind: 'never-shrink' }];
+
+/**
+ * Lint tests that can't carry a mark (not JS or TS). A backstop test in test/merge-policy.test.ts fails on a test that
+ * walks the sources and is neither a lint test nor in its NOT_A_LINT.
+ */
+export const LINT_TESTS: readonly string[] = [];
 
 /**
  * Files whose every removed line waits: the guards and lints themselves, and their configs. ENGINE_ONLY ones are the
@@ -321,11 +313,16 @@ export interface WeakeningInput {
   deleted: ReadonlySet<string>;
   /** Deleted paths whose exact blob the change adds at a new path, old path to new (a pure rename). */
   moved?: ReadonlyMap<string, string>;
-  /** A file's text before the change (null: it wasn't there), for the files with a registered table only. */
+  /** A file's text before the change (null: it wasn't there), for the files with a registered table or a mark only. */
   before: (path: string) => string | null;
-  /** A file's text after the change (null: it isn't there), for the files with a registered table only. */
+  /** A file's text after the change (null: it isn't there), for the files with a registered table or a mark only. */
   after: (path: string) => string | null;
   scope: LockScope | undefined;
+  /**
+   * The changed files whose text before the change holds a mark's text (weakeningOf finds them with git grep): their
+   * marks are read. Absent: every changed JS or TS file's text before the change is read for marks.
+   */
+  marked?: ReadonlySet<string>;
 }
 
 /** Each kind of weakening, in the words a reason uses, in the order reasons are given. */
@@ -335,6 +332,7 @@ const KINDS = {
   'test-assertion': 'removes or changes a line with an assertion or a test on it',
   'test-lines': "removes or changes a line of a test's expected output or fixture",
   'table-gone': "removes or renames a check's or guard's table",
+  'registration-gone': 'removes or changes the mark that registers a check, a check-table or lint-test line',
   'table-shrunk': "removes or changes an entry in a check's rules or a guard's list",
   'table-grown': 'adds or changes an entry in an allowlist, exception or good-fixture list',
   'allow-file': "adds a line to an allowlist file or a package manager's settings file",
@@ -454,9 +452,33 @@ export function weakeningReasons(i: WeakeningInput): string[] {
   };
   // Tests are tests in every repo: TEST_PATHS isn't the engine's own source.
   const isTest = matcher(TEST_PATHS, undefined);
-  const isGuard = matcher([...GUARD_FILES, ...LINT_TESTS], i.scope);
+  const guardFile = matcher([...GUARD_FILES, ...LINT_TESTS], i.scope);
   const isAllow = matcher(NEVER_GROW_FILES, i.scope);
-  const tables = CHECK_TABLES.filter((t) => holds(t.path, i.scope));
+  // The marks the default branch has (#869), in each changed file that can hold one, and the same file's marks after
+  // the change. Engine-only paths stand aside in a managed app's repo, as the central list's did. A file it can't read
+  // for them waits.
+  const marks = new Map<string, { was: Registrations; now: Registrations; deleted: boolean }>();
+  for (const f of i.files) {
+    const p = f.path;
+    if (!MARKABLE.test(p) || !holds(p, i.scope) || (i.marked && !i.marked.has(p)) || marks.has(p)) continue;
+    try {
+      const b = i.before(p);
+      if (b === null) continue;
+      const a = i.after(p);
+      marks.set(p, { was: registrationsOf(b), now: a === null ? { tables: [], lint: false, problems: [] } : registrationsOf(a), deleted: a === null });
+    } catch (e) {
+      hit('unreadable', p, String((e as Error).message ?? e));
+    }
+  }
+  // A lint test by its mark is a guard file: any line taken out of it waits.
+  const lintTests = new Set([...marks].filter(([, m]) => m.was.lint).map(([p]) => p));
+  // Its mark gone or changed while the file stays: the next change could take its rules out unseen.
+  for (const p of lintTests) if (!marks.get(p)!.now.lint && !marks.get(p)!.deleted) hit('registration-gone', p, LINT_MARK);
+  const isGuard = (p: string) => guardFile(p) || lintTests.has(p);
+  const tables: (CheckTable & { marked?: boolean })[] = [
+    ...CHECK_TABLES.filter((t) => holds(t.path, i.scope)),
+    ...[...marks].flatMap(([path, m]) => m.was.tables.map((t) => ({ path, ...t, marked: true }))),
+  ];
   // A test, guard, lint, allowlist or table file: its removed lines count, so its diff must be whole and text.
   const strict = (p: string) => isTest(p) || isGuard(p) || isAllow(p) || tables.some((t) => t.path === p);
   // A pure rename of a test (#783's deliverable): the same blob at a new path that the same runner still runs. Both
@@ -531,20 +553,28 @@ export function weakeningReasons(i: WeakeningInput): string[] {
       continue;
     }
     // A table only after the change is new (a new lint and its list): nothing was loosened. The backstop test keeps
-    // every registered table on the default branch.
-    if (was === null) continue;
+    // every registered table on the default branch. A mark stands right before its table's declaration, so its table
+    // is always there before the change: one that isn't makes the change wait.
+    if (was === null) {
+      if (t.marked) hit('unreadable', t.path, `${t.table}: its mark stands before no table it can read`);
+      continue;
+    }
     if (now === null) {
       hit('table-gone', t.path, t.table);
       continue;
     }
+    // Still there, no longer registered as it was (its mark removed, its kind changed, a line put between them): the
+    // next change could loosen it unseen, so this one waits.
+    if (t.marked && !marks.get(t.path)?.now.tables.some((x) => x.table === t.table && x.kind === t.kind)) hit('registration-gone', t.path, `${TABLE_MARK}${t.kind} (${t.table})`);
     // The line that declared it, removed or changed: what reads as the table after may not be it (a decoy). It waits.
     const declaring = was[0]!;
     if ((i.files.find((f) => f.path === t.path)?.removedLines ?? []).some((l) => entry(l) === declaring)) {
       hit('unreadable', t.path, `${t.table}: the line that declares it is removed or changed`);
       continue;
     }
-    if (t.kind === 'never-grow') for (const l of missing(now, was)) hit('table-grown', t.path, `${t.table}: ${l}`);
-    else for (const l of missing(was, now)) hit('table-shrunk', t.path, `${t.table}: ${l}`);
+    const held = heldKinds(t.table, t.kind);
+    if (held.has('never-grow')) for (const l of missing(now, was)) hit('table-grown', t.path, `${t.table}: ${l}`);
+    if (held.has('never-shrink')) for (const l of missing(was, now)) hit('table-shrunk', t.path, `${t.table}: ${l}`);
     // An added line that names the table outside its own lines (`NAME[k] = v`, `Object.assign(NAME, ...)`,
     // `NAME.push(...)`, `{ ...NAME, ... }`) can grow or narrow it where the reader doesn't look: it waits. A plain
     // identifier match; a JSON table is data, never used by name in its file.
@@ -575,7 +605,11 @@ export function weakeningOf(cwd: string, base: string, head: string, files: Chan
   try {
     const deleted = new Set(changedNames(cwd, ['--diff-filter=D', `${base}..${head}`]));
     const moved = exactMoves(cwd, base, head);
-    const paths = [...new Set(CHECK_TABLES.map((t) => t.path))].filter((p) => files.some((f) => f.path === p) && !isNonUtf8Path(p));
+    // The files that held a mark's text before the change (#869): git grep over the base's whole tree, so a mark is
+    // found wherever it is; a git failure makes the change wait.
+    const withMarks = new Set(filesWithText(cwd, base, [TABLE_MARK.trimEnd(), LINT_MARK]));
+    const marked = new Set(files.map((f) => f.path).filter((p) => withMarks.has(p) && MARKABLE.test(p) && !isNonUtf8Path(p)));
+    const paths = [...new Set([...CHECK_TABLES.map((t) => t.path), ...marked])].filter((p) => files.some((f) => f.path === p) && !isNonUtf8Path(p));
     // A file over the cap isn't read at all: the change waits.
     const side = (rev: string) => {
       const { texts, tooBig } = filesAt(cwd, rev, paths, MAX_TABLE_FILE);
@@ -584,7 +618,7 @@ export function weakeningOf(cwd: string, base: string, head: string, files: Chan
         return texts.get(p) ?? null;
       };
     };
-    return weakeningReasons({ files, deleted, moved, before: side(base), after: side(head), scope });
+    return weakeningReasons({ files, deleted, moved, before: side(base), after: side(head), scope, marked });
   } catch (e) {
     return [`${WEAKENING_REASON}the check for a removed or weakened test, lint or guard could not run (${escapedPath(String((e as Error).message ?? e).slice(0, 200))})`];
   }

@@ -14,12 +14,14 @@ import { BRAND } from '../brand.js';
  * Harness config no agent writes, whatever a project's guardrails list (there's no opt-out): the config folder, and
  * everything under .claude/ (settings, skills, commands, agents, hooks), which Claude Code itself reads.
  */
+// check-table: never-shrink
 export const BUILTIN_PROTECTED = [`${BRAND.configDir}/**`, '.claude/**'];
 
 /**
  * Under the config folder, the only paths agents may write: the agents' own role prompts and skills (a correction
  * lands there). A change to them is always high-risk and never auto-merges (review.ts AGENT_INSTRUCTIONS).
  */
+// check-table: never-grow
 export const AGENT_EDITABLE = [`${BRAND.configDir}/roles/**`, `${BRAND.configDir}/skills/**`];
 
 /** WHY: item 33; an AGENTS.md line comes only from an owner promoting a learning (src/learnings.ts), never an agent. */

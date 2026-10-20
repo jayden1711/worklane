@@ -461,6 +461,32 @@ export function exactMoves(cwd: string, base: string, head: string): Map<string,
 }
 
 /**
+ * The files of `rev`'s whole tree that hold any of `needles` (fixed strings; every file read as text, no textconv),
+ * each read by nameOf. For the merge decision's check for a weakened test, lint or guard (src/merge-policy-weakening.ts):
+ * which files carry a mark that registers a check (#869). git grep searches only below the directory it runs in, so it
+ * runs from the top of the worktree. No file matching is an empty list; any other failure throws.
+ */
+export function filesWithText(cwd: string, rev: string, needles: string[]): string[] {
+  const top = must(run(cwd, ['rev-parse', '--show-toplevel'])).replace(/\n$/, '');
+  const r = spawnSync('git', withGit(['grep', '-l', '-z', '-a', '-F', '--no-color', '--no-textconv', ...needles.flatMap((n) => ['-e', n]), rev, '--']), {
+    cwd: top,
+    encoding: 'buffer',
+    maxBuffer: MAX_BUFFER,
+  });
+  if (r.error) throw r.error;
+  if (r.status === 1 && !r.stderr.length) return [];
+  if (r.status !== 0) throw new Error(`git grep in ${rev} failed: ${(r.stderr.toString('utf8') || `exit ${r.status}`).trim().slice(0, 500)}`);
+  // -z with a tree: "rev:path NUL" for each file.
+  const prefix = Buffer.from(`${rev}:`);
+  return fields(r.stdout)
+    .filter((b) => b.length)
+    .map((b) => {
+      if (!b.subarray(0, prefix.length).equals(prefix)) throw new Error(`git grep in ${rev}: a name that doesn't start with the revision`);
+      return nameOf(b.subarray(prefix.length));
+    });
+}
+
+/**
  * The text of each of `paths` that is a file in `rev`'s tree, keyed by path; a path that isn't there is left out. For
  * the merge decision's check for a weakened test, lint or guard (src/merge-policy-weakening.ts), which compares a
  * changed file before and after. Paths are from the top of the repo. A blob over `maxBytes` isn't read: its path is
