@@ -14,6 +14,7 @@ import { GPU_NO_REPEAT, gpuRunsNotToRepeat } from '../testrun/gpu.js';
 import { spawnSync } from 'node:child_process';
 import { BRAND } from '../brand.js';
 import type { CommitCheck, PullRequest } from '../backlog/types.js';
+import type { JudgedChecks } from '../check-source.js';
 import type { EventLog } from '../events/log.js';
 import type { EventPayload, StoredEvent } from '../events/types.js';
 import { requiredOutcomes } from '../pr-watch.js';
@@ -299,7 +300,7 @@ export function batchSize(p: number, max: number): number {
  * May this PR merge at this head? Only with every fast check passing on the head and a passing full run from a batch
  * that held exactly this head, whose full check was posted on it. Fails closed (no fast checks configured: no).
  */
-export function mayMerge(o: { events: StoredEvent[]; number: number; head: string; checks: CommitCheck[]; fastChecks: string[] }): { ok: true; batch: string } | { ok: false; why: string } {
+export function mayMerge(o: { events: StoredEvent[]; number: number; head: string; checks: JudgedChecks; fastChecks: string[] }): { ok: true; batch: string } | { ok: false; why: string } {
   if (!o.fastChecks.length) return { ok: false, why: 'no fast checks are configured (tests.yaml land.pr_batch.fast_checks)' };
   const fast = requiredOutcomes(o.fastChecks, o.checks).filter((c) => c.outcome !== 'pass');
   if (fast.length) return { ok: false, why: `fast checks not passing on ${o.head.slice(0, 8)}: ${fast.map((c) => `${c.name} ${c.outcome}`).join(', ')}` };
