@@ -9,7 +9,7 @@ import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { BRAND } from '../src/brand.js';
-import { CHAT_ROLE } from '../src/intake/chat.js';
+import { CHAT_ROLE } from '../src/guard/chat.js';
 import { CliRunner, type RunRequest } from '../src/runner.js';
 
 const posixOnly = process.platform === 'win32' && 'POSIX shell stand-in';
