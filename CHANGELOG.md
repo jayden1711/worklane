@@ -165,6 +165,7 @@ Every release, newest first: the PRs merged since the previous one, and what cha
 - **A viewer learns only that a Claude account is set, never which (#663),** and the ops channel's sign-in failure posts name no account (#682).
 - **Instance removal:** its last check, after stopping the instance's users, refuses the removal for any process it lists, even one gone before its command could be read (#666); a removed instance's files in a shared engine group lose group write (#601). The in-flight check before a removal no longer counts a process that exited while it was being read (#592): a narrower refusal, for a process that is no longer there.
 - **pip test-run setups get a fetch step (#609)** like npm's: with network, before any setup step, it downloads wheels only, by name, and runs no repo code; the install then runs with no network and no grant. Building anything during the fetch, a repo-chosen index, and a package with no wheel are refused.
+- **A public adversarial suite lists the hostile PRs the merge gate must hold (#707 part 1, #855).** `test/adversarial/` runs 83 cases as data (locked paths, renames, `.gitattributes` marks, odd paths, guard and lint edits, the review levels, PR metadata and claims) with an evaluator stub that always approves, under the engine's, the default and a loosened `review.yaml`; each must wait, and an injection in its files or a lower risk-class claim must change no reason. Nothing changes for an install. The gaps main doesn't close yet are listed as todo with the PR that closes each.
 
 ### Guardrail changes
 
