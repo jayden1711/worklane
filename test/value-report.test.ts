@@ -3,7 +3,7 @@
 // only. Event fixtures, no network.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { parseDocument } from 'yaml';
@@ -398,7 +398,7 @@ test('the route: the policy\'s constants, said so; no instance policy, the defau
     [policyAt(estimateYaml('-1', '5', '60')), /value_report\.hours_estimate\.base_min/],
     [policyAt(estimateYaml('10', '5', '.inf')), /value_report\.hours_estimate\.cap_min/],
     [policyAt('value_report:\n  hours_estimate: { base_min: 10 }\n'), /value_report\.hours_estimate\.per_100_lines_min/],
-    [gone, /missing/],
+    [gone, /can't be read as a file/],
   ] as const) {
     const r = route(policyFile);
     assert.equal(r.status, 500, String(says));
@@ -411,6 +411,44 @@ test('the route: the policy\'s constants, said so; no instance policy, the defau
     assert.equal(v.status, 403);
     assert.doesNotMatch((v.body as { error: string }).error, /value_report|missing/);
   }
+});
+
+/** The route for an owner on a policy file, as the dashboard calls it; a throw is caught and returned (the dashboard's catch would answer with its message). */
+function ownerRoute(policyFile: string): { status: number; body: unknown } | { threw: string } {
+  const events = [stats(1, 100, 100), decided(1, true, []), engineMerged(1)];
+  try {
+    return valueRoute({ method: 'GET', role: 'owner', login: 'p', events, query: new URLSearchParams(), now: NOW, policyFile } as Parameters<typeof valueRoute>[0]);
+  } catch (e) {
+    return { threw: (e as Error).message };
+  }
+}
+/** A file-level failure: 500, the error alone, one fixed text, and no path in it. */
+function assertFileLevel(r: ReturnType<typeof ownerRoute>, why: string): void {
+  assert.ok(!('threw' in r), `${why}: the route threw: ${'threw' in r ? r.threw : ''}`);
+  if ('threw' in r) return;
+  assert.equal(r.status, 500, why);
+  assert.deepEqual(Object.keys(r.body as object), ['error'], why);
+  const error = (r.body as { error: string }).error;
+  assert.match(error, /policy\.yaml\) can't be read as a file/, why);
+  assert.ok(!error.includes(tmpdir()) && !error.includes('/'), `${why}: no path in ${JSON.stringify(error)}`);
+}
+
+test('a mode-000 policy.yaml: 500 with one fixed error and no path (readFileSync\'s EACCES names the file)', { skip: (process.getuid?.() === 0 || process.platform === 'win32') && 'root (or Windows) reads a mode-000 file' }, () => {
+  const f = policyAt('');
+  chmodSync(f, 0o000);
+  try {
+    assertFileLevel(ownerRoute(f), 'mode 000');
+  } finally {
+    chmodSync(f, 0o600);
+  }
+});
+
+test('a policy.yaml that is a directory, not YAML, or missing: the same fixed error, never its path', () => {
+  const dir = join(mkdtempSync(join(tmpdir(), 'value-dir-')), 'policy.yaml');
+  mkdirSync(dir);
+  assertFileLevel(ownerRoute(dir), 'a directory');
+  assertFileLevel(ownerRoute(policyAt('value_report: [unclosed\n')), 'not YAML');
+  assertFileLevel(ownerRoute(join(mkdtempSync(join(tmpdir(), 'value-gone-')), 'policy.yaml')), 'missing');
 });
 
 test('the setting changes no gate: auto-merge is the same with or without it, a bad one only turns it off, and no dashboard form or setting writes it', () => {

@@ -10,16 +10,31 @@ import { DEFAULT_VALUE_CONSTANTS, VALUE_WINDOWS, valueReport, type Estimate, typ
 
 export const DEFAULT_VALUE_DAYS = 30;
 
+/** Every file-level failure (missing, unreadable, not YAML, refused, a throw of any kind): one text, with no path. */
+export const POLICY_FILE_UNREADABLE = "the instance policy (policy.yaml) can't be read as a file (missing, unreadable, not YAML, or refused), so the value report isn't made";
+
 /**
  * The estimate's constants: the instance's policy.yaml value_report.hours_estimate, re-read on every request; without
  * it, or with no instance (a checkout, `policyFile` null), the engine's defaults. A policy that doesn't load is refused,
  * as everywhere else: never the defaults in its place, so the figure is never shown with constants nobody chose.
+ *
+ * INVARIANT: the error text is built only from schema issues that carry a key path (`key: problem`); anything else, a
+ * throw included, is POLICY_FILE_UNREADABLE. A file-level message (a read's EACCES, a refusal) can name the instance
+ * home's path, which isn't the report's to show, and a throw would reach the dashboard's catch with its message as is.
  */
 export function valueEstimate(policyFile: string | null): Estimate | { error: string } {
   if (policyFile === null) return { constants: { ...DEFAULT_VALUE_CONSTANTS }, from: 'default' };
-  const r = readPolicy(policyFile);
-  // The key and the problem, not the file's path: the instance home's location isn't the report's to show.
-  if (!r.policy) return { error: `the instance policy (policy.yaml) can't be read, so the value report isn't made: ${r.errors.map((e) => `${e.path ? `${e.path}: ` : ''}${e.message}`).join('; ') || 'unreadable'}` };
+  let r: ReturnType<typeof readPolicy>;
+  try {
+    r = readPolicy(policyFile);
+  } catch {
+    return { error: POLICY_FILE_UNREADABLE };
+  }
+  if (!r.policy) {
+    const keyed = r.errors.filter((e) => e.path !== '');
+    if (!keyed.length || keyed.length !== r.errors.length) return { error: POLICY_FILE_UNREADABLE };
+    return { error: `the instance policy (policy.yaml) is invalid, so the value report isn't made: ${keyed.map((e) => `${e.path}: ${e.message}`).join('; ')}` };
+  }
   const set = r.policy.value_report?.hours_estimate;
   return set ? { constants: { ...set }, from: 'policy' } : { constants: { ...DEFAULT_VALUE_CONSTANTS }, from: 'default' };
 }
