@@ -6,7 +6,7 @@
 // Only events it can parse count. An event of a kind it reads that fails its schema (src/events/types.ts) is counted
 // as unreadable and skipped, so a garbled event can never make a PR look auto-merged.
 import { EventSchemas, type EventPayload, type EventType } from './events/types.js';
-import { HIGH_RISK_REASON } from './merge-policy.js';
+import { HOLD_KINDS, holdWords } from './hold-words.js';
 import type { HeldOutcome, HoldKind, MainSaid, PostMerge, ValueConstants, ValueReport } from './value-report-types.js';
 
 export type { HeldOutcome, HoldKind, MainSaid, PostMerge, ValueConstants, ValueReport } from './value-report-types.js';
@@ -27,26 +27,15 @@ export const HOURS_SAVED_LABEL = 'an estimate (a guess until calibrated), not a 
 /** The windows the report is asked for, in days. */
 export const VALUE_WINDOWS: readonly number[] = [7, 30, 90];
 
-/** The kill switch's reasons, exactly as mergeDecision writes them (src/merge-policy.ts; a test holds them equal). */
-export const KILL_SWITCH_REASONS: readonly string[] = Object.freeze(['auto-merge is off for this instance (policy.yaml auto_merge)', 'auto-merge is off for this repo (review.yaml merge.auto)']);
+/** The kill switch's kinds: auto-merge off for the instance (policy.yaml) or for the repo (review.yaml). */
+export const KILL_SWITCH_KINDS: readonly HoldKind[] = Object.freeze(['policy-off', 'repo-off']);
 
 /**
- * A reason's kind, by the fixed prefix src/merge-policy.ts writes it with (a test runs every mergeDecision reason
- * through this). Anything else, such as GitHub's own merge refusals, is `other`: counted, never dropped.
+ * A reason's kind, by the one prefix table (src/hold-words.ts, #706; its test scans every source of hold reasons).
+ * Anything it doesn't name is `other`: counted, never dropped.
  */
-const PREFIXES: readonly [string, HoldKind][] = [
-  ['never auto-merged:', 'never'],
-  ['auto-merge is off for this', 'off'],
-  ['auto-merge is stopped:', 'stopped'],
-  [HIGH_RISK_REASON, 'high-risk'],
-  ['design:', 'design'],
-  ['big:', 'big'],
-  ['doubt:', 'doubt'],
-  ['eval:', 'eval'],
-  ['not in the approved plan:', 'outside-plan'],
-];
-export const holdKind = (reason: string): HoldKind => PREFIXES.find(([p]) => reason.startsWith(p))?.[1] ?? 'other';
-const KIND_ORDER: readonly HoldKind[] = ['off', 'stopped', 'never', 'high-risk', 'design', 'outside-plan', 'eval', 'big', 'doubt', 'other'];
+export const holdKind = (reason: string): HoldKind => holdWords(reason, { local: false }).kind;
+const KIND_ORDER: readonly HoldKind[] = [...HOLD_KINDS, 'other'];
 
 /** The kinds this report reads; any other event is ignored, never counted as unreadable. */
 const READS = ['merge.decided', 'merge.done', 'pr.closed', 'pr.stats', 'run.cost', 'merge.main_result', 'merge.stopped', 'main_watch.checked', 'main_watch.unaccounted', 'fix_forward.finished'] as const satisfies readonly EventType[];
@@ -181,7 +170,7 @@ export function valueReport(events: readonly ValueEvent[], o: { now: Date; days:
     return end !== undefined && x.firstHold !== null && end >= x.firstHold ? [end - x.firstHold] : [];
   });
 
-  const killSwitch = held.filter((x) => x.heldReasons?.length && x.heldReasons.every((r) => KILL_SWITCH_REASONS.includes(r)));
+  const killSwitch = held.filter((x) => x.heldReasons?.length && x.heldReasons.every((r) => KILL_SWITCH_KINDS.includes(holdKind(r))));
 
   const measured = auto.filter((x) => x.lines !== null);
   const minutes = measured.reduce((s, x) => s + Math.min(c.cap_min, c.base_min + (c.per_100_lines_min * x.lines!) / 100), 0);

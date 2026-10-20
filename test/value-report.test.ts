@@ -12,7 +12,7 @@ import { EventLog } from '../src/events/log.js';
 import { instructionEvalReasons, mergeDecision, outsidePlanReasons, type MergeInput } from '../src/merge-policy.js';
 import { computeLevel } from '../src/review.js';
 import { BRAND } from '../src/brand.js';
-import { DEFAULT_VALUE_CONSTANTS, holdKind, KILL_SWITCH_REASONS, valueReport, type ValueEvent } from '../src/value-report.js';
+import { DEFAULT_VALUE_CONSTANTS, holdKind, KILL_SWITCH_KINDS, valueReport, type ValueEvent } from '../src/value-report.js';
 import { valueRoute } from '../src/value-report-route.js';
 import { asPerson, exampleProject, exampleRoles } from './helpers.js';
 
@@ -120,7 +120,7 @@ function clean(over: Partial<MergeInput> = {}): MergeInput {
   };
 }
 
-test('every reason mergeDecision writes falls in a named kind, never "other"; the kill switch is exactly KILL_SWITCH_REASONS', () => {
+test('every reason mergeDecision writes falls in a named kind of the one table (src/hold-words.ts), never "other"; the kill switch is its two kinds', () => {
   const review = reviewOf();
   const ci = computeLevel({ files: [{ path: '.github/workflows/ci.yml', added: 1, removed: 0 }], labels: [], moneyPaths: [], scope: undefined }, review);
   const cases: Partial<MergeInput>[] = [
@@ -150,8 +150,11 @@ test('every reason mergeDecision writes falls in a named kind, never "other"; th
     }
   }
   assert.ok(seen >= cases.length);
-  assert.deepEqual(mergeDecision(clean({ policyOn: false, repoOn: false })).reasons, [...KILL_SWITCH_REASONS]);
-  assert.deepEqual([OFF_INSTANCE, OFF_REPO], [...KILL_SWITCH_REASONS]);
+  // The kill switch, as mergeDecision writes it, is exactly the kill-switch kinds, and the fixtures below use its words.
+  const off = mergeDecision(clean({ policyOn: false, repoOn: false })).reasons;
+  assert.deepEqual(off, [OFF_INSTANCE, OFF_REPO]);
+  assert.deepEqual(off.map(holdKind), [...KILL_SWITCH_KINDS]);
+  assert.ok(!KILL_SWITCH_KINDS.includes(holdKind('auto-merge is stopped: main went red')), 'a stop is not the kill switch');
 });
 
 // --- Held outcomes and wait ---------------------------------------------------------------------------------------

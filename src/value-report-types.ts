@@ -1,8 +1,9 @@
 // The value report's shape (src/value-report.ts builds it, GET /api/value serves it, web/src/pages/Value.tsx shows
-// it). Types only, with no imports, so the web page can read them without pulling the engine in.
+// it). Types only, so the web page can read them without pulling the engine in.
 
-/** A held PR's reason grouped by its fixed prefix (src/merge-policy.ts); anything unknown is `other`, never dropped. */
-export type HoldKind = 'never' | 'off' | 'stopped' | 'high-risk' | 'design' | 'big' | 'doubt' | 'eval' | 'outside-plan' | 'other';
+/** A held PR's reason kind, by the one prefix table (src/hold-words.ts, #706); anything unknown is `other`, never dropped. */
+import type { HoldKind } from './hold-words.js';
+export type { HoldKind };
 
 /** What became of a held PR. `merged_by_person` is inferred: pr.closed records no actor. */
 export type HeldOutcome = 'approved' | 'merged_by_person' | 'closed' | 'waiting';

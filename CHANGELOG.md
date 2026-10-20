@@ -257,6 +257,7 @@ Every release, newest first: the PRs merged since the previous one, and what cha
 - Approvals: one role rule on every surface, decide only as root or the coordinator user, money paths read from main (#715) [PROTECTED: owner merges] (#805)
 - test: raise the package budget to main's size + 2% after #805 and #787 [PROTECTED: owner merges] (#823)
 - Test runs: each run in a user namespace of its own; slirp4netns as the test user; a run can't join Docker's namespaces (#545) [PROTECTED: owner merges] (#780)
+- Value report (Machine › Reports › Value, `/machine/reports/value`, GET /api/value): PRs the engine merged on its own vs held and the hold rate, held reasons by kind, what became of held PRs, PRs held only by the kill switch, review hours saved (an estimate, with its formula and constants), main red, reverts and fix-forward after merges; owners and writers only, read-only, from the event log alone (#708)
 
 ### Fixes
 

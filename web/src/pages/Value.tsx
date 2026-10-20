@@ -13,8 +13,10 @@ const DAYS = [7, 30, 90] as const;
 export const valueRefusal = (state: Pick<State, 'user' | 'role'>) =>
   state.role === 'owner' || state.role === 'writer' ? null : `the value report is for the instance's owners and writers (admin or write on its repo); @${state.user || 'unknown'} is a ${state.role ?? 'viewer'}`;
 
+/** A short name per kind of src/hold-words.ts's table (a kind added there fails the web typecheck until named here). */
 const KIND_LABEL: Record<HoldKind, string> = {
-  off: 'Auto-merge off (kill switch)',
+  'policy-off': 'Auto-merge off for the instance (kill switch)',
+  'repo-off': 'Auto-merge off for the repo (kill switch)',
   stopped: 'Auto-merge stopped',
   never: 'Never auto-merged',
   'high-risk': 'High risk',
@@ -23,6 +25,12 @@ const KIND_LABEL: Record<HoldKind, string> = {
   eval: 'Instruction evals',
   big: 'Too big',
   doubt: 'Doubt',
+  'conflict-fix': 'Conflict fixed by an agent',
+  'cant-merge': "GitHub can't merge it",
+  'merge-failed': 'Merging failed',
+  'mergeable-unknown': 'GitHub never said',
+  combined: 'Fails with the latest default branch',
+  ruleset: 'A required check did not pass',
   other: 'Other',
 };
 const OUTCOME_LABEL: Record<HeldOutcome, string> = {
