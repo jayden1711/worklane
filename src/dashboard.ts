@@ -90,6 +90,7 @@ import { constraintsView } from './checks-from-feedback.js';
 import { digestMarkdown, waitingCached, waitingCount } from './digest.js';
 import { forViewers, stateForViewer, viewerActivity, viewerMaySee, VIEWER_EVENTS } from './viewer-events.js';
 import { prsForViewer } from './prs-viewer.js';
+import { checksFor } from './checks-viewer.js';
 import { METRICS_DEFINITIONS, trustForViewer, trustView } from './trust.js';
 import { deliveryMetrics } from './merge-metrics.js';
 import { flakyView, releaseByOwner } from './flaky.js';
@@ -2777,10 +2778,12 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           audit(who, 'machine.tailscale', { action, request: r.id });
           return json(res, 200, { ok: true, pending: true, request: r });
         }
+        // An issue's check runs, shaped by role (src/checks-viewer.ts, #837): a viewer, or any role not owner or
+        // writer, gets each check's name and result only, never its output, exit code or the commit it ran on.
         if (url.pathname === '/api/checks' && req.method === 'GET') {
           const issue = Number(url.searchParams.get('issue'));
           if (!Number.isInteger(issue) || issue <= 0) return json(res, 400, { error: 'issue must be a number' });
-          return json(res, 200, checkResults(eventCache.all(), issue));
+          return json(res, 200, checksFor(who.role, checkResults(eventCache.all(), issue)));
         }
         // A goal's task graph (src/goal-graph.ts), read-only, for everyone with a role, like the goal's own page. Built
         // from the events this person may see (a viewer's are the allowlisted ones), so it shows no goal or task a
