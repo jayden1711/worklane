@@ -8,6 +8,7 @@ import { basename, splitCommands, type SimpleCommand } from './shell.js';
 import { connectionsIn, fingerprint } from './fingerprint.js';
 import { globToRegExp } from './glob.js';
 import { pushHookFileRefusal, pushHookShellRefusal } from './push-hook.js';
+import { callAccesses, Secrets } from './access.js';
 import { BRAND } from '../brand.js';
 
 /**
@@ -72,30 +73,6 @@ export interface Verdict {
 }
 
 const EDIT_TOOLS = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit']);
-const READ_TOOLS = new Set(['Read', 'Grep', 'Glob', 'NotebookRead']);
-
-/**
- * Secret globs: "~/" is the home directory, "./" or a bare path the project
- * root, "/" absolute. A leading "!" excludes (e.g. "!./.env.example").
- */
-function matchesSecret(globs: string[], target: string, cwd: string, ctx: EvalContext): boolean {
-  const expanded = target.startsWith('~/') && ctx.home ? resolve(ctx.home, target.slice(2)) : target;
-  const abs = isAbsolute(expanded) ? expanded : resolve(cwd, expanded);
-  const one = (g: string) => matchesSecretGlob(g, abs, cwd, ctx);
-  return globs.some((g) => !g.startsWith('!') && one(g)) && !globs.some((g) => g.startsWith('!') && one(g.slice(1)));
-}
-
-function matchesSecretGlob(g: string, abs: string, cwd: string, ctx: EvalContext): boolean {
-  {
-    if (g.startsWith('~/')) {
-      if (!ctx.home) return false;
-      const rel = relative(ctx.home, abs).split('\\').join('/');
-      return !rel.startsWith('..') && globToRegExp(g.slice(2)).test(rel);
-    }
-    if (isAbsolute(g)) return globToRegExp(g.slice(1)).test(abs.split('\\').join('/').replace(/^\//, ''));
-    return globToRegExp(g).test(relToRoot(ctx.projectRoot, cwd, abs));
-  }
-}
 
 function filePathOf(call: ToolCall): string | null {
   const p = call.input.file_path ?? call.input.notebook_path ?? call.input.path ?? call.input.pattern_path;
@@ -246,14 +223,15 @@ export function evaluate(call: ToolCall, cfg: GuardrailsConfig, ctx: EvalContext
     return { decision: 'deny', rule: 'commit-identity', reason: 'commits carry the harness identity, already set in your environment; commit without setting an author, committer or user.name/user.email' };
   }
 
-  // Secret files: agents may not read or write them, by tool or by shell argument.
+  // Secret files (a task's hidden paths among them): agents may not read, list, search or write them, by any tool or
+  // shell argument. WHY (#847): every tool's paths come from one classification (access.ts), so none is checked for
+  // Read only, and a tool the guard doesn't know is checked on all it is given.
   if (cfg.secret_paths.length) {
-    const candidates: string[] = [];
-    const p = filePathOf(call);
-    if (p && (READ_TOOLS.has(call.tool) || EDIT_TOOLS.has(call.tool))) candidates.push(p);
-    for (const c of commands) candidates.push(...c.argv.slice(1).filter((a) => !a.startsWith('-')), ...c.writes);
-    const hit = candidates.find((t) => matchesSecret(cfg.secret_paths, t, call.cwd, ctx));
-    if (hit) return { decision: 'deny', rule: 'secret-path', reason: `${hit} holds credentials; agents never read them` };
+    const secrets = new Secrets(cfg.secret_paths, ctx);
+    for (const a of callAccesses(call.tool, call.input, call.cwd, commands)) {
+      const why = secrets.reached(a, call.cwd, call.tool);
+      if (why) return { decision: 'deny', rule: 'secret-path', reason: why };
+    }
   }
 
   // Network: agents may only fetch allowlisted domains; new ones need approval.
