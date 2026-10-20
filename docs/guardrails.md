@@ -8,7 +8,7 @@ This page is for someone deciding whether to trust the engine with their repo. I
 - **inferred**: read from the code, with nothing run;
 - **guess**: neither.
 
-Code is cited as a file and a symbol in it (`src/pr-watch.ts#readiness`), and a test as its file and its exact title. `test/docs-guardrails.test.ts` reads this page on every CI run and fails if a cited file, symbol or test title no longer exists, or if the hold kinds listed below stop matching what the code gives. So a citation here can't quietly go stale.
+Code is cited as a file and a symbol in it (`src/pr-watch.ts#readiness`), and a test as its file and its exact title. `test/docs-guardrails.test.ts` reads this page on every CI run. It fails if a cited file, line, symbol or test title no longer exists, if a test is cited in any form other than the one used below (which it couldn't check), or if the hold kinds listed below stop matching what the code gives. A cited symbol must be declared at the top level of its file, or be a member of a top-level class there. So a citation here can't quietly go stale.
 
 The known gaps are at the end, in [What isn't covered](#what-isnt-covered). Gaps found and fixed in October 2026 are in [security.md](security.md).
 
@@ -62,7 +62,7 @@ A PR goes through two steps before the engine merges it.
 
 ### Hold kinds
 
-Every reason `mergeDecision` gives starts with one of these. `test/docs-guardrails.test.ts` turns every input on and checks that this list and the code's reasons match exactly. A new kind of reason fails that test until it is listed here.
+Every reason `mergeDecision` gives starts with one of these. `test/docs-guardrails.test.ts` turns every input on and compares each reason's kind (its text up to and including the first colon, or `auto-merge is off`) with this list exactly, not by prefix. A new kind of reason fails that test until it is listed here. A reason that only an input value the test doesn't use could trigger would go unseen; the test must set every input, so a new input can't be added without it (inferred).
 
 | Kind | What holds the PR | Code | Test (label: measured) |
 |---|---|---|---|
@@ -80,7 +80,7 @@ Every reason `mergeDecision` gives starts with one of these. `test/docs-guardrai
 
 Even when `mergeDecision` says yes, the merge call can still be held.
 
-- **GitHub's own answer.** If GitHub can't merge the PR cleanly, is still computing, or a merge failed three times at this head, a person decides (`src/coordinator/merge-flow.ts#mergeOrWait`). Label: inferred.
+- **GitHub's own answer.** A person decides if GitHub can't merge the PR cleanly, or if a merge failed three times at this head. While GitHub is still computing whether it can merge, the engine asks again on the next poll; only after `MERGEABLE_CAP` polls of the same head (10) does that hold the PR for a person (`src/coordinator/merge-flow.ts#mergeOrWait`, `src/coordinator/wait-caps.ts#MERGEABLE_CAP`). Label: inferred.
 - **Emergency stop.** It is checked again as the last step before every merge call, an owner's approval included. Nothing merges or lands while it is in force.
   - Code: `src/coordinator/base.ts#emergencyInForce`, `src/slots.ts#emergencyStop`.
   - Tests:
@@ -90,13 +90,17 @@ Even when `mergeDecision` says yes, the merge call can still be held.
 
 ## The inputs
 
-**Changed paths.** Every reader of a change's paths goes through one helper. A renamed file counts under its old path and its new one, so renaming a guarded file can't move it out of its category.
+**Changed paths.** The engine lists a change's paths and line counts through one helper. A renamed file counts under its old path and its new one, so renaming a guarded file can't move it out of its category.
 
 - Code: `src/coordinator/change-files.ts#changeFiles`.
+- Outside the helper, each on a list in the test with its reason:
+  - in `src/`, two readers: the comment lint (`src/comment-policy.ts`), which pairs a renamed file's lines; and the push check's path rules (`src/push-check.ts`), which read `git log --name-only --no-renames`, so a rename shows both paths;
+  - in `scripts/`, a keyed list: CI test and slow-job selection, the release and updater "changes only `dist/`" checks, the push gate's denylist scan, and the bench.
 - Tests:
+  - `test/change-files-renames.test.ts` › “one helper is the only way src/ lists changed names or counts; scripts/ only on this keyed list”
   - `test/change-files-renames.test.ts` › “a rename with an edit of a locked test file lists both paths and comes out L3 / self-modification”
   - `test/change-files-renames.test.ts` › “a changed path with a control character is L3 "path with a control character" and never merges itself, whatever review.yaml lists”
-- Label: measured.
+- Label: measured for the renames, and for the list: the first test searches every file under `src/` and `scripts/` for the git flags and patch headers that list changed names or counts, and finds them only in the helper and the listed files. Inferred that no other reader exists: the search is a word list, and the test names its own gaps (a flag built by joining strings, for one).
 
 **Review level.** Code computes the level from the changed paths, labels and size. Some categories are locked: the agents' own instructions and the engine's own controls always wait, whatever a repo's `review.yaml` says.
 
@@ -151,14 +155,18 @@ A person's own session isn't affected.
 
 ## The guards around pushes and secrets
 
-**Push guard.** The engine pushes code through one function. That function refuses the default branch however the ref is spelled, and refuses a change over the push limits. Each checkout also gets a pre-push hook that refuses the default branch.
+**Push guard.** The engine pushes code through one function, `checkedPush`. It refuses the default branch however the ref is spelled, and refuses a change over the push limits. Each checkout also gets a pre-push hook that refuses the default branch.
 
+- Two other pushes exist, and neither pushes code to a branch:
+  - issue claims, a compare-and-swap push to a claim ref under `refs/` (`src/claims.ts`);
+  - the demo, which seeds its own local bare repo (`src/demo.ts`).
 - Code: `src/push-check.ts#checkedPush`, `src/push-check.ts#pushProblems`, `src/push-guard.ts#defaultBranchRefusal`, `src/push-guard.ts#prePushHook`.
 - Tests:
+  - `test/push-check.test.ts` › “the engine pushes code only through checkedPush (lease refs and the demo seed are the only other pushes)”
   - `test/push-check.test.ts` › “checkedPush refuses the default branch, however the ref is spelled, records it, and pushes nothing”
   - `test/push-check.test.ts` › “a change over max_changed_lines is refused with its size; at the limit it passes”
   - `test/push-guard.test.ts` › “the checkout's pre-push hook refuses a push to the default branch, records it, and lets a task branch through”
-- Label: measured.
+- Label: measured for the refusals, and for the one function: the first test searches every `.ts` file under `src/` for `push` passed as a git argument, and finds it only in `src/push-check.ts`, `src/claims.ts` and `src/demo.ts`. Inferred that no push is spelled some other way.
 
 **Push gate and secret scan.** A push gate scans what is pushed for secrets and project-specific terms (`scripts/push-gate.mjs`). With no scanner, nothing is pushed.
 
@@ -206,6 +214,7 @@ A person's own session isn't affected.
   - `test/direct-land-rejected.test.ts` › “direct mode: a change the evaluator rejected is held for the owner (L3), never landed”
   - `test/direct-land-rejected.test.ts` › “direct mode: the floor holds even when the review levels are configured to ask for nothing”
 - Direct mode refuses to start on a branch GitHub doesn't protect, or when protection can't be checked (`src/direct-land.ts#directLandStartGate`; `test/direct-land.test.ts` › “land_mode direct when the protection can't be checked (GitHub errors): fail closed, the coordinator refuses to start”). Label: measured.
+- One exception: when the repo's `origin` is a path on the machine (a `file://` URL or a directory, as in the demo and the tests), there is no host to ask, and direct mode starts and lands without the check (`src/direct-land.ts#localRemote`, `src/direct-land.ts#directLandRefusal`). Label: inferred, from reading the code.
 
 **People aren't gated by the engine.** The merge decision governs only the engine's own merges. Anyone with push access to a repo can merge through GitHub as GitHub allows. Where the main watch runs, it flags such a merge after the fact, and only when its checks weren't green or its author isn't a mapped writer. Label: inferred.
 
@@ -213,7 +222,7 @@ A person's own session isn't affected.
 
 - **Hidden paths can be listed and searched (#847).** The tool guard refuses Read on a task's hidden paths, but allows Glob and Grep over them. So a Grep can print their contents, and a Glob can list their names. Label: measured by the evaluator on PR #839's review, as the issue cites.
 - **Child processes inherit `Object.prototype` keys (#846).** Node copies an env object's inherited enumerable keys into a child's environment. So code already running in the engine's process could reach every child the engine spawns. Label: measured in the issue (a scratch script on Node 22); the reach is inferred. Related, in review: #844 makes the engine's own environment reads own-only.
-- **Tests can reach real host tools (#838).** A test that sets its own `PATH` to include `/usr/bin` or `/bin` runs the real `gh`, `loginctl` and similar tools, and a GitHub token exported in the shell isn't stripped from test processes. Label: measured in the issue.
+- **Tests can reach real host tools (#838).** A test that sets its own `PATH` to include `/usr/bin` or `/bin` runs the real `gh`, `loginctl` and similar tools. Label: measured in the issue. A GitHub token exported in the shell isn't stripped from test processes: `test/isolate.ts` removes only the engine's own variables and `AGENT_SLOTS_*`. Label: inferred, from reading `test/isolate.ts`; that such a token would reach those `gh` calls is inferred in the issue too (none was set in its measured run).
 - **Main needs 0 approvals.** On this repository, GitHub's rules for `main` require 0 approving reviews. Only the engine's own merge policy keeps its high-risk changes with the owner; GitHub doesn't. Label: measured (`gh api repos/<owner>/<repo>/rules/branches/main`, `required_approving_review_count` is `0`, 2026-10-19).
 - **The agents that build this repository act as the owner's account.** A move to a separate unprivileged account, with its own GitHub App and an owner-only update ruleset, is approved but not done. Label: measured (`gh api user` is the repository owner, 2026-10-19).
 - **A fresh hardened install trusts main as of its clone (#845's body).** On a fresh hardened install, the checkout is a clone of origin's main. So its release signers, its engine pin and every script root runs come from main at clone time.
