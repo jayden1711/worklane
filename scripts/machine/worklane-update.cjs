@@ -27,7 +27,9 @@
 // Either way it installs only if:
 //   - every check on it is complete and green, and every required check (updates.json
 //     required_checks) ran and succeeded: a missing, pending, failed or skipped one refuses it (a retired check,
-//     one CI no longer runs at all, isn't waited for when it's missing: RETIRED_CHECKS);
+//     one CI no longer runs at all, isn't waited for when it's missing: RETIRED_CHECKS); a required check counts
+//     only from its pinned source (#727, checkPins: the workflow file or App updates.json, ENGINE_CHECK_SOURCES or
+//     the repo's branch rules name for it; one nothing pins is judged by name, as before);
 //   - the machine is quiet: no agent slot or full-run lock is held and no emergency stop is on.
 // Drain: a machine that is never quiet (one instance running long test tiers back to back) would starve updates for
 // good. So once an update has waited updates.json "drain_after_minutes" (default 60) for a busy machine, the updater
@@ -364,22 +366,274 @@ function firstParentLine(cmp, current, head, max) {
 
 const short = (sha) => String(sha).slice(0, 7);
 /**
- * Every check run on a commit, page by page: 100 a page, the next page (CHECKS_SPACING_MS later) while GitHub's
- * total_count says there are more, at most CHECK_PAGES_MAX pages. A commit can carry well over 100: the CI batch's
- * scheduled run adds one to main's tip every half hour, newest first, so the checks that matter can be on a later
- * page. Returns { check_runs } (past CHECK_PAGES_MAX pages, the newest only: a required check among the older ones
- * reads as not run, so that commit isn't installed), or null when GitHub gives no answer for any page.
+ * Every check run on a commit, page by page: 100 a page, the next page (CHECKS_SPACING_MS later), at most
+ * CHECK_PAGES_MAX pages. A commit can carry well over 100: the CI batch's scheduled run adds one to main's tip every
+ * half hour, newest first, so the checks that matter can be on a later page. Returns { check_runs }, or null when
+ * GitHub gives no answer for any page.
+ * `pinned` (#727: some required check is pinned, checkPins' `pinned`): the next page while a page is full, whatever
+ * total_count says (a missing or wrong total_count never makes a full page the last), and still full past
+ * CHECK_PAGES_MAX pages, null too, since another source's failure on an unread page would block a pinned check.
+ * Without (every required check a bare name): exactly as before pins, the next page while total_count says there are
+ * more, and past CHECK_PAGES_MAX pages the newest only (a required check among the older ones reads as not run).
  */
-async function checkRunsOf(deps, api, sha) {
+async function checkRunsOf(deps, api, sha, pinned = false) {
   const all = [];
   for (let page = 1; page <= CHECK_PAGES_MAX; page++) {
     if (page > 1) await deps.sleep(CHECKS_SPACING_MS);
     const data = await deps.fetchJson(`${api}/commits/${sha}/check-runs?per_page=100${page > 1 ? `&page=${page}` : ''}`);
     if (!data || !Array.isArray(data.check_runs)) return null; // a page missing could hide a red check
     all.push(...data.check_runs);
-    if (data.check_runs.length < 100 || !(data.total_count > all.length)) break;
+    if (data.check_runs.length < 100) return { check_runs: all };
+    // Every required check a bare name: main's stop, where total_count says this was the last page.
+    if (!pinned && !(data.total_count > all.length)) return { check_runs: all };
   }
-  return { check_runs: all };
+  // #727: still full past CHECK_PAGES_MAX. Judging pins, any run of a pinned name from another source that isn't a
+  // pass blocks it, so an unread page could hold the failure: no answer (the commit waits), as the other pagers do.
+  return pinned ? null : { check_runs: all };
+}
+
+/**
+ * #727: the workflow file (in .github/workflows/) each of the engine's own CI checks comes from, as measured on main's
+ * batched commits. A required check counts only from its pinned source: updates.json required_check_sources (root's,
+ * { "<name>": { "app_id": N } | { "workflow": ".github/workflows/<file>" } }), else this list, else the App the repo's
+ * branch protection or ruleset requires for it; a check none of them pins is judged by name, as before (the owner's
+ * choice, 2026-10-19), and when the rules can't be read the commit waits. A fixed list in this installed
+ * file, never read from the commit being judged, so every machine's default checks are pinned without a manual step.
+ */
+const ENGINE_CHECK_SOURCES = Object.freeze({
+  agentshield: 'ci.yml',
+  dco: 'ci.yml',
+  denylist: 'ci.yml',
+  desktop: 'ci.yml',
+  'push-gate': 'ci.yml',
+  'test (ubuntu-latest, 22)': 'ci.yml',
+  'test (ubuntu-latest, 24)': 'ci.yml',
+  scan: 'gitleaks.yml',
+  'Claude sign-in probe (real users)': 'ci-slow.yml',
+  'add-project (real systemd)': 'ci-slow.yml',
+  'bootstrap (macos-latest)': 'ci-slow.yml',
+  'bootstrap (ubuntu-latest)': 'ci-slow.yml',
+  'bootstrap (windows-wsl)': 'ci-slow.yml',
+  'egress firewall (real systemd)': 'ci-slow.yml',
+  'test-run sandbox (real systemd)': 'ci-slow.yml',
+  'wizard end to end (real systemd)': 'ci-slow.yml',
+});
+/** GitHub Actions' App id (its check runs' app.id): a pin to it is judged per workflow file. */
+const ACTIONS_APP_ID = 15368;
+/** A check run GitHub Actions posted: told by its App's id, as the engine tells it (src/check-source.ts). */
+const isActions = (r) => !!r && !!r.app && r.app.id === ACTIONS_APP_ID;
+const hasOwn = (o, k) => !!o && typeof o === 'object' && Object.prototype.hasOwnProperty.call(o, k);
+const WORKFLOW_PIN = /^\.github\/workflows\/[^/]+\.ya?ml$/;
+
+/**
+ * The pin for `name`: updates.json's, else ENGINE_CHECK_SOURCES, else the branch rules' App, else null (by name). An
+ * invalid updates.json entry is { invalid: true }: it refuses the commit, never falls back to the name.
+ */
+function checkPinOf(name, own, rules) {
+  if (hasOwn(own, name)) {
+    const p = own[name];
+    if (p && Number.isInteger(p.app_id) && p.app_id > 0 && Object.keys(p).length === 1) return { app_id: p.app_id };
+    if (p && typeof p.workflow === 'string' && WORKFLOW_PIN.test(p.workflow) && Object.keys(p).length === 1) return { workflow: p.workflow };
+    return { invalid: true };
+  }
+  if (hasOwn(ENGINE_CHECK_SOURCES, name)) return { workflow: `.github/workflows/${ENGINE_CHECK_SOURCES[name]}` };
+  return hasOwn(rules, name) ? { app_id: rules[name] } : null;
+}
+
+/**
+ * #727: how GitHub refused a read, as the engine's classifyGitHubError tells it: 'denied' for a 404 or a 403 that isn't
+ * a rate limit (no permission), else 'transient' (a 5xx, a primary or secondary rate limit, anything else).
+ */
+function refusalKind(status, header, message) {
+  if (status === 404) return 'denied';
+  if (status !== 403) return 'transient';
+  const msg = String(message || '').toLowerCase();
+  if (msg.includes('secondary rate limit') || msg.includes('api rate limit exceeded') || header('x-ratelimit-remaining') === '0') return 'transient';
+  return 'denied';
+}
+
+/**
+ * #727: a read whose kind of refusal matters: { json } when GitHub answered, else { refused: refusalKind }. Deps with no
+ * fetchRead (tests' stand-ins) have only fetchJson, whose null is any refusal: read as 'transient', so it waits.
+ */
+async function readOrRefusal(deps, url) {
+  if (deps.fetchRead) return deps.fetchRead(url);
+  const json = await deps.fetchJson(url);
+  return json === null || json === undefined ? { refused: 'transient' } : { json };
+}
+
+/** How many pages of a branch's rules are read before the answer is taken as none (as the engine's checkApps). */
+const RULES_PAGES_MAX = 10;
+
+/**
+ * #727: the rules on branch `b` (encoded), as the engine reads them: 100 a page, the next page while one is full, up to
+ * RULES_PAGES_MAX. { list } when read to the end; { refused: 'denied' } when page 1 was refused for permission or 404
+ * (the owner's decision (a) applies to page 1 only); else { unread: true }: a later page refused or not a list, page 1
+ * refused otherwise, or still full past the cap. A rule on an unread page could pin a check, so unread waits.
+ */
+async function branchRules(deps, api, b) {
+  const list = [];
+  for (let page = 1; page <= RULES_PAGES_MAX; page++) {
+    const got = await readOrRefusal(deps, `${api}/rules/branches/${b}?per_page=100${page > 1 ? `&page=${page}` : ''}`);
+    if (!Array.isArray(got.json)) return page === 1 && got.refused === 'denied' ? { refused: 'denied' } : { unread: true };
+    list.push(...got.json);
+    if (got.json.length < 100) return { list };
+  }
+  return { unread: true };
+}
+
+/** Each check's App as the branch's classic protection (get a branch) and its rulesets name it; -1 or none: any source. */
+function ruleApps(branch, rules) {
+  const named = [];
+  const classic = branch && branch.protection && branch.protection.required_status_checks && branch.protection.required_status_checks.checks;
+  if (Array.isArray(classic)) for (const c of classic) named.push([c && c.context, c && c.app_id]);
+  for (const r of Array.isArray(rules) ? rules : []) {
+    const list = r && r.type === 'required_status_checks' && r.parameters ? r.parameters.required_status_checks : null;
+    if (Array.isArray(list)) for (const c of list) named.push([c && c.context, c && c.integration_id]);
+  }
+  // WHY: no prototype, so a check the rules pin under the name "__proto__" keeps its pin (a {} would drop it).
+  const out = Object.create(null);
+  const conflicting = new Set();
+  for (const [name, id] of named) {
+    if (typeof name !== 'string' || !Number.isInteger(id) || id <= 0) continue;
+    if (hasOwn(out, name) && out[name] !== id) conflicting.add(name);
+    out[name] = id;
+  }
+  for (const name of conflicting) delete out[name];
+  return out;
+}
+
+/**
+ * Did check run `r` on `o.sha` come from `pin`? A workflow pin needs GitHub Actions to have posted it, from its
+ * suite's workflow run in `o.repo` and for `o.sha`.
+ */
+function fromPinnedSource(r, pin, o) {
+  if (pin.invalid) return false;
+  if ('app_id' in pin) return !!r.app && r.app.id === pin.app_id;
+  const w = isActions(r) && r.check_suite && o.suites.get(r.check_suite.id);
+  return !!w && w.path === pin.workflow && w.repo.toLowerCase() === o.repo.toLowerCase() && w.sha === o.sha && isJobOfRun(r.html_url, r.id, w);
+}
+
+/**
+ * Is `url` (a check run's html_url) the page of job `id` in workflow run `w`: the run's own page (w.url) plus
+ * /job/<id>, over https on the same host? Each job of an Actions run has exactly that page (measured:
+ * .../actions/runs/39197227793/job/117883963166 for check run 117883963166). A check run made through the API into an
+ * Actions suite has another page (guess: /<repo>/runs/<id>; not measured).
+ */
+function isJobOfRun(url, id, w) {
+  if (typeof url !== 'string' || typeof id !== 'number') return false;
+  try {
+    const page = new URL(url);
+    const run = new URL(w.url);
+    return page.protocol === 'https:' && page.host === run.host && page.pathname.toLowerCase() === `${run.pathname.replace(/\/+$/, '')}/job/${id}`.toLowerCase() && run.pathname.endsWith(`/actions/runs/${w.run}`);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * #727: what evaluateChecks judges each required check's source by, for one updater run. Null when these deps don't
+ * read GitHub (deps.pinChecks unset: tests' stand-ins; realDeps sets it). Else forSha(sha, runs) gives the pins on
+ * `sha` (its check runs `runs` already read), with the workflow run behind each check suite and the commit's statuses
+ * (paged, CHECKS_SPACING_MS apart), or { noAnswer } when GitHub gave none; neither is read when the check runs alone
+ * already rule the commit out. The branch rules are read once, and only when a required check has no other pin.
+ */
+async function checkPins(deps, cfg, api) {
+  if (!deps.pinChecks) return null;
+  const own = cfg.required_check_sources;
+  const required = Array.isArray(cfg.required_checks) ? cfg.required_checks : [];
+  const repo = api.slice(api.indexOf('/repos/') + '/repos/'.length);
+  let rules = {};
+  // WHY: an unanswered rules read (a rate limit, say) waits; read as "no App named", it would judge by name a check
+  // the rules may pin.
+  let rulesUnread = false;
+  if (required.some((n) => !hasOwn(own, n) && !hasOwn(ENGINE_CHECK_SOURCES, n))) {
+    const b = encodeURIComponent(cfg.branch || 'main');
+    const branch = await readOrRefusal(deps, `${api}/branches/${b}`);
+    const ruleset = await branchRules(deps, api, b);
+    const branchRead = !!branch.json && typeof branch.json === 'object';
+    const rulesRead = Array.isArray(ruleset.list);
+    rules = ruleApps(branchRead ? branch.json : null, rulesRead ? ruleset.list : []);
+    // WHY (the owner's decision (a), 2026-10-19): a read refused for permission or 404 means "no App named" only while
+    // no required check is pinned (by updates.json, the engine's own sources or what was read), so a bare-names install
+    // installs as on main. A 5xx or a rate limit, or any refusal with a required check pinned, waits.
+    const deniedOnly = (branchRead || branch.refused === 'denied') && (rulesRead || ruleset.refused === 'denied');
+    rulesUnread = !(branchRead && rulesRead) && !(deniedOnly && !required.some((n) => checkPinOf(n, own, rules)));
+  }
+  // Unread rules: whether a required check is pinned is unknown, so it is taken as pinned (the commit waits anyway).
+  if (rulesUnread) return { forSha: async () => ({ noAnswer: "the branch's rules" }), rulesUnread, pinned: true };
+  const pinOf = (n) => checkPinOf(n, own, rules);
+  // WHY: an Actions-App pin needs the workflow runs too: its runs are judged per workflow file (evaluateChecks), so one
+  // file never supersedes another.
+  const needRuns = required.some((n) => 'workflow' in (pinOf(n) || {}) || (pinOf(n) || {}).app_id === ACTIONS_APP_ID);
+  const pinned = required.some((n) => pinOf(n));
+  return {
+    // Some required check is pinned: only then are the reads a pin needs made (checkRunsOf, forSha); with every
+    // required check a bare name, the reads and the verdict are main's.
+    pinned,
+    /**
+     * The pins on `sha`, or { noAnswer: what GitHub didn't answer } (the commit waits). `runs`: the commit's check
+     * runs. When a pinned required check (not a retired one) has no check run of its name at all, the commit can't be
+     * installed whatever its workflow runs or statuses say (it is missing), so neither is read (the read cost, #727).
+     */
+    forSha: async (sha, runs) => {
+      // No required check pinned: nothing to read, and no shortcut either (evaluateChecks judges every name as before).
+      if (!pinned) return { pinOf, suites: new Map(), repo, sha, statuses: [] };
+      const list = (runs || []).filter((r) => r && typeof r.name === 'string');
+      const passedOnce = (n) => list.some((r) => r.name === n && r.status === 'completed' && r.conclusion === 'success');
+      const ran = (n) => list.some((r) => r.name === n);
+      // A pinned required check with no passing run of its name at all can't pass from any source (a retired one only
+      // counts when it ran), so the commit can't be installed: its verdict comes from the check runs alone.
+      const hopeless = required.find((n) => pinOf(n) && !pinOf(n).invalid && (!RETIRED_CHECKS.includes(n) || ran(n)) && !passedOnce(n));
+      if (hopeless !== undefined) return { pinOf, suites: new Map(), repo, sha, statuses: [], hopeless };
+      // Likewise a check judged by name (not a pinned required one) whose latest run finished red, or is still running,
+      // holds the commit whatever the pinned ones say.
+      const byName = new Map();
+      for (const r of list) {
+        if (required.includes(r.name) && pinOf(r.name)) continue;
+        const prev = byName.get(r.name);
+        if (!prev || (r.started_at || '') > (prev.started_at || '') || ((r.started_at || '') === (prev.started_at || '') && r.id > prev.id)) byName.set(r.name, r);
+      }
+      const red = [...byName.values()].find((r) => r.status === 'completed' && !GREEN.has(r.conclusion));
+      if (red) return { pinOf, suites: new Map(), repo, sha, statuses: [], red: { name: red.name, conclusion: red.conclusion } };
+      const running = [...byName.values()].find((r) => r.status !== 'completed');
+      if (running) return { pinOf, suites: new Map(), repo, sha, statuses: [], running: { name: running.name, status: running.status } };
+      const suites = new Map();
+      if (needRuns) {
+        const list = await pagesOf(deps, (page) => `${api}/actions/runs?head_sha=${sha}&per_page=100${page > 1 ? `&page=${page}` : ''}`, 'workflow_runs');
+        if (!list) return { noAnswer: 'its workflow runs' };
+        for (const w of list) {
+          if (w && typeof w.id === 'number' && typeof w.html_url === 'string' && typeof w.check_suite_id === 'number' && typeof w.path === 'string' && typeof w.head_sha === 'string' && w.repository && typeof w.repository.full_name === 'string') suites.set(w.check_suite_id, { run: w.id, url: w.html_url, path: w.path, repo: w.repository.full_name, sha: w.head_sha });
+        }
+      }
+      // The commit's statuses: a same-name status that isn't success refuses a pinned check (the owner's rule).
+      let statuses = [];
+      if (pinned) {
+        const list = await pagesOf(deps, (page) => `${api}/commits/${sha}/status?per_page=100${page > 1 ? `&page=${page}` : ''}`, 'statuses');
+        if (!list) return { noAnswer: 'its commit statuses' };
+        statuses = list.filter((s) => s && typeof s.context === 'string');
+      }
+      return { pinOf, suites, repo, sha, statuses };
+    },
+  };
+}
+
+/**
+ * #727: every item of a paged GitHub list (`key` in each answer: workflow_runs, or the combined status's statuses),
+ * CHECKS_SPACING_MS apart: the next page while a page is full (100), whatever total_count says, so a missing or wrong
+ * total_count never makes a full page the last. Null when GitHub gives no answer for a page, or the list is still full
+ * past CHECK_PAGES_MAX pages (an item unread could be the failing one): the commit waits.
+ */
+async function pagesOf(deps, urlOf, key) {
+  const all = [];
+  for (let page = 1; page <= CHECK_PAGES_MAX; page++) {
+    await deps.sleep(CHECKS_SPACING_MS);
+    const data = await deps.fetchJson(urlOf(page));
+    if (!data || !Array.isArray(data[key])) return null;
+    all.push(...data[key]);
+    if (data[key].length < 100) return all;
+  }
+  return null;
 }
 
 /** `a0685ce: required check "push-gate" ended failure; …` */
@@ -411,6 +665,7 @@ async function chooseCommit(deps, cfg, api, cands, held) {
   const skipped = [];
   let calls = 0;
   let out = null;
+  const pinning = await checkPins(deps, cfg, api);
   for (let i = 0; i < cands.length && !out; i++) {
     const c = cands[i];
     let v;
@@ -418,8 +673,11 @@ async function chooseCommit(deps, cfg, api, cands, held) {
     else if (i > 0 && kept[c.sha]) v = { ok: false, final: true, reason: kept[c.sha].reason };
     else {
       if (calls++) await deps.sleep(CHECKS_SPACING_MS);
-      const data = await checkRunsOf(deps, api, c.sha);
-      v = data ? evaluateChecks(data.check_runs, cfg.required_checks) : { ok: false, final: false, noAnswer: true, reason: 'GitHub gave no answer for its check runs' };
+      const data = await checkRunsOf(deps, api, c.sha, !!pinning && pinning.pinned);
+      const pins = data && pinning ? await pinning.forSha(c.sha, data.check_runs) : undefined;
+      if (!data) v = { ok: false, final: false, noAnswer: true, reason: 'GitHub gave no answer for its check runs' };
+      else if (pins && pins.noAnswer) v = { ok: false, final: false, noAnswer: true, reason: `GitHub gave no answer for ${pins.noAnswer}` };
+      else v = evaluateChecks(data.check_runs, cfg.required_checks, pins);
       // WHY: idle only once the commit has been on main a while: just landed, its checks may not have appeared yet.
       if (v.idle && !(now - Date.parse(c.date || '') >= IDLE_AFTER_MS)) v = { ...v, idle: false };
       if (!v.ok && (v.final || v.idle) && i > 0) {
@@ -463,30 +721,116 @@ const GREEN = new Set(['success', 'neutral', 'skipped']);
  */
 const RETIRED_CHECKS = Object.freeze(['desktop']);
 /**
+ * #727, the owner's rule: the run that decides a pinned check, from its own source's runs `own` on the commit. They
+ * are grouped by workflow file (an Actions run: its suite's workflow run's path, or a group of its own when that run
+ * wasn't read; one group for any other App). In each file's group the latest run (the later workflow run, then the
+ * later check run, as a re-run attempt is) and the newest check run (the highest id: GitHub numbers check runs as it
+ * makes them, a re-run's jobs included) must both pass. So one file never supersedes another, and a re-run of an
+ * older run that failed after a newer run passed still refuses. An App that isn't Actions can't be split by file: its
+ * latest check run of the name (the highest id) decides, in whatever check suite, so a later pipeline or re-run of that
+ * App supersedes its earlier ones (the owner's decision, round 8; round 6 refused a failure in another suite). Returns
+ * a run that doesn't pass (the same whatever the list order), else the latest run of all.
+ */
+function ownVerdict(own, pins) {
+  const suite = (r) => pins.suites.get(r.check_suite && r.check_suite.id);
+  const order = (r) => [(suite(r) || {}).run ?? -1, r.id ?? -1];
+  const later = (a, b) => order(a)[0] > order(b)[0] || (order(a)[0] === order(b)[0] && order(a)[1] > order(b)[1]);
+  const groups = new Map();
+  own.forEach((r, i) => {
+    const key = !isActions(r) ? 'app' : suite(r) ? `file ${suite(r).path}` : `unread ${r.id ?? `#${i}`}`;
+    groups.set(key, [...(groups.get(key) || []), r]);
+  });
+  const ok = (r) => r.status === 'completed' && r.conclusion === 'success';
+  const bad = [];
+  for (const [key, g] of groups) {
+    // An App that isn't Actions can't be split by file: its latest run decides, in any suite (the owner, round 8).
+    const newest = g.reduce((a, b) => ((b.id ?? -1) > (a.id ?? -1) ? b : a));
+    const decide = key === 'app' ? [newest] : [g.reduce((a, b) => (later(b, a) ? b : a)), newest];
+    bad.push(...decide.filter((r) => !ok(r)));
+  }
+  // The same run whatever the list order: a finished one (waiting can't fix it) before a running one, then the highest id.
+  bad.sort((a, b) => Number(b.status === 'completed') - Number(a.status === 'completed') || (b.id ?? -1) - (a.id ?? -1));
+  return bad[0] || own.reduce((a, b) => (later(b, a) ? b : a));
+}
+
+/**
  * Every check on the commit complete and green, and every required check present and successful (a retired one only
  * when it ran: RETIRED_CHECKS).
  * final: true when waiting can't fix it (failed, skipped required); false when it may (pending, missing).
  * idle: true when a required check hasn't run and every check that is on the commit is complete: nothing in flight
  * will bring it (a slow check that only runs in batches, on a commit with no batch).
+ * pins (checkPins, #727; the owner's rule, 2026-10-19): a pinned required check is judged by its pinned source's runs
+ * on this commit (ownVerdict: per workflow file, the latest run and the newest check run must pass), and every run of
+ * its name from any other source, and every commit status of its name, must be a pass too. One nothing pins is judged
+ * by name, as before, and every other name's latest run must still be green. Absent: by name alone (tests' stand-ins
+ * only).
  */
-function evaluateChecks(runs, required) {
+function evaluateChecks(runs, required, pins) {
   if (!Array.isArray(required) || required.length === 0) return { ok: false, final: true, reason: 'no required checks configured in updates.json' };
-  const latest = new Map();
-  for (const r of runs || []) {
-    const prev = latest.get(r.name);
-    if (!prev || (r.started_at || '') > (prev.started_at || '') || ((r.started_at || '') === (prev.started_at || '') && r.id > prev.id)) latest.set(r.name, r);
+  const latestOf = (list) => {
+    const m = new Map();
+    for (const r of list) {
+      const prev = m.get(r.name);
+      if (!prev || (r.started_at || '') > (prev.started_at || '') || ((r.started_at || '') === (prev.started_at || '') && r.id > prev.id)) m.set(r.name, r);
+    }
+    return m;
+  };
+  const latest = latestOf(runs || []);
+  let judged = latest;
+  if (pins) {
+    const invalid = required.filter((name) => (pins.pinOf(name) || {}).invalid);
+    if (invalid.length) return { ok: false, final: true, reason: `updates.json required_check_sources has an invalid pin for ${invalid.map((n) => `"${n}"`).join(', ')} ({ "app_id": N } or { "workflow": ".github/workflows/<file>" }): refused` };
+    // checkPins read neither the workflow runs nor the statuses: a pinned required check has no passing run of its name
+    // at all, so it can't pass from any source. Never installed; the verdict from its own runs alone.
+    if (pins.hopeless !== undefined) {
+      const name = pins.hopeless;
+      const mine = (runs || []).filter((r) => r.name === name);
+      if (!mine.length) return { ok: false, final: false, idle: [...latest.values()].every((x) => x.status === 'completed'), reason: `required check "${name}" hasn't run on this commit from its pinned source` };
+      const running = mine.find((r) => r.status !== 'completed');
+      if (running) return { ok: false, final: false, reason: `required check "${name}" is ${running.status}` };
+      const worst = [...mine].sort((a, b) => (b.id ?? -1) - (a.id ?? -1))[0];
+      return { ok: false, final: true, reason: worst.conclusion === 'skipped' ? `required check "${name}" was skipped` : `required check "${name}" ended ${worst.conclusion}` };
+    }
+    if (pins.red) return { ok: false, final: true, reason: `${required.includes(pins.red.name) ? 'required check' : 'check'} "${pins.red.name}" ended ${pins.red.conclusion}` };
+    if (pins.running) return { ok: false, final: false, reason: `${required.includes(pins.running.name) ? 'required check' : 'check'} "${pins.running.name}" is ${pins.running.status}` };
+    // One nothing pins: by name, as before pins (the owner's choice, 2026-10-19). A pinned one: its pinned source's
+    // runs on this commit (ownVerdict), so a later run of a workflow file supersedes that file's earlier or cancelled
+    // ones (the owner's rule), and nothing else does.
+    judged = latestOf((runs || []).filter((r) => !pins.pinOf(r.name)));
+    const own = new Map();
+    for (const r of runs || []) {
+      if (!pins.pinOf(r.name) || !fromPinnedSource(r, pins.pinOf(r.name), pins)) continue;
+      own.set(r.name, [...(own.get(r.name) || []), r]);
+    }
+    for (const [name, list] of own) judged.set(name, ownVerdict(list, pins));
   }
-  const live = required.filter((name) => !RETIRED_CHECKS.includes(name) || latest.has(name));
+  // A pinned required check: any run of its name from any OTHER source that isn't a pass blocks it.
+  const isOwn = (r) => !!pins && !!pins.pinOf(r.name) && fromPinnedSource(r, pins.pinOf(r.name), pins);
+  const pinnedRequired = (name) => !!pins && !!pins.pinOf(name) && required.includes(name);
+  const from = (name) => (pins && pins.pinOf(name) ? ' from its pinned source' : '');
+  const live = required.filter((name) => !RETIRED_CHECKS.includes(name) || judged.has(name));
   // WHY: a list of retired names alone would otherwise pass on any green commit, with nothing actually required.
   if (live.length === 0) return { ok: false, final: true, reason: `no required checks configured in updates.json but retired ones (${required.join(', ')}): add the checks to require at a root shell (updates.sh --add-check)` };
   for (const name of live) {
-    const r = latest.get(name);
-    if (!r) return { ok: false, final: false, idle: [...latest.values()].every((x) => x.status === 'completed'), reason: `required check "${name}" hasn't run on this commit` };
+    const r = judged.get(name);
+    if (!r) return { ok: false, final: false, idle: [...latest.values()].every((x) => x.status === 'completed'), reason: `required check "${name}" hasn't run on this commit${from(name)}` };
     if (r.status !== 'completed') return { ok: false, final: false, reason: `required check "${name}" is ${r.status}` };
     if (r.conclusion === 'skipped') return { ok: false, final: true, reason: `required check "${name}" was skipped` };
     if (r.conclusion !== 'success') return { ok: false, final: true, reason: `required check "${name}" ended ${r.conclusion}` };
+    if (!pinnedRequired(name)) continue;
+    for (const o of (runs || []).filter((x) => x.name === name && !isOwn(x))) {
+      if (o.status !== 'completed') return { ok: false, final: false, reason: `required check "${name}" from another source is ${o.status}` };
+      if (o.conclusion !== 'success') return { ok: false, final: true, reason: `required check "${name}" from another source ended ${o.conclusion}` };
+    }
+    // A commit status of its name that isn't success refuses it too (pending: wait).
+    for (const s of (pins.statuses || []).filter((x) => x.context === name && x.state !== 'success')) {
+      if (s.state === 'pending') return { ok: false, final: false, reason: `required check "${name}" has a pending commit status` };
+      return { ok: false, final: true, reason: `required check "${name}" has a commit status that ended ${s.state}` };
+    }
   }
   for (const [name, r] of latest) {
+    // A pinned required check was judged above, by its own source's latest run and every other source's runs.
+    if (pinnedRequired(name)) continue;
     if (r.status !== 'completed') return { ok: false, final: false, reason: `check "${name}" is ${r.status}` };
     if (!GREEN.has(r.conclusion)) return { ok: false, final: true, reason: `check "${name}" ended ${r.conclusion}` };
   }
@@ -1314,7 +1658,13 @@ async function update(deps, cfg, seen = {}) {
     if (v.object !== tag.object || v.commit !== head) {
       return deps.note('refused', head, `${tag.tag} moved between ls-remote and its verification: ls-remote said tag object ${short(tag.object)} at ${short(head)}, the one verified is ${short(v.object)} at ${short(v.commit)}`, true);
     }
-    const checks = evaluateChecks(((await checkRunsOf(deps, api, v.base)) || {}).check_runs, cfg.required_checks);
+    // #727: the release's commit's required checks, each only from its pinned source.
+    const pinning = await checkPins(deps, cfg, api);
+    // No answer (past the pages read while a required check is pinned, too): no runs, so the required checks haven't
+    // run: not installed.
+    const runs = ((await checkRunsOf(deps, api, v.base, !!pinning && pinning.pinned)) || {}).check_runs;
+    const pins = pinning ? await pinning.forSha(v.base, runs) : undefined;
+    const checks = pins && pins.noAnswer ? { ok: false, final: false, reason: `GitHub gave no answer for ${pins.noAnswer.replace(/^its /, 'the ')} on ${short(v.base)}` } : evaluateChecks(runs, cfg.required_checks, pins);
     if (!checks.ok) return deps.note(checks.final ? 'refused' : 'waiting', head, checks.reason, checks.final);
   } else {
     if (!Array.isArray(cfg.required_checks) || cfg.required_checks.length === 0) return deps.note('refused', head, 'no required checks configured in updates.json', true);
@@ -1893,9 +2243,27 @@ function realDeps(print = (line) => process.stdout.write(`${line}\n`), files = {
       }
     },
     exec: (file, args, opts = {}) => execFileSync(file, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: opts.timeout || 120_000 }),
+    // #727: a required check counts only from its pinned source (checkPins); always, against the real GitHub.
+    pinChecks: true,
     fetchJson: async (url) => {
       const r = await fetch(url, { headers: { accept: 'application/vnd.github+json', 'user-agent': 'worklane-update' } });
       return r.ok ? r.json() : null;
+    },
+    // #727: the branch rules' reads, where a permission refusal differs from a transient one (readOrRefusal).
+    fetchRead: async (url) => {
+      const r = await fetch(url, { headers: { accept: 'application/vnd.github+json', 'user-agent': 'worklane-update' } });
+      if (r.ok) return { json: await r.json() };
+      // WHY: as the engine's req: the body as JSON when it parses, else its text, and its message (classifyGitHubError).
+      // A rate limit known only by a plain-text body must stay transient, never read as a permission refusal.
+      const text = await r.text();
+      let body = text;
+      try {
+        body = text ? JSON.parse(text) : '';
+      } catch {
+        // WHY: not JSON; the raw text is the message
+      }
+      const message = body && typeof body === 'object' && 'message' in body ? String(body.message) : String(body ?? '');
+      return { refused: refusalKind(r.status, (h) => r.headers.get(h), message) };
     },
     slots: () => {
       let names = [];
@@ -1997,6 +2365,6 @@ if (require.main === module) {
     },
   );
 }
-module.exports = { slotPid, drainStep, drainDeadline, drainAfterMs, inFlight, reopen, DRAIN, DRAIN_TTL_MS, DRAIN_INSTALL_TTL_MS, DRAIN_MARGIN_MS, redactDeep, appendLog, sandboxOnTimeout, sandboxCommand, parseSandbox, sandboxVerdict, sandboxWaitMs, verifySandbox, SANDBOX_INCIDENT, SANDBOX_POLL_MS, stuckStep, stuckAlertMs, STUCK_INCIDENT, IDLE_AFTER_MS, journalLine, makeNote, realDeps, chooseCommit, checkRunsOf, firstParentLine, lookbackOf, pendingWaitMs, saveJson, CHECKS_SPACING_MS, VERDICT_TTL_MS, syncHelpers, HELPERS, canaryConfig, canaryCommand, dailyDue, DAY_MS, channelOf, newer, parseTags, newestRelease, verifyRelease, parseInstance, migrateCommand, restoreCommand, parseMigrate, repoFromUrl, fastForward, evaluateChecks, RETIRED_CHECKS, quiet, parseUnits, parseShow, health, redact, buildCommand, binTargets, binProblems, installTree, run, BUILD_SCRIPT, HEALTH_MS, STABLE_MS };
+module.exports = { slotPid, drainStep, drainDeadline, drainAfterMs, inFlight, reopen, DRAIN, DRAIN_TTL_MS, DRAIN_INSTALL_TTL_MS, DRAIN_MARGIN_MS, redactDeep, appendLog, sandboxOnTimeout, sandboxCommand, parseSandbox, sandboxVerdict, sandboxWaitMs, verifySandbox, SANDBOX_INCIDENT, SANDBOX_POLL_MS, stuckStep, stuckAlertMs, STUCK_INCIDENT, IDLE_AFTER_MS, journalLine, makeNote, realDeps, chooseCommit, checkRunsOf, firstParentLine, lookbackOf, pendingWaitMs, saveJson, CHECKS_SPACING_MS, VERDICT_TTL_MS, syncHelpers, HELPERS, canaryConfig, canaryCommand, dailyDue, DAY_MS, channelOf, newer, parseTags, newestRelease, verifyRelease, parseInstance, migrateCommand, restoreCommand, parseMigrate, repoFromUrl, fastForward, evaluateChecks, RETIRED_CHECKS, ENGINE_CHECK_SOURCES, checkPins, ruleApps, quiet, parseUnits, parseShow, health, redact, buildCommand, binTargets, binProblems, installTree, run, BUILD_SCRIPT, HEALTH_MS, STABLE_MS };
 Object.assign(module.exports, { SIGNERS_STATE, SIGNERS_INCIDENT, signersDigest, readSignersState, checkSigners, expectSigners, recordSigners, signersHold, acknowledgeSigners, takeAcknowledged, signersChangeText });
 Object.assign(module.exports, { SELF, SELF_PREV, SELF_RECORD, SELF_OFF, SELF_ROLLBACK, readRootFile, selfUpdateOff, verifiedUpdater, syncSelf, setupBefore, setupRecord });
