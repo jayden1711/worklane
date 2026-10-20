@@ -275,30 +275,12 @@ export const IntakeConfig = z.strictObject({
     })
     .prefault({}),
   /**
-   * Voice intake (src/intake/voice.ts): an idea an owner of the instance spoke on the dashboard and confirmed there,
-   * within 10 s, from a focused and visible tab, taken through the same triage and approval as a Discord message.
-   * Its sender is never trusted: what it drafts waits for an owner's approval. Off by default; each owner also turns
-   * it on in their own browser (Settings, Voice).
+   * Removed (#743): voice intake and Siri. Whatever an older intake.yaml has under either key is accepted, so the file
+   * still loads (a leftover never turns intake off), and ignored: nothing reads it, intakeWarnings names it, and doctor
+   * fails until it is deleted (src/voice-removed.ts).
    */
-  voice: z
-    .strictObject({
-      enabled: z.boolean().default(false),
-    })
-    .prefault({}),
-  /**
-   * Siri (docs/siri.md, src/siri/): "tell" leaves a spoken idea in the same voice inbox (never trusted: an Inbox
-   * approval, always), and "ask" answers aloud at a viewer's level, with no tools and no repository. Both need a
-   * device token an owner made on the dashboard, through the hub's Siri gateway, from the tailnet. Off by default.
-   */
-  siri: z
-    .strictObject({
-      enabled: z.boolean().default(false),
-      /** The model Siri answers with: fast enough to be heard within Siri's patience. */
-      ask_model: z.string().min(1).max(100).default('haiku'),
-      /** Siri answers' own daily cap, in USD; every answer also counts against the instance's daily budget. */
-      ask_max_usd_per_day: z.number().positive().max(20).default(1),
-    })
-    .prefault({}),
+  voice: z.unknown().optional(),
+  siri: z.unknown().optional(),
   /**
    * Replies worded by the casual replier role from the redacted message and the engine's facts, each checked in
    * code before it is sent (src/intake/replier.ts). Off: the engine's fixed replies.
@@ -403,9 +385,8 @@ export function isAllowed(sender: Sender, cfg: IntakeConfig): boolean {
       // names its author, and only the intake label brings it here.
       return true;
     case 'voice':
-      // WHY allowed: an owner of the instance spoke and confirmed it on the dashboard (or a device token an owner made,
-      // for Siri); never trusted, so it always waits for an owner's approval.
-      return true;
+      // Removed (#743): no voice or Siri source is wired any more, and a voice report from anywhere is taken from nobody.
+      return false;
     case 'slack':
       // Only the allowed senders (slack.allowed_senders); empty means nobody. The adapter drops the rest first.
       return cfg.slack.allowed_senders.includes(sender.id);
@@ -422,8 +403,12 @@ export function intakeWarnings(cfg: IntakeConfig): string[] {
   if (cfg.slack.enabled && !cfg.slack.allowed_senders.length) out.push('slack is on but slack.allowed_senders is empty: no Slack message will be accepted');
   if (cfg.slack.enabled && !cfg.slack.channels.length) out.push('slack is on but slack.channels is empty: no Slack channel is read');
   if (cfg.linear.enabled && !cfg.linear.allowed_senders.length) out.push('linear is on but linear.allowed_senders is empty: no Linear issue will be taken');
+  for (const k of REMOVED_INTAKE_KEYS) if (cfg[k] !== undefined) out.push(`${k} is ignored: ${k === 'voice' ? 'voice intake' : 'Siri'} was removed; delete the ${k} section`);
   return out;
 }
+
+/** intake.yaml's keys for removed sources (#743): accepted, so the file still loads, and ignored with a warning. */
+export const REMOVED_INTAKE_KEYS = ['voice', 'siri'] as const;
 
 /**
  * Is this sender trusted? Decided only from the adapter's sender id against the instance config: nothing in the

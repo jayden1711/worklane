@@ -19,6 +19,7 @@ import { canRunAgents, detectOs, diskFree, fileAccess, nvidiaNodes, shimsNeedShe
 import { diskFloorCheck } from './governor-holds.js';
 import { findTool, toolBin } from './tool-path.js';
 import { checkIntakeFile } from './intake/check.js';
+import { claudeAccountLeftoverCheck } from './claude-accounts-retired.js';
 import { INTAKE_FILE } from './intake/config.js';
 import { lintSkills, skillLintReport, trackedSkills } from './skill-lint.js';
 import { initStateUnreadable, localInitFile, localRepo, readInitState, serverInitFile, setupContext, unavailableIn, type InitIo, type Mode } from './init.js';
@@ -29,6 +30,7 @@ import { openReadOnly } from './events/read-only.js';
 import { checkSetup, groupLevel, GROUPS, stepLevel, systemProbe, type SetupContext, type SetupProbe } from './setup-steps.js';
 import { modelWarnings } from './model-routing.js';
 import { HUB_UNIT_AS_ROOT, OWNER_TERMINAL_RERUN, ownerTerminalNotice, ownerTerminalRerun, type TerminalPaths } from './console/owner-terminal-removed.js';
+import { voiceSiriLeftoverCheck } from './doctor-voice-removed.js';
 
 /** off: not available in this setup's mode (said why; never a failure). */
 export type Level = 'ok' | 'warn' | 'fail' | 'off';
@@ -212,6 +214,9 @@ export function doctor(rootArg: string, opts: { agentshield?: boolean; /** A pol
     const v = spawnSync(claude, ['--version'], { encoding: 'utf8', timeout: 20_000 });
     add('claude', v.status === 0 ? 'ok' : 'warn', (v.stdout || v.stderr || '').trim().split('\n')[0] ?? '');
   }
+  // What the removed account profiles, failover and switch left (#736): ignored, named with the step that removes it.
+  const accountLeftovers = claudeAccountLeftoverCheck();
+  if (accountLeftovers) out.push(accountLeftovers);
 
   // Lean CLAUDE.md
   const claudeMd = join(root, 'CLAUDE.md');
@@ -233,6 +238,8 @@ export function doctor(rootArg: string, opts: { agentshield?: boolean; /** A pol
   out.push(...setupChecks(root, opts));
   const terminal = ownerTerminalCheck();
   if (terminal) out.push(terminal);
+  const voiceSiri = voiceSiriLeftoverCheck({ instances });
+  if (voiceSiri) out.push(voiceSiri);
   const gpu = gpuCheck();
   if (gpu) out.push(gpu);
   // Only where the project runs its tests on the machine: elsewhere no run has a sandbox to grant from.
