@@ -17,6 +17,12 @@ import { repoRoot } from './helpers.js';
 
 const posix = process.platform !== 'win32';
 const setupDir = join(repoRoot, 'scripts', 'setup');
+/**
+ * The shifted clock (test/clock-shift.ts, #687), passed to the script on the weekly job: the script starts with only
+ * PATH and HOME, and its Node child (lib.sh's install_claude_token) writes expiresAt from its own clock. Without these
+ * it wrote a real-clock expiry that a test 400 days ahead read as already past (#800). Empty on every other run.
+ */
+const clockShift: Record<string, string> = process.env.TEST_CLOCK_SHIFT ? { TEST_CLOCK_SHIFT: process.env.TEST_CLOCK_SHIFT, NODE_OPTIONS: process.env.NODE_OPTIONS ?? '' } : {};
 // Random, so that any part of it showing up anywhere is a leak, not a coincidence.
 const SECRET = `${randomBytes(16).toString('hex')}_new-${randomBytes(6).toString('hex')}`;
 const TOKEN = `sk-ant-oat01-${SECRET}`;
@@ -133,7 +139,7 @@ process.stdout.write(JSON.stringify(ok ? { loggedIn: true, authMethod: 'claude.a
   for (const u of ['worklane-alpha.service', 'worklane-beta.service']) writeFileSync(join(T, 'units', `${u}.active`), '');
   // deadline (ms): the run is killed then (r.error set), so a step that hangs fails the test instead of hanging it.
   const run = (args: string[], input = `${TOKEN}\n`, deadline?: number) => {
-    const r = spawnSync('bash', [join(s, 'claude-account.sh'), ...args], { encoding: 'utf8', input, env: { PATH: process.env.PATH ?? '/usr/bin:/bin', HOME: T }, ...(deadline ? { timeout: deadline } : {}) });
+    const r = spawnSync('bash', [join(s, 'claude-account.sh'), ...args], { encoding: 'utf8', input, env: { PATH: process.env.PATH ?? '/usr/bin:/bin', HOME: T, ...clockShift }, ...(deadline ? { timeout: deadline } : {}) });
     const lines = r.stdout.split('\n').filter(Boolean);
     return { ...r, lines, events: args.includes('--json') && args[0] === 'switch' ? lines.map((l) => JSON.parse(l) as Line) : [] };
   };
@@ -149,7 +155,7 @@ const AGENTS = ['wl-alpha-agent', 'wl-alpha-eval', 'wl-beta-agent'];
 
 /** install_claude_token <user> (lib.sh; credentials.sh and add-project.sh install one login with it), token on stdin. */
 const install = (m: ReturnType<typeof machine>, user: string, token = TOKEN, deadline = 30_000) =>
-  spawnSync('bash', ['-c', 'source "$1"; install_claude_token "$2"', '_', join(m.s, 'lib.sh'), user], { encoding: 'utf8', input: `${token}\n`, env: { PATH: process.env.PATH ?? '/usr/bin:/bin', HOME: m.T }, timeout: deadline });
+  spawnSync('bash', ['-c', 'source "$1"; install_claude_token "$2"', '_', join(m.s, 'lib.sh'), user], { encoding: 'utf8', input: `${token}\n`, env: { PATH: process.env.PATH ?? '/usr/bin:/bin', HOME: m.T, ...clockShift }, timeout: deadline });
 
 test("install_claude_token: the token in that user's own credentials file at 0600 (its dir 0700), the file's other entries kept, a year long, as that user under timeout, never echoed", { skip: !posix }, () => {
   const m = machine();
