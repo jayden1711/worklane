@@ -45,9 +45,13 @@ export const LOGIN_SWITCH_VAR = /^(ANTHROPIC_|CLAUDE_CODE_USE_|CLAUDE_CODE_OAUTH
 /** The login-switching variables `env` sets (any value, an empty one included). */
 export const loginSwitchVars = (env: NodeJS.ProcessEnv): string[] => Object.keys(env).filter((k) => LOGIN_SWITCH_VAR.test(k.toUpperCase()) && env[k] !== undefined);
 
-/** Refuses (throws) unless this process runs as the bench user. */
-export function requireBenchUser(env: NodeJS.ProcessEnv = process.env, me: string = currentUser()): string {
+/**
+ * Refuses (throws) unless this process runs as the bench user, and never as root (uid 0, or the name root), whatever
+ * BENCH_USER_ENV names: root's rootful Docker and its reach over every home are what the bench user exists to avoid.
+ */
+export function requireBenchUser(env: NodeJS.ProcessEnv = process.env, me: string = currentUser(), uid: number = process.getuid?.() ?? -1): string {
   const user = env[BENCH_USER_ENV] || DEFAULT_BENCH_USER;
+  if (uid === 0 || me === 'root') throw new Error(`the bench never runs as root (this is ${me || 'uid 0'}): log in as the bench user with sudo -iu ${user === 'root' ? DEFAULT_BENCH_USER : user}`);
   if (me !== user) throw new Error(`the bench runs as ${user} only, from its own clone (scripts/bench/README.md, one-time setup); this is ${me || 'an unknown user'}`);
   return user;
 }
