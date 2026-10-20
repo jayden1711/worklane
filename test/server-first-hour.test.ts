@@ -6,7 +6,7 @@
 // No host tool runs here: the probe answers every command with a failure and finds no tool on PATH.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
 import { request } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -184,6 +184,31 @@ test('#739 the updater deferral fails closed: an event log that exists but canno
       chmodSync(t.stateDir, 0o700);
     }
   }
+});
+
+test('#739 round 2: a dangling symlink at the event log is not "no log yet": the updater stays required, the first task not done', { skip: !posix && 'POSIX' }, () => {
+  const s = server();
+  // The engine never makes a link there: one is tampering or corruption, an unsure state.
+  symlinkSync(join(s.stateDir, 'gone.db'), join(s.stateDir, 'events.db'));
+  const v = s.check();
+  const up = stepIn(v, 'updater')!;
+  assert.equal(up.optional, false, up.detail);
+  assert.match(up.detail, /couldn't tell whether the first PR exists/);
+  const task = stepIn(v, 'server-first-task')!;
+  assert.equal(task.done, false);
+  assert.match(task.detail, /couldn't read the coordinator's event log/);
+});
+
+test('#739 round 2: a state directory that is missing is not "no log yet": the updater stays required', () => {
+  const s = server();
+  // As doctor's fallback state dir after loadInstance throws: an instance's own state dir always exists.
+  const v = s.check({ stateDir: join(s.stateDir, 'missing') });
+  const up = stepIn(v, 'updater')!;
+  assert.equal(up.optional, false, up.detail);
+  assert.match(up.detail, /couldn't tell whether the first PR exists/);
+  const task = stepIn(v, 'server-first-task')!;
+  assert.equal(task.done, false);
+  assert.match(task.detail, /couldn't read the coordinator's event log/);
 });
 
 test("#739 an installed updater: still done and required, and its files byte-identical after the checks run again", () => {

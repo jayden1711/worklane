@@ -183,7 +183,8 @@ const CASES: Record<string, { mode: Mode; on: (f: Fx, w: World) => SetupContext 
       log.append('issue.seen', { issue: 3, title: 't', labels: ['ready'], author: 'ada', owner: null, actionable: true, why: 'opened by writer ada' }, 'c');
       log.close();
     },
-    off: () => {},
+    // An instance's state dir always exists (a missing one is an error, never "no log yet").
+    off: (f) => void mkdirSync(f.ctx('server').stateDir, { recursive: true }),
     done: /#3/,
     not: /event log yet/,
   },

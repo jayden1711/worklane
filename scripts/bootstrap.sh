@@ -30,7 +30,7 @@
 #                                                 mode (it makes the sign-in App) at the https origin (from
 #                                                 Tailscale or --public-url); with no origin yet, the same page on
 #                                                 http://127.0.0.1:4399/, with the ssh -L line that reaches it
-#                                                 (its App step shows Tailscale and HTTPS first); then the hub's
+#                                                 (its App step offers the origin: your own, or Tailscale); then the hub's
 #                                                 first-run wizard. No key or token in it: the page asks, from a
 #                                                 0600 file. When nothing answers, no URL: the reason, the fix,
 #                                                 exit 4.

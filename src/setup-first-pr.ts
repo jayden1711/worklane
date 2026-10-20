@@ -3,7 +3,7 @@
 // - the first PR: until the instance opened one (or landed a change directly), a step marked `after: 'first-pr'` (the
 //   engine updater) is listed and counted, but doesn't block the way to the first task.
 // It only reads: it never writes the log, the updater's files or anything else.
-import { statSync } from 'node:fs';
+import { lstatSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { openReadOnly } from './events/read-only.js';
 import type { Detected, SetupStep, StepView } from './setup-steps.js';
@@ -20,17 +20,29 @@ const WRITERS_ISSUE = /^(?:opened by writer|ready added by writer) \S/;
 
 type LogRead<T> = { kind: 'none' } | { kind: 'read'; value: T } | { kind: 'error'; why: string };
 
+const firstLine = (e: unknown) => (e as Error).message.split('\n')[0] ?? 'unreadable';
+
 /**
- * Run one read against the log. No log at all (ENOENT): the coordinator hasn't run yet. Any other failure (a state
- * directory this user can't look into, a file that isn't a database): an error, never read as "no log".
+ * Run one read against the log. No log at all, in a state directory that is there: the coordinator hasn't run yet.
+ * Anything else is an error, never read as "no log": a state directory that is missing (an instance's always exists:
+ * doctor's fallback when the instance can't be loaded) or that this user can't look into, a log path that is a
+ * symlink (dangling or not; the engine never makes one), a directory or anything but a regular file, a file that
+ * isn't a database.
  */
 function readLog<T>(stateDir: string, read: (q: (sql: string) => unknown[]) => T): LogRead<T> {
   const file = eventsFile(stateDir);
   try {
-    statSync(file);
+    // stat (a link to it followed): any failure here, a missing directory included, is an error.
+    if (!statSync(stateDir).isDirectory()) return { kind: 'error', why: `${stateDir} isn't a directory` };
+  } catch (e) {
+    return { kind: 'error', why: `the state directory ${stateDir}: ${firstLine(e)}` };
+  }
+  try {
+    // lstat: a link isn't followed, so a dangling one is never taken for "no log yet".
+    if (!lstatSync(file).isFile()) return { kind: 'error', why: `${file} isn't a regular file` };
   } catch (e) {
     if ((e as NodeJS.ErrnoException).code === 'ENOENT') return { kind: 'none' };
-    return { kind: 'error', why: (e as Error).message.split('\n')[0] ?? 'unreadable' };
+    return { kind: 'error', why: firstLine(e) };
   }
   try {
     const db = openReadOnly(file);
@@ -40,7 +52,7 @@ function readLog<T>(stateDir: string, read: (q: (sql: string) => unknown[]) => T
       db.close();
     }
   } catch (e) {
-    return { kind: 'error', why: (e as Error).message.split('\n')[0] ?? 'unreadable' };
+    return { kind: 'error', why: firstLine(e) };
   }
 }
 
