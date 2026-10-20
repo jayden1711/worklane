@@ -9,6 +9,7 @@ export const HOOK_IMPORTS: readonly string[] = [
   'src/automations/schema.ts',
   'src/backlog/types.ts',
   'src/brand.ts',
+  'src/check-source.ts',
   'src/checkout.ts',
   'src/ci-none.ts',
   'src/comment-policy.ts',
