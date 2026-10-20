@@ -245,7 +245,23 @@ export interface CheckRun {
   stage: string;
   head: string;
   checks: { check: string; status: 'pass' | 'fail' | 'unavailable' | 'skipped' | string; exitCode: number | null; tail: string | null }[];
+  forViewer?: undefined;
 }
+
+/**
+ * The same run as a viewer gets it (src/checks-viewer.ts, #837): each check's name and result only, no head, exit
+ * codes or output.
+ */
+export interface ViewerCheckRun {
+  id: number;
+  at: string;
+  stage: string;
+  checks: { check: string; status: string }[];
+  forViewer: true;
+}
+
+/** GET /api/checks?issue=n as served: the owners' and writers' runs whole, a viewer's in its own shape. */
+export type ServedCheckRun = CheckRun | ViewerCheckRun;
 
 /** A goal's task graph (GET /api/goal-graph?issue=n, src/goal-graph.ts): `from` finishes before `to` starts. */
 export interface GoalGraph {
