@@ -15,7 +15,16 @@ import { which } from '../../src/os/index.js';
 import { repoRoot } from '../helpers.js';
 
 export const skip = !which('gitleaks') && 'gitleaks not installed (the coordinator refuses unscanned changes)';
-export const git = (cwd: string, ...a: string[]) => execFileSync('git', a, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+/**
+ * Git as the fixtures run it. Its commits are stamped from this process's clock (Date.now()), not the machine's.
+ * WHY: the weekly shifted-clock job (test/clock-shift.ts, #687) moves Node's clock but not git's, so a commit made
+ * here looked 45 or 400 days old to the coordinator, which reads commit times (`git log --format=%ct`, pr-hygiene),
+ * and a fresh PR read as stale (#800). On the real clock the two agree, so this changes nothing there.
+ */
+export const git = (cwd: string, ...a: string[]) => {
+  const at = `@${Math.floor(Date.now() / 1000)} +0000`;
+  return execFileSync('git', a, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, GIT_AUTHOR_DATE: at, GIT_COMMITTER_DATE: at } }).trim();
+};
 
 /** A "GitHub" remote, the coordinator's clone of the example project, a file backlog and a log. */
 export function fixture() {

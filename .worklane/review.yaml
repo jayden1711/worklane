@@ -40,6 +40,10 @@ categories:
     - test/experiments-coordinator.test.ts
     - test/intake-coordinator.test.ts
     - test/domain-runner.test.ts
+    # Listed here only, not locked in code (#815): the state dir's refusal in a test run, and the lint that a test
+    # checks each machine location it creates, writes or removes with onRealMachine first.
+    - test/state-dir-refusal.test.ts
+    - test/machine-path-writes.test.ts
     - .denylist*
     - .gitleaks*
     - .githooks/**
