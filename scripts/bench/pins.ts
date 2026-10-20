@@ -4,8 +4,10 @@
 // (a module-private token), are frozen once built, and the download and the pull refuse anything this module didn't
 // build (requirePinned: a module-private WeakSet, which a copy or an object made on the class's prototype isn't in).
 //
-// What the file may hold, and only that (a closed schema: an unknown key refuses the whole file):
-// - dataset.base: an https url with no credentials, port, query or fragment, on one of dataset.hosts, ending in `/`;
+// What the file may hold, and only that (a closed schema: an unknown key refuses the whole file, and so does any text
+// but the canonical form, JSON.stringify(pins, null, 2) and a newline, so a repeated key can't hide an unchecked copy):
+// - dataset.base: an https url with no credentials, port, query or fragment, on one of dataset.hosts, ending in `/`,
+//   written exactly as the url it is, each path segment a plain name (no percent escape);
 //   dataset.path: a relative file path; the url fetched is base + revision + "/" + path, so it is at the pinned
 //   revision by construction;
 // - dataset.revision (a 40-hex commit) and dataset.sha256 (64 hex, of the file's bytes): both set, or both null
@@ -103,6 +105,9 @@ export class ImageRef {
   }
 }
 
+// #863 round 1: a pin's behaviour can't be swapped either (download.ts reads only a pin's own frozen fields anyway).
+for (const C of [DatasetPin, Pins, ImageRef]) Object.freeze(C.prototype);
+
 const isObject = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
 
 function onlyKeys(o: Record<string, unknown>, keys: readonly string[], where: string): void {
@@ -139,6 +144,10 @@ function datasetPin(d: unknown): DatasetPin | null {
   if (typeof base !== 'string' || !base.endsWith('/')) throw new Error('pins: dataset.base must be a url ending in /');
   const u = checkUrl(base, hosts as string[], 'pins: dataset.base');
   if (u.search) throw new Error('pins: dataset.base has a query');
+  // #863 round 1: the url exactly as it is read (no default port, no dot segment, no upper-case host), and each path
+  // segment a plain name, as dataset.path's are: no percent escape can spell anything the scan above would refuse.
+  if (base !== u.href) throw new Error(`pins: dataset.base must be written as the url it is (${u.href})`);
+  if (!u.pathname.split('/').slice(1, -1).every((p) => PATH_PART.test(p))) throw new Error('pins: dataset.base has a path segment that is not a plain name (no percent escape, no dot or empty segment)');
   if (typeof path !== 'string' || !path.split('/').every((p) => PATH_PART.test(p))) throw new Error('pins: dataset.path must be a relative file path (no .., no leading /)');
   if (!Number.isInteger(max) || (max as number) < 1 || (max as number) > 2 ** 31) throw new Error('pins: dataset.max_bytes must be a whole number of bytes, at least 1');
   if (revision === null && sha256 === null) return null;
@@ -170,6 +179,9 @@ export function parsePins(text: string): Pins {
   }
   // Again on what the text means: a JSON escape (_ is `_`) hides a shape from the raw text, not from this.
   if (TASK_SHAPE.test(JSON.stringify(o))) throw new Error(TASK_REFUSED);
+  // #863 round 1: the text must be exactly its canonical form, so every byte of it is what was parsed and checked:
+  // a repeated key (JSON.parse keeps the last copy, unchecked earlier ones) or any other spelling is refused.
+  if (text !== `${JSON.stringify(o, null, 2)}\n`) throw new Error('pins: the file is not in its canonical form (JSON.stringify(pins, null, 2) and a newline: no repeated key, no other spacing)');
   if (!isObject(o)) throw new Error('pins: not an object');
   onlyKeys(o, ['dataset', 'image_digests'], 'the file');
   return new Pins(TOKEN, datasetPin(o.dataset), digestSet(o.image_digests));

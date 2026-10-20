@@ -253,7 +253,8 @@ export function pullImage(o: DockerOptions, ref: ImageRef): void {
     checkImageArgs(args);
     return (o.call ?? spawnDocker)(o.docker, args, { env: dockerEnv(o.env), timeoutMs });
   };
-  const text = String(ref);
+  // From its own frozen fields only, never a method (#863 round 1: a prototype's method can be swapped in-process).
+  const text = `${ref.name}@${ref.digest}`;
   const p = send(['pull', text], 60 * 60_000);
   if (p.status !== 0) throw new Error(`docker pull ${text} failed: ${p.stderr.trim().slice(0, 300)}`);
   const i = send(['image', 'inspect', '--format', INSPECT_FORMAT, text], 60_000);

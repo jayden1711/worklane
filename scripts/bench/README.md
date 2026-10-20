@@ -269,7 +269,11 @@ Every pin is in one file, `scripts/bench/pins.json`. Nothing else sets one: no v
 - `dataset`: the file's url (`base` + `revision` + `/` + `path`, so it is at the pinned revision by construction), the `revision` (a 40-hex commit), the file's `sha256`, `max_bytes` (the most it reads) and `hosts` (where a redirect may lead: each host or its subdomains, https only). `revision` and `sha256` are both set or both null. They are null now, so `bench download` refuses and fetches nothing. The `path` there is a guess until the owner pins it (**guess**): check it names the file meant.
 - `image_digests`: sha256 digests only, sorted, none or at least 100 of them. Never an image name, an instance id or a task selection: the agents can read this clone, and an image name carries its instance id. Which image a task uses comes from the held-out store.
 
-The file refuses, as a whole, an unknown key and anything shaped like an instance id or an instance image name.
+The whole file is refused for:
+- an unknown key;
+- anything shaped like an instance id or an instance image name;
+- any text but its canonical form (`JSON.stringify(pins, null, 2)` and a newline), so a repeated key can't hide an unchecked copy;
+- a `base` that isn't written exactly as the url it is, or whose path has a segment that isn't a plain name (no percent escape).
 
 To pin the dataset, the owner records the commit and the file's sha256 (a reviewed change to `pins.json`). Then, as the bench user:
 

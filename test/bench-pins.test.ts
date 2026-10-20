@@ -34,6 +34,10 @@ const BASE = `https://${HOST}/datasets/fixture/resolve/`;
 const URL_AT_REV = `${BASE}${REV}/data/verified.jsonl`;
 const FILE = `${SHA}-verified.jsonl`;
 
+/** A synthetic instance id and image name, in SWE-bench's shapes (the repo's convention: never a real task's). */
+const FAKE_ID = 'example__proj-4242';
+const FAKE_IMAGE = 'sweb.eval.x86_64.example_1776_proj-4242';
+
 /** Sorted digests, as many as the pins file needs to hold a set (never a selection). */
 const DIGESTS = Array.from({ length: 120 }, (_, i) => `sha256:${sha256(`image ${i}`)}`).sort();
 const D = DIGESTS[7]!;
@@ -53,7 +57,7 @@ interface PinsOver {
 /** A pins file's text, as scripts/bench/pins.json holds it, pinned to the fixture bytes unless told otherwise. */
 function pinsText(o: PinsOver = {}): string {
   const dataset = { base: o.base ?? BASE, path: o.path ?? 'data/verified.jsonl', revision: o.revision === undefined ? REV : o.revision, sha256: o.sha256 === undefined ? SHA : o.sha256, max_bytes: o.max ?? 1024 * 1024, hosts: o.hosts ?? [HOST], ...o.dataset };
-  return JSON.stringify({ dataset, image_digests: o.digests ?? [], ...o.extra }, null, 2);
+  return `${JSON.stringify({ dataset, image_digests: o.digests ?? [], ...o.extra }, null, 2)}\n`;
 }
 
 interface Route {
@@ -124,8 +128,8 @@ test('the pins file: one closed schema, a revision and a sha256 together or neit
     [pinsText({ path: '/abs.jsonl' }), 'an absolute path'],
     [pinsText({ max: 0 }), 'no size cap'],
     [pinsText({ hosts: [] }), 'no host'],
-    [pinsText({ path: 'data/django__django-11099.jsonl' }), 'an instance id'],
-    [pinsText({ path: 'data/sweb.eval.x86_64.django_1776_django-11099.jsonl' }), 'an instance image name'],
+    [pinsText({ path: `data/${FAKE_ID}.jsonl` }), 'an instance id'],
+    [pinsText({ path: `data/${FAKE_IMAGE}.jsonl` }), 'an instance image name'],
     [pinsText({ digests: DIGESTS.slice(0, 4) }), 'a handful of digests: a selection, not a set'],
     [pinsText({ digests: [...DIGESTS].reverse() }), 'unsorted digests'],
     [pinsText({ digests: [...DIGESTS, DIGESTS[0]!].sort() }), 'a digest twice'],
@@ -171,10 +175,72 @@ test('adversarial pass: a parsed pin cannot be changed, and an escaped instance 
   assert.throws(() => (pins.dataset as unknown as { sha256: string }).sha256 = SHA.replace(/^./, 'f'), TypeError);
   assert.throws(() => (pins.dataset!.hosts as string[]).push('elsewhere.example.net'), TypeError);
   assert.throws(() => pinnedImage(`swebench/example@${extra}`, pins), /not one of the pinned/);
-  // `_` is `_`: the raw text has no `__`, the parsed path does.
-  const escaped = pinsText({ path: 'data/django__django-11099.jsonl' }).replace('django__django', 'django\\u005f\\u005fdjango');
+  // A JSON escape for the underscore (backslash, u, 005f): the raw text has no `__`, the parsed path does.
+  const escaped = pinsText({ path: `data/${FAKE_ID}.jsonl` }).replace('example__proj', 'example\\u005f\\u005fproj');
   assert.doesNotMatch(escaped, /__/);
   assert.throws(() => parsePins(escaped), /instance id/);
+});
+
+test('round 1: a repeated key or any text but the canonical form refuses the file: nothing in it goes unparsed', async () => {
+  const { parsePins } = await pinsMod();
+  const good = JSON.parse(pinsText()) as { dataset: Record<string, unknown>; image_digests: string[] };
+  const ds = JSON.stringify(good.dataset);
+  // A hidden 4-digest selection, shadowed by a later empty list.
+  const shadowedDigests = `{"dataset": ${ds}, "image_digests": ${JSON.stringify(DIGESTS.slice(0, 4))}, "image_digests": []}\n`;
+  // A dataset with a selection and free text, shadowed by a later good one.
+  const shadowedDataset = `{"dataset": {"selection": ["t01", "t02"], "free_text": "anything"}, "dataset": ${ds}, "image_digests": []}\n`;
+  for (const [text, why] of [
+    [shadowedDigests, 'a repeated image_digests'],
+    [shadowedDataset, 'a repeated dataset'],
+    [JSON.stringify(good), 'compact, not the canonical form'],
+    [pinsText().trimEnd(), 'no final newline'],
+    [`${pinsText()}\n`, 'an extra newline'],
+    [pinsText().replace('"dataset"', '"dataset" '), 'extra space'],
+  ] as const) assert.throws(() => parsePins(text), /canonical/, why);
+  assert.ok(parsePins(pinsText()).dataset, 'the canonical form parses');
+});
+
+test("round 1: dataset.base is a url's own canonical form, every path segment a plain name: no percent escape, port or dot segment", async () => {
+  const { parsePins } = await pinsMod();
+  for (const [base, why] of [
+    [`https://${HOST}/example%5F%5Fproj-4242/`, 'a percent-escaped instance id'],
+    [`https://${HOST}/data%2Fset/`, 'a percent-escaped slash'],
+    [`https://${HOST}:443/datasets/`, 'the default port spelled out'],
+    [`https://${HOST}/a/../b/`, 'a dot-dot segment'],
+    [`https://${HOST}/a/./b/`, 'a dot segment'],
+    [`https://${HOST}//datasets/`, 'an empty segment'],
+    [`https://${HOST.toUpperCase()}/datasets/`, 'an upper-case host'],
+  ] as const) assert.throws(() => parsePins(pinsText({ base })), Error, why);
+  assert.ok(parsePins(pinsText({ base: `https://${HOST}/datasets/fixture/resolve/` })).dataset);
+});
+
+test("round 1: the image argv comes from the reference's own frozen fields: a replaced prototype method can't change it", async () => {
+  const { parsePins, pinnedImage, ImageRef, DatasetPin, Pins } = await pinsMod();
+  const { pullImage } = await dl();
+  const pins = parsePins(pinsText({ digests: DIGESTS }));
+  const ref = pinnedImage(`swebench/example@${D}`, pins);
+  const evil = `evil.example.net/other@sha256:${sha256('unpinned')}`;
+  const proto = ImageRef.prototype as unknown as Record<string, unknown>;
+  const original = proto.toString;
+  try {
+    try {
+      proto.toString = () => evil;
+    } catch {
+      // frozen: the assignment throws
+    }
+    try {
+      Object.defineProperty(ImageRef.prototype, 'toString', { value: () => evil });
+    } catch {
+      // frozen
+    }
+    const base = realpathSync(mkdtempSync(join(tmpdir(), 'bench-img-')));
+    const d = dockerStandIn((a) => (a[0] === 'pull' ? { status: 0 } : { status: 0, stdout: JSON.stringify([`swebench/example@${D}`]) }));
+    pullImage({ docker: 'docker', env: dockerEnvFor(base), call: d.call }, ref);
+    assert.deepEqual(d.calls.map((c) => c.args.at(-1)), [`swebench/example@${D}`, `swebench/example@${D}`], 'the pinned reference, whatever the prototype says');
+  } finally {
+    if (!Object.isFrozen(ImageRef.prototype)) proto.toString = original;
+  }
+  for (const C of [ImageRef, DatasetPin, Pins]) assert.ok(Object.isFrozen(C.prototype), `${C.name}.prototype is frozen`);
 });
 
 // ---- The dataset download ----
