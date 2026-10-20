@@ -1,5 +1,8 @@
 // The changelog for a release, from the PRs merged since the previous one. Pure: the release script gathers
-// the commit subjects (git) and the PRs (one GitHub listing), this groups and writes them.
+// the commit subjects (git) and the PRs (one GitHub listing), this groups and writes them. The one exception is
+// readFragments, which reads the changelog.d folder: the hand-written notes of the next release, one file per change.
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
 
 /** Files whose change is a guardrail change: the rules, the hooks that apply them, the sandbox and the scanners. */
 export const GUARDRAIL_PATHS = [/^src\/guardrails\//, /^src\/hook\.ts$/, /^src\/sandbox\.ts$/, /^src\/scan\//, /^src\/push-check\.ts$/, /^templates\/project\/guardrails/];
@@ -284,6 +287,189 @@ export function tagNotes(changelog, version) {
   // The NOTES_END line withSection writes (blank line, the line, blank line) goes; nothing else in the notes changes.
   const notes = section.replace(new RegExp(`\\n\\n${NOTES_END_LINE.source.replace(/^\^/, '')}(?=\\n)`, 'gm'), '').trimEnd();
   return { notes };
+}
+
+// changelog.d: the next release's hand-written notes, one file per change, so two PRs never edit the same lines.
+
+/**
+ * The headings a changelog.d fragment may use, in the order a release writes them. `Upgrading` may also be spelled
+ * `Upgrading (from vX.Y.Z)`, the same way in every fragment of a release. The generated headings (Features, Fixes,
+ * Security and guardrails, Reverted in this release, Guardrail changes) are the tool's own, never a fragment's.
+ */
+export const FRAGMENT_HEADINGS = ['Upgrading', 'After install', 'Guardrail changes: what each one does', 'Release tooling', 'Removals'];
+const UPGRADING = /^Upgrading(?: \(from v\d+\.\d+\.\d+\))?$/;
+/** `<issue or PR number>-<short-slug>.md`: the number with no leading zero, the slug lowercase words joined by dashes. */
+const FRAGMENT_NAME = /^([1-9]\d*)-[a-z0-9]+(?:-[a-z0-9]+)*\.md$/;
+const NAME_HELP = 'name it changelog.d/<issue or PR number>-<short-slug>.md (lowercase letters, digits and dashes; changelog.d/README.md)';
+const HEADINGS_HELP = `use one of: ${FRAGMENT_HEADINGS.map((h) => (h === 'Upgrading' ? '### Upgrading (or ### Upgrading (from vX.Y.Z))' : `### ${h}`)).join(', ')} (changelog.d/README.md)`;
+const keyOf = (heading) => (UPGRADING.test(heading) ? 'Upgrading' : FRAGMENT_HEADINGS.includes(heading) ? heading : null);
+/** File-number order, then file name: the order a release lists fragments in under each heading. */
+const byNumber = (a, b) => a.number - b.number || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
+
+/**
+ * The `### ` blocks of a fragment (or of a release's notes built from them), in order: { heading, key, text }, the
+ * text being the lines under the heading, verbatim, without the blank lines around them. Throws, naming `label`, on
+ * anything a release could drop or move: a carriage return, nothing at all, a line before the first heading, a heading
+ * that isn't a fixed one (a `#` or `##` one would start a section of CHANGELOG.md), the same heading twice, a heading
+ * with nothing under it, or the end-of-notes line the release step writes itself.
+ */
+function blocksOf(label, text) {
+  if (text.includes('\r')) throw new Error(`${label} has a carriage return: use LF line ends`);
+  if (!text.trim()) throw new Error(`${label} is empty: give it a ### heading with the notes under it, or delete it`);
+  const blocks = [];
+  text.split('\n').forEach((line, i) => {
+    const h = /^### (.*)$/.exec(line);
+    if (h) {
+      const key = keyOf(h[1]);
+      if (!key) throw new Error(`${label}: "${line}" is not one of the headings a fragment may use: ${HEADINGS_HELP}`);
+      if (blocks.some((b) => b.key === key)) throw new Error(`${label} has "${line}" twice (line ${i + 1}): put all its lines under one`);
+      blocks.push({ heading: h[1], key, lines: [] });
+      return;
+    }
+    // Up to three spaces before it, a # line is still a markdown heading; and any line starting `#` or `##`, whatever
+    // follows (a no-break space, a letter), could be read as one, or as a section of CHANGELOG.md once released.
+    if (/^ {0,3}#/.test(line)) throw new Error(`${label}: line ${i + 1} is a heading other than the fixed \`### \` ones, or starts with # like one (${JSON.stringify(line)}): indent it 4 spaces or reword it; ${HEADINGS_HELP}`);
+    if (line === NOTES_END) throw new Error(`${label}: line ${i + 1} is the end-of-notes line the release step writes itself: remove it`);
+    if (!blocks.length) {
+      if (line.trim()) throw new Error(`${label}: line ${i + 1} is before the first heading: put it under one (${HEADINGS_HELP})`);
+      return;
+    }
+    blocks.at(-1).lines.push(line);
+  });
+  return blocks.map(({ heading, key, lines }) => {
+    const first = lines.findIndex((l) => l.trim());
+    if (first < 0) throw new Error(`${label}: "### ${heading}" has nothing under it: add its notes, or remove the heading`);
+    const last = lines.findLastIndex((l) => l.trim());
+    return { heading, key, text: lines.slice(first, last + 1).join('\n') };
+  });
+}
+
+/** One fragment, read: { name, number, blocks } (blocksOf). Throws on a name that isn't `<n>-<slug>.md`, or a bad block. */
+export function parseFragment(name, text) {
+  const m = FRAGMENT_NAME.exec(name);
+  if (!m) throw new Error(`changelog.d/${name}: not a fragment name: ${NAME_HELP}`);
+  return { name, number: Number(m[1]), blocks: blocksOf(`changelog.d/${name}`, String(text)) };
+}
+
+/** The fragments, read and checked, in a release's order (byNumber). Two fragments with the same name are refused. */
+function parsedFragments(fragments) {
+  const parsed = fragments.map((f) => parseFragment(f.name, f.text)).sort(byNumber);
+  const twice = parsed.find((p, i) => i > 0 && parsed[i - 1].name === p.name);
+  if (twice) throw new Error(`changelog.d/${twice.name} is given twice`);
+  const upgrading = parsed.flatMap((p) => p.blocks.filter((b) => b.key === 'Upgrading').map((b) => ({ heading: b.heading, name: p.name })));
+  const spellings = [...new Set(upgrading.map((u) => u.heading))];
+  if (spellings.length > 1) {
+    const where = spellings.map((h) => `"### ${h}" in changelog.d/${upgrading.find((u) => u.heading === h).name}`).join(', ');
+    throw new Error(`changelog.d has two spellings of the Upgrading heading (${where}): use one`);
+  }
+  return parsed;
+}
+
+/** Each fixed heading the fragments use, in the fixed order, with its blocks' texts in fragment order. */
+const grouped = (parsed) =>
+  FRAGMENT_HEADINGS.map((key) => parsed.flatMap((p) => p.blocks.filter((b) => b.key === key))).filter((blocks) => blocks.length).map((blocks) => ({ key: blocks[0].key, heading: blocks[0].heading, text: blocks.map((b) => b.text).join('\n\n') }));
+
+/**
+ * A release's hand-written notes from its changelog.d fragments ({ name, text }): each fixed heading the fragments
+ * use, in FRAGMENT_HEADINGS order, and under it each fragment's lines for it, verbatim, in file-number order, a blank
+ * line between fragments. Throws (naming the file) on any fragment a release could drop a line of.
+ */
+export function fragmentNotes(fragments) {
+  return grouped(parsedFragments(fragments))
+    .map((g) => `### ${g.heading}\n\n${g.text}`)
+    .join('\n\n');
+}
+
+/**
+ * Why `notes` isn't exactly what the fragments make, as a list (empty when it is). Checked two ways, so a mistake in
+ * fragmentNotes or in the block reader can't hide: every non-blank line of every fragment's raw text, byte for byte
+ * and counted (each heading at least once), must be in the notes; and the notes, read back as blocks, must be the
+ * fixed headings in order with each fragment's lines under its own.
+ */
+export function fragmentProblems(fragments, notes) {
+  const parsed = parsedFragments(fragments);
+  const problems = [];
+  const lines = String(notes ?? '').split('\n');
+  const have = new Map();
+  for (const l of lines) have.set(l, (have.get(l) ?? 0) + 1);
+  // The raw text, not the parsed blocks: the count must not depend on the reader it checks.
+  for (const f of fragments) {
+    for (const l of String(f.text).split('\n')) {
+      if (!l.trim()) continue;
+      if (/^### /.test(l)) {
+        if (!lines.includes(l)) problems.push(`changelog.d/${f.name}: its heading "${l}" is missing`);
+      } else if (have.get(l)) have.set(l, have.get(l) - 1);
+      else problems.push(`changelog.d/${f.name}: ${JSON.stringify(l.slice(0, 80))} is missing`);
+    }
+  }
+  let back;
+  try {
+    back = blocksOf('the release notes', String(notes ?? ''));
+  } catch (e) {
+    return [...problems, e.message];
+  }
+  const want = grouped(parsed);
+  const shape = (bs) => JSON.stringify(bs.map((b) => [b.key, b.heading, b.text]));
+  if (shape(back) !== shape(want)) {
+    const seen = back.map((b) => `### ${b.heading}`).join(', ');
+    problems.push(`the release notes' headings or the lines under them aren't the fragments' (${seen || 'no heading'}; expected ${want.map((g) => `### ${g.heading}`).join(', ')})`);
+  }
+  return problems;
+}
+
+/**
+ * The changelog.d fragments in `dir`, { name, text }, in a release's order: every file but README.md (the format).
+ * None when there is no folder. Throws on anything else there (a directory, a symlink, a name that isn't
+ * `<n>-<slug>.md`, text that isn't UTF-8), so a fragment is never skipped without a word.
+ */
+export function readFragments(dir) {
+  if (!existsSync(dir)) return [];
+  const out = [];
+  for (const d of readdirSync(dir, { withFileTypes: true })) {
+    if (d.name === 'README.md') continue;
+    if (!d.isFile()) throw new Error(`changelog.d/${d.name}: not a regular file: a fragment is a plain file, ${NAME_HELP}`);
+    const m = FRAGMENT_NAME.exec(d.name);
+    if (!m) throw new Error(`changelog.d/${d.name}: not a fragment name: ${NAME_HELP}`);
+    let text;
+    try {
+      text = new TextDecoder('utf-8', { fatal: true }).decode(readFileSync(join(dir, d.name)));
+    } catch {
+      throw new Error(`changelog.d/${d.name} is not UTF-8 text`);
+    }
+    out.push({ name: d.name, number: Number(m[1]), text });
+  }
+  return out.sort(byNumber).map(({ name, text }) => ({ name, text }));
+}
+
+/**
+ * CHANGELOG.md with the release's section first, its notes built from the changelog.d fragments (fragmentNotes), then
+ * the generated lists (`section`, from changelogSection). With no fragments it is withSection, byte for byte. With
+ * fragments, a CHANGELOG.md that already has a section for the version (dated, or unreleased) is refused: which notes
+ * are meant is never guessed. Everything withSection checks still holds (no line of CHANGELOG.md dropped).
+ * INVARIANT: every non-blank fragment line is in the new section's notes, under its own heading, in order, read back
+ * the way a rerun reads them (fragmentProblems); otherwise it throws, and nothing is written.
+ */
+export function withFragments(existing, version, section, fragments) {
+  if (!fragments.length) return withSection(existing, version, section);
+  const notes = fragmentNotes(fragments);
+  const ours = String(existing ?? '').split(SECTION_START).filter((s) => isFor(s, version));
+  if (ours.length) {
+    throw new Error(
+      `CHANGELOG.md already has a section for v${version} (${ours.map((s) => `"## ${headingOf(s)}"`).join(', ')}), and changelog.d has ${fragments.length} fragment(s): which notes are meant can't be told, so nothing is written. ` +
+        "Start the release branch again from main (the fragments, and no section for this version), or move the fragments' lines into that section by hand and delete them.",
+    );
+  }
+  if (notesOf(section)) throw new Error(`the generated v${version} section has notes of its own: nothing written`);
+  const [title, ...rest] = section.split('\n');
+  const lists = rest.join('\n').replace(/^\n/, '');
+  let full = `${title}\n\n${notes}\n\n${lists}`;
+  if (notesOf(full) !== notes) full = `${title}\n\n${notes}\n\n${NOTES_END}\n\n${lists}`;
+  const out = withSection(existing, version, full);
+  const problems = fragmentProblems(fragments, notesOf(sectionFor(out, version) ?? ''));
+  if (problems.length) {
+    throw new Error(`changelog.d: the changelog step would drop or move fragment lines, so nothing is written:\n  ${problems.slice(0, 5).join('\n  ')}`);
+  }
+  return out;
 }
 
 /** The section for a version in a CHANGELOG.md, or null: the GitHub release notes. */
