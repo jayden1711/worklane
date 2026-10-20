@@ -151,7 +151,11 @@ test('self-modification: every glob names real engine files (none dead), and the
     ['src/install.ts', "the agents' tool guard's hook commands"],
     ['src/instance.ts', "the agents' tool guard's hook commands"],
     ['src/config/load.ts', "the agents' tool guard"],
-    ['src/events/redact.ts', "the agents' tool guard"],
+    ['src/guard/chat.ts', "the agents' tool guard"],
+    // Out of the guard's import tree since #785, and still locked under parts of their own.
+    ['src/events/redact.ts', 'sign-in, credentials or secrets'],
+    ['src/agent-settings.ts', 'what an agent run is given'],
+    ['src/plugins/approval.ts', 'what an agent run is given'],
     ['src/managed-apps.ts', 'where the self-modification locks apply'],
     ['scripts/setup/managed-apps.sh', 'the machine setup'],
     ['scripts/push-gate.mjs', 'the push gate, denylist and secret scan'],
