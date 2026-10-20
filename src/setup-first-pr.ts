@@ -47,7 +47,11 @@ function readLog<T>(stateDir: string, read: (q: (sql: string) => unknown[]) => T
 /** The server's first-task step: done once the coordinator saw a writer's ready issue with a done_when block. */
 export function detectWriterTask(stateDir: string): Detected {
   const r = readLog(stateDir, (q) => {
-    for (const row of q("SELECT payload FROM events WHERE type = 'issue.seen' ORDER BY id") as { payload: string }[]) {
+    // The query narrows (a long log isn't loaded whole on every check); the same test, exactly, is made again below.
+    const rows = q(
+      "SELECT payload FROM events WHERE type = 'issue.seen' AND json_extract(payload, '$.actionable') = 1 AND EXISTS (SELECT 1 FROM json_each(payload, '$.labels') WHERE value = 'ready') AND (json_extract(payload, '$.why') LIKE 'opened by writer %' OR json_extract(payload, '$.why') LIKE 'ready added by writer %') ORDER BY id LIMIT 20",
+    ) as { payload: string }[];
+    for (const row of rows) {
       const p = JSON.parse(row.payload) as { issue?: unknown; labels?: unknown; actionable?: unknown; why?: unknown };
       // `actionable` is the coordinator's verdict with its contract check (a parsed done_when block) folded in.
       if (p.actionable === true && Array.isArray(p.labels) && p.labels.includes('ready') && typeof p.why === 'string' && WRITERS_ISSUE.test(p.why)) return { issue: p.issue, why: p.why };
