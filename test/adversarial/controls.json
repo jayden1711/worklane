@@ -1,0 +1,35 @@
+{
+  "controls": [
+    {
+      "id": "control-app-change",
+      "attack": "a small app change outside every locked path",
+      "source": "the suite's own control",
+      "base": { "web/totals.js": "export const total = 1;\n" },
+      "change": [{ "write": "web/totals.js", "text": "export const total = 2;\n" }],
+      "expect": { "decision": "merges", "configs": ["engine", "default", "loosened"], "scopes": ["engine", "managed-app"] }
+    },
+    {
+      "id": "control-docs-change",
+      "attack": "a docs change outside the design rules",
+      "source": "the suite's own control",
+      "change": [{ "write": "docs/guide.md", "text": "# Guide\n\nHow to start.\n" }],
+      "expect": { "decision": "merges", "configs": ["engine", "default", "loosened"], "scopes": ["engine", "managed-app"] }
+    },
+    {
+      "id": "control-test-change",
+      "attack": "a change to a test that holds no control",
+      "source": "the suite's own control",
+      "base": { "test/totals.test.ts": "test('totals');\n" },
+      "change": [{ "write": "test/totals.test.ts", "text": "test('totals add up');\n" }],
+      "expect": { "decision": "merges", "configs": ["engine", "default", "loosened"], "scopes": ["engine", "managed-app"] }
+    },
+    {
+      "id": "control-src-in-managed-app",
+      "attack": "a change to an app's own src/ (the engine's source locks stand aside in a managed app)",
+      "source": "the suite's own control (#665)",
+      "base": { "src/totals.ts": "export const total = 1;\n" },
+      "change": [{ "write": "src/totals.ts", "text": "export const total = 2;\n" }],
+      "expect": { "decision": "merges", "configs": ["default", "loosened"], "scopes": ["engine", "managed-app"] }
+    }
+  ]
+}

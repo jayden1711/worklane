@@ -17,6 +17,12 @@ import { repoRoot } from './helpers.js';
 
 const posix = process.platform !== 'win32';
 const setupDir = join(repoRoot, 'scripts', 'setup');
+/**
+ * The shifted clock (test/clock-shift.ts, #687), passed to the script on the weekly job: the script starts with only
+ * PATH and HOME, and its Node child (lib.sh's install_claude_token) writes expiresAt from its own clock. Without these
+ * it wrote a real-clock expiry that a test 400 days ahead read as already past (#800). Empty on every other run.
+ */
+const clockShift: Record<string, string> = process.env.TEST_CLOCK_SHIFT ? { TEST_CLOCK_SHIFT: process.env.TEST_CLOCK_SHIFT, NODE_OPTIONS: process.env.NODE_OPTIONS ?? '' } : {};
 // Random, so that any part of it showing up anywhere is a leak, not a coincidence.
 const SECRET = `${randomBytes(16).toString('hex')}_new-${randomBytes(6).toString('hex')}`;
 const TOKEN = `sk-ant-oat01-${SECRET}`;
@@ -133,7 +139,7 @@ process.stdout.write(JSON.stringify(ok ? { loggedIn: true, authMethod: 'claude.a
   for (const u of ['worklane-alpha.service', 'worklane-beta.service']) writeFileSync(join(T, 'units', `${u}.active`), '');
   // deadline (ms): the run is killed then (r.error set), so a step that hangs fails the test instead of hanging it.
   const run = (args: string[], input = `${TOKEN}\n`, deadline?: number) => {
-    const r = spawnSync('bash', [join(s, 'claude-account.sh'), ...args], { encoding: 'utf8', input, env: { PATH: process.env.PATH ?? '/usr/bin:/bin', HOME: T }, ...(deadline ? { timeout: deadline } : {}) });
+    const r = spawnSync('bash', [join(s, 'claude-account.sh'), ...args], { encoding: 'utf8', input, env: { PATH: process.env.PATH ?? '/usr/bin:/bin', HOME: T, ...clockShift }, ...(deadline ? { timeout: deadline } : {}) });
     const lines = r.stdout.split('\n').filter(Boolean);
     return { ...r, lines, events: args.includes('--json') && args[0] === 'switch' ? lines.map((l) => JSON.parse(l) as Line) : [] };
   };
