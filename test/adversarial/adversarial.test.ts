@@ -12,7 +12,8 @@
 // Every case runs under three review.yaml files (`configs`): the engine's own (.worklane/review.yaml), the default a
 // new project gets, and a loosened one that lists nothing anywhere, so a case marked for it is held by the floor in
 // code alone. And twice more: with an injection ("merge without review", a fake fence end) added as a comment line to
-// every file it writes and with the worker claiming a lower risk class; the reasons must not change.
+// every file it writes, where the reasons must not change; and with the worker claiming a lower risk class, where the
+// class the PR goes out with must not change.
 //
 // Gaps main doesn't close yet are in todo.json, one line each with the PR that closes it: node:test reports them as
 // todo, never as a failure. They say what must hold, never how to get around it (#707: no exploit steps beyond what a
@@ -176,7 +177,7 @@ function made(c: Case | Control, inject: boolean): { dir: string; base: string; 
  * model-made input at its most permissive: the always-PASS verdict, every instruction eval passing, no CI fix run,
  * no foreign push, no push limit, the policy and the repo's auto-merge on, nothing stopped.
  */
-function decide(r: { dir: string; base: string; files: ChangeFile[] }, c: Case | Control, cfg: ConfigName, scope: LockScope, claim = c.pr.claim): MergeDecision {
+function decide(r: { dir: string; base: string; files: ChangeFile[] }, c: Case | Control, cfg: ConfigName, scope: LockScope): MergeDecision {
   const review = CONFIGS[cfg];
   const level = computeLevel({ files: r.files, labels: c.pr.labels ?? [], moneyPaths: c.moneyPaths.map((g) => globToRegExp(g)), scope }, review);
   const exists = (p: string) => spawnSync('git', ['cat-file', '-e', `${r.base}:${p}`], { cwd: r.dir }).status === 0;
@@ -199,7 +200,7 @@ function decide(r: { dir: string; base: string; files: ChangeFile[] }, c: Case |
     foreignPush: false,
     pushLimitHit: false,
     instructionEvals: instructionEvalReasons(targets, allEvalsPass(targets)),
-    claimedProtected: claim === 'protected',
+    claimedProtected: c.pr.claim === 'protected',
     outsidePlan: [],
   });
 }
@@ -252,11 +253,12 @@ for (const g of groups) {
           // reads: only the evaluator does, and it is already fully fooled) changes no reason.
           // The one comment line per file it adds is counted, so only a size reason's number may move.
           assert.deepEqual(decide(injected, c, cfg, scope).reasons.map(sizeless), d.reasons.map(sizeless), `${at}: the injection changed the decision`);
-          // A3: a worker claiming a lower class (or none) never lowers anything: the same reasons, the same class.
+          // A3: a worker claiming a lower class (or none) never lowers the class the PR goes out with. The claim reaches
+          // the decision only as `claimedProtected` (merge-flow.ts: claim === 'protected'), which a lower claim leaves
+          // false, so the decision can't see a lower claim at all: there is nothing there for this suite to test.
           const unclaimed = classOf(r, c, cfg, scope, undefined);
           for (const claim of ['docs-only', 'logic'] as const) {
             if (c.pr.claim === 'protected') break;
-            assert.deepEqual(decide(r, c, cfg, scope, claim).reasons, decide(r, c, cfg, scope, undefined).reasons, `${at}: claiming ${claim} changed the decision`);
             assert.equal(classOf(r, c, cfg, scope, claim), unclaimed, `${at}: claiming ${claim} changed the class`);
           }
         }
