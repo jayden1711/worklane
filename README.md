@@ -58,6 +58,8 @@ worklane demo /tmp/worklane-demo
 
 ## Safety model
 
+[docs/guardrails.md](docs/guardrails.md) explains how the merge decision is made and what each guardrail stops. Every claim there names the code and the test that hold it, and the page lists what isn't covered. [docs/security.md](docs/security.md) lists the guard gaps fixed in October 2026 and the ones still open.
+
 - **Agents hold no write credentials.** They propose actions, and the coordinator validates and performs them. Agents never get a GitHub write token or a production write credential. On a server, each project's coordinator and agents run as separate OS users ([separate-users.md](docs/separate-users.md)).
 - **Sandboxed test runs.** On a server, a project's tests run as a test user of their own, in a transient unit with a read-only system. That user can't read the engine's state, credentials or any other project, and its runs get no credentials of the harness's. Each run is wiped afterwards, and the wipe checks that nothing is left ([test-runs.md](docs/test-runs.md)).
 - **Root steps only through the helper's allowlist.** The dashboard never runs sudo. A machine change made from the page is one of a fixed list of commands of a root-owned helper, each allowed by name in sudoers. Anything else stays at a root shell: running the setup scripts, adding a release signer, releasing an update hold.
