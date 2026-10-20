@@ -113,6 +113,7 @@ export const LINT_TESTS: readonly string[] = [
   'test/claude-credential-guard.test.ts',
   'test/download-retry.test.ts',
   'test/owner-terminal-removed.test.ts',
+  'test/policy-edit.test.ts',
   'test/testrun-measure.test.ts',
   'test/update-helpers.test.ts',
   'test/web-buttons.test.ts',
