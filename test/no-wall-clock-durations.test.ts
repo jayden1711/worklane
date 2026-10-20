@@ -24,7 +24,7 @@ const ALLOWED: Record<string, number> = {
   'test/isolate.test.ts': 4,
   'test/login-start-lock.test.ts': 2,
   'test/machine-no-shift.test.ts': 2,
-  'test/no-late-shift.test.ts': 5,
+  'test/no-late-shift.test.ts': 3,
   'test/offline-chrome.test.ts': 1,
   'test/post-edit-hook.test.ts': 1,
   'test/push-gate-hook.test.ts': 2,
