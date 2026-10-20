@@ -282,6 +282,7 @@ Every release, newest first: the PRs merged since the previous one, and what cha
 - Review levels: a renamed file counts under its old and its new path, in changeFiles and every path reader [PROTECTED: owner merges] (#688)
 - Review levels: a .gitattributes mark can't hide a change's lines or content; adding one waits for the owner (#693) [PROTECTED: owner merges] (#802)
 - Project commands run as the agent user only in a sandbox that hides its credentials; their output is redacted (#713) [PROTECTED: owner merges] (#787)
+- Tests: a public adversarial suite (test/adversarial/) runs 83 hostile PRs the merge gate must hold, as data, with an always-PASS evaluator, under the engine's, the default and a loosened review.yaml; the gaps main doesn't close yet are listed as todo with the PR that closes each (#707 part 1)
 
 ### Guardrail changes
 
