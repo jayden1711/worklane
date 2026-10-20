@@ -284,7 +284,7 @@ test('bootstrap --mode: local is this path; server is the hardened one; with no 
   assert.match(m.run('--mode').out, /--mode needs local or server/);
 });
 
-test('bootstrap --hardened: Linux with apt and systemd only; the setup scripts in order, then the credentials by hand', { skip }, () => {
+test('bootstrap --hardened: Linux with apt and systemd only; the setup scripts in order, then Add project for the credentials', { skip }, () => {
   assert.match(machine({ os: 'Darwin', arch: 'arm64' }).run('--hardened', 'shop', 'acme/shop').out, /--hardened is for Linux servers/);
   assert.match(machine().run('--hardened', '--dry-run', 'shop', 'acme/shop').out, /needs apt-get and systemd/);
   const m = machine({ have: { 'apt-get': 'true', systemctl: 'true' } });
@@ -296,8 +296,19 @@ test('bootstrap --hardened: Linux with apt and systemd only; the setup scripts i
   // With no https origin: setup mode on loopback, so the run ends with a URL (owner, 2026-10-14).
   // The engine as the release the pin names, its tag checked at install time against that commit (#832), never by name.
   assert.deepEqual(steps, ['node.sh v24.21.0', 'machine.sh', 'machine-owners.sh --first <login>', 'tools.sh 2.1.296', 'instance.sh shop', `engine.sh --release ${PIN.tag} ${PIN.commit} shop acme/shop`, 'dashboards.sh --setup --loopback']);
-  assert.match(r.out, /credentials\.sh shop github-app/);
+  // #739: one answer for the instance's credentials, Add project (GitHub's manifest flow for the App, root installing
+  // the agents' Claude login): never an App made by hand or a token pasted from here.
+  assert.doesNotMatch(r.out, /github-app <app-id>|claude setup-token|credentials\.sh shop (github-app|claude)/);
+  // A machine's first project has no dashboard of its own yet (the hub runs with no instance; Add project's page is an
+  // instance dashboard's): the root shell's add-project.sh leads, right under the heading; the dashboard is for later ones.
+  assert.match(r.out, /\n== next: Add project, for shop's credentials, checkout and service\n {3}[^\n]*root shell[^\n]*\n {3}sudo bash scripts\/setup\/add-project\.sh shop acme\/shop\n/);
+  const block = r.out.slice(r.out.indexOf('\n== next: Add project'));
+  assert.ok(block.indexOf('add-project.sh shop acme/shop') < block.indexOf("Setup console's Add project"), 'the root-shell command before the dashboard');
+  assert.match(block, /Later projects: the dashboard's Setup console's Add project/);
   const after = m.run('--hardened', '--dry-run', '--after-credentials', 'shop', 'acme/shop');
+  // An install whose credentials were stored by hand keeps going: --after-credentials stays, and says nothing of them.
+  assert.equal(after.code, 0, after.out);
+  assert.doesNotMatch(after.out, /github-app <app-id>|claude setup-token|Add project/);
   assert.deepEqual([...after.out.matchAll(/would run: bash \S+\/setup\/(\S+)(.*)/g)].map((x) => `${x[1]}${x[2]}`.trim()), ['checkout.sh shop acme/shop', 'service.sh shop', 'check.sh shop', 'dashboards.sh --setup --loopback']);
   assert.match(m.run('--hardened', 'shop', 'acme/shop').out, /run it with sudo|y\/N/, 'a real run needs root (or asks before each script)');
 });
@@ -559,4 +570,17 @@ test('regression: bootstrap refuses a pinned engine with no full release commit 
   writeFileSync(join(dir, 'bootstrap.sh'), readFileSync(script, 'utf8').replace(/^ENGINE_COMMIT=.*$/m, `ENGINE_COMMIT=${'a'.repeat(40)}`));
   const pinned = spawnSync(join(m.bin, 'bash'), [join(dir, 'bootstrap.sh'), '--dry-run', '--no-repo'], { encoding: 'utf8', env: { PATH: m.bin, HOME: m.dir, WORKLANE_PREFIX: m.prefix } });
   assert.match(pinned.stdout, new RegExp(`would fetch \\S+ at ${'a'.repeat(40)} \\(${esc(PIN.tag)}\\)`), pinned.stderr);
+});
+
+test("#739: the quickstart's server install gives the same one answer for the credentials as the bootstrap: Add project", () => {
+  const doc = readFileSync(join(repoRoot, 'docs', 'quickstart.md'), 'utf8');
+  const server = doc.slice(doc.indexOf('\n### Server\n'), doc.indexOf('\n### Unattended\n'));
+  assert.ok(server.length > 500, 'the Server section is found');
+  assert.doesNotMatch(server, /github-app <app-id>|claude setup-token/, 'no App made by hand, no token pasted');
+  const step = server.slice(server.indexOf("3. **The instance's credentials"), server.indexOf('\n4. '));
+  assert.match(step, /\*\*Add project\*\*/);
+  assert.match(step, /sudo bash scripts\/setup\/add-project\.sh <name> <owner\/repo>/);
+  // The first project's route is the root shell (no instance dashboard yet); the dashboard's comes after it.
+  assert.match(step, /first project, run it at a root shell/);
+  assert.ok(step.indexOf('add-project.sh <name>') < step.indexOf('Setup console'), 'the root-shell command before the dashboard');
 });
