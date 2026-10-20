@@ -126,10 +126,38 @@ const TASK_TAIL = /__[A-Za-z0-9_.-]*-\d/;
 const FORMAT = /[\p{Cc}\p{Cf}]/gu;
 const NON_ASCII = /[^\x00-\x7f]/gu;
 
-/** The character with code point `hex` (base 16) or `dec` (base 10), or `?` for one that isn't a code point. */
+/** What a word too long to judge prints as (#884 round 3): withheld unjudged, so judging stays linear and fails closed. */
+export const WITHHELD_LONG = '[word too long to check: withheld]';
+/** The longest word judged; a longer one is withheld. An instance id or image name is far shorter. */
+export const WORD_MAX = 512;
+/** The most rounds of decoding; a word that still decodes to something new after them is withheld. */
+export const DECODE_ROUNDS = 16;
+
+/** The character with code point `n`, or `?` for a number that isn't a code point. */
 const codePoint = (n: number): string => (Number.isInteger(n) && n >= 0 && n <= 0x10ffff ? String.fromCodePoint(n) : '?');
 
-/** `w` with one round of escapes decoded: percent escapes, `\uXXXX`, `\u{X}`, `\xXX`, and `&#N;` / `&#xX;` entities. */
+/** The named HTML entities for the characters an id or image name is made of besides letters and digits. */
+const NAMED: Readonly<Record<string, string>> = {
+  lowbar: '_',
+  UnderBar: '_',
+  underbar: '_',
+  hyphen: '-',
+  dash: '-',
+  minus: '-',
+  ndash: '-',
+  mdash: '-',
+  horbar: '-',
+  hybull: '-',
+  period: '.',
+  sol: '/',
+  commat: '@',
+  colon: ':',
+};
+
+/**
+ * `w` with one round of escapes decoded: percent escapes, `\uXXXX`, `\u{X}`, `\xXX`, numeric entities (`&#N;`, `&#xX;`,
+ * the `;` optional), and the named entities in NAMED (`&lowbar;`, `&hyphen;`, ...).
+ */
 const unescapeOnce = (w: string): string =>
   w
     .replace(/%([0-9A-Fa-f]{2})/g, (_, h: string) => codePoint(parseInt(h, 16)))
@@ -137,50 +165,65 @@ const unescapeOnce = (w: string): string =>
     .replace(/\\u([0-9A-Fa-f]{4})/g, (_, h: string) => codePoint(parseInt(h, 16)))
     .replace(/\\x([0-9A-Fa-f]{2})/g, (_, h: string) => codePoint(parseInt(h, 16)))
     .replace(/&#[xX]([0-9A-Fa-f]{1,6});?/g, (_, h: string) => codePoint(parseInt(h, 16)))
-    .replace(/&#(\d{1,7});?/g, (_, d: string) => codePoint(parseInt(d, 10)));
+    .replace(/&#(\d{1,7});?/g, (_, d: string) => codePoint(parseInt(d, 10)))
+    .replace(/&([A-Za-z]+);/g, (all, name: string) => (Object.hasOwn(NAMED, name) ? NAMED[name]! : all));
+
+/** Each non-ASCII character read by its own role (#884 round 3): a dash as `-`, other punctuation, a symbol or a modifier letter as `_`, a digit as `0`, another letter as `a`, a mark dropped. */
+const byRole = (s: string): string =>
+  s.replace(NON_ASCII, (ch) =>
+    /\p{M}/u.test(ch) ? '' : /\p{Pd}/u.test(ch) ? '-' : /[\p{P}\p{S}\p{Lm}]/u.test(ch) ? '_' : /[\p{Nd}\p{No}]/u.test(ch) ? '0' : /\p{L}/u.test(ch) ? 'a' : '_',
+  );
 
 /**
- * The spellings a word is judged in (#884 round 2): as written, and decoded up to three rounds deep; each with its
- * control and format characters taken out and NFKC-normalised (fullwidth `＿` is `_`); and, where non-ASCII is left,
- * each such character read as a possible look-alike: all as `_`, all as `-`, all as `a`, all as `0`, and by kind (a
- * letter as `a`, a digit as `0`, anything else as `_` or as `-`).
+ * The spellings a word is judged in (#884 rounds 2 and 3), or null when it still decodes to something new after
+ * DECODE_ROUNDS (withheld): as written, and each round of decoding until it is stable; each with its control and format
+ * characters taken out, as is, NFKC-normalised (fullwidth `＿` is `_`) and with its combining marks taken out (NFD); and,
+ * where non-ASCII is left, each such character read as a possible look-alike: all as `_`, all as `-`, all as `a`, all
+ * as `0`, and each by its own role (byRole).
  */
-function spellings(word: string): string[] {
+function spellings(word: string): string[] | null {
   const forms = [word];
-  for (let i = 0; i < 3; i++) {
+  for (;;) {
     const next = unescapeOnce(forms.at(-1)!);
     if (next === forms.at(-1)) break;
+    if (forms.length > DECODE_ROUNDS) return null;
     forms.push(next);
   }
   const out = new Set<string>();
   for (const f of forms) {
     const bare = f.replace(FORMAT, '');
     // Before NFKC too: it can turn one look-alike into several characters (U+2017 is a space and a combining mark).
-    for (const s of [bare, bare.normalize('NFKC').replace(FORMAT, '')]) {
+    for (const s of [bare, bare.normalize('NFKC').replace(FORMAT, ''), bare.normalize('NFD').replace(/\p{M}/gu, '')]) {
       out.add(s);
       if (!/[^\x00-\x7f]/.test(s)) continue;
       for (const c of ['_', '-', 'a', '0']) out.add(s.replace(NON_ASCII, c));
-      for (const other of ['_', '-']) out.add(s.replace(NON_ASCII, (ch) => (/\p{Nd}/u.test(ch) ? '0' : /[\p{L}\p{M}]/u.test(ch) ? 'a' : other)));
+      out.add(byRole(s));
     }
   }
   return [...out];
 }
 
-/** Whether `word` is, in any of its spellings, shaped like an instance id or an instance image name, or holds an id's tail. */
+/**
+ * Whether `word` is, in any of its spellings, shaped like an instance id or an instance image name, or holds an id's
+ * tail; also true (fail closed) for a word it can't judge: longer than WORD_MAX, or still decoding after DECODE_ROUNDS.
+ */
 export function taskShaped(word: string): boolean {
-  return spellings(word).some((s) => TASK_SHAPE.test(s) || TASK_TAIL.test(s));
+  if (word.length > WORD_MAX) return true;
+  const all = spellings(word);
+  return all === null || all.some((s) => TASK_SHAPE.test(s) || TASK_TAIL.test(s));
 }
 
 /**
- * `text` with every word (between spaces) that is taskShaped replaced by WITHHELD: the whole word, so no piece of it is
- * left. scrub() runs it first, so every line printed, whoever writes it, goes through it before anything splits or cuts
- * a word. What no word-level match can catch (an id split across a real space, or base64) is covered only by the
- * protection by design: the bench's messages are built from keys, never from an instance id.
+ * `text` with every word (between spaces) that is taskShaped replaced: by WITHHELD_LONG when it is over WORD_MAX
+ * characters (never judged, so the check stays linear in the text's length), otherwise by WITHHELD. The whole word, so
+ * no piece of it is left. scrub() runs it first, so every line printed, whoever writes it, goes through it before
+ * anything splits or cuts a word. What no word-level match can catch (an id split across a real space, or base64) is
+ * covered only by the protection by design: the bench's messages are built from keys, never from an instance id.
  */
 export function withholdTasks(text: string): string {
   return text
     .split(/(\s+)/)
-    .map((w) => (w && !/^\s+$/.test(w) && taskShaped(w) ? WITHHELD : w))
+    .map((w) => (!w || /^\s+$/.test(w) ? w : w.length > WORD_MAX ? WITHHELD_LONG : taskShaped(w) ? WITHHELD : w))
     .join('');
 }
 

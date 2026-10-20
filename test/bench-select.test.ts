@@ -542,6 +542,41 @@ test('round 2: look-alike and encoded spellings are withheld through main(): ful
   for (const s of ['日本語の文章', 'café-1', 'def __init__(self)', 't01..t50', `sha256:${sha256('x')}`, '__pycache__']) assert.equal(withholdTasks(s), s, s);
 });
 
+test('round 3: mixed-role look-alikes, named entities and deep encodings are withheld through main(); a word too long to check is withheld unjudged', async () => {
+  const { main, withholdTasks, WITHHELD, WITHHELD_LONG, WORD_MAX } = await cli();
+  /** `_` percent-escaped `n` times: `%5F`, `%255F`, `%25255F`, ... */
+  const deep = (n: number): string => `${'%'}${'25'.repeat(n - 1)}5F`;
+  const cases: [string, string][] = [
+    ['example‗‗proj‐4242', 'double low lines with a Unicode hyphen'],
+    ['exampleˍˍproj‐4242', 'modifier low macrons (a letter) with a Unicode hyphen'],
+    ['example‗‗proj-́4242', 'a combining acute after the hyphen'],
+    ['example&lowbar;&lowbar;proj&hyphen;4242', 'named entities'],
+    ['example&UnderBar;&UnderBar;proj&minus;4242', 'other named entities'],
+    ['example%2525255F%2525255Fproj-4242', 'percent-escaped four times'],
+    [`example${deep(7)}${deep(7)}proj-4242`, 'percent-escaped seven times'],
+  ];
+  for (const [arg, why] of cases) {
+    assert.equal(withholdTasks(arg), WITHHELD, why);
+    for (const argv of [[arg], ['select', arg]]) {
+      const out: string[] = [];
+      assert.equal(main(argv, { out: (l: string) => out.push(l) }), 2, why);
+      assert.doesNotMatch(out.join('\n'), /proj/, `${why}: ${out[0]}`);
+    }
+  }
+  // Still decoding after the bound: withheld (fail closed), whatever it decodes to.
+  assert.equal(withholdTasks(`a${deep(20)}b`), WITHHELD, 'twenty rounds of percent-encoding');
+  // Longer than WORD_MAX: withheld without being judged, whatever it holds.
+  assert.equal(withholdTasks('x'.repeat(WORD_MAX + 1)), WITHHELD_LONG);
+  assert.equal(withholdTasks('x'.repeat(WORD_MAX)), 'x'.repeat(WORD_MAX), 'a word at the bound is judged, and kept');
+  const huge = 'a__'.repeat(43_691);
+  assert.equal(withholdTasks(`ok ${huge} ok`), `ok ${WITHHELD_LONG} ok`);
+  const out: string[] = [];
+  assert.equal(main([huge], { out: (l: string) => out.push(l) }), 2);
+  assert.match(out[0]!, /word too long to check/);
+  // Ordinary words stay as they are.
+  for (const s of ['x86_64', '__main__.py', 'résumé—2024', 'Zürich-2', '10–20', 'v1.2.3-rc1', 'my_var__x', 'foo%20bar', '&amp;', 'São_Paulo-3', '2026‑10‑20', 'naïve', 'node_modules/.bin']) assert.equal(withholdTasks(s), s, s);
+});
+
 test('round 2: the repo pins this seed and rule: a change to either is a change to this test, which the owner reviews', async () => {
   const { loadPins } = await pinsMod();
   const s = loadPins().selection!;
