@@ -88,6 +88,9 @@ const systemRoot = isolatedEnv[SYSTEM_ROOT_VAR]!;
 chmodSync(systemRoot, 0o700);
 const token = randomBytes(32).toString('hex');
 writeFileSync(join(systemRoot, TEST_MARK_FILE), `${token}\n`, { mode: 0o600 });
+// The same mark in the machine itself: a service mode a test starts has no system root (serviceModeEnv), and shows
+// its test machine to the state dir's refusal with this one (src/os/system-paths.ts testStateRefusal, #815).
+writeFileSync(join(testMachine, TEST_MARK_FILE), `${token}\n`, { mode: 0o600 });
 process.env[TEST_TOKEN_VAR] = token;
 
 /**
@@ -122,13 +125,13 @@ process.on('exit', () => {
 
 /**
  * An environment for a service mode a test starts (`dashboard --hub`, `--hub-setup --service`): those never run
- * with the system root (src/os/system-paths.ts serviceModeRefusal), so it and the test mark are left out. Only for a
- * mode that reads no machine location.
+ * with the system root (src/os/system-paths.ts serviceModeRefusal), so it is left out. Only for a mode that reads no
+ * machine location. The token stays: with the machine's own mark it shows the state dir's refusal this is still the
+ * test machine (testStateRefusal, #815); without the root it moves nothing (systemRootRefusal reads it only with one).
  */
 export function serviceModeEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const out = { ...env };
   delete out[SYSTEM_ROOT_VAR];
-  delete out[TEST_TOKEN_VAR];
   return out;
 }
 

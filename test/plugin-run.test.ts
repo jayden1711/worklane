@@ -9,6 +9,7 @@ import { treeHash } from '../src/plugins/tree.js';
 import { childEnv } from '../src/os/index.js';
 import { cliArgs, CliRunner, PLUGIN_LOCKS } from '../src/runner.js';
 import { STDIN_LINE } from './helpers.js';
+import { onRealMachine } from './isolate.js';
 
 const isWindows = process.platform === 'win32';
 const treeOf = (e: AllowlistEntry) => (e.record as PluginRecord).tree;
@@ -20,6 +21,7 @@ function approved(instance: string, id: string, roles: string[]): AllowlistEntry
   writeFileSync(join(tmp, 'skills', 'a', 'SKILL.md'), `---\nname: a\ndescription: ${id}\n---\nA.\n`);
   const tree = treeHash(tmp);
   const dir = storeDir(instance, id, tree);
+  onRealMachine(dir); // throws unless it is inside this test's system root: never the machine's own store (#815)
   mkdirSync(join(dir, 'skills', 'a'), { recursive: true });
   writeFileSync(join(dir, 'skills', 'a', 'SKILL.md'), readFileSync(join(tmp, 'skills', 'a', 'SKILL.md')));
   const record: ApprovalRecord = {
@@ -52,6 +54,7 @@ test('an unreadable switch-off list switches every plugin off (it can only take 
 
 test('a run never starts on an approved copy that changed on disk (fail-without: trusting the store unchecked)', () => {
   const a = approved('three', 'kit', ['builder']);
+  onRealMachine(storeDir('three', 'kit', treeOf(a))); // (#815)
   writeFileSync(join(storeDir('three', 'kit', treeOf(a)), 'skills', 'a', 'extra.md'), 'added later');
   assert.throws(() => pluginsForRun({ instance: 'three', instanceHome: home(), role: 'builder', entries: [a] }), PluginRunError);
 });
@@ -59,6 +62,7 @@ test('a run never starts on an approved copy that changed on disk (fail-without:
 test('an allowlist that can\'t be trusted refuses the run instead of meaning "no plugins"', () => {
   // One this user wrote, where root's should be: not root's, so no run of the instance starts (readAllowlist's own
   // cases are in plugin-approval.test.ts).
+  onRealMachine(allowlistPath('six')); // throws unless it is inside this test's system root (#815)
   mkdirSync(dirname(allowlistPath('six')), { recursive: true });
   writeFileSync(allowlistPath('six'), JSON.stringify({ version: 1, instance: 'six', entries: [] }));
   assert.throws(() => pluginsForRun({ instance: 'six', instanceHome: home(), role: 'builder' }), /plugins: .* isn't root's/);
@@ -107,6 +111,9 @@ const req = (cwd: string) => ({ prompt: 'p', model: 'm', cwd, allowedTools: [], 
 
 test('acceptance: an instance run gets its plugins, the empty plugin root and the locks; anything else loaded stops it', { skip: isWindows && 'POSIX stand-in claude' }, async () => {
   const a = approved('five', 'kit', ['builder']);
+  // Each throws unless it is inside this test's system root: never the machine's own store (#815).
+  onRealMachine(emptyPluginRoot('five'));
+  onRealMachine(storeDir('five', 'kit', treeOf(a)));
   mkdirSync(emptyPluginRoot('five'), { recursive: true });
   const plugins = ({ role }: { role: string }) => pluginsForRun({ instance: 'five', instanceHome: home(), role, entries: [a] });
   const cwd = mkdtempSync(join(tmpdir(), 'cwd-'));
