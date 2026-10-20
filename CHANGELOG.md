@@ -282,6 +282,7 @@ Every release, newest first: the PRs merged since the previous one, and what cha
 - Review levels: a renamed file counts under its old and its new path, in changeFiles and every path reader [PROTECTED: owner merges] (#688)
 - Review levels: a .gitattributes mark can't hide a change's lines or content; adding one waits for the owner (#693) [PROTECTED: owner merges] (#802)
 - Project commands run as the agent user only in a sandbox that hides its credentials; their output is redacted (#713) [PROTECTED: owner merges] (#787)
+- docs: how the guardrails work (docs/guardrails.md) and the guard gaps fixed and open (docs/security.md); a test fails when a file, symbol or test they cite is gone, or a merge hold kind isn't listed (#705)
 
 ### Guardrail changes
 
