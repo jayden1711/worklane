@@ -27,6 +27,7 @@ import { MACHINE_HELPER } from '../src/machine.js';
 import { MachineRequestError, machineRequests, requestPolicyChange } from '../src/machine-requests.js';
 import { runMachineRequests } from '../src/coordinator/machine-requests.js';
 import { exampleProject, repoRoot } from './helpers.js';
+import { onRealMachine } from './isolate.js';
 
 const posix = process.platform !== 'win32';
 // A root policy is a Linux machine install's: the gate asks the kernel where the opened file is (/proc/self/fd).
@@ -713,6 +714,7 @@ test("root's lock on an instance's policy: one a live writer holds makes `own` a
   ownPolicy('locked', m.deps);
   setPolicy('locked', 'auto_merge', 'on', null, m.deps);
   const lock = join(POLICY_ROOT_DIR, '.locked.lock');
+  onRealMachine(lock); // throws unless it is inside this test's system root: never the machine's own (#815)
   assert.equal(existsSync(lock), false, 'released after own and set');
   const text = readFileSync(m.file, 'utf8');
   const h = liveHolder();
@@ -776,6 +778,7 @@ test("a lock a writer left empty (killed between creating it and writing its lin
   const m = machineInstance('empty');
   ownPolicy('empty', m.deps);
   const lock = join(POLICY_ROOT_DIR, '.empty.lock');
+  onRealMachine(lock); // throws unless it is inside this test's system root (#815)
   writeFileSync(lock, '');
   assert.throws(() => setPolicy('empty', 'budget.daily_usd', '60', null, { ...m.deps, lockWaitMs: 100 }), /in progress/, 'a fresh empty lock: a writer still writing its line');
   const old = new Date(Date.now() - 60_000);
@@ -874,6 +877,7 @@ test("auto_merge off is root's kill switch alone: it opens no policy.yaml and no
   const id = instanceId('kill');
   assert.ok(id && 'id' in id);
   const d = idDir(id.id);
+  onRealMachine(d); // throws unless it is inside this test's system root (#815)
   assert.ok(flag.startsWith(join(d, 'auto-merge-off.')));
   assert.equal(statSync(flag).mode & 0o777, 0o644);
   assert.equal(statSync(flag).uid, me);
