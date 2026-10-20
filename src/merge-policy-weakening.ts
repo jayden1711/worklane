@@ -85,6 +85,7 @@ export const CHECK_TABLES: readonly CheckTable[] = [
   { path: 'src/hook-imports.ts', table: 'HOOK_IMPORTS', kind: 'never-shrink' },
   { path: 'src/delegation.ts', table: 'NEVER_LOOSEN', kind: 'never-shrink' },
   { path: 'src/guardrails/engine.ts', table: 'BUILTIN_PROTECTED', kind: 'never-shrink' },
+  { path: 'scripts/machine/worklane-machine.cjs', table: 'POLICY_ONLY', kind: 'never-shrink' },
   { path: 'scripts/push-gate-hook.mjs', table: 'GATE_RULES', kind: 'never-shrink' },
   { path: 'scripts/push-gate-hook.mjs', table: 'GATE_CODE', kind: 'never-shrink' },
   { path: 'scripts/push-gate.mjs', table: 'ATTRIBUTION', kind: 'never-shrink' },
