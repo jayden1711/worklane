@@ -143,6 +143,21 @@ test('a runtime import is followed only through a declaration that names a file 
   assert.deepEqual(opaque(declare('  // runtime-import: src/watch.ts\n')), { edges: [], opaque: [IMPORT] }, 'not the line right above the import');
   assert.deepEqual(opaque(declare("  const s = '// runtime-import: src/watch.ts';")), { edges: [], opaque: [IMPORT] }, 'in a string, not a comment');
   assert.deepEqual(opaque(declare('  // runtime-import: ../outside.ts')), { edges: [], opaque: [`${IMPORT} (declared ../outside.ts, which isn't a file)`] }, 'outside the repo');
+  // No block around the import (a top-level arrow): nothing narrower than the whole file to check against, so refused,
+  // whether the declared file is named only by other code there (route C) or by the import's own path.
+  const top = (file: string) => [
+    "const path = require('node:path');",
+    'const OPT = process.env.OPT;',
+    "const other = path.join(OPT, 'dist', 'src', 'c.js');",
+    "const f = path.join(OPT, 'current', 'dist', 'src', 'watch.js');",
+    `// runtime-import: ${file}`,
+    "const watch = () => import(require('node:url').pathToFileURL(f).href);",
+    'module.exports = { watch, other };',
+    '',
+  ].join('\n');
+  for (const file of ['src/c.ts', 'src/watch.ts']) {
+    assert.deepEqual(opaque(top(file)), { edges: [], opaque: [`${IMPORT} (declared at the top level: no {…} around the import to check ${file} against)`] }, `top level: ${file}`);
+  }
   // The real updater names dist/src/cli.js elsewhere: declaring src/cli.ts for its watchdog import is still refused.
   const updater = 'scripts/machine/worklane-update.cjs';
   const real = readFileSync(join(repoRoot, updater), 'utf8');

@@ -15,8 +15,9 @@
 // declare the repo file it loads, on the line right above it: `// runtime-import: src/x/index.ts` (several: comma or
 // space separated). Each named file is then an edge, so its changes select whatever reaches the module. A declaration
 // is taken only when every file it names exists and the string literals of the block the import is in (the `{…}`
-// around it; the whole file at top level) name that file's built path: one string, or consecutive ones as in
-// join(…, 'dist', 'src', 'x', 'index.js'). Otherwise, as with no declaration, the import stays unresolved.
+// around it; at top level there is none, and the declaration is refused) name that file's built path: one string, or
+// consecutive ones as in join(…, 'dist', 'src', 'x', 'index.js'). Otherwise, as with no declaration, the import stays
+// unresolved. Adding or changing a declaration waits for the owner (MARKERS in ../merge-policy-weakening.ts).
 // Pure: no fs, no git; the caller hands in the files and their contents (scripts/ci/affected.mjs from the working
 // tree, ./select.ts from a commit).
 import { posix } from 'node:path';
@@ -298,15 +299,15 @@ function declaredAt(text: string, masked: string, at: number): string[] | null {
   return m ? m[1]!.split(/[\s,]+/).filter(Boolean) : null;
 }
 
-/** The range of the innermost `{…}` around `at`, read from the masked text (no strings or comments); [0, end] at top level. */
-function blockAround(masked: string, at: number): [number, number] {
+/** The range of the innermost `{…}` around `at`, read from the masked text (no strings or comments); null at top level. */
+function blockAround(masked: string, at: number): [number, number] | null {
   let depth = 0;
   let open = -1;
   for (let i = at - 1; i >= 0 && open < 0; i--) {
     if (masked[i] === '}') depth++;
     else if (masked[i] === '{' && depth-- === 0) open = i;
   }
-  if (open < 0) return [0, masked.length];
+  if (open < 0) return null;
   depth = 0;
   for (let i = open; i < masked.length; i++) {
     if (masked[i] === '{') depth++;
@@ -317,11 +318,12 @@ function blockAround(masked: string, at: number): [number, number] {
 
 /**
  * Why a declaration can't stand for the import, or null when it can: every file it names is in the repo, and the
- * string literals of the block the import is in (`strings`, in order) name its built path, as one string or
- * consecutive ones.
+ * string literals of the block the import is in (`strings`, in order; null at top level, where nothing narrower than
+ * the whole file would vouch for it, so it is refused) name its built path, as one string or consecutive ones.
  */
-function declaredWrong(declared: readonly string[], files: ReadonlySet<string>, runtime: (f: string) => string, strings: readonly string[]): string | null {
+function declaredWrong(declared: readonly string[], files: ReadonlySet<string>, runtime: (f: string) => string, strings: readonly string[] | null): string | null {
   if (!declared.length) return 'declared nothing';
+  if (!strings) return `declared at the top level: no {…} around the import to check ${declared.join(', ')} against`;
   const said = `/${strings.join('/')}/`;
   for (const d of declared) {
     if (!files.has(d) || norm(d) !== d) return `declared ${d}, which isn't a file`;
@@ -477,8 +479,9 @@ export function buildGraph(o: GraphOptions): Graph {
         else {
           const why = `unresolved ${m[1] ?? 'require'}(${arg.slice(0, 80)})`;
           const declared = declaredAt(text, masked, m.index);
-          // Checked against the strings of the block the import is in, not the whole file's.
-          const bad = declared && declaredWrong(declared, files, runtime, lex(text.slice(...blockAround(masked, m.index))).strings);
+          // Checked against the strings of the block the import is in, never the whole file's.
+          const block = declared && blockAround(masked, m.index);
+          const bad = declared && declaredWrong(declared, files, runtime, block ? lex(text.slice(...block)).strings : null);
           if (!declared) f.opaque.push(why);
           else if (bad) f.opaque.push(`${why} (${bad})`);
           else for (const d of declared) (CODE_EXT.test(d) ? f.edges : f.reads).add(d);
