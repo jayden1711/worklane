@@ -74,6 +74,8 @@ export const CHECK_TABLES: readonly CheckTable[] = [
   { path: 'test/instance-name.test.ts', table: 'BAD_SHAPE', kind: 'never-shrink' },
   { path: 'scripts/lib/changelog.mjs', table: 'GUARDRAIL_PATHS', kind: 'never-shrink' },
   { path: 'test/machine-path-writes.test.ts', table: 'GUARD', kind: 'never-shrink' },
+  // The golden runner settings (#856): the deny list and hooks a run's --settings must carry.
+  { path: 'test/runner-golden.test.ts', table: 'GUARD', kind: 'never-shrink' },
   // The guards' own tables (their files are guard files too; the table names what was taken out).
   { path: 'src/review.ts', table: 'SELF_MODIFICATION_PARTS', kind: 'never-shrink' },
   { path: 'src/review.ts', table: 'LOCKED_CATEGORIES', kind: 'never-shrink' },
