@@ -67,11 +67,32 @@ export class OwnEnv {
   }
 
   /**
+   * This snapshot less `names`, each dropped as get() reads it: on Windows in any case (`Anthropic_Api_Key` is
+   * ANTHROPIC_API_KEY there), elsewhere the exact name. WHY (#786 round 4): blanking a name in a plain copy drops one
+   * spelling only, and get() would find another.
+   */
+  without(names: readonly string[]): OwnEnv {
+    const index = this.#index;
+    const drop = create(null) as Record<string, true>;
+    for (let i = 0; i < names.length; i++) drop[index ? upper(names[i]!) : names[i]!] = true;
+    const vars = create(null) as Record<string, string>;
+    const kept = index ? (create(null) as Record<string, string>) : null;
+    const keys = keysOf(this.#vars);
+    for (let i = 0; i < keys.length; i++) {
+      const k = keys[i]!;
+      if (hasOwn(drop, index ? upper(k) : k)) continue;
+      vars[k] = this.#vars[k]!;
+      if (kept) kept[upper(k)] = k;
+    }
+    return new OwnEnv(vars, kept);
+  }
+
+  /**
    * The snapshot itself (frozen, null-prototype, each name as written) for a function still typed NodeJS.ProcessEnv:
    * its reads are own variables only too. Plain property reads are case-sensitive even on Windows, so a read of it
    * must use the name's own case there (as Windows writes it: `Path`, `SystemRoot`); get() needn't.
-   * WHY (#786): testSlotsRefusal (#818) still takes a NodeJS.ProcessEnv, and the runner hands its snapshot on whole as
-   * one; agentEnv and agentAuthEnv (#819) take an EnvSource and read it through get().
+   * WHY (#786): testSlotsRefusal and testStateRefusal (#818) still take a NodeJS.ProcessEnv, so their callers hand
+   * them this; agentEnv and agentAuthEnv (#819) take an EnvSource and read it through get().
    */
   asProcessEnv(): NodeJS.ProcessEnv {
     return this.#vars;

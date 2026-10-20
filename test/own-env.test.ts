@@ -12,7 +12,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import ts from 'typescript';
 import { ownEnv, OwnEnv, type EnvSource } from '../src/os/own-env.js';
-import { agentAuthEnv, agentEnv } from '../src/runner.js';
+import { agentAuthEnv, agentBase, agentEnv } from '../src/runner.js';
 import { localServiceEnv } from '../src/service.js';
 import { detectClaudeLogin, probeEnv, type SetupProbe } from '../src/setup-steps.js';
 import { repoRoot } from './helpers.js';
@@ -154,6 +154,20 @@ test('after #819 (#786): agentAuthEnv on Windows (modelled): a name in any case 
     assert.deepEqual(Object.keys(bare), ['PATH']);
     assert.equal(bare.PATH, 'C:\\bin');
   });
+  // Round 4: a key-file or provider run drops the key in any case, as the case-sensitive read before #786 never
+  // passed `Anthropic_Api_Key` (nothing main closed may reopen); a plain local api_key run still gets it.
+  const withToken = ownEnv({ ...win, Anthropic_Auth_Token: 'tok-own' }, 'win32');
+  const seen = {
+    keyFile: agentEnv(agentBase(withToken, 'key-file'), 'api_key').ANTHROPIC_API_KEY ?? null,
+    providerKey: agentBase(withToken, 'provider').get('ANTHROPIC_API_KEY') ?? null,
+    providerToken: agentBase(withToken, 'provider').get('ANTHROPIC_AUTH_TOKEN') ?? null,
+    plain: agentEnv(agentBase(withToken, 'plain'), 'api_key').ANTHROPIC_API_KEY ?? null,
+    path: agentEnv(agentBase(withToken, 'key-file'), 'api_key').PATH ?? null,
+  };
+  assert.deepEqual(seen, { keyFile: null, providerKey: null, providerToken: null, plain: 'sk-own', path: 'C:\\bin' });
+  // Elsewhere names are case-sensitive: only the exact name is dropped.
+  const linux = ownEnv({ PATH: '/bin', ANTHROPIC_API_KEY: 'k', Anthropic_Api_Key: 'other' }, 'linux');
+  assert.deepEqual([agentBase(linux, 'key-file').get('ANTHROPIC_API_KEY'), agentBase(linux, 'key-file').get('Anthropic_Api_Key')], [undefined, 'other']);
 });
 
 test("after #819 (#786): the Claude step's environment and its login's cache key see only variables that are set", () => {

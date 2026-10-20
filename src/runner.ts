@@ -16,7 +16,7 @@ import { safeProjectEnv } from './project-env.js';
 import { withoutPushGateHatch } from './guardrails/push-hook.js';
 import { outboundEnv } from './network.js';
 import { asUser, killTree, killTreeAs, spawnDetached } from './os/index.js';
-import { ownEnv, type EnvSource } from './os/own-env.js';
+import { ownEnv, type EnvSource, type OwnEnv } from './os/own-env.js';
 import { RunRecorder, runIssue } from './run-record.js';
 import { RunFeed } from './run-feed.js';
 import { StuckDetector, stuckAction, type StuckMode, type StuckVerdict } from './stuck.js';
@@ -197,6 +197,16 @@ export function agentAuthEnv(base: EnvSource, runtime: 'cli' | 'api_key'): NodeJ
   // Local runs only: an instance never has the key in its environment (it reaches claude through apiKeyHelper).
   if (runtime === 'api_key' && own.get('ANTHROPIC_API_KEY')) env.ANTHROPIC_API_KEY = own.get('ANTHROPIC_API_KEY');
   return env;
+}
+
+/**
+ * What an agent run's environment is built from: `base`, less the key on a key-file run (apiKeyHelper is the key's
+ * only way in) and less the key and token on a provider run (the provider's key comes only from apiKeyHelper).
+ * WHY (#786): an own-variable snapshot, and each name dropped as its reads find it: on Windows in any case.
+ */
+export function agentBase(base: EnvSource, route: 'provider' | 'key-file' | 'plain'): OwnEnv {
+  const own = ownEnv(base);
+  return route === 'provider' ? own.without(['ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN']) : route === 'key-file' ? own.without(['ANTHROPIC_API_KEY']) : own;
 }
 
 /**
@@ -594,9 +604,7 @@ export class CliRunner implements AgentRunner {
   /** One try. `started` releases the login's start lock: once claude has answered (its token is fresh), or ended. */
   private async runOnce(req: RunRequest, started: () => void): Promise<RunResult> {
     if (req.provider?.kind === 'cli') return { reason: 'failed', detail: `${req.provider.name} runs on its own CLI, not claude; not starting`, costUsd: 0, turns: 0, model: req.model };
-    // With a key file, apiKeyHelper is the key's only way in: none from this process's environment.
-    // WHY (#786): a null-prototype snapshot, so agentEnv's reads of it are own variables only.
-    const base = ownEnv(req.provider ? { ...this.base, ANTHROPIC_API_KEY: undefined, ANTHROPIC_AUTH_TOKEN: undefined } : this.apiKeyFile ? { ...this.base, ANTHROPIC_API_KEY: undefined } : this.base).asProcessEnv();
+    const base = agentBase(this.base, req.provider ? 'provider' : this.apiKeyFile ? 'key-file' : 'plain');
     // A provider run's config dir is empty (no stored login, nothing of the agent's own settings), unless it runs as
     // another user, whose own dir it keeps; either way the key comes only from apiKeyHelper below.
     const providerDir = req.provider && !this.runAs && !this.lanes?.[req.lane ?? 'default']?.runAs ? mkdtempSync(join(tmpdir(), `${BRAND.cli}-provider-`)) : null;
