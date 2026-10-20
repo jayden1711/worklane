@@ -461,10 +461,12 @@ async function server() {
     return { why };
   });
 
-  await screen('screen 8: the instance\'s policy (budget changed, the change shown; root\'s file, so the dashboard writes nothing)', async () => {
+  await screen('screen 8: the instance\'s policy (budget changed, the change shown, then written by root\'s helper)', async () => {
     await open('/first-run?step=policy');
     const p = `${row('policy')} ${tid('first-run-fix-panel')}`;
     await waitFor(`${p} ${tid('policy-form')}`);
+    // auto_merge on is root's alone (#770): the form names the root command for it.
+    await waitText(`${p} [data-testid="policy-field"][data-key="auto_merge"] ${tid('policy-root-only')}`, /policy set \S+ auto_merge on/);
     const budget = `${p} [data-testid="policy-field"][data-key="budget.daily_usd"] input`;
     const file = `${home(`wl-${instance}`)}/.local/state/worklane/instances/${instance}/policy.yaml`;
     const before = sudoOk('cat', file);
@@ -473,16 +475,44 @@ async function server() {
     await click(`${p} ${tid('policy-review')}`);
     const no = await waitText(`${p} ${tid('policy-result')}`, /exceeds the policy budget 15; a repo can only tighten/);
     assert.equal(sudoOk('cat', file), before, 'a refused review wrote nothing');
+    // The dashboard only tightens (#726 rounds 10 and 11): at the repo's $20, a raise is refused at review; an admin
+    // raises it at a root shell, and then the form may lower it.
+    await type(budget, '30');
+    await click(`${p} ${tid('policy-review')}`);
+    await waitText(`${p} ${tid('policy-result')}`, /budget\.daily_usd 30 would loosen it \(now 20\)/);
+    assert.equal(sudoOk('cat', file), before, 'a raise past root\'s value wrote nothing');
+    sudoOk('/usr/local/bin/worklane', 'policy', 'set', instance, 'budget.daily_usd', '40');
     await type(budget, '30');
     await click(`${p} ${tid('policy-review')}`);
     const change = await waitText(`${p} ${tid('policy-confirming')}`, /budget\.daily_usd/);
     await click(`${p} ${tid('policy-confirm')}`);
-    // Issue #726: add-project.sh made policy.yaml root's (0644), so the dashboard refuses to write it, naming the root
-    // command; the file is unchanged and still root's.
-    const root = await waitText(`${p} ${tid('policy-result')}`, /is root's: an admin changes it at a root shell/);
-    assert.equal(sudoOk('cat', file), before, 'the dashboard wrote nothing');
+    // Issue #726: add-project.sh made policy.yaml root's (0644), so the dashboard writes nothing itself: the change goes
+    // to the coordinator, which runs the machine helper's set-policy (the engine as root); then the file has it, root's.
+    await waitText(`${p} ${tid('policy-result')}`, /queued for the coordinator: .*budget\.daily_usd/);
+    await until('the coordinator to run set-policy through the helper', async () => /daily_usd: 30\b/.test(sudoOk('cat', file)), 120_000, 1000);
     assert.equal(stat(file), 'root 644');
-    return { refused: no, change: change.split('\n').find((l) => l.includes('daily_usd')), root, file: stat(file) };
+    // The helper itself, as the coordinator user through sudo: sandbox off, allow_same_user on, land_mode direct and
+    // auto_merge on are refused, nothing written.
+    const after = sudoOk('cat', file);
+    for (const [k, v] of [['sandbox', 'off'], ['allow_same_user', 'on'], ['land_mode', 'direct'], ['auto_merge', 'on']]) {
+      const r = sh('sudo', ['-u', `wl-${instance}`, 'sudo', '-n', '/usr/local/libexec/worklane-machine', 'set-policy', k, v]);
+      assert.notEqual(r.status, 0, `set-policy ${k} ${v} ran: ${r.out}`);
+    }
+    assert.equal(sudoOk('cat', file), after, 'a refused set-policy wrote nothing');
+    // auto_merge off, through the helper's literal rule as the coordinator user: root's kill switch (#726 round 4),
+    // written with no lock and no read of policy.yaml, which it leaves as it was.
+    const off = sh('sudo', ['-u', `wl-${instance}`, 'sudo', '-n', '/usr/local/libexec/worklane-machine', 'set-policy', 'auto_merge', 'off']);
+    assert.equal(off.status, 0, `set-policy auto_merge off: ${off.out}`);
+    // Each OFF leaves a switch of its own name in the instance's id directory: root's pointer <instance>.id names
+    // by_id/<id>/, which holds auto-merge-off.<n> (src/policy-kill.ts, #726 round 9).
+    const id = sudoOk('cat', `/etc/worklane/policy-root/${instance}.id`).trim();
+    assert.match(id, /^[0-9a-f]{32}$/, `root's id pointer for ${instance}`);
+    const found = sh('sudo', ['find', `/etc/worklane/policy-root/by_id/${id}`, '-maxdepth', '1', '-name', 'auto-merge-off*']);
+    const kill = found.out.split('\n').filter(Boolean)[0];
+    assert.ok(kill, `no kill switch for ${instance}: ${found.out} ${found.err}`);
+    assert.equal(stat(kill), 'root 644');
+    assert.equal(sudoOk('cat', file), after, 'auto_merge off never touches policy.yaml');
+    return { refused: no, change: change.split('\n').find((l) => l.includes('daily_usd')), file: stat(file), killSwitch: stat(kill) };
   });
 
   // WHY skipped: since #387 the channel listing runs the engine's own CLI against Discord's API (a constant host); its
