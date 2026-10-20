@@ -1,7 +1,11 @@
 // The GitHub calls the main watch makes (src/main-watch.ts), one REST request each, with the instance's own token.
 // The watch decides when to call: at most one of these a minute.
 import { roleFromPermission, validLogin, type Role } from '../dashboard-auth.js';
-import type { CheckRunAt, Compared, MainWatchApi, MergedPull, StatusAt, WorkflowAt } from '../main-watch.js';
+import { TooManyPages, type CheckRunAt, type Compared, type MainWatchApi, type MergedPull, type StatusAt, type WorkflowAt } from '../main-watch.js';
+import type { WorkflowSource } from '../check-source.js';
+
+/** Pages of 100 check runs or statuses read for one commit (#727); past them the merge isn't judged yet. */
+const PAGES_MAX = 10;
 
 type Fetch = typeof fetch;
 
@@ -48,17 +52,72 @@ export class GitHubMainWatchApi implements MainWatchApi {
     return { status: r.status, aheadBy: r.ahead_by, behindBy: r.behind_by };
   }
 
-  async checkRuns(sha: string): Promise<CheckRunAt[]> {
-    const r = await this.json<{ check_runs: { name: string; status: string; conclusion: string | null; started_at?: string | null; completed_at?: string | null }[] }>(`/repos/${this.repo}/commits/${sha}/check-runs?filter=all&per_page=100`, `the check runs on ${sha.slice(0, 8)}`);
-    return r.check_runs.map((c) => ({ name: c.name, status: c.status, conclusion: c.conclusion, startedAt: c.started_at ?? null, completedAt: c.completed_at ?? null }));
+  /**
+   * The check runs on `sha`: the first page of 100 as main read it, then (#727) every later page while a page is full,
+   * whatever total_count says, marked `extra` (only a pinned name is judged with them). Still full past PAGES_MAX pages:
+   * TooManyPages, carrying what was read, so the watch judges a pinned merge unaccounted (src/main-watch.ts judge).
+   */
+  async checkRuns(sha: string, opts: { pinned?: boolean } = {}): Promise<CheckRunAt[]> {
+    type Run = { id?: number; html_url?: string | null; name: string; status: string; conclusion: string | null; started_at?: string | null; completed_at?: string | null; app?: { id?: number } | null; check_suite?: { id?: number } | null };
+    const out: CheckRunAt[] = [];
+    for (let page = 1; ; page++) {
+      // No required check pinned: the first page only, as main read it.
+      if (page > 1 && !opts.pinned) return out;
+      if (page > PAGES_MAX) throw new TooManyPages(`more than ${PAGES_MAX} pages of check runs on ${sha.slice(0, 8)}`, out);
+      const r = await this.json<{ check_runs: Run[] }>(`/repos/${this.repo}/commits/${sha}/check-runs?filter=all&per_page=100${page > 1 ? `&page=${page}` : ''}`, `the check runs on ${sha.slice(0, 8)}`);
+      out.push(
+        ...r.check_runs.map((c) => ({
+          name: c.name,
+          status: c.status,
+          conclusion: c.conclusion,
+          startedAt: c.started_at ?? null,
+          completedAt: c.completed_at ?? null,
+          ...(typeof c.id === 'number' ? { id: c.id } : {}),
+          ...(typeof c.html_url === 'string' ? { url: c.html_url } : {}),
+          ...(typeof c.app?.id === 'number' ? { app: c.app.id } : {}),
+          ...(typeof c.check_suite?.id === 'number' ? { suite: c.check_suite.id } : {}),
+          ...(page > 1 ? { extra: true as const } : {}),
+        })),
+      );
+      if (r.check_runs.length < 100) return out;
+    }
   }
 
-  async statuses(sha: string): Promise<StatusAt[]> {
-    const res = await this.get(`/repos/${this.repo}/commits/${sha}/statuses?per_page=100`);
-    // Statuses need their own permission; without it, there are just none to count.
-    if (res.status === 403 || res.status === 404) return [];
-    if (!res.ok) throw new Error(`GitHub ${res.status} reading the statuses on ${sha.slice(0, 8)}`);
-    return ((await res.json()) as { context: string; state: string; created_at: string }[]).map((s) => ({ context: s.context, state: s.state, createdAt: s.created_at }));
+  /** #727: the Actions workflow runs for `sha` (one page of 100) by check suite id; null when Actions can't be read. */
+  async runSources(sha: string): Promise<Record<string, WorkflowSource> | null> {
+    const res = await this.get(`/repos/${this.repo}/actions/runs?head_sha=${sha}&per_page=100`);
+    if (res.status === 403 || res.status === 404) return null;
+    if (!res.ok) throw new Error(`GitHub ${res.status} reading the workflow runs on ${sha.slice(0, 8)}`);
+    const out: Record<string, WorkflowSource> = {};
+    for (const w of ((await res.json()) as { workflow_runs?: { id?: number; html_url?: string; check_suite_id?: number; path?: string; head_sha?: string; repository?: { full_name?: string } }[] }).workflow_runs ?? []) {
+      if (typeof w.id === 'number' && typeof w.html_url === 'string' && typeof w.check_suite_id === 'number' && typeof w.path === 'string' && typeof w.head_sha === 'string' && typeof w.repository?.full_name === 'string') out[String(w.check_suite_id)] = { run: w.id, url: w.html_url, path: w.path, repo: w.repository.full_name, sha: w.head_sha };
+    }
+    return out;
+  }
+
+  /**
+   * The statuses on `sha`, newest first. No required check pinned: the first page of 100 as main read it (a 403 or 404:
+   * none). Pinned (#727): later pages as checkRuns reads them (TooManyPages past PAGES_MAX), and any refusal, a first
+   * page's 403 or 404 included, throws (the watch asks again): never a partial or missing list.
+   */
+  async statuses(sha: string, opts: { pinned?: boolean } = {}): Promise<StatusAt[]> {
+    const out: StatusAt[] = [];
+    for (let page = 1; ; page++) {
+      if (page > PAGES_MAX) throw new TooManyPages(`more than ${PAGES_MAX} pages of statuses on ${sha.slice(0, 8)}`, out);
+      const res = await this.get(`/repos/${this.repo}/commits/${sha}/statuses?per_page=100${page > 1 ? `&page=${page}` : ''}`);
+      // No required check pinned: main's read, unchanged (the first page; a 403 or 404 is none).
+      if (!opts.pinned) {
+        if (res.status === 403 || res.status === 404) return [];
+        if (!res.ok) throw new Error(`GitHub ${res.status} reading the statuses on ${sha.slice(0, 8)}`);
+        return ((await res.json()) as { context: string; state: string; created_at: string }[]).map((s) => ({ context: s.context, state: s.state, createdAt: s.created_at }));
+      }
+      // A required check pinned: any refusal throws (the watch asks again), a first page's 403 or 404 included (the
+      // owner's decision, round 8): a pinned check is never judged without its name's statuses.
+      if (!res.ok) throw new Error(`GitHub ${res.status} reading the statuses on ${sha.slice(0, 8)}${page > 1 ? ` (page ${page})` : ''}`);
+      const list = (await res.json()) as { context: string; state: string; created_at: string }[];
+      out.push(...list.map((s) => ({ context: s.context, state: s.state, createdAt: s.created_at, ...(page > 1 ? { extra: true as const } : {}) })));
+      if (list.length < 100) return out;
+    }
   }
 
   async role(login: string): Promise<Role | null> {

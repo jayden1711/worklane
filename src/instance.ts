@@ -14,8 +14,12 @@ import type { RunAs } from './runner.js';
 import { homeCredentialStores, sandboxSettings } from './sandbox.js';
 import { policyInstance, readPolicyChecked } from './policy-gate.js';
 import { autoMergeKilled } from './policy-kill.js';
-import { RESEARCH_DIR, RESEARCH_LANE, RESEARCH_REPO_LANE, RESEARCH_ROOT_ENV } from './research.js';
-import { CHAT_KEY_GLOBS, CHAT_LANE, CHAT_ROOT_ENV } from './intake/chat.js';
+import { RESEARCH_DIR, RESEARCH_LANE, RESEARCH_REPO_LANE } from './research.js';
+import { CHAT_LANE } from './intake/chat.js';
+// WHY (#785): the env the guard reads and the chat lane's deny rules come from the guard's own locked modules, never
+// through src/research.ts or src/intake/chat.ts, which aren't locked: a change there can't swap them under this file.
+import { RESEARCH_ROOT_ENV } from './guard/research.js';
+import { CHAT_KEY_GLOBS, CHAT_ROOT_ENV } from './guard/chat.js';
 import { fileURLToPath } from 'node:url';
 
 /**

@@ -72,16 +72,6 @@ export function localRunChecks(events: StoredEvent[], sha: string, tests: Pick<T
   return out;
 }
 
-/**
- * The checks a PR's head is judged by under No CI: GitHub's, with every one named like a test-run check taken out,
- * and the event log's in their place. Elsewhere (ci: github), GitHub's as they are.
- */
-export function headChecks(o: { project: Pick<ProjectConfig, 'ci'>; tests: Pick<TestsConfig, 'test_run'>; github: CommitCheck[]; events: () => StoredEvent[]; sha: string }): CommitCheck[] {
-  if (!ciIsNone(o.project)) return o.github;
-  const names = new Set(testRunCheckNames(o.tests));
-  return [...o.github.filter((c) => !names.has(c.name)), ...localRunChecks(o.events(), o.sha, o.tests)];
-}
-
 /** The checks a PR must pass: required_checks, or under No CI every test-run tier's check. */
 export function requiredFor(project: Pick<ProjectConfig, 'ci' | 'required_checks'>, tests: Pick<TestsConfig, 'test_run'>): string[] {
   return ciIsNone(project) ? testRunCheckNames(tests) : project.required_checks;

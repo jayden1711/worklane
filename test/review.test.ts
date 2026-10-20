@@ -1,10 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import * as nodeModule from 'node:module';
 import { tmpdir } from 'node:os';
 import { join, posix, sep } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import ts from 'typescript';
 import { BRAND } from '../src/brand.js';
 import { ReviewConfig } from '../src/config/schema.js';
@@ -71,9 +72,11 @@ test("regression: a change to the agents' tool guard (src/hook.ts) is self-modif
 
 // WHY (#655): the guard's deny lists, the read-only agents' tool lists and refusals, and the task file's frozen and
 // hidden paths live beside src/hook.ts. Unlocked, a change to any of them widened what the guard allows at L1.
+// The read-only lanes' tools and refusals moved from src/intake/run.ts, src/intake/chat.ts and src/research.ts to the
+// guard's own modules (#785): the guard decides with these now, and doesn't load the others.
 const GUARD_MODULES = [
   'src/held-out-paths.ts', 'src/dashboard-key-paths.ts', 'src/experiments/paths.ts',
-  'src/intake/run.ts', 'src/intake/chat.ts', 'src/research.ts', 'src/contract.ts',
+  'src/guard/intake.ts', 'src/guard/chat.ts', 'src/guard/research.ts', 'src/contract.ts',
 ];
 
 test("regression: a change to each module the agents' tool guard decides with is self-modification, L3, with a review.yaml that lists no src/**", () => {
@@ -156,10 +159,132 @@ test('the import reader sees every import form, and reports one it cannot name',
 /** The guard's code (src/hook.ts) and its process entry (src/hook-main.ts, what the installed hook commands run). */
 const GUARD_ENTRIES = ['src/hook.ts', 'src/hook-main.ts'];
 
+// WHY (#785): the tree is what has to be locked, so its size is how much ordinary engine work can never merge on its
+// own. These are its modules, every one: a new import anywhere in it fails here, naming the module, and a change to
+// this list is a change to a locked test. Each module is here because the guard decides with it (src/hook.ts, the
+// lanes' rules in src/guard/, the guardrails and their config loader with every config section it validates, the
+// secret scan, the OS adapter) or because one of those imports it.
+const GUARD_TREE = [
+  'src/adapters/railway.ts', 'src/automations/cron.ts', 'src/automations/schema.ts', 'src/backlog/types.ts', 'src/brand.ts',
+  'src/check-source.ts', 'src/checkout.ts', 'src/ci-none.ts', 'src/comment-policy.ts', 'src/config/load.ts', 'src/config/schema.ts', 'src/contract.ts',
+  'src/cross-eval.ts', 'src/dashboard-auth.ts', 'src/dashboard-key-paths.ts', 'src/delegation.ts', 'src/deploy-gate/config.ts',
+  'src/events/types.ts', 'src/experiments/paths.ts', 'src/governor-holds.ts', 'src/guard/chat.ts', 'src/guard/intake.ts',
+  'src/guard/research.ts', 'src/guardrails/context.ts', 'src/guardrails/engine.ts', 'src/guardrails/fingerprint.ts',
+  'src/guardrails/glob.ts', 'src/guardrails/push-hook.ts', 'src/guardrails/shell.ts', 'src/held-out-paths.ts', 'src/hook-imports.ts',
+  'src/hook-main.ts', 'src/hook.ts', 'src/model-routing.ts', 'src/network.ts', 'src/optimize.ts', 'src/os/index.ts',
+  'src/os/system-paths.ts', 'src/os/system-root-guard.ts', 'src/path-text.ts', 'src/preview/config.ts', 'src/project-env.ts',
+  'src/provider-hosts.ts', 'src/providers.ts', 'src/quiet-sqlite.ts', 'src/review.ts', 'src/roles.ts', 'src/routing.ts',
+  'src/scan/secrets.ts', 'src/slot-file.ts', 'src/stage-names.ts', 'src/testrun/affected.ts', 'src/testrun/config.ts',
+  'src/testrun/fetch.ts', 'src/testrun/network.ts', 'src/testrun/select.ts', 'src/tool-path.ts',
+];
+
+/** The modules the tree reached before #785 and no longer does: the lanes' modules, and the runner's, through src/stage-label.ts. */
+const LEFT_THE_TREE = [
+  'src/agent-settings.ts', 'src/bundle.ts', 'src/claude-auth-failure.ts', 'src/domain-requests.ts', 'src/events/redact.ts',
+  'src/intake/addressing.ts', 'src/intake/chat.ts', 'src/intake/dedupe.ts', 'src/intake/discord-gate.ts', 'src/intake/discord.ts',
+  'src/intake/explain.ts', 'src/intake/replier.ts', 'src/intake/report.ts', 'src/intake/run.ts', 'src/intake/triage.ts',
+  'src/local-day.ts', 'src/locks.ts', 'src/mcp/client.ts', 'src/mcp/connector.ts', 'src/mcp/snapshot.ts', 'src/plugins/approval.ts',
+  'src/plugins/run.ts', 'src/plugins/tree.ts', 'src/research.ts', 'src/run-feed.ts', 'src/run-record.ts', 'src/runner.ts',
+  'src/sandbox.ts', 'src/stage-label.ts', 'src/stuck.ts', 'src/usage-limit.ts',
+];
+
+test("regression: the agents' tool guard's import tree is exactly its pinned modules, and none that left it (#785)", () => {
+  const { modules, problems } = importTree(...GUARD_ENTRIES);
+  assert.deepEqual(problems, [], 'the guard loads a module this test cannot follow: import it by a literal relative path');
+  const grown = modules.filter((m) => !GUARD_TREE.includes(m));
+  assert.deepEqual(grown, [], `the guard's import tree grew: each module it reaches has to be locked as the guard. Import a guard module (src/guard/) instead, or move what the guard needs into one`);
+  assert.deepEqual(modules, [...GUARD_TREE].sort(), 'the pinned tree names a module the guard no longer reaches: take it out of GUARD_TREE');
+  assert.deepEqual(LEFT_THE_TREE.filter((m) => modules.includes(m)), []);
+  for (const m of LEFT_THE_TREE) assert.ok(existsSync(join(repoDir, m)), `${m} is still a module (the tree left it; it wasn't deleted)`);
+});
+
+// The runtime half of the pin: what the guard's own process really loads, by node's module loader, not by a reading
+// of the source. Its process is src/hook-main.ts, what every installed hook command runs (the test below).
+test("regression: the guard's process loads only modules of its pinned tree, and none that left it (#785)", () => {
+  assert.equal(typeof (nodeModule as { registerHooks?: unknown }).registerHooks, 'function', "this node has no module.registerHooks (node 22.15 or later), so the guard's loads can't be watched");
+  const dir = mkdtempSync(join(tmpdir(), 'guard-loads-'));
+  const preload = join(dir, 'watch.mjs');
+  writeFileSync(preload, [
+    "import { registerHooks } from 'node:module';",
+    "import { writeFileSync } from 'node:fs';",
+    'const seen = new Set();',
+    'registerHooks({ load(url, context, next) { seen.add(url); return next(url, context); } });',
+    "process.on('exit', () => writeFileSync(process.env.GUARD_LOADS_LOG, [...seen].join('\\n')));",
+  ].join('\n'));
+  const dist = pathToFileURL(join(repoDir, 'dist', 'src')).href + '/';
+  // WHY (#839 review): a lazy import loads only on the path that takes it, so the calls go past the guard's early exits:
+  // a project with a config (the config loader, the guardrails, the post-edit checks), and the research and chat lanes.
+  // The static pin above is what catches an import on a path no call here takes.
+  const project = join(dir, 'project');
+  cpSync(join(repoDir, 'examples', 'basic'), project, { recursive: true });
+  const bundle = join(dir, 'research', 'run-1');
+  mkdirSync(bundle, { recursive: true });
+  writeFileSync(join(bundle, 'research.json'), JSON.stringify({ blocklist: ['tracker.example'] }));
+  const P = BRAND.envPrefix;
+  const agent = (role: string | null, extra: Record<string, string> = {}) => ({ [`${P}_AGENT`]: '1', ...(role ? { [`${P}_ROLE`]: role } : {}), ...extra });
+  const calls: [string, string, Record<string, unknown>, Record<string, string>][] = [
+    ['no config', 'pre-tool-use', { cwd: dir, tool_name: 'Read', tool_input: { file_path: join(dir, 'x') } }, agent('researcher')],
+    ['a project, Bash', 'pre-tool-use', { cwd: project, tool_name: 'Bash', tool_input: { command: 'npm test' } }, agent(null)],
+    ['a project, a fetch', 'pre-tool-use', { cwd: project, tool_name: 'WebFetch', tool_input: { url: 'https://unlisted.example/' } }, agent(null)],
+    ['a project, a researcher', 'pre-tool-use', { cwd: project, tool_name: 'WebFetch', tool_input: { url: 'https://example.org/' } }, agent('researcher')],
+    ['the research lane', 'pre-tool-use', { cwd: bundle, tool_name: 'WebFetch', tool_input: { url: 'https://example.org/' } }, agent('researcher', { [`${P}_RESEARCH_ROOT`]: join(dir, 'research') })],
+    ['the intake lane', 'pre-tool-use', { cwd: bundle, tool_name: 'Read', tool_input: { file_path: join(bundle, 'research.json') } }, agent('intake', { [`${P}_RESEARCH_ROOT`]: join(dir, 'research') })],
+    ['the chat lane', 'pre-tool-use', { cwd: project, tool_name: 'Grep', tool_input: { pattern: 'x', path: 'src' } }, agent('channel-chat', { [`${P}_CHAT_ROOT`]: project })],
+    ['an edit in a project', 'post-tool-use', { cwd: project, tool_name: 'Edit', tool_input: { file_path: join(project, 'README.md') } }, agent(null)],
+    ['a session end', 'session-end', { cwd: project }, agent(null)],
+  ];
+  for (const [name, event, input, env] of calls) {
+    const log = join(dir, `${name.replaceAll(' ', '-').replaceAll(',', '')}.txt`);
+    const r = spawnSync(process.execPath, ['--import', pathToFileURL(preload).href, join(repoDir, 'dist', 'src', 'hook-main.js'), event], { input: JSON.stringify(input), encoding: 'utf8', env: { ...process.env, GUARD_LOADS_LOG: log, ...env } });
+    assert.equal(r.error, undefined, String(r.error));
+    assert.ok(existsSync(log), `${name}: the guard's process ran with the watch (exit ${r.status}: ${r.stderr})`);
+    const loaded = readFileSync(log, 'utf8').split('\n').filter((u) => u.startsWith(dist)).map((u) => `src/${u.slice(dist.length).replace(/\.js$/, '.ts')}`);
+    assert.ok(loaded.includes('src/hook-main.ts') && loaded.includes('src/hook.ts'), `${name}: the watch saw the guard load (${loaded.length} modules)`);
+    assert.deepEqual(loaded.filter((m) => !GUARD_TREE.includes(m)), [], `${name}: the guard's process loaded modules outside its pinned tree`);
+    assert.deepEqual(loaded.filter((m) => LEFT_THE_TREE.includes(m)), [], name);
+  }
+});
+
+// WHY (#785): of the modules that left the tree, these still decide what an agent run gets (the settings that keep its
+// hooks on, its bundles, plugins, MCP servers, host requests and stuck-run stop, the untrusted-input runs' builders,
+// and the secret redaction): they stay locked, L3, under parts of their own. The rest are ordinary modules and are no
+// longer locked.
+const STILL_LOCKED: [string, string][] = [
+  ['src/agent-settings.ts', 'what an agent run is given'], ['src/bundle.ts', 'what an agent run is given'],
+  ['src/domain-requests.ts', 'what an agent run is given'], ['src/stuck.ts', 'what an agent run is given'],
+  ['src/mcp/client.ts', 'what an agent run is given'], ['src/mcp/connector.ts', 'what an agent run is given'],
+  ['src/mcp/snapshot.ts', 'what an agent run is given'], ['src/plugins/approval.ts', 'what an agent run is given'],
+  ['src/plugins/run.ts', 'what an agent run is given'], ['src/plugins/tree.ts', 'what an agent run is given'],
+  // The run builders of the runs that read untrusted input: they set its role, lane and tools (#841 would free them).
+  ['src/research.ts', 'what an agent run is given'], ['src/intake/run.ts', 'what an agent run is given'],
+  ['src/intake/chat.ts', 'what an agent run is given'], ['src/intake/replier.ts', 'what an agent run is given'],
+  ['src/intake/explain.ts', 'what an agent run is given'],
+  // The stage judge's run builder (labelFailedRun: its role, tools, budget and schema, over agent-written text, run in
+  // the coordinator's checkout), and the intake's trust and draft checks that the locked intake decision takes as input.
+  ['src/stage-label.ts', 'what an agent run is given'], ['src/intake/triage.ts', 'what an agent run is given'],
+  ['src/intake/report.ts', 'who may approve'],
+  // candidates() bounds which issue the untrusted intake agent may name; the locked intake decision relies on it.
+  ['src/intake/dedupe.ts', 'who may approve'],
+  ['src/events/redact.ts', 'sign-in, credentials or secrets'],
+  ['src/runner.ts', 'the evaluator and the agent runner'], ['src/sandbox.ts', 'the sandbox and test runs'],
+];
+
+test('each module that left the guard\'s tree is either still locked under its own part, or an ordinary module (#785)', () => {
+  assert.deepEqual(STILL_LOCKED.map(([m]) => m).filter((m) => !LEFT_THE_TREE.includes(m)), []);
+  for (const [path, what] of STILL_LOCKED) {
+    const r = level([f(path, 1, 1)]);
+    assert.equal(r.level, 'L3', path);
+    assert.deepEqual(r.categories[SELF_MODIFICATION], [path], path);
+    assert.equal(selfModificationPart(path), what, path);
+  }
+  const unlocked = LEFT_THE_TREE.filter((m) => !STILL_LOCKED.some(([p]) => p === m));
+  assert.deepEqual(unlocked.filter((m) => selfModificationPart(m) !== null), [], 'an ordinary module is still locked: name it in STILL_LOCKED');
+});
+
 test("regression: every module in the agents' tool guard's import tree is self-modification, L3, with a review.yaml that lists no src/**", () => {
   const { modules, problems } = importTree(...GUARD_ENTRIES);
   assert.deepEqual(problems, [], 'the guard loads a module this test cannot follow: import it by a literal relative path');
-  assert.ok(modules.length > 50, `read the tree: ${modules.length} modules`);
+  assert.deepEqual(modules, [...GUARD_TREE].sort(), 'read the whole tree: exactly its pinned modules');
   const notL3 = modules.filter((path) => {
     const r = level([f(path, 1, 1)]);
     return r.level !== 'L3' || !r.categories[SELF_MODIFICATION]?.includes(path);

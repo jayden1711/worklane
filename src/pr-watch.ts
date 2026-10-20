@@ -4,6 +4,7 @@
 // cancelled, skipped or still running, a head that isn't the commit the
 // evaluator approved, or no approval at all, and it is not ready.
 import type { CommitCheck } from './backlog/types.js';
+import { assertJudged, type JudgedChecks } from './check-source.js';
 
 export type CheckOutcome = 'pass' | 'fail' | 'pending' | 'cancelled' | 'skipped' | 'missing';
 
@@ -25,8 +26,13 @@ function outcomeOf(c: CommitCheck): CheckOutcome {
   return 'fail';
 }
 
-/** Each required check's outcome on a commit; a check run wins over a status of the same name. */
-export function requiredOutcomes(required: string[], checks: CommitCheck[]): RequiredCheck[] {
+/**
+ * Each required check's outcome on a commit; a check run wins over a status of the same name. `checks` are only ever
+ * judged ones (src/check-source.ts PinnedChecks.of): a raw Backlog.checks answer doesn't compile here.
+ */
+export function requiredOutcomes(required: string[], checks: JudgedChecks): RequiredCheck[] {
+  // #727: at run time too, never a cast, an `any` or a mutated array: it throws (fails closed).
+  assertJudged(checks);
   return required.map((name) => {
     const c = checks.find((x) => x.name === name && x.source === 'check_run') ?? checks.find((x) => x.name === name);
     if (!c) return { name, outcome: 'missing' as const };
@@ -43,7 +49,8 @@ export interface Readiness {
   failed: RequiredCheck[];
 }
 
-export function readiness(o: { required: string[]; checks: CommitCheck[]; head: string; evaluated: { head: string; approved: boolean } | null }): Readiness {
+export function readiness(o: { required: string[]; checks: JudgedChecks; head: string; evaluated: { head: string; approved: boolean } | null }): Readiness {
+  assertJudged(o.checks);
   const checks = requiredOutcomes(o.required, o.checks);
   const reasons: string[] = [];
   if (!o.required.length) reasons.push('no required checks are configured (required_checks in config.yaml), so nothing is ever marked ready');
