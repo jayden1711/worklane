@@ -122,8 +122,8 @@ test('the graph on the fixture: imports, the helpers\' names, built paths back t
 });
 
 test('a runtime import is followed only through a declaration that names a file and matches the code; else it stays unresolved', () => {
-  const opaque = (updater: string, extra: Record<string, string> = {}) => {
-    const files: Record<string, string> = { 'src/watch.ts': 'export const w = 1;\n', 'src/c.ts': 'export const c = 1;\n', 'scripts/up.cjs': updater, ...extra };
+  const opaque = (updater: string) => {
+    const files: Record<string, string> = { 'src/watch.ts': 'export const w = 1;\n', 'src/c.ts': 'export const c = 1;\n', 'scripts/up.cjs': updater };
     const g = buildGraph({ files: Object.keys(files), read: (f) => files[f]!, runtimePath: ci.runtimePath, sourcePath: ci.sourcePath });
     const x = g.facts.get('scripts/up.cjs')!;
     return { edges: [...x.edges].sort(), opaque: x.opaque };
@@ -148,7 +148,7 @@ test('a runtime import is followed only through a declaration that names a file 
   const real = readFileSync(join(repoRoot, updater), 'utf8');
   assert.ok(real.includes('// runtime-import: src/watchdog/index.ts\n') && real.includes("'dist', 'src', 'cli.js'"));
   const files = git(repoRoot, 'ls-files').split('\n');
-  const swapped = buildGraph({ files, read: (f) => (f === updater ? real.replace('runtime-import: src/watchdog/index.ts', 'runtime-import: src/cli.ts') : f === 'src/watchdog/index.ts' || f === 'src/cli.ts' ? '' : 'x'), runtimePath: ci.runtimePath, sourcePath: ci.sourcePath });
+  const swapped = buildGraph({ files, read: (f) => (f === updater ? real.replace('runtime-import: src/watchdog/index.ts', 'runtime-import: src/cli.ts') : ''), runtimePath: ci.runtimePath, sourcePath: ci.sourcePath });
   assert.deepEqual(swapped.facts.get(updater)!.opaque, [`${IMPORT} (declared src/cli.ts, but the code around it never names dist/src/cli.js)`]);
 });
 
@@ -280,7 +280,7 @@ test('on the engine itself: a one-test change or a doc nothing names runs a smal
 
 test('what tsc builds comes from tsconfig.json: each `<dir>/**/*.ts` it includes, and nothing else', () => {
   const ts = JSON.parse(readFileSync(join(repoRoot, 'tsconfig.json'), 'utf8')) as { include: string[] };
-  const dirs = ts.include.map((i) => /^(.+)\/\*\*\/\*\.ts$/.exec(i)![1]!);
+  const dirs = ts.include.flatMap((i) => /^(.+)\/\*\*\/\*\.ts$/.exec(i)?.[1] ?? []);
   assert.ok(dirs.includes('scripts/bench'), 'the bench is built');
   for (const d of dirs) {
     assert.equal(ci.runtimePath(`${d}/x/y.ts`), `dist/${d}/x/y.js`, d);
