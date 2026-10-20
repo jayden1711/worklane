@@ -13,7 +13,7 @@
 //
 // What local mode can't do is listed plainly (unavailableIn), in doctor and on the dashboard, never left to fail.
 import { spawn, spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { delimiter, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createInterface } from 'node:readline';
@@ -26,10 +26,12 @@ import { gitRemoteRepo, install } from './install.js';
 import { readWatchState } from './main-watch.js';
 import { handOffFromNpx, type HandOff } from './npx-engine.js';
 import { findTool, withToolPath } from './tool-path.js';
-import { detectOs, isRoot, shareReadWithGroup, stateDir, which, writeOwnerOnly } from './os/index.js';
+import { detectOs, fileAccess, isRoot, serviceManagerEnv, shareReadWithGroup, stateDir, which, writeOwnerOnly } from './os/index.js';
 import { coordinatorUser } from './setup/app-manifest.js';
 import { instanceNameProblem } from './instance-name.js';
-import { checkSetup, checkSetupOffThread, detectClaudeLogin, detectGithubLogin, detectRepoConfig, detectTailscale, detectTools, GROUPS, MAIN_WATCH_GUARDS, MODES, protectionAnswer, type DetectCache, type Detected, type Mode, type RunResult, type SetupContext, type SetupProbe, type SetupView } from './setup-steps.js';
+import { agentRuntimeOf, checkSetup, checkSetupOffThread, detectClaudeLogin, detectGithubLogin, detectRepoConfig, detectTailscale, detectTools, GROUPS, MAIN_WATCH_GUARDS, MANAGER_LOGIN_VARS, MODES, probeEnv, protectionAnswer, RUNTIME_CHOICE_LABEL, type DetectCache, type Detected, type ManagerEnv, type Mode, type ProbeRunOptions, type RunResult, type RuntimeChoice, type SetupContext, type SetupProbe, type SetupView } from './setup-steps.js';
+import { apiKeyHelperCommand, type RuntimeKind } from './runner.js';
+import { redactString } from './events/redact.js';
 import { describeInstall, httpDownload, INSTALLABLE, installPlan, installTool, type Download, type InstallableTool, type ToolInstall } from './tool-install.js';
 import { srvCheckoutPath, varLibPath } from './os/system-paths.js';
 import { ciChoiceProblem } from './ci-choice.js';
@@ -78,6 +80,8 @@ export interface InitState {
   handoffDetail?: Record<string, string>;
   /** Local mode: auto-config's answers, open questions, command results and setup PR (src/auto-config.ts). */
   autoConfig?: AutoConfigState;
+  /** Local, a new project (#738): the chosen login; an API key as its file's path, never the key. */
+  agentRuntime?: RuntimeChoice;
   updatedAt: string;
   finishedAt: string | null;
 }
@@ -147,7 +151,8 @@ export function unavailableIn(mode: Mode, has: (cmd: string) => boolean = (c) =>
 /** Everything a step does to the world, so tests can stand in for it. */
 export interface InitIo {
   which(cmd: string): string | null;
-  run(cmd: string, args: string[], o?: { cwd?: string }): RunResult;
+  run(cmd: string, args: string[], o?: ProbeRunOptions): RunResult;
+  serviceManagerEnv(): ManagerEnv;
   /** Run a command on the person's terminal (a login): its exit status. */
   interactive(cmd: string, args: string[]): Promise<number>;
   /** Ask on the terminal; null when there is none (then nothing interactive happens). */
@@ -294,16 +299,123 @@ async function coordinator(c: InitContext, act: boolean): Promise<StepResult> {
   return handoff(c, 'coordinator', act);
 }
 
-const claudeStatus = (c: InitContext): StepResult => asStep(detectClaudeLogin(c.io));
+/** `--answer` ids for the Claude step's choice (#738). */
+export const RUNTIME_ANSWER = 'agent-runtime';
+export const KEY_FILE_ANSWER = 'api-key-file';
+const RUNTIME_ANSWERS: Record<string, RuntimeKind> = { subscription: 'cli', api_key: 'api_key' };
+
+const runtimeOf = (c: InitContext) =>
+  agentRuntimeOf({ root: c.root!, runtimeChoice: c.state.agentRuntime, draftConfig: c.state.autoConfig?.draft?.yaml['config.yaml'] }, () => {
+    try {
+      return loadConfig(c.root!);
+    } catch (e) {
+      return { error: (e as Error).message.split('\n')[0] || 'invalid config' };
+    }
+  });
+
+const claudeStatus = (c: InitContext) => detectClaudeLogin(c.io, runtimeOf(c));
+
+/**
+ * Why a file can't be the API key file (null: it can): a plain absolute path (apiKeyHelperCommand's rule), a regular
+ * file this user owns, open to no one else. Never opened. A bad path is not shown back: it may be the key itself.
+ */
+export function keyFileProblem(file: string, uid: number | undefined = process.getuid?.()): string | null {
+  try {
+    apiKeyHelperCommand(file);
+  } catch {
+    return 'the path of the key file must be absolute, with letters, digits and . _ - / only (what was given is not shown, in case it was the key itself)';
+  }
+  const shown = redactString(file);
+  const a = fileAccess(file);
+  if (a.kind === 'unsupported') return 'a key file needs POSIX file modes';
+  if (a.kind === 'hidden') return `${shown} can't be reached`;
+  if (a.kind === 'missing') return `no file at ${shown}`;
+  try {
+    if (!statSync(file).isFile()) return `${shown} is not a regular file`;
+  } catch {
+    return `no file at ${shown}`;
+  }
+  if (uid !== undefined && a.uid !== uid) return `${shown} is not yours (owner uid ${a.uid})`;
+  if (a.openToOthers) return `${shown} is open to others (mode ${a.mode}): run \`chmod 600 ${shown}\`, then choose it again`;
+  return null;
+}
+
+function recordRuntime(c: InitContext, kind: RuntimeKind, keyFile: string | undefined): StepResult | null {
+  if (kind === 'cli') {
+    c.state.agentRuntime = { kind: 'cli' };
+    return null;
+  }
+  if (!keyFile) return { status: 'failed', detail: `an API key is chosen by the path of a file holding it: add \`--answer ${KEY_FILE_ANSWER}=<path>\` (the key itself is never asked for)` };
+  const why = keyFileProblem(keyFile);
+  if (why) return { status: 'failed', detail: `${KEY_FILE_ANSWER}: ${why}` };
+  c.state.agentRuntime = { kind: 'api_key', keyFile };
+  return null;
+}
+
+/** The two choices on the terminal; Enter or no answer: the subscription, as before. */
+async function askRuntime(c: InitContext): Promise<StepResult | null> {
+  c.io.say('   How should the agents reach Claude?');
+  c.io.say(`     1)  ${RUNTIME_CHOICE_LABEL.cli} (\`claude auth login\`; the default)`);
+  c.io.say(`     2)  ${RUNTIME_CHOICE_LABEL.api_key}, in a file you own (only its path is asked for)`);
+  const a = ((await c.io.ask('   1 or 2 [1]: ')) ?? '').trim();
+  if (a === '') return null;
+  if (a === '1') return recordRuntime(c, 'cli', undefined);
+  if (a !== '2') return { status: 'failed', detail: `the answer is neither 1 nor 2 (not shown); run \`${BRAND.cli} init\` again to choose` };
+  const file = ((await c.io.ask('   the path of the file that holds the key (the path, not the key): ')) ?? '').trim();
+  return recordRuntime(c, 'api_key', file || undefined);
+}
 
 async function claude(c: InitContext, act: boolean): Promise<StepResult> {
   if (c.mode === 'server') return handoff(c, 'claude', act);
+  // WHY (#738): an existing project's agent_runtime changes only through a reviewed PR.
+  const configured = existsSync(join(c.root!, BRAND.configDir, 'config.yaml'));
+  const given = c.answers?.[RUNTIME_ANSWER];
+  if (given !== undefined) {
+    const kind = Object.hasOwn(RUNTIME_ANSWERS, given) ? RUNTIME_ANSWERS[given] : undefined;
+    if (!kind) return { status: 'failed', detail: `--answer ${RUNTIME_ANSWER}= takes subscription or api_key` };
+    if (configured) {
+      if (!act) c.io.say(`   --answer ${RUNTIME_ANSWER}: left as it is: this project's ${BRAND.configDir}/config.yaml sets agent_runtime already (change it through a reviewed PR)`);
+    } else {
+      const bad = recordRuntime(c, kind, c.answers?.[KEY_FILE_ANSWER]);
+      if (bad) return bad;
+      c.save?.();
+    }
+  }
   const v = claudeStatus(c);
-  if (v.status === 'done' || !act) return v;
-  if (!c.interactive || !c.io.which('claude')) return { status: 'failed', detail: `${v.detail}: run \`claude auth login\`, then \`${BRAND.cli} init\` again (it picks up here)` };
+  if (v.done || !act) return asStep(v);
+  if (!c.interactive || !c.io.which('claude')) return v.mismatch ? asStep(v) : { status: 'failed', detail: `${v.detail}: run \`claude auth login\`, then \`${BRAND.cli} init\` again (it picks up here)` };
+  if (!configured && !c.state.agentRuntime) {
+    const bad = await askRuntime(c);
+    if (bad) return bad;
+    c.save?.();
+    const again = claudeStatus(c);
+    if (again.done) return asStep(again);
+  }
+  // An API key has no login to open (apiKeyHelper; the detail says how).
+  const rt = runtimeOf(c);
+  if ('error' in rt || rt.kind === 'api_key') return asStep(claudeStatus(c));
   c.io.say('   opening the Claude login (claude auth login)');
   await c.io.interactive('claude', ['auth', 'login']);
-  return claudeStatus(c);
+  return asStep(claudeStatus(c));
+}
+
+/** The setup PR's config.yaml with the chosen agent_runtime.kind (#738); the key file's path never goes there. */
+export function setRuntimeKind(cfgDir: string, kind: RuntimeKind): void {
+  const file = join(cfgDir, 'config.yaml');
+  const lines = readFileSync(file, 'utf8').split('\n');
+  // One line changed: the kind under agent_runtime. Checked after, or nothing is proposed (fail closed).
+  const start = lines.findIndex((l) => /^agent_runtime:\s*(#.*)?$/.test(l));
+  for (let i = start + 1; start >= 0 && i < lines.length && /^(\s+\S|\s*$)/.test(lines[i]!); i++) {
+    const m = /^(\s+kind:\s*)[A-Za-z_]+\s*(#.*)?$/.exec(lines[i]!);
+    if (m) {
+      lines[i] = `${m[1]}${kind.padEnd(20)}# api_key: an API key, through apiKeyHelper | cli: your Claude subscription`;
+      break;
+    }
+  }
+  const text = lines.join('\n');
+  const got = ProjectConfig.safeParse(parseYaml(text));
+  if (!got.success || got.data.agent_runtime.kind !== kind) throw new Error(`couldn't set agent_runtime.kind: ${kind} in the drafted config.yaml`);
+  writeFileSync(file, text);
 }
 
 const githubStatus = (c: InitContext): StepResult => asStep(detectGithubLogin(c.io, c.repo));
@@ -337,6 +449,8 @@ export const autoConfig: AutoConfig = async (c) => {
     io: { git: (args, cwd) => c.io.run('git', args, { cwd }), gh: (args, cwd) => c.io.run('gh', args, { cwd }), ask: (q) => (c.interactive ? c.io.ask(q) : Promise.resolve(null)), say: c.io.say },
     save: () => c.save?.(),
     ...(c.hold ? { hold: true } : {}),
+    // #738: an API key chosen: the setup PR sets agent_runtime.kind (cli is the template's).
+    ...(c.state.agentRuntime?.kind === 'api_key' ? { adjust: (cfgDir: string) => setRuntimeKind(cfgDir, 'api_key') } : {}),
   });
   if (r.kind === 'drafted') return { status: 'done', detail: r.detail };
   if (r.kind !== 'merged') return { status: 'failed', detail: r.detail };
@@ -538,9 +652,10 @@ export function systemIo(o: { interactive: boolean }): InitIo {
   return {
     which: (cmd) => findTool(cmd),
     run: (cmd, args, opt = {}) => {
-      const r = spawnSync(cmd, args, { encoding: 'utf8', timeout: 60_000, env: withToolPath(), ...(opt.cwd ? { cwd: opt.cwd } : {}) });
+      const r = spawnSync(cmd, args, { encoding: 'utf8', timeout: 60_000, env: probeEnv(opt), ...(opt.cwd ? { cwd: opt.cwd } : {}) });
       return { status: r.error ? null : r.status, stdout: r.stdout ?? '', stderr: r.error ? r.error.message : (r.stderr ?? '') };
     },
+    serviceManagerEnv: () => serviceManagerEnv(MANAGER_LOGIN_VARS),
     interactive: (cmd, args) =>
       new Promise((done) => {
         rl?.close();
@@ -724,6 +839,7 @@ export function setupContext(state: InitState | null, o: { mode: Mode; root: str
     openQuestions: state?.autoConfig?.questions.length ?? 0,
     setupPr: state?.autoConfig?.pr?.url ?? serverPr,
     ...(state?.mode === 'server' ? { handoff: state.handoff, handoffDetail: state.handoffDetail ?? {} } : {}),
+    ...(o.mode === 'local' ? { runtimeChoice: state?.agentRuntime, draftConfig: state?.autoConfig?.draft?.yaml['config.yaml'] } : {}),
   };
 }
 

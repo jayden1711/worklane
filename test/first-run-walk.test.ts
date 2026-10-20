@@ -29,6 +29,7 @@ const chrome = findChrome(process.env.CHROME);
 /** The machine as the checks see it: every tool there, Claude and gh signed out, no service; git for real. */
 const probe: SetupProbe = {
   which: (c) => `/stand-in/${c}`,
+  serviceManagerEnv: () => ({ env: {} }),
   run: (cmd, args, o = {}) => {
     if (cmd === 'git') {
       try {

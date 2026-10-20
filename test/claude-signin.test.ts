@@ -85,6 +85,7 @@ function standIn(url: string) {
 function probeFor(s: { status: ClaudeStatus }): SetupProbe {
   return {
     which: (c) => `/stand-in/${c}`,
+    serviceManagerEnv: () => ({ env: {} }),
     run: (cmd, args, o = {}) => {
       if (cmd === 'claude' && args[0] === '-p') return { status: 0, stdout: '{"type":"result","subtype":"success","is_error":false,"result":"ok"}', stderr: '' }; // the login's proof: a minimal real call, answered
       if (cmd === 'claude') return { status: s.status.loggedIn ? 0 : 1, stdout: JSON.stringify({ loggedIn: s.status.loggedIn, authMethod: s.status.method }), stderr: '' };
