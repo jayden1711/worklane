@@ -161,8 +161,14 @@ export const GUARD_FILES: readonly string[] = [
   '**/.mypy.ini',
   '**/.stylelintrc*',
   '**/.markdownlint*',
-  // What install and every npm script run under.
+  // What install and every script run under (any added line waits too: NEVER_GROW_FILES), and the workspace's settings
+  // (only a removed or changed line: ordinary PRs add packages there).
   '**/.npmrc',
+  '**/.yarnrc',
+  '**/.yarnrc.yml',
+  '**/bunfig.toml',
+  '**/.bunfig.toml',
+  '**/pnpm-workspace.yaml',
   // Shared CI steps, more test runners and linters, who must review, and the project lints of the PR-gate tier.
   '.github/actions/**',
   '.github/CODEOWNERS',
@@ -201,11 +207,11 @@ export const GUARD_FILES: readonly string[] = [
   'test/isolate.ts',
 ];
 
-/**
- * Files where any line added waits: allowlist files, and `.npmrc`, whose every setting changes what install and each
- * npm script run under (`script-shell=`, `ignore-scripts=`); it is a guard file too.
- */
-export const NEVER_GROW_FILES: readonly string[] = ['.denylist-allow', '.gitleaksignore', '**/.eslintignore', '**/.semgrepignore', '**/.npmrc'];
+/** A package manager's settings: every one changes what install and each script run under (`script-shell=`, `ignore-scripts=`). */
+const PACKAGE_MANAGER_SETTINGS: readonly string[] = ['**/.npmrc', '**/.yarnrc', '**/.yarnrc.yml', '**/bunfig.toml', '**/.bunfig.toml'];
+
+/** Files where any line added waits: allowlist files, and a package manager's settings (guard files too). */
+export const NEVER_GROW_FILES: readonly string[] = ['.denylist-allow', '.gitleaksignore', '**/.eslintignore', '**/.semgrepignore', ...PACKAGE_MANAGER_SETTINGS];
 
 /**
  * Test files and their expected outputs, whatever the repo's review.yaml calls tests (an own list: narrowing the tests
@@ -327,7 +333,7 @@ const KINDS = {
   'table-gone': "removes or renames a check's or guard's table",
   'table-shrunk': "removes or changes an entry in a check's rules or a guard's list",
   'table-grown': 'adds or changes an entry in an allowlist, exception or good-fixture list',
-  'allow-file': 'adds a line to an allowlist file or .npmrc',
+  'allow-file': "adds a line to an allowlist file or a package manager's settings file",
   'table-used': "changes a check's or guard's table outside its own list",
   'guard-lines': 'removes or changes a line of a guard or lint',
   marker: 'adds a line with a skip, only or lint or type-check suppression mark',
@@ -358,6 +364,8 @@ const entry = (l: string) => {
   return t.endsWith(',') ? t.slice(0, -1).trimEnd() : t;
 };
 
+/** `eval` or `Function` as a whole word (`eval (` with a space too): a name built at run time. */
+const BUILT_NAME = /(?<![\w$])(?:eval|Function)(?![\w$])/;
 const brackets = (l: string, set: string) => [...l].filter((c) => set.includes(c)).length;
 /** A line without its `//` and `/* *\/` comments (never inside a string): one pass, so a bracket in a comment opens nothing. */
 export function withoutComments(l: string): string {
@@ -541,7 +549,7 @@ export function weakeningReasons(i: WeakeningInput): string[] {
     const own = new Set(now);
     for (const l of i.files.find((f) => f.path === t.path)?.addedLines ?? []) {
       // A name built at run time (`eval('ALL' + 'OWED')`, `Function(...)`) has no identifier to match: it waits too.
-      const built = l.includes('eval(') || l.includes('Function(');
+      const built = BUILT_NAME.test(l);
       if ((names.test(l) && !own.has(entry(l))) || built) hit('table-used', t.path, `${t.table}: ${l.trim()}`);
     }
   }

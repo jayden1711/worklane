@@ -494,7 +494,7 @@ const GUARD = 'removes or changes a line of a guard or lint';
 const GROWN = 'adds or changes an entry in an allowlist, exception or good-fixture list';
 const SHRUNK = "removes or changes an entry in a check's rules or a guard's list";
 const GONE = "removes or renames a check's or guard's table";
-const ALLOW_FILE = 'adds a line to an allowlist file or .npmrc';
+const ALLOW_FILE = "adds a line to an allowlist file or a package manager's settings file";
 const MARKER = 'adds a line with a skip, only or lint or type-check suppression mark';
 const UNREADABLE = "can't read a change to check it, so it may weaken a check";
 
@@ -719,7 +719,8 @@ test('weakening: a registered table waits on an entry added to an allowlist, or 
   }
   // Round 9's review: a name built at run time (`eval('ALL' + 'OWED')`, `Function(...)`) isn't matched by the
   // identifier, so in a registered table's file an added `eval(` or `Function(` line waits.
-  for (const line of ["eval('ALL' + 'OWED')['test/c.test.ts'] = 1;", "new Function('t', 't.x = 1')(globalThis);", "Function('return this')().ALLOWED_X = 1;"]) {
+  // (round 10's review: as whole words, so `eval (` with a space waits too)
+  for (const line of ["eval('ALL' + 'OWED')['test/c.test.ts'] = 1;", "eval ('ALL' + 'OWED')['test/c.test.ts'] = 1;", "new Function('t', 't.x = 1')(globalThis);", "Function('return this')().ALLOWED_X = 1;"]) {
     assert.deepEqual(kinds(weakensRaw({ 'test/no-clock-helpers.test.ts': clock }, { 'test/no-clock-helpers.test.ts': `${clock}${line}\n` })), ['changes a check\'s or guard\'s table outside its own list'], line);
   }
   // An added line inside the table's own literal is read as an entry, not as a use.
@@ -747,10 +748,16 @@ test('weakening: an allowlist file waits on any line added; one taken out does n
   // Round 9's review: `.npmrc` sets what install and every npm script run under (`script-shell=`, `ignore-scripts=`):
   // a guard file, and any line added to it waits too, in every repo.
   for (const scope of [undefined, 'managed-app'] as const) {
-    for (const path of ['.npmrc', 'web/.npmrc']) {
+    // (round 10's review: yarn's and bun's settings files too)
+    for (const path of ['.npmrc', 'web/.npmrc', '.yarnrc', '.yarnrc.yml', 'bunfig.toml', '.bunfig.toml']) {
       assert.deepEqual(kinds(weakens({ [path]: 'fund=false\n' }, { [path]: 'fund=false\nscript-shell=true\n' }, scope)), [ALLOW_FILE], `${path} ${String(scope)}: a line added`);
       assert.deepEqual(kinds(weakens({ [path]: 'fund=false\nengine-strict=true\n' }, { [path]: 'fund=false\n' }, scope)), [GUARD], `${path} ${String(scope)}: a line removed`);
     }
+    // pnpm-workspace.yaml: a guard file where a removed or changed line waits; ordinary PRs add packages there, so an
+    // added line doesn't (an added pnpm script setting is a named gap).
+    const ws = "packages:\n  - 'web'\nonlyBuiltDependencies:\n  - esbuild\n";
+    assert.deepEqual(kinds(weakens({ 'pnpm-workspace.yaml': ws }, { 'pnpm-workspace.yaml': ws.replace("  - esbuild\n", '') }, scope)), [GUARD], `pnpm-workspace.yaml ${String(scope)}: a line removed`);
+    assert.deepEqual(weakens({ 'pnpm-workspace.yaml': ws }, { 'pnpm-workspace.yaml': ws.replace("  - 'web'\n", "  - 'web'\n  - 'docs-site'\n") }, scope), [], `pnpm-workspace.yaml ${String(scope)}: a package added`);
   }
 });
 
