@@ -11,6 +11,9 @@ import { test } from 'node:test';
 import { systemGit } from '../src/checkout-sync.js';
 import { decisionDiff } from '../src/decision-detail.js';
 import { holdFlock } from '../src/os/index.js';
+import { EventEmitter } from 'node:events';
+import { createRequire, syncBuiltinESMExports } from 'node:module';
+import { checkSetupOffThread } from '../src/setup-steps.js';
 
 /** Runs `f` with `vars` on Object.prototype, as a polluting dependency would set them, and takes them off after. */
 async function polluted<T>(vars: Record<string, string>, f: () => T | Promise<T>): Promise<T> {
@@ -69,4 +72,32 @@ test('#846 spawn with no env (holdFlock): perl loads no module named by PERL5OPT
   const held = await polluted({ PERL5OPT: '-MWL846Canary', PERL5LIB: dir }, () => holdFlock(lock, 'shared'));
   await held.release();
   assert.equal(existsSync(mark), false, 'the lock holder ran no code named by a prototype key');
+});
+
+test("#846 round 2: the setup check's Worker (checkSetupOffThread) never takes its env from Object.prototype.env", async () => {
+  // A stand-in Worker records the options it is given, so no real probe (gh, claude, the service manager) runs here.
+  // Node's Worker reads `options.env`; with no own env on the options, that is Object.prototype.env (measured, #883 review).
+  const wt = createRequire(import.meta.url)('node:worker_threads') as Record<string, unknown>;
+  const real = wt.Worker;
+  const seen: Record<string, unknown>[] = [];
+  wt.Worker = class extends EventEmitter {
+    constructor(_file: unknown, options: Record<string, unknown>) {
+      super();
+      seen.push(options);
+    }
+  };
+  syncBuiltinESMExports();
+  try {
+    const env = await polluted({ env: { WL846_CANARY: 'from-the-prototype' } as unknown as string }, () => {
+      void checkSetupOffThread({} as Parameters<typeof checkSetupOffThread>[0], { cache: new Map() });
+      assert.equal(seen.length, 1, 'one worker started');
+      return seen[0]!.env as Record<string, unknown> | undefined;
+    });
+    assert.ok(env, 'the worker is given an environment');
+    assert.equal(Object.hasOwn(env, 'WL846_CANARY'), false, "the worker's environment is not the prototype's");
+    assert.equal(env.PATH, process.env.PATH, "the worker's environment is the engine's own");
+  } finally {
+    wt.Worker = real;
+    syncBuiltinESMExports();
+  }
 });

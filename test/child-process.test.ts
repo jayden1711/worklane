@@ -16,7 +16,8 @@ import { join, relative } from 'node:path';
 import { test } from 'node:test';
 import { promisify } from 'node:util';
 import ts from 'typescript';
-import { childEnvOf, execFile, execFileSync, spawn, spawnSync } from '../src/os/child-process.js';
+import { SHARE_ENV, Worker } from 'node:worker_threads';
+import { childEnvOf, execFile, execFileSync, spawn, spawnSync, startWorker } from '../src/os/child-process.js';
 import { ownEnv } from '../src/os/own-env.js';
 import { repoRoot } from './helpers.js';
 
@@ -50,6 +51,8 @@ const FORMS: Record<string, () => Promise<Report>> = {
   'execFileSync, no env': async () => read(execFileSync(NODE, ['-e', REPORT], { encoding: 'utf8' })),
   'execFileSync, a spread env': async () => read(execFileSync(NODE, ['-e', REPORT], { encoding: 'utf8', env: { ...process.env, WL846_KEEP: 'k' } })),
   'execFileSync, options where the arguments go': async () => read(execFileSync(NODE, { input: REPORT, encoding: 'utf8' })),
+  'execFileSync, null options (Node reads them as none)': async () => read(execFileSync(NODE, ['-e', REPORT], null as unknown as undefined)),
+  'execFile, null options and a callback': () => new Promise((done, fail) => void execFile(NODE, ['-e', REPORT], null, (e, out) => (e ? fail(e) : done(read(out))))),
   'spawn, no env': () => spawned(spawn(NODE, ['-e', REPORT])),
   'spawn, a spread env': () => spawned(spawn(NODE, ['-e', REPORT], { env: { ...process.env, WL846_KEEP: 'k' } })),
   'execFile, args and a callback': () => new Promise((done, fail) => void execFile(NODE, ['-e', REPORT], (e, out) => (e ? fail(e) : done(read(out))))),
@@ -127,6 +130,29 @@ test('#846: the other options reach Node as given (cwd, encoding, input), and a 
   assert.equal(codeOf(() => spawnSync(NODE, [], bad)), codeOf(() => nodeCp.spawnSync(NODE, [], bad)));
   assert.equal(codeOf(() => spawnSync(NODE, [], bad)), 'ERR_INVALID_ARG_TYPE');
   assert.equal(codeOf(() => execFileSync(NODE, 'not args' as unknown as string[])), codeOf(() => nodeCp.execFileSync(NODE, 'not args' as unknown as string[])));
+  // #883 round 2: null options are refused by spawn and spawnSync, as Node refuses them (execFile* read null as none).
+  const none = null as unknown as nodeCp.SpawnSyncOptions;
+  assert.equal(codeOf(() => nodeCp.spawnSync(NODE, ['-e', ''], none)), 'ERR_INVALID_ARG_TYPE', "Node's own answer");
+  assert.equal(codeOf(() => spawnSync(NODE, ['-e', ''], none)), 'ERR_INVALID_ARG_TYPE', 'spawnSync, null options');
+  assert.equal(codeOf(() => spawn(NODE, ['-e', ''], none as nodeCp.SpawnOptions)), codeOf(() => nodeCp.spawn(NODE, ['-e', ''], none as nodeCp.SpawnOptions)), 'spawn, null options');
+});
+
+test('#883 round 2: an own env key set to undefined still opts out of NODE_V8_COVERAGE, as with Node', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'wl846-cov-'));
+  const had = Object.hasOwn(process.env, 'NODE_V8_COVERAGE');
+  const was = process.env.NODE_V8_COVERAGE;
+  const SEES = "process.stdout.write(String(Object.hasOwn(process.env, 'NODE_V8_COVERAGE')))";
+  process.env.NODE_V8_COVERAGE = dir;
+  try {
+    const optOut = { env: { WL846_KEEP: 'k', NODE_V8_COVERAGE: undefined }, encoding: 'utf8' as const };
+    assert.equal(nodeCp.spawnSync(NODE, ['-e', SEES], optOut).stdout, 'false', "Node's own answer");
+    assert.equal(spawnSync(NODE, ['-e', SEES], optOut).stdout, 'false', 'the opt-out holds');
+    const kept = { env: { WL846_KEEP: 'k' }, encoding: 'utf8' as const };
+    assert.equal(spawnSync(NODE, ['-e', SEES], kept).stdout, nodeCp.spawnSync(NODE, ['-e', SEES], kept).stdout, 'without it, as Node');
+  } finally {
+    if (had) process.env.NODE_V8_COVERAGE = was;
+    else delete process.env.NODE_V8_COVERAGE;
+  }
 });
 
 test("#846: a spy on node:child_process's exports still sees each spawn (the module reads the live export per call)", () => {
@@ -149,12 +175,47 @@ test("#846: a spy on node:child_process's exports still sees each spawn (the mod
   assert.deepEqual({ ...options.env }, { WL846_KEEP: 'k' });
 });
 
+/** A worker (eval'd code) that posts what it sees: booleans and a digest only, never a variable's value. */
+const WORKER_REPORT = `const e = process.env; require('node:worker_threads').parentPort.postMessage({ canary: Object.hasOwn(e, ${JSON.stringify(CANARY)}), path: typeof e.PATH === 'string', digest: require('node:crypto').createHash('sha256').update(JSON.stringify(Object.keys(e).sort().map((k) => [k, e[k]]))).digest('hex') })`;
+type WorkerReport = { canary: boolean; path: boolean; digest: string };
+function reported(w: Worker): Promise<WorkerReport> {
+  return new Promise((done, fail) => {
+    w.once('message', (m: WorkerReport) => done(m));
+    w.once('error', fail);
+  });
+}
+
+test('#883 round 2: a Worker started through the module never takes its env from Object.prototype', async () => {
+  const fromProto = await polluted({ env: { [CANARY]: 'from-the-prototype' } }, () => reported(startWorker(WORKER_REPORT, { eval: true })));
+  assert.deepEqual([fromProto.canary, fromProto.path], [false, true], 'no env given: the engine\'s own, not Object.prototype.env');
+  const raw = await polluted({ env: { [CANARY]: 'from-the-prototype' } }, () => reported(new Worker(WORKER_REPORT, { eval: true })));
+  assert.deepEqual([raw.canary, raw.path], [true, false], "Node's own Worker takes the prototype's env whole (why startWorker exists; Node 22, measured)");
+  const given = await polluted({ [CANARY]: 'from-the-prototype' }, () => reported(startWorker(WORKER_REPORT, { eval: true, env: { ...process.env } })));
+  assert.equal(given.canary, false, 'a given env: own variables only');
+});
+
+test('#883 round 2: with a clean prototype a Worker gets what it got before; SHARE_ENV still shares', async () => {
+  const mine = await reported(startWorker(WORKER_REPORT, { eval: true }));
+  const node = await reported(new Worker(WORKER_REPORT, { eval: true }));
+  assert.equal(mine.digest, node.digest, 'no env: the same environment as Node gives');
+  assert.equal(mine.digest, digest(process.env));
+  const w = startWorker("process.env.WL846_SHARED = '1'; require('node:worker_threads').parentPort.postMessage(0)", { eval: true, env: SHARE_ENV });
+  await new Promise((done) => w.once('message', done));
+  try {
+    assert.equal(process.env.WL846_SHARED, '1', 'SHARE_ENV: the worker shares the engine\'s environment, as asked');
+  } finally {
+    delete process.env.WL846_SHARED;
+  }
+});
+
 test('childEnvOf: a fresh null-prototype copy of the own variables, in order; undefined ones left out; an OwnEnv works', async () => {
   const source: NodeJS.ProcessEnv = { B: '2', A: '1', GONE: undefined };
   const env = await polluted({ [CANARY]: 'x' }, () => childEnvOf(source));
   assert.equal(Object.getPrototypeOf(env), null);
   assert.notEqual(env, source);
-  assert.deepEqual(Object.keys(env), ['B', 'A']);
+  // An own undefined stays (#883 round 2): Node leaves it out of the child, and reads it as an opt-out (NODE_V8_COVERAGE).
+  assert.deepEqual(Object.keys(env), ['B', 'A', 'GONE']);
+  assert.equal(env.GONE, undefined);
   assert.equal(env[CANARY], undefined);
   assert.deepEqual(Object.keys(childEnvOf(Object.create({ INHERITED: '1' }) as NodeJS.ProcessEnv)), [], 'any prototype, not only Object.prototype');
   assert.deepEqual({ ...childEnvOf(ownEnv({ X: 'x' })) }, { X: 'x' }, 'an OwnEnv snapshot');
@@ -165,12 +226,17 @@ test('childEnvOf: a fresh null-prototype copy of the own variables, in order; un
 // ---- The lint (a backstop beside the module): only src/os/child-process.ts reaches node:child_process for a value. ----
 
 const MODULE = 'src/os/child-process.ts';
-const SPECIFIERS = new Set(['child_process', 'node:child_process']);
+const SPECIFIERS = new Set(['child_process', 'node:child_process', 'cluster', 'node:cluster']);
+/** worker_threads: a worker's own side (parentPort, workerData) is fine; starting one (Worker) goes through MODULE. */
+const WORKER_SPECIFIERS = new Set(['worker_threads', 'node:worker_threads']);
 /** Node's internal bindings that start a process without child_process. */
 const BINDINGS = new Set(['spawn_sync', 'process_wrap']);
 type Finding = { file: string; line: number; what: string };
 
-/** Every place in `files` (path -> text) but the module itself that reaches child_process for a value. */
+/** The name an import or export specifier takes from its module (`Worker` in `Worker as W`). */
+const takes = (s: ts.ImportSpecifier | ts.ExportSpecifier) => (s.propertyName ?? s.name).text;
+
+/** Every place in `files` (path -> text) but the module itself that reaches child_process, cluster or a Worker for a value. */
 function childProcessReach(files: Map<string, string>): Finding[] {
   const out: Finding[] = [];
   for (const [file, text] of files) {
@@ -182,12 +248,20 @@ function childProcessReach(files: Map<string, string>): Finding[] {
         if (!n.importClause?.isTypeOnly) at(n, `imports ${n.moduleSpecifier.text}: start a process through ${MODULE} (import type is fine)`);
         return;
       }
-      if (ts.isExportDeclaration(n) && n.moduleSpecifier && ts.isStringLiteral(n.moduleSpecifier) && SPECIFIERS.has(n.moduleSpecifier.text)) {
+      if (ts.isImportDeclaration(n) && ts.isStringLiteral(n.moduleSpecifier) && WORKER_SPECIFIERS.has(n.moduleSpecifier.text)) {
+        const c = n.importClause;
+        const spec = n.moduleSpecifier.text;
+        if (!c || c.isTypeOnly) return;
+        if (c.name || (c.namedBindings && ts.isNamespaceImport(c.namedBindings))) at(n, `imports ${spec} whole: start a Worker through ${MODULE}'s startWorker`);
+        else if (c.namedBindings?.elements.some((e) => !e.isTypeOnly && takes(e) === 'Worker')) at(n, `imports Worker from ${spec}: start it through ${MODULE}'s startWorker`);
+        return;
+      }
+      if (ts.isExportDeclaration(n) && n.moduleSpecifier && ts.isStringLiteral(n.moduleSpecifier) && (SPECIFIERS.has(n.moduleSpecifier.text) || WORKER_SPECIFIERS.has(n.moduleSpecifier.text))) {
         if (!n.isTypeOnly) at(n, `re-exports ${n.moduleSpecifier.text}: only ${MODULE} reaches it`);
         return;
       }
       if (ts.isImportEqualsDeclaration(n)) at(n, 'import = require(…): import a module statically');
-      if (ts.isStringLiteralLike(n) && SPECIFIERS.has(n.text)) at(n, `${JSON.stringify(n.text)}: only ${MODULE} names child_process`);
+      if (ts.isStringLiteralLike(n) && (SPECIFIERS.has(n.text) || WORKER_SPECIFIERS.has(n.text))) at(n, `${JSON.stringify(n.text)}: only ${MODULE} names it for a value`);
       if (ts.isStringLiteralLike(n) && BINDINGS.has(n.text)) at(n, `${JSON.stringify(n.text)}: an internal binding that starts a process past ${MODULE}`);
       ts.forEachChild(n, visit);
     };
@@ -231,5 +305,15 @@ test('#846 backstop: the lint finds each way around the module (fixtures, never 
   assert.deepEqual(found("import type { ChildProcess } from 'node:child_process';"), [], 'a type-only import is fine');
   assert.deepEqual(found("export type { ChildProcess } from 'node:child_process';"), [], 'a type-only re-export is fine');
   assert.deepEqual(found("import { spawn } from './os/child-process.js';"), []);
+  // #883 round 2: a Worker reads Object.prototype.env when its options set none, so it starts through the module too.
+  assert.deepEqual(found("import { Worker } from 'node:worker_threads';"), ['imports Worker from node:worker_threads']);
+  assert.deepEqual(found("import { Worker as W, isMainThread } from 'worker_threads';"), ['imports Worker from worker_threads']);
+  assert.deepEqual(found("import * as wt from 'node:worker_threads';"), ['imports node:worker_threads whole']);
+  assert.deepEqual(found("import wt from 'node:worker_threads';"), ['imports node:worker_threads whole']);
+  assert.deepEqual(found("export { Worker } from 'node:worker_threads';"), ['re-exports node:worker_threads']);
+  assert.deepEqual(found("const wt = await import('node:worker_threads');"), ['"node:worker_threads"']);
+  assert.deepEqual(found("import { parentPort, workerData } from 'node:worker_threads';"), [], "a worker's own side is fine");
+  assert.deepEqual(found("import type { Worker } from 'node:worker_threads';"), [], 'a type-only import is fine');
+  assert.deepEqual(found("import cluster from 'node:cluster';"), ['imports node:cluster']);
   assert.deepEqual(childProcessReach(new Map([[MODULE, "import * as cp from 'node:child_process';"]])), [], 'the module itself');
 });

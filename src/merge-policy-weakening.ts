@@ -75,6 +75,7 @@ export const CHECK_TABLES: readonly CheckTable[] = [
   { path: 'test/slot-path.test.ts', table: 'MAKER_ONLY', kind: 'never-shrink' },
   { path: 'test/child-process.test.ts', table: 'SPECIFIERS', kind: 'never-shrink' },
   { path: 'test/child-process.test.ts', table: 'BINDINGS', kind: 'never-shrink' },
+  { path: 'test/child-process.test.ts', table: 'WORKER_SPECIFIERS', kind: 'never-shrink' },
   { path: 'test/add-project.test.ts', table: 'NAMES_BAD', kind: 'never-shrink' },
   { path: 'test/add-project.test.ts', table: 'REPOS_BAD', kind: 'never-shrink' },
   { path: 'test/instance-name.test.ts', table: 'BAD_SHAPE', kind: 'never-shrink' },
