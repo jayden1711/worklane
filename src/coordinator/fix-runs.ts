@@ -1,7 +1,7 @@
 // CI fix runs and conflict fix runs on the harness's own PRs.
 import { localDoneWhen } from '../testrun/local.js';
 import type { Coordinator } from '../coordinator.js';
-import { spawnSync } from 'node:child_process';
+import { spawnSync } from '../os/child-process.js';
 import { randomBytes } from 'node:crypto';
 import { BRAND } from '../brand.js';
 import type { ReviewConfig } from '../config/schema.js';

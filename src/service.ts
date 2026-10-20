@@ -3,7 +3,7 @@
 import { PINS_FILE } from './experiments/store.js';
 import { AUTOMATIONS_FILE, AutomationsPolicy } from './automations/schema.js';
 import { githubGet } from './automations/github.js';
-import { execFileSync } from 'node:child_process';
+import { execFileSync } from './os/child-process.js';
 import { readFileSync, statSync } from 'node:fs';
 import { checkRepoScope } from './github-scope.js';
 import { appBotIdentity, installationTokens } from './github-app.js';

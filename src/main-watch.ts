@@ -31,7 +31,7 @@
 // The required_checks a commit is judged by are the ones in force when it landed: config.yaml as committed at its
 // first parent, read with git. Not the config loaded at startup: the clone's working tree isn't updated as the default
 // branch moves, so a check dropped since would still be required of every later merge, and never report.
-import { spawnSync } from 'node:child_process';
+import { spawnSync } from './os/child-process.js';
 import { createHash, randomBytes } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, renameSync } from 'node:fs';
 import { dirname, join } from 'node:path';

@@ -4,7 +4,7 @@
 // and it checks them with these detectors), `doctor` (one line per step) and the dashboard's first-run page
 // (GET /api/first-run). A detector only looks: it runs read-only commands (`claude auth status`, `gh auth status`,
 // `git rev-parse`, the service manager's status) and reads files; it never changes anything.
-import { spawnSync } from 'node:child_process';
+import { spawnSync } from './os/child-process.js';
 import { Worker } from 'node:worker_threads';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';

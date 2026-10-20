@@ -2,7 +2,7 @@
 // time. Local mode writes that engine's path into the repo's hooks and, later, into the coordinator's service, so
 // a cached copy won't do: like scripts/bootstrap.sh, init installs the engine under the prefix (~/.local; no root,
 // no build, no install scripts) from the very package npx is running, then hands the walk over to that install.
-import { spawn, spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from './os/child-process.js';
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { delimiter, join, sep } from 'node:path';

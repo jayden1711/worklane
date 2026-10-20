@@ -2,7 +2,7 @@
 // They are root-owned, so an instance changes them only through the machine helper, which sudo
 // lets each coordinator user run with exactly these arguments (scripts/setup/machine-helper.sh).
 // The helper validates again and logs every change; this side refuses bad values before asking.
-import { execFileSync } from 'node:child_process';
+import { execFileSync } from './os/child-process.js';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { BRAND } from './brand.js';

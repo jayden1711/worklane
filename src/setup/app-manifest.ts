@@ -19,7 +19,7 @@
 // Key material never reaches a log, an event, an ask, a response other than the runner's single collection, or an
 // error message: errors name the step and GitHub's status, never a body.
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
-import { spawn } from 'node:child_process';
+import { spawn } from '../os/child-process.js';
 import { existsSync, readFileSync } from 'node:fs';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { join } from 'node:path';
