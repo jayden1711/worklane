@@ -10,7 +10,8 @@ import { createHash } from 'node:crypto';
 import { acknowledgement, measureMain, remoteTip } from '../src/auto-merge-resume.js';
 import { BRAND } from '../src/brand.js';
 import type { CommitCheck, PullRequest } from '../src/backlog/types.js';
-import type { Role } from '../src/dashboard-auth.js';
+import type { Role, RoleOf } from '../src/dashboard-auth.js';
+import { RESUME_ROLE_LOOKUPS_PER_PASS } from '../src/coordinator/merge-flow.js';
 import { clearAutoMergeStop, protectionState, startDashboard } from '../src/dashboard.js';
 import { EventLog } from '../src/events/log.js';
 import type { EventPayload } from '../src/events/types.js';
@@ -513,6 +514,93 @@ test('resume (#776 round 2): a forged request resumes nothing: the ack must pass
   assert.equal(of(w.f, 'merge.resume_ignored').length, ignored.length);
   w.f.log.append('merge.resume_requested', { stop, file, ack: good }, 'example-owner', 'human');
   await watchMerges(w);
+  assert.ok(!existsSync(stopFile(w.f)));
+  assert.match(of<EventPayload<'merge.resumed'>>(w.f, 'merge.resumed').at(-1)!.detail, /^@example-owner resumed auto-merge from the dashboard, acknowledging/);
+});
+
+/** The coordinator's role lookups, counted; with `down`, each fails as an unreachable GitHub would. */
+const countRoles = (w: ReturnType<typeof world>) => {
+  const d = (w.c as unknown as { d: { roleOf?: RoleOf } }).d;
+  const real = d.roleOf!;
+  const s = { calls: [] as string[], down: false };
+  d.roleOf = async (login, o) => {
+    s.calls.push(login);
+    if (s.down) throw new Error('GitHub 502 reading the permission');
+    return real(login, o);
+  };
+  return s;
+};
+const stopKey = (w: ReturnType<typeof world>) => ({ stop: f776Last(w, 'merge.stopped').id, file: createHash('sha256').update(readFileSync(stopFile(w.f), 'utf8')).digest('hex') });
+/** The coordinator's resume clock set `ms` past the log's last event (a fixed time, from the log, not the wall clock). */
+const later = (w: ReturnType<typeof world>, ms: number) => {
+  const t = Date.parse(w.f.log.read(0).at(-1)!.ts) + ms;
+  (w.c as unknown as { resumeNow: () => number }).resumeNow = () => t;
+};
+
+test('resume (#776 round 3): owner lookups are bounded: only the latest request counts (the rest superseded, once), one lookup per login per pass', async () => {
+  const w = world();
+  await w.watch(2);
+  const tip = redMainStop(w);
+  w.f.backlog.setChecks(tip, failing(15));
+  const key = stopKey(w);
+  for (let i = 0; i < 40; i++) w.f.log.append('merge.resume_requested', { ...key, ack: null }, 'example-owner', 'human');
+  const roles = countRoles(w);
+  await watchMerges(w);
+  assert.equal(roles.calls.length, 1, `40 requests from one owner: one lookup (${roles.calls.length})`);
+  assert.equal(of<EventPayload<'merge.resume_ignored'>>(w.f, 'merge.resume_ignored').filter((i) => /^superseded by request /.test(i.why)).length, 39, 'the older 39 superseded, logged once');
+  assert.equal(of(w.f, 'merge.main_measured').length, 1);
+  // The next passes: within RESUME_MEASURE_MS nothing is looked up; after it, one lookup again (one request pending).
+  await watchMerges(w);
+  assert.equal(roles.calls.length, 1);
+  later(w, 61_000);
+  await watchMerges(w);
+  assert.equal(roles.calls.length, 2);
+  assert.equal(of(w.f, 'merge.resume_ignored').length, 39, 'nothing superseded twice');
+});
+
+test('resume (#776 round 3): requests across stops and many logins look up at most RESUME_ROLE_LOOKUPS_PER_PASS a pass, and only for the stop in force', async () => {
+  const w = world();
+  await w.watch(2);
+  // Requests for three earlier stops (each superseded by a newer stop): never looked up.
+  for (let k = 0; k < 3; k++) {
+    redMainStop(w);
+    w.f.log.append('merge.resume_requested', { ...stopKey(w), ack: null }, `older-${k}`, 'human');
+  }
+  const tip = redMainStop(w);
+  w.f.backlog.setChecks(tip, failing(16));
+  const key = stopKey(w);
+  for (let i = 0; i < 10; i++) w.f.log.append('merge.resume_requested', { ...key, ack: null }, `someone-${i}`, 'human');
+  const roles = countRoles(w);
+  await watchMerges(w);
+  assert.equal(roles.calls.length, RESUME_ROLE_LOOKUPS_PER_PASS, `capped at ${RESUME_ROLE_LOOKUPS_PER_PASS}: ${roles.calls.join(', ')}`);
+  assert.ok(!roles.calls.some((l) => l.startsWith('older-')), 'no lookup for an earlier stop');
+  await watchMerges(w);
+  assert.equal(roles.calls.length, 2 * RESUME_ROLE_LOOKUPS_PER_PASS, 'the next pass goes on, within the cap');
+  assert.ok(existsSync(stopFile(w.f)));
+  assert.equal(of(w.f, 'merge.resumed').length, 0);
+});
+
+test("resume (#776 round 3): a role lookup that fails isn't \"not an owner\": the request waits (recorded), is retried, and resumes once GitHub answers", async () => {
+  const w = world();
+  await w.watch(2);
+  const tip = redMainStop(w);
+  w.f.backlog.setChecks(tip, failing(17));
+  const request = w.f.log.append('merge.resume_requested', { ...stopKey(w), ack: 'the fix PR is ready; merging it needs auto-merge' }, 'example-owner', 'human');
+  const roles = countRoles(w);
+  roles.down = true;
+  await watchMerges(w);
+  assert.ok(existsSync(stopFile(w.f)), 'not resumed while the role is unknown');
+  assert.equal(of(w.f, 'merge.resume_ignored').length, 0, 'not ignored');
+  const deferred = of<EventPayload<'merge.resume_deferred'>>(w.f, 'merge.resume_deferred').at(-1)!;
+  assert.equal(deferred.request, request.id);
+  assert.match(deferred.why, /couldn't check @example-owner's owner role \(GitHub 502 reading the permission\); will retry/);
+  // Not retried within RESUME_MEASURE_MS; retried after it, and GitHub answering owner resumes it.
+  await watchMerges(w);
+  assert.equal(roles.calls.length, 1);
+  roles.down = false;
+  later(w, 61_000);
+  await watchMerges(w);
+  assert.equal(roles.calls.length, 2);
   assert.ok(!existsSync(stopFile(w.f)));
   assert.match(of<EventPayload<'merge.resumed'>>(w.f, 'merge.resumed').at(-1)!.detail, /^@example-owner resumed auto-merge from the dashboard, acknowledging/);
 });
