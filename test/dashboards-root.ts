@@ -40,7 +40,9 @@ CONSOLE_SHELL="$T/libexec/worklane-console-shell" CONSOLE_SUDOERS="$T/sudoers.d/
     'bin',
     'sudo',
     [
-      '[ "$1" = -u ] && shift 2',
+      '[ "$1" = -u ] && { echo "sudo -u $2 $3" >> ' + JSON.stringify(calls) + '; shift 2; }',
+      // The removed Siri files are deleted as their owner (dashboards.sh): the stand-in deletes them, as this user.
+      '[ "$1 $2" = "rm -rf" ] && exec "$@"',
       '[ "$1 $2" = "test -r" ] || exit 1',
       'case "$3" in',
       '  */dashboard-token) exit 0 ;;',
@@ -57,6 +59,9 @@ CONSOLE_SHELL="$T/libexec/worklane-console-shell" CONSOLE_SUDOERS="$T/sudoers.d/
   const state = join(T, 'home', 'wl-alpha', '.local', 'state', 'worklane', 'instances', 'alpha', 'state');
   mkdirSync(state, { recursive: true });
   for (const f of ['dashboard-token', 'siri-gateway-token', 'hooks-gateway-token']) writeFileSync(join(state, f), 'x');
+  // What an older install's Siri left (removed, #743): its device token store; a rerun deletes it and the gateway token.
+  mkdirSync(join(state, 'siri'));
+  writeFileSync(join(state, 'siri', 'devices.json'), '{"devices":[]}');
   const signin = join(T, 'home', 'wl-dash', '.config', 'dashboard-signin');
   const hubState = join(T, 'home', 'wl-dash', '.local', 'state', 'worklane', 'dashboard-hub');
   for (const d of [signin, hubState]) mkdirSync(d, { recursive: true });

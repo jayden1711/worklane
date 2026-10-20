@@ -17,7 +17,6 @@ import { AlertsIntake } from './alerts.js';
 import { GitHubBacklog } from '../backlog/github.js';
 import type { Backlog } from '../backlog/types.js';
 import { GitHubIssuesIntake } from './github.js';
-import { VoiceIntake } from './voice.js';
 import type { ReadOnlyQuery } from './bug-store.js';
 import { DiscordIntake, type DiscordOptions } from './discord.js';
 import { LinearIntake } from './linear.js';
@@ -262,12 +261,6 @@ export function intakeForInstance(o: {
       const backlog = o.issues ?? new GitHubBacklog(o.repo, o.githubToken, fetch, o.githubApi);
       sources.push(new GitHubIssuesIntake({ backlog, stateDir: o.stateDir, config: () => config()?.github ?? first.config.github }).source());
     }
-  }
-  // Voice: ideas an owner spoke and confirmed on the dashboard, or told Siri (src/siri/), left in the instance's state
-  // (src/intake/voice.ts). One source for both: the same inbox, never trusted.
-  if (first.config.voice.enabled || first.config.siri.enabled) {
-    if (!o.stateDir) say('intake: voice or siri is on but the instance has no state directory; spoken ideas are not taken');
-    else sources.push(new VoiceIntake({ stateDir: o.stateDir }).source());
   }
   return { config, sources, name, ...(roleOf ? { roleOf } : {}), start, stop };
 }

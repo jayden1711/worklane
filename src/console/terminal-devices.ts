@@ -1,6 +1,6 @@
 // Which Tailscale device a request comes from, and whether it's one the owner allowed for machine changes (the hub's
 // machine devices, dashboards.sh --machine-devices: Tailscale tags such as tag:owner-laptop, and/or MagicDNS node
-// names). The Siri and hooks gateways identify devices the same way. Fails closed: an empty list, an unknown device,
+// names). The hooks gateway identifies devices the same way. Fails closed: an empty list, an unknown device,
 // or a device that can't be identified is refused. (The file keeps its name from the owner terminal, removed in #742,
 // which used the same check.)
 //
@@ -32,7 +32,7 @@ export interface Device {
   tags: string[];
   /** Its Tailscale address. */
   ip: string;
-  /** Tailscale's stable node id (whois Node.StableID), when Tailscale gives one: a Siri token binds to it. */
+  /** Tailscale's stable node id (whois Node.StableID), when Tailscale gives one: the hooks gateway locks a device out by it. */
   stableId?: string;
 }
 

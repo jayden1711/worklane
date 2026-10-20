@@ -102,26 +102,9 @@ const json = (body: unknown) => ({ responseCode: 200, responseHeaders: [{ name: 
 /** The first-run answer the Settings page lists its setup screens from: six steps with a screen (the live checks take seconds). */
 const FIRST_RUN = { setup: { groups: [{ steps: Array.from({ length: 6 }, (_, i) => ({ id: `step-${i}`, title: `Setup step ${i}`, done: i % 2 === 0, skipped: false, automation: `${BRAND.cli} step ${i}`, fix: { kind: 'action', action: `step-${i}` } })) }] } };
 
-/** A server instance's Siri devices, for its owner: on, none made yet (the card with its name field and button). */
-const SIRI = { enabled: true, server: true, owner: true, createRefused: null, devices: [] };
-
 /** An instance paused on the Claude usage limit, as /api/usage says it. */
 const PAUSED = () => ({ instance: 'example', paused: { since: new Date(Date.now() - 60_000).toISOString(), resetAt: new Date(Date.now() + 3_600_000).toISOString(), source: 'claude', kind: null }, today: { runs: 3, limitHits: 1 }, lastHit: new Date().toISOString() });
 
-/**
- * The browser's on-device speech check (SpeechRecognition.available), answered only when the test says: a recognizer
- * that can recognize on-device once its model is downloaded, as Chrome reports it (the answer with the Download button).
- */
-const HELD_ON_DEVICE = `(() => {
-  let release;
-  const answered = new Promise((ok) => (release = ok));
-  window.__releaseOnDevice = () => release();
-  class Recognition { start() {} stop() {} abort() {} addEventListener() {} removeEventListener() {} }
-  Recognition.prototype.processLocally = false;
-  Recognition.available = () => answered.then(() => 'downloadable');
-  Recognition.install = async () => true;
-  window.SpeechRecognition = Recognition;
-})()`;
 
 /** Watches a page's API requests: whether every one but those held has answered, and for a moment. */
 function watchRequests(cdp: Cdp) {
@@ -225,7 +208,7 @@ async function noMoveWhenLast(cdp: Cdp, net: ReturnType<typeof watchRequests>, w
   assert.deepEqual(await js<string[]>(cdp, MOVED), [], `${what} answering last moved controls on screen (was -> now)`);
 }
 
-for (const held of ['/api/instance-settings', '/api/first-run', '/api/siri-devices', 'the on-device speech check'] as const) {
+for (const held of ['/api/instance-settings', '/api/first-run'] as const) {
   test(
     `in a real Chrome: ${held} answering last moves no control on the Settings page, and a link there still opens its page`,
     { timeout: REAL_CHROME_TIMEOUT, skip: webUiSkip(chrome) },
@@ -242,28 +225,16 @@ for (const held of ['/api/instance-settings', '/api/first-run', '/api/siri-devic
       try {
         const cdp = b.cdp;
         await openTab(cdp, d.token, 'example-owner');
-        await cdp.send('Page.addScriptToEvaluateOnNewDocument', { source: HELD_ON_DEVICE });
         const net = watchRequests(cdp);
         // The setup screens' answer is the test's own (six steps), held when it is the one under test.
-        // And the Siri devices card as a server instance shows it (on this checkout it would show nothing).
-        const answers = await intercept(cdp, { '/api/first-run': () => json(FIRST_RUN), '/api/instance-settings': null, '/api/siri-devices': () => json(SIRI) });
-        if (held === 'the on-device speech check') {
-          await cdp.send('Page.navigate', { url: `${d.url}/settings` });
-          await until('the Settings page', async () => js<boolean>(cdp, `!!${q('page-settings')}`), 20_000);
-          // Its answer changes the voice section's own line: the controls right below it are the ones it would move.
-          await noMoveWhenLast(cdp, net, held, null, () => js(cdp, 'window.__releaseOnDevice()'), q('voice-on-device'));
-        } else {
-          answers.hold(held);
-          await cdp.send('Page.navigate', { url: `${d.url}/settings` });
-          await until(`${held} held`, async () => answers.held(held), 20_000);
-          await js(cdp, 'window.__releaseOnDevice()');
-          await noMoveWhenLast(cdp, net, held, held, () => answers.release(held));
-        }
+        const answers = await intercept(cdp, { '/api/first-run': () => json(FIRST_RUN), '/api/instance-settings': null });
+        answers.hold(held);
+        await cdp.send('Page.navigate', { url: `${d.url}/settings` });
+        await until(`${held} held`, async () => answers.held(held), 20_000);
+        await noMoveWhenLast(cdp, net, held, held, () => answers.release(held));
         // Everything shown, the setup screens last.
         await until('every part shown', () => js<boolean>(cdp, `${q('settings-panels')}?.dataset.loaded === 'true'`), 20_000);
         assert.equal(await js<number>(cdp, `document.querySelectorAll('[data-testid="setup-screen"]').length`), 6, 'the six setup screens');
-        assert.ok(await js<boolean>(cdp, `!!${q('voice-install')}`), "the on-device check's answer is shown");
-        assert.ok(await js<boolean>(cdp, `!!${q('settings-siri')}`), 'the Siri devices card is shown');
         // A link, pressed where it is (it must hold still), opens its page.
         await pressSteady(cdp, q('settings-first-run-link'), 'settings-first-run-link');
         await until('the first-run page', () => js<boolean>(cdp, `location.pathname === '/first-run'`), 5_000);

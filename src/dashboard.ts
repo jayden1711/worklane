@@ -50,8 +50,7 @@ import { ATTACHMENT_EXTENSIONS, AttachmentError, attachmentCaps, attachmentsFor,
 import { mayAnswer, type Backlog } from './backlog/types.js';
 import { FIRST_TASK_TEMPLATE, FirstTaskError, firstTaskBody, ignoredIssues, READY_LABEL, type IgnoredIssue } from './first-task.js';
 import { answerDecision, approvalsAt, auditWrite } from './decide.js';
-import { BY_VOICE, VOICE_MAX_CHARS, voiceClaim, voiceExclusion, voiceRefusal } from './voice.js';
-import { submitVoiceIntake, voiceIntakeRefusal } from './intake/voice.js';
+import { removeSiriLeftovers, VOICE_REMOVED, voiceRequestRefusal } from './voice-removed.js';
 import { readRun, runsForIssue } from './run-record.js';
 import { decisionDetail, decisionDiff, prSections } from './decision-detail.js';
 import { emergencyStop, slotStatus, type EmergencyStop } from './slots.js';
@@ -62,7 +61,7 @@ import { testSlotCap, testSlotsHeld } from './testrun/slots.js';
 import { FULL_RUN_LOCK } from './testrun/run.js';
 import { healthView } from './health.js';
 import { firstTaskCard } from './first-task-progress.js';
-import { pauseOf, usageView } from './usage-limit.js';
+import { usageView } from './usage-limit.js';
 import { authHoldsOf, signinFailedView } from './claude-auth-failure.js';
 import { requestAuthRecheck } from './claude-auth-recheck.js';
 import { ConsoleError, liveRuns, sendMessage, stopRun } from './console.js';
@@ -122,18 +121,13 @@ import { applySourceIntake, credDef, credStates, intakeSourcesSummary, planSourc
 import { applyIntake, botView, DISCORD_CREDENTIAL, DiscordSetupError, discordSetupView, discordTokenRule, planIntake, listingRunner, tokenAsk, tokenState, type BotView, type DiscordListingStandIn } from './intake/discord-setup.js';
 import { INTAKE_FILE } from './intake/config.js';
 import { checkRootStep } from './console/root-steps.js';
-import { handleProfileRoute, isProfileRoute, refuseUnidentified } from './claude-profiles-routes.js';
-import { accountSet, profilesView } from './claude-profiles.js';
-import { CLAUDE_ACCOUNT_DIR, claudeAccountGate, claudeAccountView, mayViewClaudeAccount, requestClaudeAccount } from './claude-account.js';
+import { accountSet, CLAUDE_ACCOUNT_DIR, claudeAccountGate, claudeAccountView, mayViewClaudeAccount, requestClaudeAccount } from './claude-account.js';
 import { ClaudeCredentialRefused, CREDENTIAL_ROUTE_GONE, refuseClaudeCredential, REMOVED_CREDENTIAL_PATHS } from './claude-credential-guard.js';
 import { isTailscaleAction, mayViewTailscale, noTailscaleView, requestTailscale, stepsStamp, TAILSCALE_DIR, tailscaleStatus, tailscaleView, type TailscaleStatus } from './tailscale-setup.js';
 import { asksFrom, ASK_EVENTS } from './console/asks.js';
 import { incidentsView } from './watchdog/view.js';
 import { effectiveRouting, ROUTING } from './routing.js';
 import { refuseKeyInUrl } from './dashboard-key-url.js';
-import { handleSiri, siriGatewayToken } from './siri/instance.js';
-import { siriDevicesRoute } from './siri/manage.js';
-import { RateLimits } from './siri/tokens.js';
 
 /**
  * What the Settings page shows: the config's shape and choices, read-only.
@@ -208,7 +202,7 @@ export interface DashboardOptions {
    * none when unset, so every person the hub names is refused.
    */
   roleOf?: RoleOf;
-  /** The instance's intake.yaml (in its home): voice intake is taken only when it turns voice on. None: no voice intake. */
+  /** The instance's intake.yaml (in its home); nothing here reads it since voice intake was removed (#743). */
   intakeFile?: string;
   /** The instance this server serves (recorded in the audit); none for a checkout. */
   instance?: string;
@@ -1044,13 +1038,11 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
     return Promise.reject(e);
   }
   const token = dashboardToken(opts.stateDir);
-  // Siri (src/siri/): a server instance's own gateway token, for the hub's Siri gateway only; never the dashboard token.
-  const siriToken = opts.instance ? siriGatewayToken(opts.stateDir, token) : null;
-  const siriLimits = new RateLimits();
+  if (opts.instance) removeSiriLeftovers(opts.stateDir);
   // Webhook automations (src/automations/webhook.ts): the instance's own hooks gateway token, for the hub's hooks
-  // gateway only; never the dashboard's or Siri's token.
+  // gateway only; never the dashboard's token.
   // Made for every instance (dashboards.sh waits for it), whether or not it has automations yet.
-  const hooksToken = opts.instance ? hooksGatewayToken(opts.stateDir, [token, ...(siriToken ? [siriToken] : [])]) : null;
+  const hooksToken = opts.instance ? hooksGatewayToken(opts.stateDir, [token]) : null;
   const webDir = opts.webDir ?? DEFAULT_WEB_DIR;
   const viewsFile = join(opts.stateDir, 'dashboard-views.json');
   /**
@@ -1336,7 +1328,6 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
     // Folds of the events alone, kept until the log changes (the projection's "today" is part of its key).
     const today = localDay();
     const p = snap.memo(`project ${today}`, (ev) => project(ev, today));
-    const posted = snap.memo('plan.posted', (ev) => ev.filter((e) => e.type === 'plan.posted').map((e) => e.payload as EventPayload<'plan.posted'>));
     const slots = slotStatus(opts.slotsDir);
     const mayLand = approvals();
     const full = {
@@ -1352,8 +1343,7 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
       ...p,
       // The Activity feed: a viewer's is built from the allowlisted events only, as /api/events gives them.
       activity: isWriter(who.role) ? p.activity : snap.memo('viewerActivity', viewerActivity),
-      // For an owner, why voice may never approve each one (src/voice.ts), so the page says so before anyone speaks.
-      decisions: p.decisions.map((d) => ({ ...d, canAnswer: mayAnswerKind(d.kind, who.role, mayLand), ...(isOwner(who.role) ? { voiceRefused: voiceExclusion(d, posted) } : {}) })),
+      decisions: p.decisions.map((d) => ({ ...d, canAnswer: mayAnswerKind(d.kind, who.role, mayLand) })),
       // Whether this viewer may read intake reports, so the page asks for them only when it will get them.
       canReadIntake: mayReadIntake(who.role),
       // Whether this viewer may read the throughput panel, so the page asks for it only when it will get it.
@@ -1410,19 +1400,13 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
   const server = createServer(async (req, res) => {
     const url = new URL(req.url ?? '/', 'http://127.0.0.1');
     // Every route, the page itself included: a key in the URL is refused, never accepted.
-    if (refuseKeyInUrl(url, res, [token, ...(siriToken ? [siriToken] : []), ...(hooksToken ? [hooksToken] : [])])) return;
+    if (refuseKeyInUrl(url, res, [token, ...(hooksToken ? [hooksToken] : [])])) return;
     try {
-      // Siri's three routes (src/siri/instance.ts), before and instead of the dashboard's own auth: only the Siri
-      // gateway token works there, and nothing under /api/siri falls through to any other route.
       // A webhook delivery (src/automations/webhook.ts), before and instead of the dashboard's own auth: only the hooks
       // gateway token works there, and nothing under /api/hooks falls through to any other route.
       if (url.pathname === '/api/hooks' || url.pathname.startsWith('/api/hooks/')) {
         if (!hooksToken || !opts.automationsFile) return json(res, 404, { error: 'not found' });
         return void (await handleHook(req, res, url, { stateDir: opts.stateDir, home: dirname(opts.automationsFile), automationsFile: opts.automationsFile, eventsDb: opts.eventsDb, gatewayToken: hooksToken, instance: opts.instance ?? '' }));
-      }
-      if (url.pathname === '/api/siri' || url.pathname.startsWith('/api/siri/')) {
-        if (!siriToken) return json(res, 404, { error: 'not found' });
-        return void (await handleSiri(req, res, url, { stateDir: opts.stateDir, instance: opts.instance ?? null, ...(opts.intakeFile ? { intakeFile: opts.intakeFile } : {}), eventsDb: opts.eventsDb, gatewayToken: siriToken, limits: siriLimits }));
       }
       // No key asked or given: `dashboard --detach` checks this is its checkout's dashboard by a proof of the key over
       // its nonce and the port it reached (src/dashboard-proof.ts). The key itself is never sent to a port (#448).
@@ -1457,11 +1441,6 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           const s = sessionOf(req, opts.instance ?? opts.cfg.project.project.name);
           return json(res, 200, { login: s?.login ?? null, role: s?.role ?? null, via: id.via });
         }
-        // The agents' Claude account profiles (src/claude-profiles-routes.ts): a refusal is audited even with no session.
-        if (req.method === 'POST' && isProfileRoute(url.pathname) && 'status' in id && id.status === 403) {
-          const r = refuseUnidentified(req, { eventsDb: opts.eventsDb, instance: opts.instance ?? opts.cfg.project.project.name }, url.pathname, id);
-          return json(res, r.status, r.body);
-        }
         if ('status' in id) return json(res, id.status, { error: id.error });
         const who = id;
         const isOwnerHere = isOwner(who.role);
@@ -1480,10 +1459,6 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           })
         )
           return;
-        if (req.method === 'POST' && isProfileRoute(url.pathname)) {
-          const r = await handleProfileRoute(req, url, who, { eventsDb: opts.eventsDb, instance: opts.instance ?? opts.cfg.project.project.name, repo, accountDir: opts.claudeAccountDir ?? CLAUDE_ACCOUNT_DIR, ...(opts.machineOwnersFile ? { ownersFile: opts.machineOwnersFile } : {}), audit, readBody });
-          return json(res, r.status, r.body);
-        }
         // Accept a commit as a bootstrap merge (src/main-watch.ts acceptMerge): an admin's only, like clearing the stop,
         // and every attempt is audited, refusals too (a viewer's as well, so this comes before the viewers' refusal).
         if (url.pathname === '/api/main-watch/accept' && req.method === 'POST') {
@@ -1945,7 +1920,7 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           if (!mayReadThroughput(who.role)) return json(res, 403, { error: writersOnly('the metrics are', who) });
           return json(res, 200, { ...deliveryMetrics(eventCache.all(), { budgetS: opts.cfg.project.metrics.slow_test_budget_s }), definitions: METRICS_DEFINITIONS });
         }
-        if (url.pathname === '/api/value') { const v = valueRoute({ method: req.method ?? '', role: who.role, login: who.login, events: eventCache.all(), query: url.searchParams }); return json(res, v.status, v.body); } // #708: owners and writers only
+        if (url.pathname === '/api/value') { const v = valueRoute({ method: req.method ?? '', role: who.role, login: who.login, events: eventCache.all(), query: url.searchParams, policyFile: opts.policyFile ?? null }); return json(res, v.status, v.body); } // #708: owners and writers only
         // Flaky tests (src/flaky.ts): what is quarantined, why, its issue and sightings, and the flake rate. The owners'
         // and writers' to read; only an owner clears a test from quarantine, audited.
         // Harness evals (src/harness-evals/): each run's success rate, cost, wall-clock and human interventions, and the
@@ -2667,8 +2642,8 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           return json(res, 200, { ok: true, pending: true, request: r });
         }
         // The agents' Claude account (src/claude-account.ts): the machine owners' panel. Each agent user's account and
-        // expiry, and a switch a root admin runs, followed from claude-account.sh's own progress file. Hidden from
-        // everyone else. It shows status only: it never takes a Claude credential (issue #711).
+        // expiry, and what the removed account profiles left on the machine (#736). Hidden from everyone else. It shows
+        // status only: it never takes a Claude credential (issue #711).
         const accountRequester = { login: who.login, breakGlass: who.via === 'break-glass', deviceOk: who.deviceOk };
         const accountDir = opts.claudeAccountDir ?? CLAUDE_ACCOUNT_DIR;
         const ownersOpt = opts.machineOwnersFile ? { ownersFile: opts.machineOwnersFile } : {};
@@ -2678,10 +2653,10 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           // everAllowed: the same gate, asked as if from an allowed device; false means no device helps (the role), so
           // the page draws no buttons for this person instead of disabled ones (#587).
           const everAllowed = claudeAccountGate({ role: who.role, requester: { ...accountRequester, deviceOk: true } }, ownersOpt) === null;
-          return json(res, 200, { ...claudeAccountView({ dir: accountDir, events, who: { role: who.role, requester: accountRequester }, instance: opts.instance ?? opts.cfg.project.project.name, ...ownersOpt }), everAllowed, ...profilesView(accountDir, Date.now(), opts.instance ?? opts.cfg.project.project.name, pauseOf(eventCache.all())) });
+          return json(res, 200, { ...claudeAccountView({ dir: accountDir, events, who: { role: who.role, requester: accountRequester }, instance: opts.instance ?? opts.cfg.project.project.name, ...ownersOpt }), everAllowed });
         }
-        // Refresh the status: a machine request the coordinator runs through the machine helper. A switch takes a
-        // Claude credential, so it is a root admin's at a root shell, never asked for here (issue #711).
+        // Refresh the status: a machine request the coordinator runs through the machine helper. Nothing else: the engine
+        // manages no Claude account (#736), and never takes a Claude credential (issue #711).
         if (url.pathname === '/api/machine/claude-account' && req.method === 'POST') {
           const body = ((await readBody(req)) ?? {}) as { action?: unknown };
           const action = String(body.action ?? '').slice(0, 20);
@@ -2778,52 +2753,24 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           return json(res, 200, { ok: true });
         }
         if (url.pathname === '/api/decide' && req.method === 'POST') {
-          const body = (await readBody(req)) as { id?: string; answer?: string; voice?: unknown };
-          // Said by voice (src/voice.ts): the claim only adds checks, here (an owner, a focused and visible tab) and in
-          // the decide path (approve only, never what voice may not approve). Every voice refusal is audited too.
-          const claim = voiceClaim(body);
+          const body = (await readBody(req)) as { id?: string; answer?: string };
+          // Said by voice (a tab still running the removed voice client): refused, never taken as a click (#743).
+          const byVoice = voiceRequestRefusal(body);
+          if (byVoice) return json(res, 410, { error: byVoice });
           const id = String(body.id ?? '');
-          const refusedByVoice = (status: number, error: string) => (audit(who, 'voice.refused', { action: 'decision.answered', id, why: error, by: BY_VOICE }), json(res, status, { error }));
-          if (claim.voice) {
-            const no = voiceRefusal(who, claim, repo);
-            if (no) return refusedByVoice(403, no);
-          }
           const log = new EventLog(opts.eventsDb);
           let r: ReturnType<typeof answerDecision>;
           try {
             // The one decide path (src/decide.ts): a chat-thread answer goes through it too.
-            r = answerDecision(log, { id, answer: String(body.answer ?? ''), who, instance: opts.instance ?? null, repo, approvals: approvals(), ...(claim.voice ? { voice: true } : {}) });
+            r = answerDecision(log, { id, answer: String(body.answer ?? ''), who, instance: opts.instance ?? null, repo, approvals: approvals() });
           } finally {
             log.close();
           }
-          if (!r.ok) return claim.voice ? refusedByVoice(r.status, r.error) : json(res, r.status, { error: r.error });
+          if (!r.ok) return json(res, r.status, { error: r.error });
           return json(res, 200, { ok: true, event: r.event });
         }
-        // A spoken idea the owner confirmed (src/intake/voice.ts): left for the coordinator's intake, which takes it
-        // through the same triage and approval as a Discord message. Voice only, owners only, focused and visible.
-        if (url.pathname === '/api/voice/intake' && req.method === 'POST') {
-          const body = (await readBody(req)) as { text?: unknown; voice?: unknown };
-          const claim = voiceClaim(body);
-          if (!claim.voice) return json(res, 400, { error: 'this route takes only spoken ideas; file anything else on GitHub or through the Ask panel' });
-          const no = voiceRefusal(who, claim, repo) ?? voiceIntakeRefusal(opts.intakeFile);
-          if (no) {
-            audit(who, 'voice.refused', { action: 'intake.voice', why: no, by: BY_VOICE });
-            return json(res, 403, { error: no });
-          }
-          const text = typeof body.text === 'string' ? body.text.trim() : '';
-          if (!text) return json(res, 400, { error: 'nothing was said' });
-          if (text.length > VOICE_MAX_CHARS) return json(res, 400, { error: `the idea is over ${VOICE_MAX_CHARS} characters` });
-          const { id: voiceId } = submitVoiceIntake({ stateDir: opts.stateDir, text, by: who.login });
-          // INVARIANT: the audit names the idea by its id and length only; its words stay in the instance's state.
-          audit(who, 'intake.voice', { id: voiceId, chars: text.length, by: BY_VOICE });
-          return json(res, 200, { ok: true, id: voiceId });
-        }
-        // Settings, Siri devices (src/siri/manage.ts): the list, a new token (shown once), revoke and unbind.
-        if (url.pathname === '/api/siri-devices' || url.pathname.startsWith('/api/siri-devices/')) {
-          const body = req.method === 'POST' ? ((await readBody(req)) as Record<string, unknown>) : {};
-          const a = siriDevicesRoute(who, req.method ?? 'GET', url.pathname, body && typeof body === 'object' ? body : {}, { stateDir: opts.stateDir, instance: opts.instance ?? null, ...(opts.intakeFile ? { intakeFile: opts.intakeFile } : {}), audit: (action, detail) => audit(who, action, detail) });
-          if (a) return json(res, a.status, a.body);
-        }
+        // The removed voice intake's route (#743): refused, nothing taken.
+        if (url.pathname.startsWith('/api/voice/')) return json(res, 410, { error: VOICE_REMOVED });
         if (url.pathname === '/api/views') {
           if (req.method === 'GET') return json(res, 200, existsSync(viewsFile) ? JSON.parse(readFileSync(viewsFile, 'utf8')) : []);
           if (req.method === 'PUT') {

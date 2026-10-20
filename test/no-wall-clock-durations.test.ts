@@ -17,7 +17,6 @@ const ALLOWED: Record<string, number> = {
   'test/avatars.test.ts': 1,
   'test/browser-run.test.ts': 1,
   'test/ci-runner-setup.test.ts': 1,
-  'test/claude-account-script.test.ts': 1,
   'test/cli-agents.test.ts': 1,
   'test/github-app.test.ts': 1,
   'test/instance-records.test.ts': 1,

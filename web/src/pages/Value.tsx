@@ -1,5 +1,6 @@
 // The value report (GET /api/value, src/value-report.ts, #708): PRs the engine merged on its own vs held, why it held
-// them by kind, what became of the held ones, the review hours saved (an estimate, with its formula and constants),
+// them by kind, what became of the held ones, the review hours saved (an estimate, with its formula and constants, and
+// whether those are the owner's or the defaults),
 // and what went wrong after merges. The instance's owners and writers only: anyone else gets no panel and no request.
 import { useState } from 'react';
 import { useView, type State } from '../api';
@@ -90,6 +91,11 @@ export function ValueReportView({ r }: { r: ValueReport }) {
         <div className="mt-1 font-mono">{r.hoursSaved.formula}</div>
         <div className="mt-1 tabular-nums">
           base_min = {c.base_min}, per_100_lines_min = {c.per_100_lines_min}, cap_min = {c.cap_min}
+        </div>
+        <div className="mt-1" data-testid="value-constants-from">
+          {r.hoursSaved.constantsFrom === 'policy'
+            ? "Set by the instance's owner in policy.yaml (value_report.hours_estimate)."
+            : "The engine's defaults, guesses until calibrated; an owner sets them in policy.yaml (value_report.hours_estimate)."}
         </div>
         <div className="mt-1">{r.hoursSaved.label}</div>
       </Card>
