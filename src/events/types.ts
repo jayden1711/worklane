@@ -684,6 +684,8 @@ export const EventSchemas = {
   'merge.resume_requested': z.strictObject({ stop: z.number().int().positive().nullable(), file: z.string().regex(/^[0-9a-f]{64}$/).nullable(), ack: z.string().refine(isRecordedAck, 'not an acknowledgement: a typed reason of at least 10 visible characters, nothing that prints blank').nullable() }),
   /** A resume request the coordinator won't act on, and why (not a human owner's, an ack that isn't one, ...). */
   'merge.resume_ignored': z.strictObject({ request: z.number().int().positive(), why: z.string() }),
+  /** A resume request still pending because who asked couldn't be checked (the role lookup failed); retried later. */
+  'merge.resume_deferred': z.strictObject({ request: z.number().int().positive(), why: z.string() }),
   /**
    * The coordinator measured the default branch's tip for a stop it caused (src/auto-merge-resume.ts): the required
    * checks under the pinned-source verdict. `tip` null: unreadable. `request`: the resume request it answers, if any.

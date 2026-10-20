@@ -50,6 +50,12 @@ import { mainNow, mayResume, stopWaitsForGreen, type MainState } from '../auto-m
 /** How often a pending resume request has main measured again while it isn't green (#776): each look is recorded. */
 export const RESUME_MEASURE_MS = 60_000;
 
+/**
+ * At most this many owner-role lookups (GitHub's permission API) in one pass over resume requests (#776 round 3): one
+ * per login, and only for the stop in force, so the cost stays constant however many requests are logged.
+ */
+export const RESUME_ROLE_LOOKUPS_PER_PASS = 3;
+
 export abstract class MergeFlow extends FixRuns {
   /** Defined in a later part (or in Coordinator); declared here for the calls in this one. */
   protected abstract combinedGate(...args: Parameters<Coordinator['combinedGate']>): ReturnType<Coordinator['combinedGate']>;
@@ -154,6 +160,8 @@ export abstract class MergeFlow extends FixRuns {
   protected readonly mergePass = new MergePass(() => this.d.cfg.tests.land.parallel_merges);
   /** The merge train's clock for deferrals (tests move it). */
   protected trainNow: () => number = () => Date.now();
+  /** The clock resume requests are re-measured and retried by, against their events' times (tests move it). */
+  protected resumeNow: () => number = () => Date.now();
 
   // ---------------------------------------------------------------- PR batches
 
@@ -984,20 +992,28 @@ export abstract class MergeFlow extends FixRuns {
    * whose actor is an owner of the repo now, looked up fresh as the dashboard looks them up (roleOf; with none, the
    * instance's default owner), with an acknowledgement, if any, that passes the dashboard's own validator. Fail closed.
    */
-  private async requestRefusal(e: StoredEvent): Promise<string | null> {
-    if (e.source !== 'human') return `not a person's request (source ${e.source}, actor ${e.actor})`;
+  private async requestCheck(e: StoredEvent, pass: { roles: Map<string, Promise<{ role: Role | null } | { error: string }>>; left: number }): Promise<'ok' | 'wait' | { ignore: string } | { defer: string }> {
+    if (e.source !== 'human') return { ignore: `not a person's request (source ${e.source}, actor ${e.actor})` };
     const ack = (e.payload as EventPayload<'merge.resume_requested'>).ack;
-    if (ack !== null && !isRecordedAck(ack)) return 'its acknowledgement is not a typed reason the dashboard accepts';
-    let owner = false;
-    if (!this.d.roleOf) owner = e.actor.toLowerCase() === this.d.cfg.project.owners.default.toLowerCase();
-    else {
-      try {
-        owner = isOwner(await this.d.roleOf(e.actor, { fresh: true }));
-      } catch {
-        owner = false;
-      }
+    if (ack !== null && !isRecordedAck(ack)) return { ignore: 'its acknowledgement is not a typed reason the dashboard accepts' };
+    const roleOf = this.d.roleOf;
+    if (!roleOf) return e.actor.toLowerCase() === this.d.cfg.project.owners.default.toLowerCase() ? 'ok' : { ignore: `@${e.actor} is not the instance's default owner` };
+    // At most one lookup per login per pass, and RESUME_ROLE_LOOKUPS_PER_PASS in all (#776 round 3: bounded).
+    const key = e.actor.toLowerCase();
+    let looked = pass.roles.get(key);
+    if (!looked) {
+      if (pass.left <= 0) return 'wait';
+      pass.left--;
+      looked = roleOf(e.actor, { fresh: true, strict: true }).then(
+        (role) => ({ role }),
+        (err: unknown) => ({ error: String((err as Error)?.message ?? err).replace(/\s+/g, ' ').slice(0, 300) }),
+      );
+      pass.roles.set(key, looked);
     }
-    return owner ? null : `@${e.actor} is not an owner of ${this.d.cfg.project.project.repo} now`;
+    const r = await looked;
+    // A lookup that failed is no answer: the request stays pending and is retried (round 3). Only a lookup that answered non-owner ignores it.
+    if ('error' in r) return { defer: `couldn't check @${e.actor}'s owner role (${r.error}); will retry` };
+    return isOwner(r.role) ? 'ok' : { ignore: `@${e.actor} is not an owner of ${this.d.cfg.project.project.repo} now` };
   }
 
   /**
@@ -1020,20 +1036,29 @@ export abstract class MergeFlow extends FixRuns {
     const pending = named.filter((e) => !ignored.has(e.id));
     const latest = pending.at(-1);
     if (!latest) return;
-    const hasAck = pending.some((e) => (e.payload as EventPayload<'merge.resume_requested'>).ack !== null);
     const looked = this.d.log.read(latest.id, ['merge.main_measured']).at(-1);
-    if (!hasAck && looked && Date.now() - Date.parse(looked.ts) < RESUME_MEASURE_MS) return;
-    // Who asked is checked at the moment it is acted on; anything else is logged as ignored and resumes nothing.
-    const valid: StoredEvent[] = [];
-    for (const e of pending) {
-      const why = await this.requestRefusal(e);
-      if (why) this.emit('merge.resume_ignored', { request: e.id, why });
-      else valid.push(e);
+    if ((latest.payload as EventPayload<'merge.resume_requested'>).ack === null && looked && this.resumeNow() - Date.parse(looked.ts) < RESUME_MEASURE_MS) return;
+    // Only the latest request a human owner made counts (round 3): walked newest first, who asked is checked when it
+    // is acted on, within the pass's lookup bound. A request that isn't one is logged as ignored, with why; one whose
+    // owner role couldn't be read waits (logged, retried every RESUME_MEASURE_MS); the older ones are superseded.
+    const deferred = new Map(this.d.log.read(since, ['merge.resume_deferred']).map((e) => [(e.payload as EventPayload<'merge.resume_deferred'>).request, e] as const));
+    const pass = { roles: new Map<string, Promise<{ role: Role | null } | { error: string }>>(), left: RESUME_ROLE_LOOKUPS_PER_PASS };
+    let asked: StoredEvent | undefined;
+    for (const e of [...pending].reverse()) {
+      const before = deferred.get(e.id);
+      if (before && this.resumeNow() - Date.parse(before.ts) < RESUME_MEASURE_MS) return;
+      const c = await this.requestCheck(e, pass);
+      if (c === 'wait') return;
+      if (c === 'ok') {
+        asked = e;
+        break;
+      }
+      if ('defer' in c) return void this.emit('merge.resume_deferred', { request: e.id, why: c.defer });
+      this.emit('merge.resume_ignored', { request: e.id, why: c.ignore });
     }
-    const acked = valid.filter((e) => (e.payload as EventPayload<'merge.resume_requested'>).ack !== null).at(-1);
-    const asked = acked ?? valid.at(-1);
     if (!asked) return;
-    const ack = acked ? (acked.payload as EventPayload<'merge.resume_requested'>).ack : null;
+    for (const e of pending) if (e.id < asked.id) this.emit('merge.resume_ignored', { request: e.id, why: `superseded by request ${asked.id}` });
+    const ack = (asked.payload as EventPayload<'merge.resume_requested'>).ack;
     const key = { stop: stopId, file: file.id };
     const v = await mayResume({ gated: true, ack, measure: () => this.measuredMain(asked.id, key) });
     // A new stop (or a resume) logged, or the stop file changed, while main was measured: this request was for the stop before it.
