@@ -304,7 +304,11 @@ Images (`download.ts` `pullImage`): only `docker pull <name>@sha256:<digest>` an
 
 A row without one of the required fields, a field of the wrong type, an instance id twice, text that isn't UTF-8 or a file with no rows refuses the whole file. The rows file must be a 0600 regular file of the bench user, never a link.
 
-**The rule** (`selection.rule`, `sha256-rank-v1`): each row's rank is the sha256 of `<seed>:<instance id>` as hex, ascending. The first 50, in rank order, are `t01` to `t50`. The smoke round runs `t01` to `t04`, and the baseline runs all 50. A row's rank depends only on its own id and the seed, so the file's order, and any row ranked after the 50th, change nothing chosen. A rule never changes; a new one gets a new name. The seed (`selection.seed`, 20261018 in `pins.json`) is recorded before the rows are, so it can't have been picked for the tasks it chooses.
+**The rule** (`selection.rule`, `sha256-rank-v1`): each row's rank is the sha256 of `<seed>:<instance id>` as hex, ascending. The first 50, in rank order, are `t01` to `t50`. The smoke round runs `t01` to `t04`, and the baseline runs all 50. A row's rank depends only on its own id and the seed, so the file's order, and any row ranked after the 50th, change nothing chosen. A rule never changes; a new one gets a new name. The seed is `selection.seed`, 20261018 in `pins.json`.
+
+**Was the seed picked for the tasks it chooses?** Not that anyone can prove (**inferred**). The rule reads only the instance ids and the seed, and SWE-bench Verified's ids are public. So anyone holding them could try seeds offline and commit one that chooses tasks they like. Each nearby seed chooses a different smoke set (measured in review: seed + 1, + 2 and + 3).
+- The evidence against it: the seed is the date the owner approved the bench, and the commit that records it comes before any rows digest is pinned (the digest is still null).
+- The residual: that is evidence, not proof. A test pins the exact seed and rule (`test/bench-select.test.ts`), so any change to either changes a test, and the owner reviews it.
 
 **Pinning the rows.** Run, as the bench user:
 
@@ -315,9 +319,13 @@ While `rows_sha256` is null it refuses and prints the rows' canonical digest. Ch
 - writes `manifest.json` into the store (0600, through a verified temporary file): each key with its instance id, and the dataset revision, rule, seed and rows digest it came from. Run again with the same pins, it keeps the same manifest. It never replaces a different one, since grading maps each run's keys through it: move the old one aside to select again;
 - checks the smoke's image references (below), and prints the smoke run's plan.
 
-It prints keys, counts and digests only. Its one output sink also withholds any word shaped like an instance id or an instance image name, whoever writes it.
+It prints keys, counts and digests only. As a backstop, every line the `bench` command prints first has any word shaped like an instance id or an instance image name withheld, whoever writes it. That happens before anything splits or cuts the word, and in the word's decoded, NFKC-normalised and look-alike spellings. What no word-level match can catch is not defended by it: an id split across a real space, an id in base64, or one spread over two lines. The messages being built from keys is what covers those.
 
-**Image references** live in the store, in `images.json`: `{"<instance id>": "<name>@sha256:<digest>", ...}`, a 0600 file of the bench user. Producing it is the owner's step (or task setup's, still to come). A task's reference is taken only when:
+**Image references** live in the store, in `images.json`: `{"<instance id>": "<name>@sha256:<digest>", ...}`, a 0600 file of the bench user.
+- **Producing it belongs to task setup (slice 4), still to come.** It will be a command that reads the ids from the store's manifest or rows and writes the file. Until then, `bench select` reports the images line as FAIL.
+- **Never write it by hand in a shell:** no instance id or image name typed into a command, an editor's command line, or a `docker` command. The bench user's shell history is readable by the agents (**inferred**).
+
+A task's reference is taken only when:
 - it is `<name>@sha256:<digest>` with no tag, port or option;
 - its digest is one of `pins.json` `image_digests`;
 - its name is the task's own: its last part is, or ends in `.`, the instance id in lower case with `__` written as `_1776_`. That is SWE-bench's image naming (**inferred**; a name that doesn't follow it is refused, failing closed);
@@ -330,8 +338,12 @@ It prints keys, counts and digests only. Its one output sink also withholds any 
 The 4-task smoke on current main, in this order. Each step needs the one before it:
 1. **Setup and preflight** (steps 1 to 6): `bench preflight` passes as the bench user. Done by the owner on 2026-10-18; confirm with the preflight.
 2. **Pins and download** (step 7): the owner records the dataset's revision and sha256 and the image digests; `bench download`.
-3. **Rows and selection** (step 8): the rows file, its digest recorded, `images.json`, then `bench select` passes every line. It prints the plan: `t01` to `t04`, at most $40 for the round, $15 per task.
-4. **Task setup** (still to come): each task's base tree, a local clone with no upstream history, a local bare remote; images pulled with `pullImage`.
+3. **Rows and selection** (step 8): the rows file and its digest recorded, then `bench select` writes the manifest. It prints the plan: `t01` to `t04`, at most $40 for the round, $15 per task. Its images line stays FAIL until step 4 writes `images.json`.
+4. **Task setup** (slice 4, still to come):
+   - `images.json`, written from the store, never typed;
+   - then `bench select` passes every line;
+   - each task's base tree, a local clone with no upstream history, and a local bare remote;
+   - images pulled with `pullImage`. It reads the digest back for the pinned name, so an image whose digest isn't the one its own repository serves fails there (**inferred**). `loadTasks` checks only that an image's name is its task's own, and that its digest is pinned.
 5. **The engine's runner seam and the test relay** (still to come; #701, Lane C and Lane A): the engine's check and test commands run through the bench's `TaskRunner`.
 6. **`bench run --tasks smoke --spend <usd>`** (still to come): with `--spend` at most 40. Its first model call is the sandbox confirmation. It stops cleanly at any usage limit, with no retry.
 7. **Grading** of the exported patches in fresh containers, then the aggregate. If the round averaged over $8 per task, the baseline needs the owner's re-approval.

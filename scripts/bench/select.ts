@@ -23,8 +23,8 @@
 // The run (loadTasks) re-reads the rows, re-derives the selection, refuses a manifest that differs, and takes each
 // task's image reference from the store's images file, through pins.ts pinnedImage (a pinned digest, no tag), only
 // when the name is the task's own. Nothing takes an instance id, a seed or a count as an argument.
-import { createHash } from 'node:crypto';
-import { closeSync, constants, fstatSync, lstatSync, openSync, readSync, type Stats } from 'node:fs';
+import { createHash, randomBytes } from 'node:crypto';
+import { closeSync, constants, fstatSync, linkSync, lstatSync, openSync, readSync, unlinkSync, type Stats } from 'node:fs';
 import { join } from 'node:path';
 import { isMode, type Mode } from './caps.js';
 import { alreadyThere, writeVerified } from './download.js';
@@ -249,8 +249,8 @@ export interface SelectionSummary {
 }
 
 /**
- * `bench select`: the pinned selection's manifest into the store (0600, through a verified temporary file), unless the
- * same one is there. Refuses (throws), writing nothing, when computeSelection does, or when a different manifest (or a
+ * `bench select`: the pinned selection's manifest into the store (0600, a verified file under a fresh name, then
+ * link()ed to the manifest's name, which never replaces anything), unless the same one is there. Refuses (throws), writing nothing, when computeSelection does, or when a different manifest (or a
  * link) is already at its name: grading maps each run's keys through it, so it is never replaced.
  */
 export function writeSelection(layout: BenchLayout, uid: number, pins: Pins): SelectionSummary {
@@ -269,7 +269,18 @@ export function writeSelection(layout: BenchLayout, uid: number, pins: Pins): Se
       throw new Error(`the store already has a different manifest (${f}): grading maps each run's keys through it, so it is never replaced; move it aside to select again`);
     }
   } else {
-    writeVerified(f, layout.heldOut, Buffer.from(c.text), hex(c.text), uid);
+    // By design, never over anything (#884 round 2): the verified file is made under a fresh name, then linked to the
+    // manifest's name, which fails if anything (a file, a link, a dangling link) has appeared there since the lstat.
+    const fresh = join(layout.heldOut, `.${MANIFEST}.${randomBytes(8).toString('hex')}.new`);
+    writeVerified(fresh, layout.heldOut, Buffer.from(c.text), hex(c.text), uid);
+    try {
+      linkSync(fresh, f);
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === 'EEXIST') throw new Error(`${f} appeared while bench select ran: refused, never replaced; look at it, then move it aside`);
+      throw e;
+    } finally {
+      unlinkSync(fresh);
+    }
     written = true;
   }
   heldOutCheck(layout, uid);

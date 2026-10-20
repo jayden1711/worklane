@@ -282,6 +282,8 @@ test('select: the manifest is written only from the pinned rows, as a 0600 file 
   assert.equal(m.rows_sha256, canonicalSha(ROWS_TEXT));
   assert.deepEqual(m.tasks.map((t) => t.instance_id), ranked(IDS, SEED).slice(0, 50));
   assert.equal((await import('node:fs')).lstatSync(f).mode & 0o7777, 0o600);
+  assert.deepEqual((await import('node:fs')).readdirSync(b.layout.heldOut).filter((n) => n.startsWith('.')), [], 'no temporary file left behind');
+  assert.equal((await import('node:fs')).lstatSync(f).nlink, 1, 'the fresh name is gone: the manifest has one link');
   // Again, the same pins: the same manifest, kept.
   const before = readFileSync(f, 'utf8');
   assert.equal(writeSelection(b.layout, uid, pins).written, false);
@@ -491,6 +493,60 @@ test("adversarial pass: the sink's backstop withholds the whole word, through qu
   const out: string[] = [];
   assert.equal(main(['example​__proj-4242'], { out: (l: string) => out.push(l) }), 2);
   assert.doesNotMatch(out.join('\n'), /__proj|_1776_/, 'nothing of the tail through the real sink');
+});
+
+test('round 2: through main(), the backstop runs before any space or cut: zero-width, soft hyphen, bidi marks and a long argument', async () => {
+  const { main } = await cli();
+  const cases: [string, string][] = [
+    ['example__pr​oj-4242', 'a zero-width space inside the repo'],
+    ['example_​_proj-4242', 'a zero-width space between the underscores'],
+    ['example__proj-​4242', 'a zero-width space before the digits'],
+    ['example__pr­oj-4242', 'a soft hyphen inside'],
+    ['example__pr‏oj-4242', 'a right-to-left mark inside'],
+    ['swebench/sweb.eval.x86_64.example_17​76_proj-4242', 'an image name with a zero-width space in 1776'],
+    [`${'x'.repeat(190)}${FAKE_ID}`, 'an argument longer than the 200-character cut'],
+  ];
+  for (const [arg, why] of cases) {
+    for (const argv of [[arg], ['select', arg]]) {
+      const out: string[] = [];
+      assert.equal(main(argv, { out: (l: string) => out.push(l) }), 2, why);
+      const text = out.join('\n');
+      assert.doesNotMatch(text, /proj|_1776_|_17 76_|example__/, `${why} (${argv[0] === 'select' ? 'select <arg>' : 'unknown command'}): ${text.split('\n')[0]}`);
+    }
+  }
+});
+
+test('round 2: look-alike and encoded spellings are withheld through main(): fullwidth, Cyrillic, other digits, percent, backslash and entity escapes', async () => {
+  const { main, withholdTasks, WITHHELD } = await cli();
+  const cases: [string, string][] = [
+    ['example＿＿proj-4242', 'fullwidth underscores'],
+    ['example__proj-４２４２', 'fullwidth digits'],
+    ['example__prоj-4242', 'a Cyrillic o'],
+    ['example__proj-٤٢٤٢', 'Arabic-Indic digits'],
+    ['example＿＿prоj-٤٢٤٢', 'fullwidth underscores, a Cyrillic o and Arabic-Indic digits together'],
+    ['example‗‗proj-4242', 'a look-alike underscore NFKC keeps'],
+    ['example%5F%5Fproj-4242', 'percent-escaped underscores'],
+    ['example%255F%255Fproj-4242', 'percent-escaped twice'],
+    ['example\\u005f\\u005fproj-4242', 'backslash-u escapes'],
+    ['example\\x5f\\x5fproj-4242', 'backslash-x escapes'],
+    ['example&#95;&#x5f;proj-4242', 'HTML entities'],
+    ['sweb.eval.x86_64.example%5F1776%5Fproj-4242', 'an escaped image name'],
+  ];
+  for (const [arg, why] of cases) {
+    assert.equal(withholdTasks(arg), WITHHELD, why);
+    const out: string[] = [];
+    assert.equal(main([arg], { out: (l: string) => out.push(l) }), 2, why);
+    assert.doesNotMatch(out.join('\n'), /proj|prоj/, `${why}: ${out[0]}`);
+  }
+  // Words that only look a little like one stay as they are: plain non-ASCII text, a dunder, keys, digests.
+  for (const s of ['日本語の文章', 'café-1', 'def __init__(self)', 't01..t50', `sha256:${sha256('x')}`, '__pycache__']) assert.equal(withholdTasks(s), s, s);
+});
+
+test('round 2: the repo pins this seed and rule: a change to either is a change to this test, which the owner reviews', async () => {
+  const { loadPins } = await pinsMod();
+  const s = loadPins().selection!;
+  assert.equal(s.rule, 'sha256-rank-v1');
+  assert.equal(s.seed, 20261018, 'the seed recorded on 2026-10-20, before any rows digest');
 });
 
 test('bench select: no id, seed or count from the command line, no other user, and the repo pins write nothing', linux, async () => {

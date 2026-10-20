@@ -42,7 +42,7 @@ export const DIGEST = /^sha256:[0-9a-f]{64}$/;
 const HOSTNAME = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/;
 const PATH_PART = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 /** A SWE-bench instance id (owner__repo-1234) or an instance image name (owner_1776_repo-1234). */
-export const TASK_SHAPE =/[A-Za-z0-9.-]__[A-Za-z0-9_.-]+-\d+|_1776_/;
+export const TASK_SHAPE = /[A-Za-z0-9.-]__[A-Za-z0-9_.-]+-\d+|_1776_/;
 /** An image name component, and a registry domain (it has a dot; no port). */
 const COMPONENT = '[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*';
 const DOMAIN = '[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+';
@@ -200,7 +200,7 @@ function selectionPin(s: unknown): SelectionPin | null {
   return new SelectionPin(TOKEN, rule as SelectionRule, seed, rows as string | null);
 }
 
-const TASK_REFUSED ='pins: the file holds something shaped like an instance id or an instance image name: never in the repo (the agents can read it)';
+const TASK_REFUSED = 'pins: the file holds something shaped like an instance id or an instance image name: never in the repo (the agents can read it)';
 
 /** The pins in `text` (a pins file), refused (throws) on anything the schema above doesn't allow. */
 export function parsePins(text: string): Pins {

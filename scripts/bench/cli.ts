@@ -24,8 +24,9 @@
 // bench user only. It takes no argument either: the rule, the seed and the rows' digest come from the pins file, the
 // rows and the images from the store, so no instance id, seed or count is ever typed into a shell (whose history the
 // agents may read). It prints keys, counts and digests, and the smoke run's plan; never an instance id. As a backstop,
-// main()'s one sink withholds every word shaped like an instance id or an instance image name (pins.ts TASK_SHAPE),
-// whoever writes it.
+// scrub(), which every printed line goes through, first withholds every word shaped like an instance id or an instance
+// image name (pins.ts TASK_SHAPE), in any of its decoded, normalised or look-alike spellings (withholdTasks), whoever
+// writes it, before it splits or cuts anything.
 import { realpathSync } from 'node:fs';
 import { userInfo } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -92,9 +93,13 @@ const PATH_VALUE = /^(\/|unix:)/;
  * prefix of the value; this redacts it whatever cut it); every token-shaped string. Email addresses become [email];
  * control and format characters (an ANSI escape's ESC, a bell, a bidi override) a space. Cut to at most `max`
  * characters only after all of that.
+ *
+ * INVARIANT (#884 round 2): first of all, every word shaped like a task is withheld (withholdTasks), on the text as it
+ * came: before anything here turns a format character into a space (which would split the word) or cuts the text (which
+ * would leave a prefix). Every caller's scrub() withholds, not only the sink's.
  */
 export function scrub(text: string, env: NodeJS.ProcessEnv, max = DETAIL_MAX): string {
-  let s = text;
+  let s = withholdTasks(text);
   const values = Object.entries(env)
     .filter(([k, v]) => typeof v === 'string' && v.length >= PIECE_MIN && (SECRET_VAR.test(k) || LOGIN_SWITCH_VAR.test(k.toUpperCase())))
     .map(([, v]) => v as string)
@@ -118,20 +123,64 @@ export const WITHHELD = '[task withheld]';
 
 /** An instance id's tail (`__repo-1234`), whatever comes before it: a word may start there (a space split it off). */
 const TASK_TAIL = /__[A-Za-z0-9_.-]*-\d/;
+const FORMAT = /[\p{Cc}\p{Cf}]/gu;
+const NON_ASCII = /[^\x00-\x7f]/gu;
+
+/** The character with code point `hex` (base 16) or `dec` (base 10), or `?` for one that isn't a code point. */
+const codePoint = (n: number): string => (Number.isInteger(n) && n >= 0 && n <= 0x10ffff ? String.fromCodePoint(n) : '?');
+
+/** `w` with one round of escapes decoded: percent escapes, `\uXXXX`, `\u{X}`, `\xXX`, and `&#N;` / `&#xX;` entities. */
+const unescapeOnce = (w: string): string =>
+  w
+    .replace(/%([0-9A-Fa-f]{2})/g, (_, h: string) => codePoint(parseInt(h, 16)))
+    .replace(/\\u\{([0-9A-Fa-f]{1,6})\}/g, (_, h: string) => codePoint(parseInt(h, 16)))
+    .replace(/\\u([0-9A-Fa-f]{4})/g, (_, h: string) => codePoint(parseInt(h, 16)))
+    .replace(/\\x([0-9A-Fa-f]{2})/g, (_, h: string) => codePoint(parseInt(h, 16)))
+    .replace(/&#[xX]([0-9A-Fa-f]{1,6});?/g, (_, h: string) => codePoint(parseInt(h, 16)))
+    .replace(/&#(\d{1,7});?/g, (_, d: string) => codePoint(parseInt(d, 10)));
 
 /**
- * `text` with every word (between spaces) shaped like an instance id or an instance image name (pins.ts TASK_SHAPE),
- * or holding an instance id's tail, replaced by WITHHELD: the whole word, so no piece of the id's tail is left. Each word
- * is judged with its control and format characters (a zero-width space, say) taken out, as scrub() would show it.
- * main() runs it on every line, before scrub().
+ * The spellings a word is judged in (#884 round 2): as written, and decoded up to three rounds deep; each with its
+ * control and format characters taken out and NFKC-normalised (fullwidth `＿` is `_`); and, where non-ASCII is left,
+ * each such character read as a possible look-alike: all as `_`, all as `-`, all as `a`, all as `0`, and by kind (a
+ * letter as `a`, a digit as `0`, anything else as `_` or as `-`).
+ */
+function spellings(word: string): string[] {
+  const forms = [word];
+  for (let i = 0; i < 3; i++) {
+    const next = unescapeOnce(forms.at(-1)!);
+    if (next === forms.at(-1)) break;
+    forms.push(next);
+  }
+  const out = new Set<string>();
+  for (const f of forms) {
+    const bare = f.replace(FORMAT, '');
+    // Before NFKC too: it can turn one look-alike into several characters (U+2017 is a space and a combining mark).
+    for (const s of [bare, bare.normalize('NFKC').replace(FORMAT, '')]) {
+      out.add(s);
+      if (!/[^\x00-\x7f]/.test(s)) continue;
+      for (const c of ['_', '-', 'a', '0']) out.add(s.replace(NON_ASCII, c));
+      for (const other of ['_', '-']) out.add(s.replace(NON_ASCII, (ch) => (/\p{Nd}/u.test(ch) ? '0' : /[\p{L}\p{M}]/u.test(ch) ? 'a' : other)));
+    }
+  }
+  return [...out];
+}
+
+/** Whether `word` is, in any of its spellings, shaped like an instance id or an instance image name, or holds an id's tail. */
+export function taskShaped(word: string): boolean {
+  return spellings(word).some((s) => TASK_SHAPE.test(s) || TASK_TAIL.test(s));
+}
+
+/**
+ * `text` with every word (between spaces) that is taskShaped replaced by WITHHELD: the whole word, so no piece of it is
+ * left. scrub() runs it first, so every line printed, whoever writes it, goes through it before anything splits or cuts
+ * a word. What no word-level match can catch (an id split across a real space, or base64) is covered only by the
+ * protection by design: the bench's messages are built from keys, never from an instance id.
  */
 export function withholdTasks(text: string): string {
   return text
     .split(/(\s+)/)
-    .map((w) => {
-      const seen = w.replace(/[\p{Cc}\p{Cf}]/gu, '');
-      return TASK_SHAPE.test(seen) || TASK_TAIL.test(seen) ? WITHHELD : w;
-    })
+    .map((w) => (w && !/^\s+$/.test(w) && taskShaped(w) ? WITHHELD : w))
     .join('');
 }
 
@@ -217,14 +266,14 @@ export function smokePlan(keys: readonly string[]): string[] {
     `smoke run plan: tasks ${smoke.join(' ')} (the first ${MODE_TASKS.smoke} of the ${keys.length}; the baseline runs ${keys[0]}..${keys.at(-1)}, with the same rule and seed, and again on each release)`,
     `  caps: at most $${MODE_MAX_USD.smoke} for the round (--spend), $${PER_TASK_MAX_USD} per task; a round averaging over $${REAPPROVE_MEAN_USD} per task needs the owner's re-approval before the baseline`,
     '  the run takes its tasks from the held-out store (the manifest, the rows, the images file): no instance id or image name on any command line',
-    "  still to come before it can run: task setup (slice 4), the engine's runner seam and the test relay (slices 5 and 6, #701), and bench run (slice 7)",
+    "  still to come before it can run: task setup (slice 4: images.json written from the store, never typed; the clones), the engine's runner seam and the test relay (slices 5 and 6, #701), and bench run (slice 7)",
   ];
 }
 
 /** `bench select`: as the bench user, the pinned selection into the held-out store, and the smoke's plan. Its exit code. */
 export function select(d: CliDeps, pins: () => Pins = loadPins): number {
   d.out('bench select (#748): the pinned task selection into the held-out store; no container, no model call, no download');
-  const say = (status: string, name: string, detail: string) => d.out(`  ${status}  ${name.padEnd(9)}  ${scrub(withholdTasks(detail), d.env)}`);
+  const say = (status: string, name: string, detail: string) => d.out(`  ${status}  ${name.padEnd(9)}  ${scrub(detail, d.env)}`);
   let layout: BenchLayout;
   let p: Pins;
   let s: SelectionSummary;
@@ -299,8 +348,8 @@ export function main(argv: readonly string[], deps: Partial<CliDeps> = {}): numb
     ...(deps.host ? { host: deps.host } : {}),
     ...(deps.fetch ? { fetch: deps.fetch } : {}),
     // INVARIANT: the only way out: every line, whoever writes it, is scrubbed on its full text before any cut (#851 round 2),
-    // and has every word shaped like a task withheld first (#748 slice 3).
-    out: (l) => sink(scrub(withholdTasks(l), env, LINE_MAX)),
+    // and has every word shaped like a task withheld first (#748 slice 3; scrub() does that before anything else).
+    out: (l) => sink(scrub(l, env, LINE_MAX)),
   };
   const [command, ...extra] = argv;
   if (command === 'help' || command === '--help') {
