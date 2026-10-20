@@ -2,11 +2,44 @@
 // grades live here, on the host, owner-only (0700 folders, 0600 files), and are never mounted into a container. Its
 // path ends in evals/held-out/, which every agent session is denied anyway (src/hook.ts, HELD_OUT_GLOB), and the
 // agents' sandbox denies it too (agent.ts). It is the only place a task key (t01, ...) meets its instance id.
-import { existsSync, readFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { existsSync, lstatSync, readFileSync } from 'node:fs';
+import { dirname, isAbsolute, join, relative, sep } from 'node:path';
 import { ownerOnlyDir, writeOwnerOnly } from '../../src/os/index.js';
 import type { TaskRow } from './hidden.js';
-import type { BenchLayout } from './paths.js';
+import { realPath, type BenchLayout } from './paths.js';
+
+/**
+ * The held-out store as the run needs it: absent (the pinned download makes it 0700), or a real folder this user owns,
+ * mode exactly 0700 (no group or other access, no setuid, setgid or sticky bit). Every folder from the bench root
+ * (already a real path) down to the store must be a real folder, not a link, whether or not the store is made yet
+ * (#851 round 2): the agents' sandbox denies the store by this path, and whether it would follow a link to deny the
+ * place it names is a guess, so a link anywhere on the way fails closed. Only lstat'ed: nothing in it is read.
+ * The preflight runs it, and `bench download` before it fetches and again before it writes (download.ts).
+ */
+export function heldOutCheck(layout: BenchLayout, uid: number): string {
+  const rel = relative(layout.root, layout.heldOut);
+  if (!rel || rel.startsWith('..') || isAbsolute(rel)) throw new Error(`${layout.heldOut} is not inside the bench root ${layout.root}`);
+  let at = layout.root;
+  for (const part of rel.split(sep)) {
+    at = join(at, part);
+    let st;
+    try {
+      st = lstatSync(at);
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === 'ENOENT') return `${layout.heldOut}: not made yet (the pinned download makes it, 0700)`;
+      throw e;
+    }
+    if (st.isSymbolicLink()) throw new Error(`${at} is a link: every folder down to the held-out store must be a real folder under the bench root`);
+    if (!st.isDirectory()) throw new Error(`${at} is not a folder`);
+    if (at !== layout.heldOut) continue;
+    if (st.uid !== uid) throw new Error(`${layout.heldOut} belongs to uid ${st.uid}, not this user (${uid})`);
+    const mode = st.mode & 0o7777;
+    if (mode !== 0o700) throw new Error(`${layout.heldOut} is mode 0${mode.toString(8)}, not exactly 0700: chmod 700 it (hidden tests and the task map live there)`);
+  }
+  // The walk saw no link; the real path must agree (a link the walk can't see, such as one swapped in since, fails here).
+  if (realPath(layout.heldOut) !== layout.heldOut) throw new Error(`${layout.heldOut} really is ${realPath(layout.heldOut)}: a link on the way`);
+  return `${layout.heldOut}: 0700, this user's, no link on the way`;
+}
 
 const REQUIRED = ['instance_id', 'repo', 'base_commit', 'problem_statement', 'patch', 'test_patch', 'FAIL_TO_PASS', 'PASS_TO_PASS', 'difficulty'] as const;
 
