@@ -234,7 +234,8 @@ test('loopback mode (no https origin yet): the same one-time gate, then the App 
     const first = await s.call('GET', '/', { origin: null });
     assert.equal(first.status, 200);
     assert.match(first.body, /type="password"/, 'the token gate, as with an origin');
-    assert.match(first.body, new RegExp(`waits for screen ${HTTPS_SCREEN}, Tailscale and HTTPS`));
+    // #739: the origin is a choice: your own, or Tailscale (test/server-first-hour.test.ts checks both on the page).
+    assert.match(first.body, new RegExp(`waits for an https origin: your own \\(--public-url\\), or screen ${HTTPS_SCREEN}, Tailscale and HTTPS`));
     // WHY: under no-referrer a browser sends `Origin: null` on the page's own form POST, which fromHere refuses (found in
     // real Chrome by the wizard e2e's walk); same-origin sends this page's origin to itself only.
     assert.equal(first.headers['referrer-policy'], 'same-origin');
@@ -249,7 +250,7 @@ test('loopback mode (no https origin yet): the same one-time gate, then the App 
     const page = await s.call('GET', '/', { cookie: ok.cookie!, origin: null });
     assert.equal(page.status, 200);
     assert.match(page.body, new RegExp(`data-testid="signin-app-needs-https" data-next-screen="${HTTPS_SCREEN}"`));
-    assert.match(page.body, /Screen 7 first: Tailscale and HTTPS/);
+    assert.match(page.body, /An https address first: one of your own, or Tailscale \(screen 7\)/);
     for (const step of ['install', 'up', 'serve']) assert.match(page.body, new RegExp(`sudo bash /opt/e/scripts/setup/tailscale\\.sh ${step}[\n<]`));
     assert.match(page.body, /sudo bash \/opt\/e\/scripts\/bootstrap\.sh --hardened &lt;name&gt; &lt;owner\/repo&gt;/, 'then the install command again');
     assert.doesNotMatch(page.body, /name="owner"|Continue to GitHub/, 'no App form');
