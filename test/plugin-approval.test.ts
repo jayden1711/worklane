@@ -7,6 +7,7 @@ import { type AllowlistEntry, type McpRecord, type PluginRecord, allowlistPath, 
 import { confirm, confirmPlan, ingest, previewPluginServer, readPreview, recordOf, remove, stage, takeFetchSlot, withdraw } from '../src/plugins/root-ops.js';
 import { treeHash } from '../src/plugins/tree.js';
 import { repoRoot } from './helpers.js';
+import { onRealMachine } from './isolate.js';
 
 const me = process.getuid!();
 /** An approved plugin entry's tree (these tests approve plugins only). */
@@ -57,6 +58,7 @@ test('confirm refuses when the previewed files change after staging (fail-withou
   previewed('delta', 'kit');
   const digest = digestFor('delta', 'kit', ['builder']);
   stage({ instance: 'delta', id: 'kit', roles: ['builder'], digest, by: 'wl-x' });
+  onRealMachine(previewDir('delta', 'kit')); // throws unless it is inside this test's system root (#815)
   writeFileSync(join(previewDir('delta', 'kit'), 'tree', 'skills', 'a', 'SKILL.md'), 'swapped');
   assert.throws(() => confirm({ instance: 'delta', id: 'kit', digest, by: 'root', allowlistOwnerUid: me }), /changed after inspection/);
   assert.equal(existsSync(allowlistPath('delta')), false);
@@ -107,6 +109,7 @@ test('the allowlist fails closed: wrong owner, group-writable, another instance,
   previewed('iota', 'kit');
   stageAndConfirm('iota', 'kit');
   const f = allowlistPath('iota');
+  onRealMachine(f); // throws unless it is inside this test's system root (#815)
   assert.throws(() => readAllowlist('iota'), /isn't root's/);
   chmodSync(f, 0o664);
   assert.throws(() => readAllowlist('iota', { ownerUid: me }), /writable by its group/);
