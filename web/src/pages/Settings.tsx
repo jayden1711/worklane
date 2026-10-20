@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 import { getPlugins, useView, type Settings, type ViewerSettings } from '../api';
 import { InstanceSettings } from '../components/InstanceSettings';
 import { navigate } from '../App';
@@ -6,8 +6,6 @@ import { Loading } from '../components/patterns';
 import { Badge, Card, cx } from '../components/ui';
 import { SetupScreens } from '../components/SetupScreens';
 import { Header } from '../components/Header';
-import { VoiceSettings } from '../voice/VoiceSettings';
-import { SiriDevices } from '../components/SiriDevices';
 import { InOrder, type PanelLoaded } from '../in-order';
 
 function Section({ title, children }: { title: string; children: ReactNode }) {
@@ -105,26 +103,15 @@ function RoutingSection({ routes, configDir }: { routes: Route[]; configDir: str
   );
 }
 
-/**
- * A part of the page that is all there at once but for `parts` answers inside it (the voice section's on-device check,
- * the Siri devices): it mounts, so they are asked for, but shows only once every one is in (an in-order panel shows
- * while it waits). `children` gets one callback per answer.
- */
-function HiddenUntil({ parts, onLoaded, children }: { parts: number; onLoaded: PanelLoaded; children: (ready: PanelLoaded[]) => ReactNode }) {
-  const [done, setDone] = useState<ReadonlySet<number>>(() => new Set());
-  const marks = useRef<PanelLoaded[]>([]);
-  for (let i = 0; i < parts; i++) marks.current[i] ??= () => setDone((d) => (d.has(i) ? d : new Set([...d, i])));
-  const ready = Array.from({ length: parts }, (_, i) => i).every((i) => done.has(i));
-  useEffect(() => {
-    if (ready) onLoaded();
-  }, [ready, onLoaded]);
-  return <div className={ready ? 'contents' : 'hidden'}>{children(marks.current.slice(0, parts))}</div>;
+/** A part of the page that is all there at once: it says so as soon as it mounts. */
+function LoadedAtOnce({ onLoaded, children }: { onLoaded: PanelLoaded; children: ReactNode }) {
+  useEffect(() => onLoaded(), [onLoaded]);
+  return <>{children}</>;
 }
 
 const list = (xs: string[] | undefined) => (xs?.length ? xs.join(', ') : <span className="text-muted-foreground">none</span>);
 
-/** `owner`: whether this person is one of the instance's owners (State.role), for the owners-only voice section; `brand` names its wake word. */
-export function SettingsPage({ owner = false, brand }: { owner?: boolean; brand?: string }) {
+export function SettingsPage() {
   const { data: s, error } = useView<Settings | ViewerSettings>('/api/settings');
   // A viewer gets the project part only; the rest is the owners' and writers'.
   const full = s && !('forViewer' in s) ? s : null;
@@ -149,10 +136,8 @@ export function SettingsPage({ owner = false, brand }: { owner?: boolean; brand?
           panels={[
             (loaded) => <InstanceSettings onLoaded={loaded} />,
             (loaded) => (
-              // The Siri devices are the owners' and writers' only (a viewer's page never asks for them).
-              <HiddenUntil parts={full ? 2 : 1} onLoaded={loaded}>
-                {([voiceReady, siriReady]) => (
-                  <>
+              <LoadedAtOnce onLoaded={loaded}>
+                <>
                     <div className="text-[12.5px] text-ink-2">
                       <div>
                         The machine-wide settings (the agent slot cap, engine updates) and their history are on the{' '}
@@ -178,11 +163,6 @@ export function SettingsPage({ owner = false, brand }: { owner?: boolean; brand?
                       )}
                     </div>
                     <div className="grid gap-6 lg:grid-cols-2">
-                      {/* The voice section waits for the browser's on-device check: its answer adds a line and a button (28 px). */}
-                      <VoiceSettings owner={owner} brand={brand} onLoaded={voiceReady} />
-                      {/* WHY: the owners' and writers' only; a viewer's page never asks for it. It waits too: answering
-                          late, it would push the Project card and everything after it along the grid. */}
-                      {full && <SiriDevices onLoaded={siriReady} />}
                       <Section title="Project">
                         <Row k="Name">{s.project.name}</Row>
                         <Row k="Repository">{s.project.repo}</Row>
@@ -278,9 +258,8 @@ export function SettingsPage({ owner = false, brand }: { owner?: boolean; brand?
                         </Section>
                       )}
                     </div>
-                  </>
-                )}
-              </HiddenUntil>
+                </>
+              </LoadedAtOnce>
             ),
             (loaded) => <SetupScreens onLoaded={loaded} />,
           ]}

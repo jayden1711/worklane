@@ -99,17 +99,140 @@ export function handWritten(section) {
 }
 
 /**
+ * The line that ends a section's hand-written notes, written only when the generated headings alone can't show
+ * where they end (the notes use one of those headings, say). Everything above it is kept on every rerun.
+ */
+export const NOTES_END = '<!-- The lists below are written by the release script. Everything above this line is kept. -->';
+const NOTES_END_LINE = new RegExp(`^${NOTES_END.replace(/[.*+?^$()[\]{}|\\]/g, '\\$&')}[ \\t]*$`, 'gm');
+
+/** Where a section starts: a `## v...` heading, or any `##` heading that says "unreleased" (any case). */
+const SECTION_START = /(?=^##[ \t]+(?:v|[^\n]*\bunreleased\b))/im;
+
+/** A section's heading text (after the `##`), or null when the part doesn't start with one. */
+const headingOf = (part) => /^##[ \t]+([^\n]*)/.exec(part)?.[1] ?? null;
+const isUnreleased = (h) => /\bunreleased\b/i.test(h);
+/** The version a released heading names, right after the `##` ("v0.5.3", "[0.5.3]"), or null. */
+const versionIn = (h) => /^\[?v?(\d+\.\d+\.\d+)(?=[\s\])]|$)/i.exec(h)?.[1] ?? null;
+const EXACT_VERSION = /(?<![\w.])v?(\d+\.\d+\.\d+)(?![\w.])/gi;
+/**
+ * An unreleased heading's version, never guessed: the one X.Y.Z it names; '' when it names none (no digit at all:
+ * `## Unreleased`); null when it is unclear (`## v0.6 (unreleased)`, `## Unreleased (0.6.x)`, two versions).
+ */
+const unreleasedVersion = (h) => {
+  // Any numeric character, not only ASCII 0-9: `v０.６`, `v٠.٦`, `v²` and `Ⅵ` name a version too (#829 round 2).
+  if (/\p{N}/u.test(h.replace(EXACT_VERSION, ''))) return null;
+  const named = [...new Set([...h.matchAll(EXACT_VERSION)].map((m) => m[1]))];
+  return named.length === 0 ? '' : named.length === 1 ? named[0] : null;
+};
+/** Whether a part is a section that could hold this version's notes: its own, or an unreleased one naming no version. */
+const isFor = (part, version) => {
+  const h = headingOf(part);
+  if (h === null) return false;
+  if (!isUnreleased(h)) return versionIn(h) === version;
+  const v = unreleasedVersion(h);
+  return v === '' || v === version;
+};
+/** A released section's heading: the version, then its date, as changelogSection writes it ("v0.5.2 (2026-10-17)"). */
+const isDated = (h) => !isUnreleased(h) && /^\[?v?\d+\.\d+\.\d+\]?[ \t]+\(\d{4}-\d{2}-\d{2}\)/i.test(h);
+/** A line this tool writes in a section's lists: a generated heading, a PR line, a "none" line, or NOTES_END. */
+const isListLine = (l) =>
+  GENERATED.test(l) || /^- .*\(#\d+\)(?::[^\n]*)?$/.test(l) || l === '- none in this release' || l === '- no merged PRs since the previous release' || l === NOTES_END;
+
+/**
+ * The lines of the input (trimmed, non-blank, counted) that `after` lacks. `segments`: [text, ignore(line)] in input
+ * order, so a line is left out only where it may be (the fixed intro; the replaced section's heading and lists).
+ */
+function lost(segments, after) {
+  const have = new Map();
+  for (const l of after.split('\n')) if (l.trim()) have.set(l.trim(), (have.get(l.trim()) ?? 0) + 1);
+  const out = [];
+  for (const [text, ignore] of segments) {
+    for (const l of text.split('\n')) {
+      const t = l.trim();
+      if (!t || ignore(t)) continue;
+      if (have.get(t)) have.set(t, have.get(t) - 1);
+      else out.push(t);
+    }
+  }
+  return out;
+}
+
+/**
+ * A section's hand-written notes: everything above the last NOTES_END line when it has one, else (a section
+ * written before NOTES_END existed, or one whose notes need no marker) what sits above the first generated heading.
+ */
+export function notesOf(section) {
+  const text = section ?? '';
+  const ends = [...text.matchAll(NOTES_END_LINE)];
+  if (!ends.length) return handWritten(text);
+  return text.slice(0, ends.at(-1).index).replace(/^##[ \t][^\n]*\n?/, '').trim();
+}
+
+/**
  * CHANGELOG.md with the section for this version first. An existing section for the same version is replaced,
- * keeping its hand-written top, so regenerating the lists never drops the highlights or the upgrade notes.
+ * and none of its hand-written lines is ever dropped:
+ * - an unreleased one (`## vX.Y.Z (unreleased)`, any case or spacing, or `## Unreleased` with no version), or any
+ *   heading for this version that isn't the dated one (`## vX.Y.Z (draft)`, `## vX.Y.Z`), is all hand-written:
+ *   every line of it is kept, whatever its headings are called (the generated ones included), under the new dated
+ *   heading, and the generated lists come after it;
+ * - a dated one (`## vX.Y.Z (YYYY-MM-DD)`, what this tool writes) keeps its notes (notesOf), so a rerun never
+ *   drops what the first run kept; one with no generated heading (never regenerated) is kept whole, as above.
+ * When the notes would read back differently without it, a NOTES_END line is written after them, and the result is
+ * checked to read back exactly those notes: it throws rather than write a section that would lose one on a rerun.
+ * More than one section that could be this version's (two unreleased, one beside a dated one, two dated) is
+ * refused: it can't tell which notes are meant. A heading naming another version, even partly (`## v0.6
+ * (unreleased)`), is never taken as this one's; it stays where it is.
+ * Every line of the input that isn't the fixed intro or the replaced section's heading and generated lists must
+ * be in the result (counted): otherwise (text it can't place in a section, say) it throws, and nothing is written.
+ * The boundary: in a dated section the tool wrote lists for, every line after the notes shaped like a generated
+ * line (isListLine: a generated heading, `- text (#N)` with or without `: files`, the "none" lines) is taken as
+ * the tool's and replaced, as main always did, even one written there by hand. Any other line there is refused.
  */
 export function withSection(existing, version, section) {
   const head = '# Changelog\n\nEvery release, newest first: the PRs merged since the previous one, and what changed in guardrails.\n';
-  const body = (existing ?? '').replace(/^# Changelog\n[\s\S]*?(?=^## v|(?![\s\S]))/m, '');
-  const parts = body.split(/(?=^## v)/m);
-  const kept = parts.filter((s) => s.trim() && !s.startsWith(`## v${version} `));
-  const lead = handWritten(parts.find((s) => s.startsWith(`## v${version} `)));
-  const full = lead && !handWritten(section) ? section.replace(/^(## v[^\n]*\n)\n?/, (_, title) => `${title}\n${lead}\n\n`) : section;
-  return `${head}\n${full.trimEnd()}\n${kept.length ? `\n${kept.map((s) => s.trimEnd()).join('\n\n')}\n` : ''}`;
+  const input = existing ?? '';
+  const stripped = new RegExp(`^# Changelog\\n[\\s\\S]*?(?:${SECTION_START.source}|(?![\\s\\S]))`, 'im').exec(input);
+  const body = stripped ? input.slice(0, stripped.index) + input.slice(stripped.index + stripped[0].length) : input;
+  const parts = body.split(SECTION_START);
+  const dated = parts.filter((s) => isFor(s, version) && isDated(headingOf(s)));
+  const unreleased = parts.filter((s) => isFor(s, version) && !isDated(headingOf(s)));
+  if (unreleased.length + dated.length > 1) {
+    const names = [...unreleased, ...dated].map((s) => `"## ${headingOf(s)}"`).join(', ');
+    throw new Error(`CHANGELOG.md has more than one section for v${version} (${names}): merge them into one by hand first`);
+  }
+  const kept = parts.filter((s) => s.trim() && !unreleased.includes(s) && !dated.includes(s));
+  // A section this tool never wrote lists for (no generated heading, no NOTES_END) is all notes, dated or not.
+  const whole = unreleased[0] ?? (dated[0] && !GENERATED.test(dated[0]) && !dated[0].match(NOTES_END_LINE) ? dated[0] : undefined);
+  const notes = whole !== undefined ? whole.replace(/^##[ \t][^\n]*\n?/, '').trim() : notesOf(dated[0]);
+  const own = notesOf(section);
+  if (own && notes && own !== notes && whole !== undefined) throw new Error(`the new v${version} section has notes of its own, and the unreleased one has others: merge them by hand first`);
+  let full = section;
+  if (notes && !own) {
+    const [title, ...rest] = section.split('\n');
+    const lists = rest.join('\n').replace(/^\n/, '');
+    full = `${title}\n\n${notes}\n\n${lists}`;
+    if (notesOf(full) !== notes) full = `${title}\n\n${notes}\n\n${NOTES_END}\n\n${lists}`;
+    if (notesOf(full) !== notes) throw new Error(`v${version}: the section's notes wouldn't read back whole on a rerun; nothing written`);
+  }
+  const out = `${head}\n${full.trimEnd()}\n${kept.length ? `\n${kept.map((s) => s.trimEnd()).join('\n\n')}\n` : ''}`;
+  // INVARIANT: no hand-written line is dropped. Checked on the result, whatever the parsing above got wrong.
+  const intro = new Set(head.split('\n').map((l) => l.trim()));
+  const replaced = dated[0] ?? unreleased[0];
+  const firstLine = replaced?.split('\n')[0].trim();
+  const segments = parts.map((s) => [s, () => false]);
+  if (stripped) segments.unshift([stripped[0], (l) => intro.has(l)]);
+  if (replaced !== undefined) {
+    const lists = whole === undefined;
+    segments[segments.findIndex(([s]) => s === replaced)] = [replaced, (l) => l === firstLine || (lists && isListLine(l))];
+  }
+  const missing = lost(segments, out);
+  if (missing.length) {
+    throw new Error(
+      `CHANGELOG.md: the changelog step would drop ${missing.length} line(s) it can't place, so nothing is written:\n  ${missing.slice(0, 5).join('\n  ')}\n` +
+        `Put them in a section (\`## v${version} (unreleased)\` for this release), or remove them by hand.`,
+    );
+  }
+  return out;
 }
 
 /** The section for a version in a CHANGELOG.md, or null: the GitHub release notes. */

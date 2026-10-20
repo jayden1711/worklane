@@ -10,7 +10,6 @@ import { tmpdir } from 'node:os';
 import { dirname, join, relative } from 'node:path';
 import { BRAND } from '../src/brand.js';
 import { repoRoot } from './helpers.js';
-import { createDevice, readDevices, revokeAllDevices, verifyToken } from '../src/siri/tokens.js';
 
 interface Item { kind: string; what: string; when?: string[]; by: string; rename: string }
 const reg = createRequire(import.meta.url)(join(repoRoot, 'scripts', 'setup', 'instance-records.cjs')) as {
@@ -381,21 +380,6 @@ test("only an experiment job's own output volume is the engine's mount to unmoun
   assert.equal(is('alpha', `/var/lib/${cli}-exp/alpha-2/jobs/j-1/vol`), false, "another instance's volume, named for alpha");
   assert.equal(is('alpha-2', `/var/lib/${cli}-exp/alpha-2/jobs/j-1/vol`), true);
   for (const m of [`/var/lib/${cli}-exp/alpha/jobs/j-1/vol/x`, `/var/lib/${cli}-exp/alpha/jobs/j-1`, `/var/lib/${cli}-exp/alpha/jobs/J-1/vol`, `/srv/elsewhere/vol`]) assert.equal(is('alpha', m), false, m);
-});
-
-test("instance-remove.sh revokes the instance's Siri device tokens, as its coordinator, before it exports; none works after", () => {
-  const script = readFileSync(join(repoRoot, 'scripts', 'setup', 'instance-remove.sh'), 'utf8');
-  const revoke = script.indexOf('instance siri-revoke-all');
-  assert.ok(revoke > 0 && revoke < script.indexOf('export --instance'), 'revoked before the export, so the history records it');
-  const stateDir = mkdtempSync(join(tmpdir(), 'siri-'));
-  const node = { id: 'n1', name: 'phone-node' };
-  const a = createDevice({ stateDir, instance: 'alpha', name: 'phone', by: 'owner' });
-  const b = createDevice({ stateDir, instance: 'alpha', name: 'tablet', by: 'owner' });
-  assert.equal(verifyToken({ stateDir, instance: 'alpha', token: a.token, node }).ok, true);
-  assert.deepEqual(revokeAllDevices(stateDir, 'instance removed').sort(), [a.device.id, b.device.id].sort());
-  for (const t of [a.token, b.token]) assert.equal(verifyToken({ stateDir, instance: 'alpha', token: t, node }).ok, false);
-  assert.ok(readDevices(stateDir).every((d) => d.revokedBy === 'instance removed'));
-  assert.deepEqual(revokeAllDevices(stateDir, 'instance removed'), [], 'again: nothing left to revoke');
 });
 
 test("a rename keeps the old instance home's directories but state/: archived whole, 0600, and listed by path and size", { skip: !posix && 'bash, tar, find' }, () => {
