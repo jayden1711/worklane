@@ -6,8 +6,9 @@
 //
 //   node scripts/release.mjs changelog X.Y.Z [--repo owner/repo]
 //     Write CHANGELOG.md's section for X.Y.Z from the PRs merged since the previous release (one GitHub
-//     listing through `gh`). Commit it with the version bump in a normal PR. Safe to rerun: the lists are
-//     rewritten, and whatever is written by hand above them in that section (highlights, upgrade notes) is kept.
+//     listing through `gh`). Commit it with the version bump in a normal PR. A `## vX.Y.Z (unreleased)` section
+//     (or `## Unreleased`) is kept whole, every line under any heading: its heading becomes `## vX.Y.Z (date)` and
+//     the generated lists go after it. Safe to rerun: the lists are rewritten and the notes kept (changelog.mjs).
 //   node scripts/release.mjs X.Y.Z
 //     On that merged commit: build, test, tag vX.Y.Z signed (`git tag -s`), verify the signature, and write
 //     the GitHub release notes (the changelog's section). Refuses without a signing key or a way to verify the

@@ -32,10 +32,8 @@ import { deviceRefusal, parseDeviceList, type DeviceOptions } from './console/te
 import { handleManifestBreakGlass, handleManifestPublic, ManifestFlows } from './setup/app-manifest.js';
 import { isMachineOwner } from './machine-owners.js';
 import { Avatars, type AvatarOptions } from './avatars.js';
-import { startSiriGateway } from './siri/gateway.js';
 import { startHooksGateway } from './automations/webhook-gateway.js';
 import { HOOKS_GATEWAY_TOKEN_FILE } from './automations/webhook.js';
-import { SIRI_GATEWAY_TOKEN_FILE } from './siri/instance.js';
 
 export interface HubInstance {
   name: string;
@@ -71,11 +69,6 @@ export interface HubOptions {
   appManifest?: { isMachineOwner?: (login: string) => boolean; api?: string; web?: string; fetch?: typeof fetch };
   /** People's pictures (src/avatars.ts): a stand-in for GitHub, in code, for tests. */
   avatars?: AvatarOptions;
-  /**
-   * The Siri gateway (src/siri/gateway.ts): its own loopback listener on `port` (tailscale serve publishes it on
-   * 8443), given each instance's Siri gateway token file only. Absent: no gateway. whois and peerUid: tests only.
-   */
-  siri?: { port: number; whois?: (ip: string) => string; peerUid?: (clientPort: number, serverPort: number) => number | null; lockout?: { fails: number; windowMs: number; forMs: number } };
   /**
    * The hooks gateway (src/automations/webhook-gateway.ts): its own loopback listener on `port` (tailscale serve
    * publishes it on 8444), given each instance's hooks gateway token file only; it holds no webhook secret. Absent: no
@@ -305,7 +298,7 @@ const listen = (server: Server, port: number, host: string) =>
     });
   });
 
-export async function startHub(opts: HubOptions): Promise<{ server: Server; breakGlass: Server; url: string; breakGlassUrl: string; keyFile: string; token: string; session: SessionOf; siriUrl: string | null; hooksUrl: string | null; close: () => Promise<void> }> {
+export async function startHub(opts: HubOptions): Promise<{ server: Server; breakGlass: Server; url: string; breakGlassUrl: string; keyFile: string; token: string; session: SessionOf; hooksUrl: string | null; close: () => Promise<void> }> {
   const host = opts.host ?? '127.0.0.1';
   assertLoopbackHost(host);
   const token = dashboardToken(opts.stateDir);
@@ -498,26 +491,6 @@ export async function startHub(opts: HubOptions): Promise<{ server: Server; brea
     server.close();
     throw e;
   }
-  // The Siri gateway: built from each instance's Siri gateway token file only, never its dashboard token.
-  let siri: Awaited<ReturnType<typeof startSiriGateway>> | null = null;
-  if (opts.siri) {
-    try {
-      siri = await startSiriGateway({
-        instances: opts.instances.map((i) => ({ name: i.name, port: i.port, gatewayTokenFile: join(dirname(i.tokenFile), SIRI_GATEWAY_TOKEN_FILE) })),
-        port: opts.siri.port,
-        host,
-        auditFile: join(opts.stateDir, 'siri-audit.jsonl'),
-        ...(opts.siri.whois ? { whois: opts.siri.whois } : {}),
-        ...(opts.siri.peerUid ? { peerUid: opts.siri.peerUid } : {}),
-        ...(opts.siri.lockout ? { lockout: opts.siri.lockout } : {}),
-        now,
-      });
-    } catch (e) {
-      server.close();
-      breakGlass.close();
-      throw e;
-    }
-  }
   // The hooks gateway: built from each instance's hooks gateway token file only; it holds no webhook secret.
   let hooks: Awaited<ReturnType<typeof startHooksGateway>> | null = null;
   if (opts.hooks) {
@@ -536,7 +509,6 @@ export async function startHub(opts: HubOptions): Promise<{ server: Server; brea
     } catch (e) {
       server.close();
       breakGlass.close();
-      await siri?.close();
       throw e;
     }
   }
@@ -549,7 +521,6 @@ export async function startHub(opts: HubOptions): Promise<{ server: Server; brea
     keyFile: join(opts.stateDir, 'dashboard-token'),
     token,
     session,
-    siriUrl: siri?.url ?? null,
     hooksUrl: hooks?.url ?? null,
     close: () => {
       return Promise.all(
@@ -559,7 +530,7 @@ export async function startHub(opts: HubOptions): Promise<{ server: Server; brea
               s.closeAllConnections();
               s.close(() => r());
             }),
-        ).concat(siri ? [siri.close()] : [], hooks ? [hooks.close()] : []),
+        ).concat(hooks ? [hooks.close()] : []),
       ).then(() => undefined);
     },
   };

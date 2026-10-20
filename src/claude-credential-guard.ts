@@ -1,6 +1,6 @@
 // Issue #711: the dashboard never takes a Claude credential. Anthropic's terms (docs/auth.md quotes them) say a
 // developer may not "collect, store, or intermediate Claude.ai credentials or session tokens"; a Claude login is
-// installed by root on the machine (credentials.sh, claude-account.sh), or by a person signing in to the unmodified
+// installed by root on the machine (credentials.sh), or by a person signing in to the unmodified
 // `claude` there, and the engine only ever passes paths.
 //
 // So every request body the dashboard reads goes through this first: one that holds a token from `claude
@@ -13,7 +13,7 @@ const SETUP_TOKEN_IN = /sk-ant-oat[0-9]{2}-[A-Za-z0-9_-]{20}/;
 const LOGIN_CODE_VALUE = /^[A-Za-z0-9_-]{20,}#[A-Za-z0-9_-]{20,}$/;
 
 export const CREDENTIAL_REFUSED =
-  "that holds a Claude credential (a setup token, or a sign-in code), and the dashboard never takes one: install it at a root shell on the machine (credentials.sh <name> claude, or claude-account.sh); nothing was stored";
+  "that holds a Claude credential (a setup token, or a sign-in code), and the dashboard never takes one: install it at a root shell on the machine (credentials.sh <name> claude), or sign in there as the agent user; nothing was stored";
 
 export class ClaudeCredentialRefused extends Error {
   readonly status = 400;
@@ -29,7 +29,7 @@ export class ClaudeCredentialRefused extends Error {
  */
 export const REMOVED_CREDENTIAL_PATHS: ReadonlySet<string> = new Set(['/api/claude-account/token', '/api/claude-account/profile-add', '/api/claude-account/login-code']);
 export const CREDENTIAL_ROUTE_GONE =
-  "the dashboard no longer takes a Claude credential: a root admin installs one on the machine (sudo bash credentials.sh <name> claude, or claude-account.sh switch or profile-add at a root shell), or signs in there as the agent user (sudo -u <agent user> -i claude auth login). See docs/auth.md";
+  "the dashboard no longer takes a Claude credential: a root admin installs one on the machine (sudo bash credentials.sh <name> claude), or signs in there as the agent user (sudo -u <agent user> -i claude auth login). See docs/auth.md";
 
 /**
  * The credential names earlier versions had the dashboard store a Claude credential under (add-project's token, a
@@ -41,7 +41,7 @@ export const CLAUDE_CREDENTIAL_NAMES: ReadonlySet<string> = new Set(['claude-tok
 
 /** Why the coordinator withdrew such an ask: a fixed text (an ask's event never holds a value). */
 export const CLAUDE_ASK_WITHDRAWN =
-  'issue #711: the dashboard never takes a Claude credential; a root admin installs it on the machine (sudo bash credentials.sh <name> claude, or claude-account.sh at a root shell), or signs in there as the agent user. See docs/auth.md';
+  'issue #711: the dashboard never takes a Claude credential; a root admin installs it on the machine (sudo bash credentials.sh <name> claude), or signs in there as the agent user. See docs/auth.md';
 
 /** Whether a value (a parsed JSON body, any depth) holds a Claude credential: in a string value, or a key. */
 export function holdsClaudeCredential(v: unknown, depth = 0): boolean {

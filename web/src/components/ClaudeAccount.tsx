@@ -1,116 +1,13 @@
 // The agents' Claude account, on the Machine page, for the machine's owners only (src/claude-account.ts): which
-// account and expiry each agent user has, and a switch of every agent on the machine to another account that a root
-// admin runs on the machine, followed step by step (pause, the token at that root shell, each instance's check,
-// resume). The page never takes a Claude credential (issue #711): no token box, no switch button; it names the root
-// command. Everyone else gets only whether an account is set (issue #567): the server refuses them the accounts, and
-// sends that in the state.
+// account and expiry each agent user has. The engine manages no Claude account (#736): a person signs an agent user in
+// themselves, as that user, on the machine, and the panel names that command; what the removed account profiles,
+// failover and switch left on the machine is named with the root step that removes it. The page never takes a Claude
+// credential (issue #711): no token box. Everyone else gets only whether an account is set (issue #567): the server
+// refuses them the accounts, and sends that in the state.
 import { useEffect, useId, useState } from 'react';
-import { claudeAccountAction, getClaudeAccount, isRefusal, useScope, type ClaudeAccountData, type InstanceScope, type SwitchLine, type SwitchView } from '../api';
+import { claudeAccountAction, getClaudeAccount, isRefusal, useScope, type ClaudeAccountData, type InstanceScope } from '../api';
 import { afterLoad, NOTHING_YET, StaleNote, useRetry, type Loaded } from '../refresh';
-import { ago, Badge, Button, Card, cx, firstWhy } from './ui';
-import { ClaudeProfiles } from './ClaudeProfiles';
-
-type Phase = 'pending' | 'running' | 'done' | 'failed';
-const PHASE_TONE: Record<Phase, 'neutral' | 'info' | 'ok' | 'danger'> = { pending: 'neutral', running: 'info', done: 'ok', failed: 'danger' };
-const PHASE_LABEL: Record<Phase, string> = { pending: 'not yet', running: 'in progress', done: 'done', failed: 'failed' };
-const LINE_TONE: Record<SwitchLine['state'], 'neutral' | 'info' | 'ok' | 'danger' | 'warn'> = { started: 'info', done: 'ok', failed: 'danger', ask: 'warn', skipped: 'neutral' };
-const LINE_LABEL: Record<SwitchLine['state'], string> = { started: 'started', done: 'done', failed: 'failed', ask: 'waiting on you', skipped: 'skipped' };
-const SWITCH_LABEL: Record<SwitchView['status'], string> = { running: 'running', done: 'done', failed: 'failed', stalled: 'stopped without finishing' };
-
-/** Where each of the four steps is, from the switch's lines. */
-export function switchPhases(s: SwitchView): Record<'pause' | 'token' | 'check' | 'resume', Phase> {
-  const ended = s.status !== 'running';
-  const insts = s.instances;
-  const any = (f: (i: SwitchView['instances'][number]) => (SwitchLine | null)[]) => insts.flatMap(f).filter((l): l is SwitchLine => !!l);
-  const phase = (lines: SwitchLine[], complete: boolean): Phase => (lines.some((l) => l.state === 'failed') ? 'failed' : complete || (ended && lines.length) ? 'done' : lines.length ? 'running' : 'pending');
-  const pauses = any((i) => [i.pause, i.wait]);
-  const pauseDone = insts.length > 0 && insts.every((i) => i.pause && (i.pause.state !== 'done' || i.wait));
-  const checks = any((i) => [i.check, ...i.users.flatMap((u) => [u.install, u.check])]);
-  const resumes = any((i) => [i.resume]);
-  return {
-    pause: phase(pauses, pauseDone),
-    token: !s.token ? 'pending' : s.token.state === 'failed' ? 'failed' : s.token.state === 'done' ? 'done' : 'running',
-    check: phase(checks, insts.length > 0 && insts.every((i) => i.resume)),
-    resume: phase(resumes, insts.length > 0 && insts.every((i) => i.resume)),
-  };
-}
-
-function Line({ l, label }: { l: SwitchLine | null; label?: string }) {
-  if (!l) return null;
-  return (
-    <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5 text-[12.5px]" data-testid="claude-switch-line" data-step={l.step} data-state={l.state}>
-      {label && <span className="font-mono text-[12px] text-ink-2">{label}</span>}
-      <Badge tone={LINE_TONE[l.state]}>{LINE_LABEL[l.state]}</Badge>
-      <span className="min-w-0 break-words text-ink-3">{l.detail}</span>
-    </div>
-  );
-}
-
-function Step({ n, title, phase, children }: { n: number; title: string; phase: Phase; children?: React.ReactNode }) {
-  return (
-    <li className="space-y-1.5 rounded-control bg-inset p-3 shadow-hairline" data-testid="claude-switch-step" data-phase={phase}>
-      <div className="flex flex-wrap items-center gap-2">
-        <span className="tabular-nums text-[12.5px] text-ink-3">{n}.</span>
-        <span className="text-[13px] font-medium text-ink">{title}</span>
-        <Badge tone={PHASE_TONE[phase]}>{PHASE_LABEL[phase]}</Badge>
-      </div>
-      {children}
-    </li>
-  );
-}
-
-/** A switch a root admin runs on the machine, step by step, with each instance's result as it comes. Read-only. */
-export function SwitchSteps({ s }: { s: SwitchView }) {
-  const p = switchPhases(s);
-  return (
-    <div className="space-y-2" data-testid="claude-switch" data-status={s.status}>
-      <div className="flex flex-wrap items-center gap-2 text-[12.5px] text-ink-2">
-        <span className="font-medium text-ink">Switch account</span>
-        <Badge tone={s.status === 'done' ? 'ok' : s.status === 'running' ? 'info' : 'danger'}>{SWITCH_LABEL[s.status]}</Badge>
-        <span className="text-ink-3">started {ago(s.startedAt)}</span>
-      </div>
-      {s.status !== 'running' && <p className={cx('text-[12.5px]', s.status === 'done' ? 'text-ink-2' : 'text-red')} data-testid="claude-switch-result">{s.detail}</p>}
-      <ol className="space-y-2">
-        <Step n={1} title="Pause every instance" phase={p.pause}>
-          {s.instances.map((i) => (
-            <div key={i.name} className="space-y-0.5" data-testid="claude-switch-instance" data-instance={i.name}>
-              <Line l={i.pause} label={i.name} />
-              <Line l={i.wait} label={i.name} />
-            </div>
-          ))}
-        </Step>
-        <Step n={2} title="The new token, at the root shell" phase={p.token}>
-          <Line l={s.token} />
-          {s.waitingForToken && (
-            <p className="text-[12px] text-ink-3" data-testid="claude-switch-token-elsewhere">
-              It is pasted in the terminal where the switch was started. This page never takes it.
-            </p>
-          )}
-        </Step>
-        <Step n={3} title="Check each agent user" phase={p.check}>
-          {s.instances.map((i) => (
-            <div key={i.name} className="space-y-0.5" data-testid="claude-switch-check" data-instance={i.name}>
-              <Line l={i.check} label={i.name} />
-              {i.users.map((u) => (
-                <div key={u.user} className="space-y-0.5">
-                  <Line l={u.install} label={u.user} />
-                  <Line l={u.check} label={u.user} />
-                </div>
-              ))}
-            </div>
-          ))}
-        </Step>
-        <Step n={4} title="Resume" phase={p.resume}>
-          {s.instances.map((i) => (
-            <div key={i.name} data-testid="claude-switch-resume" data-instance={i.name} data-state={i.resume?.state ?? 'pending'}>
-              <Line l={i.resume} label={i.name} />
-            </div>
-          ))}
-        </Step>
-      </ol>
-    </div>
-  );
-}
+import { ago, Badge, Button, Card, firstWhy } from './ui';
 
 const expiry = (at: string | null, now: number) => {
   if (!at) return { text: 'no expiry known', tone: 'neutral' as const };
@@ -119,18 +16,38 @@ const expiry = (at: string | null, now: number) => {
   return { text: `expires ${at.slice(0, 10)} (${days} day${days === 1 ? '' : 's'})`, tone: days < 14 ? ('warn' as const) : ('neutral' as const) };
 };
 
+/** What the removed account profiles, failover and switch left on the machine (#736), and the root step that removes it. */
+function Retired({ r }: { r: NonNullable<ClaudeAccountData['retired']> }) {
+  return (
+    <div className="space-y-1 rounded-control bg-inset p-3 shadow-hairline" data-testid="claude-account-retired">
+      <p className="text-[12.5px] text-ink-2">
+        Account profiles, failover and the account switch were removed. This machine still has what they left, which nothing uses: {r.files.join(', ')}.
+        {r.refused.length > 0 && (
+          <span className="text-red" data-testid="claude-account-retired-refused">
+            {' '}
+            Not started until it is removed, since their runs were on another profile: {r.refused.join(', ')}.
+          </span>
+        )}
+        {r.unreadable && <span className="text-red"> Its profiles.json can't be read, so no instance starts until it is removed.</span>}
+      </p>
+      <p className="text-[12px] text-ink-3">A root admin removes it on the machine:</p>
+      <pre className="overflow-x-auto font-mono text-[12px] text-ink" data-testid="claude-account-retired-command">
+        {r.command}
+      </pre>
+    </div>
+  );
+}
+
 /**
  * The panel from its data (also what the render checks render); nothing at all for anyone but a machine owner.
- * `scope`: on a hub, the instances the page shows. With "All instances" chosen the panel says it covers every one and
- * offers no step for one instance alone (those would go to the instance picked before, which the page no longer names:
- * #562); with one instance picked, its steps are for that one.
+ * `scope`: on a hub, the instances the page shows. With "All instances" chosen the panel says it covers every one
+ * (#562); with one instance picked, it names that one.
  */
 export function ClaudeAccountView({ data, scope = null, onChanged, now = Date.now() }: { data: ClaudeAccountData; scope?: InstanceScope | null; onChanged?: () => void; now?: number }) {
   const [busy, setBusy] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
-  const [refusedId, busyId] = [useId(), useId()];
+  const refusedId = useId();
   if (!data.machineOwner) return null;
-  const script = data.confirmScript ?? 'claude-account.sh';
   const act = async (action: 'status') => {
     setBusy(action);
     setErr(null);
@@ -153,15 +70,7 @@ export function ClaudeAccountView({ data, scope = null, onChanged, now = Date.no
         <p className="text-[12px] text-ink-3">The Claude login every agent on this machine uses: each instance's agent user (channel chat runs as it too) and eval user. For the machine's owners.</p>
         {scope?.current && (
           <p className="mt-1 text-[12px] text-ink-2" data-testid="claude-account-scope" data-scope={all ? 'all' : data.instance}>
-            {all ? (
-              <>
-                For every instance on this machine ({all.join(', ')}): Refresh covers them all. To choose or remove an account for one instance from here, pick it in the sidebar.
-              </>
-            ) : (
-              <>
-                For {data.instance}: the account steps below are for it alone; Refresh covers every instance.
-              </>
-            )}
+            {all ? <>For every instance on this machine ({all.join(', ')}): Refresh covers them all.</> : <>For {data.instance}: Refresh covers every instance on this machine.</>}
           </p>
         )}
       </div>
@@ -190,7 +99,6 @@ export function ClaudeAccountView({ data, scope = null, onChanged, now = Date.no
         </p>
       )}
       {data.status && <p className="text-[11.5px] text-ink-3">Read {ago(data.status.at)}.</p>}
-      {data.profiles && <ClaudeProfiles table={data.profiles} ops={data.profileOps ?? []} self={all ? null : data.instance} confirmScript={script} canAct={data.allowed && !data.busy} {...(onChanged ? { onChanged } : {})} />}
       {/* A person no device would help (their role here) gets no buttons, only the read-only line below. */}
       {data.everAllowed !== false && (
         <div className="flex flex-wrap items-center gap-2">
@@ -199,19 +107,21 @@ export function ClaudeAccountView({ data, scope = null, onChanged, now = Date.no
           </Button>
         </div>
       )}
-      {/* Issue #711: switching takes a Claude credential, which this page never takes: the root command, never a button. */}
-      <div className="space-y-1 rounded-control bg-inset p-3 shadow-hairline" data-testid="claude-account-switch-howto">
-        <p className="text-[12.5px] text-ink-2">
-          To switch every agent on this machine to another account, a root admin runs this on the machine and pastes the token <code>claude setup-token</code> prints there. This page never takes a Claude credential.
-        </p>
-        <pre className="overflow-x-auto font-mono text-[12px] text-ink" data-testid="claude-account-switch-command">sudo bash {script} switch</pre>
-      </div>
+      {/* #736: the engine signs no one in and switches no account; a person signs an agent user in themselves, on the machine. */}
+      {data.signin && (
+        <div className="space-y-1 rounded-control bg-inset p-3 shadow-hairline" data-testid="claude-account-signin-howto">
+          <p className="text-[12.5px] text-ink-2">To sign an agent user in, or change its account, sign in as that user on the machine, through Anthropic's own sign-in. This page never takes a Claude credential.</p>
+          <pre className="overflow-x-auto font-mono text-[12px] text-ink" data-testid="claude-account-signin-command">
+            {data.signin}
+          </pre>
+        </div>
+      )}
+      {data.retired && <Retired r={data.retired} />}
       {!data.allowed && data.why && (
         <p id={refusedId} className="text-[12.5px] text-ink-2" data-testid="claude-account-disabled">
           Read-only: {data.why}.
         </p>
       )}
-      {data.allowed && data.busy && <p id={busyId} className="text-[12.5px] text-ink-3">{data.busy[0]!.toUpperCase() + data.busy.slice(1)}.</p>}
       {open.map((r) => (
         <p key={r.id} className="text-[12.5px] text-ink-3" data-testid="claude-account-request">
           {r.args.join(' ')}: {r.status === 'pending' ? 'waiting for the coordinator' : 'running'} (asked {ago(r.at)} by @{r.by})
@@ -222,29 +132,18 @@ export function ClaudeAccountView({ data, scope = null, onChanged, now = Date.no
           {err}
         </p>
       )}
-      {data.switch && <SwitchSteps s={data.switch} />}
     </Card>
   );
 }
 
-/**
- * Whether the panel looks again every few seconds: a switch (a root admin's) is running, a request waits for the
- * coordinator, or the newest request was a profile step handed to its own unit, which hasn't written its first line
- * yet. Without that last case the panel stopped looking the moment the request finished, before the step had started.
- */
-export function accountBusy(d: Pick<ClaudeAccountData, 'switch' | 'requests' | 'profileOps'>, now = Date.now()): boolean {
-  if (d.switch?.status === 'running') return true;
-  if (d.profileOps?.[0]?.status === 'running') return true;
-  if (d.requests.some((r) => r.status === 'pending' || r.status === 'running')) return true;
-  const last = d.requests[0];
-  if (!last || last.status !== 'done' || !['use', 'remove'].includes(last.args[1] ?? '') || now - Date.parse(last.finishedAt ?? last.at) > 60_000) return false;
-  const op = d.profileOps?.[0];
-  return !op || Date.parse(op.startedAt) < Date.parse(last.at) - 1_000;
+/** Whether the panel looks again every few seconds: a request waits for the coordinator or is running. */
+export function accountBusy(d: Pick<ClaudeAccountData, 'requests'>): boolean {
+  return d.requests.some((r) => r.status === 'pending' || r.status === 'running');
 }
 
 /**
  * For anyone the panel refuses (a viewer, a writer, an owner who isn't a machine owner): whether the agents' Claude
- * account is set, from the state, and nothing more. The server sends them no account, plan or profile name (#567).
+ * account is set, from the state, and nothing more. The server sends them no account or plan (#567).
  * Nothing when the state doesn't say (a checkout, an older server).
  */
 export function ClaudeAccountSet({ set }: { set: boolean | null | undefined }) {
@@ -255,15 +154,15 @@ export function ClaudeAccountSet({ set }: { set: boolean | null | undefined }) {
       <p className="text-[12.5px] text-ink-2">
         {set === null ? "Not known yet: the machine hasn't checked the agents' Claude login." : set ? 'An account is set for this instance\'s agents.' : "No account is signed in for this instance's agents."}
       </p>
-      <p className="text-[12px] text-ink-3">Which account it is, and switching it, are for the machine's owners.</p>
+      <p className="text-[12px] text-ink-3">Which account it is, and signing one in, are for the machine's owners.</p>
     </Card>
   );
 }
 
 /**
- * The panel: loaded, and looked at again every few seconds while a switch or a request is under way. On refusal, only
- * whether an account is set (`accountSet`, from the state); a look that fails otherwise keeps the last good data, and
- * a token being pasted, on screen (web/src/refresh.tsx).
+ * The panel: loaded, and looked at again every few seconds while a request is under way. On refusal, only whether an
+ * account is set (`accountSet`, from the state); a look that fails otherwise keeps the last good data on screen
+ * (web/src/refresh.tsx).
  */
 export function ClaudeAccountPanel({ onLoaded, accountSet }: { onLoaded?: () => void; accountSet?: boolean | null | undefined }) {
   const scope = useScope();

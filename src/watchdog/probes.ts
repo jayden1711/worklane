@@ -141,10 +141,10 @@ export function signerFindings(changes: readonly MachineChange[], now: number): 
 export const PROFILE_NOTICE_MS = 24 * 60 * 60_000;
 
 /**
- * Every Claude account profile added, staged, confirmed, chosen or removed in the last day (scripts/setup/
- * claude-account.sh writes one machine change line each, what: claude_account.profile): one alert each, naming what
- * happened, the instances and who asked. The account's email or org appears only in a confirmation (a root admin saw
- * it); the line carries no token. A staged one says how it is confirmed, or removed if nobody asked for it.
+ * Every Claude account profile added, staged, confirmed, chosen or removed in the last day, as an older engine's
+ * claude-account.sh logged it (one machine change line each, what: claude_account.profile): one alert each, naming
+ * what happened, the instances and who asked. Account profiles were removed (#736), so nothing writes such a line now:
+ * this only closes the alerts an older engine's lines opened, after their day. The line carries no token.
  */
 export function profileFindings(changes: readonly MachineChange[], now: number): Finding[] {
   const out: Finding[] = [];
@@ -154,15 +154,12 @@ export function profileFindings(changes: readonly MachineChange[], now: number):
     if (!(age >= 0 && age < PROFILE_NOTICE_MS)) continue;
     const to = c.to.slice(0, 300);
     const inst = /^wl-([a-z][a-z0-9-]{0,20})$/.exec(c.by);
-    const staged = /^staged ([a-z][a-z0-9-]{0,20}) for /.exec(to);
     out.push({
       kind: 'claude_profile_changed',
       key: `${c.at} ${to}`,
       instance: inst ? inst[1]! : null,
-      detail: `Claude account profile: ${to}, by ${c.by}${inst ? ` (instance ${inst[1]}'s dashboard)` : ''} at ${c.at}${staged ? '. Staged: nothing may use it until an admin confirms it on the machine' : ''}`,
-      fix: staged
-        ? `If you added it, confirm it on the machine (it shows the account and asks you to type the name): sudo bash ${asRoot.opt('current/scripts/setup/claude-account.sh')} confirm-profile ${staged[1]}. If you didn't, remove it there: sudo bash ${asRoot.opt('current/scripts/setup/claude-account.sh')} remove ${staged[1]}`
-        : `Nothing, if you or your failover did it. If not: choose the account back on the Machine page, and find out who asked. This notice closes by itself after a day`,
+      detail: `Claude account profile: ${to}, by ${c.by}${inst ? ` (instance ${inst[1]}'s dashboard)` : ''} at ${c.at}`,
+      fix: `Account profiles were removed (#736): no run uses this account now. Remove what they left, as root: sudo bash ${asRoot.opt('current/scripts/setup/claude-account.sh')} uninstall. This notice closes by itself after a day`,
       tried: [],
     });
   }

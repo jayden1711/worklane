@@ -905,7 +905,7 @@ function tailnet() {
   return { whois, laptop: { 'x-forwarded-for': ip(3) }, stranger: { 'x-forwarded-for': ip(5) } };
 }
 
-test('the views that say whether a machine change would pass get the device from the hub on a read too: the Machine page, Add project, the Claude account, Tailscale setup and Siri devices', async () => {
+test('the views that say whether a machine change would pass get the device from the hub on a read too: the Machine page, Add project, the Claude account and Tailscale setup', async () => {
   const { whois, laptop, stranger } = tailnet();
   const accountDir = mkdtempSync(join(tmpdir(), 'auth-account-'));
   const s = await setup({ machineOwners: ['ada'], devices: { allow: ['laptop'], whois }, claudeAccountDir: accountDir });
@@ -914,10 +914,7 @@ test('the views that say whether a machine change would pass get the device from
     const ada = await s.signIn('ada');
     const view = async (path: string, headers: Record<string, string>) => (await (await ada.get(`/api/i/a/${path}`, headers)).json()) as Record<string, unknown>;
     // Every path in the shared list is one the instance serves, and each says the device when the hub does.
-    assert.deepEqual(Object.values(DEVICE_VIEWS).sort(), ['add-project', 'claude-account', 'machine', 'siri-devices', 'tailscale']);
-    // Settings, Siri devices: New token is offered from an allowed device only.
-    assert.equal((await view(DEVICE_VIEWS.siriDevices, laptop)).createRefused, null);
-    assert.match(String((await view(DEVICE_VIEWS.siriDevices, stranger)).createRefused), /allowed Tailscale devices/);
+    assert.deepEqual(Object.values(DEVICE_VIEWS).sort(), ['add-project', 'claude-account', 'machine', 'tailscale']);
     assert.deepEqual([(await view(DEVICE_VIEWS.tailscale, laptop)).allowed, (await view(DEVICE_VIEWS.tailscale, laptop)).why], [true, null], 'Tailscale setup from an allowed device: a step may be asked for');
     assert.match(String((await view(DEVICE_VIEWS.tailscale, stranger)).why), /allowed devices/);
     const fromLaptop = { machine: await view(DEVICE_VIEWS.machine, laptop), add: await view(DEVICE_VIEWS.addProject, laptop), account: await view(DEVICE_VIEWS.claudeAccount, laptop) };
