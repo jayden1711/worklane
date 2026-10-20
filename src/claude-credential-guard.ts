@@ -6,15 +6,15 @@
 // So every request body the dashboard reads goes through this first: one that holds a token from `claude
 // setup-token`, or the one-time code Anthropic's sign-in page shows to paste, is refused before any route sees it,
 // whatever the route. Nothing is stored, and the refusal is a fixed text that never quotes the value.
-import { userFacing } from './user-facing-error.js';
+import { USER_FACING_TEXTS, userFacing } from './user-facing-error.js';
 
 /** A token from `claude setup-token` (sk-ant-oat01-...), anywhere in a string. */
 const SETUP_TOKEN_IN = /sk-ant-oat[0-9]{2}-[A-Za-z0-9_-]{20}/;
 /** The code Anthropic's sign-in page shows to paste back (<code>#<state>), as a whole value. */
 const LOGIN_CODE_VALUE = /^[A-Za-z0-9_-]{20,}#[A-Za-z0-9_-]{20,}$/;
 
-export const CREDENTIAL_REFUSED =
-  "that holds a Claude credential (a setup token, or a sign-in code), and the dashboard never takes one: install it at a root shell on the machine (credentials.sh <name> claude), or sign in there as the agent user; nothing was stored";
+/** The refusal's fixed text. It lives in src/user-facing-error.ts's closed set, so the dashboard may show it (#864). */
+export const CREDENTIAL_REFUSED = USER_FACING_TEXTS.claudeCredentialRefused;
 
 
 /**

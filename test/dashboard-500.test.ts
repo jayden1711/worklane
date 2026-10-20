@@ -8,8 +8,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { loadConfig } from '../src/config/load.js';
 import { CREDENTIAL_REFUSED } from '../src/claude-credential-guard.js';
-import { errorAnswer, INTERNAL_ERROR_TEXT, startDashboard } from '../src/dashboard.js';
-import { UserFacingError, userFacing } from '../src/user-facing-error.js';
+import { startDashboard } from '../src/dashboard.js';
+import { errorAnswer, INTERNAL_ERROR_TEXT, UserFacingError, userFacing } from '../src/user-facing-error.js';
 import { exampleProject, exampleRoles } from './helpers.js';
 
 const posix = process.platform !== 'win32';
@@ -116,8 +116,8 @@ test("#864: errorAnswer: anything thrown that isn't a UserFacingError (a string,
     throw new Error('the log is gone');
   });
   assert.deepEqual(broken, { status: 500, body: { error: INTERNAL_ERROR_TEXT } });
-  const meant = errorAnswer(userFacing(409, 'a vetted text'), { method: 'POST' }, '/api/x', () => assert.fail('a vetted answer is not an internal error'));
-  assert.deepEqual(meant, { status: 409, body: { error: 'a vetted text' } });
+  const meant = errorAnswer(userFacing(409, 'body too large'), { method: 'POST' }, '/api/x', () => assert.fail('a vetted answer is not an internal error'));
+  assert.deepEqual(meant, { status: 409, body: { error: 'body too large' } });
 });
 
 test('#864: every message the dashboard means for the page still reaches it through the outer catch', async () => {

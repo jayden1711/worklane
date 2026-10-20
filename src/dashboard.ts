@@ -123,7 +123,7 @@ import { INTAKE_FILE } from './intake/config.js';
 import { checkRootStep } from './console/root-steps.js';
 import { accountSet, CLAUDE_ACCOUNT_DIR, claudeAccountGate, claudeAccountView, mayViewClaudeAccount, requestClaudeAccount } from './claude-account.js';
 import { CREDENTIAL_ROUTE_GONE, refuseClaudeCredential, REMOVED_CREDENTIAL_PATHS } from './claude-credential-guard.js';
-import { UserFacingError, userFacing } from './user-facing-error.js';
+import { errorAnswer, userFacing } from './user-facing-error.js';
 import { isTailscaleAction, mayViewTailscale, noTailscaleView, requestTailscale, stepsStamp, TAILSCALE_DIR, tailscaleStatus, tailscaleView, type TailscaleStatus } from './tailscale-setup.js';
 import { asksFrom, ASK_EVENTS } from './console/asks.js';
 import { incidentsView } from './watchdog/view.js';
@@ -1036,26 +1036,6 @@ async function readBody(req: IncomingMessage): Promise<unknown> {
   }
   // INVARIANT (issue #711): no route takes a Claude credential, whatever it is for (src/claude-credential-guard.ts).
   return refuseClaudeCredential(body);
-}
-
-/** What a dashboard error answer says when the error isn't one it means to show (issue #864): never its message. */
-export const INTERNAL_ERROR_TEXT = 'the dashboard hit an internal error; the detail is in its log on the machine';
-
-/**
- * The request handler's last answer to an error (issue #864): a UserFacingError's status and vetted text, and for
- * anything else a 500 with INTERNAL_ERROR_TEXT, the detail (which may name a path under the instance home, a file's
- * text or a child's stderr) going to the dashboard's own log on the machine only. The log names the route by method
- * and path, never the query, which can hold a key.
- */
-export function errorAnswer(e: unknown, req: { method?: string | undefined }, pathname: string, log: (line: string) => void = (l) => console.error(l)): { status: number; body: { error: string } } {
-  const shown = UserFacingError.shown(e);
-  if (shown) return { status: shown.status, body: { error: shown.text } };
-  try {
-    log(`dashboard: ${req.method ?? '?'} ${pathname} failed: ${e instanceof Error ? (e.stack ?? `${e.name}: ${e.message}`) : String(e)}`);
-  } catch {
-    // A log that throws never turns the fixed answer into a crash.
-  }
-  return { status: 500, body: { error: INTERNAL_ERROR_TEXT } };
 }
 
 export function startDashboard(opts: DashboardOptions): Promise<{ server: Server; url: string; keyFile: string; token: string; close: () => Promise<void> }> {
