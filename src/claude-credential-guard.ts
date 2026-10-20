@@ -6,6 +6,7 @@
 // So every request body the dashboard reads goes through this first: one that holds a token from `claude
 // setup-token`, or the one-time code Anthropic's sign-in page shows to paste, is refused before any route sees it,
 // whatever the route. Nothing is stored, and the refusal is a fixed text that never quotes the value.
+import { userFacing } from './user-facing-error.js';
 
 /** A token from `claude setup-token` (sk-ant-oat01-...), anywhere in a string. */
 const SETUP_TOKEN_IN = /sk-ant-oat[0-9]{2}-[A-Za-z0-9_-]{20}/;
@@ -15,12 +16,6 @@ const LOGIN_CODE_VALUE = /^[A-Za-z0-9_-]{20,}#[A-Za-z0-9_-]{20,}$/;
 export const CREDENTIAL_REFUSED =
   "that holds a Claude credential (a setup token, or a sign-in code), and the dashboard never takes one: install it at a root shell on the machine (credentials.sh <name> claude), or sign in there as the agent user; nothing was stored";
 
-export class ClaudeCredentialRefused extends Error {
-  readonly status = 400;
-  constructor() {
-    super(CREDENTIAL_REFUSED);
-  }
-}
 
 /**
  * The routes earlier versions took a Claude credential on: a switch's token, a new profile's token, a relayed
@@ -53,8 +48,11 @@ export function holdsClaudeCredential(v: unknown, depth = 0): boolean {
   return false;
 }
 
-/** Throw ClaudeCredentialRefused when the value holds a Claude credential; else return it as it is. */
+/**
+ * Throw a 400 with CREDENTIAL_REFUSED when the value holds a Claude credential; else return it as it is. It is a
+ * UserFacingError (src/user-facing-error.ts), so the dashboard's outer catch shows the page the refusal (issue #864).
+ */
 export function refuseClaudeCredential<T>(v: T): T {
-  if (holdsClaudeCredential(v)) throw new ClaudeCredentialRefused();
+  if (holdsClaudeCredential(v)) throw userFacing(400, CREDENTIAL_REFUSED);
   return v;
 }
