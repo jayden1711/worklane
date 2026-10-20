@@ -96,6 +96,7 @@ import { flakyView, releaseByOwner } from './flaky.js';
 import { harnessEvalView } from './harness-evals/score.js';
 import { learningsView, promoteRefusal } from './learnings.js';
 import { delegationView } from './delegation.js';
+import { valueRoute } from './value-report-route.js';
 import { assertLoopbackHost, breakGlassAllowed, DEVICE_HEADER, DEVICE_VIEWS, FRESH_HEADER, cachedRoles, isOwner, isWriter, LOGIN_HEADER, mayAnswerKind, repoPermission, validLogin, type ConsoleSession, type Role, type RoleOf, type SessionOf } from './dashboard-auth.js';
 import { handleAskRoute } from './console/routes.js';
 import { ADD_PROJECT_EVENTS, addProjectManual, addProjectView } from './console/add-project.js';
@@ -1944,6 +1945,7 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           if (!mayReadThroughput(who.role)) return json(res, 403, { error: writersOnly('the metrics are', who) });
           return json(res, 200, { ...deliveryMetrics(eventCache.all(), { budgetS: opts.cfg.project.metrics.slow_test_budget_s }), definitions: METRICS_DEFINITIONS });
         }
+        if (url.pathname === '/api/value') { const v = valueRoute({ method: req.method ?? '', role: who.role, login: who.login, events: eventCache.all(), query: url.searchParams }); return json(res, v.status, v.body); } // #708: owners and writers only
         // Flaky tests (src/flaky.ts): what is quarantined, why, its issue and sightings, and the flake rate. The owners'
         // and writers' to read; only an owner clears a test from quarantine, audited.
         // Harness evals (src/harness-evals/): each run's success rate, cost, wall-clock and human interventions, and the

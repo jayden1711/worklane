@@ -125,6 +125,7 @@ Every release, newest first: the PRs merged since the previous one, and what cha
 
 ### Guardrail changes: what each one does
 
+- **A value report, for owners and writers only (#708).** `GET /api/value` and the page at `/machine/reports/value` show, for 7, 30 or 90 days: PRs the engine merged on its own vs held and the hold rate, held reasons by kind, what became of held PRs, PRs held only by the kill switch, review hours saved (an estimate, with its formula and constants), and main red, reverts and fix-forward after merges. A viewer gets a 403 with nothing but the error; the report is read-only, from the event log alone, and the scheduled public report is unchanged.
 - **A `.gitattributes` or `.gitmodules` can't hide a change from the review levels (#693, #802).**
   - The changed-files reader reads every change as text, whatever the attributes say: no textconv, no external diff, no user attributes file, no replace refs, and every submodule link. A `-diff` file holding `DROP TABLE` is L3 `deletes-data`, and its lines count.
   - The new category `diff-hiding-attributes` is always L3 and in the merge policy's floor. No `review.yaml` can drop it or put it in `merge.loosened`.
