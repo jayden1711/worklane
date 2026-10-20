@@ -344,8 +344,9 @@ test("turning auto_merge off (and land_mode back to pr, main_watch back to auto)
 
 test("auto_merge OFF from the dashboard works with root's lock held by a live writer, with one a dead writer left, with an oversized and with a corrupt policy.yaml: through root's helper to the kill switch, and the engine reads off in all four (#726 round 4)", { skip }, () => {
   const states: [string, (m: ReturnType<typeof machineInstance>) => () => void][] = [
-    ['off-live', () => { const h = liveHolder(); writeFileSync(join(POLICY_ROOT_DIR, '.off-live.lock'), h.line); return h.stop; }],
-    ['off-dead', () => { const r = spawnSync(process.execPath, ['-e', '']); writeFileSync(join(POLICY_ROOT_DIR, '.off-dead.lock'), `${r.pid} gone\n`); return () => {}; }],
+    // onRealMachine: throws unless root's directory is inside this test's system root (#815).
+    ['off-live', () => { const h = liveHolder(); onRealMachine(POLICY_ROOT_DIR); writeFileSync(join(POLICY_ROOT_DIR, '.off-live.lock'), h.line); return h.stop; }],
+    ['off-dead', () => { const r = spawnSync(process.execPath, ['-e', '']); onRealMachine(POLICY_ROOT_DIR); writeFileSync(join(POLICY_ROOT_DIR, '.off-dead.lock'), `${r.pid} gone\n`); return () => {}; }],
     ['off-huge', (m) => { coordinatorWrites(m, `${POLICY}# ${'x'.repeat(2 * 1024 * 1024)}\n`); return () => {}; }],
     ['off-corrupt', (m) => { coordinatorWrites(m, 'version: 1\nbudget: [ {{{ :\n'); return () => {}; }],
   ];
