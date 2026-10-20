@@ -261,7 +261,7 @@ The next step reads the new config with no restart and no `git pull`.
 | step | mode | without the page |
 |---|---|---|
 | Tools: git, gitleaks, claude (and gh, locally) | local, server | `worklane init --yes (local: the same pinned tools); on a server, scripts/setup/tools.sh through bootstrap.sh --hardened` |
-| Signed in to Claude | local | `claude auth login (in a terminal, as this user)` |
+| Signed in to Claude | local | `claude auth login (in a terminal, as this user); an API key: worklane init --answer agent-runtime=api_key --answer api-key-file=<path>` |
 | The agents' Claude login | server | `scripts/setup/credentials.sh <name> claude (paste the token claude setup-token prints at its hidden prompt), or scripts/setup/add-project.sh <name> <owner/repo> at a root shell (its claude-token step)` |
 | Signed in to GitHub (gh), able to push | local | `gh auth login --web (in a terminal, as this user)` |
 | The repo has a GitHub origin | local | `git remote add origin https://github.com/<owner>/<name>.git, then git fetch origin` |
