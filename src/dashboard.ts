@@ -61,6 +61,7 @@ import { networkFilePath, networkPolicy } from './testrun/network.js';
 import { testSlotCap, testSlotsHeld } from './testrun/slots.js';
 import { FULL_RUN_LOCK } from './testrun/run.js';
 import { healthView } from './health.js';
+import { firstTaskCard } from './first-task-progress.js';
 import { pauseOf, usageView } from './usage-limit.js';
 import { authHoldsOf, signinFailedView } from './claude-auth-failure.js';
 import { requestAuthRecheck } from './claude-auth-recheck.js';
@@ -2116,7 +2117,9 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           // #468: the drafted config held for its preview, and every config PR as it stands (merged wherever: synced here).
           const held = opts.instance ? null : draftView(opts.root, readInitState(join(opts.stateDir, INIT_FILE))?.autoConfig?.draft);
           const autoConfig = view.autoConfig ? { ...view.autoConfig, held } : view.autoConfig;
-          return json(res, 200, { ...view, autoConfig, configPrs: configPrsNow(who, fresh), start: firstRunStart(opts), canStart: isOwnerHere, actions, canAct: isOwnerHere, policy, repoConfig: opts.setupMode ? null : repoConfig, diskFloor: opts.setupMode ? null : diskFloorNow(opts, opts.diskFree), ...setup });
+          // #741: the issue the first-task form filed, followed through its events to its PR (writers only, as this route is).
+          const firstTask = opts.setupMode ? null : eventCache.memo('firstTaskProgress', (ev) => firstTaskCard(ev, { local: !opts.instance, repo: opts.cfg.project.project.repo || null }));
+          return json(res, 200, { ...view, autoConfig, configPrs: configPrsNow(who, fresh), start: firstRunStart(opts), canStart: isOwnerHere, actions, canAct: isOwnerHere, policy, repoConfig: opts.setupMode ? null : repoConfig, diskFloor: opts.setupMode ? null : diskFloorNow(opts, opts.diskFree), firstTask, ...setup });
         }
         // Setup mode (src/setup-mode.ts): the origin, auto-config's answers and draft, the setup PR's merge. Owners only;
         // without confirm, what it would do; every run and refusal audited.
