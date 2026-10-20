@@ -1,0 +1,4 @@
+### Guardrail changes: what each one does
+
+- **The security pages, their citations test, the adversarial suite and the Dockerfile wait for the owner (#858).** In the engine's own repo, a change to `docs/guardrails.md`, `docs/security*.md`, `SECURITY.md`, `test/docs-guardrails.test.ts`, anything under `test/adversarial/`, or the root `Dockerfile` (and `Dockerfile.<name>`) is now self-modification: L3, and never auto-merged, whatever `review.yaml` says. Before, a docs-only or tests-only change to them was L0 and could merge by itself. A managed app's files of the same names keep the categories its own `review.yaml` gives them.
+- The engine's own `review.yaml` also holds a bare `deploy` path, the root compose files (`compose.*`, `docker-compose.*`), `dockerfile*` and `Containerfile*` under `engine-guards`. These aren't locked in code yet.
