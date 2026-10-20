@@ -1,7 +1,7 @@
 // Every action is a typed event. Projections (task state, dashboard,
 // reports) are folds over these; nothing keeps private state.
 import { z } from 'zod';
-import { STAGES } from '../stage-label.js';
+import { STAGES } from '../stage-names.js';
 import { HOLD_KINDS } from '../governor-holds.js';
 
 const issue = z.number().int().positive();

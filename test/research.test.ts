@@ -6,13 +6,12 @@ import { join } from 'node:path';
 import { BRAND } from '../src/brand.js';
 import { loadConfig } from '../src/config/load.js';
 import { runHook } from '../src/hook.js';
+import { blockedHost, RESEARCH_ROOT_ENV, RESEARCH_TOOLS } from '../src/guard/research.js';
 import {
   acceptResearch,
-  blockedHost,
   RESEARCH_DEFAULT_CAPS,
   RESEARCH_PROMPT,
   RESEARCH_SCHEMA,
-  RESEARCH_TOOLS,
   ResearchMeter,
   researchCapHold,
   researchComment,
@@ -23,7 +22,6 @@ import {
   researchUsageToday,
   RESEARCH_LANE,
   RESEARCH_REPO_LANE,
-  RESEARCH_ROOT_ENV,
   writeResearchBundle,
 } from '../src/research.js';
 import { researchLanes, type Instance } from '../src/instance.js';
