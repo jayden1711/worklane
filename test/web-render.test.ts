@@ -28,6 +28,8 @@ import { tailscaleView, type TailscaleStatus } from '../src/tailscale-setup.js';
 import { raiseIncident, resolveIncident } from '../src/watchdog/incidents.js';
 import { METRICS_DEFINITIONS, trustForViewer, trustView } from '../src/trust.js';
 import { deliveryMetrics } from '../src/merge-metrics.js';
+import { FIRST_TASK_FILED, firstTaskProgress } from '../src/first-task-progress.js';
+import type { StoredEvent } from '../src/events/types.js';
 import { VIEWER_EVENTS } from '../src/viewer-events.js';
 import { firstRunView } from '../src/init.js';
 import { checkSetup } from '../src/setup-steps.js';
@@ -1549,6 +1551,83 @@ test("the first-run page: every setup step checked live, grouped, done or not do
   // Anyone but the owner and the writers: told, not asked.
   assert.match(r.renderFirstRunPage(asOther), /data-testid="first-run-refused"[^>]*>The first-run checklist is for the instance(&#x27;|')s owners and writers/);
   assert.doesNotMatch(r.renderFirstRunPage(asOwner), /first-run-refused/);
+});
+
+/** A local first run with each step before Start set done (or not), Start itself and every step after it not done. */
+function beforeStart(done: (id: string) => boolean) {
+  const f = firstRun(join(tmpdir(), 'no-such-init.json'), { root: '/r', repo: 'example-org/example-shop', instance: null });
+  const ids = f.setup!.groups.flatMap((g) => g.steps.map((s) => s.id));
+  const at = ids.indexOf('service');
+  assert.ok(at > 0 && ids.indexOf('first-task') > at, 'Start comes before Your first task, in screen order');
+  const before = new Set(ids.slice(0, at));
+  return { ...f, setup: { ...f.setup!, groups: f.setup!.groups.map((g) => ({ ...g, steps: g.steps.map((s) => ({ ...s, done: before.has(s.id) ? done(s.id) : false })) })) } };
+}
+const START_WARNING = /required steps? (isn(&#x27;|')t|aren(&#x27;|')t) done yet: the coordinator may stop at/;
+
+test('#741 the Start card counts only the steps before Start: every one of them done and Your first task not, it warns of nothing', () => {
+  const f = beforeStart(() => true);
+  const html = r.renderFirstRun(f);
+  assert.match(html, /data-step="first-task" data-status="todo"/, 'Your first task is not done');
+  assert.match(html, /data-testid="first-run-start-button"/);
+  assert.doesNotMatch(html, START_WARNING, 'a step that comes after Start is not one the coordinator stops at');
+});
+
+test('#741 the Start card still warns of a required step before Start that is not done, as before', () => {
+  const f = beforeStart((id) => id !== 'claude-login');
+  const html = r.renderFirstRun(f);
+  const start = html.slice(html.indexOf('data-testid="first-run-start"'));
+  assert.match(start, /1 required step isn(&#x27;|')t done yet: the coordinator may stop at it\./, 'Claude login, before Start, counts; Your first task, after it, does not');
+});
+
+/** Fixture events, as the coordinator records them, for the first task's card. */
+function cardEvents(steps: [string, object][]): StoredEvent[] {
+  const t0 = Date.parse('2026-10-19T09:00:00.000Z');
+  return steps.map(([type, payload], i) => ({ id: i + 1, ts: new Date(t0 + i * 60_000).toISOString(), type, actor: 'c', source: 'coordinator', payload }) as unknown as StoredEvent);
+}
+
+test('#741 the First task card: the filed issue\'s stages from its events, its PR linked, a held PR\'s plain words and what lets it through, every estimate labelled; none before one is filed', () => {
+  const f = firstRun(join(tmpdir(), 'no-such-init.json'), { root: '/r', repo: 'example-org/example-shop', instance: null });
+  assert.doesNotMatch(r.renderFirstRun({ ...f, firstTask: null }), /first-task-card/, 'nothing filed: no card');
+  const H = 'abc1234';
+  const url = 'https://github.com/example-org/example-shop/pull/41';
+  const filed: [string, object] = ['dashboard.audit', { login: 'example-owner', role: 'owner', via: 'session', instance: null, action: FIRST_TASK_FILED, detail: { issue: 7 } }];
+  // Just filed: waiting, each estimate labelled by its basis (here, the tick; with no earlier task, none, or a guess).
+  const fresh = firstTaskProgress(cardEvents([filed]), { local: true })!;
+  const waiting = r.renderFirstRun({ ...f, firstTask: fresh });
+  assert.match(waiting, /data-testid="first-task-card" data-issue="7" data-outcome="open"/);
+  assert.match(waiting, /data-stage="claimed" data-state="waiting"[\s\S]*?data-testid="first-task-estimate" data-basis="tick">Estimate: within about 65 s of the coordinator running/);
+  assert.match(waiting, /data-stage="pr" data-state="waiting"[\s\S]*?data-basis="guess">Guess: 15-60 minutes/);
+  assert.doesNotMatch(waiting, /data-basis="(tick|median|none|guess)">(?!Estimate: |Guess: )/, 'every estimate says it is one');
+  // Followed to a held PR.
+  const held = firstTaskProgress(
+    cardEvents([
+      filed,
+      ['issue.seen', { issue: 7, title: 'Round totals', labels: ['ready'], author: 'example-owner', owner: null, actionable: true, why: '' }],
+      ['issue.claimed', { issue: 7, instance: 'local', lease: H, base: H, owner: 'example-owner' }],
+      ['run.started', { issue: 7, role: 'worker', model: 'sonnet', worktree: '/stand-in', pid: 1, pgid: 1, attempt: 1 }],
+      ['run.finished', { issue: 7, role: 'worker', reason: 'succeeded', detail: '' }],
+      ['eval.verdict', { issue: 7, head: H, patch_hash: 'h', patch_correct: true, test_correct: true, confidence: 'high', advice: '' }],
+      ['pr.opened', { issue: 7, number: 41, url, head: H, draft: false }],
+      ['pr.status', { issue: 7, number: 41, head: H, ready: true, reasons: [], checks: [{ name: 'test', outcome: 'pass' }] }],
+      ['merge.decided', { issue: 7, number: 41, head: H, auto: false, reasons: ['auto-merge is off for this instance (policy.yaml auto_merge)', 'big: 500 changed lines (over 400)'] }],
+    ]),
+    { local: true, repo: 'example-org/example-shop' },
+  )!;
+  const html = r.renderFirstRun({ ...f, firstTask: held });
+  assert.match(html, /data-testid="first-task-card" data-issue="7" data-outcome="held"[\s\S]*?#7/);
+  // Read-only, and no free text: no control, and not even the issue's title.
+  const from = html.indexOf('data-testid="first-task-card"');
+  const card = html.slice(from, html.indexOf('data-testid="first-run-', from));
+  assert.ok(card.includes('first-task-hold'), 'the whole card, up to the next first-run section');
+  assert.doesNotMatch(card, /<button|<form|<input|<select|<textarea|Round totals/);
+  assert.deepEqual([...html.matchAll(/data-testid="first-task-stage" data-stage="([a-z]+)" data-state="([a-z]+)"/g)].map((m) => `${m[1]}:${m[2]}`), ['claimed:done', 'worker:done', 'evaluator:done', 'pr:done', 'checks:done', 'merge:held']);
+  assert.match(html, /data-stage="evaluator"[\s\S]*?approved, confidence high/);
+  assert.match(html, /<a href="https:\/\/github\.com\/example-org\/example-shop\/pull\/41"[^>]*data-testid="first-task-pr-link">PR #41<\/a>/);
+  assert.match(html, /data-testid="first-task-hold" data-kind="policy-off"><p[^>]*>Local mode: every PR waits for you\.[\s\S]*?What lets it through: Review the PR and merge it yourself on GitHub\./);
+  assert.match(html, /data-testid="first-task-hold" data-kind="big"><p[^>]*>The change is over this repo(&#x27;|')s size limit[\s\S]*?What lets it through: Split it/);
+  assert.doesNotMatch(html, /policy\.yaml|500 changed lines/, 'the plain words, not the raw reasons');
+  // The card sits after Start: a step of the page's, not a new one.
+  assert.ok(html.indexOf('data-testid="first-task-card"') > html.indexOf('data-testid="first-run-start"'));
 });
 
 test("the first-run page, a Fix the dashboard does itself: its plan shown first, then a confirmation; the owners only; why not, where it can't run", () => {

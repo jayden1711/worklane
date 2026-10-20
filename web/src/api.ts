@@ -1099,6 +1099,8 @@ export interface FirstRun {
   start: FirstRunStart;
   /** Whether this viewer may press Start (the instance's owners). */
   canStart: boolean;
+  /** #741: the issue the first-task form filed, followed to its PR (src/first-task-progress.ts); null before one is filed, absent from older servers. */
+  firstTask?: FirstTaskProgress | null;
   /** Each open Fix action's plan, by action id (src/setup-actions.ts), shown before it runs. */
   actions?: Record<string, FirstRunActionPlan>;
   /** Whether this viewer may run a Fix action (the instance's owners). */
@@ -1203,6 +1205,18 @@ export interface FirstTaskValues {
   context?: string;
 }
 export const getFirstTask = () => api<FirstTaskInfo>('/api/first-run/first-task');
+/** #741: the first task's stages, from the engine's events only (src/first-task-progress.ts); an estimate always says its basis. */
+export interface FirstTaskProgress {
+  issue: number;
+  filedAt: string | null;
+  pr: { number: number; url: string | null } | null;
+  stages: { id: 'claimed' | 'worker' | 'evaluator' | 'pr' | 'checks' | 'merge'; title: string; state: 'waiting' | 'running' | 'done' | 'failed' | 'held'; detail: string; at: string | null; estimate: { basis: 'tick' | 'guess' | 'none'; text: string } | null }[];
+  blocked: { at: string | null } | null;
+  question: { at: string | null } | null;
+  /** The held PR's reasons in plain words (src/hold-words.ts): why it waits, and what lets it through. */
+  holds: { kind: string; why: string; through: string }[];
+  outcome: 'open' | 'merged' | 'held' | 'closed' | 'landed' | 'blocked';
+}
 /** confirm false: the issue as it would be filed (checked with the coordinator's parser); true: filed, with `ready`. */
 export const fileFirstTask = (values: FirstTaskValues, confirm: boolean) => api<{ ok: boolean; title: string; body: string; number?: number; url?: string | null; labelCreated?: boolean; confirmed: boolean }>('/api/first-run/first-task', { method: 'POST', body: JSON.stringify({ values, confirm }) });
 /** #468: each open issue the harness isn't working on, and why. */
