@@ -250,7 +250,7 @@ test("server: the dashboard never runs claude auth login and never takes the age
   }
 });
 
-test("server, the terminal's way: credentials.sh claude takes the setup token at a hidden prompt (stdin without a terminal), checks it and installs it as the agent's own login; no /login session; bootstrap says so", () => {
+test("server, the terminal's way: credentials.sh claude takes the setup token at a hidden prompt (stdin without a terminal), checks it and installs it as the agent's own login; no /login session; the bootstrap points at add-project.sh, whose Claude step says so", () => {
   const sh = readFileSync(join(repoRoot, 'scripts', 'setup', 'credentials.sh'), 'utf8');
   const at = sh.indexOf('\n  claude)');
   const block = sh.slice(at, sh.indexOf(';;', at));

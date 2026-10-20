@@ -299,9 +299,12 @@ test('bootstrap --hardened: Linux with apt and systemd only; the setup scripts i
   // #739: one answer for the instance's credentials, Add project (GitHub's manifest flow for the App, root installing
   // the agents' Claude login): never an App made by hand or a token pasted from here.
   assert.doesNotMatch(r.out, /github-app <app-id>|claude setup-token|credentials\.sh shop (github-app|claude)/);
-  assert.match(r.out, /\n== next: Add project, for shop's credentials, checkout and service\n/);
-  assert.match(r.out, /Setup console's Add project with shop and acme\/shop/);
-  assert.match(r.out, /\n {3}sudo bash scripts\/setup\/add-project\.sh shop acme\/shop\n/);
+  // A machine's first project has no dashboard of its own yet (the hub runs with no instance; Add project's page is an
+  // instance dashboard's): the root shell's add-project.sh leads, right under the heading; the dashboard is for later ones.
+  assert.match(r.out, /\n== next: Add project, for shop's credentials, checkout and service\n {3}[^\n]*root shell[^\n]*\n {3}sudo bash scripts\/setup\/add-project\.sh shop acme\/shop\n/);
+  const block = r.out.slice(r.out.indexOf('\n== next: Add project'));
+  assert.ok(block.indexOf('add-project.sh shop acme/shop') < block.indexOf("Setup console's Add project"), 'the root-shell command before the dashboard');
+  assert.match(block, /Later projects: the dashboard's Setup console's Add project/);
   const after = m.run('--hardened', '--dry-run', '--after-credentials', 'shop', 'acme/shop');
   // An install whose credentials were stored by hand keeps going: --after-credentials stays, and says nothing of them.
   assert.equal(after.code, 0, after.out);
@@ -576,4 +579,7 @@ test("#739: the quickstart's server install gives the same one answer for the cr
   const step = server.slice(server.indexOf("3. **The instance's credentials"), server.indexOf('\n4. '));
   assert.match(step, /\*\*Add project\*\*/);
   assert.match(step, /sudo bash scripts\/setup\/add-project\.sh <name> <owner\/repo>/);
+  // The first project's route is the root shell (no instance dashboard yet); the dashboard's comes after it.
+  assert.match(step, /first project, run it at a root shell/);
+  assert.ok(step.indexOf('add-project.sh <name>') < step.indexOf('Setup console'), 'the root-shell command before the dashboard');
 });
