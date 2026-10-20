@@ -27,6 +27,8 @@ const LEAVE_OUT: [RegExp, string][] = [
   [/\.log(\.\d+)?$/, 'a log'],
   [/(^|\/)(worktrees|slots|tasks|dep-cache|chat\/pending)\//, "this machine's working files"],
   [/\.tmp$|-wal$|-shm$|-journal$/, 'a temporary file'],
+  // Removed with Siri (#743): its device store is never carried, so no bundle brings a live device to an older engine.
+  [/^siri(\/|$)|^siri-gateway-token$/, 'removed with Siri (#743)'],
 ];
 
 export interface BundleFile {
@@ -127,6 +129,11 @@ export function importBundle(o: { file: string; stateDir: string; root: string |
       // init's checklist is the machine's it was walked on; an instance walks its own (server mode).
       if (o.instance && rel === 'init.json') {
         r.skipped.push({ path: f.path, why: "init's checklist from the other machine; run init here" });
+        continue;
+      }
+      // Removed with Siri (#743): an older bundle's device token store and gateway token are never brought back.
+      if (rel === 'siri-gateway-token' || rel.startsWith('siri/')) {
+        r.skipped.push({ path: f.path, why: 'Siri was removed; its tokens are not imported' });
         continue;
       }
       const to = join(o.stateDir, rel);

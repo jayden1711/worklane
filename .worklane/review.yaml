@@ -4,7 +4,8 @@ version: 1
 categories:
   # The engine itself, its setup scripts and templates, CI, dependencies and this
   # folder: always the owner's call (owner's choice: broad).
-  engine: [src/**, scripts/**, templates/**, desktop/**, .github/**, package.json, package-lock.json, .worklane/**]
+  # deploy/**: the engine's deployment manifests set its isolation and exposure (also locked in code, src/review.ts).
+  engine: [src/**, scripts/**, templates/**, desktop/**, deploy/**, .github/**, package.json, package-lock.json, .worklane/**]
   # Whose signed tag release.yml stages on npm, and the check that enforces it: the owner's alone. Also locked in
   # code (src/review.ts self-modification, "who may sign a release"), so dropping it here changes nothing.
   release-signing: [.github/release-signers, scripts/verify-release-tag*]

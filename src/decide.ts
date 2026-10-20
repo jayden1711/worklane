@@ -9,7 +9,6 @@ import type { ReviewConfig } from './config/schema.js';
 import type { EventLog } from './events/log.js';
 import type { EventPayload } from './events/types.js';
 import { mayAnswerKind, OWNER_DECISIONS, type Role } from './dashboard-auth.js';
-import { BY_VOICE, voiceExclusion } from './voice.js';
 
 /** How the person came in: a hub session, the owner's break-glass on this machine, a chat thread, or the CLI as root or the coordinator user. */
 export type Via = 'session' | 'break-glass' | 'discord' | 'cli';
@@ -68,7 +67,7 @@ export function firstAnswer(log: EventLog, id: string): EventPayload<'decision.a
  * is one of its options; refused with 409 (naming who decided) when it is answered already. Records
  * decision.answered and the audit entry together (`audit`: more for the audit entry, such as the CLI's OS user).
  */
-export function answerDecision(log: EventLog, o: { id: string; answer: string; who: Answerer; instance: string | null; repo: string; voice?: boolean; approvals?: ReviewConfig['approvals']; audit?: Record<string, unknown> }): DecideResult {
+export function answerDecision(log: EventLog, o: { id: string; answer: string; who: Answerer; instance: string | null; repo: string; approvals?: ReviewConfig['approvals']; audit?: Record<string, unknown> }): DecideResult {
   const { who } = o;
   log.db.exec('BEGIN IMMEDIATE');
   try {
@@ -82,19 +81,11 @@ export function answerDecision(log: EventLog, o: { id: string; answer: string; w
       return refuse(403, OWNER_DECISIONS.has(q.kind) ? `@${who.login} can't answer this: ${q.kind === 'plan' ? 'a held plan' : q.kind === 'automation' ? "an automation's run" : 'a high-risk merge'} is for the instance's owners (admin on ${o.repo}); @${who.login} is a ${who.role}` : `@${who.login} can't answer this: the owners and writers of ${o.repo} answer it; @${who.login} is a ${who.role}`);
     }
     if (!o.answer || !q.options.includes(o.answer)) return refuse(400, `answer must be one of ${q.options.join(', ')}`);
-    // By voice (src/voice.ts): an owner's approval only, and never of what voice may not approve. Checked here, on the
-    // decision as recorded, so no route and no client can answer one by voice that the rule refuses.
-    if (o.voice) {
-      if (who.role !== 'owner') return refuse(403, `@${who.login} can't approve by voice: voice approvals are the instance's owners' only (admin on ${o.repo})`);
-      if (o.answer !== 'approve') return refuse(400, 'by voice, a decision can only be approved; answer it otherwise with a click');
-      const never = voiceExclusion(q, log.read(0, ['plan.posted']).map((e) => e.payload as EventPayload<'plan.posted'>));
-      if (never) return refuse(403, `not approvable by voice: ${never}`);
-    }
     const first = firstAnswer(log, o.id);
     if (first) return refuse(409, `already answered by @${first.by} (${first.answer})`, { by: first.by, answer: first.answer });
     // With the role this server read, so the coordinator acts on a writer's answer (an intake approval) too.
     const e = log.append('decision.answered', { id: o.id, by: who.login, answer: o.answer, role: who.role === 'owner' ? 'owner' : 'writer' }, who.login, 'human');
-    auditWrite(log, who, o.instance, 'decision.answered', { ...o.audit, id: o.id, kind: q.kind, answer: o.answer, ...(o.voice ? { by: BY_VOICE } : {}) });
+    auditWrite(log, who, o.instance, 'decision.answered', { ...o.audit, id: o.id, kind: q.kind, answer: o.answer });
     log.db.exec('COMMIT');
     return { ok: true, event: e.id, kind: q.kind };
   } catch (e) {

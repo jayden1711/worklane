@@ -110,7 +110,7 @@ export interface DecisionDetail {
 
 /** What happens if nobody picks anything: nothing times out. */
 export function ifNothing(kind: DetailKind, issue: number | null): string {
-  if (kind === 'automation') return "It expires: unanswered for a day, the automation doesn't run for this trigger. Only an owner answers it, here on the dashboard (never from chat or voice).";
+  if (kind === 'automation') return "It expires: unanswered for a day, the automation doesn't run for this trigger. Only an owner answers it, here on the dashboard (never from chat).";
   const where = issue !== null && kind !== 'intake' && kind !== 'delegation' && kind !== 'pr' ? `, here, or in a comment on #${issue} (\`/${BRAND.cli} <option>\`)` : kind === 'pr' ? ' on GitHub' : ', here';
   const what: Record<DetailKind, string> = {
     land: "the change doesn't land",

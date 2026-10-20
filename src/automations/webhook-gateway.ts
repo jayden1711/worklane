@@ -1,7 +1,7 @@
 // The hub's hooks gateway (docs/automations.md): a listener of its own, on loopback (HOOKS_GATEWAY_PORT), that
 // `tailscale serve --https=8444` publishes on the tailnet (tailscale.sh serve-hooks; never Funnel), answering exactly
 //   POST /hook/<instance>/<automation id>     a webhook delivery, passed to that instance's /api/hooks/<id>
-// It is the Siri gateway's shape (src/siri/gateway.ts), and holds no more:
+// It holds no more than this:
 // - its own server and handler: no session, cookie, CSRF, static file or sign-in route is reachable here;
 // - built from each instance's hooks gateway token file only (never a dashboard token), which works on that
 //   instance's /api/hooks/ routes and nowhere else; it holds no webhook secret, so it can't sign a delivery: the
@@ -18,7 +18,7 @@ import { assertLoopbackHost } from '../dashboard-auth.js';
 import { identifyDevice, type DeviceOptions } from '../console/terminal-devices.js';
 import { BODY_MAX, HOOK_HEADERS } from './webhook.js';
 
-/** The gateway's loopback port, beside Siri's (4397), the break-glass (4398) and the hub (4399). */
+/** The gateway's loopback port, beside the break-glass (4398) and the hub (4399); 4397 was the removed Siri gateway's. */
 export const HOOKS_GATEWAY_PORT = 4396;
 /** The tailnet HTTPS port tailscale serve publishes it on. */
 export const HOOKS_TAILNET_PORT = 8444;

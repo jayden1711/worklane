@@ -1,6 +1,6 @@
 // A webhook automation's deliveries, on the instance's own dashboard (docs/automations.md). They reach it only from
 // the hub's hooks gateway (src/automations/webhook-gateway.ts: the tailnet, never Funnel), on /api/hooks/<id>, before
-// and instead of the dashboard's own auth, like Siri's routes (src/siri/instance.ts):
+// and instead of the dashboard's own auth:
 // - only the hooks gateway token works here (its own file, which the hub's viewer may read with dashboards.sh
 //   --hooks); it is never the dashboard token, works on no other route, and the dashboard key works on none of these;
 // - the instance, not the hub, checks the delivery: the automation exists, is on and takes webhooks; the timestamp is
@@ -43,7 +43,7 @@ export const STORM_REFUSALS = 50;
 const DELIVERY = /^[A-Za-z0-9_-]{8,80}$/;
 const REFUSED = JSON.stringify({ error: 'refused' });
 
-/** The instance's hooks gateway token, made the first time (0600; never the dashboard's or Siri's). */
+/** The instance's hooks gateway token, made the first time (0600; never the dashboard's). */
 export function hooksGatewayToken(stateDir: string, others: string[]): string {
   const f = join(stateDir, HOOKS_GATEWAY_TOKEN_FILE);
   if (existsSync(f)) {
