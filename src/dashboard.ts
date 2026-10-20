@@ -791,9 +791,24 @@ export type ClearResult =
   | { ok: true; reason: string; how: 'requested'; acknowledged: boolean; request: number; last: MainMeasured | null }
   | { ok: false; status: 409; error: string };
 
-/** The coordinator's last recorded measurement of the default branch (merge.main_measured), or null when there is none. */
-export function lastMainMeasured(events: readonly StoredEvent[]): MainMeasured | null {
-  const e = events.filter((x) => x.type === 'merge.main_measured').at(-1);
+/** The stop in force, as a resume request names it: its merge.stopped when that is the log's last stop or resume, else the stop file's identity. */
+export type StopKey = { stop: number | null; file: string };
+
+/** The stop file's identity: sha256 of its bytes (src/coordinator/merge-flow.ts reads it the same way). */
+export const stopFileId = (raw: string) => createHash('sha256').update(raw).digest('hex');
+
+/**
+ * The coordinator's last measurement of the default branch for the stop in force (merge.main_measured made for it,
+ * after it), or null when there is none: a measurement from before this stop never shows (#776 round 2).
+ */
+export function lastMainMeasured(events: readonly StoredEvent[], key: StopKey): MainMeasured | null {
+  const e = events
+    .filter((x) => x.type === 'merge.main_measured')
+    .filter((x) => {
+      const p = x.payload as EventPayload<'merge.main_measured'>;
+      return key.stop !== null ? p.stop === key.stop && x.id > key.stop : p.stop == null && p.file === key.file;
+    })
+    .at(-1);
   if (!e) return null;
   const p = e.payload as EventPayload<'merge.main_measured'>;
   return { at: e.ts, tip: p.tip, green: p.green, why: p.why };
@@ -819,9 +834,11 @@ export function clearAutoMergeStop(o: { stateDir: string; eventsDb: string; by: 
       log.append('merge.resumed', { detail: `@${o.by} cleared the stop on the dashboard (${stop.reason.slice(0, 300)})` }, o.by, 'human');
       return { ok: true, reason: stop.reason, how: 'as_before' };
     }
-    const stopId = stops.filter((e) => e.type === 'merge.stopped').at(-1)?.id ?? null;
-    const request = log.append('merge.resume_requested', { stop: stopId, ack: o.ack ?? null }, o.by, 'human');
-    return { ok: true, reason: stop.reason, how: 'requested', acknowledged: !!o.ack, request: request.id, last: lastMainMeasured(log.read(0, ['merge.main_measured'])) };
+    // The stop in force: the log's last merge.stopped if it is the last stop or resume, else (a stop file with no
+    // merge.stopped of its own) the file itself, by its identity.
+    const key: StopKey = { stop: last?.type === 'merge.stopped' ? last.id : null, file: stopFileId(stop.raw) };
+    const request = log.append('merge.resume_requested', { stop: key.stop, file: key.file, ack: o.ack ?? null }, o.by, 'human');
+    return { ok: true, reason: stop.reason, how: 'requested', acknowledged: !!o.ack, request: request.id, last: lastMainMeasured(log.read(0, ['merge.main_measured']), key) };
   } finally {
     log.close();
   }

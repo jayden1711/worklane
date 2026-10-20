@@ -3,6 +3,7 @@
 import { z } from 'zod';
 import { STAGES } from '../stage-label.js';
 import { HOLD_KINDS } from '../governor-holds.js';
+import { isRecordedAck } from '../ack-reason.js';
 
 const issue = z.number().int().positive();
 const sha = z.string().regex(/^[0-9a-f]{7,40}$/);
@@ -676,14 +677,19 @@ export const EventSchemas = {
   /**
    * An admin asked on the dashboard to resume a stop the default branch caused (#776, on #727): the dashboard records
    * the request and never judges checks; the coordinator resumes once it measures main green, or on `ack`, a typed
-   * reason. `stop`: the merge.stopped it asks to clear (null: none logged). The actor is who asked.
+   * reason that passes the dashboard's own validator (src/ack-reason.ts), enforced here too. `stop`: the merge.stopped
+   * it asks to clear (null: none logged for the stop file in force); `file`: the stop file's identity (sha256 of its
+   * bytes), which keys a stop with no merge.stopped. The actor is who asked; the coordinator acts only on a human owner's.
    */
-  'merge.resume_requested': z.strictObject({ stop: z.number().int().positive().nullable(), ack: z.string().nullable() }),
+  'merge.resume_requested': z.strictObject({ stop: z.number().int().positive().nullable(), file: z.string().regex(/^[0-9a-f]{64}$/).nullable(), ack: z.string().refine(isRecordedAck, 'not an acknowledgement: a typed reason of at least 10 visible characters, nothing that prints blank').nullable() }),
+  /** A resume request the coordinator won't act on, and why (not a human owner's, an ack that isn't one, ...). */
+  'merge.resume_ignored': z.strictObject({ request: z.number().int().positive(), why: z.string() }),
   /**
    * The coordinator measured the default branch's tip for a stop it caused (src/auto-merge-resume.ts): the required
    * checks under the pinned-source verdict. `tip` null: unreadable. `request`: the resume request it answers, if any.
+   * `stop` / `file`: the stop it was measured for (its merge.stopped, or the stop file's identity when none is logged).
    */
-  'merge.main_measured': z.strictObject({ tip: sha.nullable(), green: z.boolean(), why: z.string().nullable(), request: z.number().int().positive().nullable() }),
+  'merge.main_measured': z.strictObject({ tip: sha.nullable(), green: z.boolean(), why: z.string().nullable(), request: z.number().int().positive().nullable(), stop: z.number().int().positive().nullable().optional(), file: z.string().nullable().optional() }),
   /**
    * Main watch (src/main-watch.ts): how the default branch is guarded. github: GitHub enforces its protection;
    * main_watch: GitHub doesn't, and the watch checks every new commit; off: neither (`detail` says why).

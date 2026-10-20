@@ -176,12 +176,6 @@ export function AcceptedMerges({ protection }: { protection: Protection }) {
   );
 }
 
-/** Whether a refused resume opens the acknowledgement form: a 409 whose body asks for one (`needsAck`), never another refusal (#776). */
-export function opensAckForm(e: unknown): boolean {
-  const x = e as { status?: unknown; body?: { needsAck?: unknown } } | null;
-  return !!x && x.status === 409 && x.body?.needsAck === true;
-}
-
 /**
  * What counts toward the reason's minimum, as the server counts it (src/auto-merge-resume.ts): letters, digits,
  * punctuation and symbols that print (no default-ignorables such as the Hangul fillers, no braille blank).
@@ -220,8 +214,8 @@ function ResumeControls({ onCleared }: { onCleared?: (() => void) | undefined })
       }
       onCleared?.();
     } catch (e) {
+      // A refusal (a reason the server won't take, not stopped any more) keeps the form as it was.
       setError((e as Error).message);
-      setNeedsAck(opensAckForm(e));
     } finally {
       setBusy(false);
     }

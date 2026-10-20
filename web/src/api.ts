@@ -895,7 +895,7 @@ export class ApiError extends Error {
   constructor(
     message: string,
     readonly status: number,
-    /** The refusal's JSON body, when it had one (e.g. `needsAck` on a resume, #776). */
+    /** The refusal's JSON body, when it had one. */
     readonly body: Record<string, unknown> = {},
   ) {
     super(message);

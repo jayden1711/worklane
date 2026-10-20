@@ -33,7 +33,9 @@ import { redactString } from '../events/redact.js';
 import { takeOpsPost } from '../watchdog/post.js';
 import { createWorktree, removeWorktree } from '../worktrees.js';
 import { approveMerge, mergeApproval } from '../decide.js';
-import { mayAnswerKind, type Role } from '../dashboard-auth.js';
+import { isOwner, mayAnswerKind, type Role } from '../dashboard-auth.js';
+import { isRecordedAck } from '../ack-reason.js';
+import { createHash } from 'node:crypto';
 import type { ChatPerson } from '../intake/people.js';
 import { mayMerge, mergesPending, mergeTurn, PrBatcher, PR_BATCH_EVENTS } from './pr-batch.js';
 import { FixRuns } from './fix-runs.js';
@@ -863,7 +865,8 @@ export abstract class MergeFlow extends FixRuns {
   protected async watchMerges() {
     const stopped = this.d.log.read(0, ['merge.stopped', 'merge.resumed']).at(-1);
     if (stopped?.type === 'merge.stopped' && !existsSync(this.stopFile)) await this.stopGoneByHand(stopped.id, stopped.payload as EventPayload<'merge.stopped'>);
-    else if (stopped?.type === 'merge.stopped') await this.resumeRequested(stopped.id);
+    // The stop in force answers resume requests: its merge.stopped, or, with none logged for it, the stop file itself.
+    else if (existsSync(this.stopFile)) await this.resumeRequested(stopped?.type === 'merge.stopped' ? stopped.id : null, stopped?.id ?? 0);
     const judged =new Set(this.d.log.read(0, ['merge.main_result']).map((e) => (e.payload as { sha: string }).sha));
     const now = Date.now();
     for (const e of this.d.log.read(0, ['merge.done'])) {
@@ -959,38 +962,95 @@ export abstract class MergeFlow extends FixRuns {
   }
 
   /** mainNow, recorded (merge.main_measured), so the dashboard can show the coordinator's last look; `request`: the request it answers. */
-  private async measuredMain(request: number | null): Promise<MainState> {
+  private async measuredMain(request: number | null, key: { stop: number | null; file: string | null } = { stop: null, file: null }): Promise<MainState> {
     const main = await this.mainNow();
-    this.emit('merge.main_measured', { tip: main.tip, green: main.green, why: main.green ? null : main.why.slice(0, 1000), request });
+    this.emit('merge.main_measured', { tip: main.tip, green: main.green, why: main.green ? null : main.why.slice(0, 1000), request, stop: key.stop, file: key.stop === null ? key.file : null });
     return main;
   }
 
+  /** The stop file's bytes and identity (sha256, as the dashboard keys a request), or null when it can't be read. */
+  private stopFileNow(): { raw: string; id: string } | null {
+    let raw: string;
+    try {
+      raw = readFileSync(this.stopFile, 'utf8');
+    } catch {
+      return existsSync(this.stopFile) ? { raw: '', id: createHash('sha256').update('').digest('hex') } : null;
+    }
+    return { raw, id: createHash('sha256').update(raw).digest('hex') };
+  }
+
   /**
-   * An admin's resume requests on the dashboard (merge.resume_requested) for the stop in force, `stopId` (#776 on #727,
-   * the owner's decision): the coordinator is the only judge. It measures main's tip (recorded) and resumes only if it is
-   * green under the pinned-source verdict, or on a recorded acknowledgement; otherwise the stop stays, and the request
-   * is measured again every RESUME_MEASURE_MS. A request for an older stop, or a stop that changes while main is
-   * measured, resumes nothing.
+   * Why the coordinator won't act on resume request `e`, or null: it acts only on a person's request (`source: human`)
+   * whose actor is an owner of the repo now, looked up fresh as the dashboard looks them up (roleOf; with none, the
+   * instance's default owner), with an acknowledgement, if any, that passes the dashboard's own validator. Fail closed.
    */
-  private async resumeRequested(stopId: number) {
-    const requests = this.d.log.read(stopId, ['merge.resume_requested']).filter((e) => {
+  private async requestRefusal(e: StoredEvent): Promise<string | null> {
+    if (e.source !== 'human') return `not a person's request (source ${e.source}, actor ${e.actor})`;
+    const ack = (e.payload as EventPayload<'merge.resume_requested'>).ack;
+    if (ack !== null && !isRecordedAck(ack)) return 'its acknowledgement is not a typed reason the dashboard accepts';
+    let owner = false;
+    if (!this.d.roleOf) owner = e.actor.toLowerCase() === this.d.cfg.project.owners.default.toLowerCase();
+    else {
+      try {
+        owner = isOwner(await this.d.roleOf(e.actor, { fresh: true }));
+      } catch {
+        owner = false;
+      }
+    }
+    return owner ? null : `@${e.actor} is not an owner of ${this.d.cfg.project.project.repo} now`;
+  }
+
+  /**
+   * An admin's resume requests on the dashboard (merge.resume_requested) for the stop in force (#776 on #727, the
+   * owner's decision): the coordinator is the only judge. The stop in force is the log's last merge.stopped (`stopId`)
+   * or, with none logged for it, the stop file by its identity (#776 round 2: never left unanswered). Each request is
+   * acted on only if it is a human owner's (requestRefusal; otherwise logged as ignored, with why). It measures main's
+   * tip (recorded) and resumes only if green under the pinned-source verdict, or on a recorded acknowledgement;
+   * otherwise the stop stays, measured again every RESUME_MEASURE_MS. A request for another stop, or a stop that
+   * changes while main is measured, resumes nothing.
+   */
+  private async resumeRequested(stopId: number | null, since: number) {
+    const file = this.stopFileNow();
+    if (!file) return;
+    const named = this.d.log.read(since, ['merge.resume_requested']).filter((e) => {
       const p = e.payload as EventPayload<'merge.resume_requested'>;
-      return p.stop === null || p.stop === stopId;
+      return stopId !== null ? p.stop === stopId : p.stop === null && p.file === file.id;
     });
-    const latest = requests.at(-1);
+    const ignored = new Set(this.d.log.read(since, ['merge.resume_ignored']).map((e) => (e.payload as EventPayload<'merge.resume_ignored'>).request));
+    const pending = named.filter((e) => !ignored.has(e.id));
+    const latest = pending.at(-1);
     if (!latest) return;
-    const acked = requests.filter((e) => (e.payload as EventPayload<'merge.resume_requested'>).ack).at(-1);
+    const hasAck = pending.some((e) => (e.payload as EventPayload<'merge.resume_requested'>).ack !== null);
     const looked = this.d.log.read(latest.id, ['merge.main_measured']).at(-1);
-    if (!acked && looked && Date.now() - Date.parse(looked.ts) < RESUME_MEASURE_MS) return;
-    const asked = acked ?? latest;
+    if (!hasAck && looked && Date.now() - Date.parse(looked.ts) < RESUME_MEASURE_MS) return;
+    // Who asked is checked at the moment it is acted on; anything else is logged as ignored and resumes nothing.
+    const valid: StoredEvent[] = [];
+    for (const e of pending) {
+      const why = await this.requestRefusal(e);
+      if (why) this.emit('merge.resume_ignored', { request: e.id, why });
+      else valid.push(e);
+    }
+    const acked = valid.filter((e) => (e.payload as EventPayload<'merge.resume_requested'>).ack !== null).at(-1);
+    const asked = acked ?? valid.at(-1);
+    if (!asked) return;
     const ack = acked ? (acked.payload as EventPayload<'merge.resume_requested'>).ack : null;
-    const v = await mayResume({ gated: true, ack, measure: () => this.measuredMain(asked.id) });
-    // A new stop (or a resume) logged while main was measured: this request was for the stop before it.
-    if (this.d.log.read(0, ['merge.stopped', 'merge.resumed']).at(-1)?.id !== stopId || !existsSync(this.stopFile)) return;
+    const key = { stop: stopId, file: file.id };
+    const v = await mayResume({ gated: true, ack, measure: () => this.measuredMain(asked.id, key) });
+    // A new stop (or a resume) logged, or the stop file changed, while main was measured: this request was for the stop before it.
+    const lastNow = this.d.log.read(0, ['merge.stopped', 'merge.resumed']).at(-1);
+    if ((stopId !== null ? lastNow?.id !== stopId : (lastNow?.id ?? 0) > since) || this.stopFileNow()?.id !== file.id) return;
     if (!v.ok) return;
     const main = v.main!;
     const how = v.how === 'green' && main.green ? `with ${this.branch} green on ${main.tip.slice(0, 8)}, measured by the coordinator` : `acknowledging ${this.branch} isn't green (${main.green ? 'green' : main.why.slice(0, 300)}${main.tip ? `, tip ${main.tip.slice(0, 8)}` : ''}): "${(ack ?? '').slice(0, 500)}"`;
-    const reason = (this.d.log.read(stopId - 1, ['merge.stopped'])[0]?.payload as EventPayload<'merge.stopped'> | undefined)?.reason ?? 'stopped';
+    let reason = 'stopped';
+    if (stopId !== null) reason = (this.d.log.read(stopId - 1, ['merge.stopped'])[0]?.payload as EventPayload<'merge.stopped'> | undefined)?.reason ?? reason;
+    else {
+      try {
+        reason = String((JSON.parse(file.raw) as { reason?: unknown }).reason ?? reason);
+      } catch {
+        reason = 'the stop file is unreadable';
+      }
+    }
     // The file first: a crash before the log line leaves no file and the stop logged, which stopGoneByHand measures again.
     rmSync(this.stopFile, { force: true });
     this.emit('merge.resumed', { detail: `@${asked.actor} resumed auto-merge from the dashboard, ${how} (${reason.slice(0, 300)})` });
@@ -1003,7 +1063,7 @@ export abstract class MergeFlow extends FixRuns {
    */
   private async stopGoneByHand(id: number, p: EventPayload<'merge.stopped'>) {
     if (!stopWaitsForGreen(p.by)) return this.emit('merge.resumed', { detail: 'the operator cleared the stop' });
-    const main = await this.measuredMain(null);
+    const main = await this.measuredMain(null, { stop: id, file: null });
     // The dashboard removes the file before it logs merge.resumed: a resume (or a new stop) since means it wasn't a hand.
     const last = this.d.log.read(0, ['merge.stopped', 'merge.resumed']).at(-1);
     if (last?.id !== id || existsSync(this.stopFile)) return;

@@ -118,32 +118,8 @@ export function mainNow(o: { repo: string; remote: string; branch: string; requi
   return measureMain({ branch: o.branch, required: o.required, tip: () => remoteTip(o.repo, o.remote, o.branch, o.timeoutMs !== undefined ? { timeoutMs: o.timeoutMs } : {}), checks: o.checks });
 }
 
-export const ACK_MIN = 10;
-export const ACK_MAX = 500;
-
-/** Characters that print nothing or change how text around them reads: control, format (zero-width, bidi), private-use, unassigned. */
-const UNREADABLE = /\p{C}/u;
-/**
- * What counts toward the minimum: letters, digits, punctuation and symbols that print (not spaces, not combining marks
- * alone, not default-ignorables such as the Hangul fillers U+115F, U+1160, U+3164, U+FFA0, nor the braille blank U+2800).
- * web/src/components/Protection.tsx counts the same way.
- */
-const VISIBLE = /(?![\p{Default_Ignorable_Code_Point}⠀])[\p{L}\p{N}\p{P}\p{S}]/gu;
-
-/**
- * The acknowledgement a resume request carries (`{ acknowledge: { reason } }`): none, a typed reason, or why it is
- * refused. A bare `true`, an empty or short reason, or one with characters that don't print is no acknowledgement.
- * Whitespace (newlines too) is folded to single spaces; nothing else is changed, so what is recorded is what was typed.
- */
-export function acknowledgement(body: unknown): { reason: string | null } | { error: string } {
-  const a = (body as { acknowledge?: unknown } | null)?.acknowledge;
-  if (a === undefined || a === null) return { reason: null };
-  const reason = typeof (a as { reason?: unknown }).reason === 'string' ? (a as { reason: string }).reason.replace(/\s+/g, ' ').trim() : '';
-  if (UNREADABLE.test(reason)) return { error: 'the reason has characters that don\'t print (control, format such as zero-width or bidi, or unassigned): type it plainly' };
-  if ((reason.match(VISIBLE)?.length ?? 0) < ACK_MIN) return { error: `an acknowledgement needs a typed reason of at least ${ACK_MIN} visible characters` };
-  if (reason.length > ACK_MAX) return { error: `the reason is too long (at most ${ACK_MAX} characters)` };
-  return { reason };
-}
+// The typed reason's one validator (src/ack-reason.ts), shared with the event schema and the coordinator.
+export { ACK_MAX, ACK_MIN, acknowledgement } from './ack-reason.js';
 
 export type ResumeVerdict =
   | { ok: true; how: 'as_before' | 'green' | 'acknowledged'; main: MainState | null }
