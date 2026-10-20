@@ -323,7 +323,12 @@ It prints keys, counts and digests only. As a backstop, every line the `bench` c
 - decoded until it is stable: percent, `\u`, `\x`, numeric entities, and the named entities for `_`, `-` and the like. A word still decoding after 16 rounds is withheld;
 - NFKC-normalised, and with combining marks removed;
 - with each non-ASCII character read as a possible look-alike, by its own role: a dash as `-`, other punctuation, a symbol or a modifier letter as `_`, a digit as `0`, another letter as `a`;
-- **read loosely**, which closes non-ASCII look-alikes by construction rather than by a list. Every non-ASCII character that is neither a digit nor a combining mark (letters, punctuation, symbols, format and invisible characters, private-use and unassigned ones) may stand in any `_` place, any `-` place, any letter of the repo's name, or before the digits. A non-ASCII digit may stand for any digit, and a combining mark is dropped.
+- **read loosely**, which closes non-ASCII look-alikes by construction rather than by a list. In some loose reading, every non-ASCII character of any kind may stand in any `_` place, any `-` place, any letter of the repo's name, or before the digits:
+  - letters, punctuation, symbols, format and invisible characters, private-use and unassigned ones, always;
+  - a combining mark, or a character carrying marks (`̲`, `l̲`);
+  - a non-ASCII digit.
+
+  A non-ASCII digit may also stand for any digit.
 
 A word over 512 characters is withheld without being judged, so the check stays linear and fails closed.
 

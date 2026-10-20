@@ -213,8 +213,16 @@ const DIGIT = '\x02';
  * becomes DIGIT; a mark is dropped. looseShaped lets ANY fill any `_` place, any `-` place, any place in the repo's name,
  * and places in the digit run, so no look-alike needs a role picked for it: the class is closed by construction.
  */
-const loose = (s: string): string =>
-  s.replace(/[^\x20-\x7e]/gu, (ch) => (/\p{M}/u.test(ch) ? '' : /[\p{Nd}\p{No}]/u.test(ch) ? DIGIT : ANY));
+const loose = (s: string, digit = DIGIT): string =>
+  s.replace(/[^\x20-\x7e]/gu, (ch) => (/\p{M}/u.test(ch) ? '' : /[\p{Nd}\p{No}]/u.test(ch) ? digit : ANY));
+
+/**
+ * The loose readings of `s` (#884 round 5). A combining mark can stand for a character too (`̲` drawn as `_`), so marks
+ * are read three ways: dropped (loose), each mark as ANY, and each character carrying marks, with its marks, as one ANY
+ * (`l̲` drawn as `_`). And a non-ASCII digit can stand for a separator, so one more reading takes digits as ANY. With
+ * these, every non-ASCII character, whatever its kind, can fill any `_` or `-` place in some reading.
+ */
+const looseReadings = (s: string): string[] => [loose(s), loose(s.replace(/\p{M}/gu, ANY)), loose(s.replace(/[^\p{M}]\p{M}+/gu, ANY)), loose(s, ANY)];
 
 /** `_1776_`, an instance image name's mark, read loosely: ANY in an underscore's place, DIGIT in a digit's. Fixed width. */
 const LOOSE_1776 = /[_\x01][1\x02][7\x02][7\x02][6\x02][_\x01]/;
@@ -262,8 +270,7 @@ export function taskShaped(word: string): boolean {
     f = next;
   }
   for (const s of forms) {
-    const l = loose(s);
-    if (LOOSE_1776.test(l) || looseTail(l)) return true;
+    for (const l of looseReadings(s)) if (LOOSE_1776.test(l) || looseTail(l)) return true;
   }
   return false;
 }
