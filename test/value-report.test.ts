@@ -6,9 +6,13 @@ import assert from 'node:assert/strict';
 import { chmodSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { loadConfig } from '../src/config/load.js';
-import { startDashboard } from '../src/dashboard.js';
+import { parseDocument } from 'yaml';
+import { ConfigInvalid, loadConfig } from '../src/config/load.js';
+import { autoMergeState, startDashboard } from '../src/dashboard.js';
 import { EventLog } from '../src/events/log.js';
+import { initInstance, loadInstance, readPolicy } from '../src/instance.js';
+import { planPolicy, PolicyEditError } from '../src/policy-edit.js';
+import { changeSetting } from '../src/settings.js';
 import { instructionEvalReasons, mergeDecision, outsidePlanReasons, type MergeInput } from '../src/merge-policy.js';
 import { computeLevel } from '../src/review.js';
 import { BRAND } from '../src/brand.js';
@@ -21,7 +25,7 @@ const HOUR = 3_600_000;
 const at = (hoursAgo: number) => new Date(NOW.getTime() - hoursAgo * HOUR).toISOString();
 const sha = (c: string) => c.repeat(40).slice(0, 40);
 const ev = (ts: string, type: string, payload: object): ValueEvent => ({ ts, type, payload });
-const report = (events: ValueEvent[], days = 30, constants = DEFAULT_VALUE_CONSTANTS) => valueReport(events, { now: NOW, days, constants });
+const report = (events: ValueEvent[], days = 30, constants = DEFAULT_VALUE_CONSTANTS, from: 'policy' | 'default' = 'default') => valueReport(events, { now: NOW, days, estimate: { constants, from } });
 
 const OFF_INSTANCE = 'auto-merge is off for this instance (policy.yaml auto_merge)';
 const OFF_REPO = 'auto-merge is off for this repo (review.yaml merge.auto)';
@@ -215,8 +219,10 @@ test('hours saved: equals the formula on fixture pr.stats; carries the formula a
   assert.deepEqual(r.hoursSaved.constants, { base_min: 10, per_100_lines_min: 5, cap_min: 60 });
   assert.match(r.hoursSaved.formula, /min\(cap_min, base_min \+ per_100_lines_min × changed_lines \/ 100\) \/ 60/);
   assert.match(r.hoursSaved.label, /estimate/);
-  const other = report(events, 30, { base_min: 30, per_100_lines_min: 5, cap_min: 60 });
+  assert.equal(r.hoursSaved.constantsFrom, 'default');
+  const other = report(events, 30, { base_min: 30, per_100_lines_min: 5, cap_min: 60 }, 'policy');
   assert.equal(other.hoursSaved.estimate, (40 + 60) / 60);
+  assert.equal(other.hoursSaved.constantsFrom, 'policy');
 });
 
 test('spend: run.cost of the auto-merged PRs\' issues, per auto-merged PR; none is null, not 0', () => {
@@ -312,25 +318,140 @@ test('a hold the engine merged on approval, then a later auto decision: never au
   assert.equal(r.counts.autoNotMerged, 1);
 });
 
+// --- The estimate's constants: an owner setting in policy.yaml (slice 3) -------------------------------------------
+
+/** A policy within the example project's config (agents.yaml: daily_budget_usd 40, workers max 4), auto-merge on. */
+const POLICY = 'version: 1\nbudget: { daily_usd: 50 }\nagents: { max_workers: 4 }\nland_mode: pr\nauto_merge: true\n';
+const estimateYaml = (base: string, per100: string, cap: string) => `value_report:\n  hours_estimate: { base_min: ${base}, per_100_lines_min: ${per100}, cap_min: ${cap} }\n`;
+function policyAt(extra: string): string {
+  const f = join(mkdtempSync(join(tmpdir(), 'value-policy-')), 'policy.yaml');
+  writeFileSync(f, POLICY + extra, { mode: 0o600 });
+  return f;
+}
+/** policy.yaml's value_report, read untyped (so this also runs on a tree without it). */
+const valueReportOf = (p: unknown) => (p as Record<string, unknown> | undefined)?.value_report;
+
+test('policy.yaml value_report.hours_estimate: the owner\'s constants load, bounds included; without it there is none', () => {
+  const r = readPolicy(policyAt(estimateYaml('15', '2.5', '90')));
+  assert.deepEqual(r.errors, []);
+  assert.deepEqual(valueReportOf(r.policy), { hours_estimate: { base_min: 15, per_100_lines_min: 2.5, cap_min: 90 } });
+  const edges = readPolicy(policyAt(estimateYaml('0', '0', '480')));
+  assert.deepEqual(edges.errors, [], 'zero and the 480-minute bound are allowed');
+  const none = readPolicy(policyAt(''));
+  assert.deepEqual(none.errors, []);
+  assert.equal(valueReportOf(none.policy), undefined);
+});
+
+test('invalid constants are refused as the rest of the policy is: named by path, the instance does not load, never a silent default', () => {
+  const bad: [string, string, string][] = [
+    ['base_min', estimateYaml('-1', '5', '60'), 'negative'],
+    ['base_min', estimateYaml('.nan', '5', '60'), 'NaN'],
+    ['cap_min', estimateYaml('10', '5', '.inf'), 'infinite'],
+    ['per_100_lines_min', estimateYaml('10', '-.inf', '60'), 'minus infinity'],
+    ['cap_min', estimateYaml('10', '5', '480.5'), 'over the 480-minute bound'],
+    ['per_100_lines_min', estimateYaml('10', '100000', '60'), 'far over the bound'],
+    ['base_min', estimateYaml('"10"', '5', '60'), 'a string'],
+    ['base_min', estimateYaml('null', '5', '60'), 'null'],
+    ['per_100_lines_min', 'value_report:\n  hours_estimate: { base_min: 10, cap_min: 60 }\n', 'missing: all three or none'],
+  ];
+  for (const [key, yaml, why] of bad) {
+    const r = readPolicy(policyAt(yaml));
+    assert.equal(r.policy, undefined, why);
+    assert.ok(r.errors.some((e) => e.path === `value_report.hours_estimate.${key}`), `${why}: ${JSON.stringify(r.errors)}`);
+  }
+  const extra = readPolicy(policyAt('value_report:\n  hours_estimate: { base_min: 10, per_100_lines_min: 5, cap_min: 60, bonus_min: 99 }\n'));
+  assert.equal(extra.policy, undefined);
+  assert.ok(extra.errors.some((e) => e.path === 'value_report.hours_estimate'), JSON.stringify(extra.errors));
+  const unknown = readPolicy(policyAt('value_report:\n  hours: 3\n'));
+  assert.equal(unknown.policy, undefined);
+  assert.ok(unknown.errors.some((e) => e.path === 'value_report'), JSON.stringify(unknown.errors));
+  // The instance itself refuses to load, as for any bad policy key.
+  const dir = mkdtempSync(join(tmpdir(), 'value-inst-'));
+  const home = initInstance('shop', mkdtempSync(join(tmpdir(), 'value-repo-')), 'example-org/example-shop', dir, 'shop-agent', '/home/example');
+  writeFileSync(join(home, 'policy.yaml'), POLICY + estimateYaml('10', '5', '-0.5'));
+  let errs: { path: string }[] = [];
+  assert.throws(() => loadInstance('shop', dir), (e) => {
+    errs = (e as ConfigInvalid).errors;
+    return e instanceof ConfigInvalid;
+  });
+  assert.ok(errs.some((e) => e.path === 'value_report.hours_estimate.cap_min'), JSON.stringify(errs));
+});
+
+test('the route: the policy\'s constants, said so; no instance policy, the defaults, said so; a bad policy is refused, never estimated with the defaults', () => {
+  const events = [stats(1, 100, 100), decided(1, true, []), engineMerged(1)]; // 200 changed lines
+  const route = (policyFile: string | null, role: 'owner' | 'viewer' = 'owner') => valueRoute({ method: 'GET', role, login: 'p', events, query: new URLSearchParams(), now: NOW, policyFile } as Parameters<typeof valueRoute>[0]);
+  type Hours = { hoursSaved: { estimate: number; constants: unknown; constantsFrom: unknown } };
+  const own = route(policyAt(estimateYaml('15', '2.5', '90')));
+  assert.equal(own.status, 200);
+  const h = (own.body as Hours).hoursSaved;
+  assert.deepEqual(h.constants, { base_min: 15, per_100_lines_min: 2.5, cap_min: 90 });
+  assert.equal(h.constantsFrom, 'policy');
+  assert.equal(h.estimate, (15 + 2.5 * 2) / 60);
+  for (const [policyFile, why] of [[policyAt(''), 'a policy that sets none'], [null, 'a checkout: no instance policy']] as const) {
+    const r = route(policyFile);
+    assert.equal(r.status, 200, why);
+    assert.deepEqual((r.body as Hours).hoursSaved.constants, DEFAULT_VALUE_CONSTANTS, why);
+    assert.equal((r.body as Hours).hoursSaved.constantsFrom, 'default', why);
+  }
+  const gone = join(mkdtempSync(join(tmpdir(), 'value-gone-')), 'policy.yaml');
+  for (const [policyFile, says] of [
+    [policyAt(estimateYaml('-1', '5', '60')), /value_report\.hours_estimate\.base_min/],
+    [policyAt(estimateYaml('10', '5', '.inf')), /value_report\.hours_estimate\.cap_min/],
+    [policyAt('value_report:\n  hours_estimate: { base_min: 10 }\n'), /value_report\.hours_estimate\.per_100_lines_min/],
+    [gone, /missing/],
+  ] as const) {
+    const r = route(policyFile);
+    assert.equal(r.status, 500, String(says));
+    assert.deepEqual(Object.keys(r.body as object), ['error'], 'no figures from a policy that does not load');
+    assert.match((r.body as { error: string }).error, says);
+    assert.match((r.body as { error: string }).error, /policy/);
+    assert.ok(!(r.body as { error: string }).error.includes(policyFile), 'the key and the problem, never where the instance home is');
+    // A viewer is refused first, as ever: nothing about the policy reaches them.
+    const v = route(policyFile, 'viewer');
+    assert.equal(v.status, 403);
+    assert.doesNotMatch((v.body as { error: string }).error, /value_report|missing/);
+  }
+});
+
+test('the setting changes no gate: auto-merge is the same with or without it, a bad one only turns it off, and no dashboard form or setting writes it', () => {
+  const stateDir = mkdtempSync(join(tmpdir(), 'value-state-'));
+  const without = autoMergeState({ policyFile: policyAt(''), repoAuto: true, stateDir });
+  assert.equal(without.on, true);
+  for (const est of [estimateYaml('0', '0', '0'), estimateYaml('480', '480', '480')]) assert.deepEqual(autoMergeState({ policyFile: policyAt(est), repoAuto: true, stateDir }), without, est);
+  const broken = autoMergeState({ policyFile: policyAt(estimateYaml('10', '5', '9999')), repoAuto: true, stateDir });
+  assert.equal(broken.on, false, 'a policy that does not load fails closed');
+  // Only policy.yaml's own editor sets it: the dashboard's Policy form and Settings refuse the key.
+  const cfg = loadConfig(exampleProject().dir);
+  const path = policyAt(estimateYaml('15', '2.5', '90'));
+  for (const key of ['value_report.hours_estimate.base_min', 'value_report', 'hours_estimate.cap_min']) {
+    assert.throws(() => planPolicy({ path, cfg, values: { [key]: 1 } }), (e) => e instanceof PolicyEditError && /not editable here/.test(e.message), key);
+    assert.throws(() => changeSetting({ policyPath: path, cfg, eventsDb: join(stateDir, 'events.db'), key, value: 1, by: 'example-owner', owner: true }), /unknown setting/, key);
+  }
+  // An edit the form does make keeps the owner's constants as they were.
+  const plan = planPolicy({ path, cfg, values: { auto_merge: false } });
+  assert.deepEqual(valueReportOf(parseDocument(plan.text).toJS()), { hours_estimate: { base_min: 15, per_100_lines_min: 2.5, cap_min: 90 } });
+  assert.equal(readFileSync(path, 'utf8'), POLICY + estimateYaml('15', '2.5', '90'), 'planning writes nothing');
+});
+
 // --- The route ----------------------------------------------------------------------------------------------------
 
 test('valueRoute: owners and writers get the report; a viewer is refused (403, the writers-only message); read-only; days checked', () => {
   const events = [decided(1, true, []), engineMerged(1)];
   for (const role of ['owner', 'writer'] as const) {
-    const r = valueRoute({ method: 'GET', role, login: 'p', events, query: new URLSearchParams(), now: NOW });
+    const r = valueRoute({ method: 'GET', role, login: 'p', events, query: new URLSearchParams(), now: NOW, policyFile: null });
     assert.equal(r.status, 200, role);
     assert.equal((r.body as { counts: { auto: number } }).counts.auto, 1);
   }
   for (const role of ['viewer', null, undefined] as const) {
-    const r = valueRoute({ method: 'GET', role, login: 'someone', events, query: new URLSearchParams(), now: NOW });
+    const r = valueRoute({ method: 'GET', role, login: 'someone', events, query: new URLSearchParams(), now: NOW, policyFile: null });
     assert.equal(r.status, 403, String(role));
     assert.deepEqual(Object.keys(r.body as object), ['error'], 'a refusal carries nothing but the error');
   }
-  assert.equal((valueRoute({ method: 'GET', role: 'viewer', login: 'someone', events, query: new URLSearchParams(), now: NOW }).body as { error: string }).error, "the value report is for the instance's owners and writers (admin or write on its repo); @someone is a viewer");
-  assert.equal(valueRoute({ method: 'POST', role: 'owner', login: 'p', events, query: new URLSearchParams(), now: NOW }).status, 405);
-  assert.equal(valueRoute({ method: 'GET', role: 'owner', login: 'p', events, query: new URLSearchParams('days=7'), now: NOW }).status, 200);
-  assert.equal((valueRoute({ method: 'GET', role: 'owner', login: 'p', events, query: new URLSearchParams('days=7'), now: NOW }).body as { window: { days: number } }).window.days, 7);
-  for (const bad of ['days=0', 'days=-1', 'days=abc', 'days=100000', 'days=7.5']) assert.equal(valueRoute({ method: 'GET', role: 'owner', login: 'p', events, query: new URLSearchParams(bad), now: NOW }).status, 400, bad);
+  assert.equal((valueRoute({ method: 'GET', role: 'viewer', login: 'someone', events, query: new URLSearchParams(), now: NOW, policyFile: null }).body as { error: string }).error, "the value report is for the instance's owners and writers (admin or write on its repo); @someone is a viewer");
+  assert.equal(valueRoute({ method: 'POST', role: 'owner', login: 'p', events, query: new URLSearchParams(), now: NOW, policyFile: null }).status, 405);
+  assert.equal(valueRoute({ method: 'GET', role: 'owner', login: 'p', events, query: new URLSearchParams('days=7'), now: NOW, policyFile: null }).status, 200);
+  assert.equal((valueRoute({ method: 'GET', role: 'owner', login: 'p', events, query: new URLSearchParams('days=7'), now: NOW, policyFile: null }).body as { window: { days: number } }).window.days, 7);
+  for (const bad of ['days=0', 'days=-1', 'days=abc', 'days=100000', 'days=7.5']) assert.equal(valueRoute({ method: 'GET', role: 'owner', login: 'p', events, query: new URLSearchParams(bad), now: NOW, policyFile: null }).status, 400, bad);
 });
 
 /**
@@ -380,6 +501,45 @@ test('GET /api/value through the dashboard: owner and writer 200, a viewer 403 w
     assert.doesNotMatch(JSON.stringify(body), /high-risk|auth/, 'no hold reason reaches a viewer');
     assert.equal((await call('example-owner', '', { method: 'POST', body: '{}' })).status, 405);
     assert.equal((await call('example-owner', '?days=nope')).status, 400);
+    const after = existsSync(calls) ? readFileSync(calls, 'utf8') : '';
+    assert.equal(after, before, 'serving the report ran no host tool');
+  } finally {
+    await d.close();
+    process.env.PATH = path;
+  }
+});
+
+test('GET /api/value on an instance\'s dashboard: the constants come from its policy.yaml, re-read on each request', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'dash-value-policy-'));
+  const log = new EventLog(join(dir, 'events.db'));
+  log.append('pr.stats', { issue: 1, number: 1, head: sha('a'), additions: 100, deletions: 100, files: 1, comments: 0 }, 'coordinator');
+  log.append('merge.decided', { issue: 1, number: 1, head: sha('a'), auto: true, reasons: [] }, 'coordinator');
+  log.append('merge.done', { issue: 1, number: 1, head: sha('a'), sha: sha('1'), url: 'u', title: 't' }, 'coordinator');
+  log.close();
+  const policyFile = policyAt(estimateYaml('15', '2.5', '90'));
+  const { dir: root } = exampleProject();
+  const { bin, log: calls } = standIns();
+  const path = process.env.PATH;
+  process.env.PATH = bin;
+  const d = await startDashboard({ root, cfg: loadConfig(root), eventsDb: join(dir, 'events.db'), stateDir: dir, user: 'example-owner', roleOf: exampleRoles, slotsDir: join(dir, 'slots'), policyFile });
+  const base = d.url.split('/?')[0]!;
+  const get = async () => {
+    const res = await fetch(`${base}/api/value`, { headers: { authorization: `Bearer ${d.token}`, ...asPerson('example-owner') } });
+    return { status: res.status, body: (await res.json()) as { error?: string; hoursSaved?: { constants: unknown; constantsFrom: unknown; estimate: number } } };
+  };
+  try {
+    const before = existsSync(calls) ? readFileSync(calls, 'utf8') : '';
+    const r = await get();
+    assert.equal(r.status, 200);
+    assert.deepEqual(r.body.hoursSaved?.constants, { base_min: 15, per_100_lines_min: 2.5, cap_min: 90 });
+    assert.equal(r.body.hoursSaved?.constantsFrom, 'policy');
+    assert.equal(r.body.hoursSaved?.estimate, 20 / 60);
+    // The owner breaks the file while the dashboard runs: refused at once, not the old constants nor the defaults.
+    writeFileSync(policyFile, POLICY + estimateYaml('15', '2.5', '-90'));
+    const broken = await get();
+    assert.equal(broken.status, 500);
+    assert.match(String(broken.body.error), /value_report\.hours_estimate\.cap_min/);
+    assert.equal(broken.body.hoursSaved, undefined);
     const after = existsSync(calls) ? readFileSync(calls, 'utf8') : '';
     assert.equal(after, before, 'serving the report ran no host tool');
   } finally {
