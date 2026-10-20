@@ -3,6 +3,7 @@
 import { z } from 'zod';
 import { STAGES } from '../stage-names.js';
 import { HOLD_KINDS } from '../governor-holds.js';
+import { isRecordedAck } from '../ack-reason.js';
 
 const issue = z.number().int().positive();
 const sha = z.string().regex(/^[0-9a-f]{7,40}$/);
@@ -666,9 +667,29 @@ export const EventSchemas = {
   'merge.main_result': z.strictObject({ issue, number: z.number().int().positive(), sha, outcome: z.enum(['green', 'red', 'timed_out']), failed: z.array(z.string()), flaky: z.array(z.string()).optional(), quarantined: z.array(z.string()).optional() }),
   /** A wait reached its cap (coordinator/wait-caps.ts): recorded, the owner told, and it waits for them. `number`: the PR, if any. */
   'wait.capped': z.strictObject({ issue, number: z.number().int().positive().nullable(), kind: z.enum(['deferred_landing', 'mergeable_recheck', 'light_check_pending', 'main_checks']), detail: z.string() }),
-  /** Auto-merge stopped for this instance (until the operator clears it); `revert` is the revert PR, if one was opened. */
-  'merge.stopped': z.strictObject({ reason: z.string(), number: z.number().int().positive().nullable(), sha: sha.nullable(), revert: z.string().nullable() }),
+  /**
+   * Auto-merge stopped for this instance (until an admin resumes it); `revert` is the revert PR, if one was opened. `by`:
+   * what stopped it (src/auto-merge-resume.ts; absent on older events, which wait for green main as these do).
+   * `restored`: the stop file was deleted by hand while main wasn't green, so it was written back, and why.
+   */
+  'merge.stopped': z.strictObject({ reason: z.string(), number: z.number().int().positive().nullable(), sha: sha.nullable(), revert: z.string().nullable(), by: z.enum(['red_main', 'main_watch', 'owner']).optional(), restored: z.string().optional() }),
   'merge.resumed': z.strictObject({ detail: z.string() }),
+  /**
+   * An admin asked on the dashboard to resume a stop the default branch caused (#776, on #727): the dashboard records
+   * the request and never judges checks; the coordinator resumes once it measures main green, or on `ack`, a typed
+   * reason that passes the dashboard's own validator (src/ack-reason.ts), enforced here too. `stop`: the merge.stopped
+   * it asks to clear (null: none logged for the stop file in force); `file`: the stop file's identity (sha256 of its
+   * bytes), which keys a stop with no merge.stopped. The actor is who asked; the coordinator acts only on a human owner's.
+   */
+  'merge.resume_requested': z.strictObject({ stop: z.number().int().positive().nullable(), file: z.string().regex(/^[0-9a-f]{64}$/).nullable(), ack: z.string().refine(isRecordedAck, 'not an acknowledgement: a typed reason of at least 10 visible characters, nothing that prints blank').nullable() }),
+  /** A resume request the coordinator won't act on, and why (not a human owner's, an ack that isn't one, ...). */
+  'merge.resume_ignored': z.strictObject({ request: z.number().int().positive(), why: z.string() }),
+  /**
+   * The coordinator measured the default branch's tip for a stop it caused (src/auto-merge-resume.ts): the required
+   * checks under the pinned-source verdict. `tip` null: unreadable. `request`: the resume request it answers, if any.
+   * `stop` / `file`: the stop it was measured for (its merge.stopped, or the stop file's identity when none is logged).
+   */
+  'merge.main_measured': z.strictObject({ tip: sha.nullable(), green: z.boolean(), why: z.string().nullable(), request: z.number().int().positive().nullable(), stop: z.number().int().positive().nullable().optional(), file: z.string().nullable().optional() }),
   /**
    * Main watch (src/main-watch.ts): how the default branch is guarded. github: GitHub enforces its protection;
    * main_watch: GitHub doesn't, and the watch checks every new commit; off: neither (`detail` says why).
