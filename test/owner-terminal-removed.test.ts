@@ -264,11 +264,18 @@ test('upgrade: the updater replaces a live console shell with a stub that refuse
   assert.deepEqual(ownerTerminalLeftovers({ hubUnitFile: m.paths.unit, consoleShell: m.paths.shell }), []);
 });
 
-test('one placeholder version: the CHANGELOG (Upgrading and After install), docs/dashboard.md, the Setup notice and the stub hold it verbatim, with --siri and --hooks and their conditions', () => {
+test('one placeholder version: the CHANGELOG (Upgrading and After install), docs/dashboard.md, the Setup notice and the stub hold it verbatim, with --siri and --hooks and their conditions', async () => {
   assert.match(OWNER_TERMINAL_RERUN, / \[--siri if it has --siri-port\] \[--hooks if it has --hooks-port\] /);
   assert.match(OWNER_TERMINAL_RERUN, /^sudo bash \/opt\/\S+\/current\/scripts\/setup\/dashboards\.sh \[--machine-devices <the hub unit's --console-devices or --machine-devices, if it has one>\] --client-id <its --client-id> --public-url <its --public-url> /);
+  // v0.5.3's notes: its CHANGELOG.md section once released, and until then the notes the release step builds from
+  // changelog.d (the same text it will write there).
   const changelog = readFileSync(join(repoRoot, 'CHANGELOG.md'), 'utf8');
-  const release = changelog.slice(changelog.indexOf('## v0.5.3'), changelog.indexOf('\n## ', changelog.indexOf('## v0.5.3') + 1));
+  const cl = (await import(pathToFileURL(join(repoRoot, 'scripts', 'lib', 'changelog.mjs')).href)) as {
+    sectionFor(changelog: string, version: string): string | null;
+    fragmentNotes(fragments: { name: string; text: string }[]): string;
+    readFragments(dir: string): { name: string; text: string }[];
+  };
+  const release = cl.sectionFor(changelog, '0.5.3') ?? `## v0.5.3\n\n${cl.fragmentNotes(cl.readFragments(join(repoRoot, 'changelog.d')))}\n`;
   const section = (name: string) => {
     const at = release.indexOf(`\n### ${name}\n`);
     assert.ok(at >= 0, `v0.5.3 has ### ${name}`);
