@@ -7,7 +7,7 @@ import { testRunSign } from './system-paths.js';
 import { availableParallelism, homedir, loadavg, userInfo } from 'node:os';
 import { basename, delimiter, dirname, join, posix as posixPath, resolve as resolvePath, sep } from 'node:path';
 import { BRAND } from '../brand.js';
-import { ownEnv } from './own-env.js';
+import { ownEnv, type OwnEnv } from './own-env.js';
 import { outboundEnv } from '../network.js';
 import { safeProjectEnv } from '../project-env.js';
 import { withoutPushGateHatch } from '../guardrails/push-hook.js';
@@ -354,18 +354,21 @@ export function canRunAgents(os: OsKind): boolean {
  * own state dir through a default it fell through to. Outside a test run, as always.
  */
 export function stateDir(): string {
-  const dir = unguardedStateDir();
-  const refusal = testStateRefusal(dir);
+  // WHY (#786): one own-variable snapshot for the dir and its refusal, as slotsDir does: a value on Object.prototype
+  // neither moves the state dir nor, paired with an own-only check, un-refuses it.
+  const env = ownEnv();
+  const dir = unguardedStateDir(env);
+  const refusal = testStateRefusal(dir, env.asProcessEnv());
   if (refusal) throw new TestStateRefused(refusal);
   return dir;
 }
 
-function unguardedStateDir(): string {
-  const override = process.env[`${BRAND.envPrefix}_STATE_DIR`];
+function unguardedStateDir(env: OwnEnv): string {
+  const override = env.get(`${BRAND.envPrefix}_STATE_DIR`);
   if (override) return override;
   if (process.platform === 'darwin') return join(homedir(), 'Library', 'Application Support', BRAND.cli);
-  if (process.platform === 'win32') return join(process.env.LOCALAPPDATA ?? join(homedir(), 'AppData', 'Local'), BRAND.cli);
-  return join(process.env.XDG_STATE_HOME ?? join(homedir(), '.local', 'state'), BRAND.cli);
+  if (process.platform === 'win32') return join(env.get('LOCALAPPDATA') ?? join(homedir(), 'AppData', 'Local'), BRAND.cli);
+  return join(env.get('XDG_STATE_HOME') ?? join(homedir(), '.local', 'state'), BRAND.cli);
 }
 
 /** An OS user's numeric id (POSIX), or null if there is no such user (or on native Windows). */
@@ -807,7 +810,7 @@ export function projectCommand(command: string, runAs?: ProjectRunAs, projectEnv
     LOGNAME: runAs.user,
     // Set by the instance's owner (instance.yaml run_as.path), never by the repo: tests.yaml can't set PATH.
     PATH: runAs.path ?? defaultAgentPath(),
-    LANG: process.env.LANG ?? 'C.UTF-8',
+    LANG: ownEnv().get('LANG') ?? 'C.UTF-8',
     CI: '1',
     // The checkout belongs to the coordinator user: without trusting it, git refuses it as "dubious ownership" and
     // any check that runs git fails. No credential helper: project code never authenticates as the instance.

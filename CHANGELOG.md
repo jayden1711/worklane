@@ -171,7 +171,7 @@ Every release, newest first: the PRs merged since the previous one, and what cha
 - **A viewer's Pull requests page shows each PR's state, never the merge decision (#821).** `GET /api/prs` gave every role why a PR waits (review levels, guard categories, paths, policy states), the fix runs, conflict and light-check detail, refused pushes, auto-merge stops, hotspot holds and the auto-merge state. Anyone who isn't an owner or writer now gets each PR's number, issue, title, link, draft and open, merged or closed, with a phase of waiting, checks, ready, merged or closed, and nothing else: no more than `/api/state` and `/api/events` already show them. Their page shows no head, checks or fix runs, and one "Merged or closed" list. The owner and writers see the page as before.
 - **The engine's security reads of the environment ignore `Object.prototype` (#786).** A variable that isn't set reads as unset, even when code in the process has put a value under that name on `Object.prototype`. This covers:
   - the system root and the test-run marks;
-  - the slot dir and its config, and the instances, init and held-out dirs;
+  - the state dir and its test-run refusal, the slot dir and its config, and the instances, init and held-out dirs;
   - the tool prefix, PATH lookups, and the PATH handed to sudo, git, tar, npm and docker;
   - the Chrome and Git Bash binaries, and the backup dirs;
   - the agent users' homes and `SUDO_USER`;
