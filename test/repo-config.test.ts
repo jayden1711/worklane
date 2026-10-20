@@ -31,6 +31,7 @@ function fixture() {
 
 const probe: SetupProbe = {
   which: (c) => `/stand-in/${c}`,
+  serviceManagerEnv: () => ({ env: {} }),
   run: (cmd, args, o = {}) => {
     if (cmd === 'git') {
       try {

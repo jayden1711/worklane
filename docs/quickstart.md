@@ -8,7 +8,7 @@ You need:
 - macOS or Linux (on Windows, use WSL2 or the Docker image);
 - git, and Node.js 22.13 or newer with npm (on a server, the install script installs Node for you);
 - a GitHub repo you can push to;
-- a Claude login. The wizard has **Sign in to Claude**, or run `claude auth login` yourself. See [auth.md](auth.md).
+- a Claude login: your Claude subscription or an API key. For the subscription, the wizard has **Sign in to Claude**, or run `claude auth login` yourself. For an API key, run `worklane init --answer agent-runtime=api_key --answer api-key-file=<path>`, where the path names a file you own (mode 600) that holds the key. The wizard records only the path, never the key, and the setup PR sets `agent_runtime.kind: api_key`. To let claude read the key, set `"apiKeyHelper": "cat -- <path>"` in your Claude settings. The login must be one the project's `agent_runtime.kind` runs on: the wizard checks this, and the agents refuse any other login. See [auth.md](auth.md).
 
 ## Local or server
 
@@ -134,7 +134,7 @@ The First run page (`/first-run`) lists every setup step, each with its state ch
 | Screen | Mode | What it does |
 |---|---|---|
 | **Tools** | both | Installs a missing gitleaks, Claude Code or gh, from pinned, checksummed downloads (on a server, the install command already did this) |
-| **Sign in to Claude** | local | Runs `claude auth login` for you and relays its sign-in page as a button; Claude Code keeps its own login |
+| **Sign in to Claude** | local | Runs `claude auth login` for you and relays its sign-in page as a button; Claude Code keeps its own login. Done only when the login is one the project's `agent_runtime.kind` runs on (`cli`: claude.ai or oauth_token; `api_key`: api_key or api_key_helper). Otherwise the step says that the agents would refuse the login, and how to fix it |
 | **The agents' Claude login** | server | Whether the agent user is signed in, and the root commands that sign it in on the machine (`credentials.sh <name> claude`, or `claude auth login` as the agent user). The page never takes the token ([auth.md](auth.md)) |
 | **Connect GitHub** | local | Runs `gh auth login --web` and shows its one-time code with a link to GitHub's device page |
 | **GitHub origin, default branch** | local | Picks the repo's GitHub origin and sets the default branch, for a checkout that lacks them |
