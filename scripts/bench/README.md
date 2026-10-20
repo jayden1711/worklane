@@ -228,7 +228,7 @@ The tarball is pinned; its four dependencies (`zod`, `commander`, `node-forge`, 
 
 The clone comes from this repository's own URL: `repository.url` in `package.json`, without its `git+` prefix (written there, not here, so this folder names no project). The pinned commit is a commit on `main` that has `scripts/bench/cli.ts`: for the first preflight, the merge commit of the PR that added it. Every run records the CLI version and the results; keep the commit you used with them.
 
-Replace the two PASTE_ values first. Each command is chained on the one before, so a clone at any other commit is never built or installed:
+If `~/src/bench-engine` already exists (an earlier clone), move it aside first (`mv ~/src/bench-engine ~/src/bench-engine.old`): `git clone` refuses a folder that is there and not empty, and the chain then stops. Replace the two PASTE_ values first. Each command is chained on the one before, so a clone at any other commit is never built or installed:
 
     BENCH_REPO=PASTE_THE_HTTPS_CLONE_URL
     BENCH_SHA=PASTE_THE_40_HEX_PINNED_COMMIT

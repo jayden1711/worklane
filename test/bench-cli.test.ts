@@ -317,7 +317,8 @@ test("round 2: README step 4 installs srt only when the tarball's checksum match
     if (digest) standIn(join(bin, 'openssl'), log, [`process.stdout.write(Buffer.from(${JSON.stringify(digest.toString('base64'))}, 'base64'));`]);
     standIn(join(bin, 'base64'), log, ["const c = []; process.stdin.on('data', (d) => c.push(d)); process.stdin.on('end', () => process.stdout.write(Buffer.concat(c).toString('base64')));"]);
     standIn(join(bin, 'mkdir'), log, ["for (const a of args.filter((x) => !x.startsWith('-'))) fs.mkdirSync(a, { recursive: true });"]);
-    const r = spawnSync('/bin/bash', ['--noprofile', '--norc', '-c', srtStep()], { env: { HOME: home, PATH: bin }, encoding: 'utf8', timeout: 60_000 });
+    // cwd: the temp base, so nothing the block does before its own `cd` lands in the test runner's folder.
+    const r = spawnSync('/bin/bash', ['--noprofile', '--norc', '-c', srtStep()], { cwd: base, env: { HOME: home, PATH: bin }, encoding: 'utf8', timeout: 60_000 });
     return { r, calls: readLog(log) };
   };
   const installs = (calls: string[][]) => calls.filter((a) => a[0] === 'install');
