@@ -15,6 +15,8 @@ const c = (await import(pathToFileURL(join(repoRoot, 'scripts', 'lib', 'changelo
   withSection(existing: string, version: string, section: string): string;
   sectionFor(changelog: string, version: string): string | null;
   handWritten(section: string | undefined): string;
+  notesOf(section: string | undefined): string;
+  NOTES_END: string;
   scrubTitle(title: string, denied: (word: string) => boolean): string;
 };
 const s = (await import(pathToFileURL(join(repoRoot, 'scripts', 'lib', 'signing.mjs')).href)) as {
@@ -94,7 +96,8 @@ test('groups: guardrail files or words go to security, fixes by label or title, 
 });
 
 test("every section of the repo's CHANGELOG.md keeps its hand-written text when the release regenerates it", () => {
-  // The release keeps only what sits above a generated heading (#671): notes in a section with none are dropped.
+  // A section's hand-written lines, read the way main's tool read them before #811 (above the first generated
+  // heading), must all survive a regeneration.
   const text = readFileSync(join(repoRoot, 'CHANGELOG.md'), 'utf8');
   const generated = /^### (?:Features|Fixes|Security and guardrails|Reverted in this release|Guardrail changes)[ \t]*$/;
   const versions = [...text.matchAll(/^## v(\d+\.\d+\.\d+) /gm)].map((m) => m[1]!);
@@ -104,7 +107,7 @@ test("every section of the repo's CHANGELOG.md keeps its hand-written text when 
     const end = lines.findIndex((l) => generated.test(l));
     const byHand = (end < 0 ? lines : lines.slice(0, end)).filter((l) => l.trim());
     const after = c.sectionFor(c.withSection(text, v, c.changelogSection(v, '2026-12-31', [])), v)!;
-    for (const l of byHand) assert.ok(after.includes(l), `v${v}: the release would drop ${JSON.stringify(l.slice(0, 80))}; end the hand-written notes with a generated heading such as "### Guardrail changes"`);
+    for (const l of byHand) assert.ok(after.includes(l), `v${v}: the release would drop ${JSON.stringify(l.slice(0, 80))}`);
   }
 });
 
@@ -116,14 +119,162 @@ function droppedByRelease(text: string, version: string): string[] {
 
 test('an unreleased section is all hand-written, so the release keeps every line of it, under any heading', () => {
   // WHY: the check above reads only the lines above the first generated heading. Notes written by hand under a
-  // heading the tool also writes ("### Guardrail changes") sat below it, unchecked, and the release dropped them.
+  // heading the tool also writes ("### Guardrail changes") sat below it, unchecked, and the release dropped them
+  // (#809). Since #811 the release keeps an unreleased section whole, so no layout is needed.
   const unreleased = '# Changelog\n\n## v9.9.9 (unreleased)\n\n### Upgrading\n\n- a step\n\n### Guardrail changes\n\n- a hand-written guardrail note\n\n## v9.9.8 (2026-01-01)\n\n### Features\n\n- old (#1)\n';
-  assert.deepEqual(droppedByRelease(unreleased, '9.9.9'), ['- a hand-written guardrail note'], 'the fixture shows the drop this test exists for');
+  assert.deepEqual(droppedByRelease(unreleased, '9.9.9'), [], 'notes under a heading the tool also writes are kept (#811)');
   const fixed = unreleased.replace('### Guardrail changes\n', '### Guardrail changes: what each one does\n').replace('note\n\n## v9.9.8', 'note\n\n### Guardrail changes\n\n## v9.9.8');
   assert.deepEqual(droppedByRelease(fixed, '9.9.9'), [], 'notes under a heading the tool never writes, ended by an empty generated heading, are all kept');
   const text = readFileSync(join(repoRoot, 'CHANGELOG.md'), 'utf8');
   for (const [, v] of text.matchAll(/^## v(\d+\.\d+\.\d+) \(unreleased\)/gm)) {
-    assert.deepEqual(droppedByRelease(text, v!), [], `v${v} (unreleased): the release would drop these lines; put them above the first "### Features", "### Fixes", "### Security and guardrails", "### Reverted in this release" or "### Guardrail changes" heading`);
+    assert.deepEqual(droppedByRelease(text, v!), [], `v${v} (unreleased): the release would drop these lines`);
+  }
+});
+
+/** The notes of a section, one line each, as a fixture writes them: every generated heading, and the tool's own lines. */
+const NOTES = [
+  '### Upgrading',
+  '',
+  '- a step',
+  '',
+  '### Features',
+  '',
+  '- a hand-written feature note',
+  '',
+  '### Fixes',
+  '',
+  '- a hand-written fix note',
+  '',
+  '### Security and guardrails',
+  '',
+  '- a hand-written security note',
+  '',
+  '### Reverted in this release',
+  '',
+  '- a hand-written revert note',
+  '',
+  '### Guardrail changes',
+  '',
+  '- a hand-written guardrail note',
+  '- none in this release',
+  '- no merged PRs since the previous release',
+  '',
+  '### Guardrail changes',
+].join('\n');
+
+test('an unreleased section, under any spelling of its heading, keeps every line in order; the lists come after it, and reruns keep it', () => {
+  // Any heading for the version that isn't the dated one the tool writes counts as unreleased: fail safe.
+  const headings = ['## v9.9.9 (unreleased)', '## V9.9.9 (Unreleased)', '##   v9.9.9   (UNRELEASED)', '## Unreleased', '## [Unreleased]', '## [9.9.9] - unreleased', '##\tunreleased (9.9.9)', '## v9.9.9 (draft)', '## v9.9.9'];
+  const older = '## v9.9.8 (2026-01-01)\n\n### Features\n\n- old (#1)';
+  for (const h of headings) {
+    const text = `# Changelog\n\nEvery release, newest first: the PRs merged since the previous one, and what changed in guardrails.\n\n${h}\n\n${NOTES}\n\n${older}\n`;
+    const once = c.withSection(text, '9.9.9', c.changelogSection('9.9.9', '2026-12-31', [{ number: 5, title: 'A PR' }]));
+    const sec = c.sectionFor(once, '9.9.9')!;
+    assert.ok(sec.startsWith(`## v9.9.9 (2026-12-31)\n\n${NOTES}\n`), `${h}: the dated heading, then every line of the notes, in order:\n${sec}`);
+    const lists = sec.indexOf('### Features\n\n- A PR (#5)');
+    assert.ok(lists > sec.indexOf('- a hand-written guardrail note'), `${h}: the generated lists come after the notes`);
+    assert.match(sec.slice(lists), /### Guardrail changes\n\n- none in this release$/, `${h}: the generated lists end the section`);
+    assert.equal((once.match(/^## /gm) ?? []).length, 2, `${h}: one section for v9.9.9 and the older one, nothing else`);
+    assert.ok(once.endsWith(`${older}\n`), `${h}: the older section is untouched`);
+    // A rerun, with a PR more, keeps every note and rewrites only the lists.
+    const twice = c.withSection(once, '9.9.9', c.changelogSection('9.9.9', '2027-01-02', [{ number: 5, title: 'A PR' }, { number: 6, title: 'Fix a thing' }]));
+    const sec2 = c.sectionFor(twice, '9.9.9')!;
+    assert.ok(sec2.startsWith(`## v9.9.9 (2027-01-02)\n\n${NOTES}\n`), `${h}: a rerun keeps every line of the notes:\n${sec2}`);
+    assert.equal((sec2.match(/\(#5\)/g) ?? []).length, 1, `${h}: a rerun replaces the lists, never repeats them`);
+    assert.match(sec2, /### Fixes\n\n- Fix a thing \(#6\)/);
+    assert.equal(c.withSection(twice, '9.9.9', c.changelogSection('9.9.9', '2027-01-02', [{ number: 5, title: 'A PR' }, { number: 6, title: 'Fix a thing' }])), twice, `${h}: a rerun with nothing new changes nothing`);
+  }
+});
+
+test("an unreleased section's notes that hold the tool's own end-of-notes line still read back whole", () => {
+  const notes = `- before\n\n${c.NOTES_END}\n\n### Guardrail changes\n\n- after`;
+  const text = `# Changelog\n\n## v9.9.9 (unreleased)\n\n${notes}\n`;
+  const once = c.withSection(text, '9.9.9', c.changelogSection('9.9.9', '2026-12-31', []));
+  assert.equal(c.notesOf(c.sectionFor(once, '9.9.9')!), notes);
+  const twice = c.withSection(once, '9.9.9', c.changelogSection('9.9.9', '2027-01-02', [{ number: 7, title: 'A PR' }]));
+  assert.equal(c.notesOf(c.sectionFor(twice, '9.9.9')!), notes, 'a rerun keeps the notes whole');
+});
+
+test('which notes are meant is never guessed: two unreleased sections for the version, or one beside a dated one, are refused; another version is left alone', () => {
+  const gen = c.changelogSection('9.9.9', '2026-12-31', []);
+  assert.throws(() => c.withSection('# Changelog\n\n## Unreleased\n\n- a\n\n## v9.9.9 (unreleased)\n\n- b\n', '9.9.9', gen), /more than one section for v9\.9\.9/);
+  assert.throws(() => c.withSection('# Changelog\n\n## v9.9.9 (unreleased)\n\n- a\n\n## v9.9.9 (2026-12-01)\n\n- b\n', '9.9.9', gen), /more than one section for v9\.9\.9/);
+  const other = '# Changelog\n\n## v9.9.10 (unreleased)\n\n### Guardrail changes\n\n- for later\n';
+  const out = c.withSection(other, '9.9.9', gen);
+  assert.ok(out.includes('## v9.9.10 (unreleased)\n\n### Guardrail changes\n\n- for later'), 'an unreleased section for another version is kept whole, where it was');
+  assert.equal(c.notesOf(c.sectionFor(out, '9.9.9')!), '', "another version's notes are never carried over");
+});
+
+test('text the step cannot place in a section is never dropped: it refuses and writes nothing', () => {
+  // WHY (#829 review): everything between "# Changelog" and the first section it recognised was thrown away.
+  const older = '## v9.9.8 (2026-01-01)\n\n### Features\n\n- old (#1)\n\n### Guardrail changes\n\n- none in this release\n';
+  const shapes: [string, string][] = [
+    ['no space after ##', '##v9.9.9 (unreleased)\n\n- note a\n'],
+    ['NBSP after ##', '## v9.9.9 (unreleased)\n\n- note b\n'],
+    ['## [9.9.9]', '## [9.9.9]\n\n- note c\n'],
+    ['## [9.9.9] - date', '## [9.9.9] - 2026-12-01\n\n- note d\n'],
+    ['## Next release', '## Next release\n\n- note e\n'],
+    ['notes under the head', '- note f\n'],
+  ];
+  for (const [name, shape] of shapes) {
+    const text = `# Changelog\n\nEvery release, newest first: the PRs merged since the previous one, and what changed in guardrails.\n\n${shape}\n${older}`;
+    const note = /- note ./.exec(shape)![0];
+    assert.throws(() => c.withSection(text, '9.9.9', c.changelogSection('9.9.9', '2026-12-31', [])), new RegExp(`would drop[\\s\\S]*${note}`), name);
+  }
+  // The intro is the tool's own: one written by hand would be replaced, so it is refused too.
+  assert.throws(() => c.withSection(`# Changelog\n\nOur own intro.\n\n${older}`, '9.9.9', c.changelogSection('9.9.9', '2026-12-31', [])), /would drop[\s\S]*Our own intro\./);
+  assert.doesNotThrow(() => c.withSection(`# Changelog\n\nEvery release, newest first: the PRs merged since the previous one, and what changed in guardrails.\n\n${older}`, '9.9.9', c.changelogSection('9.9.9', '2026-12-31', [])));
+});
+
+test("a dated section's hand-written line after its generated lists is never dropped: the step refuses", () => {
+  const text = '# Changelog\n\n## v9.9.9 (2026-12-01)\n\n### Features\n\n- A PR (#5)\n\n### Guardrail changes\n\n- none in this release\n\nA note written after the lists.\n';
+  assert.throws(() => c.withSection(text, '9.9.9', c.changelogSection('9.9.9', '2026-12-31', [])), /would drop[\s\S]*A note written after the lists/);
+});
+
+test("the boundary in a dated section's lists: list-shaped lines there are the tool's and are replaced; anything else is refused", () => {
+  // Pinned as it stands (#829 round 2). In a dated section the tool wrote lists for, every line after the notes
+  // that has a generated line's shape is taken as the tool's: a generated heading, "- <text> (#N)" with or without
+  // ": <files>", "- none in this release", "- no merged PRs since the previous release". A rerun replaces them, as
+  // main always did, even one written by hand. Any other line there is refused.
+  const dated = (after: string) => `# Changelog\n\n## v9.9.9 (2026-12-01)\n\n### Highlights\n\n- a highlight\n\n### Features\n\n- A PR (#5)\n\n### Guardrail changes\n\n- none in this release\n\n${after}\n`;
+  const regen = (text: string) => c.withSection(text, '9.9.9', c.changelogSection('9.9.9', '2026-12-31', [{ number: 6, title: 'Another PR' }]));
+  for (const replaced of ['- Upgrade first (#77): run doctor', '- Extra note, see the PR (#77)', '- none in this release', '### Fixes\n\n- Something (#78)', '### Security and guardrails']) {
+    const out = regen(dated(replaced));
+    assert.ok(!out.includes(replaced.split('\n').at(-1)!) || replaced === '- none in this release', `replaced, not kept: ${replaced}`);
+    assert.ok(c.sectionFor(out, '9.9.9')!.startsWith('## v9.9.9 (2026-12-31)\n\n### Highlights\n\n- a highlight\n\n### Features\n\n- Another PR (#6)'), 'the notes stay; the lists are the new ones');
+  }
+  for (const refused of ['A plain note.', '- a note with no PR number', '### Fixes\n\nA plain line under it.', '### Upgrade notes']) {
+    assert.throws(() => regen(dated(refused)), /would drop/, `refused: ${refused}`);
+  }
+});
+
+test('two dated sections for the version are refused, never merged into one', () => {
+  const text = '# Changelog\n\n## v9.9.9 (2026-12-02)\n\n### Highlights\n\n- first\n\n### Guardrail changes\n\n- none in this release\n\n## v9.9.9 (2026-12-01)\n\n### Highlights\n\n- second\n\n### Guardrail changes\n\n- none in this release\n';
+  assert.throws(() => c.withSection(text, '9.9.9', c.changelogSection('9.9.9', '2026-12-31', [])), /more than one section for v9\.9\.9/);
+});
+
+test('a heading that names another version, even partly, is never taken as this release: it stays as it was', () => {
+  // Any numeric character counts, not only ASCII digits: full-width, Arabic-Indic, superscript (#829 round 2).
+  for (const h of ['## v0.6 (unreleased)', '## Unreleased (0.6.x)', '## Unreleased (9.9 or later)', '## v9.9.9 or v9.9.10 (unreleased)', '## v０.６ (unreleased)', '## Unreleased (v٠.٦)', '## Unreleased (v²)', '## Unreleased (Ⅵ)']) {
+    const text = `# Changelog\n\n${h}\n\n### Guardrail changes\n\n- for later\n`;
+    const out = c.withSection(text, '9.9.9', c.changelogSection('9.9.9', '2026-12-31', []));
+    assert.equal(c.notesOf(c.sectionFor(out, '9.9.9')!), '', `${h}: not this release's notes`);
+    assert.ok(out.includes(`${h}\n\n### Guardrail changes\n\n- for later`), `${h}: kept whole, as it was`);
+  }
+});
+
+test('a section dated by hand that the tool never wrote lists for is kept whole too', () => {
+  const text = '# Changelog\n\n## v9.9.9 (2026-12-01)\n\n### Highlights\n\n- a highlight\n\n## v9.9.8 (2026-01-01)\n\n### Features\n\n- old (#1)\n';
+  assert.deepEqual(droppedByRelease(text, '9.9.9'), []);
+  assert.ok(c.sectionFor(c.withSection(text, '9.9.9', c.changelogSection('9.9.9', '2026-12-31', [])), '9.9.9')!.startsWith('## v9.9.9 (2026-12-31)\n\n### Highlights\n\n- a highlight\n\n'));
+});
+
+test("the repo's released sections regenerate exactly as before: no end-of-notes line is added to any of them", () => {
+  const text = readFileSync(join(repoRoot, 'CHANGELOG.md'), 'utf8');
+  for (const [, v] of text.matchAll(/^## v(\d+\.\d+\.\d+) \(\d{4}-\d{2}-\d{2}\)/gm)) {
+    const after = c.sectionFor(c.withSection(text, v!, c.changelogSection(v!, '2026-12-31', [{ number: 1, title: 'A PR' }])), v!)!;
+    assert.ok(!after.includes(c.NOTES_END), `v${v}: a released section gets no end-of-notes line`);
+    assert.equal(c.notesOf(after), c.handWritten(c.sectionFor(text, v!)!), `v${v}: its notes are what the release kept before`);
   }
 });
 

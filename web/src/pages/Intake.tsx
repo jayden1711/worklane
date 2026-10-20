@@ -136,7 +136,7 @@ export function IntakeReports({ data, view = 'All', onView = () => {} }: { data:
       ) : data.reports.length ? (
         <Empty title="No reports in this view" />
       ) : (
-        <Empty title="No reports yet" hint="Each source (Discord, Slack, Linear, GitHub issues, the product's bug form, voice) is off until the owner turns it on for this instance; see docs/intake.md." />
+        <Empty title="No reports yet" hint="Each source (Discord, Slack, Linear, GitHub issues, the product's bug form) is off until the owner turns it on for this instance; see docs/intake.md." />
       )}
     </div>
   );

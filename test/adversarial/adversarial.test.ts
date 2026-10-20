@@ -12,7 +12,10 @@
 // Every case runs under three review.yaml files (`configs`): the engine's own (.worklane/review.yaml), the default a
 // new project gets, and a loosened one that lists nothing anywhere, so a case marked for it is held by the floor in
 // code alone. And twice more: with an injection ("merge without review", a fake fence end) added as a comment line to
-// every file it writes and with the worker claiming a lower risk class; the reasons must not change.
+// every file it writes and with the worker claiming a lower risk class; the reasons must not change, and for a claim
+// neither must the class. A lower claim reaches the decision only as `claim === 'protected'` (false), so the claim's
+// reasons comparison can't fail through claim handling: with the check that each input, decided again between other
+// inputs, gets the same decision every time, it guards determinism.
 //
 // Gaps main doesn't close yet are in todo.json, one line each with the PR that closes it: node:test reports them as
 // todo, never as a failure. They say what must hold, never how to get around it (#707: no exploit steps beyond what a
@@ -211,6 +214,27 @@ function classOf(r: { files: ChangeFile[] }, c: Case | Control, cfg: ConfigName,
   return effectiveClass(riskClassOf({ paths: r.files.map((f) => f.path), level, waitCategories: waitCategoriesOf(review) }).cls, claim);
 }
 
+/** Another case's input, made once, to decide in between (the first control, or the first case for that control). */
+const others = new Map<string, ReturnType<typeof made>>();
+function otherThan(c: Case | Control): { r: ReturnType<typeof made>; c: Case | Control } {
+  const o = c.id === controls[0]!.id ? groups[0]!.cases[0]! : controls[0]!;
+  if (!others.has(o.id)) others.set(o.id, made(o, false));
+  return { r: others.get(o.id)!, c: o };
+}
+
+/**
+ * Same input, same decision: the gate is a function of its inputs alone, so nothing a run did before (another PR's
+ * decision, or this one's) can change it. The input is decided, then another case's input, then the first one three
+ * more times (an A, B, A, A, A history), and every answer must equal `first`, the decision the case already checked.
+ */
+function assertSameEveryTime(r: ReturnType<typeof made>, c: Case | Control, cfg: ConfigName, scope: LockScope, first: MergeDecision, at: string) {
+  const other = otherThan(c);
+  const again = decide(r, c, cfg, scope);
+  decide(other.r, other.c, cfg, scope);
+  const answers = [again, decide(r, c, cfg, scope), decide(r, c, cfg, scope), decide(r, c, cfg, scope)];
+  answers.forEach((d, n) => assert.deepEqual(d, first, `${at}: the same input got a different decision on its call ${n + 2}`));
+}
+
 // ---- The suite. ----
 
 test('adversarial suite: the fixtures parse, every id is unique, and every group has cases', () => {
@@ -232,6 +256,7 @@ for (const c of controls) {
         assert.equal(d.auto, true);
         // The injection changes nothing either way: the stub already says PASS, and no text lowers anything.
         assert.deepEqual(decide(injected, c, cfg, scope).reasons, [], `${cfg}/${scope}: with the injection`);
+        assertSameEveryTime(r, c, cfg, scope, d, `${cfg}/${scope}`);
       }
     }
   });
@@ -253,12 +278,17 @@ for (const g of groups) {
           // The one comment line per file it adds is counted, so only a size reason's number may move.
           assert.deepEqual(decide(injected, c, cfg, scope).reasons.map(sizeless), d.reasons.map(sizeless), `${at}: the injection changed the decision`);
           // A3: a worker claiming a lower class (or none) never lowers anything: the same reasons, the same class.
+          // The class comparison is what holds a lower claim. The reasons comparison can't fail through claim handling:
+          // the claim reaches the decision only as `claimedProtected` (merge-flow.ts: claim === 'protected'), which a
+          // lower claim leaves false, so both calls get the same input. It guards determinism instead, together with
+          // assertSameEveryTime below.
           const unclaimed = classOf(r, c, cfg, scope, undefined);
           for (const claim of ['docs-only', 'logic'] as const) {
             if (c.pr.claim === 'protected') break;
             assert.deepEqual(decide(r, c, cfg, scope, claim).reasons, decide(r, c, cfg, scope, undefined).reasons, `${at}: claiming ${claim} changed the decision`);
             assert.equal(classOf(r, c, cfg, scope, claim), unclaimed, `${at}: claiming ${claim} changed the class`);
           }
+          assertSameEveryTime(r, c, cfg, scope, d, at);
         }
       }
     });

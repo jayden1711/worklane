@@ -84,7 +84,7 @@ that is under $0.10. Days are this machine's local days.
 
 An automation with "Ask me before each run" (`gates.start: approve`; always on for a webhook) never runs on its
 trigger. Its owner gets an Inbox decision (approve / reject) that only an owner answers, and only on the dashboard:
-never from Discord or voice. On approve, every cap and the owner are checked again, then it runs once. Unanswered for a
+never from Discord. On approve, every cap and the owner are checked again, then it runs once. Unanswered for a
 day, it expires and never runs. Another trigger while one waits is folded into it.
 
 ## Webhooks
