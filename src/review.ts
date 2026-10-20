@@ -330,12 +330,19 @@ export const SELF_MODIFICATION_PARTS: { what: string; globs: string[] }[] = [
   // src/path-text.ts holds the odd-name tests computeLevel raises on (moved out of src/review.ts, #683), so it stays locked with it.
   { what: 'the review levels', globs: [`${BRAND.configDir}/review.yaml`, 'src/review.ts', 'src/path-text.ts'] },
   { what: 'the guardrails', globs: [`${BRAND.configDir}/guardrails.yaml`, 'src/guardrails/**'] },
-  { what: 'the machine setup', globs: ['scripts/setup/**', 'scripts/machine/**'] },
+  // deploy/**: the engine's deployment manifests (a compose file and the like) set its isolation and exposure, as the
+  // setup scripts do: the user it runs as, what it mounts, which ports it publishes. Locked before the first one exists.
+  { what: 'the machine setup', globs: ['scripts/setup/**', 'scripts/machine/**', 'deploy/**'] },
   { what: 'the CI workflows', globs: ['.github/workflows/**'] },
   // Whose signed tag the release workflow stages on npm, and the check that enforces it (release.yml).
   { what: 'who may sign a release', globs: ['.github/release-signers', 'scripts/verify-release-tag*'] },
-  { what: 'sign-in, credentials or secrets', globs: ['src/dashboard-auth*', 'src/github-app*', 'src/github-scope*', 'src/**/*secret*', 'src/console/terminal*', 'src/setup/app-manifest*'] },
-  { what: 'who may approve', globs: ['src/decide.ts', 'src/intake/decide.ts', 'src/intake/people.ts', 'src/machine-owners.ts'] },
+  // src/events/redact.ts: the secret redaction of everything stored and of every chat reply (locked with the guard's
+  // tree before #785, which no longer reaches it).
+  { what: 'sign-in, credentials or secrets', globs: ['src/dashboard-auth*', 'src/github-app*', 'src/github-scope*', 'src/**/*secret*', 'src/console/terminal*', 'src/setup/app-manifest*', 'src/events/redact.ts'] },
+  // src/intake/report.ts: isTrusted and isAllowed, the intake's trust and admission inputs to src/intake/decide.ts;
+  // src/intake/dedupe.ts: candidates(), the bound on which issue the intake agent may name, which decide.ts relies on
+  // (both locked with the guard's tree before #785, which no longer reaches them).
+  { what: 'who may approve', globs: ['src/decide.ts', 'src/intake/decide.ts', 'src/intake/people.ts', 'src/machine-owners.ts', 'src/intake/report.ts', 'src/intake/dedupe.ts'] },
   // WHY: before this, these were the owner's call only where a repo's own review.yaml listed them (the engine's does, as
   // `engine`); a repo whose review.yaml didn't would have merged a change to the evaluator or the denylist on its own.
   { what: 'the evaluator and the agent runner', globs: ['src/roles.ts', 'src/coordinator.ts', 'src/runner.ts'] },
@@ -345,10 +352,26 @@ export const SELF_MODIFICATION_PARTS: { what: string; globs: string[] }[] = [
   // tools and refusals, the task file's frozen paths, the guardrail rules' loader, the secret check, and the rest.
   // src/hook-imports.ts holds that tree as the test reads it from the real imports (test/review.test.ts).
   // Its process entry is src/hook-main.ts (under src/hook*), so the tree is read from there too (#665).
-  { what: "the agents' tool guard", globs: ['src/hook*', ...HOOK_IMPORTS] },
+  // src/guard/** holds the lanes' rules the guard decides with (#785): every file there is locked, a new one too.
+  { what: "the agents' tool guard", globs: ['src/hook*', 'src/guard/**', ...HOOK_IMPORTS] },
   // What writes the hook commands that run it (src/install.ts hookCommand, src/instance.ts's research lanes): a change
   // there could point an agent's hooks at another entry, or at none (#665).
   { what: "the agents' tool guard's hook commands", globs: ['src/install.ts', 'src/instance.ts'] },
+  // WHY (#785): these were locked only as modules the guard's import tree reached. The tree no longer reaches them, but
+  // each still decides what an agent run gets: the settings that keep its hooks on, the bundles it may read, the
+  // plugins and MCP servers it loads, the hosts it may ask for, the stuck-run stop, the role, lane and tools of the
+  // runs that read untrusted text (the research, intake, chat, replier, explainer and stage-judge run builders; #841
+  // would let those six go), and the intake run's output schema and draft checks (src/intake/triage.ts). So they stay
+  // locked here, exactly as before; only the part that names them changed.
+  {
+    what: 'what an agent run is given',
+    globs: [
+      'src/agent-settings.ts', 'src/bundle.ts', 'src/domain-requests.ts', 'src/stuck.ts',
+      'src/research.ts', 'src/intake/run.ts', 'src/intake/chat.ts', 'src/intake/replier.ts', 'src/intake/explain.ts',
+      'src/stage-label.ts', 'src/intake/triage.ts',
+      'src/mcp/client.ts', 'src/mcp/connector.ts', 'src/mcp/snapshot.ts', 'src/plugins/approval.ts', 'src/plugins/run.ts', 'src/plugins/tree.ts',
+    ],
+  },
   // Which repos root says are managed apps, where the engine's own source paths below aren't locked (#665).
   { what: 'where the self-modification locks apply', globs: ['src/managed-apps.ts'] },
   { what: 'the push gate, denylist and secret scan', globs: ['scripts/push-gate*', 'scripts/check-denylist.mjs', 'scripts/lib/denylist.mjs', 'scripts/check-dco.mjs', '.denylist*', '.gitleaks*', '.githooks/**'] },
@@ -389,8 +412,11 @@ export const LOCKED_CATEGORIES: Record<string, string[]> = {
  */
 export type LockScope = 'engine' | 'managed-app';
 
-/** The engine's own source tree: a self-modification glob under it names an engine file, not a managed app's. */
-const ENGINE_TREE = ['src/', 'scripts/', 'test/', 'docs/'];
+/**
+ * The engine's own source tree: a self-modification glob under it names an engine file, not a managed app's. deploy/ is
+ * the engine's deployment manifests; a managed app's own deploy/ stays its deploy-config, as before.
+ */
+const ENGINE_TREE = ['src/', 'scripts/', 'test/', 'docs/', 'deploy/'];
 /** Whether a locked glob names the engine's own source (so it holds only in the engine's repo). */
 export const engineSourceGlob = (glob: string): boolean => ENGINE_TREE.some((d) => glob.startsWith(d));
 

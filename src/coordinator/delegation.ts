@@ -116,7 +116,7 @@ export abstract class Delegation extends Corrections {
     }
     if (!got && land) {
       const a = read('decision.answered').find((e) => e.p.id === land.p.id && e.p.answer === 'approve');
-      // The dashboard recorded the role it read (an owner or a writer); a voice or chat answer without one is looked up.
+      // The dashboard recorded the role it read (an owner or a writer); a chat answer without one is looked up.
       const as = a ? (a.p.role ?? (await role(a.p.by))) : null;
       if (a && as && after(a.ts)) got = { by: a.p.by, at: a.ts, role: as };
     }

@@ -516,8 +516,8 @@ export class CliRunner implements AgentRunner {
      */
     private apiKeyFile?: string,
     /**
-     * The Claude login a run as this user uses, read when each run starts (src/claude-profiles.ts: the instance's
-     * active account profile), and every login's credentials file that user has, which no agent command may read.
+     * The Claude login a run as this user uses, read when each run starts (src/claude-accounts-retired.ts: its user's
+     * own, never a profile's), and every login's credentials file that user has, which no agent command may read.
      * Unset: the user's own claudeConfigDir, as always.
      */
     private login?: { resolve: (r: RunAs) => RunAs; credentialFiles: (r: RunAs) => string[] },

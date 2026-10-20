@@ -15,7 +15,8 @@ import { candidates as intakeCandidates } from '../intake/dedupe.js';
 import { acceptTriage, type Triage } from '../intake/triage.js';
 import { decide as intakeDecide, excerpt, NEEDS_INFO_REPLY, statusReply, type IntakeAction } from '../intake/decide.js';
 import { checkReply, REPLIER_ROLE, replierDir, replierRun, type ReplyFacts, type ReplyStage } from '../intake/replier.js';
-import { INTAKE_ROLE, intakeRun, writeIntakeBundle } from '../intake/run.js';
+import { intakeRun, writeIntakeBundle } from '../intake/run.js';
+import { INTAKE_ROLE } from '../guard/intake.js';
 import { QuickReplies } from './quick-replies.js';
 import { type CoordinatorDeps } from './shared.js';
 import { runRoute } from './model-routing.js';
@@ -123,7 +124,8 @@ export abstract class Intake extends QuickReplies {
     purgeSeen(this.d.stateDir);
     const error = (where: string, e: unknown) => this.emit('coordinator.error', { instance: this.d.instance, where, kind: (e as { kind?: string }).kind ?? 'error', message: (e as Error).message.slice(0, 500) });
     for (const src of it.sources) {
-      if (!cfg[src.name].enabled) continue;
+      // Voice was removed (#743): no source is wired for it, and one that said it was would take nothing.
+      if (src.name === 'voice' || !cfg[src.name].enabled) continue;
       let got: IncomingReport[];
       try {
         // Replies a person waits on aren't taken here: src/coordinator/quick-replies.ts answers them as they arrive.

@@ -17,7 +17,8 @@ import { firstTaskBody } from '../first-task.js';
 import { personOf } from '../intake/people.js';
 import type { IncomingReport, IntakeConfig } from '../intake/report.js';
 import { markSeen, reportId } from '../intake/store.js';
-import { INTAKE_DENIED } from '../intake/run.js';
+// WHY (#785): from the guard's own locked module, not through src/intake/run.ts, which isn't locked.
+import { INTAKE_DENIED } from '../guard/intake.js';
 import { localDay } from '../local-day.js';
 import { latestSlot, parseCron } from '../automations/cron.js';
 import { capRefusal, chainRefusal, originOf, runBudget, slotFired, triggerText, type Origin } from '../automations/engine.js';
@@ -265,7 +266,7 @@ export abstract class AutomationRuns extends HarnessEvals {
     const ancestors = origin.kind === 'chained' ? origin.ancestors : [];
     const source = sourceOf(trigger);
     // INVARIANT: an automation that waits for approval (a webhook's always does) never runs on its trigger: its owner
-    // is asked, on the dashboard only (never from chat or voice), and the caps are checked again on approval.
+    // is asked, on the dashboard only (never from chat), and the caps are checked again on approval.
     if (a.gates.start === 'approve' && !o.approved) {
       const decision = await this.ask('automation', null, a.owner, `Run the automation "${a.name}" (${a.id}) for ${source}?`, ['approve', 'reject'], '', [`Started by ${source}.`, ...describe(a)]);
       this.emit('automation.pending', { id: a.id, decision, trigger, depth, ancestors, source: origin.kind === 'chained' ? origin.source : null, text, target });

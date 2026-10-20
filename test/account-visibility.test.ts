@@ -10,7 +10,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 // Namespace imports: run against an engine without #567, each test fails on its own assertions, not the file on a
 // missing export.
-import * as profiles from '../src/claude-profiles.js';
+import * as account from '../src/claude-account.js';
 import * as authFailure from '../src/claude-auth-failure.js';
 import * as holds from '../src/governor-holds.js';
 import { forViewer, stateForViewer, viewerMaySee } from '../src/viewer-events.js';
@@ -22,7 +22,7 @@ import type { StoredEvent } from '../src/events/types.js';
 import { ACCOUNT, ACCOUNT_LOCAL, ACCOUNT_TEXT, accountDashboard, apiPaths, STRANGER } from './account-fixture.js';
 import { asPerson, exampleProject } from './helpers.js';
 
-const { accountSet } = profiles;
+const { accountSet } = account;
 const { authHoldsOf, signinFailedView } = authFailure;
 const { holdReason, SIGN_IN_HOLD_REASON } = holds;
 
@@ -99,7 +99,7 @@ test('#567, writer: the accounts panel refused; the sign-in banner keeps the log
   }
 });
 
-test('#567, owner who is a machine owner: the accounts panel with the email, plan and profile; the sign-in banner with the login', { skip: !posix }, async () => {
+test('#567, owner who is a machine owner: the accounts panel with the email and plan; the sign-in banner with the login', { skip: !posix }, async () => {
   const { d, get } = await accountDashboard();
   try {
     const as = asPerson('example-owner');
@@ -107,7 +107,8 @@ test('#567, owner who is a machine owner: the accounts panel with the email, pla
     assert.equal(panel.status, 200);
     assert.match(panel.text, new RegExp(ACCOUNT.email.replace(/[.]/g, '\\.')));
     assert.match(panel.text, new RegExp(ACCOUNT.plan));
-    assert.match(panel.text, new RegExp(ACCOUNT.profile));
+    // Account profiles were removed (#736): the fixture's profiles.json is a leftover, named as one, never used.
+    assert.match(panel.text, /"retired":\{"files":\["profiles\.json"/);
     const state = JSON.parse((await get('/api/state', as)).text) as { claudeAccount?: unknown };
     assert.deepEqual(state.claudeAccount, { set: true });
     const usage = JSON.parse((await get('/api/usage', as)).text) as { signinFailed: { login: string }[]; canRecheckSignin: boolean };
@@ -202,7 +203,7 @@ test('#567, the projections: a viewer state keeps only whether an account is set
   assert.deepEqual(signinFailedView(hold!, true), { login: ACCOUNT.email, detail: `refused for ${ACCOUNT.email}`, since: hold!.since, lastCheck: hold!.lastCheck });
 });
 
-test('#567: an account is set on a confirmed profile, or when the default login was last found signed in; not known with no record', () => {
+test('#567: an account is set when the agent user was last found signed in; not known with no record; a profile an older engine left counts for nothing (#736)', () => {
   const dir = (profiles: unknown, users: unknown[] | null) => {
     const d = mkdtempSync(join(tmpdir(), 'account-set-'));
     writeFileSync(join(d, 'profiles.json'), JSON.stringify(profiles));
@@ -215,7 +216,8 @@ test('#567: an account is set on a confirmed profile, or when the default login 
   assert.equal(accountSet('shop', dir({}, [agent(true, 'other'), { ...agent(true), kind: 'eval' }])), null, "no record of this instance's agent user");
   assert.equal(accountSet('shop', dir({}, null)), null, 'no status yet');
   const work = { profiles: { work: { kind: 'setup-token', users: {} } }, active: { shop: { profile: 'work', since: 'x' } } };
-  assert.equal(accountSet('shop', dir(work, null)), true, 'on a confirmed profile');
+  assert.equal(accountSet('shop', dir(work, null)), null, 'a leftover profile says nothing: no record of the agent user');
+  assert.equal(accountSet('shop', dir(work, [agent(false)])), false, 'only what status found for the agent user counts');
   const staged = { profiles: { work: { kind: 'setup-token', users: {}, staged: true } }, active: { shop: { profile: 'work', since: 'x' } } };
   assert.equal(accountSet('shop', dir(staged, [agent(false)])), false, 'a staged profile is never in use: the default login is');
 });

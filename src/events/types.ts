@@ -1,7 +1,7 @@
 // Every action is a typed event. Projections (task state, dashboard,
 // reports) are folds over these; nothing keeps private state.
 import { z } from 'zod';
-import { STAGES } from '../stage-label.js';
+import { STAGES } from '../stage-names.js';
 import { HOLD_KINDS } from '../governor-holds.js';
 
 const issue = z.number().int().positive();
@@ -297,9 +297,10 @@ export const EventSchemas = {
   /** A minimal real call on a held login: `by` the periodic check, the owner's re-check, or an account switch. */
   'claude_auth.checked': z.strictObject({ key: z.string().max(500), login: z.string().max(300), ok: z.boolean(), by: z.enum(['timer', 'owner', 'account_switch']), detail: z.string().max(1000), cost_usd: z.number().nonnegative() }),
   /**
-   * An instance's Claude account profile switch, as the root script recorded it (src/claude-profiles.ts, issue #464):
-   * `op` its id, `to` the profile asked for, `from` each instance's profile before, `by` who asked (a GitHub login, or
-   * `terminal`), `ok` whether every agent user's real call on it was answered (if not, nothing changed). Never a token.
+   * An instance's Claude account profile switch, as an older engine recorded it (issue #464; profiles were removed,
+   * #736, so nothing records one now and the schema stays to read older logs): `op` its id, `to` the profile asked
+   * for, `from` each instance's profile before, `by` who asked (a GitHub login, or `terminal`), `ok` whether every
+   * agent user's real call on it was answered (if not, nothing changed). Never a token.
    */
   'account.switched': z.strictObject({ op: z.string().max(80), to: z.string().max(40), from: z.record(z.string().max(40), z.string().max(40)), instances: z.array(z.string().max(40)).max(200), by: z.string().max(100), ok: z.boolean(), detail: z.string().max(1000) }),
   /**
@@ -308,9 +309,9 @@ export const EventSchemas = {
    */
   'claude_account.refused': z.strictObject({ path: z.string().max(100), login: z.string().max(100).nullable(), status: z.number().int(), why: z.string().max(300) }),
   /**
-   * Auto-failover between account profiles on a usage limit (src/claude-failover.ts): asked (a move, proven by a
-   * real call before it happens), switched, refused, none (no free account in the order), and the move back after
-   * the reset (back-asked, back, back-refused). Never on an auth failure. Never a token.
+   * Auto-failover between account profiles on a usage limit, as an older engine recorded it (removed, #736; the schema
+   * stays to read older logs): asked (a move, proven by a real call before it happens), switched, refused, none (no
+   * free account in the order), and the move back after the reset (back-asked, back, back-refused). Never a token.
    */
   'account.failover': z.strictObject({ stage: z.enum(['asked', 'switched', 'refused', 'none', 'back-asked', 'back', 'back-refused']), from: z.string().max(40), to: z.string().max(40), reset_at: z.string().max(40).nullable(), detail: z.string().max(1000) }),
   /** A call on a held login succeeded (`via` a run or a check): the hold ends and runs start again. */
