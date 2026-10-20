@@ -212,31 +212,34 @@ Where it comes from: the npm registry, package `@anthropic-ai/sandbox-runtime`, 
 - integrity: `sha512-WjBmS9fbTpnQwQkM9SU+JjhM2CcXo9eWEELktY1100RMvTy/jPhP44yZ3NXhh+GHB350OgPbM3+FubE5WVRtSA==`
 - shasum (sha1): `89b8735f51ad38791cb1a2913b616745dc5c04dc`
 
-Fetch the tarball, check it against the pin, and install that file, for this user only (it is no repo dependency):
+Fetch the tarball, check it against the pin, and install that file, for this user only (it is no repo dependency). The install is chained on the check, so a checksum mismatch, a failed fetch or a missing `openssl` installs nothing (`test/bench-cli.test.ts` runs this block with stand-ins):
 
-    mkdir -p ~/src/srt-0.0.79 && cd ~/src/srt-0.0.79
-    npm pack @anthropic-ai/sandbox-runtime@0.0.79
-    test "sha512-$(openssl dgst -sha512 -binary anthropic-ai-sandbox-runtime-0.0.79.tgz | base64 -w0)" = "sha512-WjBmS9fbTpnQwQkM9SU+JjhM2CcXo9eWEELktY1100RMvTy/jPhP44yZ3NXhh+GHB350OgPbM3+FubE5WVRtSA==" && echo "checksum OK"
-                                                   # expect: checksum OK (stop here if not)
-    npm install -g --prefix ~/.local ./anthropic-ai-sandbox-runtime-0.0.79.tgz
-    ~/.local/bin/srt --version                     # expect 0.0.79
+    mkdir -p ~/src/srt-0.0.79 && cd ~/src/srt-0.0.79 &&
+      npm pack @anthropic-ai/sandbox-runtime@0.0.79 &&
+      test "sha512-$(openssl dgst -sha512 -binary anthropic-ai-sandbox-runtime-0.0.79.tgz | base64 -w0)" = "sha512-WjBmS9fbTpnQwQkM9SU+JjhM2CcXo9eWEELktY1100RMvTy/jPhP44yZ3NXhh+GHB350OgPbM3+FubE5WVRtSA==" &&
+      echo "checksum OK" &&
+      npm install -g --ignore-scripts --prefix ~/.local ./anthropic-ai-sandbox-runtime-0.0.79.tgz
+    ~/.local/bin/srt --version                     # expect 0.0.79 (no such file: the checksum didn't match, nothing was installed)
     cd ~
 
-The tarball is pinned; its four dependencies (`zod`, `commander`, `node-forge`, `@pondwader/socks5-server`) are resolved by npm within their semver ranges when it installs (**inferred** from the package's metadata: it ships no lock file).
+The tarball is pinned; its four dependencies (`zod`, `commander`, `node-forge`, `@pondwader/socks5-server`) are resolved by npm within their semver ranges when it installs (**inferred** from the package's metadata: it ships no lock file). `--ignore-scripts` keeps any of their install scripts from running as the bench user; sandbox-runtime 0.0.79 has none of its own (`npm view ... scripts`, measured by the #851 review).
 
 ### 5. The bench's own clone, at the pinned commit (as the bench user)
 
 The clone comes from this repository's own URL: `repository.url` in `package.json`, without its `git+` prefix (written there, not here, so this folder names no project). The pinned commit is a commit on `main` that has `scripts/bench/cli.ts`: for the first preflight, the merge commit of the PR that added it. Every run records the CLI version and the results; keep the commit you used with them.
 
-    BENCH_REPO=<this repository's https clone URL, from package.json repository.url>
-    BENCH_SHA=<the pinned commit, 40 hex characters>
-    git clone "$BENCH_REPO" ~/src/bench-engine
-    git -C ~/src/bench-engine checkout --detach "$BENCH_SHA"
-    git -C ~/src/bench-engine log -1 --format=%H   # expect the pinned commit
-    cd ~/src/bench-engine && npm ci --ignore-scripts && npm run build && cd ~
-    mkdir -p ~/.local/bin
-    printf '#!/bin/sh\nexec node %s/src/bench-engine/dist/scripts/bench/cli.js "$@"\n' "$HOME" > ~/.local/bin/bench
-    chmod 755 ~/.local/bin/bench
+Replace the two PASTE_ values first. Each command is chained on the one before, so a clone at any other commit is never built or installed:
+
+    BENCH_REPO=PASTE_THE_HTTPS_CLONE_URL
+    BENCH_SHA=PASTE_THE_40_HEX_PINNED_COMMIT
+    git clone "$BENCH_REPO" ~/src/bench-engine &&
+      git -C ~/src/bench-engine checkout --detach "$BENCH_SHA" &&
+      test "$(git -C ~/src/bench-engine rev-parse HEAD)" = "$BENCH_SHA" &&
+      (cd ~/src/bench-engine && npm ci --ignore-scripts && npm run build) &&
+      mkdir -p ~/.local/bin &&
+      printf '#!/bin/sh\nexec node %s/src/bench-engine/dist/scripts/bench/cli.js "$@"\n' "$HOME" > ~/.local/bin/bench &&
+      chmod 755 ~/.local/bin/bench &&
+      echo "bench installed at $BENCH_SHA"
 
 ### 6. The preflight
 
@@ -250,8 +253,8 @@ Then, in that shell (a new login shell, so `~/.local/bin` is on PATH: Ubuntu's d
 
 It runs every check a run makes before any model call or container, as the bench user only (it refuses any other user, and root, before anything else runs), and prints one line per check: PASS, FAIL (with why) or SKIP. It exits 0 only when every check passes. It starts no container, makes no model call, downloads nothing and keeps nothing on disk (the srt probe's settings go in a 0600 temporary file, removed when srt ends); it prints no variable's value, no token and no account detail but the login's method and plan. The checks:
 
-- the bench user (never root), and HOME is its home in the user database; when either fails nothing else runs;
-- the bench root (outside every checkout, credential store and engine state), and the held-out store: not made yet, or a 0700 folder of this user, never a link;
+- the bench user (never root: neither the real nor the effective uid is 0, and both are known), and HOME is its home in the user database; when either fails nothing else runs;
+- the bench root (outside every checkout, credential store and engine state), and the held-out store: not made yet, or a folder of this user at exactly 0700, with no link anywhere from the bench root down to it;
 - research-on-demand off (every cap 0);
 - `claude --version` is the pin, and `claude auth status` reports a claude.ai login on Anthropic's own API (no login-switching variable set);
 - the srt probe (step 4's srt, the agents' lane): every socket and credential attempt refused;

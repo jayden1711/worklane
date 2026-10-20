@@ -48,10 +48,13 @@ export const loginSwitchVars = (env: NodeJS.ProcessEnv): string[] => Object.keys
 /**
  * Refuses (throws) unless this process runs as the bench user, and never as root (uid 0, or the name root), whatever
  * BENCH_USER_ENV names: root's rootful Docker and its reach over every home are what the bench user exists to avoid.
+ * The real and the effective uid must both be positive integers (#851 round 2): an unknown uid (-1, where the
+ * platform has none) or a setuid-root process is refused too.
  */
-export function requireBenchUser(env: NodeJS.ProcessEnv = process.env, me: string = currentUser(), uid: number = process.getuid?.() ?? -1): string {
+export function requireBenchUser(env: NodeJS.ProcessEnv = process.env, me: string = currentUser(), uid: number = process.getuid?.() ?? -1, euid: number = process.geteuid?.() ?? -1): string {
   const user = env[BENCH_USER_ENV] || DEFAULT_BENCH_USER;
-  if (uid === 0 || me === 'root') throw new Error(`the bench never runs as root (this is ${me || 'uid 0'}): log in as the bench user with sudo -iu ${user === 'root' ? DEFAULT_BENCH_USER : user}`);
+  if (uid === 0 || euid === 0 || me === 'root') throw new Error(`the bench never runs as root (this is ${me || 'uid 0'}, uid ${uid}, euid ${euid}): log in as the bench user with sudo -iu ${user === 'root' ? DEFAULT_BENCH_USER : user}`);
+  if (!Number.isInteger(uid) || uid <= 0 || !Number.isInteger(euid) || euid <= 0) throw new Error(`the bench runs only under a known, non-root uid (uid ${uid}, euid ${euid}): not starting`);
   if (me !== user) throw new Error(`the bench runs as ${user} only, from its own clone (scripts/bench/README.md, one-time setup); this is ${me || 'an unknown user'}`);
   return user;
 }

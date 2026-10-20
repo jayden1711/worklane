@@ -10,12 +10,14 @@
 // login, and the srt probe would try that user's sockets and files. The sandbox confirmation (one model call) and the
 // limits read back from a probe container (which needs a task image) stay the run's: the output says so.
 //
-// What it prints carries no secret (owner, 2026-10-19): every line goes through scrub(), which drops the value of
-// every variable whose name may hold a credential or switch the login, token-shaped strings and email addresses,
-// and control characters, and caps each detail. The checks themselves print no variable's value and no field of the
+// What it prints carries no secret (owner, 2026-10-19): main() wraps the one output sink in scrub(), so every line,
+// whoever writes it, is scrubbed on its full text before it is cut. scrub() drops the value of every variable whose
+// name may hold a credential or switch the login and each piece of such a value that starts or ends it (a message
+// cut short upstream ends in one), token-shaped strings, email addresses and control characters. The checks themselves print no variable's value and no field of the
 // login but its method and plan.
 import { lstatSync, realpathSync } from 'node:fs';
 import { userInfo } from 'node:os';
+import { isAbsolute, join, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { currentUser } from '../../src/os/index.js';
 import { benchLane, runtimeDir } from './agent.js';
@@ -23,14 +25,15 @@ import { LOGIN_SWITCH_VAR, requireBenchUser, requireClaudePin, requireSubscripti
 import { MODE_MAX_USD, PER_TASK_MAX_USD, REAPPROVE_MEAN_USD } from './caps.js';
 import { Docker, limitsFrom, type DockerOptions, type Limits } from './container.js';
 import { assertResearchOff, BENCH_SETTINGS } from './driver.js';
-import { benchHome, benchRoot, type BenchLayout } from './paths.js';
+import { benchHome, benchRoot, realPath, type BenchLayout } from './paths.js';
 import { sandboxProbe, SRT_LABEL } from './probe.js';
 
 export interface CliDeps {
   env: NodeJS.ProcessEnv;
-  /** This process's user name and uid. */
+  /** This process's user name, real uid and effective uid. */
   user: string;
   uid: number;
+  euid: number;
   /** This user's home in the user database (its passwd entry). */
   passwdHome: () => string;
   /** The claude and srt binaries (default: from PATH, as the driver runs them). */
@@ -56,22 +59,38 @@ export interface Check {
 const SECRET_VAR = /KEY|TOKEN|SECRET|PASSW|CREDENTIAL|AUTH|COOKIE|SESSION/i;
 /** Token shapes: Anthropic keys and OAuth tokens, GitHub tokens, Slack tokens, AWS key ids, JWTs. */
 const TOKEN_SHAPE = /sk-ant-[\w-]+|\bgh[opsur]_\w{16,}|\bgithub_pat_\w{16,}|\bxox[abprs]-[\w-]+|\bAKIA[0-9A-Z]{16}\b|\beyJ[\w-]{8,}\.[\w-]{8,}\.[\w-]+/g;
-const EMAIL = /[\w.+-]+@[\w-]+(?:\.[\w-]+)+/g;
-/** What scrub() keeps of one detail. */
+/** An email address: its domain ends in a letters-only label, so a package spec such as `name@0.0.79` is not one. */
+const EMAIL = /[\w.+-]+@[\w-]+(?:\.[\w-]+)*\.[A-Za-z]{2,}\b/g;
+/** What scrub() keeps of one detail, and of one printed line. */
 export const DETAIL_MAX = 400;
+const LINE_MAX = 1000;
+/** The shortest piece of a secret value scrub() redacts on its own. */
+export const PIECE_MIN = 6;
+/** A value that is a path or a socket address, not a secret: only its whole value is redacted, never its pieces. */
+const PATH_VALUE = /^(\/|unix:)/;
 
 /**
- * `text` fit to print: the value of every variable in `env` whose name may hold a credential or switch the login
- * (6 characters or more) and every token-shaped string become [redacted], email addresses [email], control and
- * format characters (an ANSI escape's ESC, a bell, a bidi override) a space; at most `max` characters.
+ * `text` fit to print. Redacted, as [redacted]: the value of every variable in `env` whose name may hold a credential
+ * or switch the login (PIECE_MIN characters or more), and every piece of such a value of PIECE_MIN or more that starts
+ * or ends it (#851 round 2: a message cut short upstream, as the driver's checks cut a child's stderr, ends in a
+ * prefix of the value; this redacts it whatever cut it); every token-shaped string. Email addresses become [email];
+ * control and format characters (an ANSI escape's ESC, a bell, a bidi override) a space. Cut to at most `max`
+ * characters only after all of that.
  */
 export function scrub(text: string, env: NodeJS.ProcessEnv, max = DETAIL_MAX): string {
   let s = text;
   const values = Object.entries(env)
-    .filter(([k, v]) => typeof v === 'string' && v.length >= 6 && (SECRET_VAR.test(k) || LOGIN_SWITCH_VAR.test(k.toUpperCase())))
+    .filter(([k, v]) => typeof v === 'string' && v.length >= PIECE_MIN && (SECRET_VAR.test(k) || LOGIN_SWITCH_VAR.test(k.toUpperCase())))
     .map(([, v]) => v as string)
     .sort((a, b) => b.length - a.length);
   for (const v of values) s = s.split(v).join('[redacted]');
+  for (const v of values) {
+    if (PATH_VALUE.test(v)) continue;
+    // Longest piece first, so a long prefix is redacted whole, not a shorter one inside it.
+    for (let n = Math.min(v.length - 1, s.length); n >= PIECE_MIN; n--) {
+      for (const piece of [v.slice(0, n), v.slice(v.length - n)]) if (s.includes(piece)) s = s.split(piece).join('[redacted]');
+    }
+  }
   s = s.replace(TOKEN_SHAPE, '[redacted]').replace(EMAIL, '[email]').replace(/[\p{Cc}\p{Cf}]/gu, ' ');
   return s.length > max ? `${s.slice(0, max - 3)}...` : s;
 }
@@ -79,23 +98,35 @@ export function scrub(text: string, env: NodeJS.ProcessEnv, max = DETAIL_MAX): s
 const message = (e: unknown): string => (e instanceof Error ? e.message : String(e));
 
 /**
- * The held-out store as the run needs it: absent (the pinned download makes it 0700), or a real folder (not a link)
- * this user owns with no group or other access. Only lstat'ed: nothing in it is read.
+ * The held-out store as the run needs it: absent (the pinned download makes it 0700), or a real folder this user owns,
+ * mode exactly 0700 (no group or other access, no setuid, setgid or sticky bit). Every folder from the bench root
+ * (already a real path) down to the store must be a real folder, not a link, whether or not the store is made yet
+ * (#851 round 2): the agents' sandbox denies the store by this path, and whether it would follow a link to deny the
+ * place it names is a guess, so a link anywhere on the way fails closed. Only lstat'ed: nothing in it is read.
  */
 export function heldOutCheck(layout: BenchLayout, uid: number): string {
-  let st;
-  try {
-    st = lstatSync(layout.heldOut);
-  } catch (e) {
-    if ((e as NodeJS.ErrnoException).code === 'ENOENT') return `${layout.heldOut}: not made yet (the pinned download makes it, 0700)`;
-    throw e;
+  const rel = relative(layout.root, layout.heldOut);
+  if (!rel || rel.startsWith('..') || isAbsolute(rel)) throw new Error(`${layout.heldOut} is not inside the bench root ${layout.root}`);
+  let at = layout.root;
+  for (const part of rel.split(sep)) {
+    at = join(at, part);
+    let st;
+    try {
+      st = lstatSync(at);
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === 'ENOENT') return `${layout.heldOut}: not made yet (the pinned download makes it, 0700)`;
+      throw e;
+    }
+    if (st.isSymbolicLink()) throw new Error(`${at} is a link: every folder down to the held-out store must be a real folder under the bench root`);
+    if (!st.isDirectory()) throw new Error(`${at} is not a folder`);
+    if (at !== layout.heldOut) continue;
+    if (st.uid !== uid) throw new Error(`${layout.heldOut} belongs to uid ${st.uid}, not this user (${uid})`);
+    const mode = st.mode & 0o7777;
+    if (mode !== 0o700) throw new Error(`${layout.heldOut} is mode 0${mode.toString(8)}, not exactly 0700: chmod 700 it (hidden tests and the task map live there)`);
   }
-  if (st.isSymbolicLink()) throw new Error(`${layout.heldOut} is a link: the held-out store must be a folder of its own, 0700`);
-  if (!st.isDirectory()) throw new Error(`${layout.heldOut} is not a folder`);
-  if (uid >= 0 && st.uid !== uid) throw new Error(`${layout.heldOut} belongs to uid ${st.uid}, not this user (${uid})`);
-  const mode = st.mode & 0o777;
-  if (mode & 0o077) throw new Error(`${layout.heldOut} is mode 0${mode.toString(8)}, not 0700: chmod 700 it (hidden tests and the task map live there)`);
-  return `${layout.heldOut}: 0700, this user's`;
+  // The walk saw no link; the real path must agree (a link the walk can't see, such as one swapped in since, fails here).
+  if (realPath(layout.heldOut) !== layout.heldOut) throw new Error(`${layout.heldOut} really is ${realPath(layout.heldOut)}: a link on the way`);
+  return `${layout.heldOut}: 0700, this user's, no link on the way`;
 }
 
 /** Every model-free, container-free check, in order. The user and home checks gate all the others. */
@@ -115,7 +146,7 @@ export function preflight(d: CliDeps): Check[] {
   };
   const rest = ['bench root', 'held-out store', 'research-on-demand', 'claude pin', 'claude login', 'sandbox probe', 'docker', 'container limits'];
 
-  if (!add('bench user', () => requireBenchUser(d.env, d.user, d.uid))) {
+  if (!add('bench user', () => requireBenchUser(d.env, d.user, d.uid, d.euid))) {
     skip(['home', ...rest], 'not run: not the bench user (it would ask another user\'s login and probe another home)');
     return checks;
   }
@@ -167,7 +198,7 @@ const USAGE = [
 ];
 
 function printPreflight(d: CliDeps): number {
-  const say = (l: string) => d.out(scrub(l, d.env, 1000));
+  const say = d.out;
   say('bench preflight (#748): no container, no model call, no download, nothing kept on disk');
   const checks = preflight(d);
   const width = Math.max(...checks.map((c) => c.name.length));
@@ -183,16 +214,19 @@ function printPreflight(d: CliDeps): number {
 /** The bench command; its exit code. */
 export function main(argv: readonly string[], deps: Partial<CliDeps> = {}): number {
   const env = deps.env ?? process.env;
+  const sink = deps.out ?? ((l: string) => process.stdout.write(`${l}\n`));
   const d: CliDeps = {
     env,
     user: deps.user ?? currentUser(),
     uid: deps.uid ?? process.getuid?.() ?? -1,
+    euid: deps.euid ?? process.geteuid?.() ?? -1,
     passwdHome: deps.passwdHome ?? (() => userInfo().homedir),
     claude: deps.claude ?? 'claude',
     srt: deps.srt ?? 'srt',
     docker: deps.docker ?? { docker: 'docker' },
     ...(deps.host ? { host: deps.host } : {}),
-    out: deps.out ?? ((l) => process.stdout.write(`${l}\n`)),
+    // INVARIANT: the only way out: every line, whoever writes it, is scrubbed on its full text before any cut (#851 round 2).
+    out: (l) => sink(scrub(l, env, LINE_MAX)),
   };
   const [command, ...extra] = argv;
   if (command === 'help' || command === '--help') {
