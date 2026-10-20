@@ -160,6 +160,17 @@ test('a release without its changelog section is refused', { skip }, () => {
   assert.equal(git('tag', '-l'), '');
 });
 
+test('regression (#712): a release whose changelog section is (unreleased) is refused before anything is built or tagged', { skip }, () => {
+  const { dir, git } = repo();
+  writeFileSync(join(dir, 'CHANGELOG.md'), '# Changelog\n\n## v1.2.3 (unreleased)\n\n### Fixes\n\n- Round totals (#7)\n\n### Guardrail changes\n\n- none in this release\n');
+  git('commit', '-q', '-am', 'an undated section');
+  const r = run(dir);
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /refusing to tag v1\.2\.3: CHANGELOG\.md at HEAD has "## v1\.2\.3 \(unreleased\)", not the dated heading/);
+  assert.equal(git('tag', '-l'), '');
+  assert.equal(existsSync(join(dir, 'dist')), false, 'nothing built');
+});
+
 test('regression: a release from a worktree created detached (no previous checkout) returns to that commit', { skip }, () => {
   const { dir, git } = repo();
   const start = git('rev-parse', 'HEAD');
