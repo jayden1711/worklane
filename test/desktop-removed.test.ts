@@ -59,6 +59,28 @@ function notOnlySuccess(job: Record<string, unknown> | undefined): string[] {
   return out;
 }
 
+type Workflow = { on?: Record<string, unknown>; defaults?: unknown; env?: unknown; jobs?: Record<string, Record<string, unknown>> };
+
+/** ci.yml's triggers, exactly: every push to main and every pull request (opened, synchronized, reopened). */
+const CI_ON = { push: { branches: ['main'] }, pull_request: { types: ['opened', 'synchronize', 'reopened'] } };
+
+/**
+ * Why ci.yml might not give every main commit and every pull request a desktop run that succeeds, outside the job
+ * itself: a trigger other than exactly CI_ON (a `paths`, `paths-ignore` or `branches` filter, narrowed `types`, a
+ * trigger dropped), or workflow-level `defaults` (a `run.shell` or `working-directory` that fails the `true` step)
+ * or `env` (a `BASH_ENV` the step's shell would source first). ci.yml has neither today.
+ */
+function workflowProblems(wf: Workflow): string[] {
+  const out: string[] = [];
+  for (const [event, want] of Object.entries(CI_ON)) {
+    const got = wf.on?.[event];
+    if (JSON.stringify(got) !== JSON.stringify(want)) out.push(`on.${event} ${JSON.stringify(got)}`);
+  }
+  if (wf.defaults !== undefined) out.push(`defaults ${JSON.stringify(wf.defaults)}`);
+  if (wf.env !== undefined) out.push(`env ${JSON.stringify(wf.env)}`);
+  return out;
+}
+
 /** The names in `required` that no workflow in `dir` defines: checks nothing will ever run. */
 function undefinedChecks(dir: string, required: string[]): string[] {
   const names = jobNames(dir);
@@ -127,10 +149,9 @@ function filesUnder(dir: string, keep: (p: string) => boolean): string[] {
 }
 
 test('the desktop check stays one more release: one job that only succeeds, on every pull request and push to main, still required (#746, #877)', () => {
-  const ci = parse(readFileSync(join(workflows, 'ci.yml'), 'utf8')) as { on?: Record<string, unknown>; jobs?: Record<string, Record<string, unknown>> };
+  const ci = parse(readFileSync(join(workflows, 'ci.yml'), 'utf8')) as Workflow;
   assert.deepEqual(notOnlySuccess(ci.jobs?.desktop), [], 'ci.yml\'s desktop job: one `true` step on GitHub\'s runner, nothing that could skip, fail or rename it');
-  assert.deepEqual(ci.on?.push, { branches: ['main'] }, 'it runs on every push to main, where the updater reads it');
-  assert.ok(ci.on && 'pull_request' in ci.on, 'and on every pull request');
+  assert.deepEqual(workflowProblems(ci), [], 'ci.yml runs on every push to main (where the updater reads it) and every pull request, with no filter and no workflow defaults');
   assert.deepEqual(workflowFiles(workflows).filter((f) => fileJobNames(join(workflows, f)).has('desktop')), ['ci.yml'], 'one job makes the desktop check: no second run of that name can be the one an updater reads');
   assert.ok(requiredChecks().includes('desktop'), 'config.yaml still requires desktop, until #877 removes the job and the check together');
   assert.ok(updaterDefaults().includes('desktop'), 'a new install\'s updater still lists desktop, until #877');
@@ -147,6 +168,20 @@ test('the no-op shape check catches whatever could make the desktop check anythi
   assert.deepEqual(notOnlySuccess({ ...ok, steps: [{ run: 'false' }] }), ['steps [{"run":"false"}]']);
   assert.deepEqual(notOnlySuccess({ ...ok, steps: [{ uses: 'actions/checkout@x' }, { run: 'true' }] }), ['steps [{"uses":"actions/checkout@x"},{"run":"true"}]']);
   assert.deepEqual(notOnlySuccess({ ...ok, 'runs-on': ['self-hosted'] }), ['runs-on ["self-hosted"]']);
+});
+
+test('the workflow check catches a filter on either trigger, a narrowed or dropped trigger, and workflow defaults', () => {
+  const pr = CI_ON.pull_request;
+  const wf = (on: Record<string, unknown>, extra: Record<string, unknown> = {}): Workflow => ({ on, ...extra });
+  assert.deepEqual(workflowProblems(wf({ ...CI_ON })), []);
+  assert.deepEqual(workflowProblems(wf({ ...CI_ON, pull_request: { ...pr, paths: ['src/**'] } })), ['on.pull_request {"types":["opened","synchronize","reopened"],"paths":["src/**"]}'], 'a PR paths filter');
+  assert.deepEqual(workflowProblems(wf({ ...CI_ON, pull_request: { ...pr, 'paths-ignore': ['docs/**'] } })), ['on.pull_request {"types":["opened","synchronize","reopened"],"paths-ignore":["docs/**"]}'], 'a PR paths-ignore filter');
+  assert.deepEqual(workflowProblems(wf({ ...CI_ON, pull_request: { ...pr, branches: ['release'] } })), ['on.pull_request {"types":["opened","synchronize","reopened"],"branches":["release"]}'], 'a PR branches filter');
+  assert.deepEqual(workflowProblems(wf({ ...CI_ON, pull_request: { types: ['closed'] } })), ['on.pull_request {"types":["closed"]}'], 'PR types narrowed');
+  assert.deepEqual(workflowProblems(wf({ push: CI_ON.push })), ['on.pull_request undefined'], 'the PR trigger dropped');
+  assert.deepEqual(workflowProblems(wf({ ...CI_ON, push: { branches: ['main'], paths: ['src/**'] } })), ['on.push {"branches":["main"],"paths":["src/**"]}'], 'a push paths filter: main commits without a run strand v0.5.2');
+  assert.deepEqual(workflowProblems(wf({ ...CI_ON }, { defaults: { run: { shell: 'false {0}' } } })), ['defaults {"run":{"shell":"false {0}"}}'], 'a workflow-level shell that fails every run step');
+  assert.deepEqual(workflowProblems(wf({ ...CI_ON }, { env: { BASH_ENV: '/nonexistent' } })), ['env {"BASH_ENV":"/nonexistent"}'], 'a workflow-level env the step\'s shell reads');
 });
 
 test('the desktop app is gone: its folder, module, build script, notice and docs', () => {
