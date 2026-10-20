@@ -8,7 +8,7 @@ You need:
 - macOS or Linux (on Windows, use WSL2 or the Docker image);
 - git, and Node.js 22.13 or newer with npm (on a server, the install script installs Node for you);
 - a GitHub repo you can push to;
-- a Claude login. The wizard has **Sign in to Claude**, or run `claude auth login` yourself. See [auth.md](auth.md).
+- a Claude login: your Claude subscription or an API key. For the subscription, the wizard has **Sign in to Claude**, or run `claude auth login` yourself. For an API key, run `worklane init --answer agent-runtime=api_key --answer api-key-file=<path>`, where the path names a file you own (mode 600) that holds the key. The wizard records only the path, never the key, and the setup PR sets `agent_runtime.kind: api_key`. To let claude read the key, set `"apiKeyHelper": "cat -- <path>"` in your Claude settings. The login must be one the project's `agent_runtime.kind` runs on: the wizard checks this, and the agents refuse any other login. See [auth.md](auth.md).
 
 ## Local or server
 
@@ -134,7 +134,7 @@ The First run page (`/first-run`) lists every setup step, each with its state ch
 | Screen | Mode | What it does |
 |---|---|---|
 | **Tools** | both | Installs a missing gitleaks, Claude Code or gh, from pinned, checksummed downloads (on a server, the install command already did this) |
-| **Sign in to Claude** | local | Runs `claude auth login` for you and relays its sign-in page as a button; Claude Code keeps its own login |
+| **Sign in to Claude** | local | Runs `claude auth login` for you and relays its sign-in page as a button; Claude Code keeps its own login. Done only when the login is one the project's `agent_runtime.kind` runs on (`cli`: claude.ai or oauth_token; `api_key`: api_key or api_key_helper). Otherwise the step says that the agents would refuse the login, and how to fix it |
 | **The agents' Claude login** | server | Whether the agent user is signed in, and the root commands that sign it in on the machine (`credentials.sh <name> claude`, or `claude auth login` as the agent user). The page never takes the token ([auth.md](auth.md)) |
 | **Connect GitHub** | local | Runs `gh auth login --web` and shows its one-time code with a link to GitHub's device page |
 | **GitHub origin, default branch** | local | Picks the repo's GitHub origin and sets the default branch, for a checkout that lacks them |
@@ -249,17 +249,6 @@ A Discord bot lets people file work, answer decisions, approve high-risk changes
 - **The channels.** Pick them from the bot's own list.
 
 The page shows the exact change to `intake.yaml` before writing it. Who may send, people and owners stay in `intake.yaml` by hand. Restart the instance afterwards (the page shows the command). See [dashboard.md](dashboard.md#discord-the-bots-token-invite-link-and-channels) and [intake.md](intake.md).
-
-## Voice (optional)
-
-The dashboard can take your voice. In the Ask panel, it can dictate into the question box, read answers aloud, and listen for a wake word. With the voice button beside Ask, you can speak an idea or `approve <issue number>`. All of it is **off by default** and **for owners only**. You turn each part on under **Settings → Voice**, and the setting is kept in that browser.
-
-**Voice intake and approvals** also need `voice.enabled: true` in the instance's `intake.yaml`.
-- **Nothing acts on its own.** What was heard shows on a 10-second banner, and nothing happens until you say "confirm" within that window or click the banner.
-- **A spoken idea** goes through the same triage as a Discord message and becomes an Inbox decision.
-- **By voice, a decision can only be approved.** A held high-risk merge, a plan held for a high-risk reason, or a delegation takes a click.
-
-See [intake.md](intake.md#25-voice-the-dashboard). Recognition and voices are **on-device**: without on-device recognition the mic stays off and says why, and without an on-device voice nothing is read aloud, unless you allow the cloud fallback or network voices. Dictation only fills the box for you to review; it never sends. No wake-word model ships with it, so the wake word stays off until one is installed ([wake-word.md](wake-word.md)).
 
 ## When something's wrong
 

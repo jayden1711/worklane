@@ -1,13 +1,13 @@
 // The Claude account panel, the engine's half (src/claude-account.ts): only a machine owner sees it; a refresh is a
-// machine request with the same gate as any machine change; the coordinator runs it through the machine helper. A
-// switch to another account is a root admin's at a root shell (issue #711): the dashboard never takes its token, so
-// neither a switch request nor the token route exists, and a switch's progress is only shown.
+// machine request with the same gate as any machine change; the coordinator runs it through the machine helper. The
+// engine manages no Claude account (#736) and never takes a Claude credential (issue #711): neither a switch request
+// nor the token route exists, and a switch an older engine left is not followed.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, mkdtempSync, readdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { claudeAccountView, requestClaudeAccount, switchedOnto, switchView, readSwitchLines, type SwitchLine, type SwitchState } from '../src/claude-account.js';
+import { claudeAccountView, requestClaudeAccount } from '../src/claude-account.js';
 import { secretsDir } from '../src/console/secrets.js';
 import { checkRootStep } from '../src/console/root-steps.js';
 import { runMachineRequests } from '../src/coordinator/machine-requests.js';
@@ -21,44 +21,14 @@ import { asDevicePerson, asPerson, exampleProject, exampleRoles, ownerRequester,
 const posix = process.platform !== 'win32';
 const TOKEN = `sk-ant-oat01-${'T'.repeat(40)}`;
 
-/** A switch's progress file as claude-account.sh writes it, up to a point. */
-function switchDir(lines: Partial<SwitchLine>[], from: string | null = 'alpha'): string {
+/** A claude-account dir as an older engine left it: a switch waiting at a root shell for its token. */
+function switchDir(): string {
   const dir = mkdtempSync(join(tmpdir(), 'claude-account-dir-'));
   const at = new Date().toISOString().replace(/\.\d+Z$/, 'Z');
-  const all = [{ step: 'switch', state: 'started', detail: `2 instance(s): alpha beta; the token from ${from ? `the dashboard of ${from}` : 'this terminal'}` }, ...lines];
-  writeFileSync(join(dir, 'switch.jsonl'), all.map((l) => JSON.stringify({ at, ...l })).join('\n') + '\n');
+  const lines = [{ step: 'switch', state: 'started', detail: '2 instance(s): alpha beta' }, { step: 'pause', state: 'done', instance: 'alpha', detail: 'starts no more runs' }, { step: 'token', state: 'ask', detail: 'paste the token' }];
+  writeFileSync(join(dir, 'switch.jsonl'), lines.map((l) => JSON.stringify({ at, ...l })).join('\n') + '\n');
   return dir;
 }
-const WAITING: Partial<SwitchLine>[] = [
-  { step: 'pause', state: 'done', instance: 'alpha', detail: 'starts no more runs' },
-  { step: 'pause', state: 'done', instance: 'beta', detail: 'starts no more runs' },
-  { step: 'token', state: 'ask', detail: "paste the token in alpha's dashboard" },
-];
-
-test('switchedOnto: only an instance whose users all got the new token, passed the check and were resumed', () => {
-  const user = (n: string, check: SwitchState): Partial<SwitchLine>[] => [
-    { step: 'install', state: 'done', instance: n, user: `wl-${n}-agent`, detail: 'stored' },
-    { step: 'check', state: check, instance: n, user: `wl-${n}-agent`, detail: check },
-  ];
-  const ended = (token: SwitchState, alpha: SwitchState, beta: SwitchState) =>
-    readSwitchLines(switchDir([...WAITING.slice(0, 2), { step: 'token' as const, state: token, detail: token }, ...(token === 'done' ? [...user('alpha', 'done'), ...user('beta', 'failed')] : []), { step: 'resume' as const, state: alpha, instance: 'alpha', detail: alpha }, { step: 'resume' as const, state: beta, instance: 'beta', detail: beta }, { step: 'switch' as const, state: 'failed' as const, detail: 'not resumed: beta' }]));
-  const lines = ended('done', 'done', 'failed');
-  assert.match(switchedOnto('alpha', lines) ?? '', /^\d{4}-\d\d-\d\dT/, 'alpha: new login, checked, resumed');
-  assert.equal(switchedOnto('beta', lines), null, 'beta: its check failed');
-  assert.equal(switchedOnto('gamma', lines), null, 'not in the switch');
-  assert.equal(switchedOnto('alpha', ended('failed', 'done', 'done')), null, 'no token: resumed on its current login, so its limit still applies');
-  assert.equal(switchedOnto('alpha', readSwitchLines(switchDir(WAITING))), null, 'still running');
-});
-
-test('switchView folds the lines per instance and user, and knows when it waits for the token, ended or stalled', () => {
-  const v = switchView(readSwitchLines(switchDir(WAITING)))!;
-  assert.deepEqual([v.status, v.waitingForToken, v.instances.map((i) => i.name)], ['running', true, ['alpha', 'beta']]);
-  const ended = switchView(readSwitchLines(switchDir([...WAITING, { step: 'token', state: 'done', detail: 'received' }, { step: 'check', state: 'failed', instance: 'beta', user: 'wl-beta-agent', detail: 'not logged in' }, { step: 'resume', state: 'failed', instance: 'beta', detail: 'not resumed' }, { step: 'switch', state: 'failed', detail: 'not resumed: beta' }])))!;
-  assert.deepEqual([ended.status, ended.waitingForToken, ended.detail], ['failed', false, 'not resumed: beta']);
-  assert.deepEqual(ended.instances[1]!.users, [{ user: 'wl-beta-agent', install: null, check: ended.lines[5] }]);
-  assert.equal(switchView(readSwitchLines(switchDir(WAITING)), Date.now() + 2 * 3600_000)!.status, 'stalled');
-  assert.equal(switchView([]), null);
-});
 
 test('a refresh is a machine request for a machine owner only, on an allowed device; one at a time', () => {
   const owners = machineOwnersFile('ada');
@@ -81,7 +51,7 @@ test('issue #711: a switch is never asked for from a dashboard: it takes a Claud
   const log = new EventLog(':memory:');
   assert.throws(
     () => requestClaudeAccount(log, { action: 'switch', requester: ownerRequester('ada'), ownersFile: owners }),
-    (e: Error) => e instanceof MachineRequestError && e.status === 400 && /root admin's, at a root shell/.test(e.message),
+    (e: Error) => e instanceof MachineRequestError && e.status === 400 && /action is status; the engine manages no Claude account/.test(e.message),
   );
   assert.deepEqual(machineRequests(log.read(0)), [], 'nothing recorded');
   // A switch an earlier version recorded, still pending when the engine was updated: the coordinator refuses it,
@@ -111,7 +81,7 @@ test('the dashboard: the panel is a machine owner\'s only; the old token route i
   const eventsDb = join(dir, 'events.db');
   new EventLog(eventsDb).close();
   const owners = machineOwnersFile('example-owner');
-  const accountDir = switchDir(WAITING, cfg.project.project.name);
+  const accountDir = switchDir();
   writeFileSync(join(accountDir, 'status.json'), JSON.stringify({ at: '2026-10-13T00:00:00Z', users: [{ instance: 'alpha', kind: 'agent', user: 'wl-alpha-agent', stored: true, logged_in: true, auth_method: 'claude.ai', account: 'agents@example.com', token_id: '0123abcd', expires_at: '2027-10-13T00:00:00.000Z' }] }));
   const home = mkdtempSync(join(tmpdir(), 'claude-account-dash-home-'));
   const d = await startDashboard({ root, cfg, eventsDb, stateDir: join(dir, 'state'), user: 'example-owner', roleOf: exampleRoles, machineOwnersFile: owners, claudeAccountDir: accountDir, secretsHome: home, slotsDir: join(dir, 'slots') });
@@ -128,9 +98,12 @@ test('the dashboard: the panel is a machine owner\'s only; the old token route i
     writeFileSync(owners, `${JSON.stringify({ owners: ['example-owner'] })}\n`);
     const view = await call('/api/claude-account', asDevicePerson('example-owner'));
     assert.equal(view.status, 200);
-    const v = JSON.parse(view.text) as { machineOwner: boolean; allowed: boolean; canPasteToken?: boolean; status: { users: { account: string; tokenId: string }[] }; switch: { waitingForToken: boolean } };
-    assert.deepEqual([v.machineOwner, v.allowed, v.switch.waitingForToken, v.status.users[0]!.account, v.status.users[0]!.tokenId], [true, true, true, 'agents@example.com', '0123abcd']);
-    assert.equal(v.canPasteToken, undefined, 'a switch waiting for its token is shown, never offered a paste box');
+    const v = JSON.parse(view.text) as { machineOwner: boolean; allowed: boolean; canPasteToken?: boolean; status: { users: { account: string; tokenId: string }[] }; switch?: unknown; retired: { files: string[] } | null };
+    assert.deepEqual([v.machineOwner, v.allowed, v.status.users[0]!.account, v.status.users[0]!.tokenId], [true, true, 'agents@example.com', '0123abcd']);
+    assert.equal(v.canPasteToken, undefined, 'never a paste box');
+    // #736: a switch an older engine left waiting for its token is not followed: only named as a leftover.
+    assert.equal(v.switch, undefined);
+    assert.deepEqual(v.retired?.files, ['switch.jsonl']);
 
     // Issue #711: the token route is gone (410) for everyone, a machine owner on an allowed device included, and its
     // body is never read: nothing is stored, audited or recorded.
@@ -164,8 +137,8 @@ test('the dashboard: the panel is a machine owner\'s only; the old token route i
 test('the view: a machine owner may act; anyone else gets nothing to act on; nothing offers a paste box', () => {
   const owners = machineOwnersFile('ada');
   const v = claudeAccountView({ dir: mkdtempSync(join(tmpdir(), 'claude-account-empty-')), events: [], who: { role: 'owner', requester: ownerRequester('ada') }, instance: 'alpha', ownersFile: owners });
-  assert.deepEqual([v.machineOwner, v.allowed, v.status, v.switch], [true, true, null, null]);
-  const other = claudeAccountView({ dir: switchDir(WAITING), events: [], who: { role: 'owner', requester: ownerRequester('ivy') }, instance: 'alpha', ownersFile: owners });
+  assert.deepEqual([v.machineOwner, v.allowed, v.status, v.retired], [true, true, null, null]);
+  const other = claudeAccountView({ dir: switchDir(), events: [], who: { role: 'owner', requester: ownerRequester('ivy') }, instance: 'alpha', ownersFile: owners });
   assert.deepEqual([other.machineOwner, other.allowed], [false, false]);
   for (const x of [v, other]) assert.ok(!('canPasteToken' in x) && !('canSwitch' in x), 'nothing to paste a token into, nor a switch to start');
 });

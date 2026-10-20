@@ -13,9 +13,12 @@ test('isAllowed answers a boolean for every source in SOURCES: none is missing i
   }
 });
 
-test("isAllowed keeps today's answers: Discord by its list, the owner-gated sources allowed", () => {
+test("isAllowed keeps today's answers: Discord by its list, the owner-gated sources allowed, the removed voice source nobody", () => {
   const cfg = IntakeConfig.parse({ version: 1, discord: { allowed_senders: ['100000000000000011'] } });
   assert.equal(isAllowed({ source: 'discord', id: '100000000000000011' }, cfg), true);
   assert.equal(isAllowed({ source: 'discord', id: '100000000000000099' }, cfg), false);
-  for (const source of ['bug-store', 'alerts', 'github', 'voice'] as const) assert.equal(isAllowed({ source, id: 'x' }, cfg), true, source);
+  for (const source of ['bug-store', 'alerts', 'github'] as const) assert.equal(isAllowed({ source, id: 'x' }, cfg), true, source);
+  // Voice and Siri were removed (#743): a voice report is taken from nobody, even with intake.yaml's old keys on.
+  const old = IntakeConfig.parse({ version: 1, voice: { enabled: true }, siri: { enabled: true } });
+  for (const c of [cfg, old]) assert.equal(isAllowed({ source: 'voice', id: 'x' }, c), false);
 });

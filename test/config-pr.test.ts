@@ -126,7 +126,7 @@ test('#468 merged, but this checkout diverged: nothing touched, by how many comm
   assert.equal(git(f.dir, 'rev-parse', 'HEAD'), mine);
 });
 
-const probe: SetupProbe = { which: (c) => `/stand-in/${c}`, run: () => ({ status: 1, stdout: '', stderr: 'stand-in' }), serviceRunning: () => false, systemUnitActive: () => false, linger: () => null };
+const probe: SetupProbe = { which: (c) => `/stand-in/${c}`, run: () => ({ status: 1, stdout: '', stderr: 'stand-in' }), serviceRunning: () => false, systemUnitActive: () => false, linger: () => null, serviceManagerEnv: () => ({ env: {} }) };
 
 async function dashboard(dir: string, gh: (args: string[]) => RunResult, user = 'example-owner') {
   const stateDir = projectStateDir(dir);

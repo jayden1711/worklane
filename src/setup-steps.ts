@@ -16,7 +16,7 @@ import { loadConfig, type Config } from './config/load.js';
 import { hookChecks, type Settings } from './agent-settings.js';
 import { loadFingerprintSets } from './guardrails/context.js';
 import { GIT_HOOK_MARKER } from './install.js';
-import { instancesDir, loadInstance, readPolicy } from './instance.js';
+import { instanceFilesProblem, instancesDir, loadInstance, loadInstanceCredentials, readPolicy } from './instance.js';
 import { githubRepoOf } from './managed-apps.js';
 import { INTAKE_FILE, loadIntakeConfig } from './intake/config.js';
 import { MACHINE_HELPER } from './machine.js';
@@ -24,15 +24,25 @@ import { MACHINE_OWNERS_FILE, readMachineOwners } from './machine-owners.js';
 import { CLAUDE_ACCOUNT_DIR, readAccountStatus } from './claude-account.js';
 import { readWatchState } from './main-watch.js';
 import { OFFSITE_FILE } from './offsite-backup.js';
-import { lingerEnabled, nodePathProblem, serviceProgram, serviceRunning, systemUnitActive } from './os/index.js';
+import { lingerEnabled, nodePathProblem, serviceManagerCheck, serviceManagerEnv, serviceProgram, serviceRunning, systemUnitActive } from './os/index.js';
 import { findTool, withToolPath } from './tool-path.js';
 import { FULL_RUN_LOCK } from './testrun/run.js';
 import { modelWarnings } from './model-routing.js';
 import { ENGINE_CURRENT, UPDATES_CONFIG } from './updates.js';
-import { instanceUnit, serviceLabel } from './service.js';
+import { instanceRuntime, instanceUnit, localServiceEnv, serviceLabel } from './service.js';
 import { asRoot, etcPath, unitPath } from './os/system-paths.js';
 import { ciChoiceProblem } from './ci-choice.js';
 import { CI_NONE_MEANS, ciIsNone, requiredFor } from './ci-none.js';
+import { parse as parseYaml } from 'yaml';
+import { ProjectConfig } from './config/schema.js';
+import { agentAuthEnv, apiKeyHelperCommand, loginMethod, RUNTIME_LOGINS, type RuntimeKind } from './runner.js';
+import { outboundEnv } from './network.js';
+
+/** The wizard's choice for a new project (#738), in init's local state: an API key as its file's path, never the key. */
+export type RuntimeChoice = { kind: 'cli' } | { kind: 'api_key'; keyFile: string };
+
+/** Each kind in the words the wizard offers it. */
+export const RUNTIME_CHOICE_LABEL: Readonly<Record<RuntimeKind, string>> = { cli: 'your Claude subscription', api_key: 'an API key' };
 
 export type Mode = 'local' | 'server';
 export const MODES: readonly Mode[] = ['local', 'server'];
@@ -43,10 +53,26 @@ export interface RunResult {
   stderr: string;
 }
 
+/** How a probe runs a command; `agentRuntime` and `managerEnv`: as a local service's agent run of that kind (#738). */
+export interface ProbeRunOptions {
+  cwd?: string;
+  agentRuntime?: RuntimeKind;
+  managerEnv?: Record<string, string>;
+}
+
+/**
+ * The login variables a local service inherits from its user service manager. agentAuthEnv then keeps what the
+ * runner keeps (outboundEnv strips none of them).
+ */
+export const MANAGER_LOGIN_VARS = ['CLAUDE_CONFIG_DIR', 'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'CLAUDE_CODE_OAUTH_TOKEN'] as const;
+
+/** A probe's environment: this process's, or for the Claude step the local service's (manager's, then unit's), filtered as the runner does. */
+export const probeEnv = (o: ProbeRunOptions = {}): NodeJS.ProcessEnv => (o.agentRuntime ? outboundEnv(agentAuthEnv({ ...(o.managerEnv ?? {}), ...localServiceEnv() }, o.agentRuntime)) : withToolPath());
+
 /** What the detectors may ask of the machine: read-only commands and the service manager. Tests stand in for it. */
 export interface SetupProbe {
   which(cmd: string): string | null;
-  run(cmd: string, args: string[], o?: { cwd?: string }): RunResult;
+  run(cmd: string, args: string[], o?: ProbeRunOptions): RunResult;
   /** This user's service (local mode's coordinator) running now; null where there is no service manager to ask. */
   serviceRunning(label: string): boolean | null;
   /** A system unit (a server instance's coordinator, the dashboard hub) active now; null off Linux. */
@@ -57,19 +83,25 @@ export interface SetupProbe {
   serviceProgram?(label: string): { file: string; node: string } | null;
   /** Whether a path exists (the service's node); the real file system when absent. */
   exists?(path: string): boolean;
+  /** The login variables the user's service manager gives the coordinator's service; required: no default (#738). */
+  serviceManagerEnv(): ManagerEnv;
 }
 
-export function systemProbe(): SetupProbe {
+export type ManagerEnv = { env: Record<string, string> } | { error: string };
+
+/** The real probe; `managerEnv`: a given service-manager reading instead of asking the manager (tests, the worker's). */
+export function systemProbe(o: { managerEnv?: ManagerEnv } = {}): SetupProbe {
   return {
     which: (cmd) => findTool(cmd),
     run: (cmd, args, o = {}) => {
-      const r = spawnSync(cmd, args, { encoding: 'utf8', timeout: 30_000, env: withToolPath(), ...(o.cwd ? { cwd: o.cwd } : {}) });
+      const r = spawnSync(cmd, args, { encoding: 'utf8', timeout: 30_000, env: probeEnv(o), ...(o.cwd ? { cwd: o.cwd } : {}) });
       return { status: r.error ? null : r.status, stdout: r.stdout ?? '', stderr: r.error ? r.error.message : (r.stderr ?? '') };
     },
     serviceRunning,
     systemUnitActive,
     linger: () => lingerEnabled(),
     serviceProgram: (label) => serviceProgram(label),
+    serviceManagerEnv: () => o.managerEnv ?? serviceManagerEnv(MANAGER_LOGIN_VARS),
   };
 }
 
@@ -138,11 +170,16 @@ export interface SetupContext {
   instanceFacts?: () => InstanceFacts | { error: string };
   /** Steps skipped on the first-run page (src/dashboard.ts). */
   skipped?: readonly string[];
+  /** Local (#738): init's choice, and the held draft's config.yaml. */
+  runtimeChoice?: RuntimeChoice | undefined;
+  draftConfig?: string | undefined;
 }
 
 export interface Detected {
   done: boolean;
   detail: string;
+  /** A fix other than the step's own (#738). */
+  fix?: Fix;
 }
 
 /** How the first-run page fixes a step that isn't done. */
@@ -242,6 +279,30 @@ export interface Checking {
 }
 
 const ok = (detail: string): Detected => ({ done: true, detail });
+/**
+ * Server: doctor's warning when root's claude-account record has no line for this instance's agent user. The step
+ * then keeps main's verdict, without a login method to check (#738; the owner's option (a), 2026-10-19).
+ */
+export function agentRecordWarning(c: SetupContext): string | null {
+  if (c.mode !== 'server' || !c.instance) return null;
+  const m = { ...MACHINE_PATHS, ...c.machine };
+  if (readAccountStatus(m.claudeAccountDir)?.users.some((x) => x.instance === c.instance && x.kind === 'agent')) return null;
+  return `no Claude account recorded for ${c.instance}; the setup step can't check its login method. As root: sudo bash ${m.engine}/scripts/setup/claude-account.sh status ${c.instance}`;
+}
+
+/** Server: credentials.yaml alone (its repo config isn't valid while the setup PR waits), or the stand-in facts. */
+function agentCredentials(k: Checking): { agent_api_key?: string | undefined } | { error: string } {
+  if (k.c.instanceFacts) {
+    const i = k.inst();
+    return isErr(i) ? i : i.credentials;
+  }
+  try {
+    return loadInstanceCredentials(k.c.instance!, instancesDir()).credentials;
+  } catch (e) {
+    return { error: `instance ${k.c.instance}'s credentials.yaml can't be read here: ${firstLine(instanceFilesProblem(e))}` };
+  }
+}
+
 /** Server mode: the instance's agent user's login, as claude-account.sh status (or add-project, credentials.sh) last found it; null when it has no record. */
 function agentLogin(k: Checking): Detected | null {
   if (!k.c.instance) return null;
@@ -251,6 +312,14 @@ function agentLogin(k: Checking): Detected | null {
   const when = s.at ? ` at ${s.at}` : '';
   // WHY (#463): signed in per claude auth status is not proof the API takes the login; the real call is, when made.
   if (u.loggedIn && u.apiOk === false) return no(`${u.user} is signed in per claude auth status, but the API refused the login on a minimal real call${when}: ${u.apiError ?? 'no answer'}`);
+  // WHY (#738): a login the instance's runtime runs on, as the preflight checks it.
+  if (u.loggedIn) {
+    const creds = agentCredentials(k);
+    if (isErr(creds)) return no(`${u.user} is signed in per claude auth status${when}, but which login its agents need can't be told: ${creds.error}`);
+    const kind = instanceRuntime({ credentials: creds }).runtime;
+    const method = u.authMethod ?? 'unknown';
+    if (!RUNTIME_LOGINS[kind].includes(method)) return no(`${u.user} is signed in${u.authMethod ? ` (${u.authMethod})` : ' with no login method recorded'}, per claude auth status as that user${when}, but the agents would refuse it: the instance runs ${kind === 'api_key' ? 'on an API key (credentials.yaml agent_api_key)' : 'on a Claude subscription login'}, which takes only ${RUNTIME_LOGINS[kind].join(' or ')}, so every run would stop with auth_mismatch`);
+  }
   if (u.loggedIn) return ok(`${u.user} is signed in${u.authMethod ? ` (${u.authMethod})` : ''}, per claude auth status as that user${when}${u.tokenId ? `; token ${u.tokenId}` : ''}`);
   return no(`${u.user}: ${u.error ?? 'not signed in'}, per claude auth status as that user${when}`);
 }
@@ -305,25 +374,101 @@ export function proveClaudeLogin(p: Pick<SetupProbe, 'run'>): Detected {
   return no(redactString(`a minimal real call failed: ${text.replace(/\s+/g, ' ')}`).slice(0, 1000));
 }
 
-/**
- * Claude Code signed in (local mode: the person's own login, which the agents use): `claude auth status` says so,
- * and a minimal real call proves the API takes it. `memo` (the dashboard's) keeps the call's answer for the same
- * login: a success for LOGIN_PROOF_OK_MS, a failure for LOGIN_PROOF_FAILED_MS; Re-check calls again.
- */
-export function detectClaudeLogin(p: Pick<SetupProbe, 'which' | 'run'>, memo?: (identity: string, call: () => Detected) => Detected): Detected {
-  if (!p.which('claude')) return no('claude is not installed (the tools step)');
-  const r = p.run('claude', ['auth', 'status']);
-  let parsed: { loggedIn?: boolean; authMethod?: string; email?: unknown; orgId?: unknown } = {};
-  try {
-    parsed = JSON.parse(r.stdout) as typeof parsed;
-  } catch {
-    // older output: the exit status says it
+/** A local project's agent_runtime kind (#738): the checkout's config.yaml, else the held draft's, else init's choice, else cli. */
+export interface AgentRuntime {
+  kind: RuntimeKind;
+  source: 'config' | 'draft' | 'choice' | 'default';
+  keyFile?: string;
+}
+
+export function agentRuntimeOf(c: Pick<SetupContext, 'root' | 'runtimeChoice' | 'draftConfig'>, cfg: () => Config | { error: string }): AgentRuntime | { error: string } {
+  const keyFile = c.runtimeChoice?.kind === 'api_key' ? { keyFile: c.runtimeChoice.keyFile } : {};
+  const cannot = (why: string) => ({ error: `can't tell which Claude login the agents need: ${why}` });
+  if (existsSync(join(c.root, BRAND.configDir, 'config.yaml'))) {
+    const loaded = cfg();
+    if (isErr(loaded)) return cannot(`${BRAND.configDir}/config.yaml doesn't load (${loaded.error})`);
+    return { kind: loaded.project.agent_runtime.kind, source: 'config', ...keyFile };
   }
-  if (!(r.status === 0 && parsed.loggedIn !== false)) return no('not signed in, per `claude auth status`');
-  const how = `signed in${parsed.authMethod ? ` (${parsed.authMethod})` : ''}, per \`claude auth status\``;
-  const identity = JSON.stringify([parsed.authMethod ?? null, parsed.email ?? null, parsed.orgId ?? null]);
-  const proof = memo ? memo(identity, () => proveClaudeLogin(p)) : proveClaudeLogin(p);
-  return proof.done ? ok(`${how}; ${proof.detail}`) : no(`${how}, but the API refused it: ${proof.detail}`);
+  if (c.draftConfig !== undefined) {
+    try {
+      const p = ProjectConfig.safeParse(parseYaml(c.draftConfig));
+      if (!p.success) return cannot(`the drafted config.yaml doesn't validate (${p.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`)[0] ?? 'invalid'})`);
+      return { kind: p.data.agent_runtime.kind, source: 'draft', ...keyFile };
+    } catch (e) {
+      return cannot(`the drafted config.yaml doesn't parse (${firstLine((e as Error).message)})`);
+    }
+  }
+  if (c.runtimeChoice) return { kind: c.runtimeChoice.kind, source: 'choice', ...keyFile };
+  return { kind: 'cli', source: 'default' };
+}
+
+const RUNTIME_FROM: Record<AgentRuntime['source'], string> = { config: `${BRAND.configDir}/config.yaml`, draft: 'the drafted config', choice: 'your choice in init, for the setup PR', default: "a new project's default" };
+const RUNTIME_WANTS: Record<RuntimeKind, string> = { cli: `a Claude subscription login (${RUNTIME_LOGINS.cli.join(' or ')})`, api_key: `an API key (${RUNTIME_LOGINS.api_key.join(' or ')})` };
+
+/** The apiKeyHelper line, only through apiKeyHelperCommand (init's state is read back unchecked); else a placeholder. */
+export function apiKeyHelperLine(keyFile: string | undefined): { line: string; file: string | null } {
+  try {
+    if (keyFile) return { line: `"apiKeyHelper": "${apiKeyHelperCommand(keyFile)}"`, file: keyFile };
+  } catch {
+    // never shown
+  }
+  return { line: '"apiKeyHelper": "cat -- <your key file>"', file: null };
+}
+
+function runtimeFix(rt: AgentRuntime): string {
+  const helper = apiKeyHelperLine(rt.keyFile);
+  const useKey = `make claude read the key from ${helper.file ?? 'a file you own'}: set ${helper.line} in your Claude settings (~/.claude/settings.json), so \`claude auth status\` reports api_key_helper`;
+  const login = 'sign in with your Claude subscription (`claude auth login`)';
+  const other: RuntimeKind = rt.kind === 'cli' ? 'api_key' : 'cli';
+  const first = rt.kind === 'cli' ? login : useKey;
+  if (rt.source === 'config') return `${first}, or change agent_runtime.kind to ${other} in ${BRAND.configDir}/config.yaml through a reviewed PR`;
+  if (rt.source === 'draft') return `${first}, or set agent_runtime.kind to ${other} in the draft's config.yaml on the first-run page`;
+  return rt.kind === 'cli'
+    ? `${login}, or choose an API key: \`${BRAND.cli} init --answer agent-runtime=api_key --answer api-key-file=<path of a file holding the key>\` (the setup PR then sets agent_runtime.kind: api_key)`
+    : `${useKey}; or choose your subscription: \`${BRAND.cli} init --answer agent-runtime=subscription\``;
+}
+
+/**
+ * Claude Code signed in (local mode) with a login the project's agent_runtime runs on (#738: the preflight refuses
+ * any other), asked as the local service's runs ask it (probeEnv), and a minimal real call proves the API takes it.
+ * `memo` (the dashboard's) keeps the call's answer for the same login: a success for LOGIN_PROOF_OK_MS, a failure
+ * for LOGIN_PROOF_FAILED_MS. `mismatch`: the detail says how to fix it.
+ */
+export function detectClaudeLogin(p: Pick<SetupProbe, 'which' | 'run' | 'serviceManagerEnv'>, runtime: AgentRuntime | { error: string }, memo?: (identity: string, call: () => Detected) => Detected): Detected & { mismatch?: true } {
+  if (!p.which('claude')) return no('claude is not installed (the tools step)');
+  if ('error' in runtime) return no(runtime.error);
+  // The service inherits its manager's environment (#738); unreadable means unknown: not done.
+  const mgr = p.serviceManagerEnv();
+  // Unreadable: a fix for that cause, never Sign in (no login fixes it).
+  if ('error' in mgr) return { ...no(`can't tell which login the coordinator's service gets: its service manager can't be read (${mgr.error})`), mismatch: true as const, fix: { kind: 'terminal', command: serviceManagerCheck(), why: "this user's service manager couldn't be read; this shows why" } };
+  const fromManager = Object.keys(mgr.env).sort();
+  const managerNote = fromManager.length ? `; with ${fromManager.join(', ')} from the service manager` : '';
+  const as = { agentRuntime: runtime.kind, managerEnv: mgr.env };
+  const r = p.run('claude', ['auth', 'status'], as);
+  type Status = { loggedIn?: unknown; authMethod?: unknown; email?: unknown; orgId?: unknown };
+  let parsed: Status | null = null;
+  try {
+    const j = JSON.parse(r.stdout) as unknown;
+    parsed = j && typeof j === 'object' ? (j as Status) : null;
+  } catch {
+    // not JSON: no method, as for the runner
+  }
+  // INVARIANT (#738): the preflight's own reading (loginMethod) and table.
+  const method = parsed ? loginMethod(parsed) : r.status === 0 ? 'unknown' : 'none';
+  const needs = `agent_runtime.kind is ${runtime.kind} (${RUNTIME_FROM[runtime.source]}), which runs only on ${RUNTIME_WANTS[runtime.kind]}`;
+  // An API-key project: no Sign in (a subscription login it refuses).
+  const keyFix: Fix = { kind: 'terminal', command: apiKeyHelperLine(runtime.keyFile).line, why: 'an API key has no sign-in: add this line to your Claude settings (~/.claude/settings.json); this page never writes them' };
+  const fixed = <T extends Detected>(d: T): T => (runtime.kind === 'api_key' ? { ...d, fix: keyFix } : d);
+  const refuse = (detail: string) => fixed({ ...no(`${detail}. To fix: ${runtimeFix(runtime)}`), mismatch: true as const });
+  if (r.status !== 0 || method === 'none') return runtime.kind === 'cli' ? no(`not signed in, per \`claude auth status\`${managerNote}`) : refuse(`not signed in, per \`claude auth status\`${managerNote}: ${needs}`);
+  const shown = method.replace(/[^A-Za-z0-9._-]/g, '?').slice(0, 40);
+  const how = `signed in${method !== 'unknown' ? ` (${shown})` : ' with no login method named'}, per \`claude auth status\`${managerNote}`;
+  if (!RUNTIME_LOGINS[runtime.kind].includes(method)) return refuse(`${how}, but the agents would refuse it: ${needs}, so every run would stop with auth_mismatch`);
+  // Never a key's value in the cache key.
+  const identity = JSON.stringify([runtime.kind, method, parsed?.email ?? null, parsed?.orgId ?? null, fromManager, mgr.env.CLAUDE_CONFIG_DIR ?? null]);
+  const prove = () => proveClaudeLogin({ run: (cmd, args) => p.run(cmd, args, as) });
+  const proof = memo ? memo(identity, prove) : prove();
+  return fixed(proof.done ? ok(`${how}; ${proof.detail}`) : no(`${how}, but the API refused it: ${proof.detail}`));
 }
 
 /** How long the dashboard keeps a login's proof: an answered call, and a refused one (Re-check always calls again). */
@@ -514,10 +659,10 @@ export const SETUP_STEPS: readonly SetupStep[] = [
     modes: ['local'],
     optional: false,
     reach: 'all',
-    today: `Run \`claude auth login\` in a terminal, then \`${BRAND.cli} init\` again (it picks up here).`,
+    today: `Run \`claude auth login\` in a terminal, then \`${BRAND.cli} init\` again (it picks up here). An API key instead: \`${BRAND.cli} init --answer agent-runtime=api_key --answer api-key-file=<path>\`. The login must be one agent_runtime.kind runs on.`,
     fix: { kind: 'signin', label: 'Sign in' },
-    automation: 'claude auth login (in a terminal, as this user)',
-    detect: (k) => detectClaudeLogin(k.p, k.memo),
+    automation: `claude auth login (in a terminal, as this user); an API key: ${BRAND.cli} init --answer agent-runtime=api_key --answer api-key-file=<path>`,
+    detect: (k) => detectClaudeLogin(k.p, agentRuntimeOf(k.c, k.cfg), k.memo),
   },
   {
     id: 'claude-token',
@@ -1203,7 +1348,7 @@ export function checkSetup(c: SetupContext, p: SetupProbe, o: { cache?: DetectCa
       return r;
     },
   };
-  const key = JSON.stringify([c.mode, c.root, c.repo, c.instance, c.openQuestions, c.setupPr]);
+  const key = JSON.stringify([c.mode, c.root, c.repo, c.instance, c.openQuestions, c.setupPr, c.runtimeChoice ?? null, c.draftConfig ?? null]);
   const steps: StepView[] = [];
   for (const s of SETUP_STEPS) {
     if (!s.modes.includes(c.mode)) continue;
@@ -1224,7 +1369,7 @@ export function checkSetup(c: SetupContext, p: SetupProbe, o: { cache?: DetectCa
       o.cache?.set(s.id, { at: t, key, r });
     }
     if (!r) continue;
-    steps.push({ id: s.id, group: s.group, rows: s.rows, title: s.title, optional: s.optional, walk: !!s.walk?.includes(c.mode), reach: s.reach, done: r.done, detail: r.detail, today: s.today, fix: s.fix, automation: s.automation ?? null, skipped: !!c.skipped?.includes(s.id), network: !!s.network, checkedAt: new Date(at).toISOString() });
+    steps.push({ id: s.id, group: s.group, rows: s.rows, title: s.title, optional: s.optional, walk: !!s.walk?.includes(c.mode), reach: s.reach, done: r.done, detail: r.detail, today: s.today, fix: r.fix ?? s.fix, automation: s.automation ?? null, skipped: !!c.skipped?.includes(s.id), network: !!s.network, checkedAt: new Date(at).toISOString() });
   }
   const groups: GroupView[] = GROUPS.filter((g) => g.modes.includes(c.mode))
     .map((g) => {
@@ -1247,9 +1392,9 @@ export const groupLevel = (g: Pick<GroupView, 'ready' | 'optional'>): 'ok' | 'wa
  * answering while the commands run. The context must be plain data (no instanceFacts function: the worker loads
  * the instance itself). The cache comes back updated.
  */
-export function checkSetupOffThread(c: Omit<SetupContext, 'instanceFacts'>, o: { cache: DetectCache; fresh?: boolean; localMs?: number; netMs?: number }): Promise<SetupView> {
+export function checkSetupOffThread(c: Omit<SetupContext, 'instanceFacts'>, o: { cache: DetectCache; fresh?: boolean; localMs?: number; netMs?: number; managerEnv?: ManagerEnv }): Promise<SetupView> {
   return new Promise((resolve, reject) => {
-    const w = new Worker(new URL('./setup-worker.js', import.meta.url), { workerData: { ctx: c, cache: o.cache, fresh: !!o.fresh, localMs: o.localMs ?? 0, netMs: o.netMs ?? 0 } });
+    const w = new Worker(new URL('./setup-worker.js', import.meta.url), { workerData: { ctx: c, cache: o.cache, fresh: !!o.fresh, localMs: o.localMs ?? 0, netMs: o.netMs ?? 0, ...(o.managerEnv ? { managerEnv: o.managerEnv } : {}) } });
     w.once('message', (m: { view: SetupView; cache: DetectCache }) => {
       o.cache.clear();
       for (const [k, v] of m.cache) o.cache.set(k, v);

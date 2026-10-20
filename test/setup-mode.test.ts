@@ -88,6 +88,7 @@ function ghStandIn(bare: string, o: { admin?: boolean; refuse?: string } = {}) {
 function initIo(gh: (args: string[]) => RunResult, ask: (q: string) => string | null = () => null, interactive: string[][] = []): InitIo {
   return {
     which: (c) => `/stand-in/${c}`,
+    serviceManagerEnv: () => ({ env: {} }),
     run: (cmd, args, o = {}) => {
       if (cmd === 'git') {
         const r = spawnSync('git', args, { encoding: 'utf8', ...(o.cwd ? { cwd: o.cwd } : {}) });
@@ -95,7 +96,7 @@ function initIo(gh: (args: string[]) => RunResult, ask: (q: string) => string | 
       }
       const a = args.join(' ');
       if (cmd === 'claude' && args[0] === '-p') return { status: 0, stdout: '{"type":"result","subtype":"success","is_error":false,"result":"ok"}', stderr: '' }; // the login's proof: a minimal real call, answered
-      if (cmd === 'claude') return { status: 0, stdout: '{"loggedIn": true}', stderr: '' };
+      if (cmd === 'claude') return { status: 0, stdout: '{"loggedIn": true, "authMethod": "claude.ai"}', stderr: '' };
       if (cmd === 'gh' && a === 'auth status') return { status: 0, stdout: '', stderr: '' };
       if (cmd === 'gh' && a.endsWith('--jq .permissions.push')) return { status: 0, stdout: 'true\n', stderr: '' };
       if (cmd === 'gh') return gh(args);
@@ -112,6 +113,7 @@ function initIo(gh: (args: string[]) => RunResult, ask: (q: string) => string | 
 
 const probe = (gh: (args: string[]) => RunResult): SetupProbe => ({
   which: (c) => `/stand-in/${c}`,
+  serviceManagerEnv: () => ({ env: {} }),
   run: (cmd, args, o = {}) => {
     if (cmd === 'git') {
       const r = spawnSync('git', args, { encoding: 'utf8', ...(o.cwd ? { cwd: o.cwd } : {}) });
