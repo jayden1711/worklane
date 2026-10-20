@@ -5,7 +5,7 @@ import type { StoredEvent } from '../src/events/types.js';
 import { PolicyFile } from '../src/instance.js';
 import { instructionEvalReasons, mergeDecision, waitCategoriesOf, type InstructionEvalResult, type MergeInput } from '../src/merge-policy.js';
 import { buildReport } from '../src/reports.js';
-import { AGENT_INSTRUCTIONS, computeLevel, DEFAULT_CATEGORIES, LOCKED_CATEGORIES, SELF_MODIFICATION, SELF_MODIFICATION_PARTS } from '../src/review.js';
+import { AGENT_INSTRUCTIONS, computeLevel, DEFAULT_CATEGORIES, LOCKED_CATEGORIES, SELF_MODIFICATION, SELF_MODIFICATION_PARTS, selfModificationPart } from '../src/review.js';
 import { execFileSync } from 'node:child_process';
 import { globToRegExp } from '../src/guardrails/glob.js';
 import { loosenedProblems } from '../src/delegation.js';
@@ -86,13 +86,17 @@ test("regression: a change to the agents' role prompts, skills, AGENTS.md or any
 /** The engine's own files, as git tracks them. */
 const engineFiles = execFileSync('git', ['ls-files'], { cwd: repoRoot, encoding: 'utf8' }).split('\n').filter(Boolean);
 
-/** Files the guard names before the repo has one (the owner's own file, written when a study is set up): exact paths only. */
-const NOT_YET_FILES = [`${BRAND.configDir}/experiments.yaml`];
+/**
+ * Globs the guard names before the repo has a file under them: the owner's own file, written when a study is set up, and
+ * the deployment manifests, locked before the first one lands (#703 adds it). Each entry must still
+ * match no file, so the first file under it takes the entry out and its glob is checked like the others.
+ */
+const NOT_YET_FILES = [`${BRAND.configDir}/experiments.yaml`, 'deploy/**'];
 
 test('self-modification: every glob names real engine files (none dead), and the list is the one the owner approved', () => {
   for (const part of SELF_MODIFICATION_PARTS) {
     for (const glob of part.globs) {
-      if (NOT_YET_FILES.includes(glob)) assert.ok(!engineFiles.includes(glob), `${glob} exists now: take it out of NOT_YET_FILES, so the glob is checked like the others`);
+      if (NOT_YET_FILES.includes(glob)) assert.ok(!engineFiles.some((f) => globToRegExp(glob).test(f)), `${glob} matches a file now: take it out of NOT_YET_FILES, so the glob is checked like the others`);
       else assert.ok(engineFiles.some((f) => globToRegExp(glob).test(f)), `${part.what}: ${glob} matches no file in the repo`);
     }
   }
@@ -259,6 +263,39 @@ test('regression: a PR touching only .github/release-signers is L3, waits for th
   assert.deepEqual(lvl.categories['release-signing'], [path]);
   assert.deepEqual(lvl.categories['release-config'], [path]);
   assert.ok(own.levels.L3_human.when.includes('release-signing') && own.merge.wait_categories.includes('release-signing'));
+});
+
+// WHY: the engine's deployment manifests (deploy/**, e.g. a compose file) set its isolation and exposure: which user it
+// runs as, what it mounts, which ports it publishes. Before this, only review.yaml's `deploy-config` held them, so a
+// review.yaml without that category would have let the first one merge below the owner. Locked before any exists.
+test('regression: a PR touching only deploy/compose.yaml is L3, waits for the owner and never auto-merges (this repo, the example, and a review.yaml that drops it)', () => {
+  const path = 'deploy/compose.yaml';
+  const own = loadConfig(repoRoot).review!;
+  const loose = {
+    ...own,
+    categories: { 'deploy-config': [] as string[], engine: [] as string[] },
+    levels: { ...own.levels, L3_human: { ...own.levels.L3_human, when: [] as string[] } },
+    merge: { ...own.merge, wait_categories: [] as string[] },
+  };
+  for (const [name, rc] of [['this repo', own], ['the example', review], ['loosened', loose]] as const) {
+    const lvl = computeLevel({ files: [{ path, added: 1, removed: 1 }], labels: [], moneyPaths: [], scope: undefined }, rc);
+    assert.equal(lvl.level, 'L3', name);
+    assert.deepEqual(lvl.categories[SELF_MODIFICATION], [path], name);
+    const d = mergeDecision(clean({ level: lvl, lines: 2, waitCategories: waitCategoriesOf(rc) }));
+    assert.equal(d.auto, false, name);
+    assert.ok(d.reasons.includes(`high-risk: ${SELF_MODIFICATION} (${path})`), `${name}: ${d.reasons.join(' | ')}`);
+    assert.deepEqual(d.why.find((y) => y.category === SELF_MODIFICATION), { category: SELF_MODIFICATION, text: `changes the machine setup: ${path}` }, name);
+    // Even a caller that passes no wait categories at all: the floor holds.
+    assert.equal(mergeDecision(clean({ level: lvl, lines: 2, waitCategories: [] })).auto, false, `${name}: the floor`);
+  }
+  // This repo's review.yaml names it too, under engine (an engine that predates the lock reads this file from main).
+  assert.deepEqual(computeLevel({ files: [{ path, added: 1, removed: 1 }], labels: [], moneyPaths: [], scope: undefined }, own).categories.engine, [path]);
+  // A managed app's own deploy/ is the app's, not the engine's: no engine lock there, its deploy-config holds as before.
+  assert.equal(selfModificationPart(path, 'managed-app'), null);
+  const app = computeLevel({ files: [{ path, added: 1, removed: 1 }], labels: [], moneyPaths: [], scope: 'managed-app' }, review);
+  assert.equal(app.categories[SELF_MODIFICATION], undefined);
+  assert.deepEqual(app.categories['deploy-config'], [path]);
+  assert.equal(app.level, 'L3');
 });
 
 test('merge policy: why a high-risk PR waits, plainly, naming the category and its first file', () => {
