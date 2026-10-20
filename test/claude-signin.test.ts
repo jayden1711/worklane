@@ -258,8 +258,13 @@ test("server, the terminal's way: credentials.sh claude takes the setup token at
   assert.match(block, /claude_token_ok "\$token" \|\| \{ token=""; echo "that is not a token from claude setup-token/);
   assert.match(block, /printf '%s' "\$token" \| install_claude_token "\$agent"\n\s+token=""\n\s+claude_login_ok "\$agent"/);
   assert.doesNotMatch(sh, /\/login/, 'no interactive Claude session to sign in through');
+  // #739: the bootstrap gives one answer, Add project, and pastes nothing itself; Add project's Claude step is where
+  // the terminal's way is said, when it waits for root.
   const bs = readFileSync(join(repoRoot, 'scripts', 'bootstrap.sh'), 'utf8');
-  assert.match(bs, /claude setup-token[^\n]*\n[^\n]*credentials\.sh \$NAME claude {3}\(paste the token it printed; it is not shown\)/);
+  assert.doesNotMatch(bs, /claude setup-token/);
+  assert.match(bs, /echo " {3}sudo bash scripts\/setup\/add-project\.sh \$NAME \$GITHUB"/);
+  const ap = readFileSync(join(repoRoot, 'scripts', 'setup', 'add-project.sh'), 'utf8');
+  assert.match(ap, /echo "waiting: the agents' Claude login, which only root installs, on this machine: sudo bash \$here\/credentials\.sh \$name claude \(it asks for the token claude setup-token prints, not shown\)/);
 });
 
 test("claude's login and status get no host-redirect variable (#391): ANTHROPIC_BASE_URL, provider switches and proxies are stripped; the relay's BROWSER kept", () => {
