@@ -725,3 +725,232 @@ test(
     assert.deepEqual(filesUnder(live), before, "nothing written to the machine's home, state, slots or system files, and its helper never ran");
   },
 );
+
+// ---------------------------------------------------------------------------------------------------------------
+// #786: a variable that isn't set reads as unset, whatever is on Object.prototype (src/os/own-env.ts).
+
+import { heldOutDir } from '../src/held-out.js';
+import { HELD_OUT_ENV } from '../src/held-out-paths.js';
+import { readManagedApps } from '../src/managed-apps.js';
+import { slotsConfigPath, which } from '../src/os/index.js';
+import { etcPath, SYSTEM_ROOTS, varLibPath } from '../src/os/system-paths.js';
+import { heldOutAllowed } from '../src/spend-gate.js';
+import { verifyWithScript } from '../src/setup/app-manifest.js';
+import { currentUser } from '../src/os/index.js';
+import { EventEmitter } from 'node:events';
+import { CliAgentRunner, cliAgentCommand } from '../src/cli-agents.js';
+import { authStatusCommand, CliRunner } from '../src/runner.js';
+
+/** Runs `f` with `vars` on Object.prototype, as a polluting dependency would set them, and takes them off after. */
+function polluted<T>(vars: Record<string, string>, f: () => T): T {
+  const proto = Object.prototype as Record<string, unknown>;
+  for (const k of Object.keys(vars)) assert.ok(!Object.hasOwn(proto, k), `${k} isn't on Object.prototype already`);
+  try {
+    for (const [k, v] of Object.entries(vars)) proto[k] = v;
+    return f();
+  } finally {
+    for (const k of Object.keys(vars)) delete proto[k];
+  }
+}
+
+/** Runs `f` with `keys` unset in this process's environment, then puts each back (an isolated one with restoreIsolated). */
+function unsetWhile<T>(keys: string[], f: () => T): T {
+  const saved = new Map(keys.map((k) => [k, Object.hasOwn(process.env, k) ? process.env[k] : undefined] as const));
+  try {
+    for (const k of keys) delete process.env[k];
+    return f();
+  } finally {
+    for (const [k, v] of saved) {
+      if (Object.hasOwn(isolatedEnv, k)) restoreIsolated(k);
+      else if (v !== undefined) process.env[k] = v;
+    }
+  }
+}
+
+/** polluted() and unsetWhile() across awaits: for a run whose environment is built after its first await. */
+async function pollutedUnset<T>(vars: Record<string, string>, f: () => Promise<T>): Promise<T> {
+  const proto = Object.prototype as Record<string, unknown>;
+  const keys = Object.keys(vars);
+  for (const k of keys) assert.ok(!Object.hasOwn(proto, k), `${k} isn't on Object.prototype already`);
+  const saved = new Map(keys.map((k) => [k, Object.hasOwn(process.env, k) ? process.env[k] : undefined] as const));
+  try {
+    for (const k of keys) delete process.env[k];
+    for (const [k, v] of Object.entries(vars)) proto[k] = v;
+    return await f();
+  } finally {
+    for (const k of keys) delete proto[k];
+    for (const [k, v] of saved) {
+      if (Object.hasOwn(isolatedEnv, k)) restoreIsolated(k);
+      else if (v !== undefined) process.env[k] = v;
+    }
+  }
+}
+
+/** polluted() across awaits, leaving this process's own environment as it is. */
+async function pollutedAsync<T>(vars: Record<string, string>, f: () => Promise<T>): Promise<T> {
+  const proto = Object.prototype as Record<string, unknown>;
+  for (const k of Object.keys(vars)) assert.ok(!Object.hasOwn(proto, k), `${k} isn't on Object.prototype already`);
+  try {
+    for (const [k, v] of Object.entries(vars)) proto[k] = v;
+    return await f();
+  } finally {
+    for (const k of Object.keys(vars)) delete proto[k];
+  }
+}
+
+test('regression (#786): with Object.prototype polluted, an unset variable reads as unset: the system root, the test-run marks, the service modes, the held-out store, the tool prefix', { skip: process.platform === 'win32' && 'POSIX owners and modes' }, () => {
+  const uid = process.getuid!();
+  const engine = { argv: [process.execPath, join(repoRoot, 'dist', 'src', 'cli.js'), 'coordinator', 'run'], execArgv: [] as string[] };
+  const clean: NodeJS.ProcessEnv = { PATH: '/usr/bin', HOME: '/home/example' };
+  const canary = mkdtempSync(join(tmpdir(), 'canary-786-'));
+  const vars = {
+    [SYSTEM_ROOT_VAR]: join(canary, 'root'),
+    NODE_TEST_CONTEXT: 'child-v8',
+    [TEST_RUN_VAR]: '1',
+    [HELD_OUT_ENV]: join(canary, 'held-out'),
+    [`${BRAND.envPrefix}_PREFIX`]: join(canary, 'prefix'),
+  };
+  polluted(vars, () => {
+    // The pollution reaches a plain read (measured on Node 22, #786): what these read before.
+    assert.equal({ ...clean }[SYSTEM_ROOT_VAR], vars[SYSTEM_ROOT_VAR], 'a plain object inherits it');
+    assert.equal(systemRootRefusal({ ...clean }, uid), null, 'the system root: unset, nothing to refuse');
+    assert.equal(testRunSign({ ...clean }, engine), null, 'the test-run marks: the engine is no test run');
+    assert.equal(serviceModeRefusal(['coordinator', 'run'], { ...clean }), null, 'a service mode: no system root to refuse');
+    assert.equal(heldOutDir('/state', { ...clean }), join('/state', 'evals', 'held-out'), "the held-out store: the state's");
+    assert.equal(heldOutAllowed([], { ...clean }), false, 'held-out cases: not asked for');
+    assert.equal(toolPrefix({ ...clean }), join(homedir(), '.local'), 'the tool prefix: the default');
+  });
+});
+
+test("regression (#786): with Object.prototype polluted, the process's own locations ignore it: the slot dir and its config, the instances and init dirs, the tool prefix and PATH", { skip: process.platform === 'win32' && 'POSIX modes' }, () => {
+  const canary = mkdtempSync(join(tmpdir(), 'canary-786-'));
+  const bin = join(canary, 'bin');
+  mkdirSync(bin);
+  writeFileSync(join(bin, 'wl786-canary-tool'), '#!/bin/sh\n', { mode: 0o755 });
+  const vars: Record<string, string> = {
+    // Inside the test machine, so the slot dir's own guard (testSlotsRefusal) would take it: only the read decides.
+    AGENT_SLOTS_DIR: join(canary, 'slots'),
+    AGENT_SLOTS_CONFIG: join(canary, 'slots-config.json'),
+    [`${BRAND.envPrefix}_INSTANCES_DIR`]: join(canary, 'instances'),
+    [`${BRAND.envPrefix}_MACHINE_INIT_DIR`]: join(canary, 'machine-init'),
+    [`${BRAND.envPrefix}_PREFIX`]: join(canary, 'prefix'),
+    PATH: bin,
+  };
+  unsetWhile(Object.keys(vars), () =>
+    polluted(vars, () => {
+      assert.equal(process.env.AGENT_SLOTS_DIR, vars.AGENT_SLOTS_DIR, 'process.env inherits it (measured on Node 22, #786)');
+      assert.equal(names(slotsDir(), vars.AGENT_SLOTS_DIR!), false, 'the slot dir is not the canary');
+      assert.equal(slotsConfigPath('/nowhere'), join('/nowhere', 'config.json'), "the slot config: the slot dir's");
+      assert.equal(instancesDir(), join(stateDir(), 'instances'), "the instances dir: the state dir's");
+      assert.equal(machineInitDir(), varLibPath('init'), "the machine's init dir: its own");
+      assert.equal(toolPrefix(), join(homedir(), '.local'), 'the tool prefix: the default');
+      assert.equal(which('wl786-canary-tool'), null, 'PATH: unset, nothing on it');
+    }),
+  );
+});
+
+test("regression (#786): a forged system root on Object.prototype, with a mark for this run's token, moves no machine path, and makes no file of this user's root's", { skip: process.platform === 'win32' && 'POSIX owners and modes' }, () => {
+  const uid = process.getuid!();
+  const token = process.env[TEST_TOKEN_VAR]!;
+  // What a polluter would make: a root of this user's alone, holding a mark for this run's token.
+  const forged = mkdtempSync(join(tmpdir(), 'forged-root-'));
+  chmodSync(forged, 0o700);
+  writeFileSync(join(forged, TEST_MARK_FILE), `${token}\n`, { mode: 0o600 });
+  assert.equal(systemRootRefusal({ [SYSTEM_ROOT_VAR]: forged, [TEST_TOKEN_VAR]: token }, uid), null, 'given as a real variable, the forgery is honoured: the test means something');
+  // A managed-apps file of this user's: in a marked test process this user stands in for root (src/managed-apps.ts rootUid).
+  const apps = join(mkdtempSync(join(tmpdir(), 'apps-')), 'managed-apps.json');
+  writeFileSync(apps, JSON.stringify({ version: 1, apps: { shop: 'acme/shop' } }), { mode: 0o644 });
+  assert.deepEqual(readManagedApps(apps), { apps: { shop: 'acme/shop' }, problem: null }, "with the preload's own root, this user's file is root's");
+  unsetWhile([SYSTEM_ROOT_VAR], () =>
+    polluted({ [SYSTEM_ROOT_VAR]: forged }, () => {
+      assert.equal(process.env[SYSTEM_ROOT_VAR], forged, 'process.env inherits it (measured on Node 22, #786)');
+      assert.equal(etcPath('x'), `${SYSTEM_ROOTS.etc}/x`, 'no machine path moves into the forged root');
+      assert.match(readManagedApps(apps).problem ?? '', /isn't root's alone/, "unset, root's files are uid 0's again: this user's file is refused");
+    }),
+  );
+  assert.equal(readManagedApps(apps).problem, null, "the preload's own root back: as before");
+});
+
+test("regression (#786): a NODE_OPTIONS on Object.prototype is not handed to the App check's node (it runs as the coordinator user)", async () => {
+  const canary = `--require ${join(mkdtempSync(join(tmpdir(), 'canary-786-')), 'never.cjs')}`;
+  const script = join(mkdtempSync(join(tmpdir(), 'script-')), 'check.mjs');
+  writeFileSync(script, '');
+  const seen: NodeJS.ProcessEnv[] = [];
+  // A stand-in spawn: records the environment it is given, and ends at once. Nothing runs.
+  const standIn = ((_file: string, _args: string[], o: { env: NodeJS.ProcessEnv }) => {
+    seen.push(o.env);
+    const p = Object.assign(new EventEmitter(), { stdout: new EventEmitter(), stderr: new EventEmitter(), stdin: { end: () => setImmediate(() => p.emit('close', 0)) } });
+    return p;
+  }) as unknown as typeof spawn;
+  const own = Object.hasOwn(process.env, 'NODE_OPTIONS') ? process.env.NODE_OPTIONS : undefined;
+  const verify = polluted({ NODE_OPTIONS: canary }, () => verifyWithScript({ script, spawn: standIn }));
+  await verify({ user: currentUser(), key: '/k', appId: 1, installationId: 2, repo: 'acme/shop' } as Parameters<typeof verify>[0]);
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0]!.NODE_OPTIONS, own, "only this process's own NODE_OPTIONS, if it has one");
+});
+
+test("regression (#786 round 2): an agent user's run gets none of Object.prototype's variables across the user switch, and sudo gets no PATH from it", { skip: process.platform === 'win32' && 'agent users: POSIX' }, async () => {
+  const canary = mkdtempSync(join(tmpdir(), 'canary-786-'));
+  const vars = { TZ: 'Canary/786', LC_ALL: 'canary-786', XDG_RUNTIME_DIR: join(canary, 'run'), CLAUDE_CONFIG_DIR: join(canary, 'claude'), PATH: join(canary, 'path') };
+  const home = mkdtempSync(join(tmpdir(), 'agent-home-'));
+  // What the runner hands sudo (the env -i list is built from it): recorded, then a node that exits at once runs instead.
+  const wrapped: NodeJS.ProcessEnv[] = [];
+  const exec = {
+    wrap: (_u: string, _f: string, _a: string[], e: NodeJS.ProcessEnv): [string, string[], NodeJS.ProcessEnv] => (wrapped.push({ ...e }), [process.execPath, ['-e', ''], { PATH: '/usr/bin:/bin' }]),
+    kill: () => {},
+  };
+  const runner = new CliAgentRunner('codex', { runAs: () => ({ user: 'agent', home }), exec });
+  const req = { role: 'worker', prompt: 'p', appendSystemPrompt: 's', cwd: canary, model: 'codex-model-x', allowedTools: [], maxTurns: 1, maxBudgetUsd: 1, stallMs: 30_000, timeoutMs: 30_000, route: { kind: 'build' as const, fallback: 'sonnet' }, provider: { name: 'cli:codex', kind: 'cli' as const, agent: 'codex' as const, usdPerMtok: { in: 1, out: 1 } } };
+  const out = await pollutedUnset(vars, async () => ({
+    run: await runner.run(req as Parameters<typeof runner.run>[0]),
+    sudo: cliAgentCommand('agent', '/bin/true', [], {})[2],
+    probe: authStatusCommand({}, { user: 'agent', home }).env,
+    login: new CliRunner('cli', process.env).loginOf({}),
+  }));
+  assert.equal(wrapped.length, 1, `the run reached its CLI: ${out.run.detail}`);
+  // Every route at once, so a failure names each one that leaks.
+  const leaks = [
+    ...Object.entries(vars).filter(([k, v]) => wrapped[0]![k] === v).map(([k]) => `the agent run's environment has ${k} from Object.prototype`),
+    ...(out.sudo.PATH === '' ? [] : [`cliAgentCommand gives sudo PATH=${out.sudo.PATH}`]),
+    ...(out.probe.PATH === '' ? [] : [`authStatusCommand gives sudo PATH=${out.probe.PATH}`]),
+    ...(out.login === join(homedir(), '.claude') ? [] : [`loginOf is ${out.login}`]),
+  ];
+  assert.deepEqual(leaks, []);
+});
+
+test("regression (#786 round 3): CliRunner, an instance's agent route, puts none of Object.prototype's variables in its run's or auth probe's env -i list", { skip: process.platform === 'win32' && 'agent users: POSIX' }, async () => {
+  // A stand-in sudo, the only one on the run's PATH (test/separate-users.test.ts's pattern), records each call's
+  // env -i list and the PATH sudo itself got, and plays claude. Nothing runs as another user.
+  const dir = mkdtempSync(join(tmpdir(), 'sudo-786-'));
+  const calls = join(dir, 'calls.jsonl');
+  writeFileSync(
+    join(dir, 'sudo'),
+    `#!${process.execPath}
+const fs = require('node:fs');
+const a = process.argv.slice(2);
+const i = a.indexOf('-i');
+const env = {};
+let j = i + 1;
+for (; j < a.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(a[j]); j++) env[a[j].slice(0, a[j].indexOf('='))] = a[j].slice(a[j].indexOf('=') + 1);
+const probe = a[j + 1] === 'auth' && a[j + 2] === 'status';
+fs.appendFileSync(${JSON.stringify(calls)}, JSON.stringify({ probe, env, sudoPath: process.env.PATH }) + '\\n');
+if (probe) console.log(JSON.stringify({ loggedIn: true, authMethod: 'claude.ai' }));
+else console.log(JSON.stringify({ type: 'result', subtype: 'success', is_error: false, result: 'done', num_turns: 0, total_cost_usd: 0 }));
+`,
+  );
+  chmodSync(join(dir, 'sudo'), 0o755);
+  const CANARY = '/canary-786-r3';
+  const NAMES = ['TZ', 'LC_ALL', 'LANG', 'TERM', 'TMPDIR', 'SHELL', 'XDG_RUNTIME_DIR', 'ComSpec', 'ProgramData'];
+  const runAs = { user: 'shop-agent', home: '/home/example/agent' };
+  // The coordinator's environment, as the service hands it: a plain object, PATH reaching only the stand-in sudo.
+  const coord = { PATH: dir, HOME: '/home/example' };
+  const run = await pollutedAsync(Object.fromEntries(NAMES.map((k) => [k, `${CANARY}/${k}`])), () =>
+    new CliRunner('cli', coord, 'claude', runAs).run({ prompt: 'p', model: 'm', cwd: dir, allowedTools: [], maxTurns: 1, maxBudgetUsd: 1, stallMs: 30_000, timeoutMs: 30_000, role: 'worker' }),
+  );
+  assert.equal(run.reason, 'succeeded', run.detail);
+  const seen = readFileSync(calls, 'utf8').trim().split('\n').map((l) => JSON.parse(l) as { probe: boolean; env: Record<string, string>; sudoPath: string });
+  assert.deepEqual([seen.some((c) => c.probe), seen.some((c) => !c.probe)], [true, true], 'the auth probe and the run both went through sudo');
+  const leaks = seen.flatMap((c) => Object.entries(c.env).filter(([, v]) => v.startsWith(CANARY)).map(([k]) => `${c.probe ? 'probe' : 'run'}: ${k}`));
+  assert.deepEqual(leaks, [], 'no variable from Object.prototype crosses the user switch');
+  assert.deepEqual([...new Set(seen.map((c) => c.sudoPath))], [dir], "sudo's own PATH is the coordinator's own");
+});

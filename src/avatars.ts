@@ -17,6 +17,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { join } from 'node:path';
 import { validLogin } from './dashboard-auth.js';
 import { GITHUB_AVATARS, GITHUB_WEB } from './github-hosts.js';
+import { ownEnv } from './os/own-env.js';
 import { SYSTEM_ROOT_VAR, systemRootRefusal } from './os/system-paths.js';
 
 /** The only sizes asked of GitHub (px): the page asks for the smallest at least twice its box (web/src/api.ts). */
@@ -44,7 +45,10 @@ const HOSTS = new Set([new URL(GITHUB_WEB).host, new URL(GITHUB_AVATARS).host]);
 const MAX_REDIRECTS = 3;
 
 /** A process the test preload marked: there, the default fetch never reaches outside. */
-const markedTestProcess = () => !!process.env[SYSTEM_ROOT_VAR] && systemRootRefusal() === null;
+const markedTestProcess = () => {
+  const env = ownEnv();
+  return !!env.get(SYSTEM_ROOT_VAR) && systemRootRefusal(env) === null;
+};
 const defaultFetch: typeof fetch = (input, init) => (markedTestProcess() ? Promise.reject(new Error('no live outside call from a test process (#462): give the avatars a stand-in fetch')) : fetch(input, init));
 
 export interface AvatarOptions {

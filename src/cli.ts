@@ -70,6 +70,7 @@ import { discordChannelsCommand } from './intake/discord-channels.js';
 import { sourceViewCommand } from './intake/source-view.js';
 import { intakeCheckCommand } from './intake/check.js';
 import { installService, stableNodePath, uninstallService } from './os/index.js';
+import { ownEnv } from './os/own-env.js';
 import { projectStateDir } from './guardrails/context.js';
 import { fileURLToPath } from 'node:url';
 
@@ -797,13 +798,15 @@ async function main(argv: string[]): Promise<number> {
           console.error(`instance ${i.name} not started; credentials missing:\n${missing.map((m) => `  ${m}`).join('\n')}`);
           return 1;
         }
+        const own = ownEnv();
+        const instancesVar = own.get(`${BRAND.envPrefix}_INSTANCES_DIR`);
         const r = installService({
           label: instanceServiceLabel(i.name),
           program: [process.execPath, fileURLToPath(import.meta.url), 'coordinator', 'run', '--instance', i.name],
           workingDir: i.home,
           logFile: join(i.stateDir, 'coordinator.log'),
           // Only what's needed to find tools and the instance; its credentials come from the instance itself.
-          env: { PATH: toolPath(), HOME: process.env.HOME ?? '', ...(process.env[`${BRAND.envPrefix}_INSTANCES_DIR`] ? { [`${BRAND.envPrefix}_INSTANCES_DIR`]: process.env[`${BRAND.envPrefix}_INSTANCES_DIR`]! } : {}) },
+          env: { PATH: toolPath(), HOME: own.get('HOME') ?? '', ...(instancesVar ? { [`${BRAND.envPrefix}_INSTANCES_DIR`]: instancesVar } : {}) },
         });
         console.log(`${r.started ? 'started' : 'NOT started'}: ${r.detail}\n  ${r.path}\n  log ${join(i.stateDir, 'coordinator.log')}`);
         return r.started ? 0 : 1;
