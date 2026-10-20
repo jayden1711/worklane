@@ -56,6 +56,7 @@ async function protectionDetail(dir: string): Promise<string> {
   const said: string[] = [];
   const io: InitIo = {
     which: (c) => `/stand-in/${c}`,
+    serviceManagerEnv: () => ({ env: {} }),
     run: (cmd, args, o = {}) => {
       if (cmd === 'git') {
         const r = spawnSync('git', args, { encoding: 'utf8', ...(o.cwd ? { cwd: o.cwd } : {}) });
