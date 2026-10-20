@@ -134,6 +134,8 @@ export function handWritten(section) {
  */
 export const NOTES_END = '<!-- The lists below are written by the release script. Everything above this line is kept. -->';
 const NOTES_END_LINE = new RegExp(`^${NOTES_END.replace(/[.*+?^$()[\]{}|\\]/g, '\\$&')}[ \\t]*$`, 'gm');
+/** Whether one line is an end-of-notes line: NOTES_END_LINE's own pattern (what notesOf and tagNotes match), unflagged. */
+export const isNotesEndLine = (line) => new RegExp(NOTES_END_LINE.source).test(line);
 
 /** Where a section starts: a `## v...` heading, or any `##` heading that says "unreleased" (any case). */
 const SECTION_START = /(?=^##[ \t]+(?:v|[^\n]*\bunreleased\b))/im;
@@ -329,7 +331,8 @@ function blocksOf(label, text) {
     // Up to three spaces before it, a # line is still a markdown heading; and any line starting `#` or `##`, whatever
     // follows (a no-break space, a letter), could be read as one, or as a section of CHANGELOG.md once released.
     if (/^ {0,3}#/.test(line)) throw new Error(`${label}: line ${i + 1} is a heading other than the fixed \`### \` ones, or starts with # like one (${JSON.stringify(line)}): indent it 4 spaces or reword it; ${HEADINGS_HELP}`);
-    if (line === NOTES_END) throw new Error(`${label}: line ${i + 1} is the end-of-notes line the release step writes itself: remove it`);
+    // The tag step strips every line NOTES_END_LINE matches (trailing spaces or tabs too), so a fragment may hold none.
+    if (isNotesEndLine(line)) throw new Error(`${label}: line ${i + 1} is the end-of-notes line the release step writes itself (the tag's notes would drop it): remove it`);
     if (!blocks.length) {
       if (line.trim()) throw new Error(`${label}: line ${i + 1} is before the first heading: put it under one (${HEADINGS_HELP})`);
       return;
@@ -382,9 +385,10 @@ export function fragmentNotes(fragments) {
 
 /**
  * Why `notes` isn't exactly what the fragments make, as a list (empty when it is). Checked two ways, so a mistake in
- * fragmentNotes or in the block reader can't hide: every non-blank line of every fragment's raw text, byte for byte
- * and counted (each heading at least once), must be in the notes; and the notes, read back as blocks, must be the
- * fixed headings in order with each fragment's lines under its own.
+ * fragmentNotes, in its grouping and sorting (grouped, byNumber) or in the block reader can't hide: every non-blank
+ * line of every fragment's raw text, byte for byte and counted (each heading at least once), must be in the notes;
+ * and the notes must equal, byte for byte, what expectedNotes works out on its own from FRAGMENT_HEADINGS and the
+ * files' names and raw text.
  */
 export function fragmentProblems(fragments, notes) {
   const parsed = parsedFragments(fragments);
@@ -402,19 +406,52 @@ export function fragmentProblems(fragments, notes) {
       else problems.push(`changelog.d/${f.name}: ${JSON.stringify(l.slice(0, 80))} is missing`);
     }
   }
-  let back;
-  try {
-    back = blocksOf('the release notes', String(notes ?? ''));
-  } catch (e) {
-    return [...problems, e.message];
-  }
-  const want = grouped(parsed);
-  const shape = (bs) => JSON.stringify(bs.map((b) => [b.key, b.heading, b.text]));
-  if (shape(back) !== shape(want)) {
-    const seen = back.map((b) => `### ${b.heading}`).join(', ');
-    problems.push(`the release notes' headings or the lines under them aren't the fragments' (${seen || 'no heading'}; expected ${want.map((g) => `### ${g.heading}`).join(', ')})`);
+  // The order, worked out again without the builder's grouping, sorting or block reader (expectedNotes).
+  const got = String(notes ?? '');
+  const expected = expectedNotes(fragments);
+  if (got !== expected) {
+    const a = got.split('\n');
+    const b = expected.split('\n');
+    let k = 0;
+    while (k < a.length && a[k] === b[k]) k++;
+    problems.push(`the release notes aren't the fragments' lines in the fixed order: line ${k + 1} is ${JSON.stringify((a[k] ?? '(the end)').slice(0, 80))}, where ${JSON.stringify((b[k] ?? '(the end)').slice(0, 80))} belongs`);
   }
   return problems;
+}
+
+/**
+ * The notes the fragments must make, written apart from fragmentNotes so the check on the built notes shares none of
+ * its code: its own order of the files (the number in the name, then the name), its own walk of each file's raw lines,
+ * its own match of a heading to FRAGMENT_HEADINGS, and its own trimming. The fragments are already checked (blocksOf).
+ */
+function expectedNotes(fragments) {
+  const numberIn = (name) => Number(/^\d+/.exec(name)?.[0]);
+  const files = [...fragments].sort((x, y) => {
+    if (numberIn(x.name) !== numberIn(y.name)) return numberIn(x.name) < numberIn(y.name) ? -1 : 1;
+    if (x.name === y.name) return 0;
+    return x.name < y.name ? -1 : 1;
+  });
+  const isUnder = (heading, want) => heading === want || (want === 'Upgrading' && heading.startsWith('Upgrading (from v'));
+  const sections = [];
+  for (const want of FRAGMENT_HEADINGS) {
+    let title = null;
+    const runs = [];
+    for (const f of files) {
+      let at = null;
+      const run = [];
+      for (const line of String(f.text).split('\n')) {
+        if (line.startsWith('### ')) {
+          at = line.slice('### '.length);
+          if (isUnder(at, want) && title === null) title = at;
+        } else if (at !== null && isUnder(at, want)) run.push(line);
+      }
+      while (run.length && !run[0].trim()) run.shift();
+      while (run.length && !run[run.length - 1].trim()) run.pop();
+      if (run.length) runs.push(run.join('\n'));
+    }
+    if (runs.length) sections.push(`### ${title}\n\n${runs.join('\n\n')}`);
+  }
+  return sections.join('\n\n');
 }
 
 /**
