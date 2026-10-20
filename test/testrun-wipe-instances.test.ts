@@ -98,6 +98,26 @@ test('regression: instance aa\'s wipe of run b or b-1 never stops instance aa-b\
   }
 });
 
+test('#545: a wipe stops its run\'s network unit whether it is the test user\'s (User=, slirp4netns as the test user) or root\'s (no User=), never one of another user\'s', { skip: !posix && 'bash' }, () => {
+  const c = BRAND.cli;
+  const units = {
+    [`${c}-test-aa_b_300.service`]: 'wl-test-aa',
+    // Run b's network: the test user's (this helper's), and root's (a helper before #545, or where the egress rule drops the test user).
+    [`${c}-test-aa_b_net_303.service`]: 'wl-test-aa',
+    [`${c}-test-aa_b_net_304.service`]: '',
+    // A unit of that name with anyone else's User= was never this helper's.
+    [`${c}-test-aa_b_net_305.service`]: 'wl-test-aa-b',
+  };
+  const h = helperAs('aa', units);
+  try {
+    const b = h.run('wipe', 'b');
+    assert.equal(b.status, 0, b.stderr);
+    assert.deepEqual(h.stopped(), [`${c}-test-aa_b_300.service`, `${c}-test-aa_b_net_303.service`, `${c}-test-aa_b_net_304.service`]);
+  } finally {
+    h.done();
+  }
+});
+
 test('exec names its unit <cli>-test-<name>_<id>_<pid>, the name wipe looks for; the engine takes its "Running as unit" line as systemd-run\'s, by either name', () => {
   const src = readFileSync(helperSrc, 'utf8');
   assert.match(src, /^run_unit\(\) \{ printf '[a-z]+-test-%s_%s_%s' "\$name" "\$1" "\$2"; \}$/m);

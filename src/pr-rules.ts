@@ -1,9 +1,9 @@
 // Review rules for the harness's own agent PRs: what every PR body starts with (a one-paragraph intent and a
 // risk class), the size limit a change is sent back over ("split it", unless it's mechanical), and the docs-only
-// fast path (the light checks decide the harness's own merge call). Pure logic plus one git read, shared by the
+// fast path (the light checks decide the harness's own merge call). Pure logic (its one git read, sizeFiles, is in
+// coordinator/change-files.ts with every other read of what a change touches), shared by the
 // coordinator, the merge flow and the tests. Part of the merge policy (a self-modification path, src/review.ts),
 // so a change here waits for the owner.
-import { spawnSync } from 'node:child_process';
 import { globToRegExp } from './guardrails/glob.js';
 import { whyHighRisk, type WaitWhy } from './merge-policy.js';
 import type { RequiredCheck } from './pr-watch.js';
@@ -82,9 +82,11 @@ export const LOCKFILE_GLOBS = [
   '**/Pipfile.lock', '**/Cargo.lock', '**/go.sum', '**/Gemfile.lock', '**/composer.lock',
 ];
 
-/** One file of a change (git diff -M): its added and removed lines. A pure rename has none, a binary file none. */
+/** One file of a change (git diff -M): its added and removed lines. A pure rename has none; a binary file its lines read as text (#693). */
 export interface SizeFile {
   path: string;
+  /** A rename's old path. */
+  from?: string;
   added: string[];
   removed: string[];
 }
@@ -120,7 +122,8 @@ function nonMechanical(files: SizeFile[]): number {
  */
 export function sizeVerdict(files: SizeFile[], o: { maxLines: number; generated: string[] }): SizeVerdict {
   const skip = [...LOCKFILE_GLOBS, ...o.generated].map((g) => globToRegExp(g));
-  const counted = files.filter((f) => !skip.some((re) => re.test(f.path)));
+  // A rename is left out only when both its paths are: an edit moved into a generated path still counts (#683).
+  const counted = files.filter((f) => ![f.path, ...(f.from === undefined ? [] : [f.from])].every((p) => skip.some((re) => re.test(p))));
   const lines = counted.reduce((s, f) => s + f.added.length + f.removed.length, 0);
   if (lines <= o.maxLines) return { ok: true, lines, why: `${lines} changed lines (limit ${o.maxLines})` };
   const real = nonMechanical(counted);
@@ -132,28 +135,8 @@ export function sizeVerdict(files: SizeFile[], o: { maxLines: number; generated:
   };
 }
 
-/** The change base..head as sizeVerdict reads it: one `git diff -M -U0`, each file under its new path. */
-export function sizeFiles(cwd: string, base: string, head: string): SizeFile[] {
-  const r = spawnSync('git', ['-c', 'core.quotePath=false', 'diff', '-M', '-U0', '--no-color', '--no-ext-diff', '--no-textconv', '--src-prefix=a/', '--dst-prefix=b/', `${base}..${head}`], { cwd, encoding: 'utf8', maxBuffer: 256 * 1024 * 1024 });
-  if (r.status !== 0) throw new Error(`git diff failed: ${r.stderr}`);
-  const out: SizeFile[] = [];
-  let cur: SizeFile | null = null;
-  let inHunk = false;
-  for (const l of r.stdout.split('\n')) {
-    const header = /^diff --git a\/(.*) b\/(.*)$/.exec(l);
-    if (header) {
-      cur = { path: header[2]!, added: [], removed: [] };
-      out.push(cur);
-      inHunk = false;
-    } else if (!cur) continue;
-    else if (l.startsWith('@@')) inHunk = true;
-    else if (inHunk && l.startsWith('+')) cur.added.push(l.slice(1));
-    else if (inHunk && l.startsWith('-')) cur.removed.push(l.slice(1));
-    else if (!inHunk && l.startsWith('rename to ')) cur.path = l.slice('rename to '.length);
-    else if (!inHunk && l.startsWith('+++ b/')) cur.path = l.slice('+++ b/'.length);
-  }
-  return out;
-}
+/** The change base..head as sizeVerdict reads it. The git read lives with every other one (coordinator/change-files.ts). */
+export { sizeFiles } from './coordinator/change-files.js';
 
 // ---------------------------------------------------------------- docs-only fast path
 

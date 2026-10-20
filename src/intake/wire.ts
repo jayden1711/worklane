@@ -9,6 +9,7 @@ import { readFileSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { cachedRoles, repoPermission, type RoleOf } from '../dashboard-auth.js';
 import { slotsDir } from '../os/index.js';
+import type { SlotPathLike } from '../slot-file.js';
 import { INTAKE_FILE, loadIntakeConfig } from './config.js';
 import { claimDiscord } from './discord-claims.js';
 import { identifyGate, sessionStartLimit } from './discord-gate.js';
@@ -16,7 +17,6 @@ import { AlertsIntake } from './alerts.js';
 import { GitHubBacklog } from '../backlog/github.js';
 import type { Backlog } from '../backlog/types.js';
 import { GitHubIssuesIntake } from './github.js';
-import { VoiceIntake } from './voice.js';
 import type { ReadOnlyQuery } from './bug-store.js';
 import { DiscordIntake, type DiscordOptions } from './discord.js';
 import { LinearIntake } from './linear.js';
@@ -108,7 +108,7 @@ export function intakeForInstance(o: {
   /** Where every instance's home is (the clash check reads their intake.yaml); default the home's parent. */
   instancesDir?: string;
   /** The machine-wide directory for the identify gate and the bots' claims; default the agent slot directory. */
-  machineDir?: string;
+  machineDir?: SlotPathLike;
   /** Tests: the adapter's socket, fetch and timers, the gate's clock, and roles. */
   discord?: Pick<DiscordOptions, 'connect' | 'fetch' | 'setInterval' | 'clearInterval' | 'setTimeout'> & { now?: () => number; sleep?: (ms: number) => Promise<void>; alive?: (pid: number) => boolean };
   roleOf?: RoleOf;
@@ -261,12 +261,6 @@ export function intakeForInstance(o: {
       const backlog = o.issues ?? new GitHubBacklog(o.repo, o.githubToken, fetch, o.githubApi);
       sources.push(new GitHubIssuesIntake({ backlog, stateDir: o.stateDir, config: () => config()?.github ?? first.config.github }).source());
     }
-  }
-  // Voice: ideas an owner spoke and confirmed on the dashboard, or told Siri (src/siri/), left in the instance's state
-  // (src/intake/voice.ts). One source for both: the same inbox, never trusted.
-  if (first.config.voice.enabled || first.config.siri.enabled) {
-    if (!o.stateDir) say('intake: voice or siri is on but the instance has no state directory; spoken ideas are not taken');
-    else sources.push(new VoiceIntake({ stateDir: o.stateDir }).source());
   }
   return { config, sources, name, ...(roleOf ? { roleOf } : {}), start, stop };
 }

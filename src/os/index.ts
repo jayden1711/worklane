@@ -3,13 +3,16 @@
 import { execFileSync, spawn } from 'node:child_process';
 import { chmodSync, chownSync, closeSync, constants as fsConstants, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, readSync, realpathSync, renameSync, rmSync, statSync, statfsSync, writeFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
+import { testRunSign } from './system-paths.js';
 import { availableParallelism, homedir, loadavg, userInfo } from 'node:os';
-import { basename, delimiter, dirname, join, resolve as resolvePath, sep } from 'node:path';
+import { basename, delimiter, dirname, join, posix as posixPath, resolve as resolvePath, sep } from 'node:path';
 import { BRAND } from '../brand.js';
 import { outboundEnv } from '../network.js';
 import { safeProjectEnv } from '../project-env.js';
 import { withoutPushGateHatch } from '../guardrails/push-hook.js';
+import { readRegularSlotFile, slotFile, slotPathOf, statfsSlotDir, type SlotPath, type SlotPathLike } from '../slot-file.js';
 import { devSlotsPath, etcPath, markTestRun, testSlotsRefusal, TestSlotsRefused, varLibPath } from './system-paths.js';
+import { testStateRefusal, TestStateRefused } from './system-paths.js';
 
 export type OsKind = 'macos' | 'linux' | 'windows-wsl' | 'windows';
 export type OsSetting = 'auto' | 'macos' | 'linux' | 'windows-wsl';
@@ -238,19 +241,6 @@ export function userGid(user: string): number | null {
   }
 }
 
-/**
- * How to run `argv` (a fixed command) in a pseudo-terminal, for the dashboard's owner terminal. Linux only:
- * util-linux `script` makes the PTY, so no native module is needed. `script -c` hands its command to a shell, so
- * every word must be plain (no shell metacharacters). Returns the [file, args] to spawn.
- */
-export function ptyCommand(argv: string[], size: { cols: number; rows: number }): [file: string, args: string[]] {
-  if (process.platform !== 'linux') throw new Error('the owner terminal needs Linux (util-linux script)');
-  if (!argv.length || argv.some((w) => !/^[A-Za-z0-9_./:=@-]+$/.test(w))) throw new Error('the terminal command must be plain words');
-  const cols = Math.max(20, Math.min(400, Math.floor(size.cols) || 80));
-  const rows = Math.max(5, Math.min(200, Math.floor(size.rows) || 24));
-  return ['/usr/bin/script', ['-q', '-f', '-e', '-c', `stty cols ${cols} rows ${rows}; exec ${argv.join(' ')}`, '/dev/null']];
-}
-
 const hexPort = (p: number) => p.toString(16).toUpperCase().padStart(4, '0');
 
 /**
@@ -303,6 +293,14 @@ export function loopbackPeerIsMe(clientPort: number, serverPort: number, platfor
   return uid !== null && typeof process.getuid === 'function' && uid === process.getuid();
 }
 
+/**
+ * The uid this process acts as (its effective uid), from the kernel through Node, never from a program found on PATH
+ * or the environment (#715). Null on native Windows, which has no uids.
+ */
+export function currentUid(): number | null {
+  return typeof process.geteuid === 'function' ? process.geteuid() : null;
+}
+
 /** The OS user this process runs as. */
 export function currentUser(): string {
   try {
@@ -347,8 +345,21 @@ export function canRunAgents(os: OsKind): boolean {
   return os !== 'windows';
 }
 
-/** Machine-local state (event log, fingerprints, findings). Never inside a repo. */
+/**
+ * Machine-local state (event log, fingerprints, findings). Never inside a repo.
+ *
+ * INVARIANT (#815): in a test run, only a directory inside the test machine (test/isolate.ts); anything else throws
+ * TestStateRefused before a file is opened (src/os/system-paths.ts testStateRefusal), so no test reaches the person's
+ * own state dir through a default it fell through to. Outside a test run, as always.
+ */
 export function stateDir(): string {
+  const dir = unguardedStateDir();
+  const refusal = testStateRefusal(dir);
+  if (refusal) throw new TestStateRefused(refusal);
+  return dir;
+}
+
+function unguardedStateDir(): string {
   const override = process.env[`${BRAND.envPrefix}_STATE_DIR`];
   if (override) return override;
   if (process.platform === 'darwin') return join(homedir(), 'Library', 'Application Support', BRAND.cli);
@@ -388,28 +399,12 @@ export function fileAccess(file: string): { kind: 'missing' } | { kind: 'hidden'
  * checked is what is read. Refused (by kind): no such file, unreadable, a symlink, not a regular file, or over
  * `maxBytes`. Native Windows has no owners to check: unsupported.
  */
-export function readRegularFile(file: string, maxBytes: number): { kind: 'missing' | 'hidden' | 'unsupported' | 'symlink' | 'not-file' } | { kind: 'too-big'; size: number } | { kind: 'file'; uid: number; mode: string; text: string } {
+export function readRegularFile(file: SlotPathLike, maxBytes: number): { kind: 'missing' | 'hidden' | 'unsupported' | 'symlink' | 'not-file' } | { kind: 'too-big'; size: number } | { kind: 'file'; uid: number; mode: string; text: string } {
   if (process.platform === 'win32') return { kind: 'unsupported' };
-  let fd: number;
-  try {
-    // INVARIANT: O_NOFOLLOW, so a symlink is refused rather than followed (#391 follow-up).
-    fd = openSync(file, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | (fsConstants.O_NONBLOCK ?? 0));
-  } catch (e) {
-    const code = (e as NodeJS.ErrnoException).code;
-    if (code === 'ELOOP' || code === 'EMLINK') return { kind: 'symlink' };
-    return code === 'EACCES' || code === 'EPERM' ? { kind: 'hidden' } : { kind: 'missing' };
-  }
-  try {
-    const s = fstatSync(fd);
-    if (!s.isFile()) return { kind: 'not-file' };
-    if (s.size > maxBytes) return { kind: 'too-big', size: s.size };
-    const buf = Buffer.alloc(maxBytes + 1);
-    const n = readSync(fd, buf, 0, maxBytes + 1, 0);
-    if (n > maxBytes) return { kind: 'too-big', size: n };
-    return { kind: 'file', uid: s.uid, mode: (s.mode & 0o777).toString(8).padStart(4, '0'), text: buf.subarray(0, n).toString('utf8') };
-  } finally {
-    closeSync(fd);
-  }
+  // INVARIANT: O_NOFOLLOW, so a symlink is refused rather than followed (#391 follow-up). The open, the checks and the
+  // read are src/slot-file.ts's, so a slot path (#772) can be read too, and no descriptor of one (whose
+  // /proc/self/fd link names its path: #806 review, A2) ever leaves that module.
+  return readRegularSlotFile(file, maxBytes);
 }
 
 /** Whether an OS user exists on this machine (POSIX; always false on native Windows). */
@@ -603,12 +598,6 @@ export function asUser(user: string, file: string, args: string[], env: NodeJS.P
 }
 
 /**
- * How to spawn a project command (a check, a test suite, a setup step):
- * under bash with pipefail, and as the instance's agent user when there is
- * one, with a clean environment. Project commands run code agents wrote, so
- * they never run as the user that holds the instance's credentials.
- */
-/**
  * A command wrapped to record its largest single process's peak memory (a test worker's), where the OS can:
  * GNU time on Linux writes the peak resident size in KB to `outFile`. Elsewhere the command is unchanged and
  * nothing is recorded (peakMemoryMb then reads null).
@@ -642,7 +631,6 @@ export function homesRoot(platform: NodeJS.Platform = process.platform): string 
   return platform === 'darwin' ? '/Users' : '/home';
 }
 
-/** A user's home directory from the system's user database (null: no such user, or no way to ask here). */
 /**
  * Open a file to one group, read only (0640), keeping its owner: on Linux, when the group exists and this process may
  * hand the file to it (root, or a member). Anywhere else, or when it can't, it stays as it was: false.
@@ -677,13 +665,142 @@ export function homeOf(user: string, platform: NodeJS.Platform = process.platfor
   return null;
 }
 
-export function projectCommand(command: string, runAs?: { user: string; home: string; path?: string }, projectEnv: Record<string, string> = {}): { file: string; args: string[]; env: NodeJS.ProcessEnv } {
+/** Bubblewrap at its fixed, root-owned path: never PATH's, where a directory the agent user can write could hold a fake. */
+export const PROJECT_SANDBOX_TOOL = '/usr/bin/bwrap';
+/** The exit code of a project command whose sandbox couldn't start: nothing of the command ran. */
+export const SANDBOX_UNAVAILABLE = 125;
+export const SANDBOX_FIX = 'install bubblewrap and its AppArmor rule with scripts/setup/machine.sh, then check with scripts/setup/check.sh <name>';
+/** The sandbox's flags: one source for it and its probe (check.sh). */
+export const PROJECT_SANDBOX_ARGS = ['--dev-bind', '/', '/', '--unshare-user', '--unshare-pid', '--die-with-parent', '--proc', '/proc'] as const;
+/** Whether this user can start it: check.sh's probe, and the wrapper's first step. */
+export const PROJECT_SANDBOX_PROBE: readonly string[] = [PROJECT_SANDBOX_TOOL, ...PROJECT_SANDBOX_ARGS, '--', '/bin/sh', '-c', ':'];
+
+/** A project command's agent user and what its sandbox hides beyond ~/.claude*; `hide` required, never dropped. */
+export interface ProjectRunAs {
+  user: string;
+  home: string;
+  path?: string;
+  hide: readonly string[];
+}
+
+// Run as the agent user before any project code: hides each path given (the command follows `--`), every ~/.claude*
+// and ~/.config/*-claude-key (credentials.sh's API key): a tmpfs over a directory, /dev/null over a file. Its own PID
+// namespace and /proc: no outside process (a `claude` holding a login) is readable through /proc/<pid>. Devices and
+// network stay. A tool that can't start is refused (SANDBOX_UNAVAILABLE) before the command runs.
+// INVARIANT: this bash gets an empty environment, so nothing a project sets (SHELLOPTS, BASHOPTS, IFS, ...) reaches
+// it; the project's variables are the inner `env -i` after `--`, passed on as words. Glob and shell options are reset
+// anyway. --norc --noprofile: it reads no startup file, such as the agent's ~/.bashrc (writable by a sandboxed
+// command; sourced by bash's rshd check for `bash -c` with a socket on stdin).
+// Every directory above a hidden path is bound onto itself first (shallowest first, before any mask): renaming it
+// fails (EBUSY), so the secret can't be moved out from under its mask. (--bind adds nosuid,nodev: a hidden path
+// under /dev would cost the sandbox its devices.)
+const LINUX_SANDBOX = [
+  'set +f; shopt -u failglob nullglob dotglob nocaseglob extglob globstar; unset GLOBIGNORE; PATH=/usr/bin:/bin',
+  // Tools by fixed path (no function or PATH entry stands in); a missing one refuses.
+  `tool() { local t; for t in "/usr/bin/$1" "/bin/$1"; do [ -x "$t" ] && { printf '%s' "$t"; return 0; }; done; printf '%s\\n' "project command not run: no $1 to resolve its sandbox's paths; ${SANDBOX_FIX}" >&2; return 1; }`,
+  `rl=$(tool readlink) || exit ${SANDBOX_UNAVAILABLE}; stt=$(tool stat) || exit ${SANDBOX_UNAVAILABLE}; fnd=$(tool find) || exit ${SANDBOX_UNAVAILABLE}`,
+  'b=$1 h=$2 u=$3; shift 3; hide=(); dirs=(); declare -A seen=() said=(); maxd=0; bad=()',
+  'above() { local d=$1 n; while d=${d%/*}; [ -n "$d" ]; do [ -n "${seen[$d]}" ] && continue; seen[$d]=1; dirs+=("$d"); n=${d//[!\\/]/}; [ "${#n}" -gt "$maxd" ] && maxd=${#n}; done; }',
+  // Refusals collected, each once, so one message names every path. Quoted: the agent names them (no forged lines).
+  'note() { [ -n "${said[$1]}" ] && return; said[$1]=1; bad+=("$1"); }',
+  `refuse() { local t; t=$("$rl" -- "$1" 2>/dev/null); note "project command not run: \${1@Q} is a symlink (to \${t@Q}) the agent user could change (it owns or can write its directory), on the way to a credential its sandbox hides, so one project command could swap it for the next. If you didn't create it, remove it as the agent user: sudo -u $u rm -- \${1@Q}. If you did, replace it with a real directory the agent may read, or name the credential's real path in credentials.yaml"; }`,
+  `unres() { note "project command not run: \${1@Q} $2; name the credential's real path in credentials.yaml"; }`,
+  // INVARIANT (#787 rounds 7, 8): each decision about a component rests on ONE lstat (its type and owner, or its
+  // errno), never two tests the agent could change in between. Stable because the agent can't change who owns a
+  // directory, or whether one it doesn't own is writable to it. Resolved one component and symlink at a time:
+  // - a symlink is followed only from a directory the agent neither owns nor can write, and the directories above it
+  //   are bound onto themselves; any other symlink, or over 40, is refused;
+  // - ENOENT, ENOTDIR: nothing to hide;
+  // - EACCES: nothing to hide only if no directory walked so far is the agent's (owned or writable): then it is the
+  //   coordinator's, unopenable by that name. Under the agent's own, it could make it searchable again: refused;
+  // - any other error, or a name too long to check: refused.
+  `st() { local o; o=$("$stt" -c '%F/%u' -- "$1" 2>&1); S=$?; if [ "$S" -eq 0 ]; then T=\${o%/*} U=\${o##*/}; else E=\${o##*: }; fi; }`,
+  'walk() { local todo=${1#/} cur= c t n=0 own=0 cw=0',
+  '  if [ -w / ]; then cw=1 own=1; fi',
+  '  while [ -n "$todo" ]; do',
+  '    c=${todo%%/*}; if [ "$c" = "$todo" ]; then todo=; else todo=${todo#*/}; fi',
+  // A `..` (only in a root link's target; hide paths with one are refused) binds the directory it leaves first: no
+  // command can remove or rename it.
+  '    case $c in ""|.) continue ;; ..) [ -n "$cur" ] && above "$cur/."; cur=${cur%/*}; st "${cur:-/}"',
+  '      if [ "$S" -ne 0 ]; then unres "$1" "cannot be checked ($E)"; return 2; fi',
+  '      cw=0; if [ "$U" = "$UID" ] || [ -w "$cur/" ]; then cw=1 own=1; fi; continue ;; esac',
+  `    if [ "\${#c}" -gt 255 ] || [ $((\${#cur} + \${#c} + 1)) -ge 4096 ]; then unres "$1" "resolves to a name too long to check"; return 2; fi`,
+  '    st "$cur/$c"',
+  '    if [ "$S" -ne 0 ]; then',
+  '      case $E in "No such file or directory"|"Not a directory") return 1 ;; "Permission denied") if [ "$own" = 0 ]; then return 1; fi',
+  '        unres "$1" "goes through a directory the agent user owns or can write but cannot search now (it could make it searchable again)"; return 2 ;; esac',
+  '      unres "$1" "cannot be checked ($E)"; return 2',
+  '    fi',
+  '    case $T in',
+  '      "symbolic link") n=$((n + 1)); if [ "$n" -gt 40 ] || [ "$cw" = 1 ]; then refuse "$cur/$c"; return 2; fi',
+  '        above "$cur/$c"; t=$("$rl" -- "$cur/$c") || { refuse "$cur/$c"; return 2; }',
+  '        case $t in /*) cur= cw=0; if [ -w / ]; then cw=1 own=1; fi ;; esac; todo=${t#/}${todo:+/$todo} ;;',
+  '      directory) cur=$cur/$c; cw=0; if [ "$U" = "$UID" ] || [ -w "$cur/" ]; then cw=1 own=1; fi ;;',
+  '      *) cur=$cur/$c cw=0 ;;',
+  '    esac',
+  '  done; R=${cur:-/} RT=$T; }',
+  'add() { local r; case $1 in /proc|/proc/*|/sys|/sys/*|/dev|/dev/*) unres "$1" "is under /proc, /sys or /dev"; return ;; esac',
+  '  walk "$1"; case $? in 1|2) return ;; esac; r=$R',
+  '  case $r in /proc|/proc/*|/sys|/sys/*|/dev|/dev/*) unres "$1" "resolves under /proc, /sys or /dev"; return ;; esac',
+  '  if [ "$RT" = directory ]; then hide+=(--tmpfs "$r"); else hide+=(--ro-bind /dev/null "$r"); fi; above "$r"; }',
+  // Default masks listed by find, whose failure refuses (a glob in an unreadable directory hid nothing, #787 r7).
+  'list() { local o; o=$("$fnd" "$1" -mindepth 1 -maxdepth 1 -name "$2" -printf "%f/" 2>/dev/null) || { unres "$1" "cannot be listed for its credential files"; return; }; while [ -n "$o" ]; do add "$1/${o%%/*}"; o=${o#*/}; done; }',
+  // (A home or ~/.config that isn't a directory holds nothing to hide.)
+  'walk "$h"; if [ $? -eq 0 ] && [ "$RT" = directory ]; then hr=$R; list "$hr" ".claude*"; walk "$hr/.config"; if [ $? -eq 0 ] && [ "$RT" = directory ]; then list "$R" "*-claude-key"; fi; fi',
+  'while [ "$#" -gt 0 ] && [ "$1" != -- ]; do add "$1"; shift; done; shift',
+  `if [ "\${#bad[@]}" -gt 0 ]; then printf '%s\\n' "\${bad[@]}" >&2; exit ${SANDBOX_UNAVAILABLE}; fi`,
+  'binds=(); for ((i = 1; i <= maxd; i++)); do for d in "${dirs[@]}"; do n=${d//[!\\/]/}; [ "${#n}" -eq "$i" ] && binds+=(--bind "$d" "$d"); done; done',
+  `box=(${PROJECT_SANDBOX_ARGS.join(' ')})`,
+  `if ! err=$("$b" "\${box[@]}" -- /bin/sh -c : 2>&1); then printf '%s\\n' "project command not run: its sandbox didn't start ($err); ${SANDBOX_FIX}" >&2; exit ${SANDBOX_UNAVAILABLE}; fi`,
+  'exec "$b" "${box[@]}" "${binds[@]}" "${hide[@]}" -- "$@"',
+].join('\n');
+
+/**
+ * What a sandbox may hide and a configured path must be: absolute, normal form (no `..`, `//`, `/./`, trailing `/`),
+ * not `/`, no NUL or newline, under PATH_MAX and NAME_MAX (else "name too long" reads as absent). Refused, never
+ * rewritten.
+ */
+export const normalAbsolute = (p: string): boolean =>
+  p.startsWith('/') && p !== '/' && posixPath.normalize(p) === p && !p.endsWith('/') && !/[\0\n]/.test(p) && Buffer.byteLength(p) < 4096 && p.split('/').every((c) => Buffer.byteLength(c) <= 255);
+/** A user's home: the same rule, but `/` is a home some users have (it is never a path to hide). */
+export const normalHome = (p: string): boolean => p === '/' || normalAbsolute(p);
+export const NOT_NORMAL_ABSOLUTE ='must be an absolute path in normal form (no .., //, /./, trailing /, NUL or newline; under 4096 bytes, no name over 255)';
+
+/** macOS's sandbox profile for a project command: everything allowed but reading or writing the hidden paths. */
+export function seatbeltProfile(home: string, hide: readonly string[]): string {
+  const bad = [home, ...hide].find((p) => !/^\/[^"\\\n]*$/.test(p));
+  if (bad !== undefined) throw new Error(`can't sandbox a project command around ${JSON.stringify(bad)}: not a plain absolute path`);
+  const re = (s: string) => s.replace(/[.*+?^$()[\]{}|]/g, '\\$&');
+  const h = re(home.replace(/\/$/, ''));
+  const rules = [`(regex #"^${h}/\\.claude")`, `(regex #"^${h}/\\.config/[^/]*-claude-key(/|$)")`, ...hide.map((p) => `(subpath "${p}")`)];
+  return `(version 1)\n(allow default)\n(deny file-read* file-write* ${rules.join(' ')})\n`;
+}
+
+/**
+ * How to spawn a project command: bash with pipefail and a clean environment. With `runAs`, as the agent user and
+ * always in a sandbox hiding its Claude logins, its API key and `runAs.hide` (#713): bubblewrap, or macOS's
+ * sandbox-exec. No way to run one as the agent user without it; `sandboxTool` is for tests.
+ */
+export function projectCommand(command: string, runAs?: ProjectRunAs, projectEnv: Record<string, string> = {}, o: { sandboxTool?: string } = {}): { file: string; args: string[]; env: NodeJS.ProcessEnv } {
   const [file, args] = shellCommand(command);
   const own = safeProjectEnv(projectEnv);
   if (!runAs) return { file, args, env: childEnv(own) };
+  // Fail closed: a runAs without its hide list (a job file an older engine wrote, a caller outside the type) is refused,
+  // never run with the default masks only.
+  if (!Array.isArray(runAs.hide)) throw new Error(`a project command as ${runAs.user} needs its sandbox's hide list (runAs.hide); refusing to run it without`);
+  // Normal form only (absolute, no //, /./, .. or trailing /), so the wrapper's checks on a path's text (/proc, /sys,
+  // /dev) and its walk see the path the kernel would; anything else is refused, never dropped or rewritten.
+  const bad = runAs.hide.find((p) => !normalAbsolute(p));
+  if (bad !== undefined) throw new Error(`a project command's hidden path ${NOT_NORMAL_ABSOLUTE}: ${JSON.stringify(bad)}; refusing to run it`);
+  const hide = [...runAs.hide];
+  // The home too: refused, never rewritten. A lexical rewrite of `..` after a symlink names a directory the kernel
+  // never reaches, and the masks would miss the real one (#787 round 6).
+  if (!normalHome(runAs.home)) throw new Error(`the agent user's home ${NOT_NORMAL_ABSOLUTE}: ${JSON.stringify(runAs.home)}; refusing to run it`);
+  const home = runAs.home;
+  if (process.platform !== 'linux' && process.platform !== 'darwin') throw new Error('running a project command as the agent user needs macOS or Linux, for its sandbox');
   const env = {
     ...own,
-    HOME: runAs.home,
+    HOME: home,
     USER: runAs.user,
     LOGNAME: runAs.user,
     // Set by the instance's owner (instance.yaml run_as.path), never by the repo: tests.yaml can't set PATH.
@@ -699,7 +816,17 @@ export function projectCommand(command: string, runAs?: { user: string; home: st
     GIT_CONFIG_VALUE_1: '*',
   };
   // INVARIANT: a proxy only from root's network.json, as for every child (src/network.ts).
-  const [f, a] = asUser(runAs.user, file, args, outboundEnv(env));
+  const full = outboundEnv(env);
+  if (process.platform === 'darwin') {
+    const [f, a] = asUser(runAs.user, '/usr/bin/sandbox-exec', ['-p', seatbeltProfile(home, hide), file, ...args], full);
+    return { file: f, args: a, env: { PATH: process.env.PATH ?? '/usr/bin:/bin' } };
+  }
+  // The wrapper's bash gets no environment at all; the command gets exactly `full`, from the env -i inside bwrap.
+  const vars = Object.entries(full)
+    .filter((e): e is [string, string] => typeof e[1] === 'string')
+    .map(([k, v]) => `${k}=${v}`);
+  const inner = ['/usr/bin/env', '-i', ...vars, file, ...args];
+  const [f, a] = asUser(runAs.user, file, ['--norc', '--noprofile', '-c', LINUX_SANDBOX, 'sandbox', o.sandboxTool ?? PROJECT_SANDBOX_TOOL, home, runAs.user, ...hide, '--', ...inner], {});
   return { file: f, args: a, env: { PATH: process.env.PATH ?? '/usr/bin:/bin' } };
 }
 
@@ -769,12 +896,7 @@ export function shellCommand(command: string): [file: string, args: string[]] {
   return [commandBash(), ['-o', 'pipefail', '-c', command]];
 }
 
-/**
- * Environment for project commands the engine runs (checks, tests). Drops
- * variables that change how a nested runner behaves when the engine itself
- * runs under a test runner (node --test sets NODE_TEST_CONTEXT, which makes a
- * nested `node --test` report to the parent instead of exiting non-zero).
- */
+/** Environment for project commands, without NODE_TEST_CONTEXT (a nested `node --test` would report to the parent). */
 export function childEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...process.env, ...extra };
   delete env.NODE_TEST_CONTEXT;
@@ -788,16 +910,11 @@ export function childEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv 
 }
 
 /**
- * Machine-wide slot directory shared by every agent harness on the box (not
- * just this one), so the name is deliberately unbranded. Override with
- * AGENT_SLOTS_DIR. See docs/slots.md.
+ * The machine-wide slot directory every agent harness shares (so unbranded; AGENT_SLOTS_DIR overrides; docs/slots.md),
+ * in durable locations: /var/tmp's cleaners would drop a long-running machine's cap and lock files.
  */
-/**
- * Durable system locations for the slots and their config. /var/tmp is
- * cleaned of old files by tmp cleaners (systemd-tmpfiles after about 30
- * days), which would drop the cap and lock files of a long-running machine.
- */
-export const SYSTEM_SLOTS = { dir: varLibPath('agent-slots'), config: etcPath('slots.json') };
+// Frozen: a module that set SYSTEM_SLOTS.dir to a guess would have slotsDir mark the slot dir by it (#806 round 4).
+export const SYSTEM_SLOTS = Object.freeze({ dir: varLibPath('agent-slots'), config: etcPath('slots.json') });
 
 /**
  * The engine updater's drain flag (scripts/machine/<cli>-update.cjs, src/update-drain.ts): with the system slot
@@ -805,20 +922,67 @@ export const SYSTEM_SLOTS = { dir: varLibPath('agent-slots'), config: etcPath('s
  * it (the slot directory itself is group-writable); with any other slot directory (development, tests), inside it.
  */
 export const UPDATE_DRAIN_FILE = varLibPath('update-drain.json');
-export function updateDrainPath(dir = slotsDir(), system = SYSTEM_SLOTS): string {
-  return dir === system.dir ? UPDATE_DRAIN_FILE : join(dir, 'update-drain.json');
+export function updateDrainPath(dir?: SlotPath, system?: typeof SYSTEM_SLOTS): SlotPathLike;
+export function updateDrainPath(dir: string, system?: typeof SYSTEM_SLOTS): string;
+export function updateDrainPath(dir: SlotPathLike, system?: typeof SYSTEM_SLOTS): SlotPathLike;
+export function updateDrainPath(dir: SlotPathLike = slotsDir(), system = SYSTEM_SLOTS): SlotPathLike {
+  return isSystemSlots(dir, system) ? UPDATE_DRAIN_FILE : slotFile(dir, 'update-drain.json');
 }
 
 /**
+ * The slot paths slotsDir made for the machine's system directory (SYSTEM_SLOTS, this module's own): set when made,
+ * never by comparing with a path or a `system` a caller passed (#806 review, A3 and the round-3 mark oracle).
+ */
+const systemSlotDirs = new WeakSet<SlotPath>();
+
+/**
+ * Whether `dir` is the system slot directory. A slot path is, when slotsDir made it as one. It is never compared with
+ * a caller's `system`: that would let any module test a guessed path against the slot dir (#806 review, A3). A plain
+ * string is compared as written: it is the caller's own path, and says nothing about the slot dir.
+ */
+const isSystemSlots = (dir: SlotPathLike, system: typeof SYSTEM_SLOTS) => (typeof dir === 'string' ? dir === system.dir : systemSlotDirs.has(dir));
+
+/**
+ * The machine's slot directory, as a slot path (#772): only src/slot-file.ts reads, writes or removes what it names,
+ * so it can't reach any other writer. This module is the only one that makes one (test/slot-path.test.ts), and the
+ * only one that reads where it is (AGENT_SLOTS_DIR, SYSTEM_SLOTS).
+ *
  * INVARIANT (#669): in a test run, only a directory inside the test machine (test/isolate.ts); anything else throws
  * TestSlotsRefused before a file is opened (src/os/system-paths.ts testSlotsRefusal), so no test reaches the machine's
  * own slots, STOP, budgets or incidents through a default. Outside a test run, as always.
  */
-export function slotsDir(system = SYSTEM_SLOTS): string {
+export function slotsDir(): SlotPath {
+  const dir = resolvedSlotsDir(SYSTEM_SLOTS);
+  // One value while the slot dir stays where it is, so slotsDir() === slotsDir() (the budget's prune throttle keys
+  // on it). It is this function's own: every other slot path, whatever path it names, is a fresh value equal to none
+  // (src/slot-file.ts), so no caller can test a guess against this one (#806 round 6).
+  if (current?.dir !== dir) {
+    const p = slotPathOf(dir);
+    if (dir === SYSTEM_SLOTS.dir) systemSlotDirs.add(p);
+    current = { dir, p };
+  }
+  return current.p;
+}
+
+/** The slot dir slotsDir resolved last, and its value. */
+let current: { dir: string; p: SlotPath } | undefined;
+
+/** The slot dir for `system`, refused in a test run unless it is inside the test machine (#669). */
+function resolvedSlotsDir(system: typeof SYSTEM_SLOTS): string {
   const dir = unguardedSlotsDir(system);
   const refusal = testSlotsRefusal(dir);
   if (refusal) throw new TestSlotsRefused(refusal);
   return dir;
+}
+
+/**
+ * slotsDir with the system locations a test gives (test/slots.test.ts): the seam has its own name, which no src/
+ * module but this one may name (test/slot-path.test.ts), so slotsDir itself takes nothing a caller could choose.
+ * It gives a fresh value every call, equal to no other slot path, and never marks one as the system dir: only
+ * slotsDir does, for the machine's own SYSTEM_SLOTS (#806 rounds 3 and 6).
+ */
+export function slotsDirFor(system: typeof SYSTEM_SLOTS): SlotPath {
+  return slotPathOf(resolvedSlotsDir(system));
 }
 
 function unguardedSlotsDir(system: typeof SYSTEM_SLOTS): string {
@@ -833,10 +997,13 @@ function unguardedSlotsDir(system: typeof SYSTEM_SLOTS): string {
  * set; else the system config file when the system slot directory is in
  * use and the file exists; else config.json in the slot directory.
  */
-export function slotsConfigPath(dir = slotsDir(), system = SYSTEM_SLOTS): string {
+export function slotsConfigPath(dir?: SlotPath, system?: typeof SYSTEM_SLOTS): SlotPathLike;
+export function slotsConfigPath(dir: string, system?: typeof SYSTEM_SLOTS): string;
+export function slotsConfigPath(dir: SlotPathLike, system?: typeof SYSTEM_SLOTS): SlotPathLike;
+export function slotsConfigPath(dir: SlotPathLike = slotsDir(), system = SYSTEM_SLOTS): SlotPathLike {
   if (process.env.AGENT_SLOTS_CONFIG) return process.env.AGENT_SLOTS_CONFIG;
-  if (dir === system.dir && existsSync(system.config)) return system.config;
-  return join(dir, 'config.json');
+  if (isSystemSlots(dir, system) && existsSync(system.config)) return system.config;
+  return slotFile(dir, 'config.json');
 }
 
 export interface ServiceSpec {
@@ -878,6 +1045,53 @@ export function serviceRunning(label: string): boolean | null {
   return null;
 }
 
+/** The command that shows why this user's service manager can't be read (the Claude step's fix, #738). */
+export const serviceManagerCheck = (platform: NodeJS.Platform = process.platform): string => (platform === 'darwin' ? 'launchctl getenv CLAUDE_CONFIG_DIR' : 'systemctl --user show-environment');
+
+/**
+ * Which of `names` this user's service manager gives every service it starts (#738): systemd's user manager on Linux,
+ * launchd on macOS. An error when it can't be read; an error never carries a value (these can be credentials).
+ */
+export function serviceManagerEnv(names: readonly string[], o: { platform?: NodeJS.Platform; run?: (cmd: string, args: string[]) => string } = {}): { env: Record<string, string> } | { error: string } {
+  const platform = o.platform ?? process.platform;
+  // INVARIANT (#738): a test run never reads this machine's manager; a test gives its own `run`, or gets unknown.
+  const sign = o.run ? null : testRunSign();
+  if (sign) return { error: `a test run never reads this machine's user service manager (${sign})` };
+  const run = o.run ?? ((cmd: string, args: string[]) => execFileSync(cmd, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 10_000 }));
+  const env: Record<string, string> = {};
+  const failed = (what: string, e: unknown) => ({ error: `${what} failed: ${((e as { stderr?: unknown }).stderr ? String((e as { stderr: unknown }).stderr) : (e as Error).message).trim().split('\n')[0]?.slice(0, 200) ?? ''}` });
+  if (platform === 'darwin') {
+    for (const n of names) {
+      try {
+        const v = run('launchctl', ['getenv', n]).replace(/\r?\n$/, '');
+        if (v) env[n] = v;
+      } catch (e) {
+        return failed(`launchctl getenv ${n}`, e);
+      }
+    }
+    return { env };
+  }
+  if (platform === 'linux') {
+    let out: string;
+    try {
+      out = run('systemctl', ['--user', 'show-environment']);
+    } catch (e) {
+      return failed('systemctl --user show-environment', e);
+    }
+    for (const line of out.split('\n')) {
+      const eq = line.indexOf('=');
+      const k = eq > 0 ? line.slice(0, eq) : '';
+      if (!names.includes(k)) continue;
+      const v = line.slice(eq + 1);
+      // A value systemd quoted ($'...') is not guessed.
+      if (v.startsWith("$'") || v.startsWith('"') || v.startsWith("'")) return { error: `the user service manager sets ${k} in a quoted form this check doesn't read` };
+      if (v) env[k] = v;
+    }
+    return { env };
+  }
+  return { error: `no user service manager this check knows on ${platform}` };
+}
+
 /** Whether a system unit (an instance's `<cli>-<name>.service`) is active; null off Linux. Any user may ask systemd this. */
 export function systemUnitActive(unit: string): boolean | null {
   if (process.platform !== 'linux') return null;
@@ -885,6 +1099,8 @@ export function systemUnitActive(unit: string): boolean | null {
 }
 
 function unitActive(args: string[]): boolean {
+  // INVARIANT (#738): a test run never asks this machine's service manager; as when it doesn't answer: not active.
+  if (testRunSign()) return false;
   try {
     return execFileSync('systemctl', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 10_000 }).trim() === 'active';
   } catch {
@@ -1099,8 +1315,8 @@ export function executableName(base: string): string {
 }
 
 /** Free disk on the volume holding `path`: percent and GB. */
-export function diskFree(path: string): { freePct: number; freeGb: number; totalGb: number } {
-  const st = statfsSync(path);
+export function diskFree(path: SlotPathLike): { freePct: number; freeGb: number; totalGb: number } {
+  const st = statfsSlotDir(path); // statfsSync, through src/slot-file.ts so the slot dir (#772) can be measured too
   const total = st.blocks * st.bsize;
   const free = st.bavail * st.bsize;
   return { freePct: total ? (free / total) * 100 : 0, freeGb: free / 1e9, totalGb: total / 1e9 };

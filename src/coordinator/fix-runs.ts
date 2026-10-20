@@ -8,11 +8,12 @@ import type { ReviewConfig } from '../config/schema.js';
 import { type DoneWhenList, type Issue, type PullRequest } from '../backlog/types.js';
 import { claim, release, renew, type Lease } from '../claims.js';
 import type { EventPayload, StoredEvent } from '../events/types.js';
-import { computeLevel, loadMoneyPaths } from '../review.js';
+import { computeLevel } from '../review.js';
 import { issueBrief, rolePrompt, VERDICT_SCHEMA, WORKER_SCHEMA } from '../roles.js';
 import { checkedPush } from '../push-check.js';
-import { conflictBrief, conflictFixesUsed, conflictVerdictSchema, conflictWaitReasons, outsideHunks, parseConflicts, type Side } from '../conflicts.js';
-import { mergeBaseInto } from '../merge-base.js';
+import { conflictBrief, conflictFixComment, conflictFixesUsed, conflictVerdictSchema, conflictWaitReasons, outsideHunks, parseConflicts, type Side } from '../conflicts.js';
+import { mergeBaseInto, resolutionStrays, stagedBlobs } from '../merge-base.js';
+import { changedNames } from './change-files.js';
 import { type Readiness } from '../pr-watch.js';
 import { tryAgentSlot } from '../slots.js';
 import { createWorktree, removeSandboxPlaceholders, removeWorktree } from '../worktrees.js';
@@ -549,14 +550,14 @@ export abstract class FixRuns extends Landing {
       if (!merged.clean) {
         files = Object.keys(merged.conflicted).sort();
         // What the merge itself made of every other file, to tell a resolution that strays from one that doesn't.
-        const staged = Object.fromEntries(merged.otherFiles.map((f) => [f, this.gitOrNull(path, 'rev-parse', `:${f}`)]));
+        const staged = stagedBlobs(path, merged.otherFiles);
         const hunks = Object.entries(merged.conflicted).flatMap(([f, t]) => parseConflicts(f, t));
         const brief = conflictBrief({ baseRef, baseSha, strategy: 'merge', hunks, ours: { label: `this pull request (#${number}, issue #${n}: ${issue.title})`, intent: issue.body }, theirs: this.baseSides(path, pr.headSha, baseSha, files) });
         const s = await this.conflictAgent(issue, doneWhen, path, taskFile, repro, pr, brief, attempt);
         if ('ended' in s) return await give(s.ended);
         summary = s.summary;
         removeSandboxPlaceholders(path);
-        if (this.git(path, 'diff', '--name-only', '--diff-filter=U')) return await give('the fix run left conflicts unresolved');
+        if (changedNames(path, ['--diff-filter=U']).length) return await give('the fix run left conflicts unresolved');
         // Still exactly the merge of the PR's head and the base: no rewritten history, no extra commits.
         if (this.gitOrNull(path, 'rev-parse', 'HEAD^1') !== pr.headSha || this.gitOrNull(path, 'rev-parse', 'HEAD^2') !== baseSha) return await give('the fix run did not finish the merge commit of the branch and its base (it rewrote history, added commits, or left the merge uncommitted)');
         // Exactly as committed (no trimming): the comparison is line for line, the last line included.
@@ -565,11 +566,10 @@ export abstract class FixRuns extends Landing {
           return r.status === 0 ? r.stdout : null;
         };
         const resolved = Object.fromEntries(files.map((f) => [f, committed(f)]));
-        const expected = new Set([...files, ...merged.otherFiles]);
-        const strays = [
-          ...merged.otherFiles.filter((f) => this.gitOrNull(path, 'rev-parse', `HEAD:${f}`) !== staged[f]),
-          ...this.git(path, 'diff', '--name-only', 'HEAD^1', 'HEAD').split('\n').filter((f) => f && !expected.has(f)),
-        ];
+        // A valid UTF-8 path as itself and a rename as both its paths (#683): an edit to `lib/naïve.ts`, or moving a
+        // file the merge didn't touch onto one it did, is still a stray, and so is any file whose blob can't be read
+        // (a name that isn't valid UTF-8 always).
+        const strays = resolutionStrays(path, files, merged.otherFiles, staged);
         outside = outsideHunks(merged.conflicted, resolved, strays);
         resolution = ['How the conflicts were resolved (a combined diff of the merge commit against both parents):', '```diff', (this.gitOrNull(path, 'show', '--format=', '--cc', 'HEAD') ?? '').slice(0, 12_000), '```'].join('\n');
       }
@@ -590,7 +590,7 @@ export abstract class FixRuns extends Landing {
       if (!verdict.patch_correct) return await give(`the evaluator rejected the resolution: ${verdict.advice || 'no reason given'}`);
       const review: ReviewConfig = this.d.cfg.review ?? DEFAULT_REVIEW;
       const touched = change.files.filter((f) => files.includes(f.path));
-      const lvl = touched.length ? computeLevel({ files: touched, labels: [], moneyPaths: loadMoneyPaths(this.d.repo, review.money_path_source), scope: lockScopeOf(this.d) }, review) : null;
+      const lvl = touched.length ? computeLevel({ files: touched, labels: [], moneyPaths: this.moneyPaths(review.money_path_source), scope: lockScopeOf(this.d) }, review) : null;
       const reasons = conflictWaitReasons({ outside, riskCategories: lvl?.level === 'L3' ? lvl.reasons : [], evaluator: { approved: verdict.patch_correct, confidence: verdict.confidence, confidenceReason: verdict.confidence_reason, bothSidesKept: merged.clean ? true : verdict.bothSidesKept } });
       const push = checkedPush({ cwd: path, remote: this.remote, base: baseSha, head, ref: `refs/heads/${pr.head}`, limits: this.d.cfg.guardrails.push, guard: this.pushGuard(), expect: pr.headSha });
       if (!push.ok && 'refused' in push) {
@@ -599,7 +599,7 @@ export abstract class FixRuns extends Landing {
       }
       if (!push.ok) return await give(`the branch moved while the fix ran (someone pushed), so the harness didn't push over it: ${push.error.split('\n').pop()}`);
       finished = { outcome: 'pushed', head, files, waits_owner: reasons.length > 0, reasons, detail: summary.slice(0, 1000) };
-      await this.d.backlog.comment(number, `[${BRAND.cli}] Conflicted with ${baseRef} (\`${baseSha.slice(0, 8)}\`)${files.length ? ` in ${files.join(', ')}` : ''}. Conflict fix ${attempt} merged it in and pushed \`${head.slice(0, 8)}\`: ${summary}${reasons.length ? `\n\nThis one waits for a human: ${reasons.join('; ')}.` : ''}`);
+      await this.d.backlog.comment(number, conflictFixComment({ cli: BRAND.cli, baseRef, baseSha, files, attempt, head, summary, reasons }));
     } catch (e) {
       if (!(e instanceof Halted) && !(e instanceof StoppedByOwner)) throw e;
       finished = { outcome: 'no_push', head: null, files, waits_owner: false, reasons: [], detail: e instanceof StoppedByOwner || e instanceof UsagePaused || e instanceof AuthPaused || e instanceof ShuttingDown ? e.message : 'stopped by an emergency stop' };

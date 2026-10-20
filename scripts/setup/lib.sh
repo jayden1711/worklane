@@ -9,6 +9,41 @@ as_root() {
 # A user's home directory, from the passwd database: never assumed to be /home/<user>.
 home_of() { getent passwd "$1" | cut -d: -f6; }
 
+# The host's egress rule (egress-firewall.sh): its nftables table, and the set of cgroups exempt from it. A unit whose
+# NFTSet= names the set (test-user.sh's Docker unit) has its cgroup added by systemd while it runs. Named once here, so
+# the rule and the units that join it can't disagree.
+EGRESS_TABLE=worklane_egress
+EGRESS_SET=egress_ok
+# NFTSet= is in systemd 255 and later; on an older one nothing can fill the set, so test users stay opt-in there.
+EGRESS_NFTSET_SYSTEMD=255
+# The rule's record: the uids it covers, its flags, and whether test users' Docker may be exempt. Root's: /etc/worklane
+# is root's, 0755, and no sandbox user may enter it (test-user.sh denies it to the test user).
+EGRESS_RECORD=/etc/worklane/egress.users
+# Whether test users' Docker may be exempt from the host egress rule (the set, #543), from the rule's record $1:
+# "exempt", or "dropped" once a rule this install loaded covered test users with no exception for their Docker.
+#   - the record's "# docker: dropped" or "# docker: exempt" line (apply writes one; dropped wins);
+#   - else a record from before #543: "# --with-test-users" in it means dropped; none, exempt (test users weren't covered);
+#   - no record (no rule was ever applied, or revert removed it): exempt. A record it can't read: dropped.
+# WHY: where a rule covered test users and their Docker had no exception (apply --with-test-users before #543, or on a
+# systemd older than 255), all of Docker's traffic was dropped, and so was every route out through it: a run that joins
+# Docker's namespaces got nowhere. The exception reopens that route (docs/test-runs.md, "Known gap"), and nothing may
+# reopen a route an install had closed. Such an install keeps dropping Docker's traffic, whatever the flags, until revert.
+egress_docker_mode() {
+  local rec
+  [ -e "$1" ] || { echo exempt; return 0; }
+  rec="$(cat "$1" 2>/dev/null)" || { echo dropped; return 0; }
+  if grep -qx '# docker: dropped' <<<"$rec"; then echo dropped
+  elif grep -qx '# docker: exempt' <<<"$rec"; then echo exempt
+  elif grep -qx '# --with-test-users' <<<"$rec"; then echo dropped
+  else echo exempt; fi
+}
+# systemd's major version (systemctl's first line, "systemd 255 (...)"); 0 when it can't be read.
+systemd_major() {
+  local v
+  v="$(systemctl --version 2>/dev/null | sed -n '1s/^systemd \([0-9][0-9]*\).*/\1/p' || true)"
+  echo "${v:-0}"
+}
+
 # A JSON string (for the scripts that print JSON lines): backslashes and quotes escaped, newlines as \n, other control characters dropped.
 json_str() {
   local s="$1"
@@ -211,7 +246,8 @@ TAILSCALE_LOCK=/run/lock/worklane-tailscale.lock
 # The hub's sign-in port, the only one tailscale serve may forward to (dashboards.sh; never 4398, the break-glass).
 HUB_PORT=4399
 BREAK_GLASS_PORT=4398
-# The hub's Siri gateway (dashboards.sh --siri), and the tailnet HTTPS port tailscale.sh serve-siri publishes it on.
+# The removed Siri gateway's loopback port, and the tailnet HTTPS port an older install forwarded to it (#743):
+# tailscale.sh unserve-siri takes that forward away.
 SIRI_GATEWAY_PORT=4397
 SIRI_TAILNET_PORT=8443
 # The hub's hooks gateway for webhook automations (dashboards.sh --hooks), and the tailnet HTTPS port tailscale.sh
@@ -242,17 +278,19 @@ hub_option() {
   [ -f "$HUB_UNIT" ] || return 0
   sed -n 's/^ExecStart=.* '"$1"' \([^ ]*\).*$/\1/p' "$HUB_UNIT" | head -1
 }
+# The hub's machine devices: its --machine-devices, else an older unit's --console-devices, the same list (#742).
+hub_machine_devices() { local v; v="$(hub_option --machine-devices)"; [ -n "$v" ] || v="$(hub_option --console-devices)"; printf '%s' "$v"; }
 # The instances the hub serves (its --hub <name>=<state>,...), one per line.
 hub_instances() { hub_option --hub | tr ',' '\n' | sed 's/=.*$//' | grep -E '^[a-z][a-z0-9-]{0,20}$' || true; }
 
 # The hub's own settings, to run dashboards.sh again with another list of instances and nothing else changed: one word
-# a line (its sign-in App's client id, its URL, the owner terminal's user and devices, --siri and --hooks when it has
-# those gateways).
+# a line (its sign-in App's client id, its URL, its machine devices, --siri and --hooks when it has those gateways).
+# An older unit's --console-devices (the removed owner terminal's list) is kept as the machine devices; its
+# --console-user is dropped (#742).
 hub_keep_args() {
   local v
   printf '%s\n' --client-id "$(hub_option --client-id)" --public-url "$(hub_option --public-url)"
-  v="$(hub_option --console-user)"; [ -z "$v" ] || printf '%s\n' --console-user "$v"
-  v="$(hub_option --console-devices)"; [ -z "$v" ] || printf '%s\n' --console-devices "$v"
+  v="$(hub_machine_devices)"; [ -z "$v" ] || printf '%s\n' --machine-devices "$v"
   [ -z "$(hub_option --siri-port)" ] || printf '%s\n' --siri
   [ -z "$(hub_option --hooks-port)" ] || printf '%s\n' --hooks
 }
@@ -579,8 +617,7 @@ repo_ok() {
   [[ "$1" == */* && "$rest" != */* ]] && github_login_ok "$owner" && [[ "${#rest}" -le 100 && "$rest" =~ ^[A-Za-z0-9_.-]+$ && "$rest" != . && "$rest" != .. ]]
 }
 
-# The bounds of the agent-user steps on a Claude login (#613): the token install and its rollback
-# (restore_claude_credentials), then the login check. timeout -k: SIGTERM at the bound, then SIGKILL
+# The bounds of the agent-user steps on a Claude login (#613): the token install, then the login check. timeout -k: SIGTERM at the bound, then SIGKILL
 # CLAUDE_KILL_AFTER_SECONDS later, since a process with a TERM handler (node has one) or blocked on a hung mount is
 # only ended by SIGKILL. Plain assignments: never read from the environment.
 CLAUDE_TOKEN_INSTALL_SECONDS=30
@@ -592,7 +629,7 @@ cut_off_status() { [ "$1" -eq 124 ] || [ "$1" -eq 137 ]; }
 # credentials (~/.claude/.credentials.json, 0600 in its 0700 ~/.claude; or <dir>/.credentials.json when an instance
 # names its agent's claude_config_dir), keeping the file's other entries. The token goes from stdin to that file and
 # nowhere else: never an argument, an environment variable or a log line (timeout passes stdin through).
-# Bounded (#613): a home on a hung FUSE or network mount must not hold root's switch (every instance paused) for ever.
+# Bounded (#613): a home on a hung FUSE or network mount must not hold root's setup step for ever.
 # Cut off, it says so on stderr and fails (cut_off_status), which every caller reads as a failed install. A cut-off
 # between its write and its rename can leave <file>.tmp-<pid> in that user's own 0700 dir (#667).
 #   install_claude_token <user> [<claude config dir>]
@@ -644,26 +681,21 @@ claude_login_ok() {
   [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q '"loggedIn": *true'
 }
 
-# The Claude account switch (claude-account.sh): what it last found for each agent user (status.json), the last
-# switch's progress (switch.jsonl, one JSON line per step change), and the instances a switch stopped and hasn't
-# started again (paused). Root's, 0644: account names and expiry dates, never a token.
+# claude-account.sh's dir: what status last found for each agent user (status.json), and what the removed account
+# switch and profiles left (#736: switch.jsonl, paused, profiles.json, profile-ops.jsonl; its uninstall removes them).
+# Root's, 0644: account names and expiry dates, never a token.
 CLAUDE_ACCOUNT_DIR=/var/lib/worklane/claude-account
-CLAUDE_ACCOUNT_LOCK=/run/lock/worklane-claude-account.lock
-# The token a dashboard switch takes: pasted by a machine owner into the asking instance's dashboard, which stores it
-# for its coordinator user only (src/console/secrets.ts); claude-account.sh reads it once, as root, and deletes it.
+# What an earlier dashboard stored for claude-account.sh to read once (#711): a switch's token, a new profile's token
+# and a relayed sign-in's code. Nothing stores one now; claude-account.sh removes any left behind, unread.
 CLAUDE_ACCOUNT_CREDENTIAL=claude-account-token
-# The same for a new account profile's token (claude-account.sh profile-add --token-from): stored by the dashboard
-# before it asks, read once by the script as root, and deleted.
 CLAUDE_PROFILE_CREDENTIAL=claude-profile-token
-# The one-time code a relayed sign-in (claude-account.sh login) takes: pasted by a machine owner in the asking
-# instance's dashboard, stored for its coordinator user only (0400), read once by the script as root, and deleted.
 CLAUDE_LOGIN_CREDENTIAL=claude-login-code
 # The machine change log (the machine helper's, root's 0644): the watchdog posts what it finds there to the ops channel.
 MACHINE_CHANGES=/var/lib/worklane/machine-changes.jsonl
-# A token from `claude setup-token`, strictly: install_claude_token's check, and src/claude-account.ts's.
+# A token from `claude setup-token`, strictly: install_claude_token's check.
 # (The length apart: a repeat bound over 255 is no regular expression to every libc.)
 claude_token_ok() { [[ "${#1}" -le 513 && "$1" =~ ^sk-ant-oat[0-9]{2}-[A-Za-z0-9_-]{20,}$ ]]; }
-# claude auth status --json as this user (with a Claude config dir: on that login, an account profile's); nothing when
+# claude auth status --json as this user (with a Claude config dir: on that login); nothing when
 # claude isn't installed or doesn't answer within a minute.
 #   claude_status_json <user> [<claude config dir>]
 claude_status_json() {
@@ -674,7 +706,7 @@ claude_status_json() {
 # that it works): one minimal real call as that user, the cheapest model, a one-word answer, one turn, a hard budget
 # cap. A refused call costs nothing; an answered one about one short Haiku turn. Prints nothing and succeeds when
 # Claude answered; else prints Claude's message (token-shaped strings redacted, 500 characters at most) and fails.
-# With a Claude config dir: the call on that login (an account profile's).
+# With a Claude config dir: the call on that login.
 #   claude_api_check <user> [<claude config dir>]
 CLAUDE_PROOF_ARGS=(-p "Reply with the single word: ok" --model haiku --max-turns 1 --max-budget-usd 0.05 --output-format json)
 claude_api_check() {
@@ -697,38 +729,8 @@ process.stdout.write(clean.slice(0, 500));
 process.exit(1);
 '
 }
-# One user's Claude credentials file put back as it was (a switch's rollback): the content on stdin, written as that
-# user, 0600, by a rename; empty stdin: there was none, so the file is removed. Never an argument or a log line.
-# Bounded like the install (#613: it runs while every instance is paused): cut off, it says so on stderr and fails.
-#   restore_claude_credentials <user> <claude config dir>
-restore_claude_credentials() {
-  local rc=0
-  (cd / && sudo -H -u "$1" timeout -k "$CLAUDE_KILL_AFTER_SECONDS" "$CLAUDE_TOKEN_INSTALL_SECONDS" "$(command -v node)" -e '
-const { existsSync, readFileSync, renameSync, rmSync, writeFileSync } = require("node:fs");
-const { join } = require("node:path");
-const dir = process.argv[1];
-if (!dir || !dir.startsWith("/")) process.exit(2);
-const file = join(dir, ".credentials.json");
-const prev = readFileSync(0, "utf8");
-if (!prev.trim()) {
-  if (existsSync(file)) rmSync(file);
-  process.exit(0);
-}
-const tmp = `${file}.tmp-${process.pid}`;
-writeFileSync(tmp, prev, { mode: 0o600 });
-renameSync(tmp, file);
-' "$2") || rc=$?
-  if cut_off_status "$rc"; then echo "putting the previous Claude login back as $1: cut off after $CLAUDE_TOKEN_INSTALL_SECONDS s (its home didn't answer)" >&2; fi
-  return "$rc"
-}
 # Whether a path is a plain file (not a link) that this user owns.
 file_owned_by() { [ -f "$1" ] && [ ! -L "$1" ] && [ -n "$(find "$1" -maxdepth 0 -type f -user "$2" 2>/dev/null)" ]; }
-# Pause an instance: SIGTERM to its coordinator's main process only. It starts no more runs, lets the ones it has
-# going finish, then exits on its own; a clean exit isn't restarted (Restart=on-failure). Its unit's own stop
-# (unit_stop, `systemctl stop`) would end those runs after TimeoutStopSec: used only once the wait has timed out.
-unit_drain() { systemctl kill --kill-whom=main --signal=SIGTERM "$1"; }
-unit_stop() { systemctl stop "$1"; }
-unit_start() { systemctl start "$1"; }
 
 # The engine repo's checks on main, one name per element (names hold commas, so never a joined string): the fast
 # ones every push to main runs (ci.yml, gitleaks.yml) and the slow ones (ci-slow.yml: bootstrap on each OS, the real
@@ -736,7 +738,7 @@ unit_start() { systemctl start "$1"; }
 # (ci-batch.yml). A pull request needn't run the slow ones, so main is where they gate, and only a batched commit
 # can be installed. Pull-request-only checks (dco) are left out: they're always "skipped" on main, and the updater
 # refuses a skipped required check. A test derives this list from the workflows.
-UPDATE_DEFAULT_CHECKS=("Claude sign-in probe (real users)" "add-project (real systemd)" "agentshield" "bootstrap (macos-latest)" "bootstrap (ubuntu-latest)" "bootstrap (windows-wsl)" "denylist" "desktop" "push-gate" "scan" "test (ubuntu-latest, 22)" "test (ubuntu-latest, 24)" "test-run sandbox (real systemd)" "wizard end to end (real systemd)")
+UPDATE_DEFAULT_CHECKS=("Claude sign-in probe (real users)" "add-project (real systemd)" "agentshield" "bootstrap (macos-latest)" "bootstrap (ubuntu-latest)" "bootstrap (windows-wsl)" "denylist" "desktop" "egress firewall (real systemd)" "push-gate" "scan" "test (ubuntu-latest, 22)" "test (ubuntu-latest, 24)" "test-run sandbox (real systemd)" "wizard end to end (real systemd)")
 
 # updates.json for the engine updater, off: the repo to follow, then each required check as its own argument.
 updates_config_json() {
@@ -744,18 +746,10 @@ updates_config_json() {
   node -e 'const [repo, ...checks] = process.argv.slice(1); process.stdout.write(JSON.stringify({ enabled: false, channel: "release", allowed_signers: "/etc/worklane/allowed_signers", repo_url: repo, branch: "main", required_checks: checks.filter((s) => s.trim()) }, null, 2) + "\n")' "$@"
 }
 
-# The sudoers rule for the dashboard's owner terminal: the hub's viewer user may run the console shell as the
-# admin user, with exactly `check` or `shell`, and nothing else; never as root. sudo inside that shell still
-# asks for the admin's password (the rule is NOPASSWD only for the console shell itself).
+# The removed owner terminal's root files (#742), which an older install has and dashboards.sh removes: its console
+# shell, and the sudoers rule that let the hub's viewer user run it as the admin user. Nothing installs them now.
 CONSOLE_SHELL=/usr/local/libexec/worklane-console-shell
-CONSOLE_SUDOERS=/etc/sudoers.d/worklane-console   # what install_sudoers worklane-console writes
-console_sudoers() {
-  local viewer="$1" admin="$2"
-  [[ "$viewer" =~ ^wl-[a-z][a-z0-9-]{0,20}$ ]] || { echo "console_sudoers: $viewer is not a viewer user" >&2; return 1; }
-  [[ "$admin" =~ ^[a-z_][a-z0-9_-]{0,31}$ && "$admin" != root && "$admin" != "$viewer" ]] || { echo "console_sudoers: $admin can't be the console user" >&2; return 1; }
-  printf '# The dashboard hub (%s) may start the owner terminal as %s: the console shell, exactly check or shell.\n' "$viewer" "$admin"
-  printf '%s ALL=(%s) NOPASSWD: %s check, %s shell\n' "$viewer" "$admin" "$CONSOLE_SHELL" "$CONSOLE_SHELL"
-}
+CONSOLE_SUDOERS=/etc/sudoers.d/worklane-console
 
 # The machine owners (src/machine-owners.ts): the GitHub logins that may change the machine from the dashboard
 # (slot caps, engine updates), as opposed to an instance's owners. Root's file; every instance user reads it.

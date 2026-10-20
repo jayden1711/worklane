@@ -160,11 +160,12 @@ test('the sandbox host reads what the helper prints for it from stdout, whatever
  * The helper's own check(), run with its real body and probe_passed, and stand-ins for everything that needs root:
  * exec_run prints the probe's stdout and systemd-run's stderr as real systemd 255 does.
  */
-function helperCheck(execRun: string) {
+function helperCheck(execRun: string, extra = 'userns_ok() { USERNS_WHY="no wrapper here (a stand-in)"; return 1; }\nuserns_unsupported() { :; }') {
   const src = readFileSync(helperSrc, 'utf8');
   const body = (name: string) => src.slice(src.indexOf(`${name}() {`), src.indexOf('\n}\n', src.indexOf(`${name}() {`)) + 3);
   const stubs = [
     'user=wl-test-shop',
+    'name=shop',
     'store=/nonexistent/store',
     'runuser() { shift 3; "$@"; }',
     'die() { echo "$*" >&2; exit 2; }',
@@ -175,6 +176,7 @@ function helperCheck(execRun: string) {
     'create() { cat >/dev/null; }',
     'wipe() { echo "wiped $1"; }',
     `exec_run() { cat >/dev/null; ${execRun}; }`,
+    extra,
   ].join('\n');
   return spawnSync('bash', ['-c', `set -euo pipefail\n${stubs}\n${body('probe_passed')}${body('check')}check`, fixtures], { encoding: 'utf8' });
 }
@@ -201,4 +203,35 @@ test('the helper\'s sandbox probe passes on the probe\'s own stdout, with system
   }
   r = helperCheck('echo "systemd-run: failed to start" >&2; return 1');
   assert.match(r.stdout, /^ {2}stderr: systemd-run: failed to start$/m, 'systemd-run\'s stderr is shown');
+});
+
+test('#545: the helper\'s check: with the wrapper, a run in a user namespace of its own (only the test user\'s uid, mapped to itself) or a FAIL; without it a NOTE, never a FAIL (a helper the updater installed first keeps test runs on)', { skip: !posix && 'bash' }, () => {
+  const own = 'userns_ok() { return 0; }\nid() { if [ "$1" = -u ]; then echo 1003; else echo wl-test-shop; fi; }';
+  let r = helperCheck('cat "$0/probe.stdout"; echo "uid_map 1003 1003 1"; return 0', own);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.match(r.stdout, /^PASS a sandboxed run is in a user namespace of its own \(only wl-test-shop's uid mapped, to itself\)$/m);
+  for (const map of ['uid_map 0 0 4294967295', 'uid_map 0 1003 1', '']) {
+    r = helperCheck(`cat "$0/probe.stdout"; echo "${map}"; return 0`, own);
+    assert.equal(r.status, 1, map);
+    assert.match(r.stdout, /^FAIL a sandboxed run isn't in a user namespace of its own: /m, map);
+  }
+  r = helperCheck('cat "$0/probe.stdout"; echo "uid_map 0 0 4294967295"; return 0');
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.match(r.stdout, /^NOTE a sandboxed run shares the host's user namespace \(no wrapper here \(a stand-in\)\), so it can join the namespaces of wl-test-shop's rootless Docker/m);
+  assert.doesNotMatch(r.stdout, /^FAIL/m);
+  assert.doesNotMatch(r.stdout, /userns-unsupported/, 'a machine that can have the wrapper (install not yet run again) says no more');
+});
+
+test('#545 round 9 (c): on a machine that can\'t have the wrapper, the helper\'s check adds NOTE userns-unsupported with the fix, and still passes (test runs stay on); with the wrapper, never', { skip: !posix && 'bash' }, () => {
+  const probe = 'cat "$0/probe.stdout"; echo "uid_map 0 0 4294967295"; return 0';
+  const old = 'userns_ok() { USERNS_WHY="no wrapper here (a stand-in)"; return 1; }\nuserns_unsupported() { echo "/usr/bin/unshare takes no --map-current-user or --keep-caps"; }';
+  let r = helperCheck(probe, old);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.match(r.stdout, /^OK$/m);
+  assert.doesNotMatch(r.stdout, /^FAIL/m);
+  assert.ok(r.stdout.split('\n').includes("NOTE userns-unsupported: this machine's unshare can't be the test runs' wrapper (/usr/bin/unshare takes no --map-current-user or --keep-caps): install util-linux 2.38 or later and setpriv, then run scripts/setup/test-user.sh install shop again"), r.stdout);
+  const own = 'userns_ok() { return 0; }\nuserns_unsupported() { echo "never asked"; }\nid() { if [ "$1" = -u ]; then echo 1003; else echo wl-test-shop; fi; }';
+  r = helperCheck('cat "$0/probe.stdout"; echo "uid_map 1003 1003 1"; return 0', own);
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.doesNotMatch(r.stdout, /userns-unsupported|never asked/);
 });

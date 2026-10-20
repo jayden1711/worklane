@@ -74,9 +74,10 @@ export function installationTokens(c: AppCredentials, repos: string[], stateDir:
 
 /**
  * The App's bot identity, as GitHub attributes commits to it:
- * "<slug>[bot]" <"<bot user id>+<slug>[bot]@users.noreply.github.com">.
+ * "<slug>[bot]" <"<bot user id>+<slug>[bot]@users.noreply.github.com">. `id`: that bot user's numeric id, which GitHub
+ * reports as `merged_by.id` on a PR the App merged (#733).
  */
-export async function appBotIdentity(c: AppCredentials, fetchImpl: Fetch = fetch, api = 'https://api.github.com', timeoutMs = REQUEST_TIMEOUT_MS): Promise<{ name: string; email: string }> {
+export async function appBotIdentity(c: AppCredentials, fetchImpl: Fetch = fetch, api = 'https://api.github.com', timeoutMs = REQUEST_TIMEOUT_MS): Promise<{ name: string; email: string; id: number }> {
   const headers = { accept: 'application/vnd.github+json', 'x-github-api-version': '2022-11-28' };
   const app = await fetchImpl(`${api}/app`, { headers: { ...headers, authorization: `Bearer ${appJwt(c.appId, readFileSync(c.keyPath, 'utf8'))}` }, signal: AbortSignal.timeout(timeoutMs) });
   if (!app.ok) throw new Error(`GitHub ${app.status} reading App ${c.appId}`);
@@ -87,5 +88,5 @@ export async function appBotIdentity(c: AppCredentials, fetchImpl: Fetch = fetch
   if (!user.ok) throw new Error(`GitHub ${user.status} reading the App's bot user ${bot}`);
   const { id } = (await user.json()) as { id?: unknown };
   if (typeof id !== 'number') throw new Error(`the App's bot user ${bot}: GitHub returned no id`);
-  return { name: bot, email: `${id}+${bot}@users.noreply.github.com` };
+  return { name: bot, email: `${id}+${bot}@users.noreply.github.com`, id };
 }

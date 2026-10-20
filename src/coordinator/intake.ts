@@ -7,7 +7,6 @@ import { mayAnswer, type Issue } from '../backlog/types.js';
 import { INTAKE_LABEL } from '../intake/github.js';
 import type { EventPayload } from '../events/types.js';
 import { ownerOnlyDir, writeOwnerOnly } from '../os/index.js';
-import { loadMoneyPaths } from '../review.js';
 import { intakeCaps, researchRepoAccess } from '../settings.js';
 import { isAllowed, isTrusted, type IncomingReport, type IntakeConfig } from '../intake/report.js';
 import { redactPii } from '../intake/redact.js';
@@ -124,7 +123,8 @@ export abstract class Intake extends QuickReplies {
     purgeSeen(this.d.stateDir);
     const error = (where: string, e: unknown) => this.emit('coordinator.error', { instance: this.d.instance, where, kind: (e as { kind?: string }).kind ?? 'error', message: (e as Error).message.slice(0, 500) });
     for (const src of it.sources) {
-      if (!cfg[src.name].enabled) continue;
+      // Voice was removed (#743): no source is wired for it, and one that said it was would take nothing.
+      if (src.name === 'voice' || !cfg[src.name].enabled) continue;
       let got: IncomingReport[];
       try {
         // Replies a person waits on aren't taken here: src/coordinator/quick-replies.ts answers them as they arrive.
@@ -267,7 +267,7 @@ export abstract class Intake extends QuickReplies {
   /** The project's money paths, for marking a draft that names one high-risk; none when unset or unreadable. */
   private intakeMoneyPaths(): RegExp[] {
     try {
-      return loadMoneyPaths(this.d.repo, this.d.cfg.review?.money_path_source);
+      return this.moneyPaths();
     } catch {
       return [];
     }

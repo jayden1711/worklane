@@ -7,11 +7,10 @@
 // when the source starts and removed when it stops; a dead process's claim doesn't count. It holds only a hash: the
 // shared directory names no workspace, app, team, label or person. Checked and written under one lock, so two
 // instances starting at once can't both pass.
-import { createHash, randomBytes } from 'node:crypto';
-import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { createHash } from 'node:crypto';
 import { tryLock } from '../locks.js';
 import { pidAlive } from '../os/index.js';
+import { listSlotDir, makeSlotDir, readSlotFile, removeSlotFile, slotFile, slotFileExists, writeSlotFile, type SlotPathLike } from '../slot-file.js';
 
 export type ClaimKind = 'slack' | 'linear';
 const INSTANCE_NAME = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/;
@@ -27,13 +26,13 @@ interface Claim {
 
 const prefix = (kind: ClaimKind) => `${kind}-claim-`;
 
-function readClaims(dir: string, kind: ClaimKind): Claim[] {
-  if (!existsSync(dir)) return [];
+function readClaims(dir: SlotPathLike, kind: ClaimKind): Claim[] {
+  if (!slotFileExists(dir)) return [];
   const out: Claim[] = [];
-  for (const f of readdirSync(dir)) {
+  for (const f of listSlotDir(dir)) {
     if (!f.startsWith(prefix(kind)) || !f.endsWith('.json')) continue;
     try {
-      const c = JSON.parse(readFileSync(join(dir, f), 'utf8')) as Claim;
+      const c = JSON.parse(readSlotFile(slotFile(dir, f))) as Claim;
       if (typeof c.instance === 'string' && Number.isInteger(c.pid) && typeof c.key === 'string') out.push(c);
     } catch {
       // half-written or unreadable: not a claim
@@ -51,12 +50,12 @@ const WHAT: Record<ClaimKind, string> = {
  * Check and claim in one step: the claim's release, or why this instance's source is refused (another live instance
  * on the machine claims the same key).
  */
-export async function claimSource(o: { kind: ClaimKind; instance: string; key: string; claimsDir: string; alive?: (pid: number) => boolean; sleep?: (ms: number) => Promise<void> }): Promise<{ release: () => void } | { error: string }> {
-  mkdirSync(o.claimsDir, { recursive: true });
+export async function claimSource(o: { kind: ClaimKind; instance: string; key: string; claimsDir: SlotPathLike; alive?: (pid: number) => boolean; sleep?: (ms: number) => Promise<void> }): Promise<{ release: () => void } | { error: string }> {
+  makeSlotDir(o.claimsDir);
   const sleep = o.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
   const alive = o.alive ?? pidAlive;
   for (let i = 0; i < 200; i++) {
-    const r = tryLock(join(o.claimsDir, `${o.kind}-claims.lock`), `${o.kind} claim ${o.instance}`);
+    const r = tryLock(slotFile(o.claimsDir, `${o.kind}-claims.lock`), `${o.kind} claim ${o.instance}`);
     if (!('lock' in r)) {
       await sleep(100);
       continue;
@@ -65,15 +64,13 @@ export async function claimSource(o: { kind: ClaimKind; instance: string; key: s
       const other = readClaims(o.claimsDir, o.kind).find((c) => c.instance !== o.instance && c.key === o.key && alive(c.pid));
       if (other) return { error: `instance "${other.instance}" (its running ${o.kind} source) already takes ${WHAT[o.kind]}` };
       if (!INSTANCE_NAME.test(o.instance)) return { release: () => {} };
-      const file = join(o.claimsDir, `${prefix(o.kind)}${o.instance}.json`);
-      const tmp = `${file}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`;
-      writeFileSync(tmp, JSON.stringify({ instance: o.instance, pid: process.pid, key: o.key } satisfies Claim));
-      renameSync(tmp, file);
+      const file = slotFile(o.claimsDir, `${prefix(o.kind)}${o.instance}.json`);
+      writeSlotFile(file, JSON.stringify({ instance: o.instance, pid: process.pid, key: o.key } satisfies Claim));
       return {
         release: () => {
           try {
-            const c = JSON.parse(readFileSync(file, 'utf8')) as Claim;
-            if (c.pid === process.pid) unlinkSync(file);
+            const c = JSON.parse(readSlotFile(file)) as Claim;
+            if (c.pid === process.pid) removeSlotFile(file);
           } catch {
             // gone already
           }

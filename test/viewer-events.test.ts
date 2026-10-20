@@ -12,6 +12,9 @@ import { EventLog } from '../src/events/log.js';
 import { EventSchemas, type StoredEvent } from '../src/events/types.js';
 import { machineNetwork } from '../src/network.js';
 import { forViewer, stateForViewer, VIEWER_EVENTS } from '../src/viewer-events.js';
+import { FIRST_TASK_FILED } from '../src/first-task-progress.js';
+import { holdWords } from '../src/hold-words.js';
+import type { SetupProbe } from '../src/setup-steps.js';
 import { asPerson, exampleProject, exampleRoles } from './helpers.js';
 
 const seen = { issue: 1, title: 'Fix rounding', labels: ['ready'], author: 'example-owner', owner: null, actionable: true, why: '' };
@@ -22,7 +25,7 @@ const seen = { issue: 1, title: 'Fix rounding', labels: ['ready'], author: 'exam
 const RUN_USD = 98765.4321;
 const asked = { id: 'd-1', kind: 'question' as const, issue: 1, owner: 'example-owner', question: 'Which rounding?', options: ['up', 'down'], recommendation: 'up', receipts: ['run 2026-x: secret-ish receipt'] };
 
-async function serve() {
+async function serve(o: { setupProbe?: SetupProbe } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'viewer-events-'));
   const db = join(dir, 'events.db');
   const log = new EventLog(db);
@@ -32,7 +35,7 @@ async function serve() {
   log.append('decision.asked', asked, 'c');
   log.append('coordinator.error', { instance: 'demo', where: 'tick', kind: 'error', message: 'agent output: /home/example/secret path' }, 'c');
   const { dir: root } = exampleProject();
-  const d = await startDashboard({ root, cfg: loadConfig(root), eventsDb: db, stateDir: dir, user: 'example-owner', roleOf: exampleRoles, slotsDir: join(dir, 'slots'), pollMs: 50 });
+  const d = await startDashboard({ root, cfg: loadConfig(root), eventsDb: db, stateDir: dir, user: 'example-owner', roleOf: exampleRoles, slotsDir: join(dir, 'slots'), pollMs: 50, ...o });
   const base = d.url.split('/?')[0]!;
   const get = async <T>(path: string, who: string) => (await fetch(`${base}${path}`, { headers: { authorization: `Bearer ${d.token}`, ...asPerson(who) } })).json() as Promise<T>;
   const status = async (path: string, who: string) => (await fetch(`${base}${path}`, { headers: { authorization: `Bearer ${d.token}`, ...asPerson(who) } })).status;
@@ -73,6 +76,31 @@ test('a viewer gets only the allowlisted events and fields on /api/events and in
     assert.deepEqual(va.map((a) => a.type), ['decision.asked', 'issue.seen'], "the viewer's Activity feed has the same allowlist");
     assert.ok(!va.some((a) => /cost|\$/.test(a.summary)), 'no costs');
     assert.ok((await activity('example-collaborator')).some((a) => a.type === 'run.cost'), 'a writer sees the costs');
+  } finally {
+    await s.d.close();
+  }
+});
+
+test('#741 a held first task: a writer\'s first-run page has its hold reason in plain words; a viewer\'s page, state and events carry no hold reason', async () => {
+  // The setup checks see stand-ins only: no real gh, claude or service is asked.
+  const setupProbe: SetupProbe = { which: (c) => `/stand-in/${c}`, run: () => ({ status: 1, stdout: '{"loggedIn": false}', stderr: 'stand-in' }), serviceRunning: () => false, systemUnitActive: () => false, linger: () => null, serviceManagerEnv: () => ({ env: {} }) };
+  const s = await serve({ setupProbe });
+  try {
+    const H = 'abc1234';
+    const reason = 'doubt: evaluator confidence medium: a held-reason marker 4b7e';
+    s.log.append('dashboard.audit', { login: 'example-owner', role: 'owner', via: 'session', instance: null, action: FIRST_TASK_FILED, detail: { issue: 1 } }, 'example-owner', 'human');
+    s.log.append('pr.opened', { issue: 1, number: 41, url: 'https://github.com/example-org/example-shop/pull/41', head: H, draft: false }, 'c');
+    s.log.append('merge.decided', { issue: 1, number: 41, head: H, auto: false, reasons: [reason] }, 'c');
+    const words = holdWords(reason, { local: true });
+    const raw = async (path: string, who: string) => (await fetch(`${s.base}${path}`, { headers: { authorization: `Bearer ${s.d.token}`, ...asPerson(who) } })).text();
+    const writer = JSON.parse(await raw('/api/first-run', 'example-collaborator')) as { firstTask: { holds: unknown[] } };
+    assert.deepEqual(writer.firstTask.holds, [words], "a writer's card says why it waits, plainly");
+    for (const path of ['/api/first-run', '/api/state', '/api/events', '/api/events?issue=1']) {
+      const v = await raw(path, 'someone-else');
+      assert.doesNotMatch(v, /4b7e|evaluator confidence/, `${path}: no hold reason for a viewer`);
+      assert.ok(!v.includes(words.why), `${path}: nor its plain words`);
+    }
+    assert.equal(await s.status('/api/first-run', 'someone-else'), 403, 'the first-run page is refused to a viewer');
   } finally {
     await s.d.close();
   }

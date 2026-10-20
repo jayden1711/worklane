@@ -166,5 +166,8 @@ export interface IncidentSink {
 
 /** The incident a usage pause raises, by instance. */
 export const USAGE_INCIDENT = 'claude_usage_limit';
-/** The notice an account profile failover raises (src/claude-failover.ts), by instance: info, nothing to do. */
+/**
+ * The notice an older engine's account profile failover raised, by instance: info, nothing to do. Failover was removed
+ * (#736): nothing raises it now, and the instance's start closes one left open (src/service.ts).
+ */
 export const FAILOVER_INCIDENT = 'claude_account_failover';

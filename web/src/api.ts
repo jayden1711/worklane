@@ -48,8 +48,6 @@ export interface Decision {
   answer: { by: string; answer: string; at: string } | null;
   /** Whether the dashboard's user may answer it (its owner or a writer); the server refuses otherwise. */
   canAnswer?: boolean;
-  /** An owner's only: why it can never be approved by voice (src/voice.ts), or null when it can. */
-  voiceRefused?: string | null;
   /** While it is open, for the owners and writers: what happened, in one plain sentence (src/decision-effects.ts). */
   happened?: string;
   /** While it is open, for the owners and writers: what each option does, in the options' order. */
@@ -604,16 +602,6 @@ async function authHeaders(): Promise<Record<string, string>> {
 }
 
 /**
- * The subprotocols the owner terminal's WebSocket offers: its own (src/dashboard-auth.ts TERMINAL_PROTOCOL) and the
- * session's CSRF token as `csrf.<token>` (CSRF_PROTOCOL_PREFIX), since a browser can't set headers on the upgrade.
- * The token never goes in the URL; the hub answers with the terminal's protocol alone.
- */
-export async function terminalProtocols(): Promise<string[]> {
-  await me;
-  return ['terminal.v1', ...(csrf ? [`csrf.${csrf}`] : [])];
-}
-
-/**
  * A live stream (server-sent events) at `path`, read with fetch so the break-glass key goes in the Authorization
  * header like every other call (a session's cookie goes by itself). It reconnects after a drop, with Last-Event-ID.
  * INVARIANT: no stream URL carries the key; EventSource, which can't send headers, isn't used (test/web-key-in-url.test.ts).
@@ -972,17 +960,9 @@ export function useLiveState() {
   return { state, error, live, pulse, refresh };
 }
 
-/** The tab's state, sent with everything done by voice: the server refuses it unless both are true. */
-export type VoiceTab = { focused: boolean; visible: boolean };
-
-/** Answer a decision; `voice`: said by voice (an approval only; the server adds its voice checks). */
-export async function decide(id: string, answer: string, voice?: VoiceTab) {
-  return api<{ ok: boolean }>('/api/decide', { method: 'POST', body: JSON.stringify({ id, answer, ...(voice ? { voice } : {}) }) });
-}
-
-/** Send a spoken idea the owner confirmed to the instance's intake (POST /api/voice/intake). */
-export async function voiceIntake(text: string, voice: VoiceTab) {
-  return api<{ ok: boolean; id: string }>('/api/voice/intake', { method: 'POST', body: JSON.stringify({ text, voice }) });
+/** Answer a decision, by a click. */
+export async function decide(id: string, answer: string) {
+  return api<{ ok: boolean }>('/api/decide', { method: 'POST', body: JSON.stringify({ id, answer }) });
 }
 
 /** A setup-console ask (src/console/asks.ts), as GET /api/asks serves it. */
@@ -1023,6 +1003,8 @@ export interface AsksView {
   role: 'owner' | 'writer' | 'viewer';
   login: string;
   asks: Ask[];
+  /** An owner's: what the machine still needs from root that no ask covers (src/console/routes.ts); absent from older servers. */
+  notices?: string[];
 }
 export const getAsks = () => api<AsksView>('/api/asks');
 export const answerAsk = (id: string, answer: string) => api<{ ok: boolean }>(`/api/asks/${id}/answer`, { method: 'POST', body: JSON.stringify({ answer }) });
@@ -1117,6 +1099,8 @@ export interface FirstRun {
   start: FirstRunStart;
   /** Whether this viewer may press Start (the instance's owners). */
   canStart: boolean;
+  /** #741: the issue the first-task form filed, followed to its PR (src/first-task-progress.ts); null before one is filed, absent from older servers. */
+  firstTask?: FirstTaskProgress | null;
   /** Each open Fix action's plan, by action id (src/setup-actions.ts), shown before it runs. */
   actions?: Record<string, FirstRunActionPlan>;
   /** Whether this viewer may run a Fix action (the instance's owners). */
@@ -1221,6 +1205,18 @@ export interface FirstTaskValues {
   context?: string;
 }
 export const getFirstTask = () => api<FirstTaskInfo>('/api/first-run/first-task');
+/** #741: the first task's stages, from the engine's events only (src/first-task-progress.ts); an estimate always says its basis. */
+export interface FirstTaskProgress {
+  issue: number;
+  filedAt: string | null;
+  pr: { number: number; url: string | null } | null;
+  stages: { id: 'claimed' | 'worker' | 'evaluator' | 'pr' | 'checks' | 'merge'; title: string; state: 'waiting' | 'running' | 'done' | 'failed' | 'held'; detail: string; at: string | null; estimate: { basis: 'tick' | 'guess' | 'none'; text: string } | null }[];
+  blocked: { at: string | null } | null;
+  question: { at: string | null } | null;
+  /** The held PR's reasons in plain words (src/hold-words.ts): why it waits, and what lets it through. */
+  holds: { kind: string; why: string; through: string }[];
+  outcome: 'open' | 'merged' | 'held' | 'closed' | 'landed' | 'blocked';
+}
 /** confirm false: the issue as it would be filed (checked with the coordinator's parser); true: filed, with `ready`. */
 export const fileFirstTask = (values: FirstTaskValues, confirm: boolean) => api<{ ok: boolean; title: string; body: string; number?: number; url?: string | null; labelCreated?: boolean; confirmed: boolean }>('/api/first-run/first-task', { method: 'POST', body: JSON.stringify({ values, confirm }) });
 /** #468: each open issue the harness isn't working on, and why. */
@@ -1544,95 +1540,25 @@ export interface AccountUser {
   installedAt: string | null;
   error: string | null;
 }
-export interface SwitchLine {
-  at: string;
-  step: 'switch' | 'pause' | 'token' | 'wait' | 'install' | 'check' | 'resume';
-  state: 'started' | 'done' | 'failed' | 'ask' | 'skipped';
-  instance: string | null;
-  user: string | null;
-  detail: string;
-}
-export interface SwitchInstance {
-  name: string;
-  pause: SwitchLine | null;
-  wait: SwitchLine | null;
-  users: { user: string; install: SwitchLine | null; check: SwitchLine | null }[];
-  check: SwitchLine | null;
-  resume: SwitchLine | null;
-}
-export interface SwitchView {
-  startedAt: string;
-  status: 'running' | 'done' | 'failed' | 'stalled';
-  detail: string;
-  /** Waiting for the token at the root shell where the switch was started (never this page: issue #711). */
-  waitingForToken: boolean;
-  token: SwitchLine | null;
-  instances: SwitchInstance[];
-}
 export interface ClaudeAccountData {
   machineOwner: boolean;
   machineOwners: string[];
   login: string;
   instance: string;
-  /** Whether this person may refresh, or choose or remove a profile (the server checks again). */
+  /** Whether this person may refresh (the server checks again). */
   allowed: boolean;
   why: string | null;
   /** False when no device would help (this person's role here): no buttons are drawn; absent from older servers. */
   everAllowed?: boolean;
-  /** A switch a root admin runs on the machine, while it runs. */
-  busy: string | null;
   status: { at: string; users: AccountUser[] } | null;
-  switch: SwitchView | null;
   requests: { id: string; args: string[]; by: string; at: string; status: string; detail: string; finishedAt?: string | null }[];
-  /** The account profiles (src/claude-profiles.ts); absent from an older server. */
-  profiles?: ProfilesTable;
-  profileOps?: ProfileOp[];
-  /** The root script on the machine: a switch, an added account and a staged profile's confirmation are run with it. */
-  confirmScript?: string;
+  /** How a person signs an agent user in, as that user on the machine (#736). Absent from an older server. */
+  signin?: string;
+  /** What the removed account profiles, failover and switch left on the machine, and the root step that removes it (#736). */
+  retired?: { files: string[]; refused: string[]; unreadable: boolean; command: string } | null;
 }
-/** One instance's agent user on one profile: its last real call there, and whether it is the active one. */
-export interface ProfileCell {
-  instance: string;
-  user: string | null;
-  active: boolean;
-  account: string | null;
-  subscription: string | null;
-  apiOk: boolean | null;
-  apiError: string | null;
-  checkedAt: string | null;
-  /** The usage limit on it (the instance's pause, on its active account): when it resets, and that in words. Absent from an older server. */
-  limit?: { resetAt: string; resets: string } | null;
-}
-export interface ProfilesTable {
-  instances: string[];
-  profiles: { name: string; kind: string; staged?: boolean; addedFor?: string | null; addedAt: string | null; cells: ProfileCell[] }[];
-  active: Record<string, string>;
-  /** The instance whose usage-limit pause the server read (its own); every other column's limit is not shown here. Absent from an older server. */
-  limitsOf?: string | null;
-  /** Auto-failover on a usage limit: machine-wide, and per instance (an empty order: off there). Absent from an older server. */
-  failover?: { machine: FailoverSetting | null; instances: Record<string, FailoverSetting> };
-}
-export interface FailoverSetting {
-  order: string[];
-  back: boolean;
-}
-export interface ProfileOp {
-  id: string;
-  op: 'profile-add' | 'use' | 'remove' | 'login';
-  profile: string;
-  for: string | null;
-  status: 'running' | 'done' | 'failed' | 'stalled';
-  startedAt: string;
-  endedAt: string | null;
-  detail: string;
-  steps: { step: string; state: string; instance: string | null; user: string | null; detail: string }[];
-}
-// Issue #711: nothing here sends a Claude credential. Adding an account, signing one in and switching every agent are
-// a root admin's on the machine; the page only shows status and names those commands.
-/** This dashboard's own instance's failover setting: an order of 2 to 8 profiles, or null for off (the machine's is a root admin's). */
-export const setClaudeFailover = (order: string[] | null, back: boolean) => api<{ ok: boolean }>('/api/machine/claude-profile', { method: 'POST', body: JSON.stringify({ action: 'failover', order, back }) });
-/** Use or remove a profile, for this dashboard's own instance only (another instance, or every one, is a root admin's). */
-export const claudeProfileAction = (action: 'use' | 'remove', profile: string) => api<{ ok: boolean }>('/api/machine/claude-profile', { method: 'POST', body: JSON.stringify({ action, profile }) });
+// Issue #711: nothing here sends a Claude credential, and the engine manages no Claude account (#736): the page only
+// shows status and names the commands a person runs on the machine.
 export const getClaudeAccount = () => api<ClaudeAccountData>('/api/claude-account');
 export const claudeAccountAction = (action: 'status') => api<{ ok: boolean }>('/api/machine/claude-account', { method: 'POST', body: JSON.stringify({ action }) });
 

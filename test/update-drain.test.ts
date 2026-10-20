@@ -11,6 +11,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fullRunLock, slotStatus, tryAgentSlot } from '../src/slots.js';
 import { testSlotsHeld, tryTestSlot } from '../src/testrun/slots.js';
+import { readSlotFile, slotFileExists, type SlotPathLike } from '../src/slot-file.js';
 import { runLimitMs } from '../src/testrun/run.js';
 import { SETUP_TIMEOUT_S } from '../src/testrun/timeout.js';
 import { drainRefusal, updateDrain, DRAIN_TTL_MAX_MS } from '../src/update-drain.js';
@@ -120,7 +121,7 @@ function machine(o: { cfg?: Record<string, unknown>; tip?: string; checks?: 'gre
 
 /** One instance running test runs back to back through the real test-slot gate, each `runMin` long, recording its cap. */
 function instance(dir: string, runMin: number, capMin = runMin + 5) {
-  let cur: { lock: { path: string; release(): void }; ends: number; rec: { started: number; ended: number | null } } | null = null;
+  let cur: { lock: { path: SlotPathLike; release(): void }; ends: number; rec: { started: number; ended: number | null } } | null = null;
   const runs: { started: number; ended: number | null }[] = [];
   let killed = 0;
   return {
@@ -129,7 +130,7 @@ function instance(dir: string, runMin: number, capMin = runMin + 5) {
     step() {
       const now = Date.now();
       // A run whose slot vanished before its end was stopped by someone else.
-      if (cur && !existsSync(cur.lock.path)) killed++;
+      if (cur && !slotFileExists(cur.lock.path)) killed++;
       if (cur && now >= cur.ends) {
         cur.lock.release();
         cur.rec.ended = now;
@@ -357,7 +358,7 @@ test('a test run records its cap in its slot: its setup steps\', its database\'s
   const dir = mkdtempSync(join(tmpdir(), 'drain-cap-'));
   try {
     const lock = tryTestSlot('t', dir, 1234)!;
-    assert.equal((JSON.parse(readFileSync(lock.path, 'utf8')) as { limit_ms: number }).limit_ms, 1234);
+    assert.equal((JSON.parse(readSlotFile(lock.path)) as { limit_ms: number }).limit_ms, 1234);
     lock.release();
     const tiers = [{ name: 'fast', timeout_s: 600, database: false }, { name: 'e2e', timeout_s: 1200, database: true }] as unknown as TestRunTier[];
     const config = { setup: ['a', 'b'], database: { ready_timeout_s: 60 } } as unknown as TestRunConfig;

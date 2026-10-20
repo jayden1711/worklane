@@ -7,7 +7,7 @@
 #   sudo bash scripts/setup/tailscale.sh install
 #   sudo bash scripts/setup/tailscale.sh up
 #   sudo bash scripts/setup/tailscale.sh serve
-#   sudo bash scripts/setup/tailscale.sh serve-siri
+#   sudo bash scripts/setup/tailscale.sh unserve-siri
 #   sudo bash scripts/setup/tailscale.sh serve-hooks
 #   sudo bash scripts/setup/tailscale.sh public-url
 #
@@ -30,31 +30,35 @@
 #             (MagicDNS and HTTPS certificates, in Tailscale's admin console), when 443 already forwards somewhere
 #             else, when anything forwards to the break-glass port 4398, and when Tailscale Funnel is on.
 #             Never Funnel: this script has no funnel command and no flag that turns it on; serve is tailnet-only.
-# serve-siri  `tailscale serve --bg --https=8443 http://127.0.0.1:4397`: https 8443 on this machine's tailnet name to the
-#             hub's Siri gateway (dashboards.sh --siri; docs/siri.md), and to nothing else. Its own port, so the tailnet
-#             policy can let only your phone reach it. Refused under the same conditions as serve, and when 8443
-#             already forwards somewhere else. Never Funnel.
+# unserve-siri  Siri was removed (#743): `tailscale serve --https=8443 off` takes away the forward an older serve-siri
+#             added (https 8443 on this machine's tailnet name to the old gateway's 127.0.0.1:4397). Only that forward:
+#             8443 going anywhere else is left as it is, and 443 and 8444 are untouched. A removal, so it runs whatever
+#             else is wrong (Funnel on, the break-glass forwarded). Done already when there is nothing to remove.
+#             serve-siri is refused: there is no gateway to serve.
 # serve-hooks `tailscale serve --bg --https=8444 http://127.0.0.1:4396`: https 8444 on this machine's tailnet name to the
 #             hub's hooks gateway for webhook automations (dashboards.sh --hooks; docs/automations.md), and to nothing
 #             else. Its own port, so the tailnet policy can let only the callers reach it. Refused under the same
-#             conditions as serve-siri (and when 8444 already goes elsewhere). Never Funnel.
+#             conditions as serve, and when 8444 already goes elsewhere. Never Funnel.
 # public-url  the hub's URL becomes https://<this machine's tailnet name>, through dashboards.sh with the hub's other
-#             settings as its unit has them (the sign-in App's client id, the instances, the owner terminal). Only once
+#             settings as its unit has them (the sign-in App's client id, the instances, the machine devices). Only once
 #             serve forwards to the hub, and never while Funnel is on. The name is read here, from tailscale status,
 #             and must be a *.ts.net name: no caller gives it, and no other host can be set. It writes the hub's and
 #             the instance dashboards' units and restarts them; the hub still listens on 127.0.0.1 only, so this makes
-#             nothing reachable that tailscale serve didn't already forward. The same as running, yourself:
-#               sudo bash scripts/setup/dashboards.sh --client-id <id> --public-url https://<name> <instance>...
+#             nothing reachable that tailscale serve didn't already forward. The same as running, yourself, with each
+#             <...> and [...] filled in from the hub unit's ExecStart (leaving out --siri or --hooks turns that gateway
+#             off; src/console/owner-terminal-removed.ts TAILSCALE_PUBLIC_URL_RERUN holds this line, a test checks it):
+#               sudo bash /opt/worklane/current/scripts/setup/dashboards.sh [--machine-devices <the hub unit's --console-devices or --machine-devices, if it has one>] --client-id <its --client-id> --public-url https://<name> [--siri if it has --siri-port] [--hooks if it has --hooks-port] <each instance name in its --hub>...
 #             Then set the sign-in App's callback URL to exactly https://<name>/auth/callback.
 #
 # Each root step writes its progress to $TAILSCALE_DIR/steps.jsonl (root's, 0644: one JSON line per change, for the
 # dashboard) and to its output. One step at a time on a machine. Exit 0 when the step is done or was already.
 source "$(dirname "$0")/lib.sh"
-usage="usage: tailscale.sh status [--json] | install | up [--for <instance>] | serve | serve-siri | serve-hooks | public-url"
+usage="usage: tailscale.sh status [--json] | install | up [--for <instance>] | serve | unserve-siri | serve-hooks | public-url"
 cmd="${1:-}"
 case "$cmd" in
   status) ;;
-  install | up | serve | serve-siri | serve-hooks | public-url) as_root "$@" ;;
+  serve-siri) echo "serve-siri: Siri was removed, so there is no gateway to serve. To take away the 8443 forward an older install added: sudo bash $0 unserve-siri" >&2; exit 2 ;;
+  install | up | serve | unserve-siri | serve-hooks | public-url) as_root "$@" ;;
   *) echo "$usage" >&2; exit 2 ;;
 esac
 shift
@@ -167,7 +171,7 @@ do_status() {
   else
     echo "tailscale: ${version:-installed}, ${state:-no state}${name:+, this machine is $name}"
     echo "https certificate for this name: $f_https; tailscale serve forwards 443 to the hub ($HUB_PORT): $f_serve"
-    echo "tailscale serve forwards $SIRI_TAILNET_PORT to the Siri gateway ($SIRI_GATEWAY_PORT): $f_siri"
+    [ "$f_siri" = no ] || echo "tailscale serve still forwards $SIRI_TAILNET_PORT to the removed Siri gateway ($SIRI_GATEWAY_PORT): take it away with sudo bash $here/tailscale.sh unserve-siri"
     echo "tailscale serve forwards $HOOKS_TAILNET_PORT to the hooks gateway ($HOOKS_GATEWAY_PORT): $f_hooks"
     [ "$f_break_glass" = no ] || echo "WARNING: tailscale serve forwards to the break-glass port $BREAK_GLASS_PORT, which must never be forwarded: tailscale serve reset"
     echo "Tailscale Funnel (the public internet): $([ "$f_funnel" = yes ] && echo "ON; nothing here changes it, and serve and public-url do nothing while it is on (tailscale funnel reset)" || echo off)"
@@ -297,32 +301,32 @@ do_serve() {
   emit done "https 443 on $f_name forwards to the hub's sign-in port ($HUB_PORT), and to nothing else"
 }
 
-# --- serve-siri: https 8443 to the hub's Siri gateway, nothing else; tailnet only, never Funnel
+# --- unserve-siri: the removed Siri gateway's 8443 forward taken away, and nothing else
 
-do_serve_siri() {
+do_unserve_siri() {
   local out rc
-  need_installed
-  read_facts
-  [ "$f_state" = Running ] || fail "this machine isn't on a tailnet yet: run the up step first"
-  [ "$f_break_glass" = no ] || fail "tailscale serve forwards to the break-glass port $BREAK_GLASS_PORT, which must never be forwarded: remove it (tailscale serve reset), then run this again"
-  [ "$f_funnel" = no ] || fail "$FUNNEL_ON"
-  if [ "$f_siri" = yes ]; then
-    emit done "https $SIRI_TAILNET_PORT on $f_name already forwards to the Siri gateway ($SIRI_GATEWAY_PORT)"
+  if ! installed; then
+    emit done "tailscale isn't installed: there is no $SIRI_TAILNET_PORT forward to take away"
     return 0
   fi
-  [ "$f_other_siri" = no ] || fail "tailscale serve already forwards https $SIRI_TAILNET_PORT somewhere else; left as it is (see: tailscale serve status)"
-  [ "$f_https" = yes ] || fail "the tailnet doesn't issue an HTTPS certificate for ${f_name#-} yet: turn on MagicDNS and HTTPS certificates in Tailscale's admin console (DNS), then run this again"
-  emit running "tailscale serve --bg --https=$SIRI_TAILNET_PORT to 127.0.0.1:$SIRI_GATEWAY_PORT"
+  read_facts
+  if [ "$f_siri" = no ]; then
+    if [ "$f_other_siri" = yes ]; then
+      emit done "https $SIRI_TAILNET_PORT forwards somewhere other than the removed Siri gateway; left as it is (see: tailscale serve status)"
+    else
+      emit done "nothing forwards https $SIRI_TAILNET_PORT to the removed Siri gateway"
+    fi
+    return 0
+  fi
+  emit running "tailscale serve --https=$SIRI_TAILNET_PORT off"
   set +e
-  out="$(timeout "$TAILSCALE_SERVE_SECONDS" env -u TS_AUTHKEY -u TS_AUTH_KEY "$TAILSCALE_BIN" serve --bg "--https=$SIRI_TAILNET_PORT" "http://127.0.0.1:$SIRI_GATEWAY_PORT" 2>&1)"
+  out="$(timeout "$TAILSCALE_SERVE_SECONDS" env -u TS_AUTHKEY -u TS_AUTH_KEY "$TAILSCALE_BIN" serve "--https=$SIRI_TAILNET_PORT" off 2>&1)"
   rc=$?
   set -e
   [ -z "$out" ] || printf '%s\n' "$out" | tailscale_redact | sed 's/^/tailscale: /'
   read_facts
-  [ "$rc" = 0 ] && [ "$f_siri" = yes ] || fail "tailscale serve didn't start forwarding $SIRI_TAILNET_PORT within $TAILSCALE_SERVE_SECONDS s (see: tailscale serve status)"
-  [ "$f_break_glass" = no ] || fail "tailscale serve forwards to the break-glass port $BREAK_GLASS_PORT: tailscale serve reset"
-  [ "$f_funnel" = no ] || fail "$FUNNEL_ON"
-  emit done "https $SIRI_TAILNET_PORT on $f_name forwards to the Siri gateway ($SIRI_GATEWAY_PORT), and to nothing else. In the tailnet policy, let only your phone reach $f_name:$SIRI_TAILNET_PORT (docs/siri.md)"
+  [ "$rc" = 0 ] && [ "$f_siri" = no ] || fail "tailscale serve still forwards https $SIRI_TAILNET_PORT to the removed Siri gateway ($SIRI_GATEWAY_PORT); take it away by hand: tailscale serve --https=$SIRI_TAILNET_PORT off"
+  emit done "https $SIRI_TAILNET_PORT on $f_name no longer forwards to the removed Siri gateway; nothing else was changed"
 }
 
 # --- serve-hooks: https 8444 to the hub's hooks gateway, nothing else; tailnet only, never Funnel
@@ -356,7 +360,7 @@ do_serve_hooks() {
 # --- public-url: the hub's URL, through dashboards.sh
 
 do_public_url() {
-  local id old user devices siri_port hooks_port names new args
+  local id old devices siri_port hooks_port names new args
   need_installed
   read_facts
   [ "$f_state" = Running ] && [ "$f_name" != - ] || fail "this machine isn't on a tailnet yet: run the up step first; the hub keeps its URL"
@@ -364,7 +368,8 @@ do_public_url() {
   [ "$f_serve" = yes ] || fail "tailscale serve doesn't forward to the hub yet, so the new URL would reach nothing: run the serve step first; the hub keeps its URL"
   new="https://$f_name"
   [ -f "$HUB_UNIT" ] || fail "no dashboard hub on this machine yet: set it up first (credentials.sh dashboard-signin, then dashboards.sh --client-id <id> --public-url $new <instance>...)"
-  id="$(hub_option --client-id)"; old="$(hub_option --public-url)"; user="$(hub_option --console-user)"; devices="$(hub_option --console-devices)"; siri_port="$(hub_option --siri-port)"; hooks_port="$(hub_option --hooks-port)"
+  # The machine devices: an older unit's --console-devices is the same list (#742); its --console-user is dropped.
+  id="$(hub_option --client-id)"; old="$(hub_option --public-url)"; devices="$(hub_machine_devices)"; siri_port="$(hub_option --siri-port)"; hooks_port="$(hub_option --hooks-port)"
   names="$(hub_instances | tr '\n' ' ' | sed 's/ $//')"
   [ -n "$id" ] && [ -n "$names" ] || fail "the hub's unit ($HUB_UNIT) doesn't name its sign-in App or its instances: run dashboards.sh yourself with --public-url $new"
   if [ "$old" = "$new" ]; then
@@ -372,8 +377,7 @@ do_public_url() {
     return 0
   fi
   args=(--client-id "$id" --public-url "$new")
-  [ -z "$user" ] || args+=(--console-user "$user")
-  [ -z "$devices" ] || args+=(--console-devices "$devices")
+  [ -z "$devices" ] || args+=(--machine-devices "$devices")
   [ -z "$siri_port" ] || args+=(--siri)
   [ -z "$hooks_port" ] || args+=(--hooks)
   emit running "dashboards.sh ${args[*]} $names"
@@ -400,7 +404,7 @@ case "$cmd" in
   install) do_install ;;
   up) do_up ;;
   serve) do_serve ;;
-  serve-siri) do_serve_siri ;;
+  unserve-siri) do_unserve_siri ;;
   serve-hooks) do_serve_hooks ;;
   public-url) do_public_url ;;
 esac

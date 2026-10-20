@@ -8,6 +8,8 @@ import { agentSettingsPath, guardrailSettings, HOOK_MARKER, NO_ATTRIBUTION, proj
 import { BRAND } from '../src/brand.js';
 import { doctor } from '../src/doctor.js';
 import { hookEntry, install, invokedEngine } from '../src/install.js';
+// #747's functions through the namespace: on an engine without them, only the test that uses them fails.
+import * as installer from '../src/install.js';
 import { childEnv } from '../src/os/index.js';
 import { CliRunner } from '../src/runner.js';
 import { engineCli, exampleProject, STDIN_LINE } from './helpers.js';
@@ -236,6 +238,80 @@ test("doctor checks an instance's agent hooks where they now live, and fails an 
   mkdirSync(join(fresh, '.claude'));
   writeFileSync(join(fresh, '.claude', 'settings.json'), JSON.stringify({ disableAllHooks: true }));
   assert.equal(doctor(fresh).find((c) => c.name === 'project settings')?.level, 'fail');
+});
+
+// WHY (#747): installs before #665 wrote hooks that run the guard through the whole CLI (`cli.js hook <event>`), and
+// they kept doing so until root re-ran setup: nothing found or moved them. Doctor now says so, and `migrate
+// --instance` (which the engine updater runs at every install) moves exactly that form, with a backup beside it that
+// the updater's rollback puts back like any other migration's.
+test("an instance's agent hooks from before the guard's own entry: doctor flags them, and migrate --instance moves exactly them", { skip: isWindows && 'POSIX modes' }, (t) => {
+  const { dir, home, instances } = setup(t);
+  writeFileSync(join(home, 'policy.yaml'), 'version: 1\nbudget: { daily_usd: 40 }\nagents: { max_workers: 4 }\n');
+  install({ root: dir, engineCli, instance: 'shop' });
+  const file = agentSettingsPath(home);
+  const now = readFileSync(file, 'utf8');
+  // The settings as install wrote them before #665: the same commands, on the CLI's `hook <event>`.
+  const events = ['pre-tool-use', 'session-start', 'session-end', 'post-tool-use'];
+  const toOld = (text: string) => events.reduce((s, ev) => s.replaceAll(`node \\"$E\\" ${ev} ||`, `node \\"$E\\" hook ${ev} ||`), text.replaceAll(JSON.stringify(hookEntry(engineCli)).slice(1, -1), JSON.stringify(engineCli).slice(1, -1)));
+  const old = toOld(now);
+  assert.notEqual(old, now);
+  assert.equal((old.match(/E=\\"[^"\\]*cli\.js\\"/g) ?? []).length, 4, 'every event on the CLI');
+  writeFileSync(file, old, { mode: 0o600 });
+  // It still passes the hook checks (it fails closed), so the runner and coordinator still start on it...
+  assert.deepEqual(readAgentSettings(home).hooks?.PreToolUse?.length, 1);
+  // ...but doctor says the guard runs through the CLI, and how to move it.
+  const flagged = doctor(dir).filter((c) => c.name === 'agent hooks shop');
+  assert.equal(flagged.length, 1, JSON.stringify(flagged));
+  assert.equal(flagged[0]!.level, 'warn');
+  assert.match(flagged[0]!.detail, /pre-tool-use, session-start, session-end, post-tool-use: the guard runs through the CLI \(`cli\.js hook`[\s\S]*migrate --instance shop/);
+  // migrate --instance moves them to exactly what install writes now, with a backup the updater can put back.
+  const env = { ...childEnv(), [INSTANCES]: instances };
+  const m = spawnSync(process.execPath, [engineCli, 'migrate', '--instance', 'shop', '--json'], { encoding: 'utf8', env });
+  assert.equal(m.status, 0, m.stderr);
+  const out = JSON.parse(m.stdout.trim().split('\n').at(-1)!) as { ok: boolean; made: { kind: string; path: string; backup: string }[]; applied: { kind: string; events?: string[] }[] };
+  assert.equal(out.ok, true);
+  const made = out.made.filter((b) => b.kind === 'hooks');
+  assert.equal(made.length, 1, m.stdout);
+  assert.equal(made[0]!.path, file);
+  assert.equal(readFileSync(made[0]!.backup, 'utf8'), old, 'the backup is the file as it was');
+  assert.equal(statSync(made[0]!.backup).mode & 0o777, 0o600);
+  assert.deepEqual(out.applied.find((a) => a.kind === 'hooks')?.events, events);
+  assert.equal(readFileSync(file, 'utf8'), now, "exactly what install writes now, and nothing else changed");
+  assert.equal(statSync(file).mode & 0o777, 0o600);
+  assert.equal(doctor(dir).filter((c) => c.name === 'agent hooks shop').length, 0, 'nothing left to flag');
+  // Again: nothing to move, no backup.
+  const again = JSON.parse(spawnSync(process.execPath, [engineCli, 'migrate', '--instance', 'shop', '--json'], { encoding: 'utf8', env }).stdout.trim()) as { made: unknown[] };
+  assert.deepEqual(again.made, []);
+  // What it moved is the form install wrote from #109 to #665, as it was then (src/install.ts at #665's parent).
+  const wrote = [
+    `E="${engineCli}"; if [ -f "$E" ]; then ${HOOK_MARKER} node "$E" hook pre-tool-use || exit 2; elif [ "$${BRAND.envPrefix}_AGENT" = 1 ]; then echo "${BRAND.cli}: engine missing at $E, agent sessions are blocked" >&2; exit 2; else :; fi`,
+    `E="${engineCli}"; if [ -f "$E" ]; then ${HOOK_MARKER} node "$E" hook post-tool-use || true; else :; fi`,
+  ];
+  for (const c of wrote) assert.ok(old.includes(JSON.stringify(c).slice(1, -1)), c);
+
+  // Only the exact old form moves: a CLI hook changed by hand (here, one that no longer blocks) stays as it is, flagged.
+  const changed = old.replace('hook pre-tool-use || exit 2', 'hook pre-tool-use || true');
+  writeFileSync(file, changed, { mode: 0o600 });
+  let r = installer.migrateLegacyHooks(file);
+  assert.deepEqual(r.events, ['session-start', 'session-end', 'post-tool-use']);
+  assert.match(r.left.join('\n'), /isn't one install wrote; re-run install/);
+  assert.match(readFileSync(file, 'utf8'), /hook pre-tool-use \|\| true/, 'left exactly as it was');
+  assert.deepEqual(installer.legacyHookEvents(JSON.parse(readFileSync(file, 'utf8')) as Settings), ['pre-tool-use']);
+  // An engine with no guard entry beside its cli.js (an engine from before #665): nothing moves, so no hook names a
+  // file that isn't there.
+  const bare = mkdtempSync(join(tmpdir(), 'engine-without-entry-'));
+  writeFileSync(join(bare, 'cli.js'), '');
+  const oldEngine = old.replaceAll(JSON.stringify(engineCli).slice(1, -1), JSON.stringify(join(bare, 'cli.js')).slice(1, -1));
+  writeFileSync(file, oldEngine, { mode: 0o600 });
+  r = installer.migrateLegacyHooks(file);
+  assert.deepEqual(r.events, []);
+  assert.equal(r.backup, null);
+  assert.match(r.left[0]!, /no hook-main\.js beside/);
+  assert.equal(readFileSync(file, 'utf8'), oldEngine);
+  // A file it can't read is left alone and never throws: an engine update isn't held for it.
+  writeFileSync(file, '{', { mode: 0o600 });
+  assert.match(installer.migrateLegacyHooks(file).left[0]!, /agent-settings\.json: /);
+  assert.deepEqual(installer.migrateLegacyHooks(join(home, 'none.json')), { events: [], backup: null, left: [] });
 });
 
 test('the CLI: install --instance and doctor --instance', { skip: isWindows && 'POSIX modes' }, (t) => {

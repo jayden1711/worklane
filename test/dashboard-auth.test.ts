@@ -22,40 +22,13 @@ import {
   DEVICE_VIEWS,
   ROLE_CACHE_MS,
   SESSION_COOKIE,
-  TERMINAL_PROTOCOL,
   SESSION_IDLE_MS,
   SESSION_MAX_MS,
   Sessions,
   STATE_COOKIE,
 } from '../src/dashboard-auth.js';
-import { WebSocket } from 'ws';
 import { EventLog } from '../src/events/log.js';
 import { asks } from '../src/console/asks.js';
-import { CONSOLE_SHELL, type AuditEntry, type SpawnPty } from '../src/console/terminal.js';
-
-/**
- * Open the owner terminal through the hub as a browser does: a real WebSocket upgrade from the hub's public origin
- * (the Host is the public one, as Tailscale serve forwards it), offering `protocols`. What came back: refused and
- * why, the HTTP status of a refused upgrade, or the subprotocol the hub answered with.
- */
-function openTerminalWs(base: string, protocols: string[], headers: Record<string, string>, origin = PUBLIC) {
-  return new Promise<{ refused?: string; error?: string; protocol?: string }>((done) => {
-    const ws = new WebSocket(`${base.replace('http', 'ws')}/api/terminal?instance=a`, protocols, { origin, headers: { host: new URL(PUBLIC).host, ...headers } });
-    ws.on('message', (m) => {
-      const msg = JSON.parse(String(m)) as { type: string; why?: string };
-      if (msg.type === 'refused') done({ refused: msg.why! });
-    });
-    ws.on('unexpected-response', (_req, res) => done({ error: String(res.statusCode) }));
-    ws.on('error', (e) => done({ error: e.message }));
-    ws.on('open', () =>
-      setTimeout(() => {
-        const protocol = ws.protocol;
-        ws.close();
-        done({ protocol });
-      }, 150),
-    );
-  });
-}
 import { MACHINE_EVENTS, machineRequests } from '../src/machine-requests.js';
 import { BRAND } from '../src/brand.js';
 import { fullRunLock, tryAgentSlot } from '../src/slots.js';
@@ -128,7 +101,7 @@ const ask = (id: string, kind: 'question' | 'plan' | 'land') => ({ id, kind, iss
  * `machine`: as on a real machine, both instances share one slots dir, and each is seeded with items on every page
  * (MARKS), its coordinator holding an agent slot and a test slot there (b also the full-run lock).
  */
-async function setup(o: { machine?: boolean; machineOwners?: string[]; devices?: { allow: string[]; whois: (ip: string) => string }; terminal?: { consoleUser: string; hubUser: string; spawnPty: SpawnPty; exec: () => string; audit: { record: (e: AuditEntry) => void } }; claudeAccountDir?: string; secretsHome?: string; hubDefaultClocks?: boolean } = {}) {
+async function setup(o: { machine?: boolean; machineOwners?: string[]; devices?: { allow: string[]; whois: (ip: string) => string }; claudeAccountDir?: string; secretsHome?: string; hubDefaultClocks?: boolean } = {}) {
   const gh = await fakeGitHub();
   const ownersFile = o.machineOwners ? machineOwnersFile(...o.machineOwners) : undefined;
   const clock = { t: Date.parse('2026-10-12T12:00:00Z') };
@@ -167,7 +140,7 @@ async function setup(o: { machine?: boolean; machineOwners?: string[]; devices?:
   const hubState = mkdtempSync(join(tmpdir(), 'auth-hub-'));
   // The hub's wall clock (sessions) and the clock its role copies age by: both the mocked one, unless the test wants
   // the hub's own defaults (Date.now and performance.now, which it then stubs).
-  const h = await startHub({ instances, stateDir: hubState, webDir: web, ...(o.hubDefaultClocks ? {} : { now, clock: now }), signIn: { clientId: CLIENT_ID, clientSecret: CLIENT_SECRET, sessionSecret: 's'.repeat(48), publicUrl: PUBLIC, web: gh.url, api: gh.url }, ...(o.devices ? { terminal: { devices: o.devices.allow, whois: o.devices.whois, peerUid: () => 0, ...(o.terminal ?? {}) } } : {}) });
+  const h = await startHub({ instances, stateDir: hubState, webDir: web, ...(o.hubDefaultClocks ? {} : { now, clock: now }), signIn: { clientId: CLIENT_ID, clientSecret: CLIENT_SECRET, sessionSecret: 's'.repeat(48), publicUrl: PUBLIC, web: gh.url, api: gh.url }, ...(o.devices ? { devices: { allow: o.devices.allow, whois: o.devices.whois, peerUid: () => 0 } } : {}) });
   const base = h.url.replace(/\/$/, '');
   const glass = h.breakGlassUrl.split('/?')[0]!;
 
@@ -362,8 +335,8 @@ test('#622: a wall-clock step forward ends no cached role early (the cache still
 });
 
 /**
- * The hub's own copy of a person's role, as production starts the hub (src/cli.ts: no clocks given): the owner
- * terminal checks only this copy. Ada, an owner on a, signs in and the hub learns her role; then she is removed from
+ * The hub's own copy of a person's role, as production starts the hub (src/cli.ts: no clocks given): the session the
+ * hub reads (SessionOf) checks only this copy. Ada, an owner on a, signs in and the hub learns her role; then she is removed from
  * the repo, and the wall clock steps by `wallStep` while 4:59 and then 5:01 really pass. The hub's session role at each.
  */
 async function hubRoleAcrossStep(t: TestContext, wallStep: number) {
@@ -395,7 +368,7 @@ async function hubRoleAcrossStep(t: TestContext, wallStep: number) {
   }
 }
 
-test("#622: on the hub, a wall-clock step back keeps no revoked owner past 5 minutes (the owner terminal's role ages by the monotonic clock)", async (t) => {
+test("#622: on the hub, a wall-clock step back keeps no revoked owner past 5 minutes (the hub's copy of the role ages by the monotonic clock)", async (t) => {
   assert.deepEqual(await hubRoleAcrossStep(t, -10 * 60_000), { before: 'owner', at459: 'owner', at501: null });
 });
 
@@ -850,16 +823,9 @@ test('no fresh sign-in: a session signed in days ago (still within 12 h idle / 7
   const accountDir = mkdtempSync(join(tmpdir(), 'auth-account-'));
   const at = new Date().toISOString();
   writeFileSync(join(accountDir, 'switch.jsonl'), [{ step: 'switch', state: 'started', detail: '1 instance(s): a; the token from the dashboard of a' }, { step: 'pause', state: 'done', instance: 'a', detail: 'starts no more runs' }, { step: 'token', state: 'ask', detail: "paste the token in a's dashboard" }].map((l) => JSON.stringify({ at, ...l })).join('\n') + '\n');
-  const termAudit: AuditEntry[] = [];
-  const spawned: string[][] = [];
-  const spawnPty: SpawnPty = (o) => {
-    spawned.push(o.argv);
-    return { write: () => {}, onData: () => {}, onExit: () => {}, kill: () => {} };
-  };
   const s = await setup({
     machineOwners: ['ada'],
     devices: { allow: ['laptop'], whois },
-    terminal: { consoleUser: 'adminx', hubUser: 'wl-dash', spawnPty, exec: () => 'password-required\n', audit: { record: (e) => void termAudit.push(e) } },
     claudeAccountDir: accountDir,
     secretsHome: mkdtempSync(join(tmpdir(), 'auth-secrets-')),
   });
@@ -916,25 +882,11 @@ test('no fresh sign-in: a session signed in days ago (still within 12 h idle / 7
     const requests = machineRequests(s.a.log.read(0, [...MACHINE_EVENTS]));
     assert.deepEqual(requests.map((r) => [r.by, r.args.join(' '), r.via]), [['ada', 'set-slots 4', 'settings'], ['ada', 'add-project gamma example/gamma', 'add-project'], ['ada', 'claude-account status', 'claude-account'], ['ada', 'set-slots 4', 'ask']]);
 
-    // The owner terminal: the same session opens it from the laptop, and nothing else does.
-    const term = (p: typeof ada | null, o: { headers?: Record<string, string>; csrf?: boolean } = {}) => openTerminalWs(s.base, p && o.csrf !== false ? [TERMINAL_PROTOCOL, `csrf.${p.csrf}`] : [TERMINAL_PROTOCOL], { ...laptop, ...(o.headers ?? {}), ...(p ? { cookie: p.cookie } : {}) });
-    // The hub's copy of each role is fresh (/api/hub, within the 5-minute role cache).
-    for (const p of [ada, ivy, wes]) await p.get('/api/hub');
-    assert.deepEqual(await term(ada), { protocol: TERMINAL_PROTOCOL }, 'a stale but valid session: the terminal opens');
-    assert.deepEqual(spawned, [['sudo', '-n', '-u', 'adminx', CONSOLE_SHELL, 'shell']]);
-    assert.match((await term(wes)).refused ?? '', /owner's alone/, 'a writer');
-    assert.match((await term(ada, { headers: stranger })).refused ?? '', /device|tailnet|allowed|console_devices/i, 'a device off the list');
-    assert.match((await term(ada, { csrf: false })).refused ?? '', /CSRF/, 'no CSRF token');
-    assert.equal(spawned.length, 1, 'only the one terminal started');
-    assert.ok(termAudit.some((e) => e.kind === 'opened' && e.login === 'ada'), 'the terminal is audited');
-    assert.ok(termAudit.filter((e) => e.kind === 'refused').length >= 3, 'its refusals too');
-
     // Seven days after the sign-in the session ends, however active: everything is refused.
     s.clock.t = signedIn + SESSION_MAX_MS;
     assert.equal(await status(ada.get('/api/hub')), 401, 'past 7 days: expired');
     const expired = await ada.post('/api/i/a/machine', { what: 'slots', value: 5 }, { headers: laptop });
     assert.equal(expired.status, 401, 'an expired session changes nothing');
-    assert.match((await term(ada)).refused ?? '', /not signed in/, 'nor opens the terminal');
     assert.equal(machineRequests(s.a.log.read(0, [...MACHINE_EVENTS])).length, 4, 'nothing more recorded');
   } finally {
     await s.close();
@@ -953,59 +905,7 @@ function tailnet() {
   return { whois, laptop: { 'x-forwarded-for': ip(3) }, stranger: { 'x-forwarded-for': ip(5) } };
 }
 
-test("the terminal's upgrade through the hub takes the session's CSRF token as a subprotocol (a browser can't set the header), answers with the terminal's protocol alone, and refuses and audits anything else", { skip: process.platform === 'win32' }, async () => {
-  const { whois, laptop } = tailnet();
-  const termAudit: AuditEntry[] = [];
-  const spawned: string[][] = [];
-  const spawnPty: SpawnPty = (o) => {
-    spawned.push(o.argv);
-    return { write: () => {}, onData: () => {}, onExit: () => {}, kill: () => {} };
-  };
-  const s = await setup({ machineOwners: ['ada'], devices: { allow: ['laptop'], whois }, terminal: { consoleUser: 'adminx', hubUser: 'wl-dash', spawnPty, exec: () => 'password-required\n', audit: { record: (e) => void termAudit.push(e) } } });
-  try {
-    s.gh.perms.set('example/a:ada', 'admin');
-    s.gh.perms.set('example/a:olu', 'admin');
-    const ada = await s.signIn('ada');
-    const olu = await s.signIn('olu');
-    for (const p of [ada, olu]) await p.get('/api/hub');
-    const open = (protocols: string[], o: { origin?: string; cookie?: string } = {}) => openTerminalWs(s.base, protocols, { ...laptop, cookie: o.cookie ?? ada.cookie }, o.origin);
-    const refusals = () => termAudit.filter((e) => e.kind === 'refused').length;
-
-    // One at a time: each refusal is counted against the audit as it was just before that one (opened together, a
-    // later one's audit line could land before an earlier one was counted).
-    const cases: [string, () => Promise<{ refused?: string; error?: string; protocol?: string }>, RegExp][] = [
-      ['no token', () => open([TERMINAL_PROTOCOL]), /CSRF/],
-      ['a wrong token', () => open([TERMINAL_PROTOCOL, `csrf.${'x'.repeat(ada.csrf.length)}`]), /CSRF/],
-      ["another session's token", () => open([TERMINAL_PROTOCOL, `csrf.${olu.csrf}`]), /CSRF/],
-      ['the token in the header only (what a browser cannot send)', () => openTerminalWs(s.base, [TERMINAL_PROTOCOL], { ...laptop, cookie: ada.cookie, 'x-csrf-token': ada.csrf }), /CSRF/],
-    ];
-    for (const [what, r, re] of cases) {
-      const before = refusals();
-      const got = await r();
-      assert.match(got.refused ?? '', re, `${what}: ${JSON.stringify(got)}`);
-      assert.equal(refusals(), before + 1, `${what}: audited`);
-    }
-    const before = refusals();
-    const cross = await open([TERMINAL_PROTOCOL, `csrf.${ada.csrf}`], { origin: 'https://evil.example' });
-    assert.equal(cross.error, '403', 'another Origin: the upgrade itself is refused');
-    assert.equal(refusals(), before + 1, 'another Origin: audited');
-    assert.equal(spawned.length, 0, 'none of them started anything');
-
-    // A valid session with its own token opens it, and the answer names the terminal's protocol, never the token.
-    const ok = await open([TERMINAL_PROTOCOL, `csrf.${ada.csrf}`]);
-    assert.deepEqual(ok, { protocol: TERMINAL_PROTOCOL });
-    assert.equal(spawned.length, 1);
-    assert.ok(termAudit.some((e) => e.kind === 'opened' && e.login === 'ada'));
-    assert.ok(!JSON.stringify(termAudit).includes(ada.csrf), 'the token is in no audit entry');
-    // The page offers exactly these subprotocols (web/src/api.ts terminalProtocols).
-    const web = readFileSync(join(repoRoot, 'web', 'src', 'api.ts'), 'utf8');
-    assert.ok(web.includes(`'${TERMINAL_PROTOCOL}'`) && web.includes('`csrf.${csrf}`'), 'the page sends the protocol and the token the hub reads');
-  } finally {
-    await s.close();
-  }
-});
-
-test('the views that say whether a machine change would pass get the device from the hub on a read too: the Machine page, Add project, the Claude account, Tailscale setup and Siri devices', async () => {
+test('the views that say whether a machine change would pass get the device from the hub on a read too: the Machine page, Add project, the Claude account and Tailscale setup', async () => {
   const { whois, laptop, stranger } = tailnet();
   const accountDir = mkdtempSync(join(tmpdir(), 'auth-account-'));
   const s = await setup({ machineOwners: ['ada'], devices: { allow: ['laptop'], whois }, claudeAccountDir: accountDir });
@@ -1014,10 +914,7 @@ test('the views that say whether a machine change would pass get the device from
     const ada = await s.signIn('ada');
     const view = async (path: string, headers: Record<string, string>) => (await (await ada.get(`/api/i/a/${path}`, headers)).json()) as Record<string, unknown>;
     // Every path in the shared list is one the instance serves, and each says the device when the hub does.
-    assert.deepEqual(Object.values(DEVICE_VIEWS).sort(), ['add-project', 'claude-account', 'machine', 'siri-devices', 'tailscale']);
-    // Settings, Siri devices: New token is offered from an allowed device only.
-    assert.equal((await view(DEVICE_VIEWS.siriDevices, laptop)).createRefused, null);
-    assert.match(String((await view(DEVICE_VIEWS.siriDevices, stranger)).createRefused), /allowed Tailscale devices/);
+    assert.deepEqual(Object.values(DEVICE_VIEWS).sort(), ['add-project', 'claude-account', 'machine', 'tailscale']);
     assert.deepEqual([(await view(DEVICE_VIEWS.tailscale, laptop)).allowed, (await view(DEVICE_VIEWS.tailscale, laptop)).why], [true, null], 'Tailscale setup from an allowed device: a step may be asked for');
     assert.match(String((await view(DEVICE_VIEWS.tailscale, stranger)).why), /allowed devices/);
     const fromLaptop = { machine: await view(DEVICE_VIEWS.machine, laptop), add: await view(DEVICE_VIEWS.addProject, laptop), account: await view(DEVICE_VIEWS.claudeAccount, laptop) };

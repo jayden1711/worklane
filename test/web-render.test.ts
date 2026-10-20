@@ -22,12 +22,13 @@ import { addProjectNameOk, addProjectRepoOk } from '../src/machine.js';
 import { asks } from '../src/console/asks.js';
 import { claudeAccountView } from '../src/claude-account.js';
 import { CLAUDE_CREDENTIAL_NAMES, REMOVED_CREDENTIAL_PATHS } from '../src/claude-credential-guard.js';
-import { profilesView } from '../src/claude-profiles.js';
 import { resetWords } from '../src/usage-limit.js';
 import { tailscaleView, type TailscaleStatus } from '../src/tailscale-setup.js';
 import { raiseIncident, resolveIncident } from '../src/watchdog/incidents.js';
 import { METRICS_DEFINITIONS, trustForViewer, trustView } from '../src/trust.js';
 import { deliveryMetrics } from '../src/merge-metrics.js';
+import { FIRST_TASK_FILED, firstTaskProgress } from '../src/first-task-progress.js';
+import type { StoredEvent } from '../src/events/types.js';
 import { VIEWER_EVENTS } from '../src/viewer-events.js';
 import { firstRunView } from '../src/init.js';
 import { checkSetup } from '../src/setup-steps.js';
@@ -85,7 +86,6 @@ interface Render {
   tailscaleStepEnded(prev: unknown, next: unknown): boolean;
   accountBusy(d: unknown, now?: number): boolean;
   addProjectInvalid(name: string, repo: string): string | null;
-  keyData(e: { key: string; ctrlKey: boolean; metaKey: boolean; altKey: boolean }): string | null;
   renderRunsRefused(message: string): string;
   runsRefused(message: string): string | null;
   runsRefusal(state: unknown): string | null;
@@ -152,52 +152,10 @@ interface Render {
   EXTEND_TABS: readonly { id: string; to: string }[];
   renderAudit(entries: unknown[]): string;
   renderChatAnswer(f: unknown, cli: string): string;
-  renderComposerMic(role: string | undefined, prefs: VoicePrefs, support: unknown, listening?: boolean): string;
-  renderMicInterim(listening: boolean, interim: string, error?: string | null): string;
-  renderVoiceSettings(owner: boolean, brand?: string): string;
-  renderVoiceSettingsView(prefs: VoicePrefs, status: unknown, brand?: string, wakeModel?: string | null): string;
-  renderWakeIndicator(micOpen: boolean, phrase: string): string;
-  WakeListener: new (engine: unknown, env: unknown, phrase: string, hooks: { onWake: () => void; onChange: (s: { status: string; micOpen: boolean; why: string | null }) => void }) => { set(o: { enabled: boolean; held?: boolean }): void; dictating(on: boolean): void; dispose(): void; status: string; micOpen: boolean };
-  startOnWake(o: { support: unknown; listening: boolean; start: () => void }): string;
-  mayWake(role: string | undefined, prefs: VoicePrefs): boolean;
-  wakePhrase(brand: string): string;
-  registerWakeEngine(e: unknown): () => void;
-  wakeEngine(): unknown;
-  NO_WAKE_MODEL: string;
-  checkSupport(ctor: unknown, o: { lang: string; allowCloud: boolean }): Promise<{ kind: string; why?: string; local?: boolean }>;
-  Dictation: new (ctor: unknown, o: { lang: string; local: boolean }, hooks: { onFinal: (t: string) => void; onInterim: (t: string) => void; onListening: (l: boolean) => void; onError: (w: string) => void }) => { start(): void; stop(): void; abort(): void; listening: boolean };
-  insertAt(text: string, start: number, end: number, chunk: string): { text: string; caret: number };
-  intoBox(box: () => unknown, setText: (t: string) => void): (words: string) => void;
-  NO_ON_DEVICE: string;
-  speechCtor(w: unknown): unknown;
-  mayDictate(role: string | undefined, prefs: VoicePrefs): boolean;
-  readVoicePrefs(): VoicePrefs;
-  renderTalkStatus(role: string | undefined, prefs: VoicePrefs, speaking: boolean, note?: string | null): string;
-  renderVoiceSettingsVoices(prefs: VoicePrefs, voices: { local: number; network: number } | null): string;
-  mayTalk(role: string | undefined, prefs: VoicePrefs): boolean;
-  countVoices(voices: FakeVoice[], lang: string): { local: number; network: number };
-  pickVoice(voices: FakeVoice[], lang: string, allowNetwork: boolean): FakeVoice | null;
-  spokenText(answer: string): string;
-  stopSpeaking(): void;
-  TalkBack: new (o: { lang: string; allowNetwork: boolean; synth?: unknown; voicesWaitMs?: number }) => TalkBackLike;
-  CODE_OMITTED: string;
-  SECRET_OMITTED: string;
-  NO_LOCAL_VOICE: string;
   renderProposedSetting(data: unknown, proposed: { key: string; value: unknown }): string;
   actionHref(a: unknown): string | null;
   citationHref(c: unknown): string;
   proposedSetting(search: string): unknown;
-  renderVoiceBanner(view: unknown): string;
-  renderVoiceButton(show: boolean, support: unknown, listening?: boolean): string;
-  renderVoiceControl(state: unknown, prefs: VoicePrefs): string;
-  approvalFor(state: unknown, issue: number): { ok: boolean; why?: string; decision?: string; title?: string; effect?: string };
-  bannerText(p: unknown): string;
-  CONFIRM_WINDOW_MS: number;
-  mayUseVoice(role: string | undefined, prefs: VoicePrefs): boolean;
-  parseHeard(text: string): { kind: string; issue?: number; text?: string };
-  tabState(doc: unknown): { focused: boolean; visible: boolean };
-  voiceActive(role: string | undefined, prefs: VoicePrefs, tab: { focused: boolean; visible: boolean }): boolean;
-  VoiceCommands: new (o: { find: (issue: number) => unknown; now?: () => number }) => VoiceMachine;
   pages: Record<string, unknown>;
 }
 
@@ -206,10 +164,6 @@ const LONG_PROSE =
   'Release the stale claim in the first sweep instead of the second: the lock is only freed in reconcile.js:472 (pinned by the lease check) after a second sweep, so a coordinator that crashes between sweeps leaves the task claimed until its lease expires an hour later. ' +
   'Free it as soon as the lease holder is gone, keep the lease check for live holders, and add a test that stops the holder between two sweeps and expects the next sweep to free the task.';
 
-type VoicePrefs = { dictation: boolean; allowCloud: boolean; talkBack?: boolean; allowNetworkVoices?: boolean; wakeWord?: boolean; voiceCommands?: boolean };
-type VoiceMachine = { pending: unknown; hear(text: string, active: boolean): { do: string; [k: string]: unknown }; click(active: boolean): { do: string; [k: string]: unknown }; cancel(): { do: string } };
-type FakeVoice = { name: string; lang: string; localService: boolean; default?: boolean };
-type TalkBackLike = { speaking: boolean; setActive(a: boolean): void; escape(): boolean; stop(): void; dispose(): void; speak(t: string): Promise<{ spoken: boolean; why?: string | null }>; stopWhenHidden(doc: unknown): () => void };
 let r: Render;
 /** The render entry's bundle (file URL), for a test that loads it again as a browser would. */
 let bundle: string;
@@ -1508,6 +1462,7 @@ function firstRun(file: string, o: { root: string; repo: string; instance: strin
     serviceRunning: () => false,
     systemUnitActive: () => false,
     linger: () => null,
+    serviceManagerEnv: () => ({ env: {} }),
   };
   const setup = checkSetup({ mode: o.instance ? 'server' : 'local', root: o.root, repo: o.repo, instance: o.instance, stateDir: mkdtempSync(join(tmpdir(), 'web-render-fr-')), policyFile: null, openQuestions: 0, setupPr: null, instanceFacts: () => ({ error: 'no instance here' }) }, probe);
   const view = firstRunView(file, { root: o.root, repo: o.repo, instance: o.instance, has: () => false, setup });
@@ -1596,6 +1551,83 @@ test("the first-run page: every setup step checked live, grouped, done or not do
   // Anyone but the owner and the writers: told, not asked.
   assert.match(r.renderFirstRunPage(asOther), /data-testid="first-run-refused"[^>]*>The first-run checklist is for the instance(&#x27;|')s owners and writers/);
   assert.doesNotMatch(r.renderFirstRunPage(asOwner), /first-run-refused/);
+});
+
+/** A local first run with each step before Start set done (or not), Start itself and every step after it not done. */
+function beforeStart(done: (id: string) => boolean) {
+  const f = firstRun(join(tmpdir(), 'no-such-init.json'), { root: '/r', repo: 'example-org/example-shop', instance: null });
+  const ids = f.setup!.groups.flatMap((g) => g.steps.map((s) => s.id));
+  const at = ids.indexOf('service');
+  assert.ok(at > 0 && ids.indexOf('first-task') > at, 'Start comes before Your first task, in screen order');
+  const before = new Set(ids.slice(0, at));
+  return { ...f, setup: { ...f.setup!, groups: f.setup!.groups.map((g) => ({ ...g, steps: g.steps.map((s) => ({ ...s, done: before.has(s.id) ? done(s.id) : false })) })) } };
+}
+const START_WARNING = /required steps? (isn(&#x27;|')t|aren(&#x27;|')t) done yet: the coordinator may stop at/;
+
+test('#741 the Start card counts only the steps before Start: every one of them done and Your first task not, it warns of nothing', () => {
+  const f = beforeStart(() => true);
+  const html = r.renderFirstRun(f);
+  assert.match(html, /data-step="first-task" data-status="todo"/, 'Your first task is not done');
+  assert.match(html, /data-testid="first-run-start-button"/);
+  assert.doesNotMatch(html, START_WARNING, 'a step that comes after Start is not one the coordinator stops at');
+});
+
+test('#741 the Start card still warns of a required step before Start that is not done, as before', () => {
+  const f = beforeStart((id) => id !== 'claude-login');
+  const html = r.renderFirstRun(f);
+  const start = html.slice(html.indexOf('data-testid="first-run-start"'));
+  assert.match(start, /1 required step isn(&#x27;|')t done yet: the coordinator may stop at it\./, 'Claude login, before Start, counts; Your first task, after it, does not');
+});
+
+/** Fixture events, as the coordinator records them, for the first task's card. */
+function cardEvents(steps: [string, object][]): StoredEvent[] {
+  const t0 = Date.parse('2026-10-19T09:00:00.000Z');
+  return steps.map(([type, payload], i) => ({ id: i + 1, ts: new Date(t0 + i * 60_000).toISOString(), type, actor: 'c', source: 'coordinator', payload }) as unknown as StoredEvent);
+}
+
+test('#741 the First task card: the filed issue\'s stages from its events, its PR linked, a held PR\'s plain words and what lets it through, every estimate labelled; none before one is filed', () => {
+  const f = firstRun(join(tmpdir(), 'no-such-init.json'), { root: '/r', repo: 'example-org/example-shop', instance: null });
+  assert.doesNotMatch(r.renderFirstRun({ ...f, firstTask: null }), /first-task-card/, 'nothing filed: no card');
+  const H = 'abc1234';
+  const url = 'https://github.com/example-org/example-shop/pull/41';
+  const filed: [string, object] = ['dashboard.audit', { login: 'example-owner', role: 'owner', via: 'session', instance: null, action: FIRST_TASK_FILED, detail: { issue: 7 } }];
+  // Just filed: waiting, each estimate labelled by its basis (here, the tick; with no earlier task, none, or a guess).
+  const fresh = firstTaskProgress(cardEvents([filed]), { local: true })!;
+  const waiting = r.renderFirstRun({ ...f, firstTask: fresh });
+  assert.match(waiting, /data-testid="first-task-card" data-issue="7" data-outcome="open"/);
+  assert.match(waiting, /data-stage="claimed" data-state="waiting"[\s\S]*?data-testid="first-task-estimate" data-basis="tick">Estimate: within about 65 s of the coordinator running/);
+  assert.match(waiting, /data-stage="pr" data-state="waiting"[\s\S]*?data-basis="guess">Guess: 15-60 minutes/);
+  assert.doesNotMatch(waiting, /data-basis="(tick|median|none|guess)">(?!Estimate: |Guess: )/, 'every estimate says it is one');
+  // Followed to a held PR.
+  const held = firstTaskProgress(
+    cardEvents([
+      filed,
+      ['issue.seen', { issue: 7, title: 'Round totals', labels: ['ready'], author: 'example-owner', owner: null, actionable: true, why: '' }],
+      ['issue.claimed', { issue: 7, instance: 'local', lease: H, base: H, owner: 'example-owner' }],
+      ['run.started', { issue: 7, role: 'worker', model: 'sonnet', worktree: '/stand-in', pid: 1, pgid: 1, attempt: 1 }],
+      ['run.finished', { issue: 7, role: 'worker', reason: 'succeeded', detail: '' }],
+      ['eval.verdict', { issue: 7, head: H, patch_hash: 'h', patch_correct: true, test_correct: true, confidence: 'high', advice: '' }],
+      ['pr.opened', { issue: 7, number: 41, url, head: H, draft: false }],
+      ['pr.status', { issue: 7, number: 41, head: H, ready: true, reasons: [], checks: [{ name: 'test', outcome: 'pass' }] }],
+      ['merge.decided', { issue: 7, number: 41, head: H, auto: false, reasons: ['auto-merge is off for this instance (policy.yaml auto_merge)', 'big: 500 changed lines (over 400)'] }],
+    ]),
+    { local: true, repo: 'example-org/example-shop' },
+  )!;
+  const html = r.renderFirstRun({ ...f, firstTask: held });
+  assert.match(html, /data-testid="first-task-card" data-issue="7" data-outcome="held"[\s\S]*?#7/);
+  // Read-only, and no free text: no control, and not even the issue's title.
+  const from = html.indexOf('data-testid="first-task-card"');
+  const card = html.slice(from, html.indexOf('data-testid="first-run-', from));
+  assert.ok(card.includes('first-task-hold'), 'the whole card, up to the next first-run section');
+  assert.doesNotMatch(card, /<button|<form|<input|<select|<textarea|Round totals/);
+  assert.deepEqual([...html.matchAll(/data-testid="first-task-stage" data-stage="([a-z]+)" data-state="([a-z]+)"/g)].map((m) => `${m[1]}:${m[2]}`), ['claimed:done', 'worker:done', 'evaluator:done', 'pr:done', 'checks:done', 'merge:held']);
+  assert.match(html, /data-stage="evaluator"[\s\S]*?approved, confidence high/);
+  assert.match(html, /<a href="https:\/\/github\.com\/example-org\/example-shop\/pull\/41"[^>]*data-testid="first-task-pr-link">PR #41<\/a>/);
+  assert.match(html, /data-testid="first-task-hold" data-kind="policy-off"><p[^>]*>Local mode: every PR waits for you\.[\s\S]*?What lets it through: Review the PR and merge it yourself on GitHub\./);
+  assert.match(html, /data-testid="first-task-hold" data-kind="big"><p[^>]*>The change is over this repo(&#x27;|')s size limit[\s\S]*?What lets it through: Split it/);
+  assert.doesNotMatch(html, /policy\.yaml|500 changed lines/, 'the plain words, not the raw reasons');
+  // The card sits after Start: a step of the page's, not a new one.
+  assert.ok(html.indexOf('data-testid="first-task-card"') > html.indexOf('data-testid="first-run-start"'));
 });
 
 test("the first-run page, a Fix the dashboard does itself: its plan shown first, then a confirmation; the owners only; why not, where it can't run", () => {
@@ -2197,9 +2229,6 @@ test('the setup console shows each ask with its status; answer controls only whe
   assert.match(html, /data-testid="ask-answered"[^>]*>approved by @olive \(owner\)/);
   const viewer = r.renderSetup({ role: 'viewer', login: 'vic', asks: asks.map((a) => ({ ...a, canAnswer: false })) });
   assert.doesNotMatch(viewer, /data-testid="ask-secret"|data-testid="ask-run"|data-testid="ask-option"/);
-  assert.equal(r.keyData({ key: 'Enter', ctrlKey: false, metaKey: false, altKey: false }), '\r');
-  assert.equal(r.keyData({ key: 'c', ctrlKey: true, metaKey: false, altKey: false }), '\x03');
-  assert.equal(r.keyData({ key: 'Shift', ctrlKey: false, metaKey: false, altKey: false }), null);
 });
 
 const CLAUDE_ASK = { id: 'ask-000000000009', instance: 'demo', title: "The Claude login for demo's agents", detail: 'Paste the token claude setup-token prints.', createdAt: '2026-10-12T10:00:00Z', createdBy: 'add-project', cancelled: null, kind: 'paste_secret', where: "wl-demo-agent's Claude login", status: 'open', answer: null, canAnswer: true, request: null };
@@ -2251,7 +2280,7 @@ test("Add project: enabled for a machine owner on an allowed device; otherwise d
   assert.doesNotMatch(enabled, /data-testid="add-project-disabled"/);
   const cases: [string, ReturnType<typeof ownerRequester>, RegExp][] = [
     ['an instance-only owner', ownerRequester('ivy'), /machine owners: @ada, @olu\); @ivy isn(&#x27;|')t one/],
-    ['a disallowed device', { ...ownerRequester('ada'), deviceOk: false }, /one of the console(&#x27;|')s allowed devices/],
+    ['a disallowed device', { ...ownerRequester('ada'), deviceOk: false }, /one of the machine(&#x27;|')s allowed devices \(dashboards\.sh --machine-devices\)/],
   ];
   for (const [who, requester, why] of cases) {
     const html = view(requester);
@@ -2484,7 +2513,6 @@ test('#562: after an instance and then All instances, the sidebar header and the
   // What each instance's server answers: its own state (its project's name) and the machine's Claude account, from it.
   const own = asOwner as State & { project: Record<string, unknown> };
   const stateOf = (name: 'a' | 'b') => ({ ...own, project: { ...own.project, name: MARKS[name].project } }) as State;
-  const cell = (instance: string, active: boolean) => ({ instance, user: `wl-${instance}-agent`, active, account: null, subscription: null, apiOk: true, apiError: null, checkedAt: null });
   const accountOf = (name: 'a' | 'b') => ({
     machineOwner: true,
     machineOwners: ['example-owner'],
@@ -2492,13 +2520,10 @@ test('#562: after an instance and then All instances, the sidebar header and the
     instance: name,
     allowed: true,
     why: null,
-    busy: null,
     status: null,
-    switch: null,
     requests: [],
-    profiles: { instances: ['a', 'b'], active: { a: 'default', b: 'default' }, profiles: [{ name: 'default', kind: 'default', addedAt: null, cells: [cell('a', true), cell('b', true)] }, { name: 'spare', kind: 'token', addedAt: null, cells: [cell('a', false), cell('b', false)] }] },
-    profileOps: [],
-    confirmScript: 'claude-account.sh',
+    signin: 'sudo -u <agent user> -i claude auth login',
+    retired: null,
   });
   // As the page sees it: every view reads scope.current's server (the state, and the account panel's data).
   const view = (scope: ReturnType<Render['scopeOf']>) => ({
@@ -2515,13 +2540,9 @@ test('#562: after an instance and then All instances, the sidebar header and the
   assert.equal(shown.header, 'All instances', 'All instances: the header says so, not b');
   assert.match(scopeLine(shown.account) ?? '', /every instance on this machine \(a, b\)/, "All instances: the Claude account panel's scope line covers every instance");
   assert.doesNotMatch(scopeLine(shown.account) ?? '', /\bb\b(?!\))/, 'and not b alone');
-  // Nothing in the panel is offered for b alone while All is chosen: its one-instance steps wait for an instance to be picked.
-  for (const id of ['claude-profile-use-here', 'claude-profile-remove', 'claude-failover']) assert.doesNotMatch(shown.account, new RegExp(`data-testid="${id}"`), `${id}: not under All`);
-  // Adding an account is root's for every instance's agent user at once, so its how-to shows under All too.
-  assert.match(shown.account, /data-testid="claude-profile-add-howto"[\s\S]*?data-testid="claude-profile-add-command">sudo bash claude-account\.sh profile-add &lt;name&gt;<[\s\S]*?for every instance(&#x27;|')s agent user at once/, 'Add an account: under All');
-  assert.doesNotMatch(shown.account, /only b&#x27;s|for b\b|Add an account for b/, 'no copy names b as the one the panel is for');
-  assert.match(shown.account, /data-testid="claude-profiles-table"/, "every instance's accounts are still listed");
-  assert.match(shown.account, /data-testid="claude-account-switch-command">sudo bash claude-account\.sh switch/, 'switching every instance: the root command');
+  assert.doesNotMatch(shown.account, /only b&#x27;s|for b\b/, 'no copy names b as the one the panel is for');
+  // How an agent user is signed in (as that user, on the machine) is the same under All.
+  assert.match(shown.account, /data-testid="claude-account-signin-command">sudo -u &lt;agent user&gt; -i claude auth login</);
 
   // One instance again: its name in the header and in the panel.
   const a = r.scopeOf(hub, 'a', false);
@@ -2529,12 +2550,9 @@ test('#562: after an instance and then All instances, the sidebar header and the
   assert.equal(back.header, 'alpha-proj', 'a picked: the header names its project');
   assert.match(scopeLine(back.account) ?? '', /^For a: /, "a picked: the panel's scope line names a");
   assert.doesNotMatch(scopeLine(back.account) ?? '', /every instance on this machine \(/);
-  assert.match(back.account, /only a&#x27;s/, 'its accounts can be chosen for a from here');
-  for (const id of ['claude-profile-use-here', 'claude-profile-add-howto', 'claude-failover']) assert.match(back.account, new RegExp(`data-testid="${id}"`), `${id}: offered for a`);
 });
 
-test('#711: the Claude account panel takes no credential: no password field, no switch button, no add or sign-in form; the root commands instead', () => {
-  const cell = (active: boolean) => ({ instance: 'a', user: 'wl-a-agent', active, account: null, subscription: null, apiOk: true, apiError: null, checkedAt: null });
+test('#711, #736: the Claude account panel takes no credential and offers no account step: no password field, no switch, add, profile or sign-in form; the sign-in command and the leftovers\' root step instead', () => {
   const data = {
     machineOwner: true,
     machineOwners: ['example-owner'],
@@ -2542,20 +2560,19 @@ test('#711: the Claude account panel takes no credential: no password field, no 
     instance: 'a',
     allowed: true,
     why: null,
-    busy: null,
     status: null,
-    switch: { startedAt: new Date().toISOString(), status: 'running' as const, detail: 'x', waitingForToken: true, token: { at: new Date().toISOString(), step: 'token' as const, state: 'ask' as const, instance: null, user: null, detail: 'paste the token' }, instances: [] },
     requests: [],
-    profiles: { instances: ['a'], active: { a: 'default' }, profiles: [{ name: 'default', kind: 'default', addedAt: null, cells: [cell(true)] }, { name: 'spare', kind: 'token', addedAt: null, cells: [cell(false)] }] },
-    profileOps: [],
-    confirmScript: '/opt/engine/scripts/setup/claude-account.sh',
+    signin: 'sudo -u <agent user> -i claude auth login',
+    retired: { files: ['profiles.json', 'switch.jsonl'], refused: ['a'], unreadable: false, command: 'sudo bash /opt/engine/scripts/setup/claude-account.sh uninstall' },
   };
   const html = r.renderClaudeAccount(data, undefined, r.scopeOf({ instances: [{ name: 'a', up: true, error: null }] }, 'a', false));
-  assert.doesNotMatch(html, /type="password"/, 'no field a credential could be typed into');
-  for (const id of ['claude-switch-token', 'claude-switch-token-send', 'claude-account-switch', 'claude-account-switch-confirm', 'claude-profile-add', 'claude-profile-token', 'claude-signin', 'claude-signin-code']) assert.ok(!html.includes(`data-testid="${id}"`), id);
-  assert.match(html, /data-testid="claude-account-switch-command">sudo bash \/opt\/engine\/scripts\/setup\/claude-account\.sh switch</);
-  assert.match(html, /data-testid="claude-profile-add-command">sudo bash \/opt\/engine\/scripts\/setup\/claude-account\.sh profile-add &lt;name&gt;</);
-  assert.match(html, /data-testid="claude-switch-token-elsewhere">It is pasted in the terminal where the switch was started\. This page never takes it\./);
+  assert.doesNotMatch(html, /type="password"|<input|<textarea/, 'no field a credential could be typed into');
+  for (const id of ['claude-switch', 'claude-switch-token', 'claude-switch-token-send', 'claude-account-switch', 'claude-account-switch-confirm', 'claude-account-switch-howto', 'claude-profile-add', 'claude-profile-token', 'claude-profiles', 'claude-profile-use-here', 'claude-profile-remove', 'claude-failover', 'claude-signin', 'claude-signin-code']) assert.ok(!html.includes(`data-testid="${id}"`), id);
+  assert.equal([...html.matchAll(/<button/g)].length, 1, 'Refresh, and nothing else');
+  assert.match(html, /data-testid="claude-account-signin-command">sudo -u &lt;agent user&gt; -i claude auth login</);
+  assert.match(html, /data-testid="claude-account-retired"[\s\S]*profiles\.json, switch\.jsonl[\s\S]*data-testid="claude-account-retired-refused"[^>]*>[^<]*another profile: a\.[\s\S]*data-testid="claude-account-retired-command">sudo bash \/opt\/engine\/scripts\/setup\/claude-account\.sh uninstall</);
+  // Nothing left: no notice.
+  assert.doesNotMatch(r.renderClaudeAccount({ ...data, retired: null }), /claude-account-retired/);
 });
 
 test('#711: no page source sends to a removed credential route, or asks the switch or a relayed sign-in to start', () => {
@@ -2591,66 +2608,25 @@ test("#711: the page-source scan flags each way #749's page started a switch or 
   for (const s of ["step: 'switch' | 'pause' | 'token'", "Pick<ClaudeAccountData, 'switch' | 'requests'>", "op: 'profile-add' | 'use' | 'remove' | 'login';", "const act = async (action: 'status') => {"]) assert.ok(!startsRefused(s, 'switch') && !startsRefused(s, 'login'), s);
 });
 
-test('Claude account: a machine owner sees each agent user and the switch step by step, never a token box (#711); anyone else nothing', () => {
+test('Claude account: a machine owner sees each agent user, never a token box (#711), and a switch an older engine left is not followed (#736); anyone else nothing', () => {
   const ownersFile = machineOwnersFile('ada');
   const dir = mkdtempSync(join(tmpdir(), 'claude-account-render-'));
   const at = new Date().toISOString();
   writeFileSync(join(dir, 'status.json'), JSON.stringify({ at, users: [{ instance: 'shop', kind: 'agent', user: 'wl-shop-agent', stored: true, logged_in: true, auth_method: 'claude.ai', account: 'agents@example.com', token_id: '0123abcd', expires_at: new Date(Date.now() + 200 * 86_400_000).toISOString() }, { instance: 'shop', kind: 'eval', user: 'wl-shop-eval', stored: false, logged_in: false, auth_method: 'none', error: 'claude auth status says it is not logged in' }] }));
-  const lines = (more: object[]) =>
-    writeFileSync(join(dir, 'switch.jsonl'), [{ step: 'switch', state: 'started', detail: '2 instance(s): shop web; the token from this terminal' }, { step: 'pause', state: 'done', instance: 'shop', detail: 'starts no more runs' }, { step: 'pause', state: 'done', instance: 'web', detail: 'starts no more runs' }, { step: 'token', state: 'ask', detail: 'paste it' }, ...more].map((l) => JSON.stringify({ at, ...l })).join('\n') + '\n');
+  // An older engine's switch, waiting for its token at a root shell.
+  writeFileSync(join(dir, 'switch.jsonl'), [{ step: 'switch', state: 'started', detail: '2 instance(s): shop web' }, { step: 'pause', state: 'done', instance: 'shop', detail: 'starts no more runs' }, { step: 'token', state: 'ask', detail: 'paste it' }].map((l) => JSON.stringify({ at, ...l })).join('\n') + '\n');
   const view = (login: string, instance = 'shop') => claudeAccountView({ dir, events: [], who: { role: 'owner', requester: ownerRequester(login) }, instance, ownersFile });
-  lines([]);
   const html = r.renderClaudeAccount(view('ada'));
-  for (const id of ['claude-account', 'claude-account-users', 'claude-account-refresh', 'claude-switch']) assert.match(html, new RegExp(`data-testid="${id}"`), id);
-  assert.doesNotMatch(html, /data-testid="claude-switch-token"/, 'a switch a root admin runs waits for its token at that shell: no box here');
+  for (const id of ['claude-account', 'claude-account-users', 'claude-account-refresh', 'claude-account-signin-howto', 'claude-account-retired']) assert.match(html, new RegExp(`data-testid="${id}"`), id);
+  assert.doesNotMatch(html, /data-testid="claude-switch/, 'no switch is followed, and no box');
   assert.match(html, /data-testid="claude-account-user" data-user="wl-shop-agent" data-signed-in="yes"/);
   assert.match(html, /agents@example\.com/);
   assert.match(html, /token 0123abcd/);
   assert.match(html, /data-user="wl-shop-eval" data-signed-in="no"[\s\S]*not logged in/);
-  assert.deepEqual([...html.matchAll(/data-testid="claude-switch-step" data-phase="([a-z]+)"/g)].map((m) => m[1]), ['running', 'running', 'pending', 'pending'], 'pause (runs finishing), token waiting, check, resume');
-  // In any instance's dashboard: no box.
-  assert.doesNotMatch(r.renderClaudeAccount(view('ada', 'web')), /data-testid="claude-switch-token"/);
-  // Each instance's result as it comes: one resumed, one left paused.
-  lines([{ step: 'token', state: 'done', detail: 'received' }, { step: 'wait', state: 'done', instance: 'shop', detail: 'finished' }, { step: 'wait', state: 'done', instance: 'web', detail: 'finished' }, { step: 'install', state: 'done', instance: 'shop', user: 'wl-shop-agent', detail: 'stored' }, { step: 'check', state: 'done', instance: 'shop', user: 'wl-shop-agent', detail: 'signed in' }, { step: 'check', state: 'failed', instance: 'web', user: 'wl-web-agent', detail: 'not logged in' }, { step: 'resume', state: 'done', instance: 'shop', detail: 'running again' }, { step: 'resume', state: 'failed', instance: 'web', detail: 'not resumed: its auth check failed' }, { step: 'switch', state: 'failed', detail: 'not resumed: web' }]);
-  const done = r.renderClaudeAccount(view('ada'));
-  assert.match(done, /data-testid="claude-switch" data-status="failed"/);
-  assert.deepEqual([...done.matchAll(/data-testid="claude-switch-resume" data-instance="([a-z]+)" data-state="([a-z]+)"/g)].map((m) => `${m[1]}:${m[2]}`), ['shop:done', 'web:failed']);
-  assert.match(done, /data-testid="claude-switch-result">not resumed: web/);
-  assert.doesNotMatch(done, /data-testid="claude-switch-token"/);
+  assert.match(html, /data-testid="claude-account-retired"[\s\S]*switch\.jsonl/);
+  assert.doesNotMatch(html, /claude-account-retired-refused/, 'a switch left over refuses no instance');
   // Not a machine owner: nothing at all (the server refuses them the data too).
   assert.equal(r.renderClaudeAccount(view('ivy')), '');
-});
-
-test("#566: the accounts table shows the usage-limit badge and its reset time on the paused instance's active account only; nothing without a pause", () => {
-  const ownersFile = machineOwnersFile('ada');
-  const dir = mkdtempSync(join(tmpdir(), 'claude-limit-render-'));
-  writeFileSync(join(dir, 'status.json'), JSON.stringify({ at: new Date().toISOString(), users: [{ instance: 'shop', kind: 'agent', user: 'wl-shop-agent', logged_in: true, api_ok: true }, { instance: 'web', kind: 'agent', user: 'wl-web-agent', logged_in: true, api_ok: true }] }));
-  writeFileSync(join(dir, 'profiles.json'), JSON.stringify({ profiles: { spare: { kind: 'setup-token', users: { 'wl-shop-agent': { instance: 'shop', user: 'wl-shop-agent', api_ok: true } } } }, active: {} }));
-  const now = Date.now();
-  const reset = new Date(now + 2 * 3600_000 + 30 * 60_000).toISOString();
-  const pause = { since: new Date(now - 60_000).toISOString(), resetAt: reset, source: 'claude' as const, kind: 'five_hour', issue: 3, role: 'worker', id: 1 };
-  // As the server sends it to shop's dashboard: shop's own pause (or none), read from shop's log.
-  const html = (p: typeof pause | null) => r.renderClaudeAccount({ ...claudeAccountView({ dir, events: [], who: { role: 'owner', requester: ownerRequester('ada') }, instance: 'shop', ownersFile }), ...profilesView(dir, now, 'shop', p) });
-  const cells = (h: string) => [...h.matchAll(/<td[^>]*data-testid="claude-profile-cell" data-profile="([^"]+)" data-instance="([^"]+)"[^>]*>([^]*?)<\/td>/g)].map((m) => ({ at: `${m[1]}/${m[2]}`, body: m[3]! }));
-
-  const paused = html(pause);
-  const all = cells(paused);
-  assert.deepEqual(all.map((c) => c.at), ['default/shop', 'default/web', 'spare/shop', 'spare/web']);
-  const marked = all.filter((c) => /data-testid="claude-profile-limit"/.test(c.body));
-  assert.deepEqual(marked.map((c) => c.at), ['default/shop'], "the badge on shop's active account only");
-  for (const c of all.filter((x) => x.at !== 'default/shop')) assert.doesNotMatch(c.body, /usage limit|resets /, c.at);
-  assert.match(marked[0]!.body, /usage limit/);
-  assert.ok(marked[0]!.body.includes(`resets ${resetWords(reset, now)}`), `the reset as the usage-limit notices word it: ${marked[0]!.body}`);
-  assert.match(resetWords(reset, now), /UTC \(in 2 h 30 min\)$/);
-  // web's limit is in web's own log: its column says so instead of showing nothing as if it had none.
-  assert.deepEqual([...paused.matchAll(/data-testid="claude-profile-limit-elsewhere" data-instance="([^"]+)"/g)].map((m) => m[1]), ['web']);
-  assert.match(paused, /data-testid="claude-profile-limit-elsewhere"[^>]*>[^<]*not shown here/);
-
-  // No pause: no badge and no reset time anywhere.
-  const free = html(null);
-  assert.equal(cells(free).length, 4);
-  assert.doesNotMatch(free, /data-testid="claude-profile-limit"/);
-  for (const c of cells(free)) assert.doesNotMatch(c.body, /usage limit|resets /, c.at);
 });
 
 test("#567: each role's Machine page and sign-in banner, from what the server sent that role: a viewer sees that an account is set and nothing naming it", { skip: process.platform === 'win32' }, async () => {
@@ -2681,7 +2657,8 @@ test("#567: each role's Machine page and sign-in banner, from what the server se
     assert.match(owner.machine, /data-testid="claude-account"/);
     assert.doesNotMatch(owner.machine, /claude-account-set/);
     assert.match(owner.machine, new RegExp(ACCOUNT.email.replace(/[.]/g, '\\.')));
-    assert.match(owner.machine, new RegExp(ACCOUNT.profile));
+    // The fixture's profiles.json is an older engine's leftover now (#736): named for what it is, never its profile.
+    assert.match(owner.machine, /data-testid="claude-account-retired"/);
     assert.match(owner.banner, /data-testid="signin-recheck"/);
     // What the line says when no account is signed in, when the machine hasn't said, and with no answer at all.
     assert.match(r.renderClaudeAccountSet({ claudeAccount: { set: false } }), /data-set="false"[\s\S]*No account is signed in/);
@@ -2958,14 +2935,14 @@ test('Tailscale and HTTPS: a machine owner sees the state, the four steps with w
   assert.deepEqual(steps(url), ['install:done', 'up:done', 'serve:done', 'public-url:next']);
   assert.match(url, new RegExp(`the hub&#x27;s URL becomes https://${name.replace(/\./g, '\\.')} \\(now https://hub\\.example\\.test\\), through dashboards\\.sh`));
   assert.match(url, new RegExp(`callback URL to exactly https://${name.replace(/\./g, '\\.')}/auth/callback`));
-  assert.match(url, /dashboards\.sh --client-id/);
+  assert.match(url, /dashboards\.sh \[--machine-devices [^\]]*\] --client-id .* \[--siri [^\]]*\] \[--hooks [^\]]*\]/);
   // All done: nothing is next; each step can be run again.
   const done = r.renderTailscaleSetup(view('ada', st({ hubUrl: `https://${name}` })));
   assert.match(done, /data-testid="tailscale-setup" data-next="none"/);
   assert.equal([...done.matchAll(/Run again…/g)].length, 4);
   // Off an allowed device: read-only, and it says why.
   const away = r.renderTailscaleSetup(tailscaleView({ status: none, dir: dirOf([]), events: [], who: { role: 'owner', requester: { login: 'ada', breakGlass: false, deviceOk: false } }, instance: 'shop', ownersFile }));
-  assert.match(away, /data-testid="tailscale-disabled"[^>]*>Read-only: a machine change needs one of the console&#x27;s allowed devices/);
+  assert.match(away, /data-testid="tailscale-disabled"[^>]*>Read-only: a machine change needs one of the machine&#x27;s allowed devices \(dashboards\.sh --machine-devices\)/);
   assert.equal([...away.matchAll(/<button[^>]*disabled=""[^>]*data-testid="tailscale-step-run"/g)].length, 4);
   // Funnel: shown read-only. Off: it says nothing here turns it on. Already on: said in red, and neither later step can be asked for.
   assert.match(done, /data-testid="tailscale-funnel" data-funnel="off"[^>]*>Funnel \(the public internet\): off\. Nothing here turns it on/);
@@ -3186,447 +3163,10 @@ test('Tailscale and Claude account: a request handed to its own unit keeps the c
   // A refused or failed request starts no unit; and after a minute the unit is taken not to have started.
   assert.ok(!r.tailscaleBusy({ run: run('2026-10-14T12:00:01Z'), requests: [req({ status: 'refused' })] }, now));
   assert.ok(!r.tailscaleBusy({ run: run('2026-10-14T12:00:01Z'), requests: [req()] }, now + 120_000));
-  // A Claude account profile step is started the same way (its own unit): the panel waits for its first line.
-  const sw = (startedAt: string, status = 'done') => ({ startedAt, status, detail: '', waitingForToken: false, token: null, instances: [] });
-  const op = (startedAt: string) => ({ id: 'op', op: 'use', profile: 'spare', for: 'alpha', status: 'done', startedAt, endedAt: startedAt, detail: '', steps: [] });
-  const use = req({ args: ['claude-account', 'use', 'spare'] });
-  assert.ok(r.accountBusy({ switch: null, requests: [use], profileOps: [op('2026-10-13T09:00:00Z')] }, now));
-  assert.ok(r.accountBusy({ switch: null, requests: [use], profileOps: [] }, now));
-  assert.ok(!r.accountBusy({ switch: null, requests: [use], profileOps: [op('2026-10-14T12:00:21Z')] }, now));
-  // A switch a root admin runs: looked at while it runs.
-  assert.ok(r.accountBusy({ switch: sw('2026-10-14T12:00:21Z', 'running'), requests: [] }, now));
-  assert.ok(!r.accountBusy({ switch: sw('2026-10-14T12:00:21Z'), requests: [] }, now));
-  assert.ok(!r.accountBusy({ switch: null, requests: [req({ args: ['claude-account', 'status'] })] }, now), 'status runs in the helper itself: no unit to wait for');
-});
-
-// Voice dictation in the Ask panel (web/src/voice/): owners only, off until turned on, on-device only by default,
-// and nothing it hears is ever sent.
-
-/** A stand-in for the browser's SpeechRecognition: the test says what it hears. */
-function fakeRecognizer(o: { availability?: string | null; processLocally?: boolean } = {}) {
-  const made: FakeRec[] = [];
-  class FakeRec {
-    lang = '';
-    continuous = false;
-    interimResults = false;
-    onresult: ((e: unknown) => void) | null = null;
-    onerror: ((e: { error: string }) => void) | null = null;
-    onend: (() => void) | null = null;
-    calls: string[] = [];
-    constructor() {
-      made.push(this);
-    }
-    start() {
-      this.calls.push('start');
-    }
-    stop() {
-      this.calls.push('stop');
-    }
-    abort() {
-      this.calls.push('abort');
-    }
-    hear(results: [string, boolean][], resultIndex = 0) {
-      this.onresult?.({ resultIndex, results: results.map(([transcript, isFinal]) => ({ isFinal, 0: { transcript } })) });
-    }
-  }
-  if (o.processLocally !== false) Object.defineProperty(FakeRec.prototype, 'processLocally', { value: false, writable: true });
-  if (o.availability !== null) (FakeRec as unknown as { available: unknown }).available = async () => o.availability ?? 'available';
-  return { ctor: FakeRec, made };
-}
-
-const READY_LOCAL = { kind: 'ready', local: true, title: 'Dictate (on-device)' };
-const roleOf = (s: State) => (s as unknown as { role?: string }).role;
-
-test("the mic is the owners' only, from the role the server serves: not a writer's, not a viewer's", () => {
-  const on = { dictation: true, allowCloud: false };
-  assert.deepEqual([roleOf(asOwner), roleOf(asWriter), roleOf(asOther)], ['owner', 'writer', 'viewer'], 'the roles a real dashboard serves');
-  assert.match(r.renderComposerMic(roleOf(asOwner), on, READY_LOCAL), /data-testid="chat-mic"[^>]*data-state="idle"[^>]*data-local="true"/);
-  for (const s of [asWriter, asOther]) assert.equal(r.renderComposerMic(roleOf(s), on, READY_LOCAL), '', `no mic for a ${roleOf(s)}`);
-  assert.equal(r.renderComposerMic(undefined, on, READY_LOCAL), '', 'no role (an older server): no mic');
-  // The Settings section that turns it on: an owner's only too.
-  assert.match(r.renderVoiceSettings(true), /data-testid="settings-voice"/);
-  assert.equal(r.renderVoiceSettings(false), '');
-});
-
-test('the mic is off until an owner turns it on in Settings, and on-device only until they allow the cloud', () => {
-  localStorage.setItem('dash-voice', '{}');
-  const prefs = r.readVoicePrefs();
-  assert.deepEqual(prefs, { dictation: false, allowCloud: false, talkBack: false, allowNetworkVoices: false, wakeWord: false, voiceCommands: false }, 'all off by default');
-  assert.equal(r.renderComposerMic(roleOf(asOwner), prefs, READY_LOCAL), '', 'not rendered for the owner until enabled');
-  const settings = r.renderVoiceSettings(true);
-  assert.match(settings, /data-testid="voice-dictation"/);
-  assert.doesNotMatch(settings, /checked=""/, 'both switches start off');
-  localStorage.setItem('dash-voice', JSON.stringify({ dictation: 'yes', allowCloud: 1 }));
-  assert.deepEqual(r.readVoicePrefs(), { dictation: false, allowCloud: false, talkBack: false, allowNetworkVoices: false, wakeWord: false, voiceCommands: false }, 'only a stored true turns either on');
-  localStorage.setItem('dash-voice', JSON.stringify({ dictation: true }));
-  assert.deepEqual(r.readVoicePrefs(), { dictation: true, allowCloud: false, talkBack: false, allowNetworkVoices: false, wakeWord: false, voiceCommands: false });
-  assert.match(r.renderVoiceSettings(true), /data-testid="voice-dictation" checked=""/);
-  assert.match(r.renderComposerMic(roleOf(asOwner), r.readVoicePrefs(), READY_LOCAL), /data-testid="chat-mic"/, 'there once turned on');
-  localStorage.setItem('dash-voice', '{}');
-});
-
-test("without speech recognition there is no button; on-device only, a browser that can't keep the audio local gets a disabled one saying why", async () => {
-  const on = { dictation: true, allowCloud: false };
-  const owner = roleOf(asOwner);
-  assert.equal(r.speechCtor({}), null);
-  const none = await r.checkSupport(null, { lang: 'en-US', allowCloud: false });
-  assert.deepEqual(none, { kind: 'none' });
-  assert.equal(r.renderComposerMic(owner, on, none), '', 'no recognizer: no button at all');
-  // A recognizer with no on-device API (an older Chrome's webkitSpeechRecognition): it would stream to the cloud.
-  const old = await r.checkSupport(fakeRecognizer({ availability: null, processLocally: false }).ctor, { lang: 'en-US', allowCloud: false });
-  assert.deepEqual([old.kind, old.why], ['disabled', r.NO_ON_DEVICE]);
-  assert.match(r.renderComposerMic(owner, on, old), /<button[^>]*disabled=""[^>]*title="on-device speech recognition isn(&#x27;|')t available in this browser"[^>]*data-state="disabled"/);
-  // The on-device API, but no model for the language: still disabled.
-  for (const availability of ['unavailable', 'downloadable']) {
-    const s = await r.checkSupport(fakeRecognizer({ availability }).ctor, { lang: 'en-US', allowCloud: false });
-    assert.equal(s.kind, 'disabled', availability);
-  }
-  const throws = fakeRecognizer();
-  (throws.ctor as unknown as { available: unknown }).available = async () => {
-    throw new Error('boom');
-  };
-  assert.deepEqual(await r.checkSupport(throws.ctor, { lang: 'en-US', allowCloud: false }).then((s) => [s.kind, s.why]), ['disabled', r.NO_ON_DEVICE], 'a check that throws is no error, just disabled');
-  // On the device: ready, and local.
-  assert.deepEqual(await r.checkSupport(fakeRecognizer().ctor, { lang: 'en-US', allowCloud: false }).then((s) => [s.kind, s.local]), ['ready', true]);
-  // Only when the owner allowed the cloud does a browser without on-device get a working mic, marked not local.
-  const cloud = await r.checkSupport(fakeRecognizer({ availability: null, processLocally: false }).ctor, { lang: 'en-US', allowCloud: true });
-  assert.deepEqual([cloud.kind, cloud.local], ['ready', false]);
-  assert.match(r.renderComposerMic(owner, { dictation: true, allowCloud: true }, cloud), /data-local="false"/);
-  assert.match(r.renderVoiceSettingsView(on, { recognizer: true, availability: 'downloadable' }), /data-testid="voice-install"/);
-  assert.doesNotMatch(r.renderVoiceSettingsView(on, { recognizer: true, availability: 'available' }), /data-testid="voice-install"/);
-});
-
-test('dictation puts what it hears in the box at the caret, interim apart, and sends nothing: no fetch, no WebSocket', () => {
-  const g = globalThis as Record<string, unknown>;
-  const network: string[] = [];
-  const saved = { fetch: g.fetch, WebSocket: g.WebSocket, XMLHttpRequest: g.XMLHttpRequest, EventSource: g.EventSource };
-  g.fetch = (...a: unknown[]) => (network.push(`fetch ${String(a[0])}`), Promise.reject(new Error('no network in dictation')));
-  g.WebSocket = class {
-    constructor(url: string) {
-      network.push(`ws ${url}`);
-    }
-  };
-  g.XMLHttpRequest = class {
-    open(_m: string, url: string) {
-      network.push(`xhr ${url}`);
-    }
-  };
-  g.EventSource = class {
-    constructor(url: string) {
-      network.push(`sse ${url}`);
-    }
-  };
-  try {
-    const { ctor, made } = fakeRecognizer();
-    // The text box: a question already typed, the caret after "Why is".
-    const box = {
-      value: 'Why is stuck?',
-      selectionStart: 6,
-      selectionEnd: 6,
-      setSelectionRange(a: number, b: number) {
-        this.selectionStart = a;
-        this.selectionEnd = b;
-      },
-    };
-    let state = box.value;
-    const interims: string[] = [];
-    const listening: boolean[] = [];
-    const errors: string[] = [];
-    const d = new r.Dictation(ctor, { lang: 'en-US', local: true }, { onFinal: r.intoBox(() => box, (t) => (state = t)), onInterim: (t) => interims.push(t), onListening: (l) => listening.push(l), onError: (w) => errors.push(w) });
-    d.start();
-    const rec = made[0]!;
-    assert.equal((rec as unknown as { processLocally: boolean }).processLocally, true, 'on-device asked of this recognizer');
-    assert.deepEqual([rec.continuous, rec.interimResults, rec.lang], [true, true, 'en-US']);
-    rec.hear([['issue', false]]);
-    assert.equal(interims.at(-1), 'issue', 'interim, not in the box');
-    assert.equal(box.value, 'Why is stuck?');
-    rec.hear([['issue twelve', true], [' and', false]]);
-    assert.equal(box.value, 'Why is issue twelve stuck?', 'the final lands at the caret');
-    assert.equal(state, box.value, "the box's own state has it too");
-    assert.equal(box.selectionStart, 'Why is issue twelve'.length, 'the caret sits after it');
-    assert.equal(interims.at(-1), 'and');
-    // Two finals in one event: both land, in order; "send" is only a word.
-    rec.hear([['issue twelve', true], ['and thirteen', true], ['send', true]], 1);
-    assert.equal(box.value, 'Why is issue twelve and thirteen send stuck?', 'no voice command');
-    // The second click stops; the browser ends.
-    d.stop();
-    assert.deepEqual(rec.calls, ['start', 'stop']);
-    rec.onend?.();
-    assert.deepEqual(listening, [true, false]);
-    assert.equal(interims.at(-1), '', 'the interim line clears');
-    assert.equal(box.value, 'Why is issue twelve and thirteen send stuck?', 'still in the box, for review: the end sends nothing');
-    assert.deepEqual(errors, []);
-    // Aborted (the panel closed or lost focus): nothing more lands, even if the browser still says something.
-    const d2 = new r.Dictation(ctor, { lang: 'en-US', local: true }, { onFinal: r.intoBox(() => box, (t) => (state = t)), onInterim: () => {}, onListening: () => {}, onError: () => {} });
-    d2.start();
-    const rec2 = made[1]!;
-    const handler = rec2.onresult;
-    d2.abort();
-    assert.deepEqual(rec2.calls, ['start', 'abort']);
-    assert.equal(d2.listening, false);
-    handler?.({ resultIndex: 0, results: [{ isFinal: true, 0: { transcript: 'late words' } }] });
-    assert.doesNotMatch(box.value, /late words/, 'nothing lands after an abort');
-    assert.deepEqual(network, [], 'no fetch, WebSocket, XHR or EventSource during dictation');
-  } finally {
-    Object.assign(g, saved);
-  }
-});
-
-test('on-device only: a recognizer without the processLocally option is never started', () => {
-  const { ctor, made } = fakeRecognizer({ processLocally: false });
-  const errors: string[] = [];
-  const d = new r.Dictation(ctor, { lang: 'en-US', local: true }, { onFinal: () => {}, onInterim: () => {}, onListening: () => {}, onError: (w) => errors.push(w) });
-  d.start();
-  assert.deepEqual(made[0]!.calls, [], 'not started');
-  assert.deepEqual(errors, [r.NO_ON_DEVICE]);
-});
-
-test('dictated words go in at the caret with a space where words meet, replacing a selection', () => {
-  assert.deepEqual(r.insertAt('', 0, 0, ' hello '), { text: 'hello', caret: 5 });
-  assert.deepEqual(r.insertAt('Why', 3, 3, 'stuck'), { text: 'Why stuck', caret: 9 });
-  assert.deepEqual(r.insertAt('a c', 1, 2, 'b'), { text: 'a b c', caret: 4 }, 'a space each side where words meet; the caret after them');
-  assert.deepEqual(r.insertAt('Why old stuck', 4, 7, 'new'), { text: 'Why new stuck', caret: 7 });
-  assert.deepEqual(r.insertAt('x', 1, 1, '  '), { text: 'x', caret: 1 }, 'nothing heard: nothing changes');
-});
-
-test('the interim line is marked as interim and says how to stop; an error says dictation stopped', () => {
-  assert.equal(r.renderMicInterim(false, ''), '');
-  assert.match(r.renderMicInterim(true, 'why is'), /data-testid="chat-mic-interim"[\s\S]*Listening[\s\S]*class="truncate italic" data-testid="chat-mic-interim-text">why is…/);
-  assert.match(r.renderMicInterim(true, ''), /Esc stops/);
-  assert.match(r.renderMicInterim(false, '', 'no microphone found'), /data-testid="chat-mic-error"[^>]*>Dictation stopped: no microphone found/);
-});
-
-// Talk-back in the Ask panel (web/src/voice/talk.ts): owners only, off until turned on, on-device voices only by
-// default, the answer without code or secrets, and stopped the moment the owner talks.
-
-const LOCAL_EN: FakeVoice = { name: 'Samantha', lang: 'en-US', localService: true };
-const NETWORK_EN: FakeVoice = { name: 'Google US English', lang: 'en-US', localService: false, default: true };
-
-/** A stand-in for window.speechSynthesis and SpeechSynthesisUtterance: it records what it is asked to do. */
-function fakeSynth(voices: FakeVoice[] = [LOCAL_EN, NETWORK_EN]) {
-  const calls: string[] = [];
-  const spoken: { text: string; voice: FakeVoice | null; lang: string; onend: (() => void) | null }[] = [];
-  class Utterance {
-    lang = '';
-    voice: FakeVoice | null = null;
-    onend: (() => void) | null = null;
-    onerror: ((e: { error?: string }) => void) | null = null;
-    constructor(public text: string) {}
-  }
-  const synth = {
-    speak(u: Utterance) {
-      calls.push('speak');
-      spoken.push(u);
-    },
-    cancel() {
-      calls.push('cancel');
-    },
-    getVoices: () => voices,
-  };
-  return { s: { synth, Utterance }, calls, spoken };
-}
-
-const TALK_ON = { dictation: false, allowCloud: false, talkBack: true, allowNetworkVoices: false };
-
-test("talk-back is off by default and the owners' only: a writer, a viewer or an owner who didn't turn it on hear nothing", async () => {
-  localStorage.setItem('dash-voice', '{}');
-  const prefs = r.readVoicePrefs();
-  assert.equal(prefs.talkBack, false, 'off by default');
-  assert.equal(prefs.allowNetworkVoices, false, 'network voices off by default');
-  localStorage.setItem('dash-voice', JSON.stringify({ talkBack: 'yes', allowNetworkVoices: 1 }));
-  assert.deepEqual([r.readVoicePrefs().talkBack, r.readVoicePrefs().allowNetworkVoices], [false, false], 'only a stored true turns it on');
-  localStorage.setItem('dash-voice', '{}');
-  assert.doesNotMatch(r.renderVoiceSettings(true), /data-testid="voice-talk-back" checked=""/, 'the switch starts off');
-  assert.match(r.renderVoiceSettings(true), /data-testid="voice-allow-network-voices"/);
-
-  const owner = roleOf(asOwner);
-  assert.equal(r.mayTalk(owner, prefs), false, 'an owner who did not turn it on');
-  assert.equal(r.mayTalk(owner, TALK_ON), true);
-  for (const s of [asWriter, asOther]) {
-    assert.equal(r.mayTalk(roleOf(s), TALK_ON), false, `not a ${roleOf(s)}`);
-    assert.equal(r.renderTalkStatus(roleOf(s), TALK_ON, true), '', `no reading line for a ${roleOf(s)}`);
-  }
-  assert.equal(r.mayTalk(undefined, TALK_ON), false, 'no role (an older server)');
-  assert.equal(r.renderTalkStatus(owner, prefs, true), '', 'nothing for an owner with it off');
-  assert.match(r.renderTalkStatus(owner, TALK_ON, true), /data-testid="chat-speaking"[\s\S]*data-testid="chat-speaking-stop"/);
-
-  // The reader itself does nothing until it is made active (the panel open, for an owner who turned it on).
-  const f = fakeSynth();
-  const t = new r.TalkBack({ lang: 'en-US', allowNetwork: false, synth: f.s });
-  try {
-    assert.deepEqual(await t.speak('Issue 12 is waiting on a review.'), { spoken: false, why: null });
-    assert.deepEqual(f.calls, [], 'speechSynthesis.speak is never called while inactive');
-  } finally {
-    t.dispose();
-  }
-});
-
-test('reading an answer hands speechSynthesis.speak the answer with code blocks and secrets left out', async () => {
-  const token = 'ghp_' + 'a1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q7R8';
-  const key = 'sk-ant-' + 'api03-Zx9Yw8Vu7Ts6Rq5Po4Nm3Lk2';
-  const jwtish = 'eyJhbGciOiJIUzI1NiJ9.' + 'eyJzdWIiOiIxMjM0NTY3ODkwIn0.abc123def456';
-  const answer = [
-    '**Issue 12** is stuck: the `review` lane has no free slot.',
-    '```bash',
-    'export GH_TOKEN=' + token,
-    'git push --force-with-lease',
-    '```',
-    `The key ${key} was pasted in the log, and so was ${jwtish}.`,
-    'Run it with postgres://app:hunter2pass@db.internal/main.',
-  ].join('\n');
-  const said = r.spokenText(answer);
-  for (const secret of [token, key, jwtish, 'hunter2pass', 'force-with-lease', 'GH_TOKEN']) assert.ok(!said.includes(secret), `"${secret}" is not read out: ${said}`);
-  assert.match(said, new RegExp(`${r.CODE_OMITTED}`), 'the code block is named, not read');
-  assert.match(said, new RegExp(`The key ${r.SECRET_OMITTED} was pasted`), 'a secret is named, not read');
-  assert.match(said, /^Issue 12 is stuck: the review lane has no free slot\./, 'markdown marks are not read out');
-  assert.match(r.spokenText('Before\n```\nan unclosed block\nstill code'), new RegExp(`^Before\\n${r.CODE_OMITTED}\\.$`), 'an unclosed block is left out to the end');
-  assert.equal(r.spokenText('Commit 3f2a9c1 is fine.'), 'Commit 3f2a9c1 is fine.', 'a short id is ordinary text');
-
-  const f = fakeSynth();
-  const t = new r.TalkBack({ lang: 'en-US', allowNetwork: false, synth: f.s });
-  try {
-    t.setActive(true);
-    assert.deepEqual(await t.speak(answer), { spoken: true });
-    assert.deepEqual(f.calls, ['speak']);
-    assert.equal(f.spoken[0]!.text, said, 'speak gets the redacted text, nothing else');
-    assert.equal(t.speaking, true);
-    f.spoken[0]!.onend?.();
-    assert.equal(t.speaking, false, 'done when the browser says it ended');
-  } finally {
-    t.dispose();
-  }
-});
-
-test("the owner starting to dictate stops the answer being read, at once", async () => {
-  const f = fakeSynth();
-  const t = new r.TalkBack({ lang: 'en-US', allowNetwork: false, synth: f.s });
-  try {
-    t.setActive(true);
-    await t.speak('A long answer about issue 12.');
-    assert.equal(t.speaking, true);
-    const { ctor } = fakeRecognizer();
-    new r.Dictation(ctor, { lang: 'en-US', local: true }, { onFinal: () => {}, onInterim: () => {}, onListening: () => {}, onError: () => {} }).start();
-    assert.deepEqual(f.calls, ['speak', 'cancel'], 'starting dictation cancels speech');
-    assert.equal(t.speaking, false);
-    // And the hook other voice input (the wake word) calls does the same.
-    await t.speak('Another answer.');
-    r.stopSpeaking();
-    assert.deepEqual(f.calls, ['speak', 'cancel', 'speak', 'cancel']);
-  } finally {
-    t.dispose();
-  }
-});
-
-test('Esc, the panel closing and the tab being hidden each stop the reading; nothing starts after a stop', async () => {
-  const f = fakeSynth();
-  const t = new r.TalkBack({ lang: 'en-US', allowNetwork: false, synth: f.s });
-  const doc = Object.assign(new EventTarget(), { visibilityState: 'visible' });
-  const unhide = t.stopWhenHidden(doc);
-  try {
-    t.setActive(true);
-    // Esc.
-    await t.speak('One.');
-    assert.equal(t.escape(), true, 'Esc while reading is taken by the reading');
-    assert.deepEqual([f.calls.at(-1), t.speaking], ['cancel', false], 'Esc cancels');
-    assert.equal(t.escape(), false, 'the next Esc is the panel’s (it closes)');
-    // The tab hidden.
-    await t.speak('Two.');
-    doc.dispatchEvent(new Event('visibilitychange'));
-    assert.equal(t.speaking, true, 'still visible: still reading');
-    doc.visibilityState = 'hidden';
-    const before = f.calls.length;
-    doc.dispatchEvent(new Event('visibilitychange'));
-    assert.deepEqual([f.calls.slice(before), t.speaking], [['cancel'], false], 'hidden cancels');
-    doc.visibilityState = 'visible';
-    // The panel closing (useTalkBack makes it inactive).
-    await t.speak('Three.');
-    t.setActive(false);
-    assert.deepEqual([f.calls.at(-1), t.speaking], ['cancel', false], 'closing the panel cancels');
-    assert.deepEqual(await t.speak('Four.'), { spoken: false, why: null }, 'closed: nothing is read');
-    // A stop while the browser's voices are still loading: nothing starts once they arrive.
-    const late = fakeSynth([]);
-    let fire = () => {};
-    const slow = { ...late.s, synth: { ...late.s.synth, addEventListener: (_: string, fn: () => void) => (fire = fn), removeEventListener: () => {} } };
-    const t2 = new r.TalkBack({ lang: 'en-US', allowNetwork: false, synth: slow, voicesWaitMs: 5000 });
-    t2.setActive(true);
-    const pending = t2.speak('Five.');
-    t2.stop();
-    late.s.synth.getVoices = () => [LOCAL_EN];
-    fire();
-    assert.deepEqual(await pending, { spoken: false, why: null });
-    assert.ok(!late.calls.includes('speak'), 'nothing is read after a stop');
-    t2.dispose();
-  } finally {
-    unhide();
-    t.dispose();
-  }
-});
-
-test('only on-device voices unless the owner allowed network voices; never the browser default by omission', async () => {
-  assert.equal(r.pickVoice([NETWORK_EN, LOCAL_EN], 'en-US', false), LOCAL_EN);
-  assert.equal(r.pickVoice([NETWORK_EN], 'en-US', false), null, 'a network voice is not used unless allowed');
-  assert.equal(r.pickVoice([NETWORK_EN], 'en-US', true), NETWORK_EN, 'allowed: a network voice when there is no local one');
-  assert.equal(r.pickVoice([NETWORK_EN, LOCAL_EN], 'en-US', true), LOCAL_EN, 'allowed, a local voice still comes first');
-  assert.equal(r.pickVoice([{ name: 'Thomas', lang: 'fr-FR', localService: true }], 'en-US', false), null, 'not another language');
-
-  const only = fakeSynth([NETWORK_EN]);
-  const t = new r.TalkBack({ lang: 'en-US', allowNetwork: false, synth: only.s });
-  try {
-    t.setActive(true);
-    assert.deepEqual(await t.speak('Hello.'), { spoken: false, why: r.NO_LOCAL_VOICE });
-    assert.deepEqual(only.calls, [], 'nothing is spoken with only a network voice');
-  } finally {
-    t.dispose();
-  }
-  const both = fakeSynth();
-  const t2 = new r.TalkBack({ lang: 'en-US', allowNetwork: false, synth: both.s });
-  try {
-    t2.setActive(true);
-    await t2.speak('Hello.');
-    assert.equal(both.spoken[0]!.voice, LOCAL_EN, 'the voice is set to the local one, never left to the browser default');
-  } finally {
-    t2.dispose();
-  }
-  assert.match(r.renderTalkStatus(roleOf(asOwner), TALK_ON, false, r.NO_LOCAL_VOICE), /data-testid="chat-talk-note"[^>]*>Not read aloud: no on-device voice/);
-  assert.deepEqual(r.countVoices([LOCAL_EN, NETWORK_EN, { name: 'Thomas', lang: 'fr-FR', localService: true }], 'en-US'), { local: 1, network: 1 });
-  assert.match(r.renderVoiceSettingsVoices(TALK_ON, { local: 0, network: 2 }), /data-testid="voice-voices"[^>]*>Voices for reading aloud \(en-US\): 0 on-device \(2 network, not used\): answers aren(&#x27;|')t read aloud here/);
-});
-
-test('reading aloud sends nothing: no fetch, WebSocket, XHR or EventSource while it speaks or stops', async () => {
-  const g = globalThis as Record<string, unknown>;
-  const network: string[] = [];
-  const saved = { fetch: g.fetch, WebSocket: g.WebSocket, XMLHttpRequest: g.XMLHttpRequest, EventSource: g.EventSource };
-  g.fetch = (...a: unknown[]) => (network.push(`fetch ${String(a[0])}`), Promise.reject(new Error('no network in talk-back')));
-  g.WebSocket = class {
-    constructor(url: string) {
-      network.push(`ws ${url}`);
-    }
-  };
-  g.XMLHttpRequest = class {
-    open(_m: string, url: string) {
-      network.push(`xhr ${url}`);
-    }
-  };
-  g.EventSource = class {
-    constructor(url: string) {
-      network.push(`sse ${url}`);
-    }
-  };
-  const f = fakeSynth();
-  const t = new r.TalkBack({ lang: 'en-US', allowNetwork: true, synth: f.s });
-  try {
-    t.setActive(true);
-    await t.speak('Issue 12 is waiting.\n```\ncode\n```');
-    f.spoken[0]!.onend?.();
-    await t.speak('Again.');
-    t.escape();
-    t.setActive(false);
-    assert.deepEqual(f.calls, ['speak', 'speak', 'cancel', 'cancel']);
-    assert.deepEqual(network, [], 'no fetch, WebSocket, XHR or EventSource during talk-back');
-  } finally {
-    t.dispose();
-    Object.assign(g, saved);
-  }
+  // The Claude account panel starts no unit of its own any more (#736): it looks again only while a request waits or runs.
+  assert.ok(r.accountBusy({ requests: [req({ args: ['claude-account', 'status'], status: 'pending' })] }));
+  assert.ok(r.accountBusy({ requests: [req({ args: ['claude-account', 'status'], status: 'running' })] }));
+  assert.ok(!r.accountBusy({ requests: [req({ args: ['claude-account', 'status'] })] }), 'status runs in the helper itself: no unit to wait for');
 });
 
 test("no effect in the web app returns a member call's value: React calls it as the cleanup (scrollIntoView returns a Promise in Chrome)", () => {
@@ -3638,144 +3178,6 @@ test("no effect in the web app returns a member call's value: React calls it as 
     for (const m of readFileSync(f, 'utf8').matchAll(/use(?:Layout)?Effect\(\(\) => (?!\{|void |\(\) =>)([^,]*?)\(/g)) if (/[.?]/.test(m[1]!)) bad.push(`${f.slice(repoRoot.length)}: ${m[0]}`);
   }
   assert.deepEqual(bad, []);
-});
-
-// Voice intake and spoken approvals (web/src/voice/commands.ts, VoiceControl.tsx): owners only, off until turned on,
-// only from a focused and visible tab; shown on a 10-second banner and acted on only by "confirm" in that window (or
-// a click), once, on exactly the item shown. The server checks it all again (test/voice.test.ts).
-
-const VOICE_ON = { dictation: false, allowCloud: false, talkBack: false, allowNetworkVoices: false, voiceCommands: true };
-const FOCUSED = { focused: true, visible: true };
-/** The state the page has: one open intake approval on #12 (voice may approve it), one excluded plan on #13. */
-const voiceState = {
-  tasks: [{ issue: 12, title: 'Show tax separately', status: 'triage' }, { issue: 13, title: 'Change the payout path', status: 'claimed' }],
-  decisions: [
-    { id: 'd-12', kind: 'intake', issue: 12, question: 'File it?', options: ['approve', 'edit', 'reject'], receipts: ['intake:x'], answer: null, canAnswer: true, voiceRefused: null },
-    { id: 'd-13', kind: 'plan', issue: 13, question: 'Approve this plan?', options: ['approve', 'revise', 'reject'], receipts: ['approve: the build starts with this plan'], answer: null, canAnswer: true, voiceRefused: 'it is high-risk (high-risk: money-path (src/pay.ts)); approve it with a click' },
-  ],
-};
-function machine() {
-  let now = 1_000_000;
-  const m = new r.VoiceCommands({ find: (n) => r.approvalFor(voiceState, n), now: () => now });
-  return { m, tick: (ms: number) => (now += ms) };
-}
-
-test("voice intake and approvals are off by default, the owners' only, and need the switch in Settings", () => {
-  localStorage.setItem('dash-voice', '{}');
-  const prefs = r.readVoicePrefs();
-  assert.equal(prefs.voiceCommands, false, 'off by default');
-  assert.equal(r.mayUseVoice('owner', prefs), false);
-  assert.equal(r.renderVoiceControl(asOwner, prefs), '', 'nothing on the page until turned on');
-  assert.doesNotMatch(r.renderVoiceSettings(true), /data-testid="voice-commands-toggle" checked=""/, 'the switch starts off');
-  assert.match(r.renderVoiceSettings(true), /Voice intake and approvals/);
-  localStorage.setItem('dash-voice', JSON.stringify({ voiceCommands: 'yes' }));
-  assert.equal(r.readVoicePrefs().voiceCommands, false, 'only a stored true turns it on');
-  localStorage.setItem('dash-voice', '{}');
-  assert.equal(r.mayUseVoice('owner', VOICE_ON), true);
-  for (const role of ['writer', 'viewer', undefined]) assert.equal(r.mayUseVoice(role, VOICE_ON), false, `not for a ${role}`);
-  assert.match(r.renderVoiceButton(true, READY_LOCAL), /data-testid="voice-commands"[^>]*data-state="idle"/);
-  assert.equal(r.renderVoiceButton(false, READY_LOCAL), '');
-});
-
-test('an unfocused or hidden tab gets no action: nothing is shown, and a confirm or click does nothing', () => {
-  const tab = (focused: boolean, visibilityState: string) => r.tabState({ hasFocus: () => focused, visibilityState });
-  assert.deepEqual(tab(true, 'visible'), FOCUSED);
-  for (const t of [tab(false, 'visible'), tab(true, 'hidden'), tab(false, 'hidden'), r.tabState(undefined)]) assert.equal(r.voiceActive('owner', VOICE_ON, t), false, JSON.stringify(t));
-  const { m } = machine();
-  assert.equal(m.hear('add a dark mode', false).do, 'nothing', 'unfocused: nothing shown');
-  assert.equal(m.pending, null);
-  assert.equal(m.hear('add a dark mode', true).do, 'show');
-  // The tab loses focus with the banner up: the confirm is not acted on, and nothing stays pending.
-  assert.equal(m.hear('confirm', false).do, 'nothing');
-  assert.equal(m.pending, null);
-  assert.equal(m.hear('approve 12', true).do, 'show');
-  assert.equal(m.click(false).do, 'nothing', 'a click from an unfocused tab does nothing either');
-  assert.equal(m.pending, null);
-});
-
-test('a spoken idea is shown, and sent only on "confirm" within 10 s; a confirm after the window does nothing', () => {
-  const { m, tick } = machine();
-  const shown = m.hear('Add a dark mode to the dashboard.', true);
-  assert.equal(shown.do, 'show');
-  assert.equal((shown.pending as { kind: string; text: string }).text, 'Add a dark mode to the dashboard.');
-  tick(r.CONFIRM_WINDOW_MS - 1);
-  assert.deepEqual(m.hear('Confirm.', true), { do: 'send-intake', text: 'Add a dark mode to the dashboard.' });
-  // Too late: the window closed.
-  m.hear('add a dark mode', true);
-  tick(r.CONFIRM_WINDOW_MS + 1);
-  assert.equal(m.hear('confirm', true).do, 'nothing', 'a confirm after 10 s does nothing');
-  assert.equal(m.click(true).do, 'nothing', 'nor a click');
-  assert.equal(m.pending, null);
-});
-
-test('"cancel", or any other speech in the window, cancels; it is not taken as a new command', () => {
-  const { m } = machine();
-  m.hear('add a dark mode', true);
-  assert.equal(m.hear('cancel', true).do, 'cancelled');
-  assert.equal(m.hear('confirm', true).do, 'nothing', 'nothing left to confirm');
-  m.hear('approve 12', true);
-  const other = m.hear('approve 13', true);
-  assert.equal(other.do, 'cancelled', 'other speech cancels, even another command');
-  assert.equal(m.hear('confirm', true).do, 'nothing');
-  m.hear('add a dark mode', true);
-  assert.equal(m.hear('well actually confirm', true).do, 'cancelled', 'only exactly "confirm" confirms');
-  assert.equal(m.pending, null);
-});
-
-test('"approve <n>" shows the item, its title and what approving does; one confirm approves exactly that one item, once', () => {
-  assert.deepEqual(r.parseHeard('Approve #12.'), { kind: 'approve', issue: 12 });
-  assert.deepEqual(r.parseHeard('approve number 12'), { kind: 'approve', issue: 12 });
-  assert.equal(r.parseHeard('approve it').kind, 'idea');
-  const { m } = machine();
-  const shown = m.hear('approve 12', true);
-  assert.equal(shown.do, 'show');
-  const p = shown.pending as { kind: string; issue: number; decision: string; title: string; effect: string };
-  assert.deepEqual([p.kind, p.issue, p.decision, p.title], ['approve', 12, 'd-12', 'Show tax separately']);
-  assert.match(p.effect, /filed as a ready issue/);
-  assert.match(r.bannerText(shown.pending), /Approve number 12, Show tax separately\. Approving means: /);
-  assert.deepEqual(m.hear('confirm', true), { do: 'approve', issue: 12, decision: 'd-12' });
-  assert.equal(m.hear('confirm', true).do, 'nothing', 'a second confirm approves nothing');
-  assert.equal(m.click(true).do, 'nothing', 'nor a click');
-  // Nothing open on the number: shown as refused, and a confirm does nothing.
-  const none = m.hear('approve 99', true);
-  assert.equal((none.pending as { kind: string }).kind, 'refused');
-  assert.equal(m.hear('confirm', true).do, 'nothing');
-});
-
-test('an excluded item is never approvable by voice on the page either: shown as refused, a confirm does nothing', () => {
-  const { m } = machine();
-  const shown = m.hear('approve 13', true);
-  const p = shown.pending as { kind: string; why: string };
-  assert.equal(p.kind, 'refused');
-  assert.match(p.why, /can't be approved by voice: it is high-risk/);
-  assert.equal(m.hear('confirm', true).do, 'nothing');
-  assert.equal(m.hear('approve 13', true).do, 'show');
-  assert.equal(m.click(true).do, 'nothing', 'nor by a click on the banner');
-  // A server that didn't say voice may approve it (no voiceRefused field): refused too.
-  const older = r.approvalFor({ tasks: [], decisions: [{ ...voiceState.decisions[0], voiceRefused: undefined }] }, 12);
-  assert.equal(older.ok, false);
-});
-
-test('every spoken confirm shows the 10-second banner, with what confirm does, a countdown and the same confirm as a button', () => {
-  const { m } = machine();
-  const idea = m.hear('add a dark mode', true);
-  const html = r.renderVoiceBanner({ pending: idea.pending, left: 10 });
-  assert.match(html, /data-testid="voice-banner"[^>]*data-kind="intake"/);
-  assert.match(html, /data-testid="voice-banner-text"[^>]*>add a dark mode</);
-  assert.match(html, /Say “confirm” within <span class="tabular-nums">10<\/span> s, or click; anything else said cancels\./);
-  assert.match(html, /data-testid="voice-banner-confirm"[^>]*>Send to intake</);
-  m.cancel();
-  const approve = m.hear('approve 12', true);
-  const a = r.renderVoiceBanner({ pending: approve.pending, left: 7 });
-  assert.match(a, /data-kind="approve"/);
-  assert.match(a, /Approve <span class="font-medium">#(<!-- -->)?12<\/span>: (<!-- -->)?Show tax separately/);
-  assert.match(a, /Approving: (<!-- -->)?the report is filed as a ready issue/);
-  assert.match(a, /data-testid="voice-banner-confirm"[^>]*>Approve</);
-  m.cancel();
-  const refused = r.renderVoiceBanner({ pending: m.hear('approve 13', true).pending, left: 10 });
-  assert.match(refused, /data-kind="refused"/);
-  assert.doesNotMatch(refused, /voice-banner-confirm/, 'an exclusion has no confirm button');
-  assert.equal(r.renderVoiceBanner(null), '');
 });
 
 /** The markup with each reserved slot's contents taken out (its own tag, and so its fixed size, kept). */
@@ -3968,297 +3370,6 @@ test("the task graph is on a goal's own page, and only a goal's", () => {
   const withLabels = (labels: (x: State['tasks'][number]) => string[]) => ({ ...asOwner, tasks: asOwner.tasks.map((x) => ({ ...x, labels: labels(x) })) }) as State;
   assert.match(r.renderIssue(withLabels((x) => (x.issue === t.issue ? ['type:goal'] : [])), t.issue), /data-testid="goal-graph"/);
   assert.doesNotMatch(r.renderIssue(withLabels(() => []), t.issue), /data-testid="goal-graph"/);
-});
-
-// The wake word, "hey <brand>" (web/src/voice/wake.ts): owners only, off by default, on this computer only, the
-// microphone open only while everything allows it and never without the indicator, and a hit only starts dictation.
-
-/** Stands in for fetch, WebSocket, XHR and EventSource while `fn` runs; returns every request anything made. */
-async function noNetwork(fn: () => Promise<void> | void): Promise<string[]> {
-  const g = globalThis as Record<string, unknown>;
-  const network: string[] = [];
-  const saved = { fetch: g.fetch, WebSocket: g.WebSocket, XMLHttpRequest: g.XMLHttpRequest, EventSource: g.EventSource };
-  g.fetch = (...a: unknown[]) => (network.push(`fetch ${String(a[0])}`), Promise.reject(new Error('no network')));
-  g.WebSocket = class {
-    constructor(url: string) {
-      network.push(`ws ${url}`);
-    }
-  };
-  g.XMLHttpRequest = class {
-    open(_m: string, url: string) {
-      network.push(`xhr ${url}`);
-    }
-  };
-  g.EventSource = class {
-    constructor(url: string) {
-      network.push(`sse ${url}`);
-    }
-  };
-  try {
-    await fn();
-  } finally {
-    Object.assign(g, saved);
-  }
-  return network;
-}
-
-const settle = async () => {
-  for (let i = 0; i < 5; i++) await new Promise((res) => setImmediate(res));
-};
-
-/** A browser and a wake-word model, stood in: the test says what is visible, what the permission is, and when it hears. */
-function fakeWake(o: { perm?: 'granted' | 'prompt' | 'denied' | null; engine?: boolean } = {}) {
-  const calls: string[] = [];
-  const changes: { status: string; micOpen: boolean }[] = [];
-  let visible = true;
-  const onVis = new Set<() => void>();
-  const onPerm = new Set<() => void>();
-  const perm = o.perm === null ? null : { state: o.perm ?? 'granted', addEventListener: (_t: string, cb: () => void) => onPerm.add(cb), removeEventListener: (_t: string, cb: () => void) => onPerm.delete(cb) };
-  const tracks: { stopped: boolean; ended: (() => void) | undefined }[] = [];
-  const hits: (() => void)[] = [];
-  let listener: { micOpen: boolean } | null = null;
-  const micOpenAtAsk: boolean[] = [];
-  const env = {
-    getUserMedia: async () => {
-      calls.push('getUserMedia');
-      micOpenAtAsk.push(listener?.micOpen ?? false);
-      const t = {
-        stopped: false,
-        ended: undefined as (() => void) | undefined,
-        stop() {
-          this.stopped = true;
-        },
-        addEventListener(_t: string, cb: () => void) {
-          this.ended = cb;
-        },
-      };
-      tracks.push(t);
-      return { getTracks: () => [t] };
-    },
-    visible: () => visible,
-    onVisibility: (cb: () => void) => (onVis.add(cb), () => void onVis.delete(cb)),
-    permission: async () => (calls.push('permission'), perm),
-  };
-  const engine =
-    o.engine === false
-      ? null
-      : {
-          id: 'test',
-          label: 'test model (licence checked)',
-          start: async (a: { phrase: string; onHit: () => void }) => {
-            calls.push(`engine start: ${a.phrase}`);
-            hits.push(a.onHit);
-            return { stop: () => calls.push('engine stop') };
-          },
-        };
-  const woken: number[] = [];
-  const make = (phrase = r.wakePhrase(BRAND.name)) => {
-    const l = new r.WakeListener(engine, env, phrase, { onWake: () => woken.push(1), onChange: (s) => changes.push(s) });
-    listener = l;
-    return l;
-  };
-  return {
-    make,
-    calls,
-    changes,
-    tracks,
-    woken,
-    micOpenAtAsk,
-    hit: () => hits.at(-1)!(),
-    setVisible(v: boolean) {
-      visible = v;
-      for (const cb of onVis) cb();
-    },
-    setPerm(s: 'granted' | 'prompt' | 'denied') {
-      perm!.state = s;
-      for (const cb of onPerm) cb();
-    },
-    gum: () => calls.filter((c) => c === 'getUserMedia').length,
-    open: () => tracks.filter((t) => !t.stopped).length,
-  };
-}
-
-test("the wake word is the owners' only, off by default, and its phrase is the product's name from brand.ts", () => {
-  const all = { dictation: true, allowCloud: false, wakeWord: true };
-  assert.equal(r.mayWake('owner', all), true);
-  for (const role of ['writer', 'viewer', undefined]) assert.equal(r.mayWake(role, all), false, `not for ${role ?? 'no role'}`);
-  assert.equal(r.mayWake('owner', { ...all, wakeWord: false }), false, 'not until an owner turns it on');
-  assert.equal(r.mayWake('owner', { ...all, dictation: false }), false, 'not without the mic button it dictates through');
-  localStorage.setItem('dash-voice', '{}');
-  assert.equal(r.readVoicePrefs().wakeWord, false, 'off by default');
-  localStorage.setItem('dash-voice', JSON.stringify({ dictation: true, wakeWord: 'on' }));
-  assert.equal(r.readVoicePrefs().wakeWord, false, 'only a stored true turns it on');
-  // Settings: the switch is in the owners-only section, unchecked, and names the phrase from the brand the server serves.
-  assert.equal(r.renderVoiceSettings(false, BRAND.name), '', 'no section for anyone but an owner');
-  const settings = r.renderVoiceSettings(true, BRAND.name);
-  assert.match(settings, /data-testid="voice-wake-word"/);
-  assert.doesNotMatch(settings, /checked=""[^>]*data-testid="voice-wake-word"/, 'starts off');
-  assert.ok(settings.includes(`“${r.wakePhrase(BRAND.name)}”`), 'the phrase, from brand.ts');
-  assert.equal(r.wakePhrase('Acme'), 'hey Acme', 'whatever the product is called');
-  localStorage.setItem('dash-voice', '{}');
-  // Nothing in the voice module spells the name out.
-  const dir = join(repoRoot, 'web', 'src', 'voice');
-  for (const f of readdirSync(dir)) assert.doesNotMatch(readFileSync(join(dir, f), 'utf8'), new RegExp(BRAND.cli, 'i'), `${f} doesn't hardcode the product name`);
-});
-
-test('no wake-word model ships: Settings says so and nothing opens the mic', async () => {
-  assert.equal(r.wakeEngine(), null, 'no engine bundled');
-  const on = { dictation: true, allowCloud: false, wakeWord: true };
-  assert.match(r.renderVoiceSettingsView(on, null, BRAND.name), /data-testid="voice-wake-model">No wake-word model installed: it won(&#x27;|')t listen/);
-  assert.match(r.renderVoiceSettingsView(on, null, BRAND.name, 'test model'), /data-testid="voice-wake-model">Model: test model/);
-  const w = fakeWake({ engine: false });
-  const l = w.make();
-  l.set({ enabled: true });
-  await settle();
-  assert.equal(l.status, 'no-model');
-  assert.deepEqual(w.calls, [], 'no permission query, no getUserMedia');
-});
-
-test('no getUserMedia (and no permission query) until an owner turns it on; then the mic opens once', async () => {
-  const w = fakeWake();
-  const l = w.make();
-  await settle();
-  l.set({ enabled: false });
-  await settle();
-  assert.deepEqual([...w.calls], [], 'nothing asked while off');
-  l.set({ enabled: true });
-  await settle();
-  assert.equal(w.gum(), 1);
-  assert.equal(l.status, 'listening');
-  assert.ok(w.calls.includes(`engine start: hey ${BRAND.name}`));
-  // Off again (the setting, or anyone but an owner): the mic closes at once.
-  l.set({ enabled: false });
-  assert.equal(w.open(), 0, 'tracks stopped');
-  assert.equal(l.micOpen, false);
-  assert.ok(w.calls.includes('engine stop'));
-  await settle();
-  assert.equal(w.gum(), 1, 'not reopened');
-});
-
-test('the indicator is on screen whenever the mic is open for the wake word, from the moment it is asked for', async () => {
-  const w = fakeWake();
-  const l = w.make();
-  l.set({ enabled: true });
-  await settle();
-  assert.deepEqual(w.micOpenAtAsk, [true], 'micOpen (the indicator) is already true when getUserMedia is called');
-  assert.ok(w.changes.some((c) => c.micOpen && c.status === 'listening'));
-  assert.equal(l.micOpen, w.open() > 0);
-  w.setVisible(false);
-  assert.equal(l.micOpen, w.open() > 0);
-  const phrase = r.wakePhrase(BRAND.name);
-  const shown = r.renderWakeIndicator(true, phrase);
-  assert.match(shown, /data-testid="wake-indicator"/);
-  assert.match(shown, /role="status"/);
-  assert.match(shown, /class="fixed /, 'fixed: on screen whatever the page');
-  assert.ok(shown.includes(`Mic on: listening for <q class="font-medium">${phrase}</q>`), 'says so in words');
-  assert.match(shown, /data-testid="wake-off"/, 'and can be turned off right there');
-  assert.equal(r.renderWakeIndicator(false, phrase), '', 'gone once the mic is closed');
-  // The dashboard renders it on every page, outside the routed page.
-  assert.match(readFileSync(join(repoRoot, 'web', 'src', 'App.tsx'), 'utf8'), /\{state && <WakeWord role=\{state\.role\} brand=\{state\.brand\.name\} \/>\}/);
-});
-
-test('a wake word stops talk-back and starts on-device dictation into the box; nothing is sent, no network at all', async () => {
-  const box = { value: 'Draft', selectionStart: 5, selectionEnd: 5, setSelectionRange() {} };
-  const { ctor, made } = fakeRecognizer();
-  const w = fakeWake();
-  // An answer being read aloud (talk.ts) when the owner says the wake word.
-  const f = fakeSynth();
-  const talk = new r.TalkBack({ lang: 'en-US', allowNetwork: false, synth: f.s });
-  const network = await noNetwork(async () => {
-    const l = w.make();
-    l.set({ enabled: true });
-    talk.setActive(true);
-    await talk.speak('A long answer about issue 12.');
-    assert.equal(talk.speaking, true);
-    await settle();
-    w.hit();
-    assert.deepEqual(w.woken, [1], 'the Ask panel is told');
-    assert.equal(talk.speaking, false, "talk-back stopped at the hit, through talk.ts's stopSpeaking, before dictation starts");
-    assert.deepEqual(f.calls, ['speak', 'cancel']);
-    assert.equal(w.open(), 0, 'the wake mic is closed: dictation has it now');
-    assert.equal(l.status, 'held');
-    // What the Ask panel does on the wake: the same dictation as the mic button.
-    const dictation = new r.Dictation(ctor, { lang: 'en-US', local: true }, { onFinal: r.intoBox(() => box, () => {}), onInterim: () => {}, onListening: () => {}, onError: () => {} });
-    assert.equal(r.startOnWake({ support: READY_LOCAL, listening: false, start: () => dictation.start() }), 'started');
-    l.dictating(true);
-    await settle();
-    assert.equal(w.gum(), 1, 'no wake mic while dictating');
-    l.dictating(false);
-    await settle();
-    assert.equal(w.gum(), 2, 'listening again once dictation ends');
-    l.dispose();
-    talk.dispose();
-  });
-  assert.deepEqual(made[0]!.calls, ['start'], 'dictation started, and only that');
-  assert.equal((made[0] as unknown as { processLocally: boolean }).processLocally, true, 'on-device, as the mic button');
-  assert.equal(box.value, 'Draft', 'nothing typed, nothing sent');
-  assert.deepEqual(network, [], 'no fetch, WebSocket, XHR or EventSource from the wake word');
-  // The support check still running waits; no on-device recognizer never starts one.
-  let started = 0;
-  assert.equal(r.startOnWake({ support: null, listening: false, start: () => started++ }), 'pending');
-  assert.equal(r.startOnWake({ support: { kind: 'disabled', why: r.NO_ON_DEVICE }, listening: false, start: () => started++ }), 'unavailable');
-  assert.equal(started, 0);
-});
-
-test('a hidden tab closes the wake mic at once; visible again, it listens again', async () => {
-  const w = fakeWake();
-  const l = w.make();
-  l.set({ enabled: true });
-  await settle();
-  assert.equal(w.open(), 1);
-  w.setVisible(false);
-  assert.equal(w.open(), 0, 'tracks stopped synchronously on hide');
-  assert.equal(l.micOpen, false);
-  await settle();
-  assert.equal(l.status, 'hidden');
-  assert.equal(w.gum(), 1);
-  w.setVisible(true);
-  await settle();
-  assert.equal(w.gum(), 2);
-  assert.equal(l.status, 'listening');
-  // Hidden while the mic is still being asked for: the stream that arrives late is stopped, not used.
-  w.setVisible(false);
-  w.setVisible(true);
-  w.setVisible(false);
-  await settle();
-  assert.equal(w.open(), 0);
-  assert.equal(l.micOpen, false);
-  l.dispose();
-});
-
-test('a revoked or denied mic permission closes it and it is not asked for again', async () => {
-  const w = fakeWake();
-  const l = w.make();
-  l.set({ enabled: true });
-  await settle();
-  w.setPerm('prompt');
-  await settle();
-  assert.equal(w.open(), 0);
-  assert.equal(l.status, 'revoked');
-  assert.equal(w.gum(), 1, 'not asked again');
-  w.setPerm('granted');
-  await settle();
-  assert.equal(w.gum(), 2, 'granted again: listens');
-  // A track that ends (the browser took the mic away): closed, not reopened.
-  w.tracks.at(-1)!.ended?.();
-  await settle();
-  assert.equal(l.status, 'revoked');
-  assert.equal(w.gum(), 2);
-  l.dispose();
-  const denied = fakeWake({ perm: 'denied' });
-  const d = denied.make();
-  d.set({ enabled: true });
-  await settle();
-  assert.equal(denied.gum(), 0, 'denied: never asked');
-  assert.equal(d.status, 'blocked');
-});
-
-test('the listening marker is our own ring, and holds still under prefers-reduced-motion', () => {
-  const css = readFileSync(join(repoRoot, 'web', 'src', 'styles.css'), 'utf8');
-  assert.match(r.renderWakeIndicator(true, 'hey x'), /<span class="wake-ring" aria-hidden="true"><\/span>/);
-  assert.match(css, /\.wake-ring::after \{[^}]*animation: wake-pulse /, 'it pulses');
-  assert.match(css, /@media \(prefers-reduced-motion: reduce\) \{ \.wake-ring::after \{ display: none; animation: none; \} \}/, 'reduced motion: the pulse is gone');
-  assert.match(css, /\.wake-ring \{[^}]*border: 2px solid var\(--red\)/, 'the still ring stays, in the theme token');
 });
 
 test("a dot for an instance whose incidents couldn't be read is grey (unknown) with why, not red; red stays for an open red incident or one not answering", async () => {

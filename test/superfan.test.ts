@@ -10,6 +10,7 @@ import { join } from 'node:path';
 import type { Backlog } from '../src/backlog/types.js';
 import type { StoredEvent } from '../src/events/types.js';
 import { redactPii } from '../src/intake/redact.js';
+import { readSlotFile } from '../src/slot-file.js';
 import { IntakeConfig, type IntakeSource } from '../src/intake/report.js';
 import { FakeRunner, type RunRequest } from '../src/runner.js';
 import { superfanPass, type SuperfanDeps } from '../src/superfan/superfan.js';
@@ -180,7 +181,7 @@ test('no secret reaches the model: tokens in an incident, an event and the journ
     assert.ok(!JSON.stringify(w.filed).includes(secret), `the issue holds ${secret.slice(0, 8)}…`);
   }
   // Its state file keeps no secret either.
-  assert.ok(!readFileSync(w.deps.stateFile, 'utf8').includes(GH_TOKEN));
+  assert.ok(!readSlotFile(w.deps.stateFile).includes(GH_TOKEN));
 });
 
 // ---------------------------------------------------------------- through the coordinator

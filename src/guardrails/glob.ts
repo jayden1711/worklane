@@ -1,4 +1,8 @@
-/** Minimal glob → RegExp for repo-relative paths: **, *, ?, and trailing "/" meaning "everything under". */
+/**
+ * Minimal glob → RegExp for repo-relative paths: **, *, ?, and trailing "/" meaning "everything under".
+ * `**` matches any characters, a newline among them (the `s` flag): git reads a path with a newline as itself, so
+ * `.claude/skills/a<newline>b/SKILL.md` is under `.claude/**` like any other (#683).
+ */
 export function globToRegExp(glob: string): RegExp {
   let g = glob.replace(/^\.\//, '');
   if (g.endsWith('/')) g += '**';
@@ -16,5 +20,5 @@ export function globToRegExp(glob: string): RegExp {
     } else if (c === '?') re += '[^/]';
     else re += c.replace(/[.+^${}()|[\]\\]/g, '\\$&');
   }
-  return new RegExp(`^${re}$`);
+  return new RegExp(`^${re}$`, 's');
 }

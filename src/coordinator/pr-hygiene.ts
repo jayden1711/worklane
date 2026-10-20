@@ -9,6 +9,7 @@ import type { PullRequest } from '../backlog/types.js';
 import { conflictTrigger } from '../conflicts.js';
 import type { EventPayload } from '../events/types.js';
 import { abortMerge, mergeBaseInto } from '../merge-base.js';
+import { shownPaths } from '../path-text.js';
 import { abandoned, carriedHead, countsOf, daysBetween, heldReasons, HYGIENE_MARKER, hygieneDue, isStale, lastActivity, supersededBy, type HygieneCounts, type HygieneResult } from '../pr-hygiene.js';
 import { checkedPush } from '../push-check.js';
 import { Gardener } from './gardener.js';
@@ -124,7 +125,7 @@ export abstract class PrHygiene extends Gardener {
         abortMerge(dir);
         // GitHub hasn't caught up: the PR watch looks again, and its conflict path takes it from there.
         this.prPolled.delete(number);
-        return { number, outcome: 'conflicting', why: `conflicts with ${this.branch} in ${Object.keys(m.conflicted).join(', ')}; nothing pushed` };
+        return { number, outcome: 'conflicting', why: `conflicts with ${this.branch} in ${shownPaths(Object.keys(m.conflicted))}; nothing pushed` };
       }
       const push = checkedPush({ cwd: dir, remote: this.remote, base: tip, head: m.head, ref: `refs/heads/${pr.head}`, limits: this.d.cfg.guardrails.push, guard: this.pushGuard(), expect: pr.headSha });
       if (!push.ok) return { number, outcome: 'skipped', why: 'refused' in push ? `the push was refused: ${push.refused.join('; ')}` : `the branch moved (someone pushed), so nothing was pushed over it` };

@@ -1,6 +1,8 @@
-// Which Tailscale device a terminal request comes from, and whether it's one the owner allowed (the hub's
-// console_devices: Tailscale tags such as tag:owner-laptop, and/or MagicDNS node names). Fails closed: an empty
-// list, an unknown device, or a device that can't be identified is refused.
+// Which Tailscale device a request comes from, and whether it's one the owner allowed for machine changes (the hub's
+// machine devices, dashboards.sh --machine-devices: Tailscale tags such as tag:owner-laptop, and/or MagicDNS node
+// names). The hooks gateway identifies devices the same way. Fails closed: an empty list, an unknown device,
+// or a device that can't be identified is refused. (The file keeps its name from the owner terminal, removed in #742,
+// which used the same check.)
 //
 // How the device is identified, behind `tailscale serve --https=443 http://127.0.0.1:<hub port>`:
 // 1. The connection must come from tailscaled itself. The hub listens on loopback, so anyone on the machine
@@ -14,12 +16,12 @@
 // 3. That address is looked up with Tailscale's own LocalAPI (`tailscale whois --json <ip>`): the node's
 //    MagicDNS name and its tags, from the control plane. The Tailscale-User-* headers are never used: serve sets
 //    them only for user-owned nodes, and they name a user, not a device.
-// The break-glass port (the token, loopback only; #197) never opens a terminal: nothing there says which device.
+// The break-glass port (the token, loopback only; #197) never identifies a device: nothing there says which device.
 import { execFileSync } from 'node:child_process';
 import type { IncomingMessage } from 'node:http';
 import { loopbackPeerUid } from '../os/index.js';
 
-/** The break-glass port (#197's HUB_BREAK_GLASS_PORT): the terminal is never served there. */
+/** The break-glass port (#197's HUB_BREAK_GLASS_PORT): no device is identified there. */
 export const BREAK_GLASS_PORT = 4398;
 /** tailscaled's uid: it runs as root. */
 export const TAILSCALED_UID = 0;
@@ -30,7 +32,7 @@ export interface Device {
   tags: string[];
   /** Its Tailscale address. */
   ip: string;
-  /** Tailscale's stable node id (whois Node.StableID), when Tailscale gives one: a Siri token binds to it. */
+  /** Tailscale's stable node id (whois Node.StableID), when Tailscale gives one: the hooks gateway locks a device out by it. */
   stableId?: string;
 }
 
@@ -75,7 +77,7 @@ export function deviceAllowed(d: Pick<Device, 'name' | 'tags'>, allow: string[])
 /** The device behind a request, from Tailscale: only for a connection tailscaled made, never from what a client says. */
 export function identifyDevice(req: IncomingMessage, o: DeviceOptions): DeviceCheck {
   const sock = req.socket;
-  if (sock.localPort === (o.breakGlassPort ?? BREAK_GLASS_PORT)) return { ok: false, why: "the terminal isn't served on the break-glass port: open it from an allowed Tailscale device, through the hub's HTTPS address" };
+  if (sock.localPort === (o.breakGlassPort ?? BREAK_GLASS_PORT)) return { ok: false, why: "no device is identified on the break-glass port: come from an allowed Tailscale device, through the hub's HTTPS address" };
   if (!['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(sock.remoteAddress ?? '') || !sock.remotePort || !sock.localPort) return { ok: false, why: "this request didn't come through tailscale serve, so its device can't be identified" };
   const uid = (o.peerUid ?? loopbackPeerUid)(sock.remotePort, sock.localPort);
   if (uid === null) return { ok: false, why: "can't tell which program opened this connection, so its Tailscale device can't be identified" };
@@ -96,12 +98,12 @@ export function identifyDevice(req: IncomingMessage, o: DeviceOptions): DeviceCh
   return { ok: true, device: { name, tags, ip, ...(stableId ? { stableId } : {}) } };
 }
 
-/** Why this request's device may not open the terminal; null when it may. Fails closed. */
+/** Why this request's device isn't one of the allowed devices; null when it is. Fails closed. */
 export function deviceRefusal(req: IncomingMessage, o: DeviceOptions): { why: string | null; device: Device | null } {
-  if (!o.allow.length) return { why: 'no Tailscale devices are allowed to open the terminal (console_devices is empty): the owner lists them in dashboards.sh --console-devices', device: null };
+  if (!o.allow.length) return { why: 'no Tailscale devices are allowed (the machine devices are empty): the owner lists them in dashboards.sh --machine-devices', device: null };
   const d = identifyDevice(req, o);
   if (!d.ok) return { why: d.why, device: null };
-  if (!deviceAllowed(d.device, o.allow)) return { why: `${d.device.name}${d.device.tags.length ? ` (${d.device.tags.join(', ')})` : ''} isn't one of the devices allowed to open the terminal`, device: d.device };
+  if (!deviceAllowed(d.device, o.allow)) return { why: `${d.device.name}${d.device.tags.length ? ` (${d.device.tags.join(', ')})` : ''} isn't one of the allowed devices (dashboards.sh --machine-devices)`, device: d.device };
   return { why: null, device: d.device };
 }
 

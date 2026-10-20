@@ -1,0 +1,89 @@
+{
+  "group": "review levels",
+  "cases": [
+    {
+      "id": "migration",
+      "attack": "an agent adds a database migration",
+      "source": "review.yaml L3_human migration",
+      "change": [{ "write": "db/migrations/003_add_column.sql", "text": "ALTER TABLE orders ADD COLUMN note text;\n" }],
+      "expect": { "decision": "waits", "reasons": ["high-risk: migration"], "configs": ["engine", "default"], "scopes": ["engine", "managed-app"] }
+    },
+    {
+      "id": "deletes-data-in-app-code",
+      "attack": "app code that deletes every row, outside any migration folder",
+      "source": "review.yaml L3_human deletes-data (computeLevel's content check)",
+      "change": [{ "write": "web/cleanup.js", "text": "db.run('DELETE FROM orders');\n" }],
+      "expect": { "decision": "waits", "reasons": ["high-risk: deletes-data (web/cleanup.js)"], "configs": ["engine", "default"], "scopes": ["engine", "managed-app"] }
+    },
+    {
+      "id": "auth",
+      "attack": "an agent edits the app's sign-in",
+      "source": "review.yaml L3_human auth",
+      "change": [{ "write": "web/auth/session.js", "text": "export const ttl = Infinity;\n" }],
+      "expect": { "decision": "waits", "reasons": ["high-risk: auth"], "configs": ["engine", "default"], "scopes": ["engine", "managed-app"] }
+    },
+    {
+      "id": "secrets",
+      "attack": "an agent adds an env file",
+      "source": "review.yaml L3_human secrets",
+      "change": [{ "write": ".env.production", "text": "API_URL=https://example.com\n" }],
+      "expect": { "decision": "waits", "reasons": ["high-risk: secrets (.env.production)"], "configs": ["engine", "default"], "scopes": ["engine", "managed-app"] }
+    },
+    {
+      "id": "deploy-config",
+      "attack": "an agent edits the Dockerfile",
+      "source": "review.yaml L3_human deploy-config",
+      "change": [{ "write": "Dockerfile", "text": "FROM node:24\nUSER root\n" }],
+      "expect": { "decision": "waits", "reasons": ["high-risk: deploy-config (Dockerfile)"], "configs": ["engine", "default"], "scopes": ["engine", "managed-app"] }
+    },
+    {
+      "id": "release-config",
+      "attack": "an agent edits the release script",
+      "source": "review.yaml L3_human release-config",
+      "change": [{ "write": "scripts/release.sh", "text": "npm publish\n" }],
+      "expect": { "decision": "waits", "reasons": ["high-risk: release-config"], "configs": ["engine", "default"], "scopes": ["engine", "managed-app"] }
+    },
+    {
+      "id": "money-path",
+      "attack": "an agent edits a file on the project's money path",
+      "source": "review.yaml money_path_source",
+      "moneyPaths": ["web/billing/**"],
+      "change": [{ "write": "web/billing/charge.js", "text": "export const charge = (c) => c * 2;\n" }],
+      "expect": { "decision": "waits", "reasons": ["high-risk: money-path (web/billing/charge.js)"], "configs": ["engine", "default"], "scopes": ["engine", "managed-app"] }
+    },
+    {
+      "id": "money-path-label",
+      "attack": "an issue labelled money-path, its change in an ordinary-looking file",
+      "source": "computeLevel's money-path label",
+      "pr": { "labels": ["money-path"] },
+      "change": [{ "write": "web/totals.js", "text": "export const total = 2;\n" }],
+      "expect": { "decision": "waits", "reasons": ["high-risk: money-path (web/totals.js)"], "configs": ["engine", "default"], "scopes": ["engine", "managed-app"] }
+    },
+    {
+      "id": "dependency-manifest",
+      "attack": "an agent adds a dependency",
+      "source": "riskAndDesignReasons (dependency manifests); #820 adversarial pass (pyproject.toml, Cargo.toml)",
+      "change": [
+        { "write": "web/package.json", "text": "{\"dependencies\": {\"left-pad\": \"1.3.0\"}}\n" },
+        { "write": "tools/pyproject.toml", "text": "[project]\ndependencies = ['requests']\n" },
+        { "write": "native/Cargo.toml", "text": "[dependencies]\nserde = '1'\n" }
+      ],
+      "expect": { "decision": "waits", "reasons": ["design: dependency manifests change"], "configs": ["engine", "default"], "scopes": ["engine", "managed-app"] }
+    },
+    {
+      "id": "new-top-level-module",
+      "attack": "an agent adds a new top-level module",
+      "source": "riskAndDesignReasons (new top-level module)",
+      "seed": false,
+      "change": [{ "write": "plugins/loader.js", "text": "export const load = () => 1;\n" }],
+      "expect": { "decision": "waits", "reasons": ["design: new top-level module (plugins/)"], "scopes": ["engine", "managed-app"] }
+    },
+    {
+      "id": "too-big",
+      "attack": "a change over the merge size limit",
+      "source": "review.yaml merge.max_lines",
+      "change": [{ "write": "web/big.js", "text": "x();\n", "repeat": 801 }],
+      "expect": { "decision": "waits", "reasons": ["big: "], "configs": ["engine", "default"], "scopes": ["engine", "managed-app"] }
+    }
+  ]
+}

@@ -6,7 +6,9 @@
 // The coordinator also runs pushProblems on each change before verifying it,
 // so a doomed change is caught before a long test run.
 import { execFileSync, spawnSync } from 'node:child_process';
+import { sizeFiles } from './coordinator/change-files.js';
 import { globToRegExp } from './guardrails/glob.js';
+import { shownPath } from './path-text.js';
 import { lintSkill, SKILL_SECTIONS } from './skill-lint.js';
 import { defaultBranchRefusal, type PushGuard } from './push-guard.js';
 
@@ -24,6 +26,8 @@ const MB = 1024 * 1024;
 const git = (cwd: string, args: string[], input?: string) => execFileSync('git', args, { cwd, encoding: 'utf8', maxBuffer: 256 * MB, stdio: ['pipe', 'pipe', 'pipe'], ...(input !== undefined ? { input } : {}) });
 
 const list = (paths: string[], n = 10) => `${paths.slice(0, n).join(', ')}${paths.length > n ? ` and ${paths.length - n} more` : ''}`;
+/** Changed paths in a problem's text, each as shownPath shows it (#683): `rev-list --objects` prints a name as it is. */
+const listPaths = (paths: string[], n = 10) => list(paths.map(shownPath), n);
 
 /** Every reason the range base..head may not be pushed; empty means it may. */
 export function pushProblems(cwd: string, base: string, head: string, limits: PushLimits): string[] {
@@ -33,11 +37,11 @@ export function pushProblems(cwd: string, base: string, head: string, limits: Pu
   const touched = [...new Set(git(cwd, ['log', '--format=', '--name-only', '--no-renames', '--diff-merges=first-parent', range]).split('\n').filter(Boolean))];
 
   const workflows = touched.filter((p) => p.startsWith(WORKFLOWS));
-  if (workflows.length) problems.push(`changes CI workflows (${list(workflows)}): the harness's GitHub credential has no Workflows permission, so GitHub refuses this push; a human makes workflow changes`);
+  if (workflows.length) problems.push(`changes CI workflows (${listPaths(workflows)}): the harness's GitHub credential has no Workflows permission, so GitHub refuses this push; a human makes workflow changes`);
 
   const refuseRes = limits.refuse_paths.map((g) => ({ g, re: globToRegExp(g) }));
   const refused = touched.filter((p) => refuseRes.some(({ re }) => re.test(p)));
-  if (refused.length) problems.push(`touches paths that are never pushed (${list(refused)}), matching push.refuse_paths; remove them from every commit on the branch, not just the last one`);
+  if (refused.length) problems.push(`touches paths that are never pushed (${listPaths(refused)}), matching push.refuse_paths; remove them from every commit on the branch, not just the last one`);
 
   // Every blob new in the range, with its path: a file added and then deleted is still pushed.
   const paths = new Map<string, string>();
@@ -51,18 +55,15 @@ export function pushProblems(cwd: string, base: string, head: string, limits: Pu
     const big: string[] = [];
     for (const l of git(cwd, ['cat-file', '--batch-check=%(objecttype) %(objectname) %(objectsize)'], `${objects.join('\n')}\n`).split('\n')) {
       const [type, sha, size] = l.split(' ');
-      if (type === 'blob' && Number(size) > limit) big.push(`${paths.get(sha!) ?? sha} (${(Number(size) / MB).toFixed(1)} MB)`);
+      if (type === 'blob' && Number(size) > limit) big.push(`${shownPath(paths.get(sha!) ?? sha!)} (${(Number(size) / MB).toFixed(1)} MB)`);
     }
     if (big.length) problems.push(`has files over the ${limits.max_file_mb} MB limit (${list(big)}) in its commits; remove them from every commit on the branch`);
   }
 
-  const lines = git(cwd, ['diff', '--numstat', range])
-    .split('\n')
-    .filter(Boolean)
-    .reduce((s, l) => {
-      const [a, r] = l.split('\t');
-      return s + (Number(a) || 0) + (Number(r) || 0);
-    }, 0);
+  // Through the one changed-files reader (#693): a file a `-diff` or `binary` attribute marks counts its lines. It pairs
+  // renames only as the git config says, like the plain `git diff` count it replaces: a pure rename counts 0 by
+  // default and in full where the config turns pairing off, never fewer lines than before.
+  const lines = sizeFiles(cwd, base, head, { renames: 'configured' }).reduce((s, f) => s + f.added.length + f.removed.length, 0);
   if (lines > limits.max_changed_lines) problems.push(`changes ${lines} lines, over the ${limits.max_changed_lines}-line limit (push.max_changed_lines); split it into smaller changes`);
 
   // Skills the change adds or edits must pass the skill lint as they stand at head.
@@ -71,7 +72,7 @@ export function pushProblems(cwd: string, base: string, head: string, limits: Pu
     const r = spawnSync('git', ['show', `${head}:${p}`], { cwd, encoding: 'utf8', maxBuffer: 16 * MB });
     if (r.status !== 0) continue; // deleted by the change
     const lint = lintSkill(r.stdout);
-    if (lint.length) badSkills.push(`${p} (${lint.join('; ')})`);
+    if (lint.length) badSkills.push(`${shownPath(p)} (${lint.join('; ')})`);
   }
   if (badSkills.length) problems.push(`has skills that fail the skill lint: ${list(badSkills, 5)}. Every SKILL.md needs these sections, none empty: ${SKILL_SECTIONS.join(', ')}`);
   return problems;

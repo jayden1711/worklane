@@ -73,10 +73,9 @@ export interface RunRequest {
   onTransientRetry?: (r: TransientRetry) => void;
   signal?: AbortSignal;
   /**
-   * An open-model provider this run goes to (src/providers.ts), resolved by the coordinator: claude talks to its
-   * Anthropic-compatible endpoint, with the key from its file through apiKeyHelper (never an environment variable),
-   * and `model` is the provider's own model id. Absent: Anthropic, as always. Kind `cli`: another vendor's coding
-   * CLI (src/cli-agents.ts) runs it instead of claude, its budget enforced from its token counts at these prices.
+   * An open-model provider for this run (src/providers.ts): its Anthropic-compatible endpoint, the key from its file
+   * via apiKeyHelper (never an environment variable), `model` its own id. Absent: Anthropic. Kind `cli`: another
+   * vendor's CLI runs it, budget enforced from its token counts.
    */
   provider?: { name: string; kind: 'local' | 'hosted'; baseUrl: string; keyFile: string } | { name: string; kind: 'cli'; agent: CliAgentName; usdPerMtok: { in: number; out: number } };
   /**
@@ -92,9 +91,8 @@ export interface RunRequest {
     noFallback?: boolean;
   };
   /**
-   * A person is waiting on this run (a chat-channel reply, a question in a decision's thread): it takes its Claude
-   * login's start lock only (the auth check and claude's start, when a token refresh happens), never the login's
-   * run lock, so it doesn't wait behind an agent run. Same lane, sandbox, tools and caps as any run.
+   * A person is waiting (chat reply, thread question): only the login's start lock, never its run lock, so it doesn't
+   * wait behind an agent run. Same lane, sandbox, tools and caps.
    */
   interactive?: boolean;
   /** The lane this run belongs to (an issue's lane:<name> label); default when unset. */
@@ -111,9 +109,8 @@ export interface RunRequest {
    */
   stuck?: { mode: StuckMode; onVerdict?: (v: StuckVerdict, action: 'log' | 'stop') => void };
   /**
-   * An earlier session to continue (`claude --resume <id>`), with its context: the one that wrote the change a fix
-   * run works on. Sessions live in the Claude login's home (the agent user's), so the run must go to the same lane.
-   * A session that is gone ends the run failed at turn 0 ("No conversation found"); the caller falls back to a fresh run.
+   * An earlier session to continue (`claude --resume <id>`), e.g. the one that wrote the change a fix run works on; it
+   * lives in the agent user's Claude home, so same lane. A gone session fails at turn 0; the caller runs fresh.
    */
   resume?: string;
 }
@@ -150,10 +147,8 @@ export interface RunResult {
 }
 
 /**
- * A live session's console handle. The session's input stays open (stream-json) for the whole run: a message
- * is held until the current turn's result, then delivered as the next user message (a message written mid-turn
- * would be folded into that turn and change its outcome). With nothing held at a result, the input is closed
- * and the session ends.
+ * A live session's console handle: input stays open; a message is held until the turn's result, then sent as the next
+ * user message (mid-turn it would change that turn). With nothing held at a result, the session ends.
  */
 export interface RunControl {
   /** The run's id: its run record and live feed (null without a state dir). */
@@ -177,15 +172,36 @@ export interface AgentRunner {
 // root's network.json (src/network.ts outboundEnv, applied below).
 const PASS_THROUGH = ['CLAUDE_CONFIG_DIR', 'PATH', 'HOME', 'USER', 'LOGNAME', 'SHELL', 'LANG', 'LC_ALL', 'TERM', 'TMPDIR', 'TZ', 'XDG_RUNTIME_DIR', 'SystemRoot', 'ComSpec', 'PATHEXT', 'APPDATA', 'LOCALAPPDATA', 'USERPROFILE', 'ProgramData', 'ProgramFiles'];
 
+/** An agent_runtime kind (config.yaml agent_runtime.kind; `sdk` is read as api_key). */
+export type RuntimeKind = 'cli' | 'api_key';
+
+/** The `claude auth status` methods each kind runs on; the preflight below and the wizard's Claude step read this one table (#738). */
+export const RUNTIME_LOGINS: Readonly<Record<RuntimeKind, readonly string[]>> = {
+  cli: ['claude.ai', 'oauth_token'],
+  api_key: ['api_key', 'api_key_helper'],
+};
+
+/** The login a `claude auth status` answer names: 'none' unless `loggedIn` is exactly true, 'unknown' with no method. */
+export function loginMethod(j: { loggedIn?: unknown; authMethod?: unknown }): string {
+  if (j.loggedIn !== true) return 'none';
+  return typeof j.authMethod === 'string' && j.authMethod ? j.authMethod : 'unknown';
+}
+
+/** What of `base` reaches claude in an agent run (the pass-through list; for api_key, local runs, the key); the Claude step uses it too. */
+export function agentAuthEnv(base: NodeJS.ProcessEnv, runtime: 'cli' | 'api_key'): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {};
+  for (const k of PASS_THROUGH) if (base[k] !== undefined) env[k] = base[k];
+  // Local runs only: an instance never has the key in its environment (it reaches claude through apiKeyHelper).
+  if (runtime === 'api_key' && base.ANTHROPIC_API_KEY) env.ANTHROPIC_API_KEY = base.ANTHROPIC_API_KEY;
+  return env;
+}
+
 /**
  * The agent's whole environment. Anything not listed is dropped, which
  * removes GitHub tokens, cloud keys, database URLs and the SSH agent.
  */
 export function agentEnv(base: NodeJS.ProcessEnv, runtime: 'cli' | 'api_key', extra: Record<string, string> = {}): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = {};
-  for (const k of PASS_THROUGH) if (base[k] !== undefined) env[k] = base[k];
-  // Local runs only: an instance never has the key in its environment (it reaches claude through apiKeyHelper).
-  if (runtime === 'api_key' && base.ANTHROPIC_API_KEY) env.ANTHROPIC_API_KEY = base.ANTHROPIC_API_KEY;
+  const env = agentAuthEnv(base, runtime);
   Object.assign(env, {
     [`${BRAND.envPrefix}_AGENT`]: '1',
     CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1',
@@ -238,12 +254,13 @@ export interface RunAs {
   claudeConfigDir?: string;
   /** PATH for project commands run as this user (instance.yaml run_as.path; default: defaultAgentPath()). */
   path?: string;
+  /** What project commands run as this user never see, besides its Claude logins (projectCommandHides, src/instance.ts). */
+  hide?: readonly string[];
 }
 
 /**
- * The agent user's own identity and places: its home, its name, its Claude login and its XDG dirs under its home.
- * The one source for every process run as the agent user that reads its login (agent runs, and every `claude auth
- * status` probe), so a probe can't look in the coordinator's home while runs look in the agent's.
+ * The agent user's home, name, Claude login and XDG dirs: the one source for every process that reads its login (runs
+ * and `claude auth status` probes), so a probe never looks in the coordinator's home.
  */
 export function agentUserEnv(r: RunAs): Record<string, string> {
   const j = posix.join; // agent users exist on POSIX systems only
@@ -302,7 +319,7 @@ export function claudeAuthStatus(env: NodeJS.ProcessEnv, runAs?: RunAs, bin = 'c
   try {
     const j = JSON.parse(r.stdout) as { loggedIn?: boolean; authMethod?: string; email?: unknown; orgName?: unknown };
     const account = typeof j.email === 'string' && j.email ? j.email : typeof j.orgName === 'string' && j.orgName ? j.orgName : null;
-    return { method: j.loggedIn ? (j.authMethod ?? 'unknown') : 'none', text: '', account: account?.slice(0, 200) ?? null };
+    return { method: loginMethod(j), text: '', account: account?.slice(0, 200) ?? null };
   } catch {
     return { method: 'unknown', text: `${r.stdout ?? ''}\n${r.stderr ?? ''}`.trim().slice(-500) };
   }
@@ -357,14 +374,9 @@ export const TRANSIENT_BUDGET_MS = 30 * 60_000;
 const STARTUP_WINDOW_MS = 90_000;
 
 /**
- * Two locks per Claude login (CLAUDE_CONFIG_DIR). Why: three runs started 0.1 s apart on one login all failed on
- * "another Claude Code process is refreshing it": two claude processes refreshing one OAuth login at once, and the
- * loser fails. claude refreshes a due token before its first request, so:
- * - the start lock (loginStartLock) covers the auth check and claude's start until its first answer (or its end,
- *   or LOGIN_START_HOLD_MS): no two claude processes on one login are ever starting, and refreshing, at once.
- *   Every run takes it.
- * - the run lock (withLoginLock) keeps agent runs one at a time per login for their whole run, as before. An
- *   interactive run (a person waiting: chat, thread questions) doesn't take it, so it never waits behind one.
+ * Two locks per Claude login: two claude processes refreshing one OAuth login at once fail. The start lock (every run)
+ * covers the auth check and claude's start until its first answer (or LOGIN_START_HOLD_MS). The run lock keeps agent
+ * runs one at a time per login; an interactive run (a person waiting) skips it.
  */
 const loginLocks = new Map<string, Promise<unknown>>();
 const startLocks = new Map<string, Promise<unknown>>();
@@ -490,8 +502,8 @@ export class CliRunner implements AgentRunner {
      */
     private apiKeyFile?: string,
     /**
-     * The Claude login a run as this user uses, read when each run starts (src/claude-profiles.ts: the instance's
-     * active account profile), and every login's credentials file that user has, which no agent command may read.
+     * The Claude login a run as this user uses, read when each run starts (src/claude-accounts-retired.ts: its user's
+     * own, never a profile's), and every login's credentials file that user has, which no agent command may read.
      * Unset: the user's own claudeConfigDir, as always.
      */
     private login?: { resolve: (r: RunAs) => RunAs; credentialFiles: (r: RunAs) => string[] },
@@ -639,7 +651,7 @@ export class CliRunner implements AgentRunner {
     // transient error) is reported with its text, and run() waits it out instead of starting claude.
     const status = req.provider ? { method: 'provider', text: '' } : claudeAuthStatus(runEnv, runAs, this.bin);
     const auth = status.method;
-    const want = req.provider ? ['provider'] : this.runtime === 'cli' ? ['claude.ai', 'oauth_token'] : ['api_key', 'api_key_helper'];
+    const want: readonly string[] = req.provider ? ['provider'] : RUNTIME_LOGINS[this.runtime];
     if (!want.includes(auth)) {
       return { reason: 'auth_mismatch', detail: `runtime ${this.runtime} expects ${want.join(' or ')} auth, claude reports ${auth}${status.text ? `: ${status.text}` : ''}; not starting (no silent billing switch)`, costUsd: 0, turns: 0, model: req.model };
     }
@@ -888,9 +900,8 @@ export class CliRunner implements AgentRunner {
 export type FakeResult = Partial<RunResult> & { reads?: string[]; /** Stream lines the session "emits" (onStreamLine). */ stream?: unknown[] };
 
 /**
- * Scripted runner for tests and dry runs: `script` acts on the worktree and returns structured output. A run
- * that read files gets a run record (with a state dir), as a real session would: the files in `reads`, or,
- * when the script doesn't say, the `files_reviewed` it reports (an honest reviewer reads what it says).
+ * Scripted runner for tests and dry runs: `script` acts on the worktree and returns structured output. A run that
+ * read files gets a run record: `reads`, else the `files_reviewed` it reports.
  */
 export class FakeRunner implements AgentRunner {
   readonly calls: RunRequest[] = [];
