@@ -30,6 +30,7 @@ const rootFile = (body: string, mode = 0o644) => {
  */
 function asRootsFile<T>(file: string, fn: () => T): T {
   const apps = MANAGED_APPS_FILE();
+  onRealMachine(apps); // throws unless it is inside this test's system root: never the machine's own (#815)
   mkdirSync(dirname(apps), { recursive: true });
   const st = lstatSync(file, { throwIfNoEntry: false });
   if (st?.isSymbolicLink()) symlinkSync(readlinkSync(file), apps);
@@ -51,6 +52,7 @@ const ENGINE_UPDATES = `${JSON.stringify({ enabled: true, repo_url: 'https://git
 /** Runs `fn` with `body` as root's updates.json (under the isolate's etc root), then takes it away again. */
 function withUpdates<T>(body: string, fn: () => T): T {
   const updates = etcPath('updates.json');
+  onRealMachine(updates); // throws unless it is inside this test's system root (#815)
   mkdirSync(dirname(updates), { recursive: true });
   writeFileSync(updates, body);
   // As updates.sh leaves it: 0644 (this user stands in for root), whatever the umask.
@@ -154,6 +156,7 @@ test("the engine's own repo is never a managed app, whatever root's file says: t
   assert.equal(noUpdates.scope, 'engine');
   assert.match(noUpdates.why, /which repo is the engine can't be told: .*updates\.json doesn't exist/);
   const updates = etcPath('updates.json');
+  onRealMachine(updates); // throws unless it is inside this test's system root (#815)
   mkdirSync(dirname(updates), { recursive: true });
   try {
     // The repo root's updater follows, in an ssh URL with another case.
@@ -198,6 +201,7 @@ test("no updates.json: the engine's code under another repo name is never a mana
 // files are, and one root can't vouch for is "can't tell": no app, every lock applies.
 test("an updates.json root can't vouch for (a symlink, not a regular file, too big, not root's alone) names no engine repo: no app, every lock applies", { skip: !posix && 'owners and modes' }, () => {
   const updates = etcPath('updates.json');
+  onRealMachine(updates); // throws unless it is inside this test's system root (#815)
   mkdirSync(dirname(updates), { recursive: true });
   const app = rootFile(`${JSON.stringify({ version: 1, apps: { shop: 'example-org/shop' } })}\n`);
   const good = join(dir(), 'updates.json');
