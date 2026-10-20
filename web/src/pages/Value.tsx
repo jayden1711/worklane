@@ -3,7 +3,7 @@
 // and what went wrong after merges. The instance's owners and writers only: anyone else gets no panel and no request.
 import { useState } from 'react';
 import { useView, type State } from '../api';
-import { Card } from '../components/ui';
+import { Button, Card } from '../components/ui';
 import { Header } from '../components/Header';
 import type { HeldOutcome, HoldKind, MainSaid, PostMerge, ValueReport } from '../../../src/value-report-types';
 
@@ -175,9 +175,9 @@ export function ValuePage({ state, pulse }: { state: State; pulse: number }) {
           <>
             <div className="mb-4 flex gap-2 text-[12px]" role="group" aria-label="Window">
               {DAYS.map((d) => (
-                <button key={d} type="button" aria-pressed={d === days} className={`rounded-md border border-line px-2 py-1 ${d === days ? 'bg-ring text-white' : 'text-ink-3'}`} onClick={() => setDays(d)}>
+                <Button key={d} type="button" size="sm" variant={d === days ? 'default' : 'outline'} aria-pressed={d === days} onClick={() => setDays(d)}>
                   {d} days
-                </button>
+                </Button>
               ))}
             </div>
             {data ? <ValueReportView r={data} /> : <div className="text-[13px] text-ink-3">{error ? `Can't load the value report: ${error}` : 'Loading…'}</div>}
