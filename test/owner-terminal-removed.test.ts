@@ -25,6 +25,7 @@ import { MACHINE_PATHS } from '../src/setup-steps.js';
 import type { Role } from '../src/console/asks.js';
 import { machine } from './dashboards-root.js';
 import { exampleProject, repoRoot } from './helpers.js';
+import { onRealMachine } from './isolate.js';
 
 const posix = process.platform !== 'win32';
 // Fake tailnet fixtures, built here so no address or node name is spelled out (the push gate's rules).
@@ -36,7 +37,11 @@ const OLD_HUB_UNIT = `[Service]\nUser=wl-dash\nExecStart=/usr/local/bin/worklane
 
 /** This test machine's own hub unit and console shell (src/os/system-paths.ts puts them under the test's root). */
 function oldInstall(on: boolean) {
-  for (const f of [MACHINE_PATHS.hubUnitFile, CONSOLE_SHELL]) rmSync(f, { force: true });
+  // onRealMachine throws unless each is inside this test's system root: never the machine's own (#815).
+  for (const f of [MACHINE_PATHS.hubUnitFile, CONSOLE_SHELL]) {
+    onRealMachine(f);
+    rmSync(f, { force: true });
+  }
   if (!on) return;
   mkdirSync(dirname(MACHINE_PATHS.hubUnitFile), { recursive: true });
   writeFileSync(MACHINE_PATHS.hubUnitFile, OLD_HUB_UNIT);
@@ -133,6 +138,7 @@ test('deprecation: on an install with a console user, the Setup page shows its o
     assert.ok(first!.endsWith(`: ${OWNER_TERMINAL_RERUN}`), first);
     assert.deepEqual(rest, [notice]);
     // Only the unit left (the shell already removed by hand): still said, since the hub runs without its sandbox.
+    onRealMachine(CONSOLE_SHELL);
     rmSync(CONSOLE_SHELL);
     assert.match((await s.asks('olive')).notices?.[0] ?? '', /still names a console user/);
     oldInstall(false);
