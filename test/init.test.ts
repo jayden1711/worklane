@@ -20,6 +20,7 @@ import { launchdUnload, shareReadWithGroup, toolPlatform, which } from '../src/o
 import { srvCheckoutPath } from '../src/os/system-paths.js';
 import { asPerson, engineCli, exampleProject, exampleRoles, repoRoot } from './helpers.js';
 import { HOST_TOOLS, hostToolStandIns, onStandIns, testPath } from './host-tools.js';
+import { onRealMachine } from './isolate.js';
 
 const posix = process.platform === 'win32' && 'POSIX tools (tar, sh)';
 
@@ -333,6 +334,7 @@ test('init (#469), server mode: the same refusal, judged on the checkout add-pro
   const ok = () => world({ tools: new Set(['git', 'claude', 'gitleaks']), addProject: async () => ({ code: 0, steps: all, details: {}, last: '' }) });
   const { dir: upstream } = exampleProject();
   const checkout = srvCheckoutPath('shopz', 'shop');
+  onRealMachine(checkout); // throws unless it is inside this test's system root: never the machine's own /srv (#815)
   mkdirSync(dirname(checkout), { recursive: true });
   execFileSync('git', ['clone', '-q', upstream, checkout]);
   const first = ok();
