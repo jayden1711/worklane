@@ -2,15 +2,17 @@
 
 Worklane runs on your machine, against a repo you have checked out, with the Claude Code CLI you sign in to yourself. You install it from npm and run one command in your repo. That command prints one URL, and every setup step after that happens on the page it opens: the dashboard's first-run wizard.
 
+What it guarantees: code decides what may merge unattended, by rules read from your default branch that no agent can loosen; tests, fail-without tests, CI and the evaluator decide whether it's right, and the evaluator's verdict can only hold a merge, never approve one alone. The rules limit scope, not correctness. The [README](../README.md#what-its-for) says how, what a backtest of the rules measured, and what falls outside it.
+
 You need:
 - macOS or Linux (on Windows, use WSL2 or the Docker image);
 - git, and Node.js 22.13 or newer with npm (on a server, the install script installs Node for you);
 - a GitHub repo you can push to;
-- a Claude login. The wizard has **Sign in to Claude**, or run `claude auth login` yourself. See [auth.md](auth.md).
+- a Claude login: your Claude subscription or an API key. For the subscription, the wizard has **Sign in to Claude**, or run `claude auth login` yourself. For an API key, run `worklane init --answer agent-runtime=api_key --answer api-key-file=<path>`, where the path names a file you own (mode 600) that holds the key. The wizard records only the path, never the key, and the setup PR sets `agent_runtime.kind: api_key`. To let claude read the key, set `"apiKeyHelper": "cat -- <path>"` in your Claude settings. The login must be one the project's `agent_runtime.kind` runs on: the wizard checks this, and the agents refuse any other login. See [auth.md](auth.md).
 
 ## Local or server
 
-You choose where it runs.
+You choose where it runs. Both are a single machine, which is and stays a first-class mode with the same guarantees, not a trial version of a cloud install. Running in your own cloud account is planned next.
 
 | | local | server |
 |---|---|---|
@@ -132,8 +134,8 @@ The First run page (`/first-run`) lists every setup step, each with its state ch
 | Screen | Mode | What it does |
 |---|---|---|
 | **Tools** | both | Installs a missing gitleaks, Claude Code or gh, from pinned, checksummed downloads (on a server, the install command already did this) |
-| **Sign in to Claude** | local | Runs `claude auth login` for you and relays its sign-in page as a button; Claude Code keeps its own login |
-| **The agents' Claude login** | server | A paste box for the token `claude setup-token` prints, for the agent user only; it is never shown again |
+| **Sign in to Claude** | local | Runs `claude auth login` for you and relays its sign-in page as a button; Claude Code keeps its own login. Done only when the login is one the project's `agent_runtime.kind` runs on (`cli`: claude.ai or oauth_token; `api_key`: api_key or api_key_helper). Otherwise the step says that the agents would refuse the login, and how to fix it |
+| **The agents' Claude login** | server | Whether the agent user is signed in, and the root commands that sign it in on the machine (`credentials.sh <name> claude`, or `claude auth login` as the agent user). The page never takes the token ([auth.md](auth.md)) |
 | **Connect GitHub** | local | Runs `gh auth login --web` and shows its one-time code with a link to GitHub's device page |
 | **GitHub origin, default branch** | local | Picks the repo's GitHub origin and sets the default branch, for a checkout that lacks them |
 | **The agents' GitHub App** | server | Opens the Setup console's **Add project** (below) |
@@ -173,11 +175,11 @@ Some steps have no button, because they can't be one:
    - the `ready` label.
 
    The harness picks up only issues opened or labelled by the repo's writers (`owners.writers` in `.worklane/config.yaml`).
-3. Watch it on the Board. A worker takes the issue in its own worktree, and an independent evaluator checks the change. It then lands or opens a PR, depending on `land_mode`.
+3. Watch it on the Board. A worker takes the issue in its own worktree, and an independent evaluator checks the change. It then opens a PR, which merges on its own only when the merge rules allow (and auto-merge is on); otherwise it waits for you. With `land_mode: direct` it lands straight on main instead, outside those guarantees.
 
 To set up another repo on the same machine, run `worklane dashboard --detach` in it, or `worklane init <repo>`, or the install script again with that repo.
 
-**On a server,** a project is an instance. The Setup console's **Add project** makes one: you type a name and pick the repo. The App comes from GitHub's manifest flow (two clicks on GitHub, installed on that one repo only), and you paste the agents' Claude token into a password box. The view follows each step live. If a step fails, it names the step and the command to retry it. Only an owner of the instance who is also a machine owner, signed in, on one of the owner terminal's allowed devices, can use it. The same steps at a root shell: `sudo bash scripts/setup/add-project.sh <name> <owner/repo>`. See [dashboard.md](dashboard.md#add-project).
+**On a server,** a project is an instance. The Setup console's **Add project** makes one: you type a name and pick the repo. The App comes from GitHub's manifest flow (two clicks on GitHub, installed on that one repo only). The agents' Claude login is never taken by the dashboard: a root admin signs them in on the machine (`sudo bash scripts/setup/credentials.sh <name> claude`, or `sudo -u wl-<name>-agent -i claude auth login`; see [auth.md](auth.md)), and Add project waits for it. The view follows each step live. If a step fails, it names the step and the command to retry it. Only an owner of the instance who is also a machine owner, signed in, on one of the machine devices (`dashboards.sh --machine-devices`), can use it. The same steps at a root shell: `sudo bash scripts/setup/add-project.sh <name> <owner/repo>`. See [dashboard.md](dashboard.md#add-project).
 
 To see everything work without a repo of your own, try the demo. It uses scripted agents and needs no login:
 
@@ -248,17 +250,6 @@ A Discord bot lets people file work, answer decisions, approve high-risk changes
 
 The page shows the exact change to `intake.yaml` before writing it. Who may send, people and owners stay in `intake.yaml` by hand. Restart the instance afterwards (the page shows the command). See [dashboard.md](dashboard.md#discord-the-bots-token-invite-link-and-channels) and [intake.md](intake.md).
 
-## Voice (optional)
-
-The dashboard can take your voice. In the Ask panel, it can dictate into the question box, read answers aloud, and listen for a wake word. With the voice button beside Ask, you can speak an idea or `approve <issue number>`. All of it is **off by default** and **for owners only**. You turn each part on under **Settings → Voice**, and the setting is kept in that browser.
-
-**Voice intake and approvals** also need `voice.enabled: true` in the instance's `intake.yaml`.
-- **Nothing acts on its own.** What was heard shows on a 10-second banner, and nothing happens until you say "confirm" within that window or click the banner.
-- **A spoken idea** goes through the same triage as a Discord message and becomes an Inbox decision.
-- **By voice, a decision can only be approved.** A held high-risk merge, a plan held for a high-risk reason, or a delegation takes a click.
-
-See [intake.md](intake.md#25-voice-the-dashboard). Recognition and voices are **on-device**: without on-device recognition the mic stays off and says why, and without an on-device voice nothing is read aloud, unless you allow the cloud fallback or network voices. Dictation only fills the box for you to review; it never sends. No wake-word model ships with it, so the wake word stays off until one is installed ([wake-word.md](wake-word.md)).
-
 ## When something's wrong
 
 | What | Where |
@@ -310,7 +301,7 @@ That command mounts your Claude login.
    - `project.repo` is the repo's `owner/name` on GitHub;
    - `owners.default` is you;
    - `owners.writers` lists the accounts whose issues the harness will work on;
-   - `land_mode` is `pr` (the default) or `direct`. `direct` needs branch protection on the default branch; without it, the coordinator refuses to start.
+   - `land_mode` is `pr` (the default) or `direct`. `direct` needs branch protection on the default branch; without it, the coordinator refuses to start. `direct` is outside the merge guarantees: a change lands after its tests and secret scan, without the merge decision. The policy is that it stays an explicit opt-in by the owner, on a single machine only.
    - `protection.strict` is `false` (the default). Set it to `true` only to opt this repo in to strict.
 2. In **`.worklane/tests.yaml`**, `runner.changed`, `runner.full` and `runner.one` are your real test commands, and `vacuity.test_globs` matches your test files.
 3. Run `worklane doctor --root <repo>` until it passes, and commit `.worklane/`.

@@ -265,7 +265,7 @@ export abstract class AutomationRuns extends HarnessEvals {
     const ancestors = origin.kind === 'chained' ? origin.ancestors : [];
     const source = sourceOf(trigger);
     // INVARIANT: an automation that waits for approval (a webhook's always does) never runs on its trigger: its owner
-    // is asked, on the dashboard only (never from chat or voice), and the caps are checked again on approval.
+    // is asked, on the dashboard only (never from chat), and the caps are checked again on approval.
     if (a.gates.start === 'approve' && !o.approved) {
       const decision = await this.ask('automation', null, a.owner, `Run the automation "${a.name}" (${a.id}) for ${source}?`, ['approve', 'reject'], '', [`Started by ${source}.`, ...describe(a)]);
       this.emit('automation.pending', { id: a.id, decision, trigger, depth, ancestors, source: origin.kind === 'chained' ? origin.source : null, text, target });

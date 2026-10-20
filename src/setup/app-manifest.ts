@@ -25,8 +25,10 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { BRAND } from '../brand.js';
+import { CREDENTIAL_REFUSED, holdsClaudeCredential } from '../claude-credential-guard.js';
 import { GITHUB_API, GITHUB_WEB } from '../github-hosts.js';
 import type { Asks } from '../console/asks.js';
+import { HUB_UNIT_AS_ROOT, hubRerunToShow, type TerminalPaths } from '../console/owner-terminal-removed.js';
 import { CALLBACK_PATH } from '../dashboard-auth.js';
 import { appJwt } from '../github-app.js';
 import { setGithubApp } from '../instance.js';
@@ -411,12 +413,15 @@ async function readJsonBody(req: IncomingMessage): Promise<Record<string, unknow
     if (size > 8_000) throw new FlowError('body too large');
     chunks.push(c as Buffer);
   }
+  let v: unknown;
   try {
-    const v = chunks.length ? JSON.parse(Buffer.concat(chunks).toString('utf8')) : {};
-    return v && typeof v === 'object' ? (v as Record<string, unknown>) : {};
+    v = chunks.length ? JSON.parse(Buffer.concat(chunks).toString('utf8')) : {};
   } catch {
     throw new FlowError('the body must be JSON');
   }
+  // INVARIANT (issue #711): no route takes a Claude credential.
+  if (holdsClaudeCredential(v)) throw new FlowError(CREDENTIAL_REFUSED);
+  return v && typeof v === 'object' ? (v as Record<string, unknown>) : {};
 }
 
 /**
@@ -494,6 +499,8 @@ export interface RunDeps {
   /** The step behind an ask failed or timed out. */
   onFail?: (askId: string, why: string) => void;
   log?: (line: string) => void;
+  /** The hub's unit, for the sign-in App's `then:` rerun (a test's own; the machine's by default). */
+  hubUnit?: Pick<TerminalPaths, 'hubUnitFile' | 'rootUid'>;
   /** How long to wait for each GitHub click; 15 minutes by default. */
   timeoutMs?: number;
   pollMs?: number;
@@ -609,7 +616,10 @@ export async function runAppManifest(o: { instance: string; repo: string; kind: 
       return fail('store the client secret', String((e as Error).message).split('\n')[0]!);
     }
     log(`installed ${secretPath} (0400, ${user} only); the App's key is not kept: sign-in never uses it`);
-    log(`then: dashboards.sh --client-id ${app.clientId} --public-url ${new URL(reg.startUrl).origin} <name>...`);
+    // The hub is running (this flow went through it): the rerun keeps its devices, its Siri and hooks gateways and its
+    // instances, with the new App's client id and this URL (#767).
+    const rerun = hubRerunToShow({ clientId: app.clientId, publicUrl: new URL(reg.startUrl).origin }, d.hubUnit);
+    log(`then, as root${rerun.exact ? '' : `, with each <...> and [...] filled in from the ExecStart of ${HUB_UNIT_AS_ROOT}`}: ${rerun.command}`);
     return { ok: true, kind: 'signin', appId: app.id, slug: app.slug, clientId: app.clientId, by, secretPath };
   }
   // WHY: everything secret GitHub returned goes straight to the coordinator's own 0400 files, beside the key, the

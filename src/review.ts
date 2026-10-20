@@ -1,12 +1,17 @@
 // Risk-based review levels, computed by code from what a change touches.
 // The highest matching level wins; a failed or low-confidence evaluator
 // verdict bumps it up one; an agent can raise its own level, never lower it.
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { spawnSync } from 'node:child_process';
+import { posix } from 'node:path';
 import type { ReviewConfig } from './config/schema.js';
 import { globToRegExp } from './guardrails/glob.js';
 import { BRAND } from './brand.js';
 import { HOOK_IMPORTS } from './hook-imports.js';
+import { hasControlCharacter, hasInvisibleCharacter, hasNonAsciiTopLevel, isNonUtf8Path, shownPath, shownPaths } from './path-text.js';
+
+// The odd-name tests and how a reason shows a path live in src/path-text.ts (one module the merge policy, the conflict
+// fix and the coordinator share); re-exported here for the callers that read them with the review levels.
+export { escapedPath, hasControlCharacter, hasInvisibleCharacter, hasNonAsciiTopLevel, isNonUtf8Path, shownPath, shownPaths } from './path-text.js';
 
 export type Level = 'L0' | 'L1' | 'L2' | 'L3';
 const ORDER: Level[] = ['L0', 'L1', 'L2', 'L3'];
@@ -18,6 +23,294 @@ const up = (l: Level): Level => ORDER[Math.min(3, ORDER.indexOf(l) + 1)]!;
  * waitCategoriesOf), whatever review.yaml says; review.yaml can't redefine, drop or loosen it.
  */
 export const AGENT_INSTRUCTIONS = 'agent-instructions';
+
+/**
+ * A changed path with a control character in it (a newline, a tab, an escape, ...). Nothing should have to read
+ * around one (a glob, a log line, the owner), so such a change is always L3 ("path with a control character") and
+ * never auto-merges (merge-policy.ts waitCategoriesOf), whatever review.yaml says (#683).
+ */
+export const CONTROL_CHARACTER_PATH = 'control-character-path';
+
+/**
+ * A changed path whose name isn't valid UTF-8 (a byte like 0xff). It can't be read as itself: every reader decodes
+ * its bad bytes as U+FFFD, and that string names no file git knows, so its lines and blobs can't be asked for. Like
+ * a control character, such a change is always L3 ("path that isn't valid UTF-8") and never auto-merges
+ * (merge-policy.ts waitCategoriesOf), whatever review.yaml says (#683).
+ */
+export const NON_UTF8_PATH = 'non-utf8-path';
+
+/**
+ * A changed path with an invisible or format character in it: a bidi override or isolate (`docs/<U+202E>dm.exe.md`
+ * reads as `docs/md.exe.md`), a zero-width character, a soft hyphen, or any other character that shows as nothing or
+ * reorders what is around it. Such a name can read as another in a file list or a hold reason, so the change is
+ * always L3 ("path with an invisible or format character") and never auto-merges (merge-policy.ts waitCategoriesOf),
+ * whatever review.yaml says (#683, the owner's call).
+ */
+export const INVISIBLE_CHARACTER_PATH = 'invisible-character-path';
+
+/**
+ * A changed path whose first segment (its top-level directory, or a file at the root) has a character outside ASCII:
+ * a look-alike of a real one, like Cyrillic `ѕrc/` beside `src/`. Further down, a name like `docs/naïve.md` is an
+ * ordinary name; at the top it can pass for a module the reader trusts. Always L3 ("top-level name that isn't ASCII")
+ * and never auto-merges (merge-policy.ts waitCategoriesOf), whatever review.yaml says (#683, the owner's call).
+ */
+export const NON_ASCII_TOP_LEVEL_PATH = 'non-ascii-top-level-path';
+
+/** The categories of a path nothing should have to read around: always L3, always waits, never loosened. */
+export const ODD_PATH_CATEGORIES: readonly string[] = [CONTROL_CHARACTER_PATH, NON_UTF8_PATH, INVISIBLE_CHARACTER_PATH, NON_ASCII_TOP_LEVEL_PATH];
+
+/**
+ * A change to a .gitattributes (any directory's) that can hide or change what a review of a file sees: `-diff` or
+ * `binary` ("Binary files differ", no lines), `linguist-generated` (GitHub folds the file away in a PR), a `filter`
+ * (git-lfs: the review sees a pointer, a checkout gets other content), a `working-tree-encoding` (the blob a review
+ * reads is the file re-encoded: `IBM037` turns ASCII code into one line of noise, and a checkout turns it back), a
+ * diff driver git doesn't ship (its textconv or binary setting lives in a config the review can't see), any name not
+ * known to be harmless, a macro definition (`[attr]quiet -diff`, or quoted as git reads it: `"[attr] quiet" -diff`;
+ * any line whose unquoted pattern starts with `[`, or that git can't unquote, counts as one), or a name some
+ * .gitattributes in the base or head tree defines as a macro (`[attr]eol -diff` on main makes `*.job eol` hide the
+ * file). Taking away a line that turned one of those off (`*.sql -filter`), or a macro definition, counts too. A
+ * changed .gitmodules whose base or head sets any `ignore` to anything but `none`, as git's own config parser reads it
+ * (or that git can't parse), counts the same: it hides submodule links, including one an existing `ignore = all` is
+ * moved onto by editing `path`. Any case and NTFS's other spellings of either name (a trailing dot, an 8.3 or fall-back
+ * short name) count; an HFS-ignorable spelling (`.gitattributes<U+200C>`) is L3 through INVISIBLE_CHARACTER_PATH
+ * instead. Above those line checks, git judges the outcome itself (ChangeFile attributeOutcome): any path whose
+ * attributes change between the trees in a way that can show less (attributeTransitionHides), by git's own reading of
+ * every .gitattributes, flags the change, whatever its lines look like. The harness's own readers ignore attributes and submodule
+ * settings (coordinator/change-files.ts), but the owner reviewing on GitHub and a checkout don't, so such a change is
+ * always L3 and never auto-merges (merge-policy.ts waitCategoriesOf), whatever review.yaml says (#693). Fails
+ * closed: only the names below pass.
+ */
+export const DIFF_HIDING_ATTRIBUTES = 'diff-hiding-attributes';
+
+/** From `i` on, only spaces and periods, then the end or an NTFS stream (`:...`). */
+const trailingOnly = (s: string, i: number): boolean => /^[ .]*(?::|$)/.test(s.slice(i));
+
+/**
+ * Whether a path's last segment is `.<name>` as a file system may open it. Fails closed: such a name is judged as the
+ * real file. The forms, as git documents its own check (is_ntfs_dotgitattributes / is_ntfs_dotgitmodules) and as `git
+ * fsck --strict` classifies names (measured in test/change-files-renames.test.ts against git itself):
+ * - `.<name>` in any case, then only spaces or periods, then the end or an NTFS stream (`.gitattributes::$DATA`);
+ * - the 8.3 short name: the first 6 letters of the name, `~`, a digit 1-4 (`GITATT~1`), then the same tail;
+ * - the fall-back short name NTFS makes from a hash, 8 characters long: k (0 to 6) ASCII characters that are the first k
+ *   of `hash` in any case, then `~`, a digit 1-9 and digits to the 8th character (`GI7D29~1`, `gi7eb~10`, `g~123456`),
+ *   then the same tail.
+ * Written here from that description, not from git's source.
+ */
+function isDotFile(path: string, name: string, hash: string): boolean {
+  const base = path.split('/').pop() ?? '';
+  const lower = base.toLowerCase();
+  if (lower.startsWith(`.${name}`) && trailingOnly(lower, name.length + 1)) return true;
+  if (new RegExp(`^${name.slice(0, 6)}~[1-4]`).test(lower) && trailingOnly(lower, 8)) return true;
+  const k = base.indexOf('~');
+  if (k < 0 || k > 6 || base.length < 8) return false;
+  const prefix = base.slice(0, k);
+  return /^[\x00-\x7f]*$/.test(prefix) && prefix.toLowerCase() === hash.slice(0, k) && /^[1-9][0-9]*$/.test(base.slice(k + 1, 8)) && trailingOnly(base, 8);
+}
+/** A .gitattributes in any directory, in any case or other spelling a file system opens as one. */
+export const isGitattributesPath = (path: string): boolean => isDotFile(path, 'gitattributes', 'gi7d29');
+/** A .gitmodules in any directory, in any case or other spelling a file system opens as one. */
+export const isGitmodulesPath = (path: string): boolean => isDotFile(path, 'gitmodules', 'gi7eba');
+/** Attributes that change line endings, whitespace checks, archives, merges or GitHub's language stats: nothing a review reads. */
+const HARMLESS_ATTRIBUTES = new Set([
+  'text', 'eol', 'crlf', 'whitespace', 'export-ignore', 'ident', 'delta', 'encoding', 'merge', 'conflict-marker-size',
+  'linguist-language', 'linguist-detectable', 'linguist-vendored', 'linguist-documentation',
+]);
+/** The diff drivers git ships (hunk headers and word splitting only): `diff=python` changes no line a review sees. */
+const BUILTIN_DIFF_DRIVERS = new Set([
+  'ada', 'bash', 'bibtex', 'cpp', 'csharp', 'css', 'dts', 'elixir', 'fortran', 'fountain', 'golang', 'html', 'java', 'kotlin', 'markdown', 'matlab',
+  'objc', 'pascal', 'perl', 'php', 'python', 'ruby', 'rust', 'scheme', 'tex',
+]);
+
+/** git's escapes in a C-quoted string (quote.c unquote_c_style), besides `\ooo` octal. */
+const C_ESCAPES: Record<string, string> = { a: '\x07', b: '\b', f: '\f', n: '\n', r: '\r', t: '\t', v: '\v', '\\': '\\', '"': '"' };
+
+/**
+ * A C-quoted string at the start of `s` (which starts with `"`), unquoted as git does: its value and what follows the
+ * closing quote, or null when git can't unquote it (an unknown escape, no closing quote).
+ */
+function cUnquote(s: string): { value: string; rest: string } | null {
+  const bytes: number[] = [];
+  const enc = new TextEncoder();
+  for (let i = 1; i < s.length; i++) {
+    const ch = s[i]!;
+    if (ch === '"') return { value: new TextDecoder().decode(new Uint8Array(bytes)), rest: s.slice(i + 1) };
+    if (ch !== '\\') {
+      bytes.push(...enc.encode(ch));
+      continue;
+    }
+    const next = s[++i];
+    if (next === undefined) return null;
+    if (next in C_ESCAPES) bytes.push(C_ESCAPES[next]!.charCodeAt(0));
+    else if (/[0-3]/.test(next) && /^[0-7]{2}$/.test(s.slice(i + 1, i + 3))) {
+      bytes.push(parseInt(s.slice(i, i + 3), 8));
+      i += 2;
+    } else return null;
+  }
+  return null;
+}
+
+/** git's blanks in a .gitattributes line (attr.c): only these are skipped before a comment or a quoted pattern. */
+const GIT_BLANK = /^[ \t\r\n]*/;
+
+/**
+ * How a .gitattributes line is read. 'git': as git's attr.c parse_attr_line does, skipping only git's blanks (space,
+ * tab, CR, LF) before the pattern, which then runs to the next git blank: `<NBSP>#* -diff` is a pattern with `-diff`
+ * to git, not a comment. 'any-space': skipping and splitting on any JavaScript whitespace, as other readers may (GitHub's
+ * linguist goes through libgit2, whose blanks include `\v` and `\f`), so `*.sql<VT>linguist-generated` has an
+ * attribute. Every check reads a line every way and flags it if any reading does (readings): reading more than git
+ * never reads less.
+ */
+type Way = 'git' | 'any-space';
+
+/**
+ * A .gitattributes line read one `way`: its pattern (C-unquoted when it starts with `"`) and what follows it; null
+ * for a blank line or a comment; 'unreadable' when a quoted pattern can't be unquoted.
+ */
+function attrLine(line: string, way: Way): { pattern: string; rest: string } | 'unreadable' | null {
+  const t = way === 'git' ? line.replace(GIT_BLANK, '') : line.replace(/^\s*/, '');
+  if (!t || t.startsWith('#')) return null;
+  if (t.startsWith('"')) {
+    const u = cUnquote(t);
+    return u ? { pattern: u.value, rest: u.rest } : 'unreadable';
+  }
+  const m = (way === 'git' ? /^([^ \t\r\n]+)([\s\S]*)$/ : /^(\S+)([\s\S]*)$/).exec(t)!;
+  return { pattern: m[1]!, rest: m[2]! };
+}
+
+/**
+ * Every reading of a line: git's way and the any-whitespace way, each of the line and (when it starts with a BOM, which
+ * git drops on a file's first line only) of the line without it.
+ */
+const readings = (line: string): ({ pattern: string; rest: string } | 'unreadable' | null)[] =>
+  (line.startsWith('﻿') ? [line, line.slice(1)] : [line]).flatMap((l) => [attrLine(l, 'git'), attrLine(l, 'any-space')]);
+
+/** The attributes in one reading of a line: what follows its pattern (or `[attr]name`). */
+function attributesIn(p: { pattern: string; rest: string } | 'unreadable' | null): { sign: string; name: string; value: string | undefined }[] {
+  if (!p || p === 'unreadable') return [];
+  return p.rest.split(/\s+/).filter(Boolean).map((a) => {
+    const m = /^([-!]?)([^=]*)(?:=(.*))?$/.exec(a)!;
+    return { sign: m[1]!, name: m[2]!, value: m[3] };
+  });
+}
+
+/** Every attribute any reading of a line finds. */
+const attributesOf = (line: string) => readings(line).flatMap(attributesIn);
+
+/**
+ * A macro definition, or a line that may be one, in any reading: its pattern, unquoted as git does (`"[attr] eol" -diff`
+ * is a macro to git), starts with `[`, or it is quoted and can't be unquoted. Fails closed.
+ */
+const isMacroDefinition = (line: string): boolean => readings(line).some((p) => p === 'unreadable' || (p !== null && p.pattern.startsWith('[')));
+
+/**
+ * The macros a .gitattributes line defines, in any reading: `[attr]` then optional blanks then the name, from the
+ * unquoted pattern; '*' (every name) when the line may define one whose name can't be read (fails closed).
+ */
+export function macrosDefined(line: string): string[] {
+  return [
+    ...new Set(
+      readings(line).flatMap((p) => {
+        if (p === null) return [];
+        if (p === 'unreadable') return ['*'];
+        if (!p.pattern.startsWith('[')) return [];
+        const m = /^\[attr\][ \t\r\n]*([^ \t\r\n]+)/.exec(p.pattern);
+        return [m ? m[1]! : '*'];
+      }),
+    ),
+  ];
+}
+
+/** Whether a line uses a name the base or head tree defines as a macro (`*`: a definition whose name can't be read). */
+const usesMacro = (line: string, macros: readonly string[]): boolean => attributesOf(line).some(({ name }) => macros.includes(name) || macros.includes('*'));
+
+/**
+ * Whether a line a change adds to a .gitattributes can hide or change what a review sees (fails closed). `macros`: the
+ * names any .gitattributes in the base or head tree defines with `[attr]` (ChangeFile.attributeMacros); `*` among them
+ * means a definition whose name couldn't be read, so every attribute counts as one.
+ */
+export function hidesDiff(line: string, macros: readonly string[] = []): boolean {
+  if (isMacroDefinition(line) || usesMacro(line, macros)) return true;
+  return attributesOf(line).some(({ sign, name, value }) => {
+    if (HARMLESS_ATTRIBUTES.has(name)) return false;
+    // `diff` set (always text), or a driver git ships; `-diff` and any other driver hide or change lines, and `!diff`
+    // can take away an earlier forced `diff` (a file with a NUL byte goes back to "Binary files differ").
+    if (name === 'diff') return sign === '-' || sign === '!' || (value !== undefined && !BUILTIN_DIFF_DRIVERS.has(value));
+    // Turning GitHub's fold off, or a filter off, shows more.
+    if ((name === 'linguist-generated' && (sign !== '' || value === 'false')) || (name === 'filter' && sign !== '')) return false;
+    return true;
+  });
+}
+
+/**
+ * Whether a line a change takes out of a .gitattributes had turned off something that hides (`*.sql -filter`, `*.sql
+ * diff`), defined a macro (the lines that use it now mean something else), or used one (`*.ts showme`, where a macro on
+ * main turns the diff back on: taking it away lets an earlier `-diff` hide the file). `macros` as for hidesDiff.
+ */
+export function unhidLine(line: string, macros: readonly string[] = []): boolean {
+  if (isMacroDefinition(line) || usesMacro(line, macros)) return true;
+  return attributesOf(line).some(({ sign, name, value }) => {
+    if (HARMLESS_ATTRIBUTES.has(name)) return false;
+    if (name === 'diff') return sign === '!' || (sign === '' && value === undefined);
+    return sign !== '' || value === 'false';
+  });
+}
+
+/** A state `git check-attr` reports that sets the attribute (to true or a value). */
+const isSet = (state: string): boolean => state !== 'unspecified' && state !== 'unset';
+
+/**
+ * Whether a path's attribute going from state `was` (base tree) to `now` (head tree), as `git check-attr` reports them,
+ * can make a review see less of the file (#693, the outcome check). It judges the change, not the end state:
+ * - `diff`: never when `now` is `set` (forced text). Otherwise yes when either side is a driver git doesn't ship (its
+ *   binary or textconv setting lives in a config the review can't see: fails closed, even from `unset`, since a
+ *   textconv can show an empty diff where the base showed "Binary files differ"); no when `was` was `unset` (binary
+ *   already); yes when `was` was `set` (leaving a forced `diff`, even for a driver git ships, hands a file with a NUL
+ *   byte back to "Binary files differ") or `now` is `unset`. Between `unspecified` and git's own drivers, no.
+ * - `binary`: yes when it becomes set.
+ * - `text`: yes when it becomes unset (a plain `git diff` shows the same; kept fail-closed for other readers).
+ * - `filter`, `working-tree-encoding`: yes when `now` sets one (a checkout gets other bytes than the blob).
+ * - `linguist-generated`: yes when `now` sets it to anything but `false` (GitHub folds the file).
+ * - `merge`: never (no diff reads it).
+ * The table of every transition and what plain git shows is in #802's round-5 adversarial pass.
+ */
+export function attributeTransitionHides(attr: string, was: string, now: string): boolean {
+  if (was === now) return false;
+  switch (attr) {
+    case 'diff': {
+      if (now === 'set') return false;
+      // A driver git doesn't ship, on either side, before the `unset` return: from binary to such a driver can show
+      // nothing at all (its textconv lives in a config the review can't see), so it fails closed (R21).
+      const custom = (s: string) => isSet(s) && s !== 'set' && !BUILTIN_DIFF_DRIVERS.has(s);
+      if (custom(now) || custom(was)) return true;
+      if (was === 'unset') return false;
+      return was === 'set' || now === 'unset';
+    }
+    case 'binary':
+      return isSet(now);
+    case 'text':
+      return now === 'unset';
+    case 'filter':
+    case 'working-tree-encoding':
+      return isSet(now);
+    case 'linguist-generated':
+      return isSet(now) && now !== 'false';
+    default:
+      return false;
+  }
+}
+
+/** The attributes the outcome check asks git about (coordinator/change-files.ts attributeOutcome). */
+export const OUTCOME_ATTRIBUTES = ['diff', 'binary', 'text', 'merge', 'filter', 'working-tree-encoding', 'linguist-generated'] as const;
+
+/**
+ * Whether a changed .gitmodules can hide a submodule's changes from `git diff` and `git status`, from what git's own
+ * config parser read in it (ChangeFile.submoduleIgnores, coordinator/change-files.ts): any `ignore` key, on the base or
+ * the head side, set to anything but exactly `none`. Fails closed: a side git couldn't parse (null), or a file read by
+ * anything but that reader (undefined), counts as hiding.
+ */
+export function hidesSubmodules(f: Pick<ChangeFile, 'submoduleIgnores'>): boolean {
+  return f.submoduleIgnores == null || f.submoduleIgnores.some((v) => v !== 'none');
+}
 
 /**
  * The harness changing its own controls: the merge policy, the main watch and the push guard, the updater, the review
@@ -34,9 +327,12 @@ export const SELF_MODIFICATION_PARTS: { what: string; globs: string[] }[] = [
   { what: 'the main watch', globs: ['src/main-watch*', 'src/github/main-watch-api*'] },
   { what: 'the push guard', globs: ['src/push-guard*', 'src/push-check*'] },
   { what: 'the updater', globs: ['src/updates*', `scripts/machine/${BRAND.cli}-update*`] },
-  { what: 'the review levels', globs: [`${BRAND.configDir}/review.yaml`, 'src/review.ts'] },
+  // src/path-text.ts holds the odd-name tests computeLevel raises on (moved out of src/review.ts, #683), so it stays locked with it.
+  { what: 'the review levels', globs: [`${BRAND.configDir}/review.yaml`, 'src/review.ts', 'src/path-text.ts'] },
   { what: 'the guardrails', globs: [`${BRAND.configDir}/guardrails.yaml`, 'src/guardrails/**'] },
-  { what: 'the machine setup', globs: ['scripts/setup/**', 'scripts/machine/**'] },
+  // deploy/**: the engine's deployment manifests (a compose file and the like) set its isolation and exposure, as the
+  // setup scripts do: the user it runs as, what it mounts, which ports it publishes. Locked before the first one exists.
+  { what: 'the machine setup', globs: ['scripts/setup/**', 'scripts/machine/**', 'deploy/**'] },
   { what: 'the CI workflows', globs: ['.github/workflows/**'] },
   // Whose signed tag the release workflow stages on npm, and the check that enforces it (release.yml).
   { what: 'who may sign a release', globs: ['.github/release-signers', 'scripts/verify-release-tag*'] },
@@ -67,6 +363,8 @@ export const SELF_MODIFICATION_PARTS: { what: string; globs: string[] }[] = [
       'test/main-watch.test.ts', 'test/main-watch-coordinator.test.ts', 'test/denylist.test.ts', 'test/dco.test.ts', 'test/package-files.test.ts',
       // Root's managed-apps reader's fail-closed cases and the script's refusals (#665).
       'test/managed-apps.test.ts',
+      // The merge reconciliation's cases: only the engine's own App's merge is reconciled, never another's (#733).
+      'test/merge-idempotent.test.ts',
     ],
   },
   { what: 'the release procedure and the design rules', globs: ['docs/releasing.md', 'docs/design.md'] },
@@ -93,8 +391,11 @@ export const LOCKED_CATEGORIES: Record<string, string[]> = {
  */
 export type LockScope = 'engine' | 'managed-app';
 
-/** The engine's own source tree: a self-modification glob under it names an engine file, not a managed app's. */
-const ENGINE_TREE = ['src/', 'scripts/', 'test/', 'docs/'];
+/**
+ * The engine's own source tree: a self-modification glob under it names an engine file, not a managed app's. deploy/ is
+ * the engine's deployment manifests; a managed app's own deploy/ stays its deploy-config, as before.
+ */
+const ENGINE_TREE = ['src/', 'scripts/', 'test/', 'docs/', 'deploy/'];
 /** Whether a locked glob names the engine's own source (so it holds only in the engine's repo). */
 export const engineSourceGlob = (glob: string): boolean => ENGINE_TREE.some((d) => glob.startsWith(d));
 
@@ -142,6 +443,23 @@ export interface ChangeFile {
   addedLines?: string[];
   /** Removed lines, for telling a comment-only change from a code change. */
   removedLines?: string[];
+  /**
+   * On a .gitattributes only: every macro name (`[attr]name`) any .gitattributes in the base or the head tree
+   * defines, so a line using one is judged as the macro, not as the harmless name it may shadow (#693).
+   */
+  attributeMacros?: string[];
+  /**
+   * On a .gitmodules only: the value of every `ignore` key git's config parser reads in it, on the base side and the
+   * head side (null for a key with no value); null when git can't parse a side (#693).
+   */
+  submoduleIgnores?: (string | null)[] | null;
+  /**
+   * On a .gitattributes only: what git itself says the change does to attributes (coordinator/change-files.ts
+   * attributeOutcome): each path whose state of an OUTCOME_ATTRIBUTES attribute differs between the base and head trees
+   * and now hides it (`path: diff unspecified -> unset`); null when git can't judge (too old for `check-attr --source`,
+   * a `$GIT_DIR/info/attributes` that would mask the trees, or a failure), which counts as hiding (#693).
+   */
+  attributeOutcome?: string[] | null;
 }
 
 export interface LevelInput {
@@ -166,20 +484,28 @@ export interface LevelResult {
 }
 
 /**
- * Money paths from the project's source of truth. A pattern containing
- * regex literals (/.../) yields those; otherwise each line is a glob.
+ * Money paths from the project's source of truth, as `rev` has it: the default branch's ref (`<remote>/<branch>`),
+ * read with git from `repo`, as review.yaml itself is (src/config/live.ts). Never a working tree: the coordinator's
+ * is never checked out again after its clone, so a list read there misses every path main added since (#715).
+ * The list file itself is a money path too: a change to it waits for the owner like the paths it names, in every
+ * repo, wherever its name would otherwise put it (docs, for a .txt). A pattern containing regex literals (/.../)
+ * yields those; otherwise each line is a glob.
  */
-export function loadMoneyPaths(root: string, src: ReviewConfig['money_path_source']): RegExp[] {
+export function loadMoneyPaths(repo: string, src: ReviewConfig['money_path_source'], rev: string): RegExp[] {
   if (!src) return [];
-  let text = readFileSync(join(root, src.file), 'utf8');
+  const file = posix.normalize(src.file).replace(/^\.\//, '');
+  const shown = spawnSync('git', ['show', `${rev}:${file}`], { cwd: repo, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 16 * 1024 * 1024 });
+  if (shown.status !== 0) throw new Error(`money_path_source: ${file} isn't readable at ${rev}: ${(shown.stderr || shown.error?.message || '').trim().split('\n')[0]}`);
+  let text = shown.stdout;
   if (src.pattern) {
     const m = text.match(new RegExp(src.pattern));
     if (!m) throw new Error(`money_path_source: pattern not found in ${src.file}`);
     text = m[1] ?? m[0];
   }
+  const self = new RegExp(`^${file.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`);
   const literals = [...text.matchAll(/\/((?:\\\/|[^/\n])+)\/([gimsuy]*)/g)].map((m) => new RegExp(m[1]!, m[2]!.replace('g', '')));
-  if (literals.length) return literals;
-  return text.split('\n').map((l) => l.trim()).filter((l) => l && !l.startsWith('#')).map((g) => globToRegExp(g));
+  if (literals.length) return [self, ...literals];
+  return [self, ...text.split('\n').map((l) => l.trim()).filter((l) => l && !l.startsWith('#')).map((g) => globToRegExp(g))];
 }
 
 export function computeLevel(input: LevelInput, cfg: ReviewConfig, extraCategories: Record<string, string[]> = {}): LevelResult {
@@ -192,6 +518,20 @@ export function computeLevel(input: LevelInput, cfg: ReviewConfig, extraCategori
     for (const [cat, list] of Object.entries(res)) if (list.some((re) => re.test(f.path))) add(cat, f.path);
     if (input.moneyPaths.some((re) => re.test(f.path))) add('money-path', f.path);
     if ((f.addedLines ?? []).some((l) => /\b(DROP\s+(TABLE|COLUMN|SCHEMA)|TRUNCATE|DELETE\s+FROM)\b/i.test(l))) add('deletes-data', f.path);
+    if (hasControlCharacter(f.path)) add(CONTROL_CHARACTER_PATH, f.path);
+    if (isNonUtf8Path(f.path)) add(NON_UTF8_PATH, f.path);
+    if (hasInvisibleCharacter(f.path)) add(INVISIBLE_CHARACTER_PATH, f.path);
+    if (hasNonAsciiTopLevel(f.path)) add(NON_ASCII_TOP_LEVEL_PATH, f.path);
+    // Two layers. The outcome: git itself (check-attr on the base and head trees) found a path whose attributes now
+    // hide it, or couldn't judge (null). The lines: what the change adds or takes away. A .gitattributes read by
+    // anything but changeFiles has no macro list, so every name may be a macro (fails closed).
+    if (isGitattributesPath(f.path)) {
+      const macros = f.attributeMacros ?? ['*'];
+      // No outcome (undefined: read by anything but changeFiles) counts as git not judging (null): fails closed.
+      const outcome = f.attributeOutcome == null || f.attributeOutcome.length > 0;
+      if (outcome || (f.addedLines ?? []).some((l) => hidesDiff(l, macros)) || (f.removedLines ?? []).some((l) => unhidLine(l, macros))) add(DIFF_HIDING_ATTRIBUTES, f.path);
+    }
+    if (isGitmodulesPath(f.path) && hidesSubmodules(f)) add(DIFF_HIDING_ATTRIBUTES, f.path);
   }
   const lines = input.files.reduce((n, f) => n + f.added + f.removed, 0);
   const isDocOrTest = (p: string) => (categories.docs ?? []).includes(p) || (categories.tests ?? []).includes(p);
@@ -211,17 +551,33 @@ export function computeLevel(input: LevelInput, cfg: ReviewConfig, extraCategori
   if (allLow && lines <= (L.L0_auto.max_lines ?? Infinity)) reasons.push(`only docs/tests, ${lines} lines`);
   else raise('L1', allLow ? `docs/tests but ${lines} lines (> ${L.L0_auto.max_lines})` : 'touches app code');
   // A category listed for L1 (e.g. docs, for a site whose docs are its product) always gets the evaluator.
-  if (level === 'L0') for (const c of L.L1_evaluator.when) if (categories[c]?.length) raise('L1', `${c}: ${(categories[c] ?? []).slice(0, 3).join(', ')}`);
+  // Every path in a reason as shownPath shows it (#683): reasons reach the PR body, events, the owner's question and
+  // hold comments, so no control, format or invisible character in a name reaches them raw.
+  const named = (c: string) => `${c}: ${shownPaths((categories[c] ?? []).slice(0, 3))}`;
+  if (level === 'L0') for (const c of L.L1_evaluator.when) if (categories[c]?.length) raise('L1', named(c));
 
   const l1Limits = (L.L1_evaluator.max_lines !== undefined && lines > L.L1_evaluator.max_lines) || (L.L1_evaluator.max_files !== undefined && input.files.length > L.L1_evaluator.max_files);
   if (l1Limits && (categories['app-non-money'] ?? []).length) {
     add('app-non-money-large', '*');
     raise('L2', `large app change: ${lines} lines, ${input.files.length} files`);
   }
-  for (const c of L.L2_notify.when) if (c !== 'app-non-money-large' && categories[c]?.length) raise('L2', `${c}: ${(categories[c] ?? []).slice(0, 3).join(', ')}`);
-  for (const c of L.L3_human.when) if (categories[c]?.length) raise('L3', `${c}: ${(categories[c] ?? []).slice(0, 3).join(', ')}`);
-  for (const c of ALWAYS_L3) if (!L.L3_human.when.includes(c) && categories[c]?.length) raise('L3', `${c}: ${(categories[c] ?? []).slice(0, 3).join(', ')}`);
+  for (const c of L.L2_notify.when) if (c !== 'app-non-money-large' && categories[c]?.length) raise('L2', named(c));
+  for (const c of L.L3_human.when) if (categories[c]?.length) raise('L3', named(c));
+  for (const c of ALWAYS_L3) if (!L.L3_human.when.includes(c) && categories[c]?.length) raise('L3', named(c));
   if (L.L3_human.over_lines !== undefined && lines > L.L3_human.over_lines) raise('L3', `${lines} lines (> ${L.L3_human.over_lines})`);
+  // The odd names, each as shownPath shows it: a control, invisible or format character, or a top-level name outside
+  // ASCII, escaped (\uXXXX), so the character shows as what it is and never reaches a comment or a log line raw; a
+  // name that isn't valid UTF-8, quoted.
+  const odd = categories[CONTROL_CHARACTER_PATH] ?? [];
+  if (odd.length) raise('L3', `path with a control character: ${odd.slice(0, 3).map(shownPath).join(', ')}`);
+  const notUtf8 = categories[NON_UTF8_PATH] ?? [];
+  if (notUtf8.length) raise('L3', `path that isn't valid UTF-8: ${notUtf8.slice(0, 3).map(shownPath).join(', ')}`);
+  const invisible = categories[INVISIBLE_CHARACTER_PATH] ?? [];
+  if (invisible.length) raise('L3', `path with an invisible or format character: ${invisible.slice(0, 3).map(shownPath).join(', ')}`);
+  const lookalike = categories[NON_ASCII_TOP_LEVEL_PATH] ?? [];
+  if (lookalike.length) raise('L3', `top-level name that isn't ASCII: ${lookalike.slice(0, 3).map(shownPath).join(', ')}`);
+  const hiding = categories[DIFF_HIDING_ATTRIBUTES] ?? [];
+  if (hiding.length) raise('L3', `.gitattributes or .gitmodules can hide what a review sees (-diff, binary, linguist-generated, a filter, an encoding, a diff driver, a macro, a submodule ignore): ${shownPaths(hiding.slice(0, 3))}`);
 
   if (input.verdict && (!input.verdict.patch_correct || !input.verdict.test_correct || input.verdict.confidence === 'low')) {
     const from = level;

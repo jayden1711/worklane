@@ -25,7 +25,7 @@ on:
       job:
         description: The slow job to run (all of them for a batch)
         type: choice
-        options: [all, bootstrap, bootstrap-windows, testrun-real-systemd, add-project-real-systemd, auth-probe-real-users, wizard-e2e-real-systemd]
+        options: [all, bootstrap, bootstrap-windows, testrun-real-systemd, add-project-real-systemd, auth-probe-real-users, egress-real-systemd, wizard-e2e-real-systemd]
         default: all
       sha:
         description: The commit to test; empty for the commit the run is on. A bisect step names it, and the run refuses any other.
@@ -1028,7 +1028,9 @@ jobs:
           jq -se 'map(select(.state=="failed")) | length == 0' "$F/run2.jsonl"
           jq -se 'map(select(.step=="app" and .state=="ask" and .ask.kind=="approve_link")) | length == 2' "$F/run2.jsonl"
           jq -se 'map(select(.step=="app" and .state=="done" and (.detail|test("made through the manifest flow$")))) | length == 1' "$F/run2.jsonl"
-          jq -se 'map(select(.step=="claude-token" and .state=="ask" and .ask.kind=="paste_secret")) | length == 1' "$F/run2.jsonl"
+          # Issue #711: the claude-token step never asks a dashboard for the token; here it comes from root's stdin.
+          jq -se 'map(select(.step=="claude-token" and .state=="ask")) | length == 0' "$F/run2.jsonl"
+          jq -se 'map(select(.step=="claude-token" and .state=="done")) | length == 1' "$F/run2.jsonl"
           jq -se 'map(select(.step=="policy" and .state=="done" and (.detail|startswith("auto_merge off, $20/day, 2 workers")))) | length == 1' "$F/run2.jsonl"
           if grep -qFf "$F/claude-token" "$F/run1.jsonl" "$F/run1.err" "$F/run2.jsonl" "$F/run2.err"; then echo "the token was echoed" >&2; exit 1; fi
           # The App came through the manifest flow: its key and secrets the coordinator's own 0400 files, nothing by hand.
@@ -1524,215 +1526,78 @@ jobs:
           # The new account's tokens: in files of the runner's only, masked; never in the env.
           for n in 2 3; do t="sk-ant-oat01-$(openssl rand -hex 24)"; echo "::add-mask::$t"; (umask 077; printf '%s\n' "$t" > "$F/claude-token$n"); done; unset t
           systemctl is-active worklane-ci.service worklane-beta.service
-      - name: "claude-account switch across both: paused (runs finish), the token for every agent and eval user at 0600, checked as each, resumed"
-        run: |
-          sudo bash scripts/setup/claude-account.sh switch --json --timeout 4 < "$F/claude-token2" > "$F/switch1.jsonl" 2> "$F/switch1.err" || { cat "$F/switch1.jsonl" "$F/switch1.err"; exit 1; }
-          cat "$F/switch1.jsonl"
-          for n in ci beta; do
-            jq -se --arg n "$n" 'map(select(.step=="pause" and .instance==$n and .state=="done")) | length == 1' "$F/switch1.jsonl"
-            # The coordinator drained (SIGTERM to its main process; its runs finished) rather than being stopped at the timeout.
-            jq -se --arg n "$n" 'map(select(.step=="wait" and .instance==$n and (.detail|test("its runs have finished")))) | length == 1' "$F/switch1.jsonl"
-            jq -se --arg n "$n" 'map(select(.step=="resume" and .instance==$n and .state=="done")) | length == 1' "$F/switch1.jsonl"
-            systemctl is-active "worklane-$n.service"
-          done
-          [ "$(jq -sc '[.[] | select(.step=="check" and .state=="done") | .user]' "$F/switch1.jsonl")" = '["wl-beta-agent","wl-beta-eval","wl-ci-agent"]' ]
-          jq -se 'last | .step=="switch" and .state=="done"' "$F/switch1.jsonl"
-          sudo journalctl --no-pager -u worklane-beta.service | grep -q 'stand-in coordinator: SIGTERM, finishing the run in flight'
-          for u in wl-ci-agent wl-beta-agent wl-beta-eval; do
-            c="$(getent passwd "$u" | cut -d: -f6)/.claude/.credentials.json"
-            [ "$(sudo stat -c '%U %a' "$c")" = "$u 600" ] || { sudo stat -c '%U %a' "$c"; exit 1; }
-            sudo grep -qFf "$F/claude-token2" "$c"
-          done
-          s=/var/lib/worklane/claude-account
-          [ "$(sudo stat -c '%U %a' "$s/status.json")" = "root 644" ]
-          sudo jq -e '[.users[] | select(.logged_in)] | length == 3' "$s/status.json"
-          sudo jq -e '[.users[].token_id] | unique | length == 1' "$s/status.json"
-          # Never echoed: not in the output, the progress or status files, or any unit's journal.
-          if grep -qFf "$F/claude-token2" "$F/switch1.jsonl" "$F/switch1.err" || sudo grep -qFf "$F/claude-token2" "$s/switch.jsonl" "$s/status.json" || sudo journalctl --no-pager | grep -qFf "$F/claude-token2"; then echo "the token was echoed" >&2; exit 1; fi
-      - name: "claude-account: an instance whose check fails is not resumed; the rerun resumes it; status"
-        run: |
-          echo wl-beta-eval | sudo tee /etc/ci-claude-fail >/dev/null
-          set +e
-          sudo bash scripts/setup/claude-account.sh switch --json --timeout 2 beta < "$F/claude-token2" > "$F/switch2.jsonl" 2> "$F/switch2.err"
-          rc=$?
-          set -e
-          cat "$F/switch2.jsonl"
-          [ "$rc" = 1 ]
-          jq -se 'map(select(.step=="check" and .user=="wl-beta-eval" and .state=="failed")) | length == 1' "$F/switch2.jsonl"
-          jq -se 'map(select(.step=="resume" and .instance=="beta" and .state=="failed")) | length == 1' "$F/switch2.jsonl"
-          if systemctl is-active -q worklane-beta.service; then echo "beta was resumed with a failed check" >&2; exit 1; fi
-          [ "$(cat /var/lib/worklane/claude-account/paused)" = beta ]
-          sudo rm -f /etc/ci-claude-fail
-          sudo bash scripts/setup/claude-account.sh switch --json --timeout 2 beta < "$F/claude-token2" > "$F/switch3.jsonl" 2> "$F/switch3.err" || { cat "$F/switch3.jsonl" "$F/switch3.err"; exit 1; }
-          jq -se 'map(select(.step=="pause" and .instance=="beta" and (.detail|test("earlier switch")))) | length == 1' "$F/switch3.jsonl"
-          jq -se 'map(select(.step=="resume" and .instance=="beta" and .state=="done")) | length == 1' "$F/switch3.jsonl"
-          systemctl is-active worklane-beta.service
-          sudo bash scripts/setup/claude-account.sh status | tee "$F/status.txt"
-          [ "$(grep -c ' signed in ' "$F/status.txt")" = 3 ] && ! grep -q 'NOT signed in' "$F/status.txt"
-          if grep -qFf "$F/claude-token2" "$F/switch2.jsonl" "$F/switch2.err" "$F/switch3.jsonl" "$F/switch3.err" "$F/status.txt"; then echo "the token was echoed" >&2; exit 1; fi
-      - name: "claude-account (#463): the API refuses the new login on the real call: the switch is refused, every agent user back on its previous login byte for byte, both instances resumed on it, the token never echoed"
-        run: |
-          t="sk-ant-oat01-$(openssl rand -hex 24)"; echo "::add-mask::$t"; (umask 077; printf '%s\n' "$t" > "$F/claude-token4"); unset t
-          # The stand-in's API refuses a token by its last 4 characters (never the token in /etc).
-          tr -d '[:space:]' < "$F/claude-token4" | tail -c 4 | sudo tee /etc/ci-claude-refuse >/dev/null
-          users="wl-beta-agent wl-beta-eval wl-ci-agent"
-          for u in $users; do sudo sha256sum "$(getent passwd "$u" | cut -d: -f6)/.claude/.credentials.json" | cut -d' ' -f1 > "$F/before-$u"; done
-          set +e
-          sudo bash scripts/setup/claude-account.sh switch --json --timeout 2 < "$F/claude-token4" > "$F/switch4.jsonl" 2> "$F/switch4.err"
-          rc=$?
-          set -e
-          cat "$F/switch4.jsonl"
-          [ "$rc" = 1 ]
-          jq -se 'last | .step=="switch" and .state=="failed" and (.detail | test("^refused: the API refused the new login \\(Claude said: HTTP 401: Invalid API key"))' "$F/switch4.jsonl"
-          [ "$(jq -sc '[.[] | select(.step=="check" and .state=="failed") | .user]' "$F/switch4.jsonl")" = '["wl-beta-agent","wl-beta-eval","wl-ci-agent"]' ]
-          [ "$(jq -sc '[.[] | select(.step=="install" and .state=="failed" and (.detail | test("^rolled back"))) | .user]' "$F/switch4.jsonl")" = '["wl-beta-agent","wl-beta-eval","wl-ci-agent"]' ]
-          for u in $users; do
-            c="$(getent passwd "$u" | cut -d: -f6)/.claude/.credentials.json"
-            [ "$(sudo sha256sum "$c" | cut -d' ' -f1)" = "$(cat "$F/before-$u")" ] || { echo "$u is not on its previous login" >&2; exit 1; }
-            [ "$(sudo stat -c '%U %a' "$c")" = "$u 600" ] || { sudo stat -c '%U %a' "$c"; exit 1; }
-          done
-          for n in ci beta; do jq -se --arg n "$n" 'map(select(.step=="resume" and .instance==$n and .state=="done")) | length == 1' "$F/switch4.jsonl"; systemctl is-active "worklane-$n.service"; done
-          s=/var/lib/worklane/claude-account
-          if grep -qFf "$F/claude-token4" "$F/switch4.jsonl" "$F/switch4.err" || sudo grep -qFf "$F/claude-token4" "$s/switch.jsonl" "$s/status.json" || sudo journalctl --no-pager | grep -qFf "$F/claude-token4"; then echo "the token was echoed" >&2; exit 1; fi
-          sudo rm -f /etc/ci-claude-refuse
-      - name: "claude-account profiles (#464), real users and real sudo: profile-add in each agent user's own profile dir, proven by a real call there; use refused by the API changes nothing; remove refused while in use; a coordinator can't name another instance or every one; its add is staged until a root confirm"
+      - name: "claude-account (#736): switch, profile-add, confirm-profile, use, remove and failover are gone: the script and the helper refuse each, nothing run or written; uninstall removes what an older engine left (each user's ~/.claude-profiles as that user, a link never followed) and keeps every login; status still reads each agent user"
         run: |
           s=/var/lib/worklane/claude-account
-          t="sk-ant-oat01-$(openssl rand -hex 24)"; echo "::add-mask::$t"; (umask 077; printf '%s\n' "$t" > "$F/claude-token5"); unset t
-          sudo bash scripts/setup/claude-account.sh profile-add work --json < "$F/claude-token5" > "$F/prof1.jsonl" 2> "$F/prof1.err" || { cat "$F/prof1.jsonl" "$F/prof1.err"; exit 1; }
-          cat "$F/prof1.jsonl"
-          [ "$(jq -sc '[.[] | select(.step=="check" and .state=="done") | .user]' "$F/prof1.jsonl")" = '["wl-beta-agent","wl-ci-agent"]' ]
+          login_sum() { local c; c="$(getent passwd "$1" | cut -d: -f6)/.claude/.credentials.json"; if sudo test -e "$c"; then sudo sha256sum "$c" | cut -d' ' -f1; else echo none; fi; }
+          for u in wl-ci-agent wl-beta-agent wl-beta-eval; do login_sum "$u" > "$F/login-before-$u"; done
+          # At a root shell, and as a coordinator through the machine helper: each removed command refused, a token on
+          # stdin never read.
+          for a in "switch" "switch --json --timeout 2" "profile-add work" "confirm-profile work" "use work" "use default beta" "remove work" "failover default+work back" "failover off stay"; do
+            # shellcheck disable=SC2086 # each case is its words
+            if sudo bash scripts/setup/claude-account.sh $a < "$F/claude-token2" > /dev/null 2>> "$F/736-refused.txt"; then echo "claude-account.sh ran $a" >&2; exit 1; fi
+          done
+          for a in "switch" "use work" "use default" "remove work" "failover default+work back" "failover off stay" "profile-add work" "login work" "uninstall"; do
+            # shellcheck disable=SC2086 # each case is its words
+            if sudo -u wl-ci sudo -n "$HELPER" claude-account $a < /dev/null 2>> "$F/736-refused.txt"; then echo "wl-ci may run claude-account $a" >&2; exit 1; fi
+          done
+          sleep 2
+          if systemctl is-active -q worklane-claude-account.service; then echo "a switch or profile unit started" >&2; exit 1; fi
+          for f in profiles.json profile-ops.jsonl switch.jsonl paused; do if sudo test -e "$s/$f"; then echo "$s/$f was written" >&2; exit 1; fi; done
+          systemctl is-active worklane-ci.service worklane-beta.service
+          # What an older engine left: a profile dir in each agent user's home (its own, 0700, a login in it), a link in
+          # the eval user's place (to a dir of root's that must survive), and root's files.
+          sudo install -d -m 0755 /usr/local/lib/ci-736-target && echo keep | sudo tee /usr/local/lib/ci-736-target/keep > /dev/null
           for u in wl-ci-agent wl-beta-agent; do
             h="$(getent passwd "$u" | cut -d: -f6)"
-            [ "$(sudo stat -c '%U %a' "$h/.claude-profiles")" = "$u 700" ] || { sudo stat -c '%U %a' "$h/.claude-profiles"; exit 1; }
-            [ "$(sudo stat -c '%U %a' "$h/.claude-profiles/work")" = "$u 700" ]
-            [ "$(sudo stat -c '%U %a' "$h/.claude-profiles/work/.credentials.json")" = "$u 600" ]
-            sudo grep -qFf "$F/claude-token5" "$h/.claude-profiles/work/.credentials.json"
-            # The login it had is untouched.
-            if sudo grep -qFf "$F/claude-token5" "$h/.claude/.credentials.json"; then echo "$u: ~/.claude changed" >&2; exit 1; fi
+            (cd / && sudo -u "$u" install -d -m 0700 "$h/.claude-profiles" "$h/.claude-profiles/work")
+            (cd / && sudo -u "$u" sh -c 'umask 077; cat > "$1"' _ "$h/.claude-profiles/work/.credentials.json") < "$F/claude-token3"
           done
-          sudo test ! -e "$(getent passwd wl-beta-eval | cut -d: -f6)/.claude-profiles/work"
-          [ "$(sudo stat -c '%U %a' "$s/profiles.json")" = "root 644" ]
-          # The API refuses the profile: use is refused, nothing changes.
-          tr -d '[:space:]' < "$F/claude-token5" | tail -c 4 | sudo tee /etc/ci-claude-refuse >/dev/null
-          set +e
-          sudo bash scripts/setup/claude-account.sh use work --json > "$F/prof2.jsonl" 2> "$F/prof2.err"
-          rc=$?
-          set -e
-          cat "$F/prof2.jsonl"
+          (cd / && sudo -u wl-beta-eval ln -s /usr/local/lib/ci-736-target "$(getent passwd wl-beta-eval | cut -d: -f6)/.claude-profiles")
+          printf '{"version":1,"profiles":{"work":{"kind":"setup-token","users":{}}},"active":{"beta":{"profile":"work","since":"2026-10-15T00:00:00Z"}},"failover":{"instances":{"ci":{"order":["default","work"],"back":true}}}}\n' | sudo tee "$s/profiles.json" > /dev/null
+          for f in profile-ops.jsonl switch.jsonl paused; do echo '{}' | sudo tee "$s/$f" > /dev/null; done
+          sudo bash scripts/setup/claude-account.sh uninstall | tee "$F/uninstall.txt"
+          for u in wl-ci-agent wl-beta-agent wl-beta-eval; do
+            p="$(getent passwd "$u" | cut -d: -f6)/.claude-profiles"
+            if sudo test -e "$p" || sudo test -L "$p"; then echo "$p is still there" >&2; exit 1; fi
+            [ "$(login_sum "$u")" = "$(cat "$F/login-before-$u")" ] || { echo "$u's own login changed" >&2; exit 1; }
+          done
+          [ "$(sudo cat /usr/local/lib/ci-736-target/keep)" = keep ] || { echo "the link was followed" >&2; exit 1; }
+          sudo rm -rf /usr/local/lib/ci-736-target
+          for f in profiles.json profile-ops.jsonl switch.jsonl paused; do if sudo test -e "$s/$f"; then echo "$s/$f is still there" >&2; exit 1; fi; done
+          [ "$(sudo stat -c '%U %a' "$s/status.json")" = "root 644" ]
+          sudo bash scripts/setup/claude-account.sh uninstall | grep -q 'nothing left'
+          # status still reads every agent user: ci's agent is signed in (add-project gave it its login), beta's aren't.
+          set +e; sudo bash scripts/setup/claude-account.sh status > "$F/status.txt"; rc=$?; set -e
+          cat "$F/status.txt"
           [ "$rc" = 1 ]
-          jq -se 'last | .step=="use" and .state=="failed" and (.detail|test("^refused: .*HTTP 401"))' "$F/prof2.jsonl"
-          sudo jq -e '.active == {}' "$s/profiles.json"
-          sudo rm -f /etc/ci-claude-refuse
-          sudo bash scripts/setup/claude-account.sh use work beta --json > "$F/prof3.jsonl" 2> "$F/prof3.err" || { cat "$F/prof3.jsonl" "$F/prof3.err"; exit 1; }
-          sudo jq -e '.active.beta.profile == "work" and (.active.ci == null)' "$s/profiles.json"
-          set +e
-          sudo bash scripts/setup/claude-account.sh remove work --json > "$F/prof4.jsonl" 2> "$F/prof4.err"
-          rc=$?
-          set -e
-          [ "$rc" = 1 ] && jq -se 'last | (.detail|test("refused: beta use profile work"))' "$F/prof4.jsonl"
-          sudo bash scripts/setup/claude-account.sh use default beta --json > /dev/null
-          sudo bash scripts/setup/claude-account.sh remove work --json > "$F/prof5.jsonl" 2> "$F/prof5.err" || { cat "$F/prof5.jsonl" "$F/prof5.err"; exit 1; }
-          for u in wl-ci-agent wl-beta-agent; do sudo test ! -e "$(getent passwd "$u" | cut -d: -f6)/.claude-profiles/work"; done
-          # Through the machine helper, as a coordinator (wl-ci): real sudo takes no instance at all, so another instance,
-          # or every one, can't even be asked for; the helper takes the instance from SUDO_USER.
-          for bad in "use work beta" "use default beta" "use work all" "use work ci" "profile-add work beta" "remove work beta" "confirm-profile work" "use work --for beta"; do
-            # shellcheck disable=SC2086 # each case is its words
-            if sudo -u wl-ci sudo -n "$HELPER" claude-account $bad < /dev/null 2>/dev/null; then echo "wl-ci may run claude-account $bad" >&2; exit 1; fi
-          done
-          if sudo -u wl-ci sudo -n bash scripts/setup/claude-account.sh use work beta < /dev/null 2>/dev/null; then echo "wl-ci may run the script itself" >&2; exit 1; fi
-          ends() { sudo grep -cE "\"op\":\"$1\",\"profile\":\"$2\",\"step\":\"$1\",\"state\":\"(done|failed)\".*\"for\":\"ci\"" "$s/profile-ops.jsonl" || true; }
-          ask() { # <op> <profile> <done|failed>: as wl-ci through the helper; waits for that step's own end, which must be the one given
-            local n
-            n="$(ends "$1" "$2")"
-            sudo -u wl-ci sudo -n "$HELPER" claude-account "$1" "$2" < /dev/null | tee -a "$F/helper-ops.txt"
-            for _ in $(seq 1 60); do [ "$(ends "$1" "$2")" -gt "$n" ] && break; sleep 2; done
-            sudo grep -E "\"op\":\"$1\",\"profile\":\"$2\",\"step\":\"$1\",\"state\":\"(done|failed)\".*\"for\":\"ci\"" "$s/profile-ops.jsonl" | tail -n 1 | grep -q "\"state\":\"$3\"" || { sudo tail -n 20 "$s/profile-ops.jsonl"; sudo journalctl --no-pager -u worklane-claude-account.service | tail -n 40; return 1; }
-          }
-          # use, from ci's dashboard: ci alone (beta keeps what it has).
-          sudo bash scripts/setup/claude-account.sh profile-add shared --json < "$F/claude-token5" > /dev/null
-          sudo bash scripts/setup/claude-account.sh use shared beta --json > /dev/null
-          ask use default done
-          grep -q 'started claude-account use default as worklane-claude-account.service' "$F/helper-ops.txt"
-          sudo jq -e '.active.beta.profile == "shared" and .active.ci == null' "$s/profiles.json"
-          # remove, from ci's dashboard: never a profile another instance uses, nor one ci wasn't given.
-          ask remove shared failed
-          sudo test -e "$(getent passwd wl-beta-agent | cut -d: -f6)/.claude-profiles/shared"
-          sudo bash scripts/setup/claude-account.sh use default beta --json > /dev/null
-          # profile-add, from ci's dashboard: ci's agent user only, STAGED; unusable until a root admin confirms it.
-          sudo -u wl-ci bash -c 'umask 077; d="$HOME/.config/ci-secrets"; mkdir -p "$d"; cat > "$d/claude-profile-token"; chmod 0400 "$d/claude-profile-token"' < "$F/claude-token5"
-          ask profile-add mine done
-          sudo jq -e '.profiles.mine.staged == true and .profiles.mine.instance == "ci" and (.profiles.mine.users | keys) == ["wl-ci-agent"]' "$s/profiles.json"
-          sudo test ! -e "$(getent passwd wl-beta-agent | cut -d: -f6)/.claude-profiles/mine"
-          sudo -u wl-ci test ! -e "$(getent passwd wl-ci | cut -d: -f6)/.config/ci-secrets/claude-profile-token"
-          ask use mine failed
-          sudo jq -e '.active.ci == null' "$s/profiles.json"
-          # Confirm, at a root shell: it shows the account, and only the name typed back confirms it.
-          set +e
-          printf 'wrong\n' | sudo bash scripts/setup/claude-account.sh confirm-profile mine 2> "$F/confirm1.err"
-          rc=$?
-          set -e
-          [ "$rc" = 1 ] && grep -q "nothing was confirmed" "$F/confirm1.err" && grep -q "Claude account agents-" "$F/confirm1.err"
-          printf 'mine\n' | sudo bash scripts/setup/claude-account.sh confirm-profile mine 2> "$F/confirm2.err" || { cat "$F/confirm2.err"; exit 1; }
-          ask use mine done
-          sudo jq -e '.active.ci.profile == "mine" and .active.beta == null' "$s/profiles.json"
-          ask use default done
-          # The relayed sign-in (the owner's approved exception), from ci's dashboard: the link for wl-ci alone, the one-time
-          # code through wl-ci's 0400 file onto claude's stdin, the account staged; neither the link nor the code kept anywhere.
-          code="$(openssl rand -hex 12)#$(openssl rand -hex 12)"; echo "::add-mask::$code"
-          t="sk-ant-oat01-$(openssl rand -hex 24)"; echo "::add-mask::$t"; (umask 077; printf '%s\n' "$t" > "$F/claude-token6"; printf '%s\n' "$code" > "$F/login-code"); unset t
-          printf '%s %s\n' "$code" "$(cat "$F/claude-token6")" | sudo tee /etc/ci-claude-login > /dev/null
-          unset code
-          if sudo -u wl-ci sudo -n "$HELPER" claude-account login rel beta < /dev/null 2>/dev/null; then echo "wl-ci may sign in for beta" >&2; exit 1; fi
-          n="$(ends login rel)"
-          sudo -u wl-ci sudo -n "$HELPER" claude-account login rel < /dev/null | tee -a "$F/helper-ops.txt"
-          for _ in $(seq 1 60); do sudo test -e "$s/login-url" && break; sleep 2; done
-          [ "$(sudo stat -c '%U %a' "$s/login-url")" = "wl-ci 400" ] || { sudo stat -c '%U %a' "$s/login-url"; exit 1; }
-          sudo -u wl-ci grep -q '^https://claude.ai/oauth/authorize?.*redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback' "$s/login-url"
-          if sudo -u wl-beta cat "$s/login-url" 2>/dev/null; then echo "another instance's coordinator can read the link" >&2; exit 1; fi
-          sudo -u wl-ci bash -c 'umask 077; d="$HOME/.config/ci-secrets"; mkdir -p "$d"; cat > "$d/claude-login-code"; chmod 0400 "$d/claude-login-code"' < "$F/login-code"
-          for _ in $(seq 1 60); do [ "$(ends login rel)" -gt "$n" ] && break; sleep 2; done
-          sudo grep -E '"op":"login","profile":"rel","step":"login","state":"done".*"for":"ci"' "$s/profile-ops.jsonl" || { sudo tail -n 20 "$s/profile-ops.jsonl"; sudo journalctl --no-pager -u worklane-claude-account.service | tail -n 40; exit 1; }
-          sudo test ! -e "$s/login-url"
-          sudo -u wl-ci test ! -e "$(getent passwd wl-ci | cut -d: -f6)/.config/ci-secrets/claude-login-code"
-          sudo jq -e '.profiles.rel.staged == true and .profiles.rel.kind == "login" and (.profiles.rel.users | keys) == ["wl-ci-agent"]' "$s/profiles.json"
-          h="$(getent passwd wl-ci-agent | cut -d: -f6)"
-          [ "$(sudo stat -c '%U %a' "$h/.claude-profiles/rel/.credentials.json")" = "wl-ci-agent 600" ]
-          ask use rel failed
-          sudo jq -se '[.[] | select(.what=="claude_account.profile") | .to] | any(. == "staged rel for ci (signed in from the dashboard)")' /var/lib/worklane/machine-changes.jsonl
-          # The code is single-use: claude has it; a second one is never read (the step is over), and the account is still staged.
-          if grep -qFf "$F/login-code" "$F"/helper-ops.txt || sudo grep -qFf "$F/login-code" "$s/profile-ops.jsonl" "$s/profiles.json" /var/lib/worklane/machine-changes.jsonl || sudo journalctl --no-pager | grep -qFf "$F/login-code"; then echo "the code was echoed" >&2; exit 1; fi
-          if sudo journalctl --no-pager | grep -q 'ci-relayed-link-4s7'; then echo "the sign-in link was logged" >&2; exit 1; fi
-          sudo rm -f /etc/ci-claude-login
-          # The failover setting, from ci's dashboard: real sudo takes the order joined by + (never a comma) and no instance.
-          sudo -u wl-ci sudo -n "$HELPER" claude-account failover default+mine back < /dev/null
-          sudo jq -e '.failover.instances.ci == {"order": ["default", "mine"], "back": true} and .failover.machine == null' "$s/profiles.json"
-          for bad in "failover default+mine back beta" "failover off stay beta" "failover default,mine back"; do
-            # shellcheck disable=SC2086 # each case is its words
-            if sudo -u wl-ci sudo -n "$HELPER" claude-account $bad < /dev/null 2>/dev/null; then echo "wl-ci may run claude-account $bad" >&2; exit 1; fi
-          done
-          sudo -u wl-ci sudo -n "$HELPER" claude-account failover off stay < /dev/null
-          # Every add, confirm, use and remove is an ops alert line in the machine change log; no token in any.
-          sudo jq -se '[.[] | select(.what=="claude_account.profile") | .to] | any(. == "staged mine for ci") and (map(select(startswith("confirmed mine as agents-"))) | length == 1) and any(. == "use mine for ci")' /var/lib/worklane/machine-changes.jsonl
-          if grep -qFf "$F/claude-token5" "$F"/prof*.jsonl "$F"/prof*.err "$F"/confirm*.err || sudo grep -qFf "$F/claude-token5" "$s/profile-ops.jsonl" "$s/profiles.json" /var/lib/worklane/machine-changes.jsonl || sudo journalctl --no-pager | grep -qFf "$F/claude-token5"; then echo "the token was echoed" >&2; exit 1; fi
-      - name: "claude-account from the dashboard: the coordinator starts it through the helper, in a unit of its own; the token from the instance's secrets"
-        run: |
-          sudo -u wl-ci sudo -n "$HELPER" claude-account switch < /dev/null | tee "$F/helper-switch.txt"
-          grep -q 'started the Claude account switch as worklane-claude-account.service' "$F/helper-switch.txt"
-          s=/var/lib/worklane/claude-account/switch.jsonl
-          # The unit starts on its own: until it has, switch.jsonl is still the last switch's (its own token ask included).
-          asked() { grep '"step":"token","state":"ask"' "$s" 2>/dev/null | grep -q "in ci's dashboard"; }
-          for _ in $(seq 1 60); do asked && break; sleep 2; done
-          asked || { cat "$s"; sudo journalctl --no-pager -u worklane-claude-account.service | tail -n 40; exit 1; }
-          # What the dashboard does with a pasted token: the coordinator user's own file, 0400, renamed into place (src/console/secrets.ts).
-          sudo -H -u wl-ci sh -c 'umask 077; d="$HOME/.config/ci-secrets"; mkdir -p "$d"; cat > "$d/.t.tmp"; chmod 0400 "$d/.t.tmp"; mv "$d/.t.tmp" "$d/claude-account-token"' < "$F/claude-token3"
-          for _ in $(seq 1 150); do grep -q '"step":"switch","state":"\(done\|failed\)"' "$s" && break; sleep 2; done
-          cat "$s"
-          tail -n 1 "$s" | jq -e '.step=="switch" and .state=="done"'
-          sudo test ! -e "$(getent passwd wl-ci | cut -d: -f6)/.config/ci-secrets/claude-account-token"
-          for u in wl-ci-agent wl-beta-agent wl-beta-eval; do sudo grep -qFf "$F/claude-token3" "$(getent passwd "$u" | cut -d: -f6)/.claude/.credentials.json"; done
+          grep -qE '^ci +wl-ci-agent +signed in ' "$F/status.txt"
+          grep -qE '^beta +wl-beta-agent +NOT signed in' "$F/status.txt"
           systemctl is-active worklane-ci.service worklane-beta.service
-          if sudo grep -qFf "$F/claude-token3" "$s" /var/lib/worklane/claude-account/status.json /var/lib/worklane/machine-changes.jsonl || sudo journalctl --no-pager | grep -qFf "$F/claude-token3"; then echo "the token was echoed" >&2; exit 1; fi
+          if grep -qFf "$F/claude-token2" "$F/736-refused.txt" "$F/status.txt" || grep -qFf "$F/claude-token3" "$F/uninstall.txt" "$F/status.txt" || sudo grep -qFf "$F/claude-token3" "$s/status.json" || sudo journalctl --no-pager | grep -qFf "$F/claude-token2"; then echo "a token was echoed" >&2; exit 1; fi
+      - name: "claude-account from the dashboard (#711): a switch takes a Claude credential, so the helper refuses it; a token an earlier dashboard stored is never read, and the next run removes it"
+        run: |
+          s=/var/lib/worklane/claude-account/switch.jsonl
+          # What an earlier dashboard did with a pasted token, a new profile's token and a relayed sign-in's code: the
+          # coordinator user's own files, 0400.
+          sudo -H -u wl-ci sh -c 'umask 077; d="$HOME/.config/ci-secrets"; mkdir -p "$d"; cat > "$d/.t.tmp"; chmod 0400 "$d/.t.tmp"; mv "$d/.t.tmp" "$d/claude-account-token"' < "$F/claude-token3"
+          sudo -H -u wl-ci sh -c 'umask 077; d="$HOME/.config/ci-secrets"; cat > "$d/claude-profile-token"; chmod 0400 "$d/claude-profile-token"' < "$F/claude-token3"
+          code="$(openssl rand -hex 12)#$(openssl rand -hex 12)"; echo "::add-mask::$code"; (umask 077; printf '%s\n' "$code" > "$F/login-code"); unset code
+          sudo -H -u wl-ci sh -c 'umask 077; d="$HOME/.config/ci-secrets"; cat > "$d/claude-login-code"; chmod 0400 "$d/claude-login-code"' < "$F/login-code"
+          for op in "switch" "profile-add mine" "login mine"; do
+            # shellcheck disable=SC2086 # each case is its words
+            if sudo -u wl-ci sudo -n "$HELPER" claude-account $op < /dev/null 2>> "$F/helper-switch.txt"; then echo "wl-ci may run claude-account $op" >&2; exit 1; fi
+          done
+          sleep 5
+          if systemctl is-active -q worklane-claude-account.service; then echo "a switch unit started" >&2; exit 1; fi
+          if sudo test -e "$s"; then echo "a switch ran" >&2; sudo cat "$s"; exit 1; fi
+          # The next run of the script (a refresh, from ci's dashboard) removes each unread, as wl-ci.
+          sudo -u wl-ci sudo -n "$HELPER" claude-account status < /dev/null > /dev/null || true
+          for f in claude-account-token claude-profile-token claude-login-code; do sudo test ! -e "$(getent passwd wl-ci | cut -d: -f6)/.config/ci-secrets/$f"; done
+          sudo test ! -e /var/lib/worklane/claude-account/login-url
+          for u in wl-ci-agent wl-beta-agent wl-beta-eval; do if sudo grep -qFf "$F/claude-token3" "$(getent passwd "$u" | cut -d: -f6)/.claude/.credentials.json" 2>/dev/null; then echo "$u got the dashboard's token" >&2; exit 1; fi; done
+          systemctl is-active worklane-ci.service worklane-beta.service
+          if grep -qFf "$F/claude-token3" "$F/helper-switch.txt" || grep -qFf "$F/login-code" "$F/helper-switch.txt" || sudo grep -qFf "$F/claude-token3" /var/lib/worklane/claude-account/status.json /var/lib/worklane/machine-changes.jsonl || sudo journalctl --no-pager | grep -qFf "$F/claude-token3" || sudo journalctl --no-pager | grep -qFf "$F/login-code"; then echo "the token or the code was echoed" >&2; exit 1; fi
       # Server mode for a repo with no .worklane/ (the setup audit's B3-B7), a fresh instance (gamma) against a second
       # fake GitHub: the App by hand writes credentials.yaml itself; --after-credentials drafts the config through
       # auto-config (questions answered as the coordinator, then a setup PR) and reports "waiting", exit 3, until it
@@ -2120,45 +1985,59 @@ jobs:
           sudo tail -n 1 "$d/steps.jsonl" | jq -e '.state=="done" and (.detail|test("is already https://"))'
           [ "$(systemctl show -p ActiveEnterTimestampMonotonic --value worklane-dashboard-hub.service)" = "$since" ]
           [ "$(sudo grep -c '"what":"tailscale"' /var/lib/worklane/machine-changes.jsonl)" = 9 ]
-      # The Siri gateway on a real machine (docs/siri.md): dashboards.sh --siri gives wl-dash the instance's Siri gateway
-      # token (and takes it away again without --siri), the hub listens on 127.0.0.1:4397, and the kernel's word on who
-      # opened the connection (/proc/net/tcp) refuses a program on this machine whatever headers it sends; the dashboard
-      # key never works on /api/siri, and the gateway token works nowhere else; serve-siri adds 8443 and keeps 443.
-      - name: "Siri gateway: wl-dash reads the gateway token only with --siri; a local program is refused by the kernel's word; the dashboard key never works on /api/siri; serve-siri adds 8443 only"
+      # Siri was removed (#743). On a real machine, with what an older install left (the hub unit's --siri-port, the
+      # instance's Siri device token store and gateway token, the tailnet's 8443 forward to 127.0.0.1:4397): the hub
+      # starts with --siri-port, says it is ignored and listens on nothing for it; serve-siri is refused;
+      # tailscale.sh unserve-siri takes 8443 away and keeps 443; dashboards.sh --siri (accepted, ignored) drops the
+      # port and deletes the token store and the gateway token.
+      - name: "Siri removed: an older install's --siri-port starts no gateway; unserve-siri takes 8443 away and keeps 443; dashboards.sh --siri drops the port and deletes the Siri tokens"
         run: |
           d=/var/lib/worklane/tailscale; hub=/etc/systemd/system/worklane-dashboard-hub.service
           state="$(getent passwd wl-ci | cut -d: -f6)/.local/state/worklane/instances/ci/state"
-          port="$(node --input-type=module -e 'const m = await import("/opt/worklane/current/dist/src/dashboard.js"); console.log(m.instancePort("ci"));')"
           id="$(sed -n 's/^ExecStart=.* --client-id \([^ ]*\).*$/\1/p' "$hub")"; url="$(sed -n 's/^ExecStart=.* --public-url \([^ ]*\).*$/\1/p' "$hub")"
           [ -n "$id" ] && [ -n "$url" ]
           sudo cp "$d/steps.jsonl" "$F/siri-steps-before.jsonl"
-          sudo test -s "$state/siri-gateway-token"
-          if sudo -u wl-dash test -r "$state/siri-gateway-token"; then echo "wl-dash reads the Siri gateway token without --siri" >&2; exit 1; fi
-          sudo bash /opt/worklane/current/scripts/setup/dashboards.sh --client-id "$id" --public-url "$url" --siri ci | tee "$F/siri-dashboards.log"
+          # What an older install left: the store and the token, the coordinator's and closed to others as the engine
+          # made them (dashboards.sh refuses an instance state anything in which is open to others), the hub unit's
+          # option, 8443. Explicit modes, not a umask: a default ACL on the state directory overrides a umask.
+          siri_files=("$state/siri" "$state/siri/devices.json" "$state/siri-gateway-token")
+          siri_show() { for p in "${siri_files[@]}"; do sudo stat -c '%A %U:%G %n' "$p"; sudo getfacl -p "$p"; done; sudo getfacl -p "$state"; }
+          g="$(id -gn wl-ci)"
+          printf '{"devices":[]}\n' > "$F/siri-devices.json"
+          head -c 24 /dev/urandom | base64 > "$F/siri-gateway-token"
+          sudo install -d -m 0700 -o wl-ci -g "$g" "$state/siri"
+          sudo install -m 0600 -o wl-ci -g "$g" "$F/siri-devices.json" "$state/siri/devices.json"
+          sudo install -m 0600 -o wl-ci -g "$g" "$F/siri-gateway-token" "$state/siri-gateway-token"
+          rm -f "$F/siri-gateway-token"
+          sudo test -s "$state/siri/devices.json" && sudo test -s "$state/siri-gateway-token"
+          if sudo find "$state" \( -perm -o=r -o -perm -o=w -o -perm -o=x \) -print | grep .; then echo "the planted files are open to others" >&2; siri_show >&2 || true; exit 1; fi
+          sudo sed -i 's/^\(ExecStart=.* --signin-dir [^ ]*\)/\1 --siri-port 4397/' "$hub"
           grep -q -- ' --siri-port 4397' "$hub"
-          sudo -u wl-dash test -r "$state/siri-gateway-token"
-          if sudo -u wl-dash test -w "$state/siri-gateway-token"; then echo "wl-dash can write the Siri gateway token" >&2; exit 1; fi
-          if sudo cmp -s "$state/siri-gateway-token" "$state/dashboard-token"; then echo "the gateway token is the dashboard token" >&2; exit 1; fi
-          for _ in $(seq 1 30); do [ "$(curl -s -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:4397/tell)" != 000 ] && break; sleep 1; done
-          # One try from this runner's user, which is not tailscaled, naming a tailnet address: refused before any token is read.
-          peer="$(printf '100.%s.%s.%s' 101 102 103)"
-          code="$(curl -sS -o "$F/siri-local.json" -w '%{http_code}' -X POST http://127.0.0.1:4397/tell -H 'content-type: application/json' -H "x-forwarded-for: $peer" -d '{"text":"an idea"}')"
-          cat "$F/siri-local.json"; echo
-          [ "$code" = 403 ] && jq -e '.speech|test("only answers from your tailnet")' "$F/siri-local.json"
-          tok="$(sudo cat "$state/dashboard-token")"; echo "::add-mask::$tok"
-          gw="$(sudo cat "$state/siri-gateway-token")"; echo "::add-mask::$gw"
-          # The dashboard key on the instance's Siri routes: refused; the gateway token on the dashboard's routes: refused.
-          [ "$(curl -sS -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer $tok" -H 'content-type: application/json' -d '{"text":"x"}' "http://127.0.0.1:$port/api/siri/tell")" = 401 ]
-          [ "$(curl -sS -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer $gw" -H 'content-type: application/json' -d '{"id":"x","answer":"approve"}' "http://127.0.0.1:$port/api/decide")" = 401 ]
-          if sudo test -d "$state/voice"; then sudo find "$state/voice" -name '*.json' | grep -q . && { echo "something reached the voice inbox" >&2; exit 1; }; fi
-          # serve-siri, by hand as root: 8443 to the gateway, 443 still to the hub, never Funnel.
-          sudo bash /opt/worklane/current/scripts/setup/tailscale.sh serve-siri
-          sudo jq -e --arg n "$TS_NAME" '.Web["\($n):8443"].Handlers["/"].Proxy=="http://127.0.0.1:4397" and .Web["\($n):443"].Handlers["/"].Proxy=="http://127.0.0.1:4399" and (has("AllowFunnel")|not)' /var/lib/ci-tailscale/serve.json
-          sudo -u wl-ci bash /opt/worklane/current/scripts/setup/tailscale.sh status --json | jq -e '.siri and .serve and (.funnel|not)'
-          # Back as it was for the steps after: no gateway, and wl-dash's read of the gateway token removed.
-          sudo bash /opt/worklane/current/scripts/setup/dashboards.sh --client-id "$id" --public-url "$url" ci > "$F/siri-dashboards-off.log"
-          if grep -q -- '--siri-port' "$hub"; then echo "the gateway stayed on" >&2; exit 1; fi
-          if sudo -u wl-dash test -r "$state/siri-gateway-token"; then echo "wl-dash still reads the Siri gateway token" >&2; exit 1; fi
+          t0="$(date +%s)"
+          sudo systemctl daemon-reload
+          sudo systemctl restart worklane-dashboard-hub.service
+          for _ in $(seq 1 30); do [ "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:4399/)" != 000 ] && break; sleep 1; done
+          systemctl is-active worklane-dashboard-hub.service
+          sudo journalctl -u worklane-dashboard-hub.service --since "@$t0" --no-pager | grep -q -- '--siri-port is ignored: Siri was removed, so no gateway starts'
+          [ "$(curl -s -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:4397/tell)" = 000 ] || { echo "something answers on 4397" >&2; exit 1; }
+          sudo /usr/bin/tailscale serve --bg --https=8443 http://127.0.0.1:4397 > /dev/null
+          sudo -u wl-ci bash /opt/worklane/current/scripts/setup/tailscale.sh status --json | jq -e '.siri and .serve'
+          # serve-siri: refused, nothing run.
+          if sudo bash /opt/worklane/current/scripts/setup/tailscale.sh serve-siri 2> "$F/serve-siri.err"; then echo "serve-siri ran" >&2; exit 1; fi
+          grep -q 'Siri was removed, so there is no gateway to serve' "$F/serve-siri.err"
+          # unserve-siri, by hand as root: 8443 gone, 443 still to the hub, never Funnel.
+          sudo bash /opt/worklane/current/scripts/setup/tailscale.sh unserve-siri
+          sudo jq -e --arg n "$TS_NAME" '(.Web|has("\($n):8443")|not) and (.TCP|has("8443")|not) and .Web["\($n):443"].Handlers["/"].Proxy=="http://127.0.0.1:4399" and (has("AllowFunnel")|not)' /var/lib/ci-tailscale/serve.json
+          sudo -u wl-ci bash /opt/worklane/current/scripts/setup/tailscale.sh status --json | jq -e '(.siri|not) and .serve and (.funnel|not)'
+          # dashboards.sh with --siri, as an older rerun passes it: accepted, said to be ignored, and everything of Siri gone.
+          if ! sudo bash /opt/worklane/current/scripts/setup/dashboards.sh --client-id "$id" --public-url "$url" --siri ci > "$F/siri-removed.log" 2> "$F/siri-removed.err"; then
+            cat "$F/siri-removed.log" "$F/siri-removed.err" >&2; siri_show >&2 || true; exit 1
+          fi
+          cat "$F/siri-removed.err"
+          grep -q 'warning: --siri is ignored: Siri was removed' "$F/siri-removed.err"
+          if grep -q -- '--siri-port' "$hub"; then echo "the hub unit still has --siri-port" >&2; exit 1; fi
+          for f in siri siri-gateway-token; do if sudo test -e "$state/$f"; then echo "$f is still there" >&2; exit 1; fi; done
+          [ "$(curl -s -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:4397/tell)" = 000 ]
           sudo install -o root -g root -m 0644 "$F/siri-steps-before.jsonl" "$d/steps.jsonl"
       # The hooks gateway for webhook automations on a real machine (docs/automations.md): dashboards.sh --hooks gives
       # wl-dash the instance's hooks gateway token (and takes it away again without --hooks), the hub listens on
@@ -2345,6 +2224,8 @@ jobs:
           wait_status() { for _ in $(seq 90); do [ "$(sudo jq -r '.id + " " + .state' "$st" 2>/dev/null)" = "$1 running" ] || [ "$(sudo jq -r .id "$st" 2>/dev/null)" != "$1" ] || break; sleep 2; done; sudo jq -c . "$st"; }
           digest() { (cd / && sudo -u wl-ci /usr/local/bin/node --input-type=module -e "import {approvalDigest} from '$E/plugins/approval.js'; import {readPreview, recordOf} from '$E/plugins/root-ops.js'; const p = readPreview('ci', process.argv[1]); const m = process.argv[3] ? {network: process.argv[3] === 'none' ? [] : process.argv[3].split('+'), secrets: process.argv[4] === 'none' ? [] : process.argv[4].split('+')} : undefined; console.log(approvalDigest(recordOf(p, process.argv[2].split('+'), m)))" "$@"); }
           confirm() { printf '%s\n' "$1" | sudo script -qec "bash /opt/worklane/current/scripts/setup/plugins.sh confirm ci $1 $2" /dev/null | tail -n 1; }
+          # preview_done: a failed preview stops right after its wait, with its unit's journal and status (#677).
+          . scripts/ci/preview-done.sh
           # The broker: its user, groups and unit.
           sudo bash scripts/setup/mcp-broker.sh ci | tee "$F/mcp-setup.log"
           systemctl is-active "worklane-mcp@ci"
@@ -2354,6 +2235,7 @@ jobs:
           sudo -u wl-ci sudo -n "$HELPER" plugin-fetch kit "$url" "$FIXTURE_SHA" test/fixtures/plugins/kit && wait_status kit
           d="$(digest kit builder)" && sudo -u wl-ci sudo -n "$HELPER" plugin-stage kit "$d" builder && confirm kit "$d"
           sudo -u wl-ci sudo -n "$HELPER" mcp-preview kit-notes kit notes && wait_status kit-notes
+          preview_done ci kit-notes
           p=/var/lib/worklane/plugins/previews/ci/kit-notes/preview.json
           jq -c '{snapshotError, tools: (.snapshot.tools // null | if . then map(.name) else . end)}' "$p"
           if ! jq -e '.snapshot' "$p" >/dev/null; then readlink -f /usr/local/bin/node; sudo find /var/lib/worklane/plugins/store/ci -maxdepth 4 -printf '%M %u:%g %p\n' | head -30; fi
@@ -2364,6 +2246,7 @@ jobs:
           sudo -u wl-ci sudo -n "$HELPER" plugin-fetch escape "$url" "$FIXTURE_SHA" test/fixtures/plugins/escape && wait_status escape
           d="$(digest escape builder)" && sudo -u wl-ci sudo -n "$HELPER" plugin-stage escape "$d" builder && confirm escape "$d"
           sudo -u wl-ci sudo -n "$HELPER" mcp-preview escape-probe escape probe && wait_status escape-probe
+          preview_done ci escape-probe
           tries="$(jq -r '.snapshot.tools[0].description' /var/lib/worklane/plugins/previews/ci/escape-probe/preview.json)"
           echo "$tries" | tr ' ' '\n'
           echo "$tries" | grep -q 'wl-ci-mcp/escaped=denied'
@@ -2440,9 +2323,9 @@ jobs:
         run: |
           hub=/etc/systemd/system/worklane-dashboard-hub.service
           id="$(sed -n 's/^ExecStart=.* --client-id \([^ ]*\).*$/\1/p' "$hub")"; url="$(sed -n 's/^ExecStart=.* --public-url \([^ ]*\).*$/\1/p' "$hub")"
-          # The hub serves both (the Siri step left it serving ci alone), with its Siri gateway as it was.
-          sudo bash scripts/setup/dashboards.sh --client-id "$id" --public-url "$url" --siri ci delta > "$F/rm-hub0.log"
-          grep -q -- '--hub ci=.*,delta=' "$hub" && grep -q -- ' --siri-port 4397' "$hub"
+          # The hub serves both (the Siri step left it serving ci alone).
+          sudo bash scripts/setup/dashboards.sh --client-id "$id" --public-url "$url" ci delta > "$F/rm-hub0.log"
+          grep -q -- '--hub ci=.*,delta=' "$hub"
           # The machine helper's rule names delta, beside the others; what it should name without it.
           helper_users() { sudo sed -n 's/^\(wl-[-a-z0-9, ]*\) ALL=(root) NOPASSWD: WORKLANE_MACHINE$/\1/p' /etc/sudoers.d/worklane-machine; }
           helper_users | tr ',' '\n' | sed 's/^ *//' | grep -qx wl-delta
@@ -2460,7 +2343,8 @@ jobs:
               p.version = 1; p.profiles ||= {}; p.active ||= {}; p.failover ||= {}; p.failover.instances ||= {};
               p.profiles["ci-shared"] = { kind: "token", added_at: "2026-10-15T00:00:00Z", staged: false, users: { "wl-ci-agent": rec("ci", "wl-ci-agent"), "wl-delta-agent": rec("delta", "wl-delta-agent") } };
               p.profiles["ci-delta-only"] = { kind: "token", added_at: "2026-10-15T00:00:00Z", staged: true, instance: "delta", users: { "wl-delta-agent": rec("delta", "wl-delta-agent") } };
-              p.active.ci = { profile: "ci-shared", since: "2026-10-15T00:00:00Z" }; p.active.delta = { profile: "ci-shared", since: "2026-10-15T00:00:00Z" };
+              // On default: an instance an older engine had on another profile starts no run since #736, and ci (kilo) and delta must start.
+              p.active.ci = { profile: "default", since: "2026-10-15T00:00:00Z" }; p.active.delta = { profile: "default", since: "2026-10-15T00:00:00Z" };
               p.failover.instances.ci = { order: ["default", "ci-shared"], back: true }; p.failover.instances.delta = { order: ["default", "ci-shared"], back: false };
             }, {});
             rw("/etc/worklane/updates.json", (u) => { u.canary = { instance: "delta", repo: "example/alpha", time_limit_minutes: 30 }; }, {});
@@ -2485,9 +2369,6 @@ jobs:
             printf '{"id":"kit","state":"done"}\n' | sudo install -D -m 0644 /dev/stdin "/var/lib/worklane/plugins/fetch-status/$n.json"
           done
           printf '{"version":1,"entries":[{"instance":"ci","id":"kit","roles":["worker"],"digest":"sha256:%064d","staged_at":"2026-10-16T00:00:00Z"},{"instance":"delta","id":"kit","roles":["worker"],"digest":"sha256:%064d","staged_at":"2026-10-16T00:00:00Z"}]}\n' 1 2 | sudo install -D -m 0644 /dev/stdin /var/lib/worklane/plugins/pending.json
-          # A Siri device token for delta, made the engine's way, as its coordinator.
-          dstate="$(getent passwd wl-delta | cut -d: -f6)/.local/state/worklane/instances/delta/state"
-          (cd / && sudo -u wl-delta node --input-type=module -e 'const m = await import("/opt/worklane/current/dist/src/siri/tokens.js"); m.createDevice({ stateDir: process.argv[1], instance: "delta", name: "delta phone", by: "ci-owner" });' "$dstate")
           # What every shared file holds for ci, to compare after.
           ci_view() {
             sudo jq -c '.instances.ci' /etc/worklane/testrun-gpu.json
@@ -2614,8 +2495,6 @@ jobs:
           [ "$(echo "$b" | wc -l)" = 1 ] && [ "$(echo "$r" | wc -l)" = 1 ]
           for f in "$b" "$r"; do [ "$(sudo stat -c '%U:%G %a' "$f")" = "root:root 600" ] || { sudo stat -c '%n %U:%G %a' "$f"; exit 1; }; done
           grep -qF "exported delta's history: $b" "$F/rm4.out"
-          # Its Siri device tokens were revoked before the export: the bundle's store has every one revoked.
-          sudo node --input-type=module -e 'const m = await import("/opt/worklane/current/dist/src/instance-move.js"); const f = m.readBundle(process.argv[1]).files.find((x) => x.path === "state/siri/devices.json"); if (!f) process.exit(1); const d = JSON.parse(Buffer.from(f.data, "base64").toString("utf8")).devices; if (!d.length || !d.every((x) => x.revokedAt && x.revokedBy === "instance removed")) process.exit(2); console.log(d.length, "Siri device(s), all revoked");' "$b"
           sudo node --input-type=module -e 'const m = await import("/opt/worklane/current/dist/src/instance-move.js"); const b = m.readBundle(process.argv[1]); if (!b.files.some((f) => f.path === "state/events.db")) process.exit(1); if (b.files.some((f) => /dashboard-token|credential|\.pem$/.test(f.path))) process.exit(2); console.log(b.files.length, "files, from", b.from.repo);' "$b"
           sudo jq -c '{instance, incidents: [.taken.incidents[]? | {id, instance}], canary: .taken.canary.canary, gpu: .records.gpu}' "$r"
           # Every incident taken is delta's (its own coordinator raised some too), the seeded one among them.
@@ -2646,7 +2525,7 @@ jobs:
           sudo jq -e '[.incidents[] | select(.instance=="delta")] | length == 0' /var/lib/worklane/agent-slots/incidents.json
           sudo jq -e '[.pending[] | select(.instance=="delta")] | length == 0' /var/lib/worklane/pending-signers.json
           if sudo grep -qx delta /var/lib/worklane/claude-account/paused; then echo "delta is still in the paused list" >&2; exit 1; fi
-          # ci's as they were: every record, its units, the hub (ci alone, its Siri gateway kept), the helper rule (ci and beta).
+          # ci's as they were: every record, its units, the hub (ci alone), the helper rule (ci and beta).
           ci_view() {
             sudo jq -c '.instances.ci' /etc/worklane/testrun-gpu.json
             sudo jq -c '.instances.ci' /etc/worklane/testrun-network.json
@@ -2670,7 +2549,7 @@ jobs:
           ci_view > "$F/rm-ci-after.txt"
           diff "$F/rm-ci-before.txt" "$F/rm-ci-after.txt"
           hub=/etc/systemd/system/worklane-dashboard-hub.service
-          grep -q -- '--hub ci=[^ ,]* ' "$hub" && grep -q -- ' --siri-port 4397' "$hub" && grep -q -- "--client-id $RM_ID --public-url $RM_URL " "$hub"
+          grep -q -- '--hub ci=[^ ,]* ' "$hub" && grep -q -- "--client-id $RM_ID --public-url $RM_URL " "$hub"
           if grep -q 'delta' "$hub"; then echo "the hub still serves delta" >&2; exit 1; fi
           sudo grep -qxF "$RM_HELPER ALL=(root) NOPASSWD: WORKLANE_MACHINE" /etc/sudoers.d/worklane-machine
           sudo -n -l -U wl-ci "$HELPER" set-slots 1 >/dev/null
@@ -2725,7 +2604,7 @@ jobs:
           sudo sh -c "cd '$gh_' && sha256sum *.yaml" | diff "$F/gamma-before.txt" -
           [ "$(systemctl show -p LoadState --value worklane-gamma.service)" = loaded ]
           sudo systemctl start worklane-gamma.service worklane-dashboard-gamma.service && sleep 10 && systemctl is-active worklane-gamma.service
-      - name: "instance-rename: ci becomes kilo: the same App key and agent login, its history imported, every root record re-keyed, the old Siri token refused, its open ask asked again; nothing of ci left"
+      - name: "instance-rename: ci becomes kilo: the same App key and agent login, its history imported, every root record re-keyed, an older install's Siri token store not carried, its open ask asked again; nothing of ci left"
         run: |
           home="$(getent passwd wl-ci | cut -d: -f6)"; state="$home/.local/state/worklane/instances/ci/state"
           # As another user, from a directory every user may enter.
@@ -2734,9 +2613,13 @@ jobs:
             sudo install -d "/etc/systemd/system/$u.service.d"
             printf '[Service]\nEnvironment=NODE_OPTIONS=%s CI_LOOPBACK_GITHUB_PORT=8999\n' "$LOOPBACK?port=8999" | sudo tee "/etc/systemd/system/$u.service.d/fake-github.conf" >/dev/null
           done
-          # A Siri device token and an open ask for ci, made the engine's way, as ci's coordinator; the canary on ci.
-          asu wl-ci node --input-type=module -e 'const m = await import("/opt/worklane/current/dist/src/siri/tokens.js"); process.stdout.write(m.createDevice({ stateDir: process.argv[1], instance: "ci", name: "ci rename phone", by: "ci-owner" }).token);' "$state" > "$F/siri-ci-token"
-          echo "::add-mask::$(cat "$F/siri-ci-token")"
+          # What an older install's Siri left in ci's state (removed, #743): its device token store. And an open ask for
+          # ci, made the engine's way, as ci's coordinator; the canary on ci.
+          # Explicit modes, the coordinator's and closed to others, as the engine made it (a umask doesn't hold under a default ACL).
+          printf '{"devices":[]}\n' > "$F/rename-siri-devices.json"
+          sudo install -d -m 0700 -o wl-ci -g "$(id -gn wl-ci)" "$state/siri"
+          sudo install -m 0600 -o wl-ci -g "$(id -gn wl-ci)" "$F/rename-siri-devices.json" "$state/siri/devices.json"
+          if sudo find "$state/siri" \( -perm -o=r -o -perm -o=w -o -perm -o=x \) -print | grep .; then sudo stat -c '%A %U:%G %n' "$state/siri" "$state/siri/devices.json" >&2; sudo getfacl -p "$state/siri" "$state/siri/devices.json" >&2; exit 1; fi
           asu wl-ci node --input-type=module -e 'const { EventLog } = await import("/opt/worklane/current/dist/src/events/log.js"); const { asks } = await import("/opt/worklane/current/dist/src/console/asks.js"); const log = new EventLog(process.argv[1]); asks(log).create({ instance: "ci", kind: "question", title: "ci rename: carried?", detail: "an open ask", options: ["yes", "no"] }); log.close();' "$state/events.db"
           sudo node -e 'const fs = require("fs"); const f = "/etc/worklane/updates.json"; const u = JSON.parse(fs.readFileSync(f, "utf8")); u.canary = { instance: "ci", repo: "example/alpha", time_limit_minutes: 30 }; fs.writeFileSync(f + ".ci", JSON.stringify(u, null, 2) + "\n"); fs.renameSync(f + ".ci", f);'
           a="$home/.config/ci-app/private-key.pem"; c="$(getent passwd wl-ci-agent | cut -d: -f6)/.claude/.credentials.json"
@@ -2787,15 +2670,8 @@ jobs:
           [ "$after_events" -gt "$before_events" ] || { echo "events: $before_events before, $after_events after" >&2; exit 1; }
           # The open ask, asked again for kilo; ci's withdrawn.
           asu wl-kilo node --input-type=module -e 'const { EventLog } = await import("/opt/worklane/current/dist/src/events/log.js"); const { asks } = await import("/opt/worklane/current/dist/src/console/asks.js"); const l = new EventLog(process.argv[1]); const a = asks(l); const n = a.list({ instance: "kilo", status: "open" }).filter((x) => x.title === "ci rename: carried?").length; const o = a.list({ instance: "ci", status: "open" }).length; l.close(); if (n !== 1 || o !== 0) { console.error(n, o); process.exit(1); }' "$ni/state/events.db"
-          # The old Siri token is refused on the new instance, as made and with its name rewritten; it was revoked by the rename.
-          sudo cp "$F/siri-ci-token" /tmp/siri-ci-token && sudo chown wl-kilo /tmp/siri-ci-token && sudo chmod 0400 /tmp/siri-ci-token
-          asu wl-kilo node --input-type=module -e '
-            const fs = await import("node:fs"); const m = await import("/opt/worklane/current/dist/src/siri/tokens.js");
-            const t = fs.readFileSync("/tmp/siri-ci-token", "utf8").trim(); const node = { id: "n1", name: "phone-node" };
-            const tries = [[t, "kilo"], [t.replace("_siri_ci_", "_siri_kilo_"), "kilo"]];
-            for (const [tok, inst] of tries) { const v = m.verifyToken({ stateDir: process.argv[1], instance: inst, token: tok, node }); if (v.ok) { console.error("accepted"); process.exit(1); } console.log(v.why); }
-            if (!m.readDevices(process.argv[1]).every((d) => d.revokedAt)) process.exit(2);' "$ni/state"
-          sudo rm -f /tmp/siri-ci-token
+          # The older install's Siri token store is never carried to the new instance: the import skips it.
+          if sudo test -e "$ni/state/siri"; then echo "ci's Siri token store was carried to kilo" >&2; exit 1; fi
           # Every root record re-keyed; none of ci's left.
           sudo jq -e '(.instances|has("ci")|not) and (.instances|has("kilo")|not)' /etc/worklane/testrun-gpu.json
           grep -q "note: ci's GPU grant (GPU 0) is not moved: ci has no test user" "$F/rn5.out"
@@ -2823,17 +2699,17 @@ jobs:
             for p in "/etc/worklane/plugins/$n.json" "/var/lib/worklane/plugins/store/$n" "/var/lib/worklane/plugins/previews/$n" "/var/lib/worklane/plugins/fetch-status/$n.json" "/var/lib/worklane-mcp-$n"; do if sudo test -e "$p"; then echo "$p is left" >&2; exit 1; fi; done
           done
           sudo jq -e '[.entries[] | select(.instance=="ci" or .instance=="kilo")] | length == 0' /var/lib/worklane/plugins/pending.json
-          sudo jq -e '(.active|has("ci")|not) and .active["kilo"].profile=="ci-shared" and (.failover.instances|has("kilo")) and (.profiles["ci-shared"].users["wl-kilo-agent"].instance=="kilo") and (.profiles["ci-shared"].users|has("wl-ci-agent")|not)' /var/lib/worklane/claude-account/profiles.json
+          sudo jq -e '(.active|has("ci")|not) and .active["kilo"].profile=="default" and (.failover.instances|has("kilo")) and (.profiles["ci-shared"].users["wl-kilo-agent"].instance=="kilo") and (.profiles["ci-shared"].users|has("wl-ci-agent")|not)' /var/lib/worklane/claude-account/profiles.json
           sudo jq -e '([.users[] | select(.instance=="ci")] | length == 0) and ([.users[] | select(.instance=="kilo" and .user=="wl-kilo-agent")] | length > 0)' /var/lib/worklane/claude-account/status.json
           sudo grep -qx kilo /var/lib/worklane/claude-account/paused && ! sudo grep -qx ci /var/lib/worklane/claude-account/paused
           sudo jq -e '.canary.instance=="kilo"' /etc/worklane/updates.json
           sudo jq -e '[.incidents[] | select(.id=="ciciok01")][0] | .instance=="kilo" and .key=="worklane-kilo.service"' /var/lib/worklane/agent-slots/incidents.json
           sudo jq -e '[.incidents[] | select(.instance=="ci")] | length == 0' /var/lib/worklane/agent-slots/incidents.json
           sudo jq -e '[.pending[] | select(.instance=="ci")] | length == 0' /var/lib/worklane/pending-signers.json
-          # The helper's rule and the hub with kilo, never ci; the hub's Siri gateway kept.
+          # The helper's rule and the hub with kilo, never ci.
           sudo grep -qxF "$RN_HELPER ALL=(root) NOPASSWD: WORKLANE_MACHINE" /etc/sudoers.d/worklane-machine
           hub=/etc/systemd/system/worklane-dashboard-hub.service
-          grep -q -- '--hub kilo=' "$hub" && grep -q -- ' --siri-port 4397' "$hub"
+          grep -q -- '--hub kilo=' "$hub"
           if grep -qE -- '--hub (.*,)?ci=' "$hub"; then echo "the hub still serves ci" >&2; exit 1; fi
           sudo -n -l -U wl-kilo "$HELPER" set-slots 1 >/dev/null
           sudo tail -n 1 /var/lib/worklane/machine-changes.jsonl | jq -e '.what=="instance.renamed" and .from=="ci" and .to=="kilo"'
@@ -2860,7 +2736,8 @@ jobs:
     # The watchdog's Claude sign-in probe on a real host: instance.sh's coordinator and agent users (separate homes,
     # 0700) and its real sudoers rule; the agent user signed in to a stand-in claude that reads the login under the
     # HOME it is given; the probe run as the coordinator through sudo, as its service runs it, finds it signed in.
-    # scripts/ci/auth-probe-real-users.mjs has the assertions.
+    # scripts/ci/auth-probe-real-users.mjs has the assertions; scripts/ci/project-command-real-users.mjs has those of a
+    # project command's sandbox there (#713).
     name: Claude sign-in probe (real users)
     needs: scope
     if: ${{ !cancelled() && contains(needs.scope.outputs.run, ' auth-probe-real-users ') }}
@@ -2925,12 +2802,48 @@ jobs:
           t="$(mktemp -d /tmp/wl-probe-XXXXXX)"
           mkdir -p "$t/node_modules"
           cp -r dist package.json "$t/"
-          cp -r node_modules/ws node_modules/yaml node_modules/zod "$t/node_modules/"
+          cp -r node_modules/yaml node_modules/zod "$t/node_modules/"
           cp scripts/ci/auth-probe-real-users.mjs "$t/"
           chmod -R a+rX "$t"
           a="$(getent passwd wl-probe-agent | cut -d: -f6)"
           sudo -u wl-probe env -i PATH=/usr/local/bin:/usr/bin:/bin HOME="$(getent passwd wl-probe | cut -d: -f6)" USER=wl-probe LOGNAME=wl-probe LANG=C.UTF-8 \
             sh -c 'cd "$HOME" && exec node "$1/auth-probe-real-users.mjs" "$1/dist" wl-probe-agent "$2"' _ "$t" "$a"
+      - name: "a project command (#713), as the coordinator through sudo to the agent user, reads neither the agent's Claude login nor its API key: bubblewrap from machine.sh, the real sandbox"
+        run: |
+          sudo apt-get update -q && sudo bash scripts/setup/machine.sh
+          # check.sh probes that the agent user can start bubblewrap with the flags project commands use (its other lines
+          # need more setup than this job has).
+          sudo bash scripts/setup/check.sh probe | tee "$RUNNER_TEMP/check.log" || true
+          grep -qx "PASS wl-probe-agent can start a project command's sandbox" "$RUNNER_TEMP/check.log"
+          a="$(getent passwd wl-probe-agent | cut -d: -f6)"
+          # A stand-in API key where credentials.sh <name> api-key puts one (never a real key).
+          k="sk-ant-api03-$(openssl rand -hex 24)"; echo "::add-mask::$k"
+          printf '%s' "$k" | sudo -u wl-probe-agent sh -c 'umask 077 && mkdir -p "$1" && cat > "$1/api_key"' _ "$a/.config/probe-claude-key"
+          unset k
+          # A secret store of the agent's, reached through a symlink in a root-owned directory (which the agent can't
+          # change): the only layout whose symlink a project command's sandbox follows rather than refuses.
+          k="sk-ant-api03-$(openssl rand -hex 24)"; echo "::add-mask::$k"
+          printf '%s' "$k" | sudo -u wl-probe-agent sh -c 'umask 077 && mkdir -p "$1" && cat > "$1/key"' _ "$a/secret-store"
+          unset k
+          sudo install -d -o root -g root -m 0755 /opt/wl-713-link
+          sudo ln -s "$a/secret-store" /opt/wl-713-link/store
+          # And one whose target leaves a directory of the agent's with `..` (the walk binds what a `..` leaves).
+          sudo -u wl-probe-agent mkdir -p "$a/secret-store/x"
+          sudo ln -s "$a/secret-store/x/.." /opt/wl-713-link/dotdot
+          t="$(mktemp -d /tmp/wl-project-command-XXXXXX)"
+          mkdir -p "$t/node_modules"
+          cp -r dist package.json "$t/"
+          cp -r node_modules/yaml node_modules/zod "$t/node_modules/"
+          cp scripts/ci/project-command-real-users.mjs "$t/"
+          git init -q -b main "$t/checkout"
+          git -C "$t/checkout" -c user.email=ci@example.com -c user.name=ci -c commit.gpgsign=false commit -q --allow-empty -m 'the coordinator checkout'
+          chmod -R a+rX "$t"
+          sudo chown -R wl-probe "$t/checkout"
+          sudo -u wl-probe env -i PATH=/usr/local/bin:/usr/bin:/bin HOME="$(getent passwd wl-probe | cut -d: -f6)" USER=wl-probe LOGNAME=wl-probe LANG=C.UTF-8 \
+            sh -c 'cd "$HOME" && exec node "$1/project-command-real-users.mjs" "$1/dist" wl-probe-agent "$2" "$1/checkout" /opt/wl-713-link/store /opt/wl-713-link/dotdot' _ "$t" "$a" < /dev/null
+          # The unit tests' real-sandbox cases, here required to run (elsewhere they skip without bubblewrap): the
+          # isolation tests, and separate-users' check that runs git as another user (nobody) in a checkout it doesn't own.
+          PROJECT_SANDBOX_REQUIRED=1 node --import ./dist/test/isolate.js --test dist/test/project-command-isolation.test.js dist/test/separate-users.test.js
 
   wizard-e2e-real-systemd:
     # The first-run wizard end to end, the way a person walks it, on a fresh runner with real systemd: the one install
@@ -3298,3 +3211,47 @@ jobs:
           name: wizard-e2e-screenshots
           path: ${{ runner.temp }}/wiz/browser/*.png
           if-no-files-found: ignore
+
+  egress-real-systemd:
+    # The host egress rule (scripts/setup/egress-firewall.sh, #543) on real systemd and nft, with a test user's real
+    # rootless Docker (test-user.sh install): test users covered by default; a test-user process dropped; Docker's
+    # image pull the one exception (its unit's NFTSet=), kept across a reload and a restart; without NFTSet= the pull
+    # is dropped; a test-user unit can't move itself into Docker's cgroup. Measured and put in the job summary either
+    # way, whether a test run can join Docker's user+net namespaces. And an install that covered test users before #543
+    # (the pre-#543 egress-firewall.sh's apply --with-test-users) keeps dropping their Docker after the new install and apply: no route the
+    # join probe found blocked before opens. scripts/ci/egress-real-systemd.sh has the steps and assertions.
+    name: egress firewall (real systemd)
+    needs: scope
+    if: ${{ !cancelled() && contains(needs.scope.outputs.run, ' egress-real-systemd ') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: a coordinator user and the full-run lock (what instance.sh and the machine script make), and nft
+        run: |
+          sudo useradd --create-home --shell /bin/bash wl-ci
+          sudo chmod 0750 "$(getent passwd wl-ci | cut -d: -f6)"
+          sudo install -o root -g root -m 0644 /dev/null /run/lock/worklane-full-run.lock
+          command -v nft > /dev/null 2>&1 || sudo apt-get install -y -q nftables > /dev/null
+      - name: test-user.sh install (its rootless Docker, before any egress rule)
+        run: |
+          n="$(nproc)"
+          sudo bash scripts/setup/test-user.sh install ci --cpus "$((n - 2))-$((n - 1))" --memory-max 2G | tee "$RUNNER_TEMP/install.log"
+          tail -n 5 "$RUNNER_TEMP/install.log" | grep -qx 'OK: all checks passed'
+          grep -qx 'NFTSet=cgroup:inet:worklane_egress:egress_ok' /etc/systemd/system/worklane-test-ci-docker.service
+      - name: the database image, pinned to the digest it has today
+        run: |
+          docker pull -q postgres:17-alpine
+          echo "DB_IMAGE=$(docker image inspect --format '{{index .RepoDigests 0}}' postgres:17-alpine)" >> "$GITHUB_ENV"
+      - name: "egress on real systemd: test users covered by default and dropped; a real rootless pull with the rule on; the set kept across a reload and a restart (the old delete-table reload emptied it); no pull without NFTSet=; no move into Docker's cgroup; whether a run can join Docker's namespaces (measured); a pre-#543 --with-test-users install keeps Docker dropped"
+        run: bash scripts/ci/egress-real-systemd.sh
+      - name: the rule, Docker and its journal, on failure
+        if: failure()
+        run: |
+          sudo nft list ruleset || true
+          systemctl cat worklane-test-ci-docker.service || true
+          systemctl show -p ControlGroup worklane-test-ci-docker.service || true
+          sudo journalctl --no-pager -n 80 -u worklane-test-ci-docker.service || true

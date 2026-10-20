@@ -13,7 +13,7 @@ import { ConfigInvalid, loadConfig } from './config/load.js';
 import { doctor } from './doctor.js';
 import { engineRoot, initCommand, MODES, type Mode } from './init.js';
 import { renamedFrom } from './instance-rename.js';
-import { revokeAllDevices } from './siri/tokens.js';
+import { SIRI_PORT_IGNORED } from './voice-removed.js';
 import { exportBundle, importBundle, type ImportResult } from './instance-move.js';
 import { hostname } from 'node:os';
 import { checkGuardrails } from './guardrails/check.js';
@@ -22,13 +22,15 @@ import { evaluate } from './guardrails/engine.js';
 import { globToRegExp } from './guardrails/glob.js';
 import { findProjectRoot, hookProcess, readStdin } from './hook.js';
 import { agentSettingsPath, guardrailSettings } from './agent-settings.js';
-import { install, installCheckoutPrePush, installGitHook, invokedEngine } from './install.js';
+import { install, installCheckoutPrePush, installGitHook, invokedEngine, migrateLegacyHooks } from './install.js';
 import { recordPushBlocked } from './push-guard.js';
-import { homeDir } from './os/index.js';
+import { currentUid, currentUser, fileAccess, homeDir, isRoot } from './os/index.js';
 import { toolPath, toolPrefix } from './tool-path.js';
 import { scanPath } from './scan/secrets.js';
 import { runCommentCheck } from './comment-policy.js';
 import { checkVacuity } from './vacuity.js';
+import { changedNames } from './coordinator/change-files.js';
+import { shownPath } from './path-text.js';
 import { prodRead } from './prodread.js';
 import { listJobs, queueJob, runJob } from './queue.js';
 import { emergencyStop, resumeAll, slotStatus, stopAll } from './slots.js';
@@ -44,9 +46,8 @@ import { dashboardSite, siteOptions, DEFAULT_WEB_DIR, instancePort, LOCAL_DASHBO
 import { DetachError, detachDashboard, detachedLines, useBold, writeDashboardPort } from './dashboard-detach.js';
 import { configReady, needsSetupMode, setupModeConfig, setupModeLines } from './setup-mode.js';
 import { keyFileNote } from './dashboard-key-url.js';
-import { HUB_BREAK_GLASS_PORT, HUB_PORT, parseHubArg, signInFromFiles, startHub } from './dashboard-hub.js';
+import { HUB_BREAK_GLASS_PORT, HUB_PORT, hubMachineDevices, parseHubArg, signInFromFiles, startHub } from './dashboard-hub.js';
 import { SetupOver, startSetupHub } from './hub-setup.js';
-import { parseDeviceList } from './console/terminal-devices.js';
 import { breakGlassHub, runAppManifest, VIEWER_USER } from './setup/app-manifest.js';
 import { seedDemo } from './demo.js';
 import { credentialProblems, initInstance, instanceFilesProblem, instanceProblems, instancesDir, listInstances, loadInstance, loadInstanceCredentials, loadInstanceSetup, policiesForRepo, setDiscordToken, setGithubApp, setIntakeCredential } from './instance.js';
@@ -155,16 +156,17 @@ usage: ${BRAND.cli} <command> [options]
                                    the page asks for the key, kept in a file only you can read);
                                    --port 0: any free port, the same one again on a rerun
   dashboard --hub name=<state dir>[,...] [--port n] [--break-glass-port n] [--service]
-            [--console-user admin --console-devices tag:x,node] [--siri-port n] [--hooks-port n]
+            [--machine-devices tag:x,node] [--siri-port n] [--hooks-port n]
             [--client-id id --public-url https://<host> --signin-dir dir]
                                    one view over several instances' own dashboards; it forwards
                                    to each, so writes stay with that instance's server and user.
                                    People sign in with GitHub (the sign-in App's client id; its
                                    secrets in --signin-dir); the token works on the break-glass
                                    port only, on this machine (docs/dashboard.md);
-                                   --console-user: the admin user the owner terminal runs as
-                                   from the Tailscale devices --console-devices lists (none: refused);
-                                   --siri-port: the Siri gateway's loopback port (4397; docs/siri.md)
+                                   --machine-devices: the Tailscale devices a machine change from
+                                   the page may come from (none: refused; an older unit's
+                                   --console-devices is read as these);
+                                   --siri-port: accepted and ignored (Siri was removed; no gateway starts)
                                    --hooks-port: the webhook automations' gateway port (4396; docs/automations.md)
   dashboard --hub-setup (--public-url https://<host> | --loopback) --signin-dir dir [--port n] [--service]
                                    the hub in setup mode, before sign-in exists (dashboards.sh --setup
@@ -184,8 +186,9 @@ usage: ${BRAND.cli} <command> [options]
                                    (the engine updater runs this as the instance's user) whether test runs are
                                    configured, and the test sandbox check's last result at a coordinator start
   migrate [--instance name]        apply pending config and state migrations, each file backed up first
-                                   (doctor lists them; the coordinator won't start while any is pending)
-  status                           what's running, waiting and spent, from the event log
+                                   (doctor lists them; the coordinator won't start while any is pending); with
+                                   --instance, also moves agent hooks still on the CLI's \`hook\` to the guard's own entry
+  status                          what's running, waiting and spent, from the event log
   testrun measure --instance name --tier t[,t...] --set KEY=V1,V2,... [--sha commit] [--json]
                                    (as the instance's coordinator user) one sandboxed test run per value of a
                                    key tests.yaml test_run env already has, in sequence, through the same
@@ -198,7 +201,9 @@ usage: ${BRAND.cli} <command> [options]
                                    root's testrun-gpu.json lists (docs/test-runs.md "GPU")
   stuck-scan [--instance name]     read-only: how many recorded runs the stuck-run guard would have
                                    flagged or stopped (run as the coordinator user)
-  decide <id> <option>             answer a decision (also: a writer comments /${BRAND.cli} <option>)
+  decide <id> <option> [--instance name]
+                                   answer a decision as the owner (root or the coordinator user only;
+                                   also: a comment /${BRAND.cli} <option> by whoever may answer its kind)
   labels                           create the backlog labels on the GitHub repo
   discord channels [--instance name] [--json]
                                    read-only: the text and announcement channels the instance's bot can see,
@@ -271,7 +276,8 @@ function option(args: string[], name: string): string | undefined {
 
 function changedTestFiles(root: string, globs: string[], branch: string): string[] {
   const base = execFileSync('git', ['merge-base', `origin/${branch}`, 'HEAD'], { cwd: root, encoding: 'utf8' }).trim();
-  const files = execFileSync('git', ['diff', '--name-only', '--diff-filter=AM', base], { cwd: root, encoding: 'utf8' }).split('\n').filter(Boolean);
+  // A renamed test file is an added one, and is checked (with renames on it was R, and skipped); a valid UTF-8 path as itself (#683).
+  const files = changedNames(root, ['--diff-filter=AM', base]);
   const res = globs.map((g) => globToRegExp(g));
   return files.filter((f) => res.some((re) => re.test(f)) && existsSync(join(root, f)));
 }
@@ -355,11 +361,19 @@ async function main(argv: string[]): Promise<number> {
         else console.error(`migration failed: ${(e as Error).message}`);
         return 1;
       }
+      // An instance's agent settings from before the guard had its own entry (#665): its hooks move to it (#747). Never
+      // fails the migrate; its backup joins the others, so the updater's rollback puts it back with them.
+      const settings = instanceOpt ? agentSettingsPath(join(instancesDir(), instanceOpt)) : null;
+      const hooks = settings ? migrateLegacyHooks(settings) : { events: [], backup: null, left: [] };
+      const hooksMade = settings && hooks.backup ? [{ kind: 'hooks' as const, path: settings, backup: hooks.backup }] : [];
       if (json) {
-        console.log(JSON.stringify({ ok: true, applied: r.applied.map((p) => ({ kind: p.kind, path: p.path, from: p.from, to: p.to })), made: r.made }));
+        const applied = [...r.applied.map((p) => ({ kind: p.kind, path: p.path, from: p.from, to: p.to })), ...(hooksMade.length ? [{ kind: 'hooks', path: settings, events: hooks.events }] : [])];
+        console.log(JSON.stringify({ ok: true, applied, made: [...r.made, ...hooksMade], ...(hooks.left.length ? { hooks_left: hooks.left } : {}) }));
         return 0;
       }
-      if (!r.applied.length) console.log('nothing to migrate: config and state are at the current versions');
+      if (hooksMade.length) console.log(`moved ${settings}'s ${hooks.events.join(', ')} hooks from the CLI's \`hook\` to the guard's own entry; backup ${hooks.backup}`);
+      for (const l of hooks.left) console.log(`hooks not moved: ${l}`);
+      if (!r.applied.length && !hooksMade.length) console.log('nothing to migrate: config and state are at the current versions');
       for (const [k, p] of r.applied.entries()) console.log(`migrated ${p.path}: ${p.kind} version ${p.from} -> ${p.to} (${p.steps.join('; ')}); backup ${r.backups[k]}`);
       if (r.applied.some((p) => p.kind === 'config' && !p.path.startsWith(instanceOpt ? join(instancesDir(), instanceOpt) : '\0'))) console.log(`the repo's ${BRAND.configDir}/ changed: commit it in a PR`);
       return 0;
@@ -542,7 +556,7 @@ async function main(argv: string[]): Promise<number> {
       for (const f of files) {
         const r = checkVacuity(root, f, { assertionPattern: v.assertion_pattern, appPaths: v.app_paths, dynamic: v.dynamic, runOne: cfg.tests.runner.one });
         if (r.vacuous) bad++;
-        console.log(`${r.vacuous ? 'VACUOUS' : 'ok     '} ${f}: ${r.assertions} assertion(s)${r.touched ? `, touched ${r.touched.length} app file(s)` : ''}${r.why.length ? ` (${r.why.join('; ')})` : ''}`);
+        console.log(`${r.vacuous ? 'VACUOUS' : 'ok     '} ${shownPath(f)}: ${r.assertions} assertion(s)${r.touched ? `, touched ${r.touched.length} app file(s)` : ''}${r.why.length ? ` (${r.why.join('; ')})` : ''}`);
       }
       if (!files.length) console.log('no test files to check');
       return bad ? 1 : 0;
@@ -854,14 +868,13 @@ async function main(argv: string[]): Promise<number> {
         const signinDir = option(opts, '--signin-dir');
         if ((clientId || publicUrl || signinDir) && !(clientId && publicUrl && signinDir)) throw new Error('sign-in needs all of --client-id, --public-url and --signin-dir');
         const signIn = clientId && publicUrl && signinDir ? signInFromFiles({ clientId, publicUrl, dir: signinDir }) : null;
-        const siriOpt = option(opts, '--siri-port');
-        if (siriOpt !== undefined && !/^[0-9]{1,5}$/.test(siriOpt)) throw new Error('--siri-port: a port number');
+        if (option(opts, '--siri-port') !== undefined) console.error(SIRI_PORT_IGNORED);
         const hooksOpt = option(opts, '--hooks-port');
         if (hooksOpt !== undefined && !/^[0-9]{1,5}$/.test(hooksOpt)) throw new Error('--hooks-port: a port number');
-        const h = await startHub({ instances, stateDir: hubState, port: portOpt ? Number(portOpt) : HUB_PORT, breakGlassPort: bgOpt ? Number(bgOpt) : HUB_BREAK_GLASS_PORT, signIn, terminal: { consoleUser: option(opts, '--console-user') ?? null, devices: parseDeviceList(option(opts, '--console-devices')) }, ...(siriOpt !== undefined ? { siri: { port: Number(siriOpt) } } : {}), ...(hooksOpt !== undefined ? { hooks: { port: Number(hooksOpt) } } : {}) });
+        const h = await startHub({ instances, stateDir: hubState, port: portOpt ? Number(portOpt) : HUB_PORT, breakGlassPort: bgOpt ? Number(bgOpt) : HUB_BREAK_GLASS_PORT, signIn, devices: { allow: hubMachineDevices((n) => option(opts, n)) }, ...(hooksOpt !== undefined ? { hooks: { port: Number(hooksOpt) } } : {}) });
         // INVARIANT: the printed and opened URLs carry no key; the key's file is named, never the key (keyFileNote).
         const bg = `${h.breakGlassUrl} ${keyFileNote(h.keyFile)}`;
-        console.log(`${BRAND.name} dashboard hub for ${instances.map((i) => i.name).join(', ') || 'no instance yet'}\n  sign-in: ${signIn ? `${signIn.publicUrl} (served on ${h.url})` : 'not set up (no --client-id)'}\n  break-glass, this machine only: ${bg}${h.siriUrl ? `\n  Siri gateway: ${h.siriUrl} (tailscale serve publishes it on 8443)` : ''}${h.hooksUrl ? `\n  hooks gateway: ${h.hooksUrl} (tailscale serve publishes it on 8444)` : ''}\n(loopback only)`);
+        console.log(`${BRAND.name} dashboard hub for ${instances.map((i) => i.name).join(', ') || 'no instance yet'}\n  sign-in: ${signIn ? `${signIn.publicUrl} (served on ${h.url})` : 'not set up (no --client-id)'}\n  break-glass, this machine only: ${bg}${h.hooksUrl ? `\n  hooks gateway: ${h.hooksUrl} (tailscale serve publishes it on 8444)` : ''}\n(loopback only)`);
         if (!service && !flag(opts, '--no-open')) openUrl(signIn ? signIn.publicUrl : h.breakGlassUrl);
         await new Promise(() => {});
         return 0;
@@ -1046,19 +1059,34 @@ async function main(argv: string[]): Promise<number> {
         console.error('usage: decide <decision-id> <option>');
         return 2;
       }
-      const log = new EventLog(logPath(root));
+      // WHY (#715): only root or the coordinator user may answer from here, checked before anything is read; the
+      // answer is the instance's owner's, through the one decide path (src/decide.ts), audited with the OS user.
+      const { cliDecideRefusal, answerDecision } = await import('./decide.js');
+      const { coordinatorUser } = await import('./setup/app-manifest.js');
+      // The caller's uid is the kernel's (geteuid), never a program on PATH. INVARIANT: on a local site the owner check
+      // is on the very file then written, so steering logPath (<PREFIX>_PROJECT_STATE_DIR, --root) only picks which log
+      // the caller writes, and passes only for a log the caller already owns and could write anyway: an instance's
+      // log is its coordinator user's, so it is refused.
+      const caller = { user: currentUser(), uid: currentUid(), root: isRoot() };
+      const localDb = logPath(root);
+      const db = instanceOpt ? null : fileAccess(localDb);
+      const refused = cliDecideRefusal(caller, { instance: instanceOpt ?? null, coordinatorUser: instanceOpt ? coordinatorUser(instanceOpt) : null, logUid: db?.kind === 'file' ? db.uid : null });
+      if (refused) {
+        console.error(`decide: refused: ${refused}`);
+        return 1;
+      }
+      const target = instanceOpt
+        ? (() => { const i = loadInstance(instanceOpt); return { db: join(i.stateDir, 'events.db'), cfg: i.config }; })()
+        : { db: localDb, cfg: loadConfig(root) };
+      const log = new EventLog(target.db);
       try {
-        const q = log.read(0, ['decision.asked']).find((e) => (e.payload as { id: string }).id === id)?.payload as { options: string[] } | undefined;
-        if (!q) {
-          console.error(`no decision ${id}`);
-          return 1;
+        const owner = target.cfg.project.owners.default;
+        const r = answerDecision(log, { id, answer, who: { login: owner, role: 'owner', via: 'cli' }, instance: instanceOpt ?? null, repo: target.cfg.project.project.repo, audit: { os_user: caller.user } });
+        if (!r.ok) {
+          console.error(r.error);
+          return r.status === 400 ? 2 : 1;
         }
-        if (!q.options.includes(answer)) {
-          console.error(`options are: ${q.options.join(', ')}`);
-          return 2;
-        }
-        log.append('decision.answered', { id, by: instanceId(), answer }, instanceId(), 'human');
-        console.log(`recorded: ${id} -> ${answer} (the coordinator acts on its next tick)`);
+        console.log(`recorded: ${id} -> ${answer}, as @${owner} (the coordinator acts on its next tick)`);
         return 0;
       } finally {
         log.close();
@@ -1265,30 +1293,13 @@ async function main(argv: string[]): Promise<number> {
           const log = new EventLog(join(i.stateDir, 'events.db'));
           try {
             const r = renamedFrom({ stateDir: i.stateDir, log, from, to: i.name });
-            console.log(`renamed from ${from}: ${r.revoked.length} Siri device(s) revoked (make new ones on the dashboard), ${r.carried.length} open ask(s) asked again for ${i.name}`);
+            console.log(`renamed from ${from}: ${r.carried.length} open ask(s) asked again for ${i.name}`);
             return 0;
           } finally {
             log.close();
           }
         } catch (e) {
           console.error(`instance renamed: ${String((e as Error).message ?? e).split('\n')[0]}`);
-          return 1;
-        }
-      }
-      if (sub === 'siri-revoke-all' && target) {
-        // instance-remove.sh's, as the instance's coordinator, before it exports: every Siri device token revoked.
-        const why = option(rest, '--why') ?? '';
-        if (!/^[a-z][a-z0-9 -]{0,60}$/.test(why)) {
-          console.error('usage: instance siri-revoke-all <name> --why <a few words>');
-          return 2;
-        }
-        try {
-          const i = loadInstance(target);
-          const ids = revokeAllDevices(i.stateDir, why);
-          console.log(`${target}: ${ids.length} Siri device token(s) revoked (${why})`);
-          return 0;
-        } catch (e) {
-          console.error(`instance siri-revoke-all: ${String((e as Error).message ?? e).split('\n')[0]}`);
           return 1;
         }
       }
@@ -1324,7 +1335,7 @@ async function main(argv: string[]): Promise<number> {
         console.log(JSON.stringify(line));
         return line.kind === 'failed' ? 1 : 0;
       }
-      console.error('usage: instance init <name> --repo <path> --github <owner/repo> [--agent-user <user>] [--agent-home <dir>] | instance list | instance show <name> | instance set-github-app <name> ... | instance set-discord-token <name> --file <path> | instance set-intake-credential <name> <key> --file <path> | instance auto-config <name> [--answer <id>=<choice>]... | instance renamed <new name> --from <old name> | instance siri-revoke-all <name> --why <a few words>');
+      console.error('usage: instance init <name> --repo <path> --github <owner/repo> [--agent-user <user>] [--agent-home <dir>] | instance list | instance show <name> | instance set-github-app <name> ... | instance set-discord-token <name> --file <path> | instance set-intake-credential <name> <key> --file <path> | instance auto-config <name> [--answer <id>=<choice>]... | instance renamed <new name> --from <old name>');
       return 2;
     }
 

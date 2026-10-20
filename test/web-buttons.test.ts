@@ -23,8 +23,6 @@ interface Render {
   renderUnderUsage(usage: unknown[], current: string | null, o: { first: unknown; ignored: unknown; automation: unknown; study: unknown; state?: unknown }): string;
   renderPausedWork(usage: unknown[], current: string | null, why?: string): string;
   renderLandsUnderUsage(usage: unknown[], current: string | null, o: { card: unknown; configPr: unknown }): string;
-  renderVoiceBannerUnderUsage(usage: unknown[], current: string | null, view: unknown, decisions: { id: string; kind: string }[]): string;
-  approvalFor(state: unknown, issue: number): { ok: boolean; why?: string };
   renderDecisionUnderUsage(usage: unknown[], current: string | null, o: { card: unknown; detail: unknown }): string;
   renderFirstTaskFiledUnderUsage(usage: unknown[], current: string | null, first: unknown, filed: { number: number; labelCreated: boolean; url: string | null }): string;
 }
@@ -77,11 +75,11 @@ test("a disabled machine button says the device isn't allowed", () => {
   // The server's own view for a machine owner whose page didn't come from an allowed device.
   const away = JSON.parse(JSON.stringify(machineView({ ...s, user: 'example-owner', role: 'owner', deviceOk: false }))) as { canChange: boolean; why: string | null };
   assert.equal(away.canChange, true, 'a machine owner: the buttons are drawn');
-  assert.match(away.why ?? '', /allowed devices \(dashboards\.sh --console-devices/, 'the reason is the refusal a change would get');
+  assert.match(away.why ?? '', /allowed devices \(dashboards\.sh --machine-devices/, 'the reason is the refusal a change would get');
   const b = described(r.renderMachine(away), 'machine-setting-review-button');
   assert.ok(b.disabled, 'held');
   assert.ok(b.id, `aria-describedby names the reason: ${b.tag}`);
-  assert.match(b.text ?? '', /^A machine change needs one of the console(&#x27;|')s allowed devices \(dashboards\.sh --console-devices/);
+  assert.match(b.text ?? '', /^A machine change needs one of the machine(&#x27;|')s allowed devices \(dashboards\.sh --machine-devices/);
   // From an allowed device the device reason is gone (what is held then is only an unchanged value).
   const here = JSON.parse(JSON.stringify(machineView({ ...s, user: 'example-owner', role: 'owner', deviceOk: true })));
   assert.equal(here.why, null);
@@ -129,7 +127,7 @@ test('a button this person can never use is not drawn; one held by the device sa
     assert.deepEqual([owner.allowed, owner.everAllowed], [false, true], 'the owner, from a device that is not allowed');
     const b = described(r.renderClaudeAccount(owner), 'claude-account-refresh');
     assert.ok(b.disabled);
-    assert.match(b.text ?? '', /^Read-only: a machine change needs one of the console(&#x27;|')s allowed devices/);
+    assert.match(b.text ?? '', /^Read-only: a machine change needs one of the machine(&#x27;|')s allowed devices \(dashboards\.sh --machine-devices\)/);
   } finally {
     d.close();
   }
@@ -267,34 +265,6 @@ test("paused reason: a decision's approve option, on its card and its own page, 
   }
 });
 
-test("paused reason: the voice banner's Approve says what its decision's kind does (decisionWork); voice reaches only plan decisions, so a plan waits; voice never approves a landing", () => {
-  const pending = (decision: string) => ({ pending: { kind: 'approve', issue: 12, decision, title: 'T', effect: 'e', until: Date.now() + 10_000 }, left: 10 });
-  const decisions = [
-    { id: 'land-12', kind: 'land' },
-    { id: 'intake-12', kind: 'intake' },
-    { id: 'plan-12', kind: 'plan' },
-    { id: 'q-12', kind: 'question' },
-  ];
-  const paused = [usageOf('example', true)];
-  const say = (decision: string) => described(r.renderVoiceBannerUnderUsage(paused, null, pending(decision), decisions), 'voice-banner-confirm');
-  // The decisionWork mechanism only: voice never approves a landing (the pin below), so no real banner shows this.
-  assert.equal(say('land-12').text, LANDS_HINT, 'mechanism: decisionWork gives a land kind the land text');
-  // The decisionWork mechanism only: voice can't reach an intake decision (asked with issue null; approvalFor matches
-  // the spoken number), so no real banner shows this either.
-  assert.equal(say('intake-12').text, NOW_HINT, 'mechanism: decisionWork gives an intake kind the happens-now text');
-  assert.equal(say('plan-12').text, PAUSED_HINT, 'a plan decision starts work: it waits for the resume');
-  assert.equal(say('q-12').id, undefined, 'any other kind says nothing');
-  for (const d of ['land-12', 'intake-12']) assert.equal(say(d).disabled, false, `${d}: not refused while paused`);
-  // Running: nothing said.
-  assert.equal(described(r.renderVoiceBannerUnderUsage([usageOf('example', false)], null, pending('land-12'), decisions), 'voice-banner-confirm').id, undefined);
-  // Pins (existing behaviour, not this change): voice never approves a landing. The server marks every land decision
-  // voiceRefused (NEVER_FROM_CHAT, src/voice.ts), and approvalFor refuses it, so no Approve banner is shown for one.
-  const land = { id: 'land-12', kind: 'land', issue: 12, owner: 'example-owner', question: 'Land #12?', options: ['approve', 'reject'], recommendation: 'approve', receipts: [], askedAt: '2026-10-18T08:00:00Z', answer: null, canAnswer: true, voiceRefused: 'a high-risk merge the owner holds is approved only by a click on the dashboard or on GitHub' };
-  const refused = r.approvalFor({ decisions: [land], tasks: [] }, 12);
-  assert.equal(refused.ok, false, 'approvalFor refuses a land decision');
-  assert.match(refused.why ?? '', /can't be approved by voice/);
-});
-
 test('paused reason: a `why` that holds wins over `work` while paused, for both kinds of work', () => {
   const html = r.renderPausedWork([usageOf('example', true)], null, 'Saving…');
   for (const id of ['paused-lands', 'paused-starts']) {
@@ -328,7 +298,6 @@ const SILENT_DISABLED: Record<string, number> = {
   'web/src/components/Automations.tsx': 7,
   'web/src/components/ChatAttachments.tsx': 1,
   'web/src/components/ChatPanel.tsx': 4,
-  'web/src/components/ClaudeProfiles.tsx': 11,
   'web/src/components/ClaudeSignin.tsx': 3,
   'web/src/components/ConfigPr.tsx': 4,
   'web/src/components/Conversations.tsx': 3,
@@ -345,7 +314,6 @@ const SILENT_DISABLED: Record<string, number> = {
   'web/src/components/Protection.tsx': 2,
   'web/src/components/RepoConfigForm.tsx': 10,
   'web/src/components/SetupConfig.tsx': 11,
-  'web/src/components/SiriDevices.tsx': 1,
   'web/src/components/SourceSetup.tsx': 10,
   'web/src/components/UpdaterSetup.tsx': 6,
   'web/src/components/Usage.tsx': 1,
@@ -354,12 +322,9 @@ const SILENT_DISABLED: Record<string, number> = {
   'web/src/pages/FirstRun.tsx': 7,
   'web/src/pages/Setup.tsx': 14,
   'web/src/render-check.tsx': 1,
-  'web/src/voice/Mic.tsx': 1,
-  'web/src/voice/VoiceControl.tsx': 1,
-  'web/src/voice/VoiceSettings.tsx': 2,
 };
-/** The list's total when it was made (155); lower it as the list shrinks, never raise it. */
-const SILENT_CEILING = 155;
+/** The list's total (155 when it was made; 145 once voice and Siri were removed, #743); lower it as the list shrinks, never raise it. */
+const SILENT_CEILING = 145;
 
 function silentDisabled(): Record<string, number> {
   const counts: Record<string, number> = {};

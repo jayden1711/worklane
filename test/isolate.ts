@@ -16,7 +16,7 @@ import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:f
 import { tmpdir } from 'node:os';
 import { isAbsolute, join, relative, sep } from 'node:path';
 import { BRAND } from '../src/brand.js';
-import { SYSTEMD_MARKERS, SYSTEM_ROOT_VAR, TEST_MARK_FILE, TEST_TOKEN_VAR } from '../src/os/system-paths.js';
+import { SYSTEMD_MARKERS, SYSTEM_ROOT_VAR, TEST_MACHINE_VAR, TEST_MARK_FILE, TEST_TOKEN_VAR } from '../src/os/system-paths.js';
 
 /** Engine settings that only tune speed, kept from the shell (a slow CI runner scales the browser's timeouts). */
 const KEEP = new Set([`${BRAND.envPrefix}_BROWSER_TIMEOUT_SCALE`]);
@@ -75,6 +75,9 @@ for (const [k, v] of Object.entries(isolatedEnv)) {
   mkdirSync(v, { recursive: true });
   process.env[k] = v;
 }
+// The machine itself, for what the engine refuses to use outside it in a test process: the slot directory
+// (src/os/index.ts slotsDir, #669). It counts only with the system root below and its mark (testSlotsRefusal).
+process.env[TEST_MACHINE_VAR] = testMachine;
 
 // The mark that lets this process and its children use the system root above (src/os/system-paths.ts
 // systemRootRefusal): a fresh token, in the environment and in a file of this user's alone inside the root. A suite
@@ -85,6 +88,9 @@ const systemRoot = isolatedEnv[SYSTEM_ROOT_VAR]!;
 chmodSync(systemRoot, 0o700);
 const token = randomBytes(32).toString('hex');
 writeFileSync(join(systemRoot, TEST_MARK_FILE), `${token}\n`, { mode: 0o600 });
+// The same mark in the machine itself: a service mode a test starts has no system root (serviceModeEnv), and shows
+// its test machine to the state dir's refusal with this one (src/os/system-paths.ts testStateRefusal, #815).
+writeFileSync(join(testMachine, TEST_MARK_FILE), `${token}\n`, { mode: 0o600 });
 process.env[TEST_TOKEN_VAR] = token;
 
 /**
@@ -119,13 +125,13 @@ process.on('exit', () => {
 
 /**
  * An environment for a service mode a test starts (`dashboard --hub`, `--hub-setup --service`): those never run
- * with the system root (src/os/system-paths.ts serviceModeRefusal), so it and the test mark are left out. Only for a
- * mode that reads no machine location.
+ * with the system root (src/os/system-paths.ts serviceModeRefusal), so it is left out. Only for a mode that reads no
+ * machine location. The token stays: with the machine's own mark it shows the state dir's refusal this is still the
+ * test machine (testStateRefusal, #815); without the root it moves nothing (systemRootRefusal reads it only with one).
  */
 export function serviceModeEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const out = { ...env };
   delete out[SYSTEM_ROOT_VAR];
-  delete out[TEST_TOKEN_VAR];
   return out;
 }
 

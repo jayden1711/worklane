@@ -5,6 +5,7 @@
 // agent slot on the machine (all instances and harnesses), so the share falls as agents start and rises as
 // they stop.
 import { slotStatus } from './slots.js';
+import type { SlotPathLike } from './slot-file.js';
 import { cpuCount } from './os/index.js';
 
 export const CORES_PLACEHOLDER = '{cores}';
@@ -33,7 +34,7 @@ export function coreShare(o: { cores: number; running: number; budget?: CoreBudg
 }
 
 /** The share right now on this machine: its cores, over the live agent slots. */
-export function currentCoreShare(budget?: CoreBudget, slotsDir?: string): number {
+export function currentCoreShare(budget?: CoreBudget, slotsDir?: SlotPathLike): number {
   const running = slotStatus(slotsDir).agents.length;
   return coreShare({ cores: cpuCount(), running, ...(budget ? { budget } : {}) });
 }

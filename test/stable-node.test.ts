@@ -122,6 +122,7 @@ test('#468 doctor and the first-run page: a service whose node is gone, or insid
   const plist = `/Users/example/Library/LaunchAgents/dev.${BRAND.cli}.example-shop.plist`;
   const probe = (node: string, exists: boolean): SetupProbe => ({
     which: (c) => `/stand-in/${c}`,
+    serviceManagerEnv: () => ({ env: {} }),
     run: () => ({ status: 1, stdout: '', stderr: 'stand-in' }),
     serviceRunning: () => true,
     systemUnitActive: () => false,

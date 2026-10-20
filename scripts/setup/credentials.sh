@@ -16,8 +16,8 @@
 #       The agent user's Claude login: the token `claude setup-token` prints (run it on a machine signed in to the
 #       Claude account the agents should use), pasted at a hidden prompt, or on stdin when there is no terminal
 #       (automation). Installed as wl-<name>-agent's own Claude login (~/.claude/.credentials.json, 0600), never
-#       echoed, never an argument; then checked with `claude auth status` as that user. The dashboard's equivalent is
-#       Add project's paste box (the first-run page's Sign in to Claude).
+#       echoed, never an argument; then checked with `claude auth status` as that user. There is no dashboard
+#       equivalent: a dashboard never takes a Claude credential (issue #711, docs/auth.md).
 #   bash scripts/setup/credentials.sh <name> github
 #       Fallback only: a fine-grained personal access token instead of an App.
 #   bash scripts/setup/credentials.sh <name> eval-key --evals-on
@@ -76,7 +76,14 @@ if [ "${1:-}" = dashboard-signin ]; then
     head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' | put_secret "$dir/session-secret"
     echo "generated $dir/session-secret (signs out every session made under an earlier one)"
   fi
-  echo "then: dashboards.sh --client-id <the App's client id> --public-url https://<machine>.<tailnet>.ts.net <name>..."
+  if [ -f "$HUB_UNIT" ]; then
+    # A hub already set up: its own settings kept, its Siri and hooks gateways and machine devices included (#767).
+    # src/console/owner-terminal-removed.ts SIGNIN_APP_RERUN holds this command; a test keeps the two the same.
+    echo "then, as root, with each <...> and [...] filled in from the ExecStart of $HUB_UNIT:"
+    echo "  sudo bash /opt/worklane/current/scripts/setup/dashboards.sh [--machine-devices <the hub unit's --console-devices or --machine-devices, if it has one>] --client-id <the sign-in App's client id> --public-url <its --public-url> [--siri if it has --siri-port] [--hooks if it has --hooks-port] <each instance name in its --hub>..."
+  else
+    echo "then: dashboards.sh --client-id <the App's client id> --public-url https://<machine>.<tailnet>.ts.net <name>..."
+  fi
   exit 0
 fi
 name="${1:?usage: credentials.sh <name> github-app|verify-app|claude|api-key|provider-key|github|eval-key|intake-discord|intake-slack|intake-linear ... | credentials.sh dashboard-signin}"

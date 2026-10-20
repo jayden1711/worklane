@@ -6,7 +6,7 @@
 // Every pattern added here must run in linear time on hostile input (an intake report, a CI log, chat text): a
 // match may start only where a run of its characters starts (a prefix group, never `\b` inside a run of `-`), and a
 // decision a regex would make by backtracking is made in a function instead. test/redact.test.ts times each one on
-// 100 KB adversarial strings. No lookbehind: the web bundle imports this module (web/src/voice/talk.ts).
+// 100 KB adversarial strings. No lookbehind, so a browser bundle may import this module too.
 type Replacement = string | ((match: string, ...groups: string[]) => string);
 
 /** Credential-shaped: mixed case with a digit (a random key), or a long hex run (a classic token). */

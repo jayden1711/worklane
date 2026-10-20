@@ -26,7 +26,7 @@ export type MachineRequestStatus = 'pending' | 'running' | 'done' | 'failed' | '
 
 export interface MachineRequest {
   id: string;
-  /** The helper's arguments: set-slots <n>, set-updates on|off, set-test-slots <n>, add-project <name> <owner/repo>, claude-account status|switch, tailscale install|up|serve|public-url. */
+  /** The helper's arguments: set-slots <n>, set-updates on|off, set-test-slots <n>, add-project <name> <owner/repo>, claude-account status|use|remove|failover, tailscale install|up|serve|public-url. */
   args: string[];
   by: string;
   via: 'settings' | 'ask' | 'add-project' | 'claude-account' | 'tailscale' | 'plugins';

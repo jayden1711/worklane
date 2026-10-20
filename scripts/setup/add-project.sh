@@ -12,8 +12,11 @@
 #                   On a machine's first project there is no hub yet: this step starts it alone first
 #                   (dashboards.sh --no-instances), with the sign-in App the hub's setup mode stored
 #                   (dashboards.sh --setup); without one it stops, naming that command.
-#   claude-token    the agent's Claude login: the token `claude setup-token` prints, pasted (or on stdin), stored for
-#                   wl-<name>-agent only. Never echoed or logged.
+#   claude-token    the agent's Claude login: the token `claude setup-token` prints, pasted at the hidden prompt of a
+#                   root shell on this machine (or on root's stdin, for automation), stored for wl-<name>-agent only,
+#                   never echoed or logged. With none (the machine helper, for a dashboard, gives no stdin) the step
+#                   waits (exit 3) for root to install the login (credentials.sh <name> claude): a dashboard never
+#                   takes a Claude credential (issue #711).
 #   checkout        checkout.sh <name> <owner/repo>; a repo with no config gets auto-config's setup PR (through the App)
 #   policy          the default policy, auto_merge off, $20/day, 2 workers, shown for you to change
 #   service         service.sh <name>, once the checkout has its config: for a setup PR, it waits (up to --timeout
@@ -26,7 +29,7 @@
 #
 # Output: stdout is one JSON line per step change, and nothing else:
 #   {"step":"checkout","state":"started|done|failed|ask|waiting","detail":"...","ask":{...},"retry":"..."}
-# "ask" lines carry what the step waits for (a GitHub link to approve, the Claude token); a "failed" line names the
+# "ask" lines carry what the step waits for (a GitHub link to approve); a "failed" line names the
 # exact retry; a "waiting" line what it waits for that only time or someone else settles (the setup PR's merge). The
 # steps' own output goes to stderr. It stops at the first failure, exit 1, or at a step still waiting, exit 3.
 #
@@ -167,9 +170,10 @@ done_claude_token() {
   echo "$agent has a Claude login"
 }
 do_claude_token() {
-  local token="" title="The Claude login for $name's agents"
-  local detail="On a machine signed in to the Claude account the agents should use, run claude setup-token and paste the token it prints. It is stored for $agent only, never shown or logged."
-  emit claude-token ask "$title" "{\"kind\":\"paste_secret\",\"credential\":\"claude-token\",\"title\":$(json_str "$title"),\"detail\":$(json_str "$detail")}"
+  local token=""
+  # Issue #711: the token comes only from root on this machine: the hidden prompt at a root shell, or stdin from root's
+  # own automation. Never from a dashboard: the machine helper gives this script no stdin, and the coordinator writes
+  # none. With none, the step waits for root to install the login, and a rerun picks up here.
   if [ -t 0 ]; then
     read -rsp "Paste the token from claude setup-token, then Enter (it is not shown): " token || true
     echo
@@ -177,7 +181,10 @@ do_claude_token() {
     IFS= read -r token || true
   fi
   token="$(printf '%s' "$token" | tr -d '[:space:]')"
-  [ -n "$token" ] || { echo "no token came (run claude setup-token and paste what it prints)"; return 1; }
+  if [ -z "$token" ]; then
+    echo "waiting: the agents' Claude login, which only root installs, on this machine: sudo bash $here/credentials.sh $name claude (it asks for the token claude setup-token prints, not shown), or sign in as $agent there (sudo -u $agent -i claude auth login)"
+    exit 3
+  fi
   printf '%s' "$token" | install_claude_token "$agent"
   token=""
   claude_login_ok "$agent" || { echo "claude auth status, as $agent, says it isn't signed in with that token"; return 1; }
@@ -296,8 +303,9 @@ dash_names() {
 }
 # The hub's settings, from its unit (or this run's --client-id and --public-url for a machine's first hub), one word a line.
 dash_args() {
-  local id url user devices
-  id="$(hub_option --client-id)"; url="$(hub_option --public-url)"; user="$(hub_option --console-user)"; devices="$(hub_option --console-devices)"
+  local id url devices
+  # The machine devices: an older unit's --console-devices is the same list (#742); its --console-user is dropped.
+  id="$(hub_option --client-id)"; url="$(hub_option --public-url)"; devices="$(hub_machine_devices)"
   id="${id:-$client_id}" url="${url:-$public_url}"
   # Else what the hub's setup mode stored with the sign-in App (dashboards.sh --setup), wl-dash's own files.
   local signin; signin="$(home_of wl-dash 2>/dev/null || true)/.config/dashboard-signin"
@@ -305,8 +313,7 @@ dash_args() {
   if [ -z "$url" ] && [ -s "$signin/public-url" ]; then url="$(cat "$signin/public-url")"; fi
   [ -n "$id" ] && [ -n "$url" ] || { echo "no dashboard hub yet to take its settings from: make the sign-in App with dashboards.sh --setup, or give add-project.sh --client-id <sign-in App client id> --public-url https://<host> (after credentials.sh dashboard-signin)"; return 1; }
   printf '%s\n' --client-id "$id" --public-url "$url"
-  [ -z "$user" ] || printf '%s\n' --console-user "$user"
-  [ -z "$devices" ] || printf '%s\n' --console-devices "$devices"
+  [ -z "$devices" ] || printf '%s\n' --machine-devices "$devices"
 }
 done_dashboards() {
   hub_instances | grep -qx "$name" && unit_active "worklane-dashboard-$name.service" || return 1

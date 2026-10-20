@@ -6,6 +6,7 @@
 // most max_prs per run, and never for a pattern in a high-risk or safety-floor path. Pure.
 import { checkDraftedIssue, DRAFT_FORMAT } from './backlog/types.js';
 import { checkTimings } from './health.js';
+import { shownPath } from './path-text.js';
 import type { StoredEvent } from './events/types.js';
 
 /** A pattern is fixed only once it has been seen this many times (distinct places, over every run). */
@@ -184,7 +185,7 @@ export function logEntry(o: { at: string; findings: Finding[]; filed: { pattern:
   return [
     `### Gardener run, ${o.at.slice(0, 16).replace('T', ' ')} UTC ($${o.costUsd.toFixed(2)})`,
     o.findings.length ? '' : 'Nothing found.',
-    ...o.findings.map((f) => `- **${f.pattern}** (${f.kind.replace('_', ' ')}): ${f.where.slice(0, 5).map((w) => `\`${w}\``).join(', ')}${f.where.length > 5 ? ` and ${f.where.length - 5} more` : ''}. ${f.detail}${filed.has(f.pattern) ? ` → fix filed as #${filed.get(f.pattern)}` : held.has(f.pattern) ? ` (${held.get(f.pattern)})` : ''}`),
+    ...o.findings.map((f) => `- **${f.pattern}** (${f.kind.replace('_', ' ')}): ${f.where.slice(0, 5).map((w) => `\`${shownPath(w)}\``).join(', ')}${f.where.length > 5 ? ` and ${f.where.length - 5} more` : ''}. ${f.detail}${filed.has(f.pattern) ? ` → fix filed as #${filed.get(f.pattern)}` : held.has(f.pattern) ? ` (${held.get(f.pattern)})` : ''}`),
     ...(o.refused.length ? ['', 'Refused from the run:', ...o.refused.map((r) => `- ${r}`)] : []),
   ].join('\n');
 }

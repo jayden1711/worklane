@@ -110,7 +110,7 @@ export interface DecisionDetail {
 
 /** What happens if nobody picks anything: nothing times out. */
 export function ifNothing(kind: DetailKind, issue: number | null): string {
-  if (kind === 'automation') return "It expires: unanswered for a day, the automation doesn't run for this trigger. Only an owner answers it, here on the dashboard (never from chat or voice).";
+  if (kind === 'automation') return "It expires: unanswered for a day, the automation doesn't run for this trigger. Only an owner answers it, here on the dashboard (never from chat).";
   const where = issue !== null && kind !== 'intake' && kind !== 'delegation' && kind !== 'pr' ? `, here, or in a comment on #${issue} (\`/${BRAND.cli} <option>\`)` : kind === 'pr' ? ' on GitHub' : ', here';
   const what: Record<DetailKind, string> = {
     land: "the change doesn't land",
@@ -162,12 +162,12 @@ function latest<T extends Record<string, unknown>>(events: readonly StoredEvent[
 }
 
 /** Categories a change's files fall in, as review.yaml (or the default) and the money paths say, now. */
-function categoriesNow(files: string[], o: { root: string; review: ReviewConfig | undefined }): { categories: Record<string, string[]>; note: string | null } {
+function categoriesNow(files: string[], o: { root: string; mainRef: string; review: ReviewConfig | undefined }): { categories: Record<string, string[]>; note: string | null } {
   const review = (o.review ?? DEFAULT_REVIEW) as ReviewConfig;
   let money: RegExp[] = [];
   let note: string | null = null;
   try {
-    money = loadMoneyPaths(o.root, review.money_path_source);
+    money = loadMoneyPaths(o.root, review.money_path_source, o.mainRef);
   } catch (e) {
     note = `money paths not checked: ${(e as Error).message}`;
   }
@@ -209,8 +209,11 @@ export interface DetailDeps {
   role: Role;
   /** Every PR the harness opened (projection.ts prsView), for a held PR's detail and a decision's PR. */
   prs: readonly PrView[];
-  /** The checkout, for the money paths. */
+  /** The checkout, for the money paths, read there at `mainRef` (the default branch's remote ref), never its working tree (#715). */
   root: string;
+  mainRef: string;
+  /** Who may approve a high-risk merge, as review.yaml on the default branch says (decide.ts approvalsAt). */
+  approvals: ReviewConfig['approvals'];
   review: ReviewConfig | undefined;
   /** The issue's runs (run-record.ts runsForIssue); asked only for the owners and writers. */
   runs: (issue: number) => RunSummary[];
@@ -254,7 +257,7 @@ export function decisionDetail(id: string, d: DetailDeps): DecisionDetail | null
     askedAt: asked ? asked.ts : (pr!.decision?.at ?? pr!.openedAt),
     answer: answer ?? (pr && kind === 'pr' && pr.state !== 'open' ? { by: '', answer: pr.state, at: pr.merged?.at ?? '' } : null),
     // A held PR is answered on GitHub (review and merge, or close), never here.
-    canAnswer: asked ? mayAnswerKind(kind, d.role) : false,
+    canAnswer: asked ? mayAnswerKind(kind, d.role, d.approvals) : false,
     ifNothing: ifNothing(kind, issue),
     withheld: null,
   };
@@ -304,7 +307,7 @@ export function decisionDetail(id: string, d: DetailDeps): DecisionDetail | null
   else if (files?.length) {
     // Categorised now, plus what the level's reasons recorded then ("money-path: a.js, b.js"): a later review.yaml or
     // money-path change can't hide what the change was held for.
-    const now = categoriesNow(files, { root: d.root, review: d.review });
+    const now = categoriesNow(files, { root: d.root, mainRef: d.mainRef, review: d.review });
     for (const r of change?.levelReasons ?? []) {
       const m = /^([a-z][a-z-]*): (.+)$/.exec(r);
       if (!m) continue;

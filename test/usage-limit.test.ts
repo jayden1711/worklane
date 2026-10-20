@@ -17,7 +17,6 @@ import { loadConfig } from '../src/config/load.js';
 import { CONFIG_INCIDENT } from '../src/config/live.js';
 import { startDashboard } from '../src/dashboard.js';
 import { EventLog } from '../src/events/log.js';
-import { readSwitchLines, switchedOnto } from '../src/claude-account.js';
 
 const NOW = Date.parse('2026-10-13T10:20:00Z');
 
@@ -220,42 +219,31 @@ test('the incident model, when there is one: raised once on the pause, resolved 
   assert.equal(calls.at(-1), 'resolve claude_usage_limit alice');
 });
 
-test('a Claude account switch ends the pause of an instance it put on the new login and resumed; one whose check failed stays paused', { skip }, async () => {
-  // switch.jsonl as claude-account.sh writes it, for instance alice, after the pause began.
-  const switchLines = (check: 'done' | 'failed', resume: 'done' | 'failed') => {
-    const dir = mkdtempSync(join(tmpdir(), 'usage-switch-'));
-    const at = new Date(Date.now() + 2000).toISOString().replace(/\.\d{3}Z$/, 'Z');
-    const lines = [
-      { step: 'switch', state: 'started', detail: '1 instance(s): alice; the token from this terminal' },
-      { step: 'pause', state: 'done', instance: 'alice', detail: 'starts no more runs' },
-      { step: 'token', state: 'done', detail: 'received' },
-      { step: 'wait', state: 'done', instance: 'alice', detail: 'its runs have finished; stopped' },
-      { step: 'install', state: 'done', instance: 'alice', user: 'wl-alice-agent', detail: 'stored' },
-      { step: 'check', state: check, instance: 'alice', user: 'wl-alice-agent', detail: check === 'done' ? 'signed in' : 'not logged in' },
-      { step: 'resume', state: resume, instance: 'alice', detail: resume === 'done' ? 'running again' : 'not resumed: its auth check failed' },
-      { step: 'switch', state: resume === 'done' ? 'done' : 'failed', detail: 'end' },
-    ];
-    writeFileSync(join(dir, 'switch.jsonl'), lines.map((l) => JSON.stringify({ at, ...l })).join('\n') + '\n');
-    return dir;
-  };
+test("the coordinator's account-switched hook ends the pause of an instance moved to a new login after it began; none, and it stays paused", { skip }, async () => {
+  // The hook's answer: when the instance last moved to a new login (null: never). Since #736 the service passes none
+  // (the engine switches no account); the coordinator's hook is kept, and this holds what it does with one.
+  // Whether the switch put the instance on a new login and resumed it: only then does it have a switch time.
+  const switchLines = (check: 'done' | 'failed', resume: 'done' | 'failed') => check === 'done' && resume === 'done';
   // The switch is written once the pause has begun (its lines are stamped then), however long the setup took.
-  const run = async (switched: (() => string) | null) => {
+  const run = async (switched: (() => boolean) | null) => {
     const f = fixture();
     f.backlog.open(easyIssue('Add a.js', 'a.js'));
     const resetAt = Date.now() + 3600_000;
     let limited = true; // the old account's limit; the new login has none
     const runner = new FakeRunner((r: RunRequest) => (r.role === 'worker' && limited ? { reason: 'rate_limited', detail: 'usage or rate limit reached', limit: { resetAt: new Date(resetAt).toISOString(), source: 'claude', kind: null } } : {}));
     const calls: string[] = [];
-    let switchDir: string | null = null;
+    let switchedAt: string | null = null;
     const c = coordinator(f, runner, {
       incidents: { raiseIncident: (kind, key) => void calls.push(`raise ${kind} ${key}`), resolveIncident: (kind, key) => void calls.push(`resolve ${kind} ${key}`) },
-      accountSwitched: () => (switchDir ? switchedOnto('alice', readSwitchLines(switchDir)) : null),
+      accountSwitched: () => switchedAt,
     });
     await c.tick();
     await c.idle();
     assert.ok(pauseOf(f.log.read(0)), 'paused on the limit');
     limited = switched === null;
-    switchDir = switched?.() ?? null; // the switch happens while it is paused, then the coordinator starts again
+    // The switch happens while it is paused (stamped then), then the coordinator starts again.
+    const stamped = new Date(Date.now() + 2000).toISOString().replace(/\.\d{3}Z$/, 'Z');
+    switchedAt = switched?.() ? stamped : null;
     await c.tick();
     await c.idle();
     return { f, calls };

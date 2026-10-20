@@ -261,7 +261,7 @@ test('the App\'s bot identity: "<slug>[bot]" with the noreply address GitHub att
     return new Response('{}', { status: 404 });
   }) as unknown as typeof fetch;
   const id = await appBotIdentity({ appId: 7, installationId: 42, keyPath: keyFile() }, fake, 'https://api.test');
-  assert.deepEqual(id, { name: 'site-app[bot]', email: '4242+site-app[bot]@users.noreply.github.com' });
+  assert.deepEqual(id, { name: 'site-app[bot]', email: '4242+site-app[bot]@users.noreply.github.com', id: 4242 });
   assert.deepEqual(seen, ['https://api.test/app jwt', 'https://api.test/users/site-app%5Bbot%5D anon']);
 });
 

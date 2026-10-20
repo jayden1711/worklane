@@ -16,6 +16,7 @@
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import type { IncomingMessage } from 'node:http';
+import type { ReviewConfig } from './config/schema.js';
 
 export type Role = 'owner' | 'writer' | 'viewer';
 
@@ -35,8 +36,8 @@ export const LOGIN_HEADER = 'x-dashboard-login';
 /** On the hub's role check (/api/role): read the permission from GitHub now, not the instance's cache. */
 export const FRESH_HEADER = 'x-dashboard-fresh-role';
 /**
- * Set (to 1) by the hub on a forwarded write when Tailscale identified the request's device as one of the console's
- * allowed devices (src/console/terminal-devices.ts); only the hub can tell, and it builds every forwarded header
+ * Set (to 1) by the hub on a forwarded write when Tailscale identified the request's device as one of the machine
+ * devices (dashboards.sh --machine-devices; src/console/terminal-devices.ts); only the hub can tell, and it builds every forwarded header
  * itself, so a browser's own copy never reaches an instance. Machine changes need it (src/machine-owners.ts).
  */
 export const DEVICE_HEADER = 'x-dashboard-console-device';
@@ -52,7 +53,7 @@ export interface ConsoleSession {
   csrfOk: boolean;
   /** The owner's break-glass (no person named). */
   breakGlass?: boolean;
-  /** The hub identified this write's device as an allowed console device (DEVICE_HEADER). */
+  /** The hub identified this write's device as one of the machine devices (DEVICE_HEADER). */
   deviceOk?: boolean;
 }
 export type SessionOf = (req: IncomingMessage, instance: string) => ConsoleSession | null;
@@ -60,25 +61,11 @@ export type SessionOf = (req: IncomingMessage, instance: string) => ConsoleSessi
 /** The header every write carries its CSRF token in. */
 export const CSRF_HEADER = 'x-csrf-token';
 /**
- * The owner terminal's WebSocket subprotocol. A browser can't set headers on a WebSocket upgrade, so the page offers
- * two subprotocols: this one and `csrf.<the session's CSRF token>`. The hub reads the token from the second and
- * answers with this one alone, never echoing the token.
- */
-export const TERMINAL_PROTOCOL = 'terminal.v1';
-/** The prefix of the subprotocol that carries the CSRF token on the terminal's upgrade. */
-export const CSRF_PROTOCOL_PREFIX = 'csrf.';
-/** The CSRF token a WebSocket upgrade offers as a subprotocol (`csrf.<token>`); undefined when it offers none. */
-export function csrfFromProtocols(req: IncomingMessage): string | undefined {
-  const offered = String(req.headers['sec-websocket-protocol'] ?? '').split(',').map((p) => p.trim());
-  const p = offered.find((x) => x.startsWith(CSRF_PROTOCOL_PREFIX));
-  return p ? p.slice(CSRF_PROTOCOL_PREFIX.length) : undefined;
-}
-/**
  * The instance API paths (after /api/) whose GET says whether a machine change would pass now, the device included.
  * The hub asks Tailscale for the device on these reads, as on every write, and the instance serves these views
  * under exactly these paths (src/dashboard.ts), so the two can't drift apart.
  */
-export const DEVICE_VIEWS = { addProject: 'add-project', machine: 'machine', claudeAccount: 'claude-account', tailscale: 'tailscale', siriDevices: 'siri-devices' } as const;
+export const DEVICE_VIEWS = { addProject: 'add-project', machine: 'machine', claudeAccount: 'claude-account', tailscale: 'tailscale' } as const;
 export const isDeviceView = (path: string) => (Object.values(DEVICE_VIEWS) as string[]).includes(path);
 /** The session cookie: __Host- binds it to this origin, Path=/, Secure, with no Domain. */
 export const SESSION_COOKIE = '__Host-session';
@@ -117,7 +104,14 @@ export const isWriter = (r: Role | null | undefined) => r === 'owner' || r === '
 
 /** Decisions only the owner may answer: held plans, high-risk (L3) merges, and an automation's run. The rest are the writers' too. */
 export const OWNER_DECISIONS: ReadonlySet<string> = new Set(['plan', 'land', 'automation']);
-export const mayAnswerKind = (kind: string, r: Role | null | undefined) => (OWNER_DECISIONS.has(kind) ? isOwner(r) : isWriter(r));
+/**
+ * THE rule for who may answer a decision of each kind, on every surface: the dashboard, a chat thread, a GitHub comment
+ * or review, and the CLI (#715). Owner decisions (OWNER_DECISIONS) are the owners'; the rest are the owners' and
+ * writers'. A high-risk merge (`land`) is the writers' too only where review.yaml on the default branch says
+ * `approvals: { land: writers }` (`approvals`, as read from there); absent, the owners' alone.
+ */
+export const mayAnswerKind = (kind: string, r: Role | null | undefined, approvals?: ReviewConfig['approvals']) =>
+  kind === 'land' && approvals?.land === 'writers' ? isWriter(r) : OWNER_DECISIONS.has(kind) ? isOwner(r) : isWriter(r);
 
 /** `fresh`: ask GitHub now, not the cache (the hub's role check, so its own copy is never older than the cache allows). */
 export type RoleOf = (login: string, o?: { fresh?: boolean }) => Promise<Role | null>;

@@ -154,7 +154,7 @@ export const EventSchemas = {
    * A write made on the dashboard: who (their GitHub login, and the role the instance read from its repo, or the
    * owner's break-glass), on which instance, and what was done.
    */
-  'dashboard.audit': z.strictObject({ login: z.string(), role: z.enum(['owner', 'writer', 'viewer']), via: z.enum(['session', 'break-glass', 'discord', 'siri']), instance: z.string().nullable(), action: z.string(), detail: z.record(z.string(), z.unknown()) }),
+  'dashboard.audit': z.strictObject({ login: z.string(), role: z.enum(['owner', 'writer', 'viewer']), via: z.enum(['session', 'break-glass', 'discord', 'siri', 'cli']), instance: z.string().nullable(), action: z.string(), detail: z.record(z.string(), z.unknown()) }),
   /** The owner changed an instance setting (policy.yaml) from the dashboard. */
   'settings.changed': z.strictObject({ key: z.string(), from: z.unknown(), to: z.unknown(), by: z.string(), at: z.string() }),
   /** The coordinator picked up the instance's settings (policy.yaml changed); `error`: they were refused and the repo's values apply. */
@@ -297,9 +297,10 @@ export const EventSchemas = {
   /** A minimal real call on a held login: `by` the periodic check, the owner's re-check, or an account switch. */
   'claude_auth.checked': z.strictObject({ key: z.string().max(500), login: z.string().max(300), ok: z.boolean(), by: z.enum(['timer', 'owner', 'account_switch']), detail: z.string().max(1000), cost_usd: z.number().nonnegative() }),
   /**
-   * An instance's Claude account profile switch, as the root script recorded it (src/claude-profiles.ts, issue #464):
-   * `op` its id, `to` the profile asked for, `from` each instance's profile before, `by` who asked (a GitHub login, or
-   * `terminal`), `ok` whether every agent user's real call on it was answered (if not, nothing changed). Never a token.
+   * An instance's Claude account profile switch, as an older engine recorded it (issue #464; profiles were removed,
+   * #736, so nothing records one now and the schema stays to read older logs): `op` its id, `to` the profile asked
+   * for, `from` each instance's profile before, `by` who asked (a GitHub login, or `terminal`), `ok` whether every
+   * agent user's real call on it was answered (if not, nothing changed). Never a token.
    */
   'account.switched': z.strictObject({ op: z.string().max(80), to: z.string().max(40), from: z.record(z.string().max(40), z.string().max(40)), instances: z.array(z.string().max(40)).max(200), by: z.string().max(100), ok: z.boolean(), detail: z.string().max(1000) }),
   /**
@@ -308,9 +309,9 @@ export const EventSchemas = {
    */
   'claude_account.refused': z.strictObject({ path: z.string().max(100), login: z.string().max(100).nullable(), status: z.number().int(), why: z.string().max(300) }),
   /**
-   * Auto-failover between account profiles on a usage limit (src/claude-failover.ts): asked (a move, proven by a
-   * real call before it happens), switched, refused, none (no free account in the order), and the move back after
-   * the reset (back-asked, back, back-refused). Never on an auth failure. Never a token.
+   * Auto-failover between account profiles on a usage limit, as an older engine recorded it (removed, #736; the schema
+   * stays to read older logs): asked (a move, proven by a real call before it happens), switched, refused, none (no
+   * free account in the order), and the move back after the reset (back-asked, back, back-refused). Never a token.
    */
   'account.failover': z.strictObject({ stage: z.enum(['asked', 'switched', 'refused', 'none', 'back-asked', 'back', 'back-refused']), from: z.string().max(40), to: z.string().max(40), reset_at: z.string().max(40).nullable(), detail: z.string().max(1000) }),
   /** A call on a held login succeeded (`via` a run or a check): the hold ends and runs start again. */
@@ -636,7 +637,19 @@ export const EventSchemas = {
    * auto-merge isn't stopped. The first approval at a head stands.
    */
   'merge.approved': z.strictObject({ issue, number: z.number().int().positive(), head: sha, by: z.string(), via: z.enum(['discord']) }),
-  'merge.done': z.strictObject({ issue, number: z.number().int().positive(), head: sha, sha, url: z.string(), title: z.string() }),
+  /**
+   * The engine is about to call GitHub's merge API for PR `number` at `head` (#733): recorded before the call, so a
+   * crash between GitHub's merge and `merge.done` leaves a trace. Never a merge on its own: the PR watch's next pass
+   * reconciles it (src/merge-policy-reconcile.ts), and nothing else reads it as one (the main watch reads only `merge.done`).
+   */
+  'merge.attempted': z.strictObject({ issue, number: z.number().int().positive(), head: sha }),
+  /**
+   * `reconciled`: recorded after the fact, for an attempt whose record a crash cut off, once GitHub showed the PR merged
+   * at exactly the attempted head by the engine's own App, as a merge commit of it carrying the engine's own merge
+   * message (#733). `merged_at`: then, when GitHub merged it: the main watch judges the checks as of that time, as it
+   * does a person's merge.
+   */
+  'merge.done': z.strictObject({ issue, number: z.number().int().positive(), head: sha, sha, url: z.string(), title: z.string(), reconciled: z.literal(true).optional(), merged_at: z.string().optional() }),
   'merge.failed': z.strictObject({ issue, number: z.number().int().positive(), head: sha, why: z.string() }),
   /**
    * The merge train (src/merge-policy-train.ts) put off merging PR `number` at `head` until `retry_at`: GitHub requires
@@ -870,8 +883,12 @@ export const EventSchemas = {
   'testrun.checks_failed': z.strictObject({ id: z.string(), sha, reason: z.enum(['no_permission', 'error']), detail: z.string().max(1000) }),
   /** The App's Checks permission on the repo, as GitHub reports it. */
   'testrun.checks_permission': z.strictObject({ level: z.enum(['write', 'read', 'none', 'unknown']), detail: z.string().max(500) }),
-  /** The sandbox's own check (the helper's `check`): no run starts until it passed. */
-  'testrun.sandbox': z.strictObject({ ok: z.boolean(), detail: z.string().max(2000) }),
+  /**
+   * The sandbox's own check (the helper's `check`): no run starts until it passed. `unsupported`: this machine can't
+   * give a run a user namespace of its own, with the fix (src/testrun/host.ts SandboxCheck); shown only, never read
+   * for `ok`, a run or an update.
+   */
+  'testrun.sandbox': z.strictObject({ ok: z.boolean(), detail: z.string().max(2000), unsupported: z.string().max(500).optional() }),
   /**
    * WHY: `<cli> testrun measure` (src/testrun/measure.ts), one tests.yaml test_run env value per sandboxed run. Its own
    * type, never testrun.queued/started/finished: the PR runs, the batcher and the test-run view never read it.

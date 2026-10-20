@@ -6,14 +6,11 @@ import { healthPass, hub, hubNow, servedByHub, instanceScope, keyMissing, needsS
 import { peek, useUpdating } from './cache';
 import { Entrances, Loading, SidebarRow } from './components/patterns';
 import { ChatPanel } from './components/ChatPanel';
-import { VoiceControl } from './voice/VoiceControl';
-import { useVoicePrefs } from './voice/prefs';
 import { MainWatchAlert } from './components/Protection';
 import { PausedScope, UsageBanner, useNow, useUsage } from './components/Usage';
 import { ago, Kbd, cx } from './components/ui';
 import { Header } from './components/Header';
 import { StatusDot } from './components/StatusDot';
-import { WakeWord } from './voice/WakeIndicator';
 import { logsRefusal, runsRefusal } from './refusals';
 import { KeyForm, KeyPage } from './components/DashboardKey';
 import { background, idle } from './prefetch';
@@ -67,6 +64,7 @@ const ExperimentsPage = lazyPage(() => import('./pages/Experiments').then((m) =>
 const RunDetail = lazyPage(() => import('./pages/RunDetail').then((m) => m.RunDetail));
 const PullRequests = lazyPage(() => import('./pages/PullRequests').then((m) => m.PullRequests));
 const HealthPage = lazyPage(() => import('./pages/Health').then((m) => m.HealthPage));
+const ValuePage = lazyPage(() => import('./pages/Value').then((m) => m.ValuePage));
 
 /** Each route's page chunk: the one shown is asked for at once (beside the first API calls), the rest when idle. */
 const PAGE_FOR: [RegExp, { preload: () => Promise<unknown> }][] = [
@@ -548,7 +546,6 @@ function InstanceDashboard({ health }: { health: Health | null }) {
   // The narrow-screen navigation drawer: closed on every change of page.
   const [nav, setNav] = useState(false);
   useEffect(() => setNav(false), [path]);
-  const [voice] = useVoicePrefs();
   // The `g` keys: every page's, a group's tabs included.
   const navNow = useRef(pagesFor(null));
   navNow.current = pagesFor(state);
@@ -608,6 +605,7 @@ function InstanceDashboard({ health }: { health: Health | null }) {
   else if (path.startsWith('/work/issues')) page = <Issues state={state} />;
   else if (path === '/shipping/land') page = <Landing state={state} />;
   else if (path === '/work/prs') page = <PullRequests state={state} />;
+  else if (path === '/machine/reports/value') page = <ValuePage state={state} pulse={pulse} />;
   else if (path === '/agents') page = <Agents state={state} />;
   else if (path === '/extend' || path.startsWith('/extend/')) page = <ExtendPage state={state} path={path} />;
   else if (path === '/experiments' || path.startsWith('/experiments/')) page = <ExperimentsPage state={state} path={path} />;
@@ -615,7 +613,7 @@ function InstanceDashboard({ health }: { health: Health | null }) {
   else if (path === '/work/intake') page = <IntakePage state={state} />;
   else if (path === '/shipping/deploys') page = <Deploys state={state} />;
   else if (path === '/machine/reports') page = <Reports state={state} pulse={pulse} />;
-  else if (path === '/settings') page = <SettingsPage owner={state.role === 'owner'} brand={state.brand.name} />;
+  else if (path === '/settings') page = <SettingsPage />;
   else if (path === '/machine/logs') page = <LogsPage refused={logsRefusal(state)} />;
   else if (path === '/machine/health') page = <HealthPage />;
   else if (path === '/machine') page = <MachinePage state={state} />;
@@ -647,8 +645,6 @@ function InstanceDashboard({ health }: { health: Health | null }) {
           </NavDrawer>
           <CommandMenu open={menu} setOpen={setMenu} state={state} toggleTheme={toggleTheme} />
           {state && <ChatPanel cli={state.brand.cli} role={state.role} user={state.user} />}
-          {state && <WakeWord role={state.role} brand={state.brand.name} />}
-          {state && <VoiceControl state={state} prefs={voice} />}
         </div>
       </PausedScope>
     </NavMenu.Provider>

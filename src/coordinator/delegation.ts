@@ -4,7 +4,7 @@
 import { BRAND } from '../brand.js';
 import { categoryRecords, delegationIssue, suggestions } from '../delegation.js';
 import type { EventPayload, EventType } from '../events/types.js';
-import { computeLevel, loadMoneyPaths } from '../review.js';
+import { computeLevel } from '../review.js';
 import { Corrections } from './corrections.js';
 import { lockScopeOf } from './shared.js';
 
@@ -50,7 +50,7 @@ export abstract class Delegation extends Corrections {
       if (claimed && head) {
         try {
           const files = this.changeFiles(this.d.repo, claimed.base, head);
-          categories = Object.keys(computeLevel({ files, labels: [], moneyPaths: loadMoneyPaths(this.d.repo, review.money_path_source), scope: lockScopeOf(this.d) }, review).categories).sort();
+          categories = Object.keys(computeLevel({ files, labels: [], moneyPaths: this.moneyPaths(review.money_path_source), scope: lockScopeOf(this.d) }, review).categories).sort();
         } catch {
           // the commits aren't here (a squash or a force-push upstream): observed with no categories
         }
@@ -116,7 +116,7 @@ export abstract class Delegation extends Corrections {
     }
     if (!got && land) {
       const a = read('decision.answered').find((e) => e.p.id === land.p.id && e.p.answer === 'approve');
-      // The dashboard recorded the role it read (an owner or a writer); a voice or chat answer without one is looked up.
+      // The dashboard recorded the role it read (an owner or a writer); a chat answer without one is looked up.
       const as = a ? (a.p.role ?? (await role(a.p.by))) : null;
       if (a && as && after(a.ts)) got = { by: a.p.by, at: a.ts, role: as };
     }

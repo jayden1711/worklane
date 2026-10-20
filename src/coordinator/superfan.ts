@@ -16,6 +16,7 @@ import { REPLIER_DENIED } from '../intake/replier.js';
 import type { IntakeConfig } from '../intake/report.js';
 import { tryLock, type Lock } from '../locks.js';
 import { slotsDir } from '../os/index.js';
+import { slotFile } from '../slot-file.js';
 import { RESEARCH_LANE } from '../research.js';
 import { superfanPass, SUPERFAN_SYSTEM, VERDICT_SCHEMA, type SuperfanDeps } from '../superfan/superfan.js';
 import { updateLog } from '../updates.js';
@@ -61,7 +62,7 @@ export abstract class SuperfanWatch extends Learnings {
   private takeMachineSuperfan(): boolean {
     if (this.stopped) return false;
     if (this.machineSuperfan) return true;
-    const r = tryLock(join(this.superfanSlots, MACHINE_LOCK), `superfan ${this.d.superfan!.name} ${process.pid}`);
+    const r = tryLock(slotFile(this.superfanSlots, MACHINE_LOCK), `superfan ${this.d.superfan!.name} ${process.pid}`);
     if (!('lock' in r)) return false;
     this.machineSuperfan = r.lock;
     return true;
@@ -84,14 +85,14 @@ export abstract class SuperfanWatch extends Learnings {
     return {
       scope,
       watching: scope === 'instance' ? `instance ${name}` : "the machine's engine and updater",
-      stateFile: scope === 'instance' ? join(this.d.stateDir, 'superfan.json') : join(dir, MACHINE_STATE),
+      stateFile: scope === 'instance' ? join(this.d.stateDir, 'superfan.json') : slotFile(dir, MACHINE_STATE),
       stateMode: scope === 'instance' ? 0o600 : 0o660,
       settings: cfg.superfan,
       read:
         scope === 'instance'
           ? async () => {
               const events = this.d.log.read();
-              return { events, incidents: readIncidents(dir).incidents.filter((x) => x.instance === name), health: healthView(events, null, { updates: [] }).suggestions, journal: (await this.d.superfan?.journal?.()) ?? null };
+              return { events, incidents: readIncidents(dir).incidents.filter((x) => x.instance === name), health: healthView(events, null, { updates: [], githubRate: null }).suggestions, journal: (await this.d.superfan?.journal?.()) ?? null };
             }
           : () => ({ incidents: readIncidents(dir).incidents.filter((x) => x.instance === null), updates: updateLog() }),
       judge: async (prompt, maxUsd) => {

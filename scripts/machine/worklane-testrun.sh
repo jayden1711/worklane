@@ -22,13 +22,25 @@
 # namespace outbound NAT to public addresses only: never the host's loopback (--disable-host-loopback, and its unit's
 # IPAddressDeny= has 127.0.0.0/8), the host's own addresses, the LAN, link-local or multicast; the machine's upstream DNS
 # servers allowed to slirp alone (the run's own unit denies them: its DNS is slirp's forwarder, nothing else). slirp4netns
-# must have seccomp (slirp_ok), and runs with --disable-host-loopback --enable-sandbox --enable-seccomp. The tier's name
+# must have seccomp (slirp_ok), and runs with --disable-host-loopback --enable-seccomp, as the test user (#545; as root,
+# with --enable-sandbox, only where the run has no user namespace of its own or the host's egress rule drops every
+# socket of the test user's: slirp_who). The tier's name
 # comes from the coordinator, so the grant is per instance at most: a coordinator can only name a tier root listed for
 # its own instance. On stderr, after any GPU line: "worklane-testrun: network
 # granted (<tier>; ...)" or "worklane-testrun: network none (<why>)". The fetch command (below) is the one other way out:
 # a fixed npm or pip download of what the lockfile or requirements files pin, with no script or build run, that never
 # reaches this host's loopback or LAN.
 # The run's Postgres has no network either (docker run --network none): it is reached on its Unix socket only.
+#
+# A run's own user namespace (#545, docs/test-runs.md "Network"): every exec and fetch unit starts with a fixed wrapper
+# ($USERNS, a root-owned copy of util-linux's unshare that test-user.sh install puts there, that only the test users may
+# run, with an AppArmor profile where user namespaces are restricted) that makes the run a user and network namespace of
+# its own, the test user's uid mapped to itself alone, brings its loopback up and drops every capability, and the
+# profile, before the run's command (userns_argv). So a
+# run's processes can't join, ptrace or open /proc/<pid>/... of any process outside it, the test user's rootless Docker
+# included: the kernel wants CAP_SYS_ADMIN (to join) or CAP_SYS_PTRACE (the rest) in that process's user namespace, and
+# a run has neither there. Without the wrapper (a helper the updater put in place before test-user.sh install ran
+# again, or a machine whose unshare is too old) a run shares the host's user namespace as before, and check says so.
 #
 #   worklane-testrun <name> create <id> <branch> <head> <base> <head sha> <base sha> [<dir>]...
 #                                                             a new run: what the bundle on stdin carries goes into the
@@ -136,6 +148,34 @@ SLIRP_SANDBOX=(-p NoNewPrivileges=yes -p TemporaryFileSystem=/etc:ro -p Temporar
   -p ProtectKernelTunables=yes -p ProtectKernelModules=yes -p ProtectControlGroups=yes -p RestrictSUIDSGID=yes -p LockPersonality=yes
   -p "CapabilityBoundingSet=CAP_SYS_ADMIN CAP_SYS_PTRACE CAP_NET_ADMIN CAP_SYS_CHROOT CAP_SETPCAP CAP_NET_BIND_SERVICE"
   -p "RestrictAddressFamilies=AF_INET AF_INET6 AF_NETLINK")
+# The same unit as the test user (#545; slirp_who): no capability at all, none needed. It joins the run's user namespace
+# as that namespace's owner (the kernel gives the owner every capability in it) and makes tap0 there; in the host's it
+# has none. slirp4netns's own --enable-sandbox fails as an ordinary user (setegid(0), measured in #543's CI spike), so
+# its unit's sandbox does that job: the whole file system read-only, no /home, a private /tmp, an empty /etc (but its
+# resolv.conf) and /run. Its socket families and its signal filter are root's slirp's. WHY no ptrace-class call
+# (@debug: ptrace, pidfd_getfd; and process_vm_readv/writev): as the test user in the host's user namespace it owns
+# rootless Docker's user namespace too, and the kernel gives an owner every capability there; this keeps a slirp4netns
+# that a run's packets took over from driving dockerd, whatever slirp4netns's own seccomp list holds.
+SLIRP_USER_SANDBOX=(-p NoNewPrivileges=yes -p ProtectSystem=strict -p ProtectHome=yes -p PrivateTmp=yes
+  -p TemporaryFileSystem=/etc:ro -p TemporaryFileSystem=/run:ro
+  -p "SystemCallFilter=~kill tkill tgkill rt_sigqueueinfo rt_tgsigqueueinfo pidfd_send_signal"
+  -p "SystemCallFilter=~@debug process_vm_readv process_vm_writev" -p SystemCallErrorNumber=EPERM
+  -p ProtectKernelTunables=yes -p ProtectKernelModules=yes -p ProtectControlGroups=yes -p RestrictSUIDSGID=yes -p LockPersonality=yes
+  -p CapabilityBoundingSet= -p "RestrictAddressFamilies=AF_INET AF_INET6 AF_NETLINK")
+# A run's own user and network namespace (the header, userns_argv): the wrapper test-user.sh install puts here (root's,
+# 0755, a copy of util-linux's unshare), and the AppArmor profile that lets it make a user namespace where the kernel
+# restricts them (the sysctl below is 1; Ubuntu 24.04). /proc is $PROC so a test can stand in for it.
+USERNS=/usr/local/libexec/worklane-testrun-userns
+USERNS_PROFILE=worklane-testrun-userns
+USERNS_RESTRICT=/proc/sys/kernel/apparmor_restrict_unprivileged_userns
+AA_PROFILES=/sys/kernel/security/apparmor/profiles
+PROC=/proc
+# The host's egress rule (scripts/setup/egress-firewall.sh; lib.sh has the same names, and a test keeps them equal):
+# its record, and the set a test user's slirp4netns joins (NFTSet=, systemd 255 or later) so its sockets may send out.
+EGRESS_RECORD=/etc/worklane/egress.users
+EGRESS_TABLE=worklane_egress
+EGRESS_SET=egress_ok
+EGRESS_NFTSET_SYSTEMD=255
 # Prefixes only: systemd-run's transient IPAddressDeny= refuses the names a unit file takes (link-local, multicast,
 # localhost: "Failed to parse IP address prefix"). Link-local is 169.254.0.0/16 and fe80::/10, multicast 224.0.0.0/4
 # and ff00::/8. WHY the private ranges are built from their first octets: the repo's denylist refuses any literal
@@ -228,12 +268,13 @@ run_unit() { printf 'worklane-test-%s_%s_%s' "$name" "$1" "$2"; }
 run_units() {
   local id="$1" u owner
   local new="^worklane-test-${name}_${id}_(fetch_)?[0-9]+[.]service\$" old="^worklane-test-${name}-${id}-[0-9]+[.]service\$"
-  # A granted run's network (slirp_start): root's, so no User=; its name is this run's alone (the underscores).
+  # A granted run's network (slirp_start): the test user's (User=), or root's (no User=: slirp_who, and every helper
+  # before #545); its name is this run's alone (the underscores).
   local net="^worklane-test-${name}_${id}_net_[0-9]+[.]service\$"
   while read -r u _; do
     [[ "$u" =~ $new || "$u" =~ $old || "$u" =~ $net ]] || continue
     owner="$(systemctl show -p User --value "$u" 2>/dev/null)" || continue
-    if [[ "$u" =~ $net ]]; then [ -z "$owner" ] && printf '%s\n' "$u"; continue; fi
+    if [[ "$u" =~ $net ]]; then if [ -z "$owner" ] || [ "$owner" = "$user" ]; then printf '%s\n' "$u"; fi; continue; fi
     [ "$owner" = "$user" ] && printf '%s\n' "$u"
   done < <(systemctl list-units --all --plain --no-legend --full "worklane-test-${name}_${id}_*" "worklane-test-${name}-${id}-*" 2>/dev/null)
   return 0
@@ -257,14 +298,23 @@ valid_env() {
   [[ "$1" == *=* && "$k" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || die "--env takes NAME=value, got ${1%%=*}"
   [[ "$v" != *$'\n'* ]] || die "--env $k: one line"
   if [[ "$k" =~ ^(PATH|HOME|USER|LOGNAME|SHELL|TMPDIR|TMP|TEMP|IFS|ENV|BASH_ENV|PS4|PROMPT_COMMAND|NODE_OPTIONS|NODE_PATH|LD_.*|DYLD_.*|BASH_FUNC_.*|GIT_.*|GH_.*|GITHUB_.*|SSH_.*|CLAUDE_.*|ANTHROPIC_.*|SUDO_.*|WORKLANE_.*|DOCKER_.*|XDG_.*)$ ]]; then die "--env $k: set by the sandbox, never by a run"; fi
+  # glibc's unsafe-environment list (what it ignores for a setuid program: these steer its loader, gconv, locales,
+  # malloc, resolver and time zones), libmount's own, and LANGUAGE. WHY (round 4): no step of a run that holds a
+  # capability ever gets a run's variable (USERNS_LOAD); this keeps them out besides. LANG, LC_* and TZ stay a run's to
+  # set here, as before, though glibc reads TZ (TZ=/path, TZ=:/path) as a file: by design no step that holds a
+  # capability gets them (the loader runs after setpriv), the engine refuses them for a project (projectEnvProblem),
+  # and an existing test keeps TZ=UTC accepted here.
+  if [[ "$k" =~ ^(GCONV_PATH|GETCONF_DIR|GLIBC_TUNABLES|HOSTALIASES|LOCALDOMAIN|LOCPATH|MALLOC_.*|NIS_PATH|NLSPATH|RESOLV_HOST_CONF|RES_OPTIONS|TZDIR|LIBMOUNT_.*|LANGUAGE)$ ]]; then die "--env $k: steers the C library or libmount, never a run's to set"; fi
   if [ "$k" != DATABASE_URL ] && [[ "$(printf %s "$k" | tr '[:lower:]' '[:upper:]')" =~ TOKEN|SECRET|PASSW|API_?KEY|PRIVATE_?KEY|CREDENTIAL|AUTH|COOKIE ]]; then die "--env $k: looks like a secret; a test run gets none"; fi
 }
 
 # INVARIANT: no variable's value is ever in an argv: not this helper's (sudo logs its whole command line to the
 # journal), not systemd-run's or docker's (any user reads a process's argv with ps or /proc/<pid>/cmdline), and not in
 # the transient unit's Environment= (systemctl show and the unit file under /run/systemd/transient show it to anyone).
-# DATABASE_URL carries the run's database password. So exec reads the run's variables on stdin, and systemd reads
-# them from a root-only file (EnvironmentFile=), removed when the run's command ends and by wipe.
+# DATABASE_URL carries the run's database password. So exec reads the run's variables on stdin, and puts them in a
+# root-only file, removed when the run's command ends and by wipe. systemd reads it (EnvironmentFile=); or, where the
+# run gets a user namespace of its own (#545), it is the unit's stdin, read by the loader after setpriv (USERNS_LOAD),
+# so no step that holds a capability ever has one of them in its environment.
 RUN_ENV=()
 ENV_FILE=
 read_run_env() {
@@ -1004,12 +1054,172 @@ slirp_ok() {
   "$SLIRP" --version 2>/dev/null | grep -q '^libseccomp: [0-9]' || { NET_WHY="$SLIRP has no seccomp support (its --version names no libseccomp): install the distribution's build (apt-get install slirp4netns), then try again"; return 1; }
 }
 
+# Whether this machine has the wrapper for a run's own user namespace, usable: root's own regular file that only the
+# test users may run (wrapper_acl_problem), an unshare that takes --map-current-user and --keep-caps (util-linux 2.38 or
+# later; read from the file, never run here), setpriv and ip to go with it, and, where the kernel restricts user
+# namespaces, its AppArmor profile loaded (USERNS_AA 1 when it is: the run's command then leaves it, userns_argv).
+# Else USERNS_WHY says why not, and a run shares the host's user namespace, as before #545.
+USERNS_WHY=
+USERNS_AA=0
+IP_BIN=
+SETPRIV_BIN=
+MOUNT_BIN=
+ENV_BIN=
+userns_ok() {
+  local got acl
+  USERNS_AA=0
+  if [ -L "$USERNS" ] || [ ! -f "$USERNS" ]; then USERNS_WHY="no $USERNS (scripts/setup/test-user.sh install puts it there)"; return 1; fi
+  got="$(stat -c '%U' -- "$USERNS")"
+  [ "$got" = "$(id -un)" ] || { USERNS_WHY="$USERNS is $got's, not $(id -un)'s"; return 1; }
+  acl="$(getfacl -cp -- "$USERNS" 2>/dev/null)" || { USERNS_WHY="can't read $USERNS's ACL (getfacl; apt-get install acl)"; return 1; }
+  got="$(wrapper_acl_problem "$acl")"
+  [ -z "$got" ] || { USERNS_WHY="$USERNS: $got (scripts/setup/test-user.sh install sets it)"; return 1; }
+  if ! grep -qaF 'map-current-user' "$USERNS" || ! grep -qaF 'keep-caps' "$USERNS"; then USERNS_WHY="$USERNS takes no --map-current-user or --keep-caps (util-linux 2.38 or later has both)"; return 1; fi
+  IP_BIN="$(command -v ip || true)"; SETPRIV_BIN="$(command -v setpriv || true)"; MOUNT_BIN="$(command -v mount || true)"; ENV_BIN="$(command -v env || true)"
+  [ -n "$IP_BIN" ] && [ -n "$SETPRIV_BIN" ] && [ -n "$MOUNT_BIN" ] && [ -n "$ENV_BIN" ] || { USERNS_WHY="no ip, setpriv, mount or env on this machine (iproute2, util-linux, coreutils)"; return 1; }
+  if grep -q "^$USERNS_PROFILE " "$AA_PROFILES" 2>/dev/null; then USERNS_AA=1
+  elif [ "$(cat "$USERNS_RESTRICT" 2>/dev/null || true)" = 1 ]; then
+    USERNS_WHY="user namespaces are restricted here ($USERNS_RESTRICT is 1) and the AppArmor profile $USERNS_PROFILE isn't loaded (scripts/setup/test-user.sh install loads it)"; return 1
+  fi
+}
+
+# Why this machine can't have the wrapper at all, or nothing when it can: its unshare (read, never run here) takes no
+# --map-current-user or --keep-caps (util-linux older than 2.38), or there's no setpriv. test-user.sh's
+# userns_unsupported_why asks the same of unshare --help.
+userns_unsupported() {
+  local u
+  u="$(command -v unshare || true)"
+  if [ -z "$u" ]; then echo "no unshare"
+  elif ! grep -qaF 'map-current-user' "$u" || ! grep -qaF 'keep-caps' "$u"; then echo "$u takes no --map-current-user or --keep-caps"
+  elif ! command -v setpriv >/dev/null; then echo "no setpriv"
+  fi
+}
+
+# Whether user <u> is the test user of an instance on this machine: wl-test-<name>, <name> a valid instance name
+# (instance_name_problem: so never instance test's wl-test-agent, wl-test-eval or wl-test-mcp, which the bare pattern
+# wl-test-* would take), and test-user.sh install has made that instance's $BASE/<name>. test-user.sh's is_test_user is
+# the same rule (a test keeps them alike).
+is_test_user() {
+  local n
+  [[ "$1" =~ ^wl-test-(.+)$ ]] || return 1
+  n="${BASH_REMATCH[1]}"
+  [ -z "$(instance_name_problem "$n")" ] && [ -d "$BASE/$n" ] && [ ! -L "$BASE/$n" ]
+}
+
+# Why the wrapper's ACL (getfacl -cp, given) lets anyone but the test users run it, or anyone but root write it; empty
+# when it doesn't. WHY: where the kernel restricts user namespaces, its AppArmor profile lets whoever runs it make one,
+# so every other user, and every NoNewPrivileges unit (DynamicUser and the like), must not be able to run it at all:
+# the owner (root), this instance's test user (who must be able to), other instances' test users (is_test_user; test-user.sh
+# install lists each), no group, nobody else; and nobody but root may write it (no w on a named entry or the mask).
+wrapper_acl_problem() {
+  local l who perm mine=0
+  while IFS= read -r l; do
+    l="${l%%[[:space:]]*}"
+    case "$l" in
+      '' | user::*) ;;
+      mask::*) [[ "${l#mask::}" != *w* ]] || { echo "its ACL mask lets a named entry write it ($l)"; return 0; } ;;
+      user:*:*) who="${l#user:}"; perm="${who##*:}"; who="${who%:*}"
+        [[ "$perm" != *w* ]] || { echo "$who may write it"; return 0; }
+        if [ "$who" = "$user" ]; then [[ "$perm" == *x ]] && mine=1
+        elif ! is_test_user "$who"; then echo "$who, not the test user of an instance here, may run it"; return 0; fi ;;
+      group::---) ;;
+      group:*) echo "a group may run it ($l)"; return 0 ;;
+      other::---) ;;
+      other:*) echo "every user may run it ($l)"; return 0 ;;
+      *) echo "an ACL entry this helper doesn't know: $l"; return 0 ;;
+    esac
+  done <<<"$1"
+  [ "$mine" -eq 1 ] || echo "$user may not run it"
+  return 0
+}
+
+# The start of a run's unit's command when it gets a user namespace of its own (userns_ok), as USERNS_ARGV; the run's
+# own argv (bash and its command) follows it. As the test user: the wrapper makes a user and a network namespace,
+# the test user's uid (and gid) mapped to itself alone, and keeps the capabilities that gives it in the new namespace
+# (--keep-caps) only for ip to bring the loopback up; setpriv then drops every one (inheritable, ambient, bounding) and
+# runs the command, which starts with none in its namespace or any other. && : if ip fails, the command never runs.
+# Where the wrapper's AppArmor profile is loaded (USERNS_AA), setpriv also has the command leave it for the unconfined
+# label (--apparmor-profile=unconfined), as every run was before #545. WHY: an unconfined-mode profile keeps its label
+# across exec, so without this the run's whole command tree would keep the profile's userns allowance, and where the
+# kernel restricts user namespaces could make more with capabilities in them; with it, such a namespace gets the
+# kernel's restricted treatment, as before (the test-run CI job asserts both ways). <systemd version>: the script's "$@"
+# goes to systemd as the command does (systemd_command), so it is never expanded.
+# The run also gets a mount namespace of its own (--mount: the unit's mounts, copied and locked), where the wrapper
+# binds /dev/null over the wrapper itself while it still has its capabilities, so the run's command can't run the wrapper
+# and get its profile's allowance back by path. With no capability in its own user namespace it can't unmount that, and
+# the mounts it was copied from are locked to it (round 3). The test-run CI job asserts a run running the wrapper is refused.
+# USERNS_LOAD: the step after setpriv (no capability left, the unconfined label) that gives the run's command its
+# variables: it reads them from its stdin, each NAME=value ended by a NUL (exec_run feeds the root-only file there),
+# exports each, and runs the command with /dev/null as its stdin, as before. All decided on the bash it runs under,
+# never from a list kept here (round 7):
+#   - a name this bash already holds as integer, read-only, an array or a nameref (${!name@a} has i, r, a, A or n:
+#     RANDOM, OPTIND, UID, GROUPS, ...), or one it set itself, or whose value it changed from the one the environment it
+#     started with gave (/proc/$$/environ, names and values: SHLVL, which bash raises at every start, HOSTNAME, OSTYPE,
+#     _, ...), is never assigned. WHY: assigning an integer one evaluates the value as arithmetic, and a[$(...)] in it
+#     runs code (measured on bash 5.2: OPTIND, RANDOM, SRANDOM, HISTCMD), which bash importing the same value from its
+#     environment, as before #545, didn't; and bash changes its own names on the way to the command (exec lowers SHLVL
+#     and sets _), so a check here couldn't vouch for them. A name the environment gave and bash kept as it was (PWD
+#     where the shell before this one exported it, CI, LANG) is the project's to replace, as with EnvironmentFile=;
+#   - its reads take no timeout (TMOUT=): a project's TMOUT would otherwise end them early on a pipe;
+#   - then each name it was given must be exported, not an array or a nameref, and hold the last value given
+#     (${!name@a}, ${!name}: no child per name).
+# A name that fails either (bash's own: read-only like SHELLOPTS, arrays like FUNCNAME, dynamic like SECONDS) gets a
+# note on stderr; the run goes on. Its own variables are WORKLANE_*, which valid_env never lets a run set, so no
+# project variable can collide with them. Nothing of it reaches a step with a capability: sh and setpriv before it read
+# no stdin, and ip and mount get /dev/null.
+USERNS_ARGV=()
+USERNS_LOAD=()
+userns_argv() {
+  local v="$1" s aa=""
+  [ "$USERNS_AA" != 1 ] || aa=" --apparmor-profile=unconfined"
+  # env -i: ip and mount run while the prelude holds its capabilities, so none of the run's variables (LIBMOUNT_*, the
+  # locale's) reaches them.
+  s="$(systemd_command "$v" "$ENV_BIN -i $IP_BIN link set lo up < /dev/null && $ENV_BIN -i $MOUNT_BIN --bind /dev/null $USERNS < /dev/null && exec $SETPRIV_BIN --inh-caps=-all --ambient-caps=-all --bounding-set=-all$aa -- \"\$@\"")"
+  USERNS_ARGV=("$USERNS" --user --map-current-user --net --mount --keep-caps -- /bin/sh -c "${s#*$'\n'}" sh)
+  s="$(systemd_command "$v" 'declare -A WORKLANE_e=() WORKLANE_s=() WORKLANE_o=(); while IFS= TMOUT= read -r -d "" WORKLANE_kv; do WORKLANE_o["${WORKLANE_kv%%=*}"]="${WORKLANE_kv#*=}"; done < "/proc/$$/environ"; while IFS= TMOUT= read -r -d "" WORKLANE_kv; do WORKLANE_n="${WORKLANE_kv%%=*}"; WORKLANE_e["$WORKLANE_n"]="${WORKLANE_kv#*=}"; if [[ "${!WORKLANE_n@a}" == *[iraAn]* ]] || { [[ -v $WORKLANE_n ]] && { [[ -z "${WORKLANE_o[$WORKLANE_n]+set}" ]] || [[ "${!WORKLANE_n}" != "${WORKLANE_o[$WORKLANE_n]}" ]]; }; }; then WORKLANE_s["$WORKLANE_n"]=1; else export "$WORKLANE_kv" 2> /dev/null; WORKLANE_o["$WORKLANE_n"]="${WORKLANE_kv#*=}"; fi; done; for WORKLANE_n in "${!WORKLANE_e[@]}"; do WORKLANE_a="${!WORKLANE_n@a}"; if [[ -n "${WORKLANE_s[$WORKLANE_n]-}" || "$WORKLANE_a" != *x* || "$WORKLANE_a" == *[aAn]* || "${!WORKLANE_n}" != "${WORKLANE_e[$WORKLANE_n]}" ]]; then echo "worklane-testrun: not set: $WORKLANE_n is the shell'"'"'s own" >&2; fi; done; exec "$@" < /dev/null')"
+  USERNS_LOAD=(/bin/bash -c "${s#*$'\n'}" load)
+}
+
+# Whether test users' Docker may be exempt from the host's egress rule: lib.sh's egress_docker_mode, word for word (a
+# test keeps them equal). Here it says whether the rule drops every socket of the test user's with no exception
+# ("dropped"), so a slirp4netns of the test user's could carry no granted run out.
+egress_docker_mode() {
+  local rec
+  [ -e "$1" ] || { echo exempt; return 0; }
+  rec="$(cat "$1" 2>/dev/null)" || { echo dropped; return 0; }
+  if grep -qx '# docker: dropped' <<<"$rec"; then echo dropped
+  elif grep -qx '# docker: exempt' <<<"$rec"; then echo exempt
+  elif grep -qx '# --with-test-users' <<<"$rec"; then echo dropped
+  else echo exempt; fi
+}
+
+# Who runs a granted run's (or a fetch's) slirp4netns, as SLIRP_AS: "user" (the test user, #545) when the run has its
+# own user namespace (<own> 1), which the test user owns and so may join with no privilege, unless the host's egress rule
+# drops every socket of the test user's (its record says dropped): there "root", as before #545. WHY root there: such an
+# install's rule has no exception for the test user (egress-firewall.sh), so the test user's slirp4netns couldn't carry
+# the run out, and an exception for it would change a rule that install had closed. Root's slirp4netns is outside the
+# rule (uid 0 isn't covered), as it always was. Also "root" without a user namespace of the run's: the test user can't
+# join a network namespace systemd made (it is the host user namespace's).
+SLIRP_AS=root
+slirp_who() {
+  SLIRP_AS=root
+  if [ "$1" -eq 1 ] && [ "$(egress_docker_mode "$EGRESS_RECORD")" != dropped ]; then SLIRP_AS=user; fi
+  return 0
+}
+
 # The command a granted run's unit runs: it waits for its network (slirp4netns's tap0 and its route) first, at most 15 s.
 # No ${...}: systemd expands those itself.
 NET_WAIT='n=0; until grep -qs "^tap0" /proc/net/route; do n=$((n + 1)); if [ "$n" -ge 150 ]; then echo "worklane-testrun: the run'"'"'s network did not come up" >&2; exit 125; fi; sleep 0.1; done; '
 
-# CAP_SYS_PTRACE: opening another user's /proc/<pid>/ns/net (the run's, the test user's) is a ptrace access check.
-# WHY no ProtectSystem=, ProtectHome= or PrivateTmp= on its unit: slirp4netns's own sandbox (--enable-sandbox) mounts an
+# As the test user (SLIRP_AS user, #545): in its own unit too, with SLIRP_USER_SANDBOX and no capability, given the run's
+# user and network namespace by path (--userns-path, --netns-type=path): it joins them as their owner. Its sockets are
+# the test user's, so where systemd can (255 or later) its unit joins the host egress rule's set (NFTSet=), as the test
+# user's Docker does: the rule lets a socket of a unit in that set out, and drops every other socket of the test user's.
+# Its unit's IPAddressDeny= is still where the boundary is. A run can't reach it: it is in the host's user namespace,
+# where a run has no capability (the header).
+# As root (SLIRP_AS root, slirp_who): CAP_SYS_PTRACE: opening another user's /proc/<pid>/ns/net (the run's, the test
+# user's) is a ptrace access check.
+# WHY no ProtectSystem=, ProtectHome= or PrivateTmp= on root's unit: slirp4netns's own sandbox (--enable-sandbox) mounts an
 # empty tmpfs on /tmp and pivot_roots into it, which PrivateTmp='s mount refuses ("cannot pivot_root to /tmp", on real
 # systemd). What it keeps after that pivot is the host's /etc and /run, bound read-only: so its unit gives it an empty
 # /etc holding only a resolv.conf of the upstream servers (libslirp's forwarder reads it), and an empty /run. As uid 0
@@ -1020,9 +1230,11 @@ NET_WAIT='n=0; until grep -qs "^tap0" /proc/net/route; do n=$((n + 1)); if [ "$n
 # net_<pid>), bound to the run's unit (it stops with it), as root only to join that namespace and make tap0, then
 # sandboxed by itself (its own mount namespace, every capability dropped, seccomp). Its unit's IPAddressDeny= is where the
 # boundary is: the host's loopback, its own addresses, the LAN, link-local and multicast; the upstream DNS servers
-# allowed. <pid> is the backgrounded systemd-run, so a run that is already over is never waited for.
+# allowed. <pid> is the backgrounded systemd-run, so a run that is already over is never waited for. <own> is 1 when the
+# run makes its own user namespace (userns_argv): then slirp4netns waits for it (wait_own_ns) and joins it, never the
+# namespace systemd made for the unit.
 slirp_start() {
-  local unit="$1" pid="$2" id="$3" main="" i allow ha
+  local unit="$1" pid="$2" id="$3" own="$4" main="" i allow ha nftset=()
   for i in $(seq 100); do
     main="$(systemctl show -p MainPID --value "$unit.service" 2>/dev/null || true)"
     [[ "$main" =~ ^[1-9][0-9]*$ ]] && break
@@ -1030,12 +1242,39 @@ slirp_start() {
     sleep 0.1
   done
   [[ "$main" =~ ^[1-9][0-9]*$ ]] || return 1
+  if [ "$own" -eq 1 ]; then wait_own_ns "$main" "$pid" || return 1; fi
   allow="$(resolvers | tr '\n' ' ')"
   ha="$(host_addrs | tr '\n' ' ')"
-  systemd-run --quiet --collect --unit="$(run_unit "$id" "net_$$")" --slice="$SLICE" \
-    -p "BindsTo=$unit.service" -p "After=$unit.service" "${SLIRP_SANDBOX[@]}" -p "BindReadOnlyPaths=$SLIRP_RESOLV:/etc/resolv.conf" \
-    -p "IPAddressDeny=$NET_LOOPBACK $NET_DENY${ha:+ ${ha% }}" ${allow:+-p "IPAddressAllow=${allow% }"} \
-    "$SLIRP" --configure --mtu=65520 --disable-host-loopback --enable-sandbox --enable-seccomp "$main" tap0
+  if [ "$SLIRP_AS" = user ]; then
+    [ "$(systemd_version)" -lt "$EGRESS_NFTSET_SYSTEMD" ] || nftset=(-p "NFTSet=cgroup:inet:$EGRESS_TABLE:$EGRESS_SET")
+    systemd-run --quiet --collect --unit="$(run_unit "$id" "net_$$")" --slice="$SLICE" --uid="$user" --gid="$user" \
+      -p "BindsTo=$unit.service" -p "After=$unit.service" "${SLIRP_USER_SANDBOX[@]}" ${nftset[@]+"${nftset[@]}"} -p "BindReadOnlyPaths=$SLIRP_RESOLV:/etc/resolv.conf" \
+      -p "IPAddressDeny=$NET_LOOPBACK $NET_DENY${ha:+ ${ha% }}" ${allow:+-p "IPAddressAllow=${allow% }"} \
+      "$SLIRP" --configure --mtu=65520 --disable-host-loopback --enable-seccomp --userns-path="$PROC/$main/ns/user" --netns-type=path "$PROC/$main/ns/net" tap0
+  else
+    systemd-run --quiet --collect --unit="$(run_unit "$id" "net_$$")" --slice="$SLICE" \
+      -p "BindsTo=$unit.service" -p "After=$unit.service" "${SLIRP_SANDBOX[@]}" -p "BindReadOnlyPaths=$SLIRP_RESOLV:/etc/resolv.conf" \
+      -p "IPAddressDeny=$NET_LOOPBACK $NET_DENY${ha:+ ${ha% }}" ${allow:+-p "IPAddressAllow=${allow% }"} \
+      "$SLIRP" --configure --mtu=65520 --disable-host-loopback --enable-sandbox --enable-seccomp "$main" tap0
+  fi
+}
+
+# Wait (at most 10 s) until the run's main process <main> is in a user namespace of its own (not the host's, which
+# $PROC/1 is in) and runs bash: the wrapper has made the run's namespaces and setpriv has handed over to the run's
+# command, which waits for its network (NET_WAIT). WHY bash, not only the namespace: between the wrapper's unshare and
+# its next exec the process isn't dumpable, and the test user's slirp4netns couldn't open its namespace files then.
+# 1 if <pid> (the run's systemd-run) ends first, or it doesn't come.
+wait_own_ns() {
+  local main="$1" pid="$2" i host bash ns
+  host="$(readlink "$PROC/1/ns/user" 2>/dev/null || true)"
+  bash="$(readlink -f /bin/bash)"
+  for i in $(seq 100); do
+    ns="$(readlink "$PROC/$main/ns/user" 2>/dev/null || true)"
+    if [ -n "$ns" ] && [ -n "$host" ] && [ "$ns" != "$host" ] && [ "$(readlink "$PROC/$main/exe" 2>/dev/null || true)" = "$bash" ]; then return 0; fi
+    kill -0 "$pid" 2>/dev/null || return 1
+    sleep 0.1
+  done
+  return 1
 }
 
 # What exec leaves behind on any exit: the run's variables file, and the notes in the GPU locks it held.
@@ -1047,7 +1286,7 @@ exec_cleanup() {
 }
 
 exec_run() {
-  local id="${1:-}" timeout="${2:-}" d t inaccessible p cmd flag kv rc=0 gpu=0 net="" granted=0 started locking waited runtime unit pid
+  local id="${1:-}" timeout="${2:-}" d t inaccessible p cmd flag kv rc=0 gpu=0 net="" granted=0 started locking waited runtime unit pid own=0
   local -a envfile=() noexpand=() gpuprops=()
   local usage="usage: exec <id> <timeout_s> [--gpu] [--network <tier>] -- <command> (the run's variables on stdin, each NAME=value then a NUL)"
   [ "$#" -ge 2 ] || die "$usage"
@@ -1112,17 +1351,34 @@ exec_run() {
     net_props 0
     [ -z "$net" ] || echo "worklane-testrun: network none ($NET_WHY)" >&2
   fi
-  # The run's variables (RUN_ENV), for systemd to read from a file of root's only: never on systemd-run's argv nor in
-  # the unit's Environment= (the INVARIANT above). Only the run's own processes get them.
+  # The run's own user and network namespace (the header), when this machine has the wrapper; its slirp4netns's user.
+  USERNS_ARGV=()
+  if userns_ok; then own=1; userns_argv "$(systemd_version)"; fi
+  slirp_who "$own"
+  # The run's variables (RUN_ENV), in a file of root's only: never on systemd-run's argv nor in the unit's
+  # Environment= (the INVARIANT above). Only the run's own processes get them. Without the wrapper, systemd reads the
+  # file (EnvironmentFile=), as before #545. With it, the unit gets none of them: the file is the unit's stdin, each
+  # NAME=value ended by a NUL, and a loader after setpriv (USERNS_LOAD) exports them and runs the command with /dev/null
+  # as its stdin. WHY (round 4): the wrapper, sh and setpriv hold capabilities in the run's new namespaces, under the
+  # wrapper's AppArmor label, and no variable of the run's (GCONV_PATH, LOCPATH, MALLOC_*, LIBMOUNT_* and the like,
+  # which steer glibc and libmount) may reach a step that holds any.
+  local stdin_file=/dev/null
   if [ "${#RUN_ENV[@]}" -gt 0 ]; then
     if [ -L "$ENV_DIR" ]; then die "$ENV_DIR is a symlink"; fi
     [ -d "$ENV_DIR" ] || mkdir -m 0700 -- "$ENV_DIR" 2>/dev/null || [ -d "$ENV_DIR" ] || die "can't make $ENV_DIR"
     p="$(stat -c '%U %a' -- "$ENV_DIR")"; [ "$p" = "$(id -un) 700" ] || die "$ENV_DIR is $p, not $(id -un)'s and 0700"
     # Dots: no name or id has one, so wipe's "<name>.<id>.*" is this run's alone.
     ENV_FILE="$ENV_DIR/$name.$id.$$"
-    ( umask 077; set -C; for kv in "${RUN_ENV[@]}"; do printf '%s=%s\n' "${kv%%=*}" "$(env_quote "${kv#*=}")"; done > "$ENV_FILE" ) || die "can't write $ENV_FILE"
-    envfile=(-p "EnvironmentFile=$ENV_FILE")
+    if [ "$own" -eq 1 ]; then
+      ( umask 077; set -C; for kv in "${RUN_ENV[@]}"; do printf '%s\0' "$kv"; done > "$ENV_FILE" ) || die "can't write $ENV_FILE"
+      stdin_file="$ENV_FILE"
+    else
+      ( umask 077; set -C; for kv in "${RUN_ENV[@]}"; do printf '%s=%s\n' "${kv%%=*}" "$(env_quote "${kv#*=}")"; done > "$ENV_FILE" ) || die "can't write $ENV_FILE"
+      envfile=(-p "EnvironmentFile=$ENV_FILE")
+    fi
   fi
+  local -a load=()
+  [ "$own" -eq 0 ] || load=("${USERNS_LOAD[@]}")
   # The unit's own name carries the run id (run_unit), so wipe finds (and stops) whatever is left of it. Not --quiet: at the end
   # systemd-run reports the unit's CPU time and peak memory, which the coordinator records per tier. Those lines (and
   # its "Running as unit" line first) are on stderr, which under --pipe is the run's own stderr too: a reader takes
@@ -1138,18 +1394,18 @@ exec_run() {
     -p "ReadWritePaths=-$root/cache -$root/shared" -p "InaccessiblePaths=$inaccessible"
     --setenv=HOME="$d/home" --setenv=TMPDIR="$t" --setenv=TMP="$t" --setenv=TEMP="$t" --setenv=PATH=/usr/local/bin:/usr/bin:/bin
     --setenv=LANG=C.UTF-8 --setenv=CI=1 --setenv=USER="$user" --setenv=LOGNAME="$user"
-    /bin/bash -o pipefail -c "$cmd")
+    ${USERNS_ARGV[@]+"${USERNS_ARGV[@]}"} ${load[@]+"${load[@]}"} /bin/bash -o pipefail -c "$cmd")
   if [ "${#gpuprops[@]}" -eq 0 ] && [ "$granted" -eq 0 ]; then
-    "${run[@]}" || rc=$?
+    "${run[@]}" < "$stdin_file" || rc=$?
   else
     # WHY: the GPU's lock must never be let go while the unit runs. bash runs a trap only once a foreground child
     # ends, so systemd-run goes in the background and is waited for: a TERM (sudo passes the coordinator's on) stops
     # the unit first, and the locks go with this helper after it. systemd-run keeps the lock fds open too. A granted
     # run's network is started once its unit has a main process (slirp_start), so it goes in the background too.
     trap 'systemctl kill --signal=KILL "$unit.service" 2>/dev/null || true; systemctl stop "$unit.service" 2>/dev/null || true; exit 143' TERM INT HUP
-    "${run[@]}" &
+    "${run[@]}" < "$stdin_file" &
     pid=$!
-    if [ "$granted" -eq 1 ]; then slirp_start "$unit" "$pid" "$id" || echo "worklane-testrun: the run's network could not be started" >&2; fi
+    if [ "$granted" -eq 1 ]; then slirp_start "$unit" "$pid" "$id" "$own" || echo "worklane-testrun: the run's network could not be started" >&2; fi
     wait "$pid" || rc=$?
     trap - TERM INT HUP
   fi
@@ -1174,7 +1430,7 @@ valid_requirements() {
 # hands npm or pip, or plant a config in its HOME (pip runs a pip.conf's `python = <path>`). Nothing outside this unit
 # sees its /tmp. It reads the workspace (its first argument) and writes only there and the cache.
 fetch_cmd() {
-  local id="${1:-}" eco="${2:-}" c="${3:-}" key="${4:-}" timeout="${5:-}" d dir cmd flag inaccessible p unit pid rc=0 script envvar f
+  local id="${1:-}" eco="${2:-}" c="${3:-}" key="${4:-}" timeout="${5:-}" d dir cmd flag inaccessible p unit pid rc=0 script envvar f own=0
   local -a noexpand=() files=()
   local usage="usage: fetch <id> npm <cache> <key> <timeout_s>, or fetch <id> pip <cache> <key> <timeout_s> <requirements file>..."
   [ "$#" -ge 5 ] || die "$usage"
@@ -1201,6 +1457,10 @@ fetch_cmd() {
   trap 'if [ -n "$RESOLV_FILE" ]; then rm -f -- "$RESOLV_FILE" "$SLIRP_RESOLV"; fi' EXIT
   net_props 1
   unit="$(run_unit "$id" "fetch_$$")"
+  # Its own user and network namespace, and its slirp4netns's user, as a run's (exec_run).
+  USERNS_ARGV=()
+  if userns_ok; then own=1; userns_argv "$(systemd_version)"; fi
+  slirp_who "$own"
   echo "worklane-testrun: fetch $eco (no script run; public addresses and the machine's DNS only)" >&2
   trap 'systemctl kill --signal=KILL "$unit.service" 2>/dev/null || true; systemctl stop "$unit.service" 2>/dev/null || true; exit 143' TERM INT HUP
   systemd-run --wait --pipe --collect ${noexpand[@]+"${noexpand[@]}"} --unit="$unit" --slice="$SLICE" --uid="$user" --gid="$user" \
@@ -1212,9 +1472,9 @@ fetch_cmd() {
     -p TemporaryFileSystem="$TMP_BASE:ro" -p "InaccessiblePaths=$inaccessible" \
     --setenv=HOME=/tmp/home --setenv=TMPDIR=/tmp --setenv=PATH=/usr/local/bin:/usr/bin:/bin --setenv=LANG=C.UTF-8 --setenv=CI=1 \
     --setenv=USER="$user" --setenv=LOGNAME="$user" --setenv="$envvar=$dir" \
-    /bin/bash -o pipefail -c "$cmd" fetch "$d/work" ${files[@]+"${files[@]}"} < /dev/null &
+    ${USERNS_ARGV[@]+"${USERNS_ARGV[@]}"} /bin/bash -o pipefail -c "$cmd" fetch "$d/work" ${files[@]+"${files[@]}"} < /dev/null &
   pid=$!
-  slirp_start "$unit" "$pid" "$id" || echo "worklane-testrun: the fetch's network could not be started" >&2
+  slirp_start "$unit" "$pid" "$id" "$own" || echo "worklane-testrun: the fetch's network could not be started" >&2
   wait "$pid" || rc=$?
   trap - TERM INT HUP
   return "$rc"
@@ -1307,13 +1567,26 @@ check() {
   rm -f "$bundle"
   # The run also reads its commit through the object store, and can't write the store (its objects or its refs).
   # No ${...} in the command: systemd-run expands those itself (as ExecStart= does) before bash sees them.
-  out="$(exec_run "$id" 60 -- 'n=0; while IFS= read -r p; do [ -e "$p" ] || continue; if [ -r "$p" ] || [ -w "$p" ] || { [ -d "$p" ] && [ -x "$p" ]; }; then echo "open $p"; n=1; fi; done; s="$(dirname "$(cat .git/objects/info/alternates)")"; [ "$s" = "'"$store"'" ] || { echo "not the store: $s"; n=1; }; git cat-file -e HEAD:probe.txt || { echo "store unread: $s"; n=1; }; for w in "$s/objects/probe-write" "$s/refs/keep/probe-write" "$s/probe-write"; do if ( : > "$w" ) 2>/dev/null; then echo "open $w (written)"; rm -f "$w"; n=1; fi; done; [ "$TMPDIR" = "'"$(run_tmp "$id")"'" ] && [ "$TMP" = "$TMPDIR" ] && [ "$TEMP" = "$TMPDIR" ] && ( : > "$TMPDIR/probe" ) || { echo "TMPDIR unusable: $TMPDIR"; n=1; }; echo probed; exit $n' <<<"$(protected_paths)" 2>"$err")" || rc=$?
+  out="$(exec_run "$id" 60 -- 'n=0; while IFS= read -r p; do [ -e "$p" ] || continue; if [ -r "$p" ] || [ -w "$p" ] || { [ -d "$p" ] && [ -x "$p" ]; }; then echo "open $p"; n=1; fi; done; s="$(dirname "$(cat .git/objects/info/alternates)")"; [ "$s" = "'"$store"'" ] || { echo "not the store: $s"; n=1; }; git cat-file -e HEAD:probe.txt || { echo "store unread: $s"; n=1; }; for w in "$s/objects/probe-write" "$s/refs/keep/probe-write" "$s/probe-write"; do if ( : > "$w" ) 2>/dev/null; then echo "open $w (written)"; rm -f "$w"; n=1; fi; done; [ "$TMPDIR" = "'"$(run_tmp "$id")"'" ] && [ "$TMP" = "$TMPDIR" ] && [ "$TEMP" = "$TMPDIR" ] && ( : > "$TMPDIR/probe" ) || { echo "TMPDIR unusable: $TMPDIR"; n=1; }; printf "uid_map %s %s %s\n" $(cat /proc/self/uid_map); echo probed; exit $n' <<<"$(protected_paths)" 2>"$err")" || rc=$?
   wipe "$id" >/dev/null || { echo "FAIL the probe run was not wiped"; fail=1; }
   # The probe's commit is no tip worth keeping: its ref goes (its objects go with git's gc).
   (cd / && runuser -u "$user" -- env -i PATH=/usr/local/bin:/usr/bin:/bin HOME=/nonexistent GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git --git-dir="$store" update-ref -d "refs/keep/$sha") || true
   if probe_passed "$rc" "$out"; then echo "PASS a sandboxed run reaches none of them, and reads the object store without writing it"
   else echo "FAIL in the sandbox (exit $rc): ${out:-the probe printed nothing}"; sed 's/^/  stderr: /' "$err"; fail=1; fi
   rm -f "$err"
+  # Its own user namespace (#545): only the test user's uid mapped, to itself. Without the wrapper a note, never a FAIL:
+  # a helper the updater put in place before test-user.sh install ran again runs as before #545, and must keep working.
+  # On a machine that can't have the wrapper, a second note, userns-unsupported: the engine reads that one line
+  # (src/testrun/host.ts) and shows it in red on doctor and the Machine page, and nothing that turns test runs off reads it.
+  if userns_ok; then
+    p="$(id -u "$user")"
+    if grep -qx "uid_map $p $p 1" <<<"$out"; then echo "PASS a sandboxed run is in a user namespace of its own (only $user's uid mapped, to itself)"
+    else echo "FAIL a sandboxed run isn't in a user namespace of its own: $(grep '^uid_map ' <<<"$out" || echo "no uid_map line")"; fail=1; fi
+  else
+    echo "NOTE a sandboxed run shares the host's user namespace ($USERNS_WHY), so it can join the namespaces of $user's rootless Docker (docs/test-runs.md, \"Known gap\")"
+    p="$(userns_unsupported)"
+    [ -z "$p" ] || echo "NOTE userns-unsupported: this machine's unshare can't be the test runs' wrapper ($p): install util-linux 2.38 or later and setpriv, then run scripts/setup/test-user.sh install $name again"
+  fi
   [ "$fail" -eq 0 ] && echo "OK" || echo "FAILED"
   return "$fail"
 }

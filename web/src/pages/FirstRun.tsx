@@ -15,6 +15,7 @@ import { DiskFloorCheck, HoldStrip } from '../components/HoldBanner';
 import { PolicyForm } from '../components/PolicyForm';
 import { RepoConfigForm } from '../components/RepoConfigForm';
 import { StarterCi } from '../components/StarterCi';
+import { FirstTaskCard } from '../components/FirstTaskProgress';
 import { SetupAutoConfig, SetupOrigin } from '../components/SetupConfig';
 import { ConfigPrList } from '../components/ConfigPr';
 import { FirstTaskForm } from '../components/FirstTask';
@@ -355,6 +356,17 @@ export function WithoutThisPage({ command, className, open = false }: { command:
  */
 export const nextStep = (f: Pick<FirstRun, 'setup'>): SetupStepView | null => f.setup?.groups.flatMap((g) => g.steps).find((s) => !s.optional && !s.done && !s.skipped) ?? null;
 
+/**
+ * WHY (#741): the required steps not done that come before Start, in screen order: what Start's card warns the
+ * coordinator may stop at. A step after Start (Your first task: Start leads to it) is not one. With no Start step
+ * (none in this mode), every required step not done counts, as before.
+ */
+export const startBlockers = (f: Pick<FirstRun, 'setup'>): SetupStepView[] => {
+  const steps = f.setup?.groups.flatMap((g) => g.steps) ?? [];
+  const at = steps.findIndex((s) => s.fix.kind === 'start');
+  return (at < 0 ? steps : steps.slice(0, at)).filter((s) => !s.optional && !s.done && s.fix.kind !== 'start');
+};
+
 /** Where the page keeps which steps are open, in this tab only (#468): a reload in the same tab keeps them. */
 export const OPEN_STEPS_KEY = 'first-run-open';
 function readOpenSteps(): string[] {
@@ -642,7 +654,9 @@ export function FirstRunView({ f, onRecheck, checking = false, initialOpen = nul
           Your first task: open an issue on GitHub with a ```done_when block and the ready label. There is no form for it on a server: an issue filed from this page would be the App's, which the coordinator doesn't count as a writer's.
         </p>
       )}
-      <StartCard start={f.start} canStart={f.canStart} blocked={setup?.groups.flatMap((g) => g.steps).filter((s) => !s.optional && !s.done && s.fix.kind !== 'start').length ?? 0} confirming={confirming} setConfirming={setConfirming} onStarted={() => onRecheck?.()} primary={next?.fix.kind === 'start' && startPressable} />
+      <StartCard start={f.start} canStart={f.canStart} blocked={startBlockers(f).length} confirming={confirming} setConfirming={setConfirming} onStarted={() => onRecheck?.()} primary={next?.fix.kind === 'start' && startPressable} />
+      {/* #741: the filed first task, followed to its PR. */}
+      {f.firstTask && <FirstTaskCard t={f.firstTask} />}
       {f.autoConfig && !f.setupMode && <AutoConfigView a={f.autoConfig} settled={!!f.setup?.groups.flatMap((g) => g.steps).find((s) => s.id === 'config-on-main')?.done || !!f.configPrs?.some((p) => p.number === f.autoConfig?.pr?.number && p.state === 'merged')} />}
       {!f.recorded && (
         <Card className="space-y-2 p-4" data-testid="first-run-none">

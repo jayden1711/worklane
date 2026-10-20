@@ -7,7 +7,7 @@ import { protectedCategories } from '../delegation.js';
 import type { EventPayload } from '../events/types.js';
 import { GARDENER_LABEL, GARDENER_LOG_LABEL, GARDENER_SCHEMA, gardenerBrief, gardenerDue, gardenerLogMarker, gardenerSignals, logEntry, patternHistory, readFindings, toFile, type Finding } from '../gardener.js';
 import { waitCategoriesOf } from '../merge-policy.js';
-import { computeLevel, loadMoneyPaths } from '../review.js';
+import { computeLevel } from '../review.js';
 import { rolePrompt } from '../roles.js';
 import { Delegation } from './delegation.js';
 import { DEFAULT_REVIEW, lockScopeOf } from './shared.js';
@@ -37,7 +37,7 @@ export abstract class Gardener extends Delegation {
   protected protectedPath(): (path: string) => boolean {
     const review: ReviewConfig = this.d.cfg.review ?? DEFAULT_REVIEW;
     const never = new Set([...protectedCategories(review), ...waitCategoriesOf(review)]);
-    const money = loadMoneyPaths(this.d.repo, review.money_path_source);
+    const money = this.moneyPaths(review.money_path_source);
     const scope = lockScopeOf(this.d);
     return (path) => Object.keys(computeLevel({ files: [{ path, added: 0, removed: 0 }], labels: [], moneyPaths: money, scope }, review).categories).some((c) => never.has(c));
   }

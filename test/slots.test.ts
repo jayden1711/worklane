@@ -1,12 +1,36 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { machineCap, slotStatus, tryAgentSlot } from '../src/slots.js';
-import { slotsConfigPath, slotsDir as machineSlotsDir } from '../src/os/index.js';
+import { slotsConfigPath, slotsDirFor as machineSlotsDir } from '../src/os/index.js';
+import { devSlotsPath } from '../src/os/system-paths.js';
+import { readSlotFile, slotFile, type SlotPath, type SlotPathLike } from '../src/slot-file.js';
+
+/**
+ * Whether slot path `p` names the file `file`: a random text written to `file` with plain fs is read back through
+ * `p`, read-only (then removed). Nothing is written through `p`: if it pointed elsewhere, nothing lands there (rule A,
+ * #806 round 7). A slot path has no identity or text to compare (#806 round 6).
+ */
+function namesFile(p: SlotPathLike, file: string): boolean {
+  const text = `names ${randomBytes(6).toString('hex')}`;
+  mkdirSync(dirname(file), { recursive: true });
+  writeFileSync(file, text);
+  try {
+    return readSlotFile(p) === text;
+  } catch {
+    return false;
+  } finally {
+    rmSync(file, { force: true });
+  }
+}
+
+/** Whether slot path `p` names the directory `dir`. */
+const names = (p: SlotPath, dir: string): boolean => namesFile(slotFile(p, `.names-${process.pid}`), join(dir, `.names-${process.pid}`));
 import { repoRoot } from './helpers.js';
 import { onRealMachine } from './isolate.js';
 
@@ -62,17 +86,25 @@ test('slot locations: durable system paths when present, env overrides, the old 
   delete process.env.AGENT_SLOTS_CONFIG;
   try {
     // The machine's /var/tmp, inside the test's own root (test/isolate.ts): a test never uses the real one.
-    assert.equal(onRealMachine(machineSlotsDir(system)), '/var/tmp/agent-slots', 'no system dir: the development default');
+    // A slot path (#772) has no identity or text to compare: a marker made in the expected dir is read through it (`names`).
+    assert.equal(onRealMachine(devSlotsPath()), '/var/tmp/agent-slots');
+    assert.ok(names(machineSlotsDir(system), devSlotsPath()), 'no system dir: the development default');
     mkdirSync(system.dir, { recursive: true });
-    assert.equal(machineSlotsDir(system), system.dir, 'the durable dir when it exists');
+    assert.ok(names(machineSlotsDir(system), system.dir), 'the durable dir when it exists');
     assert.equal(slotsConfigPath(system.dir, system), join(system.dir, 'config.json'), 'no system config yet');
+    assert.ok(namesFile(slotsConfigPath(machineSlotsDir(system), system), join(system.dir, 'config.json')), 'no system config yet (a slot path)');
     mkdirSync(join(root, 'etc'));
     writeFileSync(system.config, JSON.stringify({ max_agents: 6 }));
     assert.equal(slotsConfigPath(system.dir, system), system.config);
+    // A test's own `system` never marks a slot path as the system dir (#806 round 3: no caller's path is compared with
+    // the slot dir), so the slot-path form keeps the dir's own config; the machine's SYSTEM_SLOTS does mark one
+    // (test/slot-path.test.ts, "the machine's own system slot dir").
+    assert.ok(namesFile(slotsConfigPath(machineSlotsDir(system), system), join(system.dir, 'config.json')), 'a slot path from a test system is no system dir');
     assert.equal(slotsConfigPath('/some/other/dir', system), '/some/other/dir/config.json', 'a custom slot dir keeps its own config');
-    process.env.AGENT_SLOTS_DIR = '/custom/slots';
+    // Inside the test machine: in a test run, a slot directory outside it is refused (#669).
+    process.env.AGENT_SLOTS_DIR = join(root, 'custom-slots');
     process.env.AGENT_SLOTS_CONFIG = system.config;
-    assert.equal(machineSlotsDir(system), '/custom/slots');
+    assert.ok(names(machineSlotsDir(system), join(root, 'custom-slots')));
     const custom = mkdtempSync(join(tmpdir(), 'slots-'));
     assert.equal(machineCap(custom), 6, 'the configured file is read wherever it lives');
   } finally {

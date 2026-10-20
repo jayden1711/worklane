@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
@@ -29,6 +29,8 @@ const u = createRequire(import.meta.url)(updaterSrc) as {
   makeNote(o: { readState(): unknown; writeState(s: unknown): void; log(e: Record<string, unknown>): void; print(line: string): void }): (event: string, sha: string | null, reason: string) => string;
   realDeps(print?: (line: string) => void, files?: Record<string, string>): { note(event: string, sha: string | null, reason: string): string; checked(s: Record<string, unknown>): void };
   BUILD_SCRIPT: string;
+  verifyRelease(repoUrl: string, tag: string, signers: string, exec: (f: string, a: string[]) => string, gitDir?: string): { ok: true; base: string; object: string; commit: string } | { ok: false; reason: string };
+  verifiedUpdater(signers: string, tag: string, commit: string, exec: (f: string, a: string[]) => Buffer, gitDir?: string): { ok: true; commit: string; bytes: Buffer } | { ok: false; reason: string };
 };
 
 test('repo from a clone URL', () => {
@@ -79,10 +81,14 @@ test('a retired check (desktop, #744) an existing updates.json still requires: n
   assert.deepEqual(u.evaluateChecks([ok('test'), ok('desktop', { conclusion: 'failure' })], req), { ok: false, final: true, reason: 'required check "desktop" ended failure' });
   assert.deepEqual(u.evaluateChecks([ok('test'), ok('desktop', { conclusion: 'skipped' })], req), { ok: false, final: true, reason: 'required check "desktop" was skipped' }, 'it ran: skipped still refuses');
   assert.equal(u.evaluateChecks([ok('test'), ok('desktop', { status: 'in_progress', conclusion: null })], req).final, false, 'it is running: waited for');
+  // While CI still has the job, every commit gets a run, and it is judged exactly as before.
+  assert.deepEqual(u.evaluateChecks([ok('test'), ok('desktop')], req), { ok: true }, 'it ran green: installs as before');
+  assert.deepEqual(u.evaluateChecks([ok('test'), ok('desktop', { status: 'queued', conclusion: null })], req), { ok: false, final: false, reason: 'required check "desktop" is queued' }, 'it is queued: waited for');
   // The other required checks lose nothing.
   assert.match(u.evaluateChecks([ok('desktop')], req).reason!, /"test" hasn't run/);
   // Retired names alone are no gate: refused as an empty list is, never installed on nothing.
   assert.deepEqual(u.evaluateChecks([ok('test')], ['desktop']), { ok: false, final: true, reason: 'no required checks configured in updates.json but retired ones (desktop): add the checks to require at a root shell (updates.sh --add-check)' });
+  assert.deepEqual(u.evaluateChecks([ok('test'), ok('desktop', { conclusion: 'failure' })], ['desktop']), { ok: false, final: true, reason: 'required check "desktop" ended failure' }, 'retired names alone, and it ran: judged as before');
   assert.deepEqual(u.RETIRED_CHECKS, ['desktop'], 'a fixed list in the installed updater, never read from the commit it judges');
 });
 
@@ -570,4 +576,233 @@ test('acceptance: built as a DynamicUser and installed, the engine is readable b
     sudo(['userdel', user]);
     sudo(['rm', '-rf', src, opt, bin, `/var/lib/private/${state}`, `/var/lib/${state}`]);
   }
+});
+
+// #760: the updater replaces itself only after a healthy install from a release tag the run verified; never on main,
+// never on a rollback; a refusal is in the installed line and the journal. (syncSelf itself: test/updater-self.test.ts)
+test('run: the updater takes the release\'s updater only after a healthy install from a verified release tag, never on main or a rollback', async () => {
+  type Self = { state: string; reason?: string };
+  const onRelease = (selfResult: Self, verified: { ok: boolean; base?: string; object?: string; commit?: string; reason?: string } = { ok: true, base: 'c'.repeat(40), object: '3'.repeat(40), commit: NEW }) => {
+    const m = machine();
+    const self: string[][] = [];
+    const warned: string[] = [];
+    const base = m.deps.exec;
+    Object.assign(m.deps, {
+      config: () => ({ enabled: true, channel: 'release', allowed_signers: '/etc/worklane/allowed_signers', repo_url: 'https://github.com/example-org/engine.git', required_checks: ['test'] }),
+      installedVersion: () => '0.4.1',
+      verifyRelease: () => verified,
+      exec: (file: string, args: string[]) => (file === 'git' ? `${'3'.repeat(40)}\trefs/tags/v0.5.0\n${NEW}\trefs/tags/v0.5.0^{}\n` : base(file, args)),
+      selfUpdate: (signers: string, tag: string, sha: string) => (m.calls.push('selfUpdate'), self.push([signers, tag, sha]), selfResult),
+      warn: (line: string) => warned.push(line),
+    });
+    return { ...m, self, warned };
+  };
+  const ok = onRelease({ state: 'updated' });
+  assert.equal(await u.run(ok.deps), 'installed');
+  assert.deepEqual(ok.self, [['/etc/worklane/allowed_signers', 'v0.5.0', NEW]], 'the verified tag, the engine just installed');
+  const order = ok.calls.filter((c) => /^(switchTo|selfUpdate)/.test(c));
+  assert.deepEqual(order, ['switchTo bbbb', 'selfUpdate'], 'after the switch and the health check');
+  assert.deepEqual(ok.logs.find((l) => l.event === 'installed')!.updater, { state: 'updated' });
+  // A refused one leaves it as it is (syncSelf), and says why in the installed line and the journal.
+  const no = onRelease({ state: 'refused', reason: 'not newer' });
+  assert.equal(await u.run(no.deps), 'installed');
+  assert.deepEqual(no.logs.find((l) => l.event === 'installed')!.updater, { state: 'refused', reason: 'not newer' });
+  assert.deepEqual(no.warned, ["the updater wasn't replaced: not newer"]);
+  // A release whose services don't come up: rolled back, the updater never asked.
+  const bad = onRelease({ state: 'updated' });
+  bad.states[NEW] = ['failed'];
+  assert.equal(await u.run(bad.deps), 'rolled_back');
+  assert.deepEqual(bad.self, []);
+  // An unverified tag: refused before anything is built, the updater never asked.
+  const unsigned = onRelease({ state: 'updated' }, { ok: false, reason: "v0.5.0's signature doesn't verify" });
+  assert.equal(await u.run(unsigned.deps), 'refused');
+  assert.deepEqual(unsigned.self, []);
+  // Main has no signature to check: never.
+  const main = machine({ selfUpdate: () => assert.fail('selfUpdate on the main channel') });
+  assert.equal(await u.run(main.deps), 'installed');
+  assert.equal(main.logs.find((l) => l.event === 'installed')!.updater, undefined);
+});
+
+// ---- #764: the release verified is the release built: its own name, one tag object, no replace refs ----
+// Real git and real ssh signatures (ssh-keygen) in temp dirs, as test/updater-self.test.ts does; the origin stands in
+// for GitHub, and run()'s ls-remote is the real one on it.
+
+const sshPosix = process.platform === 'win32' && 'ssh signing in POSIX shells';
+const git = (cwd: string, ...a: string[]) => execFileSync('git', a, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+const strExec = (f: string, a: string[]) => execFileSync(f, a, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+const bufExec = (f: string, a: string[]) => execFileSync(f, a, { stdio: ['ignore', 'pipe', 'pipe'] });
+const UPDATER_BODY = "// the release's updater\n";
+/** A fresh path for a root-owned verification clone (verifyRelease creates it). */
+const verifyClone = () => join(mkdtempSync(join(tmpdir(), 'rel764-verify-')), 'v.git');
+/** Into the verification clone: the origin's `ref` under the same name, for a test to plant or swap to. */
+const into = (gitDir: string, from: string, ref: string) => execFileSync('git', ['--git-dir', gitDir, 'fetch', '-q', from, `+${ref}:${ref}`], { stdio: 'ignore' });
+
+/** An origin with a main commit and release commits off it (dist/ only unless `extra`), tagged signed, by a stranger, or unsigned. */
+function signedOrigin() {
+  const dir = mkdtempSync(join(tmpdir(), 'rel764-origin-'));
+  const keys = mkdtempSync(join(tmpdir(), 'rel764-keys-'));
+  const key = join(keys, 'release');
+  spawnSync('ssh-keygen', ['-q', '-t', 'ed25519', '-N', '', '-C', 'release', '-f', key]);
+  // A real signature, by a key that isn't in allowed_signers.
+  const stranger = join(keys, 'stranger');
+  spawnSync('ssh-keygen', ['-q', '-t', 'ed25519', '-N', '', '-C', 'stranger', '-f', stranger]);
+  const signers = join(keys, 'allowed_signers');
+  writeFileSync(signers, `owner@example.com namespaces="git" ${readFileSync(`${key}.pub`, 'utf8').trim()}\n`);
+  git(dir, 'init', '-q', '-b', 'main');
+  for (const [k, v] of [['user.name', 'Owner'], ['user.email', 'owner@example.com'], ['commit.gpgsign', 'false'], ['tag.gpgsign', 'false'], ['gpg.format', 'ssh'], ['user.signingkey', key]]) git(dir, 'config', k!, v!);
+  mkdirSync(join(dir, 'scripts', 'machine'), { recursive: true });
+  writeFileSync(join(dir, 'scripts', 'machine', 'worklane-update.cjs'), UPDATER_BODY);
+  git(dir, 'add', '-A');
+  git(dir, 'commit', '-q', '-m', 'main');
+  const main = git(dir, 'rev-parse', 'HEAD');
+  /** A commit off main, untagged: dist/ only, or with README.md too (`extra`), or another updater (`updater`). */
+  const commit = (label: string, o: { extra?: boolean; updater?: string } = {}) => {
+    git(dir, 'checkout', '-q', '--detach', main);
+    mkdirSync(join(dir, 'dist'), { recursive: true });
+    writeFileSync(join(dir, 'dist', 'cli.js'), `// ${label}\n`);
+    if (o.extra) writeFileSync(join(dir, 'README.md'), `${label}\n`);
+    if (o.updater) writeFileSync(join(dir, 'scripts', 'machine', 'worklane-update.cjs'), o.updater);
+    git(dir, 'add', '-f', '-A');
+    git(dir, 'commit', '-q', '-m', label);
+    const c = git(dir, 'rev-parse', 'HEAD');
+    git(dir, 'checkout', '-q', '-f', 'main');
+    return c;
+  };
+  /** refs/tags/<name> (moved if it exists) at `at`: signed by the release key, by the stranger's key, or unsigned. Returns its tag object. */
+  const tag = (name: string, how: 'signed' | 'stranger' | 'unsigned', at: string) => {
+    git(dir, '-c', `user.signingkey=${how === 'stranger' ? stranger : key}`, 'tag', '-f', how === 'unsigned' ? '-a' : '-s', name, '-m', name, at);
+    return git(dir, 'rev-parse', `refs/tags/${name}`);
+  };
+  return { dir, signers, main, commit, tag };
+}
+
+/** run() on the release channel against the origin: the real ls-remote, then `between` (a push), then the real verifyRelease. */
+function releaseMachine(o: ReturnType<typeof signedOrigin>, installedVersion: string, between: () => void = () => {}) {
+  const m = machine();
+  const gitDir = verifyClone();
+  const base = m.deps.exec;
+  Object.assign(m.deps, {
+    config: () => ({ enabled: true, channel: 'release', allowed_signers: o.signers, repo_url: 'https://github.com/example-org/engine.git', required_checks: ['test'] }),
+    installedVersion: () => installedVersion,
+    exec: (file: string, args: string[]) => (file === 'git' ? strExec('git', ['ls-remote', '--tags', o.dir, 'refs/tags/v*']) : base(file, args)),
+    verifyRelease: (_url: string, tag: string, signers: string) => (between(), u.verifyRelease(o.dir, tag, signers, strExec, gitDir)),
+  });
+  return { ...m, gitDir, built: () => m.calls.some((c) => /^(systemd-run|installTree|switchTo)/.test(c)) };
+}
+
+test('#764: an old signed release tag pushed under a higher version\'s ref name is refused, the reason logged, and nothing is built', { skip: sshPosix }, async () => {
+  const o = signedOrigin();
+  const oldTag = o.tag('v0.4.0', 'signed', o.commit('Release v0.4.0'));
+  const current = o.commit('Release v0.5.0');
+  o.tag('v0.5.0', 'signed', current);
+  // Someone who can push tags puts v0.4.0's signed tag object at refs/tags/v0.9.9: its signature is the owner's.
+  git(o.dir, 'update-ref', 'refs/tags/v0.9.9', oldTag);
+  assert.deepEqual(u.verifyRelease(o.dir, 'v0.9.9', o.signers, strExec, verifyClone()), { ok: false, reason: "v0.9.9's signed tag object names itself v0.4.0: a signed tag counts only under its own name" });
+  const m = releaseMachine(o, '0.5.0');
+  assert.equal(await u.run(m.deps), 'refused');
+  assert.deepEqual(m.logs.map((l) => [l.event, l.reason]), [['refused', "v0.9.9's signed tag object names itself v0.4.0: a signed tag counts only under its own name"]]);
+  assert.equal(m.built(), false, 'nothing built or switched');
+  assert.equal(m.current(), OLD);
+  // Without the renamed ref, v0.5.0 is the newest and not newer than the installed one: never back to v0.4.0.
+  git(o.dir, 'update-ref', '-d', 'refs/tags/v0.9.9');
+  assert.equal(await u.run(releaseMachine(o, '0.5.0').deps), 'current');
+  // The control: a machine on v0.4.0 installs v0.5.0, the commit its signed tag object points at.
+  const up = releaseMachine(o, '0.4.0');
+  assert.equal(await u.run(up.deps), 'installed');
+  assert.equal(up.current(), current);
+});
+
+test('#764: the tag ref moved in the verification clone after verify-tag is refused: every check is on the one object it resolved to', { skip: sshPosix }, () => {
+  const o = signedOrigin();
+  const signed = o.commit('Release v0.6.0');
+  const good = o.tag('v0.6.0', 'signed', signed);
+  // Another release commit off main, dist/ only, tagged v0.6.0 by a key that isn't allowed: it would pass every check
+  // but the signature, so only a check made on the moved name could let it through.
+  const other = o.tag('v0.6.0', 'stranger', o.commit('other'));
+  git(o.dir, 'update-ref', 'refs/swap/other', other);
+  git(o.dir, 'update-ref', 'refs/tags/v0.6.0', good);
+  const gitDir = verifyClone();
+  // The control: unmoved, it verifies (read field by field, so an updater that reports less still gets this far).
+  const control = u.verifyRelease(o.dir, 'v0.6.0', o.signers, strExec, gitDir) as Record<string, unknown>;
+  assert.deepEqual([control.ok, control.base], [true, o.main], String(control.reason));
+  assert.deepEqual([control.object ?? good, control.commit ?? signed], [good, signed]);
+  into(gitDir, o.dir, 'refs/swap/other');
+  let swapped = false;
+  // A second writer in the clone: the ref moves the moment verify-tag has passed on the signed object.
+  const racing = (f: string, a: string[]) => {
+    const out = strExec(f, a);
+    if (!swapped && a.includes('verify-tag')) {
+      execFileSync('git', ['--git-dir', gitDir, 'update-ref', 'refs/tags/v0.6.0', other]);
+      swapped = true;
+    }
+    return out;
+  };
+  const r = u.verifyRelease(o.dir, 'v0.6.0', o.signers, racing, gitDir);
+  assert.equal(swapped, true, 'the ref moved after verify-tag');
+  assert.deepEqual(r, { ok: false, reason: `v0.6.0 moved while it was being verified (from ${good.slice(0, 7)} to ${other.slice(0, 7)})` });
+});
+
+test('#764: a tag moved on the origin between ls-remote and the fetch is refused: the commit ls-remote reported must be the one verified, and nothing is built', { skip: sshPosix }, async () => {
+  const o = signedOrigin();
+  // What ls-remote sees: an unsigned v0.6.0. Then, before the fetch, v0.6.0 is pushed again, signed, at another commit.
+  const unsigned = o.commit('Release v0.6.0, unsigned');
+  const seen = o.tag('v0.6.0', 'unsigned', unsigned);
+  const signed = o.commit('Release v0.6.0');
+  let pushed = '';
+  const m = releaseMachine(o, '0.5.0', () => void (pushed ||= o.tag('v0.6.0', 'signed', signed)));
+  assert.equal(await u.run(m.deps), 'refused');
+  assert.ok(pushed, 'the tag moved between ls-remote and the fetch');
+  assert.deepEqual(m.logs.map((l) => [l.event, l.to, l.reason]), [['refused', unsigned, `v0.6.0 moved between ls-remote and its verification: ls-remote said tag object ${seen.slice(0, 7)} at ${unsigned.slice(0, 7)}, the one verified is ${pushed.slice(0, 7)} at ${signed.slice(0, 7)}`]]);
+  assert.equal(m.built(), false, 'the unsigned commit ls-remote saw is never built');
+  assert.equal(m.current(), OLD);
+  // The control: with nothing moved, the same signed tag installs, built from the commit ls-remote and the check agree on.
+  const again = releaseMachine(o, '0.5.0');
+  assert.equal(await u.run(again.deps), 'installed');
+  assert.equal(again.current(), signed);
+});
+
+test('#764: a replace ref planted in the verification clone doesn\'t change the verdict: a release commit is checked by its own bytes', { skip: sshPosix }, () => {
+  const o = signedOrigin();
+  // A signed release whose commit changes more than dist/, with a replace ref standing a clean commit in for it.
+  const dirty = o.commit('Release v0.6.0', { extra: true });
+  o.tag('v0.6.0', 'signed', dirty);
+  const clean = o.commit('clean');
+  git(o.dir, 'update-ref', 'refs/swap/clean', clean);
+  const a = verifyClone();
+  assert.match((u.verifyRelease(o.dir, 'v0.6.0', o.signers, strExec, a) as { reason: string }).reason, /changes more than dist\/: README\.md/);
+  into(a, o.dir, 'refs/swap/clean');
+  execFileSync('git', ['--git-dir', a, 'update-ref', `refs/replace/${dirty}`, clean]);
+  assert.equal(execFileSync('git', ['--git-dir', a, 'diff', '--name-only', o.main, dirty], { encoding: 'utf8' }).trim(), 'dist/cli.js', 'the plant is live for a plain git read');
+  assert.deepEqual(u.verifyRelease(o.dir, 'v0.6.0', o.signers, strExec, a), { ok: false, reason: "v0.6.0's release commit changes more than dist/: README.md" });
+});
+
+test('#764: replace refs planted in the verification clone change neither the tag object and commit verified nor the updater read from it', { skip: sshPosix }, () => {
+  const o = signedOrigin();
+  // A good signed release, its tag object replaced by another signed v0.6.1 at another commit, and its commit by one
+  // with another updater: the object and commit verified are the real ones, and so is the updater read.
+  const real = o.commit('Release v0.6.1');
+  const realTag = o.tag('v0.6.1', 'signed', real);
+  const otherTag = o.tag('v0.6.1', 'signed', o.commit('Release v0.6.1, again'));
+  git(o.dir, 'update-ref', 'refs/swap/tag', otherTag);
+  git(o.dir, 'update-ref', 'refs/tags/v0.6.1', realTag);
+  const evil = o.commit('evil', { updater: '// not the release\'s updater\n' });
+  git(o.dir, 'update-ref', 'refs/swap/evil', evil);
+  const b = verifyClone();
+  const control = u.verifyRelease(o.dir, 'v0.6.1', o.signers, strExec, b) as Record<string, unknown>;
+  assert.deepEqual([control.ok, control.base], [true, o.main], `the control, before the plant: ${String(control.reason)}`);
+  const before = u.verifiedUpdater(o.signers, 'v0.6.1', real, bufExec, b);
+  assert.deepEqual(before.ok ? [before.commit, before.bytes.toString()] : before.reason, [real, UPDATER_BODY], 'the control, before the plant');
+  into(b, o.dir, 'refs/swap/tag');
+  into(b, o.dir, 'refs/swap/evil');
+  // The release commit replaced by one with another updater: the updater read is still the real commit's.
+  execFileSync('git', ['--git-dir', b, 'update-ref', `refs/replace/${real}`, evil]);
+  assert.notEqual(execFileSync('git', ['--git-dir', b, 'show', `${real}:scripts/machine/worklane-update.cjs`], { encoding: 'utf8' }), UPDATER_BODY, 'the plant is live for a plain git read');
+  const self = u.verifiedUpdater(o.signers, 'v0.6.1', real, bufExec, b);
+  assert.deepEqual(self.ok ? [self.commit, self.bytes.toString()] : self.reason, [real, UPDATER_BODY], 'the updater read is the real commit\'s');
+  // The tag object replaced too, by another signed v0.6.1 at another commit: the object and commit verified are the real ones.
+  execFileSync('git', ['--git-dir', b, 'update-ref', `refs/replace/${realTag}`, otherTag]);
+  assert.notEqual(execFileSync('git', ['--git-dir', b, 'rev-parse', `${realTag}^{commit}`], { encoding: 'utf8' }).trim(), real, 'the plant is live for a plain git read');
+  assert.deepEqual(u.verifyRelease(o.dir, 'v0.6.1', o.signers, strExec, b), { ok: true, base: o.main, object: realTag, commit: real }, 'the real tag object and commit');
+  const again = u.verifiedUpdater(o.signers, 'v0.6.1', real, bufExec, b);
+  assert.deepEqual(again.ok ? [again.commit, again.bytes.toString()] : again.reason, [real, UPDATER_BODY], 'and the updater, with both planted');
 });

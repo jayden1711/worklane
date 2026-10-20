@@ -673,7 +673,8 @@ test('guard, checksum: the build installs from the lockfile and only at exactly 
 
 test('guard: the updater verifies a release with git verify-tag against the signers file, and this change leaves that code alone', () => {
   const src = readFileSync(updaterSrc, 'utf8');
-  assert.match(src, /g\('-c', 'gpg\.format=ssh', '-c', `gpg\.ssh\.allowedSignersFile=\$\{signers\}`, 'verify-tag', tag\);/);
+  // #764: verify-tag checks the one tag object the ref resolved to (oid), never the name again.
+  assert.match(src, /g\('-c', 'gpg\.format=ssh', '-c', `gpg\.ssh\.allowedSignersFile=\$\{signers\}`, 'verify-tag', oid\);/);
   assert.match(src, /if \(!v\.ok\) return deps\.note\('refused', head, v\.reason, true\);/, 'a release that doesn\'t verify is refused, before its checks are even read');
   assert.match(src, /if \(!exists\(signers\)\) return \{ ok: false,/, 'no signers file: nothing verifies');
   // Nothing the screen runs is in the updater: it has no notion of the helper's commands, and the helper none of verifying.
@@ -798,7 +799,7 @@ function watched(m: ReturnType<typeof rootIn>, w: Watch, cfg: Record<string, unk
     resolveIncident: (...a: string[]) => resolved.push(a),
     installed: () => current,
     installedVersion: () => '0.4.1',
-    verifyRelease: (_url: string, tag: string) => (calls.push(`verify ${tag}`), { ok: true, base: 'c'.repeat(40) }),
+    verifyRelease: (_url: string, tag: string) => (calls.push(`verify ${tag}`), { ok: true, base: 'c'.repeat(40), object: '3'.repeat(40), commit: NEW }),
     exec: (file: string, args: string[]) => {
       calls.push([file, ...args].join(' ').slice(0, 40));
       if (file === 'git' && args.includes('--tags')) return `${'3'.repeat(40)}\trefs/tags/v0.5.0\n${NEW}\trefs/tags/v0.5.0^{}\n`;
@@ -901,7 +902,8 @@ test('the watch adds a refusal in front of the signature check and takes nothing
   const hold = src.indexOf("if (signersHeld) return deps.note('held'");
   const verify = src.indexOf('const v = deps.verifyRelease(cfg.repo_url, tag.tag, cfg.allowed_signers || ALLOWED_SIGNERS);');
   assert.ok(hold > 0 && verify > hold, 'the hold is checked before the release is verified, and the verify call is as it was');
-  assert.match(src, /g\('-c', 'gpg\.format=ssh', '-c', `gpg\.ssh\.allowedSignersFile=\$\{signers\}`, 'verify-tag', tag\);/);
+  // #764: verify-tag checks the one tag object the ref resolved to (oid), never the name again.
+  assert.match(src, /g\('-c', 'gpg\.format=ssh', '-c', `gpg\.ssh\.allowedSignersFile=\$\{signers\}`, 'verify-tag', oid\);/);
   assert.match(src, /if \(!v\.ok\) return deps\.note\('refused', head, v\.reason, true\);/);
   // WHY: the off branch also closes #367's stuck alert, so it is a block on main; the watch still comes first.
   assert.match(src, /^  watchSigners\(deps, cfg\);\n  if \(!cfg \|\| cfg\.enabled !== true\) (return 'disabled';|\{)$/m, 'watched before the on/off switch is read');
@@ -975,7 +977,7 @@ function heldMachine() {
       installed: () => current,
       installedVersion: () => '1.0.0',
       // Both channels see the held commit as their newest: main's tip, and the release tag v1.0.1's commit.
-      verifyRelease: () => ({ ok: true, base: 'c'.repeat(40) }),
+      verifyRelease: () => ({ ok: true, base: 'c'.repeat(40), object: '3'.repeat(40), commit: NEW }),
       exec: (file: string, args: string[]) => (file === 'git' && args.includes('--tags') ? `${'3'.repeat(40)}\trefs/tags/v1.0.1\n${NEW}\trefs/tags/v1.0.1^{}\n` : file === 'git' ? `${NEW}\trefs/heads/main\n` : file === 'systemctl' && args[0] === 'list-units' ? 'worklane-x.service loaded active running x\n' : file === 'systemctl' && args[0] === 'show' ? 'ActiveState=active\nSubState=running\nNRestarts=0\nResult=success\n' : ''),
       fetchJson: async (url: string) => (url.includes('/compare/') ? { status: 'ahead', behind_by: 0, ahead_by: 1, total_commits: 1, commits: [{ sha: NEW, parents: [{ sha: current }], commit: { committer: { date: new Date(0).toISOString() } } }] } : { check_runs: [{ name: 'test', status: 'completed', conclusion: 'success', started_at: '1', id: 1 }] }),
       slots: () => [],

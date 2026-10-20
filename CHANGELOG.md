@@ -2,21 +2,6 @@
 
 Every release, newest first: the PRs merged since the previous one, and what changed in guardrails.
 
-## v0.5.3 (unreleased)
-
-### Upgrading (from v0.5.2)
-
-- **GitHub-sourced intake reports are worked from the draft intake checked (#643).** Two cases change on upgrade:
-  - An outsider's report filed `ready` on its own GitHub issue (the `<cli>:intake` label) by an older engine, and not started yet, has no checked draft kept, so it is now refused with a comment saying why. Removing `ready` doesn't bring it back to intake: its report stays in the seen ledger for 365 days. To have it worked, a writer opens a new issue with its contract.
-  - A writer-authored intake issue with no checked draft kept (filed by an older engine, or after the instance's state dir was wiped or moved) is worked from its body, as before this release. It doesn't get the draft's `- repro: true` unless the body has it.
-- Any issue with more than one ```` ```done_when ```` block is now refused rather than worked from the first one (#643). On upgrade, check open `ready` issues for a second block.
-- **The optional desktop window is removed (#744):** `desktop/` (the Tauri shell and its `Cargo.lock`), `npm run build:desktop`, its CI job and its `desktop` required check. Open the dashboard in your browser instead: the same page, sign-in and guards. `dashboard --app` now opens the browser, as it already did when the window wasn't built.
-- **The engine updater and the `desktop` check (#744).** Every install so far has `desktop` in `/etc/worklane/updates.json` `required_checks` (the old default list), and no commit from this release on runs it. The updater in this release stops waiting for it (see Guardrail changes), but an install still on v0.5.2 or older judges commits with its own, older updater, which waits for `desktop` on every newer commit and so installs nothing. On each such machine, drop the name once at a root shell before updating: `sudo cp -p /etc/worklane/updates.json /etc/worklane/updates.json.bak && sudo jq '.required_checks -= ["desktop"]' /etc/worklane/updates.json.bak | sudo tee /etc/worklane/updates.json > /dev/null` (or remove the `"desktop"` line by hand). Until then it stays on its installed engine; nothing else changes. The updater's log shows why: `required check "desktop" hasn't run on this commit`.
-
-### Guardrail changes
-
-- **The engine updater no longer waits for the retired `desktop` check (#744).** A required check named in the updater's own fixed list (`RETIRED_CHECKS` in `scripts/machine/worklane-update.cjs`: `desktop` only) that has no run on a commit is dropped from that commit's required list; one that ran is judged as before. A list of retired names alone is refused, as an empty list is. The window it tested was never built or installed by the updater.
-
 ## v0.5.2 (2026-10-17)
 
 ### Highlights
@@ -24,6 +9,8 @@ Every release, newest first: the PRs merged since the previous one, and what cha
 The GPU device nodes stay `root:worklane-gpu-dev 0660` after a reboot (#575). On Ubuntu's NVIDIA driver (measured on 24.04, driver 595), a root process that starts NVML, such as `nvidia-smi` or the container toolkit's `nvidia-cdi-refresh.service` at boot, put `nvidia-uvm` and `nvidia-uvm-tools` back to `root:root 0666` and the `nvidia-caps` nodes to `root:root`, and a node made after udev's own fixer run kept the wrong owner. `gpu-devices.sh apply` now also writes a boot unit that runs the fixer after udev has settled, a drop-in that runs it after `nvidia-cdi-refresh.service` (and when that unit fails), and a drop-in that gives `nvidia-persistenced` the device group, so it stops failing every boot. `check` fails when any of them is missing.
 
 `apply --users <you> --no-dynamic-nodes` is opt-in and **not for MIG GPUs**: it also sets `NVreg_ModifyDeviceFiles=0`, so NVML changes no node at all, and `/dev/nvidia-caps` stays empty (MIG's capability nodes aren't made).
+
+**Correction (2026-10-19, #583): "NVML changes no node at all" above is false.** Measured on a machine with v0.5.2 applied with `--no-dynamic-nodes` and rebooted (`check` passed): `sudo nvidia-smi -L` put `nvidia-uvm` and `nvidia-uvm-tools` back to `root:root 0666` with `ModifyDeviceFiles: 0` in effect. The trial the sentence rested on started with `nvidia-uvm` already at 0666, so NVML had nothing to change (inferred). All `--no-dynamic-nodes` does is leave `/dev/nvidia-caps` empty. After any root NVML call, with or without it, run `sudo /usr/local/libexec/worklane-gpu-devices`, then `sudo bash /opt/worklane/current/scripts/setup/gpu-devices.sh check` (v0.5.3's notes say the same).
 
 ### After install
 

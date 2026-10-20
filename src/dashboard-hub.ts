@@ -27,18 +27,13 @@ import { dirname, join } from 'node:path';
 import { DEFAULT_WEB_DIR, dashboardToken, json, serveStatic, tokenGiven, warmStatic } from './dashboard.js';
 import { refuseKeyInUrl } from './dashboard-key-url.js';
 import { compressStream, mayCompressApi, requestEncoding } from './dashboard-compress.js';
-import { assertLoopbackHost, authorizeUrl, breakGlassAllowed, clearSessionCookie, clearStateCookie, CSRF_HEADER, csrfFromProtocols, DEVICE_HEADER, isDeviceView, FRESH_HEADER, LOGIN_HEADER, loginFromCode, parseCookies, ROLE_CACHE_MS, SESSION_COOKIE, sessionCookie, Sessions, SignInStates, STATE_COOKIE, stateCookie, type Role, type SessionOf, type SignInConfig } from './dashboard-auth.js';
-import { attachTerminal } from './console/terminal-server.js';
-import { deviceRefusal, type DeviceOptions } from './console/terminal-devices.js';
-import { fileAudit, type AuditSink, type Exec, type SpawnPty } from './console/terminal.js';
-import { currentUser } from './os/index.js';
+import { assertLoopbackHost, authorizeUrl, breakGlassAllowed, clearSessionCookie, clearStateCookie, CSRF_HEADER, DEVICE_HEADER, isDeviceView, FRESH_HEADER, LOGIN_HEADER, loginFromCode, parseCookies, ROLE_CACHE_MS, SESSION_COOKIE, sessionCookie, Sessions, SignInStates, STATE_COOKIE, stateCookie, type Role, type SessionOf, type SignInConfig } from './dashboard-auth.js';
+import { deviceRefusal, parseDeviceList, type DeviceOptions } from './console/terminal-devices.js';
 import { handleManifestBreakGlass, handleManifestPublic, ManifestFlows } from './setup/app-manifest.js';
 import { isMachineOwner } from './machine-owners.js';
 import { Avatars, type AvatarOptions } from './avatars.js';
-import { startSiriGateway } from './siri/gateway.js';
 import { startHooksGateway } from './automations/webhook-gateway.js';
 import { HOOKS_GATEWAY_TOKEN_FILE } from './automations/webhook.js';
-import { SIRI_GATEWAY_TOKEN_FILE } from './siri/instance.js';
 
 export interface HubInstance {
   name: string;
@@ -62,15 +57,11 @@ export interface HubOptions {
   /** Sign-in with GitHub; without it, the hub's port refuses every API call and only the break-glass works. */
   signIn?: SignInConfig | null;
   /**
-   * The owner terminal (the setup console) reads who is asking on the hub's port through a SessionOf: the hub's
-   * own (`session` on what startHub returns) unless one is given here; it runs as consoleUser (console_user; none: it
-   * never opens). The rest is for tests.
+   * The machine devices: the Tailscale tags and node names a machine change from the page may come from
+   * (dashboards.sh --machine-devices, hubMachineDevices; none: every device is refused, and only the break-glass may
+   * change the machine). whois and peerUid identify the device (src/console/terminal-devices.ts); tests inject them.
    */
-  /**
-   * devices: the Tailscale tags and node names the terminal may be opened from (console_devices; none: it never
-   * opens); whois and peerUid identify the device (src/console/terminal-devices.ts) and are injected in tests.
-   */
-  terminal?: { consoleUser?: string | null; devices?: string[]; whois?: (ip: string) => string; peerUid?: (clientPort: number, serverPort: number) => number | null; session?: SessionOf; audit?: AuditSink; spawnPty?: SpawnPty; exec?: Exec; now?: () => number; idleMs?: number; hubUser?: string };
+  devices?: { allow?: string[]; whois?: (ip: string) => string; peerUid?: (clientPort: number, serverPort: number) => number | null };
   /**
    * GitHub Apps made through the manifest flow (src/setup/app-manifest.ts): who is a machine owner, and GitHub's
    * bases (a fake GitHub in tests; the sign-in's, else GitHub's, by default).
@@ -78,11 +69,6 @@ export interface HubOptions {
   appManifest?: { isMachineOwner?: (login: string) => boolean; api?: string; web?: string; fetch?: typeof fetch };
   /** People's pictures (src/avatars.ts): a stand-in for GitHub, in code, for tests. */
   avatars?: AvatarOptions;
-  /**
-   * The Siri gateway (src/siri/gateway.ts): its own loopback listener on `port` (tailscale serve publishes it on
-   * 8443), given each instance's Siri gateway token file only. Absent: no gateway. whois and peerUid: tests only.
-   */
-  siri?: { port: number; whois?: (ip: string) => string; peerUid?: (clientPort: number, serverPort: number) => number | null; lockout?: { fails: number; windowMs: number; forMs: number } };
   /**
    * The hooks gateway (src/automations/webhook-gateway.ts): its own loopback listener on `port` (tailscale serve
    * publishes it on 8444), given each instance's hooks gateway token file only; it holds no webhook secret. Absent: no
@@ -93,8 +79,8 @@ export interface HubOptions {
   now?: () => number;
   /**
    * WHY (#622): the clock the hub's copies of people's roles (and of whom each instance knows) age by, in ms; monotonic
-   * (performance.now) when unset, so a wall-clock step back (an NTP correction) can't keep a revoked role, the owner
-   * terminal's included, past ROLE_CACHE_MS, nor a step forward cut one short. Elapsed time only. Tests advance it.
+   * (performance.now) when unset, so a wall-clock step back (an NTP correction) can't keep a revoked role past
+   * ROLE_CACHE_MS, nor a step forward cut one short. Elapsed time only. Tests advance it.
    */
   clock?: () => number;
 }
@@ -110,6 +96,15 @@ const NAME = /^[a-z][a-z0-9-]{0,40}$/;
 
 /** `--hub -`: a hub with no instance yet (a machine's first project: dashboards.sh --no-instances). */
 export const NO_INSTANCES = '-';
+
+/**
+ * The machine devices from the hub's options (its unit's ExecStart): --machine-devices, else the --console-devices of
+ * a unit written before the owner terminal was removed (#742), which were the same allowlist. Never both merged: a
+ * unit has one or the other, and an older list is read as it was, with no device added.
+ */
+export function hubMachineDevices(option: (name: string) => string | undefined): string[] {
+  return parseDeviceList(option('--machine-devices') ?? option('--console-devices'));
+}
 
 /**
  * `a=/state/a,b=/state/b`: each instance's name and state dir (its token file is there). `-` alone: none yet, said
@@ -303,7 +298,7 @@ const listen = (server: Server, port: number, host: string) =>
     });
   });
 
-export async function startHub(opts: HubOptions): Promise<{ server: Server; breakGlass: Server; url: string; breakGlassUrl: string; keyFile: string; token: string; session: SessionOf; siriUrl: string | null; hooksUrl: string | null; close: () => Promise<void> }> {
+export async function startHub(opts: HubOptions): Promise<{ server: Server; breakGlass: Server; url: string; breakGlassUrl: string; keyFile: string; token: string; session: SessionOf; hooksUrl: string | null; close: () => Promise<void> }> {
   const host = opts.host ?? '127.0.0.1';
   assertLoopbackHost(host);
   const token = dashboardToken(opts.stateDir);
@@ -354,25 +349,22 @@ export async function startHub(opts: HubOptions): Promise<{ server: Server; brea
     return p.role;
   };
   const writeOk = (req: IncomingMessage, sid: string) => (req.headers.origin === undefined || req.headers.origin === origin) && sessions!.csrfOk(sid, req.headers[CSRF_HEADER]);
-  /** The terminal's upgrade: from this site, with the session's CSRF token offered as a subprotocol (a browser can't set the header). */
-  const upgradeOk = (req: IncomingMessage, sid: string) => req.headers.origin === origin && sessions!.csrfOk(sid, csrfFromProtocols(req));
 
   /**
-   * Who is asking on the hub's port, for the owner terminal: the signed-in person, their role on `instance` as
-   * that instance read it from its repo (null until the hub has asked, or once 5 minutes old: refused), and whether the
-   * request carries this session's CSRF token from this site: on the WebSocket upgrade, as a subprotocol.
+   * Who is asking on the hub's port: the signed-in person, their role on `instance` as that instance read it from its
+   * repo (null until the hub has asked, or once 5 minutes old: refused), and whether the request carries this
+   * session's CSRF token from this site.
    */
-  const hubSession: SessionOf = (req, instance) => {
+  const session: SessionOf = (req, instance) => {
     if (!sessions) return null;
     const sid = parseCookies(req.headers.cookie)[SESSION_COOKIE];
     const s = sid ? sessions.get(sid) : null;
     if (!s || !sid) return null;
-    return { login: s.login, role: byName.has(instance) ? (knownRole(instance, s.login)?.role ?? null) : null, csrfOk: req.headers.upgrade ? upgradeOk(req, sid) : writeOk(req, sid) };
+    return { login: s.login, role: byName.has(instance) ? (knownRole(instance, s.login)?.role ?? null) : null, csrfOk: writeOk(req, sid) };
   };
-  const session = opts.terminal?.session ?? hubSession;
-  const t = opts.terminal;
-  // The console's allowed devices, as Tailscale identifies them: the terminal needs one, and so does a machine change.
-  const devices: DeviceOptions = { allow: t?.devices ?? [], breakGlassPort: opts.breakGlassPort ?? HUB_BREAK_GLASS_PORT, ...(t?.whois ? { whois: t.whois } : {}), ...(t?.peerUid ? { peerUid: t.peerUid } : {}) };
+  const d = opts.devices;
+  // The machine devices, as Tailscale identifies them: a machine change from the page needs one.
+  const devices: DeviceOptions = { allow: d?.allow ?? [], breakGlassPort: opts.breakGlassPort ?? HUB_BREAK_GLASS_PORT, ...(d?.whois ? { whois: d.whois } : {}), ...(d?.peerUid ? { peerUid: d.peerUid } : {}) };
 
   /** The hub's port: sign-in, sessions, and the instances as the signed-in person sees them. Never the token. */
   const server = createServer(async (req, res) => {
@@ -440,7 +432,7 @@ export async function startHub(opts: HubOptions): Promise<{ server: Server; brea
         if (m) {
           const inst = byName.get(m[1]!);
           if (!inst || !(await roleOn(inst, session.login))) return json(res, 403, { error: `no access to instance ${m[1]}` });
-          // A write says whether it came from an allowed console device (asked of Tailscale only for writes, and for the
+          // A write says whether it came from one of the machine devices (asked of Tailscale only for writes, and for the
           // views that say before anything is submitted whether a change would pass: DEVICE_VIEWS).
           const deviceOk = (write || (req.method === 'GET' && isDeviceView(m[2]!))) && deviceRefusal(req, devices).why === null;
           return forward(inst, req, res, `/api/${m[2]!}`, url.searchParams, session.login, deviceOk);
@@ -490,49 +482,14 @@ export async function startHub(opts: HubOptions): Promise<{ server: Server; brea
     }
   });
 
-  // The owner terminal, on WebSocket upgrades to the sign-in port (src/console/terminal-server.ts); every attempt and command goes to the hub's audit log.
-  const detachTerminal = attachTerminal(server, {
-    config: { consoleUser: t?.consoleUser ?? null, hubUser: t?.hubUser ?? currentUser() },
-    instances: opts.instances.map((i) => i.name),
-    session,
-    audit: t?.audit ?? fileAudit(join(opts.stateDir, 'terminal-audit.jsonl')),
-    // Never served on the break-glass server (only this one), and refused there anyway if it ever were.
-    devices,
-    ...(t?.spawnPty ? { spawnPty: t.spawnPty } : {}),
-    ...(t?.exec ? { exec: t.exec } : {}),
-    ...(t?.now ? { now: t.now } : {}),
-    ...(t?.idleMs ? { idleMs: t.idleMs } : {}),
-  });
   const shown = host.includes(':') ? `[${host}]` : host;
   const port = await listen(server, opts.port ?? 0, host);
   let bgPort: number;
   try {
     bgPort = await listen(breakGlass, opts.breakGlassPort ?? 0, host);
   } catch (e) {
-    detachTerminal();
     server.close();
     throw e;
-  }
-  // The Siri gateway: built from each instance's Siri gateway token file only, never its dashboard token.
-  let siri: Awaited<ReturnType<typeof startSiriGateway>> | null = null;
-  if (opts.siri) {
-    try {
-      siri = await startSiriGateway({
-        instances: opts.instances.map((i) => ({ name: i.name, port: i.port, gatewayTokenFile: join(dirname(i.tokenFile), SIRI_GATEWAY_TOKEN_FILE) })),
-        port: opts.siri.port,
-        host,
-        auditFile: join(opts.stateDir, 'siri-audit.jsonl'),
-        ...(opts.siri.whois ? { whois: opts.siri.whois } : {}),
-        ...(opts.siri.peerUid ? { peerUid: opts.siri.peerUid } : {}),
-        ...(opts.siri.lockout ? { lockout: opts.siri.lockout } : {}),
-        now,
-      });
-    } catch (e) {
-      detachTerminal();
-      server.close();
-      breakGlass.close();
-      throw e;
-    }
   }
   // The hooks gateway: built from each instance's hooks gateway token file only; it holds no webhook secret.
   let hooks: Awaited<ReturnType<typeof startHooksGateway>> | null = null;
@@ -550,10 +507,8 @@ export async function startHub(opts: HubOptions): Promise<{ server: Server; brea
         now,
       });
     } catch (e) {
-      detachTerminal();
       server.close();
       breakGlass.close();
-      await siri?.close();
       throw e;
     }
   }
@@ -566,10 +521,8 @@ export async function startHub(opts: HubOptions): Promise<{ server: Server; brea
     keyFile: join(opts.stateDir, 'dashboard-token'),
     token,
     session,
-    siriUrl: siri?.url ?? null,
     hooksUrl: hooks?.url ?? null,
     close: () => {
-      detachTerminal();
       return Promise.all(
         [server, breakGlass].map(
           (s) =>
@@ -577,7 +530,7 @@ export async function startHub(opts: HubOptions): Promise<{ server: Server; brea
               s.closeAllConnections();
               s.close(() => r());
             }),
-        ).concat(siri ? [siri.close()] : [], hooks ? [hooks.close()] : []),
+        ).concat(hooks ? [hooks.close()] : []),
       ).then(() => undefined);
     },
   };

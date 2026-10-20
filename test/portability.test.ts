@@ -33,7 +33,7 @@ const basePath = (extra: string) => `${extra}:/usr/bin:/bin`;
 test('project commands run as the agent user with the PATH instance.yaml gives (a per-platform default), never one from tests.yaml', { skip: posix }, () => {
   assert.equal(defaultAgentPath('linux'), '/usr/local/bin:/usr/bin:/bin');
   assert.equal(defaultAgentPath('darwin'), '/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin');
-  const pathArg = (runAs: { user: string; home: string; path?: string }, env: Record<string, string> = {}) => projectCommand('npm test', runAs, env).args.filter((a) => a.startsWith('PATH='));
+  const pathArg = (runAs: { user: string; home: string; path?: string }, env: Record<string, string> = {}) => projectCommand('npm test', { ...runAs, hide: [] }, env).args.filter((a) => a.startsWith('PATH='));
   assert.deepEqual(pathArg({ user: 'wl-x-agent', home: '/var/agents/x', path: '/opt/tools/bin:/usr/bin:/bin' }), ['PATH=/opt/tools/bin:/usr/bin:/bin']);
   assert.deepEqual(pathArg({ user: 'wl-x-agent', home: '/var/agents/x' }), [`PATH=${defaultAgentPath()}`]);
   assert.deepEqual(pathArg({ user: 'wl-x-agent', home: '/var/agents/x', path: '/usr/bin:/bin' }, { PATH: '/tmp/evil' }), ['PATH=/usr/bin:/bin'], "the repo's PATH is refused");

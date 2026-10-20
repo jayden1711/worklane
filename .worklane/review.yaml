@@ -4,7 +4,8 @@ version: 1
 categories:
   # The engine itself, its setup scripts and templates, CI, dependencies and this
   # folder: always the owner's call (owner's choice: broad).
-  engine: [src/**, scripts/**, templates/**, .github/**, package.json, package-lock.json, .worklane/**]
+  # deploy/**: the engine's deployment manifests set its isolation and exposure (also locked in code, src/review.ts).
+  engine: [src/**, scripts/**, templates/**, desktop/**, deploy/**, .github/**, package.json, package-lock.json, .worklane/**]
   # Whose signed tag release.yml stages on npm, and the check that enforces it: the owner's alone. Also locked in
   # code (src/review.ts self-modification, "who may sign a release"), so dropping it here changes nothing.
   release-signing: [.github/release-signers, scripts/verify-release-tag*]
@@ -26,17 +27,24 @@ categories:
     - test/dco.test.ts
     - test/package-files.test.ts
     - test/managed-apps.test.ts
+    - test/merge-idempotent.test.ts
     # Listed here only, not locked in code: the tests' own machine (every test runs inside it), the check that engine
-    # code never writes a slot-directory file in place, and the tests that assert the agents' tool guard denies a call.
+    # code never writes a slot-directory file in place (and that a slot path reaches no other writer, #772), and the
+    # tests that assert the agents' tool guard denies a call.
     - test/isolate.ts
     - test/isolate.test.ts
     - test/slot-dir-writes.test.ts
+    - test/slot-path.test.ts
     - test/eval-roles.test.ts
     - test/research.test.ts
     - test/discord-chat.test.ts
     - test/experiments-coordinator.test.ts
     - test/intake-coordinator.test.ts
     - test/domain-runner.test.ts
+    # Listed here only, not locked in code (#815): the state dir's refusal in a test run, and the lint that a test
+    # checks each machine location it creates, writes or removes with onRealMachine first.
+    - test/state-dir-refusal.test.ts
+    - test/machine-path-writes.test.ts
     - .denylist*
     - .gitleaks*
     - .githooks/**

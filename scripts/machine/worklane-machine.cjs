@@ -15,40 +15,16 @@
 //
 // runs the installed engine's scripts/setup/add-project.sh as root with exactly those two arguments, once each is
 // checked here against its exact shape (an instance name; a GitHub owner/name), and only when the script and every
-// directory above it are root's and nobody else may write them. Its stdin (the agent's Claude token, which the
-// script asks for) and its output (one JSON line per step) pass straight through; the change log gets the name and
-// the repo, never what came on stdin.
+// directory above it are root's and nobody else may write them. Its output (one JSON line per step) passes straight
+// through; its stdin is never passed on (issue #711: a dashboard never takes a Claude credential, so the script's
+// claude-token step waits for root to install the login instead). The change log gets the name and the repo.
 //
 //   worklane-machine claude-account status
-//   worklane-machine claude-account switch
 //
-// run the installed engine's scripts/setup/claude-account.sh, under the same root-owned check. status runs it here
-// (`status --json`: each agent user's account and expiry, written to /var/lib/worklane/claude-account/status.json).
-// switch starts it as its own transient unit, worklane-claude-account.service, outside the asking coordinator's
-// cgroup, because the switch stops every coordinator, that one included; it takes the token from the asking
-// instance's dashboard (--token-from <the instance whose coordinator asked>: from SUDO_USER, never an argument). An
-// admin switches from a terminal with claude-account.sh itself.
-//
-//   worklane-machine claude-account profile-add <profile>
-//   worklane-machine claude-account use <profile>
-//   worklane-machine claude-account remove <profile>
-//   worklane-machine claude-account login <profile>
-//
-// the agents' Claude account profiles (issue #464; claude-account.sh's profile-add, use and remove), started the same
-// way as the switch, as worklane-claude-account.service (so one at a time, with the switch too): a real call per agent
-// user runs longer than the asking coordinator waits. Each is for the asking instance alone, which comes from sudo's
-// SUDO_USER and never from an argument: the helper takes no instance, and passes the script --for <that instance> (and
-// for profile-add --token-from <that instance>: its dashboard stored the token before it asked). Every instance, or
-// another one, is a root admin's, with claude-account.sh at a root shell. A profile added this way is staged: nothing
-// may use it until an admin confirms it on the machine (claude-account.sh confirm-profile, never through here).
-// login is the relayed sign-in (the owner's approved exception, docs/auth.md): `claude auth login` as the asking
-// instance's agent user; its link goes to a file that instance's coordinator user alone reads, and the one-time code
-// comes back through that user's 0400 file. Staged like any account added from a dashboard.
-//
-//   worklane-machine claude-account failover <profile+profile+...|off> back|stay
-//
-// the auto-failover setting for the asking instance alone (profiles.json only: no login is touched), run here like
-// status; its instance from SUDO_USER, as above. The machine-wide setting is a root admin's.
+// runs the installed engine's scripts/setup/claude-account.sh status, under the same root-owned check (`status
+// --json`: each agent user's account and expiry, written to /var/lib/worklane/claude-account/status.json). Nothing
+// here takes a Claude credential (issue #711). The account profile steps (use, remove) and the failover setting were
+// removed (#736): refused like any unknown command, nothing run or logged.
 //
 // The engine updater (scripts/setup/updates.sh, scripts/machine/worklane-update.cjs):
 //
@@ -128,7 +104,6 @@ const ETC = '/etc/worklane';
 const LOG = '/var/lib/worklane/machine-changes.jsonl';
 const ADD_PROJECT = '/opt/worklane/current/scripts/setup/add-project.sh';
 const CLAUDE_ACCOUNT = '/opt/worklane/current/scripts/setup/claude-account.sh';
-const CLAUDE_ACCOUNT_UNIT = 'worklane-claude-account';
 const UPDATES = '/opt/worklane/current/scripts/setup/updates.sh';
 const PENDING = '/var/lib/worklane/pending-signers.json'; // staged signers: trusted for nothing until an admin confirms one
 const PENDING_MAX = 4;
@@ -141,7 +116,7 @@ const ENGINE_CLI = '/opt/worklane/current/dist/src/cli.js';
 const PLUGINS_SH = '/opt/worklane/current/scripts/setup/plugins.sh';
 const PLUGIN_FETCH_UNIT = 'worklane-plugin-fetch';
 
-const USAGE = 'usage: worklane-machine set-slots <1..16> | set-updates on|off | set-test-slots <1..8> | add-project <name> <owner/repo> | claude-account status|switch | claude-account profile-add|remove <profile> | claude-account use|login <profile> | claude-account failover <order|off> back|stay | install-updater | set-update-channel release | stage-update-signer <principal> ssh-ed25519 <public key> | discard-update-signer <principal> ssh-ed25519 <public key> | tailscale install|up|serve|public-url | plugin-fetch <id> <https url> <sha> [<path>] | plugin-stage <id> sha256:<hex> <role+role> | plugin-withdraw <id> | plugin-remove <id> | mcp-fetch <id> <npm package> <x.y.z> | mcp-preview <id> <plugin> <server> | mcp-snapshot <id> | mcp-stage <id> sha256:<hex> <role+role> <host+host|none> <SECRET+SECRET|none>';
+const USAGE = 'usage: worklane-machine set-slots <1..16> | set-updates on|off | set-test-slots <1..8> | add-project <name> <owner/repo> | claude-account status | claude-account use|remove <profile> | claude-account failover <order|off> back|stay | install-updater | set-update-channel release | stage-update-signer <principal> ssh-ed25519 <public key> | discard-update-signer <principal> ssh-ed25519 <public key> | tailscale install|up|serve|public-url | plugin-fetch <id> <https url> <sha> [<path>] | plugin-stage <id> sha256:<hex> <role+role> | plugin-withdraw <id> | plugin-remove <id> | mcp-fetch <id> <npm package> <x.y.z> | mcp-preview <id> <plugin> <server> | mcp-snapshot <id> | mcp-stage <id> sha256:<hex> <role+role> <host+host|none> <SECRET+SECRET|none>';
 
 /**
  * Why a name can't be an instance's, or null: instance.sh's shape, never a name whose users, group or units are already
@@ -242,48 +217,24 @@ function rootScript(file) {
   return real;
 }
 
-/** The claude-account action a list asks for (status or switch), or null when it is anything else. */
+/**
+ * The claude-account action a list asks for (status), or null when it is anything else. Never switch: a switch takes
+ * a Claude credential, a root admin's at a root shell (issue #711).
+ */
 function parseClaudeAccount(args) {
-  return args.length === 2 && args[0] === 'claude-account' && (args[1] === 'status' || args[1] === 'switch') ? args[1] : null;
+  return args.length === 2 && args[0] === 'claude-account' && args[1] === 'status' ? args[1] : null;
 }
 
-/** A profile's name (claude-account.sh's check): default is the login each agent user had, never added or removed. */
-const profileName = (s) => typeof s === 'string' && /^[a-z][a-z0-9-]{0,20}$/.test(s);
 /**
- * The profile step a list asks for: profile-add|remove|use <profile>, for the asking instance alone; null for anything
- * else. No instance is ever taken from the arguments (a coordinator could name any): it comes from SUDO_USER.
+ * The account profile steps (claude-account use|remove <profile>) and the failover setting were removed (#736): no
+ * list is one, so each is refused like any unknown command. Both names stay only for the sudoers rule's patterns that
+ * still name them (dropped with that rule, #758) and the export list; neither ever returns a step.
  */
-function parseClaudeProfile(args) {
-  if (args[0] !== 'claude-account' || args.length !== 3 || !profileName(args[2])) return null;
-  const action = args[1];
-  if ((action === 'profile-add' || action === 'remove' || action === 'login') && args[2] !== 'default') return { action, profile: args[2] };
-  if (action === 'use') return { action, profile: args[2] };
+function parseClaudeProfile(_args) {
   return null;
 }
-
-/** The failover setting a list asks for: failover <order|off> back|stay, for the asking instance; null for anything else. */
-function parseClaudeFailover(args) {
-  if (args[0] !== 'claude-account' || args[1] !== 'failover' || args.length !== 4) return null;
-  const order = args[2];
-  if (order !== 'off' && !/^[a-z][a-z0-9-]{0,20}(\+[a-z][a-z0-9-]{0,20}){1,7}$/.test(order)) return null;
-  if (args[3] !== 'back' && args[3] !== 'stay') return null;
-  return { order, back: args[3] };
-}
-
-function claudeFailover(f) {
-  const real = rootScript(CLAUDE_ACCOUNT);
-  if (!real) return 1;
-  const instance = coordinatorInstance(process.env.SUDO_USER);
-  if (!instance) {
-    process.stderr.write('claude-account failover here is for a coordinator, through sudo; an admin runs scripts/setup/claude-account.sh failover\n');
-    return 2;
-  }
-  const env = { PATH: PATH_ENV, HOME: '/root', LANG: 'C.UTF-8' };
-  return runLogged('claude-account', `failover ${f.order} ${f.back} for ${instance}`, () => {
-    const r = spawnSync('bash', [real, 'failover', f.order, f.back, '--for', instance], { cwd: '/', env, stdio: 'inherit' });
-    if (r.error) throw r.error;
-    return r.status === null ? 1 : r.status;
-  });
+function parseClaudeFailover(_args) {
+  return null;
 }
 
 /** The instance whose coordinator user this is (wl-<name>), or null for anyone else. */
@@ -292,56 +243,16 @@ const coordinatorInstance = (user) => {
   return m && instanceName(m[1]) ? m[1] : null;
 };
 
-function claudeAccount(action) {
+/** claude-account.sh status, here: the only claude-account action (parseClaudeAccount takes no other). */
+function claudeAccount() {
   const real = rootScript(CLAUDE_ACCOUNT);
   if (!real) return 1;
   const env = { PATH: PATH_ENV, HOME: '/root', LANG: 'C.UTF-8' };
-  if (action === 'status') {
-    return runLogged('claude-account', 'status', () => {
-      const r = spawnSync('bash', [real, 'status', '--json'], { cwd: '/', env, stdio: 'inherit' });
-      if (r.error) throw r.error;
-      return r.status === null ? 1 : r.status;
-    });
-  }
-  // switch: for the asking coordinator's dashboard, in a unit of its own (it stops that coordinator too).
-  const instance = coordinatorInstance(process.env.SUDO_USER);
-  if (!instance) {
-    process.stderr.write('claude-account switch here is for a coordinator, through sudo; an admin runs scripts/setup/claude-account.sh switch\n');
-    return 2;
-  }
-  const r = spawnSync('systemd-run', ['--unit', CLAUDE_ACCOUNT_UNIT, '--collect', '--no-block', '--quiet', '--description', 'worklane Claude account switch', '--property', `Environment=PATH=${PATH_ENV} LANG=C.UTF-8`, '/bin/bash', real, 'switch', '--json', '--token-from', instance], { cwd: '/', env, encoding: 'utf8' });
-  if (r.error || r.status !== 0) {
-    const text = `${r.stderr || ''}${r.error ? r.error.message : ''}`.trim();
-    process.stderr.write(/already (exists|loaded|active)/i.test(text) ? 'a Claude account switch is already running (worklane-claude-account.service)\n' : `couldn't start the switch: ${text.split('\n')[0]}\n`);
-    logLine('claude-account', null, `failed: switch (token from ${instance}'s dashboard): not started`);
-    return 1;
-  }
-  logLine('claude-account', null, `switch (token from ${instance}'s dashboard)`);
-  process.stdout.write(`started the Claude account switch as ${CLAUDE_ACCOUNT_UNIT}.service; it waits for the token in ${instance}'s dashboard\n`);
-  return 0;
-}
-
-function claudeProfile(p) {
-  const real = rootScript(CLAUDE_ACCOUNT);
-  if (!real) return 1;
-  const instance = coordinatorInstance(process.env.SUDO_USER);
-  if (!instance) {
-    process.stderr.write(`claude-account ${p.action} here is for a coordinator, through sudo; an admin runs scripts/setup/claude-account.sh ${p.action}\n`);
-    return 2;
-  }
-  const what = `${p.action} ${p.profile} for ${instance} (asked from ${instance}'s dashboard)`;
-  // The instance is sudo's, never the caller's: the script also refuses any other one than --for names.
-  const args = [real, p.action, p.profile, ...(p.action === 'use' ? [instance] : []), '--json', p.action === 'profile-add' ? '--token-from' : '--for', instance];
-  const r = spawnSync('systemd-run', ['--unit', CLAUDE_ACCOUNT_UNIT, '--collect', '--no-block', '--quiet', '--description', 'worklane Claude account profile', '--property', `Environment=PATH=${PATH_ENV} LANG=C.UTF-8`, '/bin/bash', ...args], { cwd: '/', env: { PATH: PATH_ENV, HOME: '/root', LANG: 'C.UTF-8' }, encoding: 'utf8' });
-  if (r.error || r.status !== 0) {
-    const text = `${r.stderr || ''}${r.error ? r.error.message : ''}`.trim();
-    process.stderr.write(/already (exists|loaded|active)/i.test(text) ? 'a Claude account switch or profile change is already running (worklane-claude-account.service)\n' : `couldn't start ${p.action}: ${text.split('\n')[0]}\n`);
-    logLine('claude-account', null, `failed: ${what}: not started`);
-    return 1;
-  }
-  logLine('claude-account', null, what);
-  process.stdout.write(`started claude-account ${p.action} ${p.profile} as ${CLAUDE_ACCOUNT_UNIT}.service\n`);
-  return 0;
+  return runLogged('claude-account', 'status', () => {
+    const r = spawnSync('bash', [real, 'status', '--json'], { cwd: '/', env, stdio: 'inherit' });
+    if (r.error) throw r.error;
+    return r.status === null ? 1 : r.status;
+  });
 }
 
 // An ed25519 public key's encoding never varies: the key type's name, then 32 bytes, 51 bytes in all, 68 characters.
@@ -470,7 +381,8 @@ function addProject(p) {
   const real = rootScript(ADD_PROJECT);
   if (!real) return 1;
   return runLogged('add-project', `${p.name} ${p.repo}`, () => {
-    const r = spawnSync('bash', [real, p.name, p.repo], { cwd: '/', env: { PATH: PATH_ENV, HOME: '/root', LANG: 'C.UTF-8' }, stdio: 'inherit' });
+    // stdin is never passed on (issue #711): nothing a coordinator writes can reach the script as a Claude token.
+    const r = spawnSync('bash', [real, p.name, p.repo], { cwd: '/', env: { PATH: PATH_ENV, HOME: '/root', LANG: 'C.UTF-8' }, stdio: ['ignore', 'inherit', 'inherit'] });
     if (r.error) throw r.error;
     return r.status === null ? 1 : r.status;
   });
@@ -643,7 +555,7 @@ function plugin(p) {
 // the same checks as always, the helper starts itself again in a transient unit of its own (systemd-run, outside the
 // coordinator's cgroup and sandbox), with the same arguments, waits for it and passes its output and exit status back.
 // The started copy checks the arguments again before it does anything. A step that only reads, or only writes under
-// /var/lib, still runs here; the tailscale steps and the account switch already start units of their own.
+// /var/lib, still runs here; the tailscale steps already start units of their own.
 const IN_UNIT = '--in-unit'; // the copy started in its own unit: only root, which sudo's rule never lets a coordinator pass
 const UNIT_PREFIX = 'worklane-machine';
 
@@ -688,11 +600,7 @@ function main(argv) {
   const add = parseAddProject(args);
   if (add) return addProject(add);
   const account = parseClaudeAccount(args);
-  if (account) return claudeAccount(account);
-  const profile = parseClaudeProfile(args);
-  if (profile) return claudeProfile(profile);
-  const failover = parseClaudeFailover(args);
-  if (failover) return claudeFailover(failover);
+  if (account) return claudeAccount();
   if (args.length === 1 && args[0] === 'install-updater') return installUpdater();
   const stage = parseSigner('stage-update-signer', args);
   if (stage) return stageSigner(stage);

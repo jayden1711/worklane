@@ -291,8 +291,13 @@ test('the sign-in App: no permissions, the hub\'s callback URL, its client secre
     assert.equal((await s.open((await s.waitAsk(1)).url)).status, 403);
     assert.equal((await agent).ok, false);
 
+    // The running hub's unit, with its Siri and hooks gateways and a device (this test's uid stands for root).
+    const hubUnitFile = join(mkdtempSync(join(tmpdir(), 'amf-unit-')), `${BRAND.cli}-dashboard-hub.service`);
+    writeFileSync(hubUnitFile, `[Service]\nExecStart=/usr/local/bin/${BRAND.cli} dashboard --hub alpha=/s --service --client-id Iv1.oldapp00001 --public-url ${PUBLIC} --signin-dir /x --siri-port 4397 --hooks-port 4396 --machine-devices box\n`, { mode: 0o644 });
+    // A variable with pollMs: the same call compiles against an engine whose RunDeps has no hubUnit (the fail-without run).
+    const more = { pollMs: 20, hubUnit: { hubUnitFile, rootUid: typeof process.getuid === 'function' ? process.getuid() : 0 } };
     const { out, value: r } = await capture(async () => {
-      const run = runAppManifest({ instance: 'dash', repo: 'example-org/alpha', kind: 'signin', publicUrl: PUBLIC }, s.deps());
+      const run = runAppManifest({ instance: 'dash', repo: 'example-org/alpha', kind: 'signin', publicUrl: PUBLIC }, s.deps(more));
       const p = await s.startPage((await s.waitAsk(2)).url, undefined);
       assert.deepEqual(p.manifest.default_permissions, {});
       assert.deepEqual(p.manifest.callback_urls, [`${PUBLIC}/auth/callback`]);
@@ -311,7 +316,8 @@ test('the sign-in App: no permissions, the hub\'s callback URL, its client secre
     assert.equal(statSync(join(dir, 'client-secret')).mode & 0o777, 0o400);
     assert.match(readFileSync(join(dir, 'session-secret'), 'utf8'), /^[0-9a-f]{64}$/);
     assert.deepEqual(readdirSync(dir).sort(), ['client-secret', 'session-secret'], 'the App key is not kept');
-    assert.match(s.lines.join('\n'), /dashboards\.sh --client-id Iv1\.madeapp00001 --public-url https:\/\/hub\.example\.test/);
+    // The rerun keeps the hub's gateways, devices and instances, with the new App's client id (#767).
+    assert.ok(s.lines.includes(`then, as root: sudo bash /opt/${BRAND.cli}/current/scripts/setup/dashboards.sh --machine-devices 'box' --client-id 'Iv1.madeapp00001' --public-url '${PUBLIC}' --siri --hooks -- 'alpha'`), s.lines.join('\n'));
     for (const secret of [APP_SECRET, PEM.split('\n')[1]!]) assert.ok(![out, ...s.lines].join('\n').includes(secret));
   } finally {
     await s.close();

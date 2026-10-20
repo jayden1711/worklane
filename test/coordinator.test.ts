@@ -19,6 +19,7 @@ import { askChat, chatAnswer } from '../src/chat.js';
 import { ATTACHMENT_DEFAULT_CAPS } from '../src/chat-attachments.js';
 import { askInConversation, conversationTurns, createConversation } from '../src/chat-conversations.js';
 import { EventLog } from '../src/events/log.js';
+import { asks } from '../src/console/asks.js';
 import type { EventPayload, StoredEvent } from '../src/events/types.js';
 import { boardView } from '../src/board.js';
 import { CliRunner, DEFAULT_COMMIT_IDENTITY, FakeRunner, type RunRequest } from '../src/runner.js';
@@ -1892,6 +1893,23 @@ test('a CI fix run cut off by a restart is recorded as interrupted and its claim
   assert.equal(f.log.read(0, ['ci_fix.finished']).length, 1, 'once');
 });
 
+test("issue #711: at startup, the coordinator withdraws a Claude token's paste box an earlier add-project left open, saying why, and nothing else", async () => {
+  const f = fixture();
+  const a = asks(f.log);
+  // As an earlier coordinator opened it for add-project's claude-token step, then stopped mid-run (an upgrade).
+  const left = a.create({ kind: 'paste_secret', instance: 'beta', title: "The Claude login for beta's agents", detail: 'Paste the token claude setup-token prints.', credential: 'claude-token', where: "wl-beta-agent's Claude login" }, 'add-project').id;
+  const other = a.create({ kind: 'paste_secret', instance: 'alice', title: 'The chat bot token', detail: 'For intake.', credential: 'intake-discord', where: 'credentials.yaml intake.discord_token' }).id;
+  const c = new Coordinator({ cfg: f.cfg, log: f.log, backlog: f.backlog, runner: agents(), repo: f.repo, instance: 'alice', stateDir: f.stateDir, slotsDir: f.slotsDir, machine: f.machine });
+  await c.recover();
+  const w = a.get(left)!;
+  assert.equal(w.status, 'cancelled', 'withdrawn at startup');
+  assert.equal(w.cancelled!.by, 'coordinator');
+  assert.match(w.cancelled!.why, /#711.*never takes a Claude credential/);
+  assert.equal(a.get(other)!.status, 'open', 'any other secret is still asked for');
+  await c.recover();
+  assert.equal(f.log.read(0, ['ask.cancelled']).length, 1, 'once');
+});
+
 test('logTail: the last lines of a job log, runner timestamps stripped, bounded', () => {
   assert.equal(logTail('2026-10-10T07:44:38.7864502Z a\r\n2026-10-10T07:44:38.7Z b\nc', 2), 'b\nc');
   assert.equal(logTail('x'.repeat(50), 150, 10).length, 10);
@@ -2140,8 +2158,10 @@ test('self-modification: a harness PR touching only one of the harness\'s own co
       // through this flow: its first stands for them here. test/review.test.ts and test/merge-policy.test.ts check
       // every one of them through computeLevel and the merge decision.
       if (HOOK_IMPORTS.includes(glob) && glob !== HOOK_IMPORTS[0]) continue;
-      // A glob with no file yet (the owner's own, e.g. a study's definition) is an exact path: the change adds it.
-      const path = files.find((f) => globToRegExp(glob).test(f)) ?? (glob.includes('*') ? undefined : glob)!;
+      // A glob with no file yet (the owner's own, e.g. a study's definition, or deploy/** before its first manifest):
+      // the change adds one, at the exact path or at a file the glob matches.
+      const path = files.find((f) => globToRegExp(glob).test(f)) ?? glob.replace(/\*\*/g, 'new-file').replace(/\*/g, 'x');
+      assert.ok(globToRegExp(glob).test(path), `${glob}: ${path}`);
       let attempt = 0;
       const worker = (req: RunRequest) => {
         mkdirSync(dirname(join(req.cwd, path)), { recursive: true });

@@ -5,6 +5,7 @@ import { claim, release } from '../claims.js';
 import type { EventPayload, StoredEvent } from '../events/types.js';
 import { refuseInterruptedChats } from '../chat.js';
 import { refuseInterruptedTurns } from '../chat-conversations.js';
+import { withdrawClaudeCredentialAsks } from '../console/secrets.js';
 import { ClosedIssueWatch } from './closed-issues.js';
 import { Intake } from './intake.js';
 import { RETRY_CAP } from './shared.js';
@@ -22,6 +23,9 @@ export abstract class Recovery extends Intake {
     // Chat turns and intake reports cut off by a restart: each ended once, never run again.
     refuseInterruptedChats(this.d.stateDir);
     refuseInterruptedTurns(this.d.stateDir);
+    // An ask an earlier version opened for a Claude credential (add-project's claude-token, left open by a stop
+    // mid-run): withdrawn, so no page offers its paste box (issue #711).
+    withdrawClaudeCredentialAsks(this.d.log);
     try {
       await this.recoverIntake();
     } catch (e) {

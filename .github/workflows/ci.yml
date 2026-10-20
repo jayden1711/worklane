@@ -76,9 +76,18 @@ jobs:
       # About a second (vite), cheaper than one build shared as an artifact.
       - name: build the dashboard UI
         run: npm run build:web
+      # A project command run as another user starts in bubblewrap (#713), installed as every machine installs it
+      # (machine.sh, as ci-slow's jobs do). The tests that run one for real (separate-users' git check as nobody, the
+      # isolation tests) then run on every PR; PROJECT_SANDBOX_REQUIRED=1 below makes a missing sandbox fail them.
+      - name: bubblewrap (machine.sh), startable by another user
+        shell: bash
+        run: |
+          sudo apt-get update -q && sudo bash scripts/setup/machine.sh
+          sudo -n -u nobody /usr/bin/bwrap --dev-bind / / --unshare-user --unshare-pid --die-with-parent --proc /proc -- /bin/sh -c :
       - name: this shard's tests
         shell: bash
         env:
+          PROJECT_SANDBOX_REQUIRED: '1'
           CI_REQUIRE_WEB: '1'
           SHARD: ${{ matrix.shard }}
           EVENT: ${{ github.event_name }}

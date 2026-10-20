@@ -1,10 +1,10 @@
 // Crash-safe file locks: a lock is a file, created atomically, holding the
 // owner's pid. A lock whose owner is dead is stale and can be taken over.
 // Liveness, not a timeout, decides staleness (precedent: claude-code-merge-queue).
-import { createHash, randomBytes } from 'node:crypto';
-import { linkSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
-import { dirname } from 'node:path';
+// A lock in the slot dir is a slot path (#772): every file operation on it here goes through src/slot-file.ts.
+import { createHash } from 'node:crypto';
 import { pidAlive } from './os/index.js';
+import { makeSlotFileDir, readSlotFile, removeSlotFile, slotSibling, writeSlotFile, type SlotPathLike } from './slot-file.js';
 
 export interface LockInfo {
   pid: number;
@@ -15,13 +15,13 @@ export interface LockInfo {
 }
 
 export interface Lock {
-  path: string;
+  path: SlotPathLike;
   release(): void;
 }
 
-function readLock(path: string): LockInfo | null {
+function readLock(path: SlotPathLike): LockInfo | null {
   try {
-    return JSON.parse(readFileSync(path, 'utf8')) as LockInfo;
+    return JSON.parse(readSlotFile(path)) as LockInfo;
   } catch {
     return null;
   }
@@ -38,8 +38,8 @@ export const CLAIM_ABANDONED_MS = 60_000;
  * Try once. Returns the lock, or the current holder if it's busy.
  *
  * The lock's contents are written to a private temp file and hard-linked
- * into place, so the lock appears whole or not at all (link fails if the
- * lock exists). A competitor never reads a half-written lock and mistakes
+ * into place (writeSlotFile, replace: false), so the lock appears whole or
+ * not at all (link fails if the lock exists). A competitor never reads a half-written lock and mistakes
  * it for a stale one.
  *
  * Taking over a stale lock (its owner is dead) never removes a lock this
@@ -65,75 +65,65 @@ export interface TakeoverHooks {
   taking?(): void;
 }
 
-export function tryLock(path: string, owner: string, hooks: TakeoverHooks = {}, extra: Pick<LockInfo, 'limit_ms'> = {}): { lock: Lock } | { holder: LockInfo | null } {
-  mkdirSync(dirname(path), { recursive: true });
+export function tryLock(path: SlotPathLike, owner: string, hooks: TakeoverHooks = {}, extra: Pick<LockInfo, 'limit_ms'> = {}): { lock: Lock } | { holder: LockInfo | null } {
+  makeSlotFileDir(path);
   const info: LockInfo = { pid: process.pid, owner, acquiredAt: new Date().toISOString(), ...extra };
-  const tmp = `${path}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`;
-  writeFileSync(tmp, JSON.stringify(info));
-  try {
-    for (let attempt = 0; attempt < 3; attempt++) {
-      try {
-        linkSync(tmp, path);
-        return {
-          lock: {
-            path,
-            release() {
-              const cur = readLock(path);
-              if (cur?.pid === process.pid && cur.acquiredAt === info.acquiredAt) unlinkSync(path);
-            },
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      writeSlotFile(path, JSON.stringify(info), { replace: false });
+      return {
+        lock: {
+          path,
+          release() {
+            const cur = readLock(path);
+            if (cur?.pid === process.pid && cur.acquiredAt === info.acquiredAt) removeSlotFile(path);
           },
-        };
-      } catch (e) {
-        if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e;
-      }
-      const seen = readFileSafe(path);
-      if (seen === null) continue; // released in between: try again
-      const holder = parseLock(seen);
-      if (holder && pidAlive(holder.pid)) return { holder };
-      // Stale (dead owner, or unreadable): claim this exact stale lock before touching it.
-      hooks.inspected?.();
-      const claim = `${path}.${createHash('sha256').update(seen).digest('hex').slice(0, 16)}.claim`;
-      const mine = `${tmp}.claim`;
-      writeFileSync(mine, JSON.stringify({ pid: process.pid, at: Date.now() }));
-      try {
-        linkSync(mine, claim);
-      } catch (e) {
-        if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e;
-        if (claimAbandoned(claim)) unlinkQuiet(claim); // its taker died or stalled; the next try claims it afresh
-        continue; // another process is taking over this same stale lock
-      } finally {
-        unlinkQuiet(mine);
-      }
-      hooks.taking?.();
-      try {
-        // Ours alone to remove now: if the lock is still the stale one we read, nothing can replace it before this.
-        if (readFileSafe(path) === seen) unlinkQuiet(path);
-      } finally {
-        unlinkQuiet(claim);
-      }
+        },
+      };
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e;
     }
-    return { holder: readLock(path) };
-  } finally {
-    unlinkSync(tmp);
+    const seen = readFileSafe(path);
+    if (seen === null) continue; // released in between: try again
+    const holder = parseLock(seen);
+    if (holder && pidAlive(holder.pid)) return { holder };
+    // Stale (dead owner, or unreadable): claim this exact stale lock before touching it.
+    hooks.inspected?.();
+    const claim = slotSibling(path, `.${createHash('sha256').update(seen).digest('hex').slice(0, 16)}.claim`);
+    try {
+      writeSlotFile(claim, JSON.stringify({ pid: process.pid, at: Date.now() }), { replace: false });
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e;
+      if (claimAbandoned(claim)) unlinkQuiet(claim); // its taker died or stalled; the next try claims it afresh
+      continue; // another process is taking over this same stale lock
+    }
+    hooks.taking?.();
+    try {
+      // Ours alone to remove now: if the lock is still the stale one we read, nothing can replace it before this.
+      if (readFileSafe(path) === seen) unlinkQuiet(path);
+    } finally {
+      unlinkQuiet(claim);
+    }
   }
+  return { holder: readLock(path) };
 }
 
-function claimAbandoned(claim: string): boolean {
+function claimAbandoned(claim: SlotPathLike): boolean {
   const c = parseLock(readFileSafe(claim) ?? '') as { pid?: number; at?: number } | null;
   return !c || typeof c.pid !== 'number' || !pidAlive(c.pid) || Date.now() - (c.at ?? 0) > CLAIM_ABANDONED_MS;
 }
 
-function unlinkQuiet(path: string): void {
+function unlinkQuiet(path: SlotPathLike): void {
   try {
-    unlinkSync(path);
+    removeSlotFile(path);
   } catch {
     // already gone
   }
 }
 
-function readFileSafe(path: string): string | null {
+function readFileSafe(path: SlotPathLike): string | null {
   try {
-    return readFileSync(path, 'utf8');
+    return readSlotFile(path);
   } catch {
     return null;
   }
@@ -149,7 +139,7 @@ function parseLock(text: string): LockInfo | null {
 
 /** Wait up to waitMs for the lock. Never returns "success" without holding it. */
 export async function acquireLock(
-  path: string,
+  path: SlotPathLike,
   owner: string,
   waitMs: number,
   pollMs = 250,

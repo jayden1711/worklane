@@ -5,12 +5,13 @@
 import { execFileSync, spawnSync } from 'node:child_process';
 import { existsSync, lstatSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
+import { agentRecordWarning } from './setup-steps.js';
 import { BRAND } from './brand.js';
 import { ConfigInvalid, loadConfig, type Config } from './config/load.js';
 import { checkGuardrails } from './guardrails/check.js';
 import { loadFingerprintSets } from './guardrails/context.js';
 import { agentSettingsPath, hookChecks, installCommand, legacyProjectHooks, projectSettingsRefusal, type Settings } from './agent-settings.js';
-import { GIT_HOOK_MARKER } from './install.js';
+import { GIT_HOOK_MARKER, legacyHookChecks } from './install.js';
 import { instancesDir, loadInstance, policiesForRepo, policyViolations, readPolicy } from './instance.js';
 import { instanceTargets, planMigrations, projectConfigFiles, type Targets } from './migrations.js';
 import { projectStateDir } from './guardrails/context.js';
@@ -18,13 +19,18 @@ import { canRunAgents, detectOs, diskFree, fileAccess, nvidiaNodes, shimsNeedShe
 import { diskFloorCheck } from './governor-holds.js';
 import { findTool, toolBin } from './tool-path.js';
 import { checkIntakeFile } from './intake/check.js';
+import { claudeAccountLeftoverCheck } from './claude-accounts-retired.js';
 import { INTAKE_FILE } from './intake/config.js';
 import { lintSkills, skillLintReport, trackedSkills } from './skill-lint.js';
 import { initStateUnreadable, localInitFile, localRepo, readInitState, serverInitFile, setupContext, unavailableIn, type InitIo, type Mode } from './init.js';
 import { gpuCommands, gpuFilePath, gpuIndices, readGpuFile } from './testrun/gpu.js';
 import { networkCommands, networkFilePath, NETWORK_FILE_NAME, parseNetworkFile } from './testrun/network.js';
+import { usernsUnsupportedProblem } from './testrun/status.js';
+import { openReadOnly } from './events/read-only.js';
 import { checkSetup, groupLevel, GROUPS, stepLevel, systemProbe, type SetupContext, type SetupProbe } from './setup-steps.js';
 import { modelWarnings } from './model-routing.js';
+import { HUB_UNIT_AS_ROOT, OWNER_TERMINAL_RERUN, ownerTerminalNotice, ownerTerminalRerun, type TerminalPaths } from './console/owner-terminal-removed.js';
+import { voiceSiriLeftoverCheck } from './doctor-voice-removed.js';
 
 /** off: not available in this setup's mode (said why; never a failure). */
 export type Level = 'ok' | 'warn' | 'fail' | 'off';
@@ -124,6 +130,8 @@ export function doctor(rootArg: string, opts: { agentshield?: boolean; /** A pol
     if (intake.state === 'off') add(`intake ${name}`, 'ok', `no ${INTAKE_FILE} in the instance home: intake is off`);
     else if (intake.state === 'invalid') add(`intake ${name}`, 'fail', `${intake.file} is invalid, so intake is off until it is fixed (\`${BRAND.cli} intake check --instance ${name}\` checks an edit):\n${intake.errors.join('\n')}`);
     else add(`intake ${name}`, intake.warnings.length ? 'warn' : 'ok', [`${INTAKE_FILE} valid: ${intake.summary.join('; ')}`, ...intake.warnings].join('\n'));
+    const userns = usernsCheck(name);
+    if (userns) out.push(userns);
     // An API-key instance: its key file is the agent user's alone.
     try {
       const inst = loadInstance(name);
@@ -150,6 +158,7 @@ export function doctor(rootArg: string, opts: { agentshield?: boolean; /** A pol
       continue;
     }
     for (const c of hookChecks(s)) add(`agent hook ${name} ${c.event}`, c.ok ? 'ok' : 'fail', c.ok ? `${c.detail}, for agent runs only (${file})` : c.detail);
+    for (const c of legacyHookChecks(s, name, root)) add(c.name, c.level, c.detail);
     if (s.disableAllHooks !== false) add(`agent hooks ${name}`, 'fail', 'disableAllHooks is not pinned to false: a project file could turn the hooks off');
     const refusal = projectSettingsRefusal(root, s);
     if (refusal) add(`project settings`, 'fail', `${name}'s agent runs won't start: ${refusal}`);
@@ -205,6 +214,9 @@ export function doctor(rootArg: string, opts: { agentshield?: boolean; /** A pol
     const v = spawnSync(claude, ['--version'], { encoding: 'utf8', timeout: 20_000 });
     add('claude', v.status === 0 ? 'ok' : 'warn', (v.stdout || v.stderr || '').trim().split('\n')[0] ?? '');
   }
+  // What the removed account profiles, failover and switch left (#736): ignored, named with the step that removes it.
+  const accountLeftovers = claudeAccountLeftoverCheck();
+  if (accountLeftovers) out.push(accountLeftovers);
 
   // Lean CLAUDE.md
   const claudeMd = join(root, 'CLAUDE.md');
@@ -224,12 +236,62 @@ export function doctor(rootArg: string, opts: { agentshield?: boolean; /** A pol
   }
 
   out.push(...setupChecks(root, opts));
+  const terminal = ownerTerminalCheck();
+  if (terminal) out.push(terminal);
+  const voiceSiri = voiceSiriLeftoverCheck({ instances });
+  if (voiceSiri) out.push(voiceSiri);
   const gpu = gpuCheck();
   if (gpu) out.push(gpu);
   // Only where the project runs its tests on the machine: elsewhere no run has a sandbox to grant from.
   if (cfg?.tests.test_run) out.push(networkCheck());
   if (opts.agentshield) out.push(agentShield(root));
   return out;
+}
+
+/**
+ * A failure when the instance's newest sandbox check (its coordinator's `testrun.sandbox` event) said this machine
+ * can't give a test run a user namespace of its own (util-linux older than 2.38, or no setpriv), with the fix; else
+ * nothing. Read-only: the event log is opened read-only, and one this user can't read (another user's state) or that
+ * has no such event says nothing. INVARIANT: shown only. No test run, install or update waits on doctor (its exit code
+ * is read by bootstrap.sh alone, after everything is installed, to print what's next), and this reads the same field
+ * the Machine page shows (src/testrun/status.ts), which the run gate and the updater never read.
+ */
+export function usernsCheck(instance: string, eventsDb = join(instancesDir(), instance, 'state', 'events.db')): DoctorCheck | null {
+  let payload: string | undefined;
+  try {
+    if (!existsSync(eventsDb)) return null;
+    const db = openReadOnly(eventsDb);
+    try {
+      payload = (db.prepare("SELECT payload FROM events WHERE type = 'testrun.sandbox' ORDER BY id DESC LIMIT 1").get() as { payload: string } | undefined)?.payload;
+    } finally {
+      db.close();
+    }
+  } catch {
+    return null;
+  }
+  let why: unknown;
+  try {
+    why = payload ? (JSON.parse(payload) as { unsupported?: unknown }).unsupported : undefined;
+  } catch {
+    return null;
+  }
+  return typeof why === 'string' && why ? { name: `test runs ${instance}`, level: 'fail', detail: usernsUnsupportedProblem(why) } : null;
+}
+
+/**
+ * The removed owner terminal (#742): nothing while the machine has nothing of it left; a failure (doctor exits 1)
+ * while its console shell or a hub unit naming a console user is still there, since its sudoers rule (which only root
+ * can see) is then still there too and the hub may run without its sandbox. The rerun that removes them comes first:
+ * built exactly from the hub unit's ExecStart, so it keeps the hub's devices, gateways and instances; when the unit
+ * can't be read or parsed, the placeholder version, with why and where to fill it in from (never part of a command).
+ */
+export function ownerTerminalCheck(paths: TerminalPaths = {}): DoctorCheck | null {
+  const r = ownerTerminalRerun(paths);
+  // With the exact command, the notice points at it: one command to run, never a second, placeholder one.
+  const notice = ownerTerminalNotice(paths, 'command' in r);
+  if (!notice) return null;
+  const first = 'command' in r ? `run as root, once (built from the hub unit's ExecStart): ${r.command}` : `run as root, once, with each <...> and [...] filled in from the ExecStart of ${HUB_UNIT_AS_ROOT} (the exact command can't be built here: ${r.error}): ${OWNER_TERMINAL_RERUN}`;
+  return { name: 'owner terminal', level: 'fail', detail: `${first}\n${notice}` };
 }
 
 /**
@@ -286,7 +348,8 @@ export function setupChecks(root: string, opts: { instance?: string; mode?: Mode
   const state = readInitState(file);
   const mode = opts.mode ?? state?.mode;
   if (!mode) return [{ name: 'setup', level: 'warn', detail: `no guided setup recorded for this checkout: \`${BRAND.cli} init --mode local|server\` walks the checklist (tools, Claude login, GitHub, repo config, protection)` }];
-  const probe: SetupProbe = opts.probe ?? { ...systemProbe(), ...(opts.initIo ? { which: opts.initIo.which, run: opts.initIo.run } : {}) };
+  // #738: the manager's reading comes from initIo too, never from the real probe behind a stand-in io.
+  const probe: SetupProbe = opts.probe ?? { ...systemProbe(), ...(opts.initIo ? { which: opts.initIo.which, run: opts.initIo.run, serviceManagerEnv: opts.initIo.serviceManagerEnv } : {}) };
   const s = state?.mode === mode ? state : null;
   // A server instance's own clone, state and policy; a checkout's own state.
   let site = { root, stateDir: projectStateDir(root), policyFile: null as string | null };
@@ -299,7 +362,8 @@ export function setupChecks(root: string, opts: { instance?: string; mode?: Mode
       // its steps say it can't be read
     }
   }
-  const view = checkSetup({ ...setupContext(s, { mode, ...site, repo: s?.repo ?? (mode === 'local' ? localRepo(root) : null), instance }), ...opts.context }, probe);
+  const ctx = { ...setupContext(s, { mode, ...site, repo: s?.repo ?? (mode === 'local' ? localRepo(root) : null), instance }), ...opts.context };
+  const view = checkSetup(ctx, probe);
   // init's walked groups first, one line each (what init stops at, with what it found), then every step's own line.
   // A walked group with no step in this mode (Discord in local mode) still has its line, as init walks it.
   const out: DoctorCheck[] = GROUPS.filter((d) => d.walked && d.modes.includes(mode)).map((d) => {
@@ -311,6 +375,8 @@ export function setupChecks(root: string, opts: { instance?: string; mode?: Mode
   });
   for (const g of view.groups)
     for (const i of g.steps) out.push({ name: `setup step ${i.id}`, level: stepLevel(i), detail: `${i.title} (${mode} mode): ${i.detail}${i.done ? '' : `; today: ${i.today}`}` });
+  const noRecord = agentRecordWarning(ctx);
+  if (noRecord) out.push({ name: 'setup claude-account record', level: 'warn', detail: noRecord });
   for (const u of unavailableIn(mode, (c) => probe.which(c) !== null)) out.push({ name: `not in ${mode} mode: ${u.feature}`, level: 'off', detail: u.why });
   return out;
 }
