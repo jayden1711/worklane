@@ -44,10 +44,32 @@ export function scrubTitle(title, denied) {
     .trim();
 }
 
-/** The PR a PR reverts, from its title ("Revert #N: ..." or GitHub's 'Revert "title" (#N)'), or null. */
-export function revertOf(pr) {
-  const m = /^Revert\b.*?#(\d+)/i.exec(pr.title ?? '');
-  return m ? Number(m[1]) : null;
+/**
+ * The PR a revert PR reverts, or null when its title doesn't start "Revert". GitHub's revert button titles it
+ * 'Revert "<original title>"', whose first #N can be any number the original title names, and writes the reverted
+ * PR in the body: "Reverts owner/repo#N". So the body's line is read first (only for this repo when `repo` is
+ * given; "Reverts #N" too), and the title's first #N ("Revert #N: ...") only when the body names none.
+ */
+export function revertOf(pr, repo) {
+  return revertsOf(pr, repo)[0] ?? null;
+}
+
+/**
+ * Every PR a revert PR reverts, in order, each once: all its body's "Reverts" lines for this repo, else the title's
+ * first #N (see revertOf). Empty for a PR whose title doesn't start "Revert". A PR never reverts itself: its own
+ * number is left out, so it stays listed in its group.
+ */
+export function revertsOf(pr, repo) {
+  if (!/^Revert\b/i.test(pr.title ?? '')) return [];
+  const named = [];
+  for (const m of String(pr.body ?? '').matchAll(/^[ \t]*Reverts[ \t]+(?:([\w.-]+\/[\w.-]+))?#(\d+)\b/gim)) {
+    if (!m[1] || !repo || m[1].toLowerCase() === repo.toLowerCase()) named.push(Number(m[2]));
+  }
+  if (!named.length) {
+    const t = /^Revert\b.*?#(\d+)/i.exec(pr.title);
+    if (t) named.push(Number(t[1]));
+  }
+  return [...new Set(named)].filter((n) => n !== pr.number);
 }
 
 const isGuardrail = (pr) => (pr.files ?? []).some((f) => GUARDRAIL_PATHS.some((re) => re.test(f)));
@@ -61,16 +83,21 @@ export function groupOf(pr) {
 }
 
 /**
- * One release's changelog section. prs: { number, title, labels?, files? } in merge order. Every PR is listed
- * in its group; a PR that changed a guardrail file is also listed under "Guardrail changes" with those files.
+ * One release's changelog section. prs: { number, title, body?, labels?, files? } in merge order. Every PR is
+ * listed in its group; a PR that changed a guardrail file is also listed under "Guardrail changes" with those files.
  * A PR reverted within the same release is in no group: it and its revert are listed together under "Reverted in
- * this release" (a reland is a PR of its own and listed as usual).
+ * this release" (a reland is a PR of its own and listed as usual). `repo` (owner/repo): whose "Reverts" lines count.
  */
-export function changelogSection(version, date, prs) {
+export function changelogSection(version, date, prs, repo) {
   const line = (pr) => `- ${pr.title.replace(/\s*\(#\d+\)\s*$/, '')} (#${pr.number})`;
   const numbers = new Set(prs.map((pr) => pr.number));
-  const revertedBy = new Map(prs.filter((pr) => numbers.has(revertOf(pr))).map((pr) => [revertOf(pr), pr]));
-  const listed = prs.filter((pr) => !revertedBy.has(pr.number) && !numbers.has(revertOf(pr)));
+  // Each PR reverted in this release, by the first revert that names it. A revert is left out of the groups only
+  // when every PR it reverts is in this release; one that also reverts an earlier release's PR stays listed.
+  const targets = new Map(prs.map((pr) => [pr.number, revertsOf(pr, repo)]));
+  const revertedBy = new Map();
+  for (const pr of prs) for (const n of targets.get(pr.number)) if (numbers.has(n) && !revertedBy.has(n)) revertedBy.set(n, pr);
+  const hidden = (pr) => targets.get(pr.number).length > 0 && targets.get(pr.number).every((n) => numbers.has(n));
+  const listed = prs.filter((pr) => !revertedBy.has(pr.number) && !hidden(pr));
   const out = [`## v${version} (${date})`, ''];
   const groups = [['features', 'Features'], ['fixes', 'Fixes'], ['security', 'Security and guardrails']];
   for (const [key, heading] of groups) {
@@ -233,6 +260,30 @@ export function withSection(existing, version, section) {
     );
   }
   return out;
+}
+
+/**
+ * What the tag step tags with: { notes } (the version's section, without any NOTES_END line), or { problem }.
+ * Fails closed: the version must have exactly one section, with the dated heading changelogSection writes
+ * (`## vX.Y.Z (YYYY-MM-DD)`, a real date) and its generated lists, and nothing that could also be its notes (an
+ * `(unreleased)` heading for it, or `## Unreleased` with no version) anywhere in the file.
+ */
+export function tagNotes(changelog, version) {
+  const run = `run \`node scripts/release.mjs changelog ${version}\` and merge it first`;
+  const ours = String(changelog ?? '').split(SECTION_START).filter((s) => isFor(s, version));
+  if (!ours.length) return { problem: `CHANGELOG.md at HEAD has no v${version} section: ${run}` };
+  if (ours.length > 1) return { problem: `CHANGELOG.md at HEAD has more than one section for v${version} (${ours.map((s) => `"## ${headingOf(s)}"`).join(', ')}): merge them, then ${run}` };
+  const [section] = ours;
+  // The raw heading line, byte for byte as changelogSection writes it (one space, lowercase v, nothing after).
+  const first = section.split('\n')[0];
+  const date = new RegExp(`^## v${version.replace(/\./g, '\\.')} \\((\\d{4}-\\d{2}-\\d{2})\\)$`).exec(first)?.[1];
+  const when = date ? new Date(`${date}T00:00:00Z`) : null;
+  const real = when !== null && !Number.isNaN(when.getTime()) && when.toISOString().slice(0, 10) === date;
+  if (!real) return { problem: `CHANGELOG.md at HEAD has ${JSON.stringify(first)}, not the dated heading "## v${version} (YYYY-MM-DD)" the changelog step writes: ${run}` };
+  if (!/^### Guardrail changes[ \t]*$/m.test(section)) return { problem: `CHANGELOG.md at HEAD's v${version} section has no generated lists (no "### Guardrail changes"): ${run}` };
+  // The NOTES_END line withSection writes (blank line, the line, blank line) goes; nothing else in the notes changes.
+  const notes = section.replace(new RegExp(`\\n\\n${NOTES_END_LINE.source.replace(/^\^/, '')}(?=\\n)`, 'gm'), '').trimEnd();
+  return { notes };
 }
 
 /** The section for a version in a CHANGELOG.md, or null: the GitHub release notes. */

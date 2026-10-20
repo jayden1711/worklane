@@ -5,6 +5,7 @@ How a version reaches npm: the owner signs a tag, CI (`.github/workflows/release
 ## Checklist
 
 1. **Main is green** on the commit to release, and the release machine's preflight (`npm test` in a terminal) passes on that commit.
+   - **That commit has the release's changelog and version bump.** On a branch from main: `node scripts/release.mjs changelog X.Y.Z` and bump `package.json` to X.Y.Z, then review and merge both in one PR. The changelog step keeps every line of the `## vX.Y.Z (unreleased)` section, dates its heading and writes the PR lists after it. The tag step (step 4) refuses a version whose section isn't in the form that step writes: an `(unreleased)` heading or any heading other than `## vX.Y.Z (YYYY-MM-DD)` with a real date, no generated lists (`### Guardrail changes`), or a second section for the version (`## Unreleased` included).
 2. **npm trusted publisher.** On npmjs.com, `@worklane/cli` → Settings → Trusted publishing: the publisher for this repo's `release.yml` (no environment, staging only) shows as validated. If it is still "Pending validation" past its deadline, or has lapsed, remove it and add it again before pushing the tag. (The current one is pending until 2026-10-17 10:18 UTC and is validated by one `release.yml` stage publish. Don't create a release just to validate it.)
 3. **The signing key** is the one in `.github/release-signers`. Before building, probe that it signs and verifies:
    ```sh
