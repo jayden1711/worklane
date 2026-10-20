@@ -13,7 +13,7 @@ import { ConfigInvalid, loadConfig } from './config/load.js';
 import { doctor } from './doctor.js';
 import { engineRoot, initCommand, MODES, type Mode } from './init.js';
 import { renamedFrom } from './instance-rename.js';
-import { revokeAllDevices } from './siri/tokens.js';
+import { SIRI_PORT_IGNORED } from './voice-removed.js';
 import { exportBundle, importBundle, type ImportResult } from './instance-move.js';
 import { hostname } from 'node:os';
 import { checkGuardrails } from './guardrails/check.js';
@@ -167,7 +167,7 @@ usage: ${BRAND.cli} <command> [options]
                                    --machine-devices: the Tailscale devices a machine change from
                                    the page may come from (none: refused; an older unit's
                                    --console-devices is read as these);
-                                   --siri-port: the Siri gateway's loopback port (4397; docs/siri.md)
+                                   --siri-port: accepted and ignored (Siri was removed; no gateway starts)
                                    --hooks-port: the webhook automations' gateway port (4396; docs/automations.md)
   dashboard --hub-setup (--public-url https://<host> | --loopback) --signin-dir dir [--port n] [--service]
                                    the hub in setup mode, before sign-in exists (dashboards.sh --setup
@@ -869,14 +869,13 @@ async function main(argv: string[]): Promise<number> {
         const signinDir = option(opts, '--signin-dir');
         if ((clientId || publicUrl || signinDir) && !(clientId && publicUrl && signinDir)) throw new Error('sign-in needs all of --client-id, --public-url and --signin-dir');
         const signIn = clientId && publicUrl && signinDir ? signInFromFiles({ clientId, publicUrl, dir: signinDir }) : null;
-        const siriOpt = option(opts, '--siri-port');
-        if (siriOpt !== undefined && !/^[0-9]{1,5}$/.test(siriOpt)) throw new Error('--siri-port: a port number');
+        if (option(opts, '--siri-port') !== undefined) console.error(SIRI_PORT_IGNORED);
         const hooksOpt = option(opts, '--hooks-port');
         if (hooksOpt !== undefined && !/^[0-9]{1,5}$/.test(hooksOpt)) throw new Error('--hooks-port: a port number');
-        const h = await startHub({ instances, stateDir: hubState, port: portOpt ? Number(portOpt) : HUB_PORT, breakGlassPort: bgOpt ? Number(bgOpt) : HUB_BREAK_GLASS_PORT, signIn, devices: { allow: hubMachineDevices((n) => option(opts, n)) }, ...(siriOpt !== undefined ? { siri: { port: Number(siriOpt) } } : {}), ...(hooksOpt !== undefined ? { hooks: { port: Number(hooksOpt) } } : {}) });
+        const h = await startHub({ instances, stateDir: hubState, port: portOpt ? Number(portOpt) : HUB_PORT, breakGlassPort: bgOpt ? Number(bgOpt) : HUB_BREAK_GLASS_PORT, signIn, devices: { allow: hubMachineDevices((n) => option(opts, n)) }, ...(hooksOpt !== undefined ? { hooks: { port: Number(hooksOpt) } } : {}) });
         // INVARIANT: the printed and opened URLs carry no key; the key's file is named, never the key (keyFileNote).
         const bg = `${h.breakGlassUrl} ${keyFileNote(h.keyFile)}`;
-        console.log(`${BRAND.name} dashboard hub for ${instances.map((i) => i.name).join(', ') || 'no instance yet'}\n  sign-in: ${signIn ? `${signIn.publicUrl} (served on ${h.url})` : 'not set up (no --client-id)'}\n  break-glass, this machine only: ${bg}${h.siriUrl ? `\n  Siri gateway: ${h.siriUrl} (tailscale serve publishes it on 8443)` : ''}${h.hooksUrl ? `\n  hooks gateway: ${h.hooksUrl} (tailscale serve publishes it on 8444)` : ''}\n(loopback only)`);
+        console.log(`${BRAND.name} dashboard hub for ${instances.map((i) => i.name).join(', ') || 'no instance yet'}\n  sign-in: ${signIn ? `${signIn.publicUrl} (served on ${h.url})` : 'not set up (no --client-id)'}\n  break-glass, this machine only: ${bg}${h.hooksUrl ? `\n  hooks gateway: ${h.hooksUrl} (tailscale serve publishes it on 8444)` : ''}\n(loopback only)`);
         if (!service && !flag(opts, '--no-open')) openUrl(signIn ? signIn.publicUrl : h.breakGlassUrl);
         await new Promise(() => {});
         return 0;
@@ -1306,30 +1305,13 @@ async function main(argv: string[]): Promise<number> {
           const log = new EventLog(join(i.stateDir, 'events.db'));
           try {
             const r = renamedFrom({ stateDir: i.stateDir, log, from, to: i.name });
-            console.log(`renamed from ${from}: ${r.revoked.length} Siri device(s) revoked (make new ones on the dashboard), ${r.carried.length} open ask(s) asked again for ${i.name}`);
+            console.log(`renamed from ${from}: ${r.carried.length} open ask(s) asked again for ${i.name}`);
             return 0;
           } finally {
             log.close();
           }
         } catch (e) {
           console.error(`instance renamed: ${String((e as Error).message ?? e).split('\n')[0]}`);
-          return 1;
-        }
-      }
-      if (sub === 'siri-revoke-all' && target) {
-        // instance-remove.sh's, as the instance's coordinator, before it exports: every Siri device token revoked.
-        const why = option(rest, '--why') ?? '';
-        if (!/^[a-z][a-z0-9 -]{0,60}$/.test(why)) {
-          console.error('usage: instance siri-revoke-all <name> --why <a few words>');
-          return 2;
-        }
-        try {
-          const i = loadInstance(target);
-          const ids = revokeAllDevices(i.stateDir, why);
-          console.log(`${target}: ${ids.length} Siri device token(s) revoked (${why})`);
-          return 0;
-        } catch (e) {
-          console.error(`instance siri-revoke-all: ${String((e as Error).message ?? e).split('\n')[0]}`);
           return 1;
         }
       }
@@ -1365,7 +1347,7 @@ async function main(argv: string[]): Promise<number> {
         console.log(JSON.stringify(line));
         return line.kind === 'failed' ? 1 : 0;
       }
-      console.error('usage: instance init <name> --repo <path> --github <owner/repo> [--agent-user <user>] [--agent-home <dir>] | instance list | instance show <name> | instance set-github-app <name> ... | instance set-discord-token <name> --file <path> | instance set-intake-credential <name> <key> --file <path> | instance auto-config <name> [--answer <id>=<choice>]... | instance renamed <new name> --from <old name> | instance siri-revoke-all <name> --why <a few words>');
+      console.error('usage: instance init <name> --repo <path> --github <owner/repo> [--agent-user <user>] [--agent-home <dir>] | instance list | instance show <name> | instance set-github-app <name> ... | instance set-discord-token <name> --file <path> | instance set-intake-credential <name> <key> --file <path> | instance auto-config <name> [--answer <id>=<choice>]... | instance renamed <new name> --from <old name>');
       return 2;
     }
 

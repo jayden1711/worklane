@@ -5,6 +5,7 @@
 import { execFileSync, spawnSync } from 'node:child_process';
 import { existsSync, lstatSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
+import { agentRecordWarning } from './setup-steps.js';
 import { BRAND } from './brand.js';
 import { ConfigInvalid, loadConfig, type Config } from './config/load.js';
 import { checkGuardrails } from './guardrails/check.js';
@@ -18,6 +19,7 @@ import { canRunAgents, detectOs, diskFree, fileAccess, nvidiaNodes, shimsNeedShe
 import { diskFloorCheck } from './governor-holds.js';
 import { findTool, toolBin } from './tool-path.js';
 import { checkIntakeFile } from './intake/check.js';
+import { claudeAccountLeftoverCheck } from './claude-accounts-retired.js';
 import { INTAKE_FILE } from './intake/config.js';
 import { lintSkills, skillLintReport, trackedSkills } from './skill-lint.js';
 import { initStateUnreadable, localInitFile, localRepo, readInitState, serverInitFile, setupContext, unavailableIn, type InitIo, type Mode } from './init.js';
@@ -28,6 +30,7 @@ import { openReadOnly } from './events/read-only.js';
 import { checkSetup, groupLevel, GROUPS, stepLevel, systemProbe, type SetupContext, type SetupProbe } from './setup-steps.js';
 import { modelWarnings } from './model-routing.js';
 import { HUB_UNIT_AS_ROOT, OWNER_TERMINAL_RERUN, ownerTerminalNotice, ownerTerminalRerun, type TerminalPaths } from './console/owner-terminal-removed.js';
+import { voiceSiriLeftoverCheck } from './doctor-voice-removed.js';
 
 /** off: not available in this setup's mode (said why; never a failure). */
 export type Level = 'ok' | 'warn' | 'fail' | 'off';
@@ -211,6 +214,9 @@ export function doctor(rootArg: string, opts: { agentshield?: boolean; /** A pol
     const v = spawnSync(claude, ['--version'], { encoding: 'utf8', timeout: 20_000 });
     add('claude', v.status === 0 ? 'ok' : 'warn', (v.stdout || v.stderr || '').trim().split('\n')[0] ?? '');
   }
+  // What the removed account profiles, failover and switch left (#736): ignored, named with the step that removes it.
+  const accountLeftovers = claudeAccountLeftoverCheck();
+  if (accountLeftovers) out.push(accountLeftovers);
 
   // Lean CLAUDE.md
   const claudeMd = join(root, 'CLAUDE.md');
@@ -232,6 +238,8 @@ export function doctor(rootArg: string, opts: { agentshield?: boolean; /** A pol
   out.push(...setupChecks(root, opts));
   const terminal = ownerTerminalCheck();
   if (terminal) out.push(terminal);
+  const voiceSiri = voiceSiriLeftoverCheck({ instances });
+  if (voiceSiri) out.push(voiceSiri);
   const gpu = gpuCheck();
   if (gpu) out.push(gpu);
   // Only where the project runs its tests on the machine: elsewhere no run has a sandbox to grant from.
@@ -340,7 +348,8 @@ export function setupChecks(root: string, opts: { instance?: string; mode?: Mode
   const state = readInitState(file);
   const mode = opts.mode ?? state?.mode;
   if (!mode) return [{ name: 'setup', level: 'warn', detail: `no guided setup recorded for this checkout: \`${BRAND.cli} init --mode local|server\` walks the checklist (tools, Claude login, GitHub, repo config, protection)` }];
-  const probe: SetupProbe = opts.probe ?? { ...systemProbe(), ...(opts.initIo ? { which: opts.initIo.which, run: opts.initIo.run } : {}) };
+  // #738: the manager's reading comes from initIo too, never from the real probe behind a stand-in io.
+  const probe: SetupProbe = opts.probe ?? { ...systemProbe(), ...(opts.initIo ? { which: opts.initIo.which, run: opts.initIo.run, serviceManagerEnv: opts.initIo.serviceManagerEnv } : {}) };
   const s = state?.mode === mode ? state : null;
   // A server instance's own clone, state and policy; a checkout's own state.
   let site = { root, stateDir: projectStateDir(root), policyFile: null as string | null };
@@ -353,7 +362,8 @@ export function setupChecks(root: string, opts: { instance?: string; mode?: Mode
       // its steps say it can't be read
     }
   }
-  const view = checkSetup({ ...setupContext(s, { mode, ...site, repo: s?.repo ?? (mode === 'local' ? localRepo(root) : null), instance }), ...opts.context }, probe);
+  const ctx = { ...setupContext(s, { mode, ...site, repo: s?.repo ?? (mode === 'local' ? localRepo(root) : null), instance }), ...opts.context };
+  const view = checkSetup(ctx, probe);
   // init's walked groups first, one line each (what init stops at, with what it found), then every step's own line.
   // A walked group with no step in this mode (Discord in local mode) still has its line, as init walks it.
   const out: DoctorCheck[] = GROUPS.filter((d) => d.walked && d.modes.includes(mode)).map((d) => {
@@ -365,6 +375,8 @@ export function setupChecks(root: string, opts: { instance?: string; mode?: Mode
   });
   for (const g of view.groups)
     for (const i of g.steps) out.push({ name: `setup step ${i.id}`, level: stepLevel(i), detail: `${i.title} (${mode} mode): ${i.detail}${i.done ? '' : `; today: ${i.today}`}` });
+  const noRecord = agentRecordWarning(ctx);
+  if (noRecord) out.push({ name: 'setup claude-account record', level: 'warn', detail: noRecord });
   for (const u of unavailableIn(mode, (c) => probe.which(c) !== null)) out.push({ name: `not in ${mode} mode: ${u.feature}`, level: 'off', detail: u.why });
   return out;
 }

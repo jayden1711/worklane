@@ -394,6 +394,7 @@ const TRACED: [string, string | null][] = [
   ['...riskAndDesignReasons(', 'export function riskAndDesignReasons('],
   ['...(i.instructionEvals ?? [])', 'export function instructionEvalReasons('],
   ['...(i.outsidePlan ?? [])', 'export function outsidePlanReasons('],
+  ['...(i.weakening ?? [])', null], // #783: `design: may weaken a check: ...`, built in src/merge-policy-weakening.ts
   ['...d.reasons', 'export function mergeDecision('],
   ['d.reasons', '  mergeDecisionFor(n: number'], // the emitter's own value: mergeDecisionFor's, then mergeOrWait's pushes
   ['...fix.reasons', 'private async conflictRun('],
@@ -616,7 +617,7 @@ test('#741 no false progress: a retried worker makes the earlier verdict stale; 
 });
 
 /** The machine as the setup checks see it: stand-ins only (no real gh, claude or service is asked). */
-const probe: SetupProbe = { which: (c) => `/stand-in/${c}`, run: () => ({ status: 1, stdout: '{"loggedIn": false}', stderr: 'stand-in' }), serviceRunning: () => false, systemUnitActive: () => false, linger: () => null };
+const probe: SetupProbe = { which: (c) => `/stand-in/${c}`, run: () => ({ status: 1, stdout: '{"loggedIn": false}', stderr: 'stand-in' }), serviceRunning: () => false, systemUnitActive: () => false, linger: () => null, serviceManagerEnv: () => ({ env: {} }) };
 
 test('#741 GET /api/first-run: after File it, the card follows the filed issue (writers); a viewer is refused and gets no hold reason', async () => {
   const { dir } = exampleProject();

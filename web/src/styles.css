@@ -201,10 +201,3 @@ body { background: var(--background); color: var(--foreground); font-family: var
 .goal-node { cursor: pointer; outline: none; }
 .goal-node:hover rect:first-of-type, .goal-node:focus-visible rect:first-of-type { stroke: var(--ring) !important; stroke-width: 2.5; }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
-/* The wake word's listening marker (web/src/voice/WakeIndicator.tsx): a solid dot inside a ring, with a second ring that
-   grows and fades from it. One colour (the mic's red), the dashboard's own tokens, in light and dark. Under reduced
-   motion the growing ring is gone and the dot and ring hold still: the words beside it say the mic is on. */
-@keyframes wake-pulse { 0% { opacity: 0.55; transform: scale(1); } 70%, to { opacity: 0; transform: scale(2.1); } }
-.wake-ring { position: relative; display: inline-block; flex-shrink: 0; width: 12px; height: 12px; border-radius: 9999px; border: 2px solid var(--red); background: radial-gradient(circle, var(--red) 0 2.5px, transparent 3px); }
-.wake-ring::after { content: ""; position: absolute; inset: -2px; border-radius: 9999px; border: 2px solid var(--red); animation: wake-pulse 1.8s cubic-bezier(0.23, 1, 0.32, 1) infinite; }
-@media (prefers-reduced-motion: reduce) { .wake-ring::after { display: none; animation: none; } }

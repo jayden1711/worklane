@@ -90,7 +90,7 @@ test("doctor: a hub unit it can't read or parse exactly gives no command, only t
   }
 });
 
-test('the rerun doctor prints, pasted into a root shell, runs dashboards.sh with the Siri and hooks gateways and the device list kept', { skip: !posix && 'bash' }, () => {
+test('the rerun doctor prints, pasted into a root shell, runs dashboards.sh with the hooks gateway and the device list kept, and the removed Siri gateway gone', { skip: !posix && 'bash' }, () => {
   const { m, check, command } = doctorOn(SIRI_HOOKS_UNIT);
   writeFileSync(m.paths.sudoers, 'wl-dash ALL=(admin) NOPASSWD: /usr/local/libexec/worklane-console-shell check\n', { mode: 0o440 });
   assert.equal(check?.level, 'fail');
@@ -99,12 +99,12 @@ test('the rerun doctor prints, pasted into a root shell, runs dashboards.sh with
   const execStart = readFileSync(m.paths.unit, 'utf8').split('\n').find((l) => l.startsWith('ExecStart='));
   assert.match(execStart ?? '', / --hub alpha=\S+\/instances\/alpha\/state --service /, 'its instance');
   assert.match(execStart ?? '', / --client-id Iv1\.signin0001 --public-url https:\/\/hub\.example\.test /);
-  assert.match(execStart ?? '', / --siri-port 4397 --hooks-port 4396 --machine-devices tag:owner-laptop,box$/, 'the gateways and the devices kept');
+  assert.match(execStart ?? '', /--signin-dir \S+ --hooks-port 4396 --machine-devices tag:owner-laptop,box$/, 'the hooks gateway and the devices kept; no --siri-port');
+  assert.match(out.stderr, /warning: --siri is ignored: Siri was removed; this run removes its gateway port and tokens/, 'the --siri it passes is accepted, and said to be ignored');
+  assertSiriGone(m, 'the rerun');
   const calls = readFileSync(m.paths.calls, 'utf8');
-  for (const t of ['siri-gateway-token', 'hooks-gateway-token']) {
-    assert.ok(calls.includes(`setfacl -m g:wl-dash:r-- ${join(m.paths.state, t)}\n`), `the viewer still reads ${t}`);
-    assert.ok(!calls.includes(`setfacl -x g:wl-dash ${join(m.paths.state, t)}`), `${t}'s read not removed`);
-  }
+  assert.ok(calls.includes(`setfacl -m g:wl-dash:r-- ${join(m.paths.state, 'hooks-gateway-token')}\n`), 'the viewer still reads hooks-gateway-token');
+  assert.ok(!calls.includes(`setfacl -x g:wl-dash ${join(m.paths.state, 'hooks-gateway-token')}`), "hooks-gateway-token's read not removed");
   // And the rerun did its job: nothing of the terminal left, so doctor has nothing to say.
   const after = { hubUnitFile: m.paths.unit, consoleShell: m.paths.shell, rootUid: uid };
   assert.equal(ownerTerminalCheck(after), null);
@@ -253,12 +253,20 @@ function assertKeepsEverything(m: ReturnType<typeof hubMachine>, command: string
   const execStart = readFileSync(m.paths.unit, 'utf8').split('\n').find((l) => l.startsWith('ExecStart=')) ?? '';
   assert.match(execStart, / --hub alpha=\S+\/instances\/alpha\/state --service /, `${what}: its instance`);
   assert.match(execStart, new RegExp(` --client-id Iv1\\.signin0001 --public-url ${url.replaceAll('.', '\\.')} `), `${what}: the URL`);
-  assert.match(execStart, / --siri-port 4397 --hooks-port 4396 --machine-devices tag:owner-laptop,box$/, `${what}: the gateways and the devices kept (${execStart})`);
+  assert.match(execStart, /--signin-dir \S+ --hooks-port 4396 --machine-devices tag:owner-laptop,box$/, `${what}: the hooks gateway and the devices kept, no --siri-port (${execStart})`);
+  assertSiriGone(m, what);
   const calls = readFileSync(m.paths.calls, 'utf8');
-  for (const t of ['siri-gateway-token', 'hooks-gateway-token']) {
-    assert.ok(calls.includes(`setfacl -m g:wl-dash:r-- ${join(m.paths.state, t)}\n`), `${what}: the viewer still reads ${t}`);
-    assert.ok(!calls.includes(`setfacl -x g:wl-dash ${join(m.paths.state, t)}`), `${what}: ${t}'s read not removed`);
-  }
+  const t = 'hooks-gateway-token';
+  assert.ok(calls.includes(`setfacl -m g:wl-dash:r-- ${join(m.paths.state, t)}\n`), `${what}: the viewer still reads ${t}`);
+  assert.ok(!calls.includes(`setfacl -x g:wl-dash ${join(m.paths.state, t)}`), `${what}: ${t}'s read not removed`);
+}
+
+/** Siri was removed (#743): a rerun from an older unit (--siri-port) leaves no gateway port, no token store and no gateway token, and shares neither. */
+function assertSiriGone(m: { paths: { unit: string; state: string; calls: string } }, what: string) {
+  assert.doesNotMatch(readFileSync(m.paths.unit, 'utf8'), /--siri-port/, `${what}: no Siri gateway port`);
+  for (const f of ['siri', 'siri-gateway-token']) assert.ok(!existsSync(join(m.paths.state, f)), `${what}: ${f} deleted`);
+  assert.doesNotMatch(readFileSync(m.paths.calls, 'utf8'), /setfacl[^\n]*siri/, `${what}: no ACL on a Siri file`);
+  assert.ok(readFileSync(m.paths.calls, 'utf8').includes('sudo -u wl-alpha rm\n'), `${what}: deleted as the instance's coordinator, not as root`);
 }
 
 test("tailscale.sh's by-hand public-url command, filled in from the unit and pasted, keeps the Siri and hooks gateways and the devices", { skip: !posix && 'bash' }, () => {

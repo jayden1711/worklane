@@ -15,7 +15,8 @@ import { BRAND } from './brand.js';
 import { machineNetworkConfig, outboundEnv } from './network.js';
 import { providerHostsAtStart } from './provider-hosts.js';
 import { GITHUB_API } from './github-hosts.js';
-import { accountSwitchedAt, profileLogin } from './claude-profiles.js';
+import { accountSwitchedAt, retiredAccountGate, retiredAccountWarning, retiredLogin } from './claude-accounts-retired.js';
+import { FAILOVER_INCIDENT } from './usage-limit.js';
 import { FileBacklog } from './backlog/file.js';
 import { GitHubBacklog } from './backlog/github.js';
 import type { Backlog } from './backlog/types.js';
@@ -69,6 +70,9 @@ export const instanceId = () => `${userInfo().username}@${hostname().split('.')[
 export const logPath = (root: string) => join(projectStateDir(root), 'events.db');
 export const serviceLabel = (cfg: Config) => `dev.${BRAND.cli}.${cfg.project.project.name.replace(/[^A-Za-z0-9-]/g, '-')}`;
 
+/** A local coordinator unit's own variables, on top of what its service manager gives it; the Claude step uses it too (#738). */
+export const localServiceEnv = (env: NodeJS.ProcessEnv = process.env): { PATH: string; HOME: string } => ({ PATH: toolPath(env.PATH ?? '', env), HOME: env.HOME ?? '' });
+
 /**
  * The coordinator's service for a checkout (local mode), as `up` installs it and the first-run page's Start does:
  * one spec, so the two can't start it differently.
@@ -82,7 +86,7 @@ export function localServiceSpec(root: string, cfg: Config, env: NodeJS.ProcessE
     workingDir: root,
     logFile: join(projectStateDir(root), 'coordinator.log'),
     // PATH reaches the prefix's bin, where local init installs tools (src/tool-path.ts), as `up` has always set it.
-    env: { PATH: toolPath(env.PATH ?? '', env), HOME: env.HOME ?? '' },
+    env: localServiceEnv(env),
   };
 }
 
@@ -162,7 +166,7 @@ export function writeInstanceHooks(i: Pick<Instance, 'home' | 'config'>): string
  * only the owner sets, with credentials.sh); otherwise the agent user's Claude subscription login. The repo's own
  * agent_runtime doesn't decide this for an instance. The key never enters an environment (instanceEnv strips it).
  */
-export function instanceRuntime(i: Pick<Instance, 'credentials'>): { runtime: 'cli' | 'api_key'; apiKeyFile?: string } {
+export function instanceRuntime(i: { credentials: { agent_api_key?: string | undefined } }): { runtime: 'cli' | 'api_key'; apiKeyFile?: string } {
   return i.credentials.agent_api_key ? { runtime: 'api_key', apiKeyFile: i.credentials.agent_api_key } : { runtime: 'cli' };
 }
 
@@ -174,6 +178,16 @@ export async function runInstanceCoordinator(name: string, opts: { once?: boolea
     console.error(`instance ${name} not started: ${gate}`);
     return 1;
   }
+  // Account profiles, failover and the switch were removed (#736): a failover notice an older engine left would never
+  // close, and an instance whose runs were on another profile starts no run on any login (the engine never moves one).
+  incidentSink(name).resolveIncident(FAILOVER_INCIDENT, name);
+  const retired = retiredAccountGate(name);
+  if (retired) {
+    console.error(`instance ${name} not started: ${retired}`);
+    return 1;
+  }
+  const leftover = retiredAccountWarning();
+  if (leftover) console.error(leftover);
   let i = loadInstance(name);
   const missing = instanceProblems(i);
   if (missing.length) {
@@ -273,9 +287,9 @@ export async function runInstanceCoordinator(name: string, opts: { once?: boolea
   const mergePosts = i.config.project.backlog === 'github' ? { api: new GitHubMergePostsApi(i.repo.repo, tokens, fetch, githubApi()) } : undefined;
   // CI timings for the metrics (src/ci-metrics.ts): GitHub only, read-only.
   const ciMetrics = i.config.project.backlog === 'github' ? { api: new GitHubCiMetricsApi(i.repo.repo, tokens, fetch, githubApi()) } : undefined;
-  // The watchdog (src/watchdog/): this instance's checks, plus the machine's if elected. Each run's login: the
-  // instance's active profile (src/claude-profiles.ts), read as it starts.
-  const login = i.runAs ? profileLogin({ instance: i.name, agentUser: i.runAs.user }) : undefined;
+  // The watchdog (src/watchdog/): this instance's checks, plus the machine's if elected. Each run's login: its user's
+  // own, with every ~/.claude-profiles an older engine left on the run's denied reads (src/claude-accounts-retired.ts).
+  const login = i.runAs ? retiredLogin({ agentUser: i.runAs.user }) : undefined;
   const agentAs = i.runAs;
   const watchdog = (log: EventLog, intakeConfig: () => IntakeConfig | null) => watchdogForInstance({ instance: i.name, stateDir: i.stateDir, log, env, ...(agentAs && login ? { runAs: () => login.resolve(agentAs) } : {}), tokens, intake: intakeConfig, ...(i.credentials.intake?.discord_token ? { discordTokenFile: i.credentials.intake.discord_token } : {}), say: (l) => console.error(l) });
   // land_mode direct only on a branch GitHub protects (direct-land.ts): checked at start-up and before every direct land.
@@ -430,7 +444,6 @@ export async function runSite(site: Site, opts: { /** The instance's name (its i
     log.append('coordinator.stopping', { instance: instanceId(), signal, pending: coordinator.pending() }, instanceId());
     watchdog?.stop();
     clearInterval(watch);
-    clearInterval(siriWatch);
     coordinator.stop();
     nap.wake();
     // Kept referenced: work that hangs on nothing the event loop holds still ends here, not in a silent exit.
@@ -461,9 +474,6 @@ export async function runSite(site: Site, opts: { /** The instance's name (its i
     coordinator.checkIntake().catch(diskOnly);
   }, 5_000);
   watch.unref();
-  // Siri's questions: someone is listening, so they are looked for every second (a directory read when there are none).
-  const siriWatch = setInterval(() => coordinator.checkSiri().catch(diskOnly), 1_000);
-  siriWatch.unref();
   watchdog = opts.once ? null : (opts.watchdog?.(log, () => intake?.config() ?? null) ?? null);
   let lastBackup = 0;
   try {
@@ -486,7 +496,6 @@ export async function runSite(site: Site, opts: { /** The instance's name (its i
     process.off('SIGTERM', stop);
     process.off('SIGINT', stop);
     clearInterval(watch);
-    clearInterval(siriWatch);
     watchdog?.stop();
     intake?.stop();
     ungateDisk();
