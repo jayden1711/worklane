@@ -21,6 +21,10 @@ const c = (await import(pathToFileURL(join(repoRoot, 'scripts', 'lib', 'changelo
   notesOf(section: string | undefined): string;
   NOTES_END: string;
   scrubTitle(title: string, denied: (word: string) => boolean): string;
+  readFragments(dir: string): { name: string; text: string }[];
+  parseFragment(name: string, text: string): unknown;
+  fragmentNotes(fragments: { name: string; text: string }[]): string;
+  withFragments(existing: string, version: string, section: string, fragments: { name: string; text: string }[]): string;
 };
 const s = (await import(pathToFileURL(join(repoRoot, 'scripts', 'lib', 'signing.mjs')).href)) as {
   signingProblem(cfg: Record<string, string>, exists?: (f: string) => boolean): string | null;
@@ -410,6 +414,28 @@ test('a release section: each group, then guardrail changes with their files; wr
   assert.match(again, /Releases: the changelog \(#21\)/);
   assert.match(c.sectionFor(again, '0.5.0')!, /^## v0\.5\.0[\s\S]*src\/hook\.ts$/);
   assert.equal(c.sectionFor(again, '0.4.0'), null);
+});
+
+test("backstop (changelog.d): CHANGELOG.md holds only released sections, and every changelog.d fragment is one the release step takes whole", () => {
+  // WHY: one shared "(unreleased)" section re-conflicted every open PR that added a note to it. The design that makes
+  // that conflict impossible is changelog.d: each change's notes in a file of its own, which the release step moves
+  // into the dated section (scripts/lib/changelog.mjs withFragments). This test is the backstop for it: it fails on
+  // notes put back in CHANGELOG.md, or on a fragment the release step would refuse.
+  const fix = 'add your release notes as changelog.d/<issue or PR number>-<short-slug>.md instead (the format: changelog.d/README.md). CHANGELOG.md holds only released sections, which `release.mjs changelog` writes';
+  const text = readFileSync(join(repoRoot, 'CHANGELOG.md'), 'utf8');
+  for (const line of text.split('\n')) {
+    if (/^#/.test(line) && /unreleased/i.test(line)) assert.fail(`CHANGELOG.md has ${JSON.stringify(line)}: ${fix}`);
+    if (/^##(?!#)/.test(line)) assert.match(line, /^## v\d+\.\d+\.\d+ \(\d{4}-\d{2}-\d{2}\)$/, `CHANGELOG.md has ${JSON.stringify(line)}, not a released section: ${fix}`);
+  }
+  // Each throws naming the file and what to change in it.
+  const fragments = c.readFragments(join(repoRoot, 'changelog.d'));
+  const notes = c.fragmentNotes(fragments);
+  const out = c.withFragments(text, '99.0.0', c.changelogSection('99.0.0', '2026-12-31', [{ number: 1, title: 'A PR' }]), fragments);
+  assert.equal(c.notesOf(c.sectionFor(out, '99.0.0')!), notes, 'a release cut now would carry every fragment line');
+  // The README's example is a fragment the step takes.
+  const example = /```markdown\n([\s\S]*?)```/.exec(readFileSync(join(repoRoot, 'changelog.d', 'README.md'), 'utf8'))?.[1];
+  assert.ok(example, 'changelog.d/README.md has a ```markdown example');
+  c.parseFragment('123-example.md', example);
 });
 
 test('signing: refused without a key, or with an SSH key file that is missing; an existing SSH key, an inline key or a GPG key id is fine', () => {

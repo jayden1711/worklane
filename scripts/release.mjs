@@ -5,10 +5,12 @@
 // never holds build output: the tag's commit sits on top of the main commit it was cut from.
 //
 //   node scripts/release.mjs changelog X.Y.Z [--repo owner/repo]
-//     Write CHANGELOG.md's section for X.Y.Z from the PRs merged since the previous release (one GitHub
-//     listing through `gh`). Commit it with the version bump in a normal PR. A `## vX.Y.Z (unreleased)` section
-//     (or `## Unreleased`) is kept whole, every line under any heading: its heading becomes `## vX.Y.Z (date)` and
-//     the generated lists go after it. Safe to rerun: the lists are rewritten and the notes kept (changelog.mjs).
+//     Write CHANGELOG.md's section for X.Y.Z: the hand-written notes from changelog.d (one fragment per change,
+//     under the fixed headings: changelog.d/README.md), then the lists of the PRs merged since the previous release
+//     (one GitHub listing through `gh`), and delete the fragments it used. Commit it, the deletions and the version
+//     bump in a normal PR. It writes nothing when a fragment line would be dropped or moved (changelog.mjs
+//     withFragments). Safe to rerun once the fragments are gone: the lists are rewritten and the notes kept.
+//     (An older `## vX.Y.Z (unreleased)` section, or `## Unreleased`, is still kept whole, as before.)
 //   node scripts/release.mjs X.Y.Z
 //     On that merged commit: build, test, tag vX.Y.Z signed (`git tag -s`), verify the signature, and write
 //     the GitHub release notes (the changelog's section). Refuses unless that section is the dated one the
@@ -20,10 +22,10 @@
 // Pushing the tag runs .github/workflows/release.yml, which only STAGES the version on npm (after checking the tag's
 // signature against main's .github/release-signers); it goes live when the owner approves it on npmjs.com with 2FA.
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { changelogSection, prNumbers, scrubTitle, sectionFor, tagNotes, withSection } from './lib/changelog.mjs';
+import { changelogSection, prNumbers, readFragments, scrubTitle, sectionFor, tagNotes, withFragments } from './lib/changelog.mjs';
 import { loadRules, scanText } from './lib/denylist.mjs';
 import { treeDifferences } from './lib/release-tree.mjs';
 import { releaseSigners, signingProblem } from './lib/signing.mjs';
@@ -78,11 +80,24 @@ if (changelogOnly) {
       return { ...pr, title };
     });
   const section = changelogSection(version, new Date().toISOString().slice(0, 10), prs, repo);
-  const changelog = withSection(existsSync('CHANGELOG.md') ? readFileSync('CHANGELOG.md', 'utf8') : '', version, section);
-  writeFileSync('CHANGELOG.md', changelog);
+  // The release's hand-written notes: changelog.d, one fragment per change (changelog.d/README.md).
+  let fragments;
+  let changelog;
+  try {
+    fragments = readFragments('changelog.d');
+    changelog = withFragments(existsSync('CHANGELOG.md') ? readFileSync('CHANGELOG.md', 'utf8') : '', version, section, fragments);
+  } catch (e) {
+    fail(`nothing written: ${e.message}`);
+  }
+  // Checked before anything is written, so a refusal leaves CHANGELOG.md and every fragment as they were.
   const left = scanText(rules, 'CHANGELOG.md', sectionFor(changelog, version) ?? '');
-  if (left.length) fail(`CHANGELOG.md's v${version} section still fails the denylist (the hand-written top?):\n  ${left.join('\n  ')}`);
-  console.log(`CHANGELOG.md: v${version}, ${prs.length} PR(s) since ${prev ? `v${prev}` : 'the first commit'}. Review it, then commit it with the version bump in a PR.`);
+  if (left.length) fail(`CHANGELOG.md's v${version} section would fail the denylist (a changelog.d fragment, or the hand-written top?), so nothing is written:\n  ${left.join('\n  ')}`);
+  writeFileSync('CHANGELOG.md', changelog);
+  // INVARIANT: a fragment is deleted only once its lines are in CHANGELOG.md (withFragments checked them), so the
+  // release PR commits the section and the deletions together, and the next release can't list them again.
+  for (const f of fragments) unlinkSync(join('changelog.d', f.name));
+  const moved = fragments.length ? `, ${fragments.length} changelog.d fragment(s) moved into it and deleted` : '';
+  console.log(`CHANGELOG.md: v${version}, ${prs.length} PR(s) since ${prev ? `v${prev}` : 'the first commit'}${moved}. Review it, then commit it, the deletions and the version bump in one PR.`);
   process.exit(0);
 }
 
