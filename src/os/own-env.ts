@@ -70,7 +70,8 @@ export class OwnEnv {
    * The snapshot itself (frozen, null-prototype, each name as written) for a function still typed NodeJS.ProcessEnv:
    * its reads are own variables only too. Plain property reads are case-sensitive even on Windows, so a read of it
    * must use the name's own case there (as Windows writes it: `Path`, `SystemRoot`); get() needn't.
-   * WHY (#786): testSlotsRefusal (#818) and agentEnv (#819) are rewritten elsewhere, so their callers hand them this.
+   * WHY (#786): testSlotsRefusal (#818) still takes a NodeJS.ProcessEnv, and the runner hands its snapshot on whole as
+   * one; agentEnv and agentAuthEnv (#819) take an EnvSource and read it through get().
    */
   asProcessEnv(): NodeJS.ProcessEnv {
     return this.#vars;

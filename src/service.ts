@@ -48,7 +48,7 @@ import { intakeForInstance, type IntakeWiring } from './intake/wire.js';
 import { prodRead } from './prodread.js';
 import { coordinatorHooksDir, writeCoordinatorHooks } from './push-guard.js';
 import { stableNodePath, type ProjectRunAs, type ServiceSpec } from './os/index.js';
-import { ownEnv } from './os/own-env.js';
+import { ownEnv, type EnvSource } from './os/own-env.js';
 import { toolPath } from './tool-path.js';
 import { cachedRoles, repoPermission, type RoleOf } from './dashboard-auth.js';
 import type { CoordinatorDeps } from './coordinator/shared.js';
@@ -71,7 +71,11 @@ export const logPath = (root: string) => join(projectStateDir(root), 'events.db'
 export const serviceLabel = (cfg: Config) => `dev.${BRAND.cli}.${cfg.project.project.name.replace(/[^A-Za-z0-9-]/g, '-')}`;
 
 /** A local coordinator unit's own variables, on top of what its service manager gives it; the Claude step uses it too (#738). */
-export const localServiceEnv = (env: NodeJS.ProcessEnv = process.env): { PATH: string; HOME: string } => ({ PATH: toolPath(env.PATH ?? '', env), HOME: env.HOME ?? '' });
+export const localServiceEnv = (env: EnvSource = process.env): { PATH: string; HOME: string } => {
+  // WHY (#786): own variables only: a HOME or PATH on Object.prototype is never the unit's, nor the Claude step's.
+  const own = ownEnv(env);
+  return { PATH: toolPath(own.get('PATH') ?? '', own), HOME: own.get('HOME') ?? '' };
+};
 
 /**
  * The coordinator's service for a checkout (local mode), as `up` installs it and the first-run page's Start does:

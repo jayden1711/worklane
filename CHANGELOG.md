@@ -174,7 +174,8 @@ Every release, newest first: the PRs merged since the previous one, and what cha
   - the Chrome and Git Bash binaries, and the backup dirs;
   - the agent users' homes and `SUDO_USER`;
   - the variables an agent user's run is given across the user switch (`TZ`, `LC_ALL`, `XDG_RUNTIME_DIR` and the rest of its pass-through list), the Claude login a run is serialized on, and the `NODE_OPTIONS` handed to the App check's node;
-  - the `HOME` and instances dir written into an instance's service unit.
+  - the `HOME` and instances dir written into an instance's service unit;
+  - the Claude step's `claude auth status` (#738): the local unit's `PATH` and `HOME`, the pass-through list it shares with the runner (with `ANTHROPIC_API_KEY` for an `api_key` project), and the manager's `CLAUDE_CONFIG_DIR` in its login's cache key.
 
   Before, such a value was read as if it were set. These reads now go through one own-variable snapshot (`src/os/own-env.ts`). Nothing changes when the environment is clean. Not covered yet: a child process the engine spawns still inherits `Object.prototype`'s keys through Node's `child_process` (#846).
 

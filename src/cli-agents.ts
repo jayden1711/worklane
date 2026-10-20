@@ -281,7 +281,7 @@ export class CliAgentRunner implements AgentRunner {
   private runOnce(req: RunRequest, runAs: RunAs): Promise<RunResult> {
     const prices = (req.provider as Extract<RunRequest['provider'], { kind: 'cli' }>).usdPerMtok;
     const env = runAsEnv(
-      agentEnv(ownEnv(this.o.base).asProcessEnv(), 'cli', {
+      agentEnv(ownEnv(this.o.base), 'cli', {
         ...safeProjectEnv(req.env),
         ...identityEnv(this.o.identity ?? DEFAULT_COMMIT_IDENTITY),
         [`${BRAND.envPrefix}_ROLE`]: req.role,

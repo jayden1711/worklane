@@ -12,7 +12,9 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import ts from 'typescript';
 import { ownEnv, OwnEnv, type EnvSource } from '../src/os/own-env.js';
-import { agentEnv } from '../src/runner.js';
+import { agentAuthEnv, agentEnv } from '../src/runner.js';
+import { localServiceEnv } from '../src/service.js';
+import { detectClaudeLogin, probeEnv, type SetupProbe } from '../src/setup-steps.js';
 import { repoRoot } from './helpers.js';
 
 /** Runs `f` with `vars` on Object.prototype, as a polluting dependency would set them, and takes them off after. */
@@ -126,6 +128,55 @@ test("regression (#786 round 3): on Windows an agent's environment keeps SystemR
   polluted({ TZ: 'from-the-prototype' }, () => assert.equal(Object.hasOwn(agentEnv({ PATH: '/bin' }, 'cli'), 'TZ'), false, 'a raw base: own variables only'));
 });
 
+// After #819: agentAuthEnv is the pass-through list both the runner and the wizard's Claude step read, so it is the
+// security read, and it reads its base through the same snapshot.
+const PROTO_LOGIN = { ANTHROPIC_API_KEY: 'sk-from-the-prototype', TZ: 'from-the-prototype', CLAUDE_CONFIG_DIR: '/from-the-prototype' };
+
+test("after #819 (#786): agentAuthEnv sees only variables that are set: an ANTHROPIC_API_KEY, TZ or CLAUDE_CONFIG_DIR on Object.prototype is not the agent's", () => {
+  polluted(PROTO_LOGIN, () => {
+    for (const runtime of ['api_key', 'cli'] as const) {
+      assert.deepEqual(Object.keys(agentAuthEnv({ PATH: '/bin' }, runtime)), ['PATH'], `${runtime}: a raw base`);
+      assert.deepEqual(Object.keys(agentAuthEnv(ownEnv({ PATH: '/bin' }), runtime)), ['PATH'], `${runtime}: a snapshot`);
+    }
+    assert.equal(agentAuthEnv({ PATH: '/bin', ANTHROPIC_API_KEY: 'sk-own' }, 'api_key').ANTHROPIC_API_KEY, 'sk-own', 'a key that is set still reaches an api_key run');
+    assert.equal(Object.hasOwn(agentEnv({ PATH: '/bin' }, 'api_key'), 'ANTHROPIC_API_KEY'), false, 'agentEnv, which builds on it');
+  });
+});
+
+test('after #819 (#786): agentAuthEnv on Windows (modelled): a name in any case is the variable, and a prototype key still is not', () => {
+  const win: NodeJS.ProcessEnv = { Path: 'C:\\bin', SystemRoot: 'C:\\Windows', Anthropic_Api_Key: 'sk-own' };
+  const env = agentAuthEnv(ownEnv(win, 'win32'), 'api_key');
+  assert.deepEqual([env.PATH, env.SystemRoot, env.ANTHROPIC_API_KEY], ['C:\\bin', 'C:\\Windows', 'sk-own']);
+  // agentEnv hands its base on whole, so a Windows snapshot's case-folded index reaches agentAuthEnv.
+  assert.equal(agentEnv(ownEnv(win, 'win32'), 'api_key').ANTHROPIC_API_KEY, 'sk-own');
+  polluted({ ...PROTO_LOGIN, anthropic_api_key: 'sk-from-the-prototype' }, () => {
+    const bare = agentAuthEnv(ownEnv({ Path: 'C:\\bin' }, 'win32'), 'api_key');
+    assert.deepEqual(Object.keys(bare), ['PATH']);
+    assert.equal(bare.PATH, 'C:\\bin');
+  });
+});
+
+test("after #819 (#786): the Claude step's environment and its login's cache key see only variables that are set", () => {
+  const ids: string[] = [];
+  const probe: Pick<SetupProbe, 'which' | 'run' | 'serviceManagerEnv'> = {
+    which: () => '/stand-in/claude',
+    serviceManagerEnv: () => ({ env: {} }),
+    // Stand-ins: `claude auth status` signed in on claude.ai, and the proof call answered. Nothing is run.
+    run: (_cmd, args) => ({ status: 0, stdout: JSON.stringify(args[0] === 'auth' ? { loggedIn: true, authMethod: 'claude.ai' } : { subtype: 'success', is_error: false }), stderr: '' }),
+  };
+  const seen = polluted({ ...PROTO_LOGIN, HOME: '/from-the-prototype' }, () => {
+    const env = probeEnv({ agentRuntime: 'api_key', managerEnv: {} });
+    detectClaudeLogin(probe, { kind: 'cli', source: 'config' }, (id, call) => (ids.push(id), call()));
+    return {
+      unitHome: localServiceEnv({ PATH: '/bin' }).HOME,
+      authStatusEnv: ['ANTHROPIC_API_KEY', 'TZ', 'CLAUDE_CONFIG_DIR'].filter((k) => Object.hasOwn(env, k)),
+      cacheKeyConfigDir: ids.length === 1 ? (JSON.parse(ids[0]!) as unknown[]).at(-1) : `${ids.length} calls`,
+    };
+  });
+  // The local unit's HOME; what `claude auth status` runs with; the manager's CLAUDE_CONFIG_DIR in the login's cache key.
+  assert.deepEqual(seen, { unitHome: '', authStatusEnv: [], cacheKeyConfigDir: null });
+});
+
 test('the types: an EnvSource and an OwnEnv are read only through get(), and a raw environment is no OwnEnv (npm run typecheck)', () => {
   const read = (src: EnvSource, own: OwnEnv) => {
     // @ts-expect-error an EnvSource has no index signature: read it through ownEnv(src).get(name)
@@ -148,8 +199,9 @@ test('the types: an EnvSource and an OwnEnv are read only through get(), and a r
 
 /**
  * The modules that never read process.env directly (#786); the lint sees process.env only, not a parameter read raw.
- * Not yet here, each until the PR named edits it no more: src/os/index.ts (#818, stateDir), src/service.ts (#819),
- * src/hook.ts, src/guardrails/context.ts and src/mcp/connector.ts (#785), src/cli.ts (#743, #769, #803, #836).
+ * Not yet here, each until the PR named edits it no more: src/os/index.ts (stateDir and the project command's LANG;
+ * #818 has merged, so a follow-up), src/hook.ts, src/guardrails/context.ts and src/mcp/connector.ts (#785),
+ * src/cli.ts (#743, #769, #803, #836).
  */
 export const OWN_ENV_MODULES: readonly string[] = [
   'src/avatars.ts',
@@ -166,6 +218,8 @@ export const OWN_ENV_MODULES: readonly string[] = [
   'src/plugins/cli.ts',
   'src/plugins/fetch.ts',
   'src/runner.ts',
+  'src/service.ts',
+  'src/setup-steps.ts',
   'src/setup/app-manifest.ts',
   'src/skilleval.ts',
   'src/spend-gate.ts',

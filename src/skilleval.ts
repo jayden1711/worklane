@@ -199,7 +199,7 @@ export const cliAsk: Ask = (req) =>
   new Promise((resolve, reject) => {
     const args = ['-p', '--model', req.model, '--output-format', 'json', '--max-turns', '3', '--max-budget-usd', String(req.maxBudgetUsd), '--setting-sources', '', '--strict-mcp-config', '--json-schema', JSON.stringify(req.schema), '--disallowedTools', ...NO_TOOLS];
     if (req.system) args.push('--append-system-prompt', req.system);
-    const child = spawn('claude', args, { cwd: req.cwd, env: agentEnv(ownEnv().asProcessEnv(), 'cli'), stdio: ['pipe', 'pipe', 'pipe'] });
+    const child = spawn('claude', args, { cwd: req.cwd, env: agentEnv(ownEnv(), 'cli'), stdio: ['pipe', 'pipe', 'pipe'] });
     let out = '';
     let err = '';
     child.stdout.on('data', (d: Buffer) => (out += d.toString()));
