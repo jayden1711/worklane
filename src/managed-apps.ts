@@ -19,6 +19,7 @@
 import { readFileSync } from 'node:fs';
 import { instanceNameOk } from './instance-name.js';
 import { readRegularFile } from './os/index.js';
+import { ownEnv } from './os/own-env.js';
 import { SYSTEM_ROOT_VAR, etcPath, systemRootRefusal } from './os/system-paths.js';
 import type { LockScope } from './review.js';
 
@@ -46,7 +47,9 @@ const TEST_PRELOAD = Symbol.for('test-isolation');
  */
 function rootUid(): number {
   const uid = typeof process.getuid === 'function' ? process.getuid() : 0;
-  if (uid === 0 || !Object.hasOwn(globalThis, TEST_PRELOAD) || !process.env[SYSTEM_ROOT_VAR] || systemRootRefusal() !== null) return 0;
+  // INVARIANT (#786): the root is read and checked from one own-variable snapshot, never a prototype's value.
+  const env = ownEnv();
+  if (uid === 0 || !Object.hasOwn(globalThis, TEST_PRELOAD) || !env.get(SYSTEM_ROOT_VAR) || systemRootRefusal(env) !== null) return 0;
   return uid;
 }
 

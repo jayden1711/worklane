@@ -9,6 +9,7 @@
 // WHY: an agent ran scripts/eval-roles.mjs with no flags while developing; it made real model calls and read the
 // machine's held-out store, and nothing asked first.
 import { HELD_OUT_ENV } from './held-out-paths.js';
+import { ownEnv, type EnvSource } from './os/own-env.js';
 import { failedCost, type Ask } from './skilleval.js';
 
 /** The one flag that lets a command spend: the most this invocation may spend in all, in dollars. */
@@ -35,8 +36,8 @@ export function spendFromArgs(argv: readonly string[]): number | null {
 }
 
 /** Whether the caller pointed at a held-out store on purpose: the env variable, or --held-out-from-state. */
-export function heldOutAllowed(argv: readonly string[], env: NodeJS.ProcessEnv = process.env): boolean {
-  return Boolean(env[HELD_OUT_ENV]) || argv.includes(HELD_OUT_FROM_STATE_FLAG);
+export function heldOutAllowed(argv: readonly string[], env: EnvSource = process.env): boolean {
+  return Boolean(ownEnv(env).get(HELD_OUT_ENV)) || argv.includes(HELD_OUT_FROM_STATE_FLAG);
 }
 
 /** Said when held-out cases weren't read because nobody asked for them. */
