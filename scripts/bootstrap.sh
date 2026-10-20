@@ -347,11 +347,23 @@ if [ "$HARDENED" = 1 ]; then
   [ -d "$setup" ] || die "run this from a checkout of the engine repo (no $setup)"
   [ "$DRY" = 1 ] || [ "$(id -u)" -eq 0 ] || die "--hardened runs the setup scripts as root: run it with sudo"
   [ -z "$PUBLIC_URL" ] || [[ "$PUBLIC_URL" =~ ^https://[a-z0-9.-]+$ ]] || die "--public-url: the dashboard's https origin (https://<machine>.<tailnet>.ts.net)"
+  # The engine (#832): the pinned release, its tag checked by engine.sh at install time against ENGINE_COMMIT and the
+  # signers in this checkout's .github/release-signers, then built by that commit id; never origin's tag by name.
+  # A full commit id in ENGINE_TAG (only in a copy made for a test install, as CI's server-mode jobs make) is installed
+  # by that id: a commit id is its own checksum, so no tag is involved.
+  if [[ "$ENGINE_TAG" =~ ^[0-9a-f]{40}$ ]]; then
+    engine_step="engine.sh $ENGINE_TAG"
+  elif [[ "$ENGINE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    [[ "$ENGINE_COMMIT" =~ ^[0-9a-f]{40}$ ]] || die "the pinned engine $ENGINE_TAG has no release commit in this script (ENGINE_COMMIT is '$ENGINE_COMMIT', not a full commit id): use a copy of this script from after it was pinned"
+    engine_step="engine.sh --release $ENGINE_TAG $ENGINE_COMMIT"
+  else
+    die "the pinned engine ENGINE_TAG=$ENGINE_TAG is neither a release tag vX.Y.Z nor a full commit id: nothing to install it by"
+  fi
   # After the credentials, the first owner is already on file: read it back rather than ask again.
   if [ "$AFTER_CREDENTIALS" = 1 ] && [ -z "$OWNER" ] && [ -s "$MACHINE_OWNERS" ]; then OWNER="$(sed -n 's/^{"owners":\["\([A-Za-z0-9-]*\)".*/\1/p' "$MACHINE_OWNERS")"; fi
   first_owner
   # Each step: the script and its arguments. Credentials need your hands in between (see below).
-  steps=("node.sh $NODE_VERSION" "machine.sh" "machine-owners.sh --first $OWNER" "tools.sh $CLAUDE_VERSION" "instance.sh $NAME" "engine.sh $ENGINE_TAG $NAME $GITHUB")
+  steps=("node.sh $NODE_VERSION" "machine.sh" "machine-owners.sh --first $OWNER" "tools.sh $CLAUDE_VERSION" "instance.sh $NAME" "$engine_step $NAME $GITHUB")
   [ "$AFTER_CREDENTIALS" = 1 ] && steps=("checkout.sh $NAME $GITHUB" "service.sh $NAME" "check.sh $NAME")
   for step in "${steps[@]}"; do
     script="${step%% *}"

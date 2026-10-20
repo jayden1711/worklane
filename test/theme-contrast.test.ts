@@ -491,7 +491,8 @@ test('a progress bar is 3:1 on its track, and a chart mark on every light backgr
       }
     });
   }
-  assert.ok(tracks >= 7, `the scan finds the progress tracks (${tracks}; else it is broken)`);
+  // 6: the seventh, the voice banner's countdown (web/src/voice/VoiceControl.tsx), went with voice (#743).
+  assert.ok(tracks >= 6, `the scan finds the progress tracks (${tracks}; else it is broken)`);
   for (const [rel, snippet, what] of CHART_MARKS) {
     const at = readFileSync(join(repoRoot, rel), 'utf8').split('\n').map((line, i) => ({ line, n: i + 1 })).filter(({ line }) => line.includes(snippet));
     assert.equal(at.length, 1, `${rel} has one line with ${snippet} (the ${what})`);

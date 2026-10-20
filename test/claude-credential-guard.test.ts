@@ -31,12 +31,10 @@ test('the guard: a setup token anywhere in a value (any depth, a key too), or a 
 
 test('every request body the dashboard reads goes through the guard: a new reader without it fails here', () => {
   // The servers a person types into: an instance's dashboard and its routes, the setup console, and the hub's setup
-  // mode. The webhook and Siri gateways take bodies from services, never a person's paste box: listed, and why.
+  // mode. The webhook gateway takes bodies from services, never a person's paste box: listed, and why.
   const exempt: Record<string, string> = {
     'src/automations/webhook.ts': "an outside service's signed webhook payload, never a paste box",
     'src/automations/webhook-gateway.ts': "the hub's relay of those same webhook payloads",
-    'src/siri/gateway.ts': "the hub's relay of a Siri shortcut's request",
-    'src/siri/instance.ts': "a Siri shortcut's spoken request, checked by its device token",
   };
   const files: string[] = [];
   const walk = (d: string) => {

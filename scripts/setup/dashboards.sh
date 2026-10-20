@@ -55,11 +55,10 @@
 #   command line still runs. Every run removes what an older install had of it: the console shell ($CONSOLE_SHELL)
 #   and its sudoers rule ($CONSOLE_SUDOERS); and the hub's unit always gets its full sandbox.
 #
-#   --siri: the hub's Siri gateway (docs/siri.md), on 127.0.0.1:4397, for "Hey Siri, tell / ask" Shortcuts. wl-dash
-#     may then read each instance's siri-gateway-token too (the token that works on that instance's /api/siri/ routes
-#     and nowhere else; never its dashboard token). Publish it on the tailnet with tailscale.sh serve-siri (8443).
-#     Each instance still needs siri.enabled in its intake.yaml, and an owner's device token. Left out: no gateway,
-#     and wl-dash's read of the Siri gateway tokens is removed.
+#   Siri is removed (#743). --siri, which turned its gateway on, is accepted and ignored (said below), so an older
+#   command line still runs. Every run removes what an older install had of it: the hub unit never gets --siri-port
+#   (so nothing listens on 4397), and each named instance's Siri device token store ($state/siri) and gateway token
+#   ($state/siri-gateway-token) are deleted. The tailnet's 8443 forward goes with tailscale.sh unserve-siri.
 #   --hooks: the hub's hooks gateway for webhook automations (docs/automations.md), on 127.0.0.1:4396. wl-dash may
 #     then read each instance's hooks-gateway-token too (the token that works on that instance's /api/hooks/ routes and
 #     nowhere else; never its dashboard token; it holds no webhook secret, so it can't sign a delivery). Publish it on
@@ -75,7 +74,8 @@ while [ "$#" -gt 0 ]; do
     --setup) setup=1; shift ;;
     --no-instances) no_instances=1; shift ;;
     --loopback) loopback=1; shift ;;
-    --siri) siri=1; shift ;;
+    # Siri's: accepted so an older command line runs, and ignored (nothing of it is set up; its leftovers are removed).
+    --siri) siri=1; echo "warning: --siri is ignored: Siri was removed; this run removes its gateway port and tokens" >&2; shift ;;
     --hooks) hooks=1; shift ;;
     --client-id) client_id="${2:-}"; shift 2 ;;
     --public-url) public_url="${2:-}"; shift 2 ;;
@@ -242,7 +242,7 @@ User=$viewer
 Group=$viewer
 WorkingDirectory=~
 Environment=PATH=/usr/local/bin:/usr/bin:/bin
-ExecStart=/usr/local/bin/worklane dashboard --hub $hub_arg --service --client-id $client_id --public-url $public_url --signin-dir $signin_dir${siri:+ --siri-port 4397}${hooks:+ --hooks-port 4396}${machine_devices:+ --machine-devices $machine_devices}
+ExecStart=/usr/local/bin/worklane dashboard --hub $hub_arg --service --client-id $client_id --public-url $public_url --signin-dir $signin_dir${hooks:+ --hooks-port 4396}${machine_devices:+ --machine-devices $machine_devices}
 Restart=on-failure
 UMask=0007
 RestartSec=10
@@ -298,13 +298,10 @@ for name in "$@"; do
     d="$(dirname "$d")"
   done
   setfacl -m "g:$viewer:r--" "$state/dashboard-token"
-  # The Siri gateway's token (works on the instance's /api/siri/ routes only): readable by $viewer only with --siri.
-  wait_for "$state/siri-gateway-token" "$unit"
-  if [ -n "$siri" ]; then
-    setfacl -m "g:$viewer:r--" "$state/siri-gateway-token"
-  else
-    setfacl -x "g:$viewer" "$state/siri-gateway-token" 2>/dev/null || true
-  fi
+  # The removed Siri gateway's files (#743): its device token store and its gateway token, deleted on every run, as
+  # their owner (never as root, so a link the coordinator put there can take away only what it could itself). If
+  # that fails, the check below says so.
+  sudo -u "$coord" rm -rf -- "$state/siri" "$state/siri-gateway-token" || true
   # The hooks gateway's token (works on the instance's /api/hooks/ routes only): readable by $viewer only with --hooks.
   wait_for "$state/hooks-gateway-token" "$unit"
   if [ -n "$hooks" ]; then
@@ -338,11 +335,8 @@ for name in "$@"; do
   sudo -u "$viewer" test -r "$state/dashboard-token" || { echo "FAIL: $viewer can't read $name's token" >&2; exit 1; }
   if sudo -u "$viewer" test -r "$state/events.db" || sudo -u "$viewer" ls "$state" >/dev/null 2>&1; then echo "FAIL: $viewer can read $name's state beyond its token" >&2; exit 1; fi
   if sudo -u "$viewer" test -w "$state/dashboard-token" || sudo -u "$viewer" test -w "$state"; then echo "FAIL: $viewer can write $name's state" >&2; exit 1; fi
-  if [ -n "$siri" ]; then
-    sudo -u "$viewer" test -r "$state/siri-gateway-token" || { echo "FAIL: $viewer can't read $name's Siri gateway token" >&2; exit 1; }
-    if sudo -u "$viewer" test -w "$state/siri-gateway-token"; then echo "FAIL: $viewer can write $name's Siri gateway token" >&2; exit 1; fi
-  elif sudo -u "$viewer" test -r "$state/siri-gateway-token"; then
-    echo "FAIL: $viewer can read $name's Siri gateway token without --siri" >&2; exit 1
+  if [ -e "$state/siri" ] || [ -L "$state/siri" ] || [ -e "$state/siri-gateway-token" ] || [ -L "$state/siri-gateway-token" ]; then
+    echo "FAIL: $name still has the removed Siri gateway's token store or gateway token" >&2; exit 1
   fi
   if [ -n "$hooks" ]; then
     sudo -u "$viewer" test -r "$state/hooks-gateway-token" || { echo "FAIL: $viewer can't read $name's hooks gateway token" >&2; exit 1; }
@@ -357,7 +351,6 @@ echo
 echo "sign-in: $public_url (people sign in with GitHub; their role on each instance is their permission on its repo)"
 echo "  once: tailscale serve --bg --https=443 http://127.0.0.1:4399   (MagicDNS and HTTPS certificates on; docs/dashboard.md)"
 echo "  the sign-in App's callback URL must be exactly: $public_url/auth/callback"
-[ -z "$siri" ] || echo "Siri gateway: 127.0.0.1:4397; publish it on the tailnet once with: sudo bash scripts/setup/tailscale.sh serve-siri (https 8443; docs/siri.md)"
 [ -z "$hooks" ] || echo "hooks gateway (webhook automations): 127.0.0.1:4396; publish it on the tailnet once with: sudo bash scripts/setup/tailscale.sh serve-hooks (https 8444; docs/automations.md)"
 echo "break-glass (the owner, this machine only): http://127.0.0.1:4398/ (the page asks for the key once: it is in $hub_token_file; never put it in a URL)"
 echo "  from your laptop: ssh -N -L 4398:127.0.0.1:4398 <you>@<this-host>; never point tailscale serve at 4398"

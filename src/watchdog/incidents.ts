@@ -63,7 +63,7 @@ export const KINDS = {
   update_sandbox_unconfirmed: { title: "An engine update couldn't confirm the test sandbox", severity: 'amber' },
   // Raised by the coordinator itself (src/usage-limit.ts), not a probe: runs wait for the limit's reset.
   [USAGE_INCIDENT]: { title: 'Claude usage limit reached: runs are paused', severity: 'amber' },
-  // Raised by the coordinator (src/claude-failover.ts): a usage limit moved this instance to its next Claude account.
+  // Raised by an older engine's failover (removed, #736): kept so one left open still reads, until the start closes it.
   [FAILOVER_INCIDENT]: { title: 'Claude usage limit: moved to the next account', severity: 'info' },
   // Raised by the coordinator (src/config/live.ts): the default branch's config is invalid; the last good one runs on.
   [CONFIG_INCIDENT]: { title: 'The config on the default branch is invalid', severity: 'amber' },

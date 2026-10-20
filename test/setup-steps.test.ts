@@ -63,6 +63,7 @@ const calls: string[] = [];
 function probeFor(w: World): SetupProbe {
   return {
     which: (c) => (w.tools.has(c) ? `/stand-in/${c}` : null),
+    serviceManagerEnv: () => ({ env: {} }),
     run: (cmd, args, o = {}): RunResult => {
       if (cmd === 'git') {
         const r = spawnSync('git', args, { encoding: 'utf8', ...(o.cwd ? { cwd: o.cwd } : {}) });

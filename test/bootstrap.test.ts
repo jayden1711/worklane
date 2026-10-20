@@ -294,11 +294,39 @@ test('bootstrap --hardened: Linux with apt and systemd only; the setup scripts i
   assert.equal(r.code, 0, r.out);
   const steps = [...r.out.matchAll(/would run: bash \S+\/setup\/(\S+)(.*)/g)].map((x) => `${x[1]}${x[2]}`.trim());
   // With no https origin: setup mode on loopback, so the run ends with a URL (owner, 2026-10-14).
-  assert.deepEqual(steps, ['node.sh v24.21.0', 'machine.sh', 'machine-owners.sh --first <login>', 'tools.sh 2.1.296', 'instance.sh shop', `engine.sh ${PIN.tag} shop acme/shop`, 'dashboards.sh --setup --loopback']);
+  // The engine as the release the pin names, its tag checked at install time against that commit (#832), never by name.
+  assert.deepEqual(steps, ['node.sh v24.21.0', 'machine.sh', 'machine-owners.sh --first <login>', 'tools.sh 2.1.296', 'instance.sh shop', `engine.sh --release ${PIN.tag} ${PIN.commit} shop acme/shop`, 'dashboards.sh --setup --loopback']);
   assert.match(r.out, /credentials\.sh shop github-app/);
   const after = m.run('--hardened', '--dry-run', '--after-credentials', 'shop', 'acme/shop');
   assert.deepEqual([...after.out.matchAll(/would run: bash \S+\/setup\/(\S+)(.*)/g)].map((x) => `${x[1]}${x[2]}`.trim()), ['checkout.sh shop acme/shop', 'service.sh shop', 'check.sh shop', 'dashboards.sh --setup --loopback']);
   assert.match(m.run('--hardened', 'shop', 'acme/shop').out, /run it with sudo|y\/N/, 'a real run needs root (or asks before each script)');
+});
+
+test('bootstrap --hardened: a pin engine.sh would get by name is refused before any step; a full commit id (a test copy) installs by that id', { skip }, () => {
+  const m = machine({ have: { 'apt-get': 'true', systemctl: 'true' } });
+  const own = join(m.dir, 'checkout', 'scripts', 'bootstrap.sh');
+  const text = readFileSync(own, 'utf8');
+  const withPin = (tag: string, commit: string) => writeFileSync(own, text.replace(/^ENGINE_TAG=.*$/m, `ENGINE_TAG=${tag}`).replace(/^ENGINE_COMMIT=.*$/m, `ENGINE_COMMIT=${commit}`));
+  const steps = (out: string) => [...out.matchAll(/would run: bash \S+\/setup\/(\S+)(.*)/g)].map((x) => `${x[1]}${x[2]}`.trim());
+  // As CI's server-mode jobs make their copy (ENGINE_TAG set to the commit under test): by that id, no tag involved.
+  const sha = 'a'.repeat(40);
+  withPin(sha, PIN.commit);
+  const r = m.run('--hardened', '--dry-run', 'shop', 'acme/shop');
+  assert.equal(r.code, 0, r.out);
+  assert.ok(steps(r.out).includes(`engine.sh ${sha} shop acme/shop`), r.out);
+  const cases: [string, string, RegExp][] = [
+    ['v0.5.2#x', PIN.commit, /the pinned engine ENGINE_TAG=v0\.5\.2#x is neither a release tag vX\.Y\.Z nor a full commit id/],
+    ['main', PIN.commit, /the pinned engine ENGINE_TAG=main is neither a release tag vX\.Y\.Z nor a full commit id/],
+    [PIN.tag, '', new RegExp(`the pinned engine ${PIN.tag.replace(/\./g, '\\.')} has no release commit in this script \\(ENGINE_COMMIT is '', not a full commit id\\)`)],
+    [PIN.tag, PIN.commit.slice(0, 12), /has no release commit in this script/],
+  ];
+  for (const [tag, commit, why] of cases) {
+    withPin(tag, commit);
+    const bad = m.run('--hardened', '--dry-run', 'shop', 'acme/shop');
+    assert.equal(bad.code, 1, `${tag} ${commit}: ${bad.out}`);
+    assert.match(bad.out, why);
+    assert.deepEqual(steps(bad.out), [], 'no setup step planned or run');
+  }
 });
 
 test('bootstrap --hardened, the first install: the person installing becomes the first machine owner (from gh, or given), and it ends with one URL that answers (with no https origin, setup mode on loopback and the ssh -L line), or none, the reason and the fix', { skip }, () => {
@@ -362,7 +390,7 @@ test('bootstrap --hardened, the first install: the person installing becomes the
   assert.match(m.calls().join('\n'), /gh api user --jq \.login/, 'the login, from gh');
   assert.match(r.out, /first machine owner: @ada-lovelace/);
   assert.equal(readFileSync(owners, 'utf8'), '{"owners":["ada-lovelace"]}\n', 'written as the first machine owner');
-  assert.deepEqual(steps(), ['node.sh v24.21.0', 'machine.sh', 'tools.sh 2.1.296', 'instance.sh shop', `engine.sh ${PIN.tag} shop acme/shop`, 'dashboards.sh --setup --loopback']);
+  assert.deepEqual(steps(), ['node.sh v24.21.0', 'machine.sh', 'tools.sh 2.1.296', 'instance.sh shop', `engine.sh --release ${PIN.tag} ${PIN.commit} shop acme/shop`, 'dashboards.sh --setup --loopback']);
   assert.match(r.out, /no URL to open yet: the hub's setup mode doesn't answer on this machine \(port 4399\)\.\n {3}fix: sudo systemctl status worklane-dashboard-hub-setup\.service/);
   assert.doesNotMatch(r.out, /\n(https?:\/\/\S+)\n?$/, 'no URL last');
 
