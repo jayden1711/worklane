@@ -71,6 +71,8 @@ export interface MergeInput {
   outsidePlan?: string[];
   /** The worker raised the PR's risk class to protected (src/pr-rules.ts): protected waits for the owner. */
   claimedProtected?: boolean;
+  /** Why the change may remove or weaken a test, a lint or a guard (src/merge-policy-weakening.ts weakeningOf); empty: it doesn't. */
+  weakening?: string[];
 }
 
 export interface InstructionEvalResult {
@@ -243,6 +245,8 @@ export function mergeDecision(i: MergeInput): MergeDecision {
   // top-level modules are seen in code too.
   reasons.push(...riskAndDesignReasons({ level: i.level, waitCategories: i.waitCategories, design: { flag: i.verdict?.design_change, reason: i.verdict?.design_reason, by: 'the evaluator' }, newTopLevel: i.newTopLevel }));
   if (i.claimedProtected) reasons.push(`${HIGH_RISK_REASON}the worker marked the change protected (a risk class can be raised, never lowered)`);
+  // A test, lint or guard removed or loosened: the owner decides, whatever the level (#783).
+  reasons.push(...(i.weakening ?? []));
 
   // Big.
   if (i.lines > i.limits.max_lines) reasons.push(`big: ${i.lines} changed lines (over ${i.limits.max_lines})`);
