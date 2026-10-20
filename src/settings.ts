@@ -18,6 +18,7 @@ import { ROUTING_ALIASES } from './routing.js';
 import { attachmentCaps } from './chat-attachments.js';
 import type { StuckMode } from './stuck.js';
 import { etcPath } from './os/system-paths.js';
+import { readPolicyChecked } from './policy-gate.js';
 
 /** The machine's bounds on instance settings: root-owned, outside every instance's home. */
 export const LIMITS_PATH = etcPath('limits.json');
@@ -139,15 +140,20 @@ export function settingsReader(policyPath: string, limitsPath = LIMITS_PATH): ()
   let last: { settings: InstanceSettings; error: string | null } = { settings: {}, error: null };
   return () => {
     let stamp = '';
+    let text: string;
     try {
-      stamp = `${readFileSync(policyPath, 'utf8')}\0${existsSync(limitsPath) ? readFileSync(limitsPath, 'utf8') : ''}`;
+      // A root policy.yaml that isn't root's any more (src/policy-gate.ts) is never read: the last settings read stay.
+      const checked = readPolicyChecked(policyPath);
+      if (checked && 'refused' in checked) return { settings: last.settings, error: checked.refused };
+      text = checked ? checked.text : readFileSync(policyPath, 'utf8');
+      stamp = `${text}\0${existsSync(limitsPath) ? readFileSync(limitsPath, 'utf8') : ''}`;
     } catch (e) {
       return { settings: {}, error: `policy unreadable: ${(e as Error).message}` };
     }
     if (stamp === key) return last;
     key = stamp;
     try {
-      const policy = PolicyFile.parse(parseDocument(readFileSync(policyPath, 'utf8')).toJS());
+      const policy = PolicyFile.parse(parseDocument(text).toJS());
       const problems = settingsProblems(policy.settings, loadLimits(limitsPath), policy);
       last = problems.length ? { settings: {}, error: `settings refused: ${problems.join('; ')}` } : { settings: policy.settings, error: null };
     } catch (e) {
@@ -228,7 +234,8 @@ export function researchCaps(s: InstanceSettings): ResearchCaps {
  * dashboard read `by` as one of the instance's owners (admin on its repo); without it, owners.default only.
  * The new value is checked against the schema, the machine's limits and the policy's ceilings; refused,
  * nothing changes. Written atomically (a temp file beside policy.yaml, same owner, mode 0600, then a
- * rename), and recorded as settings.changed in the instance's event log.
+ * rename), and recorded as settings.changed in the instance's event log. A root policy.yaml (src/policy-gate.ts) is
+ * never written here: refused, naming the root command.
  */
 export function changeSetting(o: { policyPath: string; cfg: Config; eventsDb: string; key: string; value: unknown; by: string; owner?: boolean; actor?: string; limitsPath?: string; now?: () => Date }): { from: unknown; to: unknown } {
   const owner = o.cfg.project.owners.default;
@@ -236,7 +243,9 @@ export function changeSetting(o: { policyPath: string; cfg: Config; eventsDb: st
   if (!o.by || !isOwner) throw new SettingsError(`only the owner (@${owner}) may change settings; @${o.by || 'unknown'} may not`);
   if (!(SETTING_KEYS as readonly string[]).includes(o.key)) throw new SettingsError(`unknown setting ${o.key}; settings are ${SETTING_KEYS.join(', ')}`);
   const key = o.key as SettingKey;
-  const text = readFileSync(o.policyPath, 'utf8');
+  const checked = readPolicyChecked(o.policyPath);
+  if (checked && 'refused' in checked) throw new SettingsError(checked.refused);
+  const text = checked ? checked.text : readFileSync(o.policyPath, 'utf8');
   const doc = parseDocument(text);
   const before = PolicyFile.parse(doc.toJS());
   const from = currentValue(o.cfg, before.settings, key);
@@ -246,6 +255,8 @@ export function changeSetting(o: { policyPath: string; cfg: Config; eventsDb: st
   const problems = settingsProblems(parsed.data.settings, loadLimits(o.limitsPath), parsed.data);
   if (problems.length) throw new SettingsError(`refused: ${problems.join('; ')}`);
   const to = currentValue(o.cfg, parsed.data.settings, key);
+  // A root policy.yaml (src/policy-gate.ts) is never written here: root changes it.
+  if (checked) throw new SettingsError(`${o.policyPath} is root's: an admin changes it at a root shell (sudo ${BRAND.cli} policy set <instance> settings.${key} <value>)`);
   // Atomic: a temp file in the same directory, the original's owner, 0600; then rename over it.
   replaceFileAtomically(o.policyPath, doc.toString(), 0o600);
   const log = new EventLog(o.eventsDb);

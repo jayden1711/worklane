@@ -53,6 +53,15 @@ ensure_instance_home() {
   echo "ensure_instance_home $*" >> "$T/calls"
 }
 claude_login_ok() { :; }
+# The engine's \`policy own\` (as root; test/policy-edit.test.ts runs it with stand-ins): recorded, and then root's;
+# while <root>/own-refuses exists, refused as the engine refuses (its message on stderr, exit 1).
+own_policy() { echo "own_policy $*" >> "$T/owned"; if [ -e "$T/own-refuses" ]; then cat "$T/own-refuses" >&2; return 1; fi; touch "$T/owned-$1"; }
+# With <root>/real-policy-root-ok: lib.sh's own policy_root_ok, its records in <root>/policy-root, root's ownership of
+# policy.yaml stood in (stat), and the engine's \`policy check\` answering from <root>/gate-refuses-<name>.
+eval "real_$(declare -f policy_root_ok)"
+policy_root_ok() { if [ -e "$T/real-policy-root-ok" ]; then real_policy_root_ok "$@"; else [ -e "$T/owned-$1" ]; fi; }
+stat() { if [ -e "$T/real-policy-root-ok" ] && [ "$1" = -c ]; then echo "0 644 1"; else command stat "$@"; fi; }
+POLICY_ROOT_DIR="$T/policy-root"
 install_claude_token() {
   mkdir -p "$T/homes/$1/.claude"
   { printf '{"claudeAiOauth":{"accessToken":"'; cat; printf '"}}'; } > "$T/homes/$1/.claude/.credentials.json"
@@ -68,7 +77,8 @@ SETUP_POLL_SECONDS=0 SETUP_WAIT_SECONDS="$(cat "$T/wait-seconds" 2>/dev/null || 
   };
   stub(join(s, 'instance.sh'), 'instance', 'touch "$T/users/wl-$1" "$T/users/wl-$1-agent"; mkdir -p "$T/srv/$1"');
   // `instance auto-config`: the setup PR, open; merged from the check numbered in <root>/merge-after on.
-  stub(join(T, 'bin', 'worklane'), 'app', `if [ "$1 $2" = "instance auto-config" ]; then
+  stub(join(T, 'bin', 'worklane'), 'app', `if [ "$1 $2" = "policy check" ]; then [ ! -e "$T/gate-refuses-$3" ]; exit $?; fi
+if [ "$1 $2" = "instance auto-config" ]; then
   n=$(( $(cat "$T/ac-count" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$T/ac-count"
   if [ -e "$T/merge-after" ] && [ "$n" -ge "$(cat "$T/merge-after")" ]; then rm -f "$T/no-config"; echo '{"kind":"merged","detail":"the config is on main","pr":"https://github.com/example/alpha/pull/1","questions":[]}'; exit 0; fi
   echo '{"kind":"proposed","detail":"proposed in PR #1","pr":"https://github.com/example/alpha/pull/1","questions":[]}'; exit 0
@@ -404,4 +414,72 @@ test('the sudoers rule lets coordinators run add-project only with its two argum
   for (const n of NAMES_OK) assert.match(`add-project ${n} example/alpha`, re);
   for (const repo of REPOS_OK) assert.match(`add-project alpha ${repo}`, re);
   for (const a of ['add-project alpha', 'add-project alpha example/alpha extra', 'add-project Alpha example/alpha', 'add-project alpha a/b/c', 'add-project alpha a;id/b', 'add-project -x a/b']) assert.doesNotMatch(a, re, a);
+});
+
+test("the policy step makes the instance's policy.yaml root's, and a rerun on an earlier install (its coordinator's file) does it then (#726)", { skip: !posix && 'bash' }, () => {
+  const m = machine();
+  const owned = () => (existsSync(join(m.T, 'owned')) ? readFileSync(join(m.T, 'owned'), 'utf8').trim().split('\n') : []);
+  assert.equal(m.run().status, 0);
+  assert.deepEqual(owned(), ['own_policy alpha'], 'a new install: root\'s from the start');
+  // Root's already: done, not taken over again.
+  assert.equal(m.run().status, 0);
+  assert.deepEqual(owned(), ['own_policy alpha']);
+  // An install from before: the same policy.yaml, its coordinator user's. The rerun makes it root's, content and all.
+  rmSync(join(m.T, 'owned-alpha'));
+  const before = readFileSync(join(m.instDir('alpha'), 'policy.yaml'), 'utf8');
+  const r = m.run();
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(owned(), ['own_policy alpha', 'own_policy alpha']);
+  assert.ok(r.events.some((e) => e.step === 'policy' && e.state === 'done' && / policy set alpha /.test(e.detail)), JSON.stringify(r.events));
+  assert.equal(readFileSync(join(m.instDir('alpha'), 'policy.yaml'), 'utf8'), before, 'the setup step itself never rewrites it');
+});
+
+test("the policy step is done only when the engine's gate would read the policy: with an earlier root file put back (root's, 0644, recorded, but not what root last wrote) a rerun runs it again, `policy own <name>` with no flag (#726)", { skip: !posix && 'bash' }, () => {
+  const m = machine();
+  writeFileSync(join(m.T, 'real-policy-root-ok'), '');
+  mkdirSync(join(m.T, 'policy-root'));
+  writeFileSync(join(m.T, 'policy-root', 'alpha'), `{"file":"${m.instDir('alpha')}/policy.yaml","sha256":"${'0'.repeat(64)}"}\n`);
+  // Recorded, root's 0644 with one name, and the gate reads it: done, nothing taken over.
+  const first = m.run();
+  assert.equal(first.status, 0, first.stderr);
+  assert.ok(first.events.some((e) => e.step === 'policy' && e.state === 'done'), JSON.stringify(first.events));
+  assert.equal(existsSync(join(m.T, 'owned')), false, 'done already: own_policy never ran');
+  // Then the coordinator put back an earlier root file: still root's, 0644, one name, recorded; the gate refuses it.
+  writeFileSync(join(m.T, 'gate-refuses-alpha'), '');
+  const r = m.run();
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(readFileSync(join(m.T, 'owned'), 'utf8').trim().split('\n'), ['own_policy alpha'], 'not done: the step runs, with no flag');
+  assert.ok(m.calls().includes('app policy check alpha'), "the engine's gate was asked");
+});
+
+test("the policy step's text says auto_merge off while root's kill switch is armed, whatever policy.yaml says (#726 round 5)", { skip: !posix && 'bash' }, () => {
+  const m = machine();
+  assert.equal(m.run().status, 0);
+  const file = join(m.instDir('alpha'), 'policy.yaml');
+  writeFileSync(file, readFileSync(file, 'utf8').replace('auto_merge: false', 'auto_merge: true'));
+  const detail = () => m.run().events.find((e) => e.step === 'policy' && e.state === 'done')!.detail;
+  assert.match(detail(), /^auto_merge on, /, 'no switch: as policy.yaml says');
+  // Root's id pointer and an armed switch in that id's directory (src/policy-kill.ts, round 9).
+  const id = '0123456789abcdef0123456789abcdef';
+  mkdirSync(join(m.T, 'policy-root', 'by_id', id), { recursive: true });
+  writeFileSync(join(m.T, 'policy-root', 'alpha.id'), `${id}\n`);
+  assert.match(detail(), /^auto_merge on, /, 'an id with no switch armed: as policy.yaml says');
+  writeFileSync(join(m.T, 'policy-root', 'by_id', id, 'auto-merge-off.1700000000000-42-abcd'), '');
+  assert.match(detail(), /^auto_merge off \(root's kill switch\), /);
+});
+
+test("P6: a rerun through the machine helper on a policy the engine won't take over (loose, or changed since root wrote it) stops at the policy step, naming the admin's command; no flag is ever passed (#726)", { skip: !posix && 'bash' }, () => {
+  const m = machine();
+  assert.equal(m.run().status, 0);
+  // Since then the coordinator user put its own file there (sandbox: false): no longer root's, so the step runs again.
+  rmSync(join(m.T, 'owned-alpha'));
+  writeFileSync(join(m.T, 'own-refuses'), "/x/policy.yaml is looser than its coordinator could make it (sandbox: false), so it is left as it is, not root's: an admin checks it at a root shell, then changes it, or takes it over as it is with sudo worklane policy own alpha --retake --accept-loose\n");
+  // The machine helper runs add-project with no terminal and no token on stdin.
+  const r = m.run(['alpha', 'example/alpha'], '');
+  assert.equal(r.status, 1, r.stderr);
+  const failed = r.events.find((e) => e.step === 'policy' && e.state === 'failed');
+  assert.ok(failed, JSON.stringify(r.events));
+  assert.match(failed.detail, /policy own alpha --retake --accept-loose$/);
+  assert.equal(r.events.some((e) => e.step === 'service' && e.state === 'started'), false, 'nothing after it runs');
+  assert.deepEqual(readFileSync(join(m.T, 'owned'), 'utf8').trim().split('\n'), ['own_policy alpha', 'own_policy alpha'], 'setup asks for `policy own alpha` alone, never a flag');
 });

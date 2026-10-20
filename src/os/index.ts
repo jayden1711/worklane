@@ -382,6 +382,18 @@ export function userUid(user: string): number | null {
   }
 }
 
+/** Whether an OS user exists: 'absent' only on `getent passwd`'s "not found" (exit 2); any other failure 'unknown'. */
+export function userPresence(user: string, timeoutMs = 5_000): 'exists' | 'absent' | 'unknown' {
+  if (process.platform === 'win32') return 'unknown';
+  try {
+    const out = execFileSync('getent', ['passwd', '--', user], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: timeoutMs });
+    return out.split(':')[0] === user ? 'exists' : 'unknown';
+  } catch (e) {
+    const x = e as { status?: number | null; signal?: string | null };
+    return x.status === 2 && !x.signal ? 'absent' : 'unknown';
+  }
+}
+
 /**
  * Who owns a file and who besides the owner may touch it (POSIX): 'missing', 'hidden' when this user can't even
  * stat it (a directory it may not enter), or its owner uid and whether group or others have any permission. Never
@@ -549,6 +561,33 @@ export function pidAlive(pid: number): boolean {
     return true;
   } catch (e) {
     return (e as NodeJS.ErrnoException).code === 'EPERM';
+  }
+}
+
+/** processIdentity of a process that answers signal 0 but whose identity can't be read: running, as far as anyone can tell. */
+export const UNKNOWN_IDENTITY = 'unknown';
+
+/**
+ * Who `pid` is beyond its number, or null when no such process runs. On Linux: this boot's id and the process's start
+ * time (/proc/sys/kernel/random/boot_id, field 22 of /proc/<pid>/stat), so a pid reused after its process died, or
+ * after a reboot, reads as someone else. Elsewhere: its number alone, while it runs. A running process whose /proc
+ * entry can't be read is UNKNOWN_IDENTITY (never "gone").
+ */
+export function processIdentity(pid: number): string | null {
+  if (!pidAlive(pid)) return null;
+  if (process.platform !== 'linux') return `pid-${pid}`;
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
+    // After "(comm)", the fields from the third on; comm may hold spaces and parentheses, so from the last ')'.
+    const fields = stat.slice(stat.lastIndexOf(')') + 2).split(' ');
+    // A zombie (Z) or dying (X) process has exited: signal 0 still finds it until its parent reaps it.
+    if (fields[0] === 'Z' || fields[0] === 'X') return null;
+    const start = fields[19];
+    const boot = readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim();
+    return start && /^\d+$/.test(start) ? `${boot}:${start}` : UNKNOWN_IDENTITY;
+  } catch (e) {
+    // Gone between the signal and the read: no such process. Anything else: it runs, unread.
+    return (e as NodeJS.ErrnoException).code === 'ENOENT' || (e as NodeJS.ErrnoException).code === 'ESRCH' ? null : UNKNOWN_IDENTITY;
   }
 }
 
