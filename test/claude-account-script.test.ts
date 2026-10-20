@@ -79,8 +79,12 @@ echo "sudo $*" >> "$T/calls"
 [ "$1" = -u ] || exit 64
 user="$2"; shift 2
 if [ "$1" = timeout ] && ! command -v timeout >/dev/null; then shift; [ "$1" = -k ] && shift 2; shift; fi
+# A user whose dir can't be removed (a mount, an immutable file): its rm fails, as on the real machine.
+if [ "$1" = rm ] && [ -e "$T/fail-rm-$user" ]; then echo "rm: cannot remove: Operation not permitted" >&2; exit 1; fi
 HOME="$T/homes/$user" USER="$user" exec "$@"
 `);
+  // Host tools nothing here should reach: recorded and refused, never the machine's own.
+  for (const tool of ['logger', 'systemd-run', 'journalctl']) exe(tool, `#!/usr/bin/env bash\necho "${tool} $*" >> ${JSON.stringify(join(T, 'calls'))}\nexit 1\n`);
   // systemctl: a unit is active while units/<unit>.active exists. SIGTERM to its main process drains it: inactive after
   // 3 more polls, or never when units/<unit>.stuck exists.
   exe('systemctl', `#!/usr/bin/env bash
@@ -421,6 +425,50 @@ test('issue #736: uninstall removes what profiles, failover and the switch left 
   const again = m.run(['uninstall']);
   assert.equal(again.status, 0, again.stderr);
   assert.match(again.stdout, /nothing left/);
+});
+
+test("issue #736: uninstall can't remove a user's ~/.claude-profiles: it says so, exits 1 and removes none of root's files, so an instance that was on another profile stays refused", { skip: !posix }, () => {
+  const m = machine();
+  const v = join(m.T, 'var');
+  const files = ['profiles.json', 'profile-ops.jsonl', 'switch.jsonl', 'paused'];
+  for (const f of files) writeFileSync(join(v, f), '{}\n');
+  const pdir = (u: string) => join(m.T, 'homes', u, '.claude-profiles');
+  for (const u of ['wl-alpha-agent', 'wl-beta-agent']) mkdirSync(join(pdir(u), 'work'), { recursive: true });
+  // beta's agent dir can't be removed (its rm fails, as on a mount or an immutable file); alpha's can.
+  writeFileSync(join(m.T, 'fail-rm-wl-beta-agent'), '');
+  const r = m.run(['uninstall']);
+  assert.equal(r.status, 1, r.stderr + r.stdout);
+  assert.match(r.stderr, new RegExp(`couldn't remove ${pdir('wl-beta-agent').replace(/[.*+?^$()|[\]\\]/g, '\\$&')} \\(beta, agent user\\)`));
+  assert.match(r.stderr, /nothing else removed/);
+  for (const f of files) assert.ok(existsSync(join(v, f)), `${f} kept`);
+  assert.ok(existsSync(pdir('wl-beta-agent')), "the dir it couldn't remove is there");
+  assert.ok(m.calls().includes(`sudo -H -u wl-beta-agent rm -rf -- ${pdir('wl-beta-agent')}`), 'tried as that user');
+  assert.deepEqual(m.calls().filter((c) => /^(logger|systemd-run|journalctl) /.test(c)), [], 'no host tool reached');
+  // Fixed: a rerun removes the rest.
+  rmSync(join(m.T, 'fail-rm-wl-beta-agent'));
+  assert.equal(m.run(['uninstall']).status, 0);
+  for (const f of files) assert.ok(!existsSync(join(v, f)), f);
+  assert.ok(!lstatExists(pdir('wl-beta-agent')));
+});
+
+test('issue #736: uninstall removes a link inside ~/.claude-profiles as a link: what it points to, outside, is untouched', { skip: !posix }, () => {
+  const m = machine();
+  const pdir = join(m.T, 'homes', 'wl-alpha-agent', '.claude-profiles');
+  mkdirSync(pdir, { recursive: true });
+  // Outside the profiles dir: a dir with a login in it, and a file; a profile linked to each.
+  const outside = join(m.T, 'outside-dir');
+  mkdirSync(outside);
+  writeFileSync(join(outside, '.credentials.json'), 'not ours');
+  writeFileSync(join(m.T, 'outside-file'), 'not ours either');
+  symlinkSync(outside, join(pdir, 'work'));
+  symlinkSync(join(m.T, 'outside-file'), join(pdir, 'spare'));
+  writeFileSync(join(m.T, 'var', 'profiles.json'), '{}\n');
+  const r = m.run(['uninstall']);
+  assert.equal(r.status, 0, r.stderr + r.stdout);
+  assert.ok(!lstatExists(pdir), 'the profiles dir and the links in it are gone');
+  assert.equal(readFileSync(join(outside, '.credentials.json'), 'utf8'), 'not ours', 'the linked dir is never entered');
+  assert.equal(readFileSync(join(m.T, 'outside-file'), 'utf8'), 'not ours either', 'the linked file is never removed');
+  assert.deepEqual(m.calls().filter((c) => /^(logger|systemd-run|journalctl) /.test(c)), [], 'no host tool reached');
 });
 
 /** Whether anything (a link too) is at this path. */
