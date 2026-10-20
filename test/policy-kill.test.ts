@@ -13,10 +13,11 @@ import { BRAND } from '../src/brand.js';
 import { processIdentity } from '../src/os/index.js';
 import { policyRootChecks } from '../src/doctor-policy-root.js';
 import * as osAdapter from '../src/os/index.js';
-import { autoMergeKilled, POLICY_ROOT_DIR } from '../src/policy-kill.js';
+import { autoMergeKilled, idDir, instanceId, POLICY_ROOT_DIR } from '../src/policy-kill.js';
 import * as killModule from '../src/policy-kill.js';
 import { ownPolicy, setPolicy, type PolicyRootDeps } from '../src/policy-root.js';
 import { repoRoot } from './helpers.js';
+import { onRealMachine } from './isolate.js';
 
 const skip = process.platform !== 'linux' && 'a Linux machine install (POSIX owners, /proc)';
 const me = process.platform === 'win32' ? 0 : process.getuid!();
@@ -134,6 +135,7 @@ test('an OFF that said done while an admin\'s `set on` waited for root\'s lock i
   ownPolicy(name, m.deps);
   // A live writer holds root's lock, so ON waits for it.
   const holder = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+  onRealMachine(POLICY_ROOT_DIR); // throws unless it is inside this test's system root: never the machine's own (#815)
   writeFileSync(join(POLICY_ROOT_DIR, `.${name}.lock`), `${holder.pid} ${processIdentity(holder.pid!)}\n`);
   const child = join(m.T, 'on-wait.mjs');
   const started = join(m.T, 'started');
@@ -355,7 +357,10 @@ test("a temp file a root writer left (killed before its rename) is swept on root
   const name = 'sweep';
   const m = machineInstance(name);
   ownPolicy(name, m.deps);
-  const d = switchDir(name);
+  const p = instanceId(name);
+  assert.ok(p && 'id' in p);
+  const d = idDir(p.id);
+  onRealMachine(d); // throws unless it is inside this test's system root (#815)
   // A file's mtime set to a wall time some while ago (not a duration).
   const tenMinutesAgo = new Date(Date.now() - 600_000);
   const twoDaysAgo = new Date(Date.now() - 2 * 24 * 3600_000);
@@ -504,6 +509,7 @@ test("root's id pointer can't be turned against OFF: one that is no plain file, 
   const idCheck = () => policyRootChecks(instances, { machine: true }).find((c) => c.name === `auto_merge id ${name}`);
   assert.equal(idCheck()?.level, 'warn');
   assert.match(idCheck()!.detail, /shother shares shon's id/);
+  onRealMachine(POLICY_ROOT_DIR); // throws unless it is inside this test's system root (#815)
   unlinkSync(join(POLICY_ROOT_DIR, 'shother.id'));
   assert.equal(idCheck(), undefined);
   unlinkSync(join(POLICY_ROOT_DIR, `${name}.id`));
@@ -605,7 +611,11 @@ test("lib.sh auto_merge_killed (add-project's text) reads root's switches as the
   assert.equal(killed('la'), true, 'an OFF on the other name of the same id');
   writeFileSync(join(T, 'lg.id'), 'garbled\n');
   assert.equal(killed('lg'), true, 'a garbled pointer: off');
-  const d = switchDir('la', T);
+  // The id directory under this test's own temporary root T (not root's directory, so no onRealMachine: #815).
+  const la = kill.instanceId!('la', T);
+  assert.ok(la && 'id' in la);
+  const d = join(T, 'by_id', la.id);
+  assert.equal(d, switchDir('la', T));
   chmodSync(d, 0o000);
   try {
     assert.equal(killed('la'), true, "an id directory it can't list: off");
@@ -626,6 +636,7 @@ function lostPointer(name: string) {
   ownPolicy(name, m.deps);
   setPolicy(name, 'auto_merge', 'on', null, m.deps);
   setPolicy(name, 'auto_merge', 'off', null, m.deps);
+  onRealMachine(POLICY_ROOT_DIR); // throws unless it is inside this test's system root (#815)
   unlinkSync(join(POLICY_ROOT_DIR, `${name}.id`));
   assert.equal(autoMergeKilled(name), true, 'taken over, no pointer: off');
   return m;
@@ -698,7 +709,10 @@ function lostDir(name: string) {
   ownPolicy(name, m.deps);
   setPolicy(name, 'auto_merge', 'on', null, m.deps);
   setPolicy(name, 'auto_merge', 'off', null, m.deps);
-  const d = switchDir(name);
+  const p = instanceId(name);
+  assert.ok(p && 'id' in p);
+  const d = idDir(p.id);
+  onRealMachine(d); // throws unless it is inside this test's system root (#815)
   rmSync(d, { recursive: true });
   assert.equal(autoMergeKilled(name), true, 'its id directory gone: off');
   return { m, d };
@@ -746,6 +760,7 @@ test('a taken-over instance whose id directory is gone: an OFF puts it back with
   // A garbled pointer: --retake (named by doctor) now works: a new id, armed, off.
   const m3 = machineInstance('ldg');
   ownPolicy('ldg', m3.deps);
+  onRealMachine(POLICY_ROOT_DIR); // throws unless it is inside this test's system root (#815)
   writeFileSync(join(POLICY_ROOT_DIR, 'ldg.id'), 'garbled\n');
   assert.equal(autoMergeKilled('ldg'), true);
   ownPolicy('ldg', m3.deps, { retake: true });
@@ -757,6 +772,7 @@ test("an OFF's mint that failed or was killed before its link leaves an id direc
   const m = machineInstance('swo');
   ownPolicy('swo', m.deps);
   const byId = join(POLICY_ROOT_DIR, 'by_id');
+  onRealMachine(byId); // throws unless it is inside this test's system root (#815)
   const [old, fresh] = ['aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa01', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa02'];
   for (const n of [old, fresh]) {
     mkdirSync(join(byId, n));
@@ -776,7 +792,10 @@ test("a rename landing inside the orphan sweep (after it listed root's pointers,
   ownPolicy('swr', m.deps);
   setPolicy('swr', 'auto_merge', 'on', null, m.deps);
   assert.equal(autoMergeKilled('swr'), false, 'on before the rename');
-  const live = switchDir('swr');
+  const p = instanceId('swr');
+  assert.ok(p && 'id' in p);
+  const live = idDir(p.id);
+  onRealMachine(live); // throws unless it is inside this test's system root (#815)
   const twoHoursAgo = new Date(Date.now() - 2 * 3600_000);
   utimesSync(live, twoHoursAgo, twoHoursAgo);
   const fs = createRequire(import.meta.url)('node:fs') as Record<string, unknown>;
@@ -787,6 +806,7 @@ test("a rename landing inside the orphan sweep (after it listed root's pointers,
     if (!renamed && String(p) === POLICY_ROOT_DIR) {
       renamed = true; // instance-rename.sh: the new name aliased to the id, then the old pointer removed
       kill.aliasInstance!('swr', 'swr2');
+      onRealMachine(POLICY_ROOT_DIR); // throws unless it is inside this test's system root (#815)
       unlinkSync(join(POLICY_ROOT_DIR, 'swr.id'));
     }
     return got;
