@@ -1540,95 +1540,25 @@ export interface AccountUser {
   installedAt: string | null;
   error: string | null;
 }
-export interface SwitchLine {
-  at: string;
-  step: 'switch' | 'pause' | 'token' | 'wait' | 'install' | 'check' | 'resume';
-  state: 'started' | 'done' | 'failed' | 'ask' | 'skipped';
-  instance: string | null;
-  user: string | null;
-  detail: string;
-}
-export interface SwitchInstance {
-  name: string;
-  pause: SwitchLine | null;
-  wait: SwitchLine | null;
-  users: { user: string; install: SwitchLine | null; check: SwitchLine | null }[];
-  check: SwitchLine | null;
-  resume: SwitchLine | null;
-}
-export interface SwitchView {
-  startedAt: string;
-  status: 'running' | 'done' | 'failed' | 'stalled';
-  detail: string;
-  /** Waiting for the token at the root shell where the switch was started (never this page: issue #711). */
-  waitingForToken: boolean;
-  token: SwitchLine | null;
-  instances: SwitchInstance[];
-}
 export interface ClaudeAccountData {
   machineOwner: boolean;
   machineOwners: string[];
   login: string;
   instance: string;
-  /** Whether this person may refresh, or choose or remove a profile (the server checks again). */
+  /** Whether this person may refresh (the server checks again). */
   allowed: boolean;
   why: string | null;
   /** False when no device would help (this person's role here): no buttons are drawn; absent from older servers. */
   everAllowed?: boolean;
-  /** A switch a root admin runs on the machine, while it runs. */
-  busy: string | null;
   status: { at: string; users: AccountUser[] } | null;
-  switch: SwitchView | null;
   requests: { id: string; args: string[]; by: string; at: string; status: string; detail: string; finishedAt?: string | null }[];
-  /** The account profiles (src/claude-profiles.ts); absent from an older server. */
-  profiles?: ProfilesTable;
-  profileOps?: ProfileOp[];
-  /** The root script on the machine: a switch, an added account and a staged profile's confirmation are run with it. */
-  confirmScript?: string;
+  /** How a person signs an agent user in, as that user on the machine (#736). Absent from an older server. */
+  signin?: string;
+  /** What the removed account profiles, failover and switch left on the machine, and the root step that removes it (#736). */
+  retired?: { files: string[]; refused: string[]; unreadable: boolean; command: string } | null;
 }
-/** One instance's agent user on one profile: its last real call there, and whether it is the active one. */
-export interface ProfileCell {
-  instance: string;
-  user: string | null;
-  active: boolean;
-  account: string | null;
-  subscription: string | null;
-  apiOk: boolean | null;
-  apiError: string | null;
-  checkedAt: string | null;
-  /** The usage limit on it (the instance's pause, on its active account): when it resets, and that in words. Absent from an older server. */
-  limit?: { resetAt: string; resets: string } | null;
-}
-export interface ProfilesTable {
-  instances: string[];
-  profiles: { name: string; kind: string; staged?: boolean; addedFor?: string | null; addedAt: string | null; cells: ProfileCell[] }[];
-  active: Record<string, string>;
-  /** The instance whose usage-limit pause the server read (its own); every other column's limit is not shown here. Absent from an older server. */
-  limitsOf?: string | null;
-  /** Auto-failover on a usage limit: machine-wide, and per instance (an empty order: off there). Absent from an older server. */
-  failover?: { machine: FailoverSetting | null; instances: Record<string, FailoverSetting> };
-}
-export interface FailoverSetting {
-  order: string[];
-  back: boolean;
-}
-export interface ProfileOp {
-  id: string;
-  op: 'profile-add' | 'use' | 'remove' | 'login';
-  profile: string;
-  for: string | null;
-  status: 'running' | 'done' | 'failed' | 'stalled';
-  startedAt: string;
-  endedAt: string | null;
-  detail: string;
-  steps: { step: string; state: string; instance: string | null; user: string | null; detail: string }[];
-}
-// Issue #711: nothing here sends a Claude credential. Adding an account, signing one in and switching every agent are
-// a root admin's on the machine; the page only shows status and names those commands.
-/** This dashboard's own instance's failover setting: an order of 2 to 8 profiles, or null for off (the machine's is a root admin's). */
-export const setClaudeFailover = (order: string[] | null, back: boolean) => api<{ ok: boolean }>('/api/machine/claude-profile', { method: 'POST', body: JSON.stringify({ action: 'failover', order, back }) });
-/** Use or remove a profile, for this dashboard's own instance only (another instance, or every one, is a root admin's). */
-export const claudeProfileAction = (action: 'use' | 'remove', profile: string) => api<{ ok: boolean }>('/api/machine/claude-profile', { method: 'POST', body: JSON.stringify({ action, profile }) });
+// Issue #711: nothing here sends a Claude credential, and the engine manages no Claude account (#736): the page only
+// shows status and names the commands a person runs on the machine.
 export const getClaudeAccount = () => api<ClaudeAccountData>('/api/claude-account');
 export const claudeAccountAction = (action: 'status') => api<{ ok: boolean }>('/api/machine/claude-account', { method: 'POST', body: JSON.stringify({ action }) });
 

@@ -19,6 +19,7 @@ import { canRunAgents, detectOs, diskFree, fileAccess, nvidiaNodes, shimsNeedShe
 import { diskFloorCheck } from './governor-holds.js';
 import { findTool, toolBin } from './tool-path.js';
 import { checkIntakeFile } from './intake/check.js';
+import { claudeAccountLeftoverCheck } from './claude-accounts-retired.js';
 import { INTAKE_FILE } from './intake/config.js';
 import { lintSkills, skillLintReport, trackedSkills } from './skill-lint.js';
 import { initStateUnreadable, localInitFile, localRepo, readInitState, serverInitFile, setupContext, unavailableIn, type InitIo, type Mode } from './init.js';
@@ -213,6 +214,9 @@ export function doctor(rootArg: string, opts: { agentshield?: boolean; /** A pol
     const v = spawnSync(claude, ['--version'], { encoding: 'utf8', timeout: 20_000 });
     add('claude', v.status === 0 ? 'ok' : 'warn', (v.stdout || v.stderr || '').trim().split('\n')[0] ?? '');
   }
+  // What the removed account profiles, failover and switch left (#736): ignored, named with the step that removes it.
+  const accountLeftovers = claudeAccountLeftoverCheck();
+  if (accountLeftovers) out.push(accountLeftovers);
 
   // Lean CLAUDE.md
   const claudeMd = join(root, 'CLAUDE.md');

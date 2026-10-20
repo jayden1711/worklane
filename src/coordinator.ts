@@ -27,8 +27,6 @@ import { compareInstructions, engineRoleCases, instructionTargets, neutralDir, p
 import { SESSION_ID, type RunResult } from './runner.js';
 import { MAX_MESSAGE, mayRequest, takeRequests } from './console.js';
 import { runMachineRequests } from './coordinator/machine-requests.js';
-import { recordProfileSwitches } from './claude-profiles.js';
-import { failoverStep } from './claude-failover.js';
 import { chatTurn, contextFromEvents, recentRuns, takeChatRequests, writeChatAnswer, type ChatAnswer, type ChatRequest } from './chat.js';
 import { chatRunOptions, conversationSpentUsd, DEFAULT_PERSON_DAILY_USD, MAIN_CONVERSATION, nextLocalMidnight, personSpentUsd } from './chat-pick.js';
 import { machineStats } from './os/stats.js';
@@ -134,10 +132,6 @@ export class Coordinator extends AutomationRuns {
     await step('claude sign-in', () => this.checkHeldLogins(), 0);
     // Machine changes the dashboard recorded (it can't sudo; this unit can): src/coordinator/machine-requests.ts.
     await step('machine', () => runMachineRequests({ log: this.d.log, instance: this.d.instance, ...(this.d.machineExec ? { exec: this.d.machineExec } : {}) }), 0);
-    // A Claude account profile switch this dashboard asked for, once the root script has finished it: account.switched.
-    await step('account profiles', () => recordProfileSwitches(this.d.log, this.d.instance), 0);
-    // Auto-failover between account profiles on a usage limit, when it is on (src/claude-failover.ts). Never on an auth failure.
-    await step('account failover', () => failoverStep({ log: this.d.log, instance: this.d.instance, ...(this.d.machineExec ? { exec: this.d.machineExec } : {}), ...(this.d.incidents ? { incidents: this.d.incidents } : {}) }), null);
     const reconciled = await step('reconcile', () => this.reconcile(), 0);
     await step('nightly', () => this.maybeNightly(), undefined);
     await step('report', () => this.maybeReport(), undefined);

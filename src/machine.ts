@@ -69,20 +69,19 @@ export function setUpdates(on: boolean, exec: Exec = defaultExec): MachineResult
 
 /**
  * The agents' Claude account through the helper (scripts/setup/claude-account.sh, src/claude-account.ts): status
- * refreshes each agent user's account and expiry. Nothing here switches the account: that takes a Claude credential,
- * a root admin's at a root shell on the machine (issue #711).
+ * refreshes each agent user's account and expiry. Nothing else: the engine manages no Claude account (#736), and
+ * never takes a Claude credential (issue #711).
  */
 export function claudeAccount(action: 'status', exec: Exec = defaultExec): MachineResult {
   return runHelper(['claude-account', action], exec);
 }
 
 /**
- * A Claude account profile step through the helper (src/claude-profiles.ts): remove|use <profile>, for
- * this coordinator's own instance (the helper takes it from sudo). It starts the step as its own unit and returns at
- * once; the caller checked the shape.
+ * The account profile steps were removed (#736): refused here, the helper never run. Kept only as the name
+ * src/console/root-steps.ts imports (its import line is shared with an open change); #758 drops it.
  */
-export function claudeProfile(args: readonly string[], exec: Exec = defaultExec): MachineResult {
-  return runHelper(['claude-account', ...args], exec);
+export function claudeProfile(args: readonly string[], _exec: Exec = defaultExec): MachineResult {
+  return { ok: false, error: `claude-account ${args.join(' ').slice(0, 60)}: account profiles and failover were removed (#736)` };
 }
 
 /** What the engine updater follows (scripts/machine/, the updater): signed release tags, or main's green commits. */

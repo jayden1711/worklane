@@ -15,7 +15,8 @@ import { BRAND } from './brand.js';
 import { machineNetworkConfig, outboundEnv } from './network.js';
 import { providerHostsAtStart } from './provider-hosts.js';
 import { GITHUB_API } from './github-hosts.js';
-import { accountSwitchedAt, profileLogin } from './claude-profiles.js';
+import { accountSwitchedAt, retiredAccountGate, retiredAccountWarning, retiredLogin } from './claude-accounts-retired.js';
+import { FAILOVER_INCIDENT } from './usage-limit.js';
 import { FileBacklog } from './backlog/file.js';
 import { GitHubBacklog } from './backlog/github.js';
 import type { Backlog } from './backlog/types.js';
@@ -177,6 +178,16 @@ export async function runInstanceCoordinator(name: string, opts: { once?: boolea
     console.error(`instance ${name} not started: ${gate}`);
     return 1;
   }
+  // Account profiles, failover and the switch were removed (#736): a failover notice an older engine left would never
+  // close, and an instance whose runs were on another profile starts no run on any login (the engine never moves one).
+  incidentSink(name).resolveIncident(FAILOVER_INCIDENT, name);
+  const retired = retiredAccountGate(name);
+  if (retired) {
+    console.error(`instance ${name} not started: ${retired}`);
+    return 1;
+  }
+  const leftover = retiredAccountWarning();
+  if (leftover) console.error(leftover);
   let i = loadInstance(name);
   const missing = instanceProblems(i);
   if (missing.length) {
@@ -276,9 +287,9 @@ export async function runInstanceCoordinator(name: string, opts: { once?: boolea
   const mergePosts = i.config.project.backlog === 'github' ? { api: new GitHubMergePostsApi(i.repo.repo, tokens, fetch, githubApi()) } : undefined;
   // CI timings for the metrics (src/ci-metrics.ts): GitHub only, read-only.
   const ciMetrics = i.config.project.backlog === 'github' ? { api: new GitHubCiMetricsApi(i.repo.repo, tokens, fetch, githubApi()) } : undefined;
-  // The watchdog (src/watchdog/): this instance's checks, plus the machine's if elected. Each run's login: the
-  // instance's active profile (src/claude-profiles.ts), read as it starts.
-  const login = i.runAs ? profileLogin({ instance: i.name, agentUser: i.runAs.user }) : undefined;
+  // The watchdog (src/watchdog/): this instance's checks, plus the machine's if elected. Each run's login: its user's
+  // own, with every ~/.claude-profiles an older engine left on the run's denied reads (src/claude-accounts-retired.ts).
+  const login = i.runAs ? retiredLogin({ agentUser: i.runAs.user }) : undefined;
   const agentAs = i.runAs;
   const watchdog = (log: EventLog, intakeConfig: () => IntakeConfig | null) => watchdogForInstance({ instance: i.name, stateDir: i.stateDir, log, env, ...(agentAs && login ? { runAs: () => login.resolve(agentAs) } : {}), tokens, intake: intakeConfig, ...(i.credentials.intake?.discord_token ? { discordTokenFile: i.credentials.intake.discord_token } : {}), say: (l) => console.error(l) });
   // land_mode direct only on a branch GitHub protects (direct-land.ts): checked at start-up and before every direct land.
