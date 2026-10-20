@@ -34,6 +34,8 @@
 #                                                 first-run wizard. No key or token in it: the page asks, from a
 #                                                 0600 file. When nothing answers, no URL: the reason, the fix,
 #                                                 exit 4.
+#                                                 The instance's credentials, checkout and service: Add project,
+#                                                 in the dashboard or as add-project.sh (the run says which).
 #                                                 This is server mode (--mode server alone points here).
 #
 # Nothing is piped from the network into a shell. Everything it downloads is pinned and checked: Node.js and
@@ -376,12 +378,15 @@ if [ "$HARDENED" = 1 ]; then
     [ "$rc" = 0 ] || exit "$rc"
   done
   if [ "$AFTER_CREDENTIALS" = 0 ]; then
-    say "next, by hand: the instance's credentials"
-    echo "   bash scripts/setup/credentials.sh $NAME github-app <app-id> <installation-id> <key.pem> $GITHUB"
-    echo "   claude setup-token   (on a machine signed in to the Claude account the agents should use), then"
-    echo "   bash scripts/setup/credentials.sh $NAME claude   (paste the token it printed; it is not shown)"
-    echo "   then: sudo bash scripts/bootstrap.sh --hardened --after-credentials $NAME $GITHUB"
-    echo "   (docs/separate-users.md has the details)"
+    # WHY (#739): one answer for the instance's credentials, the same as the dashboard's: Add project. It makes the
+    # agents' App through GitHub's manifest flow only, waits for root to install the agents' Claude login, then the
+    # checkout and the service. Never an App made by hand or a token pasted here. --after-credentials stays, for an
+    # install whose credentials were stored by hand.
+    say "next: Add project, for $NAME's credentials, checkout and service"
+    echo "   In the dashboard, once you are signed in, the Setup console's Add project with $NAME and $GITHUB"
+    echo "   makes the agents' GitHub App through GitHub's manifest flow (installed on $GITHUB only), waits for the agents'"
+    echo "   Claude login, then sets up the checkout and starts the service. The same steps, at a root shell:"
+    echo "   sudo bash scripts/setup/add-project.sh $NAME $GITHUB"
   fi
   dashboard_next
   exit 0
