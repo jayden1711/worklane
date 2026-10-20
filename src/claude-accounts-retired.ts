@@ -39,6 +39,14 @@ export function retiredLogin(o: { agentUser: string }) {
   };
 }
 
+/**
+ * When this instance last moved to another login (the coordinator's `accountSwitched`, which ends a usage-limit pause
+ * that began before it): never, since the engine switches no account. Reads nothing: a switch time an older engine
+ * left in switch.jsonl or profiles.json ends no pause. Kept only so src/service.ts's runSite line, which an open change
+ * also edits, stays as it is; a follow-up drops it with the coordinator's hook.
+ */
+export const accountSwitchedAt = (_instance: string): string | null => null;
+
 /** What is left in the claude-account dir: each leftover file, and the instances profiles.json had on another profile. */
 export interface RetiredLeftovers {
   files: string[];

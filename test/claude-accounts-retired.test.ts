@@ -113,6 +113,11 @@ test("leftover state never picks a login: a run's login is its user's own dir, w
   const own = { ...AGENT, claudeConfigDir: '/srv/alpha/claude' };
   assert.deepEqual(login.resolve(own), own, "instance.yaml's claude_config_dir stays the login");
   assert.equal(new CliRunner('cli', {}, 'claude', own, undefined, undefined, {}, undefined, undefined, login).loginOf({}), '/srv/alpha/claude');
+  // A switch time an older engine left ends no usage-limit pause: the coordinator's hook always hears "never".
+  const { accountSwitchedAt } = await import('../src/claude-accounts-retired.js');
+  writeFileSync(join(CLAUDE_ACCOUNT_DIR, 'profiles.json'), JSON.stringify({ switched_at: { alpha: new Date().toISOString() } }));
+  writeFileSync(join(CLAUDE_ACCOUNT_DIR, 'switch.jsonl'), `${JSON.stringify({ at: new Date().toISOString(), step: 'switch', state: 'done', detail: 'x' })}\n`);
+  assert.equal(accountSwitchedAt('alpha'), null);
 });
 
 test("every profile dir left on disk stays on each run's denied reads (the whole ~/.claude-profiles, whatever its names), with the user's own login file", async () => {

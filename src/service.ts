@@ -15,7 +15,7 @@ import { BRAND } from './brand.js';
 import { machineNetworkConfig, outboundEnv } from './network.js';
 import { providerHostsAtStart } from './provider-hosts.js';
 import { GITHUB_API } from './github-hosts.js';
-import { retiredAccountGate, retiredAccountWarning, retiredLogin } from './claude-accounts-retired.js';
+import { accountSwitchedAt, retiredAccountGate, retiredAccountWarning, retiredLogin } from './claude-accounts-retired.js';
 import { FAILOVER_INCIDENT } from './usage-limit.js';
 import { FileBacklog } from './backlog/file.js';
 import { GitHubBacklog } from './backlog/github.js';
@@ -296,7 +296,7 @@ export async function runInstanceCoordinator(name: string, opts: { once?: boolea
   // Approved plugins (src/plugins/run.ts): root's allowlist and store, checked before every run.
   const plugins = ({ role }: { role: string }) => pluginsForRun({ instance: i.name, instanceHome: i.home, role });
   const claude = new CliRunner(instanceRuntime(i).runtime, process.env, 'claude', i.runAs ?? undefined, allLanes(i), identity, {}, () => guardrailSettings(i.home, i.name, i.repo.path), instanceRuntime(i).apiKeyFile, login, plugins, { instance: i.name, register: (role, ttlMs) => registerRun(i.name, role, ttlMs), end: (ticket) => endRun(i.name, ticket) });
-  return runSite(siteForInstance(i), { ...opts, instance: i.name, label: `instance ${name}`, lockScope, protection: watchApi, offsiteConfig: join(i.home, OFFSITE_FILE), ...(i.credentials.provider_keys ? { providerKeys: i.credentials.provider_keys } : {}), testRun, intake, roleOf, liveConfig, watchdog, incidents: incidentSink(i.name), superfan: superfanView(i.name, i.stateDir), ...(i.runAs ? { experiments: { instance: i.name, pinsFile: join(i.home, PINS_FILE) } } : {}), automations: { file: join(i.home, AUTOMATIONS_FILE), policy: () => readPolicy(join(i.home, 'policy.yaml')).policy?.automations ?? AutomationsPolicy.parse(undefined) }, ...(mainWatch ? { mainWatch } : {}), ...(mergePosts ? { mergePosts } : {}), ...(ciMetrics ? { ciMetrics } : {}) }, withCliAgents(claude, { codex: vendor('codex'), gemini: vendor('gemini') }), expiry, tokens, i.runAs ?? undefined, gh.kind === 'app' ? gh.key_path : undefined, identity, () => loadInstance(name).policy.auto_merge, settingsReader(join(i.home, 'policy.yaml')));
+  return runSite(siteForInstance(i), { ...opts, instance: i.name, label: `instance ${name}`, lockScope, protection: watchApi, offsiteConfig: join(i.home, OFFSITE_FILE), ...(i.credentials.provider_keys ? { providerKeys: i.credentials.provider_keys } : {}), testRun, intake, roleOf, liveConfig, watchdog, incidents: incidentSink(i.name), accountSwitched: () => accountSwitchedAt(i.name), superfan: superfanView(i.name, i.stateDir), ...(i.runAs ? { experiments: { instance: i.name, pinsFile: join(i.home, PINS_FILE) } } : {}), automations: { file: join(i.home, AUTOMATIONS_FILE), policy: () => readPolicy(join(i.home, 'policy.yaml')).policy?.automations ?? AutomationsPolicy.parse(undefined) }, ...(mainWatch ? { mainWatch } : {}), ...(mergePosts ? { mergePosts } : {}), ...(ciMetrics ? { ciMetrics } : {}) }, withCliAgents(claude, { codex: vendor('codex'), gemini: vendor('gemini') }), expiry, tokens, i.runAs ?? undefined, gh.kind === 'app' ? gh.key_path : undefined, identity, () => loadInstance(name).policy.auto_merge, settingsReader(join(i.home, 'policy.yaml')));
 }
 
 /** An instance's superfan view: its name, and its service log as the dashboard's Logs page reads it (never sudo). */
