@@ -9,6 +9,7 @@ import { existsSync, readFileSync, statSync } from 'node:fs';
 import { dirname, join, normalize } from 'node:path';
 import ts from 'typescript';
 import { instructionEvalReasons, mergeDecision, outsidePlanReasons, type MergeInput, type MergeVerdict } from '../src/merge-policy.js';
+import { weakeningReasons } from '../src/merge-policy-weakening.js';
 import type { LevelResult } from '../src/review.js';
 import { repoRoot } from './helpers.js';
 
@@ -171,6 +172,8 @@ const everything: Required<MergeInput> = {
   instructionEvals: instructionEvalReasons(['roles/worker'], []),
   outsidePlan: outsidePlanReasons({ planFiles: [], level, waitCategories: ['migration'], newTopLevel: ['plugins/'] }),
   claimedProtected: true,
+  // A change that takes an assertion out of a test: the #783 hold, from its own function.
+  weakening: weakeningReasons({ files: [{ path: 'test/a.test.ts', added: 0, removed: 1, addedLines: [], removedLines: ['  assert.ok(x);'] }], deleted: new Set(), before: () => null, after: () => null, scope: undefined }),
 };
 
 /** The two switch reasons have no colon and share this kind. */
@@ -210,6 +213,9 @@ function holdKindProblems(md: string): { undocumented: string[]; unused: string[
 
 test('the hold kinds the guardrails page lists are exactly the reason kinds mergeDecision gives', () => {
   const md = page();
+  // Set isn't on: a list input that is empty (an empty literal, or a helper that stopped giving a reason for its
+  // fixture) gives no reason, so a kind behind it would go unseen.
+  for (const [k, v] of Object.entries(everything)) if (Array.isArray(v)) assert.ok(v.length > 0, `the ${k} input is on (non-empty)`);
   assert.match(md, /`src\/merge-policy\.ts#mergeDecision`/, 'the page names mergeDecision as the decision');
   const kinds = listedKinds(md);
   assert.ok(kinds, 'the page has a "### Hold kinds" section');
