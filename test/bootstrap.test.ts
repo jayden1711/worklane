@@ -404,7 +404,8 @@ test('bootstrap --hardened, the first install: the person installing becomes the
     assert.deepEqual(urls(s.out), ['http://127.0.0.1:4399/'], 'the only URL it ends with');
     assert.match(s.out, /\n {3}From your own computer, first: ssh -L 4399:127\.0\.0\.1:4399 ada@box1\n/);
     assert.match(s.out, /one-time setup token: sudo cat \S+\/\.local\/state\/worklane\/dashboard-hub\/setup-token/);
-    assert.match(s.out, /needs the https origin first: the page shows Tailscale and HTTPS \(screen 7\)/);
+    // #739: the origin is a choice, your own (--public-url) or Tailscale, not a Tailscale prerequisite.
+    assert.match(s.out, /needs an https origin first, and you choose it\. Your own: a name of yours whose https\n {3}server forwards to port 4399 here; run this again with --public-url and that origin\. Or Tailscale:\n {3}the page shows Tailscale and HTTPS \(screen 7\)/);
   }
   assert.deepEqual(dash(), ['dashboards.sh --setup --loopback'], 'a rerun leaves the running loopback setup mode (and its token) alone');
   // Nobody named by sudo, and a host name that isn't a plain name: placeholders, never the raw value.
