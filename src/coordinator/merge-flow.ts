@@ -5,7 +5,7 @@ import { CI_NONE_MAIN_WATCH, ciIsNone, requiredFor } from '../ci-none.js';
 import { PinnedChecks, type JudgedChecks } from '../check-source.js';
 import type { Coordinator } from '../coordinator.js';
 import { spawnSync } from 'node:child_process';
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { BRAND } from '../brand.js';
 import type { ReviewConfig } from '../config/schema.js';
@@ -43,7 +43,10 @@ import { lit, reviewPacket, type PacketInput } from './review-packet.js';
 import { MERGEABLE_RECHECK_MS, TIP_CHECK_MS, DEFAULT_REVIEW, lockScopeOf } from './shared.js';
 import { LIGHT_PENDING_CAP, MAIN_CHECKS_MIN_POLLS, MAIN_CHECKS_TIMEOUT_MS, MERGEABLE_CAP, PollCounter, pollsFor } from './wait-caps.js';
 import { ATTEMPT_EVENTS, failedTries, openAttempt, reconcileMerge } from '../merge-policy-reconcile.js';
-import { mainNow, stopWaitsForGreen, type MainState } from '../auto-merge-resume.js';
+import { mainNow, mayResume, stopWaitsForGreen, type MainState } from '../auto-merge-resume.js';
+
+/** How often a pending resume request has main measured again while it isn't green (#776): each look is recorded. */
+export const RESUME_MEASURE_MS = 60_000;
 
 export abstract class MergeFlow extends FixRuns {
   /** Defined in a later part (or in Coordinator); declared here for the calls in this one. */
@@ -860,7 +863,8 @@ export abstract class MergeFlow extends FixRuns {
   protected async watchMerges() {
     const stopped = this.d.log.read(0, ['merge.stopped', 'merge.resumed']).at(-1);
     if (stopped?.type === 'merge.stopped' && !existsSync(this.stopFile)) await this.stopGoneByHand(stopped.id, stopped.payload as EventPayload<'merge.stopped'>);
-    const judged = new Set(this.d.log.read(0, ['merge.main_result']).map((e) => (e.payload as { sha: string }).sha));
+    else if (stopped?.type === 'merge.stopped') await this.resumeRequested(stopped.id);
+    const judged =new Set(this.d.log.read(0, ['merge.main_result']).map((e) => (e.payload as { sha: string }).sha));
     const now = Date.now();
     for (const e of this.d.log.read(0, ['merge.done'])) {
       const m = e.payload as EventPayload<'merge.done'>;
@@ -950,7 +954,46 @@ export abstract class MergeFlow extends FixRuns {
 
   /** The default branch's required checks on its tip now (src/auto-merge-resume.ts): what a stop waits for. */
   private mainNow(): Promise<MainState> {
-    return mainNow({ repo: this.d.repo, remote: this.remote, branch: this.branch, required: this.requiredChecks(), checks: (sha) => this.headChecksOf(sha) });
+    // #727: the required checks judged by the pinned-source verdict readiness and the main watch use (JudgedChecks).
+    return mainNow({ repo: this.d.repo, remote: this.remote, branch: this.branch, required: this.requiredChecks(), checks: (sha) => this.headChecksOf(sha, this.requiredChecks()) });
+  }
+
+  /** mainNow, recorded (merge.main_measured), so the dashboard can show the coordinator's last look; `request`: the request it answers. */
+  private async measuredMain(request: number | null): Promise<MainState> {
+    const main = await this.mainNow();
+    this.emit('merge.main_measured', { tip: main.tip, green: main.green, why: main.green ? null : main.why.slice(0, 1000), request });
+    return main;
+  }
+
+  /**
+   * An admin's resume requests on the dashboard (merge.resume_requested) for the stop in force, `stopId` (#776 on #727,
+   * the owner's decision): the coordinator is the only judge. It measures main's tip (recorded) and resumes only if it is
+   * green under the pinned-source verdict, or on a recorded acknowledgement; otherwise the stop stays, and the request
+   * is measured again every RESUME_MEASURE_MS. A request for an older stop, or a stop that changes while main is
+   * measured, resumes nothing.
+   */
+  private async resumeRequested(stopId: number) {
+    const requests = this.d.log.read(stopId, ['merge.resume_requested']).filter((e) => {
+      const p = e.payload as EventPayload<'merge.resume_requested'>;
+      return p.stop === null || p.stop === stopId;
+    });
+    const latest = requests.at(-1);
+    if (!latest) return;
+    const acked = requests.filter((e) => (e.payload as EventPayload<'merge.resume_requested'>).ack).at(-1);
+    const looked = this.d.log.read(latest.id, ['merge.main_measured']).at(-1);
+    if (!acked && looked && Date.now() - Date.parse(looked.ts) < RESUME_MEASURE_MS) return;
+    const asked = acked ?? latest;
+    const ack = acked ? (acked.payload as EventPayload<'merge.resume_requested'>).ack : null;
+    const v = await mayResume({ gated: true, ack, measure: () => this.measuredMain(asked.id) });
+    // A new stop (or a resume) logged while main was measured: this request was for the stop before it.
+    if (this.d.log.read(0, ['merge.stopped', 'merge.resumed']).at(-1)?.id !== stopId || !existsSync(this.stopFile)) return;
+    if (!v.ok) return;
+    const main = v.main!;
+    const how = v.how === 'green' && main.green ? `with ${this.branch} green on ${main.tip.slice(0, 8)}, measured by the coordinator` : `acknowledging ${this.branch} isn't green (${main.green ? 'green' : main.why.slice(0, 300)}${main.tip ? `, tip ${main.tip.slice(0, 8)}` : ''}): "${(ack ?? '').slice(0, 500)}"`;
+    const reason = (this.d.log.read(stopId - 1, ['merge.stopped'])[0]?.payload as EventPayload<'merge.stopped'> | undefined)?.reason ?? 'stopped';
+    // The file first: a crash before the log line leaves no file and the stop logged, which stopGoneByHand measures again.
+    rmSync(this.stopFile, { force: true });
+    this.emit('merge.resumed', { detail: `@${asked.actor} resumed auto-merge from the dashboard, ${how} (${reason.slice(0, 300)})` });
   }
 
   /**
@@ -960,7 +1003,7 @@ export abstract class MergeFlow extends FixRuns {
    */
   private async stopGoneByHand(id: number, p: EventPayload<'merge.stopped'>) {
     if (!stopWaitsForGreen(p.by)) return this.emit('merge.resumed', { detail: 'the operator cleared the stop' });
-    const main = await this.mainNow();
+    const main = await this.measuredMain(null);
     // The dashboard removes the file before it logs merge.resumed: a resume (or a new stop) since means it wasn't a hand.
     const last = this.d.log.read(0, ['merge.stopped', 'merge.resumed']).at(-1);
     if (last?.id !== id || existsSync(this.stopFile)) return;

@@ -189,22 +189,35 @@ export function opensAckForm(e: unknown): boolean {
 export const visibleChars = (s: string) => s.match(/(?![\p{Default_Ignorable_Code_Point}⠀])[\p{L}\p{N}\p{P}\p{S}]/gu)?.length ?? 0;
 const ACK_MIN = 10;
 
+/** Whether a resume answer was a recorded request the coordinator decides (#776 on #727), not a resume done now. */
+export function isResumeRequest(r: unknown): boolean {
+  return (r as { how?: unknown } | null)?.how === 'requested';
+}
+
 /**
- * An admin's resume of a stop in force. A stop the default branch caused resumes only once it is green; refused so
- * (409 with needsAck), a separate confirm with a typed reason resumes anyway, recorded (#776).
+ * An admin's resume of a stop in force. A stop the default branch caused is a recorded request: the coordinator resumes
+ * it once main is green under the pinned-source verdict, and the answer says so, with its last measurement; a separate
+ * confirm with a typed reason asks it to resume anyway, recorded (#776 on #727).
  */
 function ResumeControls({ onCleared }: { onCleared?: (() => void) | undefined }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const [needsAck, setNeedsAck] = useState(false);
   const [ack, setAck] = useState('');
   const clear = async (acknowledge?: { reason: string }) => {
     setBusy(true);
     setError(null);
     try {
-      await clearAutoMergeStop(acknowledge);
-      setNeedsAck(false);
+      const r = await clearAutoMergeStop(acknowledge);
       setAck('');
+      if (isResumeRequest(r)) {
+        setNotice(r.message ?? 'Recorded: the coordinator resumes auto-merge once the default branch is green.');
+        setNeedsAck(!r.acknowledged);
+      } else {
+        setNotice(null);
+        setNeedsAck(false);
+      }
       onCleared?.();
     } catch (e) {
       setError((e as Error).message);
@@ -222,6 +235,11 @@ function ResumeControls({ onCleared }: { onCleared?: (() => void) | undefined })
         </Button>
         {error && <span className="text-[12px] text-red">{error}</span>}
       </div>
+      {notice && (
+        <div className="mt-2 text-[12px] text-ink-2" data-testid="main-watch-resume-requested">
+          {notice}
+        </div>
+      )}
       {needsAck && (
         <form
           className="mt-2 flex flex-wrap items-center gap-2"

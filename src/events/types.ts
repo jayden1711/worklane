@@ -674,6 +674,17 @@ export const EventSchemas = {
   'merge.stopped': z.strictObject({ reason: z.string(), number: z.number().int().positive().nullable(), sha: sha.nullable(), revert: z.string().nullable(), by: z.enum(['red_main', 'main_watch', 'owner']).optional(), restored: z.string().optional() }),
   'merge.resumed': z.strictObject({ detail: z.string() }),
   /**
+   * An admin asked on the dashboard to resume a stop the default branch caused (#776, on #727): the dashboard records
+   * the request and never judges checks; the coordinator resumes once it measures main green, or on `ack`, a typed
+   * reason. `stop`: the merge.stopped it asks to clear (null: none logged). The actor is who asked.
+   */
+  'merge.resume_requested': z.strictObject({ stop: z.number().int().positive().nullable(), ack: z.string().nullable() }),
+  /**
+   * The coordinator measured the default branch's tip for a stop it caused (src/auto-merge-resume.ts): the required
+   * checks under the pinned-source verdict. `tip` null: unreadable. `request`: the resume request it answers, if any.
+   */
+  'merge.main_measured': z.strictObject({ tip: sha.nullable(), green: z.boolean(), why: z.string().nullable(), request: z.number().int().positive().nullable() }),
+  /**
    * Main watch (src/main-watch.ts): how the default branch is guarded. github: GitHub enforces its protection;
    * main_watch: GitHub doesn't, and the watch checks every new commit; off: neither (`detail` says why).
    */

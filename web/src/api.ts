@@ -418,8 +418,13 @@ export interface AcceptedMerge {
 }
 
 /** An admin resumes auto-merge (the stop file goes; audited). */
-/** Resume auto-merge; a stop the default branch caused needs it green, or `acknowledge` with a typed reason (recorded). */
-export const clearAutoMergeStop = (acknowledge?: { reason: string }) => api<{ ok: boolean }>('/api/auto-merge/clear', { method: 'POST', body: JSON.stringify(acknowledge ? { acknowledge } : {}) });
+/**
+ * Resume auto-merge. A stop the default branch caused is a recorded request (`how: 'requested'`, #776 on #727): the
+ * coordinator resumes once main is green under the pinned-source verdict, or on `acknowledge`, a typed reason; `message`
+ * says so, with the coordinator's last measurement if one is recorded.
+ */
+export const clearAutoMergeStop = (acknowledge?: { reason: string }) =>
+  api<{ ok: boolean; how: 'as_before' | 'requested'; acknowledged?: boolean; message?: string }>('/api/auto-merge/clear', { method: 'POST', body: JSON.stringify(acknowledge ? { acknowledge } : {}) });
 
 /** What the accept field names: `#22` or `22` is a PR (a sha is at least 7 hex characters), anything else a sha. */
 export function acceptTarget(text: string): { pr: number } | { sha: string } {

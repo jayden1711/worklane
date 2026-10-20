@@ -4,12 +4,15 @@
 // checks are green on its current tip, measured at that moment, or with an owner's explicit acknowledgement, a typed
 // reason recorded in the event log with who and when. Any other stop resumes as before.
 //
-// INVARIANT: one rule on every surface that resumes. The dashboard's resume asks mayResume; a stop file deleted by
-// hand is written back by the coordinator (coordinator/merge-flow.ts stopGoneByHand) while main isn't measured green.
+// INVARIANT: one judge. The coordinator alone measures main and resumes such a stop (#776 on #727, the owner's
+// decision): the dashboard records a resume request (merge.resume_requested) and never reads a check; the coordinator
+// answers it with mayResume (coordinator/merge-flow.ts resumeRequested), recording each measurement
+// (merge.main_measured), and writes back a stop file deleted by hand (stopGoneByHand) while main isn't measured green.
+// Main's checks are JudgedChecks, so a pinned required check is green only from its pinned source.
 // Fail closed: a stop with no `by`, an unknown one, or an unreadable stop file waits for green main; main with no
 // required checks configured, a tip that can't be read, or checks that can't be read is not green.
 import { spawn } from 'node:child_process';
-import type { CommitCheck } from './backlog/types.js';
+import type { JudgedChecks } from './check-source.js';
 import { killTree, spawnDetached } from './os/index.js';
 import { requiredOutcomes } from './pr-watch.js';
 
@@ -30,8 +33,12 @@ export type MainState = { green: true; tip: string } | { green: false; tip: stri
 
 const SHA = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
 
-/** Every one of `required` passes on the default branch's current tip; anything else, or anything unreadable, is not green. */
-export async function measureMain(o: { branch: string; required: string[]; tip: () => string | null | Promise<string | null>; checks: (sha: string) => Promise<CommitCheck[]> }): Promise<MainState> {
+/**
+ * Every one of `required` passes on the default branch's current tip; anything else, or anything unreadable, is not
+ * green. `checks` gives the tip's checks as the engine judges them (#727: JudgedChecks, made only by PinnedChecks), so a
+ * pinned required check passes here only from its pinned source, by the verdict readiness and the main watch use.
+ */
+export async function measureMain(o: { branch: string; required: string[]; tip: () => string | null | Promise<string | null>; checks: (sha: string) => Promise<JudgedChecks> }): Promise<MainState> {
   if (!o.required.length) return { green: false, tip: null, why: `no required checks are configured (required_checks in config.yaml), so ${o.branch} can't be measured green` };
   let tip: string | null = null;
   try {
@@ -40,7 +47,7 @@ export async function measureMain(o: { branch: string; required: string[]; tip: 
     tip = null;
   }
   if (!tip || !SHA.test(tip)) return { green: false, tip: null, why: `${o.branch}'s tip can't be read from the remote` };
-  let checks: CommitCheck[];
+  let checks: JudgedChecks;
   try {
     checks = await o.checks(tip);
   } catch (e) {
@@ -107,7 +114,7 @@ export function remoteTip(repo: string, remote: string, branch: string, o: { tim
 }
 
 /** Main now, the one way every surface measures it: the remote's tip (remoteTip) and the required checks on it. */
-export function mainNow(o: { repo: string; remote: string; branch: string; required: string[]; checks: (sha: string) => Promise<CommitCheck[]>; timeoutMs?: number }): Promise<MainState> {
+export function mainNow(o: { repo: string; remote: string; branch: string; required: string[]; checks: (sha: string) => Promise<JudgedChecks>; timeoutMs?: number }): Promise<MainState> {
   return measureMain({ branch: o.branch, required: o.required, tip: () => remoteTip(o.repo, o.remote, o.branch, o.timeoutMs !== undefined ? { timeoutMs: o.timeoutMs } : {}), checks: o.checks });
 }
 

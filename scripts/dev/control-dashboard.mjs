@@ -348,8 +348,8 @@ async function seedSigninFailed(root, issue) {
 
 /**
  * --with-auto-merge-stop: auto-merge stopped by a red default branch after an auto-merge (#776), in the demo's own
- * state directory: the stop file and its merge.stopped. The demo has no remote, so its main can't be measured green
- * and a resume asks for the acknowledgement.
+ * state directory: the stop file and its merge.stopped. A resume records a request for the coordinator, whose answer
+ * offers the acknowledgement; the demo has no remote, so its main can't be measured green.
  */
 async function seedAutoMergeStop(root) {
   const logMod = join(engine, 'dist', 'src', 'events', 'log.js');

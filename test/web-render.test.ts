@@ -101,6 +101,7 @@ interface Render {
   renderMainWatchAlert(protection: unknown): string;
   opensAckForm(error: unknown): boolean;
   ackVisibleChars(text: string): number;
+  isResumeRequest(answer: unknown): boolean;
   renderPrs(view: unknown): string;
   renderLiveFeed(items: unknown[], ended: boolean): string;
   renderConsole(data: unknown): string;
@@ -1126,6 +1127,12 @@ test('a stop in force that is not the main watch\'s (a red main after an auto-me
   assert.equal(r.opensAckForm({ status: 409, body: { error: 'the stop changed while the default branch was being measured; look again before resuming' } }), false);
   assert.equal(r.opensAckForm({ status: 400, body: { needsAck: true } }), false);
   assert.equal(r.opensAckForm(new Error('network')), false);
+});
+
+test('a resume answer that is a recorded request (the coordinator decides, #776 on #727) is told apart from a resume done now', () => {
+  assert.equal(r.isResumeRequest({ ok: true, how: 'requested', acknowledged: false, message: 'Recorded.' }), true);
+  assert.equal(r.isResumeRequest({ ok: true, how: 'as_before' }), false);
+  assert.equal(r.isResumeRequest(null), false);
 });
 
 test("the acknowledgement form counts visible characters as the server does: blanks that print nothing don't count (#776)", () => {
