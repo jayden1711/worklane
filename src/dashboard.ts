@@ -89,12 +89,14 @@ import { throughput } from './throughput.js';
 import { constraintsView } from './checks-from-feedback.js';
 import { digestMarkdown, waitingCached, waitingCount } from './digest.js';
 import { forViewers, stateForViewer, viewerActivity, viewerMaySee, VIEWER_EVENTS } from './viewer-events.js';
+import { prsForViewer } from './prs-viewer.js';
 import { METRICS_DEFINITIONS, trustForViewer, trustView } from './trust.js';
 import { deliveryMetrics } from './merge-metrics.js';
 import { flakyView, releaseByOwner } from './flaky.js';
 import { harnessEvalView } from './harness-evals/score.js';
 import { learningsView, promoteRefusal } from './learnings.js';
 import { delegationView } from './delegation.js';
+import { valueRoute } from './value-report-route.js';
 import { assertLoopbackHost, breakGlassAllowed, DEVICE_HEADER, DEVICE_VIEWS, FRESH_HEADER, cachedRoles, isOwner, isWriter, LOGIN_HEADER, mayAnswerKind, repoPermission, validLogin, type ConsoleSession, type Role, type RoleOf, type SessionOf } from './dashboard-auth.js';
 import { handleAskRoute } from './console/routes.js';
 import { ADD_PROJECT_EVENTS, addProjectManual, addProjectView } from './console/add-project.js';
@@ -1901,7 +1903,9 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           }
         }
         // Pull requests the harness opened, their checks, fix runs and merge calls, and this instance's auto-merge state.
+        // A viewer (or any role not owner or writer) gets each PR's state only, never why (src/prs-viewer.ts, #821).
         if (url.pathname === '/api/prs' && req.method === 'GET') {
+          if (!isWriter(who.role)) return json(res, 200, prsForViewer(prsView(eventCache.all())));
           return json(res, 200, { ...prsView(eventCache.all()), autoMerge: autoMergeState({ policyFile: opts.policyFile ?? null, repoAuto: opts.cfg.review?.merge.auto ?? null, stateDir: opts.stateDir }) });
         }
         // Machine health: memory, CPU and disk, check times and slowdowns, the runs' usage per day, suggestions.
@@ -1941,6 +1945,7 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           if (!mayReadThroughput(who.role)) return json(res, 403, { error: writersOnly('the metrics are', who) });
           return json(res, 200, { ...deliveryMetrics(eventCache.all(), { budgetS: opts.cfg.project.metrics.slow_test_budget_s }), definitions: METRICS_DEFINITIONS });
         }
+        if (url.pathname === '/api/value') { const v = valueRoute({ method: req.method ?? '', role: who.role, login: who.login, events: eventCache.all(), query: url.searchParams }); return json(res, v.status, v.body); } // #708: owners and writers only
         // Flaky tests (src/flaky.ts): what is quarantined, why, its issue and sightings, and the flake rate. The owners'
         // and writers' to read; only an owner clears a test from quarantine, audited.
         // Harness evals (src/harness-evals/): each run's success rate, cost, wall-clock and human interventions, and the
