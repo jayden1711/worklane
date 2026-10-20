@@ -257,6 +257,7 @@ Every release, newest first: the PRs merged since the previous one, and what cha
 - Approvals: one role rule on every surface, decide only as root or the coordinator user, money paths read from main (#715) [PROTECTED: owner merges] (#805)
 - test: raise the package budget to main's size + 2% after #805 and #787 [PROTECTED: owner merges] (#823)
 - Test runs: each run in a user namespace of its own; slirp4netns as the test user; a run can't join Docker's namespaces (#545) [PROTECTED: owner merges] (#780)
+- bench: the bench command; `bench preflight` prints a pass/fail line per check with no secret, as the bench user only and never root (#748) [PROTECTED: owner merges] (#851)
 
 ### Fixes
 
