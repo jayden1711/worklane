@@ -44,6 +44,7 @@ function fixture() {
 function probe(tools: Set<string>): SetupProbe {
   return {
     which: (c) => (tools.has(c) ? `/stand-in/${c}` : null),
+    serviceManagerEnv: () => ({ env: {} }),
     run: (cmd, args, o = {}) => {
       if (cmd === 'git') {
         const r = spawnSync('git', args, { encoding: 'utf8', ...(o.cwd ? { cwd: o.cwd } : {}) });

@@ -64,7 +64,7 @@ People open the hub at its Tailscale HTTPS address and sign in with GitHub. On e
 | --- | --- | --- |
 | admin | owner | everything: settings, held plans, high-risk (L3) merges, the console (message and stop a run; asks, root steps), filing chat drafts, the audit log |
 | maintain, write | writer | read runs, throughput, reports, intake and the digest; message (steer) a running agent, not stop it; ask the chat; answer ordinary decisions and intake approvals; save views |
-| triage, read | viewer | the tasks (without costs), decisions, PRs and deploys; not the service log, the machine settings, spend, the budget, agent runs, which agents hold the slots (only the counts), the coordinator's error text (only a count) or decisions' receipts; of the event log (the issue timeline, Activity, the live stream) only an allowlist of event types and fields (`src/viewer-events.ts`: never runs, agents, research, chat, console or costs), and of the settings only the project part; of the agents' Claude account only whether one is set. No writes at all; no Watch on the Board, and Board cards without runs, usage, diffs or checks |
+| triage, read | viewer | the tasks (without costs), decisions, PRs (each one's state only: never why it waits, its checks, fix runs or conflicts, or the auto-merge state; `src/prs-viewer.ts`) and deploys; not the service log, the machine settings, spend, the budget, agent runs, which agents hold the slots (only the counts), the coordinator's error text (only a count) or decisions' receipts; of the event log (the issue timeline, Activity, the live stream) only an allowlist of event types and fields (`src/viewer-events.ts`: never runs, agents, research, chat, console or costs), and of the settings only the project part; of the agents' Claude account only whether one is set. No writes at all; no Watch on the Board, and Board cards without runs, usage, diffs or checks |
 | none, or any error looking it up | none | nothing: the instance isn't listed, and any call to it gets 403 |
 
 - The permission is read with the instance's own installation token (`GET /repos/{owner}/{repo}/collaborators/{login}/permission`), never with the person's token, and cached at most 5 minutes per instance and login. So someone removed from the repo loses access within 5 minutes.
@@ -261,7 +261,7 @@ The next step reads the new config with no restart and no `git pull`.
 | step | mode | without the page |
 |---|---|---|
 | Tools: git, gitleaks, claude (and gh, locally) | local, server | `worklane init --yes (local: the same pinned tools); on a server, scripts/setup/tools.sh through bootstrap.sh --hardened` |
-| Signed in to Claude | local | `claude auth login (in a terminal, as this user)` |
+| Signed in to Claude | local | `claude auth login (in a terminal, as this user); an API key: worklane init --answer agent-runtime=api_key --answer api-key-file=<path>` |
 | The agents' Claude login | server | `scripts/setup/credentials.sh <name> claude (paste the token claude setup-token prints at its hidden prompt), or scripts/setup/add-project.sh <name> <owner/repo> at a root shell (its claude-token step)` |
 | Signed in to GitHub (gh), able to push | local | `gh auth login --web (in a terminal, as this user)` |
 | The repo has a GitHub origin | local | `git remote add origin https://github.com/<owner>/<name>.git, then git fetch origin` |
