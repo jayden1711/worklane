@@ -29,6 +29,7 @@ import { openReadOnly } from './events/read-only.js';
 import { checkSetup, groupLevel, GROUPS, stepLevel, systemProbe, type SetupContext, type SetupProbe } from './setup-steps.js';
 import { modelWarnings } from './model-routing.js';
 import { HUB_UNIT_AS_ROOT, OWNER_TERMINAL_RERUN, ownerTerminalNotice, ownerTerminalRerun, type TerminalPaths } from './console/owner-terminal-removed.js';
+import { voiceSiriLeftoverCheck } from './doctor-voice-removed.js';
 
 /** off: not available in this setup's mode (said why; never a failure). */
 export type Level = 'ok' | 'warn' | 'fail' | 'off';
@@ -233,6 +234,8 @@ export function doctor(rootArg: string, opts: { agentshield?: boolean; /** A pol
   out.push(...setupChecks(root, opts));
   const terminal = ownerTerminalCheck();
   if (terminal) out.push(terminal);
+  const voiceSiri = voiceSiriLeftoverCheck({ instances });
+  if (voiceSiri) out.push(voiceSiri);
   const gpu = gpuCheck();
   if (gpu) out.push(gpu);
   // Only where the project runs its tests on the machine: elsewhere no run has a sandbox to grant from.

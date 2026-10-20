@@ -433,7 +433,6 @@ export async function runSite(site: Site, opts: { /** The instance's name (its i
     log.append('coordinator.stopping', { instance: instanceId(), signal, pending: coordinator.pending() }, instanceId());
     watchdog?.stop();
     clearInterval(watch);
-    clearInterval(siriWatch);
     coordinator.stop();
     nap.wake();
     // Kept referenced: work that hangs on nothing the event loop holds still ends here, not in a silent exit.
@@ -464,9 +463,6 @@ export async function runSite(site: Site, opts: { /** The instance's name (its i
     coordinator.checkIntake().catch(diskOnly);
   }, 5_000);
   watch.unref();
-  // Siri's questions: someone is listening, so they are looked for every second (a directory read when there are none).
-  const siriWatch = setInterval(() => coordinator.checkSiri().catch(diskOnly), 1_000);
-  siriWatch.unref();
   watchdog = opts.once ? null : (opts.watchdog?.(log, () => intake?.config() ?? null) ?? null);
   let lastBackup = 0;
   try {
@@ -489,7 +485,6 @@ export async function runSite(site: Site, opts: { /** The instance's name (its i
     process.off('SIGTERM', stop);
     process.off('SIGINT', stop);
     clearInterval(watch);
-    clearInterval(siriWatch);
     watchdog?.stop();
     intake?.stop();
     ungateDisk();

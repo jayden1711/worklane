@@ -162,12 +162,13 @@ The hub's token still works, as the owner, but only on the hub's separate break-
 
 - Each instance's own dashboard applies the same rule to its own token: with no person named, it's the owner's break-glass, refused through a proxy.
 
-### Siri Shortcuts
+### Siri Shortcuts (removed)
 
-`dashboards.sh --siri` adds the hub's Siri gateway, a listener of its own on 127.0.0.1:4397 that `tailscale.sh
-serve-siri` publishes on the tailnet's port 8443: "Hey Siri, tell" leaves an idea in the Inbox and "Hey Siri, ask"
-answers aloud at a viewer's level, with a per-device token an owner makes in Settings, Siri devices. See
-[docs/siri.md](siri.md).
+Siri was removed (#743). `dashboards.sh --siri` and the hub's `--siri-port` are accepted and ignored, so an older
+command line or unit still runs, and no gateway listens. Each instance's dashboard deletes its own Siri device token
+store and gateway token when it starts, and an export never carries them. Every `dashboards.sh` run drops
+`--siri-port` from the hub's unit and deletes any Siri files left; `tailscale.sh unserve-siri` takes away the
+tailnet's 8443 forward. Until both have run, `doctor` fails under "voice and Siri removed" and names each leftover.
 
 ## Machine devices
 

@@ -198,8 +198,7 @@ export function whyHighRisk(o: { level: LevelResult; waitCategories: string[] })
 /**
  * THE mark of a high-risk reason (a category that always waits for a human: money path, auth, secrets, deploy and
  * release config, the harness's own controls, CI, a worker's protected claim). Every high-risk reason the merge
- * policy and plan mode give starts with it, and the one test of whether a reason is high-risk is isHighRiskReason:
- * a held plan with one is never approvable by voice (src/voice.ts).
+ * policy and plan mode give starts with it, and the one test of whether a reason is high-risk is isHighRiskReason.
  */
 export const HIGH_RISK_REASON = 'high-risk: ';
 export const isHighRiskReason = (reason: string): boolean => reason.startsWith(HIGH_RISK_REASON);
