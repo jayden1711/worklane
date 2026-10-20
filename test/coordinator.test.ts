@@ -2158,8 +2158,10 @@ test('self-modification: a harness PR touching only one of the harness\'s own co
       // through this flow: its first stands for them here. test/review.test.ts and test/merge-policy.test.ts check
       // every one of them through computeLevel and the merge decision.
       if (HOOK_IMPORTS.includes(glob) && glob !== HOOK_IMPORTS[0]) continue;
-      // A glob with no file yet (the owner's own, e.g. a study's definition) is an exact path: the change adds it.
-      const path = files.find((f) => globToRegExp(glob).test(f)) ?? (glob.includes('*') ? undefined : glob)!;
+      // A glob with no file yet (the owner's own, e.g. a study's definition, or deploy/** before its first manifest):
+      // the change adds one, at the exact path or at a file the glob matches.
+      const path = files.find((f) => globToRegExp(glob).test(f)) ?? glob.replace(/\*\*/g, 'new-file').replace(/\*/g, 'x');
+      assert.ok(globToRegExp(glob).test(path), `${glob}: ${path}`);
       let attempt = 0;
       const worker = (req: RunRequest) => {
         mkdirSync(dirname(join(req.cwd, path)), { recursive: true });

@@ -1,35 +1,29 @@
-// The agents' Claude account, for the machine's owners: which account and expiry each agent user has, and switching
-// every agent on the machine to another account. The root half is scripts/setup/claude-account.sh:
+// The agents' Claude account, for the machine's owners: which account and expiry each agent user has. The root half
+// is scripts/setup/claude-account.sh:
 //
-//   status   each agent user's account (as `claude auth status` names it), whether it is signed in, which token (the
-//            first 8 hex digits of its sha256) and when that expires; written to <dir>/status.json
-//   switch   pause every instance (its coordinator starts no more runs; the running ones finish), take the token
-//            `claude setup-token` prints, wait for the runs (or a timeout), install the token for every agent user
-//            (0600, never echoed), check each with `claude auth status` as that user, resume each instance whose
-//            users all passed. Each step change is a JSON line in <dir>/switch.jsonl.
+//   status     each agent user's account (as `claude auth status` names it), whether it is signed in, which token
+//              (the first 8 hex digits of its sha256) and when that expires; written to <dir>/status.json
+//   uninstall  removes what the account profiles, failover and the account switch left (issue #736: all three were
+//              removed; src/claude-accounts-retired.ts)
 //
-// From the dashboard (the Machine page's Claude account panel, a machine owner's only), status is a machine request
-// (`claude-account status`) that the coordinator runs through the machine helper. A switch takes a Claude credential,
-// which the dashboard never does (issue #711, docs/auth.md): a root admin runs it at a root shell on the machine, and
-// this side only follows it, by reading switch.jsonl.
+// The engine manages no Claude account (#736): one person signs an instance's agent user in to `claude` themselves,
+// as that user, through Anthropic's own flow, or the instance uses an API key. From the dashboard (the Machine page's
+// Claude account panel, a machine owner's only), status is a machine request (`claude-account status`) that the
+// coordinator runs through the machine helper. Nothing here takes a Claude credential (issue #711, docs/auth.md).
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { BRAND } from './brand.js';
 import type { EventLog } from './events/log.js';
 import type { StoredEvent } from './events/types.js';
 import type { Role } from './console/asks.js';
+import { retiredView, signinCommand } from './claude-accounts-retired.js';
 import { isMachineOwner, MACHINE_OWNERS_FILE, machineChangeRefusal, machineOwners, type MachineRequester } from './machine-owners.js';
 import { MachineRequestError, machineRequests, requestMachineChange, type MachineRequest } from './machine-requests.js';
 import { varLibPath } from './os/system-paths.js';
 
-/** Where claude-account.sh writes status.json, switch.jsonl and paused (root's, 0644; lib.sh's CLAUDE_ACCOUNT_DIR). */
+/** Where claude-account.sh writes status.json (root's, 0644; lib.sh's CLAUDE_ACCOUNT_DIR). */
 export const CLAUDE_ACCOUNT_DIR = varLibPath('claude-account');
-/** A token from `claude setup-token`, as the root scripts take it at a root shell (lib.sh's claude_token_ok). */
-export const SETUP_TOKEN = /^sk-ant-oat[0-9]{2}-[A-Za-z0-9_-]{20,500}$/;
-/** A switch with no new line for this long has stopped (its unit ended without a last line): the longest a step waits is 30 minutes. */
-export const SWITCH_STALE_MS = 90 * 60_000;
 
-/** What a dashboard may ask for: status only. Never switch, which takes a Claude credential (issue #711). */
+/** What a dashboard may ask for: status only. */
 export const CLAUDE_ACCOUNT_ACTIONS = ['status'] as const;
 export type ClaudeAccountAction = (typeof CLAUDE_ACCOUNT_ACTIONS)[number];
 
@@ -66,44 +60,6 @@ export interface AccountStatus {
   users: AccountUser[];
 }
 
-export type SwitchStep = 'switch' | 'pause' | 'token' | 'wait' | 'install' | 'check' | 'resume';
-export type SwitchState = 'started' | 'done' | 'failed' | 'ask' | 'skipped';
-const STEPS: readonly string[] = ['switch', 'pause', 'token', 'wait', 'install', 'check', 'resume'];
-const STATES: readonly string[] = ['started', 'done', 'failed', 'ask', 'skipped'];
-
-export interface SwitchLine {
-  at: string;
-  step: SwitchStep;
-  state: SwitchState;
-  instance: string | null;
-  user: string | null;
-  detail: string;
-}
-
-/** One instance through the switch: each phase's last line, and each user's install and check. */
-export interface SwitchInstance {
-  name: string;
-  pause: SwitchLine | null;
-  wait: SwitchLine | null;
-  users: { user: string; install: SwitchLine | null; check: SwitchLine | null }[];
-  /** A check line for the instance as a whole (no agent user found). */
-  check: SwitchLine | null;
-  resume: SwitchLine | null;
-}
-
-export interface SwitchView {
-  startedAt: string;
-  /** running; done or failed (its last line); stalled: no line for SWITCH_STALE_MS and no end. */
-  status: 'running' | 'done' | 'failed' | 'stalled';
-  /** Its last switch line's detail (how it ended, or what it is doing). */
-  detail: string;
-  /** Waiting for the token at the root shell it was started in: an ask line and nothing after it on the token step. */
-  waitingForToken: boolean;
-  token: SwitchLine | null;
-  instances: SwitchInstance[];
-  lines: SwitchLine[];
-}
-
 const str = (v: unknown, max = 1000): string | null => (typeof v === 'string' ? v.slice(0, max) : null);
 
 /** status.json, or null when there is none yet (or it can't be read). */
@@ -138,98 +94,35 @@ export function readAccountStatus(dir = CLAUDE_ACCOUNT_DIR): AccountStatus | nul
   return { at: str(o.at, 40) ?? '', users };
 }
 
-/** The progress lines of the last switch (switch.jsonl); torn or foreign lines are skipped. */
-export function readSwitchLines(dir = CLAUDE_ACCOUNT_DIR): SwitchLine[] {
-  let text: string;
-  try {
-    text = readFileSync(join(dir, 'switch.jsonl'), 'utf8');
-  } catch {
-    return [];
-  }
-  const out: SwitchLine[] = [];
-  for (const l of text.split('\n')) {
-    if (!l.trim()) continue;
-    try {
-      const j = JSON.parse(l) as Record<string, unknown>;
-      if (!STEPS.includes(j.step as string) || !STATES.includes(j.state as string) || typeof j.at !== 'string') continue;
-      out.push({ at: j.at, step: j.step as SwitchStep, state: j.state as SwitchState, instance: str(j.instance, 40), user: str(j.user, 40), detail: str(j.detail) ?? '' });
-    } catch {
-      // a torn line (being written) or not ours
-    }
-  }
-  return out;
-}
-
 /**
- * When the last switch put this instance on the new login and started it again: its resume line's time, else null.
- * All of: a token was received (not "checked on its current login"), every one of the instance's agent users had it
- * installed and passed the auth check, and the instance was resumed. Its usage-limit pause then ends (the old
- * account's limit no longer applies); an instance whose check failed stays paused.
+ * Whether an instance's agents have a Claude account set: all that anyone the accounts panel refuses learns of them
+ * (issue #567: a viewer or a writer gets no email, plan or profile name). Whether claude-account.sh last found the
+ * instance's agent user signed in; null when nothing on the machine says (no status record for it yet). A profile an
+ * older engine left counts for nothing (#736).
  */
-export function switchedOnto(instance: string, lines: readonly SwitchLine[] = readSwitchLines()): string | null {
-  const v = switchView(lines);
-  const i = v?.instances.find((x) => x.name === instance);
-  if (!v || !i || v.token?.state !== 'done' || i.resume?.state !== 'done' || i.check?.state === 'failed') return null;
-  if (i.users.length === 0 || !i.users.every((u) => u.install?.state === 'done' && u.check?.state === 'done')) return null;
-  return i.resume.at;
-}
-
-/** The last switch, folded per instance and user in the script's order; null when there has been none. */
-export function switchView(lines: readonly SwitchLine[], now = Date.now()): SwitchView | null {
-  const start = lines.findIndex((l) => l.step === 'switch' && l.state === 'started');
-  if (start < 0) return null;
-  const ls = lines.slice(start);
-  const byName = new Map<string, SwitchInstance>();
-  const inst = (name: string) => {
-    let i = byName.get(name);
-    if (!i) byName.set(name, (i = { name, pause: null, wait: null, users: [], check: null, resume: null }));
-    return i;
-  };
-  let token: SwitchLine | null = null;
-  for (const l of ls) {
-    if (l.step === 'token') token = l;
-    if (!l.instance) continue;
-    const i = inst(l.instance);
-    if (l.step === 'pause') i.pause = l;
-    else if (l.step === 'wait') i.wait = l;
-    else if (l.step === 'resume') i.resume = l;
-    else if ((l.step === 'install' || l.step === 'check') && l.user) {
-      let u = i.users.find((x) => x.user === l.user);
-      if (!u) i.users.push((u = { user: l.user, install: null, check: null }));
-      u[l.step] = l;
-    } else if (l.step === 'check') i.check = l;
-  }
-  const end = [...ls].reverse().find((l) => l.step === 'switch' && (l.state === 'done' || l.state === 'failed')) ?? null;
-  const last = ls.at(-1)!;
-  const stalled = !end && now - Date.parse(last.at) > SWITCH_STALE_MS;
-  return {
-    startedAt: ls[0]!.at,
-    status: end ? (end.state as 'done' | 'failed') : stalled ? 'stalled' : 'running',
-    detail: (end ?? ls[0]!).detail,
-    waitingForToken: !end && !stalled && token?.state === 'ask',
-    token,
-    instances: [...byName.values()],
-    lines: ls,
-  };
+export function accountSet(instance: string, dir = CLAUDE_ACCOUNT_DIR): boolean | null {
+  const rec = readAccountStatus(dir)?.users.find((u) => u.instance === instance && u.kind === 'agent');
+  return rec ? rec.loggedIn : null;
 }
 
 /** Whether this person sees the Claude account panel: a machine owner, or the owner's break-glass. */
 export const mayViewClaudeAccount = (r: Pick<MachineRequester, 'login' | 'breakGlass'>, file = MACHINE_OWNERS_FILE) => r.breakGlass || isMachineOwner(r.login, file);
 
-/** Why this person may not refresh or switch now; null when they may (the same gate as any machine change). */
+/** Why this person may not refresh now; null when they may (the same gate as any machine change). */
 export function claudeAccountGate(who: { role: Role | null; requester: MachineRequester }, o: { ownersFile?: string } = {}): string | null {
-  if (who.role !== 'owner') return `only an owner of this instance who is one of the machine's owners may switch the Claude account; @${who.requester.login} is ${who.role ? `a ${who.role}` : 'not on it'}`;
+  if (who.role !== 'owner') return `only an owner of this instance who is one of the machine's owners may refresh the Claude account; @${who.requester.login} is ${who.role ? `a ${who.role}` : 'not on it'}`;
   return machineChangeRefusal(who.requester, { file: o.ownersFile ?? MACHINE_OWNERS_FILE });
 }
 
 const isAccountRequest = (r: MachineRequest) => r.args[0] === 'claude-account';
 const open = (r: MachineRequest) => r.status === 'pending' || r.status === 'running';
 
-/** The panel's data: each agent user's account, the last switch, this log's requests, and whether this person may act. */
-export function claudeAccountView(o: { dir?: string; events: readonly StoredEvent[]; who: { role: Role | null; requester: MachineRequester }; instance: string; ownersFile?: string; now?: number }) {
-  const now = o.now ?? Date.now();
+/**
+ * The panel's data: each agent user's account, this log's requests, whether this person may act, how an agent user is
+ * signed in now, and what the removed account profiles left on the machine (#736), with the root step that removes it.
+ */
+export function claudeAccountView(o: { dir?: string; events: readonly StoredEvent[]; who: { role: Role | null; requester: MachineRequester }; instance: string; ownersFile?: string }) {
   const why = claudeAccountGate(o.who, o.ownersFile ? { ownersFile: o.ownersFile } : {});
-  const sw = switchView(readSwitchLines(o.dir), now);
   const requests = machineRequests(o.events).filter(isAccountRequest);
   return {
     machineOwner: mayViewClaudeAccount(o.who.requester, o.ownersFile),
@@ -238,11 +131,11 @@ export function claudeAccountView(o: { dir?: string; events: readonly StoredEven
     instance: o.instance,
     allowed: why === null,
     why,
-    /** A switch a root admin runs on the machine, while it runs (the page says so; it never takes the token). */
-    busy: sw?.status === 'running' ? 'a switch is running on the machine' : null,
     status: readAccountStatus(o.dir),
-    switch: sw,
     requests: requests.slice(-10).reverse(),
+    /** How a person signs an agent user in to claude: as that user, on the machine, through Anthropic's own flow. */
+    signin: signinCommand(),
+    retired: retiredView(o.dir),
   };
 }
 
@@ -250,11 +143,10 @@ export type ClaudeAccountData = ReturnType<typeof claudeAccountView>;
 
 /**
  * Record `claude-account status` for the coordinator to run through the machine helper: the same gate as any machine
- * change (src/machine-requests.ts), one at a time. Never a switch: it takes a Claude credential, a root admin's at a
- * root shell on the machine (issue #711).
+ * change (src/machine-requests.ts), one at a time.
  */
 export function requestClaudeAccount(log: EventLog, r: { action: unknown; requester: MachineRequester; ownersFile?: string }): MachineRequest {
-  if (!(CLAUDE_ACCOUNT_ACTIONS as readonly unknown[]).includes(r.action)) throw new MachineRequestError("action is status; a switch to another account is a root admin's, at a root shell on the machine (claude-account.sh switch)");
+  if (!(CLAUDE_ACCOUNT_ACTIONS as readonly unknown[]).includes(r.action)) throw new MachineRequestError('action is status; the engine manages no Claude account (#736): sign an agent user in as that user, on the machine');
   const action = r.action as ClaudeAccountAction;
   const pending = machineRequests(log.read(0, ['machine.requested', 'machine.started', 'machine.finished'])).find((x) => isAccountRequest(x) && open(x) && x.args[1] === action);
   if (pending) throw new MachineRequestError(`a claude-account ${action} is already ${pending.status === 'pending' ? 'waiting for the coordinator' : 'running'}`, 409);

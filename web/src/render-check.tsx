@@ -11,13 +11,6 @@ import { AttachButton, AttachmentList, DropHint, SentAttachments, type Pending }
 import type { ChatAttachment } from './api';
 import { ConversationSidebarView, ConversationThreadView, ProjectEditorView, type ChatView } from './components/Conversations';
 import type { ChatProject, ConversationData, ConversationItem, ProjectItem } from './api';
-import { ComposerMic, MicInterim } from './voice/Mic';
-import { VoiceSettings, VoiceSettingsView, type OnDeviceStatus, type VoiceCount } from './voice/VoiceSettings';
-import { TalkStatus } from './voice/TalkBack';
-import { VoiceBanner, VoiceButton, VoiceControl, type BannerView } from './voice/VoiceControl';
-import type { VoicePrefs } from './voice/prefs';
-import type { Support } from './voice/speech';
-import { WakeIndicator } from './voice/WakeIndicator';
 import { GroupTabs, InstanceList, NAV, NavDrawer, NavMenu, navCounts, SetupModeHidden, SidebarBody, SignInPage, StopBanner, tabsAt, WhoAmI } from './App';
 import { ExtendPage } from './pages/Extend';
 import { ExperimentsPage } from './pages/Experiments';
@@ -163,24 +156,6 @@ export { attachmentNameHeader } from './api';
 export const renderChatAnswer = (f: ChatAnswerFile, cli: string) => renderToStaticMarkup(<ChatAnswerView f={f} cli={cli} />);
 export const renderProposedSetting = (data: InstanceSettingsData, proposed: { key: string; value: unknown }) => renderToStaticMarkup(<InstanceSettingsView data={data} proposed={proposed} />);
 export { actionHref, citationHref } from './components/ChatPanel';
-export const renderComposerMic = (role: string | undefined, prefs: VoicePrefs, support: Support | null, listening = false) => renderToStaticMarkup(<ComposerMic role={role} prefs={prefs} support={support} listening={listening} onToggle={() => {}} />);
-export const renderMicInterim = (listening: boolean, interim: string, error: string | null = null) => renderToStaticMarkup(<MicInterim listening={listening} interim={interim} error={error} />);
-export const renderVoiceSettings = (owner: boolean, brand?: string) => renderToStaticMarkup(<VoiceSettings owner={owner} brand={brand} />);
-export const renderVoiceSettingsView = (prefs: VoicePrefs, status: OnDeviceStatus | null, brand?: string, wakeModel: string | null = null) => renderToStaticMarkup(<VoiceSettingsView prefs={prefs} status={status} lang="en-US" onChange={() => {}} onInstall={() => {}} brand={brand} wakeModel={wakeModel} />);
-export const renderWakeIndicator = (micOpen: boolean, phrase: string) => renderToStaticMarkup(<WakeIndicator micOpen={micOpen} phrase={phrase} onOff={() => {}} />);
-export { mayWake, NO_WAKE_MODEL, registerWakeEngine, startOnWake, wakeEngine, WakeListener, wakePhrase } from './voice/wake';
-export { checkSupport, Dictation, insertAt, intoBox, NO_ON_DEVICE, speechCtor } from './voice/speech';
-export { mayDictate } from './voice/Mic';
-export { readVoicePrefs, VOICE_DEFAULTS } from './voice/prefs';
-export const renderTalkStatus = (role: string | undefined, prefs: VoicePrefs, speaking: boolean, note: string | null = null) => renderToStaticMarkup(<TalkStatus role={role} prefs={prefs} speaking={speaking} note={note} onStop={() => {}} />);
-export const renderVoiceSettingsVoices = (prefs: VoicePrefs, voices: VoiceCount) => renderToStaticMarkup(<VoiceSettingsView prefs={prefs} status={null} lang="en-US" onChange={() => {}} onInstall={() => {}} voices={voices} />);
-export { mayTalk } from './voice/TalkBack';
-export { countVoices } from './voice/VoiceSettings';
-export { pickVoice, spokenText, stopSpeaking, TalkBack, CODE_OMITTED, SECRET_OMITTED, NO_LOCAL_VOICE } from './voice/talk';
-export const renderVoiceBanner = (view: BannerView | null) => renderToStaticMarkup(<VoiceBanner view={view} onConfirm={() => {}} onCancel={() => {}} />);
-export const renderVoiceButton = (show: boolean, support: Support | null, listening = false) => renderToStaticMarkup(<VoiceButton show={show} support={support} listening={listening} onToggle={() => {}} />);
-export const renderVoiceControl = (state: State, prefs: VoicePrefs) => renderToStaticMarkup(<VoiceControl state={state} prefs={prefs} ctor={null} />);
-export { approvalFor, bannerText, CONFIRM_WINDOW_MS, mayUseVoice, parseHeard, tabState, voiceActive, VoiceCommands } from './voice/commands';
 export { proposedSetting } from './components/InstanceSettings';
 export const renderIntake = (data: IntakeViewData, view?: string) => renderToStaticMarkup(<IntakeReports data={data} {...(view ? { view } : {})} />);
 export const renderIntakeHealth = (health: IntakeViewData['health']) => renderToStaticMarkup(<IntakeHealthSection health={health} />);
@@ -267,13 +242,6 @@ export const renderLandsUnderUsage = (usage: UsageInfo[], current: string | null
       <ul>
         <ConfigPrRow pr={o.configPr} canAct initialPlan={{ command: 'gh pr merge 7', then: 'then this checkout is fast-forwarded' }} onDone={() => {}} />
       </ul>
-    </PausedScope>,
-  );
-/** #664: the voice banner for `view`, with these open decisions, under a page's usage view. */
-export const renderVoiceBannerUnderUsage = (usage: UsageInfo[], current: string | null, view: BannerView, decisions: Pick<Decision, 'id' | 'kind'>[]) =>
-  renderToStaticMarkup(
-    <PausedScope usage={usage} current={current}>
-      <VoiceBanner view={view} decisions={decisions} onConfirm={() => {}} onCancel={() => {}} />
     </PausedScope>,
   );
 /**

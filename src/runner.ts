@@ -172,15 +172,36 @@ export interface AgentRunner {
 // root's network.json (src/network.ts outboundEnv, applied below).
 const PASS_THROUGH = ['CLAUDE_CONFIG_DIR', 'PATH', 'HOME', 'USER', 'LOGNAME', 'SHELL', 'LANG', 'LC_ALL', 'TERM', 'TMPDIR', 'TZ', 'XDG_RUNTIME_DIR', 'SystemRoot', 'ComSpec', 'PATHEXT', 'APPDATA', 'LOCALAPPDATA', 'USERPROFILE', 'ProgramData', 'ProgramFiles'];
 
+/** An agent_runtime kind (config.yaml agent_runtime.kind; `sdk` is read as api_key). */
+export type RuntimeKind = 'cli' | 'api_key';
+
+/** The `claude auth status` methods each kind runs on; the preflight below and the wizard's Claude step read this one table (#738). */
+export const RUNTIME_LOGINS: Readonly<Record<RuntimeKind, readonly string[]>> = {
+  cli: ['claude.ai', 'oauth_token'],
+  api_key: ['api_key', 'api_key_helper'],
+};
+
+/** The login a `claude auth status` answer names: 'none' unless `loggedIn` is exactly true, 'unknown' with no method. */
+export function loginMethod(j: { loggedIn?: unknown; authMethod?: unknown }): string {
+  if (j.loggedIn !== true) return 'none';
+  return typeof j.authMethod === 'string' && j.authMethod ? j.authMethod : 'unknown';
+}
+
+/** What of `base` reaches claude in an agent run (the pass-through list; for api_key, local runs, the key); the Claude step uses it too. */
+export function agentAuthEnv(base: NodeJS.ProcessEnv, runtime: 'cli' | 'api_key'): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {};
+  for (const k of PASS_THROUGH) if (base[k] !== undefined) env[k] = base[k];
+  // Local runs only: an instance never has the key in its environment (it reaches claude through apiKeyHelper).
+  if (runtime === 'api_key' && base.ANTHROPIC_API_KEY) env.ANTHROPIC_API_KEY = base.ANTHROPIC_API_KEY;
+  return env;
+}
+
 /**
  * The agent's whole environment. Anything not listed is dropped, which
  * removes GitHub tokens, cloud keys, database URLs and the SSH agent.
  */
 export function agentEnv(base: NodeJS.ProcessEnv, runtime: 'cli' | 'api_key', extra: Record<string, string> = {}): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = {};
-  for (const k of PASS_THROUGH) if (base[k] !== undefined) env[k] = base[k];
-  // Local runs only: an instance never has the key in its environment (it reaches claude through apiKeyHelper).
-  if (runtime === 'api_key' && base.ANTHROPIC_API_KEY) env.ANTHROPIC_API_KEY = base.ANTHROPIC_API_KEY;
+  const env = agentAuthEnv(base, runtime);
   Object.assign(env, {
     [`${BRAND.envPrefix}_AGENT`]: '1',
     CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1',
@@ -298,7 +319,7 @@ export function claudeAuthStatus(env: NodeJS.ProcessEnv, runAs?: RunAs, bin = 'c
   try {
     const j = JSON.parse(r.stdout) as { loggedIn?: boolean; authMethod?: string; email?: unknown; orgName?: unknown };
     const account = typeof j.email === 'string' && j.email ? j.email : typeof j.orgName === 'string' && j.orgName ? j.orgName : null;
-    return { method: j.loggedIn ? (j.authMethod ?? 'unknown') : 'none', text: '', account: account?.slice(0, 200) ?? null };
+    return { method: loginMethod(j), text: '', account: account?.slice(0, 200) ?? null };
   } catch {
     return { method: 'unknown', text: `${r.stdout ?? ''}\n${r.stderr ?? ''}`.trim().slice(-500) };
   }
@@ -481,8 +502,8 @@ export class CliRunner implements AgentRunner {
      */
     private apiKeyFile?: string,
     /**
-     * The Claude login a run as this user uses, read when each run starts (src/claude-profiles.ts: the instance's
-     * active account profile), and every login's credentials file that user has, which no agent command may read.
+     * The Claude login a run as this user uses, read when each run starts (src/claude-accounts-retired.ts: its user's
+     * own, never a profile's), and every login's credentials file that user has, which no agent command may read.
      * Unset: the user's own claudeConfigDir, as always.
      */
     private login?: { resolve: (r: RunAs) => RunAs; credentialFiles: (r: RunAs) => string[] },
@@ -630,7 +651,7 @@ export class CliRunner implements AgentRunner {
     // transient error) is reported with its text, and run() waits it out instead of starting claude.
     const status = req.provider ? { method: 'provider', text: '' } : claudeAuthStatus(runEnv, runAs, this.bin);
     const auth = status.method;
-    const want = req.provider ? ['provider'] : this.runtime === 'cli' ? ['claude.ai', 'oauth_token'] : ['api_key', 'api_key_helper'];
+    const want: readonly string[] = req.provider ? ['provider'] : RUNTIME_LOGINS[this.runtime];
     if (!want.includes(auth)) {
       return { reason: 'auth_mismatch', detail: `runtime ${this.runtime} expects ${want.join(' or ')} auth, claude reports ${auth}${status.text ? `: ${status.text}` : ''}; not starting (no silent billing switch)`, costUsd: 0, turns: 0, model: req.model };
     }

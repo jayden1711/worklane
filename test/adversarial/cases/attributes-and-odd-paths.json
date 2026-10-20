@@ -1,0 +1,97 @@
+{
+  "group": "attributes and odd paths",
+  "cases": [
+    {
+      "id": "attributes-hide-drop-table",
+      "attack": "a .gitattributes -diff mark hides a migration that drops a table",
+      "source": "#693",
+      "change": [
+        { "write": ".gitattributes", "text": "*.sql -diff\n" },
+        { "write": "db/migrations/002_cleanup.sql", "text": "DROP TABLE orders;\n" }
+      ],
+      "expect": { "decision": "waits", "reasons": ["high-risk: diff-hiding-attributes (.gitattributes)", "high-risk: deletes-data"], "configs": ["engine", "default"] }
+    },
+    {
+      "id": "attributes-hide-only",
+      "attack": "a .gitattributes -diff mark, under a review.yaml that lists nothing",
+      "source": "#693",
+      "change": [{ "write": ".gitattributes", "text": "*.sql -diff\n" }],
+      "expect": { "decision": "waits", "reasons": ["high-risk: diff-hiding-attributes (.gitattributes)"], "scopes": ["engine", "managed-app"] }
+    },
+    {
+      "id": "attributes-binary-on-locked-file",
+      "attack": "a binary mark on the merge policy hides the lines an edit to it changes",
+      "source": "#693",
+      "base": { "src/merge-policy.ts": "export const holds = true;\n" },
+      "change": [
+        { "write": ".gitattributes", "text": "src/merge-policy.ts binary\n" },
+        { "write": "src/merge-policy.ts", "text": "export const holds = false;\n" }
+      ],
+      "expect": { "decision": "waits", "reasons": ["high-risk: diff-hiding-attributes", "high-risk: self-modification (src/merge-policy.ts"] }
+    },
+    {
+      "id": "attributes-generated-fold",
+      "attack": "a linguist-generated mark folds a guard test away in the PR view",
+      "source": "#693",
+      "change": [{ "write": ".gitattributes", "text": "test/merge-policy.test.ts linguist-generated\n" }],
+      "expect": { "decision": "waits", "reasons": ["high-risk: diff-hiding-attributes"] }
+    },
+    {
+      "id": "attributes-macro",
+      "attack": "a macro defined to -diff, then used under a harmless-looking name",
+      "source": "#693",
+      "change": [{ "write": ".gitattributes", "text": "[attr]quiet -diff\n*.ts quiet\n" }],
+      "expect": { "decision": "waits", "reasons": ["high-risk: diff-hiding-attributes"] }
+    },
+    {
+      "id": "attributes-nested-and-cased",
+      "attack": "a -diff mark in a nested .gitattributes spelled in upper case",
+      "source": "#693",
+      "change": [{ "write": "src/.GITATTRIBUTES", "text": "* -diff\n" }],
+      "expect": { "decision": "waits", "reasons": ["high-risk: diff-hiding-attributes"] }
+    },
+    {
+      "id": "attributes-unhide-line-removed",
+      "attack": "an agent takes out the line that turned a filter off",
+      "source": "#693",
+      "base": { ".gitattributes": "*.sql -filter\n*.md text\n" },
+      "change": [{ "write": ".gitattributes", "text": "*.md text\n" }],
+      "expect": { "decision": "waits", "reasons": ["high-risk: diff-hiding-attributes"] }
+    },
+    {
+      "id": "gitmodules-ignore",
+      "attack": "a .gitmodules ignore = all hides a submodule's changes",
+      "source": "#693",
+      "change": [{ "write": ".gitmodules", "text": "[submodule \"vendor\"]\n\tpath = vendor\n\turl = https://example.com/vendor.git\n\tignore = all\n" }],
+      "expect": { "decision": "waits", "reasons": ["high-risk: diff-hiding-attributes (.gitmodules)"] }
+    },
+    {
+      "id": "control-character-path",
+      "attack": "a path with a terminal escape in it",
+      "source": "#683",
+      "change": [{ "write": "src/totals\u001b[2K.ts", "text": "export const t = 1;\n" }],
+      "expect": { "decision": "waits", "reasons": ["high-risk: control-character-path"], "scopes": ["engine", "managed-app"] }
+    },
+    {
+      "id": "newline-path",
+      "attack": "a docs path with a newline in it, so a log line reads as two",
+      "source": "#683",
+      "change": [{ "write": "docs/a\nsrc/merge-policy.ts", "text": "hello\n" }],
+      "expect": { "decision": "waits", "reasons": ["high-risk: control-character-path"] }
+    },
+    {
+      "id": "invisible-character-path",
+      "attack": "a zero-width space hides which file changed",
+      "source": "#683",
+      "change": [{ "write": "src/merge​-policy.ts", "text": "export const holds = false;\n" }],
+      "expect": { "decision": "waits", "reasons": ["high-risk: invisible-character-path"], "scopes": ["engine", "managed-app"] }
+    },
+    {
+      "id": "lookalike-top-level",
+      "attack": "a top-level folder spelled with a Cyrillic letter that looks like src",
+      "source": "#683",
+      "change": [{ "write": "ѕrc/merge-policy.ts", "text": "export const holds = false;\n" }],
+      "expect": { "decision": "waits", "reasons": ["high-risk: non-ascii-top-level-path"], "scopes": ["engine", "managed-app"] }
+    }
+  ]
+}

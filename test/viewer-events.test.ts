@@ -83,7 +83,7 @@ test('a viewer gets only the allowlisted events and fields on /api/events and in
 
 test('#741 a held first task: a writer\'s first-run page has its hold reason in plain words; a viewer\'s page, state and events carry no hold reason', async () => {
   // The setup checks see stand-ins only: no real gh, claude or service is asked.
-  const setupProbe: SetupProbe = { which: (c) => `/stand-in/${c}`, run: () => ({ status: 1, stdout: '{"loggedIn": false}', stderr: 'stand-in' }), serviceRunning: () => false, systemUnitActive: () => false, linger: () => null };
+  const setupProbe: SetupProbe = { which: (c) => `/stand-in/${c}`, run: () => ({ status: 1, stdout: '{"loggedIn": false}', stderr: 'stand-in' }), serviceRunning: () => false, systemUnitActive: () => false, linger: () => null, serviceManagerEnv: () => ({ env: {} }) };
   const s = await serve({ setupProbe });
   try {
     const H = 'abc1234';
