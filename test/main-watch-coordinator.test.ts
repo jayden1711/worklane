@@ -6,6 +6,7 @@ import assert from 'node:assert/strict';
 import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { createHash } from 'node:crypto';
 import { acknowledgement, measureMain, remoteTip } from '../src/auto-merge-resume.js';
 import { BRAND } from '../src/brand.js';
 import type { CommitCheck, PullRequest } from '../src/backlog/types.js';
@@ -454,6 +455,100 @@ test('resume (#776): a request the coordinator has not measured yet stays stoppe
   assert.notEqual(w.c.autoMergeStopped(), null);
   assert.equal(of(w.f, 'merge.resumed').length, 0);
   assert.equal(of(w.f, 'merge.main_measured').length, 0);
+});
+
+test('resume (#776 round 2): the answer shows only a measurement made for the stop in force, never one from before it', async () => {
+  const w = world();
+  await w.watch(2);
+  const first = redMainStop(w);
+  w.f.backlog.setChecks(first, passing);
+  const { d, resume } = await resumeDashboard(w);
+  try {
+    assert.equal((await resume()).status, 202);
+    await watchMerges(w); // measured green: resumed
+    assert.equal(of(w.f, 'merge.resumed').length, 1);
+    // Main moves on and goes red: a new stop on the new tip.
+    const tip = w.commit('red.txt');
+    git(w.person, 'push', '-q', 'origin', 'main');
+    w.f.backlog.setChecks(tip, failing(12));
+    redMainStop(w);
+    const r = await resume();
+    assert.equal(r.body.last, null, `the earlier green on ${first.slice(0, 8)} is not this stop's`);
+    assert.match(r.body.message ?? '', /has recorded no measurement of main yet/);
+    assert.doesNotMatch(r.body.message ?? '', new RegExp(first.slice(0, 8)));
+    await watchMerges(w);
+    const again = await resume();
+    assert.equal(again.body.last?.tip, tip);
+    assert.equal(again.body.last?.green, false);
+  } finally {
+    await d.close();
+  }
+});
+
+test('resume (#776 round 2): a forged request resumes nothing: the ack must pass the dashboard validator, and only a human owner, checked when it is acted on, counts', async () => {
+  const w = world();
+  await w.watch(2);
+  const tip = redMainStop(w);
+  w.f.backlog.setChecks(tip, failing(13));
+  const stop = f776Last(w, 'merge.stopped').id;
+  const file = createHash('sha256').update(readFileSync(stopFile(w.f), 'utf8')).digest('hex');
+  // The log refuses an acknowledgement the dashboard would refuse.
+  assert.throws(() => w.f.log.append('merge.resume_requested', { stop, file, ack: 'x' }, 'agent-user', 'agent'), /not an acknowledgement/);
+  const good = 'the fix PR is ready; merging it needs auto-merge';
+  // An agent's request, a writer's, and a row written around the schema with a reason that isn't one.
+  const agent = w.f.log.append('merge.resume_requested', { stop, file, ack: good }, 'agent-user', 'agent');
+  const writer = w.f.log.append('merge.resume_requested', { stop, file, ack: good }, 'example-collaborator', 'human');
+  (w.f.log as unknown as { db: { prepare(sql: string): { run(...a: unknown[]): unknown } } }).db
+    .prepare('INSERT INTO events (ts, type, actor, source, payload) VALUES (?, ?, ?, ?, ?)')
+    .run(new Date().toISOString(), 'merge.resume_requested', 'example-owner', 'human', JSON.stringify({ stop, file, ack: 'x' }));
+  await watchMerges(w);
+  assert.ok(existsSync(stopFile(w.f)), 'nothing resumed');
+  assert.equal(of(w.f, 'merge.resumed').length, 0);
+  const ignored = of<EventPayload<'merge.resume_ignored'>>(w.f, 'merge.resume_ignored');
+  assert.match(ignored.find((i) => i.request === agent.id)?.why ?? '', /not a person's request \(source agent, actor agent-user\)/);
+  assert.match(ignored.find((i) => i.request === writer.id)?.why ?? '', /@example-collaborator is not an owner/);
+  assert.ok(ignored.some((i) => /acknowledgement is not a typed reason/.test(i.why)), 'the raw row is ignored');
+  // Once ignored, not looked at again; an owner's own request still works.
+  await watchMerges(w);
+  assert.equal(of(w.f, 'merge.resume_ignored').length, ignored.length);
+  w.f.log.append('merge.resume_requested', { stop, file, ack: good }, 'example-owner', 'human');
+  await watchMerges(w);
+  assert.ok(!existsSync(stopFile(w.f)));
+  assert.match(of<EventPayload<'merge.resumed'>>(w.f, 'merge.resumed').at(-1)!.detail, /^@example-owner resumed auto-merge from the dashboard, acknowledging/);
+});
+
+test('resume (#776 round 2): a stop file with no merge.stopped of its own is answered too, under the same rules: keyed to the file, red stays, green resumes', async () => {
+  const w = world();
+  await w.watch(2);
+  const tip = git(w.f.remote, 'rev-parse', 'main');
+  // An earlier stop and resume are logged; then a stop file appears with none of its own (an older engine's, no `by`).
+  w.f.log.append('merge.stopped', { reason: 'earlier', number: null, sha: null, revert: null, by: 'red_main' }, 'coordinator');
+  w.f.log.append('merge.resumed', { detail: 'test: an earlier resume' }, 'example-owner', 'human');
+  writeFileSync(stopFile(w.f), JSON.stringify({ reason: 'stopped by an older engine' }));
+  w.f.backlog.setChecks(tip, failing(14));
+  const { d, resume } = await resumeDashboard(w);
+  try {
+    const r = await resume();
+    assert.equal(r.status, 202);
+    assert.equal((f776Last(w, 'merge.resume_requested').payload as EventPayload<'merge.resume_requested'>).stop, null);
+    await watchMerges(w);
+    assert.equal(of(w.f, 'merge.main_measured').length, 1, 'measured (round 1 never answered it)');
+    assert.ok(existsSync(stopFile(w.f)), 'red: still stopped');
+    assert.equal((await resume()).body.last?.green, false, 'the measurement for this file is shown');
+    // A forged request is ignored here too.
+    const forged = w.f.log.append('merge.resume_requested', { stop: null, file: createHash('sha256').update(readFileSync(stopFile(w.f), 'utf8')).digest('hex'), ack: 'the fix PR is ready; merging it needs auto-merge' }, 'agent-user', 'agent');
+    await watchMerges(w);
+    assert.ok(existsSync(stopFile(w.f)));
+    assert.ok(of<EventPayload<'merge.resume_ignored'>>(w.f, 'merge.resume_ignored').some((i) => i.request === forged.id));
+    // Green on the tip, asked again: resumed.
+    w.f.backlog.setChecks(tip, passing);
+    await resume();
+    await watchMerges(w);
+    assert.ok(!existsSync(stopFile(w.f)));
+    assert.match(of<EventPayload<'merge.resumed'>>(w.f, 'merge.resumed').at(-1)!.detail, /with main green on .*\(stopped by an older engine\)/);
+  } finally {
+    await d.close();
+  }
 });
 
 test('resume (#776): with main still red, an explicit acknowledgement (a typed reason) resumes and records who, why and what main was; no reason, or a short one, is refused', async () => {
