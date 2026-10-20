@@ -22,7 +22,6 @@ import { addProjectNameOk, addProjectRepoOk } from '../src/machine.js';
 import { asks } from '../src/console/asks.js';
 import { claudeAccountView } from '../src/claude-account.js';
 import { CLAUDE_CREDENTIAL_NAMES, REMOVED_CREDENTIAL_PATHS } from '../src/claude-credential-guard.js';
-import { profilesView } from '../src/claude-profiles.js';
 import { resetWords } from '../src/usage-limit.js';
 import { tailscaleView, type TailscaleStatus } from '../src/tailscale-setup.js';
 import { raiseIncident, resolveIncident } from '../src/watchdog/incidents.js';
@@ -2480,7 +2479,6 @@ test('#562: after an instance and then All instances, the sidebar header and the
   // What each instance's server answers: its own state (its project's name) and the machine's Claude account, from it.
   const own = asOwner as State & { project: Record<string, unknown> };
   const stateOf = (name: 'a' | 'b') => ({ ...own, project: { ...own.project, name: MARKS[name].project } }) as State;
-  const cell = (instance: string, active: boolean) => ({ instance, user: `wl-${instance}-agent`, active, account: null, subscription: null, apiOk: true, apiError: null, checkedAt: null });
   const accountOf = (name: 'a' | 'b') => ({
     machineOwner: true,
     machineOwners: ['example-owner'],
@@ -2488,13 +2486,10 @@ test('#562: after an instance and then All instances, the sidebar header and the
     instance: name,
     allowed: true,
     why: null,
-    busy: null,
     status: null,
-    switch: null,
     requests: [],
-    profiles: { instances: ['a', 'b'], active: { a: 'default', b: 'default' }, profiles: [{ name: 'default', kind: 'default', addedAt: null, cells: [cell('a', true), cell('b', true)] }, { name: 'spare', kind: 'token', addedAt: null, cells: [cell('a', false), cell('b', false)] }] },
-    profileOps: [],
-    confirmScript: 'claude-account.sh',
+    signin: 'sudo -u <agent user> -i claude auth login',
+    retired: null,
   });
   // As the page sees it: every view reads scope.current's server (the state, and the account panel's data).
   const view = (scope: ReturnType<Render['scopeOf']>) => ({
@@ -2511,13 +2506,9 @@ test('#562: after an instance and then All instances, the sidebar header and the
   assert.equal(shown.header, 'All instances', 'All instances: the header says so, not b');
   assert.match(scopeLine(shown.account) ?? '', /every instance on this machine \(a, b\)/, "All instances: the Claude account panel's scope line covers every instance");
   assert.doesNotMatch(scopeLine(shown.account) ?? '', /\bb\b(?!\))/, 'and not b alone');
-  // Nothing in the panel is offered for b alone while All is chosen: its one-instance steps wait for an instance to be picked.
-  for (const id of ['claude-profile-use-here', 'claude-profile-remove', 'claude-failover']) assert.doesNotMatch(shown.account, new RegExp(`data-testid="${id}"`), `${id}: not under All`);
-  // Adding an account is root's for every instance's agent user at once, so its how-to shows under All too.
-  assert.match(shown.account, /data-testid="claude-profile-add-howto"[\s\S]*?data-testid="claude-profile-add-command">sudo bash claude-account\.sh profile-add &lt;name&gt;<[\s\S]*?for every instance(&#x27;|')s agent user at once/, 'Add an account: under All');
-  assert.doesNotMatch(shown.account, /only b&#x27;s|for b\b|Add an account for b/, 'no copy names b as the one the panel is for');
-  assert.match(shown.account, /data-testid="claude-profiles-table"/, "every instance's accounts are still listed");
-  assert.match(shown.account, /data-testid="claude-account-switch-command">sudo bash claude-account\.sh switch/, 'switching every instance: the root command');
+  assert.doesNotMatch(shown.account, /only b&#x27;s|for b\b/, 'no copy names b as the one the panel is for');
+  // How an agent user is signed in (as that user, on the machine) is the same under All.
+  assert.match(shown.account, /data-testid="claude-account-signin-command">sudo -u &lt;agent user&gt; -i claude auth login</);
 
   // One instance again: its name in the header and in the panel.
   const a = r.scopeOf(hub, 'a', false);
@@ -2525,12 +2516,9 @@ test('#562: after an instance and then All instances, the sidebar header and the
   assert.equal(back.header, 'alpha-proj', 'a picked: the header names its project');
   assert.match(scopeLine(back.account) ?? '', /^For a: /, "a picked: the panel's scope line names a");
   assert.doesNotMatch(scopeLine(back.account) ?? '', /every instance on this machine \(/);
-  assert.match(back.account, /only a&#x27;s/, 'its accounts can be chosen for a from here');
-  for (const id of ['claude-profile-use-here', 'claude-profile-add-howto', 'claude-failover']) assert.match(back.account, new RegExp(`data-testid="${id}"`), `${id}: offered for a`);
 });
 
-test('#711: the Claude account panel takes no credential: no password field, no switch button, no add or sign-in form; the root commands instead', () => {
-  const cell = (active: boolean) => ({ instance: 'a', user: 'wl-a-agent', active, account: null, subscription: null, apiOk: true, apiError: null, checkedAt: null });
+test('#711, #736: the Claude account panel takes no credential and offers no account step: no password field, no switch, add, profile or sign-in form; the sign-in command and the leftovers\' root step instead', () => {
   const data = {
     machineOwner: true,
     machineOwners: ['example-owner'],
@@ -2538,20 +2526,19 @@ test('#711: the Claude account panel takes no credential: no password field, no 
     instance: 'a',
     allowed: true,
     why: null,
-    busy: null,
     status: null,
-    switch: { startedAt: new Date().toISOString(), status: 'running' as const, detail: 'x', waitingForToken: true, token: { at: new Date().toISOString(), step: 'token' as const, state: 'ask' as const, instance: null, user: null, detail: 'paste the token' }, instances: [] },
     requests: [],
-    profiles: { instances: ['a'], active: { a: 'default' }, profiles: [{ name: 'default', kind: 'default', addedAt: null, cells: [cell(true)] }, { name: 'spare', kind: 'token', addedAt: null, cells: [cell(false)] }] },
-    profileOps: [],
-    confirmScript: '/opt/engine/scripts/setup/claude-account.sh',
+    signin: 'sudo -u <agent user> -i claude auth login',
+    retired: { files: ['profiles.json', 'switch.jsonl'], refused: ['a'], unreadable: false, command: 'sudo bash /opt/engine/scripts/setup/claude-account.sh uninstall' },
   };
   const html = r.renderClaudeAccount(data, undefined, r.scopeOf({ instances: [{ name: 'a', up: true, error: null }] }, 'a', false));
-  assert.doesNotMatch(html, /type="password"/, 'no field a credential could be typed into');
-  for (const id of ['claude-switch-token', 'claude-switch-token-send', 'claude-account-switch', 'claude-account-switch-confirm', 'claude-profile-add', 'claude-profile-token', 'claude-signin', 'claude-signin-code']) assert.ok(!html.includes(`data-testid="${id}"`), id);
-  assert.match(html, /data-testid="claude-account-switch-command">sudo bash \/opt\/engine\/scripts\/setup\/claude-account\.sh switch</);
-  assert.match(html, /data-testid="claude-profile-add-command">sudo bash \/opt\/engine\/scripts\/setup\/claude-account\.sh profile-add &lt;name&gt;</);
-  assert.match(html, /data-testid="claude-switch-token-elsewhere">It is pasted in the terminal where the switch was started\. This page never takes it\./);
+  assert.doesNotMatch(html, /type="password"|<input|<textarea/, 'no field a credential could be typed into');
+  for (const id of ['claude-switch', 'claude-switch-token', 'claude-switch-token-send', 'claude-account-switch', 'claude-account-switch-confirm', 'claude-account-switch-howto', 'claude-profile-add', 'claude-profile-token', 'claude-profiles', 'claude-profile-use-here', 'claude-profile-remove', 'claude-failover', 'claude-signin', 'claude-signin-code']) assert.ok(!html.includes(`data-testid="${id}"`), id);
+  assert.equal([...html.matchAll(/<button/g)].length, 1, 'Refresh, and nothing else');
+  assert.match(html, /data-testid="claude-account-signin-command">sudo -u &lt;agent user&gt; -i claude auth login</);
+  assert.match(html, /data-testid="claude-account-retired"[\s\S]*profiles\.json, switch\.jsonl[\s\S]*data-testid="claude-account-retired-refused"[^>]*>[^<]*another profile: a\.[\s\S]*data-testid="claude-account-retired-command">sudo bash \/opt\/engine\/scripts\/setup\/claude-account\.sh uninstall</);
+  // Nothing left: no notice.
+  assert.doesNotMatch(r.renderClaudeAccount({ ...data, retired: null }), /claude-account-retired/);
 });
 
 test('#711: no page source sends to a removed credential route, or asks the switch or a relayed sign-in to start', () => {
@@ -2587,66 +2574,25 @@ test("#711: the page-source scan flags each way #749's page started a switch or 
   for (const s of ["step: 'switch' | 'pause' | 'token'", "Pick<ClaudeAccountData, 'switch' | 'requests'>", "op: 'profile-add' | 'use' | 'remove' | 'login';", "const act = async (action: 'status') => {"]) assert.ok(!startsRefused(s, 'switch') && !startsRefused(s, 'login'), s);
 });
 
-test('Claude account: a machine owner sees each agent user and the switch step by step, never a token box (#711); anyone else nothing', () => {
+test('Claude account: a machine owner sees each agent user, never a token box (#711), and a switch an older engine left is not followed (#736); anyone else nothing', () => {
   const ownersFile = machineOwnersFile('ada');
   const dir = mkdtempSync(join(tmpdir(), 'claude-account-render-'));
   const at = new Date().toISOString();
   writeFileSync(join(dir, 'status.json'), JSON.stringify({ at, users: [{ instance: 'shop', kind: 'agent', user: 'wl-shop-agent', stored: true, logged_in: true, auth_method: 'claude.ai', account: 'agents@example.com', token_id: '0123abcd', expires_at: new Date(Date.now() + 200 * 86_400_000).toISOString() }, { instance: 'shop', kind: 'eval', user: 'wl-shop-eval', stored: false, logged_in: false, auth_method: 'none', error: 'claude auth status says it is not logged in' }] }));
-  const lines = (more: object[]) =>
-    writeFileSync(join(dir, 'switch.jsonl'), [{ step: 'switch', state: 'started', detail: '2 instance(s): shop web; the token from this terminal' }, { step: 'pause', state: 'done', instance: 'shop', detail: 'starts no more runs' }, { step: 'pause', state: 'done', instance: 'web', detail: 'starts no more runs' }, { step: 'token', state: 'ask', detail: 'paste it' }, ...more].map((l) => JSON.stringify({ at, ...l })).join('\n') + '\n');
+  // An older engine's switch, waiting for its token at a root shell.
+  writeFileSync(join(dir, 'switch.jsonl'), [{ step: 'switch', state: 'started', detail: '2 instance(s): shop web' }, { step: 'pause', state: 'done', instance: 'shop', detail: 'starts no more runs' }, { step: 'token', state: 'ask', detail: 'paste it' }].map((l) => JSON.stringify({ at, ...l })).join('\n') + '\n');
   const view = (login: string, instance = 'shop') => claudeAccountView({ dir, events: [], who: { role: 'owner', requester: ownerRequester(login) }, instance, ownersFile });
-  lines([]);
   const html = r.renderClaudeAccount(view('ada'));
-  for (const id of ['claude-account', 'claude-account-users', 'claude-account-refresh', 'claude-switch']) assert.match(html, new RegExp(`data-testid="${id}"`), id);
-  assert.doesNotMatch(html, /data-testid="claude-switch-token"/, 'a switch a root admin runs waits for its token at that shell: no box here');
+  for (const id of ['claude-account', 'claude-account-users', 'claude-account-refresh', 'claude-account-signin-howto', 'claude-account-retired']) assert.match(html, new RegExp(`data-testid="${id}"`), id);
+  assert.doesNotMatch(html, /data-testid="claude-switch/, 'no switch is followed, and no box');
   assert.match(html, /data-testid="claude-account-user" data-user="wl-shop-agent" data-signed-in="yes"/);
   assert.match(html, /agents@example\.com/);
   assert.match(html, /token 0123abcd/);
   assert.match(html, /data-user="wl-shop-eval" data-signed-in="no"[\s\S]*not logged in/);
-  assert.deepEqual([...html.matchAll(/data-testid="claude-switch-step" data-phase="([a-z]+)"/g)].map((m) => m[1]), ['running', 'running', 'pending', 'pending'], 'pause (runs finishing), token waiting, check, resume');
-  // In any instance's dashboard: no box.
-  assert.doesNotMatch(r.renderClaudeAccount(view('ada', 'web')), /data-testid="claude-switch-token"/);
-  // Each instance's result as it comes: one resumed, one left paused.
-  lines([{ step: 'token', state: 'done', detail: 'received' }, { step: 'wait', state: 'done', instance: 'shop', detail: 'finished' }, { step: 'wait', state: 'done', instance: 'web', detail: 'finished' }, { step: 'install', state: 'done', instance: 'shop', user: 'wl-shop-agent', detail: 'stored' }, { step: 'check', state: 'done', instance: 'shop', user: 'wl-shop-agent', detail: 'signed in' }, { step: 'check', state: 'failed', instance: 'web', user: 'wl-web-agent', detail: 'not logged in' }, { step: 'resume', state: 'done', instance: 'shop', detail: 'running again' }, { step: 'resume', state: 'failed', instance: 'web', detail: 'not resumed: its auth check failed' }, { step: 'switch', state: 'failed', detail: 'not resumed: web' }]);
-  const done = r.renderClaudeAccount(view('ada'));
-  assert.match(done, /data-testid="claude-switch" data-status="failed"/);
-  assert.deepEqual([...done.matchAll(/data-testid="claude-switch-resume" data-instance="([a-z]+)" data-state="([a-z]+)"/g)].map((m) => `${m[1]}:${m[2]}`), ['shop:done', 'web:failed']);
-  assert.match(done, /data-testid="claude-switch-result">not resumed: web/);
-  assert.doesNotMatch(done, /data-testid="claude-switch-token"/);
+  assert.match(html, /data-testid="claude-account-retired"[\s\S]*switch\.jsonl/);
+  assert.doesNotMatch(html, /claude-account-retired-refused/, 'a switch left over refuses no instance');
   // Not a machine owner: nothing at all (the server refuses them the data too).
   assert.equal(r.renderClaudeAccount(view('ivy')), '');
-});
-
-test("#566: the accounts table shows the usage-limit badge and its reset time on the paused instance's active account only; nothing without a pause", () => {
-  const ownersFile = machineOwnersFile('ada');
-  const dir = mkdtempSync(join(tmpdir(), 'claude-limit-render-'));
-  writeFileSync(join(dir, 'status.json'), JSON.stringify({ at: new Date().toISOString(), users: [{ instance: 'shop', kind: 'agent', user: 'wl-shop-agent', logged_in: true, api_ok: true }, { instance: 'web', kind: 'agent', user: 'wl-web-agent', logged_in: true, api_ok: true }] }));
-  writeFileSync(join(dir, 'profiles.json'), JSON.stringify({ profiles: { spare: { kind: 'setup-token', users: { 'wl-shop-agent': { instance: 'shop', user: 'wl-shop-agent', api_ok: true } } } }, active: {} }));
-  const now = Date.now();
-  const reset = new Date(now + 2 * 3600_000 + 30 * 60_000).toISOString();
-  const pause = { since: new Date(now - 60_000).toISOString(), resetAt: reset, source: 'claude' as const, kind: 'five_hour', issue: 3, role: 'worker', id: 1 };
-  // As the server sends it to shop's dashboard: shop's own pause (or none), read from shop's log.
-  const html = (p: typeof pause | null) => r.renderClaudeAccount({ ...claudeAccountView({ dir, events: [], who: { role: 'owner', requester: ownerRequester('ada') }, instance: 'shop', ownersFile }), ...profilesView(dir, now, 'shop', p) });
-  const cells = (h: string) => [...h.matchAll(/<td[^>]*data-testid="claude-profile-cell" data-profile="([^"]+)" data-instance="([^"]+)"[^>]*>([^]*?)<\/td>/g)].map((m) => ({ at: `${m[1]}/${m[2]}`, body: m[3]! }));
-
-  const paused = html(pause);
-  const all = cells(paused);
-  assert.deepEqual(all.map((c) => c.at), ['default/shop', 'default/web', 'spare/shop', 'spare/web']);
-  const marked = all.filter((c) => /data-testid="claude-profile-limit"/.test(c.body));
-  assert.deepEqual(marked.map((c) => c.at), ['default/shop'], "the badge on shop's active account only");
-  for (const c of all.filter((x) => x.at !== 'default/shop')) assert.doesNotMatch(c.body, /usage limit|resets /, c.at);
-  assert.match(marked[0]!.body, /usage limit/);
-  assert.ok(marked[0]!.body.includes(`resets ${resetWords(reset, now)}`), `the reset as the usage-limit notices word it: ${marked[0]!.body}`);
-  assert.match(resetWords(reset, now), /UTC \(in 2 h 30 min\)$/);
-  // web's limit is in web's own log: its column says so instead of showing nothing as if it had none.
-  assert.deepEqual([...paused.matchAll(/data-testid="claude-profile-limit-elsewhere" data-instance="([^"]+)"/g)].map((m) => m[1]), ['web']);
-  assert.match(paused, /data-testid="claude-profile-limit-elsewhere"[^>]*>[^<]*not shown here/);
-
-  // No pause: no badge and no reset time anywhere.
-  const free = html(null);
-  assert.equal(cells(free).length, 4);
-  assert.doesNotMatch(free, /data-testid="claude-profile-limit"/);
-  for (const c of cells(free)) assert.doesNotMatch(c.body, /usage limit|resets /, c.at);
 });
 
 test("#567: each role's Machine page and sign-in banner, from what the server sent that role: a viewer sees that an account is set and nothing naming it", { skip: process.platform === 'win32' }, async () => {
@@ -2677,7 +2623,8 @@ test("#567: each role's Machine page and sign-in banner, from what the server se
     assert.match(owner.machine, /data-testid="claude-account"/);
     assert.doesNotMatch(owner.machine, /claude-account-set/);
     assert.match(owner.machine, new RegExp(ACCOUNT.email.replace(/[.]/g, '\\.')));
-    assert.match(owner.machine, new RegExp(ACCOUNT.profile));
+    // The fixture's profiles.json is an older engine's leftover now (#736): named for what it is, never its profile.
+    assert.match(owner.machine, /data-testid="claude-account-retired"/);
     assert.match(owner.banner, /data-testid="signin-recheck"/);
     // What the line says when no account is signed in, when the machine hasn't said, and with no answer at all.
     assert.match(r.renderClaudeAccountSet({ claudeAccount: { set: false } }), /data-set="false"[\s\S]*No account is signed in/);
@@ -3182,17 +3129,10 @@ test('Tailscale and Claude account: a request handed to its own unit keeps the c
   // A refused or failed request starts no unit; and after a minute the unit is taken not to have started.
   assert.ok(!r.tailscaleBusy({ run: run('2026-10-14T12:00:01Z'), requests: [req({ status: 'refused' })] }, now));
   assert.ok(!r.tailscaleBusy({ run: run('2026-10-14T12:00:01Z'), requests: [req()] }, now + 120_000));
-  // A Claude account profile step is started the same way (its own unit): the panel waits for its first line.
-  const sw = (startedAt: string, status = 'done') => ({ startedAt, status, detail: '', waitingForToken: false, token: null, instances: [] });
-  const op = (startedAt: string) => ({ id: 'op', op: 'use', profile: 'spare', for: 'alpha', status: 'done', startedAt, endedAt: startedAt, detail: '', steps: [] });
-  const use = req({ args: ['claude-account', 'use', 'spare'] });
-  assert.ok(r.accountBusy({ switch: null, requests: [use], profileOps: [op('2026-10-13T09:00:00Z')] }, now));
-  assert.ok(r.accountBusy({ switch: null, requests: [use], profileOps: [] }, now));
-  assert.ok(!r.accountBusy({ switch: null, requests: [use], profileOps: [op('2026-10-14T12:00:21Z')] }, now));
-  // A switch a root admin runs: looked at while it runs.
-  assert.ok(r.accountBusy({ switch: sw('2026-10-14T12:00:21Z', 'running'), requests: [] }, now));
-  assert.ok(!r.accountBusy({ switch: sw('2026-10-14T12:00:21Z'), requests: [] }, now));
-  assert.ok(!r.accountBusy({ switch: null, requests: [req({ args: ['claude-account', 'status'] })] }, now), 'status runs in the helper itself: no unit to wait for');
+  // The Claude account panel starts no unit of its own any more (#736): it looks again only while a request waits or runs.
+  assert.ok(r.accountBusy({ requests: [req({ args: ['claude-account', 'status'], status: 'pending' })] }));
+  assert.ok(r.accountBusy({ requests: [req({ args: ['claude-account', 'status'], status: 'running' })] }));
+  assert.ok(!r.accountBusy({ requests: [req({ args: ['claude-account', 'status'] })] }), 'status runs in the helper itself: no unit to wait for');
 });
 
 // Voice dictation in the Ask panel (web/src/voice/): owners only, off until turned on, on-device only by default,

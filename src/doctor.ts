@@ -16,6 +16,7 @@ import { instanceTargets, planMigrations, projectConfigFiles, type Targets } fro
 import { projectStateDir } from './guardrails/context.js';
 import { canRunAgents, detectOs, diskFree, fileAccess, nvidiaNodes, shimsNeedShell, userUid, wslAvailable } from './os/index.js';
 import { diskFloorCheck } from './governor-holds.js';
+import { claudeAccountLeftoverCheck } from './claude-accounts-retired.js';
 import { findTool, toolBin } from './tool-path.js';
 import { checkIntakeFile } from './intake/check.js';
 import { INTAKE_FILE } from './intake/config.js';
@@ -211,6 +212,9 @@ export function doctor(rootArg: string, opts: { agentshield?: boolean; /** A pol
     const v = spawnSync(claude, ['--version'], { encoding: 'utf8', timeout: 20_000 });
     add('claude', v.status === 0 ? 'ok' : 'warn', (v.stdout || v.stderr || '').trim().split('\n')[0] ?? '');
   }
+  // What the removed account profiles, failover and switch left (#736): ignored, named with the step that removes it.
+  const accountLeftovers = claudeAccountLeftoverCheck();
+  if (accountLeftovers) out.push(accountLeftovers);
 
   // Lean CLAUDE.md
   const claudeMd = join(root, 'CLAUDE.md');

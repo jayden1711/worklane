@@ -328,7 +328,6 @@ const SILENT_DISABLED: Record<string, number> = {
   'web/src/components/Automations.tsx': 7,
   'web/src/components/ChatAttachments.tsx': 1,
   'web/src/components/ChatPanel.tsx': 4,
-  'web/src/components/ClaudeProfiles.tsx': 6,
   'web/src/components/ClaudeSignin.tsx': 3,
   'web/src/components/ConfigPr.tsx': 4,
   'web/src/components/Conversations.tsx': 3,

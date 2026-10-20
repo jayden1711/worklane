@@ -61,7 +61,7 @@ import { networkFilePath, networkPolicy } from './testrun/network.js';
 import { testSlotCap, testSlotsHeld } from './testrun/slots.js';
 import { FULL_RUN_LOCK } from './testrun/run.js';
 import { healthView } from './health.js';
-import { pauseOf, usageView } from './usage-limit.js';
+import { usageView } from './usage-limit.js';
 import { authHoldsOf, signinFailedView } from './claude-auth-failure.js';
 import { requestAuthRecheck } from './claude-auth-recheck.js';
 import { ConsoleError, liveRuns, sendMessage, stopRun } from './console.js';
@@ -119,9 +119,7 @@ import { applySourceIntake, credDef, credStates, intakeSourcesSummary, planSourc
 import { applyIntake, botView, DISCORD_CREDENTIAL, DiscordSetupError, discordSetupView, discordTokenRule, planIntake, listingRunner, tokenAsk, tokenState, type BotView, type DiscordListingStandIn } from './intake/discord-setup.js';
 import { INTAKE_FILE } from './intake/config.js';
 import { checkRootStep } from './console/root-steps.js';
-import { handleProfileRoute, isProfileRoute, refuseUnidentified } from './claude-profiles-routes.js';
-import { accountSet, profilesView } from './claude-profiles.js';
-import { CLAUDE_ACCOUNT_DIR, claudeAccountGate, claudeAccountView, mayViewClaudeAccount, requestClaudeAccount } from './claude-account.js';
+import { accountSet, CLAUDE_ACCOUNT_DIR, claudeAccountGate, claudeAccountView, mayViewClaudeAccount, requestClaudeAccount } from './claude-account.js';
 import { ClaudeCredentialRefused, CREDENTIAL_ROUTE_GONE, refuseClaudeCredential, REMOVED_CREDENTIAL_PATHS } from './claude-credential-guard.js';
 import { isTailscaleAction, mayViewTailscale, noTailscaleView, requestTailscale, stepsStamp, TAILSCALE_DIR, tailscaleStatus, tailscaleView, type TailscaleStatus } from './tailscale-setup.js';
 import { asksFrom, ASK_EVENTS } from './console/asks.js';
@@ -1454,11 +1452,6 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           const s = sessionOf(req, opts.instance ?? opts.cfg.project.project.name);
           return json(res, 200, { login: s?.login ?? null, role: s?.role ?? null, via: id.via });
         }
-        // The agents' Claude account profiles (src/claude-profiles-routes.ts): a refusal is audited even with no session.
-        if (req.method === 'POST' && isProfileRoute(url.pathname) && 'status' in id && id.status === 403) {
-          const r = refuseUnidentified(req, { eventsDb: opts.eventsDb, instance: opts.instance ?? opts.cfg.project.project.name }, url.pathname, id);
-          return json(res, r.status, r.body);
-        }
         if ('status' in id) return json(res, id.status, { error: id.error });
         const who = id;
         const isOwnerHere = isOwner(who.role);
@@ -1477,10 +1470,6 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           })
         )
           return;
-        if (req.method === 'POST' && isProfileRoute(url.pathname)) {
-          const r = await handleProfileRoute(req, url, who, { eventsDb: opts.eventsDb, instance: opts.instance ?? opts.cfg.project.project.name, repo, accountDir: opts.claudeAccountDir ?? CLAUDE_ACCOUNT_DIR, ...(opts.machineOwnersFile ? { ownersFile: opts.machineOwnersFile } : {}), audit, readBody });
-          return json(res, r.status, r.body);
-        }
         // Accept a commit as a bootstrap merge (src/main-watch.ts acceptMerge): an admin's only, like clearing the stop,
         // and every attempt is audited, refusals too (a viewer's as well, so this comes before the viewers' refusal).
         if (url.pathname === '/api/main-watch/accept' && req.method === 'POST') {
@@ -2659,8 +2648,8 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           return json(res, 200, { ok: true, pending: true, request: r });
         }
         // The agents' Claude account (src/claude-account.ts): the machine owners' panel. Each agent user's account and
-        // expiry, and a switch a root admin runs, followed from claude-account.sh's own progress file. Hidden from
-        // everyone else. It shows status only: it never takes a Claude credential (issue #711).
+        // expiry, and what the removed account profiles left on the machine (#736). Hidden from everyone else. It shows
+        // status only: it never takes a Claude credential (issue #711).
         const accountRequester = { login: who.login, breakGlass: who.via === 'break-glass', deviceOk: who.deviceOk };
         const accountDir = opts.claudeAccountDir ?? CLAUDE_ACCOUNT_DIR;
         const ownersOpt = opts.machineOwnersFile ? { ownersFile: opts.machineOwnersFile } : {};
@@ -2670,10 +2659,10 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           // everAllowed: the same gate, asked as if from an allowed device; false means no device helps (the role), so
           // the page draws no buttons for this person instead of disabled ones (#587).
           const everAllowed = claudeAccountGate({ role: who.role, requester: { ...accountRequester, deviceOk: true } }, ownersOpt) === null;
-          return json(res, 200, { ...claudeAccountView({ dir: accountDir, events, who: { role: who.role, requester: accountRequester }, instance: opts.instance ?? opts.cfg.project.project.name, ...ownersOpt }), everAllowed, ...profilesView(accountDir, Date.now(), opts.instance ?? opts.cfg.project.project.name, pauseOf(eventCache.all())) });
+          return json(res, 200, { ...claudeAccountView({ dir: accountDir, events, who: { role: who.role, requester: accountRequester }, instance: opts.instance ?? opts.cfg.project.project.name, ...ownersOpt }), everAllowed });
         }
-        // Refresh the status: a machine request the coordinator runs through the machine helper. A switch takes a
-        // Claude credential, so it is a root admin's at a root shell, never asked for here (issue #711).
+        // Refresh the status: a machine request the coordinator runs through the machine helper. Nothing else: the engine
+        // manages no Claude account (#736), and never takes a Claude credential (issue #711).
         if (url.pathname === '/api/machine/claude-account' && req.method === 'POST') {
           const body = ((await readBody(req)) ?? {}) as { action?: unknown };
           const action = String(body.action ?? '').slice(0, 20);

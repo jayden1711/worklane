@@ -562,7 +562,6 @@ test('a step is recorded only once it has run: as done when it exited 0, as fail
   const src = readFileSync(helperSrc, 'utf8');
   for (const s of ["runLogged('install-updater', 'updates.sh',", "runLogged('add-project', `${p.name} ${p.repo}`,", "runLogged('claude-account', 'status',"]) assert.ok(src.includes(s), s);
   const units: [string, string, string][] = [
-    ["spawnSync('systemd-run', ['--unit', CLAUDE_ACCOUNT_UNIT", 'logLine(\'claude-account\', null, what);', "logLine('claude-account', null, `failed: ${what}: not started`);"],
     ["spawnSync('systemd-run', ['--unit', TAILSCALE_UNIT", "logLine('tailscale', null, action);", "logLine('tailscale', null, `failed: ${action}: not started`);"],
   ];
   for (const [start, ok, failed] of units) {

@@ -15,7 +15,8 @@ import { BRAND } from './brand.js';
 import { machineNetworkConfig, outboundEnv } from './network.js';
 import { providerHostsAtStart } from './provider-hosts.js';
 import { GITHUB_API } from './github-hosts.js';
-import { accountSwitchedAt, profileLogin } from './claude-profiles.js';
+import { retiredAccountGate, retiredAccountWarning, retiredLogin } from './claude-accounts-retired.js';
+import { FAILOVER_INCIDENT } from './usage-limit.js';
 import { FileBacklog } from './backlog/file.js';
 import { GitHubBacklog } from './backlog/github.js';
 import type { Backlog } from './backlog/types.js';
@@ -174,6 +175,16 @@ export async function runInstanceCoordinator(name: string, opts: { once?: boolea
     console.error(`instance ${name} not started: ${gate}`);
     return 1;
   }
+  // Account profiles, failover and the switch were removed (#736): a failover notice an older engine left would never
+  // close, and an instance whose runs were on another profile starts no run on any login (the engine never moves one).
+  incidentSink(name).resolveIncident(FAILOVER_INCIDENT, name);
+  const retired = retiredAccountGate(name);
+  if (retired) {
+    console.error(`instance ${name} not started: ${retired}`);
+    return 1;
+  }
+  const leftover = retiredAccountWarning();
+  if (leftover) console.error(leftover);
   let i = loadInstance(name);
   const missing = instanceProblems(i);
   if (missing.length) {
@@ -273,9 +284,9 @@ export async function runInstanceCoordinator(name: string, opts: { once?: boolea
   const mergePosts = i.config.project.backlog === 'github' ? { api: new GitHubMergePostsApi(i.repo.repo, tokens, fetch, githubApi()) } : undefined;
   // CI timings for the metrics (src/ci-metrics.ts): GitHub only, read-only.
   const ciMetrics = i.config.project.backlog === 'github' ? { api: new GitHubCiMetricsApi(i.repo.repo, tokens, fetch, githubApi()) } : undefined;
-  // The watchdog (src/watchdog/): this instance's checks, plus the machine's if elected. Each run's login: the
-  // instance's active profile (src/claude-profiles.ts), read as it starts.
-  const login = i.runAs ? profileLogin({ instance: i.name, agentUser: i.runAs.user }) : undefined;
+  // The watchdog (src/watchdog/): this instance's checks, plus the machine's if elected. Each run's login: its user's
+  // own, with every ~/.claude-profiles an older engine left on the run's denied reads (src/claude-accounts-retired.ts).
+  const login = i.runAs ? retiredLogin({ agentUser: i.runAs.user }) : undefined;
   const agentAs = i.runAs;
   const watchdog = (log: EventLog, intakeConfig: () => IntakeConfig | null) => watchdogForInstance({ instance: i.name, stateDir: i.stateDir, log, env, ...(agentAs && login ? { runAs: () => login.resolve(agentAs) } : {}), tokens, intake: intakeConfig, ...(i.credentials.intake?.discord_token ? { discordTokenFile: i.credentials.intake.discord_token } : {}), say: (l) => console.error(l) });
   // land_mode direct only on a branch GitHub protects (direct-land.ts): checked at start-up and before every direct land.
@@ -285,7 +296,7 @@ export async function runInstanceCoordinator(name: string, opts: { once?: boolea
   // Approved plugins (src/plugins/run.ts): root's allowlist and store, checked before every run.
   const plugins = ({ role }: { role: string }) => pluginsForRun({ instance: i.name, instanceHome: i.home, role });
   const claude = new CliRunner(instanceRuntime(i).runtime, process.env, 'claude', i.runAs ?? undefined, allLanes(i), identity, {}, () => guardrailSettings(i.home, i.name, i.repo.path), instanceRuntime(i).apiKeyFile, login, plugins, { instance: i.name, register: (role, ttlMs) => registerRun(i.name, role, ttlMs), end: (ticket) => endRun(i.name, ticket) });
-  return runSite(siteForInstance(i), { ...opts, instance: i.name, label: `instance ${name}`, lockScope, protection: watchApi, offsiteConfig: join(i.home, OFFSITE_FILE), ...(i.credentials.provider_keys ? { providerKeys: i.credentials.provider_keys } : {}), testRun, intake, roleOf, liveConfig, watchdog, incidents: incidentSink(i.name), accountSwitched: () => accountSwitchedAt(i.name), superfan: superfanView(i.name, i.stateDir), ...(i.runAs ? { experiments: { instance: i.name, pinsFile: join(i.home, PINS_FILE) } } : {}), automations: { file: join(i.home, AUTOMATIONS_FILE), policy: () => readPolicy(join(i.home, 'policy.yaml')).policy?.automations ?? AutomationsPolicy.parse(undefined) }, ...(mainWatch ? { mainWatch } : {}), ...(mergePosts ? { mergePosts } : {}), ...(ciMetrics ? { ciMetrics } : {}) }, withCliAgents(claude, { codex: vendor('codex'), gemini: vendor('gemini') }), expiry, tokens, i.runAs ?? undefined, gh.kind === 'app' ? gh.key_path : undefined, identity, () => loadInstance(name).policy.auto_merge, settingsReader(join(i.home, 'policy.yaml')));
+  return runSite(siteForInstance(i), { ...opts, instance: i.name, label: `instance ${name}`, lockScope, protection: watchApi, offsiteConfig: join(i.home, OFFSITE_FILE), ...(i.credentials.provider_keys ? { providerKeys: i.credentials.provider_keys } : {}), testRun, intake, roleOf, liveConfig, watchdog, incidents: incidentSink(i.name), superfan: superfanView(i.name, i.stateDir), ...(i.runAs ? { experiments: { instance: i.name, pinsFile: join(i.home, PINS_FILE) } } : {}), automations: { file: join(i.home, AUTOMATIONS_FILE), policy: () => readPolicy(join(i.home, 'policy.yaml')).policy?.automations ?? AutomationsPolicy.parse(undefined) }, ...(mainWatch ? { mainWatch } : {}), ...(mergePosts ? { mergePosts } : {}), ...(ciMetrics ? { ciMetrics } : {}) }, withCliAgents(claude, { codex: vendor('codex'), gemini: vendor('gemini') }), expiry, tokens, i.runAs ?? undefined, gh.kind === 'app' ? gh.key_path : undefined, identity, () => loadInstance(name).policy.auto_merge, settingsReader(join(i.home, 'policy.yaml')));
 }
 
 /** An instance's superfan view: its name, and its service log as the dashboard's Logs page reads it (never sudo). */
