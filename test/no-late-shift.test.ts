@@ -12,6 +12,7 @@ import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { runInNewContext } from 'node:vm';
 import { BRAND } from '../src/brand.js';
 import { findChrome, sleep, until, type Cdp } from '../src/browser/cdp.js';
 import { loadConfig } from '../src/config/load.js';
@@ -23,6 +24,62 @@ import { asDevicePerson, exampleProject, exampleRoles, machineOwnersFile, repoRo
 
 /** How long a page waits for the usage's first answer (web/src/components/Usage.tsx USAGE_WAIT_MS; checked below). */
 const USAGE_WAIT_MS = 3_000;
+
+/**
+ * What the page's own clock saw (performance.now(), from its navigation start): when each USAGE_WAIT_MS timer it set
+ * started and was cleared (null: never), and when the page first showed (null: never).
+ */
+export interface UsageWaitSeen {
+  timers: { start: number; clearedAt: number | null }[];
+  shownAt: number | null;
+}
+
+/**
+ * Whether the page waited for the usage, measured on the page's own clock from the moment its wait began (#865).
+ * WHY: the test's clock started only once its poll saw the request held, which comes after the page's timer starts
+ * (its hub wait, the request's dispatch, the poll's lag between), so a loaded runner measured a correct page short
+ * (2476 ms in a release run). Here the start is the page's own timer start, so load can only make the wait longer.
+ * The wait counted is the latest USAGE_WAIT_MS timer still running (or fired) when the page showed: a page that shows
+ * before it, or started none, or cleared it first, fails; one that never shows, or past `longest`, fails too.
+ * `tolerance` covers only the page clock's coarseness, not load.
+ */
+export function usageWaitVerdict(seen: UsageWaitSeen, o: { waitMs: number; tolerance: number; longest: number }): { ok: true; waited: number } | { ok: false; why: string } {
+  const { shownAt } = seen;
+  if (shownAt === null) return { ok: false, why: 'the page never showed' };
+  const running = seen.timers.filter((t) => t.start <= shownAt && (t.clearedAt === null || t.clearedAt >= shownAt));
+  if (!running.length) return { ok: false, why: `the page showed at ${Math.round(shownAt)} ms with no ${o.waitMs} ms wait running (timers seen: ${JSON.stringify(seen.timers)})` };
+  const waited = shownAt - Math.max(...running.map((t) => t.start));
+  if (waited < o.waitMs - o.tolerance) return { ok: false, why: `the page showed ${Math.round(waited)} ms after its wait began, before its ${o.waitMs} ms wait was up` };
+  if (waited > o.longest) return { ok: false, why: `the page showed ${Math.round(waited)} ms after its wait began, past ${o.longest} ms` };
+  return { ok: true, waited };
+}
+
+/** In the page, from before its own scripts: records its USAGE_WAIT_MS timers and when `shown` first matches (UsageWaitSeen). */
+const WATCH_USAGE_WAIT = (shown: string) => `(() => {
+  const seen = (window.__usageWait = { timers: [], shownAt: null });
+  const set = window.setTimeout, clear = window.clearTimeout, byId = new Map();
+  window.setTimeout = function (fn, ms, ...rest) {
+    const id = set.call(window, fn, ms, ...rest);
+    if (ms === ${USAGE_WAIT_MS}) {
+      const t = { start: performance.now(), clearedAt: null };
+      seen.timers.push(t);
+      byId.set(id, t);
+    }
+    return id;
+  };
+  window.clearTimeout = function (id) {
+    const t = byId.get(id);
+    if (t && t.clearedAt === null) t.clearedAt = performance.now();
+    return clear.call(window, id);
+  };
+  const look = () => {
+    if (seen.shownAt !== null || !document.querySelector(${JSON.stringify(shown)})) return;
+    seen.shownAt = performance.now();
+    watch.disconnect();
+  };
+  const watch = new MutationObserver(look);
+  watch.observe(document, { childList: true, subtree: true, attributes: true });
+})()`;
 
 realChromeTests();
 const chrome = findChrome(process.env.CHROME);
@@ -303,15 +360,19 @@ test(
     try {
       const cdp = b.cdp;
       await openTab(cdp, d.token);
+      const shown = '[data-testid="page-inbox"] [data-decision="d-old-prose"]';
+      await cdp.send('Page.addScriptToEvaluateOnNewDocument', { source: WATCH_USAGE_WAIT(shown) });
       const answers = await intercept(cdp, { '/api/usage': null });
       answers.hold('/api/usage');
       await cdp.send('Page.navigate', { url: `${d.url}/inbox` });
       await until('/api/usage asked for', async () => answers.held('/api/usage'), 20_000);
-      const asked = Date.now();
-      // Never let through: the page shows anyway, once the wait is up (and a loaded runner's slack).
-      await until('the Inbox, with the usage still unanswered', () => js<boolean>(cdp, `!!document.querySelector('[data-testid="page-inbox"] [data-decision="d-old-prose"]')`), USAGE_WAIT_MS + 5_000, 100);
+      // Never let through: the page shows anyway, once the wait is up. The upper bound on the test's clock starts
+      // after the page's wait began, so it is at least this long on the page's.
+      await until('the Inbox, with the usage still unanswered', () => js<boolean>(cdp, `!!document.querySelector(${JSON.stringify(shown)})`), USAGE_WAIT_MS + 5_000, 100);
       assert.ok(answers.held('/api/usage'), 'the usage request is still unanswered');
-      assert.ok(Date.now() - asked >= USAGE_WAIT_MS - 500, `the page waited for the usage (${Date.now() - asked} ms)`);
+      // #865: the lower bound on the page's own clock, from its own wait's start (load can't shorten it).
+      const verdict = usageWaitVerdict(await js<UsageWaitSeen>(cdp, 'window.__usageWait'), { waitMs: USAGE_WAIT_MS, tolerance: 50, longest: USAGE_WAIT_MS + 5_000 });
+      assert.ok(verdict.ok, `the page waited for the usage: ${verdict.ok ? '' : verdict.why}`);
       await answers.stop();
     } finally {
       await b.close();
@@ -379,4 +440,92 @@ test('intercept: stop() sends every answer on its way before turning interceptio
   paused!({ requestId: 'b', request: { url: 'http://127.0.0.1/api/x' } }); // paused just as stop() began
   await stopped;
   assert.deepEqual(late, [], 'no Fetch call reached Chrome after interception was turned off');
+});
+
+// #865: the real-Chrome test's lower bound, on the page's own clock. Times are ms from the page's navigation start.
+const WAIT = { waitMs: USAGE_WAIT_MS, tolerance: 50, longest: USAGE_WAIT_MS + 5_000 };
+
+test('usageWaitVerdict: a correct page under a 1 s hub delay on a loaded runner passes; the old clock failed it (#865)', () => {
+  // Loaded: the page's timer starts at 800 ms; its hub answers 1 s later, so /api/usage goes at 1800; the test's
+  // poll sees it held at 2100; the timer fires at 3800 and the page shows at 3830.
+  const timerStart = 800;
+  const heldSeen = 2100;
+  const shownAt = 3830;
+  const v = usageWaitVerdict({ timers: [{ start: timerStart, clearedAt: null }], shownAt }, WAIT);
+  assert.deepEqual(v, { ok: true, waited: 3030 });
+  // The old bound (from when the test saw the request held, with 500 ms slack) measured the same page short.
+  assert.ok(shownAt - heldSeen < USAGE_WAIT_MS - 500, 'the old clock failed this correct page');
+});
+
+test('usageWaitVerdict: a page that shows before its wait is up fails, whatever the load (#865)', () => {
+  // Its timer started, but the page showed 50 ms later.
+  assert.match((usageWaitVerdict({ timers: [{ start: 800, clearedAt: null }], shownAt: 850 }, WAIT) as { why: string }).why, /50 ms after its wait began, before its 3000 ms wait/);
+  // Even after a slow load: shown 3500 ms after navigation, only 100 ms after its wait began.
+  assert.equal(usageWaitVerdict({ timers: [{ start: 3400, clearedAt: null }], shownAt: 3500 }, WAIT).ok, false);
+  // Short by more than the clock's tolerance.
+  assert.equal(usageWaitVerdict({ timers: [{ start: 800, clearedAt: null }], shownAt: 800 + USAGE_WAIT_MS - 51 }, WAIT).ok, false);
+  // No wait at all, or one cleared before it showed (a StrictMode-style first mount leaves one; it isn't the wait).
+  assert.match((usageWaitVerdict({ timers: [], shownAt: 850 }, WAIT) as { why: string }).why, /no 3000 ms wait running/);
+  assert.equal(usageWaitVerdict({ timers: [{ start: 800, clearedAt: 820 }], shownAt: 850 }, WAIT).ok, false);
+  assert.match((usageWaitVerdict({ timers: [{ start: 0, clearedAt: 1 }], shownAt: 3_100 }, WAIT) as { why: string }).why, /no 3000 ms wait running/);
+  // A wait started after it showed doesn't count for it.
+  assert.equal(usageWaitVerdict({ timers: [{ start: 900, clearedAt: null }], shownAt: 850 }, WAIT).ok, false);
+  // Two waits running: the later one is the one measured (the strict choice), so the earlier can't excuse it.
+  assert.equal(usageWaitVerdict({ timers: [{ start: 0, clearedAt: null }, { start: 3000, clearedAt: null }], shownAt: 3100 }, WAIT).ok, false);
+  // Cleared only after it showed: it was still running when the page showed.
+  assert.equal(usageWaitVerdict({ timers: [{ start: 800, clearedAt: 900 }], shownAt: 850 }, WAIT).ok, false);
+});
+
+test('usageWaitVerdict: a page that never shows, or shows past the upper bound, fails (#865)', () => {
+  assert.deepEqual(usageWaitVerdict({ timers: [{ start: 800, clearedAt: null }], shownAt: null }, WAIT), { ok: false, why: 'the page never showed' });
+  assert.match((usageWaitVerdict({ timers: [{ start: 800, clearedAt: null }], shownAt: 800 + USAGE_WAIT_MS + 5_001 }, WAIT) as { why: string }).why, /past 8000 ms/);
+  // At the bounds exactly: passes.
+  assert.equal(usageWaitVerdict({ timers: [{ start: 800, clearedAt: null }], shownAt: 800 + USAGE_WAIT_MS - 50 }, WAIT).ok, true);
+  assert.equal(usageWaitVerdict({ timers: [{ start: 800, clearedAt: null }], shownAt: 800 + USAGE_WAIT_MS + 5_000 }, WAIT).ok, true);
+});
+
+test("the page-side watch records the usage wait's timers and when the page shows, as usageWaitVerdict reads them (#865)", () => {
+  // The script the real-Chrome test puts in the page, run against a stand-in window (no Chrome here).
+  let now = 0;
+  let present = false;
+  const watching: { fn: (() => void) | null } = { fn: null };
+  const native: { set: number[]; cleared: number[] } = { set: [], cleared: [] };
+  const win: Record<string, unknown> = {
+    setTimeout: (_fn: unknown, ms: number) => native.set.push(ms),
+    clearTimeout: (id: number) => void native.cleared.push(id),
+  };
+  runInNewContext(WATCH_USAGE_WAIT('#shown'), {
+    window: win,
+    performance: { now: () => now },
+    document: { querySelector: (s: string) => (present && s === '#shown' ? {} : null) },
+    MutationObserver: class {
+      constructor(fn: () => void) {
+        watching.fn = fn;
+      }
+      observe() {}
+      disconnect() {
+        watching.fn = null;
+      }
+    },
+  });
+  const setT = win.setTimeout as (fn: unknown, ms: number) => number;
+  const clearT = win.clearTimeout as (id: number) => void;
+  now = 5;
+  const first = setT(() => {}, USAGE_WAIT_MS);
+  now = 6;
+  clearT(first);
+  now = 7;
+  const second = setT(() => {}, USAGE_WAIT_MS);
+  setT(() => {}, 10);
+  watching.fn!(); // a change before the page shows: nothing recorded
+  now = 3_020;
+  present = true;
+  watching.fn!();
+  assert.equal(watching.fn, null, 'it stops watching once the page shows');
+  now = 9_000;
+  clearT(second);
+  assert.deepEqual(native, { set: [USAGE_WAIT_MS, USAGE_WAIT_MS, 10], cleared: [1, 2] }, 'every timer still reaches the page');
+  const seen = JSON.parse(JSON.stringify(win.__usageWait)) as UsageWaitSeen;
+  assert.deepEqual(seen, { timers: [{ start: 5, clearedAt: 6 }, { start: 7, clearedAt: 9_000 }], shownAt: 3_020 });
+  assert.deepEqual(usageWaitVerdict(seen, WAIT), { ok: true, waited: 3_013 });
 });
