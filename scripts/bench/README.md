@@ -16,13 +16,14 @@ What is here so far:
 - **Driver** (`driver.ts`, `confirm.ts`, `grade.ts`, `aggregate.ts`, `store.ts`): the run loop, the sandbox confirmation, patch export, the predictions for grading, and the aggregate. `srt-fingerprint.mjs` compares a sandbox-runtime release with the build a Claude Code binary bundles.
 - **The `bench` command** (`cli.ts`): `bench preflight` runs the model-free, container-free checks above and prints a PASS/FAIL/SKIP line each (setup step 6).
 - **Pinned downloads** (`pins.json`, `pins.ts`, `download.ts`): `bench download` fetches the dataset file at its pinned revision and sha256 into the held-out store, and `pullImage` pulls a task image by pinned digest only (step 7). The dataset isn't pinned yet, so `bench download` refuses until the owner records the pin.
+- **Task selection** (`select.ts`): `bench select` chooses the tasks by a fixed rule and seed from the pinned rows, writes the manifest into the held-out store, and prints keys and the smoke run's plan, never an instance id (step 8). `loadTasks` hands the run its tasks and their image references from the store. The rows aren't pinned yet, so `bench select` refuses and prints their digest for the owner to record.
 
 Still to come:
-- the PR-mode task runner on the replay harness (`src/harness-evals/replay.ts`), with stub CI;
-- the agent's test relay into the container;
-- task selection (it reads the downloaded file, writes the manifest, and hands each task's image reference to `pullImage` from the store);
-- the grading run and the B0, B1 and `claude -p` baselines;
-- the `bench` command's other subcommands (`select`, `run` and the rest; `preflight` and `download` are here).
+- task setup: the base tree, a local clone with no upstream history, a local bare remote;
+- the PR-mode task runner on the replay harness (`src/harness-evals/replay.ts`), with stub CI, and the agent's test relay into the container: both need the engine's runner seam (#701);
+- `bench run`, the grading run and the B0, B1 and `claude -p` baselines.
+
+See "The smoke run plan" below for the order.
 
 ## How it is isolated
 
@@ -268,6 +269,7 @@ Left to the run: the limits read back from a probe container (it needs a task im
 Every pin is in one file, `scripts/bench/pins.json`. Nothing else sets one: no variable, flag or argument (`bench download` takes none), and the code takes a pin only as `pins.ts` parsed it from that file. It holds:
 - `dataset`: the file's url (`base` + `revision` + `/` + `path`, so it is at the pinned revision by construction), the `revision` (a 40-hex commit), the file's `sha256`, `max_bytes` (the most it reads) and `hosts` (where a redirect may lead: each host or its subdomains, https only). `revision` and `sha256` are both set or both null. They are null now, so `bench download` refuses and fetches nothing. The `path` there is a guess until the owner pins it (**guess**): check it names the file meant.
 - `image_digests`: sha256 digests only, sorted, none or at least 100 of them. Never an image name, an instance id or a task selection: the agents can read this clone, and an image name carries its instance id. Which image a task uses comes from the held-out store.
+- `selection`: how tasks are chosen, never which: `rule`, `seed` and `rows_sha256` (step 8), or null.
 
 The whole file is refused for:
 - an unknown key;
@@ -287,11 +289,58 @@ What it does, in order:
 
 Images (`download.ts` `pullImage`): only `docker pull <name>@sha256:<digest>` and `docker image inspect` (to read the digest back) are sent. The argv is built only from a reference `pins.ts` checked: a pinned digest, no tag, no port, no option. The argv is checked again before docker runs. No command takes an image name on the command line, since the bench user's shell history is readable by the agents (**inferred**: the sandbox's read-deny list doesn't name it). Task selection hands each task's reference over from the store.
 
+### 8. The rows and the task selection (on the bench machine only)
+
+**Why a rows file.** The selection reads JSON lines, one task per line, with no new dependency. The file pinned in step 7 is most likely parquet (**guess**: the `path` in `pins.json` is). Nothing in this repo reads parquet. So there are two ways to give the bench its rows, and both keep every byte pinned:
+- **Preferred, if one exists:** an upstream JSON-lines copy of the dataset at a pinned revision. Pin it in step 7 (its `path` ends in `.jsonl`), and `bench select` reads that verified file itself, with no conversion. Whether such a copy exists is a **guess**: none is known here.
+- **Otherwise:** convert the downloaded parquet file once, on the bench machine, into `rows.jsonl` beside it, with a tool of your choice (it is not a repo dependency). For example, as the bench user, if Python and pyarrow are installed (**not run here**: nothing may be downloaded):
+
+      cd ~/bench/state/evals/held-out/swebench/dataset &&
+        umask 077 &&
+        python3 -I -c 'import json, sys, pyarrow.parquet as pq; [print(json.dumps(r)) for r in pq.read_table(sys.argv[1]).to_pylist()]' PASTE_THE_PINNED_FILE_NAME > rows.jsonl.new &&
+        chmod 600 rows.jsonl.new && mv rows.jsonl.new rows.jsonl
+
+**The rows are pinned by their canonical digest** (`select.ts` `canonicalRows`), in `pins.json` `selection.rows_sha256`. The digest is taken over each row's known fields only (`instance_id`, `repo`, `base_commit`, `problem_statement`, `patch`, `test_patch`, `FAIL_TO_PASS`, `PASS_TO_PASS`, `hints_text`, `difficulty`, and `version` and `environment_setup_commit` when present), in that order, with the test lists as compact JSON, the rows sorted by instance id. So a converter's spelling, key order or extra columns change nothing, and a conversion on another machine must give the same rows or the selection refuses. The run gets those canonical rows only: a field outside the digest never reaches it.
+
+A row without one of the required fields, a field of the wrong type, an instance id twice, text that isn't UTF-8 or a file with no rows refuses the whole file. The rows file must be a 0600 regular file of the bench user, never a link.
+
+**The rule** (`selection.rule`, `sha256-rank-v1`): each row's rank is the sha256 of `<seed>:<instance id>` as hex, ascending. The first 50, in rank order, are `t01` to `t50`. The smoke round runs `t01` to `t04`, and the baseline runs all 50. A row's rank depends only on its own id and the seed, so the file's order, and any row ranked after the 50th, change nothing chosen. A rule never changes; a new one gets a new name. The seed (`selection.seed`, 20261018 in `pins.json`) is recorded before the rows are, so it can't have been picked for the tasks it chooses.
+
+**Pinning the rows.** Run, as the bench user:
+
+    bench select
+
+While `rows_sha256` is null it refuses and prints the rows' canonical digest. Check that `rows.jsonl` came from the pinned file, then record the digest in `pins.json` (a reviewed change), and run `bench select` again. It:
+- refuses unless the dataset, the selection and the rows are pinned, the store passes the preflight's held-out check, and the pinned dataset file is there and verified;
+- writes `manifest.json` into the store (0600, through a verified temporary file): each key with its instance id, and the dataset revision, rule, seed and rows digest it came from. Run again with the same pins, it keeps the same manifest. It never replaces a different one, since grading maps each run's keys through it: move the old one aside to select again;
+- checks the smoke's image references (below), and prints the smoke run's plan.
+
+It prints keys, counts and digests only. Its one output sink also withholds any word shaped like an instance id or an instance image name, whoever writes it.
+
+**Image references** live in the store, in `images.json`: `{"<instance id>": "<name>@sha256:<digest>", ...}`, a 0600 file of the bench user. Producing it is the owner's step (or task setup's, still to come). A task's reference is taken only when:
+- it is `<name>@sha256:<digest>` with no tag, port or option;
+- its digest is one of `pins.json` `image_digests`;
+- its name is the task's own: its last part is, or ends in `.`, the instance id in lower case with `__` written as `_1776_`. That is SWE-bench's image naming (**inferred**; a name that doesn't follow it is refused, failing closed);
+- no other task of the run has its digest.
+
+**What the run gets** (`select.ts` `loadTasks`, called in-process by `bench run`, still to come): it re-reads the rows and checks them against the pin, re-derives the selection, refuses a manifest that differs (an edit, or other pins since `bench select`), and takes each task's image reference as above. Its refusals name keys, never a task. No command takes an instance id, a seed, a count or an image name, so none is ever typed into the bench user's shell, whose history the agents may read (**inferred**: its sandbox's read-deny list doesn't name it).
+
+## The smoke run plan
+
+The 4-task smoke on current main, in this order. Each step needs the one before it:
+1. **Setup and preflight** (steps 1 to 6): `bench preflight` passes as the bench user. Done by the owner on 2026-10-18; confirm with the preflight.
+2. **Pins and download** (step 7): the owner records the dataset's revision and sha256 and the image digests; `bench download`.
+3. **Rows and selection** (step 8): the rows file, its digest recorded, `images.json`, then `bench select` passes every line. It prints the plan: `t01` to `t04`, at most $40 for the round, $15 per task.
+4. **Task setup** (still to come): each task's base tree, a local clone with no upstream history, a local bare remote; images pulled with `pullImage`.
+5. **The engine's runner seam and the test relay** (still to come; #701, Lane C and Lane A): the engine's check and test commands run through the bench's `TaskRunner`.
+6. **`bench run --tasks smoke --spend <usd>`** (still to come): with `--spend` at most 40. Its first model call is the sandbox confirmation. It stops cleanly at any usage limit, with no retry.
+7. **Grading** of the exported patches in fresh containers, then the aggregate. If the round averaged over $8 per task, the baseline needs the owner's re-approval.
+
 ## Data and results
 
 Everything lives under `$HOME/bench`, outside every repository and engine state dir. The driver refuses a root inside a git checkout, a credential store or real engine state. Results are private.
 
-- `state/evals/held-out/swebench/`: the dataset copy (`dataset/<sha256>-<name>`, 0600, step 7), the manifest, the predictions and grades (0700).
+- `state/evals/held-out/swebench/`: the dataset copy (`dataset/<sha256>-<name>`, 0600, step 7), the rows (`dataset/rows.jsonl`, step 8), the manifest (`manifest.json`), the image references (`images.json`), the predictions and grades (0700).
 - `runs/<run>/<key>/`: each task's clone, local remote and engine state.
 - `runs/<run>/patches/<key>/<label>.diff`: the exported patches (`final`, `attempt-N`, `b0`, `b1`, `bare`).
 - `runs/<run>/sandbox.json`: the two sandbox checks, per attempt, and the confirmation's usage.

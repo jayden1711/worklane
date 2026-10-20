@@ -19,6 +19,13 @@
 // `download` (#748, slice 2) fetches the pinned dataset file into the held-out store (download.ts), as the bench user
 // only, with the pins from scripts/bench/pins.json and nowhere else: it takes no argument. It starts no container and
 // makes no model call.
+//
+// `select` (#748, slice 3) writes the pinned task selection's manifest into the held-out store (select.ts), as the
+// bench user only. It takes no argument either: the rule, the seed and the rows' digest come from the pins file, the
+// rows and the images from the store, so no instance id, seed or count is ever typed into a shell (whose history the
+// agents may read). It prints keys, counts and digests, and the smoke run's plan; never an instance id. As a backstop,
+// main()'s one sink withholds every word shaped like an instance id or an instance image name (pins.ts TASK_SHAPE),
+// whoever writes it.
 import { realpathSync } from 'node:fs';
 import { userInfo } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -30,8 +37,9 @@ import { Docker, limitsFrom, type DockerOptions, type Limits } from './container
 import { downloadDataset, httpsFetcher, type Fetcher } from './download.js';
 import { assertResearchOff, BENCH_SETTINGS } from './driver.js';
 import { benchHome, benchRoot, type BenchLayout } from './paths.js';
-import { loadPins, PINS_FILE, type Pins } from './pins.js';
+import { loadPins, PINS_FILE, TASK_SHAPE, type Pins } from './pins.js';
 import { sandboxProbe, SRT_LABEL } from './probe.js';
+import { loadTasks, MODE_TASKS, RowsUnpinned, writeSelection, type SelectionSummary } from './select.js';
 import { heldOutCheck } from './store.js';
 
 export interface CliDeps {
@@ -105,6 +113,28 @@ export function scrub(text: string, env: NodeJS.ProcessEnv, max = DETAIL_MAX): s
 
 const message = (e: unknown): string => (e instanceof Error ? e.message : String(e));
 
+/** What a word shaped like an instance id or an instance image name prints as. */
+export const WITHHELD = '[task withheld]';
+
+/** An instance id's tail (`__repo-1234`), whatever comes before it: a word may start there (a space split it off). */
+const TASK_TAIL = /__[A-Za-z0-9_.-]*-\d/;
+
+/**
+ * `text` with every word (between spaces) shaped like an instance id or an instance image name (pins.ts TASK_SHAPE),
+ * or holding an instance id's tail, replaced by WITHHELD: the whole word, so no piece of the id's tail is left. Each word
+ * is judged with its control and format characters (a zero-width space, say) taken out, as scrub() would show it.
+ * main() runs it on every line, before scrub().
+ */
+export function withholdTasks(text: string): string {
+  return text
+    .split(/(\s+)/)
+    .map((w) => {
+      const seen = w.replace(/[\p{Cc}\p{Cf}]/gu, '');
+      return TASK_SHAPE.test(seen) || TASK_TAIL.test(seen) ? WITHHELD : w;
+    })
+    .join('');
+}
+
 // The held-out store's check lives with the store (store.ts): `bench download` runs it too.
 export { heldOutCheck };
 
@@ -175,8 +205,52 @@ const USAGE = [
   '              exits 0 only when all pass. Starts no container, makes no model call, downloads nothing, keeps nothing on disk.',
   '  download    the dataset file at the revision and sha256 pinned in scripts/bench/pins.json, into the held-out',
   '              store (0700; the file 0600), verified before it is kept. Takes no argument: only that file sets a pin.',
+  '  select      the tasks the pinned rule and seed choose from the pinned rows, as a manifest in the held-out store,',
+  "              and the smoke run's plan. Takes no argument: prints keys (t01, ...), never an instance id.",
   '  help        this text',
 ];
+
+/** The smoke run's plan, for `bench select`: keys and caps only. */
+export function smokePlan(keys: readonly string[]): string[] {
+  const smoke = keys.slice(0, MODE_TASKS.smoke);
+  return [
+    `smoke run plan: tasks ${smoke.join(' ')} (the first ${MODE_TASKS.smoke} of the ${keys.length}; the baseline runs ${keys[0]}..${keys.at(-1)}, with the same rule and seed, and again on each release)`,
+    `  caps: at most $${MODE_MAX_USD.smoke} for the round (--spend), $${PER_TASK_MAX_USD} per task; a round averaging over $${REAPPROVE_MEAN_USD} per task needs the owner's re-approval before the baseline`,
+    '  the run takes its tasks from the held-out store (the manifest, the rows, the images file): no instance id or image name on any command line',
+    "  still to come before it can run: task setup (slice 4), the engine's runner seam and the test relay (slices 5 and 6, #701), and bench run (slice 7)",
+  ];
+}
+
+/** `bench select`: as the bench user, the pinned selection into the held-out store, and the smoke's plan. Its exit code. */
+export function select(d: CliDeps, pins: () => Pins = loadPins): number {
+  d.out('bench select (#748): the pinned task selection into the held-out store; no container, no model call, no download');
+  const say = (status: string, name: string, detail: string) => d.out(`  ${status}  ${name.padEnd(9)}  ${scrub(withholdTasks(detail), d.env)}`);
+  let layout: BenchLayout;
+  let p: Pins;
+  let s: SelectionSummary;
+  try {
+    requireBenchUser(d.env, d.user, d.uid, d.euid);
+    layout = benchRoot(d.env, benchHome(d.env, d.passwdHome));
+    p = pins();
+    s = writeSelection(layout, d.uid, p);
+  } catch (e) {
+    if (e instanceof RowsUnpinned) say('FAIL', 'rows', e.message);
+    else say('FAIL', 'selection', message(e));
+    return 1;
+  }
+  say('PASS', 'rows', `${s.rows} rows, canonical sha256 ${s.rowsSha256} (the pinned one), from the dataset at revision ${s.revision}`);
+  say('PASS', 'selection', `rule ${s.rule}, seed ${s.seed}: ${s.keys.length} tasks, ${s.keys[0]}..${s.keys.at(-1)}; the manifest (0600, in the store) ${s.written ? 'written' : 'was already there, the same: kept'}`);
+  let ok = true;
+  try {
+    const tasks = loadTasks(layout, d.uid, p, 'smoke');
+    say('PASS', 'images', `the smoke's ${tasks.map((t) => t.key).join(' ')}: each a pinned digest, under its own task's name (the baseline's are checked when it runs)`);
+  } catch (e) {
+    ok = false;
+    say('FAIL', 'images', message(e));
+  }
+  for (const l of smokePlan(s.keys)) d.out(l);
+  return ok ? 0 : 1;
+}
 
 /** `bench download`: as the bench user, the pinned dataset into the held-out store. Its exit code. */
 export async function download(d: CliDeps, pins: () => Pins = loadPins): Promise<number> {
@@ -224,8 +298,9 @@ export function main(argv: readonly string[], deps: Partial<CliDeps> = {}): numb
     docker: deps.docker ?? { docker: 'docker' },
     ...(deps.host ? { host: deps.host } : {}),
     ...(deps.fetch ? { fetch: deps.fetch } : {}),
-    // INVARIANT: the only way out: every line, whoever writes it, is scrubbed on its full text before any cut (#851 round 2).
-    out: (l) => sink(scrub(l, env, LINE_MAX)),
+    // INVARIANT: the only way out: every line, whoever writes it, is scrubbed on its full text before any cut (#851 round 2),
+    // and has every word shaped like a task withheld first (#748 slice 3).
+    out: (l) => sink(scrub(withholdTasks(l), env, LINE_MAX)),
   };
   const [command, ...extra] = argv;
   if (command === 'help' || command === '--help') {
@@ -234,7 +309,8 @@ export function main(argv: readonly string[], deps: Partial<CliDeps> = {}): numb
   }
   if (command === 'preflight' && extra.length === 0) return printPreflight(d);
   if (command === 'download' && extra.length === 0) return download(d);
-  const takesNone = command === 'preflight' || command === 'download';
+  if (command === 'select' && extra.length === 0) return select(d);
+  const takesNone = command === 'preflight' || command === 'download' || command === 'select';
   d.out(command === undefined ? 'no command' : takesNone ? `${command} takes no arguments, not ${scrub(extra.join(' '), env, 200)}` : `unknown command: ${scrub(command, env, 200)}`);
   for (const l of USAGE) d.out(l);
   return 2;
