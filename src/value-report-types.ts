@@ -18,6 +18,9 @@ export interface ValueConstants {
   cap_min: number;
 }
 
+/** Where the constants came from: the instance's policy.yaml (value_report.hours_estimate), or the engine's defaults. */
+export type ConstantsFrom = 'policy' | 'default';
+
 export interface PostMerge {
   /** PRs merged in the window, in this group. */
   merged: number;
@@ -56,7 +59,8 @@ export interface ValueReport {
   heldWait: { medianMs: number | null; resolved: number };
   /** Held PRs whose only reasons are the kill switch ("held only by the kill switch"). */
   wouldHaveMerged: { count: number; prs: { number: number; outcome: HeldOutcome; main: MainSaid }[] };
-  hoursSaved: { estimate: number; prs: number; withoutStats: number; formula: string; constants: ValueConstants; label: string };
+  /** The estimate, with the constants it used and where they came from, so whoever reads the figure can tell. */
+  hoursSaved: { estimate: number; prs: number; withoutStats: number; formula: string; constants: ValueConstants; constantsFrom: ConstantsFrom; label: string };
   /** Agent spend (run.cost) on the auto-merged PRs' issues, measured. */
   spend: { usd: number; perAutoPr: number | null };
   postMerge: { auto: PostMerge; person: PostMerge };

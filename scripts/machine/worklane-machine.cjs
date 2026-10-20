@@ -23,22 +23,8 @@
 //
 // runs the installed engine's scripts/setup/claude-account.sh status, under the same root-owned check (`status
 // --json`: each agent user's account and expiry, written to /var/lib/worklane/claude-account/status.json). Nothing
-// here takes a Claude credential (issue #711): a switch to another account, adding a profile, and signing one in are
-// a root admin's, with claude-account.sh (or credentials.sh) at a root shell on the machine.
-//
-//   worklane-machine claude-account use <profile>
-//   worklane-machine claude-account remove <profile>
-//
-// the agents' Claude account profiles (issue #464; claude-account.sh's use and remove), started as their own unit,
-// worklane-claude-account.service (so one at a time): a real call per agent user runs longer than the asking
-// coordinator waits. Each is for the asking instance alone, which comes from sudo's SUDO_USER and never from an
-// argument: the helper takes no instance, and passes the script --for <that instance>. Every instance, or another
-// one, is a root admin's, with claude-account.sh at a root shell.
-//
-//   worklane-machine claude-account failover <profile+profile+...|off> back|stay
-//
-// the auto-failover setting for the asking instance alone (profiles.json only: no login is touched), run here like
-// status; its instance from SUDO_USER, as above. The machine-wide setting is a root admin's.
+// here takes a Claude credential (issue #711). The account profile steps (use, remove) and the failover setting were
+// removed (#736): refused like any unknown command, nothing run or logged.
 //
 // The engine updater (scripts/setup/updates.sh, scripts/machine/worklane-update.cjs):
 //
@@ -118,7 +104,6 @@ const ETC = '/etc/worklane';
 const LOG = '/var/lib/worklane/machine-changes.jsonl';
 const ADD_PROJECT = '/opt/worklane/current/scripts/setup/add-project.sh';
 const CLAUDE_ACCOUNT = '/opt/worklane/current/scripts/setup/claude-account.sh';
-const CLAUDE_ACCOUNT_UNIT = 'worklane-claude-account';
 const UPDATES = '/opt/worklane/current/scripts/setup/updates.sh';
 const PENDING = '/var/lib/worklane/pending-signers.json'; // staged signers: trusted for nothing until an admin confirms one
 const PENDING_MAX = 4;
@@ -248,44 +233,16 @@ function parseClaudeAccount(args) {
   return args.length === 2 && args[0] === 'claude-account' && args[1] === 'status' ? args[1] : null;
 }
 
-/** A profile's name (claude-account.sh's check): default is the login each agent user had, never added or removed. */
-const profileName = (s) => typeof s === 'string' && /^[a-z][a-z0-9-]{0,20}$/.test(s);
 /**
- * The profile step a list asks for: remove|use <profile>, for the asking instance alone; null for anything else. No
- * instance is ever taken from the arguments (a coordinator could name any): it comes from SUDO_USER. Never profile-add
- * or login: each takes a Claude credential, a root admin's at a root shell (issue #711).
+ * The account profile steps (claude-account use|remove <profile>) and the failover setting were removed (#736): no
+ * list is one, so each is refused like any unknown command. Both names stay only for the sudoers rule's patterns that
+ * still name them (dropped with that rule, #758) and the export list; neither ever returns a step.
  */
-function parseClaudeProfile(args) {
-  if (args[0] !== 'claude-account' || args.length !== 3 || !profileName(args[2])) return null;
-  const action = args[1];
-  if (action === 'remove' && args[2] !== 'default') return { action, profile: args[2] };
-  if (action === 'use') return { action, profile: args[2] };
+function parseClaudeProfile(_args) {
   return null;
 }
-
-/** The failover setting a list asks for: failover <order|off> back|stay, for the asking instance; null for anything else. */
-function parseClaudeFailover(args) {
-  if (args[0] !== 'claude-account' || args[1] !== 'failover' || args.length !== 4) return null;
-  const order = args[2];
-  if (order !== 'off' && !/^[a-z][a-z0-9-]{0,20}(\+[a-z][a-z0-9-]{0,20}){1,7}$/.test(order)) return null;
-  if (args[3] !== 'back' && args[3] !== 'stay') return null;
-  return { order, back: args[3] };
-}
-
-function claudeFailover(f) {
-  const real = rootScript(CLAUDE_ACCOUNT);
-  if (!real) return 1;
-  const instance = coordinatorInstance(process.env.SUDO_USER);
-  if (!instance) {
-    process.stderr.write('claude-account failover here is for a coordinator, through sudo; an admin runs scripts/setup/claude-account.sh failover\n');
-    return 2;
-  }
-  const env = { PATH: PATH_ENV, HOME: '/root', LANG: 'C.UTF-8' };
-  return runLogged('claude-account', `failover ${f.order} ${f.back} for ${instance}`, () => {
-    const r = spawnSync('bash', [real, 'failover', f.order, f.back, '--for', instance], { cwd: '/', env, stdio: 'inherit' });
-    if (r.error) throw r.error;
-    return r.status === null ? 1 : r.status;
-  });
+function parseClaudeFailover(_args) {
+  return null;
 }
 
 /** The instance whose coordinator user this is (wl-<name>), or null for anyone else. */
@@ -304,29 +261,6 @@ function claudeAccount() {
     if (r.error) throw r.error;
     return r.status === null ? 1 : r.status;
   });
-}
-
-function claudeProfile(p) {
-  const real = rootScript(CLAUDE_ACCOUNT);
-  if (!real) return 1;
-  const instance = coordinatorInstance(process.env.SUDO_USER);
-  if (!instance) {
-    process.stderr.write(`claude-account ${p.action} here is for a coordinator, through sudo; an admin runs scripts/setup/claude-account.sh ${p.action}\n`);
-    return 2;
-  }
-  const what = `${p.action} ${p.profile} for ${instance} (asked from ${instance}'s dashboard)`;
-  // The instance is sudo's, never the caller's: the script also refuses any other one than --for names.
-  const args = [real, p.action, p.profile, ...(p.action === 'use' ? [instance] : []), '--json', '--for', instance];
-  const r = spawnSync('systemd-run', ['--unit', CLAUDE_ACCOUNT_UNIT, '--collect', '--no-block', '--quiet', '--description', 'worklane Claude account profile', '--property', `Environment=PATH=${PATH_ENV} LANG=C.UTF-8`, '/bin/bash', ...args], { cwd: '/', env: { PATH: PATH_ENV, HOME: '/root', LANG: 'C.UTF-8' }, encoding: 'utf8' });
-  if (r.error || r.status !== 0) {
-    const text = `${r.stderr || ''}${r.error ? r.error.message : ''}`.trim();
-    process.stderr.write(/already (exists|loaded|active)/i.test(text) ? 'a Claude account switch or profile change is already running (worklane-claude-account.service)\n' : `couldn't start ${p.action}: ${text.split('\n')[0]}\n`);
-    logLine('claude-account', null, `failed: ${what}: not started`);
-    return 1;
-  }
-  logLine('claude-account', null, what);
-  process.stdout.write(`started claude-account ${p.action} ${p.profile} as ${CLAUDE_ACCOUNT_UNIT}.service\n`);
-  return 0;
 }
 
 // An ed25519 public key's encoding never varies: the key type's name, then 32 bytes, 51 bytes in all, 68 characters.
@@ -679,7 +613,7 @@ function policySet(p) {
 // the same checks as always, the helper starts itself again in a transient unit of its own (systemd-run, outside the
 // coordinator's cgroup and sandbox), with the same arguments, waits for it and passes its output and exit status back.
 // The started copy checks the arguments again before it does anything. A step that only reads, or only writes under
-// /var/lib, still runs here; the tailscale steps and the account profile steps already start units of their own.
+// /var/lib, still runs here; the tailscale steps already start units of their own.
 const IN_UNIT = '--in-unit'; // the copy started in its own unit: only root, which sudo's rule never lets a coordinator pass
 const UNIT_PREFIX = 'worklane-machine';
 
@@ -726,10 +660,6 @@ function main(argv) {
   if (add) return addProject(add);
   const account = parseClaudeAccount(args);
   if (account) return claudeAccount();
-  const profile = parseClaudeProfile(args);
-  if (profile) return claudeProfile(profile);
-  const failover = parseClaudeFailover(args);
-  if (failover) return claudeFailover(failover);
   if (args.length === 1 && args[0] === 'install-updater') return installUpdater();
   const stage = parseSigner('stage-update-signer', args);
   if (stage) return stageSigner(stage);

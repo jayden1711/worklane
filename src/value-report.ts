@@ -1,6 +1,7 @@
 // The value report (#708): from the event log alone, for a window, how many PRs the engine merged on its own and
 // how many it held; why it held them, by kind; what became of the held ones; an estimate of review hours saved,
-// labeled as one, with its formula and constants; and what went wrong after merges, split by auto-merged and
+// labeled as one, with its formula and constants, and whether those are the owner's (policy.yaml) or the defaults;
+// and what went wrong after merges, split by auto-merged and
 // merged by a person. Pure and read-only: it never writes an event or changes policy.
 //
 // Only events it can parse count. An event of a kind it reads that fails its schema (src/events/types.ts) is counted
@@ -10,9 +11,9 @@
 // that names no PR can't be pinned to any; it shows only in the unreadable count.
 import { EventSchemas, type EventPayload, type EventType } from './events/types.js';
 import { HOLD_KINDS, holdWords } from './hold-words.js';
-import type { HeldOutcome, HoldKind, MainSaid, PostMerge, ValueConstants, ValueReport } from './value-report-types.js';
+import type { ConstantsFrom, HeldOutcome, HoldKind, MainSaid, PostMerge, ValueConstants, ValueReport } from './value-report-types.js';
 
-export type { HeldOutcome, HoldKind, MainSaid, PostMerge, ValueConstants, ValueReport } from './value-report-types.js';
+export type { ConstantsFrom, HeldOutcome, HoldKind, MainSaid, PostMerge, ValueConstants, ValueReport } from './value-report-types.js';
 
 /** An event as the log or its cache hands it over: its payload is checked here, not trusted. */
 export interface ValueEvent {
@@ -21,8 +22,14 @@ export interface ValueEvent {
   payload: unknown;
 }
 
-/** The estimate's constants: guesses until calibrated (#708). An owner setting is a later slice. */
+/** The estimate's default constants: guesses until calibrated (#708). An owner sets their own in policy.yaml. */
 export const DEFAULT_VALUE_CONSTANTS: Readonly<ValueConstants> = Object.freeze({ base_min: 10, per_100_lines_min: 5, cap_min: 60 });
+
+/** The constants an estimate uses, and where they came from (the report says which). */
+export interface Estimate {
+  constants: ValueConstants;
+  from: ConstantsFrom;
+}
 
 export const HOURS_SAVED_FORMULA = 'est_review_hours_saved = Σ over PRs the engine auto-merged in the window of min(cap_min, base_min + per_100_lines_min × changed_lines / 100) / 60, changed_lines = additions + deletions (pr.stats)';
 export const HOURS_SAVED_LABEL = 'an estimate (a guess until calibrated), not a measurement: the owner\'s time on held PRs and the cost of post-merge failures are shown beside it, not subtracted';
@@ -79,8 +86,8 @@ const median = (xs: number[]): number | null => {
 
 const emptyPost = (): PostMerge => ({ merged: 0, mainRed: 0, reverts: 0, fixForward: { fixed: 0, reverted: 0, gave_up: 0 } });
 
-export function valueReport(events: readonly ValueEvent[], o: { now: Date; days: number; constants?: ValueConstants }): ValueReport {
-  const c = o.constants ?? DEFAULT_VALUE_CONSTANTS;
+export function valueReport(events: readonly ValueEvent[], o: { now: Date; days: number; estimate?: Estimate }): ValueReport {
+  const { constants: c, from } = o.estimate ?? { constants: DEFAULT_VALUE_CONSTANTS, from: 'default' };
   const until = o.now.getTime();
   const since = until - o.days * 86_400_000;
   let unreadable = 0;
@@ -213,7 +220,7 @@ export function valueReport(events: readonly ValueEvent[], o: { now: Date; days:
     heldOutcomes,
     heldWait: { medianMs: median(waits), resolved: waits.length },
     wouldHaveMerged: { count: killSwitch.length, prs: killSwitch.map((x) => ({ number: x.number, outcome: outcomeOf(x), main: mainSaid(x.number) })) },
-    hoursSaved: { estimate: minutes / 60, prs: measured.length, withoutStats: auto.length - measured.length, formula: HOURS_SAVED_FORMULA, constants: { ...c }, label: HOURS_SAVED_LABEL },
+    hoursSaved: { estimate: minutes / 60, prs: measured.length, withoutStats: auto.length - measured.length, formula: HOURS_SAVED_FORMULA, constants: { ...c }, constantsFrom: from, label: HOURS_SAVED_LABEL },
     spend: { usd, perAutoPr: auto.length ? usd / auto.length : null },
     postMerge: { auto: post(auto), person: post(byPerson) },
   };

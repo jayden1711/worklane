@@ -394,6 +394,7 @@ const TRACED: [string, string | null][] = [
   ['...riskAndDesignReasons(', 'export function riskAndDesignReasons('],
   ['...(i.instructionEvals ?? [])', 'export function instructionEvalReasons('],
   ['...(i.outsidePlan ?? [])', 'export function outsidePlanReasons('],
+  ['...(i.weakening ?? [])', null], // #783: `design: may weaken a check: ...`, built in src/merge-policy-weakening.ts
   ['...d.reasons', 'export function mergeDecision('],
   ['d.reasons', '  mergeDecisionFor(n: number'], // the emitter's own value: mergeDecisionFor's, then mergeOrWait's pushes
   ['...fix.reasons', 'private async conflictRun('],
