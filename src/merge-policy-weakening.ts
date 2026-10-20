@@ -117,6 +117,7 @@ export const LINT_TESTS: readonly string[] = [
   'test/update-helpers.test.ts',
   'test/web-buttons.test.ts',
   'test/superfan.test.ts',
+  'test/claude-accounts-retired.test.ts',
 ];
 
 /**
