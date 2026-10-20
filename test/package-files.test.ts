@@ -87,6 +87,7 @@ const forbidden = (p: string) =>
  */
 const RUNTIME_PATHS = [
   'dist/src/cli.js',
+  'dist/src/setup-worker.js',
   'dist/web/',
   'examples/basic',
   'package.json',
