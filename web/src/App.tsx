@@ -67,6 +67,7 @@ const ExperimentsPage = lazyPage(() => import('./pages/Experiments').then((m) =>
 const RunDetail = lazyPage(() => import('./pages/RunDetail').then((m) => m.RunDetail));
 const PullRequests = lazyPage(() => import('./pages/PullRequests').then((m) => m.PullRequests));
 const HealthPage = lazyPage(() => import('./pages/Health').then((m) => m.HealthPage));
+const ValuePage = lazyPage(() => import('./pages/Value').then((m) => m.ValuePage));
 
 /** Each route's page chunk: the one shown is asked for at once (beside the first API calls), the rest when idle. */
 const PAGE_FOR: [RegExp, { preload: () => Promise<unknown> }][] = [
@@ -608,6 +609,7 @@ function InstanceDashboard({ health }: { health: Health | null }) {
   else if (path.startsWith('/work/issues')) page = <Issues state={state} />;
   else if (path === '/shipping/land') page = <Landing state={state} />;
   else if (path === '/work/prs') page = <PullRequests state={state} />;
+  else if (path === '/machine/reports/value') page = <ValuePage state={state} pulse={pulse} />;
   else if (path === '/agents') page = <Agents state={state} />;
   else if (path === '/extend' || path.startsWith('/extend/')) page = <ExtendPage state={state} path={path} />;
   else if (path === '/experiments' || path.startsWith('/experiments/')) page = <ExperimentsPage state={state} path={path} />;
