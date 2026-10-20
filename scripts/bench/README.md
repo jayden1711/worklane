@@ -322,9 +322,18 @@ While `rows_sha256` is null it refuses and prints the rows' canonical digest. Ch
 It prints keys, counts and digests only. As a backstop, every line the `bench` command prints first has any word shaped like an instance id or an instance image name withheld, whoever writes it. That happens before anything splits or cuts the word, and the word is judged in all of these spellings:
 - decoded until it is stable: percent, `\u`, `\x`, numeric entities, and the named entities for `_`, `-` and the like. A word still decoding after 16 rounds is withheld;
 - NFKC-normalised, and with combining marks removed;
-- with each non-ASCII character read as a possible look-alike, by its own role: a dash as `-`, other punctuation, a symbol or a modifier letter as `_`, a digit as `0`, another letter as `a`.
+- with each non-ASCII character read as a possible look-alike, by its own role: a dash as `-`, other punctuation, a symbol or a modifier letter as `_`, a digit as `0`, another letter as `a`;
+- **read loosely**, which closes non-ASCII look-alikes by construction rather than by a list. Every non-ASCII character that is neither a digit nor a combining mark (letters, punctuation, symbols, format and invisible characters, private-use and unassigned ones) may stand in any `_` place, any `-` place, any letter of the repo's name, or before the digits. A non-ASCII digit may stand for any digit, and a combining mark is dropped.
 
-A word over 512 characters is withheld without being judged, so the check stays linear and fails closed. What no word-level match can catch is not defended by it: an id split across a real space, an id in base64, or one spread over two lines. The messages being built from keys is what covers those.
+A word over 512 characters is withheld without being judged, so the check stays linear and fails closed.
+
+Not defended by it (**inferred**; the messages being built from keys is what covers these):
+- an id split across a real space, or across two lines;
+- an id in base64 or another encoding not listed above;
+- ASCII stand-ins (`~` for `-`, `O` or `l` for a digit);
+- an id whose digits are all replaced by letters.
+
+It errs closed: a word with two non-ASCII characters in a row that later reaches a `-` and a digit (`éé-1`, `東京都-1`), or three non-ASCII characters before a digit, is withheld (measured). The messages being built from keys is what covers those.
 
 **Image references** live in the store, in `images.json`: `{"<instance id>": "<name>@sha256:<digest>", ...}`, a 0600 file of the bench user.
 - **Producing it belongs to task setup (slice 4), still to come.** It will be a command that reads the ids from the store's manifest or rows and writes the file. Until then, `bench select` reports the images line as FAIL.

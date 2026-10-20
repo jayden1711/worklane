@@ -203,14 +203,69 @@ function spellings(word: string): string[] | null {
   return [...out];
 }
 
+/** The loose reading's placeholders: ANY stands for any non-ASCII character but a digit or a mark; DIGIT for a non-ASCII digit. */
+const ANY = '\x01';
+const DIGIT = '\x02';
+
+/**
+ * `s` read loosely (#884 round 4): every non-ASCII character that is neither a digit nor a mark (a letter, punctuation, a
+ * symbol, a format, private-use or unassigned character), and every control character, becomes ANY; a non-ASCII digit
+ * becomes DIGIT; a mark is dropped. looseShaped lets ANY fill any `_` place, any `-` place, any place in the repo's name,
+ * and places in the digit run, so no look-alike needs a role picked for it: the class is closed by construction.
+ */
+const loose = (s: string): string =>
+  s.replace(/[^\x20-\x7e]/gu, (ch) => (/\p{M}/u.test(ch) ? '' : /[\p{Nd}\p{No}]/u.test(ch) ? DIGIT : ANY));
+
+/** `_1776_`, an instance image name's mark, read loosely: ANY in an underscore's place, DIGIT in a digit's. Fixed width. */
+const LOOSE_1776 = /[_\x01][1\x02][7\x02][7\x02][6\x02][_\x01]/;
+
+/**
+ * Whether `s` (a loose reading) holds an instance id's tail, in linear time: two underscore places (`_` or ANY), then
+ * repo characters (letters, digits, `_`, `.`, `-`, ANY, DIGIT), then a hyphen place (`-` or ANY), then any ANYs, then
+ * a digit (an ASCII digit or DIGIT). TASK_SHAPE's first form holds such a tail, so this covers it too.
+ */
+function looseTail(s: string): boolean {
+  const n = s.length;
+  const isU = (c: string) => c === '_' || c === ANY;
+  const isH = (c: string) => c === '-' || c === ANY;
+  const isD = (c: string) => (c >= '0' && c <= '9') || c === DIGIT;
+  const isR = (c: string) => /[A-Za-z0-9_.-]/.test(c) || c === ANY || c === DIGIT;
+  // fromHere[x]: from x on, repo characters lead to a hyphen place that ANYs and then a digit follow.
+  const fromHere = new Array<boolean>(n + 1).fill(false);
+  let anysThenDigit = false;
+  for (let x = n - 1; x >= 0; x--) {
+    const c = s[x]!;
+    const hyphenHere = isH(c) && anysThenDigit;
+    fromHere[x] = isR(c) && (hyphenHere || fromHere[x + 1]!);
+    anysThenDigit = isD(c) || (c === ANY && anysThenDigit);
+  }
+  for (let i = 0; i + 2 <= n; i++) if (isU(s[i]!) && isU(s[i + 1]!) && fromHere[i + 2]) return true;
+  return false;
+}
+
 /**
  * Whether `word` is, in any of its spellings, shaped like an instance id or an instance image name, or holds an id's
- * tail; also true (fail closed) for a word it can't judge: longer than WORD_MAX, or still decoding after DECODE_ROUNDS.
+ * tail, read exactly or loosely; also true (fail closed) for a word it can't judge: longer than WORD_MAX, or still
+ * decoding after DECODE_ROUNDS.
  */
 export function taskShaped(word: string): boolean {
   if (word.length > WORD_MAX) return true;
   const all = spellings(word);
-  return all === null || all.some((s) => TASK_SHAPE.test(s) || TASK_TAIL.test(s));
+  if (all === null || all.some((s) => TASK_SHAPE.test(s) || TASK_TAIL.test(s))) return true;
+  // The loose reading, of each decoded form as it came (format characters kept, as ANY) and of each spelling.
+  const forms = new Set<string>(all);
+  for (let f = word, i = 0; i <= DECODE_ROUNDS; i++) {
+    forms.add(f);
+    forms.add(f.normalize('NFKC'));
+    const next = unescapeOnce(f);
+    if (next === f) break;
+    f = next;
+  }
+  for (const s of forms) {
+    const l = loose(s);
+    if (LOOSE_1776.test(l) || looseTail(l)) return true;
+  }
+  return false;
 }
 
 /**
