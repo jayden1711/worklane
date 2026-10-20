@@ -25,6 +25,8 @@ const nothing: SetupProbe = {
   serviceRunning: () => null,
   systemUnitActive: () => false,
   linger: () => null,
+  // #819 (now on main): the user service manager's login variables; none here, as in test/setup-steps.test.ts.
+  serviceManagerEnv: () => ({ env: {} }),
 };
 
 function server(o: { updater?: 'installed' | 'none' } = {}) {
