@@ -215,7 +215,7 @@ test('ci-batch.yml looks whenever a ci.yml or ci-slow.yml run ends and every 30 
 test('the engine repo requires to merge exactly the checks every pull request runs, never a main-only one a PR may skip', () => {
   const cfg = parse(readFileSync(join(repoRoot, '.worklane', 'config.yaml'), 'utf8')) as { required_checks: string[] };
   assert.deepEqual([...cfg.required_checks].sort(), prChecks());
-  for (const x of ['dco', 'scan', 'test (ubuntu-latest, 22)']) assert.ok(prChecks().includes(x), x);
+  for (const x of ['dco', 'scan', 'desktop', 'test (ubuntu-latest, 22)']) assert.ok(prChecks().includes(x), x);
   for (const x of SLOW_CHECKS) assert.ok(!prChecks().includes(x), x);
 });
 

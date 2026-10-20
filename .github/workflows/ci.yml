@@ -1,5 +1,5 @@
 name: ci
-# The fast checks, on every pull request and every push to main: test, agentshield, push-gate, denylist,
+# The fast checks, on every pull request and every push to main: test, desktop, agentshield, push-gate, denylist,
 # and dco on PRs (scan is gitleaks.yml's). They are what the main ruleset requires. The slow checks (the bootstrap
 # on each OS, the real systemd and real users jobs) are ci-slow.yml's: on main they run in batches, on main's newest
 # commit, one batch at a time (ci-batch.yml), and on a PR only when it touches what they exercise. The engine
@@ -144,6 +144,17 @@ jobs:
         run: |
           echo "test shard 1..4/4 (ubuntu-latest, 24): $RESULT"
           [ "$RESULT" = success ]
+
+  # Kept for one release after #744 removed what it tested, as a job that only succeeds: same job id, same check
+  # name. An install whose updater is v0.5.2's or older requires a successful "desktop" run on every commit it
+  # installs (it has no retired-check rule), and so does the release channel's check of a release's base commit.
+  # With no run it would wait forever. No `if`, `needs` or `name`: a skipped run is refused by that updater, and
+  # the check must keep the job id as its name. The release after the one that ships this removes the job and the
+  # check together (test/desktop-removed.test.ts holds this shape).
+  desktop:
+    runs-on: ubuntu-latest
+    steps:
+      - run: 'true'
 
   agentshield:
     # Scan the hooks, permissions and settings a fresh install generates.

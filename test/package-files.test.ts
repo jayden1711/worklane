@@ -79,7 +79,7 @@ const forbidden = (p: string) =>
   /(^|\/)\.env(\.|$)/.test(p) ||
   /\.(pem|key|p12)$/.test(p) ||
   /(^|\/)(\.npmrc|credentials\.ya?ml)$/.test(p) ||
-  /^(src|test|\.github|docs)\//.test(p);
+  /^(src|test|\.github|docs|desktop)\//.test(p);
 
 /**
  * Every path the engine reads from its own package root, as the scan above finds them in src/ (kept here by hand, so

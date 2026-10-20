@@ -1,6 +1,9 @@
-// #744: the desktop window is removed, with its CI job, its required check and its lockfile. Two things are kept true
-// here: every required check is a job some workflow defines (so neither a merge nor an engine install waits on a
-// check that never runs again), and nothing but the CHANGELOG still names the removed app.
+// #744: the desktop window is removed, with its lockfile, docs and build steps. Its CI job stays one more release as
+// a job that only succeeds (#746, the owner's option (a)): an updater from v0.5.2 or older requires a successful
+// "desktop" run on every commit it installs, so the job and its required check go together a release later (#877).
+// Kept true here: every required check is a job some workflow defines (so neither a merge nor an engine install
+// waits on a check that never runs again), the desktop job can only succeed, and nothing but the release notes
+// still names the removed app.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
@@ -17,19 +20,42 @@ type Job = { name?: string; strategy?: { matrix?: Record<string, unknown> } };
  */
 function jobNames(dir: string): Set<string> {
   const out = new Set<string>();
-  for (const f of readdirSync(dir).filter((x) => /\.ya?ml$/.test(x))) {
-    const wf = parse(readFileSync(join(dir, f), 'utf8')) as { jobs?: Record<string, Job> };
-    for (const [key, job] of Object.entries(wf.jobs ?? {})) {
-      const name = job.name ?? key;
-      const axes = Object.entries(job.strategy?.matrix ?? {}).filter(([k, v]) => k !== 'include' && k !== 'exclude' && Array.isArray(v)) as [string, unknown[]][];
-      let combos: string[][] = [[]];
-      for (const [, values] of axes) combos = combos.flatMap((c) => values.map((v) => [...c, String(v)]));
-      for (const c of combos) {
-        const vars = Object.fromEntries(axes.map(([k], i) => [k, c[i]!]));
-        out.add(name.includes('${{') ? name.replace(/\$\{\{ matrix\.([a-z]+) \}\}/g, (m, k: string) => vars[k] ?? m) : c.length ? `${name} (${c.join(', ')})` : name);
-      }
+  for (const f of workflowFiles(dir)) for (const n of fileJobNames(join(dir, f))) out.add(n);
+  return out;
+}
+
+function workflowFiles(dir: string): string[] {
+  return readdirSync(dir).filter((x) => /\.ya?ml$/.test(x));
+}
+
+/** The check names one workflow file can create (see jobNames). */
+function fileJobNames(file: string): Set<string> {
+  const out = new Set<string>();
+  const wf = parse(readFileSync(file, 'utf8')) as { jobs?: Record<string, Job> };
+  for (const [key, job] of Object.entries(wf.jobs ?? {})) {
+    const name = job.name ?? key;
+    const axes = Object.entries(job.strategy?.matrix ?? {}).filter(([k, v]) => k !== 'include' && k !== 'exclude' && Array.isArray(v)) as [string, unknown[]][];
+    let combos: string[][] = [[]];
+    for (const [, values] of axes) combos = combos.flatMap((c) => values.map((v) => [...c, String(v)]));
+    for (const c of combos) {
+      const vars = Object.fromEntries(axes.map(([k], i) => [k, c[i]!]));
+      out.add(name.includes('${{') ? name.replace(/\$\{\{ matrix\.([a-z]+) \}\}/g, (m, k: string) => vars[k] ?? m) : c.length ? `${name} (${c.join(', ')})` : name);
     }
   }
+  return out;
+}
+
+/**
+ * Why `job` might end any way but success on a commit: anything beyond GitHub's runner and one step that runs
+ * `true`. No `if` (a skipped required check is refused by a v0.5.2 updater), no `needs` (a failed or skipped
+ * dependency skips it), no `name` (the check must keep the job id as its name), and no `continue-on-error`,
+ * `uses`, matrix, container, environment or timeout of its own: nothing that can turn it red, skip it or rename it.
+ */
+function notOnlySuccess(job: Record<string, unknown> | undefined): string[] {
+  if (!job) return ['no such job'];
+  const out = Object.keys(job).filter((k) => k !== 'runs-on' && k !== 'steps').map((k) => `has ${k}`);
+  if (job['runs-on'] !== 'ubuntu-latest') out.push(`runs-on ${JSON.stringify(job['runs-on'])}`);
+  if (JSON.stringify(job.steps) !== JSON.stringify([{ run: 'true' }])) out.push(`steps ${JSON.stringify(job.steps)}`);
   return out;
 }
 
@@ -85,8 +111,10 @@ const NAMES_IT = /\bTauri\b|(^|[^\w.-])desktop\/|build:desktop|_DESKTOP\b|\bdesk
 /**
  * The files that may still name it. The CHANGELOG, which records the removal (#744). docs/progress.md, the dated
  * build log, which records what each step shipped then. docs/prior-art.md, whose rows describe other projects.
+ * .worklane/review.yaml, whose `engine` globs keep `desktop/**` (owner-only review for the folder) until #877:
+ * dropping a glob is a loosening, the owner's call, so it goes with the job's removal, not here.
  */
-const MAY_NAME_IT = new Set(['CHANGELOG.md', 'docs/progress.md', 'docs/prior-art.md']);
+const MAY_NAME_IT = new Set(['CHANGELOG.md', 'docs/progress.md', 'docs/prior-art.md', '.worklane/review.yaml']);
 
 function filesUnder(dir: string, keep: (p: string) => boolean): string[] {
   const out: string[] = [];
@@ -98,13 +126,33 @@ function filesUnder(dir: string, keep: (p: string) => boolean): string[] {
   return out;
 }
 
-test('the desktop app is gone: its folder, module, build script, CI job and check, notice, globs and docs', () => {
+test('the desktop check stays one more release: one job that only succeeds, on every pull request and push to main, still required (#746, #877)', () => {
+  const ci = parse(readFileSync(join(workflows, 'ci.yml'), 'utf8')) as { on?: Record<string, unknown>; jobs?: Record<string, Record<string, unknown>> };
+  assert.deepEqual(notOnlySuccess(ci.jobs?.desktop), [], 'ci.yml\'s desktop job: one `true` step on GitHub\'s runner, nothing that could skip, fail or rename it');
+  assert.deepEqual(ci.on?.push, { branches: ['main'] }, 'it runs on every push to main, where the updater reads it');
+  assert.ok(ci.on && 'pull_request' in ci.on, 'and on every pull request');
+  assert.deepEqual(workflowFiles(workflows).filter((f) => fileJobNames(join(workflows, f)).has('desktop')), ['ci.yml'], 'one job makes the desktop check: no second run of that name can be the one an updater reads');
+  assert.ok(requiredChecks().includes('desktop'), 'config.yaml still requires desktop, until #877 removes the job and the check together');
+  assert.ok(updaterDefaults().includes('desktop'), 'a new install\'s updater still lists desktop, until #877');
+});
+
+test('the no-op shape check catches whatever could make the desktop check anything but success', () => {
+  const ok = { 'runs-on': 'ubuntu-latest', steps: [{ run: 'true' }] };
+  assert.deepEqual(notOnlySuccess(ok), []);
+  assert.deepEqual(notOnlySuccess(undefined), ['no such job'], 'the job removed before its check: v0.5.2 installs would wait forever');
+  assert.deepEqual(notOnlySuccess({ if: "github.event_name == 'pull_request'", ...ok }), ['has if'], 'skipped on main: a v0.5.2 updater refuses a skipped required check');
+  assert.deepEqual(notOnlySuccess({ ...ok, needs: 'test-22' }), ['has needs']);
+  assert.deepEqual(notOnlySuccess({ ...ok, name: 'desktop (no-op)' }), ['has name'], 'renamed: the check "desktop" would never run again');
+  assert.deepEqual(notOnlySuccess({ ...ok, 'continue-on-error': true }), ['has continue-on-error']);
+  assert.deepEqual(notOnlySuccess({ ...ok, steps: [{ run: 'false' }] }), ['steps [{"run":"false"}]']);
+  assert.deepEqual(notOnlySuccess({ ...ok, steps: [{ uses: 'actions/checkout@x' }, { run: 'true' }] }), ['steps [{"uses":"actions/checkout@x"},{"run":"true"}]']);
+  assert.deepEqual(notOnlySuccess({ ...ok, 'runs-on': ['self-hosted'] }), ['runs-on ["self-hosted"]']);
+});
+
+test('the desktop app is gone: its folder, module, build script, notice and docs', () => {
   for (const p of ['desktop', join('src', 'desktop.ts'), join('test', 'desktop.test.ts')]) assert.ok(!existsSync(join(repoRoot, p)), `${p} is removed`);
   const pkg = JSON.parse(readFileSync(join(repoRoot, 'package.json'), 'utf8')) as { scripts: Record<string, string> };
   assert.ok(!('build:desktop' in pkg.scripts), 'no build:desktop script');
-  assert.ok(!jobNames(workflows).has('desktop'), 'no workflow defines a desktop job');
-  assert.ok(!requiredChecks().includes('desktop'), 'config.yaml no longer requires desktop');
-  assert.ok(!updaterDefaults().includes('desktop'), 'a new install\'s updater no longer requires desktop');
 
   const files = [
     ...filesUnder(workflows, (p) => /\.ya?ml$/.test(p)),
@@ -118,12 +166,16 @@ test('the desktop app is gone: its folder, module, build script, CI job and chec
     .flatMap((r) => readFileSync(join(repoRoot, r), 'utf8').split('\n').map((line, i) => ({ at: `${r}:${i + 1}`, line })).filter((x) => NAMES_IT.test(x.line)))
     .map((x) => `${x.at}: ${x.line.trim()}`);
   assert.deepEqual(named, [], 'nothing but the CHANGELOG (and the dated build log and other projects\' rows) names it');
+});
 
-  // The CHANGELOG says what replaces it, under the release that removes it.
-  const unreleased = readFileSync(join(repoRoot, 'CHANGELOG.md'), 'utf8').split(/^## /m)[1] ?? '';
-  assert.match(unreleased, /^v[\d.]+ \(unreleased\)/, 'the newest CHANGELOG section is the unreleased one');
-  assert.match(unreleased, /desktop window[^\n]*removed[^\n]*#744/i);
-  assert.match(unreleased, /open the dashboard in (a|your) browser/i);
+test('the release notes say what replaces it, that the desktop check stays one more release, and that v0.5.2 installs rerun updates.sh', () => {
+  // The fragment until the release step moves it into CHANGELOG.md: read both, so the release PR passes too.
+  const dir = join(repoRoot, 'changelog.d');
+  const notes = [join(repoRoot, 'CHANGELOG.md'), ...readdirSync(dir).filter((f) => f !== 'README.md').map((f) => join(dir, f))].map((f) => readFileSync(f, 'utf8')).join('\n');
+  assert.match(notes, /desktop window[^\n]*removed[^\n]*#744/i);
+  assert.match(notes, /open the dashboard in (a|your) browser/i);
+  assert.match(notes, /`desktop` (CI )?check stays[^\n]*one more release/i);
+  assert.match(notes, /v0\.5\.2 installs[^\n]*rerun `updates\.sh` once/i);
 });
 
 test('the fixture helpers read a real tree: this test would see a desktop job if one came back', () => {

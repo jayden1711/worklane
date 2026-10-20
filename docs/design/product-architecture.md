@@ -330,7 +330,6 @@ An air-gapped install needs, each inside the boundary (inferred):
 | Slack | Socket Mode, mentions from allowed senders and channels; intake and replies only (`src/intake/slack.ts:1-8`) | Supported | Supported | Supported |
 | Linear | Polled API key, allowed senders' issues only; intake and comments only (`src/intake/linear.ts:1-8`) | Supported | Supported | Supported |
 | Siri | Removed (#743): no gateway, no device tokens (`src/voice-removed.ts`) | Removed | Removed | Removed |
-| Desktop app | Removed (#744): open the dashboard in a browser, with the same sign-in and guards | Removed | Removed | Removed |
 
 ### 11.2 Which surface carries each action today (measured)
 
