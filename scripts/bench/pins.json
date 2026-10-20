@@ -1,0 +1,11 @@
+{
+  "dataset": {
+    "base": "https://huggingface.co/datasets/princeton-nlp/SWE-bench_Verified/resolve/",
+    "path": "data/test-00000-of-00001.parquet",
+    "revision": null,
+    "sha256": null,
+    "max_bytes": 268435456,
+    "hosts": ["huggingface.co", "hf.co"]
+  },
+  "image_digests": []
+}
