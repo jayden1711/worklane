@@ -16,8 +16,9 @@ import { join, relative } from 'node:path';
 import { test } from 'node:test';
 import { promisify } from 'node:util';
 import ts from 'typescript';
-import { SHARE_ENV, Worker } from 'node:worker_threads';
-import { childEnvOf, execFile, execFileSync, spawn, spawnSync, startWorker } from '../src/os/child-process.js';
+import { pathToFileURL } from 'node:url';
+import { Worker, type WorkerOptions } from 'node:worker_threads';
+import { childEnvOf, execFile, execFileSync, spawn, spawnSync, startSetupWorker } from '../src/os/child-process.js';
 import { ownEnv } from '../src/os/own-env.js';
 import { repoRoot } from './helpers.js';
 
@@ -185,30 +186,92 @@ function reported(w: Worker): Promise<WorkerReport> {
   });
 }
 
-test('#883 round 2: a Worker started through the module never takes its env from Object.prototype', async () => {
-  const fromProto = await polluted({ env: { [CANARY]: 'from-the-prototype' } }, () => reported(startWorker(WORKER_REPORT, { eval: true })));
-  assert.deepEqual([fromProto.canary, fromProto.path], [false, true], 'no env given: the engine\'s own, not Object.prototype.env');
-  const raw = await polluted({ env: { [CANARY]: 'from-the-prototype' } }, () => reported(new Worker(WORKER_REPORT, { eval: true })));
-  assert.deepEqual([raw.canary, raw.path], [true, false], "Node's own Worker takes the prototype's env whole (why startWorker exists; Node 22, measured)");
-  const given = await polluted({ [CANARY]: 'from-the-prototype' }, () => reported(startWorker(WORKER_REPORT, { eval: true, env: { ...process.env } })));
-  assert.equal(given.canary, false, 'a given env: own variables only');
-});
-
-test('#883 round 2: with a clean prototype a Worker gets what it got before; SHARE_ENV still shares', async () => {
-  const mine = await reported(startWorker(WORKER_REPORT, { eval: true }));
-  const node = await reported(new Worker(WORKER_REPORT, { eval: true }));
-  assert.equal(mine.digest, node.digest, 'no env: the same environment as Node gives');
-  assert.equal(mine.digest, digest(process.env));
-  const w = startWorker("process.env.WL846_SHARED = '1'; require('node:worker_threads').parentPort.postMessage(0)", { eval: true, env: SHARE_ENV });
-  await new Promise((done) => w.once('message', done));
+/**
+ * The options startSetupWorker hands Node's Worker, through a stand-in Worker (the real setup worker runs the real
+ * probe: gh, claude, the service manager), with `vars` on Object.prototype while it is called.
+ */
+async function setupWorkerOptions(vars: Record<string, unknown>): Promise<{ file: unknown; options: Record<string, unknown> }> {
+  const wtm = createRequire(import.meta.url)('node:worker_threads') as Record<string, unknown>;
+  const real = wtm.Worker;
+  const seen: { file: unknown; options: Record<string, unknown> }[] = [];
+  wtm.Worker = class {
+    constructor(file: unknown, options: Record<string, unknown>) {
+      seen.push({ file, options });
+    }
+  };
+  syncBuiltinESMExports();
   try {
-    assert.equal(process.env.WL846_SHARED, '1', 'SHARE_ENV: the worker shares the engine\'s environment, as asked');
+    await polluted(vars, () => void startSetupWorker({ some: 'data' }));
   } finally {
-    delete process.env.WL846_SHARED;
+    wtm.Worker = real;
+    syncBuiltinESMExports();
   }
+  assert.equal(seen.length, 1);
+  return seen[0]!;
+}
+
+/** A tiny worker script (a file, so no eval): it posts 1. */
+function workerScript(): URL {
+  const f = join(mkdtempSync(join(tmpdir(), 'wl846-worker-')), 'w.mjs');
+  writeFileSync(f, "import { parentPort } from 'node:worker_threads'; parentPort.postMessage(1);\n");
+  return pathToFileURL(f);
+}
+
+/** The option names Node's Worker reads from its options (a Proxy records each), for a script URL. */
+async function workerOptionNames(): Promise<string[]> {
+  const seen = new Set<string>();
+  const options = new Proxy({ env: childEnvOf(process.env) } as Record<string | symbol, unknown>, {
+    get: (t, k) => (typeof k === 'string' && seen.add(k), Reflect.get(t, k)),
+    has: (t, k) => (typeof k === 'string' && seen.add(k), Reflect.has(t, k)),
+  });
+  const w = new Worker(workerScript(), options as WorkerOptions);
+  await new Promise((done, fail) => (w.once('message', done), w.once('error', fail)));
+  await w.terminate();
+  return [...seen].sort();
+}
+
+test('#883 round 3: the setup worker never takes an option from Object.prototype: env given, every other option Node reads an own key', async () => {
+  const names = await workerOptionNames();
+  for (const n of ['env', 'eval', 'execArgv', 'argv', 'resourceLimits']) assert.ok(names.includes(n), `Node reads ${n} (the probe works)`);
+  const pollute = { env: { [CANARY]: 'from-the-prototype' }, execArgv: ['--require', '/nonexistent/preload.cjs'], argv: ['x'], resourceLimits: { maxOldGenerationSizeMb: 1 }, name: 'polluted', stdin: true, transferList: [] };
+  const { file, options } = await setupWorkerOptions(pollute);
+  assert.equal(String(file), new URL('../src/setup-worker.js', import.meta.url).href, 'the setup worker, from a fixed src/ path');
+  // eval can't be named in a src/ Worker's options (#806's lint); an inherited one fails closed (the next test).
+  assert.deepEqual(names.filter((n) => n !== 'eval' && !Object.hasOwn(options, n)), [], 'each option Node reads is an own key: none comes from a prototype');
+  for (const n of names.filter((x) => x !== 'eval' && x !== 'env' && x !== 'workerData')) assert.equal(options[n], undefined, `${n}: Node's default`);
+  assert.deepEqual(options.workerData, { some: 'data' });
+  const env = options.env as Record<string, unknown>;
+  assert.equal(Object.getPrototypeOf(env), null);
+  assert.equal(Object.hasOwn(env, CANARY), false, "the worker's env is not the prototype's");
+  assert.equal(env.PATH, process.env.PATH, "the engine's own");
+  // Why: Node's own Worker, options with no env, takes Object.prototype.env whole (Node 22, measured).
+  const raw = await polluted({ env: { [CANARY]: 'from-the-prototype' } }, () => reported(new Worker(WORKER_REPORT, { eval: true })));
+  assert.deepEqual([raw.canary, raw.path], [true, false]);
 });
 
-test('childEnvOf: a fresh null-prototype copy of the own variables, in order; undefined ones left out; an OwnEnv works', async () => {
+test('#883 round 3: an inherited eval makes Node refuse a Worker started from a URL (the setup worker fails closed)', async () => {
+  const code = await polluted({ eval: true }, () => {
+    try {
+      new Worker(workerScript(), { workerData: 1, env: childEnvOf(process.env) }).terminate();
+      return null;
+    } catch (e) {
+      return (e as { code?: string }).code ?? null;
+    }
+  });
+  assert.equal(code, 'ERR_INVALID_ARG_VALUE');
+});
+
+test('#883 round 3: with a clean prototype the setup worker gets what it got before (the env it is given, run in a real Worker)', async () => {
+  const { options } = await setupWorkerOptions({});
+  assert.equal(digest(options.env as Record<string, string | undefined>), digest(process.env));
+  // The same env object, in a real Worker (eval'd here, in the test, never in src/), reads as Node's default does.
+  const given = await reported(new Worker(WORKER_REPORT, { eval: true, env: childEnvOf(process.env) }));
+  const node = await reported(new Worker(WORKER_REPORT, { eval: true }));
+  assert.equal(given.digest, node.digest);
+  assert.equal(given.digest, digest(process.env));
+});
+
+test('childEnvOf: a fresh null-prototype copy of the own variables, in order; an own undefined kept; an OwnEnv works', async () => {
   const source: NodeJS.ProcessEnv = { B: '2', A: '1', GONE: undefined };
   const env = await polluted({ [CANARY]: 'x' }, () => childEnvOf(source));
   assert.equal(Object.getPrototypeOf(env), null);
@@ -252,8 +315,12 @@ function childProcessReach(files: Map<string, string>): Finding[] {
         const c = n.importClause;
         const spec = n.moduleSpecifier.text;
         if (!c || c.isTypeOnly) return;
-        if (c.name || (c.namedBindings && ts.isNamespaceImport(c.namedBindings))) at(n, `imports ${spec} whole: start a Worker through ${MODULE}'s startWorker`);
-        else if (c.namedBindings?.elements.some((e) => !e.isTypeOnly && takes(e) === 'Worker')) at(n, `imports Worker from ${spec}: start it through ${MODULE}'s startWorker`);
+        if (c.name || (c.namedBindings && ts.isNamespaceImport(c.namedBindings))) at(n, `imports ${spec} whole: start a Worker through ${MODULE}'s fixed starter`);
+        else {
+          // `default` is the whole module under another name (#883 round 3: `import { default as wt }` reached Worker).
+          const taken = c.namedBindings?.elements.find((e) => !e.isTypeOnly && (takes(e) === 'Worker' || takes(e) === 'default'));
+          if (taken) at(n, `imports ${takes(taken)} from ${spec}: start a Worker through ${MODULE}'s fixed starter`);
+        }
         return;
       }
       if (ts.isExportDeclaration(n) && n.moduleSpecifier && ts.isStringLiteral(n.moduleSpecifier) && (SPECIFIERS.has(n.moduleSpecifier.text) || WORKER_SPECIFIERS.has(n.moduleSpecifier.text))) {
@@ -309,6 +376,9 @@ test('#846 backstop: the lint finds each way around the module (fixtures, never 
   assert.deepEqual(found("import { Worker } from 'node:worker_threads';"), ['imports Worker from node:worker_threads']);
   assert.deepEqual(found("import { Worker as W, isMainThread } from 'worker_threads';"), ['imports Worker from worker_threads']);
   assert.deepEqual(found("import * as wt from 'node:worker_threads';"), ['imports node:worker_threads whole']);
+  assert.deepEqual(found("import { default as wt } from 'node:worker_threads';"), ['imports default from node:worker_threads'], '#883 round 3: the module under another name');
+  assert.deepEqual(found("import { default as cp } from 'node:child_process';"), ['imports node:child_process']);
+  assert.deepEqual(found("import { default as c } from 'node:cluster';"), ['imports node:cluster']);
   assert.deepEqual(found("import wt from 'node:worker_threads';"), ['imports node:worker_threads whole']);
   assert.deepEqual(found("export { Worker } from 'node:worker_threads';"), ['re-exports node:worker_threads']);
   assert.deepEqual(found("const wt = await import('node:worker_threads');"), ['"node:worker_threads"']);

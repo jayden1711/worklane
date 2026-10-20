@@ -4,7 +4,7 @@
 // and it checks them with these detectors), `doctor` (one line per step) and the dashboard's first-run page
 // (GET /api/first-run). A detector only looks: it runs read-only commands (`claude auth status`, `gh auth status`,
 // `git rev-parse`, the service manager's status) and reads files; it never changes anything.
-import { spawnSync, startWorker } from './os/child-process.js';
+import { spawnSync, startSetupWorker } from './os/child-process.js';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -1394,7 +1394,7 @@ export const groupLevel = (g: Pick<GroupView, 'ready' | 'optional'>): 'ok' | 'wa
  */
 export function checkSetupOffThread(c: Omit<SetupContext, 'instanceFacts'>, o: { cache: DetectCache; fresh?: boolean; localMs?: number; netMs?: number; managerEnv?: ManagerEnv }): Promise<SetupView> {
   return new Promise((resolve, reject) => {
-    const w = startWorker(new URL('./setup-worker.js', import.meta.url), { workerData: { ctx: c, cache: o.cache, fresh: !!o.fresh, localMs: o.localMs ?? 0, netMs: o.netMs ?? 0, ...(o.managerEnv ? { managerEnv: o.managerEnv } : {}) } });
+    const w = startSetupWorker({ ctx: c, cache: o.cache, fresh: !!o.fresh, localMs: o.localMs ?? 0, netMs: o.netMs ?? 0, ...(o.managerEnv ? { managerEnv: o.managerEnv } : {}) });
     w.once('message', (m: { view: SetupView; cache: DetectCache }) => {
       o.cache.clear();
       for (const [k, v] of m.cache) o.cache.set(k, v);

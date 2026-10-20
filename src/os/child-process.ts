@@ -9,8 +9,9 @@
 // INVARIANT: spawn, spawnSync, execFile and execFileSync here are node:child_process's, except that the child's
 // environment is always childEnvOf(options.env || process.env): a null-prototype copy of the own variables only, so no
 // value reaches a child from a prototype, whatever the caller passed (a plain object, a spread, nothing at all). The
-// options themselves are passed as a null-prototype copy of their own keys too. startWorker does the same for a
-// worker_threads Worker (whose options' `env` was read through the prototype, #883 round 2). No other module in src/
+// options themselves are passed as a null-prototype copy of their own keys too. startSetupWorker does the same for the
+// engine's one worker_threads Worker (whose options' `env` was read through the prototype, #883 rounds 2 and 3), from
+// a fixed script and never eval, so it loads no other code (#806). No other module in src/
 // imports node:child_process for a value, nor Worker from node:worker_threads (test/child-process.test.ts, the
 // backstop); a type-only import is fine.
 //
@@ -23,7 +24,6 @@
 import * as cp from 'node:child_process';
 import { promisify } from 'node:util';
 import * as wt from 'node:worker_threads';
-import type { WorkerOptions } from 'node:worker_threads';
 import { OwnEnv, type EnvSource } from './own-env.js';
 
 export type { ChildProcess, ChildProcessWithoutNullStreams } from 'node:child_process';
@@ -120,16 +120,31 @@ defineProperty(execFile, promisify.custom, {
 });
 
 /**
- * node:worker_threads's Worker (#883 round 2). WHY: a Worker whose options set no `env` reads `options.env` through the
- * prototype, so `Object.prototype.env` became the worker's whole environment, and so its children's (measured, Node
- * 22). Here the options are a null-prototype copy of their own keys, and `env` is always given: childEnvOf(options.env
- * ?? process.env), or SHARE_ENV as the caller asked. With a clean prototype a worker gets what it got before.
+ * The setup check's worker (src/setup-worker.ts, started by checkSetupOffThread), and no other: the engine's one Worker
+ * (#883 rounds 2 and 3). WHY: a Worker whose options set no `env` reads `options.env` through the prototype, so
+ * `Object.prototype.env` became the worker's whole environment, and so that of every child it starts (gh, claude, the
+ * service manager; measured, Node 22). The other options are read the same way: an inherited `execArgv` of
+ * `--require <file>` ran that file in the worker, and an inherited `resourceLimits` crashed it (measured, #883 round 3).
+ * So `env` is always given, childEnvOf(process.env) (what the worker got before with a clean prototype), and every
+ * other option Node reads is an own key here, undefined (Node's default), so none is read from a prototype.
+ * The one it can't name is `eval` (#806's lint refuses the word in a Worker's options): an inherited `eval` makes
+ * Node refuse to start the worker (a URL script can't be eval'd), so it fails closed (measured).
+ * INVARIANT (#806): the script is a fixed literal src/ module and the options a literal without `eval` or a spread, so
+ * this is no code loader; test/slot-path.test.ts holds every Worker in src/ to that. Another worker gets its own fixed
+ * starter beside this one. test/child-process.test.ts fails if Node reads an option name this literal doesn't set.
  */
-export function startWorker(filename: string | URL, options?: WorkerOptions): wt.Worker {
-  if (options != null && (typeof options !== 'object' || isArray(options))) return new wt.Worker(filename, options);
-  const out = options != null ? ownCopy(options) : (create(null) as Record<string, unknown>);
-  // Not an object (SHARE_ENV, or a caller's mistake for Node to refuse): handed on as it is.
-  const env = out.env === undefined ? process.env : out.env;
-  out.env = env !== null && typeof env === 'object' ? childEnvOf(env as EnvSource) : env;
-  return new wt.Worker(filename, out as WorkerOptions);
+export function startSetupWorker(workerData: unknown): wt.Worker {
+  return new wt.Worker(new URL('../setup-worker.js', import.meta.url), {
+    workerData,
+    env: childEnvOf(process.env),
+    argv: undefined,
+    execArgv: undefined,
+    name: undefined,
+    resourceLimits: undefined,
+    stdin: undefined,
+    stdout: undefined,
+    stderr: undefined,
+    trackUnmanagedFds: undefined,
+    transferList: undefined,
+  });
 }
