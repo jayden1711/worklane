@@ -140,6 +140,7 @@ test('an empty required_checks in PR mode is a config problem, with the fix; dir
 
 const probe: SetupProbe = {
   which: (c) => `/stand-in/${c}`,
+  serviceManagerEnv: () => ({ env: {} }),
   run: (cmd, args, o = {}) => {
     if (cmd !== 'git') return { status: 1, stdout: '', stderr: 'no stand-in' };
     try {
