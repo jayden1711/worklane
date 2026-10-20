@@ -8,7 +8,7 @@ This page is for someone deciding whether to trust the engine with their repo. I
 - **inferred**: read from the code, with nothing run;
 - **guess**: neither.
 
-Code is cited as a file and a symbol in it (`src/pr-watch.ts#readiness`), and a test as its file and its exact title. `test/docs-guardrails.test.ts` reads this page on every CI run. It fails if a cited file, line, symbol or test title no longer exists, if a test is cited in any form other than the one used below (which it couldn't check), or if the hold kinds listed below stop matching what the code gives. A cited symbol must be declared at the top level of its file, or be a member of a top-level class there. So a citation here can't quietly go stale.
+Code is cited as a file and a symbol in it (`src/pr-watch.ts#readiness`), and a test as its file and its exact title. `test/docs-guardrails.test.ts` reads this page on every CI run. It fails if a cited file, line, symbol or test title no longer exists, if a quoted or arrowed test citation isn't in the exact form used below (a test file in code followed by any quote or arrow, or a curly opening quote or arrow anywhere outside such a citation), or if the hold kinds listed below stop matching what the code gives. A cited symbol must be declared at the top level of its file, or be a member of a top-level class there. A test mentioned without a quote or an arrow (in italics, say, or in brackets) isn't seen by the test. So a citation in the checked form can't quietly go stale.
 
 The known gaps are at the end, in [What isn't covered](#what-isnt-covered). Gaps found and fixed in October 2026 are in [security.md](security.md).
 
