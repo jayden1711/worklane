@@ -222,9 +222,10 @@ test('the incident model, when there is one: raised once on the pause, resolved 
 test("the coordinator's account-switched hook ends the pause of an instance moved to a new login after it began; none, and it stays paused", { skip }, async () => {
   // The hook's answer: when the instance last moved to a new login (null: never). Since #736 the service passes none
   // (the engine switches no account); the coordinator's hook is kept, and this holds what it does with one.
-  const switchLines = (check: 'done' | 'failed', resume: 'done' | 'failed') => (check === 'done' && resume === 'done' ? new Date(Date.now() + 2000).toISOString().replace(/\.\d{3}Z$/, 'Z') : null);
+  // Whether the switch put the instance on a new login and resumed it: only then does it have a switch time.
+  const switchLines = (check: 'done' | 'failed', resume: 'done' | 'failed') => check === 'done' && resume === 'done';
   // The switch is written once the pause has begun (its lines are stamped then), however long the setup took.
-  const run = async (switched: (() => string | null) | null) => {
+  const run = async (switched: (() => boolean) | null) => {
     const f = fixture();
     f.backlog.open(easyIssue('Add a.js', 'a.js'));
     const resetAt = Date.now() + 3600_000;
@@ -240,7 +241,9 @@ test("the coordinator's account-switched hook ends the pause of an instance move
     await c.idle();
     assert.ok(pauseOf(f.log.read(0)), 'paused on the limit');
     limited = switched === null;
-    switchedAt = switched?.() ?? null; // the switch happens while it is paused, then the coordinator starts again
+    // The switch happens while it is paused (stamped then), then the coordinator starts again.
+    const stamped = new Date(Date.now() + 2000).toISOString().replace(/\.\d{3}Z$/, 'Z');
+    switchedAt = switched?.() ? stamped : null;
     await c.tick();
     await c.idle();
     return { f, calls };
