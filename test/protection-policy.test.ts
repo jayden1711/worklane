@@ -34,6 +34,7 @@ function fixture(checks = true) {
 
 const probe = (protectedNow: () => boolean): SetupProbe => ({
   which: (c) => `/stand-in/${c}`,
+  serviceManagerEnv: () => ({ env: {} }),
   run: (cmd, args) => (cmd === 'gh' && args.join(' ').endsWith('/protection --silent') ? (protectedNow() ? { status: 0, stdout: '', stderr: '' } : { status: 1, stdout: '', stderr: 'gh: Branch not protected (HTTP 404)' }) : { status: 1, stdout: '', stderr: 'no stand-in' }),
   serviceRunning: () => false,
   systemUnitActive: () => false,

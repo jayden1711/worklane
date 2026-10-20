@@ -87,8 +87,17 @@ function checkSummary(pr: PrView): string {
   return `${checks.filter((c) => c.outcome === 'pass').length}/${checks.length} required checks pass`;
 }
 
+/**
+ * GET /api/prs as served: a viewer's (src/prs-viewer.ts, #821) has each PR's state only, no auto-merge state, and
+ * `forViewer` set; the owners' and writers' has everything.
+ */
+export type ServedPrs = Omit<PrsView, 'autoMerge'> & { autoMerge: PrsView['autoMerge'] | null; forViewer?: true };
+
+/** What a viewer sees in place of the reasons and the auto-merge state. */
+const VIEWER_WITHHELD = "Why it waits, and the auto-merge state, are for the instance's owners and writers.";
+
 /** A PR waiting for a person, as a recommendation-style card: what it is, exactly why it waits, its checks, and where to act. */
-function WaitingCard({ pr }: { pr: PrView }) {
+function WaitingCard({ pr, forViewer }: { pr: PrView; forViewer: boolean }) {
   // Both can apply: a CI fix gave up, then (after a person's push) the merge policy still left it to a person.
   const groups = [
     ...(pr.gaveUp ? [{ title: 'Why the CI fix stopped', reasons: [pr.gaveUp.reason], testId: 'pr-gave-up-reasons' }] : []),
@@ -123,20 +132,25 @@ function WaitingCard({ pr }: { pr: PrView }) {
             ))
           ) : (
             <div className="mt-1.5 text-[12px] text-ink-3" data-testid="pr-wait-reasons">
-              no reason recorded
+              {forViewer ? VIEWER_WITHHELD : 'no reason recorded'}
             </div>
           )}
         </div>
-        <div className="mt-2.5 space-y-2">
-          <Checks pr={pr} />
-          <MergeFlow pr={pr} />
-        </div>
+        {/* A viewer's answer has no head, checks or fix runs: nothing is shown rather than "none". */}
+        {!forViewer && (
+          <div className="mt-2.5 space-y-2">
+            <Checks pr={pr} />
+            <MergeFlow pr={pr} />
+          </div>
+        )}
       </div>
       <div className="primitive-card-footer flex items-center gap-2 border-t border-line text-[12px] text-ink-3">
-        <span>
-          head <span className="font-mono">{short(pr.head)}</span>
-          {pr.fixes.length ? ` · ${pr.fixes.length} fix run(s)` : ''}
-        </span>
+        {!forViewer && (
+          <span>
+            head <span className="font-mono">{short(pr.head)}</span>
+            {pr.fixes.length ? ` · ${pr.fixes.length} fix run(s)` : ''}
+          </span>
+        )}
         <a href={`/decisions/pr-${pr.number}`} onClick={(e) => (e.preventDefault(), navigate(`/decisions/pr-${pr.number}`))} className="ml-auto inline-flex h-7 items-center rounded-full bg-surface px-3 text-[12.5px] font-medium text-ink shadow-btn hover:bg-hover" data-testid="pr-details">
           Details
         </a>
@@ -179,7 +193,7 @@ function ShowMore({ list, total, onMore }: { list: string; total: number; onMore
 }
 
 /** The whole PR view from its data (also what the render checks render). */
-export function PullRequestsView({ view }: { view: PrsView }) {
+export function PullRequestsView({ view }: { view: ServedPrs }) {
   // Lists shown whole; the others show their first PR_ROWS.
   const [whole, setWhole] = useState<ReadonlySet<string>>(() => new Set());
   const rows = <T,>(list: string, xs: T[]) => (whole.has(list) ? xs : xs.slice(0, PR_ROWS));
@@ -191,50 +205,57 @@ export function PullRequestsView({ view }: { view: PrsView }) {
   const done = by('merged', 'closed');
   const am = view.autoMerge;
   const lastStop = view.stops.find((s) => s.kind === 'stopped');
+  const forViewer = view.forViewer === true || !am;
   return (
     <div className="space-y-6 p-6" data-testid="prs-page">
-      <div className="overflow-hidden rounded-card bg-surface shadow-card" data-auto-merge={am.on ? 'on' : am.stopped ? 'stopped' : 'off'} data-testid="prs-auto-merge">
-        <div className="primitive-card-pad">
-          <div className="flex items-center gap-2">
-            <span className="text-[14px] font-medium text-ink">Auto-merge on this instance</span>
-            <span data-testid="prs-auto-merge-state">
-              <Badge tone={am.on ? 'ok' : am.stopped ? 'danger' : 'neutral'}>{am.on ? 'on' : am.stopped ? 'stopped' : 'off'}</Badge>
-            </span>
+      {!am ? (
+        <Card className="p-4 text-[13px] text-ink-2" data-testid="prs-viewer-note">
+          {VIEWER_WITHHELD}
+        </Card>
+      ) : (
+        <div className="overflow-hidden rounded-card bg-surface shadow-card" data-auto-merge={am.on ? 'on' : am.stopped ? 'stopped' : 'off'} data-testid="prs-auto-merge">
+          <div className="primitive-card-pad">
+            <div className="flex items-center gap-2">
+              <span className="text-[14px] font-medium text-ink">Auto-merge on this instance</span>
+              <span data-testid="prs-auto-merge-state">
+                <Badge tone={am.on ? 'ok' : am.stopped ? 'danger' : 'neutral'}>{am.on ? 'on' : am.stopped ? 'stopped' : 'off'}</Badge>
+              </span>
+            </div>
+            <p className="mt-1.5 text-[13px] leading-relaxed text-ink-2" data-testid="prs-auto-merge-why">{am.why}</p>
           </div>
-          <p className="mt-1.5 text-[13px] leading-relaxed text-ink-2" data-testid="prs-auto-merge-why">{am.why}</p>
-        </div>
-        <div className="primitive-card-footer flex flex-wrap items-center gap-x-4 gap-y-1 border-t border-line text-[12px] text-ink-3">
-          <span>
-            policy kill switch: <span className="text-ink">{am.policy === null ? 'n/a' : am.policy ? 'on' : 'off'}</span>
-          </span>
-          <span>
-            repo review.yaml: <span className="text-ink">{am.repo === null ? 'n/a' : am.repo ? 'on' : 'off'}</span>
-          </span>
-          {view.hygiene && (
-            <span data-testid="prs-hygiene">
-              stale PR pass {ago(view.hygiene.at)}: <span className="text-ink">{view.hygiene.line}</span>
-            </span>
-          )}
-          {lastStop && (
+          <div className="primitive-card-footer flex flex-wrap items-center gap-x-4 gap-y-1 border-t border-line text-[12px] text-ink-3">
             <span>
-              last stop {ago(lastStop.at)}: {lastStop.reason}
-              {lastStop.revert && (
-                <>
-                  {' '}
-                  ·{' '}
-                  <a href={lastStop.revert} {...ext} className="text-blue-ink hover:underline" data-testid="prs-revert-link">
-                    revert PR
-                  </a>
-                </>
-              )}
+              policy kill switch: <span className="text-ink">{am.policy === null ? 'n/a' : am.policy ? 'on' : 'off'}</span>
             </span>
-          )}
+            <span>
+              repo review.yaml: <span className="text-ink">{am.repo === null ? 'n/a' : am.repo ? 'on' : 'off'}</span>
+            </span>
+            {view.hygiene && (
+              <span data-testid="prs-hygiene">
+                stale PR pass {ago(view.hygiene.at)}: <span className="text-ink">{view.hygiene.line}</span>
+              </span>
+            )}
+            {lastStop && (
+              <span>
+                last stop {ago(lastStop.at)}: {lastStop.reason}
+                {lastStop.revert && (
+                  <>
+                    {' '}
+                    ·{' '}
+                    <a href={lastStop.revert} {...ext} className="text-blue-ink hover:underline" data-testid="prs-revert-link">
+                      revert PR
+                    </a>
+                  </>
+                )}
+              </span>
+            )}
+          </div>
         </div>
-      </div>
+      )}
 
       <section className="space-y-2" aria-label="Waiting for you" data-testid="prs-waiting">
         <div className="text-[13px] font-medium text-ink">Waiting for you ({waiting.length})</div>
-        {waiting.length ? <div className="space-y-3">{waiting.map((pr) => <WaitingCard key={pr.number} pr={pr} />)}</div> : <Empty title="Nothing waits for you" hint="A PR lands here when the merge rules leave it to you, or a CI fix run gives up." />}
+        {waiting.length ? <div className="space-y-3">{waiting.map((pr) => <WaitingCard key={pr.number} pr={pr} forViewer={forViewer} />)}</div> : <Empty title="Nothing waits for you" hint="A PR lands here when the merge rules leave it to you, or a CI fix run gives up." />}
       </section>
 
       <Card className="overflow-hidden" data-testid="prs-in-progress">
@@ -252,18 +273,24 @@ export function PullRequestsView({ view }: { view: PrsView }) {
                   {pr.title} <span className="font-normal text-ink-3">· #{pr.number}</span>
                 </>
               }
-              amount={pr.phase === 'resolving' && pr.conflict ? `merging main, ${sinceNow(pr.conflict.at)}` : pr.phase === 'light_check' && pr.lightCheck ? `waiting ${sinceNow(pr.lightCheck.at)}` : checkSummary(pr)}
+              amount={forViewer ? (pr.draft ? 'draft' : 'ready for review') : pr.phase === 'resolving' && pr.conflict ? `merging main, ${sinceNow(pr.conflict.at)}` : pr.phase === 'light_check' && pr.lightCheck ? `waiting ${sinceNow(pr.lightCheck.at)}` : checkSummary(pr)}
               pill={<Badge tone={PHASE[pr.phase].tone}>{PHASE[pr.phase].label}</Badge>}
               details={
-                <div className="space-y-2 py-1">
-                  <Checks pr={pr} />
-                  <MergeFlow pr={pr} />
-                  {pr.status && !pr.status.ready && pr.status.reasons.length > 0 && <div className="text-[12px] text-ink-2">not ready: {pr.status.reasons.join('; ')}</div>}
-                  <Fixes pr={pr} />
+                forViewer ? (
                   <a href={pr.url} {...ext} className="text-[12px] text-blue-ink hover:underline" data-testid="pr-github-link">
                     open on GitHub
                   </a>
-                </div>
+                ) : (
+                  <div className="space-y-2 py-1">
+                    <Checks pr={pr} />
+                    <MergeFlow pr={pr} />
+                    {pr.status && !pr.status.ready && pr.status.reasons.length > 0 && <div className="text-[12px] text-ink-2">not ready: {pr.status.reasons.join('; ')}</div>}
+                    <Fixes pr={pr} />
+                    <a href={pr.url} {...ext} className="text-[12px] text-blue-ink hover:underline" data-testid="pr-github-link">
+                      open on GitHub
+                    </a>
+                  </div>
+                )
               }
             />
           ))
@@ -273,39 +300,42 @@ export function PullRequestsView({ view }: { view: PrsView }) {
         <ShowMore list="moving" total={whole.has('moving') ? 0 : moving.length} onMore={more('moving')} />
       </Card>
 
-      <section className="space-y-2" aria-label="Auto-merged" data-testid="prs-auto-merged">
-        <div className="text-[13px] font-medium text-ink">Auto-merged ({auto.length})</div>
-        {auto.length ? (
-          <RecordsTable testId="prs-auto-merged-table" head={['PR', 'Merge commit', 'Main after', 'Why it merged itself']} className="[&_th:nth-child(1)]:w-[34%] [&_th:nth-child(2)]:w-28 [&_th:nth-child(3)]:w-28">
-            {rows('auto', auto).map((pr) => (
-              <tr key={pr.number} className="border-b border-line last:border-0" data-pr={pr.number} data-phase={pr.phase} data-testid="pr-merged-row" style={{ background: pr.mainResult?.outcome === 'red' ? 'var(--red-tint)' : undefined }}>
-                <td className="primitive-table-cell text-[13px]">
-                  <PrLink pr={pr} /> <span className="text-ink">{pr.title}</span>
-                  <div className="text-[11.5px] text-ink-3">{pr.merged ? ago(pr.merged.at) : ''}</div>
-                </td>
-                <td className="primitive-table-cell font-mono text-[12px]">
-                  {pr.merged?.sha ? (
-                    <a href={pr.merged.url} {...ext} className="text-blue-ink hover:underline" data-testid="pr-merge-commit-link">
-                      {short(pr.merged.sha)}
-                    </a>
-                  ) : (
-                    '-'
-                  )}
-                </td>
-                <td className="primitive-table-cell">{pr.mainResult ? <DotPill tone={pr.mainResult.outcome === 'green' ? 'green' : 'red'}>{pr.mainResult.outcome}</DotPill> : <DotPill tone="orange">pending</DotPill>}</td>
-                <td className="primitive-table-cell text-[12px] text-ink-2" data-testid="pr-merge-reasons">{(pr.decision?.auto ? pr.decision.reasons : []).join('; ') || 'all merge rules passed'}</td>
-              </tr>
-            ))}
-          </RecordsTable>
-        ) : (
-          <Card className="p-4 text-[13px] text-ink-3">Nothing auto-merged yet.</Card>
-        )}
-        <ShowMore list="auto" total={whole.has('auto') ? 0 : auto.length} onMore={more('auto')} />
-      </section>
+      {/* A viewer's answer doesn't say which PRs merged themselves: one "Merged or closed" list below instead. */}
+      {!forViewer && (
+        <section className="space-y-2" aria-label="Auto-merged" data-testid="prs-auto-merged">
+          <div className="text-[13px] font-medium text-ink">Auto-merged ({auto.length})</div>
+          {auto.length ? (
+            <RecordsTable testId="prs-auto-merged-table" head={['PR', 'Merge commit', 'Main after', 'Why it merged itself']} className="[&_th:nth-child(1)]:w-[34%] [&_th:nth-child(2)]:w-28 [&_th:nth-child(3)]:w-28">
+              {rows('auto', auto).map((pr) => (
+                <tr key={pr.number} className="border-b border-line last:border-0" data-pr={pr.number} data-phase={pr.phase} data-testid="pr-merged-row" style={{ background: pr.mainResult?.outcome === 'red' ? 'var(--red-tint)' : undefined }}>
+                  <td className="primitive-table-cell text-[13px]">
+                    <PrLink pr={pr} /> <span className="text-ink">{pr.title}</span>
+                    <div className="text-[11.5px] text-ink-3">{pr.merged ? ago(pr.merged.at) : ''}</div>
+                  </td>
+                  <td className="primitive-table-cell font-mono text-[12px]">
+                    {pr.merged?.sha ? (
+                      <a href={pr.merged.url} {...ext} className="text-blue-ink hover:underline" data-testid="pr-merge-commit-link">
+                        {short(pr.merged.sha)}
+                      </a>
+                    ) : (
+                      '-'
+                    )}
+                  </td>
+                  <td className="primitive-table-cell">{pr.mainResult ? <DotPill tone={pr.mainResult.outcome === 'green' ? 'green' : 'red'}>{pr.mainResult.outcome}</DotPill> : <DotPill tone="orange">pending</DotPill>}</td>
+                  <td className="primitive-table-cell text-[12px] text-ink-2" data-testid="pr-merge-reasons">{(pr.decision?.auto ? pr.decision.reasons : []).join('; ') || 'all merge rules passed'}</td>
+                </tr>
+              ))}
+            </RecordsTable>
+          ) : (
+            <Card className="p-4 text-[13px] text-ink-3">Nothing auto-merged yet.</Card>
+          )}
+          <ShowMore list="auto" total={whole.has('auto') ? 0 : auto.length} onMore={more('auto')} />
+        </section>
+      )}
 
       {done.length > 0 && (
         <Card className="overflow-hidden" data-testid="prs-closed">
-          <div className="primitive-card-bar border-b border-line text-[13px] font-medium text-ink">Merged by a person, or closed ({done.length})</div>
+          <div className="primitive-card-bar border-b border-line text-[13px] font-medium text-ink">{forViewer ? 'Merged or closed' : 'Merged by a person, or closed'} ({done.length})</div>
           {rows('done', done).map((pr, i) => (
             <TaskRow
               key={pr.number}
@@ -389,7 +419,7 @@ export function PullRequestsView({ view }: { view: PrsView }) {
 }
 
 export function PullRequests({ state }: { state: State }) {
-  const { data, error } = useView<PrsView>('/api/prs', state.lastId);
+  const { data, error } = useView<ServedPrs>('/api/prs', state.lastId);
   const c = state.prCounts;
   return (
     <div data-testid="page-prs">

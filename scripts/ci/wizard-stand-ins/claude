@@ -6,8 +6,25 @@
 # The login's proof (one minimal real call) is answered once signed in, refused with a 401 before.
 # `auth login` hands the browser opener ($BROWSER, which the dashboard sets to its relay) Anthropic's authorize link,
 # whose redirect comes back to a listener on localhost, as Claude Code's own does; then it waits for the sign-in.
+# WHY the pointer in HOME (#738): the Claude step asks claude with only the environment agent runs give it, so
+# WIZARD_STANDIN_DIR doesn't reach those calls; HOME does, as a real login lives there. A call that has the variable
+# (the dashboard's sign-in relay always does) records it there; one without reads it, and with neither there is no
+# sign-in yet.
 set -u
-d="${WIZARD_STANDIN_DIR:?the wizard stand-ins keep their state in WIZARD_STANDIN_DIR}"
+ptr="${HOME:-/nonexistent}/.wizard-standin-dir"
+if [ -n "${WIZARD_STANDIN_DIR:-}" ]; then
+  d="$WIZARD_STANDIN_DIR"
+  printf '%s\n' "$d" > "$ptr"
+else
+  d="$(cat "$ptr" 2>/dev/null || true)"
+fi
+if [ -z "$d" ] || [ ! -d "$d" ]; then
+  case "${1:-} ${2:-}" in
+    "--version "*) echo "2.1.296 (Claude Code)"; exit 0 ;;
+    "auth status") echo '{"loggedIn": false, "authMethod": "none"}'; exit 1 ;;
+    *) echo "claude stand-in: no state dir yet (WIZARD_STANDIN_DIR)" >&2; exit 1 ;;
+  esac
+fi
 printf '%s\n' "$*" >> "$d/claude-calls"
 case "${1:-} ${2:-}" in
   "--version "*) echo "2.1.296 (Claude Code)" ;;
