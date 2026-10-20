@@ -125,6 +125,12 @@ Every release, newest first: the PRs merged since the previous one, and what cha
 
 ### Guardrail changes: what each one does
 
+- **The benchmark (`scripts/bench/`, not installed) downloads only what `scripts/bench/pins.json` pins, verified before it is kept (#748).**
+  - `bench download` fetches the dataset file at its pinned revision, over https from the pinned hosts only. It checks the sha256 in memory before it makes or writes anything. It writes a 0600 file into the 0700 held-out store through a temporary file that is read back before the rename.
+  - It refuses a store that fails the preflight's held-out check, and never follows a link.
+  - Task images are pulled by pinned digest only. The only docker calls are `pull <name>@sha256:…` and `image inspect`; a tag is refused.
+  - No flag, argument or variable sets a pin, and the pins file refuses anything shaped like an instance id. The dataset is unpinned for now, so `bench download` refuses until the owner records the pin.
+
 - **A `.gitattributes` or `.gitmodules` can't hide a change from the review levels (#693, #802).**
   - The changed-files reader reads every change as text, whatever the attributes say: no textconv, no external diff, no user attributes file, no replace refs, and every submodule link. A `-diff` file holding `DROP TABLE` is L3 `deletes-data`, and its lines count.
   - The new category `diff-hiding-attributes` is always L3 and in the merge policy's floor. No `review.yaml` can drop it or put it in `merge.loosened`.
