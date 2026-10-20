@@ -81,14 +81,6 @@ export function claudeAccount(action: 'status', exec: Exec = defaultExec): Machi
   return runHelper(['claude-account', action], exec);
 }
 
-/**
- * The account profile steps were removed (#736): refused here, the helper never run. Kept only as the name
- * src/console/root-steps.ts imports (its import line is shared with an open change); #758 drops it.
- */
-export function claudeProfile(args: readonly string[], _exec: Exec = defaultExec): MachineResult {
-  return { ok: false, error: `claude-account ${args.join(' ').slice(0, 60)}: account profiles and failover were removed (#736)` };
-}
-
 /** What the engine updater follows (scripts/machine/, the updater): signed release tags, or main's green commits. */
 export const UPDATE_CHANNELS = ['release', 'main'] as const;
 export type UpdateChannelName = (typeof UPDATE_CHANNELS)[number];

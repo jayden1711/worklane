@@ -24,7 +24,8 @@
 // runs the installed engine's scripts/setup/claude-account.sh status, under the same root-owned check (`status
 // --json`: each agent user's account and expiry, written to /var/lib/worklane/claude-account/status.json). Nothing
 // here takes a Claude credential (issue #711). The account profile steps (use, remove) and the failover setting were
-// removed (#736): refused like any unknown command, nothing run or logged.
+// removed (#736): refused like any unknown command, nothing run or logged. The sudoers rule lists claude-account
+// status alone (#758).
 //
 // The engine updater (scripts/setup/updates.sh, scripts/machine/worklane-update.cjs):
 //
@@ -116,7 +117,7 @@ const ENGINE_CLI = '/opt/worklane/current/dist/src/cli.js';
 const PLUGINS_SH = '/opt/worklane/current/scripts/setup/plugins.sh';
 const PLUGIN_FETCH_UNIT = 'worklane-plugin-fetch';
 
-const USAGE = 'usage: worklane-machine set-slots <1..16> | set-updates on|off | set-test-slots <1..8> | add-project <name> <owner/repo> | claude-account status | claude-account use|remove <profile> | claude-account failover <order|off> back|stay | install-updater | set-update-channel release | stage-update-signer <principal> ssh-ed25519 <public key> | discard-update-signer <principal> ssh-ed25519 <public key> | tailscale install|up|serve|public-url | plugin-fetch <id> <https url> <sha> [<path>] | plugin-stage <id> sha256:<hex> <role+role> | plugin-withdraw <id> | plugin-remove <id> | mcp-fetch <id> <npm package> <x.y.z> | mcp-preview <id> <plugin> <server> | mcp-snapshot <id> | mcp-stage <id> sha256:<hex> <role+role> <host+host|none> <SECRET+SECRET|none> | set-policy <key> <value>';
+const USAGE = 'usage: worklane-machine set-slots <1..16> | set-updates on|off | set-test-slots <1..8> | add-project <name> <owner/repo> | claude-account status | install-updater | set-update-channel release | stage-update-signer <principal> ssh-ed25519 <public key> | discard-update-signer <principal> ssh-ed25519 <public key> | tailscale install|up|serve|public-url | plugin-fetch <id> <https url> <sha> [<path>] | plugin-stage <id> sha256:<hex> <role+role> | plugin-withdraw <id> | plugin-remove <id> | mcp-fetch <id> <npm package> <x.y.z> | mcp-preview <id> <plugin> <server> | mcp-snapshot <id> | mcp-stage <id> sha256:<hex> <role+role> <host+host|none> <SECRET+SECRET|none> | set-policy <key> <value>';
 
 /**
  * Why a name can't be an instance's, or null: instance.sh's shape, never a name whose users, group or units are already
@@ -235,8 +236,8 @@ function parseClaudeAccount(args) {
 
 /**
  * The account profile steps (claude-account use|remove <profile>) and the failover setting were removed (#736): no
- * list is one, so each is refused like any unknown command. Both names stay only for the sudoers rule's patterns that
- * still name them (dropped with that rule, #758) and the export list; neither ever returns a step.
+ * list is one, so each is refused like any unknown command, and no sudoers rule names one (#758). Both names stay only
+ * in the export list, which test/claude-accounts-retired.test.ts checks refuses each; neither ever returns a step.
  */
 function parseClaudeProfile(_args) {
   return null;
