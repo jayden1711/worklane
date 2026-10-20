@@ -64,6 +64,7 @@ export const CHECK_TABLES: readonly CheckTable[] = [
   { path: 'test/review.test.ts', table: 'LOCK_SCOPE_BAD', kind: 'never-shrink' },
   { path: 'test/review.test.ts', table: 'GUARD_MODULES', kind: 'never-shrink' },
   { path: 'test/review.test.ts', table: 'GUARD_ENTRIES', kind: 'never-shrink' },
+  { path: 'test/review.test.ts', table: 'GUARD_TREE', kind: 'never-shrink' },
   { path: 'test/slot-dir-writes.test.ts', table: 'SLOT_NAMES', kind: 'never-shrink' },
   { path: 'test/slot-dir-writes.test.ts', table: 'WRITE_CALLS', kind: 'never-shrink' },
   { path: 'test/slot-dir-writes.test.ts', table: 'CHMOD_BY_NAME', kind: 'never-shrink' },
