@@ -266,7 +266,50 @@ test('a garbled event is "unreadable N", skipped, and never counted as auto-merg
   assert.equal(r.unreadable, 4);
   assert.equal(r.counts.auto, 0);
   assert.equal(r.hoursSaved.prs, 0);
-  assert.equal(r.counts.autoNotMerged, 1, 'PR 2: a readable auto decision, no readable merge');
+  // PR 2: a readable auto decision, then a garbled merge.done naming it: unsure, in neither number.
+  assert.equal((r.counts as Record<string, unknown>).unsure, 1);
+  assert.equal(r.counts.autoNotMerged, 0);
+});
+
+/** The figure for PRs a garbled decision or merge left unsure (read untyped, so this also runs on a tree without it). */
+const unsure = (r: ReturnType<typeof report>) => (r.counts as Record<string, unknown>).unsure;
+
+test('a garbled hold between an auto decision and the merge: the PR is unsure, never auto-merged, never in hours saved', () => {
+  // Review round 1's sequence: a readable auto decision, a garbled hold for the same PR, then the engine's merge.
+  const events = [
+    stats(9, 100, 0),
+    decided(9, true, [], 12),
+    ev(at(11), 'merge.decided', { issue: 9, number: 9, head: sha('a'), auto: 'no', reasons: ['high-risk: x'] }),
+    engineMerged(9, 10),
+  ];
+  const r = report(events);
+  assert.equal(r.unreadable, 1);
+  assert.equal(r.counts.auto, 0, 'the skipped hold must not leave the earlier auto decision standing');
+  assert.equal(r.counts.held, 0);
+  assert.equal(unsure(r), 1);
+  assert.equal(r.hoursSaved.prs, 0);
+  assert.equal(r.hoursSaved.estimate, 0);
+  assert.equal(r.counts.holdRate, null, 'an unsure PR is in neither side of the hold rate');
+  assert.equal(r.postMerge.auto.merged, 0);
+  assert.equal(r.spend.perAutoPr, null);
+});
+
+test('a garbled merge.done naming a PR makes it unsure; a garbled event naming no PR leaves the others alone', () => {
+  const r = report([
+    decided(1, true, []), engineMerged(1),
+    decided(2, true, []), ev(at(9), 'merge.done', { issue: 2, number: 2, head: sha('a'), sha: 'zz', url: '', title: '' }), engineMerged(2, 8),
+    ev(at(9), 'merge.decided', { issue: 3, number: 'three', head: sha('a'), auto: true, reasons: [] }),
+  ]);
+  assert.equal(r.unreadable, 2);
+  assert.equal(r.counts.auto, 1, 'PR 1 only: PR 2 has a garbled merge');
+  assert.equal(unsure(r), 1);
+});
+
+test('a hold the engine merged on approval, then a later auto decision: never auto-merged (the merge was the approval\'s)', () => {
+  const r = report([decided(1, false, ['high-risk: auth (a)'], 12), engineMerged(1, 11), decided(1, true, [], 10, 'b')]);
+  assert.equal(r.counts.auto, 0);
+  assert.equal(r.hoursSaved.prs, 0);
+  assert.equal(r.counts.autoNotMerged, 1);
 });
 
 // --- The route ----------------------------------------------------------------------------------------------------

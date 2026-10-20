@@ -79,6 +79,12 @@ export function ValueReportView({ r }: { r: ValueReport }) {
         <Figure testId="value-hold-rate" label="Hold rate" value={pct(r.counts.holdRate)} sub="held / (held + auto-merged)" />
         <Figure testId="value-hours" label="Review hours saved (estimate)" value={`~${r.hoursSaved.estimate.toFixed(1)} h`} sub={`${r.hoursSaved.prs} PRs estimated, ${r.hoursSaved.withoutStats} without size data`} />
       </div>
+      {(r.counts.unsure > 0 || r.unreadable > 0) && (
+        <div className="text-[12px] text-ink-3" data-testid="value-unreadable">
+          {r.unreadable} unreadable event{r.unreadable === 1 ? '' : 's'} skipped
+          {r.counts.unsure > 0 ? `; ${r.counts.unsure} PR${r.counts.unsure === 1 ? '' : 's'} left unsure by one, counted in neither number` : ''}.
+        </div>
+      )}
       <Card className="p-3 text-[12px] text-ink-3" data-testid="value-formula">
         <div className="font-medium text-ink">How the hours are estimated</div>
         <div className="mt-1 font-mono">{r.hoursSaved.formula}</div>
@@ -150,9 +156,7 @@ export function ValueReportView({ r }: { r: ValueReport }) {
         </table>
         <div className="mt-2 text-[12px] text-ink-3">
           Agent spend on auto-merged PRs: ${r.spend.usd.toFixed(2)}
-          {r.spend.perAutoPr !== null ? ` (~$${r.spend.perAutoPr.toFixed(2)} each)` : ''}, the agent CLI's own estimates.
-          {r.unreadable > 0 ? ` Unreadable events skipped: ${r.unreadable}.` : ''}
-        </div>
+          {r.spend.perAutoPr !== null ? ` (~$${r.spend.perAutoPr.toFixed(2)} each)` : ''}, the agent CLI's own estimates.        </div>
       </Card>
     </section>
   );

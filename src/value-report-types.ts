@@ -31,7 +31,10 @@ export interface PostMerge {
 
 export interface ValueReport {
   window: { days: number; since: string; until: string };
-  /** Events of the kinds this report reads that failed their schema: skipped, never counted (as auto-merged or anything). */
+  /**
+   * Events of the kinds this report reads that failed their schema: skipped. A garbled merge.decided or merge.done
+   * that still names its PR makes that PR unsure (counts.unsure); one that names no PR shows only here.
+   */
   unreadable: number;
   /** Per PR, judged at its last merge decision in the window. */
   counts: {
@@ -41,6 +44,8 @@ export interface ValueReport {
     held: number;
     /** Decided auto, not merged (yet): in neither number. */
     autoNotMerged: number;
+    /** A garbled decision or merge names it, so how it merged can't be told: in neither number, nor hours or spend. */
+    unsure: number;
     /** held / (held + auto); null when there are none: "no data", never 0% or NaN. */
     holdRate: number | null;
   };

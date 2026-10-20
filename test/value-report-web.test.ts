@@ -77,4 +77,10 @@ test('the view: counts, hold rate, "no data" when empty, and the hours estimate 
   const empty = r.renderView(valueReport([], { now: NOW, days: 30 }));
   assert.match(empty, /data-testid="value-hold-rate"[^]*?no data/);
   assert.doesNotMatch(empty, /NaN/);
+  assert.doesNotMatch(html, /value-unreadable/, 'nothing unreadable: no line for it');
+  // A garbled hold naming PR 1 between its auto decision and its merge: the page says it is left unsure.
+  const garbled = [...events.slice(0, 2), { ts: at(9.5), type: 'merge.decided', payload: { issue: 1, number: 1, head: sha('a'), auto: 'no', reasons: [] } }, ...events.slice(2)];
+  const unsure = r.renderView(valueReport(garbled, { now: NOW, days: 30 }));
+  assert.match(unsure, /data-testid="value-unreadable"[^]*?1 unreadable event skipped; 1 PR left unsure by one, counted in neither number/);
+  assert.match(unsure, /data-testid="value-auto"[^]*?>0</);
 });

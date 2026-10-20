@@ -4,7 +4,10 @@
 // merged by a person. Pure and read-only: it never writes an event or changes policy.
 //
 // Only events it can parse count. An event of a kind it reads that fails its schema (src/events/types.ts) is counted
-// as unreadable and skipped, so a garbled event can never make a PR look auto-merged.
+// as unreadable and skipped. Skipping alone is not enough: a garbled hold between an auto decision and the merge would
+// leave the auto decision standing. So a garbled merge.decided or merge.done that still names its PR (an integer
+// `number`) makes that PR unsure: in neither the auto-merged nor the held count, never in hours saved or spend. One
+// that names no PR can't be pinned to any; it shows only in the unreadable count.
 import { EventSchemas, type EventPayload, type EventType } from './events/types.js';
 import { HOLD_KINDS, holdWords } from './hold-words.js';
 import type { HeldOutcome, HoldKind, MainSaid, PostMerge, ValueConstants, ValueReport } from './value-report-types.js';
@@ -41,6 +44,8 @@ const KIND_ORDER: readonly HoldKind[] = [...HOLD_KINDS, 'other'];
 const READS = ['merge.decided', 'merge.done', 'pr.closed', 'pr.stats', 'run.cost', 'merge.main_result', 'merge.stopped', 'main_watch.checked', 'main_watch.unaccounted', 'fix_forward.finished'] as const satisfies readonly EventType[];
 type Read = (typeof READS)[number];
 const reads = new Set<string>(READS);
+/** The kinds that decide whether a PR was auto-merged: garbled, they leave their PR unsure. */
+const DECIDES = new Set<string>(['merge.decided', 'merge.done'] satisfies Read[]);
 
 type Parsed = { [T in Read]: { t: number; type: T; p: EventPayload<T> } }[Read];
 
@@ -91,12 +96,16 @@ export function valueReport(events: readonly ValueEvent[], o: { now: Date; days:
   const green = new Set<number>();
   const reverted = new Set<number>();
   const fixForward: { pr: number | null; sha: string; outcome: 'fixed' | 'reverted' | 'gave_up' }[] = [];
+  /** PRs a garbled decision or merge names: whether the engine merged them on its own can't be told. */
+  const unsure = new Set<number>();
 
   for (const raw of events) {
     if (!reads.has(raw.type)) continue;
     const e = parse(raw);
     if (!e) {
       unreadable++;
+      const n = DECIDES.has(raw.type) && typeof raw.payload === 'object' && raw.payload !== null ? (raw.payload as { number?: unknown }).number : undefined;
+      if (typeof n === 'number' && Number.isInteger(n) && n > 0) unsure.add(n);
       continue;
     }
     switch (e.type) {
@@ -156,7 +165,9 @@ export function valueReport(events: readonly ValueEvent[], o: { now: Date; days:
   const mainSaid = (n: number): MainSaid => (reverted.has(n) ? 'reverted' : red.has(n) ? 'red' : green.has(n) ? 'green' : 'none');
   const outcomeOf = (x: Pr): HeldOutcome => (x.engineMerge ? 'approved' : x.closed?.merged ? 'merged_by_person' : x.closed ? 'closed' : 'waiting');
 
-  const inWindow = [...prs.values()].filter((x) => x.last && x.last.t >= since && x.last.t <= until);
+  const decidedInWindow = [...prs.values()].filter((x) => x.last && x.last.t >= since && x.last.t <= until);
+  const unsureInWindow = decidedInWindow.filter((x) => unsure.has(x.number));
+  const inWindow = decidedInWindow.filter((x) => !unsure.has(x.number));
   const auto = inWindow.filter((x) => x.last!.auto && x.engineMerge?.auto === true);
   const autoNotMerged = inWindow.filter((x) => x.last!.auto && x.engineMerge?.auto !== true);
   const held = inWindow.filter((x) => !x.last!.auto);
@@ -197,7 +208,7 @@ export function valueReport(events: readonly ValueEvent[], o: { now: Date; days:
   return {
     window: { days: o.days, since: new Date(since).toISOString(), until: new Date(until).toISOString() },
     unreadable,
-    counts: { auto: auto.length, held: held.length, autoNotMerged: autoNotMerged.length, holdRate: held.length + auto.length ? held.length / (held.length + auto.length) : null },
+    counts: { auto: auto.length, held: held.length, autoNotMerged: autoNotMerged.length, unsure: unsureInWindow.length, holdRate: held.length + auto.length ? held.length / (held.length + auto.length) : null },
     heldByKind: KIND_ORDER.filter((k) => kinds.has(k)).map((k) => ({ kind: k, prs: kinds.get(k)! })),
     heldOutcomes,
     heldWait: { medianMs: median(waits), resolved: waits.length },
