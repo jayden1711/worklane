@@ -10,6 +10,13 @@
 // script (a shell script sources what it likes), a file some code names in a string without a read this can
 // resolve, or a file nothing reaches (but documentation). A test with an import it can't resolve, or one that reads
 // the whole repo, runs on every change.
+//
+// A dynamic import whose target is a run-time path (an installed copy of the code: /opt/…/dist/src/x/index.js) can
+// declare the repo file it loads, on the line right above it: `// runtime-import: src/x/index.ts` (several: comma or
+// space separated). Each named file is then an edge, so its changes select whatever reaches the module. A declaration
+// is taken only when every file it names exists and the string literals of the block the import is in (the `{…}`
+// around it; the whole file at top level) name that file's built path: one string, or consecutive ones as in
+// join(…, 'dist', 'src', 'x', 'index.js'). Otherwise, as with no declaration, the import stays unresolved.
 // Pure: no fs, no git; the caller hands in the files and their contents (scripts/ci/affected.mjs from the working
 // tree, ./select.ts from a commit).
 import { posix } from 'node:path';
@@ -277,6 +284,53 @@ function staticImports(text: string, masked: string): { spec: string; names: Map
   return out;
 }
 
+/**
+ * The files a `// runtime-import: a, b` comment declares for the import() or require() at `at`: the comment must be
+ * the whole of the line right above that call's line. Null when there is none.
+ */
+function declaredAt(text: string, masked: string, at: number): string[] | null {
+  const line = text.lastIndexOf('\n', at - 1) + 1;
+  if (line === 0) return null;
+  const above = text.lastIndexOf('\n', line - 2) + 1;
+  // Only a comment: in the masked text (comments blanked), the line is empty.
+  if (masked.slice(above, line - 1).trim() !== '') return null;
+  const m = /^\s*\/\/\s*runtime-import:(.*)$/.exec(text.slice(above, line - 1).replace(/\r$/, ''));
+  return m ? m[1]!.split(/[\s,]+/).filter(Boolean) : null;
+}
+
+/** The range of the innermost `{…}` around `at`, read from the masked text (no strings or comments); [0, end] at top level. */
+function blockAround(masked: string, at: number): [number, number] {
+  let depth = 0;
+  let open = -1;
+  for (let i = at - 1; i >= 0 && open < 0; i--) {
+    if (masked[i] === '}') depth++;
+    else if (masked[i] === '{' && depth-- === 0) open = i;
+  }
+  if (open < 0) return [0, masked.length];
+  depth = 0;
+  for (let i = open; i < masked.length; i++) {
+    if (masked[i] === '{') depth++;
+    else if (masked[i] === '}' && --depth === 0) return [open, i + 1];
+  }
+  return [open, masked.length];
+}
+
+/**
+ * Why a declaration can't stand for the import, or null when it can: every file it names is in the repo, and the
+ * string literals of the block the import is in (`strings`, in order) name its built path, as one string or
+ * consecutive ones.
+ */
+function declaredWrong(declared: readonly string[], files: ReadonlySet<string>, runtime: (f: string) => string, strings: readonly string[]): string | null {
+  if (!declared.length) return 'declared nothing';
+  const said = `/${strings.join('/')}/`;
+  for (const d of declared) {
+    if (!files.has(d) || norm(d) !== d) return `declared ${d}, which isn't a file`;
+    const built = runtime(d);
+    if (!said.includes(`/${built}/`)) return `declared ${d}, but the code around it never names ${built}`;
+  }
+  return null;
+}
+
 /** Build the graph: every code file's edges, reads and unresolved imports. */
 export function buildGraph(o: GraphOptions): Graph {
   const files = new Set(o.files);
@@ -420,7 +474,15 @@ export function buildGraph(o: GraphOptions): Graph {
         if (lit && !lit.partial) importSpec(lit.value);
         else if (rel !== null) readPath({ path: rel, dir: true });
         else if (p) readPath(p);
-        else f.opaque.push(`unresolved ${m[1] ?? 'require'}(${arg.slice(0, 80)})`);
+        else {
+          const why = `unresolved ${m[1] ?? 'require'}(${arg.slice(0, 80)})`;
+          const declared = declaredAt(text, masked, m.index);
+          // Checked against the strings of the block the import is in, not the whole file's.
+          const bad = declared && declaredWrong(declared, files, runtime, lex(text.slice(...blockAround(masked, m.index))).strings);
+          if (!declared) f.opaque.push(why);
+          else if (bad) f.opaque.push(`${why} (${bad})`);
+          else for (const d of declared) (CODE_EXT.test(d) ? f.edges : f.reads).add(d);
+        }
       }
       // Every other path expression: new URL('…', import.meta.url), join(<named path>, …).
       for (const m of masked.matchAll(/\bnew URL\(|(?<![\w$.])(?:path\.|posix\.)?(?:join|resolve)\(/g)) {
