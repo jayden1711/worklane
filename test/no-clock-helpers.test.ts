@@ -22,7 +22,6 @@ const ALLOWED: Record<string, number> = {
   'test/machine-no-shift.test.ts': 1,
   'test/no-late-shift.test.ts': 1,
   'test/waiting-page.test.ts': 1,
-  'test/web-buttons.test.ts': 1,
   'test/web-render.test.ts': 4,
 };
 

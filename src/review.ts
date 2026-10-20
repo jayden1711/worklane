@@ -330,7 +330,9 @@ export const SELF_MODIFICATION_PARTS: { what: string; globs: string[] }[] = [
   // src/path-text.ts holds the odd-name tests computeLevel raises on (moved out of src/review.ts, #683), so it stays locked with it.
   { what: 'the review levels', globs: [`${BRAND.configDir}/review.yaml`, 'src/review.ts', 'src/path-text.ts'] },
   { what: 'the guardrails', globs: [`${BRAND.configDir}/guardrails.yaml`, 'src/guardrails/**'] },
-  { what: 'the machine setup', globs: ['scripts/setup/**', 'scripts/machine/**'] },
+  // deploy/**: the engine's deployment manifests (a compose file and the like) set its isolation and exposure, as the
+  // setup scripts do: the user it runs as, what it mounts, which ports it publishes. Locked before the first one exists.
+  { what: 'the machine setup', globs: ['scripts/setup/**', 'scripts/machine/**', 'deploy/**'] },
   { what: 'the CI workflows', globs: ['.github/workflows/**'] },
   // Whose signed tag the release workflow stages on npm, and the check that enforces it (release.yml).
   { what: 'who may sign a release', globs: ['.github/release-signers', 'scripts/verify-release-tag*'] },
@@ -410,8 +412,11 @@ export const LOCKED_CATEGORIES: Record<string, string[]> = {
  */
 export type LockScope = 'engine' | 'managed-app';
 
-/** The engine's own source tree: a self-modification glob under it names an engine file, not a managed app's. */
-const ENGINE_TREE = ['src/', 'scripts/', 'test/', 'docs/'];
+/**
+ * The engine's own source tree: a self-modification glob under it names an engine file, not a managed app's. deploy/ is
+ * the engine's deployment manifests; a managed app's own deploy/ stays its deploy-config, as before.
+ */
+const ENGINE_TREE = ['src/', 'scripts/', 'test/', 'docs/', 'deploy/'];
 /** Whether a locked glob names the engine's own source (so it holds only in the engine's repo). */
 export const engineSourceGlob = (glob: string): boolean => ENGINE_TREE.some((d) => glob.startsWith(d));
 
