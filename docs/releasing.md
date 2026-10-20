@@ -34,11 +34,12 @@ How a version reaches npm: the owner signs a tag, CI (`.github/workflows/release
    - anything that can't be split (git or workspace packages, another package manager): root grants it, per instance, `sudo bash /opt/worklane/current/scripts/setup/testrun-network.sh enable <name> --tiers setup`, and the config sets `setup_network: true`;
    - a tier that needs the network itself: `network: true` on it, and root's `--tiers` names it too. Each grant needs the owner's go.
    - a database client that only takes a host and port (not a socket directory in `host=`) needs changing too.
-12. **Siri Shortcut, after it installs on the release-channel machine that runs the hub** (0.5.1 adds it, #507), once, in this order:
-   - root: `sudo bash /opt/worklane/current/scripts/setup/tailscale.sh serve-siri` (publishes 8443 on the tailnet, never Funnel);
-   - root: `sudo bash /opt/worklane/current/scripts/setup/dashboards.sh --siri <your usual options> <every instance>` (the same run as before, plus `--siri`: lets the hub read each instance's Siri gateway token);
-   - on a Mac: sign the two Shortcuts once (`shortcuts sign`, docs/siri.md), and sign again only when a Shortcut changes;
-   - in the Tailscale admin console: the tailnet ACL that limits port 8443 to your phone (docs/siri.md gives it).
+12. **Voice and Siri removed (#743), on every server machine after it installs.** Nothing listens and nothing is taken once it installs. Every server instance had a Siri gateway token (Siri on or not): each instance's dashboard deletes its own token and device store when it starts on this version. Then, as root, `worklane doctor`: under "voice and Siri removed" it fails, naming each leftover, until they are gone, and finds nothing on a machine that never used voice or Siri once each instance's dashboard has restarted. On a machine that did (the hub unit `/etc/systemd/system/worklane-dashboard-hub.service` has `--siri-port`, or an instance's `intake.yaml` has `voice:` or `siri:`), once:
+   - root: `sudo bash /opt/worklane/current/scripts/setup/tailscale.sh unserve-siri` (takes the 8443 forward away; 443 and 8444 are untouched; done already when there is none);
+   - root, when the hub unit has `--siri-port`: the `dashboards.sh` rerun doctor prints (it drops the option and deletes any Siri files an instance still has; the `--siri` it passes is accepted and ignored);
+   - each instance's `intake.yaml`: delete its `voice:` and `siri:` sections;
+   - ideas spoken before the upgrade and never taken, in an instance's `state/voice/inbox/` (doctor names them): read them, file any you want, then delete `state/voice/`;
+   - in the Tailscale admin console: delete the tailnet ACL rule for port 8443, and remove the two Shortcuts from the phone.
 
 ## Publishing by hand
 

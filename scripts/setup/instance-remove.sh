@@ -188,8 +188,6 @@ if [ -n "$exported" ]; then
 elif [ -n "$state_dir" ] && [ -f "$state_dir/instance.yaml" ]; then
   say "export $name's history"
   [ -x "$ENGINE_CLI" ] || refuse "no $ENGINE_CLI to export with: install the engine (engine.sh), then run this again"
-  # Its Siri device tokens revoked first, as its coordinator: none works again, and the export records it.
-  run_as "$coord" '"$1" instance siri-revoke-all "$2" --why "$3"' "$ENGINE_CLI" "$name" "instance removed" || refuse "revoking $name's Siri device tokens failed (above): nothing removed"
   work="$(mktemp -d)"
   on_exit+=("rm -rf '$work'")
   chown -h "$coord" "$work" && chmod 0700 "$work"

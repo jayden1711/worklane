@@ -30,7 +30,13 @@ const worker = (rename: number, report: number) => (req: RunRequest) => {
     return { summary: 'the report calls the renamed function' };
   }
   if (issue === rename) {
-    for (const f of ['src/price.js', 'test/price.test.js']) writeFileSync(at(f), readFileSync(at(f), 'utf8').replaceAll('totalCents', 'totalInCents'));
+    writeFileSync(at('src/price.js'), readFileSync(at('src/price.js'), 'utf8').replaceAll('totalCents', 'totalInCents'));
+    // The test imports the renamed function under its old local name, so its assertion lines stay as they are: a
+    // rename that changes an assertion line waits for the owner (#783), and this scenario is about the merge after it.
+    const t = readFileSync(at('test/price.test.js'), 'utf8');
+    const renamed = t.replace('totalCents }', 'totalInCents as totalCents }');
+    assert.notEqual(renamed, t, 'the test imports totalCents');
+    writeFileSync(at('test/price.test.js'), renamed);
     commitAll(req.cwd, RENAME);
     return { summary: 'renamed' };
   }

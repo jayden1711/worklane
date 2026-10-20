@@ -28,8 +28,8 @@
 #             agents' Claude logins and account profiles, copied to <new>'s users, each the new user's own
 #   checkout  checkout.sh <new> <repo>: a fresh clone, through the same App
 #   import    <old>'s history into <new>, as <new>'s coordinator (worklane import), then `worklane instance renamed`:
-#             every Siri device token revoked (a token names its instance: make new ones on the dashboard), and each
-#             console ask still open for <old> asked again for <new>
+#             each console ask still open for <old> asked again for <new> (an older bundle's Siri tokens are never
+#             imported: Siri was removed)
 #   records   root's shared records of <old> become <new>'s: the agents' Claude profiles, status and paused list, the
 #             canary, incidents, staged signers, the init record (instance-records.cjs rekey)
 #   services  <new>'s test user when <old> had one, its GPU grant (testrun-gpu.sh disable <old>, enable <new>, the same
@@ -113,7 +113,7 @@ show_plan() {
       users) printf '  users    wl-%s, wl-%s-agent%s, group wl-%s-work (instance.sh)\n' "$new" "$new" "$(user_exists "wl-$old-eval" && echo ", wl-$new-eval")" "$new" ;;
       home) printf "  home     %s's instance home, with %s's files (paths and users moved), its ~/.config/%s-* and the agents' Claude logins\n" "$new" "$old" "$old" ;;
       checkout) printf '  checkout %s/%s/%s, a fresh clone through the same App\n' "$SRV_ROOT" "$new" "${repo#*/}" ;;
-      import) printf "  import   %s's history into %s; Siri device tokens revoked; open asks asked again for %s\n" "$old" "$new" "$new" ;;
+      import) printf "  import   %s's history into %s; open asks asked again for %s\n" "$old" "$new" "$new" ;;
       records) printf "  records  %s\n" "$(records plan "$old" | cut -f1 | grep -vxE 'gpu|testrun-net' | tr '\n' ' ')" ;;
       services) printf '  services %s%s, worklane-%s.service, the machine helper rule and the hub with %s\n' "$(user_exists "wl-test-$old" && echo "test user wl-test-$new, ")" "$(records plan "$old" | cut -f1 | grep -qx gpu && echo "the GPU grant, ")" "$new" "$new" ;;
       keep) printf "  keep     %s's instance home directories but state/ -> %s/%s-to-%s-<time>.home-dirs.tar (root's 0600), listed by path and size\n" "$old" "$ARCHIVE" "$old" "$new" ;;
@@ -383,6 +383,5 @@ echo
 echo "renamed $old to $new ($repo). $old's history: $(sed -n 's/^bundle=//p' "$progress" | tail -1)"
 if [ -n "$drops" ]; then echo "Not moved to $new (each went with $old):"; printf '%s\n' "$drops" | sed 's/^/  - /'; fi
 echo "Next:"
-echo "  - Siri: every device token was revoked (each named $old): make new ones on $new's dashboard, Settings > Siri"
 echo "  - GitHub: nothing changed. The App keeps its name ($old-worklane, unless GitHub's form changed it); to rename it, in the App's settings on GitHub (the engine reads its name from GitHub)"
 echo "  - the gardener's log issue (gardener-log:$old) stays as it is; $new opens its own"

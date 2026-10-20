@@ -193,6 +193,19 @@ export const PolicyFile = z.strictObject({
   /** When set, the repo's network allowlist and pre-approved tools must be subsets of these. */
   network_allow: z.array(z.string()).optional(),
   pre_approved: z.array(z.string()).optional(),
+  /**
+   * The value report's hours-saved estimate (src/value-report.ts, #708): its constants, in minutes, all three or none.
+   * Absent: the engine's defaults, which the report says are guesses. Display only: read by GET /api/value alone, no
+   * gate reads it, and the dashboard can't write it (not a policy-edit.ts POLICY_KEYS key nor a settings.ts one).
+   * Bounded at a working day each (480), as a bad value fails here like any other key: the instance doesn't load.
+   */
+  value_report: z
+    .strictObject({
+      hours_estimate: z
+        .strictObject({ base_min: z.number().min(0).max(480), per_100_lines_min: z.number().min(0).max(480), cap_min: z.number().min(0).max(480) })
+        .optional(),
+    })
+    .optional(),
 });
 
 export const CredentialsFile = z.strictObject({

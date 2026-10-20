@@ -25,16 +25,17 @@ Every method the unmodified `claude` has works for the agent users, run on the m
 | Method | Server mode: who, and how | Local mode |
 |---|---|---|
 | `claude auth login` (or `/login` in `claude`) | as the agent user: `sudo -u wl-<name>-agent -i claude auth login`. Sign-in completes on Anthropic's page. The login lands in that user's own `~/.claude` | as yourself, in a terminal. The first-run page's **Sign in to Claude** runs the same command as this machine's user and shows Anthropic's sign-in link as a button; the link comes back to `claude`'s own listener on localhost, and nothing is pasted into the page (`src/claude-signin.ts`) |
-| `claude setup-token` | run it anywhere signed in to the account, then as root: `sudo bash scripts/setup/credentials.sh <name> claude` (hidden prompt, or stdin). `add-project.sh` at a root shell asks the same. `claude-account.sh switch` puts one token on every agent user on the machine | not needed |
+| `claude setup-token` | run it anywhere signed in to the account, then as root: `sudo bash scripts/setup/credentials.sh <name> claude` (hidden prompt, or stdin). `add-project.sh` at a root shell asks the same | not needed |
 | API key | as root: `sudo bash scripts/setup/credentials.sh <name> api-key`; `claude` reads it through `apiKeyHelper` as the agent user (below) | `agent_runtime.kind: api_key` and `ANTHROPIC_API_KEY` |
 | Bedrock, Vertex, Foundry | `claude` supports them as the agent user (its own settings). The engine's runs refuse a run on them today: the runner's auth check accepts only `claude.ai`/`oauth_token` for `cli` and `api_key`/`api_key_helper` for `api_key` (`src/runner.ts`, "no silent billing switch"). That check is #700's to change, not this page's | the same |
-| Account profiles | as root: `sudo bash scripts/setup/claude-account.sh profile-add <profile>` (hidden prompt, or stdin) puts a token in each agent user's own profile dir; which profile an instance uses is chosen at a root shell or from its dashboard (no credential) | not used |
+
+The engine manages no Claude account (#736): it keeps no account profiles, fails over between none, and switches no login. One person signs each agent user in, by one of the methods above, or the instance uses an API key.
 
 **Existing installs.** Nothing reopens.
 - **Files.** An earlier dashboard stored each of these, as the coordinator user, for a root script to read once: a switch's token, a profile's token, a sign-in code, and Add project's token. They went in a `*-secrets` dir in the coordinator user's own `~/.config`. Add project's token went in the *asking* instance's coordinator user's home, under the *new* project's name: `~wl-<asker>/.config/<new>-secrets/claude-token`. The others went in `~wl-<name>/.config/<name>-secrets/`. The next run of `claude-account.sh` of any kind (the Machine page's Refresh is one) removes them, unread: in every `~wl-<name>/.config/*-secrets/` dir, as that coordinator user, only those four names (`claude-token`, `claude-account-token`, `claude-profile-token`, `claude-login-code`), and only regular files. It follows no link.
 - **Asks.** Add project's ask for the token (a `paste_secret` ask for `claude-token`), left open when the coordinator stopped mid-run, is withdrawn when the coordinator next starts. The withdrawal's event gives the reason, citing #711. Until then the ask is listed as not answerable, so no page offers its paste box, and the server refuses any answer to it.
 
-A profile an earlier version staged from a dashboard stays unusable until a root admin confirms it: `sudo bash scripts/setup/claude-account.sh confirm-profile <profile>`.
+- **Account profiles, failover and the switch (#736).** What they left is never used to pick a login: each run is on its agent user's own login, and every `~/.claude-profiles` stays denied to its commands. An instance whose runs were on another profile doesn't start, and says why. `worklane doctor` and the Machine page name what is left; remove it as root with `sudo bash scripts/setup/claude-account.sh uninstall` (each agent user's `~/.claude-profiles`, as that user, then `profiles.json`, `profile-ops.jsonl`, `switch.jsonl` and `paused`), then sign the agent user in yourself if it isn't.
 
 ## How agents are billed
 
@@ -67,16 +68,14 @@ The helper is given only to runs as the instance's agent user. A lane that runs 
 
 ## Who can reach the agents' credentials
 
-The agents' Claude login (`~/.claude/.credentials.json`, and each profile's) and the API key file belong to the agent user, 0600 or 0400, in directories only it can open. Who can still reach them:
+The agents' Claude login (`~/.claude/.credentials.json`) and the API key file belong to the agent user, 0600 or 0400, in directories only it can open. Who can still reach them:
 
 - **The agent user**, which `claude` runs as, and owns the files. With the sandbox on (`policy.yaml`'s default), its commands (Bash and the rest) are denied the files by the sandbox's read rules; `claude` itself reads them outside the sandbox, as it must. With the sandbox off, an agent's commands can read them. Project commands can't either way: they always run in their own sandbox (above).
 - **Root**, and any admin with sudo.
 - **The coordinator user (`wl-<name>`), and the agent code it launches.** Its sudo rule is `wl-<name> ALL=(wl-<name>-agent) NOPASSWD: ALL`, with the eval user added when there is one (`scripts/setup/instance.sh:40`): it may run any command as the agent user, and so read the agent's login and key file. Anything that gets code running as the coordinator user (the coordinator service, or a shell as that user) can do the same. The coordinator's own code never does; nothing enforces that, beyond the code. Narrowing the rule so the coordinator can run only what it needs is a later change (#737).
 - **The instance's dashboard process, indirectly.** It runs as the coordinator user with `NoNewPrivileges=yes` (`scripts/setup/dashboards.sh`), so it can't use the sudo rule itself. It can still write the coordinator user's files, `policy.yaml` among them (#726), so code that took it over could change what the coordinator later runs as the agent user. Count it with the coordinator user. The dashboard takes no credential in any case (above).
 
-The root scripts handle the credential only while installing it: `credentials.sh`, `add-project.sh` and `claude-account.sh` take the token at a hidden prompt (or root's stdin) and pipe it into the agent user's own file, never as an argument and never to a log. `claude-account.sh status` reads the stored login as root to show which token it is (the first 8 hex digits of its sha256) and when it expires; it never shows or stores the token.
-
-**Account profiles (issue #464).** An agent user may hold several Claude logins side by side, each in its own `CLAUDE_CONFIG_DIR` under its home (`~/.claude-profiles/<name>/`, 0700, its own). The engine only passes the active profile's path to each run; it never reads, copies or moves a login between profiles or users. A profile is added by a root admin on the machine (`claude-account.sh profile-add`, its token at the hidden prompt), installed as each agent user. It becomes active only after one minimal real call as every agent user on it is answered, and a dashboard can choose it only for its own instance (docs/dashboard.md, "Claude account profiles"). Every profile's credentials file is denied to agent commands.
+The root scripts handle the credential only while installing it: `credentials.sh` and `add-project.sh` take the token at a hidden prompt (or root's stdin) and pipe it into the agent user's own file, never as an argument and never to a log. `claude-account.sh status` reads the stored login as root to show which token it is (the first 8 hex digits of its sha256) and when it expires; it never shows or stores the token.
 
 ## What the docs say
 
