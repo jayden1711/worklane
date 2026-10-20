@@ -161,6 +161,8 @@ export const GUARD_FILES: readonly string[] = [
   '**/.mypy.ini',
   '**/.stylelintrc*',
   '**/.markdownlint*',
+  // What install and every npm script run under.
+  '**/.npmrc',
   // Shared CI steps, more test runners and linters, who must review, and the project lints of the PR-gate tier.
   '.github/actions/**',
   '.github/CODEOWNERS',
@@ -199,8 +201,11 @@ export const GUARD_FILES: readonly string[] = [
   'test/isolate.ts',
 ];
 
-/** Allowlist files: any line added waits. */
-export const NEVER_GROW_FILES: readonly string[] = ['.denylist-allow', '.gitleaksignore', '**/.eslintignore', '**/.semgrepignore'];
+/**
+ * Files where any line added waits: allowlist files, and `.npmrc`, whose every setting changes what install and each
+ * npm script run under (`script-shell=`, `ignore-scripts=`); it is a guard file too.
+ */
+export const NEVER_GROW_FILES: readonly string[] = ['.denylist-allow', '.gitleaksignore', '**/.eslintignore', '**/.semgrepignore', '**/.npmrc'];
 
 /**
  * Test files and their expected outputs, whatever the repo's review.yaml calls tests (an own list: narrowing the tests
@@ -322,7 +327,7 @@ const KINDS = {
   'table-gone': "removes or renames a check's or guard's table",
   'table-shrunk': "removes or changes an entry in a check's rules or a guard's list",
   'table-grown': 'adds or changes an entry in an allowlist, exception or good-fixture list',
-  'allow-file': 'adds an entry to an allowlist file',
+  'allow-file': 'adds a line to an allowlist file or .npmrc',
   'table-used': "changes a check's or guard's table outside its own list",
   'guard-lines': 'removes or changes a line of a guard or lint',
   marker: 'adds a line with a skip, only or lint or type-check suppression mark',
@@ -535,7 +540,9 @@ export function weakeningReasons(i: WeakeningInput): string[] {
     const names = new RegExp(`(?<![\\w$])${t.table}(?![\\w$])`);
     const own = new Set(now);
     for (const l of i.files.find((f) => f.path === t.path)?.addedLines ?? []) {
-      if (names.test(l) && !own.has(entry(l))) hit('table-used', t.path, `${t.table}: ${l.trim()}`);
+      // A name built at run time (`eval('ALL' + 'OWED')`, `Function(...)`) has no identifier to match: it waits too.
+      const built = l.includes('eval(') || l.includes('Function(');
+      if ((names.test(l) && !own.has(entry(l))) || built) hit('table-used', t.path, `${t.table}: ${l.trim()}`);
     }
   }
 

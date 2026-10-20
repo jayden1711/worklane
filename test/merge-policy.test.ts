@@ -494,7 +494,7 @@ const GUARD = 'removes or changes a line of a guard or lint';
 const GROWN = 'adds or changes an entry in an allowlist, exception or good-fixture list';
 const SHRUNK = "removes or changes an entry in a check's rules or a guard's list";
 const GONE = "removes or renames a check's or guard's table";
-const ALLOW_FILE = 'adds an entry to an allowlist file';
+const ALLOW_FILE = 'adds a line to an allowlist file or .npmrc';
 const MARKER = 'adds a line with a skip, only or lint or type-check suppression mark';
 const UNREADABLE = "can't read a change to check it, so it may weaken a check";
 
@@ -717,6 +717,11 @@ test('weakening: a registered table waits on an entry added to an allowlist, or 
     const text = `const ${table} = {\n  a: 1,\n};\n${others}`;
     assert.ok(kinds(weakensRaw({ [path]: text }, { [path]: `${text}${table}.b = 2;\n` })).includes("changes a check's or guard's table outside its own list"), path);
   }
+  // Round 9's review: a name built at run time (`eval('ALL' + 'OWED')`, `Function(...)`) isn't matched by the
+  // identifier, so in a registered table's file an added `eval(` or `Function(` line waits.
+  for (const line of ["eval('ALL' + 'OWED')['test/c.test.ts'] = 1;", "new Function('t', 't.x = 1')(globalThis);", "Function('return this')().ALLOWED_X = 1;"]) {
+    assert.deepEqual(kinds(weakensRaw({ 'test/no-clock-helpers.test.ts': clock }, { 'test/no-clock-helpers.test.ts': `${clock}${line}\n` })), ['changes a check\'s or guard\'s table outside its own list'], line);
+  }
   // An added line inside the table's own literal is read as an entry, not as a use.
   assert.deepEqual(kinds(weakensRaw({ 'test/no-clock-helpers.test.ts': clock }, { 'test/no-clock-helpers.test.ts': clock.replace("  'test/a.test.ts': 1,\n", "  'test/a.test.ts': 1,\n  'test/b.test.ts': 1,\n") })), [GROWN]);
   for (const decl of ['const ALLOWED: string[] =\n  [', 'const ALLOWED = // see [docs]\n  [', 'const ALLOWED = new Set()\n  .add(']) {
@@ -739,6 +744,14 @@ test('weakening: an allowlist file waits on any line added; one taken out does n
   assert.deepEqual(kinds(weakens({ '.denylist-allow': 'a\n' }, { '.denylist-allow': 'a\nb\n' })), [ALLOW_FILE]);
   assert.deepEqual(kinds(weakens({ '.gitleaksignore': 'a\n' }, { '.gitleaksignore': 'a\nb\n' }, 'managed-app')), [ALLOW_FILE]);
   assert.deepEqual(weakens({ '.denylist-allow': 'a\nb\n' }, { '.denylist-allow': 'a\n' }), []);
+  // Round 9's review: `.npmrc` sets what install and every npm script run under (`script-shell=`, `ignore-scripts=`):
+  // a guard file, and any line added to it waits too, in every repo.
+  for (const scope of [undefined, 'managed-app'] as const) {
+    for (const path of ['.npmrc', 'web/.npmrc']) {
+      assert.deepEqual(kinds(weakens({ [path]: 'fund=false\n' }, { [path]: 'fund=false\nscript-shell=true\n' }, scope)), [ALLOW_FILE], `${path} ${String(scope)}: a line added`);
+      assert.deepEqual(kinds(weakens({ [path]: 'fund=false\nengine-strict=true\n' }, { [path]: 'fund=false\n' }, scope)), [GUARD], `${path} ${String(scope)}: a line removed`);
+    }
+  }
 });
 
 test("weakening (owner's rule, 2026-10-19): an added line with a skip, only or suppression mark waits, in a test, a config or a source; an ordinary added line or a doc does not", () => {
