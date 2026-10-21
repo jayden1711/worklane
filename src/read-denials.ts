@@ -347,8 +347,9 @@ function linksToDirectory(link: string): boolean {
  * secret_paths, under every checkout of the run's repository, "~/" under the run's home; and, when the task hides
  * anything, the repository's object stores, so `git show <rev>:<hidden>` has nothing to read.
  *
- * An exception ("!./.env.example") is kept as the hook keeps it: a pattern it overlaps is passed as what it matches
- * now, the exception left out, and as the whole pattern when that can't be listed in full (stricter, never looser).
+ * An exception ("!./.env.example") is kept as the hook keeps it, within its own source only (one config, or the task):
+ * a pattern it overlaps is passed as what it matches now, the exception left out, and as the whole pattern when that
+ * can't be listed in full (stricter, never looser). It never subtracts from another source.
  *
  * `repo` is the instance's repository path, the coordinator's own record of the main checkout: always a checkout here,
  * whatever the run's `.git` says.
@@ -380,8 +381,8 @@ export function runReadDenials(o: { cwd: string; home: string | undefined; taskF
   const main = o.repo ? resolve(o.repo) : repo.main;
   if (!main && repo.mainUnknown) return { error: `the main checkout of the repository around ${o.cwd} can't be found (its git directory isn't <checkout>/.git and records no core.worktree), so its hidden and secret paths can't be denied` };
   // The run's own checkout's config is what its hook reads, and its agent can write it. The main checkout's and the
-  // default branch's committed config (as src/config/live.ts reads it) count too: emptying secret_paths in a
-  // worktree drops nothing. Each only adds entries.
+  // default branch's committed config (as src/config/live.ts reads it) count too, each worked out on its own (below):
+  // emptying secret_paths in a worktree, or adding an exception there, drops nothing the others deny.
   const configs = [cfg];
   if (main && resolve(main) !== resolve(root) && existsSync(join(main, BRAND.configDir))) {
     try {
@@ -397,13 +398,17 @@ export function runReadDenials(o: { cwd: string; home: string | undefined; taskF
     const missing = e instanceof ConfigInvalid && e.errors.every((x) => x.message.startsWith('missing at'));
     if (!missing) return { error: `the guardrails on the default branch (origin/${branch}) can't load (${firstLine(e)}), so its secret paths can't be denied` };
   }
-  const secret = [...new Set(configs.flatMap((c) => c.guardrails.secret_paths))];
+  // Each source is worked out on its own, its exceptions applied to its own patterns only, and the results unioned:
+  // an exception ("!/**", "!./.env") one source adds, the run's own checkout's above all (its agent can write it),
+  // never subtracts what another denies. The task's hidden paths take no exception from any config (stricter than the
+  // hook, which applies the config's exceptions to them too).
+  const sources = [...new Map([...configs.map((c) => c.guardrails.secret_paths), hidden].map((s) => [JSON.stringify(s), s])).values()].filter((s) => s.length);
   const worktreeRoots = [...new Set(configs.map((c) => c.tests.worktree.root))];
-  const patterns = [...secret, ...hidden];
-  if (!patterns.length) return { paths: [] };
+  const all = sources.flat();
+  if (!all.length) return { paths: [] };
   // A bracket the project or the task wrote is a character to the hook and a class to the sandbox: no entry means
   // the same to both. One in a path the runner resolved is written as "?" instead (asEntry).
-  const written = patterns.find((p) => !p.startsWith('!') && SANDBOX_ONLY_GLOB.test(p));
+  const written = all.find((p) => !p.startsWith('!') && SANDBOX_ONLY_GLOB.test(p));
   if (written) return { error: `${written} has "[" or "]", which the sandbox reads as a pattern; it can't be denied as written` };
   const roots = [...new Set([root, ...(main ? [main] : []), ...repo.checkouts])];
   const anchored = (ps: string[], under = roots) => {
@@ -415,35 +420,10 @@ export function runReadDenials(o: { cwd: string; home: string | undefined; taskF
     }
     return out;
   };
-  const pos = anchored(patterns.filter((p) => !p.startsWith('!')));
-  const neg = anchored(patterns.filter((p) => p.startsWith('!')).map((p) => p.slice(1)));
-  if ('error' in pos) return pos;
-  if ('error' in neg) return neg;
-  const negRes = neg.map(absRe);
-  const excepted = (p: string) => negRes.some((re) => re.test(p.slice(1)));
   // Worked out on the real paths (a bracket in them is a plain character to globToRegExp, as to the hook); written
   // for the sandbox only as they're added.
   const entries = new Set<string>();
   const out = { add: (p: string) => entries.add(asEntry(p)) };
-  for (const a of pos) {
-    const dir = dirForm(a);
-    if (dir !== null) {
-      // "dir/**" is the directory itself to the sandbox: one mount, whatever is created in it later. An exception that
-      // names the directory itself excepts nothing beneath it, to the hook as here; only one that can match beneath it
-      // makes the pattern overlapped.
-      const now = overlaps(a, neg) ? expand(a) : null;
-      if (now) for (const m of now.filter((m) => !excepted(m))) out.add(m);
-      else out.add(dir);
-      continue;
-    }
-    if (!GLOB.test(a)) {
-      if (!excepted(a)) out.add(a);
-      continue;
-    }
-    const now = overlaps(a, neg) ? expand(a) : null;
-    if (now) for (const m of now.filter((m) => !excepted(m))) out.add(m);
-    else out.add(a);
-  }
   // A checkout created after the run starts (a worker's worktree, made while an experiment runs): the hook matches a
   // relative pattern only inside the run's own checkout, so nothing else covers it. Each relative pattern is also a
   // glob over every place worktrees are made (the project's worktree root, the engine's own, and each existing
@@ -455,29 +435,11 @@ export function runReadDenials(o: { cwd: string; home: string | undefined; taskF
   const base = main ?? root;
   const parents = new Set([...worktreeRoots.map((w) => resolve(base, w)), join(projectStateDir(base), 'worktrees'), ...repo.linked.map((l) => dirname(l))]);
   parents.delete('/');
-  const relative = (p: string) => !(p === '~' || p.startsWith('~/') || isAbsolute(p));
-  const relNegs = patterns.filter((p) => p.startsWith('!')).map((p) => p.slice(1)).filter(relative);
-  const relNeg = anchored(relNegs, ['/r']);
-  if ('error' in relNeg) return relNeg;
   const under = [...parents].map((d) => join(d, '*'));
-  const lateNeg = anchored(relNegs, under);
-  if ('error' in lateNeg) return lateNeg;
-  const lateNegRes = lateNeg.map(absRe);
-  const exceptedLate = (p: string) => excepted(p) || lateNegRes.some((re) => re.test(p.slice(1)));
-  for (const p of patterns.filter((p) => !p.startsWith('!') && relative(p))) {
-    const probe = anchored([p], ['/r']);
-    if ('error' in probe) return probe;
-    const late = anchored([p], under);
-    if ('error' in late) return late;
-    if (!probe.some((a) => overlaps(a, relNeg))) {
-      for (const a of late) out.add(a);
-      continue;
-    }
-    for (const a of late) {
-      const now = expand(a);
-      if (now) for (const m of now.filter((m) => !exceptedLate(m))) out.add(m);
-      else out.add(a);
-    }
+  const relative = (p: string) => !(p === '~' || p.startsWith('~/') || isAbsolute(p));
+  for (const patterns of sources) {
+    const added = addSource(patterns);
+    if (added) return added;
   }
   if (hidden.length) for (const s of repo.stores) out.add(s);
   for (const p of entries) {
@@ -488,4 +450,57 @@ export function runReadDenials(o: { cwd: string; home: string | undefined; taskF
     }
   }
   return { paths: [...entries] };
+
+  /** One source's entries, its own exceptions applied to its own patterns only; an error stops the run. */
+  function addSource(patterns: string[]): { error: string } | null {
+    const pos = anchored(patterns.filter((p) => !p.startsWith('!')));
+    const neg = anchored(patterns.filter((p) => p.startsWith('!')).map((p) => p.slice(1)));
+    if ('error' in pos) return pos;
+    if ('error' in neg) return neg;
+    const negRes = neg.map(absRe);
+    const excepted = (p: string) => negRes.some((re) => re.test(p.slice(1)));
+    for (const a of pos) {
+      const dir = dirForm(a);
+      if (dir !== null) {
+        // "dir/**" is the directory itself to the sandbox: one mount, whatever is created in it later. An exception
+        // that names the directory itself excepts nothing beneath it, to the hook as here; only one that can match
+        // beneath it makes the pattern overlapped.
+        const now = overlaps(a, neg) ? expand(a) : null;
+        if (now) for (const m of now.filter((m) => !excepted(m))) out.add(m);
+        else out.add(dir);
+        continue;
+      }
+      if (!GLOB.test(a)) {
+        if (!excepted(a)) out.add(a);
+        continue;
+      }
+      const now = overlaps(a, neg) ? expand(a) : null;
+      if (now) for (const m of now.filter((m) => !excepted(m))) out.add(m);
+      else out.add(a);
+    }
+    // The late-worktree globs (see above), with this source's exceptions only.
+    const relNegs = patterns.filter((p) => p.startsWith('!')).map((p) => p.slice(1)).filter(relative);
+    const relNeg = anchored(relNegs, ['/r']);
+    if ('error' in relNeg) return relNeg;
+    const lateNeg = anchored(relNegs, under);
+    if ('error' in lateNeg) return lateNeg;
+    const lateNegRes = lateNeg.map(absRe);
+    const exceptedLate = (p: string) => excepted(p) || lateNegRes.some((re) => re.test(p.slice(1)));
+    for (const p of patterns.filter((p) => !p.startsWith('!') && relative(p))) {
+      const probe = anchored([p], ['/r']);
+      if ('error' in probe) return probe;
+      const late = anchored([p], under);
+      if ('error' in late) return late;
+      if (!probe.some((a) => overlaps(a, relNeg))) {
+        for (const a of late) out.add(a);
+        continue;
+      }
+      for (const a of late) {
+        const now = expand(a);
+        if (now) for (const m of now.filter((m) => !exceptedLate(m))) out.add(m);
+        else out.add(a);
+      }
+    }
+    return null;
+  }
 }
