@@ -13,8 +13,15 @@ import { existsSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFile
 import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
 import { isNode, isPair, isScalar, parse, parseDocument, visit } from 'yaml';
+import { fileURLToPath } from 'node:url';
 import { LINT_MARK, registrationsOf, weakeningReasons } from '../src/merge-policy-weakening.js';
-import { repoRoot } from './helpers.js';
+
+/**
+ * The repo's top, from this file's built place (dist/test/). Computed here, not imported from test/helpers.ts: that
+ * file is no guard, so a changed line there is held by nothing, and it could point this backstop at another tree or
+ * patch what it reads (round 18). Everything this file runs is in it, in test/isolate.ts (a guard file) or in src/.
+ */
+const repoRoot = fileURLToPath(new URL('../../', import.meta.url));
 
 type Job = { name?: unknown; strategy?: { matrix?: unknown } };
 
@@ -1011,4 +1018,54 @@ test('a later change that narrows one of these rules waits for the owner: this f
     assert.ok(reasons.some((r) => r.includes('removes or changes a line of a guard or lint')), `${label}: ${JSON.stringify(reasons)}`);
   }
   assert.notDeepEqual(hold(before.replace(`${LINT_MARK}\n`, '')), [], 'the mark taken out');
+});
+
+/**
+ * The modules this file may load, since round 18: node built-ins it uses, yaml, and the weakening module. Not a local
+ * helper such as test/helpers.ts, which no hold covers; and not `node:module`, `node:vm` or `node:child_process`,
+ * which could load one.
+ */
+// check-table: never-grow
+const MAY_IMPORT = new Set(['node:test', 'node:assert/strict', 'node:fs', 'node:os', 'node:path', 'node:url', 'yaml', '../src/merge-policy-weakening.js']);
+
+/** The #783/#869 hold for a change to the files in `edits` (path to [text before, text after]), lines as a diff gives them. */
+function holdOf(edits: Record<string, [string, string]>): string[] {
+  const minus = (a: string[], b: string[]) => {
+    const left = [...b];
+    return a.filter((x) => {
+      const k = left.indexOf(x);
+      if (k === -1) return true;
+      left.splice(k, 1);
+      return false;
+    });
+  };
+  const files = Object.entries(edits).map(([path, [b, a]]) => {
+    const removed = minus(b.split('\n'), a.split('\n'));
+    const added = minus(a.split('\n'), b.split('\n'));
+    return { path, added: added.length, removed: removed.length, addedLines: added, removedLines: removed };
+  });
+  return weakeningReasons({ files, deleted: new Set(), before: (p) => edits[p]?.[0] ?? null, after: (p) => edits[p]?.[1] ?? null, scope: undefined });
+}
+
+test('everything this backstop runs is held: it imports only node: modules, yaml and the weakening module, and finds the repo itself (round 18)', () => {
+  const P = 'test/desktop-removed.test.ts';
+  const text = readFileSync(join(repoRoot, P), 'utf8');
+  const from = [...text.matchAll(/^(?:import|export)\s[^'"]*?\sfrom\s+['"]([^'"]+)['"]/gm), ...text.matchAll(/^import\s+['"]([^'"]+)['"]/gm)].map((m) => m[1]!);
+  assert.ok(from.includes('yaml') && from.includes('node:test'), `the import list was read: ${JSON.stringify(from)}`);
+  assert.deepEqual(from.filter((s) => !MAY_IMPORT.has(s)), [], 'no module outside MAY_IMPORT: no local helper outside the hold');
+  assert.ok(!/\bimport\s*\(|\brequire\s*\(/.test(text), 'no dynamic import or require');
+  // The second adversarial review of 2fd92b5d (T1): a changed repoRoot line in test/helpers.ts got no hold (measured
+  // then), and it could point this file at another tree. This file no longer reads helpers.ts, and the same change
+  // here is held.
+  const elsewhere = "new URL(process.argv.some((a) => a.endsWith('desktop-removed.test.js')) ? '../../test/fixtures/frozen/' : '../../', import.meta.url)";
+  // Split, so this line never holds it whole.
+  const OWN_ROOT = 'const repoRoot = fileURLToPath(new URL(' + "'../../', import.meta.url));";
+  assert.equal(text.split(OWN_ROOT).length, 2, 'this file sets repoRoot once');
+  for (const [label, after] of [
+    ['its repoRoot pointed at another tree', text.replace(OWN_ROOT, () => `const repoRoot = fileURLToPath(${elsewhere});`)],
+    ['its repoRoot taken from helpers.ts again', text.replace(OWN_ROOT, () => "import { repoRoot } from './helpers.js';")],
+  ] as const) {
+    const reasons = holdOf({ [P]: [text, after] });
+    assert.ok(reasons.some((r) => r.includes('removes or changes a line of a guard or lint')), `${label}: ${JSON.stringify(reasons)}`);
+  }
 });
