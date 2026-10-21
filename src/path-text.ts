@@ -20,6 +20,22 @@ export const isNonUtf8Path = (path: string): boolean => path.includes('�');
  */
 export const hasInvisibleCharacter = (path: string): boolean => /[\p{Cf}\p{Default_Ignorable_Code_Point}]/u.test(path);
 
+/**
+ * Whether a segment of a path starts or ends with a space (`docs/releasing.md ` with a trailing one): in text it
+ * reads as the name without it (#763).
+ */
+export const hasEdgeSpace = (path: string): boolean => /(?:^|\/) | (?:\/|$)/.test(path);
+
+/**
+ * Whether a path holds a character outside ASCII other than an accent on an ASCII letter (#763): a letter of another
+ * script, a fullwidth or mathematical letter, a long s, a symbol, a no-break space, the braille blank. Any of them can
+ * read as an ASCII character it isn't (a Cyrillic e as `e`). An accented letter is one whose canonical decomposition
+ * (NFD) is an ASCII letter and combining marks (`naïve`, `café`). WHY a rule and not Unicode's look-alike table: this
+ * module imports nothing (test/review-packet.test.ts), so it escapes every such name, look-alike or not. The
+ * replacement character is left to isNonUtf8Path.
+ */
+export const hasNonAccentCharacter = (path: string): boolean => /\P{ASCII}/u.test(path.normalize('NFD').replace(/\p{M}/gu, '').replaceAll('�', ''));
+
 /** Whether a path's first segment (its top-level directory, or a file at the root) has a character outside ASCII. */
 export const hasNonAsciiTopLevel = (path: string): boolean => /[^\x00-\x7f]/.test(path.split('/')[0]!);
 
@@ -34,7 +50,10 @@ export const escapedPath = (path: string): string => JSON.stringify(path).replac
  * Escaped (escapedPath) when it holds a control character, an invisible or format character, or its top-level name
  * isn't ASCII: so no Cc, Cf or default-ignorable character reaches the text, a newline can't start a line of its own,
  * and a bidi override can't reorder the line around it. Quoted (JSON) when it holds a U+FFFD (a name that isn't valid
- * UTF-8), so it reads as the odd name it is.
+ * UTF-8), so it reads as the odd name it is. Escaped too (#763) when it holds a character outside ASCII other than an
+ * accent (hasNonAccentCharacter: a Cyrillic e, a fullwidth letter, a no-break space, the braille blank), so a
+ * `docs/releasing.md` spelled with a Cyrillic e can't read as the real `docs/releasing.md`, and when a segment starts
+ * or ends with a space (hasEdgeSpace), which text can't show.
  *
  * INVARIANT: two different paths never show as the same text. The three forms are disjoint: a name shown as itself
  * never starts with `"` (one that does, like a directory named `"src`, is escaped too, so it can't read as the
@@ -42,7 +61,7 @@ export const escapedPath = (path: string): string => JSON.stringify(path).replac
  * one-to-one (JSON.parse gives the path back).
  */
 export const shownPath = (path: string): string =>
-  hasControlCharacter(path) || hasInvisibleCharacter(path) || hasNonAsciiTopLevel(path) || path.startsWith('"') ? escapedPath(path) : isNonUtf8Path(path) ? JSON.stringify(path) : path;
+  hasControlCharacter(path) || hasInvisibleCharacter(path) || hasNonAsciiTopLevel(path) || hasNonAccentCharacter(path) || hasEdgeSpace(path) || path.startsWith('"') ? escapedPath(path) : isNonUtf8Path(path) ? JSON.stringify(path) : path;
 
 /** Several changed paths as text: each one shownPath, joined. */
 export const shownPaths = (paths: readonly string[], sep = ', '): string => paths.map(shownPath).join(sep);

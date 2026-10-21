@@ -7,7 +7,8 @@ import type { ReviewConfig } from './config/schema.js';
 import { globToRegExp } from './guardrails/glob.js';
 import { BRAND } from './brand.js';
 import { HOOK_IMPORTS } from './hook-imports.js';
-import { hasControlCharacter, hasInvisibleCharacter, hasNonAsciiTopLevel, isNonUtf8Path, shownPath, shownPaths } from './path-text.js';
+import { escapedPath, hasControlCharacter, hasInvisibleCharacter, hasNonAsciiTopLevel, isNonUtf8Path, shownPath, shownPaths } from './path-text.js';
+import { lookalikeOf, type Lookalike, type Protected } from './confusables.js';
 
 // The odd-name tests and how a reason shows a path live in src/path-text.ts (one module the merge policy, the conflict
 // fix and the coordinator share); re-exported here for the callers that read them with the review levels.
@@ -56,8 +57,22 @@ export const INVISIBLE_CHARACTER_PATH = 'invisible-character-path';
  */
 export const NON_ASCII_TOP_LEVEL_PATH = 'non-ascii-top-level-path';
 
+/**
+ * A changed path that reads as a locked or protected one without being it (#763): its UTS #39 confusable skeleton
+ * (src/confusables.ts) matches a glob of a category that waits for a person (the locked ones, review.yaml's L3 and
+ * merge.wait_categories, ci-config) or a money path, and the path itself doesn't: a `docs/releasing.md` spelled with
+ * a Cyrillic e beside the locked one, a `web/CLAUDE.md` with a Cyrillic capital E beside `**\/CLAUDE.md`, a
+ * `scripts/setup/x.sh` with a Cyrillic e beside `scripts/setup/**`, `src/rnerge-policy.ts` (r, n) beside
+ * `src/merge-policy*`; for a name outside ASCII, a case-insensitive match too (a long s for an s), and its NFKC form's
+ * (a fullwidth letter); a name with a blank-looking character (a trailing space, the braille blank), compared without
+ * it too. A path too long to compare counts too (fails closed).
+ * Always L3 ("path that looks like a protected one") and never auto-merges (merge-policy.ts waitCategoriesOf),
+ * whatever review.yaml says, so it waits at least as long as the path it reads as.
+ */
+export const CONFUSABLE_PATH = 'confusable-path';
+
 /** The categories of a path nothing should have to read around: always L3, always waits, never loosened. */
-export const ODD_PATH_CATEGORIES: readonly string[] = [CONTROL_CHARACTER_PATH, NON_UTF8_PATH, INVISIBLE_CHARACTER_PATH, NON_ASCII_TOP_LEVEL_PATH];
+export const ODD_PATH_CATEGORIES: readonly string[] = [CONTROL_CHARACTER_PATH, NON_UTF8_PATH, INVISIBLE_CHARACTER_PATH, NON_ASCII_TOP_LEVEL_PATH, CONFUSABLE_PATH];
 
 /**
  * A change to a .gitattributes (any directory's) that can hide or change what a review of a file sees: `-diff` or
@@ -328,7 +343,8 @@ export const SELF_MODIFICATION_PARTS: { what: string; globs: string[] }[] = [
   { what: 'the push guard', globs: ['src/push-guard*', 'src/push-check*'] },
   { what: 'the updater', globs: ['src/updates*', `scripts/machine/${BRAND.cli}-update*`] },
   // src/path-text.ts holds the odd-name tests computeLevel raises on (moved out of src/review.ts, #683), so it stays locked with it.
-  { what: 'the review levels', globs: [`${BRAND.configDir}/review.yaml`, 'src/review.ts', 'src/path-text.ts'] },
+  // src/confusables*: the look-alike check and its Unicode table (#763).
+  { what: 'the review levels', globs: [`${BRAND.configDir}/review.yaml`, 'src/review.ts', 'src/path-text.ts', 'src/confusables*'] },
   { what: 'the guardrails', globs: [`${BRAND.configDir}/guardrails.yaml`, 'src/guardrails/**'] },
   // deploy/**: the engine's deployment manifests (a compose file and the like) set its isolation and exposure, as the
   // setup scripts do: the user it runs as, what it mounts, which ports it publishes. Locked before the first one exists.
@@ -554,6 +570,25 @@ export function computeLevel(input: LevelInput, cfg: ReviewConfig, extraCategori
     }
     if (isGitmodulesPath(f.path) && hidesSubmodules(f)) add(DIFF_HIDING_ATTRIBUTES, f.path);
   }
+  // A path that reads as a protected one (#763): compared with every glob of each category that waits for a person
+  // (merge-policy.ts waitCategoriesOf: review.yaml's L3 and wait list, ci-config, the locked ones) and every money path.
+  const waiting = new Set([...cfg.levels.L3_human.when, ...(cfg.merge?.wait_categories ?? []), 'ci-config', ...Object.keys(lockedCategories(input.scope))]);
+  const protectedPaths: Protected[] = [
+    ...Object.entries(defs).flatMap(([c, globs]) => (waiting.has(c) ? globs.map((glob) => ({ glob, what: `${shownPath(glob)} (${c})` })) : [])),
+    ...input.moneyPaths.map((re) => ({ re, what: 'a money path' })),
+  ];
+  // A path another odd-path category holds already (an invisible character, a top-level name outside ASCII, ...) waits
+  // on that floor at L3; it isn't compared again, so its reason stays the one that says what is odd about it.
+  const oddAlready = new Set(ODD_PATH_CATEGORIES.filter((c) => c !== CONFUSABLE_PATH).flatMap((c) => categories[c] ?? []));
+  const lookalikes = new Map<string, Lookalike>();
+  for (const f of input.files) {
+    if (oddAlready.has(f.path)) continue;
+    const hit = lookalikeOf(f.path, protectedPaths);
+    if (hit) {
+      lookalikes.set(f.path, hit);
+      add(CONFUSABLE_PATH, f.path);
+    }
+  }
   const lines = input.files.reduce((n, f) => n + f.added + f.removed, 0);
   const isDocOrTest = (p: string) => (categories.docs ?? []).includes(p) || (categories.tests ?? []).includes(p);
   const app = input.files.filter((f) => !isDocOrTest(f.path) && !(categories['harness-config'] ?? []).includes(f.path));
@@ -597,6 +632,13 @@ export function computeLevel(input: LevelInput, cfg: ReviewConfig, extraCategori
   if (invisible.length) raise('L3', `path with an invisible or format character: ${invisible.slice(0, 3).map(shownPath).join(', ')}`);
   const lookalike = categories[NON_ASCII_TOP_LEVEL_PATH] ?? [];
   if (lookalike.length) raise('L3', `top-level name that isn't ASCII: ${lookalike.slice(0, 3).map(shownPath).join(', ')}`);
+  // Each look-alike escaped (escapedPath), so it can't read as the path it looks like, then what it looks like.
+  const confusable = categories[CONFUSABLE_PATH] ?? [];
+  const lookalikeWhy = (p: string) => {
+    const h = lookalikes.get(p);
+    return `${escapedPath(p)} (${!h ? 'review.yaml lists it' : 'like' in h ? `like ${h.like}` : `not compared: ${h.unchecked}`})`;
+  };
+  if (confusable.length) raise('L3', `path that looks like a protected one: ${confusable.slice(0, 3).map(lookalikeWhy).join(', ')}`);
   const hiding = categories[DIFF_HIDING_ATTRIBUTES] ?? [];
   if (hiding.length) raise('L3', `.gitattributes or .gitmodules can hide what a review sees (-diff, binary, linguist-generated, a filter, an encoding, a diff driver, a macro, a submodule ignore): ${shownPaths(hiding.slice(0, 3))}`);
 

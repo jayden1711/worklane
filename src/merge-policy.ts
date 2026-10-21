@@ -5,7 +5,7 @@
 // on the exact evaluated commit, evaluator approved) is decided before this.
 import { BRAND } from './brand.js';
 import { shownPath } from './path-text.js';
-import { AGENT_INSTRUCTIONS, CONTROL_CHARACTER_PATH, DIFF_HIDING_ATTRIBUTES, INVISIBLE_CHARACTER_PATH, LOCKED_CATEGORIES, NON_ASCII_TOP_LEVEL_PATH, NON_UTF8_PATH, ODD_PATH_CATEGORIES, SELF_MODIFICATION, selfModificationPart, type LevelResult } from './review.js';
+import { AGENT_INSTRUCTIONS, CONFUSABLE_PATH, CONTROL_CHARACTER_PATH, DIFF_HIDING_ATTRIBUTES, INVISIBLE_CHARACTER_PATH, LOCKED_CATEGORIES, NON_ASCII_TOP_LEVEL_PATH, NON_UTF8_PATH, ODD_PATH_CATEGORIES, SELF_MODIFICATION, selfModificationPart, type LevelResult } from './review.js';
 
 export interface MergeVerdict {
   patch_correct: boolean;
@@ -154,6 +154,7 @@ const CATEGORY_WORDS: Record<string, string> = {
   [NON_UTF8_PATH]: "has a path that isn't valid UTF-8",
   [INVISIBLE_CHARACTER_PATH]: 'has a path with an invisible or format character',
   [NON_ASCII_TOP_LEVEL_PATH]: "has a top-level name that isn't ASCII",
+  [CONFUSABLE_PATH]: 'has a path that looks like a protected one',
   [DIFF_HIDING_ATTRIBUTES]: 'changes a .gitattributes or .gitmodules in a way that can hide what a review sees (-diff, binary, linguist-generated, a filter, an encoding, a diff driver, a macro, a submodule ignore)',
 };
 
