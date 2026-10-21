@@ -28,6 +28,24 @@
       "change": [{ "write": "web/totals.js", "text": "export const total = 2;\n" }, { "write": "package.json", "text": "{\n  \"name\": \"app\",\n  \"dependencies\": { \"left-pad\": \"1.3.0\" }\n}\n" }],
       "inputs": { "plan": ["web/totals.js"] },
       "expect": { "decision": "waits", "reasons": ["not in the approved plan: design: dependency manifests change (package.json)"], "configs": ["engine", "default"], "scopes": ["engine", "managed-app"] }
+    },
+    {
+      "id": "outside-plan-folder-named",
+      "attack": "a planned task whose plan names a folder, and whose PR adds an auth file in it, in a repo that puts auth at L2",
+      "source": "merge-policy.ts outsidePlanReasons (a plan lists files, not folders); docs/guardrails.md Hold kinds: outside the plan",
+      "base": { "web/totals.js": "export const total = 1;\n" },
+      "change": [{ "write": "web/totals.js", "text": "export const total = 2;\n" }, { "write": "web/auth/session.js", "text": "export const ttl = 600000;\n" }],
+      "inputs": { "plan": ["web/"] },
+      "expect": { "decision": "waits", "reasons": ["not in the approved plan: high-risk: auth"], "configs": ["default", "auth-at-l2"], "scopes": ["engine", "managed-app"] }
+    },
+    {
+      "id": "outside-plan-path-in-other-case",
+      "attack": "a planned task whose plan names the auth file in other letter case, in a repo that puts auth at L2",
+      "source": "merge-policy.ts outsidePlanReasons (paths match exactly); docs/guardrails.md Hold kinds: outside the plan",
+      "base": { "web/totals.js": "export const total = 1;\n", "web/auth/session.js": "export const ttl = 60;\n" },
+      "change": [{ "write": "web/totals.js", "text": "export const total = 2;\n" }, { "write": "web/auth/session.js", "text": "export const ttl = 600000;\n" }],
+      "inputs": { "plan": ["web/totals.js", "WEB/AUTH/SESSION.JS"] },
+      "expect": { "decision": "waits", "reasons": ["not in the approved plan: high-risk: auth"], "configs": ["default", "auth-at-l2"], "scopes": ["engine", "managed-app"] }
     }
   ]
 }

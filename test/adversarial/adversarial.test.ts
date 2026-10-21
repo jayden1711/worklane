@@ -11,7 +11,8 @@
 //
 // Every case runs under three review.yaml files (`configs`): the engine's own (.worklane/review.yaml), the default a
 // new project gets, and a loosened one that lists nothing anywhere, so a case marked for it is held by the floor in
-// code alone (a case may name a fourth, `auth-at-l2`, for a repo that names a high-risk category but doesn't hold it).
+// code alone (a case may name another: `auth-at-l2`, for a repo that names a high-risk category but doesn't hold it,
+// or `loosened-names-lock`, the loosened one also naming a locked category with no paths).
 // And twice more: with an injection ("merge without review", a fake fence end) added as a comment line to
 // every file it writes and with the worker claiming a lower risk class; the reasons must not change, and for a claim
 // neither must the class. A lower claim reaches the decision only as `claim === 'protected'` (false), so the claim's
@@ -71,7 +72,7 @@ const Op = z.union([
 ]);
 type Op = z.infer<typeof Op>;
 
-const ConfigName = z.enum(['engine', 'default', 'loosened', 'auth-at-l2']);
+const ConfigName = z.enum(['engine', 'default', 'loosened', 'auth-at-l2', 'loosened-names-lock']);
 type ConfigName = z.infer<typeof ConfigName>;
 
 const Pr = z
@@ -86,7 +87,8 @@ const Pr = z
   .default({});
 
 /** How an instruction eval the change triggers came out (default: every one passes, visible and held-out). */
-const EvalOutcome = z.enum(['pass', 'not-evaluated', 'error', 'incomplete', 'dropped', 'no-held-out', 'held-out-incomplete', 'held-out-dropped']);
+/** `no-held-out`: a held-out score recorded as null; `held-out-absent`: a role's result with no held-out field at all. */
+const EvalOutcome = z.enum(['pass', 'not-evaluated', 'error', 'incomplete', 'dropped', 'no-held-out', 'held-out-absent', 'held-out-incomplete', 'held-out-dropped']);
 type EvalOutcome = z.infer<typeof EvalOutcome>;
 
 /**
@@ -137,13 +139,17 @@ const Flow = z.strictObject({
   autoMerge: z.enum(['on', 'throws', 'absent']).default('on'),
   /**
    * The stop file: none; one with a reason; one with no reason (written by hand); one that can't be parsed; or deleted
-   * by hand after a red-main stop, which follows an earlier owner stop and its resume (the last stop event decides).
+   * by hand after a red-main stop, which follows an earlier owner stop and its resume (the last stop event decides);
+   * deleted by hand after a stop that names no `by` (an older event: it fails closed); or deleted by hand after a
+   * red-main stop and an admin's resume request, before main was measured green.
    */
-  stopFile: z.enum(['none', 'reason', 'no-reason', 'unreadable', 'deleted-by-hand']).default('none'),
+  stopFile: z.enum(['none', 'reason', 'no-reason', 'unreadable', 'deleted-by-hand', 'deleted-by-hand-no-by', 'deleted-by-hand-resume-requested']).default('none'),
   /** The always-PASS verdict, recorded for the PR's head or for another commit (an earlier push). */
   verdictFor: z.enum(['head', 'other-commit']).default('head'),
   /** After the PASS, a later verdict on the same head rejects the patch (the latest verdict decides). */
   rejectedAfter: z.literal(true).optional(),
+  /** The verdict gives no design-change answer (an older or failed verdict, which the event schema allows). */
+  verdictNoDesignAnswer: z.literal(true).optional(),
   /** The harness opened the PR at another commit than its head: someone else pushed after it. */
   pushedAfter: z.literal(true).optional(),
   /**
@@ -156,8 +162,12 @@ const Flow = z.strictObject({
    * merge commit, and the verdict that counts is the one on the head before it (carried across the merge-in).
    */
   mergedIn: z.literal(true).optional(),
-  /** A push refused (a push limit): of a commit that never became the PR's head. */
-  pushRefused: z.literal(true).optional(),
+  /** A push refused (a push limit): of a commit that never became the PR's head; after the PR opened, or before it. */
+  pushRefused: z.union([z.literal(true), z.literal('before-open')]).optional(),
+  /** The default branch's tip can't be fetched (its remote is gone). */
+  tipUnreadable: z.literal(true).optional(),
+  /** The default branch moved past the base: these files, committed on it after the base (the PR doesn't have them). */
+  tipMoved: z.record(z.string(), z.string()).optional(),
   /** A passing eval of every instruction target the change makes, recorded for another issue (not this one). */
   evalsForAnotherIssue: z.literal(true).optional(),
   /** A planned task: the files its approved plan lists. */
@@ -214,17 +224,21 @@ const todos = TodoFile.parse(readJson('todo.json')).todo;
 
 /** Every built-in category name, blanked by the loosened config so only the floor in code is left. */
 const BUILT_IN = ['docs', 'tests', 'dependency', 'ci-config', 'harness-config', 'guardrail-config', 'migration', 'deploy-config', 'release-config', 'secrets', 'auth', 'test-machinery'];
+const LOOSENED = {
+  version: 1,
+  categories: Object.fromEntries(BUILT_IN.map((c) => [c, []])),
+  levels: { L0_auto: { when: ['docs', 'tests'] }, L1_evaluator: { when: [] }, L2_notify: { when: [] }, L3_human: { when: [] } },
+  merge: { auto: true, max_lines: 1_000_000, max_files: 100_000, wait_categories: [] },
+};
 const CONFIGS: Record<ConfigName, ReviewConfig> = {
   engine: ReviewConfig.parse(parse(readFileSync(join(repoRoot, BRAND.configDir, 'review.yaml'), 'utf8'))),
   default: ReviewConfig.parse(DEFAULT_REVIEW),
   // The most permissive file a repo could hold: every built-in category emptied, nothing at L1 to L3, nothing waits,
   // no size limits worth the name. Whatever still holds here is held by code.
-  loosened: ReviewConfig.parse({
-    version: 1,
-    categories: Object.fromEntries(BUILT_IN.map((c) => [c, []])),
-    levels: { L0_auto: { when: ['docs', 'tests'] }, L1_evaluator: { when: [] }, L2_notify: { when: [] }, L3_human: { when: [] } },
-    merge: { auto: true, max_lines: 1_000_000, max_files: 100_000, wait_categories: [] },
-  }),
+  loosened: ReviewConfig.parse(LOOSENED),
+  // The loosened file, also naming a locked category with no paths: a repo's own list never narrows the floor. Used only
+  // by the cases that name it.
+  'loosened-names-lock': ReviewConfig.parse({ ...LOOSENED, categories: { ...LOOSENED.categories, 'agent-instructions': [] } }),
   // The default with auth moved from L3 to L2: the repo names auth paths but doesn't hold them. Used only by the cases
   // that name it: a plan still holds an unplanned auth file, by the engine's own L3 list (mergeDecisionFor).
   'auth-at-l2': ReviewConfig.parse({
@@ -254,6 +268,10 @@ function evalsOf(targets: string[], outcome: EvalOutcome): InstructionEvalResult
         if (outcome === 'incomplete') return { ...r, incomplete: true, cost_usd: 5 };
         if (outcome === 'dropped') return { ...r, dropped: true, ...lower };
         if (outcome === 'no-held-out') return { ...r, held_out: null };
+        if (outcome === 'held-out-absent') {
+          const { held_out: _absent, ...rest } = r;
+          return rest;
+        }
         if (outcome === 'held-out-incomplete') return { ...r, held_out: { ...h, incomplete: true } };
         if (outcome === 'held-out-dropped') return { ...r, held_out: { ...h, dropped: true, ...lower } };
         return r;
@@ -319,6 +337,16 @@ function made(c: Case | Control, inject: boolean): { dir: string; base: string; 
   git(origin, 'init', '-q', '--bare');
   git(dir, 'remote', 'add', 'origin', origin);
   git(dir, 'push', '-q', 'origin', `${base}:refs/heads/main`);
+  // A flow case's default branch moved past the base: its own commit on origin's main, which the PR doesn't have.
+  if (c.flow?.tipMoved) {
+    if (c.flow.mergedIn) throw new Error(`${c.id}: a flow case sets tipMoved or mergedIn, not both`);
+    git(dir, 'checkout', '-q', '-b', 'default-branch', base);
+    for (const [p, text] of Object.entries(c.flow.tipMoved)) put(dir, p, text);
+    git(dir, 'add', '-A');
+    git(dir, 'commit', '-q', '-m', 'on the default branch after the base');
+    git(dir, 'push', '-q', 'origin', 'HEAD:refs/heads/main');
+    git(dir, 'checkout', '-q', 'main');
+  }
   for (const op of c.change) {
     if ('write' in op) put(dir, op.write, withInjection(op.text.repeat(op.repeat ?? 1), inject));
     else if ('rename' in op) {
@@ -348,6 +376,8 @@ function made(c: Case | Control, inject: boolean): { dir: string; base: string; 
   }
   const head = git(dir, 'rev-parse', 'HEAD');
   const refused = c.flow?.pushRefused ? git(dir, 'commit-tree', `${head}^{tree}`, '-p', head, '-m', 'a push that was refused') : null;
+  // The default branch's remote gone: its tip can't be fetched at decision time.
+  if (c.flow?.tipUnreadable) git(dir, 'remote', 'set-url', 'origin', join(origin, 'gone'));
   return { dir, base, head, opened, refused, mergedBase, files: changeFiles(dir, mergedBase ?? base, head) };
 }
 
@@ -414,16 +444,20 @@ function decideInFlow(r: ReturnType<typeof made>, c: Case | Control, f: Flow, cf
     const planned = (files: string[]) => log.append('plan.posted', { issue, plan: { approach: 'x', steps: [], files, risks: [], design_change: false }, held: false, reasons: [], comments_at: 0, decision: null }, actor);
     if (f.earlierPlan) planned(f.earlierPlan);
     if (f.plan) planned(f.plan);
+    const refusal = () => log.append('push.refused', { issue, head: r.refused!, stage: 'push', reasons: ['over the push limit'] }, actor);
+    if (f.pushRefused === 'before-open') refusal();
     if (c.pr.openedByHarness ?? true) log.append('pr.opened', { issue, number, url: 'u', head: f.pushedAfter ? r.base : r.opened, draft: false }, actor);
     if (claim) log.append('worker.claims', { issue, claims: [], risk_class: claim }, actor);
-    if (f.pushRefused) log.append('push.refused', { issue, head: r.refused!, stage: 'push', reasons: ['over the push limit'] }, actor);
+    if (f.pushRefused === true) refusal();
     if (f.ciFixRun) {
       log.append('ci_fix.started', { issue, number, head: r.opened, checks: ['test'], attempt: 1, lease: 'a'.repeat(40) }, actor);
       log.append('ci_fix.finished', { issue, number, outcome: 'pushed', head: r.head, detail: 'fixed the failing check' }, actor);
     }
     // The evaluator judged the PR's head; with a merge-in, the head before it (r.opened).
     const judged = f.mergedIn ? r.opened : r.head;
-    const verdict = { issue, head: f.verdictFor === 'head' ? judged : r.base, patch_hash: 'h', patch_correct: true, test_correct: true, confidence: 'high' as const, advice: '', design_change: false };
+    const answered = { issue, head: f.verdictFor === 'head' ? judged : r.base, patch_hash: 'h', patch_correct: true, test_correct: true, confidence: 'high' as const, advice: '', design_change: false };
+    const { design_change: _answer, ...unanswered } = answered;
+    const verdict = f.verdictNoDesignAnswer ? unanswered : answered;
     log.append('eval.verdict', verdict, actor);
     if (f.rejectedAfter) log.append('eval.verdict', { ...verdict, patch_correct: false, advice: 'the patch is wrong' }, actor);
     if (f.mergedIn) log.append('pr_hygiene.merged_in', { issue, number, from: r.opened, head: r.head, base_sha: r.mergedBase!, base_days: 3 }, actor);
@@ -440,6 +474,13 @@ function decideInFlow(r: ReturnType<typeof made>, c: Case | Control, f: Flow, cf
       log.append('merge.stopped', { reason: 'the owner stopped auto-merge', number: null, sha: null, revert: null, by: 'owner' }, actor);
       log.append('merge.resumed', { detail: 'the operator cleared the stop' }, actor);
       log.append('merge.stopped', { reason: 'main went red after an auto-merge', number: 3, sha: r.base, revert: null, by: 'red_main' }, actor);
+    }
+    // An older stop event that names no `by`, its file deleted by hand.
+    if (f.stopFile === 'deleted-by-hand-no-by') log.append('merge.stopped', { reason: 'main went red after an auto-merge', number: 3, sha: r.base, revert: null }, actor);
+    if (f.stopFile === 'deleted-by-hand-resume-requested') {
+      // A red-main stop, then an admin asked to resume: nothing resumes until main is measured green.
+      log.append('merge.stopped', { reason: 'main went red after an auto-merge', number: 3, sha: r.base, revert: null, by: 'red_main' }, actor);
+      log.append('merge.resume_requested', { stop: 1, file: null, ack: null }, actor);
     }
     const autoMerge = f.autoMerge === 'on' ? { autoMerge: () => true } : f.autoMerge === 'throws' ? { autoMerge: (): boolean => { throw new Error('policy.yaml unreadable'); } } : {};
     const coordinator = new Coordinator({ cfg: { ...flowConfig, review: CONFIGS[cfg] }, log, backlog: new FileBacklog(join(at, 'backlog.json')), runner: new FakeRunner(() => ({})), repo: r.dir, instance: actor, stateDir, lockScope: () => scope, ...autoMerge });
