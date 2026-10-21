@@ -181,9 +181,9 @@ A person's own session isn't affected.
 
 **Commit scan and redaction.** Agent commits are scanned before they happen. A scanner that can't run is reported as unavailable, never as clean. Secrets in event payloads and transcripts are redacted before they are stored.
 
-- The commit scan covers every commit form and checkout the guard allows: it scans what the commit will record, in the checkout it lands in. A command line whose commit it can't model is refused, never scanned narrowly (#971).
-  - Code: `src/guard/commit.ts#commitPlan`, `src/hook.ts#runHook`.
-  - Tests: `test/adversarial/commit-scan.test.ts` › “attack: a commit aimed at another checkout is scanned there”, `test/adversarial/commit-scan.test.ts` › “attack: a commit run where the model cannot follow it is refused”, `test/commit-plan.test.ts` › “what the model cannot follow is refused, never scanned narrowly”
+- The commit scan covers every commit form and checkout the guard allows: it scans what the commit will record, in the checkout it lands in, reading the content itself rather than a diff git renders. A command line whose commit it can't model is refused, never scanned narrowly (#971).
+  - Code: `src/guard/commit.ts#commitPlan`, `src/scan/secrets.ts#scanCommit`, `src/hook.ts#runHook`.
+  - Tests: `test/adversarial/commit-scan.test.ts` › “attack: a commit aimed at another checkout is scanned there”, `test/adversarial/commit-scan.test.ts` › “attack: a commit run where the model cannot follow it is refused”, `test/adversarial/commit-scan-routes.test.ts` › “attack: the checkout's git settings for showing changes do not hide what a commit records”, `test/commit-plan.test.ts` › “what the model cannot follow is refused, never scanned narrowly”
   - Label: inferred until CI on main runs these tests (they pass locally, and fail on the commit before this change).
 - Code: `src/scan/secrets.ts#scanCommit`, `src/events/redact.ts#redact`.
 - Tests:

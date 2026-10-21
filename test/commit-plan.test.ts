@@ -2,6 +2,9 @@
 // it records, and which lines it refuses as unmodelled. The hook-level attacks are in test/adversarial/commit-scan.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdirSync, mkdtempSync, realpathSync, symlinkSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { commitPlan, type CommitPlan, type GitQuery } from '../src/guard/commit.js';
 
 /** Every directory is a checkout whose top level is itself; no aliases. */
@@ -33,6 +36,10 @@ test('a line with no commit is no business of the commit scan, however it is wri
     `gh pr create --title t --body "$(cat <<'EOF'\nRun \`git commit -a\` first.\nEOF\n)"`,
     `cat <<'EOF' > notes.md\ngit commit -m x\nEOF`,
     'echo "commit"',
+    'git -C "$D" status',
+    'git log -n "$N" --format=%h',
+    'which git && command -v git',
+    `gh pr create --title t --body "$(cat <<EOF\nThis commit adds a check.\nEOF\n)"`,
   ]) assert.equal(plan(c), null, c);
 });
 
@@ -44,15 +51,33 @@ test('a plain commit scans the staged changes of the checkout it runs in, from i
 });
 
 test('the checkout: -C and directory changes are followed, every place the commit can land is scanned', () => {
-  assert.deepEqual(scans('git -C /o commit -m x').map((s) => s.top), ['/o']);
-  assert.deepEqual(scans('git -C a -C b commit -m x').map((s) => s.top), ['/w/a/b']);
-  assert.deepEqual(scans('cd /o && git commit -m x').map((s) => s.top).sort(), ['/o', '/w']);
-  assert.deepEqual(scans('cd /o || git commit -m x').map((s) => s.top).sort(), ['/o', '/w']);
-  assert.deepEqual(scans('cd sub; cd deeper && git commit -m x').map((s) => s.top).sort(), ['/w', '/w/deeper', '/w/sub', '/w/sub/deeper']);
-  refused('cd $D && git commit -m x');
-  refused('cd && git commit -m x');
-  refused('cd ~/o && git commit -m x');
-  assert.ok('refuse' in plan('cd sub && git commit -m x', { CDPATH: '/elsewhere' })!);
+  const base = realpathSync(mkdtempSync(join(tmpdir(), 'plan-')));
+  const w = join(base, 'w');
+  const o = join(base, 'o');
+  for (const d of [o, join(w, 'sub', 'deeper'), join(w, 'deeper')]) mkdirSync(d, { recursive: true });
+  symlinkSync(o, join(w, 'lnk'));
+  const at = (c: string, env: NodeJS.ProcessEnv = {}, q: GitQuery = git) => commitPlan(c, { cwd: w, env, git: q });
+  const tops = (c: string) => {
+    const p = at(c);
+    assert.ok(p && 'scans' in p, `${c} -> ${JSON.stringify(p)}`);
+    return p.scans.map((s) => s.top).sort();
+  };
+  assert.deepEqual(tops(`git -C ${o} commit -m x`), [o]);
+  assert.deepEqual(tops('git -C a -C b commit -m x'), [join(w, 'a', 'b')]);
+  assert.deepEqual(tops(`cd ${o} && git commit -m x`), [o, w]);
+  assert.deepEqual(tops(`cd ${o} || git commit -m x`), [o, w]);
+  assert.deepEqual(tops('cd sub; cd deeper && git commit -m x'), [w, join(w, 'deeper'), join(w, 'sub'), join(w, 'sub', 'deeper')]);
+  // WHY: each of these may end where the model doesn't: it is refused, never guessed.
+  for (const c of ['cd $D', 'cd', 'cd ~/o', 'cd -', 'cd -P sub', 'cd -L sub', 'cd sub/..', 'cd lnk', 'cd lnk/../sub', 'cd missing', 'cd sub deeper', 'pushd', 'pushd +1', 'popd', `cd ${o}/../o`]) {
+    const p = at(`${c} && git commit -m x`);
+    assert.ok(p && 'refuse' in p, `${c} -> ${JSON.stringify(p)}`);
+  }
+  assert.ok('refuse' in at('cd sub && git commit -m x', { CDPATH: '/elsewhere' })!);
+  // A place the commit may run that isn't a checkout, or whose lookup fails, refuses the line: it is never skipped.
+  const notThere: GitQuery = (cwd, args) => (args.includes('rev-parse') && cwd === o ? { status: 128, stdout: '' } : git(cwd, args));
+  assert.ok('refuse' in at(`cd ${o} && git commit -m x`, {}, notThere)!);
+  const timesOut: GitQuery = (cwd, args) => (args.includes('rev-parse') ? { status: null, stdout: '' } : git(cwd, args));
+  assert.ok('refuse' in at('git commit -m x', {}, timesOut)!);
 });
 
 test('the content: working-tree forms, staging in the line and amends widen the scan', () => {
@@ -112,6 +137,15 @@ test('what the model cannot follow is refused, never scanned narrowly', () => {
     'git commit -m x | tee out.txt',
     'cat f | bash; git commit -m x',
     'git config alias.ci commit && git ci -m x',
+    'git checkout $B',
+    'git log -n $N',
+    'git add *.ts',
+    'git $"commit" -am x',
+    "git $'commit' -am x",
+    'git {commit,-a} -m x',
+    'find . -name x | xargs git',
+    'git status && git diff --output=f && git commit -a -m x',
+    'git log --ext-diff -p && git commit -a -m x',
     'git -c alias.ci=commit ci -m x',
   ]) refused(c);
 });

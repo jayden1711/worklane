@@ -165,6 +165,7 @@ function preToolUse(input: HookInput, env: NodeJS.ProcessEnv): HookOutput {
       log(root, 'secrets.jsonl', { source: 'commit', session: input.session_id, status: 'unmodelled' });
       return decide('deny', plan.refuse);
     }
+    if (plan && !plan.scans.length) return decide('deny', 'the commit secret scan found no checkout to scan for this commit, so it isn\'t let through unscanned');
     for (const { top, scope } of plan?.scans ?? []) {
       const r = scanCommit(top, scope);
       if (r.status !== 'clean') {

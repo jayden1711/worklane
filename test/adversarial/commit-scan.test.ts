@@ -18,7 +18,7 @@ const skip = !hasGitleaks && 'gitleaks not installed';
 const TOKEN = `${'ghp_'}a1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q7R8`;
 const SECRET = `export const token = '${TOKEN}';\n`;
 const FOUND = /gitleaks found a secret in this commit/;
-const UNMODELLED = /the commit secret scan can't tell what this command line commits/;
+const UNMODELLED = /the commit secret scan can't (tell what this command line commits|read this command line)/;
 
 const git = (cwd: string, ...a: string[]) => execFileSync('git', a, { cwd, stdio: 'ignore' });
 
