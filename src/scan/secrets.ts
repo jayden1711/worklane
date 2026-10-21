@@ -4,7 +4,7 @@ import { spawn, spawnSync } from '../os/child-process.js';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { gitEnv } from '../os/git.js';
+import { gitConfigRefusal, gitEnv } from '../os/git.js';
 import { findTool } from '../tool-path.js';
 
 export interface Finding {
@@ -48,6 +48,9 @@ export function scanPath(path: string, binary = findTool('gitleaks')): ScanResul
 /** Scan what a `git commit` is about to record: staged changes, plus unstaged ones for `commit -a`. */
 export function scanCommit(cwd: string, includeUnstaged: boolean, binary = findTool('gitleaks')): ScanResult {
   if (!binary) return { status: 'unavailable', error: 'gitleaks not found on PATH' };
+  // gitleaks runs git itself: for an instance's process, never on a config the guard refuses (#926, src/os/git.ts).
+  const refused = gitConfigRefusal(cwd);
+  if (refused) return { status: 'unavailable', error: refused };
   const findings: Finding[] = [];
   for (const args of includeUnstaged ? [['--staged'], []] : [['--staged']]) {
     const r = spawnSync(binary, ['git', '--pre-commit', ...args, '--redact', '--no-banner', '--exit-code', String(LEAKS_EXIT), '.'], { cwd, encoding: 'utf8', timeout: 120_000, env: gitEnv() });
@@ -66,6 +69,9 @@ export function scanCommit(cwd: string, includeUnstaged: boolean, binary = findT
  */
 export function scanRange(cwd: string, range: string, binary = findTool('gitleaks')): Promise<ScanResult> {
   if (!binary) return Promise.resolve({ status: 'unavailable', error: 'gitleaks not found on PATH' });
+  // As scanCommit: no gitleaks (and so no git) on a config the guard refuses (#926).
+  const refused = gitConfigRefusal(cwd);
+  if (refused) return Promise.resolve({ status: 'unavailable', error: refused });
   return scanAsync(binary, (report) => ['git', '--redact', '--no-banner', '--log-opts', range, '--report-format', 'json', '--report-path', report, '--exit-code', String(LEAKS_EXIT), '.'], cwd);
 }
 

@@ -166,7 +166,9 @@ export abstract class Landing extends Decisions {
       }
       for (const q of batch) {
         const claimed = this.events(q.issue).filter((e) => e.type === 'issue.claimed').at(-1)!.payload as EventPayload<'issue.claimed'>;
-        const pick = gitSpawnSync(['cherry-pick', `${claimed.base}..${q.head}`], { cwd: path, encoding: 'utf8' });
+        // The harness identity as committer, as every commit the coordinator makes: an instance's git reads no global
+        // config (#926, src/os/git.ts), where a committer name could otherwise have come from.
+        const pick = gitSpawnSync(['-c', `user.name=${this.identity.name}`, '-c', `user.email=${this.identity.email}`, 'cherry-pick', `${claimed.base}..${q.head}`], { cwd: path, encoding: 'utf8' });
         if (pick.status !== 0) {
           gitSpawnSync(['cherry-pick', '--abort'], { cwd: path });
           result(q.issue, 'conflict', null, `does not apply cleanly on ${tip.slice(0, 8)}${applied.length ? ` after ${applied.map((a) => `#${a.issue}`).join(', ')}` : ''}; never guessing at conflicts`);

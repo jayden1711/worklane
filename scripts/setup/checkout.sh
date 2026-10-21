@@ -18,15 +18,51 @@ coord="wl-$name" work="wl-$name-work"
 dest="/srv/worklane/$name/${repo#*/}"
 # GitHub itself, always: the clone carries the App's token, so no setting names another host.
 
+# Issue #926: .git/ itself, and everything in it but objects/, refs/, logs/ and worktrees/ (and lfs/ and modules/,
+# which git-lfs and submodules write from a worktree), is the coordinator's alone: owned by it, and writable by no one
+# else. Agents' worktrees write only those (their commits, branches, index and HEAD; measured: commit, checkout -b,
+# fetch, rebase, merge, stash and worktree add all work with the rest locked; deleting a branch or tag, and setting
+# an upstream, don't, as they rewrite packed-refs or config). Otherwise an agent could rename its own file over .git/config, or add info/attributes, a hook or a
+# commondir, and the coordinator's git, which runs here as itself, would run what it names. The working tree stays
+# group-writable. The top is locked first, so nothing in it can be swapped while the rest is; a symlink in it is
+# refused (root never follows one there), and chown never follows one inside.
+lock_git_dir() {
+  local g="$dest/.git"
+  if [ -L "$g" ] || [ ! -d "$g" ]; then echo "refusing: $g is not a directory" >&2; exit 1; fi
+  chown -h "$coord" "$g"
+  chmod go-w "$g"
+  if [ -n "$(find "$g" -mindepth 1 -maxdepth 1 -type l)" ]; then
+    echo "refusing: $g holds a symlink ($(find "$g" -mindepth 1 -maxdepth 1 -type l | head -3 | tr '\n' ' ')); git never makes one there: look at it and remove it, then run this again" >&2
+    exit 1
+  fi
+  find "$g" -mindepth 1 -maxdepth 1 ! -name objects ! -name refs ! -name logs ! -name worktrees ! -name lfs ! -name modules -exec chown -R -h -P "$coord" {} + -exec chmod -R go-w {} +
+}
+# A checkout from before #926: locked before the coordinator's git runs in it again.
+if [ -d "$dest/.git" ]; then
+  say "lock $dest/.git to $coord before its git runs there"
+  lock_git_dir
+fi
+
 say "clone $repo into $dest as $coord (authenticated by the App, through the credential helper)"
 run_as "$coord" '
   export WORKLANE_INSTANCE="$1"
+  # As the engine runs an instance git (src/os/git.ts, #926): no system or global config, and never on a config that
+  # names a command or a host for git (the same keys as its REFUSED_KEYS; test/git-config-guard.test.ts ties them).
+  export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null
+  refused="^(include\.path|includeif\..*\.path|filter\..*\.(clean|smudge|process)|diff\..*\.(command|textconv)|merge\..*\.driver|(mergetool|difftool)\..*\.cmd|url\..*\.(insteadof|pushinsteadof)|remote\..*\.(uploadpack|receivepack|proxy|proxyauthmethod|vcs)|http\.(.*\.)?(ssl[a-z]*|proxy[a-z]*|schannel[a-z]*|pinnedpubkey|curloptresolve|extraheader|cookiefile|savecookies|followredirects)|core\.(worktree|gitproxy|hookspath)|submodule\..*\.update)$"
   # The instance is on the helper line itself: `sudo -u <coordinator> git ...` clears the environment.
   helper="!/usr/local/bin/worklane git-credential --instance $1"
   if [ ! -d "$2/.git" ]; then
     git -c credential.helper= -c "credential.helper=$helper" clone -q "https://github.com/$3.git" "$2"
   fi
   cd "$2"
+  # The listing first, on its own: a config git can not read stops here (set -e), never passes as clean.
+  listing="$(git config --list --name-only --show-scope --includes)"
+  planted="$(printf "%s\n" "$listing" | awk -F "\t" "\$1 != \"command\" { print \$2 }" | grep -Ei "$refused" || true)"
+  if [ -n "$planted" ]; then
+    echo "refusing to run git in $2: its git config sets $(printf "%s" "$planted" | tr "\n" " ")which names a command or a host for git; take it out of .git/config (git config --unset ...), then run this again" >&2
+    exit 1
+  fi
   # Later fetches and pushes from this checkout use the App too; nothing else can authenticate here.
   git config --replace-all credential.helper ""
   git config --add credential.helper "$helper"
@@ -39,13 +75,11 @@ run_as "$coord" '
   git log -1 --format="checkout at %h (%s)"
 ' "$name" "$dest" "$repo"
 
-say "permissions: the code is group-writable for agents; the repo's git config and hooks are not"
+say "permissions: the code is group-writable for agents; .git/ is $coord's, but for objects/, refs/, logs/ and worktrees/"
 chgrp -R "$work" "$dest"
 chmod -R g+rwX "$dest"
 find "$dest" -type d -exec chmod g+s {} +
-chmod 0644 "$dest/.git/config"
-chmod 0755 "$dest/.git/hooks"
-find "$dest/.git/hooks" -type f -exec chmod 0755 {} +
+lock_git_dir
 
 say "Worklane config in the repo, and the guardrail hooks for $name's agent runs"
 # The hooks and permission rules go to the instance's agent settings, in the coordinator's own instance home (only

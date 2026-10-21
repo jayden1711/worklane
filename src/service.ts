@@ -4,6 +4,8 @@ import { PINS_FILE } from './experiments/store.js';
 import { AUTOMATIONS_FILE, AutomationsPolicy } from './automations/schema.js';
 import { githubGet } from './automations/github.js';
 import { execFileSync } from './os/child-process.js';
+import { GIT_GUARD_VAR } from './os/git.js';
+import { lockGitDir } from './os/git-dir-lock.js';
 import { readFileSync, statSync } from 'node:fs';
 import { checkRepoScope } from './github-scope.js';
 import { appBotIdentity, installationTokens } from './github-app.js';
@@ -142,6 +144,9 @@ export function instanceEnv(i: Instance, base: NodeJS.ProcessEnv = process.env):
   ];
   if (i.credentials.github.kind === 'gh-config-dir') {
     env.GH_CONFIG_DIR = i.credentials.github.path;
+    // #926: the guard (src/os/git.ts) reads no global config, where `gh auth setup-git` (credentials.sh) put gh's
+    // helper, and clears every helper a file names: git authenticates through gh's helper set here instead.
+    git.push(['credential.helper', ''], ['credential.helper', '!gh auth git-credential']);
   } else {
     // App mode: gh has no login to fall back on, and git gets each token from the App through a credential helper.
     env.GH_CONFIG_DIR = join(i.stateDir, 'no-gh-login');
@@ -155,6 +160,9 @@ export function instanceEnv(i: Instance, base: NodeJS.ProcessEnv = process.env):
   });
   if (i.credentials.claude) env.CLAUDE_CONFIG_DIR = i.credentials.claude.config_dir;
   env[`${BRAND.envPrefix}_INSTANCE`] = i.name;
+  // #926: every git this process runs (all through src/os/git.ts) is guarded: no system or global config, no command
+  // or host a config file names, and none run at all while a file sets one of those it can't set over.
+  env[GIT_GUARD_VAR] = '1';
   // INVARIANT: no inherited variable decides where the coordinator's children (gh, git, claude) send credentials;
   // only root's network.json sets a proxy (src/network.ts). This env becomes the coordinator's process.env.
   return outboundEnv(env);
@@ -198,6 +206,15 @@ export async function runInstanceCoordinator(name: string, opts: { once?: boolea
   if (missing.length) {
     console.error(`instance ${name} not started:\n${missing.map((m) => `  ${m}`).join('\n')}`);
     return 1;
+  }
+  // #926: agents run as another user in the checkout's group: its .git/ is this user's alone (but what their worktrees
+  // write), as checkout.sh leaves it, so an install from before is locked by its first start on this engine.
+  if (i.runAs) {
+    const unlocked = lockGitDir(i.repo.path);
+    if (unlocked.length) {
+      console.error(`instance ${name} not started: its checkout's .git/ can't be made this user's alone (#926):\n${unlocked.slice(0, 10).map((m) => `  ${m}`).join('\n')}\nrun scripts/setup/checkout.sh ${name} ${i.repo.repo} as root, which does it`);
+      return 1;
+    }
   }
   // Agents' guardrails: checked here so a missing install stops the instance at start, and again for every run.
   try {
