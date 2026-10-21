@@ -62,6 +62,20 @@ function log(root: string, file: string, entry: object) {
 
 const isAgent = (env: NodeJS.ProcessEnv) => env[`${BRAND.envPrefix}_AGENT`] === '1';
 
+/** The most of a PreToolUse reason the guard sends at each end (#894 review); the middle of a longer one is cut. */
+export const REASON_END_CHARS = 300;
+
+/**
+ * A deny or ask reason as the guard sends it. WHY (#894 review): a reason quotes the word it matched (a path, a
+ * pattern, a host), and the agent picks the word: padded (`./` 40,000 times before `.env`), it made an 80 KB deny.
+ * Every reason the guard sends goes through here, so a deny stays about 1 KB whatever the call: a reason over twice
+ * REASON_END_CHARS keeps its start (the word's) and its end (why it was refused), with the cut named.
+ */
+export function shownReason(reason: string): string {
+  if (reason.length <= 2 * REASON_END_CHARS) return reason;
+  return `${reason.slice(0, REASON_END_CHARS)}… (${reason.length - 2 * REASON_END_CHARS} characters cut) …${reason.slice(-REASON_END_CHARS)}`;
+}
+
 /**
  * The guardrails with the task's frozen paths (and its hidden ones, unreadable too) added. A task file that is named but can't be read or parsed is
  * an error, never "no frozen paths": the caller refuses the call rather than run without the guard.
@@ -87,18 +101,18 @@ function preToolUse(input: HookInput, env: NodeJS.ProcessEnv): HookOutput {
   const intakeRefusal = (tool: string) => (isAgent(env) && role === INTAKE_ROLE && !(INTAKE_TOOLS as readonly string[]).includes(tool) ? `intake runs may only use ${INTAKE_TOOLS.join(', ')}; ${tool} is refused` : null);
   if (isAgent(env) && (role === 'researcher' || role === INTAKE_ROLE) && researchRoot) {
     const why = intakeRefusal(input.tool_name ?? '') ?? researchModeRefusal(input.tool_name ?? '', input.tool_input ?? {}, cwd, researchRoot);
-    return why ? { stdout: JSON.stringify({ hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: `[${BRAND.cli}] ${why}` } }), exitCode: 0 } : { exitCode: 0 };
+    return why ? { stdout: JSON.stringify({ hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: `[${BRAND.cli}] ${shownReason(why)}` } }), exitCode: 0 } : { exitCode: 0 };
   }
   // A chat-channel run: its three read tools inside the checkout only, never a credential, key or .env file, and
   // nothing at all without its lane's root (fail closed). The project's guardrails below still apply on top.
   if (isAgent(env) && role === CHAT_ROLE) {
     const chatRoot = env[CHAT_ROOT_ENV];
     const why = chatRoot ? chatModeRefusal(input.tool_name ?? '', input.tool_input ?? {}, cwd, chatRoot) : `chat runs need their lane's root (${CHAT_ROOT_ENV}); refusing every call`;
-    if (why) return { stdout: JSON.stringify({ hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: `[${BRAND.cli}] ${why}` } }), exitCode: 0 };
+    if (why) return { stdout: JSON.stringify({ hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: `[${BRAND.cli}] ${shownReason(why)}` } }), exitCode: 0 };
   }
   const root = env.CLAUDE_PROJECT_DIR && existsSync(join(env.CLAUDE_PROJECT_DIR, BRAND.configDir)) ? env.CLAUDE_PROJECT_DIR : findProjectRoot(cwd);
   const decide = (permissionDecision: 'deny' | 'ask', reason: string): HookOutput => ({
-    stdout: JSON.stringify({ hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision, permissionDecisionReason: `[${BRAND.cli}] ${reason}` } }),
+    stdout: JSON.stringify({ hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision, permissionDecisionReason: `[${BRAND.cli}] ${shownReason(reason)}` } }),
     exitCode: 0,
   });
   if (!root) return isAgent(env) ? decide('deny', `no ${BRAND.configDir}/ found above ${cwd}`) : { exitCode: 0 };
