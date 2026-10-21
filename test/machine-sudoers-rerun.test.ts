@@ -61,6 +61,10 @@ ensure_instance_home() {
   printf 'version: 1\\nbudget: { daily_usd: 20 }\\nagents: { max_workers: 2 }\\nland_mode: pr\\nauto_merge: false\\n' > "$d/policy.yaml"
 }
 claude_login_ok() { :; }
+# The policy step's root ownership (#726), stood in as add-project.test.ts does: root's once owned.
+own_policy() { touch "$T/owned-$1"; }
+policy_root_ok() { [ -e "$T/owned-$1" ]; }
+POLICY_ROOT_DIR="$T/policy-root"
 install_claude_token() {
   mkdir -p "$T/homes/$1/.claude"
   { printf '{"claudeAiOauth":{"accessToken":"'; cat; printf '"}}'; } > "$T/homes/$1/.claude/.credentials.json"
