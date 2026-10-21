@@ -182,6 +182,13 @@ test('attack: with a signature program configured, any log or show before a comm
   }
 });
 
+test('attack: with a diff filter configured, an interactive staging step before a commit refuses it', { skip }, async () => {
+  const a = checkout();
+  git(a, 'config', 'interactive.diffFilter', program());
+  writeFileSync(join(a, 'notes.md'), 'edit\n');
+  await refused(a, 'echo y | git add -p notes.md && git commit -am x', NOT_RUN);
+});
+
 test('attack: a nested checkout the line stages is checked like a submodule', { skip }, async () => {
   const a = checkout();
   const sub = join(a, 'sub');

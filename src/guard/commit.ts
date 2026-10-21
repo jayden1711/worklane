@@ -993,7 +993,9 @@ export function commitPlan(command: string, p: PlanEnv): CommitPlan | null {
         const read = gitWords(c.words);
         if (STAGING.has(read.sub ?? '')) staging = true;
         const words = read.rest.map((w) => w.text);
-        if (read.sub === 'diff' || read.sub === 'show' || (read.sub === 'log' && logShowsDiffs(words)) || (read.sub === 'status' && words.some((t) => t.startsWith('-') && !STATUS_NO_DIFF.test(t)))) reads.diffReads = true;
+        // WHY: an interactive staging step shows each change as a diff (through any filter the config names) first.
+        const interactive = read.sub === 'add' && words.some((t) => /^-[a-zA-Z]*[pi]/.test(t) || /^--(p|pa|pat|patc|patch|i|in|int|inte|inter|intera|interac|interact|interacti|interactiv|interactive)$/.test(t));
+        if (interactive || read.sub === 'diff' || read.sub === 'show' || (read.sub === 'log' && logShowsDiffs(words)) || (read.sub === 'status' && words.some((t) => t.startsWith('-') && !STATUS_NO_DIFF.test(t)))) reads.diffReads = true;
         if (read.sub === 'log' || read.sub === 'show') reads.logReads = true;
         if (words.some((t) => t.includes('%G') || /^--show-sig/.test(t))) reads.signatureReads = true;
         // WHY: a read in another checkout runs under that checkout's config; its programs are checked there too.

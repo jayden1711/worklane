@@ -314,7 +314,7 @@ function storedAsOnDisk(top: string, paths: string[]) {
 }
 
 /** Config that names a program git runs to show a change as a diff. */
-const DIFF_PROGRAM_KEYS = [/^diff\.external$/, /^diff\..+\.(textconv|command)$/];
+const DIFF_PROGRAM_KEYS = [/^diff\.external$/, /^diff\..+\.(textconv|command)$/, /^interactive\.difffilter$/];
 /** Config that names a program git runs to check a signature. */
 const SIGNATURE_PROGRAM_KEY = /^gpg\.(.+\.)?program$/;
 const FILTER_KEY = /^filter\.(.+)\.(clean|smudge|process)$/;
