@@ -14,7 +14,8 @@
     - Either directory holds more than 500 symlinks.
   - Any other link out of the home is allowed. Examples are a skeleton's `~/.ghcup -> /usr/local/.ghcup` (writable by everyone on a CI runner) and `~/.bash_history -> /dev/null`.
     - Inside this agent's sandbox, what the link reaches is read-only.
-    - Every directory on its way is pinned there, so none can be renamed away and recreated.
+    - Every directory on its way is pinned there, so none can be renamed away and recreated. That includes the way to a device it ends at, except under `/dev`: binding `/dev` would cost the sandbox its devices, and the directories there that others can write are sticky.
+    - The home's own way is always pinned too, so a directory above the home can't be renamed away and the home's path recreated.
     - That holds only in this agent user's sandboxes. If a directory the link reaches can be written by other users, they still can write it. That includes another instance's agent user, through its own project commands. On such a machine, give the agent user a skeleton without that link.
   - A link that stays inside the home all the way is fine too.
   - A link that reaches `/`, or a directory that holds the command's working directory, is refused: it can't be made read-only without taking the command's own directory with it.
@@ -38,7 +39,7 @@
   - a dangling link passes through a directory the agent can write;
   - a cache is a link.
 
-  Any other link is allowed. Every directory above what it reaches is pinned, and the target itself is bound read-only.
+  Any other link is allowed. Every directory above what it reaches is pinned, and the target itself is bound read-only. A device target isn't bound (writing it plants nothing), but the directories above it are pinned, except under `/dev`. The home itself and every directory above it are always pinned.
 
   A project command can't write the home, nor anything an allowed link in it reaches. Three things fall outside that:
   - a link deeper in the home whose way out the agent user can change (After install);

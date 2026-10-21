@@ -752,7 +752,7 @@ const LINUX_SANDBOX = [
   'note() { [ -n "${said[$1]}" ] && return; said[$1]=1; bad+=("$1"); }',
   // (Set while a link in the home is checked (`links` below), $lk names it: the refusals then speak of that link.)
   `refuse() { local t; named[$1]=1; t=$("$rl" -- "$1" 2>/dev/null); if [ -n "$lk" ]; then note "project command not run: \${lk@Q} is a symlink in the agent user's home that leads through \${1@Q}, a symlink (to \${t@Q}) the agent user could re-aim (it owns or can write its directory): a command could point it elsewhere and write, through \${lk@Q}, what an agent-user process outside the sandbox reads later. Point \${lk@Q} at the real path, or remove it as the agent user: sudo -u $u rm -- \${lk@Q}"; return; fi; note "project command not run: \${1@Q} is a symlink (to \${t@Q}) the agent user could change (it owns or can write its directory), on the way to a credential its sandbox hides, so one project command could swap it for the next. If you didn't create it, remove it as the agent user: sudo -u $u rm -- \${1@Q}. If you did, replace it with a real directory the agent may read, or name the credential's real path in credentials.yaml"; }`,
-  `unres() { if [ -n "$lk" ]; then note "project command not run: \${lk@Q}, a symlink in the agent user's home, leads to a path that $2 (at \${cur:-/}); point it at the real path, or remove it as the agent user: sudo -u $u rm -- \${lk@Q}"; return; fi; note "project command not run: \${1@Q} $2; name the credential's real path in credentials.yaml"; }`,
+  `unres() { local at=\${cur:-/}; if [ -n "$lk" ]; then note "project command not run: \${lk@Q}, a symlink in the agent user's home, leads to a path that $2 (at \${at@Q}); point it at the real path, or remove it as the agent user: sudo -u $u rm -- \${lk@Q}"; return; fi; note "project command not run: \${1@Q} $2; name the credential's real path in credentials.yaml"; }`,
   // Link mode only (#798): a directory or file on a link's way, by the owner ($U) and cw the walk just worked out. In
   // the home it is read-only inside the sandbox (not the agent's to change there: cw=0). Elsewhere one the agent owns
   // is refused (OW, the first such path in OWAT): the agent's own files outside its home, fail closed. One it can
@@ -789,7 +789,10 @@ const LINUX_SANDBOX = [
   '    st "$cur/$c"',
   '    if [ "$S" -ne 0 ]; then',
   '      case $E in "No such file or directory"|"Not a directory") P=$cur/$c PW=$cw; return 1 ;; "Permission denied") if [ "$own" = 0 ]; then P=$cur/$c PW=$cw; return 1; fi',
-  '        unres "$1" "goes through a directory the agent user owns or can write but cannot search now (it could make it searchable again)"; return 2 ;; esac',
+    // (A link's walk starts in the home, the agent's own, so own is 1 from the start: any directory it can't search is
+  // refused there, root's too, and the refusal says only that.)
+  '        if [ -n "$lk" ]; then unres "$1" "goes through a directory the agent user can\'t search, so where it leads can\'t be checked"; else',
+  '        unres "$1" "goes through a directory the agent user owns or can write but cannot search now (it could make it searchable again)"; fi; return 2 ;; esac',
   '      unres "$1" "cannot be checked ($E)"; return 2',
   '    fi',
   '    case $T in',
@@ -812,8 +815,11 @@ const LINUX_SANDBOX = [
   'list() { local o; o=$("$fnd" "$1" -mindepth 1 -maxdepth 1 -name "$2" -printf "%f/" 2>/dev/null) || { unres "$1" "cannot be listed for its credential files"; return; }; while [ -n "$o" ]; do add "$1/${o%%/*}"; o=${o#*/}; done; }',
   // (A ~/.config that isn't a directory holds nothing to hide.) The home must be a directory other than /: the sandbox
   // makes it read-only (below), and with none to make read-only a command could create one and plant config in it.
+  // Its way is always pinned, the home and every directory above it bound onto itself, with or without a ~/.claude*
+  // mask to pin it: a read-only home is no use if a directory above it (the agent's own, under a writable one) can be
+  // renamed away and the home's path recreated (#798, round 5).
   'walk "$h"; hw=$?; hr= cfg=',
-  'if [ "$hw" -eq 0 ] && [ "$RT" = directory ] && [ "$R" != / ]; then hr=$R; list "$hr" ".claude*"; walk "$hr/.config"; if [ $? -eq 0 ] && [ "$RT" = directory ]; then cfg=$R; list "$R" "*-claude-key"; fi',
+  'if [ "$hw" -eq 0 ] && [ "$RT" = directory ] && [ "$R" != / ]; then hr=$R; above "$hr/."; list "$hr" ".claude*"; walk "$hr/.config"; if [ $? -eq 0 ] && [ "$RT" = directory ]; then cfg=$R; list "$R" "*-claude-key"; fi',
   `elif [ "$hw" -ne 2 ]; then note "project command not run: the agent user's home \${h@Q} is not a directory (other than /) its sandbox can make read-only, so a command could plant config there that the agent user reads outside the sandbox; set the instance's run_as.agent_home to the agent user's real home"; fi`,
   // INVARIANT (#798): the read-only home is only as good as where its links lead. Each symlink directly in the home or
   // directly in ~/.config is walked from the home, one component and one link at a time, with walk's own rule for a
@@ -827,7 +833,8 @@ const LINUX_SANDBOX = [
   // - every directory above what the link reaches is pinned (bound onto itself, as add() pins a credential's way), so
   //   none can be renamed away and recreated (`~/.profile -> W/D/c`, W writable: `mv W/D` is refused), and what it
   //   reaches outside the home is bound read-only (lbinds): nothing under it is written through the link, nor
-  //   directly; a device (/dev/null) is left as it is (writing it plants nothing);
+  //   directly; a device (/dev/null) isn't bound (writing it plants nothing), but outside /dev the directories above
+  //   it are pinned all the same (`~/.x -> W/D/n`, n a device: `mv W/D` is refused);
   // - a dangling link is refused when any directory on its way outside the home is writable (a command could create
   //   its target, or rename a directory below it away and recreate it), else the directories above it are pinned;
   // - one reaching / or the command's working directory is refused (binding it read-only would take the command's
@@ -849,7 +856,12 @@ const LINUX_SANDBOX = [
   // A dangling link: nothing to bind, so refused when any directory on its way outside the home is one the agent can
   // write: a command could create the target there, or rename a directory below it away and recreate it (fail closed).
   `    if [ "$s" -eq 1 ]; then case $x in "$hr"|"$hr"/*) ;; *) if [ "$PW" = 1 ] || [ "$AW" = 1 ]; then note "project command not run: \${p@Q} is a symlink to \${x@Q}, which doesn't exist, on a way outside the agent user's home through a directory it can write: a command could create it there, for an agent-user process outside the sandbox to read later. Point it elsewhere, or remove it as the agent user: sudo -u $u rm -- \${p@Q}"; else above "$x"; fi ;; esac; continue; fi`,
-  '    case $x in "$hr"|"$hr"/*) continue ;; esac; [ "$RT" = "character special file" ] || [ "$RT" = "block special file" ] && continue',
+  // A device: no read-only bind (writing it plants nothing), but the directories above it are pinned first, so none
+  // can be renamed away and the device's path recreated as a file. Not under /dev: binding /dev onto itself costs the
+  // sandbox its devices (nodev), and /dev's writable directories (/dev/shm, /dev/mqueue) are sticky: no one renames
+  // root's directory there but root. (A link to /dev/null stays as cheap as it was.)
+  '    case $x in "$hr"|"$hr"/*) continue ;; esac',
+  '    if [ "$RT" = "character special file" ] || [ "$RT" = "block special file" ]; then case $x in /dev/*) ;; *) above "$x" ;; esac; continue; fi',
   `    case "$cwd/" in "$x"/*) note "project command not run: \${p@Q} is a symlink to \${x@Q}, outside the agent user's home, which holds the command's working directory: the sandbox can't make it read-only and still run the command there. Point it elsewhere, or remove it as the agent user: sudo -u $u rm -- \${p@Q}"; continue ;; esac`,
   `    [ "$x" = / ] && { note "project command not run: \${p@Q} is a symlink to /: the sandbox can't make that read-only and still run the command. Remove it as the agent user: sudo -u $u rm -- \${p@Q}"; continue; }`,
   // Every directory above the target pinned (as add() pins a credential's), then the target read-only.
