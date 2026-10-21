@@ -14,14 +14,13 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { parse } from 'yaml';
 import { BRAND } from '../src/brand.js';
+import { LOOKALIKE_BOUND_MS as BOUND_MS } from '../src/confusables.js';
 import { ReviewConfig } from '../src/config/schema.js';
 import { computeLevel, type ChangeFile } from '../src/review.js';
 import { repoRoot } from './helpers.js';
 
 /** The Arabic ligature sallallahou alayhe wasallam: one character, 18 in its compatibility form. */
 const LIGATURE = 'ﷺ';
-/** The bound this test holds one computeLevel call to, in ms (measured at about 2.7 s at most on a loaded machine). */
-const BOUND_MS = 6_000;
 const engine = () => ReviewConfig.parse(parse(readFileSync(join(repoRoot, BRAND.configDir, 'review.yaml'), 'utf8')));
 
 test('#763 round 8: the ligature here is one Arabic character that is 18 characters in its compatibility form', () => {

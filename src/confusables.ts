@@ -14,20 +14,59 @@ import { CONFUSABLES } from './confusables-data.js';
 export const MAX_CHECKED_PATH = 1024;
 /** The longest skeleton compared (a character can map to up to 18): a path whose skeleton is longer counts as a look-alike. */
 export const MAX_CHECKED_SKELETON = 4096;
-/** The longest run of combining marks compared (UAX #15's stream-safe limit): a path with a longer one counts as a look-alike. */
+/**
+ * The longest run of combining marks normalized (UAX #15's stream-safe limit): a path with a longer one, as written or
+ * in any string the check normalizes (normalized), counts as a look-alike.
+ */
 export const MAX_MARK_RUN = 30;
-const MARK_RUN = new RegExp(`\\p{M}{${MAX_MARK_RUN + 1}}`, 'u');
+/**
+ * The halfwidth katakana voiced and semi-voiced sound marks, written as themselves: letter modifiers, not combining
+ * marks, yet their NFKC form is a combining mark of a nonzero class, so normalizing joins them to the run of marks
+ * before them (#763 round 9). test/confusable-mark-runs.test.ts checks every code point: these two are the only
+ * characters outside \p{M} whose NFKC form starts with a non-starter, and every non-starter is \p{M}.
+ */
+export const HALFWIDTH_SOUND_MARKS = 'ﾞﾟ';
+/** A run of characters that are combining marks or whose NFKC form starts with one (a non-starter). */
+const MARKS = new RegExp(`[\\p{M}${HALFWIDTH_SOUND_MARKS}]+`, 'gu');
+/**
+ * Whether `s` has a run of more than MAX_MARK_RUN marks (MARKS), counted in characters. One pass: each run is matched
+ * once, greedily (#763 round 9: a pattern of 31 marks retried from every mark of a run, 160 microseconds on a
+ * 1,000-character path of runs of 30, measured, where this takes about 9).
+ */
+function overMarkRun(s: string): boolean {
+  MARKS.lastIndex = 0;
+  for (let m = MARKS.exec(s); m; m = MARKS.exec(s)) if (m[0].length > MAX_MARK_RUN && [...m[0]].length > MAX_MARK_RUN) return true;
+  return false;
+}
+/** Thrown by normalized for a string with a longer run than MAX_MARK_RUN; lookalikeOf holds the path for it. */
+class MarkRunOver extends Error {}
+/**
+ * INVARIANT (#763 round 9): every normalization in this module is this call, so the run limit applies to the exact
+ * string normalized, whichever path variant (with or without its blanks) and pass (skeleton, NFKC) it comes from.
+ * Normalizing a run of marks sorts it, in time that grows with the square of its length in V8 (measured by the
+ * round-8 delta check: 1,000 marks out of order cost 431 microseconds a call, 4,096 cost 6.5 ms). Before round 9 only the
+ * path as written was checked: runs of 30 split by blanks joined in the blank-free variant, and the halfwidth sound
+ * marks (not \p{M}) joined the marks around them under NFKC. test/confusable-mark-runs.test.ts checks that no other
+ * line of this module normalizes.
+ */
+function normalized(s: string, form: 'NFD' | 'NFKC'): string {
+  if (overMarkRun(s)) throw new MarkRunOver(`a run of more than ${MAX_MARK_RUN} combining marks`);
+  return s.normalize(form);
+}
 /**
  * The work one change's look-alike check may do, in steps (PAIR_COST, WALK_COST, FORM_CHAR_COST below), charged as
  * the work is done. Once it is overdrawn, the path being compared and every further path count as look-alikes, not
- * compared (#763 rounds 6 to 8). Measured in the PR (round 8, scratchpad probes on a loaded 16-core machine): a step
- * costs about 0.2 to 1.1 ns across the 20 shapes probed (short and long paths, inside and outside ASCII, few or 400
- * globs, globs that keep the walk alive, characters whose forms grow 7 or 18 times, runs of 30 combining marks), so
- * spending the budget takes at most about 2.2 s; the slowest single computeLevel measured, crafted to spend it, took
- * about 2.7 s (main's own category matching included). A change of every file in this repo doesn't spend it. How
- * fast another machine spends it is a guess.
+ * compared (#763 rounds 6 to 8). Sized so that spending it all keeps one computeLevel within LOOKALIKE_BOUND_MS. A
+ * change of every file in this repo doesn't spend it.
  */
 export const LOOKALIKE_BUDGET = 2_000_000_000;
+/**
+ * The time bound (#763 round 9), in ms: one computeLevel, its look-alike check included, budget spent or not. The
+ * timing tests (test/confusable-time-bound.test.ts, test/confusable-expanding.test.ts and
+ * test/confusable-mark-runs.test.ts) hold the slowest shapes found in review to it, each in a child process. Held on
+ * the machines those tests run on; how fast another machine is, is a guess.
+ */
+export const LOOKALIKE_BOUND_MS = 6_000;
 
 let table: Map<number, string> | undefined;
 /** Each character's prototype, read once from the generated table: one mapping a line, the character then its prototype. */
@@ -45,7 +84,7 @@ function prototypes(): Map<number, string> {
 const IGNORABLE = /^\p{Default_Ignorable_Code_Point}$/u;
 
 /** The combining dot above, taken from an e with a dot above (written as itself) so no code point number is needed. */
-export const COMBINING_DOT_ABOVE = 'ė'.normalize('NFD').slice(1);
+export const COMBINING_DOT_ABOVE = normalized('ė', 'NFD').slice(1);
 /** The dotless i, which a combining dot above turns into a plain-looking i. */
 const DOTLESS_I = 'ı';
 /** A character whose own dot hides a combining dot above after it (Soft_Dotted: i, j and kin), or the dotless i. */
@@ -61,7 +100,7 @@ export function skeleton(s: string, cap = Infinity): string {
   const t = prototypes();
   let out = '';
   let base = '';
-  for (const ch of s.normalize('NFD')) {
+  for (const ch of normalized(s, 'NFD')) {
     if (IGNORABLE.test(ch)) continue;
     if (!/^\p{M}$/u.test(ch)) base = ch;
     else if (ch === COMBINING_DOT_ABOVE && HIDES_DOT(base)) continue;
@@ -69,7 +108,7 @@ export function skeleton(s: string, cap = Infinity): string {
     // Past `cap` the caller compares nothing (#763 round 8): stop here, over it, rather than build the rest.
     if (out.length > cap) return out;
   }
-  return out.normalize('NFD');
+  return normalized(out, 'NFD');
 }
 
 /**
@@ -87,7 +126,7 @@ const nonAscii = (s: string): boolean => /\P{ASCII}/u.test(s);
  * The compatibility form (NFKC): a fullwidth or mathematical letter as the plain one, which UTS #39's table leaves to
  * NFKC. Compared as well as the path itself: it only ever adds matches.
  */
-const compat = (s: string): string => s.normalize('NFKC');
+const compat = (s: string): string => normalized(s, 'NFKC');
 
 /**
  * The braille pattern with no dots: it shows as a blank, yet it is neither a format nor a default-ignorable character
@@ -394,7 +433,14 @@ function formOf(g: Ready['globs'][number], f: Form): readonly [Compiled, Compile
   if (!c) {
     formed += 2 * (g.glob.length + 1);
     const form = FORMS[f];
-    c = [compiled(globParts(mapGlob(g.glob, form))), compiled(globParts(mapGlob(g.glob, (s) => reading(form(s)))))] as const;
+    try {
+      c = [compiled(globParts(mapGlob(g.glob, form))), compiled(globParts(mapGlob(g.glob, (s) => reading(form(s)))))] as const;
+    } catch (e) {
+      // The protected glob's own text has the long run (the owner's config): say so, not that the path has it (the path
+      // is still not compared). Its text isn't quoted: a reason shows it raw.
+      if (e instanceof MarkRunOver) throw new Error(`a protected glob (${g.what}) has ${e.message}`);
+      throw e;
+    }
     g.forms.set(f, c);
   }
   return c;
@@ -437,10 +483,11 @@ export type Lookalike = { like: string } | { unchecked: string };
  */
 export function lookalikeOf(path: string, patterns: readonly Protected[], budget?: { left: number }): Lookalike | null {
   if (path.length > MAX_CHECKED_PATH) return { unchecked: `longer than ${MAX_CHECKED_PATH} characters` };
-  // Normalizing a run of combining marks sorts it, in time that grows faster than its length (#763 round 8, measured:
-  // 1,000 marks out of order cost about 1.6 ns a budget unit where everything else costs at most 1.1). A run longer
-  // than Unicode's stream-safe limit (UAX #15: 30) isn't compared: no name needs one.
-  if (MARK_RUN.test(path)) return { unchecked: `it has a run of more than ${MAX_MARK_RUN} combining marks` };
+  // Normalizing a run of combining marks sorts it, in time that grows faster than its length (#763 round 8). A run
+  // longer than Unicode's stream-safe limit (UAX #15: 30) isn't compared: no name needs one. Here the path as
+  // written; normalized checks every string the check normalizes too (round 9: a run that only forms once blanks are
+  // taken out, or under NFKC).
+  if (overMarkRun(path)) return { unchecked: `it has a run of more than ${MAX_MARK_RUN} combining marks` };
   try {
     const r = readied(patterns);
     if (r.refused) return { unchecked: r.refused.refused };
@@ -449,6 +496,9 @@ export function lookalikeOf(path: string, patterns: readonly Protected[], budget
     const wide = nonAscii(path);
     const bare = withoutBlanks(path);
     const variants = bare === path ? [path] : [path, bare];
+    // The blank-free variant's runs before any form is made (round 9): normalized would refuse it anyway, after the
+    // path's own forms.
+    if (bare !== path && overMarkRun(bare)) throw new MarkRunOver('without its blanks');
     const kinds = wide ? WIDE_FORMS : ASCII_FORMS;
     // Each form once, pass by pass, and its reading once, each charged FORM_CHAR_COST a character of what it reads and
     // makes, before and as it is made (#763 rounds 7 and 8). A pass over MAX_CHECKED_SKELETON stops it: not compared.
@@ -515,6 +565,7 @@ export function lookalikeOf(path: string, patterns: readonly Protected[], budget
     }
     return null;
   } catch (e) {
+    if (e instanceof MarkRunOver) return { unchecked: `it has a run of more than ${MAX_MARK_RUN} combining marks once its blanks are taken out or it is normalized` };
     return { unchecked: `the check failed: ${(e as Error).message}` };
   }
 }

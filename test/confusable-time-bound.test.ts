@@ -12,11 +12,9 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { parse } from 'yaml';
 import { BRAND } from '../src/brand.js';
+import { LOOKALIKE_BOUND_MS as BOUND_MS } from '../src/confusables.js';
 import { ReviewConfig } from '../src/config/schema.js';
 import { repoRoot } from './helpers.js';
-
-/** The bound this test holds one computeLevel call to, in ms (measured at about 2.5 s at most on a loaded machine). */
-const BOUND_MS = 6_000;
 const LEVELS = { L0_auto: { when: ['docs-only', 'tests-only'], max_lines: 200 }, L1_evaluator: { when: ['app-non-money'], max_lines: 400, max_files: 10 }, L2_notify: { when: ['dependency'] } };
 
 /** computeLevel's wall time and level for `count` paths of one shape, under `cfg` and the money list `money`, in a child process. */
