@@ -92,6 +92,7 @@ export const CHECK_TABLES: readonly CheckTable[] = [
   { path: 'src/hook-imports.ts', table: 'HOOK_IMPORTS', kind: 'never-shrink' },
   { path: 'src/delegation.ts', table: 'NEVER_LOOSEN', kind: 'never-shrink' },
   { path: 'src/guardrails/engine.ts', table: 'BUILTIN_PROTECTED', kind: 'never-shrink' },
+  { path: `scripts/machine/${BRAND.cli}-machine.cjs`, table: 'POLICY_ONLY', kind: 'never-shrink' },
   { path: 'scripts/push-gate-hook.mjs', table: 'GATE_RULES', kind: 'never-shrink' },
   { path: 'scripts/push-gate-hook.mjs', table: 'GATE_CODE', kind: 'never-shrink' },
   { path: 'scripts/push-gate.mjs', table: 'ATTRIBUTION', kind: 'never-shrink' },
@@ -121,6 +122,7 @@ export const LINT_TESTS: readonly string[] = [
   'test/claude-credential-guard.test.ts',
   'test/download-retry.test.ts',
   'test/owner-terminal-removed.test.ts',
+  'test/policy-edit.test.ts',
   'test/testrun-measure.test.ts',
   'test/update-helpers.test.ts',
   'test/web-buttons.test.ts',
@@ -273,6 +275,9 @@ export const MARKERS: readonly string[] = [
   'swiftlint:disable', 'rubocop:disable', 'rubocop:todo', 'istanbul ignore', 'c8 ignore', 'v8 ignore', 'pragma: no cover',
   'nosec', 'nosemgrep', 'NOSONAR', 'gitleaks:allow', '@SuppressWarnings', '@Suppress(', '#pragma warning disable', 'phpcs:ignore', '@phpstan-ignore', '@psalm-suppress',
   'shellcheck disable', 'stylelint-disable', 'yamllint disable', 'hadolint ignore',
+  // A test selected less: a declared runtime import turns tests that ran on every change into selected ones
+  // (src/testrun/affected.ts, #881).
+  'runtime-import:',
 ];
 /** MARKERS as one regex of escaped literal alternatives (no quantifier): the same substrings, in one pass per line. */
 const MARK = new RegExp(MARKERS.map((m) => m.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|'));

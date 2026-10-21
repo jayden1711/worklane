@@ -165,7 +165,7 @@ const GUARD_ENTRIES = ['src/hook.ts', 'src/hook-main.ts'];
 // lanes' rules in src/guard/, the guardrails and their config loader with every config section it validates, the
 // secret scan, the OS adapter) or because one of those imports it.
 const GUARD_TREE = [
-  'src/adapters/railway.ts', 'src/automations/cron.ts', 'src/automations/schema.ts', 'src/backlog/types.ts', 'src/brand.ts',
+  'src/ack-reason.ts', 'src/adapters/railway.ts', 'src/automations/cron.ts', 'src/automations/schema.ts', 'src/backlog/types.ts', 'src/brand.ts',
   'src/check-source.ts', 'src/checkout.ts', 'src/ci-none.ts', 'src/comment-policy.ts', 'src/config/load.ts', 'src/config/schema.ts', 'src/contract.ts',
   'src/cross-eval.ts', 'src/dashboard-auth.ts', 'src/dashboard-key-paths.ts', 'src/delegation.ts', 'src/deploy-gate/config.ts',
   'src/events/types.ts', 'src/experiments/paths.ts', 'src/governor-holds.ts', 'src/guard/chat.ts', 'src/guard/intake.ts',
