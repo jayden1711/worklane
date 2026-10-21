@@ -49,6 +49,8 @@ test('a task\'s hidden directory is refused to Read, Glob, Grep, NotebookRead, L
     ['Glob a brace pattern that names it', 'Glob', { pattern: '{src,evals-secret}/**' }],
     ['Glob from the root, its files match', 'Glob', { pattern: '**/*.py' }],
     ['Glob through a symlink to it', 'Glob', { pattern: '*', path: 'peek' }],
+    ['Glob with its file as the path, and a pattern that climbs out', 'Glob', { path: 'evals-secret/score.py', pattern: '../../src/*' }],
+    ['Glob with a backslash escape', 'Glob', { pattern: 'evals\\-secret/*' }],
     ['Grep its path', 'Grep', { pattern: 'EXPECTED', path: 'evals-secret' }],
     ['Grep a file in it', 'Grep', { pattern: 'EXPECTED', path: join(dir, 'evals-secret', 'score.py') }],
     ['Grep with no path (the root holds it)', 'Grep', { pattern: 'EXPECTED' }],
@@ -59,6 +61,9 @@ test('a task\'s hidden directory is refused to Read, Glob, Grep, NotebookRead, L
     ['Grep the root with a brace glob that names it', 'Grep', { pattern: 'EXPECTED', glob: '{src,evals-secret}/**' }],
     ['Grep the root with a glob it cannot read', 'Grep', { pattern: 'EXPECTED', glob: '[es]*/**' }],
     ['Grep through a symlink to it', 'Grep', { pattern: 'EXPECTED', path: 'peek' }],
+    ['Grep the root with a backslash escape in its glob', 'Grep', { pattern: 'EXPECTED', glob: 'score\\.py' }],
+    ['Grep the root with a glob that may be split at a space', 'Grep', { pattern: 'EXPECTED', glob: '*.ts *.py' }],
+    ['Grep the root with a glob that may be split at a comma', 'Grep', { pattern: 'EXPECTED', glob: '*.md,score.py' }],
     ['NotebookRead in it', 'NotebookRead', { notebook_path: 'evals-secret/nb.ipynb' }],
     ['LS it', 'LS', { path: join(dir, 'evals-secret') }],
     ['LS the root', 'LS', { path: dir }],
@@ -95,6 +100,7 @@ test('a task\'s hidden directory leaves every other read alone', async () => {
     ['Grep the source', 'Grep', { pattern: 'price', path: 'src' }],
     ['Grep the root with a glob no hidden file matches', 'Grep', { pattern: 'price', glob: '*.js' }],
     ['Grep the root with an anchored glob elsewhere', 'Grep', { pattern: 'price', glob: 'src/**' }],
+    ['Grep the root with a comma inside braces', 'Grep', { pattern: 'price', glob: '*.{js,md}' }],
     ['Grep a sibling whose name starts the same', 'Grep', { pattern: 'price', path: 'evals' }],
     ['LS the source', 'LS', { path: join(dir, 'src') }],
     ['Bash ls the source', 'Bash', { command: 'ls src' }],
@@ -138,16 +144,52 @@ test('a project\'s secret files: a Glob or Grep that would list or search them i
   assert.equal(decide('Bash', { command: 'ls *' }), 'none', "the shell's * does not start a dot-name");
 });
 
-test('a directory too large to check is refused for a Glob or Grep over it when a secret could be in it, never let through', () => {
+/** A tree of `dirs` directories of 1,000 empty files each. */
+function bigTree(dirs: number): string {
   const p = mkdtempSync(join(tmpdir(), 'big-'));
-  for (let d = 0; d < 21; d++) {
+  for (let d = 0; d < dirs; d++) {
     mkdirSync(join(p, `d${d}`));
     for (let f = 0; f < 1000; f++) writeFileSync(join(p, `d${d}`, `f${f}`), '');
   }
+  return p;
+}
+
+test('a directory too large to check is refused for a Glob or Grep over it when a secret could be in it, never let through', () => {
+  const p = bigTree(21);
   const g = GuardrailsConfig.parse({ version: 1, rules: [], secret_paths: ['**/.env'], examples: { must_block: [], must_ask: [], must_allow: [] } });
   const decide = (input: Record<string, unknown>) => evaluate({ tool: 'Grep', input, cwd: p }, g, { ...exampleContext(g, p, true), home: join(p, 'no-home') });
   const v = decide({ pattern: 'x' });
   assert.equal(v.decision, 'deny');
   assert.match(v.reason ?? '', /too large to check/);
   assert.equal(decide({ pattern: 'x', path: 'd3' }).decision, 'none', 'a narrower path is checked and let through');
+});
+
+// WHY (#887 review): the agent hook times out at 30 s, and a hook that times out doesn't block the call. So one call's
+// walks share one budget: many wildcard words over a tree just under the cap are refused fast, never walked one by one.
+test('one call\'s walks share one budget: many wildcard words over a large tree are refused, well within the hook\'s timeout', () => {
+  const p = bigTree(18);
+  // `**/.env` matches anywhere (as the built-in held-out and dashboard-key globs do), so each word walks the tree.
+  const g = GuardrailsConfig.parse({ version: 1, rules: [], secret_paths: ['evals-secret/**', '**/.env'], examples: { must_block: [], must_ask: [], must_allow: [] } });
+  const command = `ls ${Array.from({ length: 100 }, () => '*/*').join(' ')} ; cat evals-secre?/score.py`;
+  const started = Date.now();
+  const v = evaluate({ tool: 'Bash', input: { command }, cwd: p }, g, { ...exampleContext(g, p, true), home: join(p, 'no-home') });
+  const ms = Date.now() - started;
+  assert.equal(v.decision, 'deny', v.reason);
+  assert.match(v.reason ?? '', /too large to check/);
+  assert.ok(ms < 10_000, `the check took ${ms} ms`);
+});
+
+test('a secret glob with a literal start is walked whole: its files under node_modules are found from above, at and below it', () => {
+  const p = mkdtempSync(join(tmpdir(), 'cfg-'));
+  mkdirSync(join(p, 'cfg', 'node_modules', 'x'), { recursive: true });
+  writeFileSync(join(p, 'cfg', 'node_modules', 'x', 'token'), 'secret\n');
+  mkdirSync(join(p, 'src'));
+  writeFileSync(join(p, 'src', 'a.ts'), 'x\n');
+  const g = GuardrailsConfig.parse({ version: 1, rules: [], secret_paths: ['cfg/**/token', '**/.env'], examples: { must_block: [], must_ask: [], must_allow: [] } });
+  const decide = (tool: string, input: Record<string, unknown>) => evaluate({ tool, input, cwd: p }, g, { ...exampleContext(g, p, true), home: join(p, 'no-home') }).decision;
+  assert.equal(decide('Grep', { pattern: 'secret', glob: 'token' }), 'deny', 'from the root');
+  assert.equal(decide('Grep', { pattern: 'secret', path: 'cfg' }), 'deny', 'at its start');
+  assert.equal(decide('Glob', { pattern: '**/token', path: 'cfg' }), 'deny', 'a Glob at its start');
+  assert.equal(decide('Grep', { pattern: 'secret', path: 'cfg/node_modules' }), 'deny', 'below its start');
+  assert.equal(decide('Grep', { pattern: 'secret', path: 'src' }), 'none', 'elsewhere');
 });

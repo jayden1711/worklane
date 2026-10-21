@@ -10,13 +10,18 @@ import type { SimpleCommand } from './shell.js';
 /**
  * One place a call reaches. `path`: a file or directory it reads or writes (a directory counts for what is under it).
  * `tree`: a directory it lists or searches, every entry under it that one of `filter` matches (globs relative to it;
- * null: every entry; `shell`: as the shell expands a word, where a wildcard never starts a dot-name). `unchecked`: a
- * request the guard can't place, refused.
+ * null: every entry; `expand: 'word'`: as the shell expands a word, where a wildcard never starts a dot-name).
+ * `unchecked`: a request the guard can't place, refused.
  */
-export type Access = { kind: 'path'; target: string } | { kind: 'tree'; target: string; filter: string[] | null; shell?: true } | { kind: 'unchecked'; why: string };
+export type Access = { kind: 'path'; target: string } | { kind: 'tree'; target: string; filter: string[] | null; expand?: 'word' } | { kind: 'unchecked'; why: string };
 
-/** The most entries one call's secret check walks; past that, the call needs a narrower path. */
+/** The most entries one call's secret check walks, over all its accesses; past that, the call is refused. */
 export const WALK_LIMIT = 20_000;
+/**
+ * WHY (#887 review): the most time one call's walks take, well under the agent hook's 30 s timeout (src/install.ts),
+ * past which the call is refused: a hook that times out doesn't block the call.
+ */
+export const WALK_MS = 5_000;
 
 /** The known tools' fields that hold only text, or that Glob, Grep and LS place themselves. Every other string a call holds is a path. */
 const TEXT_FIELDS: Record<string, readonly string[]> = {
@@ -86,24 +91,48 @@ function split(path: string): { literal: string[]; rest: string[] } {
  * point), the rest filters under it. With no base (a shell word), the target stays as written, for the check to
  * resolve against the call's directory and the home directory.
  */
-function patternAccess(base: string | null, alt: string, shell = false): Access {
+function patternAccess(base: string | null, alt: string, asShell = false): Access {
   const { literal, rest } = split(alt);
   const target = isAbsolute(alt) ? resolve('/', ...literal) : base === null ? literal.join('/') || '.' : resolve(base, ...literal);
   if (rest.includes('..')) return { kind: 'unchecked', why: `a pattern with .. after a wildcard (${alt}) can't be checked for secret files; name the directory instead` };
   if (!rest.length) return { kind: 'path', target };
-  return shell ? { kind: 'tree', target, filter: [rest.join('/')], shell: true } : { kind: 'tree', target, filter: [rest.join('/')] };
+  return asShell ? { kind: 'tree', target, filter: [rest.join('/')], expand: 'word' } : { kind: 'tree', target, filter: [rest.join('/')] };
 }
 
+/** WHY (#887 review): glob and ripgrep read a backslash as an escape, which the guard's globs don't; so it's refused, not misread. */
+const escaped = (pattern: string, field: string): Access | null =>
+  pattern.includes('\\') ? { kind: 'unchecked', why: `a ${field} with a backslash (${pattern}) can't be checked for secret files; write it without one` } : null;
+
 function globAccesses(input: Record<string, unknown>, cwd: string): Access[] {
-  const base = resolve(cwd, str(input.path) ?? '.');
-  const alts = alternatives(str(input.pattern) ?? '**');
-  return alts ? alts.map((a) => patternAccess(base, a)) : [{ kind: 'tree', target: base, filter: null }];
+  const path = str(input.path);
+  const base = resolve(cwd, path ?? '.');
+  // The path is checked as a path too, whatever the pattern points at: an absolute or `..` pattern leaves it (#887 review).
+  const own: Access[] = path ? [{ kind: 'path', target: base }] : [];
+  const pattern = str(input.pattern) ?? '**';
+  const bad = escaped(pattern, 'Glob pattern');
+  if (bad) return [...own, bad];
+  const alts = alternatives(pattern);
+  return [...own, ...(alts ? alts.map((a) => patternAccess(base, a)) : [{ kind: 'tree' as const, target: base, filter: null }])];
+}
+
+/** A comma outside braces, or whitespace: a glob some reader may split into several. */
+function mayBeSeveral(glob: string): boolean {
+  let depth = 0;
+  for (const c of glob) {
+    if (c === '{') depth++;
+    else if (c === '}') depth = Math.max(0, depth - 1);
+    else if ((c === ',' && depth === 0) || /\s/.test(c)) return true;
+  }
+  return false;
 }
 
 function grepAccesses(input: Record<string, unknown>, cwd: string): Access[] {
   const base = resolve(cwd, str(input.path) ?? '.');
   const glob = str(input.glob);
-  const alts = glob ? alternatives(glob) : null;
+  const bad = glob ? escaped(glob, 'Grep glob') : null;
+  if (bad) return [bad];
+  // WHY (#887 review): whether the glob reaches ripgrep as one --glob or several is undocumented, so such a glob filters nothing.
+  const alts = glob && !mayBeSeveral(glob) ? alternatives(glob) : null;
   if (!alts) return [{ kind: 'tree', target: base, filter: null }];
   // ripgrep matches a glob without a slash against each name at any depth, and one with a slash against the path
   // under the searched directory. Both readings are checked, so neither is the one that slips through.
@@ -239,6 +268,8 @@ interface Glob {
   /** Where its matches start (the literal directories it names; "/" for a project glob that starts with `**`), and the glob segments under that. */
   at: string;
   rest: Segs;
+  /** It names a directory to start from: a walk for it never skips .git or node_modules (#887 review). */
+  literalStart: boolean;
 }
 
 function parseGlob(g: string, ctx: SecretContext): Glob | null {
@@ -249,7 +280,7 @@ function parseGlob(g: string, ctx: SecretContext): Glob | null {
   if (rest.endsWith('/')) rest += '**';
   const s = split(rest);
   const anywhere = !home && !s.literal.length && (s.rest[0] ?? '').includes('**');
-  return { base, homeOnly: home, re: globToRegExp(rest), at: anywhere ? '/' : resolve(base, ...s.literal), rest: segsOf(s.rest) };
+  return { base, homeOnly: home, re: globToRegExp(rest), at: anywhere ? '/' : resolve(base, ...s.literal), rest: segsOf(s.rest), literalStart: s.literal.length > 0 };
 }
 
 /**
@@ -259,8 +290,13 @@ function parseGlob(g: string, ctx: SecretContext): Glob | null {
 export class Secrets {
   private readonly pos: Glob[];
   private readonly neg: Glob[];
+  /** One budget for every walk of the call this instance checks (WALK_LIMIT entries, WALK_MS); spent, every later walk refuses. */
+  private seen = 0;
+  private readonly deadline: number;
 
-  constructor(globs: string[], private readonly ctx: SecretContext) {
+  /** One instance per tool call: its walk budget is the call's. */
+  constructor(globs: string[], private readonly ctx: SecretContext, limits: { ms?: number } = {}) {
+    this.deadline = Date.now() + (limits.ms ?? WALK_MS);
     const parse = (g: string) => {
       const p = parseGlob(g, ctx);
       return p ? [p] : [];
@@ -289,26 +325,33 @@ export class Secrets {
 
   /**
    * Where a search of `dir` has to walk to see every secret it could reach: a glob's start under `dir` (walked whole),
-   * or `dir` itself (skipping .git and node_modules, as the chat lane's walk does) for a glob that can match under it
-   * from above. A start inside another walked one adds nothing.
+   * or `dir` itself for a glob that can match under it from above. Only a glob with no literal start (one that starts with `**`, or `.env.*`)
+   * lets that walk skip .git and node_modules, as the chat lane's walk does. A root inside another walked one adds
+   * nothing, unless that one skips what this one must not.
    */
   private walkRoots(dir: string): { root: string; skip: boolean }[] {
     const roots = new Map<string, boolean>();
     for (const g of this.pos) {
       if (g.at !== dir && within(dir, g.at)) roots.set(g.at, false);
-      else if (within(g.at, dir) && reachesUnder(g.rest, posixRel(g.at, dir).split('/').filter(Boolean))) roots.set(dir, roots.get(dir) ?? true);
+      else if (within(g.at, dir) && reachesUnder(g.rest, posixRel(g.at, dir).split('/').filter(Boolean))) roots.set(dir, (roots.get(dir) ?? true) && !g.literalStart);
     }
     const all = [...roots].map(([root, skip]) => ({ root, skip }));
-    const covered = (r: string, o: { root: string; skip: boolean }) => o.root !== r && within(o.root, r) && (!o.skip || !posixRel(o.root, r).split('/').some((s) => SKIPPED.has(s)));
-    return all.filter((r) => !all.some((o) => covered(r.root, o)));
+    const covered = (r: { root: string; skip: boolean }, o: { root: string; skip: boolean }) =>
+      o.root !== r.root && within(o.root, r.root) && (!o.skip || (r.skip && !posixRel(o.root, r.root).split('/').some((s) => SKIPPED.has(s))));
+    return all.filter((r) => !all.some((o) => covered(r, o)));
+  }
+
+  /** Whether the call's walk budget is spent (counting one more entry). */
+  private spent(): boolean {
+    return ++this.seen > WALK_LIMIT || (this.seen % 64 === 0 && Date.now() > this.deadline);
   }
 
   /**
    * The first secret a listing or search of `dir` reaches (an entry one of `filter` matches, relative to `dir`),
-   * 'too-large' past WALK_LIMIT entries, or null. It goes down only into directories that could hold a match.
+   * 'too-large' once the call's walk budget is spent, or null. It goes down only into directories that could hold a match.
    */
   private inTree(dir: string, filter: Filter[] | null): string | 'too-large' | null {
-    let seen = 0;
+    if (Date.now() > this.deadline) return 'too-large';
     const wanted = (rel: string, isDir: boolean) => !filter || filter.some((f) => f.re.test(rel) || (isDir && f.re.test(`${rel}/`)));
     const holds = (rel: string) => !filter || filter.some((f) => reachesUnder(f.segs, rel.split('/').filter(Boolean)));
     for (const { root, skip } of this.walkRoots(dir)) {
@@ -318,7 +361,7 @@ export class Secrets {
       if (first) stack.push(first);
       while (stack.length) {
         const { p, link, isDir, inSecret: above } = stack.pop()!;
-        if (++seen > WALK_LIMIT) return 'too-large';
+        if (this.spent()) return 'too-large';
         const inSecret = above || (link && this.at(real(p)));
         const rel = posixRel(dir, p);
         if (p !== dir && (inSecret || this.at(p)) && wanted(rel, isDir)) return p;
@@ -354,10 +397,10 @@ export class Secrets {
       return null;
     }
     if (!isDir) return null;
-    const filter = a.filter?.map((f) => filterOf(f, a.shell === true)) ?? null;
+    const filter = a.filter?.map((f) => filterOf(f, a.expand === 'word')) ?? null;
     for (const dir of new Set([abs, real(abs)])) {
       const hit = this.inTree(dir, filter);
-      if (hit === 'too-large') return `${a.target} is too large to check for secret or hidden files (over ${WALK_LIMIT} entries); give ${tool} a narrower path`;
+      if (hit === 'too-large') return `${a.target}: this call is too large to check for secret or hidden files (over ${WALK_LIMIT} entries or ${WALK_MS / 1000} s in all); give ${tool} a narrower path, or fewer patterns`;
       if (hit) return `a ${tool} of ${a.target}${a.filter ? ` (${a.filter.join(', ')})` : ''} would reach ${hit}, a secret or hidden path; agents never read them. Give it a narrower path, or a glob that leaves it out`;
     }
     return null;

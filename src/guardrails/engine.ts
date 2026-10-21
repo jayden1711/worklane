@@ -227,8 +227,10 @@ export function evaluate(call: ToolCall, cfg: GuardrailsConfig, ctx: EvalContext
   // shell argument. WHY (#847): every tool's paths come from one classification (access.ts), so none is checked for
   // Read only, and a tool the guard doesn't know is checked on all it is given.
   if (cfg.secret_paths.length) {
+    // One instance per call: its walks share one budget. Paths first, so a cheap refusal never waits on a walk.
     const secrets = new Secrets(cfg.secret_paths, ctx);
-    for (const a of callAccesses(call.tool, call.input, call.cwd, commands)) {
+    const accesses = callAccesses(call.tool, call.input, call.cwd, commands);
+    for (const a of [...accesses.filter((x) => x.kind !== 'tree'), ...accesses.filter((x) => x.kind === 'tree')]) {
       const why = secrets.reached(a, call.cwd, call.tool);
       if (why) return { decision: 'deny', rule: 'secret-path', reason: why };
     }
