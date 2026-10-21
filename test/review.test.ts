@@ -169,13 +169,15 @@ const GUARD_TREE = [
   'src/check-source.ts', 'src/checkout.ts', 'src/ci-none.ts', 'src/comment-policy.ts', 'src/config/load.ts', 'src/config/schema.ts', 'src/contract.ts',
   'src/cross-eval.ts', 'src/dashboard-auth.ts', 'src/dashboard-key-paths.ts', 'src/delegation.ts', 'src/deploy-gate/config.ts',
   'src/events/types.ts', 'src/experiments/paths.ts', 'src/governor-holds.ts', 'src/guard/chat.ts', 'src/guard/intake.ts',
-  'src/guard/research.ts', 'src/guardrails/context.ts', 'src/guardrails/engine.ts', 'src/guardrails/fingerprint.ts',
+  'src/guard/research.ts', 'src/guardrails/access.ts', 'src/guardrails/context.ts', 'src/guardrails/engine.ts', 'src/guardrails/fingerprint.ts',
   'src/guardrails/glob.ts', 'src/guardrails/push-hook.ts', 'src/guardrails/shell.ts', 'src/held-out-paths.ts', 'src/hook-imports.ts',
   'src/hook-main.ts', 'src/hook.ts', 'src/model-routing.ts', 'src/network.ts', 'src/optimize.ts', 'src/os/child-process.ts', 'src/os/index.ts',
   'src/os/own-env.ts', 'src/os/system-paths.ts', 'src/os/system-root-guard.ts', 'src/path-text.ts', 'src/preview/config.ts', 'src/project-env.ts',
   'src/provider-hosts.ts', 'src/providers.ts', 'src/quiet-sqlite.ts', 'src/review.ts', 'src/roles.ts', 'src/routing.ts',
   'src/scan/secrets.ts', 'src/slot-file.ts', 'src/stage-names.ts', 'src/testrun/affected.ts', 'src/testrun/config.ts',
   'src/testrun/fetch.ts', 'src/testrun/network.ts', 'src/testrun/select.ts', 'src/tool-path.ts',
+  // The deadline's holder for a PreToolUse call (src/hook-main.ts imports it).
+  'src/hook-deadline.ts',
 ];
 
 /** The modules the tree reached before #785 and no longer does: the lanes' modules, and the runner's, through src/stage-label.ts. */
@@ -199,17 +201,19 @@ test("regression: the agents' tool guard's import tree is exactly its pinned mod
 });
 
 // The runtime half of the pin: what the guard's own process really loads, by node's module loader, not by a reading
-// of the source. Its process is src/hook-main.ts, what every installed hook command runs (the test below).
+// of the source. Its process is src/hook-main.ts, what every installed hook command runs (the test below). A PreToolUse
+// call runs two (src/hook-deadline.ts): the deadline's holder, and the guard deciding in a child of it; the watch
+// follows node into both (the child gets its node arguments) and each appends what it loaded under its own arguments.
 test("regression: the guard's process loads only modules of its pinned tree, and none that left it (#785)", () => {
   assert.equal(typeof (nodeModule as { registerHooks?: unknown }).registerHooks, 'function', "this node has no module.registerHooks (node 22.15 or later), so the guard's loads can't be watched");
   const dir = mkdtempSync(join(tmpdir(), 'guard-loads-'));
   const preload = join(dir, 'watch.mjs');
   writeFileSync(preload, [
     "import { registerHooks } from 'node:module';",
-    "import { writeFileSync } from 'node:fs';",
+    "import { appendFileSync } from 'node:fs';",
     'const seen = new Set();',
     'registerHooks({ load(url, context, next) { seen.add(url); return next(url, context); } });',
-    "process.on('exit', () => writeFileSync(process.env.GUARD_LOADS_LOG, [...seen].join('\\n')));",
+    "process.on('exit', () => appendFileSync(process.env.GUARD_LOADS_LOG, ['process ' + process.argv.slice(2).join(' '), ...seen, ''].join('\\n')));",
   ].join('\n'));
   const dist = pathToFileURL(join(repoDir, 'dist', 'src')).href + '/';
   // WHY (#839 review): a lazy import loads only on the path that takes it, so the calls go past the guard's early exits:
@@ -242,6 +246,13 @@ test("regression: the guard's process loads only modules of its pinned tree, and
     assert.ok(loaded.includes('src/hook-main.ts') && loaded.includes('src/hook.ts'), `${name}: the watch saw the guard load (${loaded.length} modules)`);
     assert.deepEqual(loaded.filter((m) => !GUARD_TREE.includes(m)), [], `${name}: the guard's process loaded modules outside its pinned tree`);
     assert.deepEqual(loaded.filter((m) => LEFT_THE_TREE.includes(m)), [], name);
+    // The process Claude Code waits on for a PreToolUse call holds the deadline and runs no guard code (src/hook-deadline.ts).
+    if (event === 'pre-tool-use') {
+      const holder = readFileSync(log, 'utf8').split('process ').find((s) => s.startsWith(`${event}\n`));
+      assert.ok(holder, `${name}: the deadline's holder ran with the watch`);
+      const held = holder.split('\n').filter((u) => u.startsWith(dist)).map((u) => `src/${u.slice(dist.length).replace(/\.js$/, '.ts')}`);
+      assert.deepEqual(held.sort(), ['src/brand.ts', 'src/hook-deadline.ts', 'src/hook-main.ts', 'src/os/child-process.ts', 'src/os/own-env.ts', 'src/os/system-paths.ts', 'src/os/system-root-guard.ts', 'src/quiet-sqlite.ts'], `${name}: the deadline's holder loads only these`);
+    }
   }
 });
 
