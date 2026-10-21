@@ -5,11 +5,9 @@
 // leaves a SKILL.md that fails the skill lint.
 // The coordinator also runs pushProblems on each change before verifying it,
 // so a doomed change is caught before a long test run.
-import { existsSync, readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
 import { sizeFiles } from './coordinator/change-files.js';
 import { globToRegExp } from './guardrails/glob.js';
-import { gitExecFileSync, gitSpawnSync } from './os/git.js';
+import { gitExecFileSync, gitSnapshot, gitSpawnSync, type GitSnapshot } from './os/git.js';
 import { shownPath } from './path-text.js';
 import { lintSkill, SKILL_SECTIONS } from './skill-lint.js';
 import { defaultBranchRefusal, type PushGuard } from './push-guard.js';
@@ -31,38 +29,73 @@ const list = (paths: string[], n = 10) => `${paths.slice(0, n).join(', ')}${path
 /** Changed paths in a problem's text, each as shownPath shows it (#683): `rev-list --objects` prints a name as it is. */
 const listPaths = (paths: string[], n = 10) => list(paths.map(shownPath), n);
 
+/** The refusal for a range the push limits can't read whole (#807). */
+const cutRefusal = (why: string) =>
+  `this repo's history is cut inside the range (${why}): the push limits can't read it whole, so nothing is pushed. A shallow clone pushes only changes above its cut; fetch the rest (git fetch --unshallow), or remove a .git/shallow file nobody meant to write`;
+
+/** base and head as commit ids, read in the repo (the snapshot has no refs). Throws as git does on a bad name. */
+const commitIds = (cwd: string, base: string, head: string): [string, string] =>
+  [base, head].map((r) => git(cwd, ['rev-parse', '--verify', '--end-of-options', `${r}^{commit}`]).trim()) as [string, string];
+
 /**
- * Why the range can't be read whole, or null (#807). A shallow repo's `shallow` file lists commits whose parents git
- * then treats as missing, and any agent can write it into the shared repo: a commit listed inside the range cuts the
- * walks below short (a refused file in an earlier commit read as 0 problems, measured). A cut outside the range (a
- * depth-limited clone's base, the harness-eval replay's clone) leaves the range whole and is fine. Fails closed: a
- * shallow file or range it can't read is a refusal too. WHY not `--shallow-file`: it is git's internal option.
+ * Why base..head can't be read whole in `snap`, or null (#807). A shallow repo's `shallow` file lists commits whose
+ * parents git treats as missing, and any agent can write it into the shared repo: a commit listed inside the range cut
+ * the walks short (a refused file in an earlier commit read as 0 problems, measured). A cut outside the range (a
+ * depth-limited clone's base, the harness-eval replay's clone) leaves the range whole and is fine.
  */
-export function shallowCut(cwd: string, range: string): string | null {
-  const refuse = (why: string) =>
-    `this repo's history is cut inside the range (${why}): the push limits can't read it whole, so nothing is pushed. A shallow clone pushes only changes above its cut; fetch the rest (git fetch --unshallow), or remove a .git/shallow file nobody meant to write`;
+function cutIn(snap: GitSnapshot, base: string, head: string): string | null {
+  const inRange = snap.cutInRange(base, head);
+  return inRange.length ? cutRefusal(`a shallow boundary at ${inRange.slice(0, 3).map((c) => c.slice(0, 12)).join(', ')}`) : null;
+}
+
+/** A gitSnapshot of `cwd`, or the refusal when one can't be taken (a shallow file it can't read the way git might). */
+function snapshotOf(cwd: string): GitSnapshot | string {
   try {
-    const file = resolve(cwd, gitExecFileSync(['rev-parse', '--git-path', 'shallow'], { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim());
-    if (!existsSync(file)) return null;
-    const cut = new Set(readFileSync(file, 'utf8').split('\n').map((l) => l.trim()).filter(Boolean));
-    if (!cut.size) return null;
-    const inRange = git(cwd, ['rev-list', range]).split('\n').filter((c) => cut.has(c));
-    return inRange.length ? refuse(`a shallow boundary at ${inRange.slice(0, 3).map((c) => c.slice(0, 12)).join(', ')}`) : null;
+    return gitSnapshot(cwd);
   } catch (e) {
-    return refuse(`can't read its shallow file: ${String((e as Error).message).split('\n')[0]}`);
+    return cutRefusal(String((e as Error).message).split('\n')[0]!);
   }
 }
 
-/** Every reason the range base..head may not be pushed; empty means it may. */
+/**
+ * Why `cwd`'s history is cut inside base..head right now, or null: the check checkedPush makes once more right before
+ * the push. Fails closed.
+ */
+export function shallowCut(cwd: string, base: string, head: string): string | null {
+  const snap = snapshotOf(cwd);
+  if (typeof snap === 'string') return snap;
+  try {
+    const [b, h] = commitIds(cwd, base, head);
+    return cutIn(snap, b, h);
+  } finally {
+    snap.dispose();
+  }
+}
+
+/**
+ * Every reason the range base..head may not be pushed; empty means it may. Every walk of the range reads one
+ * gitSnapshot, the one whose shallow file was checked, so a cut written or removed while they run changes nothing
+ * (#927: toggling it every ~3 ms beat the old before-and-after checks in 23 of 150 runs, measured).
+ */
 export function pushProblems(cwd: string, base: string, head: string, limits: PushLimits): string[] {
+  const snap = snapshotOf(cwd);
+  if (typeof snap === 'string') return [snap];
+  try {
+    return judge(cwd, snap, ...commitIds(cwd, base, head), limits);
+  } finally {
+    snap.dispose();
+  }
+}
+
+function judge(cwd: string, snap: GitSnapshot, base: string, head: string, limits: PushLimits): string[] {
+  const cut = cutIn(snap, base, head);
+  if (cut) return [cut];
   const range = `${base}..${head}`;
-  // Before the walks (a cut already there) and again after them (one written while they ran): a cut range is judged
-  // by nothing else.
-  const before = shallowCut(cwd, range);
-  if (before) return [before];
+  // The range's walks, through the snapshot.
+  const walk = (args: string[], input?: string) => gitExecFileSync(args, { env: snap.env, encoding: 'utf8', maxBuffer: 256 * MB, stdio: ['pipe', 'pipe', 'pipe'], ...(input !== undefined ? { input } : {}) });
   const problems: string[] = [];
   // Paths touched by any commit in the range, not just the net diff.
-  const touched = [...new Set(git(cwd, ['log', '--format=', '--name-only', '--no-renames', '--diff-merges=first-parent', range]).split('\n').filter(Boolean))];
+  const touched = [...new Set(walk(['log', '--format=', '--name-only', '--no-renames', '--diff-merges=first-parent', range]).split('\n').filter(Boolean))];
 
   const workflows = touched.filter((p) => p.startsWith(WORKFLOWS));
   if (workflows.length) problems.push(`changes CI workflows (${listPaths(workflows)}): the harness's GitHub credential has no Workflows permission, so GitHub refuses this push; a human makes workflow changes`);
@@ -73,7 +106,7 @@ export function pushProblems(cwd: string, base: string, head: string, limits: Pu
 
   // Every blob new in the range, with its path: a file added and then deleted is still pushed.
   const paths = new Map<string, string>();
-  for (const l of git(cwd, ['rev-list', '--objects', range]).split('\n')) {
+  for (const l of walk(['rev-list', '--objects', range]).split('\n')) {
     const [sha, ...p] = l.split(' ');
     if (sha && p.length) paths.set(sha, p.join(' '));
   }
@@ -81,7 +114,7 @@ export function pushProblems(cwd: string, base: string, head: string, limits: Pu
   if (objects.length) {
     const limit = limits.max_file_mb * MB;
     const big: string[] = [];
-    for (const l of git(cwd, ['cat-file', '--batch-check=%(objecttype) %(objectname) %(objectsize)'], `${objects.join('\n')}\n`).split('\n')) {
+    for (const l of walk(['cat-file', '--batch-check=%(objecttype) %(objectname) %(objectsize)'], `${objects.join('\n')}\n`).split('\n')) {
       const [type, sha, size] = l.split(' ');
       if (type === 'blob' && Number(size) > limit) big.push(`${shownPath(paths.get(sha!) ?? sha!)} (${(Number(size) / MB).toFixed(1)} MB)`);
     }
@@ -103,8 +136,7 @@ export function pushProblems(cwd: string, base: string, head: string, limits: Pu
     if (lint.length) badSkills.push(`${shownPath(p)} (${lint.join('; ')})`);
   }
   if (badSkills.length) problems.push(`has skills that fail the skill lint: ${list(badSkills, 5)}. Every SKILL.md needs these sections, none empty: ${SKILL_SECTIONS.join(', ')}`);
-  const after = shallowCut(cwd, range);
-  return after ? [after] : problems;
+  return problems;
 }
 
 export type PushResult = { ok: true } | { ok: false; refused: string[] } | { ok: false; error: string };
@@ -123,7 +155,7 @@ export function checkedPush(o: { cwd: string; remote: string; base: string; head
   const refused = pushProblems(o.cwd, o.base, o.head, o.limits);
   if (refused.length) return { ok: false, refused };
   // Once more right before the push, in this process: a cut written since the limits ran (#807).
-  const late = shallowCut(o.cwd, `${o.base}..${o.head}`);
+  const late = shallowCut(o.cwd, o.base, o.head);
   if (late) return { ok: false, refused: [late] };
   const lease = o.expect ? [`--force-with-lease=${o.ref}:${o.expect}`] : [];
   const push = gitSpawnSync(['push',...lease, o.remote, `${o.force ? '+' : ''}${o.head}:${o.ref}`], { cwd: o.cwd, encoding: 'utf8' });
