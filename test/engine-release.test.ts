@@ -7,7 +7,7 @@
 // so nothing after it (install into /opt, links) is ever reached; those commands are tripwires anyway.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawnSync } from './script-child-process.js';
+import { spawnSync } from 'node:child_process';
 import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';

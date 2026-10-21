@@ -2,7 +2,7 @@
 // verifies and whose commit is a release commit. Real git, a real SSH signing key, a throwaway repo.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawnSync } from './script-child-process.js';
+import { spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';

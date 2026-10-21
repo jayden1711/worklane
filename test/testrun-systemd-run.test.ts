@@ -7,7 +7,7 @@
 // against probe.stderr.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawnSync } from './script-child-process.js';
+import { spawnSync } from 'node:child_process';
 import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';

@@ -3,7 +3,7 @@
 // root; the CI step "updates.sh --add-check, as root" in ci-slow.yml runs the real script on real systemd as root.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawnSync } from './script-child-process.js';
+import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';

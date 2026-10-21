@@ -3,7 +3,7 @@
 // sudoers are proven on a real host as root: .github/workflows/ci-slow.yml, add-project (real systemd).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn, spawnSync } from './script-child-process.js';
+import { spawn, spawnSync } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';

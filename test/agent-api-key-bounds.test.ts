@@ -5,7 +5,7 @@
 //   and only this instance's key place there; other-keys fails closed on a key it can see that isn't the agent's alone.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawnSync } from './script-child-process.js';
+import { spawnSync } from 'node:child_process';
 import { chmodSync, closeSync, constants, linkSync, mkdirSync, openSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { AGENT, canHide, coordinatorView, engineInstance, KEY, machine, posix, tokenStep } from './api-key-fixtures.js';

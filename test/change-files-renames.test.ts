@@ -5,7 +5,7 @@
 // The same class: a path git C-quotes (a non-ASCII byte, a tab, a quote, a backslash) or one with a newline in it.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync, spawnSync } from './script-child-process.js';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';

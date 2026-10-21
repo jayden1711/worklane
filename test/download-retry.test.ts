@@ -3,7 +3,7 @@
 // download that installs something tries a passing 5xx again; the checksum after it is unchanged and still decides.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFile } from './script-child-process.js';
+import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { createServer } from 'node:http';
 import { mkdtempSync, readdirSync, readFileSync } from 'node:fs';

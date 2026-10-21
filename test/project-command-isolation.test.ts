@@ -6,7 +6,7 @@
 // without the `sudo -n -u <agent> --` in front of it), and its "home" is a temp dir holding planted stand-in keys.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn, spawnSync } from './script-child-process.js';
+import { spawn, spawnSync } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir, userInfo } from 'node:os';
 import { join } from 'node:path';

@@ -4,7 +4,7 @@
 // PolicyRootDeps.rootUid), and the real root (uid 0) where the coordinator user's own file must be refused.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn, spawnSync } from './script-child-process.js';
+import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { chmodSync, copyFileSync, existsSync, linkSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { createRequire, syncBuiltinESMExports } from 'node:module';

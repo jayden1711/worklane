@@ -6,7 +6,7 @@ import { PolicyFile } from '../src/instance.js';
 import { instructionEvalReasons, mergeDecision, waitCategoriesOf, type InstructionEvalResult, type MergeInput } from '../src/merge-policy.js';
 import { buildReport } from '../src/reports.js';
 import { AGENT_INSTRUCTIONS, computeLevel, DEFAULT_CATEGORIES, LOCKED_CATEGORIES, SELF_MODIFICATION, SELF_MODIFICATION_PARTS, selfModificationPart } from '../src/review.js';
-import { execFileSync } from './script-child-process.js';
+import { execFileSync } from 'node:child_process';
 import { globToRegExp } from '../src/guardrails/glob.js';
 import { loosenedProblems } from '../src/delegation.js';
 import { repoRoot } from './helpers.js';

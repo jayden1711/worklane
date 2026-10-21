@@ -6,6 +6,7 @@
 // the same in the script, the helper and the engine.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { spawn, spawnSync } from 'node:child_process';
 import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
@@ -13,8 +14,9 @@ import { join } from 'node:path';
 import { addProjectNameOk, addProjectRepoOk } from '../src/machine.js';
 import { checkRootStep } from '../src/console/root-steps.js';
 import { repoRoot } from './helpers.js';
-// #991: every child here has recording stand-ins for sudo, systemctl and the other host tools ahead of the machine's.
-import { hostCalls, spawn, spawnSync } from './script-child-process.js';
+// #991: the preload (test/isolate.ts) gives every child recording stand-ins for the machine's host tools; this is
+// their record.
+import { hostCalls } from './isolate.js';
 
 const posix = process.platform !== 'win32';
 const setupDir = join(repoRoot, 'scripts', 'setup');

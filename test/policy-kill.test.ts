@@ -3,7 +3,7 @@
 // Stand-ins only, as in test/policy-edit.test.ts: "root" is this test's own uid; no test runs as root.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn, spawnSync } from './script-child-process.js';
+import { spawn, spawnSync } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { createRequire, syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';

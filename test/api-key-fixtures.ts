@@ -1,7 +1,7 @@
 // Shared stand-ins for the API-key login tests (#897, #904): an add-project machine in a temp dir, an instance home the
 // engine's CLI runs against (with a user database stand-in), and a server instance's setup steps as its coordinator
 // user sees them. Every host tool is a stand-in: no sudo, no claude, no systemd, no real user database.
-import { spawnSync } from './script-child-process.js';
+import { spawnSync } from 'node:child_process';
 import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';

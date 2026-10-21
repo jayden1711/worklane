@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { machineTool, spawnSync } from './script-child-process.js';
+import { spawnSync } from 'node:child_process';
+import { machineTool } from './isolate.js';
 import { generateKeyPairSync } from 'node:crypto';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';

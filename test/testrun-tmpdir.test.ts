@@ -3,7 +3,7 @@
 // FATAL "Socket path too long: /var/lib/<cli>-test/<name>/runs/<id>/tmp/org.chromium.Chromium.XXXXXX/SingletonSocket".
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync, spawnSync } from './script-child-process.js';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir, userInfo } from 'node:os';
 import { join } from 'node:path';
