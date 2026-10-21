@@ -71,7 +71,7 @@ import { sourceViewCommand } from './intake/source-view.js';
 import { intakeCheckCommand } from './intake/check.js';
 import { installService, stableNodePath, uninstallService } from './os/index.js';
 import { ownEnv } from './os/own-env.js';
-import { gitExecFileSync } from './os/git.js';
+import { gitExecFileSync, repoConfigRefusal } from './os/git.js';
 import { projectStateDir } from './guardrails/context.js';
 import { fileURLToPath } from 'node:url';
 
@@ -1119,6 +1119,22 @@ async function main(argv: string[]): Promise<number> {
       } finally {
         log.close();
       }
+    }
+
+    case 'git-config-check': {
+      // #926: scripts/setup/checkout.sh's check before its own git in an instance checkout: the engine's parser
+      // (configRefusal), so a shell can never read the listing differently. Exit 1, saying why, when it's refused.
+      const dir = sub;
+      if (!dir) {
+        console.error('usage: git-config-check <dir>');
+        return 2;
+      }
+      const why = repoConfigRefusal(dir);
+      if (why) {
+        console.error(`refusing to run git in ${dir}: ${why}`);
+        return 1;
+      }
+      return 0;
     }
 
     case 'git-credential': {

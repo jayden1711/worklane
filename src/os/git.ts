@@ -254,6 +254,15 @@ function preflight(file: string, args: readonly string[], cwd: string | URL | un
   return configRefusal(r.stdout);
 }
 
+/**
+ * Whether the repo at `dir` sets in its own config (local or worktree scope) a key a guarded git refuses, as a reason;
+ * null when nothing does. For scripts/setup/checkout.sh, through the CLI (`git-config-check`), before its own git runs
+ * there: the same listing and the same parser as the guard, so the two can never read a config differently.
+ */
+export function repoConfigRefusal(dir: string): string | null {
+  return preflight('git', gitArgs([]), dir, gitEnv());
+}
+
 /** Before gitleaks (which runs git itself) on `cwd`: why not, for an instance's process; null when it may run. */
 export function gitConfigRefusal(cwd?: string): string | null {
   const env = gitEnv();

@@ -3,7 +3,8 @@
 //   common dir it made, with its own config (remote.origin.url) and hooks: the guarded git pushed to the agent's
 //   remote, and in auto-config ran the agent's pre-commit and pre-push (measured on fc552f5d by the review). A marked
 //   git in a worktree is now pinned to the engine-known common dir, and refused when a link doesn't point there;
-// - auto-config runs with the coordinator's own hooks dir at command scope, never the repo's;
+// - auto-config runs with the checkout's own hooks dir by its absolute path at command scope (round 3), never one a
+//   rewritten link names;
 // - a system-level url.insteadOf (how a machine, or CI, routes github.com) still routes the coordinator's clone and
 //   its guarded fetch: system config is root's, not an agent's.
 import { test } from 'node:test';
@@ -117,14 +118,15 @@ for (const [route, plant] of Object.entries(ROUTES)) {
   });
 }
 
-test('#926 round 2: auto-config runs git with the coordinator\'s own hooks dir at command scope, never the repo\'s', () => {
+test("#926: auto-config runs git with the checkout's own hooks dir by its absolute path at command scope, never one a link names", () => {
   const fn = (autoConfig as Record<string, unknown>).autoConfigGitEnv as ((name: string, repo: string, home: string) => Record<string, string>) | undefined;
   assert.equal(typeof fn, 'function', 'serverAutoConfig names the git environment it runs with');
   const env = fn!('shop', '/srv/x/shop', '/var/lib/wl-shop');
   const pairs = Array.from({ length: Number(env.GIT_CONFIG_COUNT) }, (_, n) => [env[`GIT_CONFIG_KEY_${n}`], env[`GIT_CONFIG_VALUE_${n}`]]);
   const hooks = pairs.filter(([k]) => k === 'core.hooksPath');
   assert.equal(hooks.length, 1);
-  assert.ok(hooks[0]![1]!.startsWith('/var/lib/wl-shop/'),`an engine-owned dir in the instance home: ${hooks[0]![1]}`);
+  // Round 3: the checkout's own hooks (gitleaks pre-commit, the default-branch pre-push), as before #926.
+  assert.equal(hooks[0]![1], join('/srv/x/shop', '.git', 'hooks'));
   assert.equal(env[MARK], '/srv/x/shop', 'the mark names the checkout the links are checked against');
 });
 
@@ -141,6 +143,9 @@ test('#926 round 2: an engine-made worktree, unchanged, still works as the coord
 });
 
 // ---- A system-level url.insteadOf (root's /etc/gitconfig, here GIT_CONFIG_SYSTEM) still routes github.com ----
+
+/** `worklane` in checkout.sh's section: the built engine for its config check, nothing for the rest. */
+const ENGINE_STUB = `worklane() { if [ "$1" = git-config-check ]; then "${process.execPath}" "${join(repoRoot, 'dist', 'src', 'cli.js')}" "$@"; fi; }\n`;
 
 function mirror() {
   const base = mkdtempSync(join(tmpdir(), 'git-guard-mirror-'));
@@ -167,7 +172,7 @@ test("#926 round 2: checkout.sh's clone follows a system-level url.insteadOf (CI
   const sections = [...sh.matchAll(/run_as "\$coord" '\n([\s\S]*?)\n\s*' /g)].map((x) => x[1]!);
   const dest = join(m.base, 'srv', 'alpha');
   mkdirSync(join(m.base, 'srv'));
-  const r = execFileSync('bash', ['-c', `set -euo pipefail\nworklane() { :; }\n${sections[0]}`, '_', 'alpha', dest, 'example/alpha'], { encoding: 'utf8', env: m.env, stdio: ['ignore', 'pipe', 'pipe'] });
+  const r = execFileSync('bash', ['-c', `set -euo pipefail\n${ENGINE_STUB}${sections[0]}`, '_', 'alpha', dest, 'example/alpha'], { encoding: 'utf8', env: m.env, stdio: ['ignore', 'pipe', 'pipe'] });
   assert.match(r, /checkout at [0-9a-f]+ \(init\)/);
   assert.equal(git(dest, 'rev-parse', 'HEAD'), git(m.bare, 'rev-parse', 'main'));
 });
@@ -178,7 +183,7 @@ test("#926 round 2: checkout.sh's own check refuses a planted key in the checkou
   const section = [...sh.matchAll(/run_as "\$coord" '\n([\s\S]*?)\n\s*' /g)].map((x) => x[1]!)[0]!;
   const dest = join(m.base, 'srv', 'alpha');
   mkdirSync(join(m.base, 'srv'));
-  const run = () => execFileSync('bash', ['-c', `set -euo pipefail\nworklane() { :; }\n${section}`, '_', 'alpha', dest, 'example/alpha'], { encoding: 'utf8', env: m.env, stdio: ['ignore', 'pipe', 'pipe'] });
+  const run = () => execFileSync('bash', ['-c', `set -euo pipefail\n${ENGINE_STUB}${section}`, '_', 'alpha', dest, 'example/alpha'], { encoding: 'utf8', env: m.env, stdio: ['ignore', 'pipe', 'pipe'] });
   run();
   // A subsection with "=" and a space in it: the key is read whole, never cut at either.
   git(dest, 'config', 'url.https://evil.example/a=b c.insteadOf', 'https://github.com/example/alpha');

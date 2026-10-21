@@ -237,12 +237,11 @@ test('#926 the guard reads the listing git prints: each refused key, from a file
   assert.equal(configRefusal(row('command', 'include.path')), null);
   // core.hooksPath in a file is set over when the engine sets its own (the coordinator's hooks dir).
   assert.equal(configRefusal(row('local', 'core.hookspath') + row('command', 'core.hookspath')), null);
-  // The same keys in checkout.sh's own check (run as the coordinator before its pull): one list, two spellings.
+  // checkout.sh's own check (run as the coordinator before its pull) is this one, through the CLI: no second parser
+  // or key list in shell (round 3: a shell parser read a listing with control bytes differently).
   const sh = readFileSync(join(repoRoot, 'scripts', 'setup', 'checkout.sh'), 'utf8');
-  const ere = /^\s*refused="([^"]+)"$/m.exec(sh)?.[1];
-  assert.ok(ere, 'checkout.sh names the refused keys');
-  const shRefuses = (key: string) => new RegExp(ere!, 'i').test(key);
-  for (const k of [...refused, ...fine]) assert.equal(shRefuses(k), configRefusal(row('local', k)) !== null, `checkout.sh and the engine differ on ${k}`);
+  assert.match(sh, /^ {2}worklane git-config-check "\$2"$/m);
+  assert.doesNotMatch(sh, /refused=|--show-scope/);
 });
 
 test('#926 checkout.sh locks .git/ but what agents write, and refuses a symlink in it', { skip: process.platform === 'win32' && 'POSIX modes' }, () => {

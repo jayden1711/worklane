@@ -46,26 +46,17 @@ fi
 say "clone $repo into $dest as $coord (authenticated by the App, through the credential helper)"
 run_as "$coord" '
   export WORKLANE_INSTANCE="$1"
-  # As the engine runs an instance git (src/os/git.ts, #926): never on a repo config that names a command or a host
-  # for git (the same keys as its REFUSED_KEYS; test/git-config-guard.test.ts ties them). System config belongs to
-  # root and is read: it is how a machine (or the fake GitHub in CI) routes github.com, and the first clone, into a
-  # new directory, has no repo config to read. Only the repo config (local and worktree scope) is checked.
-  refused="^(include\.path|includeif\..*\.path|filter\..*\.(clean|smudge|process)|diff\..*\.(command|textconv)|merge\..*\.driver|(mergetool|difftool)\..*\.cmd|url\..*\.(insteadof|pushinsteadof)|remote\..*\.(uploadpack|receivepack|proxy|proxyauthmethod|vcs)|http\.(.*\.)?(ssl[a-z]*|proxy[a-z]*|schannel[a-z]*|pinnedpubkey|curloptresolve|extraheader|cookiefile|savecookies|followredirects)|core\.(worktree|gitproxy|hookspath)|submodule\..*\.update)$"
   # The instance is on the helper line itself: `sudo -u <coordinator> git ...` clears the environment.
   helper="!/usr/local/bin/worklane git-credential --instance $1"
   if [ ! -d "$2/.git" ]; then
     git -c credential.helper= -c "credential.helper=$helper" clone -q "https://github.com/$3.git" "$2"
   fi
   cd "$2"
-  # The listing first, on its own: a config git can not read stops here (set -e, pipefail), never passes as clean.
-  # NUL-separated (scope, then the key and its value on the next lines), as the engine reads it: a key never holds a
-  # newline, but a subsection may hold "=" or a space, so the key is all of the first line, nothing parsed out of it.
-  listing="$(git config --list --show-scope --includes -z | tr "\000\n" "\002\001")"
-  planted="$(printf "%s" "$listing" | awk -v RS="\002" -v FS="\001" "NR % 2 == 1 { s = \$0; next } s == \"local\" || s == \"worktree\" { print \$1 }" | grep -Ei "$refused" || true)"
-  if [ -n "$planted" ]; then
-    echo "refusing to run git in $2: its git config sets $(printf "%s" "$planted" | tr "\n" " ")which names a command or a host for git; take it out of .git/config (git config --unset ...), then run this again" >&2
-    exit 1
-  fi
+  # Issue #926: no git here on a repo config that names a command or a host for git, the guard keys of src/os/git.ts.
+  # The engine itself reads the listing (git-config-check, its own parser): no second parser in shell to disagree with
+  # it. It fails (and set -e stops this) on such a key, or on a config it can not read. System config belongs to root
+  # and is read, as git does: it is how a machine (or the fake GitHub in CI) routes github.com.
+  worklane git-config-check "$2"
   # Later fetches and pushes from this checkout use the App too; nothing else can authenticate here.
   git config --replace-all credential.helper ""
   git config --add credential.helper "$helper"

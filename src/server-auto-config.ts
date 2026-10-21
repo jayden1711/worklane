@@ -19,7 +19,6 @@ import { GITHUB_API } from './github-hosts.js';
 import { installationTokens } from './github-app.js';
 import { instanceConfigProblems, loadInstanceSetup, type PolicyFile } from './instance.js';
 import { machineOwners } from './machine-owners.js';
-import { coordinatorHooksDir } from './push-guard.js';
 import { writeOwnerOnly } from './os/index.js';
 import { coordinatorUser } from './setup/app-manifest.js';
 
@@ -124,21 +123,23 @@ export interface ServerAutoConfigLine {
 }
 
 /**
- * The git config auto-config runs with (#926), as the coordinator's (instanceEnv): the mark, naming the checkout a
- * worktree's git is pinned to; no credential helper but the App's; and the coordinator's own hooks dir (its instance
- * home, this user's only), never the repo's, whose hooks a rewritten worktree link could swap for an agent's.
+ * The git config auto-config runs with (#926): the mark, naming the checkout a worktree's git is pinned to; no
+ * credential helper but the App's; and the checkout's own hooks dir by its absolute path (`<checkout>/.git/hooks`,
+ * which checkout.sh's `install --git-hooks-only` fills, the gitleaks pre-commit and the default-branch pre-push, and
+ * locks to the coordinator), so its commit and push run those hooks as before #926, on a first install too, and never
+ * hooks a rewritten worktree link could name.
  */
-export function autoConfigGitPairs(name: string, home: string): [string, string][] {
+export function autoConfigGitPairs(name: string, repo: string): [string, string][] {
   return [
     ['credential.helper', ''],
     ['credential.helper', `!"${process.execPath}" "${fileURLToPath(new URL('./cli.js', import.meta.url))}" git-credential --instance ${name}`],
-    ['core.hooksPath', coordinatorHooksDir(home)],
+    ['core.hooksPath', join(repo, '.git', 'hooks')],
   ];
 }
 
 /** autoConfigGitPairs as an environment of its own, with the mark: what a git started by auto-config gets. */
-export function autoConfigGitEnv(name: string, repo: string, home: string): Record<string, string> {
-  const pairs = autoConfigGitPairs(name, home);
+export function autoConfigGitEnv(name: string, repo: string): Record<string, string> {
+  const pairs = autoConfigGitPairs(name, repo);
   const env: Record<string, string> = { [GIT_GUARD_VAR]: repo, GIT_CONFIG_COUNT: String(pairs.length) };
   pairs.forEach(([k, v], n) => {
     env[`GIT_CONFIG_KEY_${n}`] = k;
@@ -187,8 +188,8 @@ export async function serverAutoConfig(name: string, o: { answers?: Record<strin
   // #926: the checkout is agent-writable, and the agent user runs the project's commands in a scratch worktree of it.
   // While auto-config runs, this process is marked as its instance's, so every git it runs is guarded (src/os/git.ts),
   // as the coordinator's is: pinned to the checkout's own .git in that worktree, with the App's credential helper (the
-  // guard clears the one checkout.sh wrote into .git/config) and the coordinator's own hooks dir.
-  const unmark = markAsInstance(i.repo.path, autoConfigGitPairs(name, i.home));
+  // guard clears the one checkout.sh wrote into .git/config) and the checkout's own hooks (gitleaks, the pre-push).
+  const unmark = markAsInstance(i.repo.path, autoConfigGitPairs(name, i.repo.path));
   const r = await autoConfigure({
     root: i.repo.path,
     repo: i.repo.repo,
