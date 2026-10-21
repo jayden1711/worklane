@@ -142,5 +142,5 @@ test('merge decision: a tightening only: no input held before is mergeable with 
 });
 
 test('the gate\'s vacuity code is locked as the merge policy: a change to it waits for the owner', () => {
-  for (const p of ['src/merge-policy-vacuity.ts', 'src/vacuity.ts']) assert.equal(selfModificationPart(p), 'the merge policy', p);
+  for (const p of ['src/merge-policy-vacuity.ts', 'src/vacuity.ts', 'src/vacuity-read.ts']) assert.equal(selfModificationPart(p), 'the merge policy', p);
 });

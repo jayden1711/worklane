@@ -169,9 +169,31 @@ export function removeWorktree(o: WorktreeOptions, name: string): boolean {
   if (!owned(o).includes(path)) throw new Error(`refusing to remove ${path}: not created by ${BRAND.cli}`);
   spawnSync('git', ['worktree', 'remove', '--force', path], { cwd: o.repo, encoding: 'utf8' });
   spawnSync('git', ['worktree', 'prune'], { cwd: o.repo });
+  return removed(o, path);
+}
+
+/** Whether a worktree we removed is gone, from the disk and git's list; then off our ownership record. */
+function removed(o: WorktreeOptions, path: string): boolean {
   const gone = !existsSync(path) && !git(o.repo, 'worktree', 'list', '--porcelain').includes(`worktree ${path}\n`);
   if (gone) setOwned(o, owned(o).filter((p) => p !== path));
   return gone;
+}
+
+/**
+ * removeWorktree without blocking: `git worktree remove` (which deletes everything the worktree holds, however much a
+ * test left in it) and the prune run as child processes the event loop waits on (#784: the merge gate's coverage run).
+ */
+export async function removeWorktreeAsync(o: WorktreeOptions, name: string): Promise<boolean> {
+  const path = worktreePath(o, name);
+  if (!owned(o).includes(path)) throw new Error(`refusing to remove ${path}: not created by ${BRAND.cli}`);
+  const run = (args: string[]) => new Promise<void>((done) => {
+    const child = spawn('git', args, { cwd: o.repo, stdio: 'ignore' });
+    child.on('error', () => done());
+    child.on('close', () => done());
+  });
+  await run(['worktree', 'remove', '--force', path]);
+  await run(['worktree', 'prune']);
+  return removed(o, path);
 }
 
 /** Our worktrees still on disk (for startup cleanup of terminal tasks). */

@@ -50,7 +50,9 @@ function read(f: { root: string; cov: string }, cov = f.cov) {
   return { ...(JSON.parse(r.stdout.trim().split('\n').at(-1) ?? '{}') as { touched?: string[]; threw?: string; message?: string }), ms };
 }
 
-const coverageOf = (root: string, file: string) => JSON.stringify({ result: [{ url: pathToFileURL(join(root, file)).href, functions: [{ functionName: 'a', ranges: [{ count: 1 }] }] }] });
+// As V8 writes it for src/a.js ('export function a() { return 1; }\n', 34 characters): the module's top level over the
+// whole file, and the function a, which ran.
+const coverageOf = (root: string, file: string) => JSON.stringify({ result: [{ url: pathToFileURL(join(root, file)).href, functions: [{ functionName: '', ranges: [{ startOffset: 0, endOffset: 34, count: 1 }] }, { functionName: 'a', ranges: [{ startOffset: 7, endOffset: 33, count: 1 }] }] }] });
 
 test('hostile coverage: a FIFO named like a coverage file is refused at once, never waited on', { skip: posix }, () => {
   const f = fixture((cov) => execFileSync('mkfifo', [join(cov, 'evil.json')]));

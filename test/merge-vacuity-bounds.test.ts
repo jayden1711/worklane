@@ -30,9 +30,11 @@ test('source maps naming many made-up sources: the reader stops past its cap, at
   mkdirSync(join(root, 'src'));
   const scripts = [];
   for (let i = 0; i < 1100; i++) {
-    writeFileSync(join(root, 'dist', `m${i}.js`), `export function f${i}() { return ${i}; }\n`);
+    const text = `export function f${i}() { return ${i}; }\n`;
+    writeFileSync(join(root, 'dist', `m${i}.js`), text);
     writeFileSync(join(root, 'dist', `m${i}.js.map`), JSON.stringify({ version: 3, sources: Array.from({ length: 1000 }, (_, j) => `../src/made-up-${i}-${j}.ts`), mappings: '' }));
-    scripts.push({ url: pathToFileURL(join(root, 'dist', `m${i}.js`)).href, functions: [{ functionName: `f${i}`, ranges: [{ count: 1 }] }] });
+    // As V8 writes it: the module's top level over the whole file, and the function, which ran.
+    scripts.push({ url: pathToFileURL(join(root, 'dist', `m${i}.js`)).href, functions: [{ functionName: '', ranges: [{ startOffset: 0, endOffset: text.length, count: 1 }] }, { functionName: `f${i}`, ranges: [{ startOffset: 7, endOffset: text.length - 1, count: 1 }] }] });
   }
   const cov = join(root, '.cov');
   mkdirSync(cov);
@@ -63,7 +65,8 @@ test('vacuity.measured records only the touched files the PR changes: a map nami
   const files: Record<string, string> = {
     'src/price.ts': 'export function totalCents(items: { cents: number; qty: number }[]): number {\n  return items.reduce((s, { cents, qty }) => s + cents * qty, 0);\n}\n',
     'dist/price.js': 'export function totalCents(items) {\n  return items.reduce((s, { cents, qty }) => s + cents * qty, 0);\n}\n',
-    'dist/price.js.map': JSON.stringify({ version: 3, sources: ['../src/price.ts', ...Array.from({ length: 100 }, (_, i) => `../src/made-up-${i}.ts`)], mappings: '' }),
+    // Each of the build's three lines maps to the same line of src/price.ts (source 0); the other hundred are only named.
+    'dist/price.js.map': JSON.stringify({ version: 3, sources: ['../src/price.ts', ...Array.from({ length: 100 }, (_, i) => `../src/made-up-${i}.ts`)], mappings: 'AAAA;AACA;AACA' }),
     'test/dist.test.js': "import { test } from 'node:test';\nimport assert from 'node:assert/strict';\nimport { totalCents } from '../dist/price.js';\ntest('t', () => { assert.equal(totalCents([{ cents: 2, qty: 3 }]), 6); });\n",
   };
   for (const [p, text] of Object.entries(files)) {

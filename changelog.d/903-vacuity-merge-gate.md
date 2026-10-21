@@ -1,9 +1,10 @@
 ### Upgrading (from v0.5.2)
 
 - **A PR that changes app code waits for you unless its own tests are shown to run that code (#784).** Only a measured yes lets it auto-merge.
-  - Its tests are the test files it adds or changes and the `test:` files its task's `done_when` names. They must assert something.
-  - Each is run with `runner.one` under Node's V8 coverage, in a scratch worktree at the PR's head and off the coordinator's tick, and must call a function in at least one app file the PR changes.
-  - A test that runs a build (`dist/`) counts for the source files that build's source map (`<file>.js.map`) names.
+  - Its tests are the test files it adds or changes and the `test:` files its task's `done_when` names. They must call an assertion; importing an assertion module is not one.
+  - Each is run with `runner.one` under Node's V8 coverage, in a scratch worktree at the PR's head, with the setup, the run and the coverage read off the coordinator's thread. The run must execute code on a line the PR changes in at least one of its app files.
+  - Code that runs as a module loads doesn't count: its top level, a class's static fields, and a helper called at load unless the PR changed that helper's own lines.
+  - A test that runs a build (`dist/`) counts for the source lines its source map (`<file>.js.map`) maps the code that ran to. A module a loader transforms on load (tsx, ts-node, babel) counts for nothing.
 - **Which installs lose auto-merge of app-code PRs:**
   - every repo whose `.worklane/tests.yaml` has `vacuity.dynamic: false`, which is what `worklane init` wrote before;
   - every repo with no `vacuity` section, where any change but tests, docs, config, data and assets waits.

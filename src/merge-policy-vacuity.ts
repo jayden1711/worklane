@@ -4,22 +4,24 @@
 //
 // A PR that changes app code auto-merges only on a measured yes: its tests (the test files it adds or changes, as
 // tests.yaml vacuity.test_globs matches them, and the `test:` files its task's agreed done_when names, which the
-// coordinator's own verification ran) assert something, and, each run with runner.one under V8 coverage, they
-// execute a function (not just the top level) in at least one app file the PR changes. Anything else is a `design:`
+// coordinator's own verification ran) hold an assertion call (an import of an assertion module is none), and, each run
+// with runner.one under V8 coverage, they run code on a line the PR changes in at least one of its app files. Code that
+// runs as a module loads (its top level, V8's synthetic initializers) doesn't count, and a helper the module calls as it
+// loads counts only for its own lines (src/vacuity.ts touchedAppFiles). Anything else is a `design:`
 // reason to wait: no test, no assertion, a static-only config, no runner.one, a test path that would need quoting,
 // nothing measured after VACUITY_TRIES starts, a run that failed. The one exception is the reason given while the
 // run is still to come (VACUITY_UNMEASURED): the gate runs it and decides again.
 //
 // What counts as changed app code: a file the PR changes, under vacuity.app_paths, not matched by a test glob, still
 // there at the head, and not one with no runtime code for a test to run (NO_RUNTIME_CODE: types only, config, data,
-// docs and assets). Any other kind counts, one it doesn't know included (fail closed). Coverage matches by path; a
-// build's file (dist/) counts for the source files its source map names (src/vacuity.ts touchedAppFiles).
+// docs and assets). Any other kind counts, one it doesn't know included (fail closed). Coverage matches by path; code
+// that ran in a build's file (dist/) counts for the source lines its source map maps that code to, source by source.
 // A repo with no vacuity section waits too (the owner's decision): with the tamper guard's own test globs
 // (FALLBACK_TEST_GLOBS), any other changed file with runtime code holds it, naming the missing section.
 import { BRAND } from './brand.js';
 import { globToRegExp } from './guardrails/glob.js';
 import { shownPath } from './path-text.js';
-import { countAssertions, FALLBACK_TEST_GLOBS } from './vacuity.js';
+import { countAssertionCalls, FALLBACK_TEST_GLOBS } from './vacuity.js';
 
 export interface VacuityConfig {
   test_globs: string[];
@@ -151,7 +153,8 @@ export function vacuityCheck(o: {
   if (!tests.length) reasons.push(`design: vacuity: it changes app code (${list(app)}) and no test: it adds or changes none, and its task's done_when names none`);
   const odd = tests.filter((p) => !PLAIN_TEST_PATH.test(p));
   if (odd.length) reasons.push(`design: vacuity: a test path has characters other than letters, digits, ".", "_", "-" and "/", so it is never put in a command (${list(odd)})`);
-  if (tests.length && tests.every((p) => countAssertions(text.get(p)!, cfg.assertion_pattern) === 0)) reasons.push(`design: vacuity: its tests (${list(tests)}) have no assertion matching /${cfg.assertion_pattern}/`);
+  // An import or require of an assertion module is no assertion (countAssertionCalls, #784 round 4).
+  if (tests.length && tests.every((p) => countAssertionCalls(text.get(p)!, cfg.assertion_pattern) === 0)) reasons.push(`design: vacuity: its tests (${list(tests)}) have no assertion matching /${cfg.assertion_pattern}/`);
   if (!cfg.dynamic) reasons.push(`design: vacuity: tests.yaml vacuity.dynamic is off, so nothing measured whether its tests run the app code it changes (${list(app)})`);
   else if (!o.runOne) reasons.push("design: vacuity: tests.yaml runner.one is not set, so its tests can't be run one by one under coverage");
   if (reasons.length) return { reasons };

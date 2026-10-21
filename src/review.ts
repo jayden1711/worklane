@@ -324,7 +324,7 @@ export function hidesSubmodules(f: Pick<ChangeFile, 'submoduleIgnores'>): boolea
 export const SELF_MODIFICATION = 'self-modification';
 export const SELF_MODIFICATION_PARTS: { what: string; globs: string[] }[] = [
   // src/vacuity.ts: what the merge gate counts as an assertion and as app code run (#784, src/merge-policy-vacuity.ts).
-  { what: 'the merge policy', globs: ['src/merge-policy*', 'src/coordinator/merge-flow*', 'src/pr-rules*', 'src/vacuity.ts'] },
+  { what: 'the merge policy', globs: ['src/merge-policy*', 'src/coordinator/merge-flow*', 'src/pr-rules*', 'src/vacuity.ts', 'src/vacuity-read.ts'] },
   { what: 'the main watch', globs: ['src/main-watch*', 'src/github/main-watch-api*'] },
   { what: 'the push guard', globs: ['src/push-guard*', 'src/push-check*'] },
   { what: 'the updater', globs: ['src/updates*', `scripts/machine/${BRAND.cli}-update*`] },
@@ -399,7 +399,7 @@ export const SELF_MODIFICATION_PARTS: { what: string; globs: string[] }[] = [
       // The merge gate's vacuity check: tests that run none of the changed code never auto-merge (#784).
       'test/vacuity.test.ts', 'test/merge-policy-vacuity.test.ts', 'test/merge-vacuity-coordinator.test.ts',
       'test/merge-vacuity-hostile.test.ts', 'test/merge-vacuity-decisions.test.ts', 'test/merge-vacuity-doctor.test.ts',
-      'test/merge-vacuity-bounds.test.ts',
+      'test/merge-vacuity-bounds.test.ts', 'test/merge-vacuity-precision.test.ts',
       // The test that keeps the security pages' citations true, the adversarial suite of hostile PRs (its runner, its
       // cases, controls and todo list), and the test that holds these locks (#858).
       'test/docs-guardrails.test.ts',

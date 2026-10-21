@@ -121,6 +121,7 @@ test('self-modification: every glob names real engine files (none dead), and the
     ['src/pr-rules.ts', 'the merge policy'],
     ['src/merge-policy-vacuity.ts', 'the merge policy'],
     ['src/vacuity.ts', 'the merge policy'],
+    ['src/vacuity-read.ts', 'the merge policy'],
     ['src/main-watch.ts', 'the main watch'],
     ['src/push-guard.ts', 'the push guard'],
     ['src/updates.ts', 'the updater'],

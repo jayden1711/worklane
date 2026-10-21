@@ -157,7 +157,9 @@ test('(d) a source map that is a FIFO, or over its size limit, is never read: th
   void big;
   const cov = join(root, '.cov');
   mkdirSync(cov);
-  const fn = (file: string) => ({ url: new URL(`file://${join(root, file)}`).href, functions: [{ functionName: 'a', ranges: [{ count: 1 }] }] });
+  // As V8 writes it: the module's top level over the whole file, and a function inside it that ran.
+  const len = 'export function a() { return 1; }\n'.length;
+  const fn = (file: string) => ({ url: new URL(`file://${join(root, file)}`).href, functions: [{ functionName: '', ranges: [{ startOffset: 0, endOffset: len, count: 1 }] }, { functionName: 'a', ranges: [{ startOffset: 7, endOffset: len - 1, count: 1 }] }] });
   writeFileSync(join(cov, 'c.json'), JSON.stringify({ result: [fn('dist/a.js'), fn('dist/b.js')] }));
   const probe = "const [mod, cov, root] = process.argv.slice(1); const m = await import(mod); console.log(JSON.stringify(m.touchedAppFiles(cov, root, ['src/**'])));";
   const mod = new URL('../src/vacuity.js', import.meta.url).href;
