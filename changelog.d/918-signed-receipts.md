@@ -5,8 +5,8 @@
   - `worklane receipts keygen` makes an ed25519 key pair.
   - `worklane receipts sign --log <events.db> --key <private> --out <file> --state <file>` signs each merge decision and
     result in an instance's event log, chaining each receipt to the one before it. `--state` is the signer's own record
-    of its chain, kept in a directory only the signer can write: it signs only onto receipts that extend it. Start a
-    new chain once with `--genesis`.
+    of its chain, kept in a directory only the signer can write: it signs only onto receipts that extend it, and one
+    `sign` runs at a time. Start a new chain once with `--genesis`.
   - `worklane receipts verify <file|dir> --key <pub>` checks the receipts with only the public key: no engine state and no
     network.
   - **Not yet root-signed:** `sign` signs as whoever runs it. Keep the private key away from the coordinator user.

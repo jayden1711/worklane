@@ -27,7 +27,7 @@ worklane receipts verify receipts/ --key customer-receipts.pub
 - **Exit 2:** a usage error. Passing a private key as `--key` counts as one, and so does an `--anchor` that isn't a receipt id (64 lowercase hex characters). An empty `--anchor` is refused rather than skipped, so a script with an unset variable fails loudly.
 - **Exit 3:** every receipt is authentic, but the signer flagged a field. It found something different from what the coordinator claimed, and prints `FLAGGED: receipt N: <field>: the coordinator claimed X, the signer found Y`. A field the engine left `null` that the signer filled in is not a flag; `verify` prints it as `UNRECORDED: receipt N: <field>: ... the signer found Y`.
 
-`verify` reads regular files only, at most 64 MiB of receipts in all: a link, FIFO or device fails. Text that comes from the receipts or file names is printed with control characters escaped (`\u001b` for ESC), so a receipts file can't rewrite what your terminal shows.
+`verify` reads regular files only, at most 64 MiB of receipts in all: a link, FIFO or device fails. Text that comes from the receipts or file names is printed with control, format and invisible characters escaped (`\u001b` for ESC, `​` for a zero-width space), so a receipts file can't rewrite what your terminal shows.
 
 **Keep the head.** Next time, pass it with `--anchor <head>`. A chain that lost receipts at its end still looks whole on its own, and only the anchor shows they're gone.
 

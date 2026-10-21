@@ -37,32 +37,24 @@ const USAGE = [
 ].join('\n');
 
 /**
- * The code points a terminal may act on, as inclusive ranges: C0 (the newline included), DEL and C1; the Arabic
- * letter mark; the left-to-right and right-to-left marks; the line and paragraph separators; and the bidirectional
- * embeddings, overrides and isolates.
+ * What a terminal may act on or not show, by Unicode property, the set src/path-text.ts's shownPath escapes (#918
+ * round 5): control characters (Cc: C0, the newline included, DEL and C1), format characters (Cf: the bidi marks,
+ * embeddings, overrides and isolates, zero-width characters, the BOM, the soft hyphen), default-ignorable code points
+ * (U+034F, the Hangul fillers, the variation selectors), the line and paragraph separators, and lone surrogates.
  */
-const UNPRINTABLE: readonly (readonly [number, number])[] = [
-  [0x00, 0x1f],
-  [0x7f, 0x9f],
-  [0x61c, 0x61c],
-  [0x200e, 0x200f],
-  [0x2028, 0x202e],
-  [0x2066, 0x2069],
-];
+const UNPRINTABLE = /[\p{Cc}\p{Cf}\p{Default_Ignorable_Code_Point}\p{Zl}\p{Zp}\p{Cs}]/gu;
 
 /**
- * `s` as one line no terminal acts on: every UNPRINTABLE code point is written as `\uXXXX`. WHY (#918 round 4,
- * A5/A6): verify prints text from the receipts and the file system (a keyid, a schema message naming a key, a file
- * name, a verified field), and an ESC or CR in it could clear the line and print a false "verified". Everything
- * these commands print but the usage text goes through it.
+ * `s` as one line no terminal acts on, with nothing hidden: every UNPRINTABLE code point is written as `\uXXXX` (or
+ * `\u{XXXXX}` past U+FFFF). WHY (#918 rounds 4 and 5, A5/A6): verify prints text from the receipts and the file
+ * system (a keyid, a schema message naming a key, a file name, a verified field), and an ESC or CR in it could clear
+ * the line and print a false "verified". Everything these commands print but the usage text goes through it.
  */
 export function printable(s: string): string {
-  let out = '';
-  for (const ch of s) {
+  return s.replace(UNPRINTABLE, (ch) => {
     const c = ch.codePointAt(0)!;
-    out += UNPRINTABLE.some(([lo, hi]) => c >= lo && c <= hi) ? `\\u${c.toString(16).padStart(4, '0')}` : ch;
-  }
-  return out;
+    return c > 0xffff ? `\\u{${c.toString(16)}}` : `\\u${c.toString(16).padStart(4, '0')}`;
+  });
 }
 const say = (line: string) => console.log(printable(line));
 const warn = (line: string) => console.error(printable(line));
@@ -79,14 +71,15 @@ function values(args: string[], name: string): string[] {
   return out;
 }
 
-function one(args: string[], name: string): string {
-  const v = values(args, name);
-  if (v.length !== 1) throw new ReceiptError(`give ${name} once`);
-  return v[0]!;
-}
-
 /** A usage error: its message (if any), then the usage, exit 2. */
 class Usage extends Error {}
+
+/** The one value of option `name`; missing or given twice is a usage error. */
+function one(args: string[], name: string): string {
+  const v = values(args, name);
+  if (v.length !== 1) throw new Usage(`give ${name} once`);
+  return v[0]!;
+}
 
 /** Whether flag `name` (no value) was given, taken out of `args`. */
 function flag(args: string[], name: string): boolean {
@@ -163,11 +156,10 @@ export async function receiptsCommand(sub: string | undefined, rest: string[]): 
       console.error(USAGE);
       return 2;
     }
-    if (e instanceof ReceiptError) {
-      warn(`${BRAND.cli} receipts: ${e.message}`);
-      return 1;
-    }
-    throw e;
+    // WHY (#918 round 5): any other error (a file system error naming a path from --out's directory) is printed the
+    // same way, escaped, rather than as a raw stack: no untrusted name reaches the terminal unescaped.
+    warn(`${BRAND.cli} receipts: ${e instanceof Error ? e.message : String(e)}`);
+    return 1;
   }
 }
 

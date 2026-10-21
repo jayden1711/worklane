@@ -1,7 +1,7 @@
 // OS adapter layer. This is the only module allowed to branch on the
 // platform (test/os-boundary.test.ts enforces it).
 import { execFileSync, spawn } from './child-process.js';
-import { chmodSync, chownSync, closeSync, constants as fsConstants, existsSync, fstatSync, linkSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, readSync, realpathSync, renameSync, rmSync, statSync, statfsSync, writeFileSync } from 'node:fs';
+import { chmodSync, chownSync, closeSync, constants as fsConstants, existsSync, fstatSync, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, readSync, realpathSync, renameSync, rmSync, statSync, statfsSync, writeFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { testRunSign } from './system-paths.js';
 import { availableParallelism, homedir, loadavg, userInfo } from 'node:os';
@@ -164,6 +164,27 @@ export function replaceOwnerOnly(file: string, data: string): void {
     renameSync(staged, file);
   } finally {
     dropStaged(staged);
+  }
+}
+
+/**
+ * Flush `file` and its directory entry to disk (fsync on each, opened read-only), so a write made after this can't
+ * outlive it on a power loss: for a receipt signer's chain state, which must be on disk before the receipts it names
+ * (#918 round 5). Native Windows can't open a directory: the file only there.
+ */
+export function syncToDisk(file: string): void {
+  const fd = openSync(file, 'r');
+  try {
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+  if (process.platform === 'win32') return;
+  const dir = openSync(dirname(file), 'r');
+  try {
+    fsyncSync(dir);
+  } finally {
+    closeSync(dir);
   }
 }
 

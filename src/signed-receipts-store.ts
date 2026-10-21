@@ -1,10 +1,12 @@
 // Signed receipts on disk (#717): the event log read read-only, the receipts as JSON lines (one DSSE envelope each),
 // the signer's own chain state, and ed25519 keys as PEM files. The format and the checks are src/signed-receipts.ts.
 import { createPrivateKey, createPublicKey, type KeyObject } from 'node:crypto';
-import { closeSync, constants, existsSync, fstatSync, lstatSync, openSync, readdirSync, readFileSync, readSync } from 'node:fs';
-import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { closeSync, constants, existsSync, fstatSync, lstatSync, openSync, readdirSync, readFileSync, readSync, realpathSync } from 'node:fs';
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { BRAND } from './brand.js';
 import { openReadOnly } from './events/read-only.js';
-import { notOwnerOnlyDir, replaceOwnerOnly } from './os/index.js';
+import { tryLock } from './locks.js';
+import { notOwnerOnlyDir, replaceOwnerOnly, syncToDisk } from './os/index.js';
 import { canonicalJson, chainStateOf, ChainStateSchema, keySigner, ReceiptError, RECEIPT_EVENTS, rotateChain, signEvents, type ChainState, type Envelope, type ReceiptEvent, type ReceiptSigner } from './signed-receipts.js';
 
 /**
@@ -104,19 +106,34 @@ function writeReceipts(path: string, envelopes: readonly Envelope[]): void {
  * not the receipts' directory (whoever may write that may not reach the state; #918 round 4).
  */
 function statePlace(state: string, out: string): void {
-  const rel = relative(resolve(out), resolve(state));
+  // Compared by real path (#918 round 5: `--out` spelled through a link to the state's directory was accepted).
+  const real = (p: string) => {
+    try {
+      return realpathSync(p);
+    } catch {
+      return resolve(p);
+    }
+  };
+  const stateDir = real(dirname(resolve(state)));
+  const outDir = real(dirname(resolve(out)));
+  const rel = relative(join(outDir, basename(out)), join(stateDir, basename(state)));
   const inOut = rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel);
-  if (resolve(dirname(state)) === resolve(dirname(out)) || inOut) {
+  if (stateDir === outDir || inOut) {
     throw new ReceiptError(`the signer's chain state must be kept separate from the receipts: ${state} is in the directory of ${out}`);
   }
-  const why = notOwnerOnlyDir(dirname(resolve(state)));
+  const why = notOwnerOnlyDir(stateDir);
   if (why) throw new ReceiptError(`the signer's chain state goes in a directory only the signer can write: ${why}`);
 }
 
-/** The signer's chain state, or null when it has none (no file at `path`). Refused: a link, or a file that isn't one. */
-function readState(path: string): ChainState | null {
+/** The signer's chain state file's text, or null when there is none. Refused: a link, or a file that isn't one. */
+function readStateText(path: string): string | null {
   if (!lstatSync(path, { throwIfNoEntry: false })) return null;
-  const text = readRegular(path, STATE_MAX_BYTES, "the signer's chain state");
+  return readRegular(path, STATE_MAX_BYTES, "the signer's chain state");
+}
+
+/** The signer's chain state from its file's text (readStateText), or null when it has none. */
+function parseState(path: string, text: string | null): ChainState | null {
+  if (text === null) return null;
   let parsed: unknown;
   try {
     parsed = JSON.parse(text);
@@ -128,9 +145,33 @@ function readState(path: string): ChainState | null {
   return st.data;
 }
 
-/** The signer's chain state, written after the receipts (a crash between leaves receipts that still extend it). */
+/**
+ * The signer's chain state, written BEFORE the receipts it names (#918 round 5; see signLog), and flushed to disk
+ * before they are written (syncToDisk): without that, a power loss could keep the new receipts and an older state.
+ */
 function writeState(path: string, state: ChainState): void {
   replaceOwnerOnly(path, `${canonicalJson(state)}\n`);
+  syncToDisk(path);
+}
+
+/**
+ * Run `fn` as the only signer of the chain state at `state` (#918 round 5, row 2: two `sign` runs at once, with the
+ * log edited between their reads, each signed its own version of an event). An exclusive lock beside the state, in
+ * its owner-only directory (tryLock: created whole or not at all; one whose process is gone is taken over), is held
+ * from the first read to the last write; one already held refuses. And the state must still be what `fn` read just
+ * before it writes (`unchanged`): a writer that took no lock is refused too.
+ */
+function asOnlySigner<T>(state: string, fn: (own: ChainState | null, unchanged: () => void) => T): T {
+  const got = tryLock(`${state}.lock`, `${BRAND.cli} receipts`);
+  if (!('lock' in got)) throw new ReceiptError(`another sign or rotate holds the signer's lock (${state}.lock${got.holder ? `, pid ${got.holder.pid}` : ''}); nothing was signed`);
+  try {
+    const text = readStateText(state);
+    return fn(parseState(state, text), () => {
+      if (readStateText(state) !== text) throw new ReceiptError(`the signer's chain state ${state} changed while this run signed (another writer); nothing was written`);
+    });
+  } finally {
+    got.lock.release();
+  }
 }
 
 /** An ed25519 private key from a PEM file, as a signer. */
@@ -160,30 +201,48 @@ export function loadPublicKey(path: string): KeyObject {
 
 /**
  * Receipt every merge decision and result in the log not yet receipted, onto the chain in `out`, from the signer's
- * own chain state in `state` (#918 round 4). With no state, only `genesis` starts a chain, and only where `out` holds
- * no receipts; with one, `genesis` is refused and `out` must extend it. Writes nothing when there is nothing new, or
- * when it refuses (src/signed-receipts.ts). Writes the receipts first, then the state.
+ * own chain state in `state` (#918 rounds 4 and 5), as the only signer (asOnlySigner). With no state, only `genesis`
+ * starts a chain, and only where nothing is at `out`; with one, `genesis` is refused and `out` must extend it, or be
+ * short of it by receipts the log gives back exactly (signEvents). Writes nothing when there is nothing new, or when
+ * it refuses (src/signed-receipts.ts).
+ *
+ * INVARIANT: the state is written BEFORE the receipts. A run that fails or is killed between the two leaves the state
+ * ahead of the receipts, never receipts the state doesn't cover (#918 round 4 review, row 1: receipts first let a cut
+ * file and an edited log be signed again). The next run gives the missing receipts back only if the log still makes
+ * them byte for byte; otherwise it refuses.
  */
 export function signLog(o: { log: string; out: string; state: string; genesis?: boolean; signer: ReceiptSigner }): { added: number; count: number; head: string | null } {
   statePlace(o.state, o.out);
-  const own = readState(o.state);
-  if (own && o.genesis) throw new ReceiptError(`the signer already has a chain (its state is ${o.state}): --genesis never starts over it; nothing was signed`);
-  if (!own && !o.genesis) throw new ReceiptError(`the signer has no chain state at ${o.state}: a new chain starts only with --genesis (root or the owner only); nothing was signed`);
-  const existing = readReceiptFiles(o.out);
-  const r = signEvents(existing, readReceiptEvents(o.log), o.signer, { from: own ?? 'genesis' });
-  if (r.added) writeReceipts(o.out, r.envelopes);
-  if (r.added || (own && own.count !== r.state.count)) writeState(o.state, r.state);
-  return { added: r.added, count: r.envelopes.length, head: r.head };
+  return asOnlySigner(o.state, (own, unchanged) => {
+    if (own && o.genesis) throw new ReceiptError(`the signer already has a chain (its state is ${o.state}): --genesis never starts over it; nothing was signed`);
+    if (!own && !o.genesis) throw new ReceiptError(`the signer has no chain state at ${o.state}: a new chain starts only with --genesis (root or the owner only); nothing was signed`);
+    if (o.genesis && lstatSync(o.out, { throwIfNoEntry: false })) {
+      throw new ReceiptError(`--genesis never replaces anything at --out (${o.out}): receipts there are someone else's chain, never adopted; nothing was signed`);
+    }
+    const existing = readReceiptFiles(o.out);
+    const r = signEvents(existing, readReceiptEvents(o.log), o.signer, { from: own ?? 'genesis' });
+    unchanged();
+    if (!own || canonicalJson(own) !== canonicalJson(r.state)) writeState(o.state, r.state);
+    if (r.added) writeReceipts(o.out, r.envelopes);
+    return { added: r.added, count: r.envelopes.length, head: r.head };
+  });
 }
 
-/** Rotate the chain in `out` to `next`, signed by the current key, from the signer's own chain state in `state`. */
+/**
+ * Rotate the chain in `out` to `next`, signed by the current key, from the signer's own chain state in `state`, as
+ * the only signer. The state is written first, as in signLog: a rotation whose receipts write then fails leaves a
+ * state no receipts reach (a `key.rotated` can't be made again byte for byte), and sign refuses until root or the
+ * owner restores the receipts or the state.
+ */
 export function rotateFile(o: { out: string; state: string; signer: ReceiptSigner; next: KeyObject }): { count: number; head: string | null } {
   statePlace(o.state, o.out);
-  const own = readState(o.state);
-  if (!own) throw new ReceiptError(`the signer has no chain state at ${o.state}: there is no chain of its own to rotate`);
-  const envelopes = rotateChain(readReceiptFiles(o.out), o.signer, o.next, { from: own });
-  writeReceipts(o.out, envelopes);
-  const state = chainStateOf(envelopes, own.start);
-  writeState(o.state, state);
-  return { count: envelopes.length, head: state.head };
+  return asOnlySigner(o.state, (own, unchanged) => {
+    if (!own) throw new ReceiptError(`the signer has no chain state at ${o.state}: there is no chain of its own to rotate`);
+    const envelopes = rotateChain(readReceiptFiles(o.out), o.signer, o.next, { from: own });
+    const state = chainStateOf(envelopes, own.start);
+    unchanged();
+    writeState(o.state, state);
+    writeReceipts(o.out, envelopes);
+    return { count: envelopes.length, head: state.head };
+  });
 }
