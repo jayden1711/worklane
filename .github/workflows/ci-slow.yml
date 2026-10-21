@@ -1521,8 +1521,16 @@ jobs:
           sudo systemctl daemon-reload && sudo systemctl start worklane-beta.service
           # The machine helper's rule names both instances, as add-project.sh keeps it.
           sudo bash scripts/setup/machine-helper.sh ci beta
-          sudo -n -l -U wl-beta "$HELPER" claude-account switch
-          if sudo -n -l -U wl-dash "$HELPER" claude-account switch 2>/dev/null; then echo "wl-dash may switch the account" >&2; exit 1; fi
+          sudo -n -l -U wl-beta "$HELPER" claude-account status
+          if sudo -n -l -U wl-dash "$HELPER" claude-account status 2>/dev/null; then echo "wl-dash may run the helper" >&2; exit 1; fi
+          # The one claude-account rule is status (#758): no coordinator, and not wl-dash, may run another.
+          for u in wl-ci wl-beta wl-dash; do
+            for a in "switch" "profile-add work" "login work" "use work" "remove work" "failover default+work back" "failover off stay"; do
+              # shellcheck disable=SC2086 # each case is its words
+              if sudo -n -l -U "$u" "$HELPER" claude-account $a 2>/dev/null; then echo "$u may run claude-account $a" >&2; exit 1; fi
+            done
+          done
+          if sudo grep -E 'claude-account (switch|profile-add|login|use|remove|failover)|profile-add' /etc/sudoers.d/worklane-machine; then echo "the rule still names a removed claude-account command" >&2; exit 1; fi
           # The new account's tokens: in files of the runner's only, masked; never in the env.
           for n in 2 3; do t="sk-ant-oat01-$(openssl rand -hex 24)"; echo "::add-mask::$t"; (umask 077; printf '%s\n' "$t" > "$F/claude-token$n"); done; unset t
           systemctl is-active worklane-ci.service worklane-beta.service
@@ -1540,6 +1548,10 @@ jobs:
           for a in "switch" "use work" "use default" "remove work" "failover default+work back" "failover off stay" "profile-add work" "login work" "uninstall"; do
             # shellcheck disable=SC2086 # each case is its words
             if sudo -u wl-ci sudo -n "$HELPER" claude-account $a < /dev/null 2>> "$F/736-refused.txt"; then echo "wl-ci may run claude-account $a" >&2; exit 1; fi
+            # sudo's rule no longer lists any of them (#758), so that refusal is sudo's: run as root, past the rule,
+            # the helper itself still refuses each.
+            # shellcheck disable=SC2086 # each case is its words
+            if sudo "$HELPER" claude-account $a < "$F/claude-token2" 2>> "$F/736-refused.txt"; then echo "the helper ran claude-account $a as root" >&2; exit 1; fi
           done
           sleep 2
           if systemctl is-active -q worklane-claude-account.service; then echo "a switch or profile unit started" >&2; exit 1; fi

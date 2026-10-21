@@ -8,7 +8,7 @@ import { MachineRequestError, requestMachineChange, type MachineRequest } from '
 import type { MachineRequester } from '../machine-owners.js';
 import { pluginStepOk, PLUGIN_STEPS } from '../plugins/steps.js';
 import { policySetOk } from '../policy-gate.js';
-import { addProjectNameOk, addProjectRepoOk, claudeAccount, claudeProfile, pluginStep, policyStep, followReleases, installUpdater, MACHINE_HELPER, setSlotCap, setTestSlotCap, setUpdates, signerKeyOk, signerPrincipalOk, SLOTS_MAX, SLOTS_MIN, stagedSigner, tailscaleStep, TEST_SLOTS_MAX, TEST_SLOTS_MIN, type Exec, type MachineResult } from '../machine.js';
+import { addProjectNameOk, addProjectRepoOk, claudeAccount, pluginStep, policyStep, followReleases, installUpdater, MACHINE_HELPER, setSlotCap, setTestSlotCap, setUpdates, signerKeyOk, signerPrincipalOk, SLOTS_MAX, SLOTS_MIN, stagedSigner, tailscaleStep, TEST_SLOTS_MAX, TEST_SLOTS_MIN, type Exec, type MachineResult } from '../machine.js';
 
 export interface RootStepRule {
   command: string;
