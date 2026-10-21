@@ -6,12 +6,24 @@ import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { performance } from 'node:perf_hooks';
 import { BRAND } from '../src/brand.js';
 import { runHook } from '../src/hook.js';
 import { GuardrailsConfig } from '../src/config/schema.js';
+import { Secrets } from '../src/guardrails/access.js';
 import { exampleContext } from '../src/guardrails/check.js';
 import { evaluate } from '../src/guardrails/engine.js';
 import { exampleProject } from './helpers.js';
+
+/** A plain folder holding a hidden directory, with the agent run's built-in anywhere globs, judged at the engine. */
+function hiddenProject() {
+  const p = mkdtempSync(join(tmpdir(), 'hidden-'));
+  mkdirSync(join(p, 'evals-secret'));
+  writeFileSync(join(p, 'evals-secret', 'score.py'), 'EXPECTED = 42\n');
+  const g = GuardrailsConfig.parse({ version: 1, rules: [], secret_paths: ['evals-secret/**', '/**/evals/held-out/**', '/**/dashboard-token'], examples: { must_block: [], must_ask: [], must_allow: [] } });
+  const decide = (tool: string, input: Record<string, unknown>) => evaluate({ tool, input, cwd: p }, g, { ...exampleContext(g, p, true), home: join(p, 'no-home') });
+  return { p, decide };
+}
 
 const AGENT = `${BRAND.envPrefix}_AGENT`;
 const TASK = `${BRAND.envPrefix}_TASK_FILE`;
@@ -171,12 +183,60 @@ test('one call\'s walks share one budget: many wildcard words over a large tree 
   // `**/.env` matches anywhere (as the built-in held-out and dashboard-key globs do), so each word walks the tree.
   const g = GuardrailsConfig.parse({ version: 1, rules: [], secret_paths: ['evals-secret/**', '**/.env'], examples: { must_block: [], must_ask: [], must_allow: [] } });
   const command = `ls ${Array.from({ length: 100 }, () => '*/*').join(' ')} ; cat evals-secre?/score.py`;
-  const started = Date.now();
+  const started = performance.now();
   const v = evaluate({ tool: 'Bash', input: { command }, cwd: p }, g, { ...exampleContext(g, p, true), home: join(p, 'no-home') });
-  const ms = Date.now() - started;
+  const ms = performance.now() - started;
   assert.equal(v.decision, 'deny', v.reason);
   assert.match(v.reason ?? '', /too large to check/);
   assert.ok(ms < 10_000, `the check took ${ms} ms`);
+});
+
+// WHY (#887 review): the budget covers path checks too, and a long word or path is refused or skipped before any work,
+// so neither long words nor many brace alternatives can keep the check past the hook's timeout.
+test('long words and paths are settled fast: refused, or (a plain shell word no call can open) passed over', () => {
+  const { p, decide } = hiddenProject();
+  const timed = (tool: string, input: Record<string, unknown>) => {
+    const started = performance.now();
+    const v = decide(tool, input);
+    return { ...v, ms: performance.now() - started };
+  };
+  const braces = Array.from({ length: 4 }, () => `{a,b}{a,b}{a,b}{a,b}{a,b}${'/q'.repeat(5_000)}`).join(' ');
+  const long = 'evals/'.repeat(40_000);
+  const cases: [string, string, Record<string, unknown>, 'deny' | 'none'][] = [
+    ['4 brace words of 10 KB, then a read of the hidden file', 'Bash', { command: `ls ${braces} ; cat evals-secret/score.py` }, 'deny'],
+    ['one plain word of 240 KB, then a read of the hidden file', 'Bash', { command: `ls ${long} ; cat evals-secret/score.py` }, 'deny'],
+    ['one plain word of 240 KB alone (no call can open it)', 'Bash', { command: `ls ${long}` }, 'none'],
+    ['a long word that resolves to the hidden file', 'Bash', { command: `cat ${'./'.repeat(3_000)}evals-secret/score.py` }, 'deny'],
+    ['a Read of a 50 KB path', 'Read', { file_path: join(p, 'x/'.repeat(25_000)) }, 'deny'],
+    ['a Glob pattern of 10 KB', 'Glob', { pattern: `${'*/'.repeat(5_000)}x` }, 'deny'],
+  ];
+  for (const [what, tool, input, want] of cases) {
+    const v = timed(tool, input);
+    assert.equal(v.decision, want, `${what}: ${v.reason ?? ''}`);
+    assert.ok(v.ms < 2_000, `${what}: took ${Math.round(v.ms)} ms`);
+  }
+});
+
+test('a huge directory is read one entry at a time against the budget: the time budget ends the walk mid-directory', () => {
+  const p = mkdtempSync(join(tmpdir(), 'flat-'));
+  writeFileSync(join(p, 'target'), '');
+  // A symlink costs a stat; listing them all before the budget is looked at took about 480 ms here (#887 review).
+  for (let i = 0; i < 200_000; i++) symlinkSync('target', join(p, `l${i}`));
+  const secrets = new Secrets(['**/.env'], { projectRoot: p, home: join(p, 'no-home') }, { ms: 50 });
+  const started = performance.now();
+  const why = secrets.reached({ kind: 'tree', target: p, filter: null }, p, 'Grep');
+  const ms = performance.now() - started;
+  assert.match(why ?? '', /too large to check/);
+  assert.ok(ms < 250, `the walk ran ${Math.round(ms)} ms past a 50 ms budget`);
+});
+
+test('the time budget runs on a monotonic clock: a wall clock that stands still or steps back never stops it firing', (t) => {
+  const p = mkdtempSync(join(tmpdir(), 'clock-'));
+  for (let i = 0; i < 100; i++) writeFileSync(join(p, `f${i}`), '');
+  t.mock.timers.enable({ apis: ['Date'], now: 1_000_000 });
+  const secrets = new Secrets(['**/.env'], { projectRoot: p, home: join(p, 'no-home') }, { ms: 0 });
+  t.mock.timers.setTime(0);
+  assert.match(secrets.reached({ kind: 'tree', target: p, filter: null }, p, 'Grep') ?? '', /too large to check/);
 });
 
 test('a secret glob with a literal start is walked whole: its files under node_modules are found from above, at and below it', () => {

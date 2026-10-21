@@ -6,7 +6,7 @@
   - every word of a Bash command, with what the shell expands a wildcard, brace or class word to, an option's value after `=`, and an input redirect's file;
   - in the guard's rules, every string of a tool they don't know, and of a field of a known tool they don't name. The agents' hook runs today only for Bash, Edit, Write, MultiEdit, NotebookEdit, WebFetch, Read, Grep and Glob, so other tools don't reach it yet.
 
-  A Glob, Grep or LS is refused when its directory is a secret, or holds one its filter matches, through a symlink too. A Glob pattern or Grep glob with a backslash is refused, since the guard can't read its escapes as the tools do. A Grep glob with a space, or a comma outside braces, filters nothing. One call's checks share one budget (20,000 entries, 5 seconds), and a call past it is refused, never let through.
+  A Glob, Grep or LS is refused when its directory is a secret, or holds one its filter matches, through a symlink too. A Glob pattern or Grep glob with a backslash is refused, since the guard can't read its escapes as the tools do. A Grep glob with a space, or a comma outside braces, filters nothing. One call's checks share one budget (20,000 walked entries, 5 seconds on a monotonic clock), checked before every path and at every entry, and a call past it is refused, never let through. A path, Glob pattern or Grep glob longer than 4,096 characters is refused, and so is a shell word that long with a wildcard or brace.
 
   New refusals:
   - A Grep with no path is refused in an experiment session (its config folder is hidden), and in a project whose root holds a real `.env` file, unless the Grep's glob leaves the file out.

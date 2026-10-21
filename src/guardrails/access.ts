@@ -2,8 +2,9 @@
 // INVARIANT (#847): the guard's secret check takes every call's paths from callAccesses alone. A tool it doesn't know,
 // and a field of a known tool it doesn't name, is read as a path (and, when it names a directory, as a search of it)
 // on every string it holds, so a new tool or field is checked from the start, never let through.
-import { lstatSync, readdirSync, realpathSync, statSync, type Dirent } from 'node:fs';
-import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import { lstatSync, opendirSync, realpathSync, statSync } from 'node:fs';
+import { isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { performance } from 'node:perf_hooks';
 import { globToRegExp } from './glob.js';
 import type { SimpleCommand } from './shell.js';
 
@@ -13,15 +14,22 @@ import type { SimpleCommand } from './shell.js';
  * null: every entry; `expand: 'word'`: as the shell expands a word, where a wildcard never starts a dot-name).
  * `unchecked`: a request the guard can't place, refused.
  */
-export type Access = { kind: 'path'; target: string } | { kind: 'tree'; target: string; filter: string[] | null; expand?: 'word' } | { kind: 'unchecked'; why: string };
+export type Access = { kind: 'path'; target: string; from?: 'word' } | { kind: 'tree'; target: string; filter: string[] | null; expand?: 'word' } | { kind: 'unchecked'; why: string };
 
 /** The most entries one call's secret check walks, over all its accesses; past that, the call is refused. */
 export const WALK_LIMIT = 20_000;
 /**
- * WHY (#887 review): the most time one call's walks take, well under the agent hook's 30 s timeout (src/install.ts),
- * past which the call is refused: a hook that times out doesn't block the call.
+ * WHY (#887 review): the most time one call's secret check takes, well under the agent hook's 30 s timeout
+ * (src/install.ts), past which the call is refused: a hook that times out doesn't block the call. It is checked before
+ * every access and at every walked entry, on a monotonic clock.
  */
 export const WALK_MS = 5_000;
+/**
+ * WHY (#887 review): the longest path or pattern the check reads. No system call opens a longer path (Linux's
+ * PATH_MAX), and a bound keeps each access's work small; a longer one is refused before any work.
+ */
+export const PATH_MAX = 4096;
+const tooLong = (what: string): Access => ({ kind: 'unchecked', why: `a ${what} longer than ${PATH_MAX} characters can't be checked for secret files` });
 
 /** The known tools' fields that hold only text, or that Glob, Grep and LS place themselves. Every other string a call holds is a path. */
 const TEXT_FIELDS: Record<string, readonly string[]> = {
@@ -109,6 +117,7 @@ function globAccesses(input: Record<string, unknown>, cwd: string): Access[] {
   // The path is checked as a path too, whatever the pattern points at: an absolute or `..` pattern leaves it (#887 review).
   const own: Access[] = path ? [{ kind: 'path', target: base }] : [];
   const pattern = str(input.pattern) ?? '**';
+  if (pattern.length > PATH_MAX) return [...own, tooLong('Glob pattern')];
   const bad = escaped(pattern, 'Glob pattern');
   if (bad) return [...own, bad];
   const alts = alternatives(pattern);
@@ -129,6 +138,7 @@ function mayBeSeveral(glob: string): boolean {
 function grepAccesses(input: Record<string, unknown>, cwd: string): Access[] {
   const base = resolve(cwd, str(input.path) ?? '.');
   const glob = str(input.glob);
+  if (glob && glob.length > PATH_MAX) return [tooLong('Grep glob')];
   const bad = glob ? escaped(glob, 'Grep glob') : null;
   if (bad) return [bad];
   // WHY (#887 review): whether the glob reaches ripgrep as one --glob or several is undocumented, so such a glob filters nothing.
@@ -143,11 +153,15 @@ function grepAccesses(input: Record<string, unknown>, cwd: string): Access[] {
 
 /** A shell word as the places it names: itself, and what the shell would expand it to (braces, wildcards, classes). */
 function wordAccesses(w: string): Access[] {
-  const out: Access[] = [{ kind: 'path', target: w }];
-  if (!/[*?[{]/.test(w)) return out;
+  const expands = /[*?[{]/.test(w);
+  // WHY (#887 review): a long word the shell would expand can't be bounded cheaply, so it is refused before any work.
+  // A long plain word is still checked: as a path once resolved (`././…` collapses), see Secrets.reached.
+  if (w.length > PATH_MAX && expands) return [tooLong('shell word with a wildcard or brace')];
+  const out: Access[] = [{ kind: 'path', target: w, from: 'word' }];
+  if (!expands) return out;
   const alts = expandBraces(w);
   if (!alts) return [...out, { kind: 'unchecked', why: `the shell word ${w} expands to too many paths to check for secret files` }];
-  for (const a of alts) out.push(WILD.test(a) ? patternAccess(null, a, true) : { kind: 'path', target: a });
+  for (const a of alts) out.push(WILD.test(a) ? patternAccess(null, a, true) : { kind: 'path', target: a, from: 'word' });
   return out;
 }
 
@@ -221,16 +235,40 @@ const within = (dir: string, p: string) => {
 };
 const SKIPPED = new Set(['.git', 'node_modules']);
 
-/** The real path of `p` (its nearest existing parent's, for a path that doesn't exist), so a symlink can't hide where it leads. */
+/**
+ * The real path of absolute `p` (its nearest existing parent's, for a path that doesn't exist), so a symlink can't hide
+ * where it leads. WHY (#887 review): the parent is found by a binary search over `p`'s own prefixes (a path's parents
+ * exist when it does), so the cost grows with log(depth), not depth squared; a path longer than PATH_MAX is refused
+ * before it gets here, and one whose real path can't be read stays as written.
+ */
 function real(p: string): string {
-  const rest: string[] = [];
-  for (let cur = p; ; cur = dirname(cur)) {
+  if (p.length > PATH_MAX) return p;
+  try {
+    return realpathSync.native(p);
+  } catch {
+    // Not there: its nearest existing parent's real path, and the rest as written.
+  }
+  const cuts: number[] = [];
+  for (let i = 1; i < p.length; i++) if (p[i] === sep) cuts.push(i);
+  const there = (i: number) => {
     try {
-      return join(realpathSync(cur), ...rest);
+      lstatSync(p.slice(0, cuts[i]));
+      return true;
     } catch {
-      if (dirname(cur) === cur) return p;
-      rest.unshift(basename(cur));
+      return false;
     }
+  };
+  let [lo, hi, best] = [0, cuts.length - 1, -1];
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (there(mid)) [best, lo] = [mid, mid + 1];
+    else hi = mid - 1;
+  }
+  if (best < 0) return p;
+  try {
+    return realpathSync.native(p.slice(0, cuts[best])) + p.slice(cuts[best]);
+  } catch {
+    return p;
   }
 }
 
@@ -290,13 +328,16 @@ function parseGlob(g: string, ctx: SecretContext): Glob | null {
 export class Secrets {
   private readonly pos: Glob[];
   private readonly neg: Glob[];
-  /** One budget for every walk of the call this instance checks (WALK_LIMIT entries, WALK_MS); spent, every later walk refuses. */
+  /**
+   * One budget for the call this instance checks: WALK_LIMIT walked entries, and WALK_MS on the monotonic clock (a wall
+   * clock stepped back would never reach the deadline). Once spent, every later access is refused.
+   */
   private seen = 0;
   private readonly deadline: number;
 
-  /** One instance per tool call: its walk budget is the call's. */
+  /** One instance per tool call: its budget is the call's. */
   constructor(globs: string[], private readonly ctx: SecretContext, limits: { ms?: number } = {}) {
-    this.deadline = Date.now() + (limits.ms ?? WALK_MS);
+    this.deadline = performance.now() + (limits.ms ?? WALK_MS);
     const parse = (g: string) => {
       const p = parseGlob(g, ctx);
       return p ? [p] : [];
@@ -341,45 +382,67 @@ export class Secrets {
     return all.filter((r) => !all.some((o) => covered(r, o)));
   }
 
-  /** Whether the call's walk budget is spent (counting one more entry). */
+  /** Whether the call's time budget is spent. */
+  private late(): boolean {
+    return performance.now() > this.deadline;
+  }
+
+  /** Whether the call's budget is spent, counting one more walked entry. */
   private spent(): boolean {
-    return ++this.seen > WALK_LIMIT || (this.seen % 64 === 0 && Date.now() > this.deadline);
+    return ++this.seen > WALK_LIMIT || (this.seen % 16 === 0 && this.late());
   }
 
   /**
    * The first secret a listing or search of `dir` reaches (an entry one of `filter` matches, relative to `dir`),
-   * 'too-large' once the call's walk budget is spent, or null. It goes down only into directories that could hold a match.
+   * 'too-large' once the call's budget is spent, or null. It goes down only into directories that could hold a match,
+   * and reads a directory one entry at a time, each charged to the budget, so no directory's size can outrun it.
    */
   private inTree(dir: string, filter: Filter[] | null): string | 'too-large' | null {
-    if (Date.now() > this.deadline) return 'too-large';
+    if (this.late()) return 'too-large';
     const wanted = (rel: string, isDir: boolean) => !filter || filter.some((f) => f.re.test(rel) || (isDir && f.re.test(`${rel}/`)));
     const holds = (rel: string) => !filter || filter.some((f) => reachesUnder(f.segs, rel.split('/').filter(Boolean)));
     for (const { root, skip } of this.walkRoots(dir)) {
       // `inSecret`: reached through a symlink that leads into a secret, so a secret wherever its own path points.
       const stack: Entry[] = [];
       const first = entryAt(root);
-      if (first) stack.push(first);
+      if (first) {
+        if (this.spent()) return 'too-large';
+        stack.push(first);
+      }
       while (stack.length) {
         const { p, link, isDir, inSecret: above } = stack.pop()!;
-        if (this.spent()) return 'too-large';
         const inSecret = above || (link && this.at(real(p)));
         const rel = posixRel(dir, p);
         if (p !== dir && (inSecret || this.at(p)) && wanted(rel, isDir)) return p;
-        // A symlink is followed only into a secret (to test the filter on what is there); a loop ends at WALK_LIMIT.
+        // A symlink is followed only into a secret (to test the filter on what is there); a loop ends with the budget.
         if (!isDir || (link && p !== root && !inSecret) || !holds(rel)) continue;
-        let names: Dirent[];
-        try {
-          names = readdirSync(p, { withFileTypes: true });
-        } catch {
-          continue;
-        }
-        for (const d of names) {
-          if (skip && SKIPPED.has(d.name)) continue;
-          const c = join(p, d.name);
-          const l = d.isSymbolicLink();
-          stack.push({ p: c, link: l, isDir: l ? dirAt(c) : d.isDirectory(), inSecret });
-        }
+        const listed = this.list(p, skip, inSecret, stack);
+        if (listed === 'too-large') return listed;
       }
+    }
+    return null;
+  }
+
+  /** A directory's entries onto `stack`, one read at a time, each charged to the call's budget; 'too-large' once it is spent. */
+  private list(p: string, skip: boolean, inSecret: boolean, stack: Entry[]): 'too-large' | null {
+    let d: ReturnType<typeof opendirSync>;
+    try {
+      d = opendirSync(p);
+    } catch {
+      return null;
+    }
+    try {
+      for (let e = d.readSync(); e; e = d.readSync()) {
+        if (skip && SKIPPED.has(e.name)) continue;
+        if (this.spent()) return 'too-large';
+        const c = join(p, e.name);
+        const l = e.isSymbolicLink();
+        stack.push({ p: c, link: l, isDir: l ? dirAt(c) : e.isDirectory(), inSecret });
+      }
+    } catch {
+      // An entry that can't be read is one the tool can't read either.
+    } finally {
+      d.closeSync();
     }
     return null;
   }
@@ -387,7 +450,12 @@ export class Secrets {
   /** Why an access reaches a secret, or null. `tool` names it in the reason. */
   reached(a: Access, cwd: string, tool: string): string | null {
     if (a.kind === 'unchecked') return a.why;
+    // WHY (#887 review): the budget covers every access, path checks too, not only the walks.
+    if (this.late()) return `this call is too large to check for secret or hidden files (over ${WALK_MS / 1000} s); give ${tool} fewer or shorter paths`;
     const abs = this.absolute(a.target, cwd);
+    // A shell word that is still longer than PATH_MAX once resolved names nothing any system call can open; a tool's
+    // path that long is refused.
+    if (abs.length > PATH_MAX) return a.kind === 'path' && a.from === 'word' ? null : `a path longer than ${PATH_MAX} characters can't be checked for secret files`;
     if (this.at(abs) || this.at(real(abs))) return `${a.target} holds credentials; agents never read them`;
     if (a.kind === 'path') return null;
     let isDir = false;
