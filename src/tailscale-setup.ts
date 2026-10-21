@@ -20,6 +20,7 @@ import { readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { BRAND } from './brand.js';
 import type { EventLog } from './events/log.js';
+import { redactString } from './events/redact.js';
 import type { StoredEvent } from './events/types.js';
 import type { Role } from './console/asks.js';
 import { isMachineOwner, MACHINE_OWNERS_FILE, machineChangeRefusal, machineOwners, type MachineRequester } from './machine-owners.js';
@@ -112,8 +113,11 @@ export interface StepLine {
   detail: string;
 }
 
-/** Take a link or a key out of a line before it is shown: the script never writes one, and this is the check on that. */
-const scrub = (s: string) => s.replace(/https?:\/\/login\.tailscale\.com\S*/g, '[the login link]').replace(/tskey-[A-Za-z0-9_-]+/g, '[a key]');
+/**
+ * Take a key or a link out of a line before it is shown: the script never writes one, and this is the check on that.
+ * A key (and any other secret) by the shared redactor (#889), then the login link.
+ */
+const scrub = (s: string) => redactString(s).replace(/https?:\/\/login\.tailscale\.com\S*/g, '[the login link]');
 
 /** Which version of the progress file this is (its size and change time; '' when there is none): it changes with every line. */
 export function stepsStamp(dir = TAILSCALE_DIR): string {

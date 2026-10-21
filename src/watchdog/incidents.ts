@@ -127,14 +127,10 @@ export interface RaiseOptions {
 /** The store's directory: the machine's slot directory, which every instance's coordinator can write. */
 export const incidentsDir = (dir?: SlotPathLike): SlotPathLike => dir ?? slotsDir();
 
-/** A Discord bot token's shape (three dot-separated base64url parts): never stored or posted, whoever's it is. */
-export const DISCORD_TOKEN = /\b[A-Za-z0-9_-]{23,28}\.[A-Za-z0-9_-]{6,7}\.[A-Za-z0-9_-]{27,}\b/g;
-
-/** A text with every secret-shaped string taken out. */
-export const redactIncidentText = (s: string) => redactString(s).replace(DISCORD_TOKEN, '[REDACTED]');
-
+// Every secret-shaped string is taken out by the shared redactor, a Discord bot token's among them (#889: its pattern
+// was here, and only here).
 const clip = (s: string, n: number) => {
-  const r = redactIncidentText(String(s ?? '')).replace(/\s+/g, ' ').trim();
+  const r = redactString(String(s ?? '')).replace(/\s+/g, ' ').trim();
   return r.length > n ? `${r.slice(0, n - 1)}…` : r;
 };
 

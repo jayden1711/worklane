@@ -62,6 +62,9 @@ export const CHECK_TABLES: readonly CheckTable[] = [
   { path: 'test/owner-terminal-rerun.test.ts', table: 'FIRST_TIME_ONLY', kind: 'never-grow' },
   { path: 'scripts/lib/denylist.mjs', table: 'SKIP', kind: 'never-grow' },
   { path: 'src/guardrails/engine.ts', table: 'AGENT_EDITABLE', kind: 'never-grow' },
+  // #889: the modules that still redact a token shape on their own, and the one-module lint's good fixtures.
+  { path: 'test/redaction-one-module.test.ts', table: 'KNOWN_OWN_REDACTORS', kind: 'never-grow' },
+  { path: 'test/redaction-one-module.test.ts', table: 'GOOD_SOURCES', kind: 'never-grow' },
   // The lints' rules and bad fixtures, and the guards' lists: taking one out is a loosening.
   { path: 'test/change-files-renames.test.ts', table: 'READER_WORDS', kind: 'never-shrink' },
   { path: 'test/review.test.ts', table: 'LOCK_SCOPE_BAD', kind: 'never-shrink' },
@@ -80,6 +83,10 @@ export const CHECK_TABLES: readonly CheckTable[] = [
   { path: 'test/machine-path-writes.test.ts', table: 'GUARD', kind: 'never-shrink' },
   // The golden runner settings (#856): the deny list and hooks a run's --settings must carry.
   { path: 'test/runner-golden.test.ts', table: 'GUARD', kind: 'never-shrink' },
+  // #889: the shared redactor's one list of credential shapes, a stand-in for each, and the one-module lint's bad fixtures.
+  { path: 'src/events/redact.ts', table: 'PATTERNS', kind: 'never-shrink' },
+  { path: 'test/token-standins.ts', table: 'SHAPES', kind: 'never-shrink' },
+  { path: 'test/redaction-one-module.test.ts', table: 'BAD_SOURCES', kind: 'never-shrink' },
   // The guards' own tables (their files are guard files too; the table names what was taken out).
   { path: 'src/review.ts', table: 'SELF_MODIFICATION_PARTS', kind: 'never-shrink' },
   { path: 'src/review.ts', table: 'LOCKED_CATEGORIES', kind: 'never-shrink' },
@@ -124,6 +131,7 @@ export const LINT_TESTS: readonly string[] = [
   'test/web-buttons.test.ts',
   'test/superfan.test.ts',
   'test/claude-accounts-retired.test.ts',
+  'test/redaction-one-module.test.ts',
 ];
 
 /**

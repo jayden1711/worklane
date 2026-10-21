@@ -2,6 +2,8 @@
 // based; gitleaks still scans transcripts. False positives cost a few
 // characters of a log line; a false negative leaks a key into the log.
 // This is the one shared redactor: a feature that needs more redaction adds a pattern here, never its own redactor.
+// PATTERNS is the one list of credential shapes (#889); test/redaction-one-module.test.ts fails on a module that
+// redacts a token shape with its own regex, and test/redact-shapes.test.ts drives every shape through every output path.
 //
 // Every pattern added here must run in linear time on hostile input (an intake report, a CI log, chat text): a
 // match may start only where a run of its characters starts (a prefix group, never `\b` inside a run of `-`), and a
@@ -63,6 +65,9 @@ const PATTERNS: [RegExp, Replacement, string][] = [
   // Linear personal API keys and OAuth tokens.
   [/\blin_(?:api|oauth)_[A-Za-z0-9]{20,}\b/g, 'lin_[REDACTED]', 'Linear key'],
   [/https:\/\/hooks\.slack\.com\/services\/[A-Za-z0-9/]+/g, 'https://hooks.slack.com/services/[REDACTED]', 'Slack webhook'],
+  // Tailscale auth keys, API tokens and OAuth client secrets (tskey-auth-..., tskey-api-..., tskey-client-...): the
+  // prefix and the rest of its run, however short (src/tailscale-setup.ts redacted them this way on its own).
+  [/tskey-[A-Za-z0-9_-]+/g, 'tskey-[REDACTED]', 'Tailscale key'],
   [/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g, '[REDACTED PRIVATE KEY]', 'private key'],
   [/\b(Bearer)\s+[A-Za-z0-9._~+/-]{20,}=*/g, '$1 [REDACTED]', 'bearer token'],
   // Credentials inside connection strings: keep scheme, user and host.
@@ -79,7 +84,15 @@ const PATTERNS: [RegExp, Replacement, string][] = [
     (m, q, k, sep, v) => (credentialKey(k!) && credentialShaped(v!) ? `${q}${k}${q}${sep}${q}[REDACTED]${q}` : m),
     'secret under a JSON key',
   ],
+  // A Discord bot token: three base64url parts (the bot's id, a timestamp, an HMAC). Last, as src/watchdog/incidents.ts
+  // applied it after the rest (#889: it was redacted only there; there it started at `\b`, here after any character
+  // but a letter or digit, so `x_<token>` is found too). It may start inside a run of `-` or `_`, but the first part
+  // is bounded (23 to 28 characters, then a dot), so each start reads a bounded stretch: linear (redact-shapes.test.ts).
+  [/(^|[^A-Za-z0-9])[A-Za-z0-9_-]{23,28}\.[A-Za-z0-9_-]{6,7}\.[A-Za-z0-9_-]{27,}\b/g, '$1[REDACTED]', 'Discord bot token'],
 ];
+// Not covered, by decision (#889): a bare 32-character key with no prefix, such as a dashboard key standing alone. A
+// commit hash, a digest and the engine's own ids (randomBytes(16) in hex) have the same shape. A key in a Bearer
+// header, a JSON value under a credential key, or a URL's password is covered; a key is never put in a URL.
 
 /**
  * The first word of a dotted name that is code, not a host: `this.internal`, `opts.corp`, `config.lan.x`. Only
@@ -142,8 +155,14 @@ const IDENTIFIERS: [RegExp, Replacement, string][] = [
   [/(^|[^\w:])f(?:[cd][0-9a-f]{2}|e[89ab][0-9a-f]):(?:[0-9a-f]{0,4}:){1,6}[0-9a-f]{0,4}(?![\w:])/gi, '$1[private-ip]', 'private IP'],
 ];
 
-/** Every pattern with its kind, for the linear-time test (test/redact.test.ts). */
-export const REDACTION_PATTERNS: readonly { kind: string; re: RegExp; rep: Replacement }[] = [...PATTERNS, ...IDENTIFIERS].map(([re, rep, kind]) => ({ kind, re, rep }));
+/**
+ * Every pattern with its kind, for the linear-time test (test/redact.test.ts) and the shape tests
+ * (test/redact-shapes.test.ts): `secret` for a secret's pattern (applied by default), not for an identifier's.
+ */
+export const REDACTION_PATTERNS: readonly { kind: string; re: RegExp; rep: Replacement; secret: boolean }[] = [
+  ...PATTERNS.map(([re, rep, kind]) => ({ kind, re, rep, secret: true })),
+  ...IDENTIFIERS.map(([re, rep, kind]) => ({ kind, re, rep, secret: false })),
+];
 
 export interface RedactTextOptions {
   /** Also redact emails, internal hostnames, private IPs and home paths' user names (text for an issue, comment or PR). */

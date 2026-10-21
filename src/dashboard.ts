@@ -884,6 +884,8 @@ const journalctl: JournalReader = (unit, lines) => {
 };
 
 const clip = (s: string) => redactString(s.length > 2000 ? `${s.slice(0, 2000)} …` : s);
+/** Lines read above a service log file's kept lines, so a private key that starts there is redacted whole (a 4096-bit key is about 50 lines). */
+const KEY_MARGIN = 100;
 
 /**
  * The coordinator's service log, read-only, as the dashboard's user (the
@@ -917,7 +919,12 @@ export function readServiceLog(src: LogSource, lines = 200, read: JournalReader 
   }
   if (src.file && existsSync(src.file)) {
     const text = readFileSync(src.file, 'utf8');
-    const entries = text.split('\n').filter((l) => l.trim()).slice(-lines).map((message) => ({ at: null, priority: null, message: clip(message) }));
+    // The last lines, and KEY_MARGIN more above them, are redacted as one text before they are split, so a secret over
+    // several lines (a private key, even one that starts above the kept lines) is found whole (#889); each line is
+    // redacted again as it is clipped.
+    const tail = text.split('\n').filter((l) => l.trim()).slice(-(lines + KEY_MARGIN));
+    const kept = redactString(tail.join('\n')).split('\n').filter((l) => l.trim()).slice(-lines);
+    const entries = kept.map((message) => ({ at: null, priority: null, message: clip(message) }));
     return { source: 'file', unit: src.unit, entries, problem: entries.length ? null : problem };
   }
   return { source: 'none', unit: src.unit, entries: [], problem: problem ?? 'no service log found: the coordinator runs in the foreground or as a service without a log file' };
