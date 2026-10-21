@@ -12,6 +12,10 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, realpathSync, renameSync
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { runReadDenials } from '../src/read-denials.js';
+import { projectStateDir } from '../src/guardrails/context.js';
+
+/** The globs a pattern no exception overlaps also gets over the worktree parents (read-denials-late.test.ts). */
+const late = (main: string, rel: string) => [join(main, '.claude', 'worktrees', '*', rel), join(projectStateDir(main), 'worktrees', '*', rel)];
 
 const skip = process.platform !== 'linux' && "sandbox-runtime's Linux read-deny rules, where CI runs";
 const SRT = join(repoRoot, 'node_modules', '@anthropic-ai', 'sandbox-runtime', 'dist', 'sandbox');
@@ -84,7 +88,7 @@ test('#890: a symlinked directory the glob never descends into, or a link to a f
   symlinkSync('../elsewhere', join(dir, 'linked'));
   symlinkSync('README.md', join(dir, 'readme-link'));
   const p = paths(runReadDenials({ cwd: dir, home: '/h' }));
-  assert.deepEqual(p.sort(), [join(dir, '.env'), join(dir, '.env.local')]);
+  assert.deepEqual(p.sort(), [join(dir, '.env'), join(dir, '.env.local'), ...late(dir, '.env')].sort());
   assert.equal(await hides(p, join(dir, '.env.example')), false);
 
   const deep = project(['./**/.env*', '!./.env.example']);
@@ -149,7 +153,7 @@ test("#890: a run that hides nothing doesn't read the alternates, so a chain tha
   const dir = project(['./.env']);
   // A store that isn't there: git can't follow the chain (git follows a quoted line, so that no longer stands for one).
   writeFileSync(join(dir, '.git', 'objects', 'info', 'alternates'), `${join(dirname(dir), 'nowhere', 'objects')}\n`);
-  assert.deepEqual(paths(runReadDenials({ cwd: dir, home: '/h' })), [join(dir, '.env')]);
+  assert.deepEqual(paths(runReadDenials({ cwd: dir, home: '/h' })), [join(dir, '.env'), ...late(dir, '.env')]);
   const r = runReadDenials({ cwd: dir, home: '/h', taskFile: task(['evals/**']) });
   assert.ok('error' in r && /alternates .* can't be read in full/.test(r.error), JSON.stringify(r));
 });

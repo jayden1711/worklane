@@ -13,6 +13,7 @@ import { basename, dirname, isAbsolute, join, posix, resolve } from 'node:path';
 import { BRAND } from './brand.js';
 import { loadConfig } from './config/load.js';
 import { TaskFile } from './contract.js';
+import { projectStateDir } from './guardrails/context.js';
 import { globToRegExp } from './guardrails/glob.js';
 
 /** Directory entries listed, at most, to expand one pattern that has an exception; past it the pattern is denied whole. */
@@ -45,13 +46,21 @@ function projectRoot(start: string): string | null {
   }
 }
 
+interface Repository {
+  checkouts: string[];
+  main: string | null;
+  linked: string[];
+  stores: string[];
+}
+
 /**
  * The git repository around `start`: every checkout of it (this one, the main one, each linked worktree), where a
  * hidden or secret file can also sit, and its object stores (objects, alternates, LFS), which hold every committed
  * file's content whatever the checkout shows. None outside a repository. The stores are read only `withStores`: a
  * run that hides nothing isn't denied them, so a chain of alternates that can't be followed doesn't refuse it.
+ * `main` is the main checkout (none for a bare repository), `linked` the linked worktrees.
  */
-export function gitStores(start: string, withStores = true): { checkouts: string[]; stores: string[] } | { error: string } {
+export function gitStores(start: string, withStores = true): Repository | { error: string } {
   let dir = resolve(start);
   let dotGit = join(dir, '.git');
   for (;;) {
@@ -59,7 +68,7 @@ export function gitStores(start: string, withStores = true): { checkouts: string
       lstatSync(dotGit);
       break;
     } catch {
-      if (dirname(dir) === dir) return { checkouts: [], stores: [] };
+      if (dirname(dir) === dir) return { checkouts: [], main: null, linked: [], stores: [] };
       dir = dirname(dir);
       dotGit = join(dir, '.git');
     }
@@ -72,15 +81,17 @@ export function gitStores(start: string, withStores = true): { checkouts: string
       gitDir = resolve(dir, m[1]!.trim());
     }
     const common = resolve(gitDir, optional(join(gitDir, 'commondir'))?.trim() || '.');
-    const checkouts = [dir, ...(basename(common) === '.git' ? [dirname(common)] : [])];
+    const main = basename(common) === '.git' ? dirname(common) : null;
+    const linked: string[] = [];
     for (const n of listing(join(common, 'worktrees'))) {
       const g = optional(join(common, 'worktrees', n, 'gitdir'))?.trim();
-      if (g) checkouts.push(dirname(resolve(common, 'worktrees', n, g)));
+      if (g) linked.push(dirname(resolve(common, 'worktrees', n, g)));
     }
-    if (!withStores) return { checkouts: [...new Set(checkouts)], stores: [] };
+    const repo = { checkouts: [...new Set([dir, ...(main ? [main] : []), ...linked])], main, linked };
+    if (!withStores) return { ...repo, stores: [] };
     const borrowed = alternates(common);
     if ('error' in borrowed) return borrowed;
-    return { checkouts: [...new Set(checkouts)], stores: [join(common, 'objects'), ...borrowed.stores, join(common, 'lfs')] };
+    return { ...repo, stores: [join(common, 'objects'), ...borrowed.stores, join(common, 'lfs')] };
   } catch (e) {
     return { error: `the git repository at ${dotGit} can't be read (${firstLine(e)})` };
   }
@@ -185,6 +196,32 @@ function anchor(p: string, roots: string[], home: string | undefined): string[] 
   return out.map((a) => (p.endsWith('/') ? `${a.replace(/\/+$/, '')}/**` : a));
 }
 
+/** The directory a "dir/**" entry with no other glob in it stands for; null for any other entry. */
+function dirForm(a: string): string | null {
+  return a.endsWith('/**') && !GLOB.test(a.slice(0, -3)) ? a.slice(0, -3) || '/' : null;
+}
+
+/**
+ * Whether an exception (an absolute pattern) can match a path under `dir`; true when that can't be ruled out. "*" and
+ * "?" never match "/", so without "**" an exception matches only paths with as many parts as it has.
+ */
+function mayMatchBeneath(n: string, dir: string): boolean {
+  const under = `${dir === '/' ? '' : dir}/`;
+  if (!GLOB.test(n)) return n.startsWith(under);
+  const fixed = n.split(/[*?]/)[0]!;
+  if (fixed.startsWith(under)) return true;
+  if (!under.startsWith(fixed)) return false;
+  return n.includes('**') || n.split('/').length > dir.split('/').length;
+}
+
+/** Whether one of these exceptions can except something the absolute pattern `a` matches (true when unsure). */
+function overlaps(a: string, neg: string[]): boolean {
+  const dir = dirForm(a);
+  if (dir !== null) return neg.some((n) => mayMatchBeneath(n, dir));
+  const re = absRe(a);
+  return neg.some((n) => GLOB.test(n) || re.test(n.slice(1)));
+}
+
 /**
  * What an absolute glob matches now, listed from its fixed directory down. Null when that can't be done in full: a
  * directory that can't be listed, more than EXPAND_LIMIT entries, or a symlinked directory it would descend into. The
@@ -252,9 +289,12 @@ export function runReadDenials(o: { cwd: string; home: string | undefined; taskF
   }
   const root = projectRoot(o.cwd);
   let secret: string[] = [];
+  let worktreeRoot: string | null = null;
   if (root) {
     try {
-      secret = loadConfig(root).guardrails.secret_paths;
+      const cfg = loadConfig(root);
+      secret = cfg.guardrails.secret_paths;
+      worktreeRoot = cfg.tests.worktree.root;
     } catch (e) {
       return { error: `the guardrails in ${root} can't load (${firstLine(e)}), so its secret paths can't be denied` };
     }
@@ -268,10 +308,10 @@ export function runReadDenials(o: { cwd: string; home: string | undefined; taskF
   const repo = gitStores(root ?? o.cwd, hidden.length > 0);
   if ('error' in repo) return repo;
   const roots = [...new Set([root ?? resolve(o.cwd), ...repo.checkouts])];
-  const anchored = (ps: string[]) => {
+  const anchored = (ps: string[], under = roots) => {
     const out: string[] = [];
     for (const p of ps) {
-      const a = anchor(p, roots, o.home);
+      const a = anchor(p, under, o.home);
       if ('error' in a) return a;
       out.push(...a);
     }
@@ -288,17 +328,42 @@ export function runReadDenials(o: { cwd: string; home: string | undefined; taskF
   const entries = new Set<string>();
   const out = { add: (p: string) => entries.add(asEntry(p)) };
   for (const a of pos) {
-    // "dir/**" is the directory itself to the sandbox: one mount, whatever is created in it later.
-    const p = a.endsWith('/**') && !GLOB.test(a.slice(0, -3)) ? a.slice(0, -3) || '/' : a;
-    if (!GLOB.test(p)) {
-      if (!excepted(p)) out.add(p);
+    const dir = dirForm(a);
+    if (dir !== null) {
+      // "dir/**" is the directory itself to the sandbox: one mount, whatever is created in it later. An exception that
+      // names the directory itself excepts nothing beneath it, to the hook as here; only one that can match beneath it
+      // makes the pattern overlapped.
+      const now = overlaps(a, neg) ? expand(a) : null;
+      if (now) for (const m of now.filter((m) => !excepted(m))) out.add(m);
+      else out.add(dir);
       continue;
     }
-    const re = absRe(p);
-    const overlapped = neg.some((n) => GLOB.test(n) || re.test(n.slice(1)));
-    const now = overlapped ? expand(p) : null;
+    if (!GLOB.test(a)) {
+      if (!excepted(a)) out.add(a);
+      continue;
+    }
+    const now = overlaps(a, neg) ? expand(a) : null;
     if (now) for (const m of now.filter((m) => !excepted(m))) out.add(m);
-    else out.add(p);
+    else out.add(a);
+  }
+  // A checkout created after the run starts (a worker's worktree, made while an experiment runs): the hook matches a
+  // relative pattern only inside the run's own checkout, so nothing else covers it. Each relative pattern is also a
+  // glob over every place worktrees are made (the project's worktree root, the engine's own, and each existing
+  // worktree's parent), which the sandbox expands on every command and a Read rule matches at call time. A pattern an
+  // exception overlaps is left to what it matches now (above): over a parent, the exception would be hidden in every
+  // worktree, the run's own among them.
+  const base = repo.main ?? root ?? resolve(o.cwd);
+  const parents = new Set([...(worktreeRoot ? [resolve(base, worktreeRoot)] : []), join(projectStateDir(base), 'worktrees'), ...repo.linked.map((l) => dirname(l))]);
+  parents.delete('/');
+  const relative = (p: string) => !(p === '~' || p.startsWith('~/') || isAbsolute(p));
+  const relNeg = anchored(patterns.filter((p) => p.startsWith('!')).map((p) => p.slice(1)).filter(relative), ['/r']);
+  if ('error' in relNeg) return relNeg;
+  for (const p of patterns.filter((p) => !p.startsWith('!') && relative(p))) {
+    const probe = anchored([p], ['/r']);
+    if ('error' in probe || probe.some((a) => overlaps(a, relNeg))) continue;
+    const late = anchored([p], [...parents].map((d) => join(d, '*')));
+    if ('error' in late) return late;
+    for (const a of late) out.add(a);
   }
   if (hidden.length) for (const s of repo.stores) out.add(s);
   for (const p of entries) {
