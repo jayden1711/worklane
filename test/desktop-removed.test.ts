@@ -1,3 +1,4 @@
+// lint-test
 // #744: the desktop window is removed, with its lockfile, docs and build steps. Its CI job stays one more release as
 // a job that only succeeds (#746, the owner's option (a)): an updater from v0.5.2 or older requires a successful
 // "desktop" run on every commit it installs, so the job and its required check go together a release later (#877).
@@ -11,7 +12,8 @@ import assert from 'node:assert/strict';
 import { existsSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
-import { isNode, isScalar, parse, parseDocument, visit } from 'yaml';
+import { isNode, isPair, isScalar, parse, parseDocument, visit } from 'yaml';
+import { LINT_MARK, registrationsOf, weakeningReasons } from '../src/merge-policy-weakening.js';
 import { repoRoot } from './helpers.js';
 
 type Job = { name?: unknown; strategy?: { matrix?: unknown } };
@@ -60,9 +62,10 @@ const shown = (v: unknown) => (typeof v === 'object' && v !== null ? JSON.string
  * combination of its own when it fits none (so an `include`-only matrix is its entries). Null when the matrix isn't
  * written out (an expression such as `${{ fromJSON(...) }}`, for the matrix, an axis or an entry): the caller then
  * treats the job's name as unresolved. Each combination is a Map in key order, so no key is ever read from
- * Object.prototype (`toString`, `constructor`) and integer-like keys keep their place (round 8).
+ * Object.prototype (`toString`, `constructor`) and integer-like keys keep their place (round 8). `grown`: an include
+ * entry added a key outside the axes to a combination the axes made (round 16; see jobCheckNames).
  */
-function matrixCombos(matrix: unknown): Map<string, unknown>[] | null {
+function matrixCombos(matrix: unknown): { combos: Map<string, unknown>[]; grown: boolean } | null {
   if (!isRecord(matrix)) return null;
   // An expression anywhere in the matrix, key or value, axis, include or exclude: GitHub evaluates it, which changes
   // which combinations it builds (an exclude by expression can empty the product, so include entries stand alone),
@@ -118,17 +121,19 @@ function matrixCombos(matrix: unknown): Map<string, unknown>[] | null {
   combos = combos.filter((c) => !exclude.some((e) => Object.entries(e).every(([k, v]) => c.has(k) && same(c.get(k), v))));
   const original = combos.map((c) => new Map(c));
   const added: Map<string, unknown>[] = [];
+  let grown = false;
   for (const entry of include) {
     let fits = false;
     combos.forEach((c, i) => {
       if (Object.entries(entry).every(([k, v]) => !original[i]!.has(k) || same(original[i]!.get(k), v))) {
         for (const [k, v] of Object.entries(entry)) c.set(k, v);
+        if (Object.keys(entry).some((k) => !original[i]!.has(k))) grown = true;
         fits = true;
       }
     });
     if (!fits) added.push(new Map(Object.entries(entry)));
   }
-  return [...combos, ...added];
+  return { combos: [...combos, ...added], grown };
 }
 
 /** Whether `v` holds a YAML merge key (`<<`) anywhere: the `yaml` parser keeps it as a plain key. */
@@ -163,10 +168,17 @@ function jobCheckNames(key: string, job: Job): Set<string> {
   // expand it into a matrix, `test (ubuntu-latest, 22)`, where this would read a bare `test` (round 9). Unresolved.
   if (job.strategy !== undefined && !isRecord(job.strategy)) return new Set([`${name} (${UNRESOLVED} strategy ${JSON.stringify(job.strategy)} }})`]);
   const matrix = job.strategy?.matrix;
-  const combos = matrix === undefined ? [new Map<string, unknown>()] : matrixCombos(matrix);
+  const read = matrix === undefined ? { combos: [new Map<string, unknown>()], grown: false } : matrixCombos(matrix);
   // A matrix this can't read, or one with no combination at all (`{}`, `include: []`, an empty axis, everything
   // excluded): what GitHub shows for it is unsure, possibly a failed job under its own name, so it fails closed.
-  if (!combos || combos.length === 0) return new Set([`${name} (${UNRESOLVED} matrix ${JSON.stringify(matrix)} }})`]);
+  if (!read || read.combos.length === 0) return new Set([`${name} (${UNRESOLVED} matrix ${JSON.stringify(matrix)} }})`]);
+  const { combos, grown } = read;
+  // A name with no expression (the key, or a constant) gets the combination's values as a suffix. When an include
+  // entry added a key outside the axes to a combination the axes made, whether GitHub's suffix shows that value is
+  // unsure: without it, `test` with `os: [ubuntu-latest]`, `node: [22]` and include `{ node: 22, q: q }` would be
+  // `test (ubuntu-latest, 22)`, a twin. So the name is unresolved (round 16). An include-only matrix, or an entry
+  // that stands as a combination of its own, is read as before.
+  if (grown && !name.includes(UNRESOLVED)) return new Set([`${key} (${UNRESOLVED} an include key added to a combination }})`]);
   for (const c of combos) {
     // GitHub's expression contexts and property names ignore case, and spacing inside ${{ }} is free.
     const vars = new Map([...c].map(([k, v]) => [fold(k), v]));
@@ -201,6 +213,7 @@ function jobCheckNames(key: string, job: Job): Set<string> {
  * - an explicit tag on any node, and a number scalar not written in plain decimal (round 12): GitHub resolves core
  *   tags, and reads hex and octal as 32-bit numbers, where `yaml` does neither;
  * - an anchor defined twice (round 15): which definition an alias gets may differ;
+ * - a mapping key that isn't a string scalar (round 16): `true:` and `"true":` are one property in JS;
  * - a root, a `jobs`, or a job that isn't a plain mapping (a scalar, a list, `!!omap`), a `permissions` (at the root
  *   or in a job) that is neither a string nor a plain mapping, or any value anywhere that is neither a plain mapping,
  *   a list nor a scalar (a `Map`, a `Set`, binary data);
@@ -240,11 +253,16 @@ function readWorkflow(file: string): { wf: Record<string, unknown> | null; unsur
   //   source), and an exclude can then empty the product on GitHub only.
   // - an anchor defined twice (`&n desktop`, then `&n shots`): `yaml` resolves `*n` to the newest; whether GitHub's
   //   reader does too is unsure (round 15).
+  // - a mapping key that isn't a string scalar (`true:`, `True:`, `~:`, `1:`, an alias, a list): JS makes it a
+  //   property name, so `true:` and `"true":` fold into one, the last, where `yaml` and GitHub keep two keys; a red
+  //   job under the first would be hidden here (round 16).
   let tagged = false;
   let number = false;
   let twice = false;
+  let oddKey = false;
   const anchors = new Set<string>();
   visit(doc, (_, n) => {
+    if (isPair(n) && !(isScalar(n.key) && typeof n.key.value === 'string')) oddKey = true;
     if (!isNode(n)) return;
     if (n.anchor !== undefined) {
       if (anchors.has(n.anchor)) twice = true;
@@ -256,6 +274,7 @@ function readWorkflow(file: string): { wf: Record<string, unknown> | null; unsur
   if (twice) return unsure('an anchor defined twice');
   if (tagged) return unsure('an explicit tag');
   if (number) return unsure('a number not in plain decimal');
+  if (oddKey) return unsure('a mapping key that is not a string');
   if (!plainAll(value)) return unsure('a value that is not a plain mapping, list or scalar, or a key outside printable ASCII');
   if (value.jobs !== undefined && !isRecord(value.jobs)) return unsure('jobs that are not a mapping');
   const jobs = Object.values(isRecord(value.jobs) ? value.jobs : {});
@@ -729,6 +748,12 @@ const UNSURE_TEXT_FIXTURES: [string, string, string, boolean][] = [
   ['A8 an anchor defined twice, &n desktop then &n shots, name: *n', 'other.yml', "env:\n  A: &n desktop\n  B: &n shots\njobs:\n  t:\n    name: *n\n    runs-on: x\n    steps: [ { run: 'false' } ]\n", true],
   ['control: one anchor, two aliases', 'other.yml', 'env:\n  A: &n shots\njobs:\n  t:\n    name: *n\n    runs-on: x\n  u:\n    env: { N: *n }\n    runs-on: x\n', false],
   ['control: a matrix name that uses every key', 'other.yml', 'jobs:\n  t:\n    name: lint ${{ matrix.a }} ${{ matrix.b }}\n    strategy: { matrix: { a: [x, y], b: [1, 2] } }\n    runs-on: x\n', false],
+  // Round 16 (#746 second adversarial review of 8249c09c, A6): a key that isn't a string. JS folds `true:` (a boolean)
+  // and `"true":` into one property, the last, so a red job named desktop under the first was hidden here.
+  ['A6 a job keyed true (a boolean) named desktop, then one keyed "true"', 'other.yml', "jobs:\n  true:\n    name: desktop\n    runs-on: x\n    steps: [ { run: 'false' } ]\n  \"true\":\n    runs-on: x\n", true],
+  ['A6b a job keyed ~ (null) named desktop, then one keyed ""', 'other.yml', "jobs:\n  ~:\n    name: desktop\n    runs-on: x\n    steps: [ { run: 'false' } ]\n  \"\":\n    runs-on: x\n", true],
+  ['A6c in ci.yml, a job keyed True (a boolean) named desktop, then one keyed "true"', 'ci.yml', BASE_CI + "  True:\n    name: desktop\n    runs-on: x\n    steps: [ { run: 'false' } ]\n  \"true\":\n    runs-on: x\n", true],
+  ['control: keys "true", "1", "~" and \'null\' quoted are strings', 'other.yml', "jobs:\n  \"true\":\n    runs-on: x\n  t:\n    env: { \"1\": a, \"~\": b, 'null': c }\n    runs-on: x\n", false],
   ['control: a BOM at offset 0 only', 'other.yml', String.fromCharCode(0xfeff) + 'jobs:\n  t:\n    runs-on: x\n', false],
   ['control: TAB in a comment', 'other.yml', 'jobs:\n  t:\n    runs-on: x # a\tb\n', false],
 ];
@@ -765,6 +790,10 @@ const NAME_TWIN_FIXTURES: [string, string][] = [
   // Round 15 (#746 second adversarial review of f8448bb4, A10): names over 100 characters fail closed, in case GitHub
   // shortens them (guess). The real tree's longest name has 34 characters.
   ['A10 two names of 101 characters sharing their first 100', 'jobs:\n  a:\n    name: ' + 'x'.repeat(100) + "a\n    runs-on: x\n    steps: [ { run: 'false' } ]\n  b:\n    name: " + 'x'.repeat(100) + 'b\n    runs-on: x\n'],
+  // Round 16 (#746 reviews of 8249c09c, A7): an include entry that adds a key outside the axes to a combination, in a
+  // job whose name has no expression. If GitHub's suffix leaves the added value out, it is `test (ubuntu-latest, 22)`.
+  ['A7 a job keyed test, include { node: 22, q: q } on its one combination', "jobs:\n  test:\n    strategy: { matrix: { os: [ubuntu-latest], node: [22], include: [ { node: 22, q: q } ] } }\n    runs-on: x\n    steps: [ { run: 'true' } ]\n"],
+  ['A7b the same under a constant name: test', "jobs:\n  twin:\n    name: test\n    strategy: { matrix: { os: [ubuntu-latest], node: [22], include: [ { q: q } ] } }\n    runs-on: x\n    steps: [ { run: 'true' } ]\n"],
 ];
 
 test('a job GitHub may name as a twin of another check is caught: matrix keys, numbers, reusable-workflow names (round 8)', () => {
@@ -783,6 +812,13 @@ test('a job GitHub may name as a twin of another check is caught: matrix keys, n
   writeFileSync(join(ok, 'ci.yml'), BARE_BASE_CI);
   writeFileSync(join(ok, 'other.yml'), 'jobs:\n  lint:\n    strategy: { matrix: { node_v: [22, 999999999999999], os-x: [a] } }\n    runs-on: x\n');
   assert.deepEqual(checkTwins(ok, REQUIRED), [], 'lint (22, a), lint (999999999999999, a)');
+  // Round 16 controls for A7: an include-only matrix, and a plain axis matrix with an include entry that adds no key,
+  // are still read.
+  const ok7 = mkdtempSync(join(tmpdir(), 'wf-'));
+  writeFileSync(join(ok7, 'ci.yml'), BARE_BASE_CI);
+  writeFileSync(join(ok7, 'other.yml'), 'jobs:\n  lint:\n    strategy: { matrix: { include: [ { node: 22, q: q }, { node: 24 } ] } }\n    runs-on: x\n  fmt:\n    strategy: { matrix: { os: [a, b], include: [ { os: a } ] } }\n    runs-on: x\n');
+  assert.deepEqual([...fileJobNames(join(ok7, 'other.yml'))].sort(), ['fmt (a)', 'fmt (b)', 'lint (22, q)', 'lint (24)']);
+  assert.deepEqual(checkTwins(ok7, REQUIRED), [], 'A7 controls');
 });
 
 /**
@@ -850,7 +886,10 @@ test('matrix names expand as GitHub gives them: include, exclude, case and spaci
     return [...fileJobNames(join(dir, 'w.yml'))].sort();
   };
   assert.deepEqual(names('jobs:\n  s:\n    name: v ${{matrix.View}}\n    strategy: { matrix: { include: [{ view: a }, { view: b }] } }\n'), ['v a', 'v b']);
-  assert.deepEqual(names('jobs:\n  s:\n    strategy: { matrix: { os: [x, y], exclude: [{ os: y }], include: [{ os: x, n: 1 }, { os: z }] } }\n'), ['s (x, 1)', 's (z)']);
+  // Since round 16 an include key added to a combination the axes made leaves a name with no expression unresolved
+  // (A7); an entry that stands as its own combination is still read.
+  assert.deepEqual(names('jobs:\n  s:\n    strategy: { matrix: { os: [x, y], exclude: [{ os: y }], include: [{ os: x, n: 1 }, { os: z }] } }\n'), ['s (${{ an include key added to a combination }})']);
+  assert.deepEqual(names('jobs:\n  s:\n    strategy: { matrix: { os: [x, y], exclude: [{ os: y }], include: [{ os: x }, { os: z, n: 1 }] } }\n'), ['s (x)', 's (z, 1)']);
   assert.deepEqual(names('jobs:\n  s:\n    name: ${{ matrix.os }}-${{ matrix.n }}\n    strategy: { matrix: { os: [x], n: [1, 2], include: [{ n: 2, extra: e }] } }\n'), ['x-1', 'x-2']);
 });
 
@@ -916,4 +955,50 @@ test('the fixture helpers read a real tree: this test would see a desktop job if
   assert.ok(jobNames(dir).has('desktop'));
   assert.ok(NAMES_IT.test('The optional desktop window (`desktop/`) is built with Tauri'));
   assert.ok(!NAMES_IT.test('screenshots (desktop, dark mode, phone width)'), 'the word alone, for a viewport, is fine');
+});
+
+/**
+ * Round 16 (#746 second adversarial review of 8249c09c, M1 to M4): this file's rules live in its helpers, which no
+ * fixture reaches in full, so a later change could narrow one with every test still green. Its lint-test mark (line
+ * 1) makes the #783/#869 hold see any line taken out of the file. Each row narrows one rule; its anchor is split in
+ * two so this table never holds it whole. [label, anchor, narrowed]
+ */
+// check-table: never-shrink
+const NARROWING_MUTANTS: [string, [string, string], string][] = [
+  ['M1 one job, two runs of one name: only under 5 combinations', ['if (out.size <', ' combos.length) return'], 'if (out.size < combos.length && combos.length < 5) return'],
+  ['M2 names over 100 characters: only up to 199', ['n.length >', ' 100 ?'], '(n.length > 100 && n.length < 200) ?'],
+  ['M3 an anchor defined twice: only under 3 anchors', ['if (twice)', ' return'], 'if (twice && anchors.size < 3) return'],
+  ['M4 an unresolved name may make only desktop', ['[...names].some((n) =>', ' n.includes(UNRESOLVED));'], "(check === 'desktop' && [...names].some((n) => n.includes(UNRESOLVED)));"],
+  ['A7 an include key added to a combination: only with 2 or more', ['if (grown && !name.includes(UNRESOLVED))', ' return'], 'if (grown && !name.includes(UNRESOLVED) && combos.length > 1) return'],
+  ['A6 a key that is not a string: only with an anchor twice', ['if (oddKey)', ' return'], 'if (oddKey && twice) return'],
+];
+
+test('a later change that narrows one of these rules waits for the owner: this file is a lint test (round 16)', () => {
+  const P = 'test/desktop-removed.test.ts';
+  const before = readFileSync(join(repoRoot, P), 'utf8');
+  /** The #783/#869 hold for a change to this file alone, its lines as a diff gives them. */
+  const hold = (after: string) => {
+    const minus = (a: string[], b: string[]) => {
+      const left = [...b];
+      return a.filter((x) => {
+        const k = left.indexOf(x);
+        if (k === -1) return true;
+        left.splice(k, 1);
+        return false;
+      });
+    };
+    const [b, a] = [before.split('\n'), after.split('\n')];
+    const removed = minus(b, a);
+    const added = minus(a, b);
+    const files = [{ path: P, added: added.length, removed: removed.length, addedLines: added, removedLines: removed }];
+    return weakeningReasons({ files, deleted: new Set(), before: (p) => (p === P ? before : null), after: (p) => (p === P ? after : null), scope: undefined });
+  };
+  assert.ok(registrationsOf(before).lint, 'the file carries its lint-test mark');
+  for (const [label, [head, tail], narrowed] of NARROWING_MUTANTS) {
+    const rule = head + tail;
+    assert.equal(before.split(rule).length, 2, `${label}: the rule is in the file once`);
+    const reasons = hold(before.replace(rule, () => narrowed));
+    assert.ok(reasons.some((r) => r.includes('removes or changes a line of a guard or lint')), `${label}: ${JSON.stringify(reasons)}`);
+  }
+  assert.notDeepEqual(hold(before.replace(`${LINT_MARK}\n`, '')), [], 'the mark taken out');
 });
