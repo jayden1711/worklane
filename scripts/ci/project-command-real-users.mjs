@@ -77,10 +77,15 @@ if (dotdotLink) {
 
 // #798: the agent's home is read-only inside the sandbox. A project command can't plant ~/.bashrc or ~/.gitconfig for a
 // later agent-user process outside it (a login shell, git) to run or read.
-const plant = projectCommand(`echo 'echo PLANTED-RC' >> "$HOME/.bashrc" 2>&1; printf '[wl]\\n\\tplanted = PLANTED-GIT\\n' >> "$HOME/.gitconfig" 2>&1; true`, { user, home, hide: [] });
+// (A failed `>>` is reported by the shell before any `2>&1` applies: the refusal is on stderr.)
+const rcBefore = asUser(user, '/bin/cat', [join(home, '.bashrc')], { PATH: '/usr/bin:/bin' });
+const before = run(rcBefore[0], rcBefore[1], '/').stdout;
+const plant = projectCommand(`echo 'echo PLANTED-RC' >> "$HOME/.bashrc"; printf '[wl]\\n\\tplanted = PLANTED-GIT\\n' >> "$HOME/.gitconfig"; true`, { user, home, hide: [] });
 const pr = run(plant.file, plant.args, checkout);
 assert.equal(pr.status, 0, pr.stderr);
-assert.match(pr.stdout, /Read-only file system/, `a project command wrote the agent's home: ${pr.stdout}`);
+assert.match(pr.stderr, /\.bashrc: Read-only file system/, `a project command wrote the agent's ~/.bashrc: ${pr.stderr}`);
+assert.match(pr.stderr, /\.gitconfig: Read-only file system/, `a project command wrote the agent's ~/.gitconfig: ${pr.stderr}`);
+assert.equal(run(rcBefore[0], rcBefore[1], '/').stdout, before, "the agent's ~/.bashrc is unchanged");
 const [lf, la] = asUser(user, '/bin/bash', ['--norc', '--noprofile', '-c', 'cat "$HOME/.bashrc" "$HOME/.gitconfig" 2>/dev/null; git config --global --get wl.planted; true'], { PATH: '/usr/bin:/bin', HOME: home });
 const later = run(lf, la, '/');
 assert.doesNotMatch(later.stdout, /PLANTED-/, `a later agent-user process read what a project command planted: ${later.stdout}`);
