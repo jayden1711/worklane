@@ -2,17 +2,18 @@
 
 - **Check the machine helper's sudoers rule once (#898).** `sudo bash /opt/worklane/current/scripts/setup/machine-helper.sh --check` only reads, and answers one of:
   - `current` or `absent`: nothing to do.
-  - `stale`: the rewrite only drops grants. Rerun with no flag: `sudo bash /opt/worklane/current/scripts/setup/machine-helper.sh <every instance>`.
-  - `wider`: the engine's rule grants more than the installed one, as it does on a machine coming from v0.5.2 (set-policy, #726). It prints a unified diff headed `--- installed /etc/sudoers.d/worklane-machine` and `+++ engine (machine-helper.sh)`. Read it, then run `sudo bash /opt/worklane/current/scripts/setup/machine-helper.sh --replace-sudoers <every instance>`.
+  - `stale`: the installed rule is in the engine's own shape and the rewrite only drops whole commands or users. Rerun with no flag: `sudo bash /opt/worklane/current/scripts/setup/machine-helper.sh <every instance>`.
+  - `wider`: anything else. That covers a machine coming from v0.5.2, whose engine rule adds set-policy (#726), and an installed rule edited outside the engine's shape. It prints a unified diff headed `--- installed /etc/sudoers.d/worklane-machine` and `+++ engine (machine-helper.sh)`. Read it, then run `sudo bash /opt/worklane/current/scripts/setup/machine-helper.sh --replace-sudoers <every instance>`.
 
   The updater keeps the helper itself in step with the engine, never its sudoers rule, so a rule an older engine wrote stays until you run that.
 
 ### Guardrail changes: what each one does
 
-- **The machine helper's sudoers rule is rewritten on its own only when that narrows it (#898).**
+- **The machine helper's sudoers rule is rewritten on its own only when it narrows, failing closed (#898).**
   - add-project's machine-helper step is done only while the rule is the engine's, byte for byte.
-  - Otherwise a rerun rewrites it, through `machine-helper.sh`, only when every grant the engine's rule makes is already installed (each command, user spec and user, whitespace aside). So the rewrite only drops grants, and the one user it may add is the instance being added on its first add.
-  - When the engine's rule would grant more (a newer engine's command, a sudo that now reads patterns, another instance's user), `add-project.sh` and `machine-helper.sh` change nothing. They print the unified diff and `rerun as root with --replace-sudoers to install the engine's rule: <command>`, and add-project waits (exit 3).
+  - Otherwise a rerun rewrites it, through `machine-helper.sh`, only when the installed rule is in the engine's own exact shape and the engine's rule only drops whole commands or users from it. The shape is: comment lines, one `Cmnd_Alias WORKLANE_MACHINE` in the engine's formatting, and one `<users> ALL=(root) NOPASSWD: WORKLANE_MACHINE` line.
+  - The one user a rewrite may add on its own is the coordinator of an instance add-project is creating. That is a user add-project made itself, which stays on root's list (`/var/lib/worklane/add-project-new`) until the rule names it. A coordinator root took out of the rule is never put back on its own.
+  - Anything else waits. That covers a command or user the installed rule lacks, a second spec or alias, a tag, a `Defaults` or include line, a negation, an escape, or a CR. `add-project.sh`, `machine-helper.sh`, `instance-remove.sh` and `instance-rename.sh` change nothing; the last two check this before their first change. They print the unified diff and `rerun as root with --replace-sudoers to install the engine's rule: <command>`, and add-project waits (exit 3).
   - `--replace-sudoers` is root's, at a root shell: the machine helper runs `add-project.sh` with exactly a name and a repo, so a coordinator's add-project can never pass it.
 - **The updater names a stale or wider machine helper rule (#898).**
   - On every run, updates on or off, the updater runs the installed engine's `machine-helper.sh --check` as root.
