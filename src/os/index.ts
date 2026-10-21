@@ -411,6 +411,23 @@ export function fileAccess(file: string): { kind: 'missing' } | { kind: 'hidden'
 }
 
 /**
+ * What this user can tell of a key file without reading it (#904), the path itself never followed (lstat): missing,
+ * hidden (in a directory this user can't search: the expected case for an agent's key, as its coordinator), or what it
+ * is: whether a regular file, whether this user's own, whether its group or others may read or write it, and its link
+ * count. Native Windows has no owners to check: unsupported.
+ */
+export function keyFileAccess(file: string): { kind: 'missing' } | { kind: 'hidden' } | { kind: 'unsupported' } | { kind: 'file'; regular: boolean; own: boolean; openToOthers: boolean; mode: string; links: number } {
+  if (process.platform === 'win32' || typeof process.getuid !== 'function') return { kind: 'unsupported' };
+  try {
+    const s = lstatSync(file);
+    return { kind: 'file', regular: s.isFile(), own: s.uid === process.getuid(), openToOthers: (s.mode & 0o077) !== 0, mode: (s.mode & 0o777).toString(8).padStart(4, '0'), links: s.nlink };
+  } catch (e) {
+    const code = (e as NodeJS.ErrnoException).code;
+    return code === 'EACCES' || code === 'EPERM' ? { kind: 'hidden' } : { kind: 'missing' };
+  }
+}
+
+/**
  * A regular file's owner, mode and text, read through one descriptor opened without following a symlink, so what is
  * checked is what is read. Refused (by kind): no such file, unreadable, a symlink, not a regular file, or over
  * `maxBytes`. Native Windows has no owners to check: unsupported.
