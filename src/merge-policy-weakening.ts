@@ -62,6 +62,7 @@ export const CHECK_TABLES: readonly CheckTable[] = [
   { path: 'test/owner-terminal-rerun.test.ts', table: 'FIRST_TIME_ONLY', kind: 'never-grow' },
   { path: 'scripts/lib/denylist.mjs', table: 'SKIP', kind: 'never-grow' },
   { path: 'src/guardrails/engine.ts', table: 'AGENT_EDITABLE', kind: 'never-grow' },
+  { path: 'scripts/bench/pins.ts', table: 'SELECTION_RULES', kind: 'never-grow' },
   // #889: the modules that still redact a token shape on their own, and the one-module lint's good fixtures.
   { path: 'test/redaction-one-module.test.ts', table: 'KNOWN_OWN_REDACTORS', kind: 'never-grow' },
   { path: 'test/redaction-one-module.test.ts', table: 'GOOD_SOURCES', kind: 'never-grow' },

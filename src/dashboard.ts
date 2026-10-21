@@ -124,7 +124,8 @@ import { applyIntake, botView, DISCORD_CREDENTIAL, DiscordSetupError, discordSet
 import { INTAKE_FILE } from './intake/config.js';
 import { checkRootStep } from './console/root-steps.js';
 import { accountSet, CLAUDE_ACCOUNT_DIR, claudeAccountGate, claudeAccountView, mayViewClaudeAccount, requestClaudeAccount } from './claude-account.js';
-import { ClaudeCredentialRefused, CREDENTIAL_ROUTE_GONE, refuseClaudeCredential, REMOVED_CREDENTIAL_PATHS } from './claude-credential-guard.js';
+import { CREDENTIAL_ROUTE_GONE, refuseClaudeCredential, REMOVED_CREDENTIAL_PATHS } from './claude-credential-guard.js';
+import { errorAnswer, userFacing } from './user-facing-error.js';
 import { isTailscaleAction, mayViewTailscale, noTailscaleView, requestTailscale, stepsStamp, TAILSCALE_DIR, tailscaleStatus, tailscaleView, type TailscaleStatus } from './tailscale-setup.js';
 import { asksFrom, ASK_EVENTS } from './console/asks.js';
 import { incidentsView } from './watchdog/view.js';
@@ -1090,11 +1091,18 @@ async function readBody(req: IncomingMessage): Promise<unknown> {
   let size = 0;
   for await (const c of req) {
     size += (c as Buffer).length;
-    if (size > 64_000) throw new Error('body too large');
+    if (size > 64_000) throw userFacing(500, 'body too large');
     chunks.push(c as Buffer);
   }
+  let body: unknown = {};
+  try {
+    if (chunks.length) body = JSON.parse(Buffer.concat(chunks).toString('utf8')) as unknown;
+  } catch {
+    // JSON.parse's message quotes the body back: a fixed text instead (issue #864).
+    throw userFacing(400, "the request body isn't JSON");
+  }
   // INVARIANT (issue #711): no route takes a Claude credential, whatever it is for (src/claude-credential-guard.ts).
-  return refuseClaudeCredential(chunks.length ? (JSON.parse(Buffer.concat(chunks).toString('utf8')) as unknown) : {});
+  return refuseClaudeCredential(body);
 }
 
 export function startDashboard(opts: DashboardOptions): Promise<{ server: Server; url: string; keyFile: string; token: string; close: () => Promise<void> }> {
@@ -2880,7 +2888,9 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
       }
       serveStatic(webDir, url, res);
     } catch (e) {
-      json(res, e instanceof ClaudeCredentialRefused ? e.status : 500, { error: (e as Error).message });
+      // Issue #864: only a UserFacingError's vetted text reaches the page; anything else is one fixed 500.
+      const answer = errorAnswer(e, req, url.pathname);
+      json(res, answer.status, answer.body);
     }
   });
 
