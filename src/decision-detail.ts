@@ -15,7 +15,7 @@ import { DEFAULT_REVIEW } from './coordinator/shared.js';
 import { isOwner, isWriter, mayAnswerKind, type Role } from './dashboard-auth.js';
 import type { DecisionContext } from './decision-context.js';
 import { happened, isInvestigation, optionEffects, type DetailKind } from './decision-effects.js';
-import { redactString } from './events/redact.js';
+import { redactCut } from './events/redact.js';
 import type { EventPayload, StoredEvent } from './events/types.js';
 import type { PrView } from './projection.js';
 import { computeLevel, loadMoneyPaths, selfModificationPart } from './review.js';
@@ -143,8 +143,9 @@ export function prSections(body: string | null | undefined): { failWithout: stri
     const h = heads[i]!;
     const end = heads.slice(i + 1).find((n) => n.level <= h.level)?.at ?? lines.length;
     const s = lines.slice(h.at + 1, end).join('\n').trim();
-    // Redacted before it is cut (#889): a cut first leaves a token or a key's body unfound.
-    return s ? redactString(s).slice(0, 20_000) : null;
+    // Redacted before it is cut, over the kept part and a margin only (#889): a cut first leaves a token or a key's
+    // body unfound, and the whole text could be any size.
+    return s ? redactCut(s, 20_000) : null;
   };
   return { failWithout: section(/fail[- ]?without/i), never: section(/\bnever\b/i) };
 }
@@ -353,8 +354,9 @@ export async function decisionDiff(root: string, base: string, head: string): Pr
     execFile('git', ['diff', '--no-color', '--no-ext-diff', `${base}..${head}`], { cwd: root, env: { ...withToolPath(), GIT_TERMINAL_PROMPT: '0' }, timeout: 15_000, maxBuffer: 8 * 1024 * 1024, encoding: 'utf8' }, (err, stdout, stderr) => {
       if (err) return done({ diff: null, why: `not in this checkout's git: ${(stderr || err.message).trim().split('\n')[0]}` });
       const truncated = stdout.length > MAX;
-      // Redacted before it is cut (#889): a cut first leaves a token or a key's body unfound.
-      done({ diff: redactString(stdout).slice(0, MAX), truncated });
+      // Redacted before it is cut, over the kept part and a margin only (#889): up to 8 MB of diff, and the redaction is
+      // synchronous on the dashboard.
+      done({ diff: redactCut(stdout, MAX), truncated });
     });
   });
 }

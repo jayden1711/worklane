@@ -36,7 +36,7 @@ import { EventCache, type OpenRead } from './events/cache.js';
 import { compress, compressibleType, MIN_COMPRESS_BYTES, mayCompressApi, requestEncoding, StaticCompressed, type Encoding } from './dashboard-compress.js';
 import { dashboardProof, NONCE, PROOF_PATH } from './dashboard-proof.js';
 import { localDay } from './local-day.js';
-import { DASHBOARD_KEY_PREFIX, redactRecords, redactString } from './events/redact.js';
+import { DASHBOARD_KEY_PREFIX, redactCut, redactRecords, redactString } from './events/redact.js';
 import type { EventPayload, StoredEvent } from './events/types.js';
 import { acceptGit, acceptMerge, protectionView, type AcceptGit, type AcceptTarget } from './main-watch.js';
 import { deployGateView } from './deploy-gate/gate.js';
@@ -885,9 +885,15 @@ const journalctl: JournalReader = (unit, lines) => {
 };
 
 /** A message cut to 2,000 characters, redacted first: a cut made before would leave a long secret's body unfound (#889). */
+/** How much of one log record is shown, and how much of it is read (redacted) to show that (#889 round 4). */
+const RECORD_SHOWN = 2000;
+const RECORD_READ = RECORD_SHOWN + 4096;
+/** A record cut to what is read of it: a huge journal line costs no more than that (the redaction is synchronous). */
+const readPart = (s: string) => (s.length > RECORD_READ ? s.slice(0, RECORD_READ) : s);
+/** A message cut to 2,000 characters, redacted first: a cut made before would leave a long secret's body unfound (#889). */
 const clip = (s: string) => {
-  const r = redactString(s);
-  return r.length > 2000 ? `${r.slice(0, 2000)} …` : r;
+  const r = redactCut(s, RECORD_SHOWN);
+  return s.length > RECORD_SHOWN && r.length >= RECORD_SHOWN ? `${r} …` : r;
 };
 /**
  * Records read above the kept ones (journal entries or log-file lines), so a private key that starts there is
@@ -922,7 +928,8 @@ export function readServiceLog(src: LogSource, lines = 200, read: JournalReader 
       }
       // journald keeps a service's output one line per entry: the entries are redacted as one text (#889), so a private
       // key logged a line at a time is found whole. An entry that was inside one comes back empty and is left out.
-      const shown = redactRecords(records.map((e) => e.message));
+      // Each entry only as far as it is read (RECORD_READ), so a run of huge entries costs no more than the view shows.
+      const shown = redactRecords(records.map((e) => readPart(e.message)));
       const entries = records.flatMap((e, i) => (shown[i]!.trim() || !e.message.trim() ? [{ ...e, message: clip(shown[i]!) }] : [])).slice(-lines);
       if (entries.length) return { source: 'journal', unit: src.unit, entries, problem: null };
       problem = `no lines of ${src.unit} this user can read. Either the service hasn't logged yet, or the journal isn't kept on disk split per user, so the service's own user can't read its lines: run scripts/setup/journal.sh on the machine (as an admin).`;
@@ -936,7 +943,7 @@ export function readServiceLog(src: LogSource, lines = 200, read: JournalReader 
     // private key, even one that starts above the kept lines) is found whole (#889); each line is redacted again as it
     // is clipped.
     const tail = text.split('\n').filter((l) => l.trim()).slice(-(lines + KEY_MARGIN));
-    const kept = redactRecords(tail).filter((l) => l.trim()).slice(-lines);
+    const kept = redactRecords(tail.map(readPart)).filter((l) => l.trim()).slice(-lines);
     const entries = kept.map((message) => ({ at: null, priority: null, message: clip(message) }));
     return { source: 'file', unit: src.unit, entries, problem: entries.length ? null : problem };
   }

@@ -16,7 +16,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { closeSync, existsSync, openSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeSync } from 'node:fs';
 import { join } from 'node:path';
 import type { InstanceSettings } from './instance.js';
-import { redactString, secretKinds } from './events/redact.js';
+import { redactCut, redactString, secretKinds } from './events/redact.js';
 import { ownerOnlyDir, writeOwnerOnly } from './os/index.js';
 import { scanFile } from './scan/secrets.js';
 
@@ -370,8 +370,9 @@ export function attachmentPrompt(stateDir: string, ids: string[], bundleDir: str
     } else {
       const raw = attachmentBytes(stateDir, id)!.toString('utf8');
       const room = Math.max(0, Math.min(INLINE_PER_FILE, budget));
-      // Redacted before it is cut (#889): a cut first leaves a token or a key's body unfound.
-      const body = redactString(raw).slice(0, room);
+      // Redacted before it is cut, over the kept part and a margin only (#889): a cut first leaves a token or a key's
+      // body unfound, and a file may be 10 MB.
+      const body = redactCut(raw, room);
       budget -= body.length;
       const cut = raw.length > room ? `\n(cut: the first ${room} of ${raw.length} characters)` : '';
       lines.push(`${what}:`, `<<<ATTACHMENT ${n} BEGIN ${nonce}>>>`, body, `<<<ATTACHMENT ${n} END ${nonce}>>>${cut}`);
