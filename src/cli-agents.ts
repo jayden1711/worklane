@@ -1,7 +1,7 @@
 // WHY: item 38. Other vendors' coding CLIs (Codex, Gemini) as build agents. They have neither claude's sandbox nor
 // the guardrail hooks, so a run starts only as an unprivileged OS user, only on a build route that isn't high-risk,
 // and with its budget enforced here from the CLI's own token counts; its change is held after (cliChangeRefusal).
-import { spawn } from 'node:child_process';
+import { spawn } from './os/child-process.js';
 import { BRAND } from './brand.js';
 import { asUser, killTreeAs, spawnDetached } from './os/index.js';
 import { ownEnv } from './os/own-env.js';

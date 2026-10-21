@@ -1,5 +1,5 @@
 // Landing: the land queue and batches, the gates before landing, opening PRs, and what follows a landing (deploy).
-import { spawnSync } from 'node:child_process';
+import { spawnSync } from '../os/child-process.js';
 import { randomBytes } from 'node:crypto';
 import { BRAND } from '../brand.js';
 import { type DoneWhenList } from '../backlog/types.js';

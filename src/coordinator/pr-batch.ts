@@ -11,7 +11,7 @@
 // back in the queue), and nothing is merged twice.
 import { TestRunHeld } from '../testrun/gate.js';
 import { GPU_NO_REPEAT, gpuRunsNotToRepeat } from '../testrun/gpu.js';
-import { spawnSync } from 'node:child_process';
+import { spawnSync } from '../os/child-process.js';
 import { BRAND } from '../brand.js';
 import type { CommitCheck, PullRequest } from '../backlog/types.js';
 import type { JudgedChecks } from '../check-source.js';

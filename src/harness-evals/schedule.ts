@@ -1,7 +1,7 @@
 // When the harness eval suite runs: on this machine, from the nightly window (tests.yaml nightly_at), at most once a
 // day; weekly, and when the engine running here changed src/ since the last run. Which engine is running comes from
 // the engine itself: its git commit, or the commit its install directory is named after (/opt/<cli>/<sha>).
-import { spawnSync } from 'node:child_process';
+import { spawnSync } from '../os/child-process.js';
 import { existsSync, realpathSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import { fileURLToPath } from 'node:url';

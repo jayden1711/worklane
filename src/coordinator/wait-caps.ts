@@ -6,13 +6,20 @@
 //   mergeable recheck    GitHub still computing whether a ready PR can merge, on MERGEABLE_CAP polls of one head
 //   pending light check  the combined check found a conflict GitHub never reports, for LIGHT_PENDING_CAP polls
 //   main checks          the required checks on an auto-merge's commit never all report, for MAIN_CHECKS_TIMEOUT_MS
+//                        (a read that fails or gives no answer in MAIN_CHECKS_READ_MS is a poll with no report); at
+//                        the cap auto-merge stops (#731: unknown is not green), and it waits for the owner
 
 /** Polls of one PR head whose mergeable state stays unknown before it waits for the owner. */
 export const MERGEABLE_CAP = 10;
 /** Polls of one PR head whose combined check says "conflict" while GitHub says it merges, before the owner. */
 export const LIGHT_PENDING_CAP = 10;
-/** How long the checks on an auto-merge's commit may take to report before the wait is given up. */
+/**
+ * How long the checks on an auto-merge's commit may take to report before the wait is given up: counted in polls, and
+ * from the merge itself (its merge.done), so a restart, which forgets the polls, never starts it again.
+ */
 export const MAIN_CHECKS_TIMEOUT_MS = 2 * 3600_000;
+/** How long one read of an auto-merge's checks may take before that poll counts as no answer (#731: never green). */
+export const MAIN_CHECKS_READ_MS = 120_000;
 /** At least this many polls of an auto-merge's checks, whatever the poll interval (it is 0 in tests). */
 export const MAIN_CHECKS_MIN_POLLS = 20;
 

@@ -13,7 +13,7 @@ import { applyExperiment, EXP_ACTIONS, ExperimentsError, experimentsOn, experime
 import { PINS_FILE } from './experiments/store.js';
 import { handleHook, hooksGatewayToken } from './automations/webhook.js';
 import { AUTOMATIONS_FILE, AutomationsPolicy, limitsInForce } from './automations/schema.js';
-import { spawnSync } from 'node:child_process';
+import { spawnSync } from './os/child-process.js';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';

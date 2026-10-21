@@ -7,7 +7,7 @@
 // credential, so the script's claude-token step waits for root to install it on the machine (credentials.sh), and
 // this sends the script nothing: its stdin is closed at once.
 // The script's end is the request's machine.finished: done, or failed with the step and its retry.
-import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { spawn, type ChildProcessWithoutNullStreams } from '../os/child-process.js';
 import { createInterface } from 'node:readline';
 import type { EventLog } from '../events/log.js';
 import { asks } from '../console/asks.js';

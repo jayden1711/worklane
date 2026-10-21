@@ -1,5 +1,5 @@
 // Decisions: held plans, refused hosts, and the owner's answers on issues.
-import { spawnSync } from 'node:child_process';
+import { spawnSync } from '../os/child-process.js';
 import { randomBytes } from 'node:crypto';
 import { rmSync } from 'node:fs';
 import { join } from 'node:path';

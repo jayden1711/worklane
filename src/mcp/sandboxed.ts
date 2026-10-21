@@ -3,7 +3,7 @@
 // each server gets its own network allowlist and filesystem rules: the library keeps one configuration per process.
 // stdio passes straight through (the server's MCP channel); the exit status is the server's. Fails closed: a sandbox
 // that can't start means no server, never an unsandboxed one.
-import { spawn } from 'node:child_process';
+import { spawn } from '../os/child-process.js';
 import { readFileSync } from 'node:fs';
 import type { SandboxManager as SandboxManagerType, SandboxRuntimeConfig } from '@anthropic-ai/sandbox-runtime';
 import { z } from 'zod';
