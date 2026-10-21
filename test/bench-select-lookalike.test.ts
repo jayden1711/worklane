@@ -53,7 +53,8 @@ test('a visible extra character after the hyphen is withheld too, next to look-a
     ['example‗‗proj-ʹ4242', 'a modifier prime'],
     ['exampleˍˍproj-ʹ4242', 'a modifier prime, modifier macrons as underscores'],
     ['example‗‗proj-★4242', 'a star'],
-    ['example‗‗proj-\u{1F468}‍\u{1F469}4242', 'an emoji ZWJ sequence'],
+    // Built from code points: the joiner (U+200D) is never raw in this source.
+    [`example‗‗proj-${String.fromCodePoint(0x1f468, 0x200d, 0x1f469)}4242`, 'an emoji ZWJ sequence'],
     ['example‿‿proj−★★4242', 'two stars after a minus sign'],
   ] as const) {
     assert.equal(withholdTasks(arg), WITHHELD, why);

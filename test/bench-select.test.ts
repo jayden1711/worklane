@@ -25,6 +25,15 @@ const cli = () => import('../scripts/bench/cli.js');
 const sha256 = (b: Buffer | string): string => createHash('sha256').update(b).digest('hex');
 const uid = process.getuid?.() ?? 1000;
 
+/**
+ * Invisible characters the backstop tests use, built from their code points so none is raw in this source (no
+ * Trojan-source text in a security test): a zero-width space, a no-break space, a soft hyphen, a right-to-left mark.
+ */
+const ZWSP = String.fromCodePoint(0x200b);
+const NBSP = String.fromCodePoint(0xa0);
+const SHY = String.fromCodePoint(0xad);
+const RLM = String.fromCodePoint(0x200f);
+
 /** Anything shaped like an instance id or an instance image name: never in what the bench prints or throws. */
 const TASKISH = /__|_1776_/;
 
@@ -481,9 +490,9 @@ test("adversarial pass: the sink's backstop withholds the whole word, through qu
     [JSON.stringify({ a: FAKE_ID }), 'inside JSON'],
     [IMAGES[FAKE_ID]!, 'an instance image name'],
     [FAKE_ID.toUpperCase(), 'upper case'],
-    ['example​__proj-4242', 'a zero-width space before the underscores'],
-    ['example__pr​oj-4242', 'a zero-width space inside'],
-    ['example __proj-4242', 'a no-break space splitting the word'],
+    [`example${ZWSP}__proj-4242`, 'a zero-width space before the underscores'],
+    [`example__pr${ZWSP}oj-4242`, 'a zero-width space inside'],
+    [`example${NBSP}__proj-4242`, 'a no-break space splitting the word'],
   ] as const) {
     const got = withholdTasks(text);
     assert.match(got, new RegExp(WITHHELD.replace(/[[\]]/g, '\\$&')), why);
@@ -491,19 +500,19 @@ test("adversarial pass: the sink's backstop withholds the whole word, through qu
   }
   assert.equal(withholdTasks('t01 t02: def __init__(self) and a_b'), 't01 t02: def __init__(self) and a_b', 'nothing else is touched');
   const out: string[] = [];
-  assert.equal(main(['example​__proj-4242'], { out: (l: string) => out.push(l) }), 2);
+  assert.equal(main([`example${ZWSP}__proj-4242`], { out: (l: string) => out.push(l) }), 2);
   assert.doesNotMatch(out.join('\n'), /__proj|_1776_/, 'nothing of the tail through the real sink');
 });
 
 test('round 2: through main(), the backstop runs before any space or cut: zero-width, soft hyphen, bidi marks and a long argument', async () => {
   const { main } = await cli();
   const cases: [string, string][] = [
-    ['example__pr​oj-4242', 'a zero-width space inside the repo'],
-    ['example_​_proj-4242', 'a zero-width space between the underscores'],
-    ['example__proj-​4242', 'a zero-width space before the digits'],
-    ['example__pr­oj-4242', 'a soft hyphen inside'],
-    ['example__pr‏oj-4242', 'a right-to-left mark inside'],
-    ['swebench/sweb.eval.x86_64.example_17​76_proj-4242', 'an image name with a zero-width space in 1776'],
+    [`example__pr${ZWSP}oj-4242`, 'a zero-width space inside the repo'],
+    [`example_${ZWSP}_proj-4242`, 'a zero-width space between the underscores'],
+    [`example__proj-${ZWSP}4242`, 'a zero-width space before the digits'],
+    [`example__pr${SHY}oj-4242`, 'a soft hyphen inside'],
+    [`example__pr${RLM}oj-4242`, 'a right-to-left mark inside'],
+    [`swebench/sweb.eval.x86_64.example_17${ZWSP}76_proj-4242`, 'an image name with a zero-width space in 1776'],
     [`${'x'.repeat(190)}${FAKE_ID}`, 'an argument longer than the 200-character cut'],
   ];
   for (const [arg, why] of cases) {
