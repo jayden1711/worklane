@@ -19,6 +19,7 @@ const RAW: { file: string; owner: string; member: string }[] = [
 const MEMBERS = new Set(RAW.map((r) => r.member));
 
 /** The files in src/ that may read GitHub's checks raw, and why. */
+// check-table: never-grow
 export const RAW_READS_ALLOWED: Record<string, string> = {
   'src/check-source.ts': 'PinnedChecks.of: the one place that turns them into JudgedChecks',
   'src/main-watch.ts': 'the main watch reads the runs at a merge and judges them by their pins itself (judge)',
@@ -116,6 +117,7 @@ export function rawCheckReads(files: Record<string, string>, root = repoRoot): {
 }
 
 /** The files in src/ that may assert a type into JudgedChecks: only the one that makes them. */
+// check-table: never-grow
 export const JUDGED_CASTS_ALLOWED: Record<string, string> = { 'src/check-source.ts': 'PinnedChecks.of makes JudgedChecks: the brand is its to give' };
 
 /**
@@ -165,6 +167,7 @@ export function judgedCasts(files: Record<string, string>, root = repoRoot): { f
  * stand-in backlog elsewhere could brand checks from anywhere. merge-flow.ts builds it over the coordinator's own
  * backlog, config and event log.
  */
+// check-table: never-grow
 export const MAKERS_ALLOWED: Record<string, string[]> = {
   PinnedChecks: ['src/coordinator/merge-flow.ts'],
 };

@@ -248,6 +248,21 @@ export function checkImageArgs(args: readonly string[]): void {
 /** docker.io's short form, as RepoDigests prints it: no docker.io/ and no library/ in front. */
 const shortName = (name: string): string => name.replace(/^docker\.io\//, '').replace(/^library\//, '');
 
+/**
+ * Why pullImage refused, by stage, so a caller that must not print the image's name (bench pull: it names the task)
+ * can say what failed from the stage alone: `pull` (docker pull failed, with its exit status) or `read back` (the
+ * pinned digest didn't read back). Its message quotes the reference and docker's own words.
+ */
+export class PullRefused extends Error {
+  constructor(
+    readonly stage: 'pull' | 'read back',
+    readonly status: number | null,
+    message: string,
+  ) {
+    super(message);
+  }
+}
+
 /** `ref` pulled by its digest, and the digest read back from the daemon. Refuses (throws) on any failure. */
 export function pullImage(o: DockerOptions, ref: ImageRef): void {
   // Only pins.ts pinnedImage builds an ImageRef: a pinned digest, no tag.
@@ -259,7 +274,7 @@ export function pullImage(o: DockerOptions, ref: ImageRef): void {
   // From its own frozen fields only, never a method (#863 round 1: a prototype's method can be swapped in-process).
   const text = `${ref.name}@${ref.digest}`;
   const p = send(['pull', text], 60 * 60_000);
-  if (p.status !== 0) throw new Error(`docker pull ${text} failed: ${p.stderr.trim().slice(0, 300)}`);
+  if (p.status !== 0) throw new PullRefused('pull', p.status, `docker pull ${text} failed: ${p.stderr.trim().slice(0, 300)}`);
   const i = send(['image', 'inspect', '--format', INSPECT_FORMAT, text], 60_000);
   let digests: unknown = null;
   try {
@@ -269,5 +284,5 @@ export function pullImage(o: DockerOptions, ref: ImageRef): void {
   }
   const want = `${shortName(ref.name)}@${ref.digest}`;
   const ok = i.status === 0 && Array.isArray(digests) && digests.some((d) => typeof d === 'string' && shortName(d) === want);
-  if (!ok) throw new Error(`docker image inspect ${text}: the pinned digest ${ref.digest} doesn't read back: refused`);
+  if (!ok) throw new PullRefused('read back', i.status, `docker image inspect ${text}: the pinned digest ${ref.digest} doesn't read back: refused`);
 }

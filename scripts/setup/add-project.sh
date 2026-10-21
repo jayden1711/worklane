@@ -19,7 +19,10 @@
 #                   root shell on this machine (or on root's stdin, for automation), stored for wl-<name>-agent only,
 #                   never echoed or logged. With none (the machine helper, for a dashboard, gives no stdin) the step
 #                   waits (exit 3) for root to install the login (credentials.sh <name> claude): a dashboard never
-#                   takes a Claude credential (issue #711).
+#                   takes a Claude credential (issue #711). An Anthropic API key counts as the login too (issue #897):
+#                   done when credentials.yaml names the agent's key file where credentials.sh <name> api-key
+#                   installs and writes it, that file is the agent user's own and open to nobody else, the agent's
+#                   own settings name it as their apiKeyHelper, and claude reports an API-key login.
 #   checkout        checkout.sh <name> <owner/repo>; a repo with no config gets auto-config's setup PR (through the App)
 #   policy          the default policy, auto_merge off, $20/day, 2 workers, shown for you to change; made root's (0644,
 #                   the coordinator reads it and never writes it; an earlier install's on a rerun, its content kept)
@@ -177,10 +180,41 @@ alone_app() { echo "sudo $ENGINE_CLI app-manifest $name $repo"; }
 
 # --- claude-token
 done_claude_token() {
-  local f
+  local f k ah
   f="$(home_of "$agent")/.claude/.credentials.json"
-  [ -f "$f" ] && grep -q '"accessToken"' "$f" || return 1
-  echo "$agent has a Claude login"
+  if [ -f "$f" ] && grep -q '"accessToken"' "$f"; then
+    echo "$agent has a Claude login"
+    return 0
+  fi
+  # Issue #897: or an Anthropic API key (credentials.sh <name> api-key). credentials.yaml names the key file, where
+  # credentials.sh installs it; the file is the agent user's own and open to nobody else; the agent's own settings name
+  # that same file as their apiKeyHelper (#904: the one the runner gives runs, so the login claude reports is that
+  # file's); and claude, as the agent user, reports an API-key login.
+  k="$(agent_api_key_path)" || return 1
+  ah="$(home_of "$agent")"
+  agent_key_path_ok "$ah" "$k" || return 1
+  agent_key_file_ok "$agent" "$k" || return 1
+  agent_key_helper_ok "$agent" "$ah/.claude/settings.json" "$k" || return 1
+  claude_api_key_login_ok "$agent" || return 1
+  echo "$agent bills to an Anthropic API key ($k, its own, open to nobody else), and claude reports an API-key login as that user"
+}
+# The key file credentials.yaml's agent_api_key names, exactly as the engine loads it (#904: one parser; a line picked
+# out of the text can differ from the YAML, e.g. in a flow mapping). The file's bytes are read as the coordinator user
+# (its own file: root opens nothing at a path it could point elsewhere), bounded by root and capped at 64 KiB, into a
+# file of root's; root's engine (`instance agent-api-key-of`) parses them, schema and all. Only when the file names
+# agent_api_key at all, so an instance without one never runs the engine here. Then only a path apiKeyHelper can name
+# (src/runner.ts apiKeyHelperCommand) in the normal form the schema takes (no //, /./, /../ or trailing /).
+agent_api_key_path() {
+  local k="" tmp
+  run_as_bounded "$coord" "$AGENT_CHECK_SECONDS" /dev/null '[ -f "$1" ] && [ ! -L "$1" ] && grep -q agent_api_key -- "$1" && [ "$(wc -c < "$1")" -le 65536 ]' "$(creds)" || return 1
+  tmp="$(mktemp)" || return 1
+  if run_as_bounded "$coord" "$AGENT_CHECK_SECONDS" "$tmp" '[ -f "$1" ] && [ ! -L "$1" ] && exec head -c 65537 -- "$1"' "$(creds)"; then
+    k="$( (close_fds; cd / && exec timeout -s KILL "$AGENT_CHECK_SECONDS" "$ENGINE_CLI" instance agent-api-key-of < "$tmp" 2>/dev/null) || true)"
+  fi
+  rm -f -- "$tmp"
+  [[ "$k" =~ ^/[A-Za-z0-9._/-]+$ ]] || return 1
+  [[ "$k/" != *//* && "$k/" != */./* && "$k/" != */../* ]] || return 1
+  printf '%s' "$k"
 }
 do_claude_token() {
   local token=""
@@ -195,7 +229,8 @@ do_claude_token() {
   fi
   token="$(printf '%s' "$token" | tr -d '[:space:]')"
   if [ -z "$token" ]; then
-    echo "waiting: the agents' Claude login, which only root installs, on this machine: sudo bash $here/credentials.sh $name claude (it asks for the token claude setup-token prints, not shown), or sign in as $agent there (sudo -u $agent -i claude auth login)"
+    # Both routes (#897), within the 400 characters run_step keeps of it, for the longest name (a test holds it so).
+    echo "waiting: the agents' Claude login, which only root installs, on this machine: sudo bash $here/credentials.sh $name claude (it asks for the token claude setup-token prints), or the same with api-key for claude (it asks for an Anthropic API key), neither shown; or sudo -u $agent -i claude auth login"
     exit 3
   fi
   printf '%s' "$token" | install_claude_token "$agent"

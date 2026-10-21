@@ -585,6 +585,7 @@ const POLICY_SET_KEYS = {
   'settings.intake.reports_per_sender_per_day': 'number', 'settings.intake.drafts_per_day': 'number', 'settings.intake.max_usd_per_day': 'number', 'settings.stuck_guard': 'word',
   'settings.chat_attachments.max_file_mb': 'number', 'settings.chat_attachments.max_message_mb': 'number', 'settings.chat_attachments.retention_days': 'number',
 };
+// check-table: never-shrink
 const POLICY_ONLY = { land_mode: 'pr', main_watch: 'auto', auto_merge: 'off' };
 const POLICY_SHAPES = {
   number: /^(0|[1-9][0-9]{0,5})(\.[0-9]{1,2})?$/,

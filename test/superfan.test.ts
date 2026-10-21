@@ -1,3 +1,4 @@
+// lint-test
 // The superfans (src/superfan/, src/coordinator/superfan.ts): a watcher per instance (and one for the machine's
 // engine and updater) that reads what happened since its last pass and posts only when a cheap model finds
 // something new or odd, deduped, within its own daily budget. The model and Discord are fakes; the incident store,
