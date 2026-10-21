@@ -1,5 +1,5 @@
 // #726 / #770: the machine helper's POLICY_ONLY (the one value of land_mode, main_watch and auto_merge a coordinator may
-// set) is a registered check table (src/merge-policy-weakening.ts CHECK_TABLES, never-shrink), so a PR that takes a
+// set) is a registered check table (its `// check-table: never-shrink` mark, #869), so a PR that takes a
 // key out of it waits for the owner. Measured through the merge decision's own path (merge-flow calls weakeningOf with
 // changeFiles): a real git change of the real helper file, found only through BRAND, so a rename keeps it.
 //
