@@ -15,14 +15,14 @@ What is here so far:
 - **Containers** (`container.ts`, `agent.ts`, `hidden.ts`, `probe.ts`): the rootless Docker launcher with required limits, the exec-only task runner, the hidden-field guards, the agents' environment and sandbox, and the srt sandbox probe.
 - **Driver** (`driver.ts`, `confirm.ts`, `grade.ts`, `aggregate.ts`, `store.ts`): the run loop, the sandbox confirmation, patch export, the predictions for grading, and the aggregate. `srt-fingerprint.mjs` compares a sandbox-runtime release with the build a Claude Code binary bundles.
 - **The `bench` command** (`cli.ts`): `bench preflight` runs the model-free, container-free checks above and prints a PASS/FAIL/SKIP line each (setup step 6).
+- **Pinned downloads** (`pins.json`, `pins.ts`, `download.ts`): `bench download` fetches the dataset file at its pinned revision and sha256 into the held-out store, and `pullImage` pulls a task image by pinned digest only (step 7). The dataset isn't pinned yet, so `bench download` refuses until the owner records the pin.
 
 Still to come:
 - the PR-mode task runner on the replay harness (`src/harness-evals/replay.ts`), with stub CI;
 - the agent's test relay into the container;
-- task selection;
-- the pinned-download scripts;
+- task selection (it reads the downloaded file, writes the manifest, and hands each task's image reference to `pullImage` from the store);
 - the grading run and the B0, B1 and `claude -p` baselines;
-- the `bench` command's other subcommands (`run` and the rest; `preflight` is here).
+- the `bench` command's other subcommands (`select`, `run` and the rest; `preflight` and `download` are here).
 
 ## How it is isolated
 
@@ -263,11 +263,35 @@ It runs every check a run makes before any model call or container, as the bench
 
 Left to the run: the limits read back from a probe container (it needs a task image), and the sandbox confirmation, the run's first model call.
 
+### 7. The pinned download (needs the owner's OK; on the bench machine only)
+
+Every pin is in one file, `scripts/bench/pins.json`. Nothing else sets one: no variable, flag or argument (`bench download` takes none), and the code takes a pin only as `pins.ts` parsed it from that file. It holds:
+- `dataset`: the file's url (`base` + `revision` + `/` + `path`, so it is at the pinned revision by construction), the `revision` (a 40-hex commit), the file's `sha256`, `max_bytes` (the most it reads) and `hosts` (where a redirect may lead: each host or its subdomains, https only). `revision` and `sha256` are both set or both null. They are null now, so `bench download` refuses and fetches nothing. The `path` there is a guess until the owner pins it (**guess**): check it names the file meant.
+- `image_digests`: sha256 digests only, sorted, none or at least 100 of them. Never an image name, an instance id or a task selection: the agents can read this clone, and an image name carries its instance id. Which image a task uses comes from the held-out store.
+
+The whole file is refused for:
+- an unknown key;
+- anything shaped like an instance id or an instance image name;
+- any text but its canonical form (`JSON.stringify(pins, null, 2)` and a newline), so a repeated key can't hide an unchecked copy;
+- a `base` that isn't written exactly as the url it is, or whose path has a segment that isn't a plain name (no percent escape).
+
+To pin the dataset, the owner records the commit and the file's sha256 (a reviewed change to `pins.json`). Then, as the bench user:
+
+    bench download
+
+What it does, in order:
+- refuses unless it runs as the bench user with its own home, and unless the held-out store passes the preflight's check (absent, or a real 0700 folder of this user with no link from the bench root down). It never chmods or replaces a store that fails: the owner fixes it;
+- keeps a file already at its name (`dataset/<sha256>-<name>` in the store) when it matches, fetching nothing. It refuses one that doesn't match, or a link there, and leaves it for the owner to look at;
+- fetches the bytes into memory over https, from the pinned host, through at most five redirects (each to a pinned host or its subdomain, with no credentials and no port), up to `max_bytes`. Their sha256 must equal the pin. Until then it makes and writes nothing, not even the store;
+- makes the store and its `dataset/` folder (0700, one folder at a time, never through a link), then writes a new temporary file there. That file is created exclusively, refuses a link and is 0600. It is synced and read back, and renamed to its name only when the read-back matches the pin.
+
+Images (`download.ts` `pullImage`): only `docker pull <name>@sha256:<digest>` and `docker image inspect` (to read the digest back) are sent. The argv is built only from a reference `pins.ts` checked: a pinned digest, no tag, no port, no option. The argv is checked again before docker runs. No command takes an image name on the command line, since the bench user's shell history is readable by the agents (**inferred**: the sandbox's read-deny list doesn't name it). Task selection hands each task's reference over from the store.
+
 ## Data and results
 
 Everything lives under `$HOME/bench`, outside every repository and engine state dir. The driver refuses a root inside a git checkout, a credential store or real engine state. Results are private.
 
-- `state/evals/held-out/swebench/`: the dataset copy, the manifest, the predictions and grades (0700).
+- `state/evals/held-out/swebench/`: the dataset copy (`dataset/<sha256>-<name>`, 0600, step 7), the manifest, the predictions and grades (0700).
 - `runs/<run>/<key>/`: each task's clone, local remote and engine state.
 - `runs/<run>/patches/<key>/<label>.diff`: the exported patches (`final`, `attempt-N`, `b0`, `b1`, `bare`).
 - `runs/<run>/sandbox.json`: the two sandbox checks, per attempt, and the confirmation's usage.

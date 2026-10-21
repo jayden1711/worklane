@@ -15,18 +15,24 @@
 // name may hold a credential or switch the login and each piece of such a value that starts or ends it (a message
 // cut short upstream ends in one), token-shaped strings, email addresses and control characters. The checks themselves print no variable's value and no field of the
 // login but its method and plan.
-import { lstatSync, realpathSync } from 'node:fs';
+//
+// `download` (#748, slice 2) fetches the pinned dataset file into the held-out store (download.ts), as the bench user
+// only, with the pins from scripts/bench/pins.json and nowhere else: it takes no argument. It starts no container and
+// makes no model call.
+import { realpathSync } from 'node:fs';
 import { userInfo } from 'node:os';
-import { isAbsolute, join, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { currentUser } from '../../src/os/index.js';
 import { benchLane, runtimeDir } from './agent.js';
 import { LOGIN_SWITCH_VAR, requireBenchUser, requireClaudePin, requireSubscription } from './auth.js';
 import { MODE_MAX_USD, PER_TASK_MAX_USD, REAPPROVE_MEAN_USD } from './caps.js';
 import { Docker, limitsFrom, type DockerOptions, type Limits } from './container.js';
+import { downloadDataset, httpsFetcher, type Fetcher } from './download.js';
 import { assertResearchOff, BENCH_SETTINGS } from './driver.js';
-import { benchHome, benchRoot, realPath, type BenchLayout } from './paths.js';
+import { benchHome, benchRoot, type BenchLayout } from './paths.js';
+import { loadPins, PINS_FILE, type Pins } from './pins.js';
 import { sandboxProbe, SRT_LABEL } from './probe.js';
+import { heldOutCheck } from './store.js';
 
 export interface CliDeps {
   env: NodeJS.ProcessEnv;
@@ -45,6 +51,8 @@ export interface CliDeps {
   host?: { cpus: number; memoryBytes: number };
   /** Where each line goes (default: stdout). Every line is scrubbed first. */
   out: (line: string) => void;
+  /** `download`'s one HTTP request at a time (default: Node's fetch, no redirect followed; tests pass a stand-in). */
+  fetch?: Fetcher;
 }
 
 export type CheckStatus = 'PASS' | 'FAIL' | 'SKIP';
@@ -97,37 +105,8 @@ export function scrub(text: string, env: NodeJS.ProcessEnv, max = DETAIL_MAX): s
 
 const message = (e: unknown): string => (e instanceof Error ? e.message : String(e));
 
-/**
- * The held-out store as the run needs it: absent (the pinned download makes it 0700), or a real folder this user owns,
- * mode exactly 0700 (no group or other access, no setuid, setgid or sticky bit). Every folder from the bench root
- * (already a real path) down to the store must be a real folder, not a link, whether or not the store is made yet
- * (#851 round 2): the agents' sandbox denies the store by this path, and whether it would follow a link to deny the
- * place it names is a guess, so a link anywhere on the way fails closed. Only lstat'ed: nothing in it is read.
- */
-export function heldOutCheck(layout: BenchLayout, uid: number): string {
-  const rel = relative(layout.root, layout.heldOut);
-  if (!rel || rel.startsWith('..') || isAbsolute(rel)) throw new Error(`${layout.heldOut} is not inside the bench root ${layout.root}`);
-  let at = layout.root;
-  for (const part of rel.split(sep)) {
-    at = join(at, part);
-    let st;
-    try {
-      st = lstatSync(at);
-    } catch (e) {
-      if ((e as NodeJS.ErrnoException).code === 'ENOENT') return `${layout.heldOut}: not made yet (the pinned download makes it, 0700)`;
-      throw e;
-    }
-    if (st.isSymbolicLink()) throw new Error(`${at} is a link: every folder down to the held-out store must be a real folder under the bench root`);
-    if (!st.isDirectory()) throw new Error(`${at} is not a folder`);
-    if (at !== layout.heldOut) continue;
-    if (st.uid !== uid) throw new Error(`${layout.heldOut} belongs to uid ${st.uid}, not this user (${uid})`);
-    const mode = st.mode & 0o7777;
-    if (mode !== 0o700) throw new Error(`${layout.heldOut} is mode 0${mode.toString(8)}, not exactly 0700: chmod 700 it (hidden tests and the task map live there)`);
-  }
-  // The walk saw no link; the real path must agree (a link the walk can't see, such as one swapped in since, fails here).
-  if (realPath(layout.heldOut) !== layout.heldOut) throw new Error(`${layout.heldOut} really is ${realPath(layout.heldOut)}: a link on the way`);
-  return `${layout.heldOut}: 0700, this user's, no link on the way`;
-}
+// The held-out store's check lives with the store (store.ts): `bench download` runs it too.
+export { heldOutCheck };
 
 /** Every model-free, container-free check, in order. The user and home checks gate all the others. */
 export function preflight(d: CliDeps): Check[] {
@@ -194,8 +173,27 @@ const USAGE = [
   '',
   '  preflight   the checks a run makes before any model call or container: one PASS/FAIL/SKIP line each;',
   '              exits 0 only when all pass. Starts no container, makes no model call, downloads nothing, keeps nothing on disk.',
+  '  download    the dataset file at the revision and sha256 pinned in scripts/bench/pins.json, into the held-out',
+  '              store (0700; the file 0600), verified before it is kept. Takes no argument: only that file sets a pin.',
   '  help        this text',
 ];
+
+/** `bench download`: as the bench user, the pinned dataset into the held-out store. Its exit code. */
+export async function download(d: CliDeps, pins: () => Pins = loadPins): Promise<number> {
+  d.out('bench download (#748): the pinned dataset into the held-out store; no container, no model call');
+  try {
+    requireBenchUser(d.env, d.user, d.uid, d.euid);
+    const layout = benchRoot(d.env, benchHome(d.env, d.passwdHome));
+    const pin = pins().dataset;
+    if (!pin) throw new Error(`the dataset is not pinned yet: ${PINS_FILE} has no revision and sha256 (the owner records both); nothing fetched`);
+    const r = await downloadDataset(layout, d.uid, pin, d.fetch ?? httpsFetcher);
+    d.out(`  PASS  dataset  ${r.fetched ? 'downloaded and verified' : 'already there, verified'}: sha256 ${pin.sha256} at revision ${pin.revision}, ${r.bytes} bytes, ${r.file} (0600)`);
+    return 0;
+  } catch (e) {
+    d.out(`  FAIL  dataset  ${scrub(message(e), d.env)}`);
+    return 1;
+  }
+}
 
 function printPreflight(d: CliDeps): number {
   const say = d.out;
@@ -211,8 +209,8 @@ function printPreflight(d: CliDeps): number {
   return failed || skipped ? 1 : 0;
 }
 
-/** The bench command; its exit code. */
-export function main(argv: readonly string[], deps: Partial<CliDeps> = {}): number {
+/** The bench command; its exit code (`download`'s once it ends). */
+export function main(argv: readonly string[], deps: Partial<CliDeps> = {}): number | Promise<number> {
   const env = deps.env ?? process.env;
   const sink = deps.out ?? ((l: string) => process.stdout.write(`${l}\n`));
   const d: CliDeps = {
@@ -225,6 +223,7 @@ export function main(argv: readonly string[], deps: Partial<CliDeps> = {}): numb
     srt: deps.srt ?? 'srt',
     docker: deps.docker ?? { docker: 'docker' },
     ...(deps.host ? { host: deps.host } : {}),
+    ...(deps.fetch ? { fetch: deps.fetch } : {}),
     // INVARIANT: the only way out: every line, whoever writes it, is scrubbed on its full text before any cut (#851 round 2).
     out: (l) => sink(scrub(l, env, LINE_MAX)),
   };
@@ -234,7 +233,9 @@ export function main(argv: readonly string[], deps: Partial<CliDeps> = {}): numb
     return 0;
   }
   if (command === 'preflight' && extra.length === 0) return printPreflight(d);
-  d.out(command === undefined ? 'no command' : command === 'preflight' ? `preflight takes no arguments, not ${scrub(extra.join(' '), env, 200)}` : `unknown command: ${scrub(command, env, 200)}`);
+  if (command === 'download' && extra.length === 0) return download(d);
+  const takesNone = command === 'preflight' || command === 'download';
+  d.out(command === undefined ? 'no command' : takesNone ? `${command} takes no arguments, not ${scrub(extra.join(' '), env, 200)}` : `unknown command: ${scrub(command, env, 200)}`);
   for (const l of USAGE) d.out(l);
   return 2;
 }
@@ -247,4 +248,8 @@ try {
 } catch {
   // not a file: not run as this script
 }
-if (invoked === self) process.exitCode = main(process.argv.slice(2));
+if (invoked === self) {
+  const code = main(process.argv.slice(2));
+  if (typeof code === 'number') process.exitCode = code;
+  else void code.then((c) => (process.exitCode = c));
+}
