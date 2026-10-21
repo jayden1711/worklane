@@ -1,7 +1,7 @@
 // Cache keys: the sha256 of the files that pin what a cache holds (the lockfile), read at the run's commit from the
 // coordinator's clone. A changed lockfile is a new key and so a new, empty cache, never a stale one; a key file the
 // commit doesn't have is part of the key too ("missing"), so adding one later changes it.
-import { execFileSync } from 'node:child_process';
+import { execFileSync } from '../os/child-process.js';
 import { createHash } from 'node:crypto';
 import type { TestRunCache } from './config.js';
 

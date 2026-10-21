@@ -14,7 +14,7 @@
 //
 // WHY the account email is labelled cached: `claude auth status` names the account from Claude Code's cached
 // profile (~/.claude.json), not from the token, so after a token change it can name the previous account (#341).
-import { execFile, spawn } from 'node:child_process';
+import { execFile, spawn } from './os/child-process.js';
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';

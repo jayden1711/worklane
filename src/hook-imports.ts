@@ -29,6 +29,7 @@ export const HOOK_IMPORTS: readonly string[] = [
   'src/model-routing.ts',
   'src/network.ts',
   'src/optimize.ts',
+  'src/os/child-process.ts',
   'src/os/index.ts',
   'src/os/own-env.ts',
   'src/os/system-paths.ts',

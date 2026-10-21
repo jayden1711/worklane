@@ -3,7 +3,7 @@
 // Who may do what is here too, so the page and the tests share one rule: owners start, resume, approve, decline and
 // archive; writers (and owners) pause and stop a running job, the safe direction; viewers nothing (403, no nav item).
 import { createHash } from 'node:crypto';
-import { execFileSync } from 'node:child_process';
+import { execFileSync } from '../os/child-process.js';
 import type { Role } from '../dashboard-auth.js';
 import type { EventLog } from '../events/log.js';
 import type { EventPayload, StoredEvent } from '../events/types.js';

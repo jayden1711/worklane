@@ -6,7 +6,7 @@
 // checkout's .claude/settings.json (keeping the project's own entries), for
 // local runs without an instance. Re-running is safe: our entries are
 // recognized by a marker and replaced, never duplicated.
-import { execFileSync } from 'node:child_process';
+import { execFileSync } from './os/child-process.js';
 import { chmodSync, cpSync, existsSync, mkdirSync, readFileSync, readlinkSync, renameSync, writeFileSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';

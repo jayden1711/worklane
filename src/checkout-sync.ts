@@ -2,7 +2,7 @@
 // `git pull` in a terminal. This brings the checkout's default branch up to origin's, as a fast-forward only: never a
 // reset, a merge commit or a rebase, and never over the person's own work. Anything else is refused, saying why and
 // what to run instead.
-import { spawnSync } from 'node:child_process';
+import { spawnSync } from './os/child-process.js';
 import { withToolPath } from './tool-path.js';
 
 export interface GitRun {

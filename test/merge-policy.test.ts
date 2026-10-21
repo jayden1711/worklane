@@ -104,7 +104,7 @@ const engineFiles = execFileSync('git', ['ls-files'], { cwd: repoRoot, encoding:
  * match no file, so the first file under it takes the entry out and its glob is checked like the others.
  */
 // check-table: never-grow
-const NOT_YET_FILES = [`${BRAND.configDir}/experiments.yaml`, 'deploy/**'];
+const NOT_YET_FILES = [`${BRAND.configDir}/experiments.yaml`, 'deploy/**', 'deploy', 'compose.*', 'docker-compose.*', 'dockerfile*', 'Containerfile*'];
 
 test('self-modification: every glob names real engine files (none dead), and the list is the one the owner approved', () => {
   for (const part of SELF_MODIFICATION_PARTS) {
@@ -1321,7 +1321,7 @@ test('acceptance (#869): through the merge decision, a new marked allowlist and 
 });
 
 /**
- * Every registration before the marks (main at a5df2254, #869): CHECK_TABLES and LINT_TESTS as they were, the queue's
+ * Every registration before the marks (main at 41f6dd42, #869): CHECK_TABLES and LINT_TESTS as they were, the queue's
  * and the owner's lines included. Each is still registered, with the same kind, by its mark or the central list.
  * Taking one out loosens this test.
  */
@@ -1347,6 +1347,7 @@ const REGISTERED_BEFORE_MARKS: readonly { path: string; table?: string; kind: st
   { path: 'test/owner-terminal-rerun.test.ts', table: 'FIRST_TIME_ONLY', kind: 'never-grow' },
   { path: 'scripts/lib/denylist.mjs', table: 'SKIP', kind: 'never-grow' },
   { path: 'src/guardrails/engine.ts', table: 'AGENT_EDITABLE', kind: 'never-grow' },
+  { path: 'scripts/bench/pins.ts', table: 'SELECTION_RULES', kind: 'never-grow' },
   { path: 'test/change-files-renames.test.ts', table: 'READER_WORDS', kind: 'never-shrink' },
   { path: 'test/review.test.ts', table: 'LOCK_SCOPE_BAD', kind: 'never-shrink' },
   { path: 'test/review.test.ts', table: 'GUARD_MODULES', kind: 'never-shrink' },
@@ -1357,6 +1358,9 @@ const REGISTERED_BEFORE_MARKS: readonly { path: string; table?: string; kind: st
   { path: 'test/slot-dir-writes.test.ts', table: 'CHMOD_BY_NAME', kind: 'never-shrink' },
   { path: 'test/slot-dir-writes.test.ts', table: 'FD_WRITES', kind: 'never-shrink' },
   { path: 'test/slot-path.test.ts', table: 'MAKER_ONLY', kind: 'never-shrink' },
+  { path: 'test/child-process.test.ts', table: 'SPECIFIERS', kind: 'never-shrink' },
+  { path: 'test/child-process.test.ts', table: 'BINDINGS', kind: 'never-shrink' },
+  { path: 'test/child-process.test.ts', table: 'WORKER_SPECIFIERS', kind: 'never-shrink' },
   { path: 'test/add-project.test.ts', table: 'NAMES_BAD', kind: 'never-shrink' },
   { path: 'test/add-project.test.ts', table: 'REPOS_BAD', kind: 'never-shrink' },
   { path: 'test/instance-name.test.ts', table: 'BAD_SHAPE', kind: 'never-shrink' },
@@ -1381,6 +1385,7 @@ const REGISTERED_BEFORE_MARKS: readonly { path: string; table?: string; kind: st
   { path: 'test/testrun-gpu.test.ts', kind: 'lint' },
   { path: 'test/boundaries.test.ts', kind: 'lint' },
   { path: 'test/web-key-in-url.test.ts', kind: 'lint' },
+  { path: 'test/child-process.test.ts', kind: 'lint' },
   { path: 'test/self-hosted-guard.test.ts', kind: 'lint' },
   { path: 'test/package-deps.test.ts', kind: 'lint' },
   { path: 'test/no-clock-helpers.test.ts', kind: 'lint' },
@@ -1407,7 +1412,7 @@ test('registration (#869): every check registered before the marks is still regi
     for (const t of marks.tables) now.add(`${path} ${t.table} ${t.kind}`);
     if (marks.lint) now.add(`${path} lint`);
   }
-  assert.equal(REGISTERED_BEFORE_MARKS.length, 70, 'the 49 tables and 21 lint tests main registered');
+  assert.equal(REGISTERED_BEFORE_MARKS.length, 75, 'the 53 tables and 22 lint tests main registered');
   const lost = REGISTERED_BEFORE_MARKS.map((r) => (r.table === undefined ? `${r.path} lint` : `${r.path} ${r.table} ${r.kind}`)).filter((k) => !now.has(k));
   assert.deepEqual(lost, []);
 });

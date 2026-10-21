@@ -7,7 +7,7 @@
 // design (src/setup/app-manifest.ts, scripts/setup/app-permissions.mjs); this only drafts text and builds a link.
 // Once the workflow ran on the default branch, its check is offered for required_checks as an ordinary config
 // change the person reviews and proposes (src/config-change.ts), never written here.
-import { spawnSync } from 'node:child_process';
+import { spawnSync } from './os/child-process.js';
 import { BRAND } from './brand.js';
 import { detectProject, NO_TESTS, type Detection } from './auto-config.js';
 import { GITHUB_WEB } from './github-hosts.js';

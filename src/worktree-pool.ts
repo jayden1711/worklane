@@ -7,7 +7,7 @@
 // When main moves and the files that pin the install (worktree.setup_key) didn't change, a pooled worktree
 // follows main by a checkout in place, keeping what its setup installed, so a merge doesn't empty the pool. It is
 // still set up on main only and handed to one task, never back: no task's change reaches another's dependencies.
-import { execFileSync } from 'node:child_process';
+import { execFileSync } from './os/child-process.js';
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';

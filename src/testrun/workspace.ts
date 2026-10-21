@@ -13,7 +13,7 @@
 //
 // Directories the project leaves out (tests.yaml checkout.sparse_exclude) are left out of the workspace too (sparse
 // checkout), unless a tier of the run sets full_checkout.
-import { execFileSync, spawn } from 'node:child_process';
+import { execFileSync, spawn } from '../os/child-process.js';
 import { Readable } from 'node:stream';
 import { BRAND } from '../brand.js';
 import { safeProjectEnv } from '../project-env.js';

@@ -2,7 +2,7 @@
 // console errors, failed and slow requests, a trace summary and screenshots. The browser only reaches the app on
 // localhost: every other request is refused before it leaves, and recorded. The app and the browser are always
 // stopped. With no Chrome or Chromium, the run is skipped and says so.
-import { spawn, type ChildProcess } from 'node:child_process';
+import { spawn, type ChildProcess } from '../os/child-process.js';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { AppConfig, FlowStep } from '../config/schema.js';

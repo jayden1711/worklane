@@ -2,7 +2,7 @@
 // baseline) plus any extra nightly tiers (e.g. mutation testing), queued
 // behind the machine-wide full-run lock, the project's idle probe and the
 // load gate, so they never overlap another full run.
-import { execFileSync } from 'node:child_process';
+import { execFileSync } from './os/child-process.js';
 import { fileURLToPath } from 'node:url';
 import { BRAND } from './brand.js';
 import type { Config } from './config/load.js';
