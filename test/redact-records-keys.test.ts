@@ -92,6 +92,7 @@ test('gh-login, the bench and the root updater: no stand-in survives their own o
  * redact()): a token cut short, a clone URL's user info, a value after a secret's name, a short bearer token. Each
  * module masks the same now, through the shared redactor's broad rules, as its own mask word.
  */
+// check-table: never-shrink
 const CUT_SHORT: [string, string, string][] = [
   ['a GitHub token of 8', `error: ${'gho'}_${run(8)} rejected`, run(8)],
   ['a fine-grained token of 16', `x ${'github'}_pat_11${run(14)} y`, run(14)],

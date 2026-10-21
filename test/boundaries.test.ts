@@ -1,3 +1,4 @@
+// lint-test
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';

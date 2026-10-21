@@ -7,14 +7,37 @@ import ts from 'typescript';
 export const BEGIN = '// BEGIN generated from src/events/redact.ts: do not edit (node scripts/gen-redact-vendor.mjs --write)';
 export const END = '// END generated from src/events/redact.ts';
 
-/** The block for `source` (src/events/redact.ts's text): the module, transpiled, as the object `sharedRedact`. */
+const MARK = '// check-table: ';
+/** The table marks in `source` (#886): each mark line with the name of the table declared on the next line. */
+function marksIn(source) {
+  const lines = source.split('\n');
+  const out = [];
+  for (let k = 0; k + 1 < lines.length; k++) {
+    const t = lines[k].trim();
+    const name = /^(?:export\s+)?(?:const|let|var)\s+([A-Za-z_]\w*)/.exec(lines[k + 1].trimStart())?.[1];
+    if (t.startsWith(MARK) && name) out.push([t, name]);
+  }
+  return out;
+}
+
+/**
+ * The block for `source` (src/events/redact.ts's text): the module, transpiled, as the object `sharedRedact`. The
+ * transpile drops comments, so each table mark in the module is put back before the same table in the copy: the copy's
+ * tables are held as the module's are (#889 round 7).
+ */
 export function vendoredBlock(source) {
   const out = ts.transpileModule(source, {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, removeComments: true },
     fileName: 'redact.ts',
   });
+  const lines = out.outputText.trimEnd().split('\n');
+  for (const [mark, name] of marksIn(source)) {
+    const at = lines.findIndex((l) => new RegExp(`^(?:export\\s+)?(?:const|let|var)\\s+${name}(?![\\w$])`).test(l));
+    if (at === -1) throw new Error(`the copy has no table ${name} to mark`);
+    lines.splice(at, 0, mark);
+  }
   // Lines are kept as transpiled (no indent added): a template literal over two lines must not change.
-  return [BEGIN, 'const sharedRedact = (() => {', 'const exports = {};', out.outputText.trimEnd(), 'return exports;', '})();', END].join('\n');
+  return [BEGIN, 'const sharedRedact = (() => {', 'const exports = {};', lines.join('\n'), 'return exports;', '})();', END].join('\n');
 }
 
 /** The block in `text` (the updater's source), markers included; null when its markers are missing or out of order. */

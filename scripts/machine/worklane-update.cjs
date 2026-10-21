@@ -125,6 +125,7 @@ exports.redactRecords = redactRecords;
 exports.redact = redact;
 const credentialShaped = (v) => (/[a-z]/.test(v) && /[A-Z]/.test(v) && /\d/.test(v)) || /^[0-9a-fA-F]{32,}$/.test(v);
 const basicShaped = (v) => /[0-9+/=]/.test(v) || (v.length >= 16 && v.length % 4 !== 1 && /[a-z]/.test(v) && /[A-Z]/.test(v));
+// check-table: never-shrink
 const CREDENTIAL_WORDS = new Set(['token', 'secret', 'secrets', 'password', 'passwd', 'pwd', 'pass', 'passphrase', 'jwt', 'bearer', 'credential', 'credentials', 'authorization']);
 const CREDENTIAL_ENDINGS = ['token', 'secret', 'password', 'passwd', 'accesskey'];
 const credentialWord = (w) => CREDENTIAL_WORDS.has(w) || CREDENTIAL_ENDINGS.some((e) => w.endsWith(e));
@@ -162,6 +163,7 @@ function orphanEnd(m) {
     }
     return cut === -1 ? m : `[REDACTED PRIVATE KEY]${m.slice(cut)}`;
 }
+// check-table: never-shrink
 const PATTERNS = [
     [new RegExp(`${exports.DASHBOARD_KEY_PREFIX}${DASHBOARD_KEY_BODY}(?![A-Za-z0-9_-])`, 'g'), `${exports.DASHBOARD_KEY_PREFIX}[REDACTED]`, 'dashboard key'],
     [/gh[pousr]_[A-Za-z0-9]{30,}(?![A-Za-z0-9])/g, 'gh*_[REDACTED]', 'GitHub token'],
@@ -195,6 +197,7 @@ const PATTERNS = [
     ],
     [/(^|[^A-Za-z0-9])[A-Za-z0-9_-]{23,28}\.[A-Za-z0-9_-]{6,7}\.[A-Za-z0-9_-]{27,}\b/g, '$1[REDACTED]', 'Discord bot token'],
 ];
+// check-table: never-shrink
 const BROAD = [
     [/(?:gh[pousr]_|github_pat_)[A-Za-z0-9_]{8,}/g, (k) => k, 'GitHub token, cut short'],
     [/sk-ant-[A-Za-z0-9_-]+/g, (k) => k, 'Anthropic key, cut short'],
@@ -355,6 +358,7 @@ function spansOf(t, re, rep, rank, out) {
     }
 }
 const SHAPE_RULES = PATTERNS.map(([re, rep]) => [re, rep]);
+// check-table: never-shrink
 const BROAD_RULES = [...SHAPE_RULES, ...BROAD.map(([re, rep]) => [re, rep('[REDACTED]')])];
 function allSpans(s, rules) {
     const spans = [];

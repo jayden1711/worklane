@@ -44,6 +44,7 @@ const JSON_VALUE = run(24, 'notArealValue7');
 const BASIC = Buffer.from(`x-access-token:${j('_', 'ghs', run(36))}`).toString('base64');
 
 /** Every stand-in: a shape gone from here is a shape no test drives (registered never-shrink). */
+// check-table: never-shrink
 export const SHAPES: readonly StandIn[] = [
   // GitHub: classic, OAuth, user-to-server, installation and refresh tokens, and fine-grained PATs.
   t('GitHub token', 'a GitHub classic token', `ghp_${run(36)}`),

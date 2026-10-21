@@ -1,3 +1,4 @@
+// lint-test
 // #889, the backstop: no module redacts a credential with its own regex. The protection is by design: the one list of
 // shapes is PATTERNS in src/events/redact.ts, every output path calls redactString or redact (test/redact-shapes.test.ts
 // drives each), and a module that needs a shape adds it there. A second list drifts: a Discord bot token was redacted
@@ -122,6 +123,7 @@ function codeFiles(): string[] {
 }
 
 /** Bad sources: each is an own redactor the lint must report. */
+// check-table: never-shrink
 const BAD_SOURCES: readonly string[] = [
   // incidents.ts's own Discord pattern, as it was.
   "export const D = /\\b[A-Za-z0-9_-]{23,28}\\.[A-Za-z0-9_-]{6,7}\\.[A-Za-z0-9_-]{27,}\\b/g;\nexport const r = (s: string) => s.replace(D, '[REDACTED]');",
@@ -140,6 +142,7 @@ const BAD_SOURCES: readonly string[] = [
   "const t = (s: string) => s.replace(/https:\\/\\/hooks\\.slack\\.com\\/services\\/\\S+/g, '');",
 ];
 /** Good sources: none is an own redactor (the shared one called, a shape checked, text tidied). */
+// check-table: never-grow
 const GOOD_SOURCES: readonly string[] = [
   "import { redactString } from './events/redact.js';\nconst t = (s: string) => redactString(s).replace(/\\s+/g, ' ');",
   "const SHAPE = /^xoxb-[A-Za-z0-9-]{20,250}$/;\nconst ok = (s: string) => SHAPE.test(s);",

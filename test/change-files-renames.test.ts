@@ -1,3 +1,4 @@
+// lint-test
 // A renamed file is judged on its old and its new path (#683). With git's rename detection on, `git diff --numstat`
 // prints one combined path for a rename with an edit (`test/{review.test.ts => review2.test.ts}`), which matches no
 // glob: renaming a locked file and weakening it in the same change came out L0, and the content checks saw nothing.
@@ -738,6 +739,7 @@ const HELPER = 'src/coordinator/change-files.ts';
  * concatenation (`'--name' + '-only'`), a header regex that never spells the header, and a short or common flag
  * (`status -s`, `diff --check`) kept in a constant away from its subcommand.
  */
+// check-table: never-shrink
 const READER_WORDS: Record<string, RegExp> = {
   'name-only': /name-only/g,
   'name-status': /name-status/g,
@@ -765,6 +767,7 @@ const READER_WORDS: Record<string, RegExp> = {
  * Files outside the helper that hold one of those words, each with how many times (exactly: one more is a new reader)
  * and why. src/: none of them lists the paths a change touches for a decision. scripts/: their own -z parsing.
  */
+// check-table: never-grow
 const OUTSIDE_THE_HELPER: Record<string, { words: Record<string, number>; why: string; must?: RegExp[] }> = {
   // src/: not a list of what a change touches.
   'src/checkout-sync.ts': { words: { porcelain: 1 }, why: '`status --porcelain`: is the checkout clean (empty or not); no path is read' },
@@ -794,10 +797,6 @@ const OUTSIDE_THE_HELPER: Record<string, { words: Record<string, number>; why: s
   'src/comment-policy.ts': {
     words: { 'ls-files': 1, 'rename detection': 1, 'patch headers': 3 },
     why: "`ls-files --error-unmatch`: is one file tracked. The comment lint over added lines wants renames paired (a moved file's lines aren't new); it is in the agents' tool guard's import tree, which can't take a new import while #691 lists that tree",
-  },
-  'src/push-check.ts': {
-    words: { 'name-only': 1 },
-    why: '`log --name-only --no-renames` (refuse_paths, workflows, the SKILL.md lint) still splits on newlines: a follow-up moves it here (-z); its line count is sizeFiles (#693)',
   },
   // scripts/: their own -z parsing, in their own language.
   'scripts/ci/slow-jobs.sh': { words: { 'name-only': 1 }, why: 'CI slow-job selection', must: [/--name-only --no-renames -z/] },
@@ -949,6 +948,45 @@ test('the push limit still counts a file whose name git quotes (a tab), and a pu
   const head = commit(dir, 'add and move');
   assert.deepEqual(pushProblems(dir, base, head, { ...DEFAULT_PUSH_LIMITS, max_changed_lines: 5 }), []);
   assert.deepEqual(pushProblems(dir, base, head, { ...DEFAULT_PUSH_LIMITS, max_changed_lines: 4 }), ['changes 5 lines, over the 4-line limit (push.max_changed_lines); split it into smaller changes']);
+});
+
+// ---- The push limits read each changed name as itself (#724). Without -z, `git log --name-only` C-quoted a name with a
+// non-ASCII byte, a newline, a quote or a backslash (`"secrets/na\303\257ve.pem"`), and the quoted string matched no
+// refuse_paths glob: such a file was pushed (0 problems, measured by #688's reviewers).
+
+test('push limits: a refused path whose name has a non-ASCII byte is refused; so are a workflow and a failing skill named so', () => {
+  const { dir, base } = repo({ 'README.md': '# x\n' });
+  write(dir, { 'secrets/naïve.pem': 'k\n', '.github/workflows/ci-é.yml': 'on: push\n', '.claude/skills/naïve/SKILL.md': '## When to use\nx\n' });
+  const head = commit(dir, 'add');
+  const p = pushProblems(dir, base, head, { ...DEFAULT_PUSH_LIMITS, refuse_paths: ['secrets/**'] });
+  assert.equal(p.length, 3, p.join('\n'));
+  assert.match(p.join('\n'), /changes CI workflows \(\.github\/workflows\/ci-é\.yml\)/);
+  assert.match(p.join('\n'), /touches paths that are never pushed \(secrets\/naïve\.pem\)/);
+  assert.match(p.join('\n'), /skills that fail the skill lint: \.claude\/skills\/naïve\/SKILL\.md/);
+});
+
+test('push limits: a refused path with a newline in its name is refused, and shown escaped', { skip: process.platform === 'win32' && 'a newline in a file name' }, () => {
+  const { dir, base } = repo({ 'README.md': '# x\n' });
+  write(dir, { 'data/a\nb.bin': 'x\n' });
+  const head = commit(dir, 'add');
+  const p = pushProblems(dir, base, head, { ...DEFAULT_PUSH_LIMITS, refuse_paths: ['data/**'] });
+  assert.equal(p.length, 1, p.join('\n'));
+  assert.ok(p[0]!.includes('(' + JSON.stringify('data/a\nb.bin') + ')'), p[0]);
+  assert.ok(!p[0]!.includes('a\nb'), 'no raw newline in the text');
+});
+
+test('push limits: a name that reads like git\'s quoted form (logs/"\\303\\251".txt) is matched as its own bytes', { skip: process.platform === 'win32' && 'a quote or backslash in a file name' }, () => {
+  const { dir, base } = repo({ 'README.md': '# x\n' });
+  const name = 'logs/"\\303\\251".txt';
+  write(dir, { [name]: 'x\n' });
+  const head = commit(dir, 'add');
+  // git itself prints it quoted, with every quote and backslash escaped.
+  assert.equal(git(dir, 'log', '--format=', '--name-only', `${base}..${head}`), '"logs/\\"\\\\303\\\\251\\".txt"');
+  const p = pushProblems(dir, base, head, { ...DEFAULT_PUSH_LIMITS, refuse_paths: ['logs/**'] });
+  assert.equal(p.length, 1, p.join('\n'));
+  assert.ok(p[0]!.includes(`(${name})`), p[0]);
+  // Its quoted form names no file: a glob written for the quoted text matches nothing.
+  assert.deepEqual(pushProblems(dir, base, head, { ...DEFAULT_PUSH_LIMITS, refuse_paths: ['"logs/**'] }), []);
 });
 
 test('a change that marks a path -diff, binary or linguist-generated in a .gitattributes is L3 and never merges itself, whatever review.yaml lists', () => {

@@ -21,6 +21,7 @@ const credentialShaped = (v: string) => (/[a-z]/.test(v) && /[A-Z]/.test(v) && /
 const basicShaped = (v: string) => /[0-9+/=]/.test(v) || (v.length >= 16 && v.length % 4 !== 1 && /[a-z]/.test(v) && /[A-Z]/.test(v));
 
 /** A word that makes any key holding it a credential's: `db_password`, `slack_bot_token`, `aws_secret_access_key`. */
+// check-table: never-shrink
 const CREDENTIAL_WORDS = new Set(['token', 'secret', 'secrets', 'password', 'passwd', 'pwd', 'pass', 'passphrase', 'jwt', 'bearer', 'credential', 'credentials', 'authorization']);
 /**
  * A word that ends in one of these is a credential word too: a name written as one word, with nothing to split on
@@ -80,6 +81,7 @@ function orphanEnd(m: string): string {
 }
 
 // Each pattern with what kind of secret it finds (secretKinds names the kind, never the value).
+// check-table: never-shrink
 const PATTERNS: [RegExp, Replacement, string][] = [
   // A dashboard key, wherever its prefix is (after a `-` or a letter too: `key-wld_...`): a match runs to the end of its
   // run of key characters and the next search starts after it, so linear.
@@ -173,6 +175,7 @@ const PATTERNS: [RegExp, Replacement, string][] = [
  * token prefix and a short run, a URL's user info, a value after a secret's name, a short bearer token, and a JWT
  * after a hyphen. Each starts only where a run starts, or reads a bounded stretch from each start: linear.
  */
+// check-table: never-shrink
 const BROAD: [RegExp, (mask: string) => string, string][] = [
   // Wherever the prefix is, as in PATTERNS (#889 round 4).
   [/(?:gh[pousr]_|github_pat_)[A-Za-z0-9_]{8,}/g, (k) => k, 'GitHub token, cut short'],
@@ -444,6 +447,7 @@ function spansOf(t: string, re: RegExp, rep: Replacement, rank: number, out: Spa
 /** Every rule of the default mode: the shapes, each with its own marker. */
 const SHAPE_RULES: [RegExp, Replacement][] = PATTERNS.map(([re, rep]): [RegExp, Replacement] => [re, rep]);
 /** Every rule of the broad mode: the shapes and the broad rules, each shown with the default mask. */
+// check-table: never-shrink
 const BROAD_RULES: [RegExp, Replacement][] = [...SHAPE_RULES, ...BROAD.map(([re, rep]): [RegExp, Replacement] => [re, rep('[REDACTED]')])];
 
 /** What every rule of `rules` finds in `s`: on the text as it was, and again with a boundary at each glue point. */

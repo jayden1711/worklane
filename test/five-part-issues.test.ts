@@ -5,6 +5,7 @@ import { checkDraftedIssue, DRAFT_FORMAT, ISSUE_PARTS, issueParts, parseContract
 import { defaultRolePrompt } from '../src/roles.js';
 import { INTAKE_PROMPT } from '../src/intake/run.js';
 
+// check-table: never-grow
 const GOOD = [
   '**Outcome:** Totals skip zero quantities.',
   '**Sources:** src/totals.js and its tests; nowhere else.',

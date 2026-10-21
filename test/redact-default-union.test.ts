@@ -13,9 +13,12 @@ import { leaks, run } from './token-standins.js';
 type Replacement = string | ((match: string, ...groups: string[]) => string);
 // Main's helpers for its JSON-key rule, verbatim.
 const credentialShaped = (v: string) => (/[a-z]/.test(v) && /[A-Z]/.test(v) && /\d/.test(v)) || /^[0-9a-fA-F]{32,}$/.test(v);
+// check-table: never-shrink
 const CREDENTIAL_WORDS = new Set(['token', 'secret', 'secrets', 'password', 'passwd', 'pwd', 'pass', 'passphrase', 'jwt', 'bearer', 'credential', 'credentials', 'authorization']);
+// check-table: never-shrink
 const CREDENTIAL_ENDINGS = ['token', 'secret', 'password', 'passwd', 'accesskey'];
 const credentialWord = (w: string) => CREDENTIAL_WORDS.has(w) || CREDENTIAL_ENDINGS.some((e) => w.endsWith(e));
+// check-table: never-shrink
 const KEY_QUALIFIERS = new Set(['api', 'access', 'secret', 'private', 'signing', 'encryption', 'master', 'client', 'app', 'auth', 'account', 'service', 'license', 'deploy', 'admin', 'webhook', 'session', 'ssh', 'hmac', 'consumer']);
 function credentialKey(k: string): boolean {
   const words = k
@@ -31,6 +34,7 @@ function credentialKey(k: string): boolean {
 }
 
 /** Main's PATTERNS (src/events/redact.ts at d2a549f4), verbatim. */
+// check-table: never-shrink
 const MAIN_PATTERNS: [RegExp, Replacement][] = [
   [/\b(gh[pousr]_[A-Za-z0-9]{30,})\b/g, 'gh*_[REDACTED]'],
   [/\bgithub_pat_[A-Za-z0-9_]{40,}\b/g, 'github_pat_[REDACTED]'],
