@@ -18,6 +18,12 @@ land_mode: pr               # direct (fast-forward to the default branch) | pr
 # listed here passed on the exact commit the evaluator approved. Names as GitHub shows
 # them, e.g. ["test", "build (ubuntu-latest)"]. Empty: nothing is ever marked ready.
 required_checks: []
+# Where each required check must come from: the Actions workflow file that runs it, or the GitHub App that posts it.
+# A check of that name from anything else counts as missing. One not listed takes the App GitHub's branch protection
+# or ruleset requires for it, or else is judged by name alone (`doctor` prints a block that pins them).
+# required_check_sources:
+#   test: { workflow: .github/workflows/ci.yml }
+#   build (ubuntu-latest): { app_id: 12345 }
 # size:M/L tasks are planned first; the plan, with its acceptance criteria, is posted on the issue and in its
 # Discord decision thread. always: every plan waits for an owner's approval ("approve plan <n>" in the thread, the
 # dashboard, or the issue) before any code is written | risky or off: only a high-risk or design-level plan waits

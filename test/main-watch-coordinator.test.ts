@@ -3,13 +3,16 @@
 // (audited); a writer's PR gets the full run and check on its head, is never auto-merged, and merging it trips nothing.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { createHash } from 'node:crypto';
+import { acknowledgement, measureMain, remoteTip } from '../src/auto-merge-resume.js';
 import { BRAND } from '../src/brand.js';
 import type { CommitCheck, PullRequest } from '../src/backlog/types.js';
-import type { Role } from '../src/dashboard-auth.js';
-import { protectionState, startDashboard } from '../src/dashboard.js';
+import type { Role, RoleOf } from '../src/dashboard-auth.js';
+import { RESUME_ROLE_LOOKUPS_PER_PASS } from '../src/coordinator/merge-flow.js';
+import { clearAutoMergeStop, protectionState, startDashboard } from '../src/dashboard.js';
 import { EventLog } from '../src/events/log.js';
 import type { EventPayload } from '../src/events/types.js';
 import { mainWatchPost } from '../src/intake/channel.js';
@@ -19,8 +22,8 @@ import { CONFIG_PATH, disabledWorkflowFor, protectionView, type CheckRunAt, type
 import type { PrTestRuns, OpenPr } from '../src/coordinator/test-runs.js';
 import type { TestRunRequest, TestRuns } from '../src/coordinator/pr-batch.js';
 import { FakeRunner } from '../src/runner.js';
-import { coordinator, fixture, git, passing, type Fixture } from './repro-state-graph/harness.js';
-import { asPerson, exampleRoles } from './helpers.js';
+import { coordinator, failing, fixture, git, passing, type Fixture } from './repro-state-graph/harness.js';
+import { asJudged, asPerson, exampleRoles } from './helpers.js';
 
 const ident = ['-c', 'user.email=ada@example.com', '-c', 'user.name=Ada', '-c', 'commit.gpgsign=false'];
 
@@ -183,7 +186,9 @@ test('main watch: only an admin clears the stop on the dashboard; it is audited,
   w.commit('direct.txt');
   git(w.person, 'push', '-q', 'origin', 'main');
   await w.watch(4); // GitHub's empty commit-to-PR link is asked again for LINK_LAG_MS first
-  const d = await startDashboard({ root: w.f.repo, cfg: w.f.cfg, eventsDb: join(w.f.base, 'events.db'), stateDir: w.f.stateDir, user: 'example-owner', roleOf: exampleRoles, slotsDir: w.f.slotsDir, instance: 'alice' });
+  // Precondition (#776): the default branch is green on its tip again, so the main watch's stop may resume.
+  w.f.backlog.setChecks(git(w.f.remote, 'rev-parse', 'main'), passing);
+  const d = await startDashboard({ root: w.f.repo, cfg: w.f.cfg, eventsDb: join(w.f.base, 'events.db'), stateDir: w.f.stateDir, user: 'example-owner', roleOf: exampleRoles, slotsDir: w.f.slotsDir, instance: 'alice', backlog: () => w.f.backlog });
   const base = d.url.split('/?')[0]!;
   const call = (who: string, path: string, method = 'GET') => fetch(`${base}${path}`, { method, headers: { authorization: `Bearer ${d.token}`, 'content-type': 'application/json', ...asPerson(who) }, ...(method === 'POST' ? { body: '{}' } : {}) });
   try {
@@ -196,17 +201,691 @@ test('main watch: only an admin clears the stop on the dashboard; it is audited,
     assert.deepEqual(viewer.protection, { mode: 'main_watch' }, 'a viewer sees the mode only');
     assert.equal((await call('example-collaborator', '/api/auto-merge/clear', 'POST')).status, 403, 'a writer may not clear it');
     assert.ok(existsSync(stopFile(w.f)));
-    assert.equal((await call('example-owner', '/api/auto-merge/clear', 'POST')).status, 200);
+    // #776 on #727: the main watch's stop is a recorded request; the coordinator resumes it once it measures main green.
+    assert.equal((await call('example-owner', '/api/auto-merge/clear', 'POST')).status, 202);
+    assert.ok(existsSync(stopFile(w.f)), 'the dashboard resumes nothing itself');
+    const audit = of<EventPayload<'dashboard.audit'>>(w.f, 'dashboard.audit').at(-1)!;
+    assert.equal(audit.action, 'auto_merge.resume_requested');
+    assert.equal(audit.login, 'example-owner');
+    await watchMerges(w);
     assert.ok(!existsSync(stopFile(w.f)), 'cleared');
     assert.equal(w.c.autoMergeStopped(), null);
-    const audit = of<EventPayload<'dashboard.audit'>>(w.f, 'dashboard.audit').at(-1)!;
-    assert.equal(audit.action, 'auto_merge.cleared');
-    assert.equal(audit.login, 'example-owner');
-    assert.match(of<EventPayload<'merge.resumed'>>(w.f, 'merge.resumed').at(-1)!.detail, /@example-owner cleared the stop on the dashboard/);
+    assert.match(of<EventPayload<'merge.resumed'>>(w.f, 'merge.resumed').at(-1)!.detail, /@example-owner resumed auto-merge from the dashboard, with main green/);
     assert.equal((await call('example-owner', '/api/auto-merge/clear', 'POST')).status, 409, 'nothing left to clear');
   } finally {
     await d.close();
   }
+});
+
+// ---- #776: a stop the default branch caused resumes only once it is green on its tip, or with a recorded acknowledgement.
+
+/** The coordinator's own red-main stop (fix-forward reverted the culprit, or gave up), on main's current tip. */
+const redMainStop = (w: ReturnType<typeof world>) => {
+  const tip = git(w.f.remote, 'rev-parse', 'main');
+  (w.c as unknown as { stopFor(reason: string, n: number | null, sha: string, revert: string | null): void }).stopFor(`main's required checks failed (ci) on \`${tip.slice(0, 8)}\``, null, tip, null);
+  return tip;
+};
+const watchMerges = (w: ReturnType<typeof world>) => (w.c as unknown as { watchMerges(): Promise<void> }).watchMerges();
+/** The last event of `type`, whole (its actor and time too). */
+const f776Last = (w: ReturnType<typeof world>, type: 'merge.resumed' | 'merge.stopped' | 'merge.resume_requested') => w.f.log.read(0, [type]).at(-1)!;
+
+/**
+ * A dashboard over the world; `cfg` stands in for the instance's config. Its backlog counts every check read: the
+ * dashboard makes none (#776 on #727), so `reads` stays empty.
+ */
+async function resumeDashboard(w: ReturnType<typeof world>, cfg = w.f.cfg, extra: Record<string, unknown> = {}) {
+  const reads: string[] = [];
+  const backlog = new Proxy(w.f.backlog, { get: (t, k, r) => (k === 'checks' || k === 'checkApps' ? (...a: unknown[]) => (reads.push(String(k)), Reflect.get(t, k, r).apply(t, a)) : Reflect.get(t, k, r)) });
+  const d = await startDashboard({ root: w.f.repo, cfg, eventsDb: join(w.f.base, 'events.db'), stateDir: w.f.stateDir, user: 'example-owner', roleOf: exampleRoles, slotsDir: w.f.slotsDir, instance: 'alice', backlog: () => backlog, ...extra });
+  const base = d.url.split('/?')[0]!;
+  const resume = async (body: unknown = {}, who = 'example-owner') => {
+    const r = await fetch(`${base}/api/auto-merge/clear`, { method: 'POST', headers: { authorization: `Bearer ${d.token}`, 'content-type': 'application/json', ...asPerson(who) }, body: JSON.stringify(body) });
+    return { status: r.status, body: (await r.json()) as { ok?: boolean; how?: string; error?: string; acknowledged?: boolean; message?: string; last?: { tip: string | null; green: boolean; why: string | null } | null } };
+  };
+  const get = (path: string) => fetch(`${base}${path}`, { headers: { authorization: `Bearer ${d.token}`, ...asPerson('example-owner') } });
+  return { d, resume, get, reads };
+}
+
+/** A remote whose upload-pack hangs for `seconds` (a stand-in for a remote that stops answering). */
+const hangRemote = (w: ReturnType<typeof world>, seconds: number) => {
+  const script = join(w.f.base, 'hang-upload-pack');
+  writeFileSync(script, `#!/bin/sh\nsleep ${seconds}\n`);
+  chmodSync(script, 0o755);
+  git(w.f.repo, 'config', 'remote.origin.uploadpack', script);
+};
+
+test("resume (#776): main's tip is the exact ref refs/heads/<branch>: a green decoy branch or tag whose name ends in refs/heads/main never stands in for a red main", async () => {
+  const w = world();
+  await w.watch(2);
+  const green = git(w.f.remote, 'rev-parse', 'main');
+  w.f.backlog.setChecks(green, passing);
+  // Main goes red; anyone who can push a branch or a tag plants green decoys.
+  const tip = w.commit('red.txt');
+  git(w.person, 'push', '-q', 'origin', 'main');
+  w.f.backlog.setChecks(tip, failing(11));
+  git(w.person, 'push', '-q', 'origin', `${green}:refs/heads/a/refs/heads/main`, `${green}:refs/tags/refs/heads/main`);
+  assert.match(git(w.f.repo, 'ls-remote', 'origin', 'refs/heads/main'), /refs\/heads\/a\/refs\/heads\/main[\s\S]*refs\/heads\/main[\s\S]*refs\/tags\/refs\/heads\/main/, 'git itself lists the decoys for that pattern');
+  assert.equal(await remoteTip(w.f.repo, 'origin', 'main'), tip, 'the exact ref only');
+  redMainStop(w);
+  const { d, resume } = await resumeDashboard(w);
+  try {
+    assert.equal((await resume()).status, 202, 'recorded');
+  } finally {
+    await d.close();
+  }
+  // The coordinator measures the real, red main: not resumed, and the measurement says why.
+  await watchMerges(w);
+  assert.ok(existsSync(stopFile(w.f)));
+  assert.equal(of(w.f, 'merge.resumed').length, 0);
+  assert.match(of<EventPayload<'merge.main_measured'>>(w.f, 'merge.main_measured').at(-1)!.why ?? '', new RegExp(`tip ${tip.slice(0, 8)} are not all green`));
+  // The coordinator too: a hand deletion is written back.
+  unlinkSync(stopFile(w.f));
+  await watchMerges(w);
+  assert.ok(existsSync(stopFile(w.f)), 'written back');
+  assert.equal(of(w.f, 'merge.resumed').length, 0);
+});
+
+test("resume (#776): reading main never blocks: a hung remote times out as not green, and the dashboard's resume never waits on it (it reads nothing)", async () => {
+  const w = world();
+  await w.watch(2);
+  redMainStop(w);
+  hangRemote(w, 4);
+  // The read itself: the event loop runs while it waits, and a timeout is no tip.
+  let ticks = 0;
+  const timer = setInterval(() => ticks++, 50);
+  const started = performance.now();
+  const read = await remoteTip(w.f.repo, 'origin', 'main', { timeoutMs: 1000 });
+  clearInterval(timer);
+  assert.equal(read, null, 'timed out: unreadable');
+  assert.ok(ticks >= 5, `the event loop ran while git waited (${ticks} ticks)`);
+  assert.ok(performance.now() - started < 3500, 'bounded by the timeout, not the remote');
+  // The dashboard (#776 on #727): a resume records a request and reads neither main's tip nor a check, so a hung
+  // remote never holds it.
+  const { d, resume, reads } = await resumeDashboard(w);
+  try {
+    const t0 = performance.now();
+    const r = await resume();
+    const took = Math.round(performance.now() - t0);
+    assert.equal(r.status, 202);
+    assert.ok(took < 2000, `answered at once (${took} ms), the remote hanging for 4 s`);
+    assert.deepEqual(reads, [], 'no check read');
+    assert.ok(existsSync(stopFile(w.f)));
+  } finally {
+    await d.close();
+  }
+});
+
+test('resume (#776): a timed-out read of main leaves nothing running: git and everything it started (the transport, its children) are killed', async () => {
+  const w = world();
+  await w.watch(2);
+  // The transport stand-in records its own pid and its child's, then waits on the child, as a hung connection would.
+  const pids = join(w.f.base, 'upload-pack.pids');
+  const script = join(w.f.base, 'hang-upload-pack-tree');
+  writeFileSync(script, `#!/bin/sh\necho $$ >> '${pids}'\nsleep 30 &\necho $! >> '${pids}'\nwait\n`);
+  chmodSync(script, 0o755);
+  git(w.f.repo, 'config', 'remote.origin.uploadpack', script);
+  assert.equal(await remoteTip(w.f.repo, 'origin', 'main', { timeoutMs: 1000 }), null, 'timed out: unreadable');
+  const started = readFileSync(pids, 'utf8').split('\n').filter(Boolean).map(Number);
+  assert.equal(started.length, 2, 'the transport and its child had started');
+  const alive = (pid: number) => {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  // Killed processes are reaped by their new parent shortly after; give it a moment.
+  for (let i = 0; i < 20 && started.some(alive); i++) await new Promise((r) => setTimeout(r, 100));
+  const left = started.filter(alive);
+  for (const pid of left) process.kill(pid, 'SIGKILL'); // never leave them behind, even when the test fails
+  assert.deepEqual(left, [], 'no descendant of git survives the timeout');
+});
+
+test('resume (#776): characters that print as blanks (Hangul fillers, the braille blank, other default-ignorables) never count toward the minimum', () => {
+  for (const [what, ch] of [['U+3164', 'ㅤ'], ['U+115F', 'ᅟ'], ['U+1160', 'ᅠ'], ['U+FFA0', 'ﾠ'], ['U+2800', '⠀']] as const) {
+    assert.ok('error' in acknowledgement({ acknowledge: { reason: ch.repeat(12) } }), `${what} alone is refused`);
+    assert.ok('error' in acknowledgement({ acknowledge: { reason: `abc${ch.repeat(9)}` } }), `${what} padding 3 letters is refused`);
+  }
+  assert.deepEqual(acknowledgement({ acknowledge: { reason: '한국어로 된 이유를 적습니다' } }), { reason: '한국어로 된 이유를 적습니다' }, 'real Hangul counts');
+});
+
+test('resume (#776): a red-main stop with main still red is a recorded request that stays stopped, the measurement recorded and shown; once main is green on its tip the coordinator resumes it', async () => {
+  const w = world();
+  await w.watch(2);
+  const tip = redMainStop(w);
+  assert.equal((JSON.parse(readFileSync(stopFile(w.f), 'utf8')) as { by: string }).by, 'red_main', 'why it stopped is recorded');
+  assert.equal(of<EventPayload<'merge.stopped'>>(w.f, 'merge.stopped').at(-1)!.by, 'red_main');
+  w.f.backlog.setChecks(tip, failing(7));
+  const { d, resume, reads } = await resumeDashboard(w);
+  try {
+    const asked = await resume();
+    assert.equal(asked.status, 202);
+    assert.equal(asked.body.how, 'requested');
+    assert.match(asked.body.message ?? '', /only when main's tip is green with every required check from its pinned source/);
+    assert.match(asked.body.message ?? '', /has recorded no measurement of main yet; until it does, auto-merge stays stopped/, 'never guesses green');
+    assert.equal(asked.body.last, null);
+    const request = f776Last(w, 'merge.resume_requested');
+    assert.equal(request.actor, 'example-owner');
+    assert.equal((request.payload as EventPayload<'merge.resume_requested'>).stop, f776Last(w, 'merge.stopped').id);
+    assert.equal(of<EventPayload<'dashboard.audit'>>(w.f, 'dashboard.audit').at(-1)!.action, 'auto_merge.resume_requested');
+    // The coordinator measures main red: it stays stopped, and records what it saw.
+    await watchMerges(w);
+    assert.ok(existsSync(stopFile(w.f)), 'still stopped');
+    assert.equal(of(w.f, 'merge.resumed').length, 0);
+    const seen = of<EventPayload<'merge.main_measured'>>(w.f, 'merge.main_measured').at(-1)!;
+    assert.deepEqual([seen.tip, seen.green, seen.request], [tip, false, request.id]);
+    assert.match(seen.why ?? '', /not all green \(ci: fail\)/);
+    // Within RESUME_MEASURE_MS of its last look, a pending request isn't measured again.
+    w.f.backlog.setChecks(tip, passing);
+    const looks = of(w.f, 'merge.main_measured').length;
+    await watchMerges(w);
+    assert.equal(of(w.f, 'merge.main_measured').length, looks);
+    assert.ok(existsSync(stopFile(w.f)));
+    w.f.backlog.setChecks(tip, failing(7));
+    // The dashboard shows that measurement on the next request.
+    const again = await resume();
+    assert.equal(again.body.last?.tip, tip);
+    assert.equal(again.body.last?.green, false);
+    assert.match(again.body.message ?? '', new RegExp(`last measurement, at .*: ${tip.slice(0, 8)} not green \\(.*ci: fail`));
+    // Still pending on the tip, asked again: not green either.
+    w.f.backlog.setChecks(tip, [{ name: 'ci', source: 'check_run', status: 'in_progress', conclusion: null, id: 8 }]);
+    await resume();
+    await watchMerges(w);
+    assert.ok(existsSync(stopFile(w.f)));
+    assert.equal(of<EventPayload<'merge.main_measured'>>(w.f, 'merge.main_measured').at(-1)!.green, false);
+    // Green on the tip, asked again: the coordinator resumes, and says so.
+    w.f.backlog.setChecks(tip, passing);
+    await resume();
+    await watchMerges(w);
+    assert.ok(!existsSync(stopFile(w.f)));
+    assert.match(of<EventPayload<'merge.resumed'>>(w.f, 'merge.resumed').at(-1)!.detail, new RegExp(`^@example-owner resumed auto-merge from the dashboard, with main green on ${tip.slice(0, 8)}, measured by the coordinator`));
+    assert.equal(w.c.autoMergeStopped(), null);
+    assert.deepEqual(reads, [], 'the dashboard read no check');
+  } finally {
+    await d.close();
+  }
+});
+
+test('resume (#776 on #727): a red-main stop does NOT resume when main is green only from an unpinned source (a same-name check from another App); green from the pinned source, it resumes', async () => {
+  const w = world();
+  // `ci` pinned to App 2222 in the config the coordinator judges by (it follows the default branch's).
+  w.f.cfg.project.required_check_sources = { ci: { app_id: 2222 } };
+  appendFileSync(join(w.person, CONFIG_PATH), '\nrequired_check_sources:\n  ci: { app_id: 2222 }\n');
+  git(w.person, 'add', CONFIG_PATH);
+  git(w.person, ...ident, 'commit', '-q', '-m', 'pin ci');
+  git(w.person, 'push', '-q', 'origin', 'main');
+  // A backlog that reads GitHub's rules is one whose pins are enforced (PinnedChecks.enforced); these name no App.
+  Object.assign(w.f.backlog, { checkApps: async () => ({}) });
+  await w.watch(2);
+  const tip = redMainStop(w);
+  w.f.backlog.setChecks(tip, [{ name: 'ci', source: 'check_run', status: 'completed', conclusion: 'success', id: 30, app: 3333 }]);
+  const { d, resume } = await resumeDashboard(w);
+  try {
+    assert.equal((await resume()).status, 202);
+    await watchMerges(w);
+    assert.ok(existsSync(stopFile(w.f)), 'green by name only: still stopped');
+    assert.equal(of(w.f, 'merge.resumed').length, 0);
+    assert.match(of<EventPayload<'merge.main_measured'>>(w.f, 'merge.main_measured').at(-1)!.why ?? '', /ci: missing/);
+    // From the pinned App: green, and it resumes.
+    w.f.backlog.setChecks(tip, [{ name: 'ci', source: 'check_run', status: 'completed', conclusion: 'success', id: 31, app: 2222 }]);
+    await resume();
+    await watchMerges(w);
+    assert.ok(!existsSync(stopFile(w.f)));
+    assert.match(of<EventPayload<'merge.resumed'>>(w.f, 'merge.resumed').at(-1)!.detail, new RegExp(`with main green on ${tip.slice(0, 8)}`));
+  } finally {
+    await d.close();
+  }
+});
+
+test('resume (#776): a request the coordinator has not measured yet stays stopped, on every surface', async () => {
+  const w = world();
+  await w.watch(2);
+  const tip = redMainStop(w);
+  w.f.backlog.setChecks(tip, passing);
+  const { d, resume } = await resumeDashboard(w);
+  try {
+    const r = await resume();
+    assert.equal(r.status, 202);
+    assert.equal(r.body.last, null);
+  } finally {
+    await d.close();
+  }
+  // Main is green, but nothing has measured it: the stop is in force until the coordinator looks.
+  assert.ok(existsSync(stopFile(w.f)));
+  assert.notEqual(w.c.autoMergeStopped(), null);
+  assert.equal(of(w.f, 'merge.resumed').length, 0);
+  assert.equal(of(w.f, 'merge.main_measured').length, 0);
+});
+
+test('resume (#776 round 2): the answer shows only a measurement made for the stop in force, never one from before it', async () => {
+  const w = world();
+  await w.watch(2);
+  const first = redMainStop(w);
+  w.f.backlog.setChecks(first, passing);
+  const { d, resume } = await resumeDashboard(w);
+  try {
+    assert.equal((await resume()).status, 202);
+    await watchMerges(w); // measured green: resumed
+    assert.equal(of(w.f, 'merge.resumed').length, 1);
+    // Main moves on and goes red: a new stop on the new tip.
+    const tip = w.commit('red.txt');
+    git(w.person, 'push', '-q', 'origin', 'main');
+    w.f.backlog.setChecks(tip, failing(12));
+    redMainStop(w);
+    const r = await resume();
+    assert.equal(r.body.last, null, `the earlier green on ${first.slice(0, 8)} is not this stop's`);
+    assert.match(r.body.message ?? '', /has recorded no measurement of main yet/);
+    assert.doesNotMatch(r.body.message ?? '', new RegExp(first.slice(0, 8)));
+    await watchMerges(w);
+    const again = await resume();
+    assert.equal(again.body.last?.tip, tip);
+    assert.equal(again.body.last?.green, false);
+  } finally {
+    await d.close();
+  }
+});
+
+test('resume (#776 round 2): a forged request resumes nothing: the ack must pass the dashboard validator, and only a human owner, checked when it is acted on, counts', async () => {
+  const w = world();
+  await w.watch(2);
+  const tip = redMainStop(w);
+  w.f.backlog.setChecks(tip, failing(13));
+  const stop = f776Last(w, 'merge.stopped').id;
+  const file = createHash('sha256').update(readFileSync(stopFile(w.f), 'utf8')).digest('hex');
+  // The log refuses an acknowledgement the dashboard would refuse.
+  assert.throws(() => w.f.log.append('merge.resume_requested', { stop, file, ack: 'x' }, 'agent-user', 'agent'), /not an acknowledgement/);
+  const good = 'the fix PR is ready; merging it needs auto-merge';
+  // An agent's request, a writer's, and a row written around the schema with a reason that isn't one.
+  const agent = w.f.log.append('merge.resume_requested', { stop, file, ack: good }, 'agent-user', 'agent');
+  const writer = w.f.log.append('merge.resume_requested', { stop, file, ack: good }, 'example-collaborator', 'human');
+  (w.f.log as unknown as { db: { prepare(sql: string): { run(...a: unknown[]): unknown } } }).db
+    .prepare('INSERT INTO events (ts, type, actor, source, payload) VALUES (?, ?, ?, ?, ?)')
+    .run(new Date().toISOString(), 'merge.resume_requested', 'example-owner', 'human', JSON.stringify({ stop, file, ack: 'x' }));
+  await watchMerges(w);
+  assert.ok(existsSync(stopFile(w.f)), 'nothing resumed');
+  assert.equal(of(w.f, 'merge.resumed').length, 0);
+  const ignored = of<EventPayload<'merge.resume_ignored'>>(w.f, 'merge.resume_ignored');
+  assert.match(ignored.find((i) => i.request === agent.id)?.why ?? '', /not a person's request \(source agent, actor agent-user\)/);
+  assert.match(ignored.find((i) => i.request === writer.id)?.why ?? '', /@example-collaborator is not an owner/);
+  assert.ok(ignored.some((i) => /acknowledgement is not a typed reason/.test(i.why)), 'the raw row is ignored');
+  // Once ignored, not looked at again; an owner's own request still works.
+  await watchMerges(w);
+  assert.equal(of(w.f, 'merge.resume_ignored').length, ignored.length);
+  w.f.log.append('merge.resume_requested', { stop, file, ack: good }, 'example-owner', 'human');
+  await watchMerges(w);
+  assert.ok(!existsSync(stopFile(w.f)));
+  assert.match(of<EventPayload<'merge.resumed'>>(w.f, 'merge.resumed').at(-1)!.detail, /^@example-owner resumed auto-merge from the dashboard, acknowledging/);
+});
+
+/** The coordinator's role lookups, counted; with `down`, each fails as an unreachable GitHub would. */
+const countRoles = (w: ReturnType<typeof world>) => {
+  const d = (w.c as unknown as { d: { roleOf?: RoleOf } }).d;
+  const real = d.roleOf!;
+  const s = { calls: [] as string[], down: false };
+  d.roleOf = async (login, o) => {
+    s.calls.push(login);
+    if (s.down) throw new Error('GitHub 502 reading the permission');
+    return real(login, o);
+  };
+  return s;
+};
+const stopKey = (w: ReturnType<typeof world>) => ({ stop: f776Last(w, 'merge.stopped').id, file: createHash('sha256').update(readFileSync(stopFile(w.f), 'utf8')).digest('hex') });
+/** The coordinator's resume clock set `ms` past the log's last event (a fixed time, from the log, not the wall clock). */
+const later = (w: ReturnType<typeof world>, ms: number) => {
+  const t = Date.parse(w.f.log.read(0).at(-1)!.ts) + ms;
+  (w.c as unknown as { resumeNow: () => number }).resumeNow = () => t;
+};
+
+test('resume (#776 round 3): owner lookups are bounded: only the latest request counts (the rest superseded, once), one lookup per login per pass', async () => {
+  const w = world();
+  await w.watch(2);
+  const tip = redMainStop(w);
+  w.f.backlog.setChecks(tip, failing(15));
+  const key = stopKey(w);
+  for (let i = 0; i < 40; i++) w.f.log.append('merge.resume_requested', { ...key, ack: null }, 'example-owner', 'human');
+  const roles = countRoles(w);
+  await watchMerges(w);
+  assert.equal(roles.calls.length, 1, `40 requests from one owner: one lookup (${roles.calls.length})`);
+  assert.equal(of<EventPayload<'merge.resume_ignored'>>(w.f, 'merge.resume_ignored').filter((i) => /^superseded by request /.test(i.why)).length, 39, 'the older 39 superseded, logged once');
+  assert.equal(of(w.f, 'merge.main_measured').length, 1);
+  // The next passes: within RESUME_MEASURE_MS nothing is looked up; after it, one lookup again (one request pending).
+  await watchMerges(w);
+  assert.equal(roles.calls.length, 1);
+  later(w, 61_000);
+  await watchMerges(w);
+  assert.equal(roles.calls.length, 2);
+  assert.equal(of(w.f, 'merge.resume_ignored').length, 39, 'nothing superseded twice');
+});
+
+test('resume (#776 round 3): requests across stops and many logins look up at most RESUME_ROLE_LOOKUPS_PER_PASS a pass, and only for the stop in force', async () => {
+  const w = world();
+  await w.watch(2);
+  // Requests for three earlier stops (each superseded by a newer stop): never looked up.
+  for (let k = 0; k < 3; k++) {
+    redMainStop(w);
+    w.f.log.append('merge.resume_requested', { ...stopKey(w), ack: null }, `older-${k}`, 'human');
+  }
+  const tip = redMainStop(w);
+  w.f.backlog.setChecks(tip, failing(16));
+  const key = stopKey(w);
+  for (let i = 0; i < 10; i++) w.f.log.append('merge.resume_requested', { ...key, ack: null }, `someone-${i}`, 'human');
+  const roles = countRoles(w);
+  await watchMerges(w);
+  assert.equal(roles.calls.length, RESUME_ROLE_LOOKUPS_PER_PASS, `capped at ${RESUME_ROLE_LOOKUPS_PER_PASS}: ${roles.calls.join(', ')}`);
+  assert.ok(!roles.calls.some((l) => l.startsWith('older-')), 'no lookup for an earlier stop');
+  await watchMerges(w);
+  assert.equal(roles.calls.length, 2 * RESUME_ROLE_LOOKUPS_PER_PASS, 'the next pass goes on, within the cap');
+  assert.ok(existsSync(stopFile(w.f)));
+  assert.equal(of(w.f, 'merge.resumed').length, 0);
+});
+
+test("resume (#776 round 3): a role lookup that fails isn't \"not an owner\": the request waits (recorded), is retried, and resumes once GitHub answers", async () => {
+  const w = world();
+  await w.watch(2);
+  const tip = redMainStop(w);
+  w.f.backlog.setChecks(tip, failing(17));
+  const request = w.f.log.append('merge.resume_requested', { ...stopKey(w), ack: 'the fix PR is ready; merging it needs auto-merge' }, 'example-owner', 'human');
+  const roles = countRoles(w);
+  roles.down = true;
+  await watchMerges(w);
+  assert.ok(existsSync(stopFile(w.f)), 'not resumed while the role is unknown');
+  assert.equal(of(w.f, 'merge.resume_ignored').length, 0, 'not ignored');
+  const deferred = of<EventPayload<'merge.resume_deferred'>>(w.f, 'merge.resume_deferred').at(-1)!;
+  assert.equal(deferred.request, request.id);
+  assert.match(deferred.why, /couldn't check @example-owner's owner role \(GitHub 502 reading the permission\); will retry/);
+  // Not retried within RESUME_MEASURE_MS; retried after it, and GitHub answering owner resumes it.
+  await watchMerges(w);
+  assert.equal(roles.calls.length, 1);
+  roles.down = false;
+  later(w, 61_000);
+  await watchMerges(w);
+  assert.equal(roles.calls.length, 2);
+  assert.ok(!existsSync(stopFile(w.f)));
+  assert.match(of<EventPayload<'merge.resumed'>>(w.f, 'merge.resumed').at(-1)!.detail, /^@example-owner resumed auto-merge from the dashboard, acknowledging/);
+});
+
+test('resume (#776 round 2): a stop file with no merge.stopped of its own is answered too, under the same rules: keyed to the file, red stays, green resumes', async () => {
+  const w = world();
+  await w.watch(2);
+  const tip = git(w.f.remote, 'rev-parse', 'main');
+  // An earlier stop and resume are logged; then a stop file appears with none of its own (an older engine's, no `by`).
+  w.f.log.append('merge.stopped', { reason: 'earlier', number: null, sha: null, revert: null, by: 'red_main' }, 'coordinator');
+  w.f.log.append('merge.resumed', { detail: 'test: an earlier resume' }, 'example-owner', 'human');
+  writeFileSync(stopFile(w.f), JSON.stringify({ reason: 'stopped by an older engine' }));
+  w.f.backlog.setChecks(tip, failing(14));
+  const { d, resume } = await resumeDashboard(w);
+  try {
+    const r = await resume();
+    assert.equal(r.status, 202);
+    assert.equal((f776Last(w, 'merge.resume_requested').payload as EventPayload<'merge.resume_requested'>).stop, null);
+    await watchMerges(w);
+    assert.equal(of(w.f, 'merge.main_measured').length, 1, 'measured (round 1 never answered it)');
+    assert.ok(existsSync(stopFile(w.f)), 'red: still stopped');
+    assert.equal((await resume()).body.last?.green, false, 'the measurement for this file is shown');
+    // A forged request is ignored here too.
+    const forged = w.f.log.append('merge.resume_requested', { stop: null, file: createHash('sha256').update(readFileSync(stopFile(w.f), 'utf8')).digest('hex'), ack: 'the fix PR is ready; merging it needs auto-merge' }, 'agent-user', 'agent');
+    await watchMerges(w);
+    assert.ok(existsSync(stopFile(w.f)));
+    assert.ok(of<EventPayload<'merge.resume_ignored'>>(w.f, 'merge.resume_ignored').some((i) => i.request === forged.id));
+    // Green on the tip, asked again: resumed.
+    w.f.backlog.setChecks(tip, passing);
+    await resume();
+    await watchMerges(w);
+    assert.ok(!existsSync(stopFile(w.f)));
+    assert.match(of<EventPayload<'merge.resumed'>>(w.f, 'merge.resumed').at(-1)!.detail, /with main green on .*\(stopped by an older engine\)/);
+  } finally {
+    await d.close();
+  }
+});
+
+test('resume (#776): with main still red, an explicit acknowledgement (a typed reason) resumes and records who, why and what main was; no reason, or a short one, is refused', async () => {
+  const w = world();
+  await w.watch(2);
+  const tip = redMainStop(w);
+  w.f.backlog.setChecks(tip, failing(9));
+  const { d, resume } = await resumeDashboard(w);
+  try {
+    assert.equal((await resume({ acknowledge: true })).status, 400, 'no typed reason');
+    assert.equal((await resume({ acknowledge: { reason: 'ok' } })).status, 400, 'too short');
+    assert.equal((await resume({ acknowledge: { reason: 'the fix PR is ready; merging it needs auto-merge' } }, 'example-collaborator')).status, 403, 'a writer may not, acknowledged or not');
+    assert.ok(existsSync(stopFile(w.f)));
+    const ok = await resume({ acknowledge: { reason: 'the fix PR is ready; merging it needs auto-merge' } });
+    assert.equal(ok.status, 202);
+    assert.equal(ok.body.how, 'requested');
+    assert.equal(ok.body.acknowledged, true);
+    assert.ok(existsSync(stopFile(w.f)), 'the coordinator resumes, not the dashboard');
+    const request = f776Last(w, 'merge.resume_requested');
+    assert.equal(request.actor, 'example-owner');
+    assert.equal((request.payload as EventPayload<'merge.resume_requested'>).ack, 'the fix PR is ready; merging it needs auto-merge');
+    const audit = of<EventPayload<'dashboard.audit'>>(w.f, 'dashboard.audit').at(-1)!;
+    assert.equal(audit.action, 'auto_merge.resume_requested');
+    assert.equal(audit.detail.acknowledged, 'the fix PR is ready; merging it needs auto-merge');
+    // The coordinator measures main (recorded), and on the acknowledgement resumes, recording who, why and what main was.
+    await watchMerges(w);
+    assert.ok(!existsSync(stopFile(w.f)));
+    const seen = of<EventPayload<'merge.main_measured'>>(w.f, 'merge.main_measured').at(-1)!;
+    assert.deepEqual([seen.tip, seen.green, seen.request], [tip, false, request.id]);
+    assert.match((f776Last(w, 'merge.resumed').payload as EventPayload<'merge.resumed'>).detail, new RegExp(`^@example-owner resumed auto-merge from the dashboard, acknowledging main isn't green \\(.*ci: fail.*, tip ${tip.slice(0, 8)}\\): "the fix PR is ready; merging it needs auto-merge"`));
+    assert.equal(w.c.autoMergeStopped(), null);
+  } finally {
+    await d.close();
+  }
+});
+
+test('resume (#776): an acknowledgement is a readable typed reason: control and format characters are refused, and only visible characters count toward the minimum', async () => {
+  const refused = {
+    'zero-width spaces': '​'.repeat(12),
+    'word joiners': '⁠'.repeat(12),
+    'one letter and combining marks': `a${'́'.repeat(12)}`,
+    'a bidi override': '‮evitcepsorter si siht ok',
+    'NULs': '\u0000'.repeat(12),
+    'terminal escapes': '\u001b[2J\u001b[31mmain is fine, resume',
+    'a zero-width space inside a real reason': 'the fix PR​ is ready to merge',
+    'spaces only': ' '.repeat(20),
+    'no-break spaces only': ' '.repeat(20),
+    'nine visible characters': 'a b c d e f g h i',
+  };
+  for (const [what, reason] of Object.entries(refused)) assert.ok('error' in acknowledgement({ acknowledge: { reason } }), `${what} is refused`);
+  // Accented letters (composed or not), newlines folded: accepted, stored as typed, whitespace folded.
+  const ok = acknowledgement({ acknowledge: { reason: 'Le correctif était\nprêt à fusionner' } });
+  assert.deepEqual(ok, { reason: 'Le correctif était prêt à fusionner' });
+  // Through the route: refused with 400, nothing written raw into the log.
+  const w = world();
+  await w.watch(2);
+  const tip = redMainStop(w);
+  w.f.backlog.setChecks(tip, failing(10));
+  const { d, resume } = await resumeDashboard(w);
+  try {
+    for (const reason of [refused['terminal escapes'], refused['zero-width spaces']]) assert.equal((await resume({ acknowledge: { reason } })).status, 400);
+    assert.ok(existsSync(stopFile(w.f)));
+    assert.ok(!w.f.log.read(0).some((e) => JSON.stringify(e.payload).includes('\\u001b')), 'no escape in the log');
+  } finally {
+    await d.close();
+  }
+});
+
+test("resume (#776): fail closed: the main watch's stop, a stop with no `by`, an unreadable one, no required checks and a tip that can't be read all wait; only another kind of stop resumes as before", async () => {
+  const w = world();
+  await w.watch(2);
+  w.commit('direct.txt');
+  git(w.person, 'push', '-q', 'origin', 'main');
+  await w.watch(4);
+  assert.equal((JSON.parse(readFileSync(stopFile(w.f), 'utf8')) as { by: string }).by, 'main_watch');
+  // The direct push's tip has no checks at all: missing is not green.
+  const { d, resume } = await resumeDashboard(w);
+  try {
+    assert.equal((await resume()).status, 202);
+    await watchMerges(w);
+    assert.ok(existsSync(stopFile(w.f)));
+    assert.match(of<EventPayload<'merge.main_measured'>>(w.f, 'merge.main_measured').at(-1)!.why ?? '', /ci: missing/);
+    // Someone with file access rewrites the stop with no `by`, then unreadable: both are still requests the coordinator
+    // decides (the last merge.stopped is the main watch's), never a resume on the dashboard.
+    writeFileSync(stopFile(w.f), JSON.stringify({ reason: 'edited' }));
+    assert.equal((await resume()).body.how, 'requested');
+    writeFileSync(stopFile(w.f), '{not json');
+    assert.equal((await resume()).body.how, 'requested');
+    // Rewriting `by` to a kind that resumes as before doesn't help either: the log's last stop is the main watch's.
+    writeFileSync(stopFile(w.f), JSON.stringify({ reason: 'edited', by: 'owner' }));
+    assert.equal((await resume()).body.how, 'requested');
+    await watchMerges(w);
+    assert.ok(existsSync(stopFile(w.f)));
+    assert.equal(of(w.f, 'merge.resumed').length, 0);
+  } finally {
+    await d.close();
+  }
+  // No required checks configured: nothing measures main green.
+  assert.match(((m) => (m.green ? '' : m.why))(await measureMain({ branch: 'main', required: [], tip: () => 'a'.repeat(40), checks: () => asJudged(passing) })), /no required checks are configured/);
+  // A tip that can't be read (or isn't a sha), and checks that can't be read: not green.
+  const checks = () => asJudged(passing);
+  assert.equal((await measureMain({ branch: 'main', required: ['ci'], tip: () => null, checks })).green, false);
+  assert.equal((await measureMain({ branch: 'main', required: ['ci'], tip: () => 'refs/heads/main', checks })).green, false);
+  assert.equal((await measureMain({ branch: 'main', required: ['ci'], tip: () => { throw new Error('ls-remote failed'); }, checks })).green, false);
+  const unreadable = await measureMain({ branch: 'main', required: ['ci'], tip: () => 'a'.repeat(40), checks: async () => { throw new Error('HTTP 502'); } });
+  assert.equal(unreadable.green, false);
+  assert.match(!unreadable.green ? unreadable.why : '', /can't be read \(HTTP 502\)/);
+  assert.equal((await measureMain({ branch: 'main', required: ['ci'], tip: () => 'a'.repeat(40), checks })).green, true, 'control');
+  // A stop that isn't the default branch's (an owner's, with no merge.stopped of the branch's last), with main red: as before.
+  w.f.log.append('merge.resumed', { detail: 'test: an earlier resume' }, 'example-owner', 'human');
+  writeFileSync(stopFile(w.f), JSON.stringify({ reason: 'paused by the owner', by: 'owner' }));
+  w.f.backlog.setChecks(git(w.f.remote, 'rev-parse', 'main'), failing(3));
+  const o = await resumeDashboard(w);
+  try {
+    const r = await o.resume();
+    assert.equal(r.status, 200);
+    assert.equal(r.body.how, 'as_before');
+  } finally {
+    await o.d.close();
+  }
+});
+
+test('resume (#776): a stop changed while main is measured is not resumed: the new stop stands', async () => {
+  const w = world();
+  await w.watch(2);
+  const tip = redMainStop(w);
+  w.f.backlog.setChecks(tip, passing);
+  const r = clearAutoMergeStop({ stateDir: w.f.stateDir, eventsDb: join(w.f.base, 'events.db'), by: 'example-owner' });
+  assert.equal(r.ok && r.how, 'requested');
+  // The main watch stops auto-merge again for a new commit while the coordinator reads main for the request.
+  const c = w.c as unknown as { headChecksOf(sha: string, judging?: readonly string[]): Promise<unknown>; emit(type: string, p: unknown): unknown };
+  const read = c.headChecksOf.bind(c);
+  c.headChecksOf = async (sha, judging) => {
+    c.emit('merge.stopped', { reason: 'main watch: a newer commit', number: null, sha: 'b'.repeat(40), revert: null, by: 'main_watch' });
+    writeFileSync(stopFile(w.f), JSON.stringify({ reason: 'main watch: a newer commit', by: 'main_watch', sha: 'b'.repeat(40) }));
+    return read(sha, judging);
+  };
+  await watchMerges(w);
+  assert.match(readFileSync(stopFile(w.f), 'utf8'), /a newer commit/);
+  assert.equal(of(w.f, 'merge.resumed').length, 0, 'the request was for the stop before it');
+  // The request names the older stop: the next pass resumes nothing either.
+  c.headChecksOf = read;
+  await watchMerges(w);
+  assert.equal(of(w.f, 'merge.resumed').length, 0);
+  assert.ok(existsSync(stopFile(w.f)));
+});
+
+test("resume (#776): the coordinator reads main's tip from the remote now: a fetch that fails while the clone's last-fetched main is green resumes nothing (fail closed)", async () => {
+  const w = world();
+  await w.watch(2); // the clone's refs/remotes/origin/main is main's tip now
+  const stale = git(w.f.repo, 'rev-parse', 'refs/remotes/origin/main');
+  w.f.backlog.setChecks(stale, passing);
+  // Main moves on and goes red; the clone hasn't fetched it.
+  const tip = w.commit('red.txt');
+  git(w.person, 'push', '-q', 'origin', 'main');
+  w.f.backlog.setChecks(tip, failing(5));
+  redMainStop(w);
+  assert.equal(git(w.f.repo, 'rev-parse', 'refs/remotes/origin/main'), stale, 'the clone still has the old, green main');
+  // Then the remote can't be reached (network, auth): nothing can say what main's tip is now.
+  git(w.f.repo, 'remote', 'set-url', 'origin', join(w.f.base, 'unreachable.git'));
+  const { d, resume } = await resumeDashboard(w);
+  try {
+    assert.equal((await resume()).status, 202);
+  } finally {
+    await d.close();
+  }
+  await watchMerges(w);
+  assert.ok(existsSync(stopFile(w.f)), 'the stale green tip is never measured as main now');
+  assert.equal(of(w.f, 'merge.resumed').length, 0);
+  const seen = of<EventPayload<'merge.main_measured'>>(w.f, 'merge.main_measured').at(-1)!;
+  assert.deepEqual([seen.tip, seen.green], [null, false]);
+  assert.match(seen.why ?? '', /tip can't be read from the remote/);
+});
+
+test('resume (#776): every stop is logged before its file is written, so no stop file exists without its merge.stopped', async () => {
+  const w = world();
+  await w.watch(2);
+  const seen: boolean[] = [];
+  const c = w.c as unknown as { emit(type: string, p: unknown): unknown };
+  const emit = c.emit.bind(c);
+  c.emit = (type, p) => {
+    if (type === 'merge.stopped') seen.push(existsSync(stopFile(w.f)));
+    return emit(type, p);
+  };
+  redMainStop(w); // fix-forward's stop
+  unlinkSync(stopFile(w.f));
+  w.f.backlog.setChecks(git(w.f.remote, 'rev-parse', 'main'), failing(6));
+  await watchMerges(w); // written back
+  unlinkSync(stopFile(w.f));
+  w.f.log.append('merge.resumed', { detail: 'test: an earlier resume' }, 'example-owner', 'human');
+  w.commit('direct.txt');
+  git(w.person, 'push', '-q', 'origin', 'main');
+  await w.watch(4); // the main watch's stop
+  assert.equal(seen.length, 3, 'three stops');
+  assert.deepEqual(seen, [false, false, false], 'each logged before its file exists');
+  assert.ok(existsSync(stopFile(w.f)));
+});
+
+test('resume (#776): a stop file deleted by hand while main is still red is written back (same rule as the dashboard); with main green on its tip it resumes', async () => {
+  const w = world();
+  await w.watch(2);
+  const tip = redMainStop(w);
+  w.f.backlog.setChecks(tip, failing(4));
+  unlinkSync(stopFile(w.f));
+  // Before the coordinator's next look at main (a merge step runs before it in a tick), the stop still holds.
+  assert.match(w.c.autoMergeStopped() ?? '', /deleted by hand; auto-merge stays stopped until main is measured green/);
+  await watchMerges(w);
+  assert.ok(existsSync(stopFile(w.f)), 'written back');
+  const back = JSON.parse(readFileSync(stopFile(w.f), 'utf8')) as { by: string; reason: string; restored: string };
+  assert.equal(back.by, 'red_main');
+  assert.match(back.reason, /required checks failed/);
+  assert.match(back.restored, /deleted by hand while .*not all green \(ci: fail\).*acknowledgement/);
+  assert.match(of<EventPayload<'merge.stopped'>>(w.f, 'merge.stopped').at(-1)!.restored ?? '', /deleted by hand/);
+  assert.equal(of(w.f, 'merge.resumed').length, 0, 'not resumed');
+  assert.notEqual(w.c.autoMergeStopped(), null);
+  // Again on the next pass: nothing more (the stop is in force).
+  await watchMerges(w);
+  assert.equal(of(w.f, 'merge.stopped').length, 2);
+  // Main green on its tip: a hand deletion resumes, as before, and says main was green.
+  w.f.backlog.setChecks(tip, passing);
+  unlinkSync(stopFile(w.f));
+  await watchMerges(w);
+  assert.ok(!existsSync(stopFile(w.f)));
+  assert.match(of<EventPayload<'merge.resumed'>>(w.f, 'merge.resumed').at(-1)!.detail, new RegExp(`by hand, with main green on ${tip.slice(0, 8)}`));
+  assert.equal(w.c.autoMergeStopped(), null);
+});
+
+test("resume (#776): the main watch's stop deleted by hand comes back as the main watch's (its alert stays); a dashboard resume logged while main is measured is never undone", async () => {
+  const w = world();
+  await w.watch(2);
+  w.commit('direct.txt');
+  git(w.person, 'push', '-q', 'origin', 'main');
+  await w.watch(4);
+  unlinkSync(stopFile(w.f));
+  await watchMerges(w);
+  assert.equal((JSON.parse(readFileSync(stopFile(w.f), 'utf8')) as { by: string }).by, 'main_watch');
+  assert.ok(protectionState({ stateDir: w.f.stateDir, repo: w.f.cfg.project.project.repo, events: w.f.log.read(0), role: 'owner' }).alert, 'the alert (and its resume) still shows');
+  // The dashboard's acknowledged resume: the file goes, then merge.resumed is logged. A coordinator pass that sees the
+  // file gone first, and the resume logged while it measures main, leaves it resumed.
+  const c = w.c as unknown as { headChecksOf(sha: string): Promise<unknown> };
+  const read = c.headChecksOf.bind(c);
+  c.headChecksOf = async (sha) => {
+    w.f.log.append('merge.resumed', { detail: '@example-owner cleared the stop on the dashboard, acknowledging ...' }, 'example-owner', 'human');
+    return read(sha);
+  };
+  unlinkSync(stopFile(w.f));
+  await watchMerges(w);
+  assert.ok(!existsSync(stopFile(w.f)), 'the acknowledged resume stands');
+  assert.equal(w.c.autoMergeStopped(), null);
 });
 
 /** A test-run service whose full runs pass, posting the `full` check on each head as the App would. */
@@ -422,9 +1101,11 @@ test('main watch caps: at most 3 revert PRs a day on an instance, across a resta
   git(w.person, 'push', '-q', 'origin', 'main');
   await w.watch(15);
   assert.equal(reverts(w.f).length, 3);
-  // A restart, then an admin clears the stop.
+  // A restart, then an admin clears the stop. Precondition (#776): main is green on its tip, measured on the next pass.
   w.restart();
+  w.f.backlog.setChecks(git(w.f.remote, 'rev-parse', 'main'), passing);
   unlinkSync(stopFile(w.f));
+  await watchMerges(w);
   assert.equal(w.c.autoMergeStopped(), null);
   const fourth = w.commit('d4.txt');
   git(w.person, 'push', '-q', 'origin', 'main');

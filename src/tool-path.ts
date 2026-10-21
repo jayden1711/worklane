@@ -6,21 +6,28 @@
 import { delimiter, join } from 'node:path';
 import { BRAND } from './brand.js';
 import { homeDir, which } from './os/index.js';
+import { ownEnv, type EnvSource } from './os/own-env.js';
 
 /** Where local init installs tools and the engine (bin/ under it). */
-export const toolPrefix = (env: NodeJS.ProcessEnv = process.env) => env[`${BRAND.envPrefix}_PREFIX`] || join(homeDir(), '.local');
+export const toolPrefix = (env: EnvSource = process.env) => ownEnv(env).get(`${BRAND.envPrefix}_PREFIX`) || join(homeDir(), '.local');
 
-export const toolBin = (env: NodeJS.ProcessEnv = process.env) => join(toolPrefix(env), 'bin');
+export const toolBin = (env: EnvSource = process.env) => join(toolPrefix(env), 'bin');
 
 /** PATH with the prefix's bin at the end, unless it's there already. */
-export function toolPath(path: string = process.env.PATH ?? '', env: NodeJS.ProcessEnv = process.env): string {
+export function toolPath(path: string = ownEnv().get('PATH') ?? '', env: EnvSource = process.env): string {
   const bin = toolBin(env);
   const dirs = path.split(delimiter).filter(Boolean);
   return dirs.includes(bin) ? dirs.join(delimiter) : [...dirs, bin].join(delimiter);
 }
 
 /** A tool's full path: on PATH, else in the prefix's bin; null when in neither. */
-export const findTool = (cmd: string, env: NodeJS.ProcessEnv = process.env) => which(cmd, toolPath(env.PATH ?? '', env));
+export const findTool = (cmd: string, env: EnvSource = process.env) => {
+  const own = ownEnv(env);
+  return which(cmd, toolPath(own.get('PATH') ?? '', own));
+};
 
-/** An environment for running tools by name: `env` with PATH reaching the prefix's bin too. */
-export const withToolPath = (env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv => ({ ...env, PATH: toolPath(env.PATH ?? '', env) });
+/** An environment for running tools by name: `env` with PATH reaching the prefix's bin too (a spread copies own variables only). */
+export const withToolPath = (env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv => {
+  const own = ownEnv(env);
+  return { ...env, PATH: toolPath(own.get('PATH') ?? '', own) };
+};

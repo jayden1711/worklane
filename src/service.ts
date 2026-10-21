@@ -38,7 +38,7 @@ import { CliRunner, type AgentRunner, type CommitIdentity } from './runner.js';
 import { CliAgentRunner, withCliAgents } from './cli-agents.js';
 import type { CliAgentName } from './providers.js';
 import { latestBaseline } from './baseline.js';
-import { instanceConfigProblems, instanceProblems, instancesDir, laneRuns, researchLanes, loadInstance, readPolicy, type Instance, type InstanceSettings, type PolicyFile } from './instance.js';
+import { instanceAutoMerge, instanceConfigProblems, instanceProblems, instancesDir, laneRuns, researchLanes, loadInstance, readPolicy, type Instance, type InstanceSettings, type PolicyFile } from './instance.js';
 import { startConfig } from './config/live.js';
 import { instanceTargets, migrationGate, projectConfigFiles } from './migrations.js';
 import { settingsReader } from './settings.js';
@@ -49,6 +49,7 @@ import { intakeForInstance, type IntakeWiring } from './intake/wire.js';
 import { prodRead } from './prodread.js';
 import { coordinatorHooksDir, writeCoordinatorHooks } from './push-guard.js';
 import { stableNodePath, type ProjectRunAs, type ServiceSpec } from './os/index.js';
+import { ownEnv, type EnvSource } from './os/own-env.js';
 import { toolPath } from './tool-path.js';
 import { cachedRoles, repoPermission, type RoleOf } from './dashboard-auth.js';
 import type { CoordinatorDeps } from './coordinator/shared.js';
@@ -71,7 +72,11 @@ export const logPath = (root: string) => join(projectStateDir(root), 'events.db'
 export const serviceLabel = (cfg: Config) => `dev.${BRAND.cli}.${cfg.project.project.name.replace(/[^A-Za-z0-9-]/g, '-')}`;
 
 /** A local coordinator unit's own variables, on top of what its service manager gives it; the Claude step uses it too (#738). */
-export const localServiceEnv = (env: NodeJS.ProcessEnv = process.env): { PATH: string; HOME: string } => ({ PATH: toolPath(env.PATH ?? '', env), HOME: env.HOME ?? '' });
+export const localServiceEnv = (env: EnvSource = process.env): { PATH: string; HOME: string } => {
+  // WHY (#786): own variables only: a HOME or PATH on Object.prototype is never the unit's, nor the Claude step's.
+  const own = ownEnv(env);
+  return { PATH: toolPath(own.get('PATH') ?? '', own), HOME: own.get('HOME') ?? '' };
+};
 
 /**
  * The coordinator's service for a checkout (local mode), as `up` installs it and the first-run page's Start does:
@@ -299,7 +304,7 @@ export async function runInstanceCoordinator(name: string, opts: { once?: boolea
   // Approved plugins (src/plugins/run.ts): root's allowlist and store, checked before every run.
   const plugins = ({ role }: { role: string }) => pluginsForRun({ instance: i.name, instanceHome: i.home, role });
   const claude = new CliRunner(instanceRuntime(i).runtime, process.env, 'claude', i.runAs ?? undefined, allLanes(i), identity, {}, () => guardrailSettings(i.home, i.name, i.repo.path), instanceRuntime(i).apiKeyFile, login, plugins, { instance: i.name, register: (role, ttlMs) => registerRun(i.name, role, ttlMs), end: (ticket) => endRun(i.name, ticket) });
-  return runSite(siteForInstance(i), { ...opts, instance: i.name, label: `instance ${name}`, lockScope, protection: watchApi, offsiteConfig: join(i.home, OFFSITE_FILE), ...(i.credentials.provider_keys ? { providerKeys: i.credentials.provider_keys } : {}), testRun, intake, roleOf, liveConfig, watchdog, incidents: incidentSink(i.name), accountSwitched: () => accountSwitchedAt(i.name), superfan: superfanView(i.name, i.stateDir), ...(i.runAs ? { experiments: { instance: i.name, pinsFile: join(i.home, PINS_FILE) } } : {}), automations: { file: join(i.home, AUTOMATIONS_FILE), policy: () => readPolicy(join(i.home, 'policy.yaml')).policy?.automations ?? AutomationsPolicy.parse(undefined) }, ...(mainWatch ? { mainWatch } : {}), ...(mergePosts ? { mergePosts } : {}), ...(ciMetrics ? { ciMetrics } : {}) }, withCliAgents(claude, { codex: vendor('codex'), gemini: vendor('gemini') }), expiry, tokens, i.runAs ?? undefined, gh.kind === 'app' ? gh.key_path : undefined, identity, () => loadInstance(name).policy.auto_merge, settingsReader(join(i.home, 'policy.yaml')));
+  return runSite(siteForInstance(i), { ...opts, instance: i.name, label: `instance ${name}`, lockScope, protection: watchApi, offsiteConfig: join(i.home, OFFSITE_FILE), ...(i.credentials.provider_keys ? { providerKeys: i.credentials.provider_keys } : {}), testRun, intake, roleOf, liveConfig, watchdog, incidents: incidentSink(i.name), accountSwitched: () => accountSwitchedAt(i.name), superfan: superfanView(i.name, i.stateDir), ...(i.runAs ? { experiments: { instance: i.name, pinsFile: join(i.home, PINS_FILE) } } : {}), automations: { file: join(i.home, AUTOMATIONS_FILE), policy: () => readPolicy(join(i.home, 'policy.yaml')).policy?.automations ?? AutomationsPolicy.parse(undefined) }, ...(mainWatch ? { mainWatch } : {}), ...(mergePosts ? { mergePosts } : {}), ...(ciMetrics ? { ciMetrics } : {}) }, withCliAgents(claude, { codex: vendor('codex'), gemini: vendor('gemini') }), expiry, tokens, i.runAs ?? undefined, gh.kind === 'app' ? gh.key_path : undefined, identity, () => instanceAutoMerge(name), settingsReader(join(i.home, 'policy.yaml')));
 }
 
 /** An instance's superfan view: its name, and its service log as the dashboard's Logs page reads it (never sudo). */
@@ -451,8 +456,8 @@ export async function runSite(site: Site, opts: { /** The instance's name (its i
   };
   process.on('SIGTERM', stop);
   process.on('SIGINT', stop);
-  const backupDir = opts.backupDir ?? process.env[`${BRAND.envPrefix}_BACKUP_DIR`] ?? join(state, 'backups');
-  const offsiteConfig = opts.offsiteConfig ?? process.env[`${BRAND.envPrefix}_OFFSITE_BACKUP`];
+  const backupDir = opts.backupDir ?? ownEnv().get(`${BRAND.envPrefix}_BACKUP_DIR`) ?? join(state, 'backups');
+  const offsiteConfig = opts.offsiteConfig ?? ownEnv().get(`${BRAND.envPrefix}_OFFSITE_BACKUP`);
   // An emergency stop takes effect within seconds, not at the next tick.
   // The console's requests (message, stop), chat questions and intake (which pulls its sources on its own, slower
   // clock) are taken on the same short timer. Discord chat and decision-thread messages don't wait for it: each wakes

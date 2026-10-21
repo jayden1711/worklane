@@ -119,12 +119,17 @@ test('changing a setting: owner only; checked, written atomically (0600, comment
   assert.throws(() => changeSetting({ ...base, key: 'workers', value: 'many', by: owner }), /refused: settings\.workers/);
   assert.equal(readFileSync(i.policyPath, 'utf8'), POLICY, 'a refused change writes nothing');
 
-  const r = changeSetting({ ...base, key: 'workers', value: 3, by: owner.toUpperCase() });
-  assert.deepEqual(r, { from: cfg.agents.roles.workers!.count ?? 1, to: 3 });
+  // Round 11 (the owner's decision of 2026-10-19): the dashboard only tightens, on every install, so raising workers
+  // from the value in effect is the admin's (here: an edit of the file). Until then this raised workers 1 → 3.
+  assert.throws(() => changeSetting({ ...base, key: 'workers', value: 3, by: owner }), /settings\.workers 3 would loosen it \(now 1\).*edit .*policy\.yaml \(settings\.workers: 3\), or its Helm value/);
+  assert.equal(readFileSync(i.policyPath, 'utf8'), POLICY, 'a refused raise writes nothing');
+  const budgetNow = cfg.agents.daily_budget_usd;
+  const r = changeSetting({ ...base, key: 'daily_budget_usd', value: budgetNow - 10, by: owner.toUpperCase() });
+  assert.deepEqual(r, { from: budgetNow, to: budgetNow - 10 });
   const text = readFileSync(i.policyPath, 'utf8');
   assert.match(text, /# the operator's notes stay/);
-  assert.match(text, /settings:\s*\n\s+workers: 3/);
-  assert.deepEqual(PolicyFile.parse(parseYaml(text)).settings, { workers: 3 });
+  assert.match(text, new RegExp(`settings:\\s*\\n\\s+daily_budget_usd: ${budgetNow - 10}`));
+  assert.deepEqual(PolicyFile.parse(parseYaml(text)).settings, { daily_budget_usd: budgetNow - 10 });
   if (process.platform !== 'win32') assert.equal(statSync(i.policyPath).mode & 0o777, 0o600);
   assert.deepEqual(readdirSync(i.d).filter((f) => f.endsWith('.tmp')), [], 'no temp file left');
   changeSetting({ ...base, key: 'ci_repair.max_fixes_per_pr', value: 1, by: owner });
@@ -132,7 +137,7 @@ test('changing a setting: owner only; checked, written atomically (0600, comment
   const events = log.read(0, ['settings.changed']);
   log.close();
   assert.deepEqual(events.map((e) => [e.payload, e.source]), [
-    [{ key: 'workers', from: cfg.agents.roles.workers!.count ?? 1, to: 3, by: owner.toUpperCase(), at: '2026-10-10T12:00:00.000Z' }, 'human'],
+    [{ key: 'daily_budget_usd', from: budgetNow, to: budgetNow - 10, by: owner.toUpperCase(), at: '2026-10-10T12:00:00.000Z' }, 'human'],
     [{ key: 'ci_repair.max_fixes_per_pr', from: 2, to: 1, by: owner, at: '2026-10-10T12:00:00.000Z' }, 'human'],
   ]);
 });

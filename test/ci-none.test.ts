@@ -8,7 +8,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { BRAND } from '../src/brand.js';
 import { ciChoiceProblem } from '../src/ci-choice.js';
-import { CI_NONE_MAIN_WATCH, headChecks, localRunChecks, requiredFor, testRunCheckNames } from '../src/ci-none.js';
+import type { CommitCheck } from '../src/backlog/types.js';
+import { PinnedChecks, type JudgedChecks } from '../src/check-source.js';
+import { CI_NONE_MAIN_WATCH, localRunChecks, requiredFor, testRunCheckNames } from '../src/ci-none.js';
 import { ConfigInvalid, loadConfig } from '../src/config/load.js';
 import { EventLog } from '../src/events/log.js';
 import type { StoredEvent } from '../src/events/types.js';
@@ -33,8 +35,15 @@ function log() {
     l.append('testrun.finished', { id: run, sha, kind: 'fast', prs: [7], ok: results.every(([, ok]) => ok), outcome, results: results.map(([tier, ok]) => ({ tier, ok })), detail: '' }, 'alice');
   };
   const queued = (sha: string) => l.append('testrun.queued', { id: `q${++id}`, sha, kind: 'fast', prs: [7], shard: null }, 'alice');
-  return { finished, queued, events: (): StoredEvent[] => l.read(0, ['testrun.queued', 'testrun.finished']) };
+  return { finished, queued, log: l, events: (): StoredEvent[] => l.read(0, ['testrun.queued', 'testrun.finished']) };
 }
+
+/**
+ * The checks a head is judged by, as the merge flow makes them (PinnedChecks over a backlog answering `github`, with
+ * the No CI config and this event log): it reads the log itself (#727: no maker takes a caller's events).
+ */
+const headChecks = (o: { project: { ci?: 'none' | 'github' }; github: CommitCheck[]; log: EventLog; sha: string }): Promise<JudgedChecks> =>
+  new PinnedChecks({ backlog: { checks: async () => o.github }, branch: () => 'main', repo: () => 'o/r', configured: () => ({}), local: { project: () => o.project, tests: () => tests, log: o.log } }).of(o.sha);
 
 const gh = (name: string, conclusion = 'success') => ({ name, source: 'check_run' as const, status: 'completed', conclusion });
 const approved = { head: HEAD, approved: true };
@@ -46,46 +55,47 @@ test('No CI: the required checks are every test_run tier\'s check, as the test r
   assert.deepEqual(requiredFor({ required_checks: ['ci'] }, tests), ['ci'], 'absent: github');
 });
 
-test("No CI: a test-run check passes only from this instance's log, on exactly this head, with every one of its tiers passed", () => {
+test("No CI: a test-run check passes only from this instance's log, on exactly this head, with every one of its tiers passed", async () => {
   const l = log();
-  const ready = () => readiness({ required: ['fast'], checks: headChecks({ project: none, tests, github: [], events: l.events, sha: HEAD }), head: HEAD, evaluated: approved });
-  assert.deepEqual(ready().reasons, ['fast: missing']);
+  const ready = async () => readiness({ required: ['fast'], checks: await headChecks({ project: none, github: [], log: l.log, sha: HEAD }), head: HEAD, evaluated: approved });
+  assert.deepEqual((await ready()).reasons, ['fast: missing']);
   l.finished(OTHER, 'done', [['unit', true], ['lint', true]]);
-  assert.deepEqual(ready().reasons, ['fast: missing'], 'another commit\'s run says nothing about this head');
+  assert.deepEqual((await ready()).reasons, ['fast: missing'], 'another commit\'s run says nothing about this head');
   l.queued(HEAD);
-  assert.deepEqual(ready().reasons, ['fast: pending'], 'a run on it, not finished: pending');
+  assert.deepEqual((await ready()).reasons, ['fast: pending'], 'a run on it, not finished: pending');
   l.finished(HEAD, 'done', [['unit', true], ['lint', false]]);
-  assert.deepEqual(ready().reasons, ['fast: fail'], 'one of its tiers failed');
+  assert.deepEqual((await ready()).reasons, ['fast: fail'], 'one of its tiers failed');
   l.finished(HEAD, 'cancelled', [['unit', true], ['lint', true]]);
-  assert.deepEqual(ready().reasons, ['fast: fail'], 'a cancelled run is no verdict');
+  assert.deepEqual((await ready()).reasons, ['fast: fail'], 'a cancelled run is no verdict');
   l.finished(HEAD, 'done', [['unit', true], ['lint', true]]);
-  assert.equal(ready().ready, true, 'its latest run on this head passed every tier');
+  assert.equal((await ready()).ready, true, 'its latest run on this head passed every tier');
   l.finished(HEAD, 'error', [['unit', true], ['lint', true]]);
-  assert.deepEqual(ready().reasons, ['fast: fail'], 'a run whose setup failed fails its tiers');
+  assert.deepEqual((await ready()).reasons, ['fast: fail'], 'a run whose setup failed fails its tiers');
 });
 
-test('No CI: a GitHub check named like a test-run check counts for nothing, passing or failing; other GitHub checks are left as they are', () => {
+test('No CI: a GitHub check named like a test-run check counts for nothing, passing or failing; other GitHub checks are left as they are', async () => {
   const l = log();
   const spoof = [gh('fast'), gh('test-run/suite'), gh('lint-bot', 'failure')];
-  const judged = headChecks({ project: none, tests, github: spoof, events: l.events, sha: HEAD });
-  assert.deepEqual(judged, [gh('lint-bot', 'failure')], 'the same-named GitHub checks are gone');
+  const judged = await headChecks({ project: none, github: spoof, log: l.log, sha: HEAD });
+  assert.deepEqual([...judged], [gh('lint-bot', 'failure')], 'the same-named GitHub checks are gone');
   const r = readiness({ required: requiredFor(none, tests), checks: judged, head: HEAD, evaluated: approved });
   assert.equal(r.ready, false);
   assert.deepEqual(r.reasons, ['fast: missing', 'test-run/suite: missing']);
   // And a red one on GitHub can't block a green local run either: GitHub runs nothing a PR waits on.
   l.finished(HEAD, 'done', [['unit', true], ['lint', true], ['suite', true]]);
-  const green = readiness({ required: requiredFor(none, tests), checks: headChecks({ project: none, tests, github: [gh('fast', 'failure')], events: l.events, sha: HEAD }), head: HEAD, evaluated: approved });
+  const green = readiness({ required: requiredFor(none, tests), checks: await headChecks({ project: none, github: [gh('fast', 'failure')], log: l.log, sha: HEAD }), head: HEAD, evaluated: approved });
   assert.equal(green.ready, true, green.reasons.join('; '));
   // ci: github: GitHub's checks as they are, the log never read.
   let read = 0;
-  assert.deepEqual(headChecks({ project: { ci: 'github' }, tests, github: spoof, events: () => (read++, []), sha: HEAD }), spoof);
+  const counting = { read: (from: number, types: Parameters<EventLog['read']>[1]) => (read++, l.log.read(from, types)) } as unknown as EventLog;
+  assert.deepEqual([...(await headChecks({ project: { ci: 'github' }, github: spoof, log: counting, sha: HEAD }))], spoof);
   assert.equal(read, 0);
 });
 
-test('No CI: the evaluator still decides; a passed test run alone is never ready', () => {
+test('No CI: the evaluator still decides; a passed test run alone is never ready', async () => {
   const l = log();
   l.finished(HEAD, 'done', [['unit', true], ['lint', true]]);
-  const checks = headChecks({ project: none, tests, github: [], events: l.events, sha: HEAD });
+  const checks = await headChecks({ project: none, github: [], log: l.log, sha: HEAD });
   assert.deepEqual(readiness({ required: ['fast'], checks, head: HEAD, evaluated: null }).reasons, ['no evaluator verdict']);
   assert.match(readiness({ required: ['fast'], checks, head: HEAD, evaluated: { head: OTHER, approved: true } }).reasons.join(), /is not the commit the evaluator approved/);
   assert.match(readiness({ required: ['fast'], checks, head: HEAD, evaluated: { head: HEAD, approved: false } }).reasons.join(), /did not approve/);
@@ -115,21 +125,23 @@ test('ci: none is refused without tests.yaml test_run (the fix: the starter CI),
   assert.equal(loadConfig(exampleProject().dir).project.ci, undefined);
 });
 
-test("the coordinator under No CI: ready only on its own log's test run of the exact head, never on GitHub's same-named check; the main watch says what No CI means", () => {
+test("the coordinator under No CI: ready only on its own log's test run of the exact head, never on GitHub's same-named check; the main watch says what No CI means", async () => {
   const f = fixture();
   f.cfg.project.land_mode = 'pr';
   f.cfg.project.ci = 'none';
   f.cfg.tests.test_run = tests.test_run;
   const c = coordinator(f, new FakeRunner(() => ({ structured: {} })), { prPollMs: 0 });
+  // The checks as the merge flow reads them for a head (PinnedChecks.of: the backlog's, then the log's test runs).
+  const headOf = () => (c as unknown as { headChecksOf(sha: string): Promise<JudgedChecks> }).headChecksOf(HEAD);
   f.log.append('eval.verdict', { issue: 1, head: HEAD, patch_hash: 'x', patch_correct: true, test_correct: true, confidence: 'high', advice: '' }, 'alice');
-  const spoof = [gh('fast'), gh('test-run/suite')];
-  const r1 = c.prReadiness(1, HEAD, spoof);
+  f.backlog.setChecks(HEAD, [gh('fast'), gh('test-run/suite')]);
+  const r1 = c.prReadiness(1, HEAD, await headOf());
   assert.equal(r1.ready, false);
   assert.deepEqual(r1.reasons, ['fast: missing', 'test-run/suite: missing']);
   f.log.append('testrun.finished', { id: 'r1', sha: HEAD, kind: 'fast', prs: [1], ok: true, outcome: 'done', results: [{ tier: 'unit', ok: true }, { tier: 'lint', ok: true }], detail: '' }, 'alice');
   // Batching's except (the full checks come from the batch), as the PR watch passes it.
-  assert.equal(c.prReadiness(1, HEAD, [], ['test-run/suite']).ready, true);
-  assert.deepEqual(c.prReadiness(1, HEAD, []).reasons, ['test-run/suite: missing'], 'the full tier is still required outside a batch');
+  assert.equal(c.prReadiness(1, HEAD, await headOf(), ['test-run/suite']).ready, true);
+  assert.deepEqual(c.prReadiness(1, HEAD, await headOf()).reasons, ['test-run/suite: missing'], 'the full tier is still required outside a batch');
   assert.match(CI_NONE_MAIN_WATCH, /main watch can't judge merges by checks/);
 });
 

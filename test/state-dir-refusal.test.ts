@@ -18,7 +18,7 @@ import { pathToFileURL } from 'node:url';
 import { BRAND } from '../src/brand.js';
 import { stateDir } from '../src/os/index.js';
 import * as systemPaths from '../src/os/system-paths.js';
-import { SYSTEM_ROOT_VAR, TEST_MACHINE_VAR, TEST_TOKEN_VAR, testSlotsRefusal } from '../src/os/system-paths.js';
+import { SYSTEM_ROOT_VAR, TEST_MACHINE_VAR, TEST_RUN_VAR, TEST_TOKEN_VAR, testSlotsRefusal } from '../src/os/system-paths.js';
 import { repoRoot } from './helpers.js';
 import { isolatedEnv, restoreIsolated, serviceModeEnv, testMachine } from './isolate.js';
 
@@ -46,8 +46,10 @@ import cp from 'node:child_process';
 import { syncBuiltinESMExports } from 'node:module';
 import { isAbsolute, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-const [osUrl, pathsUrl, allowedJson, control, outsideControl] = process.argv.slice(2);
+const [osUrl, pathsUrl, allowedJson, control, outsideControl, pollutionJson] = process.argv.slice(2);
 const allowed = JSON.parse(allowedJson);
+// #786: names put on Object.prototype just for the stateDir() call, as a polluting dependency would set them.
+const pollution = JSON.parse(pollutionJson || '{}');
 const touched = [];
 const ok = (p) => allowed.some((d) => { const r = relative(d, p); return r === '' || (!r.startsWith('..') && !isAbsolute(r)); });
 const pathOf = (a) => (typeof a === 'string' ? a : a instanceof URL ? fileURLToPath(a) : Buffer.isBuffer(a) ? a.toString() : null);
@@ -84,7 +86,9 @@ os.fileAccess(control);
 let refusedOutside = false;
 try { fs.existsSync(outsideControl); } catch { refusedOutside = true; }
 let result = null, error = null;
+for (const [k, v] of Object.entries(pollution)) Object.prototype[k] = v;
 try { result = os.stateDir(); } catch (e) { error = { name: e.name, message: e.message }; }
+for (const k of Object.keys(pollution)) delete Object.prototype[k];
 console.log(JSON.stringify({ sign: paths.testRunSign(), result, error, touched, refusedOutside }));
 `;
 
@@ -96,15 +100,18 @@ interface Probe {
   refusedOutside: boolean;
 }
 
-/** Runs stateDir() in a scratch child with `env`; checks the controls and that nothing outside the test machine was touched. */
-function probe(env: NodeJS.ProcessEnv, outside: string): Probe {
+/**
+ * Runs stateDir() in a scratch child with `env` (and `pollution` on Object.prototype for the call); checks the
+ * controls and that nothing outside the test machine was touched.
+ */
+function probe(env: NodeJS.ProcessEnv, outside: string, pollution: Record<string, string> = {}): Probe {
   const dir = mkdtempSync(join(tmpdir(), 'state-probe-'));
   writeFileSync(join(dir, 'probe.mjs'), PROBE);
   const control = join(dir, 'control');
   const url = (p: string) => pathToFileURL(join(repoRoot, 'dist', 'src', 'os', p)).href;
   // Allowed: the test machine, and the engine's own built modules (node's loader reads them through node:fs).
   const dist = join(repoRoot, 'dist', 'src');
-  const r = spawnSync(process.execPath, [join(dir, 'probe.mjs'), url('index.js'), url('system-paths.js'), JSON.stringify([testMachine, dist]), control, join(outside, 'control')], { cwd: dir, env, encoding: 'utf8', timeout: 60_000 });
+  const r = spawnSync(process.execPath, [join(dir, 'probe.mjs'), url('index.js'), url('system-paths.js'), JSON.stringify([testMachine, dist]), control, join(outside, 'control'), JSON.stringify(pollution)], { cwd: dir, env, encoding: 'utf8', timeout: 60_000 });
   assert.equal(r.status, 0, `${r.stdout}\n${r.stderr}`);
   const out = JSON.parse(r.stdout) as Probe;
   // The controls: the wrappers saw this probe's call and the engine's own, and refused a path outside.
@@ -170,6 +177,34 @@ test('in a test run, every fall-through of stateDir() that lands outside the tes
   const stray = probe(testRunEnv({ [TEST_MACHINE_VAR]: undefined }), outside);
   assert.equal(stray.error?.name, 'TestStateRefused');
   assert.match(stray.error!.message, new RegExp(`${TEST_MACHINE_VAR} is unset`));
+});
+
+test('#786: a state-dir variable or a test-run mark on Object.prototype neither moves the state dir nor un-refuses it', { skip: !linux && 'the Linux fall-throughs' }, () => {
+  const outside = standIn();
+  const ownHome = isolatedEnv.HOME!;
+  // Each polluted value names a place inside the test machine, so the engine would accept it there, and nothing
+  // outside the machine is ever touched (the probe's wrappers refuse that).
+  const forged = join(testMachine, `polluted-${randomBytes(4).toString('hex')}`);
+  const run = (set: Record<string, string | undefined>, pollution: Record<string, string>) => {
+    const r = probe(testRunEnv(set), outside, pollution);
+    return r.error ? `refused: ${r.error.name}` : r.result;
+  };
+  const seen = {
+    // <PREFIX>_STATE_DIR unset: the XDG_STATE_HOME fall-through, not the prototype's value.
+    stateVar: run({ [STATE]: undefined }, { [STATE]: forged }),
+    // Both unset: the test's HOME, not the prototype's XDG_STATE_HOME.
+    xdgVar: run({ [STATE]: undefined, XDG_STATE_HOME: undefined, HOME: ownHome }, { XDG_STATE_HOME: forged }),
+    // A test run's child (TEST_RUN_VAR, its own) that lost its test machine stays refused when the prototype names one.
+    machineMark: run({ [TEST_RUN_VAR]: '1', [TEST_MACHINE_VAR]: undefined }, { [TEST_MACHINE_VAR]: testMachine }),
+    // Nor when the prototype carries the machine, its root and this run's token, none of them set.
+    allMarks: run({ [TEST_RUN_VAR]: '1', [TEST_MACHINE_VAR]: undefined, [SYSTEM_ROOT_VAR]: undefined, [TEST_TOKEN_VAR]: undefined }, { [TEST_MACHINE_VAR]: testMachine, [SYSTEM_ROOT_VAR]: isolatedEnv[SYSTEM_ROOT_VAR]!, [TEST_TOKEN_VAR]: process.env[TEST_TOKEN_VAR]! }),
+  };
+  assert.deepEqual(seen, {
+    stateVar: join(isolatedEnv.XDG_STATE_HOME!, BRAND.cli),
+    xdgVar: join(ownHome, '.local', 'state', BRAND.cli),
+    machineMark: 'refused: TestStateRefused',
+    allMarks: 'refused: TestStateRefused',
+  });
 });
 
 test('outside a test run stateDir() is what it always was: each fall-through as before, nothing refused and nothing opened (#815)', { skip: !linux && 'the Linux fall-throughs' }, () => {
