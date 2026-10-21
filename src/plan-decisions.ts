@@ -92,6 +92,8 @@ function headingAliases(file: string, heading: string): string[] {
  * part or reworded. Instead it indexes only records committed at the plan's base (committedRecords), and in the
  * engine's repo every decision record path, and this file, is self-modification (src/review.ts): a copy reaches the
  * index only through a PR that adds or changes a committed record, which waits like the page itself.
+ * That holds for the base the coordinator gives. Which commit that is comes from a fetch whose source a process
+ * running as the engine's user can still reach (#962).
  */
 export const PROCESS_DOC = 'docs/process.md';
 
