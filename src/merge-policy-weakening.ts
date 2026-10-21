@@ -82,6 +82,14 @@ export const CHECK_TABLES: readonly CheckTable[] = [
   { path: 'test/instance-name.test.ts', table: 'BAD_SHAPE', kind: 'never-shrink' },
   { path: 'scripts/lib/changelog.mjs', table: 'GUARDRAIL_PATHS', kind: 'never-shrink' },
   { path: 'test/machine-path-writes.test.ts', table: 'GUARD', kind: 'never-shrink' },
+  // #746: the desktop twin backstop's fixtures (shapes it must catch, and the controls it must not).
+  { path: 'test/desktop-removed.test.ts', table: 'TWIN_FIXTURES', kind: 'never-shrink' },
+  { path: 'test/desktop-removed.test.ts', table: 'CI_TWIN_FIXTURES', kind: 'never-shrink' },
+  { path: 'test/desktop-removed.test.ts', table: 'FILE_NAME_FIXTURES', kind: 'never-shrink' },
+  { path: 'test/desktop-removed.test.ts', table: 'BYTE_FIXTURES', kind: 'never-shrink' },
+  { path: 'test/desktop-removed.test.ts', table: 'UNSURE_TEXT_FIXTURES', kind: 'never-shrink' },
+  { path: 'test/desktop-removed.test.ts', table: 'NAME_TWIN_FIXTURES', kind: 'never-shrink' },
+  { path: 'test/desktop-removed.test.ts', table: 'BARE_NAME_FIXTURES', kind: 'never-shrink' },
   // The golden runner settings (#856): the deny list and hooks a run's --settings must carry.
   { path: 'test/runner-golden.test.ts', table: 'GUARD', kind: 'never-shrink' },
   // The guards' own tables (their files are guard files too; the table names what was taken out).
