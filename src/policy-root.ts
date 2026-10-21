@@ -376,7 +376,8 @@ export function policyCommand(sub: string | undefined, rest: string[], deps: Pol
     if (sub === 'own' && args.length === 1 && flags.every((f) => f === '--retake' || f === '--accept-loose')) {
       const r = ownPolicy(args[0]!, deps, { retake: flags.includes('--retake'), acceptLoose: flags.includes('--accept-loose') });
       console.log(`${r.file} is root's now (0644), its content as it was:\n${Object.entries(r.keys).map(([k, v]) => `  ${k}: ${String(v)}`).join('\n')}`);
-      if (r.loose.length) console.log(`CHECK: ${r.loose.join('; ')}: looser than its coordinator could make it. If you didn't set it, change it with sudo ${BRAND.cli} policy set ${args[0]} <key> <value>, or edit the file as root and then run ${ownCommand(args[0]!, '--retake', '--accept-loose')}.`);
+      // A name reserved after it was made is never retaken (#902 round 13): only policy set changes its policy now.
+      if (r.loose.length) console.log(`CHECK: ${r.loose.join('; ')}: looser than its coordinator could make it. If you didn't set it, change it with sudo ${BRAND.cli} policy set ${args[0]} <key> <value>${instanceNameOk(args[0]) ? `, or edit the file as root and then run ${ownCommand(args[0]!, '--retake', '--accept-loose')}` : ` (it only tightens: ${args[0]} was made before that name was reserved, so a file edited by hand is never taken over again)`}.`);
       return 0;
     }
     if (sub === 'set' && rest.length === 3 && !flags.length) {

@@ -20,11 +20,9 @@ import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import { BRAND } from './brand.js';
-import { LATER_RESERVED } from './instance-name.js';
 import { HELPER_RULES, helperRules } from './machine.js';
 import { readRootFile } from './os/root-file.js';
-import { asRoot } from './os/system-paths.js';
-import { POLICY_ROOT_DIR } from './policy-kill.js';
+import { POLICY_ROOT_DIR, retakeCommand } from './policy-kill.js';
 
 /** Root's record of the instances whose policy.yaml is root's: one file per instance (policyRecord). */
 export { POLICY_ROOT_DIR };
@@ -80,13 +78,14 @@ export const policyRootUid = (): number => rootUid;
  * flag says what an admin checked first (policyCommand): `--retake`, a recorded file that changed since root wrote
  * it; `--accept-loose`, a policy looser than a coordinator could make it. Setup never passes either. For an instance
  * made before its name was reserved (machine, console), `policy own` refuses `--retake` (#902 rounds 10, 12), so where
- * that is needed the command named instead is its removal (#902 round 11), never one that would be refused.
- * `--accept-loose` alone (a first takeover) works for such a name, and is named as for any other.
+ * that is needed the command named instead is its removal (policy-kill.ts retakeCommand, the one builder of that way
+ * out, #902 rounds 11, 13), never one that would be refused. `--accept-loose` alone (a first takeover) works for such
+ * a name, and is named as for any other.
  */
-export const ownCommand = (instance: string, ...flags: ('--retake' | '--accept-loose')[]) =>
-  flags.includes('--retake') && LATER_RESERVED.includes(instance)
-    ? `sudo bash ${asRoot.opt('current/scripts/setup/instance-remove.sh')} ${instance} (${instance} is a name reserved since: its policy is never taken over with --retake; remove the instance, then add it again under another name)`
-    : `sudo ${BRAND.cli} policy own ${instance}${flags.map((f) => ` ${f}`).join('')}`;
+export const ownCommand = (instance: string, ...flags: ('--retake' | '--accept-loose')[]) => {
+  const own = `sudo ${BRAND.cli} policy own ${instance}${flags.map((f) => ` ${f}`).join('')}`;
+  return flags.includes('--retake') ? retakeCommand(instance, own) : own;
+};
 
 /** Whether root's record covers this instance (any answer but "none" does: an unreadable record refuses, never skips). */
 export function policyRootRequired(instance: string, dir = POLICY_ROOT_DIR): boolean {
