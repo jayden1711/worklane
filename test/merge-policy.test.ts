@@ -151,7 +151,11 @@ test('self-modification: every glob names real engine files (none dead), and the
     ['src/install.ts', "the agents' tool guard's hook commands"],
     ['src/instance.ts', "the agents' tool guard's hook commands"],
     ['src/config/load.ts', "the agents' tool guard"],
-    ['src/events/redact.ts', "the agents' tool guard"],
+    ['src/guard/chat.ts', "the agents' tool guard"],
+    // Out of the guard's import tree since #785, and still locked under parts of their own.
+    ['src/events/redact.ts', 'sign-in, credentials or secrets'],
+    ['src/agent-settings.ts', 'what an agent run is given'],
+    ['src/plugins/approval.ts', 'what an agent run is given'],
     ['src/managed-apps.ts', 'where the self-modification locks apply'],
     ['scripts/setup/managed-apps.sh', 'the machine setup'],
     ['scripts/push-gate.mjs', 'the push gate, denylist and secret scan'],
@@ -840,6 +844,26 @@ test("weakening (owner's rule, 2026-10-19): an added line with a skip, only or s
   // A doc that names a mark adds none.
   assert.deepEqual(weakens({ 'README.md': '# x\n' }, { 'README.md': '# x\nAdd `// eslint-disable-next-line` only with a reason; `# noqa` too.\n' }), []);
   assert.deepEqual(weakens({ 'docs/lint.md': '# x\n' }, { 'docs/lint.md': '# x\n- `// @ts-ignore`: never; use `@ts-expect-error` with why.\n' }), []);
+});
+
+test('weakening: a test-selection declaration (`// runtime-import:`, src/testrun/affected.ts) added or changed waits, in any file but docs; taken out it does not', () => {
+  const decl = '  // runtime-import: src/watchdog/index.ts';
+  const body = (d: string) => `function watchdog() {\n  const f = path.join(OPT, 'current', 'dist', 'src', 'watchdog', 'index.js');\n${d}\n  return import(require('node:url').pathToFileURL(f).href);\n}\n`;
+  const bare = body('').replace('\n\n', '\n');
+  for (const path of ['scripts/up.cjs', 'src/x/y.ts', 'lib/loader.mjs', 'scripts/machine/worklane-update.cjs', 'test/a.test.ts']) {
+    assert.deepEqual(kinds(weakens({ [path]: bare }, { [path]: body(decl) })), [MARKER], `${path}: added`);
+    assert.deepEqual(kinds(weakens({ [path]: body(decl) }, { [path]: body('  // runtime-import: src/cli.ts') })).filter((k) => k !== GUARD), [MARKER], `${path}: changed to another file`);
+  }
+  // The routes the review measured past the selector's own check: each needs an added declaration, so each waits.
+  const routes: Record<string, string> = {
+    'a decoy literal beside a wrong declaration (A)': body("  const decoy = 'dist/src/cli.js';\n  // runtime-import: src/cli.ts"),
+    'a declaration inside a multi-line template literal (B)': body('  const s = `\n  // runtime-import: src/cli.ts\n  `; void s;'),
+    'a top-level arrow with no block around it (C)': "const f = path.join(OPT, 'dist', 'src', 'watchdog', 'index.js');\n// runtime-import: src/cli.ts\nconst w = () => import(require('node:url').pathToFileURL(f).href);\n",
+  };
+  for (const [what, after] of Object.entries(routes)) assert.deepEqual(kinds(weakens({ 'scripts/up.cjs': bare }, { 'scripts/up.cjs': after })), [MARKER], what);
+  // Taken out, the import is unresolved again and its tests run on every change: no wait. A doc naming it adds none.
+  assert.deepEqual(weakens({ 'src/x/y.ts': body(decl) }, { 'src/x/y.ts': bare }), []);
+  assert.deepEqual(weakens({ 'docs/selection.md': '# x\n' }, { 'docs/selection.md': '# x\n- `// runtime-import: src/x.ts` declares it.\n' }), []);
 });
 
 test("weakening: bounded and fail closed: too many changed characters, a diff that doesn't match its counts, a file that isn't text, a table file it can't read, a git failure", () => {

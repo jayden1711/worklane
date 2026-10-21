@@ -3,7 +3,7 @@ import type { AutomationsPolicy } from '../automations/schema.js';
 import type { Get } from '../automations/github.js';
 import type { IncidentSink } from '../usage-limit.js';
 import type { SlotPathLike } from '../slot-file.js';
-import { spawn } from 'node:child_process';
+import { spawn } from '../os/child-process.js';
 import type { Config, ConfigError } from '../config/load.js';
 import { type Backlog, type Issue } from '../backlog/types.js';
 import { claim, release } from '../claims.js';

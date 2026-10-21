@@ -1,12 +1,20 @@
 // GitHub Issues backlog over REST. Only the coordinator holds the token;
 // agents never see it. Errors are classified (a 403 isn't "missing
 // permission" unless it is).
-import { execFileSync } from 'node:child_process';
+import { execFileSync } from '../os/child-process.js';
 import { redact, redactString, TRACKER } from '../events/redact.js';
 import { classifyGitHubError } from '../github/errors.js';
 import { BudgetPaused, budgetFor, SECONDARY_DEFAULT_S, type GitHubBudget } from '../github/budget.js';
 import { noteGitHubOk } from '../github/seen.js';
 import type { Backlog, CommitCheck, Issue, PrReview, PrReviewComment, PullRequest, RerunJobs } from './types.js';
+import { ACTIONS_APP_ID, BranchDenied, githubCheckApps, type GithubCheckApps, type WorkflowSource } from '../check-source.js';
+
+/** GitHub's default page size for a commit's combined status (the first page main read is that size). */
+const STATUS_PAGE_DEFAULT = 30;
+/** Pages of the combined status read for one commit (#727); past them it isn't judged. */
+const STATUS_PAGES_MAX = 10;
+/** Pages of 100 check runs read for one commit (#727), as the main watch reads them; past them it isn't judged. */
+const CHECK_PAGES_MAX = 10;
 
 export class GitHubError extends Error {
   constructor(
@@ -222,24 +230,134 @@ export class GitHubBacklog implements Backlog {
     }
   }
 
-  async checks(sha: string): Promise<CommitCheck[]> {
+  /**
+   * Every check on `sha`. Without `pinned` (no check being judged is pinned), exactly main's reads: up to 9 pages of check
+   * runs, judged as read, and the combined status's first page (a 403 or 404: none). With `pinned` (#727), the reads a
+   * pinned check needs, failing closed: see below and statusPages.
+   */
+  async checks(sha: string, opts: { pinned?: boolean } = {}): Promise<CommitCheck[]> {
+    const pinned = opts.pinned === true;
     const out: CommitCheck[] = [];
-    for (let page = 1; page < 10; page++) {
-      const r = await this.req<{ check_runs: { id: number; name: string; status: string; conclusion: string | null; html_url?: string }[] }>('GET', `/repos/${this.repo}/commits/${sha}/check-runs?filter=latest&per_page=100&page=${page}`);
-      out.push(...r.check_runs.map((c) => ({ name: c.name, source: 'check_run' as const, status: c.status, conclusion: c.conclusion, id: c.id, ...(c.html_url ? { url: c.html_url } : {}) })));
+    const suites = new Map<CommitCheck, number>();
+    // Main read 9 pages and judged them. Pinned (#727): a 10th too (marked `extra`: only a pinned name is judged with
+    // it), and a throw past it, as the main watch does: a failing run on an unread page could be another source's,
+    // which blocks a pinned check, so a truncated list is never judged (the PR waits).
+    for (let page = 1; ; page++) {
+      if (!pinned && page >= CHECK_PAGES_MAX) break;
+      if (page > CHECK_PAGES_MAX) throw new Error(`more than ${CHECK_PAGES_MAX} pages of check runs on ${sha.slice(0, 8)}: not judged`);
+      const r = await this.req<{ check_runs: { id: number; name: string; status: string; conclusion: string | null; html_url?: string; app?: { id?: number; slug?: string } | null; check_suite?: { id?: number } | null }[] }>('GET', `/repos/${this.repo}/commits/${sha}/check-runs?filter=latest&per_page=100&page=${page}`);
+      for (const c of r.check_runs) {
+        const app = c.app?.id;
+        const check: CommitCheck = { name: c.name, source: 'check_run', status: c.status, conclusion: c.conclusion, id: c.id, ...(c.html_url ? { url: c.html_url } : {}), ...(typeof app === 'number' ? { app } : {}), ...(page >= CHECK_PAGES_MAX ? { extra: true as const } : {}) };
+        // An Actions run is told by its App's id, as the main watch tells it (src/check-source.ts ACTIONS_APP_ID).
+        if (pinned && app === ACTIONS_APP_ID && typeof c.check_suite?.id === 'number') suites.set(check, c.check_suite.id);
+        out.push(check);
+      }
       if (r.check_runs.length < 100) break;
     }
-    // Commit statuses need their own permission; without it (403) or with none (404), there are just no statuses.
-    let statuses: { context: string; state: string; target_url?: string | null }[] = [];
-    try {
-      statuses = (await this.req<{ statuses: typeof statuses }>('GET', `/repos/${this.repo}/commits/${sha}/status`)).statuses;
-    } catch (e) {
-      if (!(e instanceof GitHubError && (e.status === 403 || e.status === 404))) throw e;
+    // #727: which workflow run, in which repo and for which commit, posted each Actions check (its suite's run). Read
+    // only when a check being judged is pinned (`pinned`): by name, nothing needs it.
+    if (suites.size) {
+      if (![...suites.values()].every((s) => this.suiteRuns.has(s))) await this.workflowRuns(sha);
+      for (const [check, suite] of suites) check.workflow = this.suiteRuns.get(suite) ?? null;
     }
+    const statuses = pinned ? await this.statusPages(sha) : await this.firstStatusPage(sha);
     for (const s of statuses) {
-      out.push({ name: s.context, source: 'status', status: s.state === 'pending' ? 'pending' : 'completed', conclusion: s.state === 'pending' ? null : s.state === 'success' ? 'success' : 'failure', ...(s.target_url ? { url: s.target_url } : {}) });
+      out.push({ name: s.context, source: 'status', status: s.state === 'pending' ? 'pending' : 'completed', conclusion: s.state === 'pending' ? null : s.state === 'success' ? 'success' : 'failure', ...(s.target_url ? { url: s.target_url } : {}), ...(s.extra ? { extra: true as const } : {}) });
     }
     return out;
+  }
+
+  /**
+   * The combined status's contexts on `sha` as main read them, with no judged check pinned: the first page (GitHub's
+   * default page size); commit statuses need their own permission, so a 403 or 404 means none.
+   */
+  private async firstStatusPage(sha: string): Promise<{ context: string; state: string; target_url?: string | null; extra?: true }[]> {
+    try {
+      return (await this.req<{ statuses: { context: string; state: string; target_url?: string | null }[] }>('GET', `/repos/${this.repo}/commits/${sha}/status`)).statuses;
+    } catch (e) {
+      if (!(e instanceof GitHubError && (e.status === 403 || e.status === 404))) throw e;
+      return [];
+    }
+  }
+
+  /**
+   * #727, a check being judged is pinned: the combined status's contexts on `sha`, the first page as main read it, then every
+   * later page while a page is full, whatever total_count says, marked `extra` (only a pinned name is judged with them).
+   * Past STATUS_PAGES_MAX pages it throws: a status unread could be a pinned check's failure, so the commit isn't
+   * judged (it waits). Any refusal throws too, a first page's 403 or 404 included (the owner's decision, round 8): a
+   * pinned check is never judged without its name's statuses.
+   */
+  private async statusPages(sha: string): Promise<{ context: string; state: string; target_url?: string | null; extra?: true }[]> {
+    type Page = { total_count?: number; statuses: { context: string; state: string; target_url?: string | null }[] };
+    const first = await this.req<Page>('GET', `/repos/${this.repo}/commits/${sha}/status`);
+    const all: { context: string; state: string; target_url?: string | null; extra?: true }[] = [...first.statuses];
+    let page = first;
+    for (let n = 2; page.statuses.length >= STATUS_PAGE_DEFAULT; n++) {
+      if (n > STATUS_PAGES_MAX) throw new Error(`more than ${STATUS_PAGES_MAX} pages of commit statuses on ${sha.slice(0, 8)}: not judged`);
+      page = await this.req<Page>('GET', `/repos/${this.repo}/commits/${sha}/status?page=${n}`);
+      all.push(...page.statuses.map((s) => ({ ...s, extra: true as const })));
+    }
+    return all;
+  }
+
+  /** A check suite's workflow run never changes: kept, so a commit's runs are listed once per new suite. */
+  private readonly suiteRuns = new Map<number, WorkflowSource>();
+
+  /** Keeps each Actions workflow run for `sha` by its check suite (one page of 100); none when Actions can't be read. */
+  private async workflowRuns(sha: string): Promise<void> {
+    let r: { workflow_runs: { id?: number; html_url?: string; check_suite_id?: number; path?: string; head_sha?: string; repository?: { full_name?: string } }[] };
+    try {
+      r = await this.req('GET', `/repos/${this.repo}/actions/runs?head_sha=${sha}&per_page=100`);
+    } catch (e) {
+      // No Actions: read (403) or none (404): a workflow-pinned check then has no source, so it counts as missing.
+      if (e instanceof GitHubError && (e.status === 403 || e.status === 404)) return;
+      throw e;
+    }
+    if (this.suiteRuns.size > 5000) this.suiteRuns.clear();
+    for (const w of r.workflow_runs) {
+      if (typeof w.id === 'number' && typeof w.html_url === 'string' && typeof w.check_suite_id === 'number' && typeof w.path === 'string' && typeof w.head_sha === 'string' && typeof w.repository?.full_name === 'string') {
+        this.suiteRuns.set(w.check_suite_id, { run: w.id, url: w.html_url, path: w.path, repo: w.repository.full_name, sha: w.head_sha });
+      }
+    }
+  }
+
+  /** #727: the App each required check needs on `branch`, as classic protection (get a branch) and rulesets name it. */
+  async checkApps(branch: string): Promise<GithubCheckApps> {
+    const b = encodeURIComponent(branch);
+    // The branch read refused for permission (a 403 that isn't a rate limit) or a 404: the owner's decision (a),
+    // 2026-10-19: no App named by classic protection, for a judgement with no pinned name (BranchDenied carries what the
+    // rules name; PinnedChecks decides). A rate limit or a 5xx throws: transient, so it keeps waiting.
+    let protection: unknown = null;
+    let denied = false;
+    try {
+      protection = await this.req<unknown>('GET', `/repos/${this.repo}/branches/${b}`);
+    } catch (e) {
+      if (!(e instanceof GitHubError && (e.status === 404 || (e.status === 403 && e.kind !== 'rate_limited' && e.kind !== 'secondary_rate_limited')))) throw e;
+      denied = true;
+    }
+    const rules: unknown[] = [];
+    // Every page while a page is full (#727: a rule on an unread page could pin a check); past 10, not an answer.
+    for (let page = 1; ; page++) {
+      if (page > 10) throw new Error(`more than 10 pages of branch rules for ${branch}: not read`);
+      let list: unknown;
+      try {
+        list = await this.req<unknown>('GET', `/repos/${this.repo}/rules/branches/${b}?per_page=100${page > 1 ? `&page=${page}` : ''}`);
+      } catch (e) {
+        // A first page refused for permission (no rulesets on this plan) or 404 (none to read): classic protection
+        // alone names the Apps. A rate-limited 403, or any refusal of a later page, is not that answer (#727, round 9):
+        // it throws, so the last answer is kept (or the rules stay unknown), never "no rulesets", which would drop a
+        // ruleset's pin.
+        if (page === 1 && e instanceof GitHubError && (e.status === 404 || (e.status === 403 && e.kind !== 'rate_limited' && e.kind !== 'secondary_rate_limited'))) break;
+        throw e;
+      }
+      if (!Array.isArray(list)) break;
+      rules.push(...list);
+      if (list.length < 100) break;
+    }
+    const apps = githubCheckApps(protection, rules);
+    if (denied) throw new BranchDenied(apps);
+    return apps;
   }
 
   async requestReview(n: number, logins: string[]) {

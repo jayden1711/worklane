@@ -8,13 +8,14 @@
 // cases, run against the instructions at the base and at the head, with a cost cap, compared
 // case by case. The agent under test only ever sees the instructions and the situation (never
 // the rubric), in a neutrally named directory, and a judge on a different model grades it.
-import { spawn } from 'node:child_process';
+import { spawn } from './os/child-process.js';
 import { createHash } from 'node:crypto';
 import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { BRAND } from './brand.js';
 import { agentEnv, type AgentRunner } from './runner.js';
+import { ownEnv } from './os/own-env.js';
 
 export interface EvalCase {
   id: string;
@@ -198,7 +199,7 @@ export const cliAsk: Ask = (req) =>
   new Promise((resolve, reject) => {
     const args = ['-p', '--model', req.model, '--output-format', 'json', '--max-turns', '3', '--max-budget-usd', String(req.maxBudgetUsd), '--setting-sources', '', '--strict-mcp-config', '--json-schema', JSON.stringify(req.schema), '--disallowedTools', ...NO_TOOLS];
     if (req.system) args.push('--append-system-prompt', req.system);
-    const child = spawn('claude', args, { cwd: req.cwd, env: agentEnv(process.env, 'cli'), stdio: ['pipe', 'pipe', 'pipe'] });
+    const child = spawn('claude', args, { cwd: req.cwd, env: agentEnv(ownEnv(), 'cli'), stdio: ['pipe', 'pipe', 'pipe'] });
     let out = '';
     let err = '';
     child.stdout.on('data', (d: Buffer) => (out += d.toString()));

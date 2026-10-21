@@ -5,13 +5,14 @@
 // only: the workspace, the commands and the database all belong to that user, in the test runs' slice, and the
 // commands run sandboxed. The local host does the same steps as the current user in a directory of its own, with
 // no sandbox: for the engine's tests and for development, never for a project's PRs (the coordinator refuses it).
-import { spawn } from 'node:child_process';
+import { spawn } from '../os/child-process.js';
 import { randomBytes } from 'node:crypto';
 import { existsSync, mkdirSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Readable } from 'node:stream';
 import { BRAND } from '../brand.js';
 import { killTree, shellCommand, spawnDetached } from '../os/index.js';
+import { ownEnv } from '../os/own-env.js';
 import { SPARSE_MAX, sparseDirProblem } from '../checkout.js';
 import { MAX_CONNECTIONS, PINNED_IMAGE } from './config.js';
 import { HELPER_PROTOCOL } from './helper.js';
@@ -518,7 +519,7 @@ export function sandboxHost(instance: string, helper = SANDBOX_HELPER, sudo = 's
  */
 export function localHost(base: string, o: { docker?: string; path?: string } = {}): RunHost {
   const docker = o.docker ?? 'docker';
-  const dockerEnv = { PATH: o.path ?? process.env.PATH ?? '/usr/bin:/bin', HOME: join(base, 'docker-home') };
+  const dockerEnv = { PATH: o.path ?? ownEnv().get('PATH') ?? '/usr/bin:/bin', HOME: join(base, 'docker-home') };
   const runDir = (id: string) => join(base, 'runs', id);
   const d = (args: string[], timeoutMs = 120_000) => run(docker, args, { env: dockerEnv, timeoutMs });
   const leftovers = async (id: string): Promise<string[]> => {
@@ -542,7 +543,7 @@ export function localHost(base: string, o: { docker?: string; path?: string } = 
       const w = await run('sh', ['-c', 'cat > "$1"', '_', file], { stdin: bundle, timeoutMs: 600_000 });
       if (w.code !== 0) throw fail('create', `receiving run ${id}'s bundle`, w);
       const [bash, args] = shellCommand(cloneScript());
-      const env = { PATH: o.path ?? process.env.PATH ?? '/usr/bin:/bin', HOME: join(dir, 'home'), LANG: 'C.UTF-8' };
+      const env = { PATH: o.path ?? ownEnv().get('PATH') ?? '/usr/bin:/bin', HOME: join(dir, 'home'), LANG: 'C.UTF-8' };
       mkdirSync(join(base, 'store'), { recursive: true, mode: 0o700 });
       const r = await run(bash, [...args, '_', file, join(dir, 'work'), refs.branch, refs.head, refs.base, refs.headSha, refs.baseSha, join(base, 'store'), ...refs.exclude], { env, cwd: dir, timeoutMs: 600_000 });
       if (r.code !== 0) throw fail('create', `creating run ${id}'s workspace`, r);
@@ -550,7 +551,7 @@ export function localHost(base: string, o: { docker?: string; path?: string } = 
     },
     async storeTips() {
       if (!existsSync(join(base, 'store', 'HEAD'))) return [];
-      const r = await run('git', [`--git-dir=${join(base, 'store')}`, 'for-each-ref', '--format=%(objectname)', 'refs/keep/'], { env: { PATH: o.path ?? process.env.PATH ?? '/usr/bin:/bin', GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null' }, timeoutMs: 60_000 });
+      const r = await run('git', [`--git-dir=${join(base, 'store')}`, 'for-each-ref', '--format=%(objectname)', 'refs/keep/'], { env: { PATH: o.path ?? ownEnv().get('PATH') ?? '/usr/bin:/bin', GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null' }, timeoutMs: 60_000 });
       if (r.code !== 0) throw fail('store-tips', 'reading the object store', r);
       return parseTips(r.stdout);
     },
@@ -614,7 +615,7 @@ export function localHost(base: string, o: { docker?: string; path?: string } = 
       // The workspace, then the requirements files, are the script's arguments, as the helper passes them. (The helper
       // runs it in its unit's private /tmp; the local host has no sandbox, and uses a directory of the run's.)
       const [file, args] = shellCommand(fetchScript(fetcher));
-      const full = { PATH: o.path ?? process.env.PATH ?? '/usr/bin:/bin', HOME: join(fd, 'home'), TMPDIR: join(dir, 'tmp'), LANG: 'C.UTF-8', CI: '1', [FETCH_CACHE_ENV[fetcher]]: await this.cache(cache, key) };
+      const full = { PATH: o.path ?? ownEnv().get('PATH') ?? '/usr/bin:/bin', HOME: join(fd, 'home'), TMPDIR: join(dir, 'tmp'), LANG: 'C.UTF-8', CI: '1', [FETCH_CACHE_ENV[fetcher]]: await this.cache(cache, key) };
       const r = await run(file, [...args, 'fetch', join(dir, 'work'), ...files], { cwd: fd, env: full, timeoutMs, signal });
       rmSync(fd, { recursive: true, force: true });
       return { code: r.code, out: r.out, err: r.stderr, timedOut: r.code === null && !signal?.aborted };
@@ -624,7 +625,7 @@ export function localHost(base: string, o: { docker?: string; path?: string } = 
       const dir = runDir(id);
       const [file, args] = shellCommand(command);
       // Exactly these variables: never this process's own environment.
-      const full = { ...env, PATH: o.path ?? process.env.PATH ?? '/usr/bin:/bin', HOME: join(dir, 'home'), TMPDIR: join(dir, 'tmp'), LANG: 'C.UTF-8', CI: '1' };
+      const full = { ...env, PATH: o.path ?? ownEnv().get('PATH') ?? '/usr/bin:/bin', HOME: join(dir, 'home'), TMPDIR: join(dir, 'tmp'), LANG: 'C.UTF-8', CI: '1' };
       const r = await run(file, args, { cwd: join(dir, 'work'), env: full, timeoutMs, signal });
       // The local host has no GPU to grant: a command that asks is told so, as the helper would.
       // Nor network: it has no sandbox to keep a command off it, and says so to one that asks.

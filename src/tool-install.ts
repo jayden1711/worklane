@@ -7,7 +7,7 @@
 // tarball is checked against the integrity pinned here; npm checks its platform binary against the registry's.
 import { createHash } from 'node:crypto';
 import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { spawnSync } from 'node:child_process';
+import { spawnSync } from './os/child-process.js';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { toolPlatform } from './os/index.js';

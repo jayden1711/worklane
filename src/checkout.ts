@@ -5,7 +5,7 @@
 // don't read. A test-run tier that needs them says `full_checkout: true` (test_run.tiers).
 //
 // Non-cone sparse checkout ("/*" then "!/<dir>/" per directory): everything, minus those directories.
-import { execFileSync } from 'node:child_process';
+import { execFileSync } from './os/child-process.js';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { z } from 'zod';

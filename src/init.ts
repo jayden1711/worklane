@@ -12,7 +12,7 @@
 //           agent's Claude token and the checkout). Init never installs tools there: that stays the owner's step.
 //
 // What local mode can't do is listed plainly (unavailableIn), in doctor and on the dashboard, never left to fail.
-import { spawn, spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from './os/child-process.js';
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { delimiter, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -37,6 +37,7 @@ import { srvCheckoutPath, varLibPath } from './os/system-paths.js';
 import { ciChoiceProblem } from './ci-choice.js';
 import { ProjectConfig } from './config/schema.js';
 import { parse as parseYaml } from 'yaml';
+import { ownEnv } from './os/own-env.js';
 
 export { MODES, type Mode, type RunResult };
 export type StepId = 'tools' | 'claude' | 'github' | 'repo-config' | 'coordinator' | 'protection' | 'discord' | 'tailscale';
@@ -96,7 +97,7 @@ export const localInitFile = (root: string) => join(projectStateDir(root), INIT_
  */
 export const serverInitFile = (instance: string) => join(machineInitDir(), `${instance}.json`);
 /** The machine's init records (tests point it elsewhere). */
-export const machineInitDir = () => process.env[`${BRAND.envPrefix}_MACHINE_INIT_DIR`] ?? varLibPath('init');
+export const machineInitDir = () => ownEnv().get(`${BRAND.envPrefix}_MACHINE_INIT_DIR`) ?? varLibPath('init');
 /** Where an engine before this kept it: root's own state, which the coordinator can't read. Read once, to carry it over. */
 export const legacyServerInitFile = (instance: string) => join(stateDir(), 'init', `${instance}.json`);
 
@@ -238,7 +239,7 @@ async function tools(c: InitContext, act: boolean): Promise<StepResult> {
   }
   // This run finds them at once; the person's shell needs the prefix on PATH.
   const bin = join(c.prefix, 'bin');
-  const path = process.env.PATH ?? '';
+  const path = ownEnv().get('PATH') ?? '';
   if (!path.split(delimiter).includes(bin)) {
     process.env.PATH = `${bin}${delimiter}${path}`;
     c.io.say(`   note: ${bin} isn't on your PATH: add it in your shell profile (export PATH="${bin}:$PATH")`);

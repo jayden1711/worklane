@@ -4,7 +4,7 @@
 // intake role; shows the draft; and files it `ready` only on an explicit yes from the person who posted it or an
 // admin (mayFileReady). Until then the draft is only in the coordinator's private store. Once filed, the thread
 // gets the issue's progress from the events: planned, PR opened, merged, live.
-import { execFileSync } from 'node:child_process';
+import { execFileSync } from '../os/child-process.js';
 import { existsSync, readFileSync, rmSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import type { EventPayload } from '../events/types.js';
@@ -17,7 +17,8 @@ import { candidates as intakeCandidates } from '../intake/dedupe.js';
 import { mayAddIdea, mayFileReady, personOf, type ChatPerson } from '../intake/people.js';
 import { redactPii } from '../intake/redact.js';
 import type { IncomingReport, IntakeConfig, IntakeSource } from '../intake/report.js';
-import { INTAKE_ROLE, intakeRun, writeIntakeBundle } from '../intake/run.js';
+import { intakeRun, writeIntakeBundle } from '../intake/run.js';
+import { INTAKE_ROLE } from '../guard/intake.js';
 import { IntakeMeter, readRaw, reportId, storeRaw } from '../intake/store.js';
 import { acceptTriage } from '../intake/triage.js';
 import { Channel } from './channel.js';

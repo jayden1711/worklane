@@ -3,10 +3,11 @@
 // no LFS smudge, no config from the machine, no ref that can move. Running this as a throwaway user (systemd
 // DynamicUser) is the root side's job (scripts/setup/plugins.sh); this module is the part that is the same wherever it
 // runs, and it never executes a file it fetched.
-import { execFileSync } from 'node:child_process';
+import { execFileSync } from '../os/child-process.js';
 import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { ownEnv } from '../os/own-env.js';
 import { type Inspection } from './inspect.js';
 import { treeFiles, treeHashOf, type TreeFile } from './tree.js';
 
@@ -46,7 +47,7 @@ function git(cwd: string, home: string, args: string[], allowFile: boolean, pin?
     cwd,
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'pipe'],
-    env: { PATH: process.env.PATH ?? '/usr/bin:/bin', HOME: home, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_TERMINAL_PROMPT: '0', GIT_ASKPASS: 'false', GIT_LFS_SKIP_SMUDGE: '1', LANG: 'C' },
+    env: { PATH: ownEnv().get('PATH') ?? '/usr/bin:/bin', HOME: home, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_TERMINAL_PROMPT: '0', GIT_ASKPASS: 'false', GIT_LFS_SKIP_SMUDGE: '1', LANG: 'C' },
     timeout: 120_000,
     maxBuffer: 16 * 1024 * 1024,
   });
@@ -82,7 +83,7 @@ export function fetchGitPlugin(s: GitSource, dest: string, o: { allowFileUrls?: 
     const tar = join(work, 'tree.tar');
     g(repo, work, ['archive', '--format=tar', '-o', tar, s.path ? `HEAD:${s.path}` : 'HEAD']);
     mkdirSync(dest, { recursive: true });
-    execFileSync('tar', ['-xf', tar, '-C', dest, '--no-same-owner'], { stdio: ['ignore', 'pipe', 'pipe'], env: { PATH: process.env.PATH ?? '/usr/bin:/bin', LANG: 'C' } });
+    execFileSync('tar', ['-xf', tar, '-C', dest, '--no-same-owner'], { stdio: ['ignore', 'pipe', 'pipe'], env: { PATH: ownEnv().get('PATH') ?? '/usr/bin:/bin', LANG: 'C' } });
   } finally {
     rmSync(work, { recursive: true, force: true });
   }

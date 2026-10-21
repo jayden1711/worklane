@@ -2,11 +2,12 @@
 // version, its tarball's integrity the registry's own, its whole dependency tree locked and installed with no install
 // script run, and no bin links (the tree hash refuses links). A package any of whose dependencies needs an install
 // script is refused (Q7). Nothing here runs the package.
-import { execFileSync } from 'node:child_process';
+import { execFileSync } from '../os/child-process.js';
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, posix } from 'node:path';
+import { ownEnv } from '../os/own-env.js';
 import { lockResolvedProblem } from '../plugins/hosts.js';
 
 export const NPM_NAME = /^(?:@[a-z0-9][a-z0-9._~-]*\/)?[a-z0-9][a-z0-9._~-]*$/;
@@ -30,7 +31,7 @@ function npm(cwd: string, home: string, args: string[], registry: string): strin
     stdio: ['ignore', 'pipe', 'pipe'],
     timeout: 240_000,
     maxBuffer: 64 * 1024 * 1024,
-    env: { PATH: process.env.PATH ?? '/usr/local/bin:/usr/bin:/bin', HOME: home, LANG: 'C', NPM_CONFIG_USERCONFIG: '/dev/null', NPM_CONFIG_GLOBALCONFIG: '/dev/null', NPM_CONFIG_CACHE: join(home, 'cache'), NPM_CONFIG_IGNORE_SCRIPTS: 'true', NPM_CONFIG_BIN_LINKS: 'false', NPM_CONFIG_FUND: 'false', NPM_CONFIG_AUDIT: 'false', NPM_CONFIG_UPDATE_NOTIFIER: 'false', NPM_CONFIG_REGISTRY: `https://${registry}/` },
+    env: { PATH: ownEnv().get('PATH') ?? '/usr/local/bin:/usr/bin:/bin', HOME: home, LANG: 'C', NPM_CONFIG_USERCONFIG: '/dev/null', NPM_CONFIG_GLOBALCONFIG: '/dev/null', NPM_CONFIG_CACHE: join(home, 'cache'), NPM_CONFIG_IGNORE_SCRIPTS: 'true', NPM_CONFIG_BIN_LINKS: 'false', NPM_CONFIG_FUND: 'false', NPM_CONFIG_AUDIT: 'false', NPM_CONFIG_UPDATE_NOTIFIER: 'false', NPM_CONFIG_REGISTRY: `https://${registry}/` },
   });
 }
 

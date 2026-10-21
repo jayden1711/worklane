@@ -1,5 +1,5 @@
 // Work intake (docs/intake.md): pulling the sources, triage, filing or asking, replies, and recovery after a restart.
-import { execFileSync } from 'node:child_process';
+import { execFileSync } from '../os/child-process.js';
 import { createHash } from 'node:crypto';
 import { readFileSync, existsSync, rmSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -15,7 +15,8 @@ import { candidates as intakeCandidates } from '../intake/dedupe.js';
 import { acceptTriage, type Triage } from '../intake/triage.js';
 import { decide as intakeDecide, excerpt, NEEDS_INFO_REPLY, statusReply, type IntakeAction } from '../intake/decide.js';
 import { checkReply, REPLIER_ROLE, replierDir, replierRun, type ReplyFacts, type ReplyStage } from '../intake/replier.js';
-import { INTAKE_ROLE, intakeRun, writeIntakeBundle } from '../intake/run.js';
+import { intakeRun, writeIntakeBundle } from '../intake/run.js';
+import { INTAKE_ROLE } from '../guard/intake.js';
 import { QuickReplies } from './quick-replies.js';
 import { type CoordinatorDeps } from './shared.js';
 import { runRoute } from './model-routing.js';

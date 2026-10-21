@@ -10,7 +10,7 @@
 // back (here: fetched from the destination and decrypted) has the snapshot's
 // checksum and latest event id. An encrypt command that leaves the snapshot
 // readable is refused before anything is sent.
-import { spawnSync } from 'node:child_process';
+import { spawnSync } from './os/child-process.js';
 import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';

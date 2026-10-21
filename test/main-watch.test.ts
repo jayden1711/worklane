@@ -6,9 +6,13 @@ import { execFileSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { GitHubBacklog } from '../src/backlog/github.js';
+import { PinnedChecks, type CheckPin, type WorkflowSource } from '../src/check-source.js';
+import { readiness } from '../src/pr-watch.js';
 import type { Role } from '../src/dashboard-auth.js';
 import { GitHubMainWatchApi } from '../src/github/main-watch-api.js';
-import { acceptGit, acceptMerge, CONFIG_PATH, DEAD_CHECK_MS, disabledWorkflowFor, disabledWorkflowsOf, judge, LINK_LAG_MS, MAIN_WATCH_CALL_MS, MainWatch, outcomesAt, protectionView, readWatchState, repoGit, revertCapsAt, type Acceptance, type AcceptTarget, type CheckRunAt, type Compared, type MainWatchApi, type MergedPull, type ProtectionMode, type StatusAt, subjectPrNumber, tripOf, type Trip, type WatchGit, type WorkflowAt } from '../src/main-watch.js';
+import { TooManyPages } from '../src/main-watch.js';
+import { acceptGit, acceptMerge, CONFIG_PATH, DEAD_CHECK_MS, disabledWorkflowFor, disabledWorkflowsOf, judge, LINK_LAG_MS, MAIN_WATCH_CALL_MS, MainWatch, outcomesAt, protectionView, readWatchState, repoGit, revertCapsAt, type Acceptance, type AcceptTarget, type CheckRunAt, type Compared, type MainWatchApi, type MainWatchDeps, type MergedPull, type ProtectionMode, type StatusAt, subjectPrNumber, tripOf, type Trip, type WatchGit, type WorkflowAt } from '../src/main-watch.js';
 
 const git = (cwd: string, ...a: string[]) => execFileSync('git', a, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 const ident = ['-c', 'user.email=ada@example.com', '-c', 'user.name=Ada', '-c', 'commit.gpgsign=false'];
@@ -67,6 +71,8 @@ function fakeGitHub() {
   const roles = new Map<string, Role | null>();
   /** GitHub's compare, by `base...head`; not set: head is behind base (not in that merge). */
   const compares = new Map<string, Compared>();
+  /** The workflow run behind each check suite on a commit, by suite id (#727). */
+  const sources = new Map<string, Record<string, WorkflowSource>>();
   /** `workflows`: the Actions workflows' list; null: GitHub answered 403 or 404; 'throw': any other error. */
   const g = { protection: 'none' as 'enforced' | 'none', now: 0, workflows: null as WorkflowAt[] | null | 'throw' };
   const call = (what: string) => calls.push({ at: g.now, what });
@@ -76,6 +82,7 @@ function fakeGitHub() {
     pull: async (n) => (call(`pull #${n}`), prs.get(n)!),
     checkRuns: async (sha) => (call(`runs ${sha.slice(0, 7)}`), runs.get(sha) ?? []),
     statuses: async (sha) => (call(`statuses ${sha.slice(0, 7)}`), statuses.get(sha) ?? []),
+    runSources: async (sha) => (call(`sources ${sha.slice(0, 7)}`), sources.get(sha) ?? {}),
     role: async (login) => (call(`role ${login}`), roles.get(login) ?? null),
     compare: async (base, head) => (call(`compare ${base.slice(0, 7)}...${head.slice(0, 7)}`), compares.get(`${base}...${head}`) ?? { status: 'behind', aheadBy: 0, behindBy: 1 }),
     workflows: async () => {
@@ -91,19 +98,20 @@ function fakeGitHub() {
     prs.set(number, p);
     return p;
   };
-  return { api, calls, pulls, prs, runs, statuses, roles, compares, g, pr };
+  return { api, calls, pulls, prs, runs, statuses, roles, compares, sources, g, pr };
 }
 
 const T = Date.parse('2026-10-12T10:00:00Z');
 const iso = (ms: number) => new Date(ms).toISOString();
 const ci = (o: Partial<CheckRunAt> = {}): CheckRunAt => ({ name: 'ci', status: 'completed', conclusion: 'success', startedAt: iso(T - 10 * 60_000), completedAt: iso(T - 5 * 60_000), ...o });
 
-function watcher(w: ReturnType<typeof world>, gh: ReturnType<typeof fakeGitHub>, o: { harness?: Map<string, { number: number; head: string; at: string }>; required?: string[] } = {}) {
+function watcher(w: ReturnType<typeof world>, gh: ReturnType<typeof fakeGitHub>, o: { harness?: Map<string, { number: number; head: string; at: string }>; required?: string[]; pins?: MainWatchDeps['pins'] } = {}) {
   const out = { modes: [] as { mode: ProtectionMode; detail: string }[], checked: [] as { sha: string; how: string; number: number }[], accepted: [] as { sha: string; number: number | null; a: Acceptance }[], unaccounted: [] as { sha: string; reason: string; number: number | null; revert: boolean; trip: Trip | null }[], dead: [] as { check: string; since: string; state: string; workflow?: WorkflowAt }[] };
   const watch = new MainWatch({
     stateFile: w.stateFile,
     branch: 'main',
     required: () => o.required ?? ['ci'],
+    ...(o.pins ? { pins: o.pins } : {}),
     deadCheck: (d) => void out.dead.push(d),
     api: gh.api,
     git: repoGit(w.coord, 'origin', 'main'),
@@ -126,7 +134,7 @@ async function run(gh: ReturnType<typeof fakeGitHub>, watch: MainWatch, minutes:
 }
 
 /** A watch that has asked about protection and taken main's tip as its baseline. */
-async function started(o: { harness?: Map<string, { number: number; head: string; at: string }>; required?: string[]; config?: string; files?: Record<string, string> } = {}) {
+async function started(o: { harness?: Map<string, { number: number; head: string; at: string }>; required?: string[]; config?: string; files?: Record<string, string>; pins?: MainWatchDeps['pins'] } = {}) {
   const w = world({ ...(o.config === undefined ? {} : { config: o.config }), ...(o.files ? { files: o.files } : {}) });
   const gh = fakeGitHub();
   gh.g.now = T + 60 * 60_000;
@@ -171,6 +179,173 @@ test("main watch: a merge is judged by the required_checks committed at its firs
   assert.equal(a.unaccounted.length, 1);
   assert.match(a.unaccounted[0]!.reason, /lint missing/);
   assert.doesNotMatch(a.unaccounted[0]!.reason, /loaded at startup/);
+});
+
+test('main watch (#727): a merge whose required checks came from another App or workflow than their pins, or a status, is unaccounted', async () => {
+  const repo = 'example-org/example-shop';
+  const pins = { sources: () => ({}), github: async () => ({}), repo };
+  const config = 'required_checks: [ci, lint, deploy]\nrequired_check_sources:\n  ci: { app_id: 1111 }\n  lint: { workflow: .github/workflows/ci.yml }\n  deploy: { app_id: 1111 }\n';
+  const s = await started({ pins, config });
+  const m = s.w.mergedPr();
+  s.gh.pr(7, m.merge, m.head, iso(T), 'example-collaborator');
+  s.gh.roles.set('example-collaborator', 'writer');
+  // A job of workflow run 7000 (suite 70) has the page .../actions/runs/7000/job/<its id>.
+  const job = (id: number) => ({ id, url: `https://github.com/${repo}/actions/runs/7000/job/${id}` });
+  s.gh.runs.set(m.head, [ci({ app: 2222, suite: 1 }), ci({ name: 'lint', app: 15368, suite: 70, ...job(701) })]);
+  s.gh.statuses.set(m.head, [{ context: 'deploy', state: 'success', createdAt: iso(T - 60_000) }]);
+  const runPage = `https://github.com/${repo}/actions/runs/7000`;
+  s.gh.sources.set(m.head, { '70': { run: 7000, url: runPage, path: '.github/workflows/evil.yml', repo, sha: m.head } });
+  await run(s.gh, s.watch, 8);
+  assert.equal(s.unaccounted.length, 1);
+  assert.match(s.unaccounted[0]!.reason, /ci missing, lint missing, deploy missing/);
+
+  // From their pinned sources, the same merge is accounted for.
+  const a = await started({ pins, config });
+  const n = a.w.mergedPr();
+  a.gh.pr(8, n.merge, n.head, iso(T), 'example-collaborator');
+  a.gh.roles.set('example-collaborator', 'writer');
+  a.gh.runs.set(n.head, [ci({ app: 1111, suite: 1 }), ci({ name: 'lint', app: 15368, suite: 70, ...job(701) }), ci({ name: 'deploy', app: 1111, suite: 1 })]);
+  a.gh.sources.set(n.head, { '70': { run: 7000, url: runPage, path: '.github/workflows/ci.yml', repo, sha: n.head } });
+  await run(a.gh, a.watch, 8);
+  assert.deepEqual(a.unaccounted, []);
+  assert.deepEqual(a.checked, [{ sha: n.merge, how: 'person', number: 8 }]);
+  assert.ok(a.gh.calls.some((c) => c.what === `sources ${n.head.slice(0, 7)}`), 'the workflow runs were read for the workflow pin');
+
+  // A check run in the pinned workflow's suite that isn't one of its run's own jobs (made through the API: its page
+  // is not .../actions/runs/7000/job/<id>; guess, not measured) doesn't count.
+  const api = await started({ pins, config });
+  const q = api.w.mergedPr();
+  api.gh.pr(10, q.merge, q.head, iso(T), 'example-collaborator');
+  api.gh.roles.set('example-collaborator', 'writer');
+  api.gh.runs.set(q.head, [ci({ app: 1111, suite: 1 }), ci({ name: 'lint', app: 15368, suite: 70, id: 702, url: `https://github.com/${repo}/runs/702` }), ci({ name: 'deploy', app: 1111, suite: 1 })]);
+  api.gh.sources.set(q.head, { '70': { run: 7000, url: runPage, path: '.github/workflows/ci.yml', repo, sha: q.head } });
+  await run(api.gh, api.watch, 8);
+  assert.match(api.unaccounted[0]?.reason ?? '', /: lint missing$/);
+});
+
+test("main watch (#727): pinning never turns a check that wasn't a pass into one: another App's newer failing run still fails it", async () => {
+  const pins = { sources: () => ({}), github: async () => ({}), repo: 'example-org/example-shop' };
+  const s = await started({ pins, config: 'required_checks: [ci]\nrequired_check_sources:\n  ci: { app_id: 1111 }\n' });
+  const m = s.w.mergedPr();
+  s.gh.pr(7, m.merge, m.head, iso(T), 'example-collaborator');
+  s.gh.roles.set('example-collaborator', 'writer');
+  s.gh.runs.set(m.head, [ci({ app: 1111, suite: 1 }), ci({ app: 2222, suite: 2, conclusion: 'failure', startedAt: iso(T - 8 * 60_000) })]);
+  await run(s.gh, s.watch, 8);
+  assert.match(s.unaccounted[0]?.reason ?? '', /: ci fail$/);
+});
+
+test("main watch (#727, owner rule): a pinned check is its source's latest run on the head; any non-pass of its name from another source blocks it", async () => {
+  const repo = 'example-org/example-shop';
+  const pins = { sources: () => ({}), github: async () => ({}), repo };
+  const config = 'required_checks: [ci]\nrequired_check_sources:\n  ci: { workflow: .github/workflows/ci.yml }\n';
+  // ci.yml ran twice on the head: run 100 (suite 1), then run 200 (suite 2); run 300 (suite 3) is ci.yml for another head.
+  const page = (run: number) => `https://github.com/${repo}/actions/runs/${run}`;
+  const job = (suite: number, id: number) => ({ app: 15368, suite, id, url: `${page(suite * 100)}/job/${id}` });
+  const verdict = async (runs: CheckRunAt[], statuses: StatusAt[] = []) => {
+    const s = await started({ pins, config });
+    const m = s.w.mergedPr();
+    s.gh.pr(7, m.merge, m.head, iso(T), 'example-collaborator');
+    s.gh.roles.set('example-collaborator', 'writer');
+    s.gh.runs.set(m.head, runs);
+    s.gh.statuses.set(m.head, statuses);
+    s.gh.sources.set(m.head, { '1': { run: 100, url: page(100), path: '.github/workflows/ci.yml', repo, sha: m.head }, '2': { run: 200, url: page(200), path: '.github/workflows/ci.yml', repo, sha: m.head }, '3': { run: 300, url: page(300), path: '.github/workflows/ci.yml', repo, sha: 'f'.repeat(40) } });
+    await run(s.gh, s.watch, 8);
+    return s.unaccounted[0]?.reason.replace(/^.*: /, '') ?? (s.checked.length ? 'accounted' : 'none');
+  };
+  // Started later in time but in the earlier run: ordering is by the runs' own order, not by start time or list order.
+  const early = { startedAt: iso(T - 20 * 60_000), completedAt: iso(T - 15 * 60_000) };
+  // 1. Cancelled, then passed in the later run: accounted. 2. Failed, then passed: accounted.
+  assert.equal(await verdict([ci({ ...job(1, 11), conclusion: 'cancelled' }), ci({ ...job(2, 21), ...early })]), 'accounted');
+  assert.equal(await verdict([ci({ ...job(2, 21), ...early }), ci({ ...job(1, 11), conclusion: 'failure' })]), 'accounted');
+  // Passed, then cancelled in the later run: the later run decides.
+  assert.equal(await verdict([ci(job(1, 11)), ci({ ...job(2, 21), conclusion: 'cancelled', ...early })]), 'ci fail');
+  // A re-run attempt in the same workflow run (a newer check run, same suite) counts as the newer.
+  assert.equal(await verdict([ci({ ...job(1, 19), ...early }), ci({ ...job(1, 11), conclusion: 'failure' })]), 'accounted');
+  // 3. The pinned run passed, and another App's same-name check failed: unaccounted.
+  assert.equal(await verdict([ci(job(2, 21)), ci({ app: 2222, suite: 9, conclusion: 'failure', ...early })]), 'ci fail');
+  // A later ci.yml run for ANOTHER head never supersedes; its failure blocks, its pass never rescues.
+  assert.equal(await verdict([ci(job(2, 21)), ci({ ...job(3, 31), conclusion: 'failure' })]), 'ci fail');
+  assert.equal(await verdict([ci({ ...job(2, 21), conclusion: 'failure' }), ci(job(3, 31))]), 'ci fail');
+  // A same-name commit status that isn't success blocks.
+  assert.equal(await verdict([ci(job(2, 21))], [{ context: 'ci', state: 'failure', createdAt: iso(T - 60_000) }]), 'ci fail');
+});
+
+test('main watch (#727): an Actions-App pin never lets one workflow file supersede another; a failed re-run of an older run blocks', async () => {
+  const repo = 'example-org/example-shop';
+  const page = (run: number) => `https://github.com/${repo}/actions/runs/${run}`;
+  const job = (suite: number, id: number) => ({ app: 15368, suite, id, url: `${page(suite * 100)}/job/${id}` });
+  const verdict = async (o: { github: Record<string, number>; config: string; files: Record<string, string>; runs: CheckRunAt[] }) => {
+    const s = await started({ pins: { sources: () => ({}), github: async () => o.github, repo }, config: o.config });
+    const m = s.w.mergedPr();
+    s.gh.pr(7, m.merge, m.head, iso(T), 'example-collaborator');
+    s.gh.roles.set('example-collaborator', 'writer');
+    s.gh.runs.set(m.head, o.runs);
+    s.gh.sources.set(m.head, Object.fromEntries(Object.entries(o.files).map(([suite, path]) => [suite, { run: Number(suite) * 100, url: page(Number(suite) * 100), path, repo, sha: m.head }])));
+    await run(s.gh, s.watch, 8);
+    // Round 6: the watch itself asked for the workflow runs (it used to under a workflow pin only, so under an
+    // Actions-App pin every run was its own group and these cases passed for the wrong reason).
+    assert.ok(s.gh.calls.some((c) => c.what.startsWith('sources ')), 'the watch read the workflow runs behind the Actions suites');
+    return s.unaccounted[0]?.reason.replace(/^.*: /, '') ?? (s.checked.length ? 'accounted' : 'none');
+  };
+  // GitHub's rules pin `ci` to the Actions App; ci.yml is suite 1 (run 100), a PR-added evil.yml suite 2 (run 200).
+  const app = { github: { ci: 15368 }, config: 'required_checks: [ci]\n', files: { '1': '.github/workflows/ci.yml', '2': '.github/workflows/evil.yml' } };
+  assert.equal(await verdict({ ...app, runs: [ci({ ...job(1, 11), conclusion: 'failure' }), ci(job(2, 21))] }), 'ci fail');
+  assert.equal(await verdict({ ...app, runs: [ci({ ...job(1, 11), status: 'in_progress', conclusion: null, completedAt: null }), ci(job(2, 21))] }), 'ci pending');
+  assert.equal(await verdict({ ...app, runs: [ci(job(1, 11)), ci(job(2, 21))] }), 'accounted');
+  // A workflow pin: run 200 passed (check run 21), then run 100 was re-run and its newest attempt (check run 31) failed.
+  const wf = { github: {}, config: 'required_checks: [ci]\nrequired_check_sources:\n  ci: { workflow: .github/workflows/ci.yml }\n', files: { '1': '.github/workflows/ci.yml', '2': '.github/workflows/ci.yml' } };
+  assert.equal(await verdict({ ...wf, runs: [ci(job(2, 21)), ci({ ...job(1, 31), conclusion: 'failure' })] }), 'ci fail');
+  assert.equal(await verdict({ ...wf, runs: [ci({ ...job(1, 11), conclusion: 'cancelled' }), ci(job(2, 21))] }), 'accounted', "the owner's case 1 stays");
+});
+
+test("main watch (#727): while GitHub's rules have never answered, a merge waits to be judged: never by name, never unaccounted", async () => {
+  let rules: Record<string, number> | null = null;
+  const s = await started({ pins: { sources: () => ({}), github: async () => rules, repo: 'example-org/example-shop' }, config: 'required_checks: [ci]\n' });
+  const m = s.w.mergedPr();
+  s.gh.pr(7, m.merge, m.head, iso(T), 'example-collaborator');
+  s.gh.roles.set('example-collaborator', 'writer');
+  s.gh.runs.set(m.head, [ci({ app: 2222, suite: 1 })]);
+  await run(s.gh, s.watch, 8);
+  assert.deepEqual([s.checked, s.unaccounted], [[], []], 'not judged yet');
+  rules = { ci: 1111 };
+  await run(s.gh, s.watch, 8);
+  assert.match(s.unaccounted[0]?.reason ?? '', /: ci missing$/, "judged once GitHub answers: its App pin applies");
+});
+
+test("main watch (#727): while GitHub's rules have never answered, a direct push and a bot's merge are still unaccounted, as on main", async () => {
+  const pins = { sources: () => ({}), github: async () => null, repo: 'example-org/example-shop' };
+  const d = await started({ pins, config: 'required_checks: [ci]\n' });
+  const sha = d.w.directPush();
+  await run(d.gh, d.watch, 8);
+  assert.equal(d.unaccounted.length, 1, 'the direct push');
+  assert.equal(d.unaccounted[0]!.sha, sha);
+  assert.match(d.unaccounted[0]!.reason, /pushed to main directly/);
+
+  const b = await started({ pins, config: 'required_checks: [ci]\n' });
+  const m = b.w.mergedPr();
+  b.gh.pr(7, m.merge, m.head, iso(T), 'example-bot[bot]', true);
+  b.gh.runs.set(m.head, [ci({ app: 1111, suite: 1 })]);
+  await run(b.gh, b.watch, 8);
+  assert.match(b.unaccounted[0]?.reason ?? '', /merged into main by a bot/);
+});
+
+test('main watch (#727): with no pin recorded and none named by GitHub, a check is judged by name, exactly as before pins', async () => {
+  const pins = { sources: () => ({}), github: async () => ({}), repo: 'example-org/example-shop' };
+  const judged = async (withPins: boolean, runs: CheckRunAt[], statuses: StatusAt[] = []) => {
+    const s = await started({ ...(withPins ? { pins } : {}), config: 'required_checks: [ci, deploy]\n' });
+    const m = s.w.mergedPr();
+    s.gh.pr(9, m.merge, m.head, iso(T), 'example-collaborator');
+    s.gh.roles.set('example-collaborator', 'writer');
+    s.gh.runs.set(m.head, runs);
+    s.gh.statuses.set(m.head, statuses);
+    await run(s.gh, s.watch, 8);
+    return { unaccounted: s.unaccounted.map((u) => u.reason.replace(/\b[0-9a-f]{8}\b/g, '<sha>')), checked: s.checked.length };
+  };
+  const deploy = [{ context: 'deploy', state: 'success', createdAt: iso(T - 60_000) }];
+  for (const [runs, statuses] of [[[ci({ app: 1111, suite: 1 })], deploy], [[ci({ app: 2222, suite: 2, conclusion: 'failure' })], deploy], [[ci()], []]] as [CheckRunAt[], StatusAt[]][]) {
+    assert.deepEqual(await judged(true, runs, statuses), await judged(false, runs, statuses));
+  }
+  assert.deepEqual(await judged(true, [ci({ app: 1111, suite: 1 })], deploy), { unaccounted: [], checked: 1 }, 'accounted, as on main');
 });
 
 test('main watch: with no config.yaml readable at the first parent, the startup config judges, and the reason says so', async () => {
@@ -874,4 +1049,181 @@ test("GitHubMainWatchApi: compare reads GitHub's ahead/behind counts; a PR carri
   assert.deepEqual(await api.compare('a'.repeat(40), 'b'.repeat(40)), { status: 'ahead', aheadBy: 1, behindBy: 0 });
   assert.ok(urls[0]!.endsWith(`/repos/x/y/compare/${'a'.repeat(40)}...${'b'.repeat(40)}?per_page=1`), urls[0]);
   assert.equal((await api.pull(9)).commits, 3);
+});
+
+test('main watch (#727 round 7): past its page cap a pinned merge is unaccounted (a trip, never a stall), and the next merge is judged', async () => {
+  const config = 'required_checks: [ci]\nrequired_check_sources:\n  ci: { app_id: 1111 }\n';
+  const s = await started({ pins: { sources: () => ({}), github: async () => ({}), repo: 'example-org/example-shop' }, config });
+  const pinnedPass = ci({ id: 1, app: 1111, suite: 11, url: 'https://github.example/example-org/example-shop/runs/1' });
+  const first = s.w.mergedPr();
+  s.gh.pr(7, first.merge, first.head, iso(T), 'example-collaborator');
+  s.gh.roles.set('example-collaborator', 'writer');
+  const real = s.gh.api.checkRuns;
+  // The first merge's head carries more than 10 pages of check runs: the read gives up with what it read.
+  s.gh.api.checkRuns = async (sha) => {
+    if (sha === first.head) throw new TooManyPages(`more than 10 pages of check runs on ${sha.slice(0, 8)}`, [pinnedPass]);
+    return real(sha);
+  };
+  await run(s.gh, s.watch, 10);
+  assert.equal(s.unaccounted.length, 1, 'judged, not stalled (961ecbad threw on every step)');
+  assert.match(s.unaccounted[0]!.reason, /its pinned required checks \(ci\) can't be judged on .*: more than 10 pages of check runs/);
+  // The next merge is judged as usual.
+  const second = s.w.mergedPr();
+  s.gh.pr(8, second.merge, second.head, iso(T + 60_000), 'example-collaborator');
+  s.gh.runs.set(second.head, [pinnedPass]);
+  await run(s.gh, s.watch, 10);
+  assert.deepEqual(s.checked.map((c) => c.number), [8], 'the next merge is accounted');
+  assert.equal(s.unaccounted.length, 1);
+});
+
+test("main watch (#727 round 8): with no required check pinned, it reads one page of runs and statuses, as main, so a commit past the cap is judged as on main", async () => {
+  // GitHub's rules name no App and config.yaml pins nothing: `ci` is a bare name.
+  const s = await started({ pins: { sources: () => ({}), github: async () => ({}), repo: 'example-org/example-shop' }, config: 'required_checks: [ci]\n' });
+  const m = s.w.mergedPr();
+  s.gh.pr(7, m.merge, m.head, iso(T), 'example-collaborator');
+  s.gh.roles.set('example-collaborator', 'writer');
+  const asked: (boolean | undefined)[] = [];
+  // The head carries more than 10 pages of runs: a read of every page would give up (TooManyPages).
+  s.gh.api.checkRuns = async (_sha, opts) => {
+    asked.push(opts?.pinned);
+    if (opts?.pinned) throw new TooManyPages('more than 10 pages of check runs', []);
+    return [ci()];
+  };
+  await run(s.gh, s.watch, 10);
+  assert.deepEqual(asked, [false], 'one read, of the first page, as main');
+  assert.deepEqual(s.unaccounted, [], 'accounted, as main (9c1c8bd5 read every page: with a pin it trips)');
+  assert.deepEqual(s.checked.map((c) => c.number), [7]);
+});
+
+test("main watch (#727, the owner's decision (a)): a branch read refused for permission or 404 is 'no App named' for a bare-names merge; a 5xx or rate limit, or a pin judged, waits", async () => {
+  const outcome = async (branch: Response, config: string) => {
+    // GitHub's App per check comes from PinnedChecks over a GitHubBacklog stand-in, wired as merge-flow.ts wires it.
+    const f = (async (url: string) => {
+      const u = new URL(url);
+      if (u.pathname === '/repos/example-org/example-shop/branches/main') return branch.clone();
+      if (u.pathname === '/repos/example-org/example-shop/rules/branches/main') return new Response('[]');
+      return new Response('{"message":"Not Found"}', { status: 404 });
+    }) as typeof fetch;
+    const pinned = new PinnedChecks({ backlog: new GitHubBacklog('example-org/example-shop', () => `tok-branch-${Math.random()}`, f), branch: () => 'main', repo: () => 'example-org/example-shop', configured: () => ({}) });
+    const s = await started({ pins: { sources: () => ({}), github: (judging, configured) => pinned.githubAppsFor(judging, configured), repo: 'example-org/example-shop' }, config });
+    const m = s.w.mergedPr();
+    s.gh.pr(7, m.merge, m.head, iso(T), 'example-collaborator');
+    s.gh.roles.set('example-collaborator', 'writer');
+    s.gh.runs.set(m.head, [ci({ app: 2222, suite: 22, id: 1 })]);
+    await run(s.gh, s.watch, 10);
+    return s.checked.length ? 'accounted' : s.unaccounted.length ? 'unaccounted' : 'no verdict';
+  };
+  const bare = 'required_checks: [ci]\n';
+  const pinnedCfg = 'required_checks: [ci]\nrequired_check_sources:\n  ci: { app_id: 2222 }\n';
+  const permission = () => new Response('{"message":"Resource not accessible by integration"}', { status: 403 });
+  const notFound = () => new Response('{"message":"Branch not found"}', { status: 404 });
+  const boom = () => new Response('{"message":"boom"}', { status: 500 });
+  const rate = () => new Response('{"message":"API rate limit exceeded"}', { status: 403, headers: { 'x-ratelimit-remaining': '0', 'x-ratelimit-reset': '4102444800' } });
+  for (const [what, answer] of [['a permission 403', permission], ['a 404', notFound]] as const) {
+    assert.equal(await outcome(answer(), bare), 'accounted', `bare, ${what}: main's verdict (cf32770b waited)`);
+    assert.equal(await outcome(answer(), pinnedCfg), 'no verdict', `a pin judged, ${what}: it waits, as before`);
+  }
+  for (const [what, answer] of [['a 500', boom], ['a rate-limited 403', rate]] as const) {
+    assert.equal(await outcome(answer(), bare), 'no verdict', `bare, ${what}: transient, it waits`);
+    assert.equal(await outcome(answer(), pinnedCfg), 'no verdict', `a pin judged, ${what}`);
+  }
+});
+
+// #727 round 6: readiness and the main watch judge a pinned check through one function (pinnedVerdict) over the same
+// facts. One table, each case under a workflow pin, an Actions-App pin (GitHub's rules name 15368) and a pin to an App
+// that isn't Actions: readiness through PinnedChecks.of over GitHubBacklog's real requests, the watch through its own
+// request loop (it asks for each read itself, nothing handed in). Both must give the expected verdict.
+type Job = { id: number; suite: number; app?: number; conclusion?: string; status?: string };
+type Case = { what: string; jobs: Job[]; files?: Record<number, string>; statuses?: { context: string; state: string }[]; expect: 'pass' | 'fail' | 'pending' | 'missing' };
+const AGREE_REPO = 'example-org/example-shop';
+const OTHER_APP = 2222;
+const NON_ACTIONS_APP = 1111;
+const pageOf = (j: Job) => (j.app ?? ACTIONS_ID) === ACTIONS_ID ? `https://github.com/${AGREE_REPO}/actions/runs/${j.suite * 100}/job/${j.id}` : `https://github.example/${AGREE_REPO}/runs/${j.id}`;
+const ACTIONS_ID = 15368;
+
+/** Readiness's verdict for `ci` on `head`: GitHubBacklog's own requests over these answers (check runs as filter=latest lists them). */
+async function readinessVerdict(c: Case, head: string, pin: { configured: Record<string, CheckPin>; github: Record<string, number> }): Promise<string> {
+  const latest = new Map<number, Job>();
+  for (const j of c.jobs) if (!latest.has(j.suite) || latest.get(j.suite)!.id < j.id) latest.set(j.suite, j);
+  const answer = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status });
+  const f = (async (url: string) => {
+    const path = url.replace('https://api.github.com', '');
+    if (path.startsWith(`/repos/${AGREE_REPO}/commits/${head}/check-runs?filter=latest`)) {
+      const runs = [...latest.values()].map((j) => ({ id: j.id, name: 'ci', status: j.status ?? 'completed', conclusion: (j.status ?? 'completed') === 'completed' ? (j.conclusion ?? 'success') : null, html_url: pageOf(j), app: { id: j.app ?? ACTIONS_ID }, check_suite: { id: j.suite } }));
+      return answer({ total_count: runs.length, check_runs: runs });
+    }
+    if (path.startsWith(`/repos/${AGREE_REPO}/actions/runs?head_sha=${head}`)) {
+      const runs = Object.entries(c.files ?? {}).map(([suite, file]) => ({ id: Number(suite) * 100, html_url: `https://github.com/${AGREE_REPO}/actions/runs/${Number(suite) * 100}`, check_suite_id: Number(suite), path: file, head_sha: head, repository: { full_name: AGREE_REPO } }));
+      return answer({ total_count: runs.length, workflow_runs: runs });
+    }
+    if (path.startsWith(`/repos/${AGREE_REPO}/commits/${head}/status`)) return answer({ total_count: (c.statuses ?? []).length, statuses: c.statuses ?? [] });
+    if (path === `/repos/${AGREE_REPO}/branches/main`) return answer({ name: 'main', protection: { enabled: false } });
+    if (path.startsWith(`/repos/${AGREE_REPO}/rules/branches/main`)) return answer(Object.entries(pin.github).map(([context, id]) => ({ type: 'required_status_checks', parameters: { required_status_checks: [{ context, integration_id: id }] } })));
+    return answer({ message: 'Not Found' }, 404);
+  }) as typeof fetch;
+  const pinned = new PinnedChecks({ backlog: new GitHubBacklog(AGREE_REPO, () => 't', f), branch: () => 'main', repo: () => AGREE_REPO, configured: () => pin.configured });
+  const out = readiness({ required: ['ci'], checks: await pinned.of(head), head, evaluated: { head, approved: true } }).checks[0]!.outcome;
+  return out === 'pass' || out === 'pending' || out === 'missing' ? out : 'fail';
+}
+
+/** The main watch's verdict for `ci` on a merge whose PR head carries these runs, through its own request loop. */
+async function watchVerdict(c: Case, pin: { config: string; github: Record<string, number> }): Promise<string> {
+  const s = await started({ pins: { sources: () => ({}), github: async () => pin.github, repo: AGREE_REPO }, config: pin.config });
+  const m = s.w.mergedPr();
+  s.gh.pr(7, m.merge, m.head, iso(T), 'example-collaborator');
+  s.gh.roles.set('example-collaborator', 'writer');
+  // filter=all: every attempt, each started and finished before the merge, in id order.
+  s.gh.runs.set(
+    m.head,
+    c.jobs.map((j) => ci({ id: j.id, suite: j.suite, app: j.app ?? ACTIONS_ID, url: pageOf(j), status: j.status ?? 'completed', conclusion: (j.status ?? 'completed') === 'completed' ? (j.conclusion ?? 'success') : null, startedAt: iso(T - (60 - j.id) * 60_000), completedAt: (j.status ?? 'completed') === 'completed' ? iso(T - (59 - j.id) * 60_000) : null })),
+  );
+  s.gh.sources.set(m.head, Object.fromEntries(Object.entries(c.files ?? {}).map(([suite, path]) => [suite, { run: Number(suite) * 100, url: `https://github.com/${AGREE_REPO}/actions/runs/${Number(suite) * 100}`, path, repo: AGREE_REPO, sha: m.head }])));
+  s.gh.statuses.set(m.head, (c.statuses ?? []).map((x) => ({ ...x, createdAt: iso(T - 30 * 60_000) })));
+  await run(s.gh, s.watch, 10);
+  const why = s.unaccounted[0]?.reason;
+  if (!why) return s.checked.length ? 'pass' : 'none';
+  const hit = /: ci (\w+)$/.exec(why)?.[1];
+  return hit ?? why;
+}
+
+test('readiness and the main watch agree on every pinned case, under a workflow pin, an Actions-App pin and a non-Actions App pin (#727 round 6)', async () => {
+  const ciYml = '.github/workflows/ci.yml';
+  const actions: Case[] = [
+    { what: "owner 1: run 100 cancelled, then run 200 passed", jobs: [{ id: 10, suite: 1, conclusion: 'cancelled' }, { id: 20, suite: 2 }], files: { 1: ciYml, 2: ciYml }, expect: 'pass' },
+    { what: 'owner 2: run 100 failed, then run 200 passed', jobs: [{ id: 10, suite: 1, conclusion: 'failure' }, { id: 20, suite: 2 }], files: { 1: ciYml, 2: ciYml }, expect: 'pass' },
+    { what: "owner 3: the pinned pass, and another App's same-name failure", jobs: [{ id: 20, suite: 2 }, { id: 30, suite: 9, app: OTHER_APP, conclusion: 'failure' }], files: { 2: ciYml }, expect: 'fail' },
+    { what: 'tightening: run 200 passed, then run 100 re-run and failed', jobs: [{ id: 10, suite: 1 }, { id: 20, suite: 2 }, { id: 30, suite: 1, conclusion: 'failure' }], files: { 1: ciYml, 2: ciYml }, expect: 'fail' },
+    { what: 'a normal re-run: run 100 cancelled, run 200 failed then its re-run attempt passed', jobs: [{ id: 10, suite: 1, conclusion: 'cancelled' }, { id: 20, suite: 2, conclusion: 'failure' }, { id: 30, suite: 2 }], files: { 1: ciYml, 2: ciYml }, expect: 'pass' },
+    { what: 'a re-run attempt of the latest run still running', jobs: [{ id: 20, suite: 2, conclusion: 'failure' }, { id: 30, suite: 2, status: 'in_progress' }], files: { 2: ciYml }, expect: 'pending' },
+    { what: 'ci.yml failed, then a PR-added evil.yml passed later', jobs: [{ id: 10, suite: 1, conclusion: 'failure' }, { id: 20, suite: 3 }], files: { 1: ciYml, 3: '.github/workflows/evil.yml' }, expect: 'fail' },
+    { what: "the pinned pass, and the name's failing commit status", jobs: [{ id: 20, suite: 2 }], files: { 2: ciYml }, statuses: [{ context: 'ci', state: 'failure' }], expect: 'fail' },
+  ];
+  const app: Case[] = [
+    // Round 8, the owner's decision: the App's latest run decides, across suites (round 6 had these fail).
+    { what: 'owner 1 under a non-Actions App: suite 11 cancelled, then suite 12 passed', jobs: [{ id: 10, suite: 11, app: NON_ACTIONS_APP, conclusion: 'cancelled' }, { id: 20, suite: 12, app: NON_ACTIONS_APP }], expect: 'pass' },
+    { what: 'owner 2 under a non-Actions App: suite 11 failed, then suite 12 passed', jobs: [{ id: 10, suite: 11, app: NON_ACTIONS_APP, conclusion: 'failure' }, { id: 20, suite: 12, app: NON_ACTIONS_APP }], expect: 'pass' },
+    { what: 'a non-Actions App: suite 11 passed, then a later suite 12 failed', jobs: [{ id: 10, suite: 11, app: NON_ACTIONS_APP }, { id: 20, suite: 12, app: NON_ACTIONS_APP, conclusion: 'failure' }], expect: 'fail' },
+    { what: 'a re-run in the same suite passed over its failure', jobs: [{ id: 10, suite: 11, app: NON_ACTIONS_APP, conclusion: 'failure' }, { id: 20, suite: 11, app: NON_ACTIONS_APP }], expect: 'pass' },
+    { what: "owner 3 under a non-Actions App: its pass, and another App's failure", jobs: [{ id: 20, suite: 12, app: NON_ACTIONS_APP }, { id: 30, suite: 9, app: OTHER_APP, conclusion: 'failure' }], expect: 'fail' },
+    { what: 'two suites of the App, both passed', jobs: [{ id: 10, suite: 11, app: NON_ACTIONS_APP }, { id: 20, suite: 12, app: NON_ACTIONS_APP }], expect: 'pass' },
+    { what: 'only an Actions run of the name', jobs: [{ id: 20, suite: 2 }], files: { 2: ciYml }, expect: 'missing' },
+  ];
+  const kinds = [
+    { kind: 'workflow pin', cases: actions, ready: { configured: { ci: { workflow: ciYml } }, github: {} }, watch: { config: `required_checks: [ci]\nrequired_check_sources:\n  ci: { workflow: ${ciYml} }\n`, github: {} } },
+    { kind: 'Actions-App pin', cases: actions, ready: { configured: {}, github: { ci: ACTIONS_ID } }, watch: { config: 'required_checks: [ci]\n', github: { ci: ACTIONS_ID } } },
+    { kind: 'non-Actions App pin', cases: app, ready: { configured: { ci: { app_id: NON_ACTIONS_APP } }, github: {} }, watch: { config: `required_checks: [ci]\nrequired_check_sources:\n  ci: { app_id: ${NON_ACTIONS_APP} }\n`, github: {} } },
+  ];
+  // Under a workflow pin evil.yml is another source (its pass can't count, ci.yml's failure stands): fail either way.
+  const rows: string[] = [];
+  for (const k of kinds) {
+    for (const c of k.cases) {
+      const head = 'f'.repeat(40);
+      const r = await readinessVerdict(c, head, k.ready);
+      const w = await watchVerdict(c, k.watch);
+      rows.push(`${k.kind} | ${c.what} | readiness ${r} | watch ${w}`);
+      assert.equal(r, c.expect, `readiness, ${k.kind}: ${c.what}`);
+      assert.equal(w, c.expect, `main watch, ${k.kind}: ${c.what}`);
+    }
+  }
+  assert.equal(rows.length, 23);
 });

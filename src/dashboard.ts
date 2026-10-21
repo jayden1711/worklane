@@ -13,7 +13,7 @@ import { applyExperiment, EXP_ACTIONS, ExperimentsError, experimentsOn, experime
 import { PINS_FILE } from './experiments/store.js';
 import { handleHook, hooksGatewayToken } from './automations/webhook.js';
 import { AUTOMATIONS_FILE, AutomationsPolicy, limitsInForce } from './automations/schema.js';
-import { spawnSync } from 'node:child_process';
+import { spawnSync } from './os/child-process.js';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
@@ -23,6 +23,7 @@ import { openReadOnly } from './events/read-only.js';
 import { BRAND } from './brand.js';
 import { starterCiView } from './starter-ci.js';
 import { CI_NONE_MEANS, ciIsNone } from './ci-none.js';
+import { acknowledgement, stopWaitsForGreen } from './auto-merge-resume.js';
 
 /** Which CI judges a PR, and under No CI what that means (#469): the PR, land and Settings pages say it. */
 const ciMode = (cfg: Config) => (ciIsNone(cfg.project) ? { kind: 'none' as const, means: CI_NONE_MEANS } : { kind: 'github' as const, means: null });
@@ -73,7 +74,7 @@ import { boardForViewer, boardView } from './board.js';
 import { goalGraph } from './goal-graph.js';
 import { MACHINE_CHANGES, MACHINE_HELPER, machineChanges, SLOTS_MAX, SLOTS_MIN, TEST_SLOTS_MAX, TEST_SLOTS_MIN, addProjectCommand } from './machine.js';
 import { isMachineOwner, MACHINE_OWNERS_FILE, machineChangeRefusal, machineOwners } from './machine-owners.js';
-import { MachineRequestError, machineRequests, requestAddProject, requestMachineChange, settingArgs, MACHINE_EVENTS, type MachineRequest } from './machine-requests.js';
+import { MachineRequestError, machineRequests, requestAddProject, requestMachineChange, requestPolicyChange, settingArgs, MACHINE_EVENTS, type MachineRequest } from './machine-requests.js';
 import { ENGINE_CURRENT, installedEngine, lastCheck, UPDATES_CONFIG, UPDATES_LOG, UPDATES_STATE, updateLog, updatesPanel, updateSettings, type UpdatesDrain } from './updates.js';
 import { updateDrain } from './update-drain.js';
 import type { SlotPathLike } from './slot-file.js';
@@ -89,6 +90,7 @@ import { constraintsView } from './checks-from-feedback.js';
 import { digestMarkdown, waitingCached, waitingCount } from './digest.js';
 import { forViewers, stateForViewer, viewerActivity, viewerMaySee, VIEWER_EVENTS } from './viewer-events.js';
 import { prsForViewer } from './prs-viewer.js';
+import { checksFor } from './checks-viewer.js';
 import { METRICS_DEFINITIONS, trustForViewer, trustView } from './trust.js';
 import { deliveryMetrics } from './merge-metrics.js';
 import { flakyView, releaseByOwner } from './flaky.js';
@@ -769,29 +771,87 @@ export function acceptTarget(body: { sha?: unknown; pr?: unknown }): AcceptTarge
   return hasSha ? { sha: String(body.sha) } : { pr: Number(body.pr) };
 }
 
-function readStopFile(stateDir: string): { reason: string; by: string | null } | null {
+function readStopFile(stateDir: string): { reason: string; by: string | null; raw: string } | null {
   const file = join(stateDir, 'auto-merge-stopped.json');
   if (!existsSync(file)) return null;
+  let raw = '';
   try {
-    const j = JSON.parse(readFileSync(file, 'utf8')) as { reason?: unknown; by?: unknown };
-    return { reason: String(j.reason ?? 'stopped'), by: typeof j.by === 'string' ? j.by : null };
+    raw = readFileSync(file, 'utf8');
+    const j = JSON.parse(raw) as { reason?: unknown; by?: unknown };
+    return { reason: String(j.reason ?? 'stopped'), by: typeof j.by === 'string' ? j.by : null, raw };
   } catch {
-    return { reason: 'the stop file is unreadable', by: null };
+    return { reason: 'the stop file is unreadable', by: null, raw };
   }
 }
 
-/** An admin resumes auto-merge from the dashboard: the stop file goes, and merge.resumed records who did. */
-export function clearAutoMergeStop(o: { stateDir: string; eventsDb: string; by: string }): { ok: true; reason: string } | { ok: false; error: string } {
+/** The coordinator's last measurement of the default branch for a stop it caused (merge.main_measured), as recorded. */
+export type MainMeasured = { at: string; tip: string | null; green: boolean; why: string | null };
+
+export type ClearResult =
+  | { ok: true; reason: string; how: 'as_before' }
+  | { ok: true; reason: string; how: 'requested'; acknowledged: boolean; request: number; last: MainMeasured | null }
+  | { ok: false; status: 409; error: string };
+
+/** The stop in force, as a resume request names it: its merge.stopped when that is the log's last stop or resume, else the stop file's identity. */
+export type StopKey = { stop: number | null; file: string };
+
+/** The stop file's identity: sha256 of its bytes (src/coordinator/merge-flow.ts reads it the same way). */
+export const stopFileId = (raw: string) => createHash('sha256').update(raw).digest('hex');
+
+/**
+ * The coordinator's last measurement of the default branch for the stop in force (merge.main_measured made for it,
+ * after it), or null when there is none: a measurement from before this stop never shows (#776 round 2).
+ */
+export function lastMainMeasured(events: readonly StoredEvent[], key: StopKey): MainMeasured | null {
+  const e = events
+    .filter((x) => x.type === 'merge.main_measured')
+    .filter((x) => {
+      const p = x.payload as EventPayload<'merge.main_measured'>;
+      return key.stop !== null ? p.stop === key.stop && x.id > key.stop : p.stop == null && p.file === key.file;
+    })
+    .at(-1);
+  if (!e) return null;
+  const p = e.payload as EventPayload<'merge.main_measured'>;
+  return { at: e.ts, tip: p.tip, green: p.green, why: p.why };
+}
+
+/**
+ * An admin resumes auto-merge from the dashboard. A stop that resumes as before (src/auto-merge-resume.ts): the stop
+ * file goes, and merge.resumed records who did. A stop the default branch caused: the dashboard never judges checks
+ * (#776 on #727, the owner's decision): it records a resume request (merge.resume_requested, with `ack`, a typed reason,
+ * if given) and the coordinator, the only judge, resumes once it measures main's tip green under the pinned-source
+ * verdict, or on the acknowledgement. Fail closed: the stop file's `by` and the last merge.stopped both count.
+ */
+export function clearAutoMergeStop(o: { stateDir: string; eventsDb: string; by: string; ack?: string | null }): ClearResult {
   const stop = readStopFile(o.stateDir);
-  if (!stop) return { ok: false, error: 'auto-merge is not stopped' };
-  rmSync(join(o.stateDir, 'auto-merge-stopped.json'), { force: true });
+  if (!stop) return { ok: false, status: 409, error: 'auto-merge is not stopped' };
   const log = new EventLog(o.eventsDb);
   try {
-    log.append('merge.resumed', { detail: `@${o.by} cleared the stop on the dashboard (${stop.reason.slice(0, 300)})` }, o.by, 'human');
+    const stops = log.read(0, ['merge.stopped', 'merge.resumed']);
+    const last = stops.at(-1);
+    const gated = stopWaitsForGreen(stop.by) || (last?.type === 'merge.stopped' && stopWaitsForGreen((last.payload as EventPayload<'merge.stopped'>).by));
+    if (!gated) {
+      rmSync(join(o.stateDir, 'auto-merge-stopped.json'), { force: true });
+      log.append('merge.resumed', { detail: `@${o.by} cleared the stop on the dashboard (${stop.reason.slice(0, 300)})` }, o.by, 'human');
+      return { ok: true, reason: stop.reason, how: 'as_before' };
+    }
+    // The stop in force: the log's last merge.stopped if it is the last stop or resume, else (a stop file with no
+    // merge.stopped of its own) the file itself, by its identity.
+    const key: StopKey = { stop: last?.type === 'merge.stopped' ? last.id : null, file: stopFileId(stop.raw) };
+    const request = log.append('merge.resume_requested', { stop: key.stop, file: key.file, ack: o.ack ?? null }, o.by, 'human');
+    return { ok: true, reason: stop.reason, how: 'requested', acknowledged: !!o.ack, request: request.id, last: lastMainMeasured(log.read(0, ['merge.main_measured']), key) };
   } finally {
     log.close();
   }
-  return { ok: true, reason: stop.reason };
+}
+
+/** What the dashboard says to a resume request (#776 on #727): who resumes, on what, and the coordinator's last look. */
+export function resumeRequestedText(branch: string, r: { acknowledged: boolean; last: MainMeasured | null }): string {
+  const rule = `Recorded. The coordinator resumes auto-merge only when ${branch}'s tip is green with every required check from its pinned source (the verdict PR readiness and the main watch use)`;
+  const ack = r.acknowledged ? `, or now on your acknowledgement, which it records with what ${branch} was` : '';
+  const l = r.last;
+  const seen = l ? ` Its last measurement, at ${l.at}: ${l.tip ? `${l.tip.slice(0, 8)} ` : ''}${l.green ? 'green' : `not green (${(l.why ?? 'unknown').slice(0, 300)})`}.` : ` The coordinator has recorded no measurement of ${branch} yet; until it does, auto-merge stays stopped.`;
+  return `${rule}${ack}, at its next look.${seen}`;
 }
 
 /** Where the coordinator's service output is:its systemd unit's journal and/or the log file a launchd or user service writes. */
@@ -1315,6 +1375,18 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
     const log = new EventLog(opts.eventsDb);
     try {
       auditWrite(log, who, opts.instance ?? null, action, detail);
+    } finally {
+      log.close();
+    }
+  };
+
+  /** For a root policy.yaml (#726): a checked change recorded for the coordinator to run through root's helper; its id. */
+  const policyRequester = (who: Who) => (args: string[]) => {
+    const log = new EventLog(opts.eventsDb);
+    try {
+      const r = requestPolicyChange(log, { args, by: who.login, breakGlass: who.via === 'break-glass' });
+      audit(who, 'policy.requested', { args, request: r.id });
+      return r.id;
     } finally {
       log.close();
     }
@@ -2057,9 +2129,11 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           if (!opts.policyFile) return json(res, 400, { error: 'settings are an instance\'s: this dashboard serves a checkout' });
           const body = (await readBody(req)) as { key?: string; value?: unknown };
           try {
-            const r = changeSetting({ policyPath: opts.policyFile, cfg: opts.cfg, eventsDb: opts.eventsDb, key: String(body.key ?? ''), value: body.value, by: who.login, owner: isOwnerHere, ...(opts.limitsPath ? { limitsPath: opts.limitsPath } : {}) });
-            audit(who, 'settings.changed', { key: String(body.key ?? ''), from: r.from, to: r.to });
-            return json(res, 200, { ok: true, ...r });
+            const r = changeSetting({ policyPath: opts.policyFile, cfg: opts.cfg, eventsDb: opts.eventsDb, key: String(body.key ?? ''), value: body.value, by: who.login, owner: isOwnerHere, request: policyRequester(who), ...(opts.limitsPath ? { limitsPath: opts.limitsPath } : {}), ...(opts.machine?.helperRulesPath ? { helperRulesFile: opts.machine.helperRulesPath } : {}) });
+            // A root policy.yaml: only queued for the coordinator (root's helper runs it; it logs settings.changed then).
+            if (r.requested) audit(who, 'settings.queued', { key: String(body.key ?? ''), from: r.from, to: r.to, request: r.requested, note: 'queued for the coordinator' });
+            else audit(who, 'settings.changed', { key: String(body.key ?? ''), from: r.from, to: r.to });
+            return json(res, 200, { ok: true, ...r, ...(r.requested ? { queued: true } : {}) });
           } catch (e) {
             if (e instanceof SettingsError) return json(res, /only the owner/.test(e.message) ? 403 : 400, { error: e.message });
             throw e;
@@ -2270,13 +2344,16 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           };
           if (!opts.policyFile) return refused(400, "the policy is a server instance's: this dashboard serves a checkout");
           if (!isOwnerHere) return refused(403, `only the instance's owners (admin on ${repo}) may change its policy; @${who.login} is a ${who.role}`);
-          const o = { path: opts.policyFile, cfg: opts.cfg, values, ...(opts.limitsPath ? { limitsPath: opts.limitsPath } : {}) };
+          const o = { path: opts.policyFile, cfg: opts.cfg, values, ...(opts.limitsPath ? { limitsPath: opts.limitsPath } : {}), ...(opts.machine?.helperRulesPath ? { helperRulesFile: opts.machine.helperRulesPath } : {}) };
           try {
             if (body.confirm !== true) return json(res, 200, { ok: true, changes: planPolicy(o).changes, confirmed: false });
-            const changes = applyPolicy({ ...o, eventsDb: opts.eventsDb, by: who.login });
+            // A root policy.yaml: each change only queued for the coordinator (root's helper runs it).
+            const requests: string[] = [];
+            const ask = policyRequester(who);
+            const changes = applyPolicy({ ...o, eventsDb: opts.eventsDb, by: who.login, request: (args) => { const id = ask(args); requests.push(id); return id; } });
             setupCache.delete('policy');
-            audit(who, 'first_run.policy', { changes });
-            return json(res, 200, { ok: true, changes, confirmed: true });
+            audit(who, 'first_run.policy', { changes, ...(requests.length ? { requests, note: 'queued for the coordinator' } : {}) });
+            return json(res, 200, { ok: true, changes, confirmed: true, ...(requests.length ? { queued: true } : {}) });
           } catch (e) {
             if (e instanceof PolicyEditError) return refused(400, e.message);
             throw e;
@@ -2718,10 +2795,12 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           audit(who, 'machine.tailscale', { action, request: r.id });
           return json(res, 200, { ok: true, pending: true, request: r });
         }
+        // An issue's check runs, shaped by role (src/checks-viewer.ts, #837): a viewer, or any role not owner or
+        // writer, gets each check's name and result only, never its output, exit code or the commit it ran on.
         if (url.pathname === '/api/checks' && req.method === 'GET') {
           const issue = Number(url.searchParams.get('issue'));
           if (!Number.isInteger(issue) || issue <= 0) return json(res, 400, { error: 'issue must be a number' });
-          return json(res, 200, checkResults(eventCache.all(), issue));
+          return json(res, 200, checksFor(who.role, checkResults(eventCache.all(), issue)));
         }
         // A goal's task graph (src/goal-graph.ts), read-only, for everyone with a role, like the goal's own page. Built
         // from the events this person may see (a viewer's are the allowlisted ones), so it shows no goal or task a
@@ -2744,13 +2823,22 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           return;
         }
         // Clear the auto-merge stop (a red main after an auto-merge, or the main watch's unaccounted commit): an admin's
-        // only, audited, and the one way auto-merge resumes from the dashboard.
+        // only, audited, and the one way auto-merge resumes from the dashboard. A stop the default branch caused waits
+        // for it to be green on its tip, measured now, or for an acknowledgement with a typed reason (#776).
         if (url.pathname === '/api/auto-merge/clear' && req.method === 'POST') {
           if (!isOwnerHere) return json(res, 403, { error: `only the instance's owners (admin on ${repo}) may resume auto-merge; @${who.login} is a ${who.role}` });
-          const r = clearAutoMergeStop({ stateDir: opts.stateDir, eventsDb: opts.eventsDb, by: who.login });
-          if (!r.ok) return json(res, 409, { error: r.error });
-          audit(who, 'auto_merge.cleared', { reason: r.reason });
-          return json(res, 200, { ok: true });
+          const ack = acknowledgement(await readBody(req));
+          if ('error' in ack) return json(res, 400, { error: ack.error });
+          // The dashboard makes no check read (#776 on #727, the owner's decision): a stop the default branch caused is
+          // a recorded request, which the coordinator, the only judge, resumes under the pinned-source verdict.
+          const r = clearAutoMergeStop({ stateDir: opts.stateDir, eventsDb: opts.eventsDb, by: who.login, ack: ack.reason });
+          if (!r.ok) return json(res, r.status, { error: r.error });
+          if (r.how === 'as_before') {
+            audit(who, 'auto_merge.cleared', { reason: r.reason, how: r.how });
+            return json(res, 200, { ok: true, how: r.how });
+          }
+          audit(who, 'auto_merge.resume_requested', { reason: r.reason, request: r.request, last: r.last, ...(ack.reason ? { acknowledged: ack.reason } : {}) });
+          return json(res, 202, { ok: true, how: r.how, acknowledged: r.acknowledged, last: r.last, message: resumeRequestedText(opts.cfg.project.project.default_branch, r) });
         }
         if (url.pathname === '/api/decide' && req.method === 'POST') {
           const body = (await readBody(req)) as { id?: string; answer?: string };
