@@ -8,7 +8,7 @@ This runs the engine's full loop on SWE-bench Verified tasks, in local clones on
 
 Every rate comes with a Wilson 95% interval. It is a gated-merge benchmark built on SWE-bench Verified, not a SWE-bench score.
 
-**Status: Phase 0, nothing has run.** No model call, image pull or download has been made from this code.
+**Status: Phase 0, nothing has run.** No model call, image pull, registry request or download has been made from this code.
 
 What is here so far:
 - **Preflight** (`paths.ts`, `auth.ts`, `caps.ts`, `usage.ts`): the bench user, login and CLI pin checks, the caps, and the usage meter with its clean stop.
@@ -17,9 +17,10 @@ What is here so far:
 - **The `bench` command** (`cli.ts`): `bench preflight` runs the model-free, container-free checks above and prints a PASS/FAIL/SKIP line each (setup step 6).
 - **Pinned downloads** (`pins.json`, `pins.ts`, `download.ts`): `bench download` fetches the dataset file at its pinned revision and sha256 into the held-out store, and `pullImage` pulls a task image by pinned digest only (step 7). The dataset isn't pinned yet, so `bench download` refuses until the owner records the pin.
 - **Task selection** (`select.ts`): `bench select` chooses the tasks by a fixed rule and seed from the pinned rows, writes the manifest into the held-out store, and prints keys and the smoke run's plan, never an instance id (step 8). `loadTasks` hands the run its tasks and their image references from the store. The rows aren't pinned yet, so `bench select` refuses and prints their digest for the owner to record.
+- **Task images** (`images.ts`): `bench images` writes each selected task's image reference into the held-out store, from the store's manifest, with each digest taken only when `pins.json` pins it (step 9). No image digest is pinned yet, so it refuses.
 
 Still to come:
-- task setup: the base tree, a local clone with no upstream history, a local bare remote;
+- the rest of task setup: the base tree, a local clone with no upstream history, a local bare remote, and the image pulls;
 - the PR-mode task runner on the replay harness (`src/harness-evals/replay.ts`), with stub CI, and the agent's test relay into the container: both need the engine's runner seam (#701);
 - `bench run`, the grading run and the B0, B1 and `claude -p` baselines.
 
@@ -268,7 +269,7 @@ Left to the run: the limits read back from a probe container (it needs a task im
 
 Every pin is in one file, `scripts/bench/pins.json`. Nothing else sets one: no variable, flag or argument (`bench download` takes none), and the code takes a pin only as `pins.ts` parsed it from that file. It holds:
 - `dataset`: the file's url (`base` + `revision` + `/` + `path`, so it is at the pinned revision by construction), the `revision` (a 40-hex commit), the file's `sha256`, `max_bytes` (the most it reads) and `hosts` (where a redirect may lead: each host or its subdomains, https only). `revision` and `sha256` are both set or both null. They are null now, so `bench download` refuses and fetches nothing. The `path` there is a guess until the owner pins it (**guess**): check it names the file meant.
-- `image_digests`: sha256 digests only, sorted, none or at least 100 of them. Never an image name, an instance id or a task selection: the agents can read this clone, and an image name carries its instance id. Which image a task uses comes from the held-out store.
+- `image_digests`: sha256 digests only, sorted, none or at least 100 of them. Never an image name, an instance id or a task selection: the agents can read this clone, and an image name carries its instance id. Which image a task uses comes from the held-out store. Each is the digest of the manifest the registry serves for an image's `latest` tag: the image index's digest when the image has one, which is what `docker pull` records in `RepoDigests` (**inferred**). `bench images` (step 9) takes a task's digest only when it is one of these.
 - `selection`: how tasks are chosen, never which: `rule`, `seed` and `rows_sha256` (step 8), or null.
 
 The whole file is refused for:
@@ -345,7 +346,7 @@ It errs closed (measured), withholding:
 - decomposed (NFD) text with two marks on one letter, or with marks next to `_` before `-N` (`Việt-1`, `Nguyễn-3`, a decomposed `ä_ö-1`). The composed (NFC) forms are kept. The messages being built from keys is what covers those.
 
 **Image references** live in the store, in `images.json`: `{"<instance id>": "<name>@sha256:<digest>", ...}`, a 0600 file of the bench user.
-- **Producing it belongs to task setup (slice 4), still to come.** It will be a command that reads the ids from the store's manifest or rows and writes the file. Until then, `bench select` reports the images line as FAIL.
+- **`bench images` writes it** (step 9). Until then, `bench select` reports the images line as FAIL.
 - **Never write it by hand in a shell:** no instance id or image name typed into a command, an editor's command line, or a `docker` command. The bench user's shell history is readable by the agents (**inferred**).
 
 A task's reference is taken only when:
@@ -356,17 +357,36 @@ A task's reference is taken only when:
 
 **What the run gets** (`select.ts` `loadTasks`, called in-process by `bench run`, still to come): it re-reads the rows and checks them against the pin, re-derives the selection, refuses a manifest that differs (an edit, or other pins since `bench select`), and takes each task's image reference as above. Its refusals name keys, never a task. No command takes an instance id, a seed, a count or an image name, so none is ever typed into the bench user's shell, whose history the agents may read (**inferred**: its sandbox's read-deny list doesn't name it).
 
+### 9. The task images (on the bench machine only)
+
+Once the owner has pinned the image digests (step 7) and `bench select` has written the manifest (step 8), run, as the bench user:
+
+    bench images
+
+It takes no argument. For each of the 50 selected tasks, in key order:
+- **the task:** from the store's manifest, only when it is exactly what the pins select now (the rows re-read and checked against their pin, the selection re-derived, as the run does). A missing or different manifest is refused: run `bench select`;
+- **the name:** the task's own, under SWE-bench's image naming: `swebench/sweb.eval.x86_64.` and the instance id in lower case, with `__` written as `_1776_` (**inferred** from SWE-bench's harness; a name that doesn't follow it fails at the registry). An id that isn't `<owner>__<repo>-<number>`, or that makes a name docker wouldn't take, is refused;
+- **the digest:** the sha256 of the manifest Docker Hub's registry serves for that name's `latest` tag. It is taken only when it is one of `pins.json` `image_digests`, and no other task has it.
+  - The registry is asked at fixed addresses (`auth.docker.io` for an anonymous pull token, `registry-1.docker.io` for the manifest), for manifests only: no image is pulled, no credential is sent, no redirect is followed, and every answer is capped (4 MiB).
+  - The digest is the sha256 of the bytes served, never only the registry's header; a header that disagrees is refused.
+  - So the registry says which image is the task's, and the pins say which images may be used at all. A tag moved to an image that isn't pinned is refused, never followed. `pullImage` reads the digest back for the name when it pulls.
+
+Only when every task has its reference, and the store and the manifest pass their checks again, is the file written: 0600, through a verified temporary file linked to its name, never over anything. A different `images.json` already there, or a link there, is refused and left as it is: move it aside to write it again. Then it runs the run's own check (`loadTasks`, smoke and baseline).
+
+It prints keys, counts and the file's sha256. A refusal names keys, and the digest the registry served when that digest isn't pinned, so the owner can check it. Never an instance id or an image name, and every line goes through the withholding backstop above. Then `bench select` passes every line.
+
 ## The smoke run plan
 
 The 4-task smoke on current main, in this order. Each step needs the one before it:
 1. **Setup and preflight** (steps 1 to 6): `bench preflight` passes as the bench user. Done by the owner on 2026-10-18; confirm with the preflight.
 2. **Pins and download** (step 7): the owner records the dataset's revision and sha256 and the image digests; `bench download`.
 3. **Rows and selection** (step 8): the rows file and its digest recorded, then `bench select` writes the manifest. It prints the plan: `t01` to `t04`, at most $40 for the round, $15 per task. Its images line stays FAIL until step 4 writes `images.json`.
-4. **Task setup** (slice 4, still to come):
-   - `images.json`, written from the store, never typed;
+4. **Task setup** (slice 4):
+   - `bench images` (step 9) writes `images.json` from the store, never typed. Built; it needs the image digests pinned;
    - then `bench select` passes every line;
-   - each task's base tree, a local clone with no upstream history, and a local bare remote;
-   - images pulled with `pullImage`. It reads the digest back for the pinned name, so an image whose digest isn't the one its own repository serves fails there (**inferred**). `loadTasks` checks only that an image's name is its task's own, and that its digest is pinned.
+   - still to come:
+     - each task's base tree, a local clone with no upstream history, and a local bare remote;
+     - images pulled with `pullImage`. It reads the digest back for the pinned name, so an image whose digest isn't the one its own repository serves fails there (**inferred**). `loadTasks` checks only that an image's name is its task's own, and that its digest is pinned; `bench images` took each digest from the registry for that name.
 5. **The engine's runner seam and the test relay** (still to come; #701, Lane C and Lane A): the engine's check and test commands run through the bench's `TaskRunner`.
 6. **`bench run --tasks smoke --spend <usd>`** (still to come): with `--spend` at most 40. Its first model call is the sandbox confirmation. It stops cleanly at any usage limit, with no retry.
 7. **Grading** of the exported patches in fresh containers, then the aggregate. If the round averaged over $8 per task, the baseline needs the owner's re-approval.
