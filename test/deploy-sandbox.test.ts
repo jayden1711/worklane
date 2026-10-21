@@ -72,13 +72,19 @@ test('a deploy trigger and verify run as the agent user, sandboxed: a planted co
     const ok = await deployer(c).deploy('staging', `{ ${steal}; } > ${JSON.stringify(p.out)} 2>&1; true`, `{ ${steal}; } >> ${JSON.stringify(p.out)} 2>&1; echo ${SHA}`, SHA, 7, 2, 10);
     const seen = existsSync(p.out) ? readFileSync(p.out, 'utf8') : '';
     for (const [what, v] of Object.entries({ ...p.keys, env: envSecret })) assert.ok(!seen.includes(v), `the deploy command read the ${what} stand-in: ${seen}`);
-    assert.deepEqual(calls(), ['shop-agent', 'shop-agent'], 'the trigger and the verify each ran through sudo as the agent user, never as the coordinator');
     if (required || sandboxRuns) {
+      assert.deepEqual(calls(), ['shop-agent', 'shop-agent'], 'the trigger and the verify each ran through sudo as the agent user, never as the coordinator');
       assert.equal(ok, true, 'a deploy that needs none of them still triggers and verifies');
       assert.match(seen, /ordinary/, 'the command ran, with the agent home\'s ordinary files');
     } else {
-      // No sandbox here: the command is refused, and a refused deploy is never a done one.
+      // No sandbox here (e.g. release.yml's build job, which installs no bubblewrap): the trigger is still started only
+      // through sudo as the agent user, its sandbox refuses it before the command runs, and a refused trigger ends the
+      // deploy, so the verify is never started at all. A refused deploy is never a done one.
+      assert.deepEqual(calls(), ['shop-agent'], 'only the trigger was started, through sudo as the agent user; a refused trigger never runs the verify');
       assert.equal(ok, false);
+      assert.equal(seen, '', 'nothing of the trigger ran');
+      assert.match((f.log.read(0, ['deploy.failed']).at(-1)?.payload as { why: string } | undefined)?.why ?? '', /^trigger failed: project command not run/, 'deploy.failed says the trigger was refused');
+      assert.equal(f.log.read(0, ['deploy.verified']).length, 0);
     }
   } finally {
     delete process.env.WL799_COORDINATOR_SECRET;
