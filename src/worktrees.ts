@@ -2,7 +2,7 @@
 // removes a worktree it didn't create: names carry our prefix AND must be in
 // our ownership record, so other sessions' worktrees are always safe.
 import { execFileSync, spawn, spawnSync } from './os/child-process.js';
-import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmdirSync, unlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmdirSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { BRAND } from './brand.js';
 import { checkoutSparse } from './checkout.js';
@@ -109,17 +109,54 @@ export function removeSandboxPlaceholders(worktree: string): string[] {
 /** How every worktree the engine makes is named in its place (worktreePath): read-denials hides them by it (#890). */
 export const WORKTREE_NAME_PREFIX = `${BRAND.cli}-`;
 
-export function worktreePath(o: WorktreeOptions, name: string): string {
-  return resolve(o.repo, o.root, `${WORKTREE_NAME_PREFIX}${name}`);
+/** The directory of its own the engine makes its worktrees in under a root that holds the main checkout (#890 r17). */
+export const WORKTREE_DIR_NAME = `${BRAND.cli}-worktrees`;
+
+const pathForms = (p: string) => {
+  const forms = [resolve(p)];
+  try {
+    forms.push(realpathSync(p));
+  } catch {
+    // not there (yet): as written only
+  }
+  return [...new Set(forms)];
+};
+
+/** Whether `dir` is, or holds, `p`, compared as written and by real path. */
+export function holdsPath(dir: string, p: string): boolean {
+  return pathForms(dir).some((d) => pathForms(p).some((f) => f === d || f.startsWith(`${d === '/' ? '' : d}/`)));
 }
 
 /**
- * The coordinator's own places task worktrees are made in (#890): its start config's worktree root, resolved under the
- * repository, and the engine's own. One helper, so the places the coordinator makes at its start (recovery) and the
- * ones every guarded run hides whole (src/service.ts into the runner) can't differ.
+ * Where new worktrees are made: the worktree root, or, when the root is or holds the main checkout (`..`, `.`, ""), a
+ * directory of the engine's own in it, `<root>/<cli>-worktrees`. WHY (#890 round 17): such a root can't be hidden from a
+ * run whole (it holds the main checkout), and a name pattern over it is expanded only when a command is wrapped, so a
+ * command already running read a worktree made later (measured). The directory is hidden whole like any other place,
+ * so its mount covers commands already running too.
+ */
+export function worktreeDir(repo: string, root: string): string {
+  const base = resolve(repo, root);
+  return holdsPath(base, repo) ? join(base, WORKTREE_DIR_NAME) : base;
+}
+
+export function worktreePath(o: WorktreeOptions, name: string): string {
+  const legacy = resolve(o.repo, o.root, `${WORKTREE_NAME_PREFIX}${name}`);
+  const dir = worktreeDir(o.repo, o.root);
+  // A worktree made before round 17 directly under such a root stays where it is (its record, its pooled install).
+  if (dir !== resolve(o.repo, o.root) && owned(o).includes(legacy)) return legacy;
+  return join(dir, `${WORKTREE_NAME_PREFIX}${name}`);
+}
+
+/**
+ * The coordinator's own places task worktrees are made in (#890): where it makes them (worktreeDir), the engine's own,
+ * and, under a root that holds the main checkout, that root itself (its worktrees from before round 17 are hidden by
+ * name there). One helper, so the places the coordinator makes at its start (recovery) and the ones every guarded run
+ * hides (src/service.ts into the runner) can't differ.
  */
 export function worktreePlaces(repo: string, root: string): string[] {
-  return [resolve(repo, root), join(projectStateDir(repo), 'worktrees')];
+  const base = resolve(repo, root);
+  const dir = worktreeDir(repo, root);
+  return [...new Set([dir, ...(dir !== base ? [base] : []), join(projectStateDir(repo), 'worktrees')])];
 }
 
 /**
