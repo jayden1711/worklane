@@ -740,6 +740,22 @@ export class RefusedMoneyLine extends RegExp {
 export const moneyListProblems = (money: readonly RegExp[]): { line: string; why: string; suggestion: string }[] =>
   money.filter((re): re is RefusedMoneyLine => re instanceof RefusedMoneyLine).map(({ line, why, suggestion }) => ({ line, why, suggestion }));
 
+/**
+ * doctor's money-list check (#763 round 6): fail for each refused line (every PR waits until it is rewritten), with
+ * its suggested glob; ok when every line is a glob or converts to one; warn when the list can't be read at `rev`.
+ */
+export function moneyListCheck(repo: string, src: ReviewConfig['money_path_source'], rev: string): { level: 'ok' | 'warn' | 'fail'; detail: string } {
+  let money: RegExp[];
+  try {
+    money = loadMoneyPaths(repo, src, rev);
+  } catch (e) {
+    return { level: 'warn', detail: (e as Error).message };
+  }
+  const problems = moneyListProblems(money);
+  if (!problems.length) return { level: 'ok', detail: 'money paths are globs only: every line of the money list is a glob or converts to one' };
+  return { level: 'fail', detail: problems.map((p) => `${p.line} isn't a glob (${p.why}): every PR waits until it is rewritten as globs, for example ${p.suggestion}`).join('\n') };
+}
+
 export function computeLevel(input: LevelInput, cfg: ReviewConfig, extraCategories: Record<string, string[]> = {}): LevelResult {
   const defs = { ...DEFAULT_CATEGORIES, ...cfg.categories, ...extraCategories, ...lockedCategories(input.scope) };
   const res = Object.fromEntries(Object.entries(defs).map(([k, globs]) => [k, globs.map((g) => globToRegExp(g))]));

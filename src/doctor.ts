@@ -33,6 +33,7 @@ import { checkSetup, groupLevel, GROUPS, stepLevel, systemProbe, type SetupConte
 import { modelWarnings } from './model-routing.js';
 import { HUB_UNIT_AS_ROOT, OWNER_TERMINAL_RERUN, ownerTerminalNotice, ownerTerminalRerun, type TerminalPaths } from './console/owner-terminal-removed.js';
 import { voiceSiriLeftoverCheck } from './doctor-voice-removed.js';
+import { moneyListCheck } from './review.js';
 
 /** off: not available in this setup's mode (said why; never a failure). */
 export type Level = 'ok' | 'warn' | 'fail' | 'off';
@@ -125,6 +126,12 @@ export function doctor(rootArg: string, opts: { agentshield?: boolean; /** A pol
     } catch (e) {
       add('disk floor', 'warn', `can't measure the free disk at ${root}: ${(e as Error).message}`);
     }
+  }
+
+  // #763: money paths are globs only; a money-list line with no glob form holds every PR until it is rewritten.
+  if (cfg?.review?.money_path_source) {
+    const money = moneyListCheck(root, cfg.review.money_path_source, `origin/${cfg.project.project.default_branch}`);
+    add('money paths', money.level, money.detail);
   }
 
   const os = detectOs(cfg?.project.os ?? 'auto');

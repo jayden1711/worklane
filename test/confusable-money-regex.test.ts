@@ -8,7 +8,11 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { ReviewConfig } from '../src/config/schema.js';
 import { mergeDecision, waitCategoriesOf } from '../src/merge-policy.js';
-import { computeLevel, escapedPath, MoneyGlob, moneyListEntries, moneyListProblems, RefusedMoneyLine, regexToGlob, type ChangeFile } from '../src/review.js';
+import { execFileSync } from 'node:child_process';
+import { mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { computeLevel, escapedPath, MoneyGlob, moneyListCheck, moneyListEntries, moneyListProblems, RefusedMoneyLine, regexToGlob, type ChangeFile } from '../src/review.js';
 
 const CYRILLIC_A = 'а';
 
@@ -55,6 +59,23 @@ test('#763: doctor\'s list names each refused line with a suggested glob; a conv
     { line: '/migrations\\/\\d+_rates/', why: '"\\d+_rates" has no mechanical glob form', suggestion: '**migrations/**_rates**' },
   ]);
   assert.deepEqual(moneyListProblems(moneyListEntries('/^src\\/payments\\//\nbilling/**')), []);
+});
+
+test('#763: doctor\'s money-list check fails on each refused line with its suggested glob, passes a list of globs, and warns when it can\'t read the list', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'money-doctor-'));
+  const git = (...a: string[]) => execFileSync('git', a, { cwd: dir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+  git('init', '-q', '-b', 'main');
+  const commit = (text: string) => {
+    writeFileSync(join(dir, 'money.txt'), text);
+    git('add', '-A');
+    git('-c', 'user.email=ada@example.com', '-c', 'user.name=Ada', '-c', 'commit.gpgsign=false', 'commit', '-q', '-m', 'money');
+  };
+  const src = { file: 'money.txt' } as Parameters<typeof moneyListCheck>[1];
+  commit('/billing/i\npayments/**\n');
+  assert.deepEqual(moneyListCheck(dir, src, 'HEAD'), { level: 'fail', detail: '/billing/i isn\'t a glob (its flags (i) ask for more than a glob says (a glob matches case as written)): every PR waits until it is rewritten as globs, for example **billing**' });
+  commit('/^src\\/payments\\//\nbilling/**\n');
+  assert.equal(moneyListCheck(dir, src, 'HEAD').level, 'ok');
+  assert.equal(moneyListCheck(dir, src, 'origin/main').level, 'warn');
 });
 
 const LEVELS = { L0_auto: { when: ['docs-only', 'tests-only'], max_lines: 200 }, L1_evaluator: { when: ['app-non-money'], max_lines: 400, max_files: 10 }, L2_notify: { when: ['dependency'] } };
