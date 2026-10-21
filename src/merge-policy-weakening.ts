@@ -63,6 +63,8 @@ export const CHECK_TABLES: readonly CheckTable[] = [
   { path: 'scripts/lib/denylist.mjs', table: 'SKIP', kind: 'never-grow' },
   { path: 'src/guardrails/engine.ts', table: 'AGENT_EDITABLE', kind: 'never-grow' },
   { path: 'scripts/bench/pins.ts', table: 'SELECTION_RULES', kind: 'never-grow' },
+  // #746: the files that may still name the removed desktop app.
+  { path: 'test/desktop-removed.test.ts', table: 'MAY_NAME_IT', kind: 'never-grow' },
   // The lints' rules and bad fixtures, and the guards' lists: taking one out is a loosening.
   { path: 'test/change-files-renames.test.ts', table: 'READER_WORDS', kind: 'never-shrink' },
   { path: 'test/review.test.ts', table: 'LOCK_SCOPE_BAD', kind: 'never-shrink' },
