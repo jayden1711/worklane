@@ -2842,8 +2842,9 @@ jobs:
           sudo -u wl-probe env -i PATH=/usr/local/bin:/usr/bin:/bin HOME="$(getent passwd wl-probe | cut -d: -f6)" USER=wl-probe LOGNAME=wl-probe LANG=C.UTF-8 \
             sh -c 'cd "$HOME" && exec node "$1/project-command-real-users.mjs" "$1/dist" wl-probe-agent "$2" "$1/checkout" /opt/wl-713-link/store /opt/wl-713-link/dotdot' _ "$t" "$a" < /dev/null
           # The unit tests' real-sandbox cases, here required to run (elsewhere they skip without bubblewrap): the
-          # isolation tests, and separate-users' check that runs git as another user (nobody) in a checkout it doesn't own.
-          PROJECT_SANDBOX_REQUIRED=1 node --import ./dist/test/isolate.js --test dist/test/project-command-isolation.test.js dist/test/separate-users.test.js
+          # isolation tests, the read-only agent home's (#798), and separate-users' check that runs git as another user
+          # (nobody) in a checkout it doesn't own.
+          PROJECT_SANDBOX_REQUIRED=1 node --import ./dist/test/isolate.js --test dist/test/project-command-isolation.test.js dist/test/project-command-home.test.js dist/test/separate-users.test.js
 
   wizard-e2e-real-systemd:
     # The first-run wizard end to end, the way a person walks it, on a fresh runner with real systemd: the one install

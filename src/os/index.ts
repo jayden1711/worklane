@@ -689,8 +689,9 @@ export interface ProjectRunAs {
 // network stay. A tool that can't start is refused (SANDBOX_UNAVAILABLE) before the command runs.
 // INVARIANT: this bash gets an empty environment, so nothing a project sets (SHELLOPTS, BASHOPTS, IFS, ...) reaches
 // it; the project's variables are the inner `env -i` after `--`, passed on as words. Glob and shell options are reset
-// anyway. --norc --noprofile: it reads no startup file, such as the agent's ~/.bashrc (writable by a sandboxed
-// command; sourced by bash's rshd check for `bash -c` with a socket on stdin).
+// anyway. --norc --noprofile: it reads no startup file, such as the agent's ~/.bashrc (read-only to a sandboxed
+// command since #798, but one planted before, or by the agent itself, is still there; sourced by bash's rshd check for
+// `bash -c` with a socket on stdin). The home is read-only inside, apart from throwaway caches (see `homes` below).
 // Every directory above a hidden path is bound onto itself first (shallowest first, before any mask): renaming it
 // fails (EBUSY), so the secret can't be moved out from under its mask. (--bind adds nosuid,nodev: a hidden path
 // under /dev would cost the sandbox its devices.)
@@ -698,7 +699,7 @@ const LINUX_SANDBOX = [
   'set +f; shopt -u failglob nullglob dotglob nocaseglob extglob globstar; unset GLOBIGNORE; PATH=/usr/bin:/bin',
   // Tools by fixed path (no function or PATH entry stands in); a missing one refuses.
   `tool() { local t; for t in "/usr/bin/$1" "/bin/$1"; do [ -x "$t" ] && { printf '%s' "$t"; return 0; }; done; printf '%s\\n' "project command not run: no $1 to resolve its sandbox's paths; ${SANDBOX_FIX}" >&2; return 1; }`,
-  `rl=$(tool readlink) || exit ${SANDBOX_UNAVAILABLE}; stt=$(tool stat) || exit ${SANDBOX_UNAVAILABLE}; fnd=$(tool find) || exit ${SANDBOX_UNAVAILABLE}`,
+  `rl=$(tool readlink) || exit ${SANDBOX_UNAVAILABLE}; stt=$(tool stat) || exit ${SANDBOX_UNAVAILABLE}; fnd=$(tool find) || exit ${SANDBOX_UNAVAILABLE}; mkd=$(tool mkdir) || exit ${SANDBOX_UNAVAILABLE}`,
   'b=$1 h=$2 u=$3; shift 3; hide=(); dirs=(); declare -A seen=() said=(); maxd=0; bad=()',
   'above() { local d=$1 n; while d=${d%/*}; [ -n "$d" ]; do [ -n "${seen[$d]}" ] && continue; seen[$d]=1; dirs+=("$d"); n=${d//[!\\/]/}; [ "${#n}" -gt "$maxd" ] && maxd=${#n}; done; }',
   // Refusals collected, each once, so one message names every path. Quoted: the agent names them (no forged lines).
@@ -745,14 +746,25 @@ const LINUX_SANDBOX = [
   '  if [ "$RT" = directory ]; then hide+=(--tmpfs "$r"); else hide+=(--ro-bind /dev/null "$r"); fi; above "$r"; }',
   // Default masks listed by find, whose failure refuses (a glob in an unreadable directory hid nothing, #787 r7).
   'list() { local o; o=$("$fnd" "$1" -mindepth 1 -maxdepth 1 -name "$2" -printf "%f/" 2>/dev/null) || { unres "$1" "cannot be listed for its credential files"; return; }; while [ -n "$o" ]; do add "$1/${o%%/*}"; o=${o#*/}; done; }',
-  // (A home or ~/.config that isn't a directory holds nothing to hide.)
-  'walk "$h"; if [ $? -eq 0 ] && [ "$RT" = directory ]; then hr=$R; list "$hr" ".claude*"; walk "$hr/.config"; if [ $? -eq 0 ] && [ "$RT" = directory ]; then list "$R" "*-claude-key"; fi; fi',
+  // (A ~/.config that isn't a directory holds nothing to hide.) The home must be a directory other than /: the sandbox
+  // makes it read-only (below), and with none to make read-only a command could create one and plant config in it.
+  'walk "$h"; hw=$?; hr=',
+  'if [ "$hw" -eq 0 ] && [ "$RT" = directory ] && [ "$R" != / ]; then hr=$R; list "$hr" ".claude*"; walk "$hr/.config"; if [ $? -eq 0 ] && [ "$RT" = directory ]; then list "$R" "*-claude-key"; fi',
+  `elif [ "$hw" -ne 2 ]; then note "project command not run: the agent user's home \${h@Q} is not a directory (other than /) its sandbox can make read-only, so a command could plant config there that the agent user reads outside the sandbox; set the instance's run_as.agent_home to the agent user's real home"; fi`,
   'while [ "$#" -gt 0 ] && [ "$1" != -- ]; do add "$1"; shift; done; shift',
   `if [ "\${#bad[@]}" -gt 0 ]; then printf '%s\\n' "\${bad[@]}" >&2; exit ${SANDBOX_UNAVAILABLE}; fi`,
   'binds=(); for ((i = 1; i <= maxd; i++)); do for d in "${dirs[@]}"; do n=${d//[!\\/]/}; [ "${#n}" -eq "$i" ] && binds+=(--bind "$d" "$d"); done; done',
+  // INVARIANT (#798): the agent's home is read-only inside the sandbox, so no command can plant config (~/.bashrc,
+  // ~/.profile, ~/.gitconfig, ~/.npmrc, ~/.ssh, ~/.local/bin, ...) that a later agent-user process outside it reads:
+  // a login shell, git, npm, the agent's own claude. After the binds above (it covers those under the home: nothing in
+  // it can be renamed now), before the masks (they still hide what's under it). Only its caches are writable, each an
+  // empty tmpfs that is gone when the command ends: never a persistent directory, since ~/.cache holds what unsandboxed
+  // processes run (corepack, go-build, browsers) and ~/.npm what npx runs. A cache made only if absent (npm fails on a
+  // read-only one), and only over a real directory: a symlink isn't followed, what it points to stays read-only.
+  'homes=(--ro-bind "$hr" "$hr"); for n in .cache .npm; do p=$hr/$n; st "$p"; if [ "$S" -ne 0 ] && [ "$E" = "No such file or directory" ]; then "$mkd" -m 700 -- "$p" 2>/dev/null; st "$p"; fi; if [ "$S" -eq 0 ] && [ "$T" = directory ]; then homes+=(--tmpfs "$p"); fi; done',
   `box=(${PROJECT_SANDBOX_ARGS.join(' ')})`,
   `if ! err=$("$b" "\${box[@]}" -- /bin/sh -c : 2>&1); then printf '%s\\n' "project command not run: its sandbox didn't start ($err); ${SANDBOX_FIX}" >&2; exit ${SANDBOX_UNAVAILABLE}; fi`,
-  'exec "$b" "${box[@]}" "${binds[@]}" "${hide[@]}" -- "$@"',
+  'exec "$b" "${box[@]}" "${binds[@]}" "${homes[@]}" "${hide[@]}" -- "$@"',
 ].join('\n');
 
 /**
@@ -766,14 +778,20 @@ export const normalAbsolute = (p: string): boolean =>
 export const normalHome = (p: string): boolean => p === '/' || normalAbsolute(p);
 export const NOT_NORMAL_ABSOLUTE ='must be an absolute path in normal form (no .., //, /./, trailing /, NUL or newline; under 4096 bytes, no name over 255)';
 
-/** macOS's sandbox profile for a project command: everything allowed but reading or writing the hidden paths. */
+/**
+ * macOS's sandbox profile for a project command: everything allowed but reading or writing the hidden paths, and
+ * writing anything under the agent's home (#798: no config planted there for a later agent-user process outside the
+ * sandbox). No writable cache there: sandbox-exec has no throwaway layer, and a persistent one could be planted too.
+ */
 export function seatbeltProfile(home: string, hide: readonly string[]): string {
   const bad = [home, ...hide].find((p) => !/^\/[^"\\\n]*$/.test(p));
   if (bad !== undefined) throw new Error(`can't sandbox a project command around ${JSON.stringify(bad)}: not a plain absolute path`);
+  const plain = home.replace(/\/+$/, '');
+  if (plain === '') throw new Error("can't sandbox a project command for an agent user whose home is /: there is no home to make read-only; set the instance's run_as.agent_home to its real home");
   const re = (s: string) => s.replace(/[.*+?^$()[\]{}|]/g, '\\$&');
-  const h = re(home.replace(/\/$/, ''));
+  const h = re(plain);
   const rules = [`(regex #"^${h}/\\.claude")`, `(regex #"^${h}/\\.config/[^/]*-claude-key(/|$)")`, ...hide.map((p) => `(subpath "${p}")`)];
-  return `(version 1)\n(allow default)\n(deny file-read* file-write* ${rules.join(' ')})\n`;
+  return `(version 1)\n(allow default)\n(deny file-read* file-write* ${rules.join(' ')})\n(deny file-write* (subpath "${plain}"))\n`;
 }
 
 /**
