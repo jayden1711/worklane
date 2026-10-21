@@ -438,6 +438,25 @@ async function server() {
     for (const s of ['signin-app', 'agent-app', 'config-on-main', 'owners', 'coordinator']) assert.equal(status[s], 'done', `${s} is done after the install and the first project (${JSON.stringify(status)})`);
     return { status };
   });
+  // #739: before Tailscale and the updater (serverMachine, below), the checklist already leads to the first task: the
+  // updater is listed after it and blocks nothing until the instance's first PR.
+  await screen('the first task (server): a step after the coordinator, reached without the updater', async () => {
+    const steps = f.setup.groups.flatMap((g) => g.steps);
+    const groups = f.setup.groups.map((g) => g.id);
+    assert.ok(groups.indexOf('coordinator') < groups.indexOf('first-task') && groups.indexOf('first-task') < groups.indexOf('updates'), `the order: ${groups.join(', ')}`);
+    const task = steps.find((s) => s.id === 'server-first-task');
+    assert.ok(task && !task.optional, `the server lists its first-task step as required (${JSON.stringify(task)})`);
+    const updater = steps.find((s) => s.id === 'updater');
+    assert.ok(updater && !updater.done, 'the updater is listed, not set up yet');
+    assert.equal(updater.optional, true, `the updater blocks nothing before the first PR: ${updater.detail}`);
+    assert.match(updater.detail, /^after your first PR: /);
+    const left = steps.filter((s) => !s.optional && !s.done && !s.skipped).map((s) => s.id);
+    assert.ok(!left.includes('updater'), `the required steps left: ${left.join(', ')}`);
+    await open('/first-run?step=server-first-task');
+    const panel = await waitText(`${row('server-first-task')} ${tid('first-run-outside')}`, /signed in as one of the writers/);
+    return { left, task: task.detail, updater: updater.detail, panel };
+  });
+
   await screen('screen 2 (server): the agents\' Claude login reads done after the first project stored it', async () => {
     // add-project.sh stored the token for wl-<instance>-agent (the job checked the file, 0600); the step must say so.
     const claude = f.setup.groups.flatMap((g) => g.steps).find((s) => s.id === 'claude-token');
@@ -699,7 +718,7 @@ async function setupLoopback() {
     await cdp.send('Page.navigate', { url: wizardUrl });
     await until('the setup page', () => evaluate(`document.readyState === 'complete' && !!document.querySelector('#token')`), 30_000, 200);
     assert.ok(!new URL(await evaluate('location.href')).search, 'the URL carries nothing');
-    assert.match((await text('main')) ?? '', /waits for screen 7, Tailscale and HTTPS/);
+    assert.match((await text('main')) ?? '', /waits for an https origin: your own \(--public-url\), or screen 7, Tailscale and HTTPS/);
     const token = readFileSync(keyFile, 'utf8').trim();
     await click('#token');
     assert.ok(await evaluate(`document.activeElement === document.querySelector('#token')`), 'the click focused the token field');
@@ -715,7 +734,9 @@ async function setupLoopback() {
     const card = tid('signin-app-needs-https');
     assert.equal(await attr(card, 'data-next-screen'), '7');
     const t = (await text(card)) ?? '';
-    assert.match(t, /Screen 7 first: Tailscale and HTTPS/);
+    // #739: a choice, your own origin or Tailscale; the rerun with --public-url is the first.
+    assert.match(t, /An https address first: one of your own, or Tailscale \(screen 7\)/);
+    assert.match(t, /sudo bash \/\S+\/scripts\/bootstrap\.sh --hardened --public-url https:\/\/<your host> /);
     for (const step of ['install', 'up', 'serve']) assert.match(t, new RegExp(`sudo bash /\\S+/scripts/setup/tailscale\\.sh ${step}\\b`), `screen 7's ${step} step`);
     assert.match(t, /Then run the install command again/);
     assert.ok(!(await evaluate(`!!document.querySelector('input[name="owner"], form[action="/setup/signin-app"]')`)), 'no App form');
