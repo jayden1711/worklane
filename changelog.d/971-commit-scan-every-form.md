@@ -2,6 +2,8 @@
 
 - An agent's shell command that commits is now let through only when the commit secret scan can model it. A line it can't model is refused with the reason and a way to commit instead: stage in one call, then run a plain `git commit` in a call of its own.
 - An agent's git command whose subcommand isn't a literal word, or whose words hold an unquoted expansion or pattern, is refused too: quote the expansion, or run the command with literal words.
+- So is any agent command line that runs a program whose name is expanded, feeds a shell its script through a pipe or a here-document, gives a shell an expanded script, or has a program build a command from its input. Name programs literally, and run scripts from files.
+- A commit that takes working-tree files git stores through a filter or an encoding attribute is refused: stage those files first, then commit what is staged.
 
 ### Guardrail changes: what each one does
 

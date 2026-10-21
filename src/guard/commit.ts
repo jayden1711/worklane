@@ -51,6 +51,8 @@ interface Cmd {
   heredocs: [number, number][];
   /** Its redirects' file words: their substitutions run before it too. */
   targets: Word[];
+  /** It reads the output of the command before it in a pipeline. */
+  piped: boolean;
 }
 
 const plain = (w: Word) => !w.text.includes(EXPANSION);
@@ -88,6 +90,7 @@ class Parser {
     const endCmd = () => {
       if (cmd) {
         if (!cmd.words.length) this.fail('a redirect without a command');
+        cmd.piped = pipeline.length > 0;
         pipeline.push(cmd);
       }
       cmd = null;
@@ -99,7 +102,7 @@ class Parser {
       if (pipeline.length) pipelines.push(pipeline);
       pipeline = [];
     };
-    const current = (): Cmd => (cmd ??= { words: [], writes: false, heredocs: [], targets: [] });
+    const current = (): Cmd => (cmd ??= { words: [], writes: false, heredocs: [], targets: [], piped: false });
     for (;;) {
       if (this.i >= s.length) {
         if (inSub) this.fail('an unclosed substitution');
@@ -518,7 +521,7 @@ function commitEffects(rest: Word[]): { worktree: boolean; amend: boolean } {
 const STAGING = new Set(['add', 'rm', 'mv']);
 // WHY: git commands that only read, which ordinary work runs before a commit; none may write a file (see beforeRefusal).
 const READ_ONLY_GIT = new Set(['status', 'rev-parse', 'diff', 'log', 'show']);
-const READ_ONLY = new Set(['true', ':', 'pwd', 'echo', 'cat']);
+const READ_ONLY = new Set(['true', ':', 'pwd', 'echo', 'cat', 'head', 'tail', 'wc', 'grep', 'ls']);
 const PIPE_SAFE = new Set(['echo', 'cat', 'head', 'tail', 'grep', 'true']);
 
 /**
@@ -623,7 +626,7 @@ interface LooseGit {
 
 /** A git command as the guard's general matcher sees it; null when it isn't one. */
 function looseGit(c: SimpleCommand): LooseGit | null {
-  const a = c.argv;
+  const a = c.argv.slice(keywordsBefore(c.argv));
   if (!isGitName(a[0] ?? '')) return null;
   const configs: string[] = [];
   const dirs: string[] = [];
@@ -686,9 +689,97 @@ function looseCommits(loose: SimpleCommand[]): { commits: number; indirect: bool
 }
 
 // WHY: programs that never run their arguments as a command, so a word `git` among them is only a word.
-const NON_EXEC = new Set(['echo', 'printf', 'which', 'type', 'whereis', 'hash', 'man', 'help', 'info', 'whatis', 'apropos', 'test', '[',
-  'ls', 'cat', 'head', 'tail', 'wc', 'grep', 'egrep', 'fgrep', 'rg', 'cd', 'pushd', 'mkdir', 'rmdir', 'rm', 'cp', 'mv', 'touch', 'stat',
-  'file', 'du', 'realpath', 'readlink', 'basename', 'dirname', 'gh']);
+// WHY: the general matcher keeps a shell keyword as a command's first word; the command is the word after it.
+const KEYWORDS = new Set(['if', 'then', 'else', 'elif', 'fi', 'do', 'done', 'while', 'until', '!', 'time', '{', '}', 'case', 'esac', 'for', 'select', 'in', 'function', 'coproc']);
+const keywordsBefore = (argv: string[]) => {
+  let i = 0;
+  while (i < argv.length - 1 && KEYWORDS.has(argv[i]!)) i++;
+  return i;
+};
+
+/**
+ * unseenProgram for a line the strict reader can't parse, as far as the general matcher and the text show it. WHY
+ * (#971): such a line still runs; what can't be read there is refused the same way.
+ */
+function unseenInUnread(command: string, raw: SimpleCommand[]): string | null {
+  const NONLITERAL = /[$`*?[\]{}]/;
+  for (const c of raw) {
+    const argv = c.argv.slice(keywordsBefore(c.argv));
+    const run = argv[0] ?? '';
+    if (NONLITERAL.test(run)) return 'a command whose name is expanded';
+    const at = argv.findIndex((t, k) => k > 0 && isGitName(t));
+    if (at > 0 && !NON_EXEC.has(basename(run))) {
+      const sub = argv.slice(at + 1).find((t) => !t.startsWith('-'));
+      if (sub === undefined || sub === 'commit' || NONLITERAL.test(sub)) return 'git run through another program';
+    }
+  }
+  const sh = String.raw`(?:\S*/)?(?:ba|z|da|k|mk|tc|c|fi|a)?sh|busybox`;
+  if (new RegExp(String.raw`\|&?\s*(?:(?:sudo|env|exec|command|nohup|nice|time)\s+)*(?:${sh})(?![\w.-])`).test(command)) return 'text fed to a shell';
+  if (new RegExp(String.raw`(?:^|[\s;&|(])(?:${sh})(?![\w.-])[^\n;&|]*<<`).test(command)) return 'text fed to a shell';
+  if (/\benv\b[^\n;&|]*\s(?:-[a-zA-Z]*S|--sp)/.test(command)) return 'a program that splits a string into a command';
+  if (/\bxargs\b[^\n;&|]*\s(?:-[a-zA-Z]*[iIJ]|--repl)/.test(command)) return 'a program that builds a command from its input';
+  return null;
+}
+
+// INVARIANT (#971): only programs with no option or setting that runs another program (no pager, preprocessor,
+// alias or hook): print or test text, list or move files, or report on them. A program that can run one is not here.
+const NON_EXEC = new Set(['echo', 'printf', 'which', 'type', 'whereis', 'hash', 'help', 'test', '[',
+  'ls', 'cat', 'head', 'tail', 'wc', 'grep', 'egrep', 'fgrep', 'cd', 'pushd', 'mkdir', 'rmdir', 'rm', 'cp', 'mv', 'touch', 'stat',
+  'file', 'du', 'realpath', 'readlink', 'basename', 'dirname']);
+const SHELLS = new Set(['sh', 'bash', 'zsh', 'dash', 'ksh', 'mksh', 'ash', 'fish', 'csh', 'tcsh', 'busybox']);
+/** Stands for a word the shell expands, in a line rebuilt for the general matcher. */
+const UNSEEN = '$__unseen__';
+const quoteWord = (t: string) => `'${t.replace(/'/g, `'\\''`)}'`;
+
+/**
+ * Why a line may run a program the model can't name, or hand a shell text it can't read; null when it doesn't.
+ * INVARIANT (#971): every word in command position is literal, after any wrapper too; no wrapper builds a command
+ * from its input; no shell reads its script from a pipe, a here-document or an expanded `-c`.
+ */
+function unseenProgram(list: Cmd[][]): string | null {
+  for (const c of allCommands(list)) {
+    const name = c.words[0]!;
+    if (!plain(name)) return 'a command whose name is expanded';
+    // WHY: the general matcher knows the wrappers (and how each takes its options); a rebuilt line shows it which
+    // words are expanded, so a wrapped command's name is checked the same way.
+    const rebuilt = c.words.map((w) => (plain(w) ? quoteWord(w.text) : UNSEEN)).join(' ');
+    const parts = splitCommands(rebuilt);
+    for (const x of parts) {
+      const run = x.argv[0] ?? '';
+      if (run.includes(UNSEEN)) return 'a command run by another program whose name is expanded';
+      if (!SHELLS.has(basename(run))) continue;
+      const args = x.argv.slice(1);
+      const ci = args.findIndex((t) => /^-[a-zA-Z]*c[a-zA-Z]*$/.test(t));
+      if (ci >= 0) {
+        if ((args[ci + 1] ?? UNSEEN).includes(UNSEEN)) return 'a shell given an expanded script';
+        continue;
+      }
+      // WHY: with no script file (or with -s) a shell runs what it reads; options that take a value don't name one.
+      const operands = args.filter((t, k) => !t.startsWith('-') && !t.startsWith('+') && !/^[-+][oO]$/.test(args[k - 1] ?? ''));
+      const readsInput = !operands.length || args.some((t) => /^-[a-zA-Z]*s/.test(t));
+      if (readsInput && x === parts[0] && (c.piped || c.heredocs.length)) return 'text fed to a shell';
+    }
+    const words = c.words.map((w) => w.text);
+    for (const [k, t] of words.entries()) {
+      const b = basename(t);
+      if (b === 'xargs' && words.slice(k + 1).some((o) => /^-[a-zA-Z]*[iIJ]/.test(o) || /^--repl/.test(o))) return 'a program that builds a command from its input';
+      if (b === 'env') {
+        for (const o of words.slice(k + 1)) {
+          if (!o.startsWith('-') && !ASSIGNMENT.test(o)) break;
+          if (/^-[a-zA-Z]*S/.test(o) || /^--sp/.test(o)) return 'a program that splits a string into a command';
+        }
+      }
+      if (b === 'find') {
+        for (let j = k + 1; j < words.length; j++) {
+          if (!/^-(exec|execdir|ok|okdir)$/.test(words[j]!)) continue;
+          const run = c.words[j + 1];
+          if (!run || !plain(run) || run.text.includes('{}')) return 'a program that builds a command from its input';
+        }
+      }
+    }
+  }
+  return null;
+}
 const GIT_VALUE_OPTIONS = new Set(['-C', '-c', '--git-dir', '--work-tree', '--namespace', '--super-prefix', '--config-env', '--attr-source']);
 
 /** A git command's subcommand (words[0] is git): its text, EXPANSION when it isn't literal, undefined when none. */
@@ -781,19 +872,17 @@ export function commitPlan(command: string, p: PlanEnv): CommitPlan | null {
   });
   if (!list) {
     if (rawCommits.commits || rawCommits.indirect) return refuse(why);
-    return mentions || unread ? refuseUnread(why) : null;
+    if (mentions || unread) return refuseUnread(why);
+    const unseen = unseenInUnread(command, raw);
+    return unseen ? refuseUnread(`${why}; ${unseen}`) : null;
   }
+  const unseen = unseenProgram(list);
+  if (unseen) return refuseUnread(unseen);
 
   const all = allCommands(list);
   const commits: Cmd[] = [];
-  const namesGit = /\bgit\b/.test(command.replace(/["'\\]/g, ''));
   for (const c of all) {
     const name = c.words[0]!;
-    // WHY (#971): an expanded command name can be git, or a program that runs git, with any subcommand.
-    if (!plain(name)) {
-      if (namesGit) return refuseUnread('a command whose name is expanded, in a line that names git');
-      continue;
-    }
     const at = isGitName(name.text) ? 0 : c.words.findIndex((w, k) => k > 0 && isGitName(w.text));
     if (at < 0) continue;
     if (at > 0 && (NON_EXEC.has(name.text) || (name.text === 'command' && /^-[vV]$/.test(c.words[1]?.text ?? '')))) continue;
@@ -803,7 +892,7 @@ export function commitPlan(command: string, p: PlanEnv): CommitPlan | null {
     // only when a literal subcommand follows it there, and never a commit.
     if (sub === EXPANSION) return refuseUnread('a git subcommand that is expanded');
     if (c.words.slice(at).some((w) => w.bare)) return (sub === 'commit' ? refuse : refuseUnread)('an unquoted expansion or pattern in a git command');
-    if (at > 0 && (sub === undefined || sub === 'commit')) return refuseUnread('git run through another program');
+    if (at > 0 && (sub === undefined || sub === 'commit' || sub.includes('{}'))) return refuseUnread('git run through another program');
     if (sub === 'commit') commits.push(c);
   }
   const hidden = looseCommits(loose);

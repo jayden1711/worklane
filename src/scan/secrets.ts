@@ -73,6 +73,9 @@ export function scanCommit(top: string, scope: CommitScanScope, binary = findToo
     const own = join(top, '.gitleaks.toml');
     const config = join(tmp, 'gitleaks.toml');
     writeFileSync(config, existsSync(own) ? readFileSync(own) : '[extend]\nuseDefault = true\n');
+    // WHY (#971): never an ignore list: not one on disk, and not one the commit itself brings (see below).
+    const noIgnores = join(tmp, 'no-ignores');
+    writeFileSync(noIgnores, '');
     const findings: Finding[] = [];
     for (const [i, [what, read]] of routes.entries()) {
       const files = read();
@@ -81,11 +84,13 @@ export function scanCommit(top: string, scope: CommitScanScope, binary = findToo
       for (const [path, text] of files) {
         const parts = path.split('/');
         if (!path || path.startsWith('/') || parts.some((p) => p === '..' || p === '')) throw new Error(`an unexpected path from git: ${JSON.stringify(path)}`);
-        mkdirSync(dirname(join(dir, path)), { recursive: true });
-        writeFileSync(join(dir, path), text, 'latin1');
+        // WHY: the commit's own files are content to scan, never the scanner's settings.
+        const at = path === '.gitleaksignore' ? '.gitleaksignore.content' : path;
+        mkdirSync(dirname(join(dir, at)), { recursive: true });
+        writeFileSync(join(dir, at), Buffer.concat([TEXT_PREFIX, Buffer.from(text, 'latin1')]));
       }
       const report = join(tmp, `report-${i}.json`);
-      const r = spawnSync(binary, ['dir', '.', '--config', config, '--gitleaks-ignore-path', tmp, '--redact', '--no-banner', '--report-format', 'json', '--report-path', report, '--exit-code', String(LEAKS_EXIT)], { cwd: dir, encoding: 'utf8', timeout: 120_000 });
+      const r = spawnSync(binary, ['dir', '.', '--config', config, '--gitleaks-ignore-path', noIgnores, '--redact', '--no-banner', '--report-format', 'json', '--report-path', report, '--exit-code', String(LEAKS_EXIT)], { cwd: dir, encoding: 'utf8', timeout: 120_000 });
       if (r.error) return { status: 'unavailable', error: r.error.message };
       if (r.status === LEAKS_EXIT) {
         const raw = JSON.parse(readFileSync(report, 'utf8')) as { RuleID: string; File: string }[];
@@ -101,6 +106,12 @@ export function scanCommit(top: string, scope: CommitScanScope, binary = findToo
 }
 
 const ZERO = /^0+$/;
+
+/**
+ * Written before every file the commit scan hands the scanner. WHY (#971): so nothing in the content can decide
+ * whether the scanner reads the file.
+ */
+const TEXT_PREFIX = Buffer.alloc(65_536, 0x0a);
 
 /** git in the checkout, for an object or a revision (never a list of changes: those come from the change reader). */
 function gitOut(top: string, args: string[], input?: string): Buffer {
@@ -127,18 +138,86 @@ function objects(top: string, ids: string[]): Buffer[] {
   return got;
 }
 
-/** The lines of `now` that `before` doesn't have, in order, a blank line between runs; NUL bytes dropped. */
+/**
+ * The lines `now` adds to `before`, placed as a line diff's hunks place them: each run of added lines whole, a blank
+ * line between runs; NUL bytes dropped. WHY (#971): computed here, so no config or attribute of the checkout can
+ * change which lines count as added; a line seen elsewhere in the earlier version still counts where it is added.
+ */
 function newLines(before: Buffer | null, now: Buffer): string {
   const text = (b: Buffer) => b.toString('latin1').replace(/\0/g, '');
   const lines = text(now).split('\n');
   if (!before) return lines.join('\n');
-  const had = new Set(text(before).split('\n'));
+  const added = addedLines(text(before).split('\n'), lines);
   const out: string[] = [];
-  for (const l of lines) {
-    if (!had.has(l)) out.push(l);
+  lines.forEach((l, i) => {
+    if (added[i]) out.push(l);
     else if (out.length && out.at(-1) !== '') out.push('');
-  }
+  });
   return out.join('\n');
+}
+
+/** The most work the line diff does (edit steps times the diagonals it keeps) before it counts every line as added. */
+const DIFF_BUDGET = 10_000_000;
+
+/**
+ * Which lines of `b` a shortest edit script from `a` inserts (Myers' algorithm). Over DIFF_BUDGET it marks every line
+ * of `b` as added: more is scanned, never less.
+ */
+export function addedLines(a: string[], b: string[]): boolean[] {
+  const added = new Array<boolean>(b.length).fill(false);
+  let pre = 0;
+  while (pre < a.length && pre < b.length && a[pre] === b[pre]) pre++;
+  let suf = 0;
+  while (suf < a.length - pre && suf < b.length - pre && a[a.length - 1 - suf] === b[b.length - 1 - suf]) suf++;
+  const A = a.slice(pre, a.length - suf);
+  const B = b.slice(pre, b.length - suf);
+  const n = A.length;
+  const m = B.length;
+  const all = () => {
+    for (let i = 0; i < m; i++) added[pre + i] = true;
+    return added;
+  };
+  if (!m) return added;
+  if (!n) return all();
+  const max = n + m;
+  const off = max + 1;
+  let v: Int32Array = new Int32Array(2 * max + 3);
+  const trace: Int32Array[] = [];
+  let found = -1;
+  for (let d = 0; d <= max && found < 0; d++) {
+    if ((d + 1) * v.length > DIFF_BUDGET) return all();
+    trace.push(v.slice());
+    for (let k = -d; k <= d; k += 2) {
+      let x = k === -d || (k !== d && v[off + k - 1]! < v[off + k + 1]!) ? v[off + k + 1]! : v[off + k - 1]! + 1;
+      let y = x - k;
+      while (x < n && y < m && A[x] === B[y]) {
+        x++;
+        y++;
+      }
+      v[off + k] = x;
+      if (x >= n && y >= m) {
+        found = d;
+        break;
+      }
+    }
+  }
+  let x = n;
+  let y = m;
+  for (let d = found; d > 0; d--) {
+    v = trace[d]!;
+    const k = x - y;
+    const prevK = k === -d || (k !== d && v[off + k - 1]! < v[off + k + 1]!) ? k + 1 : k - 1;
+    const prevX = v[off + prevK]!;
+    const prevY = prevX - prevK;
+    while (x > prevX && y > prevY) {
+      x--;
+      y--;
+    }
+    if (x === prevX) added[pre + prevY] = true;
+    x = prevX;
+    y = prevY;
+  }
+  return added;
 }
 
 interface RawEntry {
@@ -206,16 +285,39 @@ function stagedContent(top: string): Map<string, string> {
 }
 
 function worktreeContent(top: string): Map<string, string> {
-  return entryContent(top, rawEntries(rawChanges(top, [])));
+  const entries = rawEntries(rawChanges(top, []));
+  storedAsOnDisk(top, entries.filter((e) => !e.after).map((e) => e.path));
+  return entryContent(top, entries);
 }
 
 function untrackedContent(top: string): Map<string, string> {
+  const paths = untrackedNames(top);
+  storedAsOnDisk(top, paths);
   const out = new Map<string, string>();
-  for (const path of untrackedNames(top)) {
+  for (const path of paths) {
     const now = fromDisk(top, path);
     if (now !== null) out.set(path, newLines(null, now));
   }
   return out;
+}
+
+/** Attributes under which git stores something other than a working-tree file's bytes. */
+const CONVERTING = ['filter', 'working-tree-encoding'];
+
+/**
+ * Throws unless git stores each of these working-tree files as the bytes on disk the scan reads. INVARIANT (#971): a
+ * file with a filter or an encoding attribute, from any attributes source (the worktree's, the index's, the repo's or
+ * the user's), refuses the commit; the scan never runs a filter itself.
+ */
+function storedAsOnDisk(top: string, paths: string[]) {
+  if (!paths.length) return;
+  if (paths.some((p) => p.includes('�'))) throw new Error('a file in this commit has a name that is not UTF-8, so its attributes can\'t be checked');
+  for (const where of [[], ['--cached']]) {
+    const out = gitOut(top, ['check-attr', '-z', '--stdin', ...where, ...CONVERTING], `${paths.join('\0')}\0`).toString('utf8').split('\0');
+    for (let i = 0; i + 2 < out.length; i += 3) {
+      if (out[i + 2] !== 'unspecified' && out[i + 2] !== 'unset') throw new Error(`a file in this commit has a ${out[i + 1]} attribute, so git stores other bytes than the scan reads`);
+    }
+  }
 }
 
 /** The current commit's changes against each of its parents (none: the empty tree). */
