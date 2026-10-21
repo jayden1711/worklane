@@ -72,7 +72,11 @@ case "$cmd" in
   *) echo "$usage" >&2; exit 2 ;;
 esac
 # The same names lib.sh allows (never one whose users or units are another's), except for the helper-only commands.
+# An instance made before its name was reserved (machine, console; #902 round 9) is checked and has what it has removed;
+# nothing is installed, set or added under such a name.
+if [ "$name" != helper ] && { [ "$cmd" = remove ] || [ "$cmd" = check ] || [ "$cmd" = status ] || [ "$sub" = remove ]; }; then need_instance_name "$name" "the instance name" kept; else
 [ "$name" = helper ] || need_instance_name "$name" "the instance name"
+fi
 [[ "$memory_max" =~ ^[1-9][0-9]*[KMGT]$ ]] || { echo "--memory-max: a size such as 8G" >&2; exit 2; }
 [[ "$cpu_weight" =~ ^[0-9]+$ ]] && [ "$cpu_weight" -ge 1 ] && [ "$cpu_weight" -le 10000 ] || { echo "--cpu-weight: 1 to 10000" >&2; exit 2; }
 
