@@ -45,6 +45,8 @@ export function useNow(on: boolean): number {
  */
 /** The longest a page waits for the usage's first answer before it shows anyway. */
 export const USAGE_WAIT_MS = 3_000;
+/** The performance mark set where that wait begins (its timer starts), for a test to measure the wait from. */
+export const USAGE_WAIT_MARK = 'usage-wait-start';
 
 export function useUsage(lastId: number | undefined): { usage: UsageInfo[]; answered: boolean } {
   const names = (): (string | null)[] => {
@@ -66,6 +68,8 @@ export function useUsage(lastId: number | undefined): { usage: UsageInfo[]; answ
     gone.current = false;
     void load(names());
     const t = window.setInterval(() => void load(names()), 30_000);
+    // WHY: the mark is where the wait begins, on the page's own clock: test/no-late-shift.test.ts measures from it (#865).
+    performance.mark(USAGE_WAIT_MARK);
     const bound = window.setTimeout(() => setAnswered(true), USAGE_WAIT_MS);
     return () => {
       gone.current = true;
