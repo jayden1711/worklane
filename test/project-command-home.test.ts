@@ -112,11 +112,12 @@ test('its caches (~/.cache, ~/.npm) are writable inside the command and gone aft
   assert.doesNotMatch(again.stdout, /probe|_cacache/, again.stdout);
 });
 
-test('a cache that is a symlink into the home is not made writable: what it points to stays read-only', { skip: realSkip }, () => {
+test('a cache that is a symlink into the home is never made writable: the run is refused, nothing written through it', { skip: realSkip }, () => {
   const p = agentHome();
   symlinkSync(join(p.home, '.config'), join(p.home, '.cache'));
   const r = asStandIn('echo x > ~/.cache/planted 2>&1; true', p.home, p.work);
-  assert.equal(r.status, 0, r.stderr);
+  // Round 2: a cache that is a link at all is refused (test/project-command-home-links.test.ts has the outward ones).
+  assert.equal(r.status, osAdapter.SANDBOX_UNAVAILABLE, r.stderr);
   assert.ok(!existsSync(join(p.home, '.config', 'planted')), 'wrote through the symlink into ~/.config');
 });
 

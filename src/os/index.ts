@@ -675,6 +675,8 @@ export const PROJECT_SANDBOX_ARGS = ['--dev-bind', '/', '/', '--unshare-user', '
 /** Whether this user can start it: check.sh's probe, and the wrapper's first step. */
 export const PROJECT_SANDBOX_PROBE: readonly string[] = [PROJECT_SANDBOX_TOOL, ...PROJECT_SANDBOX_ARGS, '--', '/bin/sh', '-c', ':'];
 
+/** How many symlinks, in the home or in ~/.config, the wrapper checks for one leading out of the home before refusing. */
+export const LINK_CAP = 500;
 /** A project command's agent user and what its sandbox hides beyond ~/.claude*; `hide` required, never dropped. */
 export interface ProjectRunAs {
   user: string;
@@ -700,11 +702,11 @@ const LINUX_SANDBOX = [
   // Tools by fixed path (no function or PATH entry stands in); a missing one refuses.
   `tool() { local t; for t in "/usr/bin/$1" "/bin/$1"; do [ -x "$t" ] && { printf '%s' "$t"; return 0; }; done; printf '%s\\n' "project command not run: no $1 to resolve its sandbox's paths; ${SANDBOX_FIX}" >&2; return 1; }`,
   `rl=$(tool readlink) || exit ${SANDBOX_UNAVAILABLE}; stt=$(tool stat) || exit ${SANDBOX_UNAVAILABLE}; fnd=$(tool find) || exit ${SANDBOX_UNAVAILABLE}; mkd=$(tool mkdir) || exit ${SANDBOX_UNAVAILABLE}`,
-  'b=$1 h=$2 u=$3; shift 3; hide=(); dirs=(); declare -A seen=() said=(); maxd=0; bad=()',
+  'b=$1 h=$2 u=$3; shift 3; hide=(); dirs=(); declare -A seen=() said=() named=(); maxd=0; bad=()',
   'above() { local d=$1 n; while d=${d%/*}; [ -n "$d" ]; do [ -n "${seen[$d]}" ] && continue; seen[$d]=1; dirs+=("$d"); n=${d//[!\\/]/}; [ "${#n}" -gt "$maxd" ] && maxd=${#n}; done; }',
   // Refusals collected, each once, so one message names every path. Quoted: the agent names them (no forged lines).
   'note() { [ -n "${said[$1]}" ] && return; said[$1]=1; bad+=("$1"); }',
-  `refuse() { local t; t=$("$rl" -- "$1" 2>/dev/null); note "project command not run: \${1@Q} is a symlink (to \${t@Q}) the agent user could change (it owns or can write its directory), on the way to a credential its sandbox hides, so one project command could swap it for the next. If you didn't create it, remove it as the agent user: sudo -u $u rm -- \${1@Q}. If you did, replace it with a real directory the agent may read, or name the credential's real path in credentials.yaml"; }`,
+  `refuse() { local t; named[$1]=1; t=$("$rl" -- "$1" 2>/dev/null); note "project command not run: \${1@Q} is a symlink (to \${t@Q}) the agent user could change (it owns or can write its directory), on the way to a credential its sandbox hides, so one project command could swap it for the next. If you didn't create it, remove it as the agent user: sudo -u $u rm -- \${1@Q}. If you did, replace it with a real directory the agent may read, or name the credential's real path in credentials.yaml"; }`,
   `unres() { note "project command not run: \${1@Q} $2; name the credential's real path in credentials.yaml"; }`,
   // INVARIANT (#787 rounds 7, 8): each decision about a component rests on ONE lstat (its type and owner, or its
   // errno), never two tests the agent could change in between. Stable because the agent can't change who owns a
@@ -748,9 +750,22 @@ const LINUX_SANDBOX = [
   'list() { local o; o=$("$fnd" "$1" -mindepth 1 -maxdepth 1 -name "$2" -printf "%f/" 2>/dev/null) || { unres "$1" "cannot be listed for its credential files"; return; }; while [ -n "$o" ]; do add "$1/${o%%/*}"; o=${o#*/}; done; }',
   // (A ~/.config that isn't a directory holds nothing to hide.) The home must be a directory other than /: the sandbox
   // makes it read-only (below), and with none to make read-only a command could create one and plant config in it.
-  'walk "$h"; hw=$?; hr=',
-  'if [ "$hw" -eq 0 ] && [ "$RT" = directory ] && [ "$R" != / ]; then hr=$R; list "$hr" ".claude*"; walk "$hr/.config"; if [ $? -eq 0 ] && [ "$RT" = directory ]; then list "$R" "*-claude-key"; fi',
+  'walk "$h"; hw=$?; hr= cfg=',
+  'if [ "$hw" -eq 0 ] && [ "$RT" = directory ] && [ "$R" != / ]; then hr=$R; list "$hr" ".claude*"; walk "$hr/.config"; if [ $? -eq 0 ] && [ "$RT" = directory ]; then cfg=$R; list "$R" "*-claude-key"; fi',
   `elif [ "$hw" -ne 2 ]; then note "project command not run: the agent user's home \${h@Q} is not a directory (other than /) its sandbox can make read-only, so a command could plant config there that the agent user reads outside the sandbox; set the instance's run_as.agent_home to the agent user's real home"; fi`,
+  // INVARIANT (#798): the read-only home is only as good as where its links lead. A symlink directly in the home or
+  // directly in ~/.config that resolves (every link followed, `..` and a missing tail included: readlink -m) outside
+  // the home would let a command write, through it, what an agent-user process outside the sandbox reads later
+  // (~/.profile, ~/.ssh, ~/.local to /tmp): refused, all named at once. Bounded: past LINK_CAP symlinks in one
+  // directory, refused rather than run with some unchecked. ~/.cache and ~/.npm become throwaway mounts, never through
+  // a link (a write there would reach, and outlive the command at, what it points to): refused as links at all.
+  `links() { local o n=0 p t; o=$("$fnd" "$1" -mindepth 1 -maxdepth 1 -type l -printf "%f/" 2>/dev/null) || { note "project command not run: \${1@Q} cannot be listed for symlinks that could lead out of the agent user's home"; return; }`,
+  `  while [ -n "$o" ]; do n=$((n + 1)); if [ "$n" -gt ${LINK_CAP} ]; then note "project command not run: \${1@Q} holds more than ${LINK_CAP} symlinks to check for one leading out of the agent user's home; remove the ones it doesn't need"; return; fi`,
+  // (A link already refused on the way to a credential is named once, by that refusal.)
+  '    p=$1/${o%%/*}; o=${o#*/}; [ -n "${named[$p]}" ] && continue; t=$("$rl" -m -- "$p" 2>/dev/null) || t=',
+  `    case $t in "$hr"|"$hr"/*) ;; *) note "project command not run: \${p@Q} is a symlink to \${t@Q}, outside the agent user's home: through it a command could write what an agent-user process outside the sandbox reads later. Replace it with the real file or directory, or a link inside the home; to remove it, as the agent user: sudo -u $u rm -- \${p@Q}" ;; esac`,
+  '  done; }',
+  `if [ -n "$hr" ]; then links "$hr"; [ -n "$cfg" ] && links "$cfg"; for n in .cache .npm; do p=$hr/$n; st "$p"; if [ "$S" -eq 0 ] && [ "$T" = "symbolic link" ]; then note "project command not run: \${p@Q} is a symlink; a project command's ~/.cache and ~/.npm are throwaway directories its sandbox mounts there, never through a link (a write would reach, and outlive the command at, what it points to). Make it a real directory: as the agent user, sudo -u $u rm -- \${p@Q}"; fi; done; fi`,
   'while [ "$#" -gt 0 ] && [ "$1" != -- ]; do add "$1"; shift; done; shift',
   `if [ "\${#bad[@]}" -gt 0 ]; then printf '%s\\n' "\${bad[@]}" >&2; exit ${SANDBOX_UNAVAILABLE}; fi`,
   'binds=(); for ((i = 1; i <= maxd; i++)); do for d in "${dirs[@]}"; do n=${d//[!\\/]/}; [ "${#n}" -eq "$i" ] && binds+=(--bind "$d" "$d"); done; done',
@@ -760,7 +775,9 @@ const LINUX_SANDBOX = [
   // it can be renamed now), before the masks (they still hide what's under it). Only its caches are writable, each an
   // empty tmpfs that is gone when the command ends: never a persistent directory, since ~/.cache holds what unsandboxed
   // processes run (corepack, go-build, browsers) and ~/.npm what npx runs. A cache made only if absent (npm fails on a
-  // read-only one), and only over a real directory: a symlink isn't followed, what it points to stays read-only.
+  // read-only one), and only over a real directory (one that is a symlink was refused above). What a link elsewhere in
+  // the home leads to stays read-only only inside the home: links leading out of it directly in the home or ~/.config
+  // were refused above; one deeper down (~/.ssh/config, a link to /tmp) is followed where it leads.
   'homes=(--ro-bind "$hr" "$hr"); for n in .cache .npm; do p=$hr/$n; st "$p"; if [ "$S" -ne 0 ] && [ "$E" = "No such file or directory" ]; then "$mkd" -m 700 -- "$p" 2>/dev/null; st "$p"; fi; if [ "$S" -eq 0 ] && [ "$T" = directory ]; then homes+=(--tmpfs "$p"); fi; done',
   `box=(${PROJECT_SANDBOX_ARGS.join(' ')})`,
   `if ! err=$("$b" "\${box[@]}" -- /bin/sh -c : 2>&1); then printf '%s\\n' "project command not run: its sandbox didn't start ($err); ${SANDBOX_FIX}" >&2; exit ${SANDBOX_UNAVAILABLE}; fi`,
