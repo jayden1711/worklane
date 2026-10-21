@@ -134,9 +134,14 @@ if [ -n "$abort" ]; then
   exec 9> "$ADD_PROJECT_LOCK"
   flock -n 9 || refuse "an add-project, instance-remove or instance-rename is running on this machine; wait for it to finish"
   say "abort: $new goes, $old's records and unit come back"
+  # Root's auto_merge switches need nothing: both names share one id (instance_alias), so an OFF given to either during
+  # the rename is the old name's already. <new>'s pointer goes with <new> (instance-remove.sh, which refuses while it
+  # runs: its pointer then stays, and it reads the shared switches), or below when it has no user yet.
   if done_step records; then records rekey "$new" "$old" "$ARCHIVE/$new-abort-$(date -u +%Y%m%dT%H%M%SZ).records.json"; [ ! -f "/var/lib/worklane/init/$old.json" ] || chgrp "wl-$old" "/var/lib/worklane/init/$old.json"; fi
   # <new> never ran: its history is <old>'s, exported already.
-  if done_step users; then flock -u 9; bash "$here/instance-remove.sh" "$new" --yes --exported "$(sed -n 's/^bundle=//p' "$progress" | tail -1)"; flock -n 9 || refuse "lost the lock"; fi
+  if done_step users; then flock -u 9; bash "$here/instance-remove.sh" "$new" --yes --exported "$(sed -n 's/^bundle=//p' "$progress" | tail -1)"; flock -n 9 || refuse "lost the lock"
+  # No user of <new>'s yet, so nothing of it runs: its pointer goes (instance-remove.sh takes it otherwise).
+  else rm -f -- "$POLICY_ROOT_DIR/$new.id"; fi
   if [ -f "$parked" ]; then mv -f "$parked" "$unit"; systemctl daemon-reload; echo "put back $unit ($old stays stopped: sudo systemctl start worklane-$old.service)"; fi
   rm -f "$progress"
   echo "aborted: $old is as it was, stopped; $new is gone"
@@ -197,6 +202,10 @@ fi
 install -d -o root -g root -m 0700 "$RENAMES" "$ARCHIVE"
 [ -n "$started" ] || printf 'repo=%s\n' "$repo" > "$progress"
 chmod 0600 "$progress"
+# From here both names are one instance's auto_merge switches: the new name's id pointer holds the old one's id (made
+# now, with its spare, if the old name had none), so the rename never carries, forwards or moves a switch. Not again
+# on a rerun once the old name's removal is done (it would make a pointer for a name that is gone).
+done_step remove || instance_alias "$old" "$new"
 step_failed() {
   local s="$1"
   echo >&2
@@ -280,6 +289,8 @@ step_home() {
     echo "carried $from -> $to"
   done <<<"$named"
   find "$(inst_dir "$new")" -maxdepth 1 -type f -exec chown -h "wl-$new:wl-$new" {} +
+  # The old name's policy.yaml was root's (issue #726): the new name's is too, from the start, its content as carried.
+  carry_policy_root "$old" "$new"
   # The agents' Claude logins and account profiles (claude-account.sh's dirs), each the new user's own.
   copy_as "$oa/.claude/.credentials.json" "$na/.claude/.credentials.json" "wl-$new-agent"
   copy_as "$oa/.claude-profiles" "$na/.claude-profiles" "wl-$new-agent"
