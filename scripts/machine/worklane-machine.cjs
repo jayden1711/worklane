@@ -129,6 +129,7 @@ function instanceNameProblem(s) {
   if (s === 'dash') return 'wl-dash is the dashboard viewer';
   if (s === 'hub' || s === 'hub-setup') return `worklane-dashboard-${s}.service is the dashboard hub's`;
   if (s === 'update' || s === 'tailscale' || s === 'claude-account' || s === 'egress') return `worklane-${s}.service is the machine's own`;
+  if (s === 'machine' || s === 'console') return `/etc/sudoers.d/worklane-${s} is the machine's own sudoers file`;
   if (s === 'agent' || s === 'eval' || s === 'work' || s === 'mcp' || s === 'mcpc' || s === 'mcpctl') return `its test user wl-test-${s} would be instance test's ${s} name, and wl-ci-${s} the ${s} name of instance ci`;
   if (s.startsWith('test-')) return `wl-${s} is the test user of instance ${s.slice(5)}`;
   if (s.startsWith('ci-')) return `wl-${s} is the user of CI runner ${s.slice(3)}`;
@@ -250,6 +251,17 @@ function parseClaudeFailover(_args) {
 const coordinatorInstance = (user) => {
   const m = /^wl-(.+)$/.exec(user || '');
   return m && instanceName(m[1]) ? m[1] : null;
+};
+/**
+ * The instance a coordinator's set-policy is for (#902 round 9): any name in the shape every instance name has had, so
+ * an instance made before its name was reserved (machine, console) can still turn things off. set-policy only
+ * tightens: parsePolicySet takes land_mode, main_watch and auto_merge only toward pr, auto and off, and root's policy
+ * set checks every other key a coordinator sends against the value in effect (src/policy-root.ts setPolicy). Every
+ * other step keeps coordinatorInstance.
+ */
+const policyInstance = (user) => {
+  const m = /^wl-([a-z][a-z0-9-]{0,20})$/.exec(user || '');
+  return m ? m[1] : null;
 };
 
 /** claude-account.sh status, here: the only claude-account action (parseClaudeAccount takes no other). */
@@ -592,7 +604,7 @@ function parsePolicySet(args) {
 }
 
 function policySet(p) {
-  const instance = coordinatorInstance(process.env.SUDO_USER);
+  const instance = policyInstance(process.env.SUDO_USER);
   if (!instance) {
     process.stderr.write(`set-policy here is for a coordinator, through sudo; an admin runs: ${ENGINE_CLI} policy set <instance> ${p.key} ${p.value}\n`);
     return 2;
@@ -704,4 +716,4 @@ function main(argv) {
 }
 
 if (require.main === module) process.exitCode = main(process.argv.slice(2));
-module.exports = { parsePolicySet, POLICY_SET_KEYS, POLICY_ONLY, parsePlugin, pluginHosts, mcpRegistries, pluginUrlProblem, pluginPathProblem, runLogged, needsUnit, unitCommand, IN_UNIT, parse, instanceNameProblem, parseAddProject, parseClaudeAccount, parseClaudeProfile, parseClaudeFailover, parseTailscale, tailscaleCommand, coordinatorInstance, parseSigner, fingerprint, readPending, writePending, PENDING, PENDING_MAX, PENDING_TTL_MS };
+module.exports = { parsePolicySet, POLICY_SET_KEYS, POLICY_ONLY, parsePlugin, pluginHosts, mcpRegistries, pluginUrlProblem, pluginPathProblem, runLogged, needsUnit, unitCommand, IN_UNIT, parse, instanceNameProblem, parseAddProject, parseClaudeAccount, parseClaudeProfile, parseClaudeFailover, parseTailscale, tailscaleCommand, coordinatorInstance, policyInstance, parseSigner, fingerprint, readPending, writePending, PENDING, PENDING_MAX, PENDING_TTL_MS };

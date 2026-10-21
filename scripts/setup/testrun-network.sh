@@ -39,7 +39,8 @@ case "$cmd" in
     [ -n "$tiers" ] || { echo "enable needs --tiers" >&2; echo "$usage" >&2; exit 2; }
     [[ "$tiers" =~ ^[a-z][a-z0-9_-]{0,39}(,[a-z][a-z0-9_-]{0,39}){0,31}$ ]] || { echo "--tiers: tier names (lowercase letters, digits, _ or -, at most 40 each; at most 32), comma-separated, got $tiers" >&2; exit 2; }
     ;;
-  disable) instance_name_ok "$name" && [ -z "$tiers" ] || { echo "$usage" >&2; exit 2; } ;;
+  # An instance made before its name was reserved (machine, console) can still lose what it has (#902 round 9).
+  disable) kept_instance_name_ok "$name" && [ -z "$tiers" ] || { echo "$usage" >&2; exit 2; } ;;
   *) echo "$usage" >&2; exit 2 ;;
 esac
 as_root "$cmd" ${name:+"$name"} ${tiers:+--tiers "$tiers"}

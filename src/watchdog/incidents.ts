@@ -61,6 +61,9 @@ export const KINDS = {
   helper_outdated: { title: 'The test sandbox helper is outdated: no test run starts', severity: 'red' },
   // Raised by the engine updater (scripts/machine/<cli>-update.cjs): after an install, an instance never said whether its sandbox check passed.
   update_sandbox_unconfirmed: { title: "An engine update couldn't confirm the test sandbox", severity: 'amber' },
+  // Raised by the engine updater (scripts/machine/<cli>-update.cjs), every run: the machine helper's sudoers rule is not
+  // what the installed engine's machine-helper.sh writes (#898). Its fix is the exact command; closes once it is current.
+  machine_sudoers_stale: { title: "The machine helper's sudoers rule is out of date", severity: 'amber' },
   // Raised by the coordinator itself (src/usage-limit.ts), not a probe: runs wait for the limit's reset.
   [USAGE_INCIDENT]: { title: 'Claude usage limit reached: runs are paused', severity: 'amber' },
   // Raised by an older engine's failover (removed, #736): kept so one left open still reads, until the start closes it.

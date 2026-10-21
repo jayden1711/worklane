@@ -557,8 +557,22 @@ function redact(value, o = {}) {
     if (Array.isArray(value))
         return value.map((v) => redact(v, o));
     if (value && typeof value === 'object')
-        return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, redact(v, o)]));
+        return Object.fromEntries(redactKeys(Object.entries(value), o));
     return value;
+}
+function redactKeys(entries, o) {
+    const keys = entries.map(([k]) => redactString(k, o));
+    const used = new Set(entries.filter(([k], i) => keys[i] === k).map(([k]) => k));
+    return entries.map(([k, v], i) => {
+        let key = keys[i];
+        if (key !== k) {
+            const base = key;
+            for (let n = 2; used.has(key); n++)
+                key = `${base} (${n})`;
+            used.add(key);
+        }
+        return [key, redact(v, o)];
+    });
 }
 return exports;
 })();
@@ -2075,6 +2089,8 @@ async function run(deps) {
 
 async function runOnce(deps, seen) {
   const cfg = deps.config();
+  // Read-only and never throws: said every run, updates on or off (#898).
+  watchSudoers(deps);
   watchSigners(deps, cfg);
   if (!cfg || cfg.enabled !== true) {
     stuckCheck(deps, cfg, null); // off: never an alert, and an open one is closed
@@ -2686,6 +2702,133 @@ function signersChangeText(c) {
 }
 const SIGNERS_ACK = 'sudo bash /opt/worklane/current/scripts/setup/updates.sh --acknowledge-signers';
 
+// ---------- the machine helper's sudoers rule, watched (#898) ----------
+
+// syncHelpers keeps the machine helper's bytes in step with the engine, but its sudoers rule is machine-helper.sh's and
+// is never touched here: after an upgrade the rule can be an older engine's (missing a command the new helper takes,
+// or naming one it no longer should). Every run, the installed engine's `machine-helper.sh --check` (read-only) says
+// whether it is current; a stale one is named in the journal and as an incident, with the exact command that rewrites
+// it. Nothing here writes the rule: only that script does, and only ever its own output.
+// The check says which of two cases applies (the owner's rule):
+//   - "stale" (exit 3): the rewrite only drops grants, so the command needs no flag;
+//   - "wider" (exit 4): the engine's rule grants what the installed one doesn't, so the command carries
+//     --replace-sudoers, root's explicit yes.
+const SUDOERS_INCIDENT = 'machine_sudoers_stale';
+const CHECK_PATH = '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin';
+const CHECK_EXIT = { 0: ['absent', 'current'], 3: ['stale'], 4: ['wider'] };
+
+/**
+ * `machine-helper.sh --check` of the engine in `engineDir`: { state: current|absent|stale|wider|unknown, detail, fix? },
+ * or null when that engine has no machine-helper.sh, or when this process isn't `owner`. The owner is root for the
+ * updater; anyone else (a test with the real deps) never runs the installed engine's script. The script and the lib.sh
+ * it sources must be `owner`'s regular files, writable by no one else, or nothing runs (unknown, said why). For stale and
+ * wider, detail is the check's last line followed by the difference it printed, and fix is the command that line names.
+ */
+function machineSudoersCheck(engineDir, exec = execFileSync, owner = 0, top = '/') {
+  if (typeof process.getuid !== 'function' || process.getuid() !== owner) return null;
+  if (!fs.existsSync(path.join(engineDir, 'scripts', 'setup', 'machine-helper.sh'))) return null;
+  const unchecked = (why) => ({ state: 'unknown', detail: `the machine helper's sudoers rule wasn't checked: ${why}` });
+  // The whole path, as the machine helper's rootScript() checks the engine's add-project.sh before running it as root.
+  // The engine directory is resolved once (/opt/worklane/current is a link), and below it nothing may be a link: the
+  // script and the lib.sh it sources must be where the resolved engine has them. Every directory from them up to `top`
+  // (/ on a machine) must be `owner`'s and writable by no one else. bash then runs the resolved path, so the dirname "$0"
+  // it sources lib.sh from is the directory checked here.
+  let real;
+  try {
+    real = fs.realpathSync(engineDir);
+  } catch (e) {
+    return unchecked(firstLine(e));
+  }
+  const setup = path.join(real, 'scripts', 'setup');
+  const script = path.join(setup, 'machine-helper.sh');
+  for (const f of [script, path.join(setup, 'lib.sh')]) {
+    let resolved;
+    try {
+      resolved = fs.realpathSync(f);
+    } catch (e) {
+      return unchecked(firstLine(e));
+    }
+    if (resolved !== f) return unchecked(`${f} goes through a link (to ${resolved})`);
+    const problem = rootFileProblem(readRootFile(f), owner, f) || pathProblem(path.dirname(f), owner, top);
+    if (problem) return unchecked(problem);
+  }
+  let out;
+  let status = 0;
+  try {
+    out = exec('bash', [script, '--check'], { encoding: 'utf8', cwd: '/', env: { PATH: CHECK_PATH, LANG: 'C.UTF-8' }, stdio: ['ignore', 'pipe', 'pipe'], timeout: 60_000 });
+  } catch (e) {
+    out = e && e.stdout;
+    status = e && typeof e.status === 'number' ? e.status : -1;
+    if (status !== 3 && status !== 4) return { state: 'unknown', detail: `couldn't check the machine helper's sudoers rule: ${firstLine(e)}` };
+  }
+  const lines = String(out || '').trim().split('\n');
+  const line = lines.pop() || '';
+  const m = /^(absent|current|stale|wider): /.exec(line);
+  // INVARIANT: a state counts only with its own exit code (CHECK_EXIT); anything else is unknown.
+  if (!m || !(CHECK_EXIT[status] || []).includes(m[1])) return { state: 'unknown', detail: `the machine helper's sudoers check gave no answer: ${line.slice(0, 300)}` };
+  if (m[1] === 'absent' || m[1] === 'current') return { state: m[1], detail: line.slice(0, 600) };
+  // The command the check named, through the engine path it was given (the current link), not the resolved one.
+  const logical = (t) => t.split(`${real}/`).join(`${engineDir.replace(/\/+$/, '')}/`);
+  const diff = lines.filter((l) => /^[+-]/.test(l) && !/^(\+\+\+|---) /.test(l));
+  // INVARIANT (#902 round 7, F3): a pinned --replace-sudoers command is never shown beside a diff cut to fit. For
+  // wider, the incident says how many lines the engine's rule adds and drops, and its fix is `--check` at a root shell,
+  // which prints the whole diff and the pinned command together.
+  if (m[1] === 'wider') {
+    const added = diff.filter((l) => l.startsWith('+')).length;
+    const dropped = diff.length - added;
+    const fix = `sudo bash ${engineDir.replace(/\/+$/, '')}/scripts/setup/machine-helper.sh --check`;
+    const detail = `wider: the engine's rule grants what the installed machine helper rule doesn't (${added} line${added === 1 ? '' : 's'} added, ${dropped} dropped); run the fix at a root shell for the whole diff and the command, pinned to it, that installs it`;
+    return { state: 'wider', detail: detail.slice(0, 600), fix: fix.slice(0, 300) };
+  }
+  const fix = /: (sudo (?:bash|rm -f) \S.*)$/.exec(line);
+  const detail = logical(`${line}${diff.length ? ` The diff: ${diff.join(' | ')}` : ''}`);
+  return { state: m[1], detail: detail.slice(0, 600), ...(fix ? { fix: logical(fix[1]).slice(0, 300) } : {}) };
+}
+
+/** The first directory from `dir` up to `top` (inclusive) that isn't `owner`'s alone, or null when none. */
+function pathProblem(dir, owner, top = '/') {
+  let p = dir;
+  for (;;) {
+    let st;
+    try {
+      st = fs.lstatSync(p);
+    } catch {
+      return `${p} is missing`;
+    }
+    if (!st.isDirectory()) return `${p} isn't a directory`;
+    if (st.uid !== owner || st.mode & 0o022) return `${p} isn't ${owner === 0 ? "root's" : `uid ${owner}'s`} alone (owner ${st.uid}, mode ${(st.mode & 0o777).toString(8)})`;
+    if (p === top) return null;
+    const up = path.dirname(p);
+    if (up === p) return null;
+    p = up;
+  }
+}
+
+/**
+ * Every run, updates on or off: a stale or wider machine helper rule is said and raised, its detail saying which, its
+ * fix the command for that case. A current rule, or none, closes it. Never throws.
+ */
+function watchSudoers(deps) {
+  if (typeof deps.sudoersCheck !== 'function') return;
+  let r;
+  try {
+    r = deps.sudoersCheck();
+  } catch (e) {
+    r = { state: 'unknown', detail: `couldn't check the machine helper's sudoers rule: ${firstLine(e)}` };
+  }
+  if (!r) return;
+  try {
+    if (r.state === 'stale' || r.state === 'wider') {
+      if (typeof deps.warn === 'function') deps.warn(`machine_sudoers_stale: ${r.detail}`);
+      if (typeof deps.raiseIncident === 'function') deps.raiseIncident(SUDOERS_INCIDENT, 'machine-helper', r.detail, r.fix || 'sudo bash /opt/worklane/current/scripts/setup/machine-helper.sh --check');
+    } else if (r.state === 'current' || r.state === 'absent') {
+      if (typeof deps.resolveIncident === 'function') deps.resolveIncident(SUDOERS_INCIDENT, 'machine-helper');
+    } else if (typeof deps.warn === 'function') deps.warn(r.detail);
+  } catch {
+    // the journal has what was said; an alert never stops an update
+  }
+}
+
 /** Every run, before anything else: the signers file against its record. A change is logged, said on stderr, and raised. */
 function watchSigners(deps, cfg) {
   if (typeof deps.signersCheck !== 'function') return;
@@ -2842,6 +2985,8 @@ function realDeps(print = (line) => process.stdout.write(`${line}\n`), files = {
     signersCheck: (file) => checkSigners(file),
     signersHold: () => signersHold(),
     signersAcknowledged: () => takeAcknowledged(),
+    // The installed engine's check, through the current link: the command it names is the one that stays valid.
+    sudoersCheck: () => machineSudoersCheck(path.join(OPT, 'current')),
     // stderr is the unit's journal: a line there needs neither the dashboard nor a coordinator.
     warn: (line) => process.stderr.write(`${line}\n`),
     switchTo: (sha) => {
@@ -2879,6 +3024,7 @@ if (require.main === module) {
   );
 }
 module.exports = { slotPid, drainStep, drainDeadline, drainAfterMs, inFlight, reopen, DRAIN, DRAIN_TTL_MS, DRAIN_INSTALL_TTL_MS, DRAIN_MARGIN_MS, redactDeep, appendLog, sandboxOnTimeout, sandboxCommand, parseSandbox, sandboxVerdict, sandboxWaitMs, verifySandbox, SANDBOX_INCIDENT, SANDBOX_POLL_MS, stuckStep, stuckAlertMs, STUCK_INCIDENT, IDLE_AFTER_MS, journalLine, makeNote, realDeps, chooseCommit, checkRunsOf, firstParentLine, lookbackOf, pendingWaitMs, saveJson, CHECKS_SPACING_MS, VERDICT_TTL_MS, syncHelpers, HELPERS, canaryConfig, canaryCommand, dailyDue, DAY_MS, channelOf, newer, parseTags, newestRelease, verifyRelease, parseInstance, migrateCommand, restoreCommand, parseMigrate, repoFromUrl, fastForward, evaluateChecks, RETIRED_CHECKS, ENGINE_CHECK_SOURCES, checkPins, ruleApps, quiet, parseUnits, parseShow, health, redact, buildCommand, binTargets, binProblems, installTree, run, BUILD_SCRIPT, HEALTH_MS, STABLE_MS };
+Object.assign(module.exports, { SUDOERS_INCIDENT, machineSudoersCheck, watchSudoers });
 Object.assign(module.exports, { SIGNERS_STATE, SIGNERS_INCIDENT, signersDigest, readSignersState, checkSigners, expectSigners, recordSigners, signersHold, acknowledgeSigners, takeAcknowledged, signersChangeText });
 Object.assign(module.exports, { SELF, SELF_PREV, SELF_RECORD, SELF_OFF, SELF_ROLLBACK, readRootFile, selfUpdateOff, verifiedUpdater, syncSelf, setupBefore, setupRecord });
 Object.assign(module.exports, { releaseBase });
