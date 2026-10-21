@@ -241,3 +241,12 @@ A person's own session isn't affected.
 - #845: the hardened install verifies the release tag.
 
 The adversarial suite (#707, `test/adversarial/adversarial.test.ts`) holds attack cases for the merge decision: each one a hostile PR the gate must hold. Its cases cover #820 (`test/adversarial/cases/weakening.json`) and #839 (the `guard-folder-new-file` case). #788's pinned check source has no case yet: the suite doesn't drive the readiness check, so it is listed in `test/adversarial/todo.json`. Label: measured, by the suite's own run.
+
+Its flow cases (`test/adversarial/cases/flow.json`) are decided by the coordinator's own `mergeDecisionFor`, from an event log shaped as a live instance writes it. What they drive, and what they don't yet:
+
+- The verdict: the latest one on the PR's head, and the one carried across a merge-in of the default branch (one merge-in, not a chain of them).
+- A CI fix run started on an earlier head, a refused push of a commit that never became the head, the last stop event when the stop file was deleted by hand, a stop file with no reason, and the latest plan.
+- Evals: only a task with no eval recorded for it, including when another task's eval of the same skill passed. How an eval the task did run came out (an error, the cost cap, a lower score) is driven at the gate only (`test/adversarial/cases/instruction-evals.json`), not through the flow's reading of the log.
+- Not driven: the readiness check (above), the reasons a conflict fix's pushed head adds, and labels or money paths read from the log.
+
+Label: measured, by in-memory mutants of the flow on #957: each mutant that breaks one of the items above turns a case red.
