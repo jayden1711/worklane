@@ -197,8 +197,10 @@ for f in client-secret session-secret; do
 done
 
 state_of() { local coord="wl-$1"; echo "$(home_of "$coord")/.local/state/worklane/instances/$1/state"; }
+# kept: the hub serves every instance already on the machine, one made before its name was reserved (machine, console)
+# too, as before (#902 round 9): an add-project or a removal of another instance rewrites the hub with it.
 for name in "$@"; do
-  need_instance_name "$name"
+  need_instance_name "$name" "instance name" kept
   id -u "wl-$name" >/dev/null 2>&1 || { echo "no wl-$name; run instance.sh $name first" >&2; exit 1; }
   [ -d "$(state_of "$name")" ] || { echo "no state for instance $name at $(state_of "$name"); run engine.sh with it first" >&2; exit 1; }
   # An ACL on the way to the token would expose anything there that others may read: refuse first.

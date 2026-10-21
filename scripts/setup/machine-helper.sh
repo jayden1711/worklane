@@ -37,15 +37,162 @@
 #   - Makes /etc/worklane/slots.json root:root 0644: until now the agent-slots group could
 #     write any content to it; from now on the cap changes only through the helper.
 # Re-run it with the full list after adding an instance.
+#
+#   bash scripts/setup/machine-helper.sh --replace-sudoers=<pin> <name> [<name>...]
+#
+# The owner's rule (#898): the rule is rewritten on its own only when the result is narrower than or equal to what is
+# installed, and it fails closed. That holds only when the installed rule is in this script's own exact shape (lib.sh
+# machine_sudoers_shape) and this script's rule only drops whole commands or users from it. The users named here are
+# the exception: at a root shell you name them on purpose.
+# Anything else changes nothing: a command it lacks (a newer engine's, or a sudo upgraded past 1.9.10), or any line,
+# tag, Defaults, include, negation or escape outside that shape. It prints a unified diff (minus side "installed
+# <file>", plus side "engine (machine-helper.sh)") and the line "rerun as root with --replace-sudoers to install the
+# engine's rule: <command>", then exits 3. The command carries the pin of the rule it showed (--replace-sudoers=<sha256>).
+# Run at a root shell once you've read the diff, it writes that rule whole and nothing else: if the engine's rule has
+# changed since (a release landed, say), it shows the new diff and its new pinned command, and writes nothing. The
+# check runs again at write time, under the rule's lock, and refuses if the rule changed meanwhile. Every writer of the
+# rule in this engine takes that lock: this script, and an instance's removal taking the rule away. instance.sh can't
+# write it: the instance name machine is reserved (#902 round 8). A root writer that takes no lock (a hand edit, visudo
+# or rm at a root shell, an older release's scripts) can still land between the last check's read and the move.
+#
+#   bash scripts/setup/machine-helper.sh --drop=<name>
+#
+# An instance's removal runs it when the engine's rule for the other instances would widen the installed one (#902 round 8):
+# takes wl-<name> out of the installed rule and changes nothing else, under the lock. A rule outside the engine's
+# shape, one that doesn't name wl-<name>, or one naming no one else is refused (exit 3), nothing written.
+# A machine's first install needs no flag: no rule, and no helper
+# or rules record either (a rule taken away from a machine that had the helper is wider to put back). No sudoers rule
+# lets a coordinator run this script; through the helper a coordinator reaches only add-project.sh, with exactly a name
+# and a repo.
+#
+#   bash scripts/setup/machine-helper.sh --check      whether the installed rule is current; changes nothing (#898)
+#
+# The diff, if any, then one last line on stdout:
+#   - "absent: ..." (no rule here), exit 0;
+#   - "current: ..." (byte for byte what this script writes for the instances the rule names whose coordinator users
+#     exist), exit 0;
+#   - "stale: ...", exit 3: the rewrite only drops grants, so the line ends with the command that rewrites it, which
+#     needs no flag;
+#   - "wider: rerun as root with --replace-sudoers to install the engine's rule: <command>", exit 4: this engine's rule
+#     grants what the installed one doesn't.
+# The updater keeps the helper's bytes in step with the engine but never touches sudoers, so after an upgrade the rule
+# can be an older engine's. The updater runs this check every run and names either case (journal, incident).
 source "$(dirname "$0")/lib.sh"
 as_root "$@"
-[ "$#" -ge 1 ] || { echo "usage: machine-helper.sh <name> [<name>...]" >&2; exit 2; }
+here="$(cd "$(dirname "$0")" && pwd)"
+if [ "${1:-}" = --check ]; then
+  [ "$#" -eq 1 ] || { echo "usage: machine-helper.sh --check" >&2; exit 2; }
+  [ -e "$MACHINE_SUDOERS" ] || { echo "absent: no $MACHINE_SUDOERS: the machine helper has no rule on this machine"; exit 0; }
+  names=() users=()
+  # Only names this script takes (the instance-name rules), so the command printed runs (#902 round 9). An instance made
+  # before its name was reserved (machine, console) is left out: rewriting the rule without it only narrows it.
+  for n in $(helper_instances); do if instance_name_ok "$n" && user_exists "wl-$n"; then names+=("$n"); users+=("wl-$n"); fi; done
+  if [ "${#names[@]}" -eq 0 ]; then
+    # In the engine's own shape, naming no user that is here: removing it only narrows. Anything else (a rule this
+    # can't read the users of, as the engine writes them) fails closed: wider.
+    if machine_sudoers_shape < "$MACHINE_SUDOERS" >/dev/null 2>&1; then
+      echo "stale: $MACHINE_SUDOERS names no coordinator user on this machine that the engine keeps in it; remove it, as root: sudo rm -f $MACHINE_SUDOERS"
+      exit 3
+    fi
+    # Its users line can't be read: the command names the instances on this machine from the hub and the checkouts.
+    here_now="$(machine_instances_here | tr '\n' ' ' | sed 's/ $//')"
+    if [ -z "$here_now" ]; then
+      echo "wider: $MACHINE_SUDOERS isn't in the engine's own shape and no instance's coordinator is on this machine; remove it, as root: sudo rm -f $MACHINE_SUDOERS"
+    else
+      for n in $here_now; do users+=("wl-$n"); done
+      rule="$(machine_sudoers "${users[@]}")"
+      sudoers_unified_diff "$MACHINE_SUDOERS" "$rule"
+      echo "wider: rerun as root with --replace-sudoers to install the engine's rule: sudo bash $here/machine-helper.sh --replace-sudoers=$(sudoers_pin "$rule") $here_now"
+    fi
+    exit 4
+  fi
+  rule="$(machine_sudoers "${users[@]}")"
+  if sudoers_current "$MACHINE_SUDOERS" "$rule"; then
+    echo "current: $MACHINE_SUDOERS is what machine-helper.sh writes for ${names[*]}"
+    exit 0
+  fi
+  sudoers_unified_diff "$MACHINE_SUDOERS" "$rule"
+  if sudoers_only_narrows "$MACHINE_SUDOERS" "$rule"; then
+    echo "stale: $MACHINE_SUDOERS is not what machine-helper.sh writes for ${names[*]}, and rewriting it only drops grants (an older engine's, or an edit); rewrite it, as root: sudo bash $here/machine-helper.sh --may-add= ${names[*]}"
+    exit 3
+  fi
+  echo "wider: rerun as root with --replace-sudoers to install the engine's rule: sudo bash $here/machine-helper.sh --replace-sudoers=$(sudoers_pin "$rule") ${names[*]}"
+  exit 4
+fi
+usage="usage: machine-helper.sh [--replace-sudoers=<pin>] [--may-add=<name>|--may-add=] <name> [<name>...] | --drop=<name>"
+# --replace-sudoers=<pin>: root's yes to exactly the rule a waiting run showed (#902 round 6): its pin, the sha256 the
+# printed command carries. A bare --replace-sudoers is refused: it would install whatever the engine's rule is by then.
+# --may-add: the users this run may add to the rule without the flag (add-project's instance being created, a rename's
+# new name; --may-add= for none). Without it, at a root shell, the names given are the ones root adds on purpose.
+pin="" may=() may_set="" drop=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --replace-sudoers=*) pin="${1#*=}"; [[ "$pin" =~ ^[0-9a-f]{64}$ ]] || { echo "$usage" >&2; exit 2; }; shift ;;
+    --replace-sudoers) echo "--replace-sudoers takes the pin of the rule you were shown: --replace-sudoers=<sha256>, as the waiting run printed it" >&2; exit 2 ;;
+    --may-add=*) may_set=1; v="${1#*=}"; if [ -n "$v" ]; then need_instance_name "$v"; may+=("wl-$v"); fi; shift ;;
+    # --drop=<name> (an instance's removal, #902 round 8): take that one coordinator out of the installed rule, nothing
+    # else. Any name the rule can hold, older ones the name rules now refuse included.
+    --drop=*) drop="${1#*=}"; [[ "$drop" =~ ^[a-z][a-z0-9-]{0,20}$ ]] || { echo "$usage" >&2; exit 2; }; shift ;;
+    -*) echo "$usage" >&2; exit 2 ;;
+    *) break ;;
+  esac
+done
+# --drop: a removal never waits on a widening (#902 round 8, A3; decision guide 2). The installed rule, in the engine's
+# own shape, without that one user: it only narrows. Under the lock, shown first, checked again at the move.
+if [ -n "$drop" ]; then
+  [ "$#" -eq 0 ] && [ -z "$pin" ] && [ -z "$may_set" ] || { echo "$usage" >&2; exit 2; }
+  machine_sudoers_lock
+  seen="$(sudoers_state "$MACHINE_SUDOERS")"
+  rule="$(machine_sudoers_without "$MACHINE_SUDOERS" "wl-$drop")" || { echo "refused: $MACHINE_SUDOERS isn't in the engine's own shape, or doesn't name wl-$drop and another coordinator; nothing written. Edit it by hand at a root shell (visudo -f $MACHINE_SUDOERS), or see: sudo bash $here/machine-helper.sh --check"; exit 3; }
+  sudoers_unified_diff "$MACHINE_SUDOERS" "$rule"
+  echo "--drop=$drop: wl-$drop out of the installed rule, nothing else changed (above)"
+  machine_helper_drop_precommit() { machine_sudoers_precommit "$1" "$seen" "" "$rule" 0; }
+  SUDOERS_PRECOMMIT=machine_helper_drop_precommit
+  install_sudoers worklane-machine "$rule"
+  SUDOERS_PRECOMMIT=""
+  exit 0
+fi
+[ "$#" -ge 1 ] || { echo "$usage" >&2; exit 2; }
 users=()
 for name in "$@"; do
   need_instance_name "$name"
-  id -u "wl-$name" >/dev/null 2>&1 || { echo "no wl-$name; run instance.sh $name first" >&2; exit 1; }
+  user_exists "wl-$name" || { echo "no wl-$name; run instance.sh $name first" >&2; exit 1; }
   users+=("wl-$name")
 done
+[ -n "$may_set" ] || may=("${users[@]}")
+# One writer of the rule at a time, from this check to its write (#902 rounds 6, 7): every writer in this engine takes
+# this lock, which only root can open, and none of them writes without it (lib.sh machine_sudoers_lock). A root writer
+# outside the engine takes none (see the top).
+machine_sudoers_lock
+# Before anything changes: a rule that would grant more than the installed one waits for --replace-sudoers (#898).
+rule="$(machine_sudoers "${users[@]}")"
+seen="$(sudoers_state "$MACHINE_SUDOERS")"
+# A first install, read now: this run installs the helper before it writes the rule (#902 round 7, CI).
+first=0
+if [ "$seen" = absent ] && machine_helper_never_set_up; then first=1; fi
+rerun="sudo bash $here/machine-helper.sh --replace-sudoers=$(sudoers_pin "$rule") $*"
+if [ -z "$pin" ] && ! sudoers_only_narrows "$MACHINE_SUDOERS" "$rule" ${may[@]+"${may[@]}"}; then
+  sudoers_unified_diff "$MACHINE_SUDOERS" "$rule"
+  echo "rerun as root with --replace-sudoers to install the engine's rule: $rerun"
+  exit 3
+fi
+# --replace-sudoers=<pin>: only the rule that pin was printed for. Another (a release landed since, say) is shown, with
+# its own pinned command, and nothing is written (#902 round 6).
+if [ -n "$pin" ]; then
+  sudoers_unified_diff "$MACHINE_SUDOERS" "$rule"
+  if [ "$(sudoers_pin "$rule")" != "$pin" ]; then
+    echo "refused: the engine's rule (above) is not the one --replace-sudoers=$pin was printed for; nothing written"
+    echo "rerun as root with --replace-sudoers to install the engine's rule: $rerun"
+    exit 3
+  fi
+  echo "--replace-sudoers: installing the engine's rule above"
+else
+  # Without the flag too, what it writes is shown first (#902 round 8, A11): the users named here and any grant dropped.
+  sudoers_unified_diff "$MACHINE_SUDOERS" "$rule"
+fi
+# Every name this run writes into the rule is no longer an instance being created (#898): off root's list now, before
+# anything is written. If the run then fails, those names need --replace-sudoers to be added, which fails closed.
+new_instance_clear "$@"
 command -v node >/dev/null || { echo "needs node on root's PATH (node.sh)" >&2; exit 1; }
 [ -d /etc/worklane ] || { echo "no /etc/worklane; run machine.sh first" >&2; exit 1; }
 
@@ -73,7 +220,15 @@ chmod 0644 /etc/worklane/slots.json
 cat /etc/worklane/slots.json
 
 say "sudoers: ${users[*]} may run exactly the helper's 36 commands (claude-account status, and set-policy auto_merge off, land_mode pr and main_watch auto among them), add-project <name> <owner/repo>, stage-update-signer or discard-update-signer <principal> ssh-ed25519 <public key>, the plugin steps and set-policy <key> <value> (its own instance only)"
+# The one check, again, at write time (#902 rounds 6, 7), under the lock: the rule must still be what the check above
+# read, and the rule written must still only narrow it, or carry root's pin. It runs here and once more inside
+# install_sudoers, right before its move (SUDOERS_PRECOMMIT), after visudo, where the temp file must also hold byte
+# for byte the rule checked. Otherwise nothing is written (exit 3).
+machine_sudoers_commit_ok "$seen" "$pin" "$rule" "$first" ${may[@]+"${may[@]}"} || exit 3
+machine_helper_precommit() { machine_sudoers_precommit "$1" "$seen" "$pin" "$rule" "$first" ${may[@]+"${may[@]}"}; }
+SUDOERS_PRECOMMIT=machine_helper_precommit
 install_sudoers worklane-machine "$(machine_sudoers "${users[@]}")"
+SUDOERS_PRECOMMIT=""
 if sudo_regex_ok; then
   echo "sudo $(sudo_version): $SUDO_REGEX_MIN or later, so the add-project, stage-update-signer, discard-update-signer, plugin and set-policy rules are installed"
   left_out='[]'
