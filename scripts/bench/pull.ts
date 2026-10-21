@@ -16,8 +16,12 @@
 //   own commit object (none of its parents: no upstream history) and exactly the objects of its tree are packed out.
 //   On the host that commit must hash to base_commit and name that tree, so the tree is base_commit's by its hash,
 //   not by the container's word;
-// - with none: /testbed's files are added to a throwaway repository in the container (outside /testbed), and that
-//   tree is packed out. Its tree id is recorded as the content hash, and the output says HEAD wasn't checked.
+// - with none: refused (#947 round 2). Nothing would bind its files to base_commit, and an image takes that path just
+//   by having no /testbed/.git. A content-hash fallback would be a loosening for the owner to decide.
+// What comes out is bounded (#947 round 2): the probe's output and the pack's (TREE_CAPS.copyOutBytes) are capped in
+// bytes as they arrive, and past the cap the exec is ended, nothing is kept and the container is removed. What the pack
+// decodes to (every object's size, summed) is capped too (TREE_CAPS.treeBytes), before anything is checked out: a small
+// pack can inflate a thousandfold. And the image must be the task's own digest reference: no tag ever reaches `run`.
 // On the host, in a temporary folder in the store: the pack is indexed (git hashes every object), the tree must be
 // there with every object it reaches, and one root commit is made on it (fixed author and date, so the same tree
 // always gives the same commit). A fresh bare repository fetches only that commit (so nothing unreachable comes
@@ -37,10 +41,10 @@ import { randomBytes, createHash } from 'node:crypto';
 import { closeSync, constants, fstatSync, lstatSync, mkdirSync, openSync, readSync, renameSync, rmdirSync, rmSync, type Stats } from 'node:fs';
 import { join } from 'node:path';
 import type { Mode } from './caps.js';
-import { LimitsNotApplied, TaskRunner, WORK, type Docker, type DockerOptions, type TaskContainer } from './container.js';
+import { LimitsNotApplied, OutputTooLarge, TaskRunner, WORK, type Docker, type DockerOptions, type TaskContainer } from './container.js';
 import { pullImage, PullRefused, writeVerified } from './download.js';
 import { realPath, type BenchLayout } from './paths.js';
-import type { Pins } from './pins.js';
+import { DIGEST_REF, requirePinned, type Pins } from './pins.js';
 import { loadTasks, type SelectedTask } from './select.js';
 import { heldOutCheck } from './store.js';
 
@@ -50,6 +54,21 @@ export const TREE_RECORD = 'tree.json';
 
 /** A refusal whose message names no task: safe to print beside the task's key. */
 export class Refused extends Error {}
+
+/** How much a task's copy-out may bring: the pack's base64 text, and what its objects decode to, summed. */
+export interface TreeCaps {
+  copyOutBytes: number;
+  treeBytes: number;
+}
+
+/**
+ * The caps `bench pull` uses. Both are guesses at what SWE-bench Verified's largest base tree needs, with room: none is
+ * measured here (no real image is pulled). A tree over either is refused, naming the cap; raising one is a reviewed
+ * change. 384 MiB of base64 (a 288 MiB pack) stays well inside one string's limit (about 512 MiB).
+ */
+export const TREE_CAPS: Readonly<TreeCaps> = Object.freeze({ copyOutBytes: 384 * 1024 * 1024, treeBytes: 1024 * 1024 * 1024 });
+/** The probe answers three short lines. */
+const PROBE_MAX_BYTES = 64 * 1024;
 
 const message = (e: unknown): string => (e instanceof Error ? e.message : String(e));
 const SHA1 = /^[0-9a-f]{40}$/;
@@ -83,9 +102,9 @@ export interface TreeRecord {
   instance_id: string;
   base_commit: string;
   image_digest: string;
-  /** git: /testbed's HEAD tree, HEAD checked to be base_commit; content: /testbed's files (no git metadata there). */
-  source: 'git' | 'content';
-  head_checked: boolean;
+  /** git: /testbed's HEAD tree, HEAD checked to be base_commit, bound by its commit's hash. The only source taken. */
+  source: 'git';
+  head_checked: true;
   tree: string;
   /** The one commit, on the tree, in the bare remote and the clone. */
   commit: string;
@@ -93,7 +112,6 @@ export interface TreeRecord {
 
 export interface TreeResult {
   key: string;
-  source: 'git' | 'content';
   /** true: already there and verified, so nothing was copied. */
   kept: boolean;
 }
@@ -113,20 +131,8 @@ const PROBE = "if [ -e /testbed/.git ]; then echo git && git -c safe.directory=/
  * pack, in base64. Reads /testbed only. The commit object lets the host check, by its hash, that the tree is base_commit's.
  */
 const PACK = "{ printf '%s\\n' \"$1\"; git -c safe.directory=/testbed -c core.fsmonitor=false -C /testbed rev-list --objects \"$2\"; } | git -c safe.directory=/testbed -c core.fsmonitor=false -C /testbed pack-objects -q --stdout | base64 -w0";
-/** In the container, with no git metadata in /testbed: its files in a throwaway repository under /work, the tree id, then that tree as a pack in base64. */
-const CONTENT = [
-  'set -e',
-  'g=/work/content.git',
-  'git init -q --bare --template= "$g"',
-  'cd /testbed',
-  'GIT_DIR="$g" GIT_INDEX_FILE="$g/index" GIT_WORK_TREE=/testbed git -c core.fsmonitor=false add -A -f .',
-  't=$(GIT_DIR="$g" GIT_INDEX_FILE="$g/index" git write-tree)',
-  'echo "$t"',
-  "printf '%s\\n' \"$t\" | GIT_DIR=\"$g\" git pack-objects -q --stdout --revs | base64 -w0",
-].join('\n');
-
-/** The three scripts run in a task's container, for the test that runs them with sh on a stand-in /testbed. */
-export const CONTAINER_SCRIPTS = Object.freeze({ probe: PROBE, pack: PACK, content: CONTENT });
+/** The two scripts run in a task's container, for the test that runs them with sh on a stand-in /testbed. */
+export const CONTAINER_SCRIPTS = Object.freeze({ probe: PROBE, pack: PACK });
 
 /** A pack sent as base64: refused unless it is base64 and not empty. Its contents are checked by git on the host. */
 function decodePack(text: string): Buffer {
@@ -136,34 +142,36 @@ function decodePack(text: string): Buffer {
 }
 
 interface Copied {
-  source: 'git' | 'content';
   tree: string;
   pack: Buffer;
 }
 
+/** run.exec with a byte cap: past it, the exec is ended and refused (Refused, naming the cap). */
+async function capped(run: TaskRunner, argv: string[], timeoutMs: number, cap: number) {
+  try {
+    return await run.exec(WORK, argv, {}, timeoutMs, undefined, cap);
+  } catch (e) {
+    if (e instanceof OutputTooLarge) throw new Refused(`what came out of /testbed went over ${cap} bytes: ended, refused, nothing kept`);
+    throw e;
+  }
+}
+
 /** The task's base tree, packed out of its container's /testbed: as the top of this file says. */
-async function copyOut(run: TaskRunner, task: SelectedTask): Promise<Copied> {
-  const probe = await run.exec(WORK, ['sh', '-c', PROBE], {}, 5 * 60_000);
+async function copyOut(run: TaskRunner, task: SelectedTask, caps: TreeCaps): Promise<Copied> {
+  const probe = await capped(run, ['sh', '-c', PROBE], 5 * 60_000, PROBE_MAX_BYTES);
   if (probe.status !== 0) throw new Refused(`the /testbed probe in its container failed (exit ${probe.status ?? 'none'}): refused, nothing kept`);
   const lines = probe.stdout.split('\n').map((l) => l.trim());
   while (lines.at(-1) === '') lines.pop();
-  if (lines[0] === 'git') {
-    const [head, tree] = [lines[1] ?? '', lines[2] ?? ''];
-    if (lines.length !== 3 || !SHA1.test(head) || !SHA1.test(tree)) throw new Refused("/testbed has git metadata, but its HEAD and tree didn't read as object ids: refused, nothing kept");
-    if (head !== task.row.base_commit) throw new Refused("/testbed's HEAD is not this task's base_commit: refused, nothing kept");
-    const p = await run.exec(WORK, ['sh', '-c', PACK, 'sh', head, tree], {}, 60 * 60_000);
-    if (p.status !== 0) throw new Refused(`copying /testbed's tree out failed (exit ${p.status ?? 'none'}): refused, nothing kept`);
-    return { source: 'git', tree, pack: decodePack(p.stdout) };
-  }
   if (lines.length === 1 && lines[0] === 'none') {
-    const p = await run.exec(WORK, ['sh', '-c', CONTENT], {}, 60 * 60_000);
-    if (p.status !== 0) throw new Refused(`copying /testbed's content out failed (exit ${p.status ?? 'none'}): refused, nothing kept`);
-    const nl = p.stdout.indexOf('\n');
-    const tree = nl < 0 ? '' : p.stdout.slice(0, nl).trim();
-    if (!SHA1.test(tree)) throw new Refused("/testbed's content didn't come out as a tree id and a pack: refused, nothing kept");
-    return { source: 'content', tree, pack: decodePack(p.stdout.slice(nl + 1)) };
+    throw new Refused("/testbed has no git metadata, so nothing binds its files to this task's base_commit: refused, nothing copied out or kept");
   }
-  throw new Refused('the /testbed probe answered neither git nor none: refused, nothing kept');
+  if (lines[0] !== 'git') throw new Refused('the /testbed probe answered neither git nor none: refused, nothing kept');
+  const [head, tree] = [lines[1] ?? '', lines[2] ?? ''];
+  if (lines.length !== 3 || !SHA1.test(head) || !SHA1.test(tree)) throw new Refused("/testbed has git metadata, but its HEAD and tree didn't read as object ids: refused, nothing kept");
+  if (head !== task.row.base_commit) throw new Refused("/testbed's HEAD is not this task's base_commit: refused, nothing kept");
+  const p = await capped(run, ['sh', '-c', PACK, 'sh', head, tree], 60 * 60_000, caps.copyOutBytes);
+  if (p.status !== 0) throw new Refused(`copying /testbed's tree out failed (exit ${p.status ?? 'none'}): refused, nothing kept`);
+  return { tree, pack: decodePack(p.stdout) };
 }
 
 /** lstat, or null when nothing is there. */
@@ -248,7 +256,7 @@ function keepExisting(final: string, uid: number, task: SelectedTask): TreeResul
   const rec = readRecord(join(final, TREE_RECORD), uid);
   if (rec.key !== task.key || rec.instance_id !== task.row.instance_id || rec.base_commit !== task.row.base_commit) throw new Refused(`the store's tree at ${final} is another task's: refused, left as it is; move it aside to build it again`);
   if (rec.image_digest !== task.ref.digest) throw new Refused(`the store's tree at ${final} came from another image: refused, left as it is; move it aside to build it again`);
-  if ((rec.source !== 'git' && rec.source !== 'content') || rec.head_checked !== (rec.source === 'git') || !SHA1.test(rec.tree ?? '') || !SHA1.test(rec.commit ?? '')) throw new Refused(`${join(final, TREE_RECORD)} is not a whole tree record: refused, left as it is`);
+  if (rec.source !== 'git' || rec.head_checked !== true || !SHA1.test(rec.tree ?? '') || !SHA1.test(rec.commit ?? '')) throw new Refused(`${join(final, TREE_RECORD)} is not a whole tree record bound to base_commit: refused, left as it is`);
   checkRemote(join(final, 'remote.git'), rec.commit!, rec.tree!, final);
   const clone = join(final, 'clone');
   const cst = lstatOrNull(clone);
@@ -259,11 +267,19 @@ function keepExisting(final: string, uid: number, task: SelectedTask): TreeResul
     cloneOk = false;
   }
   if (!cloneOk) throw new Refused(`${final}: its clone is missing, a link, or not at the recorded commit with its bare remote as origin: refused, left as it is; move it aside to build it again`);
-  return { key: task.key, source: rec.source, kept: true };
+  return { key: task.key, kept: true };
+}
+
+/** What every object in the repository at `gitDir` decodes to, summed (`cat-file --batch-all-objects`). */
+function decodedBytes(gitDir: string): number {
+  return git(['--git-dir', gitDir, 'cat-file', '--batch-all-objects', '--batch-check=%(objectsize)'])
+    .split('\n')
+    .filter(Boolean)
+    .reduce((n, l) => n + Number(l), 0);
 }
 
 /** The bare remote, the clone and the record, built in `tmp` from what came out of the container. Throws Refused on any doubt. */
-function build(tmp: string, final: string, uid: number, task: SelectedTask, c: Copied): void {
+function build(tmp: string, final: string, uid: number, task: SelectedTask, c: Copied, caps: TreeCaps): void {
   const scratch = join(tmp, 'import.git');
   const remote = join(tmp, 'remote.git');
   const clone = join(tmp, 'clone');
@@ -275,16 +291,22 @@ function build(tmp: string, final: string, uid: number, task: SelectedTask, c: C
   } catch {
     throw new Refused("what came out of /testbed is not a pack holding its tree: refused, nothing kept");
   }
-  if (c.source === 'git') {
-    // By hash, not by the container's word: base_commit's own commit object, and its tree is the one copied out.
-    let ok = false;
-    try {
-      ok = git(['--git-dir', scratch, 'cat-file', '-t', task.row.base_commit]) === 'commit' && git(['--git-dir', scratch, 'rev-parse', '--verify', `${task.row.base_commit}^{tree}`]) === c.tree;
-    } catch {
-      ok = false;
-    }
-    if (!ok) throw new Refused("the pack out of /testbed doesn't hold base_commit's own commit on that tree: refused, nothing kept");
+  // By hash, not by the container's word: base_commit's own commit object, and its tree is the one copied out.
+  let ok = false;
+  try {
+    ok = git(['--git-dir', scratch, 'cat-file', '-t', task.row.base_commit]) === 'commit' && git(['--git-dir', scratch, 'rev-parse', '--verify', `${task.row.base_commit}^{tree}`]) === c.tree;
+  } catch {
+    ok = false;
   }
+  if (!ok) throw new Refused("the pack out of /testbed doesn't hold base_commit's own commit on that tree: refused, nothing kept");
+  // Before anything is fetched or checked out: what the objects decode to (a small pack can inflate a thousandfold).
+  let size = Infinity;
+  try {
+    size = decodedBytes(scratch);
+  } catch {
+    // unreadable: refused below
+  }
+  if (!(size <= caps.treeBytes)) throw new Refused(`what came out of /testbed decodes to over ${caps.treeBytes} bytes: refused before any checkout, nothing kept`);
   const commit = git(['--git-dir', scratch, 'commit-tree', c.tree, '-m', 'bench base tree']);
   git(['--git-dir', scratch, 'update-ref', 'refs/heads/main', commit]);
   // A fresh bare remote takes only what that commit reaches: nothing else in the pack comes along.
@@ -300,7 +322,7 @@ function build(tmp: string, final: string, uid: number, task: SelectedTask, c: C
   git(['clone', '-q', '--template=', remote, clone]);
   git(['-C', clone, 'remote', 'set-url', 'origin', join(final, 'remote.git')]);
   if (git(['-C', clone, 'rev-parse', 'HEAD']) !== commit || git(['-C', clone, 'rev-list', '--count', 'HEAD']) !== '1') throw new Refused('its clone is not the one commit of its bare remote: refused, nothing kept');
-  const rec: TreeRecord = { key: task.key, instance_id: task.row.instance_id, base_commit: task.row.base_commit, image_digest: task.ref.digest, source: c.source, head_checked: c.source === 'git', tree: c.tree, commit };
+  const rec: TreeRecord = { key: task.key, instance_id: task.row.instance_id, base_commit: task.row.base_commit, image_digest: task.ref.digest, source: 'git', head_checked: true, tree: c.tree, commit };
   const text = `${JSON.stringify(rec, null, 2)}\n`;
   writeVerified(join(tmp, TREE_RECORD), tmp, Buffer.from(text), createHash('sha256').update(text).digest('hex'), uid);
 }
@@ -310,8 +332,16 @@ function build(tmp: string, final: string, uid: number, task: SelectedTask, c: C
  * checks out, otherwise copied out of the task's image through `docker` (its container runner) and built. Refuses
  * (throws Refused, naming no task) on any doubt, keeping nothing of it.
  */
-export async function baseTree(layout: BenchLayout, uid: number, task: SelectedTask, o: DockerOptions, docker: Docker): Promise<TreeResult> {
+export async function baseTree(layout: BenchLayout, uid: number, task: SelectedTask, o: DockerOptions, docker: Docker, caps: TreeCaps = TREE_CAPS): Promise<TreeResult> {
   if (!SHA1.test(task.row.base_commit)) throw new Refused("this task's base_commit is not a commit id: refused");
+  // Only the task's own pinned digest reference reaches `docker run`: never a tag (container.ts's image check allows one).
+  try {
+    requirePinned(task.ref, 'image reference');
+  } catch {
+    throw new Refused("this task's image reference is not one pins.ts built: refused before docker run");
+  }
+  if (typeof task.image !== 'string' || !DIGEST_REF.test(task.image) || task.image !== `${task.ref.name}@${task.ref.digest}`) throw new Refused("this task's image is not its pinned digest reference: refused before docker run");
+  if (!(caps.copyOutBytes > 0) || !(caps.treeBytes > 0)) throw new Refused('the copy-out caps must be positive: refused');
   const dir = treesDir(layout, uid);
   const final = join(dir, task.key);
   if (lstatOrNull(final)) return keepExisting(final, uid, task);
@@ -320,7 +350,7 @@ export async function baseTree(layout: BenchLayout, uid: number, task: SelectedT
   try {
     docker.start(c, task.row);
     // Nothing is ever sent on its stdin, so there is no tree to check one against.
-    copied = await copyOut(new TaskRunner(o, c, task.row, Buffer.alloc(0)), task);
+    copied = await copyOut(new TaskRunner(o, c, task.row, Buffer.alloc(0)), task, caps);
   } catch (e) {
     if (e instanceof Refused || e instanceof LimitsNotApplied) throw new Refused(message(e));
     // docker's own words name the image: never passed on.
@@ -333,7 +363,7 @@ export async function baseTree(layout: BenchLayout, uid: number, task: SelectedT
   let placed = false;
   try {
     try {
-      build(tmp, final, uid, task, copied);
+      build(tmp, final, uid, task, copied, caps);
     } catch (e) {
       if (e instanceof Refused) throw e;
       throw new Refused('building its bare remote and clone failed: refused, nothing kept');
@@ -357,5 +387,5 @@ export async function baseTree(layout: BenchLayout, uid: number, task: SelectedT
   } finally {
     if (!placed) rmSync(tmp, { recursive: true, force: true });
   }
-  return { key: task.key, source: copied.source, kept: false };
+  return { key: task.key, kept: false };
 }

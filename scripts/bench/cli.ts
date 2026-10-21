@@ -51,7 +51,7 @@ import { httpsRegistry, writeImages, type ImagesSummary, type RegistryFetch } fr
 import { benchHome, benchRoot, type BenchLayout } from './paths.js';
 import { loadPins, PINS_FILE, TASK_SHAPE, type Pins } from './pins.js';
 import { sandboxProbe, SRT_LABEL } from './probe.js';
-import { baseTree, pullTasks, Refused, TREES } from './pull.js';
+import { baseTree, pullTasks, Refused, TREE_CAPS, TREES, type TreeCaps } from './pull.js';
 import { loadTasks, MODE_TASKS, RowsUnpinned, writeSelection, type SelectedTask, type SelectionSummary } from './select.js';
 import { heldOutCheck } from './store.js';
 
@@ -440,7 +440,7 @@ export async function images(d: CliDeps, pins: () => Pins = loadPins): Promise<n
  * (pull.ts pullTasks), then each task's base tree into the held-out store (pull.ts baseTree), one task at a time,
  * stopping at the first refusal. Prints keys and counts only. Its exit code.
  */
-export async function pull(d: CliDeps, mode: Mode, pins: () => Pins = loadPins): Promise<number> {
+export async function pull(d: CliDeps, mode: Mode, pins: () => Pins = loadPins, caps: TreeCaps = TREE_CAPS): Promise<number> {
   d.out(`bench pull (#748): the ${mode} tasks' images by pinned digest, and each task's base tree from its own image into the held-out store; no model call, no upstream fetch`);
   const say = (status: string, name: string, detail: string) => d.out(`  ${status}  ${name.padEnd(9)}  ${scrub(detail, d.env)}`);
   const o: DockerOptions = { ...d.docker, env: d.env };
@@ -477,9 +477,8 @@ export async function pull(d: CliDeps, mode: Mode, pins: () => Pins = loadPins):
   say('PASS', 'pull', `${tasks.length} images pulled by digest, none by tag; each digest read back as images.json and pins.json give it`);
   for (const t of tasks) {
     try {
-      const r = await baseTree(layout, d.uid, t, o, docker);
-      const what = r.source === 'git' ? "/testbed's tree at base_commit (HEAD checked), its tree hash recorded" : 'no git metadata in /testbed, so its content hash is recorded instead (HEAD not checked against base_commit)';
-      say('PASS', t.key, `base tree: ${what}; a bare remote with one commit and a clone of it, in the store${r.kept ? ' (already there, verified: kept)' : ''}`);
+      const r = await baseTree(layout, d.uid, t, o, docker, caps);
+      say('PASS', t.key, `base tree: /testbed's tree at base_commit (HEAD checked, bound by its commit's hash), its tree hash recorded; a bare remote with one commit and a clone of it, in the store${r.kept ? ' (already there, verified: kept)' : ''}`);
     } catch (e) {
       say('FAIL', t.key, e instanceof Refused ? e.message : "its base tree was refused (the store's check failed): nothing kept");
       return 1;
