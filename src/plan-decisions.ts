@@ -92,8 +92,8 @@ function headingAliases(file: string, heading: string): string[] {
  * part or reworded. Instead it indexes only records committed at the plan's base (committedRecords), and in the
  * engine's repo every decision record path, and this file, is self-modification (src/review.ts): a copy reaches the
  * index only through a PR that adds or changes a committed record, which waits like the page itself.
- * That holds except through the open routes (#962, who picks the base; #956, question text in decisions already
- * made), which are listed once, under "Open routes into the decisions index" in docs/process.md.
+ * That holds except through the open routes (for example #962, who picks the base), which are listed once, under
+ * "Open routes into the decisions index" in docs/process.md.
  */
 export const PROCESS_DOC = 'docs/process.md';
 
