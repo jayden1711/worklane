@@ -726,15 +726,15 @@ The sections above say how the harness merges a project's PRs. This one is the p
   - release signing and the updater;
   - CI workflows.
 - **The orchestrator runs the batch-merge procedure itself:**
-  - strict up-to-date is turned off for the batch, then back on, on any exit;
+  - strict up-to-date is turned off for the batch, then back on by an exit trap, on a normal or an error exit (not when the process is killed outright, as by SIGKILL);
   - each merge is pinned to its tested head;
-  - after every step, main's tree is checked against the tested combined tree;
+  - after each merge, main's tree is compared with that step's tested tree (the combined branch after the same merges), and at the end with the whole tested combined tree;
   - no admin bypass, no force.
 - **Reviewers and builders never merge.**
 - **The owner is brought only:**
   - release signing;
   - turning `auto_merge` on for a project;
   - direction changes;
-  - steps that need the owner's hands or GitHub admin rights.
+  - steps that physically need the owner's hands or GitHub admin rights.
 - **A weekly summary of critical merges goes to the owner.**
-- **The `[PROTECTED: owner merges]` title marker does not mean the owner merges the PR.** It means the PR is in the critical set and needs the second adversarial review before the orchestrator merges it.
+- **The `[PROTECTED: owner merges]` title marker no longer means the owner merges the PR.** It marks a PR that touches a protected path, which covers far more than the critical set (a dependency bump carries it too). Such a PR is merged by the orchestrator under this section like any other. It needs the second adversarial review only if it is in the critical set above, which the orchestrator decides from the PR's changed files.
