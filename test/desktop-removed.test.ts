@@ -64,6 +64,10 @@ const shown = (v: unknown) => (typeof v === 'object' && v !== null ? JSON.string
  */
 function matrixCombos(matrix: unknown): Map<string, unknown>[] | null {
   if (!isRecord(matrix)) return null;
+  // An expression anywhere in the matrix, key or value, axis, include or exclude: GitHub evaluates it, which changes
+  // which combinations it builds (an exclude by expression can empty the product, so include entries stand alone),
+  // where this would compare it as text (round 11).
+  if (JSON.stringify(matrix).includes('${{')) return null;
   const { include = [], exclude = [], ...axes } = matrix;
   if (!Array.isArray(include) || !Array.isArray(exclude) || !include.every(isRecord) || !exclude.every(isRecord)) return null;
   if (!Object.values(axes).every(Array.isArray)) return null;
@@ -85,6 +89,21 @@ function matrixCombos(matrix: unknown): Map<string, unknown>[] | null {
   // digits, a 15-digit format drops them; round 8) and -0 (JS prints `0`, .NET `-0`; round 9). Every other integer
   // below 1e15 in size is taken to print the same both ways (inferred, not measured on GitHub).
   if (values.some((v) => typeof v === 'number' && (!(Number.isInteger(v) && Math.abs(v) < 1e15) || Object.is(v, -0)))) return null;
+  // Two values of one key that differ, but match once printed and case-folded (`'1'` and `1`, `'true'` and `true`,
+  // `Q` and `q`): whether GitHub matches an exclude or include entry loosely is unsure, so the matrix is unreadable
+  // (round 11).
+  const byKey = new Map<string, unknown[]>();
+  const note = (k: string, v: unknown) => byKey.set(fold(k), [...(byKey.get(fold(k)) ?? []), v]);
+  for (const [k, vs] of Object.entries(axes) as [string, unknown[]][]) for (const v of vs) note(k, v);
+  for (const e of [...include, ...exclude]) for (const [k, v] of Object.entries(e)) note(k, v);
+  for (const vs of byKey.values()) {
+    const seen = new Map<string, unknown>();
+    for (const v of vs) {
+      const loose = fold(String(v));
+      if (seen.has(loose) && !same(seen.get(loose), v)) return null;
+      seen.set(loose, v);
+    }
+  }
   let combos: Map<string, unknown>[] = Object.keys(axes).length ? [new Map()] : [];
   for (const [k, values] of Object.entries(axes) as [string, unknown[]][]) combos = combos.flatMap((c) => values.map((v) => new Map([...c, [k, v]])));
   combos = combos.filter((c) => !exclude.some((e) => Object.entries(e).every(([k, v]) => c.has(k) && same(c.get(k), v))));
@@ -519,6 +538,13 @@ const TWIN_FIXTURES: [string, string, boolean][] = [
   ['X17 a matrix key U+00DF, name ${{ matrix.ss }}, a job keyed desktop', 'jobs:\n  desktop:\n    name: ${{ matrix.ss }}\n    strategy: { matrix: { "\\u00df": [phone] } }\n    runs-on: x\n', true],
   ['a root key with a no-break space, "jobs\\u00a0"', '"jobs\\u00a0":\n  desktop:\n    runs-on: x\n', true],
   ['a root key with a trailing space, "jobs "', '"jobs ":\n  desktop:\n    runs-on: x\n', true],
+  // Round 11 (#746 adversarial review of 094acd50): an expression inside a matrix value, and loose value matching.
+  ['E1 an exclude by expression empties the product; include desktop and phone stand alone', "jobs:\n  shots:\n    name: ${{ matrix.v }}\n    strategy:\n      matrix:\n        k: [q]\n        exclude: [ { k: \"${{ 'q' }}\" } ]\n        include: [ { v: desktop }, { v: phone } ]\n    runs-on: x\n    steps: [ { run: 'false' } ]\n", true],
+  ['E1b the axis value is the expression, the exclude literal', "jobs:\n  shots:\n    name: ${{ matrix.v }}\n    strategy:\n      matrix:\n        k: [\"${{ 'q' }}\"]\n        exclude: [ { k: q } ]\n        include: [ { v: desktop }, { v: phone } ]\n    runs-on: x\n    steps: [ { run: 'false' } ]\n", true],
+  ['E1c the conditional-exclude idiom', "jobs:\n  shots:\n    name: ${{ matrix.v }}\n    strategy:\n      matrix:\n        k: [q]\n        exclude: [ { k: \"${{ github.event_name == 'push' && 'q' || 'none' }}\" } ]\n        include: [ { v: desktop }, { v: phone } ]\n    runs-on: x\n    steps: [ { run: 'false' } ]\n", true],
+  ['Q1 an exclude that differs in case only (q, Q)', "jobs:\n  shots:\n    name: ${{ matrix.v }}\n    strategy:\n      matrix:\n        k: [q]\n        exclude: [ { k: Q } ]\n        include: [ { v: desktop }, { v: phone } ]\n    runs-on: x\n    steps: [ { run: 'false' } ]\n", true],
+  ["Q2 an exclude that differs in type only (1, '1')", "jobs:\n  shots:\n    name: ${{ matrix.v }}\n    strategy:\n      matrix:\n        k: [1]\n        exclude: [ { k: '1' } ]\n        include: [ { v: desktop }, { v: phone } ]\n    runs-on: x\n    steps: [ { run: 'false' } ]\n", true],
+  ["Q3 an exclude by a string for a boolean (true, 'true')", "jobs:\n  shots:\n    name: ${{ matrix.v }}\n    strategy:\n      matrix:\n        k: [true]\n        exclude: [ { k: 'true' } ]\n        include: [ { v: desktop }, { v: phone } ]\n    runs-on: x\n    steps: [ { run: 'false' } ]\n", true],
   ['a name with more around the value', 'jobs:\n  shots:\n    name: shots ${{ matrix.view }}\n    strategy: { matrix: { view: [desktop, phone] } }\n    runs-on: x\n', false],
   ['no name: the values in parentheses', 'jobs:\n  shots:\n    strategy: { matrix: { view: [desktop] } }\n    runs-on: x\n', false],
   ['no name, include entries only', 'jobs:\n  shots:\n    strategy: { matrix: { include: [{ view: desktop }] } }\n    runs-on: x\n', false],
@@ -627,6 +653,9 @@ const NAME_TWIN_FIXTURES: [string, string][] = [
   ['R9-1 a job keyed test, its whole strategy an expression', "jobs:\n  test:\n    strategy: >-\n      ${{ fromJSON('{\"matrix\":{\"os\":[\"ubuntu-latest\"],\"node\":[22]}}') }}\n    runs-on: x\n    steps: [ { run: 'false' } ]\n"],
   ['R9-1 a job keyed bootstrap, its whole strategy an expression', "jobs:\n  bootstrap:\n    strategy: >-\n      ${{ fromJSON('{\"matrix\":{\"os\":[\"ubuntu-latest\"]}}') }}\n    runs-on: x\n    steps: [ { run: 'false' } ]\n"],
   ['R9-4 a matrix value -0', "jobs:\n  lint:\n    strategy: { matrix: { v: [-0] } }\n    runs-on: x\n    steps: [ { run: 'false' } ]\n"],
+  // Round 11: an exclude by expression, so the include entry stands alone as GitHub builds it.
+  ['E2b a green test (ubuntu-latest, 22) twin, an exclude by expression, needs: a slow job', "jobs:\n  slow:\n    runs-on: x\n    steps: [ { run: 'sleep 1500' } ]\n  test:\n    needs: slow\n    strategy:\n      matrix:\n        os: [ubuntu-latest]\n        k: [q]\n        exclude: [ { k: \"${{ 'q' }}\" } ]\n        include: [ { os: ubuntu-latest, node: 22 } ]\n    runs-on: x\n    steps: [ { run: 'true' } ]\n"],
+  ['E2c a green dco twin, name ${{ matrix.n }}, an exclude by expression', "jobs:\n  t:\n    name: ${{ matrix.n }}\n    strategy:\n      matrix:\n        k: [q]\n        exclude: [ { k: \"${{ 'q' }}\" } ]\n        include: [ { n: dco }, { n: x } ]\n    runs-on: x\n    steps: [ { run: 'true' } ]\n"],
 ];
 
 test('a job GitHub may name as a twin of another check is caught: matrix keys, numbers, reusable-workflow names (round 8)', () => {
