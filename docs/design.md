@@ -575,6 +575,7 @@ The scanner sits behind an adapter so it can move to betterleaks; gitleaks is in
   - **staging:** after a landing, the coordinator triggers the deploy explicitly (a configured command), polls until it settles, then **confirms the deployed SHA equals the landed SHA**.
   - **production:** the project's release command stays the path. The verifier confirms every production service serves the release SHA.
 - A skipped deploy, a failed deploy, or a SHA mismatch is `deploy.failed`: a red row on the Deploys page and an Inbox item for the owner of deploys.
+- The trigger and verify commands are project commands (#799): an approved PR can change `deploy.yaml`, so they run as the agent user in its sandbox, with the project's environment only, under `tests.yaml` `command_timeout_s` (a verify poll at most 2 minutes), and their output is redacted. One that is refused, times out or is stopped by a shutdown is `deploy.failed`, never verified. They hold no credential of the coordinator's.
 - An issue is `done` only after `deploy.verified`.
 
 ## 14. Dashboard
