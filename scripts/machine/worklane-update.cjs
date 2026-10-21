@@ -121,6 +121,7 @@ exports.redactString = redactString;
 exports.redactRecords = redactRecords;
 exports.redact = redact;
 const credentialShaped = (v) => (/[a-z]/.test(v) && /[A-Z]/.test(v) && /\d/.test(v)) || /^[0-9a-fA-F]{32,}$/.test(v);
+const basicShaped = (v) => /[0-9+/=]/.test(v) || (v.length >= 16 && v.length % 4 !== 1 && /[a-z]/.test(v) && /[A-Z]/.test(v));
 const CREDENTIAL_WORDS = new Set(['token', 'secret', 'secrets', 'password', 'passwd', 'pwd', 'pass', 'passphrase', 'jwt', 'bearer', 'credential', 'credentials', 'authorization']);
 const CREDENTIAL_ENDINGS = ['token', 'secret', 'password', 'passwd', 'accesskey'];
 const credentialWord = (w) => CREDENTIAL_WORDS.has(w) || CREDENTIAL_ENDINGS.some((e) => w.endsWith(e));
@@ -144,24 +145,26 @@ const DASHBOARD_KEY_BODY = '[A-Za-z0-9_-]{32,}';
 const isDashboardKey = (key) => new RegExp(`^${exports.DASHBOARD_KEY_PREFIX}${DASHBOARD_KEY_BODY}$`).test(key);
 exports.isDashboardKey = isDashboardKey;
 const PATTERNS = [
-    [new RegExp(`(^|[^A-Za-z0-9_-])${exports.DASHBOARD_KEY_PREFIX}${DASHBOARD_KEY_BODY}(?![A-Za-z0-9_-])`, 'g'), `$1${exports.DASHBOARD_KEY_PREFIX}[REDACTED]`, 'dashboard key'],
-    [/\b(gh[pousr]_[A-Za-z0-9]{30,})\b/g, 'gh*_[REDACTED]', 'GitHub token'],
+    [new RegExp(`${exports.DASHBOARD_KEY_PREFIX}${DASHBOARD_KEY_BODY}(?![A-Za-z0-9_-])`, 'g'), `${exports.DASHBOARD_KEY_PREFIX}[REDACTED]`, 'dashboard key'],
+    [/\b(gh[pousr]_[A-Za-z0-9]{30,})(?![A-Za-z0-9])/g, 'gh*_[REDACTED]', 'GitHub token'],
     [/\bgithub_pat_[A-Za-z0-9_]{40,}\b/g, 'github_pat_[REDACTED]', 'GitHub token'],
     [/\bsk-(?:ant-)?[A-Za-z0-9_-]{20,}\b/g, 'sk-[REDACTED]', 'API key (sk-)'],
     [/(^|[^A-Za-z0-9_])([sr]k)_(?:live|test)_([A-Za-z0-9]{16,})(?![A-Za-z0-9_])/g, (m, pre, k, v) => (/\d/.test(v) ? `${pre}${k}_[REDACTED]` : m), 'Stripe key'],
     [/(^|[^A-Za-z0-9_-])AIza[0-9A-Za-z_-]{35}(?![0-9A-Za-z_-])/g, '$1AIza[REDACTED]', 'Google API key'],
-    [/(^|[^A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]*/g, '$1[REDACTED JWT]', 'JWT'],
-    [/\b(AKIA|ASIA)[A-Z0-9]{16}\b/g, 'AKIA[REDACTED]', 'AWS access key'],
-    [/\bxoxe[.-][A-Za-z0-9.-]{10,}\b/g, 'xoxe-[REDACTED]', 'Slack token'],
-    [/\bxox[abprs]-[A-Za-z0-9-]{10,}\b/g, 'xox-[REDACTED]', 'Slack token'],
-    [/\bxapp-[A-Za-z0-9-]{10,}\b/g, 'xapp-[REDACTED]', 'Slack app-level token'],
-    [/\blin_(?:api|oauth)_[A-Za-z0-9]{20,}\b/g, 'lin_[REDACTED]', 'Linear key'],
+    [/(^|[^A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]*(?:\.[A-Za-z0-9_-]+)*/g, '$1[REDACTED JWT]', 'JWT'],
+    [/\b(AKIA|ASIA)[A-Z0-9]{16}(?![A-Za-z0-9])/g, 'AKIA[REDACTED]', 'AWS access key'],
+    [/\bxoxe[.-][A-Za-z0-9.-]{10,}(?![A-Za-z0-9])/g, 'xoxe-[REDACTED]', 'Slack token'],
+    [/\bxox[abprs]-[A-Za-z0-9-]{10,}(?![A-Za-z0-9])/g, 'xox-[REDACTED]', 'Slack token'],
+    [/\bxapp-[A-Za-z0-9-]{10,}(?![A-Za-z0-9])/g, 'xapp-[REDACTED]', 'Slack app-level token'],
+    [/\blin_(?:api|oauth)_[A-Za-z0-9]{20,}(?![A-Za-z0-9])/g, 'lin_[REDACTED]', 'Linear key'],
     [/https:\/\/hooks\.slack\.com\/services\/[A-Za-z0-9/]+/g, 'https://hooks.slack.com/services/[REDACTED]', 'Slack webhook'],
     [/tskey-[A-Za-z0-9_-]+/g, 'tskey-[REDACTED]', 'Tailscale key'],
-    [/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g, '[REDACTED PRIVATE KEY]', 'private key'],
+    [/-----BEGIN [A-Z ]*PRIVATE KEY(?: BLOCK)?-----(?:[\s\S]*?-----END [A-Z ]*PRIVATE KEY(?: BLOCK)?-----|[\s\S]*)/g, '[REDACTED PRIVATE KEY]', 'private key'],
+    [/^[\s\S]*-----END [A-Z ]*PRIVATE KEY(?: BLOCK)?-----/, '[REDACTED PRIVATE KEY]', 'private key'],
     [/\b(Bearer|bearer|BEARER)\s+[A-Za-z0-9._~+/-]{20,}=*/g, '$1 [REDACTED]', 'bearer token'],
+    [/\b(Basic|basic|BASIC)(\s+)([A-Za-z0-9+/]{8,}={0,2})(?![A-Za-z0-9+/=])/g, (m, s, sp, v) => (basicShaped(v) ? `${s}${sp}[REDACTED]` : m), 'Basic credential'],
     [/\b([a-z][a-z0-9+.-]*:\/\/[^:/\s@]+):[^@\s/]+@/gi, '$1:[REDACTED]@', 'password in a URL'],
-    [/\b0x[0-9a-fA-F]{64}\b/g, '0x[REDACTED-32-BYTES]', '32-byte hex key'],
+    [/\b0x[0-9a-fA-F]{64}(?![A-Za-z0-9])/g, '0x[REDACTED-32-BYTES]', '32-byte hex key'],
     [
         /(\\?")([A-Za-z0-9_-]+)\1(\s*:\s*)\1([A-Za-z0-9_\-.+/=~]{16,})\1/g,
         (m, q, k, sep, v) => (credentialKey(k) && credentialShaped(v) ? `${q}${k}${q}${sep}${q}[REDACTED]${q}` : m),
@@ -172,10 +175,11 @@ const PATTERNS = [
 const BROAD = [
     [/(^|[^A-Za-z0-9_])(?:gh[pousr]_|github_pat_)[A-Za-z0-9_]{8,}/g, (k) => `$1${k}`, 'GitHub token, cut short'],
     [/sk-ant-[A-Za-z0-9_-]+/g, (k) => k, 'Anthropic key, cut short'],
+    [/\b(gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-ant-[A-Za-z0-9_-]{10,}|xox[abprs]-[A-Za-z0-9-]{10,})/g, (k) => k, "the updater's token rule"],
     [/(^|[^A-Za-z0-9_])xox[abprs]-[A-Za-z0-9_-]+/g, (k) => `$1${k}`, 'Slack token, cut short'],
-    [/(^|[^A-Za-z0-9_])eyJ[A-Za-z0-9_-]{8,512}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]+/g, (k) => `$1${k}`, 'JWT after a hyphen'],
+    [/(^|[^A-Za-z0-9_])eyJ[A-Za-z0-9_-]{8,512}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*/g, (k) => `$1${k}`, 'JWT after a hyphen'],
     [/\b(bearer)\s+[A-Za-z0-9._~+/=-]{8,}/gi, (k) => `$1 ${k}`, 'short bearer token'],
-    [/(^|[^a-z0-9+.-])([a-z][a-z0-9+.-]*:\/\/)[^\s/@]+@/gi, (k) => `$1$2${k}@`, 'user info in a URL'],
+    [/([a-z][a-z0-9+.-]{0,31}:\/\/)[^\s/@]+@/gi, (k) => `$1${k}@`, 'user info in a URL'],
     [/\b([A-Za-z_]*(?:token|secret|password|passwd|api[_-]?key))(\s*[=:]\s*)("[^"]*"|'[^']*'|\S+)/gi, (k) => `$1$2${k}`, 'value after a secret name'],
 ];
 const CODE_HEADS = new Set(['this', 'self', 'super', 'opts', 'options', 'o', 'ctx', 'context', 'config', 'cfg', 'conf', 'settings', 'props', 'state', 'env', 'process', 'module', 'exports', 'window', 'document', 'globalThis', 'args', 'params', 'req', 'res', 'request', 'response', 'obj', 'result', 'item', 'e', 'err', 'x']);
@@ -212,21 +216,45 @@ exports.REDACTION_PATTERNS = [
     ...BROAD.map(([re, rep, kind]) => ({ kind, re, rep: rep('[REDACTED]'), group: 'broad' })),
     ...IDENTIFIERS.map(([re, rep, kind]) => ({ kind, re, rep, group: 'identifier' })),
 ];
-const GLUED_PREFIXES = ['ghp_', 'gho_', 'ghu_', 'ghs_', 'ghr_', 'github_pat_', 'sk-', 'sk_live_', 'sk_test_', 'rk_live_', 'rk_test_', 'xoxa-', 'xoxb-', 'xoxe', 'xoxp-', 'xoxr-', 'xoxs-', 'xapp-', 'lin_api_', 'lin_oauth_', 'AKIA', 'ASIA', 'AIza', 'eyJ', '0x', 'Bearer', 'bearer', 'BEARER', exports.DASHBOARD_KEY_PREFIX];
-function afterUnderscore(s, f) {
-    const cuts = [];
+const GLUED_PREFIXES = ['ghp_', 'gho_', 'ghu_', 'ghs_', 'ghr_', 'github_pat_', 'sk-', 'sk_live_', 'sk_test_', 'rk_live_', 'rk_test_', 'xoxa-', 'xoxb-', 'xoxe', 'xoxp-', 'xoxr-', 'xoxs-', 'xapp-', 'lin_api_', 'lin_oauth_', 'AKIA', 'ASIA', 'AIza', 'eyJ', '0x', 'Bearer', 'bearer', 'BEARER', 'Basic', 'basic', 'BASIC', exports.DASHBOARD_KEY_PREFIX];
+const GLUE = /\u001b(?:\[[0-?]*[ -/]*[@-~]|[@-Z\\-_])|\\(?:u[0-9A-Fa-f]{4}|[nrtbf"\\/])/g;
+function gluePoints(s) {
+    const cuts = [...s.matchAll(GLUE)].map((m) => m.index + m[0].length);
     for (let at = s.indexOf('_'); at !== -1; at = s.indexOf('_', at + 1))
         if (GLUED_PREFIXES.some((p) => s.startsWith(p, at + 1)))
             cuts.push(at + 1);
+    return [...new Set(cuts)].filter((c) => c < s.length).sort((a, b) => a - b);
+}
+function freeMark(s) {
+    const held = new Set();
+    for (let i = 0; i < s.length; i++) {
+        const c = s.charCodeAt(i);
+        if (c >= 0xe000 && c <= 0xf8ff)
+            held.add(c);
+    }
+    for (let c = 0xe000; c <= 0xf8ff; c++)
+        if (!held.has(c))
+            return String.fromCharCode(c);
+    return null;
+}
+function glued(s, f) {
+    const cuts = gluePoints(s);
     if (!cuts.length)
         return s;
-    let out = '';
+    const mark = freeMark(s);
+    if (mark === null) {
+        let out = s.slice(0, cuts[0]);
+        for (const [i, c] of cuts.entries())
+            out += f(s.slice(c, cuts[i + 1] ?? s.length));
+        return out;
+    }
+    let marked = '';
     let from = 0;
-    for (const c of [...cuts, s.length]) {
-        out += from === 0 ? s.slice(0, c) : f(s.slice(from, c));
+    for (const c of cuts) {
+        marked += s.slice(from, c) + mark;
         from = c;
     }
-    return out;
+    return f(marked + s.slice(from)).split(mark).join('');
 }
 const expand = (rep, m, groups) => rep.replace(/\$(\d|\$|&)/g, (_, k) => (k === '$' ? '$' : k === '&' ? m : String(groups[Number(k) - 1] ?? '')));
 const breaks = (s) => s.split('\n').length - 1;
@@ -281,19 +309,139 @@ function secretKinds(s) {
     }
     return [...kinds].sort();
 }
+const globals = new Map();
+const globalOf = (re) => {
+    let g = globals.get(re);
+    if (!g)
+        globals.set(re, (g = re.flags.includes('g') ? re : new RegExp(re.source, `${re.flags}g`)));
+    return g;
+};
+function spansOf(t, re, rep, out) {
+    const g = globalOf(re);
+    g.lastIndex = 0;
+    for (let m = g.exec(t); m; m = g.exec(t)) {
+        const whole = m[0];
+        g.lastIndex = Math.max(m.index + 1, m.index + whole.length - 64);
+        const groups = m.slice(1).map((x) => x ?? '');
+        const r = typeof rep === 'string' ? expand(rep, whole, groups) : rep(whole, ...groups);
+        if (r === whole)
+            continue;
+        let a = 0;
+        while (a < whole.length && a < r.length && whole[a] === r[a])
+            a++;
+        let b = 0;
+        while (b < whole.length - a && b < r.length - a && whole[whole.length - 1 - b] === r[r.length - 1 - b])
+            b++;
+        if (whole.length - b > a)
+            out.push([m.index + a, m.index + whole.length - b]);
+    }
+}
+const BROAD_RULES = [...PATTERNS.map(([re, rep]) => [re, rep]), ...BROAD.map(([re, rep]) => [re, rep('[REDACTED]')])];
+function maskOnce(s, mask, keepLines) {
+    const spans = [];
+    for (const [re, rep] of BROAD_RULES)
+        spansOf(s, re, rep, spans);
+    const word = (i) => /[A-Za-z0-9_]/.test(s[i] ?? '');
+    readAt(s, gluePoints(s), spans);
+    readAt(s, [...new Set(spans.flat())].filter((c) => c > 0 && c < s.length && word(c - 1) && word(c)).sort((a, b) => a - b), spans);
+    const masks = [];
+    if (mask)
+        for (let at = s.indexOf(mask); at !== -1; at = s.indexOf(mask, at + mask.length))
+            masks.push([at, at + mask.length]);
+    const kept = masks.length ? spans.flatMap(([a, b]) => outside([a, b], masks)) : spans;
+    if (!kept.length)
+        return s;
+    kept.sort((x, y) => x[0] - y[0]);
+    let out = '';
+    let at = 0;
+    let open = null;
+    const close = () => {
+        if (!open)
+            return;
+        out += s.slice(at, open[0]) + mask + (keepLines ? '\n'.repeat(breaks(s.slice(open[0], open[1]))) : '');
+        at = open[1];
+    };
+    for (const [a, b] of kept) {
+        if (b <= a)
+            continue;
+        if (open && a <= open[1])
+            open[1] = Math.max(open[1], b);
+        else {
+            close();
+            open = [a, b];
+        }
+    }
+    close();
+    return out + s.slice(at);
+}
+function readAt(s, cuts, spans) {
+    if (!cuts.length)
+        return;
+    const markChar = freeMark(s);
+    if (markChar === null) {
+        for (const [i, c] of cuts.entries()) {
+            const piece = s.slice(c, cuts[i + 1] ?? s.length);
+            const more = [];
+            for (const [re, rep] of BROAD_RULES)
+                spansOf(piece, re, rep, more);
+            for (const [a, b] of more)
+                spans.push([a + c, b + c]);
+        }
+        return;
+    }
+    let marked = '';
+    let from = 0;
+    for (const c of cuts) {
+        marked += s.slice(from, c) + markChar;
+        from = c;
+    }
+    marked += s.slice(from);
+    const back = (p) => {
+        let lo = 0;
+        let hi = cuts.length;
+        while (lo < hi) {
+            const mid = (lo + hi) >> 1;
+            if (cuts[mid] + mid < p)
+                lo = mid + 1;
+            else
+                hi = mid;
+        }
+        return p - lo;
+    };
+    const more = [];
+    for (const [re, rep] of BROAD_RULES)
+        spansOf(marked, re, rep, more);
+    for (const [a, b] of more)
+        spans.push([back(a), back(b)]);
+}
+function outside([a, b], regions) {
+    const out = [];
+    let from = a;
+    for (const [x, y] of regions) {
+        if (y <= from || x >= b)
+            continue;
+        if (x > from)
+            out.push([from, x]);
+        from = Math.max(from, y);
+    }
+    if (from < b)
+        out.push([from, b]);
+    return out;
+}
+function maskUnion(s, mask, keepLines) {
+    let out = maskOnce(s, mask, keepLines);
+    for (let i = 0; i < 2; i++) {
+        const again = maskOnce(out, mask, keepLines);
+        if (again === out)
+            break;
+        out = again;
+    }
+    return out;
+}
 function redactString(s, o = {}) {
     const put = o.keepLines ? applyKeepingLines : apply;
-    let out = s;
-    if (o.broad) {
-        for (const [re, rep, kind] of PATTERNS)
-            if (kind === 'private key')
-                out = put(out, re, rep);
-        const mask = (o.mask ?? '[REDACTED]').replace(/\$/g, '$$$$');
-        for (const [re, rep] of BROAD)
-            out = put(out, re, rep(mask));
-    }
-    const secrets = (t) => PATTERNS.reduce((x, [re, rep]) => put(x, re, rep), t);
-    out = afterUnderscore(secrets(out), secrets);
+    const secrets = (t) => PATTERNS.reduce((y, [re, rep]) => put(y, re, rep), t);
+    let out = o.broad ? maskUnion(s, o.mask ?? '[REDACTED]', o.keepLines === true) : glued(secrets(s), secrets);
     if (o.identifiers)
         out = outsideMachineBlocks(out, (part) => IDENTIFIERS.reduce((t, [re, rep]) => put(t, re, rep), part));
     return out;

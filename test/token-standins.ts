@@ -40,6 +40,8 @@ const PEM_BODY = run(64);
 const PEM = j('\n', j(' ', '-----BEGIN', 'RSA', 'PRIVATE', 'KEY-----'), PEM_BODY, j(' ', '-----END', 'RSA', 'PRIVATE', 'KEY-----'));
 const URL_PASSWORD = run(24, 'pW9xQ2zL');
 const JSON_VALUE = run(24, 'notArealValue7');
+/** HTTP Basic: base64 of user:password (git's extraheader form, with an App installation token as the password). */
+const BASIC = Buffer.from(`x-access-token:${j('_', 'ghs', run(36))}`).toString('base64');
 
 /** Every stand-in: a shape gone from here is a shape no test drives (registered never-shrink). */
 export const SHAPES: readonly StandIn[] = [
@@ -86,6 +88,7 @@ export const SHAPES: readonly StandIn[] = [
   t('AWS access key', 'an AWS temporary key id', `ASIA${upper(16)}`),
   t('private key', 'a PEM private key', PEM, PEM_BODY),
   t('bearer token', 'a bearer token', `Bearer ${run(40, 'zY8xW7vU6')}`, run(40, 'zY8xW7vU6')),
+  t('Basic credential', 'a Basic credential', `Basic ${BASIC}`, BASIC),
   t('32-byte hex key', 'a 32-byte hex key', `0x${hex(64)}`),
   // Structures around a value, not token shapes.
   { kind: 'password in a URL', what: 'a password in a URL', value: `postgres://app:${URL_PASSWORD}@db.example.test:5432/app`, secret: URL_PASSWORD, token: false },

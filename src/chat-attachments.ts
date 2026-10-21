@@ -370,7 +370,8 @@ export function attachmentPrompt(stateDir: string, ids: string[], bundleDir: str
     } else {
       const raw = attachmentBytes(stateDir, id)!.toString('utf8');
       const room = Math.max(0, Math.min(INLINE_PER_FILE, budget));
-      const body = redactString(raw.slice(0, room));
+      // Redacted before it is cut (#889): a cut first leaves a token or a key's body unfound.
+      const body = redactString(raw).slice(0, room);
       budget -= body.length;
       const cut = raw.length > room ? `\n(cut: the first ${room} of ${raw.length} characters)` : '';
       lines.push(`${what}:`, `<<<ATTACHMENT ${n} BEGIN ${nonce}>>>`, body, `<<<ATTACHMENT ${n} END ${nonce}>>>${cut}`);

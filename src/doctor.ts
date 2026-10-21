@@ -16,7 +16,8 @@ import { GIT_HOOK_MARKER, legacyHookChecks } from './install.js';
 import { instancesDir, loadInstance, policiesForRepo, policyViolations, readPolicy } from './instance.js';
 import { instanceTargets, planMigrations, projectConfigFiles, type Targets } from './migrations.js';
 import { projectStateDir } from './guardrails/context.js';
-import { canRunAgents, detectOs, diskFree, fileAccess, nvidiaNodes, shimsNeedShell, userUid, wslAvailable } from './os/index.js';
+import { canRunAgents, detectOs, diskFree, fileAccess, homeOf, nvidiaNodes, shimsNeedShell, stateDir, userUid, wslAvailable } from './os/index.js';
+import { VIEWER_USER } from './setup/app-manifest.js';
 import { diskFloorCheck } from './governor-holds.js';
 import { policyRootChecks } from './doctor-policy-root.js';
 import { findTool, toolBin } from './tool-path.js';
@@ -258,9 +259,16 @@ export function doctor(rootArg: string, opts: { agentshield?: boolean; /** A pol
   if (cfg?.tests.test_run) out.push(networkCheck());
   if (opts.agentshield) out.push(agentShield(root));
   out.push(...policyRootChecks());
-  // #889: each dashboard key this user can read, the local one and each instance's: an older key asks for rotation.
-  for (const [where, dir] of [['local', projectStateDir(root)], ...instances.map((n) => [n, join(instancesDir(), n, 'state')])] as [string, string][]) {
-    const k = dashboardKeyCheck(join(dir, 'dashboard-token'), where);
+  // #889: each dashboard key this user can read: the local one, each instance's and the hub's (its own user's state dir,
+  // or the viewer user's when doctor runs as root): an older key asks for rotation.
+  const viewerHome = homeOf(VIEWER_USER);
+  const keyDirs: [string, string][] = [['local', projectStateDir(root)], ...instances.map((n): [string, string] => [n, join(instancesDir(), n, 'state')]), ['hub', join(stateDir(), 'dashboard-hub')], ...(viewerHome ? [['hub', join(viewerHome, '.local', 'state', BRAND.cli, 'dashboard-hub')] as [string, string]] : [])];
+  const seen = new Set<string>();
+  for (const [where, dir] of keyDirs) {
+    const file = join(dir, 'dashboard-token');
+    if (seen.has(file)) continue;
+    seen.add(file);
+    const k = dashboardKeyCheck(file, where);
     if (k) out.push(k);
   }
   return out;

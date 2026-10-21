@@ -92,6 +92,7 @@ export const CHECK_TABLES: readonly CheckTable[] = [
   // The root updater's generated copy of that module (test/redact-vendored.test.ts holds it to the module).
   { path: `scripts/machine/${BRAND.cli}-update.cjs`, table: 'PATTERNS', kind: 'never-shrink' },
   { path: `scripts/machine/${BRAND.cli}-update.cjs`, table: 'CREDENTIAL_WORDS', kind: 'never-shrink' },
+  { path: `scripts/machine/${BRAND.cli}-update.cjs`, table: 'BROAD_RULES', kind: 'never-shrink' },
   { path: 'test/redact-records-keys.test.ts', table: 'CUT_SHORT', kind: 'never-shrink' },
   { path: 'test/token-standins.ts', table: 'SHAPES', kind: 'never-shrink' },
   { path: 'test/redaction-one-module.test.ts', table: 'BAD_SOURCES', kind: 'never-shrink' },

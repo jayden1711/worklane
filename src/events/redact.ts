@@ -14,6 +14,12 @@ type Replacement = string | ((match: string, ...groups: string[]) => string);
 /** Credential-shaped: mixed case with a digit (a random key), or a long hex run (a classic token). */
 const credentialShaped = (v: string) => (/[a-z]/.test(v) && /[A-Z]/.test(v) && /\d/.test(v)) || /^[0-9a-fA-F]{32,}$/.test(v);
 
+/**
+ * A value after `Basic` that is a credential, not a word: base64 with a digit, `+`, `/` or `=` in it, or a mixed-case
+ * run of 16 or more characters whose length base64 can have (no padding: not 1 more than a multiple of 4).
+ */
+const basicShaped = (v: string) => /[0-9+/=]/.test(v) || (v.length >= 16 && v.length % 4 !== 1 && /[a-z]/.test(v) && /[A-Z]/.test(v));
+
 /** A word that makes any key holding it a credential's: `db_password`, `slack_bot_token`, `aws_secret_access_key`. */
 const CREDENTIAL_WORDS = new Set(['token', 'secret', 'secrets', 'password', 'passwd', 'pwd', 'pass', 'passphrase', 'jwt', 'bearer', 'credential', 'credentials', 'authorization']);
 /**
@@ -57,9 +63,11 @@ export const isDashboardKey = (key: string): boolean => new RegExp(`^${DASHBOARD
 
 // Each pattern with what kind of secret it finds (secretKinds names the kind, never the value).
 const PATTERNS: [RegExp, Replacement, string][] = [
-  // A dashboard key: starts only where a run of key characters starts (`wld_wld_...` is one run), so linear.
-  [new RegExp(`(^|[^A-Za-z0-9_-])${DASHBOARD_KEY_PREFIX}${DASHBOARD_KEY_BODY}(?![A-Za-z0-9_-])`, 'g'), `$1${DASHBOARD_KEY_PREFIX}[REDACTED]`, 'dashboard key'],
-  [/\b(gh[pousr]_[A-Za-z0-9]{30,})\b/g, 'gh*_[REDACTED]', 'GitHub token'],
+  // A dashboard key, wherever its prefix is (after a `-` or a letter too: `key-wld_...`): a match runs to the end of its
+  // run of key characters and the next search starts after it, so linear.
+  [new RegExp(`${DASHBOARD_KEY_PREFIX}${DASHBOARD_KEY_BODY}(?![A-Za-z0-9_-])`, 'g'), `${DASHBOARD_KEY_PREFIX}[REDACTED]`, 'dashboard key'],
+  // The token's end: no letter or digit after it, so `ghp_..._backup` is found too (a `\b` there needs a non-word).
+  [/\b(gh[pousr]_[A-Za-z0-9]{30,})(?![A-Za-z0-9])/g, 'gh*_[REDACTED]', 'GitHub token'],
   [/\bgithub_pat_[A-Za-z0-9_]{40,}\b/g, 'github_pat_[REDACTED]', 'GitHub token'],
   [/\bsk-(?:ant-)?[A-Za-z0-9_-]{20,}\b/g, 'sk-[REDACTED]', 'API key (sk-)'],
   // Stripe secret and restricted keys, live and test: random, so with a digit (a long camelCase name after the
@@ -68,26 +76,36 @@ const PATTERNS: [RegExp, Replacement, string][] = [
   // Google API keys: AIza and 35 more characters.
   [/(^|[^A-Za-z0-9_-])AIza[0-9A-Za-z_-]{35}(?![0-9A-Za-z_-])/g, '$1AIza[REDACTED]', 'Google API key'],
   // JSON Web Tokens: a base64url JSON header (so `eyJ`), a payload and a signature (empty when unsigned).
-  [/(^|[^A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]*/g, '$1[REDACTED JWT]', 'JWT'],
-  [/\b(AKIA|ASIA)[A-Z0-9]{16}\b/g, 'AKIA[REDACTED]', 'AWS access key'],
+  // Any further dotted parts go with it (#889 round 3): a JWE has five, and a token may be followed by more.
+  [/(^|[^A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]*(?:\.[A-Za-z0-9_-]+)*/g, '$1[REDACTED JWT]', 'JWT'],
+  [/\b(AKIA|ASIA)[A-Z0-9]{16}(?![A-Za-z0-9])/g, 'AKIA[REDACTED]', 'AWS access key'],
   // Slack's token-rotation and refresh tokens (xoxe-..., xoxe.xoxb-...), before the
   // other Slack tokens (one is inside it); then its app-level token (xapp-, Socket Mode).
-  [/\bxoxe[.-][A-Za-z0-9.-]{10,}\b/g, 'xoxe-[REDACTED]', 'Slack token'],
-  [/\bxox[abprs]-[A-Za-z0-9-]{10,}\b/g, 'xox-[REDACTED]', 'Slack token'],
-  [/\bxapp-[A-Za-z0-9-]{10,}\b/g, 'xapp-[REDACTED]', 'Slack app-level token'],
+  [/\bxoxe[.-][A-Za-z0-9.-]{10,}(?![A-Za-z0-9])/g, 'xoxe-[REDACTED]', 'Slack token'],
+  [/\bxox[abprs]-[A-Za-z0-9-]{10,}(?![A-Za-z0-9])/g, 'xox-[REDACTED]', 'Slack token'],
+  [/\bxapp-[A-Za-z0-9-]{10,}(?![A-Za-z0-9])/g, 'xapp-[REDACTED]', 'Slack app-level token'],
   // Linear personal API keys and OAuth tokens.
-  [/\blin_(?:api|oauth)_[A-Za-z0-9]{20,}\b/g, 'lin_[REDACTED]', 'Linear key'],
+  [/\blin_(?:api|oauth)_[A-Za-z0-9]{20,}(?![A-Za-z0-9])/g, 'lin_[REDACTED]', 'Linear key'],
   [/https:\/\/hooks\.slack\.com\/services\/[A-Za-z0-9/]+/g, 'https://hooks.slack.com/services/[REDACTED]', 'Slack webhook'],
   // Tailscale auth keys, API tokens and OAuth client secrets (tskey-auth-..., tskey-api-..., tskey-client-...): the
   // prefix and the rest of its run, however short (src/tailscale-setup.ts redacted them this way on its own).
   [/tskey-[A-Za-z0-9_-]+/g, 'tskey-[REDACTED]', 'Tailscale key'],
-  [/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g, '[REDACTED PRIVATE KEY]', 'private key'],
+  // A private key (PEM, and PGP's PRIVATE KEY BLOCK), failing closed (#889): from its BEGIN line to its END line, or
+  // to the end of the text when no END follows (a key cut short, or still being written); then, for an END line with
+  // no BEGIN before it (a key whose start is above a window), from the start of the text to that END line. Each BEGIN
+  // is read once (its match runs to its END or to the end), and the second rule has one start: linear.
+  [/-----BEGIN [A-Z ]*PRIVATE KEY(?: BLOCK)?-----(?:[\s\S]*?-----END [A-Z ]*PRIVATE KEY(?: BLOCK)?-----|[\s\S]*)/g, '[REDACTED PRIVATE KEY]', 'private key'],
+  [/^[\s\S]*-----END [A-Z ]*PRIVATE KEY(?: BLOCK)?-----/, '[REDACTED PRIVATE KEY]', 'private key'],
   // The scheme is case-insensitive (RFC 9110): `bearer` and `BEARER` too (#889).
   [/\b(Bearer|bearer|BEARER)\s+[A-Za-z0-9._~+/-]{20,}=*/g, '$1 [REDACTED]', 'bearer token'],
+  // HTTP Basic credentials (base64 of user:password; git's extraheader, src/dashboard-auth.ts's client id and secret),
+  // failing closed: any credential-looking value after the scheme. Prose ("Basic Authentication") has no digit, `+`,
+  // `/` or `=`, and isn't a mixed-case run of a base64 length.
+  [/\b(Basic|basic|BASIC)(\s+)([A-Za-z0-9+/]{8,}={0,2})(?![A-Za-z0-9+/=])/g, (m, s, sp, v) => (basicShaped(v!) ? `${s}${sp}[REDACTED]` : m), 'Basic credential'],
   // Credentials inside connection strings: keep scheme, user and host.
   [/\b([a-z][a-z0-9+.-]*:\/\/[^:/\s@]+):[^@\s/]+@/gi, '$1:[REDACTED]@', 'password in a URL'],
   // 0x-prefixed 32-byte hex (EVM private keys and the like).
-  [/\b0x[0-9a-fA-F]{64}\b/g, '0x[REDACTED-32-BYTES]', '32-byte hex key'],
+  [/\b0x[0-9a-fA-F]{64}(?![A-Za-z0-9])/g, '0x[REDACTED-32-BYTES]', '32-byte hex key'],
   // A JSON string value under a credential key (credentialKey: "aws_secret_access_key", "db_password", "x-api-key",
   // "slack_bot_token", "authorization", ...), also inside an escaped JSON string (\"token\":\"...\"). Not "cacheKey"
   // or "sort_key", and only a credential-shaped value (16 or more characters; mixed case with a digit, or long hex),
@@ -110,18 +128,24 @@ const PATTERNS: [RegExp, Replacement, string][] = [
 /**
  * The broad rules (`broad: true`), for text whose source may cut a token short or name a secret by its key: gh's
  * output (src/gh-login.ts), the bench's printed lines (scripts/bench/cli.ts) and the root updater's files
- * (scripts/machine/<cli>-update.cjs, which carries a generated copy of this module). Applied before PATTERNS, each
- * puts `mask` (default [REDACTED]) in place of what it finds. They were those modules' own rules (#889): a known
+ * (scripts/machine/<cli>-update.cjs, which carries a generated copy of this module). Run with PATTERNS, all on the
+ * text as it was, and what any of them finds is masked with `mask` (maskUnion). They were those modules' own rules (#889): a known
  * token prefix and a short run, a URL's user info, a value after a secret's name, a short bearer token, and a JWT
  * after a hyphen. Each starts only where a run starts, or reads a bounded stretch from each start: linear.
  */
 const BROAD: [RegExp, (mask: string) => string, string][] = [
   [/(^|[^A-Za-z0-9_])(?:gh[pousr]_|github_pat_)[A-Za-z0-9_]{8,}/g, (k) => `$1${k}`, 'GitHub token, cut short'],
   [/sk-ant-[A-Za-z0-9_-]+/g, (k) => k, 'Anthropic key, cut short'],
+  // The root updater's own token rule on main, as it was: where it ends (a GitHub token's run of letters and digits, a
+  // Slack token's before a `_`) is where its next rule saw a boundary (maskUnion reads again there).
+  [/\b(gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-ant-[A-Za-z0-9_-]{10,}|xox[abprs]-[A-Za-z0-9-]{10,})/g, (k) => k, "the updater's token rule"],
   [/(^|[^A-Za-z0-9_])xox[abprs]-[A-Za-z0-9_-]+/g, (k) => `$1${k}`, 'Slack token, cut short'],
-  [/(^|[^A-Za-z0-9_])eyJ[A-Za-z0-9_-]{8,512}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]+/g, (k) => `$1${k}`, 'JWT after a hyphen'],
+  [/(^|[^A-Za-z0-9_])eyJ[A-Za-z0-9_-]{8,512}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*/g, (k) => `$1${k}`, 'JWT after a hyphen'],
   [/\b(bearer)\s+[A-Za-z0-9._~+/=-]{8,}/gi, (k) => `$1 ${k}`, 'short bearer token'],
-  [/(^|[^a-z0-9+.-])([a-z][a-z0-9+.-]*:\/\/)[^\s/@]+@/gi, (k) => `$1$2${k}@`, 'user info in a URL'],
+  // A scheme of up to 32 characters right before `://`, from any start (after `-`, `.`, `+` or a letter too: the
+  // updater's own rule started at any `\b`, a scheme of any length): each start reads at most 33 characters, and each
+  // `://` is reached from at most 32 starts, so linear.
+  [/([a-z][a-z0-9+.-]{0,31}:\/\/)[^\s/@]+@/gi, (k) => `$1${k}@`, 'user info in a URL'],
   [/\b([A-Za-z_]*(?:token|secret|password|passwd|api[_-]?key))(\s*[=:]\s*)("[^"]*"|'[^']*'|\S+)/gi, (k) => `$1$2${k}`, 'value after a secret name'],
 ];
 
@@ -200,9 +224,12 @@ export const REDACTION_PATTERNS: readonly { kind: string; re: RegExp; rep: Repla
 export interface RedactTextOptions {
   /** Also redact emails, internal hostnames, private IPs and home paths' user names (text for an issue, comment or PR). */
   identifiers?: boolean;
-  /** Also apply the broad rules (BROAD), first: a token prefix cut short, a URL's user info, a value after a secret's name. */
+  /**
+   * The broad mode: the shapes and the broad rules (BROAD: a token prefix cut short, a URL's user info, a value after a
+   * secret's name), all on the text as it was; the union of what they find is masked with `mask` (maskUnion).
+   */
   broad?: boolean;
-  /** What a broad rule puts in place of what it finds; [REDACTED] when unset. */
+  /** In the broad mode, what each masked run becomes (taken literally); [REDACTED] when unset. */
   mask?: string;
   /** Keep the text's line count: a match over several lines (a private key) leaves its line breaks (redactRecords). */
   keepLines?: boolean;
@@ -210,23 +237,56 @@ export interface RedactTextOptions {
 
 /**
  * The prefixes of the shapes whose patterns start at `\b` (or after a character that isn't `_`): after an underscore
- * (`MY_ghp_...`, `x_sk-...`) a second pass reads from the prefix on (afterUnderscore), so a key glued to a name is
- * found too (#889). The first pass is unchanged, so nothing it found is lost.
+ * (`MY_ghp_...`, `x_sk-...`) a token is glued to a name, and the second pass (glued) reads it from its prefix on.
  */
-const GLUED_PREFIXES = ['ghp_', 'gho_', 'ghu_', 'ghs_', 'ghr_', 'github_pat_', 'sk-', 'sk_live_', 'sk_test_', 'rk_live_', 'rk_test_', 'xoxa-', 'xoxb-', 'xoxe', 'xoxp-', 'xoxr-', 'xoxs-', 'xapp-', 'lin_api_', 'lin_oauth_', 'AKIA', 'ASIA', 'AIza', 'eyJ', '0x', 'Bearer', 'bearer', 'BEARER', DASHBOARD_KEY_PREFIX];
+const GLUED_PREFIXES = ['ghp_', 'gho_', 'ghu_', 'ghs_', 'ghr_', 'github_pat_', 'sk-', 'sk_live_', 'sk_test_', 'rk_live_', 'rk_test_', 'xoxa-', 'xoxb-', 'xoxe', 'xoxp-', 'xoxr-', 'xoxs-', 'xapp-', 'lin_api_', 'lin_oauth_', 'AKIA', 'ASIA', 'AIza', 'eyJ', '0x', 'Bearer', 'bearer', 'BEARER', 'Basic', 'basic', 'BASIC', DASHBOARD_KEY_PREFIX];
+/**
+ * What ends in a letter and may sit right before a token (#889): an ANSI escape sequence (a coloured log line,
+ * `ESC[1m`) and a backslash escape in raw JSON or C-style text (`\n`, `\t`, `\"`, `\u001b`). A cut point goes after
+ * each. Each ESC or backslash starts one bounded match: linear.
+ */
+const GLUE = /\u001b(?:\[[0-?]*[ -/]*[@-~]|[@-Z\\-_])|\\(?:u[0-9A-Fa-f]{4}|[nrtbf"\\/])/g;
 
-/** `s` with `f` applied again from each underscore that a known prefix follows: indexOf scans, so linear. */
-function afterUnderscore(s: string, f: (part: string) => string): string {
-  const cuts: number[] = [];
+/** Where a token may start glued to what is before it: after each GLUE match, and after `_` before a known prefix. */
+function gluePoints(s: string): number[] {
+  const cuts = [...s.matchAll(GLUE)].map((m) => m.index! + m[0].length);
   for (let at = s.indexOf('_'); at !== -1; at = s.indexOf('_', at + 1)) if (GLUED_PREFIXES.some((p) => s.startsWith(p, at + 1))) cuts.push(at + 1);
+  return [...new Set(cuts)].filter((c) => c < s.length).sort((a, b) => a - b);
+}
+
+/** A character `s` doesn't hold (a private-use one), to mark the cut points with; null when it holds them all. */
+function freeMark(s: string): string | null {
+  const held = new Set<number>();
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    if (c >= 0xe000 && c <= 0xf8ff) held.add(c);
+  }
+  for (let c = 0xe000; c <= 0xf8ff; c++) if (!held.has(c)) return String.fromCharCode(c);
+  return null;
+}
+
+/**
+ * The second pass (#889): `f` again on `s` with a boundary at each glue point, so a token glued to a name, to an ANSI
+ * escape or to a JSON escape is found from its start. The boundary is a mark no pattern takes in, inserted and taken
+ * out again, so the text is otherwise kept as it was. When `s` holds every mark character, each piece after a glue
+ * point is redacted on its own instead. The first pass ran on the text as it was, so nothing it found is lost.
+ */
+function glued(s: string, f: (part: string) => string): string {
+  const cuts = gluePoints(s);
   if (!cuts.length) return s;
-  let out = '';
+  const mark = freeMark(s);
+  if (mark === null) {
+    let out = s.slice(0, cuts[0]);
+    for (const [i, c] of cuts.entries()) out += f(s.slice(c, cuts[i + 1] ?? s.length));
+    return out;
+  }
+  let marked = '';
   let from = 0;
-  for (const c of [...cuts, s.length]) {
-    out += from === 0 ? s.slice(0, c) : f(s.slice(from, c));
+  for (const c of cuts) {
+    marked += s.slice(from, c) + mark;
     from = c;
   }
-  return out;
+  return f(marked + s.slice(from)).split(mark).join('');
 }
 
 /** `$1`, `$&` and `$$` in a replacement string, as String.prototype.replace reads them. */
@@ -297,18 +357,154 @@ export function secretKinds(s: string): string[] {
   return [...kinds].sort();
 }
 
+/** A rule's regex as a global one, for matchAll (the orphan-END rule has no `g`). */
+const globals = new Map<RegExp, RegExp>();
+const globalOf = (re: RegExp) => {
+  let g = globals.get(re);
+  if (!g) globals.set(re, (g = re.flags.includes('g') ? re : new RegExp(re.source, `${re.flags}g`)));
+  return g;
+};
+
+/**
+ * Where `re` finds a secret in `t`, as [start, end) spans: each match's part its replacement takes out (what the match
+ * and the replacement don't share at either end), so the scheme, the key's name or the separator a rule keeps is not
+ * in the span. A match its replacement leaves as it was (a function that judged it no secret) gives none.
+ */
+function spansOf(t: string, re: RegExp, rep: Replacement, out: [number, number][]) {
+  const g = globalOf(re);
+  g.lastIndex = 0;
+  for (let m = g.exec(t); m; m = g.exec(t)) {
+    const whole = m[0];
+    // The next search starts 64 characters before the match's end, not after it: a value a rule takes in may hold the
+    // next secret's name (`token='abc password = 'x`, `Bearer abc+Bearer xyz`), and that next match must still be
+    // found. Each match start is after the last one's, and at most 64 characters are read again: linear.
+    g.lastIndex = Math.max(m.index + 1, m.index + whole.length - 64);
+    const groups = m.slice(1).map((x) => x ?? '');
+    const r = typeof rep === 'string' ? expand(rep, whole, groups) : rep(whole, ...groups);
+    if (r === whole) continue;
+    let a = 0;
+    while (a < whole.length && a < r.length && whole[a] === r[a]) a++;
+    let b = 0;
+    while (b < whole.length - a && b < r.length - a && whole[whole.length - 1 - b] === r[r.length - 1 - b]) b++;
+    if (whole.length - b > a) out.push([m.index! + a, m.index! + whole.length - b]);
+  }
+}
+
+/** Every rule of the broad mode: the shapes and the broad rules, each shown with the default mask. */
+const BROAD_RULES: [RegExp, Replacement][] = [...PATTERNS.map(([re, rep]): [RegExp, Replacement] => [re, rep]), ...BROAD.map(([re, rep]): [RegExp, Replacement] => [re, rep('[REDACTED]')])];
+
+/**
+ * The broad mode (#889 round 3, the final check's regression finding): every rule runs on the text as it was, and the
+ * union of the spans they find is masked, each run once, with `mask`. Order-free by design: no rule's marker can hide
+ * what another rule would have found, so each rule masks at least what it masked alone (the modules' own rules on
+ * main among them; test/redact-broad-union.test.ts compares them on generated input). The glue points (gluePoints)
+ * are found the same way, on the text with a mark at each, mapped back. One pass of maskUnion.
+ */
+function maskOnce(s: string, mask: string, keepLines: boolean): string {
+  const spans: [number, number][] = [];
+  for (const [re, rep] of BROAD_RULES) spansOf(s, re, rep, spans);
+  // Two more reads, each with boundaries marked in: the glue points; and where a span found begins or ends between two
+  // word characters (a module's own rules, applied in turn, saw a boundary where an earlier rule's replacement ended:
+  // `xoxa-...[here]_db_password=...`). Apart, so a boundary of one kind can't break a match the other needs.
+  const word = (i: number) => /[A-Za-z0-9_]/.test(s[i] ?? '');
+  readAt(s, gluePoints(s), spans);
+  readAt(s, [...new Set(spans.flat())].filter((c) => c > 0 && c < s.length && word(c - 1) && word(c)).sort((a, b) => a - b), spans);
+  // What is already a mask stays as it is: a rule that takes in a mask word (`token=[REDACTED]`) adds nothing.
+  const masks: [number, number][] = [];
+  if (mask) for (let at = s.indexOf(mask); at !== -1; at = s.indexOf(mask, at + mask.length)) masks.push([at, at + mask.length]);
+  const kept = masks.length ? spans.flatMap(([a, b]) => outside([a, b], masks)) : spans;
+  if (!kept.length) return s;
+  kept.sort((x, y) => x[0] - y[0]);
+  let out = '';
+  let at = 0;
+  let open: [number, number] | null = null;
+  const close = () => {
+    if (!open) return;
+    out += s.slice(at, open[0]) + mask + (keepLines ? '\n'.repeat(breaks(s.slice(open[0], open[1]))) : '');
+    at = open[1];
+  };
+  for (const [a, b] of kept) {
+    if (b <= a) continue;
+    if (open && a <= open[1]) open[1] = Math.max(open[1], b);
+    else {
+      close();
+      open = [a, b];
+    }
+  }
+  close();
+  return out + s.slice(at);
+}
+
+/** Every rule on `s` with a boundary marked in at each of `cuts` (sorted); the spans found, mapped back, go in `spans`. */
+function readAt(s: string, cuts: number[], spans: [number, number][]) {
+  if (!cuts.length) return;
+  const markChar = freeMark(s);
+  if (markChar === null) {
+    // Every mark character is in the text: each piece after a cut is read on its own.
+    for (const [i, c] of cuts.entries()) {
+      const piece = s.slice(c, cuts[i + 1] ?? s.length);
+      const more: [number, number][] = [];
+      for (const [re, rep] of BROAD_RULES) spansOf(piece, re, rep, more);
+      for (const [a, b] of more) spans.push([a + c, b + c]);
+    }
+    return;
+  }
+  let marked = '';
+  let from = 0;
+  for (const c of cuts) {
+    marked += s.slice(from, c) + markChar;
+    from = c;
+  }
+  marked += s.slice(from);
+  // A position in the marked text, back to the text: less the marks before it.
+  const back = (p: number) => {
+    let lo = 0;
+    let hi = cuts.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (cuts[mid]! + mid < p) lo = mid + 1;
+      else hi = mid;
+    }
+    return p - lo;
+  };
+  const more: [number, number][] = [];
+  for (const [re, rep] of BROAD_RULES) spansOf(marked, re, rep, more);
+  for (const [a, b] of more) spans.push([back(a), back(b)]);
+}
+
+/** The parts of [a, b) outside every one of `regions` (sorted, not overlapping). */
+function outside([a, b]: [number, number], regions: [number, number][]): [number, number][] {
+  const out: [number, number][] = [];
+  let from = a;
+  for (const [x, y] of regions) {
+    if (y <= from || x >= b) continue;
+    if (x > from) out.push([from, x]);
+    from = Math.max(from, y);
+  }
+  if (from < b) out.push([from, b]);
+  return out;
+}
+
+/**
+ * The broad mode: masked once, then again on what that gave, until nothing changes (at most 3 times). A mask can make
+ * a boundary a later rule needs (`[REDACTED]_db_password=...`), as each module's own rules, applied in turn, did.
+ */
+function maskUnion(s: string, mask: string, keepLines: boolean): string {
+  let out = maskOnce(s, mask, keepLines);
+  for (let i = 0; i < 2; i++) {
+    const again = maskOnce(out, mask, keepLines);
+    if (again === out) break;
+    out = again;
+  }
+  return out;
+}
+
 export function redactString(s: string, o: RedactTextOptions = {}): string {
   const put = o.keepLines ? applyKeepingLines : apply;
-  let out = s;
-  if (o.broad) {
-    // A private key first: a broad rule (a value after `TOKEN=`) would take its BEGIN line and leave its body unfound.
-    for (const [re, rep, kind] of PATTERNS) if (kind === 'private key') out = put(out, re, rep);
-    // A `$` in the mask is taken literally.
-    const mask = (o.mask ?? '[REDACTED]').replace(/\$/g, '$$$$');
-    for (const [re, rep] of BROAD) out = put(out, re, rep(mask));
-  }
-  const secrets = (t: string) => PATTERNS.reduce((x, [re, rep]) => put(x, re, rep), t);
-  out = afterUnderscore(secrets(out), secrets);
+  // The broad mode masks the union of every rule's spans (maskUnion); the default mode applies the shapes in turn,
+  // each with its own marker, then again from each glue point (glued).
+  const secrets = (t: string) => PATTERNS.reduce((y, [re, rep]) => put(y, re, rep), t);
+  let out = o.broad ? maskUnion(s, o.mask ?? '[REDACTED]', o.keepLines === true) : glued(secrets(s), secrets);
   if (o.identifiers) out = outsideMachineBlocks(out, (part) => IDENTIFIERS.reduce((t, [re, rep]) => put(t, re, rep), part));
   return out;
 }
