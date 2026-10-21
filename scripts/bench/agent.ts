@@ -63,10 +63,16 @@ export function benchDenied(o: LaneInput): string[] {
     ...(socket ? [socket] : []),
     join(o.home, '.local', 'share', 'docker'),
     ...(o.dataHome ? [join(o.dataHome, 'docker')] : []),
+    // The system journal, persistent and volatile: the bench user's own journal file there is readable by it, and its
+    // rootless dockerd may log the task images it pulls (`bench pull`), whose names carry instance ids (a guess).
+    ...JOURNALS,
     o.state,
     o.heldOut,
   ];
 }
+
+/** Where systemd-journald keeps the journal: persistent, then volatile. */
+export const JOURNALS: readonly string[] = Object.freeze(['/var/log/journal', '/run/log/journal']);
 
 /**
  * The lane every bench agent run gets: its sandbox, and what it denies. Built with the engine's withDeniedReads, so the
