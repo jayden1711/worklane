@@ -221,16 +221,15 @@ A person's own session isn't affected.
 **Known open gaps.** Each has an open issue or a PR in review. None of the PRs in review counts as shipped until it merges.
 
 - **Hidden paths can be listed and searched (#847).** The tool guard refuses Read on a task's hidden paths, but allows Glob and Grep over them. So a Grep can print their contents, and a Glob can list their names. Label: measured by the evaluator on PR #839's review, as the issue cites.
-- **Child processes inherit `Object.prototype` keys (#846).** Node copies an env object's inherited enumerable keys into a child's environment. So code already running in the engine's process could reach every child the engine spawns. Label: measured in the issue (a scratch script on Node 22); the reach is inferred. In review: #844 makes the engine's own environment reads own-only, and #883 starts every child through `src/os/child-process.ts`, which gives it only the variables that are set.
 - **Tests can reach real host tools (#838).** A test that sets its own `PATH` to include `/usr/bin` or `/bin` runs the real `gh`, `loginctl` and similar tools. Label: measured in the issue. A GitHub token exported in the shell isn't stripped from test processes: `test/isolate.ts` removes only the engine's own variables and `AGENT_SLOTS_*`. Label: inferred, from reading `test/isolate.ts`; that such a token would reach those `gh` calls is inferred in the issue too (none was set in its measured run).
 - **Main needs 0 approvals.** On this repository, GitHub's rules for `main` require 0 approving reviews. Only the engine's own merge policy keeps its high-risk changes with the owner; GitHub doesn't. Label: measured (`gh api repos/<owner>/<repo>/rules/branches/main`, `required_approving_review_count` is `0`, 2026-10-19).
 - **The agents that build this repository act as the owner's account.** A move to a separate unprivileged account, with its own GitHub App and an owner-only update ruleset, is approved but not done. Label: measured (`gh api user` is the repository owner, 2026-10-19).
 - **A fresh hardened install trusts main as of its clone (#845's body).** On a fresh hardened install, the checkout is a clone of origin's main. So its release signers, its engine pin and every script root runs come from main at clone time.
   - With 0 required approvals, anyone who can land a change on main before that clone is trusted by it.
-  - #845 (in review) verifies the release tag before building as root, but this gap stays open. It closes with the owner-only update ruleset, or with an anchor the operator checks outside GitHub.
+  - #845 (merged) verifies the release tag before building as root, but this gap stays open. It closes with the owner-only update ruleset, or with an anchor the operator checks outside GitHub.
   - Label: measured by #845's round-1 reviewer, with throwaway keys.
 
-**Guard work in review, not shipped:**
+**Guard work merged after this page was first written** (label: measured, `gh pr view` shows each PR merged, 2026-10-20):
 
 - #820: a PR that removes or weakens a test, lint or guard waits for the owner.
 - #788 and #789: a required check counts only from the workflow or App pinned for its name.
@@ -238,6 +237,7 @@ A person's own session isn't affected.
 - #834: resuming auto-merge after a stop waits for green main.
 - #839: the tool guard's own module tree is locked.
 - #844: environment reads see only variables that are set.
+- #883 (closes #846): every child the engine spawns starts through `src/os/child-process.ts`, which gives it only the variables that are set, so it no longer inherits `Object.prototype`'s keys.
 - #845: the hardened install verifies the release tag.
 
-An adversarial suite (#707) will add attack tests for these guards. Its page will be linked here once it lands.
+The adversarial suite (#707, `test/adversarial/adversarial.test.ts`) holds attack cases for the merge decision: each one a hostile PR the gate must hold. Its cases cover #820 (`test/adversarial/cases/weakening.json`) and #839 (the `guard-folder-new-file` case). #788's pinned check source has no case yet: the suite doesn't drive the readiness check, so it is listed in `test/adversarial/todo.json`. Label: measured, by the suite's own run.
