@@ -142,7 +142,8 @@ test('#890: an experiment run\'s hidden paths and the secret paths are in its sa
   assert.ok(!readRuleDenies(deny, join(f.repo, '.env.example')), 'the exception (!./.env.example) stays readable');
   assert.ok(!denyRead.some((d) => d.endsWith('.env.example') || d.endsWith('.env.*')), JSON.stringify(denyRead));
   // The object store, whose blobs hold the hidden files whatever the worktree shows.
-  assert.ok(denyRead.includes(join(f.repo, '.git', 'objects')), JSON.stringify(denyRead));
+  // (The whole common git directory since round 6: objects, lfs, rerere's preimages and the rest.)
+  assert.ok(denyRead.includes(join(f.repo, '.git')), JSON.stringify(denyRead));
   assert.ok(readRuleDenies(deny, join(f.repo, '.git', 'objects', 'pack', 'x.pack')));
   // Source the agent works on stays readable.
   assert.ok(!readRuleDenies(deny, join(f.wt, 'src', 'price.js')));

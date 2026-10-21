@@ -8,10 +8,10 @@
 // INVARIANT: no host tool can run. Every program the runners start, by name or through sudo, is a stand-in in one
 // directory, and that directory is this process's whole PATH and every run's. The stand-ins exec nothing; they record
 // and answer.
-import { STDIN_LINE, allowProviderHosts } from './helpers.js';
+import { STDIN_LINE, allowProviderHosts, repoRoot } from './helpers.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, cpSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { agentSettingsPath, guardrailSettings, HOOK_MARKER } from '../src/agent-settings.js';
@@ -75,6 +75,11 @@ function newCase(authMethod: string) {
   for (const d of ['work', 'userhome', 'state', 'instance']) mkdirSync(join(root, d));
   // The task file fullRequest names, as the coordinator writes one: a run whose task file can't be read doesn't start (#890).
   writeFileSync(join(root, 'task.md'), JSON.stringify({ id: 'golden', done_when: [{ manual: 'x' }] }));
+  // The work dir is a project, as every guarded run's is: one with no config folder doesn't start (#890), as its hook
+  // would deny every call. Its secret_paths are empty, so the pinned --settings below gain nothing.
+  cpSync(join(repoRoot, 'examples', 'basic', BRAND.configDir), join(root, 'work', BRAND.configDir), { recursive: true });
+  const guardrails = join(root, 'work', BRAND.configDir, 'guardrails.yaml');
+  writeFileSync(guardrails, readFileSync(guardrails, 'utf8').replace(/^secret_paths:\n(?: {2}- .*\n)+/m, 'secret_paths: []\n'));
   writeFileSync(LOG, '');
   writeFileSync(AUTH, authMethod);
   return root;

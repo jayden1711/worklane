@@ -4,7 +4,7 @@ import { exampleProject } from './helpers.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { EXPAND_LIMIT, gitStores, runReadDenials } from '../src/read-denials.js';
@@ -78,7 +78,8 @@ test('#890: a task\'s hidden paths add the repository\'s object stores and every
   const plain = paths(runReadDenials({ cwd: wt, home: '/h' }));
   assert.deepEqual(plain.sort(), [join(dir, '.env'), join(wt, '.env'), ...late(dir, ['.env'], [dirname(wt)])].sort());
   const hid = paths(runReadDenials({ cwd: wt, home: '/h', taskFile: task(['evals/**']) }));
-  for (const p of [join(wt, 'evals'), join(dir, 'evals'), join(dir, '.git', 'objects'), join(shared, 'objects'), join(dir, '.git', 'lfs')]) assert.ok(hid.includes(p), `${p}: ${JSON.stringify(hid)}`);
+  // The whole common git directory (its objects and lfs among it, round 6) and the borrowed store.
+  for (const p of [join(wt, 'evals'), join(dir, 'evals'), join(dir, '.git'), join(shared, 'objects')]) assert.ok(hid.includes(p), `${p}: ${JSON.stringify(hid)}`);
   const g = gitStores(wt);
   assert.ok(!('error' in g) && g.checkouts.includes(dir) && g.checkouts.includes(wt));
 });
@@ -96,7 +97,15 @@ test('#890: paths the sandbox can\'t take as written refuse the run', { skip }, 
   assert.ok('error' in r && /needs the run's home/.test(r.error), JSON.stringify(r));
 });
 
-test('#890: no project config and no task: nothing added, and nothing refused', { skip }, () => {
+test('#890: no project config: the guarded run is refused, as its hook would deny every call (round 6)', { skip }, () => {
   const dir = mkdtempSync(join(tmpdir(), 'bare-'));
+  const r = runReadDenials({ cwd: dir, home: '/h' });
+  assert.ok('error' in r && /folder found/.test(r.error), JSON.stringify(r));
+});
+
+test('#890: a project with no secret paths and no task: nothing added, and nothing refused', { skip }, () => {
+  const { dir } = exampleProject();
+  const f = join(dir, '.worklane', 'guardrails.yaml');
+  writeFileSync(f, readFileSync(f, 'utf8').replace(/^secret_paths:\n(?: {2}- .*\n)+/m, 'secret_paths: []\n'));
   assert.deepEqual(runReadDenials({ cwd: dir, home: '/h' }), { paths: [] });
 });

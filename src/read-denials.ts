@@ -7,10 +7,10 @@
 // with everything under it; a trailing `/**` means the directory; any other glob is expanded to what exists each
 // time a command is wrapped, following symlinked directories. A path that doesn't exist then hides nothing, and `[`
 // `]` are glob syntax there (`?` is any one character but "/").
-import { lstatSync, readdirSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, lstatSync, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, posix, resolve } from 'node:path';
 import { BRAND } from './brand.js';
-import { loadConfig } from './config/load.js';
+import { ConfigInvalid, loadConfig, loadConfigAt } from './config/load.js';
 import { TaskFile } from './contract.js';
 import { projectStateDir } from './guardrails/context.js';
 import { globToRegExp } from './guardrails/glob.js';
@@ -34,14 +34,14 @@ const firstLine = (e: unknown) => (e as Error).message.split('\n')[0]!.slice(0, 
 /** An absolute pattern's regex, matched against an absolute path without its leading "/". */
 const absRe = (p: string) => globToRegExp(p.slice(1));
 
-/** The nearest directory at or above `start` holding the config folder: the hook's project root. */
+/**
+ * The nearest directory at or above `start` holding the config folder, found exactly as the hook finds its project
+ * root (src/hook.ts findProjectRoot: existsSync, which follows a symlinked folder). The hook takes CLAUDE_PROJECT_DIR
+ * first, which Claude Code sets to the run's cwd, the `start` here (inferred).
+ */
 function projectRoot(start: string): string | null {
   for (let dir = resolve(start); ; dir = dirname(dir)) {
-    try {
-      if (lstatSync(join(dir, BRAND.configDir)).isDirectory()) return dir;
-    } catch {
-      // not here
-    }
+    if (existsSync(join(dir, BRAND.configDir))) return dir;
     if (dirname(dir) === dir) return null;
   }
 }
@@ -112,10 +112,19 @@ export function gitStores(start: string, withStores = true): Repository | { erro
     if (!withStores) return { ...repo, stores: [] };
     const borrowed = alternates(common);
     if ('error' in borrowed) return borrowed;
-    // A submodule's objects live in its own git directory, under modules/ (and, for a linked worktree's submodules,
-    // under worktrees/<name>/modules/): denied whole, so `git -C <submodule> show` has nothing to read either.
-    const modules = [join(common, 'modules'), ...named.map((n) => join(common, 'worktrees', n, 'modules'))];
-    return { ...repo, stores: [join(common, 'objects'), ...borrowed.stores, join(common, 'lfs'), ...modules] };
+    // The whole common git directory, not only its objects: rerere's preimages, rebase patches, lost-found, LFS and
+    // every submodule's store (modules/, worktrees/<name>/modules/) hold committed or hidden content too, and git can't
+    // work in such a run anyway once its objects are gone.
+    const stores = [common, ...borrowed.stores];
+    // A link out of a store (packs on another disk, say) is hidden by the mount over the store, its target isn't:
+    // each link's real place is denied too. git-lfs's own storage may be set anywhere (lfs.storage, read against
+    // the git directory when relative).
+    const storeDirs = [join(common, 'objects'), ...borrowed.stores];
+    const out = linkTargets([common, ...storeDirs.flatMap((s) => [s, join(s, 'pack'), join(s, 'info')])]);
+    const lfs = git(common, ['config', '--get', 'lfs.storage'], [0, 1]);
+    if ('error' in lfs) return lfs;
+    if (lfs.out.trim()) out.push(resolve(common, lfs.out.trim()));
+    return { ...repo, stores: [...new Set([...stores, ...out])] };
   } catch (e) {
     return { error: `the git repository at ${dotGit} can't be read (${firstLine(e)})` };
   }
@@ -200,6 +209,35 @@ function unquote(q: string): string | null {
   }
   const text = Buffer.from(bytes).toString('utf8');
   return Buffer.from(text, 'utf8').equals(Buffer.from(bytes)) ? text : null;
+}
+
+/**
+ * The real places the symlinks directly in these directories lead to. A link that leads nowhere hides nothing and
+ * is skipped; a directory that isn't there is skipped; anything else that can't be read throws (the run refuses).
+ */
+function linkTargets(dirs: string[]): string[] {
+  const out: string[] = [];
+  for (const d of dirs) {
+    let entries;
+    try {
+      entries = readdirSync(d, { withFileTypes: true });
+    } catch (e) {
+      const code = (e as NodeJS.ErrnoException).code;
+      if (code === 'ENOENT' || code === 'ENOTDIR') continue;
+      throw e;
+    }
+    for (const e of entries) {
+      if (!e.isSymbolicLink()) continue;
+      try {
+        const to = realpathSync(join(d, e.name));
+        if (to === '/') throw new Error(`${join(d, e.name)} leads to /, which can't be denied`);
+        out.push(to);
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+      }
+    }
+  }
+  return out;
 }
 
 /** A file's text, or null when there is none; any other failure throws. */
@@ -328,29 +366,46 @@ export function runReadDenials(o: { cwd: string; home: string | undefined; taskF
       return { error: `the task file ${o.taskFile} can't be read (${firstLine(e)}), so its hidden paths can't be denied` };
     }
   }
+  // A guarded run with no project root has every call denied by the hook (`no <config> found`): it doesn't start.
   const root = projectRoot(o.cwd);
-  let secret: string[] = [];
-  let worktreeRoot: string | null = null;
-  if (root) {
+  if (!root) return { error: `no ${BRAND.configDir} folder found at or above ${o.cwd}, so its project root (and secret paths) can't be found` };
+  let cfg;
+  try {
+    cfg = loadConfig(root);
+  } catch (e) {
+    return { error: `the guardrails in ${root} can't load (${firstLine(e)}), so its secret paths can't be denied` };
+  }
+  const repo = gitStores(root, hidden.length > 0);
+  if ('error' in repo) return repo;
+  const main = o.repo ? resolve(o.repo) : repo.main;
+  if (!main && repo.mainUnknown) return { error: `the main checkout of the repository around ${o.cwd} can't be found (its git directory isn't <checkout>/.git and records no core.worktree), so its hidden and secret paths can't be denied` };
+  // The run's own checkout's config is what its hook reads, and its agent can write it. The main checkout's and the
+  // default branch's committed config (as src/config/live.ts reads it) count too: emptying secret_paths in a
+  // worktree drops nothing. Each only adds entries.
+  const configs = [cfg];
+  if (main && resolve(main) !== resolve(root) && existsSync(join(main, BRAND.configDir))) {
     try {
-      const cfg = loadConfig(root);
-      secret = cfg.guardrails.secret_paths;
-      worktreeRoot = cfg.tests.worktree.root;
+      configs.push(loadConfig(main));
     } catch (e) {
-      return { error: `the guardrails in ${root} can't load (${firstLine(e)}), so its secret paths can't be denied` };
+      return { error: `the guardrails in ${main} can't load (${firstLine(e)}), so its secret paths can't be denied` };
     }
   }
+  const branch = configs[configs.length - 1]!.project.project.default_branch;
+  try {
+    configs.push(loadConfigAt(main ?? root, `refs/remotes/origin/${branch}`));
+  } catch (e) {
+    const missing = e instanceof ConfigInvalid && e.errors.every((x) => x.message.startsWith('missing at'));
+    if (!missing) return { error: `the guardrails on the default branch (origin/${branch}) can't load (${firstLine(e)}), so its secret paths can't be denied` };
+  }
+  const secret = [...new Set(configs.flatMap((c) => c.guardrails.secret_paths))];
+  const worktreeRoots = [...new Set(configs.map((c) => c.tests.worktree.root))];
   const patterns = [...secret, ...hidden];
   if (!patterns.length) return { paths: [] };
   // A bracket the project or the task wrote is a character to the hook and a class to the sandbox: no entry means
   // the same to both. One in a path the runner resolved is written as "?" instead (asEntry).
   const written = patterns.find((p) => !p.startsWith('!') && SANDBOX_ONLY_GLOB.test(p));
   if (written) return { error: `${written} has "[" or "]", which the sandbox reads as a pattern; it can't be denied as written` };
-  const repo = gitStores(root ?? o.cwd, hidden.length > 0);
-  if ('error' in repo) return repo;
-  const main = o.repo ? resolve(o.repo) : repo.main;
-  if (!main && repo.mainUnknown) return { error: `the main checkout of the repository around ${o.cwd} can't be found (its git directory isn't <checkout>/.git and records no core.worktree), so its hidden and secret paths can't be denied` };
-  const roots = [...new Set([root ?? resolve(o.cwd), ...(main ? [main] : []), ...repo.checkouts])];
+  const roots = [...new Set([root, ...(main ? [main] : []), ...repo.checkouts])];
   const anchored = (ps: string[], under = roots) => {
     const out: string[] = [];
     for (const p of ps) {
@@ -392,21 +447,37 @@ export function runReadDenials(o: { cwd: string; home: string | undefined; taskF
   // A checkout created after the run starts (a worker's worktree, made while an experiment runs): the hook matches a
   // relative pattern only inside the run's own checkout, so nothing else covers it. Each relative pattern is also a
   // glob over every place worktrees are made (the project's worktree root, the engine's own, and each existing
-  // worktree's parent), which the sandbox expands on every command and a Read rule matches at call time. A pattern an
-  // exception overlaps is left to what it matches now (above): over a parent, the exception would be hidden in every
+  // worktree's parent), which the sandbox expands each time a command is wrapped and a Read rule matches at call
+  // time. Not for a command already running when the worktree appears: its mounts were fixed when it was wrapped.
+  // A pattern an exception overlaps is listed at the start instead, in every directory under each parent (a checkout
+  // git no longer lists among them), the exception left out: over a parent, a glob would hide the exception in every
   // worktree, the run's own among them.
-  const base = main ?? root ?? resolve(o.cwd);
-  const parents = new Set([...(worktreeRoot ? [resolve(base, worktreeRoot)] : []), join(projectStateDir(base), 'worktrees'), ...repo.linked.map((l) => dirname(l))]);
+  const base = main ?? root;
+  const parents = new Set([...worktreeRoots.map((w) => resolve(base, w)), join(projectStateDir(base), 'worktrees'), ...repo.linked.map((l) => dirname(l))]);
   parents.delete('/');
   const relative = (p: string) => !(p === '~' || p.startsWith('~/') || isAbsolute(p));
-  const relNeg = anchored(patterns.filter((p) => p.startsWith('!')).map((p) => p.slice(1)).filter(relative), ['/r']);
+  const relNegs = patterns.filter((p) => p.startsWith('!')).map((p) => p.slice(1)).filter(relative);
+  const relNeg = anchored(relNegs, ['/r']);
   if ('error' in relNeg) return relNeg;
+  const under = [...parents].map((d) => join(d, '*'));
+  const lateNeg = anchored(relNegs, under);
+  if ('error' in lateNeg) return lateNeg;
+  const lateNegRes = lateNeg.map(absRe);
+  const exceptedLate = (p: string) => excepted(p) || lateNegRes.some((re) => re.test(p.slice(1)));
   for (const p of patterns.filter((p) => !p.startsWith('!') && relative(p))) {
     const probe = anchored([p], ['/r']);
-    if ('error' in probe || probe.some((a) => overlaps(a, relNeg))) continue;
-    const late = anchored([p], [...parents].map((d) => join(d, '*')));
+    if ('error' in probe) return probe;
+    const late = anchored([p], under);
     if ('error' in late) return late;
-    for (const a of late) out.add(a);
+    if (!probe.some((a) => overlaps(a, relNeg))) {
+      for (const a of late) out.add(a);
+      continue;
+    }
+    for (const a of late) {
+      const now = expand(a);
+      if (now) for (const m of now.filter((m) => !exceptedLate(m))) out.add(m);
+      else out.add(a);
+    }
   }
   if (hidden.length) for (const s of repo.stores) out.add(s);
   for (const p of entries) {
