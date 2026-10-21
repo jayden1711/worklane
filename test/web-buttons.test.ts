@@ -1,3 +1,4 @@
+// lint-test
 // Only buttons look like buttons, and a disabled button says why (#587): display chips (ValuePill, Badge) are
 // flat, not pill-shaped; a button held by the server's own check shows that check's reason as its accessible
 // description; a button this person can never use isn't drawn; and every bare `disabled=` in web/src is on a
