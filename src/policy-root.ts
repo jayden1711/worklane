@@ -222,8 +222,12 @@ export interface OwnFlags {
  * make it (unless `acceptLoose`). Returns the keys an admin should check, and which are loose.
  */
 export function ownPolicy(instance: string, d: PolicyRootDeps = {}, flags: OwnFlags = {}): { file: string; keys: Record<string, unknown>; loose: string[] } {
-  // Taking a policy over only tightens it (its coordinator can no longer write it), so an instance made before its name
-  // was reserved is taken over too (#902 round 9).
+  // An instance made before its name was reserved (machine, console) is taken over only as a first takeover of a file
+  // no looser than its coordinator could make it, or as root's own file unchanged (#902 round 10): that only tightens.
+  // --retake (a file changed since root wrote it) and --accept-loose (one looser than its coordinator could make) can
+  // each adopt a looser policy, so under such a name both are refused, and the gate keeps refusing a file root didn't
+  // write (fail closed).
+  if (!instanceNameOk(instance) && (flags.retake || flags.acceptLoose)) throw new Error(`${instance} is a name the instance-name rules refuse now (${instanceNameProblem(instance)}): its policy is never taken over with --retake or --accept-loose, which could loosen it; it only tightens (policy set)`);
   const { dir, file, coordUid } = instancePolicy(instance, d, true);
   const rootUid = d.rootUid ?? 0;
   const markers = d.markerDir ?? POLICY_ROOT_DIR;

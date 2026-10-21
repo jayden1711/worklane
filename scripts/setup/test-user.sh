@@ -209,12 +209,14 @@ BASE=/var/lib/worklane-test
 
 # Whether user <u> is the test user of an instance on this machine: the helper's is_test_user, word for word (a test
 # keeps them equal). WHY not the pattern wl-test-*: instance test's agent, eval and MCP users are wl-test-agent,
-# wl-test-eval and wl-test-mcp.
+# wl-test-eval and wl-test-mcp. An instance made before machine and console were reserved (#902) keeps its test user,
+# as on main (#545: its entry on the wrapper's ACL must be no problem for another instance's run).
+# kept: machine console
 is_test_user() {
   local n
   [[ "$1" =~ ^wl-test-(.+)$ ]] || return 1
   n="${BASH_REMATCH[1]}"
-  [ -z "$(instance_name_problem "$n")" ] && [ -d "$BASE/$n" ] && [ ! -L "$BASE/$n" ]
+  { [ "$n" = machine ] || [ "$n" = console ] || [ -z "$(instance_name_problem "$n")" ]; } && [ -d "$BASE/$n" ] && [ ! -L "$BASE/$n" ]
 }
 
 # Why the wrapper's ACL lets anyone but the test users run it, or anyone but root write it: the helper's

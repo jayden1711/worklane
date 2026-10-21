@@ -147,6 +147,11 @@ instance_name_problem() {
 }
 [[ "$name" =~ ^[a-z][a-z0-9-]{0,20}$ ]] || die "usage: worklane-exp <name> version|eval-put|eval-seal|create|job|stop|wipe|prune|check ..."
 why="$(instance_name_problem "$name")"
+# kept: machine console
+# An instance made before those two names were reserved (#902: their sudoers files are the machine's own) still stops,
+# wipes, prunes and checks what it has (decision guide 2). Every verb that makes something keeps the rule above. The same
+# names as lib.sh LATER_RESERVED_NAMES (a test keeps them equal).
+case "$cmd" in stop | wipe | prune | check | version) if [ "$name" = machine ] || [ "$name" = console ]; then why=""; fi ;; esac
 [ -z "$why" ] || die "instance name $name: $why"
 juser="wl-exp-$name"
 suser="wl-score-$name"
