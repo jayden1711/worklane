@@ -147,10 +147,11 @@ test("#890: an alternates file deeper in the chain that can't be read refuses th
 
 test("#890: a run that hides nothing doesn't read the alternates, so a chain that can't be followed doesn't refuse it", { skip }, () => {
   const dir = project(['./.env']);
-  writeFileSync(join(dir, '.git', 'objects', 'info', 'alternates'), '"/quoted/objects"\n');
+  // A store that isn't there: git can't follow the chain (git follows a quoted line, so that no longer stands for one).
+  writeFileSync(join(dir, '.git', 'objects', 'info', 'alternates'), `${join(dirname(dir), 'nowhere', 'objects')}\n`);
   assert.deepEqual(paths(runReadDenials({ cwd: dir, home: '/h' })), [join(dir, '.env')]);
   const r = runReadDenials({ cwd: dir, home: '/h', taskFile: task(['evals/**']) });
-  assert.ok('error' in r && /quoted path/.test(r.error), JSON.stringify(r));
+  assert.ok('error' in r && /alternates .* can't be read in full/.test(r.error), JSON.stringify(r));
 });
 
 // --- "[" and "]" in paths the runner resolved itself ---

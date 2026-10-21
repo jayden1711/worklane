@@ -7,6 +7,7 @@
 // with everything under it; a trailing `/**` means the directory; any other glob is expanded to what exists each
 // time a command is wrapped, following symlinked directories. A path that doesn't exist then hides nothing, and `[`
 // `]` are glob syntax there (`?` is any one character but "/").
+import { spawnSync } from 'node:child_process';
 import { lstatSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, posix, resolve } from 'node:path';
 import { BRAND } from './brand.js';
@@ -77,49 +78,80 @@ export function gitStores(start: string, withStores = true): { checkouts: string
       if (g) checkouts.push(dirname(resolve(common, 'worktrees', n, g)));
     }
     if (!withStores) return { checkouts: [...new Set(checkouts)], stores: [] };
-    const objects = join(common, 'objects');
-    const borrowed = alternates(objects);
+    const borrowed = alternates(common);
     if ('error' in borrowed) return borrowed;
-    return { checkouts: [...new Set(checkouts)], stores: [objects, ...borrowed.stores, join(common, 'lfs')] };
+    return { checkouts: [...new Set(checkouts)], stores: [join(common, 'objects'), ...borrowed.stores, join(common, 'lfs')] };
   } catch (e) {
     return { error: `the git repository at ${dotGit} can't be read (${firstLine(e)})` };
   }
 }
 
-/**
- * How many stores down a chain of alternates git reads: the repository's own alternates, and theirs, 6 levels in all
- * (measured, git 2.43: a blob 6 stores down is read, 7 down isn't, "ignoring alternate object stores, nesting too deep").
- */
-export const ALTERNATES_DEPTH = 6;
+/** What `git count-objects -v` may say on stderr about a store's own stray files: nothing about which stores it reads. */
+const STRAY_FILE_WARNING = /^warning: (garbage found|no corresponding \.(pack|idx)): /;
 
 /**
- * Every object store `objects` borrows from through info/alternates, down the chain as git follows it: each relative
- * path read against the store that names it, a store already listed not followed again. Fail closed: a chain deeper
- * than git follows, or a quoted line (git unquotes it; this doesn't), is an error; a file that can't be read throws.
+ * Every object store the repository whose git directory is `common` borrows from, as git itself reads the chain of
+ * alternates: `git count-objects -v` prints one "alternate:" line per store, at the real path git opened. Taken
+ * from git, not parsed here, so it can't be read differently from git (a relative line against the store's real
+ * path, an untrimmed line, a quoted line, the depth git stops at).
+ *
+ * git runs with none of this process's GIT_* variables and a C locale; the paths it prints are C-quoted whatever the
+ * repository's config says (core.quotePath on the command line). count-objects runs no program the repository's
+ * config names (measured, git 2.43.0: fsmonitor, pager, hooksPath, editor, askPass, sshCommand, credential helper,
+ * gpg, diff.external, include.path, alias; none ran).
+ *
+ * Fail closed: git failing, any stderr line other than a stray file in a store (a chain deeper than git follows, an
+ * alternates file it can't read, a store that isn't there), or a line that can't be parsed, is an error.
  */
-function alternates(objects: string): { stores: string[] } | { error: string } {
+function alternates(common: string): { stores: string[] } | { error: string } {
+  const env: NodeJS.ProcessEnv = {};
+  for (const [k, v] of Object.entries(process.env)) if (!k.startsWith('GIT_') && k !== 'LANGUAGE') env[k] = v;
+  const r = spawnSync('git', ['-c', 'core.quotePath=true', '--git-dir', common, 'count-objects', '-v'], {
+    env: { ...env, LC_ALL: 'C', GIT_TERMINAL_PROMPT: '0' },
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+    timeout: 60_000,
+    maxBuffer: 16 * 1024 * 1024,
+  });
+  const said = (r.stderr ?? '').split('\n').find((l) => l.trim() && !STRAY_FILE_WARNING.test(l));
+  const why = r.error ? firstLine(r.error) : r.status !== 0 ? `exit ${r.status ?? r.signal}: ${said ?? ''}` : said;
+  if (why !== undefined) return { error: `the chain of git alternates of ${common} can't be read in full (git: ${why.slice(0, 200)}), so its stores can't all be denied` };
   const stores: string[] = [];
-  const seen = new Set([objects]);
-  let level = [objects];
-  for (let depth = 1; level.length; depth++) {
-    const next: string[] = [];
-    for (const store of level) {
-      const file = join(store, 'info', 'alternates');
-      for (const line of (optional(file) ?? '').split('\n')) {
-        const l = line.trim();
-        if (!l || l.startsWith('#')) continue;
-        if (l.startsWith('"')) return { error: `${file} names a quoted path, which can't be followed, so the stores behind it can't be denied` };
-        const s = resolve(store, l);
-        if (seen.has(s)) continue;
-        if (depth > ALTERNATES_DEPTH) return { error: `${file} borrows from ${s}, deeper than git follows alternates (${ALTERNATES_DEPTH} stores), so the chain can't be denied in full` };
-        seen.add(s);
-        stores.push(s);
-        next.push(s);
-      }
-    }
-    level = next;
+  for (const line of r.stdout.split('\n')) {
+    if (!line.startsWith('alternate:')) continue;
+    const text = line.slice('alternate:'.length).replace(/^ /, '');
+    const p = text.startsWith('"') ? unquote(text) : text;
+    if (p === null || !isAbsolute(p)) return { error: `git lists an object store of ${common} as ${text.slice(0, 200)}, which can't be read as a path, so it can't be denied` };
+    stores.push(p);
   }
   return { stores };
+}
+
+const C_ESCAPES: Record<string, number> = { a: 7, b: 8, t: 9, n: 10, v: 11, f: 12, r: 13, '"': 34, '\\': 92 };
+
+/** A path git printed C-quoted ("…" with \n, \", \\, \303\251 and the like), or null when it isn't one or isn't UTF-8. */
+function unquote(q: string): string | null {
+  if (q.length < 2 || !q.startsWith('"') || !q.endsWith('"')) return null;
+  const s = q.slice(1, -1);
+  const bytes: number[] = [];
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i]!;
+    if (c === '"') return null;
+    if (c !== '\\') {
+      bytes.push(...Buffer.from(c, 'utf8'));
+      continue;
+    }
+    const n = s[i + 1];
+    if (n !== undefined && n in C_ESCAPES) {
+      bytes.push(C_ESCAPES[n]!);
+      i += 1;
+    } else if (/^[0-3][0-7]{2}$/.test(s.slice(i + 1, i + 4))) {
+      bytes.push(parseInt(s.slice(i + 1, i + 4), 8));
+      i += 3;
+    } else return null;
+  }
+  const text = Buffer.from(bytes).toString('utf8');
+  return Buffer.from(text, 'utf8').equals(Buffer.from(bytes)) ? text : null;
 }
 
 /** A file's text, or null when there is none; any other failure throws. */

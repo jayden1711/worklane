@@ -62,11 +62,14 @@ test('#890: a task\'s hidden paths add the repository\'s object stores and every
   const dir = project(['./.env']);
   const wt = join(dirname(dir), 'wt');
   execFileSync('git', ['worktree', 'add', '-q', '-b', 'x', wt, 'HEAD'], { cwd: dir, stdio: 'ignore' });
-  writeFileSync(join(dir, '.git', 'objects', 'info', 'alternates'), '/srv/shared/objects\n');
+  // A store that exists: git refuses to list one that doesn't, and so does the run (read-denials-routes.test.ts).
+  const shared = join(dirname(dir), 'shared.git');
+  execFileSync('git', ['init', '-q', '--bare', shared], { stdio: 'ignore' });
+  writeFileSync(join(dir, '.git', 'objects', 'info', 'alternates'), `${join(shared, 'objects')}\n`);
   const plain = paths(runReadDenials({ cwd: wt, home: '/h' }));
   assert.deepEqual(plain.sort(), [join(dir, '.env'), join(wt, '.env')].sort());
   const hid = paths(runReadDenials({ cwd: wt, home: '/h', taskFile: task(['evals/**']) }));
-  for (const p of [join(wt, 'evals'), join(dir, 'evals'), join(dir, '.git', 'objects'), '/srv/shared/objects', join(dir, '.git', 'lfs')]) assert.ok(hid.includes(p), `${p}: ${JSON.stringify(hid)}`);
+  for (const p of [join(wt, 'evals'), join(dir, 'evals'), join(dir, '.git', 'objects'), join(shared, 'objects'), join(dir, '.git', 'lfs')]) assert.ok(hid.includes(p), `${p}: ${JSON.stringify(hid)}`);
   const g = gitStores(wt);
   assert.ok(!('error' in g) && g.checkouts.includes(dir) && g.checkouts.includes(wt));
 });
