@@ -9,10 +9,10 @@
 //
 // INVARIANT: spawn, spawnSync, execFile, execFileSync and execSync here are node:child_process's, except that no host
 // tool (SCRIPT_HOST_TOOLS: sudo, systemctl, useradd, claude and the like) on the child's PATH resolves to the machine's
-// own. Ahead of the first PATH entry that isn't the test's own, a directory of recording stand-ins shadows each host
-// tool the rest of that PATH would find; a tool the machine doesn't have stays missing, as it was. The test's own
-// directories (inside this test process's machine, test/isolate.ts, or inside the repo) keep their place in front, so a
-// test's own stand-in for a tool still answers, and a PATH of only its own directories is left as it is. Each stand-in
+// own. First on that PATH, a directory of recording stand-ins shadows each host tool the PATH would find on the
+// machine: in a directory that isn't the test's own, or through a link in one of its own to the machine's same file. A
+// tool the machine doesn't have stays missing, as it was, and a test's own stand-in for a tool (its own directories:
+// inside this test process's machine, test/isolate.ts, or inside the repo) still answers. Each stand-in
 // records its call (one JSON line, hostCalls()) and exits 1, as a tool that can't answer; it runs nothing else. A test
 // of a scripts/ shell script imports its child_process functions from here, never node:child_process
 // (test/script-host-tools.test.ts, the backstop; its one exception is test/setup-scripts.test.ts, whose CI-only
@@ -26,8 +26,8 @@
 // answers.
 import * as cp from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
-import { delimiter, isAbsolute, join, relative, resolve } from 'node:path';
+import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from 'node:fs';
+import { delimiter, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { HOST_TOOLS, onPath } from './host-tools.js';
 import { testMachine } from './isolate.js';
@@ -87,19 +87,37 @@ const inside = (dir: string, root: string) => {
 /** A PATH entry that is the test's own: an absolute directory inside this test process's machine or the repo. */
 const own = (entry: string) => isAbsolute(entry) && (inside(resolve(entry), testMachine) || inside(resolve(entry), repoRoot));
 
+/** Where the machine keeps its tools, besides what a PATH names: to tell a link to one of them in a test's own directory. */
+const MACHINE_DIRS = ['/usr/local/sbin', '/usr/local/bin', '/usr/sbin', '/usr/bin', '/sbin', '/bin'].join(delimiter);
+const find = (tool: string, path: string) => (path === '' ? null : onPath(tool, path));
+const real = (p: string) => {
+  try {
+    return realpathSync(p);
+  } catch {
+    return p;
+  }
+};
+
 /**
- * `path` with stand-ins, ahead of its first entry that isn't the test's own, for each host tool the entries from there
- * on would find. No PATH at all is the one a child would search then (libuv's and bash's default, /usr/bin:/bin).
+ * `path` with a directory of stand-ins first, for each host tool it would find on the machine: the first one it finds
+ * is in a directory that isn't the test's own, or is a link in one of its own to the machine's same file. A tool it
+ * would find nowhere, or first as the test's own stand-in, is left as it is. No PATH at all is the one a child would
+ * search then (libuv's and bash's default, /usr/bin:/bin).
  */
 export function scriptPath(path: string | undefined): string {
+  // No shortcut for a PATH that already has stand-ins on it: theirs are the test's own files, so each tool they cover
+  // is found first as the test's own, and only what they don't cover gets more.
   const entries = (path ?? '/usr/bin:/bin').split(delimiter);
-  if (entries.some((e) => isAbsolute(e) && inside(resolve(e), standInRoot))) return entries.join(delimiter);
-  const at = entries.findIndex((e) => !own(e));
-  if (at === -1) return entries.join(delimiter);
-  const rest = entries.slice(at).join(delimiter);
-  const found = SCRIPT_HOST_TOOLS.filter((t) => onPath(t, rest) !== null);
-  if (found.length === 0) return entries.join(delimiter);
-  return [...entries.slice(0, at), standInsFor(found), ...entries.slice(at)].join(delimiter);
+  const machine = [...entries.filter((e) => !own(e)), MACHINE_DIRS].join(delimiter);
+  const shadow = SCRIPT_HOST_TOOLS.filter((t) => {
+    const first = find(t, entries.join(delimiter));
+    if (first === null) return false;
+    if (!own(dirname(first))) return true;
+    const theirs = find(t, machine);
+    return theirs !== null && real(first) === real(theirs);
+  });
+  if (shadow.length === 0) return entries.join(delimiter);
+  return [standInsFor(shadow), ...entries].join(delimiter);
 }
 
 /**

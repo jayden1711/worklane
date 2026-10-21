@@ -8,7 +8,7 @@
 // test module that does) starts its children through that module, never node:child_process (nor
 // src/os/child-process.ts, which adds no stand-ins).
 import assert from 'node:assert/strict';
-import { chmodSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, readdirSync, readFileSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { basename, delimiter, dirname, join, relative } from 'node:path';
 import { test } from 'node:test';
 import ts from 'typescript';
@@ -59,25 +59,59 @@ test("#991: no host tool on a child's PATH resolves to the machine's own: each i
   assert.deepEqual(hostCalls().slice(before), [{ tool: 'sudo', args: ['-H', '-u', 'wl-nobody', 'env', 'true'] }]);
 });
 
-test("#991: a test's own directories keep their place in front, and its own stand-in answers; the stand-ins go before the first that isn't its own", { skip: (!posix || !systemHasHostTools) && 'no host tool in /usr/bin or /bin to shadow' }, () => {
+test("#991: the stand-ins go first and hold only the machine's tools: a test's own stand-in still answers, a link to the machine's own does not", { skip: (!posix || !systemHasHostTools) && 'no host tool in /usr/bin or /bin to shadow' }, () => {
   const own = join(testMachine, 't', 'own-bin');
   mkdirSync(own, { recursive: true });
   writeFileSync(join(own, 'sudo'), '#!/bin/sh\necho own\n');
   chmodSync(join(own, 'sudo'), 0o755);
   const fixture = join(repoRoot, 'test', 'fixtures');
-  const d = scriptPath(SYSTEM).split(delimiter)[0]!;
+  const first = (p: string) => p.split(delimiter)[0]!;
+  const d = first(scriptPath(SYSTEM));
   assert.ok(d.startsWith(`${standInRoot}/`), d);
   assert.equal(scriptPath(SYSTEM), `${d}:${SYSTEM}`);
-  assert.equal(scriptPath(`${own}:${SYSTEM}`), `${own}:${d}:${SYSTEM}`);
-  assert.equal(scriptPath(`${own}:${fixture}:${SYSTEM}`), `${own}:${fixture}:${d}:${SYSTEM}`);
-  assert.equal(scriptPath(`/usr/bin:/bin:${own}`), `${d}:/usr/bin:/bin:${own}`, "the machine's first: the stand-ins ahead of it all");
   assert.equal(scriptPath(undefined), `${d}:${SYSTEM}`, 'no PATH: the one a child would search, behind the stand-ins');
-  assert.equal(scriptPath(own), own, 'only its own directories: nothing of the machine to shadow');
-  assert.equal(scriptPath(`${own}:/nonexistent`), `${own}:/nonexistent`, 'no host tool past them: nothing made up');
+  assert.equal(scriptPath(`/usr/bin:/bin:${own}`), `${d}:/usr/bin:/bin:${own}`, "the machine's first: its own sudo is the one found");
   assert.equal(scriptPath(scriptPath(SYSTEM)), `${d}:${SYSTEM}`, 'once');
+  assert.equal(first(scriptPath(`${standInRoot}:${SYSTEM}`)), d, 'naming the stand-ins\' root skips nothing');
   assert.deepEqual(scriptEnv({ PATH: SYSTEM, X: 'y' }), { PATH: `${d}:${SYSTEM}`, X: 'y' });
-  // The test's own sudo still answers, ahead of the stand-ins.
-  assert.equal(spawnSync('/bin/sh', ['-c', 'sudo'], { encoding: 'utf8', env: { PATH: `${own}:${SYSTEM}` } }).stdout, 'own\n');
+  for (const path of [`${own}:${SYSTEM}`, `${own}:${fixture}:${SYSTEM}`]) {
+    const e = first(scriptPath(path));
+    assert.ok(e.startsWith(`${standInRoot}/`), e);
+    assert.equal(scriptPath(path), `${e}:${path}`);
+    // The test's own sudo answers; every other host tool the machine has is a stand-in.
+    const r = spawnSync('/bin/bash', ['-c', `sudo; for t in ${SCRIPT_HOST_TOOLS.join(' ')}; do printf '%s=%s\\n' "$t" "$(command -v "$t" || true)"; done`], { encoding: 'utf8', env: { PATH: path } });
+    const [said, ...lines] = r.stdout.split('\n');
+    assert.equal(said, 'own');
+    for (const l of lines.filter(Boolean)) {
+      const [t, at] = l.split('=') as [string, string];
+      if (t === 'sudo') assert.equal(at, join(own, 'sudo'));
+      else if (onPath(t, SYSTEM) !== null) assert.ok(at.startsWith(`${standInRoot}/`), l);
+    }
+  }
+  // Its own stand-in for a tool the machine lacks answers even behind the machine's directories.
+  const lacking = SCRIPT_HOST_TOOLS.find((t) => onPath(t, `${SYSTEM}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/sbin`) === null);
+  if (lacking !== undefined) {
+    const late = join(testMachine, 't', 'late-bin');
+    mkdirSync(late, { recursive: true });
+    writeFileSync(join(late, lacking), '#!/bin/sh\necho late\n');
+    chmodSync(join(late, lacking), 0o755);
+    assert.equal(spawnSync('/bin/sh', ['-c', lacking], { encoding: 'utf8', env: { PATH: `${SYSTEM}:${late}` } }).stdout, 'late\n', lacking);
+  }
+  assert.equal(scriptPath(own), own, 'only its own directories, with no link to the machine: nothing to shadow');
+  assert.equal(scriptPath(`${own}:/nonexistent`), `${own}:/nonexistent`, 'no host tool anywhere on it: nothing made up');
+  // A link in its own directory to the machine's own tool is the machine's tool.
+  const theirs = onPath('systemctl', SYSTEM) ?? onPath('sudo', SYSTEM);
+  if (theirs !== null) {
+    const linked = join(testMachine, 't', 'linked-bin');
+    mkdirSync(linked, { recursive: true });
+    symlinkSync(theirs, join(linked, basename(theirs)));
+    symlinkSync('/bin/true', join(linked, 'docker'));
+    const path = `${linked}:/nonexistent`;
+    const r = spawnSync('/bin/sh', ['-c', `command -v ${basename(theirs)}; command -v docker`], { encoding: 'utf8', env: { PATH: path } });
+    const [tool, docker] = r.stdout.trim().split('\n');
+    assert.ok(tool!.startsWith(`${standInRoot}/`), `${tool}: a link to the machine's ${basename(theirs)} is shadowed`);
+    assert.equal(docker, join(linked, 'docker'), "a link to another tool (true) is the test's own stand-in");
+  }
 });
 
 // ---- The lint (a backstop beside test/script-child-process.ts). ----
