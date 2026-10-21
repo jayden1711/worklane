@@ -1,7 +1,7 @@
 // One git runner for every git call the engine makes (#807). refs/replace/* and $GIT_DIR/info/grafts are in the
 // repository, which every worktree of it shares, so an agent can write either; every git the engine runs there then
-// reads the agent's stand-in. A `git replace` of the pushed commit hid a refused file from the push limits (1 problem
-// became 0), and a graft that makes the base reach the head empties the range.
+// reads the agent's stand-in. A `git replace` of the pushed commit hid a refused file and a big one from the push
+// limits (2 problems became 0), and a graft that makes the base reach the head emptied the range (2 became 0).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
