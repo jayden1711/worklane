@@ -7,7 +7,7 @@
 //
 // The graph is read from the coordinator's clone at the run's commit (git ls-tree, git cat-file), never from the
 // workspace: the sandboxed test user owns that.
-import { spawnSync } from 'node:child_process';
+import { spawnSync } from '../os/child-process.js';
 import { builtinModules } from 'node:module';
 import { BRAND } from '../brand.js';
 import { buildGraph, CODE_EXT, selectTests, type Plan } from './affected.js';

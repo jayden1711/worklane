@@ -3,7 +3,7 @@
 // new run, and the superseded one is cancelled. Full tiers run per batch of approved PRs (PR mode, Track PB): the
 // harness's, and people's PRs from this listing (merge-flow.ts batchPeoplesPrs): a mapped admin's or writer's once its
 // fast checks pass; a bot's or an unmapped author's only once an admin approved it.
-import { execFileSync } from 'node:child_process';
+import { execFileSync } from '../os/child-process.js';
 import { BRAND } from '../brand.js';
 import { changedNames } from './change-files.js';
 import type { EventLog } from '../events/log.js';

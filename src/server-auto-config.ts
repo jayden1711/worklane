@@ -8,7 +8,7 @@
 //   doesn't stop the coordinator;
 // - there is no terminal: open questions are recorded, and answered with `instance auto-config <name> --answer`.
 // Its state is the coordinator's own (auto-config.json in the instance's state dir); each run prints one JSON line.
-import { spawnSync } from 'node:child_process';
+import { spawnSync } from './os/child-process.js';
 import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { parseDocument } from 'yaml';

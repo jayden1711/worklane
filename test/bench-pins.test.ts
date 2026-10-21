@@ -57,7 +57,8 @@ interface PinsOver {
 /** A pins file's text, as scripts/bench/pins.json holds it, pinned to the fixture bytes unless told otherwise. */
 function pinsText(o: PinsOver = {}): string {
   const dataset = { base: o.base ?? BASE, path: o.path ?? 'data/verified.jsonl', revision: o.revision === undefined ? REV : o.revision, sha256: o.sha256 === undefined ? SHA : o.sha256, max_bytes: o.max ?? 1024 * 1024, hosts: o.hosts ?? [HOST], ...o.dataset };
-  return `${JSON.stringify({ dataset, image_digests: o.digests ?? [], ...o.extra }, null, 2)}\n`;
+  // #748 slice 3: `selection` is a required key; null (nothing selected) here. test/bench-select.test.ts covers it.
+  return `${JSON.stringify({ dataset, image_digests: o.digests ?? [], selection: null, ...o.extra }, null, 2)}\n`;
 }
 
 interface Route {
@@ -144,7 +145,7 @@ test("the repo's pins file parses, sets nothing but the pins, and names no task"
   assert.equal(PINS_FILE, join(repoRoot, 'scripts', 'bench', 'pins.json'), 'the one pins file, in this clone');
   const pins = loadPins();
   const text = readFileSync(PINS_FILE, 'utf8');
-  assert.deepEqual(Object.keys(JSON.parse(text) as object).sort(), ['dataset', 'image_digests']);
+  assert.deepEqual(Object.keys(JSON.parse(text) as object).sort(), ['dataset', 'image_digests', 'selection']);
   assert.doesNotMatch(text, /__|_1776_|:latest|swebench\//, 'no instance id, image name or tag');
   if (pins.dataset) assert.match(pins.dataset.url, new RegExp(`/${pins.dataset.revision}/`));
 });

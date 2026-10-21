@@ -10,4 +10,4 @@
   - the `HOME` and instances dir written into an instance's service unit;
   - the Claude step's `claude auth status` (#738): the local unit's `PATH` and `HOME`, the pass-through list it shares with the runner (with `ANTHROPIC_API_KEY` for an `api_key` project), and the manager's `CLAUDE_CONFIG_DIR` in its login's cache key.
 
-  Before, such a value was read as if it were set. These reads now go through one own-variable snapshot (`src/os/own-env.ts`). It joins the agents' tool guard's locked tree, since the guard's OS adapter imports it, which takes the tree to 58 modules. Nothing changes when the environment is clean. Not covered yet: a child process the engine spawns still inherits `Object.prototype`'s keys through Node's `child_process` (#846).
+  Before, such a value was read as if it were set. These reads now go through one own-variable snapshot (`src/os/own-env.ts`). It joins the agents' tool guard's locked tree, since the guard's OS adapter imports it, which takes the tree to 58 modules. Nothing changes when the environment is clean. What a child process the engine spawns gets is covered separately (#846).
