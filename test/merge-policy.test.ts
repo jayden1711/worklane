@@ -1383,3 +1383,66 @@ test('registration (#869): every check registered before the marks is still regi
   const lost = REGISTERED_BEFORE_MARKS.map((r) => (r.table === undefined ? `${r.path} lint` : `${r.path} ${r.table} ${r.kind}`)).filter((k) => !now.has(k));
   assert.deepEqual(lost, []);
 });
+
+/**
+ * The same registrations, through the hold itself: for each, the change it holds (a line taken out of a never-shrink
+ * table, a line put into a never-grow one, a line taken out of a lint test) gives a reason naming it. Each kind it is
+ * held by is tried: its old kind, and its name's floor (a rule list's name holds it on shrinking).
+ */
+test('registration (#869): every check registered before the marks is still held by the hold itself: its table shrunk or grown, or a line taken out of its lint test, waits, naming it', () => {
+  const texts = repoTexts();
+  const notHeld: string[] = [];
+  const reasonsFor = (path: string, was: string, now: string) => weakens({ [path]: was }, { [path]: now });
+  const names = (reasons: string[], kind: string, what: string) => reasons.some((r) => r.startsWith(`${weakening.WEAKENING_REASON}${kind} (`) && r.includes(what));
+  for (const r of REGISTERED_BEFORE_MARKS) {
+    const text = texts.get(r.path);
+    if (text === undefined) {
+      notHeld.push(`${r.path}: not read`);
+      continue;
+    }
+    const lines = text.split('\n');
+    if (r.table === undefined) {
+      // A lint test: its last line of code taken out waits as a guard's line.
+      let k = lines.length - 1;
+      while (k > 0 && (!lines[k]!.trim() || lines[k]!.trim() === weakening.LINT_MARK)) k--;
+      const now = lines.filter((_, j) => j !== k).join('\n');
+      if (!names(reasonsFor(r.path, text, now), GUARD, `${r.path}: `)) notHeld.push(`${r.path} lint`);
+      continue;
+    }
+    const head = new RegExp(`^(?:export\\s+)?(?:(?:const|let|var)\\s+${r.table}|"${r.table}"\\s*:)(?![\\w$])`);
+    const at = lines.findIndex((l) => head.test(l.trimStart()));
+    const table = at === -1 ? null : weakening.tableLines(text, r.table);
+    if (!table?.length) {
+      notHeld.push(`${r.path} ${r.table}: not found`);
+      continue;
+    }
+    const deep = (l: string) => l.trim() !== '' && l.length - l.trimStart().length > lines[at]!.length - lines[at]!.trimStart().length;
+    for (const kind of weakening.heldKinds(r.table, r.kind as weakening.TableKind)) {
+      let now: string;
+      let expect: string;
+      if (table.length === 1) {
+        // A one-line table: its declaring line changed waits, naming the table. Grown: an entry put first. Shrunk: its
+        // first entry taken out (to its first comma, or the whole list).
+        const line = lines[at]!;
+        const eq = line.search(/=(?!>)|":/);
+        const open = line.slice(eq).search(/[[{(]/) + eq;
+        const comma = line.indexOf(',', open);
+        const end = comma === -1 ? line.search(/[\]})][^\]})]*$/) : comma + 1;
+        const changed = kind === 'never-grow' ? `${line.slice(0, open + 1)}'held-probe', ${line.slice(open + 1)}` : `${line.slice(0, open + 1)}${line.slice(end).trimStart()}`;
+        if (changed === line) notHeld.push(`${r.path} ${r.table}: the probe changed nothing`);
+        now = lines.map((l, j) => (j === at ? changed : l)).join('\n');
+        expect = UNREADABLE;
+      } else if (kind === 'never-grow') {
+        const pad = ' '.repeat(lines[at]!.length - lines[at]!.trimStart().length + 2);
+        now = [...lines.slice(0, at + 1), `${pad}'held-probe',`, ...lines.slice(at + 1)].join('\n');
+        expect = GROWN;
+      } else {
+        const k = lines.findIndex((l, j) => j > at && deep(l));
+        now = lines.filter((_, j) => j !== k).join('\n');
+        expect = SHRUNK;
+      }
+      if (!names(reasonsFor(r.path, text, now), expect, `${r.table}: `)) notHeld.push(`${r.path} ${r.table} ${kind}`);
+    }
+  }
+  assert.deepEqual(notHeld, []);
+});
