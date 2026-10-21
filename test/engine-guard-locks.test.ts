@@ -8,12 +8,14 @@
 // repo's merge process (docs/process.md), the planners' decision records and the code that indexes them (#920).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { BRAND } from '../src/brand.js';
 import { loadConfig } from '../src/config/load.js';
 import { mergeDecision, waitCategoriesOf, type MergeInput } from '../src/merge-policy.js';
+import { WEAKENING_REASON, weakeningReasons } from '../src/merge-policy-weakening.js';
 import { DECISION_DIRS, DECISION_FILES, recordEntries } from '../src/plan-decisions.js';
 import { computeLevel, DEFAULT_CATEGORIES, SELF_MODIFICATION, SELF_MODIFICATION_PARTS, selfModificationPart, type LevelResult, type LockScope } from '../src/review.js';
 import { repoRoot } from './helpers.js';
@@ -218,6 +220,11 @@ test("regression: every decision record the planners' index reads is self-modifi
     const repo = mkdtempSync(join(dir, 'r-'));
     mkdirSync(join(repo, dirname(path)), { recursive: true });
     writeFileSync(join(repo, path), '# Merges\n\n## Who merges\nAn agent merges.\n');
+    // Committed: the index reads only the records git tracks at HEAD (#920 round 7).
+    const git = (...a: string[]) => execFileSync('git', a, { cwd: repo, stdio: ['ignore', 'pipe', 'pipe'] });
+    git('init', '-q', '-b', 'main');
+    git('add', '-A');
+    git('-c', 'user.email=ada@example.com', '-c', 'user.name=Ada', '-c', 'commit.gpgsign=false', 'commit', '-q', '-m', 'record');
     const nested = path.includes('/sub/');
     assert.equal(recordEntries(repo).length, nested ? 0 : 1, `${path}: the index reads it`);
     // And the lock holds it, under every review.yaml.
@@ -232,6 +239,16 @@ test("regression: every decision record the planners' index reads is self-modifi
   // A folder itself (a symlink to anywhere) is locked too.
   for (const d of DECISION_DIRS) assert.equal(selfModificationPart(d), records, d);
   for (const f of DECISION_FILES) assert.ok(locked.some(([p]) => p === f) || f === 'docs/design.md', `${f} is in the locked list`);
+});
+
+// WHY (#920 round 7): src/plan-decisions.ts holds guard logic (only committed records, never docs/process.md). A line
+// taken out of it may weaken that guard, so it raises the weakening hold, as a line taken out of src/review.ts does.
+test('a removed or changed line in src/plan-decisions.ts raises the weakening hold; an added one does not', () => {
+  const reasons = (f: { addedLines: string[]; removedLines: string[] }) =>
+    weakeningReasons({ files: [{ path: 'src/plan-decisions.ts', added: f.addedLines.length, removed: f.removedLines.length, ...f }], deleted: new Set(), before: () => null, after: () => null, scope: undefined });
+  const removed = reasons({ addedLines: [], removedLines: ['  if (!committed) return out;'] });
+  assert.ok(removed.some((r) => r.startsWith(WEAKENING_REASON) && r.includes('src/plan-decisions.ts')), removed.join(' | '));
+  assert.deepEqual(reasons({ addedLines: ['  // one more comment'], removedLines: [] }), []);
 });
 
 // WHY (#920 round 6): docs/design.md is a decision record and the design rules' file. Listed in both parts, it was named

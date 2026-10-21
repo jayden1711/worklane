@@ -8,6 +8,7 @@ import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from 'n
 import { basename, dirname, isAbsolute, join, posix, relative, sep } from 'node:path';
 import { redactString } from './events/redact.js';
 import type { EventPayload, StoredEvent } from './events/types.js';
+import { spawnSync } from './os/child-process.js';
 import { DECISION_DIRS, DECISION_FILES } from './review.js';
 
 /** The whole section when nothing recorded bears on the plan. Never beside citations. */
@@ -87,8 +88,9 @@ function headingAliases(file: string, heading: string): string[] {
  * How the engine repo's own PRs are merged (owner, 2026-10-21): process, never a recorded decision. A decisions file
  * or folder entry that is this file under another name (a symlink, a hard link) is not indexed, so a plan can't cite
  * it to let the engine merge more. This code can't recognise a copy of the page's text under another name, whole, in
- * part or reworded: in the engine's repo every decision record path, and this file, is self-modification instead
- * (src/review.ts), so a PR that adds or changes one waits for the owner's process like the page itself.
+ * part or reworded. Instead it indexes only records committed at the plan's base (committedRecords), and in the
+ * engine's repo every decision record path, and this file, is self-modification (src/review.ts): a copy reaches the
+ * index only through a PR that adds or changes a committed record, which waits like the page itself.
  */
 export const PROCESS_DOC = 'docs/process.md';
 
@@ -105,15 +107,69 @@ function identity(path: string): string | null {
   }
 }
 
+const GIT_LIMITS = { maxBuffer: 64 * 1024 * 1024, timeout: 60_000 };
+
+/** Whether a tree entry's path is a record path: a decisions file, or a file directly in a decisions folder. */
+const isRecordPath = (path: string) => DECISION_FILES.includes(path) || DECISION_DIRS.includes(posix.dirname(path));
+
 /**
- * The decision records the checkout keeps, as index entries. Fails closed: a record is indexed only when its real path
- * is inside the checkout (a symlink out of it, say from a planning worktree nested in a clone to the clone's own
- * files, is not) and is itself a record path (a link to any other file is not), it isn't docs/process.md under another
- * name, and all of that could be told. When the page exists but can't be read (EACCES, ELOOP, ...), no record is
- * indexed, since any of them could be it.
+ * The records git tracks at `rev` (the plan's base commit; HEAD when not given), by path, with each one's text read
+ * from its blob; or null when that can't be told (not a checkout's top, a rev that isn't HEAD or a full commit id, git
+ * failing, output it can't read). Only regular
+ * files count (mode 100644 or 100755): a symlink (120000) or a submodule (160000) at a record path is no record. The
+ * working tree is never read for a record's text: a file a setup step, an install script or a pooled worktree left
+ * there untracked, or an edit not committed, is no record (#920). Paths are git's exact bytes, whatever the
+ * filesystem's case.
  */
-export function recordEntries(repo: string): DecisionEntry[] {
+function committedRecords(repo: string, rev: string): Map<string, string> | null {
+  if (rev !== 'HEAD' && !/^[0-9a-f]{40,64}$/.test(rev)) return null;
+  // Replace refs (refs/replace) could stand another tree in for the commit's own: never read through them.
+  const git = (args: string[], input?: string) => spawnSync('git', ['--no-replace-objects', '--literal-pathspecs', ...args], { cwd: repo, input, ...GIT_LIMITS });
+  const top = git(['rev-parse', '--show-cdup']);
+  if (top.error || top.status !== 0 || top.stdout.toString().trim() !== '') return null;
+  const ls = git(['ls-tree', '-r', '-z', '--full-tree', rev, '--', ...DECISION_FILES, ...DECISION_DIRS]);
+  if (ls.error || ls.status !== 0) return null;
+  const entries: { path: string; oid: string }[] = [];
+  for (const rec of ls.stdout.toString('utf8').split('\0')) {
+    if (!rec) continue;
+    const m = /^(\d{6}) ([a-z]+) ([0-9a-f]{40,64})\t([\s\S]+)$/.exec(rec);
+    if (!m) return null;
+    const [, mode, type, oid, path] = m;
+    if (type !== 'blob' || (mode !== '100644' && mode !== '100755') || !isRecordPath(path!)) continue;
+    entries.push({ path: path!, oid: oid! });
+  }
+  const out = new Map<string, string>();
+  if (!entries.length) return out;
+  const cat = git(['cat-file', '--batch'], `${entries.map((e) => e.oid).join('\n')}\n`);
+  if (cat.error || cat.status !== 0) return null;
+  const buf = cat.stdout as Buffer;
+  let at = 0;
+  for (const e of entries) {
+    const nl = buf.indexOf(0x0a, at);
+    if (nl < 0) return null;
+    const head = /^([0-9a-f]{40,64}) blob (\d+)$/.exec(buf.subarray(at, nl).toString('utf8'));
+    if (!head || head[1] !== e.oid) return null;
+    const start = nl + 1;
+    const end = start + Number(head[2]);
+    if (end >= buf.length || buf[end] !== 0x0a) return null;
+    out.set(e.path, buf.subarray(start, end).toString('utf8'));
+    at = end + 1;
+  }
+  return out;
+}
+
+/**
+ * The decision records the checkout keeps, as index entries. Fails closed. A record is indexed only when git tracks it
+ * at the checkout's HEAD as a regular file at a record path, and its text is read from git, never from the working
+ * tree (committedRecords). Then, as a second check on the working tree: its real path is inside the checkout (a
+ * symlink out of it, say from a planning worktree nested in a clone to the clone's own files, is not) and is itself a
+ * record path, it isn't docs/process.md under another name (a hard link), and all of that could be told. When git
+ * can't tell, or the page exists but can't be read (EACCES, ELOOP, ...), no record is indexed.
+ */
+export function recordEntries(repo: string, rev = 'HEAD'): DecisionEntry[] {
   const out: DecisionEntry[] = [];
+  const committed = committedRecords(repo, rev);
+  if (!committed) return out;
   let root: string;
   try {
     root = realpathSync(repo);
@@ -134,25 +190,21 @@ export function recordEntries(repo: string): DecisionEntry[] {
     // A link inside the checkout counts only when it leads to another record path: those are locked in the engine's
     // repo, and any other file isn't, so a later change to it would change the record with nothing holding it.
     const at = inside.split(sep).join('/');
-    if (!DECISION_FILES.includes(at) && !DECISION_DIRS.includes(posix.dirname(at))) return false;
+    if (!isRecordPath(at)) return false;
     const id = identity(join(repo, rel));
     return id !== null && id !== ABSENT && id !== page;
   };
   for (const file of DECISION_FILES) {
-    if (!present(repo, file) || !indexable(file)) continue;
-    for (const s of sectionsOf(readFileSync(join(repo, file), 'utf8'))) out.push({ ref: `${file} § ${s.heading}`, aliases: headingAliases(file, s.heading), title: s.heading, text: s.text });
+    const md = committed.get(file);
+    if (md === undefined || !present(repo, file) || !indexable(file)) continue;
+    for (const s of sectionsOf(md)) out.push({ ref: `${file} § ${s.heading}`, aliases: headingAliases(file, s.heading), title: s.heading, text: s.text });
   }
   for (const dir of DECISION_DIRS) {
-    let names: string[];
-    try {
-      names = statSync(join(repo, dir)).isDirectory() ? readdirSync(join(repo, dir)).filter((n) => n.endsWith('.md') && n.toLowerCase() !== 'readme.md').sort() : [];
-    } catch {
-      continue;
-    }
+    const names = [...committed.keys()].filter((p) => posix.dirname(p) === dir).map((p) => p.slice(dir.length + 1)).filter((n) => n.endsWith('.md') && n.toLowerCase() !== 'readme.md').sort();
     for (const name of names) {
       const file = `${dir}/${name}`;
       if (!indexable(file)) continue;
-      const md = readFileSync(join(repo, file), 'utf8');
+      const md = committed.get(file)!;
       const title = /^#{1,6}\s+(.+?)\s*#*\s*$/m.exec(md)?.[1] ?? name.slice(0, -3);
       const id = /^([A-Za-z]{0,10}-?\d+)[-_ ]/.exec(name)?.[1];
       out.push({ ref: file, aliases: [...new Set([file, file.slice(0, -3), ...(id ? [`${dir}/${id}`] : [])].map(normRef))], title, text: md.trim().slice(0, TEXT_CAP) });
@@ -179,8 +231,8 @@ export function madeEntries(events: readonly StoredEvent[]): DecisionEntry[] {
 }
 
 /** The decisions index a plan is checked against: the decisions already made, then the checkout's records. */
-export function decisionIndex(repo: string, events: readonly StoredEvent[]): DecisionEntry[] {
-  return [...madeEntries(events), ...recordEntries(repo)];
+export function decisionIndex(repo: string, events: readonly StoredEvent[], rev = 'HEAD'): DecisionEntry[] {
+  return [...madeEntries(events), ...recordEntries(repo, rev)];
 }
 
 /** The entry a citation names, or null. */

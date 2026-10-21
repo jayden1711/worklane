@@ -208,6 +208,8 @@ export const GUARD_FILES: readonly string[] = [
   'src/push-guard*',
   'src/push-check*',
   'src/review.ts',
+  // What the planners' decisions index reads, and what it leaves out (#920): only committed records, never docs/process.md.
+  'src/plan-decisions.ts',
   'src/path-text.ts',
   'src/guardrails/**',
   'src/hook*',

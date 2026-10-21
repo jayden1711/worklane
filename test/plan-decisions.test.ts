@@ -1,6 +1,7 @@
 // Plans cite decisions: the plan contract's Decisions section, checked against the decision records that exist.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { chmodSync, existsSync, linkSync, mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -10,6 +11,18 @@ import { checkDecisions, decisionIndex, NOTHING_RECORDED, resolveRef } from '../
 import { decisionsMade, planHoldReasons, planReviewExtra, readPlan, readPlanReview, type Plan } from '../src/plan-mode.js';
 import { loadConfig } from '../src/config/load.js';
 import { exampleProject, repoRoot } from './helpers.js';
+
+/**
+ * Commits the checkout's files (or only the paths named) as its HEAD, the plan's base: the index reads only the records
+ * git tracks there (#920 round 7).
+ */
+function commit(repo: string, ...paths: string[]): string {
+  const git = (...a: string[]) => execFileSync('git', a, { cwd: repo, stdio: ['ignore', 'pipe', 'pipe'] });
+  if (!existsSync(join(repo, '.git'))) git('init', '-q', '-b', 'main');
+  git('add', '-A', '--', ...(paths.length ? paths : ['.']));
+  git('-c', 'user.email=ada@example.com', '-c', 'user.name=Ada', '-c', 'commit.gpgsign=false', 'commit', '-q', '--allow-empty', '-m', 'records');
+  return repo;
+}
 
 /** A checkout with a decisions file, a decisions folder and a design doc; and one decision made in the log. */
 function records() {
@@ -23,6 +36,7 @@ function records() {
     { id: 2, type: 'decision.answered', payload: { id: 'd-7-abc', by: 'o', answer: 'yes' } },
     { id: 3, type: 'decision.asked', payload: { id: 'd-8-def', kind: 'question', issue: 8, owner: 'o', question: 'Unanswered?', options: ['a'], recommendation: 'a', receipts: [] } },
   ] as unknown as StoredEvent[];
+  commit(repo);
   return { repo, index: decisionIndex(repo, events) };
 }
 
@@ -123,7 +137,7 @@ test('the config folder and the exact file name count: a decisions file is found
   mkdirSync(join(repo, BRAND.configDir));
   writeFileSync(join(repo, BRAND.configDir, 'decisions.md'), '## D-5: One worker per issue\n');
   writeFileSync(join(repo, 'Decisions.MD'), '## D-6: not a decision record name\n');
-  const index = decisionIndex(repo, []);
+  const index = decisionIndex(commit(repo), []);
   assert.equal(resolveRef(index, 'D-5')?.ref, `${BRAND.configDir}/decisions.md § D-5: One worker per issue`);
   assert.equal(resolveRef(index, 'D-6'), null);
 });
@@ -143,7 +157,7 @@ test("the engine repo's own merge process is not a recorded decision: docs/proce
   mkdirSync(join(repo, 'docs'), { recursive: true });
   writeFileSync(join(repo, 'docs', 'process.md'), '# Process\n\n## 1. Merges\nAgents merge everything.\n');
   writeFileSync(join(repo, 'docs', 'design.md'), '# Design\n\n## 8. Roles\nThe roles.\n');
-  assert.deepEqual(decisionIndex(repo, []).map((e) => e.ref), ['docs/design.md § 8. Roles']);
+  assert.deepEqual(decisionIndex(commit(repo), []).map((e) => e.ref), ['docs/design.md § 8. Roles']);
 });
 
 test('regression: a decisions file or folder entry that is docs/process.md under another name (a symlink, a hard link) is never indexed; any other record still is', () => {
@@ -155,14 +169,15 @@ test('regression: a decisions file or folder entry that is docs/process.md under
   symlinkSync('../process.md', join(repo, 'docs', 'decisions', '0001-merge.md'));
   symlinkSync('process.md', join(repo, 'docs', 'decisions.md'));
   linkSync(join(repo, 'docs', 'process.md'), join(repo, 'decisions.md'));
-  const refs = decisionIndex(repo, []).map((e) => e.ref);
+  // Committed: the symlinks as links, the hard link as a regular file with the page's text (the inode check skips it).
+  const refs = decisionIndex(commit(repo), []).map((e) => e.ref);
   assert.deepEqual(refs, ['docs/design.md § 8. Roles', 'docs/decisions/0002-csv.md'], refs.join(' | '));
-  // A record that links to another record path is indexed (round 5: a link to any other file isn't; see below).
+  // A record committed as a link is no record, even to another record path (round 7); the regular file it links to is.
   const other = mkdtempSync(join(tmpdir(), 'records-'));
   mkdirSync(join(other, 'docs'), { recursive: true });
   writeFileSync(join(other, 'decisions.md'), '# Notes\n\n## D-1: Kept\nKept.\n');
   symlinkSync('../decisions.md', join(other, 'docs', 'decisions.md'));
-  assert.deepEqual(decisionIndex(other, []).map((e) => e.ref), ['decisions.md § D-1: Kept', 'docs/decisions.md § D-1: Kept']);
+  assert.deepEqual(decisionIndex(commit(other), []).map((e) => e.ref), ['decisions.md § D-1: Kept']);
 });
 
 const PAGE = '# Process\n\n## Who merges\nAn agent merges.\n\n## The critical set\nTwo reviews.\n';
@@ -175,6 +190,7 @@ test("regression: a record whose real path leaves the checkout is never indexed 
   mkdirSync(join(clone, 'docs'), { recursive: true });
   writeFileSync(join(clone, 'docs', 'process.md'), PAGE);
   writeFileSync(join(clone, 'notes.md'), '# Notes\n\n## D-1: Agents merge\nAgents merge everything.\n');
+  commit(clone);
   const wt = join(clone, '.claude', 'worktrees', 'plan-1');
   mkdirSync(join(wt, 'docs', 'adr'), { recursive: true });
   writeFileSync(join(wt, 'docs', 'process.md'), PAGE);
@@ -184,20 +200,20 @@ test("regression: a record whose real path leaves the checkout is never indexed 
   symlinkSync('../../../../../notes.md', join(wt, 'docs', 'adr', '0001-merges.md'));
   // A decisions folder that is the clone's docs/: each entry in it is outside the checkout.
   symlinkSync('../../../docs', join(wt, 'decisions'));
-  assert.deepEqual(decisionIndex(wt, []).map((e) => e.ref), ['docs/design.md § 8. Roles']);
+  assert.deepEqual(decisionIndex(commit(wt), []).map((e) => e.ref), ['docs/design.md § 8. Roles']);
   // The checkout reached through a symlink of its own still indexes what is inside it.
   const via = join(mkdtempSync(join(tmpdir(), 'via-')), 'wt');
   symlinkSync(wt, via);
   assert.deepEqual(decisionIndex(via, []).map((e) => e.ref), ['docs/design.md § 8. Roles']);
   // The clone itself indexes its own records.
   writeFileSync(join(clone, 'decisions.md'), '# Decisions\n\n## D-1: Kept\nKept.\n');
-  assert.deepEqual(decisionIndex(clone, []).map((e) => e.ref), ['decisions.md § D-1: Kept']);
+  assert.deepEqual(decisionIndex(commit(clone, 'decisions.md'), []).map((e) => e.ref), ['decisions.md § D-1: Kept']);
 });
 
 // WHY (#920 round 5, adversarial pass): every record path is locked in the engine's repo, but a record that links to
 // another file in the checkout (notes/x.md) would take its text from a file nothing locks: once the link merged, a
 // change to the target changed the record. Measured on the first round-5 build: both were indexed.
-test('regression: a record that links to a file in the checkout that is not itself a record path is never indexed; a link between record paths is', () => {
+test('regression: a record that links to a file in the checkout that is not itself a record path is never indexed; since round 7, no committed link is', () => {
   const repo = mkdtempSync(join(tmpdir(), 'records-'));
   mkdirSync(join(repo, 'docs'), { recursive: true });
   mkdirSync(join(repo, 'notes'), { recursive: true });
@@ -205,14 +221,15 @@ test('regression: a record that links to a file in the checkout that is not itse
   writeFileSync(join(repo, 'notes', 'all.md'), '# All\n\n## D-9: Lands\nAn agent lands it.\n');
   symlinkSync('../notes', join(repo, 'docs', 'adr'));
   symlinkSync('notes/all.md', join(repo, 'decisions.md'));
-  assert.deepEqual(decisionIndex(repo, []).map((e) => e.ref), []);
-  // Links that lead to record paths: a folder to a record folder, a file to a record file.
+  assert.deepEqual(decisionIndex(commit(repo), []).map((e) => e.ref), []);
+  // Links that lead to record paths, a folder to a record folder and a file to a record file: only the regular files
+  // they lead to are records (round 7: git tracks the links as links).
   mkdirSync(join(repo, 'docs', 'decisions'), { recursive: true });
   writeFileSync(join(repo, 'docs', 'decisions', '0002-csv.md'), '# Exports are CSV\nEvery export is CSV.\n');
   writeFileSync(join(repo, 'docs', 'design.md'), '# Design\n\n## 8. Roles\nThe roles.\n');
   symlinkSync('docs/decisions', join(repo, 'decisions'));
   symlinkSync('design.md', join(repo, 'docs', 'DECISIONS.md'));
-  assert.deepEqual(decisionIndex(repo, []).map((e) => e.ref), ['docs/DECISIONS.md § 8. Roles', 'docs/design.md § 8. Roles', 'decisions/0002-csv.md', 'docs/decisions/0002-csv.md']);
+  assert.deepEqual(decisionIndex(commit(repo), []).map((e) => e.ref), ['docs/design.md § 8. Roles', 'docs/decisions/0002-csv.md']);
 });
 
 // WHY (#920 round 5): when docs/process.md can't be read, no record could be told apart from it, and a hard link to it
@@ -223,10 +240,10 @@ test('regression: when docs/process.md exists but cannot be read (a symlink loop
   symlinkSync('process.md', join(repo, 'docs', 'process.md'));
   writeFileSync(join(repo, 'decisions.md'), '# Decisions\n\n## D-1: Kept\nKept.\n');
   writeFileSync(join(repo, 'docs', 'design.md'), '# Design\n\n## 8. Roles\nThe roles.\n');
-  assert.deepEqual(decisionIndex(repo, []).map((e) => e.ref), []);
+  assert.deepEqual(decisionIndex(commit(repo), []).map((e) => e.ref), []);
   const absent = mkdtempSync(join(tmpdir(), 'records-'));
   writeFileSync(join(absent, 'decisions.md'), '# Decisions\n\n## D-1: Kept\nKept.\n');
-  assert.deepEqual(decisionIndex(absent, []).map((e) => e.ref), ['decisions.md § D-1: Kept']);
+  assert.deepEqual(decisionIndex(commit(absent), []).map((e) => e.ref), ['decisions.md § D-1: Kept']);
 });
 
 test('regression: an unsearchable docs/ with a top-level decisions.md hard-linked to docs/process.md indexes nothing', () => {
@@ -234,6 +251,7 @@ test('regression: an unsearchable docs/ with a top-level decisions.md hard-linke
   mkdirSync(join(repo, 'docs'), { recursive: true });
   writeFileSync(join(repo, 'docs', 'process.md'), PAGE);
   linkSync(join(repo, 'docs', 'process.md'), join(repo, 'decisions.md'));
+  commit(repo);
   chmodSync(join(repo, 'docs'), 0o600);
   try {
     // A user who can't search docs/ can't tell the hard link from the page: nothing. One who can (root) finds the same
@@ -242,4 +260,59 @@ test('regression: an unsearchable docs/ with a top-level decisions.md hard-linke
   } finally {
     chmodSync(join(repo, 'docs'), 0o755);
   }
+});
+
+// WHY (#920 round 7, second adversarial review A1): the lock holds git changes to the record paths, but the index read
+// the working tree, so a file that a setup step, an install script or a pooled worktree left at a record path,
+// untracked, was indexed and citable with no PR adding it. The index reads only what git tracks at HEAD (the plan's
+// base) as regular files, with the text from git.
+test('regression: only records git tracks at HEAD as regular files are indexed, with their committed text; an untracked, staged, edited or linked one is not', () => {
+  const repo = mkdtempSync(join(tmpdir(), 'records-'));
+  mkdirSync(join(repo, 'docs', 'decisions'), { recursive: true });
+  writeFileSync(join(repo, 'docs', 'decisions', '0001-csv.md'), '# Exports are CSV\nEvery export is CSV.\n');
+  writeFileSync(join(repo, 'docs', 'design.md'), '# Design\n\n## 8. Roles\nThe roles.\n');
+  // A record committed as a link to another record path.
+  symlinkSync('0001-csv.md', join(repo, 'docs', 'decisions', '0002-link.md'));
+  commit(repo);
+  // Left in the working tree after the commit: an untracked record, a staged one, and an edit to a committed one.
+  writeFileSync(join(repo, 'docs', 'decisions', '0003-merges.md'), '# Who lands changes\nAn agent lands every change after one look.\n');
+  writeFileSync(join(repo, 'decisions.md'), '# Decisions\n\n## D-1: Agents merge\nAgents merge everything.\n');
+  execFileSync('git', ['add', 'decisions.md'], { cwd: repo, stdio: ['ignore', 'pipe', 'pipe'] });
+  writeFileSync(join(repo, 'docs', 'design.md'), '# Design\n\n## 8. Roles\nAn agent merges every role.\n');
+  const index = decisionIndex(repo, []);
+  assert.deepEqual(index.map((e) => e.ref), ['docs/design.md § 8. Roles', 'docs/decisions/0001-csv.md']);
+  assert.equal(index[0]!.text, 'The roles.', 'the committed text, not the edit');
+  assert.equal(resolveRef(index, 'docs/decisions/0003'), null);
+  assert.equal(resolveRef(index, 'D-1'), null);
+  // Not a git checkout, or not its top: no records.
+  const plain = mkdtempSync(join(tmpdir(), 'records-'));
+  writeFileSync(join(plain, 'decisions.md'), '# Decisions\n\n## D-1: Kept\nKept.\n');
+  assert.deepEqual(decisionIndex(plain, []).map((e) => e.ref), []);
+  assert.deepEqual(decisionIndex(join(repo, 'docs'), []).map((e) => e.ref), []);
+});
+
+// WHY (#920 round 7): the plan step passes its base commit. A setup step that commits a record in the worktree, or
+// stands another commit in for the base with `git replace`, changes nothing the index reads.
+test('read at the plan\'s base commit: a later commit, a replace ref, or a rev that is not a full commit id adds nothing', () => {
+  const git = (repo: string, ...a: string[]) => execFileSync('git', a, { cwd: repo, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+  const repo = mkdtempSync(join(tmpdir(), 'records-'));
+  mkdirSync(join(repo, 'docs'), { recursive: true });
+  writeFileSync(join(repo, 'docs', 'design.md'), '# Design\n\n## 8. Roles\nThe roles.\n');
+  const base = git(commit(repo), 'rev-parse', 'HEAD');
+  writeFileSync(join(repo, 'decisions.md'), '# Decisions\n\n## D-1: Agents merge\nAgents merge everything.\n');
+  const later = git(commit(repo), 'rev-parse', 'HEAD');
+  assert.deepEqual(decisionIndex(repo, [], base).map((e) => e.ref), ['docs/design.md § 8. Roles']);
+  assert.deepEqual(decisionIndex(repo, [], later).map((e) => e.ref), ['decisions.md § D-1: Agents merge', 'docs/design.md § 8. Roles']);
+  git(repo, 'replace', base, later);
+  assert.deepEqual(decisionIndex(repo, [], base).map((e) => e.ref), ['docs/design.md § 8. Roles'], 'the replace ref is not read');
+  for (const rev of ['main', base.slice(0, 8), '--output=x', `${base}^`]) assert.deepEqual(decisionIndex(repo, [], rev), [], rev);
+});
+
+test('an untracked record alone (no commit at all on top of it) is not indexed', () => {
+  const repo = mkdtempSync(join(tmpdir(), 'records-'));
+  writeFileSync(join(repo, 'README.md'), 'A project.\n');
+  commit(repo);
+  mkdirSync(join(repo, 'docs', 'decisions'), { recursive: true });
+  writeFileSync(join(repo, 'docs', 'decisions', '0001-merge.md'), '# Who lands changes\nAn agent lands every change after one look.\n');
+  assert.deepEqual(decisionIndex(repo, []).map((e) => e.ref), []);
 });
