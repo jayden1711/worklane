@@ -21,7 +21,7 @@ import { HELD_OUT_ENV, HELD_OUT_GLOB } from './held-out-paths.js';
 import { DASHBOARD_KEY_GLOB } from './dashboard-key-paths.js';
 import { expSecretGlobs } from './experiments/paths.js';
 import { scanCommit, scanPath } from './scan/secrets.js';
-import { splitCommands } from './guardrails/shell.js';
+import { commitPlan } from './guard/commit.js';
 import { checkWorkingFile, formatFindings } from './comment-policy.js';
 
 export interface HookInput {
@@ -158,9 +158,15 @@ function preToolUse(input: HookInput, env: NodeJS.ProcessEnv): HookOutput {
   const v = evaluate({ tool: input.tool_name ?? '', input: input.tool_input ?? {}, cwd }, guardrails, liveContext(root, env));
   if (v.decision === 'none') {
     // Agents: every commit is secret-scanned first. Humans opt in with a git pre-commit hook.
-    const commit = isAgent(env) && input.tool_name === 'Bash' ? gitCommit(String(input.tool_input?.command ?? '')) : null;
-    if (commit) {
-      const r = scanCommit(cwd, commit.all);
+    // INVARIANT (#971): what is scanned is what the commit records, in every checkout it can land in; a command line
+    // whose commit can't be modelled (src/guard/commit.ts) is refused, never let through on a narrower scan.
+    const plan = isAgent(env) && input.tool_name === 'Bash' ? commitPlan(String(input.tool_input?.command ?? ''), { cwd, env, git: gitQuery }) : null;
+    if (plan && 'refuse' in plan) {
+      log(root, 'secrets.jsonl', { source: 'commit', session: input.session_id, status: 'unmodelled' });
+      return decide('deny', plan.refuse);
+    }
+    for (const { top, scope } of plan?.scans ?? []) {
+      const r = scanCommit(top, scope);
       if (r.status !== 'clean') {
         log(root, 'secrets.jsonl', { source: 'commit', session: input.session_id, status: r.status });
         return decide('deny', r.status === 'leaks' ? 'gitleaks found a secret in this commit; remove it (and rotate it if real) before committing' : `commit secret scan could not run (${r.error}); not committing unscanned`);
@@ -172,15 +178,10 @@ function preToolUse(input: HookInput, env: NodeJS.ProcessEnv): HookOutput {
   return decide(v.decision, `${v.rule}: ${v.reason}`);
 }
 
-/** The `git commit` in a command line, if any, and whether it commits unstaged changes (-a). */
-export function gitCommit(command: string): { all: boolean } | null {
-  for (const c of splitCommands(command)) {
-    const [bin, ...args] = c.argv;
-    if (bin !== 'git') continue;
-    const sub = args.find((a, i) => !a.startsWith('-') && !['-C', '-c'].includes(args[i - 1] ?? ''));
-    if (sub === 'commit') return { all: args.some((a) => a === '-a' || a === '--all' || /^-[a-zA-Z]*a[a-zA-Z]*$/.test(a)) };
-  }
-  return null;
+/** A read-only git query for the commit model: its exit status and output, never an exception. */
+function gitQuery(dir: string, args: string[]): { status: number | null; stdout: string } {
+  const r = spawnSync('git', args, { cwd: dir, encoding: 'utf8', timeout: 5_000 });
+  return { status: r.error ? null : r.status, stdout: r.stdout ?? '' };
 }
 
 function sessionEnd(input: HookInput): HookOutput {
