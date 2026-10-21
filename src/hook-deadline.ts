@@ -32,13 +32,46 @@ export const EVALUATE_ARG = '--evaluate';
 /** The child's extra descriptor: the exit code it decided, as one line, written just before it exits. */
 export const VERDICT_FD = 3;
 
-/** The most stdout or stderr the child may write (each); more is a refusal. The guard's answers are a few hundred bytes. */
+/** The most stdout or stderr the child may write (each); more is a refusal. The guard's denies are about 1 KB at most (src/hook.ts shownReason). */
 export const OUTPUT_CAP = 1024 * 1024;
+
+/**
+ * How long the holder may take to hand its answer to Claude Code before it exits 2 instead (deliver). WHY 5 s: the
+ * budget and this together stay at half the hook's 30 s timeout; a reader that takes longer is not reading.
+ */
+export const DELIVERY_BUDGET_MS = 5_000;
 
 export interface GuardAnswer {
   stdout: string;
   stderr: string;
   exitCode: 0 | 2;
+}
+
+/**
+ * Hands `a` to Claude Code and ends the process with its exit code, only once stdout and stderr were written whole.
+ * WHY (#894 review): the guard denies with exit 0 and a JSON deny on stdout, and a pipe takes 64 KiB (one page on a
+ * shrunk one) before a write has to wait: exiting straight after the write cut a long deny short, into invalid JSON
+ * with exit 0, which Claude Code without onFailure "block" lets through. A write that fails, or that hasn't finished
+ * within DELIVERY_BUDGET_MS, ends the process with exit 2, which blocks whatever stdout holds.
+ */
+export function deliver(a: GuardAnswer, out: NodeJS.WriteStream = process.stdout, err: NodeJS.WriteStream = process.stderr): void {
+  const bail = setTimeout(() => process.exit(2), DELIVERY_BUDGET_MS);
+  // WHY: a broken pipe is an 'error' event too; the write's callback decides, so none may throw here.
+  for (const s of [out, err]) s.on('error', () => {});
+  const write = (s: NodeJS.WriteStream, text: string) =>
+    new Promise<void>((done, fail) => {
+      if (!text) return done();
+      s.write(text, (e) => (e ? fail(e) : done()));
+    });
+  write(out, a.stdout)
+    .then(() => write(err, a.stderr))
+    .then(
+      () => {
+        clearTimeout(bail);
+        process.exit(a.exitCode);
+      },
+      () => process.exit(2),
+    );
 }
 
 /** The refusal for a call the guard couldn't decide: deny on stdout, the reason on stderr, exit code 2. */

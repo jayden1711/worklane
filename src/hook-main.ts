@@ -18,22 +18,21 @@ import './os/system-root-guard.js';
 import { writeSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { BRAND } from './brand.js';
-import { EVALUATE_ARG, refusal, underDeadline, VERDICT_FD, type GuardAnswer } from './hook-deadline.js';
+import { deliver, EVALUATE_ARG, refusal, underDeadline, VERDICT_FD, type GuardAnswer } from './hook-deadline.js';
 
 const [first, second] = process.argv.slice(2);
 
+// INVARIANT (#894 review): the holder exits only once its answer is written whole, or with exit 2 (deliver).
+let answered = false;
 const answer = (a: GuardAnswer) => {
-  try {
-    if (a.stdout) process.stdout.write(a.stdout);
-    if (a.stderr) process.stderr.write(a.stderr);
-  } finally {
-    process.exit(a.exitCode);
-  }
+  if (answered) return;
+  answered = true;
+  deliver(a);
 };
 
 if (first === 'pre-tool-use') {
-  // Fails closed: anything that goes wrong in this process refuses the call.
-  process.on('uncaughtException', (e) => answer(refusal(`the tool guard failed (${e?.message ?? String(e)}); this tool call is refused`)));
+  // Fails closed: anything that goes wrong in this process refuses the call, and while an answer is being delivered, exit 2.
+  process.on('uncaughtException', (e) => (answered ? process.exit(2) : answer(refusal(`the tool guard failed (${e?.message ?? String(e)}); this tool call is refused`))));
   // INVARIANT: the evaluator is this file itself, by its own path: never a path from the call, the environment or a setting.
   void underDeadline({ file: process.execPath, args: [...process.execArgv, fileURLToPath(import.meta.url), EVALUATE_ARG, first] }, process.stdin).then(answer);
 } else {
