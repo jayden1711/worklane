@@ -167,7 +167,7 @@ A signed receipt is a merge decision or merge result, signed and chained so that
 - **Not yet root-signed.** `receipts sign` signs with whatever key file it's given, as whoever runs it, and says so in its output. Nothing installs or schedules a signer yet.
 - **Not yet recorded:** the merge record doesn't carry the policy commit, changed files, check run ids or level, so those fields are `null`.
 - **Nothing verified independently yet.** Every field is *attested*: the coordinator's claim as its log recorded it. Each receipt's `verified` list is empty, and `verify` says so.
-- **Already built:** the signer refuses a log that changed under receipts it already signed (`log.digest`).
+- **Already built:** the signer keeps its own chain state (`--state`: the count, the last receipt's id and the start key), apart from the receipts, and signs only onto receipts that extend it. So it refuses a log that changed under receipts it already signed (`log.digest`), also after the receipts file was truncated, deleted or swapped for another chain (#918 round 4). That holds only while the state is the signer's alone: in slice 1, `sign` refuses a state beside the receipts or in a directory others can write, but whoever runs `sign` owns it.
 
 **Schema (v1).** A receipt's statement is canonical JSON: RFC 8785 for the values it holds (keys sorted, no whitespace, integers only). It carries `schema: "<cli>.receipt/v1"`, and a verifier refuses any version it doesn't know. A new field means a new version.
 - **Every receipt:** `seq`, `prev` and `at`.
@@ -215,13 +215,18 @@ This catches any receipt that was changed, reordered, inserted, or dropped from 
 - **C. Chosen: a separate signer OS user.** It owns the key and reads the event log read-only.
   - **Who it is:** a dedicated system user, not root, that the coordinator has no sudo rule to (a setup test asserts this).
   - **How it runs:** from a systemd path or timer unit, with other OSes behind the OS adapter. In pod mode it's a signer pod with the key in a Secret the coordinator's service account can't read, and the log volume mounted read-only.
-  - **What it owns:** the only readable copy of the key. It is also the only writer of its receipts file.
+  - **What it owns:** the only readable copy of the key, and its chain state, in a directory only it can write. It is also the only writer of its receipts file *and of that file's directory*. Slice 3 requirement: `--out` and its directory are writable by the signer user alone, and a setup test asserts it. (#918's second review worked two routes through the directory: a link planted at the old temp name, A11, now closed by design, and a truncated file, A2, now refused by the chain state.)
   - **Its input:** the log, never a request from the coordinator, so there is no new channel from the coordinator to it or to root.
   - **Its cost:** it signs after the fact. Between a decision and its signing, a compromised coordinator could rewrite the log, since it owns the database file. A path unit keeps that window short (inferred, not measured).
   - **Slice 1** ships the format, the chain and the command. Anyone holding a key file runs it, so it is *not yet* this signer. Slice 3, in the epic lane, installs the user and the unit.
 
 **What the signer (C) must do.** It never signs blindly what the coordinator wrote. These requirements apply to slice 3; slice 1 already does the parts marked built.
-- **Its own append-only chain.** Each receipt links to the previous one *it* signed (`seq`, and `prev` = the SHA-256 of that payload). It extends the chain only when the chain verifies from a start key it trusts, and only with the chain's current key (built).
+- **Its own append-only chain.** Each receipt links to the previous one *it* signed (`seq`, and `prev` = the SHA-256 of that payload). It extends the chain only with the chain's current key (built).
+- **Its own memory of that chain** (built, #918 round 4). The chain state (`--state`) holds the count, the last receipt's id and the start key. The signer keeps it apart from the receipts: `sign` refuses a state in the receipts' directory, or in a directory a group or other user may write.
+  - It signs only onto receipts that verify from the state's start key and hold the state's head at its place. A missing, emptied, truncated or swapped receipts file is refused, and nothing is signed.
+  - It writes the receipts first, then the state. A crash between them leaves receipts that still extend the state.
+  - A new chain starts only with `--genesis`, only where the signer has no state, and only where it finds no receipts (it never adopts a file it didn't sign). Only root or the owner runs `--genesis`; the slice-3 unit never passes it.
+  - What it doesn't stop: whoever can write the state, or holds the key, can reset it. So the state is the signer's alone, like the key.
 - **It refuses input that breaks its chain:**
   - **A duplicate or a reorder:** event ids must rise strictly, and an id seen twice is refused (built).
   - **A gap or a fork in the log:** `log.digest` at each receipt is the running hash of every event up to it. A log that no longer hashes to what was signed (an event edited, dropped, or inserted before a signed one) is refused, and nothing more is signed (built).
@@ -257,11 +262,15 @@ This catches any receipt that was changed, reordered, inserted, or dropped from 
 
 **Keys.**
 - **Generation and custody:** the customer makes the key on their own side, air-gapped if they want: `receipts keygen`, or any ed25519 PKCS#8 PEM. No online service is involved (#698 decision 9).
+  - `keygen` stages each key file under an unpredictable name beside it, then links it into place, never over anything and never through a link. It checks the result is the file it staged: the same inode, mode 0600, this user's, two names, the same bytes.
+  - **Not handled:** a process killed between staging and linking leaves the staging file, `.<name>.<16 hex>.new` (mode 0600, holding the whole private key). Nothing removes it. Delete it by hand. `sign` and `rotate` leave a staging file of the receipts or the state the same way (no secret in either).
+  - **No fsync:** none of these writes is synced. After a power loss a key, receipts or state file can be empty or cut short. Each then fails closed (an unreadable key or state, or receipts that don't extend the state), and root or the owner restores it, or starts a new chain with `--genesis`.
 - **Distribution:** the customer hands the public key to auditors out of band. A key that a receipts file declares about itself proves nothing.
 - **Signer list:** v1 has one signature per receipt. A list of signers from the customer's side is a later version (DSSE allows several).
 
 **Verify.** `<cli> receipts verify <file|dir> --key <pub> [--key <pub>]... [--anchor <id>]`. The command name comes from `BRAND`.
 - **Inputs:** only the receipts and the public key. No engine state, no network.
+- **What it reads:** regular files only, at most 64 MiB of receipts in all. A link, FIFO or device, in a directory or given itself, fails (#918's A7: a FIFO hung round 3's verify).
 - **Exit codes:**
   - 0: verified.
   - 1: failed; it names the first bad receipt.
@@ -269,11 +278,13 @@ This catches any receipt that was changed, reordered, inserted, or dropped from 
   - 3: authentic, but the signer flagged a field it found different from the coordinator's claim. An *unrecorded* (null) claim the signer filled is not a flag.
 - **Output:**
   - the head, for the auditor to keep as the next anchor;
-  - what the signer verified, against what it only attests.
+  - what the signer verified, against what it only attests;
+  - one `FLAGGED` line per mismatch and one `UNRECORDED` line per unrecorded check, each with the receipt, the field and the value the signer found.
+  - Text from the receipts or the file system (a keyid, a schema message, a file name, a verified field) is printed with every control character escaped as `\uXXXX`, so it can't move the cursor or fake a line (#918's A5 and A6).
 
 **Rotation.**
 - **Planned:** a `key.rotated` receipt, signed by the current key, names the next key. After it, only the next key verifies. Auditors keep trusting the start key, and the verifier follows the rotations.
-- **The signer trusts a start key too.** It extends a chain only if the chain verifies from its own key, or, after a rotation, from a start key it's given with `--trust`. A file swapped for a chain someone else started, then rotated to this key, is never extended.
+- **The signer trusts only the start key its own chain state names.** `sign` and `rotate` take no `--trust`: it is a usage error. Round 3's `--trust <start key>` let a chain that any holder of that key started and rotated to the current key be extended (#918's second review, A4, measured). A chain someone else started, a fresh one from a retired start key included, doesn't hold the state's head, so it is never extended (measured: `test/signed-receipts-hardening.test.ts`). Auditors still pass the start key to `verify` as `--key`.
 - **What rotation doesn't stop: a retired key can still sign a different chain.** Its holder can sign a fresh chain from the start, or fork the real one before the rotation. Either verifies with that key unless the auditor holds an anchor taken after the rotation (measured in #918's review).
 - **Compromised key:** rotation can't help, because the holder of the stolen key can rotate too. Start a new chain with a new key, and publish out of band the old chain's last trusted head and the new public key.
 
@@ -303,12 +314,15 @@ This catches any receipt that was changed, reordered, inserted, or dropped from 
     - a head, a changed-file list or check run ids that GitHub and git don't show (slice 3 flags them);
     - a merge commit that isn't on main, or has another tree;
     - a policy commit that wasn't main's tip;
-    - a log edit behind a receipt already signed (refused: `log.digest`, built);
+    - a log edit behind a receipt already signed (refused: `log.digest`, built), also after it truncates, deletes or swaps the receipts file (refused: the signer's own chain state, built). This holds while the coordinator can neither write the signer's state nor read its key, which is what C provides; in slice 1, whoever runs `sign` has both;
     - any change, reorder or re-signing of a receipt already made (it never holds the key).
   - **It can stop writing,** which leaves gaps visible against GitHub.
 - **Signer identity:** the trust root. It can sign anything, which is why it is separate and small.
 - **Root:** everything.
-- **Anyone who can write the receipts file:** can delete or truncate it (a dropped tail needs an anchor to show), never forge a receipt.
+- **Anyone who can write the receipts file:**
+  - **Can:** delete, truncate or swap it. An auditor without an anchor then sees a shorter or different chain. Signing then stops, since the signer refuses receipts that don't extend its chain state, until root or the owner restores the file. Writing the file's directory also lets them plant names beside it.
+  - **Can't:** forge a receipt; get an edited log re-signed onto a cut, deleted or swapped chain (the chain state); or have the signer write through a planted link (receipts and state go through an unpredictable staging name, then a rename: #918's A11).
+  - **The condition:** the signer's state and key are out of their reach. With write access to the state too, they could set it back to an earlier head (receipt ids are public), and with the log too, get an edited log re-signed after the cut.
 - **Dashboard and other instances:** no role in receipts.
 - **Someone with push access:** can change code and policy. Once step 2 lands, the receipt names the policy commit, but it doesn't stop the change.
 

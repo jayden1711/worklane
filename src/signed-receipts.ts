@@ -308,23 +308,63 @@ export function verifyChain(envelopes: readonly unknown[], o: { keys: readonly K
   return { ok: true, count: ids.length, head: prev, ids, keys, statements };
 }
 
-/** How a signer extends a chain: the keys it trusts to have started it (default: its own key), and its clock. */
+/** The schema of the signer's own chain state (ChainState); a signer refuses any other. */
+export const CHAIN_STATE_SCHEMA = `${BRAND.cli}.receipt-state/v1`;
+
+/**
+ * The signer's own memory of its chain (#918 round 4: A2, A3, A4), kept by the signer where only it writes, apart
+ * from the receipts: how many receipts it has signed, the last one's id, and the key that started the chain. A
+ * receipts file is signed on only when it extends this head, so a file truncated, deleted or swapped for another
+ * chain (one a retired start key signed and rotated to this key included) is never extended.
+ */
+export const ChainStateSchema = z.strictObject({ schema: z.literal(CHAIN_STATE_SCHEMA), count: positive, head: hex64, start: KeyRef });
+export type ChainState = z.infer<typeof ChainStateSchema>;
+
+/**
+ * Where a signer extends from: its own chain state, or 'genesis', a new chain where the signer has none. Never a key
+ * to trust: a start key is trusted only as the signer's own state names it (#918 round 4, A4: `--trust` let a chain
+ * any holder of a retired start key made be extended).
+ */
+export type ChainFrom = ChainState | 'genesis';
+
+/** How a signer extends a chain: from where, and its clock. */
 export interface SignOptions {
-  trust?: readonly KeyObject[];
+  from: ChainFrom;
   now?: () => string;
 }
 
+/** A receipt's id: the SHA-256 of its payload, hex. */
+export function receiptId(env: Envelope): string {
+  return sha256(Buffer.from(env.payload, 'base64'));
+}
+
+/** The signer's chain state after `envelopes`, a chain that starts from `start`. */
+export function chainStateOf(envelopes: readonly Envelope[], start: { keyid: string; spki: string }): ChainState {
+  return ChainStateSchema.parse({ schema: CHAIN_STATE_SCHEMA, count: envelopes.length, head: receiptId(envelopes.at(-1)!), start: { keyid: start.keyid, spki: start.spki } });
+}
+
 /**
- * The chain so far, for a signer about to extend it: it must verify from a start key the signer trusts (its own key
- * unless told others), so a file swapped for a chain someone else started is never extended (#717 adversarial pass:
- * a chain started by another key and rotated to this one), and this key must be the chain's current one.
+ * The chain so far, for a signer about to extend it.
+ * - 'genesis': there must be no receipts. A file the signer has no state for is someone else's, never adopted.
+ * - Its own state: the receipts must be there (a missing or empty file was deleted or truncated), verify from the
+ *   start key the state names, and hold the state's head at its place (so they extend what this signer signed: not
+ *   cut back, not another chain). And this key must be the chain's current one.
  */
-function chainSoFar(existing: readonly unknown[], signer: ReceiptSigner, trust: readonly KeyObject[] | undefined): Extract<ChainResult, { ok: true }> {
-  if (!existing.length) return { ok: true, count: 0, head: null, ids: [], keys: [], statements: [] };
-  const state = verifyChain(existing, { keys: trust?.length ? trust : [signer.publicKey] });
-  if (!state.ok) throw new ReceiptError(`the receipts so far don't verify (receipt ${state.index + 1}: ${state.problem}); nothing was signed. After a rotation, pass the chain's start key as a trusted key`);
+function chainSoFar(existing: readonly unknown[], signer: ReceiptSigner, from: ChainFrom): Extract<ChainResult, { ok: true }> {
+  if (from === 'genesis') {
+    if (existing.length) throw new ReceiptError("there are receipts already, and the signer has no chain state of its own: they are someone else's chain, never adopted; nothing was signed");
+    return { ok: true, count: 0, head: null, ids: [], keys: [], statements: [] };
+  }
+  const own = ChainStateSchema.parse(from);
+  const at = `the signer's own chain head is receipt ${own.count} (${own.head})`;
+  if (!existing.length) throw new ReceiptError(`the receipts are missing or empty, but ${at}: they were deleted or truncated; nothing was signed`);
+  const start = keyOfRef(own.start);
+  if (!start) throw new ReceiptError("the signer's chain state names a start key that is unreadable, or isn't the key its id names; nothing was signed");
+  const state = verifyChain(existing, { keys: [start] });
+  if (!state.ok) throw new ReceiptError(`the receipts so far don't verify from the signer's start key (receipt ${state.index + 1}: ${state.problem}); nothing was signed`);
+  if (state.count < own.count || state.ids[own.count - 1] !== own.head) throw new ReceiptError(`the receipts don't extend the chain this signer signed (${at}): they were truncated, replaced or forked; nothing was signed`);
   const mine = keyId(signer.publicKey);
-  if (state.count && state.keys.at(-1) !== mine) throw new ReceiptError(`this key (${mine}) is not the chain's current key (${state.keys.at(-1)}); nothing was signed`);
+  if (state.keys.at(-1) !== mine) throw new ReceiptError(`this key (${mine}) is not the chain's current key (${state.keys.at(-1)}); nothing was signed`);
   return state;
 }
 
@@ -357,12 +397,14 @@ function bodyOf(e: ReceiptEvent, version: string | null, decided: Map<string, st
 
 /**
  * Extend a chain with a receipt for each merge decision and result in `events` after the last one it receipts (a
- * new chain starts with its key). Refuses, signing nothing, when the chain so far doesn't verify from a trusted start
- * key, when the signer's key isn't the chain's current one, or at an event that doesn't match its schema.
+ * new chain, from 'genesis', starts with its key). Refuses, signing nothing, when the chain so far doesn't extend the
+ * signer's own chain state (chainSoFar), when the signer's key isn't the chain's current one, when the log changed
+ * under receipts already signed, or at an event that doesn't match its schema. `state`: the signer's chain state
+ * after this (unchanged when nothing was added).
  */
-export function signEvents(existing: readonly unknown[], events: readonly ReceiptEvent[], signer: ReceiptSigner, o: SignOptions = {}): { envelopes: Envelope[]; added: number; head: string | null } {
+export function signEvents(existing: readonly unknown[], events: readonly ReceiptEvent[], signer: ReceiptSigner, o: SignOptions): { envelopes: Envelope[]; added: number; head: string | null; state: ChainState } {
   const now = o.now ?? (() => new Date().toISOString());
-  const state = chainSoFar(existing, signer, o.trust);
+  const state = chainSoFar(existing, signer, o.from);
   const envelopes = [...(existing as Envelope[])];
   let seq = state.count;
   let prev = state.head;
@@ -407,13 +449,16 @@ export function signEvents(existing: readonly unknown[], events: readonly Receip
     const id = push(body);
     if (body.kind === 'merge.decided') decided.set(`${body.inputs.pr}@${body.inputs.head}`, id);
   }
-  return { envelopes, added: seq - state.count, head: prev };
+  return { envelopes, added: seq - state.count, head: prev, state: chainStateOf(envelopes, o.from === 'genesis' ? keyRef(signer.publicKey) : o.from.start) };
 }
 
-/** Hand the chain to a new key: a key.rotated receipt signed by the current key. After it only `next` signs. */
-export function rotateChain(existing: readonly unknown[], signer: ReceiptSigner, next: KeyObject, o: SignOptions = {}): Envelope[] {
+/**
+ * Hand the chain to a new key: a key.rotated receipt signed by the current key. After it only `next` signs. Only
+ * from the signer's own chain state (a chain to rotate); chainStateOf gives the state after it.
+ */
+export function rotateChain(existing: readonly unknown[], signer: ReceiptSigner, next: KeyObject, o: SignOptions & { from: ChainState }): Envelope[] {
   const now = o.now ?? (() => new Date().toISOString());
-  const state = chainSoFar(existing, signer, o.trust);
+  const state = chainSoFar(existing, signer, o.from);
   if (!state.count) throw new ReceiptError('there is no chain to rotate: sign with the new key to start one');
   if (next.type !== 'public' || next.asymmetricKeyType !== 'ed25519') throw new ReceiptError('the next key is an ed25519 public key');
   if (keyId(next) === keyId(signer.publicKey)) throw new ReceiptError('the next key is the key already in use');

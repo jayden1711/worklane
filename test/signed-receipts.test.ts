@@ -10,7 +10,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { BRAND } from '../src/brand.js';
 import { EventLog } from '../src/events/log.js';
-import { canonicalJson, fieldChecks, keyId, keySigner, pae, PAYLOAD_TYPE, RECEIPT_SCHEMA, rotateChain, signEvents, statementOf, verifyChain, type Envelope, type ReceiptEvent, type ReceiptSigner } from '../src/signed-receipts.js';
+import { canonicalJson, chainStateOf, fieldChecks, keyId, keySigner, pae, PAYLOAD_TYPE, RECEIPT_SCHEMA, rotateChain, signEvents, statementOf, verifyChain, type Envelope, type ReceiptEvent, type ReceiptSigner } from '../src/signed-receipts.js';
 import { readReceiptFiles, signLog } from '../src/signed-receipts-store.js';
 import { engineCli } from './helpers.js';
 
@@ -38,12 +38,17 @@ function fixtureLog(): { dir: string; path: string; log: EventLog } {
   return { dir, path, log };
 }
 
-function signed(): { dir: string; out: string; pub: KeyObject; signer: ReceiptSigner; envs: Envelope[]; log: EventLog; path: string } {
+/** The signer's own chain state file, in a directory of its own (0700), apart from the receipts (#918 round 4). */
+const stateFile = () => join(mkdtempSync(join(tmpdir(), 'rst-')), 'chain-state.json');
+const GENESIS = { from: 'genesis' } as const;
+
+function signed(): { dir: string; out: string; state: string; pub: KeyObject; signer: ReceiptSigner; envs: Envelope[]; log: EventLog; path: string } {
   const f = fixtureLog();
   const k = keys();
   const out = join(f.dir, 'receipts.jsonl');
-  signLog({ log: f.path, out, signer: k.signer });
-  return { ...f, out, ...k, envs: readReceiptFiles(out) as Envelope[] };
+  const state = stateFile();
+  signLog({ log: f.path, out, state, genesis: true, signer: k.signer });
+  return { ...f, out, state, ...k, envs: readReceiptFiles(out) as Envelope[] };
 }
 
 const reencode = (env: Envelope, st: unknown): Envelope => ({ ...env, payload: Buffer.from(canonicalJson(st), 'utf8').toString('base64') });
@@ -112,9 +117,9 @@ test('signing again receipts only what is new, continuing the same chain', () =>
   const s = signed();
   const first = verifyChain(s.envs, { keys: [s.pub] });
   assert.ok(first.ok);
-  assert.deepEqual(signLog({ log: s.path, out: s.out, signer: s.signer }), { added: 0, count: 5, head: first.head });
+  assert.deepEqual(signLog({ log: s.path, out: s.out, state: s.state, signer: s.signer }), { added: 0, count: 5, head: first.head });
   s.log.append('merge.decided', { issue: 9, number: 43, head: sha('d'), auto: true, reasons: [] }, 'inst');
-  const again = signLog({ log: s.path, out: s.out, signer: s.signer });
+  const again = signLog({ log: s.path, out: s.out, state: s.state, signer: s.signer });
   assert.equal(again.added, 1);
   const r = verifyChain(readReceiptFiles(s.out), { keys: [s.pub] });
   assert.ok(r.ok, JSON.stringify(r));
@@ -211,14 +216,15 @@ test('the wrong public key fails verification, and no key at all is refused', ()
 test('a rotated key: the chain follows the rotation, and only the current key signs', () => {
   const s = signed();
   const next = keys();
-  const rotated = rotateChain(s.envs, s.signer, next.pub);
+  const startRef = (statementOf(s.envs[0]!) as { key: { keyid: string; spki: string } }).key;
+  const rotated = rotateChain(s.envs, s.signer, next.pub, { from: chainStateOf(s.envs, startRef) });
   writeFileSync(s.out, `${rotated.map((e) => canonicalJson(e)).join('\n')}\n`);
   // The old key may not sign after the rotation; the new one may.
   s.log.append('merge.decided', { issue: 9, number: 43, head: sha('d'), auto: true, reasons: [] }, 'inst');
-  assert.throws(() => signLog({ log: s.path, out: s.out, signer: s.signer }), /not the chain's current key/);
-  // The new key didn't start the chain: it extends it only when told the start key to trust.
-  assert.throws(() => signLog({ log: s.path, out: s.out, signer: next.signer }), /don't verify/);
-  assert.equal(signLog({ log: s.path, out: s.out, signer: next.signer, trust: [s.pub] }).added, 1);
+  assert.throws(() => signLog({ log: s.path, out: s.out, state: s.state, signer: s.signer }), /not the chain's current key/);
+  // The new key didn't start the chain: it extends it from the signer's own chain state, which names the start key
+  // (#918 round 4, A4: never from a key it is told to trust; test/signed-receipts-hardening.test.ts).
+  assert.equal(signLog({ log: s.path, out: s.out, state: s.state, signer: next.signer }).added, 1);
   const envs = readReceiptFiles(s.out) as Envelope[];
   const r = verifyChain(envs, { keys: [s.pub] });
   assert.ok(r.ok, JSON.stringify(r));
@@ -237,17 +243,18 @@ test('a rotated key: the chain follows the rotation, and only the current key si
   bad[5] = sealWith(rogue, statementOf(envs[5]!));
   assert.ok(!verifyChain(bad, { keys: [s.pub] }).ok);
   // Rotating with a key that isn't the current one is refused.
-  assert.throws(() => rotateChain(envs, s.signer, rogue.pub, { trust: [s.pub] }), /not the chain's current key/);
+  assert.throws(() => rotateChain(envs, s.signer, rogue.pub, { from: chainStateOf(envs, startRef) }), /not the chain's current key/);
 });
 
 test('a receipts file swapped for a chain someone else started (rotated to this key) is never extended', () => {
   const s = signed();
   const attacker = keys();
   // Started by the attacker's key, then rotated to the real signer's key: valid on its own terms.
-  const fake = rotateChain(signEvents([], [], attacker.signer).envelopes, attacker.signer, s.pub, { trust: [attacker.pub] });
+  const started = signEvents([], [], attacker.signer, GENESIS);
+  const fake = rotateChain(started.envelopes, attacker.signer, s.pub, { from: started.state });
   writeFileSync(s.out, `${fake.map((e) => canonicalJson(e)).join('\n')}\n`);
   const before = readFileSync(s.out, 'utf8');
-  assert.throws(() => signLog({ log: s.path, out: s.out, signer: s.signer }), /not a key given to verify against/);
+  assert.throws(() => signLog({ log: s.path, out: s.out, state: s.state, signer: s.signer }), /not a key given to verify against/);
   assert.equal(readFileSync(s.out, 'utf8'), before, 'nothing was written');
   assert.ok(!verifyChain(fake, { keys: [s.pub] }).ok, "and an auditor holding the real key rejects it at its first receipt");
 });
@@ -259,7 +266,7 @@ test('a planted secret in a decision or a failure never appears in its receipt',
     { id: 2, ts: '2026-10-20T00:00:01.000Z', type: 'merge.decided', actor: 'inst', payload: { issue: 1, number: 2, head: H1, auto: false, reasons: [`held: ${TOKEN}`], why: [{ category: 'x', text: `see ${TOKEN}` }] } },
     { id: 3, ts: '2026-10-20T00:00:02.000Z', type: 'merge.failed', actor: 'inst', payload: { issue: 1, number: 2, head: H1, why: `push with ${TOKEN} refused` } },
   ];
-  const { envelopes } = signEvents([], events, k.signer);
+  const { envelopes } = signEvents([], events, k.signer, GENESIS);
   const text = envelopes.map((e) => Buffer.from(e.payload, 'base64').toString('utf8')).join('\n') + envelopes.map((e) => canonicalJson(e)).join('\n');
   assert.ok(!text.includes(TOKEN), 'the token reached a receipt');
   assert.match(text, /REDACTED/);
@@ -274,14 +281,14 @@ test('the signer refuses to extend receipts that no longer verify, and leaves th
   writeFileSync(s.out, lines.join('\n'));
   const before = readFileSync(s.out, 'utf8');
   s.log.append('merge.decided', { issue: 9, number: 43, head: sha('d'), auto: true, reasons: [] }, 'inst');
-  assert.throws(() => signLog({ log: s.path, out: s.out, signer: s.signer }), /don't verify/);
+  assert.throws(() => signLog({ log: s.path, out: s.out, state: s.state, signer: s.signer }), /don't verify/);
   assert.equal(readFileSync(s.out, 'utf8'), before);
 });
 
 test('a garbled merge event in the log is refused, never signed as if it were whole', () => {
   const k = keys();
   const events: ReceiptEvent[] = [{ id: 2, ts: '2026-10-20T00:00:01.000Z', type: 'merge.decided', actor: 'inst', payload: { issue: 1, number: 2, head: 'not-a-sha', auto: 'yes' } }];
-  assert.throws(() => signEvents([], events, k.signer), /event 2/);
+  assert.throws(() => signEvents([], events, k.signer, GENESIS), /event 2/);
 });
 
 test(`${BRAND.cli} receipts: keygen, sign and verify offline from the CLI; a tampered file fails`, () => {
@@ -294,7 +301,7 @@ test(`${BRAND.cli} receipts: keygen, sign and verify offline from the CLI; a tam
   assert.equal(gen.status, 0, gen.stderr);
   assert.equal(cli('keygen', '--private', priv, '--public', pub).status, 1, 'never overwrites a key');
   const out = join(f.dir, 'receipts.jsonl');
-  const sg = cli('sign', '--log', f.path, '--key', priv, '--out', out);
+  const sg = cli('sign', '--log', f.path, '--key', priv, '--out', out, '--state', stateFile(), '--genesis');
   assert.equal(sg.status, 0, sg.stderr);
   assert.match(sg.stdout, /not yet root-signed/);
   // The auditor's copy, elsewhere, with only the public key.
@@ -315,7 +322,9 @@ test(`${BRAND.cli} receipts: keygen, sign and verify offline from the CLI; a tam
   assert.match(help.stdout, /receipts verify <file\|dir> --key <pub>/);
   // Never a signature from a key the CLI can't read as an ed25519 private key.
   writeFileSync(join(keyDir, 'junk.key'), 'not a key');
-  assert.equal(cli('sign', '--log', f.path, '--key', join(keyDir, 'junk.key'), '--out', join(f.dir, 'r2.jsonl')).status, 1);
+  const junk = cli('sign', '--log', f.path, '--key', join(keyDir, 'junk.key'), '--out', join(f.dir, 'r2.jsonl'), '--state', stateFile(), '--genesis');
+  assert.equal(junk.status, 1);
+  assert.match(junk.stderr, /not a readable private key/);
   // The auditor is told what the signer checked itself and what is only the coordinator's word (attested).
   assert.match(ok.stdout, /verified independently by the signer: none/);
 });
@@ -374,21 +383,23 @@ test('the signer refuses a log that changed under receipts it already signed: an
     ev(4, 'issue.seen', { issue: 1, labels: [] }),
     ev(5, 'merge.done', { issue: 1, number: 2, head: H1, sha: M1, url: 'u', title: 't' }),
   ];
-  const first = signEvents([], base, k.signer).envelopes;
+  const signedOnce = signEvents([], base, k.signer, GENESIS);
+  const first = signedOnce.envelopes;
+  const from = { from: signedOnce.state };
   const next = ev(7, 'merge.decided', { issue: 3, number: 4, head: H2, auto: true, reasons: [] });
-  assert.equal(signEvents(first, [...base, next], k.signer).added, 1, 'a log that only grew is signed on');
+  assert.equal(signEvents(first, [...base, next], k.signer, from).added, 1, 'a log that only grew is signed on');
   const edited = base.map((e) => (e.id === 4 ? { ...e, payload: { issue: 1, labels: ['changed'] } } : e));
-  assert.throws(() => signEvents(first, [...edited, next], k.signer), /log changed/);
-  assert.throws(() => signEvents(first, [...base.filter((e) => e.id !== 4), next], k.signer), /log changed/);
-  assert.throws(() => signEvents(first, [...base, ev(3, 'issue.seen', { issue: 9, labels: [] }), next], k.signer), /log changed/);
-  assert.throws(() => signEvents(first, [...base.filter((e) => e.id !== 2), next], k.signer), /log changed/);
+  assert.throws(() => signEvents(first, [...edited, next], k.signer, from), /log changed/);
+  assert.throws(() => signEvents(first, [...base.filter((e) => e.id !== 4), next], k.signer, from), /log changed/);
+  assert.throws(() => signEvents(first, [...base, ev(3, 'issue.seen', { issue: 9, labels: [] }), next], k.signer, from), /log changed/);
+  assert.throws(() => signEvents(first, [...base.filter((e) => e.id !== 2), next], k.signer, from), /log changed/);
 });
 
 test('verify shows what the signer verified against what it only attests, and flags a mismatch with exit 3', () => {
   // Slice 1's signer verifies nothing; this receipt is what slice 3's will make (the format is already v1's).
   const k = keys();
   const ev = (id: number, type: string, payload: unknown): ReceiptEvent => ({ id, ts: `2026-10-20T00:00:0${id}.000Z`, type, actor: 'inst', payload });
-  const envs = signEvents([], [ev(1, 'coordinator.started', { instance: 'inst', pid: 1, version: '1' }), ev(2, 'merge.decided', { issue: 1, number: 2, head: H1, auto: true, reasons: [] })], k.signer).envelopes;
+  const envs = signEvents([], [ev(1, 'coordinator.started', { instance: 'inst', pid: 1, version: '1' }), ev(2, 'merge.decided', { issue: 1, number: 2, head: H1, auto: true, reasons: [] })], k.signer, GENESIS).envelopes;
   const st = statementOf(envs[1]!) as Record<string, unknown>;
   const dir = mkdtempSync(join(tmpdir(), 'rvf-'));
   const pub = join(dir, 'k.pub');
@@ -427,8 +438,9 @@ test('the log digest is unambiguous: bytes moved across a field boundary are a c
   const started: ReceiptEvent = { id: 1, ts: at(1), type: 'coordinator.started', actor: 'inst', payload: { instance: 'inst', pid: 1, version: '1' } };
   const seen: ReceiptEvent = { id: 2, ts: at(2), type: 'issue.seen', actor: 'inst', payload: undefined, raw: '{"issue":1}\n{"x":2}' };
   const decided: ReceiptEvent = { id: 3, ts: at(3), type: 'merge.decided', actor: 'inst', payload: { issue: 1, number: 2, head: H1, auto: true, reasons: [] } };
-  const first = signEvents([], [started, seen, decided], k.signer).envelopes;
+  const once = signEvents([], [started, seen, decided], k.signer, GENESIS);
+  const first = once.envelopes;
   const shifted: ReceiptEvent = { ...seen, actor: 'inst\n{"issue":1}', raw: '{"x":2}' };
-  assert.throws(() => signEvents(first, [started, shifted, decided], k.signer), /log changed/);
-  assert.equal(signEvents(first, [started, seen, decided], k.signer).added, 0, 'the same log is no change');
+  assert.throws(() => signEvents(first, [started, shifted, decided], k.signer, { from: once.state }), /log changed/);
+  assert.equal(signEvents(first, [started, seen, decided], k.signer, { from: once.state }).added, 0, 'the same log is no change');
 });

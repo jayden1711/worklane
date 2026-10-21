@@ -1,7 +1,7 @@
 // `<cli> receipts keygen | sign | rotate | verify` (#717): signed receipts from the command line. verify needs only
 // the receipts and the public key: no engine state, no network, no instance.
 import { generateKeyPairSync } from 'node:crypto';
-import { existsSync, lstatSync, rmSync } from 'node:fs';
+import { lstatSync, rmSync } from 'node:fs';
 import { BRAND } from './brand.js';
 import { createOwnerOnly } from './os/index.js';
 import { fieldChecks, keyId, ReceiptError, verifyChain } from './signed-receipts.js';
@@ -32,9 +32,40 @@ function createKeyFile(path: string, data: string) {
 const USAGE = [
   `usage: ${BRAND.cli} receipts verify <file|dir> --key <pub> [--key <pub>]... [--anchor <receipt id>]`,
   `       ${BRAND.cli} receipts keygen --private <file> --public <file>`,
-  `       ${BRAND.cli} receipts sign --log <events.db> --key <private> --out <file> [--trust <start pub>]...`,
-  `       ${BRAND.cli} receipts rotate --out <file> --key <current private> --next <new public> [--trust <start pub>]...`,
+  `       ${BRAND.cli} receipts sign --log <events.db> --key <private> --out <file> --state <file> [--genesis]`,
+  `       ${BRAND.cli} receipts rotate --out <file> --key <current private> --next <new public> --state <file>`,
 ].join('\n');
+
+/**
+ * The code points a terminal may act on, as inclusive ranges: C0 (the newline included), DEL and C1; the Arabic
+ * letter mark; the left-to-right and right-to-left marks; the line and paragraph separators; and the bidirectional
+ * embeddings, overrides and isolates.
+ */
+const UNPRINTABLE: readonly (readonly [number, number])[] = [
+  [0x00, 0x1f],
+  [0x7f, 0x9f],
+  [0x61c, 0x61c],
+  [0x200e, 0x200f],
+  [0x2028, 0x202e],
+  [0x2066, 0x2069],
+];
+
+/**
+ * `s` as one line no terminal acts on: every UNPRINTABLE code point is written as `\uXXXX`. WHY (#918 round 4,
+ * A5/A6): verify prints text from the receipts and the file system (a keyid, a schema message naming a key, a file
+ * name, a verified field), and an ESC or CR in it could clear the line and print a false "verified". Everything
+ * these commands print but the usage text goes through it.
+ */
+export function printable(s: string): string {
+  let out = '';
+  for (const ch of s) {
+    const c = ch.codePointAt(0)!;
+    out += UNPRINTABLE.some(([lo, hi]) => c >= lo && c <= hi) ? `\\u${c.toString(16).padStart(4, '0')}` : ch;
+  }
+  return out;
+}
+const say = (line: string) => console.log(printable(line));
+const warn = (line: string) => console.error(printable(line));
 
 /** Every value of option `name`, taken out of `args`. */
 function values(args: string[], name: string): string[] {
@@ -54,7 +85,23 @@ function one(args: string[], name: string): string {
   return v[0]!;
 }
 
+/** A usage error: its message (if any), then the usage, exit 2. */
 class Usage extends Error {}
+
+/** Whether flag `name` (no value) was given, taken out of `args`. */
+function flag(args: string[], name: string): boolean {
+  const had = args.includes(name);
+  for (let i = args.indexOf(name); i >= 0; i = args.indexOf(name)) args.splice(i, 1);
+  return had;
+}
+
+/**
+ * WHY (#918 round 4, A4): a signer trusts only the start key its own chain state names. `--trust <key>` let a chain
+ * that any holder of a retired start key signed and rotated to this key be extended, so it is refused, never ignored.
+ */
+function noTrust(args: string[], sub: string): void {
+  if (args.includes('--trust')) throw new Usage(`receipts ${sub} takes no --trust: the signer trusts only the start key its own chain state (--state) names. An auditor passes start keys to verify, as --key`);
+}
 
 export async function receiptsCommand(sub: string | undefined, rest: string[]): Promise<number> {
   const args = [...rest];
@@ -77,31 +124,34 @@ export async function receiptsCommand(sub: string | undefined, rest: string[]): 
           rmSync(priv, { force: true });
           throw e;
         }
-        console.log(`receipt key ${keyId(k.publicKey)}: private ${priv} (0600; give it only to the signer), public ${pub} (give it to auditors)`);
+        say(`receipt key ${keyId(k.publicKey)}: private ${priv} (0600; give it only to the signer), public ${pub} (give it to auditors)`);
         return 0;
       }
       case 'sign': {
+        noTrust(args, 'sign');
+        const genesis = flag(args, '--genesis');
         const log = one(args, '--log');
         const key = one(args, '--key');
         const out = one(args, '--out');
-        const trust = values(args, '--trust').map(loadPublicKey);
+        const state = one(args, '--state');
         done(args);
         const signer = loadSigner(key);
-        const r = signLog({ log, out, signer, trust });
-        console.log(`${r.added} new receipts signed with key ${keyId(signer.publicKey)}; ${r.count} in the chain, head ${r.head ?? 'none'}`);
-        console.log(NOT_ROOT_SIGNED);
+        const r = signLog({ log, out, state, signer, ...(genesis ? { genesis } : {}) });
+        say(`${r.added} new receipts signed with key ${keyId(signer.publicKey)}; ${r.count} in the chain, head ${r.head ?? 'none'}`);
+        say(NOT_ROOT_SIGNED);
         return 0;
       }
       case 'rotate': {
+        noTrust(args, 'rotate');
         const out = one(args, '--out');
         const key = one(args, '--key');
         const next = one(args, '--next');
-        const trust = values(args, '--trust').map(loadPublicKey);
+        const state = one(args, '--state');
         done(args);
         const nextKey = loadPublicKey(next);
-        const r = rotateFile({ out, signer: loadSigner(key), next: nextKey, trust });
-        console.log(`the chain in ${out} now continues under key ${keyId(nextKey)} (${r.count} receipts, head ${r.head ?? 'none'}); sign with its private key from now on`);
-        console.log(NOT_ROOT_SIGNED);
+        const r = rotateFile({ out, state, signer: loadSigner(key), next: nextKey });
+        say(`the chain in ${out} now continues under key ${keyId(nextKey)} (${r.count} receipts, head ${r.head ?? 'none'}); sign with its private key from now on`);
+        say(NOT_ROOT_SIGNED);
         return 0;
       }
       default:
@@ -109,11 +159,12 @@ export async function receiptsCommand(sub: string | undefined, rest: string[]): 
     }
   } catch (e) {
     if (e instanceof Usage) {
+      if (e.message) warn(`${BRAND.cli} receipts: ${e.message}`);
       console.error(USAGE);
       return 2;
     }
     if (e instanceof ReceiptError) {
-      console.error(`${BRAND.cli} receipts: ${e.message}`);
+      warn(`${BRAND.cli} receipts: ${e.message}`);
       return 1;
     }
     throw e;
@@ -131,7 +182,8 @@ function verify(args: string[]): number {
     paths = values(args, '--key');
     anchor = values(args, '--anchor');
   } catch (e) {
-    console.error(`${(e as Error).message}\n${USAGE}`);
+    warn((e as Error).message);
+    console.error(USAGE);
     return 2;
   }
   const [target, ...extra] = args;
@@ -142,49 +194,52 @@ function verify(args: string[]): number {
   // WHY (#918 round 2): an anchor given is always checked. An empty one (an unset variable in a script) or a
   // malformed one is a usage error, never a check quietly skipped.
   if (anchor.length && !RECEIPT_ID.test(anchor[0]!)) {
-    console.error(`${BRAND.cli} receipts verify: --anchor takes a receipt id (64 lowercase hex characters, as verify prints the head), not ${JSON.stringify(anchor[0]!.slice(0, 80))}`);
+    warn(`${BRAND.cli} receipts verify: --anchor takes a receipt id (64 lowercase hex characters, as verify prints the head), not ${JSON.stringify(anchor[0]!.slice(0, 80))}`);
     return 2;
   }
   let keys;
   try {
     keys = paths.map(loadPublicKey);
   } catch (e) {
-    console.error(`${BRAND.cli} receipts verify: ${(e as Error).message}`);
+    warn(`${BRAND.cli} receipts verify: ${(e as Error).message}`);
     return 2;
   }
-  if (!existsSync(target)) {
-    console.error(`FAILED: no receipts at ${target}`);
+  if (!taken(target)) {
+    warn(`FAILED: no receipts at ${target}`);
     return 1;
   }
   let envelopes: unknown[];
   try {
     envelopes = readReceiptFiles(target);
   } catch (e) {
-    console.error(`FAILED: ${(e as Error).message}`);
+    warn(`FAILED: ${(e as Error).message}`);
     return 1;
   }
   const r = verifyChain(envelopes, { keys, ...(anchor.length ? { anchor: anchor[0]! } : {}) });
   if (!r.ok) {
-    console.error(r.index < envelopes.length ? `FAILED: receipt ${r.index + 1} of ${envelopes.length}: ${r.problem}` : `FAILED: ${r.problem}`);
+    warn(r.index < envelopes.length ? `FAILED: receipt ${r.index + 1} of ${envelopes.length}: ${r.problem}` : `FAILED: ${r.problem}`);
     return 1;
   }
   const kinds = new Map<string, number>();
   for (const s of r.statements) kinds.set(s.kind, (kinds.get(s.kind) ?? 0) + 1);
-  console.log(`${r.count} receipts verified: ${[...kinds].map(([k, n]) => `${n} ${k}`).join(', ')}`);
-  console.log(`keys, in order: ${r.keys.join(' -> ')}`);
-  console.log(`head (keep it, and pass it as --anchor next time to catch a dropped tail): ${r.head}`);
+  say(`${r.count} receipts verified: ${[...kinds].map(([k, n]) => `${n} ${k}`).join(', ')}`);
+  say(`keys, in order: ${r.keys.join(' -> ')}`);
+  say(`head (keep it, and pass it as --anchor next time to catch a dropped tail): ${r.head}`);
   // VERIFIES vs ATTESTS (docs/design.md §5a): what the signer checked itself, and every other field only attested.
   const checks = r.statements.flatMap((s, i) => fieldChecks(s).map((c) => ({ ...c, receipt: i + 1 })));
   const flagged = checks.filter((c) => c.result === 'mismatch');
-  if (!checks.length) console.log("verified independently by the signer: none. Every field is attested: the coordinator's claim as its log recorded it, signed as such");
+  const unrecorded = checks.filter((c) => c.result === 'unrecorded');
+  if (!checks.length) say("verified independently by the signer: none. Every field is attested: the coordinator's claim as its log recorded it, signed as such");
   else {
     const fields = [...new Set(checks.map((c) => `${c.field} (${c.how})`))];
-    console.log(`verified independently by the signer: ${checks.length} field checks, of ${fields.join(', ')}; every other field is attested (the coordinator's claim as its log recorded it)`);
-    const unrecorded = checks.filter((c) => c.result === 'unrecorded').length;
-    if (unrecorded) console.log(`of those, ${unrecorded} the deciding engine didn't record (null): the signer's value is the only one, not a mismatch`);
+    say(`verified independently by the signer: ${checks.length} field checks, of ${fields.join(', ')}; every other field is attested (the coordinator's claim as its log recorded it)`);
+    if (unrecorded.length) say(`of those, ${unrecorded.length} the deciding engine didn't record (null): the signer's value is the only one, not a mismatch`);
   }
-  console.log("a verified list is the key holder's word: verify checks who signed, not which program did the checking");
-  for (const c of flagged) console.log(`FLAGGED: receipt ${c.receipt}: ${c.field}: the coordinator claimed ${JSON.stringify(c.claimed).slice(0, 100)}, the signer found ${JSON.stringify(c.found).slice(0, 100)} (${c.how})`);
-  console.log('A receipt proves what the log said and in what order, signed by the chain key; never that an attested field was true.');
+  say("a verified list is the key holder's word: verify checks who signed, not which program did the checking");
+  const value = (v: unknown) => JSON.stringify(v).slice(0, 100);
+  // WHY (#918 round 3 advisory): an unrecorded check is shown, not only counted, so the signer's value is seen.
+  for (const c of unrecorded) say(`UNRECORDED: receipt ${c.receipt}: ${c.field}: the deciding engine recorded null; the signer found ${value(c.found)} (${c.how})`);
+  for (const c of flagged) say(`FLAGGED: receipt ${c.receipt}: ${c.field}: the coordinator claimed ${value(c.claimed)}, the signer found ${value(c.found)} (${c.how})`);
+  say("A receipt proves only that the chain's key holder signed that the log said this, in this order; never that the log said it, or that an attested field was true.");
   return flagged.length ? EXIT_FLAGGED : 0;
 }
