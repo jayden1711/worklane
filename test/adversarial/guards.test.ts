@@ -31,7 +31,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, 
 import { homedir, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { guardrailSettings, agentSettingsPath, type Settings } from '../../src/agent-settings.js';
+import { agentSettingsPath, agentSettingsProblems, guardrailSettings, type Settings } from '../../src/agent-settings.js';
 import { BRAND } from '../../src/brand.js';
 import { GuardrailsConfig } from '../../src/config/schema.js';
 import { EventLog } from '../../src/events/log.js';
@@ -249,7 +249,12 @@ test(`adversarial guards / tool.no-read-secrets (${doc('- read secret files;')})
   const g = guardProject();
   const d = g.dir;
   const key = join(homedir(), '.ssh', 'id_ed25519');
+  // Links in the checkout: one to a secret file, one to the hidden directory.
+  symlinkSync(join(d, '.env'), join(d, 'env-link'));
+  symlinkSync(join(d, 'evals-secret'), join(d, 'peek'));
   const secrets: ToolAttack[] = [
+    { what: 'Read a link to .env', tool: 'Read', input: { file_path: join(d, 'env-link') } },
+    bash('cat a link to .env', 'cat env-link'),
     { what: 'Read .env by its absolute path', tool: 'Read', input: { file_path: join(d, '.env') } },
     { what: 'Read .env by a relative path', tool: 'Read', input: { file_path: '.env' } },
     { what: 'Read .env through ../ from a subfolder', tool: 'Read', input: { file_path: '../.env' }, cwd: join(d, 'src') },
@@ -294,6 +299,8 @@ test(`adversarial guards / tool.no-read-secrets (${doc('- read secret files;')})
     bash('head a hidden file through ./ and ../', 'head ./evals-secret/../evals-secret/score.py'),
     bash('bash -c on a hidden file', 'bash -c "cat evals-secret/score.py"'),
     bash('copy a hidden file out', `cp evals-secret/score.py ${join(g.tasks, 'copy')}`),
+    { what: 'Read a hidden file through a link to its directory', tool: 'Read', input: { file_path: join(d, 'peek', 'score.py') } },
+    bash('cat a hidden file through a link to its directory', 'cat peek/score.py'),
   ];
   assert.deepEqual(await letThrough(hidden, refusedBy(g, /secret-path/)), [], "reads of the task's hidden paths the guard let through");
 
@@ -412,22 +419,28 @@ test(`adversarial guards / tool.unreadable-task-file-denies (${doc("A task file 
   assert.notEqual((await g.call('Read', { file_path: join(g.dir, 'src', 'price.js') })).decision, 'deny', 'control: a readable task file lets an ordinary read through');
 });
 
-test(`adversarial guards / tool.hook-covers-tools (${doc('A hook runs before every agent tool call')}): every tool the guard's rules decide on reaches the hook`, { skip: !posix && 'POSIX stand-in claude' }, async () => {
-  // The tools src/guardrails/engine.ts decides on: its EDIT_TOOLS and its file-reading READ_TOOLS, Bash and WebFetch.
-  const tools = ['Bash', 'Edit', 'Write', 'MultiEdit', 'NotebookEdit', 'WebFetch', 'Read', 'Grep', 'Glob'];
-  const missed = (where: string, entries: { matcher?: string; hooks: { command: string }[] }[]) => {
-    const pre = entries.filter((e) => e.hooks.some((h) => h.command.includes(`${BRAND.envPrefix}_HOOK=1`)));
-    assert.equal(pre.length, 1, `${where}: one guard hook entry`);
-    const matcher = pre[0]!.matcher;
-    const reaches = (tool: string) => matcher === undefined || matcher === '*' || new RegExp(`^(?:${matcher})$`).test(tool);
-    return tools.filter((t) => !reaches(t)).map((t) => `${where}: ${t} (matcher ${matcher})`);
-  };
-  // What install writes, and what a run's --settings really carries (runSettings rebuilds the hooks).
+/** The tools src/guardrails/engine.ts decides on: its EDIT_TOOLS and its file-reading READ_TOOLS, Bash and WebFetch. */
+const guardedTools = ['Bash', 'Edit', 'Write', 'MultiEdit', 'NotebookEdit', 'WebFetch', 'Read', 'Grep', 'Glob'];
+/** The guarded tools a set of PreToolUse entries never sends to the guard (its one entry's matcher). */
+function toolsMissed(where: string, entries: { matcher?: string; hooks: { command: string }[] }[]): string[] {
+  const pre = entries.filter((e) => e.hooks.some((h) => h.command.includes(`${BRAND.envPrefix}_HOOK=1`)));
+  assert.equal(pre.length, 1, `${where}: one guard hook entry`);
+  const matcher = pre[0]!.matcher;
+  const reaches = (tool: string) => matcher === undefined || matcher === '*' || new RegExp(`^(?:${matcher})$`).test(tool);
+  return guardedTools.filter((t) => !reaches(t)).map((t) => `${where}: ${t} (matcher ${matcher})`);
+}
+
+test(`adversarial guards / tool.hook-covers-tools (${doc('A hook runs before every agent tool call')}): every tool the guard's rules decide on reaches the hook`, () => {
+  assert.deepEqual(toolsMissed('install', agentSettings(engineCli, [], [], []).hooks?.PreToolUse ?? []), [], 'tools the installed guard hook never sees');
+});
+
+test(`adversarial guards / tool.hook-covers-tools (${doc('A hook runs before every agent tool call')}): a run's --settings sends every tool the guard's rules decide on to the hook`, { skip: !posix && 'POSIX stand-in claude' }, async () => {
+  // What a run's --settings really carries: runSettings rebuilds the hooks from the instance's and the lane's.
   const cwd = mkdtempSync(join(tmpdir(), 'adv-cwd-'));
   const { r, s } = await agentRun({ guardrails: instanceHome(JSON.stringify(goodSettings()), cwd).guardrails, cwd });
   assert.ok(s.ran(), `${r.reason}: ${r.detail}`);
   const atRun = (s.log().settings as { hooks?: Record<string, { matcher?: string; hooks: { command: string }[] }[]> }).hooks?.PreToolUse ?? [];
-  assert.deepEqual([...missed('install', agentSettings(engineCli, [], [], []).hooks?.PreToolUse ?? []), ...missed("a run's --settings", atRun)], [], 'tools the guard hook never sees');
+  assert.deepEqual(toolsMissed("a run's --settings", atRun), [], "tools a run's guard hook never sees");
 });
 
 // ---- Agent runs: the settings check, the sandbox settings, the environment. ----
@@ -486,13 +499,15 @@ function instanceHome(content: string | null, cwd: string) {
 const goodSettings = () => agentSettings(engineCli, [], [], ['~/.ssh/**']);
 
 const settle = () => new Promise((r) => setTimeout(r, 1200));
+/** An empty home for one agent run: never this process's (on macOS test/isolate.ts leaves HOME where it is). */
+const fixtureHome = () => mkdtempSync(join(tmpdir(), 'adv-home-'));
 const request = (cwd: string, more: Partial<RunRequest> = {}): RunRequest => ({ role: 'worker', prompt: 'p', cwd, model: 'm', allowedTools: [], maxTurns: 1, maxBudgetUsd: 1, stallMs: 30_000, timeoutMs: 30_000, ...more });
 
 /** One agent run through the real runner with a stand-in claude; settled, so work a killed run would have done shows. */
 async function agentRun(o: { guardrails?: () => Settings; lanes?: ReturnType<typeof laneRuns>; base?: NodeJS.ProcessEnv; mode?: Mode; staleFrom?: string; cwd?: string; req?: Partial<RunRequest> }) {
   const s = standIn(o.mode, o.staleFrom);
   const cwd = o.cwd ?? mkdtempSync(join(tmpdir(), 'adv-cwd-'));
-  const r = await new CliRunner('cli', o.base ?? { PATH: process.env.PATH, HOME: homedir() }, s.bin, undefined, o.lanes, undefined, {}, o.guardrails).run(request(cwd, o.req));
+  const r = await new CliRunner('cli', o.base ?? { PATH: process.env.PATH, HOME: fixtureHome() }, s.bin, undefined, o.lanes, undefined, {}, o.guardrails).run(request(cwd, o.req));
   await settle();
   return { r, s, cwd };
 }
@@ -537,6 +552,9 @@ test(`adversarial guards / settings.required (${doc("An agent run starts only wi
   const cwd = mkdtempSync(join(tmpdir(), 'adv-cwd-'));
   const { r, s } = await agentRun({ guardrails: instanceHome(JSON.stringify(good), cwd).guardrails, cwd });
   assert.ok(r.reason === 'succeeded' && s.worked(), `control: complete agent settings start the run (${r.reason}: ${r.detail})`);
+  // And what the run really got: the --settings claude was given hold the same checks the agent settings file must
+  // pass (every guarded hook, failing closed, its engine present; disableAllHooks pinned off), not only the file.
+  assert.deepEqual(agentSettingsProblems(s.log().settings as Settings), [], "the run's --settings fall short of the agent settings checks");
 });
 
 test(`adversarial guards / settings.project-loosen-refused (${doc('A project `.claude/settings.json` that could loosen them refuses the run')}): a checkout's own settings that could loosen the run refuse it`, { skip: !posix && 'POSIX stand-in claude' }, async () => {
@@ -598,27 +616,29 @@ test(`adversarial guards / settings.applied-echo (${doc("Every run's `--settings
 });
 
 /** The lanes an instance with the sandbox on gives the runner (src/instance.ts laneRuns), for a checkout at `cwd`. */
-function sandboxLanes(cwd: string) {
+function sandboxLanes(cwd: string): { lanes: ReturnType<typeof laneRuns>; base: string } {
   const base = mkdtempSync(join(tmpdir(), 'adv-lanes-'));
-  // Every path the lane denies exists, as the kind it is on a real machine (src/sandbox.ts homeCredentialStores; the
-  // instance home; claude's login file), so the Read-rule cases can tell a file entry from a directory one. The home
-  // is this test process's own (test/isolate.ts).
-  for (const d of ['.ssh', '.aws', '.config/gh', '.gnupg', '.docker']) mkdirSync(join(homedir(), d), { recursive: true });
-  for (const f of ['.netrc', '.npmrc', '.pypirc', '.docker/config.json']) if (!existsSync(join(homedir(), f))) writeFileSync(join(homedir(), f), '');
+  // INVARIANT: the fixture writes only under `base`, never this process's home. On macOS test/isolate.ts doesn't move
+  // HOME, so a home-relative write would land in the person's real home. So the lane is worked out for an agent user
+  // whose home is a fixture of its own, and the runner gets the lane's settings only (no run-as, so no sudo).
+  // Every path the lane denies exists there, as the kind it is on a real machine (src/sandbox.ts homeCredentialStores;
+  // the instance home; claude's login file), so the Read-rule cases can tell a file entry from a directory one.
+  const home = join(base, 'agent-home');
+  for (const d of ['.ssh', '.aws', '.config/gh', '.gnupg', '.docker', '.claude']) mkdirSync(join(home, d), { recursive: true });
+  for (const f of ['.netrc', '.npmrc', '.pypirc', '.docker/config.json', '.claude/.credentials.json']) writeFileSync(join(home, f), '');
   mkdirSync(join(base, 'inst-home'));
-  mkdirSync(join(base, 'agent-claude'));
-  writeFileSync(join(base, 'agent-claude', '.credentials.json'), '{}');
   const inst = {
     name: 'adversarial',
-    runAs: null,
+    runAs: { user: 'adversarial-agent', home, hide: [] },
     evalAs: null,
     home: join(base, 'inst-home'),
     stateDir: join(base, 'state'),
     repo: { path: cwd, repo: 'example/adversarial' },
     policy: PolicyFile.parse({ version: 1, budget: { daily_usd: 20 }, agents: { max_workers: 2 }, land_mode: 'pr', sandbox: true }),
-    credentials: { claude: { config_dir: join(base, 'agent-claude') } },
+    credentials: {},
   } as unknown as Instance;
-  return laneRuns(inst);
+  const lanes = Object.fromEntries(Object.entries(laneRuns(inst)).map(([name, lane]) => [name, lane.settings ? { settings: lane.settings } : {}]));
+  return { lanes, base };
 }
 
 interface SandboxSettings {
@@ -627,16 +647,20 @@ interface SandboxSettings {
   hooks?: Record<string, { hooks: { type: string; command: string; onFailure?: string }[] }[]>;
 }
 /** The --settings of a sandboxed run as claude got them: a plain run, and one with an "allow once" host. */
-let sandboxRuns: Promise<{ what: string; settings: SandboxSettings }[]> | null = null;
+let sandboxRuns: Promise<{ what: string; settings: SandboxSettings; home: string }[]> | null = null;
 const sandboxed = () =>
   (sandboxRuns ??= (async () => {
-    const out: { what: string; settings: SandboxSettings }[] = [];
+    const out: { what: string; settings: SandboxSettings; home: string }[] = [];
     const variants: [string, Partial<RunRequest>][] = [['a run', {}], ['a run with an allow-once host', { allowOnce: ['example.org'] }]];
     for (const [what, req] of variants) {
       const cwd = mkdtempSync(join(tmpdir(), 'adv-cwd-'));
-      const { r, s } = await agentRun({ guardrails: goodSettings, lanes: sandboxLanes(cwd), cwd, req });
+      const { lanes, base } = sandboxLanes(cwd);
+      const { r, s } = await agentRun({ guardrails: goodSettings, lanes, cwd, req });
       assert.ok(r.reason === 'succeeded' && s.ran(), `${what}: ${r.reason}: ${r.detail}`);
-      out.push({ what, settings: s.log().settings as SandboxSettings });
+      const settings = s.log().settings as SandboxSettings;
+      // The lane was worked out from the fixture's home, not this process's (where the fixture would have had to write).
+      assert.ok((settings.sandbox?.filesystem?.denyRead ?? []).includes(join(base, 'agent-home', '.ssh')), `${what}: the lane's denials come from the fixture home`);
+      out.push({ what, settings, home: join(base, 'agent-home') });
     }
     return out;
   })());
@@ -664,30 +688,41 @@ const sandboxHides = (entries: string[], target: string) =>
     return isGlob(p) ? globToRegExp(unrooted(p)).test(unrooted(target)) : target === p || target.startsWith(`${p}/`);
   });
 /** The paths a run's Read rules name (Claude Code's `Read(//<absolute path>)` form), each as an absolute path or glob. */
-const readRulePaths = (deny: string[] | undefined) => (deny ?? []).flatMap((x) => /^Read\((\/\/.*)\)$/.exec(x)?.[1]?.slice(1) ?? []);
+const readRulePaths = (deny: string[] | undefined, home?: string) =>
+  (deny ?? []).flatMap((x) => {
+    // Claude Code's absolute form `Read(//<path>)`, and the home form `Read(~/<path>)` when the agent's home is known.
+    // A rule in another form (relative to a settings file) is not read here, so a fix written that way would leave a
+    // known hole open in this file until the form is added: stale, never a lost protection.
+    const abs = /^Read\((\/\/.*)\)$/.exec(x)?.[1]?.slice(1);
+    if (abs) return [abs];
+    const rel = home ? /^Read\(~\/(.*)\)$/.exec(x)?.[1] : undefined;
+    return rel ? [join(home!, rel)] : [];
+  });
 /** Whether a Read rule denies `target`, read as the gitignore-style pattern it is: `p/**` is what's under p, never p itself. */
 const readRuleDenies = (rules: string[], target: string) => rules.some((r) => (isGlob(r) ? globToRegExp(unrooted(r)).test(unrooted(target)) : target === r));
 /** Each denyRead entry, as a file or a directory on this machine (the fixture made every one), or `missing`. */
 const entryKinds = (entries: string[]) => entries.filter((e) => !isGlob(e)).map((e) => ({ entry: e.replace(/\/\*\*$/, ''), kind: !existsSync(e.replace(/\/\*\*$/, '')) ? 'missing' : statSync(e.replace(/\/\*\*$/, '')).isDirectory() ? 'dir' : 'file' }));
 
 test(`adversarial guards / sandbox.read-tool-same-deny (${doc('The Read tool is denied the same paths as the commands')}): everything under each directory the sandbox hides from commands is denied to the Read tool`, { skip: !posix && 'POSIX stand-in claude' }, async () => {
-  for (const { what, settings } of await sandboxed()) {
+  for (const { what, settings, home } of await sandboxed()) {
     const kinds = entryKinds(settings.sandbox?.filesystem?.denyRead ?? []);
     assert.deepEqual(kinds.filter((k) => k.kind === 'missing').map((k) => k.entry), [], `${what}: the fixture made every denied path, so each is a file or a directory`);
     const dirs = kinds.filter((k) => k.kind === 'dir');
     assert.ok(dirs.length > 0, `${what}: the sandbox hides a directory`);
-    const rules = readRulePaths(settings.permissions?.deny);
-    assert.deepEqual(dirs.filter((k) => !readRuleDenies(rules, `${k.entry}/a-file`)).map((k) => k.entry), [], `${what}: directories hidden from commands whose files the Read tool may read`);
+    const rules = readRulePaths(settings.permissions?.deny, home);
+    // A file right under each directory, and one nested deeper: the sandbox hides both.
+    const unread = dirs.flatMap((k) => [`${k.entry}/a-file`, `${k.entry}/sub/deeper/a-file`].filter((t) => !readRuleDenies(rules, t)));
+    assert.deepEqual(unread, [], `${what}: files under directories hidden from commands that the Read tool may read`);
   }
 });
 
-knownHole(`adversarial guards / sandbox.read-tool-same-deny (${doc('The Read tool is denied the same paths as the commands')}): Read rules for file entries`, "the owner's private issue", { skip: !posix && 'POSIX stand-in claude' }, async () => {
+knownHole(`adversarial guards / sandbox.read-tool-same-deny (${doc('The Read tool is denied the same paths as the commands')}): Read rules for file entries`, '#959', { skip: !posix && 'POSIX stand-in claude' }, async () => {
   const attacks: string[] = [];
   const open: string[] = [];
-  for (const { what, settings } of await sandboxed()) {
+  for (const { what, settings, home } of await sandboxed()) {
     const files = entryKinds(settings.sandbox?.filesystem?.denyRead ?? []).filter((k) => k.kind === 'file');
     assert.ok(files.length > 0, `${what}: the sandbox hides a file`);
-    const rules = readRulePaths(settings.permissions?.deny);
+    const rules = readRulePaths(settings.permissions?.deny, home);
     files.forEach((f, i) => {
       const name = `${what}: file entry ${i + 1} of ${files.length}`;
       attacks.push(name);
@@ -704,7 +739,7 @@ knownHole(`adversarial guards / tool.no-read-secrets (${doc('- read secret files
   writeFileSync(join(dir, 'evals-secret', 'score.py'), 'EXPECTED = 42\n');
   const taskFile = join(mkdtempSync(join(tmpdir(), 'adv-tasks-')), 'exp.json');
   writeFileSync(taskFile, JSON.stringify({ id: 'exp', done_when: [{ manual: 'x' }], frozen: [], hidden: ['evals-secret/**'] }));
-  const { r, s } = await agentRun({ guardrails: goodSettings, lanes: sandboxLanes(dir), cwd: dir, req: { taskFile } });
+  const { r, s } = await agentRun({ guardrails: goodSettings, lanes: sandboxLanes(dir).lanes, cwd: dir, req: { taskFile } });
   assert.ok(s.ran(), `${r.reason}: ${r.detail}`);
   const settings = s.log().settings as SandboxSettings;
   const denyRead = settings.sandbox?.filesystem?.denyRead ?? [];
@@ -727,7 +762,7 @@ test(`adversarial guards / tool.unreadable-task-file-denies (${doc("A task file 
 
 test(`adversarial guards / pushgate.no-hatch-in-env (${doc('No agent starts with the hatch in its environment')}): the hatch reaches no agent run, from the coordinator's environment or a project's`, { skip: !posix && 'POSIX stand-in claude' }, async () => {
   const cwd = mkdtempSync(join(tmpdir(), 'adv-cwd-'));
-  const base = { PATH: process.env.PATH, HOME: homedir(), [HATCH]: '1', [HATCH.toLowerCase()]: '1', Push_Gate_Bootstrap: '1' };
+  const base = { PATH: process.env.PATH, HOME: fixtureHome(), [HATCH]: '1', [HATCH.toLowerCase()]: '1', Push_Gate_Bootstrap: '1' };
   const { r, s } = await agentRun({ guardrails: instanceHome(JSON.stringify(goodSettings()), cwd).guardrails, cwd, base, req: { env: { [HATCH]: '1' } } });
   assert.ok(r.reason === 'succeeded' && s.ran(), `control: the run started (${r.reason}: ${r.detail})`);
   const log = s.log();
@@ -814,6 +849,26 @@ test(`adversarial guards / push.size-limit (${doc('refuses a change over the pus
     { what: 'a refused path under a -diff attribute', make: (r) => (r.put('.gitattributes', '*.pem -diff\n'), r.put('secrets/key.pem', 'stand-in\n'), r.commit()) },
     { what: 'a refused path renamed away', make: (r) => (r.put('secrets/key.pem', 'stand-in\n'), r.commit(), run(r.dir, 'mv', 'secrets/key.pem', 'key.pem'), r.commit()) },
     { what: 'a CI workflow', make: (r) => (r.put('.github/workflows/x.yml', 'on: push\n'), r.commit()) },
+    // Closed by PR #928 (#724), merged: a name git would quote.
+    { what: 'a refused path with a non-ASCII name', make: (r) => (r.put('secrets/kéy.pem', 'stand-in\n'), r.commit()) },
+    // Closed by PR #928 too, merged: a replace ref of the pushed commit hides nothing.
+    { what: 'a refused path behind a replace ref', make: (r) => (r.put('secrets/key.pem', 'stand-in\n'), run(r.dir, 'replace', r.commit(), run(r.dir, 'commit-tree', `${r.base}^{tree}`, '-p', r.base, '-m', 'benign'))) },
+    { what: 'a big file behind a replace ref', make: (r) => (r.put('big.txt', bigLine()), run(r.dir, 'replace', r.commit(), run(r.dir, 'commit-tree', `${r.base}^{tree}`, '-p', r.base, '-m', 'benign'))) },
+    // A merge commit that itself adds a refused path, both of its parents clean.
+    {
+      what: 'a refused path added by a merge commit itself',
+      make: (r) => {
+        run(r.dir, 'checkout', '-q', '-b', 'side');
+        r.put('side.txt', 'side\n');
+        r.commit('side');
+        run(r.dir, 'checkout', '-q', 'main');
+        r.put('main.txt', 'main\n');
+        r.commit('main');
+        run(r.dir, 'merge', '-q', '--no-ff', '--no-commit', 'side');
+        r.put('secrets/key.pem', 'stand-in\n');
+        r.commit('merge side');
+      },
+    },
   ];
   const left = await letThrough(changes, (c) => {
     const r = pushRepo();
@@ -829,29 +884,6 @@ test(`adversarial guards / push.size-limit (${doc('refuses a change over the pus
   assert.deepEqual(checkedPush({ cwd: r.dir, remote: 'origin', base: r.base, head, ref: 'refs/heads/task-1', limits, guard: guardOf([]) }), { ok: true }, 'control: a change at the limits is pushed');
 });
 
-knownHole(`adversarial guards / push.size-limit (${doc('refuses a change over the push limits')}): a replace ref of the pushed commit hides nothing from checkedPush`, 'PR #927 (#807), or PR #928 (#724) if it lands first (it closes this too)', {}, () => {
-  const attacks = ['a refused path', 'a file over the size limit'];
-  const left: string[] = [];
-  for (const [what, file, text] of [[attacks[0]!, 'secrets/key.pem', 'stand-in\n'], [attacks[1]!, 'big.txt', bigLine()]] as const) {
-    const r = pushRepo();
-    const benign = run(r.dir, 'commit-tree', `${r.base}^{tree}`, '-p', r.base, '-m', 'benign');
-    r.put(file, text);
-    const head = r.commit();
-    run(r.dir, 'replace', head, benign);
-    const out = checkedPush({ cwd: r.dir, remote: 'origin', base: r.base, head, ref: 'refs/heads/task-1', limits, guard: guardOf([]) });
-    if (out.ok || r.at('refs/heads/task-1') !== null) left.push(what);
-  }
-  return { attacks, open: left };
-});
-
-knownHole(`adversarial guards / push.size-limit (${doc('refuses a change over the push limits')}): a refused path with a non-ASCII name is refused`, 'PR #928 (#724)', {}, () => {
-  const r = pushRepo();
-  r.put('secrets/kéy.pem', 'stand-in\n');
-  const head = r.commit();
-  const out = checkedPush({ cwd: r.dir, remote: 'origin', base: r.base, head, ref: 'refs/heads/task-1', limits, guard: guardOf([]) });
-  const what = 'a refused path with a non-ASCII name';
-  return { attacks: [what], open: out.ok || r.at('refs/heads/task-1') !== null ? [what] : [] };
-});
 
 test(`adversarial guards / push.prepush-hook (${doc('Each checkout also gets a pre-push hook that refuses the default branch')}): git itself refuses a push to the default branch from the checkout, however it is spelled`, { skip: !posix && 'POSIX hook' }, async () => {
   // The configured default branch isn't `main`, so a hook that only knows `main` fails here.
@@ -923,6 +955,7 @@ test(`adversarial guards / pushgate.secret-scan (${doc('A push gate scans what i
     { what: 'a token in the first of two commits', make: (r) => (r.put('a.md', `token: ${ghToken()}\n`), r.commit(), r.put('b.md', 'fine\n'), r.commit()) },
     { what: 'a project term in a file', make: (r) => (r.put('notes.md', `deployed by ${TERM}\n`), r.commit()) },
     { what: 'a project term in the commit message', make: (r) => (r.put('ok.md', 'fine\n'), r.commit(`fix the ${TERM} deploy`)) },
+    { what: "a project term in the message of a pushed commit that isn't the tip", make: (r) => (r.put('ok.md', 'fine\n'), r.commit(`fix the ${TERM} deploy`), r.put('next.md', 'fine\n'), r.commit('next')) },
     { what: 'a project term in a file under a -diff attribute, deleted again', make: (r) => (r.put('.gitattributes', '*.txt -diff\n'), r.put('n.txt', `by ${TERM}\n`), r.commit(), unlinkSync(join(r.dir, 'n.txt')), r.commit()) },
   ];
   assert.deepEqual(
@@ -1020,7 +1053,8 @@ test(`adversarial guards / commit.scan-before (${doc('Agent commits are scanned 
   const commits = [
     { what: 'git commit', command: 'git commit -m x', stage: true },
     { what: 'git commit -q', command: 'git commit -qm x', stage: true },
-    { what: 'git -C', command: `git -C ${g.dir} commit -m x`, stage: true },
+    { what: 'git -C naming the checkout', command: `git -C ${g.dir} commit -m x`, stage: true },
+    { what: 'git -C naming a folder in the checkout', command: 'git -C src commit -m x', stage: true },
     { what: 'git -c', command: 'git -c core.quotepath=off commit -m x', stage: true },
     { what: 'commit --no-verify', command: 'git commit --no-verify -m x', stage: true },
     { what: 'in a nested shell', command: 'bash -c "git commit -m x"', stage: true },
@@ -1103,6 +1137,10 @@ function corpus(): { what: string; text: string; secret: string }[] {
     { what: 'a password in a URL', text: `connect postgres://app:${password}@db.example.com/app`, secret: password },
     one('a 32-byte hex key', `0x${hex(64)}`),
     { what: 'a value under a credential key', text: JSON.stringify({ id: 3, api_key: jsonValue }), secret: jsonValue },
+    ...(['password', 'token', 'clientSecret'] as const).map((key) => {
+      const v = alnum(24);
+      return { what: `a value under "${key}"`, text: JSON.stringify({ id: 3, [key]: v }), secret: v };
+    }),
   ];
 }
 
@@ -1145,7 +1183,12 @@ function stored(text: string): { where: string; raw: string }[] {
 }
 
 test(`adversarial guards / redact.before-store (${doc('Secrets in event payloads and transcripts are redacted before they are stored')}): no credential shape the redactor knows reaches the event log or a run record`, () => {
-  const left = corpus().flatMap((c) => stored(c.text).flatMap((s) => (s.raw.includes(c.secret) || s.raw === '(no record written)' ? [`${c.what} in ${s.where}`] : [])));
+  // Two values of each shape in one string: every match is redacted, not only the first.
+  const second = corpus();
+  const left = corpus().flatMap((c, i) => {
+    const d = second[i]!;
+    return stored(`${c.text} then ${d.text}`).flatMap((s) => [c.secret, d.secret].flatMap((secret, n) => (s.raw.includes(secret) || s.raw === '(no record written)' ? [`${c.what} (value ${n + 1} of 2) in ${s.where}`] : [])));
+  });
   assert.deepEqual(left, [], 'secrets stored as they were');
   assert.ok(stored('an ordinary line').every((s) => s.raw.includes('an ordinary line')), 'control: ordinary text is stored as it is');
 });
