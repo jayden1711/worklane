@@ -1,3 +1,4 @@
+// lint-test
 // Every write into the shared slot directory goes through one helper, writeSlotFile (src/slot-file.ts, #661).
 // Removing an instance (#555, PR #601) takes group write off its files there, so any of them can be 0444 to everyone
 // else. Replacing a file needs only the directory's group write; an in-place write (writeFileSync to the final name,
@@ -65,8 +66,10 @@ import { PID_LIMIT, repoRoot } from './helpers.js';
 // The lint
 
 /** Names that carry a slot-dir path (or a path in it): a module that uses one is a slot module. */
+// check-table: never-shrink
 const SLOT_NAMES = new Set(['slotsDir', 'SYSTEM_SLOTS', 'AGENT_SLOTS_DIR', 'incidentsDir', 'claimsDir', 'machineDir', 'superfanSlots', 'updateDrainPath', 'slotsConfigPath']);
 /** Calls that open a file for write. */
+// check-table: never-shrink
 const WRITE_CALLS = new Set(['writeFileSync', 'writeFile', 'appendFileSync', 'appendFile', 'createWriteStream', 'openSync', 'open', 'copyFileSync', 'copyFile', 'cpSync', 'cp', 'truncateSync', 'truncate']);
 /** The one module that writes slot-dir files: a new temp file of its own (flag wx), renamed or linked into place. */
 const HELPER = 'src/slot-file.ts';
@@ -82,6 +85,7 @@ const HELPER = 'src/slot-file.ts';
 type Review = { kind: 'helper' | 'writer' | 'passes'; why: string } | { kind: 'mixed'; why: string; elsewhere: Record<string, readonly [count: number, what: string]> };
 
 /** Every src/ module that names a slot-dir path, hands one on, or is handed one. Add a module only after reading every write in it. */
+// check-table: never-grow
 const REVIEWED: Record<string, Review> = {
   [HELPER]: { kind: 'helper', why: 'writeSlotFile: a new temp file (flag wx), renamed or linked into place' },
   'src/locks.ts': { kind: 'writer', why: 'tryLock: the lock, and a takeover claim, through writeSlotFile (linked into place: replace false)' },
@@ -260,9 +264,11 @@ function helperWrite(call: ts.CallExpression, name: string, own: (a: ts.Expressi
 }
 
 /** Calls that set a file's mode by its name: they follow a symlink. */
+// check-table: never-shrink
 const CHMOD_BY_NAME = new Set(['chmodSync', 'chmod', 'lchmodSync', 'lchmod']);
 
 /** Calls that write, truncate or change the mode of the file behind a descriptor (their first argument). */
+// check-table: never-shrink
 const FD_WRITES = new Set(['writeSync', 'write', 'writev', 'writevSync', 'ftruncate', 'ftruncateSync', 'fchmod', 'fchmodSync']);
 
 /** Every declaration of `name` in a function (or the module), its parameters included, outside nested functions. */

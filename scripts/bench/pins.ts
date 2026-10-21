@@ -84,6 +84,7 @@ export class DatasetPin {
 }
 
 /** The selection rules select.ts implements. A rule's algorithm never changes; a new one gets a new name. */
+// check-table: never-grow
 export const SELECTION_RULES = ['sha256-rank-v1'] as const;
 export type SelectionRule = (typeof SELECTION_RULES)[number];
 /** The largest seed: 32 bits. */

@@ -1,3 +1,4 @@
+// lint-test
 // One git runner for every git call the engine makes (#807). refs/replace/* and $GIT_DIR/info/grafts are in the
 // repository, which every worktree of it shares, so an agent can write either; every git the engine runs there then
 // reads the agent's stand-in. A `git replace` of the pushed commit hid a refused file and a big one from the push
@@ -190,6 +191,7 @@ function gitStarts(text: string): number {
   return patterns.reduce((n, re) => n + (text.match(re)?.length ?? 0), 0);
 }
 
+// check-table: never-grow
 const RUNNERS = new Set(['src/os/git.ts', 'scripts/lib/git.cjs']);
 
 /**
@@ -205,6 +207,7 @@ const BY_NAME = (fn: string, call: string) => [new RegExp(`${fn}\\(${call}`)];
  * is a call through a runner that takes any command and gives git the settings by its name (commandSpawnSync), a
  * file that runs on its own and holds the settings itself, or text that names git without starting it.
  */
+// check-table: never-grow
 const OUTSIDE_THE_RUNNER: Record<string, { n: number; why: string; must?: RegExp[] }> = {
   // Through a runner that takes any command: its real one spawns through commandSpawnSync (src/os/git.ts).
   'src/init.ts': { n: 6, why: "`c.io.run('git', ...)` and `io.run('git', ...)`: systemIo().run, here, spawns through commandSpawnSync; and `manual.includes('git')`, a hint's text", must: BY_NAME('commandSpawnSync', 'cmd, args, ') },

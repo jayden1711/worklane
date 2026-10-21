@@ -1,3 +1,4 @@
+// lint-test
 // #846: every child the engine starts gets only its own environment. The protection is by design: src/os/child-process.ts
 // is the engine's only way to start a process, and whatever a caller passes as `env` (a plain object, a spread, nothing
 // at all), the child gets childEnvOf() of it: a null-prototype copy of the own variables. These tests pollute
@@ -289,10 +290,13 @@ test('childEnvOf: a fresh null-prototype copy of the own variables, in order; an
 // ---- The lint (a backstop beside the module): only src/os/child-process.ts reaches node:child_process for a value. ----
 
 const MODULE = 'src/os/child-process.ts';
+// check-table: never-shrink
 const SPECIFIERS = new Set(['child_process', 'node:child_process', 'cluster', 'node:cluster']);
 /** worker_threads: a worker's own side (parentPort, workerData) is fine; starting one (Worker) goes through MODULE. */
+// check-table: never-shrink
 const WORKER_SPECIFIERS = new Set(['worker_threads', 'node:worker_threads']);
 /** Node's internal bindings that start a process without child_process. */
+// check-table: never-shrink
 const BINDINGS = new Set(['spawn_sync', 'process_wrap']);
 type Finding = { file: string; line: number; what: string };
 

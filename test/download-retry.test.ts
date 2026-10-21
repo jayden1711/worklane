@@ -1,3 +1,4 @@
+// lint-test
 // WHY: main's bootstrap job failed on one HTTP 504 from GitHub's release host while fetching gitleaks (2026-10-15). A
 // download that installs something tries a passing 5xx again; the checksum after it is unchanged and still decides.
 import { test } from 'node:test';

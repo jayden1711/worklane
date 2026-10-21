@@ -7,9 +7,13 @@
 //   - a test file (TEST_PATHS): a removed line (a changed line is a removed one and an added one) with an assertion or
 //     a test on it (CHECK_LINE); a deleted test file;
 //   - a test's expected output (a snapshot, a fixture, any test file that isn't code): any removed line;
-//   - a guard or lint file (GUARD_FILES, LINT_TESTS): any removed line;
-//   - a registered table (CHECK_TABLES), its lines from its declaration to its close: a line gone from a rule list, a
-//     bad-fixture list or a guard's list (never-shrink), or new in an allowlist or exception list (never-grow);
+//   - a guard or lint file (GUARD_FILES, a lint test by its mark): any removed line;
+//   - a registered table (its mark, or CHECK_TABLES), its lines from its declaration to its close: a line gone from a
+//     rule list, a bad-fixture list or a guard's list (never-shrink), or new in an allowlist or exception list
+//     (never-grow); its name sets a floor its mark can only add to (ALLOW_NAMED, RULE_NAMED);
+//   - a registration mark the default branch has, gone or changed while what it registers is still there (#869);
+//   - in a registered table's file, an added line that could hide the table from the reader (an escaped name, a
+//     declaration with its name on the next line);
 //   - an allowlist file (NEVER_GROW_FILES): any added line;
 //   - any file but docs: an added line with a skip, only or suppression marker on it (MARKERS, owner, 2026-10-19).
 // Other pure additions pass: an added assertion, test, rule or guard line never waits.
@@ -19,7 +23,7 @@
 // isn't text, a table it can't find or a git failure, the change waits. The engine's own source paths (ENGINE_ONLY)
 // stand aside in a managed app's repo, as the locks do there (src/review.ts lockedCategories).
 import { BRAND } from './brand.js';
-import { changedNames, exactMoves, filesAt } from './coordinator/change-files.js';
+import { changedNames, exactMoves, filesAt, filesWithText, mergeBaseOf } from './coordinator/change-files.js';
 import { globToRegExp } from './guardrails/glob.js';
 import { escapedPath, isNonUtf8Path, shownPath } from './path-text.js';
 import { engineSourceGlob, LOCKED_CATEGORIES, lockedCategories, type ChangeFile, type LockScope } from './review.js';
@@ -35,105 +39,81 @@ export interface CheckTable {
 }
 
 /**
- * Every check table the hold reads. A lint test's allowlist (OUTSIDE_THE_HELPER, ALLOWED, REVIEWED, ...) is here
- * however its file is locked: a tests-only change that adds an entry would otherwise be L0. A backstop test in
- * test/merge-policy.test.ts fails on a check-shaped table in test/ or scripts/ that is neither here nor in its
- * NOT_A_CHECK, and on an entry here whose table the hold can't find.
+ * A check registers itself where it is declared (#869), so adding one never needs an edit here:
+ *   - a table: the line right before its `const`/`let`/`var` declaration is exactly TABLE_MARK and its kind
+ *     (`never-grow` for an allowlist, an exception list or good fixtures; `never-shrink` for rules, bad fixtures or a
+ *     guard's list);
+ *   - a lint test (one whose rules live in its code, so any line taken out of it waits, as from a guard file): a line
+ *     that is exactly LINT_MARK, near its top.
+ * Marks are read only in JS and TS files (MARKABLE), from the text before the change and from the default branch's
+ * current tip (weakeningOf; a PR claimed before a mark landed is held by it too). A mark a change adds holds from the next change on; one it removes, changes or detaches from its table
+ * waits for the owner. A line that looks like a mark but isn't one registers nothing (the backstop test fails on it).
  */
-export const CHECK_TABLES: readonly CheckTable[] = [
-  // The lints' allowlists and good fixtures: adding to them is a loosening.
-  { path: 'test/change-files-renames.test.ts', table: 'OUTSIDE_THE_HELPER', kind: 'never-grow' },
-  { path: 'test/no-clock-helpers.test.ts', table: 'ALLOWED', kind: 'never-grow' },
-  { path: 'test/no-wall-clock-durations.test.ts', table: 'ALLOWED', kind: 'never-grow' },
-  { path: 'test/instance-name.test.ts', table: 'ALLOWED', kind: 'never-grow' },
-  { path: 'test/five-part-issues.test.ts', table: 'GOOD', kind: 'never-grow' },
-  { path: 'test/plugin-inspect.test.ts', table: 'GOOD', kind: 'never-grow' },
-  { path: 'scripts/setup/app-permissions.mjs', table: 'ALLOWED_UP_TO', kind: 'never-grow' },
-  { path: 'test/slot-path.test.ts', table: 'SLOT_SOURCES', kind: 'never-grow' },
-  { path: 'test/slot-dir-writes.test.ts', table: 'REVIEWED', kind: 'never-grow' },
-  { path: 'test/review.test.ts', table: 'LOCK_SCOPE_GOOD', kind: 'never-grow' },
-  { path: 'test/merge-policy.test.ts', table: 'NOT_YET_FILES', kind: 'never-grow' },
-  { path: 'test/merge-policy.test.ts', table: 'NOT_A_CHECK', kind: 'never-grow' },
-  { path: 'test/merge-policy.test.ts', table: 'NOT_A_LINT', kind: 'never-grow' },
-  { path: 'test/review-packet.test.ts', table: 'PACKET_ALLOWED', kind: 'never-grow' },
-  { path: 'test/raw-check-reads.ts', table: 'RAW_READS_ALLOWED', kind: 'never-grow' },
-  { path: 'test/raw-check-reads.ts', table: 'JUDGED_CASTS_ALLOWED', kind: 'never-grow' },
-  { path: 'test/raw-check-reads.ts', table: 'MAKERS_ALLOWED', kind: 'never-grow' },
-  { path: 'test/owner-terminal-rerun.test.ts', table: 'FIRST_TIME_ONLY', kind: 'never-grow' },
-  // The git runner scan's exceptions (#807): a file let start git outside the runner, and the runners it skips.
-  { path: 'test/git-runner.test.ts', table: 'OUTSIDE_THE_RUNNER', kind: 'never-grow' },
-  { path: 'test/git-runner.test.ts', table: 'RUNNERS', kind: 'never-grow' },
-  { path: 'scripts/lib/denylist.mjs', table: 'SKIP', kind: 'never-grow' },
-  { path: 'src/guardrails/engine.ts', table: 'AGENT_EDITABLE', kind: 'never-grow' },
-  { path: 'scripts/bench/pins.ts', table: 'SELECTION_RULES', kind: 'never-grow' },
-  // The lints' rules and bad fixtures, and the guards' lists: taking one out is a loosening.
-  { path: 'test/change-files-renames.test.ts', table: 'READER_WORDS', kind: 'never-shrink' },
-  { path: 'test/review.test.ts', table: 'LOCK_SCOPE_BAD', kind: 'never-shrink' },
-  { path: 'test/review.test.ts', table: 'GUARD_MODULES', kind: 'never-shrink' },
-  { path: 'test/review.test.ts', table: 'GUARD_ENTRIES', kind: 'never-shrink' },
-  { path: 'test/review.test.ts', table: 'GUARD_TREE', kind: 'never-shrink' },
-  { path: 'test/slot-dir-writes.test.ts', table: 'SLOT_NAMES', kind: 'never-shrink' },
-  { path: 'test/slot-dir-writes.test.ts', table: 'WRITE_CALLS', kind: 'never-shrink' },
-  { path: 'test/slot-dir-writes.test.ts', table: 'CHMOD_BY_NAME', kind: 'never-shrink' },
-  { path: 'test/slot-dir-writes.test.ts', table: 'FD_WRITES', kind: 'never-shrink' },
-  { path: 'test/slot-path.test.ts', table: 'MAKER_ONLY', kind: 'never-shrink' },
-  { path: 'test/child-process.test.ts', table: 'SPECIFIERS', kind: 'never-shrink' },
-  { path: 'test/child-process.test.ts', table: 'BINDINGS', kind: 'never-shrink' },
-  { path: 'test/child-process.test.ts', table: 'WORKER_SPECIFIERS', kind: 'never-shrink' },
-  { path: 'test/add-project.test.ts', table: 'NAMES_BAD', kind: 'never-shrink' },
-  { path: 'test/add-project.test.ts', table: 'REPOS_BAD', kind: 'never-shrink' },
-  { path: 'test/instance-name.test.ts', table: 'BAD_SHAPE', kind: 'never-shrink' },
-  { path: 'scripts/lib/changelog.mjs', table: 'GUARDRAIL_PATHS', kind: 'never-shrink' },
-  { path: 'test/machine-path-writes.test.ts', table: 'GUARD', kind: 'never-shrink' },
-  // The golden runner settings (#856): the deny list and hooks a run's --settings must carry.
-  { path: 'test/runner-golden.test.ts', table: 'GUARD', kind: 'never-shrink' },
-  // The guards' own tables (their files are guard files too; the table names what was taken out).
-  { path: 'src/review.ts', table: 'SELF_MODIFICATION_PARTS', kind: 'never-shrink' },
-  { path: 'src/review.ts', table: 'LOCKED_CATEGORIES', kind: 'never-shrink' },
-  { path: 'src/review.ts', table: 'ODD_PATH_CATEGORIES', kind: 'never-shrink' },
-  { path: 'src/review.ts', table: 'ALWAYS_L3', kind: 'never-shrink' },
-  { path: 'src/merge-policy.ts', table: 'FLOOR', kind: 'never-shrink' },
-  { path: 'src/hook-imports.ts', table: 'HOOK_IMPORTS', kind: 'never-shrink' },
-  { path: 'src/delegation.ts', table: 'NEVER_LOOSEN', kind: 'never-shrink' },
-  { path: 'src/guardrails/engine.ts', table: 'BUILTIN_PROTECTED', kind: 'never-shrink' },
-  { path: `scripts/machine/${BRAND.cli}-machine.cjs`, table: 'POLICY_ONLY', kind: 'never-shrink' },
-  { path: 'scripts/push-gate-hook.mjs', table: 'GATE_RULES', kind: 'never-shrink' },
-  { path: 'scripts/push-gate-hook.mjs', table: 'GATE_CODE', kind: 'never-shrink' },
-  { path: 'scripts/push-gate.mjs', table: 'ATTRIBUTION', kind: 'never-shrink' },
-  // The commands that run the checks: a script dropped or changed (a lint taken out of `npm test`) waits.
-  { path: 'package.json', table: 'scripts', kind: 'never-shrink' },
-];
+export const TABLE_MARK = '// check-table: ';
+export const LINT_MARK = '// lint-test';
+/** The files a mark is read in. */
+export const MARKABLE = /\.[cm]?[jt]sx?$/;
+/** A table name that says it allows or exempts something: never-grow, whatever its mark says. */
+export const ALLOW_NAMED = /ALLOW|EXEMPT|EXCEPT|SKIP|OUTSIDE|IGNORE|KNOWN|REVIEWED|PERMIT|BASELINE|LEGACY|WAIVE|NOT_YET|GOOD/;
+/**
+ * A table name that says it holds rules or a guard's list: never-shrink, whatever its mark says. A name of both kinds
+ * is held both ways. ONLY is neither (an allowlist of first-time-only files and a guard's maker-only list both use it).
+ */
+export const RULE_NAMED = /BAD|RULES|WORDS|PATTERNS|DENY|BANNED|FORBIDDEN|NEVER|GUARD/;
+/** A line that tries to be a mark (any comment opener, any spacing): it must be one exactly. */
+const MARKISH = /^(?:\/\/|\/\*|\*)\s*(?:check-table|lint-test)/;
+/** A declaration a table mark registers: its name, a plain identifier (as tableLines reads it). */
+const DECLARES = /^(?:export\s+)?(?:const|let|var)\s+([A-Za-z_]\w*)(?![\w$])/;
+
+/** What a file's marks register, and the lines that look like marks but register nothing (for the backstop). */
+export interface Registrations {
+  tables: { table: string; kind: TableKind }[];
+  lint: boolean;
+  problems: string[];
+}
+
+/** The marks in a file's text: the tables they register (with their kinds), whether it is a lint test, and odd marks. */
+export function registrationsOf(text: string): Registrations {
+  const out: Registrations = { tables: [], lint: false, problems: [] };
+  const lines = text.split('\n');
+  for (let k = 0; k < lines.length; k++) {
+    const t = lines[k]!.trim();
+    if (t === LINT_MARK) {
+      out.lint = true;
+      continue;
+    }
+    const kind = t.startsWith(TABLE_MARK) ? t.slice(TABLE_MARK.length) : null;
+    if (kind === 'never-grow' || kind === 'never-shrink') {
+      const name = DECLARES.exec(lines[k + 1]?.trimStart() ?? '')?.[1];
+      if (name) out.tables.push({ table: name, kind });
+      else out.problems.push(`line ${k + 1}: a table mark with no table declared on the next line`);
+    } else if (MARKISH.test(t)) out.problems.push(`line ${k + 1}: not a mark, so it registers nothing: ${t.slice(0, 80)}`);
+  }
+  return out;
+}
+
+/** The kinds a table is held by: its mark's, and its name's floor. A mark only adds to the floor. */
+export function heldKinds(table: string, kind: TableKind): Set<TableKind> {
+  const held = new Set<TableKind>([kind]);
+  if (ALLOW_NAMED.test(table)) held.add('never-grow');
+  if (RULE_NAMED.test(table)) held.add('never-shrink');
+  return held;
+}
 
 /**
- * Lint tests whose rules live in their code, not (only) in a registered table: any line removed from one holds, as
- * from a guard file. A backstop test in test/merge-policy.test.ts fails on a test that walks the sources and is in
- * neither this list nor its NOT_A_LINT.
+ * The check tables that can't carry a mark (not JS or TS): `package.json`'s scripts, the commands that run the checks
+ * (a script dropped or changed, a lint taken out of `npm test`, waits). Every other table registers itself by its mark.
+ * A backstop test in test/merge-policy.test.ts fails on a check-shaped table in test/ or scripts/ that is neither
+ * registered nor in its NOT_A_CHECK, on a registered table the hold can't find, and on an allowlist's name marked
+ * never-shrink (a rule list's name may carry either mark: its floor holds it on shrinking whatever the mark says).
  */
-export const LINT_TESTS: readonly string[] = [
-  'test/pipefail.test.ts',
-  'test/brand.test.ts',
-  'test/testrun-gpu.test.ts',
-  'test/boundaries.test.ts',
-  'test/web-key-in-url.test.ts',
-  'test/child-process.test.ts',
-  'test/self-hosted-guard.test.ts',
-  'test/package-deps.test.ts',
-  'test/no-clock-helpers.test.ts',
-  'test/no-wall-clock-durations.test.ts',
-  'test/change-files-renames.test.ts',
-  'test/slot-dir-writes.test.ts',
-  'test/slot-path.test.ts',
-  'test/claude-credential-guard.test.ts',
-  'test/download-retry.test.ts',
-  'test/owner-terminal-removed.test.ts',
-  'test/policy-edit.test.ts',
-  'test/testrun-measure.test.ts',
-  'test/update-helpers.test.ts',
-  'test/web-buttons.test.ts',
-  'test/superfan.test.ts',
-  'test/claude-accounts-retired.test.ts',
-  'test/git-runner.test.ts',
-];
+export const CHECK_TABLES: readonly CheckTable[] = [{ path: 'package.json', table: 'scripts', kind: 'never-shrink' }];
+
+/**
+ * Lint tests that can't carry a mark (not JS or TS). A backstop test in test/merge-policy.test.ts fails on a test that
+ * walks the sources and is neither a lint test nor in its NOT_A_LINT.
+ */
+export const LINT_TESTS: readonly string[] = [];
 
 /**
  * Files whose every removed line waits: the guards and lints themselves, and their configs. ENGINE_ONLY ones are the
@@ -339,11 +319,30 @@ export interface WeakeningInput {
   deleted: ReadonlySet<string>;
   /** Deleted paths whose exact blob the change adds at a new path, old path to new (a pure rename). */
   moved?: ReadonlyMap<string, string>;
-  /** A file's text before the change (null: it wasn't there), for the files with a registered table only. */
+  /** A file's text before the change (null: it wasn't there), for the files with a registered table or a mark only. */
   before: (path: string) => string | null;
-  /** A file's text after the change (null: it isn't there), for the files with a registered table only. */
+  /** A file's text after the change (null: it isn't there), for the files with a registered table or a mark only. */
   after: (path: string) => string | null;
   scope: LockScope | undefined;
+  /**
+   * The changed files whose text before the change holds a mark's text (weakeningOf finds them with git grep): their
+   * marks are read. Absent: every changed JS or TS file's text before the change is read for marks.
+   */
+  marked?: ReadonlySet<string>;
+  /**
+   * A file's text at the default branch's current tip (null: it isn't there), for the files whose text there holds a
+   * mark's text (tipMarked). A registration on the default branch holds whatever the change's base is: a PR claimed
+   * before a mark landed is held by it too (#886's round-4 review). Absent: only the base's marks are read (a pure test).
+   */
+  tip?: (path: string) => string | null;
+  /** The changed files whose text at the tip holds a mark's text. Absent with `tip`: every changed JS or TS file. */
+  tipMarked?: ReadonlySet<string>;
+  /**
+   * A file's text where the change meets the tip (git merge-base): a tip mark the head lacks was taken out by the
+   * change only when this text has it; otherwise the head is older than the mark and the merge keeps it. Absent: a tip
+   * mark the head lacks always waits.
+   */
+  meet?: (path: string) => string | null;
 }
 
 /** Each kind of weakening, in the words a reason uses, in the order reasons are given. */
@@ -353,10 +352,12 @@ const KINDS = {
   'test-assertion': 'removes or changes a line with an assertion or a test on it',
   'test-lines': "removes or changes a line of a test's expected output or fixture",
   'table-gone': "removes or renames a check's or guard's table",
+  'registration-gone': 'removes or changes the mark that registers a check, a check-table or lint-test line',
   'table-shrunk': "removes or changes an entry in a check's rules or a guard's list",
   'table-grown': 'adds or changes an entry in an allowlist, exception or good-fixture list',
   'allow-file': "adds a line to an allowlist file or a package manager's settings file",
   'table-used': "changes a check's or guard's table outside its own list",
+  'table-hidden': "adds a line that could hide a check's table from the line reader, an escaped name, a name on the next line or a global binding",
   'guard-lines': 'removes or changes a line of a guard or lint',
   marker: 'adds a line with a skip, only or lint or type-check suppression mark',
 } as const;
@@ -413,6 +414,352 @@ export function withoutComments(l: string): string {
   return out;
 }
 
+/** Reserved words that can only come before an expression: a `/` after one starts a regex literal. */
+const EXPRESSION_KEYWORD = new Set(['return', 'typeof', 'instanceof', 'in', 'new', 'delete', 'void', 'throw', 'case', 'do', 'else', 'default', 'extends']);
+/**
+ * Other reserved words, and the contextual ones that can also be names (`of`, `await`, `yield`, TS's `as`): a `/` after
+ * one of them is one it can't place (unsure). Any other word (a name, a number, `this`, `null`, `true`) ends an operand.
+ */
+const UNPLACED_WORD = new Set(['break', 'catch', 'class', 'const', 'continue', 'debugger', 'enum', 'export', 'finally', 'for', 'function', 'if', 'import', 'let', 'static', 'switch', 'try', 'var', 'while', 'with', 'of', 'yield', 'await', 'async', 'as', 'satisfies', 'keyof', 'infer', 'is', 'asserts', 'from', 'get', 'set', 'type', 'interface', 'declare', 'namespace', 'module', 'abstract', 'readonly', 'public', 'private', 'protected', 'implements', 'package', 'override', 'accessor', 'unique', 'out']);
+/** Line terminators besides `\n`: each ends a `//` comment, and a quoted string or regex literal can't hold one unescaped. */
+const OTHER_LINE_END = new Set([String.fromCharCode(13), String.fromCharCode(0x2028), String.fromCharCode(0x2029)]);
+/** Keywords whose `( ... )` is a condition, so a `/` after its `)` starts a regex literal (`if (x) /re/.test(s)`). */
+const CONDITION_WORD = new Set(['if', 'while', 'for', 'with']);
+const isWordChar = (c: string) => (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c === '_' || c === '$';
+
+/**
+ * Each line's code, read over the whole file at once (#886's round-5 review): the state (a string, a template and its
+ * `${...}`, a regex literal, a comment) carries from line to line, so a line that closes a template, or a regex
+ * literal that holds a quote, is read as what it is. Comments and the text of strings, templates and regex literals are
+ * left out (the quotes and slashes are kept).
+ *
+ * It aims to decide a regex literal against a division only where that is certain (#886's rounds 6 and 7), and each
+ * round's review has found a shape where it wasn't: what it reads is hardened by its tests, not proven. A `/` starts a
+ * regex literal where an operand must come next (after `(`, `,`, `=`, `=>`, `:`, `;`, `[`, `{`, `?`, `&`, `|`, `*`,
+ * `%`, `^`, `<`, a binary `+` or `-`, a unary `+`, `-`, `!` or `~` where an operand was expected, the `)` of `if`,
+ * `while`, `for`, `for await` or `with`, or a reserved word that only comes before an expression), and is a division
+ * right after an operand ends on the same line (a name, a number, a string, a regex literal, `]`). A word after a
+ * member `.` or `#` is a name, never a keyword; one after a spread's `...` is read as it stands. Everywhere else, it
+ * can't place it: after `}`, any other `)` or one with no `(`, a `>` that may close type arguments, `++` or `--`, TS's
+ * non-null `x!`, a contextual word, `.`, or an operand on an earlier line (a semicolon may be inserted). It also
+ * can't read a character outside printable ASCII, or whitespace other than a space, tab, CR or LF, outside a string
+ * or comment. There, and where a string or regex runs off its line, it stops reading and every later character, of
+ * every later line, and the whole line it gave up on, is the raw text (comments and strings included). From that line
+ * on (`unsureFrom`) the checks that read it pair and skip nothing (#886's rounds 8 and 9). A hand-written reader of JS
+ * can still be fooled by shapes not yet found: #941 replaces it with data-only JSON tables. One pass, no regex.
+ */
+export function codeLinesOf(text: string): string[] {
+  return codeOf(text).lines;
+}
+
+/** codeLinesOf's lines, and the first line it gave up on (-1: it read the whole file). */
+export function codeOf(text: string): { lines: string[]; unsureFrom: number } {
+  const out: string[] = [];
+  let line = '';
+  let mode: 'code' | 'line-comment' | 'block-comment' | "'" | '"' | 'template' | 'regex' | 'class' = 'code';
+  let unsure = false;
+  let unsureFrom = -1;
+  // It gives up on the line being read (or, for a string that ran off its line, the one just ended).
+  const giveUp = (at = out.length) => {
+    unsure = true;
+    if (unsureFrom === -1) unsureFrom = at;
+  };
+  // The brace depth at each open template expression's `${`, and the code's brace depth.
+  const holes: number[] = [];
+  let depth = 0;
+  // Each open `(`: whether it is a condition's; and whether the last `)` closed one (false: another, or none open).
+  const parens: boolean[] = [];
+  let lastParenCondition = false;
+  // The last significant code character, the word ending at it (if it ends one), and the word before that one (`for`
+  // in `for await`). What a `/` there would be: `expected` (an operand comes next: a regex literal), `ended` (an
+  // operand just ended: a division, on the same line) or `unknown`; and whether a line ended since (a semicolon may be
+  // inserted).
+  let last = '';
+  let word = '';
+  let wordBefore = '';
+  let wordAfterDot = false;
+  let lastDotSpread = false;
+  // Whether the `..` being read follows a number with no `.` of its own (`1..x`).
+  let numberDots = false;
+  // (Asserted, so the checks below read what sig set, not the start value.)
+  let state = 'expected' as 'expected' | 'ended' | 'unknown';
+  let lineSince = false;
+  const sig = (c: string, w: string, s: typeof state) => {
+    last = c;
+    word = w;
+    state = s;
+    lineSince = false;
+  };
+  const newline = () => {
+    out.push(line);
+    line = '';
+  };
+  for (let k = 0; k < text.length; k++) {
+    const c = text[k]!;
+    if (unsure) {
+      if (c === '\n') newline();
+      else line += c;
+      continue;
+    }
+    if (c === '\n') {
+      newline();
+      if (mode === 'code' || mode === 'line-comment' || mode === 'block-comment') lineSince = true;
+      if (mode === 'line-comment') mode = 'code';
+      // A quoted string or a regex literal never runs past its line (an escaped newline is skipped below).
+      else if (mode === "'" || mode === '"' || mode === 'regex' || mode === 'class') giveUp(out.length - 1);
+      continue;
+    }
+    // The other line terminators end a `//` comment too, mid-line by this file's lines; one unescaped in a quoted
+    // string or a regex literal is one it can't place.
+    if (OTHER_LINE_END.has(c)) {
+      if (mode === 'code' || mode === 'line-comment' || mode === 'block-comment') lineSince = true;
+      if (mode === 'line-comment') mode = 'code';
+      else if (mode === 'regex' || mode === 'class' || ((mode === "'" || mode === '"') && c === String.fromCharCode(13)) || (mode === 'code' && c !== String.fromCharCode(13))) {
+        giveUp();
+        line += c;
+      }
+      continue;
+    }
+    // A backslash in a string, template or regex escapes the next character (a newline included).
+    if (c === '\\' && mode !== 'code' && mode !== 'line-comment' && mode !== 'block-comment') {
+      const n = text[k + 1];
+      if (n === undefined) continue;
+      k++;
+      if (n === '\n') newline();
+      continue;
+    }
+    if (mode === 'line-comment') continue;
+    if (mode === 'block-comment') {
+      if (c === '*' && text[k + 1] === '/') {
+        k++;
+        mode = 'code';
+      }
+      continue;
+    }
+    if (mode === "'" || mode === '"') {
+      if (c === mode) {
+        line += c;
+        mode = 'code';
+        sig('"', '', 'ended');
+      }
+      continue;
+    }
+    if (mode === 'template') {
+      if (c === '`') {
+        line += c;
+        mode = 'code';
+        sig('"', '', 'ended');
+      } else if (c === '$' && text[k + 1] === '{') {
+        k++;
+        line += '${';
+        holes.push(depth);
+        mode = 'code';
+        sig('{', '', 'expected');
+      }
+      continue;
+    }
+    // A regex literal is only ever entered where it is certain, so its text is left out like a string's.
+    if (mode === 'regex' || mode === 'class') {
+      if (mode === 'class' && c === ']') mode = 'regex';
+      else if (mode === 'regex' && c === '[') mode = 'class';
+      else if (mode === 'regex' && c === '/') {
+        line += c;
+        mode = 'code';
+        sig('"', '', 'ended');
+      }
+      continue;
+    }
+    // Code. A hashbang line is a comment; `<!--` and `-->` are comments in a script and code in a module: unsure.
+    if (k === 0 && c === '#' && text[1] === '!') {
+      mode = 'line-comment';
+      continue;
+    }
+    // A character it doesn't read (#886's round 7): one outside printable ASCII (a name with a letter outside ASCII, a zero-width
+    // joiner, a no-break space, a byte order mark), or whitespace other than a space or tab (a form feed, a vertical
+    // tab). It can't tell what such a name or space makes of the words around it: unsure.
+    const code = c.charCodeAt(0);
+    if (code > 0x7e || (code < 0x20 && c !== '\t')) {
+      giveUp();
+      line += c;
+      continue;
+    }
+    if (text.startsWith('<!--', k) || text.startsWith('-->', k)) {
+      giveUp();
+      line += c;
+      continue;
+    }
+    if (c === '/' && text[k + 1] === '/') {
+      mode = 'line-comment';
+      k++;
+      continue;
+    }
+    if (c === '/' && text[k + 1] === '*') {
+      mode = 'block-comment';
+      k++;
+      continue;
+    }
+    if (c === '/') {
+      // A regex literal where an operand must come next; a division right after one ends on the same line. Anything
+      // else it can't place: unsure.
+      const regex = state === 'expected' ? true : state === 'ended' && !lineSince ? false : null;
+      line += c;
+      if (regex === null) giveUp();
+      else if (regex) mode = 'regex';
+      else sig('/', '', 'expected');
+      continue;
+    }
+    line += c;
+    if (c === "'" || c === '"') mode = c;
+    else if (c === '`') mode = 'template';
+    else if (c === '{') {
+      depth++;
+      sig(c, '', 'expected');
+    } else if (c === '}') {
+      if (holes.length && holes[holes.length - 1] === depth) {
+        holes.pop();
+        mode = 'template';
+        line = line.slice(0, -1);
+      } else {
+        depth--;
+        // The end of a block or of an object literal: which, it can't tell.
+        sig(c, '', 'unknown');
+      }
+    } else if (c === '(') {
+      parens.push(isWordChar(last) && !wordAfterDot && (CONDITION_WORD.has(word) || (word === 'await' && wordBefore === 'for')));
+      sig(c, '', 'expected');
+    } else if (c === ')') {
+      // A condition's `)`: a statement comes next. Any other, or one with no `(`: it can't place what follows.
+      lastParenCondition = parens.pop() ?? false;
+      sig(c, '', lastParenCondition ? 'expected' : 'unknown');
+    } else if (c === ']') sig(c, '', 'ended');
+    else if (isWordChar(c)) {
+      const extends_ = k > 0 && isWordChar(text[k - 1]!) && isWordChar(last);
+      // A word after a member `.` is a property (`x.in / 2`, `o.if(4)`), and one after `#` a private name
+      // (`this.#if(4)`): never a keyword. One after a spread's `...` is read as it stands (`[...typeof /re/]`).
+      if (!extends_) {
+        wordAfterDot = (last === '.' && !lastDotSpread) || last === '#';
+        wordBefore = isWordChar(last) ? word : '';
+      }
+      const w = extends_ ? word + c : c;
+      sig(c, w, wordAfterDot ? 'ended' : EXPRESSION_KEYWORD.has(w) ? 'expected' : UNPLACED_WORD.has(w) ? 'unknown' : 'ended');
+    } else if (c === '+' || c === '-') {
+      // `++` or `--`: prefix or postfix, it can't tell. Otherwise binary after an operand, and unary where an operand
+      // was expected: either way an operand comes next. After anything else (`}`, another `)`): it can't tell.
+      sig(c, '', text[k - 1] === c ? 'unknown' : state === 'ended' || state === 'expected' ? 'expected' : 'unknown');
+    } else if (c === '!' || c === '~') {
+      // A unary operator where an operand was expected: one still is. After an operand (TS's non-null `x!`), or after
+      // anything it can't place: it can't tell.
+      sig(c, '', state === 'expected' ? 'expected' : 'unknown');
+    } else if (c === '.') {
+      // A `.` is a spread's only as part of exactly `...`: what follows a spread is read as it stands. A lone `.` is a
+      // member's (or a number's own). In `1..x` the first is the number's own and the second a member's (#886's round
+      // 8). Any other run of dots: it can't place it. A `/` right after any `.` can't be placed either.
+      let s = k;
+      while (text[s - 1] === '.') s--;
+      let e = k;
+      while (text[e + 1] === '.') e++;
+      const run = e - s + 1;
+      if (run === 2 && k === s) numberDots = isWordChar(last) && !wordAfterDot && word !== '' && [...word].every((d) => d >= '0' && d <= '9') && text[k - 1] === last;
+      if (run === 3) lastDotSpread = true;
+      else if (run === 1 || (run === 2 && numberDots)) lastDotSpread = false;
+      else {
+        giveUp();
+        line += text.slice(k + 1, e + 1);
+        k = e;
+        continue;
+      }
+      sig(c, '', 'unknown');
+    } else if (c === '>') {
+      // `=>`: a body comes next. Any other `>` may close type arguments (`N<string> / 2`).
+      sig(c, '', text[k - 1] === '=' ? 'expected' : 'unknown');
+    } else if ('(,=:;[{?&|*%^<'.includes(c)) sig(c, '', 'expected');
+    else if (c !== ' ' && c !== '\t') sig(c, '', 'unknown');
+  }
+  out.push(line);
+  // The line it gave up on is read raw too, whole (a string or regex that ran off it may have hidden part of it as
+  // text, #886's round 9).
+  if (unsureFrom !== -1) out[unsureFrom] = text.split('\n')[unsureFrom] ?? out[unsureFrom]!;
+  return { lines: out, unsureFrom };
+}
+
+/** A name for the global object (`globalThis`, `global`, `self`, `window`), each place it stands in a line's code. */
+const GLOBAL_NAME = /(?<![\w$])(?:globalThis|global|self|window)(?![\w$])/g;
+/** A declaration of `self` or `window` as a local, in a line's code. */
+const LOCAL_SELF = /(?<![\w$])(?:const|let|var|function|class) (self|window)(?![\w$])/g;
+/** A word that declares the name after it. */
+const DECLARES_NEXT = /(?<![\w$])(?:const|let|var|function|class)$/;
+
+/**
+ * Whether a line's code uses a name for the global object (#886's round 5). Not as a property (`x.self`), a key
+ * (`{ self: 1 }`), or the name a declaration declares; and not `self` or `window` where the file declares them as
+ * locals (`localNames`: Node has neither global, and a file's own `const self` is common). `global` and `globalThis`
+ * always count.
+ */
+function usesGlobalName(code: string, localNames: ReadonlySet<string>, previous: string, unsure: boolean): boolean {
+  for (const m of code.matchAll(GLOBAL_NAME)) {
+    // On a line the reader gave up on, the text is raw (comments and strings in it): no skip applies (#886's round 8).
+    if (unsure) return true;
+    const name = m[0];
+    const before = code.slice(0, m.index).trimEnd();
+    const after = code.slice(m.index + name.length).trimStart();
+    if (before.endsWith('.') && !before.endsWith('...')) continue;
+    // A key after `{` or `,`; first on its line, only when the code line before ends in one (a ternary's middle
+    // operand `? \n globalThis : 0` is no key, #886's round 7).
+    const keyPlace = before === '' ? previous.endsWith('{') || previous.endsWith(',') : before.endsWith('{') || before.endsWith(',');
+    if (keyPlace && after.startsWith(':')) continue;
+    if (DECLARES_NEXT.test(before)) continue;
+    if ((name === 'self' || name === 'window') && localNames.has(name)) continue;
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Whether a line's code has a computed key built from strings (`{ ['CHE' + 'CKS']: x }`): a `[...]` holding a quote,
+ * where a key stands (after `{` or `,`, or first on its line), then `:`. A ternary's `? ['a'] : []` is no key.
+ */
+function computedStringKey(code: string, unsure: boolean): boolean {
+  // A raw line: nothing paired (a `]` in a string or comment can't end the brackets early).
+  if (unsure) return rawStringKey(code);
+  for (let k = code.indexOf('['); k !== -1; k = code.indexOf('[', k + 1)) {
+    const end = code.indexOf(']', k + 1);
+    if (end === -1) return false;
+    const inner = code.slice(k + 1, end);
+    if (!(inner.includes("'") || inner.includes('"') || inner.includes('`'))) continue;
+    const before = code.slice(0, k).trimEnd();
+    const after = code.slice(end + 1).trimStart();
+    // A bracket assignment of a name built from strings (`module.exports['CHE' + 'CKS'] = x`, #886's round 9), on
+    // whatever object: it can bind the live table where the reader doesn't look.
+    if ((inner.includes('+') || inner.includes('${')) && after.startsWith('=') && !after.startsWith('==') && !after.startsWith('=>')) return true;
+    if (!(before === '' || before.endsWith('{') || before.endsWith(','))) continue;
+    if (after.startsWith(':')) return true;
+  }
+  return false;
+}
+
+/** Whether a line's code ends with `const`, `let` or `var` and no name after it: the name is on another line. */
+function namelessDeclaration(code: string): boolean {
+  const t = code.trimEnd();
+  return ['const', 'let', 'var'].some((w) => t.endsWith(w) && !/[\w$.]/.test(t.charAt(t.length - w.length - 1)));
+}
+
+/**
+ * On a raw line (one the reader gave up on, or any line of a .jsx or .tsx file), what the line checks look for, with
+ * nothing paired or skipped (#886's round 9): a `[` with a quote after it and then a `:` or `=` anywhere later (a key
+ * or a bracket assignment of a string-built name, whatever a `]` in a string or comment does); a nameless declaration
+ * with the line's comments taken out too.
+ */
+function rawStringKey(line: string): boolean {
+  const open = line.indexOf('[');
+  if (open === -1) return false;
+  const quote = Math.min(...["'", '"', '`'].map((q) => line.indexOf(q, open + 1)).filter((n) => n !== -1));
+  if (!Number.isFinite(quote)) return false;
+  return line.indexOf(':', quote + 1) !== -1 || line.indexOf('=', quote + 1) !== -1;
+}
+
+/** A `with (` statement in a line's code: it binds an object's keys as names, so a table's name could read another list. */
+const WITH_STATEMENT = /(?<![\w$.])with\s*\(/;
+
 /**
  * A registered table's lines (as entries, blanks left out), or null when the text doesn't declare it. It is declared
  * by a line that starts `const NAME`, `export const NAME`, `let NAME` or `"NAME":`. It is that line alone when the line
@@ -422,6 +769,12 @@ export function withoutComments(l: string): string {
  * change waits.
  */
 export function tableLines(text: string, table: string): string[] | null {
+  const span = tableSpan(text, table);
+  return span === null ? null : text.split('\n').slice(span[0], span[1] + 1).filter((x) => x.trim()).map(entry);
+}
+
+/** Where tableLines reads a table: its first and last line numbers (0-based, inclusive), or null. Throws as tableLines does. */
+export function tableSpan(text: string, table: string): [number, number] | null {
   const lines = text.split('\n');
   // `const`, `let` or `var` with any spacing, or a JSON key; table names are plain identifiers.
   const head = new RegExp(`^(?:export\\s+)?(?:(?:const|let|var)\\s+${table}|"${table}"\\s*:)(?![\\w$])`);
@@ -443,13 +796,13 @@ export function tableLines(text: string, table: string): string[] | null {
     // A one-line table: nothing of it may follow on a deeper line (`= new Set()` with `.add(...)` below).
     const next = lines.slice(start + 1).find((l) => l.trim());
     if (next !== undefined && indent(next) > at) throw new Error(`${table}: its line closes, but the next line is deeper`);
-    return [entry(first)];
+    return [start, start];
   }
   for (let k = start + 1; k < lines.length; k++) {
     const l = lines[k]!;
     if (!l.trim() || indent(l) > at) continue;
     if (!']})'.includes(l.trim().charAt(0))) throw new Error(`${table}: line ${k + 1} is at its indent but doesn't close it`);
-    return lines.slice(start, k + 1).filter((x) => x.trim()).map(entry);
+    return [start, k];
   }
   throw new Error(`${table} never closes`);
 }
@@ -472,9 +825,66 @@ export function weakeningReasons(i: WeakeningInput): string[] {
   };
   // Tests are tests in every repo: TEST_PATHS isn't the engine's own source.
   const isTest = matcher(TEST_PATHS, undefined);
-  const isGuard = matcher([...GUARD_FILES, ...LINT_TESTS], i.scope);
+  const guardFile = matcher([...GUARD_FILES, ...LINT_TESTS], i.scope);
   const isAllow = matcher(NEVER_GROW_FILES, i.scope);
-  const tables = CHECK_TABLES.filter((t) => holds(t.path, i.scope));
+  // The marks in each changed file that can hold one: at the change's base and at the default branch's current tip
+  // (#869; a mark on the default branch holds whatever the base), and the same file's marks after the change.
+  // Engine-only paths stand aside in a managed app's repo, as the central list's did. A file it can't read for them waits.
+  const none = (): Registrations => ({ tables: [], lint: false, problems: [] });
+  const marks = new Map<string, { was: Registrations; tip: Registrations; now: Registrations; deleted: boolean; inBase: boolean }>();
+  for (const f of i.files) {
+    const p = f.path;
+    if (!MARKABLE.test(p) || !holds(p, i.scope) || marks.has(p)) continue;
+    const fromBase = !i.marked || i.marked.has(p);
+    const fromTip = i.tip !== undefined && (!i.tipMarked || i.tipMarked.has(p));
+    if (!fromBase && !fromTip) continue;
+    try {
+      const b = fromBase ? i.before(p) : null;
+      const t = fromTip ? i.tip!(p) : null;
+      if (b === null && t === null) continue;
+      const a = i.after(p);
+      marks.set(p, { was: b === null ? none() : registrationsOf(b), tip: t === null ? none() : registrationsOf(t), now: a === null ? none() : registrationsOf(a), deleted: a === null, inBase: i.before(p) !== null });
+    } catch (e) {
+      hit('unreadable', p, String((e as Error).message ?? e));
+    }
+  }
+  /** Whether a tip mark the head lacks was taken out by the change: the text where the change meets the tip has it. */
+  const tookOut = (p: string, has: (r: Registrations) => boolean): boolean => {
+    if (!i.meet) return true;
+    try {
+      const m = i.meet(p);
+      return m !== null && has(registrationsOf(m));
+    } catch {
+      return true;
+    }
+  };
+  // A lint test by its mark (at the base or the tip) is a guard file: any line taken out of it waits.
+  const lintTests = new Set([...marks].filter(([, m]) => m.was.lint || m.tip.lint).map(([p]) => p));
+  // Its mark gone or changed while the file stays: the next change could take its rules out unseen.
+  for (const p of lintTests) {
+    const m = marks.get(p)!;
+    if (m.now.lint || m.deleted) continue;
+    if (m.was.lint || tookOut(p, (r) => r.lint)) hit('registration-gone', p, LINT_MARK);
+  }
+  // A lint test registered on the default branch after the base, in a file the base doesn't have: the tip's lines
+  // against the head's (the head merged it in), each one gone waits.
+  for (const p of lintTests) {
+    const m = marks.get(p)!;
+    if (m.inBase || !m.tip.lint || m.deleted) continue;
+    try {
+      const [t, a] = [i.tip!(p), i.after(p)];
+      if (t !== null && a !== null) for (const l of missing(t.split('\n'), a.split('\n'))) if (l.trim()) hit('guard-lines', p, l.trim());
+    } catch (e) {
+      hit('unreadable', p, String((e as Error).message ?? e));
+    }
+  }
+  const isGuard = (p: string) => guardFile(p) || lintTests.has(p);
+  const tables: (CheckTable & { marked?: boolean; atTip?: boolean })[] = [
+    ...CHECK_TABLES.filter((t) => holds(t.path, i.scope)),
+    ...[...marks].flatMap(([path, m]) => m.was.tables.map((t) => ({ path, ...t, marked: true }))),
+    // The tip's marks the base hasn't (a table marked, or a marked table made, on the default branch after the base).
+    ...[...marks].flatMap(([path, m]) => m.tip.tables.filter((t) => !m.was.tables.some((x) => x.table === t.table && x.kind === t.kind)).map((t) => ({ path, ...t, marked: true, atTip: true }))),
+  ];
   // A test, guard, lint, allowlist or table file: its removed lines count, so its diff must be whole and text.
   const strict = (p: string) => isTest(p) || isGuard(p) || isAllow(p) || tables.some((t) => t.path === p);
   // A pure rename of a test (#783's deliverable): the same blob at a new path that the same runner still runs. Both
@@ -548,32 +958,106 @@ export function weakeningReasons(i: WeakeningInput): string[] {
       hit('unreadable', t.path, String((e as Error).message ?? e));
       continue;
     }
+    const sameMark = (r: Registrations) => r.tables.some((x) => x.table === t.table && x.kind === t.kind);
+    // A table registered on the default branch after the base, in a file whose base hasn't it: the tip's table against
+    // the head's. Not in the head and never merged into it: only the default branch has it, and the merge keeps it.
+    let fromTip = false;
+    if (was === null && t.atTip) {
+      if (now === null) {
+        if (tookOut(t.path, sameMark)) hit('table-gone', t.path, t.table);
+        continue;
+      }
+      try {
+        const tt = i.tip!(t.path);
+        was = tt === null ? null : tableLines(tt, t.table);
+      } catch (e) {
+        hit('unreadable', t.path, String((e as Error).message ?? e));
+        continue;
+      }
+      fromTip = true;
+    }
     // A table only after the change is new (a new lint and its list): nothing was loosened. The backstop test keeps
-    // every registered table on the default branch.
-    if (was === null) continue;
+    // every registered table on the default branch. A mark stands right before its table's declaration, so its table
+    // is always there before the change: one that isn't makes the change wait.
+    if (was === null) {
+      if (t.marked) hit('unreadable', t.path, `${t.table}: its mark stands before no table it can read`);
+      continue;
+    }
     if (now === null) {
       hit('table-gone', t.path, t.table);
       continue;
     }
+    // Still there, no longer registered as it was (its mark removed, its kind changed, a line put between them): the
+    // next change could loosen it unseen, so this one waits. A tip mark the head lacks waits only when the change took
+    // it out (it is where the change meets the tip); a head older than the mark keeps it through the merge.
+    const nowMarks = marks.get(t.path)?.now;
+    if (t.marked && !(nowMarks && sameMark(nowMarks)) && (!t.atTip || tookOut(t.path, sameMark))) hit('registration-gone', t.path, `${TABLE_MARK}${t.kind} (${t.table})`);
     // The line that declared it, removed or changed: what reads as the table after may not be it (a decoy). It waits.
     const declaring = was[0]!;
-    if ((i.files.find((f) => f.path === t.path)?.removedLines ?? []).some((l) => entry(l) === declaring)) {
+    if (fromTip ? now[0] !== declaring : (i.files.find((f) => f.path === t.path)?.removedLines ?? []).some((l) => entry(l) === declaring)) {
       hit('unreadable', t.path, `${t.table}: the line that declares it is removed or changed`);
       continue;
     }
-    if (t.kind === 'never-grow') for (const l of missing(now, was)) hit('table-grown', t.path, `${t.table}: ${l}`);
-    else for (const l of missing(was, now)) hit('table-shrunk', t.path, `${t.table}: ${l}`);
+    const held = heldKinds(t.table, t.kind);
+    if (held.has('never-grow')) for (const l of missing(now, was)) hit('table-grown', t.path, `${t.table}: ${l}`);
+    if (held.has('never-shrink')) for (const l of missing(was, now)) hit('table-shrunk', t.path, `${t.table}: ${l}`);
     // An added line that names the table outside its own lines (`NAME[k] = v`, `Object.assign(NAME, ...)`,
     // `NAME.push(...)`, `{ ...NAME, ... }`) can grow or narrow it where the reader doesn't look: it waits. A plain
     // identifier match; a JSON table is data, never used by name in its file.
     if (t.path.endsWith('.json')) continue;
     const names = new RegExp(`(?<![\\w$])${t.table}(?![\\w$])`);
-    const own = new Set(now);
+    // A line is the table's own only when every line of the file with its text is inside the table's lines: a copy of
+    // an entry kept in a decoy table, then used outside it (`export const` with the name on the next line), isn't.
+    const afterLines = a!.split('\n');
+    let span: [number, number] | null = null;
+    try {
+      span = tableSpan(a!, t.table);
+    } catch {
+      span = null;
+    }
+    const own = (l: string) => span !== null && afterLines.every((x, k) => entry(x) !== entry(l) || (k >= span![0] && k <= span![1]));
     for (const l of i.files.find((f) => f.path === t.path)?.addedLines ?? []) {
       // A name built at run time (`eval('ALL' + 'OWED')`, `Function(...)`) has no identifier to match: it waits too.
       const built = BUILT_NAME.test(l);
-      if ((names.test(l) && !own.has(entry(l))) || built) hit('table-used', t.path, `${t.table}: ${l.trim()}`);
+      if ((names.test(l) && !own(l)) || built) hit('table-used', t.path, `${t.table}: ${l.trim()}`);
     }
+  }
+
+  // In a registered table's file, an added line that could give the live table a binding the line reader never matches
+  // waits (#886's rounds 4 to 6): with the table's old lines kept as dead text (in a comment or a template), the live
+  // one could be declared under a name written with a `\u` escape, or with its name on the next line, or bound on the
+  // global object. So, in the line's code as codeLinesOf reads the whole file after the change (all of the file after
+  // anything it can't place counts as code): a `\u`; a `const`, `let` or `var` with no name after it; a name for the
+  // global object (usesGlobalName); or a computed key built from strings where a key stands.
+  const tableFiles = new Set(tables.filter((t) => !t.path.endsWith('.json') && i.files.some((f) => f.path === t.path)).map((t) => t.path));
+  for (const p of tableFiles) {
+    const added = new Set(i.files.find((f) => f.path === p)?.addedLines ?? []);
+    let text: string | null;
+    try {
+      text = i.after(p);
+    } catch (e) {
+      hit('unreadable', p, String((e as Error).message ?? e));
+      continue;
+    }
+    if (text === null || !added.size) continue;
+    const lines = text.split('\n');
+    // JSX text isn't JS: in a .jsx or .tsx file every line reads as code.
+    const read = /\.[jt]sx$/.test(p) ? { lines, unsureFrom: 0 } : codeOf(text);
+    const code = read.lines;
+    // From the first line the reader gave up on (that line included), the text is raw: the global-name check skips
+    // nothing there, the computed-key check pairs no brackets, and a nameless declaration is also looked for with the
+    // line's comments taken out (#886's rounds 8 and 9).
+    const unsureAt = (k: number) => read.unsureFrom !== -1 && k >= read.unsureFrom;
+    const localNames = new Set(code.filter((_, k) => !unsureAt(k)).flatMap((c) => [...c.matchAll(LOCAL_SELF)].map((m) => m[1]!)));
+    // The code line before each line that has code (for a key first on its line).
+    let previous = '';
+    lines.forEach((l, k) => {
+      const c = code[k] ?? l;
+      const unsure = unsureAt(k);
+      const nameless = namelessDeclaration(c) || (unsure && namelessDeclaration(withoutComments(c)));
+      if (added.has(l) && (c.includes('\\u') || nameless || WITH_STATEMENT.test(c) || usesGlobalName(c, localNames, previous, unsure) || computedStringKey(c, unsure))) hit('table-hidden', p, l.trim());
+      if (c.trim()) previous = c.trimEnd();
+    });
   }
 
   const out: string[] = [];
@@ -589,11 +1073,21 @@ export function weakeningReasons(i: WeakeningInput): string[] {
  * weakeningReasons for the change base..head of the repo at `cwd`, with `files` from changeFiles. When the change
  * can't be read, one reason says so: the change waits (fail closed).
  */
-export function weakeningOf(cwd: string, base: string, head: string, files: ChangeFile[], scope: LockScope | undefined): string[] {
+export function weakeningOf(cwd: string, base: string, head: string, files: ChangeFile[], scope: LockScope | undefined, tip: string | null): string[] {
   try {
+    // The default branch's current tip, fetched by the caller at decision time: its marks hold whatever the base. One
+    // it couldn't read makes the change wait.
+    if (tip === null) throw new Error(`the default branch's current tip couldn't be read, so its registered checks can't be`);
     const deleted = new Set(changedNames(cwd, ['--diff-filter=D', `${base}..${head}`]));
     const moved = exactMoves(cwd, base, head);
-    const paths = [...new Set(CHECK_TABLES.map((t) => t.path))].filter((p) => files.some((f) => f.path === p) && !isNonUtf8Path(p));
+    // The files that hold a mark's text before the change and at the tip (#869): git grep over each whole tree, so a
+    // mark is found wherever it is; a git failure makes the change wait.
+    const markable = (set: Set<string>) => new Set(files.map((f) => f.path).filter((p) => set.has(p) && MARKABLE.test(p) && !isNonUtf8Path(p)));
+    const marked = markable(new Set(filesWithText(cwd, base, [TABLE_MARK.trimEnd(), LINT_MARK])));
+    const tipMarked = markable(new Set(filesWithText(cwd, tip, [TABLE_MARK.trimEnd(), LINT_MARK])));
+    // Where the change meets the tip: a tip mark the head lacks was taken out by the change only if it is there.
+    const meet = mergeBaseOf(cwd, tip, head);
+    const paths = [...new Set([...CHECK_TABLES.map((t) => t.path), ...marked, ...tipMarked])].filter((p) => files.some((f) => f.path === p) && !isNonUtf8Path(p));
     // A file over the cap isn't read at all: the change waits.
     const side = (rev: string) => {
       const { texts, tooBig } = filesAt(cwd, rev, paths, MAX_TABLE_FILE);
@@ -602,7 +1096,7 @@ export function weakeningOf(cwd: string, base: string, head: string, files: Chan
         return texts.get(p) ?? null;
       };
     };
-    return weakeningReasons({ files, deleted, moved, before: side(base), after: side(head), scope });
+    return weakeningReasons({ files, deleted, moved, before: side(base), after: side(head), scope, marked, tip: side(tip), tipMarked, meet: side(meet) });
   } catch (e) {
     return [`${WEAKENING_REASON}the check for a removed or weakened test, lint or guard could not run (${escapedPath(String((e as Error).message ?? e).slice(0, 200))})`];
   }
