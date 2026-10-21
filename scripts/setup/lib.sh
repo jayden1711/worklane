@@ -64,10 +64,13 @@ run_as() {
 as_user_argv() { AS_USER=(sudo -H -u "$1" env GIT_TERMINAL_PROMPT=0); }
 # Close every file descriptor above 2 this shell holds (#904): add-project's event stream (fd 3), its lock (fd 9),
 # anything else inherited. For a subshell about to start what another user, or a parse of their bytes, runs: nothing
-# of the caller's then depends on sudo's closefrom, or on a process that outlives the bound.
+# of the caller's then depends on sudo's closefrom, or on a process that outlives the bound. With no /proc listing,
+# every descriptor below the soft limit (ulimit -n; none above it can be opened), 65536 when that isn't a number.
 close_fds() {
-  local fd me="$BASHPID"
-  for fd in $(ls /proc/"$me"/fd 2>/dev/null || seq 3 255); do
+  local fd me="$BASHPID" max
+  max="$(ulimit -n 2>/dev/null)" || true
+  [[ "$max" =~ ^[0-9]+$ ]] || max=65536
+  for fd in $(ls /proc/"$me"/fd 2>/dev/null || seq 3 "$((max - 1))"); do
     [ "$fd" -gt 2 ] 2>/dev/null && { eval "exec $fd>&-"; } 2>/dev/null
   done
   return 0
@@ -79,10 +82,13 @@ close_fds() {
 # (close_fds), so one that escapes the group (setsid) or outlives the bound holds no pipe of the caller's and no lock.
 # Exit 137 when cut off.
 #   run_as_bounded <user> <seconds> <out> <script> [args...]
-run_as_bounded() {
+run_as_bounded() { run_as_bounded_input "$@" </dev/null; }
+# run_as_bounded, but that user's stdin is the caller's (a secret piped in, a program on a heredoc), not /dev/null.
+#   run_as_bounded_input <user> <seconds> <out> <script> [args...]
+run_as_bounded_input() {
   local user="$1" secs="$2" out="$3" script="$4"; shift 4
   as_user_argv "$user"
-  (close_fds; cd / && exec timeout -s KILL "$secs" "${AS_USER[@]}" bash -euo pipefail -c "$script" _ "$@") </dev/null >"$out" 2>/dev/null
+  (close_fds; cd / && exec timeout -s KILL "$secs" "${AS_USER[@]}" bash -euo pipefail -c "$script" _ "$@") >"$out" 2>/dev/null
 }
 
 say() { printf '\n== %s\n' "$*"; }
