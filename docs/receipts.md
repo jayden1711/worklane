@@ -33,6 +33,12 @@ worklane receipts verify receipts/ --key customer-receipts.pub
 
 **After a key rotation**, keep passing the chain's first key. The verifier follows each rotation, which the old key signed. You can pass several keys with `--key`.
 
+**When a chain ends and a new one follows**, the new chain's first receipt (`chain.started`) names the chain it succeeds in `previous`: the keys that signed it, its head, and its last event. It receipts only events after that event, with a key that never signed the old chain. Check these:
+- **`previous.head`** must be the head you kept for the old chain (your anchor). If it names an earlier head, the new chain started early and may sign events the old chain already signed.
+- **`previous: null`** marks an instance's first chain only. A second such chain for the same instance is a fork.
+
+**A receipt field can be cut.** A long text keeps its first 1,024 characters, and a long list its first 64 items. The receipt's `cut` lists each cut field with the SHA-256 and length of the whole, so whoever holds the full text can check it.
+
 ## Verified or attested
 
 A receipt field is one of two kinds, and `verify` tells you which:

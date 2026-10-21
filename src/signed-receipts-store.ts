@@ -7,7 +7,7 @@ import { BRAND } from './brand.js';
 import { openReadOnly } from './events/read-only.js';
 import { tryLock } from './locks.js';
 import { notOwnerOnlyDir, processIdentity, processPlace, replaceOwnerOnly, syncToDisk, UNKNOWN_IDENTITY } from './os/index.js';
-import { canonicalJson, chainStateOf, ChainStateSchema, keySigner, ReceiptError, RECEIPT_EVENTS, rotateChain, signEvents, type ChainState, type Envelope, type ReceiptEvent, type ReceiptSigner } from './signed-receipts.js';
+import { canonicalJson, chainStateOf, ChainStateSchema, keySigner, predecessorOf, predecessorOfState, ReceiptError, RECEIPT_EVENTS, rotateChain, signEvents, type ChainState, type Envelope, type Predecessor, type ReceiptEvent, type ReceiptSigner } from './signed-receipts.js';
 
 /**
  * Every event in an events database opened read-only, oldest first, each with its payload as stored (`raw`, for the
@@ -92,7 +92,8 @@ export function readReceiptFiles(path: string): unknown[] {
     const text = readRegular(file, budget, 'receipts file');
     budget -= Buffer.byteLength(text, 'utf8');
     return text.split('\n').flatMap((line, i) => {
-      if (!line.trim()) return [];
+      // Only an empty line is skipped (the one after the last newline); a line of whitespace is not canonical JSON.
+      if (line === '') return [];
       let value: unknown;
       try {
         value = JSON.parse(line) as unknown;
@@ -115,8 +116,23 @@ export function readReceiptFiles(path: string): unknown[] {
 }
 
 /** Replace the receipts file (replaceOwnerOnly: never through a name planted beside it; #918 round 4, A11). */
-function writeReceipts(path: string, envelopes: readonly Envelope[]): void {
-  replaceOwnerOnly(path, `${envelopes.map((e) => canonicalJson(e)).join('\n')}\n`);
+/**
+ * The receipts file's text, refused over RECEIPTS_MAX_BYTES before anything is written (#918 round 9, route 2: a
+ * receipts file over the cap was written after the state, and nothing could read it back). writeReceipts publishes it.
+ */
+function receiptsText(envelopes: readonly Envelope[]): string {
+  const text = `${envelopes.map((e) => canonicalJson(e)).join('\n')}\n`;
+  if (Buffer.byteLength(text, 'utf8') > RECEIPTS_MAX_BYTES) throw new ReceiptError(`the receipts would be over the ${RECEIPTS_MAX_BYTES} bytes a receipts file may hold; nothing was written`);
+  return text;
+}
+
+function writeReceipts(path: string, text: string): void {
+  replaceOwnerOnly(path, text);
+}
+
+/** `--out` is one receipts file for sign and rotate: a directory there is refused before anything is written. */
+function outIsFile(out: string): void {
+  if (lstatSync(out, { throwIfNoEntry: false })?.isDirectory()) throw new ReceiptError(`--out ${out} is a directory: sign and rotate write one receipts file; nothing was written`);
 }
 
 /**
@@ -158,8 +174,17 @@ function statePlace(state: string, out: string): string {
  */
 function readStateText(path: string): string | null {
   if (!lstatSync(path, { throwIfNoEntry: false })) return null;
-  return readRegular(path, STATE_MAX_BYTES, "the signer's chain state", true);
+  try {
+    return readRegular(path, STATE_MAX_BYTES, "the signer's chain state", true);
+  } catch (e) {
+    // Every unreadable state (a link, a second name, over the cap, not UTF-8) gets the same guidance (#918 round 9).
+    if (e instanceof ReceiptError) throw new ReceiptError(`${e.message}; nothing was signed. ${CHAIN_ENDS}`);
+    throw e;
+  }
 }
+
+/** What every refusal over an unreadable state says (#918 rounds 8 and 9). */
+const CHAIN_ENDS = 'This chain ends here: an older copy of the state is never restored (it would let this key sign a published decision again), and a new chain takes a new key, started with --genesis --after naming this chain';
 
 /** The signer's chain state from its file's text (readStateText), or null when it has none. */
 function parseState(path: string, text: string | null): ChainState | null {
@@ -171,7 +196,7 @@ function parseState(path: string, text: string | null): ChainState | null {
     parsed = undefined;
   }
   const st = ChainStateSchema.safeParse(parsed);
-  if (!st.success) throw new ReceiptError(`the signer's chain state ${path} is unreadable; nothing was signed. This chain ends here: an older copy of the state is never restored (it would let this key sign a published decision again), and a new chain takes a new key, announced as such`);
+  if (!st.success) throw new ReceiptError(`the signer's chain state ${path} is unreadable; nothing was signed. ${CHAIN_ENDS}`);
   return st.data;
 }
 
@@ -297,8 +322,11 @@ export function loadPublicKey(path: string): KeyObject {
  * file and an edited log be signed again). The next run gives the missing receipts back only if the log still makes
  * them byte for byte; otherwise it refuses.
  */
-export function signLog(o: { log: string; out: string; state: string; genesis?: boolean; signer: ReceiptSigner }): { added: number; count: number; head: string | null } {
+export function signLog(o: { log: string; out: string; state: string; genesis?: boolean; after?: string; signer: ReceiptSigner }): { added: number; count: number; head: string | null } {
   const statePath = statePlace(o.state, o.out);
+  outIsFile(o.out);
+  if (o.after !== undefined && !o.genesis) throw new ReceiptError('--after names the chain a new chain succeeds: it goes with --genesis only');
+  const after = o.after === undefined ? undefined : endedChain(o.after);
   return asOnlySigner(statePath, (own, unchanged, save) => {
     if (own && o.genesis) throw new ReceiptError(`the signer already has a chain (its state is ${o.state}): --genesis never starts over it; nothing was signed`);
     if (!own && !o.genesis) throw new ReceiptError(`the signer has no chain state at ${o.state}: a new chain starts only with --genesis (root or the owner only); nothing was signed`);
@@ -306,12 +334,37 @@ export function signLog(o: { log: string; out: string; state: string; genesis?: 
       throw new ReceiptError(`--genesis never replaces anything at --out (${o.out}): receipts there are someone else's chain, never adopted; nothing was signed`);
     }
     const existing = readReceiptFiles(o.out);
-    const r = signEvents(existing, readReceiptEvents(o.log), o.signer, { from: own ?? 'genesis' });
+    const r = signEvents(existing, readReceiptEvents(o.log), o.signer, { from: own ?? 'genesis', ...(after ? { after } : {}) });
+    const text = r.added ? receiptsText(r.envelopes) : null;
     unchanged();
     if (!own || canonicalJson(own) !== canonicalJson(r.state)) save(r.state);
-    if (r.added) writeReceipts(o.out, r.envelopes);
+    if (text !== null) writeReceipts(o.out, text);
     return { added: r.added, count: r.envelopes.length, head: r.head };
   });
+}
+
+/**
+ * The chain a new chain succeeds (`--after`), from that chain's own state file, or from a copy of its receipts (a file
+ * or a directory). WHY (#918 round 9, route 1): after a chain ends, a new one started from event 1 signed the edited
+ * log the old one refused. A successor names its predecessor and starts after its last event, with a key that never
+ * signed it. A copy of the receipts shorter than what the old chain signed would let the successor sign events the old
+ * one also signed: give the state when it can be read (docs/design.md §5a).
+ */
+function endedChain(path: string): Predecessor {
+  const there = lstatSync(path, { throwIfNoEntry: false });
+  if (!there) throw new ReceiptError(`--after ${path}: nothing there; give the ended chain's state, or a copy of its receipts`);
+  if (!there.isDirectory()) {
+    const text = readRegular(path, STATE_MAX_BYTES, 'the chain to succeed');
+    let parsed: unknown = null;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      parsed = null;
+    }
+    const st = ChainStateSchema.safeParse(parsed);
+    if (st.success) return predecessorOfState(st.data);
+  }
+  return predecessorOf(readReceiptFiles(path));
 }
 
 /**
@@ -321,13 +374,15 @@ export function signLog(o: { log: string; out: string; state: string; genesis?: 
  */
 export function rotateFile(o: { out: string; state: string; signer: ReceiptSigner; next: KeyObject }): { count: number; head: string | null } {
   const statePath = statePlace(o.state, o.out);
+  outIsFile(o.out);
   return asOnlySigner(statePath, (own, unchanged, save) => {
     if (!own) throw new ReceiptError(`the signer has no chain state at ${o.state}: there is no chain of its own to rotate`);
     const envelopes = rotateChain(readReceiptFiles(o.out), o.signer, o.next, { from: own });
     const state = chainStateOf(envelopes, own.start);
+    const text = receiptsText(envelopes);
     unchanged();
     save(state);
-    writeReceipts(o.out, envelopes);
+    writeReceipts(o.out, text);
     return { count: envelopes.length, head: state.head };
   });
 }

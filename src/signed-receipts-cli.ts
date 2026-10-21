@@ -32,7 +32,7 @@ function createKeyFile(path: string, data: string) {
 const USAGE = [
   `usage: ${BRAND.cli} receipts verify <file|dir> --key <pub> [--key <pub>]... [--anchor <receipt id>]`,
   `       ${BRAND.cli} receipts keygen --private <file> --public <file>`,
-  `       ${BRAND.cli} receipts sign --log <events.db> --key <private> --out <file> --state <file> [--genesis]`,
+  `       ${BRAND.cli} receipts sign --log <events.db> --key <private> --out <file> --state <file> [--genesis [--after <ended chain's state or receipts>]]`,
   `       ${BRAND.cli} receipts rotate --out <file> --key <current private> --next <new public> --state <file>`,
 ].join('\n');
 
@@ -128,9 +128,11 @@ export async function receiptsCommand(sub: string | undefined, rest: string[]): 
         const key = one(args, '--key');
         const out = one(args, '--out');
         const state = one(args, '--state');
+        const after = values(args, '--after');
+        if (after.length > 1) throw new Usage('give --after once');
         done(args);
         const signer = loadSigner(key);
-        const r = signLog({ log, out, state, signer, ...(genesis ? { genesis } : {}) });
+        const r = signLog({ log, out, state, signer, ...(genesis ? { genesis } : {}), ...(after.length ? { after: after[0]! } : {}) });
         say(`${r.added} new receipts signed with key ${keyId(signer.publicKey)}; ${r.count} in the chain, head ${r.head ?? 'none'}`);
         say(NOT_ROOT_SIGNED);
         return 0;

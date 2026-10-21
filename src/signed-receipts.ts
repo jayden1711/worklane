@@ -43,7 +43,21 @@ const Verified = z.array(z.strictObject({ field: z.string().min(1).max(100), how
  * and `log.digest`: a running SHA-256 over every event in the log up to this one (logDigest), as the signer read it.
  * The signer refuses to go on when a log no longer hashes to what it signed (an event edited, dropped or inserted).
  */
-const eventFields = { instance: z.string(), event: positive, verified: Verified, log: z.strictObject({ digest: hex64 }) };
+/**
+ * The fields of a receipt that were cut to their bound (cutToBound: a string past TEXT_MAX code units, a list past
+ * ITEMS_MAX items), by dotted path, each with the SHA-256 and length of the whole value as the log held it (after
+ * redaction). Empty when nothing was cut. WHY (#918 round 9, route 2): one oversized event made a receipt nothing
+ * could read; a cut field attests its first part and the digest of the whole (docs/design.md §5a, VERIFIES vs ATTESTS).
+ */
+const Cut = z.record(z.string().min(1), z.strictObject({ sha256: hex64, length: positive }));
+const eventFields = { instance: z.string(), event: positive, verified: Verified, log: z.strictObject({ digest: hex64 }), cut: Cut };
+/**
+ * The chain a new chain succeeds, named in its `chain.started` (#918 round 9, route 1): every key that signed it (its
+ * predecessors' included), its head, and the last log event it receipted. The new chain receipts only events after
+ * that one, with a key not among these. Null for a first chain.
+ */
+const Previous = z.strictObject({ keys: z.array(hex64).min(1), head: hex64, event: z.number().int().min(0) });
+export type Predecessor = z.infer<typeof Previous>;
 
 /**
  * One receipt's statement. INVARIANT: a field the deciding engine didn't record is null, never filled in afterwards
@@ -51,7 +65,7 @@ const eventFields = { instance: z.string(), event: positive, verified: Verified,
  * merge record carries them (#717 step 1), so a receipt never claims more than the log said at the time.
  */
 const StatementSchema = z.discriminatedUnion('kind', [
-  z.strictObject({ ...chainFields, kind: z.literal('chain.started'), key: KeyRef }),
+  z.strictObject({ ...chainFields, kind: z.literal('chain.started'), key: KeyRef, previous: Previous.nullable() }),
   z.strictObject({ ...chainFields, kind: z.literal('key.rotated'), next: KeyRef }),
   z.strictObject({
     ...chainFields,
@@ -330,6 +344,8 @@ export const ChainStateSchema = z.strictObject({
    * that deletes the state and so lets the same key start a second chain.
    */
   fixed: z.array(EnvelopeSchema).min(1),
+  /** The last log event the chain receipted (its predecessor's, before its own first): where a successor starts. */
+  event: z.number().int().min(0),
 });
 export type ChainState = z.infer<typeof ChainStateSchema>;
 
@@ -340,9 +356,13 @@ export type ChainState = z.infer<typeof ChainStateSchema>;
  */
 export type ChainFrom = ChainState | 'genesis';
 
-/** How a signer extends a chain: from where, and its clock. */
+/**
+ * How a signer extends a chain: from where, and its clock. `after`, with 'genesis' only: the chain this new one
+ * succeeds (predecessorOf), so it receipts only events after that chain's last, with a key that never signed it.
+ */
 export interface SignOptions {
   from: ChainFrom;
+  after?: Predecessor;
   now?: () => string;
 }
 
@@ -356,7 +376,38 @@ export function chainStateOf(envelopes: readonly Envelope[], start: { keyid: str
   let last = 0;
   for (const [i, e] of envelopes.entries()) if ((statementOf(e) as { kind?: unknown } | null)?.kind === 'key.rotated') last = i;
   const fixed = envelopes.slice(0, last + 1).map((e) => ({ payloadType: e.payloadType, payload: e.payload, signatures: e.signatures.map((s) => ({ keyid: s.keyid, sig: s.sig })) }));
-  return ChainStateSchema.parse({ schema: CHAIN_STATE_SCHEMA, count: envelopes.length, head: receiptId(envelopes.at(-1)!), start: { keyid: start.keyid, spki: start.spki }, fixed });
+  return ChainStateSchema.parse({ schema: CHAIN_STATE_SCHEMA, count: envelopes.length, head: receiptId(envelopes.at(-1)!), start: { keyid: start.keyid, spki: start.spki }, fixed, event: lastEventOf(envelopes) });
+}
+
+/** The chain a successor names, from the ended chain's own state: its keys (from its fixed receipts), head and last event. */
+export function predecessorOfState(s: ChainState): Predecessor {
+  return Previous.parse({ ...predecessorOf(s.fixed), head: s.head, event: s.event });
+}
+
+/** The last log event a chain receipted: its last merge receipt's, or, with none, its predecessor's (or 0). */
+function lastEventOf(envelopes: readonly Envelope[]): number {
+  let event = 0;
+  for (const e of envelopes) {
+    const s = statementOf(e) as { kind?: string; event?: number; previous?: { event?: number } | null };
+    if (s.kind === 'chain.started') event = s.previous?.event ?? 0;
+    if ((s.kind === 'merge.decided' || s.kind === 'merge.result') && typeof s.event === 'number') event = s.event;
+  }
+  return event;
+}
+
+/**
+ * The chain a successor names (#918 round 9, route 1), from that chain's receipts, verified from the start key its
+ * first receipt declares (`envelopes` come from its own state, or a copy the owner trusts): every key that signed it
+ * or its own predecessors, its head, and its last event.
+ */
+export function predecessorOf(envelopes: readonly unknown[]): Predecessor {
+  const first = EnvelopeSchema.safeParse(envelopes[0]);
+  const st = first.success ? (statementOf(first.data) as { kind?: string; key?: { keyid: string; spki: string }; previous?: Predecessor | null }) : null;
+  const start = st?.kind === 'chain.started' && st.key ? keyOfRef(st.key) : null;
+  if (!start) throw new ReceiptError('the chain to succeed has no readable start: give its own state, or a copy of its receipts');
+  const r = verifyChain(envelopes, { keys: [start] });
+  if (!r.ok) throw new ReceiptError(`the chain to succeed doesn't verify (receipt ${r.index + 1}: ${r.problem}): give its own state, or a copy of its receipts`);
+  return Previous.parse({ keys: [...new Set([...(st?.previous?.keys ?? []), ...r.keys])], head: r.head, event: lastEventOf(envelopes as Envelope[]) });
 }
 
 /** The words every refusal about the signer's own head uses. */
@@ -411,22 +462,51 @@ function parsed<T extends (typeof RECEIPT_EVENTS)[number]>(e: ReceiptEvent, type
 }
 
 /** A merge event's receipt body, redacted (the log redacts on write already; this holds for any source). */
+/** The most UTF-16 code units a string in a receipt keeps, and the most items a list keeps (cutToBound). */
+export const TEXT_MAX = 1024;
+export const ITEMS_MAX = 64;
+
+/**
+ * `v` with every string past TEXT_MAX and every list past ITEMS_MAX cut to that bound, each cut recorded in `cut` by
+ * its dotted path with the SHA-256 (of the string's UTF-8, or of the list's canonical JSON) and length of the whole.
+ * WHY (#918 round 9, route 2): one event with a 50 MiB reason made a receipts file over the read cap, which nothing
+ * could verify, and every chain over that log stalled there. Bounded, a receipt stays small whatever the log holds.
+ */
+function cutToBound(v: unknown, path: string, cut: Record<string, { sha256: string; length: number }>): unknown {
+  if (typeof v === 'string') {
+    if (v.length <= TEXT_MAX) return v;
+    cut[path] = { sha256: sha256(Buffer.from(v, 'utf8')), length: v.length };
+    const kept = v.slice(0, TEXT_MAX);
+    const end = kept.charCodeAt(kept.length - 1);
+    // Never half a surrogate pair at the cut.
+    return end >= 0xd800 && end <= 0xdbff ? kept.slice(0, -1) : kept;
+  }
+  if (Array.isArray(v)) {
+    if (v.length > ITEMS_MAX) cut[path] = { sha256: sha256(Buffer.from(canonicalJson(v), 'utf8')), length: v.length };
+    return v.slice(0, ITEMS_MAX).map((x, i) => cutToBound(x, `${path}.${i}`, cut));
+  }
+  if (v !== null && typeof v === 'object') return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, cutToBound(x, path ? `${path}.${k}` : k, cut)]));
+  return v;
+}
+
 function bodyOf(e: ReceiptEvent, version: string | null, decided: Map<string, string>, digest: string): Body | null {
   const common = { at: e.ts, instance: e.actor, event: e.id };
   // Slice 1 verifies nothing itself: every field is attested (see Verified). Added after the redactor, which only
   // the event-derived text needs.
   const signer = { verified: [], log: { digest } };
+  const bounded = <T>(body: T) => {
+    const cut: Record<string, { sha256: string; length: number }> = {};
+    return { ...(cutToBound(redact(body), '', cut) as T), ...signer, cut };
+  };
   if (e.type === 'merge.decided') {
     const p = parsed(e, 'merge.decided');
-    const body = { ...common, kind: 'merge.decided' as const, engine: { version }, policy: { commit: null }, inputs: { issue: p.issue, pr: p.number, head: p.head, files: null, check_runs: null }, decision: { auto: p.auto, level: null, reasons: p.reasons, why: p.why ?? [] } };
-    return { ...redact(body), ...signer };
+    return bounded({ ...common, kind: 'merge.decided' as const, engine: { version }, policy: { commit: null }, inputs: { issue: p.issue, pr: p.number, head: p.head, files: null, check_runs: null }, decision: { auto: p.auto, level: null, reasons: p.reasons, why: p.why ?? [] } });
   }
   if (e.type === 'merge.done' || e.type === 'merge.failed') {
     const done = e.type === 'merge.done' ? parsed(e, 'merge.done') : null;
     const p = done ?? parsed(e, 'merge.failed');
     const why = done ? null : (p as EventPayload<'merge.failed'>).why;
-    const body = { ...common, kind: 'merge.result' as const, issue: p.issue, pr: p.number, head: p.head, merged: !!done, commit: done?.sha ?? null, reconciled: done?.reconciled === true, why, decision: decided.get(`${p.number}@${p.head}`) ?? null };
-    return { ...redact(body), ...signer };
+    return bounded({ ...common, kind: 'merge.result' as const, issue: p.issue, pr: p.number, head: p.head, merged: !!done, commit: done?.sha ?? null, reconciled: done?.reconciled === true, why, decision: decided.get(`${p.number}@${p.head}`) ?? null });
   }
   return null;
 }
@@ -439,8 +519,13 @@ function bodyOf(e: ReceiptEvent, version: string | null, decided: Map<string, st
  * after this (unchanged when nothing was added).
  */
 export function signEvents(existing: readonly unknown[], events: readonly ReceiptEvent[], signer: ReceiptSigner, o: SignOptions): { envelopes: Envelope[]; added: number; head: string | null; state: ChainState } {
+  if (o.after && o.from !== 'genesis') throw new ReceiptError('only a new chain (genesis) names a chain it succeeds');
+  // WHY (#918 round 9, routes 1b, 1c): a key that signed the ended chain, or a chain before it, never starts its
+  // successor, so the same key never signs a second version of what it signed there.
+  const mine = keyId(signer.publicKey);
+  if (o.after?.keys.includes(mine)) throw new ReceiptError(`this key (${mine}) signed the chain it would succeed: a successor takes a new key; nothing was signed`);
   const { state, base, behind } = chainSoFar(existing, signer, o.from);
-  const r = extend(base, state, events, signer, o.now ?? (() => new Date().toISOString()));
+  const r = extend(base, state, events, signer, o.now ?? (() => new Date().toISOString()), o.after ? Previous.parse(o.after) : null);
   // Receipts behind the signer's own head are signed again from the log, onto its fixed receipts. Merge receipts take
   // their time, version and digest from the log, and ed25519 is deterministic, so an unchanged log gives back the very
   // receipts the state names; a log changed meanwhile gives another id: refused.
@@ -452,7 +537,7 @@ export function signEvents(existing: readonly unknown[], events: readonly Receip
 }
 
 /** `existing` (verified as `state`) extended with a receipt for each merge event in `events` after its last one. */
-function extend(existing: readonly unknown[], state: Extract<ChainResult, { ok: true }>, events: readonly ReceiptEvent[], signer: ReceiptSigner, now: () => string): { envelopes: Envelope[]; added: number; head: string | null } {
+function extend(existing: readonly unknown[], state: Extract<ChainResult, { ok: true }>, events: readonly ReceiptEvent[], signer: ReceiptSigner, now: () => string, after: Predecessor | null): { envelopes: Envelope[]; added: number; head: string | null } {
   const envelopes = [...(existing as Envelope[])];
   let seq = state.count;
   let prev = state.head;
@@ -463,10 +548,12 @@ function extend(existing: readonly unknown[], state: Extract<ChainResult, { ok: 
     prev = id;
     return id;
   };
-  if (!state.count) push({ kind: 'chain.started', at: now(), key: keyRef(signer.publicKey) });
+  if (!state.count) push({ kind: 'chain.started', at: now(), key: keyRef(signer.publicKey), previous: after });
   const decided = new Map<string, string>();
-  let last = 0;
+  // A successor chain receipts only events after the last one the chain it succeeds receipted (#918 round 9).
+  let last = state.count ? 0 : (after?.event ?? 0);
   for (const [i, s] of state.statements.entries()) {
+    if (s.kind === 'chain.started') last = s.previous?.event ?? 0;
     if (s.kind === 'merge.decided') decided.set(`${s.inputs.pr}@${s.inputs.head}`, state.ids[i]!);
     if (s.kind === 'merge.decided' || s.kind === 'merge.result') last = s.event;
   }
