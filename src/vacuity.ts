@@ -10,10 +10,12 @@
 //           that counts, so a helper a module calls as it loads (`const T = build()`, tsc's __decorate, esbuild's
 //           __name) counts for nothing even when the PR adds the whole file or a test's body imports it, once or many
 //           times, directly or through another module; and only code on the characters the PR changes that are code
-//           (codeRanges, round 8: by V8's block ranges, so an untaken branch on a changed line doesn't count; a build's
-//           sources by line). Not seen: work a module starts as it loads that keeps running and that the tests' own
-//           activity triggers (a timer while a test waits, an async_hooks or exit listener), and code after a call
-//           that threw (V8 counts a block as run once entered).
+//           (codeRanges, rounds 8, 9: each hunk aligned by character, against V8's block ranges, so an untaken branch
+//           on a changed line doesn't count). Not seen: work a module starts as it loads that keeps running and that
+//           the tests' own activity triggers (a timer while a test waits, an async_hooks or exit listener); code
+//           after a call that threw (V8 counts a block as run once entered); and where V8 makes no block range (an
+//           optional call's arguments, a default parameter or destructuring default, a logical assignment's right
+//           side, code in a string) or a build's map places code only by line.
 import { spawn, spawnSync } from './os/child-process.js';
 import { lstatSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -238,8 +240,10 @@ type Segment = [number, number, number];
  * How many times each part of a script's code ran, as [start, end, count] offsets with count > 0. One sweep over the
  * ranges of every function of the script but two kinds: each span takes the count of the innermost range around it, so
  * a block that didn't run, or a nested function never called, is not run code even inside a function that ran. Left
- * out: the module's own top level (the unnamed function at offset 0, which is what loading runs) and V8's synthetic
- * initializers (`<static_initializer>` and the like). The top level must span exactly the script's text, or that text
+ * out: the module's own top level (the unnamed function at offset 0, which is what loading runs) and a class's static
+ * initializers (`<static_initializer>`, run as the class is defined). An instance's field initializers
+ * (`<instance_members_initializer>`) run when a test makes one, so they count (#784 round 9: since the baseline takes
+ * away what loading runs, they need no leaving out). The top level must span exactly the script's text, or that text
  * and the one suffix Node's own TypeScript type stripping adds (`\n\n//# sourceURL=<the script's URL>`: the stripped
  * text keeps every offset). Null otherwise (it ran other text: a loader transformed it), so it counts for nothing.
  */
@@ -248,7 +252,7 @@ function ranSegments(fns: V8Coverage['result'][number]['functions'], length: num
   const end = top?.ranges[0]!.endOffset;
   if (end !== length && end !== length + `\n\n//# sourceURL=${url}`.length) return null;
   const rs = fns
-    .filter((f) => f !== top && !f.functionName.startsWith('<'))
+    .filter((f) => f !== top && !/^<static/.test(f.functionName))
     .flatMap((f) => f.ranges)
     .filter((r) => r.startOffset < r.endOffset)
     .sort((a, b) => a.startOffset - b.startOffset || b.endOffset - a.endOffset);
@@ -786,7 +790,9 @@ export function measureTouched(coverageDir: string, root: string, appPaths: stri
           s = { rel, text, ran: [], loaded: [] };
           scripts.set(file, s);
         }
-        const segs = ranSegments(script.functions, s.text.length, script.url);
+        // A byte-order mark is no part of the script V8 ran: its offsets start after it (#784 round 9).
+        const bom = s.text.charCodeAt(0) === 0xfeff ? 1 : 0;
+        const segs = ranSegments(script.functions, s.text.length - bom, script.url)?.map(([a, b, c]): Segment => [a + bom, b + bom, c]);
         if (!segs) continue;
         if (into === 'ran') s.ran.push(...segs);
         else s.loaded.push(...segs.map(([a, b, c]): Segment => [a, b, c * times]));

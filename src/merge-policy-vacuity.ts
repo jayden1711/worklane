@@ -6,8 +6,10 @@
 // tests.yaml vacuity.test_globs matches them, and the `test:` files its task's agreed done_when names, which the
 // coordinator's own verification ran) hold an assertion call (an import of an assertion module is none), and, each run
 // with runner.one (`node --test`: coverageRunnerOne) under V8 coverage, they run code on a character the PR changes
-// (round 8: V8's innermost block range around it ran, so an untaken branch or arm on a changed line doesn't count; a
-// removal is measured at its own place, the code now there) in at least one of its app files more often than loading
+// (rounds 8, 9: each hunk aligned by character; V8's innermost block range around a changed code character ran, so an
+// untaken branch or arm on a changed line doesn't count, however the line was shortened, split or moved; a removal is
+// measured at its own place, the code now there; a change too large to align holds) in at least one of its app files
+// more often than loading
 // accounts for: the same run with every test skipped (what loading
 // the test file and its static imports runs), plus, for every script the tests evaluated more often than that run did
 // (a dynamic import in a test's body, a copy with a query string, what such a module imports), that script loaded on
@@ -28,8 +30,11 @@
 // test or module that checks whether it runs in a baseline (inferred); work a module starts as it loads that keeps
 // running and that the tests' own run drives, more in the real run than in a baseline: a timer while a test waits, an
 // async_hooks listener on the tests' own activity, an exit handler (measured: round-5 final check, round-7 review);
-// code after a call that threw, which V8 counts as run once its block was entered (measured, round-7 review). The
-// timer, the async_hooks listener and the throw each have a todo test.
+// code after a call that threw, which V8 counts as run once its block was entered (measured, round-7 review). And
+// where V8 makes no block range of its own, so a change there counts when the code around it ran (measured, round-8
+// reviews): an optional call's arguments, a default parameter, a destructuring default, a logical assignment's right
+// side (`??=`, `||=`, `&&=`), code in a string (`new Function('…')`), and built code, which its map places only by line.
+// Each of these has a todo test (merge-vacuity-r8, -r9-limits; B1 in -r6).
 //
 // What counts as changed app code: a file the PR changes, under vacuity.app_paths, not matched by a test glob, still
 // there at the head, and not one with no runtime code for a test to run (NO_RUNTIME_CODE: types only, config, data,
@@ -60,6 +65,9 @@ export const PLAIN_TEST_PATH = /^(?!-)(?!(?:.*\/)?\.\.(?:\/|$))[A-Za-z0-9._/-]+$
 
 /** The most characters of one test file the gate reads for its assertion calls (more: the PR holds; #784 round 8). */
 export const ASSERTION_TEXT_MAX = 1024 * 1024;
+
+/** The most characters of all of a PR's tests the gate reads for assertion calls (more: the PR holds; round 9). */
+export const ASSERTION_TOTAL_MAX = 4 * 1024 * 1024;
 
 /** How many times a coverage run may start at one head without finishing before the PR waits instead. */
 export const VACUITY_TRIES = 3;
@@ -221,7 +229,10 @@ export function vacuityCheck(o: {
   // An import or require of an assertion module is no assertion (countAssertionCalls, #784 round 4).
   // #784 round 8: the count is linear, and bounded too (it runs on the coordinator's thread): a larger test holds.
   const big = tests.filter((p) => text.get(p)!.length > ASSERTION_TEXT_MAX);
+  const total = tests.reduce((n, p) => n + text.get(p)!.length, 0);
   if (big.length) reasons.push(`design: vacuity: a test file is over ${ASSERTION_TEXT_MAX} characters, more than the gate reads for its assertions (${list(big)})`);
+  // And in all (#784 round 9: 60 files of 1 MiB took 1.5 s on every decision).
+  else if (total > ASSERTION_TOTAL_MAX) reasons.push(`design: vacuity: its tests are over ${ASSERTION_TOTAL_MAX} characters in all, more than the gate reads for their assertions (${list(tests)})`);
   else if (tests.length && tests.every((p) => countAssertionCalls(text.get(p)!, cfg.assertion_pattern) === 0)) reasons.push(`design: vacuity: its tests (${list(tests)}) have no assertion matching /${cfg.assertion_pattern}/`);
   if (!cfg.dynamic) reasons.push(`design: vacuity: tests.yaml vacuity.dynamic is off, so nothing measured whether its tests run the app code it changes (${list(app)})`);
   else if (!o.runOne) reasons.push("design: vacuity: tests.yaml runner.one is not set, so its tests can't be run one by one under coverage");

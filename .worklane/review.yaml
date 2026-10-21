@@ -46,6 +46,7 @@ categories:
     - test/merge-vacuity-r8.test.ts
     - test/merge-vacuity-r9-tip.test.ts
     - test/merge-vacuity-r9-precision.test.ts
+    - test/merge-vacuity-r9-limits.test.ts
     - test/vacuity-tip.ts
     # Listed here only, not locked in code: the tests' own machine (every test runs inside it), the check that engine
     # code never writes a slot-directory file in place (and that a slot path reaches no other writer, #772), and the
