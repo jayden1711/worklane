@@ -601,7 +601,8 @@ const REGEX_LITERAL = String.raw`\/((?:\\.|\[(?:\\.|[^\]\\\n])*\]|[^/\\\n[])+)\/
  *   (round 7). A trailing ` # comment` or (round 8) ` // comment`, or quotes around the whole glob, are taken off; a
  *   line the glob matcher would read literally where other glob dialects don't (a brace set, a `[...]` class, an
  *   extglob, a leading `!` or list marker, a quote, a backslash) or (round 8) that no git path can match as written
- *   (a leading `/`, a `//`, a trailing `,` or `;`) is refused with a suggested glob (rounds 7 and 8: such a line
+ *   (a leading `/`, a `//`, a trailing `,` or `;`, round 9 a `.` or `..` segment) is refused with a suggested glob
+ *   (rounds 7 to 9: such a line
  *   used to match nothing, silently).
  * - With no regex token in the text, every line is a glob line, as on main. With one (a list of regexes, or code
  *   around one), main read only the regex literals; a line is a glob line there too when it holds a letter or a digit
@@ -614,14 +615,18 @@ const REGEX_LITERAL = String.raw`\/((?:\\.|\[(?:\\.|[^\]\\\n])*\]|[^/\\\n[])+)\/
  *   fragment main couldn't compile (`/**\/` in `src/**\/billing/**`) made main's loadMoneyPaths throw for the whole
  *   list, so main counted nothing for it: none of its fragments is kept (round 8), and the list's globs are read as
  *   written (the owner's decision of 2026-10-21).
- * - Each entry also says what main counted for it (`before`; moneyBefore), so a level never drops below main's for
- *   what only this version counts as money (round 8; computeLevel's app-non-money).
+ * - Each entry also says what main counted for it (`before`; moneyBefore), from every line that reads as it (round 9),
+ *   so for a list main could load, a level never drops below main's for what only this version counts as money
+ *   (round 8; computeLevel's app-non-money). A list main threw on routed at L3 there; its globs are read here (the
+ *   owner's option (b)), so a change under such a list can level below what main did.
  */
 export function moneyListEntries(text: string): RegExp[] {
   const out: RegExp[] = [];
   const seen = new Set<string>();
   const once = (key: string): boolean => !seen.has(key) && !!seen.add(key);
-  const lines = text.split('\n').map((l) => l.trim()).filter((l) => l && !l.startsWith('#'));
+  /** Each glob line's entry, by its glob: one entry a glob, its `before` set from every line that reads as it. */
+  const globs = new Map<string, MoneyGlob>();
+  const lines =text.split('\n').map((l) => l.trim()).filter((l) => l && !l.startsWith('#'));
   const TOKEN = new RegExp(`(?<=^|[\\s,[(=:])${REGEX_LITERAL}(?=$|[\\s,;\\])])`, 'g');
   const regexMode = lines.some((l) => [...l.matchAll(TOKEN)].length > 0);
   // Main's reading (its pattern, before any line is read): did it find a /.../ at all, and which compiled.
@@ -666,12 +671,15 @@ export function moneyListEntries(text: string): RegExp[] {
     if (regexMode && (/\s/.test(unwrapped(line).replace(/^-\s+/, '')) || !/[A-Za-z0-9]/.test(line) || line.startsWith('//'))) continue;
     const g = globLine(line);
     if ('glob' in g) {
-      if (once(`glob:${g.glob}`)) {
-        const entry = new MoneyGlob(globToRegExp(g.glob), g.glob);
-        // Main read this very glob when the text held no /.../: it counted these paths too.
-        entry.before = !fragments.length && g.glob === line ? entry : null;
+      let entry = globs.get(g.glob);
+      if (!entry) {
+        entry = new MoneyGlob(globToRegExp(g.glob), g.glob);
+        globs.set(g.glob, entry);
         out.push(entry);
       }
+      // Main read this very glob when the text held no /.../: it counted these paths too. Set for each line, not only
+      // the glob's first (round 9: `billing/** # card data` then `billing/**` lost the second line's reading).
+      if (!fragments.length && g.glob === line) entry.before = entry;
     } else if (once(`refused:${line}`)) out.push(new RefusedMoneyLine(line, g.why, g.suggestion, true));
     // Main read this line as a glob as written when the text held no /.../.
     if (!fragments.length && !('glob' in g && g.glob === line)) kept(globToRegExp(line));
@@ -699,7 +707,7 @@ function unwrapped(line: string): string {
  * so the line would match nothing like what it says (#763 round 7), or null: a brace set, a `[...]` class, an extglob
  * (`@(`, `!(`, `+(`, `?(`, `*(`), a leading `!` (an exclusion) or list marker (`- `), a quote, a backslash, or a line
  * that starts with `#` (a comment); and (round 8) what no git path has or list punctuation around a glob: a leading
- * `/`, a `//`, a trailing `,` or `;`. `(` alone is a literal (a route group's folder), and so are spaces and `#` inside.
+ * `/`, a `//`, a trailing `,` or `;`, and (round 9) a `.` or `..` segment. `(` alone is a literal (a route group's folder), and so are spaces and `#` inside.
  */
 export function globLineProblem(glob: string): string | null {
   if (/^#/.test(glob)) return 'it starts with # (a comment)';
@@ -714,6 +722,8 @@ export function globLineProblem(glob: string): string | null {
   if (/^\//.test(glob)) return 'a git path never starts with /';
   if (/\/\//.test(glob)) return 'a git path never holds //';
   if (/[,;]$/.test(glob)) return 'a trailing , or ; is read as part of the name';
+  // Round 9: a `.` or `..` segment (a leading `./` aside, which the matcher drops): git stores neither.
+  if (/(?:^|\/)\.\.?(?:\/|$)/.test(glob.replace(/^\.\//, ''))) return 'a git path never has a . or .. segment';
   return null;
 }
 
@@ -739,6 +749,13 @@ export function writableGlob(glob: string): string {
     .replace(/([?*+@!])\(/g, '$1*')
     .replace(/(\s)#/g, '$1*')
     .replace(/^[#!]/, '*')
+    // Round 9: everything up to a `..` segment as any directories; a `.` segment dropped (a trailing one as everything
+    // under the directory before it).
+    .replace(/^(?:.*\/)?\.\.(?:\/|$)/, '**/')
+    .replace(/^(?:\.\/)+/, '')
+    .replace(/\/\.(?=\/)/g, '')
+    .replace(/\/\.$/, '/')
+    .replace(/^\.$/, '')
     // A `//` as any directories, a leading `/` as any directories before, a trailing `,` or `;` as `*` (round 8).
     .replace(/\/{2,}/g, '/**/')
     .replace(/^\/+/, '**/')
