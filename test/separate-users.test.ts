@@ -280,11 +280,15 @@ test('regression: a check that runs git, run as the agent user in the coordinato
   g('add', 'a.txt');
   g('-c', 'user.name=t', '-c', 'user.email=t@example.com', 'commit', '-q', '-m', 'a');
   spawnSync('chmod', ['-R', 'a+rX', repo]);
+  // A real directory as the agent's home: since #798 a home of / is refused (there is no home to make read-only).
+  const home = mkdtempSync('/tmp/wl-check-home-');
+  chmodSync(home, 0o755);
   try {
-    const { file, args, env } = projectCommand('git diff --exit-code', { user: 'nobody', home: '/', hide: [] });
+    const { file, args, env } = projectCommand('git diff --exit-code', { user: 'nobody', home, hide: [] });
     const r = spawnSync(file, args, { cwd: repo, env, encoding: 'utf8' });
     assert.equal(r.status, 0, r.stderr);
   } finally {
     rmSync(repo, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
   }
 });

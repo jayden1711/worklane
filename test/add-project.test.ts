@@ -44,6 +44,7 @@ as_root() { :; }
 home_of() { echo "$T/homes/$1"; }
 user_exists() { [ -e "$T/users/$1" ]; }
 unit_active() { [ -e "$T/active/$1" ]; }
+sudo_version() { echo 1.9.15; }
 run_as() { local user="$1" script="$2"; shift 2; HOME="$T/homes/$user" bash -euo pipefail -c "$script" _ "$@"; }
 ensure_instance_home() {
   local d="$T/homes/wl-$1/.local/state/worklane/instances/$1"
@@ -70,14 +71,20 @@ install_claude_token() {
   echo "install_claude_token $1" >> "$T/calls"
 }
 SRV_ROOT="$T/srv" ENGINE_CLI="$T/bin/worklane" MACHINE_HELPER="$T/helper" MACHINE_SUDOERS="$T/sudoers-machine" HUB_UNIT="$T/hub.service" ADD_PROJECT_LOCK="$T/lock"
+ADD_PROJECT_NEW="$T/add-project-new" ADD_PROJECT_NEW_UID=${process.getuid?.() ?? 0} HELPER_RULES="$T/helper-rules.json" MACHINE_SUDOERS_LOCK="$T/locks/sudoers.lock" MACHINE_SUDOERS_LOCK_UID=${process.getuid?.() ?? 0}
 SETUP_POLL_SECONDS=0 SETUP_WAIT_SECONDS="$(cat "$T/wait-seconds" 2>/dev/null || true)"
+# The machine's groups and sudoers files (new_instance_mark_if_new reads both, #902 round 9), in the temp dir.
+group_exists() { [ -e "$T/groups/$1" ]; }
+sudoers_installed() { [ -e "$T/sudoers.d/$1" ]; }
 `,
   );
   const stub = (file: string, step: string, body: string) => {
     writeFileSync(file, `#!/usr/bin/env bash\nset -euo pipefail\nT=${JSON.stringify(T)}\necho "${step} $*" >> "$T/calls"\nif [ -e "$T/fail-${step}" ]; then echo "${step} went wrong: $(cat "$T/fail-${step}")" >&2; exit 1; fi\n${body}\n`);
     chmodSync(file, 0o755);
   };
-  stub(join(s, 'instance.sh'), 'instance', 'touch "$T/users/wl-$1" "$T/users/wl-$1-agent"; mkdir -p "$T/srv/$1"');
+  // As the real instance.sh: a coordinator it makes goes on root's list of instances being created (#898), only when
+  // nothing of that instance is on the machine yet (#902 round 8, A1).
+  stub(join(s, 'instance.sh'), 'instance', 'source "$T/scripts/setup/lib.sh"; new_instance_mark_if_new "$1"; touch "$T/users/wl-$1" "$T/users/wl-$1-agent"; mkdir -p "$T/srv/$1"');
   // `instance auto-config`: the setup PR, open; merged from the check numbered in <root>/merge-after on.
   stub(join(T, 'bin', 'worklane'), 'app', `if [ "$1 $2" = "policy check" ]; then [ ! -e "$T/gate-refuses-$3" ]; exit $?; fi
 if [ "$1 $2" = "instance auto-config" ]; then
@@ -95,9 +102,12 @@ echo "OK: App x (id 91), installation 4242"`);
   stub(join(s, 'checkout.sh'), 'checkout', 'mkdir -p "$T/srv/$1/${2#*/}/.git"; [ -e "$T/no-config" ] && exit 0; mkdir -p "$T/srv/$1/${2#*/}/.worklane"; printf "suites: {}\\n" > "$T/srv/$1/${2#*/}/.worklane/tests.yaml"');
   stub(join(s, 'service.sh'), 'service', 'touch "$T/active/worklane-$1.service"');
   stub(join(s, 'test-user.sh'), 'test-user', 'touch "$T/users/wl-test-$2" "$T/active/worklane-test-$2-docker.service"');
+  // What the real one writes (#898: the step is done only while the rule is exactly that): the helper, and the rule.
   stub(join(s, 'machine-helper.sh'), 'machine-helper', `cp "$T/scripts/machine/worklane-machine.cjs" "$T/helper"
-users=""; for n in "$@"; do users="\${users:+$users, }wl-$n"; done
-printf 'Cmnd_Alias WORKLANE_MACHINE = x\\n%s ALL=(root) NOPASSWD: WORKLANE_MACHINE\\n' "$users" > "$T/sudoers-machine"`);
+source "$T/scripts/setup/lib.sh"
+while [ "\${1#--}" != "\${1:-}" ]; do shift; done
+users=(); for n in "$@"; do users+=("wl-$n"); done
+sudoers_bytes "$(machine_sudoers "\${users[@]}")" > "$T/sudoers-machine"`);
   stub(join(s, 'dashboards.sh'), 'dashboards', `none=""; if [ "\${1:-}" = --no-instances ]; then none=1; shift; fi
 opts=""; while [ "$#" -gt 0 ] && [ "\${1#--}" != "$1" ]; do opts="$opts $1 $2"; shift 2; done
 hub=""; for n in "$@"; do hub="\${hub:+$hub,}$n=$T/homes/wl-$n/state"; touch "$T/active/worklane-dashboard-$n.service"; done
@@ -106,7 +116,9 @@ printf '[Service]\\nExecStart=/usr/local/bin/worklane dashboard --hub %s --servi
   // "old": an instance set up earlier, in the machine helper's rule and the hub.
   for (const u of ['wl-old', 'wl-old-agent']) writeFileSync(join(T, 'users', u), '');
   mkdirSync(join(instDir('old'), 'state'), { recursive: true });
-  writeFileSync(join(T, 'sudoers-machine'), 'Cmnd_Alias WORKLANE_MACHINE = x\nwl-old ALL=(root) NOPASSWD: WORKLANE_MACHINE\n');
+  // Its rule as machine-helper.sh wrote it for old (#898: a placeholder rule would be narrower than the engine's, and
+  // adding alpha would wait for --replace-sudoers).
+  writeFileSync(join(T, 'sudoers-machine'), spawnSync('bash', ['-c', 'source "$1"; c="$(machine_sudoers wl-old)"; printf "%s\\n" "$c"', '_', join(s, 'lib.sh')], { encoding: 'utf8', env: { PATH: process.env.PATH ?? '/usr/bin:/bin', HOME: T } }).stdout);
   writeFileSync(join(T, 'hub.service'), `[Service]\nExecStart=/usr/local/bin/worklane dashboard --hub old=${instDir('old')}/state --service --client-id Iv1.signin0001 --public-url https://hub.example.test --signin-dir /x --console-user admin --console-devices tag:owner\n`);
   // The hub is up: its token, which the App step needs.
   const hubTok = join(T, 'homes', 'wl-dash', '.local', 'state', 'worklane', 'dashboard-hub');
@@ -171,7 +183,8 @@ test('add-project runs the steps in order, one JSON line per change on stdout, a
   assert.match(r.events.find((e) => e.step === 'test-user' && e.state === 'done')!.detail, /no test_run/);
   // The machine helper and the dashboards, with the instance already there and the new one; the hub's settings kept.
   const calls = m.calls();
-  assert.ok(calls.includes('machine-helper alpha old'), calls.join('\n'));
+  // The one user it may add, the instance being created, named for machine-helper.sh's own check (#902 round 6).
+  assert.ok(calls.includes('machine-helper --may-add=alpha alpha old'), calls.join('\n'));
   // An older hub unit (the removed owner terminal's --console-user and --console-devices): its devices are kept as the
   // machine devices, and its console user is dropped (#742).
   assert.ok(calls.includes('dashboards --client-id Iv1.signin0001 --public-url https://hub.example.test --machine-devices tag:owner alpha old'), calls.join('\n'));

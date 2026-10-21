@@ -7,7 +7,7 @@ import { parseDocument } from 'yaml';
 import { z } from 'zod';
 import { BRAND } from './brand.js';
 import { ownEnv } from './os/own-env.js';
-import { INSTANCE_FILE_NAME_MAX, instanceNameProblem } from './instance-name.js';
+import { INSTANCE_FILE_NAME_MAX, instanceNameProblem, keptInstanceNameProblem } from './instance-name.js';
 import { CLI_AGENTS } from './providers.js';
 import { ConfigInvalid, loadConfig, type Config, type ConfigError } from './config/load.js';
 import { defaultAgentPath, homeOf, homesRoot, normalAbsolute, normalHome, NOT_NORMAL_ABSOLUTE, replaceFileAtomically, stateDir, userExists, type ProjectRunAs } from './os/index.js';
@@ -31,9 +31,10 @@ import { fileURLToPath } from 'node:url';
 const HOOK_MAIN = fileURLToPath(new URL('./hook-main.js', import.meta.url));
 
 // An instance's own users and units are never another's (src/instance-name.ts); an instance that runs as its owner's
-// user may keep a longer name than a machine's (INSTANCE_FILE_NAME_MAX).
+// user may keep a longer name than a machine's (INSTANCE_FILE_NAME_MAX). An instance made before its name was reserved
+// (src/instance-name.ts LATER_RESERVED) still loads, so it runs, exports and is removed as before; init makes none.
 const name = z.string().superRefine((s, ctx) => {
-  const why = instanceNameProblem(s, INSTANCE_FILE_NAME_MAX);
+  const why = keptInstanceNameProblem(s, INSTANCE_FILE_NAME_MAX);
   if (why) ctx.addIssue({ code: 'custom', message: why });
 });
 
