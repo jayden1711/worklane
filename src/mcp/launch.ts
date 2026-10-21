@@ -1,6 +1,6 @@
 // How an approved MCP server is started: its approved code (root's store), inside its own sandbox (sandboxed.ts), with
 // an environment of a minimal PATH and HOME and its own secrets only, never the broker's or anyone else's.
-import { spawn, type ChildProcess } from 'node:child_process';
+import { spawn, type ChildProcess } from '../os/child-process.js';
 import { chownSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { McpRuntime } from '../plugins/approval.js';

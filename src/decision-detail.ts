@@ -9,7 +9,7 @@
 //   - a viewer gets only the fields VIEWER_DECISION_FIELDS allows (src/viewer-events.ts), never the context;
 //   - a writer gets the context too, as the agent runs it comes from (mayReadRuns), minus the owner-only parts;
 //   - the owners also get the owner-only parts: raw check output, the tamper guard's flags, and the diff.
-import { execFile } from 'node:child_process';
+import { execFile } from './os/child-process.js';
 import { BRAND } from './brand.js';
 import { DEFAULT_REVIEW } from './coordinator/shared.js';
 import { isOwner, isWriter, mayAnswerKind, type Role } from './dashboard-auth.js';

@@ -14,7 +14,11 @@
 //   (unpinned: `bench download` refuses until the owner records them);
 // - dataset.max_bytes, the most the download reads; dataset.hosts, where it may be redirected (a host or its
 //   subdomains), https only;
-// - image_digests: sha256 digests, sorted, each once; none, or at least MIN_DIGEST_SET of them.
+// - image_digests: sha256 digests, sorted, each once; none, or at least MIN_DIGEST_SET of them;
+// - selection (#748, slice 3): how the tasks are chosen, never which: `rule` (one of SELECTION_RULES, each a fixed
+//   algorithm in select.ts), `seed` (a whole number, 0 to 2^32 - 1) and `rows_sha256` (the canonical digest of the rows
+//   the rule reads, select.ts canonicalRows; null until the owner records it). Or null: nothing is selected. With the
+//   dataset's revision, that is the whole selection: the same pins always choose the same tasks.
 //
 // What it must never hold: an instance id, an image name or a task selection. The bench user's clone is readable by
 // the agents (only credential places, state and the held-out store are denied), so anything here that maps a task to
@@ -38,7 +42,7 @@ export const DIGEST = /^sha256:[0-9a-f]{64}$/;
 const HOSTNAME = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/;
 const PATH_PART = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 /** A SWE-bench instance id (owner__repo-1234) or an instance image name (owner_1776_repo-1234). */
-const TASK_SHAPE = /[A-Za-z0-9.-]__[A-Za-z0-9_.-]+-\d+|_1776_/;
+export const TASK_SHAPE = /[A-Za-z0-9.-]__[A-Za-z0-9_.-]+-\d+|_1776_/;
 /** An image name component, and a registry domain (it has a dot; no port). */
 const COMPONENT = '[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*';
 const DOMAIN = '[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+';
@@ -79,12 +83,31 @@ export class DatasetPin {
   }
 }
 
-/** Every pin in the file: the dataset's (null until pinned) and the image digests (frozen, sorted). */
+/** The selection rules select.ts implements. A rule's algorithm never changes; a new one gets a new name. */
+export const SELECTION_RULES = ['sha256-rank-v1'] as const;
+export type SelectionRule = (typeof SELECTION_RULES)[number];
+/** The largest seed: 32 bits. */
+export const SEED_MAX = 2 ** 32 - 1;
+
+/** How the tasks are chosen: the rule, its seed, and the canonical digest of the rows it reads (null until pinned). */
+export class SelectionPin {
+  constructor(
+    token: symbol,
+    readonly rule: SelectionRule,
+    readonly seed: number,
+    readonly rowsSha256: string | null,
+  ) {
+    fromPinsFile(token, this);
+  }
+}
+
+/** Every pin in the file: the dataset's (null until pinned), the image digests (frozen, sorted) and the selection. */
 export class Pins {
   constructor(
     token: symbol,
     readonly dataset: DatasetPin | null,
     readonly digests: readonly string[],
+    readonly selection: SelectionPin | null,
   ) {
     fromPinsFile(token, this);
   }
@@ -106,7 +129,7 @@ export class ImageRef {
 }
 
 // #863 round 1: a pin's behaviour can't be swapped either (download.ts reads only a pin's own frozen fields anyway).
-for (const C of [DatasetPin, Pins, ImageRef]) Object.freeze(C.prototype);
+for (const C of [DatasetPin, Pins, ImageRef, SelectionPin]) Object.freeze(C.prototype);
 
 const isObject = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
 
@@ -166,6 +189,17 @@ function digestSet(v: unknown): readonly string[] {
   return Object.freeze([...(v as string[])]);
 }
 
+function selectionPin(s: unknown): SelectionPin | null {
+  if (s === null) return null;
+  if (!isObject(s)) throw new Error('pins: selection is not an object (or null: nothing selected)');
+  onlyKeys(s, ['rule', 'seed', 'rows_sha256'], 'selection');
+  const { rule, seed, rows_sha256: rows } = s;
+  if (typeof rule !== 'string' || !(SELECTION_RULES as readonly string[]).includes(rule)) throw new Error(`pins: selection.rule must be one of ${SELECTION_RULES.join(', ')}`);
+  if (typeof seed !== 'number' || !Number.isInteger(seed) || seed < 0 || seed > SEED_MAX) throw new Error(`pins: selection.seed must be a whole number from 0 to ${SEED_MAX}`);
+  if (rows !== null && (typeof rows !== 'string' || !HEX64.test(rows))) throw new Error("pins: selection.rows_sha256 must be the rows' canonical sha256 (64 lower-case hex), or null until it is recorded");
+  return new SelectionPin(TOKEN, rule as SelectionRule, seed, rows as string | null);
+}
+
 const TASK_REFUSED = 'pins: the file holds something shaped like an instance id or an instance image name: never in the repo (the agents can read it)';
 
 /** The pins in `text` (a pins file), refused (throws) on anything the schema above doesn't allow. */
@@ -183,8 +217,8 @@ export function parsePins(text: string): Pins {
   // a repeated key (JSON.parse keeps the last copy, unchecked earlier ones) or any other spelling is refused.
   if (text !== `${JSON.stringify(o, null, 2)}\n`) throw new Error('pins: the file is not in its canonical form (JSON.stringify(pins, null, 2) and a newline: no repeated key, no other spacing)');
   if (!isObject(o)) throw new Error('pins: not an object');
-  onlyKeys(o, ['dataset', 'image_digests'], 'the file');
-  return new Pins(TOKEN, datasetPin(o.dataset), digestSet(o.image_digests));
+  onlyKeys(o, ['dataset', 'image_digests', 'selection'], 'the file');
+  return new Pins(TOKEN, datasetPin(o.dataset), digestSet(o.image_digests), selectionPin(o.selection));
 }
 
 /** The pins, from the one pins file. */

@@ -3,7 +3,7 @@
 // function, checkComments, for the PR diff check (checkRange, scripts/check-comments.mjs) and the agents' post-edit
 // hook (checkWorkingFile, wired in #330's second part), so the two can't drift. Comments are found by a line
 // scanner per language (no parser dependency).
-import { spawnSync } from 'node:child_process';
+import { spawnSync } from './os/child-process.js';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { parseDocument } from 'yaml';

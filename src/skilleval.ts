@@ -8,7 +8,7 @@
 // cases, run against the instructions at the base and at the head, with a cost cap, compared
 // case by case. The agent under test only ever sees the instructions and the situation (never
 // the rubric), in a neutrally named directory, and a judge on a different model grades it.
-import { spawn } from 'node:child_process';
+import { spawn } from './os/child-process.js';
 import { createHash } from 'node:crypto';
 import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';

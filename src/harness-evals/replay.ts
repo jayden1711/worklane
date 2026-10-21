@@ -4,7 +4,7 @@
 // scratch clone is deleted when its replay ends. The engine is the one running the replay (the harness under test);
 // the task's project config is its own at the base, except the harness config taken from the harness under test
 // (HARNESS_CONFIG_PATHS), so a change to that config is what the replay measures.
-import { execFileSync } from 'node:child_process';
+import { execFileSync } from '../os/child-process.js';
 import { randomBytes } from 'node:crypto';
 import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';

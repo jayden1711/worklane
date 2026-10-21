@@ -8,7 +8,7 @@
 // `gh auth token`; `gh auth status` is read for its exit code only), and of gh's output it keeps only the device code
 // and the exact device URL, matched by pattern; anything else gh says reaches the page only as one failure line, with
 // anything token-shaped masked.
-import { spawn, spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from './os/child-process.js';
 import { findTool, withToolPath } from './tool-path.js';
 import { outboundEnv } from './network.js';
 
