@@ -7,13 +7,17 @@ import { openReadOnly } from './events/read-only.js';
 import { writeOwnerOnly } from './os/index.js';
 import { canonicalJson, keySigner, ReceiptError, RECEIPT_EVENTS, rotateChain, signEvents, verifyChain, type Envelope, type ReceiptEvent, type ReceiptSigner } from './signed-receipts.js';
 
-/** The events receipts are made from, oldest first, from an events database opened read-only. */
+/**
+ * Every event in an events database opened read-only, oldest first, each with its payload as stored (`raw`, for the
+ * log digest). Only the kinds receipts are made from are parsed.
+ */
 export function readReceiptEvents(dbPath: string): ReceiptEvent[] {
   if (!existsSync(dbPath)) throw new ReceiptError(`no event log at ${dbPath}`);
+  const read: ReadonlySet<string> = new Set(RECEIPT_EVENTS);
   const db = openReadOnly(dbPath);
   try {
-    const rows = db.prepare(`SELECT id, ts, type, actor, payload FROM events WHERE type IN (${RECEIPT_EVENTS.map(() => '?').join(',')}) ORDER BY id`).all(...RECEIPT_EVENTS) as { id: number; ts: string; type: string; actor: string; payload: string }[];
-    return rows.map((r) => ({ id: Number(r.id), ts: r.ts, type: r.type, actor: r.actor, payload: JSON.parse(r.payload) as unknown }));
+    const rows = db.prepare('SELECT id, ts, type, actor, payload FROM events ORDER BY id').all() as { id: number; ts: string; type: string; actor: string; payload: string }[];
+    return rows.map((r) => ({ id: Number(r.id), ts: r.ts, type: r.type, actor: r.actor, raw: r.payload, payload: read.has(r.type) ? (JSON.parse(r.payload) as unknown) : undefined }));
   } finally {
     db.close();
   }

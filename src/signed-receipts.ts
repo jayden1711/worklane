@@ -21,8 +21,19 @@ const commit = z.string().regex(/^[0-9a-f]{7,64}$/);
 const positive = z.number().int().positive();
 const chainFields = { schema: z.literal(RECEIPT_SCHEMA), seq: z.number().int().min(0), prev: hex64.nullable(), at: z.string().min(1) };
 const KeyRef = z.strictObject({ keyid: hex64, spki: z.string().min(1) });
-/** The event a receipt stands for: the actor the log names, and the event's id there. */
-const eventFields = { instance: z.string(), event: positive };
+/**
+ * What the signer checked itself (docs/design.md §5a, VERIFIES vs ATTESTS): each entry names a field of this statement
+ * (a dotted path) or a fact only the signer derives (e.g. `result.tree`), how it was found (`git`, `github`), and the
+ * value it found. Every field not listed is ATTESTED: the coordinator's claim as its log recorded it. Slice 1's
+ * signer checks nothing itself, so the list is empty; slice 3 fills it without a format change.
+ */
+const Verified = z.array(z.strictObject({ field: z.string().min(1).max(100), how: z.string().min(1).max(200), found: z.union([z.string(), z.number().int(), z.boolean(), z.null(), z.array(z.string())]) }));
+/**
+ * The event a receipt stands for: the actor the log names, the event's id there, what the signer verified itself,
+ * and `log.digest`: a running SHA-256 over every event in the log up to this one (logDigest), as the signer read it.
+ * The signer refuses to go on when a log no longer hashes to what it signed (an event edited, dropped or inserted).
+ */
+const eventFields = { instance: z.string(), event: positive, verified: Verified, log: z.strictObject({ digest: hex64 }) };
 
 /**
  * One receipt's statement. INVARIANT: a field the deciding engine didn't record is null, never filled in afterwards
@@ -74,13 +85,42 @@ const base64 = z.string().regex(/^[A-Za-z0-9+/]*={0,2}$/);
 const EnvelopeSchema = z.strictObject({ payloadType: z.string(), payload: base64, signatures: z.array(z.strictObject({ keyid: z.string(), sig: base64 })).length(1) });
 export type Envelope = z.infer<typeof EnvelopeSchema>;
 
-/** An event as the log stores it (src/events/log.ts), of the kinds receipts read. */
+/** An event as the log stores it (src/events/log.ts). `raw`: its payload as stored (JSON text), when read from one. */
 export interface ReceiptEvent {
   id: number;
   ts: string;
   type: string;
   actor: string;
   payload: unknown;
+  raw?: string;
+}
+
+/** The log's running digest after event `e`: SHA-256 over the digest before it and the event as stored. */
+export function logDigest(before: string, e: ReceiptEvent): string {
+  return createHash('sha256')
+    .update(`${before}\n${e.id}\n${e.ts}\n${e.type}\n${e.actor}\n${e.raw ?? JSON.stringify(e.payload)}`)
+    .digest('hex');
+}
+
+export interface FieldCheck {
+  field: string;
+  how: string;
+  found: unknown;
+  /** The statement's own value at `field`, when it has one. */
+  claimed?: unknown;
+  /** match / mismatch: the signer's value against the statement's; derived: a fact the statement has no field for. */
+  result: 'match' | 'mismatch' | 'derived';
+}
+
+/** What the signer verified in a receipt, each against the coordinator's claim; [] when it verified nothing. */
+export function fieldChecks(s: Statement): FieldCheck[] {
+  if (s.kind !== 'merge.decided' && s.kind !== 'merge.result') return [];
+  return s.verified.map((v) => {
+    let at: unknown = s;
+    for (const k of v.field.split('.')) at = at !== null && typeof at === 'object' && Object.hasOwn(at, k) ? (at as Record<string, unknown>)[k] : undefined;
+    if (at === undefined) return { ...v, result: 'derived' as const };
+    return { ...v, claimed: at, result: canonicalJson(at) === canonicalJson(v.found) ? ('match' as const) : ('mismatch' as const) };
+  });
 }
 /** The event kinds a receipt is made from, and coordinator.started for the engine version. */
 export const RECEIPT_EVENTS = ['coordinator.started', 'merge.decided', 'merge.done', 'merge.failed'] as const;
@@ -110,7 +150,9 @@ export function canonicalJson(v: unknown): string {
     return String(v);
   }
   if (Array.isArray(v)) return `[${v.map(canonicalJson).join(',')}]`;
-  if (typeof v === 'object' && (Object.getPrototypeOf(v) === Object.prototype || Object.getPrototypeOf(v) === null)) {
+  // A plain object only (what JSON.parse and a statement literal make): a Buffer, Date, Map or class instance has
+  // another constructor and throws. WHY not by its prototype: src/ never reaches one (test/slot-path.test.ts).
+  if (typeof v === 'object' && (v as { constructor?: unknown }).constructor === Object) {
     const o = v as Record<string, unknown>;
     return `{${Object.keys(o)
       .sort()
@@ -273,19 +315,22 @@ function parsed<T extends (typeof RECEIPT_EVENTS)[number]>(e: ReceiptEvent, type
 }
 
 /** A merge event's receipt body, redacted (the log redacts on write already; this holds for any source). */
-function bodyOf(e: ReceiptEvent, version: string | null, decided: Map<string, string>): Body | null {
+function bodyOf(e: ReceiptEvent, version: string | null, decided: Map<string, string>, digest: string): Body | null {
   const common = { at: e.ts, instance: e.actor, event: e.id };
+  // Slice 1 verifies nothing itself: every field is attested (see Verified). Added after the redactor, which only
+  // the event-derived text needs.
+  const signer = { verified: [], log: { digest } };
   if (e.type === 'merge.decided') {
     const p = parsed(e, 'merge.decided');
     const body = { ...common, kind: 'merge.decided' as const, engine: { version }, policy: { commit: null }, inputs: { issue: p.issue, pr: p.number, head: p.head, files: null, check_runs: null }, decision: { auto: p.auto, level: null, reasons: p.reasons, why: p.why ?? [] } };
-    return redact(body);
+    return { ...redact(body), ...signer };
   }
   if (e.type === 'merge.done' || e.type === 'merge.failed') {
     const done = e.type === 'merge.done' ? parsed(e, 'merge.done') : null;
     const p = done ?? parsed(e, 'merge.failed');
     const why = done ? null : (p as EventPayload<'merge.failed'>).why;
     const body = { ...common, kind: 'merge.result' as const, issue: p.issue, pr: p.number, head: p.head, merged: !!done, commit: done?.sha ?? null, reconciled: done?.reconciled === true, why, decision: decided.get(`${p.number}@${p.head}`) ?? null };
-    return redact(body);
+    return { ...redact(body), ...signer };
   }
   return null;
 }
@@ -315,14 +360,29 @@ export function signEvents(existing: readonly unknown[], events: readonly Receip
     if (s.kind === 'merge.decided') decided.set(`${s.inputs.pr}@${s.inputs.head}`, state.ids[i]!);
     if (s.kind === 'merge.decided' || s.kind === 'merge.result') last = s.event;
   }
+  // The log as read now must hash, at each event already receipted, to what that receipt recorded: an event edited,
+  // dropped or inserted before it is a log that changed under signed receipts, and nothing more is signed.
+  const sorted = [...events].sort((a, b) => a.id - b.id);
+  const digests = new Map<number, string>();
+  let digest = '';
+  for (const e of sorted) {
+    if (digests.has(e.id)) throw new ReceiptError(`event ${e.id} appears twice in the log; nothing was signed`);
+    digest = logDigest(digest, e);
+    digests.set(e.id, digest);
+  }
+  for (const s of state.statements) {
+    if ((s.kind === 'merge.decided' || s.kind === 'merge.result') && digests.get(s.event) !== s.log.digest) {
+      throw new ReceiptError(`the log changed under receipts already signed (at event ${s.event}: an event before it was edited, dropped or inserted, or it is gone); nothing was signed`);
+    }
+  }
   let version: string | null = null;
-  for (const e of [...events].sort((a, b) => a.id - b.id)) {
+  for (const e of sorted) {
     if (e.type === 'coordinator.started') {
       version = parsed(e, 'coordinator.started').version;
       continue;
     }
     if (e.id <= last) continue;
-    const body = bodyOf(e, version, decided);
+    const body = bodyOf(e, version, decided, digests.get(e.id)!);
     if (!body) continue;
     const id = push(body);
     if (body.kind === 'merge.decided') decided.set(`${body.inputs.pr}@${body.inputs.head}`, id);

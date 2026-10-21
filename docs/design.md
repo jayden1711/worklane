@@ -166,6 +166,8 @@ A signed receipt is a merge decision or merge result, signed and chained so that
 - **Built:** the format, the chain, `<cli> receipts keygen|sign|rotate|verify`, and receipts for `merge.decided`, `merge.done` and `merge.failed`.
 - **Not yet root-signed.** `receipts sign` signs with whatever key file it's given, as whoever runs it, and says so in its output. Nothing installs or schedules a signer yet.
 - **Not yet recorded:** the merge record doesn't carry the policy commit, changed files, check run ids or level, so those fields are `null`.
+- **Nothing verified independently yet.** Every field is *attested*: the coordinator's claim as its log recorded it. Each receipt's `verified` list is empty, and `verify` says so.
+- **Already built:** the signer refuses a log that changed under receipts it already signed (`log.digest`).
 
 **Schema (v1).** A receipt's statement is canonical JSON: RFC 8785 for the values it holds (keys sorted, no whitespace, integers only). It carries `schema: "<cli>.receipt/v1"`, and a verifier refuses any version it doesn't know. A new field means a new version.
 - **Every receipt:** `seq`, `prev` and `at`.
@@ -178,6 +180,9 @@ A signed receipt is a merge decision or merge result, signed and chained so that
   - `inputs`: issue, pr, head, `files` and `check_runs`;
   - `decision`: auto, level, reasons and why.
 - **`merge.result`:** pr, head, merged, the merge `commit`, `reconciled`, `why`, and `decision`, which is the id of the chain's latest decision receipt for that head. A held PR may never merge, so the result is its own receipt rather than a field of the decision.
+- **Both merge kinds also carry:**
+  - **`verified`:** what the signer checked itself, as `{field, how, found}`. `field` is a dotted path in the statement, or a fact only the signer derives, such as `result.tree`. A field not listed is attested.
+  - **`log.digest`:** a running SHA-256 over every event in the log up to this one, as the signer read it.
 - **`null` means the deciding engine didn't record it.** It's never filled in later from somewhere else.
 
 **Envelope.** Each statement is signed in a DSSE envelope (in-toto's format, reused rather than invented):
@@ -186,7 +191,7 @@ A signed receipt is a merge decision or merge result, signed and chained so that
 - one ed25519 signature from Node's built-in crypto (no new dependency);
 - `keyid` = SHA-256 of the key's SPKI DER.
 
-Receipts are stored one envelope per line (JSON lines). They hold ids, hashes and reasons, never prompts, code or diffs, and they go through the redactor again before signing, even though the log already redacts on write.
+Receipts are stored one envelope per line (JSON lines). They hold ids, hashes and reasons, not prompts, code or diffs. The reasons, why and failure text are free text from the log. They go through the pattern redactor again before signing (the log already redacts on write), so a secret no pattern matches would pass, as it would into the log.
 
 **Chain.** Each receipt's `prev` is the SHA-256 of the previous payload, and its `seq` is its position; the first receipt is `chain.started`. The verifier checks:
 - the first receipt was started by a key the auditor gave;
@@ -197,12 +202,49 @@ Receipts are stored one envelope per line (JSON lines). They hold ids, hashes an
 
 This catches any receipt that was changed, reordered, inserted, or dropped from the start or middle. A dropped tail shows only against an anchor, a head kept from an earlier look (`--anchor`). A fork (a second chain from the same key) also shows only by comparing anchors.
 
-**Who signs (owner decision; see #737).** The coordinator can act as the agent user (`ALL=(agent) NOPASSWD: ALL`), so it must not hold the key:
-- **A. A key in the coordinator: rejected.** A compromised coordinator re-signs a forged chain from the start, and past receipts then prove nothing.
-- **B. The root machine helper signs what the coordinator sends** (a new sudoers verb). The key and the past stay safe. But root parses coordinator input on every decision, and what it signs is still the coordinator's word.
-- **C. Recommended: a signer identity of its own that reads the log read-only.** A dedicated system user, not root, that the coordinator has no sudo rule to (a setup test asserts this). It runs from a systemd path or timer unit (other OSes behind the OS adapter). It holds the only readable copy of the key and is the only writer of the receipts file. Its one input is the append-only log, so there is no new channel from the coordinator to it or to root. In pod mode it's a signer pod with the key in a Secret the coordinator's service account can't read, and the log volume mounted read-only.
-  - **C's cost:** it signs after the fact. Between a decision and its signing, a compromised coordinator could rewrite the log, since it owns the database file. A path unit on the log keeps that window short (inferred, not measured).
-- **Slice 1** ships the seam (`ReceiptSigner`) and the command. Installing C is slice 3. It touches setup scripts, so it belongs to Lane A.
+**Who signs: C, decided by the owner (2026-10-20; see #737).** The coordinator can act as the agent user (`ALL=(agent) NOPASSWD: ALL`), so it never holds the key. The options were:
+- **A. A key in the coordinator.** Rejected: a compromised coordinator re-signs a forged chain from the start.
+- **B. The root machine helper signs what the coordinator sends.** Not chosen: root would parse coordinator input on every decision, and what it signs would be the coordinator's word.
+- **C. Chosen: a separate signer OS user.** It owns the key and reads the event log read-only.
+  - **Who it is:** a dedicated system user, not root, that the coordinator has no sudo rule to (a setup test asserts this).
+  - **How it runs:** from a systemd path or timer unit, with other OSes behind the OS adapter. In pod mode it's a signer pod with the key in a Secret the coordinator's service account can't read, and the log volume mounted read-only.
+  - **What it owns:** the only readable copy of the key. It is also the only writer of its receipts file.
+  - **Its input:** the log, never a request from the coordinator, so there is no new channel from the coordinator to it or to root.
+  - **Its cost:** it signs after the fact. Between a decision and its signing, a compromised coordinator could rewrite the log, since it owns the database file. A path unit keeps that window short (inferred, not measured).
+  - **Slice 1** ships the format, the chain and the command. Anyone holding a key file runs it, so it is *not yet* this signer. Slice 3, in the epic lane, installs the user and the unit.
+
+**What the signer (C) must do.** It never signs blindly what the coordinator wrote. These requirements apply to slice 3; slice 1 already does the parts marked built.
+- **Its own append-only chain.** Each receipt links to the previous one *it* signed (`seq`, and `prev` = the SHA-256 of that payload). It extends the chain only when the chain verifies from a start key it trusts, and only with the chain's current key (built).
+- **It refuses input that breaks its chain:**
+  - **A duplicate or a reorder:** event ids must rise strictly, and an id seen twice is refused (built).
+  - **A gap or a fork in the log:** `log.digest` at each receipt is the running hash of every event up to it. A log that no longer hashes to what was signed (an event edited, dropped, or inserted before a signed one) is refused, and nothing more is signed (built).
+  - It never signs on top of a receipts file that doesn't verify (built).
+- **It re-derives facts itself where it can,** with a read-only identity: its own clone or fetch, and a read-only GitHub token. It records each check in `verified`, and flags any mismatch with the coordinator's claim. A flagged receipt is still signed: the evidence is the point. `verify` exits 3 on a flag. Slice 3 decides which mismatches refuse to sign instead.
+  - The merge commit and its tree, from git.
+  - The policy commit: main's tip at the decision's time, from git's reflog of the fetched ref (as far as the fetches cover).
+  - The PR head and its changed files, from git and GitHub.
+  - The required check run ids at the head, from GitHub's checks API.
+
+**VERIFIES vs ATTESTS.** Each receipt field, by who stands behind it:
+
+| Field | Slice 1 | Slice 3 signer (planned) |
+|---|---|---|
+| `seq`, `prev`, `log.digest`, `event` order | **Verifies** (its own chain and its own read of the log) | Verifies |
+| `instance`, `at`, `engine.version` | Attests (the log's actor, clock and `coordinator.started`) | Attests: nothing outside the coordinator knows them |
+| `inputs.issue`, `inputs.pr` | Attests | Verifies the PR exists and links the issue (GitHub), else attests |
+| `inputs.head` | Attests | Verifies against GitHub's PR head at signing time (it can have moved: then flagged, not proven) |
+| `inputs.files` | Attests (`null`) | Verifies: `git diff --name-only` of base...head in its own clone |
+| `inputs.check_runs` | Attests (`null`) | Verifies: ids and conclusions from GitHub's checks API at the head |
+| `policy.commit` | Attests (`null`) | Verifies that it was main's tip at the decision's time, as far as its fetches saw |
+| `decision.auto`, `level`, `reasons`, `why` | Attests | Attests. Step 1's replay (`explain-merge`) could re-derive `auto` and `reasons` from the verified inputs later |
+| `merge.result` `merged`, `commit` | Attests | Verifies: the commit is on main, its parents are main's previous tip and the head, and its tree (as `result.tree`) |
+| `merge.result` `why` | Attests | Attests |
+
+`verify` prints how many fields the signer verified itself, and that every other field is attested. A receipt never implies more than was checked.
+
+**Format readiness for slice 3.** Slice 1's chain is the signer's own chain: `seq`, `prev` over the previous payload it signed, `chain.started`, `key.rotated`, and `log.digest`. `verified` exists from v1, empty in slice 1. So slice 3 fills fields without a format change (inferred from the table above). Two things slice 3 may still want, each a v2 if it does:
+- a refusal recorded in the chain, rather than only reported by the signer;
+- several signatures per receipt (a signer list).
 
 **Keys.**
 - **Generation and custody:** the customer makes the key on their own side, air-gapped if they want: `receipts keygen`, or any ed25519 PKCS#8 PEM. No online service is involved (#698 decision 9).
@@ -211,12 +253,19 @@ This catches any receipt that was changed, reordered, inserted, or dropped from 
 
 **Verify.** `<cli> receipts verify <file|dir> --key <pub> [--key <pub>]... [--anchor <id>]`. The command name comes from `BRAND`.
 - **Inputs:** only the receipts and the public key. No engine state, no network.
-- **Exit codes:** 0 verified; 1 failed (it names the first bad receipt); 2 a usage error, including a private key passed as `--key`.
-- **Output:** the head, for the auditor to keep as the next anchor.
+- **Exit codes:**
+  - 0: verified.
+  - 1: failed; it names the first bad receipt.
+  - 2: a usage error, including a private key passed as `--key`, or an `--anchor` that isn't a receipt id (an empty one included: an anchor given is never skipped).
+  - 3: authentic, but the signer flagged a field it found different from the coordinator's claim.
+- **Output:**
+  - the head, for the auditor to keep as the next anchor;
+  - what the signer verified, against what it only attests.
 
 **Rotation.**
 - **Planned:** a `key.rotated` receipt, signed by the current key, names the next key. After it, only the next key verifies. Auditors keep trusting the start key, and the verifier follows the rotations.
 - **The signer trusts a start key too.** It extends a chain only if the chain verifies from its own key, or, after a rotation, from a start key it's given with `--trust`. A file swapped for a chain someone else started, then rotated to this key, is never extended.
+- **What rotation doesn't stop: a retired key can still sign a different chain.** Its holder can sign a fresh chain from the start, or fork the real one before the rotation. Either verifies with that key unless the auditor holds an anchor taken after the rotation (measured in #918's review).
 - **Compromised key:** rotation can't help, because the holder of the stolen key can rotate too. Start a new chain with a new key, and publish out of band the old chain's last trusted head and the new public key.
 
 **Events, in order.**
@@ -235,10 +284,19 @@ This catches any receipt that was changed, reordered, inserted, or dropped from 
 **Compromised component.**
 - **Agent user:** no write to the log (inferred: the log is the coordinator's, group-only) and no read of the key. It can shape a decision only through the PR, which a receipt records by id.
 - **Coordinator:**
-  - It can append false events, and they get signed.
-  - It can rewrite the log before the signer reads it.
-  - It can stop writing, which leaves gaps visible against GitHub.
-  - Under C it can't change or re-sign a receipt already made.
+  - **What it can still make the signer attest:**
+    - a decision that never happened, and its level, reasons and why;
+    - the engine version;
+    - the times;
+    - any field the signer can't re-derive, marked attested;
+    - a log rewritten before the signer first reads it.
+  - **What it can't make the signer verify:**
+    - a head, a changed-file list or check run ids that GitHub and git don't show (slice 3 flags them);
+    - a merge commit that isn't on main, or has another tree;
+    - a policy commit that wasn't main's tip;
+    - a log edit behind a receipt already signed (refused: `log.digest`, built);
+    - any change, reorder or re-signing of a receipt already made (it never holds the key).
+  - **It can stop writing,** which leaves gaps visible against GitHub.
 - **Signer identity:** the trust root. It can sign anything, which is why it is separate and small.
 - **Root:** everything.
 - **Anyone who can write the receipts file:** can delete or truncate it (a dropped tail needs an anchor to show), never forge a receipt.

@@ -5,12 +5,12 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { generateKeyPairSync, type KeyObject } from 'node:crypto';
-import { copyFileSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, lstatSync, mkdtempSync, readFileSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { BRAND } from '../src/brand.js';
 import { EventLog } from '../src/events/log.js';
-import { canonicalJson, keyId, keySigner, pae, PAYLOAD_TYPE, RECEIPT_SCHEMA, rotateChain, signEvents, statementOf, verifyChain, type Envelope, type ReceiptEvent, type ReceiptSigner } from '../src/signed-receipts.js';
+import { canonicalJson, fieldChecks, keyId, keySigner, pae, PAYLOAD_TYPE, RECEIPT_SCHEMA, rotateChain, signEvents, statementOf, verifyChain, type Envelope, type ReceiptEvent, type ReceiptSigner } from '../src/signed-receipts.js';
 import { readReceiptFiles, signLog } from '../src/signed-receipts-store.js';
 import { engineCli } from './helpers.js';
 
@@ -88,6 +88,9 @@ test('every merge decision and result in the log gets a receipt that verifies of
   assert.deepEqual(d1.inputs, { issue: 7, pr: 41, head: H1, files: null, check_runs: null });
   assert.deepEqual(d1.decision, { auto: true, level: null, reasons: [], why: [] });
   assert.equal(d1.policy.commit, null, 'the deciding engine does not record its policy commit yet: null, never a guess');
+  // Nothing in slice 1 is checked independently by the signer: every field is attested, and the receipt says so.
+  assert.deepEqual((d1 as { verified?: unknown }).verified, []);
+  assert.match(String((d1 as { log?: { digest?: unknown } }).log?.digest), /^[0-9a-f]{64}$/, 'the log as the signer read it, up to this event');
   const res1 = st[2]!;
   assert.ok(res1.kind === 'merge.result');
   assert.deepEqual([res1.merged, res1.commit, res1.decision], [true, M1, r.ids[1]]);
@@ -313,4 +316,89 @@ test(`${BRAND.cli} receipts: keygen, sign and verify offline from the CLI; a tam
   // Never a signature from a key the CLI can't read as an ed25519 private key.
   writeFileSync(join(keyDir, 'junk.key'), 'not a key');
   assert.equal(cli('sign', '--log', f.path, '--key', join(keyDir, 'junk.key'), '--out', join(f.dir, 'r2.jsonl')).status, 1);
+  // The auditor is told what the signer checked itself and what is only the coordinator's word (attested).
+  assert.match(ok.stdout, /verified independently by the signer: none/);
+});
+
+const receiptsCli = (...a: string[]) => spawnSync(process.execPath, [engineCli, 'receipts', ...a], { encoding: 'utf8', timeout: 60_000 });
+
+test('verify --anchor: an empty or malformed anchor is a usage error, never a skipped check (#918 round 2)', () => {
+  const s = signed();
+  const pub = join(s.dir, 'chain.pub');
+  writeFileSync(pub, s.pub.export({ type: 'spki', format: 'pem' }).toString());
+  const full = verifyChain(s.envs, { keys: [s.pub] });
+  assert.ok(full.ok);
+  const head = full.head!;
+  const short = join(s.dir, 'short.jsonl');
+  writeFileSync(short, `${readFileSync(s.out, 'utf8').split('\n').slice(0, 4).join('\n')}\n`);
+  for (const bad of ['', 'xyz', head.toUpperCase(), head.slice(1), `${head}0`]) {
+    const r = receiptsCli('verify', short, '--key', pub, '--anchor', bad);
+    assert.equal(r.status, 2, `--anchor ${JSON.stringify(bad)}: exit ${r.status}, ${r.stdout}`);
+  }
+  assert.equal(receiptsCli('verify', short, '--key', pub, '--anchor', head).status, 1, 'the dropped tail is caught');
+  assert.equal(receiptsCli('verify', s.out, '--key', pub, '--anchor', head).status, 0);
+});
+
+test('keygen creates each key file itself: never through a planted link, never over anything (#918 round 2)', { skip: process.platform === 'win32' && 'symlinks need privileges on Windows' }, () => {
+  const dir = mkdtempSync(join(tmpdir(), 'rkl-'));
+  // A dangling link at --private: refused; the link stays a link and nothing appears where it points.
+  const priv = join(dir, 'a.key');
+  symlinkSync(join(dir, 'victim-a'), priv);
+  assert.equal(receiptsCli('keygen', '--private', priv, '--public', join(dir, 'a.pub')).status, 1);
+  assert.ok(lstatSync(priv).isSymbolicLink());
+  assert.ok(!existsSync(join(dir, 'victim-a')));
+  assert.ok(!existsSync(join(dir, 'a.pub')));
+  // A dangling link at --public: refused, and no private key is left behind.
+  const pub = join(dir, 'b.pub');
+  symlinkSync(join(dir, 'victim-b'), pub);
+  assert.equal(receiptsCli('keygen', '--private', join(dir, 'b.key'), '--public', pub).status, 1);
+  assert.ok(!existsSync(join(dir, 'victim-b')));
+  assert.ok(!existsSync(join(dir, 'b.key')));
+  // Made normally: both files are regular files, this user's only (0600).
+  assert.equal(receiptsCli('keygen', '--private', join(dir, 'c.key'), '--public', join(dir, 'c.pub')).status, 0);
+  for (const f of ['c.key', 'c.pub']) {
+    assert.ok(lstatSync(join(dir, f)).isFile());
+    assert.equal(statSync(join(dir, f)).mode & 0o777, 0o600, f);
+  }
+});
+
+test('the signer refuses a log that changed under receipts it already signed: an event edited, dropped or inserted (#918 round 2)', () => {
+  const k = keys();
+  const at = (id: number) => `2026-10-20T00:00:${String(id).padStart(2, '0')}.000Z`;
+  const ev = (id: number, type: string, payload: unknown): ReceiptEvent => ({ id, ts: at(id), type, actor: 'inst', payload });
+  const base = [
+    ev(1, 'coordinator.started', { instance: 'inst', pid: 1, version: '1.2.3' }),
+    ev(2, 'merge.decided', { issue: 1, number: 2, head: H1, auto: true, reasons: [] }),
+    ev(4, 'issue.seen', { issue: 1, labels: [] }),
+    ev(5, 'merge.done', { issue: 1, number: 2, head: H1, sha: M1, url: 'u', title: 't' }),
+  ];
+  const first = signEvents([], base, k.signer).envelopes;
+  const next = ev(7, 'merge.decided', { issue: 3, number: 4, head: H2, auto: true, reasons: [] });
+  assert.equal(signEvents(first, [...base, next], k.signer).added, 1, 'a log that only grew is signed on');
+  const edited = base.map((e) => (e.id === 4 ? { ...e, payload: { issue: 1, labels: ['changed'] } } : e));
+  assert.throws(() => signEvents(first, [...edited, next], k.signer), /log changed/);
+  assert.throws(() => signEvents(first, [...base.filter((e) => e.id !== 4), next], k.signer), /log changed/);
+  assert.throws(() => signEvents(first, [...base, ev(3, 'issue.seen', { issue: 9, labels: [] }), next], k.signer), /log changed/);
+  assert.throws(() => signEvents(first, [...base.filter((e) => e.id !== 2), next], k.signer), /log changed/);
+});
+
+test('verify shows what the signer verified against what it only attests, and flags a mismatch with exit 3', () => {
+  // Slice 1's signer verifies nothing; this receipt is what slice 3's will make (the format is already v1's).
+  const k = keys();
+  const ev = (id: number, type: string, payload: unknown): ReceiptEvent => ({ id, ts: `2026-10-20T00:00:0${id}.000Z`, type, actor: 'inst', payload });
+  const envs = signEvents([], [ev(1, 'coordinator.started', { instance: 'inst', pid: 1, version: '1' }), ev(2, 'merge.decided', { issue: 1, number: 2, head: H1, auto: true, reasons: [] })], k.signer).envelopes;
+  const st = statementOf(envs[1]!) as Record<string, unknown>;
+  const checked = sealWith(k, { ...st, verified: [{ field: 'inputs.head', how: 'git', found: H1 }, { field: 'policy.commit', how: 'git', found: M1 }, { field: 'result.tree', how: 'git', found: H2 }] });
+  const chain = [envs[0]!, checked];
+  const r = verifyChain(chain, { keys: [k.pub] });
+  assert.ok(r.ok, JSON.stringify(r));
+  assert.deepEqual(fieldChecks(r.statements[1]!).map((c) => [c.field, c.result]), [['inputs.head', 'match'], ['policy.commit', 'mismatch'], ['result.tree', 'derived']]);
+  const dir = mkdtempSync(join(tmpdir(), 'rvf-'));
+  const pub = join(dir, 'k.pub');
+  writeFileSync(pub, k.pub.export({ type: 'spki', format: 'pem' }).toString());
+  writeFileSync(join(dir, 'r.jsonl'), `${chain.map((e) => canonicalJson(e)).join('\n')}\n`);
+  const out = receiptsCli('verify', join(dir, 'r.jsonl'), '--key', pub);
+  assert.equal(out.status, 3, out.stderr);
+  assert.match(out.stdout, /verified independently by the signer: 3 field checks/);
+  assert.match(out.stdout, /FLAGGED: receipt 2: policy\.commit: the coordinator claimed null, the signer found "c{40}" \(git\)/);
 });
