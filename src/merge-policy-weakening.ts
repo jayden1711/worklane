@@ -444,13 +444,25 @@ const isWordChar = (c: string) => (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z
  * non-null `x!`, a contextual word, `.`, or an operand on an earlier line (a semicolon may be inserted). It also
  * can't read a character outside printable ASCII, or whitespace other than a space, tab, CR or LF, outside a string
  * or comment. There, and where a string or regex runs off its line, it stops reading and every later character, of
- * every later line, is code: unsure reads as code, so what it holds waits. One pass, no regex.
+ * every later line, is the raw text (comments and strings included): what an unsure line holds waits, and the checks
+ * that read it skip nothing from that line on (`unsureFrom`, #886's round 8). One pass, no regex.
  */
 export function codeLinesOf(text: string): string[] {
+  return codeOf(text).lines;
+}
+
+/** codeLinesOf's lines, and the first line it gave up on (-1: it read the whole file). */
+export function codeOf(text: string): { lines: string[]; unsureFrom: number } {
   const out: string[] = [];
   let line = '';
   let mode: 'code' | 'line-comment' | 'block-comment' | "'" | '"' | 'template' | 'regex' | 'class' = 'code';
   let unsure = false;
+  let unsureFrom = -1;
+  // It gives up on the line being read (or, for a string that ran off its line, the one just ended).
+  const giveUp = (at = out.length) => {
+    unsure = true;
+    if (unsureFrom === -1) unsureFrom = at;
+  };
   // The brace depth at each open template expression's `${`, and the code's brace depth.
   const holes: number[] = [];
   let depth = 0;
@@ -466,6 +478,8 @@ export function codeLinesOf(text: string): string[] {
   let wordBefore = '';
   let wordAfterDot = false;
   let lastDotSpread = false;
+  // Whether the `..` being read follows a number with no `.` of its own (`1..x`).
+  let numberDots = false;
   // (Asserted, so the checks below read what sig set, not the start value.)
   let state = 'expected' as 'expected' | 'ended' | 'unknown';
   let lineSince = false;
@@ -491,7 +505,7 @@ export function codeLinesOf(text: string): string[] {
       if (mode === 'code' || mode === 'line-comment' || mode === 'block-comment') lineSince = true;
       if (mode === 'line-comment') mode = 'code';
       // A quoted string or a regex literal never runs past its line (an escaped newline is skipped below).
-      else if (mode === "'" || mode === '"' || mode === 'regex' || mode === 'class') unsure = true;
+      else if (mode === "'" || mode === '"' || mode === 'regex' || mode === 'class') giveUp(out.length - 1);
       continue;
     }
     // The other line terminators end a `//` comment too, mid-line by this file's lines; one unescaped in a quoted
@@ -500,7 +514,7 @@ export function codeLinesOf(text: string): string[] {
       if (mode === 'code' || mode === 'line-comment' || mode === 'block-comment') lineSince = true;
       if (mode === 'line-comment') mode = 'code';
       else if (mode === 'regex' || mode === 'class' || ((mode === "'" || mode === '"') && c === String.fromCharCode(13)) || (mode === 'code' && c !== String.fromCharCode(13))) {
-        unsure = true;
+        giveUp();
         line += c;
       }
       continue;
@@ -564,12 +578,12 @@ export function codeLinesOf(text: string): string[] {
     // tab). It can't tell what such a name or space makes of the words around it: unsure.
     const code = c.charCodeAt(0);
     if (code > 0x7e || (code < 0x20 && c !== '\t')) {
-      unsure = true;
+      giveUp();
       line += c;
       continue;
     }
     if (text.startsWith('<!--', k) || text.startsWith('-->', k)) {
-      unsure = true;
+      giveUp();
       line += c;
       continue;
     }
@@ -588,7 +602,7 @@ export function codeLinesOf(text: string): string[] {
       // else it can't place: unsure.
       const regex = state === 'expected' ? true : state === 'ended' && !lineSince ? false : null;
       line += c;
-      if (regex === null) unsure = true;
+      if (regex === null) giveUp();
       else if (regex) mode = 'regex';
       else sig('/', '', 'expected');
       continue;
@@ -636,9 +650,23 @@ export function codeLinesOf(text: string): string[] {
       // anything it can't place: it can't tell.
       sig(c, '', state === 'expected' ? 'expected' : 'unknown');
     } else if (c === '.') {
-      // A spread's `...` or a member's `.`: what follows a spread is read as it stands. A `/` right after either one
-      // can't be placed.
-      lastDotSpread = text[k - 1] === '.' || text[k + 1] === '.';
+      // A `.` is a spread's only as part of exactly `...`: what follows a spread is read as it stands. A lone `.` is a
+      // member's (or a number's own). In `1..x` the first is the number's own and the second a member's (#886's round
+      // 8). Any other run of dots: it can't place it. A `/` right after any `.` can't be placed either.
+      let s = k;
+      while (text[s - 1] === '.') s--;
+      let e = k;
+      while (text[e + 1] === '.') e++;
+      const run = e - s + 1;
+      if (run === 2 && k === s) numberDots = isWordChar(last) && !wordAfterDot && word !== '' && [...word].every((d) => d >= '0' && d <= '9') && text[k - 1] === last;
+      if (run === 3) lastDotSpread = true;
+      else if (run === 1 || (run === 2 && numberDots)) lastDotSpread = false;
+      else {
+        giveUp();
+        line += text.slice(k + 1, e + 1);
+        k = e;
+        continue;
+      }
       sig(c, '', 'unknown');
     } else if (c === '>') {
       // `=>`: a body comes next. Any other `>` may close type arguments (`N<string> / 2`).
@@ -647,7 +675,7 @@ export function codeLinesOf(text: string): string[] {
     else if (c !== ' ' && c !== '\t') sig(c, '', 'unknown');
   }
   out.push(line);
-  return out;
+  return { lines: out, unsureFrom };
 }
 
 /** A name for the global object (`globalThis`, `global`, `self`, `window`), each place it stands in a line's code. */
@@ -663,8 +691,10 @@ const DECLARES_NEXT = /(?<![\w$])(?:const|let|var|function|class)$/;
  * locals (`localNames`: Node has neither global, and a file's own `const self` is common). `global` and `globalThis`
  * always count.
  */
-function usesGlobalName(code: string, localNames: ReadonlySet<string>, previous: string): boolean {
+function usesGlobalName(code: string, localNames: ReadonlySet<string>, previous: string, unsure: boolean): boolean {
   for (const m of code.matchAll(GLOBAL_NAME)) {
+    // On a line the reader gave up on, the text is raw (comments and strings in it): no skip applies (#886's round 8).
+    if (unsure) return true;
     const name = m[0];
     const before = code.slice(0, m.index).trimEnd();
     const after = code.slice(m.index + name.length).trimStart();
@@ -684,14 +714,15 @@ function usesGlobalName(code: string, localNames: ReadonlySet<string>, previous:
  * Whether a line's code has a computed key built from strings (`{ ['CHE' + 'CKS']: x }`): a `[...]` holding a quote,
  * where a key stands (after `{` or `,`, or first on its line), then `:`. A ternary's `? ['a'] : []` is no key.
  */
-function computedStringKey(code: string): boolean {
+function computedStringKey(code: string, unsure: boolean): boolean {
   for (let k = code.indexOf('['); k !== -1; k = code.indexOf('[', k + 1)) {
     const end = code.indexOf(']', k + 1);
     if (end === -1) return false;
     const inner = code.slice(k + 1, end);
     if (!(inner.includes("'") || inner.includes('"') || inner.includes('`'))) continue;
     const before = code.slice(0, k).trimEnd();
-    if (!(before === '' || before.endsWith('{') || before.endsWith(','))) continue;
+    // On a line the reader gave up on, any `[...]` holding a quote, then `:`, counts.
+    if (!unsure && !(before === '' || before.endsWith('{') || before.endsWith(','))) continue;
     if (code.slice(end + 1).trimStart().startsWith(':')) return true;
   }
   return false;
@@ -985,13 +1016,17 @@ export function weakeningReasons(i: WeakeningInput): string[] {
     if (text === null || !added.size) continue;
     const lines = text.split('\n');
     // JSX text isn't JS: in a .jsx or .tsx file every line reads as code.
-    const code = /\.[jt]sx$/.test(p) ? lines : codeLinesOf(text);
-    const localNames = new Set(code.flatMap((c) => [...c.matchAll(LOCAL_SELF)].map((m) => m[1]!)));
+    const read = /\.[jt]sx$/.test(p) ? { lines, unsureFrom: 0 } : codeOf(text);
+    const code = read.lines;
+    // From the first line the reader gave up on, the text is raw: no skip applies there (#886's round 8).
+    const unsureAt = (k: number) => read.unsureFrom !== -1 && k >= read.unsureFrom;
+    const localNames = new Set(code.filter((_, k) => !unsureAt(k)).flatMap((c) => [...c.matchAll(LOCAL_SELF)].map((m) => m[1]!)));
     // The code line before each line that has code (for a key first on its line).
     let previous = '';
     lines.forEach((l, k) => {
       const c = code[k] ?? l;
-      if (added.has(l) && (c.includes('\\u') || namelessDeclaration(c) || usesGlobalName(c, localNames, previous) || computedStringKey(c))) hit('table-hidden', p, l.trim());
+      const unsure = unsureAt(k);
+      if (added.has(l) && (c.includes('\\u') || namelessDeclaration(c) || usesGlobalName(c, localNames, previous, unsure) || computedStringKey(c, unsure))) hit('table-hidden', p, l.trim());
       if (c.trim()) previous = c.trimEnd();
     });
   }
