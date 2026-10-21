@@ -1,7 +1,7 @@
 // WHY: the one-command install (scripts/bootstrap.sh) ends with one wizard URL, the same on every run, and a rerun
 // changes nothing: the dashboard starts in the background only when it isn't answering already.
 // INVARIANT: the URL never carries the dashboard's key; it stays in its 0600 file and the page asks for it once.
-import { spawn } from 'node:child_process';
+import { spawn } from './os/child-process.js';
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { BRAND } from './brand.js';

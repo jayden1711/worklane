@@ -10,5 +10,10 @@
       "hf.co"
     ]
   },
-  "image_digests": []
+  "image_digests": [],
+  "selection": {
+    "rule": "sha256-rank-v1",
+    "seed": 20261018,
+    "rows_sha256": null
+  }
 }

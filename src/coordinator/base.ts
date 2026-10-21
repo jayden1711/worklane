@@ -1,7 +1,7 @@
 // The coordinator's state and the helpers every part uses: its fields and constructor (the runner wrapper),
 // events, git, project commands, paths and task files, the governor, cost, asking, blocking and releasing.
 import type { Coordinator } from '../coordinator.js';
-import { execFileSync } from 'node:child_process';
+import { execFileSync } from '../os/child-process.js';
 import { randomBytes } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import { BRAND } from '../brand.js';

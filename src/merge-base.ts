@@ -2,7 +2,7 @@
 // coordinator owns: merge a base into the checked-out branch and report what
 // conflicted. Merge commits only here (the default strategy); conflict
 // markers use diff3 style so a resolver also sees the common ancestor.
-import { spawnSync } from 'node:child_process';
+import { spawnSync } from './os/child-process.js';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { changedNames, changedNamesOrNull, presentNames } from './coordinator/change-files.js';

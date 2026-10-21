@@ -3,7 +3,7 @@
 
 // INVARIANT: the host is always the sandbox host (no flag picks another; only a test passes MeasureIo.host), and no
 // checks dependency, token or App key is loaded here: a measure can't post a check.
-import { execFileSync } from 'node:child_process';
+import { execFileSync } from '../os/child-process.js';
 import { join } from 'node:path';
 import { BRAND } from '../brand.js';
 import { EventLog } from '../events/log.js';
