@@ -34,6 +34,7 @@ import { appJwt } from '../github-app.js';
 import { setGithubApp } from '../instance.js';
 import { instanceNameProblem } from '../instance-name.js';
 import { asUser, currentUser, homeOf, installSecretFor } from '../os/index.js';
+import { ownEnv } from '../os/own-env.js';
 
 type Fetch = typeof fetch;
 export type AppKind = 'agent' | 'signin';
@@ -529,7 +530,8 @@ export function verifyWithScript(opts: { script?: string; node?: { args?: string
   const script = opts.script ?? APP_PERMISSIONS_SCRIPT;
   // The node options this process was started with go to the node it starts as the coordinator, as they would to
   // any child: switching user (sudo env -i) would drop them. Whoever set them started this process (root, here).
-  const env = { ...(process.env.NODE_OPTIONS ? { NODE_OPTIONS: process.env.NODE_OPTIONS } : {}), ...(opts.node?.env ?? {}) };
+  const nodeOptions = ownEnv().get('NODE_OPTIONS');
+  const env = { ...(nodeOptions ? { NODE_OPTIONS: nodeOptions } : {}), ...(opts.node?.env ?? {}) };
   return (o) =>
     new Promise((done) => {
       const args = [...(opts.node?.args ?? []), '--input-type=module', '-', o.key, String(o.appId), String(o.installationId), o.repo];

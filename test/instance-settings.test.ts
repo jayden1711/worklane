@@ -119,17 +119,22 @@ test('the owner changes a setting through the instance\'s own server: written, r
   const x = await serve(s);
   try {
     assert.equal((await fetch(`${x.base}/api/instance-settings`)).status, 401);
-    const r = await x.post('workers', 2);
+    // Round 11 (the owner's decision of 2026-10-19): the dashboard only tightens, so a raise is refused, naming the
+    // admin's route; until then this raised workers 1 → 2 here. A lowering goes as before.
+    const up = await x.post('workers', 2);
+    assert.equal(up.status, 400);
+    assert.match(await up.text(), /settings\.workers 2 would loosen it \(now 1\)/);
+    const r = await x.post('chat_attachments.retention_days', 7);
     assert.equal(r.status, 200, await r.clone().text());
-    assert.deepEqual(await r.json(), { ok: true, from: 1, to: 2 });
-    assert.match(readFileSync(s.policyFile, 'utf8'), /workers: 2/);
+    assert.deepEqual(await r.json(), { ok: true, from: 30, to: 7 });
+    assert.match(readFileSync(s.policyFile, 'utf8'), /retention_days: 7/);
     const v = await x.get();
-    assert.deepEqual(v.settings.find((y) => y.key === 'workers'), { key: 'workers', value: 2, source: 'instance' });
+    assert.deepEqual(v.settings.find((y) => y.key === 'chat_attachments.retention_days'), { key: 'chat_attachments.retention_days', value: 7, source: 'instance' });
     assert.equal((await x.post('run_windows', [{ from: '22:00', to: '06:00' }])).status, 200);
     const changed = new EventLog(s.eventsDb).read(0, ['settings.changed']);
-    assert.deepEqual(changed.map((e) => [(e.payload as { key: string }).key, (e.payload as { by: string }).by, e.source]), [['workers', 'example-owner', 'human'], ['run_windows', 'example-owner', 'human']]);
+    assert.deepEqual(changed.map((e) => [(e.payload as { key: string }).key, (e.payload as { by: string }).by, e.source]), [['chat_attachments.retention_days', 'example-owner', 'human'], ['run_windows', 'example-owner', 'human']]);
     const st = (await (await fetch(`${x.base}/api/state`, { headers: x.h })).json()) as { activity: { summary: string; type: string }[] };
-    assert.ok(st.activity.some((a) => a.type === 'settings.changed' && a.summary === 'setting workers: 1 → 2, by @example-owner'), 'on Activity');
+    assert.ok(st.activity.some((a) => a.type === 'settings.changed' && a.summary === 'setting chat_attachments.retention_days: 30 → 7, by @example-owner'), 'on Activity');
     assert.ok(st.activity.some((a) => a.summary === 'setting run_windows: any time → 22:00-06:00, by @example-owner'));
   } finally {
     await x.d.close();

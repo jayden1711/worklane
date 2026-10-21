@@ -24,7 +24,8 @@
 // runs the installed engine's scripts/setup/claude-account.sh status, under the same root-owned check (`status
 // --json`: each agent user's account and expiry, written to /var/lib/worklane/claude-account/status.json). Nothing
 // here takes a Claude credential (issue #711). The account profile steps (use, remove) and the failover setting were
-// removed (#736): refused like any unknown command, nothing run or logged.
+// removed (#736): refused like any unknown command, nothing run or logged. The sudoers rule lists claude-account
+// status alone (#758).
 //
 // The engine updater (scripts/setup/updates.sh, scripts/machine/worklane-update.cjs):
 //
@@ -116,7 +117,7 @@ const ENGINE_CLI = '/opt/worklane/current/dist/src/cli.js';
 const PLUGINS_SH = '/opt/worklane/current/scripts/setup/plugins.sh';
 const PLUGIN_FETCH_UNIT = 'worklane-plugin-fetch';
 
-const USAGE = 'usage: worklane-machine set-slots <1..16> | set-updates on|off | set-test-slots <1..8> | add-project <name> <owner/repo> | claude-account status | claude-account use|remove <profile> | claude-account failover <order|off> back|stay | install-updater | set-update-channel release | stage-update-signer <principal> ssh-ed25519 <public key> | discard-update-signer <principal> ssh-ed25519 <public key> | tailscale install|up|serve|public-url | plugin-fetch <id> <https url> <sha> [<path>] | plugin-stage <id> sha256:<hex> <role+role> | plugin-withdraw <id> | plugin-remove <id> | mcp-fetch <id> <npm package> <x.y.z> | mcp-preview <id> <plugin> <server> | mcp-snapshot <id> | mcp-stage <id> sha256:<hex> <role+role> <host+host|none> <SECRET+SECRET|none>';
+const USAGE = 'usage: worklane-machine set-slots <1..16> | set-updates on|off | set-test-slots <1..8> | add-project <name> <owner/repo> | claude-account status | install-updater | set-update-channel release | stage-update-signer <principal> ssh-ed25519 <public key> | discard-update-signer <principal> ssh-ed25519 <public key> | tailscale install|up|serve|public-url | plugin-fetch <id> <https url> <sha> [<path>] | plugin-stage <id> sha256:<hex> <role+role> | plugin-withdraw <id> | plugin-remove <id> | mcp-fetch <id> <npm package> <x.y.z> | mcp-preview <id> <plugin> <server> | mcp-snapshot <id> | mcp-stage <id> sha256:<hex> <role+role> <host+host|none> <SECRET+SECRET|none> | set-policy <key> <value>';
 
 /**
  * Why a name can't be an instance's, or null: instance.sh's shape, never a name whose users, group or units are already
@@ -188,7 +189,7 @@ function logLine(what, from, to) {
  * recorded only once it has run, as done (`to`) when it exited 0 and as `failed: <to>: exit <n>` otherwise, never as
  * a change before it happened. Returns the step's status.
  */
-function runLogged(what, to, run) {
+function runLogged(what, to, run, opts = {}) {
   let status;
   try {
     status = run();
@@ -196,7 +197,15 @@ function runLogged(what, to, run) {
     process.stderr.write(`${what}: ${(e && e.message) || e}\n`);
     status = 1;
   }
-  logLine(what, null, status === 0 ? to : `failed: ${to}: exit ${status}`);
+  try {
+    logLine(what, null, status === 0 ? to : `failed: ${to}: exit ${status}`);
+  } catch (e) {
+    // opts.statusOverLog (set-policy): a change that went through is never reported as failed because its log line
+    // couldn't be written (a full /var/lib): said on stderr, and the step's own status kept (#726: OFF is never
+    // reported failed once done).
+    if (!opts.statusOverLog) throw e;
+    process.stderr.write(`${what}: ${status === 0 ? 'done' : 'failed'}, but the change log (${LOG}) couldn't be written: ${(e && e.message) || e}\n`);
+  }
   return status;
 }
 
@@ -227,8 +236,8 @@ function parseClaudeAccount(args) {
 
 /**
  * The account profile steps (claude-account use|remove <profile>) and the failover setting were removed (#736): no
- * list is one, so each is refused like any unknown command. Both names stay only for the sudoers rule's patterns that
- * still name them (dropped with that rule, #758) and the export list; neither ever returns a step.
+ * list is one, so each is refused like any unknown command, and no sudoers rule names one (#758). Both names stay only
+ * in the export list, which test/claude-accounts-retired.test.ts checks refuses each; neither ever returns a step.
  */
 function parseClaudeProfile(_args) {
   return null;
@@ -547,6 +556,56 @@ function plugin(p) {
   return r.status === null ? 1 : r.status;
 }
 
+// ---------- the asking instance's root policy.yaml (issue #726) ----------
+//
+//   worklane-machine set-policy <key> <value>
+//
+// One key of the asking coordinator's own instance's policy.yaml (from SUDO_USER, never an argument), which setup made
+// root's: the installed engine's `policy set` runs as root, checks it against the schema and the machine's limits, and
+// writes it root's, 0644. Only these keys, each in its shape (src/policy-gate.ts holds the same table; a test holds them
+// equal); never sandbox, allow_same_user, lanes or an allowlist; land_mode only to pr, main_watch only to auto, and
+// auto_merge only off (POLICY_ONLY, held equal to the engine's HELPER_ONLY). Loosening any of those is an admin's, at a
+// root shell (sudo <cli> policy set <instance> <key> <value>).
+const POLICY_SET_KEYS = {
+  'budget.daily_usd': 'number', 'agents.max_workers': 'number', land_mode: 'word', auto_merge: 'bool', main_watch: 'word', 'automations.enabled': 'bool',
+  'settings.workers': 'number', 'settings.daily_budget_usd': 'number', 'settings.ci_repair.enabled': 'bool', 'settings.ci_repair.max_fixes_per_pr': 'number', 'settings.run_windows': 'windows',
+  'settings.research.max_searches_per_day': 'number', 'settings.research.max_fetches_per_day': 'number', 'settings.research.max_usd_per_day': 'number', 'settings.research.repo_access': 'bool',
+  'settings.intake.reports_per_sender_per_day': 'number', 'settings.intake.drafts_per_day': 'number', 'settings.intake.max_usd_per_day': 'number', 'settings.stuck_guard': 'word',
+  'settings.chat_attachments.max_file_mb': 'number', 'settings.chat_attachments.max_message_mb': 'number', 'settings.chat_attachments.retention_days': 'number',
+};
+const POLICY_ONLY = { land_mode: 'pr', main_watch: 'auto', auto_merge: 'off' };
+const POLICY_SHAPES = {
+  number: /^(0|[1-9][0-9]{0,5})(\.[0-9]{1,2})?$/,
+  bool: /^(on|off)$/,
+  word: /^[a-z][a-z-]{0,15}$/,
+  windows: /^(none|[0-2][0-9][0-5][0-9]-[0-2][0-9][0-5][0-9](\+[0-2][0-9][0-5][0-9]-[0-2][0-9][0-5][0-9]){0,7})$/,
+};
+
+/** The policy change a list asks for, or null when it is anything but `set-policy <key> <value>` in its exact shape. */
+function parsePolicySet(args) {
+  if (args.length !== 3 || args[0] !== 'set-policy' || typeof args[1] !== 'string' || typeof args[2] !== 'string') return null;
+  const [, key, value] = args;
+  if (!Object.prototype.hasOwnProperty.call(POLICY_SET_KEYS, key) || !POLICY_SHAPES[POLICY_SET_KEYS[key]].test(value)) return null;
+  if (Object.prototype.hasOwnProperty.call(POLICY_ONLY, key) && POLICY_ONLY[key] !== value) return null;
+  return { key, value };
+}
+
+function policySet(p) {
+  const instance = coordinatorInstance(process.env.SUDO_USER);
+  if (!instance) {
+    process.stderr.write(`set-policy here is for a coordinator, through sudo; an admin runs: ${ENGINE_CLI} policy set <instance> ${p.key} ${p.value}\n`);
+    return 2;
+  }
+  const cli = rootScript(ENGINE_CLI);
+  if (!cli) return 1;
+  return runLogged(`policy.${instance}`, `${p.key} ${p.value}`, () => {
+    // Its last line, {key, from, to}, is what the coordinator records as settings.changed.
+    const r = spawnSync(process.execPath, [cli, 'policy', 'set', instance, p.key, p.value], { cwd: '/', env: { PATH: PATH_ENV, HOME: '/root', LANG: 'C.UTF-8', SUDO_USER: process.env.SUDO_USER }, stdio: ['ignore', 'inherit', 'inherit'] });
+    if (r.error) throw r.error;
+    return r.status === null ? 1 : r.status;
+  }, { statusOverLog: true });
+}
+
 // ---------- where a step runs ----------
 //
 // The coordinator calls this helper through sudo from inside its own unit, whose sandbox (ProtectSystem=full) makes
@@ -566,6 +625,7 @@ function needsUnit(args) {
   if (parseSigner('stage-update-signer', args) || parseSigner('discard-update-signer', args)) return true; // its pending list, kept with the rest
   if (parseClaudeAccount(args) === 'status') return true; // claude-account.sh as root
   if (parseClaudeFailover(args)) return true; // claude-account.sh as root
+  if (parsePolicySet(args)) return true; // the engine as root, writing in the instance home (outside the coordinator's sandbox)
   const pl = parsePlugin(args);
   if (pl && pl.action === 'remove') return true; // /etc/worklane/plugins
   return false;
@@ -610,6 +670,8 @@ function main(argv) {
   if (ts) return tailscale(ts);
   const pl = parsePlugin(args);
   if (pl) return plugin(pl);
+  const pol = parsePolicySet(args);
+  if (pol) return policySet(pol);
   const change = parse(args);
   if (!change) {
     process.stderr.write(`${USAGE}\n`);
@@ -641,4 +703,4 @@ function main(argv) {
 }
 
 if (require.main === module) process.exitCode = main(process.argv.slice(2));
-module.exports = { parsePlugin, pluginHosts, mcpRegistries, pluginUrlProblem, pluginPathProblem, runLogged, needsUnit, unitCommand, IN_UNIT, parse, instanceNameProblem, parseAddProject, parseClaudeAccount, parseClaudeProfile, parseClaudeFailover, parseTailscale, tailscaleCommand, coordinatorInstance, parseSigner, fingerprint, readPending, writePending, PENDING, PENDING_MAX, PENDING_TTL_MS };
+module.exports = { parsePolicySet, POLICY_SET_KEYS, POLICY_ONLY, parsePlugin, pluginHosts, mcpRegistries, pluginUrlProblem, pluginPathProblem, runLogged, needsUnit, unitCommand, IN_UNIT, parse, instanceNameProblem, parseAddProject, parseClaudeAccount, parseClaudeProfile, parseClaudeFailover, parseTailscale, tailscaleCommand, coordinatorInstance, parseSigner, fingerprint, readPending, writePending, PENDING, PENDING_MAX, PENDING_TTL_MS };

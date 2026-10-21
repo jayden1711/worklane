@@ -7,6 +7,7 @@ import { testRunSign } from './system-paths.js';
 import { availableParallelism, homedir, loadavg, userInfo } from 'node:os';
 import { basename, delimiter, dirname, join, posix as posixPath, resolve as resolvePath, sep } from 'node:path';
 import { BRAND } from '../brand.js';
+import { ownEnv, type OwnEnv } from './own-env.js';
 import { outboundEnv } from '../network.js';
 import { safeProjectEnv } from '../project-env.js';
 import { withoutPushGateHatch } from '../guardrails/push-hook.js';
@@ -353,18 +354,21 @@ export function canRunAgents(os: OsKind): boolean {
  * own state dir through a default it fell through to. Outside a test run, as always.
  */
 export function stateDir(): string {
-  const dir = unguardedStateDir();
-  const refusal = testStateRefusal(dir);
+  // WHY (#786): one own-variable snapshot for the dir and its refusal, as slotsDir does: a value on Object.prototype
+  // neither moves the state dir nor, paired with an own-only check, un-refuses it.
+  const env = ownEnv();
+  const dir = unguardedStateDir(env);
+  const refusal = testStateRefusal(dir, env.asProcessEnv());
   if (refusal) throw new TestStateRefused(refusal);
   return dir;
 }
 
-function unguardedStateDir(): string {
-  const override = process.env[`${BRAND.envPrefix}_STATE_DIR`];
+function unguardedStateDir(env: OwnEnv): string {
+  const override = env.get(`${BRAND.envPrefix}_STATE_DIR`);
   if (override) return override;
   if (process.platform === 'darwin') return join(homedir(), 'Library', 'Application Support', BRAND.cli);
-  if (process.platform === 'win32') return join(process.env.LOCALAPPDATA ?? join(homedir(), 'AppData', 'Local'), BRAND.cli);
-  return join(process.env.XDG_STATE_HOME ?? join(homedir(), '.local', 'state'), BRAND.cli);
+  if (process.platform === 'win32') return join(env.get('LOCALAPPDATA') ?? join(homedir(), 'AppData', 'Local'), BRAND.cli);
+  return join(env.get('XDG_STATE_HOME') ?? join(homedir(), '.local', 'state'), BRAND.cli);
 }
 
 /** An OS user's numeric id (POSIX), or null if there is no such user (or on native Windows). */
@@ -375,6 +379,18 @@ export function userUid(user: string): number | null {
     return /^\d+$/.test(out) ? Number(out) : null;
   } catch {
     return null;
+  }
+}
+
+/** Whether an OS user exists: 'absent' only on `getent passwd`'s "not found" (exit 2); any other failure 'unknown'. */
+export function userPresence(user: string, timeoutMs = 5_000): 'exists' | 'absent' | 'unknown' {
+  if (process.platform === 'win32') return 'unknown';
+  try {
+    const out = execFileSync('getent', ['passwd', '--', user], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: timeoutMs });
+    return out.split(':')[0] === user ? 'exists' : 'unknown';
+  } catch (e) {
+    const x = e as { status?: number | null; signal?: string | null };
+    return x.status === 2 && !x.signal ? 'absent' : 'unknown';
   }
 }
 
@@ -419,8 +435,8 @@ export function userExists(user: string): boolean {
 }
 
 /** Full path of an executable on `path` (PATH by default), or null. */
-export function which(cmd: string, path: string = process.env.PATH ?? ''): string | null {
-  const exts = process.platform === 'win32' ? (process.env.PATHEXT ?? '.EXE;.CMD;.BAT').split(';') : [''];
+export function which(cmd: string, path: string = ownEnv().get('PATH') ?? ''): string | null {
+  const exts = process.platform === 'win32' ? (ownEnv().get('PATHEXT') ?? '.EXE;.CMD;.BAT').split(';') : [''];
   for (const dir of path.split(delimiter)) {
     for (const ext of exts) {
       const p = join(dir, cmd + ext.toLowerCase());
@@ -548,6 +564,33 @@ export function pidAlive(pid: number): boolean {
   }
 }
 
+/** processIdentity of a process that answers signal 0 but whose identity can't be read: running, as far as anyone can tell. */
+export const UNKNOWN_IDENTITY = 'unknown';
+
+/**
+ * Who `pid` is beyond its number, or null when no such process runs. On Linux: this boot's id and the process's start
+ * time (/proc/sys/kernel/random/boot_id, field 22 of /proc/<pid>/stat), so a pid reused after its process died, or
+ * after a reboot, reads as someone else. Elsewhere: its number alone, while it runs. A running process whose /proc
+ * entry can't be read is UNKNOWN_IDENTITY (never "gone").
+ */
+export function processIdentity(pid: number): string | null {
+  if (!pidAlive(pid)) return null;
+  if (process.platform !== 'linux') return `pid-${pid}`;
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
+    // After "(comm)", the fields from the third on; comm may hold spaces and parentheses, so from the last ')'.
+    const fields = stat.slice(stat.lastIndexOf(')') + 2).split(' ');
+    // A zombie (Z) or dying (X) process has exited: signal 0 still finds it until its parent reaps it.
+    if (fields[0] === 'Z' || fields[0] === 'X') return null;
+    const start = fields[19];
+    const boot = readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim();
+    return start && /^\d+$/.test(start) ? `${boot}:${start}` : UNKNOWN_IDENTITY;
+  } catch (e) {
+    // Gone between the signal and the read: no such process. Anything else: it runs, unread.
+    return (e as NodeJS.ErrnoException).code === 'ENOENT' || (e as NodeJS.ErrnoException).code === 'ESRCH' ? null : UNKNOWN_IDENTITY;
+  }
+}
+
 export function wslAvailable(): boolean {
   if (process.platform !== 'win32') return false;
   try {
@@ -571,10 +614,11 @@ export function npmGlobalPackageDir(prefix: string, pkg: string, platform: NodeJ
 export function chromeCandidates(): string[] {
   if (process.platform === 'darwin') return ['/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', '/Applications/Chromium.app/Contents/MacOS/Chromium'];
   if (process.platform === 'win32') {
+    const env = ownEnv();
     return [
-      join(process.env.PROGRAMFILES ?? 'C:\\Program Files', 'Google', 'Chrome', 'Application', 'chrome.exe'),
-      join(process.env['PROGRAMFILES(X86)'] ?? 'C:\\Program Files (x86)', 'Google', 'Chrome', 'Application', 'chrome.exe'),
-      join(process.env.LOCALAPPDATA ?? '', 'Google', 'Chrome', 'Application', 'chrome.exe'),
+      join(env.get('PROGRAMFILES') ?? 'C:\\Program Files', 'Google', 'Chrome', 'Application', 'chrome.exe'),
+      join(env.get('PROGRAMFILES(X86)') ?? 'C:\\Program Files (x86)', 'Google', 'Chrome', 'Application', 'chrome.exe'),
+      join(env.get('LOCALAPPDATA') ?? '', 'Google', 'Chrome', 'Application', 'chrome.exe'),
     ];
   }
   return [];
@@ -840,7 +884,7 @@ export function projectCommand(command: string, runAs?: ProjectRunAs, projectEnv
     LOGNAME: runAs.user,
     // Set by the instance's owner (instance.yaml run_as.path), never by the repo: tests.yaml can't set PATH.
     PATH: runAs.path ?? defaultAgentPath(),
-    LANG: process.env.LANG ?? 'C.UTF-8',
+    LANG: ownEnv().get('LANG') ?? 'C.UTF-8',
     CI: '1',
     // The checkout belongs to the coordinator user: without trusting it, git refuses it as "dubious ownership" and
     // any check that runs git fails. No credential helper: project code never authenticates as the instance.
@@ -854,7 +898,7 @@ export function projectCommand(command: string, runAs?: ProjectRunAs, projectEnv
   const full = outboundEnv(env);
   if (process.platform === 'darwin') {
     const [f, a] = asUser(runAs.user, '/usr/bin/sandbox-exec', ['-p', seatbeltProfile(home, hide), file, ...args], full);
-    return { file: f, args: a, env: { PATH: process.env.PATH ?? '/usr/bin:/bin' } };
+    return { file: f, args: a, env: { PATH: ownEnv().get('PATH') ?? '/usr/bin:/bin' } };
   }
   // The wrapper's bash gets no environment at all; the command gets exactly `full`, from the env -i inside bwrap.
   const vars = Object.entries(full)
@@ -862,7 +906,7 @@ export function projectCommand(command: string, runAs?: ProjectRunAs, projectEnv
     .map(([k, v]) => `${k}=${v}`);
   const inner = ['/usr/bin/env', '-i', ...vars, file, ...args];
   const [f, a] = asUser(runAs.user, file, ['--norc', '--noprofile', '-c', LINUX_SANDBOX, 'sandbox', o.sandboxTool ?? PROJECT_SANDBOX_TOOL, home, runAs.user, ...hide, '--', ...inner], {});
-  return { file: f, args: a, env: { PATH: process.env.PATH ?? '/usr/bin:/bin' } };
+  return { file: f, args: a, env: { PATH: ownEnv().get('PATH') ?? '/usr/bin:/bin' } };
 }
 
 /**
@@ -907,9 +951,10 @@ export function commandBash(): string {
   let found: string | null = null;
   if (process.platform === 'win32') {
     const git = which('git');
+    const env = ownEnv();
     const candidates = [
-      process.env.CLAUDE_CODE_GIT_BASH_PATH,
-      join(process.env.ProgramFiles ?? 'C:\\Program Files', 'Git', 'bin', 'bash.exe'),
+      env.get('CLAUDE_CODE_GIT_BASH_PATH'),
+      join(env.get('ProgramFiles') ?? 'C:\\Program Files', 'Git', 'bin', 'bash.exe'),
       // ...\Git\cmd\git.exe -> ...\Git\bin\bash.exe
       git ? join(dirname(dirname(git)), 'bin', 'bash.exe') : undefined,
     ];
@@ -1005,7 +1050,7 @@ let current: { dir: string; p: SlotPath } | undefined;
 /** The slot dir for `system`, refused in a test run unless it is inside the test machine (#669). */
 function resolvedSlotsDir(system: typeof SYSTEM_SLOTS): string {
   const dir = unguardedSlotsDir(system);
-  const refusal = testSlotsRefusal(dir);
+  const refusal = testSlotsRefusal(dir, ownEnv().asProcessEnv());
   if (refusal) throw new TestSlotsRefused(refusal);
   return dir;
 }
@@ -1021,8 +1066,10 @@ export function slotsDirFor(system: typeof SYSTEM_SLOTS): SlotPath {
 }
 
 function unguardedSlotsDir(system: typeof SYSTEM_SLOTS): string {
-  if (process.env.AGENT_SLOTS_DIR) return process.env.AGENT_SLOTS_DIR;
-  if (process.platform === 'win32') return join(process.env.ProgramData ?? 'C:\\ProgramData', 'agent-slots');
+  const env = ownEnv();
+  const given = env.get('AGENT_SLOTS_DIR');
+  if (given) return given;
+  if (process.platform === 'win32') return join(env.get('ProgramData') ?? 'C:\\ProgramData', 'agent-slots');
   if (existsSync(system.dir)) return system.dir;
   return devSlotsPath(); // single-user and development machines
 }
@@ -1036,7 +1083,8 @@ export function slotsConfigPath(dir?: SlotPath, system?: typeof SYSTEM_SLOTS): S
 export function slotsConfigPath(dir: string, system?: typeof SYSTEM_SLOTS): string;
 export function slotsConfigPath(dir: SlotPathLike, system?: typeof SYSTEM_SLOTS): SlotPathLike;
 export function slotsConfigPath(dir: SlotPathLike = slotsDir(), system = SYSTEM_SLOTS): SlotPathLike {
-  if (process.env.AGENT_SLOTS_CONFIG) return process.env.AGENT_SLOTS_CONFIG;
+  const given = ownEnv().get('AGENT_SLOTS_CONFIG');
+  if (given) return given;
   if (isSystemSlots(dir, system) && existsSync(system.config)) return system.config;
   return slotFile(dir, 'config.json');
 }
@@ -1060,7 +1108,7 @@ export function serviceChange(label: string): { path: string; manager: string; c
     return { path, manager: 'launchd (a per-user agent: KeepAlive, starts at login)', commands: [`launchctl bootout gui/${uid}/${label}`, `launchctl bootstrap gui/${uid} ${path}`] };
   }
   if (process.platform === 'linux') {
-    const path = join(process.env.XDG_CONFIG_HOME ?? join(homedir(), '.config'), 'systemd', 'user', `${label}.service`);
+    const path = join(ownEnv().get('XDG_CONFIG_HOME') ?? join(homedir(), '.config'), 'systemd', 'user', `${label}.service`);
     return { path, manager: 'systemd --user (Restart=always)', commands: ['systemctl --user daemon-reload', `systemctl --user enable --now ${label}.service`] };
   }
   return null;
@@ -1214,7 +1262,7 @@ export function installService(spec: ServiceSpec): { path: string; started: bool
     return { path, ...launch(['bootstrap', `gui/${uid}`, path]) };
   }
   if (process.platform === 'linux') {
-    const path = join(process.env.XDG_CONFIG_HOME ?? join(homedir(), '.config'), 'systemd', 'user', `${spec.label}.service`);
+    const path = join(ownEnv().get('XDG_CONFIG_HOME') ?? join(homedir(), '.config'), 'systemd', 'user', `${spec.label}.service`);
     const unit = systemdUserUnit(spec);
     mkdirSync(dirname(path), { recursive: true });
     writeFileSync(path, unit);
@@ -1284,7 +1332,7 @@ export function uninstallService(label: string): string {
     } catch {
       // not enabled
     }
-    const path = join(process.env.XDG_CONFIG_HOME ?? join(homedir(), '.config'), 'systemd', 'user', `${label}.service`);
+    const path = join(ownEnv().get('XDG_CONFIG_HOME') ?? join(homedir(), '.config'), 'systemd', 'user', `${label}.service`);
     rmSync(path, { force: true });
     return path;
   }
@@ -1310,7 +1358,7 @@ export const shellQuote = (s: string): string => `'${s.replace(/'/g, `'\\''`)}'`
  * there's no clipboard tool (then the path alone is shown). macOS: pbcopy. Linux: wl-copy, else xclip, else WSL's
  * clip.exe. Windows (cmd): clip. WHY: a key file's path can have a space (~/Library/Application Support) (#467).
  */
-export function copyFileCommand(file: string, platform: NodeJS.Platform = process.platform, path: string = process.env.PATH ?? ''): string | null {
+export function copyFileCommand(file: string, platform: NodeJS.Platform = process.platform, path: string = ownEnv().get('PATH') ?? ''): string | null {
   if (platform === 'win32') return /["%^&|<>]/.test(file) ? null : `clip < "${file}"`;
   const q = shellQuote(file);
   if (platform === 'darwin') return `pbcopy < ${q}`;

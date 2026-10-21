@@ -105,7 +105,12 @@ export async function fileCanary(backlog: Backlog, repo: string, reason: CanaryR
   return { issue, url: `https://github.com/${repo}/issues/${issue}`, id: c.id };
 }
 
-/** Read how far the canary got: the instance's events, and GitHub once the instance recorded the merge. */
+/**
+ * Read how far the canary got: the instance's events, and GitHub once the instance recorded the merge.
+ * WHY a raw read of the checks (#727): the updater keeps or rolls back an install on this verdict, but a pass needs the
+ * PR merged by the canary instance, whose own merge judged its required checks by their pins (src/check-source.ts),
+ * and every check on the head green, so a spoofed check can only turn a pass into a fail.
+ */
 export async function checkCanary(backlog: Backlog, repo: string, issue: number, events: StoredEvent[]): Promise<CanaryStatus> {
   const first = canaryProgress({ issue, repo, events });
   if (first.stage !== 'checks' || !first.pr) return first;

@@ -176,24 +176,106 @@ export function AcceptedMerges({ protection }: { protection: Protection }) {
   );
 }
 
-/** An unaccounted commit stopped auto-merge: shown on every page until an admin clears it. */
-export function MainWatchAlert({ protection, onCleared }: { protection: Protection | undefined; onCleared?: () => void }) {
+/**
+ * What counts toward the reason's minimum, as the server counts it (src/auto-merge-resume.ts): letters, digits,
+ * punctuation and symbols that print (no default-ignorables such as the Hangul fillers, no braille blank).
+ */
+export const visibleChars = (s: string) => s.match(/(?![\p{Default_Ignorable_Code_Point}⠀])[\p{L}\p{N}\p{P}\p{S}]/gu)?.length ?? 0;
+const ACK_MIN = 10;
+
+/** Whether a resume answer was a recorded request the coordinator decides (#776 on #727), not a resume done now. */
+export function isResumeRequest(r: unknown): boolean {
+  return (r as { how?: unknown } | null)?.how === 'requested';
+}
+
+/**
+ * An admin's resume of a stop in force. A stop the default branch caused is a recorded request: the coordinator resumes
+ * it once main is green under the pinned-source verdict, and the answer says so, with its last measurement; a separate
+ * confirm with a typed reason asks it to resume anyway, recorded (#776 on #727).
+ */
+function ResumeControls({ onCleared }: { onCleared?: (() => void) | undefined }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const a = protection?.alert;
-  if (!a) return null;
-  const clear = async () => {
+  const [notice, setNotice] = useState<string | null>(null);
+  const [needsAck, setNeedsAck] = useState(false);
+  const [ack, setAck] = useState('');
+  const clear = async (acknowledge?: { reason: string }) => {
     setBusy(true);
     setError(null);
     try {
-      await clearAutoMergeStop();
+      const r = await clearAutoMergeStop(acknowledge);
+      setAck('');
+      if (isResumeRequest(r)) {
+        setNotice(r.message ?? 'Recorded: the coordinator resumes auto-merge once the default branch is green.');
+        setNeedsAck(!r.acknowledged);
+      } else {
+        setNotice(null);
+        setNeedsAck(false);
+      }
       onCleared?.();
     } catch (e) {
+      // A refusal (a reason the server won't take, not stopped any more) keeps the form as it was.
       setError((e as Error).message);
     } finally {
       setBusy(false);
     }
   };
+  const short = visibleChars(ack) < ACK_MIN ? `type a reason of at least ${ACK_MIN} visible characters` : null;
+  return (
+    <>
+      <div className="mt-2 flex items-center gap-2">
+        <Button size="sm" variant="outline" disabled={busy} onClick={() => void clear()} data-testid="main-watch-clear">
+          Clear and resume auto-merge
+        </Button>
+        {error && <span className="text-[12px] text-red">{error}</span>}
+      </div>
+      {notice && (
+        <div className="mt-2 text-[12px] text-ink-2" data-testid="main-watch-resume-requested">
+          {notice}
+        </div>
+      )}
+      {needsAck && (
+        <form
+          className="mt-2 flex flex-wrap items-center gap-2"
+          onSubmit={(e) => {
+            e.preventDefault();
+            if (!short) void clear({ reason: ack });
+          }}
+          data-testid="main-watch-ack"
+        >
+          <input
+            value={ack}
+            onChange={(e) => setAck(e.target.value)}
+            placeholder="why resume while the default branch isn't green (recorded)"
+            aria-label="reason to resume while the default branch isn't green"
+            className="h-7 min-w-0 flex-1 rounded-control bg-field px-2 text-[12.5px] text-ink shadow-hairline outline-none focus:shadow-[0_0_0_1px_var(--ring)]"
+            data-testid="main-watch-ack-reason"
+          />
+          <Button size="sm" variant="outline" type="submit" disabled={busy} why={short} data-testid="main-watch-ack-submit">
+            Acknowledge and resume anyway
+          </Button>
+        </form>
+      )}
+    </>
+  );
+}
+
+/**
+ * Auto-merge stopped, shown on every page until an admin resumes it: an unaccounted commit's alert (the main watch),
+ * or, for any other stop in force (a red default branch after an auto-merge), its reason (#776).
+ */
+export function MainWatchAlert({ protection, onCleared }: { protection: Protection | undefined; onCleared?: () => void }) {
+  const a = protection?.alert;
+  if (!a) {
+    if (!protection?.stopped) return null;
+    return (
+      <div role="alert" className="mx-6 mt-4 rounded-card bg-red-tint px-4 py-3 text-[13px] shadow-[0_0_0_1px_var(--red-tint)]" data-testid="auto-merge-stopped">
+        <span className="font-semibold text-red">Auto-merge is stopped</span>
+        <span className="text-ink-2"> {protection.stopped}. Every PR waits for you until an admin resumes it.</span>
+        {protection.canClear && <ResumeControls onCleared={onCleared} />}
+      </div>
+    );
+  }
   return (
     <div role="alert" className="mx-6 mt-4 rounded-card bg-red-tint px-4 py-3 text-[13px] shadow-[0_0_0_1px_var(--red-tint)]" data-testid="main-watch-alert">
       <span className="font-semibold text-red">Unaccounted commit on the default branch</span>
@@ -218,14 +300,7 @@ export function MainWatchAlert({ protection, onCleared }: { protection: Protecti
           'No revert PR was opened.'
         )}
       </span>
-      {protection?.canClear && (
-        <div className="mt-2 flex items-center gap-2">
-          <Button size="sm" variant="outline" disabled={busy} onClick={() => void clear()} data-testid="main-watch-clear">
-            Clear and resume auto-merge
-          </Button>
-          {error && <span className="text-[12px] text-red">{error}</span>}
-        </div>
-      )}
+      {protection?.canClear && <ResumeControls onCleared={onCleared} />}
     </div>
   );
 }
