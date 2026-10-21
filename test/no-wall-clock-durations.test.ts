@@ -1,3 +1,4 @@
+// lint-test
 // WHY (#582): a test that measures elapsed time as Date.now() minus a start reads the wall clock, which an NTP step
 // moves (back about 2.5 s every 30 s on one machine): the wait comes out shorter or longer than it was, and the test
 // fails or passes on the clock, not the code. Elapsed time is measured with performance.now() (monotonic) or a clock
@@ -12,6 +13,7 @@ import { join, relative, sep } from 'node:path';
 import { repoRoot } from './helpers.js';
 
 /** The wall-clock durations each test file had when this check came in (#582), by file; only ever lowered. */
+// check-table: never-grow
 const ALLOWED: Record<string, number> = {
   'test/auto-config.test.ts': 1,
   'test/avatars.test.ts': 1,

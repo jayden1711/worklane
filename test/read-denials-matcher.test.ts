@@ -5,6 +5,8 @@ import assert from 'node:assert/strict';
 import { globToRegExp } from '../src/guardrails/glob.js';
 import { globMatcher } from '../src/read-denials.js';
 
+// The equivalence corpus (#890): a pattern taken out is a case no longer checked.
+// check-table: never-shrink
 const PATTERNS = ['**', '**/', '*', '?', 'a', 'a/', './a', '.env', '.env.*', '**/.env*', '**.env', 'secrets**', 'a/**/k', 'a/**', '**/k', 'cfg/*/prod.yaml', 'a?c.txt', '*.pem', '**/*.pem', 'x/**/y/**/z', 'a**b', 'a*/b', '*/', '+(){}$^|.[]', 'sp ace', 'back\\slash', 'é*', 'a\nb', '**/**', '***', 'a/***/b'];
 const PATHS = ['', 'a', 'a/', 'a/b', 'a/k', 'a/x/k', 'a/x/y/k', 'k', '.env', '.env.local', 'x/.env', 'x/y/.env.prod', 'secrets', 'secrets/x', 'secretsx/y', 'cfg/dev/prod.yaml', 'cfg/a/b/prod.yaml', 'abc.txt', 'a/c.txt', 'key.pem', 'd/key.pem', 'x/y/z', 'x/1/y/2/z', 'ab', 'a/b/b', 'axb', 'a//b', '+(){}$^|.[]', 'sp ace', 'back\\slash', 'é', 'éé/x', 'a\nb', 'aa/bb', '/', 'x/'];
 

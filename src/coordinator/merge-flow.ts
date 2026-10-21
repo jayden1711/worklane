@@ -542,6 +542,20 @@ export abstract class MergeFlow extends FixRuns {
     }
   }
 
+  /**
+   * The default branch's tip, fetched now into its remote-tracking ref by an explicit refspec (a clone whose configured
+   * refspec doesn't map the branch would leave that ref stale); null when the fetch or the read fails (the merge
+   * decision then waits).
+   */
+  private defaultTipNow(): string | null {
+    try {
+      this.git(this.d.repo, 'fetch', '-q', this.remote, `+refs/heads/${this.branch}:refs/remotes/${this.remote}/${this.branch}`);
+      return this.git(this.d.repo, 'rev-parse', '--verify', '-q', `refs/remotes/${this.remote}/${this.branch}^{commit}`) || null;
+    } catch {
+      return null;
+    }
+  }
+
   /** The policy's call on a ready PR at its current head. */
   mergeDecisionFor(n: number, number: number, pr: PullRequest): MergeDecision {
     const review: ReviewConfig = this.d.cfg.review ?? DEFAULT_REVIEW;
@@ -586,8 +600,9 @@ export abstract class MergeFlow extends FixRuns {
       // A planned task: high-risk or design-level files its approved plan didn't list hold the merge: the repo's
       // high-risk categories and the engine's own, whether or not this repo's merge rules hold them elsewhere.
       claimedProtected: this.claimedClass(n) === 'protected',
-      // A test, lint or guard the change removes or loosens, read from the change itself (#783).
-      weakening: weakeningOf(this.d.repo, base, pr.headSha, files, lockScopeOf(this.d)),
+      // A test, lint or guard the change removes or loosens, read from the change itself (#783), with the checks the
+      // default branch registers now (its tip, fetched here) as well as at the change's base (#869).
+      weakening: weakeningOf(this.d.repo, base, pr.headSha, files, lockScopeOf(this.d), this.defaultTipNow()),
       outsidePlan: plan ? outsidePlanReasons({ planFiles: plan.files ?? [], level, waitCategories: [...new Set([...waitCategoriesOf(review), ...DEFAULT_REVIEW.levels.L3_human.when])], newTopLevel }) : [],
     });
     // A head a conflict fix pushed: its own reasons to wait (outside the hunks, risky files, an unsure evaluator).

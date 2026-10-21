@@ -1,3 +1,4 @@
+// lint-test
 // Issue #736: the engine no longer manages Claude subscription accounts. Account profiles, failover between them and
 // the whole-login switch are gone; one person signs the agent user in to `claude` themselves (or the instance uses an
 // API key). Checked here: the dashboard route and the machine helper's verbs are gone; what an older install left is
