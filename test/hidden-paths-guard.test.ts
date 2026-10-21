@@ -3,7 +3,8 @@
 // (src/guardrails/access.ts), so a tool it doesn't know is checked on every string it is given, never let through.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from 'node:fs';
+import fs, { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { performance } from 'node:perf_hooks';
@@ -223,14 +224,51 @@ test('a huge directory is read one entry at a time against the budget: the time 
   // A symlink costs a stat; listing them all before the budget was looked at ran 698 ms past a 50 ms one (#887 review).
   const entries = 2_000;
   for (let i = 0; i < entries; i++) symlinkSync('target', join(p, `l${i}`));
-  // WHY (#887 review, round 6): a clock that moves one step per read, not the runner's, so the bound is exact on any
-  // runner: a budget of 50 steps is spent after at most 50 reads, and the walk reads it every 16 entries.
+  // WHY (#887 review, rounds 6 and 7): a clock that moves one step per read, not the runner's, so the result is the
+  // same on any runner. The walk must stop at its first clock read past the deadline: `stopAt` is what it had charged
+  // then.
   let reads = 0;
-  const secrets = new Secrets(['**/.env'], { projectRoot: p, home: join(p, 'no-home') }, { ms: 50, now: () => reads++ });
-  const why = secrets.reached({ kind: 'tree', target: p, filter: null }, p, 'Grep');
+  let stopAt = -1;
+  let secrets: Secrets | undefined;
+  const now = () => {
+    const t = reads++;
+    if (t > 50 && stopAt < 0) stopAt = secrets?.charged ?? -1;
+    return t;
+  };
+  // And no entry is listed (Dir.readSync) or stat'ed before it is charged: counted at node:fs, so work done ahead of
+  // the budget shows however fast the runner is.
+  let listed = 0;
+  let stated = 0;
+  const { readSync } = fs.Dir.prototype;
+  const { statSync } = fs;
+  const writable = fs as { statSync: typeof fs.statSync };
+  fs.Dir.prototype.readSync = function (this: fs.Dir) {
+    const e = readSync.call(this);
+    if (e) listed++;
+    return e;
+  };
+  writable.statSync = ((path: fs.PathLike, ...rest: unknown[]) => {
+    if (String(path).startsWith(join(p, 'l'))) stated++;
+    return (statSync as (...a: unknown[]) => unknown)(path, ...rest);
+  }) as typeof fs.statSync;
+  syncBuiltinESMExports();
+  let why: string | null;
+  try {
+    secrets = new Secrets(['**/.env'], { projectRoot: p, home: join(p, 'no-home') }, { ms: 50, now });
+    why = secrets.reached({ kind: 'tree', target: p, filter: null }, p, 'Grep');
+  } finally {
+    fs.Dir.prototype.readSync = readSync;
+    writable.statSync = statSync;
+    syncBuiltinESMExports();
+  }
+  const charged = secrets.charged;
   assert.match(why ?? '', /too large to check/);
-  assert.ok(secrets.charged < entries, `the walk read all ${entries} entries before the budget stopped it`);
-  assert.ok(secrets.charged <= 16 * 51, `the walk charged ${secrets.charged} entries, past one 16-entry interval after the deadline`);
+  assert.ok(stopAt > 0 && charged < entries, `the walk read all ${entries} entries before the budget stopped it`);
+  assert.equal(charged, stopAt, 'the walk went on past its first clock read after the deadline');
+  // The clock gives 51 values up to the deadline (0 to 50); read at least every 16 entries, it is past it by 16 × 51.
+  assert.ok(charged <= 16 * 51, `the walk charged ${charged} entries: it reads the clock less often than every 16`);
+  assert.ok(listed > 0 && listed <= charged, `${listed} entries listed one at a time, for ${charged} charged`);
+  assert.ok(stated > 0 && stated <= charged, `${stated} entries stat'ed, for ${charged} charged`);
 });
 
 test('the time budget runs on a monotonic clock: a wall clock that stands still or steps back never stops it firing', (t) => {
