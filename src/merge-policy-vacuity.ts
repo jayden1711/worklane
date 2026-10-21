@@ -7,8 +7,9 @@
 // coordinator's own verification ran) hold an assertion call (an import of an assertion module is none), and, each run
 // with runner.one (`node --test`: coverageRunnerOne) under V8 coverage, they run code on a character the PR changes
 // (rounds 8, 9: each hunk aligned by character; V8's innermost block range around a changed code character ran, so an
-// untaken branch or arm on a changed line doesn't count, however the line was shortened, split or moved; a removal is
-// measured at its own place, the code now there; a change too large to align holds) in at least one of its app files
+// untaken branch or arm on a changed line doesn't count, whether the change adds code or reflows lines; a removal
+// counts only when the code on its sides ran, and never across a block or clause boundary; the removed side is lexed in
+// its base file; a change too large to align, even line by line, holds) in at least one of its app files
 // more often than loading
 // accounts for: the same run with every test skipped (what loading
 // the test file and its static imports runs), plus, for every script the tests evaluated more often than that run did
