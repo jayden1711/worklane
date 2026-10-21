@@ -2561,13 +2561,15 @@ test('auto-merge stop: main red after an auto-merge (green before it) stops auto
   assert.doesNotMatch(git(t.f.repo, 'show', `${revert.headSha}:src/price.js`), /qty > 0/, 'the revert undoes the change');
   assert.ok(revert.labels.includes('needs-owner'));
   assert.deepEqual(revert.reviewers, ['example-owner']);
-  assert.ok(t.pr().comments.some((x) => /@example-owner main's required checks failed \(ci\).*Auto-merge is stopped on this instance until the operator deletes/.test(x.body)));
+  assert.ok(t.pr().comments.some((x) => /@example-owner main's required checks failed \(ci\).*Auto-merge is stopped on this instance until an admin resumes it on the dashboard, once main's required checks are green on its tip/.test(x.body)));
   assert.ok(!t.c.watchedPrs().some((w) => w.number === revert.number), 'the revert PR is never watched, so never auto-merged (and never reverted)');
   // A new PR now waits, however clean.
   assert.match(String(t.c.autoMergeStopped()), /after auto-merging/);
   // Survives a restart: a new coordinator still sees the stop.
   const again = new Coordinator({ cfg: t.f.cfg, log: t.f.log, backlog: t.f.backlog, runner: agents(), repo: t.f.repo, instance: 'alice', stateDir: t.f.stateDir, slotsDir: t.f.slotsDir, machine: t.f.machine, prPollMs: 0, autoMerge: () => true });
   assert.ok(again.autoMergeStopped());
+  // Precondition (#776): main is green on its tip again before the operator's hand deletion resumes it.
+  t.f.backlog.setChecks(git(t.f.repo, 'ls-remote', 'origin', 'refs/heads/main').split('\t')[0]!, passing);
   rmSync(join(t.f.stateDir, 'auto-merge-stopped.json'));
   await again.tick();
   assert.ok(t.f.log.read(0, ['merge.resumed']).length === 1, 'the operator cleared it');
