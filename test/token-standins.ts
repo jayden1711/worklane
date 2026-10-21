@@ -57,6 +57,8 @@ export const SHAPES: readonly StandIn[] = [
   t('API key (sk-)', 'an Anthropic API key', `sk-ant-api03-${run(93)}AA`),
   t('API key (sk-)', 'an Anthropic setup token', `sk-ant-oat01-${run(80)}AA`),
   t('API key (sk-)', 'an Anthropic admin key', `sk-ant-admin01-${run(80)}AA`),
+  // A plain `sk-` key (an OpenAI-style project key): no distinctive prefix, so found glued only from a glue point (#889 round 8).
+  t('API key (sk-)', 'a plain sk- project key', `sk-proj-${run(48)}`),
   // Discord: a bot token (three base64url parts), older and newer first-part lengths.
   t('Discord bot token', 'a Discord bot token', DISCORD),
   t('Discord bot token', 'a newer Discord bot token', DISCORD_NEW),

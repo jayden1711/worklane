@@ -18,7 +18,21 @@ const credentialShaped = (v: string) => (/[a-z]/.test(v) && /[A-Z]/.test(v) && /
  * A value after `Basic` that is a credential, not a word: base64 with a digit, `+`, `/` or `=` in it, or a mixed-case
  * run of 16 or more characters whose length base64 can have (no padding: not 1 more than a multiple of 4).
  */
-const basicShaped = (v: string) => /[0-9+/=]/.test(v) || (v.length >= 16 && v.length % 4 !== 1 && /[a-z]/.test(v) && /[A-Z]/.test(v));
+const basicShaped = (v: string) => /[0-9+/=]/.test(v) || (v.length >= 16 && v.length % 4 !== 1 && /[a-z]/.test(v) && /[A-Z]/.test(v)) || basicPair(v);
+/**
+ * Whether `v` is base64 of a `user:password` pair: it decodes to printable ASCII with a `:` in it (#889 round 8: a short
+ * pair, `dXNlcjpwYXNz`, has no digit, `+`, `/` or `=` and is under 16 characters). A word after "Basic" in prose
+ * ("Authentication") decodes to bytes that aren't, or doesn't decode at all.
+ */
+function basicPair(v: string): boolean {
+  let text: string;
+  try {
+    text = atob(v);
+  } catch {
+    return false;
+  }
+  return /^[\x20-\x7e]*:[\x20-\x7e]*$/.test(text);
+}
 
 /** A word that makes any key holding it a credential's: `db_password`, `slack_bot_token`, `aws_secret_access_key`. */
 // check-table: never-shrink
@@ -28,9 +42,11 @@ const CREDENTIAL_WORDS = new Set(['token', 'secret', 'secrets', 'password', 'pas
  * (`csrftoken`, `clientsecret`, `adminpassword`, `secretaccesskey`). Only the end counts, so `tokenizer` and
  * `secretary` are not; `pass` and `pwd` count only whole (`compass`, `bypass`).
  */
+// check-table: never-shrink
 const CREDENTIAL_ENDINGS = ['token', 'secret', 'password', 'passwd', 'accesskey'];
 const credentialWord = (w: string) => CREDENTIAL_WORDS.has(w) || CREDENTIAL_ENDINGS.some((e) => w.endsWith(e));
 /** The word before `key` that makes it a credential (`x-api-key`, `apiKey`, `signing_key`); `cacheKey`, `sort_key` are not. */
+// check-table: never-shrink
 const KEY_QUALIFIERS = new Set(['api', 'access', 'secret', 'private', 'signing', 'encryption', 'master', 'client', 'app', 'auth', 'account', 'service', 'license', 'deploy', 'admin', 'webhook', 'session', 'ssh', 'hmac', 'consumer']);
 
 /**
@@ -142,10 +158,12 @@ const PATTERNS: [RegExp, Replacement, string][] = [
   // glued after it (#889 round 7: a check that nothing followed left `Basic <value>==<more>` to a later pass, after
   // another rule's marker made the boundary; broad mode, which masks that rule's text, showed it).
   [/\b(basic)(\s+)([A-Za-z0-9+/]{8,}={0,2})/gi, (m, s, sp, v) => (basicShaped(v!) ? `${s}${sp}[REDACTED]` : m), 'Basic credential'],
-  // Credentials inside connection strings: keep scheme, user and host. A scheme of up to 32 characters right before
-  // `://`, from any start (#889 round 4: from `\b` with any length it was quadratic on a long dotted run): each start
-  // reads at most 33 characters, and each `://` is reached from at most 32 starts, so linear.
-  [/([a-z][a-z0-9+.-]{0,31}:\/\/[^:/\s@]+):[^@\s/]+@/gi, '$1:[REDACTED]@', 'password in a URL'],
+  // Credentials inside connection strings: keep scheme, user and host. The last 1 to 32 characters of the scheme right
+  // before `://`, from any start (#889 round 4: from `\b` with any length it was quadratic on a long dotted run): each
+  // start reads at most 33 characters, and each `://` is reached from at most 32 starts, so linear. No letter is
+  // required among them (round 8: a scheme whose last 32 characters are digits or `-` was main's too), so every match
+  // main's rule made, with at least one scheme character before `://`, this one makes.
+  [/([a-z0-9+.-]{1,32}:\/\/[^:/\s@]+):[^@\s/]+@/gi, '$1:[REDACTED]@', 'password in a URL'],
   // 0x-prefixed 32-byte hex (EVM private keys and the like).
   [/\b0x[0-9a-fA-F]{64}(?![A-Za-z0-9])/g, '0x[REDACTED-32-BYTES]', '32-byte hex key'],
   // A JSON string value under a credential key (credentialKey: "aws_secret_access_key", "db_password", "x-api-key",
@@ -186,10 +204,10 @@ const BROAD: [RegExp, (mask: string) => string, string][] = [
   [/xox[abprs]-[A-Za-z0-9_-]+/g, (k) => k, 'Slack token, cut short'],
   [/eyJ[A-Za-z0-9_-]{8,512}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*/g, (k) => k, 'JWT after a hyphen'],
   [/\b(bearer)\s+[A-Za-z0-9._~+/=-]{8,}/gi, (k) => `$1 ${k}`, 'short bearer token'],
-  // A scheme of up to 32 characters right before `://`, from any start (after `-`, `.`, `+` or a letter too: the
-  // updater's own rule started at any `\b`, a scheme of any length): each start reads at most 33 characters, and each
-  // `://` is reached from at most 32 starts, so linear.
-  [/([a-z][a-z0-9+.-]{0,31}:\/\/)[^\s/@]+@/gi, (k) => `$1${k}@`, 'user info in a URL'],
+  // The last 1 to 32 characters of a scheme right before `://`, from any start (after `-`, `.`, `+` or a letter too: the
+  // updater's own rule started at any `\b`, a scheme of any length; no letter required, round 8): each start reads at
+  // most 33 characters, and each `://` is reached from at most 32 starts, so linear.
+  [/([a-z0-9+.-]{1,32}:\/\/)[^\s/@]+@/gi, (k) => `$1${k}@`, 'user info in a URL'],
   [/\b([A-Za-z_]*(?:token|secret|password|passwd|api[_-]?key))(\s*[=:]\s*)("[^"]*"|'[^']*'|\S+)/gi, (k) => `$1$2${k}`, 'value after a secret name'],
 ];
 
@@ -283,6 +301,7 @@ export interface RedactTextOptions {
  * The prefixes of the shapes whose patterns start at `\b` (or after a character that isn't `_`): after an underscore
  * (`MY_ghp_...`, `x_sk-...`) a token is glued to a name, and the second pass (glued) reads it from its prefix on.
  */
+// check-table: never-shrink
 const GLUED_PREFIXES = ['ghp_', 'gho_', 'ghu_', 'ghs_', 'ghr_', 'github_pat_', 'sk-', 'sk_live_', 'sk_test_', 'rk_live_', 'rk_test_', 'xoxa-', 'xoxb-', 'xoxe', 'xoxp-', 'xoxr-', 'xoxs-', 'xapp-', 'lin_api_', 'lin_oauth_', 'AKIA', 'ASIA', 'AIza', 'eyJ', '0x', 'Bearer', 'bearer', 'BEARER', 'Basic', 'basic', 'BASIC', DASHBOARD_KEY_PREFIX];
 /**
  * What ends in a letter or digit and may sit right before a token (#889): an escape sequence (a coloured log line,
@@ -291,18 +310,17 @@ const GLUED_PREFIXES = ['ghp_', 'gho_', 'ghu_', 'ghs_', 'ghr_', 'github_pat_', '
  * a plain `sk-`, a JSON value): the others are found wherever their prefix is. Each start reads a bounded stretch,
  * but a CSI's parameter run: one scan each, linear.
  */
-const GLUE = new RegExp(
-  [
-    // ESC as the byte, as a JSON or C escape (`\u001b`, `\x1b`, `\033`, `\e`) or in caret notation (`^[`), then a whole
-    // sequence: a CSI with its parameters (`[1m`), an nF one (`(B`), or one character (`7`, `8`, `c`).
-    String.raw`(?:\u001b|\\u001[bB]|\\x1[bB]|\\033|\\e|\^\[)(?:\[[0-?]*[ -/]*[@-~]|[ -/]+[0-~]|[0-~])`,
-    // The 8-bit CSI.
-    String.raw`\u009b[0-?]*[ -/]*[@-~]`,
-    // A backslash escape in raw JSON or C-style text.
-    String.raw`\\(?:u[0-9A-Fa-f]{4}|[nrtbf"\\/])`,
-  ].join('|'),
-  'g',
-);
+// check-table: never-shrink
+const GLUE_PARTS = [
+  // ESC as the byte, as a JSON or C escape (`\u001b`, `\x1b`, `\033`, `\e`) or in caret notation (`^[`), then a whole
+  // sequence: a CSI with its parameters (`[1m`), an nF one (`(B`), or one character (`7`, `8`, `c`).
+  String.raw`(?:\u001b|\\u001[bB]|\\x1[bB]|\\033|\\e|\^\[)(?:\[[0-?]*[ -/]*[@-~]|[ -/]+[0-~]|[0-~])`,
+  // The 8-bit CSI.
+  String.raw`\u009b[0-?]*[ -/]*[@-~]`,
+  // A backslash escape in raw JSON or C-style text.
+  String.raw`\\(?:u[0-9A-Fa-f]{4}|[nrtbf"\\/])`,
+];
+const GLUE = new RegExp(GLUE_PARTS.join('|'), 'g');
 
 /** Where a token may start glued to what is before it: after each GLUE match, and after `_` before a known prefix. */
 function gluePoints(s: string): number[] {

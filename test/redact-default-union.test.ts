@@ -87,6 +87,8 @@ const SHAPES: [string, string, string][] = (() => {
     ['Tailscale key', `${'tskey'}-auth-${s(30, 'Ts2Ak7Qz4Wf8')}`, s(30, 'Ts2Ak7Qz4Wf8')],
     ['bearer token', `Bearer ${s(36, 'Br5Tk2Nv8Zx3')}`, s(36, 'Br5Tk2Nv8Zx3')],
     ['URL password', `postgres://app:${s(20, 'Pw6Db3Hq9Lk1')}@db.example.com`, s(20, 'Pw6Db3Hq9Lk1')],
+    // A scheme longer than 32 characters whose last 32 hold no letter (#889 round 8).
+    ['URL password, long scheme', `x${'1'.repeat(40)}://app:${s(20, 'Lg7Sc4Hm2Pw9')}@db.example.com`, s(20, 'Lg7Sc4Hm2Pw9')],
     ['32-byte hex key', `0x${hex(64)}`, hex(64)],
     ['JSON value', `{"api_key":"${s(28, 'Js8Vk3Ap5Qy2')}"}`, s(28, 'Js8Vk3Ap5Qy2')],
     ['private key', `${KEY_BEGIN}\n${s(64, 'Pk1Bd7Ry4Ms9')}\n${KEY_END}`, s(64, 'Pk1Bd7Ry4Ms9')],
