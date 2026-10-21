@@ -130,9 +130,9 @@ export function unlockWorktree(repo: string, path: string): void {
 
 /**
  * Every worktree in our ownership record that is still on disk, locked: one made before locking came in (round 12),
- * on an existing install, is locked the next time the coordinator makes a worktree (the pool refills at start).
+ * on an existing install. Called when the coordinator starts (its recovery), and again whenever it makes a worktree.
  */
-function lockOwned(o: WorktreeOptions): void {
+export function lockOwnedWorktrees(o: WorktreeOptions): void {
   // Best effort: git refuses one already locked, and a record it can't lock (broken by hand) never stops a new
   // worktree being made.
   for (const p of owned(o)) if (existsSync(p)) spawnSync('git', ['worktree', 'lock', '--reason', WORKTREE_LOCK_REASON, p], { cwd: o.repo, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
@@ -142,7 +142,13 @@ function lockOwned(o: WorktreeOptions): void {
 function addWorktree(o: WorktreeOptions, name: string, branch: string, base: string): string {
   const path = worktreePath(o, name);
   if (existsSync(path)) removeWorktree(o, name);
-  lockOwned(o);
+  else if (owned(o).includes(path)) {
+    // Ours, its directory deleted some other way: its locked record would refuse this add ("missing but locked"), where
+    // before locking any prune cleared it. Unlocked and pruned here, ours only (a record still locked is kept).
+    unlockWorktree(o.repo, path);
+    spawnSync('git', ['worktree', 'prune'], { cwd: o.repo, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+  }
+  lockOwnedWorktrees(o);
   setOwned(o, [...owned(o), path]); // recorded before creation, so a crash mid-way is still cleaned up
   excludeSandboxPlaceholders(o.repo);
   const sparse = o.sparseExclude ?? [];

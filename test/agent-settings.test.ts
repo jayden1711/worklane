@@ -168,7 +168,9 @@ test("acceptance: an instance's agent run gets the hooks with --settings; withou
   const h = childEnv().HOME!;
   // Then "./.env" in a worktree made after the run starts: under the project's worktree root and the engine's own.
   const late = [join(dir, '.claude', 'worktrees', '*', '.env'), join(projectStateDir(dir), 'worktrees', '*', '.env')];
-  const secrets = [join(dir, '.env'), ...['.ssh', '.aws', '.config/gh', '.railway', '.npmrc', '.claude/.credentials.json'].map((p) => join(h, p)), ...late];
+  // And, in the sandbox only, both places task checkouts are made, hidden whole (made at the start if missing, #890 r13).
+  const places = [join(dir, '.claude', 'worktrees'), join(projectStateDir(dir), 'worktrees')];
+  const secrets = [join(dir, '.env'), ...['.ssh', '.aws', '.config/gh', '.railway', '.npmrc', '.claude/.credentials.json'].map((p) => join(h, p)), ...late, ...places];
   assert.deepEqual(s.sandbox, { enabled: true, filesystem: { denyRead: secrets } }, "the lane's sandbox is kept");
   assert.ok(s.permissions!.deny!.includes('Read(//x/**)') && s.permissions!.deny!.includes('Read(~/.ssh/**)'));
   attributionOff(s);

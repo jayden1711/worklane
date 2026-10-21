@@ -7,7 +7,7 @@
 // with everything under it; a trailing `/**` means the directory; any other glob is expanded to what exists each
 // time a command is wrapped, following symlinked directories. A path that doesn't exist then hides nothing, and `[`
 // `]` are glob syntax there (`?` is any one character but "/").
-import { existsSync, lstatSync, readdirSync, realpathSync, statSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, readdirSync, realpathSync, statSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, posix, resolve } from 'node:path';
 import { BRAND } from './brand.js';
 import { ConfigInvalid, loadConfig, loadConfigAt, readRegular } from './config/load.js';
@@ -71,7 +71,7 @@ function capPerCheckout(entries: Set<string>, own: string[], checkouts: string[]
  * (B5glob, measured by the round-8 delta check). One mount per checkout bounds that, and no run reads another task's
  * checkout at all. A checkout made after the start is covered only by the globs over `places` (see runReadDenials).
  */
-function siblingCheckouts(linked: string[], places: string[], own: string[], keep: string[], cwd: string): { siblings: string[]; places: string[] } | { error: string } {
+function siblingCheckouts(linked: string[], places: string[], own: string[], keep: string[], cwd: string, create: boolean): { siblings: string[]; places: string[] } | { error: string } {
   const forms = (p: string) => [...new Set([resolve(p), realOrNull(p) ?? resolve(p)])];
   const holds = (paths: string[]) => {
     const all = paths.flatMap(forms);
@@ -89,6 +89,16 @@ function siblingCheckouts(linked: string[], places: string[], own: string[], kee
     // checkouts (the instance's task files and bundles beside the repository): only the worktrees git lists there are
     // hidden.
     if (holdsMain(place)) continue;
+    // Made now if it isn't there yet (round 13), so it is hidden whole from the start: a worktree made in it later
+    // (the first one, after a main-checkout run began) is hidden too, never read or counted entry by entry. Only in a
+    // git repository (`create`): outside one there are no task checkouts to make there.
+    if (create) {
+      try {
+        mkdirSync(place, { recursive: true });
+      } catch (e) {
+        return { error: `${place}, where task checkouts are made, can't be created (${(e as NodeJS.ErrnoException).code ?? firstLine(e)}), so a checkout made there later can't be hidden` };
+      }
+    }
     // Hidden whole in the sandbox, so a checkout made there after the start is hidden too (round 10's open B5glob
     // case): the run's own checkout beneath it is bound back by the sandbox as its cwd, which it may write (measured,
     // srt 0.0.78 and bwrap: read, write and git there work). Only when the cwd is that checkout: a cwd below it would
@@ -101,7 +111,6 @@ function siblingCheckouts(linked: string[], places: string[], own: string[], kee
       if (code === 'ENOENT' || code === 'ENOTDIR') continue;
       return { error: `${place}, where task checkouts are made, can't be listed (${code ?? firstLine(e)}), so the other checkouts there can't be hidden` };
     }
-    // A place that isn't there yet isn't hidden whole: the per-pattern globs cover a worktree made there later.
     if (!holdsOwn(place) || ownIsCwd) whole.push(resolve(place));
     // Directories only, never followed: a link there could lead anywhere, the main checkout among them.
     for (const e of entries) if (e.isDirectory()) found.add(join(place, e.name));
@@ -120,7 +129,9 @@ const SANDBOX_ONLY_GLOB = /[[\]]/;
  */
 const asEntry = (p: string) => p.replace(/[[\]]/g, '?');
 
-const firstLine = (e: unknown) => (e as Error).message.split('\n')[0]!.slice(0, 200);
+/** At most 200 characters of a line: a long one keeps its start and its end (a long path in the middle is elided, never the words after it). */
+const short = (s: string) => (s.length > 200 ? `${s.slice(0, 80)}…${s.slice(-119)}` : s);
+const firstLine = (e: unknown) => short((e as Error).message.split('\n')[0]!);
 /** Why a config didn't load: each of its errors (a ConfigInvalid's first line names none), or the error's first line. */
 const configWhy = (e: unknown) => (e instanceof ConfigInvalid ? e.errors.map((x) => `${x.file}${x.path ? ` at ${x.path}` : ''}: ${x.message}`).join('; ').slice(0, 400) : firstLine(e));
 /** One step of a compiled glob: a character, any one but "/", any run but "/", any run, or a jump (an optional part). */
@@ -635,7 +646,7 @@ export function runReadDenials(o: { cwd: string; home: string | undefined; taskF
   const base = main ?? root;
   const taskPlaces = [...new Set([...worktreeRoots.map((w) => resolve(base, w)), join(projectStateDir(base), 'worktrees')])];
   // Every other task checkout is hidden whole (the owner's decision, round 10), always: see siblingCheckouts.
-  const other = siblingCheckouts(repo.linked, taskPlaces, [root, ...repo.checkouts.slice(0, 1)], [...(main ? [main] : []), ...repo.stores, ...(repo.common ? [repo.common] : []), ...(o.taskFile ? [o.taskFile] : [])], o.cwd);
+  const other = siblingCheckouts(repo.linked, taskPlaces, [root, ...repo.checkouts.slice(0, 1)], [...(main ? [main] : []), ...repo.stores, ...(repo.common ? [repo.common] : []), ...(o.taskFile ? [o.taskFile] : [])], o.cwd, repo.common !== null);
   if ('error' in other) return other;
   const { siblings } = other;
   // The places themselves go to the sandbox only: a Read rule can't be carved back for the run's own checkout.
