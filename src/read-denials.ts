@@ -7,7 +7,6 @@
 // with everything under it; a trailing `/**` means the directory; any other glob is expanded to what exists each
 // time a command is wrapped, following symlinked directories. A path that doesn't exist then hides nothing, and `[`
 // `]` are glob syntax there (`?` is any one character but "/").
-import { spawnSync } from 'node:child_process';
 import { lstatSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, posix, resolve } from 'node:path';
 import { BRAND } from './brand.js';
@@ -15,6 +14,7 @@ import { loadConfig } from './config/load.js';
 import { TaskFile } from './contract.js';
 import { projectStateDir } from './guardrails/context.js';
 import { globToRegExp } from './guardrails/glob.js';
+import { spawnSync } from './os/child-process.js';
 
 /** Directory entries listed, at most, to expand one pattern that has an exception; past it the pattern is denied whole. */
 export const EXPAND_LIMIT = 5000;
@@ -48,17 +48,25 @@ function projectRoot(start: string): string | null {
 
 interface Repository {
   checkouts: string[];
+  /** The main checkout; null for a bare repository, and when it can't be found (`mainUnknown`). */
   main: string | null;
+  /** The git directory isn't <checkout>/.git, records no core.worktree, and the repository isn't bare. */
+  mainUnknown: boolean;
   linked: string[];
   stores: string[];
 }
 
 /**
  * The git repository around `start`: every checkout of it (this one, the main one, each linked worktree), where a
- * hidden or secret file can also sit, and its object stores (objects, alternates, LFS), which hold every committed
- * file's content whatever the checkout shows. None outside a repository. The stores are read only `withStores`: a
- * run that hides nothing isn't denied them, so a chain of alternates that can't be followed doesn't refuse it.
- * `main` is the main checkout (none for a bare repository), `linked` the linked worktrees.
+ * hidden or secret file can also sit, and its object stores (objects, alternates, LFS, and every submodule's store
+ * under modules/), which hold every committed file's content whatever the checkout shows. None outside a repository.
+ * The stores are read only `withStores`: a run that hides nothing isn't denied them, so a chain of alternates that
+ * can't be followed doesn't refuse it.
+ *
+ * The main checkout is the common git directory's parent when that is ".git". Otherwise it is what git records
+ * (core.worktree, which a submodule's git directory holds); a bare repository has none. A git directory made apart
+ * from its checkout (`git init --separate-git-dir`) records nothing that leads back (measured, git 2.43.0), so
+ * `mainUnknown` is set, and the caller needs the checkout from elsewhere or refuses.
  */
 export function gitStores(start: string, withStores = true): Repository | { error: string } {
   let dir = resolve(start);
@@ -68,7 +76,7 @@ export function gitStores(start: string, withStores = true): Repository | { erro
       lstatSync(dotGit);
       break;
     } catch {
-      if (dirname(dir) === dir) return { checkouts: [], main: null, linked: [], stores: [] };
+      if (dirname(dir) === dir) return { checkouts: [], main: null, mainUnknown: false, linked: [], stores: [] };
       dir = dirname(dir);
       dotGit = join(dir, '.git');
     }
@@ -81,20 +89,59 @@ export function gitStores(start: string, withStores = true): Repository | { erro
       gitDir = resolve(dir, m[1]!.trim());
     }
     const common = resolve(gitDir, optional(join(gitDir, 'commondir'))?.trim() || '.');
-    const main = basename(common) === '.git' ? dirname(common) : null;
+    let main: string | null = null;
+    let mainUnknown = false;
+    if (basename(common) === '.git') main = dirname(common);
+    else {
+      const worktree = git(common, ['config', '--get', 'core.worktree'], [0, 1]);
+      if ('error' in worktree) return worktree;
+      if (worktree.out.trim()) main = resolve(common, worktree.out.trim());
+      else {
+        const bare = git(common, ['rev-parse', '--is-bare-repository']);
+        if ('error' in bare) return bare;
+        mainUnknown = bare.out.trim() !== 'true';
+      }
+    }
     const linked: string[] = [];
-    for (const n of listing(join(common, 'worktrees'))) {
+    const named = listing(join(common, 'worktrees'));
+    for (const n of named) {
       const g = optional(join(common, 'worktrees', n, 'gitdir'))?.trim();
       if (g) linked.push(dirname(resolve(common, 'worktrees', n, g)));
     }
-    const repo = { checkouts: [...new Set([dir, ...(main ? [main] : []), ...linked])], main, linked };
+    const repo = { checkouts: [...new Set([dir, ...(main ? [main] : []), ...linked])], main, mainUnknown, linked };
     if (!withStores) return { ...repo, stores: [] };
     const borrowed = alternates(common);
     if ('error' in borrowed) return borrowed;
-    return { ...repo, stores: [join(common, 'objects'), ...borrowed.stores, join(common, 'lfs')] };
+    // A submodule's objects live in its own git directory, under modules/ (and, for a linked worktree's submodules,
+    // under worktrees/<name>/modules/): denied whole, so `git -C <submodule> show` has nothing to read either.
+    const modules = [join(common, 'modules'), ...named.map((n) => join(common, 'worktrees', n, 'modules'))];
+    return { ...repo, stores: [join(common, 'objects'), ...borrowed.stores, join(common, 'lfs'), ...modules] };
   } catch (e) {
     return { error: `the git repository at ${dotGit} can't be read (${firstLine(e)})` };
   }
+}
+
+/**
+ * git, run on the git directory `common` alone: with none of this process's GIT_* variables, a C locale, no prompt,
+ * stdin closed, and paths C-quoted whatever the repository's config says (core.quotePath on the command line). The
+ * commands used here run no program a repository's config names (count-objects measured with a hostile config, git
+ * 2.43.0; config --get and rev-parse --is-bare-repository likewise, round 5). Fail closed: git failing, an exit
+ * status not in `ok`, or any stderr line `benign` doesn't match, is an error.
+ */
+function git(common: string, args: string[], ok: number[] = [0], benign?: RegExp): { out: string } | { error: string } {
+  const env: NodeJS.ProcessEnv = {};
+  for (const [k, v] of Object.entries(process.env)) if (!k.startsWith('GIT_') && k !== 'LANGUAGE') env[k] = v;
+  const r = spawnSync('git', ['-c', 'core.quotePath=true', '--git-dir', common, ...args], {
+    env: { ...env, LC_ALL: 'C', GIT_TERMINAL_PROMPT: '0' },
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+    timeout: 60_000,
+    maxBuffer: 16 * 1024 * 1024,
+  });
+  const said = (r.stderr ?? '').split('\n').find((l) => l.trim() && !benign?.test(l));
+  const why = r.error ? firstLine(r.error) : r.status === null || !ok.includes(r.status) ? `exit ${r.status ?? r.signal}: ${said ?? ''}` : said;
+  if (why !== undefined) return { error: `git ${args.join(' ')} in ${common}: ${why.slice(0, 200)}` };
+  return { out: r.stdout ?? '' };
 }
 
 /** What `git count-objects -v` may say on stderr about a store's own stray files: nothing about which stores it reads. */
@@ -115,20 +162,10 @@ const STRAY_FILE_WARNING = /^warning: (garbage found|no corresponding \.(pack|id
  * alternates file it can't read, a store that isn't there), or a line that can't be parsed, is an error.
  */
 function alternates(common: string): { stores: string[] } | { error: string } {
-  const env: NodeJS.ProcessEnv = {};
-  for (const [k, v] of Object.entries(process.env)) if (!k.startsWith('GIT_') && k !== 'LANGUAGE') env[k] = v;
-  const r = spawnSync('git', ['-c', 'core.quotePath=true', '--git-dir', common, 'count-objects', '-v'], {
-    env: { ...env, LC_ALL: 'C', GIT_TERMINAL_PROMPT: '0' },
-    encoding: 'utf8',
-    stdio: ['ignore', 'pipe', 'pipe'],
-    timeout: 60_000,
-    maxBuffer: 16 * 1024 * 1024,
-  });
-  const said = (r.stderr ?? '').split('\n').find((l) => l.trim() && !STRAY_FILE_WARNING.test(l));
-  const why = r.error ? firstLine(r.error) : r.status !== 0 ? `exit ${r.status ?? r.signal}: ${said ?? ''}` : said;
-  if (why !== undefined) return { error: `the chain of git alternates of ${common} can't be read in full (git: ${why.slice(0, 200)}), so its stores can't all be denied` };
+  const r = git(common, ['count-objects', '-v'], [0], STRAY_FILE_WARNING);
+  if ('error' in r) return { error: `the chain of git alternates of ${common} can't be read in full (git: ${r.error}), so its stores can't all be denied` };
   const stores: string[] = [];
-  for (const line of r.stdout.split('\n')) {
+  for (const line of r.out.split('\n')) {
     if (!line.startsWith('alternate:')) continue;
     const text = line.slice('alternate:'.length).replace(/^ /, '');
     const p = text.startsWith('"') ? unquote(text) : text;
@@ -275,10 +312,14 @@ function linksToDirectory(link: string): boolean {
  * An exception ("!./.env.example") is kept as the hook keeps it: a pattern it overlaps is passed as what it matches
  * now, the exception left out, and as the whole pattern when that can't be listed in full (stricter, never looser).
  *
- * Fail closed: a task file or project config that can't be read, a pattern the sandbox can't take as written, or an
- * object store chain that can't be followed in full, is an error, and the run doesn't start.
+ * `repo` is the instance's repository path, the coordinator's own record of the main checkout: always a checkout here,
+ * whatever the run's `.git` says.
+ *
+ * Fail closed: a task file or project config that can't be read, a pattern the sandbox can't take as written, an
+ * object store chain that can't be followed in full, or a main checkout that can't be found (no `repo`, and a git
+ * directory that leads nowhere back), is an error, and the run doesn't start.
  */
-export function runReadDenials(o: { cwd: string; home: string | undefined; taskFile?: string }): { paths: string[] } | { error: string } {
+export function runReadDenials(o: { cwd: string; home: string | undefined; taskFile?: string; repo?: string }): { paths: string[] } | { error: string } {
   let hidden: string[] = [];
   if (o.taskFile) {
     try {
@@ -307,7 +348,9 @@ export function runReadDenials(o: { cwd: string; home: string | undefined; taskF
   if (written) return { error: `${written} has "[" or "]", which the sandbox reads as a pattern; it can't be denied as written` };
   const repo = gitStores(root ?? o.cwd, hidden.length > 0);
   if ('error' in repo) return repo;
-  const roots = [...new Set([root ?? resolve(o.cwd), ...repo.checkouts])];
+  const main = o.repo ? resolve(o.repo) : repo.main;
+  if (!main && repo.mainUnknown) return { error: `the main checkout of the repository around ${o.cwd} can't be found (its git directory isn't <checkout>/.git and records no core.worktree), so its hidden and secret paths can't be denied` };
+  const roots = [...new Set([root ?? resolve(o.cwd), ...(main ? [main] : []), ...repo.checkouts])];
   const anchored = (ps: string[], under = roots) => {
     const out: string[] = [];
     for (const p of ps) {
@@ -352,7 +395,7 @@ export function runReadDenials(o: { cwd: string; home: string | undefined; taskF
   // worktree's parent), which the sandbox expands on every command and a Read rule matches at call time. A pattern an
   // exception overlaps is left to what it matches now (above): over a parent, the exception would be hidden in every
   // worktree, the run's own among them.
-  const base = repo.main ?? root ?? resolve(o.cwd);
+  const base = main ?? root ?? resolve(o.cwd);
   const parents = new Set([...(worktreeRoot ? [resolve(base, worktreeRoot)] : []), join(projectStateDir(base), 'worktrees'), ...repo.linked.map((l) => dirname(l))]);
   parents.delete('/');
   const relative = (p: string) => !(p === '~' || p.startsWith('~/') || isAbsolute(p));

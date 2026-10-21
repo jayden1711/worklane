@@ -533,6 +533,11 @@ export class CliRunner implements AgentRunner {
      * the run ends. Null from register: no broker, so no servers. A refusal or failure: the run doesn't start.
      */
     private mcp?: { instance: string; register: (role: string, ttlMs: number) => Promise<McpRun | null>; end: (ticket: string) => Promise<void> },
+    /**
+     * The instance's repository path (its main checkout), for a guarded run's own read denials (#890): always one of
+     * the checkouts they cover, whatever the run's `.git` leads to.
+     */
+    private repoPath?: string,
   ) {}
 
   /** The lane's user, on the login its runs use now. */
@@ -664,7 +669,7 @@ export class CliRunner implements AgentRunner {
     }
     // INVARIANT (#890): a guarded run's task hidden paths and project secret paths are denied by its OS sandbox and
     // its Read rules too, not only by the hook; when they can't be worked out, the run doesn't start.
-    const ownDenials = guard ? runReadDenials({ cwd: req.cwd, home: runEnv.HOME, ...(req.taskFile ? { taskFile: req.taskFile } : {}) }) : { paths: [] };
+    const ownDenials = guard ? runReadDenials({ cwd: req.cwd, home: runEnv.HOME, ...(req.taskFile ? { taskFile: req.taskFile } : {}), ...(this.repoPath ? { repo: this.repoPath } : {}) }) : { paths: [] };
     if ('error' in ownDenials) return { reason: 'failed', detail: `${ownDenials.error}; not starting`, costUsd: 0, turns: 0, model: req.model };
     // Preflight, inside the login's start lock: an unreadable status that mentions a token refresh (or any other
     // transient error) is reported with its text, and run() waits it out instead of starting claude.
