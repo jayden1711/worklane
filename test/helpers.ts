@@ -4,6 +4,8 @@ import { homedir, tmpdir, userInfo } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { agentSettingsPath } from '../src/agent-settings.js';
+import type { CommitCheck } from '../src/backlog/types.js';
+import { PinnedChecks, type JudgedChecks } from '../src/check-source.js';
 import { agentSettings } from '../src/install.js';
 import { machineProviderHosts } from '../src/provider-hosts.js';
 
@@ -16,6 +18,13 @@ if (/\.test\.js$/.test(process.argv[1] ?? '') && !(globalThis as Record<symbol, 
 
 export const repoRoot = fileURLToPath(new URL('../../', import.meta.url));
 export const engineCli = join(repoRoot, 'dist', 'src', 'cli.js');
+
+/**
+ * Fixture checks as judged checks (#727): made by the one maker, PinnedChecks.of, over a stand-in backlog with no
+ * GitHub rules (so judged by name), since the judging functions check at run time that their input was made in
+ * src/check-source.ts (a cast throws).
+ */
+export const asJudged = (checks: readonly CommitCheck[]): Promise<JudgedChecks> => new PinnedChecks({ backlog: { checks: async () => [...checks] }, branch: () => 'main', repo: () => 'o/r', configured: () => ({}) }).of('0'.repeat(40));
 
 /** A throwaway git repo copied from examples/basic, with its own state dir. */
 export function exampleProject(): { dir: string; stateDir: string } {

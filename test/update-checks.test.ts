@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { readdirSync, readFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { parse } from 'yaml';
@@ -168,6 +169,17 @@ test('the updater\'s default required checks are exactly what a batched main com
     const wf = parse(readFileSync(join(repoRoot, '.github', 'workflows', f), 'utf8')) as { jobs: Record<string, Job> };
     const name = wf.jobs[key]?.name ?? key;
     assert.ok(!defaults().includes(name), `${f} ${key}: a helper, not something the updater requires`);
+  }
+});
+
+test("#727: the updater pins each default check to the workflow file that posts it, so no machine needs a manual step", () => {
+  const u = createRequire(import.meta.url)(join(repoRoot, 'scripts', 'machine', 'worklane-update.cjs')) as { ENGINE_CHECK_SOURCES: Record<string, string>; RETIRED_CHECKS: string[] };
+  for (const name of defaults()) {
+    const files = checks().filter((c) => c.name === name && (c.push || c.batch)).map((c) => c.file);
+    assert.deepEqual(files, [u.ENGINE_CHECK_SOURCES[name]], `${name}: pinned to the one workflow file that posts it on main`);
+  }
+  for (const [name, file] of Object.entries(u.ENGINE_CHECK_SOURCES)) {
+    assert.ok(u.RETIRED_CHECKS.includes(name) || checks().some((c) => c.name === name && c.file === file), `${name}: ${file} posts it`);
   }
 });
 

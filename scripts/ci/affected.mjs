@@ -42,15 +42,35 @@ export const HELPER_PATHS = {
 
 export const isTest = (f) => /^test\/.+\.test\.ts$/.test(f);
 export const forceAll = (f) => FORCE_ALL.find(([re]) => re.test(f))?.[1] ?? null;
-/** Where a source runs from: tsc builds src/ and test/ into dist/. */
-export const runtimePath = (f) => (/^(src|test)\/.+\.ts$/.test(f) ? `dist/${f.replace(/\.ts$/, '.js')}` : f);
-/**
- * A built path back to its source: dist/src and dist/test are tsc's. dist/web (the dashboard's build of web/) stays
- * as it is: a test that opens the built UI (test/browser-helpers.ts's webUiSkip) does so through the dashboard, whose
- * src/ module reads the package (packagePaths: dist/web is web/), so a web/ change picks it that way; web/'s own
- * tests read web/ directly (join(repoRoot, 'web', …)).
- */
-export const sourcePath = (p) => (/^dist\/(src|test)(\/|$)/.test(p) ? p.slice(5) : p);
+
+const escape = (s) => s.replace(/[.*+?^$()[\]{}|\\/]/g, '\\$&');
+// What tsc builds, read from the tree's tsconfig.json: with rootDir '.' and an outDir inside the tree, each `include`
+// entry of the form <dir>/**/*.ts builds <dir>/x.ts into <outDir>/<dir>/x.js. Anything else there is left unmapped,
+// so a test importing its built file has an unresolved import and runs on every change. A tsconfig.json that isn't
+// JSON fails the plan (CI goes red) rather than guess. A change to any tsconfig runs the whole suite (FORCE_ALL).
+export function compiledPaths(dir) {
+  const ts = JSON.parse(readFileSync(join(dir, 'tsconfig.json'), 'utf8'));
+  const out = ts.compilerOptions?.outDir;
+  const ok = ts.compilerOptions?.rootDir === '.' && typeof out === 'string' && /^[\w.-]+(\/[\w.-]+)*$/.test(out) && !/(^|\/)\.\.?(\/|$)/.test(out);
+  const dirs = !ok ? [] : (Array.isArray(ts.include) ? ts.include : []).map((i) => /^([\w-][\w.-]*(?:\/[\w-][\w.-]*)*)\/\*\*\/\*\.ts$/.exec(i)?.[1]).filter(Boolean);
+  if (!dirs.length) return { runtimePath: (f) => f, sourcePath: (p) => p };
+  const alt = dirs.map(escape).join('|');
+  const built = new RegExp(`^(?:${alt})/.+\\.ts$`);
+  const back = new RegExp(`^${escape(out)}/(?:${alt})(?:/|$)`);
+  return {
+    /** Where a source runs from: src/x.ts -> dist/src/x.js. */
+    runtimePath: (f) => (built.test(f) ? `${out}/${f.replace(/\.ts$/, '.js')}` : f),
+    /**
+     * A built path back to its source: dist/src/x.js -> src/x.js. dist/web (the dashboard's build of web/) stays as
+     * it is: a test that opens the built UI (test/browser-helpers.ts's webUiSkip) does so through the dashboard, whose
+     * src/ module reads the package (packagePaths: dist/web is web/), so a web/ change picks it that way; web/'s own
+     * tests read web/ directly (join(repoRoot, 'web', …)).
+     */
+    sourcePath: (p) => (back.test(p) ? p.slice(out.length + 1) : p),
+  };
+}
+/** The engine's own (this checkout's tsconfig.json): src/, test/ and scripts/bench/ build into dist/. */
+export const { runtimePath, sourcePath } = compiledPaths(root);
 
 /**
  * The engine's package: what a src/ module reads when it reads the directory it runs from as a whole (npm pack of
@@ -59,6 +79,7 @@ export const sourcePath = (p) => (/^dist\/(src|test)(\/|$)/.test(p) ? p.slice(5)
  */
 export function packagePaths(dir) {
   const pkg = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8'));
+  const { sourcePath } = compiledPaths(dir);
   const files = (pkg.files ?? []).filter((f) => !f.startsWith('!')).map((f) => (f === 'dist/web' ? 'web' : sourcePath(f)));
   return [...new Set(['package.json', 'README.md', ...files])];
 }
@@ -71,7 +92,7 @@ export const wholeRead = (dir) => {
 export async function plan(dir, changed, added = new Set()) {
   const a = await import(pathToFileURL(join(root, 'dist', 'src', 'testrun', 'affected.js')).href);
   const files = git(dir, 'ls-files', '-z', '--cached', '--others', '--exclude-standard');
-  const g = a.buildGraph({ files, read: (f) => readFileSync(join(dir, f), 'utf8'), pathModules: HELPER_PATHS, runtimePath, sourcePath, wholeRead: wholeRead(dir) });
+  const g = a.buildGraph({ files, read: (f) => readFileSync(join(dir, f), 'utf8'), pathModules: HELPER_PATHS, ...compiledPaths(dir), wholeRead: wholeRead(dir) });
   return a.selectTests(g, changed, { isTest, forceAll, added });
 }
 

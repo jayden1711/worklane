@@ -19,6 +19,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { BRAND } from '../brand.js';
 import { groupGid, isRoot, userHomeDir, userUid } from '../os/index.js';
+import { ownEnv } from '../os/own-env.js';
 import { mcpStatePath } from '../os/system-paths.js';
 import { AllowlistError, HOST, parseRoles, readAllowlist, SECRET_NAME, type McpRecord, type McpRuntime } from './approval.js';
 import { fetchGitPlugin, sourceProblem } from './fetch.js';
@@ -63,7 +64,7 @@ function opts(args: string[]): Record<string, string> {
 }
 
 /** Who asked: the coordinator user sudo names, or root at a shell. */
-const by = () => process.env.SUDO_USER || 'root';
+const by = () => ownEnv().get('SUDO_USER') || 'root';
 
 async function readLine(prompt: string): Promise<string> {
   const rl = createInterface({ input: process.stdin, output: process.stderr });
@@ -219,7 +220,7 @@ export async function pluginsCommand(sub: string | undefined, rest: string[], in
     }
     // confirm: an admin at a root shell. Never a coordinator through sudo: the helper has no confirm, and this refuses one.
     need('digest');
-    if (/^wl-/.test(process.env.SUDO_USER ?? '')) throw new Error('confirm is an admin\'s, at a root shell: a coordinator may only stage');
+    if (/^wl-/.test(ownEnv().get('SUDO_USER') ?? '')) throw new Error('confirm is an admin\'s, at a root shell: a coordinator may only stage');
     const plan = confirmPlan({ instance: instance!, id: o.id!, digest: o.digest! });
     console.error(`${describeRecord(plan.record, o.digest!)}\nstaged by ${plan.pending.staged_by} at ${plan.pending.staged_at}\n`);
     const typed = await readLine(`To confirm, type the plugin id (${o.id}): `);

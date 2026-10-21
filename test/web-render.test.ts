@@ -99,6 +99,8 @@ interface Render {
   renderProtection(protection: unknown, brand: string): string;
   renderDeployGate(gate: unknown): string;
   renderMainWatchAlert(protection: unknown): string;
+  ackVisibleChars(text: string): number;
+  isResumeRequest(answer: unknown): boolean;
   renderPrs(view: unknown): string;
   renderLiveFeed(items: unknown[], ended: boolean): string;
   renderConsole(data: unknown): string;
@@ -1110,6 +1112,28 @@ test('the protection mode on the Machine page, the last commit checked for write
   assert.match(r.renderMainWatchAlert({ ...alert, alert: { ...alert.alert, revert: null } }), /No revert PR was opened\./, 'no reason known: says so plainly');
 });
 
+test('a stop in force that is not the main watch\'s (a red main after an auto-merge) shows its banner, and an admin its resume (#776)', () => {
+  const red = { mode: 'main_watch' as const, detail: '', lastChecked: null, alert: null, stopped: "main's required checks failed (ci) on `cccccccc` after auto-merging #12", canClear: false };
+  const banner = r.renderMainWatchAlert(red);
+  assert.match(banner, /data-testid="auto-merge-stopped"[\s\S]*Auto-merge is stopped[\s\S]*required checks failed \(ci\) on `cccccccc` after auto-merging #12/);
+  assert.doesNotMatch(banner, /main-watch-clear/, 'only an admin gets the resume');
+  assert.doesNotMatch(banner, /Unaccounted commit/, 'not the main watch alert');
+  assert.match(r.renderMainWatchAlert({ ...red, canClear: true }), /data-testid="main-watch-clear"[^>]*>Clear and resume auto-merge/);
+  assert.equal(r.renderMainWatchAlert({ mode: 'main_watch' }), '', "a viewer's: nothing");
+});
+
+test('a resume answer that is a recorded request (the coordinator decides, #776 on #727) is told apart from a resume done now', () => {
+  assert.equal(r.isResumeRequest({ ok: true, how: 'requested', acknowledged: false, message: 'Recorded.' }), true);
+  assert.equal(r.isResumeRequest({ ok: true, how: 'as_before' }), false);
+  assert.equal(r.isResumeRequest(null), false);
+});
+
+test("the acknowledgement form counts visible characters as the server does: blanks that print nothing don't count (#776)", () => {
+  assert.equal(r.ackVisibleChars('the fix PR is ready'), 15);
+  for (const ch of ['ㅤ', 'ᅟ', 'ᅠ', 'ﾠ', '⠀', '​', '️']) assert.equal(r.ackVisibleChars(ch.repeat(12)), 0, `U+${ch.codePointAt(0)!.toString(16).toUpperCase()}`);
+  assert.equal(r.ackVisibleChars('한국어'), 3);
+});
+
 test("the main watch banner past a revert-PR cap: the trip's revert PR and why this commit has none of its own; past the day's cap, why none", () => {
   const sha = 'd'.repeat(40);
   const base = { mode: 'main_watch' as const, detail: '', lastChecked: null, stopped: 'main watch: x', canClear: false };
@@ -1699,6 +1723,29 @@ test("the first-run page, Policy form: each key with its bounds and why, the iso
   const writer = r.renderFirstRun({ ...f, policy, canAct: false }, { open: 'policy' });
   assert.match(writer, /data-testid="policy-refused"[^>]*>Only the instance(&#x27;|')s owners can change its policy/);
   assert.match(writer, /type="number"[^>]*disabled=""/);
+  // A root policy.yaml (#726): auto_merge on and land_mode direct are root's alone; the form offers only the
+  // tightening, disabled where the value is that already, and names the root command. Off stays on offer when on.
+  const rootPolicy = (autoMerge: boolean) => ({
+    ...policy,
+    fields: [
+      policy.fields[0]!,
+      { ...policy.fields[1]!, only: 'pr', root: 'sudo engine policy set shop land_mode direct' },
+      { ...policy.fields[2]!, value: autoMerge, only: false, root: 'sudo engine policy set shop auto_merge on' },
+    ],
+  });
+  const off = r.renderFirstRun({ ...f, policy: rootPolicy(false), canAct: true }, { open: 'policy' });
+  assert.match(off, /data-key="auto_merge"[\s\S]*?type="checkbox"[^>]*disabled=""[\s\S]*?data-testid="policy-root-only"[^>]*>Here only false; anything else is an admin(&#x27;|')s: <code[^>]*>sudo engine policy set shop auto_merge on</);
+  assert.match(off, /data-key="land_mode"[\s\S]*?<select[^>]*disabled=""[\s\S]*?<\/select>/);
+  assert.doesNotMatch(off.match(/data-key="land_mode"[\s\S]*?<\/select>/)![0], /direct/, 'no loosening offered');
+  // A policy that can't be read on a machine instance root's record covers: why, and "Turn auto-merge off" all the same.
+  const broken = { fields: [], fixed: [], error: 'refused: it is 2097200 bytes, over 262144', canTurnOff: true };
+  const offAnyway = r.renderFirstRun({ ...f, policy: broken, canAct: true }, { open: 'policy' });
+  assert.match(offAnyway, /data-testid="policy-error"[^>]*>refused: it is 2097200 bytes[\s\S]*?data-testid="policy-off"[^>]*>Turn auto-merge off</);
+  assert.doesNotMatch(r.renderFirstRun({ ...f, policy: { ...broken, canTurnOff: false }, canAct: true }, { open: 'policy' }), /policy-off/);
+  assert.doesNotMatch(r.renderFirstRun({ ...f, policy: broken, canAct: false }, { open: 'policy' }), /policy-off/, 'owners only');
+  const on = r.renderFirstRun({ ...f, policy: rootPolicy(true), canAct: true }, { open: 'policy' });
+  assert.match(on, /data-key="auto_merge"[\s\S]*?type="checkbox"/);
+  assert.doesNotMatch(on.match(/data-key="auto_merge"[\s\S]*?type="checkbox"[^>]*>/)![0], /disabled/, 'turning it off stays on offer');
 });
 
 test("the first-run page, Repo config form: writers, required checks, budget and workers from the default branch's config; Review then the change and Propose as a PR; writers can't; why not when the config isn't on the default branch", () => {

@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { parse as parseYaml } from 'yaml';
 import { DoneWhen } from '../contract.js';
+import type { GithubCheckApps, WorkflowSource } from '../check-source.js';
 import type { z } from 'zod';
 
 export interface Issue {
@@ -41,8 +42,16 @@ export interface Backlog {
   openPr(head: string, base: string, title: string, body: string, opts?: { draft?: boolean; headSha?: string }): Promise<{ url: string; number: number; draft: boolean }>;
   /** A pull request's current state. */
   pullRequest(n: number): Promise<PullRequest>;
-  /** Every check on a commit: check runs (latest per name) and commit statuses. */
-  checks(sha: string): Promise<CommitCheck[]>;
+  /**
+   * Every check on a commit: check runs (latest per name) and commit statuses. `pinned` (#727): some required check is
+   * pinned to its source, so read what judging it needs (more pages, failing closed); without it, read as before pins.
+   */
+  checks(sha: string, opts?: { pinned?: boolean }): Promise<CommitCheck[]>;
+  /**
+   * #727: the App GitHub's branch protection or ruleset requires for each required check on `branch`. Present only
+   * where checks come from GitHub, and then every pinned check judged must come from its source (src/check-source.ts).
+   */
+  checkApps?(branch: string): Promise<GithubCheckApps>;
   /** Take a draft PR out of draft. */
   markReady(n: number): Promise<void>;
   /**
@@ -137,6 +146,15 @@ export interface CommitCheck {
   /** The check run's id (its job, for a run from Actions), when there is one. */
   id?: number;
   url?: string;
+  /** A check run's GitHub App id: who posted it (#727, src/check-source.ts). A status has none. */
+  app?: number;
+  /** The Actions workflow run behind a check run's suite; null: Actions couldn't be read for it. Absent: not Actions. */
+  workflow?: WorkflowSource | null;
+  /**
+   * #727: read past the first page main read (a status on a later page of the combined status). Only a pinned name is
+   * judged with it (a non-pass of it blocks); an unpinned name is judged exactly as before, without it.
+   */
+  extra?: true;
 }
 
 export const LABELS = [

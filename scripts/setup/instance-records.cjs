@@ -73,6 +73,7 @@ const ITEMS = [
   { kind: 'path', rename: 'drop', note: "plugins aren't moved: approve them again for the new name (plugins.sh confirm); its MCP broker and secrets aren't either (mcp-broker.sh <new>, then its secrets)", what: '/var/lib/worklane/plugins/fetch-status/<name>.json', by: 'plugins.sh fetch' },
   { kind: 'path', rename: 'drop', note: "its MCP broker isn't moved: mcp-broker.sh <new>, then install its servers' secrets again", what: '/var/lib/worklane-mcp-<name>', by: "worklane-mcp@<name>.service's StateDirectory" },
   { kind: 'path', rename: 'move', what: '/var/lib/worklane/init/<name>.json', by: 'init --mode server (src/init.ts serverInitFile)' },
+  { kind: 'path', rename: 'new', what: '/etc/worklane/policy-root/<name>', by: "add-project.sh's policy step (worklane policy own: its policy.yaml is root's); instance-rename.sh makes the new name's when the old one's was" },
   { kind: 'sudoers', rename: 'drop', note: 'goes with the experiments', what: 'worklane-exp-<name>', by: 'experiments.sh install' },
   { kind: 'path', rename: 'drop', note: 'goes with the experiments (archived first)', what: '/etc/worklane/experiments/<name>.json', by: 'experiments.sh install, set, data' },
   { kind: 'path', rename: 'drop', note: 'goes with the experiments (job records archived first)', what: '/var/lib/worklane-exp/<name>', by: 'experiments.sh install; the experiment helper' },
@@ -88,6 +89,9 @@ const ITEMS = [
   { kind: 'user', rename: 'new', what: 'wl-<name>-eval', by: 'instance.sh --eval' },
   { kind: 'user', rename: 'new', what: 'wl-<name>-agent', by: 'instance.sh' },
   { kind: 'user', rename: 'new', what: 'wl-<name>', by: 'instance.sh (its home: the instance state, its App key and credentials)' },
+  // After the instance's users (#726): while wl-<name> is there it can still start, so an auto_merge off for it must
+  // still find its id. Its id's switches (policy-root/by_id/<id>/) go at the removal's end, once no name points at them.
+  { kind: 'path', rename: 'new', what: '/etc/worklane/policy-root/<name>.id', by: "worklane policy own, or the first auto_merge off (root's pointer to the instance's id: its kill switches live in policy-root/by_id/<id>/); instance-rename.sh points the new name at the same id at its start (policy alias), so no switch is ever carried" },
   { kind: 'group', rename: 'new', what: 'wl-<name>-work', by: 'instance.sh' },
   { kind: 'group', rename: 'drop', note: "its MCP broker isn't moved: mcp-broker.sh <new>, then install its servers' secrets again", what: 'wl-<name>-mcpc', by: "mcp-broker.sh (the broker's client socket)" },
   { kind: 'group', rename: 'drop', note: "its MCP broker isn't moved: mcp-broker.sh <new>, then install its servers' secrets again", what: 'wl-<name>-mcpctl', by: "mcp-broker.sh (the broker's control socket)" },
@@ -126,6 +130,7 @@ const SHARED_FILES = [
   { at: '/var/lib/worklane/canary.json', item: "canary (the canary run in progress: taken with updates.json's canary)" },
   { at: '/var/lib/worklane-test', item: '/var/lib/worklane-test/<name>' },
   { at: '/etc/worklane/plugins', item: '/etc/worklane/plugins/<name>.json' },
+  { at: '/etc/worklane/policy-root', item: '/etc/worklane/policy-root/<name>' },
   { at: '/var/lib/worklane/plugins', item: 'plugin-pending (pending.json), previews/<name>, store/<name>, fetch-status/<name>.json (fetches.jsonl: a log, kept)' },
   { at: '/etc/worklane/managed-apps.json', item: 'managed-apps' },
   { at: '/etc/worklane/plugin-hosts.json', why: 'the hosts any plugin may come from: the machine\'s, no instance in it' },
