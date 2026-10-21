@@ -115,10 +115,11 @@ const sharedRedact = (() => {
 const exports = {};
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.CUT_MARGIN = exports.TRACKER = exports.REDACTION_PATTERNS = exports.isDashboardKey = exports.DASHBOARD_KEY_PREFIX = void 0;
+exports.CUT_MARGIN = exports.UNSCANNABLE = exports.TRACKER = exports.REDACTION_PATTERNS = exports.isDashboardKey = exports.DASHBOARD_KEY_PREFIX = void 0;
 exports.secretKinds = secretKinds;
 exports.redactString = redactString;
 exports.redactCut = redactCut;
+exports.readWindow = readWindow;
 exports.redactRecords = redactRecords;
 exports.redact = redact;
 const credentialShaped = (v) => (/[a-z]/.test(v) && /[A-Z]/.test(v) && /\d/.test(v)) || /^[0-9a-fA-F]{32,}$/.test(v);
@@ -153,8 +154,14 @@ const PATTERNS = [
     [/\bsk-(?:ant-)?[A-Za-z0-9_-]{20,}\b/g, 'sk-[REDACTED]', 'API key (sk-)'],
     [/(^|[^A-Za-z0-9_])([sr]k)_(?:live|test)_([A-Za-z0-9]{16,})(?![A-Za-z0-9_])/g, (m, pre, k, v) => (/\d/.test(v) ? `${pre}${k}_[REDACTED]` : m), 'Stripe key'],
     [/AIza[0-9A-Za-z_-]{35}(?![0-9A-Za-z_-])/g, 'AIza[REDACTED]', 'Google API key'],
-    [/(^|[^A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]*(?:\.[A-Za-z0-9_-]+)*/g, '$1[REDACTED JWT]', 'JWT'],
-    [/eyJ[A-Za-z0-9_-]{8,512}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]*(?:\.[A-Za-z0-9_-]+)*/g, '[REDACTED JWT]', 'JWT'],
+    [
+        /(^|[^A-Za-z0-9_-])([A-Za-z0-9_-]{11,})\.([A-Za-z0-9_-]{8,})\.[A-Za-z0-9_-]*(?:\.[A-Za-z0-9_-]+)*/g,
+        (m, pre, head) => {
+            const at = head.indexOf('eyJ');
+            return at !== -1 && head.length - at >= 11 ? `${pre}${head.slice(0, at)}[REDACTED JWT]` : m;
+        },
+        'JWT',
+    ],
     [/(?:AKIA|ASIA)[A-Z0-9]{16}(?![A-Za-z0-9])/g, 'AKIA[REDACTED]', 'AWS access key'],
     [/xoxe[.-][A-Za-z0-9.-]{10,}(?![A-Za-z0-9])/g, 'xoxe-[REDACTED]', 'Slack token'],
     [/xox[abprs]-[A-Za-z0-9-]{10,}(?![A-Za-z0-9])/g, 'xox-[REDACTED]', 'Slack token'],
@@ -446,7 +453,18 @@ function maskUnion(s, mask, keepLines) {
     }
     return out;
 }
+exports.UNSCANNABLE = '[REDACTED: too large to scan]';
 function redactString(s, o = {}) {
+    try {
+        return redactOrThrow(s, o);
+    }
+    catch (e) {
+        if (e instanceof RangeError)
+            return exports.UNSCANNABLE + (o.keepLines ? '\n'.repeat(breaks(s)) : '');
+        throw e;
+    }
+}
+function redactOrThrow(s, o) {
     const put = o.keepLines ? applyKeepingLines : apply;
     const secrets = (t) => PATTERNS.reduce((y, [re, rep]) => put(y, re, rep), t);
     let out = o.broad ? maskUnion(s, o.mask ?? '[REDACTED]', o.keepLines === true) : glued(secrets(s), secrets);
@@ -456,8 +474,16 @@ function redactString(s, o = {}) {
 }
 exports.CUT_MARGIN = 16 * 1024;
 function redactCut(s, max, o = {}) {
-    const r = redactString(s.length > max + exports.CUT_MARGIN ? s.slice(0, max + exports.CUT_MARGIN) : s, o);
+    const r = redactString(s.length > max + exports.CUT_MARGIN ? readWindow(s, max + exports.CUT_MARGIN) : s, o);
     return r.length > max ? r.slice(0, max) : r;
+}
+function readWindow(s, end) {
+    if (s.length <= end)
+        return s;
+    for (let i = end - 1; i >= 0; i--)
+        if (/\s/.test(s[i]))
+            return s.slice(0, i + 1);
+    return '';
 }
 function redactRecords(records, o = {}) {
     const lines = redactString(records.join('\n'), { ...o, keepLines: true }).split('\n');

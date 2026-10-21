@@ -36,7 +36,7 @@ import { EventCache, type OpenRead } from './events/cache.js';
 import { compress, compressibleType, MIN_COMPRESS_BYTES, mayCompressApi, requestEncoding, StaticCompressed, type Encoding } from './dashboard-compress.js';
 import { dashboardProof, NONCE, PROOF_PATH } from './dashboard-proof.js';
 import { localDay } from './local-day.js';
-import { DASHBOARD_KEY_PREFIX, redactCut, redactRecords, redactString } from './events/redact.js';
+import { DASHBOARD_KEY_PREFIX, readWindow, redactCut, redactRecords, redactString } from './events/redact.js';
 import type { EventPayload, StoredEvent } from './events/types.js';
 import { acceptGit, acceptMerge, protectionView, type AcceptGit, type AcceptTarget } from './main-watch.js';
 import { deployGateView } from './deploy-gate/gate.js';
@@ -889,7 +889,8 @@ const journalctl: JournalReader = (unit, lines) => {
 const RECORD_SHOWN = 2000;
 const RECORD_READ = RECORD_SHOWN + 4096;
 /** A record cut to what is read of it: a huge journal line costs no more than that (the redaction is synchronous). */
-const readPart = (s: string) => (s.length > RECORD_READ ? s.slice(0, RECORD_READ) : s);
+// It ends at the record's last whitespace in that part (readWindow, #889 round 5): its raw end is never shown.
+const readPart = (s: string) => readWindow(s, RECORD_READ);
 /** A message cut to 2,000 characters, redacted first: a cut made before would leave a long secret's body unfound (#889). */
 const clip = (s: string) => {
   const r = redactCut(s, RECORD_SHOWN);

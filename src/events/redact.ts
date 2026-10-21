@@ -82,9 +82,17 @@ const PATTERNS: [RegExp, Replacement, string][] = [
   [/AIza[0-9A-Za-z_-]{35}(?![0-9A-Za-z_-])/g, 'AIza[REDACTED]', 'Google API key'],
   // JSON Web Tokens: a base64url JSON header (so `eyJ`), a payload and a signature (empty when unsigned).
   // Any further dotted parts go with it (#889 round 3): a JWE has five, and a token may be followed by more.
-  [/(^|[^A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]*(?:\.[A-Za-z0-9_-]+)*/g, '$1[REDACTED JWT]', 'JWT'],
-  // And wherever `eyJ` is, with its header bounded (512 characters), so each start reads a bounded stretch first.
-  [/eyJ[A-Za-z0-9_-]{8,512}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]*(?:\.[A-Za-z0-9_-]+)*/g, '[REDACTED JWT]', 'JWT'],
+  // Read from the start of the header's run of base64url characters, with no bound on its length (an `x5c` chain makes
+  // a header several KB, #889 round 5); a function finds `eyJ` in that run, so a token glued after a letter, a digit or
+  // `-` is found from its `eyJ` on. Each start is a run's start: linear.
+  [
+    /(^|[^A-Za-z0-9_-])([A-Za-z0-9_-]{11,})\.([A-Za-z0-9_-]{8,})\.[A-Za-z0-9_-]*(?:\.[A-Za-z0-9_-]+)*/g,
+    (m, pre, head) => {
+      const at = head!.indexOf('eyJ');
+      return at !== -1 && head!.length - at >= 11 ? `${pre}${head!.slice(0, at)}[REDACTED JWT]` : m;
+    },
+    'JWT',
+  ],
   [/(?:AKIA|ASIA)[A-Z0-9]{16}(?![A-Za-z0-9])/g, 'AKIA[REDACTED]', 'AWS access key'],
   // Slack's token-rotation and refresh tokens (xoxe-..., xoxe.xoxb-...), before the
   // other Slack tokens (one is inside it); then its app-level token (xapp-, Socket Mode).
@@ -529,7 +537,21 @@ function maskUnion(s: string, mask: string, keepLines: boolean): string {
   return out;
 }
 
+/** What a text becomes when it can't be scanned (#889 round 5): shown as nothing of it. */
+export const UNSCANNABLE = '[REDACTED: too large to scan]';
+
 export function redactString(s: string, o: RedactTextOptions = {}): string {
+  try {
+    return redactOrThrow(s, o);
+  } catch (e) {
+    // V8's backtracking stack overflows on one run of millions of characters after a prefix (`RangeError: Maximum
+    // call stack size exceeded`): fail closed, with the text's line count kept for redactRecords.
+    if (e instanceof RangeError) return UNSCANNABLE + (o.keepLines ? '\n'.repeat(breaks(s)) : '');
+    throw e;
+  }
+}
+
+function redactOrThrow(s: string, o: RedactTextOptions): string {
   const put = o.keepLines ? applyKeepingLines : apply;
   // The broad mode masks the union of every rule's spans (maskUnion); the default mode applies the shapes in turn,
   // each with its own marker, then again from each glue point (glued).
@@ -549,8 +571,21 @@ export const CUT_MARGIN = 16 * 1024;
  * dashboard) stay responsive.
  */
 export function redactCut(s: string, max: number, o: RedactTextOptions = {}): string {
-  const r = redactString(s.length > max + CUT_MARGIN ? s.slice(0, max + CUT_MARGIN) : s, o);
+  const r = redactString(s.length > max + CUT_MARGIN ? readWindow(s, max + CUT_MARGIN) : s, o);
   return r.length > max ? r.slice(0, max) : r;
+}
+
+/**
+ * The first `end` characters of `s` as a window to redact, ending at its last whitespace (#889 round 5): the raw end of
+ * a window is never shown. A token cut by the window's end is too short for its rule, and redaction earlier in the
+ * window (a key, an END line with no BEGIN) can shrink the text so far that the cut lands inside what is shown. No
+ * token, URL user info or credential value holds whitespace, so ending at one drops the cut run whole; a window with no
+ * whitespace at all is dropped (empty). A private key cut this way still fails closed by its BEGIN.
+ */
+export function readWindow(s: string, end: number): string {
+  if (s.length <= end) return s;
+  for (let i = end - 1; i >= 0; i--) if (/\s/.test(s[i]!)) return s.slice(0, i + 1);
+  return '';
 }
 
 /**
