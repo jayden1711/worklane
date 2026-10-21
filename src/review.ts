@@ -326,6 +326,24 @@ export const DECISION_DIRS = ['decisions', 'docs/decisions', 'docs/adr', `${BRAN
 const DECISION_RECORD_GLOBS = [...DECISION_FILES, ...DECISION_DIRS.flatMap((d) => [d, `${d}/**`])];
 
 /**
+ * Each glob stays in the first part that lists it and leaves every later one, so one path has one part and one name
+ * (#920: docs/design.md is a decision record too, and stays "the release procedure and the design rules"). The lock is
+ * the same either way: the first part still holds the glob. Only a repeat is dropped, never a glob's only listing.
+ */
+function onePartPerGlob(parts: { what: string; globs: string[] }[]): { what: string; globs: string[] }[] {
+  const seen = new Set<string>();
+  return parts.map((p) => {
+    const globs: string[] = [];
+    for (const g of p.globs) {
+      if (seen.has(g)) continue;
+      seen.add(g);
+      globs.push(g);
+    }
+    return { what: p.what, globs };
+  });
+}
+
+/**
  * The harness changing its own controls: the merge policy, the main watch and the push guard, the updater, the review
  * levels and guardrails, the machine's setup scripts, the engine's container image, deployment files and CI workflows, sign-in and
  * credentials, who may approve, the evaluator and the agent runner, the sandbox, the push gate, denylist and secret scan,
@@ -335,7 +353,7 @@ const DECISION_RECORD_GLOBS = [...DECISION_FILES, ...DECISION_DIRS.flatMap((d) =
  * first part a file matches names it. Every glob matches a real file in the engine's repo (a test checks).
  */
 export const SELF_MODIFICATION = 'self-modification';
-export const SELF_MODIFICATION_PARTS: { what: string; globs: string[] }[] = [
+export const SELF_MODIFICATION_PARTS: { what: string; globs: string[] }[] = onePartPerGlob([
   { what: 'the merge policy', globs: ['src/merge-policy*', 'src/coordinator/merge-flow*', 'src/pr-rules*'] },
   { what: 'the main watch', globs: ['src/main-watch*', 'src/github/main-watch-api*'] },
   { what: 'the push guard', globs: ['src/push-guard*', 'src/push-check*'] },
@@ -427,8 +445,8 @@ export const SELF_MODIFICATION_PARTS: { what: string; globs: string[] }[] = [
   // plan may cite it. A docs-only record was L0 and merged itself, so a PR could put the merge process above, whole,
   // in part or reworded, where planners read it as a decision; the index code can't recognise a copy. Read from the
   // index's own lists (DECISION_FILES, DECISION_DIRS above), so the two can't drift. Only docs/design.md exists yet
-  // (NOT_YET_FILES in test/merge-policy.test.ts). In the engine's repo only: a managed app's records keep their
-  // categories (engineSourceGlob).
+  // (NOT_YET_FILES in test/merge-policy.test.ts), and it stays named by the design rules' part above (onePartPerGlob).
+  // In the engine's repo only: a managed app's records keep their categories (engineSourceGlob).
   { what: "the planners' decision records", globs: DECISION_RECORD_GLOBS },
   // The code that builds that index: what it reads, and what it leaves out (docs/process.md, a record linked elsewhere).
   { what: "the planners' decisions index", globs: ['src/plan-decisions.ts'] },
@@ -439,7 +457,7 @@ export const SELF_MODIFICATION_PARTS: { what: string; globs: string[] }[] = [
   { what: 'the coordinator', globs: ['src/coordinator/**'] },
   // A study's definition (docs: the experiments design): its eval, editable paths and budget are what a job may touch.
   { what: 'the experiment studies', globs: [`${BRAND.configDir}/experiments.yaml`] },
-];
+]);
 
 export const LOCKED_CATEGORIES: Record<string, string[]> = {
   [AGENT_INSTRUCTIONS]: [`${BRAND.configDir}/roles/**`, `${BRAND.configDir}/skills/**`, 'AGENTS.md', '**/CLAUDE.md'],

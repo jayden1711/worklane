@@ -15,7 +15,7 @@ import { BRAND } from '../src/brand.js';
 import { loadConfig } from '../src/config/load.js';
 import { mergeDecision, waitCategoriesOf, type MergeInput } from '../src/merge-policy.js';
 import { DECISION_DIRS, DECISION_FILES, recordEntries } from '../src/plan-decisions.js';
-import { computeLevel, DEFAULT_CATEGORIES, SELF_MODIFICATION, selfModificationPart, type LevelResult, type LockScope } from '../src/review.js';
+import { computeLevel, DEFAULT_CATEGORIES, SELF_MODIFICATION, SELF_MODIFICATION_PARTS, selfModificationPart, type LevelResult, type LockScope } from '../src/review.js';
 import { repoRoot } from './helpers.js';
 
 const own = loadConfig(repoRoot).review!;
@@ -232,4 +232,19 @@ test("regression: every decision record the planners' index reads is self-modifi
   // A folder itself (a symlink to anywhere) is locked too.
   for (const d of DECISION_DIRS) assert.equal(selfModificationPart(d), records, d);
   for (const f of DECISION_FILES) assert.ok(locked.some(([p]) => p === f) || f === 'docs/design.md', `${f} is in the locked list`);
+});
+
+// WHY (#920 round 6): docs/design.md is a decision record and the design rules' file. Listed in both parts, it was named
+// by the first, while a check that walks each part's globs (test/coordinator.test.ts) expected the second: CI shard 1/4
+// failed. Each glob is in one part only, so a path has one name; the lock still comes from the index's lists.
+test('each self-modification glob is in exactly one part, and each exact path names its own part (docs/design.md stays the design rules\')', () => {
+  const globs = SELF_MODIFICATION_PARTS.flatMap((p) => p.globs);
+  assert.deepEqual(globs.filter((g, i) => globs.indexOf(g) !== i), [], 'a glob in two parts');
+  for (const part of SELF_MODIFICATION_PARTS) {
+    for (const glob of part.globs.filter((g) => !/[*?[]/.test(g))) assert.equal(selfModificationPart(glob), part.what, glob);
+  }
+  assert.equal(selfModificationPart('docs/design.md'), 'the release procedure and the design rules');
+  // Every path the index reads is still locked, the design doc among them.
+  for (const f of DECISION_FILES) assert.ok(globs.includes(f), f);
+  for (const d of DECISION_DIRS) assert.ok(globs.includes(d) && globs.includes(`${d}/**`), d);
 });

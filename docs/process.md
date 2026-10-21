@@ -20,7 +20,7 @@ This page is the process for this repo's own PRs, which builders write, reviewer
 
 - **A PR in the critical set also needs a second, adversarial review.** The second reviewer is not the builder, not the orchestrator and not the first reviewer. They pass the same current head, and post the PASS on the PR naming that head.
 - **Any push to a PR in the critical set needs both reviews again**, on the new head.
-- **A PR is in the critical set when its changed files touch any of these.** The changed files include both paths of a rename or copy: the old path too, which GitHub's PR file list leaves out. The engine's own `computeLevel` or `selfModificationPart` (`src/review.ts`), run on the PR's diff, decides; when it can't be run or its result can't be read, the PR is in the critical set.
+- **A PR is in the critical set when its changed files touch any of these subjects**, or when the engine's own `computeLevel` (`src/review.ts`), run on the PR's diff, puts any changed file under `self-modification`, `engine-guards` or `release-signing`. The changed files include both paths of a rename or copy: the old path too, which GitHub's PR file list leaves out. The code can only add a PR to the set, never take one out: a file under one of these subjects is in whatever the code says of it (for example `scripts/lib/signing.mjs`, `src/update-drain.ts` or `src/updater-setup.ts`, under release signing and the updater). When it's unsure whether a file is under a subject, or the code's result can't be run or read, the PR is in.
   - merge policy;
   - review levels;
   - locks and the tool guard;
