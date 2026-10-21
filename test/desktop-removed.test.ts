@@ -12,11 +12,12 @@ import { join, relative } from 'node:path';
 import { parse } from 'yaml';
 import { repoRoot } from './helpers.js';
 
-type Job = { name?: string; strategy?: { matrix?: Record<string, unknown> } };
+type Job = { name?: unknown; strategy?: { matrix?: unknown } };
 
 /**
  * Every check name the workflows in `dir` can create: each job's name (its key when it has none), a matrix job
  * expanded as GitHub names it (the values substituted where the name uses them, else appended in parentheses).
+ * A name this can't work out keeps an unresolved `${{` (see UNRESOLVED and mayName).
  */
 function jobNames(dir: string): Set<string> {
   const out = new Set<string>();
@@ -28,18 +29,67 @@ function workflowFiles(dir: string): string[] {
   return readdirSync(dir).filter((x) => /\.ya?ml$/.test(x));
 }
 
+/** What a check name still holds when this can't evaluate it: an expression GitHub would evaluate on the runner. */
+const UNRESOLVED = '${{';
+
+/**
+ * Whether `names` may include the check `check`: by name, or because one of them still holds an expression this
+ * can't evaluate (`${{ 'desktop' }}`, `${{ github.x }}`, a matrix key it couldn't find), which could evaluate to
+ * anything. That second case fails closed: such a name counts as a possible maker of every check.
+ */
+const mayName = (names: Set<string>, check: string) => names.has(check) || [...names].some((n) => n.includes(UNRESOLVED));
+
+const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
+const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
+const shown = (v: unknown) => (typeof v === 'object' && v !== null ? JSON.stringify(v) : String(v));
+
+/**
+ * A job's matrix combinations as GitHub builds them: the product of its axes, less each `exclude` match, then each
+ * `include` entry merged into every combination whose original values it doesn't overwrite, or added as a
+ * combination of its own when it fits none (so an `include`-only matrix is its entries). Null when the matrix isn't
+ * written out (an expression such as `${{ fromJSON(...) }}`, for the matrix, an axis or an entry): the caller then
+ * treats the job's name as unresolved.
+ */
+function matrixCombos(matrix: unknown): Record<string, unknown>[] | null {
+  if (!isRecord(matrix)) return null;
+  const { include = [], exclude = [], ...axes } = matrix;
+  if (!Array.isArray(include) || !Array.isArray(exclude) || !include.every(isRecord) || !exclude.every(isRecord)) return null;
+  if (!Object.values(axes).every(Array.isArray)) return null;
+  let combos: Record<string, unknown>[] = Object.keys(axes).length ? [{}] : [];
+  for (const [k, values] of Object.entries(axes) as [string, unknown[]][]) combos = combos.flatMap((c) => values.map((v) => ({ ...c, [k]: v })));
+  combos = combos.filter((c) => !exclude.some((e) => Object.entries(e).every(([k, v]) => same(c[k], v))));
+  const original = combos.map((c) => ({ ...c }));
+  const added: Record<string, unknown>[] = [];
+  for (const entry of include) {
+    let fits = false;
+    combos.forEach((c, i) => {
+      if (Object.entries(entry).every(([k, v]) => !(k in original[i]!) || same(original[i]![k], v))) {
+        Object.assign(c, entry);
+        fits = true;
+      }
+    });
+    if (!fits) added.push({ ...entry });
+  }
+  return [...combos, ...added];
+}
+
 /** The check names one workflow file can create (see jobNames). */
 function fileJobNames(file: string): Set<string> {
   const out = new Set<string>();
   const wf = parse(readFileSync(file, 'utf8')) as { jobs?: Record<string, Job> };
   for (const [key, job] of Object.entries(wf.jobs ?? {})) {
-    const name = job.name ?? key;
-    const axes = Object.entries(job.strategy?.matrix ?? {}).filter(([k, v]) => k !== 'include' && k !== 'exclude' && Array.isArray(v)) as [string, unknown[]][];
-    let combos: string[][] = [[]];
-    for (const [, values] of axes) combos = combos.flatMap((c) => values.map((v) => [...c, String(v)]));
+    const name = String(job.name ?? key);
+    const matrix = job.strategy?.matrix;
+    const combos = matrix === undefined ? [{}] : matrixCombos(matrix);
+    if (!combos) {
+      out.add(`${name} (${UNRESOLVED} matrix ${JSON.stringify(matrix)} }})`);
+      continue;
+    }
     for (const c of combos) {
-      const vars = Object.fromEntries(axes.map(([k], i) => [k, c[i]!]));
-      out.add(name.includes('${{') ? name.replace(/\$\{\{ matrix\.([a-z]+) \}\}/g, (m, k: string) => vars[k] ?? m) : c.length ? `${name} (${c.join(', ')})` : name);
+      // GitHub's expression contexts and property names ignore case, and spacing inside ${{ }} is free.
+      const vars = new Map(Object.entries(c).map(([k, v]) => [k.toLowerCase(), v]));
+      if (name.includes(UNRESOLVED)) out.add(name.replace(/\$\{\{\s*matrix\.([\w-]+)\s*\}\}/gi, (m, k: string) => (vars.has(k.toLowerCase()) ? shown(vars.get(k.toLowerCase())) : m)));
+      else out.add(Object.keys(c).length ? `${name} (${Object.values(c).map(shown).join(', ')})` : name);
     }
   }
   return out;
@@ -79,6 +129,11 @@ function workflowProblems(wf: Workflow): string[] {
   if (wf.defaults !== undefined) out.push(`defaults ${JSON.stringify(wf.defaults)}`);
   if (wf.env !== undefined) out.push(`env ${JSON.stringify(wf.env)}`);
   return out;
+}
+
+/** The workflow files in `dir` that may make a `desktop` check (mayName). */
+function desktopMakers(dir: string): string[] {
+  return workflowFiles(dir).filter((f) => mayName(fileJobNames(join(dir, f)), 'desktop'));
 }
 
 /** The names in `required` that no workflow in `dir` defines: checks nothing will ever run. */
@@ -152,9 +207,56 @@ test('the desktop check stays one more release: one job that only succeeds, on e
   const ci = parse(readFileSync(join(workflows, 'ci.yml'), 'utf8')) as Workflow;
   assert.deepEqual(notOnlySuccess(ci.jobs?.desktop), [], 'ci.yml\'s desktop job: one `true` step on GitHub\'s runner, nothing that could skip, fail or rename it');
   assert.deepEqual(workflowProblems(ci), [], 'ci.yml runs on every push to main (where the updater reads it) and every pull request, with no filter and no workflow defaults');
-  assert.deepEqual(workflowFiles(workflows).filter((f) => fileJobNames(join(workflows, f)).has('desktop')), ['ci.yml'], 'one job makes the desktop check: no second run of that name can be the one an updater reads');
+  assert.deepEqual(desktopMakers(workflows), ['ci.yml'], 'one job makes the desktop check: no second run of that name can be the one an updater reads (a name this can\'t evaluate counts as one)');
   assert.ok(requiredChecks().includes('desktop'), 'config.yaml still requires desktop, until #877 removes the job and the check together');
   assert.ok(updaterDefaults().includes('desktop'), 'a new install\'s updater still lists desktop, until #877');
+});
+
+/**
+ * A second workflow's job, and whether it may make a `desktop` check. True ones would give an updater a second
+ * `desktop` run that could be red (the "red twin"); the false ones show the fail-closed rule isn't "every name".
+ * The first seven are the second adversarial review's (#746); the four it found missed come after the controls.
+ */
+const TWIN_FIXTURES: [string, string, boolean][] = [
+  ['a job keyed desktop', 'jobs:\n  desktop:\n    runs-on: x\n', true],
+  ['name: desktop', 'jobs:\n  shots:\n    name: desktop\n    runs-on: x\n', true],
+  ['a matrix axis, ${{ matrix.view }}', 'jobs:\n  shots:\n    name: ${{ matrix.view }}\n    strategy: { matrix: { view: [desktop, phone] } }\n    runs-on: x\n', true],
+  ['a matrix of include entries only', 'jobs:\n  shots:\n    name: ${{ matrix.view }}\n    strategy:\n      matrix:\n        include:\n          - view: desktop\n          - view: phone\n    runs-on: x\n', true],
+  ['no spaces, ${{matrix.view}}', 'jobs:\n  shots:\n    name: ${{matrix.view}}\n    strategy: { matrix: { view: [desktop, phone] } }\n    runs-on: x\n', true],
+  ['a camelCase key, ${{ matrix.viewName }}', 'jobs:\n  shots:\n    name: ${{ matrix.viewName }}\n    strategy: { matrix: { viewName: [desktop, phone] } }\n    runs-on: x\n', true],
+  ["a literal expression, ${{ 'desktop' }}", "jobs:\n  shots:\n    name: ${{ 'desktop' }}\n    runs-on: x\n", true],
+  ['another case, ${{ MATRIX.View }}', 'jobs:\n  shots:\n    name: ${{ MATRIX.View }}\n    strategy: { matrix: { view: [desktop, phone] } }\n    runs-on: x\n', true],
+  ['an include entry merged into an axis combination', 'jobs:\n  shots:\n    name: ${{ matrix.view }}\n    strategy: { matrix: { os: [a], include: [{ os: a, view: desktop }] } }\n    runs-on: x\n', true],
+  ['an include entry that fits no combination, added as its own', 'jobs:\n  shots:\n    name: ${{ matrix.view }}\n    strategy: { matrix: { view: [phone], include: [{ view: desktop }] } }\n    runs-on: x\n', true],
+  ['a matrix from an expression', 'jobs:\n  shots:\n    name: ${{ matrix.view }}\n    strategy: { matrix: "${{ fromJSON(needs.plan.outputs.views) }}" }\n    runs-on: x\n', true],
+  ['an axis from an expression, the name not using it (unreadable, so it fails closed)','jobs:\n  shots:\n    strategy: { matrix: { view: "${{ fromJSON(needs.plan.outputs.views) }}" } }\n    runs-on: x\n', true],
+  ['another context, ${{ github.job }}', 'jobs:\n  shots:\n    name: ${{ github.job }}\n    runs-on: x\n', true],
+  ['a matrix key the matrix lacks', 'jobs:\n  shots:\n    name: ${{ matrix.other }}\n    strategy: { matrix: { view: [phone] } }\n    runs-on: x\n', true],
+  ['a name with more around the value', 'jobs:\n  shots:\n    name: shots ${{ matrix.view }}\n    strategy: { matrix: { view: [desktop, phone] } }\n    runs-on: x\n', false],
+  ['no name: the values in parentheses', 'jobs:\n  shots:\n    strategy: { matrix: { view: [desktop] } }\n    runs-on: x\n', false],
+  ['no name, include entries only', 'jobs:\n  shots:\n    strategy: { matrix: { include: [{ view: desktop }] } }\n    runs-on: x\n', false],
+  ['desktop excluded', 'jobs:\n  shots:\n    name: ${{ matrix.view }}\n    strategy: { matrix: { view: [desktop, phone], exclude: [{ view: desktop }] } }\n    runs-on: x\n', false],
+  ['an include entry that adds a key only', 'jobs:\n  shots:\n    name: ${{ matrix.view }}\n    strategy: { matrix: { view: [phone], include: [{ size: big }] } }\n    runs-on: x\n', false],
+];
+
+test('a second workflow that may make a desktop check is caught, whatever its name is built from (#746 second adversarial review)', () => {
+  for (const [label, yml, makes] of TWIN_FIXTURES) {
+    const dir = mkdtempSync(join(tmpdir(), 'wf-'));
+    writeFileSync(join(dir, 'ci.yml'), "jobs:\n  desktop:\n    runs-on: ubuntu-latest\n    steps:\n      - run: 'true'\n");
+    writeFileSync(join(dir, 'other.yml'), yml);
+    assert.deepEqual(desktopMakers(dir), makes ? ['ci.yml', 'other.yml'] : ['ci.yml'], label);
+  }
+});
+
+test('matrix names expand as GitHub gives them: include, exclude, case and spacing', () => {
+  const names = (yml: string) => {
+    const dir = mkdtempSync(join(tmpdir(), 'wf-'));
+    writeFileSync(join(dir, 'w.yml'), yml);
+    return [...fileJobNames(join(dir, 'w.yml'))].sort();
+  };
+  assert.deepEqual(names('jobs:\n  s:\n    name: v ${{matrix.View}}\n    strategy: { matrix: { include: [{ view: a }, { view: b }] } }\n'), ['v a', 'v b']);
+  assert.deepEqual(names('jobs:\n  s:\n    strategy: { matrix: { os: [x, y], exclude: [{ os: y }], include: [{ os: x, n: 1 }, { os: z }] } }\n'), ['s (x, 1)', 's (z)']);
+  assert.deepEqual(names('jobs:\n  s:\n    name: ${{ matrix.os }}-${{ matrix.n }}\n    strategy: { matrix: { os: [x], n: [1, 2], include: [{ n: 2, extra: e }] } }\n'), ['x-1', 'x-2']);
 });
 
 test('the no-op shape check catches whatever could make the desktop check anything but success', () => {
