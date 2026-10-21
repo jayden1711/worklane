@@ -13,8 +13,15 @@
 // whatever environment the caller passes, so no caller can turn them off. test/git-runner.test.ts fails on a git call
 // in src/ or scripts/ that doesn't come through here (or scripts/lib/git.cjs, the same settings for scripts).
 //
-// LIMIT: a shallow clone's `.git/shallow` is still read (it is how a shallow clone works, and git writes it itself).
-// A program the engine runs that runs git itself (gitleaks) gets these settings only when it is handed gitEnv().
+// The commit-graph file (objects/info/commit-graph, in the shared objects dir) is the same kind of state: git trusts
+// its parent links, and a forged one skipped a commit in a range (measured, #927's round-2 check). It is off for every
+// git here too (`-c core.commitGraph=false`, and the same pair in the environment for gits a program runs itself).
+//
+// A shallow clone's `shallow` file is read (it is how a shallow clone works). A reader that must see a range whole
+// takes a gitSnapshot: one copy of that file, checked, that every walk it runs reads, however the shared file changes.
+//
+// LIMIT: a program the engine runs that runs git itself (gitleaks) gets these settings only when it is handed gitEnv().
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { execFile, execFileSync, spawn, spawnSync } from './child-process.js';
 import type {
   ChildProcess,
@@ -34,12 +41,18 @@ import type {
   StdioNull,
   StdioPipe,
 } from 'node:child_process';
-import { devNull } from 'node:os';
-import { join } from 'node:path';
+import { devNull, tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
 import type { Readable } from 'node:stream';
 
-/** Before every git subcommand: replace refs off for this git (git also sets GIT_NO_REPLACE_OBJECTS for the gits it runs). */
-export const GIT_FIXED_ARGS: readonly string[] = Object.freeze(['--no-replace-objects']);
+/**
+ * Before every git subcommand: replace refs off for this git (git also sets GIT_NO_REPLACE_OBJECTS for the gits it
+ * runs), and the commit-graph off.
+ */
+export const GIT_FIXED_ARGS: readonly string[] = Object.freeze(['--no-replace-objects', '-c', 'core.commitGraph=false']);
+
+/** git config every git also gets through its environment (GIT_CONFIG_COUNT pairs), after the caller's own pairs. */
+export const GIT_FIXED_CONFIG: readonly (readonly [string, string])[] = Object.freeze([Object.freeze(['core.commitGraph', 'false'] as const)]);
 
 /**
  * On every git process, over the caller's environment. GIT_GRAFT_FILE is a path under the null device, which can't
@@ -50,9 +63,21 @@ export const GIT_FIXED_ENV: Readonly<Record<string, string>> = Object.freeze({
   GIT_GRAFT_FILE: join(devNull, 'no-grafts'),
 });
 
-/** `env` (or this process's environment), with the fixed settings on top. */
+/**
+ * `env` (or this process's environment), with the fixed settings on top and the fixed config pairs after its own
+ * GIT_CONFIG_COUNT pairs (a later pair wins). A count that isn't a whole number is git's refusal anyway; it is replaced.
+ */
 export function gitEnv(env?: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-  return { ...(env ?? process.env), ...GIT_FIXED_ENV };
+  const out: NodeJS.ProcessEnv = { ...(env ?? process.env), ...GIT_FIXED_ENV };
+  let n = Number(out.GIT_CONFIG_COUNT ?? '0');
+  if (!Number.isSafeInteger(n) || n < 0) n = 0;
+  for (const [k, v] of GIT_FIXED_CONFIG) {
+    out[`GIT_CONFIG_KEY_${n}`] = k;
+    out[`GIT_CONFIG_VALUE_${n}`] = v;
+    n++;
+  }
+  out.GIT_CONFIG_COUNT = String(n);
+  return out;
 }
 
 /** The argument list a git process gets: the fixed arguments, then `args`. */
@@ -109,4 +134,78 @@ export function commandSpawnSync(cmd: string, args: readonly string[], options: 
   return isGitCommand(cmd)
     ? spawnSync(cmd, gitArgs(args), { ...options, env: gitEnv(options.env) })
     : spawnSync(cmd, args, options);
+}
+
+const OBJECT_ID = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
+
+/**
+ * The commits a `shallow` file lists, or null when any line isn't exactly a full lowercase object id. git reads the
+ * file more loosely (an uppercase id, text after the id, a line over 1 KB: each measured to cut a range on git 2.43),
+ * so a line this can't read the way git might is never taken as "no cut".
+ */
+export function shallowIds(text: string): string[] | null {
+  const lines = text.split('\n');
+  if (lines.at(-1) === '') lines.pop();
+  return lines.every((l) => OBJECT_ID.test(l)) ? lines : null;
+}
+
+/** Variables that would point a git at another repo, worktree, index or shallow file than the snapshot's own. */
+const REPO_VARS = ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE', 'GIT_COMMON_DIR', 'GIT_OBJECT_DIRECTORY', 'GIT_SHALLOW_FILE', 'GIT_NAMESPACE'];
+
+/** One fixed view of a repo's history: what every walk of one check reads (#927). */
+export interface GitSnapshot {
+  /** The environment a git (or a program that runs git, through gitEnv) reads the snapshot with. */
+  readonly env: NodeJS.ProcessEnv;
+  /** The commits the snapshot's shallow file cuts at (empty: not shallow). */
+  readonly cut: ReadonlySet<string>;
+  /** The cut commits inside base..head (object ids): each hides what is below it. */
+  cutInRange(base: string, head: string): string[];
+  /** Removes the snapshot's directory. */
+  dispose(): void;
+}
+
+/**
+ * A private git directory over `cwd`'s repo: its objects (GIT_OBJECT_DIRECTORY, with their alternates) and one copy
+ * of its `shallow` file, read once and checked (shallowIds). No refs, no config but its own, no replace refs and no
+ * grafts. A walk through `env` reads that copy, so writing or removing the repo's own shallow file mid-check changes
+ * nothing (an agent toggling it every ~3 ms got a refused file past the old before-and-after checks: 23 of 150 runs,
+ * measured). Documented environment only, not git's internal --shallow-file. Commit ids only: the snapshot has no
+ * refs, so resolve names in the repo first. Throws, saying why, when the repo or its shallow file can't be read.
+ */
+export function gitSnapshot(cwd: string): GitSnapshot {
+  const clean = (): NodeJS.ProcessEnv => {
+    const e: NodeJS.ProcessEnv = { ...process.env };
+    for (const k of REPO_VARS) delete e[k];
+    return e;
+  };
+  const [format, objectsPath, shallowPath] = gitExecFileSync(['rev-parse', '--show-object-format', '--git-path', 'objects', '--git-path', 'shallow'], { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).split('\n');
+  if (!format || !objectsPath || !shallowPath) throw new Error('git rev-parse gave no object format or paths');
+  let text = '';
+  try {
+    text = readFileSync(resolve(cwd, shallowPath), 'utf8');
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw new Error(`can't read its shallow file: ${(e as Error).message}`);
+  }
+  const ids = shallowIds(text);
+  if (ids === null) throw new Error('its shallow file has a line that isn\'t exactly a full lowercase object id, which git may still read as a cut');
+  const dir = mkdtempSync(join(tmpdir(), 'git-snapshot-'));
+  try {
+    gitExecFileSync(['init', '-q', '--bare', `--object-format=${format}`, dir], { env: clean(), stdio: ['ignore', 'pipe', 'pipe'] });
+    if (ids.length) writeFileSync(join(dir, 'shallow'), `${ids.join('\n')}\n`);
+  } catch (e) {
+    rmSync(dir, { recursive: true, force: true });
+    throw e;
+  }
+  const env: NodeJS.ProcessEnv = { ...clean(), GIT_DIR: dir, GIT_OBJECT_DIRECTORY: resolve(cwd, objectsPath) };
+  const cut = new Set(ids);
+  return {
+    env,
+    cut,
+    cutInRange: (base, head) => {
+      if (!cut.size) return [];
+      const listed = gitExecFileSync(['rev-list', `${base}..${head}`], { env, encoding: 'utf8', maxBuffer: 256 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'] });
+      return listed.split('\n').filter((c) => cut.has(c));
+    },
+    dispose: () => rmSync(dir, { recursive: true, force: true }),
+  };
 }
