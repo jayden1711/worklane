@@ -354,7 +354,8 @@ step_services() {
   bash "$here/service.sh" "$new" "${args[@]}"
   names="$({ helper_instances; echo "$new"; } | sort -u | while read -r n; do if user_exists "wl-$n"; then echo "$n"; fi; done | tr '\n' ' ')"
   # shellcheck disable=SC2086 # one word per instance name
-  bash "$here/machine-helper.sh" $names
+  # The one user this rename adds on purpose: its new name's (#902 round 6). machine-helper.sh checks the rest at write time.
+  bash "$here/machine-helper.sh" "--may-add=$new" $names
   if [ -f "$HUB_UNIT" ]; then
     mapfile -t args < <(hub_keep_args)
     # Never the old name: its dashboard stays stopped (instance-remove.sh refuses while it runs), and it goes next.

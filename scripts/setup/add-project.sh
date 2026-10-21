@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Add a project to this machine in one go, as root (review it first): every setup step for one instance, in order.
 #
-#   sudo bash scripts/setup/add-project.sh <name> <owner/repo> [--public-url https://<host>] [--client-id <id>] [--timeout <minutes>] [--replace-sudoers]
+#   sudo bash scripts/setup/add-project.sh <name> <owner/repo> [--public-url https://<host>] [--client-id <id>] [--timeout <minutes>] [--replace-sudoers=<pin>]
 #
 # --replace-sudoers is root's alone, at a root shell: the machine helper (a coordinator's add-project) passes exactly
 # the name and repo, never a flag.
@@ -46,7 +46,7 @@
 source "$(dirname "$0")/lib.sh"
 as_root "$@"
 here="$(cd "$(dirname "$0")" && pwd)"
-usage="usage: add-project.sh <name> <owner/repo> [--public-url https://<host>] [--client-id <sign-in App client id>] [--timeout <minutes>] [--replace-sudoers]"
+usage="usage: add-project.sh <name> <owner/repo> [--public-url https://<host>] [--client-id <sign-in App client id>] [--timeout <minutes>] [--replace-sudoers=<pin>]"
 [ "$#" -ge 2 ] || { echo "$usage" >&2; exit 2; }
 name="$1" repo="$2"
 shift 2
@@ -56,7 +56,9 @@ while [ "$#" -gt 0 ]; do
     --public-url) public_url="${2:-}"; shift 2 ;;
     --client-id) client_id="${2:-}"; shift 2 ;;
     --timeout) timeout="${2:-}"; shift 2 ;;
-    --replace-sudoers) replace_sudoers=1; shift ;;
+    # The pin of the rule a waiting run showed (#902 round 6); a bare flag would install whatever the rule is by then.
+    --replace-sudoers=*) replace_sudoers="${1#*=}"; [[ "$replace_sudoers" =~ ^[0-9a-f]{64}$ ]] || { echo "$usage" >&2; exit 2; }; shift ;;
+    --replace-sudoers) echo "--replace-sudoers takes the pin of the rule you were shown: --replace-sudoers=<sha256>, as the waiting run printed it" >&2; exit 2 ;;
     *) echo "$usage" >&2; exit 2 ;;
   esac
 done
@@ -323,17 +325,26 @@ done_machine_helper() {
 # names it in the rule. A user named in the rule before, which root then took out say, or a hub-only instance's,
 # counts as a widening.
 # So does a newer engine's command, a sudo that now reads patterns, or any line outside that shape. Each waits (exit 3),
-# showing the unified diff and the command with --replace-sudoers. That flag is root's, at a root shell: the machine
-# helper runs this script with exactly a name and a repo.
+# showing the unified diff and the command with --replace-sudoers=<pin>, the pin of the rule it showed. That flag is
+# root's, at a root shell: the machine helper runs this script with exactly a name and a repo.
+# This check is for the step's own waiting output. The one check that counts is machine-helper.sh's, at write time,
+# under its lock: this step passes it only --may-add for the one user it may add (#902 round 6), never its trust.
 do_machine_helper() {
-  local names n users=() allow=() rule
+  local names n users=() allow=() rule pin rc
   names="$(helper_names)"
   for n in $names; do users+=("wl-$n"); done
   if new_instance_marked "$name"; then allow=("$coord"); fi
   rule="$(machine_sudoers "${users[@]}")"
+  pin="$(sudoers_pin "$rule")"
   if [ -n "$replace_sudoers" ]; then
-    # What it installs, shown before anything is written (#902 round 5).
+    # What it installs, shown before anything is written (#902 round 5), and only the rule the pin was printed for.
     sudoers_unified_diff "$MACHINE_SUDOERS" "$rule"
+    if [ "$pin" != "$replace_sudoers" ]; then
+      echo "the engine's rule (above) is not the one --replace-sudoers=$replace_sudoers was printed for; nothing written"
+      echo "rerun as root with --replace-sudoers to install the engine's rule: $again --replace-sudoers=$pin"
+      echo "waiting: rerun as root with --replace-sudoers to install the engine's rule: $again --replace-sudoers=$pin"
+      exit 3
+    fi
     echo "--replace-sudoers: the machine helper's rule becomes the engine's rule above"
   elif sudoers_only_narrows "$MACHINE_SUDOERS" "$rule" "${allow[@]}"; then
     sudoers_unified_diff "$MACHINE_SUDOERS" "$rule"
@@ -344,12 +355,18 @@ do_machine_helper() {
     fi
   else
     sudoers_unified_diff "$MACHINE_SUDOERS" "$rule"
-    echo "rerun as root with --replace-sudoers to install the engine's rule: $again --replace-sudoers"
-    echo "waiting: rerun as root with --replace-sudoers to install the engine's rule: $again --replace-sudoers"
+    echo "rerun as root with --replace-sudoers to install the engine's rule: $again --replace-sudoers=$pin"
+    echo "waiting: rerun as root with --replace-sudoers to install the engine's rule: $again --replace-sudoers=$pin"
     exit 3
   fi
+  rc=0
   # shellcheck disable=SC2086 # one word per instance name
-  bash "$here/machine-helper.sh" ${replace_sudoers:+--replace-sudoers} $names
+  bash "$here/machine-helper.sh" ${replace_sudoers:+--replace-sudoers=$replace_sudoers} "--may-add=${allow[*]:+$name}" $names || rc=$?
+  if [ "$rc" -eq 3 ]; then
+    echo "waiting: machine-helper.sh's own check refused at write time (above): the rule changed while this ran, or needs root; rerun $again"
+    exit 3
+  fi
+  return "$rc"
 }
 detail_machine_helper() { echo "the machine helper lists $(helper_names 2>/dev/null | one_line)"; }
 alone_machine_helper() { echo "sudo bash $here/machine-helper.sh $(helper_names 2>/dev/null | one_line)"; }

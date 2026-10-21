@@ -4,6 +4,7 @@
 // id, systemctl, ...) is a recording stand-in first on PATH that exits 1, so a test can assert none was called.
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -62,7 +63,7 @@ install_claude_token() {
   { printf '{"claudeAiOauth":{"accessToken":"'; cat; printf '"}}'; } > "$T/homes/$1/.claude/.credentials.json"
 }
 SRV_ROOT="$T/srv" ENGINE_CLI="$T/bin/worklane" MACHINE_HELPER="$T/helper" MACHINE_SUDOERS="$T/sudoers-machine" HUB_UNIT="$T/hub.service" ADD_PROJECT_LOCK="$T/lock"
-ADD_PROJECT_NEW="$T/add-project-new" ADD_PROJECT_NEW_UID=${process.getuid?.() ?? 0} HELPER_RULES="$T/helper-rules.json"
+ADD_PROJECT_NEW="$T/add-project-new" ADD_PROJECT_NEW_UID=${process.getuid?.() ?? 0} HELPER_RULES="$T/helper-rules.json" MACHINE_SUDOERS_LOCK="$T/sudoers-lock"
 SETUP_POLL_SECONDS=0
 `;
   writeFileSync(join(s, 'lib.sh'), lib);
@@ -90,7 +91,7 @@ mkdir -p "$T/homes/wl-$2/.config/$2-app"; echo key > "$T/homes/wl-$2/.config/$2-
   stub(join(s, 'test-user.sh'), 'test-user', ':');
   stub(join(s, 'machine-helper.sh'), 'machine-helper', `cp "$T/scripts/machine/worklane-machine.cjs" "$T/helper"
 source "$T/scripts/setup/lib.sh"
-if [ "\${1:-}" = --replace-sudoers ]; then shift; fi
+while [ "\${1#--}" != "\${1:-}" ]; do shift; done
 users=(); for n in "$@"; do users+=("wl-$n"); done
 content="$(machine_sudoers "\${users[@]}")"
 printf '%s\\n' "$content" > "$T/sudoers-machine"`);
@@ -110,6 +111,8 @@ printf '[Service]\\nExecStart=/usr/local/bin/worklane dashboard --hub %s --servi
     assert.equal(r.status, 0, r.stderr);
     return r.stdout;
   };
+  /** The pin of machine_sudoers for these instances: what a printed --replace-sudoers=<pin> carries (#902 round 6). */
+  const pin = (...names: string[]) => createHash('sha256').update(expected(...names)).digest('hex');
   const sudoers = () => readFileSync(join(T, 'sudoers-machine'), 'utf8');
   const setSudoers = (text: string) => writeFileSync(join(T, 'sudoers-machine'), text);
   // The machine's rule before alpha: what machine-helper.sh wrote for old.
@@ -127,7 +130,7 @@ printf '[Service]\\nExecStart=/usr/local/bin/worklane dashboard --hub %s --servi
   const hostCalls = () => (existsSync(join(T, 'host-calls')) ? readFileSync(join(T, 'host-calls'), 'utf8') : '');
   const helperRuns = () => calls().filter((c) => c.startsWith('machine-helper ')).length;
   const step = (r: { events: Step[] }) => r.events.find((e) => e.step === 'machine-helper' && e.state === 'done');
-  return { T, s, real, env, expected, sudoers, setSudoers, run, helper, check, calls, hostCalls, helperRuns, step };
+  return { T, s, real, env, expected, pin, sudoers, setSudoers, run, helper, check, calls, hostCalls, helperRuns, step };
 }
 
 /** An older engine's rule for these users: the same shape, one command fewer. Returns the rule and the command. */

@@ -99,11 +99,11 @@ test('#902 round 4: a rule whose users line can\'t be read gets a command that n
   m.setSudoers(unreadable);
   const r = spawnSync('bash', [join(m.s, 'instance-rename.sh'), 'old', 'beta', '--yes'], { encoding: 'utf8', input: '', env: m.env });
   assert.equal(r.status, 1, r.stderr);
-  assert.ok(r.stdout.endsWith(`\n${RERUN}sudo bash ${m.s}/machine-helper.sh --replace-sudoers old\n`), r.stdout);
+  assert.ok(r.stdout.endsWith(`\n${RERUN}sudo bash ${m.s}/machine-helper.sh --replace-sudoers=${m.pin('old')} old\n`), r.stdout);
   assert.equal(m.sudoers(), unreadable);
   const c = m.check();
   assert.equal(c.status, 4, c.stdout);
-  assert.ok(c.stdout.endsWith(`wider: ${RERUN}sudo bash ${m.real}/machine-helper.sh --replace-sudoers old\n`), c.stdout);
+  assert.ok(c.stdout.endsWith(`wider: ${RERUN}sudo bash ${m.real}/machine-helper.sh --replace-sudoers=${m.pin('old')} old\n`), c.stdout);
   assert.ok(!existsSync(join(m.T, 'reached')));
   assert.equal(m.hostCalls(), '');
 });

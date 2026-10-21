@@ -80,11 +80,16 @@ sudoers_current() { [ -f "$1" ] && sudoers_bytes "$2" | cmp -s - "$1"; }
 
 # Install a sudoers file safely: write a dotted temp name (sudo ignores
 # names with a dot), validate it, and only then move it into place.
+# SUDOERS_PRECOMMIT, when a caller sets it (machine-helper.sh, #902 round 6), names a function run last, right before
+# the move: if it fails, the temp file goes and nothing is installed (exit 3). lib.sh sets it empty here, so nothing
+# from the environment reaches it.
+SUDOERS_PRECOMMIT=""
 install_sudoers() {
   local name="$1" content="$2" tmp="/etc/sudoers.d/.$1.tmp"
   sudoers_bytes "$content" > "$tmp"
   chmod 0440 "$tmp"
   if ! visudo -cf "$tmp"; then rm -f "$tmp"; echo "sudoers $name is invalid; nothing installed" >&2; exit 1; fi
+  if [ -n "$SUDOERS_PRECOMMIT" ] && ! "$SUDOERS_PRECOMMIT"; then rm -f "$tmp"; echo "sudoers $name: not installed (above)" >&2; exit 3; fi
   mv -f "$tmp" "/etc/sudoers.d/$name"
   echo "installed /etc/sudoers.d/$name"
 }
@@ -327,16 +332,20 @@ machine_sudoers_preflight() {
   for n in "$@"; do users+=("wl-$n"); [ "wl-$n" = "$allow" ] || others+=("$n"); done
   rule="$(machine_sudoers "${users[@]}")" || return 1
   sudoers_only_narrows "$MACHINE_SUDOERS" "$rule" ${allow:+"$allow"} && return 0
-  sudoers_unified_diff "$MACHINE_SUDOERS" "$rule"
   # The command names the instances there now: the one the script adds on purpose is added by the script itself. When
-  # the rule's users line can't be read, they come from the hub and the checkouts, so the command always runs.
+  # the rule's users line can't be read, they come from the hub and the checkouts, so the command always runs. The diff
+  # shown is the rule that command installs, and the command is pinned to it (#902 round 6).
   if [ "${#others[@]}" -eq 0 ]; then
     for n in $(machine_instances_here); do [ "wl-$n" = "$allow" ] || others+=("$n"); done
   fi
   if [ "${#others[@]}" -eq 0 ]; then
+    sudoers_unified_diff "$MACHINE_SUDOERS" "$rule"
     echo "no instance's coordinator is on this machine to rewrite the rule for: remove it, as root: sudo rm -f $MACHINE_SUDOERS"
   else
-    echo "rerun as root with --replace-sudoers to install the engine's rule: sudo bash $dir/machine-helper.sh --replace-sudoers ${others[*]}"
+    users=(); for n in "${others[@]}"; do users+=("wl-$n"); done
+    rule="$(machine_sudoers "${users[@]}")" || return 1
+    sudoers_unified_diff "$MACHINE_SUDOERS" "$rule"
+    echo "rerun as root with --replace-sudoers to install the engine's rule: sudo bash $dir/machine-helper.sh --replace-sudoers=$(sudoers_pin "$rule") ${others[*]}"
   fi
   return 1
 }
@@ -348,6 +357,41 @@ sudoers_unified_diff() {
   # No rule installed: the whole engine rule is what it adds.
   [ -e "$from" ] || [ -L "$from" ] || from=/dev/null
   diff -u --label "installed $1" --label "engine (machine-helper.sh)" -- "$from" <(sudoers_bytes "$2") || true
+}
+
+# The pin of an engine rule (#902 round 6): the sha256 of the bytes install_sudoers writes for content $1. Every
+# printed --replace-sudoers command carries the pin of the rule it showed (--replace-sudoers=<pin>), and a flag run
+# installs only a rule with that pin, so root installs exactly the rule it read.
+sudoers_pin() { sudoers_bytes "$1" | sha256sum | cut -d' ' -f1; }
+
+# The installed rule $1 at one moment: the sha256 of its bytes, "absent", or "unreadable".
+sudoers_state() {
+  if [ ! -e "$1" ] && [ ! -L "$1" ]; then echo absent; return 0; fi
+  { sha256sum < "$1" 2>/dev/null || echo unreadable; } | cut -d' ' -f1
+}
+
+# Where the machine helper's rule is written (#902 round 6, B1): the one check, at write time. machine-helper.sh runs
+# it under its lock, right before install_sudoers.
+#   - $1 is the installed rule's state when the run's first check read it (sudoers_state); it must be the same now,
+#     so nothing changed the rule between that check and this write.
+#   - $2 is the pin root passed with --replace-sudoers=, or empty. A pin must be $3's.
+#   - Without a pin, $3, the rule written, must only narrow the installed one, adding none but the users $4...
+# Returns 0 to write. Otherwise it says why and returns 3: nothing is written.
+machine_sudoers_commit_ok() {
+  local seen="$1" pin="$2" rule="$3"
+  shift 3
+  if [ "$(sudoers_state "$MACHINE_SUDOERS")" != "$seen" ]; then
+    echo "refused: $MACHINE_SUDOERS changed while this ran; nothing written. Run it again: it checks the rule as it is now"
+    return 3
+  fi
+  if [ -n "$pin" ]; then
+    [ "$(sudoers_pin "$rule")" = "$pin" ] && return 0
+    echo "refused: the engine's rule is not the one --replace-sudoers=$pin was printed for; nothing written"
+    return 3
+  fi
+  sudoers_only_narrows "$MACHINE_SUDOERS" "$rule" "$@" && return 0
+  echo "refused: the engine's rule grants what $MACHINE_SUDOERS doesn't; nothing written"
+  return 3
 }
 
 # Whether this machine never had the machine helper set up: no helper and no rules record (machine-helper.sh writes
@@ -674,6 +718,9 @@ ENGINE_CLI=/usr/local/bin/worklane
 # add-project's wait for a repo's setup PR to merge: how often it checks, and (empty: its --timeout) for how long.
 SETUP_POLL_SECONDS=20 SETUP_WAIT_SECONDS=""
 ADD_PROJECT_LOCK=/run/lock/worklane-add-project.lock
+# Every writer of the machine helper's rule holds this lock from its check to its write: machine-helper.sh, and
+# instance-remove.sh when it takes the rule away (#902 round 6).
+MACHINE_SUDOERS_LOCK=/run/lock/worklane-machine-sudoers.lock
 # The instances being created: root's list, one name a line, a regular file of root's, 0600, one link (#898).
 #   - A name goes on it where its coordinator user is made: instance.sh, which only root runs. That covers
 #     add-project's instance step, a by-hand instance.sh, and instance-rename.sh's users step.

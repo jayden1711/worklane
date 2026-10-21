@@ -58,10 +58,10 @@ for (const [what, change] of VARIANTS) {
     assert.equal(m.sudoers(), installed, 'not rewritten');
     assert.equal(m.helperRuns(), 1);
     const wait = r.events.find((e) => e.step === 'machine-helper' && e.state === 'waiting');
-    assert.equal(wait?.detail, `${RERUN}sudo bash ${m.s}/add-project.sh alpha example/alpha --replace-sudoers`);
+    assert.equal(wait?.detail, `${RERUN}sudo bash ${m.s}/add-project.sh alpha example/alpha --replace-sudoers=${m.pin('alpha', 'old')}`);
     const c = m.check();
     assert.equal(c.status, 4, `${what}: ${c.stdout}`);
-    assert.match(c.stdout.trimEnd().split('\n').pop()!, /^wider: rerun as root with --replace-sudoers to install the engine's rule: sudo bash \S+\/machine-helper\.sh --replace-sudoers /);
+    assert.match(c.stdout.trimEnd().split('\n').pop()!, /^wider: rerun as root with --replace-sudoers to install the engine's rule: sudo bash \S+\/machine-helper\.sh --replace-sudoers=[0-9a-f]{64} [a-z]/);
     assert.equal(m.sudoers(), installed);
     assert.equal(m.hostCalls(), '');
   });
@@ -78,7 +78,7 @@ test('#902 users: a coordinator root took out of the rule is not put back by an 
   assert.equal(r.status, 3, r.stderr);
   assert.equal(m.sudoers(), narrowed, 'wl-alpha is not put back');
   assert.ok(r.stderr.includes('-wl-old ALL=(root) NOPASSWD: WORKLANE_MACHINE\n+wl-alpha, wl-old ALL=(root) NOPASSWD: WORKLANE_MACHINE\n'), r.stderr);
-  assert.equal(m.run(['--replace-sudoers']).status, 0, 'root\'s flag puts it back');
+  assert.equal(m.run([`--replace-sudoers=${m.pin('alpha', 'old')}`]).status, 0, 'root\'s flag puts it back');
   assert.equal(m.sudoers(), m.expected('alpha', 'old'));
 
   // A first add that stops before the machine-helper step (no Claude login yet) and is resumed: still a creation.
@@ -111,7 +111,7 @@ test('#902 instance-remove.sh stops before its first change when the machine hel
   const r = run('instance-remove.sh', 'alpha', '--yes');
   assert.equal(r.status, 1, r.stderr);
   assert.ok(r.stdout.startsWith(`--- installed ${join(m.T, 'sudoers-machine')}\n+++ engine (machine-helper.sh)\n`), r.stdout);
-  assert.ok(r.stdout.endsWith(`\n${RERUN}sudo bash ${m.s}/machine-helper.sh --replace-sudoers old\n`), r.stdout);
+  assert.ok(r.stdout.endsWith(`\n${RERUN}sudo bash ${m.s}/machine-helper.sh --replace-sudoers=${m.pin('old')} old\n`), r.stdout);
   assert.match(r.stderr, /refused: alpha is not removed, nothing changed/);
   assert.deepEqual(snapshot(m), before, 'nothing changed');
   assert.ok(!existsSync(join(m.T, 'reached')), 'it stopped before reading its registry');
@@ -133,7 +133,7 @@ test('#902 instance-rename.sh stops before its first change when the machine hel
   const r = run('instance-rename.sh', 'old', 'beta', '--yes');
   assert.equal(r.status, 1, r.stderr);
   assert.ok(r.stdout.startsWith(`--- installed ${join(m.T, 'sudoers-machine')}\n+++ engine (machine-helper.sh)\n`), r.stdout);
-  assert.ok(r.stdout.endsWith(`\n${RERUN}sudo bash ${m.s}/machine-helper.sh --replace-sudoers old\n`), r.stdout);
+  assert.ok(r.stdout.endsWith(`\n${RERUN}sudo bash ${m.s}/machine-helper.sh --replace-sudoers=${m.pin('old')} old\n`), r.stdout);
   assert.match(r.stderr, /refused: old is not renamed, nothing changed/);
   assert.deepEqual(snapshot(m), before, 'nothing changed');
   assert.ok(!existsSync(join(m.T, 'reached')));

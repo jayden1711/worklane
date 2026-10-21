@@ -30,7 +30,7 @@ test('#902 round 5 A1: a rule root took away (deleted, or moved aside) is not pu
     assert.ok(!existsSync(rule), `${how}: the rule stays away`);
     assert.ok(r.stderr.includes(`--- installed ${rule}\n+++ engine (machine-helper.sh)\n`), r.stderr);
     assert.match(r.stderr, /^\+wl-alpha, wl-old ALL=\(root\) NOPASSWD: WORKLANE_MACHINE$/m, 'the whole rule it would add, shown');
-    assert.ok(r.stderr.includes(`\n${RERUN}sudo bash ${m.s}/add-project.sh alpha example/alpha --replace-sudoers\n`), r.stderr);
+    assert.ok(r.stderr.includes(`\n${RERUN}sudo bash ${m.s}/add-project.sh alpha example/alpha --replace-sudoers=${m.pin('alpha', 'old')}\n`), r.stderr);
     assert.doesNotMatch(r.stderr, /grants nothing the installed one doesn't/);
     // machine-helper.sh by hand holds it too.
     const h = m.helper('alpha', 'old');
@@ -51,7 +51,7 @@ test('#902 round 5 A2: --replace-sudoers shows the diff it installs before writi
   const m = machine();
   assert.equal(m.run().status, 0);
   m.setSudoers(m.expected('old'));
-  const r = m.run(['--replace-sudoers']);
+  const r = m.run([`--replace-sudoers=${m.pin('alpha', 'old')}`]);
   assert.equal(r.status, 0, r.stderr);
   const shown = r.stderr.indexOf(`--- installed ${join(m.T, 'sudoers-machine')}\n+++ engine (machine-helper.sh)\n`);
   const said = r.stderr.indexOf("--replace-sudoers: the machine helper's rule becomes the engine's rule above");
@@ -59,7 +59,7 @@ test('#902 round 5 A2: --replace-sudoers shows the diff it installs before writi
   assert.match(r.stderr, /^\+wl-alpha, wl-old ALL=\(root\) NOPASSWD: WORKLANE_MACHINE$/m);
   // machine-helper.sh --replace-sudoers by hand (here it then stops at its first host step, a refusing stand-in).
   m.setSudoers(m.expected('old'));
-  const h = m.helper('--replace-sudoers', 'alpha', 'old');
+  const h = m.helper(`--replace-sudoers=${m.pin('alpha', 'old')}`, 'alpha', 'old');
   assert.ok(h.stdout.startsWith(`--- installed ${join(m.T, 'sudoers-machine')}\n+++ engine (machine-helper.sh)\n`), h.stdout + h.stderr);
   assert.match(h.stdout, /^\+wl-alpha, wl-old ALL=\(root\) NOPASSWD: WORKLANE_MACHINE$/m);
   assert.match(h.stdout, /--replace-sudoers: installing the engine's rule above/);

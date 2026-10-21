@@ -34,9 +34,9 @@ test('#898: a rerun after an upgrade does not take the helper\'s bytes and a lis
   assert.equal(again.status, 3, again.stderr);
   assert.equal(m.helperRuns(), 1, 'not rewritten on its own: the engine\'s rule is wider');
   assert.equal(m.sudoers(), older);
-  const replaced = m.run(['--replace-sudoers']);
+  const replaced = m.run([`--replace-sudoers=${m.pin('alpha', 'old')}`]);
   assert.equal(replaced.status, 0, replaced.stderr);
-  assert.ok(m.calls().includes('machine-helper --replace-sudoers alpha old'), m.calls().join('\n'));
+  assert.ok(m.calls().includes(`machine-helper --replace-sudoers=${m.pin('alpha', 'old')} --may-add= alpha old`), m.calls().join('\n'));
   assert.equal(m.sudoers(), m.expected('alpha', 'old'), 'byte for byte what machine-helper.sh writes for these instances');
 
   // Current now: the next rerun skips it, and says why.
@@ -55,7 +55,7 @@ test('#898: a rule with a line outside the engine\'s shape is never kept, and ne
   const waits = m.run();
   assert.equal(waits.status, 3, waits.stderr);
   assert.equal(m.helperRuns(), 1);
-  const r = m.run(['--replace-sudoers']);
+  const r = m.run([`--replace-sudoers=${m.pin('alpha', 'old')}`]);
   assert.equal(r.status, 0, r.stderr);
   assert.equal(m.helperRuns(), 2);
   assert.equal(m.sudoers(), m.expected('alpha', 'old'));
@@ -76,7 +76,7 @@ test('#898: a sudo upgraded past 1.9.10 since the rule was written: its pattern 
   const waits = m.run();
   assert.equal(waits.status, 3, waits.stderr);
   assert.equal(m.helperRuns(), 1);
-  const r = m.run(['--replace-sudoers']);
+  const r = m.run([`--replace-sudoers=${m.pin('alpha', 'old')}`]);
   assert.equal(r.status, 0, r.stderr);
   assert.ok(m.sudoers().includes('^add-project'), 'the pattern rules, now that sudo reads them');
   assert.equal(m.sudoers(), m.expected('alpha', 'old'));
@@ -103,7 +103,7 @@ test('#898: machine-helper.sh --check says absent, current, stale (no flag) or w
   before = snapshot();
   r = m.check();
   assert.equal(r.status, 4, r.stderr);
-  assert.ok(r.stdout.trimEnd().endsWith(`wider: rerun as root with --replace-sudoers to install the engine's rule: sudo bash ${m.real}/machine-helper.sh --replace-sudoers alpha old`), r.stdout);
+  assert.ok(r.stdout.trimEnd().endsWith(`wider: rerun as root with --replace-sudoers to install the engine's rule: sudo bash ${m.real}/machine-helper.sh --replace-sudoers=${m.pin('alpha', 'old')} alpha old`), r.stdout);
   assert.match(r.stdout, new RegExp(`^--- installed ${esc(file)}\\n\\+\\+\\+ engine \\(machine-helper\\.sh\\)\\n`));
   assert.deepEqual(snapshot(), before, 'nothing written');
 
@@ -119,7 +119,7 @@ test('#898: machine-helper.sh --check says absent, current, stale (no flag) or w
   r = m.check();
   assert.equal(r.status, 4);
   assert.match(r.stdout, /^-wl-alpha ALL=\(root\) NOPASSWD: ALL$/m);
-  assert.ok(r.stdout.trimEnd().endsWith(`--replace-sudoers alpha old`), r.stdout);
+  assert.ok(r.stdout.trimEnd().endsWith(`--replace-sudoers=${m.pin('alpha', 'old')} alpha old`), r.stdout);
 
   // No user left for any instance it names: the command removes it, as instance-remove.sh does for the last one.
   m.setSudoers(m.expected('alpha', 'old').replace('wl-alpha, wl-old ALL=', 'wl-gone ALL='));
@@ -156,7 +156,7 @@ test('#898: the updater reads machine-helper.sh --check of the installed engine:
   m.setSudoers(olderRule(m.expected('alpha', 'old')));
   const wider = check()!;
   assert.equal(wider.state, 'wider');
-  assert.equal(wider.fix, `sudo bash ${engine}/scripts/setup/machine-helper.sh --replace-sudoers alpha old`);
+  assert.equal(wider.fix, `sudo bash ${engine}/scripts/setup/machine-helper.sh --replace-sudoers=${m.pin('alpha', 'old')} alpha old`);
   assert.match(wider.detail, /^wider: rerun as root with --replace-sudoers to install the engine's rule: .* The diff: \+/);
   m.setSudoers(withCommand(m.expected('alpha', 'old'), `${m.T}/helper claude-account switch`));
   const stale = check()!;
@@ -205,7 +205,7 @@ test('#898: the updater reads machine-helper.sh --check of the installed engine:
   m.setSudoers(olderRule(m.expected('alpha', 'old')));
   const viaLink = check(join(m.T, 'current'))!;
   assert.equal(viaLink.state, 'wider');
-  assert.equal(viaLink.fix, `sudo bash ${join(m.T, 'current')}/scripts/setup/machine-helper.sh --replace-sudoers alpha old`);
+  assert.equal(viaLink.fix, `sudo bash ${join(m.T, 'current')}/scripts/setup/machine-helper.sh --replace-sudoers=${m.pin('alpha', 'old')} alpha old`);
   assert.equal(m.hostCalls(), '');
 });
 

@@ -50,7 +50,7 @@ test('#898 owner rule: an installed rule narrower than the engine\'s is NOT rewr
   assert.equal(m.sudoers(), rule, 'the installed rule is as it was');
   assert.ok(r.stderr.includes(header(m)), r.stderr);
   assert.deepEqual(changed(r.stderr, '+'), [`+    ${command}, \\`]);
-  const cmd = `sudo bash ${m.s}/add-project.sh alpha example/alpha --replace-sudoers`;
+  const cmd = `sudo bash ${m.s}/add-project.sh alpha example/alpha --replace-sudoers=${m.pin('alpha', 'old')}`;
   assert.ok(r.stderr.includes(`\n${RERUN}${cmd}\n`), r.stderr);
   assert.equal(waiting(r)?.detail, `${RERUN}${cmd}`);
   assert.ok(!r.events.some((e) => e.step === 'dashboards'), 'it stops there');
@@ -62,9 +62,9 @@ test('#898 owner rule: with --replace-sudoers (root, at a root shell) the narrow
   assert.equal(m.run().status, 0);
   m.setSudoers(withoutCommand(m.expected('alpha', 'old')).rule);
   assert.equal(m.run().status, 3);
-  const r = m.run(['--replace-sudoers']);
+  const r = m.run([`--replace-sudoers=${m.pin('alpha', 'old')}`]);
   assert.equal(r.status, 0, r.stderr);
-  assert.ok(m.calls().includes('machine-helper --replace-sudoers alpha old'), m.calls().join('\n'));
+  assert.ok(m.calls().includes(`machine-helper --replace-sudoers=${m.pin('alpha', 'old')} --may-add= alpha old`), m.calls().join('\n'));
   assert.equal(m.sudoers(), m.expected('alpha', 'old'));
   assert.equal(m.hostCalls(), '');
 });
@@ -83,7 +83,7 @@ test('#898 owner rule: a hand-added line is never kept, and never dropped while 
   assert.equal(r.status, 3, r.stderr);
   assert.deepEqual(changed(r.stderr, '-'), [`-${hand.trimEnd()}`]);
   assert.deepEqual(changed(r.stderr, '+'), []);
-  assert.equal(m.run(['--replace-sudoers']).status, 0);
+  assert.equal(m.run([`--replace-sudoers=${m.pin('alpha', 'old')}`]).status, 0);
   assert.equal(m.sudoers(), m.expected('alpha', 'old'));
   assert.equal(m.hostCalls(), '');
 });
@@ -100,7 +100,7 @@ test('#898 owner rule: a user the installed rule lacks is a widening too: a hub-
   assert.equal(r.status, 3, r.stderr);
   assert.equal(m.sudoers(), before);
   assert.deepEqual(changed(r.stderr, '+'), ['+wl-alpha, wl-beta, wl-old ALL=(root) NOPASSWD: WORKLANE_MACHINE']);
-  assert.equal(m.run(['--replace-sudoers']).status, 0);
+  assert.equal(m.run([`--replace-sudoers=${m.pin('alpha', 'beta', 'old')}`]).status, 0);
   assert.equal(m.sudoers(), m.expected('alpha', 'beta', 'old'));
 });
 
@@ -133,7 +133,7 @@ test('#898 owner rule: machine-helper.sh run directly holds the rule too: a wide
   assert.equal(r.status, 3, r.stderr);
   assert.ok(r.stdout.startsWith(header(m)), r.stdout);
   assert.deepEqual(changed(r.stdout, '+'), [`+    ${command}, \\`]);
-  assert.ok(r.stdout.endsWith(`\n${RERUN}sudo bash ${m.real}/machine-helper.sh --replace-sudoers alpha old\n`), r.stdout);
+  assert.ok(r.stdout.endsWith(`\n${RERUN}sudo bash ${m.real}/machine-helper.sh --replace-sudoers=${m.pin('alpha', 'old')} alpha old\n`), r.stdout);
   assert.equal(m.sudoers(), rule);
   assert.equal(m.hostCalls(), '', 'refused before any step: no host tool reached');
 });
@@ -167,6 +167,6 @@ test('#898 owner rule: a machine on v0.5.2\'s exact rule is not a superset of th
     'set-policy land_mode pr',
     'set-policy main_watch auto',
   ]);
-  assert.ok(r.stderr.includes(`\n${RERUN}sudo bash ${m.s}/add-project.sh alpha example/alpha --replace-sudoers\n`), r.stderr);
+  assert.ok(r.stderr.includes(`\n${RERUN}sudo bash ${m.s}/add-project.sh alpha example/alpha --replace-sudoers=${m.pin('alpha', 'old')}\n`), r.stderr);
   assert.equal(m.hostCalls(), '');
 });

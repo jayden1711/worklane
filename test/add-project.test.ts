@@ -71,7 +71,7 @@ install_claude_token() {
   echo "install_claude_token $1" >> "$T/calls"
 }
 SRV_ROOT="$T/srv" ENGINE_CLI="$T/bin/worklane" MACHINE_HELPER="$T/helper" MACHINE_SUDOERS="$T/sudoers-machine" HUB_UNIT="$T/hub.service" ADD_PROJECT_LOCK="$T/lock"
-ADD_PROJECT_NEW="$T/add-project-new" ADD_PROJECT_NEW_UID=${process.getuid?.() ?? 0} HELPER_RULES="$T/helper-rules.json"
+ADD_PROJECT_NEW="$T/add-project-new" ADD_PROJECT_NEW_UID=${process.getuid?.() ?? 0} HELPER_RULES="$T/helper-rules.json" MACHINE_SUDOERS_LOCK="$T/sudoers-lock"
 SETUP_POLL_SECONDS=0 SETUP_WAIT_SECONDS="$(cat "$T/wait-seconds" 2>/dev/null || true)"
 `,
   );
@@ -101,6 +101,7 @@ echo "OK: App x (id 91), installation 4242"`);
   // What the real one writes (#898: the step is done only while the rule is exactly that): the helper, and the rule.
   stub(join(s, 'machine-helper.sh'), 'machine-helper', `cp "$T/scripts/machine/worklane-machine.cjs" "$T/helper"
 source "$T/scripts/setup/lib.sh"
+while [ "\${1#--}" != "\${1:-}" ]; do shift; done
 users=(); for n in "$@"; do users+=("wl-$n"); done
 sudoers_bytes "$(machine_sudoers "\${users[@]}")" > "$T/sudoers-machine"`);
   stub(join(s, 'dashboards.sh'), 'dashboards', `none=""; if [ "\${1:-}" = --no-instances ]; then none=1; shift; fi
@@ -178,7 +179,8 @@ test('add-project runs the steps in order, one JSON line per change on stdout, a
   assert.match(r.events.find((e) => e.step === 'test-user' && e.state === 'done')!.detail, /no test_run/);
   // The machine helper and the dashboards, with the instance already there and the new one; the hub's settings kept.
   const calls = m.calls();
-  assert.ok(calls.includes('machine-helper alpha old'), calls.join('\n'));
+  // The one user it may add, the instance being created, named for machine-helper.sh's own check (#902 round 6).
+  assert.ok(calls.includes('machine-helper --may-add=alpha alpha old'), calls.join('\n'));
   // An older hub unit (the removed owner terminal's --console-user and --console-devices): its devices are kept as the
   // machine devices, and its console user is dropped (#742).
   assert.ok(calls.includes('dashboards --client-id Iv1.signin0001 --public-url https://hub.example.test --machine-devices tag:owner alpha old'), calls.join('\n'));
