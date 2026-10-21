@@ -1012,7 +1012,7 @@ const unscanned = (p: string) => /(?:^|\/)(?:fixtures|node_modules)\//.test(p);
 /**
  * What the backstops find wrong with the registries, for a repo given as its files (path to text). Tables: each
  * registered table (the central list's, and every `// check-table: <kind>` mark's, #869) is found where it is
- * registered; its kind keeps its name's floor (an allowlist's name is never-grow, a rule list's never-shrink); every
+ * registered; an allowlist's name is marked never-grow (a rule list's name may carry either mark); every
  * mark is well formed and stands right before a declaration; every check-shaped table in test/ and scripts/ is
  * registered or in NOT_A_CHECK. Lints: every test that lists src/ or scripts/ files is a lint test (`// lint-test`, or
  * the central list) or in NOT_A_LINT. `listing` is the tests that list sources.
@@ -1035,10 +1035,10 @@ function registryProblems(texts: ReadonlyMap<string, string>): { tables: string[
       tables.push(`${t.path} is not a real file`);
       continue;
     }
+    // An allowlist's name is never-grow (#869). A rule list's name may carry either mark: its floor holds it on
+    // shrinking whatever the mark says, and a never-grow mark adds a growth hold (a mark only adds).
     const allow = weakening.ALLOW_NAMED?.test(t.table);
-    const rule = weakening.RULE_NAMED?.test(t.table);
     if (allow && t.kind !== 'never-grow') tables.push(`${t.path} ${t.table}: its name says it allows or exempts something, so it is never-grow`);
-    if (rule && t.kind !== 'never-shrink') tables.push(`${t.path} ${t.table}: its name says it holds rules or a guard's list, so it is never-shrink`);
     let read: string[] | null;
     try {
       read = weakening.tableLines(text, t.table);
@@ -1266,11 +1266,9 @@ test('registration backstop (#869): a new allowlist and a new lint test pass wit
   const bare = withFile(p, NEW_LINT.replace('// lint-test\n', '').replace('// check-table: never-grow\n', ''));
   assert.deepEqual(bare.tables.filter((x) => x.startsWith(`${p} NEW_ALLOWED`)).length, 1, bare.tables.join(' | '));
   assert.deepEqual(bare.lints.filter((x) => x.startsWith(p)).length, 1, bare.lints.join(' | '));
-  // A kind against its name.
+  // A kind against its name: an allowlist's name marked never-shrink.
   const against = withFile(p, NEW_LINT.replace('never-grow', 'never-shrink'));
   assert.ok(against.tables.some((x) => x.includes('NEW_ALLOWED: its name says it allows')), against.tables.join(' | '));
-  const rules = withFile(p, NEW_LINT.replaceAll('NEW_ALLOWED', 'NEW_RULES'));
-  assert.ok(rules.tables.some((x) => x.includes('NEW_RULES: its name says it holds rules')), rules.tables.join(' | '));
   // A mark that isn't one, or with no declaration on the next line: it would register nothing.
   for (const odd of ['// check-table: never-grwo', '//check-table: never-grow', '/* check-table: never-grow */', '// check-table:never-grow', '// lint-test: rules', '//lint-test']) {
     const r = withFile(p, NEW_LINT.replace('// check-table: never-grow', odd));
@@ -1278,6 +1276,36 @@ test('registration backstop (#869): a new allowlist and a new lint test pass wit
   }
   const orphan = withFile(p, NEW_LINT.replace('const NEW_ALLOWED', '/** why */\nconst NEW_ALLOWED'));
   assert.ok(orphan.tables.some((x) => x.startsWith(`${p}: `)), orphan.tables.join(' | '));
+});
+
+test("registration backstop (#869): a mark only adds to its name's floor: a rule-named table registers with either mark, a name of both kinds registers as never-grow, and each is held on shrinking whatever its mark", () => {
+  const repo = repoTexts();
+  const p = 'test/new-rules.test.ts';
+  const problems = (text: string) => registryProblems(new Map([...repo, [p, text]])).tables;
+  const table = (kind: string, name: string) => `// check-table: ${kind}\nconst ${name} = [\n  'a',\n  'b',\n];\n`;
+  const grow = (t: string) => t.replace("  'b',\n", "  'b',\n  'c',\n");
+  const shrink = (t: string) => t.replace("  'b',\n", '');
+  const change = (was: string, now: string) => kinds(weakens({ [p]: was }, { [p]: now }));
+  // A rule list's name: either mark registers it. Marked never-grow (an allowlist of accepted rules), it is held both ways.
+  for (const name of ['SELECTION_RULES', 'NEW_RULES', 'X_GUARD']) {
+    for (const kind of ['never-grow', 'never-shrink']) {
+      const t = table(kind, name);
+      assert.deepEqual(problems(t), [], `${name} marked ${kind} registers`);
+      assert.deepEqual(change(t, shrink(t)), [SHRUNK], `${name} marked ${kind}, shrunk`);
+    }
+    assert.deepEqual(change(table('never-grow', name), grow(table('never-grow', name))), [GROWN], `${name} marked never-grow, grown`);
+  }
+  // A name of both kinds: marked never-grow it registers, and it is held both ways. Marked never-shrink, the allowlist
+  // name's rule (#869's acceptance) still fails it, and the hold still holds it both ways.
+  for (const name of ['KNOWN_BAD', 'ALLOWED_WORDS', 'SKIP_RULES', 'GUARD_EXCEPTIONS']) {
+    const t = table('never-grow', name);
+    assert.deepEqual(problems(t), [], `${name} marked never-grow registers`);
+    assert.deepEqual(change(t, shrink(t)), [SHRUNK], `${name} marked never-grow, shrunk`);
+    assert.deepEqual(change(t, grow(t)), [GROWN], `${name} marked never-grow, grown`);
+    const s = table('never-shrink', name);
+    assert.ok(problems(s).some((x) => x.includes(`${name}: its name says it allows`)), `${name} marked never-shrink: ${problems(s).join(' | ')}`);
+    assert.deepEqual([change(s, shrink(s)), change(s, grow(s))], [[SHRUNK], [GROWN]], `${name} marked never-shrink`);
+  }
 });
 
 test('acceptance (#869): through the merge decision, a new marked allowlist and lint test merge; growing it, or taking its mark away, waits for the owner', () => {

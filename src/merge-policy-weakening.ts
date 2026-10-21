@@ -102,7 +102,8 @@ export function heldKinds(table: string, kind: TableKind): Set<TableKind> {
  * The check tables that can't carry a mark (not JS or TS): `package.json`'s scripts, the commands that run the checks
  * (a script dropped or changed, a lint taken out of `npm test`, waits). Every other table registers itself by its mark.
  * A backstop test in test/merge-policy.test.ts fails on a check-shaped table in test/ or scripts/ that is neither
- * registered nor in its NOT_A_CHECK, on a registered table the hold can't find, and on a kind against its name.
+ * registered nor in its NOT_A_CHECK, on a registered table the hold can't find, and on an allowlist's name marked
+ * never-shrink (a rule list's name may carry either mark: its floor holds it on shrinking whatever the mark says).
  */
 export const CHECK_TABLES: readonly CheckTable[] = [{ path: 'package.json', table: 'scripts', kind: 'never-shrink' }];
 
