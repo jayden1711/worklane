@@ -19,7 +19,7 @@ import { GitHubIssuesIntake, INTAKE_LABEL } from '../src/intake/github.js';
 import { IntakeConfig, type IncomingReport, type IntakeSource } from '../src/intake/report.js';
 import { reportId } from '../src/intake/store.js';
 import { intakeHealth, intakeReports } from '../src/intake/view.js';
-import { RESEARCH_ROOT_ENV } from '../src/research.js';
+import { RESEARCH_ROOT_ENV } from '../src/guard/research.js';
 import { FakeRunner, type RunRequest } from '../src/runner.js';
 import { repoRoot } from './helpers.js';
 

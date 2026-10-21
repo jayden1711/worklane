@@ -135,8 +135,9 @@ function SettingRow({ s, d, onChanged, proposed }: { s: { key: string; value: un
     setBusy(true);
     setMsg(null);
     try {
-      const r = await api<{ from: unknown; to: unknown }>('/api/instance-settings', { method: 'POST', body: JSON.stringify({ key: s.key, value: review.value }) });
-      setMsg({ ok: true, text: `changed: ${showValue(s.key, r.from)} → ${showValue(s.key, r.to)}` });
+      const r = await api<{ from: unknown; to: unknown; queued?: boolean }>('/api/instance-settings', { method: 'POST', body: JSON.stringify({ key: s.key, value: review.value }) });
+      // A root policy.yaml: only asked of the coordinator, which has root's helper write it.
+      setMsg({ ok: true, text: `${r.queued ? 'queued for the coordinator' : 'changed'}: ${showValue(s.key, r.from)} → ${showValue(s.key, r.to)}` });
       setReview(null);
       onChanged();
     } catch (e) {

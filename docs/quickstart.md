@@ -84,26 +84,29 @@ sudo bash scripts/bootstrap.sh --hardened <name> <owner/repo>
 
 1. **Root scripts, one at a time.** It runs the setup scripts in `scripts/setup/` in order (Node, the machine, the machine owners, the tools, the instance, the engine). It pages each one for you to read and asks before running it (`--yes` skips the questions).
 2. **The first machine owner.** That's you, by your GitHub login. It reads the login from `gh` if gh is signed in and asks you to confirm, or asks you for it. `--machine-owner <login>` answers ahead of time. Machine owners are the people who may add projects and change the machine from the dashboard.
-3. **The instance's credentials.** It prints the commands for these. Run them, then run the command again with `--after-credentials` to set up the checkout and start the service:
+3. **The instance's credentials: Add project.** It points you at **Add project**. For the machine's first project, run it at a root shell: the dashboard's Add project runs from a project's own dashboard, and there is none yet.
 
    ```sh
-   sudo bash scripts/bootstrap.sh --hardened --after-credentials <name> <owner/repo>
+   sudo bash scripts/setup/add-project.sh <name> <owner/repo>
    ```
 
-   If the repo's setup PR isn't merged yet, the command says "waiting" and exits 3. Merge the PR and run the command again; it picks up where it stopped.
+   Later projects use the dashboard's Setup console, **Add project** (see [Your first project](#your-first-project)), once you are signed in. Add project makes the agents' GitHub App through GitHub's manifest flow, waits for the agents' Claude login (a root admin installs it on the machine), then sets up the checkout and starts the service. If the repo's setup PR isn't merged yet, it says "waiting" (exit 3). Merge the PR and run it again; it picks up where it stopped. An install whose credentials were stored by hand earlier keeps them, and `--after-credentials` still finishes it.
 4. **One URL, last, and only one that answers.** It asks each URL first (HTTP 200) and prints only one that answered:
    - **A fresh machine (no dashboard sign-in App yet):** it starts the hub's setup mode and prints `https://<the machine's https name>/`. On that page you make the sign-in App with GitHub (Connect GitHub; GitHub's manifest flow, two clicks, nothing to copy). The page asks for a one-time setup token: run `sudo cat` on the file it names. The token is never printed, logged or put in a link. Setup mode turns itself off once the App exists.
-   - **A fresh machine with no https origin yet:** it starts setup mode on loopback only (`dashboards.sh --setup --loopback`) and prints `http://127.0.0.1:4399/`, with the line to run from your own computer first: `ssh -L 4399:127.0.0.1:4399 <you>@<server>` (it fills in who ran `sudo` and the server's host name). The page asks for the same one-time setup token. Its sign-in App step can't start GitHub's manifest flow yet, because that needs an https address GitHub can send your browser back to. So it shows **Tailscale and HTTPS** (screen 7) first, as three root commands (`scripts/setup/tailscale.sh install`, `up`, `serve`). Run the install command again after them: it finds the tailnet name, moves setup mode to `https://<the machine's https name>/` with a new token, and the App step goes on there.
+   - **A fresh machine with no https origin yet:** it starts setup mode on loopback only (`dashboards.sh --setup --loopback`) and prints `http://127.0.0.1:4399/`, with the line to run from your own computer first: `ssh -L 4399:127.0.0.1:4399 <you>@<server>` (it fills in who ran `sudo` and the server's host name). The page asks for the same one-time setup token. Its sign-in App step can't start GitHub's manifest flow yet, because that needs an https address GitHub can send your browser back to. So the page asks you to choose the origin (below): one of your own, by running the install command again with `--public-url https://<host>`, or **Tailscale and HTTPS** (screen 7), as three root commands (`scripts/setup/tailscale.sh install`, `up`, `serve`) and then the install command again, which finds the tailnet name. Either way it moves setup mode to that https address with a new token, and the App step goes on there.
    - **The sign-in App made, no hub yet:** it starts the hub (`dashboards.sh --no-instances`).
    - **A hub running:** `https://<the machine's https name>/first-run`. Sign in with GitHub as the machine owner. While that origin doesn't reach the hub, it prints `http://127.0.0.1:4398/first-run` instead, the owner's break-glass on the server, with the line to run from your own computer first: `ssh -L 4398:127.0.0.1:4398 <you>@<server>`.
 
-**The https origin.** Setup mode and sign-in need the machine's https name. That's its Tailscale name, with MagicDNS and HTTPS certificates turned on in Tailscale's admin console, and the hub served on it:
+**The https origin: your choice.** Setup mode and sign-in need an https address for the hub. Pick one:
 
-```sh
-sudo tailscale serve --bg --https=443 http://127.0.0.1:4399
-```
+- **An origin of your own.** A name you control whose https server (your reverse proxy, with its certificate) forwards to `http://127.0.0.1:4399` on the machine, and to nothing else. Give it to the install command: `sudo bash scripts/bootstrap.sh --hardened --public-url https://<host> <name> <owner/repo>`.
+- **Tailscale.** The machine's Tailscale name, with MagicDNS and HTTPS certificates turned on in Tailscale's admin console, and the hub served on it (`scripts/setup/tailscale.sh install`, `up`, `serve` do this, one step each):
 
-You can also give an https origin of your own with `--public-url https://<host>`. [dashboard.md](dashboard.md#tailscale-https-the-owners-step) has the details. Once the hub is up, the Machine page's **Tailscale and HTTPS** card walks you through these steps from the browser.
+  ```sh
+  sudo tailscale serve --bg --https=443 http://127.0.0.1:4399
+  ```
+
+  Once the hub is up, the Machine page's **Tailscale and HTTPS** card walks you through these steps from the browser. [dashboard.md](dashboard.md#tailscale-https-the-owners-step) has the details.
 
 **When nothing answers.** If what it started doesn't answer (for example, the origin doesn't reach the hub), it prints no URL. It says why, prints the command that fixes it, and exits 4. Fix what it says and run the same command again. The installed parts stay as they are.
 
@@ -145,7 +148,7 @@ The First run page (`/first-run`) lists every setup step, each with its state ch
 | **Policy** | server | Reviews the instance's policy (auto-merge, land mode, budget, workers) as a form, with the change shown before it is written |
 | **Discord** | server | The bot's token, invite link and channels (below) |
 | **Tailscale and HTTPS** | server | The Machine page's card: install, log in, serve, the hub's URL |
-| **Updater** | server | The Machine page's Updater setup (below) |
+| **Updater** | server | The Machine page's Updater setup (below). Listed after your first task: until the instance opens its first PR it blocks nothing; then it is required, before the machine runs unattended for long |
 | **Start** | both | Starts the coordinator: your own service locally (launchd or `systemd --user`), the instance's service on a server |
 
 Some steps have no button, because they can't be one:
@@ -180,6 +183,8 @@ Some steps have no button, because they can't be one:
 To set up another repo on the same machine, run `worklane dashboard --detach` in it, or `worklane init <repo>`, or the install script again with that repo.
 
 **On a server,** a project is an instance. The Setup console's **Add project** makes one: you type a name and pick the repo. The App comes from GitHub's manifest flow (two clicks on GitHub, installed on that one repo only). The agents' Claude login is never taken by the dashboard: a root admin signs them in on the machine (`sudo bash scripts/setup/credentials.sh <name> claude`, or `sudo -u wl-<name>-agent -i claude auth login`; see [auth.md](auth.md)), and Add project waits for it. The view follows each step live. If a step fails, it names the step and the command to retry it. Only an owner of the instance who is also a machine owner, signed in, on one of the machine devices (`dashboards.sh --machine-devices`), can use it. The same steps at a root shell: `sudo bash scripts/setup/add-project.sh <name> <owner/repo>`. See [dashboard.md](dashboard.md#add-project).
+
+Once the instance's coordinator runs, its first task is filed on GitHub as on a local install (step 2 above), by one of the repo's writers. The page has no form for it on a server: an issue filed from the page would be the App's, and the coordinator never counts the App's own issues as a writer's. The First run page's **Your first task** step turns done once the coordinator has taken a writer's `ready` issue with a `done_when` block. The engine updater comes after that: until the instance opens its first PR it is listed but blocks nothing.
 
 To see everything work without a repo of your own, try the demo. It uses scripted agents and needs no login:
 

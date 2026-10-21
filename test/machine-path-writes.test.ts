@@ -866,8 +866,9 @@ test("lint: the state and slot dirs need no onRealMachine while their resolvers 
   assert.equal(lintFixtures({ 'test/fixture-c.test.ts': writes }), '');
   // The resolvers without their refusals (fixture copies of src/os/index.ts, nothing in src/ is changed).
   const real = ts.sys.readFile(join(repoRoot, 'src', 'os', 'index.ts'))!;
-  const noState = real.replace(/const refusal = testStateRefusal\(dir\);\n\s*if \(refusal\) throw new TestStateRefused\(refusal\);\n/, '');
-  const noSlots = real.replace(/const refusal = testSlotsRefusal\(dir\);\n\s*if \(refusal\) throw new TestSlotsRefused\(refusal\);\n/, '');
+  // The call may hand the refusal its environment (#786: an own-variable snapshot), so its arguments after `dir` are cut too.
+  const noState = real.replace(/const refusal = testStateRefusal\(dir(?:, [^;]*)?\);\n\s*if \(refusal\) throw new TestStateRefused\(refusal\);\n/, '');
+  const noSlots = real.replace(/const refusal = testSlotsRefusal\(dir(?:, [^;]*)?\);\n\s*if \(refusal\) throw new TestSlotsRefused\(refusal\);\n/, '');
   assert.notEqual(noState, real, 'the state refusal is cut');
   assert.notEqual(noSlots, real, 'the slot refusal is cut');
   for (const [mutant, line, name] of [[noState, 12, 'stateDir'], [noSlots, 13, 'slotsDir']] as const) {

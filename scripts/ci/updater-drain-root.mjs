@@ -56,13 +56,14 @@ let stuck = { installed: OLD, since: new Date(Date.now() - 3 * 3600_000).toISOSt
 const raised = [];
 const deps = {
   ...u.realDeps(() => {}),
-  config: () => ({ enabled: true, repo_url: 'https://github.com/example-org/engine.git', branch: 'main', required_checks: ['test'], drain_after_minutes: 60 }),
+  // realDeps judges checks by their source (#727): `test` is pinned to App 1, which posts it below.
+  config: () => ({ enabled: true, repo_url: 'https://github.com/example-org/engine.git', branch: 'main', required_checks: ['test'], required_check_sources: { test: { app_id: 1 } }, drain_after_minutes: 60 }),
   installed: () => current,
   exec: (f, args) => (f === 'git' ? `${NEW}\trefs/heads/main\n` : f === 'systemctl' && args[0] === 'show' ? 'ActiveState=active\nSubState=running\nNRestarts=0\nResult=success\n' : f === 'systemctl' && args[0] === 'list-units' ? 'worklane-x.service loaded active running x\n' : ''),
   fetchJson: async (url) =>
     url.includes('/compare/')
       ? { status: 'ahead', ahead_by: 1, behind_by: 0, total_commits: 1, commits: [{ sha: NEW, parents: [{ sha: OLD }], commit: { committer: { date: new Date(Date.now() - 600_000).toISOString() } } }] }
-      : { check_runs: [{ name: 'test', status: 'completed', conclusion: 'success', started_at: '1', id: 1 }] },
+      : { check_runs: [{ name: 'test', status: 'completed', conclusion: 'success', started_at: '1', id: 1, app: { id: 1 } }], statuses: [] },
   installTree: () => {},
   syncHelpers: () => [],
   switchTo: (s) => (current = s),

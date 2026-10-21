@@ -113,8 +113,12 @@ export const OWNER_DECISIONS: ReadonlySet<string> = new Set(['plan', 'land', 'au
 export const mayAnswerKind = (kind: string, r: Role | null | undefined, approvals?: ReviewConfig['approvals']) =>
   kind === 'land' && approvals?.land === 'writers' ? isWriter(r) : OWNER_DECISIONS.has(kind) ? isOwner(r) : isWriter(r);
 
-/** `fresh`: ask GitHub now, not the cache (the hub's role check, so its own copy is never older than the cache allows). */
-export type RoleOf = (login: string, o?: { fresh?: boolean }) => Promise<Role | null>;
+/**
+ * `fresh`: ask GitHub now, not the cache (the hub's role check, so its own copy is never older than the cache allows).
+ * `strict`: a lookup that fails throws instead of answering null (no role), so a caller can tell "GitHub is down" from
+ * "not a collaborator" (#776 round 3: a resume request waits on the first and is ignored only on the second).
+ */
+export type RoleOf = (login: string, o?: { fresh?: boolean; strict?: boolean }) => Promise<Role | null>;
 type Fetch = typeof fetch;
 
 /**
@@ -154,7 +158,8 @@ export function cachedRoles(permission: (login: string) => Promise<string>, now:
     try {
       role = roleFromPermission(await permission(login));
       until = now() + Math.min(ttl, ROLE_CACHE_MS);
-    } catch {
+    } catch (e) {
+      if (o.strict) throw e;
       role = null;
       until = now() + Math.min(ttl, ROLE_ERROR_CACHE_MS);
     }
