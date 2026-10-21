@@ -332,10 +332,16 @@ do_machine_helper() {
   if new_instance_marked "$name"; then allow=("$coord"); fi
   rule="$(machine_sudoers "${users[@]}")"
   if [ -n "$replace_sudoers" ]; then
-    echo "--replace-sudoers: the machine helper's rule becomes machine-helper.sh's, whatever it adds"
+    # What it installs, shown before anything is written (#902 round 5).
+    sudoers_unified_diff "$MACHINE_SUDOERS" "$rule"
+    echo "--replace-sudoers: the machine helper's rule becomes the engine's rule above"
   elif sudoers_only_narrows "$MACHINE_SUDOERS" "$rule" "${allow[@]}"; then
-    [ ! -e "$MACHINE_SUDOERS" ] || sudoers_unified_diff "$MACHINE_SUDOERS" "$rule"
-    echo "the machine helper's rule, for $(printf '%s\n' "$names" | one_line): it grants nothing the installed one doesn't${allow[*]:+ but ${allow[*]}}"
+    sudoers_unified_diff "$MACHINE_SUDOERS" "$rule"
+    if [ -e "$MACHINE_SUDOERS" ] || [ -L "$MACHINE_SUDOERS" ]; then
+      echo "the machine helper's rule, for $(printf '%s\n' "$names" | one_line): it grants nothing the installed one doesn't${allow[*]:+ but ${allow[*]}}"
+    else
+      echo "the machine helper's first rule, for $(printf '%s\n' "$names" | one_line): this machine never had the helper set up"
+    fi
   else
     sudoers_unified_diff "$MACHINE_SUDOERS" "$rule"
     echo "rerun as root with --replace-sudoers to install the engine's rule: $again --replace-sudoers"

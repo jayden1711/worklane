@@ -346,7 +346,9 @@ if helper_instances | grep -qx "$name"; then
     bash "$here/machine-helper.sh" $helper_now
   else
     remove_sudoers worklane-machine
-    echo "removed $MACHINE_SUDOERS: no instance is left to run the machine helper"
+    # The helper stays installed, so the next add-project puts a rule back only with root's --replace-sudoers (#902
+    # round 5: a rule taken away is never put back on its own).
+    echo "removed $MACHINE_SUDOERS: no instance is left to run the machine helper; the next add-project shows the rule it would install and waits for --replace-sudoers"
   fi
 fi
 if hub_instances | grep -qx "$name"; then

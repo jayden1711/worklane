@@ -289,14 +289,20 @@ machine_sudoers_shape() {
 #   - $1 must be a regular file (no link, no NUL) in the engine's own shape (machine_sudoers_shape), and so must $2.
 #   - Every command of $2 must be one of $1's, byte for byte.
 #   - Every user of $2 must be one of $1's, unless it is among $3...: users the caller adds on purpose, which are
-#     machine-helper.sh's own arguments at a root shell, or the instance add-project is creating.
+#     machine-helper.sh's own arguments at a root shell, or an instance being created (instance.sh's mark).
 # So the rewrite only drops whole commands or users. Anything else, including any doubt, is wider: only root's
-# --replace-sudoers replaces it. With no $1 yet (a machine's first install) there is nothing to be wider than.
+# --replace-sudoers replaces it. No $1 is a first install only where the helper was never set up
+# (machine_helper_never_set_up); a rule taken away from a machine that had one is wider to put back.
 # Only reads; prints nothing.
 sudoers_only_narrows() {
   local file="$1" content="$2" have want l
   shift 2
-  [ -e "$file" ] || [ -L "$file" ] || return 0
+  if [ ! -e "$file" ] && [ ! -L "$file" ]; then
+    # No rule: a first install only on a machine that never had the helper set up (#902 round 5). Where the helper
+    # or its rules record is there, the rule was taken away (root revoking it, say): putting one back is wider.
+    machine_helper_never_set_up && return 0
+    return 1
+  fi
   [ -f "$file" ] && [ ! -L "$file" ] || return 1
   tr -d '\000' < "$file" | cmp -s - "$file" || return 1
   have="$(machine_sudoers_shape < "$file")" || return 1
@@ -338,7 +344,16 @@ machine_sudoers_preflight() {
 # The difference between installed sudoers file $1 and content $2 as a unified diff, labelled for the owner's runbook:
 # its minus side "installed <file>", its plus side "engine (machine-helper.sh)". Prints nothing when they are the same.
 sudoers_unified_diff() {
-  diff -u --label "installed $1" --label "engine (machine-helper.sh)" -- "$1" <(sudoers_bytes "$2") || true
+  local from="$1"
+  # No rule installed: the whole engine rule is what it adds.
+  [ -e "$from" ] || [ -L "$from" ] || from=/dev/null
+  diff -u --label "installed $1" --label "engine (machine-helper.sh)" -- "$from" <(sudoers_bytes "$2") || true
+}
+
+# Whether this machine never had the machine helper set up: no helper and no rules record (machine-helper.sh writes
+# both). Only then is a missing rule a first install.
+machine_helper_never_set_up() {
+  [ ! -e "$MACHINE_HELPER" ] && [ ! -L "$MACHINE_HELPER" ] && [ ! -e "$HELPER_RULES" ] && [ ! -L "$HELPER_RULES" ]
 }
 
 # Tailscale for the dashboard hub (tailscale.sh). The install is pinned: Tailscale's own apt repository for this
@@ -704,6 +719,8 @@ new_instance_clear() {
 machine_instances_here() {
   local n
   for n in $({ helper_instances; hub_instances; ls -1 "$SRV_ROOT" 2>/dev/null; } | grep -E '^[a-z][a-z0-9-]{0,20}$' | sort -u); do
+    # Only names machine-helper.sh would take (the instance-name rules), so the command it prints runs.
+    [ -z "$(instance_name_problem "$n")" ] || continue
     if user_exists "wl-$n"; then echo "$n"; fi
   done
 }

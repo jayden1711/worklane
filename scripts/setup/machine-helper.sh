@@ -48,8 +48,10 @@
 # tag, Defaults, include, negation or escape outside that shape. It prints a unified diff (minus side "installed
 # <file>", plus side "engine (machine-helper.sh)") and the line "rerun as root with --replace-sudoers to install the
 # engine's rule: <command>", then exits 3. --replace-sudoers, at a root shell once you've read the diff, writes the rule
-# whole. A machine's first install (no rule yet) needs no flag. No sudoers rule lets a coordinator run this script;
-# through the helper a coordinator reaches only add-project.sh, with exactly a name and a repo.
+# whole, and prints the diff of what it writes first. A machine's first install needs no flag: no rule, and no helper
+# or rules record either (a rule taken away from a machine that had the helper is wider to put back). No sudoers rule
+# lets a coordinator run this script; through the helper a coordinator reaches only add-project.sh, with exactly a name
+# and a repo.
 #
 #   bash scripts/setup/machine-helper.sh --check      whether the installed rule is current; changes nothing (#898)
 #
@@ -115,6 +117,12 @@ if [ -z "$replace" ] && ! sudoers_only_narrows "$MACHINE_SUDOERS" "$rule" "${use
   sudoers_unified_diff "$MACHINE_SUDOERS" "$rule"
   echo "rerun as root with --replace-sudoers to install the engine's rule: sudo bash $here/machine-helper.sh --replace-sudoers $*"
   exit 3
+fi
+# --replace-sudoers: what it installs, shown before anything is written, so root sees this run's rule, not an older
+# run's (#902 round 5).
+if [ -n "$replace" ]; then
+  sudoers_unified_diff "$MACHINE_SUDOERS" "$rule"
+  echo "--replace-sudoers: installing the engine's rule above"
 fi
 # Every name this run writes into the rule is no longer an instance being created (#898): off root's list now, before
 # anything is written. If the run then fails, those names need --replace-sudoers to be added, which fails closed.
