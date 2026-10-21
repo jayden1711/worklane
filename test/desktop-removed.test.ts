@@ -58,9 +58,10 @@ const shown = (v: unknown) => (typeof v === 'object' && v !== null ? JSON.string
  * `include` entry merged into every combination whose original values it doesn't overwrite, or added as a
  * combination of its own when it fits none (so an `include`-only matrix is its entries). Null when the matrix isn't
  * written out (an expression such as `${{ fromJSON(...) }}`, for the matrix, an axis or an entry): the caller then
- * treats the job's name as unresolved.
+ * treats the job's name as unresolved. Each combination is a Map in key order, so no key is ever read from
+ * Object.prototype (`toString`, `constructor`) and integer-like keys keep their place (round 8).
  */
-function matrixCombos(matrix: unknown): Record<string, unknown>[] | null {
+function matrixCombos(matrix: unknown): Map<string, unknown>[] | null {
   if (!isRecord(matrix)) return null;
   const { include = [], exclude = [], ...axes } = matrix;
   if (!Array.isArray(include) || !Array.isArray(exclude) || !include.every(isRecord) || !exclude.every(isRecord)) return null;
@@ -68,29 +69,34 @@ function matrixCombos(matrix: unknown): Record<string, unknown>[] | null {
   // Keys that differ only in case (`view` and `View`, or an `Include` axis): whether GitHub reads them as one key is
   // unsure, and the combinations differ either way, so the matrix counts as unreadable.
   const keys = [...Object.keys(axes), ...include.flatMap((e) => Object.keys(e)), ...exclude.flatMap((e) => Object.keys(e))];
-  // A key outside printable ASCII (U+017F long s, U+00DF sharp s, U+212A Kelvin): whether `matrix.s` or `matrix.ss`
-  // reaches it is unsure, so the matrix is unreadable (round 7).
-  if (keys.some((k) => /[^\x20-\x7e]/.test(k))) return null;
+  // A key outside a closed identifier set makes the matrix unreadable. That covers a key outside printable ASCII
+  // (U+017F long s, U+00DF sharp s, U+212A Kelvin: whether `matrix.s` or `matrix.ss` reaches it is unsure; round 7),
+  // an integer-like key such as `"1"` (JS lists those first, GitHub keeps the file's order; round 8), and
+  // `__proto__`.
+  if (keys.some((k) => !/^[A-Za-z_][A-Za-z0-9_-]*$/.test(k) || k === '__proto__')) return null;
   if (Object.keys(axes).some((k) => ['include', 'exclude'].includes(fold(k)) || ['include', 'exclude'].includes(k.toLowerCase()))) return null;
   if (new Set(keys.map(fold)).size !== new Set(keys).size || new Set(keys.map((k) => k.toLowerCase())).size !== new Set(keys).size) return null;
   // A value that isn't a plain, non-blank scalar (null, an object or list, '' or blanks): how GitHub names the job
   // then (an empty or dropped suffix?) is unsure, so the matrix counts as unreadable (as src/check-pin-block.ts does).
   const values = [...(Object.values(axes) as unknown[][]).flat(), ...include.flatMap((e) => Object.values(e)), ...exclude.flatMap((e) => Object.values(e))];
   if (values.some((v) => v === null || typeof v === 'object' || (typeof v === 'string' && v.trim() === ''))) return null;
-  let combos: Record<string, unknown>[] = Object.keys(axes).length ? [{}] : [];
-  for (const [k, values] of Object.entries(axes) as [string, unknown[]][]) combos = combos.flatMap((c) => values.map((v) => ({ ...c, [k]: v })));
-  combos = combos.filter((c) => !exclude.some((e) => Object.entries(e).every(([k, v]) => same(c[k], v))));
-  const original = combos.map((c) => ({ ...c }));
-  const added: Record<string, unknown>[] = [];
+  // A number JS and GitHub may print differently (`22.00000000000001`: JS keeps the digits, a 15-digit format drops
+  // them): only an integer below 1e15 prints the same both ways (round 8).
+  if (values.some((v) => typeof v === 'number' && !(Number.isInteger(v) && Math.abs(v) < 1e15))) return null;
+  let combos: Map<string, unknown>[] = Object.keys(axes).length ? [new Map()] : [];
+  for (const [k, values] of Object.entries(axes) as [string, unknown[]][]) combos = combos.flatMap((c) => values.map((v) => new Map([...c, [k, v]])));
+  combos = combos.filter((c) => !exclude.some((e) => Object.entries(e).every(([k, v]) => c.has(k) && same(c.get(k), v))));
+  const original = combos.map((c) => new Map(c));
+  const added: Map<string, unknown>[] = [];
   for (const entry of include) {
     let fits = false;
     combos.forEach((c, i) => {
-      if (Object.entries(entry).every(([k, v]) => !(k in original[i]!) || same(original[i]![k], v))) {
-        Object.assign(c, entry);
+      if (Object.entries(entry).every(([k, v]) => !original[i]!.has(k) || same(original[i]!.get(k), v))) {
+        for (const [k, v] of Object.entries(entry)) c.set(k, v);
         fits = true;
       }
     });
-    if (!fits) added.push({ ...entry });
+    if (!fits) added.push(new Map(Object.entries(entry)));
   }
   return [...combos, ...added];
 }
@@ -124,17 +130,19 @@ function jobCheckNames(key: string, job: Job): Set<string> {
   if (job.name !== undefined && (typeof job.name !== 'string' || job.name.trim() === '')) return new Set([`${key} (${UNRESOLVED} name ${JSON.stringify(job.name)} }})`]);
   const name = (job.name as string | undefined) ?? key;
   const matrix = job.strategy?.matrix;
-  const combos = matrix === undefined ? [{}] : matrixCombos(matrix);
+  const combos = matrix === undefined ? [new Map<string, unknown>()] : matrixCombos(matrix);
   // A matrix this can't read, or one with no combination at all (`{}`, `include: []`, an empty axis, everything
   // excluded): what GitHub shows for it is unsure, possibly a failed job under its own name, so it fails closed.
   if (!combos || combos.length === 0) return new Set([`${name} (${UNRESOLVED} matrix ${JSON.stringify(matrix)} }})`]);
   for (const c of combos) {
     // GitHub's expression contexts and property names ignore case, and spacing inside ${{ }} is free.
-    const vars = new Map(Object.entries(c).map(([k, v]) => [fold(k), v]));
+    const vars = new Map([...c].map(([k, v]) => [fold(k), v]));
     if (name.includes(UNRESOLVED)) out.add(name.replace(/\$\{\{\s*matrix\.([\w-]+)\s*\}\}/gi, (m, k: string) => (vars.has(fold(k)) ? shown(vars.get(fold(k))) : m)));
-    else out.add(Object.keys(c).length ? `${name} (${Object.values(c).map(shown).join(', ')})` : name);
+    else out.add(c.size ? `${name} (${[...c.values()].map(shown).join(', ')})` : name);
   }
-  return new Set([...out].map((n) => (unsureName(n) ? `${key} (${UNRESOLVED} name ${JSON.stringify(n)} }})` : n)));
+  // A name holding ` / `: GitHub names a reusable workflow's jobs `<caller> / <callee job>`, which this doesn't
+  // build, so a literal name of that shape may twin one (round 8). It fails closed like any unsure name.
+  return new Set([...out].map((n) => (unsureName(n) || n.includes(' / ') ? `${key} (${UNRESOLVED} name ${JSON.stringify(n)} }})` : n)));
 }
 
 /**
@@ -592,6 +600,39 @@ const UNSURE_TEXT_FIXTURES: [string, string, string, boolean][] = [
   ['control: a BOM at offset 0 only', 'other.yml', String.fromCharCode(0xfeff) + 'jobs:\n  t:\n    runs-on: x\n', false],
   ['control: TAB in a comment', 'other.yml', 'jobs:\n  t:\n    runs-on: x # a\tb\n', false],
 ];
+
+/**
+ * Round 8 (#746 adversarial review of abff5d0d): plain-ASCII jobs that GitHub may name as a twin of
+ * `test (ubuntu-latest, 22)` (BASE_CI makes it) where JS object and number semantics named them otherwise, and a
+ * literal name of the `<caller> / <callee>` shape. Each must leave checkTwins non-empty. [label, other.yml]
+ */
+const NAME_TWIN_FIXTURES: [string, string][] = [
+  ['A1 an include entry with a key toString', "jobs:\n  test:\n    strategy: { matrix: { os: [ubuntu-latest], include: [ { toString: 22 } ] } }\n    runs-on: x\n    steps: [ { run: 'false' } ]\n"],
+  ['A1 an include entry with a key constructor', "jobs:\n  test:\n    strategy: { matrix: { os: [ubuntu-latest], include: [ { constructor: 22 } ] } }\n    runs-on: x\n    steps: [ { run: 'false' } ]\n"],
+  ['A2 an integer-like axis key "1"', "jobs:\n  test:\n    strategy: { matrix: { os: [ubuntu-latest], \"1\": [22] } }\n    runs-on: x\n    steps: [ { run: 'false' } ]\n"],
+  ['A2 an integer-like key "1" in an include entry', "jobs:\n  test:\n    strategy: { matrix: { os: [ubuntu-latest], include: [ { \"1\": 22 } ] } }\n    runs-on: x\n    steps: [ { run: 'false' } ]\n"],
+  ['A3 a value 22.00000000000001 in the suffix', "jobs:\n  test:\n    strategy: { matrix: { os: [ubuntu-latest], node: [22.00000000000001] } }\n    runs-on: x\n    steps: [ { run: 'false' } ]\n"],
+  ['A3 a value 22.00000000000001 through ${{ matrix.node }}', "jobs:\n  twin:\n    name: test (ubuntu-latest, ${{ matrix.node }})\n    strategy: { matrix: { node: [22.00000000000001] } }\n    runs-on: x\n    steps: [ { run: 'false' } ]\n"],
+  ['A4 a literal name full-ci / scope', "jobs:\n  twin:\n    name: full-ci / scope\n    runs-on: x\n    steps: [ { run: 'false' } ]\n"],
+];
+
+test('a job GitHub may name as a twin of another check is caught: matrix keys, numbers, reusable-workflow names (round 8)', () => {
+  const REQUIRED = ['desktop', 'test (ubuntu-latest, 22)', 'test (ubuntu-latest, 24)'];
+  const base = mkdtempSync(join(tmpdir(), 'wf-'));
+  writeFileSync(join(base, 'ci.yml'), BASE_CI);
+  assert.deepEqual(checkTwins(base, REQUIRED), [], 'BASE_CI alone');
+  for (const [label, yml] of NAME_TWIN_FIXTURES) {
+    const dir = mkdtempSync(join(tmpdir(), 'wf-'));
+    writeFileSync(join(dir, 'ci.yml'), BASE_CI);
+    writeFileSync(join(dir, 'other.yml'), yml);
+    assert.notDeepEqual(checkTwins(dir, REQUIRED), [], label);
+  }
+  // Integer matrix values below 1e15, and identifier keys, still resolve: a plain matrix is no twin.
+  const ok = mkdtempSync(join(tmpdir(), 'wf-'));
+  writeFileSync(join(ok, 'ci.yml'), BASE_CI);
+  writeFileSync(join(ok, 'other.yml'), 'jobs:\n  lint:\n    strategy: { matrix: { node_v: [22, 999999999999999], os-x: [a] } }\n    runs-on: x\n');
+  assert.deepEqual(checkTwins(ok, REQUIRED), [], 'lint (22, a), lint (999999999999999, a)');
+});
 
 test('a file another YAML reader may read otherwise counts as unsure: hidden line breaks, BOMs past the start, directives (round 7)', () => {
   const REQUIRED = ['desktop', 'test (ubuntu-latest, 22)', 'test (ubuntu-latest, 24)'];
