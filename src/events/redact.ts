@@ -215,6 +215,26 @@ export function redactString(s: string, o: RedactTextOptions = {}): string {
 export function redact<T>(value: T, o: RedactTextOptions = {}): T {
   if (typeof value === 'string') return redactString(value, o) as T;
   if (Array.isArray(value)) return value.map((v) => redact(v, o)) as T;
-  if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, redact(v, o)])) as T;
+  if (value && typeof value === 'object') return Object.fromEntries(redactKeys(Object.entries(value), o)) as T;
   return value;
+}
+
+/**
+ * An object's entries with each key redacted like a value (#972): a secret in a key's place is stored no more than one
+ * in a value's. Every entry is kept: a key with no secret stays as it is, and a redacted key that would take another
+ * entry's name (two secrets redacted alike, or a key that already reads like the redacted text) is numbered, ` (2)`
+ * and on, in the entries' order.
+ */
+function redactKeys(entries: [string, unknown][], o: RedactTextOptions): [string, unknown][] {
+  const keys = entries.map(([k]) => redactString(k, o));
+  const used = new Set(entries.filter(([k], i) => keys[i] === k).map(([k]) => k));
+  return entries.map(([k, v], i) => {
+    let key = keys[i]!;
+    if (key !== k) {
+      const base = key;
+      for (let n = 2; used.has(key); n++) key = `${base} (${n})`;
+      used.add(key);
+    }
+    return [key, redact(v, o)];
+  });
 }

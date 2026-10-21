@@ -117,7 +117,7 @@ Even when `mergeDecision` says yes, the merge call can still be held.
 
 **Tool guard.** A hook runs before every agent tool call (`src/hook.ts`), and the rules decide (`src/guardrails/engine.ts#evaluate`). Agents can't:
 
-- write the engine's config folder or `.claude/`, including by a shell redirect;
+- write the engine's config folder or `.claude/`, including by a shell redirect. The check decides on the file a write really reaches, not only on the name it is given, and refuses a write when it can't tell which file that is;
 - read secret files;
 - fetch a domain outside the allowlist.
 
@@ -125,6 +125,8 @@ A person's own session isn't affected.
 
 - Tests:
   - `test/guardrails.test.ts` › “protected harness files: agents denied (including shell redirects); humans unaffected”
+  - `test/adversarial/tool-guard-writes.test.ts` › “tool guard writes: every write tool and parsed shell write is judged by the file it reaches, for every protected path”
+  - `test/adversarial/tool-guard-writes.test.ts` › “tool guard writes: a write whose file the guard cannot tell is refused”
   - `test/guardrails.test.ts` › “secret files: agents may not read them by tool or shell; exclusions apply; humans unaffected”
   - `test/guardrails.test.ts` › “agents can only fetch allowlisted domains”
 - Label: measured.

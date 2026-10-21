@@ -1,0 +1,57 @@
+# Coordinators may change the machine slot caps and the update switch, switch the agents' Claude account, put the machine on Tailscale, add a project, and set the engine updater up (install it, follow releases, stage a release signer for an admin to confirm), through one validating helper.
+Cmnd_Alias WORKLANE_MACHINE = /usr/local/libexec/worklane-machine set-slots 1, \
+    /usr/local/libexec/worklane-machine set-slots 2, \
+    /usr/local/libexec/worklane-machine set-slots 3, \
+    /usr/local/libexec/worklane-machine set-slots 4, \
+    /usr/local/libexec/worklane-machine set-slots 5, \
+    /usr/local/libexec/worklane-machine set-slots 6, \
+    /usr/local/libexec/worklane-machine set-slots 7, \
+    /usr/local/libexec/worklane-machine set-slots 8, \
+    /usr/local/libexec/worklane-machine set-slots 9, \
+    /usr/local/libexec/worklane-machine set-slots 10, \
+    /usr/local/libexec/worklane-machine set-slots 11, \
+    /usr/local/libexec/worklane-machine set-slots 12, \
+    /usr/local/libexec/worklane-machine set-slots 13, \
+    /usr/local/libexec/worklane-machine set-slots 14, \
+    /usr/local/libexec/worklane-machine set-slots 15, \
+    /usr/local/libexec/worklane-machine set-slots 16, \
+    /usr/local/libexec/worklane-machine set-updates on, \
+    /usr/local/libexec/worklane-machine set-updates off, \
+    /usr/local/libexec/worklane-machine set-test-slots 1, \
+    /usr/local/libexec/worklane-machine set-test-slots 2, \
+    /usr/local/libexec/worklane-machine set-test-slots 3, \
+    /usr/local/libexec/worklane-machine set-test-slots 4, \
+    /usr/local/libexec/worklane-machine set-test-slots 5, \
+    /usr/local/libexec/worklane-machine set-test-slots 6, \
+    /usr/local/libexec/worklane-machine set-test-slots 7, \
+    /usr/local/libexec/worklane-machine set-test-slots 8, \
+    /usr/local/libexec/worklane-machine claude-account status, \
+    /usr/local/libexec/worklane-machine claude-account switch, \
+    /usr/local/libexec/worklane-machine install-updater, \
+    /usr/local/libexec/worklane-machine set-update-channel release, \
+    /usr/local/libexec/worklane-machine tailscale install, \
+    /usr/local/libexec/worklane-machine tailscale up, \
+    /usr/local/libexec/worklane-machine tailscale serve, \
+    /usr/local/libexec/worklane-machine tailscale public-url, \
+    /usr/local/libexec/worklane-machine ^stage-update-signer [A-Za-z0-9][A-Za-z0-9._+-]*@[A-Za-z0-9][A-Za-z0-9.-]* ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI[A-Za-z0-9+/]{43}$, \
+    /usr/local/libexec/worklane-machine ^discard-update-signer [A-Za-z0-9][A-Za-z0-9._+-]*@[A-Za-z0-9][A-Za-z0-9.-]* ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI[A-Za-z0-9+/]{43}$, \
+    /usr/local/libexec/worklane-machine ^claude-account profile-add [a-z][a-z0-9-]*$, \
+    /usr/local/libexec/worklane-machine ^claude-account remove [a-z][a-z0-9-]*$, \
+    /usr/local/libexec/worklane-machine ^claude-account use [a-z][a-z0-9-]*$, \
+    /usr/local/libexec/worklane-machine ^claude-account login [a-z][a-z0-9-]*$, \
+    /usr/local/libexec/worklane-machine ^claude-account failover [a-z][a-z0-9+-]* back$, \
+    /usr/local/libexec/worklane-machine ^claude-account failover [a-z][a-z0-9+-]* stay$, \
+    /usr/local/libexec/worklane-machine ^plugin-fetch [a-z0-9][a-z0-9-]* https.//[A-Za-z0-9.-]+/[A-Za-z0-9._~/-]+ [0-9a-f]{40}$, \
+    /usr/local/libexec/worklane-machine ^plugin-fetch [a-z0-9][a-z0-9-]* https.//[A-Za-z0-9.-]+/[A-Za-z0-9._~/-]+ [0-9a-f]{40} [A-Za-z0-9._/-]+$, \
+    /usr/local/libexec/worklane-machine ^plugin-stage [a-z0-9][a-z0-9-]* sha256.[0-9a-f]{64} [a-z][a-z0-9+-]*$, \
+    /usr/local/libexec/worklane-machine ^plugin-withdraw [a-z0-9][a-z0-9-]*$, \
+    /usr/local/libexec/worklane-machine ^plugin-remove [a-z0-9][a-z0-9-]*$, \
+    /usr/local/libexec/worklane-machine ^mcp-fetch [a-z0-9][a-z0-9-]* [a-z0-9][a-z0-9._~-]* [0-9][0-9A-Za-z.-]*$, \
+    /usr/local/libexec/worklane-machine ^mcp-fetch [a-z0-9][a-z0-9-]* @[a-z0-9][a-z0-9._~-]*/[a-z0-9][a-z0-9._~-]* [0-9][0-9A-Za-z.-]*$, \
+    /usr/local/libexec/worklane-machine ^mcp-fetch [a-z0-9][a-z0-9-]* [a-z0-9][a-z0-9._~-]* [0-9][0-9A-Za-z.-]* [a-z0-9][a-z0-9-]*[.][a-z0-9.-]+$, \
+    /usr/local/libexec/worklane-machine ^mcp-fetch [a-z0-9][a-z0-9-]* @[a-z0-9][a-z0-9._~-]*/[a-z0-9][a-z0-9._~-]* [0-9][0-9A-Za-z.-]* [a-z0-9][a-z0-9-]*[.][a-z0-9.-]+$, \
+    /usr/local/libexec/worklane-machine ^mcp-preview [a-z0-9][a-z0-9-]* [a-z0-9][a-z0-9-]* [A-Za-z0-9_-]+$, \
+    /usr/local/libexec/worklane-machine ^mcp-snapshot [a-z0-9][a-z0-9-]*$, \
+    /usr/local/libexec/worklane-machine ^mcp-stage [a-z0-9][a-z0-9-]* sha256.[0-9a-f]{64} [a-z][a-z0-9+-]* [a-z0-9*.+-]+ [A-Za-z0-9_+]+$, \
+    /usr/local/libexec/worklane-machine ^add-project [a-z][a-z0-9-]* [A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9_.-]+$
+wl-alpha, wl-old ALL=(root) NOPASSWD: WORKLANE_MACHINE
