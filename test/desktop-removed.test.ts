@@ -173,13 +173,18 @@ function jobCheckNames(key: string, job: Job): Set<string> {
     if (name.includes(UNRESOLVED)) out.add(name.replace(/\$\{\{\s*matrix\.([\w-]+)\s*\}\}/gi, (m, k: string) => (vars.has(fold(k)) ? shown(vars.get(fold(k))) : m)));
     else out.add(c.size ? `${name} (${[...c.values()].map(shown).join(', ')})` : name);
   }
+  // Fewer names than combinations: one job makes two runs of one name (a name that leaves out a key that varies, or
+  // two equal combinations). A v0.5.2 updater reads only the newest run of a name, so a later green run hides a red
+  // one; each combination is its own check run (measured on this repo's shards). Unresolved (round 15).
+  if (out.size < combos.length) return new Set([`${key} (${UNRESOLVED} ${combos.length} combinations, ${out.size} names }})`]);
   // A matrix job with an `if:` or `needs:`: GitHub evaluates them before it expands the matrix, and a job skipped
   // there gets ONE check run under its bare name (`name:`, else the key; measured on this repo: ci-slow.yml's
   // `bootstrap`, skipped). So it also makes its bare name (round 10). A bare name holding `${{` stays unresolved.
   if (matrix !== undefined && Object.keys(job).some((k) => ['if', 'needs'].includes(fold(k)))) out.add(name);
   // A name holding ` / `: GitHub names a reusable workflow's jobs `<caller> / <callee job>`, which this doesn't
-  // build, so a literal name of that shape may twin one (round 8). It fails closed like any unsure name.
-  return new Set([...out].map((n) => (unsureName(n) || n.includes(' / ') ? `${key} (${UNRESOLVED} name ${JSON.stringify(n)} }})` : n)));
+  // build, so a literal name of that shape may twin one (round 8). It fails closed like any unsure name. So does a
+  // name over 100 characters, in case GitHub shortens it (guess; round 15). The real tree's longest has 34.
+  return new Set([...out].map((n) => (unsureName(n) || n.includes(' / ') || n.length > 100 ? `${key} (${UNRESOLVED} name ${JSON.stringify(n)} }})` : n)));
 }
 
 /**
@@ -195,6 +200,7 @@ function jobCheckNames(key: string, job: Job): Set<string> {
  *   `<<` under `%YAML 1.1`, which the parser applies and leaves no key for): whether Actions merges it is unsure;
  * - an explicit tag on any node, and a number scalar not written in plain decimal (round 12): GitHub resolves core
  *   tags, and reads hex and octal as 32-bit numbers, where `yaml` does neither;
+ * - an anchor defined twice (round 15): which definition an alias gets may differ;
  * - a root, a `jobs`, or a job that isn't a plain mapping (a scalar, a list, `!!omap`), a `permissions` (at the root
  *   or in a job) that is neither a string nor a plain mapping, or any value anywhere that is neither a plain mapping,
  *   a list nor a scalar (a `Map`, a `Set`, binary data);
@@ -232,13 +238,22 @@ function readWorkflow(file: string): { wf: Record<string, unknown> | null; unsur
   // - a number not written in plain decimal (`0xffffffff`, `0o17`, `+22`, `022`, `2.2e1`, `22.0`, `.5`, `.inf`):
   //   GitHub reads hex and octal as 32-bit, so `0xffffffff` is -1 there and 4294967295 here (inferred from the runner
   //   source), and an exclude can then empty the product on GitHub only.
+  // - an anchor defined twice (`&n desktop`, then `&n shots`): `yaml` resolves `*n` to the newest; whether GitHub's
+  //   reader does too is unsure (round 15).
   let tagged = false;
   let number = false;
+  let twice = false;
+  const anchors = new Set<string>();
   visit(doc, (_, n) => {
     if (!isNode(n)) return;
+    if (n.anchor !== undefined) {
+      if (anchors.has(n.anchor)) twice = true;
+      anchors.add(n.anchor);
+    }
     if (n.tag !== undefined) tagged = true;
     if (isScalar(n) && ['number', 'bigint'].includes(typeof n.value) && !/^-?(0|[1-9][0-9]*)$/.test(n.source ?? '')) number = true;
   });
+  if (twice) return unsure('an anchor defined twice');
   if (tagged) return unsure('an explicit tag');
   if (number) return unsure('a number not in plain decimal');
   if (!plainAll(value)) return unsure('a value that is not a plain mapping, list or scalar, or a key outside printable ASCII');
@@ -703,6 +718,11 @@ const UNSURE_TEXT_FIXTURES: [string, string, string, boolean][] = [
   ['T9 a tag on an empty value', 'other.yml', 'jobs:\n  t:\n    runs-on: x\n    env: !!null\n', true],
   ['control: plain decimal numbers, -1, 0, 22 and 4294967295', 'other.yml', 'jobs:\n  t:\n    strategy: { matrix: { v: [-1, 0, 22, 4294967295] } }\n    timeout-minutes: 10\n    runs-on: x\n', false],
   ["control: '0x16' and \"+22\" quoted, ! inside a scalar, !! in a quoted name and in a comment", 'other.yml', "jobs:\n  t:\n    name: 'a!b !!c'\n    strategy: { matrix: { v: ['0x16', \"+22\", a!b] } }\n    runs-on: x # !!float 22\n", false],
+  // Round 15 (#746 second adversarial review of f8448bb4): an anchor defined twice. `yaml` resolves an alias to the
+  // newest definition; if GitHub's reader keeps the first, this is a desktop twin (guess).
+  ['A8 an anchor defined twice, &n desktop then &n shots, name: *n', 'other.yml', "env:\n  A: &n desktop\n  B: &n shots\njobs:\n  t:\n    name: *n\n    runs-on: x\n    steps: [ { run: 'false' } ]\n", true],
+  ['control: one anchor, two aliases', 'other.yml', 'env:\n  A: &n shots\njobs:\n  t:\n    name: *n\n    runs-on: x\n  u:\n    env: { N: *n }\n    runs-on: x\n', false],
+  ['control: a matrix name that uses every key', 'other.yml', 'jobs:\n  t:\n    name: lint ${{ matrix.a }} ${{ matrix.b }}\n    strategy: { matrix: { a: [x, y], b: [1, 2] } }\n    runs-on: x\n', false],
   ['control: a BOM at offset 0 only', 'other.yml', String.fromCharCode(0xfeff) + 'jobs:\n  t:\n    runs-on: x\n', false],
   ['control: TAB in a comment', 'other.yml', 'jobs:\n  t:\n    runs-on: x # a\tb\n', false],
 ];
@@ -735,6 +755,9 @@ const NAME_TWIN_FIXTURES: [string, string][] = [
   ['H1e the same, the axis 0xffffffff and the exclude -1', "jobs:\n  t:\n    name: ${{ matrix.n }}\n    strategy:\n      matrix:\n        k: [0xffffffff]\n        exclude: [ { k: -1 } ]\n        include: [ { n: dco }, { n: x } ]\n    runs-on: x\n    steps: [ { run: 'true' } ]\n"],
   ['H2 the reverse: an axis 4294967295, a hex exclude 0xffffffff; GitHub keeps test (ubuntu-latest, 22)', "jobs:\n  twin:\n    name: test (${{ matrix.os }}, ${{ matrix.node }})\n    strategy:\n      matrix:\n        os: [ubuntu-latest]\n        node: [22]\n        k: [4294967295]\n        exclude: [ { k: 0xffffffff } ]\n        include: [ { os: other, node: 1 } ]\n    runs-on: x\n    steps: [ { run: 'true' } ]\n"],
   ["T1b an exclude !!float 22 against an axis '22'; GitHub may keep test (ubuntu-latest, 22)", "jobs:\n  twin:\n    name: test (${{ matrix.os }}, ${{ matrix.n }})\n    strategy:\n      matrix:\n        os: [ubuntu-latest]\n        n: [22]\n        k: ['22']\n        exclude: [ { k: !!float 22 } ]\n        include: [ { os: other, n: 1 } ]\n    runs-on: x\n    steps: [ { run: 'true' } ]\n"],
+  // Round 15 (#746 second adversarial review of f8448bb4, A10): names over 100 characters fail closed, in case GitHub
+  // shortens them (guess). The real tree's longest name has 34 characters.
+  ['A10 two names of 101 characters sharing their first 100', 'jobs:\n  a:\n    name: ' + 'x'.repeat(100) + "a\n    runs-on: x\n    steps: [ { run: 'false' } ]\n  b:\n    name: " + 'x'.repeat(100) + 'b\n    runs-on: x\n'],
 ];
 
 test('a job GitHub may name as a twin of another check is caught: matrix keys, numbers, reusable-workflow names (round 8)', () => {
@@ -758,7 +781,9 @@ test('a job GitHub may name as a twin of another check is caught: matrix keys, n
 /**
  * Round 10 (#746 adversarial review of f5fafeca): a matrix job with an `if:` or `needs:` that GitHub skips gets one
  * check run under its bare name, which this didn't count. Each makes a skipped twin of a name BARE_BASE_CI makes, so
- * checkTwins must report it. [label, file, text]; a `ci.yml` row is the whole ci.yml.
+ * checkTwins must report it. [label, file, text]; a `ci.yml` row is the whole ci.yml. Since round 15 it also holds
+ * one job that makes two runs of one name (a matrix name that leaves out a key that varies, or two equal
+ * combinations): a v0.5.2 updater reads only the newest, so the second hides a red first.
  */
 const BARE_NAME_FIXTURES: [string, string, string][] = [
   ['S1 a job keyed desktop, a matrix, if: false', 'other.yml', "jobs:\n  desktop:\n    if: false\n    strategy: { matrix: { v: [a] } }\n    runs-on: x\n    steps: [ { run: 'false' } ]\n"],
@@ -770,6 +795,11 @@ const BARE_NAME_FIXTURES: [string, string, string][] = [
   ['S6 a reusable-workflow caller keyed desktop, a matrix, if: false', 'other.yml', 'jobs:\n  desktop:\n    if: false\n    strategy: { matrix: { v: [a] } }\n    uses: ./.github/workflows/ci-slow.yml\n'],
   ['S7 an include-only matrix, name: desktop, if: false', 'other.yml', 'jobs:\n  shots:\n    name: desktop\n    if: false\n    strategy: { matrix: { include: [ { view: phone } ] } }\n    runs-on: x\n'],
   ['G2 a job keyed desktop, name ${{ matrix.v }}, if: false (the bare name stays unresolved)', 'other.yml', 'jobs:\n  desktop:\n    name: ${{ matrix.v }}\n    if: false\n    strategy: { matrix: { v: [phone] } }\n    runs-on: x\n'],
+  // Round 15 (#746 second adversarial review of f8448bb4): one job, two runs of one name.
+  ['A1 in ci.yml, the dco job named ${{ matrix.c }}, axes c: [dco] and copy: [1, 2]', 'ci.yml', BARE_BASE_CI.replace('  dco:\n    runs-on: x\n', '  dco:\n    name: ${{ matrix.c }}\n    strategy: { max-parallel: 1, fail-fast: false, matrix: { c: [dco], copy: [1, 2] } }\n    runs-on: x\n')],
+  ['A1b in ci.yml, the test job named test (${{ matrix.os }}, ${{ matrix.node }}), an extra axis attempt: [1, 2]', 'ci.yml', BARE_BASE_CI.replace('  test:\n    strategy: { matrix: { os: [ubuntu-latest], node: [22, 24] } }\n', '  test:\n    name: test (${{ matrix.os }}, ${{ matrix.node }})\n    strategy: { max-parallel: 1, matrix: { os: [ubuntu-latest], node: [22, 24], attempt: [1, 2] } }\n')],
+  ['A1c in ci.yml, the dco job named ${{ matrix.c }}, two include entries { c: dco, k: a } and { c: dco, k: b }', 'ci.yml', BARE_BASE_CI.replace('  dco:\n    runs-on: x\n', '  dco:\n    name: ${{ matrix.c }}\n    strategy: { max-parallel: 1, matrix: { include: [ { c: dco, k: a }, { c: dco, k: b } ] } }\n    runs-on: x\n')],
+  ['A1e in ci.yml, the dco job named ${{ matrix.c }}, a repeated axis value c: [dco, dco]', 'ci.yml', BARE_BASE_CI.replace('  dco:\n    runs-on: x\n', '  dco:\n    name: ${{ matrix.c }}\n    strategy: { matrix: { c: [dco, dco] } }\n    runs-on: x\n')],
 ];
 
 test('a skipped matrix job twins its bare name: an if: or needs: on a matrix job makes it (round 10)', () => {
