@@ -433,89 +433,151 @@ function lexLines(text: string, slashIsRegex: boolean): { code: boolean[]; inCom
 
 /**
  * One changed file's hunks as the merge gate hands them to the reader (from change-files.ts changedLineNumbers): `at`,
- * the head line the removed lines followed; `added`, the head lines added; `removedCode`, whether the removed text held
- * code (codeLines).
+ * the head line the removed lines followed; `added`, the head lines added; `removed`, the text it removed.
  */
 export interface ChangedHunkSpots {
   at: number;
   added: number[];
-  removedCode: boolean;
-  /**
-   * For each added line, the columns [start, end) the change took on it, when the hunk replaced as many lines as it
-   * added (each paired with its old line, the common start and end left out); null: the whole line (#784 round 8).
-   */
-  cols?: ([number, number] | null)[];
+  removed: string[];
 }
 
 /** Character ranges [start, end) of a text. */
 export type CharRanges = [number, number][];
 
+/** Why the gate can't measure a change it can't place by character (fixed text; the PR holds). */
+export const UNPLACEABLE = "a change too large to align character by character, so where it changed code can't be told";
+
+/** The most cells the character alignment of one hunk's changed middle may take (more: the change can't be placed). */
+export const ALIGN_CELLS = 4_000_000;
+
 /**
- * The columns a hunk's change took on each added line (ChangedHunkSpots.cols, #784 round 8): when it replaced as many
- * lines as it added, each added line against the line it replaced, the common start and end left out (a change that
- * only took characters away: the character after where they were). Otherwise every line whole (null), and so is a
- * line with less code than the line it replaced (code commented out: a removal, measured where it was).
+ * An edit script from `r` to `a` (sequences of characters): '=' a character both keep, '+' one `a` adds, '-' one `r`
+ * removes. The common start and end first, then the longest common subsequence of what is left between. Null when that
+ * middle is too large to align (ALIGN_CELLS): the change can't be placed, and the caller holds.
  */
-export function changedColumns(added: readonly string[], removed: readonly string[]): ([number, number] | null)[] {
-  if (added.length !== removed.length) return added.map(() => null);
-  const codeChars = (t: string) => codeLines(t).mask.reduce((n, m) => n + m, 0);
-  return added.map((a, k) => {
-    const r = removed[k]!;
-    if (codeChars(a) < codeChars(r)) return null;
-    let p = 0;
-    while (p < a.length && p < r.length && a[p] === r[p]) p++;
-    let s = 0;
-    while (s < a.length - p && s < r.length - p && a[a.length - 1 - s] === r[r.length - 1 - s]) s++;
-    const end = a.length - s;
-    if (p < end) return [p, end];
-    return a.length ? [Math.min(p, a.length - 1), Math.min(p, a.length - 1) + 1] : null;
-  });
+function alignChars(a: readonly string[], r: readonly string[]): string[] | null {
+  let p = 0;
+  while (p < a.length && p < r.length && a[p] === r[p]) p++;
+  let s = 0;
+  while (s < a.length - p && s < r.length - p && a[a.length - 1 - s] === r[r.length - 1 - s]) s++;
+  const am = a.slice(p, a.length - s);
+  const rm = r.slice(p, r.length - s);
+  const mid: string[] = [];
+  if (!am.length || !rm.length) {
+    for (const _ of rm) mid.push('-');
+    for (const _ of am) mid.push('+');
+  } else {
+    if ((am.length + 1) * (rm.length + 1) > ALIGN_CELLS) return null;
+    // lcs[i][j]: the longest common subsequence of am[i..] and rm[j..].
+    const w = rm.length + 1;
+    const lcs = new Int32Array((am.length + 1) * w);
+    for (let i = am.length - 1; i >= 0; i--) {
+      for (let j = rm.length - 1; j >= 0; j--) lcs[i * w + j] = am[i] === rm[j] ? lcs[(i + 1) * w + j + 1]! + 1 : Math.max(lcs[(i + 1) * w + j]!, lcs[i * w + j + 1]!);
+    }
+    let i = 0;
+    let j = 0;
+    while (i < am.length && j < rm.length) {
+      if (am[i] === rm[j]) {
+        mid.push('=');
+        i++;
+        j++;
+      } else if (lcs[(i + 1) * w + j]! >= lcs[i * w + j + 1]!) {
+        mid.push('+');
+        i++;
+      } else {
+        mid.push('-');
+        j++;
+      }
+    }
+    for (; j < rm.length; j++) mid.push('-');
+    for (; i < am.length; i++) mid.push('+');
+  }
+  return [...new Array<string>(p).fill('='), ...mid, ...new Array<string>(s).fill('=')];
 }
 
 /**
- * The characters of a changed file (its head text) a test must run code on (#784 round 8, by character, not by line):
- * on each added line, the part the change took (`cols`, else the whole line), only its code characters (codeLines'
- * mask: no whitespace, no comment); and, for a hunk that removed code and added none, the first code character at or
- * after where it was, unless that spot is inside a block comment: the code that now runs in the removed code's place,
- * never its neighbours above. Empty: nothing to measure in this file.
+ * The characters of a changed file (its head text) a test must run code on (#784 rounds 8, 9: by character, never by
+ * line). Each hunk's removed text and added lines are aligned character by character, whitespace left out (alignChars):
+ * every added character that is code at the head (codeLines' mask: no whitespace, no comment) counts; and every run of
+ * removed characters that held code counts at its own place, the first code character at or after where it was in the
+ * head (unless a removal that added nothing was inside a block comment). A shortened line, a split or joined one, a moved
+ * one, a comment or blank line added beside: each measured at the characters that changed. Null: a hunk too large to
+ * align, which the caller holds on; empty: nothing to measure in this file.
  */
-export function codeRanges(text: string, hunks: readonly ChangedHunkSpots[]): CharRanges {
+export function codeRanges(text: string, hunks: readonly ChangedHunkSpots[]): CharRanges | null {
   const { inComment, mask } = codeLines(text);
   const starts = lineStarts(text);
   const lines = starts.length - 1;
   const out: CharRanges = [];
-  // The runs of code characters in [a, b).
-  const codeIn = (a: number, b: number) => {
-    const runs: CharRanges = [];
-    for (let i = Math.max(0, a); i < Math.min(b, text.length); i++) {
-      if (!mask[i]) continue;
-      const last = runs.at(-1);
-      if (last && last[1] === i) last[1] = i + 1;
-      else runs.push([i, i + 1]);
-    }
-    return runs;
+  const blank = (c: string) => c === ' ' || c === '\t' || c === '\r' || c === '\n' || c === '\f' || c === '\v' || c === ' ' || c === '﻿';
+  const push = (i: number) => {
+    const last = out.at(-1);
+    if (last && last[1] === i) last[1] = i + 1;
+    else if (!last || last[0] !== i) out.push([i, i + 1]);
+  };
+  const codeFrom = (i: number) => {
+    let q = Math.max(0, i);
+    while (q < text.length && !mask[q]) q++;
+    return q < text.length ? q : -1;
   };
   for (const h of hunks) {
-    let added = 0;
-    h.added.forEach((l, k) => {
-      if (l < 1 || l > lines) return;
-      const [a, b] = [starts[l - 1]!, starts[l]!];
-      const c = h.cols?.[k];
-      const runs = codeIn(c ? a + c[0] : a, c ? a + c[1] : b);
-      added += runs.length;
-      out.push(...runs);
-    });
-    // A line replaced by one (paired by `cols`) is measured by what its change took on it alone: if none of that is code
-    // (a comment added at its end), it is no change to measure.
-    const paired = h.added.length > 0 && h.cols?.length === h.added.length && h.cols.every((c) => c !== null);
-    if (added || !h.removedCode || paired) continue;
-    if (h.at >= 1 && h.at <= lines && inComment[h.at - 1]) continue;
-    const from =h.at >= lines ? text.length : starts[Math.max(0, h.at)]!;
-    let p = from;
-    while (p < text.length && !mask[p]) p++;
-    if (p < text.length) out.push([p, p + 1]);
+    // The added side: its characters at the head, whitespace left out.
+    const aOff: number[] = [];
+    for (const l of h.added) {
+      if (l < 1 || l > lines) continue;
+      for (let i = starts[l - 1]!; i < starts[l]!; i++) if (!blank(text[i]!)) aOff.push(i);
+    }
+    // The removed side: its characters, and which held code (its own text lexed).
+    const rText = h.removed.join('\n');
+    const rMask = codeLines(rText).mask;
+    const rIdx: number[] = [];
+    for (let i = 0; i < rText.length; i++) if (!blank(rText[i]!)) rIdx.push(i);
+    const ops = alignChars(aOff.map((i) => text[i]!), rIdx.map((i) => rText[i]!));
+    if (!ops) return null;
+    // Where the hunk's added text ends at the head (a removal after its last character is measured from there).
+    const lastAdded = h.added.filter((l) => l >= 1 && l <= lines).at(-1);
+    const after = lastAdded !== undefined ? starts[lastAdded]! : h.at >= lines ? text.length : starts[Math.max(0, h.at)]!;
+    const pureRemoval = !h.added.length;
+    let ai = 0;
+    let ri = 0;
+    // One gap: a run of characters the change took or gave, or kept but turned from code to comment or back.
+    let addedCode = false;
+    let removedCode = false;
+    const close = () => {
+      // Code taken away and none given in its place (a removal, code commented out): measured where it was, at the
+      // first code character now there. Code given in its place is measured itself.
+      if (removedCode && !addedCode && !(pureRemoval && h.at >= 1 && h.at <= lines && inComment[h.at - 1])) {
+        const q = codeFrom(ai < aOff.length ? aOff[ai]! : after);
+        if (q >= 0) push(q);
+      }
+      addedCode = removedCode = false;
+    };
+    for (const op of ops) {
+      if (op === '=') {
+        const aCode = mask[aOff[ai]!] === 1;
+        const rCode = rMask[rIdx[ri]!] === 1;
+        if (aCode !== rCode) {
+          if (aCode) {
+            push(aOff[ai]!);
+            addedCode = true;
+          } else removedCode = true;
+        } else close();
+        ai++;
+        ri++;
+      } else if (op === '+') {
+        if (mask[aOff[ai]!]) {
+          push(aOff[ai]!);
+          addedCode = true;
+        }
+        ai++;
+      } else {
+        if (rMask[rIdx[ri]!]) removedCode = true;
+        ri++;
+      }
+    }
+    close();
   }
-  return out;
+  return out.sort((x, y) => x[0] - y[0]);
 }
 
 /** The 1-based lines `ranges` fall on (for a build's sources, which its map places by line). */
@@ -679,6 +741,8 @@ export function measureTouched(coverageDir: string, root: string, appPaths: stri
     for (const f of wanted!) {
       const text = textOf(join(realRoot, f), SCRIPT_BYTES);
       const chars = text === null ? [] : codeRanges(text, hunks[f]!);
+      // A change it can't place by character holds the PR: never measured by the whole line instead (#784 round 9).
+      if (chars === null) throw new CoverageUnreadable(UNPLACEABLE);
       changed.set(f, { chars, lines: text === null ? [] : linesOf(lineStarts(text), chars) });
     }
     if (![...changed.values()].some((s) => s.chars.length)) throw new CoverageUnreadable(NOTHING_TO_MEASURE);

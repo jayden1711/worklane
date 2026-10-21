@@ -28,7 +28,7 @@ import { instructionEvalReasons, mergeDecision, neverAutoMerge, outsidePlanReaso
 import { deferDelay, deferrable, isBehind, mergeDeferral, mergeMessage, MergePass, mergeRefusal, type Deferral } from '../merge-policy-train.js';
 import { weakeningOf } from '../merge-policy-weakening.js';
 import { baselineRunnerOne, coverageRunnerOne, PLAIN_TEST_PATH, VACUITY_UNMEASURED, vacuityCheck, type VacuityCheck } from '../merge-policy-vacuity.js';
-import { changedColumns, codeLines, CoverageUnreadable, LOAD_BUDGET_MS, readTouchedInChild, type ChangedHunkSpots, type LoadRun } from '../vacuity.js';
+import { CoverageUnreadable, LOAD_BUDGET_MS, readTouchedInChild, type ChangedHunkSpots, type LoadRun } from '../vacuity.js';
 
 /** A coverage run to make: vacuityCheck's, with the commit the PR's change is measured from (its changed lines). */
 type VacuityRun = NonNullable<VacuityCheck['run']> & { base: string };
@@ -1856,9 +1856,8 @@ export abstract class MergeFlow extends FixRuns {
   /**
    * The hunks a PR changes in each of `files` (src/coordinator/change-files.ts changedLinesCommand: renames paired,
    * whitespace and blank lines left out, hunks never joined, as text, with its guards), run as a child the coordinator
-   * awaits and a shutdown kills. Each hunk says whether the text it removed held code (codeLines); the reader process
-   * keeps the changed characters that are code (codeRanges); `cols` pairs each added line with the line it replaced,
-   * so only the part the change took is measured. A git failure throws: the run fails, and the PR waits.
+   * awaits and a shutdown kills. Each hunk carries the text it removed; the reader process aligns each hunk's removed text with its added lines by character and keeps the changed code characters
+   * (codeRanges). A git failure throws: the run fails, and the PR waits.
    */
   private async changedHunks(base: string, head: string, files: string[]): Promise<Record<string, ChangedHunkSpots[]>> {
     const signal = this.shutdown.signal;
@@ -1886,8 +1885,8 @@ export abstract class MergeFlow extends FixRuns {
     });
     const byFile = changedLineNumbers(text);
     const out: Record<string, ChangedHunkSpots[]> = {};
-    // A removal counts only where it took code away: removed lines all blank or comments make no change to measure.
-    for (const f of files) out[f] = (byFile.get(f) ?? []).map((h) => ({ at: h.at, added: h.added, removedCode: h.removed.length > 0 && codeLines(h.removed.join('\n')).code.some(Boolean), cols: changedColumns(h.addedText, h.removed) }));
+    // The reader aligns each hunk's removed text with its added lines character by character (codeRanges).
+    for (const f of files) out[f] =(byFile.get(f) ?? []).map((h) => ({ at: h.at, added: h.added, removed: h.removed }));
     return out;
   }
 
