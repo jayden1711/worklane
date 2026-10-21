@@ -17,9 +17,10 @@ import { repoRoot } from './helpers.js';
 type Job = { name?: unknown; strategy?: { matrix?: unknown } };
 
 /**
- * Every check name the workflows in `dir` can create: each job's name (its key when it has none), a matrix job
- * expanded as GitHub names it (the values substituted where the name uses them, else appended in parentheses).
- * A name this can't work out keeps an unresolved `${{` (see UNRESOLVED and mayName).
+ * Every check name the workflows in `dir` can create, as this models GitHub's naming: each job's name (its key when
+ * it has none), a matrix job expanded (the values substituted where the name uses them, else appended in
+ * parentheses), and, for a matrix job with an `if:` or `needs:`, its bare name too: a skipped one gets one check run
+ * under it (round 10). A name this can't work out keeps an unresolved `${{` (see UNRESOLVED and mayName).
  */
 function jobNames(dir: string): Set<string> {
   const out = new Set<string>();
@@ -144,6 +145,10 @@ function jobCheckNames(key: string, job: Job): Set<string> {
     if (name.includes(UNRESOLVED)) out.add(name.replace(/\$\{\{\s*matrix\.([\w-]+)\s*\}\}/gi, (m, k: string) => (vars.has(fold(k)) ? shown(vars.get(fold(k))) : m)));
     else out.add(c.size ? `${name} (${[...c.values()].map(shown).join(', ')})` : name);
   }
+  // A matrix job with an `if:` or `needs:`: GitHub evaluates them before it expands the matrix, and a job skipped
+  // there gets ONE check run under its bare name (`name:`, else the key; measured on this repo: ci-slow.yml's
+  // `bootstrap`, skipped). So it also makes its bare name (round 10). A bare name holding `${{` stays unresolved.
+  if (matrix !== undefined && Object.keys(job).some((k) => ['if', 'needs'].includes(fold(k)))) out.add(name);
   // A name holding ` / `: GitHub names a reusable workflow's jobs `<caller> / <callee job>`, which this doesn't
   // build, so a literal name of that shape may twin one (round 8). It fails closed like any unsure name.
   return new Set([...out].map((n) => (unsureName(n) || n.includes(' / ') ? `${key} (${UNRESOLVED} name ${JSON.stringify(n)} }})` : n)));
@@ -640,6 +645,44 @@ test('a job GitHub may name as a twin of another check is caught: matrix keys, n
   writeFileSync(join(ok, 'ci.yml'), BASE_CI);
   writeFileSync(join(ok, 'other.yml'), 'jobs:\n  lint:\n    strategy: { matrix: { node_v: [22, 999999999999999], os-x: [a] } }\n    runs-on: x\n');
   assert.deepEqual(checkTwins(ok, REQUIRED), [], 'lint (22, a), lint (999999999999999, a)');
+});
+
+/** BASE_CI with two plain jobs, `dco` (required) and `build` (not), for the round 10 skipped-matrix fixtures. */
+const BARE_BASE_CI = BASE_CI + '  dco:\n    runs-on: x\n  build:\n    runs-on: x\n';
+
+/**
+ * Round 10 (#746 adversarial review of f5fafeca): a matrix job with an `if:` or `needs:` that GitHub skips gets one
+ * check run under its bare name, which this didn't count. Each makes a skipped twin of a name BARE_BASE_CI makes, so
+ * checkTwins must report it. [label, file, text]; a `ci.yml` row is the whole ci.yml.
+ */
+const BARE_NAME_FIXTURES: [string, string, string][] = [
+  ['S1 a job keyed desktop, a matrix, if: false', 'other.yml', "jobs:\n  desktop:\n    if: false\n    strategy: { matrix: { v: [a] } }\n    runs-on: x\n    steps: [ { run: 'false' } ]\n"],
+  ['S1b the same, an if false on push and pull_request', 'other.yml', "jobs:\n  desktop:\n    if: github.event_name == 'schedule'\n    strategy: { matrix: { v: [a] } }\n    runs-on: x\n    steps: [ { run: 'false' } ]\n"],
+  ['S2 name: desktop, a matrix, needs: a failing job', 'other.yml', "jobs:\n  gate:\n    runs-on: x\n    steps: [ { run: 'false' } ]\n  shots:\n    name: desktop\n    needs: gate\n    strategy: { matrix: { view: [phone, tablet] } }\n    runs-on: x\n"],
+  ['S3 a job keyed build (not required), a matrix, needs: a slow job, if: false', 'other.yml', "jobs:\n  slow:\n    runs-on: x\n    steps: [ { run: 'sleep 600' } ]\n  build:\n    needs: slow\n    if: false\n    strategy: { matrix: { v: [a] } }\n    runs-on: x\n"],
+  ['S4 a job keyed dco (required), a matrix, if: false', 'other.yml', 'jobs:\n  dco:\n    if: false\n    strategy: { matrix: { v: [a] } }\n    runs-on: x\n'],
+  ['S5 in ci.yml, a second job named desktop, a matrix, if: false', 'ci.yml', BARE_BASE_CI + "  shots:\n    name: desktop\n    if: false\n    strategy: { matrix: { view: [phone] } }\n    runs-on: x\n    steps: [ { run: 'false' } ]\n"],
+  ['S6 a reusable-workflow caller keyed desktop, a matrix, if: false', 'other.yml', 'jobs:\n  desktop:\n    if: false\n    strategy: { matrix: { v: [a] } }\n    uses: ./.github/workflows/ci-slow.yml\n'],
+  ['S7 an include-only matrix, name: desktop, if: false', 'other.yml', 'jobs:\n  shots:\n    name: desktop\n    if: false\n    strategy: { matrix: { include: [ { view: phone } ] } }\n    runs-on: x\n'],
+  ['G2 a job keyed desktop, name ${{ matrix.v }}, if: false (the bare name stays unresolved)', 'other.yml', 'jobs:\n  desktop:\n    name: ${{ matrix.v }}\n    if: false\n    strategy: { matrix: { v: [phone] } }\n    runs-on: x\n'],
+];
+
+test('a skipped matrix job twins its bare name: an if: or needs: on a matrix job makes it (round 10)', () => {
+  const REQUIRED = ['desktop', 'dco', 'test (ubuntu-latest, 22)', 'test (ubuntu-latest, 24)'];
+  const base = mkdtempSync(join(tmpdir(), 'wf-'));
+  writeFileSync(join(base, 'ci.yml'), BARE_BASE_CI);
+  assert.deepEqual(checkTwins(base, REQUIRED), [], 'BARE_BASE_CI alone');
+  for (const [label, file, text] of BARE_NAME_FIXTURES) {
+    const dir = mkdtempSync(join(tmpdir(), 'wf-'));
+    writeFileSync(join(dir, 'ci.yml'), BARE_BASE_CI);
+    writeFileSync(join(dir, file), text);
+    assert.notDeepEqual(checkTwins(dir, REQUIRED), [], label);
+  }
+  // A matrix job with no if: or needs: makes only its expanded names, as before.
+  const ok = mkdtempSync(join(tmpdir(), 'wf-'));
+  writeFileSync(join(ok, 'ci.yml'), BARE_BASE_CI);
+  writeFileSync(join(ok, 'other.yml'), 'jobs:\n  desktop2:\n    name: lint\n    strategy: { matrix: { v: [a] } }\n    runs-on: x\n');
+  assert.deepEqual(checkTwins(ok, REQUIRED), [], 'lint (a) only');
 });
 
 test('a file another YAML reader may read otherwise counts as unsure: hidden line breaks, BOMs past the start, directives (round 7)', () => {
