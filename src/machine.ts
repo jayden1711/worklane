@@ -47,6 +47,11 @@ export function pluginStep(args: readonly string[], exec: Exec = defaultExec): M
   return runHelper([...args], exec);
 }
 
+/** One change to the asking coordinator's root policy.yaml through the helper: set-policy <key> <value> (src/policy-gate.ts checked its shape). */
+export function policyStep(args: readonly string[], exec: Exec = defaultExec): MachineResult {
+  return runHelper(['set-policy', ...args], exec);
+}
+
 /** Set the machine's agent slot cap (1..16) through the helper. */
 export function setSlotCap(n: number, exec: Exec = defaultExec): MachineResult {
   if (!Number.isInteger(n) || n < SLOTS_MIN || n > SLOTS_MAX) return { ok: false, error: `the slot cap must be a whole number from ${SLOTS_MIN} to ${SLOTS_MAX}, not ${n}` };
@@ -74,14 +79,6 @@ export function setUpdates(on: boolean, exec: Exec = defaultExec): MachineResult
  */
 export function claudeAccount(action: 'status', exec: Exec = defaultExec): MachineResult {
   return runHelper(['claude-account', action], exec);
-}
-
-/**
- * The account profile steps were removed (#736): refused here, the helper never run. Kept only as the name
- * src/console/root-steps.ts imports (its import line is shared with an open change); #758 drops it.
- */
-export function claudeProfile(args: readonly string[], _exec: Exec = defaultExec): MachineResult {
-  return { ok: false, error: `claude-account ${args.join(' ').slice(0, 60)}: account profiles and failover were removed (#736)` };
 }
 
 /** What the engine updater follows (scripts/machine/, the updater): signed release tags, or main's green commits. */

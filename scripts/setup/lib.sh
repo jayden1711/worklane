@@ -119,11 +119,14 @@ refuse_if_open() {
   exit 1
 }
 
-# The sudoers rule for the machine helper: each coordinator user named may run exactly the 34
+# The sudoers rule for the machine helper: each coordinator user named may run exactly the 36
 # allowed commands (set-slots 1..16, set-updates on, set-updates off, set-test-slots 1..8, claude-account status,
-# claude-account switch, install-updater, set-update-channel release, tailscale install, tailscale up, tailscale serve,
-# tailscale public-url) as root, and nothing else.
+# install-updater, set-update-channel release, tailscale install, tailscale up, tailscale serve, tailscale public-url,
+# and set-policy's three tightenings below) as root, and nothing else.
 # Listed one by one, no wildcards or patterns. Never for the dashboard viewer (wl-dash).
+# No other claude-account command (#758): switch, profile-add and login took a Claude credential (#711, #749), and
+# use, remove and failover managed the account profiles the engine no longer has (#736). The helper refuses each, and
+# no rule names one, so an older rule that did is gone on the next machine-helper.sh run (install_sudoers replaces it).
 #
 # And `add-project <name> <owner/repo>`, the one command whose arguments can't be listed: a fixed pattern of exactly
 # two arguments of those shapes (sudo's anchored regular expression, sudo 1.9.10 or later; an older sudo matches it
@@ -134,30 +137,21 @@ refuse_if_open() {
 # after the type), which the helper checks again (it decodes the key). Staging writes only the helper's pending list:
 # no rule here lets a coordinator write the updater's allowed signers file, or follow main instead of releases.
 #
-# And the agents' Claude account profiles (issue #464): `claude-account profile-add|remove <profile>` and
-# `claude-account use <profile>`, the relayed sign-in `claude-account login <profile>`, and `claude-account failover
-# <order|off> back|stay`: six anchored patterns, each one profile's name (lowercase letters, digits and dashes), or
-# an order (names joined by +: never a comma, which sudoers reads as the end of a command), and nothing else. No
-# pattern takes an instance: each step is for the asking coordinator's own instance,
-# which the helper takes from SUDO_USER, so a coordinator can never name another instance, or every instance.
-# Those, the two signer rules and add-project are written only when this machine's sudo reads them as patterns (sudo_regex_ok): an
+# The plugin steps, set-policy, the two signer rules and add-project are written only when this machine's sudo reads them as patterns (sudo_regex_ok): an
 # older sudo would take a pattern as literal text, so they are left out there, the rule says so in a comment, and
 # machine-helper.sh records it in HELPER_RULES for the dashboard (which then shows the root command instead).
 HELPER_RULES=/etc/worklane/helper-rules.json
 MACHINE_HELPER=/usr/local/libexec/worklane-machine
 MACHINE_SUDOERS=/etc/sudoers.d/worklane-machine   # what install_sudoers worklane-machine writes
 ADD_PROJECT_SUDOERS_ARGS='^add-project [a-z][a-z0-9-]* [A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9_.-]+$'
+# One key of the asking coordinator's root policy.yaml (issue #726): a key and a value of these characters; the helper
+# takes only its fixed keys, each in its exact shape, and never a loosening (src/policy-gate.ts). No instance.
+POLICY_SUDOERS_ARGS='^set-policy [a-z][a-z_.]* [a-z0-9.+-]+$'
+# Its three tightenings (the engine's HELPER_ONLY: test/policy-edit.test.ts holds them equal), each listed whole, so
+# every sudo, however old, matches them exactly, as it does set-updates off: turning auto_merge off, land_mode back to
+# pr and main_watch back to auto work from a dashboard on any sudo (#726).
+POLICY_TIGHTEN_ARGS=('set-policy auto_merge off' 'set-policy land_mode pr' 'set-policy main_watch auto')
 SIGNER_SUDOERS_ARGS='[A-Za-z0-9][A-Za-z0-9._+-]*@[A-Za-z0-9][A-Za-z0-9.-]* ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI[A-Za-z0-9+/]{43}$'
-# Whether this machine's sudo is 1.9.10 or later, the first that reads a command's arguments written ^...$ as a regular
-# expression (from `sudo -V`'s first line, "Sudo version X.Y.Z[pN]"). Unknown is no.
-PROFILE_SUDOERS_ARGS=(
-  '^claude-account profile-add [a-z][a-z0-9-]*$'
-  '^claude-account remove [a-z][a-z0-9-]*$'
-  '^claude-account use [a-z][a-z0-9-]*$'
-  '^claude-account login [a-z][a-z0-9-]*$'
-  '^claude-account failover [a-z][a-z0-9+-]* back$'
-  '^claude-account failover [a-z][a-z0-9+-]* stay$'
-)
 # The plugin steps (src/plugins/, plugins.sh): an id, and for a fetch an https URL with a commit (and a subdirectory),
 # for a stage a digest and roles. sudoers needs ':' escaped, so the patterns say '.' where the helper, which checks every
 # argument exactly again, requires 'https:' and 'sha256:'. No instance: the helper takes the asking coordinator's from SUDO_USER.
@@ -175,6 +169,8 @@ PLUGIN_SUDOERS_ARGS=(
   '^mcp-snapshot [a-z0-9][a-z0-9-]*$'
   '^mcp-stage [a-z0-9][a-z0-9-]* sha256.[0-9a-f]{64} [a-z][a-z0-9+-]* [a-z0-9*.+-]+ [A-Za-z0-9_+]+$'
 )
+# Whether this machine's sudo is 1.9.10 or later, the first that reads a command's arguments written ^...$ as a regular
+# expression (from `sudo -V`'s first line, "Sudo version X.Y.Z[pN]"). Unknown is no.
 SUDO_REGEX_MIN=1.9.10
 sudo_version() { sudo -V 2>/dev/null | sed -n 's/^Sudo version \([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\).*/\1/p' | head -n 1; }
 sudo_regex_ok() {
@@ -194,23 +190,23 @@ machine_sudoers() {
   for n in $(seq 1 16); do cmds+=("$MACHINE_HELPER set-slots $n"); done
   cmds+=("$MACHINE_HELPER set-updates on" "$MACHINE_HELPER set-updates off")
   for n in $(seq 1 8); do cmds+=("$MACHINE_HELPER set-test-slots $n"); done
-  cmds+=("$MACHINE_HELPER claude-account status" "$MACHINE_HELPER claude-account switch")
+  cmds+=("$MACHINE_HELPER claude-account status")
   cmds+=("$MACHINE_HELPER install-updater" "$MACHINE_HELPER set-update-channel release")
   # Tailscale (tailscale.sh): four fixed commands. sudo matches a listed command's arguments exactly, so none takes an
   # auth key, a flag, a URL or a port.
   cmds+=("$MACHINE_HELPER tailscale install" "$MACHINE_HELPER tailscale up" "$MACHINE_HELPER tailscale serve" "$MACHINE_HELPER tailscale public-url")
+  for n in "${POLICY_TIGHTEN_ARGS[@]}"; do cmds+=("$MACHINE_HELPER $n"); done
   if sudo_regex_ok; then
     cmds+=("$MACHINE_HELPER ^stage-update-signer $SIGNER_SUDOERS_ARGS" "$MACHINE_HELPER ^discard-update-signer $SIGNER_SUDOERS_ARGS")
-    for n in "${PROFILE_SUDOERS_ARGS[@]}"; do cmds+=("$MACHINE_HELPER $n"); done
     for n in "${PLUGIN_SUDOERS_ARGS[@]}"; do cmds+=("$MACHINE_HELPER $n"); done
-    cmds+=("$MACHINE_HELPER $ADD_PROJECT_SUDOERS_ARGS")
+    cmds+=("$MACHINE_HELPER $POLICY_SUDOERS_ARGS" "$MACHINE_HELPER $ADD_PROJECT_SUDOERS_ARGS")
   else
     signer_rules=0
   fi
-  printf '# Coordinators may change the machine slot caps and the update switch, switch the agents'"'"' Claude account, put the machine on Tailscale, add a project, and set the engine updater up (install it, follow releases, stage a release signer for an admin to confirm), through one validating helper.\n'
+  printf '# Coordinators may change the machine slot caps and the update switch, refresh the agents'"'"' Claude account status, put the machine on Tailscale, add a project, and set the engine updater up (install it, follow releases, stage a release signer for an admin to confirm), through one validating helper.\n'
   [ "$signer_rules" = 1 ] || printf '# Not here: add-project, stage-update-signer and discard-update-signer. This sudo (%s) is older than %s and would read their patterns as literal text.\n' "$(sudo_version || true)" "$SUDO_REGEX_MIN"
-  [ "$signer_rules" = 1 ] || printf '# Not here either, for the same reason: the claude-account profile commands (profile-add, use, remove, login, failover).\n'
   [ "$signer_rules" = 1 ] || printf '# Nor the plugin steps (plugin-fetch, plugin-stage, plugin-withdraw, plugin-remove, mcp-fetch, mcp-preview, mcp-snapshot, mcp-stage): plugins.sh at a root shell instead.\n'
+  [ "$signer_rules" = 1 ] || printf '# Nor set-policy: a root policy.yaml changes at a root shell instead (worklane policy set), but for its three tightenings, listed whole (auto_merge off, land_mode pr, main_watch auto).\n'
   printf 'Cmnd_Alias WORKLANE_MACHINE = %s' "${cmds[0]}"
   for n in "${cmds[@]:1}"; do printf ', \\\n    %s' "$n"; done
   local users="$1"; shift
@@ -564,6 +560,55 @@ ensure_instance_home() {
     worklane instance init "$1" --repo "$2" --github "$3" --agent-user "$agent" --agent-home "$agent_home"
   ' "$name" "$SRV_ROOT/$name/${repo#*/}" "$repo" "$(home_of "wl-$name-agent")"
 }
+
+# An instance's policy.yaml, root's (issue #726): the engine, as root, makes it root's 0644 with its content kept (read
+# without following a link the coordinator could plant), records it in $POLICY_ROOT_DIR, and prints the isolation and
+# merge keys for whoever runs setup to check. From then on the engine refuses it if it stops being root's.
+POLICY_ROOT_DIR=/etc/worklane/policy-root
+# Whether root's kill switch turns instance $1's auto_merge off, as the engine reads it (src/policy-kill.ts
+# autoMergeKilled): its id pointer <name>.id names by_id/<id>/, and any auto-merge-off* there is off. Fail closed: a
+# pointer that isn't a plain file or holds no id, an id directory missing or unlistable, or a taken-over instance (its
+# record there) with no pointer, all count as off.
+auto_merge_killed() {
+  local p="$POLICY_ROOT_DIR/$1.id" id f
+  if [ ! -e "$p" ] && [ ! -L "$p" ]; then
+    [ ! -e "$POLICY_ROOT_DIR" ] || ls -A -- "$POLICY_ROOT_DIR" >/dev/null 2>&1 || return 0
+    [ -e "$POLICY_ROOT_DIR/$1" ] && return 0
+    return 1
+  fi
+  [ -f "$p" ] && [ ! -L "$p" ] || return 0
+  id="$(head -c 64 -- "$p" 2>/dev/null | tr -d '[:space:]')" || return 0
+  [[ "$id" =~ ^[0-9a-f]{32}$ ]] || return 0
+  ls -A -- "$POLICY_ROOT_DIR/by_id/$id" >/dev/null 2>&1 || return 0
+  for f in "$POLICY_ROOT_DIR/by_id/$id"/auto-merge-off*; do
+    if [ -e "$f" ] || [ -L "$f" ]; then return 0; fi
+  done
+  return 1
+}
+# A rename's start (instance-rename.sh): instance $2's id pointer holds $1's id (made, with its spare, if $1 had none),
+# so the two names are one instance's switches: a rename never carries, forwards or moves one (#726 round 9).
+instance_alias() { "$ENGINE_CLI" policy alias "$1" "$2"; }
+# The id instance $1's pointer holds, or nothing (instance-remove.sh: its id directory goes once no pointer names it).
+instance_id_of() { local id; id="$(head -c 64 -- "$POLICY_ROOT_DIR/$1.id" 2>/dev/null | tr -d '[:space:]')" || true; [[ "$id" =~ ^[0-9a-f]{32}$ ]] && echo "$id"; return 0; }
+# Whether any instance's pointer still names id $1.
+id_in_use() { local f; for f in "$POLICY_ROOT_DIR"/*.id; do [ -f "$f" ] && [ "$(head -c 64 -- "$f" | tr -d '[:space:]')" = "$1" ] && return 0; done; return 1; }
+# Never with a flag: the machine helper reaches this as root (add-project's rerun), so it takes over only what the
+# coordinator could have set itself, or what root wrote; anything else is an admin's, at a root shell, with one of
+# policy own's flags, which no script here passes. test/policy-edit.test.ts holds this line, and that, as they are.
+own_policy() { "$ENGINE_CLI" policy own "$1"; }
+# A rename (instance-rename.sh): when the old name's policy.yaml was root's, the new name's is too, its content as
+# carried. The old name's record goes under the new name first, so `policy own` takes the carried file as content root
+# wrote (its sha256 is the record's), with no flag; one that changed since root wrote it is refused, the rename stops.
+# Root's auto_merge kill switches need nothing here: both names share one id from the rename's start (instance_alias).
+carry_policy_root() {
+  [ -f "$POLICY_ROOT_DIR/$1" ] || return 0
+  install -m 0644 "$POLICY_ROOT_DIR/$1" "$POLICY_ROOT_DIR/$2"
+  own_policy "$2"
+}
+# Whether instance $1's policy.yaml ($2) is root's already, as recorded: a regular file root's, 0644, one name, and the
+# engine's own gate would read it (`policy check`: the recorded file, with what root last wrote there). So the policy
+# step is done exactly when the coordinator can start on it; an earlier root file put back runs the step again.
+policy_root_ok() { [ -f "$POLICY_ROOT_DIR/$1" ] && [ ! -L "$2" ] && [ "$(stat -c '%u %a %h' -- "$2" 2>/dev/null)" = "0 644 1" ] && "$ENGINE_CLI" policy check "$1" >/dev/null 2>&1; }
 
 # Every user an instance's agents or evals run as (each coordinator's instance.yaml run_as), one per line: never
 # a GPU lock's holder (testrun-gpu.sh) or a member of the GPU's device group (gpu-devices.sh).

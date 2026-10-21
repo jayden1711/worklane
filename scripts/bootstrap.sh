@@ -30,10 +30,13 @@
 #                                                 mode (it makes the sign-in App) at the https origin (from
 #                                                 Tailscale or --public-url); with no origin yet, the same page on
 #                                                 http://127.0.0.1:4399/, with the ssh -L line that reaches it
-#                                                 (its App step shows Tailscale and HTTPS first); then the hub's
+#                                                 (its App step offers the origin: your own, or Tailscale); then the hub's
 #                                                 first-run wizard. No key or token in it: the page asks, from a
 #                                                 0600 file. When nothing answers, no URL: the reason, the fix,
 #                                                 exit 4.
+#                                                 The instance's credentials, checkout and service: Add project,
+#                                                 add-project.sh at a root shell for the machine's first project
+#                                                 (the dashboard's Add project for the ones after it).
 #                                                 This is server mode (--mode server alone points here).
 #
 # Nothing is piped from the network into a shell. Everything it downloads is pinned and checked: Node.js and
@@ -266,8 +269,11 @@ dashboard_next() {
       setup_serves --loopback || setup_step "dashboards.sh --setup --loopback"
       say "the dashboard: everything after this first install happens there"
       echo "   No sign-in App yet, and no https origin for it: the hub's setup mode answers on this machine only (port $HUB_PORT)."
-      echo "   Its sign-in App step needs the https origin first: the page shows Tailscale and HTTPS (screen 7) and how;"
-      echo "   run this again once that's done, and setup mode moves to the origin, where the App step goes on."
+      # WHY (#739): the origin is a choice (your own, or Tailscale), not a Tailscale prerequisite.
+      echo "   Its sign-in App step needs an https origin first, and you choose it. Your own: a name of yours whose https"
+      echo "   server forwards to port $HUB_PORT here; run this again with --public-url and that origin. Or Tailscale:"
+      echo "   the page shows Tailscale and HTTPS (screen 7) and how; run this again once that's done. Either way setup"
+      echo "   mode moves to the origin, where the App step goes on."
       echo "   From your own computer, first: ssh -L $HUB_PORT:127.0.0.1:$HUB_PORT $(ssh_target)"
       echo "   The page asks for a one-time setup token: sudo cat $hub_state/setup-token on this machine (it is never"
       echo "   printed, logged or put in a link)."
@@ -376,12 +382,18 @@ if [ "$HARDENED" = 1 ]; then
     [ "$rc" = 0 ] || exit "$rc"
   done
   if [ "$AFTER_CREDENTIALS" = 0 ]; then
-    say "next, by hand: the instance's credentials"
-    echo "   bash scripts/setup/credentials.sh $NAME github-app <app-id> <installation-id> <key.pem> $GITHUB"
-    echo "   claude setup-token   (on a machine signed in to the Claude account the agents should use), then"
-    echo "   bash scripts/setup/credentials.sh $NAME claude   (paste the token it printed; it is not shown)"
-    echo "   then: sudo bash scripts/bootstrap.sh --hardened --after-credentials $NAME $GITHUB"
-    echo "   (docs/separate-users.md has the details)"
+    # WHY (#739): one answer for the instance's credentials, the same steps as the dashboard's: Add project. It makes the
+    # agents' App through GitHub's manifest flow only, waits for root to install the agents' Claude login, then the
+    # checkout and the service. Never an App made by hand or a token pasted here. --after-credentials stays, for an
+    # install whose credentials were stored by hand.
+    # A machine's first project has no dashboard of its own yet (the hub runs with no instance, and Add project's page
+    # is an instance dashboard's): the root shell leads; the dashboard's Add project is for the projects after it.
+    say "next: Add project, for $NAME's credentials, checkout and service"
+    echo "   At a root shell on this machine (a machine's first project has no dashboard of its own to do it from yet):"
+    echo "   sudo bash scripts/setup/add-project.sh $NAME $GITHUB"
+    echo "   It makes the agents' GitHub App through GitHub's manifest flow (installed on $GITHUB only), waits for the"
+    echo "   agents' Claude login, then sets up the checkout and starts the service; run it again after a wait or a stop."
+    echo "   Later projects: the dashboard's Setup console's Add project, once you are signed in."
   fi
   dashboard_next
   exit 0

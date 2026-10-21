@@ -12,6 +12,7 @@ import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { createContext, runInContext } from 'node:vm';
 import { BRAND } from '../src/brand.js';
 import { findChrome, sleep, until, type Cdp } from '../src/browser/cdp.js';
 import { loadConfig } from '../src/config/load.js';
@@ -23,6 +24,54 @@ import { asDevicePerson, exampleProject, exampleRoles, machineOwnersFile, repoRo
 
 /** How long a page waits for the usage's first answer (web/src/components/Usage.tsx USAGE_WAIT_MS; checked below). */
 const USAGE_WAIT_MS = 3_000;
+
+/** The performance mark the page sets where its wait for the usage begins (web/src/components/Usage.tsx USAGE_WAIT_MARK; checked below). */
+const USAGE_WAIT_MARK = 'usage-wait-start';
+
+/**
+ * What the page's own clock saw (performance.now(), from its navigation start): each USAGE_WAIT_MARK the page set
+ * (where its wait began), and when the page first showed (null: never).
+ */
+export interface UsageWaitSeen {
+  marks: number[];
+  shownAt: number | null;
+}
+
+/**
+ * Whether the page waited for the usage, measured on the page's own clock from the moment its wait began (#865).
+ * WHY: the test's clock started only once its poll saw the request held, which comes after the page's timer starts
+ * (its hub wait, the request's dispatch, the poll's lag between), so a loaded runner measured a correct page short
+ * (2476 ms in a release run). Here the start is the page's own mark where its wait begins, so load can only make the
+ * wait longer. Only that mark counts, never a timer of the same length (the event stream's reconnect waits 3000 ms
+ * too, as the server's `retry` says), so no other timer can stand in for the wait. The latest mark set before the
+ * page showed is the wait then running: a page that shows before it is up, or set no mark, fails; one that never
+ * shows, or past `longest`, fails too. `tolerance` covers only the page clock's coarseness, not load.
+ */
+export function usageWaitVerdict(seen: UsageWaitSeen, o: { waitMs: number; tolerance: number; longest: number }): { ok: true; waited: number } | { ok: false; why: string } {
+  const { shownAt } = seen;
+  if (shownAt === null) return { ok: false, why: 'the page never showed' };
+  const before = seen.marks.filter((m) => m <= shownAt);
+  if (!before.length) return { ok: false, why: `the page showed at ${Math.round(shownAt)} ms with no ${USAGE_WAIT_MARK} mark before it (marks: ${JSON.stringify(seen.marks)})` };
+  const waited = shownAt - Math.max(...before);
+  if (waited < o.waitMs - o.tolerance) return { ok: false, why: `the page showed ${Math.round(waited)} ms after its wait began, before its ${o.waitMs} ms wait was up` };
+  if (waited > o.longest) return { ok: false, why: `the page showed ${Math.round(waited)} ms after its wait began, past ${o.longest} ms` };
+  return { ok: true, waited };
+}
+
+/** In the page, from before its own scripts: records when `shown` first matches (UsageWaitSeen's shownAt). */
+const WATCH_SHOWN = (shown: string) => `(() => {
+  window.__shownAt = null;
+  const look = () => {
+    if (window.__shownAt !== null || !document.querySelector(${JSON.stringify(shown)})) return;
+    window.__shownAt = performance.now();
+    watch.disconnect();
+  };
+  const watch = new MutationObserver(look);
+  watch.observe(document, { childList: true, subtree: true, attributes: true });
+})()`;
+
+/** In the page, afterwards: what it saw (UsageWaitSeen). */
+const READ_USAGE_WAIT = `({ marks: performance.getEntriesByName(${JSON.stringify(USAGE_WAIT_MARK)}, 'mark').map((m) => m.startTime), shownAt: window.__shownAt ?? null })`;
 
 realChromeTests();
 const chrome = findChrome(process.env.CHROME);
@@ -274,15 +323,19 @@ test(
     try {
       const cdp = b.cdp;
       await openTab(cdp, d.token);
+      const shown = '[data-testid="page-inbox"] [data-decision="d-old-prose"]';
+      await cdp.send('Page.addScriptToEvaluateOnNewDocument', { source: WATCH_SHOWN(shown) });
       const answers = await intercept(cdp, { '/api/usage': null });
       answers.hold('/api/usage');
       await cdp.send('Page.navigate', { url: `${d.url}/inbox` });
       await until('/api/usage asked for', async () => answers.held('/api/usage'), 20_000);
-      const asked = Date.now();
-      // Never let through: the page shows anyway, once the wait is up (and a loaded runner's slack).
-      await until('the Inbox, with the usage still unanswered', () => js<boolean>(cdp, `!!document.querySelector('[data-testid="page-inbox"] [data-decision="d-old-prose"]')`), USAGE_WAIT_MS + 5_000, 100);
+      // Never let through: the page shows anyway, once the wait is up. The upper bound on the test's clock starts
+      // after the page's wait began, so it is at least this long on the page's.
+      await until('the Inbox, with the usage still unanswered', () => js<boolean>(cdp, `!!document.querySelector(${JSON.stringify(shown)})`), USAGE_WAIT_MS + 5_000, 100);
       assert.ok(answers.held('/api/usage'), 'the usage request is still unanswered');
-      assert.ok(Date.now() - asked >= USAGE_WAIT_MS - 500, `the page waited for the usage (${Date.now() - asked} ms)`);
+      // #865: the lower bound on the page's own clock, from its own wait's start (load can't shorten it).
+      const verdict = usageWaitVerdict(await js<UsageWaitSeen>(cdp, READ_USAGE_WAIT), { waitMs: USAGE_WAIT_MS, tolerance: 50, longest: USAGE_WAIT_MS + 5_000 });
+      assert.ok(verdict.ok, `the page waited for the usage: ${verdict.ok ? '' : verdict.why}`);
       await answers.stop();
     } finally {
       await b.close();
@@ -350,4 +403,108 @@ test('intercept: stop() sends every answer on its way before turning interceptio
   paused!({ requestId: 'b', request: { url: 'http://127.0.0.1/api/x' } }); // paused just as stop() began
   await stopped;
   assert.deepEqual(late, [], 'no Fetch call reached Chrome after interception was turned off');
+});
+
+// #865: the real-Chrome test's lower bound, on the page's own clock. Times are ms from the page's navigation start.
+const WAIT = { waitMs: USAGE_WAIT_MS, tolerance: 50, longest: USAGE_WAIT_MS + 5_000 };
+
+test('usageWaitVerdict: a correct page under a 1 s hub delay on a loaded runner passes; the old clock failed it (#865)', () => {
+  // Loaded: the page's timer starts at 800 ms; its hub answers 1 s later, so /api/usage goes at 1800; the test's
+  // poll sees it held at 2100; the timer fires at 3800 and the page shows at 3830.
+  const markAt = 800;
+  const heldSeen = 2100;
+  const shownAt = 3830;
+  const v = usageWaitVerdict({ marks: [markAt], shownAt }, WAIT);
+  assert.deepEqual(v, { ok: true, waited: 3030 });
+  // The old bound (from when the test saw the request held, with 500 ms slack) measured the same page short.
+  assert.ok(shownAt - heldSeen < USAGE_WAIT_MS - 500, 'the old clock failed this correct page');
+});
+
+test('usageWaitVerdict: a page that shows before its wait is up fails, whatever the load (#865)', () => {
+  // Its wait began, but the page showed 50 ms later.
+  assert.match((usageWaitVerdict({ marks: [800], shownAt: 850 }, WAIT) as { why: string }).why, /50 ms after its wait began, before its 3000 ms wait/);
+  // Even after a slow load: shown 3500 ms after navigation, only 100 ms after its wait began.
+  assert.equal(usageWaitVerdict({ marks: [3400], shownAt: 3500 }, WAIT).ok, false);
+  // Short by more than the clock's tolerance.
+  assert.equal(usageWaitVerdict({ marks: [800], shownAt: 800 + USAGE_WAIT_MS - 51 }, WAIT).ok, false);
+  // No mark: whatever else the page waited on, the wait for the usage isn't known to have begun.
+  assert.match((usageWaitVerdict({ marks: [], shownAt: 850 }, WAIT) as { why: string }).why, /no usage-wait-start mark before it/);
+  // A wait begun only after it showed doesn't count for it.
+  assert.equal(usageWaitVerdict({ marks: [900], shownAt: 850 }, WAIT).ok, false);
+  // Begun twice (the wait started again): the later one is the wait then running, so the earlier can't excuse it.
+  assert.equal(usageWaitVerdict({ marks: [0, 3000], shownAt: 3100 }, WAIT).ok, false);
+});
+
+test('usageWaitVerdict: a page that never shows, or shows past the upper bound, fails (#865)', () => {
+  assert.deepEqual(usageWaitVerdict({ marks: [800], shownAt: null }, WAIT), { ok: false, why: 'the page never showed' });
+  assert.match((usageWaitVerdict({ marks: [800], shownAt: 800 + USAGE_WAIT_MS + 5_001 }, WAIT) as { why: string }).why, /past 8000 ms/);
+  // A wait begun again only after the page showed (a remount) isn't the wait it showed after.
+  assert.deepEqual(usageWaitVerdict({ marks: [0, 3_100], shownAt: 3_050 }, WAIT), { ok: true, waited: 3_050 });
+  // At the bounds exactly: passes.
+  assert.equal(usageWaitVerdict({ marks: [800], shownAt: 800 + USAGE_WAIT_MS - 50 }, WAIT).ok, true);
+  assert.equal(usageWaitVerdict({ marks: [800], shownAt: 800 + USAGE_WAIT_MS + 5_000 }, WAIT).ok, true);
+});
+
+test('Usage.tsx marks USAGE_WAIT_MARK right where its wait for the usage starts its timer (#865)', () => {
+  const src = readFileSync(join(repoRoot, 'web', 'src', 'components', 'Usage.tsx'), 'utf8');
+  assert.match(src, new RegExp(`export const USAGE_WAIT_MARK = '${USAGE_WAIT_MARK}';`), "the test's mark is the page's");
+  assert.match(src, /performance\.mark\(USAGE_WAIT_MARK\);\n\s*const bound = window\.setTimeout\(\(\) => setAnswered\(true\), USAGE_WAIT_MS\);/, 'the mark is set just as the timer starts');
+});
+
+/** The page-side scripts against a stand-in page (no Chrome here): a clock, marks, the shown element and the observer. */
+function standInPage() {
+  const page = { now: 0, present: false, marks: [] as number[], watching: null as (() => void) | null };
+  const ctx = createContext({
+    performance: {
+      now: () => page.now,
+      getEntriesByName: (name: string, type: string) => (name === USAGE_WAIT_MARK && type === 'mark' ? page.marks.map((startTime) => ({ startTime })) : []),
+    },
+    document: { querySelector: (s: string) => (page.present && s === '#shown' ? {} : null) },
+    MutationObserver: class {
+      constructor(fn: () => void) {
+        page.watching = fn;
+      }
+      observe() {}
+      disconnect() {
+        page.watching = null;
+      }
+    },
+  });
+  ctx.window = ctx;
+  runInContext(WATCH_SHOWN('#shown'), ctx);
+  const read = () => JSON.parse(JSON.stringify(runInContext(READ_USAGE_WAIT, ctx))) as UsageWaitSeen;
+  return { page, read };
+}
+
+test('the page-side watch records when the page shows, and the read gives its marks with it, as usageWaitVerdict reads them (#865)', () => {
+  const { page, read } = standInPage();
+  page.now = 5;
+  page.marks.push(5);
+  page.watching!(); // a change before the page shows: nothing recorded
+  assert.deepEqual(read(), { marks: [5], shownAt: null });
+  page.now = 3_020;
+  page.present = true;
+  page.watching!();
+  assert.equal(page.watching, null, 'it stops watching once the page shows');
+  page.now = 9_000;
+  assert.deepEqual(read(), { marks: [5], shownAt: 3_020 });
+  assert.deepEqual(usageWaitVerdict(read(), WAIT), { ok: true, waited: 3_015 });
+});
+
+test('usageWaitVerdict: another 3000 ms timer (the event stream reconnecting) never stands in for the wait (#865 review)', () => {
+  // The decoy: the page's usage wait isn't marked (not begun, or no longer a marked wait); the event stream fails
+  // at 100 ms and its reconnect timer waits the server's `retry: 3000`; the page shows at 3200. It must fail.
+  const decoy = standInPage();
+  decoy.page.now = 3_200;
+  decoy.page.present = true;
+  decoy.page.watching!();
+  assert.deepEqual(decoy.read(), { marks: [], shownAt: 3_200 });
+  assert.match((usageWaitVerdict(decoy.read(), WAIT) as { why: string }).why, /no usage-wait-start mark before it/);
+  // And the stream reconnecting 1 s before a correct page shows changes nothing: only the mark counts.
+  const correct = standInPage();
+  correct.page.marks.push(800);
+  correct.page.now = 3_830;
+  correct.page.present = true;
+  correct.page.watching!();
+  assert.deepEqual(usageWaitVerdict(correct.read(), WAIT), { ok: true, waited: 3_030 });
 });
