@@ -433,15 +433,18 @@ const isWordChar = (c: string) => (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z
  * literal that holds a quote, is read as what it is. Comments and the text of strings, templates and regex literals are
  * left out (the quotes and slashes are kept).
  *
- * It decides a regex literal against a division only where that is certain (#886's round 6): a `/` starts a regex
- * literal where an operand must come next (after `(`, `,`, `=`, `=>`, `:`, `;`, `[`, `{`, `?`, `&`, `|`, `*`, `%`, `^`,
- * `<`, a binary `+` or `-`, a unary `+`, `-`, `!` or `~` where an operand was expected, the `)` of `if`, `while`, `for`,
- * `for await` or `with`, or a reserved word that only comes before an expression), and is a division right after an
- * operand ends on the same line (a name, a number, a string, a regex literal, `]`). Everywhere else, it can't place
- * it: after `}`, any other `)` or one with no `(`, a `>` that may close type arguments, `++` or `--`, TS's non-null
- * `x!`, a contextual word, `.`, or an operand on an earlier line (a semicolon may be inserted). There, and where a
- * string or regex runs off its line, it stops reading and every later character, of every later line, is code:
- * unsure reads as code, so what it holds waits. One pass, no regex.
+ * It aims to decide a regex literal against a division only where that is certain (#886's rounds 6 and 7), and each
+ * round's review has found a shape where it wasn't: what it reads is hardened by its tests, not proven. A `/` starts a
+ * regex literal where an operand must come next (after `(`, `,`, `=`, `=>`, `:`, `;`, `[`, `{`, `?`, `&`, `|`, `*`,
+ * `%`, `^`, `<`, a binary `+` or `-`, a unary `+`, `-`, `!` or `~` where an operand was expected, the `)` of `if`,
+ * `while`, `for`, `for await` or `with`, or a reserved word that only comes before an expression), and is a division
+ * right after an operand ends on the same line (a name, a number, a string, a regex literal, `]`). A word after a
+ * member `.` or `#` is a name, never a keyword; one after a spread's `...` is read as it stands. Everywhere else, it
+ * can't place it: after `}`, any other `)` or one with no `(`, a `>` that may close type arguments, `++` or `--`, TS's
+ * non-null `x!`, a contextual word, `.`, or an operand on an earlier line (a semicolon may be inserted). It also
+ * can't read a character outside printable ASCII, or whitespace other than a space, tab, CR or LF, outside a string
+ * or comment. There, and where a string or regex runs off its line, it stops reading and every later character, of
+ * every later line, is code: unsure reads as code, so what it holds waits. One pass, no regex.
  */
 export function codeLinesOf(text: string): string[] {
   const out: string[] = [];
@@ -462,6 +465,7 @@ export function codeLinesOf(text: string): string[] {
   let word = '';
   let wordBefore = '';
   let wordAfterDot = false;
+  let lastDotSpread = false;
   // (Asserted, so the checks below read what sig set, not the start value.)
   let state = 'expected' as 'expected' | 'ended' | 'unknown';
   let lineSince = false;
@@ -495,7 +499,7 @@ export function codeLinesOf(text: string): string[] {
     if (OTHER_LINE_END.has(c)) {
       if (mode === 'code' || mode === 'line-comment' || mode === 'block-comment') lineSince = true;
       if (mode === 'line-comment') mode = 'code';
-      else if (mode === 'regex' || mode === 'class' || ((mode === "'" || mode === '"') && c === String.fromCharCode(13))) {
+      else if (mode === 'regex' || mode === 'class' || ((mode === "'" || mode === '"') && c === String.fromCharCode(13)) || (mode === 'code' && c !== String.fromCharCode(13))) {
         unsure = true;
         line += c;
       }
@@ -555,6 +559,15 @@ export function codeLinesOf(text: string): string[] {
       mode = 'line-comment';
       continue;
     }
+    // A character it doesn't read (#886's round 7): one outside printable ASCII (a name with a letter outside ASCII, a zero-width
+    // joiner, a no-break space, a byte order mark), or whitespace other than a space or tab (a form feed, a vertical
+    // tab). It can't tell what such a name or space makes of the words around it: unsure.
+    const code = c.charCodeAt(0);
+    if (code > 0x7e || (code < 0x20 && c !== '\t')) {
+      unsure = true;
+      line += c;
+      continue;
+    }
     if (text.startsWith('<!--', k) || text.startsWith('-->', k)) {
       unsure = true;
       line += c;
@@ -606,9 +619,10 @@ export function codeLinesOf(text: string): string[] {
     } else if (c === ']') sig(c, '', 'ended');
     else if (isWordChar(c)) {
       const extends_ = k > 0 && isWordChar(text[k - 1]!) && isWordChar(last);
-      // A word after a `.` is a property (`x.in / 2`, `o.if(4)`), never a keyword.
+      // A word after a member `.` is a property (`x.in / 2`, `o.if(4)`), and one after `#` a private name
+      // (`this.#if(4)`): never a keyword. One after a spread's `...` is read as it stands (`[...typeof /re/]`).
       if (!extends_) {
-        wordAfterDot = last === '.';
+        wordAfterDot = (last === '.' && !lastDotSpread) || last === '#';
         wordBefore = isWordChar(last) ? word : '';
       }
       const w = extends_ ? word + c : c;
@@ -621,8 +635,12 @@ export function codeLinesOf(text: string): string[] {
       // A unary operator where an operand was expected: one still is. After an operand (TS's non-null `x!`), or after
       // anything it can't place: it can't tell.
       sig(c, '', state === 'expected' ? 'expected' : 'unknown');
-    }
-    else if (c === '>') {
+    } else if (c === '.') {
+      // A spread's `...` or a member's `.`: what follows a spread is read as it stands. A `/` right after either one
+      // can't be placed.
+      lastDotSpread = text[k - 1] === '.' || text[k + 1] === '.';
+      sig(c, '', 'unknown');
+    } else if (c === '>') {
       // `=>`: a body comes next. Any other `>` may close type arguments (`N<string> / 2`).
       sig(c, '', text[k - 1] === '=' ? 'expected' : 'unknown');
     } else if ('(,=:;[{?&|*%^<'.includes(c)) sig(c, '', 'expected');
@@ -645,13 +663,16 @@ const DECLARES_NEXT = /(?<![\w$])(?:const|let|var|function|class)$/;
  * locals (`localNames`: Node has neither global, and a file's own `const self` is common). `global` and `globalThis`
  * always count.
  */
-function usesGlobalName(code: string, localNames: ReadonlySet<string>): boolean {
+function usesGlobalName(code: string, localNames: ReadonlySet<string>, previous: string): boolean {
   for (const m of code.matchAll(GLOBAL_NAME)) {
     const name = m[0];
     const before = code.slice(0, m.index).trimEnd();
     const after = code.slice(m.index + name.length).trimStart();
-    if (before.endsWith('.')) continue;
-    if ((before === '' || before.endsWith('{') || before.endsWith(',')) && after.startsWith(':')) continue;
+    if (before.endsWith('.') && !before.endsWith('...')) continue;
+    // A key after `{` or `,`; first on its line, only when the code line before ends in one (a ternary's middle
+    // operand `? \n globalThis : 0` is no key, #886's round 7).
+    const keyPlace = before === '' ? previous.endsWith('{') || previous.endsWith(',') : before.endsWith('{') || before.endsWith(',');
+    if (keyPlace && after.startsWith(':')) continue;
     if (DECLARES_NEXT.test(before)) continue;
     if ((name === 'self' || name === 'window') && localNames.has(name)) continue;
     return true;
@@ -966,9 +987,12 @@ export function weakeningReasons(i: WeakeningInput): string[] {
     // JSX text isn't JS: in a .jsx or .tsx file every line reads as code.
     const code = /\.[jt]sx$/.test(p) ? lines : codeLinesOf(text);
     const localNames = new Set(code.flatMap((c) => [...c.matchAll(LOCAL_SELF)].map((m) => m[1]!)));
+    // The code line before each line that has code (for a key first on its line).
+    let previous = '';
     lines.forEach((l, k) => {
       const c = code[k] ?? l;
-      if (added.has(l) && (c.includes('\\u') || namelessDeclaration(c) || usesGlobalName(c, localNames) || computedStringKey(c))) hit('table-hidden', p, l.trim());
+      if (added.has(l) && (c.includes('\\u') || namelessDeclaration(c) || usesGlobalName(c, localNames, previous) || computedStringKey(c))) hit('table-hidden', p, l.trim());
+      if (c.trim()) previous = c.trimEnd();
     });
   }
 
