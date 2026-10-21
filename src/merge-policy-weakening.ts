@@ -209,7 +209,7 @@ export const GUARD_FILES: readonly string[] = [
   'src/push-check*',
   'src/review.ts',
   // What the planners' decisions index reads, and what it leaves out (#920): records committed at the base, never
-  // docs/process.md; the routes it doesn't close are listed under "Open routes into the decisions index" there.
+  // docs/process.md; known routes it doesn't close are under "Open routes into the decisions index" there (#975).
   'src/plan-decisions.ts',
   'src/path-text.ts',
   'src/guardrails/**',

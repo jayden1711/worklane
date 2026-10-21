@@ -90,10 +90,10 @@ function headingAliases(file: string, heading: string): string[] {
  * or folder entry that is this file under another name (a symlink, a hard link) is not indexed, so a plan can't cite
  * it to let the engine merge more. This code can't recognise a copy of the page's text under another name, whole, in
  * part or reworded. Instead it indexes only records committed at the plan's base (committedRecords), and in the
- * engine's repo every decision record path, and this file, is self-modification (src/review.ts): a copy reaches the
- * index only through a PR that adds or changes a committed record, which waits like the page itself.
- * That holds except through the open routes (for example #962, who picks the base), which are listed once, under
- * "Open routes into the decisions index" in docs/process.md.
+ * engine's repo every decision record path, and this file, is self-modification (src/review.ts): a PR that brings a
+ * copy into a committed record waits like the page itself. That PR is not the only way in: the known open routes
+ * (for example #962, who picks the base) are under "Open routes into the decisions index" in docs/process.md, and
+ * that list is not proven complete (#975).
  */
 export const PROCESS_DOC = 'docs/process.md';
 
