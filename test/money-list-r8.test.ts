@@ -32,7 +32,9 @@ test('#763 round 8: a mechanical regex line with a / inside a class converts who
 test('#763 round 8: what only this version counts as money doesn\'t lower a level: a large change under a glob line beside a regex stays L2', () => {
   // Main read only the regex here; the glob line is read since round 6. This review.yaml doesn't list money-path.
   const cfg = ReviewConfig.parse({ version: 1, levels: { ...LEVELS, L3_human: { when: ['auth'], over_lines: 800 } } });
-  const money = moneyListEntries('export const MONEY = [\n  /^ledger\\//,\n  billing/**\n];');
+  // (Round 11: the list's code line `export const MONEY = [` is refused now, which holds everything at L3; the list
+  // here is the array's body, as money_path_source.pattern selects it, so the level shows what this test is about.)
+  const money = moneyListEntries('  /^ledger\\//,\n  billing/**\n');
   const files: ChangeFile[] = Array.from({ length: 11 }, (_, i) => ({ path: `billing/f${i}.ts`, added: 1, removed: 0 }));
   const level = computeLevel({ files, labels: [], moneyPaths: money, scope: undefined }, cfg);
   assert.equal(level.level, 'L2');
@@ -54,6 +56,6 @@ test('#763 round 8: a trailing // comment is taken off; a trailing , or ;, a lea
     assert.deepEqual(moneyListProblems(back), [], `${line} -> ${problems[0]!.suggestion}`);
     assert.equal(isMoney('src/billing/x.ts', back), true, `${line} -> ${problems[0]!.suggestion}`);
   }
-  // Beside regexes (code), a // comment line is code, not refused.
-  assert.deepEqual(moneyListProblems(moneyListEntries('const MONEY = [\n//payments\n/^ledger\\//,\n];')), []);
+  // A line that starts with // is a comment line (round 11: in every list), not refused; a code line is (round 11).
+  assert.deepEqual(moneyListProblems(moneyListEntries('const MONEY = [\n//payments\n/^ledger\\//,\n];')).map((p) => p.line), ['const MONEY = [']);
 });

@@ -54,13 +54,16 @@ test('#763: a line is a regex only as a /.../flags token; src/payments/** is a g
   assert.deepEqual(read('const MONEY = [/^src\\/payments\\//, /invoice/];'), ['refused const MONEY = [/^src\\/payments\\//, /invoice/];', '/^src\\/payments\\//', '/invoice/']);
   // Beside a regex line, a glob line without a space is read as a glob too (main read only the regex).
   assert.deepEqual(read('/invoice/\nbilling/**'), ['**invoice**', 'billing/**']);
-  // There, a list item is refused rather than skipped as code (round 7), and code stays code.
-  assert.deepEqual(read('const MONEY = [\n/invoice/,\n- billing/**\n];'), ['**invoice**', 'refused - billing/**']);
+  // There, a list item is refused rather than skipped as code (round 7). Round 11 (the coordinator's decision: no line
+  // is dropped): a code line with a blank is refused too, never skipped; a line of only brackets is blank.
+  assert.deepEqual(read('const MONEY = [\n/invoice/,\n- billing/**\n];'), ['refused const MONEY = [', '**invoice**', 'refused - billing/**']);
 });
 
 test('#763: doctor\'s list names each refused line with a suggested glob; a converted list has none', () => {
   assert.deepEqual(moneyListProblems(moneyListEntries('/billing/i\npayments/**\n/migrations\\/\\d+_rates/')), [
-    { line: '/billing/i', why: 'its flags (i) ask for more than a glob says (a glob matches case as written)', suggestion: '**billing**' },
+    // Round 11: under the i flag each ASCII letter is `?`, so the suggestion matches every case the regex does (it
+    // was `**billing**`, which missed `src/Billing/x.ts`: the round-10 review).
+    { line: '/billing/i', why: 'its flags (i) ask for more than a glob says (a glob matches case as written)', suggestion: '**???????**' },
     { line: '/migrations\\/\\d+_rates/', why: '"\\d+_rates" has no mechanical glob form', suggestion: '**migrations/**_rates**' },
   ]);
   assert.deepEqual(moneyListProblems(moneyListEntries('/^src\\/payments\\//\nbilling/**')), []);
@@ -79,7 +82,7 @@ test('#763: doctor\'s money-list check fails on each refused line with its sugge
   commit('/billing/i\npayments/**\n');
   assert.deepEqual(moneyListCheck(dir, src, 'HEAD'), {
     level: 'fail',
-    detail: `/billing/i isn't a glob (its flags (i) ask for more than a glob says (a glob matches case as written)): every PR waits until it is rewritten as globs, for example **billing**\neach line is read whole (a comment is ${MONEY_COMMENT_SYNTAX})`,
+    detail: `/billing/i isn't a glob (its flags (i) ask for more than a glob says (a glob matches case as written)): every PR waits until it is rewritten as globs, for example **???????**\neach line is read whole (a comment is ${MONEY_COMMENT_SYNTAX})`,
   });
   commit('/^src\\/payments\\//\nbilling/**\n');
   assert.equal(moneyListCheck(dir, src, 'HEAD').level, 'ok');
@@ -125,6 +128,6 @@ test('#763: a refused line holds every change as not compared, naming the line, 
     const level = computeLevel({ files, labels: [], moneyPaths: money, scope: undefined }, REVIEW);
     assert.equal(level.level, 'L3');
     assert.ok(level.categories['money-path']?.includes(path), path);
-    assert.ok(level.reasons.some((r) => r.includes('not compared: the money list\'s line "/billing/i" isn\'t a glob') && r.includes('for example **billing**')), level.reasons.join('\n'));
+    assert.ok(level.reasons.some((r) => r.includes('not compared: the money list\'s line "/billing/i" isn\'t a glob') && r.includes('for example **???????**')), level.reasons.join('\n'));
   }
 });

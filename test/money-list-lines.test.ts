@@ -123,8 +123,10 @@ test('#763 round 7: a trailing comment, and quotes around the whole glob, are ta
     for (const path of ['billing.ts', 'lib/pay.ts']) assert.equal(judge(path, money).money, true, `${JSON.stringify(text)}: ${path}`);
     assert.deepEqual([judge('lib/other.ts', money).level, judge('lib/other.ts', money).auto], ['L1', true], text);
   }
-  // Code around a list of regexes (a whole JS file) is still read as code: nothing refused.
-  assert.deepEqual(moneyListProblems(moneyFrom('export const MONEY = [\n  /^src\\/payments\\//,\n];\n')), []);
+  // Round 11 (the coordinator's decision: no line is dropped): code around a list of regexes (a whole JS file) is
+  // refused, never skipped; its brackets alone are blank. A list selected by money_path_source.pattern holds no code.
+  assert.deepEqual(moneyListProblems(moneyFrom('export const MONEY = [\n  /^src\\/payments\\//,\n];\n')).map((p) => p.line), ['export const MONEY = [']);
+  assert.deepEqual(moneyListProblems(moneyFrom('\n  /^src\\/payments\\//,\n')), []);
 });
 
 test('#763 round 7: each suggestion for a refused regex line, written back, is accepted and matches the paths the regex did', () => {
@@ -132,9 +134,8 @@ test('#763 round 7: each suggestion for a refused regex line, written back, is a
     ['/^src\\/\\w+\\/billing\\//', ['src/api/billing/x.ts']],
     ['/^apps\\/[a-z]+\\/payments\\//', ['apps/shop/payments/x.ts']],
     ['/^src\\/(?:api|web)\\/billing/', ['src/web/billing.ts']],
-    // The one exception to "matches every path the regex did": case under the i flag, which the refusal names (a glob
-    // matches case as written, so each other spelling needs its own line).
-    ['/invoice/i', ['lib/invoice.ts']],
+    // Under the i flag too (round 11: each ASCII letter is `?` in the suggestion, so every case is matched).
+    ['/invoice/i', ['lib/invoice.ts', 'lib/Invoice.ts', 'lib/INVOICE.ts']],
     ['/^db\\/migrations\\/\\d+_\\w+\\.sql$/', ['db/migrations/0001_rates.sql']],
     ['/^app\\/\\[slug\\]\\/x\\d/', ['app/[slug]/x1.ts']],
     ['/^lib\\/"pay"\\d/', ['lib/"pay"1.ts']],
