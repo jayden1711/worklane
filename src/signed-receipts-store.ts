@@ -171,7 +171,7 @@ function parseState(path: string, text: string | null): ChainState | null {
     parsed = undefined;
   }
   const st = ChainStateSchema.safeParse(parsed);
-  if (!st.success) throw new ReceiptError(`the signer's chain state ${path} is unreadable; nothing was signed (root or the owner restores it from a backup; a new chain takes a new key)`);
+  if (!st.success) throw new ReceiptError(`the signer's chain state ${path} is unreadable; nothing was signed. This chain ends here: an older copy of the state is never restored (it would let this key sign a published decision again), and a new chain takes a new key, announced as such`);
   return st.data;
 }
 
@@ -182,7 +182,10 @@ function parseState(path: string, text: string | null): ChainState | null {
 function writeState(path: string, state: ChainState): void {
   // No copy of the state it replaces is kept (#918 round 7: round 6's `<state>.prev` was a way to roll the signer
   // back; the fixed receipts in the state make every recovery a give-back instead).
-  replaceOwnerOnly(path, `${canonicalJson(state)}\n`);
+  const text = `${canonicalJson(state)}\n`;
+  // Never a state the next run couldn't read back (#918 round 8 advisory): refused before anything is written.
+  if (Buffer.byteLength(text, 'utf8') > STATE_MAX_BYTES) throw new ReceiptError(`the signer's chain state would be over ${STATE_MAX_BYTES} bytes; nothing was written`);
+  replaceOwnerOnly(path, text);
   syncToDisk(path);
 }
 
@@ -313,9 +316,8 @@ export function signLog(o: { log: string; out: string; state: string; genesis?: 
 
 /**
  * Rotate the chain in `out` to `next`, signed by the current key, from the signer's own chain state in `state`, as
- * the only signer. The state is written first, as in signLog: a rotation whose receipts write then fails leaves a
- * state no receipts reach (a `key.rotated` can't be made again byte for byte), and sign refuses until root or the
- * owner restores the receipts or the state.
+ * the only signer. The state is written first, as in signLog: a rotation whose receipts write then fails is given
+ * back by the next sign with the new key, from the state's fixed receipts (#918 round 7).
  */
 export function rotateFile(o: { out: string; state: string; signer: ReceiptSigner; next: KeyObject }): { count: number; head: string | null } {
   const statePath = statePlace(o.state, o.out);

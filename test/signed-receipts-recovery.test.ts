@@ -172,6 +172,20 @@ test('a rotation whose receipts write failed: the new key gives it back, the old
   assert.equal(kinds(out).at(-1), 'merge.decided');
 });
 
+test('an unreadable state ends the chain: the refusal never sends the owner to an older copy (round 8: S3, S4)', () => {
+  const f = fixtureLog();
+  const k = keys();
+  const out = join(f.dir, 'receipts.jsonl');
+  const state = stateFile();
+  sign({ log: f.path, out, state, genesis: true, signer: k.signer });
+  writeFileSync(state, '{"schema":"not a state"}\n');
+  assert.throws(
+    () => sign({ log: f.path, out, state, signer: k.signer }),
+    (e: Error) => /chain ends here/.test(e.message) && /never restored/.test(e.message) && /new key/.test(e.message) && !/from a backup/.test(e.message),
+  );
+  assert.throws(() => sign({ log: f.path, out, state, genesis: true, signer: k.signer }));
+});
+
 test('a receipts file that is not valid UTF-8 is refused, compared as bytes', () => {
   const f = fixtureLog();
   const k = keys();
