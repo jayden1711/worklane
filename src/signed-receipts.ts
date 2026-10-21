@@ -49,7 +49,7 @@ const Verified = z.array(z.strictObject({ field: z.string().min(1).max(100), how
  * redaction). Empty when nothing was cut. WHY (#918 round 9, route 2): one oversized event made a receipt nothing
  * could read; a cut field attests its first part and the digest of the whole (docs/design.md §5a, VERIFIES vs ATTESTS).
  */
-const Cut = z.record(z.string().min(1), z.strictObject({ sha256: hex64, length: positive, of: z.enum(['whole', 'kept']) }));
+const Cut = z.record(z.string().min(1), z.strictObject({ sha256: hex64, length: z.number().int().min(0), of: z.enum(['whole', 'kept']) }));
 const eventFields = { instance: z.string(), event: positive, verified: Verified, log: z.strictObject({ digest: hex64 }), cut: Cut };
 /**
  * The chain a new chain succeeds, named in its `chain.started` (#918 round 9, route 1): every key that signed it (its
@@ -73,6 +73,12 @@ export type Predecessor = z.infer<typeof Previous>;
 const StatementSchema = z.discriminatedUnion('kind', [
   z.strictObject({ ...chainFields, kind: z.literal('chain.started'), key: KeyRef, previous: Previous.nullable() }),
   z.strictObject({ ...chainFields, kind: z.literal('key.rotated'), next: KeyRef }),
+  /**
+   * A merge event the signer can't read as one (#918 round 11, P3): its payload doesn't match the event's schema.
+   * Signed as unsignable, with the event's type and why, so the chain records it and goes on; never signed as if it
+   * were a decision or a result. Round 10 refused it, and one appended event ended the chain.
+   */
+  z.strictObject({ ...chainFields, ...eventFields, kind: z.literal('event.unsignable'), type: z.string(), problem: z.string() }),
   z.strictObject({
     ...chainFields,
     ...eventFields,
@@ -108,6 +114,9 @@ const StatementSchema = z.discriminatedUnion('kind', [
   }),
 ]);
 export type Statement = z.infer<typeof StatementSchema>;
+/** A receipt for one log event: a merge decision, a merge result, or an unsignable merge event. */
+type EventReceipt = Extract<Statement, { kind: 'merge.decided' | 'merge.result' | 'event.unsignable' }>;
+const isEventReceipt = (s: Statement): s is EventReceipt => s.kind === 'merge.decided' || s.kind === 'merge.result' || s.kind === 'event.unsignable';
 type Body = Statement extends infer S ? (S extends Statement ? Omit<S, 'schema' | 'seq' | 'prev'> : never) : never;
 
 const base64 = z.string().regex(/^[A-Za-z0-9+/]*={0,2}$/);
@@ -313,7 +322,7 @@ export function verifyChain(envelopes: readonly unknown[], o: { keys: readonly K
     if (signatures[0]!.keyid !== signing) return fail(i, `signed by key ${signatures[0]!.keyid.slice(0, 80)}; the chain's key here is ${signing}`);
     if (!edVerify(null, pae(PAYLOAD_TYPE, bytes), current!, sig)) return fail(i, "the signature doesn't verify with the chain's key: it was changed, or another key signed it");
     const id = sha256(bytes);
-    if (s.kind === 'merge.decided' || s.kind === 'merge.result') {
+    if (isEventReceipt(s)) {
       if (s.event <= lastEvent) return fail(i, `its event ${s.event} is not after the one before (${lastEvent})`);
       lastEvent = s.event;
     }
@@ -365,6 +374,12 @@ export const ChainStateSchema = z.strictObject({
    * an ended chain resumed beside its successor once the log was restored, and a second successor started from it.
    */
   ended: z.strictObject({ successor: hex64, head: hex64 }).nullable(),
+  /**
+   * The signer's chain registry (round 11) as this chain started: its path, and its line count and head just after
+   * this chain's start line. Every later sign and rotate checks the registry still holds that line there, so a
+   * registry deleted, cut or edited is refused. Null only outside the store (the pure functions here).
+   */
+  registry: z.strictObject({ path: z.string().min(1), count: positive, head: hex64 }).nullable(),
 });
 export type ChainState = z.infer<typeof ChainStateSchema>;
 
@@ -395,7 +410,7 @@ export function chainStateOf(envelopes: readonly Envelope[], start: { keyid: str
   let last = 0;
   for (const [i, e] of envelopes.entries()) if ((statementOf(e) as { kind?: unknown } | null)?.kind === 'key.rotated') last = i;
   const fixed = envelopes.slice(0, last + 1).map((e) => ({ payloadType: e.payloadType, payload: e.payload, signatures: e.signatures.map((s) => ({ keyid: s.keyid, sig: s.sig })) }));
-  return ChainStateSchema.parse({ schema: CHAIN_STATE_SCHEMA, count: envelopes.length, head: receiptId(envelopes.at(-1)!), start: { keyid: start.keyid, spki: start.spki }, fixed, event: lastEventOf(envelopes), ended: null });
+  return ChainStateSchema.parse({ schema: CHAIN_STATE_SCHEMA, count: envelopes.length, head: receiptId(envelopes.at(-1)!), start: { keyid: start.keyid, spki: start.spki }, fixed, event: lastEventOf(envelopes), ended: null, registry: null });
 }
 
 /** The chain a successor names, from the ended chain's own state: its keys (from its fixed receipts), head and last event. */
@@ -409,7 +424,7 @@ function lastEventOf(envelopes: readonly Envelope[]): number {
   for (const e of envelopes) {
     const s = statementOf(e) as { kind?: string; event?: number; previous?: { event?: number } | null };
     if (s.kind === 'chain.started') event = s.previous?.event ?? 0;
-    if ((s.kind === 'merge.decided' || s.kind === 'merge.result') && typeof s.event === 'number') event = s.event;
+    if ((s.kind === 'merge.decided' || s.kind === 'merge.result' || s.kind === 'event.unsignable') && typeof s.event === 'number') event = s.event;
   }
   return event;
 }
@@ -475,11 +490,6 @@ function chainSoFar(existing: readonly unknown[], signer: ReceiptSigner, from: C
   return { state, base, behind: state.count < own.count ? own : null };
 }
 
-function parsed<T extends (typeof RECEIPT_EVENTS)[number]>(e: ReceiptEvent, type: T): EventPayload<T> {
-  const p = EventSchemas[type].safeParse(e.payload);
-  if (!p.success) throw new ReceiptError(`event ${e.id} (${type}) in the log doesn't match its schema; nothing was signed past it`);
-  return p.data as EventPayload<T>;
-}
 
 /** A merge event's receipt body, redacted (the log redacts on write already; this holds for any source). */
 /** The most UTF-16 code units a string in a receipt keeps, and the most items a list keeps (redactBounded). */
@@ -537,20 +547,35 @@ function bodyOf(e: ReceiptEvent, version: string | null, decided: Map<string, st
   const signer = { verified: [], log: { digest } };
   const bounded = <T>(body: T) => {
     const cut: Record<string, CutEntry> = {};
-    return { ...(redactBounded(body, '', cut) as T), ...signer, cut };
+    const out = redactBounded(body, '', cut) as T & { at: string };
+    // WHY (#918 round 11, P3): a `ts` that is empty, or cut to nothing (over REDACT_MAX), would make `at` "", which
+    // no receipt may be, and one appended event ended the chain. The receipt says so instead, and records the cut.
+    if (out.at === '') {
+      cut.at ??= { length: 0, sha256: digestOf(''), of: 'kept' };
+      out.at = AT_UNRECORDED;
+    }
+    return { ...out, ...signer, cut };
   };
+  if (e.type !== 'merge.decided' && e.type !== 'merge.done' && e.type !== 'merge.failed') return null;
+  // A merge event whose payload doesn't match its schema is signed as unsignable (round 11, P3), never as if it
+  // were whole, and the chain goes on.
+  const unsignable = () => bounded({ ...common, kind: 'event.unsignable' as const, type: e.type, problem: "its payload doesn't match the event's schema" });
   if (e.type === 'merge.decided') {
-    const p = parsed(e, 'merge.decided');
+    const r = EventSchemas['merge.decided'].safeParse(e.payload);
+    if (!r.success) return unsignable();
+    const p = r.data as EventPayload<'merge.decided'>;
     return bounded({ ...common, kind: 'merge.decided' as const, engine: { version }, policy: { commit: null }, inputs: { issue: p.issue, pr: p.number, head: p.head, files: null, check_runs: null }, decision: { auto: p.auto, level: null, reasons: p.reasons, why: p.why ?? [] } });
   }
-  if (e.type === 'merge.done' || e.type === 'merge.failed') {
-    const done = e.type === 'merge.done' ? parsed(e, 'merge.done') : null;
-    const p = done ?? parsed(e, 'merge.failed');
-    const why = done ? null : (p as EventPayload<'merge.failed'>).why;
-    return bounded({ ...common, kind: 'merge.result' as const, issue: p.issue, pr: p.number, head: p.head, merged: !!done, commit: done?.sha ?? null, reconciled: done?.reconciled === true, why, decision: decided.get(`${p.number}@${p.head}`) ?? null });
-  }
-  return null;
+  const r = (e.type === 'merge.done' ? EventSchemas['merge.done'] : EventSchemas['merge.failed']).safeParse(e.payload);
+  if (!r.success) return unsignable();
+  const done = e.type === 'merge.done' ? (r.data as EventPayload<'merge.done'>) : null;
+  const p = done ?? (r.data as EventPayload<'merge.failed'>);
+  const why = done ? null : (p as EventPayload<'merge.failed'>).why;
+  return bounded({ ...common, kind: 'merge.result' as const, issue: p.issue, pr: p.number, head: p.head, merged: !!done, commit: done?.sha ?? null, reconciled: done?.reconciled === true, why, decision: decided.get(`${p.number}@${p.head}`) ?? null });
 }
+
+/** What `at` says when the log's `ts` was empty or past the bound (the receipt's `cut.at` records which). */
+export const AT_UNRECORDED = 'unrecorded';
 
 /**
  * Extend a chain with a receipt for each merge decision and result in `events` after the last one it receipts (a
@@ -596,7 +621,7 @@ function extend(existing: readonly unknown[], state: Extract<ChainResult, { ok: 
   for (const [i, s] of state.statements.entries()) {
     if (s.kind === 'chain.started') last = s.previous?.event ?? 0;
     if (s.kind === 'merge.decided') decided.set(`${s.inputs.pr}@${s.inputs.head}`, state.ids[i]!);
-    if (s.kind === 'merge.decided' || s.kind === 'merge.result') last = s.event;
+    if (isEventReceipt(s)) last = s.event;
   }
   // The log as read now must hash, at each event already receipted, to what that receipt recorded: an event edited,
   // dropped or inserted before it is a log that changed under signed receipts, and nothing more is signed.
@@ -609,14 +634,17 @@ function extend(existing: readonly unknown[], state: Extract<ChainResult, { ok: 
     digests.set(e.id, digest);
   }
   for (const s of state.statements) {
-    if ((s.kind === 'merge.decided' || s.kind === 'merge.result') && digests.get(s.event) !== s.log.digest) {
+    if (isEventReceipt(s) && digests.get(s.event) !== s.log.digest) {
       throw new ReceiptError(`the log changed under receipts already signed (at event ${s.event}: an event before it was edited, dropped or inserted, or it is gone); nothing was signed`);
     }
   }
   let version: string | null = null;
   for (const e of sorted) {
     if (e.type === 'coordinator.started') {
-      version = parsed(e, 'coordinator.started').version;
+      // A coordinator.started that doesn't match its schema leaves the version unrecorded (null) for the decisions
+      // after it, rather than ending the chain (#918 round 11, P3).
+      const v = EventSchemas['coordinator.started'].safeParse(e.payload);
+      version = v.success ? (v.data as EventPayload<'coordinator.started'>).version : null;
       continue;
     }
     if (e.id <= last) continue;
@@ -640,6 +668,10 @@ export function rotateChain(existing: readonly unknown[], signer: ReceiptSigner,
   if (!state.count) throw new ReceiptError('there is no chain to rotate: sign with the new key to start one');
   if (next.type !== 'public' || next.asymmetricKeyType !== 'ed25519') throw new ReceiptError('the next key is an ed25519 public key');
   if (keyId(next) === keyId(signer.publicKey)) throw new ReceiptError('the next key is the key already in use');
+  // WHY (#918 round 11, P7): verify refuses a successor that rotates to a key of the chain it succeeds, so the
+  // signer never writes one.
+  const started = state.statements[0];
+  if (started?.kind === 'chain.started' && started.previous?.keys.includes(keyId(next))) throw new ReceiptError('the next key signed the chain this one succeeds: a successor never rotates to it; nothing was rotated');
   const { envelope } = seal({ schema: RECEIPT_SCHEMA, seq: state.count, prev: state.head, kind: 'key.rotated', at: now(), next: keyRef(next) }, signer);
   return [...(existing as Envelope[]), envelope];
 }

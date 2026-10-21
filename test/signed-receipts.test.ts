@@ -47,7 +47,7 @@ function signed(): { dir: string; out: string; state: string; pub: KeyObject; si
   const k = keys();
   const out = join(f.dir, 'receipts.jsonl');
   const state = stateFile();
-  signLog({ log: f.path, out, state, genesis: true, signer: k.signer });
+  signLog({ log: f.path, out, state, genesis: true, registry: join(mkdtempSync(join(tmpdir(), 'rreg-')), 'registry.jsonl'), signer: k.signer });
   return { ...f, out, state, ...k, envs: readReceiptFiles(out) as Envelope[] };
 }
 
@@ -285,10 +285,17 @@ test('the signer refuses to extend receipts that no longer verify, and leaves th
   assert.equal(readFileSync(s.out, 'utf8'), before);
 });
 
-test('a garbled merge event in the log is refused, never signed as if it were whole', () => {
+test('a garbled merge event in the log is never signed as if it were whole: it is signed as unsignable (round 11)', () => {
+  // Round 1 to 10 refused it, which let one appended event end the chain (#918 round-10 review, P3). It is now
+  // recorded as an `event.unsignable` receipt, with no decision fields, and the chain goes on.
   const k = keys();
   const events: ReceiptEvent[] = [{ id: 2, ts: '2026-10-20T00:00:01.000Z', type: 'merge.decided', actor: 'inst', payload: { issue: 1, number: 2, head: 'not-a-sha', auto: 'yes' } }];
-  assert.throws(() => signEvents([], events, k.signer, GENESIS), /event 2/);
+  const { envelopes } = signEvents([], events, k.signer, GENESIS);
+  const st = statementOf(envelopes[1]!) as Record<string, unknown>;
+  assert.equal(st.kind, 'event.unsignable');
+  assert.equal(st.event, 2);
+  for (const field of ['decision', 'inputs', 'policy', 'engine']) assert.ok(!(field in st), `an unsignable receipt has no ${field}`);
+  assert.ok(verifyChain(envelopes, { keys: [k.pub] }).ok);
 });
 
 test(`${BRAND.cli} receipts: keygen, sign and verify offline from the CLI; a tampered file fails`, () => {
@@ -301,7 +308,7 @@ test(`${BRAND.cli} receipts: keygen, sign and verify offline from the CLI; a tam
   assert.equal(gen.status, 0, gen.stderr);
   assert.equal(cli('keygen', '--private', priv, '--public', pub).status, 1, 'never overwrites a key');
   const out = join(f.dir, 'receipts.jsonl');
-  const sg = cli('sign', '--log', f.path, '--key', priv, '--out', out, '--state', stateFile(), '--genesis');
+  const sg = cli('sign', '--log', f.path, '--key', priv, '--out', out, '--state', stateFile(), '--genesis', '--registry', join(mkdtempSync(join(tmpdir(), 'rreg-')), 'registry.jsonl'));
   assert.equal(sg.status, 0, sg.stderr);
   assert.match(sg.stdout, /not yet root-signed/);
   // The auditor's copy, elsewhere, with only the public key.
@@ -322,7 +329,7 @@ test(`${BRAND.cli} receipts: keygen, sign and verify offline from the CLI; a tam
   assert.match(help.stdout, /receipts verify <file\|dir> --key <pub>/);
   // Never a signature from a key the CLI can't read as an ed25519 private key.
   writeFileSync(join(keyDir, 'junk.key'), 'not a key');
-  const junk = cli('sign', '--log', f.path, '--key', join(keyDir, 'junk.key'), '--out', join(f.dir, 'r2.jsonl'), '--state', stateFile(), '--genesis');
+  const junk = cli('sign', '--log', f.path, '--key', join(keyDir, 'junk.key'), '--out', join(f.dir, 'r2.jsonl'), '--state', stateFile(), '--genesis', '--registry', join(mkdtempSync(join(tmpdir(), 'rreg-')), 'registry.jsonl'));
   assert.equal(junk.status, 1);
   assert.match(junk.stderr, /not a readable private key/);
   // The auditor is told what the signer checked itself and what is only the coordinator's word (attested).

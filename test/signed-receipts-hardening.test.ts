@@ -27,7 +27,9 @@ const H1 = sha('a');
 const H2 = sha('b');
 const M1 = sha('c');
 
-const sign = (o: Record<string, unknown>) => signLog(o as unknown as Parameters<typeof signLog>[0]);
+/** The signer's chain registry for this file (round 11): every genesis is recorded there unless a test gives its own. */
+const REGISTRY = join(mkdtempSync(join(tmpdir(), 'rreg-')), 'registry.jsonl');
+const sign = (o: Record<string, unknown>) => signLog({ ...(o.genesis ? { registry: REGISTRY } : {}), ...o } as unknown as Parameters<typeof signLog>[0]);
 const rotate = (o: Record<string, unknown>) => rotateFile(o as unknown as Parameters<typeof rotateFile>[0]);
 const cli = (...a: string[]) => spawnSync(process.execPath, [engineCli, 'receipts', ...a], { encoding: 'utf8', timeout: 20_000 });
 
@@ -177,7 +179,8 @@ test('a retired start key cannot get a forged chain extended: the signer follows
   editHeldDecision(f.path);
   const fake = join(mkdtempSync(join(tmpdir(), 'rf4-')), 'fake.jsonl');
   const forgerState = stateFile();
-  sign({ log: f.path, out: fake, signer: s.signer, state: forgerState, genesis: true });
+  // The forger keeps no registry of the signer's: a registry of its own (round 11).
+  sign({ log: f.path, out: fake, signer: s.signer, state: forgerState, genesis: true, registry: join(mkdtempSync(join(tmpdir(), 'rreg-')), 'registry.jsonl') });
   rotate({ out: fake, signer: s.signer, next: k2.pub, state: forgerState, trust: [s.pub] });
   assert.ok(verifyChain(readReceiptFiles(fake), { keys: [s.pub] }).ok, 'the forged chain verifies from the start key on its own');
   copyFileSync(fake, out);

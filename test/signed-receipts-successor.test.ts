@@ -24,7 +24,9 @@ const H1 = sha('a');
 const H2 = sha('b');
 const M1 = sha('c');
 
-const sign = (o: Record<string, unknown>) => signLog(o as unknown as Parameters<typeof signLog>[0]);
+/** The signer's chain registry for this file (round 11): every genesis is recorded there unless a test gives its own. */
+const REGISTRY = join(mkdtempSync(join(tmpdir(), 'rreg-')), 'registry.jsonl');
+const sign = (o: Record<string, unknown>) => signLog({ ...(o.genesis ? { registry: REGISTRY } : {}), ...o } as unknown as Parameters<typeof signLog>[0]);
 const rotate = (o: Record<string, unknown>) => rotateFile(o as unknown as Parameters<typeof rotateFile>[0]);
 const text = (p: string) => (existsSync(p) ? readFileSync(p, 'utf8') : null);
 type St = { kind: string; event?: number; decision?: { auto: boolean; reasons: string[] }; previous?: unknown; cut?: Record<string, { sha256: string; length: number; of?: string }> };
@@ -78,7 +80,11 @@ test('a successor chain with a new key never signs the events the ended chain si
   for (const from of ['state', 'receipts copy']) {
     const old = endedChain();
     const after = from === 'state' ? old.state : join(mkdtempSync(join(tmpdir(), 'rc9-')), 'copy.jsonl');
-    if (from !== 'state') copyFileSync(old.out, after);
+    if (from !== 'state') {
+      copyFileSync(old.out, after);
+      // Round 11: a copy is taken only when the ended chain's state can't be read.
+      writeFileSync(old.state, 'not a state');
+    }
     const k2 = keys();
     const out = outFile();
     const state2 = stateFile();

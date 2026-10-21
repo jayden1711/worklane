@@ -15,7 +15,8 @@ import { EventLog } from '../src/events/log.js';
 import { keySigner } from '../src/signed-receipts.js';
 import { RECEIPTS_MAX_BYTES, rotateFile, signLog } from '../src/signed-receipts-store.js';
 
-const sign = (o: Record<string, unknown>) => signLog(o as unknown as Parameters<typeof signLog>[0]);
+/** Each chain here gets a chain registry of its own (round 11): both are started by the same key. */
+const sign = (o: Record<string, unknown>) => signLog({ ...(o.genesis ? { registry: join(mkdtempSync(join(tmpdir(), 'rreg-')), 'registry.jsonl') } : {}), ...o } as unknown as Parameters<typeof signLog>[0]);
 const rotate = (o: Record<string, unknown>) => rotateFile(o as unknown as Parameters<typeof rotateFile>[0]);
 const size = (p: string) => statSync(p).size;
 const digest = (p: string) => createHash('sha256').update(readFileSync(p)).digest('hex');

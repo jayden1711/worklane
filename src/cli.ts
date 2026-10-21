@@ -218,13 +218,14 @@ usage: ${BRAND.cli} <command> [options]
                                    one. Needs no engine state or network (docs/receipts.md)
   receipts keygen --private <file> --public <file>
                                    make an ed25519 receipt key pair; never overwrites a file
-  receipts sign --log <events.db> --key <private> --out <file> --state <file> [--genesis [--after <file>]]
+  receipts sign --log <events.db> --key <private> --out <file> --state <file> [--genesis --registry <file> [--after <file>]]
                                    receipt each merge decision and result in the log not yet receipted, chained
                                    onto <file>, which must extend the signer's own chain head in --state (kept
                                    apart, in a directory only the signer writes). --genesis starts a new chain
-                                   where there is none (root or the owner only); with --after, it succeeds an
-                                   ended chain (its state, or a copy of its receipts) from that chain's last
-                                   event, with a new key. Not yet root-signed: it signs as whoever runs it (#717)
+                                   where there is none (root or the owner only), recorded in the signer's chain
+                                   registry; with --after, it succeeds an ended chain (its state, or a copy of
+                                   its receipts when the state can't be read), from that chain's last event,
+                                   with a new key. Not yet root-signed: it signs as whoever runs it (#717)
   receipts rotate --out <file> --key <current private> --next <new public> --state <file>
                                    continue the chain under a new key, signed by the current one
   decide <id> <option> [--instance name]

@@ -39,11 +39,13 @@ worklane receipts verify receipts/ --key customer-receipts.pub
 - a new chain whose `previous.head` isn't the latest head you hold for the old chain;
 - a second chain with `previous: null` for the same instance. `previous: null` marks an instance's first chain only.
 
-A chain started `from: "copy"` came from receipts that may have been cut short, so it can't show you everything the old chain signed. It never signs an event that existed when it started, though: compare the merges between the old chain's head and its start with the repository's.
+A chain started `from: "copy"` came from receipts that may have been cut short, so it can't show you everything the old chain signed. The signer starts one only when the old chain's own state can't be read. It starts after the log's last event at that time, so it signs no event that existed then, as long as the log's event ids never go back. The coordinator owns those ids, so this is its word: compare the merges between the old chain's head and the new chain's start with the repository's.
+
+A receipt of kind `event.unsignable` stands for a merge event the signer couldn't read (not JSON, or not the event's shape): it records the event's type and why, and nothing of its content as a decision. `at: "unrecorded"` means the log's time for that event was empty or too long (`cut.at` says which).
 
 Keep each chain's receipts in its own directory: `verify <dir>` reads one chain.
 
-**A receipt field can be cut.** A long text keeps its first 1,024 characters (after redaction), and a long list its first 64 items. A text over 16,384 characters keeps nothing. The receipt's `cut` lists each cut field with its length and a SHA-256: with `of: "whole"`, of the whole redacted text, so whoever holds the text can redact it and check; with `of: "kept"`, only of what the receipt keeps.
+**A receipt field can be cut.** A long text keeps its first 1,024 characters (after redaction), and a long list its first 64 items. A text over 16,384 characters keeps nothing. The receipt's `cut` lists each cut field with its length and a SHA-256: with `of: "whole"`, of the whole redacted text, so whoever holds the text can redact it and check; with `of: "kept"`, only of what the receipt keeps. Each SHA-256 is over the value's canonical JSON, never the bare text: for a text, hash it quoted as a JSON string.
 
 ## Verified or attested
 

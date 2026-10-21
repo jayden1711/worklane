@@ -18,7 +18,9 @@ import { canonicalJson, keyId, keySigner, pae, PAYLOAD_TYPE, receiptId, statemen
 import { readReceiptFiles, rotateFile, signLog } from '../src/signed-receipts-store.js';
 
 const sha = (c: string) => c.repeat(40).slice(0, 40);
-const sign = (o: Record<string, unknown>) => signLog(o as unknown as Parameters<typeof signLog>[0]);
+/** The signer's chain registry for this file (round 11): every genesis is recorded there unless a test gives its own. */
+const REGISTRY = join(mkdtempSync(join(tmpdir(), 'rreg-')), 'registry.jsonl');
+const sign = (o: Record<string, unknown>) => signLog({ ...(o.genesis ? { registry: REGISTRY } : {}), ...o } as unknown as Parameters<typeof signLog>[0]);
 const rotate = (o: Record<string, unknown>) => rotateFile(o as unknown as Parameters<typeof rotateFile>[0]);
 type St = { kind: string; event?: number; previous?: { keys: string[]; event: number; from?: string } | null; decision?: { auto: boolean; reasons: string[] }; cut?: Record<string, { sha256: string }> };
 const statements = (out: string) => (readReceiptFiles(out) as Envelope[]).map((e) => statementOf(e) as St);
@@ -122,19 +124,28 @@ test('a successor from a receipts copy cut short starts after the log, never re-
     setPayload(f.path, 4, FLIPPED);
     const copy = fresh('copy.jsonl');
     writeFileSync(copy, look);
-    // Row 3: a new key. Row 3b: the chain's own current key, which the cut copy doesn't name.
-    const successor = rotated ? k2 : keys();
+    // Round 11: a copy is taken only when the ended chain's state can't be read.
+    writeFileSync(state, 'not a state');
     const outB = fresh('receipts.jsonl');
-    let signed: St[] = [];
-    try {
-      sign({ log: f.path, out: outB, state: fresh('chain-state.json'), genesis: true, after: copy, signer: successor.signer });
-      signed = statements(outB);
-    } catch {
-      signed = [];
+    if (rotated) {
+      // Row 3b: the chain's own current key, which the cut copy doesn't name: the registry does, so it is refused.
+      assert.throws(() => sign({ log: f.path, out: outB, state: fresh('chain-state.json'), genesis: true, after: copy, signer: k2.signer }), /already signed a chain/);
+      continue;
     }
-    assert.deepEqual(signed.filter((s) => s.kind !== 'chain.started' && (s.event ?? 0) <= 5).map((s) => s.event), [], `${rotated ? '3b' : '3'}: events the ended chain covered were signed again`);
-    if (signed.length) assert.equal(signed[0]!.previous?.from, 'copy', 'the successor says it came from a copy');
+    // Row 3: a new key starts, and signs nothing the ended chain covered.
+    sign({ log: f.path, out: outB, state: fresh('chain-state.json'), genesis: true, after: copy, signer: keys().signer });
+    const signed = statements(outB);
+    assert.deepEqual(signed.filter((s) => s.kind !== 'chain.started' && (s.event ?? 0) <= 5).map((s) => s.event), [], 'events the ended chain covered were signed again');
+    assert.equal(signed[0]!.previous?.from, 'copy', 'the successor says it came from a copy');
   }
+});
+
+test('rotate on an ended chain is refused, nothing written', () => {
+  const A = endedA();
+  sign({ log: A.f.path, out: fresh('receipts.jsonl'), state: fresh('chain-state.json'), genesis: true, after: A.state, signer: keys().signer });
+  const before = [readFileSync(A.out, 'utf8'), readFileSync(A.state, 'utf8')];
+  assert.throws(() => rotate({ out: A.out, state: A.state, signer: A.a.signer, next: keys().pub }), /ended/);
+  assert.deepEqual([readFileSync(A.out, 'utf8'), readFileSync(A.state, 'utf8')], before);
 });
 
 /** A DSSE envelope over `st`, signed by `k` (what a successor's key holder can make by hand). */
@@ -175,9 +186,10 @@ test('one event of 3.5 MB of private-key BEGIN markers never stalls the signer (
   } finally {
     db.close();
   }
-  const t0 = Date.now();
+  // A duration, so from the monotonic clock (test/no-wall-clock-durations.test.ts, #582).
+  const t0 = performance.now();
   sign({ log: f.path, out, state, signer: k.signer });
-  const ms = Date.now() - t0;
+  const ms = Math.round(performance.now() - t0);
   assert.ok(ms < 15_000, `signing took ${ms} ms`);
   assert.ok(verifyChain(readReceiptFiles(out), { keys: [k.pub] }).ok);
 });
