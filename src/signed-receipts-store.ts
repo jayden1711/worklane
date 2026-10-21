@@ -8,31 +8,87 @@ import { BRAND } from './brand.js';
 import { openReadOnly } from './events/read-only.js';
 import { tryLock } from './locks.js';
 import { notOwnerOnlyDir, processIdentity, processPlace, replaceOwnerOnly, syncToDisk, UNKNOWN_IDENTITY } from './os/index.js';
-import { AT_UNRECORDED, canonicalJson, chainStateOf, ChainStateSchema, keyId, keySigner, predecessorOf, predecessorOfState, ReceiptError, RECEIPT_EVENTS, rotateChain, signEvents, statementOf, type ChainState, type Envelope, type Predecessor, type ReceiptEvent, type ReceiptSigner } from './signed-receipts.js';
+import { AT_UNRECORDED, canonicalJson, chainStateOf, ChainStateSchema, FIELD_READ_MAX, keyId, keySigner, logDigest, PAYLOAD_READ_MAX, predecessorOf, predecessorOfState, ReceiptError, RECEIPT_EVENTS, rotateChain, signEvents, statementOf, type ChainState, type Envelope, type Predecessor, type ReceiptEvent, type ReceiptSigner } from './signed-receipts.js';
+
+/** The bytes of one log column hashed per query, at most (a longer one takes several queries). */
+const HASH_CHUNK = 64 * 1024 * 1024;
+const LOG_COLUMNS = ['ts', 'type', 'actor', 'payload'] as const;
+type LogColumn = (typeof LOG_COLUMNS)[number];
 
 /**
- * Every event in an events database opened read-only, oldest first, each with its payload as stored (`raw`, for the
- * log digest). Only the kinds receipts are made from are parsed.
+ * The event log must be the shape the signer reads (round 13, the round-12 second review's rows 4 and 5): `events` a
+ * table, not a view (a view can yield rows without end, and `sign` ran on holding its lock), whose `id` is its
+ * INTEGER PRIMARY KEY with rowids (so every id is an integer), in a UTF-8 database (column bytes are hashed and read
+ * as UTF-8). Anything else is refused before a row is read: fail closed, with the reason.
+ */
+function checkLogShape(db: ReturnType<typeof openReadOnly>, path: string): void {
+  const refuse = (why: string) => new ReceiptError(`the event log ${path} isn't one the signer reads: its "events" must be a table with id INTEGER PRIMARY KEY and rowids, in a UTF-8 database (${why}); nothing was signed`);
+  const objects = db.prepare("SELECT type, sql FROM sqlite_master WHERE name = 'events'").all() as { type: string; sql: string | null }[];
+  if (objects.length !== 1 || objects[0]!.type !== 'table') throw refuse(objects.length ? `it is a ${objects.map((o) => o.type).join(', ')}` : 'there is none');
+  if (/without\s+rowid/i.test(objects[0]!.sql ?? '')) throw refuse('it is a WITHOUT ROWID table');
+  const columns = db.prepare('PRAGMA table_info(events)').all() as { name: string; type: string; pk: number; notnull: number }[];
+  const keys = columns.filter((c) => c.pk > 0);
+  if (keys.length !== 1 || keys[0]!.name !== 'id' || keys[0]!.type.toUpperCase() !== 'INTEGER') throw refuse('its id is not its INTEGER PRIMARY KEY');
+  // NOT NULL as the log creates them: a NULL would hash as "" does.
+  for (const name of LOG_COLUMNS) if (!columns.some((c) => c.name === name && c.notnull)) throw refuse(`it has no NOT NULL ${name} column`);
+  const encoding = (db.prepare('PRAGMA encoding').get() as { encoding?: string } | undefined)?.encoding;
+  if (encoding !== 'UTF-8') throw refuse(`the database is ${encoding ?? 'of no known'} encoding`);
+}
+
+/**
+ * Every event in an events database opened read-only, oldest first. Each column is hashed from its bytes as stored
+ * (`hashes`, for the log digest), in chunks of HASH_CHUNK. Only what a receipt can use is read as text: ts, type and
+ * actor up to FIELD_READ_MAX bytes, and the payload of a kind receipts are made from up to PAYLOAD_READ_MAX bytes,
+ * parsed. A field past its bound is never read (`unread`). WHY (#918 round 13): round 12 read every row whole with
+ * `.all()` and hashed each event as one string, so one appended 90 MB event stopped every `sign` for good (the
+ * round-12 second review, row 1). Rows are read one at a time.
  */
 export function readReceiptEvents(dbPath: string): ReceiptEvent[] {
   if (!existsSync(dbPath)) throw new ReceiptError(`no event log at ${dbPath}`);
   const read: ReadonlySet<string> = new Set(RECEIPT_EVENTS);
+  const kinds = RECEIPT_EVENTS.map((k) => `'${k}'`).join(', ');
   const db = openReadOnly(dbPath);
   try {
-    const query = db.prepare('SELECT id, ts, type, actor, payload FROM events ORDER BY id');
+    checkLogShape(db, dbPath);
+    const size = (c: LogColumn) => `length(CAST(${c} AS BLOB))`;
+    const inline = (c: LogColumn) => (c === 'payload' ? `CAST(type AS TEXT) IN (${kinds}) AND ${size(c)} <= ${PAYLOAD_READ_MAX}` : `${size(c)} <= ${FIELD_READ_MAX}`);
+    const query = db.prepare(`SELECT id, ${LOG_COLUMNS.map((c) => `${size(c)} AS ${c}_n, CASE WHEN ${inline(c)} THEN CAST(${c} AS BLOB) END AS ${c}_b`).join(', ')} FROM events ORDER BY id`);
     // Every integer read as a BigInt (#918 round 12): an id past 2^53 is read exactly, never refused as "too large".
     query.setReadBigInts(true);
-    const rows = query.all() as { id: bigint; ts: unknown; type: unknown; actor: unknown; payload: unknown }[];
+    const chunks = Object.fromEntries(LOG_COLUMNS.map((c) => [c, db.prepare(`SELECT substr(CAST(${c} AS BLOB), ?, ?) AS b FROM events WHERE id = ?`)])) as Record<LogColumn, ReturnType<typeof db.prepare>>;
+    const hashOf = (c: LogColumn, id: bigint, n: number, bytes: Uint8Array | null): string => {
+      const h = createHash('sha256');
+      if (bytes) h.update(bytes);
+      else for (let at = 1; at <= n; at += HASH_CHUNK) h.update((chunks[c].get(at, HASH_CHUNK, id) as { b: Uint8Array }).b);
+      return h.digest('hex');
+    };
+    const text = (b: Uint8Array) => Buffer.from(b.buffer, b.byteOffset, b.byteLength).toString('utf8');
     // A payload that isn't JSON reads as undefined: its event is then signed as unsignable, never ending the chain
     // (#918 round 11, P3).
-    const json = (text: string): unknown => {
+    const json = (t: string): unknown => {
       try {
-        return JSON.parse(text) as unknown;
+        return JSON.parse(t) as unknown;
       } catch {
         return undefined;
       }
     };
-    return rows.map((r) => ({ id: BigInt(r.id), ts: String(r.ts), type: String(r.type), actor: String(r.actor), raw: String(r.payload), payload: read.has(String(r.type)) ? json(String(r.payload)) : undefined }));
+    const events: ReceiptEvent[] = [];
+    for (const row of query.iterate() as Iterable<Record<string, unknown>>) {
+      const id = row.id;
+      // A rowid is always an integer; checked anyway, so nothing else reaches BigInt() (round 13).
+      if (typeof id !== 'bigint') throw new ReceiptError(`the event log ${dbPath} has an id that isn't an integer; nothing was signed`);
+      const n = (c: LogColumn) => Number(row[`${c}_n`] as bigint);
+      const b = (c: LogColumn) => (row[`${c}_b`] as Uint8Array | null) ?? null;
+      const hashes = { ts: hashOf('ts', id, n('ts'), b('ts')), type: hashOf('type', id, n('type'), b('type')), actor: hashOf('actor', id, n('actor'), b('actor')), payload: hashOf('payload', id, n('payload'), b('payload')) };
+      const type = b('type') ? text(b('type')!) : '';
+      const unread: NonNullable<ReceiptEvent['unread']> = {};
+      if (!b('ts')) unread.ts = n('ts');
+      if (!b('actor')) unread.actor = n('actor');
+      if (read.has(type) && !b('payload')) unread.payload = n('payload');
+      const payload = read.has(type) && b('payload') ? json(text(b('payload')!)) : undefined;
+      events.push({ id, ts: b('ts') ? text(b('ts')!) : '', type, actor: b('actor') ? text(b('actor')!) : '', payload, hashes, ...(Object.keys(unread).length ? { unread } : {}) });
+    }
+    return events;
   } finally {
     db.close();
   }
@@ -182,7 +238,7 @@ function statePlace(state: string, out: string): string {
  * its ownedPath a path any other user can redirect (on Linux, any link on the way: a link's own mode reads 0777). From
  * here on only the real path is used, so a link flipped after this check changes nothing read or written.
  */
-function ownedStatePath(state: string): string {
+function ownedStatePath(state: string, what = "the signer's chain state"): string {
   const given = dirname(resolve(state));
   let real = resolve(given);
   try {
@@ -191,7 +247,7 @@ function ownedStatePath(state: string): string {
     // Missing: notOwnerOnlyDir names it below.
   }
   const why = notOwnerOnlyDir(given) ?? notOwnerOnlyDir(real);
-  if (why) throw new ReceiptError(`the signer's chain state goes in a directory only the signer can write, reached through no link: ${why}`);
+  if (why) throw new ReceiptError(`${what} goes in a directory only the signer can write, reached through no link: ${why}`);
   return join(real, basename(state));
 }
 
@@ -234,11 +290,19 @@ function parseState(path: string, text: string | null): ChainState | null {
 function writeState(path: string, state: ChainState): void {
   // No copy of the state it replaces is kept (#918 round 7: round 6's `<state>.prev` was a way to roll the signer
   // back; the fixed receipts in the state make every recovery a give-back instead).
-  const text = `${canonicalJson(state)}\n`;
-  // Never a state the next run couldn't read back (#918 round 8 advisory): refused before anything is written.
-  if (Buffer.byteLength(text, 'utf8') > STATE_MAX_BYTES) throw new ReceiptError(`the signer's chain state would be over ${STATE_MAX_BYTES} bytes; nothing was written`);
-  replaceOwnerOnly(path, text);
+  replaceOwnerOnly(path, stateText(state));
   syncToDisk(path);
+}
+
+/**
+ * A chain state's text, refused over STATE_MAX_BYTES (#918 round 8 advisory: never a state the next run couldn't read
+ * back). Round 13: every caller checks it before any registry write too, so a refusal over the cap burns no key and
+ * ends no chain in the registry (the round-12 second review's row 7).
+ */
+function stateText(state: ChainState): string {
+  const text = `${canonicalJson(state)}\n`;
+  if (Buffer.byteLength(text, 'utf8') > STATE_MAX_BYTES) throw new ReceiptError(`the signer's chain state would be over ${STATE_MAX_BYTES} bytes; nothing was written`);
+  return text;
 }
 
 /** The signer's lock: one per state directory (#918 round 6, row 5: one per state path let a hard-linked alias in). */
@@ -383,7 +447,8 @@ export function signLog(o: { log: string; out: string; state: string; genesis?: 
 }
 
 /** What `sign` did: the receipts it added, the chain's length and head, and how many it couldn't read (round 12). */
-export type SignResult = { added: number; count: number; head: string | null; unsignable: number; unrecorded: number };
+/** `skipped` (round 13): merge events at ids <= 0, never receipted (no receipt holds such an id). */
+export type SignResult = { added: number; count: number; head: string | null; unsignable: number; unrecorded: number; skipped: number };
 
 /**
  * signLog's body, as the only signer of the chain at `statePath` (asOnlySigner). `after`: the chain a new chain
@@ -396,9 +461,13 @@ function signAs(o: { log: string; out: string; state: string; genesis?: boolean;
     if (o.genesis && lstatSync(o.out, { throwIfNoEntry: false })) {
       throw new ReceiptError(`--genesis never replaces anything at --out (${o.out}): receipts there are someone else's chain, never adopted; nothing was signed`);
     }
-    if (own) checkRegistry(own, statePath);
+    if (own) {
+      checkRegistry(own, statePath);
+      ensureSaved(own);
+    }
     const existing = readReceiptFiles(o.out);
-    const r = signEvents(existing, readReceiptEvents(o.log), o.signer, { from: own ?? 'genesis', ...(after ? { after: after.previous } : {}) });
+    const events = readReceiptEvents(o.log);
+    const r = signEvents(existing, events, o.signer, { from: own ?? 'genesis', ...(after ? { after: after.previous } : {}) });
     const text = r.added ? receiptsText(r.envelopes) : null;
     unchanged();
     let ref = own?.registry ?? null;
@@ -406,12 +475,20 @@ function signAs(o: { log: string; out: string; state: string; genesis?: boolean;
       // WHY (#918 rounds 11 and 12): every chain start is recorded in the signer's registry before its first receipt,
       // and the ended chain is marked only now, once the successor's receipts are computed: a failure that depends on
       // the log burns nothing (round-10 review, P3a). Its head must still be the one the successor names.
-      if (after?.held) stillAt(after.held, after.previous);
-      ref = recordStart(registry!, o.signer, statePath, realLog(o.log), after);
+      if (after?.held) {
+        const ended = stillAt(after.held, after.previous);
+        // Every cap before any registry write (round 13): the ended chain's marked state, and this chain's own state
+        // with the largest registry reference it can get.
+        stateText({ ...ended, ended: { successor: keyId(o.signer.publicKey), head: ended.head } });
+      }
+      stateText({ ...r.state, registry: { path: registry!, count: Number.MAX_SAFE_INTEGER, head: '0'.repeat(64) } });
+      ref = recordStart(registry!, o.signer, statePath, { path: realLog(o.log), first: events.length ? logDigest('', events[0]!) : null }, after);
       if (after?.held) markEnded(after.held, after.previous, o.signer);
     }
     const next = { ...r.state, registry: ref };
     if (!own || canonicalJson(own) !== canonicalJson(next)) save(next);
+    // Round 13: from here on, a rerun of this start is refused (recordStart), so a deleted state never starts again.
+    if (!own) recordSaved(registry!, ref!.head);
     if (text !== null) writeReceipts(o.out, text);
     const added = r.envelopes.slice(existing.length).map((e) => statementOf(e) as { kind?: string; at?: string });
     return {
@@ -420,6 +497,7 @@ function signAs(o: { log: string; out: string; state: string; genesis?: boolean;
       head: r.head,
       unsignable: added.filter((s) => s.kind === 'event.unsignable').length,
       unrecorded: added.filter((s) => s.kind !== 'chain.started' && s.kind !== 'key.rotated' && s.at === AT_UNRECORDED).length,
+      skipped: r.skipped,
     };
   });
 }
@@ -449,8 +527,18 @@ const hex64 = z.string().regex(/^[0-9a-f]{64}$/);
  *   one (row 3b: a cut copy hides it).
  */
 const RegistryLine = z.discriminatedUnion('kind', [
-  z.strictObject({ ...registryFields, kind: z.literal('start'), key: hex64, state: z.string().min(1), log: z.string().min(1), previous: z.strictObject({ chain: hex64, head: hex64 }).nullable() }),
+  /**
+   * `first` (round 13): the log's own digest step at its first event (logDigest from ""), or null for an empty log. A
+   * successor's log is its predecessor's when it is at the same real path OR starts with the same first event.
+   */
+  z.strictObject({ ...registryFields, kind: z.literal('start'), key: hex64, state: z.string().min(1), log: z.string().min(1), first: hex64.nullable(), previous: z.strictObject({ chain: hex64, head: hex64 }).nullable() }),
   z.strictObject({ ...registryFields, kind: z.literal('rotate'), chain: hex64, key: hex64 }),
+  /**
+   * The chain whose start line is `chain` saved its state (round 13): from then on a rerun of its start is never
+   * "finishing an interrupted start". WHY: round 12 couldn't tell a start that crashed before its state was written from
+   * a chain whose state and receipts were deleted later, and signed that chain again from its start (X1, X8).
+   */
+  z.strictObject({ ...registryFields, kind: z.literal('saved'), chain: hex64 }),
 ]);
 type RegistryLine = z.infer<typeof RegistryLine>;
 type StartLine = Extract<RegistryLine, { kind: 'start' }>;
@@ -463,7 +551,7 @@ const lineId = (text: string) => createHash('sha256').update(text, 'utf8').diges
  * can write, and not a chain state's own directory ("outside any per-chain --state").
  */
 function registryPlace(path: string, statePath: string): string {
-  const real = ownedStatePath(path);
+  const real = ownedStatePath(path, "the signer's chain registry");
   if (dirname(real) === dirname(statePath)) throw new ReceiptError(`the signer's chain registry goes outside any chain's state directory: ${path} is beside ${statePath}`);
   return real;
 }
@@ -553,10 +641,14 @@ type Ended = { previous: Predecessor; chain: string; held: { path: string; text:
  *   12: round 11 took a second first chain beside a recorded one, which signed the log again from event 1);
  * - a chain is succeeded at most once;
  * - a run that only finishes its own interrupted start records nothing new, and only as what its line recorded: the
- *   same state, log and `previous` (round 12: a successor's start finished as a first chain signed from event 1).
+ *   same state, log and `previous` (round 12: a successor's start finished as a first chain signed from event 1), and
+ *   only while the registry has no `saved` line for it (round 13: a saved start whose state is gone was deleted, never
+ *   interrupted);
+ * - a successor's log is its predecessor's: the same real path, or the same first event (round 13: the coordinator,
+ *   which owns its log, blocked every successor by moving the file; another instance's log is still refused).
  * Returns the registry reference the new state keeps.
  */
-function recordStart(registry: string, signer: ReceiptSigner, statePath: string, log: string, after: Ended | null): NonNullable<ChainState['registry']> {
+function recordStart(registry: string, signer: ReceiptSigner, statePath: string, log: LogIdentity, after: Ended | null): NonNullable<ChainState['registry']> {
   return withLock(join(dirname(registry), REGISTRY_LOCK), "another genesis holds the signer's registry lock", () => {
     const reg = readRegistry(registry);
     const mine = keyId(signer.publicKey);
@@ -565,6 +657,9 @@ function recordStart(registry: string, signer: ReceiptSigner, statePath: string,
     const line = reg.lines[at];
     if (line?.kind === 'start') {
       if (line.state !== statePath) throw new ReceiptError(`this key (${mine}) already started a chain (the signer's registry, at ${line.state}): a key starts one chain only; nothing was signed`);
+      if (reg.lines.some((l) => l.kind === 'saved' && l.chain === reg.ids[at])) {
+        throw new ReceiptError(`this key's chain saved its state at ${line.state} (the signer's registry says so), and it is gone now: deleted or moved, never an interrupted start, so it is never started again. The chain ends here: a new key succeeds it with --genesis --after a copy of its receipts; nothing was signed`);
+      }
       if (canonicalJson(line.previous) !== canonicalJson(previous)) {
         throw new ReceiptError(
           line.previous
@@ -572,29 +667,50 @@ function recordStart(registry: string, signer: ReceiptSigner, statePath: string,
             : `this key's start was recorded as the registry's first chain (previous: null): finish it only with a plain --genesis, never --after; nothing was signed`,
         );
       }
-      if (line.log !== log) throw new ReceiptError(`this key's start was recorded over the event log ${line.log}: finish it over that log; nothing was signed`);
+      if (!sameLog(line, log)) throw new ReceiptError(`this key's start was recorded over the event log ${line.log}: finish it over that log; nothing was signed`);
       // Finishing an interrupted start, as recorded: its line is there already.
       return { path: registry, count: at + 1, head: reg.ids[at]! };
     }
     const rotated = reg.lines.find((l) => l.kind === 'rotate' && l.key === mine);
-    if (rotated) throw new ReceiptError(`this key (${mine}) already signed a chain, rotated to in the chain whose start line is ${rotated.kind === 'rotate' ? rotated.chain : ''} (the signer's registry): a key starts no chain after that; nothing was signed`);
+    if (rotated) throw new ReceiptError(`this key (${mine}) already signed a chain, or was about to: the signer's registry holds a rotation to it (finished or interrupted), and a key starts no chain after that. Make a new key; nothing was signed`);
     const starts = reg.lines.filter((l): l is StartLine => l.kind === 'start');
-    const other = starts.find((l) => l.log !== log);
-    if (other) throw new ReceiptError(`the signer's chain registry ${registry} serves the event log ${other.log}, not ${log}: a registry serves one instance's log (a signer for several instances keeps a registry and a key for each); nothing was signed`);
     if (!previous && starts.length) {
       throw new ReceiptError(`the signer's chain registry ${registry} already holds its first chain (previous: null, key ${starts[0]!.key}): a registry holds one, and every later chain succeeds one (--genesis --after); nothing was signed`);
     }
     if (previous) {
       const i = reg.ids.indexOf(previous.chain);
-      if (reg.lines[i]?.kind !== 'start') throw new ReceiptError(`the chain to succeed isn't in the signer's registry ${registry}; nothing was signed`);
+      const predecessor = reg.lines[i];
+      if (predecessor?.kind !== 'start') throw new ReceiptError(`the chain to succeed isn't in the signer's registry ${registry}; nothing was signed`);
       const next = successorOf(reg, previous.chain);
       if (next) throw new ReceiptError(`the chain to succeed already has a successor, started by key ${next.key} (the signer's registry): a chain has one successor; nothing was signed`);
+      if (!sameLog(predecessor, log)) {
+        throw new ReceiptError(`the chain to succeed signed the event log ${predecessor.log}, and ${log.path} is neither at that path nor starts with its first event: a successor signs its predecessor's log, and a registry serves one instance's log (a signer for several instances keeps a registry and a key for each); nothing was signed`);
+      }
     }
-    return appendRegistry(reg, [{ kind: 'start', key: mine, state: statePath, log, previous }]);
+    return appendRegistry(reg, [{ kind: 'start', key: mine, state: statePath, log: log.path, first: log.first, previous }]);
   });
 }
 
-type RegistryAdd = { kind: 'start'; key: string; state: string; log: string; previous: { chain: string; head: string } | null } | { kind: 'rotate'; chain: string; key: string };
+/** An event log as a start line records it: its real path, and its digest step at its first event (null: empty). */
+type LogIdentity = { path: string; first: string | null };
+/** The same log: at the same real path, or starting with the same first event (round 13). */
+const sameLog = (line: StartLine, log: LogIdentity) => line.log === log.path || (line.first !== null && line.first === log.first);
+
+/** Record that the chain whose start line is `chain` saved its state (round 13), once. */
+function recordSaved(registry: string, chain: string): void {
+  withLock(join(dirname(registry), REGISTRY_LOCK), "another genesis or rotate holds the signer's registry lock", () => {
+    const reg = readRegistry(registry);
+    if (!reg.lines.some((l) => l.kind === 'saved' && l.chain === chain)) appendRegistry(reg, [{ kind: 'saved', chain }]);
+  });
+}
+
+/** An existing chain's `saved` line, written now if a crash right after its first state write left none. */
+function ensureSaved(own: ChainState): void {
+  const reg = readRegistry(own.registry!.path);
+  if (!reg.lines.some((l) => l.kind === 'saved' && l.chain === own.registry!.head)) recordSaved(own.registry!.path, own.registry!.head);
+}
+
+type RegistryAdd = { kind: 'start'; key: string; state: string; log: string; first: string | null; previous: { chain: string; head: string } | null } | { kind: 'rotate'; chain: string; key: string } | { kind: 'saved'; chain: string };
 
 /** Append `add` to the registry `reg` (read under its lock), flushed to disk; its count and head after. */
 function appendRegistry(reg: Registry, add: readonly RegistryAdd[]): NonNullable<ChainState['registry']> {
@@ -617,7 +733,9 @@ function recordRotate(own: ChainState, next: string): void {
   const registry = own.registry!.path;
   withLock(join(dirname(registry), REGISTRY_LOCK), "another genesis or rotate holds the signer's registry lock", () => {
     const reg = readRegistry(registry);
-    if (reg.lines.some((l) => (l.kind === 'start' || l.kind === 'rotate') && l.key === next)) throw new ReceiptError(`the next key (${next}) already signed a chain (the signer's registry): a key signs one chain only; nothing was rotated`);
+    if (reg.lines.some((l) => (l.kind === 'start' || l.kind === 'rotate') && l.key === next)) {
+      throw new ReceiptError(`the next key (${next}) is in the signer's registry already (it started a chain, a chain was rotated to it, or a rotation to it was interrupted): a key joins one chain only. Make a new key; nothing was rotated`);
+    }
     appendRegistry(reg, [{ kind: 'rotate', chain: own.registry!.head, key: next }]);
   });
 }
@@ -739,9 +857,12 @@ export function rotateFile(o: { out: string; state: string; signer: ReceiptSigne
   return asOnlySigner(statePath, (own, unchanged, save) => {
     if (!own) throw new ReceiptError(`the signer has no chain state at ${o.state}: there is no chain of its own to rotate`);
     checkRegistry(own, statePath);
+    ensureSaved(own);
     const envelopes = rotateChain(readReceiptFiles(o.out), o.signer, o.next, { from: own });
     const state = { ...chainStateOf(envelopes, own.start), registry: own.registry };
     const text = receiptsText(envelopes);
+    // Every cap before the registry's rotate line (round 13): a refusal here burns no key.
+    stateText(state);
     unchanged();
     recordRotate(own, keyId(o.next));
     save(state);

@@ -23,7 +23,7 @@ const chainFields = { schema: z.literal(RECEIPT_SCHEMA), seq: z.number().int().m
 const KeyRef = z.strictObject({ keyid: hex64, spki: z.string().min(1) });
 /**
  * What the signer checked itself (docs/design.md §5a, VERIFIES vs ATTESTS): each entry names a field of this statement
- * (a dotted path) or a fact only the signer derives (e.g. `result.tree`), how it was found (`git`, `github`), and the
+ * (a dotted path) or a fact only the signer derives (e.g. `result.tree`), how it was found (from git or GitHub), and the
  * value it found. Every field not listed is ATTESTED: the coordinator's claim as its log recorded it. Slice 1's
  * signer checks nothing itself, so the list is empty; slice 3 fills it without a format change.
  */
@@ -49,7 +49,8 @@ const Verified = z.array(z.strictObject({ field: z.string().min(1).max(100), how
  * redaction). Empty when nothing was cut. WHY (#918 round 9, route 2): one oversized event made a receipt nothing
  * could read; a cut field attests its first part and the digest of the whole (docs/design.md §5a, VERIFIES vs ATTESTS).
  */
-const Cut = z.record(z.string().min(1), z.strictObject({ sha256: hex64, length: z.number().int().min(0), of: z.enum(['whole', 'kept']) }));
+/** `of: 'unread'` (round 13): a log field past the signer's read bound, never read; `length` is its size in bytes. */
+const Cut = z.record(z.string().min(1), z.strictObject({ sha256: hex64, length: z.number().int().min(0), of: z.enum(['whole', 'kept', 'unread']) }));
 /**
  * A log event's id as a receipt holds it: its decimal digits, a JSON string, never a JSON number (#918 round 12). WHY:
  * SQLite's ids reach 2^63 - 1, and the coordinator owns the log; a JSON number past 2^53 can't be read back exactly,
@@ -135,6 +136,9 @@ export type Envelope = z.infer<typeof EnvelopeSchema>;
 /**
  * An event as the log stores it (src/events/log.ts). `raw`: its payload as stored (JSON text), when read from one.
  * `id`: an integer; the store reads it as a BigInt, so an id past 2^53 is exact (round 12).
+ * `hashes`: the SHA-256 of each column's bytes as stored, when the store read them in chunks (round 13); without them
+ * they are taken from the strings here. `unread`: the size in bytes of each field past the signer's read bound, which
+ * the store never read (`ts`, `actor` and `payload` are then "" and undefined).
  */
 export interface ReceiptEvent {
   id: number | bigint;
@@ -143,16 +147,24 @@ export interface ReceiptEvent {
   actor: string;
   payload: unknown;
   raw?: string;
+  hashes?: { ts: string; type: string; actor: string; payload: string };
+  unread?: { ts?: number; actor?: number; payload?: number };
 }
 
+const textHash = (s: string) => createHash('sha256').update(s, 'utf8').digest('hex');
+
 /**
- * The log's running digest after event `e`: SHA-256 over the canonical JSON of [the digest before it, the event's id,
- * time, type, actor and payload as stored]. INVARIANT: an unambiguous encoding (each field a JSON value, so no byte can
- * move from one field to the next and keep the digest: #918 round 3 measured that with newline-joined fields).
+ * The log's running digest after event `e`: SHA-256 over the canonical JSON of [the digest before it, the event's id
+ * (decimal), and the SHA-256 of its time, type, actor and payload as stored]. INVARIANT: an unambiguous encoding (each
+ * field its own JSON value, so no byte can move from one field to the next and keep the digest: #918 round 3 measured
+ * that with newline-joined fields). WHY each field by its hash (#918 round 13): round 12 put the fields themselves in
+ * one string, and one appended event of 90,000,000 control characters (6 each in JSON) was past V8's longest string,
+ * so every `sign` threw. A field's hash is taken from its bytes in bounded chunks (the store), never one string.
  */
 export function logDigest(before: string, e: ReceiptEvent): string {
+  const h = e.hashes ?? { ts: textHash(e.ts), type: textHash(e.type), actor: textHash(e.actor), payload: textHash(e.raw ?? JSON.stringify(e.payload ?? null)) };
   return createHash('sha256')
-    .update(canonicalJson([before, BigInt(e.id).toString(), e.ts, e.type, e.actor, e.raw ?? JSON.stringify(e.payload ?? null)]), 'utf8')
+    .update(canonicalJson([before, BigInt(e.id).toString(), h.ts, h.type, h.actor, h.payload]), 'utf8')
     .digest('hex');
 }
 
@@ -516,7 +528,20 @@ export const ITEMS_MAX = 64;
  */
 export const REDACT_MAX = 16 * 1024;
 
-type CutEntry = { sha256: string; length: number; of: 'whole' | 'kept' };
+/**
+ * The most bytes the store reads of a log event's ts, type or actor (round 13): more than any string the redactor
+ * keeps (REDACT_MAX UTF-16 code units are at most 48 KiB of UTF-8), so every field a receipt could keep is read.
+ */
+export const FIELD_READ_MAX = 64 * 1024;
+/**
+ * The most bytes the store reads of a merge event's or coordinator.started's payload (round 13); a longer one is
+ * never read or parsed, and its merge event is signed as `event.unsignable`. Every other event's payload is never read,
+ * only hashed. WHY: one appended 90 MB event stalled every `sign` (round-12 second review, row 1). 64 MiB keeps round
+ * 9's 50 MiB reason readable (it is cut in its receipt), and is far below V8's longest string.
+ */
+export const PAYLOAD_READ_MAX = 64 * 1024 * 1024;
+
+type CutEntry = { sha256: string; length: number; of: 'whole' | 'kept' | 'unread' };
 /** A value's SHA-256 over its canonical JSON (a lone surrogate is escaped there, never read as U+FFFD: row 7). */
 const digestOf = (v: unknown) => sha256(Buffer.from(canonicalJson(v), 'utf8'));
 
@@ -561,6 +586,10 @@ function bodyOf(e: ReceiptEvent, version: string | null, decided: Map<string, st
   const bounded = <T>(body: T) => {
     const cut: Record<string, CutEntry> = {};
     const out = redactBounded(body, '', cut) as T & { at: string };
+    // A field past the store's read bound was never read (round 13): the receipt keeps none of it, and says so.
+    for (const [field, size] of [['at', e.unread?.ts], ['instance', e.unread?.actor]] as const) {
+      if (size !== undefined) cut[field] = { length: size, sha256: digestOf(''), of: 'unread' };
+    }
     // WHY (#918 round 11, P3): a `ts` that is empty, or cut to nothing (over REDACT_MAX), would make `at` "", which
     // no receipt may be, and one appended event ended the chain. The receipt says so instead, and records the cut.
     if (out.at === '') {
@@ -571,8 +600,9 @@ function bodyOf(e: ReceiptEvent, version: string | null, decided: Map<string, st
   };
   if (e.type !== 'merge.decided' && e.type !== 'merge.done' && e.type !== 'merge.failed') return null;
   // A merge event whose payload doesn't match its schema is signed as unsignable (round 11, P3), never as if it
-  // were whole, and the chain goes on.
-  const unsignable = () => bounded({ ...common, kind: 'event.unsignable' as const, type: e.type, problem: "its payload doesn't match the event's schema" });
+  // were whole, and the chain goes on. So is one whose payload is past the store's read bound (round 13: never read).
+  const unsignable = (problem = "its payload doesn't match the event's schema") => bounded({ ...common, kind: 'event.unsignable' as const, type: e.type, problem });
+  if (e.unread?.payload !== undefined) return unsignable(`its payload is ${e.unread.payload} bytes, past the ${PAYLOAD_READ_MAX} the signer reads: never read`);
   if (e.type === 'merge.decided') {
     const r = EventSchemas['merge.decided'].safeParse(e.payload);
     if (!r.success) return unsignable();
@@ -597,7 +627,7 @@ export const AT_UNRECORDED = 'unrecorded';
  * under receipts already signed, or at an event that doesn't match its schema. `state`: the signer's chain state
  * after this (unchanged when nothing was added).
  */
-export function signEvents(existing: readonly unknown[], events: readonly ReceiptEvent[], signer: ReceiptSigner, o: SignOptions): { envelopes: Envelope[]; added: number; head: string | null; state: ChainState } {
+export function signEvents(existing: readonly unknown[], events: readonly ReceiptEvent[], signer: ReceiptSigner, o: SignOptions): { envelopes: Envelope[]; added: number; head: string | null; state: ChainState; skipped: number } {
   if (o.after && o.from !== 'genesis') throw new ReceiptError('only a new chain (genesis) names a chain it succeeds');
   // WHY (#918 round 9, routes 1b, 1c): a key that signed the ended chain, or a chain before it, never starts its
   // successor, so the same key never signs a second version of what it signed there.
@@ -616,7 +646,8 @@ export function signEvents(existing: readonly unknown[], events: readonly Receip
 }
 
 /** `existing` (verified as `state`) extended with a receipt for each merge event in `events` after its last one. */
-function extend(existing: readonly unknown[], state: Extract<ChainResult, { ok: true }>, events: readonly ReceiptEvent[], signer: ReceiptSigner, now: () => string, after: Predecessor | null): { envelopes: Envelope[]; added: number; head: string | null } {
+function extend(existing: readonly unknown[], state: Extract<ChainResult, { ok: true }>, events: readonly ReceiptEvent[], signer: ReceiptSigner, now: () => string, after: Predecessor | null): { envelopes: Envelope[]; added: number; head: string | null; skipped: number } {
+  let skipped = 0;
   const envelopes = [...(existing as Envelope[])];
   let seq = state.count;
   let prev = state.head;
@@ -661,13 +692,16 @@ function extend(existing: readonly unknown[], state: Extract<ChainResult, { ok: 
       version = v.success ? (v.data as EventPayload<'coordinator.started'>).version : null;
       continue;
     }
+    // A merge event at an id <= 0 is never receipted (no receipt holds such an id): counted, so it is never passed
+    // over silently (round 13, the round-12 second review's row 2).
+    if (eventId <= 0n && (e.type === 'merge.decided' || e.type === 'merge.done' || e.type === 'merge.failed')) skipped++;
     if (eventId <= last) continue;
     const body = bodyOf(e, version, decided, digests.get(eventId.toString())!);
     if (!body) continue;
     const id = push(body);
     if (body.kind === 'merge.decided') decided.set(`${body.inputs.pr}@${body.inputs.head}`, id);
   }
-  return { envelopes, added: seq - state.count, head: prev };
+  return { envelopes, added: seq - state.count, head: prev, skipped };
 }
 
 /**

@@ -154,10 +154,13 @@ test('an interrupted successor start is finished only as what the registry recor
   const b = keys();
   const B = { out: fresh('receipts.jsonl'), state: fresh('chain-state.json') };
   sign({ log: f.path, ...B, genesis: true, after: A.state, registry, signer: b.signer });
-  // The start as a crash right after the registry's start line leaves it: no ended mark yet, no state, no receipts.
+  // The start as a crash right after the registry's start line leaves it: no ended mark yet, no state, no receipts,
+  // and (round 13) no `saved` line after B's start line, which is the registry's last line.
   writeFileSync(A.state, unmarked);
   unlinkSync(B.state);
   unlinkSync(B.out);
+  const lines = readFileSync(registry, 'utf8').trimEnd().split('\n');
+  if ((JSON.parse(lines.at(-1)!) as { kind: string }).kind === 'saved') writeFileSync(registry, `${lines.slice(0, -1).join('\n')}\n`);
   // Finished as a first chain: refused, nothing written (round 11 took it, and B signed decision 42 flipped).
   assert.throws(() => sign({ log: f.path, ...B, genesis: true, registry, signer: b.signer }), /--after/);
   assert.ok(!existsSync(B.state) && !existsSync(B.out));
