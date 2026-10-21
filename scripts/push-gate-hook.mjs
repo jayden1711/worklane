@@ -23,8 +23,10 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 /** The gate and every file it imports (test/push-gate-hook.test.ts checks this against the real imports). */
+// check-table: never-shrink
 export const GATE_CODE = ['scripts/push-gate.mjs', 'scripts/lib/denylist.mjs'];
 /** The rule files the gate and gitleaks read from the directory they run in. */
+// check-table: never-shrink
 export const GATE_RULES = { required: ['.denylist.json'], optional: ['.denylist-allow', '.gitleaks.toml', '.gitleaksignore'] };
 const REMOTE = 'origin';
 const SELF = 'scripts/push-gate-hook.mjs';

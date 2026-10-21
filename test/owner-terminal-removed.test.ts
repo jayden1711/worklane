@@ -1,3 +1,4 @@
+// lint-test
 // #742: the browser owner terminal is removed, with its sudoers rule and its root console shell. What an existing
 // install relies on stays: the machine devices (an older --console-devices list, read as them, never more) still gate
 // machine changes from the page, and the break-glass stays. While an install still has the terminal's root files or

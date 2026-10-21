@@ -17,7 +17,7 @@ import { loadConfig, type Config } from './config/load.js';
 import { hookChecks, type Settings } from './agent-settings.js';
 import { loadFingerprintSets } from './guardrails/context.js';
 import { GIT_HOOK_MARKER } from './install.js';
-import { instanceFilesProblem, instancesDir, loadInstance, loadInstanceCredentials, readPolicy } from './instance.js';
+import { instanceFilesProblem, instancesDir, isInstalledKeyPath, loadInstance, loadInstanceCredentials, readPolicy, serverAgentHome, serverAgentUser } from './instance.js';
 import { githubRepoOf } from './managed-apps.js';
 import { INTAKE_FILE, loadIntakeConfig } from './intake/config.js';
 import { MACHINE_HELPER } from './machine.js';
@@ -25,7 +25,7 @@ import { MACHINE_OWNERS_FILE, readMachineOwners } from './machine-owners.js';
 import { CLAUDE_ACCOUNT_DIR, readAccountStatus } from './claude-account.js';
 import { readWatchState } from './main-watch.js';
 import { OFFSITE_FILE } from './offsite-backup.js';
-import { lingerEnabled, nodePathProblem, serviceManagerCheck, serviceManagerEnv, serviceProgram, serviceRunning, systemUnitActive } from './os/index.js';
+import { keyFileAccess, lingerEnabled, nodePathProblem, serviceManagerCheck, serviceManagerEnv, serviceProgram, serviceRunning, systemUnitActive } from './os/index.js';
 import { findTool, withToolPath } from './tool-path.js';
 import { FULL_RUN_LOCK } from './testrun/run.js';
 import { modelWarnings } from './model-routing.js';
@@ -140,6 +140,8 @@ export const HUB_SETUP_UNIT = `${BRAND.cli}-dashboard-hub-setup.service`;
 /** What a server instance's steps read from it: its credentials and its home. */
 export interface InstanceFacts {
   home: string;
+  /** The agent user's home (instance.yaml run_as.agent_home), when its agents run as their own user. */
+  agentHome?: string | undefined;
   credentials: {
     github: { kind: 'app'; key_path: string } | { kind: 'gh-config-dir'; path: string };
     claude?: { config_dir: string } | undefined;
@@ -683,9 +685,9 @@ export const SETUP_STEPS: readonly SetupStep[] = [
     optional: false,
     reach: 'all',
     // Issue #711: never through the dashboard, which never takes a Claude credential; root installs it on the machine.
-    today: "As root on the machine: run `claude setup-token` on a machine signed in to the agents' Claude account, then paste the token it prints at credentials.sh <name> claude's hidden prompt; or sign in there as the agent user (sudo -u wl-<name>-agent -i claude auth login). The dashboard never takes the token.",
+    today: "As root on the machine: run `claude setup-token` on a machine signed in to the agents' Claude account, then paste the token it prints at credentials.sh <name> claude's hidden prompt; or sign in there as the agent user (sudo -u wl-<name>-agent -i claude auth login); or bill the agents to an Anthropic API key instead: credentials.sh <name> api-key. The dashboard never takes the token or the key.",
     fix: { kind: 'signin', label: 'Show how' },
-    automation: 'scripts/setup/credentials.sh <name> claude (paste the token claude setup-token prints at its hidden prompt), or scripts/setup/add-project.sh <name> <owner/repo> at a root shell (its claude-token step)',
+    automation: 'scripts/setup/credentials.sh <name> claude (paste the token claude setup-token prints at its hidden prompt), or scripts/setup/add-project.sh <name> <owner/repo> at a root shell (its claude-token step); an API key instead: scripts/setup/credentials.sh <name> api-key',
     detect: (k) => {
       const i = k.inst();
       // WHY: add-project and credentials.sh keep the login in the agent user's own home, out of this user's sight;
@@ -1114,14 +1116,40 @@ export const SETUP_STEPS: readonly SetupStep[] = [
     modes: ['server'],
     optional: true,
     reach: 'few',
-    today: 'credentials.sh <name> api-key (or provider-key, eval-key) prompts for the key, then set it in credentials.yaml by hand and restart the instance.',
+    today: 'credentials.sh <name> api-key prompts for the key and writes agent_api_key into credentials.yaml itself; provider-key and eval-key print the line to set in credentials.yaml by hand. Then restart the instance.',
     fix: { kind: 'outside', url: 'https://console.anthropic.com/settings/keys', label: "Anthropic's console", why: "the key is made in the provider's console" },
     detect: (k) => {
       const i = k.inst();
       if (isErr(i)) return no(i.error);
       const key = i.credentials.agent_api_key;
       if (!key) return no('none set (only for API-key billing)');
-      return existsSync(key) ? ok(`agent API key installed (${key})`) : no(`credentials.yaml names ${key}, which isn't there`);
+      const instance = k.c.instance ?? '';
+      const agent = serverAgentUser(instance);
+      const again = `As root: sudo bash ${k.m.engine}/scripts/setup/credentials.sh ${instance} api-key`;
+      // WHY (#904): only this instance's key place in its agent user's home counts, that home from the user database
+      // (defaultFacts: serverAgentHome), never instance.yaml's agent_home, which this user writes. Any other file, however
+      // private to the agent user, the runner would send to the API as the key.
+      if (!i.agentHome || !isInstalledKeyPath(i.agentHome, key, instance)) return no(`credentials.yaml names ${key}, which is not where credentials.sh <name> api-key installs the key (${i.agentHome ?? `${agent}'s home`}/.config/${instance}-claude-key/api_key). ${again}`);
+      const seen = keyFileAccess(key);
+      // Seen from here (root's doctor, or a setup where this user can search that home): only the agent's own key file,
+      // one plain file, that this user doesn't own and its group and others can't read. Fail closed (#904).
+      if (seen.kind === 'file') {
+        if (!seen.regular) return no(`${key} is not a plain file. ${again}`);
+        if (seen.links !== 1) return no(`${key} has ${seen.links} links: the key is one file of its own. ${again}`);
+        if (seen.own) return no(`${key} is this user's own: the key must be ${agent}'s, which this user can't read. ${again}`);
+        if (seen.openToOthers) return no(`${key} is mode ${seen.mode}: only ${agent} may read it (0400). ${again}`);
+        return ok(`agent API key installed (${key}, mode ${seen.mode})`);
+      }
+      if (seen.kind === 'missing') return no(`credentials.yaml names ${key}, which isn't there. ${again}`);
+      if (seen.kind === 'unsupported') return no(`${key}: an API key's owner and mode can't be checked on this system`);
+      // WHY (#897): the key is in the agent user's home, which the coordinator user can't see into, as intended. What
+      // claude auth status (and its minimal real call) found as that user, as root recorded it, is the real state:
+      // that record's, for this instance's own agent user only.
+      const s = readAccountStatus(k.m.claudeAccountDir);
+      const u = s?.users.find((x) => x.instance === instance && x.kind === 'agent' && x.user === agent);
+      const when = s?.at ? ` at ${s.at}` : '';
+      if (u?.loggedIn && u.apiOk !== false && RUNTIME_LOGINS.api_key.includes(u.authMethod ?? '')) return ok(`agent API key set (${key}), in ${u.user}'s home, which this user can't see, as intended; ${u.user} is signed in with it (${u.authMethod}), per claude auth status as that user${when}`);
+      return no(`credentials.yaml names ${key}, in a home this user can't see (as intended), and root's account record shows no working API-key login for the instance's agent user${u ? ` (${u.error ?? (u.loggedIn ? `signed in with ${u.authMethod ?? 'no login method recorded'}` : 'not signed in')}${when})` : ''}. As root: sudo bash ${k.m.engine}/scripts/setup/claude-account.sh status ${k.c.instance}`);
     },
   },
   {
@@ -1333,7 +1361,8 @@ function defaultFacts(name: string | null): () => InstanceFacts | { error: strin
     if (!name) return { error: 'no instance: these steps are a server instance\'s' };
     try {
       const i = loadInstance(name, instancesDir());
-      return { home: i.home, credentials: i.credentials as InstanceFacts['credentials'] };
+      // WHY (#904): the agent's home from the user database, never instance.yaml's run_as.agent_home (this user writes it).
+      return { home: i.home, agentHome: i.runAs ? (serverAgentHome(name) ?? undefined) : undefined, credentials: i.credentials as InstanceFacts['credentials'] };
     } catch (e) {
       return { error: `instance ${name} can't be read here: ${firstLine((e as Error).message)}` };
     }

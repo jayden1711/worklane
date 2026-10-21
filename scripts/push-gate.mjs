@@ -160,6 +160,7 @@ function scanCommit(rules, sha, owner) {
 // Vendor attribution (#576): this repo's attribution is the DCO sign-off only. A Co-Authored-By trailer with any
 // address (or none: the commit's own email is dropped from the scan above, so this is its own check), a coding tool's
 // "Generated with" line, or its session trailer. Whole lines only: naming them in prose is fine.
+// check-table: never-shrink
 const ATTRIBUTION = [
   /^\s*Co-Authored-By\s*:/i,
   /^[^\p{L}\p{N}]*Generated (?:with|by) \[?(?:Claude|Codex|Copilot|Cursor|Gemini|Aider)\b/iu,
