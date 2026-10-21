@@ -2,7 +2,7 @@
 // merge started from, the issue it closed (or the PR's own opening paragraph), the issue's done_when (or the PR's
 // test files), and the merge for reference. A public task goes to the engine's templates/evals/tasks only when its
 // repository is the engine's own and public; every other one goes to the held-out store, never a repository.
-import { execFileSync } from 'node:child_process';
+import { execFileSync } from '../os/child-process.js';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { stringify as stringifyYaml } from 'yaml';

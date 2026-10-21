@@ -11,7 +11,11 @@
 //     The checks below are read on that main commit (CI runs on main, not on tags).
 //   - "main" (the default when the field is absent, so an existing install keeps following main): the newest
 //     commit on main's first-parent line that passes the checks below, only when it descends from the installed
-//     engine (never older, never a rewrite). One red tip doesn't block updates: from the tip back, newest first, it
+//     engine (never older, never a rewrite). A release install's engine is a release commit (main's commit plus
+//     dist/), which no main commit descends from: for it, and only once verifyRelease proves the installed commit
+//     is a signed release's, "the installed engine" here means the main commit that release was cut from
+//     (releaseBase, #895). A rollback still goes back to the release commit.
+//     One red tip doesn't block updates: from the tip back, newest first, it
 //     reads each commit's check runs (one API call each, a second apart, an older commit's red verdict remembered
 //     for an hour) and stops at the first fully green one that isn't held. It looks at most updates.json
 //     "max_lookback" commits back (default 20), only at commits newer than the installed one, and never at a merge's
@@ -1563,6 +1567,43 @@ function verifyRelease(repoUrl, tag, signers, exec, gitDir = VERIFY_GIT, exists 
   return { ok: true, base: parents[0], object: oid, commit };
 }
 
+/**
+ * The main commit a release install was cut from (#895), only when the installed commit is proven a release commit.
+ * A release install's engine is its tag's release commit: the main commit it was cut from plus dist/ only, never on
+ * main itself, so no main commit fast-forwards it. The main channel compares and walks main's first-parent line from
+ * this base instead, and nothing else changes: what is installed (and rolled back to) is still the release commit.
+ * The proof is verifyRelease's, unchanged, on the root-owned clone: refs/tags/<tag> resolved once to one signed tag
+ * object that verifies against the allowed signers file, names itself <tag> and points at the installed commit; that
+ * commit has one parent, on main; its diff from it is dist/ only. Which tag to verify comes from the repo's own tag
+ * list (ls-remote, as the release channel reads it): the newest vX.Y.Z whose commit is the installed one. That list
+ * only names a candidate, and the object ls-remote reported must be the one verified. Nothing a coordinator can write
+ * (the update log, the state file, the updater record, the installed package.json) is read. Refused, the caller keeps
+ * the plain refusal: no tag names the commit, the signers file is held (as on the release channel), the branch
+ * followed isn't main (the proof is of a parent on main), or anything about the tag fails.
+ * Returns { ok: true, base, tag } or { ok: false, reason }.
+ */
+function releaseBase(deps, cfg, current) {
+  const branch = cfg.branch || 'main';
+  if (branch !== 'main') return { ok: false, reason: `a release install moves onto main only when following main, not ${branch}` };
+  if (typeof deps.verifyRelease !== 'function') return { ok: false, reason: 'no release verifier' };
+  const signersHeld = typeof deps.signersHold === 'function' ? deps.signersHold() : null;
+  if (signersHeld) return { ok: false, reason: `the signers file changed outside updates.sh at ${signersHeld.at} and hasn't been acknowledged (${signersChangeText(signersHeld)}); no release tag is taken as proof until an admin runs: ${SIGNERS_ACK}` };
+  try {
+    const tag = newestRelease(parseTags(deps.exec('git', ['ls-remote', '--tags', cfg.repo_url, 'refs/tags/v*'])).filter((t) => t.commit === current));
+    if (!tag) return { ok: false, reason: `no release tag vX.Y.Z on ${cfg.repo_url} names it` };
+    const proof = deps.verifyRelease(cfg.repo_url, tag.tag, cfg.allowed_signers || ALLOWED_SIGNERS);
+    if (!proof || !proof.ok) return { ok: false, reason: (proof && proof.reason) || `${tag.tag} didn't verify` };
+    // INVARIANT: one tag object throughout, as on the release channel (#764): the one ls-remote listed, verified, at the installed commit.
+    if (proof.object !== tag.object || proof.commit !== current) {
+      return { ok: false, reason: `${tag.tag} moved between ls-remote and its verification: ls-remote said tag object ${short(tag.object)} at ${short(current)}, the one verified is ${short(proof.object)} at ${short(proof.commit)}` };
+    }
+    if (!OBJECT_ID.test(String(proof.base))) return { ok: false, reason: `${tag.tag}'s main commit isn't an object id` };
+    return { ok: true, base: proof.base, tag: tag.tag };
+  } catch (e) {
+    return { ok: false, reason: `couldn't check the release tags: ${firstLine(e)}` };
+  }
+}
+
 // ---------- the run ----------
 
 async function run(deps) {
@@ -1646,6 +1687,8 @@ async function update(deps, cfg, seen = {}) {
   const api = `https://api.github.com/repos/${gh.owner}/${gh.repo}`;
   // On main: the newer commits passed over for the one installed, and why.
   let skipped = [];
+  // On main, from a proven release install (releaseBase): its tag and the main commit it was cut from.
+  let crossing = null;
   if (release) {
     if (held && held.sha === head) return deps.note('held', head, heldReason(held), true);
     // The commit whose checks count: the main commit the release was cut from.
@@ -1670,11 +1713,25 @@ async function update(deps, cfg, seen = {}) {
     if (!checks.ok) return deps.note(checks.final ? 'refused' : 'waiting', head, checks.reason, checks.final);
   } else {
     if (!Array.isArray(cfg.required_checks) || cfg.required_checks.length === 0) return deps.note('refused', head, 'no required checks configured in updates.json', true);
-    const cmp = current ? await deps.fetchJson(`${api}/compare/${current}...${head}`) : { status: 'ahead', behind_by: 0, ahead_by: 0 };
-    const ff = fastForward(cmp);
+    let cmp = current ? await deps.fetchJson(`${api}/compare/${current}...${head}`) : { status: 'ahead', behind_by: 0, ahead_by: 0 };
+    let ff = fastForward(cmp);
+    // Where main's first-parent line is walked back to: the installed commit, or, for an installed commit proven a
+    // release commit (never on main), the main commit it was cut from (#895). Any doubt: the plain refusal.
+    let since = current;
+    if (!ff.ok && current && cmp) {
+      const rel = releaseBase(deps, cfg, current);
+      if (!rel.ok) return deps.note('refused', head, `${ff.reason}; and it isn't a verified release commit: ${rel.reason}`, true);
+      // Main is where the release was cut: its engine is that commit's, plus the built dist/.
+      if (rel.base === head) return upToDate(head);
+      cmp = await deps.fetchJson(`${api}/compare/${rel.base}...${head}`);
+      ff = fastForward(cmp);
+      if (!ff.ok) return deps.note('refused', head, `${ff.reason}, from ${short(rel.base)}, the main commit ${rel.tag} (installed) was cut from`, true);
+      since = rel.base;
+      crossing = { tag: rel.tag, base: rel.base };
+    }
     if (!ff.ok) return deps.note('refused', head, ff.reason, true);
-    // The newest commit on main's first-parent line, back to the installed one, whose checks are all green.
-    const pick = await chooseCommit(deps, cfg, api, firstParentLine(cmp, current, head, lookbackOf(cfg)), held);
+    // The newest commit on main's first-parent line, back to the installed one (or its release's main commit), whose checks are all green.
+    const pick = await chooseCommit(deps, cfg, api, firstParentLine(cmp, since, head, lookbackOf(cfg)), held);
     skipped = pick.skipped;
     if (pick.wait) return deps.note('waiting', pick.wait.sha, skipped.length ? `${pick.reason}; newer commits skipped: ${skippedText(skipped)}` : pick.reason, false);
     if (pick.none) {
@@ -1716,7 +1773,7 @@ async function update(deps, cfg, seen = {}) {
   if (skipped.length) {
     deps.log({ event: 'chose', from: current, to: head, tip: skipped[0].sha, skipped, reason: `${short(head)} is the newest commit on main's first-parent line with every check green; skipped ${skippedText(skipped)}` });
   }
-  deps.log({ event: 'attempt', from: current, to: head, ...(tag ? { tag: tag.tag } : {}) });
+  deps.log({ event: 'attempt', from: current, to: head, ...(tag ? { tag: tag.tag } : {}), ...(crossing ? { release: crossing } : {}) });
   const [file, ...args] = buildCommand(cfg.repo_url, head);
   try {
     deps.exec(file, args, { timeout: 40 * 60_000 });
@@ -2491,3 +2548,4 @@ module.exports = { slotPid, drainStep, drainDeadline, drainAfterMs, inFlight, re
 Object.assign(module.exports, { SUDOERS_INCIDENT, machineSudoersCheck, watchSudoers });
 Object.assign(module.exports, { SIGNERS_STATE, SIGNERS_INCIDENT, signersDigest, readSignersState, checkSigners, expectSigners, recordSigners, signersHold, acknowledgeSigners, takeAcknowledged, signersChangeText });
 Object.assign(module.exports, { SELF, SELF_PREV, SELF_RECORD, SELF_OFF, SELF_ROLLBACK, readRootFile, selfUpdateOff, verifiedUpdater, syncSelf, setupBefore, setupRecord });
+Object.assign(module.exports, { releaseBase });

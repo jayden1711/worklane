@@ -1,6 +1,6 @@
 // The optional desktop window for the dashboard. The shell (desktop/, Tauri)
 // only shows the local dashboard URL it is given; this finds and runs it.
-import { spawn } from 'node:child_process';
+import { spawn } from './os/child-process.js';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';

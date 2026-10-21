@@ -3,7 +3,7 @@
 // Hooks read one JSON object on stdin. Every failure inside a hook fails
 // closed (deny or block with a reason); the generated settings also append
 // `|| exit 2`, so a missing or crashing engine blocks instead of allowing.
-import { spawnSync } from 'node:child_process';
+import { spawnSync } from './os/child-process.js';
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { childEnv, shellCommand } from './os/index.js';

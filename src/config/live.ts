@@ -4,7 +4,7 @@
 // schema and checks as at start, and swapped in whole. A config that fails validation is never applied: the last
 // good one stays, and why is recorded. Settings read once at start (below) keep their running value until a restart.
 // Merges are still judged by the config at their own parent (main-watch.ts requiredAt): this is for everything else.
-import { spawnSync } from 'node:child_process';
+import { spawnSync } from '../os/child-process.js';
 import { BRAND } from '../brand.js';
 import { ConfigInvalid, loadConfigAt, type Config, type ConfigError } from './load.js';
 

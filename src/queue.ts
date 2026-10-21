@@ -1,6 +1,6 @@
 // Queued exclusive runs (e.g. a full test suite): `queue` spawns a detached runner that outlives its caller,
 // waits for the machine-wide full-run lock AND the project's idle probe, then runs and records the result.
-import { spawn } from 'node:child_process';
+import { spawn } from './os/child-process.js';
 import { closeSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { join } from 'node:path';

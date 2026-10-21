@@ -1,6 +1,6 @@
 // Skill lint: every SKILL.md has the six sections a skill needs to be used and checked, each with something in it.
 // Validate (how to check the result) matters most: a skill whose result can't be checked is a guess.
-import { execFileSync } from 'node:child_process';
+import { execFileSync } from './os/child-process.js';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 

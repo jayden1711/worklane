@@ -3,7 +3,7 @@
 // code read-only, and no write access to anything the broker later reads or executes: homes are hidden (ProtectHome),
 // the system and /var/lib are read-only (ProtectSystem=strict), its /tmp is its own (PrivateTmp). What comes back is
 // one line of JSON on stdout, which root parses as data (SnapshotSchema) and nothing else.
-import { spawnSync } from 'node:child_process';
+import { spawnSync } from '../os/child-process.js';
 import { SnapshotSchema, type McpRuntime } from '../plugins/approval.js';
 import { connectUpstream } from './upstream.js';
 import { launchServer, resolveArgv } from './launch.js';
