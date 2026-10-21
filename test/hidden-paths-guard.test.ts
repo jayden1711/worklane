@@ -193,7 +193,7 @@ test('one call\'s walks share one budget: many wildcard words over a large tree 
 
 // WHY (#887 review): the budget covers path checks too, and a long word or path is refused or skipped before any work,
 // so neither long words nor many brace alternatives can keep the check past the hook's timeout.
-test('long words and paths are settled fast: refused, or (a plain shell word no call can open) passed over', () => {
+test('long words and paths are settled fast: refused, or (a plain shell word no call can open) matched by its text alone', () => {
   const { p, decide } = hiddenProject();
   const timed = (tool: string, input: Record<string, unknown>) => {
     const started = performance.now();

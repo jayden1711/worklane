@@ -29,6 +29,14 @@ export const WALK_MS = 5_000;
  * PATH_MAX), and a bound keeps each access's work small; a longer one is refused before any work.
  */
 export const PATH_MAX = 4096;
+/**
+ * WHY (#887 review, round 4): the longest plain shell word matched against the secret globs by its text (one regex per
+ * glob, which no deadline can stop midway); a longer one is refused before that work, so one word can overrun the
+ * call's budget by a bounded amount only.
+ */
+export const WORD_MAX = 1_048_576;
+/** A long word as a reason names it: its start and its length. */
+const clip = (s: string) => (s.length > 200 ? `${s.slice(0, 200)}... (${s.length} characters)` : s);
 const tooLong = (what: string): Access => ({ kind: 'unchecked', why: `a ${what} longer than ${PATH_MAX} characters can't be checked for secret files` });
 
 /** The known tools' fields that hold only text, or that Glob, Grep and LS place themselves. Every other string a call holds is a path. */
@@ -453,9 +461,15 @@ export class Secrets {
     // WHY (#887 review): the budget covers every access, path checks too, not only the walks.
     if (this.late()) return `this call is too large to check for secret or hidden files (over ${WALK_MS / 1000} s); give ${tool} fewer or shorter paths`;
     const abs = this.absolute(a.target, cwd);
-    // A shell word that is still longer than PATH_MAX once resolved names nothing any system call can open; a tool's
-    // path that long is refused.
-    if (abs.length > PATH_MAX) return a.kind === 'path' && a.from === 'word' ? null : `a path longer than ${PATH_MAX} characters can't be checked for secret files`;
+    if (abs.length > PATH_MAX) {
+      // A tool's path that long is refused.
+      if (a.kind !== 'path' || a.from !== 'word') return `a path longer than ${PATH_MAX} characters can't be checked for secret files`;
+      // WHY (#887 review, round 4): no system call opens a shell word this long in one step, but a program that walks
+      // it a component at a time (`mkdir -p`) can act under a hidden directory. So it is matched against the globs by
+      // its text alone, as before #847: no file touched and no walk, one regex test per glob.
+      if (abs.length > WORD_MAX) return `a shell word longer than ${WORD_MAX} characters can't be checked for secret files`;
+      return this.at(abs) ? `${clip(a.target)} holds credentials; agents never read them` : null;
+    }
     if (this.at(abs) || this.at(real(abs))) return `${a.target} holds credentials; agents never read them`;
     if (a.kind === 'path') return null;
     let isDir = false;
