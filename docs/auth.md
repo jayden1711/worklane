@@ -43,7 +43,7 @@ There is one runtime: the locally installed, unmodified `claude` binary, headles
 
 | | Claude login (default) | API key (option) |
 |---|---|---|
-| Set by | root on the machine: a token from `claude setup-token` at `scripts/setup/credentials.sh <name> claude`'s hidden prompt, or `claude auth login` as the agent user (above) | `scripts/setup/credentials.sh <name> api-key`, then `agent_api_key: <file>` in the instance's `credentials.yaml` |
+| Set by | root on the machine: a token from `claude setup-token` at `scripts/setup/credentials.sh <name> claude`'s hidden prompt, or `claude auth login` as the agent user (above) | root on the machine: `scripts/setup/credentials.sh <name> api-key`, which installs the key for the agent user and, once `claude auth status` as that user reports an API-key login, writes `agent_api_key: <file>` into the instance's `credentials.yaml` (as the coordinator user, through `worklane instance set-agent-api-key`; the instance's GitHub credential comes first) and refreshes the account record. `add-project.sh`'s claude-token step counts it as the agents' login |
 | `agent_runtime` | `cli` | `api_key` for an instance with `agent_api_key` (an instance's billing is set by its own credentials, not by the repo's config); a local run without an instance uses `agent_runtime.kind: api_key` (`sdk` is accepted as the old name) and `ANTHROPIC_API_KEY` |
 | Where the credential lives | the agent user's Claude config dir | a file owned by the agent user, mode 0400, in a 0700 directory of its own |
 | How `claude` gets it | its own login | `apiKeyHelper` (`cat -- <file>`), passed in each run's `--settings` and in the agent user's own Claude settings, so `claude` reads the key as the agent user when it starts |

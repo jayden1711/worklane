@@ -1,3 +1,4 @@
+// lint-test
 // The updater keeps the root helpers (scripts/machine/, installed by the setup scripts) in step with each engine it
 // installs: a differing one is replaced atomically with the installed file's owner and mode; sudoers is never touched.
 import { test } from 'node:test';

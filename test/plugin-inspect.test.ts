@@ -17,6 +17,7 @@ function plugin(files: Record<string, string | object>): string {
   return root;
 }
 const skill = (name: string, extra = '', body = 'Do the thing.\n') => `---\nname: ${name}\ndescription: a skill\n${extra}---\n${body}`;
+// check-table: never-grow
 const GOOD = {
   '.claude-plugin/plugin.json': { name: 'review-kit', version: '1.2.0', description: 'x', author: { name: 'a' } },
   'skills/review/SKILL.md': skill('review'),

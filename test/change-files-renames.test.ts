@@ -1,3 +1,4 @@
+// lint-test
 // A renamed file is judged on its old and its new path (#683). With git's rename detection on, `git diff --numstat`
 // prints one combined path for a rename with an edit (`test/{review.test.ts => review2.test.ts}`), which matches no
 // glob: renaming a locked file and weakening it in the same change came out L0, and the content checks saw nothing.
@@ -738,6 +739,7 @@ const HELPER = 'src/coordinator/change-files.ts';
  * concatenation (`'--name' + '-only'`), a header regex that never spells the header, and a short or common flag
  * (`status -s`, `diff --check`) kept in a constant away from its subcommand.
  */
+// check-table: never-shrink
 const READER_WORDS: Record<string, RegExp> = {
   'name-only': /name-only/g,
   'name-status': /name-status/g,
@@ -765,6 +767,7 @@ const READER_WORDS: Record<string, RegExp> = {
  * Files outside the helper that hold one of those words, each with how many times (exactly: one more is a new reader)
  * and why. src/: none of them lists the paths a change touches for a decision. scripts/: their own -z parsing.
  */
+// check-table: never-grow
 const OUTSIDE_THE_HELPER: Record<string, { words: Record<string, number>; why: string; must?: RegExp[] }> = {
   // src/: not a list of what a change touches.
   'src/checkout-sync.ts': { words: { porcelain: 1 }, why: '`status --porcelain`: is the checkout clean (empty or not); no path is read' },
