@@ -1,0 +1,8 @@
+### After install
+
+- **Check the machine helper's sudoers rule once (#898).** `sudo bash /opt/worklane/current/scripts/setup/machine-helper.sh --check` prints `current`, `absent`, or `stale` with the exact command that rewrites it (`sudo bash /opt/worklane/current/scripts/setup/machine-helper.sh <every instance>`). A rule an older engine wrote stays as it was until that runs: the updater keeps the helper itself in step, never its sudoers rule. A rerun of `add-project.sh` for any instance now rewrites a stale rule too, to exactly what `machine-helper.sh` writes. If you edited the rule by hand, that rerun puts it back to the engine's rule.
+
+### Guardrail changes: what each one does
+
+- **add-project's machine-helper step is done only while the sudoers rule is the engine's, byte for byte (#898).** Before, the step counted as done when the helper's bytes matched and the instance was listed, so after an upgrade a rule from an older engine was never rewritten. Now a rule that differs in any way (narrower, wider, written for another sudo version, or edited) makes the step rerun `machine-helper.sh`, the rule's only writer. The rule therefore only ever ends up equal to that script's output, never wider.
+- **The updater names a stale machine helper rule (#898).** On every run, updates on or off, the updater runs the installed engine's `machine-helper.sh --check` as root. It does so only when the script and its `lib.sh` are root's and writable by no one else. A stale rule is said in the updater's journal and raised as a `machine_sudoers_stale` incident whose fix is the exact command. A current rule closes the incident. The updater never writes the rule and never holds an update on it.
