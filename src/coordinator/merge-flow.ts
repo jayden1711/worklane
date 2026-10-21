@@ -417,7 +417,9 @@ export abstract class MergeFlow extends FixRuns {
   /**
    * A fix-forward PR the vacuity gate holds while the default branch is red (#784, the owner's decision: it waits for
    * them): said at once on the ops channel, the urgent path fix-forward's own red-main posts take (opsPost, as
-   * fixForward's `post`), once per PR and head (its key; opsPost sends a key once). Main stays red until it merges.
+   * fixForward's `post`), once per PR and head (its key; opsPost sends a key once). Called when the hold is decided and
+   * on every later pass at that head, so a post the machine-wide limit put off ('limited') goes out once it allows.
+   * Main stays red until it merges.
    */
   private async redMainFixHeld(w: EventPayload<'pr.opened'>, pr: PullRequest, reasons: string[]) {
     if (!reasons.some((r) => r.startsWith('design: vacuity: '))) return;
@@ -674,6 +676,9 @@ export abstract class MergeFlow extends FixRuns {
       .filter((p) => p.number === number && p.head === pr.headSha)
       .at(-1);
     if (prior && !prior.auto) {
+      // A red-main notice the ops-post limit put off when this hold was decided: tried again on each pass until it goes
+      // (#784 round 3); opsPost's key sends it once per PR and head.
+      await this.redMainFixHeld(w, pr, prior.reasons);
       // An owner's approval from a Discord thread at this very head: merged through the normal path below.
       const approved = mergeApproval(this.d.log, number, pr.headSha);
       if (approved) return this.mergeApproved(w, pr, approved.by);
@@ -1649,7 +1654,7 @@ export abstract class MergeFlow extends FixRuns {
         }
         if (error === null && !existsSync(cov)) error = 'no coverage was written (runner.one must run the tests in Node for a coverage run)';
         // The directory and its files are the test's: read as hostile input, bounded, and only fixed text on failure.
-        if (error === null) touched = touchedAppFiles(cov, path, run.appPaths);
+        if (error === null) touched = touchedAppFiles(cov, path, run.appPaths, run.app);
       }
     } catch (e) {
       // CoverageUnreadable's message is fixed text; anything else (a worktree or git failure) is redacted.

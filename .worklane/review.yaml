@@ -34,6 +34,7 @@ categories:
     - test/merge-vacuity-hostile.test.ts
     - test/merge-vacuity-decisions.test.ts
     - test/merge-vacuity-doctor.test.ts
+    - test/merge-vacuity-bounds.test.ts
     # Listed here only, not locked in code: the tests' own machine (every test runs inside it), the check that engine
     # code never writes a slot-directory file in place (and that a slot path reaches no other writer, #772), and the
     # tests that assert the agents' tool guard denies a call.

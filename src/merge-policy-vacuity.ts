@@ -57,7 +57,8 @@ export interface VacuityMeasured {
 /** Why it waits (empty: it doesn't); `run`, with no reasons: the coverage run still to make (it waits until then). */
 export interface VacuityCheck {
   reasons: string[];
-  run?: { tests: string[]; appPaths: string[] };
+  /** `app`: the changed app files, the only ones the run records as touched (#784 round 3: bounded by the PR). */
+  run?: { tests: string[]; appPaths: string[]; app: string[] };
 }
 
 const list = (p: string[]) => `${p.slice(0, 3).map(shownPath).join(', ')}${p.length > 3 ? ` and ${p.length - 3} more` : ''}`;
@@ -94,12 +95,16 @@ export function vacuitySnippet(v: Partial<VacuityConfig> | undefined, runOne: st
 }
 
 /**
- * A runner.one the coverage run can measure: one test file run in Node (node --test, tsx --test, vitest run, jest),
- * with no shell operator around it. Bun runs no V8 coverage of Node's, so bunx is never one.
+ * The runner.one forms the coverage run can measure, matched against the WHOLE command: one test file run in Node
+ * (node --test, tsx --test, vitest run, jest), with at most a package runner before it (npx, pnpm exec, yarn), plain
+ * option words after it (`--x`, `--x=value`), then `{file}` last. Single spaces only: no newline or tab (a second
+ * command), no quote, no shell operator, nothing else before or after. Bun runs no V8 coverage of Node's: never bunx.
  */
+const RUNNER_ONE = /^(?:(?:npx|pnpm exec|yarn) )?(?:node --test|tsx --test|vitest run|jest)(?: --?[A-Za-z0-9][A-Za-z0-9._:/=@-]*)* \{file\}$/;
+
+/** A runner.one the coverage run can measure (RUNNER_ONE). */
 export function coverageRunnerOne(one: string | null | undefined): boolean {
-  if (!one || /[|;&<>`$()]/.test(one.replaceAll('{file}', '')) || /^\s*bunx?\b/.test(one)) return false;
-  return /(?:^|\s)(?:node\s+--test|tsx\s+--test|vitest\s+run|jest)\s(?:[^\s]+\s)*\{file\}\s*$/.test(one);
+  return typeof one === 'string' && RUNNER_ONE.test(one);
 }
 
 /** Doctor's word on the merge gate's vacuity check (#784): whether app-code PRs can auto-merge here, and how if not. */
@@ -154,7 +159,7 @@ export function vacuityCheck(o: {
   const last = o.runs.last && o.runs.last.tests.join('\0') === tests.join('\0') ? o.runs.last : null;
   if (!last) {
     if (o.runs.started >= VACUITY_TRIES) return { reasons: [`design: vacuity: its coverage run started ${o.runs.started} times at this head and never finished`] };
-    return { reasons: [], run: { tests, appPaths: cfg.app_paths } };
+    return { reasons: [], run: { tests, appPaths: cfg.app_paths, app } };
   }
   if (last.error !== null) return { reasons: [`design: vacuity: its coverage run failed: ${last.error}`] };
   if (!app.some((p) => last.touched.includes(p))) return { reasons: [`design: vacuity: its tests (${list(tests)}) ran none of the app code it changes (${list(app)})`] };

@@ -30,7 +30,7 @@ function check(o: { files: Record<string, string | null>; kept?: Record<string, 
 
 test('vacuity: its tests include those its task\'s done_when names (what verification ran), changed or not, once each, if the head has them', () => {
   const v = check({ files: { 'src/a.js': 'x' }, kept: { 'test/price.test.js': ASSERTS }, contractTests: ['test/price.test.js'] });
-  assert.deepEqual(v, { reasons: [], run: { tests: ['test/price.test.js'], appPaths: ['src/**'] } }, 'an unchanged test the contract names');
+  assert.deepEqual(v, { reasons: [], run: { tests: ['test/price.test.js'], appPaths: ['src/**'], app: ['src/a.js'] } }, 'an unchanged test the contract names');
   assert.deepEqual(check({ files: { 'src/a.js': 'x', 'test/a.test.js': ASSERTS }, kept: { 'test/price.test.js': ASSERTS }, contractTests: ['test/price.test.js', 'test/a.test.js'] }).run?.tests, ['test/a.test.js', 'test/price.test.js'], 'changed ones first, no repeats');
   assert.deepEqual(check({ files: { 'src/a.js': 'x' }, contractTests: ['test/gone.test.js'] }).reasons, [`design: vacuity: it changes app code (src/a.js) ${NONE}`], 'one the head lacks is no test');
   assert.deepEqual(check({ files: { 'src/a.js': 'x' }, kept: { 'test/price.test.js': NO_ASSERT }, contractTests: ['test/price.test.js'] }).reasons, ['design: vacuity: its tests (test/price.test.js) have no assertion matching /\\b(assert|expect)\\b/']);
@@ -39,7 +39,7 @@ test('vacuity: its tests include those its task\'s done_when names (what verific
 
 test('vacuity: app code changed with a test that asserts and nothing measured yet: the gate asks for the coverage run first', () => {
   const v = check({ files: { 'src/a.js': 'x', 'test/a.test.js': ASSERTS } });
-  assert.deepEqual(v, { reasons: [], run: { tests: ['test/a.test.js'], appPaths: ['src/**'] } }, 'no reason of its own: pending (mergeDecision holds it, below)');
+  assert.deepEqual(v, { reasons: [], run: { tests: ['test/a.test.js'], appPaths: ['src/**'], app: ['src/a.js'] } }, 'no reason of its own: pending (mergeDecision holds it, below)');
 });
 
 test('vacuity: a measured run that executed a changed app file clears it; one that executed none holds it, naming both sides', () => {

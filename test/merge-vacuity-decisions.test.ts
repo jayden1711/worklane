@@ -10,6 +10,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { performance } from 'node:perf_hooks';
 import { parse } from 'yaml';
 import { detectProject, draftTests, planFrom } from '../src/auto-config.js';
 import { BRAND } from '../src/brand.js';
@@ -160,10 +161,10 @@ test('(d) a source map that is a FIFO, or over its size limit, is never read: th
   writeFileSync(join(cov, 'c.json'), JSON.stringify({ result: [fn('dist/a.js'), fn('dist/b.js')] }));
   const probe = "const [mod, cov, root] = process.argv.slice(1); const m = await import(mod); console.log(JSON.stringify(m.touchedAppFiles(cov, root, ['src/**'])));";
   const mod = new URL('../src/vacuity.js', import.meta.url).href;
-  const t0 = Date.now();
+  const t0 = performance.now();
   const r = execFileSync(process.execPath, ['--input-type=module', '-e', probe, mod, cov, root], { encoding: 'utf8', timeout: 10_000, killSignal: 'SIGKILL' });
   assert.deepEqual(JSON.parse(r.trim()), [], 'nothing mapped');
-  assert.ok(Date.now() - t0 < 5_000, 'at once');
+  assert.ok(performance.now() - t0 < 5_000, 'at once');
 });
 
 // ---- (c) fix-forward's PR held while main is red

@@ -101,8 +101,12 @@ function readCoverageDir(dir: string): V8Coverage[] {
   return out;
 }
 
-/** What the source maps of a coverage run may add up to before the reader stops mapping (they are the build's: hostile too). */
-export const SOURCE_MAP_LIMITS = { maps: 1024, mapBytes: 8 * 1024 * 1024, totalBytes: 64 * 1024 * 1024 } as const;
+/**
+ * What the source maps of a coverage run may add up to (they are the build's: hostile too). Past maps or bytes, a map
+ * maps nothing; past `sources` (every source every map names, real or not), the whole read fails closed
+ * (CoverageUnreadable), so the work it does and what it returns stay small whatever the maps say (#784 round 3).
+ */
+export const SOURCE_MAP_LIMITS = { maps: 1024, mapBytes: 8 * 1024 * 1024, totalBytes: 64 * 1024 * 1024, sources: 5000 } as const;
 
 const under = (p: string, base: string) => {
   const rel = relative(base, p);
@@ -115,7 +119,7 @@ const under = (p: string, base: string) => {
  * byte limits (`budget`, shared by every map of the run), opened without following a link or waiting on a FIFO. A map
  * it can't read, or one over the limits, maps nothing: that coverage then counts for no source file, so the PR waits.
  */
-function sourcesOf(file: string, realRoot: string, budget: { maps: number; bytes: number }): string[] {
+function sourcesOf(file: string, realRoot: string, budget: { maps: number; bytes: number; sources: number }): string[] {
   const map = `${file}.map`;
   let size: number;
   try {
@@ -137,9 +141,11 @@ function sourcesOf(file: string, realRoot: string, budget: { maps: number; bytes
     return [];
   }
   if (!m || typeof m !== 'object' || !Array.isArray(m.sources)) return [];
+  budget.sources += m.sources.length;
+  if (budget.sources > SOURCE_MAP_LIMITS.sources) throw new CoverageUnreadable(`the coverage directory's source maps name more than ${SOURCE_MAP_LIMITS.sources} source files`);
   const base = resolve(dirname(map), typeof m.sourceRoot === 'string' ? m.sourceRoot : '');
   const out: string[] = [];
-  for (const s of m.sources.slice(0, 1000)) {
+  for (const s of m.sources) {
     if (typeof s !== 'string' || s.startsWith('webpack:') || /^[a-z][a-z0-9+.-]*:\/\//i.test(s)) continue;
     const src = resolve(base, s);
     if (under(src, realRoot)) out.push(relative(realRoot, src).split('\\').join('/'));
@@ -151,13 +157,15 @@ function sourcesOf(file: string, realRoot: string, budget: { maps: number; bytes
  * App files in which at least one non-top-level function ran: the script's own path, or, for a built script outside
  * the app paths (dist/), each app file its source map names. The coverage directory is read as hostile input
  * (readCoverageDir: throws CoverageUnreadable), so are the maps (sourcesOf), and only script paths under `root` are
- * resolved on disk.
+ * resolved on disk. `only`: of those, just these files (the merge gate passes the PR's changed app files, so what it
+ * records is never more than the PR's own list, whatever the coverage or a map names).
  */
-export function touchedAppFiles(coverageDir: string, root: string, appPaths: string[]): string[] {
+export function touchedAppFiles(coverageDir: string, root: string, appPaths: string[], only?: readonly string[]): string[] {
   const res = appPaths.map((g) => globToRegExp(g));
   const realRoot = realpathSync(root);
-  const isApp = (rel: string) => !rel.startsWith('..') && res.some((re) => re.test(rel));
-  const budget = { maps: 0, bytes: 0 };
+  const wanted = only ? new Set(only) : null;
+  const isApp = (rel: string) => !rel.startsWith('..') && res.some((re) => re.test(rel)) && (!wanted || wanted.has(rel));
+  const budget = { maps: 0, bytes: 0, sources: 0 };
   const mapped = new Map<string, string[]>();
   const touched = new Set<string>();
   for (const cov of readCoverageDir(coverageDir)) {
