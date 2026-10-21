@@ -47,7 +47,8 @@ done
 case "$cmd" in
   status) [ -z "$name$devices$max" ] || { echo "$usage" >&2; exit 2; } ;;
   enable) instance_name_ok "$name" || { echo "not an instance name: ${name:-(none)}" >&2; exit 2; } ;;
-  disable) instance_name_ok "$name" && [ -z "$devices$max" ] || { echo "$usage" >&2; exit 2; } ;;
+  # An instance made before its name was reserved (machine, console) can still lose what it has (#902 round 9).
+  disable) kept_instance_name_ok "$name" && [ -z "$devices$max" ] || { echo "$usage" >&2; exit 2; } ;;
   holder) [[ "$name" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] && [ -z "$devices$max" ] || { echo "$usage" >&2; exit 2; } ;;
   *) echo "$usage" >&2; exit 2 ;;
 esac

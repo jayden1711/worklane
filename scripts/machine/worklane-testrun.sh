@@ -195,6 +195,7 @@ instance_name_problem() {
   elif [ "$n" = dash ]; then echo "wl-dash is the dashboard viewer"
   elif [ "$n" = hub ] || [ "$n" = hub-setup ]; then echo "worklane-dashboard-$n.service is the dashboard hub's"
   elif [ "$n" = update ] || [ "$n" = tailscale ] || [ "$n" = claude-account ] || [ "$n" = egress ]; then echo "worklane-$n.service is the machine's own"
+  elif [ "$n" = machine ] || [ "$n" = console ]; then echo "/etc/sudoers.d/worklane-$n is the machine's own sudoers file"
   elif [ "$n" = agent ] || [ "$n" = eval ] || [ "$n" = work ] || [ "$n" = mcp ] || [ "$n" = mcpc ] || [ "$n" = mcpctl ]; then echo "its test user wl-test-$n would be instance test's $n name, and wl-ci-$n the $n name of instance ci"
   elif [[ "$n" == test-* ]]; then echo "wl-$n is the test user of instance ${n#test-}"
   elif [[ "$n" == ci-* ]]; then echo "wl-$n is the user of CI runner ${n#ci-}"
@@ -207,6 +208,13 @@ instance_name_problem() {
 }
 [[ "$name" =~ ^[a-z][a-z0-9-]{0,20}$ ]] || die "usage: worklane-testrun <name> create|store-tips|file|cache|shared|db-start|fetch|exec|wipe|check|version ..."
 why="$(instance_name_problem "$name")"
+# kept: machine console
+# An instance made before those two names were reserved (#902: their sudoers files are the machine's own) still wipes
+# and checks what it has (decision guide 2). Every other verb keeps the rule above, so it starts no test run of its own.
+# check still makes and runs root's own fixed probe (a run from root's one-commit bundle, the fixed probe command, then
+# wiped), as for any instance: no command, GPU or network the coordinator chooses reaches it. The same names as lib.sh
+# LATER_RESERVED_NAMES (test/legacy-kept-names.ts checks every refused name against these verbs).
+case "$cmd" in wipe | check | version) if [ "$name" = machine ] || [ "$name" = console ]; then why=""; fi ;; esac
 [ -z "$why" ] || die "instance name $name: $why"
 user="wl-test-$name"
 root="$BASE/$name"
@@ -1098,12 +1106,14 @@ userns_unsupported() {
 # Whether user <u> is the test user of an instance on this machine: wl-test-<name>, <name> a valid instance name
 # (instance_name_problem: so never instance test's wl-test-agent, wl-test-eval or wl-test-mcp, which the bare pattern
 # wl-test-* would take), and test-user.sh install has made that instance's $BASE/<name>. test-user.sh's is_test_user is
-# the same rule (a test keeps them alike).
+# the same rule (a test keeps them alike). An instance made before machine and console were reserved (#902) keeps its
+# test user, as on main: test-user.sh install lists it on the wrapper's ACL, which must stay no problem for every other
+# instance's run (#545: a problem there sends every run to the host's user namespace).
 is_test_user() {
   local n
   [[ "$1" =~ ^wl-test-(.+)$ ]] || return 1
   n="${BASH_REMATCH[1]}"
-  [ -z "$(instance_name_problem "$n")" ] && [ -d "$BASE/$n" ] && [ ! -L "$BASE/$n" ]
+  { [ "$n" = machine ] || [ "$n" = console ] || [ -z "$(instance_name_problem "$n")" ]; } && [ -d "$BASE/$n" ] && [ ! -L "$BASE/$n" ]
 }
 
 # Why the wrapper's ACL (getfacl -cp, given) lets anyone but the test users run it, or anyone but root write it; empty
