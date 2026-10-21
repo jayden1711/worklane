@@ -170,8 +170,12 @@ test('coordinator: a result measured at one head is never applied to the head af
 });
 
 test('watch: a coverage run that sleeps never holds up the PR watch: the pass ends at once, the PR waits unmerged and unannounced', { skip }, async () => {
-  // Its checks pass as the task's verification runs them; under the gate's coverage run, the test sleeps 30 s first.
-  const t = await openPr({ 'evaluator-verdict': approve() }, { autoMerge: () => true, edit: (cfg) => void (cfg.tests.runner.one = 'if [ -n "$NODE_V8_COVERAGE" ]; then sleep 30; fi; node --test --test-reporter=spec {file}') });
+  // Its checks pass as the task's verification runs them; once the PR is open, runner.one names a reporter that sleeps
+  // 30 s first, so the gate's coverage run does.
+  const t = await openPr({ 'evaluator-verdict': approve() }, { autoMerge: () => true });
+  const reporter = join(mkdtempSync(join(tmpdir(), 'sleepy-')), 'sleep.mjs');
+  writeFileSync(reporter, 'export default async function* (source) {\n  await new Promise((r) => setTimeout(r, 30_000));\n  for await (const _ of source) yield \'\';\n}\n');
+  t.f.cfg.tests.runner.one = `node --test --test-reporter=${reporter} {file}`;
   const ticks = t.f.log.read(0, ['coordinator.tick']).length;
   t.f.backlog.setChecks(t.pr().headSha, passing);
   const t0 = performance.now();

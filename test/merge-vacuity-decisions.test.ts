@@ -41,12 +41,14 @@ function drafted(files: Record<string, string>): { text: string; doc: ReturnType
 }
 const pkg = (o: object) => JSON.stringify(o);
 
-test('(a) auto-config: a runner that runs one test file in Node turns the coverage run on (node --test, vitest)', () => {
+test('(a) auto-config: node --test turns the coverage run on; vitest (its transform counts for nothing) leaves it off, with the note', () => {
   const node = drafted({ 'package.json': pkg({ scripts: { test: 'node --test' } }), 'package-lock.json': '{}', 'src/a.js': '', 'test/a.test.js': "import assert from 'node:assert';" });
   assert.deepEqual([node.doc.runner.one, node.doc.vacuity?.dynamic], ['node --test {file}', true]);
-  const vitest = drafted({ 'package.json': pkg({ scripts: { test: 'vitest run' }, devDependencies: { vitest: '1' } }), 'package-lock.json': '{}', 'src/a.ts': '', 'src/a.test.ts': 'expect(1)' });
-  assert.deepEqual([vitest.doc.runner.one, vitest.doc.vacuity?.dynamic], ['npx vitest run {file}', true]);
   assert.doesNotMatch(node.text, /vacuity\.dynamic is false/, 'no note when it is on');
+  const vitest = drafted({ 'package.json': pkg({ scripts: { test: 'vitest run' }, devDependencies: { vitest: '1' } }), 'package-lock.json': '{}', 'src/a.ts': '', 'src/a.test.ts': 'expect(1)' });
+  assert.deepEqual([vitest.doc.runner.one, vitest.doc.vacuity?.dynamic], ['npx vitest run {file}', false]);
+  assert.match(vitest.text, /# note: vacuity\.dynamic is false/);
+  assert.match(vitest.text, /#\s+one: "node --test \{file\}"/);
 });
 
 test('(a) auto-config: where none is found, the run stays off and the draft says how to turn it on, with lines to paste', () => {
@@ -204,15 +206,16 @@ function fakeChat() {
 test('(c) a fix-forward PR the gate holds while main is red is said at once on the ops channel, once per PR and head', { skip }, async () => {
   const chat = fakeChat();
   const intake = IntakeConfig.parse({ version: 1, discord: { enabled: true, guild: '555555', channels: ['111111'], allowed_senders: ['100000000001'], people: { '100000000001': 'example-owner' }, ops_channel: OPS, dashboard_url: 'https://dashboard.example.test', owners: ['100000000001'] } });
-  // Passes as the task's own checks run it; fails under the gate's coverage run: the gate holds it.
   const t = await openPr({ 'evaluator-verdict': approve() }, {
     autoMerge: () => true,
     edit: (cfg) => {
-      cfg.tests.runner.one = 'node --test --test-reporter=spec {file} && test -z "$NODE_V8_COVERAGE"';
       cfg.project.fix_forward.max_attempts = 0; // fix-forward's own steps stay out of the way: only its record is read
     },
     deps: { intake: { config: () => intake, sources: [chat] } },
   });
+  // Passed as the task's own checks ran it; once the PR is open, the gate's coverage run fails (a reporter that isn't
+  // there): the gate holds it.
+  t.f.cfg.tests.runner.one = 'node --test --test-reporter=no-such-reporter {file}';
   // The default branch is red, and this PR's task is fix-forward's fix for it.
   t.f.log.append('fix_forward.started', { sha: 'a'.repeat(40), number: null, failed: ['ci'], last_green: null, candidates: [] }, 'alice');
   t.f.log.append('fix_forward.attempt', { sha: 'a'.repeat(40), attempt: 1, issue: t.n, culprit: null }, 'alice');

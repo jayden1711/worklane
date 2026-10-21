@@ -149,7 +149,7 @@ test('attack 6: the reader process has a wall-clock limit: past it the read fail
   assert.equal(typeof read, 'function', 'the read runs in a process of its own');
   const cov = mkdtempSync(join(tmpdir(), 'slow-cov-'));
   const t0 = performance.now();
-  const r = await read!({ coverageDir: cov, root: cov, appPaths: ['src/**'], only: [], lines: {} }, 1);
+  const r = await read!({ coverageDir: cov, baselineDir: cov, root: cov, appPaths: ['src/**'], only: [], hunks: {} }, 1);
   assert.match(r.error ?? '', /^the coverage directory took longer than \d+ s to read$/);
   assert.ok(performance.now() - t0 < 5_000);
 });

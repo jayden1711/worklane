@@ -20,15 +20,15 @@ import { instructionTargets } from '../skilleval.js';
 import { checkedPush } from '../push-check.js';
 import { conflictTrigger } from '../conflicts.js';
 import { abortMerge, mergeBaseInto } from '../merge-base.js';
-import { changedNamesOrNull } from './change-files.js';
+import { changedLineNumbers, changedLinesCommand, changedNamesOrNull } from './change-files.js';
 import { lightOutcome } from '../light-check.js';
 import { readiness, requiredOutcomes, type Readiness } from '../pr-watch.js';
 import { checksFor, effectiveClass, riskClassOf, rulesetHold } from '../pr-rules.js';
 import { instructionEvalReasons, mergeDecision, neverAutoMerge, outsidePlanReasons, REVERT_BRANCH_PREFIX, waitCategoriesOf, type MergeDecision } from '../merge-policy.js';
 import { deferDelay, deferrable, isBehind, mergeDeferral, mergeMessage, MergePass, mergeRefusal, type Deferral } from '../merge-policy-train.js';
 import { weakeningOf } from '../merge-policy-weakening.js';
-import { VACUITY_UNMEASURED, vacuityCheck, type VacuityCheck } from '../merge-policy-vacuity.js';
-import { CoverageUnreadable, readTouchedInChild, type LineSpans } from '../vacuity.js';
+import { baselineRunnerOne, coverageRunnerOne, VACUITY_UNMEASURED, vacuityCheck, type VacuityCheck } from '../merge-policy-vacuity.js';
+import { codeLines, CoverageUnreadable, readTouchedInChild, type ChangedHunkSpots } from '../vacuity.js';
 
 /** A coverage run to make: vacuityCheck's, with the commit the PR's change is measured from (its changed lines). */
 type VacuityRun = NonNullable<VacuityCheck['run']> & { base: string };
@@ -624,7 +624,12 @@ export abstract class MergeFlow extends FixRuns {
     } catch {
       // an unreadable policy is "off"
     }
-    const vacuity = this.vacuityFor(n, number, pr.headSha, files.map((f) => f.path));
+    // #784 round 5 (A1): for vacuity, the PR's own change is measured from where its head meets the default branch's
+    // current tip, so the default branch's files and tests a merge brought in (a conflict fix's: fix-runs.ts) are never
+    // taken for the PR's own.
+    const vacuityBase = this.vacuityBase(base, pr.headSha);
+    const vacuityFiles = vacuityBase === base ? files : this.changeFiles(this.d.repo, vacuityBase, pr.headSha);
+    const vacuity = this.vacuityFor(n, number, pr.headSha, vacuityFiles.map((f) => f.path));
     const decided = mergeDecision({
       branch: pr.head,
       openedByHarness: this.openedByUs(number),
@@ -655,7 +660,7 @@ export abstract class MergeFlow extends FixRuns {
       vacuityPending: vacuity.run !== undefined,
       outsidePlan: plan ? outsidePlanReasons({ planFiles: plan.files ?? [], level, waitCategories: [...new Set([...waitCategoriesOf(review), ...DEFAULT_REVIEW.levels.L3_human.when])], newTopLevel }) : [],
     });
-    const d = vacuity.run ? { ...decided, vacuityRun: { ...vacuity.run, base } } : decided;
+    const d = vacuity.run ? { ...decided, vacuityRun: { ...vacuity.run, base: vacuityBase } } : decided;
     // A head a conflict fix pushed: its own reasons to wait (outside the hunks, risky files, an unsure evaluator).
     const fix = this.d.log.read(0, ['conflict_fix.finished']).map((e) => e.payload as EventPayload<'conflict_fix.finished'>).filter((p) => p.number === number && p.outcome === 'pushed' && p.head === pr.headSha).at(-1);
     if (fix?.reasons.length) return { ...d, auto: false, reasons: [...d.reasons, ...fix.reasons] };
@@ -1600,6 +1605,19 @@ export abstract class MergeFlow extends FixRuns {
   }
 
   /**
+   * Where vacuity measures a PR's change from (#784 round 5, A1): the merge base of its head and the default branch's
+   * tip (`<remote>/<branch>`), when the claim's base is that commit or an ancestor of it and it isn't the head itself;
+   * the claim's base otherwise (no tip in this clone, a rewritten default branch). A PR that merged the default branch
+   * in then shows only its own lines: never the default branch's change and the tests that came with it.
+   */
+  private vacuityBase(base: string, head: string): string {
+    const r = spawnSync('git', ['--no-replace-objects', 'merge-base', `refs/remotes/${this.remote}/${this.branch}`, head], { cwd: this.d.repo, encoding: 'utf8' });
+    const mb = r.status === 0 ? r.stdout.trim() : '';
+    if (!/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(mb) || mb === base || mb === head) return base;
+    return this.isAncestor(base, mb) ? mb : base;
+  }
+
+  /**
    * Whether the PR's own tests run the app code it changes, at this head (src/merge-policy-vacuity.ts), from the head's
    * files and this head's coverage runs. Every git read is in atHead, so a failing one holds the PR (vacuityCheck).
    */
@@ -1645,26 +1663,33 @@ export abstract class MergeFlow extends FixRuns {
     try {
       const one = this.d.cfg.tests.runner.one;
       if (!one) throw new Error('tests.yaml runner.one is not set');
-      // The lines the PR changes in each of its app files: only code that ran on them counts (#784 round 4).
-      const lines = await this.changedLineSpans(run.base, pr.headSha, run.app);
-      // Its setup steps (the PR's own install scripts) run as child processes the coordinator awaits, off its tick.
-      const { path, setupErrors } = await createWorktreeAsync(this.wt, name, branch, pr.headSha);
+      if (!coverageRunnerOne(one)) throw new Error('tests.yaml runner.one is not `node --test [options] {file}`');
+      // The PR's hunks in each of its app files: only code that ran on their lines that hold code counts (#784 rounds 4, 5).
+      const hunks = await this.changedHunks(run.base, pr.headSha, run.app);
+      // Its setup steps (the PR's own install scripts) run as child processes the coordinator awaits, off its tick; a
+      // shutdown stops them.
+      const { path, setupErrors } = await createWorktreeAsync(this.wt, name, branch, pr.headSha, this.shutdown.signal);
       if (setupErrors.length) error = `the scratch worktree's setup failed: ${setupErrors.join('; ')}`;
       else {
-        // A directory the change can't know the name of, so it can't ship coverage files of its own there.
+        // Directories the change can't know the names of, so it can't ship coverage files of its own there.
         const cov = join(path, `.${BRAND.cli}-coverage-${randomBytes(8).toString('hex')}`);
+        const baseline = join(path, `.${BRAND.cli}-coverage-${randomBytes(8).toString('hex')}`);
+        // Each test twice: as runner.one runs it, then with every test skipped (the baseline: only loading runs).
         for (const t of run.tests) {
-          // A plain path (PLAIN_TEST_PATH, checked before any run is asked for): put in the command as it is.
-          const r = await this.project(one.replaceAll('{file}', t), path, { NODE_V8_COVERAGE: cov });
-          if (r.code === 0) continue;
-          error = `${shownPath(t)} ${r.code === null ? 'did not finish (timed out or stopped)' : `exited ${r.code}`}: ${r.tail.split('\n').filter(Boolean).slice(-3).join(' / ')}`;
-          break;
+          for (const [command, dir] of [[one, cov], [baselineRunnerOne(one), baseline]] as const) {
+            // A plain path (PLAIN_TEST_PATH, checked before any run is asked for): put in the command as it is.
+            const r = await this.project(command.replaceAll('{file}', t), path, { NODE_V8_COVERAGE: dir });
+            if (r.code === 0) continue;
+            error = `${shownPath(t)}${dir === baseline ? ' (with every test skipped)' : ''} ${r.code === null ? 'did not finish (timed out or stopped)' : `exited ${r.code}`}: ${r.tail.split('\n').filter(Boolean).slice(-3).join(' / ')}`;
+            break;
+          }
+          if (error !== null) break;
         }
-        if (error === null && !existsSync(cov)) error = 'no coverage was written (runner.one must run the tests in Node for a coverage run)';
-        // The directory and its files are the test's: read as hostile input, in a process of its own with a time limit
-        // (the coordinator's thread never waits on it), bounded, and only fixed text on failure.
+        if (error === null && (!existsSync(cov) || !existsSync(baseline))) error = 'no coverage was written (runner.one must run the tests in Node for a coverage run)';
+        // The directories and their files are the test's: read as hostile input, in a process of its own with a time
+        // limit (the coordinator's thread never waits on it), bounded, and only fixed text on failure.
         if (error === null) {
-          const r = await readTouchedInChild({ coverageDir: cov, root: path, appPaths: run.appPaths, only: run.app, lines });
+          const r = await readTouchedInChild({ coverageDir: cov, baselineDir: baseline, root: path, appPaths: run.appPaths, only: run.app, hunks }, undefined, this.shutdown.signal);
           if ('error' in r) error = r.error;
           else touched = r.touched;
         }
@@ -1686,30 +1711,38 @@ export abstract class MergeFlow extends FixRuns {
   }
 
   /**
-   * The lines a PR changes in each of `files` at its head (1-based, inclusive), from `git diff -U0` run as a child the
-   * coordinator awaits, with change-files.ts's guards (no replace refs, no attributes file). A hunk that only deletes
-   * names the lines on either side of where it did. A git failure throws: the run fails, and the PR waits.
+   * The hunks a PR changes in each of `files` (src/coordinator/change-files.ts changedLinesCommand: renames paired,
+   * whitespace and blank lines left out, hunks never joined, as text, with its guards), run as a child the coordinator
+   * awaits and a shutdown kills. Each hunk says whether the text it removed held code (codeLines); the reader process
+   * keeps the added lines that hold code (codeSpans). A git failure throws: the run fails, and the PR waits.
    */
-  private async changedLineSpans(base: string, head: string, files: string[]): Promise<Record<string, LineSpans>> {
-    const out: Record<string, LineSpans> = {};
-    for (const f of files) {
-      const text = await new Promise<string>((done, fail) => {
-        let s = '';
-        const child = spawn('git', ['--literal-pathspecs', '--no-replace-objects', '-c', 'core.attributesFile=/dev/null', 'diff', '-U0', '--no-color', '--no-ext-diff', '--no-textconv', '--no-renames', base, head, '--', f], { cwd: this.d.repo, stdio: ['ignore', 'pipe', 'ignore'] });
-        child.stdout!.setEncoding('utf8');
-        child.stdout!.on('data', (d: string) => {
-          s += d;
-          if (s.length > 16 * 1024 * 1024) child.kill('SIGKILL');
-        });
-        child.on('error', fail);
-        child.on('close', (code) => (code === 0 && s.length <= 16 * 1024 * 1024 ? done(s) : fail(new Error(`git diff for the changed lines of ${shownPath(f)} failed`))));
+  private async changedHunks(base: string, head: string, files: string[]): Promise<Record<string, ChangedHunkSpots[]>> {
+    const signal = this.shutdown.signal;
+    const text = await new Promise<string>((done, fail) => {
+      let s = '';
+      // change-files.ts's command: renames paired, whitespace and blank lines left out, hunks never joined, as text.
+      const child = spawn('git', changedLinesCommand(base, head), { cwd: this.d.repo, stdio: ['ignore', 'pipe', 'ignore'] });
+      const stop = () => child.kill('SIGKILL');
+      signal.addEventListener('abort', stop, { once: true });
+      child.stdout!.setEncoding('utf8');
+      child.stdout!.on('data', (d: string) => {
+        s += d;
+        if (s.length > 16 * 1024 * 1024) child.kill('SIGKILL');
       });
-      out[f] = [...text.matchAll(/^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/gm)].map((m) => {
-        const start = Number(m[1]);
-        const count = m[2] === undefined ? 1 : Number(m[2]);
-        return count === 0 ? [Math.max(1, start), start + 1] : [start, start + count - 1];
+      child.on('error', (e) => {
+        signal.removeEventListener('abort', stop);
+        fail(e);
       });
-    }
+      child.on('close', (code) => {
+        signal.removeEventListener('abort', stop);
+        if (code === 0 && s.length <= 16 * 1024 * 1024) done(s);
+        else fail(new Error('git diff for the changed lines failed'));
+      });
+    });
+    const byFile = changedLineNumbers(text);
+    const out: Record<string, ChangedHunkSpots[]> = {};
+    // A removal counts only where it took code away: removed lines all blank or comments make no change to measure.
+    for (const f of files) out[f] = (byFile.get(f) ?? []).map((h) => ({ at: h.at, added: h.added, removedCode: h.removed.length > 0 && codeLines(h.removed.join('\n')).code.some(Boolean) }));
     return out;
   }
 

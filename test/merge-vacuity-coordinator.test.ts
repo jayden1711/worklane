@@ -109,12 +109,13 @@ test('gate: fail closed: a coverage run whose test fails holds the PR, naming th
   assert.match(then.reasons[0]!, /^design: vacuity: its coverage run failed: test\/red\.test\.js exited 1/);
 });
 
-test('gate: fail closed: a runner.one that writes no coverage (not Node) holds the PR', async () => {
+test('gate: fail closed: a runner.one other than node --test (here one that writes no coverage) holds the PR, with no run asked for', async () => {
   const t = prWith({ 'src/price.js': PRICE, 'test/price-more.test.js': TOUCHES }, (c) => {
     c.tests.runner.one = 'true {file}';
   });
-  const { then } = await decided(t);
-  assert.deepEqual([then.auto, then.reasons], [false, ['design: vacuity: its coverage run failed: no coverage was written (runner.one must run the tests in Node for a coverage run)']]);
+  const { then, first } = await decided(t);
+  assert.equal(first.vacuityRun, undefined);
+  assert.deepEqual([then.auto, then.reasons], [false, ['design: vacuity: tests.yaml runner.one is not `node --test [options] {file}` with no --import, --require or loader option, the one form whose coverage the merge gate can measure']]);
 });
 
 test('gate: fail closed: runs that start and never finish stop being retried and hold the PR', () => {
@@ -164,13 +165,15 @@ test('watch: a PR held for another reason gets no coverage run, and its hold nam
 });
 
 test('watch: fail closed: a coverage run that fails holds the PR for the owner, with the reason, and never merges', { skip }, async () => {
-  // Passes as the task's own checks run it; fails only under the gate's coverage run.
-  const t = await openPr({ 'evaluator-verdict': approve() }, { autoMerge: () => true, edit: (cfg) => void (cfg.tests.runner.one = 'node --test --test-reporter=spec {file} && test -z "$NODE_V8_COVERAGE"') });
+  // Passed as the task's own checks ran it; once the PR is open, runner.one names a reporter that isn't there, so the
+  // gate's coverage run fails (#784 round 5: runner.one is node --test, so no shell around it can fail it).
+  const t = await openPr({ 'evaluator-verdict': approve() }, { autoMerge: () => true });
+  t.f.cfg.tests.runner.one = 'node --test --test-reporter=no-such-reporter {file}';
   await green(t);
   await green(t);
   assert.equal(t.f.log.read(0, ['merge.done']).length, 0, 'not merged');
   const decided = t.f.log.read(0, ['merge.decided']).map((e) => e.payload as EventPayload<'merge.decided'>);
   assert.deepEqual(decided.map((d) => [d.auto, d.reasons.length]), [[false, 1]]);
-  assert.match(decided[0]!.reasons[0]!, /^design: vacuity: its coverage run failed: test\/repro-qty\.test\.js exited 1/);
+  assert.match(decided[0]!.reasons[0]!, /^design: vacuity: its coverage run failed: test\/repro-qty\.test\.js exited [1-9]/);
   assert.equal(t.f.log.read(0, ['vacuity.started']).length, 1, 'measured once at the head, not again on every pass');
 });

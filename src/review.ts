@@ -399,7 +399,7 @@ export const SELF_MODIFICATION_PARTS: { what: string; globs: string[] }[] = [
       // The merge gate's vacuity check: tests that run none of the changed code never auto-merge (#784).
       'test/vacuity.test.ts', 'test/merge-policy-vacuity.test.ts', 'test/merge-vacuity-coordinator.test.ts',
       'test/merge-vacuity-hostile.test.ts', 'test/merge-vacuity-decisions.test.ts', 'test/merge-vacuity-doctor.test.ts',
-      'test/merge-vacuity-bounds.test.ts', 'test/merge-vacuity-precision.test.ts',
+      'test/merge-vacuity-bounds.test.ts', 'test/merge-vacuity-precision.test.ts', 'test/merge-vacuity-r5.test.ts',
       // The test that keeps the security pages' citations true, the adversarial suite of hostile PRs (its runner, its
       // cases, controls and todo list), and the test that holds these locks (#858).
       'test/docs-guardrails.test.ts',

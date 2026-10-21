@@ -5,12 +5,20 @@
 // A PR that changes app code auto-merges only on a measured yes: its tests (the test files it adds or changes, as
 // tests.yaml vacuity.test_globs matches them, and the `test:` files its task's agreed done_when names, which the
 // coordinator's own verification ran) hold an assertion call (an import of an assertion module is none), and, each run
-// with runner.one under V8 coverage, they run code on a line the PR changes in at least one of its app files. Code that
-// runs as a module loads (its top level, V8's synthetic initializers) doesn't count, and a helper the module calls as it
-// loads counts only for its own lines (src/vacuity.ts touchedAppFiles). Anything else is a `design:`
-// reason to wait: no test, no assertion, a static-only config, no runner.one, a test path that would need quoting,
-// nothing measured after VACUITY_TRIES starts, a run that failed. The one exception is the reason given while the
-// run is still to come (VACUITY_UNMEASURED): the gate runs it and decides again.
+// with runner.one (`node --test`: coverageRunnerOne) under V8 coverage, they run code on a line the PR changes in at
+// least one of its app files more often than the same run with every test skipped does (the baseline: what loading the
+// test file and its imports runs). So code that runs as a module loads doesn't count: its top level, V8's synthetic
+// initializers, and a helper it calls as it loads, even in a file the PR adds (src/vacuity.ts touchedAppFiles). Only a
+// changed line that holds code counts: a blank, whitespace-only or comment line, or a rename, is nothing to measure,
+// and a PR with nothing else waits. The PR's lines are measured from where its branch meets the default branch's tip,
+// so what it merged in from that branch is never its own. Anything else is a `design:` reason to wait: no test, no
+// assertion, a static-only config, no runner.one or another runner, a test path that would need quoting, nothing
+// measured after VACUITY_TRIES starts, a run that failed. The one exception is the reason given while the run is still
+// to come (VACUITY_UNMEASURED): the gate runs it and decides again.
+//
+// What it can't see (inferred): a test that calls the code and asserts nothing about it (any assertion call passes); a
+// test that imports a module inside a test's body (a helper the module calls as it loads then counts, its top level
+// doesn't); a test or module that checks whether it runs in the baseline.
 //
 // What counts as changed app code: a file the PR changes, under vacuity.app_paths, not matched by a test glob, still
 // there at the head, and not one with no runtime code for a test to run (NO_RUNTIME_CODE: types only, config, data,
@@ -92,21 +100,33 @@ export function vacuitySnippet(v: Partial<VacuityConfig> | undefined, runOne: st
     `  app_paths: [${(v?.app_paths?.length ? v.app_paths : ['src/**']).map(q).join(', ')}]`,
     '  dynamic: true',
     'runner:',
-    `  one: ${q(runOne ?? 'node --test {file}')}   # runs ONE test file in Node; {file} is its path`,
+    `  one: ${q(coverageRunnerOne(runOne) ? runOne! : 'node --test {file}')}   # runs ONE test file with node --test; {file} is its path`,
   ].join('\n');
 }
 
 /**
- * The runner.one forms the coverage run can measure, matched against the WHOLE command: one test file run in Node
- * (node --test, tsx --test, vitest run, jest), with at most a package runner before it (npx, pnpm exec, yarn), plain
- * option words after it (`--x`, `--x=value`), then `{file}` last. Single spaces only: no newline or tab (a second
- * command), no quote, no shell operator, nothing else before or after. Bun runs no V8 coverage of Node's: never bunx.
+ * The one runner.one form the coverage run can measure, matched against the WHOLE command: `node --test`, plain option
+ * words after it (`--x`, `--x=value`), then `{file}` last. Single spaces only: no newline or tab (a second command), no
+ * quote, no shell operator, nothing else before or after. Not tsx, vitest or jest (#784 round 5, measured: code a loader
+ * transforms runs other text than the file's, so it counts for nothing), and no option that loads code first
+ * (`--import`, `--require`, `-r`, `--loader`, `--experimental-loader`): a loader could transform the same way. Node's own
+ * TypeScript type stripping keeps every offset, so a `.ts` file is measured (ranSegments).
  */
-const RUNNER_ONE = /^(?:(?:npx|pnpm exec|yarn) )?(?:node --test|tsx --test|vitest run|jest)(?: --?[A-Za-z0-9][A-Za-z0-9._:/=@-]*)* \{file\}$/;
+const RUNNER_ONE = /^node --test(?: --?[A-Za-z0-9][A-Za-z0-9._:/=@-]*)* \{file\}$/;
+const PRELOADS = / (?:--import|--require|-r|--loader|--experimental-loader)(?:[ =]|$)/;
 
-/** A runner.one the coverage run can measure (RUNNER_ONE). */
+/** A runner.one the coverage run can measure (RUNNER_ONE, with no PRELOADS option). */
 export function coverageRunnerOne(one: string | null | undefined): boolean {
-  return typeof one === 'string' && RUNNER_ONE.test(one);
+  return typeof one === 'string' && RUNNER_ONE.test(one) && !PRELOADS.test(one);
+}
+
+/**
+ * runner.one for the baseline run (#784 round 5): the same command with every test skipped
+ * (`--test-skip-pattern=.`; a test's name is never empty), so the test file and what it imports load and no test runs.
+ * Only for a coverageRunnerOne command.
+ */
+export function baselineRunnerOne(one: string): string {
+  return one.replace(/^node --test/, 'node --test --test-skip-pattern=.');
 }
 
 /** Doctor's word on the merge gate's vacuity check (#784): whether app-code PRs can auto-merge here, and how if not. */
@@ -116,8 +136,8 @@ export function vacuityDoctor(tests: { vacuity?: VacuityConfig | undefined; runn
   if (!v) return how('tests.yaml has no vacuity section');
   if (!v.dynamic) return how('tests.yaml vacuity.dynamic is false');
   if (!tests.runner.one) return how('tests.yaml runner.one is not set');
-  if (!coverageRunnerOne(tests.runner.one)) return { level: 'warn', detail: `runner.one (${tests.runner.one}) isn't one the coverage run knows runs a single test file in Node (node --test, tsx --test, vitest run, jest {file}): if it doesn't, every app-code PR waits for you (no coverage is written)` };
-  return { level: 'ok', detail: `PRs that change app code (${v.app_paths.join(', ')}) auto-merge only when their tests, run with \`${tests.runner.one}\` under coverage, call it` };
+  if (!coverageRunnerOne(tests.runner.one)) return how(`runner.one (${tests.runner.one}) isn't \`node --test [options] {file}\` with no --import, --require or loader option, the one form whose coverage the merge gate can measure (code tsx, vitest, jest or a loader transforms counts for nothing)`);
+  return { level: 'ok', detail: `PRs that change app code (${v.app_paths.join(', ')}) auto-merge only when their tests, run with \`${tests.runner.one}\` under coverage, run code on a line they change more often than loading them does. JavaScript is measured as it is, TypeScript under Node's own type stripping, and a build's code (dist/) through its source maps` };
 }
 
 export function vacuityCheck(o: {
@@ -157,6 +177,7 @@ export function vacuityCheck(o: {
   if (tests.length && tests.every((p) => countAssertionCalls(text.get(p)!, cfg.assertion_pattern) === 0)) reasons.push(`design: vacuity: its tests (${list(tests)}) have no assertion matching /${cfg.assertion_pattern}/`);
   if (!cfg.dynamic) reasons.push(`design: vacuity: tests.yaml vacuity.dynamic is off, so nothing measured whether its tests run the app code it changes (${list(app)})`);
   else if (!o.runOne) reasons.push("design: vacuity: tests.yaml runner.one is not set, so its tests can't be run one by one under coverage");
+  else if (!coverageRunnerOne(o.runOne)) reasons.push('design: vacuity: tests.yaml runner.one is not `node --test [options] {file}` with no --import, --require or loader option, the one form whose coverage the merge gate can measure');
   if (reasons.length) return { reasons };
   // A run of other tests than this head's (tests.yaml changed since) is not this head's.
   const last = o.runs.last && o.runs.last.tests.join('\0') === tests.join('\0') ? o.runs.last : null;
