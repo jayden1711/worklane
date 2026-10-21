@@ -20,8 +20,10 @@
 //   by having no /testbed/.git. A content-hash fallback would be a loosening for the owner to decide.
 // What comes out is bounded (#947 round 2): the probe's output and the pack's (TREE_CAPS.copyOutBytes) are capped in
 // bytes as they arrive, and past the cap the exec is ended, nothing is kept and the container is removed. What the pack
-// decodes to (every object's size, summed) is capped too (TREE_CAPS.treeBytes), before anything is checked out: a small
-// pack can inflate a thousandfold. And the image must be the task's own digest reference: no tag ever reaches `run`.
+// decodes to is capped too, in total (TREE_CAPS.treeBytes) and per object (TREE_CAPS.objectBytes), read from the pack's
+// own headers before `git index-pack` sees it (#947 round 3: index-pack builds each object in memory, and a delta of a
+// few bytes can declare gigabytes; 1,115 bytes peaked at 1.58 GB in review), then again on what git read, before any
+// checkout. And the image must be the task's own digest reference: no tag ever reaches `run`.
 // On the host, in a temporary folder in the store: the pack is indexed (git hashes every object), the tree must be
 // there with every object it reaches, and one root commit is made on it (fixed author and date, so the same tree
 // always gives the same commit). A fresh bare repository fetches only that commit (so nothing unreachable comes
@@ -40,6 +42,7 @@ import { execFileSync } from 'node:child_process';
 import { randomBytes, createHash } from 'node:crypto';
 import { closeSync, constants, fstatSync, lstatSync, mkdirSync, openSync, readSync, renameSync, rmdirSync, rmSync, type Stats } from 'node:fs';
 import { join } from 'node:path';
+import { inflateSync } from 'node:zlib';
 import type { Mode } from './caps.js';
 import { LimitsNotApplied, OutputTooLarge, TaskRunner, WORK, type Docker, type DockerOptions, type TaskContainer } from './container.js';
 import { pullImage, PullRefused, writeVerified } from './download.js';
@@ -55,18 +58,104 @@ export const TREE_RECORD = 'tree.json';
 /** A refusal whose message names no task: safe to print beside the task's key. */
 export class Refused extends Error {}
 
-/** How much a task's copy-out may bring: the pack's base64 text, and what its objects decode to, summed. */
+/**
+ * How much a task's copy-out may bring: the pack's base64 text; what its objects decode to, summed; and what any one
+ * object decodes to (a delta's target). The last two are read from the pack's own headers before `git index-pack`
+ * sees it (packDeclaredBytes): index-pack builds each object in memory, and a delta of a few bytes can declare
+ * gigabytes.
+ */
 export interface TreeCaps {
   copyOutBytes: number;
   treeBytes: number;
+  objectBytes: number;
 }
 
 /**
- * The caps `bench pull` uses. Both are guesses at what SWE-bench Verified's largest base tree needs, with room: none is
- * measured here (no real image is pulled). A tree over either is refused, naming the cap; raising one is a reviewed
+ * The caps `bench pull` uses. All are guesses at what SWE-bench Verified's largest base tree needs, with room: none is
+ * measured here (no real image is pulled). A tree over any is refused, naming the cap; raising one is a reviewed
  * change. 384 MiB of base64 (a 288 MiB pack) stays well inside one string's limit (about 512 MiB).
  */
-export const TREE_CAPS: Readonly<TreeCaps> = Object.freeze({ copyOutBytes: 384 * 1024 * 1024, treeBytes: 1024 * 1024 * 1024 });
+export const TREE_CAPS: Readonly<TreeCaps> = Object.freeze({ copyOutBytes: 384 * 1024 * 1024, treeBytes: 1024 * 1024 * 1024, objectBytes: 256 * 1024 * 1024 });
+
+/**
+ * What every entry of `pack` declares it decodes to, summed, read from the pack itself before `git index-pack` sees it:
+ * a whole object's size from its entry header, a delta's from its target size (the second number of its inflated delta
+ * header). Each entry's data is inflated once, to find where it ends, never to more than its header's size. Refuses
+ * (throws Refused) a pack that isn't well formed (signature, version, count, types, sizes, zlib data, nothing after the
+ * last entry but the 20-byte trailer), an object over `caps.objectBytes`, and a sum over `caps.treeBytes`. Its
+ * messages name no task.
+ */
+export function packDeclaredBytes(pack: Buffer, caps: { treeBytes: number; objectBytes: number }): number {
+  const bad = (why: string) => new Refused(`what came out of /testbed is not a well-formed pack (${why}): refused before it is indexed, nothing kept`);
+  if (!Buffer.isBuffer(pack) || pack.length < 32 || pack.toString('latin1', 0, 4) !== 'PACK') throw bad('no pack signature');
+  const version = pack.readUInt32BE(4);
+  if (version !== 2 && version !== 3) throw bad(`version ${version}`);
+  const count = pack.readUInt32BE(8);
+  const end = pack.length - 20;
+  let pos = 12;
+  let total = 0;
+  for (let i = 0; i < count; i++) {
+    if (pos >= end) throw bad('fewer entries than its count');
+    let b = pack[pos++]!;
+    const type = (b >> 4) & 7;
+    let size = b & 15;
+    let mult = 16;
+    for (let n = 0; b & 0x80; n++) {
+      if (pos >= end || n >= 9) throw bad('an entry size cut short or too long');
+      b = pack[pos++]!;
+      size += (b & 0x7f) * mult;
+      mult *= 128;
+    }
+    if (type === 6) {
+      // OFS_DELTA: the base's offset, 7 bits a byte; only skipped here (index-pack resolves it).
+      let n = 0;
+      do {
+        if (pos >= end || n++ >= 10) throw bad('a delta base offset cut short');
+        b = pack[pos++]!;
+      } while (b & 0x80);
+    } else if (type === 7) {
+      pos += 20;
+      if (pos > end) throw bad('a delta base id cut short');
+    } else if (type < 1 || type > 4) throw bad(`entry type ${type}`);
+    // A delta's own data is small; a whole object's size is what it decodes to. Both bounded before inflating.
+    if (size > caps.objectBytes) throw new Refused(`what came out of /testbed declares an object of over ${caps.objectBytes} bytes: refused before it is indexed, nothing kept`);
+    let data: Buffer;
+    let used: number;
+    try {
+      const r = inflateSync(pack.subarray(pos, end), { info: true, maxOutputLength: Math.max(size, 1) }) as unknown as { buffer: Buffer; engine: { bytesWritten: number } };
+      data = r.buffer;
+      used = r.engine.bytesWritten;
+    } catch {
+      throw bad('entry data that is not zlib, cut short, or longer than its size');
+    }
+    if (data.length !== size || !(used > 0)) throw bad('an entry size that is not what its data inflates to');
+    pos += used;
+    let decoded = size;
+    if (type === 6 || type === 7) {
+      let p = 0;
+      const header = (): number => {
+        let v = 0;
+        let m = 1;
+        let c: number;
+        let k = 0;
+        do {
+          if (p >= data.length || k++ >= 10) throw bad('a delta header cut short');
+          c = data[p++]!;
+          v += (c & 0x7f) * m;
+          m *= 128;
+        } while (c & 0x80);
+        return v;
+      };
+      header();
+      decoded = header();
+    }
+    if (decoded > caps.objectBytes) throw new Refused(`what came out of /testbed declares an object of over ${caps.objectBytes} bytes: refused before it is indexed, nothing kept`);
+    total += decoded;
+    if (total > caps.treeBytes) throw new Refused(`what came out of /testbed declares objects that decode to over ${caps.treeBytes} bytes: refused before it is indexed, nothing kept`);
+  }
+  if (pos !== end) throw bad('bytes after its last entry');
+  return total;
+}
 /** The probe answers three short lines. */
 const PROBE_MAX_BYTES = 64 * 1024;
 
@@ -283,6 +372,8 @@ function build(tmp: string, final: string, uid: number, task: SelectedTask, c: C
   const scratch = join(tmp, 'import.git');
   const remote = join(tmp, 'remote.git');
   const clone = join(tmp, 'clone');
+  // Before index-pack, which builds each object in memory: what the pack declares, against the caps.
+  packDeclaredBytes(c.pack, caps);
   git(['init', '--bare', '-q', '--template=', scratch]);
   try {
     // index-pack hashes every object, so what is indexed is exactly what the ids say.
@@ -299,7 +390,8 @@ function build(tmp: string, final: string, uid: number, task: SelectedTask, c: C
     ok = false;
   }
   if (!ok) throw new Refused("the pack out of /testbed doesn't hold base_commit's own commit on that tree: refused, nothing kept");
-  // Before anything is fetched or checked out: what the objects decode to (a small pack can inflate a thousandfold).
+  // Again, on what git itself read, before anything is fetched or checked out (packDeclaredBytes already held the pack's
+  // own declarations to the same cap, before index-pack).
   let size = Infinity;
   try {
     size = decodedBytes(scratch);
@@ -341,7 +433,7 @@ export async function baseTree(layout: BenchLayout, uid: number, task: SelectedT
     throw new Refused("this task's image reference is not one pins.ts built: refused before docker run");
   }
   if (typeof task.image !== 'string' || !DIGEST_REF.test(task.image) || task.image !== `${task.ref.name}@${task.ref.digest}`) throw new Refused("this task's image is not its pinned digest reference: refused before docker run");
-  if (!(caps.copyOutBytes > 0) || !(caps.treeBytes > 0)) throw new Refused('the copy-out caps must be positive: refused');
+  if (!(caps.copyOutBytes > 0) || !(caps.treeBytes > 0) || !(caps.objectBytes > 0)) throw new Refused('the copy-out caps must be positive: refused');
   const dir = treesDir(layout, uid);
   const final = join(dir, task.key);
   if (lstatOrNull(final)) return keepExisting(final, uid, task);

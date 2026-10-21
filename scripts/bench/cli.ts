@@ -440,7 +440,9 @@ export async function images(d: CliDeps, pins: () => Pins = loadPins): Promise<n
  * (pull.ts pullTasks), then each task's base tree into the held-out store (pull.ts baseTree), one task at a time,
  * stopping at the first refusal. Prints keys and counts only. Its exit code.
  */
-export async function pull(d: CliDeps, mode: Mode, pins: () => Pins = loadPins, caps: TreeCaps = TREE_CAPS): Promise<number> {
+export async function pull(d: CliDeps, mode: Mode, pins: () => Pins = loadPins, capsIn: Partial<TreeCaps> = {}): Promise<number> {
+  // Tests lower a cap; anything they don't name is the bench's own (TREE_CAPS).
+  const caps: TreeCaps = { ...TREE_CAPS, ...capsIn };
   d.out(`bench pull (#748): the ${mode} tasks' images by pinned digest, and each task's base tree from its own image into the held-out store; no model call, no upstream fetch`);
   const say = (status: string, name: string, detail: string) => d.out(`  ${status}  ${name.padEnd(9)}  ${scrub(detail, d.env)}`);
   const o: DockerOptions = { ...d.docker, env: d.env };

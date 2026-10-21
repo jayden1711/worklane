@@ -388,7 +388,9 @@ test("the container's own scripts, run by sh on a stand-in /testbed: HEAD and tr
   const plain = join(root, 'plain');
   mkdirSync(plain);
   writeFileSync(join(plain, 'setup.py'), 'setup()\n');
+  const plainBefore = snapshot(plain);
   assert.equal(sh(plain, CONTAINER_SCRIPTS.probe), 'none\n');
+  assert.deepEqual(snapshot(plain), plainBefore, 'a /testbed with no git metadata is unchanged by the probe');
 });
 
 // ---- The README ----
