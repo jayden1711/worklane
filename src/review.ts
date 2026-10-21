@@ -314,9 +314,9 @@ export function hidesSubmodules(f: Pick<ChangeFile, 'submoduleIgnores'>): boolea
 
 /**
  * The harness changing its own controls: the merge policy, the main watch and the push guard, the updater, the review
- * levels and guardrails, the machine's setup scripts and CI workflows, sign-in and credentials, who may approve, the
- * evaluator and the agent runner, the sandbox, the push gate, denylist and secret scan, the tests that hold those
- * controls, and the release and design rules.
+ * levels and guardrails, the machine's setup scripts, the engine's container image, deployment files and CI workflows, sign-in and
+ * credentials, who may approve, the evaluator and the agent runner, the sandbox, the push gate, denylist and secret scan,
+ * the tests that hold those controls, the release and design rules, and the public security claims.
  * Always L3 and never auto-merged (merge-policy.ts waitCategoriesOf), whatever review.yaml says; review.yaml can't
  * redefine, drop or loosen it. Each part says, in the words "Waiting on you" shows, what such a change changes; the
  * first part a file matches names it. Every glob matches a real file in the engine's repo (a test checks).
@@ -336,6 +336,15 @@ export const SELF_MODIFICATION_PARTS: { what: string; globs: string[] }[] = [
   // deploy/**: the engine's deployment manifests (a compose file and the like) set its isolation and exposure, as the
   // setup scripts do: the user it runs as, what it mounts, which ports it publishes. Locked before the first one exists.
   { what: 'the machine setup', globs: ['scripts/setup/**', 'scripts/machine/**', 'deploy/**'] },
+  // The engine's container image (Dockerfile, and any Dockerfile.<name> beside it, in any case the tools read, and the
+  // Containerfile podman reads): the base image, the user it runs as, what it installs and from where. Before this, only
+  // review.yaml's deploy-config held the Dockerfile (#858, a gap #853's review named). dockerfile* and Containerfile*
+  // match no file yet (NOT_YET_FILES in test/merge-policy.test.ts).
+  { what: "the engine's container image", globs: ['Dockerfile*', 'dockerfile*', 'Containerfile*'] },
+  // The engine's deployment files at the top of its repo, beside deploy/**: a bare deploy path (a file, or a symlink to
+  // anywhere) and the compose files set how it runs, as the setup scripts do: the user, the mounts, the ports. Locked
+  // before the first one exists (NOT_YET_FILES in test/merge-policy.test.ts; #885).
+  { what: "the engine's deployment files", globs: ['deploy', 'compose.*', 'docker-compose.*'] },
   { what: 'the CI workflows', globs: ['.github/workflows/**'] },
   // Whose signed tag the release workflow stages on npm, and the check that enforces it (release.yml).
   { what: 'who may sign a release', globs: ['.github/release-signers', 'scripts/verify-release-tag*'] },
@@ -389,11 +398,21 @@ export const SELF_MODIFICATION_PARTS: { what: string; globs: string[] }[] = [
       'test/managed-apps.test.ts',
       // The merge reconciliation's cases: only the engine's own App's merge is reconciled, never another's (#733).
       'test/merge-idempotent.test.ts',
+      // The test that keeps the security pages' citations true, the adversarial suite of hostile PRs (its runner, its
+      // cases, controls and todo list), and the test that holds these locks (#858).
+      'test/docs-guardrails.test.ts',
+      'test/adversarial/**',
+      'test/engine-guard-locks.test.ts',
+      // The test that keeps each lock glob that matches no file yet paired with its lock (#885).
+      'test/not-yet-files-locks.test.ts',
       // The replace-ref and graft routes, and the scan that every git call goes through the git runner (#807).
       'test/git-runner.test.ts',
     ],
   },
   { what: 'the release procedure and the design rules', globs: ['docs/releasing.md', 'docs/design.md'] },
+  // What the engine publicly claims its guards do and which gaps are open (#705), and how to report one: a docs-only
+  // change was L0 and merged itself, so a PR could rewrite a claim with nothing holding it (#858).
+  { what: 'the public security claims', globs: ['docs/guardrails.md', 'docs/security*.md', 'SECURITY.md'] },
   // After the merge policy's own part above (the first part a file matches names it): the rest of the coordinator.
   { what: 'the coordinator', globs: ['src/coordinator/**'] },
   // A study's definition (docs: the experiments design): its eval, editable paths and budget are what a job may touch.
@@ -422,8 +441,15 @@ export type LockScope = 'engine' | 'managed-app';
  * the engine's deployment manifests; a managed app's own deploy/ stays its deploy-config, as before.
  */
 const ENGINE_TREE = ['src/', 'scripts/', 'test/', 'docs/', 'deploy/'];
+/**
+ * The engine's own files at the top of its repo, glob for glob (#858): its security policy, its container image and its
+ * deployment files. Like ENGINE_TREE, their locks hold only in the engine's repo; a managed app's own SECURITY.md,
+ * Dockerfile, Containerfile, compose file or deploy path keeps the categories its review.yaml gives it, as before.
+ * Matched exactly, so no other glob stands aside through it.
+ */
+const ENGINE_ROOT_FILES = ['SECURITY.md', 'Dockerfile*', 'dockerfile*', 'Containerfile*', 'deploy', 'compose.*', 'docker-compose.*'];
 /** Whether a locked glob names the engine's own source (so it holds only in the engine's repo). */
-export const engineSourceGlob = (glob: string): boolean => ENGINE_TREE.some((d) => glob.startsWith(d));
+export const engineSourceGlob = (glob: string): boolean => ENGINE_TREE.some((d) => glob.startsWith(d)) || ENGINE_ROOT_FILES.includes(glob);
 
 /** The locked categories in this scope: all of them in the engine's repo; in a managed app's, those that hold in every repo. */
 export function lockedCategories(scope: LockScope | undefined): Record<string, string[]> {

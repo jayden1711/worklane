@@ -3,7 +3,7 @@
 // no LFS smudge, no config from the machine, no ref that can move. Running this as a throwaway user (systemd
 // DynamicUser) is the root side's job (scripts/setup/plugins.sh); this module is the part that is the same wherever it
 // runs, and it never executes a file it fetched.
-import { execFileSync } from 'node:child_process';
+import { execFileSync } from '../os/child-process.js';
 import { gitExecFileSync } from '../os/git.js';
 import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';

@@ -1,7 +1,7 @@
 // `tune`: profile a project's test suite on this machine (a fresh worktree on main, set up as the agent user; the
 // suite at 1, 2, 4 and all cores' workers; time and peak worker memory) and propose tests.yaml's `cores.max` and
 // `{cores}` as a PR, under the usual push limits. Nothing changes until it is reviewed and merged.
-import { spawnSync } from 'node:child_process';
+import { spawnSync } from './os/child-process.js';
 import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { freemem } from 'node:os';
 import { join } from 'node:path';

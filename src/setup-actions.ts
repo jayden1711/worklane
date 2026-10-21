@@ -1,7 +1,7 @@
 // WHY: the first-run page fixes some steps itself (Fix kind 'action'). Each action shows its plan before anything
 // happens and runs the CLI's own code for the step; the dashboard runs it for owners only, confirmed and audited.
 import { join } from 'node:path';
-import { spawnSync } from 'node:child_process';
+import { spawnSync } from './os/child-process.js';
 import { commandSpawnSync, gitExecFileSync } from './os/git.js';
 import { BRAND } from './brand.js';
 import type { Config } from './config/load.js';

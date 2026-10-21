@@ -5,7 +5,7 @@
 // only: the workspace, the commands and the database all belong to that user, in the test runs' slice, and the
 // commands run sandboxed. The local host does the same steps as the current user in a directory of its own, with
 // no sandbox: for the engine's tests and for development, never for a project's PRs (the coordinator refuses it).
-import { spawn } from 'node:child_process';
+import { spawn } from '../os/child-process.js';
 import { randomBytes } from 'node:crypto';
 import { existsSync, mkdirSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';

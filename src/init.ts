@@ -12,7 +12,7 @@
 //           agent's Claude token and the checkout). Init never installs tools there: that stays the owner's step.
 //
 // What local mode can't do is listed plainly (unavailableIn), in doctor and on the dashboard, never left to fail.
-import { spawn } from 'node:child_process';
+import { spawn } from './os/child-process.js';
 import { commandSpawnSync } from './os/git.js';
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { delimiter, dirname, join, resolve } from 'node:path';

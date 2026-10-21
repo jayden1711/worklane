@@ -210,8 +210,8 @@ const OUTSIDE_THE_RUNNER: Record<string, { n: number; why: string; must?: RegExp
   'scripts/ci/new-deps.mjs': { n: 1, why: "runGit: CI runs the base's copy of this file alone, from a temp dir (new-deps.yml)", must: ITS_OWN },
   'scripts/ci/testrun-real-systemd.mjs': { n: 1, why: 'its git: the job copies this file alone into the VM (ci-slow.yml)', must: [/const GIT_FIXED_ARGS = \['--no-replace-objects'\]/, /GIT_NO_REPLACE_OBJECTS: '1', GIT_GRAFT_FILE: join\(devNull, 'no-grafts'\)/, /execFileSync\('git', \[\.\.\.GIT_FIXED_ARGS, /] },
   'scripts/machine/worklane-update.cjs': {
-    n: 6,
-    why: "the root updater, installed alone in /usr/local/libexec: its reads of the verification clone carry VERIFY_GIT_ARGS (replace refs off); that clone is root's own, which no agent can write a graft into; the two ls-remote calls read no object",
+    n: 7,
+    why: "the root updater, installed alone in /usr/local/libexec: its reads of the verification clone carry VERIFY_GIT_ARGS (replace refs off); that clone is root's own, which no agent can write a graft into; the three ls-remote calls read no object",
     must: [/^const VERIFY_GIT_ARGS = \['--no-replace-objects'\];$/m],
   },
   // CI and dev scripts, through a runner that takes any command: commandSpawnSync / commandExecFileSync / commandSpawn (scripts/lib/git.cjs).

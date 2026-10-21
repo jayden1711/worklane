@@ -15,7 +15,7 @@
 //
 // LIMIT: a shallow clone's `.git/shallow` is still read (it is how a shallow clone works, and git writes it itself).
 // A program the engine runs that runs git itself (gitleaks) gets these settings only when it is handed gitEnv().
-import { execFile, execFileSync, spawn, spawnSync } from 'node:child_process';
+import { execFile, execFileSync, spawn, spawnSync } from './child-process.js';
 import type {
   ChildProcess,
   ChildProcessByStdio,

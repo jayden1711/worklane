@@ -1,7 +1,7 @@
 // A self-contained demo: a copy of the example project with a local "GitHub"
 // remote and a file backlog, worked by the real coordinator with scripted
 // agents, so the event log (and the dashboard) shows every state for real.
-import { spawnSync } from 'node:child_process';
+import { spawnSync } from './os/child-process.js';
 import { gitExecFileSync } from './os/git.js';
 import { cpSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';

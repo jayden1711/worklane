@@ -2,7 +2,7 @@
 // change: a reviewed commit. The values are applied to the default branch's own files (comments kept), checked with
 // the same loader the coordinator uses, and proposed as a PR from a branch of their own; nothing is pushed to the
 // default branch, and nothing in the checkout is touched.
-import { spawnSync } from 'node:child_process';
+import { spawnSync } from './os/child-process.js';
 import { gitSpawnSync } from './os/git.js';
 import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';

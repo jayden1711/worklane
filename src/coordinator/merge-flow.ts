@@ -43,9 +43,9 @@ import { FlakyGate } from './flaky.js';
 import { FixForward } from './fix-forward.js';
 import { lit, reviewPacket, type PacketInput } from './review-packet.js';
 import { MERGEABLE_RECHECK_MS, TIP_CHECK_MS, DEFAULT_REVIEW, lockScopeOf } from './shared.js';
-import { LIGHT_PENDING_CAP, MAIN_CHECKS_MIN_POLLS, MAIN_CHECKS_TIMEOUT_MS, MERGEABLE_CAP, PollCounter, pollsFor } from './wait-caps.js';
+import { LIGHT_PENDING_CAP, MAIN_CHECKS_MIN_POLLS, MAIN_CHECKS_READ_MS, MAIN_CHECKS_TIMEOUT_MS, MERGEABLE_CAP, PollCounter, pollsFor } from './wait-caps.js';
 import { ATTEMPT_EVENTS, failedTries, openAttempt, reconcileMerge } from '../merge-policy-reconcile.js';
-import { mainNow, mayResume, stopWaitsForGreen, type MainState } from '../auto-merge-resume.js';
+import { mainNow, mayResume, stopWaitsForGreen, type MainState, type StopBy } from '../auto-merge-resume.js';
 
 /** How often a pending resume request has main measured again while it isn't green (#776): each look is recorded. */
 export const RESUME_MEASURE_MS = 60_000;
@@ -169,6 +169,10 @@ export abstract class MergeFlow extends FixRuns {
   protected trainNow: () => number = () => Date.now();
   /** The clock resume requests are re-measured and retried by, against their events' times (tests move it). */
   protected resumeNow: () => number = () => Date.now();
+  /** The clock an auto-merge's wait for main's checks is timed by, against its merge.done (tests move it). */
+  protected mainChecksNow: () => number = () => Date.now();
+  /** How long one read of an auto-merge's checks may take before it counts as no answer (tests shorten it). */
+  protected mainChecksReadMs = MAIN_CHECKS_READ_MS;
 
   // ---------------------------------------------------------------- PR batches
 
@@ -875,7 +879,8 @@ export abstract class MergeFlow extends FixRuns {
   /**
    * After each auto-merge, the default branch's required checks on its merge commit. Red, with the commit
    * before it green: stop auto-merging on this instance, open a revert PR and tell the owner. Red with main
-   * already red before it: stop and tell, nothing to revert. A stop lasts until the operator clears it.
+   * already red before it: stop and tell, nothing to revert. Checks that never report by the timeout (no answer, a read
+   * that fails or never answers) are not green either (#731): stop and tell. A stop lasts until the operator clears it.
    */
   protected async watchMerges() {
     const stopped = this.d.log.read(0, ['merge.stopped', 'merge.resumed']).at(-1);
@@ -883,7 +888,9 @@ export abstract class MergeFlow extends FixRuns {
     // The stop in force answers resume requests: its merge.stopped, or, with none logged for it, the stop file itself.
     else if (existsSync(this.stopFile)) await this.resumeRequested(stopped?.type === 'merge.stopped' ? stopped.id : null, stopped?.id ?? 0);
     const judged =new Set(this.d.log.read(0, ['merge.main_result']).map((e) => (e.payload as { sha: string }).sha));
-    const now = Date.now();
+    const now = this.mainChecksNow();
+    /** This pass's merges whose checks never reported by the timeout: one stop for them all (#731). */
+    const unknown: { m: EventPayload<'merge.done'>; missing: string[]; how: string; polls: number }[] = [];
     for (const e of this.d.log.read(0, ['merge.done'])) {
       const m = e.payload as EventPayload<'merge.done'>;
       if (judged.has(m.sha) || now - (this.mainPolled.get(m.sha) ?? 0) < (this.d.prPollMs ?? 60_000)) continue;
@@ -894,26 +901,98 @@ export abstract class MergeFlow extends FixRuns {
       if (!required.length) continue;
       // No CI: every test_run tier (fast and full) runs on the merge commit, in the sandbox; judged from the log.
       if (ciIsNone(this.d.cfg.project)) this.startMainRuns(m.sha);
+      // Still not reported, up to a timeout: in polls, so it holds whatever the poll interval, and from the merge
+      // itself, so a restart (which forgets the polls) never starts it again. At it, unknown is not green (#731).
+      // Nothing is logged here: mainUnknown marks it judged only once its stop is durable.
+      const timedOut = (missing: string[], how: string) => {
+        const polls = this.waitPolls.bump(`main:${m.sha}`);
+        if (polls < pollsFor(MAIN_CHECKS_TIMEOUT_MS, this.d.prPollMs ?? 60_000, MAIN_CHECKS_MIN_POLLS) && now - Date.parse(e.ts) < MAIN_CHECKS_TIMEOUT_MS) return;
+        unknown.push({ m, missing, how, polls });
+      };
+      // A read that fails (a GitHub error) or never answers is no answer: never green, and a poll toward the timeout.
+      const read = await this.mainChecksRead(m.sha, required);
+      if ('error' in read) {
+        timedOut(required, `couldn't be read (${read.error})`);
+        continue;
+      }
       // Failing checks are re-run on this same commit first (src/flaky.ts): passing then, they are flaky, quarantined,
       // and don't turn the branch red here; a quarantined check's failure doesn't either. Only the harness's own
       // decision changes: the checks on GitHub, and what the updater requires, stay as they are.
-      const gate = await this.flakyGate.judge({ sha: m.sha, number: m.number, outcomes: requiredOutcomes(required, await this.headChecksOf(m.sha, required)) });
+      const gate = await this.flakyGate.judge({ sha: m.sha, number: m.number, outcomes: requiredOutcomes(required, read.checks) });
       if (gate.wait) continue;
       const outcomes = gate.outcomes;
       const failed = outcomes.filter((c) => c.outcome === 'fail' || c.outcome === 'cancelled').map((c) => c.name);
       if (!failed.length && outcomes.some((c) => c.outcome !== 'pass')) {
-        // Still running, up to a timeout (in polls, so it holds whatever the poll interval).
-        const polls = this.waitPolls.bump(`main:${m.sha}`);
-        if (polls < pollsFor(MAIN_CHECKS_TIMEOUT_MS, this.d.prPollMs ?? 60_000, MAIN_CHECKS_MIN_POLLS)) continue;
-        const missing = outcomes.filter((c) => c.outcome !== 'pass').map((c) => c.name);
-        this.emit('merge.main_result', { issue: m.issue, number: m.number, sha: m.sha, outcome: 'timed_out', failed: missing });
-        this.emit('wait.capped', { issue: m.issue, number: m.number, kind: 'main_checks', detail: `${missing.join(', ')} never reported on ${m.sha.slice(0, 8)} after ${polls} polls` });
-        await this.d.backlog.comment(m.number, `[${BRAND.cli}] @${this.ownerOf(m.issue)} the required check(s) ${missing.join(', ')} never reported on the merge commit \`${m.sha.slice(0, 8)}\` (${polls} polls), so whether ${this.branch} is green after this merge is unknown. Auto-merge goes on; check them yourself.`);
+        timedOut(outcomes.filter((c) => c.outcome !== 'pass').map((c) => c.name), 'never reported');
         continue;
       }
       this.emit('merge.main_result', { issue: m.issue, number: m.number, sha: m.sha, outcome: failed.length ? 'red' : 'green', failed, ...(gate.flaky.length ? { flaky: gate.flaky } : {}), ...(gate.quarantined.length ? { quarantined: gate.quarantined } : {}) });
       if (failed.length) await this.mainWentRed(m, failed);
     }
+    if (unknown.length) await this.mainUnknown(unknown);
+  }
+
+  /**
+   * The required checks on an auto-merge's commit, or why they couldn't be read: an error (GitHub's, or any other), or no
+   * answer in mainChecksReadMs. Either is no answer, never green (#731). The error is recorded as the step's was.
+   */
+  private async mainChecksRead(sha: string, required: string[]): Promise<{ checks: JudgedChecks } | { error: string }> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const late = new Promise<{ error: string }>((done) => {
+      timer = setTimeout(() => done({ error: `no answer in ${Math.round(this.mainChecksReadMs / 1000)} s` }), this.mainChecksReadMs);
+    });
+    const read = this.headChecksOf(sha, required).then(
+      (checks) => ({ checks }),
+      (e: unknown) => {
+        const message = String((e as Error)?.message ?? e).replace(/\s+/g, ' ');
+        this.emit('coordinator.error', { instance: this.d.instance, where: `main's checks on ${sha.slice(0, 8)}`, kind: (e as { kind?: string }).kind ?? 'error', message: message.slice(0, 500) });
+        return { error: message.slice(0, 200) };
+      },
+    );
+    try {
+      return await Promise.race([read, late]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /**
+   * Auto-merges whose required checks never reported by the timeout (#731): whether the default branch is green after
+   * them is unknown, and unknown is not green. Auto-merge stops (`main_unknown`, which resumes only as a red main's stop
+   * does: main green on its tip, or an owner's typed acknowledgement), naming the checks and the commits, unless a stop
+   * that already waits for green main is in force (kept as it is: its kind, reason and alert). Each PR is told.
+   * INVARIANT (#731 round 2): a merge is marked judged (merge.main_result timed_out) only after the stop is written or
+   * kept. A pass cut off before the stop (a restart, or a later read that throws) leaves it unjudged, so a later pass
+   * times it out again; one cut off after the stop leaves that stop in force. Either way the stop is never lost.
+   */
+  private async mainUnknown(list: { m: EventPayload<'merge.done'>; missing: string[]; how: string; polls: number }[]) {
+    const last = list.at(-1)!.m;
+    const kept = this.gatedStopInForce();
+    if (!kept) this.stopFor(`${this.branch} isn't known green after auto-merging: ${list.map((u) => `${u.missing.join(', ')} ${u.how} on \`${u.m.sha.slice(0, 8)}\` (#${u.m.number})`).join('; ')}`.slice(0, 2000), last.number, last.sha, null, 'main_unknown');
+    // Durable now (the file and merge.stopped, or the stop already in force): only then are the merges judged.
+    for (const u of list) {
+      this.emit('merge.main_result', { issue: u.m.issue, number: u.m.number, sha: u.m.sha, outcome: 'timed_out', failed: u.missing });
+      this.emit('wait.capped', { issue: u.m.issue, number: u.m.number, kind: 'main_checks', detail: `${u.missing.join(', ')} ${u.how} on ${u.m.sha.slice(0, 8)} after ${u.polls} polls`.slice(0, 1000) });
+    }
+    for (const u of list) {
+      const what = `the required check(s) ${u.missing.join(', ')} ${u.how} on the merge commit \`${u.m.sha.slice(0, 8)}\` (${u.polls} polls), so whether ${this.branch} is green after this merge is unknown, and unknown is not green.`;
+      const then = kept ? `Auto-merge stays stopped on this instance (${kept.slice(0, 300)}). ${this.stopResume}` : this.stopResume;
+      await this.d.backlog.comment(u.m.number, `[${BRAND.cli}] @${this.ownerOf(u.m.issue)} ${what} ${then}`);
+    }
+  }
+
+  /** The reason of a stop in force that already waits for green main (stopWaitsForGreen of its `by`), or null. */
+  private gatedStopInForce(): string | null {
+    const stopped = this.autoMergeStopped();
+    if (!stopped) return null;
+    if (!existsSync(this.stopFile)) return stopped; // a gated stop deleted by hand: held until the coordinator looks
+    let by: unknown;
+    try {
+      by = (JSON.parse(readFileSync(this.stopFile, 'utf8')) as { by?: unknown }).by;
+    } catch {
+      by = undefined; // unreadable: waits for green main (fail closed), so it is kept
+    }
+    return stopWaitsForGreen(by) ? stopped : null;
   }
 
   /** No CI: merge commits whose tier runs this process started (or found already queued in the log). */
@@ -964,10 +1043,10 @@ export abstract class MergeFlow extends FixRuns {
     return m ? this.ownerOf(m.issue) : this.d.cfg.project.owners.default;
   }
 
-  private stopFor(reason: string, number: number | null, sha: string, revert: string | null) {
+  private stopFor(reason: string, number: number | null, sha: string, revert: string | null, by: Exclude<StopBy, 'owner' | 'main_watch'> = 'red_main') {
     // Logged first (#776): a crash between the two leaves a logged stop with no file, which autoMergeStopped holds.
-    this.emit('merge.stopped', { reason, number, sha, revert, by: 'red_main' });
-    writeGroupOnly(this.stopFile, JSON.stringify({ reason, by: 'red_main', number, sha, revert, at: new Date().toISOString() }, null, 2));
+    this.emit('merge.stopped', { reason, number, sha, revert, by });
+    writeGroupOnly(this.stopFile, JSON.stringify({ reason, by, number, sha, revert, at: new Date().toISOString() }, null, 2));
   }
 
   /** The default branch's required checks on its tip now (src/auto-merge-resume.ts): what a stop waits for. */

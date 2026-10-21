@@ -1,6 +1,6 @@
 // Secret scanning behind an adapter (gitleaks today; betterleaks later).
 // A scanner that can't run is reported as unavailable, never as "clean".
-import { spawn, spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from '../os/child-process.js';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';

@@ -2,7 +2,7 @@
 // makes the command exit non-zero. Nothing here is skipped silently: a check
 // that can't run reports why, and a feature the setup's mode can't have is
 // listed as off, with why.
-import { execFileSync, spawnSync } from 'node:child_process';
+import { execFileSync, spawnSync } from './os/child-process.js';
 import { gitExecFileSync } from './os/git.js';
 import { existsSync, lstatSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
