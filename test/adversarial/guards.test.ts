@@ -1,3 +1,4 @@
+// lint-test
 // The adversarial suite's second half (#707): the guards around the agents and around pushes and secrets
 // (docs/guardrails.md, "The guards around the agents" and "The guards around pushes and secrets"). The first half
 // (adversarial.test.ts) feeds hostile PRs to the merge gate; this file feeds hostile inputs to each guard's own entry
@@ -31,6 +32,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, 
 import { homedir, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { z } from 'zod';
 import { agentSettingsPath, agentSettingsProblems, guardrailSettings, type Settings } from '../../src/agent-settings.js';
 import { BRAND } from '../../src/brand.js';
 import { GuardrailsConfig } from '../../src/config/schema.js';
@@ -40,12 +42,14 @@ import { globToRegExp } from '../../src/guardrails/glob.js';
 import { runHook, type HookOutput } from '../../src/hook.js';
 import { agentSettings } from '../../src/install.js';
 import { laneRuns, PolicyFile, type Instance } from '../../src/instance.js';
+import { withDeniedReads } from '../../src/sandbox.js';
+import { RunFeed } from '../../src/run-feed.js';
 import { which } from '../../src/os/index.js';
 import { checkedPush, type PushLimits } from '../../src/push-check.js';
 import { installPrePushHook } from '../../src/push-guard.js';
 import { RunRecorder } from '../../src/run-record.js';
 import { CliRunner, type RunRequest } from '../../src/runner.js';
-import { scanCommit, scanPath, scanRange } from '../../src/scan/secrets.js';
+import { scanCommit, scanFile, scanPath, scanRange } from '../../src/scan/secrets.js';
 import { engineCli, exampleProject, repoRoot, STDIN_LINE } from '../helpers.js';
 
 const posix = process.platform !== 'win32';
@@ -149,9 +153,11 @@ function answerOf(o: HookOutput): Answer {
  * a task file that hides one directory, and `call`: the hook's answer for one tool call. By default the call is an
  * agent's (`agent: false`: a person's session) with that task file (`task: null`: none; a path: that file).
  */
-function guardProject() {
+function guardProject(p: { network?: boolean } = {}) {
   const { dir, stateDir } = exampleProject();
-  writeFileSync(join(dir, C, 'guardrails.yaml'), JSON.stringify({ version: 1, rules: [], protected_paths: [], secret_paths: ['./.env', './.env.*', '!./.env.example', '~/.ssh/**'], network: { allow: ['docs.github.com', '*.npmjs.org'] }, examples: { must_block: [], must_ask: [], must_allow: [] } }));
+  // `network: false`: the file names no allowlist at all, so the guard's default (an empty one) applies.
+  const network = p.network === false ? {} : { network: { allow: ['docs.github.com', '*.npmjs.org'] } };
+  writeFileSync(join(dir, C, 'guardrails.yaml'), JSON.stringify({ version: 1, rules: [], protected_paths: [], secret_paths: ['./.env', './.env.*', '!./.env.example', '~/.ssh/**'], ...network, examples: { must_block: [], must_ask: [], must_allow: [] } }));
   writeFileSync(join(dir, '.env'), 'TOKEN=stand-in\n');
   writeFileSync(join(dir, '.env.example'), 'TOKEN=\n');
   mkdirSync(join(dir, 'evals-secret'));
@@ -159,9 +165,10 @@ function guardProject() {
   const tasks = mkdtempSync(join(tmpdir(), 'adv-tasks-'));
   const taskFile = join(tasks, 'exp-1.json');
   writeFileSync(taskFile, JSON.stringify({ id: 'exp-1', done_when: [{ manual: 'checked by the coordinator' }], frozen: [], hidden: ['evals-secret/**'] }));
-  const call = async (tool: string, input: Record<string, unknown>, o: { cwd?: string; task?: string | null; agent?: boolean } = {}): Promise<Answer> => {
+  // `projectDir`: the session's project as the agent CLI names it (CLAUDE_PROJECT_DIR); the checkout unless said.
+  const call = async (tool: string, input: Record<string, unknown>, o: { cwd?: string; task?: string | null; agent?: boolean; projectDir?: string } = {}): Promise<Answer> => {
     const task = o.agent === false || o.task === null ? {} : { [TASK]: o.task ?? taskFile };
-    const env = { ...process.env, [STATE]: stateDir, ...(o.agent === false ? {} : { [AGENT]: '1' }), ...task };
+    const env = { ...process.env, CLAUDE_PROJECT_DIR: o.projectDir ?? dir, [STATE]: stateDir, ...(o.agent === false ? {} : { [AGENT]: '1' }), ...task };
     return answerOf(await runHook('pre-tool-use', { hook_event_name: 'PreToolUse', cwd: o.cwd ?? dir, tool_name: tool, tool_input: input, session_id: 'adversarial' }, env));
   };
   return { dir, tasks, taskFile, call };
@@ -286,6 +293,11 @@ test(`adversarial guards / tool.no-read-secrets (${doc('- read secret files;')})
     bash('after ;', 'true; cat .env.local'),
     bash('a home key', 'cat ~/.ssh/id_ed25519'),
     bash('a home key by its absolute path', `cat ${key}`),
+    // The engine's own secrets, whatever the project lists: a held-out eval store and a dashboard key, anywhere.
+    { what: 'Read a held-out eval case', tool: 'Read', input: { file_path: join(g.tasks, 'store', 'evals', 'held-out', 'case-1.json') } },
+    bash('cat a held-out eval case', `cat ${join(g.tasks, 'store', 'evals', 'held-out', 'case-1.json')}`),
+    { what: 'Read a dashboard key', tool: 'Read', input: { file_path: join(g.tasks, 'store', 'dashboard-token') } },
+    bash('cat a dashboard key', `cat ${join(g.tasks, 'store', 'dashboard-token')}`),
   ];
   assert.deepEqual(await letThrough(secrets, refusedBy(g, /secret-path/)), [], 'reads of secret files the guard let through');
 
@@ -363,6 +375,12 @@ test(`adversarial guards / tool.domain-allowlist (${doc('- fetch a domain outsid
     'fetches off the allowlist the guard let through',
   );
   for (const url of ['https://docs.github.com/x', 'https://registry.npmjs.org/x', 'https://npmjs.org/']) assert.notEqual((await g.call('WebFetch', { url, prompt: 'x' })).decision, 'deny', `control: ${url} is on the allowlist`);
+  // A project whose guardrails.yaml names no allowlist: the default is empty, so an agent fetches nothing.
+  const none = guardProject({ network: false });
+  for (const url of ['https://evil.example/x', 'https://docs.github.com/x']) {
+    const v = await none.call('WebFetch', { url, prompt: 'x' });
+    assert.ok(v.decision === 'deny' && /network/.test(v.reason), `with no allowlist, ${url}: ${v.decision} ${v.reason}`);
+  }
 });
 
 test(`adversarial guards / tool.must-allow-conflict (${doc("A rule that would block a must-allow example can't be activated")}): a new rule that blocks or asks on a must-allow example fails the check`, () => {
@@ -417,6 +435,12 @@ test(`adversarial guards / tool.unreadable-task-file-denies (${doc("A task file 
     'task files the guard skipped instead of refusing the call',
   );
   assert.notEqual((await g.call('Read', { file_path: join(g.dir, 'src', 'price.js') })).decision, 'deny', 'control: a readable task file lets an ordinary read through');
+  // Never skipped either when the call comes from a directory with no project above it: refused, not unguarded.
+  const outside = mkdtempSync(join(tmpdir(), 'adv-outside-'));
+  for (const [tool, input] of [['Read', { file_path: join(g.dir, '.env') }], ['WebFetch', { url: 'https://evil.example/', prompt: 'x' }], ['Bash', { command: 'true' }]] as const) {
+    const v = await g.call(tool, input, { cwd: outside, projectDir: outside });
+    assert.equal(v.decision, 'deny', `${tool} from a directory with no project above it: ${v.decision} ${v.reason}`);
+  }
 });
 
 /** The tools src/guardrails/engine.ts decides on: its EDIT_TOOLS and its file-reading READ_TOOLS, Bash and WebFetch. */
@@ -445,7 +469,7 @@ test(`adversarial guards / tool.hook-covers-tools (${doc('A hook runs before eve
 
 // ---- Agent runs: the settings check, the sandbox settings, the environment. ----
 
-type Mode = 'applied' | 'dropped' | 'stale' | 'no-style' | 'assistant-first' | 'tool-result-first' | 'result-only';
+type Mode = 'applied' | 'dropped' | 'stale' | 'no-style' | 'assistant-first' | 'tool-result-first' | 'result-only' | 'system-first-dropped';
 
 /**
  * A stand-in claude. It records its arguments, --settings and environment names, then answers as `mode` says: its
@@ -473,11 +497,12 @@ fs.writeFileSync(${JSON.stringify(log)}, JSON.stringify({ args, settings, env: O
 const mode = ${JSON.stringify(mode)};
 const mine = settings ? settings.outputStyle : undefined;
 if (mine !== undefined) fs.writeFileSync(${JSON.stringify(value)}, String(mine));
-const style = mode === 'dropped' ? 'default' : mode === 'stale' ? fs.readFileSync(${JSON.stringify(staleFrom)}, 'utf8') : mode === 'no-style' ? undefined : mine;
+const style = mode === 'dropped' || mode === 'system-first-dropped' ? 'default' : mode === 'stale' ? fs.readFileSync(${JSON.stringify(staleFrom)}, 'utf8') : mode === 'no-style' ? undefined : mine;
 const say = (o) => console.log(JSON.stringify(o));
 if (mode === 'result-only') { say({ type: 'result', subtype: 'success', result: 'done', total_cost_usd: 0, num_turns: 1 }); process.exit(0); }
 if (mode === 'assistant-first') say({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 't0', name: 'Bash', input: { command: 'true' } }] } });
 if (mode === 'tool-result-first') say({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 't0', content: 'early' }] } });
+if (mode === 'system-first-dropped') say({ type: 'system', subtype: 'hook_response', hook_name: 'SessionStart' });
 say({ type: 'system', subtype: 'init', session_id: 's', tools: ['Bash', 'Read'], mcp_servers: [], plugins: [], ...(style === undefined ? {} : { output_style: style }) });
 setTimeout(() => {
   fs.writeFileSync(${JSON.stringify(work)}, 'done');
@@ -501,6 +526,8 @@ const goodSettings = () => agentSettings(engineCli, [], [], ['~/.ssh/**']);
 const settle = () => new Promise((r) => setTimeout(r, 1200));
 /** An empty home for one agent run: never this process's (on macOS test/isolate.ts leaves HOME where it is). */
 const fixtureHome = () => mkdtempSync(join(tmpdir(), 'adv-home-'));
+/** Each item twice: with no lanes, and with the sandboxed lanes every instance has (`lanes: true`). */
+const bothLaneKinds = <T extends { what: string }>(items: readonly T[]) => items.flatMap((i) => [{ ...i, lanes: false }, { ...i, what: `${i.what}, with sandboxed lanes`, lanes: true }]);
 const request = (cwd: string, more: Partial<RunRequest> = {}): RunRequest => ({ role: 'worker', prompt: 'p', cwd, model: 'm', allowedTools: [], maxTurns: 1, maxBudgetUsd: 1, stallMs: 30_000, timeoutMs: 30_000, ...more });
 
 /** One agent run through the real runner with a stand-in claude; settled, so work a killed run would have done shows. */
@@ -536,9 +563,10 @@ test(`adversarial guards / settings.required (${doc("An agent run starts only wi
     { what: 'disableAllHooks true', content: without((s) => (s.disableAllHooks = true)) },
     { what: 'disableAllHooks not pinned', content: without((s) => delete s.disableAllHooks) },
   ];
-  const left = await letThrough(files, async (f) => {
+  // Each with no lanes, and with the sandboxed lanes every instance has.
+  const left = await letThrough(bothLaneKinds(files), async (f) => {
     const cwd = mkdtempSync(join(tmpdir(), 'adv-cwd-'));
-    const { r, s } = await agentRun({ guardrails: instanceHome(f.content, cwd).guardrails, cwd });
+    const { r, s } = await agentRun({ guardrails: instanceHome(f.content, cwd).guardrails, cwd, ...(f.lanes ? { lanes: sandboxLanes(cwd).lanes } : {}) });
     return r.reason === 'failed' && /not starting/.test(r.detail) && !s.ran() ? null : `${r.reason}: ${r.detail.slice(0, 200)}${s.ran() ? ' (claude ran)' : ''}`;
   });
   if (!asRoot) {
@@ -553,8 +581,13 @@ test(`adversarial guards / settings.required (${doc("An agent run starts only wi
   const { r, s } = await agentRun({ guardrails: instanceHome(JSON.stringify(good), cwd).guardrails, cwd });
   assert.ok(r.reason === 'succeeded' && s.worked(), `control: complete agent settings start the run (${r.reason}: ${r.detail})`);
   // And what the run really got: the --settings claude was given hold the same checks the agent settings file must
-  // pass (every guarded hook, failing closed, its engine present; disableAllHooks pinned off), not only the file.
+  // pass (every guarded hook, failing closed, its engine present; disableAllHooks pinned off), not only the file. The
+  // same for a run in the sandboxed lanes every instance has.
   assert.deepEqual(agentSettingsProblems(s.log().settings as Settings), [], "the run's --settings fall short of the agent settings checks");
+  const laneCwd = mkdtempSync(join(tmpdir(), 'adv-cwd-'));
+  const inLane = await agentRun({ guardrails: instanceHome(JSON.stringify(good), laneCwd).guardrails, cwd: laneCwd, lanes: sandboxLanes(laneCwd).lanes });
+  assert.ok(inLane.r.reason === 'succeeded' && inLane.s.worked(), `control: a run in a sandboxed lane starts (${inLane.r.reason}: ${inLane.r.detail})`);
+  assert.deepEqual(agentSettingsProblems(inLane.s.log().settings as Settings), [], "a sandboxed run's --settings fall short of the agent settings checks");
 });
 
 test(`adversarial guards / settings.project-loosen-refused (${doc('A project `.claude/settings.json` that could loosen them refuses the run')}): a checkout's own settings that could loosen the run refuse it`, { skip: !posix && 'POSIX stand-in claude' }, async () => {
@@ -571,14 +604,18 @@ test(`adversarial guards / settings.project-loosen-refused (${doc('A project `.c
     { what: "every project MCP server on", content: { enableAllProjectMcpServers: true } },
     { what: 'an API key helper', content: { apiKeyHelper: 'cat /dev/null' } },
     { what: 'the check key', content: { outputStyle: 'default' } },
+    { what: 'a status line command', content: { statusLine: { type: 'command', command: 'true' } } },
+    { what: 'an auth refresh command', content: { awsAuthRefresh: 'true' } },
+    { what: 'a key no list names (made up for this run)', content: { [`k${alnum(10)}`]: true } },
     { what: 'malformed JSON', content: '{ not json' },
     { what: 'a JSON array', content: '[]' },
   ];
-  const left = await letThrough(files, async (f) => {
+  // Each with no lanes, and with the sandboxed lanes every instance has.
+  const left = await letThrough(bothLaneKinds(files), async (f) => {
     const cwd = mkdtempSync(join(tmpdir(), 'adv-cwd-'));
     mkdirSync(join(cwd, '.claude'));
     writeFileSync(join(cwd, '.claude', 'settings.json'), typeof f.content === 'string' ? f.content : JSON.stringify(f.content));
-    const { r, s } = await agentRun({ guardrails: instanceHome(JSON.stringify(goodSettings()), cwd).guardrails, cwd });
+    const { r, s } = await agentRun({ guardrails: instanceHome(JSON.stringify(goodSettings()), cwd).guardrails, cwd, ...(f.lanes ? { lanes: sandboxLanes(cwd).lanes } : {}) });
     return r.reason === 'failed' && /could loosen agent runs|can't be read/.test(r.detail) && !s.ran() ? null : `${r.reason}: ${r.detail.slice(0, 200)}${s.ran() ? ' (claude ran)' : ''}`;
   });
   assert.deepEqual(left, [], 'project settings a run started with anyway');
@@ -605,9 +642,11 @@ test(`adversarial guards / settings.applied-echo (${doc("Every run's `--settings
     { what: 'an agent turn before the init', mode: 'assistant-first' },
     { what: 'a tool result before the init', mode: 'tool-result-first' },
     { what: 'a result and no init', mode: 'result-only' },
+    { what: 'a system line before an init that dropped the settings', mode: 'system-first-dropped' },
   ];
-  const left = await letThrough(modes, async (m) => {
-    const { r, s } = await agentRun({ guardrails, cwd, mode: m.mode, staleFrom: first.s.value });
+  // Each with no lanes, and with the sandboxed lanes every instance has.
+  const left = await letThrough(bothLaneKinds(modes), async (m) => {
+    const { r, s } = await agentRun({ guardrails, cwd, mode: m.mode, staleFrom: first.s.value, ...(m.lanes ? { lanes: sandboxLanes(cwd).lanes } : {}) });
     return r.reason === 'failed' && !s.worked() ? null : `${r.reason}${s.worked() ? ' (the agent worked)' : ''}: ${r.detail.slice(0, 200)}`;
   });
   assert.deepEqual(left, [], 'runs that went on without their settings confirmed');
@@ -647,10 +686,14 @@ interface SandboxSettings {
   hooks?: Record<string, { hooks: { type: string; command: string; onFailure?: string }[] }[]>;
 }
 /** The --settings of a sandboxed run as claude got them: a plain run, and one with an "allow once" host. */
-let sandboxRuns: Promise<{ what: string; settings: SandboxSettings; home: string }[]> | null = null;
+/**
+ * Each item: the settings, the agent home they were worked out for, and `run`: true for the --settings a run really
+ * passed claude, false for a lane's own settings as the runner extends them (no run of its own).
+ */
+let sandboxRuns: Promise<{ what: string; settings: SandboxSettings; home: string; run: boolean }[]> | null = null;
 const sandboxed = () =>
   (sandboxRuns ??= (async () => {
-    const out: { what: string; settings: SandboxSettings; home: string }[] = [];
+    const out: { what: string; settings: SandboxSettings; home: string; run: boolean }[] = [];
     const variants: [string, Partial<RunRequest>][] = [['a run', {}], ['a run with an allow-once host', { allowOnce: ['example.org'] }]];
     for (const [what, req] of variants) {
       const cwd = mkdtempSync(join(tmpdir(), 'adv-cwd-'));
@@ -660,8 +703,15 @@ const sandboxed = () =>
       const settings = s.log().settings as SandboxSettings;
       // The lane was worked out from the fixture's home, not this process's (where the fixture would have had to write).
       assert.ok((settings.sandbox?.filesystem?.denyRead ?? []).includes(join(base, 'agent-home', '.ssh')), `${what}: the lane's denials come from the fixture home`);
-      out.push({ what, settings, home: join(base, 'agent-home') });
+      out.push({ what, settings, home: join(base, 'agent-home'), run: true });
     }
+    // A run as its own user: the runner denies that user's login files too (src/runner.ts, withDeniedReads on the
+    // lane's settings). Worked out here as the runner does, since a run as another user needs that user.
+    const cwd = mkdtempSync(join(tmpdir(), 'adv-cwd-'));
+    const { lanes, base } = sandboxLanes(cwd);
+    const home = join(base, 'agent-home');
+    const lane = lanes.default!.settings as object;
+    out.push({ what: 'a lane for a run as its own user, its login files denied', settings: withDeniedReads(lane, [join(home, '.claude', '.credentials.json')]) as SandboxSettings, home, run: false });
     return out;
   })());
 
@@ -719,7 +769,7 @@ test(`adversarial guards / sandbox.read-tool-same-deny (${doc('The Read tool is 
 knownHole(`adversarial guards / sandbox.read-tool-same-deny (${doc('The Read tool is denied the same paths as the commands')}): Read rules for file entries`, '#959', { skip: !posix && 'POSIX stand-in claude' }, async () => {
   const attacks: string[] = [];
   const open: string[] = [];
-  for (const { what, settings, home } of await sandboxed()) {
+  for (const { what, settings, home } of (await sandboxed()).filter((x) => x.run)) {
     const files = entryKinds(settings.sandbox?.filesystem?.denyRead ?? []).filter((k) => k.kind === 'file');
     assert.ok(files.length > 0, `${what}: the sandbox hides a file`);
     const rules = readRulePaths(settings.permissions?.deny, home);
@@ -854,6 +904,18 @@ test(`adversarial guards / push.size-limit (${doc('refuses a change over the pus
     // Closed by PR #928 too, merged: a replace ref of the pushed commit hides nothing.
     { what: 'a refused path behind a replace ref', make: (r) => (r.put('secrets/key.pem', 'stand-in\n'), run(r.dir, 'replace', r.commit(), run(r.dir, 'commit-tree', `${r.base}^{tree}`, '-p', r.base, '-m', 'benign'))) },
     { what: 'a big file behind a replace ref', make: (r) => (r.put('big.txt', bigLine()), run(r.dir, 'replace', r.commit(), run(r.dir, 'commit-tree', `${r.base}^{tree}`, '-p', r.base, '-m', 'benign'))) },
+    // A crafted tree (no git command writes one) that hides a refused path under a `.` entry.
+    {
+      what: 'a refused path under a crafted "." tree entry',
+      make: (r) => {
+        const hash = (args: string[], input: string | Buffer) => execFileSync('git', args, { cwd: r.dir, input, encoding: 'utf8' }).trim();
+        const entry = (mode: string, name: string, sha: string) => Buffer.concat([Buffer.from(`${mode} ${name}\0`), Buffer.from(sha, 'hex')]);
+        const tree = (buf: Buffer) => hash(['hash-object', '-t', 'tree', '--literally', '-w', '--stdin'], buf);
+        const secrets = tree(entry('100644', 'key.pem', hash(['hash-object', '-w', '--stdin'], 'stand-in\n')));
+        const root = tree(Buffer.concat([entry('40000', '.', tree(entry('40000', 'secrets', secrets))), entry('100644', 'README.md', run(r.dir, 'rev-parse', 'HEAD:README.md'))]));
+        run(r.dir, 'update-ref', 'HEAD', hash(['commit-tree', root, '-p', r.base, '-m', 'crafted'], ''));
+      },
+    },
     // A merge commit that itself adds a refused path, both of its parents clean.
     {
       what: 'a refused path added by a merge commit itself',
@@ -1101,13 +1163,23 @@ test(`adversarial guards / commit.scanner-unavailable-not-clean (${doc("A scanne
     { what: 'killed', path: bin('gitleaks', '#!/bin/sh\nkill -9 $$\n') },
     { what: "can't be run", path: bin('gitleaks', '#!/bin/sh\nexit 0\n', 0o644) },
     { what: 'a directory', path: mkdtempSync(join(tmpdir(), 'adv-scanner-dir-')) },
+    { what: 'found nowhere', path: null },
   ];
+  const results = async (path: string | null) => ({
+    commit: scanCommit(r.dir, false, path),
+    commitAll: scanCommit(r.dir, true, path),
+    path: scanPath(join(r.dir, 'a.txt'), path),
+    range: await scanRange(r.dir, `${r.base}..HEAD`, path),
+    file: await scanFile(join(r.dir, 'a.txt'), path),
+  });
   const left = await letThrough(scanners, async (s) => {
-    const results = { commit: scanCommit(r.dir, false, s.path), commitAll: scanCommit(r.dir, true, s.path), path: scanPath(join(r.dir, 'a.txt'), s.path), range: await scanRange(r.dir, `${r.base}..HEAD`, s.path) };
-    const bad = Object.entries(results).filter(([, v]) => v.status !== 'unavailable');
+    const bad = Object.entries(await results(s.path)).filter(([, v]) => v.status !== 'unavailable');
     return bad.length ? JSON.stringify(Object.fromEntries(bad)) : null;
   });
   assert.deepEqual(left, [], 'broken scanners reported as something other than unavailable');
+  // A scanner that exits with the leaks code but leaves no report: whatever it is, never clean.
+  const noReport = await results(bin('gitleaks', '#!/bin/sh\nexit 3\n'));
+  assert.deepEqual(Object.entries(noReport).filter(([, v]) => v.status === 'clean').map(([k]) => k), [], 'a leaks exit with no report read as clean');
 });
 
 // ---- Redaction: what the event log and the run record store. ----
@@ -1138,6 +1210,23 @@ function corpus(): { what: string; text: string; secret: string }[] {
     one('a 32-byte hex key', `0x${hex(64)}`),
     { what: 'a value under a credential key', text: JSON.stringify({ id: 3, api_key: jsonValue }), secret: jsonValue },
     ...(['password', 'token', 'clientSecret'] as const).map((key) => {
+      const v = alnum(24);
+      return { what: `a value under "${key}"`, text: JSON.stringify({ id: 3, [key]: v }), secret: v };
+    }),
+    // One sample per alternative of each pattern (src/events/redact.ts), beside the ones above.
+    ...['o', 'u', 's', 'r'].map((k) => one(`a GitHub token (gh${k}_)`, ['gh', k, '_', alnum(36)].join(''))),
+    one('an API key (sk-)', ['sk', '-', alnum(40)].join('')),
+    ...[['sk', 'test'], ['rk', 'live'], ['rk', 'test']].map(([k, env]) => one(`a Stripe key (${k}_${env})`, [k, env, alnum(24)].join('_'))),
+    one('a temporary AWS access key', ['AS', 'IA', upperDigits(16)].join('')),
+    ...['a', 'p', 'r', 's'].map((k) => one(`a Slack token (xox${k}-)`, ['xo', 'x', k, '-', alnum(12), '-', alnum(24)].join(''))),
+    one('a Slack rotation token (xoxe.)', ['xo', 'xe.xo', 'xb-1-', alnum(30)].join('')),
+    one('a Linear OAuth token', ['lin', '_oauth_', alnum(40)].join('')),
+    ...['OPENSSH PRIVATE', 'EC PRIVATE', 'PRIVATE'].map((kind) => {
+      const body = alnum(64);
+      return { what: `a private key (${kind})`, text: ['-----BEGIN ', kind, ' KEY-----\n', body, '\n-----END ', kind, ' KEY-----'].join(''), secret: body };
+    }),
+    ((pw: string) => ({ what: 'a password in an https URL', text: `fetch https://deploy:${pw}@git.example.com/repo`, secret: pw }))(alnum(20)),
+    ...(['x-api-key', 'aws_secret_access_key', 'signing_key'] as const).map((key) => {
       const v = alnum(24);
       return { what: `a value under "${key}"`, text: JSON.stringify({ id: 3, [key]: v }), secret: v };
     }),
@@ -1175,10 +1264,15 @@ function stored(text: string): { where: string; raw: string }[] {
   rec.line({ type: 'assistant', message: { content: [{ type: 'text', text }, { type: 'tool_use', id: 't1', name: 'Bash', input: { command: `echo ${text}` } }] } });
   rec.line({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 't1', content: text }] } });
   const file = rec.finish({ reason: 'failed', costUsd: 0, turns: 1, model: 'm', final: text, detail: text });
+  // The run feed: the live view of a run's transcript, as the dashboard reads it.
+  const feed = new RunFeed(stateDir, { run: 'adversarial-feed', issue: null, role: 'worker', model: 'm', cwd: stateDir });
+  feed.line({ type: 'assistant', message: { content: [{ type: 'text', text }, { type: 'tool_use', id: 't1', name: 'Bash', input: { command: `echo ${text}` } }] } });
+  feed.line({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 't1', content: text }] } });
   return [
     { where: 'the event log', raw: events },
     { where: 'the event log, held while its storage was full', raw: held },
     { where: 'the run record', raw: file ? readFileSync(file, 'utf8') : '(no record written)' },
+    { where: 'the run feed', raw: existsSync(feed.file) ? readFileSync(feed.file, 'utf8') : '(no record written)' },
   ];
 }
 
@@ -1200,4 +1294,40 @@ knownHole(`adversarial guards / redact.before-store (${doc('Secrets in event pay
   const token = [`M${alnum(23)}`, alnum(6), alnum(27)].join('.');
   const stores = stored(`bot token=${token} in a log line`);
   return { attacks: stores.map((s) => `a Discord bot token kept by ${s.where}`), open: stores.filter((s) => s.raw.includes(token)).map((s) => `a Discord bot token kept by ${s.where}`) };
+});
+
+// ---- What "covered" means: the mutant list (test/adversarial/mutants.json, run by run-mutants.mjs). ----
+
+const MutantList = z.strictObject({
+  about: z.string().min(1),
+  guarantees: z.record(z.string().regex(/^[a-z]+\.[a-z-]+$/), z.union([z.strictObject({ status: z.enum(['covered', 'extra']) }), z.strictObject({ status: z.literal('open'), see: z.array(z.string().regex(/^#\d+$/)).min(1) })])),
+  mutants: z.array(
+    z.strictObject({
+      id: z.string().regex(/^[a-z0-9]+-[A-Za-z0-9]+$/),
+      kills: z.array(z.string()).min(1),
+      breaks: z.string().min(1),
+      edits: z.array(z.strictObject({ file: z.string().regex(/^(dist\/src|scripts)\/[\w/.-]+\.m?js$/), from: z.string().min(1), to: z.string() })).min(1),
+    }),
+  ).min(1),
+});
+
+test('adversarial guards / the mutant list: it parses, each mutant names real code and a guarantee with cases here, and each covered guarantee has mutants', () => {
+  const list = MutantList.parse(JSON.parse(readFileSync(join(repoRoot, 'test', 'adversarial', 'mutants.json'), 'utf8')));
+  const ids = list.mutants.map((m) => m.id);
+  assert.deepEqual(ids.filter((id, i) => ids.indexOf(id) !== i), [], 'duplicate mutant ids');
+  const source = readFileSync(join(repoRoot, 'test', 'adversarial', 'guards.test.ts'), 'utf8');
+  const problems: string[] = [];
+  for (const g of Object.keys(list.guarantees)) if (!source.includes(`adversarial guards / ${g} (`)) problems.push(`${g}: no case in this file`);
+  for (const [g, s] of Object.entries(list.guarantees)) if (s.status === 'covered' && !list.mutants.some((m) => m.kills.includes(g))) problems.push(`${g}: covered with no mutant listed`);
+  for (const m of list.mutants) {
+    for (const g of m.kills) if (!(g in list.guarantees)) problems.push(`${m.id}: kills ${g}, which the list doesn't name`);
+    for (const e of m.edits) {
+      // The built code the mutant rewrites (the suite runs from dist/, so it is there): its anchor exactly once.
+      const file = join(repoRoot, e.file);
+      const n = existsSync(file) ? readFileSync(file, 'utf8').split(e.from).length - 1 : -1;
+      if (n !== 1) problems.push(`${m.id}: ${n < 0 ? `${e.file} doesn't exist` : `its anchor is in ${e.file} ${n} times`}`);
+      if (e.to === e.from) problems.push(`${m.id}: an edit that changes nothing`);
+    }
+  }
+  assert.deepEqual(problems, [], 'the mutant list is out of step with the code or this file');
 });
