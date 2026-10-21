@@ -6,7 +6,9 @@
 // Root-owned, world-writable, non-sticky directories can't be made without root, so the test runs in a user
 // namespace (`unshare --user --map-root-user --map-auto --mount`): its uid 0 (this user) stands in for root, its uid
 // 1000 for the agent user, and every file lives on a tmpfs over /mnt in that private mount namespace. Nothing real is
-// touched, and no sudo. Skipped where such a namespace, or bubblewrap inside it, isn't available.
+// touched, and no sudo. Skipped where such a namespace, or bubblewrap inside it, isn't available, unless
+// PROJECT_SANDBOX_REQUIRED=1 makes that a failure: CI's test shards set it, and give the runner the subordinate ids and
+// the user namespaces this needs (ci.yml, the bubblewrap step). It skipped in CI before round 5.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
@@ -16,9 +18,10 @@ import { join } from 'node:path';
 import * as osAdapter from '../src/os/index.js';
 
 const posix = process.platform === 'linux';
+const required = process.env.PROJECT_SANDBOX_REQUIRED === '1';
 const NS = ['--user', '--map-root-user', '--map-auto', '--mount'];
 const nsRuns = posix && spawnSync('unshare', [...NS, '/bin/sh', '-c', 'mount -t tmpfs none /mnt'], { stdio: 'ignore' }).status === 0;
-const skip = !posix ? 'Linux only' : !nsRuns && 'needs `unshare --map-auto` (subordinate ids) to stand in for root and a second user';
+const skip = required ? false : !posix ? 'Linux only' : !nsRuns && 'needs `unshare --map-auto` (subordinate ids) to stand in for root and a second user';
 
 /** The wrapper's argv after `sudo -n -u <agent> --`, NUL-separated, for the stand-in agent to run. */
 function argsFile(dir: string, name: string, home: string, command: string): string {
@@ -51,7 +54,10 @@ function results(): ((k: string) => string) | null {
   const script = join(dir, 'pins.sh');
   writeFileSync(script, SCRIPT);
   const r = spawnSync('unshare', [...NS, '/bin/bash', script, s1, s2], { encoding: 'utf8', timeout: 120_000, stdio: ['ignore', 'pipe', 'pipe'] });
-  ran = /NOSANDBOX|NOMOUNT/.test(r.stdout) ? null : (k: string) => new RegExp(`^${k}=(.*)$`, 'm').exec(r.stdout)?.[1] ?? `(no ${k}: ${r.stdout}${r.stderr})`;
+  if (/NOSANDBOX|NOMOUNT/.test(r.stdout) || r.status !== 0) {
+    if (required) assert.fail(`PROJECT_SANDBOX_REQUIRED=1, but the namespace or bubblewrap in it didn't run: ${r.stdout}${r.stderr}`);
+    ran = null;
+  } else ran = (k: string) => new RegExp(`^${k}=(.*)$`, 'm').exec(r.stdout)?.[1] ?? `(no ${k}: ${r.stdout}${r.stderr})`;
   return ran;
 }
 
