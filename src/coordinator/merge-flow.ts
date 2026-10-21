@@ -336,6 +336,11 @@ export abstract class MergeFlow extends FixRuns {
     // The default branch's tip for this pass's merge decisions, fetched once, off the event loop and bounded (#784
     // round 8): every decision of the pass reads it (defaultTipNow), so the pass that would merge a PR has it fresh.
     if (due.length) this.tipThisPass = await this.defaultTipFetched();
+    // A shutdown that cut the fetch short decides nothing (its failed fetch would hold every PR of the pass).
+    if (this.shutdown.signal.aborted) {
+      this.tipThisPass = undefined;
+      return;
+    }
     try {
       for (const watched of due) {
         this.prPolled.set(watched.number, now);
@@ -349,6 +354,24 @@ export abstract class MergeFlow extends FixRuns {
   /** The default branch's tip this watch pass fetched (null: the fetch failed); undefined outside a pass. */
   private tipThisPass: string | null | undefined;
 
+  /** How long defaultTipFetched's fetch may take (DEFAULT_TIP_FETCH_MS; a test sets less). */
+  protected tipFetchMs = DEFAULT_TIP_FETCH_MS;
+
+  /**
+   * `decide` with the default branch's tip fetched now (defaultTipFetched: awaited, bounded), whatever the pass fetched
+   * (#784 round 9): what is about to merge is decided on main as it is.
+   */
+  private async onFreshTip<T>(decide: () => T): Promise<T> {
+    const fresh = await this.defaultTipFetched();
+    const before = this.tipThisPass;
+    this.tipThisPass = fresh;
+    try {
+      return decide();
+    } finally {
+      this.tipThisPass = before;
+    }
+  }
+
   /**
    * defaultTipNow's fetch as a child the pass awaits (#784 round 8: the coordinator's thread never waits on the
    * remote), killed past DEFAULT_TIP_FETCH_MS or on shutdown; null when it fails.
@@ -359,7 +382,7 @@ export abstract class MergeFlow extends FixRuns {
       if (signal.aborted) return done(false);
       const child = spawn('git', ['fetch', '-q', this.remote, `+refs/heads/${this.branch}:refs/remotes/${this.remote}/${this.branch}`], { cwd: this.d.repo, stdio: 'ignore' });
       const stop = () => child.kill('SIGKILL');
-      const timer = setTimeout(stop, DEFAULT_TIP_FETCH_MS);
+      const timer = setTimeout(stop, this.tipFetchMs);
       signal.addEventListener('abort', stop, { once: true });
       const end = (r: boolean) => {
         clearTimeout(timer);
@@ -759,7 +782,11 @@ export abstract class MergeFlow extends FixRuns {
       if (batching && !this.emergencyInForce() && !this.autoMergeStopped() && (await this.ownerApproved(w, pr)) && !this.triesCapped(w, pr, `@${this.ownerOf(w.issue)}'s review`)) await this.mergeTested(w, pr, 'approved');
       return; // otherwise already waiting for the owner
     }
-    const d = this.mergeDecisionFor(n, number, pr);
+    // A PR the pass's tip would let merge is decided again on the default branch fetched now (#784 round 9): a mark
+    // that landed on main since the pass fetched (a merge earlier in this pass, a person on GitHub) holds it, as
+    // main's per-decision fetch did (#869, #886).
+    const passed = this.mergeDecisionFor(n, number, pr);
+    const d = passed.auto ? await this.onFreshTip(() => this.mergeDecisionFor(n, number, pr)) : passed;
     // Nothing holds it but its tests' coverage run at this head, still to come (watchPr's startVacuityRun runs it in
     // the background): not merged, and not sent to the owner either; the pass after the run decides (#784).
     if (d.reasons.length === 1 && d.reasons[0] === VACUITY_UNMEASURED) return;
