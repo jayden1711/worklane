@@ -1,11 +1,11 @@
 // Issue #798, round 3: a link directly in the agent's home is walked hop by hop, as the credential paths are. Where it
 // resolves isn't enough: `~/.profile -> /x/hop/profile` with `/x/hop -> ~/dotfiles` resolves inside the home, yet a
-// command can re-aim /x/hop (the agent's) and then write ~/.profile's new target. And a link whose every hop only root
-// can change (a skeleton's `~/.ghcup -> /usr/local/.ghcup`, `~/.bash_history -> /dev/null`) must not stop every
-// project command: it is allowed, and what it reaches is read-only inside the sandbox.
+// command can re-aim /x/hop (the agent's) and then write ~/.profile's new target. And a link with no hop the agent
+// could re-aim, to what it doesn't own (a skeleton's `~/.ghcup -> /usr/local/.ghcup`, `~/.bash_history -> /dev/null`),
+// must not stop every project command: it is allowed, and what it reaches is read-only inside the sandbox.
 //
 // No real sudo and no real state: the current user stands in for the agent user, and its "home" is a temp dir. The
-// root-owned targets are the machine's own (/usr/share, /etc/passwd, /dev/null), only read.
+// root-owned targets are the machine's own (/usr/share, /etc/passwd, /dev/null), never written.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
@@ -55,7 +55,7 @@ test('a link that resolves inside the home through a hop the agent can re-aim ou
   assert.equal(readFileSync(join(p.home, '.profile'), 'utf8'), '# own\n', '~/.profile reads what the command planted');
 });
 
-test('a hop in a directory the agent can write but doesn\'t own (root\'s, world-writable, as a group-writable one would be) is refused', { skip: realSkip }, () => {
+test('a link hop in a directory the agent can write but doesn\'t own (root\'s, world-writable, as a group-writable one would be) is refused', { skip: realSkip }, () => {
   const p = layout();
   // A link in /tmp itself: root owns /tmp, everyone may write it (sticky), so the agent could replace a link of its own there.
   const hop = join('/tmp', `wl-798-hop-${randomBytes(8).toString('hex')}`);
@@ -69,14 +69,16 @@ test('a hop in a directory the agent can write but doesn\'t own (root\'s, world-
   }
 });
 
-test('links whose every hop only root can change are allowed (a skeleton\'s links), and what they reach stays read-only', { skip: realSkip }, () => {
+test('links the agent user doesn\'t own, with no link on the way it could re-aim, are allowed (a skeleton\'s links), and what they reach is read-only', { skip: realSkip }, () => {
   const p = layout();
-  // As /etc/skel can hold on a real machine (the CI runner's has ~/.ghcup -> /usr/local/.ghcup): a root-owned
-  // directory, a root-owned file, a device, and a dangling link into a root-owned directory nobody else can fill.
+  // As /etc/skel can hold on a real machine (the CI runner's has ~/.ghcup -> /usr/local/.ghcup, a directory the agent
+  // user can write: pinned and bound read-only, not refused): a directory and a file of root's, a device, and a
+  // dangling link into / (no one but root can create it). On a CI runner /usr/share is writable by the test's user:
+  // there the touch below shows the read-only bind; elsewhere root's own permissions refuse it.
   symlinkSync('/usr/share', join(p.home, '.skel-dir'));
   symlinkSync('/etc/passwd', join(p.home, '.skel-file'));
   symlinkSync('/dev/null', join(p.home, '.bash_history'));
-  symlinkSync(`/usr/share/wl-798-absent-${randomBytes(4).toString('hex')}`, join(p.home, '.skel-absent'));
+  symlinkSync(`/wl-798-absent-${randomBytes(4).toString('hex')}`, join(p.home, '.skel-absent'));
   const r = asStandIn('echo ran > ran.txt; ls ~/.skel-dir > /dev/null && echo listed; head -c1 ~/.skel-file > /dev/null && echo read; echo gone > ~/.bash_history && echo devnull; touch ~/.skel-dir/wl-798 2>&1; true', p.home, p.work);
   assert.equal(r.status, 0, r.stderr);
   assert.ok(existsSync(join(p.work, 'ran.txt')), 'the command ran');
