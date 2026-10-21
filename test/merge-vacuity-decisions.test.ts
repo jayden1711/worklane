@@ -213,9 +213,9 @@ test('(c) a fix-forward PR the gate holds while main is red is said at once on t
     },
     deps: { intake: { config: () => intake, sources: [chat] } },
   });
-  // Passed as the task's own checks ran it; once the PR is open, the gate's coverage run fails (a reporter that isn't
-  // there): the gate holds it.
-  t.f.cfg.tests.runner.one = 'node --test --test-reporter=no-such-reporter {file}';
+  // Passed as the task's own checks ran it; once the PR is open, the gate's coverage run fails (a shard that doesn't
+  // exist): the gate holds it.
+  t.f.cfg.tests.runner.one = 'node --test --test-shard=2/1 {file}';
   // The default branch is red, and this PR's task is fix-forward's fix for it.
   t.f.log.append('fix_forward.started', { sha: 'a'.repeat(40), number: null, failed: ['ci'], last_green: null, candidates: [] }, 'alice');
   t.f.log.append('fix_forward.attempt', { sha: 'a'.repeat(40), attempt: 1, issue: t.n, culprit: null }, 'alice');

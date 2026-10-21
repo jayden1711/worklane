@@ -4,9 +4,12 @@
 //  dynamic: run the file under NODE_V8_COVERAGE; it must execute code inside the app's paths. Code that runs as the
 //           module loads doesn't count: the module's own top level and V8's synthetic initializers (a class's static
 //           fields). The merge gate also runs each test a second time with none of its tests run (a baseline: the
-//           file and what it imports only load), and counts only code that ran more often in the real run, so a helper
+//           file and what it imports only load), and loads each script that made a file touched on its own (one more
+//           baseline each), and counts only code that ran more often in the real run than in any baseline, so a helper
 //           a module calls as it loads (`const T = build()`, tsc's __decorate, esbuild's __name) counts for nothing even
-//           when the PR adds the whole file; and only code on the lines the PR changes that hold code (codeSpans).
+//           when the PR adds the whole file or a test's body imports it; and only code on the lines the PR changes that
+//           hold code (codeSpans). Not seen: work a module starts as it loads that keeps running (a timer) while a test
+//           waits.
 import { spawn, spawnSync } from './os/child-process.js';
 import { lstatSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -213,20 +216,31 @@ function ranSegments(fns: V8Coverage['result'][number]['functions'], length: num
 }
 
 /**
- * Where code ran more times in the test runs (`ran`: every process's segments of one script) than in the baseline runs
- * (`baseline`: the same tests loaded with none of them run), as sorted [start, end) offsets. What loading the test file
- * and the modules it imports runs, a helper the app file calls as it loads included, runs as often in both, so only
- * what the tests' own bodies ran is left (#784 round 5).
+ * Where code ran more times in the test runs (`ran`: every process's segments of one script, summed) than in the most
+ * any baseline ran it (`baselines`: each one's segments summed), as sorted [start, end) offsets (#784 rounds 5, 6). The
+ * baselines are the same tests with none of them run (what loading the test file and its imports runs) and each
+ * changed script loaded on its own (what loading it runs, wherever a test imports it, a test's body included). The
+ * most of them, not their sum: a test that loads a module and then calls it is never taken for one that only loaded it.
  */
-function ranMore(ran: Segment[], baseline: Segment[]): [number, number][] {
-  const events = [...ran.flatMap(([a, b, c]) => [[a, c], [b, -c]] as const), ...baseline.flatMap(([a, b, c]) => [[a, -c], [b, c]] as const)].sort((x, y) => x[0] - y[0]);
+function ranMore(ran: Segment[], baselines: Segment[][]): [number, number][] {
+  const cuts = [...new Set([ran, ...baselines].flatMap((segs) => segs.flatMap(([a, b]) => [a, b])))].sort((x, y) => x - y);
+  const at = new Map(cuts.map((c, i) => [c, i]));
+  // The run count over each interval [cuts[i], cuts[i + 1]).
+  const level = (segs: Segment[]) => {
+    const d = new Array<number>(cuts.length).fill(0);
+    for (const [a, b, c] of segs) {
+      d[at.get(a)!]! += c;
+      d[at.get(b)!]! -= c;
+    }
+    for (let i = 1; i < d.length; i++) d[i]! += d[i - 1]!;
+    return d;
+  };
+  const r = level(ran);
+  const bs = baselines.map(level);
   const out: [number, number][] = [];
-  let sum = 0;
-  for (let i = 0; i < events.length; i++) {
-    sum += events[i]![1];
-    const a = events[i]![0];
-    const b = events[i + 1]?.[0];
-    if (b === undefined || a === b || sum <= 0) continue;
+  for (let i = 0; i + 1 < cuts.length; i++) {
+    if (r[i]! - Math.max(0, ...bs.map((b) => b[i]!)) <= 0) continue;
+    const [a, b] = [cuts[i]!, cuts[i + 1]!];
     const last = out.at(-1);
     if (last && last[1] === a) last[1] = b;
     else out.push([a, b]);
@@ -244,11 +258,23 @@ const KEYWORDS_BEFORE_REGEX = new Set(['return', 'typeof', 'instanceof', 'in', '
 /**
  * Which lines of a JavaScript or TypeScript text hold code (`code[i]`, line i 0-based): a character outside a comment,
  * a string's or a template's text included (a blank line inside a template is its text too). `inComment[i]`: line i
- * ends inside a block comment. A lexer, not a parser: a `/` after a value (a name, a number, `)`, `]`, a string's end)
- * divides, and anywhere else, or after a keyword such as `return`, starts a regular expression; a `#!` first line is a
- * comment. Where it guesses wrong (JSX text with `//` in it), a line reads as a comment: it counts for less, never more.
+ * ends inside a block comment. A lexer, not a parser, so it reads the text twice (#784 round 6): once with a `/` after
+ * a value (a name, a number, `)`, `]`, a string's end) dividing, once with every `/` that starts no comment starting a
+ * regular expression (`if (s) /`/.test(s)`, where the first reading opens a template at the backtick). A line holds
+ * code only when both readings say so, and ends in a comment when either does. When neither reading ends cleanly (a
+ * string, template, comment or regular expression still open at the end), no line holds code. So where one reading is
+ * right, a misread only makes a line count for less. Where both misread, with a `/` needing each reading and a quote
+ * or backtick after the wrong one, a comment line can still read as code (inferred).
  */
 export function codeLines(text: string): { code: boolean[]; inComment: boolean[] } {
+  const a = lexLines(text, false);
+  const b = lexLines(text, true);
+  if (!a.settled && !b.settled) return { code: a.code.map(() => false), inComment: a.inComment.map(() => true) };
+  return { code: a.code.map((c, i) => c && b.code[i] === true), inComment: a.inComment.map((c, i) => c || b.inComment[i] === true) };
+}
+
+/** One reading of codeLines: `slashIsRegex`, every `/` that starts no comment starts a regular expression. */
+function lexLines(text: string, slashIsRegex: boolean): { code: boolean[]; inComment: boolean[]; settled: boolean } {
   type State = 'code' | 'line' | 'block' | 'sq' | 'dq' | 'tpl' | 're' | 'class';
   const code: boolean[] = [false];
   const inComment: boolean[] = [];
@@ -317,7 +343,7 @@ export function codeLines(text: string): { code: boolean[]; inComment: boolean[]
       prev = 'a';
       continue;
     }
-    const after = prev === 'a' && !KEYWORDS_BEFORE_REGEX.has(word) ? 'value' : prev === ')' || prev === ']' ? 'value' : 'operator';
+    const after = slashIsRegex ? 'operator' : prev === 'a' && !KEYWORDS_BEFORE_REGEX.has(word) ? 'value' : prev === ')' || prev === ']' ? 'value' : 'operator';
     word = '';
     if (c === '/') {
       if (after === 'operator') s = 're';
@@ -337,7 +363,7 @@ export function codeLines(text: string): { code: boolean[]; inComment: boolean[]
     } else prev = c;
   }
   inComment[line] = s === 'block';
-  return { code: code.map(Boolean), inComment };
+  return { code: code.map(Boolean), inComment, settled: (s === 'code' || s === 'line') && braces.length === 0 };
 }
 
 /**
@@ -507,6 +533,15 @@ export const NOTHING_TO_MEASURE = 'nothing to measure: its changes to app code a
  * a process of its own, with a time limit (readTouchedInChild).
  */
 export function touchedAppFiles(coverageDir: string, root: string, appPaths: string[], only?: readonly string[], hunks?: Readonly<Record<string, readonly ChangedHunkSpots[]>>, baselineDir?: string): string[] {
+  return measureTouched(coverageDir, root, appPaths, only, hunks, baselineDir).touched;
+}
+
+/**
+ * touchedAppFiles, and `scripts`: the scripts (paths under `root`) whose run code made a file touched, an app file
+ * itself or a build's script whose map named it. `loadDir` (#784 round 6): the coverage of each of those scripts
+ * loaded on its own, one process each; what any one of them ran is taken away too (ranMore).
+ */
+export function measureTouched(coverageDir: string, root: string, appPaths: string[], only?: readonly string[], hunks?: Readonly<Record<string, readonly ChangedHunkSpots[]>>, baselineDir?: string, loadDir?: string): { touched: string[]; scripts: string[] } {
   const res = appPaths.map((g) => globToRegExp(g));
   const realRoot = realpathSync.native(root);
   const wanted = hunks ? new Set(Object.keys(hunks)) : only ? new Set(only) : null;
@@ -522,10 +557,11 @@ export function touchedAppFiles(coverageDir: string, root: string, appPaths: str
     if (![...spans.values()].some((s) => s.length)) throw new CoverageUnreadable(NOTHING_TO_MEASURE);
   }
   const spansOf = (rel: string): LineSpans | null => (hunks ? (spans.get(rel) ?? []) : null);
-  // Every process's segments of each script under the root, test runs and baseline runs apart.
-  const scripts = new Map<string, { rel: string; text: string; ran: Segment[]; baseline: Segment[] }>();
-  const collect = (dir: string, into: 'ran' | 'baseline') => {
-    for (const cov of readCoverageDir(dir)) {
+  // Every process's segments of each script under the root: the test runs' summed, the test baseline's summed (group
+  // 0), and each load-only process its own group.
+  const scripts = new Map<string, { rel: string; text: string; ran: Segment[]; groups: Segment[][] }>();
+  const collect = (dir: string, into: 'ran' | 'baseline' | 'load') => {
+    for (const [n, cov] of readCoverageDir(dir).entries()) {
       for (const script of cov.result) {
         if (!script.url.startsWith('file:') || script.url.length > COVERAGE_LIMITS.urlChars) continue;
         let file: string;
@@ -539,42 +575,61 @@ export function touchedAppFiles(coverageDir: string, root: string, appPaths: str
         }
         if (!under(file, realRoot)) continue;
         let s = scripts.get(file);
-        // The baseline only takes away from scripts the tests ran.
-        if (!s && into === 'baseline') continue;
+        // A baseline only takes away from scripts the tests ran.
+        if (!s && into !== 'ran') continue;
         if (!s) {
           const text = textOf(file, SCRIPT_BYTES);
           if (text === null) continue;
-          s = { rel: relative(realRoot, file).split('\\').join('/'), text, ran: [], baseline: [] };
+          s = { rel: relative(realRoot, file).split('\\').join('/'), text, ran: [], groups: [[]] };
           scripts.set(file, s);
         }
         const segs = ranSegments(script.functions, s.text.length, script.url);
-        if (segs) s[into].push(...segs);
+        if (!segs) continue;
+        if (into === 'ran') s.ran.push(...segs);
+        else if (into === 'baseline') s.groups[0]!.push(...segs);
+        else {
+          // One group per load process (coverage file), however many of its scripts it holds.
+          const key = n + 1;
+          while (s.groups.length <= key) s.groups.push([]);
+          s.groups[key]!.push(...segs);
+        }
       }
     }
   };
   collect(coverageDir, 'ran');
   if (baselineDir !== undefined) collect(baselineDir, 'baseline');
+  if (loadDir !== undefined) collect(loadDir, 'load');
   const budget = { maps: 0, bytes: 0, sources: 0 };
   const touched = new Set<string>();
-  const mappedRan = new Map<string, Set<number>>();
-  for (const [file, { rel, text, ran, baseline }] of scripts) {
-    const ranges = ranMore(ran, baseline);
+  const from = new Set<string>();
+  // For each source a build's map names: the lines whose code ran, by the script that ran them.
+  const mappedRan = new Map<string, Map<string, Set<number>>>();
+  for (const [file, { rel, text, ran, groups }] of scripts) {
+    const ranges = ranMore(ran, groups.filter((g) => g.length));
     if (!ranges.length) continue;
     if (isApp(rel)) {
-      if (ranOn(ranges, lineStarts(text), spansOf(rel))) touched.add(rel);
+      if (ranOn(ranges, lineStarts(text), spansOf(rel))) {
+        touched.add(rel);
+        from.add(rel);
+      }
       continue;
     }
     for (const [src, lines] of mappedLines(file, ranges, text, realRoot, budget)) {
-      if (!mappedRan.has(src)) mappedRan.set(src, new Set());
-      for (const l of lines) mappedRan.get(src)!.add(l);
+      if (!mappedRan.has(src)) mappedRan.set(src, new Map());
+      mappedRan.get(src)!.set(rel, lines);
     }
   }
-  for (const [src, ran] of mappedRan) {
-    if (!isApp(src) || touched.has(src)) continue;
+  for (const [src, by] of mappedRan) {
+    if (!isApp(src)) continue;
     const s = spansOf(src);
-    if (!s ? ran.size > 0 : s.some(([a, b]) => [...ran].some((l) => l >= a && l <= b))) touched.add(src);
+    for (const [rel, ran] of by) {
+      if (!s ? ran.size > 0 : s.some(([a, b]) => [...ran].some((l) => l >= a && l <= b))) {
+        touched.add(src);
+        from.add(rel);
+      }
+    }
   }
-  return [...touched].sort();
+  return { touched: [...touched].sort(), scripts: [...from].sort() };
 }
 
 /** What the merge gate asks the reader process: touchedAppFiles's arguments. */
@@ -585,7 +640,15 @@ export interface TouchedRequest {
   appPaths: string[];
   only: string[];
   hunks: Record<string, ChangedHunkSpots[]>;
+  /** The load-only baselines' coverage (#784 round 6), once the scripts to load are known. */
+  loadDir?: string;
 }
+
+/** What the reader answers: the touched files, and the scripts that touched them (measureTouched). */
+export type TouchedAnswer = { touched: string[]; scripts: string[] } | { error: string };
+
+/** The most scripts a read may name to load on their own (more: the read fails, and the PR waits). */
+export const LOAD_SCRIPTS_MAX = 64;
 
 /** How long the reader process may take before the read counts as failed (the PR waits). */
 export const COVERAGE_READ_TIMEOUT_MS = 120_000;
@@ -596,12 +659,12 @@ export const COVERAGE_READ_TIMEOUT_MS = 120_000;
  * isn't the reader's. The request goes in on stdin, the answer comes back on stdout (at most 1 MiB). `signal` (the
  * coordinator's shutdown) kills it too.
  */
-export function readTouchedInChild(req: TouchedRequest, timeoutMs = COVERAGE_READ_TIMEOUT_MS, signal?: AbortSignal): Promise<{ touched: string[] } | { error: string }> {
+export function readTouchedInChild(req: TouchedRequest, timeoutMs = COVERAGE_READ_TIMEOUT_MS, signal?: AbortSignal): Promise<TouchedAnswer> {
   const reader = fileURLToPath(new URL('./vacuity-read.js', import.meta.url));
   return new Promise((done) => {
     let out = '';
     let settled = false;
-    const finish = (r: { touched: string[] } | { error: string }) => {
+    const finish = (r: TouchedAnswer) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
@@ -630,9 +693,14 @@ export function readTouchedInChild(req: TouchedRequest, timeoutMs = COVERAGE_REA
     child.on('error', () => finish({ error: 'the coverage read could not start' }));
     child.on('close', () => {
       try {
-        const a = JSON.parse(out) as { touched?: unknown; error?: unknown };
+        const a = JSON.parse(out) as { touched?: unknown; scripts?: unknown; error?: unknown };
         if (typeof a.error === 'string') return finish({ error: a.error });
-        if (Array.isArray(a.touched) && a.touched.every((t) => typeof t === 'string' && req.only.includes(t))) return finish({ touched: a.touched as string[] });
+        // The touched files are the PR's own; the scripts, relative paths under the worktree, at most LOAD_SCRIPTS_MAX.
+        const rel = (p: unknown) => typeof p === 'string' && p.length > 0 && p.length <= COVERAGE_LIMITS.urlChars && !isAbsolute(p) && !p.split('/').includes('..');
+        if (Array.isArray(a.touched) && a.touched.every((t) => typeof t === 'string' && req.only.includes(t)) && Array.isArray(a.scripts) && a.scripts.every(rel)) {
+          if (a.scripts.length > LOAD_SCRIPTS_MAX) return finish({ error: `the coverage read named more than ${LOAD_SCRIPTS_MAX} scripts to load on their own` });
+          return finish({ touched: a.touched as string[], scripts: a.scripts as string[] });
+        }
       } catch {
         // below
       }

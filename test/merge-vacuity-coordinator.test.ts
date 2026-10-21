@@ -115,7 +115,7 @@ test('gate: fail closed: a runner.one other than node --test (here one that writ
   });
   const { then, first } = await decided(t);
   assert.equal(first.vacuityRun, undefined);
-  assert.deepEqual([then.auto, then.reasons], [false, ['design: vacuity: tests.yaml runner.one is not `node --test [options] {file}` with no --import, --require or loader option, the one form whose coverage the merge gate can measure']]);
+  assert.deepEqual([then.auto, then.reasons], [false, ["design: vacuity: tests.yaml runner.one is not `node --test [options] {file}` with only the test runner's own options, the one form whose coverage the merge gate can measure"]]);
 });
 
 test('gate: fail closed: runs that start and never finish stop being retried and hold the PR', () => {
@@ -165,10 +165,11 @@ test('watch: a PR held for another reason gets no coverage run, and its hold nam
 });
 
 test('watch: fail closed: a coverage run that fails holds the PR for the owner, with the reason, and never merges', { skip }, async () => {
-  // Passed as the task's own checks ran it; once the PR is open, runner.one names a reporter that isn't there, so the
-  // gate's coverage run fails (#784 round 5: runner.one is node --test, so no shell around it can fail it).
+  // Passed as the task's own checks ran it; once the PR is open, runner.one asks for a shard that doesn't exist, so the
+  // gate's coverage run fails (#784 rounds 5, 6: runner.one is node --test with its own options only, so no shell
+  // around it, and no reporter module, can fail it).
   const t = await openPr({ 'evaluator-verdict': approve() }, { autoMerge: () => true });
-  t.f.cfg.tests.runner.one = 'node --test --test-reporter=no-such-reporter {file}';
+  t.f.cfg.tests.runner.one = 'node --test --test-shard=2/1 {file}';
   await green(t);
   await green(t);
   assert.equal(t.f.log.read(0, ['merge.done']).length, 0, 'not merged');

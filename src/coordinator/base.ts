@@ -257,9 +257,9 @@ export abstract class CoordinatorBase {
    * A project command (check, gate, pre-land step): it runs agent-written code, so it runs as the agent user. `env`:
    * the harness's own variables for this one command (the vacuity gate's NODE_V8_COVERAGE), over tests.yaml env.
    */
-  protected project(command: string, cwd: string, env: Record<string, string> = {}) {
+  protected project(command: string, cwd: string, env: Record<string, string> = {}, unset: readonly string[] = []) {
     const share = this.coreShare();
-    return sh(withCores(command, share), cwd, this.commandTimeoutMs, this.d.commandsAs, { ...envWithCores(this.d.cfg.tests.env, share), ...env }, this.shutdown.signal);
+    return sh(withCores(command, share), cwd, this.commandTimeoutMs, this.d.commandsAs, { ...envWithCores(this.d.cfg.tests.env, share), ...env }, this.shutdown.signal, unset);
   }
 
   /** How long a project command or an agent run may take (tests.yaml command_timeout_s). */

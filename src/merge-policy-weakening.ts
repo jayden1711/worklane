@@ -84,6 +84,9 @@ export const CHECK_TABLES: readonly CheckTable[] = [
   { path: 'test/machine-path-writes.test.ts', table: 'GUARD', kind: 'never-shrink' },
   // The merge gate's must-hold changes that hold no code to measure (#784): a case gone is a loosening.
   { path: 'test/merge-vacuity-r5.test.ts', table: 'ONLY', kind: 'never-shrink' },
+  // The runner.one options the merge gate's coverage run accepts, and the forms its test says are refused (#784).
+  { path: 'src/merge-policy-vacuity.ts', table: 'RUNNER_OPTIONS', kind: 'never-grow' },
+  { path: 'test/merge-vacuity-r6.test.ts', table: 'REFUSED', kind: 'never-shrink' },
   // The golden runner settings (#856): the deny list and hooks a run's --settings must carry.
   { path: 'test/runner-golden.test.ts', table: 'GUARD', kind: 'never-shrink' },
   // The guards' own tables (their files are guard files too; the table names what was taken out).

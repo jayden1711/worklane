@@ -6,19 +6,22 @@
 // tests.yaml vacuity.test_globs matches them, and the `test:` files its task's agreed done_when names, which the
 // coordinator's own verification ran) hold an assertion call (an import of an assertion module is none), and, each run
 // with runner.one (`node --test`: coverageRunnerOne) under V8 coverage, they run code on a line the PR changes in at
-// least one of its app files more often than the same run with every test skipped does (the baseline: what loading the
-// test file and its imports runs). So code that runs as a module loads doesn't count: its top level, V8's synthetic
-// initializers, and a helper it calls as it loads, even in a file the PR adds (src/vacuity.ts touchedAppFiles). Only a
-// changed line that holds code counts: a blank, whitespace-only or comment line, or a rename, is nothing to measure,
-// and a PR with nothing else waits. The PR's lines are measured from where its branch meets the default branch's tip,
-// so what it merged in from that branch is never its own. Anything else is a `design:` reason to wait: no test, no
-// assertion, a static-only config, no runner.one or another runner, a test path that would need quoting, nothing
-// measured after VACUITY_TRIES starts, a run that failed. The one exception is the reason given while the run is still
-// to come (VACUITY_UNMEASURED): the gate runs it and decides again.
+// least one of its app files more often than any baseline does: the same run with every test skipped (what loading the
+// test file and its imports runs), and each script that made a file touched, loaded on its own (what loading it runs,
+// wherever a test imports it, a test's body included). So what loading runs doesn't count: a module's top level, V8's
+// synthetic initializers, and a helper it calls as it loads, even in a file the PR adds (src/vacuity.ts
+// measureTouched). Only a changed line that holds code counts: a blank, whitespace-only or comment line, or a rename,
+// is nothing to measure, and a PR with nothing else waits. The PR's lines are measured from where its branch meets the
+// default branch's tip, so what it merged in from that branch is never its own; a merge that brings in a commit that
+// tip doesn't have (a fetch that is behind, another branch) holds. Anything else is a `design:` reason to wait: no
+// test, no assertion, a static-only config, no runner.one or another runner, a test path that would need quoting,
+// nothing measured after VACUITY_TRIES starts, a run that failed. The one exception is the reason given while the run
+// is still to come (VACUITY_UNMEASURED): the gate runs it and decides again.
 //
-// What it can't see (inferred): a test that calls the code and asserts nothing about it (any assertion call passes); a
-// test that imports a module inside a test's body (a helper the module calls as it loads then counts, its top level
-// doesn't); a test or module that checks whether it runs in the baseline.
+// What it can't see: a test that calls the code and asserts nothing about it (any assertion call passes; inferred); a
+// test or module that checks whether it runs in a baseline (inferred); code a module starts as it loads that keeps
+// running after, a timer or a listener, which runs more in the real run only because that run lasts longer
+// (measured by the round-5 final check: a load-time interval running the changed callback while a test waits merged).
 //
 // What counts as changed app code: a file the PR changes, under vacuity.app_paths, not matched by a test glob, still
 // there at the head, and not one with no runtime code for a test to run (NO_RUNTIME_CODE: types only, config, data,
@@ -105,19 +108,38 @@ export function vacuitySnippet(v: Partial<VacuityConfig> | undefined, runOne: st
 }
 
 /**
- * The one runner.one form the coverage run can measure, matched against the WHOLE command: `node --test`, plain option
- * words after it (`--x`, `--x=value`), then `{file}` last. Single spaces only: no newline or tab (a second command), no
- * quote, no shell operator, nothing else before or after. Not tsx, vitest or jest (#784 round 5, measured: code a loader
- * transforms runs other text than the file's, so it counts for nothing), and no option that loads code first
- * (`--import`, `--require`, `-r`, `--loader`, `--experimental-loader`): a loader could transform the same way. Node's own
- * TypeScript type stripping keeps every offset, so a `.ts` file is measured (ranSegments).
+ * The one runner.one form the coverage run can measure, matched against the WHOLE command: `node --test`, option words
+ * from RUNNER_OPTIONS after it, then `{file}` last. Single spaces only: no newline or tab (a second command), no quote,
+ * no shell operator, nothing else before or after. Not tsx, vitest or jest (#784 round 5, measured: code a loader
+ * transforms runs other text than the file's, so it counts for nothing).
  */
-const RUNNER_ONE = /^node --test(?: --?[A-Za-z0-9][A-Za-z0-9._:/=@-]*)* \{file\}$/;
-const PRELOADS = / (?:--import|--require|-r|--loader|--experimental-loader)(?:[ =]|$)/;
+const RUNNER_ONE = /^node --test((?: [^ ]+)*) \{file\}$/;
 
-/** A runner.one the coverage run can measure (RUNNER_ONE, with no PRELOADS option). */
+/**
+ * The only options runner.one may give `node --test` (#784 round 6): an allowlist of the test runner's own options,
+ * which neither load code before the tests nor change the text Node runs. Anything else is refused, since a Node
+ * option can preload code: measured on Node 22.23, `--env-file` (a NODE_OPTIONS line in the file), the config-file
+ * options (a node.config.json `import`), `--import`/`--require`/a loader, `-e`/`--eval`, and
+ * `--experimental-transform-types` (other text). Reporters are the built-in ones only: a reporter module is code
+ * too. Node's own TypeScript type stripping keeps every offset, so a `.ts` file is measured (ranSegments).
+ */
+const RUNNER_OPTIONS: readonly RegExp[] = [
+  /^--test-reporter=(?:spec|tap|dot|junit|lcov)$/,
+  /^--test-reporter-destination=(?:stdout|stderr|[A-Za-z0-9_][A-Za-z0-9._/-]*)$/,
+  /^--test-(?:timeout|concurrency)=\d+$/,
+  /^--test-(?:name|skip)-pattern=[A-Za-z0-9._:/@-]+$/,
+  /^--(?:experimental-)?test-isolation=(?:process|none)$/,
+  /^--test-(?:force-exit|only)$/,
+  /^--test-shard=\d+\/\d+$/,
+  /^--(?:no-)?experimental-strip-types$/,
+  /^--no-warnings$/,
+];
+
+/** A runner.one the coverage run can measure: RUNNER_ONE, each option one of RUNNER_OPTIONS. */
 export function coverageRunnerOne(one: string | null | undefined): boolean {
-  return typeof one === 'string' && RUNNER_ONE.test(one) && !PRELOADS.test(one);
+  const m = typeof one === 'string' ? RUNNER_ONE.exec(one) : null;
+  if (!m) return false;
+  return m[1]!.split(' ').filter((w) => w !== '').every((w) => RUNNER_OPTIONS.some((re) => re.test(w)));
 }
 
 /**
@@ -136,7 +158,7 @@ export function vacuityDoctor(tests: { vacuity?: VacuityConfig | undefined; runn
   if (!v) return how('tests.yaml has no vacuity section');
   if (!v.dynamic) return how('tests.yaml vacuity.dynamic is false');
   if (!tests.runner.one) return how('tests.yaml runner.one is not set');
-  if (!coverageRunnerOne(tests.runner.one)) return how(`runner.one (${tests.runner.one}) isn't \`node --test [options] {file}\` with no --import, --require or loader option, the one form whose coverage the merge gate can measure (code tsx, vitest, jest or a loader transforms counts for nothing)`);
+  if (!coverageRunnerOne(tests.runner.one)) return how(`runner.one (${tests.runner.one}) isn't \`node --test [options] {file}\` with only the test runner's own options (built-in reporters, timeout, concurrency, name and skip patterns, isolation, shard, force-exit, only, type stripping), the one form whose coverage the merge gate can measure (code tsx, vitest, jest, a loader or a preload transforms or adds counts for nothing, or isn't the test's)`);
   return { level: 'ok', detail: `PRs that change app code (${v.app_paths.join(', ')}) auto-merge only when their tests, run with \`${tests.runner.one}\` under coverage, run code on a line they change more often than loading them does. JavaScript is measured as it is, TypeScript under Node's own type stripping, and a build's code (dist/) through its source maps` };
 }
 
@@ -151,6 +173,11 @@ export function vacuityCheck(o: {
   atHead: (path: string) => string | null;
   /** This head's coverage runs: how many started, and the last that finished (null: none). */
   runs: { started: number; last: VacuityMeasured | null };
+  /**
+   * Whether a merge between where the change is measured from and the head brings in a commit the default branch's
+   * tip here doesn't have (#784 round 6). It then holds.
+   */
+  foreignMerge?: boolean;
 }): VacuityCheck {
   if (!o.cfg) return noSection(o.changed, o.atHead);
   const cfg = o.cfg;
@@ -167,6 +194,9 @@ export function vacuityCheck(o: {
   }
   const app = o.changed.filter((p) => appRes.some((re) => re.test(p)) && !isTest(p) && !NO_RUNTIME_CODE.test(p) && text.get(p) !== null);
   if (!app.length) return { reasons: [] };
+  // #784 round 6: a merge the gate can't place on the default branch (fail closed: what it brought in might be counted
+  // as the PR's own change, with the tests that came with it).
+  if (o.foreignMerge) return { reasons: ["design: vacuity: a merge in it brings in commits the default branch here doesn't have (a fetch of that branch that is behind, or another branch), so its own change can't be told from what it merged in"] };
   // Its tests: the test files it adds or changes, then those its task's done_when names, each one there at the head.
   const tests = [...new Set([...o.changed.filter(isTest), ...named])].filter((p) => text.get(p) !== null && text.get(p) !== undefined);
   const reasons: string[] = [];
@@ -177,7 +207,7 @@ export function vacuityCheck(o: {
   if (tests.length && tests.every((p) => countAssertionCalls(text.get(p)!, cfg.assertion_pattern) === 0)) reasons.push(`design: vacuity: its tests (${list(tests)}) have no assertion matching /${cfg.assertion_pattern}/`);
   if (!cfg.dynamic) reasons.push(`design: vacuity: tests.yaml vacuity.dynamic is off, so nothing measured whether its tests run the app code it changes (${list(app)})`);
   else if (!o.runOne) reasons.push("design: vacuity: tests.yaml runner.one is not set, so its tests can't be run one by one under coverage");
-  else if (!coverageRunnerOne(o.runOne)) reasons.push('design: vacuity: tests.yaml runner.one is not `node --test [options] {file}` with no --import, --require or loader option, the one form whose coverage the merge gate can measure');
+  else if (!coverageRunnerOne(o.runOne)) reasons.push("design: vacuity: tests.yaml runner.one is not `node --test [options] {file}` with only the test runner's own options, the one form whose coverage the merge gate can measure");
   if (reasons.length) return { reasons };
   // A run of other tests than this head's (tests.yaml changed since) is not this head's.
   const last = o.runs.last && o.runs.last.tests.join('\0') === tests.join('\0') ? o.runs.last : null;

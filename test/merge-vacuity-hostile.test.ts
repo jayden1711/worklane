@@ -170,12 +170,10 @@ test('coordinator: a result measured at one head is never applied to the head af
 });
 
 test('watch: a coverage run that sleeps never holds up the PR watch: the pass ends at once, the PR waits unmerged and unannounced', { skip }, async () => {
-  // Its checks pass as the task's verification runs them; once the PR is open, runner.one names a reporter that sleeps
-  // 30 s first, so the gate's coverage run does.
+  // Its checks pass as the task's verification runs them; once the PR is open, the scratch worktree's setup sleeps 30 s
+  // first, so the gate's coverage run does (#784 round 6: runner.one takes no reporter module that could sleep).
   const t = await openPr({ 'evaluator-verdict': approve() }, { autoMerge: () => true });
-  const reporter = join(mkdtempSync(join(tmpdir(), 'sleepy-')), 'sleep.mjs');
-  writeFileSync(reporter, 'export default async function* (source) {\n  await new Promise((r) => setTimeout(r, 30_000));\n  for await (const _ of source) yield \'\';\n}\n');
-  t.f.cfg.tests.runner.one = `node --test --test-reporter=${reporter} {file}`;
+  t.f.cfg.tests.worktree.setup = ['sleep 30'];
   const ticks = t.f.log.read(0, ['coordinator.tick']).length;
   t.f.backlog.setChecks(t.pr().headSha, passing);
   const t0 = performance.now();
@@ -191,7 +189,7 @@ test('watch: a coverage run that sleeps never holds up the PR watch: the pass en
     assert.equal(t.f.log.read(0, ['vacuity.started']).length, 1, 'one run per PR at a time, not one per pass');
     assert.equal(t.f.log.read(0, ['merge.done']).length, 0);
   } finally {
-    (t.c as unknown as { stop(): void }).stop(); // kills the sleeping run (a project command aborts on shutdown)
+    (t.c as unknown as { stop(): void }).stop(); // kills the sleeping run (a setup step aborts on shutdown)
     await t.c.idle();
   }
   assert.equal(t.f.log.read(0, ['vacuity.measured']).length, 0, 'a run a shutdown cut short records nothing');
