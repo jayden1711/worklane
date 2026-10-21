@@ -3,7 +3,7 @@
 // repo has sgconfig.yml) or a test, written by one run in a scratch worktree and checked before it is pushed; or an
 // issue, when the constraint (its evidence's files, or the draft's) is in a protected area. The PR is never recorded
 // as the harness's (no pr.opened) and its branch never auto-merges. See src/checks-from-feedback.ts.
-import { spawnSync } from 'node:child_process';
+import { spawnSync } from '../os/child-process.js';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { BRAND } from '../brand.js';

@@ -103,7 +103,7 @@ const engineFiles = execFileSync('git', ['ls-files'], { cwd: repoRoot, encoding:
  * the deployment manifests, locked before the first one lands (#703 adds it). Each entry must still
  * match no file, so the first file under it takes the entry out and its glob is checked like the others.
  */
-const NOT_YET_FILES = [`${BRAND.configDir}/experiments.yaml`, 'deploy/**'];
+const NOT_YET_FILES = [`${BRAND.configDir}/experiments.yaml`, 'deploy/**', 'deploy', 'compose.*', 'docker-compose.*', 'dockerfile*', 'Containerfile*'];
 
 test('self-modification: every glob names real engine files (none dead), and the list is the one the owner approved', () => {
   for (const part of SELF_MODIFICATION_PARTS) {

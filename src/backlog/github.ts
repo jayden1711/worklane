@@ -1,7 +1,7 @@
 // GitHub Issues backlog over REST. Only the coordinator holds the token;
 // agents never see it. Errors are classified (a 403 isn't "missing
 // permission" unless it is).
-import { execFileSync } from 'node:child_process';
+import { execFileSync } from '../os/child-process.js';
 import { redact, redactString, TRACKER } from '../events/redact.js';
 import { classifyGitHubError } from '../github/errors.js';
 import { BudgetPaused, budgetFor, SECONDARY_DEFAULT_S, type GitHubBudget } from '../github/budget.js';

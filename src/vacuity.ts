@@ -3,7 +3,7 @@
 //  dynamic: run the file under NODE_V8_COVERAGE; it must execute at least one
 //           function inside the app's paths. Merely importing a module runs
 //           only its top level, which doesn't count.
-import { spawnSync } from 'node:child_process';
+import { spawnSync } from './os/child-process.js';
 import { lstatSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';

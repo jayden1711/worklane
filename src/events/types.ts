@@ -659,7 +659,10 @@ export const EventSchemas = {
    */
   'merge.deferred': z.strictObject({ issue, number: z.number().int().positive(), head: sha, why: z.string(), retry_at: z.string() }),
   /** The default branch's required checks on an auto-merge's commit. */
-  /** timed_out: some required check never reported on the merge commit (`failed` names them); the owner is told. */
+  /**
+   * timed_out: some required check never reported on the merge commit, or its read failed or never answered (`failed`
+   * names them); not green, so auto-merge stops (`merge.stopped` by `main_unknown`, #731) and the owner is told.
+   */
   /**
    * The default branch's required checks on an auto-merge's commit. `flaky`: failed, then passed on a re-run of the
    * same commit; `quarantined`: failed, but quarantined as flaky (src/flaky.ts). Neither turns it red for the harness.
@@ -672,7 +675,7 @@ export const EventSchemas = {
    * what stopped it (src/auto-merge-resume.ts; absent on older events, which wait for green main as these do).
    * `restored`: the stop file was deleted by hand while main wasn't green, so it was written back, and why.
    */
-  'merge.stopped': z.strictObject({ reason: z.string(), number: z.number().int().positive().nullable(), sha: sha.nullable(), revert: z.string().nullable(), by: z.enum(['red_main', 'main_watch', 'owner']).optional(), restored: z.string().optional() }),
+  'merge.stopped': z.strictObject({ reason: z.string(), number: z.number().int().positive().nullable(), sha: sha.nullable(), revert: z.string().nullable(), by: z.enum(['red_main', 'main_watch', 'main_unknown', 'owner']).optional(), restored: z.string().optional() }),
   'merge.resumed': z.strictObject({ detail: z.string() }),
   /**
    * An admin asked on the dashboard to resume a stop the default branch caused (#776, on #727): the dashboard records

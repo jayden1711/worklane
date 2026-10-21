@@ -3,7 +3,7 @@
 // step is decided from events plus GitHub, so a restart picks up where the
 // log says it was. Agents only ever propose: they commit on their own
 // branch in their own worktree; everything outward-facing happens here.
-import { execFileSync, spawn, spawnSync } from 'node:child_process';
+import { execFileSync, spawn, spawnSync } from './os/child-process.js';
 import { createHash, randomBytes } from 'node:crypto';
 import { cpSync, mkdirSync, readFileSync, existsSync, rmSync } from 'node:fs';
 import { dirname, join } from 'node:path';

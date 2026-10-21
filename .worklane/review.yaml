@@ -57,6 +57,23 @@ categories:
     - docs/releasing.md
     - docs/design.md
     - docs/design/**  # the architecture docs (#698): listed here only, not locked in code
+    # The public security claims, the test that keeps their citations true, the adversarial suite and the test that
+    # holds these locks (#858). Also locked in code (src/review.ts self-modification).
+    - docs/guardrails.md
+    - docs/security*.md
+    - SECURITY.md
+    - test/docs-guardrails.test.ts
+    - test/adversarial/**
+    - test/engine-guard-locks.test.ts
+    - test/not-yet-files-locks.test.ts
+    # The engine's deployment files at the top of the repo, beside deploy/** (#858): they set how it runs, as the setup
+    # scripts do. All of them are also locked in code (src/review.ts self-modification; #885).
+    - deploy
+    - Dockerfile*
+    - dockerfile*
+    - Containerfile*
+    - compose.*
+    - docker-compose.*
 levels:
   L0_auto:      { when: [docs-only, tests-only, comments, copy], max_lines: 200 }
   L1_evaluator: { when: [ui, app-non-money], max_lines: 400, max_files: 10 }

@@ -136,9 +136,9 @@ function hashFile(p: string): { sha256: string; st: Stats } {
 /**
  * Step 2: whether the pinned file is already in the store, verified. Refuses (throws) a dataset folder that isn't a
  * real 0700 folder of this user, a link or anything but a 0600 regular file of this user at the file's name, and a
- * file there whose bytes don't match the pin. Reads only; changes nothing.
+ * file there whose bytes don't match the pin. Reads only; changes nothing. Task selection (select.ts) runs it too.
  */
-function alreadyThere(layout: BenchLayout, uid: number, pin: DatasetPin): boolean {
+export function alreadyThere(layout: BenchLayout, uid: number, pin: DatasetPin): boolean {
   const dir = lstatOrNull(layout.data);
   if (!dir) return false;
   ownFolder(layout.data, dir, uid);
@@ -173,8 +173,11 @@ function makeStore(layout: BenchLayout, uid: number): void {
   ownFolder(layout.data, lstatSync(layout.data), uid);
 }
 
-/** Step 5: `bytes` (checked against `sha256` first) at `file`, through a verified temporary file and a rename. */
-function writeVerified(file: string, dir: string, bytes: Buffer, sha256: string, uid: number): void {
+/**
+ * Step 5: `bytes` (checked against `sha256` first) at `file`, through a verified temporary file and a rename. Task
+ * selection (select.ts) writes the manifest through it too.
+ */
+export function writeVerified(file: string, dir: string, bytes: Buffer, sha256: string, uid: number): void {
   if (hex(bytes) !== sha256) throw new Error(`sha256 mismatch before writing ${file}: nothing written`);
   const tmp = join(dir, `.${randomBytes(8).toString('hex')}.${process.pid}.tmp`);
   // O_EXCL: a new file, never one (or a link) already there; O_NOFOLLOW: never through a link.
