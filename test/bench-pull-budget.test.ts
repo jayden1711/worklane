@@ -129,9 +129,10 @@ test("many valid large deltas are refused promptly: each delta's own data counts
   // index-pack (1.96 GB with git's default threads on 16 CPUs).
   const pack = copyDeltas(33, 31 * MiB);
   assert.ok(pack.length < 16 * MiB, `the pack is small (${pack.length} bytes), well under the copy-out cap`);
-  const started = Date.now();
+  // WHY: performance.now(), monotonic: an NTP step can't move it (#582).
+  const started = performance.now();
   await assert.rejects(async () => f(pack, await caps()), /declares over 1073741824 bytes.*before it is indexed/);
-  const ms = Date.now() - started;
+  const ms = Math.round(performance.now() - started);
   assert.ok(ms < 20_000, `refused in ${ms} ms, after inflating at most the budget`);
   // Scaled down, at the edge: 7 deltas of a 1 MiB target fit 64 MiB with their 8 MiB of data each; 8 don't.
   const at = { treeBytes: 64 * MiB, objectBytes: 16 * MiB };

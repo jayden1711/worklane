@@ -110,14 +110,15 @@ test('a delta bomb is refused before index-pack: a pack of a few KB that declare
   const b = await bench();
   const out: string[] = [];
   const d = docker({ pack: () => ok(bomb.toString('base64')) });
-  const started = Date.now();
+  // WHY: performance.now(), monotonic: an NTP step can't move it (#582).
+  const started = performance.now();
   assert.equal(await pull(cliDeps(b, out, d) as never, 'smoke', () => parsePins(b.pinsText)), 1, out.join('\n'));
   const text = out.join('\n');
   assert.match(text, /FAIL +t01 +.*declares .*over \d+ bytes.*before it is indexed/);
   assert.doesNotMatch(text, TASKISH);
   assert.deepEqual(readdirSync(treesDir(b.layout)), [], 'nothing kept, no temporary folder left');
   assert.deepEqual(new Set(verbs(d, 'rm').map((a) => a[2])), new Set(d.containers.keys()), 'its container removed');
-  assert.ok(Date.now() - started < 30_000, 'refused without building the target');
+  assert.ok(performance.now() - started < 30_000,'refused without building the target');
 });
 
 test('the walk refuses a pack over the decoded cap, or with one object over the object cap, before it is indexed', linux, async () => {

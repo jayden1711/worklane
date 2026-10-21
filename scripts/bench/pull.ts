@@ -143,9 +143,11 @@ export interface PackWalk {
  * The pack's entries, read from the pack itself before `git index-pack` sees it, against one budget,
  * `caps.treeBytes`. Each entry is charged ENTRY_COST, the bytes its data inflates to (a delta's own data counts, not
  * only its target) and, for a delta, its target size (the second number of its delta header). The charge is made
- * before the data is inflated, so the walk never inflates past the budget: its time and memory, and what index-pack
- * hashes and builds, are bounded by it (#947 round 4: uncounted delta data let a 300 MB pack take the walk 302.6 s,
- * and 33 deltas of 248 MiB each made index-pack peak at 1.96 GB). Refuses (throws Refused) a pack that isn't well
+ * before the data is inflated, so the walk never inflates past the budget, and reads at most a million entries
+ * (#947 round 4: uncounted delta data let a 300 MB pack take the walk 302.6 s, and 33 deltas of 248 MiB each made
+ * index-pack peak at 1.96 GB). index-pack's memory follows the budget; its time does not (it can rebuild a chain's
+ * bases again and again: 19 chained 50 MiB deltas, a 51 KB pack, took it 18.6 s at 106 MB in review), and is bounded
+ * by the 30-minute git timeout. Refuses (throws Refused) a pack that isn't well
  * formed (signature, version, count, types, sizes, zlib data, nothing after the last entry but the 20-byte trailer),
  * an object or delta data over `caps.objectBytes`, and a charge over `caps.treeBytes`. Its messages name no task.
  */
