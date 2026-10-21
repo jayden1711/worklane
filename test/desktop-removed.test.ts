@@ -68,8 +68,11 @@ function matrixCombos(matrix: unknown): Record<string, unknown>[] | null {
   // Keys that differ only in case (`view` and `View`, or an `Include` axis): whether GitHub reads them as one key is
   // unsure, and the combinations differ either way, so the matrix counts as unreadable.
   const keys = [...Object.keys(axes), ...include.flatMap((e) => Object.keys(e)), ...exclude.flatMap((e) => Object.keys(e))];
-  if (Object.keys(axes).some((k) => ['include', 'exclude'].includes(fold(k)))) return null;
-  if (new Set(keys.map(fold)).size !== new Set(keys).size) return null;
+  // A key outside printable ASCII (U+017F long s, U+00DF sharp s, U+212A Kelvin): whether `matrix.s` or `matrix.ss`
+  // reaches it is unsure, so the matrix is unreadable (round 7).
+  if (keys.some((k) => /[^\x20-\x7e]/.test(k))) return null;
+  if (Object.keys(axes).some((k) => ['include', 'exclude'].includes(fold(k)) || ['include', 'exclude'].includes(k.toLowerCase()))) return null;
+  if (new Set(keys.map(fold)).size !== new Set(keys).size || new Set(keys.map((k) => k.toLowerCase())).size !== new Set(keys).size) return null;
   // A value that isn't a plain, non-blank scalar (null, an object or list, '' or blanks): how GitHub names the job
   // then (an empty or dropped suffix?) is unsure, so the matrix counts as unreadable (as src/check-pin-block.ts does).
   const values = [...(Object.values(axes) as unknown[][]).flat(), ...include.flatMap((e) => Object.values(e)), ...exclude.flatMap((e) => Object.values(e))];
@@ -137,12 +140,19 @@ function jobCheckNames(key: string, job: Job): Set<string> {
 /**
  * One workflow file as this reads it, and why it may read it otherwise than GitHub (`unsure`, null when it can't
  * tell any reason). Unsure, each failing closed:
- * - bytes that aren't UTF-8 (a UTF-16 file with a BOM reads as one string, with no jobs), or a NUL;
+ * - bytes that aren't UTF-8 (a UTF-16 file with a BOM reads as one string, with no jobs);
+ * - any character other than TAB, LF and printable ASCII, past a BOM at offset 0. A closed set: it takes in a NUL,
+ *   a lone CR, NEL, LS and PS (line breaks to other YAML readers that end a comment early and so hide the rest of the
+ *   line from this one), a BOM at a line start (skipped by other readers, part of a key here), and every other
+ *   control or non-ASCII character. Every real workflow is inside it;
+ * - any `%YAML` or `%TAG` directive (under `%YAML 1.1`, `022` reads as octal 18, and `<<` merges);
  * - a merge key anywhere, found in the YAML syntax tree, so every spelling counts (`<<`, `"<<"`, `!!merge <<`, and
  *   `<<` under `%YAML 1.1`, which the parser applies and leaves no key for): whether Actions merges it is unsure;
- * - a root, or a `jobs`, that isn't a plain mapping (a scalar, a list, `!!omap`);
- * - a root key that is `jobs` in another case (`Jobs:`, `job` + U+017F).
- * `wf` is null when the file can't be read at all.
+ * - a root, a `jobs`, or a job that isn't a plain mapping (a scalar, a list, `!!omap`), a `permissions` (at the root
+ *   or in a job) that is neither a string nor a plain mapping, or any value anywhere that is neither a plain mapping,
+ *   a list nor a scalar (a `Map`, a `Set`, binary data);
+ * - any key outside printable ASCII (`jobs` and a no-break space), and a root key that is `jobs` in another case (`Jobs:`).
+ * `wf` is null when the file can't be read as a mapping at all.
  */
 function readWorkflow(file: string): { wf: Record<string, unknown> | null; unsure: string | null } {
   let text: string;
@@ -151,15 +161,44 @@ function readWorkflow(file: string): { wf: Record<string, unknown> | null; unsur
   } catch {
     return { wf: null, unsure: 'not UTF-8' };
   }
-  if (text.includes('\0')) return { wf: null, unsure: 'a NUL' };
-  const value: unknown = parse(text);
-  let merge = false;
-  visit(parseDocument(text), { Pair: (_, p) => void (isScalar(p.key) && p.key.source === '<<' && (merge = true)) });
+  const odd = /[^\t\n\x20-\x7e]/.test(text.startsWith(String.fromCharCode(0xfeff)) ? text.slice(1) : text);
+  let value: unknown;
+  try {
+    value = parse(text);
+  } catch (e) {
+    // A file that is unsure anyway may also not parse; any other parse error fails the test, as before.
+    if (odd) return { wf: null, unsure: 'a character outside TAB, LF and printable ASCII' };
+    throw e;
+  }
   if (!isRecord(value)) return { wf: null, unsure: 'a root that is not a mapping' };
-  if (merge || hasMergeKey(value)) return { wf: value, unsure: 'a merge key' };
-  if (value.jobs !== undefined && !isRecord(value.jobs)) return { wf: value, unsure: 'jobs that are not a mapping' };
-  if (otherCase(value, ['jobs'])) return { wf: value, unsure: 'jobs in another case' };
+  const unsure = (why: string) => ({ wf: value as Record<string, unknown>, unsure: why });
+  if (odd) return unsure('a character outside TAB, LF and printable ASCII');
+  const doc = parseDocument(text);
+  if (doc.directives?.yaml.explicit || JSON.stringify(doc.directives?.tags) !== JSON.stringify({ '!!': 'tag:yaml.org,2002:' })) return unsure('a %YAML or %TAG directive');
+  let merge = false;
+  visit(doc, { Pair: (_, p) => void (isScalar(p.key) && p.key.source === '<<' && (merge = true)) });
+  if (merge || hasMergeKey(value)) return unsure('a merge key');
+  if (!plainAll(value)) return unsure('a value that is not a plain mapping, list or scalar, or a key outside printable ASCII');
+  if (value.jobs !== undefined && !isRecord(value.jobs)) return unsure('jobs that are not a mapping');
+  const jobs = Object.values(isRecord(value.jobs) ? value.jobs : {});
+  if (!jobs.every(isRecord)) return unsure('a job that is not a mapping');
+  const permsOk = (o: Record<string, unknown>) => Object.entries(o).every(([k, v]) => fold(k) !== 'permissions' || typeof v === 'string' || isRecord(v));
+  if (!permsOk(value) || !(jobs as Record<string, unknown>[]).every(permsOk)) return unsure('permissions that are neither a string nor a mapping');
+  if (otherCase(value, ['jobs'])) return unsure('jobs in another case');
   return { wf: value, unsure: null };
+}
+
+/**
+ * Whether `v` holds only plain mappings, lists and scalars, with every mapping key inside printable ASCII and with no
+ * leading or trailing space (`"jobs "`): the same closed set as names (unsureName).
+ */
+function plainAll(v: unknown, seen = new Set<unknown>()): boolean {
+  if (typeof v !== 'object' || v === null) return true;
+  if (seen.has(v)) return true;
+  seen.add(v);
+  if (Array.isArray(v)) return v.every((x) => plainAll(x, seen));
+  if (!isRecord(v)) return false;
+  return Object.entries(v).every(([k, x]) => !unsureName(k) && plainAll(x, seen));
 }
 
 /**
@@ -169,7 +208,7 @@ function readWorkflow(file: string): { wf: Record<string, unknown> | null; unsur
 function fileJobs(file: string): [string, Set<string>][] {
   const { wf, unsure } = readWorkflow(file);
   const jobs = Object.entries(isRecord(wf?.jobs) ? (wf.jobs as Record<string, Job>) : {})
-    .filter(([key]) => key !== '<<')
+    .filter(([key, job]) => key !== '<<' && isRecord(job))
     .map(([key, job]): [string, Set<string>] => [key, jobCheckNames(key, job)]);
   if (unsure) jobs.push(['?', new Set([`? (${UNRESOLVED} ${unsure} }})`])]);
   return jobs;
@@ -249,12 +288,14 @@ function makersOf(dir: string, check: string): string[] {
 }
 
 /**
- * The names in `required` not made by exactly one job, each with the jobs that may make it. A v0.5.2 updater keeps
- * only the newest run of a name, so a second job making a required check, red and started first, is never read:
- * the same fail-open as a `desktop` twin, for any required check (#746 adversarial review, round 6).
+ * The check names not made by exactly one job, each with the jobs that may make it: every name in `required`, and
+ * every name any job in `dir` makes. A v0.5.2 updater gates every check run on a commit by the newest run of its
+ * name, required or not, so a second job making the same name hides the first: a red run that started first is
+ * never read (#746 adversarial reviews, rounds 6 and 7).
  */
-function requiredTwins(dir: string, required: string[]): string[] {
-  return [...new Set(required)].map((r) => [r, makersOf(dir, r)] as const).filter(([, m]) => m.length !== 1).map(([r, m]) => `${r}: ${m.join(', ') || 'no job'}`);
+function checkTwins(dir: string, required: string[]): string[] {
+  const made = workflowFiles(dir, true).flatMap((f) => fileJobs(join(dir, f)).flatMap(([, names]) => [...names].filter((n) => !n.includes(UNRESOLVED))));
+  return [...new Set([...required, ...made])].map((r) => [r, makersOf(dir, r)] as const).filter(([, m]) => m.length !== 1).map(([r, m]) => `${r}: ${m.join(', ') || 'no job'}`);
 }
 
 /** The names in `required` that no workflow in `dir` defines: checks nothing will ever run. */
@@ -277,13 +318,15 @@ test('every required check, the repo\'s and the updater\'s defaults, is a job so
   assert.deepEqual(undefinedChecks(workflows, updaterDefaults()), [], 'UPDATE_DEFAULT_CHECKS in scripts/setup/lib.sh');
 });
 
-test('every required check is made by exactly one job: no twin can hide a red run from a v0.5.2 updater (round 6)', () => {
-  assert.deepEqual(requiredTwins(workflows, [...requiredChecks(), ...updaterDefaults()]), [], 'config.yaml required_checks and UPDATE_DEFAULT_CHECKS');
+test('every check name in the workflows, required or not, is made by exactly one job (rounds 6 and 7)', () => {
+  assert.deepEqual(checkTwins(workflows, [...requiredChecks(), ...updaterDefaults()]), [], 'every name the workflows make, and config.yaml required_checks and UPDATE_DEFAULT_CHECKS');
   const dir = mkdtempSync(join(tmpdir(), 'wf-'));
-  writeFileSync(join(dir, 'ci.yml'), "jobs:\n  desktop:\n    runs-on: ubuntu-latest\n    steps:\n      - run: 'true'\n  dco:\n    runs-on: x\n");
-  assert.deepEqual(requiredTwins(dir, ['desktop', 'dco']), [], 'one job each');
+  writeFileSync(join(dir, 'ci.yml'), "jobs:\n  desktop:\n    runs-on: ubuntu-latest\n    steps:\n      - run: 'true'\n  dco:\n    runs-on: x\n  build:\n    runs-on: x\n");
+  assert.deepEqual(checkTwins(dir, ['desktop', 'dco']), [], 'one job each');
   writeFileSync(join(dir, 'other.yml'), "jobs:\n  twin:\n    name: dco\n    runs-on: x\n    steps: [ { run: 'false' } ]\n");
-  assert.deepEqual(requiredTwins(dir, ['desktop', 'dco', 'lint']), ['dco: ci.yml:dco, other.yml:twin', 'lint: no job'], 'a red dco twin, and a check with no job');
+  assert.deepEqual(checkTwins(dir, ['desktop', 'dco', 'lint']), ['dco: ci.yml:dco, other.yml:twin', 'lint: no job'], 'a red dco twin, and a check with no job');
+  writeFileSync(join(dir, 'other.yml'), 'jobs:\n  twin:\n    name: build\n    runs-on: x\n');
+  assert.deepEqual(checkTwins(dir, ['desktop', 'dco']), ['build: ci.yml:build, other.yml:twin'], 'a twin of a check nobody requires: v0.5.2 gates on it too');
 });
 
 test('a required check whose job was removed first is caught, matrix names expanded as GitHub gives them', () => {
@@ -330,6 +373,12 @@ test('no workflow or job may post a check run through the Checks API: no checks:
   assert.deepEqual(writers('x: &p { permissions: write-all }\njobs:\n  a:\n    <<: *p\n    runs-on: x\n'), ['w.yml (?)'], 'permissions from a merge key');
   assert.deepEqual(writers('%YAML 1.1\n---\nx: &p { permissions: write-all }\njobs:\n  a:\n    <<: *p\n    runs-on: x\n'), ['w.yml (?)', 'w.yml:a'], 'a merge the parser applied');
   assert.deepEqual(writers('"job\\u017f":\n  a:\n    permissions: write-all\n    runs-on: x\n'), ['w.yml (?)'], 'jobs under a key that folds to jobs');
+  // Round 7: a job or permissions that isn't a plain mapping, and text another YAML reader reads otherwise.
+  assert.deepEqual(writers('%YAML 1.1\n---\njobs:\n  a: !!omap\n    - permissions: write-all\n    - runs-on: x\n'), ['w.yml (?)'], 'XW1 a job that is an !!omap');
+  assert.deepEqual(writers('%YAML 1.1\n---\npermissions: !!omap\n  - checks: write\njobs:\n  a:\n    runs-on: x\n'), ['w.yml (?)'], 'XW2 root permissions that are an !!omap');
+  assert.deepEqual(writers('permissions: [checks]\njobs:\n  a:\n    runs-on: x\n'), ['w.yml (?)'], 'permissions that are a list');
+  assert.deepEqual(writers('jobs:\n  a:\n    runs-on: x\n    # c' + String.fromCharCode(0x2028) + '    permissions: write-all\n'), ['w.yml (?)'], 'L2 permissions after an LS');
+  assert.deepEqual(writers('jobs:\n  a:\n    runs-on: x\n' + String.fromCharCode(0xfeff) + '   permissions: write-all\n'), ['w.yml (?)'], "B3' permissions after a BOM");
 });
 
 test('a required check defined only in a .YML or .Yaml file counts as undefined: GitHub may never run it (round 5)', () => {
@@ -443,6 +492,16 @@ const TWIN_FIXTURES: [string, string, boolean][] = [
   ['a name with U+FE0F', 'jobs:\n  shots:\n    name: "desktop\\ufe0f"\n    runs-on: x\n', true],
   ['a name with U+3164', 'jobs:\n  shots:\n    name: "desktop\\u3164"\n    runs-on: x\n', true],
   ['a name with U+2800', 'jobs:\n  shots:\n    name: "desktop\\u2800"\n    runs-on: x\n', true],
+  // Round 7 (#746 delta check): matrix keys outside ASCII, and values that are neither plain mappings nor scalars.
+  ['X1 a job that is an !!omap', '%YAML 1.1\n---\njobs:\n  twin: !!omap\n    - name: desktop\n    - runs-on: x\n', true],
+  ['X2 a job that is a list', 'jobs:\n  twin:\n    - name: desktop\n', true],
+  ['X3 a job that is a scalar', 'jobs:\n  twin: desktop\n', true],
+  ['X6 a matrix key U+017F, name ${{ matrix.s }}, a job keyed desktop', 'jobs:\n  desktop:\n    name: ${{ matrix.s }}\n    strategy: { matrix: { "\\u017f": [phone] } }\n    runs-on: x\n', true],
+  ['X6b the same, a job keyed shots', 'jobs:\n  shots:\n    name: ${{ matrix.s }}\n    strategy: { matrix: { "\\u017f": [phone] } }\n    runs-on: x\n', true],
+  ['X16 matrix keys U+00DF and U+1E9E', 'jobs:\n  shots:\n    strategy: { matrix: { "\\u00df": [a], "\\u1e9e": [b] } }\n    runs-on: x\n', true],
+  ['X17 a matrix key U+00DF, name ${{ matrix.ss }}, a job keyed desktop', 'jobs:\n  desktop:\n    name: ${{ matrix.ss }}\n    strategy: { matrix: { "\\u00df": [phone] } }\n    runs-on: x\n', true],
+  ['a root key with a no-break space, "jobs\\u00a0"', '"jobs\\u00a0":\n  desktop:\n    runs-on: x\n', true],
+  ['a root key with a trailing space, "jobs "', '"jobs ":\n  desktop:\n    runs-on: x\n', true],
   ['a name with more around the value', 'jobs:\n  shots:\n    name: shots ${{ matrix.view }}\n    strategy: { matrix: { view: [desktop, phone] } }\n    runs-on: x\n', false],
   ['no name: the values in parentheses', 'jobs:\n  shots:\n    strategy: { matrix: { view: [desktop] } }\n    runs-on: x\n', false],
   ['no name, include entries only', 'jobs:\n  shots:\n    strategy: { matrix: { include: [{ view: desktop }] } }\n    runs-on: x\n', false],
@@ -495,6 +554,58 @@ test('a second job that may make a desktop check is caught, in another workflow 
   }
   for (const f of FILE_NAME_FIXTURES) assert.deepEqual(makers({ [f]: 'jobs:\n  desktop:\n    runs-on: x\n' }), ['ci.yml:desktop', `${f}:desktop`], f);
   for (const [label, bytes] of BYTE_FIXTURES) assert.deepEqual(makers({ 'other.yml': bytes }), ['ci.yml:desktop', 'other.yml:?'], label);
+});
+
+/**
+ * ci.yml as the round 7 text fixtures start from: the real triggers and the no-op job, and a matrix job making
+ * `test (ubuntu-latest, 22)` and `(..., 24)`, so a hidden twin or condition is the only thing wrong.
+ */
+const BASE_CI = "on:\n  push:\n    branches: [main]\n  pull_request:\n    types: [opened, synchronize, reopened]\njobs:\n  desktop:\n    runs-on: ubuntu-latest\n    steps:\n      - run: 'true'\n  test:\n    strategy: { matrix: { os: [ubuntu-latest], node: [22, 24] } }\n    runs-on: x\n";
+
+/**
+ * Round 7 (#746 adversarial review of 80395fcb): text another YAML reader (libyaml and its ports) reads otherwise.
+ * A lone CR, NEL, LS or PS ends a comment there but not here, so the rest of the line is hidden from this reader; a
+ * BOM at a line start is skipped there but read as part of a key here; `%YAML 1.1` makes `022` octal here. Each file
+ * must count as unsure (`<file>:?`). [label, file, text, unsure]
+ */
+const UNSURE_TEXT_FIXTURES: [string, string, string, boolean][] = [
+  ['L1 NEL ends a comment, then name: desktop', 'other.yml', 'jobs:\n  t:\n    runs-on: x\n    # c' + String.fromCharCode(0x85) + '    name: desktop\n', true],
+  ['L2 LS, then permissions: write-all', 'other.yml', 'jobs:\n  t:\n    runs-on: x\n    # c' + String.fromCharCode(0x2028) + '    permissions: write-all\n', true],
+  ['L3 PS, then a second job named desktop', 'other.yml', 'jobs:\n  t:\n    runs-on: x\n  # c' + String.fromCharCode(0x2029) + '  u:\n    name: desktop\n', true],
+  ['L4 LS, then a test (ubuntu-latest, 22) twin', 'other.yml', 'jobs:\n  t:\n    runs-on: x\n  # c' + String.fromCharCode(0x2028) + '  test:\n    strategy: { matrix: { os: [ubuntu-latest], node: [22] } }\n', true],
+  ['L5 NEL, then root permissions: { checks: write }', 'other.yml', 'on: push # c' + String.fromCharCode(0x85) + 'permissions: { checks: write }\njobs:\n  t:\n    runs-on: x\n', true],
+  ["L6 in ci.yml's desktop job: LS, then if: false", 'ci.yml', BASE_CI.replace("      - run: 'true'\n", "      - run: 'true'\n    # c" + String.fromCharCode(0x2028) + '    if: false\n'), true],
+  ['R1 a lone CR ends a comment, then name: desktop', 'other.yml', 'jobs:\n  t:\n    runs-on: x\n    # c' + String.fromCharCode(13) + '    name: desktop\n', true],
+  ['R2 a lone CR, then permissions: write-all', 'other.yml', 'jobs:\n  t:\n    runs-on: x\n    # c' + String.fromCharCode(13) + '    permissions: write-all\n', true],
+  ["B1' a BOM and a space at a line start, a second job named desktop", 'other.yml', 'jobs:\n  t:\n    runs-on: x\n' + String.fromCharCode(0xfeff) + " u:\n    name: desktop\n    steps: [ { run: 'false' } ]\n", true],
+  ["B2' a BOM and 3 spaces, name: desktop in a job", 'other.yml', 'jobs:\n  t:\n    runs-on: x\n' + String.fromCharCode(0xfeff) + '   name: desktop\n', true],
+  ["B3' a BOM and 3 spaces, permissions: write-all in a job", 'other.yml', 'jobs:\n  t:\n    runs-on: x\n' + String.fromCharCode(0xfeff) + '   permissions: write-all\n', true],
+  ["B4' a BOM at a line start, root permissions", 'other.yml', ' on: push\n' + String.fromCharCode(0xfeff) + 'permissions: { checks: write }\n jobs:\n  t:\n    runs-on: x\n', true],
+  ["B5' in ci.yml, a BOM and a space, a second job named desktop", 'ci.yml', BASE_CI + String.fromCharCode(0xfeff) + " shots:\n    name: desktop\n    steps: [ { run: 'false' } ]\n", true],
+  ["B6' a BOM and a space, a test (ubuntu-latest, 22) twin", 'other.yml', 'jobs:\n  t:\n    runs-on: x\n' + String.fromCharCode(0xfeff) + ' test:\n    strategy: { matrix: { os: [ubuntu-latest], node: [22] } }\n', true],
+  ["C1 in ci.yml's desktop job, a BOM and 3 spaces, if: false", 'ci.yml', BASE_CI.replace('  desktop:\n    runs-on: ubuntu-latest\n', '  desktop:\n    runs-on: ubuntu-latest\n' + String.fromCharCode(0xfeff) + '   if: false\n'), true],
+  ["C2 in ci.yml's desktop job, a BOM and 3 spaces, a rename", 'ci.yml', BASE_CI.replace('  desktop:\n    runs-on: ubuntu-latest\n', '  desktop:\n    runs-on: ubuntu-latest\n' + String.fromCharCode(0xfeff) + '   name: renamed\n'), true],
+  ['C3 in ci.yml, a BOM and 3 spaces, a paths filter on push', 'ci.yml', BASE_CI.replace('    branches: [main]\n', '    branches: [main]\n' + String.fromCharCode(0xfeff) + '   paths: [x]\n'), true],
+  ['%YAML 1.1: node 022 reads as octal 18, a test (ubuntu-latest, 22) twin elsewhere', 'other.yml', '%YAML 1.1\n---\njobs:\n  test:\n    strategy: { matrix: { os: [ubuntu-latest], node: [022] } }\n    runs-on: x\n', true],
+  ['%YAML 1.2 (any directive)', 'other.yml', '%YAML 1.2\n---\njobs:\n  t:\n    runs-on: x\n', true],
+  ['%TAG', 'other.yml', '%TAG !e! tag:yaml.org,2002:\n---\njobs:\n  t:\n    name: !e!str shots\n    runs-on: x\n', true],
+  ['control: a BOM at offset 0 only', 'other.yml', String.fromCharCode(0xfeff) + 'jobs:\n  t:\n    runs-on: x\n', false],
+  ['control: TAB in a comment', 'other.yml', 'jobs:\n  t:\n    runs-on: x # a\tb\n', false],
+];
+
+test('a file another YAML reader may read otherwise counts as unsure: hidden line breaks, BOMs past the start, directives (round 7)', () => {
+  const REQUIRED = ['desktop', 'test (ubuntu-latest, 22)', 'test (ubuntu-latest, 24)'];
+  for (const [label, file, text, unsure] of UNSURE_TEXT_FIXTURES) {
+    const dir = mkdtempSync(join(tmpdir(), 'wf-'));
+    writeFileSync(join(dir, 'ci.yml'), BASE_CI);
+    writeFileSync(join(dir, file), text);
+    const makers = desktopMakers(dir);
+    if (unsure) assert.ok(makers.includes(`${file}:?`), `${label}: ${JSON.stringify(makers)}`);
+    else {
+      assert.deepEqual(makers, ['ci.yml:desktop'], label);
+      assert.deepEqual(checkTwins(dir, REQUIRED), [], label);
+    }
+  }
 });
 
 test('matrix names expand as GitHub gives them: include, exclude, case and spacing', () => {

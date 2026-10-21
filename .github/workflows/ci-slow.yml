@@ -721,8 +721,9 @@ jobs:
           export WORKLANE_INSTANCES_DIR="$HOME/measure-instances"
           r="$HOME/measure-repo"
           cp -r "$t/examples/basic" "$r"
-          # A tier that prints one stopwatch line per lane, as a runner that times its suites does.
-          printf '%s\n' 'test_run: {"tiers": [{"name": "lanes", "kind": "fast", "command": "for i in $(seq $LANES); do echo \"⏱ suite-$i: 0.$i\"s; done; sleep 1"}], "env": {"LANES": "1"}}' >> "$r/.worklane/tests.yaml"
+          # A tier that prints one stopwatch line per lane, as a runner that times its suites does. The stopwatch is
+          # written as a YAML escape of U+23F1, which tests.yaml decodes: this workflow stays printable ASCII (#746).
+          printf '%s\n' 'test_run: {"tiers": [{"name": "lanes", "kind": "fast", "command": "for i in $(seq $LANES); do echo \"\U000023F1 suite-$i: 0.$i\"s; done; sleep 1"}], "env": {"LANES": "1"}}' >> "$r/.worklane/tests.yaml"
           g=(git -C "$r" -c user.email=ci@example.com -c user.name=ci -c commit.gpgsign=false)
           "${g[@]}" init -q -b main && "${g[@]}" add -A && "${g[@]}" commit -q -m measure
           "$t/node" "$t/dist/src/cli.js" instance init ci --repo "$r" --github example-org/example-shop > /dev/null
