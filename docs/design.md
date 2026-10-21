@@ -12,7 +12,7 @@ Status: **accepted at step 0 (2026-10-07)**, with the answers in §19. Name: Wor
 
 > **Thesis (owner, 2026-10-18).** Code decides what may merge unattended; tests, fail-without tests, CI and the evaluator decide whether it's right. The rules limit scope (blast radius), not correctness: a backtest of the default rules over the public AIDev agent-PR dataset, with every verdict assumed PASS, would auto-merge 72.6% of PRs, including 66.0% of those people closed unmerged or reverted (README, "What it's for", with its limits). The merge decision follows rules read from the default branch (§4) that no agent can loosen: agents can't write the config folder's rules (the only paths in it they may edit are their own role prompts and skills, `AGENT_EDITABLE` in `src/guardrails/engine.ts`, and a change to those is `agent-instructions`, always high-risk and never auto-merged), and a change to the review rules, the merge policy or the harness's other controls is self-modification, always L3 and never auto-merged (`src/review.ts`). A model can only hold a merge, never approve one alone: the evaluator's PASS is required but never sufficient, since `readiness` needs every required check green on the head it approved (`src/pr-watch.ts`) and `mergeDecision` keeps every reason code computes, which a verdict can only add to (`src/merge-policy.ts`). A red main stops merging: only fix-forward's fix merges until it is green, and the culprit is reverted through a revert PR for a human when the fix doesn't come (§10, fix-forward). What sets the harness apart is the combination: deterministic merge rules, locks that know what an agent could change to loosen its own gate, a model that can only hold, and the control plane on infrastructure the customer owns. Direct land (`land_mode: direct`) is outside these guarantees: it skips `mergeDecision`; it is off by default, and the policy is that it stays an explicit owner opt-in on a single machine. The single machine is and stays a first-class deployment mode ([design/product-architecture.md](design/product-architecture.md) §0). The README's "What it's for" gives the review-bottleneck numbers this answers, with their source.
 
-This document describes the architecture. Each section notes the precedent it follows (details and licenses in [prior-art.md](prior-art.md)); the order it was built in is in §18. Examples describe a hypothetical project. Everything specific to a real project lives in that project's `.worklane/` folder (config plus a `NOTES.md`), never in this repo; a CI denylist check enforces this.
+This document describes the architecture. Each section notes the precedent it follows (details and licenses in [prior-art.md](prior-art.md)); the order it was built in is in §18. Examples describe a hypothetical project. Everything specific to a real project lives in that project's `.worklane/` folder (config plus a `NOTES.md`), never in this repo; a CI denylist check enforces this. How this repo's own PRs are merged is process, not design, and is not a recorded decision: [process.md](process.md).
 
 ---
 
@@ -708,33 +708,3 @@ What exists, and where it deviates from the plan above:
 5. **Production DB:** agents get no production DB access until the project owner creates a read-only role (§12.1).
 6. **Deploy CLIs:** the hook resolves the linked environment. Project release scripts should target production explicitly, so a checkout can stay linked to staging.
 7. **Code of Conduct contact** is set. Security reports use GitHub private vulnerability reporting.
-
-## 20. How the engine repo itself is merged (owner decision, 2026-10-21)
-
-The sections above say how the harness merges a project's PRs. This one is the process for this repo's own PRs, which builders write, reviewers check and an orchestrator merges.
-
-- **The orchestrator merges every PR** once it has:
-  - passed an independent final check: a separate reviewer's PASS on its current head;
-  - passed the combined check: the batch merged together on a do-not-merge draft PR, with CI green on that tree;
-  - green required CI.
-- **The critical set needs more.** A PR in it also needs a second, independent adversarial reviewer to pass it. The critical set is:
-  - merge policy;
-  - review levels;
-  - locks and the tool guard;
-  - sudoers and root helpers;
-  - setup and machine scripts;
-  - release signing and the updater;
-  - CI workflows.
-- **The orchestrator runs the batch-merge procedure itself:**
-  - strict up-to-date is turned off for the batch, then back on by an exit trap, on a normal or an error exit (not when the process is killed outright, as by SIGKILL);
-  - each merge is pinned to its tested head;
-  - after each merge, main's tree is compared with that step's tested tree (the combined branch after the same merges), and at the end with the whole tested combined tree;
-  - no admin bypass, no force.
-- **Reviewers and builders never merge.**
-- **The owner is brought only:**
-  - release signing;
-  - turning `auto_merge` on for a project;
-  - direction changes;
-  - steps that physically need the owner's hands or GitHub admin rights.
-- **A weekly summary of critical merges goes to the owner.**
-- **The `[PROTECTED: owner merges]` title marker no longer means the owner merges the PR.** It marks a PR that touches a protected path, which covers far more than the critical set (a dependency bump carries it too). Such a PR is merged by the orchestrator under this section like any other. It needs the second adversarial review only if it is in the critical set above, which the orchestrator decides from the PR's changed files.

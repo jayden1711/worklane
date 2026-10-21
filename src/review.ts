@@ -405,6 +405,9 @@ export const SELF_MODIFICATION_PARTS: { what: string; globs: string[] }[] = [
     ],
   },
   { what: 'the release procedure and the design rules', globs: ['docs/releasing.md', 'docs/design.md'] },
+  // How the engine repo's own PRs are merged and who reviews them (owner, 2026-10-21): a docs-only change was L0 and
+  // could merge itself, so a PR could drop its own second review. Kept out of the decisions index (src/plan-decisions.ts).
+  { what: "the engine repo's merge process", globs: ['docs/process.md'] },
   // What the engine publicly claims its guards do and which gaps are open (#705), and how to report one: a docs-only
   // change was L0 and merged itself, so a PR could rewrite a claim with nothing holding it (#858).
   { what: 'the public security claims', globs: ['docs/guardrails.md', 'docs/security*.md', 'SECURITY.md'] },

@@ -201,6 +201,13 @@
       "expect": { "decision": "waits", "reasons": ["high-risk: self-modification"] }
     },
     {
+      "id": "merge-process-docs-only",
+      "attack": "a docs-only change that rewrites how the engine repo's own PRs are merged, dropping the second review",
+      "source": "SELF_MODIFICATION_PARTS, the engine repo's merge process (owner, 2026-10-21)",
+      "change": [{ "write": "docs/process.md", "text": "# Process\n\nOne reviewer is enough for every PR.\n" }],
+      "expect": { "decision": "waits", "reasons": ["high-risk: self-modification"] }
+    },
+    {
       "id": "security-pages-docs-only",
       "attack": "a docs-only change that rewrites the public security claims",
       "source": "SELF_MODIFICATION_PARTS, the public security claims (#858)",

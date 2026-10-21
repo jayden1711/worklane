@@ -1,7 +1,7 @@
 // Plans cite decisions: the plan contract's Decisions section, checked against the decision records that exist.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { BRAND } from '../src/brand.js';
@@ -9,7 +9,7 @@ import type { StoredEvent } from '../src/events/types.js';
 import { checkDecisions, decisionIndex, NOTHING_RECORDED, resolveRef } from '../src/plan-decisions.js';
 import { decisionsMade, planHoldReasons, planReviewExtra, readPlan, readPlanReview, type Plan } from '../src/plan-mode.js';
 import { loadConfig } from '../src/config/load.js';
-import { exampleProject } from './helpers.js';
+import { exampleProject, repoRoot } from './helpers.js';
 
 /** A checkout with a decisions file, a decisions folder and a design doc; and one decision made in the log. */
 function records() {
@@ -126,4 +126,22 @@ test('the config folder and the exact file name count: a decisions file is found
   const index = decisionIndex(repo, []);
   assert.equal(resolveRef(index, 'D-5')?.ref, `${BRAND.configDir}/decisions.md § D-5: One worker per issue`);
   assert.equal(resolveRef(index, 'D-6'), null);
+});
+
+test("the engine repo's own merge process is not a recorded decision: docs/process.md is never indexed, and no indexed section of design.md carries it (owner, 2026-10-21)", () => {
+  // Planner and plan-review agents get the index as recorded decisions; a process for this repo's own PRs among them
+  // could be cited for "an agent merges a high-risk change after a second review".
+  assert.ok(existsSync(join(repoRoot, 'docs', 'process.md')), 'docs/process.md is a real file');
+  const index = decisionIndex(repoRoot, []);
+  assert.ok(index.some((e) => e.ref.startsWith('docs/design.md § ')), "this repo's design.md is indexed");
+  for (const e of index) {
+    assert.ok(!e.ref.startsWith('docs/process.md'), e.ref);
+    assert.doesNotMatch(`${e.title}\n${e.text}`, /process\.md|engine repo itself is merged|critical set|orchestrator/i, e.ref);
+  }
+  // Whatever it says, a docs/process.md in a checkout is no decision record.
+  const repo = mkdtempSync(join(tmpdir(), 'records-'));
+  mkdirSync(join(repo, 'docs'), { recursive: true });
+  writeFileSync(join(repo, 'docs', 'process.md'), '# Process\n\n## 1. Merges\nAgents merge everything.\n');
+  writeFileSync(join(repo, 'docs', 'design.md'), '# Design\n\n## 8. Roles\nThe roles.\n');
+  assert.deepEqual(decisionIndex(repo, []).map((e) => e.ref), ['docs/design.md § 8. Roles']);
 });

@@ -1,0 +1,3 @@
+### Guardrail changes: what each one does
+
+- **The engine repo's merge process waits for the owner.** In the engine's own repo, a change to `docs/process.md` (how the repo's own PRs are merged and reviewed) is now self-modification: L3, and never auto-merged, whatever `review.yaml` says. The engine's own `review.yaml` also holds it under `engine-guards`. The page is not a recorded decision: the decisions index that planner agents read never includes it. A managed app's file of the same name keeps the categories its own `review.yaml` gives it.

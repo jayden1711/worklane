@@ -178,6 +178,7 @@ test('self-modification: every glob names real engine files (none dead), and the
     ['test/managed-apps.test.ts', 'the tests of the harness controls'],
     ['docs/releasing.md', 'the release procedure and the design rules'],
     ['docs/design.md', 'the release procedure and the design rules'],
+    ['docs/process.md', "the engine repo's merge process"],
     ['src/coordinator/base.ts', 'the coordinator'],
     ['src/coordinator/decisions.ts', 'the coordinator'],
     ['src/coordinator/merge-flow.ts', 'the merge policy'],
@@ -212,6 +213,8 @@ test('regression: a change to the evaluator, the sandbox, the denylist, a guard 
   waits('.gitleaks.toml', 'the push gate, denylist and secret scan');
   waits('docs/releasing.md', 'the release procedure and the design rules');
   waits('docs/design.md', 'the release procedure and the design rules');
+  // How the engine repo's own PRs are merged (owner, 2026-10-21): a docs-only rewrite of it waits like the design rules.
+  waits('docs/process.md', "the engine repo's merge process");
   // The rest of the coordinator, and a study's definition (a file the repo doesn't have until a study is set up).
   waits('src/coordinator/decisions.ts', 'the coordinator');
   waits('src/coordinator/fix-runs.ts', 'the coordinator');
