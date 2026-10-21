@@ -246,9 +246,12 @@ The adversarial suite (#707, `test/adversarial/adversarial.test.ts`) holds attac
 
 Its flow cases (`test/adversarial/cases/flow.json`) are decided by the coordinator's own `mergeDecisionFor`, from an event log shaped as a live instance writes it. What they drive, and what they don't yet:
 
-- The verdict: the latest one on the PR's head, and the one carried across a merge-in of the default branch (one merge-in, not a chain of them).
-- A CI fix run started on an earlier head, a refused push of a commit that never became the head, the last stop event when the stop file was deleted by hand, a stop file with no reason, and the latest plan.
+- The verdict: the latest one on the PR's head, one with no design-change answer, and the one carried across a merge-in of the default branch (one merge-in, not a chain of them). After a merge-in, the change is measured from the default branch's commit merged in.
+- A CI fix run started on an earlier head, a refused push of a commit that never became the head (before or after the PR opened), and the latest plan.
+- The stop: a stop file with no reason; and, with the file deleted by hand, the last stop event, a stop event that names no cause, and a resume that was requested but hasn't happened.
+- The default branch's tip (#869): one that can't be fetched, and one that moved past the PR's base with a newly marked table. In every other flow case the tip is the base, or the commit a merge-in merged.
 - Evals: only a task with no eval recorded for it, including when another task's eval of the same skill passed. How an eval the task did run came out (an error, the cost cap, a lower score) is driven at the gate only (`test/adversarial/cases/instruction-evals.json`), not through the flow's reading of the log.
 - Not driven: the readiness check (above), the reasons a conflict fix's pushed head adds, and labels or money paths read from the log.
+- Open on main: a stop file whose reason is an empty string doesn't stop auto-merge (#982). It is a todo line in `test/adversarial/todo.json`, not a case.
 
-Label: measured, by in-memory mutants of the flow on #957: each mutant that breaks one of the items above turns a case red.
+Label: measured, by in-memory mutants on #957: each mutant that breaks one of the items above turns a case red. The mutants are the ones two reviews and the builder wrote; a green run under them bounds what they missed, it doesn't prove coverage.
