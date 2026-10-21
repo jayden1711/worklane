@@ -68,9 +68,11 @@ test('#763: an ASCII case variant isn\'t held for its case: a lower-case money l
 });
 
 test('#763: one change\'s look-alike work is bounded: past the budget, the remaining paths wait as not compared', () => {
-  const money = moneyFrom(['payments/**', 'billing/**']);
+  // A glob that keeps the walk alive on every character (round 7 charges the walk as it is done, so plain globs a
+  // path's first character rules out cost little).
+  const money = moneyFrom(['payments/**', 'billing/**', '**a**b**']);
   const crafted = (i: number) => `docs/${String.fromCodePoint(1072).repeat(450)}${String.fromCodePoint(160).repeat(450)}${i}.md`;
-  const files: ChangeFile[] = Array.from({ length: 400 }, (_, i) => ({ path: crafted(i), added: 1, removed: 0 }));
+  const files: ChangeFile[] = Array.from({ length: 3000 }, (_, i) => ({ path: crafted(i), added: 1, removed: 0 }));
   const t = performance.now();
   const level = computeLevel({ files, labels: [], moneyPaths: money, scope: undefined }, REVIEW);
   const ms = performance.now() - t;

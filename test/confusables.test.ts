@@ -20,16 +20,21 @@ import { repoRoot } from './helpers.js';
 test('#763: the look-alike check\'s glob matcher answers as globToRegExp does, in linear time', () => {
   const pieces = ['a', 'b', '/', '**', '*', '?', '**/', 'ab', '.', 'x/', './', '\n'];
   const chars = ['a', 'b', '/', '.', 'x', '\n'];
+  // A 32-bit LCG in integer arithmetic (Math.imul), its high bits used (round 7: the earlier one worked in doubles,
+  // lost precision and cycled, giving 1,148 distinct cases of 50,000, measured by the round-6 delta check).
   let seed = 7;
   const rnd = (n: number) => {
-    seed = (seed * 1103515245 + 12345) % 2147483648;
-    return seed % n;
+    seed = (Math.imul(seed, 1103515245) + 12345) >>> 0;
+    return (seed >>> 8) % n;
   };
+  const cases = new Set<string>();
   for (let t = 0; t < 50_000; t++) {
     const glob = Array.from({ length: 1 + rnd(7) }, () => pieces[rnd(pieces.length)]).join('');
     const path = Array.from({ length: rnd(14) }, () => chars[rnd(chars.length)]).join('');
+    cases.add(`${glob}\0${path}`);
     assert.equal(globMatches(glob, path), globToRegExp(glob).test(path), `${JSON.stringify(glob)} ${JSON.stringify(path)}`);
   }
+  assert.ok(cases.size > 45_000, `${cases.size} distinct cases`);
   // Four ** on 4,096 characters: a RegExp backtracks for many seconds on this; the matcher takes well under 50 ms.
   const t0 = performance.now();
   assert.equal(globMatches('**a**a**a**b', 'a'.repeat(4096)), false);

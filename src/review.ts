@@ -574,39 +574,140 @@ export function loadMoneyPaths(repo: string, src: ReviewConfig['money_path_sourc
  * - A `/regex/flags` token is a regex: a whole line `/.../flags` (a trailing comma allowed), or such a token that
  *   starts the line or follows a space, a comma, `[`, `(`, `=` or `:`, and ends the line or comes before a space, a
  *   comma, `;`, `]` or `)`. `src/payments/**` holds no token (its first `/` follows a letter), so it is a glob.
- * - A regex is converted to a glob when that is mechanical (regexToGlob), and refused otherwise: a RefusedMoneyLine,
- *   which holds every change until the list is fixed. Never dropped.
- * - With no regex token in the text, each line is a glob, as on main.
- * - With one, main read only the regex literals; the other lines are read as globs too now, unless they hold a space
- *   (code around a list in a `pattern`-extracted file).
- * - INVARIANT (no regression for an existing install): main read every `/.../` in the text as a regex, a glob line's
- *   `/payments/` in `src/payments/**` included. Each of those is still read, converted (unanchored, so `**payments**`)
- *   or refused, beside the line's own reading, so no path main counted as a money path stops counting.
+ * - A regex is converted to a glob when that is mechanical (regexToGlob), and refused otherwise, as is one that
+ *   isn't a valid regex at all (round 7): a RefusedMoneyLine, which holds every change until the list is fixed.
+ * - Every other line is a glob line (globLine): read as the glob it is, never refused for what main made of it
+ *   (round 7). A trailing ` # comment`, or quotes around the whole glob, are taken off; a line the glob matcher would
+ *   read literally where other glob dialects don't (a brace set, a `[...]` class, an extglob, a leading `!` or list
+ *   marker, a quote, a backslash) is refused with a suggested glob (round 7: such a line used to match nothing,
+ *   silently).
+ * - With no regex token in the text, every line is a glob line, as on main. With one (a list of regexes, or code
+ *   around one), main read only the regex literals; a line is a glob line there too when it holds a letter or a digit
+ *   and no space once a trailing comment, quotes and a list marker are off (so `- billing/**` there is refused, not
+ *   skipped). Any other line there is code (`];`, `export const X = [`) and read as main read it: not at all.
+ * - INVARIANT (no regression for an existing install, round 7): main's own reading is kept as well, for money-path
+ *   membership only (KeptMoneyReading: never compared for look-alikes, never refused): every `/.../` it found in the
+ *   text, as the RegExp main made of it (`/payments/i` in `src/payments/invoices/**` included), and each line it read
+ *   as a glob as written (`billing.ts # card data`). So no path main counted as a money path stops counting. A
+ *   fragment main couldn't compile (`/**\/` in `src/**\/billing/**`) made main's loadMoneyPaths throw for the whole
+ *   list; it is skipped, and the list's globs are read as written (the owner's decision of 2026-10-21).
  */
 export function moneyListEntries(text: string): RegExp[] {
   const out: RegExp[] = [];
   const seen = new Set<string>();
-  const add = (line: string, body: string, flags: string) => {
-    if (seen.has(`${body}/${flags}`)) return;
-    seen.add(`${body}/${flags}`);
+  const once = (key: string): boolean => !seen.has(key) && !!seen.add(key);
+  const regex = (token: string, body: string, flags: string) => {
+    if (!once(`re:${body}/${flags}`)) return;
+    let valid = true;
+    try {
+      new RegExp(body, flags);
+    } catch {
+      valid = false;
+    }
     const r = regexToGlob(body, flags);
-    out.push('glob' in r ? new MoneyGlob(globToRegExp(r.glob), r.glob) : new RefusedMoneyLine(line, r.why, r.suggestion));
+    if (!valid) out.push(new RefusedMoneyLine(token, "it isn't a valid regex (the list failed to load before this version)", 'glob' in r ? r.glob : r.suggestion));
+    else out.push('glob' in r ? new MoneyGlob(globToRegExp(r.glob), r.glob) : new RefusedMoneyLine(token, r.why, r.suggestion));
+  };
+  const kept = (re: RegExp) => {
+    if (once(`kept:${re.source}/${re.flags}`)) out.push(new KeptMoneyReading(re.source, re.flags));
   };
   const lines = text.split('\n').map((l) => l.trim()).filter((l) => l && !l.startsWith('#'));
   const TOKEN = /(?<=^|[\s,[(=:])\/((?:\\.|[^/\\\n])+)\/([a-z]*)(?=$|[\s,;\])])/g;
   const regexMode = lines.some((l) => [...l.matchAll(TOKEN)].length > 0);
+  // Main's reading (its pattern, before any line is read): did it find a /.../ at all, and which compiled.
+  const fragments = [...text.matchAll(/\/((?:\\\/|[^/\n])+)\/([gimsuy]*)/g)];
   for (const line of lines) {
     const tokens = [...line.matchAll(TOKEN)];
-    for (const t of tokens) add(t[0], t[1]!, t[2]!);
-    if (!tokens.length && (!regexMode || !/\s/.test(line))) {
-      if (!seen.has(`glob:${line}`)) out.push(new MoneyGlob(globToRegExp(line), line));
-      seen.add(`glob:${line}`);
+    for (const t of tokens) regex(t[0], t[1]!, t[2]!);
+    if (tokens.length) continue;
+    // Beside regexes, a line with a space is code, unless it is a list item (`- billing/**`), which is refused below.
+    if (regexMode && (/\s/.test(unwrapped(line).replace(/^-\s+/, '')) || !/[A-Za-z0-9]/.test(line))) continue;
+    const g = globLine(line);
+    if ('glob' in g) {
+      if (once(`glob:${g.glob}`)) out.push(new MoneyGlob(globToRegExp(g.glob), g.glob));
+    } else if (once(`refused:${line}`)) out.push(new RefusedMoneyLine(line, g.why, g.suggestion, true));
+    // Main read this line as a glob as written when the text held no /.../.
+    if (!fragments.length && !('glob' in g && g.glob === line)) kept(globToRegExp(line));
+  }
+  for (const m of fragments) {
+    // A regex line read above already: its glob matches every path the regex does (regexToGlob), or it is refused.
+    if (seen.has(`re:${m[1]}/${m[2]}`)) continue;
+    try {
+      kept(new RegExp(m[1]!, m[2]!.replace('g', '')));
+    } catch {
+      // Main threw here for the whole list; the owner's decision (2026-10-21) reads its globs as written instead.
     }
   }
-  // Main's reading, kept: every /.../ in the text (its old pattern), converted or refused.
-  for (const m of text.matchAll(/\/((?:\\\/|[^/\n])+)\/([gimsuy]*)/g)) add(m[0], m[1]!, m[2]!);
   return out;
 }
+
+/** A line with a trailing ` # comment` and quotes around the whole of it taken off (globLine's mechanical part). */
+function unwrapped(line: string): string {
+  const bare = /^(.*?\S)\s+#.*$/.exec(line)?.[1] ?? line;
+  return /^(['"`])([^'"`\\]*)\1,?$/.exec(bare)?.[2] ?? bare;
+}
+
+/**
+ * What in a glob line the glob matcher (globToRegExp) reads literally, though other glob dialects read it as syntax,
+ * so the line would match nothing like what it says (#763 round 7), or null: a brace set, a `[...]` class, an extglob
+ * (`@(`, `!(`, `+(`, `?(`, `*(`), a leading `!` (an exclusion) or list marker (`- `), a quote, a backslash, or a line
+ * that starts with `#` (a comment). `(` alone is a literal (a route group's folder), and so are spaces and `#` inside.
+ */
+export function globLineProblem(glob: string): string | null {
+  if (/^#/.test(glob)) return 'it starts with # (a comment)';
+  if (/^!/.test(glob)) return 'a leading ! (an exclusion elsewhere) is read as part of the name, and a money list only adds paths';
+  if (/^[-*+]\s/.test(glob)) return 'a list marker at its start is read as part of the name';
+  if (/[{}]/.test(glob)) return 'a brace set ({a,b}) is read literally here: write one line for each choice';
+  if (/[[\]]/.test(glob)) return 'a class ([...]) is read literally here';
+  if (/[?*+@!]\(/.test(glob)) return 'an extglob (@(...), !(...), ...) is read literally here';
+  if (/['"`]/.test(glob)) return 'a quote is read as part of the name';
+  if (/\\/.test(glob)) return 'a backslash is read as part of the name (paths use /)';
+  return null;
+}
+
+/**
+ * A glob to write instead of one with a problem (globLineProblem), matching at least every path it could mean, read
+ * literally or as the syntax it looks like: a leading `!` or list marker, and each quote, read as `*` (which also
+ * matches nothing); each brace set, class or extglob as `*` (`**` when it holds a `/`); a backslash as `**`; a `#`
+ * after a space, and any character still in the way, as `*`. Never itself refused (`**` if all else fails).
+ */
+export function writableGlob(glob: string): string {
+  let g = glob.replace(/^!+/, '*').replace(/^[-*+]\s+/, '*').replace(/['"`]/g, '*').replace(/\\/g, '**');
+  const group = (s: string) => (s.includes('/') || s.includes('**') ? '**' : '*');
+  for (let i = 0; i < 8; i++) {
+    const next = g
+      .replace(/[?*+@!]\(([^()]*)\)/g, (_, inner: string) => group(inner))
+      .replace(/\{([^{}]*)\}/g, (_, inner: string) => group(inner))
+      .replace(/\[([^[\]]*)\]/g, (_, inner: string) => group(inner));
+    if (next === g) break;
+    g = next;
+  }
+  g = g
+    .replace(/[{}[\]]/g, '*')
+    .replace(/([?*+@!])\(/g, '$1*')
+    .replace(/(\s)#/g, '$1*')
+    .replace(/^[#!]/, '*')
+    // So it can't read as a /regex/ token when written back: no `/` at its start or after a space, `,`, `(`, `=` or `:`.
+    .replace(/^\//, '*/')
+    .replace(/[\s,(=:](?=\/)/g, '?')
+    .replace(/\*{3,}/g, '**')
+    .trim();
+  return !g || globLineProblem(g) || unwrapped(g) !== g ? '**' : g;
+}
+
+/** A glob line as read (#763 round 7): its glob, or why it is refused and a glob to write instead. */
+function globLine(line: string): { glob: string } | { why: string; suggestion: string } {
+  const g = unwrapped(line);
+  const why = globLineProblem(g);
+  return why ? { why, suggestion: writableGlob(g) } : { glob: g };
+}
+
+/**
+ * Main's own reading of a money list, kept for money-path membership only (#763 round 7): a `/.../` it found in a
+ * line (`/payments/` in `src/payments/**`), as the RegExp main made of it, or a line it read as a glob as written. It
+ * counts the paths main counted, so none stops counting; it is never compared for look-alikes, and never refused.
+ */
+export class KeptMoneyReading extends RegExp {}
 
 /**
  * A regex body and flags as a glob, when the conversion is mechanical (#763 round 6). Mechanical means only:
@@ -629,7 +730,8 @@ export function regexToGlob(body: string, flags: string): { glob: string } | { w
   const start = body.startsWith('^');
   if (start) i = 1;
   let end = false;
-  // The suggestion (loose) is a glob matching at least what the regex does: each part it can't convert reads as **.
+  // The suggestion (loose) is a glob matching at least what the regex does, case as written (under the i flag, which
+  // the refusal names, each other spelling needs a line of its own): each part it can't convert reads as **.
   let lastLiteral = 0;
   const wide = () => {
     if (!loose.endsWith('**')) loose += '**';
@@ -654,7 +756,9 @@ export function regexToGlob(body: string, flags: string): { glob: string } | { w
     const wild = /^(?:\.\*\??|\[\^(?:\\\/|\/)\](?:\*|\+)?)/.exec(rest);
     if (wild) {
       const w = wild[0];
-      const part = w.startsWith('.') ? '**' : w.endsWith('*') ? '*' : w.endsWith('+') ? '?*' : '?';
+      // Under the u flag a lone [^/] is one code point, which may be two UTF-16 units (an emoji), where a glob's `?`
+      // is one: `?*` keeps every path it matched (round 7; the round-6 delta check measured `?` as narrower).
+      const part = w.startsWith('.') ? '**' : w.endsWith('*') ? '*' : w.endsWith('+') || flags.includes('u') ? '?*' : '?';
       glob += part;
       loose += part;
       lastLiteral = 0;
@@ -700,7 +804,8 @@ export function regexToGlob(body: string, flags: string): { glob: string } | { w
     i += c.length;
   }
   const wrap = (g: string) => `${start ? '' : '**'}${g}${end ? '' : '**'}`.replace(/\*{3,}/g, '**');
-  return why ? { why, suggestion: wrap(loose) } : { glob: wrap(glob) };
+  // The suggestion is written back as a glob line, so whatever globLineProblem would refuse in it reads as `?` there.
+  return why ? { why, suggestion: writableGlob(wrap(loose)) } : { glob: wrap(glob) };
 }
 
 /**
@@ -718,21 +823,25 @@ export class MoneyGlob extends RegExp {
 }
 
 /**
- * A money-list line that is a regex with no mechanical glob form (#763 round 6). It matches every path, so every
- * change counts as touching a money path, and the look-alike check holds every changed path as not compared, naming
- * the line, until the list is fixed (fails closed; never dropped). moneyListProblems lists these for doctor.
+ * A refused money-list line (#763 rounds 6 and 7): a regex with no mechanical glob form, or one that isn't a valid
+ * regex, or (`literal`) a glob line the matcher would read literally (globLineProblem). It matches every path, so
+ * every change counts as touching a money path, and the look-alike check holds every changed path as not compared,
+ * naming the line, until the list is fixed (fails closed). moneyListProblems lists these for doctor.
  */
 export class RefusedMoneyLine extends RegExp {
   constructor(
     readonly line: string,
     readonly why: string,
     readonly suggestion: string,
+    readonly literal = false,
   ) {
     super('');
   }
   /** The text a hold and doctor show. */
   get reason(): string {
-    return `the money list's line ${JSON.stringify(this.line)} isn't a glob (${this.why}); money paths are globs only: write it as one, for example ${this.suggestion}`;
+    return this.literal
+      ? `the money list's line ${JSON.stringify(this.line)} would be read literally (${this.why}); write it as a glob, for example ${this.suggestion}`
+      : `the money list's line ${JSON.stringify(this.line)} isn't a glob (${this.why}); money paths are globs only: write it as one, for example ${this.suggestion}`;
   }
 }
 
@@ -741,8 +850,9 @@ export const moneyListProblems = (money: readonly RegExp[]): { line: string; why
   money.filter((re): re is RefusedMoneyLine => re instanceof RefusedMoneyLine).map(({ line, why, suggestion }) => ({ line, why, suggestion }));
 
 /**
- * doctor's money-list check (#763 round 6): fail for each refused line (every PR waits until it is rewritten), with
- * its suggested glob; ok when every line is a glob or converts to one; warn when the list can't be read at `rev`.
+ * doctor's money-list check (#763 rounds 6 and 7): fail for each refused line (every PR waits until it is rewritten),
+ * naming it, with its suggested glob; ok when every line is a glob or converts to one; warn when the list can't be
+ * read at `rev`.
  */
 export function moneyListCheck(repo: string, src: ReviewConfig['money_path_source'], rev: string): { level: 'ok' | 'warn' | 'fail'; detail: string } {
   let money: RegExp[];
@@ -751,9 +861,12 @@ export function moneyListCheck(repo: string, src: ReviewConfig['money_path_sourc
   } catch (e) {
     return { level: 'warn', detail: (e as Error).message };
   }
-  const problems = moneyListProblems(money);
-  if (!problems.length) return { level: 'ok', detail: 'money paths are globs only: every line of the money list is a glob or converts to one' };
-  return { level: 'fail', detail: problems.map((p) => `${p.line} isn't a glob (${p.why}): every PR waits until it is rewritten as globs, for example ${p.suggestion}`).join('\n') };
+  const refused = money.filter((re): re is RefusedMoneyLine => re instanceof RefusedMoneyLine);
+  if (!refused.length) return { level: 'ok', detail: 'money paths are globs only: every line of the money list is a glob or converts to one' };
+  return {
+    level: 'fail',
+    detail: refused.map((p) => `${p.line} ${p.literal ? 'would be read literally' : "isn't a glob"} (${p.why}): every PR waits until it is rewritten as globs, for example ${p.suggestion}`).join('\n'),
+  };
 }
 
 export function computeLevel(input: LevelInput, cfg: ReviewConfig, extraCategories: Record<string, string[]> = {}): LevelResult {
@@ -789,9 +902,12 @@ export function computeLevel(input: LevelInput, cfg: ReviewConfig, extraCategori
     // A money glob by skeleton, its own RegExp deciding what is its own; a refused line holds every path (round 6).
     // (Its RegExp is passed as `own` only when it isn't the glob's own, as for the list file's name, so the look-alike
     // check matches globs in linear time.)
-    ...input.moneyPaths.map((re): Protected =>
-      re instanceof RefusedMoneyLine ? { refused: re.reason, what: 'a money path' } : re instanceof MoneyGlob ? { glob: re.glob, ...(re.source === globToRegExp(re.glob).source ? {} : { own: re }), what: 'a money path' } : { re, what: 'a money path' },
-    ),
+    // Main's kept reading (KeptMoneyReading) counts for money-path membership only, never for look-alikes (round 7).
+    ...input.moneyPaths
+      .filter((re) => !(re instanceof KeptMoneyReading))
+      .map((re): Protected =>
+        re instanceof RefusedMoneyLine ? { refused: re.reason, what: 'a money path' } : re instanceof MoneyGlob ? { glob: re.glob, ...(re.source === globToRegExp(re.glob).source ? {} : { own: re }), what: 'a money path' } : { re, what: 'a money path' },
+      ),
   ];
   // A path another odd-path category holds already (an invisible character, a top-level name outside ASCII, ...) waits
   // on that floor at L3; it isn't compared again, so its reason stays the one that says what is odd about it.

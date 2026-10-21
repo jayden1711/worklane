@@ -33,14 +33,19 @@ export const hasEdgeSpace = (path: string): boolean => /(?:^|\/) | (?:\/|$)/.tes
  * form and whose canonical decomposition (NFD) is an ASCII letter and then at least one combining mark (`naïve`,
  * `café`). INVARIANT: nothing else counts, so a character that decomposes to a bare ASCII one (the Kelvin sign to K),
  * a lone combining mark, a sign with an overlay (#763 round 2), or a twin of an accented letter that isn't its NFC
- * form (the Angstrom sign beside the A with a ring above, round 3) is escaped. WHY a rule and not Unicode's look-alike table: this module imports
+ * form (the Angstrom sign beside the A with a ring above, round 3), or one whose lower case isn't one NFC character
+ * (round 7: the capital I with a dot above, whose lower case is an i and a combining dot above, which the look-alike
+ * check reads as i) is escaped. WHY a rule and not Unicode's look-alike table: this module imports
  * nothing (test/review-packet.test.ts), so it escapes every such name, look-alike or not. The replacement character
  * is left to isNonUtf8Path.
  */
 export const hasNonAccentCharacter = (path: string): boolean => {
-  for (const ch of path) if (/\P{ASCII}/u.test(ch) && ch !== '�' && !(ch === ch.normalize('NFC') && /^[A-Za-z]\p{M}+$/u.test(ch.normalize('NFD')))) return true;
+  for (const ch of path) if (/\P{ASCII}/u.test(ch) && ch !== '�' && !isAccent(ch)) return true;
   return false;
 };
+
+/** An accent on an ASCII letter: its own NFC form, its NFD an ASCII letter then marks, its lower case one NFC character. */
+const isAccent = (ch: string): boolean => ch === ch.normalize('NFC') && /^[A-Za-z]\p{M}+$/u.test(ch.normalize('NFD')) && [...ch.toLowerCase().normalize('NFC')].length === 1;
 
 /** Whether a path's first segment (its top-level directory, or a file at the root) has a character outside ASCII. */
 export const hasNonAsciiTopLevel = (path: string): boolean => /[^\x00-\x7f]/.test(path.split('/')[0]!);

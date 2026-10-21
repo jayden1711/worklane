@@ -6,7 +6,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { ReviewConfig } from '../src/config/schema.js';
-import { mergeDecision, waitCategoriesOf } from '../src/merge-policy.js';
+import { mergeDecision, waitCategoriesOf, whyHighRisk } from '../src/merge-policy.js';
 import { computeLevel, escapedPath, shownPath } from '../src/review.js';
 
 /** The last code point Unicode has. */
@@ -23,8 +23,11 @@ function bareSingletons(): string[] {
   return out;
 }
 
-/** The rule: an accent on an ASCII letter is its own NFC form, and its NFD is an ASCII letter then at least one combining mark. */
-const isAccent = (c: string) => c === c.normalize('NFC') && /^[A-Za-z]\p{M}+$/u.test(c.normalize('NFD'));
+/**
+ * The rule: an accent on an ASCII letter is its own NFC form, its NFD is an ASCII letter then at least one combining
+ * mark, and its lower case is one NFC character (round 7).
+ */
+const isAccent = (c: string) => c === c.normalize('NFC') && /^[A-Za-z]\p{M}+$/u.test(c.normalize('NFD')) && [...c.toLowerCase().normalize('NFC')].length === 1;
 
 test('#763: the characters outside ASCII that decompose to a bare ASCII character (the Kelvin sign, the Greek question mark, the Greek varia) show escaped, never raw', () => {
   const singles = bareSingletons();
@@ -70,4 +73,24 @@ test('#763: a Kelvin-sign look-alike of src/hook.ts is held, and its high-risk l
   assert.equal(merge.auto, false);
   assert.deepEqual(merge.reasons.filter((r) => r.startsWith('high-risk: confusable-path')), [`high-risk: confusable-path (${escapedPath(path)})`]);
   assert.ok(merge.reasons.every((r) => !r.includes(path)), 'no reason holds the path raw');
+});
+
+test('#763 round 7: the capital I with a dot above (its lower case is an i and a combining dot above) shows escaped, in a held look-alike\'s high-risk line too', () => {
+  const dotted = 'I'.concat('ė'.normalize('NFD').slice(1)).normalize('NFC');
+  assert.ok(dotted.length === 1 && [...dotted.toLowerCase()].length === 2, escapedPath(dotted));
+  const path = `docs/releas${dotted}ng.md`;
+  assert.equal(shownPath(path), escapedPath(path));
+  const cfg = ReviewConfig.parse({ version: 1, levels: { L0_auto: { when: ['docs-only', 'tests-only'], max_lines: 200 }, L1_evaluator: { when: ['app-non-money'], max_lines: 400, max_files: 10 }, L2_notify: { when: ['dependency'] }, L3_human: { when: [], over_lines: 800 } } });
+  const level = computeLevel({ files: [{ path, added: 1, removed: 0 }], labels: [], moneyPaths: [], scope: undefined }, cfg);
+  assert.equal(level.level, 'L3');
+  const lines = whyHighRisk({ level, waitCategories: waitCategoriesOf(cfg) }).map((w) => w.text);
+  assert.ok(lines.includes(`has a path that looks like a protected one: ${escapedPath(path)}`), lines.join('\n'));
+  assert.ok(lines.every((t) => !t.includes(path)), 'no high-risk line holds the path raw');
+  // The lower-case clause excludes this one character and no other (measured here).
+  const excluded: string[] = [];
+  for (let cp = 128; cp <= LAST; cp++) {
+    const c = String.fromCodePoint(cp);
+    if (c === c.normalize('NFC') && /^[A-Za-z]\p{M}+$/u.test(c.normalize('NFD')) && !isAccent(c)) excluded.push(c);
+  }
+  assert.deepEqual(excluded, [dotted]);
 });

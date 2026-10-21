@@ -44,13 +44,16 @@ test('#763: regexToGlob converts only the mechanical forms: literals, escaped pu
 
 test('#763: a line is a regex only as a /.../flags token; src/payments/** is a glob; main\'s reading of every /.../ in the text is kept beside it', () => {
   const read = (text: string) => moneyListEntries(text).map((r) => (r instanceof RefusedMoneyLine ? `refused ${r.line}` : r instanceof MoneyGlob ? r.glob : String(r)));
-  // A list of globs: each line a glob. Main read the /payments/ inside the first line as a regex, so that stays too.
-  assert.deepEqual(read('src/payments/**\nbilling/**\n**/ledger.ts'), ['src/payments/**', 'billing/**', '**/ledger.ts', '**payments**']);
+  // A list of globs: each line a glob. Main read the /payments/ inside the first line as a regex, so that stays too,
+  // as main's own RegExp for money-path membership only (round 7: never refused, never compared for look-alikes).
+  assert.deepEqual(read('src/payments/**\nbilling/**\n**/ledger.ts'), ['src/payments/**', 'billing/**', '**/ledger.ts', '/payments/']);
   // A list of regexes, one a line (a trailing comma allowed), or a code array: tokens converted or refused.
   assert.deepEqual(read('/^lib\\/pay\\.ts$/,\n/billing/i'), ['lib/pay.ts', 'refused /billing/i']);
   assert.deepEqual(read('const MONEY = [/^src\\/payments\\//, /invoice/];'), ['src/payments/**', '**invoice**']);
   // Beside a regex line, a glob line without a space is read as a glob too (main read only the regex).
   assert.deepEqual(read('/invoice/\nbilling/**'), ['**invoice**', 'billing/**']);
+  // There, a list item is refused rather than skipped as code (round 7), and code stays code.
+  assert.deepEqual(read('const MONEY = [\n/invoice/,\n- billing/**\n];'), ['**invoice**', 'refused - billing/**']);
 });
 
 test('#763: doctor\'s list names each refused line with a suggested glob; a converted list has none', () => {
