@@ -75,6 +75,9 @@ const SHAPES: [string, string, string][] = (() => {
     ['Slack app token', `${'xapp'}-1-${s(30, 'Xa9Pp2Tk5Mr7')}`, s(30, 'Xa9Pp2Tk5Mr7')],
     ['Linear key', `${'lin'}_api_${s(40, 'Ln3Ar8Pk6Qc2')}`, s(40, 'Ln3Ar8Pk6Qc2')],
     ['JWT', `${'eyJ'}${s(20, 'hDr1Bq5Zt8')}.${'eyJ'}${s(24, 'pLd4Nx7Jv2')}.${jwtSig}`, jwtSig],
+    // Unsigned (`alg: none`: an empty third part), and one whose signature starts with `+` (#889 round 7).
+    ['unsigned JWT', `${'eyJ'}${s(20, 'hDr1Bq5Zt8')}.${'eyJ'}${s(60, 'uNs7Gd2Pq9Lw')}.`, s(60, 'uNs7Gd2Pq9Lw')],
+    ['JWT with a +-led signature', `${'eyJ'}${s(20, 'hDr1Bq5Zt8')}.${'eyJ'}${s(60, 'pLs4Gn8Wq3Zk')}.+${s(20, 'Sx5Rt1Mv7Yb2')}`, s(60, 'pLs4Gn8Wq3Zk')],
     ['AWS key', `${'AKIA'}${'Q7RZ4KX2M9TBH3WD'}`, 'Q7RZ4KX2M9TBH3WD'],
     ['Google key', `${'AIza'}${s(35, 'Go4Gk1Ey9Ap3')}`, s(35, 'Go4Gk1Ey9Ap3')],
     ['Tailscale key', `${'tskey'}-auth-${s(30, 'Ts2Ak7Qz4Wf8')}`, s(30, 'Ts2Ak7Qz4Wf8')],
@@ -87,7 +90,7 @@ const SHAPES: [string, string, string][] = (() => {
 })();
 
 /** Separators a log line, a URL, JSON or an ANSI-coloured terminal puts between two values. */
-const SEPARATORS = ['', ' ', '-', '.', '+', '_', ':', '=', ',', '/', '"', '\n', '\u001b[1m', '\\n', 'Authorization: ', 'BEARER '];
+const SEPARATORS = ['', ' ', '-', '.', '+', '_', ':', '=', ',', '/', '"', '\n', '\u001b[1m', '\\n', 'Authorization: ', 'BEARER ', 'x.', 'a.b.'];
 
 /** The secrets main hid in `s` that `out` shows. */
 function narrowed(s: string, out: string, secrets: string[]): string[] {

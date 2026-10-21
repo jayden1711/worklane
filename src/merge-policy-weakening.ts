@@ -99,6 +99,8 @@ export const CHECK_TABLES: readonly CheckTable[] = [
   // Main's default rules, the baseline the default mode must hide at least as much as (#889 round 6).
   { path: 'test/redact-default-union.test.ts', table: 'MAIN_PATTERNS', kind: 'never-shrink' },
   { path: 'test/redact-default-union.test.ts', table: 'CREDENTIAL_WORDS', kind: 'never-shrink' },
+  { path: 'test/redact-default-union.test.ts', table: 'KEY_QUALIFIERS', kind: 'never-shrink' },
+  { path: 'test/redact-default-union.test.ts', table: 'CREDENTIAL_ENDINGS', kind: 'never-shrink' },
   // The guards' own tables (their files are guard files too; the table names what was taken out).
   { path: 'src/review.ts', table: 'SELF_MODIFICATION_PARTS', kind: 'never-shrink' },
   { path: 'src/review.ts', table: 'LOCKED_CATEGORIES', kind: 'never-shrink' },

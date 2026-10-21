@@ -115,8 +115,9 @@ const sharedRedact = (() => {
 const exports = {};
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.CUT_MARGIN = exports.UNSCANNABLE = exports.UNSCANNABLE_KIND = exports.TRACKER = exports.REDACTION_PATTERNS = exports.isDashboardKey = exports.DASHBOARD_KEY_PREFIX = void 0;
+exports.CUT_MARGIN = exports.UNSCANNABLE = exports.MAX_PASSES = exports.UNSCANNABLE_KIND = exports.TRACKER = exports.REDACTION_PATTERNS = exports.isDashboardKey = exports.DASHBOARD_KEY_PREFIX = void 0;
 exports.secretKinds = secretKinds;
+exports.fixedPoint = fixedPoint;
 exports.redactString = redactString;
 exports.redactCut = redactCut;
 exports.readWindow = readWindow;
@@ -161,17 +162,6 @@ function orphanEnd(m) {
     }
     return cut === -1 ? m : `[REDACTED PRIVATE KEY]${m.slice(cut)}`;
 }
-function jwtIn(m, pre) {
-    const parts = m.slice(pre.length).split('.');
-    let before = pre;
-    for (let i = 0; i + 2 < parts.length; i++) {
-        const at = parts[i].indexOf('eyJ');
-        if (at !== -1 && parts[i].length - at >= 11 && parts[i + 1].length >= 8)
-            return `${before}${parts[i].slice(0, at)}[REDACTED JWT]`;
-        before += `${parts[i]}.`;
-    }
-    return m;
-}
 const PATTERNS = [
     [new RegExp(`${exports.DASHBOARD_KEY_PREFIX}${DASHBOARD_KEY_BODY}(?![A-Za-z0-9_-])`, 'g'), `${exports.DASHBOARD_KEY_PREFIX}[REDACTED]`, 'dashboard key'],
     [/gh[pousr]_[A-Za-z0-9]{30,}(?![A-Za-z0-9])/g, 'gh*_[REDACTED]', 'GitHub token'],
@@ -180,7 +170,11 @@ const PATTERNS = [
     [/\bsk-(?:ant-)?[A-Za-z0-9_-]{20,}\b/g, 'sk-[REDACTED]', 'API key (sk-)'],
     [/(^|[^A-Za-z0-9_])([sr]k)_(?:live|test)_([A-Za-z0-9]{16,})(?![A-Za-z0-9_])/g, (m, pre, k, v) => (/\d/.test(v) ? `${pre}${k}_[REDACTED]` : m), 'Stripe key'],
     [/AIza[0-9A-Za-z_-]{35}(?![0-9A-Za-z_-])/g, 'AIza[REDACTED]', 'Google API key'],
-    [/(^|[^A-Za-z0-9_-])(?=([A-Za-z0-9_-]+))\2\.(?=([A-Za-z0-9_-]+))\3\.[A-Za-z0-9_-]*(?:\.[A-Za-z0-9_-]+)*/g, (m, pre) => jwtIn(m, pre), 'JWT'],
+    [
+        /(^|[^A-Za-z0-9_-])(?=([A-Za-z0-9_-]*?)eyJ)\2eyJ(?=[A-Za-z0-9_-]{8})(?=([A-Za-z0-9_-]+))\3\.(?=[A-Za-z0-9_-]{8})(?=([A-Za-z0-9_-]+))\4\.[A-Za-z0-9_-]*(?:\.[A-Za-z0-9_-]*)*/g,
+        '$1$2[REDACTED JWT]',
+        'JWT',
+    ],
     [/(?:AKIA|ASIA)[A-Z0-9]{16}(?![A-Za-z0-9])/g, 'AKIA[REDACTED]', 'AWS access key'],
     [/xoxe[.-][A-Za-z0-9.-]{10,}(?![A-Za-z0-9])/g, 'xoxe-[REDACTED]', 'Slack token'],
     [/xox[abprs]-[A-Za-z0-9-]{10,}(?![A-Za-z0-9])/g, 'xox-[REDACTED]', 'Slack token'],
@@ -191,7 +185,7 @@ const PATTERNS = [
     [/-----BEGIN [A-Z ]*PRIVATE KEY(?: BLOCK)?-----(?:[\s\S]*?-----END [A-Z ]*PRIVATE KEY(?: BLOCK)?-----|[\s\S]*)/g, '[REDACTED PRIVATE KEY]', 'private key'],
     [/^[\s\S]*-----END [A-Z ]*PRIVATE KEY(?: BLOCK)?-----/, orphanEnd, 'private key'],
     [/\b(bearer)\s+[A-Za-z0-9._~+/-]{20,}=*/gi, '$1 [REDACTED]', 'bearer token'],
-    [/\b(basic)(\s+)([A-Za-z0-9+/]{8,}={0,2})(?![A-Za-z0-9+/=])/gi, (m, s, sp, v) => (basicShaped(v) ? `${s}${sp}[REDACTED]` : m), 'Basic credential'],
+    [/\b(basic)(\s+)([A-Za-z0-9+/]{8,}={0,2})/gi, (m, s, sp, v) => (basicShaped(v) ? `${s}${sp}[REDACTED]` : m), 'Basic credential'],
     [/([a-z][a-z0-9+.-]{0,31}:\/\/[^:/\s@]+):[^@\s/]+@/gi, '$1:[REDACTED]@', 'password in a URL'],
     [/\b0x[0-9a-fA-F]{64}(?![A-Za-z0-9])/g, '0x[REDACTED-32-BYTES]', '32-byte hex key'],
     [
@@ -346,8 +340,10 @@ function spansOf(t, re, rep, rank, out) {
         g.lastIndex = Math.max(m.index + 1, m.index + whole.length - 64);
         const groups = m.slice(1).map((x) => x ?? '');
         const r = typeof rep === 'string' ? expand(rep, whole, groups) : rep(whole, ...groups);
-        if (r === whole)
+        if (r === whole) {
+            g.lastIndex = m.index + 1;
             continue;
+        }
         let a = 0;
         while (a < whole.length && a < r.length && whole[a] === r[a])
             a++;
@@ -390,15 +386,19 @@ function replaceOnce(s, keepLines) {
     }
     return out + s.slice(at);
 }
-function replaceUnion(s, keepLines) {
-    let out = replaceOnce(s, keepLines);
-    for (let i = 0; i < 2 && out !== s; i++) {
-        const again = replaceOnce(out, keepLines);
+exports.MAX_PASSES = 8;
+function fixedPoint(s, pass, keepLines = false) {
+    let out = s;
+    for (let i = 0; i < exports.MAX_PASSES; i++) {
+        const again = pass(out);
         if (again === out)
-            break;
+            return out;
         out = again;
     }
-    return out;
+    return exports.UNSCANNABLE + (keepLines ? '\n'.repeat(breaks(s)) : '');
+}
+function replaceUnion(s, keepLines) {
+    return fixedPoint(s, (t) => replaceOnce(t, keepLines), keepLines);
 }
 function maskOnce(s, mask, keepLines) {
     const spans = allSpans(s, BROAD_RULES);
@@ -488,14 +488,7 @@ function outside(spans, regions) {
     return out;
 }
 function maskUnion(s, mask, keepLines) {
-    let out = maskOnce(s, mask, keepLines);
-    for (let i = 0; i < 2; i++) {
-        const again = maskOnce(out, mask, keepLines);
-        if (again === out)
-            break;
-        out = again;
-    }
-    return out;
+    return fixedPoint(s, (t) => maskOnce(t, mask, keepLines), keepLines);
 }
 exports.UNSCANNABLE = '[REDACTED: too large to scan]';
 function redactString(s, o = {}) {

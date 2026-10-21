@@ -79,24 +79,6 @@ function orphanEnd(m: string): string {
   return cut === -1 ? m : `[REDACTED PRIVATE KEY]${m.slice(cut)}`;
 }
 
-/**
- * `m` (a run of three or more dotted parts after `pre`) with a JWT in it redacted, from its `eyJ` to the run's end: the first part
- * holding `eyJ` and 8 more characters, followed by a part of 8 or more (the payload) and one more dot. Any part may be
- * the header (#889 round 6: `name.eyJ...`, where the run's first part is a name, was found by main's rule from the
- * dot); within a part, the header may be glued after anything (round 5). As it was when no part is a header. One walk
- * over the parts: linear.
- */
-function jwtIn(m: string, pre: string): string {
-  const parts = m.slice(pre.length).split('.');
-  let before = pre;
-  for (let i = 0; i + 2 < parts.length; i++) {
-    const at = parts[i]!.indexOf('eyJ');
-    if (at !== -1 && parts[i]!.length - at >= 11 && parts[i + 1]!.length >= 8) return `${before}${parts[i]!.slice(0, at)}[REDACTED JWT]`;
-    before += `${parts[i]}.`;
-  }
-  return m;
-}
-
 // Each pattern with what kind of secret it finds (secretKinds names the kind, never the value).
 const PATTERNS: [RegExp, Replacement, string][] = [
   // A dashboard key, wherever its prefix is (after a `-` or a letter too: `key-wld_...`): a match runs to the end of its
@@ -116,15 +98,22 @@ const PATTERNS: [RegExp, Replacement, string][] = [
   [/(^|[^A-Za-z0-9_])([sr]k)_(?:live|test)_([A-Za-z0-9]{16,})(?![A-Za-z0-9_])/g, (m, pre, k, v) => (/\d/.test(v!) ? `${pre}${k}_[REDACTED]` : m), 'Stripe key'],
   // Google API keys: AIza and 35 more characters.
   [/AIza[0-9A-Za-z_-]{35}(?![0-9A-Za-z_-])/g, 'AIza[REDACTED]', 'Google API key'],
-  // JSON Web Tokens: a base64url JSON header (so `eyJ`), a payload and a signature (empty when unsigned).
-  // Any further dotted parts go with it (#889 round 3): a JWE has five, and a token may be followed by more.
-  // Read from the start of the header's run of base64url characters, with no bound on its length (an `x5c` chain makes
-  // a header several KB, #889 round 5); a function finds `eyJ` in that run, so a token glued after a letter, a digit or
-  // `-` is found from its `eyJ` on. Each start is a run's start: linear.
-  // Each of the first two parts is read whole, with no way back into it (a lookahead takes the run, a backreference
-  // steps over it): a run of millions of characters with no dot after it is passed in one step, not given back a
-  // character at a time until V8's backtracking stack overflows (#889 round 6). jwtIn checks the parts' lengths.
-  [/(^|[^A-Za-z0-9_-])(?=([A-Za-z0-9_-]+))\2\.(?=([A-Za-z0-9_-]+))\3\.[A-Za-z0-9_-]*(?:\.[A-Za-z0-9_-]+)*/g, (m, pre) => jwtIn(m, pre!), 'JWT'],
+  // JSON Web Tokens: a base64url JSON header (so `eyJ` and 8 or more), a payload of 8 or more and a signature (empty
+  // when unsigned, or cut at a `+` or `/`). Any further dotted parts go with it, empty ones too (#889 rounds 3 and 7): a
+  // JWE has five, and a token may be followed by more.
+  // - The header is found in any part, glued after anything in it (`x<jwt>`, `%3D<jwt>`, `name.<jwt>`): the match
+  //   starts at a part's start (after a character no part holds: `.`, a space, `%`), and a lookahead looks in that part
+  //   for `eyJ`. It can't leave its part, so each part is read once from its start: linear.
+  // - Each of the header and the payload is read whole, with no way back into it (a lookahead takes the run, a
+  //   backreference steps over it), with no bound on its length (an `x5c` chain makes a header several KB, round 5):
+  //   a run of millions of characters is passed in one step, not given back a character at a time until V8's
+  //   backtracking stack overflows (round 6).
+  // - A plain replacement: no match is declined, so nothing the search steps over can hide a token (round 7).
+  [
+    /(^|[^A-Za-z0-9_-])(?=([A-Za-z0-9_-]*?)eyJ)\2eyJ(?=[A-Za-z0-9_-]{8})(?=([A-Za-z0-9_-]+))\3\.(?=[A-Za-z0-9_-]{8})(?=([A-Za-z0-9_-]+))\4\.[A-Za-z0-9_-]*(?:\.[A-Za-z0-9_-]*)*/g,
+    '$1$2[REDACTED JWT]',
+    'JWT',
+  ],
   [/(?:AKIA|ASIA)[A-Z0-9]{16}(?![A-Za-z0-9])/g, 'AKIA[REDACTED]', 'AWS access key'],
   // Slack's token-rotation and refresh tokens (xoxe-..., xoxe.xoxb-...), before the
   // other Slack tokens (one is inside it); then its app-level token (xapp-, Socket Mode).
@@ -147,8 +136,10 @@ const PATTERNS: [RegExp, Replacement, string][] = [
   [/\b(bearer)\s+[A-Za-z0-9._~+/-]{20,}=*/gi, '$1 [REDACTED]', 'bearer token'],
   // HTTP Basic credentials (base64 of user:password; git's extraheader, src/dashboard-auth.ts's client id and secret),
   // failing closed: any credential-looking value after the scheme. Prose ("Basic Authentication") has no digit, `+`,
-  // `/` or `=`, and isn't a mixed-case run of a base64 length.
-  [/\b(basic)(\s+)([A-Za-z0-9+/]{8,}={0,2})(?![A-Za-z0-9+/=])/gi, (m, s, sp, v) => (basicShaped(v!) ? `${s}${sp}[REDACTED]` : m), 'Basic credential'],
+  // `/` or `=`, and isn't a mixed-case run of a base64 length. The value ends where its run and padding end, whatever is
+  // glued after it (#889 round 7: a check that nothing followed left `Basic <value>==<more>` to a later pass, after
+  // another rule's marker made the boundary; broad mode, which masks that rule's text, showed it).
+  [/\b(basic)(\s+)([A-Za-z0-9+/]{8,}={0,2})/gi, (m, s, sp, v) => (basicShaped(v!) ? `${s}${sp}[REDACTED]` : m), 'Basic credential'],
   // Credentials inside connection strings: keep scheme, user and host. A scheme of up to 32 characters right before
   // `://`, from any start (#889 round 4: from `\b` with any length it was quadratic on a long dotted run): each start
   // reads at most 33 characters, and each `://` is reached from at most 32 starts, so linear.
@@ -435,7 +426,13 @@ function spansOf(t: string, re: RegExp, rep: Replacement, rank: number, out: Spa
     g.lastIndex = Math.max(m.index + 1, m.index + whole.length - 64);
     const groups = m.slice(1).map((x) => x ?? '');
     const r = typeof rep === 'string' ? expand(rep, whole, groups) : rep(whole, ...groups);
-    if (r === whole) continue;
+    if (r === whole) {
+      // A match the rule's function declined (no secret) hides nothing it stepped over (#889 round 7): the next search
+      // starts at its next character, so a start inside it is still tried. Linear only for a rule whose starts are
+      // bounded (a prefix group or a quote): test/redact-declined.test.ts holds every function-backed rule to both.
+      g.lastIndex = m.index + 1;
+      continue;
+    }
     let a = 0;
     while (a < whole.length && a < r.length && whole[a] === r[a]) a++;
     let b = 0;
@@ -486,18 +483,28 @@ function replaceOnce(s: string, keepLines: boolean): string {
   return out + s.slice(at);
 }
 
+/** How many passes a mode may take to reach a text no pass changes (fixedPoint). */
+export const MAX_PASSES = 8;
+
 /**
- * The default mode: replaced once, then again on what that gave, until nothing changes (at most 3 times). A marker can
- * make a boundary a later rule needs, as main's rules, applied in turn, had.
+ * `pass` applied to `s`, then to what it gave, until it changes nothing, failing closed (#889 round 7): a text still
+ * changing after MAX_PASSES passes becomes UNSCANNABLE (with `s`'s line breaks when `keepLines`), never the last pass's
+ * output, which a further pass would have redacted more. Each pass reads the whole text: at most MAX_PASSES times
+ * linear. No input measured so far needs a third pass.
  */
-function replaceUnion(s: string, keepLines: boolean): string {
-  let out = replaceOnce(s, keepLines);
-  for (let i = 0; i < 2 && out !== s; i++) {
-    const again = replaceOnce(out, keepLines);
-    if (again === out) break;
+export function fixedPoint(s: string, pass: (t: string) => string, keepLines = false): string {
+  let out = s;
+  for (let i = 0; i < MAX_PASSES; i++) {
+    const again = pass(out);
+    if (again === out) return out;
     out = again;
   }
-  return out;
+  return UNSCANNABLE + (keepLines ? '\n'.repeat(breaks(s)) : '');
+}
+
+/** The default mode: replaced again on what each pass gave until nothing changes. A marker can make a boundary a later rule needs, as main's rules, applied in turn, had. */
+function replaceUnion(s: string, keepLines: boolean): string {
+  return fixedPoint(s, (t) => replaceOnce(t, keepLines), keepLines);
 }
 
 /**
@@ -602,17 +609,11 @@ function outside(spans: [number, number][], regions: [number, number][]): [numbe
 }
 
 /**
- * The broad mode: masked once, then again on what that gave, until nothing changes (at most 3 times). A mask can make
- * a boundary a later rule needs (`[REDACTED]_db_password=...`), as each module's own rules, applied in turn, did.
+ * The broad mode: masked again on what each pass gave until nothing changes (fixedPoint). A mask can make a boundary a
+ * later rule needs (`[REDACTED]_db_password=...`), as each module's own rules, applied in turn, did.
  */
 function maskUnion(s: string, mask: string, keepLines: boolean): string {
-  let out = maskOnce(s, mask, keepLines);
-  for (let i = 0; i < 2; i++) {
-    const again = maskOnce(out, mask, keepLines);
-    if (again === out) break;
-    out = again;
-  }
-  return out;
+  return fixedPoint(s, (t) => maskOnce(t, mask, keepLines), keepLines);
 }
 
 /** What a text becomes when it can't be scanned (#889 round 5): shown as nothing of it. */
