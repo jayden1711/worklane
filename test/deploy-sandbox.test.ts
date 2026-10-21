@@ -124,11 +124,12 @@ test('a deploy trigger past the command timeout fails the deploy; a verify past 
   const f = fixture();
   f.cfg.tests.command_timeout_s = 1;
   const c = coordinator(f, agents());
-  const t0 = Date.now();
+  const t0 = performance.now();
   assert.equal(await deployer(c).deploy('staging', 'sleep 6; true', `echo ${SHA}`, SHA, 7, 2, 10), false, 'a trigger that timed out is a failed deploy');
-  assert.match((f.log.read(0, ['deploy.failed']).at(-1)?.payload as { why: string }).why, /trigger/);
+  assert.match((f.log.read(0, ['deploy.failed']).at(-1)?.payload as { why: string }).why, /^trigger failed: no exit code \(timed out after 1 s/, 'deploy.failed says it timed out');
   assert.equal(await deployer(c).deploy('staging', 'true', `sleep 6; echo ${SHA}`, SHA, 7, 2, 10), false, 'a verify that timed out never counts as serving the sha');
-  assert.ok(Date.now() - t0 < 10_000, `each command was stopped at the timeout (${Date.now() - t0} ms)`);
+  const took = performance.now() - t0;
+  assert.ok(took < 10_000, `each command was stopped at the timeout (${Math.round(took)} ms)`);
   assert.equal(f.log.read(0, ['deploy.verified']).length, 0);
   // The same commands within the timeout still deploy (no regression for an install without an agent user).
   assert.equal(await deployer(c).deploy('staging', 'true', `echo ${SHA}`, SHA, 7, 2, 10), true);
@@ -143,6 +144,25 @@ test('a deploy asked for while the coordinator shuts down runs nothing and is no
   assert.equal(await deployer(c).deploy('staging', `echo ran > ${JSON.stringify(ran)}`, `echo ${SHA}`, SHA, 7, 2, 10), false);
   assert.ok(!existsSync(ran), 'the trigger never ran');
 });
+
+for (const stage of ['trigger', 'verify'] as const) {
+  test(`a shutdown that stops a running deploy ${stage} fails the deploy and says why`, { skip: !posix && 'POSIX shell' }, async () => {
+    const f = fixture();
+    const c = coordinator(f, agents());
+    const started = join(mkdtempSync(join(tmpdir(), 'wl-799-')), 'started');
+    const slow = `touch ${JSON.stringify(started)}; sleep 20`;
+    const run = deployer(c).deploy('staging', stage === 'trigger' ? slow : 'true', stage === 'verify' ? `${slow}; echo ${SHA}` : `echo ${SHA}`, SHA, 7, 2, 10);
+    const t0 = performance.now();
+    while (!existsSync(started) && performance.now() - t0 < 10_000) await new Promise((r) => setTimeout(r, 20));
+    assert.ok(existsSync(started), `the ${stage} started`);
+    (c as unknown as { shutdown: AbortController }).shutdown.abort();
+    assert.equal(await run, false, 'stopped by a shutdown, never done');
+    assert.ok(performance.now() - t0 < 15_000, 'the command was stopped, not waited out');
+    const why = (f.log.read(0, ['deploy.failed']).at(-1)?.payload as { why: string }).why;
+    assert.match(why, new RegExp(`^${stage === 'trigger' ? 'trigger failed' : 'verify refused or stopped'}: stopped: the coordinator is shutting down`), why);
+    assert.equal(f.log.read(0, ['deploy.verified']).length, 0);
+  });
+}
 
 test('a key a sandboxed deploy trigger prints reaches no event: deploy.failed carries it redacted', { skip: realSkip }, async () => {
   const p = planted();

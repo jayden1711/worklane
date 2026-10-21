@@ -255,11 +255,11 @@ export abstract class CoordinatorBase {
 
   /**
    * A project command (check, gate, pre-land step, deploy trigger and verify): it runs code an agent or an approved PR
-   * wrote, so it runs as the agent user, in its sandbox. `timeoutMs`: at most the command timeout.
+   * wrote, so it runs as the agent user, in its sandbox. `o.timeoutMs`: shorter than the command timeout, never longer.
    */
-  protected project(command: string, cwd: string, timeoutMs = this.commandTimeoutMs) {
+  protected project(command: string, cwd: string, o: { timeoutMs?: number } = {}) {
     const share = this.coreShare();
-    return sh(withCores(command, share), cwd, Math.min(timeoutMs, this.commandTimeoutMs), this.d.commandsAs, envWithCores(this.d.cfg.tests.env, share), this.shutdown.signal);
+    return sh(withCores(command, share), cwd, Math.min(o.timeoutMs ?? this.commandTimeoutMs, this.commandTimeoutMs), this.d.commandsAs, envWithCores(this.d.cfg.tests.env, share), this.shutdown.signal);
   }
 
   /** How long a project command or an agent run may take (tests.yaml command_timeout_s). */

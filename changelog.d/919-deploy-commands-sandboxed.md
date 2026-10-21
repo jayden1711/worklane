@@ -7,5 +7,6 @@
   - with their output redacted.
 
   A command that is refused, times out or is stopped by a shutdown counts as a failed deploy (`deploy.failed`). The issue is then labelled `blocked` and stays open.
-  - What you may see: a deploy trigger that used the coordinator user's credentials now fails. Examples are a CLI login in its home, a token in its service environment, or the GitHub App key. Nothing hands those to a deploy command. Until there is a way to name a deploy credential, trigger such deploys from the platform or from CI, and keep `verify` to confirm the landed commit.
+  - What you may see: a deploy trigger **or verify** that used the coordinator user's credentials now fails. Examples are a platform CLI login in its home, a token in its service environment or home, or the GitHub App key. A trigger fails at once. A verify fails on every poll, and the deploy ends in `deploy.failed`. Nothing hands those credentials to a deploy command.
+  - Until there is a way to name a deploy credential, trigger such deploys from the platform or from CI. Keeping `verify` to confirm the landed commit works only if the verify needs no credential, for example a public endpoint that reports the running version. A verify that needs a credential fails closed, like the trigger.
   - On a checkout or a local site (no agent user), the deploy still runs as your user, as before. It now stops at `command_timeout_s`.

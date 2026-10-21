@@ -418,21 +418,24 @@ export abstract class Landing extends Decisions {
         return true;
       }
       // Refused, or the coordinator is shutting down: asking again can't verify it.
-      if (v.refused || this.shutdown.signal.aborted) return failed(`verify not run: ${v.tail}`);
+      if (v.refused) return failed(`verify refused or stopped: ${v.tail}`);
       await new Promise((r) => setTimeout(r, pollMs));
     }
     return failed(`${env} did not report ${sha.slice(0, 8)} after ${(polls * pollMs) / 60_000} min`);
   }
 
   /**
-   * A deploy command, through the one path every project command takes (project()). `refused`: it never ran, because
-   * its sandbox refused it (a runAs without its hide list, a hidden path it can't make safe, no sandbox to start) or
-   * the coordinator is shutting down. Never run another way.
+   * A deploy command, through the one path every project command takes (project()). `refused`: it never ran or was
+   * stopped, because its sandbox refused it (a runAs without its hide list, a hidden path it can't make safe, no
+   * sandbox to start) or the coordinator is shutting down. Never run another way. `tail` always says why it failed.
    */
   private async deployStep(command: string, timeoutMs: number): Promise<{ code: number | null; tail: string; out: string; refused: boolean }> {
     try {
-      const r = await this.project(command, this.d.repo, timeoutMs);
-      return { ...r, refused: this.shutdown.signal.aborted || (this.d.commandsAs !== undefined && r.code === SANDBOX_UNAVAILABLE && /project command not run/.test(r.tail)) };
+      const r = await this.project(command, this.d.repo, { timeoutMs });
+      // Stopped by a shutdown mid-run: its output so far may be empty, so the reason is named, never left blank.
+      if (this.shutdown.signal.aborted) return { ...r, code: null, tail: r.tail.startsWith('not run:') ? r.tail : `stopped: the coordinator is shutting down${r.tail ? `\n${r.tail}` : ''}`, refused: true };
+      const tail = r.code === null ? `no exit code (timed out after ${Math.round(Math.min(timeoutMs, this.commandTimeoutMs) / 1000)} s, or did not start)${r.tail ? `\n${r.tail}` : ''}` : r.tail;
+      return { ...r, tail, refused: this.d.commandsAs !== undefined && r.code === SANDBOX_UNAVAILABLE && /project command not run/.test(r.tail) };
     } catch (e) {
       return { code: null, tail: `not run: ${redactString(e instanceof Error ? e.message : String(e))}`, out: '', refused: true };
     }
