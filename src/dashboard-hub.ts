@@ -26,6 +26,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { DEFAULT_WEB_DIR, dashboardToken, json, serveStatic, tokenGiven, warmStatic } from './dashboard.js';
 import { refuseKeyInUrl } from './dashboard-key-url.js';
+import { errorAnswer } from './user-facing-error.js';
 import { compressStream, mayCompressApi, requestEncoding } from './dashboard-compress.js';
 import { assertLoopbackHost, authorizeUrl, breakGlassAllowed, clearSessionCookie, clearStateCookie, CSRF_HEADER, DEVICE_HEADER, isDeviceView, FRESH_HEADER, LOGIN_HEADER, loginFromCode, parseCookies, ROLE_CACHE_MS, SESSION_COOKIE, sessionCookie, Sessions, SignInStates, STATE_COOKIE, stateCookie, type Role, type SessionOf, type SignInConfig } from './dashboard-auth.js';
 import { deviceRefusal, parseDeviceList, type DeviceOptions } from './console/terminal-devices.js';
@@ -441,7 +442,9 @@ export async function startHub(opts: HubOptions): Promise<{ server: Server; brea
       }
       serveStatic(webDir, url, res, { hub: true });
     } catch (e) {
-      json(res, 500, { error: (e as Error).message });
+      // Issue #864: only a UserFacingError's vetted text reaches the page; anything else is one fixed 500.
+      const answer = errorAnswer(e, req, url.pathname);
+      json(res, answer.status, answer.body);
     }
   });
 
@@ -478,7 +481,9 @@ export async function startHub(opts: HubOptions): Promise<{ server: Server; brea
       }
       serveStatic(webDir, url, res, { hub: true });
     } catch (e) {
-      json(res, 500, { error: (e as Error).message });
+      // Issue #864: as the signed-in port.
+      const answer = errorAnswer(e, req, url.pathname);
+      json(res, answer.status, answer.body);
     }
   });
 
