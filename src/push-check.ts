@@ -5,7 +5,7 @@
 // leaves a SKILL.md that fails the skill lint.
 // The coordinator also runs pushProblems on each change before verifying it,
 // so a doomed change is caught before a long test run.
-import { execFileSync, spawnSync } from 'node:child_process';
+import { execFileSync, spawnSync } from './os/child-process.js';
 import { sizeFiles } from './coordinator/change-files.js';
 import { globToRegExp } from './guardrails/glob.js';
 import { shownPath } from './path-text.js';

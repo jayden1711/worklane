@@ -1,7 +1,7 @@
 // Risk-based review levels, computed by code from what a change touches.
 // The highest matching level wins; a failed or low-confidence evaluator
 // verdict bumps it up one; an agent can raise its own level, never lower it.
-import { spawnSync } from 'node:child_process';
+import { spawnSync } from './os/child-process.js';
 import { posix } from 'node:path';
 import type { ReviewConfig } from './config/schema.js';
 import { globToRegExp } from './guardrails/glob.js';

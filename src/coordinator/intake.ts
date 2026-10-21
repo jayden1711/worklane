@@ -1,5 +1,5 @@
 // Work intake (docs/intake.md): pulling the sources, triage, filing or asking, replies, and recovery after a restart.
-import { execFileSync } from 'node:child_process';
+import { execFileSync } from '../os/child-process.js';
 import { createHash } from 'node:crypto';
 import { readFileSync, existsSync, rmSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';

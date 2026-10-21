@@ -4,7 +4,7 @@ import { startRefusal, TestRunHeld } from '../testrun/gate.js';
 import { CI_NONE_MAIN_WATCH, ciIsNone, requiredFor } from '../ci-none.js';
 import { PinnedChecks, type JudgedChecks } from '../check-source.js';
 import type { Coordinator } from '../coordinator.js';
-import { spawnSync } from 'node:child_process';
+import { spawnSync } from '../os/child-process.js';
 import { readFileSync, existsSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { BRAND } from '../brand.js';

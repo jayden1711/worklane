@@ -1,7 +1,7 @@
 // Worktrees the coordinator creates and owns. It never lists, touches or
 // removes a worktree it didn't create: names carry our prefix AND must be in
 // our ownership record, so other sessions' worktrees are always safe.
-import { execFileSync, spawn, spawnSync } from 'node:child_process';
+import { execFileSync, spawn, spawnSync } from './os/child-process.js';
 import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmdirSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { BRAND } from './brand.js';
