@@ -21,7 +21,7 @@
 // `bench select` (writeSelection) writes the manifest (each key and its instance id, and the pins it came from) into
 // the store, 0600, and never over a different one: grading maps a run's keys to instance ids through it (grade.ts).
 // The run (loadTasks) re-reads the rows, re-derives the selection, refuses a manifest that differs, and takes each
-// task's image reference from the store's images file, through pins.ts pinnedImage (a pinned digest, no tag), only
+// task's image reference from the store's images file (`bench images` writes it, images.ts), through pins.ts pinnedImage (a pinned digest, no tag), only
 // when the name is the task's own. Nothing takes an instance id, a seed or a count as an argument.
 import { createHash, randomBytes } from 'node:crypto';
 import { closeSync, constants, fstatSync, linkSync, lstatSync, openSync, readSync, unlinkSync, type Stats } from 'node:fs';
@@ -255,36 +255,71 @@ export interface SelectionSummary {
  */
 export function writeSelection(layout: BenchLayout, uid: number, pins: Pins): SelectionSummary {
   const c = computeSelection(layout, uid, pins);
-  const f = join(layout.heldOut, MANIFEST);
+  const written = writeOnce(layout, uid, MANIFEST, c.text, { what: 'manifest', why: "grading maps each run's keys through it, so it is never replaced", again: 'select again', command: 'bench select' });
+  heldOutCheck(layout, uid);
+  return { rows: c.rows, rowsSha256: c.rowsSha256, revision: c.revision, rule: c.pin.rule, seed: c.pin.seed, keys: c.tasks.map((t) => t.key), written };
+}
+
+/** How writeOnce's refusals name the file: what it is, why it is never replaced, and what to do after moving it aside. */
+export interface OnceWords {
+  what: string;
+  why: string;
+  again: string;
+  command: string;
+}
+
+/**
+ * `text` into the store as `name`, unless the same text is already there: true when it wrote, false when it kept the
+ * same file. Refuses (throws) a link at that name, anything there but a 0600 regular file of this user, and a file
+ * with other text: it is never replaced. By design, never over anything (#884 round 2): the verified file
+ * (download.ts writeVerified: created exclusively, never through a link, 0600, read back) is made under a fresh name,
+ * then linked to `name`, which fails if anything (a file, a link, a dangling link) has appeared there since the lstat.
+ */
+export function writeOnce(layout: BenchLayout, uid: number, name: string, text: string, words: OnceWords): boolean {
+  const f = join(layout.heldOut, name);
   let st: Stats | null = null;
   try {
     st = lstatSync(f);
   } catch (e) {
     if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e;
   }
-  let written = false;
   if (st) {
     if (st.isSymbolicLink()) throw new Error(`${f} is a link: refused (never followed); look at it, then move it aside`);
-    if (readOwnFile(f, uid, SMALL_MAX_BYTES, 'the manifest').toString('utf8') !== c.text) {
-      throw new Error(`the store already has a different manifest (${f}): grading maps each run's keys through it, so it is never replaced; move it aside to select again`);
+    if (readOwnFile(f, uid, SMALL_MAX_BYTES, `the ${words.what}`).toString('utf8') !== text) {
+      throw new Error(`the store already has a different ${words.what} (${f}): ${words.why}; move it aside to ${words.again}`);
     }
-  } else {
-    // By design, never over anything (#884 round 2): the verified file is made under a fresh name, then linked to the
-    // manifest's name, which fails if anything (a file, a link, a dangling link) has appeared there since the lstat.
-    const fresh = join(layout.heldOut, `.${MANIFEST}.${randomBytes(8).toString('hex')}.new`);
-    writeVerified(fresh, layout.heldOut, Buffer.from(c.text), hex(c.text), uid);
-    try {
-      linkSync(fresh, f);
-    } catch (e) {
-      if ((e as NodeJS.ErrnoException).code === 'EEXIST') throw new Error(`${f} appeared while bench select ran: refused, never replaced; look at it, then move it aside`);
-      throw e;
-    } finally {
-      unlinkSync(fresh);
-    }
-    written = true;
+    return false;
   }
-  heldOutCheck(layout, uid);
-  return { rows: c.rows, rowsSha256: c.rowsSha256, revision: c.revision, rule: c.pin.rule, seed: c.pin.seed, keys: c.tasks.map((t) => t.key), written };
+  const fresh = join(layout.heldOut, `.${name}.${randomBytes(8).toString('hex')}.new`);
+  writeVerified(fresh, layout.heldOut, Buffer.from(text), hex(text), uid);
+  try {
+    linkSync(fresh, f);
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === 'EEXIST') throw new Error(`${f} appeared while ${words.command} ran: refused, never replaced; look at it, then move it aside`);
+    throw e;
+  } finally {
+    unlinkSync(fresh);
+  }
+  return true;
+}
+
+/**
+ * The selection's tasks, in key order, as the store's manifest holds them: the rows re-read and checked against their
+ * pin, the selection re-derived, and the manifest `bench select` wrote checked to be exactly that. Refuses (throws) when
+ * computeSelection does, when there is no manifest, or when it differs. Reads only. The run (loadTasks) and
+ * `bench images` (images.ts) both take their tasks here.
+ */
+export function selectedTasks(layout: BenchLayout, uid: number, pins: Pins): readonly { key: string; row: TaskRow }[] {
+  const c = computeSelection(layout, uid, pins);
+  let manifest: string;
+  try {
+    manifest = readOwnFile(join(layout.heldOut, MANIFEST), uid, SMALL_MAX_BYTES, 'the manifest').toString('utf8');
+  } catch (e) {
+    if (e instanceof Missing) throw new Error('no task manifest in the store: run bench select first');
+    throw e;
+  }
+  if (manifest !== c.text) throw new Error("the store's manifest is not what the pins select now (another seed, rule or rows since bench select, or an edit): move it aside and run bench select");
+  return c.tasks;
 }
 
 /** Whether image `name` is the one SWE-bench names after `instanceId`: its last part is, or ends in `.`, the id in lower case with `__` as `_1776_`. */
@@ -303,15 +338,7 @@ export function imageNamesTask(name: string, instanceId: string): boolean {
  */
 export function loadTasks(layout: BenchLayout, uid: number, pins: Pins, mode: Mode): readonly SelectedTask[] {
   if (!isMode(mode)) throw new Error('the task set is smoke or baseline');
-  const c = computeSelection(layout, uid, pins);
-  let manifest: string;
-  try {
-    manifest = readOwnFile(join(layout.heldOut, MANIFEST), uid, SMALL_MAX_BYTES, 'the manifest').toString('utf8');
-  } catch (e) {
-    if (e instanceof Missing) throw new Error('no task manifest in the store: run bench select first');
-    throw e;
-  }
-  if (manifest !== c.text) throw new Error("the store's manifest is not what the pins select now (another seed, rule or rows since bench select, or an edit): move it aside and run bench select");
+  const tasks = selectedTasks(layout, uid, pins);
   let images: unknown;
   try {
     images = JSON.parse(utf8(readOwnFile(join(layout.heldOut, IMAGES_FILE), uid, SMALL_MAX_BYTES, 'the images file'), 'the images file'));
@@ -321,7 +348,7 @@ export function loadTasks(layout: BenchLayout, uid: number, pins: Pins, mode: Mo
   }
   if (!isObject(images)) throw new Error('the images file is not a JSON object of instance id to image reference');
   const byDigest = new Map<string, string>();
-  const out = c.tasks.slice(0, MODE_TASKS[mode]).map((t): SelectedTask => {
+  const out = tasks.slice(0, MODE_TASKS[mode]).map((t): SelectedTask => {
     const id = t.row.instance_id;
     const v = Object.hasOwn(images as object, id) ? (images as Record<string, unknown>)[id] : undefined;
     if (typeof v !== 'string') throw new Error(`${t.key}: the images file has no image reference for this task`);
