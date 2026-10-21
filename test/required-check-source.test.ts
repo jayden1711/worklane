@@ -7,7 +7,8 @@ import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { GitHubBacklog } from '../src/backlog/github.js';
 import type { CommitCheck } from '../src/backlog/types.js';
-import { checkSourceDoctor, githubCheckApps, governanceRefusal, PinnedChecks, pinOf, type CheckPin, type JudgedChecks } from '../src/check-source.js';
+import { checkSourceDoctor } from '../src/check-pin-block.js';
+import { githubCheckApps, governanceRefusal, PinnedChecks, pinOf, type CheckPin, type JudgedChecks } from '../src/check-source.js';
 import { ProjectConfig } from '../src/config/schema.js';
 import { GitHubMainWatchApi } from '../src/github/main-watch-api.js';
 import { readiness, requiredOutcomes } from '../src/pr-watch.js';
@@ -352,13 +353,14 @@ test('turning governance mode on with any bare-name required check is refused, n
   assert.equal(governanceRefusal(['test'], { test: { workflow: '.github/workflows/ci.yml' } }), null);
 });
 
-test('doctor names each required check with no recorded source, judged by name, and how to pin it', () => {
+test('doctor names each required check with no recorded source, judged by name, with the block that pins it', () => {
   const project = { land_mode: 'pr', required_checks: ['test', 'lint'], required_check_sources: { test: { app_id: CI_APP } } };
-  const d = checkSourceDoctor(project);
+  const workflows = { at: 'c'.repeat(40), files: { '.github/workflows/ci.yml': 'jobs:\n  lint:\n    runs-on: ubuntu-latest\n' }, skipped: [] };
+  const d = checkSourceDoctor(project, workflows, null);
   assert.equal(d.level, 'warn');
-  assert.match(d.detail, /^no source recorded for lint: each is judged by name .*required_check_sources/);
-  assert.equal(checkSourceDoctor({ ...project, required_check_sources: { ...project.required_check_sources, lint: { workflow: '.github/workflows/ci.yml' } } }).level, 'ok');
-  assert.equal(checkSourceDoctor({ ...project, land_mode: 'direct' }).level, 'ok');
+  assert.match(d.detail, /^no source recorded for lint: each is judged by name .*\nrequired_check_sources:\n {2}"lint": \{ workflow: "\.github\/workflows\/ci\.yml" \}/);
+  assert.equal(checkSourceDoctor({ ...project, required_check_sources: { ...project.required_check_sources, lint: { workflow: '.github/workflows/ci.yml' } } }, workflows, null).level, 'ok');
+  assert.equal(checkSourceDoctor({ ...project, land_mode: 'direct' }, workflows, null).level, 'ok');
 });
 
 test('config.yaml required_check_sources: an App id or a workflow file under .github/workflows/, nothing else', () => {
