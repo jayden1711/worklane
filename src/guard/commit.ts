@@ -554,12 +554,17 @@ function commitEffects(rest: Word[]): { worktree: boolean; amend: boolean } {
 }
 
 const STAGING = new Set(['add', 'rm', 'mv']);
-/** git log options that show no diff: anything else may show one, and a diff runs the programs that render it. */
-const LOG_NO_DIFF = /^(--oneline|-n|--max-count(=.*)?|-[0-9]+|--(format|pretty)(=.*)?|--graph|--(no-)?decorate(=.*)?|--all|--reverse|--(since|after|until|before|author|committer|grep|date)(=.*)?|--first-parent|--(no-)?merges|--abbrev-commit|-s|--no-patch|--no-color|--color(=.*)?)$/;
+/**
+ * git log options that show no diff and never take the next word as their value. INVARIANT (#971): any other option
+ * may show a diff (or hide a word that does), and a diff runs the programs that render it, so it counts as one.
+ */
+const LOG_NO_DIFF = /^(--oneline|-[0-9]+|-n[0-9]+|--max-count=[0-9]+|--(format|pretty)=.*|--graph|--(no-)?decorate|--all|--reverse|--(since|after|until|before|author|committer|grep|date)=.*|--first-parent|--(no-)?merges|--abbrev-commit|-s|--no-patch|--no-color)$/;
+/** git status options that show no diff and take no separate value; any other one counts as showing one. */
+const STATUS_NO_DIFF = /^(-s|--short|-b|--branch|-sb|-bs|-u(no|normal|all)?|--untracked-files=(no|normal|all)|--no-ahead-behind|--ahead-behind)$/;
 
 /** Whether `git log` with these words (after the subcommand) may show a diff. */
 function logShowsDiffs(words: string[]): boolean {
-  return words.some((t, i) => t.startsWith('-') && !LOG_NO_DIFF.test(t) && !(/^(-n|--max-count|--format|--pretty|--since|--after|--until|--before|--author|--committer|--grep|--date)$/.test(words[i - 1] ?? '')));
+  return words.some((t) => t.startsWith('-') && !LOG_NO_DIFF.test(t));
 }
 
 // WHY: git commands that only read, which ordinary work runs before a commit; none may write a file (see beforeRefusal).
@@ -988,7 +993,7 @@ export function commitPlan(command: string, p: PlanEnv): CommitPlan | null {
         const read = gitWords(c.words);
         if (STAGING.has(read.sub ?? '')) staging = true;
         const words = read.rest.map((w) => w.text);
-        if (read.sub === 'diff' || read.sub === 'show' || (read.sub === 'log' && logShowsDiffs(words)) || (read.sub === 'status' && words.some((t) => /^(-v+|--verbose)$/.test(t)))) reads.diffReads = true;
+        if (read.sub === 'diff' || read.sub === 'show' || (read.sub === 'log' && logShowsDiffs(words)) || (read.sub === 'status' && words.some((t) => t.startsWith('-') && !STATUS_NO_DIFF.test(t)))) reads.diffReads = true;
         if (read.sub === 'log' || read.sub === 'show') reads.logReads = true;
         if (words.some((t) => t.includes('%G') || /^--show-sig/.test(t))) reads.signatureReads = true;
         // WHY: a read in another checkout runs under that checkout's config; its programs are checked there too.

@@ -13,6 +13,12 @@ import { BRAND } from '../../src/brand.js';
 import { runHook } from '../../src/hook.js';
 import { repoRoot } from '../helpers.js';
 
+// WHY (#971, round 6): the host's own git config (system and user) must not change what these tests see.
+const GIT_CONFIG_DIR = mkdtempSync(join(tmpdir(), 'gitconfig-'));
+writeFileSync(join(GIT_CONFIG_DIR, 'config'), '');
+process.env.GIT_CONFIG_NOSYSTEM = '1';
+process.env.GIT_CONFIG_GLOBAL = join(GIT_CONFIG_DIR, 'config');
+
 const hasGitleaks = spawnSync('gitleaks', ['version'], { encoding: 'utf8' }).status === 0;
 const skip = !hasGitleaks && 'gitleaks not installed';
 
@@ -236,7 +242,9 @@ test('attack: a signature program the config names is refused when the line show
   writeFileSync(join(a, 'ok.js'), 'export const ok = 1;\n');
   git(a, 'add', 'ok.js');
   git(a, 'config', 'gpg.program', program(a));
-  await allowed(a, 'git log -1 --oneline && git commit -m x', 'signatures not shown');
+  // WHY (round 6): config can ask for signatures in many ways, so with a signature program set any log refuses.
+  await refused(a, 'git log -1 --oneline && git commit -m x', NOT_RUN, 'signatures not asked for in the line');
+  await allowed(a, 'git commit -m x', 'no log or show before the commit');
   await refused(a, 'git log --show-signature -1 && git commit -m x', NOT_RUN, 'signatures asked for in the line');
   await refused(a, "git log -1 --format='%G?' && git commit -m x", NOT_RUN, 'a signature format asked for in the line');
   git(a, 'config', 'log.showSignature', 'true');

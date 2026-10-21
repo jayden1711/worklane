@@ -14,6 +14,12 @@ import { runHook } from '../../src/hook.js';
 import * as secrets from '../../src/scan/secrets.js';
 import { repoRoot } from '../helpers.js';
 
+// WHY (#971, round 6): the host's own git config (system and user) must not change what these tests see.
+const GIT_CONFIG_DIR = mkdtempSync(join(tmpdir(), 'gitconfig-'));
+writeFileSync(join(GIT_CONFIG_DIR, 'config'), '');
+process.env.GIT_CONFIG_NOSYSTEM = '1';
+process.env.GIT_CONFIG_GLOBAL = join(GIT_CONFIG_DIR, 'config');
+
 const hasGitleaks = spawnSync('gitleaks', ['version'], { encoding: 'utf8' }).status === 0;
 const skip = !hasGitleaks && 'gitleaks not installed';
 

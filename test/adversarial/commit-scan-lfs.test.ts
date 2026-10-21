@@ -14,6 +14,12 @@ import { BRAND } from '../../src/brand.js';
 import { runHook } from '../../src/hook.js';
 import { repoRoot } from '../helpers.js';
 
+// WHY (#971, round 6): the host's own git config (system and user) must not change what these tests see.
+const GIT_CONFIG_DIR = mkdtempSync(join(tmpdir(), 'gitconfig-'));
+writeFileSync(join(GIT_CONFIG_DIR, 'config'), '');
+process.env.GIT_CONFIG_NOSYSTEM = '1';
+process.env.GIT_CONFIG_GLOBAL = join(GIT_CONFIG_DIR, 'config');
+
 const hasGitleaks = spawnSync('gitleaks', ['version'], { encoding: 'utf8' }).status === 0;
 const skip = !hasGitleaks && 'gitleaks not installed';
 
@@ -86,7 +92,7 @@ test('attack: a large-file filter that is not exactly the standard one still ref
     ['an extra argument', swap('filter.lfs.clean', 'git-lfs clean -- %f --extra')],
     ['a different program', swap('filter.lfs.process', 'other-lfs filter-process')],
     ['a custom clean', swap('filter.lfs.clean', 'cat')],
-    ['not required', STANDARD.filter(([k]) => k !== 'filter.lfs.required')],
+    ['not required', swap('filter.lfs.required', 'false')],
   ] as const) {
     const d = await decide(lfsCheckout(config, 'plain data\n'), 'git commit -m x');
     assert.equal(d.decision, 'deny', what);

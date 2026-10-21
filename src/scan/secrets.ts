@@ -1,6 +1,7 @@
 // Secret scanning behind an adapter (gitleaks today; betterleaks later).
 // A scanner that can't run is reported as unavailable, never as "clean".
 import { spawn, spawnSync } from '../os/child-process.js';
+import { createHash } from 'node:crypto';
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { delimiter, dirname, join, resolve as resolvePath } from 'node:path';
@@ -284,9 +285,9 @@ function untrackedContent(top: string): Compared[] {
   const out: Compared[] = [];
   for (const path of paths) {
     const now = fromDisk(top, path);
-    if (now !== null) out.push({ path, now, before: null });
+    if (now !== null) out.push({ path, now, before: null, disk: true });
   }
-  return out;
+  return lfsContent(top, out);
 }
 
 /** Attributes under which git stores something other than a working-tree file's bytes. */
@@ -306,7 +307,7 @@ function storedAsOnDisk(top: string, paths: string[]) {
     for (let i = 0; i + 2 < out.length; i += 3) {
       if (out[i + 2] === 'unspecified' || out[i + 2] === 'unset') continue;
       // WHY (owner, 2026-10-21): the standard large-file filter stores the file's own bytes, read from disk here.
-      if (out[i + 1] === 'filter' && out[i + 2] === 'lfs' && (lfs ??= lfsStandard(top))) continue;
+      if (out[i + 1] === 'filter' && out[i + 2] === 'lfs' && (lfs ??= lfsStandard(configOf(top)))) continue;
       throw new Error(`a file in this commit has a ${out[i + 1]} attribute, so git stores other bytes than the scan reads`);
     }
   }
@@ -317,8 +318,28 @@ const DIFF_PROGRAM_KEYS = [/^diff\.external$/, /^diff\..+\.(textconv|command)$/]
 /** Config that names a program git runs to check a signature. */
 const SIGNATURE_PROGRAM_KEY = /^gpg\.(.+\.)?program$/;
 const FILTER_KEY = /^filter\.(.+)\.(clean|smudge|process)$/;
-const OFF = new Set(['false', 'no', 'off', '0']);
-const ON = new Set(['', 'true', 'yes', 'on', '1']);
+
+/**
+ * A config key as git compares it: the section and the variable name without case, a subsection (a filter's or a
+ * diff driver's name) exactly as written. WHY (#971): only the exact driver a file names is the driver git runs.
+ */
+function configKey(raw: string): string {
+  const first = raw.indexOf('.');
+  const last = raw.lastIndexOf('.');
+  if (first < 0 || first === last) return raw.toLowerCase();
+  return `${raw.slice(0, first).toLowerCase()}${raw.slice(first, last)}${raw.slice(last).toLowerCase()}`;
+}
+
+/** The effective config of the checkout at `top`: each key (as configKey gives it) with its values, in order. */
+function configOf(top: string): Map<string, string[]> {
+  const out = new Map<string, string[]>();
+  for (const e of gitOut(top, ['config', '--list', '-z']).toString('utf8').split('\0').filter(Boolean)) {
+    const nl = e.indexOf('\n');
+    const key = configKey(nl < 0 ? e : e.slice(0, nl));
+    out.set(key, [...(out.get(key) ?? []), nl < 0 ? '' : e.slice(nl + 1)]);
+  }
+  return out;
+}
 
 /**
  * Throws when the effective config of the checkout at `top`, or of a submodule checked out in it, names a program
@@ -328,26 +349,25 @@ const ON = new Set(['', 'true', 'yes', 'on', '1']);
  */
 export function checkReadPrograms(top: string, scope: CommitScanScope, depth = 0) {
   if (depth > 8) throw new Error('submodules nested too deep to check');
-  const entries = gitOut(top, ['config', '--list', '-z']).toString('utf8').split('\0').filter(Boolean);
+  const config = configOf(top);
   const filters = new Set<string>();
-  let showSignature = false;
   let signer = '';
-  for (const e of entries) {
-    const nl = e.indexOf('\n');
-    const key = (nl < 0 ? e : e.slice(0, nl)).toLowerCase();
-    const value = (nl < 0 ? '' : e.slice(nl + 1)).trim().toLowerCase();
-    // WHY: a boolean monitor is git's own daemon; any other value is the path of a program git runs.
-    if (key === 'core.fsmonitor' && !OFF.has(value) && !ON.has(value)) throw new Error('the checkout\'s config names a file-system monitor program, which git runs while it reads changes');
-    if (scope.diffReads && DIFF_PROGRAM_KEYS.some((re) => re.test(key))) throw new Error(`the checkout's config names a program git runs to show a diff (${key}), and the line shows one before it commits`);
-    if (key === 'log.showsignature') showSignature = ON.has(value);
+  for (const key of config.keys()) {
+    if (scope.diffReads && DIFF_PROGRAM_KEYS.some((re) => re.test(key))) throw new Error(`the checkout's config names a program git runs to show a diff (${key}), and the line shows changes before it commits`);
+    // WHY: with a signature program set, any log or show may run it (config can ask for signatures in many ways).
     if (SIGNATURE_PROGRAM_KEY.test(key)) signer = key;
     const f = FILTER_KEY.exec(key);
     if (f) filters.add(f[1]!);
   }
-  if (scope.logReads && (scope.signatureReads || showSignature) && signer) throw new Error(`the checkout's config names a program git runs to check signatures (${signer}), and the line shows signatures before it commits`);
+  // WHY: git's own reading of the monitor setting: a boolean is git's own daemon; anything else is a program's path.
+  if (config.has('core.fsmonitor')) {
+    const r = spawnSync('git', ['config', '--type=bool', '--get', 'core.fsmonitor'], { cwd: top, encoding: 'utf8', timeout: 60_000 });
+    if (r.error || r.status !== 0) throw new Error('the checkout\'s config names a file-system monitor program, which git runs while it reads changes');
+  }
+  if (scope.logReads && signer) throw new Error(`the checkout's config names a program git runs to check signatures (${signer}), and the line shows commits before it commits`);
   // WHY (owner, 2026-10-21): the standard large-file filter, exactly as its installer writes it, is allowed; it stores
   // the file's own bytes, which the scan reads (lfsContent). Any other value, or any other filter, still refuses.
-  if (filters.has('lfs') && lfsStandard(top)) {
+  if (filters.has('lfs') && lfsStandard(config)) {
     filters.delete('lfs');
     lfsProgramIsFile();
   }
@@ -356,13 +376,14 @@ export function checkReadPrograms(top: string, scope: CommitScanScope, depth = 0
   if (tracked.length) {
     const out = gitOut(top, ['check-attr', '-z', '--stdin', 'filter'], `${tracked.join('\0')}\0`).toString('utf8').split('\0');
     for (let i = 0; i + 2 < out.length; i += 3) {
-      if (filters.has(out[i + 2]!.toLowerCase())) {
+      if (filters.has(out[i + 2]!)) {
         throw new Error(`this checkout's files use a filter its config names (${out[i + 2]}), a program git runs while it reads changes, so agent commits here are refused; a person commits here, or the owner removes the filter from this checkout's config`);
       }
     }
   }
-  // WHY: a read and the scan's own listing reach into each checked-out submodule under that submodule's own config.
-  for (const sub of submodules(top)) checkReadPrograms(sub, scope, depth + 1);
+  // WHY: a read and the scan's own listing reach into each checked-out submodule under that submodule's own config,
+  // and a nested checkout the line stages becomes one.
+  for (const sub of submodules(top, scope.untracked)) checkReadPrograms(sub, scope, depth + 1);
 }
 
 /** The large-file filter's config exactly as its standard install writes it (#971, owner 2026-10-21). */
@@ -374,18 +395,23 @@ const LFS_STANDARD: Record<string, string> = {
 };
 
 /**
- * Whether the effective config's large-file filter is exactly the standard one: each of its four keys present, every
- * value it has (from any config source) the standard string, and the object store where the scan reads it.
+ * The large-file program's own settings that change nothing it stores or runs: where it talks to and how it locks.
+ * WHY (#971): any other `lfs.*` key (an extension program, another store, ...) can change the bytes stored or run a
+ * program during the commit, so the standard filter's allowance doesn't hold with it.
  */
-function lfsStandard(top: string): boolean {
-  const seen = new Map<string, string[]>();
-  for (const e of gitOut(top, ['config', '--list', '-z']).toString('utf8').split('\0').filter(Boolean)) {
-    const nl = e.indexOf('\n');
-    const key = (nl < 0 ? e : e.slice(0, nl)).toLowerCase();
-    if (key.startsWith('filter.lfs.') || key === 'lfs.storage') seen.set(key, [...(seen.get(key) ?? []), nl < 0 ? '' : e.slice(nl + 1)]);
+const LFS_SAFE_KEY = /^lfs\.(url|pushurl|locksverify|repositoryformatversion|fetchinclude|fetchexclude|fetchrecentalways|concurrenttransfers|activitytimeout|dialtimeout|tlstimeout|keepalive|skipdownloaderrors)$|^lfs\..+\.(access|locksverify)$/;
+
+/**
+ * Whether the effective config's large-file filter is exactly the standard one: the `lfs` driver (by its exact name)
+ * with each of its four keys present and every value it has (from any config source) the standard string, no other
+ * key for that driver, and no large-file setting outside LFS_SAFE_KEY.
+ */
+function lfsStandard(config: Map<string, string[]>): boolean {
+  for (const key of config.keys()) {
+    if (key.startsWith('filter.lfs.') && !(key in LFS_STANDARD)) return false;
+    if (key.startsWith('lfs.') && !LFS_SAFE_KEY.test(key)) return false;
   }
-  if (seen.has('lfs.storage')) return false;
-  return Object.entries(LFS_STANDARD).every(([k, v]) => (seen.get(k) ?? []).length > 0 && seen.get(k)!.every((x) => x === v));
+  return Object.entries(LFS_STANDARD).every(([k, v]) => (config.get(k) ?? []).length > 0 && config.get(k)!.every((x) => x === v));
 }
 
 /** Throws when a `git-lfs` that git would run (the first on PATH) is not a regular file. */
@@ -412,15 +438,17 @@ const isLink = (p: string) => {
   }
 };
 
-const LFS_POINTER = /^version https:\/\/git-lfs\.github\.com\/spec\/v1\noid sha256:([0-9a-f]{64})\nsize ([0-9]+)\n/;
+/** A whole large-file pointer, and nothing else: its object's id and size. */
+const LFS_POINTER = /^version https:\/\/git-lfs\.github\.com\/spec\/v1\noid sha256:([0-9a-f]{64})\nsize (0|[1-9][0-9]{0,15})\n$/;
 
 /**
- * Each compared file whose large-file filter is the standard one, with any side that is a large-file pointer read as
- * the object it points to, from the checkout's large-file store. INVARIANT (#971): a pointer whose object isn't there
- * refuses the commit; it is never scanned as the pointer text.
+ * Each compared file whose large-file filter is the standard one, with any side that is exactly one large-file pointer
+ * (stored, or on disk, which the filter passes through as it is) read as its own bytes and the object it names, from
+ * the checkout's large-file store. INVARIANT (#971): the bytes git stores are always scanned, the object as well,
+ * never instead; a pointer whose object isn't there, or doesn't match it, refuses the commit.
  */
 function lfsContent(top: string, files: Compared[]): Compared[] {
-  if (!files.length || !lfsStandard(top)) return files;
+  if (!files.length || !lfsStandard(configOf(top))) return files;
   const paths = files.map((f) => f.path);
   if (paths.some((p) => p.includes('�'))) throw new Error('a file in this commit has a name that is not UTF-8, so its attributes can\'t be checked');
   const tracked = new Set<string>();
@@ -437,14 +465,18 @@ function lfsContent(top: string, files: Compared[]): Compared[] {
     const oid = m[1]!;
     const at = join(store, oid.slice(0, 2), oid.slice(2, 4), oid);
     if (!existsSync(at)) throw new Error('a large-file pointer in this commit names an object that is not in the checkout\'s large-file store');
-    return readFileSync(at);
+    const object = readFileSync(at);
+    if (object.length !== Number(m[2]) || createHash('sha256').update(object).digest('hex') !== oid) throw new Error('a large-file pointer in this commit names an object whose content does not match it');
+    return Buffer.concat([b, Buffer.from('\n'), object]);
   };
-  // WHY: a side read from disk is the file's own bytes already (what the filter stores); only stored sides are pointers.
-  return files.map((f) => (tracked.has(f.path) ? { ...f, now: f.disk ? f.now : read(f.now)!, before: read(f.before) } : f));
+  return files.map((f) => (tracked.has(f.path) ? { ...f, now: read(f.now)!, before: read(f.before) } : f));
 }
 
-/** The checked-out submodules of the checkout at `top`: links in HEAD's tree or staged, with a checkout there. */
-function submodules(top: string): string[] {
+/**
+ * The checked-out submodules of the checkout at `top`: links in HEAD's tree or staged, with a checkout there, and,
+ * with `untracked`, the untracked nested checkouts staging could turn into links.
+ */
+function submodules(top: string, untracked = false): string[] {
   const paths = new Set<string>();
   const head = headId(top);
   if (head) {
@@ -454,6 +486,7 @@ function submodules(top: string): string[] {
     }
   }
   for (const e of rawAll(stagedRaw(top))) if (e.mode === '160000') paths.add(e.path);
+  if (untracked) for (const p of untrackedNames(top)) if (p.endsWith('/')) paths.add(p.slice(0, -1));
   return [...paths].map((p) => join(top, p)).filter((p) => existsSync(join(p, '.git')));
 }
 
