@@ -7,7 +7,8 @@ import { AskError, asks, mayAnswerAsk, type Ask, type Role } from './asks.js';
 import { MachineRequestError, requestMachineChange, type MachineRequest } from '../machine-requests.js';
 import type { MachineRequester } from '../machine-owners.js';
 import { pluginStepOk, PLUGIN_STEPS } from '../plugins/steps.js';
-import { addProjectNameOk, addProjectRepoOk, claudeAccount, claudeProfile, pluginStep, followReleases, installUpdater, MACHINE_HELPER, setSlotCap, setTestSlotCap, setUpdates, signerKeyOk, signerPrincipalOk, SLOTS_MAX, SLOTS_MIN, stagedSigner, tailscaleStep, TEST_SLOTS_MAX, TEST_SLOTS_MIN, type Exec, type MachineResult } from '../machine.js';
+import { policySetOk } from '../policy-gate.js';
+import { addProjectNameOk, addProjectRepoOk, claudeAccount, claudeProfile, pluginStep, policyStep, followReleases, installUpdater, MACHINE_HELPER, setSlotCap, setTestSlotCap, setUpdates, signerKeyOk, signerPrincipalOk, SLOTS_MAX, SLOTS_MIN, stagedSigner, tailscaleStep, TEST_SLOTS_MAX, TEST_SLOTS_MIN, type Exec, type MachineResult } from '../machine.js';
 
 export interface RootStepRule {
   command: string;
@@ -104,6 +105,13 @@ export const ROOT_STEPS: readonly RootStepRule[] = [
     // It runs for minutes and asks for things on the way: the coordinator streams it (src/coordinator/add-project.ts).
     streams: true,
     run: () => ({ ok: false, error: 'add-project streams its steps: the coordinator runs it with its own runner' }),
+  },
+  {
+    command: 'set-policy',
+    what: "change one key of this instance's root policy.yaml (issue #726): never sandbox or allow_same_user, and land_mode, main_watch and auto_merge only toward pr, auto and off",
+    usage: 'set-policy <key> <value>',
+    allows: (a) => policySetOk(a),
+    run: (a, exec) => policyStep(a, exec),
   },
   // Plugins and MCP servers (src/plugins/, src/mcp/): fetch, preview, snapshot, stage, withdraw and remove, for the asking
   // instance only. None confirms: an admin does that at a root shell (scripts/setup/plugins.sh confirm).

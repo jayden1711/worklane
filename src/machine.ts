@@ -47,6 +47,11 @@ export function pluginStep(args: readonly string[], exec: Exec = defaultExec): M
   return runHelper([...args], exec);
 }
 
+/** One change to the asking coordinator's root policy.yaml through the helper: set-policy <key> <value> (src/policy-gate.ts checked its shape). */
+export function policyStep(args: readonly string[], exec: Exec = defaultExec): MachineResult {
+  return runHelper(['set-policy', ...args], exec);
+}
+
 /** Set the machine's agent slot cap (1..16) through the helper. */
 export function setSlotCap(n: number, exec: Exec = defaultExec): MachineResult {
   if (!Number.isInteger(n) || n < SLOTS_MIN || n > SLOTS_MAX) return { ok: false, error: `the slot cap must be a whole number from ${SLOTS_MIN} to ${SLOTS_MAX}, not ${n}` };

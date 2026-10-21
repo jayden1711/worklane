@@ -977,7 +977,7 @@ export const SETUP_STEPS: readonly SetupStep[] = [
     modes: ['server'],
     optional: false,
     reach: 'most',
-    today: "Edit the instance's policy.yaml (auto_merge, land_mode, budget, workers); the Settings page changes workers and budget.",
+    today: "Edit the instance's policy.yaml (auto_merge, land_mode, budget, workers); the Settings page only lowers workers and budget (raising them is the admin's).",
     fix: { kind: 'form', form: 'policy', label: 'Review' },
     automation: "the instance's policy.yaml: budget.daily_usd, agents.max_workers, land_mode, auto_merge, main_watch",
     detect: (k) => {

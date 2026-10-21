@@ -147,6 +147,13 @@ HELPER_RULES=/etc/worklane/helper-rules.json
 MACHINE_HELPER=/usr/local/libexec/worklane-machine
 MACHINE_SUDOERS=/etc/sudoers.d/worklane-machine   # what install_sudoers worklane-machine writes
 ADD_PROJECT_SUDOERS_ARGS='^add-project [a-z][a-z0-9-]* [A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9_.-]+$'
+# One key of the asking coordinator's root policy.yaml (issue #726): a key and a value of these characters; the helper
+# takes only its fixed keys, each in its exact shape, and never a loosening (src/policy-gate.ts). No instance.
+POLICY_SUDOERS_ARGS='^set-policy [a-z][a-z_.]* [a-z0-9.+-]+$'
+# Its three tightenings (the engine's HELPER_ONLY: test/policy-edit.test.ts holds them equal), each listed whole, so
+# every sudo, however old, matches them exactly, as it does set-updates off: turning auto_merge off, land_mode back to
+# pr and main_watch back to auto work from a dashboard on any sudo (#726).
+POLICY_TIGHTEN_ARGS=('set-policy auto_merge off' 'set-policy land_mode pr' 'set-policy main_watch auto')
 SIGNER_SUDOERS_ARGS='[A-Za-z0-9][A-Za-z0-9._+-]*@[A-Za-z0-9][A-Za-z0-9.-]* ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI[A-Za-z0-9+/]{43}$'
 # Whether this machine's sudo is 1.9.10 or later, the first that reads a command's arguments written ^...$ as a regular
 # expression (from `sudo -V`'s first line, "Sudo version X.Y.Z[pN]"). Unknown is no.
@@ -199,11 +206,12 @@ machine_sudoers() {
   # Tailscale (tailscale.sh): four fixed commands. sudo matches a listed command's arguments exactly, so none takes an
   # auth key, a flag, a URL or a port.
   cmds+=("$MACHINE_HELPER tailscale install" "$MACHINE_HELPER tailscale up" "$MACHINE_HELPER tailscale serve" "$MACHINE_HELPER tailscale public-url")
+  for n in "${POLICY_TIGHTEN_ARGS[@]}"; do cmds+=("$MACHINE_HELPER $n"); done
   if sudo_regex_ok; then
     cmds+=("$MACHINE_HELPER ^stage-update-signer $SIGNER_SUDOERS_ARGS" "$MACHINE_HELPER ^discard-update-signer $SIGNER_SUDOERS_ARGS")
     for n in "${PROFILE_SUDOERS_ARGS[@]}"; do cmds+=("$MACHINE_HELPER $n"); done
     for n in "${PLUGIN_SUDOERS_ARGS[@]}"; do cmds+=("$MACHINE_HELPER $n"); done
-    cmds+=("$MACHINE_HELPER $ADD_PROJECT_SUDOERS_ARGS")
+    cmds+=("$MACHINE_HELPER $POLICY_SUDOERS_ARGS" "$MACHINE_HELPER $ADD_PROJECT_SUDOERS_ARGS")
   else
     signer_rules=0
   fi
@@ -211,6 +219,7 @@ machine_sudoers() {
   [ "$signer_rules" = 1 ] || printf '# Not here: add-project, stage-update-signer and discard-update-signer. This sudo (%s) is older than %s and would read their patterns as literal text.\n' "$(sudo_version || true)" "$SUDO_REGEX_MIN"
   [ "$signer_rules" = 1 ] || printf '# Not here either, for the same reason: the claude-account profile commands (profile-add, use, remove, login, failover).\n'
   [ "$signer_rules" = 1 ] || printf '# Nor the plugin steps (plugin-fetch, plugin-stage, plugin-withdraw, plugin-remove, mcp-fetch, mcp-preview, mcp-snapshot, mcp-stage): plugins.sh at a root shell instead.\n'
+  [ "$signer_rules" = 1 ] || printf '# Nor set-policy: a root policy.yaml changes at a root shell instead (worklane policy set), but for its three tightenings, listed whole (auto_merge off, land_mode pr, main_watch auto).\n'
   printf 'Cmnd_Alias WORKLANE_MACHINE = %s' "${cmds[0]}"
   for n in "${cmds[@]:1}"; do printf ', \\\n    %s' "$n"; done
   local users="$1"; shift

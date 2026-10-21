@@ -53,6 +53,8 @@ ensure_instance_home() {
   echo "ensure_instance_home $*" >> "$T/calls"
 }
 claude_login_ok() { :; }
+# The machine's sudo: 1.9.10 or later, unless <root>/old-sudo exists (then the helper's pattern rules are left out).
+sudo_regex_ok() { [ ! -e "$T/old-sudo" ]; }
 # The engine's \`policy own\` (as root; test/policy-edit.test.ts runs it with stand-ins): recorded, and then root's;
 # while <root>/own-refuses exists, refused as the engine refuses (its message on stderr, exit 1).
 own_policy() { echo "own_policy $*" >> "$T/owned"; if [ -e "$T/own-refuses" ]; then cat "$T/own-refuses" >&2; return 1; fi; touch "$T/owned-$1"; }
@@ -432,6 +434,29 @@ test("the policy step makes the instance's policy.yaml root's, and a rerun on an
   assert.deepEqual(owned(), ['own_policy alpha', 'own_policy alpha']);
   assert.ok(r.events.some((e) => e.step === 'policy' && e.state === 'done' && / policy set alpha /.test(e.detail)), JSON.stringify(r.events));
   assert.equal(readFileSync(join(m.instDir('alpha'), 'policy.yaml'), 'utf8'), before, 'the setup step itself never rewrites it');
+});
+
+test('the sudoers rule lets coordinators run set-policy with one anchored pattern of plain words (#726)', { skip: !posix && 'bash' }, () => {
+  const r = spawnSync('bash', ['-c', 'source "$1"; machine_sudoers wl-alpha', '_', join(setupDir, 'lib.sh')], { encoding: 'utf8' });
+  assert.equal(r.status, 0, r.stderr);
+  const line = r.stdout.split('\n').find((l) => l.includes('^set-policy'))!.trim().replace(/, \\$/, '');
+  const re = new RegExp(line.split(' ').slice(1).join(' '));
+  for (const a of ['set-policy auto_merge on', 'set-policy settings.workers 3', 'set-policy settings.run_windows 0900-1700+2200-0600']) assert.match(a, re, a);
+  for (const a of ['set-policy auto_merge', 'set-policy auto_merge on x', 'set-policy Auto on', 'set-policy auto_merge on;id', 'set-policy auto_merge {"x":1}']) assert.doesNotMatch(a, re, a);
+});
+
+test("the policy step names the dashboard's route only where root's helper has its set-policy rule (sudo 1.9.10 or later) (#726)", { skip: !posix && 'bash' }, () => {
+  const detail = (m: ReturnType<typeof machine>) => {
+    const r = m.run();
+    assert.equal(r.status, 0, r.stderr);
+    return r.events.find((e) => e.step === 'policy' && e.state === 'done')!.detail;
+  };
+  assert.match(detail(machine()), /workers: change them in the dashboard's Settings \(through root's helper\), or as root with \S+ policy set alpha <key> <value>; turning auto_merge on is root's alone$/);
+  const old = machine();
+  writeFileSync(join(old.T, 'old-sudo'), '');
+  const d = detail(old);
+  assert.match(d, /workers: change them as root with \S+ policy set alpha <key> <value> \(this machine's sudo is older than 1\.9\.10, so the dashboard only turns auto_merge off, land_mode to pr and main_watch to auto\)$/);
+  assert.doesNotMatch(d, /dashboard's Settings/);
 });
 
 test("the policy step is done only when the engine's gate would read the policy: with an earlier root file put back (root's, 0644, recorded, but not what root last wrote) a rerun runs it again, `policy own <name>` with no flag (#726)", { skip: !posix && 'bash' }, () => {
