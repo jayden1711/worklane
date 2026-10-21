@@ -19,11 +19,13 @@
 // - with none: refused (#947 round 2). Nothing would bind its files to base_commit, and an image takes that path just
 //   by having no /testbed/.git. A content-hash fallback would be a loosening for the owner to decide.
 // What comes out is bounded (#947 round 2): the probe's output and the pack's (TREE_CAPS.copyOutBytes) are capped in
-// bytes as they arrive, and past the cap the exec is ended, nothing is kept and the container is removed. What the pack
-// decodes to is capped too, in total (TREE_CAPS.treeBytes) and per object (TREE_CAPS.objectBytes), read from the pack's
-// own headers before `git index-pack` sees it (#947 round 3: index-pack builds each object in memory, and a delta of a
-// few bytes can declare gigabytes; 1,115 bytes peaked at 1.58 GB in review), then again on what git read, before any
-// checkout. And the image must be the task's own digest reference: no tag ever reaches `run`.
+// bytes as they arrive, and past the cap the exec is ended, nothing is kept and the container is removed. Then the pack
+// is walked before `git index-pack` sees it (packDeclaredBytes), against one budget (TREE_CAPS.treeBytes): every
+// entry's inflated data (a delta's own data too), each delta's target, and a fixed cost an entry; and one object or
+// delta's data against TREE_CAPS.objectBytes (#947 rounds 3 and 4: index-pack builds each object in memory, a delta of
+// a few bytes can declare gigabytes, and uncounted delta data or entries cost minutes and gigabytes). index-pack, and
+// every pack-objects git runs here, uses one thread. What git read is held to the total again, before any checkout.
+// And the image must be the task's own digest reference: no tag ever reaches `run`.
 // On the host, in a temporary folder in the store: the pack is indexed (git hashes every object), the tree must be
 // there with every object it reaches, and one root commit is made on it (fixed author and date, so the same tree
 // always gives the same commit). A fresh bare repository fetches only that commit (so nothing unreachable comes
@@ -42,7 +44,7 @@ import { execFileSync } from 'node:child_process';
 import { randomBytes, createHash } from 'node:crypto';
 import { closeSync, constants, fstatSync, lstatSync, mkdirSync, openSync, readSync, renameSync, rmdirSync, rmSync, type Stats } from 'node:fs';
 import { join } from 'node:path';
-import { inflateSync } from 'node:zlib';
+import { createInflate, inflateSync } from 'node:zlib';
 import type { Mode } from './caps.js';
 import { LimitsNotApplied, OutputTooLarge, TaskRunner, WORK, type Docker, type DockerOptions, type TaskContainer } from './container.js';
 import { pullImage, PullRefused, writeVerified } from './download.js';
@@ -59,10 +61,11 @@ export const TREE_RECORD = 'tree.json';
 export class Refused extends Error {}
 
 /**
- * How much a task's copy-out may bring: the pack's base64 text; what its objects decode to, summed; and what any one
- * object decodes to (a delta's target). The last two are read from the pack's own headers before `git index-pack`
- * sees it (packDeclaredBytes): index-pack builds each object in memory, and a delta of a few bytes can declare
- * gigabytes.
+ * How much a task's copy-out may bring: the pack's base64 text; the walk's budget (packDeclaredBytes: every entry's
+ * inflated data, a delta's own data too, each delta's target, and ENTRY_COST an entry, summed); and what any one
+ * object or delta's data decodes to. The last two are read from the pack itself before `git index-pack` sees it:
+ * index-pack builds each object in memory, and a delta of a few bytes can declare gigabytes. What git read is held to
+ * `treeBytes` again after index-pack.
  */
 export interface TreeCaps {
   copyOutBytes: number;
@@ -78,24 +81,95 @@ export interface TreeCaps {
 export const TREE_CAPS: Readonly<TreeCaps> = Object.freeze({ copyOutBytes: 384 * 1024 * 1024, treeBytes: 1024 * 1024 * 1024, objectBytes: 256 * 1024 * 1024 });
 
 /**
- * What every entry of `pack` declares it decodes to, summed, read from the pack itself before `git index-pack` sees it:
- * a whole object's size from its entry header, a delta's from its target size (the second number of its inflated delta
- * header). Each entry's data is inflated once, to find where it ends, never to more than its header's size. Refuses
- * (throws Refused) a pack that isn't well formed (signature, version, count, types, sizes, zlib data, nothing after the
- * last entry but the 20-byte trailer), an object over `caps.objectBytes`, and a sum over `caps.treeBytes`. Its
- * messages name no task.
+ * What one pack entry costs the walk's budget on top of its bytes, whatever it declares. `git index-pack` keeps a record
+ * of every entry, and the walk's time grows with the count: 18 million 4-byte blobs (a 288 MB pack, under the copy-out
+ * cap) took the walk 49.7 s and peaked `index-pack --threads=1` at 1.41 GB (#947 round 4, measured). At 1 KiB an entry,
+ * the 1 GiB budget admits at most a million entries; a real tree has tens of thousands (inferred).
  */
-export function packDeclaredBytes(pack: Buffer, caps: { treeBytes: number; objectBytes: number }): number {
+export const ENTRY_COST = 1024;
+/** Entry data up to this size is inflated in one piece; past it, streamed, keeping only its first bytes. */
+const INFLATE_WHOLE_MAX = 1024 * 1024;
+/** How much of an entry's inflated data the walk keeps: a delta's header (two sizes, at most 10 bytes each). */
+const HEAD_BYTES = 32;
+
+/**
+ * An entry's zlib data, `data` (it runs on to the pack's trailer), inflated to exactly `size` bytes and never more:
+ * its first HEAD_BYTES bytes and how many bytes of `data` it used, or null when it isn't zlib, is cut short or isn't
+ * `size` bytes. Memory stays small whatever `size` is: past INFLATE_WHOLE_MAX the output is streamed and dropped.
+ */
+async function inflateEntry(data: Buffer, size: number): Promise<{ head: Buffer; used: number } | null> {
+  if (size <= INFLATE_WHOLE_MAX) {
+    try {
+      const r = inflateSync(data, { info: true, maxOutputLength: Math.max(size, 1) }) as unknown as { buffer: Buffer; engine: { bytesWritten: number } };
+      return r.buffer.length === size && r.engine.bytesWritten > 0 ? { head: Buffer.from(r.buffer.subarray(0, HEAD_BYTES)), used: r.engine.bytesWritten } : null;
+    } catch {
+      return null;
+    }
+  }
+  return new Promise((resolve) => {
+    const z = createInflate({ chunkSize: INFLATE_WHOLE_MAX });
+    let out = 0;
+    let head = Buffer.alloc(0);
+    let settled = false;
+    const settle = (v: { head: Buffer; used: number } | null) => {
+      if (settled) return;
+      settled = true;
+      resolve(v);
+    };
+    z.on('data', (b: Buffer) => {
+      out += b.length;
+      if (out > size) {
+        z.destroy();
+        return settle(null);
+      }
+      // A copy: a slice would keep the whole chunk alive.
+      if (head.length < HEAD_BYTES) head = Buffer.concat([head, Buffer.from(b.subarray(0, HEAD_BYTES - head.length))]);
+    });
+    z.on('error', () => settle(null));
+    z.on('end', () => settle(out === size && z.bytesWritten > 0 ? { head, used: z.bytesWritten } : null));
+    z.end(data);
+  });
+}
+
+/** What packDeclaredBytes read: the objects' decoded sizes, summed, and what the walk's budget was charged. */
+export interface PackWalk {
+  /** A whole object's size, or a delta's target size, summed: what git reads (`cat-file --batch-check`). */
+  decoded: number;
+  /** Every entry's inflated data (a delta's own data too), each delta's target, and ENTRY_COST an entry. */
+  spent: number;
+}
+
+/**
+ * The pack's entries, read from the pack itself before `git index-pack` sees it, against one budget,
+ * `caps.treeBytes`. Each entry is charged ENTRY_COST, the bytes its data inflates to (a delta's own data counts, not
+ * only its target) and, for a delta, its target size (the second number of its delta header). The charge is made
+ * before the data is inflated, so the walk never inflates past the budget: its time and memory, and what index-pack
+ * hashes and builds, are bounded by it (#947 round 4: uncounted delta data let a 300 MB pack take the walk 302.6 s,
+ * and 33 deltas of 248 MiB each made index-pack peak at 1.96 GB). Refuses (throws Refused) a pack that isn't well
+ * formed (signature, version, count, types, sizes, zlib data, nothing after the last entry but the 20-byte trailer),
+ * an object or delta data over `caps.objectBytes`, and a charge over `caps.treeBytes`. Its messages name no task.
+ */
+export async function packDeclaredBytes(pack: Buffer, caps: { treeBytes: number; objectBytes: number }): Promise<PackWalk> {
   const bad = (why: string) => new Refused(`what came out of /testbed is not a well-formed pack (${why}): refused before it is indexed, nothing kept`);
+  const over = () => new Refused(`what came out of /testbed is too much to inflate and decode: it declares over ${caps.treeBytes} bytes of data, delta targets and entries (${ENTRY_COST} bytes each): refused before it is indexed, nothing kept`);
   if (!Buffer.isBuffer(pack) || pack.length < 32 || pack.toString('latin1', 0, 4) !== 'PACK') throw bad('no pack signature');
   const version = pack.readUInt32BE(4);
   if (version !== 2 && version !== 3) throw bad(`version ${version}`);
   const count = pack.readUInt32BE(8);
+  // Every entry's fixed charge first: a count over the budget is refused before any entry is read.
+  let spent = count * ENTRY_COST;
+  if (spent > caps.treeBytes) throw over();
+  const spend = (n: number) => {
+    spent += n;
+    if (spent > caps.treeBytes) throw over();
+  };
   const end = pack.length - 20;
+  if (!createHash('sha1').update(pack.subarray(0, end)).digest().equals(pack.subarray(end))) throw bad('a trailer that is not its checksum');
   let pos = 12;
   let total = 0;
   for (let i = 0; i < count; i++) {
     if (pos >= end) throw bad('fewer entries than its count');
+    const start = pos;
     let b = pack[pos++]!;
     const type = (b >> 4) & 7;
     let size = b & 15;
@@ -107,29 +181,28 @@ export function packDeclaredBytes(pack: Buffer, caps: { treeBytes: number; objec
       mult *= 128;
     }
     if (type === 6) {
-      // OFS_DELTA: the base's offset, 7 bits a byte; only skipped here (index-pack resolves it).
-      let n = 0;
-      do {
-        if (pos >= end || n++ >= 10) throw bad('a delta base offset cut short');
+      // OFS_DELTA: how far back its base starts, 7 bits a byte, as git reads it. index-pack resolves it; here it only
+      // has to land on or after the first entry and before this one.
+      if (pos >= end) throw bad('a delta base offset cut short');
+      b = pack[pos++]!;
+      let back = b & 0x7f;
+      for (let n = 1; b & 0x80; n++) {
+        if (pos >= end || n >= 10 || back > start) throw bad('a delta base offset cut short or outside the pack');
         b = pack[pos++]!;
-      } while (b & 0x80);
+        back = (back + 1) * 128 + (b & 0x7f);
+      }
+      if (back < 1 || start - back < 12) throw bad('a delta base offset outside the pack');
     } else if (type === 7) {
       pos += 20;
       if (pos > end) throw bad('a delta base id cut short');
     } else if (type < 1 || type > 4) throw bad(`entry type ${type}`);
-    // A delta's own data is small; a whole object's size is what it decodes to. Both bounded before inflating.
+    // A whole object's size is what it decodes to; a delta's is its own data. Both capped and charged before inflating.
     if (size > caps.objectBytes) throw new Refused(`what came out of /testbed declares an object of over ${caps.objectBytes} bytes: refused before it is indexed, nothing kept`);
-    let data: Buffer;
-    let used: number;
-    try {
-      const r = inflateSync(pack.subarray(pos, end), { info: true, maxOutputLength: Math.max(size, 1) }) as unknown as { buffer: Buffer; engine: { bytesWritten: number } };
-      data = r.buffer;
-      used = r.engine.bytesWritten;
-    } catch {
-      throw bad('entry data that is not zlib, cut short, or longer than its size');
-    }
-    if (data.length !== size || !(used > 0)) throw bad('an entry size that is not what its data inflates to');
-    pos += used;
+    spend(size);
+    const r = await inflateEntry(pack.subarray(pos, end), size);
+    if (!r) throw bad('entry data that is not zlib, cut short, or not what its size says');
+    const data = r.head;
+    pos += r.used;
     let decoded = size;
     if (type === 6 || type === 7) {
       let p = 0;
@@ -148,13 +221,14 @@ export function packDeclaredBytes(pack: Buffer, caps: { treeBytes: number; objec
       };
       header();
       decoded = header();
+      if (decoded > caps.objectBytes) throw new Refused(`what came out of /testbed declares an object of over ${caps.objectBytes} bytes: refused before it is indexed, nothing kept`);
+      // index-pack builds the target from its base and this data: charged on top of the data.
+      spend(decoded);
     }
-    if (decoded > caps.objectBytes) throw new Refused(`what came out of /testbed declares an object of over ${caps.objectBytes} bytes: refused before it is indexed, nothing kept`);
     total += decoded;
-    if (total > caps.treeBytes) throw new Refused(`what came out of /testbed declares objects that decode to over ${caps.treeBytes} bytes: refused before it is indexed, nothing kept`);
   }
   if (pos !== end) throw bad('bytes after its last entry');
-  return total;
+  return { decoded: total, spent };
 }
 /** The probe answers three short lines. */
 const PROBE_MAX_BYTES = 64 * 1024;
@@ -207,7 +281,10 @@ export interface TreeResult {
 
 /** git on the host, with no config but its own (an agent's Edit could reach ~/.gitconfig), and the local file protocol only. */
 const GIT_ENV: NodeJS.ProcessEnv = { PATH: process.env.PATH, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_TERMINAL_PROMPT: '0', GIT_AUTHOR_NAME: 'bench', GIT_AUTHOR_EMAIL: 'bench@localhost', GIT_AUTHOR_DATE: '@0 +0000', GIT_COMMITTER_NAME: 'bench', GIT_COMMITTER_EMAIL: 'bench@localhost', GIT_COMMITTER_DATE: '@0 +0000' };
-const GIT_HARDENED = ['-c', 'core.fsmonitor=false', '-c', 'core.hooksPath=/dev/null', '-c', 'protocol.allow=never', '-c', 'protocol.file.allow=always'];
+// pack.threads=1: index-pack and pack-objects (here and in what fetch runs) on one thread. Each thread holds its own
+// objects, so their memory grew with the host's CPUs: an admitted 12.5 MB pack peaked index-pack at 0.86 to 1.96 GB
+// with git's default threads on 16 CPUs, 3.27 GB with 16, and 283 MiB with one (#947 round 4, measured in review).
+const GIT_HARDENED = ['-c', 'core.fsmonitor=false', '-c', 'core.hooksPath=/dev/null', '-c', 'protocol.allow=never', '-c', 'protocol.file.allow=always', '-c', 'pack.threads=1'];
 const git = (args: readonly string[], input?: Buffer): string =>
   execFileSync('git', [...GIT_HARDENED, ...args], { env: GIT_ENV, stdio: ['pipe', 'pipe', 'pipe'], timeout: 30 * 60_000, maxBuffer: 256 * 1024 * 1024, ...(input ? { input } : {}) })
     .toString('utf8')
@@ -372,12 +449,11 @@ function build(tmp: string, final: string, uid: number, task: SelectedTask, c: C
   const scratch = join(tmp, 'import.git');
   const remote = join(tmp, 'remote.git');
   const clone = join(tmp, 'clone');
-  // Before index-pack, which builds each object in memory: what the pack declares, against the caps.
-  packDeclaredBytes(c.pack, caps);
+  // baseTree walked the pack against the budget before this (packDeclaredBytes).
   git(['init', '--bare', '-q', '--template=', scratch]);
   try {
-    // index-pack hashes every object, so what is indexed is exactly what the ids say.
-    git(['--git-dir', scratch, 'index-pack', '--stdin'], c.pack);
+    // index-pack hashes every object, so what is indexed is exactly what the ids say. One thread, whatever the config.
+    git(['--git-dir', scratch, 'index-pack', '--threads=1', '--stdin'], c.pack);
     if (git(['--git-dir', scratch, 'cat-file', '-t', c.tree]) !== 'tree') throw new Error('not a tree');
   } catch {
     throw new Refused("what came out of /testbed is not a pack holding its tree: refused, nothing kept");
@@ -450,6 +526,9 @@ export async function baseTree(layout: BenchLayout, uid: number, task: SelectedT
   } finally {
     docker.stop(c);
   }
+  // Before index-pack, which builds each object in memory, and before anything is made in the store: the pack against
+  // the budget.
+  await packDeclaredBytes(copied.pack, caps);
   const tmp = join(dir, `.${task.key}.${randomBytes(8).toString('hex')}.new`);
   mkdirSync(tmp, { mode: 0o700 });
   let placed = false;

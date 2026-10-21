@@ -20,7 +20,7 @@ const linux = { skip: process.platform !== 'linux' && 'the bench is Linux only' 
 // WHY: loaded when a test runs, not at the top, so each test fails on its own on code from before this change.
 const cli = () => import('../scripts/bench/cli.js');
 const pullMod = () => import('../scripts/bench/pull.js') as Promise<Record<string, unknown>>;
-type Walk = (pack: Buffer, caps: { treeBytes: number; objectBytes: number }) => number;
+type Walk = (pack: Buffer, caps: { treeBytes: number; objectBytes: number }) => Promise<{ decoded: number; spent: number }>;
 const walk = async (): Promise<Walk> => {
   const f = (await pullMod()).packDeclaredBytes;
   assert.equal(typeof f, 'function', 'pull.ts exports packDeclaredBytes');
@@ -94,11 +94,11 @@ const BIG = { treeBytes: 1024 * MiB, objectBytes: 256 * MiB };
 test("the pack walk reads the same sizes git does: whole objects from their headers, deltas from their targets", linux, async () => {
   const f = await walk();
   const small = deltaBomb(2);
-  assert.equal(f(small, BIG), 3 * MiB, 'a 1 MiB blob and a delta to 2 MiB');
-  assert.equal(f(small, BIG), gitSizes(small), 'what git reads, for the crafted delta pack');
+  assert.equal((await f(small, BIG)).decoded, 3 * MiB, 'a 1 MiB blob and a delta to 2 MiB');
+  assert.equal((await f(small, BIG)).decoded, gitSizes(small), 'what git reads, for the crafted delta pack');
   for (const b64 of [TREE.b64, TREE.history, TREE.treeOnly]) {
     const pack = Buffer.from(b64, 'base64');
-    assert.equal(f(pack, BIG), gitSizes(pack), 'what git reads, for a pack git made');
+    assert.equal((await f(pack, BIG)).decoded, gitSizes(pack), 'what git reads, for a pack git made');
   }
 });
 
@@ -123,12 +123,15 @@ test('a delta bomb is refused before index-pack: a pack of a few KB that declare
 test('the walk refuses a pack over the decoded cap, or with one object over the object cap, before it is indexed', linux, async () => {
   const f = await walk();
   const history = Buffer.from(TREE.history, 'base64');
-  const total = gitSizes(history);
-  assert.equal(f(history, { treeBytes: total, objectBytes: MiB }), total, 'exactly at the cap: taken');
-  assert.throws(() => f(history, { treeBytes: total - 1, objectBytes: MiB }), new RegExp(`declares .*over ${total - 1} bytes.*before it is indexed`));
+  // Round 4: the budget is what the walk charges (data, delta targets, a fixed cost an entry), at least what git reads.
+  const { decoded, spent } = await f(history, BIG);
+  assert.equal(decoded, gitSizes(history));
+  assert.ok(spent >= decoded);
+  assert.deepEqual(await f(history, { treeBytes: spent, objectBytes: MiB }), { decoded, spent }, 'exactly at the cap: taken');
+  await assert.rejects(async () => f(history, { treeBytes: spent - 1, objectBytes: MiB }), new RegExp(`declares .*over ${spent - 1} bytes.*before it is indexed`));
   const big = Buffer.from(treePack({ 'big.bin': Buffer.alloc(2 * MiB) }).b64, 'base64');
-  assert.throws(() => f(big, { treeBytes: 1024 * MiB, objectBytes: MiB }), /declares an object of over 1048576 bytes.*before it is indexed/);
-  assert.throws(() => f(deltaBomb(2), { treeBytes: 1024 * MiB, objectBytes: MiB + 1 }), /declares an object of over 1048577 bytes/, "a delta's target counts, not its delta data");
+  await assert.rejects(async () => f(big, { treeBytes: 1024 * MiB, objectBytes: MiB }), /declares an object of over 1048576 bytes.*before it is indexed/);
+  await assert.rejects(async () => f(deltaBomb(2), { treeBytes: 1024 * MiB, objectBytes: MiB + 1 }), /declares an object of over 1048577 bytes/, "a delta's target counts, not only its delta data");
 });
 
 test('the walk refuses a pack that is not well formed, before it is indexed', linux, async () => {
@@ -145,9 +148,9 @@ test('the walk refuses a pack that is not well formed, before it is indexed', li
     [finish([Buffer.concat([entryHeader(3, 10), deflateSync(Buffer.from('hello'))])]), 'a size that is not what it inflates to'],
     [finish([Buffer.concat([entryHeader(3, 5), deflateSync(Buffer.from('hello')).subarray(0, 4)])]), 'cut-short data'],
     [finish([Buffer.concat([entryHeader(3, 5), Buffer.from('not zlib at all')])]), 'not zlib'],
-    [finish([Buffer.concat([entryHeader(6, 3), Buffer.from(ofs(1)), deflateSync(Buffer.from([0x80]))])]), 'a delta header cut short'],
+    [finish([blob, Buffer.concat([entryHeader(6, 1), Buffer.from(ofs(blob.length)), deflateSync(Buffer.from([0x80]))])]), 'a delta header cut short'],
   ];
-  for (const [pack, why] of cases) assert.throws(() => f(pack, BIG), /not a well-formed pack.*before it is indexed/, why);
+  for (const [pack, why] of cases) await assert.rejects(async () => f(pack, BIG), /not a well-formed pack.*before it is indexed/, why);
 });
 
 test("the README says what is checked before index-pack, and doesn't claim the decoded check comes first", linux, () => {
