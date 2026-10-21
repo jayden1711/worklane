@@ -66,6 +66,8 @@ for (const [what, line] of [
   ['an uppercase id', (id: string) => id.toUpperCase()],
   ['text right after the id', (id: string) => `${id}zz`],
   ['a word after the id', (id: string) => `${id} comment`],
+  // A line git itself rejects, so round 2 refused it too (only the message differed). Round 2's 1 KB form, which git
+  // reads as a cut and round 2 took as no cut, is in test/push-shallow-format.test.ts.
   ['a line over 1 KB', (id: string) => `${id}${' '.repeat(1100)}x`],
 ] as const) {
   test(`a shallow file line with ${what} is refused, never read as "no cut"`, () => {

@@ -137,17 +137,22 @@ export function commandSpawnSync(cmd: string, args: readonly string[], options: 
     : spawnSync(cmd, args, options);
 }
 
-const OBJECT_ID = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
+/** A full lowercase object id of each object format git names (`rev-parse --show-object-format`): nothing else. */
+const OBJECT_ID = new Map([['sha1', /^[0-9a-f]{40}$/], ['sha256', /^[0-9a-f]{64}$/]]);
 
 /**
- * The commits a `shallow` file lists, or null when any line isn't exactly a full lowercase object id. git reads the
- * file more loosely (an uppercase id, text after the id, a line over 1 KB: each measured to cut a range on git 2.43),
- * so a line this can't read the way git might is never taken as "no cut".
+ * The commits a `shallow` file lists, or null when any line isn't exactly one full lowercase object id of the repo's
+ * own `format`, or the format is one this doesn't know. git reads the file more loosely: an uppercase id, text after
+ * the id, a line over 1 KB, and in a sha1 repo a 64-hex line, read as its first 40 (each measured to cut a range on
+ * git 2.43; the last got a refused file onto the remote in 34 of 80 pushes, #927 round 3). So a line this can't read
+ * the way git might is never taken as "no cut".
  */
-export function shallowIds(text: string): string[] | null {
+export function shallowIds(text: string, format: string): string[] | null {
+  const id = OBJECT_ID.get(format);
+  if (!id) return null;
   const lines = text.split('\n');
   if (lines.at(-1) === '') lines.pop();
-  return lines.every((l) => OBJECT_ID.test(l)) ? lines : null;
+  return lines.every((l) => id.test(l)) ? lines : null;
 }
 
 /** Variables that would point a git at another repo, worktree, index or shallow file than the snapshot's own. */
@@ -187,8 +192,8 @@ export function gitSnapshot(cwd: string): GitSnapshot {
   } catch (e) {
     if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw new Error(`can't read its shallow file: ${(e as Error).message}`);
   }
-  const ids = shallowIds(text);
-  if (ids === null) throw new Error('its shallow file has a line that isn\'t exactly a full lowercase object id, which git may still read as a cut');
+  const ids = shallowIds(text, format);
+  if (ids === null) throw new Error(`its shallow file has a line that isn't exactly a full lowercase object id of this repo's format (${format}), which git may still read as a cut`);
   const dir = mkdtempSync(join(tmpdir(), 'git-snapshot-'));
   try {
     gitExecFileSync(['init', '-q', '--bare', `--object-format=${format}`, dir], { env: clean(), stdio: ['ignore', 'pipe', 'pipe'] });
