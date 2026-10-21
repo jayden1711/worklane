@@ -7,6 +7,7 @@ import { join, resolve } from 'node:path';
 import { BRAND } from './brand.js';
 import { checkoutSparse } from './checkout.js';
 import { redactString } from './events/redact.js';
+import { projectStateDir } from './guardrails/context.js';
 import { groupOnlyDir, projectCommand, writeGroupOnly, type ProjectRunAs } from './os/index.js';
 
 export interface WorktreeOptions {
@@ -105,8 +106,20 @@ export function removeSandboxPlaceholders(worktree: string): string[] {
   return removed;
 }
 
+/** How every worktree the engine makes is named in its place (worktreePath): read-denials hides them by it (#890). */
+export const WORKTREE_NAME_PREFIX = `${BRAND.cli}-`;
+
 export function worktreePath(o: WorktreeOptions, name: string): string {
-  return resolve(o.repo, o.root, `${BRAND.cli}-${name}`);
+  return resolve(o.repo, o.root, `${WORKTREE_NAME_PREFIX}${name}`);
+}
+
+/**
+ * The coordinator's own places task worktrees are made in (#890): its start config's worktree root, resolved under the
+ * repository, and the engine's own. One helper, so the places the coordinator makes at its start (recovery) and the
+ * ones every guarded run hides whole (src/service.ts into the runner) can't differ.
+ */
+export function worktreePlaces(repo: string, root: string): string[] {
+  return [resolve(repo, root), join(projectStateDir(repo), 'worktrees')];
 }
 
 /**

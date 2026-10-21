@@ -14,6 +14,7 @@ import { runReadDenials } from '../src/read-denials.js';
 import { agentSettings } from '../src/install.js';
 import { laneRuns, PolicyFile, type Instance } from '../src/instance.js';
 import { CliRunner, type RunRequest } from '../src/runner.js';
+import { worktreePlaces } from '../src/worktrees.js';
 
 const skip = process.platform !== 'linux' && "sandbox-runtime's Linux read-deny rules, where CI runs";
 const SRT = join(repoRoot, 'node_modules', '@anthropic-ai', 'sandbox-runtime', 'dist', 'sandbox');
@@ -126,8 +127,9 @@ test('#890: the runner passes the instance\'s repository path, so a separate git
   const req: RunRequest = { env: {}, role: 'experimenter', prompt: 'p', cwd: linked, model: 'm', allowedTools: ['Read'], disallowedTools: ['Bash'], maxTurns: 1, maxBudgetUsd: 0.01, taskFile: task(HIDDEN), stallMs: 30_000, timeoutMs: 30_000 };
   const runner = (bin: string, repoPath?: string) => {
     const args: ConstructorParameters<typeof CliRunner> = ['cli', { PATH: process.env.PATH, HOME: home }, bin, undefined, laneRuns(inst), undefined, {}, () => agentSettings(engineCli, [], [], [])];
-    // The repository path is the constructor's last option (after apiKeyFile, login, plugins and mcp).
-    return new (CliRunner as unknown as new (...a: unknown[]) => CliRunner)(...args, undefined, undefined, undefined, undefined, repoPath);
+    // The repository path comes after apiKeyFile, login, plugins and mcp; with it, the coordinator's places (round 16:
+    // a runner with the path and no places refuses), after the branch and the start secrets.
+    return new (CliRunner as unknown as new (...a: unknown[]) => CliRunner)(...args, undefined, undefined, undefined, undefined, repoPath, undefined, undefined, repoPath ? worktreePlaces(repoPath, '.claude/worktrees') : undefined);
   };
   const s = standIn(mkdtempSync(join(tmpdir(), 'stand-in-')));
   const r = await runner(s.bin, main).run(req);

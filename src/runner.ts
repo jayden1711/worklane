@@ -4,7 +4,7 @@
 // git credential helper, no SSH agent, so an agent can't push or write to
 // GitHub even if it tries. It proposes; the coordinator acts.
 import { spawn, spawnSync } from './os/child-process.js';
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 import { join, posix } from 'node:path';
@@ -693,6 +693,19 @@ export class CliRunner implements AgentRunner {
     // A run with no tool allowed and every reading tool refused (the experiment monitor) reads nothing: it may run
     // outside a project.
     const readsNothing = req.allowedTools.length === 0 && READING_TOOLS.every((t) => req.disallowedTools?.includes(t));
+    // The coordinator's own worktree places (round 16): a guarded runner given the repository path must be given them
+    // too (src/service.ts passes both), or its runs would hide no place whole; and each is made again here, in the
+    // coordinator's process, if it went missing since the start (the same write recover() makes), so it is hidden.
+    if (guard && this.repoPath && !this.worktreePlaces) return { reason: 'failed', detail: `this runner was given the repository path but not the coordinator's worktree places, so other task checkouts can't be hidden; not starting`, costUsd: 0, turns: 0, model: req.model };
+    if (guard) {
+      for (const place of this.worktreePlaces ?? []) {
+        try {
+          mkdirSync(place, { recursive: true });
+        } catch (e) {
+          return { reason: 'failed', detail: `${place}, the coordinator's own place for task worktrees, can't be made (${(e as NodeJS.ErrnoException).code ?? (e as Error).message}); not starting`, costUsd: 0, turns: 0, model: req.model };
+        }
+      }
+    }
     const ownDenials = guard ? runReadDenials({ cwd: req.cwd, home: runEnv.HOME, readsNothing, ...(req.taskFile ? { taskFile: req.taskFile } : {}), ...(this.repoPath ? { repo: this.repoPath } : {}), ...(this.defaultBranch ? { defaultBranch: this.defaultBranch } : {}), ...(this.startSecrets ? { startSecrets: this.startSecrets } : {}), ...(this.worktreePlaces ? { places: this.worktreePlaces } : {}) }) : { paths: [] };
     if ('error' in ownDenials) return { reason: 'failed', detail: `${ownDenials.error}; not starting`, costUsd: 0, turns: 0, model: req.model };
     // Preflight, inside the login's start lock: an unreadable status that mentions a token refresh (or any other

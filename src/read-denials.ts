@@ -8,7 +8,8 @@
 // time a command is wrapped, following symlinked directories. A path that doesn't exist then hides nothing, and `[`
 // `]` are glob syntax there (`?` is any one character but "/").
 import { existsSync, lstatSync, readdirSync, realpathSync, statSync } from 'node:fs';
-import { basename, dirname, isAbsolute, join, posix, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, posix, relative, resolve } from 'node:path';
+import { WORKTREE_NAME_PREFIX } from './worktrees.js';
 import { BRAND } from './brand.js';
 import { ConfigInvalid, loadConfig, loadConfigAt, readRegular } from './config/load.js';
 import { TaskFile } from './contract.js';
@@ -72,7 +73,7 @@ function capPerCheckout(entries: Set<string>, own: string[], checkouts: string[]
  * (B5glob, measured by the round-8 delta check). One mount per checkout bounds that, and no run reads another task's
  * checkout at all. A checkout made after the start is covered only by the globs over `places` (see runReadDenials).
  */
-function siblingCheckouts(linked: string[], places: string[], own: string[], keep: string[], cwd: string): { siblings: string[]; places: string[] } | { error: string } {
+function siblingCheckouts(linked: string[], places: string[], own: string[], keep: string[], cwd: string, coordinator: { main: string | null } | null): { siblings: string[]; places: string[] } | { error: string } {
   const forms = (p: string) => [...new Set([resolve(p), realOrNull(p) ?? resolve(p)])];
   const holds = (paths: string[]) => {
     const all = paths.flatMap(forms);
@@ -86,10 +87,26 @@ function siblingCheckouts(linked: string[], places: string[], own: string[], kee
   const whole: string[] = [];
   for (const l of linked) found.add(resolve(l));
   for (const place of places) {
-    // A place that holds the main checkout (a worktree root of ".." in the project's config) holds more than task
-    // checkouts (the instance's task files and bundles beside the repository): only the worktrees git lists there are
-    // hidden.
-    if (holdsMain(place)) continue;
+    // A place that holds the main checkout (a worktree root of "..", "." or "") holds more than task checkouts (the
+    // instance's task files and bundles beside the repository, or the main checkout itself), so it is never hidden
+    // whole. For the coordinator's own place (round 16, R1), the engine's worktrees there are hidden by their names
+    // instead: `<place>/<cli>-*`, which the sandbox expands at each command, so one made later is hidden too (measured:
+    // read before). The run's own checkout among them is bound back as its cwd (measured), as under a whole place.
+    if (holdsMain(place)) {
+      if (!coordinator) continue;
+      const main = coordinator.main;
+      if (main) {
+        const first = relative(resolve(place), resolve(main)).split('/')[0] ?? '';
+        if (first.startsWith(WORKTREE_NAME_PREFIX)) return { error: `the main checkout ${main} lies under ${join(place, first)}, whose name matches the engine's worktree names (${WORKTREE_NAME_PREFIX}*) in its worktree root ${place}, so they can't be hidden without hiding it` };
+      }
+      // A cwd below its own checkout would bring back only itself: then the names are left to the per-checkout entries.
+      const named = (p: string) => {
+        const rel = relative(resolve(place), resolve(p));
+        return rel !== '' && !rel.startsWith('..') && !isAbsolute(rel) && rel.split('/')[0]!.startsWith(WORKTREE_NAME_PREFIX);
+      };
+      if (!own.some(named) || ownIsCwd) whole.push(join(resolve(place), `${WORKTREE_NAME_PREFIX}*`));
+      continue;
+    }
     // Never made here (round 14): a place may come from a config the run's agent can write, and this runs as the
     // coordinator, outside any sandbox (round 13 made one under .git/hooks, measured). The coordinator makes its own
     // places at its start (src/coordinator/recovery.ts); one that isn't there is left to the per-pattern globs.
@@ -102,6 +119,8 @@ function siblingCheckouts(linked: string[], places: string[], own: string[], kee
       entries = readdirSync(place, { withFileTypes: true });
     } catch (e) {
       const code = (e as NodeJS.ErrnoException).code;
+      // The coordinator's own place must be there (round 16, R2: fail closed): its runner makes it again before this.
+      if (coordinator && (code === 'ENOENT' || code === 'ENOTDIR')) return { error: `${place}, the coordinator's own place for task worktrees, isn't there (${code}), so a worktree made there couldn't be hidden` };
       if (code === 'ENOENT' || code === 'ENOTDIR') continue;
       return { error: `${place}, where task checkouts are made, can't be listed (${code ?? firstLine(e)}), so the other checkouts there can't be hidden` };
     }
@@ -660,7 +679,7 @@ export function runReadDenials(o: { cwd: string; home: string | undefined; taskF
   // coordinator makes no worktree there. Without the coordinator's (a runner built outside an instance), the configs'.
   const taskPlaces = o.places ? [...new Set(o.places.map((p) => resolve(p)))] : configPlaces;
   // Every other task checkout is hidden whole (the owner's decision, round 10), always: see siblingCheckouts.
-  const other = siblingCheckouts(repo.linked, taskPlaces, [root, ...repo.checkouts.slice(0, 1)], [...(main ? [main] : []), ...(repo.common ? [repo.common] : []), ...(o.taskFile ? [o.taskFile] : [])], o.cwd);
+  const other = siblingCheckouts(repo.linked, taskPlaces, [root, ...repo.checkouts.slice(0, 1)], [...(main ? [main] : []), ...(repo.common ? [repo.common] : []), ...(o.taskFile ? [o.taskFile] : [])], o.cwd, o.places ? { main } : null);
   if ('error' in other) return other;
   const { siblings } = other;
   // F2 (round 14): an object store must never sit in another checkout or a place: one there (an alternates line a
