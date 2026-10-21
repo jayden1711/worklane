@@ -166,6 +166,7 @@ const paths = (p: string[]) => `${p.slice(0, 3).map(shown).join(', ')}${p.length
  * invisible or format character, or one whose top-level name isn't ASCII (review.ts ODD_PATH_CATEGORIES), and a
  * .gitattributes mark that hides a file's diff (review.ts DIFF_HIDING_ATTRIBUTES), whatever any list says.
  */
+// check-table: never-shrink
 const FLOOR = [...Object.keys(LOCKED_CATEGORIES), ...ODD_PATH_CATEGORIES, DIFF_HIDING_ATTRIBUTES];
 
 /**
