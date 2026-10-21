@@ -4,6 +4,7 @@
 import { spawn } from 'node:child_process';
 import { BRAND } from './brand.js';
 import { asUser, killTreeAs, spawnDetached } from './os/index.js';
+import { ownEnv } from './os/own-env.js';
 import { safeProjectEnv } from './project-env.js';
 import { providerRefusal, type CliAgentName } from './providers.js';
 import { RunFeed } from './run-feed.js';
@@ -244,7 +245,7 @@ export interface CliAgentOptions {
 
 /** INVARIANT: through sudo as the agent user, its environment passed explicitly (env -i); sudo itself gets only PATH. */
 export function cliAgentCommand(user: string, file: string, args: string[], env: NodeJS.ProcessEnv): [file: string, args: string[], env: NodeJS.ProcessEnv] {
-  return [...asUser(user, file, args, env), { PATH: env.PATH ?? '' }];
+  return [...asUser(user, file, args, env), { PATH: ownEnv(env).get('PATH') ?? '' }];
 }
 
 const SUDO_EXEC: NonNullable<CliAgentOptions['exec']> = {
@@ -280,7 +281,7 @@ export class CliAgentRunner implements AgentRunner {
   private runOnce(req: RunRequest, runAs: RunAs): Promise<RunResult> {
     const prices = (req.provider as Extract<RunRequest['provider'], { kind: 'cli' }>).usdPerMtok;
     const env = runAsEnv(
-      agentEnv(this.o.base ?? process.env, 'cli', {
+      agentEnv(ownEnv(this.o.base), 'cli', {
         ...safeProjectEnv(req.env),
         ...identityEnv(this.o.identity ?? DEFAULT_COMMIT_IDENTITY),
         [`${BRAND.envPrefix}_ROLE`]: req.role,

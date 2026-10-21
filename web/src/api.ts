@@ -245,7 +245,23 @@ export interface CheckRun {
   stage: string;
   head: string;
   checks: { check: string; status: 'pass' | 'fail' | 'unavailable' | 'skipped' | string; exitCode: number | null; tail: string | null }[];
+  forViewer?: undefined;
 }
+
+/**
+ * The same run as a viewer gets it (src/checks-viewer.ts, #837): each check's name and result only, no head, exit
+ * codes or output.
+ */
+export interface ViewerCheckRun {
+  id: number;
+  at: string;
+  stage: string;
+  checks: { check: string; status: string }[];
+  forViewer: true;
+}
+
+/** GET /api/checks?issue=n as served: the owners' and writers' runs whole, a viewer's in its own shape. */
+export type ServedCheckRun = CheckRun | ViewerCheckRun;
 
 /** A goal's task graph (GET /api/goal-graph?issue=n, src/goal-graph.ts): `from` finishes before `to` starts. */
 export interface GoalGraph {
@@ -418,7 +434,13 @@ export interface AcceptedMerge {
 }
 
 /** An admin resumes auto-merge (the stop file goes; audited). */
-export const clearAutoMergeStop = () => api<{ ok: boolean }>('/api/auto-merge/clear', { method: 'POST', body: '{}' });
+/**
+ * Resume auto-merge. A stop the default branch caused is a recorded request (`how: 'requested'`, #776 on #727): the
+ * coordinator resumes once main is green under the pinned-source verdict, or on `acknowledge`, a typed reason; `message`
+ * says so, with the coordinator's last measurement if one is recorded.
+ */
+export const clearAutoMergeStop = (acknowledge?: { reason: string }) =>
+  api<{ ok: boolean; how: 'as_before' | 'requested'; acknowledged?: boolean; message?: string }>('/api/auto-merge/clear', { method: 'POST', body: JSON.stringify(acknowledge ? { acknowledge } : {}) });
 
 /** What the accept field names: `#22` or `22` is a PR (a sha is at least 7 hex characters), anything else a sha. */
 export function acceptTarget(text: string): { pr: number } | { sha: string } {
@@ -889,6 +911,8 @@ export class ApiError extends Error {
   constructor(
     message: string,
     readonly status: number,
+    /** The refusal's JSON body, when it had one. */
+    readonly body: Record<string, unknown> = {},
   ) {
     super(message);
     this.name = 'ApiError';
@@ -902,7 +926,7 @@ async function answer<T>(res: Response): Promise<T> {
   if (!res.ok) {
     // A proxy's 502 page is no JSON: its status still says what it was.
     const body = (await res.json().catch(() => ({}))) as { error?: string };
-    throw new ApiError(body.error ?? `HTTP ${res.status}`, res.status);
+    throw new ApiError(body.error ?? `HTTP ${res.status}`, res.status, body);
   }
   return (await res.json()) as T;
 }

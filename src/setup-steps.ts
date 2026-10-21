@@ -31,6 +31,7 @@ import { modelWarnings } from './model-routing.js';
 import { ENGINE_CURRENT, UPDATES_CONFIG } from './updates.js';
 import { instanceRuntime, instanceUnit, localServiceEnv, serviceLabel } from './service.js';
 import { asRoot, etcPath, unitPath } from './os/system-paths.js';
+import { ownEnv } from './os/own-env.js';
 import { ciChoiceProblem } from './ci-choice.js';
 import { CI_NONE_MEANS, ciIsNone, requiredFor } from './ci-none.js';
 import { parse as parseYaml } from 'yaml';
@@ -464,8 +465,8 @@ export function detectClaudeLogin(p: Pick<SetupProbe, 'which' | 'run' | 'service
   const shown = method.replace(/[^A-Za-z0-9._-]/g, '?').slice(0, 40);
   const how = `signed in${method !== 'unknown' ? ` (${shown})` : ' with no login method named'}, per \`claude auth status\`${managerNote}`;
   if (!RUNTIME_LOGINS[runtime.kind].includes(method)) return refuse(`${how}, but the agents would refuse it: ${needs}, so every run would stop with auth_mismatch`);
-  // Never a key's value in the cache key.
-  const identity = JSON.stringify([runtime.kind, method, parsed?.email ?? null, parsed?.orgId ?? null, fromManager, mgr.env.CLAUDE_CONFIG_DIR ?? null]);
+  // Never a key's value in the cache key. WHY (#786): the manager's own CLAUDE_CONFIG_DIR, never Object.prototype's.
+  const identity = JSON.stringify([runtime.kind, method, parsed?.email ?? null, parsed?.orgId ?? null, fromManager, ownEnv(mgr.env).get('CLAUDE_CONFIG_DIR') ?? null]);
   const prove = () => proveClaudeLogin({ run: (cmd, args) => p.run(cmd, args, as) });
   const proof = memo ? memo(identity, prove) : prove();
   return fixed(proof.done ? ok(`${how}; ${proof.detail}`) : no(`${how}, but the API refused it: ${proof.detail}`));

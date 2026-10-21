@@ -582,6 +582,55 @@ ensure_instance_home() {
   ' "$name" "$SRV_ROOT/$name/${repo#*/}" "$repo" "$(home_of "wl-$name-agent")"
 }
 
+# An instance's policy.yaml, root's (issue #726): the engine, as root, makes it root's 0644 with its content kept (read
+# without following a link the coordinator could plant), records it in $POLICY_ROOT_DIR, and prints the isolation and
+# merge keys for whoever runs setup to check. From then on the engine refuses it if it stops being root's.
+POLICY_ROOT_DIR=/etc/worklane/policy-root
+# Whether root's kill switch turns instance $1's auto_merge off, as the engine reads it (src/policy-kill.ts
+# autoMergeKilled): its id pointer <name>.id names by_id/<id>/, and any auto-merge-off* there is off. Fail closed: a
+# pointer that isn't a plain file or holds no id, an id directory missing or unlistable, or a taken-over instance (its
+# record there) with no pointer, all count as off.
+auto_merge_killed() {
+  local p="$POLICY_ROOT_DIR/$1.id" id f
+  if [ ! -e "$p" ] && [ ! -L "$p" ]; then
+    [ ! -e "$POLICY_ROOT_DIR" ] || ls -A -- "$POLICY_ROOT_DIR" >/dev/null 2>&1 || return 0
+    [ -e "$POLICY_ROOT_DIR/$1" ] && return 0
+    return 1
+  fi
+  [ -f "$p" ] && [ ! -L "$p" ] || return 0
+  id="$(head -c 64 -- "$p" 2>/dev/null | tr -d '[:space:]')" || return 0
+  [[ "$id" =~ ^[0-9a-f]{32}$ ]] || return 0
+  ls -A -- "$POLICY_ROOT_DIR/by_id/$id" >/dev/null 2>&1 || return 0
+  for f in "$POLICY_ROOT_DIR/by_id/$id"/auto-merge-off*; do
+    if [ -e "$f" ] || [ -L "$f" ]; then return 0; fi
+  done
+  return 1
+}
+# A rename's start (instance-rename.sh): instance $2's id pointer holds $1's id (made, with its spare, if $1 had none),
+# so the two names are one instance's switches: a rename never carries, forwards or moves one (#726 round 9).
+instance_alias() { "$ENGINE_CLI" policy alias "$1" "$2"; }
+# The id instance $1's pointer holds, or nothing (instance-remove.sh: its id directory goes once no pointer names it).
+instance_id_of() { local id; id="$(head -c 64 -- "$POLICY_ROOT_DIR/$1.id" 2>/dev/null | tr -d '[:space:]')" || true; [[ "$id" =~ ^[0-9a-f]{32}$ ]] && echo "$id"; return 0; }
+# Whether any instance's pointer still names id $1.
+id_in_use() { local f; for f in "$POLICY_ROOT_DIR"/*.id; do [ -f "$f" ] && [ "$(head -c 64 -- "$f" | tr -d '[:space:]')" = "$1" ] && return 0; done; return 1; }
+# Never with a flag: the machine helper reaches this as root (add-project's rerun), so it takes over only what the
+# coordinator could have set itself, or what root wrote; anything else is an admin's, at a root shell, with one of
+# policy own's flags, which no script here passes. test/policy-edit.test.ts holds this line, and that, as they are.
+own_policy() { "$ENGINE_CLI" policy own "$1"; }
+# A rename (instance-rename.sh): when the old name's policy.yaml was root's, the new name's is too, its content as
+# carried. The old name's record goes under the new name first, so `policy own` takes the carried file as content root
+# wrote (its sha256 is the record's), with no flag; one that changed since root wrote it is refused, the rename stops.
+# Root's auto_merge kill switches need nothing here: both names share one id from the rename's start (instance_alias).
+carry_policy_root() {
+  [ -f "$POLICY_ROOT_DIR/$1" ] || return 0
+  install -m 0644 "$POLICY_ROOT_DIR/$1" "$POLICY_ROOT_DIR/$2"
+  own_policy "$2"
+}
+# Whether instance $1's policy.yaml ($2) is root's already, as recorded: a regular file root's, 0644, one name, and the
+# engine's own gate would read it (`policy check`: the recorded file, with what root last wrote there). So the policy
+# step is done exactly when the coordinator can start on it; an earlier root file put back runs the step again.
+policy_root_ok() { [ -f "$POLICY_ROOT_DIR/$1" ] && [ ! -L "$2" ] && [ "$(stat -c '%u %a %h' -- "$2" 2>/dev/null)" = "0 644 1" ] && "$ENGINE_CLI" policy check "$1" >/dev/null 2>&1; }
+
 # Every user an instance's agents or evals run as (each coordinator's instance.yaml run_as), one per line: never
 # a GPU lock's holder (testrun-gpu.sh) or a member of the GPU's device group (gpu-devices.sh).
 run_as_users() {
