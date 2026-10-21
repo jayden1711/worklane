@@ -156,28 +156,37 @@ export const ISOLATED = Symbol.for('test-isolation');
 //
 // INVARIANT: in every test process (POSIX), node:child_process's spawn, spawnSync, execFile, execFileSync, exec,
 // execSync and fork (execFile's and exec's promisified forms too, and every caller of them: the engine's
-// src/os/child-process.ts reads the live exports) start their child with:
+// src/os/child-process.ts reads the live exports), and process.execve, start their child with:
 //   - first on its PATH, a directory of recording stand-ins for each host tool (HOST_TOOL_NAMES) that PATH would find
 //     on the machine: in a directory that isn't the test's own (inside this test machine or the repo), or through a
 //     test's own file whose real path leaves them (a link to the machine's tool). Relative and empty entries are
 //     resolved against the child's cwd first. A tool the machine lacks stays missing; a test's own stand-in answers;
-//   - for a host tool given by path outside the test's own directories: a refusal (thrown) when a test file asked, its
-//     stand-in when the engine's own code did (doctor finds gitleaks on PATH and runs it by path);
-//   - a refusal for `env -i` (or `-u PATH`) with no PATH, and for `command -p` or a login shell, each when the command
-//     line runs a host tool as a command;
-//   - the stand-ins first in any PATH handed to `env`.
+//   - for a host tool given by path outside the test's own directories (the file, fork's execPath, a `shell` option,
+//     process.execve's file): a refusal (thrown) when a test file asked, its stand-in when the engine's own code did
+//     (doctor finds gitleaks on PATH and runs it by path). From a test file, also any argument, or any word of a
+//     command line, that is such a path (`env /usr/bin/sudo`, `timeout 5 /usr/bin/sudo`, `sh -c '/usr/bin/sudo'`);
+//   - a refusal for `env -i` (or `-u PATH`) with no PATH=, `command -p` and a login shell, each when a host tool's name
+//     is a word of the command line (a path that only ends in one, ~/.config/gh, is not);
+//   - the stand-ins first in a PATH= given to `env` as an argument.
+// Arguments that aren't strings are made strings, as Node makes them, before any of this.
 // Each stand-in records its call (hostCalls()) and exits 1, as a tool that can't answer; it runs nothing else.
-// process.binding's spawn_sync and process_wrap are refused. The pinned exceptions, never-grow: the files in
-// REAL_HOST_TOOLS_ON_PURPOSE start their children untouched, and machineTool() hands the machine's own tool to the
-// CI acceptance runs in MACHINE_TOOLS_ON_PURPOSE; both are checked against the calling file at run time.
+// process.binding's spawn_sync and process_wrap are refused. The pinned exceptions, never-grow, are keyed to this
+// test process's own test file (process.argv[1] when this preload ran, never a stack frame's name) and hold on CI only
+// (GITHUB_ACTIONS=true when this preload ran): the file in REAL_HOST_TOOLS_ON_PURPOSE starts its children untouched,
+// and machineTool() hands the CI acceptance runs in MACHINE_TOOLS_ON_PURPOSE the machine's own tool, found on this
+// process's PATH as loaded. Off CI, machineTool gives the stand-in, so a developer machine never runs the real tool.
 //
 // LIMIT: what a child does with its own PATH is its own. A script that sets PATH itself (several root scripts export
-// /usr/sbin:/usr/bin:...; claude-account.sh appends /usr/sbin; worklane-testrun.sh and ci-runner/reset.sh reset it), a
-// login shell or `env -i` whose command line names no host tool (it calls a function that does), or a script that names
-// a tool by absolute path, finds the machine's tool past this. So does code that replaces these builtins or patches
-// the exports after load, a Worker (its own module instances), child_process.ChildProcess used directly, or a link to a
-// tool that is under no host tool's name and on no PATH. `id` and `getent` are not stood in: they only read the user
-// database, and scripts use their answers.
+// /usr/sbin:/usr/bin:...; claude-account.sh appends /usr/sbin; worklane-testrun.sh and ci-runner/reset.sh reset it),
+// an inline PATH= in a command line (`env PATH=/usr/bin sudo` in a shell line, `PATH=/usr/bin:/bin; sudo`), a login
+// shell or `env -i` whose command line names no host tool (it calls a function that does), or a tool named by path
+// inside a script file, finds the machine's tool past this. A child Node process without this preload inherits the
+// stand-ins on its PATH but none of the refusals, and a PATH it sets itself gets no stand-ins. So does code that runs
+// before this preload (an --import or --require ahead of it keeps the raw functions), code that replaces these
+// builtins or patches the exports after load, a Worker (its own module instances), child_process.ChildProcess used
+// directly, or a link to a tool that is under no host tool's name and on no PATH. Which caller asked (a test file or
+// the engine) is read from the stack, which code can name (vm's filename): that only chooses between a refusal and a
+// stand-in. `id` and `getent` are not stood in: they only read the user database, and scripts use their answers.
 
 /**
  * Every host tool a test must never run for real: test/host-tools.ts HOST_TOOLS but gitleaks, and more. gitleaks
@@ -228,6 +237,16 @@ const SHELLS = new Set(['sh', 'bash', 'dash', 'zsh', 'ksh', 'ash']);
 const MACHINE_DIRS = ['/usr/local/sbin', '/usr/local/bin', '/usr/sbin', '/usr/bin', '/sbin', '/bin'];
 /** This process's PATH as the shell gave it, before any test changes it. */
 const PATH_AT_LOAD = process.env.PATH ?? '';
+/** Whether this process runs on CI, as this preload found it (a test can't turn the exceptions on later). */
+const ON_CI = process.env.GITHUB_ACTIONS === 'true';
+/** The test file this process runs (test/x.test.ts), from its own argv as this preload found it; null if none. */
+const TEST_FILE = (() => {
+  const main = process.argv[1];
+  if (!main) return null;
+  const rel = relative(REPO, resolve(main)).split(sep).join('/');
+  const built = /^dist\/(test\/.+\.test)\.js$/.exec(rel);
+  return built ? `${built[1]}.ts` : null;
+})();
 
 /** The stand-ins: inside this test machine, made on first use, one directory per set of tools. */
 export const standInRoot = join(testMachine, 'host-tools');
@@ -372,20 +391,37 @@ function callerFile(): string | null {
 }
 
 /**
- * The machine's own `tool`, by its absolute path, for a pinned CI acceptance run (MACHINE_TOOLS_ON_PURPOSE: refused
- * from any other file). With none on the machine, the bare name, which a child resolves through the stand-ins (or not
- * at all), so the run skips as on a machine without it.
+ * What machineTool(`tool`) gives in a process running `testFile`, on CI or not, with `path` as its PATH when the
+ * preload ran: a refusal for a file MACHINE_TOOLS_ON_PURPOSE doesn't pin; off CI, the tool's stand-in; on CI, the
+ * machine's own, found on that PATH alone (its entries that aren't the test's own, as a bare name found it before
+ * #991: never more), or the bare name where it has none, which a child resolves through the stand-ins.
+ */
+export function machineToolFor(tool: string, testFile: string | null, onCi: boolean, path: string): { kind: 'refused' | 'stand-in' | 'machine'; file: string } {
+  if (testFile === null || !MACHINE.has(`${testFile} ${tool}`)) return { kind: 'refused', file: tool };
+  if (!onCi || !TOOLS.has(tool)) return { kind: 'stand-in', file: join(standInsFor([...HOST_TOOL_NAMES].sort()), TOOLS.has(tool) ? tool : 'sudo') };
+  return { kind: 'machine', file: findOn(tool, path.split(':').filter((d) => isAbsolute(d) && !isOwn(d))) ?? tool };
+}
+/** The machine's own paths machineTool handed out: started untouched (on CI, in the pinned file's process). */
+const issued = new Set<string>();
+
+/**
+ * The machine's own `tool`, by its absolute path, for a pinned CI acceptance run (MACHINE_TOOLS_ON_PURPOSE, keyed to
+ * this process's test file; refused for any other). Off CI, its stand-in. On CI with none on this process's PATH, the
+ * bare name, so the run skips as on a machine without it.
  */
 export function machineTool(tool: string): string;
 /**
  * The same pin, for engine code the run calls (it starts `tool` by name): while `run` runs (synchronously), a child
- * started by that name gets the machine's own; every other host tool is still a stand-in. Returns what `run` returns.
+ * started by that name gets the machine's own (on CI); every other host tool is still a stand-in. Returns what `run`
+ * returns.
  */
 export function machineTool<T>(tool: string, run: () => T): T;
 export function machineTool<T>(tool: string, run?: () => T): string | T {
-  const caller = callerFile();
-  if (caller === null || !MACHINE.has(`${caller} ${tool}`)) refuse(`machineTool('${tool}') from ${caller ?? 'an unknown file'}, which MACHINE_TOOLS_ON_PURPOSE doesn't pin`);
-  if (!run) return findOn(tool, machineDirs()) ?? tool;
+  const got = machineToolFor(tool, TEST_FILE, ON_CI, PATH_AT_LOAD);
+  if (got.kind === 'refused') refuse(`machineTool('${tool}') in ${TEST_FILE ?? 'a process with no test file'}, which MACHINE_TOOLS_ON_PURPOSE doesn't pin`);
+  if (got.kind === 'machine' && got.file.includes('/')) issued.add(got.file);
+  if (!run) return got.file;
+  if (got.kind !== 'machine') return run();
   const had = byName.has(tool);
   byName.add(tool);
   try {
@@ -394,19 +430,50 @@ export function machineTool<T>(tool: string, run?: () => T): string | T {
     if (!had) byName.delete(tool);
   }
 }
-/** The tools a pinned machineTool(tool, run) lets through by name, while its run runs. */
+/** The tools a pinned machineTool(tool, run) lets through by name, while its run runs (on CI). */
 const byName = new Set<string>();
 
+/** A shell option word that takes the script next (-c, -lc, -ec ...). */
+const SCRIPT_OPTION = /^-[a-zA-Z]*c[a-zA-Z]*$/;
 /**
- * A host tool as a command in a shell command line: at its start, after ; & | ( ` $( or a quote (a script handed to
- * another shell), or after a word that runs the next one (env with its options and assignments, command, exec, sudo,
- * nohup, time, xargs, then, do, else), by name or by path. A path that only ends in a tool's name as an argument
- * (~/.config/gh) is not one.
+ * A command line's words, as a shell splits them: on blanks and its operators, a quoted part staying in its word (a
+ * message that mentions `sudo -u` is one word). The quoted script after -c is a command line of its own: its words
+ * too. $( and ` split as operators, so `$(sudo x)` gives `sudo`.
  */
-const HOST_COMMAND = new RegExp(
-  `(?:^|[;&|(\`'"\\n]|\\$\\(|\\b(?:then|do|else|exec|nohup|time|xargs|sudo|command(?:\\s+-[a-zA-Z]+)*|env(?:\\s+-\\S+|\\s+[A-Za-z_]\\w*=\\S*)*))\\s*(?:/\\S*/)?(?:${HOST_TOOL_NAMES.map((t) => t.replace(/-/g, '\\-')).join('|')})(?=$|[\\s;&|)\`'"])`,
-);
-const namesHostTool = (text: string) => HOST_COMMAND.test(text);
+function shellWords(text: string): string[] {
+  const out: string[] = [];
+  let word = '';
+  const flush = () => {
+    if (word) out.push(word);
+    word = '';
+  };
+  for (let i = 0; i < text.length; ) {
+    const c = text[i]!;
+    if (c === "'" || c === '"') {
+      const end = text.indexOf(c, i + 1);
+      const body = end < 0 ? text.slice(i + 1) : text.slice(i + 1, end);
+      if (word === '' && SCRIPT_OPTION.test(out.at(-1) ?? '')) out.push(...shellWords(body));
+      else word += body;
+      i = end < 0 ? text.length : end + 1;
+      continue;
+    }
+    if (/[\s;&|()<>`!{}]/.test(c)) flush();
+    else word += c;
+    i++;
+  }
+  flush();
+  return out;
+}
+/** The words of an argument list: each argument one word, but the script after -c split as a command line. */
+const argWords = (argv: readonly string[]) => argv.flatMap((a, i) => (i > 0 && SCRIPT_OPTION.test(argv[i - 1]!) ? shellWords(a) : [a]));
+/**
+ * Whether a host tool's name is a word of a command line, wherever it stands (`if sudo`, `! sudo`, `timeout 5 sudo`,
+ * `env -i sudo`). A path that only ends in one (~/.config/gh) is not: its word is the whole path.
+ */
+const namesHostTool = (ws: readonly string[]) => ws.some((w) => TOOLS.has(w.replace(/^\$/, '')));
+/** The words (or an assignment's value) that are a host tool by path outside the test's own directories. */
+const hostToolPaths = (ws: readonly string[], cwd: string) =>
+  ws.map((w) => w.replace(/^[A-Za-z_]\w*=/, '')).filter((w) => w.includes('/') && !/\s/.test(w) && hostToolPath(resolve(cwd, w)));
 
 /** A shell's own options, up to its script (-c's argument) or its first operand. */
 function shellOptions(args: readonly string[]): string[] {
@@ -427,8 +494,8 @@ function shellOptions(args: readonly string[]): string[] {
 }
 
 /** Refuses a shell command line that would search past the stand-ins for a host tool it names. */
-function checkShellLine(form: string, text: string, options: readonly string[]): void {
-  if (!namesHostTool(text)) return;
+function checkShellLine(form: string, text: string, options: readonly string[], ws: readonly string[]): void {
+  if (!namesHostTool(ws)) return;
   const at = '(^|[\\s;&|(`\'"])';
   const login = options.some((o) => o === '--login' || /^-[a-zA-Z]*l[a-zA-Z]*$/.test(o)) || new RegExp(`${at}(\\S*/)?(ba|da|z|k|a)?sh\\s+(-[a-zA-Z]+\\s+)*(-[a-zA-Z]*l[a-zA-Z]*|--login)(\\s|$)`).test(text);
   const pathless = new RegExp(`${at}command\\s+-[a-zA-Z]*p`).test(text);
@@ -470,8 +537,8 @@ function envArguments(form: string, argv: string[], cwd: string): string[] {
   }
   const rest = out.slice(i);
   const text = [split, ...rest].join(' ');
-  if (clears && !path && namesHostTool(text)) refuse(`${form} env: a cleared PATH (env -i or -u PATH) and no PATH= for ${rest[0] ?? split}, which names a host tool`);
-  if (rest.length && SHELLS.has(basename(rest[0]!))) checkShellLine(form, rest.slice(1).join(' '), shellOptions(rest.slice(1)));
+  if (clears && !path && namesHostTool([...shellWords(split), ...argWords(rest)])) refuse(`${form} env: a cleared PATH (env -i or -u PATH) and no PATH= for ${rest[0] ?? split}, which names a host tool`);
+  if (rest.length && SHELLS.has(basename(rest[0]!))) checkShellLine(form, rest.slice(1).join(' '), shellOptions(rest.slice(1)), argWords(rest.slice(1)));
   return out;
 }
 
@@ -482,38 +549,55 @@ type Options = Record<string, unknown>;
  * machineTool run). `line`: `command` is a shell command line (exec, execSync), not a file.
  */
 function guard(form: string, command: unknown, args: readonly unknown[], options: unknown, line: boolean): { file: string; args: string[]; options: Options } | null {
-  if (typeof command !== 'string' || !args.every((a) => typeof a === 'string')) return null; // Node refuses it as before
+  if (typeof command !== 'string') return null; // Node refuses a file that isn't a string, as before
   if (options !== undefined && options !== null && (typeof options !== 'object' || Array.isArray(options))) return null;
+  // The pinned file's own process, on CI: untouched, as before #991 (keyed to the process, not to a stack frame).
+  if (ON_CI && TEST_FILE !== null && REAL.has(TEST_FILE)) return null;
+  // Arguments as Node makes them: never left untouched for not being strings (a numeric uid, a port).
+  let argv = args.map((a) => (typeof a === 'string' ? a : String(a)));
   const caller = callerFile();
-  if (caller !== null && REAL.has(caller)) return null;
-  if (!line && byName.size && byName.has(command) && !(options as Options | undefined)?.shell) return null;
+  const fromTest = caller === null || caller.startsWith('test/');
   const o = (options ?? {}) as Options;
+  if (!line && ON_CI && byName.size && byName.has(command) && !o.shell) return null;
   const cwd = typeof o.cwd === 'string' ? resolve(o.cwd) : o.cwd instanceof URL ? fileURLToPath(o.cwd) : process.cwd();
-  const shell = line || Boolean(o.shell);
-  let argv = args as string[];
+  /** A host tool by path: null when it is none; the pinned machine path, untouched; else refused, or its stand-in. */
+  const byPath = (given: string): string | null => {
+    const path = resolve(cwd, given);
+    if (!hostToolPath(path)) return null;
+    if (ON_CI && issued.has(given)) return given;
+    const real = realOr(path);
+    const tool = [basename(path), basename(real)].find((n) => TOOLS.has(n)) ?? machineTools().get(real) ?? basename(path);
+    // A test file is told; the engine's own code (doctor resolving gitleaks on PATH, say) gets the stand-in, as it
+    // would by name.
+    if (fromTest || !TOOLS.has(tool)) refuse(`${form} ${given}: the machine's own ${tool}, by path`);
+    return join(standInsFor([...HOST_TOOL_NAMES].sort()), tool);
+  };
   let file = command;
-  if (shell) checkShellLine(form, [command, ...argv].join(' '), []);
+  const shellOption = typeof o.shell === 'string' && o.shell.includes('/') ? byPath(o.shell) : null;
+  if (shellOption !== null && issued.has(shellOption)) return null;
+  const shell = line || Boolean(o.shell);
+  if (shell) checkShellLine(form, [command, ...argv].join(' '), [], shellWords([command, ...argv].join(' ')));
   else {
     if (command.includes('/')) {
-      const path = resolve(cwd, command);
-      if (hostToolPath(path)) {
-        const real = realOr(path);
-        const tool = [basename(path), basename(real)].find((n) => TOOLS.has(n)) ?? machineTools().get(real) ?? basename(path);
-        if (caller !== null && MACHINE.has(`${caller} ${tool}`)) return null;
-        // A test file is told; the engine's own code (doctor resolving gitleaks on PATH, say) gets the stand-in, as it
-        // would by name.
-        if (caller === null || caller.startsWith('test/') || !TOOLS.has(tool)) refuse(`${form} ${command}: the machine's own ${tool}, by path`);
-        file = join(standInsFor([...HOST_TOOL_NAMES].sort()), tool);
-      }
+      const swapped = byPath(command);
+      if (swapped !== null && issued.has(swapped)) return null; // the pinned acceptance run, as it was
+      if (swapped !== null) file = swapped;
     }
     const name = basename(command);
     if (name === 'env') argv = envArguments(form, argv, cwd);
-    else if (SHELLS.has(name)) checkShellLine(form, argv.join(' '), shellOptions(argv));
+    else if (SHELLS.has(name)) checkShellLine(form, argv.join(' '), shellOptions(argv), argWords(argv));
+  }
+  // From a test file, a host tool by path anywhere in its own arguments or command line (env, timeout, sh -c ...).
+  if (fromTest) {
+    const named = hostToolPaths(shell ? shellWords([command, ...argv].join(' ')) : argWords(argv), cwd);
+    if (named.length) refuse(`${form}: ${named[0]} in its command line: the machine's own ${basename(named[0]!)}, by path`);
   }
   const env = (o.env || process.env) as Record<string, string | undefined>;
   const childEnv = Object.assign(Object.create(Object.getPrototypeOf(env) as object | null) as Record<string, string | undefined>, env);
   childEnv.PATH = withHostStandIns(env.PATH, cwd);
-  const childOptions = Object.assign(Object.create(Object.getPrototypeOf(o) as object | null) as Options, o, { env: childEnv });
+  const extra: Options = { env: childEnv };
+  if (shellOption !== null) extra.shell = shellOption;
+  const childOptions = Object.assign(Object.create(Object.getPrototypeOf(o) as object | null) as Options, o, extra);
   return { file, args: argv, options: childOptions };
 }
 
@@ -578,11 +662,25 @@ if (POSIX) {
     },
     fork: function (this: unknown, modulePath: unknown, a?: unknown, b?: unknown) {
       const n = argsAndOptions(a, b);
-      const g = n && guard('fork', process.execPath, [], n[1], false);
-      return g ? raw.fork.call(this, modulePath, n![0], g.options) : raw.fork.call(this, modulePath, a, b);
+      // fork starts options.execPath (node by default): judged as the command.
+      const execPath = (n?.[1] as Options | undefined)?.execPath;
+      const g = n && guard('fork', typeof execPath === 'string' ? execPath : process.execPath, [], n[1], false);
+      if (!g) return raw.fork.call(this, modulePath, a, b);
+      if (typeof execPath === 'string' && g.file !== execPath) g.options.execPath = g.file;
+      return raw.fork.call(this, modulePath, n![0], g.options);
     },
   });
   syncBuiltinESMExports();
+  // process.execve (Node 22.15+) replaces this process with another program: judged as a spawn would be.
+  const proc = process as unknown as { execve?: (file: string, args?: readonly string[], env?: Record<string, string | undefined>) => never };
+  const rawExecve = proc.execve;
+  if (typeof rawExecve === 'function') {
+    proc.execve = function (file: string, args: readonly string[] = [], env: Record<string, string | undefined> = process.env) {
+      const g = guard('process.execve', file, args, { env }, false);
+      if (!g) return rawExecve.call(process, file, args, env);
+      return rawExecve.call(process, g.file, g.args, g.options.env as Record<string, string | undefined>);
+    };
+  }
   const binding = process as unknown as { binding: (name: string) => unknown };
   const rawBinding = binding.binding;
   binding.binding = function (name: string) {
@@ -594,6 +692,9 @@ if (POSIX) {
 /** For a test that must not import this module's names (test/script-host-tools.test.ts runs at commits without them). */
 (globalThis as Record<symbol, unknown>)[Symbol.for('test-host-tools')] = Object.freeze({
   installed: POSIX,
+  onCi: ON_CI,
+  testFile: TEST_FILE,
+  machineToolFor,
   standInRoot,
   hostCalls,
   hostToolPath,

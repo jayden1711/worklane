@@ -15,7 +15,9 @@ import { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync,
 import { tmpdir } from 'node:os';
 import { basename, join, relative } from 'node:path';
 import { test } from 'node:test';
+import { pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
+import vm from 'node:vm';
 import ts from 'typescript';
 import { spawnSync as engineSpawnSync } from '../src/os/child-process.js';
 import { repoRoot } from './helpers.js';
@@ -30,6 +32,8 @@ type Guard = {
   HOST_TOOL_NAMES: readonly string[];
   REAL_HOST_TOOLS_ON_PURPOSE: readonly string[];
   MACHINE_TOOLS_ON_PURPOSE: readonly string[];
+  testFile: string | null;
+  machineToolFor: (tool: string, testFile: string | null, onCi: boolean, path: string) => { kind: string; file: string };
 };
 function guard(): Guard {
   const g = (globalThis as Record<symbol, unknown>)[Symbol.for('test-host-tools')] as Guard | undefined;
@@ -148,6 +152,23 @@ test('#991: the ways past the stand-ins it can see are refused: a host tool by p
   refused(() => cp.spawnSync(`cd ${MISSING} && bash -l -c 'sudo -V'`, { shell: true }));
   refused(() => (process as unknown as { binding: (n: string) => unknown }).binding('spawn_sync'));
   refused(() => (process as unknown as { binding: (n: string) => unknown }).binding('process_wrap'));
+  // A host tool's name as any word under env -i, a login shell or command -p (#997 round 3: if, !, timeout).
+  refused(() => cp.spawnSync('env', ['-i', '-C', MISSING, 'sh', '-c', 'if sudo -V; then :; fi']));
+  refused(() => cp.spawnSync('env', ['-i', '-C', MISSING, 'timeout', '5', 'sudo', '-V']));
+  refused(() => cp.spawnSync('bash', ['-lc', `cd ${MISSING} && ! sudo -V`]));
+  refused(() => cp.spawnSync('bash', ['-lc', `cd ${MISSING} && if sudo -V; then :; fi`]));
+  refused(() => cp.execSync(`cd ${MISSING} && env -i sh -c 'type sudo'`));
+  refused(() => cp.spawnSync('sh', ['-c', `cd ${MISSING} && command -p timeout 5 sudo -V`]));
+  // A host tool by path anywhere in a test's own command: an operand, a word of a command line, a shell, fork's
+  // execPath, process.execve (#997 round 3, N2-N4, N6).
+  refused(() => cp.spawnSync('env', ['-C', MISSING, `${MISSING}/sudo`, '-V']));
+  refused(() => cp.spawnSync('timeout', ['5', `${MISSING}/sudo`, '-V']));
+  refused(() => cp.spawnSync('sh', ['-c', `cd ${MISSING} && ${MISSING}/systemctl --version`]));
+  refused(() => cp.execSync(`cd ${MISSING} && ${MISSING}/sudo -V`));
+  refused(() => cp.spawnSync('-V', { shell: `${MISSING}/sudo` }));
+  refused(() => cp.fork(join(tmpdir(), 'none.cjs'), [], { execPath: `${MISSING}/sudo`, execArgv: [] }));
+  const execve = (process as unknown as { execve?: (f: string, a: string[], e: Record<string, string>) => void }).execve;
+  if (typeof execve === 'function') refused(() => execve(`${MISSING}/sudo`, [`${MISSING}/sudo`, '-V'], {}));
   // The engine's own code naming a host tool by path gets its stand-in (recorded, exit 1), never the tool.
   const before = g.hostCalls().length;
   const byEngine = engineSpawnSync(`${MISSING}/sudo`, ['-n', 'true'], { encoding: 'utf8' });
@@ -171,6 +192,43 @@ test('#991: the ways past the stand-ins it can see are refused: a host tool by p
   const { machineTool } = (await import('./isolate.js')) as unknown as { machineTool?: (t: string) => string };
   assert.equal(typeof machineTool, 'function');
   refused(() => machineTool!('sudo'));
+});
+
+test("#991 round 3: an argument that isn't a string, and a caller named by vm, start nothing untouched; the exceptions are this process's, from its argv", { skip: !posix && 'POSIX' }, () => {
+  const g = guard();
+  // Resolution only: what the child's shell finds for sudo.
+  const sudoIs = (out: string) => (findOn('sudo', SYSTEM) === null ? out === 'none' : out.startsWith(`${g.standInRoot}/`));
+  const n1 = String(cp.spawnSync('sh', ['-c', 'command -v sudo || echo none', '_', 1 as unknown as string], { encoding: 'utf8', env: { PATH: SYSTEM } }).stdout).trim();
+  assert.ok(sudoIs(n1), `N1, a numeric argument: ${n1}`);
+  // N5: a frame that names itself setup-scripts.test.ts (the exempt file) or engine-update.test.ts (pinned for sudo).
+  const forged = join(repoRoot, 'dist', 'test', 'setup-scripts.test.js');
+  const run = vm.runInThisContext(`(cp, env) => String(cp.spawnSync('sh', ['-c', 'command -v sudo || echo none'], { encoding: 'utf8', env }).stdout).trim()`, { filename: forged }) as (c: typeof cp, e: object) => string;
+  const n5 = run(cp, { PATH: SYSTEM });
+  assert.ok(sudoIs(n5), `N5, a frame named setup-scripts.test.js: ${n5}`);
+  assert.equal(g.testFile, 'test/script-host-tools.test.ts', "the exceptions are keyed to this process's own test file");
+});
+
+test('#991 round 3: machineTool finds the tool only on the PATH this process started with, and only on CI; off CI it is the stand-in', () => {
+  const g = guard();
+  const pinned = 'test/engine-update.test.ts';
+  assert.deepEqual(g.machineToolFor('sudo', 'test/script-host-tools.test.ts', true, SYSTEM), { kind: 'refused', file: 'sudo' }, 'a file it doesn\'t pin');
+  assert.deepEqual(g.machineToolFor('sudo', null, true, SYSTEM).kind, 'refused', 'a process with no test file');
+  // Never MACHINE_DIRS: a PATH without the tool gives the bare name, which a child resolves through the stand-ins.
+  assert.deepEqual(g.machineToolFor('sudo', pinned, true, MISSING), { kind: 'machine', file: 'sudo' });
+  const there = findOn('sudo', SYSTEM);
+  if (there !== null) assert.deepEqual(g.machineToolFor('sudo', pinned, true, SYSTEM), { kind: 'machine', file: there });
+  // Off CI, the stand-in: a developer machine never runs the real tool.
+  const off = g.machineToolFor('sudo', pinned, false, SYSTEM);
+  assert.equal(off.kind, 'stand-in');
+  assert.ok(off.file.startsWith(`${g.standInRoot}/`) && basename(off.file) === 'sudo', off.file);
+});
+
+test('#991 round 3: the guard and its backstop are engine-guards, and a change to the preload runs the whole suite', async () => {
+  const review = readFileSync(join(repoRoot, '.worklane', 'review.yaml'), 'utf8');
+  const guards = review.slice(review.indexOf('engine-guards:'), review.indexOf('\nlevels:'));
+  for (const f of ['test/isolate.ts', 'test/host-tools.ts', 'test/script-host-tools.test.ts']) assert.match(guards, new RegExp(`^ {4}- ${f.replace(/[.]/g, '\\.')}$`, 'm'), f);
+  const affected = (await import(pathToFileURL(join(repoRoot, 'scripts', 'ci', 'affected.mjs')).href)) as { forceAll: (f: string) => string | null };
+  assert.ok(affected.forceAll('test/isolate.ts'), 'test/isolate.ts forces the whole suite');
 });
 
 // ---- The pins: who may take a real tool. ----
