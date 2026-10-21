@@ -57,6 +57,7 @@ export const INVISIBLE_CHARACTER_PATH = 'invisible-character-path';
 export const NON_ASCII_TOP_LEVEL_PATH = 'non-ascii-top-level-path';
 
 /** The categories of a path nothing should have to read around: always L3, always waits, never loosened. */
+// check-table: never-shrink
 export const ODD_PATH_CATEGORIES: readonly string[] = [CONTROL_CHARACTER_PATH, NON_UTF8_PATH, INVISIBLE_CHARACTER_PATH, NON_ASCII_TOP_LEVEL_PATH];
 
 /**
@@ -353,6 +354,7 @@ function onePartPerGlob(parts: { what: string; globs: string[] }[]): { what: str
  * first part a file matches names it. Every glob matches a real file in the engine's repo (a test checks).
  */
 export const SELF_MODIFICATION = 'self-modification';
+// check-table: never-shrink
 export const SELF_MODIFICATION_PARTS: { what: string; globs: string[] }[] = onePartPerGlob([
   { what: 'the merge policy', globs: ['src/merge-policy*', 'src/coordinator/merge-flow*', 'src/pr-rules*'] },
   { what: 'the main watch', globs: ['src/main-watch*', 'src/github/main-watch-api*'] },
@@ -466,6 +468,7 @@ export const SELF_MODIFICATION_PARTS: { what: string; globs: string[] }[] = oneP
   { what: 'the experiment studies', globs: [`${BRAND.configDir}/experiments.yaml`] },
 ]);
 
+// check-table: never-shrink
 export const LOCKED_CATEGORIES: Record<string, string[]> = {
   [AGENT_INSTRUCTIONS]: [`${BRAND.configDir}/roles/**`, `${BRAND.configDir}/skills/**`, 'AGENTS.md', '**/CLAUDE.md'],
   [SELF_MODIFICATION]: SELF_MODIFICATION_PARTS.flatMap((p) => p.globs),
@@ -487,6 +490,7 @@ export type LockScope = 'engine' | 'managed-app';
  * The engine's own source tree: a self-modification glob under it names an engine file, not a managed app's. deploy/ is
  * the engine's deployment manifests; a managed app's own deploy/ stays its deploy-config, as before.
  */
+// check-table: never-grow
 const ENGINE_TREE = ['src/', 'scripts/', 'test/', 'docs/', 'deploy/'];
 /**
  * The engine's own files at the top of its repo, glob for glob (#858): its security policy, its container image and its
@@ -494,6 +498,7 @@ const ENGINE_TREE = ['src/', 'scripts/', 'test/', 'docs/', 'deploy/'];
  * Dockerfile, Containerfile, compose file or deploy path keeps the categories its review.yaml gives it, as before.
  * Matched exactly, so no other glob stands aside through it.
  */
+// check-table: never-grow
 const ENGINE_ROOT_FILES = ['SECURITY.md', 'Dockerfile*', 'dockerfile*', 'Containerfile*', 'deploy', 'compose.*', 'docker-compose.*'];
 /**
  * Whether a locked glob names the engine's own source (so it holds only in the engine's repo). The decision records'
@@ -509,6 +514,7 @@ export function lockedCategories(scope: LockScope | undefined): Record<string, s
 }
 
 /** Locked categories that are always L3, whatever review.yaml's levels list. */
+// check-table: never-shrink
 const ALWAYS_L3 = [SELF_MODIFICATION];
 
 /** What a change to this path changes, in plain words (the self-modification part it falls in, in this scope), or null. */

@@ -1,3 +1,4 @@
+// lint-test
 // GPU test runs, the engine's side (src/testrun/gpu.ts, docs/test-runs.md "GPU"): root's file as the engine reads it
 // (planning and display only), the helper's line, the sandbox host's --gpu, doctor, the Machine page's view, the root
 // script that writes the file, and `gpu hold`. The helper's own side: test/testrun-gpu-helper.test.ts.

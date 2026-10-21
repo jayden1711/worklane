@@ -16,6 +16,7 @@ export const REQUIRED = {
 };
 
 /** More than REQUIRED that is still fine: the manifest the setup console posts asks for checks: write. */
+// check-table: never-grow
 export const ALLOWED_UP_TO = { checks: 'write' };
 
 /** Not needed to start, but a feature can't work without it. */

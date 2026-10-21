@@ -1,3 +1,4 @@
+// lint-test
 // WHY (#687): a test helper that reads the wall clock on every call (`const at = (s) => Math.floor(Date.now() / 1000)
 // + s`) gives two calls two clocks. test/github-budget-health.test.ts set a reset time with at(600) and expected
 // at(600) again later; when a second ticked in between, it failed. A test reads "now" once and reuses it, pins Date
@@ -14,6 +15,7 @@ import { join, relative, sep } from 'node:path';
 import { repoRoot } from './helpers.js';
 
 /** The clock-reading helpers each test file had when this check came in (#687), by file; only ever lowered. */
+// check-table: never-grow
 const ALLOWED: Record<string, number> = {
   'test/delegation-coordinator.test.ts': 2,
   'test/github-budget-health.test.ts': 1,
