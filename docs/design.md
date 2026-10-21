@@ -158,6 +158,92 @@ roles:
   - **Success is only reported after reading the copy back and comparing its checksum and its latest event id.** This is a day-one regression test (§17).
   - Optional off-machine push (e.g. to a private git branch or a bucket) is verified the same way: a remote read-back, not the exit code.
 
+## 5a. Signed receipts (#717)
+
+A signed receipt is a merge decision or merge result, signed and chained so that anyone holding the instance's public key can check it offline. These are not the claims receipts in the review packet (`src/receipts.ts`). Code: `src/signed-receipts*.ts`. Auditor guide: [receipts.md](receipts.md).
+
+**Status (slice 1).**
+- **Built:** the format, the chain, `<cli> receipts keygen|sign|rotate|verify`, and receipts for `merge.decided`, `merge.done` and `merge.failed`.
+- **Not yet root-signed.** `receipts sign` signs with whatever key file it's given, as whoever runs it, and says so in its output. Nothing installs or schedules a signer yet.
+- **Not yet recorded:** the merge record doesn't carry the policy commit, changed files, check run ids or level, so those fields are `null`.
+
+**Schema (v1).** A receipt's statement is canonical JSON: RFC 8785 for the values it holds (keys sorted, no whitespace, integers only). It carries `schema: "<cli>.receipt/v1"`, and a verifier refuses any version it doesn't know. A new field means a new version.
+- **Every receipt:** `seq`, `prev` and `at`.
+- **`chain.started`:** `key` (key id and SPKI).
+- **`key.rotated`:** `next` (the new key).
+- **`merge.decided`:**
+  - `instance` and `event` (the actor and event id from the log);
+  - `engine.version` (as the deciding coordinator announced it at start);
+  - `policy.commit`;
+  - `inputs`: issue, pr, head, `files` and `check_runs`;
+  - `decision`: auto, level, reasons and why.
+- **`merge.result`:** pr, head, merged, the merge `commit`, `reconciled`, `why`, and `decision`, which is the id of the chain's latest decision receipt for that head. A held PR may never merge, so the result is its own receipt rather than a field of the decision.
+- **`null` means the deciding engine didn't record it.** It's never filled in later from somewhere else.
+
+**Envelope.** Each statement is signed in a DSSE envelope (in-toto's format, reused rather than invented):
+- payload type `application/vnd.<cli>.receipt+json`;
+- the PAE encoding;
+- one ed25519 signature from Node's built-in crypto (no new dependency);
+- `keyid` = SHA-256 of the key's SPKI DER.
+
+Receipts are stored one envelope per line (JSON lines). They hold ids, hashes and reasons, never prompts, code or diffs, and they go through the redactor again before signing, even though the log already redacts on write.
+
+**Chain.** Each receipt's `prev` is the SHA-256 of the previous payload, and its `seq` is its position; the first receipt is `chain.started`. The verifier checks:
+- the first receipt was started by a key the auditor gave;
+- each `seq` and `prev`;
+- each signature, by the chain's current key;
+- event ids rise strictly;
+- each result names the latest decision for its head.
+
+This catches any receipt that was changed, reordered, inserted, or dropped from the start or middle. A dropped tail shows only against an anchor, a head kept from an earlier look (`--anchor`). A fork (a second chain from the same key) also shows only by comparing anchors.
+
+**Who signs (owner decision; see #737).** The coordinator can act as the agent user (`ALL=(agent) NOPASSWD: ALL`), so it must not hold the key:
+- **A. A key in the coordinator: rejected.** A compromised coordinator re-signs a forged chain from the start, and past receipts then prove nothing.
+- **B. The root machine helper signs what the coordinator sends** (a new sudoers verb). The key and the past stay safe. But root parses coordinator input on every decision, and what it signs is still the coordinator's word.
+- **C. Recommended: a signer identity of its own that reads the log read-only.** A dedicated system user, not root, that the coordinator has no sudo rule to (a setup test asserts this). It runs from a systemd path or timer unit (other OSes behind the OS adapter). It holds the only readable copy of the key and is the only writer of the receipts file. Its one input is the append-only log, so there is no new channel from the coordinator to it or to root. In pod mode it's a signer pod with the key in a Secret the coordinator's service account can't read, and the log volume mounted read-only.
+  - **C's cost:** it signs after the fact. Between a decision and its signing, a compromised coordinator could rewrite the log, since it owns the database file. A path unit on the log keeps that window short (inferred, not measured).
+- **Slice 1** ships the seam (`ReceiptSigner`) and the command. Installing C is slice 3. It touches setup scripts, so it belongs to Lane A.
+
+**Keys.**
+- **Generation and custody:** the customer makes the key on their own side, air-gapped if they want: `receipts keygen`, or any ed25519 PKCS#8 PEM. No online service is involved (#698 decision 9).
+- **Distribution:** the customer hands the public key to auditors out of band. A key that a receipts file declares about itself proves nothing.
+- **Signer list:** v1 has one signature per receipt. A list of signers from the customer's side is a later version (DSSE allows several).
+
+**Verify.** `<cli> receipts verify <file|dir> --key <pub> [--key <pub>]... [--anchor <id>]`. The command name comes from `BRAND`.
+- **Inputs:** only the receipts and the public key. No engine state, no network.
+- **Exit codes:** 0 verified; 1 failed (it names the first bad receipt); 2 a usage error, including a private key passed as `--key`.
+- **Output:** the head, for the auditor to keep as the next anchor.
+
+**Rotation.**
+- **Planned:** a `key.rotated` receipt, signed by the current key, names the next key. After it, only the next key verifies. Auditors keep trusting the start key, and the verifier follows the rotations.
+- **Compromised key:** rotation can't help, because the holder of the stolen key can rotate too. Start a new chain with a new key, and publish out of band the old chain's last trusted head and the new public key.
+
+**Events, in order.**
+1. `merge.decided` and its result (slice 1).
+2. The merge record gains the policy commit, changed files, required check run ids, level and approver (#717 step 1; `src/coordinator/merge-flow.ts`, Lane A). The `null` fields then fill in without a schema change.
+3. The installed signer (C).
+4. Agent runs, an audit export, and multiple signers.
+
+**What a receipt can never prove: anything outside its inputs.**
+- That the log told the truth: a false decision the coordinator appends is signed like a true one.
+- That the change was good: receipts hold ids, not the code, and say nothing of whether the checks were meaningful.
+- That nothing merged without a receipt: a merge made outside the engine has none. Compare GitHub's merges with the receipts; `main_watch.unaccounted` is the engine's own version of that check.
+- That the tail is complete, without an anchor.
+- Anything before the signer started, or the true time: `at` is the log's clock.
+
+**Compromised component.**
+- **Agent user:** no write to the log (inferred: the log is the coordinator's, group-only) and no read of the key. It can shape a decision only through the PR, which a receipt records by id.
+- **Coordinator:**
+  - It can append false events, and they get signed.
+  - It can rewrite the log before the signer reads it.
+  - It can stop writing, which leaves gaps visible against GitHub.
+  - Under C it can't change or re-sign a receipt already made.
+- **Signer identity:** the trust root. It can sign anything, which is why it is separate and small.
+- **Root:** everything.
+- **Anyone who can write the receipts file:** can delete or truncate it (a dropped tail needs an anchor to show), never forge a receipt.
+- **Dashboard and other instances:** no role in receipts.
+- **Someone with push access:** can change code and policy. Once step 2 lands, the receipt names the policy commit, but it doesn't stop the change.
+
 ## 6. Backlog and ownership
 
 - **Tracker:** GitHub Issues on the project repo, through a `backlog` adapter: `github`, or `file` for tests and the example project.

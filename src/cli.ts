@@ -210,6 +210,18 @@ usage: ${BRAND.cli} <command> [options]
                                    root's testrun-gpu.json lists (docs/test-runs.md "GPU")
   stuck-scan [--instance name]     read-only: how many recorded runs the stuck-run guard would have
                                    flagged or stopped (run as the coordinator user)
+  receipts verify <file|dir> --key <pub> [--key <pub>]... [--anchor <receipt id>]
+                                   check signed receipts offline: each signature by the chain's key, the order,
+                                   and that none was changed or dropped (a dropped tail only against --anchor, a
+                                   head kept from an earlier look); a dir: its *.jsonl in name order. Needs no
+                                   engine state or network (docs/receipts.md)
+  receipts keygen --private <file> --public <file>
+                                   make an ed25519 receipt key pair; never overwrites a file
+  receipts sign --log <events.db> --key <private> --out <file>
+                                   receipt each merge decision and result in the log not yet receipted, chained
+                                   onto <file>. Not yet root-signed: it signs as whoever runs it (#717)
+  receipts rotate --out <file> --key <current private> --next <new public>
+                                   continue the chain under a new key, signed by the current one
   decide <id> <option> [--instance name]
                                    answer a decision as the owner (root or the coordinator user only;
                                    also: a comment /${BRAND.cli} <option> by whoever may answer its kind)
@@ -780,6 +792,11 @@ async function main(argv: string[]): Promise<number> {
     case 'policy': {
       const { policyCommand } = await import('./policy-root.js');
       return policyCommand(sub, rest);
+    }
+
+    case 'receipts': {
+      const { receiptsCommand } = await import('./signed-receipts-cli.js');
+      return receiptsCommand(sub, rest);
     }
 
     case 'slots': {
