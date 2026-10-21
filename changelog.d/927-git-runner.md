@@ -12,5 +12,8 @@
   refs off and no graft file, over whatever environment the caller passes; gitleaks gets the same settings. A test
   fails on a git call in `src/` or `scripts/` that doesn't come through it, and the runner and that test wait for the
   owner.
+- **A shallow cut in a pushed range is refused (#927):** a `.git/shallow` (a shallow clone's, or one written by hand)
+  that cuts the range being pushed made the push limits read only part of it. The push is now refused, and the
+  message names `git fetch --unshallow`. A shallow clone still pushes changes that lie wholly above its cut.
 - **What the owner sees (#927):** the decision diff, the fix-forward culprit diff and the patch hash show a file's
   lines even when the change's `.gitattributes` marks it `-diff` or `binary`.

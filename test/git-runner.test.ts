@@ -162,8 +162,11 @@ test('scripts/lib/git.cjs (scripts run without a build) has the engine runner\'s
  * Where a source text starts git itself: `git` (or a path to it, or git.exe) as a quoted string in an argument or array
  * position or assigned to a name (`spawnSync('git', …)`, `run('git', …)`, `['git', 'fetch']`, `const bin = 'git'`), or
  * a shell line that starts with git (`exec('git log')`, `['-c', 'git log']`). A comparison (`=== 'git'`) or an object
- * key's value (`type: 'git'`) isn't one. A backstop next to the runner, not a proof: a name built at run time
- * (`'gi' + 't'`) gets past it.
+ * key's value (`type: 'git'`) isn't one. A backstop next to the runner, not a proof. Measured misses (#927's final
+ * check): a name built at run time (`'gi' + 't'`, `${'git'}`, String.raw`git`), a ternary or a default (`x ? 'git' :`,
+ * `?? 'git'`, `|| 'git'`), a command from config, env or an object property, git in the middle of a shell string
+ * (`bash -lc 'cd x && git log'`, `execSync('cd x && git log')`, `spawnSync('git log', { shell: true })`), and the
+ * `.sh` files under scripts/ (16 run git; not scanned).
  */
 function gitStarts(text: string): number {
   const patterns = [
