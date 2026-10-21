@@ -178,6 +178,8 @@ test('self-modification: every glob names real engine files (none dead), and the
     ['test/package-files.test.ts', 'the tests of the harness controls'],
     ['test/managed-apps.test.ts', 'the tests of the harness controls'],
     ['test/change-files-renames.test.ts', 'the tests of the harness controls'],
+    ['test/push-skill-names.test.ts', 'the tests of the harness controls'],
+    ['test/push-skill-links.test.ts', 'the tests of the harness controls'],
     ['docs/releasing.md', 'the release procedure and the design rules'],
     ['docs/design.md', 'the release procedure and the design rules'],
     ['src/coordinator/base.ts', 'the coordinator'],
@@ -201,6 +203,17 @@ test('the rename and odd-name tests are locked (#724): a one-line change to test
   const engine = ReviewConfig.parse(parse(readFileSync(join(repoRoot, BRAND.configDir, 'review.yaml'), 'utf8')));
   assert.ok(engine.categories['engine-guards']?.includes(path), 'listed in .worklane/review.yaml engine-guards');
   assert.equal(computeLevel({ files: [{ path, added: 1, removed: 1 }], labels: [], moneyPaths: [], scope: undefined }, engine).level, 'L3');
+});
+
+test('the push limits\' SKILL.md lint tests are locked (#724): a one-line change to either is self-modification, L3, never a tests-only L0', () => {
+  const cfg = ReviewConfig.parse({ version: 1, levels: { L0_auto: { when: ['docs-only', 'tests-only'], max_lines: 200 }, L1_evaluator: { when: [] }, L2_notify: { when: [] }, L3_human: { when: [] } } });
+  const engine = ReviewConfig.parse(parse(readFileSync(join(repoRoot, BRAND.configDir, 'review.yaml'), 'utf8')));
+  for (const path of ['test/push-skill-names.test.ts', 'test/push-skill-links.test.ts']) {
+    const r = computeLevel({ files: [{ path, added: 1, removed: 1 }], labels: [], moneyPaths: [], scope: undefined }, cfg);
+    assert.deepEqual([r.level, r.categories[SELF_MODIFICATION], selfModificationPart(path)], ['L3', [path], 'the tests of the harness controls'], path);
+    assert.ok(engine.categories['engine-guards']?.includes(path), `${path}: listed in .worklane/review.yaml engine-guards`);
+    assert.equal(computeLevel({ files: [{ path, added: 1, removed: 1 }], labels: [], moneyPaths: [], scope: undefined }, engine).level, 'L3', path);
+  }
 });
 
 test('regression: a change to the evaluator, the sandbox, the denylist, a guard test or the release rules waits for the owner, even a tests-only or docs-only one, whatever review.yaml tries', () => {

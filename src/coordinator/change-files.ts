@@ -142,26 +142,40 @@ export function rangeNames(cwd: string, range: string): string[] {
   return [...new Set(names(must(runBytes(cwd, ['log', '--format=', '--name-only', '--no-renames', '--diff-merges=first-parent', '--ignore-submodules=none', '-z', range]))))];
 }
 
+/** A tree entry as blobsByName reads it: a regular file's text, or why it wasn't read. */
+export type TreeFile = { text: string } | { unread: string };
+
+/** The tree modes of a regular file: anything else (a symlink, 120000; a submodule link, 160000) is never read as one. */
+const REGULAR_FILE = new Set(['100644', '100755']);
+
 /**
- * The entries of `rev`'s tree whose name, as nameOf reads it, is one of `names`: for each such name, the text of every
- * entry with it, read by object id and never by name, so a name that isn't valid UTF-8 (which can't be handed back to
- * git) is still read (#724). An entry that isn't a blob (a submodule link), or whose blob git can't give, is null. A
- * name with no entry at `rev` isn't in the map: that is the only "not there". Throws when the tree can't be listed.
+ * The entries of `rev`'s tree whose name, as nameOf reads it, is one of `names`: for each such name, every entry with
+ * it, read by object id and never by name, so a name that isn't valid UTF-8 (which can't be handed back to git) is
+ * still read (#724). Only a regular file of at most `maxBytes` is read; anything else says why it wasn't: a symlink
+ * (its blob is its target's path, not the file a checkout opens), a submodule link, a blob over the size, or one git
+ * can't give. A name with no entry at `rev` isn't in the map: that is the only "not there". Throws when the tree
+ * can't be listed.
  */
-export function blobsByName(cwd: string, rev: string, names: string[]): Map<string, (string | null)[]> {
-  const out = new Map<string, (string | null)[]>();
+export function blobsByName(cwd: string, rev: string, names: string[], maxBytes = Infinity): Map<string, TreeFile[]> {
+  const out = new Map<string, TreeFile[]>();
   const wanted = new Set(names);
   if (!wanted.size) return out;
   if (rev.startsWith('-')) throw new Error(`blobsByName: ${rev} is not a revision`);
-  // -r -z: "mode SP type SP object TAB path NUL" for every file of the tree.
-  for (const rec of fields(must(runBytes(cwd, ['ls-tree', '-r', '-z', '--full-tree', rev])))) {
+  // -r -z -l: "mode SP type SP object SP+ size TAB path NUL" for every file of the tree.
+  for (const rec of fields(must(runBytes(cwd, ['ls-tree', '-r', '-z', '-l', '--full-tree', rev])))) {
     const tab = rec.indexOf(9);
     if (tab === -1) continue;
     const name = nameOf(rec.subarray(tab + 1));
     if (!wanted.has(name)) continue;
-    const [, type, sha] = rec.subarray(0, tab).toString('latin1').split(' ');
-    const text = type === 'blob' && sha ? run(cwd, ['cat-file', 'blob', sha]) : null;
-    out.set(name, [...(out.get(name) ?? []), text instanceof Error ? null : text]);
+    const [mode, type, sha, size] = rec.subarray(0, tab).toString('latin1').split(/ +/);
+    const file = ((): TreeFile => {
+      if (mode === '120000') return { unread: 'a symbolic link, not a file' };
+      if (type !== 'blob' || !sha || !REGULAR_FILE.has(mode ?? '')) return { unread: `not a regular file (mode ${mode})` };
+      if (!(Number(size) <= maxBytes)) return { unread: `${size} bytes, over the ${maxBytes}-byte limit for it` };
+      const text = run(cwd, ['cat-file', 'blob', sha]);
+      return text instanceof Error ? { unread: 'git can\'t give its blob' } : { text };
+    })();
+    out.set(name, [...(out.get(name) ?? []), file]);
   }
   return out;
 }

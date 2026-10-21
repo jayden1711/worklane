@@ -68,13 +68,16 @@ export function pushProblems(cwd: string, base: string, head: string, limits: Pu
   if (lines > limits.max_changed_lines) problems.push(`changes ${lines} lines, over the ${limits.max_changed_lines}-line limit (push.max_changed_lines); split it into smaller changes`);
 
   // Skills the change adds or edits must pass the skill lint as they stand at head. Each is read from head's tree by
-  // its bytes (#724): a name with no entry there was deleted by the change; one that can't be read is a problem.
+  // its bytes (#724): a name with no entry there was deleted by the change; one that isn't a regular file of at most
+  // SKILL_MAX_BYTES (a symlink, a submodule link, a huge blob) is a problem, never linted as something else or skipped.
   const badSkills: string[] = [];
+  // A skill is prose: a bigger SKILL.md is refused, never read whole.
+  const SKILL_MAX_BYTES = MB;
   const skills = touched.filter((t) => t === 'SKILL.md' || t.endsWith('/SKILL.md'));
-  const atHead = blobsByName(cwd, head, skills);
+  const atHead = blobsByName(cwd, head, skills, SKILL_MAX_BYTES);
   for (const p of skills) {
-    for (const text of atHead.get(p) ?? []) {
-      const lint = text === null ? ["can't be read at the head: not a file git can give"] : lintSkill(text);
+    for (const file of atHead.get(p) ?? []) {
+      const lint = 'text' in file ? lintSkill(file.text) : [`can't be read at the head: ${file.unread}`];
       if (lint.length) badSkills.push(`${shownPath(p)} (${lint.join('; ')})`);
     }
   }

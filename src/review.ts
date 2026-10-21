@@ -393,6 +393,8 @@ export const SELF_MODIFICATION_PARTS: { what: string; globs: string[] }[] = [
       // The rename, odd-byte and control-character guarantees, and the scan that keeps every changed-name reader in
       // one helper (#688, locked by #724).
       'test/change-files-renames.test.ts',
+      // The push limits' SKILL.md lint: read by its bytes, and a link, a submodule or a huge blob refused (#724).
+      'test/push-skill-names.test.ts', 'test/push-skill-links.test.ts',
       'test/main-watch.test.ts', 'test/main-watch-coordinator.test.ts', 'test/denylist.test.ts', 'test/dco.test.ts', 'test/package-files.test.ts',
       // Root's managed-apps reader's fail-closed cases and the script's refusals (#665).
       'test/managed-apps.test.ts',
