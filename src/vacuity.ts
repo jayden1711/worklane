@@ -476,7 +476,11 @@ const CLAUSE_START = /^(?:\}|case\b|default\b|else\b|catch\b|finally\b)/;
 /** Why the gate can't measure a change it can't place by character (fixed text; the PR holds). */
 export const UNPLACEABLE = "a change too large to align character by character, so where it changed code can't be told";
 
-/** The most cells the character alignment of one hunk's changed middle may take (more: the change can't be placed). */
+/**
+ * The most cells one character alignment may take: a hunk's changed middle, or (when that is more) a run of changed
+ * lines whose added and removed counts differ (alignHunk; more: the change can't be placed, and the PR holds). About
+ * 2,000 code characters a side: some 50 to 90 lines rewritten, not paired line by line.
+ */
 export const ALIGN_CELLS = 4_000_000;
 
 /**
@@ -522,6 +526,57 @@ function alignChars(a: readonly string[], r: readonly string[]): string[] | null
     for (; i < am.length; i++) mid.push('+');
   }
   return [...new Array<string>(p).fill('='), ...mid, ...new Array<string>(s).fill('=')];
+}
+
+/**
+ * alignChars over a hunk given line by line (#784 round 10): the whole hunk first; when that is too large, its lines
+ * first (a longest common subsequence of whole lines), then the characters of each changed run between equal lines,
+ * line by line where the run has as many added lines as removed (a rename or reflow of each), else the run whole. Null
+ * only when a run, or the line alignment itself, is too large: the change can't be placed, and the caller holds.
+ */
+function alignHunk(aLines: readonly string[][], rLines: readonly string[][]): string[] | null {
+  const whole = alignChars(aLines.flat(), rLines.flat());
+  if (whole) return whole;
+  const as = aLines.map((l) => l.join(''));
+  const rs = rLines.map((l) => l.join(''));
+  if ((as.length + 1) * (rs.length + 1) > ALIGN_CELLS) return null;
+  const w = rs.length + 1;
+  const lcs = new Int32Array((as.length + 1) * w);
+  for (let i = as.length - 1; i >= 0; i--) {
+    for (let j = rs.length - 1; j >= 0; j--) lcs[i * w + j] = as[i] === rs[j] ? lcs[(i + 1) * w + j + 1]! + 1 : Math.max(lcs[(i + 1) * w + j]!, lcs[i * w + j + 1]!);
+  }
+  const ops: string[] = [];
+  let ra: string[][] = [];
+  let rr: string[][] = [];
+  // A run of changed lines between equal ones, aligned by character.
+  const flush = (): boolean => {
+    if (ra.length === rr.length) {
+      for (let k = 0; k < ra.length; k++) {
+        const o = alignChars(ra[k]!, rr[k]!);
+        if (!o) return false;
+        ops.push(...o);
+      }
+    } else {
+      const o = alignChars(ra.flat(), rr.flat());
+      if (!o) return false;
+      ops.push(...o);
+    }
+    ra = [];
+    rr = [];
+    return true;
+  };
+  let i = 0;
+  let j = 0;
+  while (i < as.length || j < rs.length) {
+    if (i < as.length && j < rs.length && as[i] === rs[j]) {
+      if (!flush()) return null;
+      for (const _ of aLines[i]!) ops.push('=');
+      i++;
+      j++;
+    } else if (j >= rs.length || (i < as.length && lcs[(i + 1) * w + j]! >= lcs[i * w + j + 1]!)) ra.push(aLines[i++]! as string[]);
+    else rr.push(rLines[j++]! as string[]);
+  }
+  return flush() ? ops : null;
 }
 
 /**
@@ -571,9 +626,16 @@ export function codeRanges(text: string, hunks: readonly ChangedHunkSpots[], bas
   for (const h of hunks) {
     // The added side: its characters at the head, whitespace left out.
     const aOff: number[] = [];
+    const aLines: string[][] = [];
     for (const l of h.added) {
       if (l < 1 || l > lines) continue;
-      for (let i = starts[l - 1]!; i < starts[l]!; i++) if (!blank(text[i]!)) aOff.push(i);
+      const line: string[] = [];
+      for (let i = starts[l - 1]!; i < starts[l]!; i++) {
+        if (blank(text[i]!)) continue;
+        aOff.push(i);
+        line.push(text[i]!);
+      }
+      aLines.push(line);
     }
     // The removed side: its characters, and which held code, as lexed in the base file they came from (round 10);
     // without a base reader (a direct call), its own text lexed.
@@ -593,8 +655,15 @@ export function codeRanges(text: string, hunks: readonly ChangedHunkSpots[], bas
       }
     } else rMask = codeLines(rText).mask;
     const rIdx: number[] = [];
-    for (let i = 0; i < rText.length; i++) if (!blank(rText[i]!)) rIdx.push(i);
-    const ops = alignChars(aOff.map((i) => text[i]!), rIdx.map((i) => rText[i]!));
+    const rLines: string[][] = h.removed.map(() => []);
+    for (let i = 0, k = 0; i < rText.length; i++) {
+      if (rText[i] === '\n') k++;
+      else if (!blank(rText[i]!)) {
+        rIdx.push(i);
+        rLines[k]!.push(rText[i]!);
+      }
+    }
+    const ops = alignHunk(aLines, rLines);
     if (!ops) return null;
     // Where the hunk's added text ends at the head (a removal after its last character is measured from there).
     const lastAdded = h.added.filter((l) => l >= 1 && l <= lines).at(-1);
