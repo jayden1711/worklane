@@ -21,11 +21,12 @@ import { readReceiptFiles, rotateFile, signLog } from '../src/signed-receipts-st
 
 const sha = (c: string) => c.repeat(40).slice(0, 40);
 const fresh = (name: string) => join(mkdtempSync(join(tmpdir(), 'rr11-')), name);
-/** The signer's chain registry for this file: every genesis is recorded there unless a test gives its own. */
-const REGISTRY = fresh('registry.jsonl');
-const sign = (o: Record<string, unknown>) => signLog({ ...(o.genesis ? { registry: REGISTRY } : {}), ...o } as unknown as Parameters<typeof signLog>[0]);
+/** The signer's chain registry for each log (round 12: a registry holds one first chain, for one log), unless a test gives its own. */
+const registries = new Map<unknown, string>();
+const registryFor = (log: unknown) => registries.get(log) ?? registries.set(log, fresh('registry.jsonl')).get(log)!;
+const sign = (o: Record<string, unknown>) => signLog({ ...(o.genesis ? { registry: registryFor(o.log) } : {}), ...o } as unknown as Parameters<typeof signLog>[0]);
 const rotate = (o: Record<string, unknown>) => rotateFile(o as unknown as Parameters<typeof rotateFile>[0]);
-type St = { kind: string; event?: number; at?: string; cut?: Record<string, { length: number; of?: string }> };
+type St = { kind: string; event?: string; at?: string; cut?: Record<string, { length: number; of?: string }> };
 const statements = (out: string) => (readReceiptFiles(out) as Envelope[]).map((e) => statementOf(e) as St);
 
 function keys(): { pub: KeyObject; signer: ReceiptSigner } {
@@ -131,7 +132,7 @@ test('an appended event the signer cannot read is signed as unsignable, and the 
   insert(f.path, { ts: TS, type: 'merge.decided', payload: decided(8) });
   sign({ log: f.path, out, state, signer: k.signer });
   const st = statements(out);
-  assert.deepEqual(st.slice(-3).map((s) => [s.kind, s.event]), [['event.unsignable', 6], ['event.unsignable', 7], ['merge.decided', 8]]);
+  assert.deepEqual(st.slice(-3).map((s) => [s.kind, s.event]), [['event.unsignable', '6'], ['event.unsignable', '7'], ['merge.decided', '8']]);
   assert.ok(verifyChain(readReceiptFiles(out), { keys: [k.pub] }).ok);
 });
 
@@ -157,7 +158,7 @@ test('an unreadable appended event never burns the ended chain: its successor st
   insert(A.f.path, { ts: TS, type: 'merge.decided', payload: 'not json' });
   const out = fresh('receipts.jsonl');
   sign({ log: A.f.path, out, state: fresh('chain-state.json'), genesis: true, after: A.state, signer: keys().signer });
-  assert.deepEqual(statements(out).slice(1).map((s) => [s.kind, s.event]), [['event.unsignable', 6]]);
+  assert.deepEqual(statements(out).slice(1).map((s) => [s.kind, s.event]), [['event.unsignable', '6']]);
 });
 
 test('a successor never rotates to a key of the chain it succeeds; nothing is written (P7)', () => {

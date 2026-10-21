@@ -24,12 +24,13 @@ const H1 = sha('a');
 const H2 = sha('b');
 const M1 = sha('c');
 
-/** The signer's chain registry for this file (round 11): every genesis is recorded there unless a test gives its own. */
-const REGISTRY = join(mkdtempSync(join(tmpdir(), 'rreg-')), 'registry.jsonl');
-const sign = (o: Record<string, unknown>) => signLog({ ...(o.genesis ? { registry: REGISTRY } : {}), ...o } as unknown as Parameters<typeof signLog>[0]);
+/** The signer's chain registry for each log (round 12: a registry holds one first chain, for one log), unless a test gives its own. */
+const registries = new Map<unknown, string>();
+const registryFor = (log: unknown) => registries.get(log) ?? registries.set(log, join(mkdtempSync(join(tmpdir(), 'rreg-')), 'registry.jsonl')).get(log)!;
+const sign = (o: Record<string, unknown>) => signLog({ ...(o.genesis ? { registry: registryFor(o.log) } : {}), ...o } as unknown as Parameters<typeof signLog>[0]);
 const rotate = (o: Record<string, unknown>) => rotateFile(o as unknown as Parameters<typeof rotateFile>[0]);
 const text = (p: string) => (existsSync(p) ? readFileSync(p, 'utf8') : null);
-type St = { kind: string; event?: number; decision?: { auto: boolean; reasons: string[] }; previous?: unknown; cut?: Record<string, { sha256: string; length: number; of?: string }> };
+type St = { kind: string; event?: string; decision?: { auto: boolean; reasons: string[] }; previous?: unknown; cut?: Record<string, { sha256: string; length: number; of?: string }> };
 const statements = (out: string) => (readReceiptFiles(out) as Envelope[]).map((e) => statementOf(e) as St);
 
 function keys(): { pub: KeyObject; signer: ReceiptSigner } {
@@ -96,7 +97,7 @@ test('a successor chain with a new key never signs the events the ended chain si
     const st = statements(out);
     assert.ok(verifyChain(readReceiptFiles(out), { keys: [k2.pub] }).ok);
     // Never the edited decision 42 (event 4), nor anything else the ended chain covered.
-    assert.deepEqual(st.filter((s) => s.kind !== 'chain.started').map((s) => s.event), from === 'state' ? [6, 7] : [7], `${from}: ${JSON.stringify(st.map((s) => s.event))}`);
+    assert.deepEqual(st.filter((s) => s.kind !== 'chain.started').map((s) => s.event), from === 'state' ? ['6', '7'] : ['7'], `${from}: ${JSON.stringify(st.map((s) => s.event))}`);
     assert.ok(st[0]!.previous, `${from}: chain.started names the chain it succeeds`);
   }
 });

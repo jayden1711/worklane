@@ -4,7 +4,7 @@ import { generateKeyPairSync } from 'node:crypto';
 import { lstatSync, rmSync } from 'node:fs';
 import { BRAND } from './brand.js';
 import { createOwnerOnly } from './os/index.js';
-import { fieldChecks, keyId, ReceiptError, verifyChain } from './signed-receipts.js';
+import { AT_UNRECORDED, fieldChecks, keyId, ReceiptError, verifyChain } from './signed-receipts.js';
 import { loadPublicKey, loadSigner, readReceiptFiles, rotateFile, signLog } from './signed-receipts-store.js';
 
 /** Said by every signing command until the separate signer user exists (docs/design.md §5a, decision C, slice 3). */
@@ -137,6 +137,9 @@ export async function receiptsCommand(sub: string | undefined, rest: string[]): 
         const signer = loadSigner(key);
         const r = signLog({ log, out, state, signer, ...(genesis ? { genesis, registry: registry[0]! } : {}), ...(after.length ? { after: after[0]! } : {}) });
         say(`${r.added} new receipts signed with key ${keyId(signer.publicKey)}; ${r.count} in the chain, head ${r.head ?? 'none'}`);
+        // WHY (#918 round 12): a merge event the signer couldn't read, or a time it couldn't keep, is said every time,
+        // never only counted by verify.
+        say(`of the new receipts, ${r.unsignable} event.unsignable (a merge event the signer couldn't read as a decision or result) and ${r.unrecorded} with at "unrecorded" (the log's time was empty or past the bound); verify lists each`);
         say(NOT_ROOT_SIGNED);
         return 0;
       }
@@ -238,6 +241,15 @@ function verify(args: string[]): number {
   // WHY (#918 round 3 advisory): an unrecorded check is shown, not only counted, so the signer's value is seen.
   for (const c of unrecorded) say(`UNRECORDED: receipt ${c.receipt}: ${c.field}: the deciding engine recorded null; the signer found ${value(c.found)} (${c.how})`);
   for (const c of flagged) say(`FLAGGED: receipt ${c.receipt}: ${c.field}: the coordinator claimed ${value(c.claimed)}, the signer found ${value(c.found)} (${c.how})`);
+  // WHY (#918 round 12, the round-11 delta check's 3.5): a receipt the signer made for what it couldn't read is shown,
+  // one line each, as a flag is, not only counted. Its `type` is the log's, its `problem` the signing tool's reading.
+  for (const [i, s] of r.statements.entries()) {
+    if (s.kind === 'event.unsignable') say(`UNSIGNABLE: receipt ${i + 1}: event ${s.event} (${s.type}): ${s.problem}; no decision or result was read from it (log.digest binds the event as stored)`);
+    if ((s.kind === 'merge.decided' || s.kind === 'merge.result' || s.kind === 'event.unsignable') && s.at === AT_UNRECORDED) {
+      const cut = s.cut.at;
+      say(`UNRECORDED TIME: receipt ${i + 1}: event ${s.event}: at is "${AT_UNRECORDED}": ${cut ? `the log's time was ${cut.length ? `past the bound (${cut.length} characters)` : 'empty'}, so the signer kept none of it` : 'the log said so itself'}`);
+    }
+  }
   say("A receipt proves only that the chain's key holder signed that the log said this, in this order; never that the log said it, or that an attested field was true.");
   return flagged.length ? EXIT_FLAGGED : 0;
 }

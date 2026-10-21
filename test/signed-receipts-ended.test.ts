@@ -18,9 +18,10 @@ import { keySigner, statementOf, verifyChain, type Envelope, type ReceiptSigner 
 import { readReceiptFiles, signLog } from '../src/signed-receipts-store.js';
 
 const sha = (c: string) => c.repeat(40).slice(0, 40);
-/** The signer's chain registry for this file (round 11): every genesis is recorded there unless a test gives its own. */
-const REGISTRY = join(mkdtempSync(join(tmpdir(), 'rreg-')), 'registry.jsonl');
-const sign = (o: Record<string, unknown>) => signLog({ ...(o.genesis ? { registry: REGISTRY } : {}), ...o } as unknown as Parameters<typeof signLog>[0]);
+/** The signer's chain registry for each log (round 12: a registry holds one first chain, for one log), unless a test gives its own. */
+const registries = new Map<unknown, string>();
+const registryFor = (log: unknown) => registries.get(log) ?? registries.set(log, join(mkdtempSync(join(tmpdir(), 'rreg-')), 'registry.jsonl')).get(log)!;
+const sign = (o: Record<string, unknown>) => signLog({ ...(o.genesis ? { registry: registryFor(o.log) } : {}), ...o } as unknown as Parameters<typeof signLog>[0]);
 
 function keys(): { pub: KeyObject; signer: ReceiptSigner } {
   const k = generateKeyPairSync('ed25519');
@@ -71,8 +72,8 @@ for (const route of ['E1: receipts deleted, held decision edited', 'E2: log edit
     sign({ log: f.path, out: out2, state: fresh('chain-state.json'), genesis: true, after: state, signer: k2.signer });
     const envs = readReceiptFiles(out2) as Envelope[];
     assert.ok(verifyChain(envs, { keys: [k2.pub] }).ok);
-    const signed = envs.map((e) => statementOf(e) as { kind: string; event?: number }).filter((s) => s.kind !== 'chain.started');
-    assert.deepEqual(signed.map((s) => s.event), [6], 'only the event after the ended chain (6); never 2-5, the edited 4 included');
+    const signed = envs.map((e) => statementOf(e) as { kind: string; event?: string }).filter((s) => s.kind !== 'chain.started');
+    assert.deepEqual(signed.map((s) => s.event), ['6'],'only the event after the ended chain (6); never 2-5, the edited 4 included');
     if (route.startsWith('E2')) assert.equal(readFileSync(out, 'utf8'), published, 'the ended chain stays the record up to its head');
     assert.ok(existsSync(state), 'the ended chain keeps its state');
   });

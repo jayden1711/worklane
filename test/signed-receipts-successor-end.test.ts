@@ -18,11 +18,12 @@ import { canonicalJson, keyId, keySigner, pae, PAYLOAD_TYPE, receiptId, statemen
 import { readReceiptFiles, rotateFile, signLog } from '../src/signed-receipts-store.js';
 
 const sha = (c: string) => c.repeat(40).slice(0, 40);
-/** The signer's chain registry for this file (round 11): every genesis is recorded there unless a test gives its own. */
-const REGISTRY = join(mkdtempSync(join(tmpdir(), 'rreg-')), 'registry.jsonl');
-const sign = (o: Record<string, unknown>) => signLog({ ...(o.genesis ? { registry: REGISTRY } : {}), ...o } as unknown as Parameters<typeof signLog>[0]);
+/** The signer's chain registry for each log (round 12: a registry holds one first chain, for one log), unless a test gives its own. */
+const registries = new Map<unknown, string>();
+const registryFor = (log: unknown) => registries.get(log) ?? registries.set(log, join(mkdtempSync(join(tmpdir(), 'rreg-')), 'registry.jsonl')).get(log)!;
+const sign = (o: Record<string, unknown>) => signLog({ ...(o.genesis ? { registry: registryFor(o.log) } : {}), ...o } as unknown as Parameters<typeof signLog>[0]);
 const rotate = (o: Record<string, unknown>) => rotateFile(o as unknown as Parameters<typeof rotateFile>[0]);
-type St = { kind: string; event?: number; previous?: { keys: string[]; event: number; from?: string } | null; decision?: { auto: boolean; reasons: string[] }; cut?: Record<string, { sha256: string }> };
+type St = { kind: string; event?: string; previous?: { keys: string[]; event: string; from?: string } | null; decision?: { auto: boolean; reasons: string[] }; cut?: Record<string, { sha256: string }> };
 const statements = (out: string) => (readReceiptFiles(out) as Envelope[]).map((e) => statementOf(e) as St);
 const merges = (out: string) => statements(out).filter((s) => s.kind === 'merge.decided' || s.kind === 'merge.result');
 
@@ -89,7 +90,7 @@ test('an ended chain never resumes beside its successor, even once the log is re
   const b = keys();
   const outB = fresh('receipts.jsonl');
   sign({ log: A.f.path, out: outB, state: fresh('chain-state.json'), genesis: true, after: A.state, signer: b.signer });
-  assert.deepEqual(merges(outB).map((s) => s.event), [6]);
+  assert.deepEqual(merges(outB).map((s) => s.event), ['6']);
   // The coordinator restores event 4 and changes event 6.
   setPayload(A.f.path, 4, A.original);
   setPayload(A.f.path, 6, JSON.stringify({ issue: 6, number: 6, head: sha('d'), auto: true, reasons: ['Y: auto'] }));
@@ -135,7 +136,7 @@ test('a successor from a receipts copy cut short starts after the log, never re-
     // Row 3: a new key starts, and signs nothing the ended chain covered.
     sign({ log: f.path, out: outB, state: fresh('chain-state.json'), genesis: true, after: copy, signer: keys().signer });
     const signed = statements(outB);
-    assert.deepEqual(signed.filter((s) => s.kind !== 'chain.started' && (s.event ?? 0) <= 5).map((s) => s.event), [], 'events the ended chain covered were signed again');
+    assert.deepEqual(signed.filter((s) => s.kind !== 'chain.started' && BigInt(s.event ?? '0') <= 5n).map((s) => s.event), [], 'events the ended chain covered were signed again');
     assert.equal(signed[0]!.previous?.from, 'copy', 'the successor says it came from a copy');
   }
 });
@@ -161,7 +162,8 @@ test("verify holds a successor to its own previous: no event at or before the en
   sign({ log: A.f.path, out: outB, state: fresh('chain-state.json'), genesis: true, after: A.state, signer: b.signer });
   const started = (readReceiptFiles(outB) as Envelope[])[0]!;
   // A receipt for event 4, which the ended chain covered, signed by hand after the successor's start.
-  const old = (readReceiptFiles(A.out) as Envelope[]).map((e) => statementOf(e) as Record<string, unknown>).find((s) => s.event === 4)!;
+  const old = (readReceiptFiles(A.out) as Envelope[]).map((e) => statementOf(e) as Record<string, unknown>).find((s) => s.event === '4')!;
+  assert.ok(old, "the ended chain's receipt for event 4");
   const resigned = sealWith(b, { ...old, seq: 1, prev: receiptId(started) });
   const r1 = verifyChain([started, resigned], { keys: [b.pub] });
   assert.ok(!r1.ok, 'an event at or before previous.event verified');

@@ -37,11 +37,13 @@ worklane receipts verify receipts/ --key customer-receipts.pub
 - receipts in the old chain after the new chain's `previous.head`;
 - two chains naming the same `previous.head`;
 - a new chain whose `previous.head` isn't the latest head you hold for the old chain;
-- a second chain with `previous: null` for the same instance. `previous: null` marks an instance's first chain only.
+- a second chain with `previous: null` for the same instance. `previous: null` marks an instance's first chain only. The signer's own registry refuses a second one, but only within that registry: a signer started with a new registry isn't stopped, so this check is yours.
 
 A chain started `from: "copy"` came from receipts that may have been cut short, so it can't show you everything the old chain signed. The signer starts one only when the old chain's own state can't be read. It starts after the log's last event at that time, so it signs no event that existed then, as long as the log's event ids never go back. The coordinator owns those ids, so this is its word: compare the merges between the old chain's head and the new chain's start with the repository's.
 
-A receipt of kind `event.unsignable` stands for a merge event the signer couldn't read (not JSON, or not the event's shape): it records the event's type and why, and nothing of its content as a decision. `at: "unrecorded"` means the log's time for that event was empty or too long (`cut.at` says which).
+A receipt of kind `event.unsignable` stands for a merge event the signer couldn't read (not JSON, or not the event's shape): it records the event's type and why, and nothing of its content as a decision. `at: "unrecorded"` means the log's time for that event was empty or too long (`cut.at` says which). `verify` prints one `UNSIGNABLE: receipt N: event E (type): why` line for each of the first, and one `UNRECORDED TIME: receipt N: event E: ...` line for each of the second. The `type` is the log's; the `why`, and the reading of the time, are the signing tool's own.
+
+An `event` is the log's event id as a string of decimal digits (`"42"`), never a JSON number, so an id past 2^53 is exact. Compare them as integers, not as text.
 
 Keep each chain's receipts in its own directory: `verify <dir>` reads one chain.
 

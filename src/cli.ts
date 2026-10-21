@@ -223,7 +223,8 @@ usage: ${BRAND.cli} <command> [options]
                                    onto <file>, which must extend the signer's own chain head in --state (kept
                                    apart, in a directory only the signer writes). --genesis starts a new chain
                                    where there is none (root or the owner only), recorded in the signer's chain
-                                   registry; with --after, it succeeds an ended chain (its state, or a copy of
+                                   registry (one per instance, holding one first chain); with --after, it
+                                   succeeds an ended chain (its state, or a copy of
                                    its receipts when the state can't be read), from that chain's last event,
                                    with a new key. Not yet root-signed: it signs as whoever runs it (#717)
   receipts rotate --out <file> --key <current private> --next <new public> --state <file>

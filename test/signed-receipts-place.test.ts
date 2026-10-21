@@ -28,9 +28,10 @@ const M1 = sha('c');
 /** The signer lock's name in the state's directory (round 6), and the one beside the state file (round 5). */
 const LOCK_NAMES = (state: string) => [join(dirname(state), '.receipts-signer.lock'), `${state}.lock`];
 
-/** The signer's chain registry for this file (round 11): every genesis is recorded there unless a test gives its own. */
-const REGISTRY = join(mkdtempSync(join(tmpdir(), 'rreg-')), 'registry.jsonl');
-const sign = (o: Record<string, unknown>) => signLog({ ...(o.genesis ? { registry: REGISTRY } : {}), ...o } as unknown as Parameters<typeof signLog>[0]);
+/** The signer's chain registry for each log (round 12: a registry holds one first chain, for one log), unless a test gives its own. */
+const registries = new Map<unknown, string>();
+const registryFor = (log: unknown) => registries.get(log) ?? registries.set(log, join(mkdtempSync(join(tmpdir(), 'rreg-')), 'registry.jsonl')).get(log)!;
+const sign = (o: Record<string, unknown>) => signLog({ ...(o.genesis ? { registry: registryFor(o.log) } : {}), ...o } as unknown as Parameters<typeof signLog>[0]);
 const cli = (...a: string[]) => spawnSync(process.execPath, [engineCli, 'receipts', ...a], { encoding: 'utf8', timeout: 20_000 });
 const text = (p: string) => (existsSync(p) ? readFileSync(p, 'utf8') : null);
 

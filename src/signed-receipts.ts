@@ -50,7 +50,15 @@ const Verified = z.array(z.strictObject({ field: z.string().min(1).max(100), how
  * could read; a cut field attests its first part and the digest of the whole (docs/design.md §5a, VERIFIES vs ATTESTS).
  */
 const Cut = z.record(z.string().min(1), z.strictObject({ sha256: hex64, length: z.number().int().min(0), of: z.enum(['whole', 'kept']) }));
-const eventFields = { instance: z.string(), event: positive, verified: Verified, log: z.strictObject({ digest: hex64 }), cut: Cut };
+/**
+ * A log event's id as a receipt holds it: its decimal digits, a JSON string, never a JSON number (#918 round 12). WHY:
+ * SQLite's ids reach 2^63 - 1, and the coordinator owns the log; a JSON number past 2^53 can't be read back exactly,
+ * and one event appended at 2^53 made every later `sign` throw, the honest events after it included (AUTOINCREMENT
+ * gives them larger ids still). Compared as BigInt. `EVENT_MARK` also takes 0: "before the log's first event".
+ */
+const EVENT_ID = z.string().regex(/^[1-9][0-9]{0,18}$/);
+const EVENT_MARK = z.string().regex(/^(0|[1-9][0-9]{0,18})$/);
+const eventFields = { instance: z.string(), event: EVENT_ID, verified: Verified, log: z.strictObject({ digest: hex64 }), cut: Cut };
 /**
  * The chain a new chain succeeds, named in its `chain.started` (#918 round 9, route 1): every key that signed it (its
  * predecessors' included), its head, and the last log event it receipted. The new chain receipts only events after
@@ -59,7 +67,7 @@ const eventFields = { instance: z.string(), event: positive, verified: Verified,
 const Previous = z.strictObject({
   keys: z.array(hex64).min(1),
   head: hex64,
-  event: z.number().int().min(0),
+  event: EVENT_MARK,
   /** Read from the ended chain's own state, or from a copy of its receipts (round 10: a copy may be cut short). */
   from: z.enum(['state', 'copy']),
 });
@@ -124,9 +132,12 @@ const base64 = z.string().regex(/^[A-Za-z0-9+/]*={0,2}$/);
 const EnvelopeSchema = z.strictObject({ payloadType: z.string(), payload: base64, signatures: z.array(z.strictObject({ keyid: z.string(), sig: base64 })).length(1) });
 export type Envelope = z.infer<typeof EnvelopeSchema>;
 
-/** An event as the log stores it (src/events/log.ts). `raw`: its payload as stored (JSON text), when read from one. */
+/**
+ * An event as the log stores it (src/events/log.ts). `raw`: its payload as stored (JSON text), when read from one.
+ * `id`: an integer; the store reads it as a BigInt, so an id past 2^53 is exact (round 12).
+ */
 export interface ReceiptEvent {
-  id: number;
+  id: number | bigint;
   ts: string;
   type: string;
   actor: string;
@@ -141,7 +152,7 @@ export interface ReceiptEvent {
  */
 export function logDigest(before: string, e: ReceiptEvent): string {
   return createHash('sha256')
-    .update(canonicalJson([before, e.id, e.ts, e.type, e.actor, e.raw ?? JSON.stringify(e.payload ?? null)]), 'utf8')
+    .update(canonicalJson([before, BigInt(e.id).toString(), e.ts, e.type, e.actor, e.raw ?? JSON.stringify(e.payload ?? null)]), 'utf8')
     .digest('hex');
 }
 
@@ -275,7 +286,7 @@ export function verifyChain(envelopes: readonly unknown[], o: { keys: readonly K
   if (!envelopes.length) return fail(0, 'no receipts');
   let current: KeyObject | null = null;
   let prev: string | null = null;
-  let lastEvent = 0;
+  let lastEvent = 0n;
   let previousKeys: readonly string[] = [];
   const ids: string[] = [];
   const keys: string[] = [];
@@ -312,7 +323,7 @@ export function verifyChain(envelopes: readonly unknown[], o: { keys: readonly K
       // succeeds, and receipting only events after that chain's last one.
       if (s.previous?.keys.includes(s.key.keyid)) return fail(0, `the chain was started by key ${s.key.keyid}, which signed the chain it succeeds`);
       previousKeys = s.previous?.keys ?? [];
-      lastEvent = s.previous?.event ?? 0;
+      lastEvent = BigInt(s.previous?.event ?? '0');
       current = declared;
       keys.push(s.key.keyid);
     } else if (s.kind === 'chain.started') return fail(i, 'a second chain start inside the chain');
@@ -323,8 +334,8 @@ export function verifyChain(envelopes: readonly unknown[], o: { keys: readonly K
     if (!edVerify(null, pae(PAYLOAD_TYPE, bytes), current!, sig)) return fail(i, "the signature doesn't verify with the chain's key: it was changed, or another key signed it");
     const id = sha256(bytes);
     if (isEventReceipt(s)) {
-      if (s.event <= lastEvent) return fail(i, `its event ${s.event} is not after the one before (${lastEvent})`);
-      lastEvent = s.event;
+      if (BigInt(s.event) <= lastEvent) return fail(i, `its event ${s.event} is not after the one before (${lastEvent})`);
+      lastEvent = BigInt(s.event);
     }
     if (s.kind === 'merge.decided') decided.set(`${s.inputs.pr}@${s.inputs.head}`, id);
     if (s.kind === 'merge.result' && s.decision !== (decided.get(`${s.pr}@${s.head}`) ?? null)) return fail(i, "the decision it names is not the chain's latest decision for that PR head");
@@ -367,7 +378,7 @@ export const ChainStateSchema = z.strictObject({
    */
   fixed: z.array(EnvelopeSchema).min(1),
   /** The last log event the chain receipted (its predecessor's, before its own first): where a successor starts. */
-  event: z.number().int().min(0),
+  event: EVENT_MARK,
   /**
    * Set when a successor started from this chain (round 10): the successor's start key and the head it succeeded.
    * An ended chain never signs or rotates again, and has one successor only. WHY (#918 round-9 review, rows 1 and 2):
@@ -376,8 +387,10 @@ export const ChainStateSchema = z.strictObject({
   ended: z.strictObject({ successor: hex64, head: hex64 }).nullable(),
   /**
    * The signer's chain registry (round 11) as this chain started: its path, and its line count and head just after
-   * this chain's start line. Every later sign and rotate checks the registry still holds that line there, so a
-   * registry deleted, cut or edited is refused. Null only outside the store (the pure functions here).
+   * this chain's start line. `head` is that start line's id: the chain's identity in the registry (round 12). Every
+   * later sign and rotate checks the registry still holds that line there, so a registry deleted, replaced, edited or
+   * cut short of it is refused; an older copy that still holds it is not (the signer user's act, docs/design.md §5a).
+   * Null only outside the store (the pure functions here).
    */
   registry: z.strictObject({ path: z.string().min(1), count: positive, head: hex64 }).nullable(),
 });
@@ -419,12 +432,12 @@ export function predecessorOfState(s: ChainState): Predecessor {
 }
 
 /** The last log event a chain receipted: its last merge receipt's, or, with none, its predecessor's (or 0). */
-function lastEventOf(envelopes: readonly Envelope[]): number {
-  let event = 0;
+function lastEventOf(envelopes: readonly Envelope[]): string {
+  let event = '0';
   for (const e of envelopes) {
-    const s = statementOf(e) as { kind?: string; event?: number; previous?: { event?: number } | null };
-    if (s.kind === 'chain.started') event = s.previous?.event ?? 0;
-    if ((s.kind === 'merge.decided' || s.kind === 'merge.result' || s.kind === 'event.unsignable') && typeof s.event === 'number') event = s.event;
+    const s = statementOf(e) as { kind?: string; event?: unknown; previous?: { event?: string } | null };
+    if (s.kind === 'chain.started') event = s.previous?.event ?? '0';
+    if ((s.kind === 'merge.decided' || s.kind === 'merge.result' || s.kind === 'event.unsignable') && typeof s.event === 'string') event = s.event;
   }
   return event;
 }
@@ -541,7 +554,7 @@ function redactBounded(v: unknown, path: string, cut: Record<string, CutEntry>):
 }
 
 function bodyOf(e: ReceiptEvent, version: string | null, decided: Map<string, string>, digest: string): Body | null {
-  const common = { at: e.ts, instance: e.actor, event: e.id };
+  const common = { at: e.ts, instance: e.actor, event: BigInt(e.id).toString() };
   // Slice 1 verifies nothing itself: every field is attested (see Verified). Added after the redactor, which only
   // the event-derived text needs.
   const signer = { verified: [], log: { digest } };
@@ -617,21 +630,22 @@ function extend(existing: readonly unknown[], state: Extract<ChainResult, { ok: 
   if (!state.count) push({ kind: 'chain.started', at: now(), key: keyRef(signer.publicKey), previous: after });
   const decided = new Map<string, string>();
   // A successor chain receipts only events after the last one the chain it succeeds receipted (#918 round 9).
-  let last = state.count ? 0 : (after?.event ?? 0);
+  let last = state.count ? 0n : BigInt(after?.event ?? '0');
   for (const [i, s] of state.statements.entries()) {
-    if (s.kind === 'chain.started') last = s.previous?.event ?? 0;
+    if (s.kind === 'chain.started') last = BigInt(s.previous?.event ?? '0');
     if (s.kind === 'merge.decided') decided.set(`${s.inputs.pr}@${s.inputs.head}`, state.ids[i]!);
-    if (isEventReceipt(s)) last = s.event;
+    if (isEventReceipt(s)) last = BigInt(s.event);
   }
   // The log as read now must hash, at each event already receipted, to what that receipt recorded: an event edited,
-  // dropped or inserted before it is a log that changed under signed receipts, and nothing more is signed.
-  const sorted = [...events].sort((a, b) => a.id - b.id);
-  const digests = new Map<number, string>();
+  // dropped or inserted before it is a log that changed under signed receipts, and nothing more is signed. Ids are
+  // compared as BigInt, keyed by their decimal text (round 12).
+  const sorted = events.map((e) => ({ e, id: BigInt(e.id) })).sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  const digests = new Map<string, string>();
   let digest = '';
-  for (const e of sorted) {
-    if (digests.has(e.id)) throw new ReceiptError(`event ${e.id} appears twice in the log; nothing was signed`);
+  for (const { e, id } of sorted) {
+    if (digests.has(id.toString())) throw new ReceiptError(`event ${id} appears twice in the log; nothing was signed`);
     digest = logDigest(digest, e);
-    digests.set(e.id, digest);
+    digests.set(id.toString(), digest);
   }
   for (const s of state.statements) {
     if (isEventReceipt(s) && digests.get(s.event) !== s.log.digest) {
@@ -639,7 +653,7 @@ function extend(existing: readonly unknown[], state: Extract<ChainResult, { ok: 
     }
   }
   let version: string | null = null;
-  for (const e of sorted) {
+  for (const { e, id: eventId } of sorted) {
     if (e.type === 'coordinator.started') {
       // A coordinator.started that doesn't match its schema leaves the version unrecorded (null) for the decisions
       // after it, rather than ending the chain (#918 round 11, P3).
@@ -647,8 +661,8 @@ function extend(existing: readonly unknown[], state: Extract<ChainResult, { ok: 
       version = v.success ? (v.data as EventPayload<'coordinator.started'>).version : null;
       continue;
     }
-    if (e.id <= last) continue;
-    const body = bodyOf(e, version, decided, digests.get(e.id)!);
+    if (eventId <= last) continue;
+    const body = bodyOf(e, version, decided, digests.get(eventId.toString())!);
     if (!body) continue;
     const id = push(body);
     if (body.kind === 'merge.decided') decided.set(`${body.inputs.pr}@${body.inputs.head}`, id);

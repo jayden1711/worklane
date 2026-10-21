@@ -7,8 +7,9 @@
     result in an instance's event log, chaining each receipt to the one before it. `--state` is the signer's own record
     of its chain, kept in a directory only the signer can write: it signs only onto receipts that extend it, and one
     `sign` runs at a time. Start a new chain once with `--genesis --registry <file>` (the signer's registry of every
-    chain it starts, kept next to its keys); if a chain ever ends, its successor starts with a new key and
-    `--genesis --registry <file> --after <the ended chain's state>`, after the ended chain's last event.
+    chain it starts, kept next to its keys: one registry and one key per instance); if a chain ever ends, its
+    successor starts with a new key and `--genesis --registry <file> --after <the ended chain's state>`, after the
+    ended chain's last event. Keep each chain's state where it started: a moved state is refused until it is put back.
   - `worklane receipts verify <file|dir> --key <pub>` checks the receipts with only the public key: no engine state and no
     network.
   - **Not yet root-signed:** `sign` signs as whoever runs it. Keep the private key away from the coordinator user.
