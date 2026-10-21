@@ -1,15 +1,17 @@
 // #744: the desktop window is removed, with its lockfile, docs and build steps. Its CI job stays one more release as
 // a job that only succeeds (#746, the owner's option (a)): an updater from v0.5.2 or older requires a successful
 // "desktop" run on every commit it installs, so the job and its required check go together a release later (#877).
-// Kept true here: every required check is a job some workflow defines (so neither a merge nor an engine install
-// waits on a check that never runs again), the desktop job can only succeed, and nothing but the release notes
-// still names the removed app.
+// Kept true here: every required check is a job some workflow defines (a check with no job at all would never run
+// again; that a defined job runs on every commit is not proven here: an `if:`, a `workflow_call`- or
+// `workflow_dispatch`-only file can still skip it), each required check is made by exactly one job (a second,
+// red one that started first is hidden from a v0.5.2 updater), the desktop job can only succeed, and nothing but the
+// release notes still names the removed app.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
-import { parse } from 'yaml';
+import { isScalar, parse, parseDocument, visit } from 'yaml';
 import { repoRoot } from './helpers.js';
 
 type Job = { name?: unknown; strategy?: { matrix?: unknown } };
@@ -44,7 +46,10 @@ const UNRESOLVED = '${{';
  */
 const mayName = (names: Set<string>, check: string) => names.has(check) || [...names].some((n) => n.includes(UNRESOLVED));
 
-const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
+/** A plain mapping: not a list, and not a `Map` or other class (`!!omap`, `!!set` and the like). */
+const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && [Object.prototype, null].includes(Object.getPrototypeOf(v));
+/** A key as GitHub may compare it: case folded the Unicode way, so `job` + U+017F (long s) folds to `jobs`. */
+const fold = (k: string) => k.toUpperCase().toLowerCase();
 const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
 const shown = (v: unknown) => (typeof v === 'object' && v !== null ? JSON.stringify(v) : String(v));
 
@@ -63,8 +68,8 @@ function matrixCombos(matrix: unknown): Record<string, unknown>[] | null {
   // Keys that differ only in case (`view` and `View`, or an `Include` axis): whether GitHub reads them as one key is
   // unsure, and the combinations differ either way, so the matrix counts as unreadable.
   const keys = [...Object.keys(axes), ...include.flatMap((e) => Object.keys(e)), ...exclude.flatMap((e) => Object.keys(e))];
-  if (Object.keys(axes).some((k) => /^(in|ex)clude$/i.test(k))) return null;
-  if (new Set(keys.map((k) => k.toLowerCase())).size !== new Set(keys).size) return null;
+  if (Object.keys(axes).some((k) => ['include', 'exclude'].includes(fold(k)))) return null;
+  if (new Set(keys.map(fold)).size !== new Set(keys).size) return null;
   // A value that isn't a plain, non-blank scalar (null, an object or list, '' or blanks): how GitHub names the job
   // then (an empty or dropped suffix?) is unsure, so the matrix counts as unreadable (as src/check-pin-block.ts does).
   const values = [...(Object.values(axes) as unknown[][]).flat(), ...include.flatMap((e) => Object.values(e)), ...exclude.flatMap((e) => Object.values(e))];
@@ -95,15 +100,16 @@ function hasMergeKey(v: unknown, seen = new Set<unknown>()): boolean {
   return Object.values(v).some((x) => hasMergeKey(x, seen));
 }
 
-/** Whether `v` has a key that is one of `names` in another case (`Name:`, `Jobs:`): how GitHub reads it is unsure. */
-const otherCase = (v: unknown, names: string[]) => isRecord(v) && Object.keys(v).some((k) => names.includes(k.toLowerCase()) && !names.includes(k));
+/** Whether `v` has a key that is one of `names` in another case (`Name:`, `Jobs:`, `job` + U+017F): how GitHub reads it is unsure. */
+const otherCase = (v: unknown, names: string[]) => isRecord(v) && Object.keys(v).some((k) => names.includes(fold(k)) && !names.includes(k));
 
 /**
- * Whether GitHub may show `name` as another name: leading or trailing white space, a line break (a `|` or `>+`
- * block scalar keeps one), a no-break space or a format character (zero-width and the like). It may trim or drop
- * them, so such a name fails closed.
+ * Whether GitHub may show `name` as another name. A closed set, not a list of bad characters: any character outside
+ * printable ASCII (a line break from a `|` or `>+` block scalar, a tab, a no-break space, a zero-width or format
+ * character, a control character, any letter it might fold), or a leading or trailing space. It may trim, drop or
+ * fold them, so such a name fails closed. Every name the real workflows make is inside the set.
  */
-const unsureName = (name: string) => /^\s|\s$|[^\S ]|\u0085|\p{Cf}/u.test(name);
+const unsureName = (name: string) => /[^\x20-\x7e]|^ | $/.test(name);
 
 /** The check names one job can create (see jobNames). */
 function jobCheckNames(key: string, job: Job): Set<string> {
@@ -121,27 +127,51 @@ function jobCheckNames(key: string, job: Job): Set<string> {
   if (!combos || combos.length === 0) return new Set([`${name} (${UNRESOLVED} matrix ${JSON.stringify(matrix)} }})`]);
   for (const c of combos) {
     // GitHub's expression contexts and property names ignore case, and spacing inside ${{ }} is free.
-    const vars = new Map(Object.entries(c).map(([k, v]) => [k.toLowerCase(), v]));
-    if (name.includes(UNRESOLVED)) out.add(name.replace(/\$\{\{\s*matrix\.([\w-]+)\s*\}\}/gi, (m, k: string) => (vars.has(k.toLowerCase()) ? shown(vars.get(k.toLowerCase())) : m)));
+    const vars = new Map(Object.entries(c).map(([k, v]) => [fold(k), v]));
+    if (name.includes(UNRESOLVED)) out.add(name.replace(/\$\{\{\s*matrix\.([\w-]+)\s*\}\}/gi, (m, k: string) => (vars.has(fold(k)) ? shown(vars.get(fold(k))) : m)));
     else out.add(Object.keys(c).length ? `${name} (${Object.values(c).map(shown).join(', ')})` : name);
   }
   return new Set([...out].map((n) => (unsureName(n) ? `${key} (${UNRESOLVED} name ${JSON.stringify(n)} }})` : n)));
 }
 
 /**
- * Each job in one workflow file, by key, with the check names it can create. A merge key anywhere in the file (at
- * its root, under `jobs:` or in a job) adds an entry `<<` with an unresolved name: whether Actions merges it, and so
- * which jobs the file has, is unsure, so the file may make any check. A `<<` under `jobs:` is not read as a job.
- * A root key `Jobs` (or `JOBS`) adds an unresolved entry `Jobs` the same way.
+ * One workflow file as this reads it, and why it may read it otherwise than GitHub (`unsure`, null when it can't
+ * tell any reason). Unsure, each failing closed:
+ * - bytes that aren't UTF-8 (a UTF-16 file with a BOM reads as one string, with no jobs), or a NUL;
+ * - a merge key anywhere, found in the YAML syntax tree, so every spelling counts (`<<`, `"<<"`, `!!merge <<`, and
+ *   `<<` under `%YAML 1.1`, which the parser applies and leaves no key for): whether Actions merges it is unsure;
+ * - a root, or a `jobs`, that isn't a plain mapping (a scalar, a list, `!!omap`);
+ * - a root key that is `jobs` in another case (`Jobs:`, `job` + U+017F).
+ * `wf` is null when the file can't be read at all.
+ */
+function readWorkflow(file: string): { wf: Record<string, unknown> | null; unsure: string | null } {
+  let text: string;
+  try {
+    text = new TextDecoder('utf-8', { fatal: true }).decode(readFileSync(file));
+  } catch {
+    return { wf: null, unsure: 'not UTF-8' };
+  }
+  if (text.includes('\0')) return { wf: null, unsure: 'a NUL' };
+  const value: unknown = parse(text);
+  let merge = false;
+  visit(parseDocument(text), { Pair: (_, p) => void (isScalar(p.key) && p.key.source === '<<' && (merge = true)) });
+  if (!isRecord(value)) return { wf: null, unsure: 'a root that is not a mapping' };
+  if (merge || hasMergeKey(value)) return { wf: value, unsure: 'a merge key' };
+  if (value.jobs !== undefined && !isRecord(value.jobs)) return { wf: value, unsure: 'jobs that are not a mapping' };
+  if (otherCase(value, ['jobs'])) return { wf: value, unsure: 'jobs in another case' };
+  return { wf: value, unsure: null };
+}
+
+/**
+ * Each job in one workflow file, by key, with the check names it can create. A file readWorkflow is unsure of also
+ * gets an entry `?` with an unresolved name, so it may make any check. A `<<` under `jobs:` is not read as a job.
  */
 function fileJobs(file: string): [string, Set<string>][] {
-  const wf = parse(readFileSync(file, 'utf8')) as { jobs?: Record<string, Job> };
-  const jobs = Object.entries(wf.jobs ?? {})
+  const { wf, unsure } = readWorkflow(file);
+  const jobs = Object.entries(isRecord(wf?.jobs) ? (wf.jobs as Record<string, Job>) : {})
     .filter(([key]) => key !== '<<')
     .map(([key, job]): [string, Set<string>] => [key, jobCheckNames(key, job)]);
-  if (hasMergeKey(wf)) jobs.push(['<<', new Set([`<< (${UNRESOLVED} merge key }})`])]);
-  // `Jobs:` and the like: whether GitHub reads it as `jobs` is unsure (most likely it refuses the file), so it fails closed.
-  if (otherCase(wf, ['jobs'])) jobs.push(['Jobs', new Set([`Jobs (${UNRESOLVED} a key in another case }})`])]);
+  if (unsure) jobs.push(['?', new Set([`? (${UNRESOLVED} ${unsure} }})`])]);
   return jobs;
 }
 
@@ -154,16 +184,17 @@ function fileJobNames(file: string): Set<string> {
  * The workflows and jobs in `dir` that let a step post a check run of any name, `desktop` included, through the
  * Checks API: `checks: write` or `write-all`, keys and values in any case. The protection is by design: the repo's
  * default workflow token is read-only and each workflow sets its own `permissions` without `checks`. This is a
- * backstop beside it until #877 removes the check.
+ * backstop beside it until #877 removes the check. A file readWorkflow is unsure of counts as `<file> (?)`.
  */
 function checkWriters(dir: string): string[] {
-  const grants = (p: unknown) => (typeof p === 'string' && p.trim().toLowerCase() === 'write-all') || (isRecord(p) && Object.entries(p).some(([k, v]) => k.toLowerCase() === 'checks' && String(v).trim().toLowerCase() === 'write'));
-  const perms = (o: unknown) => (isRecord(o) ? Object.entries(o).filter(([k]) => k.toLowerCase() === 'permissions').map(([, v]) => v) : []);
+  const grants = (p: unknown) => (typeof p === 'string' && fold(p.trim()) === 'write-all') || (isRecord(p) && Object.entries(p).some(([k, v]) => fold(k) === 'checks' && fold(String(v).trim()) === 'write'));
+  const perms = (o: unknown) => (isRecord(o) ? Object.entries(o).filter(([k]) => fold(k) === 'permissions').map(([, v]) => v) : []);
   const out: string[] = [];
   for (const f of workflowFiles(dir, true)) {
-    const wf = parse(readFileSync(join(dir, f), 'utf8')) as Record<string, unknown>;
+    const { wf, unsure } = readWorkflow(join(dir, f));
+    if (unsure) out.push(`${f} (?)`);
     if (perms(wf).some(grants)) out.push(f);
-    for (const [key, job] of Object.entries(isRecord(wf.jobs) ? wf.jobs : {})) if (perms(job).some(grants)) out.push(`${f}:${key}`);
+    for (const [key, job] of Object.entries(isRecord(wf?.jobs) ? wf.jobs : {})) if (perms(job).some(grants)) out.push(`${f}:${key}`);
   }
   return out;
 }
@@ -209,7 +240,21 @@ function workflowProblems(wf: Workflow): string[] {
  * job inside ci.yml is a twin too.
  */
 function desktopMakers(dir: string): string[] {
-  return workflowFiles(dir, true).flatMap((f) => fileJobs(join(dir, f)).filter(([, names]) => mayName(names, 'desktop')).map(([key]) => `${f}:${key}`));
+  return makersOf(dir, 'desktop');
+}
+
+/** Every job in `dir`'s workflows (any-case extensions) that may make the check `check` (mayName), as `file:job`. */
+function makersOf(dir: string, check: string): string[] {
+  return workflowFiles(dir, true).flatMap((f) => fileJobs(join(dir, f)).filter(([, names]) => mayName(names, check)).map(([key]) => `${f}:${key}`));
+}
+
+/**
+ * The names in `required` not made by exactly one job, each with the jobs that may make it. A v0.5.2 updater keeps
+ * only the newest run of a name, so a second job making a required check, red and started first, is never read:
+ * the same fail-open as a `desktop` twin, for any required check (#746 adversarial review, round 6).
+ */
+function requiredTwins(dir: string, required: string[]): string[] {
+  return [...new Set(required)].map((r) => [r, makersOf(dir, r)] as const).filter(([, m]) => m.length !== 1).map(([r, m]) => `${r}: ${m.join(', ') || 'no job'}`);
 }
 
 /** The names in `required` that no workflow in `dir` defines: checks nothing will ever run. */
@@ -230,6 +275,15 @@ function updaterDefaults(): string[] {
 test('every required check, the repo\'s and the updater\'s defaults, is a job some workflow defines', () => {
   assert.deepEqual(undefinedChecks(workflows, requiredChecks()), [], 'config.yaml required_checks');
   assert.deepEqual(undefinedChecks(workflows, updaterDefaults()), [], 'UPDATE_DEFAULT_CHECKS in scripts/setup/lib.sh');
+});
+
+test('every required check is made by exactly one job: no twin can hide a red run from a v0.5.2 updater (round 6)', () => {
+  assert.deepEqual(requiredTwins(workflows, [...requiredChecks(), ...updaterDefaults()]), [], 'config.yaml required_checks and UPDATE_DEFAULT_CHECKS');
+  const dir = mkdtempSync(join(tmpdir(), 'wf-'));
+  writeFileSync(join(dir, 'ci.yml'), "jobs:\n  desktop:\n    runs-on: ubuntu-latest\n    steps:\n      - run: 'true'\n  dco:\n    runs-on: x\n");
+  assert.deepEqual(requiredTwins(dir, ['desktop', 'dco']), [], 'one job each');
+  writeFileSync(join(dir, 'other.yml'), "jobs:\n  twin:\n    name: dco\n    runs-on: x\n    steps: [ { run: 'false' } ]\n");
+  assert.deepEqual(requiredTwins(dir, ['desktop', 'dco', 'lint']), ['dco: ci.yml:dco, other.yml:twin', 'lint: no job'], 'a red dco twin, and a check with no job');
 });
 
 test('a required check whose job was removed first is caught, matrix names expanded as GitHub gives them', () => {
@@ -260,7 +314,7 @@ test('a required check whose job was removed first is caught, matrix names expan
 
 test('no workflow or job may post a check run through the Checks API: no checks: write, no write-all (round 5)', () => {
   assert.deepEqual(checkWriters(workflows), [], 'a step with checks: write could post a red desktop check run');
-  const writers = (yml: string) => {
+  const writers = (yml: string | Buffer) => {
     const dir = mkdtempSync(join(tmpdir(), 'wf-'));
     writeFileSync(join(dir, 'w.yml'), yml);
     return checkWriters(dir);
@@ -271,6 +325,11 @@ test('no workflow or job may post a check run through the Checks API: no checks:
   assert.deepEqual(writers('jobs:\n  a:\n    permissions: write-all\n    runs-on: x\n'), ['w.yml:a']);
   assert.deepEqual(writers('Permissions: { Checks: Write }\njobs:\n  a:\n    runs-on: x\n'), ['w.yml'], 'any case');
   assert.deepEqual(writers('permissions: { checks: read, contents: write }\njobs:\n  a:\n    permissions: read-all\n    runs-on: x\n'), [], 'reading checks is fine');
+  // Round 6: a file this can't be sure it reads as GitHub does counts as a possible writer.
+  assert.deepEqual(writers(Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from('permissions: write-all\njobs:\n  a:\n    runs-on: x\n', 'utf16le')])), ['w.yml (?)'], 'UTF-16');
+  assert.deepEqual(writers('x: &p { permissions: write-all }\njobs:\n  a:\n    <<: *p\n    runs-on: x\n'), ['w.yml (?)'], 'permissions from a merge key');
+  assert.deepEqual(writers('%YAML 1.1\n---\nx: &p { permissions: write-all }\njobs:\n  a:\n    <<: *p\n    runs-on: x\n'), ['w.yml (?)', 'w.yml:a'], 'a merge the parser applied');
+  assert.deepEqual(writers('"job\\u017f":\n  a:\n    permissions: write-all\n    runs-on: x\n'), ['w.yml (?)'], 'jobs under a key that folds to jobs');
 });
 
 test('a required check defined only in a .YML or .Yaml file counts as undefined: GitHub may never run it (round 5)', () => {
@@ -365,7 +424,26 @@ const TWIN_FIXTURES: [string, string, boolean][] = [
   ['F5 a job keyed desktop, an object matrix value', 'jobs:\n  desktop:\n    strategy: { matrix: { v: [{}] } }\n    runs-on: x\n', true],
   ['F5 a job keyed desktop, a null value in an include entry', 'jobs:\n  desktop:\n    strategy: { matrix: { include: [{ v: ~ }] } }\n    runs-on: x\n', true],
   ['R2 Name: desktop (another case)', 'jobs:\n  shots:\n    Name: desktop\n    runs-on: x\n', true],
-  ['R2 Jobs: (another case) with a job keyed desktop', 'Jobs:\n  desktop:\n    runs-on: x\n', true],  ['a name with more around the value', 'jobs:\n  shots:\n    name: shots ${{ matrix.view }}\n    strategy: { matrix: { view: [desktop, phone] } }\n    runs-on: x\n', false],
+  ['R2 Jobs: (another case) with a job keyed desktop', 'Jobs:\n  desktop:\n    runs-on: x\n', true],
+  // Round 6 (#746 adversarial review): merge keys in every spelling, files that aren't plain mappings, names outside
+  // printable ASCII, and keys that fold to `jobs` the Unicode way.
+  ['%YAML 1.1 merge key, an explicit name over the anchor', "%YAML 1.1\n---\nenv:\n  X: &n { name: desktop }\njobs:\n  shots:\n    <<: *n\n    name: shots\n    runs-on: x\n    steps: [ { run: 'false' } ]\n", true],
+  ['%YAML 1.1 merge key under jobs:, an explicit job over it', "%YAML 1.1\n---\nx: &j { twin: { name: desktop, runs-on: x } }\njobs:\n  <<: *j\n  twin:\n    name: shots\n    runs-on: x\n", true],
+  ['!!merge tag, an explicit name over the anchor', "env:\n  X: &n { name: desktop }\njobs:\n  shots:\n    !!merge <<: *n\n    name: shots\n    runs-on: x\n", true],
+  ['jobs: !!omap', '%YAML 1.1\n---\njobs: !!omap\n  - twin: { name: desktop, runs-on: x }\n', true],
+  ['jobs: a list', 'jobs:\n  - desktop\n', true],
+  ['jobs: empty', 'on: push\njobs:\n', true],
+  ['a root that is a scalar', 'desktop\n', true],
+  ['a root key that folds to jobs, "job\\u017f"', '"job\\u017f":\n  desktop:\n    runs-on: x\n', true],
+  ['a name with a NUL escape', 'jobs:\n  shots:\n    name: "desktop\\0"\n    runs-on: x\n', true],
+  ['a name with ESC', 'jobs:\n  shots:\n    name: "desktop\\e"\n    runs-on: x\n', true],
+  ['a name with DEL', 'jobs:\n  shots:\n    name: "desktop\\x7f"\n    runs-on: x\n', true],
+  ['a name with a C1 control', 'jobs:\n  shots:\n    name: "desktop\\x9b"\n    runs-on: x\n', true],
+  ['a name with U+034F', 'jobs:\n  shots:\n    name: "desktop\\u034f"\n    runs-on: x\n', true],
+  ['a name with U+FE0F', 'jobs:\n  shots:\n    name: "desktop\\ufe0f"\n    runs-on: x\n', true],
+  ['a name with U+3164', 'jobs:\n  shots:\n    name: "desktop\\u3164"\n    runs-on: x\n', true],
+  ['a name with U+2800', 'jobs:\n  shots:\n    name: "desktop\\u2800"\n    runs-on: x\n', true],
+  ['a name with more around the value', 'jobs:\n  shots:\n    name: shots ${{ matrix.view }}\n    strategy: { matrix: { view: [desktop, phone] } }\n    runs-on: x\n', false],
   ['no name: the values in parentheses', 'jobs:\n  shots:\n    strategy: { matrix: { view: [desktop] } }\n    runs-on: x\n', false],
   ['no name, include entries only', 'jobs:\n  shots:\n    strategy: { matrix: { include: [{ view: desktop }] } }\n    runs-on: x\n', false],
   ['desktop excluded', 'jobs:\n  shots:\n    name: ${{ matrix.view }}\n    strategy: { matrix: { view: [desktop, phone], exclude: [{ view: desktop }] } }\n    runs-on: x\n', false],
@@ -390,8 +468,15 @@ const CI_TWIN_FIXTURES: [string, string][] = [
 /** A workflow file name the backstop must read: `.yml` or `.yaml`, any case. */
 const FILE_NAME_FIXTURES = ['other.YML', 'other.Yaml'];
 
+/** Workflow files whose bytes this can't read as GitHub might (round 6): each holds a `name: desktop` job. */
+const BYTE_FIXTURES: [string, Buffer][] = [
+  ['UTF-16LE with a BOM', Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from('jobs:\n  twin:\n    name: desktop\n    runs-on: x\n', 'utf16le')])],
+  ['UTF-16BE with a BOM', Buffer.from(String.fromCharCode(0xfeff) + 'jobs:\n  twin:\n    name: desktop\n    runs-on: x\n', 'utf16le').swap16()],
+  ['a NUL byte in a comment', Buffer.from('jobs:\n  twin:\n    name: shots\n    runs-on: x\n# ' + String.fromCharCode(0) + '\n')],
+];
+
 test('a second job that may make a desktop check is caught, in another workflow or in ci.yml, whatever its name is built from (#746 adversarial reviews)', () => {
-  const makers = (files: Record<string, string>) => {
+  const makers = (files: Record<string, string | Buffer>) => {
     const dir = mkdtempSync(join(tmpdir(), 'wf-'));
     writeFileSync(join(dir, 'ci.yml'), NOOP_CI);
     for (const [f, text] of Object.entries(files)) writeFileSync(join(dir, f), text);
@@ -409,6 +494,7 @@ test('a second job that may make a desktop check is caught, in another workflow 
     assert.equal(got[0], 'ci.yml:desktop');
   }
   for (const f of FILE_NAME_FIXTURES) assert.deepEqual(makers({ [f]: 'jobs:\n  desktop:\n    runs-on: x\n' }), ['ci.yml:desktop', `${f}:desktop`], f);
+  for (const [label, bytes] of BYTE_FIXTURES) assert.deepEqual(makers({ 'other.yml': bytes }), ['ci.yml:desktop', 'other.yml:?'], label);
 });
 
 test('matrix names expand as GitHub gives them: include, exclude, case and spacing', () => {
