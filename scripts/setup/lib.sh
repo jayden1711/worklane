@@ -102,13 +102,25 @@ ensure_user() {
 ensure_group() { groupadd -f "$1"; }
 ensure_member() { usermod -aG "$2" "$1"; }
 
+# The bytes install_sudoers writes for <content>: the one place they are made, so a check that a rule is current
+# (sudoers_current) compares exactly what an install would write.
+sudoers_bytes() { printf '%s\n' "$1"; }
+
+# Whether <file> holds byte for byte what install_sudoers writes for <content>. A missing file never does.
+sudoers_current() { [ -f "$1" ] && sudoers_bytes "$2" | cmp -s - "$1"; }
+
 # Install a sudoers file safely: write a dotted temp name (sudo ignores
 # names with a dot), validate it, and only then move it into place.
+# SUDOERS_PRECOMMIT, when a caller sets it (machine-helper.sh, #902 round 6), names a function run last, right before
+# the move, given the temp file: if it fails, the temp file goes and nothing is installed (exit 3). lib.sh sets it empty here, so nothing
+# from the environment reaches it.
+SUDOERS_PRECOMMIT=""
 install_sudoers() {
   local name="$1" content="$2" tmp="/etc/sudoers.d/.$1.tmp"
-  printf '%s\n' "$content" > "$tmp"
+  sudoers_bytes "$content" > "$tmp"
   chmod 0440 "$tmp"
   if ! visudo -cf "$tmp"; then rm -f "$tmp"; echo "sudoers $name is invalid; nothing installed" >&2; exit 1; fi
+  if [ -n "$SUDOERS_PRECOMMIT" ] && ! "$SUDOERS_PRECOMMIT" "$tmp"; then rm -f "$tmp"; echo "sudoers $name: not installed (above)" >&2; exit 3; fi
   mv -f "$tmp" "/etc/sudoers.d/$name"
   echo "installed /etc/sudoers.d/$name"
 }
@@ -249,6 +261,230 @@ machine_sudoers() {
 helper_instances() {
   [ -f "$MACHINE_SUDOERS" ] || return 0
   sed -n 's/^\(wl-[-a-z0-9, ]*\) ALL=(root) NOPASSWD: WORKLANE_MACHINE$/\1/p' "$MACHINE_SUDOERS" | tr ',' '\n' | sed -e 's/^ *wl-//' -e 's/ *$//' | grep -E '^[a-z][a-z0-9-]{0,20}$' || true
+}
+
+# Whether the installed machine helper rule ($MACHINE_SUDOERS) is byte for byte what machine-helper.sh writes for these
+# instances: machine_sudoers for their coordinator users, as install_sudoers writes it (#898). The helper's own bytes
+# say nothing about it: the updater keeps those in step with the engine and never touches sudoers. Only reads.
+machine_sudoers_current() {
+  local n users=()
+  [ "$#" -ge 1 ] || return 1
+  for n in "$@"; do users+=("wl-$n"); done
+  sudoers_current "$MACHINE_SUDOERS" "$(machine_sudoers "${users[@]}")"
+}
+
+# The machine helper's rule read in the engine's own shape, or nothing (#898, #902 round 3: fail closed). On stdin, a
+# text machine_sudoers writes, as install_sudoers writes it:
+#   - comment lines, each starting "# ": never an #include or #includedir, never "#<digits>" (sudoers reads that as a
+#     uid), never one ending in \;
+#   - then exactly one "Cmnd_Alias WORKLANE_MACHINE = " block, one command a line: the first on the alias line, the
+#     rest indented four spaces, each but the last ending ", \";
+#   - then exactly one "<users> ALL=(root) NOPASSWD: WORKLANE_MACHINE" line, its users wl-<name> joined by ", ";
+#   - and nothing else.
+# Every command is "$MACHINE_HELPER <arguments>": words of the characters the engine's own commands use, one space
+# apart. That means no "!", no backslash, no comma, colon, equals sign, quote or tab.
+# It prints "cmd <command>" for each command and "user <user>" for each user, and exits 0. On anything else, exit 1:
+# a tab, a CR, a blank line, a second alias or spec, a tag, a Defaults or include line, a negation, an escape, or
+# anything it can't place. The caller then treats the rule as one only --replace-sudoers may replace.
+machine_sudoers_shape() {
+  LC_ALL=C awk -v H="$MACHINE_HELPER" -v A='^[]A-Za-z0-9^$.*+[{}/@_~-]+( []A-Za-z0-9^$.*+[{}/@_~-]+)*$' \
+    -v S='^wl-[a-z][a-z0-9-]*(, wl-[a-z][a-z0-9-]*)* ALL=[(]root[)] NOPASSWD: WORKLANE_MACHINE$' '
+    function bad() { failed = 1; exit 1 }
+    {
+      line = $0
+      if (line ~ /[\r\t]/) bad()
+      if (st == 0 && substr(line, 1, 1) == "#") {
+        if (substr(line, 1, 2) != "# " || line ~ /\\$/) bad()
+        next
+      }
+      if (st == 0) {
+        if (substr(line, 1, 30) != "Cmnd_Alias WORKLANE_MACHINE = ") bad()
+        rest = substr(line, 31); st = 1
+      } else if (st == 1) {
+        if (substr(line, 1, 4) != "    ") bad()
+        rest = substr(line, 5)
+      } else if (st == 2) {
+        if (line !~ S) bad()
+        u = line; sub(/ ALL=.*$/, "", u)
+        n = split(u, us, ", ")
+        for (i = 1; i <= n; i++) print "user " us[i]
+        st = 3; next
+      } else bad()
+      more = 0
+      if (substr(rest, length(rest) - 2) == ", \\") { more = 1; rest = substr(rest, 1, length(rest) - 3) }
+      if (index(rest, H " ") != 1) bad()
+      if (substr(rest, length(H) + 2) !~ A) bad()
+      print "cmd " rest
+      if (!more) st = 2
+    }
+    END { if (failed || st != 3) exit 1 }'
+}
+
+# Whether replacing the installed rule $1 by content $2 only narrows it (#898). The owner's rule: the rule is rewritten
+# on its own only when the result is narrower than or equal to what is installed.
+#   - $1 must be a regular file (no link, no NUL) in the engine's own shape (machine_sudoers_shape), and so must $2.
+#   - Every command of $2 must be one of $1's, byte for byte.
+#   - Every user of $2 must be one of $1's, unless it is among $3...: users the caller adds on purpose, which are
+#     machine-helper.sh's own arguments at a root shell, or an instance being created (instance.sh's mark).
+# So the rewrite only drops whole commands or users. Anything else, including any doubt, is wider: only root's
+# --replace-sudoers replaces it. No $1 is a first install only where the helper was never set up
+# (machine_helper_never_set_up); a rule taken away from a machine that had one is wider to put back.
+# Only reads; prints nothing.
+sudoers_only_narrows() {
+  local file="$1" content="$2" have want l
+  shift 2
+  if [ ! -e "$file" ] && [ ! -L "$file" ]; then
+    # No rule: a first install only on a machine that never had the helper set up (#902 round 5). Where the helper
+    # or its rules record is there, the rule was taken away (root revoking it, say): putting one back is wider.
+    machine_helper_never_set_up && return 0
+    return 1
+  fi
+  [ -f "$file" ] && [ ! -L "$file" ] || return 1
+  tr -d '\000' < "$file" | cmp -s - "$file" || return 1
+  have="$(machine_sudoers_shape < "$file")" || return 1
+  want="$(sudoers_bytes "$content" | machine_sudoers_shape)" || return 1
+  while IFS= read -r l; do
+    grep -qxF -- "$l" <<<"$have" && continue
+    case "$l" in "user "*) printf '%s\n' "$@" | grep -qxF -- "${l#user }" && continue ;; esac
+    return 1
+  done <<<"$want"
+  return 0
+}
+
+# Before a setup script's first change (instance-remove.sh, instance-rename.sh): stop when rewriting the machine
+# helper's rule for instances $3... would need --replace-sudoers (#898). $1 is the script's directory, for the command.
+# $2 is the one user the script adds on purpose (the renamed instance's), or empty. When it would need the flag, it
+# prints the diff and the command and returns 1, so the script stops with nothing changed. With no instance left to
+# name, or no rule naming any, there is nothing to check.
+machine_sudoers_preflight() {
+  local dir="$1" allow="$2" n users=() others=() rule
+  shift 2
+  [ "$#" -gt 0 ] || return 0
+  for n in "$@"; do users+=("wl-$n"); [ "wl-$n" = "$allow" ] || others+=("$n"); done
+  rule="$(machine_sudoers "${users[@]}")" || return 1
+  sudoers_only_narrows "$MACHINE_SUDOERS" "$rule" ${allow:+"$allow"} && return 0
+  # The command names the instances there now: the one the script adds on purpose is added by the script itself. When
+  # the rule's users line can't be read, they come from the hub and the checkouts, so the command always runs. The diff
+  # shown is the rule that command installs, and the command is pinned to it (#902 round 6).
+  if [ "${#others[@]}" -eq 0 ]; then
+    for n in $(machine_instances_here); do [ "wl-$n" = "$allow" ] || others+=("$n"); done
+  fi
+  if [ "${#others[@]}" -eq 0 ]; then
+    sudoers_unified_diff "$MACHINE_SUDOERS" "$rule"
+    echo "no instance's coordinator is on this machine to rewrite the rule for: remove it, as root: sudo rm -f $MACHINE_SUDOERS"
+  else
+    users=(); for n in "${others[@]}"; do users+=("wl-$n"); done
+    rule="$(machine_sudoers "${users[@]}")" || return 1
+    sudoers_unified_diff "$MACHINE_SUDOERS" "$rule"
+    echo "rerun as root with --replace-sudoers to install the engine's rule: sudo bash $dir/machine-helper.sh --replace-sudoers=$(sudoers_pin "$rule") ${others[*]}"
+  fi
+  return 1
+}
+
+# The installed rule $1 with user $2 taken out of it and nothing else changed (#902 round 8, A3): what instance-remove.sh
+# installs when the engine's rule is wider than the installed one, so a removal (a revocation) never waits on a
+# widening. It only narrows: the same lines, one user fewer. It prints the content (as machine_sudoers does, no final
+# newline), or fails when $1 isn't in the engine's own shape (machine_sudoers_shape), doesn't name $2, or names no one
+# else.
+machine_sudoers_without() {
+  local file="$1" drop="$2"
+  [ -f "$file" ] && [ ! -L "$file" ] || return 1
+  tr -d '\000' < "$file" | cmp -s - "$file" || return 1
+  machine_sudoers_shape < "$file" > /dev/null || return 1
+  LC_ALL=C awk -v D="$drop" '
+    /^wl-[a-z0-9, -]* ALL=[(]root[)] NOPASSWD: WORKLANE_MACHINE$/ {
+      u = $0; sub(/ ALL=.*$/, "", u)
+      n = split(u, us, ", "); out = ""; found = 0
+      for (i = 1; i <= n; i++) { if (us[i] == D) { found = 1; continue }; out = out (out == "" ? "" : ", ") us[i] }
+      if (!found || out == "") exit 1
+      print out " ALL=(root) NOPASSWD: WORKLANE_MACHINE"
+      next
+    }
+    { print }' "$file"
+}
+
+# The difference between installed sudoers file $1 and content $2 as a unified diff, labelled for the owner's runbook:
+# its minus side "installed <file>", its plus side "engine (machine-helper.sh)". Prints nothing when they are the same.
+sudoers_unified_diff() {
+  local from="$1"
+  # No rule installed: the whole engine rule is what it adds.
+  [ -e "$from" ] || [ -L "$from" ] || from=/dev/null
+  diff -u --label "installed $1" --label "engine (machine-helper.sh)" -- "$from" <(sudoers_bytes "$2") || true
+}
+
+# The pin of an engine rule (#902 round 6): the sha256 of the bytes install_sudoers writes for content $1. Every
+# printed --replace-sudoers command carries the pin of the rule it showed (--replace-sudoers=<pin>), and a flag run
+# installs only a rule with that pin, so root installs exactly the rule it read.
+sudoers_pin() { sudoers_bytes "$1" | sha256sum | cut -d' ' -f1; }
+
+# The installed rule $1 at one moment: the sha256 of its bytes, "absent", or "unreadable".
+sudoers_state() {
+  if [ ! -e "$1" ] && [ ! -L "$1" ]; then echo absent; return 0; fi
+  { sha256sum < "$1" 2>/dev/null || echo unreadable; } | cut -d' ' -f1
+}
+
+# Where the machine helper's rule is written (#902 round 6, B1): the one check, at write time. machine-helper.sh runs
+# it under its lock, right before install_sudoers.
+#   - $1 is the installed rule's state when the run's first check read it (sudoers_state); it must be the same now,
+#     so nothing changed the rule between that check and this write.
+#   - $2 is the pin root passed with --replace-sudoers=, or empty. A pin must be $3's.
+#   - $4 is 1 when the run's first check found a first install (no rule, and the helper never set up), else 0. The run
+#     itself installs the helper before it writes the rule, so that is read once, at the first check, never again here.
+#   - Without a pin, $3, the rule written, must only narrow the installed one, adding none but the users $5..., or be
+#     that first install, the rule still absent.
+# Returns 0 to write. Otherwise it says why and returns 3: nothing is written.
+machine_sudoers_commit_ok() {
+  local seen="$1" pin="$2" rule="$3" first="$4"
+  shift 4
+  if [ "$(sudoers_state "$MACHINE_SUDOERS")" != "$seen" ]; then
+    echo "refused: $MACHINE_SUDOERS changed while this ran; nothing written. Run it again: it checks the rule as it is now"
+    return 3
+  fi
+  if [ -n "$pin" ]; then
+    [ "$(sudoers_pin "$rule")" = "$pin" ] && return 0
+    echo "refused: the engine's rule is not the one --replace-sudoers=$pin was printed for; nothing written"
+    return 3
+  fi
+  [ "$first" = 1 ] && [ "$seen" = absent ] && return 0
+  sudoers_only_narrows "$MACHINE_SUDOERS" "$rule" "$@" && return 0
+  echo "refused: the engine's rule grants what $MACHINE_SUDOERS doesn't; nothing written"
+  return 3
+}
+
+# install_sudoers' last step for the machine helper's rule (#902 round 7, F4): the temp file $1 must hold byte for byte
+# the rule the checks judged, $4 (the bytes written are the bytes checked), and machine_sudoers_commit_ok must still
+# hold, with $2... as for it. Otherwise nothing is installed.
+machine_sudoers_precommit() {
+  local tmp="$1"
+  shift
+  if ! sudoers_bytes "$3" | cmp -s - "$tmp"; then
+    echo "refused: the rule about to be written is not the rule checked; nothing written"
+    return 3
+  fi
+  machine_sudoers_commit_ok "$@"
+}
+
+# The lock every engine writer of the machine helper's rule holds from its check to its write (#902 round 6, 7: F1;
+# machine-helper.sh, its --drop, and instance-remove.sh; instance.sh can't write it, round 8). A root writer outside
+# the engine (a hand edit, visudo or rm, an older release's scripts) takes none. It sits
+# in a directory only root can enter (root's, 0700, not a link), so no other user can open, hold or plant it. Without
+# flock, or with that directory anything else, the run refuses: it never writes the rule unlocked.
+machine_sudoers_lock() {
+  local d="${MACHINE_SUDOERS_LOCK%/*}"
+  command -v flock >/dev/null 2>&1 || { echo "refused: writing $MACHINE_SUDOERS needs flock (util-linux), and there is none" >&2; exit 1; }
+  ( umask 077; mkdir -p "$d" )
+  if [ ! -d "$d" ] || [ -L "$d" ] || [ "$(command stat -c '%u %a' -- "$d" 2>/dev/null)" != "$MACHINE_SUDOERS_LOCK_UID 700" ]; then
+    echo "refused: $d is not root's 0700 directory; it holds the lock every writer of $MACHINE_SUDOERS takes" >&2
+    exit 1
+  fi
+  exec 8> "$MACHINE_SUDOERS_LOCK"
+  flock -w 120 8 || { echo "another run is writing $MACHINE_SUDOERS; run this again once it is done" >&2; exit 1; }
+}
+
+# Whether this machine never had the machine helper set up: no helper and no rules record (machine-helper.sh writes
+# both). Only then is a missing rule a first install.
+machine_helper_never_set_up() {
+  [ ! -e "$MACHINE_HELPER" ] && [ ! -L "$MACHINE_HELPER" ] && [ ! -e "$HELPER_RULES" ] && [ ! -L "$HELPER_RULES" ]
 }
 
 # Tailscale for the dashboard hub (tailscale.sh). The install is pinned: Tailscale's own apt repository for this
@@ -569,6 +805,78 @@ ENGINE_CLI=/usr/local/bin/worklane
 # add-project's wait for a repo's setup PR to merge: how often it checks, and (empty: its --timeout) for how long.
 SETUP_POLL_SECONDS=20 SETUP_WAIT_SECONDS=""
 ADD_PROJECT_LOCK=/run/lock/worklane-add-project.lock
+# instance-remove.sh's PATH once it runs as root, and where it keeps a removed instance's history (#902 round 9, N3:
+# set here, so a test's lib points both into its temp dir and every host tool the script reaches is the test's).
+ROOT_PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+REMOVED_ARCHIVE=/var/lib/worklane/removed
+# Every writer of the machine helper's rule holds this lock from its check to its write: machine-helper.sh, and
+# instance-remove.sh when it takes the rule away (#902 round 6).
+MACHINE_SUDOERS_LOCK=/run/worklane-machine/sudoers.lock   # in a root-only 0700 directory (machine_sudoers_lock)
+MACHINE_SUDOERS_LOCK_UID=0
+# The instances being created: root's list, one name a line, a regular file of root's, 0600, one link (#898).
+#   - A name goes on it where its coordinator user is made: instance.sh, which only root runs. That covers
+#     add-project's instance step, a by-hand instance.sh, and instance-rename.sh's users step.
+#   - It comes off wherever the machine helper's rule is written: machine-helper.sh, for every name it writes.
+#   - Only a name on it lets add-project add that instance's coordinator to the rule without --replace-sudoers.
+# A list that isn't exactly that (a link, another owner or mode, a second link) marks nothing, so the flag is needed.
+ADD_PROJECT_NEW=/var/lib/worklane/add-project-new
+ADD_PROJECT_NEW_UID=0   # its owner: root
+# Whether instance $1 is on the list, read only from a list that is exactly root's 0600 regular file.
+new_instance_marked() {
+  local f="$ADD_PROJECT_NEW"
+  [ -f "$f" ] && [ ! -L "$f" ] && [ "$(command stat -c '%u %a %h' -- "$f" 2>/dev/null)" = "$ADD_PROJECT_NEW_UID 600 1" ] || return 1
+  grep -qxF -- "$1" "$f"
+}
+# The list rewritten whole: its names, if it is a list new_instance_marked would read, without $1, then $2 (a name to
+# add, or nothing). The temp file is created exclusively (set -C: O_EXCL, so never through a link or over a file there
+# already). A temp file left there refuses the write.
+new_instance_write() {
+  local f="$ADD_PROJECT_NEW" tmp="$ADD_PROJECT_NEW.tmp" keep=""
+  if [ -f "$f" ] && [ ! -L "$f" ] && [ "$(command stat -c '%u %a %h' -- "$f" 2>/dev/null)" = "$ADD_PROJECT_NEW_UID 600 1" ]; then
+    keep="$(grep -vxF -- "$1" "$f" || true)"
+  fi
+  mkdir -p "$(dirname "$f")"
+  [ ! -e "$tmp" ] && [ ! -L "$tmp" ] || return 1
+  ( set -C; umask 077; { [ -z "$keep" ] || printf '%s\n' "$keep"; [ -z "${2:-}" ] || printf '%s\n' "$2"; } > "$tmp" ) || return 1
+  mv -f -T -- "$tmp" "$f"
+}
+# instance.sh, as it makes wl-$1: $1 goes on the list. Failing to write it leaves $1 unmarked (its first add then
+# needs --replace-sudoers), never marked by mistake.
+new_instance_mark() { new_instance_write "$1" "$1" || echo "note: $1 could not be put on $ADD_PROJECT_NEW; its first add will wait for --replace-sudoers" >&2; }
+# instance.sh, before it makes anything: $1 goes on the list only when nothing of an instance by that name is on this
+# machine yet (#902 round 8, A1). That means none of its users, no group wl-<n>-work, no sudoers file of its own
+# (worklane-<n>: userdel leaves both, #902 round 9, N2), no checkout root, no hub entry, and no place in the machine
+# helper's rule. A coordinator root took out of the rule and deleted by hand, with any of those left, is no new
+# instance: its next add waits for --replace-sudoers.
+group_exists() { getent group "$1" >/dev/null 2>&1; }
+new_instance_mark_if_new() {
+  local n="$1" u
+  for u in "wl-$n" "wl-$n-agent" "wl-$n-eval"; do if user_exists "$u"; then return 0; fi; done
+  if group_exists "wl-$n-work" || sudoers_installed "worklane-$n"; then return 0; fi
+  if [ -e "$SRV_ROOT/$n" ] || [ -L "$SRV_ROOT/$n" ]; then return 0; fi
+  if { hub_instances; helper_instances; } | grep -qx -- "$n"; then return 0; fi
+  new_instance_mark "$n"
+}
+# machine-helper.sh, for every name it writes into the rule: each comes off. Failing that, the list goes, so no name it
+# held marks anything (each then needs the flag).
+new_instance_clear() {
+  local n
+  [ -e "$ADD_PROJECT_NEW" ] || [ -L "$ADD_PROJECT_NEW" ] || return 0
+  for n in "$@"; do
+    new_instance_marked "$n" || continue
+    new_instance_write "$n" || { rm -f -- "$ADD_PROJECT_NEW"; echo "note: $ADD_PROJECT_NEW could not be rewritten: removed" >&2; return 0; }
+  done
+}
+# The instances on this machine whose coordinator user exists: from the machine helper's rule, the hub and the
+# checkouts' root. For a command that must name them when the rule's own users line can't be read.
+machine_instances_here() {
+  local n
+  for n in $({ helper_instances; hub_instances; ls -1 "$SRV_ROOT" 2>/dev/null; } | grep -E '^[a-z][a-z0-9-]{0,20}$' | sort -u); do
+    # Only names machine-helper.sh would take (the instance-name rules), so the command it prints runs.
+    [ -z "$(instance_name_problem "$n")" ] || continue
+    if user_exists "wl-$n"; then echo "$n"; fi
+  done
+}
 user_exists() { id -u "$1" >/dev/null 2>&1; }
 unit_active() { systemctl is-active -q "$1"; }
 
@@ -664,6 +972,7 @@ instance_name_problem() {
   elif [ "$n" = dash ]; then echo "wl-dash is the dashboard viewer"
   elif [ "$n" = hub ] || [ "$n" = hub-setup ]; then echo "worklane-dashboard-$n.service is the dashboard hub's"
   elif [ "$n" = update ] || [ "$n" = tailscale ] || [ "$n" = claude-account ] || [ "$n" = egress ]; then echo "worklane-$n.service is the machine's own"
+  elif [ "$n" = machine ] || [ "$n" = console ]; then echo "/etc/sudoers.d/worklane-$n is the machine's own sudoers file"
   elif [ "$n" = agent ] || [ "$n" = eval ] || [ "$n" = work ] || [ "$n" = mcp ] || [ "$n" = mcpc ] || [ "$n" = mcpctl ]; then echo "its test user wl-test-$n would be instance test's $n name, and wl-ci-$n the $n name of instance ci"
   elif [[ "$n" == test-* ]]; then echo "wl-$n is the test user of instance ${n#test-}"
   elif [[ "$n" == ci-* ]]; then echo "wl-$n is the user of CI runner ${n#ci-}"
@@ -675,8 +984,25 @@ instance_name_problem() {
   fi
 }
 instance_name_ok() { [ -z "$(instance_name_problem "$1")" ]; }
-# Refuse a name that can't be an instance's, saying why: `need_instance_name <name> [<what it is>]`.
-need_instance_name() { local why; why="$(instance_name_problem "$1")"; [ -z "$why" ] || { echo "${2:-instance name} ${1:-(none)}: $why" >&2; exit 2; }; }
+# Refuse a name that can't be an instance's, saying why: `need_instance_name <name> [<what it is>] [kept]`. With kept,
+# for an instance already on the machine (served, checked or removed; never made): kept_instance_name_problem.
+need_instance_name() {
+  local why
+  if [ "${3:-}" = kept ]; then why="$(kept_instance_name_problem "$1")"; else why="$(instance_name_problem "$1")"; fi
+  [ -z "$why" ] || { echo "${2:-instance name} ${1:-(none)}: $why" >&2; exit 2; }
+}
+# The names reserved after an instance could already have one (#902 round 8: their sudoers files are the machine's
+# own). Nothing new is made under either; an instance made before keeps working where it is: what serves, turns off or
+# removes what it already has takes its name (#902 round 9; decision guide 2 and 3). It never goes back into the
+# machine helper's rule: every list passed to machine-helper.sh holds instance_name_ok names only. As
+# src/instance-name.ts LATER_RESERVED and keptInstanceNameProblem.
+LATER_RESERVED_NAMES="machine console"
+kept_instance_name_problem() {
+  local n
+  for n in $LATER_RESERVED_NAMES; do if [ "${1:-}" = "$n" ]; then return 0; fi; done
+  instance_name_problem "${1:-}"
+}
+kept_instance_name_ok() { [ -z "$(kept_instance_name_problem "$1")" ]; }
 # Why a name can't be a CI runner's (ci-runner.sh --name; nothing when it can): an instance's shape, never agent, eval
 # or work (wl-ci-<x> is then instance ci's), nor ending in -docker or -reset (another runner's units). As
 # src/instance-name.ts ciRunnerNameProblem.
