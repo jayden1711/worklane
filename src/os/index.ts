@@ -949,9 +949,11 @@ export function seatbeltProfile(home: string, hide: readonly string[]): string {
  * path. Seatbelt matches canonical paths (a profile names /private/tmp, never /tmp), so a configured home reached
  * through a symlink (/var/... is /private/var/...) would match nothing: the whole home writable, its ~/.claude*
  * readable. Such a home, or one that can't be resolved, is refused, never rewritten (#798 round 11; Linux resolves
- * the home itself, in its wrapper). `real` is for tests.
+ * the home itself, in its wrapper). Resolved by the OS's own realpath (`.native`), which returns the name's case as
+ * the disk stores it: Node's JS realpath keeps the case it was given, so on a case-insensitive disk `/Volumes/x/Agent`
+ * could pass for `/Volumes/x/agent` while the profile matches neither (round 12). `real` is for tests.
  */
-export function seatbeltProfileFor(home: string, hide: readonly string[], real: (p: string) => string = realpathSync): string {
+export function seatbeltProfileFor(home: string, hide: readonly string[], real: (p: string) => string = realpathSync.native): string {
   let canonical: string;
   try {
     canonical = real(home);
@@ -965,9 +967,11 @@ export function seatbeltProfileFor(home: string, hide: readonly string[], real: 
 /**
  * How to spawn a project command: bash with pipefail and a clean environment. With `runAs`, as the agent user and
  * always in a sandbox hiding its Claude logins, its API key and `runAs.hide` (#713): bubblewrap, or macOS's
- * sandbox-exec. No way to run one as the agent user without it; `sandboxTool` is for tests.
+ * sandbox-exec. No way to run one as the agent user without it; `sandboxTool`, `platform` and `realpath` are for
+ * tests (which sandbox is built, and how macOS's home is resolved; either way the command runs in one).
  */
-export function projectCommand(command: string, runAs?: ProjectRunAs, projectEnv: Record<string, string> = {}, o: { sandboxTool?: string } = {}): { file: string; args: string[]; env: NodeJS.ProcessEnv } {
+export function projectCommand(command: string, runAs?: ProjectRunAs, projectEnv: Record<string, string> = {}, o: { sandboxTool?: string; platform?: 'linux' | 'darwin'; realpath?: (p: string) => string } = {}): { file: string; args: string[]; env: NodeJS.ProcessEnv } {
+  const platform = o.platform ?? process.platform;
   const [file, args] = shellCommand(command);
   const own = safeProjectEnv(projectEnv);
   if (!runAs) return { file, args, env: childEnv(own) };
@@ -983,7 +987,7 @@ export function projectCommand(command: string, runAs?: ProjectRunAs, projectEnv
   // never reaches, and the masks would miss the real one (#787 round 6).
   if (!normalHome(runAs.home)) throw new Error(`the agent user's home ${NOT_NORMAL_ABSOLUTE}: ${JSON.stringify(runAs.home)}; refusing to run it`);
   const home = runAs.home;
-  if (process.platform !== 'linux' && process.platform !== 'darwin') throw new Error('running a project command as the agent user needs macOS or Linux, for its sandbox');
+  if (platform !== 'linux' && platform !== 'darwin') throw new Error('running a project command as the agent user needs macOS or Linux, for its sandbox');
   const env = {
     ...own,
     HOME: home,
@@ -1003,8 +1007,8 @@ export function projectCommand(command: string, runAs?: ProjectRunAs, projectEnv
   };
   // INVARIANT: a proxy only from root's network.json, as for every child (src/network.ts).
   const full = outboundEnv(env);
-  if (process.platform === 'darwin') {
-    const [f, a] = asUser(runAs.user, '/usr/bin/sandbox-exec', ['-p', seatbeltProfileFor(home, hide), file, ...args], full);
+  if (platform === 'darwin') {
+    const [f, a] = asUser(runAs.user, '/usr/bin/sandbox-exec', ['-p', seatbeltProfileFor(home, hide, o.realpath), file, ...args], full);
     return { file: f, args: a, env: { PATH: ownEnv().get('PATH') ?? '/usr/bin:/bin' } };
   }
   // The wrapper's bash gets no environment at all; the command gets exactly `full`, from the env -i inside bwrap.
