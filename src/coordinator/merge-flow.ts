@@ -896,11 +896,10 @@ export abstract class MergeFlow extends FixRuns {
       if (ciIsNone(this.d.cfg.project)) this.startMainRuns(m.sha);
       // Still not reported, up to a timeout: in polls, so it holds whatever the poll interval, and from the merge
       // itself, so a restart (which forgets the polls) never starts it again. At it, unknown is not green (#731).
+      // Nothing is logged here: mainUnknown marks it judged only once its stop is durable.
       const timedOut = (missing: string[], how: string) => {
         const polls = this.waitPolls.bump(`main:${m.sha}`);
         if (polls < pollsFor(MAIN_CHECKS_TIMEOUT_MS, this.d.prPollMs ?? 60_000, MAIN_CHECKS_MIN_POLLS) && now - Date.parse(e.ts) < MAIN_CHECKS_TIMEOUT_MS) return;
-        this.emit('merge.main_result', { issue: m.issue, number: m.number, sha: m.sha, outcome: 'timed_out', failed: missing });
-        this.emit('wait.capped', { issue: m.issue, number: m.number, kind: 'main_checks', detail: `${missing.join(', ')} ${how} on ${m.sha.slice(0, 8)} after ${polls} polls`.slice(0, 1000) });
         unknown.push({ m, missing, how, polls });
       };
       // A read that fails (a GitHub error) or never answers is no answer: never green, and a poll toward the timeout.
@@ -955,11 +954,19 @@ export abstract class MergeFlow extends FixRuns {
    * them is unknown, and unknown is not green. Auto-merge stops (`main_unknown`, which resumes only as a red main's stop
    * does: main green on its tip, or an owner's typed acknowledgement), naming the checks and the commits, unless a stop
    * that already waits for green main is in force (kept as it is: its kind, reason and alert). Each PR is told.
+   * INVARIANT (#731 round 2): a merge is marked judged (merge.main_result timed_out) only after the stop is written or
+   * kept. A pass cut off before the stop (a restart, or a later read that throws) leaves it unjudged, so a later pass
+   * times it out again; one cut off after the stop leaves that stop in force. Either way the stop is never lost.
    */
   private async mainUnknown(list: { m: EventPayload<'merge.done'>; missing: string[]; how: string; polls: number }[]) {
     const last = list.at(-1)!.m;
     const kept = this.gatedStopInForce();
     if (!kept) this.stopFor(`${this.branch} isn't known green after auto-merging: ${list.map((u) => `${u.missing.join(', ')} ${u.how} on \`${u.m.sha.slice(0, 8)}\` (#${u.m.number})`).join('; ')}`.slice(0, 2000), last.number, last.sha, null, 'main_unknown');
+    // Durable now (the file and merge.stopped, or the stop already in force): only then are the merges judged.
+    for (const u of list) {
+      this.emit('merge.main_result', { issue: u.m.issue, number: u.m.number, sha: u.m.sha, outcome: 'timed_out', failed: u.missing });
+      this.emit('wait.capped', { issue: u.m.issue, number: u.m.number, kind: 'main_checks', detail: `${u.missing.join(', ')} ${u.how} on ${u.m.sha.slice(0, 8)} after ${u.polls} polls`.slice(0, 1000) });
+    }
     for (const u of list) {
       const what = `the required check(s) ${u.missing.join(', ')} ${u.how} on the merge commit \`${u.m.sha.slice(0, 8)}\` (${u.polls} polls), so whether ${this.branch} is green after this merge is unknown, and unknown is not green.`;
       const then = kept ? `Auto-merge stays stopped on this instance (${kept.slice(0, 300)}). ${this.stopResume}` : this.stopResume;
