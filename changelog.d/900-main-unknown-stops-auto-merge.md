@@ -1,0 +1,6 @@
+### Upgrading (from v0.5.2)
+
+- **Main's checks that never report after an auto-merge now stop auto-merge (#731).** Before, when a required check on an auto-merge's commit was still missing or pending after the timeout (2 hours), the engine commented "Auto-merge goes on; check them yourself" and kept merging. Now unknown is not green: auto-merge stops on the instance (`auto-merge-stopped.json` and `merge.stopped` with `by: main_unknown`), the reason names the checks and the merge commit, and the PR is told. It resumes as a red-main stop does: once the default branch's required checks pass on its tip, measured by the coordinator, or with an owner's typed acknowledgement on the dashboard. What changes on upgrade:
+  - A GitHub error reading those checks, or a read with no answer in 2 minutes, counts as no report. Before, an error kept the wait from ever timing out.
+  - The 2 hours count from the merge, so a restart no longer starts them again. An older auto-merge that was never judged (for example, one from before `required_checks` was set) can stop auto-merge on the first look after the upgrade; acknowledge it on the dashboard once main is checked.
+  - A stop already in force that waits for green main is kept as it is; a `by: owner` stop is replaced by this one.
