@@ -161,8 +161,10 @@ export const ISOLATED = Symbol.for('test-isolation');
 //     on the machine: in a directory that isn't the test's own (inside this test machine or the repo), or through a
 //     test's own file whose real path leaves them (a link to the machine's tool). Relative and empty entries are
 //     resolved against the child's cwd first. A tool the machine lacks stays missing; a test's own stand-in answers;
-//   - a refusal (thrown) for a host tool given by path outside the test's own directories, for `env -i` (or `-u PATH`)
-//     with no PATH, and for `command -p` or a login shell, each when the command line names a host tool;
+//   - for a host tool given by path outside the test's own directories: a refusal (thrown) when a test file asked, its
+//     stand-in when the engine's own code did (doctor finds gitleaks on PATH and runs it by path);
+//   - a refusal for `env -i` (or `-u PATH`) with no PATH, and for `command -p` or a login shell, each when the command
+//     line runs a host tool as a command;
 //   - the stand-ins first in any PATH handed to `env`.
 // Each stand-in records its call (hostCalls()) and exits 1, as a tool that can't answer; it runs nothing else.
 // process.binding's spawn_sync and process_wrap are refused. The pinned exceptions, never-grow: the files in
@@ -177,14 +179,17 @@ export const ISOLATED = Symbol.for('test-isolation');
 // tool that is under no host tool's name and on no PATH. `id` and `getent` are not stood in: they only read the user
 // database, and scripts use their answers.
 
-/** Every host tool a test must never run for real (a superset of test/host-tools.ts HOST_TOOLS). */
+/**
+ * Every host tool a test must never run for real: test/host-tools.ts HOST_TOOLS but gitleaks, and more. gitleaks
+ * only reads the files it is given, and the secret-scan tests run the real one (CI installs it).
+ */
 // check-table: never-shrink
 export const HOST_TOOL_NAMES = [
   'systemctl', 'launchctl', 'loginctl', 'systemd-run', 'journalctl',
   'sudo', 'su', 'runuser', 'doas', 'pkexec',
   'useradd', 'usermod', 'userdel', 'groupadd', 'groupdel', 'gpasswd', 'chpasswd', 'visudo',
   'nft', 'iptables', 'setfacl',
-  'gh', 'docker', 'tailscale', 'gitleaks', 'claude',
+  'gh', 'docker', 'tailscale', 'claude',
 ] as const;
 
 /**
@@ -205,6 +210,7 @@ export const MACHINE_TOOLS_ON_PURPOSE: readonly string[] = Object.freeze([
   'test/frozen-guard.test.ts sudo',
   'test/machine-helper.test.ts visudo',
   'test/separate-users.test.ts sudo',
+  'test/watchdog.test.ts systemctl',
 ]);
 
 const POSIX = process.platform !== 'win32';
@@ -257,9 +263,18 @@ const findOn = (tool: string, dirs: readonly string[]) => {
 };
 /** The machine's own directories: this process's PATH as loaded (not the test's own), then MACHINE_DIRS. */
 const machineDirs = () => [...new Set([...PATH_AT_LOAD.split(':').filter((d) => isAbsolute(d) && !isOwn(d)), ...MACHINE_DIRS])];
-let machineReal: Set<string> | null = null;
-/** The real path of each host tool the machine has. */
-const machineTools = () => (machineReal ??= new Set(HOST_TOOL_NAMES.map((t) => findOn(t, machineDirs())).filter((f): f is string => f !== null).map(realOr)));
+let machineReal: Map<string, string> | null = null;
+/** The real path of each host tool the machine has, to its name. */
+const machineTools = () => {
+  if (!machineReal) {
+    machineReal = new Map();
+    for (const t of HOST_TOOL_NAMES) {
+      const f = findOn(t, machineDirs());
+      if (f !== null) machineReal.set(realOr(f), t);
+    }
+  }
+  return machineReal;
+};
 /** The host tools a non-own directory holds (read once: tests don't write outside their own). */
 const dirTools = new Map<string, readonly string[]>();
 const toolsIn = (dir: string) => {
@@ -361,14 +376,37 @@ function callerFile(): string | null {
  * from any other file). With none on the machine, the bare name, which a child resolves through the stand-ins (or not
  * at all), so the run skips as on a machine without it.
  */
-export function machineTool(tool: string): string {
+export function machineTool(tool: string): string;
+/**
+ * The same pin, for engine code the run calls (it starts `tool` by name): while `run` runs (synchronously), a child
+ * started by that name gets the machine's own; every other host tool is still a stand-in. Returns what `run` returns.
+ */
+export function machineTool<T>(tool: string, run: () => T): T;
+export function machineTool<T>(tool: string, run?: () => T): string | T {
   const caller = callerFile();
   if (caller === null || !MACHINE.has(`${caller} ${tool}`)) refuse(`machineTool('${tool}') from ${caller ?? 'an unknown file'}, which MACHINE_TOOLS_ON_PURPOSE doesn't pin`);
-  return findOn(tool, machineDirs()) ?? tool;
+  if (!run) return findOn(tool, machineDirs()) ?? tool;
+  const had = byName.has(tool);
+  byName.add(tool);
+  try {
+    return run();
+  } finally {
+    if (!had) byName.delete(tool);
+  }
 }
+/** The tools a pinned machineTool(tool, run) lets through by name, while its run runs. */
+const byName = new Set<string>();
 
-const HOST_WORD = new RegExp(`(^|[^\\w.-])(${HOST_TOOL_NAMES.map((t) => t.replace(/-/g, '\\-')).join('|')})(?=$|[^\\w.-])`);
-const namesHostTool = (text: string) => HOST_WORD.test(text);
+/**
+ * A host tool as a command in a shell command line: at its start, after ; & | ( ` $( or a quote (a script handed to
+ * another shell), or after a word that runs the next one (env with its options and assignments, command, exec, sudo,
+ * nohup, time, xargs, then, do, else), by name or by path. A path that only ends in a tool's name as an argument
+ * (~/.config/gh) is not one.
+ */
+const HOST_COMMAND = new RegExp(
+  `(?:^|[;&|(\`'"\\n]|\\$\\(|\\b(?:then|do|else|exec|nohup|time|xargs|sudo|command(?:\\s+-[a-zA-Z]+)*|env(?:\\s+-\\S+|\\s+[A-Za-z_]\\w*=\\S*)*))\\s*(?:/\\S*/)?(?:${HOST_TOOL_NAMES.map((t) => t.replace(/-/g, '\\-')).join('|')})(?=$|[\\s;&|)\`'"])`,
+);
+const namesHostTool = (text: string) => HOST_COMMAND.test(text);
 
 /** A shell's own options, up to its script (-c's argument) or its first operand. */
 function shellOptions(args: readonly string[]): string[] {
@@ -443,22 +481,29 @@ type Options = Record<string, unknown>;
  * What a child starts with, or null to start it untouched (a file in REAL_HOST_TOOLS_ON_PURPOSE, or a pinned
  * machineTool run). `line`: `command` is a shell command line (exec, execSync), not a file.
  */
-function guard(form: string, command: unknown, args: readonly unknown[], options: unknown, line: boolean): { args: string[]; options: Options } | null {
+function guard(form: string, command: unknown, args: readonly unknown[], options: unknown, line: boolean): { file: string; args: string[]; options: Options } | null {
   if (typeof command !== 'string' || !args.every((a) => typeof a === 'string')) return null; // Node refuses it as before
   if (options !== undefined && options !== null && (typeof options !== 'object' || Array.isArray(options))) return null;
   const caller = callerFile();
   if (caller !== null && REAL.has(caller)) return null;
+  if (!line && byName.size && byName.has(command) && !(options as Options | undefined)?.shell) return null;
   const o = (options ?? {}) as Options;
   const cwd = typeof o.cwd === 'string' ? resolve(o.cwd) : o.cwd instanceof URL ? fileURLToPath(o.cwd) : process.cwd();
   const shell = line || Boolean(o.shell);
   let argv = args as string[];
+  let file = command;
   if (shell) checkShellLine(form, [command, ...argv].join(' '), []);
   else {
     if (command.includes('/')) {
-      const file = resolve(cwd, command);
-      if (hostToolPath(file)) {
-        if (caller !== null && MACHINE.has(`${caller} ${basename(file)}`)) return null;
-        refuse(`${form} ${command}: the machine's own ${basename(file)}, by path`);
+      const path = resolve(cwd, command);
+      if (hostToolPath(path)) {
+        const real = realOr(path);
+        const tool = [basename(path), basename(real)].find((n) => TOOLS.has(n)) ?? machineTools().get(real) ?? basename(path);
+        if (caller !== null && MACHINE.has(`${caller} ${tool}`)) return null;
+        // A test file is told; the engine's own code (doctor resolving gitleaks on PATH, say) gets the stand-in, as it
+        // would by name.
+        if (caller === null || caller.startsWith('test/') || !TOOLS.has(tool)) refuse(`${form} ${command}: the machine's own ${tool}, by path`);
+        file = join(standInsFor([...HOST_TOOL_NAMES].sort()), tool);
       }
     }
     const name = basename(command);
@@ -469,7 +514,7 @@ function guard(form: string, command: unknown, args: readonly unknown[], options
   const childEnv = Object.assign(Object.create(Object.getPrototypeOf(env) as object | null) as Record<string, string | undefined>, env);
   childEnv.PATH = withHostStandIns(env.PATH, cwd);
   const childOptions = Object.assign(Object.create(Object.getPrototypeOf(o) as object | null) as Options, o, { env: childEnv });
-  return { args: argv, options: childOptions };
+  return { file, args: argv, options: childOptions };
 }
 
 /** (args?, options?) as Node reads them; null when Node would refuse them (then the call goes to Node untouched). */
@@ -500,7 +545,7 @@ if (POSIX) {
       const n = argsAndOptions(a, b);
       // Null options: spawn and spawnSync refuse them (left to Node, untouched); execFileSync reads them as none.
       const g = n && !(form !== 'execFileSync' && n[1] === null) && guard(form, command, n[0], n[1] ?? undefined, false);
-      return g ? raw[form].call(this, command, g.args, g.options) : raw[form].call(this, command, a, b);
+      return g ? raw[form].call(this, g.file, g.args, g.options) : raw[form].call(this, command, a, b);
     };
   // `promised`: the promisified form, which takes no callback (an extra argument would hide promisify's own).
   const execFileWith = (to: Fn, promised: boolean) =>
@@ -508,7 +553,7 @@ if (POSIX) {
       const n = execFileArgs(a, b, c);
       const g = n && guard('execFile', file, n[0], n[1], false);
       if (!g) return promised ? to.call(this, file, ...[a, b].filter((x) => x !== undefined)) : to.call(this, file, a, b, c);
-      return promised ? to.call(this, file, g.args, g.options) : to.call(this, file, g.args, g.options, n![2]);
+      return promised ? to.call(this, g.file, g.args, g.options) : to.call(this, g.file, g.args, g.options, n![2]);
     };
   const execWith = (to: Fn, promised: boolean) =>
     function (this: unknown, command: unknown, a?: unknown, b?: unknown) {

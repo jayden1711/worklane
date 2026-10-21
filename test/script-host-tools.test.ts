@@ -148,6 +148,11 @@ test('#991: the ways past the stand-ins it can see are refused: a host tool by p
   refused(() => cp.spawnSync(`cd ${MISSING} && bash -l -c 'sudo -V'`, { shell: true }));
   refused(() => (process as unknown as { binding: (n: string) => unknown }).binding('spawn_sync'));
   refused(() => (process as unknown as { binding: (n: string) => unknown }).binding('process_wrap'));
+  // The engine's own code naming a host tool by path gets its stand-in (recorded, exit 1), never the tool.
+  const before = g.hostCalls().length;
+  const byEngine = engineSpawnSync(`${MISSING}/sudo`, ['-n', 'true'], { encoding: 'utf8' });
+  assert.equal(byEngine.status, 1, String(byEngine.error ?? ''));
+  assert.deepEqual(g.hostCalls().slice(before), [{ tool: 'sudo', args: ['-n', 'true'] }]);
   // A PATH handed to env gets the stand-ins first (resolution only).
   const viaEnv = String(cp.spawnSync('env', ['-i', `PATH=${SYSTEM}`, 'sh', '-c', 'command -v sudo || echo none'], { encoding: 'utf8' }).stdout).trim();
   assert.ok(findOn('sudo', SYSTEM) === null ? viaEnv === 'none' : viaEnv.startsWith(`${g.standInRoot}/`), viaEnv);
@@ -196,7 +201,7 @@ function machineToolRefs(file: string, text: string): string[] {
     if (named) {
       const p = n.parent;
       if (ts.isImportSpecifier(p) && !p.propertyName && p.name === n) out.push('import');
-      else if (ts.isCallExpression(p) && p.expression === n && p.arguments.length === 1 && ts.isStringLiteral(p.arguments[0]!)) out.push(p.arguments[0].text);
+      else if (ts.isCallExpression(p) && p.expression === n && p.arguments.length >= 1 && p.arguments.length <= 2 && ts.isStringLiteral(p.arguments[0]!)) out.push(p.arguments[0].text);
       else out.push('<other>');
     }
     ts.forEachChild(n, visit);
@@ -228,5 +233,6 @@ test('#991 pin: the one file that starts its children untouched still needs the 
   const g = guard();
   assert.deepEqual([...g.REAL_HOST_TOOLS_ON_PURPOSE], ['test/setup-scripts.test.ts'], 'one file, and it may only go');
   assert.match(readFileSync(join(repoRoot, 'test', 'setup-scripts.test.ts'), 'utf8'), /spawnSync\('sudo', \['-n', /, "its acceptance runs ask real sudo -n, or there's no reason left for the exception");
-  for (const t of HOST_TOOLS) assert.ok(g.HOST_TOOL_NAMES.includes(t), t);
+  // gitleaks only reads, and the secret-scan tests run the real one.
+  for (const t of HOST_TOOLS) if (t !== 'gitleaks') assert.ok(g.HOST_TOOL_NAMES.includes(t), t);
 });
