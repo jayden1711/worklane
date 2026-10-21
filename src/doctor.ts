@@ -18,6 +18,7 @@ import { instanceTargets, planMigrations, projectConfigFiles, type Targets } fro
 import { projectStateDir } from './guardrails/context.js';
 import { canRunAgents, detectOs, diskFree, fileAccess, nvidiaNodes, shimsNeedShell, userUid, wslAvailable } from './os/index.js';
 import { diskFloorCheck } from './governor-holds.js';
+import { policyRootChecks } from './doctor-policy-root.js';
 import { findTool, toolBin } from './tool-path.js';
 import { checkIntakeFile } from './intake/check.js';
 import { claudeAccountLeftoverCheck } from './claude-accounts-retired.js';
@@ -255,6 +256,7 @@ export function doctor(rootArg: string, opts: { agentshield?: boolean; /** A pol
   // Only where the project runs its tests on the machine: elsewhere no run has a sandbox to grant from.
   if (cfg?.tests.test_run) out.push(networkCheck());
   if (opts.agentshield) out.push(agentShield(root));
+  out.push(...policyRootChecks());
   return out;
 }
 
