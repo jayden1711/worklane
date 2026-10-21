@@ -48,6 +48,11 @@ run_as() { local user="$1" script="$2"; shift 2; echo "run_as $user" >> "$T/call
 claude_status_json() { cat "$T/claude-status-$1" 2>/dev/null || true; }
 claude_login_ok() { :; }
 install_claude_token() { cat > /dev/null; echo "install_claude_token $1" >> "$T/calls"; }
+# The policy step's root ownership (#726), stood in as test/add-project.test.ts does: no sudo -V, no engine CLI.
+sudo_regex_ok() { :; }
+own_policy() { touch "$T/owned-$1"; }
+policy_root_ok() { [ -e "$T/owned-$1" ]; }
+POLICY_ROOT_DIR="$T/policy-root"
 SRV_ROOT="$T/srv" ENGINE_CLI="$T/bin/worklane" MACHINE_HELPER="$T/helper" MACHINE_SUDOERS="$T/sudoers-machine" HUB_UNIT="$T/hub.service" ADD_PROJECT_LOCK="$T/lock"
 SETUP_POLL_SECONDS=0 SETUP_WAIT_SECONDS=0
 `,
