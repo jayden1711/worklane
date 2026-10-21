@@ -9,9 +9,11 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { childEnv, shellCommand } from './os/index.js';
 import { BRAND } from './brand.js';
 import { ConfigInvalid, loadConfig, type Config } from './config/load.js';
-import { hostOf, RESEARCH_ROOT_ENV, researchCallRefusal, researchModeRefusal } from './research.js';
-import { INTAKE_ROLE, INTAKE_TOOLS } from './intake/run.js';
-import { CHAT_ROLE, CHAT_ROOT_ENV, chatModeRefusal } from './intake/chat.js';
+// WHY (#785): the lanes' rules come from the guard's own modules (src/guard/), not from src/research.ts and
+// src/intake/*, so the guard's process loads only what it decides with (test/review.test.ts pins the tree).
+import { hostOf, RESEARCH_ROOT_ENV, researchCallRefusal, researchModeRefusal } from './guard/research.js';
+import { INTAKE_ROLE, INTAKE_TOOLS } from './guard/intake.js';
+import { CHAT_ROLE, CHAT_ROOT_ENV, chatModeRefusal } from './guard/chat.js';
 import { evaluate } from './guardrails/engine.js';
 import { liveContext, projectStateDir } from './guardrails/context.js';
 import { TaskFile } from './contract.js';
