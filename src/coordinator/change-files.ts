@@ -142,6 +142,30 @@ export function rangeNames(cwd: string, range: string): string[] {
   return [...new Set(names(must(runBytes(cwd, ['log', '--format=', '--name-only', '--no-renames', '--diff-merges=first-parent', '--ignore-submodules=none', '-z', range]))))];
 }
 
+/**
+ * The entries of `rev`'s tree whose name, as nameOf reads it, is one of `names`: for each such name, the text of every
+ * entry with it, read by object id and never by name, so a name that isn't valid UTF-8 (which can't be handed back to
+ * git) is still read (#724). An entry that isn't a blob (a submodule link), or whose blob git can't give, is null. A
+ * name with no entry at `rev` isn't in the map: that is the only "not there". Throws when the tree can't be listed.
+ */
+export function blobsByName(cwd: string, rev: string, names: string[]): Map<string, (string | null)[]> {
+  const out = new Map<string, (string | null)[]>();
+  const wanted = new Set(names);
+  if (!wanted.size) return out;
+  if (rev.startsWith('-')) throw new Error(`blobsByName: ${rev} is not a revision`);
+  // -r -z: "mode SP type SP object TAB path NUL" for every file of the tree.
+  for (const rec of fields(must(runBytes(cwd, ['ls-tree', '-r', '-z', '--full-tree', rev])))) {
+    const tab = rec.indexOf(9);
+    if (tab === -1) continue;
+    const name = nameOf(rec.subarray(tab + 1));
+    if (!wanted.has(name)) continue;
+    const [, type, sha] = rec.subarray(0, tab).toString('latin1').split(' ');
+    const text = type === 'blob' && sha ? run(cwd, ['cat-file', 'blob', sha]) : null;
+    out.set(name, [...(out.get(name) ?? []), text instanceof Error ? null : text]);
+  }
+  return out;
+}
+
 /** changedNames, or null when git fails (an unknown commit, no repo). */
 export function changedNamesOrNull(cwd: string, args: string[], o: NameListOptions = {}): string[] | null {
   const out = nameList(cwd, args, o);
