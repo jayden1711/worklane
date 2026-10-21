@@ -21,6 +21,7 @@ categories:
     - test/push-hook-guard.test.ts
     - test/push-gate.test.ts
     - test/push-gate-hook.test.ts
+    - test/change-files-renames.test.ts
     - test/main-watch.test.ts
     - test/main-watch-coordinator.test.ts
     - test/denylist.test.ts
@@ -28,7 +29,6 @@ categories:
     - test/package-files.test.ts
     - test/managed-apps.test.ts
     - test/merge-idempotent.test.ts
-    - test/change-files-renames.test.ts
     # Listed here only, not locked in code: the tests' own machine (every test runs inside it), the check that engine
     # code never writes a slot-directory file in place (and that a slot path reaches no other writer, #772), and the
     # tests that assert the agents' tool guard denies a call.

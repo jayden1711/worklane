@@ -390,6 +390,9 @@ export const SELF_MODIFICATION_PARTS: { what: string; globs: string[] }[] = [
     globs: [
       'test/review.test.ts', 'test/merge-policy.test.ts', 'test/guardrails.test.ts',
       'test/push-check.test.ts', 'test/push-guard.test.ts', 'test/push-hook-guard.test.ts', 'test/push-gate.test.ts', 'test/push-gate-hook.test.ts',
+      // The rename, odd-byte and control-character guarantees, and the scan that keeps every changed-name reader in
+      // one helper (#688, locked by #724).
+      'test/change-files-renames.test.ts',
       'test/main-watch.test.ts', 'test/main-watch-coordinator.test.ts', 'test/denylist.test.ts', 'test/dco.test.ts', 'test/package-files.test.ts',
       // Root's managed-apps reader's fail-closed cases and the script's refusals (#665).
       'test/managed-apps.test.ts',
@@ -402,9 +405,6 @@ export const SELF_MODIFICATION_PARTS: { what: string; globs: string[] }[] = [
       'test/engine-guard-locks.test.ts',
       // The test that keeps each lock glob that matches no file yet paired with its lock (#885).
       'test/not-yet-files-locks.test.ts',
-      // The rename, odd-byte and control-character guarantees, and the scan that keeps every changed-name reader in
-      // one helper (#688, locked by #724).
-      'test/change-files-renames.test.ts',
     ],
   },
   { what: 'the release procedure and the design rules', globs: ['docs/releasing.md', 'docs/design.md'] },
