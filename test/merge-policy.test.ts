@@ -894,7 +894,7 @@ test("weakening: bounded and fail closed: too many changed characters, a diff th
     throw new Error('no blob');
   };
   assert.deepEqual(kinds(weakening.weakeningReasons({ files: [{ path: 'package.json', added: 1, removed: 1, addedLines: ['x'], removedLines: ['y'] }], deleted: new Set(), before: boom, after: boom, scope: undefined })), [UNREADABLE]);
-  const r = weakening.weakeningOf(exampleProject().dir, 'no-such-rev', 'HEAD', [{ path: 'test/math.test.ts', added: 1, removed: 1, addedLines: ['x'], removedLines: ['y'] }], undefined);
+  const r = weakening.weakeningOf(exampleProject().dir, 'no-such-rev', 'HEAD', [{ path: 'test/math.test.ts', added: 1, removed: 1, addedLines: ['x'], removedLines: ['y'] }], undefined, 'HEAD');
   assert.equal(r.length, 1);
   assert.match(r[0]!, /^design: may weaken a check: the check for a removed or weakened test, lint or guard could not run/);
   // The patterns are linear: substrings, and one regex of literal alternatives with no quantifier.
@@ -917,7 +917,7 @@ test('weakening: weakeningOf reads the deleted paths from git and never a table 
   const r = weakening.weakeningOf(dir, base, head, [
     { path: 'test/add-project.test.ts', added: 0, removed: 1, addedLines: [], removedLines: ['// pad'] },
     { path: 'test/old.test.ts', added: 0, removed: 1, addedLines: [], removedLines: ['export const two = 2;'] },
-  ], undefined);
+  ], undefined, base);
   assert.deepEqual(kinds(r), [UNREADABLE, DELETED]);
   assert.match(r[0]!, /over 500000: not read/);
 });
@@ -942,7 +942,7 @@ test('weakening (round 6 review): only a regular file can be a pure rename; a sy
   const moves = changes.exactMoves(dir, base, head);
   assert.equal(moves.get('test/plain.test.ts'), 'test/sum.test.ts', 'a regular file is paired');
   assert.equal(moves.has('test/link.test.ts'), false, 'a symlink is not');
-  const r = weakening.weakeningOf(dir, base, head, changes.changeFiles(dir, base, head), undefined);
+  const r = weakening.weakeningOf(dir, base, head, changes.changeFiles(dir, base, head), undefined, base);
   assert.ok(kinds(r).includes(DELETED), r.join(' | '));
   assert.ok(r.some((x) => x.includes('test/link.test.ts')), r.join(' | '));
   assert.ok(!r.some((x) => x.includes('plain.test.ts') || x.includes('sum.test.ts')), r.join(' | '));
@@ -1114,6 +1114,11 @@ function decideChange(base: Record<string, string>, head: Record<string, string 
     return g('rev-parse', 'HEAD');
   };
   const before = commit(base);
+  // The default branch on its remote, at the base (claimed at its tip): the merge decision fetches its tip and reads
+  // the checks it registers (#869).
+  execFileSync('git', ['init', '-q', '--bare', join(dir, '..', 'origin.git')], { stdio: 'ignore' });
+  g('remote', 'add', 'origin', join(dir, '..', 'origin.git'));
+  g('push', '-q', 'origin', `${before}:refs/heads/main`);
   const after = commit(head);
   const cfg = loadConfig(dir);
   cfg.project.land_mode = 'pr';

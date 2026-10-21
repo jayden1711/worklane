@@ -32,7 +32,8 @@ function reasonsFor(before: string, after: string): string[] {
   writeFileSync(join(dir, HELPER), after);
   g('commit', '-q', '-am', 'head');
   const head = g('rev-parse', 'HEAD');
-  return weakeningOf(dir, base, head, changeFiles(dir, base, head), undefined);
+  // The default branch's tip is the change's base here (claimed at the tip).
+  return weakeningOf(dir, base, head, changeFiles(dir, base, head), undefined, base);
 }
 /** The reasons that name the helper's POLICY_ONLY. */
 const naming = (r: string[]) => r.filter((x) => x.startsWith(WEAKENING_REASON) && x.includes(`${HELPER}: "POLICY_ONLY: `));

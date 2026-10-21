@@ -487,6 +487,15 @@ export function filesWithText(cwd: string, rev: string, needles: string[]): stri
 }
 
 /**
+ * Where two commits meet (git merge-base): for the merge decision's check for a weakened test, lint or guard, the
+ * point a change met the default branch's tip, so a mark there that the change's head lacks was taken out by the change
+ * (#869). Throws when git fails or there is none.
+ */
+export function mergeBaseOf(cwd: string, a: string, b: string): string {
+  return must(run(cwd, ['merge-base', a, b])).trim();
+}
+
+/**
  * The text of each of `paths` that is a file in `rev`'s tree, keyed by path; a path that isn't there is left out. For
  * the merge decision's check for a weakened test, lint or guard (src/merge-policy-weakening.ts), which compares a
  * changed file before and after. Paths are from the top of the repo. A blob over `maxBytes` isn't read: its path is
