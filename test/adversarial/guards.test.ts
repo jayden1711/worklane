@@ -15,9 +15,10 @@
 // the text moved away). Each attack is one line: what it tries and the input. A test passes only if every attack is
 // refused, and its controls show the refusal isn't everything refused.
 //
-// A gap an open PR (or an open issue with no PR yet) is closing is a test with `todo` naming it: node:test runs its
-// body and reports it as todo, never as a failure. Each fails on main and passes once that change lands; removing the
-// `todo` is the change's own job. They show no more than that change's own tests or issue already do (#707).
+// A hole an open PR is closing is a known-hole case (knownHole): a strict expected failure that names the PR. It
+// passes while every one of its attacks still gets through, and fails the suite, saying "this hole is closed: turn
+// this into a normal case", once any is refused. So the fix PR goes red in its own CI until it turns the case into a
+// normal one, and the flip can't be forgotten. They show no more than that PR's own tests or issue already do (#707).
 //
 // Every fixture is fake and assembled at runtime (stand-in tokens, a hashed made-up term), so no secret-, address- or
 // path-shaped literal sits in this file for the repo's own scans to find. Nothing touches the machine's own state: the
@@ -74,6 +75,51 @@ async function letThrough<A extends { what: string }>(attacks: readonly A[], ref
   }
   return out;
 }
+
+// ---- Known holes: strict expected failures. ----
+
+/** A route main doesn't close yet: the attacks its case makes, and the ones that still get through on this tree. */
+interface Hole {
+  attacks: string[];
+  open: string[];
+}
+
+/**
+ * Why a known hole's case fails the suite, or null while every one of its attacks still gets through. WHY: a hole
+ * case is a strict expected failure, not a node:test todo (which reports a passing body as `ok # TODO`, so a
+ * regression of a fix would stay green). The fix PR that closes the hole goes red in its own CI until it turns the
+ * case into a normal one; main never does, as only that PR changes what the attacks get.
+ */
+function holeStatus(closes: string, h: Hole): string | null {
+  const unknown = h.open.filter((a) => !h.attacks.includes(a));
+  if (!h.attacks.length || unknown.length) return `known-hole bookkeeping is wrong (${closes}): attacks ${JSON.stringify(h.attacks)}, open ${JSON.stringify(h.open)}`;
+  const closed = h.attacks.filter((a) => !h.open.includes(a));
+  if (!closed.length) return null;
+  if (closed.length === h.attacks.length) return `this hole is closed: turn this into a normal case (it closes with ${closes}): ${closed.join('; ')} are now refused`;
+  return `this hole is partly closed: turn these attacks into a normal case (it closes with ${closes}), and keep the rest here: ${closed.join('; ')} are now refused`;
+}
+
+/** The status of one hole case: its body runs first, so a body that can't run fails the case and never counts as open. */
+const holeVerdict = async (closes: string, body: () => Promise<Hole> | Hole) => holeStatus(closes, await body());
+
+/** A case for a hole an open PR closes: green while the hole is open on this tree, red with what to do once it isn't. */
+function knownHole(name: string, closes: string, opts: { skip?: string | false }, body: () => Promise<Hole> | Hole) {
+  test(`${name} [known hole, open on main: closes with ${closes}]`, opts, async () => {
+    const why = await holeVerdict(closes, body);
+    assert.equal(why, null, why ?? '');
+  });
+}
+
+test('adversarial guards / known-hole helper: an open hole passes; a closed one, wholly or in part, fails with what to do; a body that cannot run fails', async () => {
+  const closes = 'PR #1 (#2)';
+  assert.equal(holeStatus(closes, { attacks: ['a', 'b'], open: ['b', 'a'] }), null, 'every attack still gets through');
+  assert.match(holeStatus(closes, { attacks: ['a', 'b'], open: [] }) ?? '', /^this hole is closed: turn this into a normal case \(it closes with PR #1 \(#2\)\): a; b are now refused$/);
+  assert.match(holeStatus(closes, { attacks: ['a', 'b'], open: ['a'] }) ?? '', /^this hole is partly closed: turn these attacks into a normal case .*: b are now refused$/);
+  assert.match(holeStatus(closes, { attacks: [], open: [] }) ?? '', /bookkeeping is wrong/, 'a hole with no attacks proves nothing');
+  assert.match(holeStatus(closes, { attacks: ['a'], open: ['a', 'z'] }) ?? '', /bookkeeping is wrong/, 'an open attack the case never made');
+  await assert.rejects(holeVerdict(closes, () => { throw new Error('the fixture broke'); }), /the fixture broke/);
+  assert.equal(await holeVerdict(closes, async () => ({ attacks: ['a'], open: ['a'] })), null);
+});
 
 // ---- Stand-in secrets, made at runtime. ----
 
@@ -260,7 +306,7 @@ test(`adversarial guards / tool.no-read-secrets (${doc('- read secret files;')})
   ] as const) assert.notEqual((await g.call(tool, input, o)).decision, 'deny', `control: ${what}`);
 });
 
-test(`adversarial guards / tool.no-read-secrets (${doc('- read secret files;')}): a Glob, Grep, directory read or recursive shell search over a hidden directory or the secret files is refused`, { todo: 'closes with PR #887 (#847)', skip: !posix && 'POSIX shells' }, async () => {
+test(`adversarial guards / tool.no-read-secrets (${doc('- read secret files;')}): a Glob, Grep, directory read or recursive shell search over a hidden directory or the secret files is refused`, { skip: !posix && 'POSIX shells' }, async () => {
   const g = guardProject();
   const hidden: ToolAttack[] = [
     { what: 'Glob its pattern', tool: 'Glob', input: { pattern: 'evals-secret/**' } },
@@ -290,6 +336,8 @@ test(`adversarial guards / tool.domain-allowlist (${doc('- fetch a domain outsid
     ['an allowed name as userinfo', 'https://docs.github.com@evil.example/'],
     ['an allowed name as a subdomain of another', 'https://docs.github.com.evil.example/'],
     ['a name that ends like a wildcard entry, without its dot', 'https://evilnpmjs.org/'],
+    ['a name that ends with an exact entry, without a dot before it', 'https://evildocs.github.com/'],
+    ['a name that ends with an exact entry after another label', 'https://evil.docs.github.com/'],
     ['an allowed name as a path', 'https://evil.example/docs.github.com'],
     ['an IPv4 literal', 'http://127.0.0.1:8080/'],
     ['an IPv6 literal', 'http://[::1]/'],
@@ -603,7 +651,7 @@ const covers = (entries: string[], target: string) =>
     return /[*?[{]/.test(e) && globToRegExp(e.replace(/^\//, '')).test(target.replace(/^\//, ''));
   });
 
-test(`adversarial guards / tool.no-read-secrets (${doc('- read secret files;')}): a task's hidden paths and the project's secret files are denied by the sandbox and the Read rules too, not only by the hook`, { todo: 'closes with PR #893 (#890)', skip: !posix && 'POSIX stand-in claude' }, async () => {
+knownHole(`adversarial guards / tool.no-read-secrets (${doc('- read secret files;')}): a task's hidden paths and the project's secret files are denied by the sandbox and the Read rules too, not only by the hook`, 'PR #893 (#890)', { skip: !posix && 'POSIX stand-in claude' }, async () => {
   const { dir } = exampleProject();
   writeFileSync(join(dir, '.env'), 'TOKEN=stand-in\n');
   mkdirSync(join(dir, 'evals-secret'));
@@ -615,13 +663,14 @@ test(`adversarial guards / tool.no-read-secrets (${doc('- read secret files;')})
   const settings = s.log().settings as SandboxSettings;
   const denyRead = settings.sandbox?.filesystem?.denyRead ?? [];
   const readRules = (settings.permissions?.deny ?? []).flatMap((x) => /^Read\((\/\/.*)\)$/.exec(x)?.[1]?.slice(1) ?? []);
-  for (const target of [join(dir, 'evals-secret', 'score.py'), join(dir, '.env')]) {
-    assert.ok(covers(denyRead, target), `the sandbox hides ${target} from commands`);
-    assert.ok(covers(readRules, target), `a Read rule denies ${target}`);
-  }
+  const checks = [['the hidden file', join(dir, 'evals-secret', 'score.py')], ['.env', join(dir, '.env')]].flatMap(([what, target]) => [
+    { what: `a command reads ${what} (the sandbox doesn't hide it)`, open: !covers(denyRead, target!) },
+    { what: `the Read tool reads ${what} (no Read rule denies it)`, open: !covers(readRules, target!) },
+  ]);
+  return { attacks: checks.map((c) => c.what), open: checks.filter((c) => c.open).map((c) => c.what) };
 });
 
-test(`adversarial guards / tool.unreadable-task-file-denies (${doc("A task file the guard can't read denies the call")}): a guard hook that fails rather than answers (a timeout, a crash) blocks the call`, { todo: 'closes with PR #894', skip: !posix && 'POSIX stand-in claude' }, async () => {
+test(`adversarial guards / tool.unreadable-task-file-denies (${doc("A task file the guard can't read denies the call")}): a guard hook that fails rather than answers (a timeout, a crash) blocks the call`, { skip: !posix && 'POSIX stand-in claude' }, async () => {
   const cwd = mkdtempSync(join(tmpdir(), 'adv-cwd-'));
   const { r, s } = await agentRun({ guardrails: instanceHome(JSON.stringify(goodSettings()), cwd).guardrails, cwd });
   assert.ok(s.ran(), `${r.reason}: ${r.detail}`);
@@ -730,26 +779,28 @@ test(`adversarial guards / push.size-limit (${doc('refuses a change over the pus
   assert.deepEqual(checkedPush({ cwd: r.dir, remote: 'origin', base: r.base, head, ref: 'refs/heads/task-1', limits, guard: guardOf([]) }), { ok: true }, 'control: a change at the limits is pushed');
 });
 
-test(`adversarial guards / push.size-limit (${doc('refuses a change over the push limits')}): a replace ref of the pushed commit hides nothing from checkedPush`, { todo: 'closes with #807 (an open issue; no fix PR yet)' }, () => {
+knownHole(`adversarial guards / push.size-limit (${doc('refuses a change over the push limits')}): a replace ref of the pushed commit hides nothing from checkedPush`, 'PR #927 (#807)', {}, () => {
+  const attacks = ['a refused path', 'a file over the size limit'];
   const left: string[] = [];
-  for (const [what, file, text] of [['a refused path', 'secrets/key.pem', 'stand-in\n'], ['a file over the size limit', 'big.txt', bigLine()]] as const) {
+  for (const [what, file, text] of [[attacks[0]!, 'secrets/key.pem', 'stand-in\n'], [attacks[1]!, 'big.txt', bigLine()]] as const) {
     const r = pushRepo();
     const benign = run(r.dir, 'commit-tree', `${r.base}^{tree}`, '-p', r.base, '-m', 'benign');
     r.put(file, text);
     const head = r.commit();
     run(r.dir, 'replace', head, benign);
     const out = checkedPush({ cwd: r.dir, remote: 'origin', base: r.base, head, ref: 'refs/heads/task-1', limits, guard: guardOf([]) });
-    if (out.ok || r.at('refs/heads/task-1') !== null) left.push(`${what}: ${JSON.stringify(out)}`);
+    if (out.ok || r.at('refs/heads/task-1') !== null) left.push(what);
   }
-  assert.deepEqual(left, [], 'changes a replace ref hid from checkedPush');
+  return { attacks, open: left };
 });
 
-test(`adversarial guards / push.size-limit (${doc('refuses a change over the push limits')}): a refused path with a non-ASCII name is refused`, { todo: 'closes with #724 (an open issue; no fix PR yet)' }, () => {
+knownHole(`adversarial guards / push.size-limit (${doc('refuses a change over the push limits')}): a refused path with a non-ASCII name is refused`, 'PR #928 (#724)', {}, () => {
   const r = pushRepo();
   r.put('secrets/kéy.pem', 'stand-in\n');
   const head = r.commit();
   const out = checkedPush({ cwd: r.dir, remote: 'origin', base: r.base, head, ref: 'refs/heads/task-1', limits, guard: guardOf([]) });
-  assert.ok(!out.ok && r.at('refs/heads/task-1') === null, JSON.stringify(out));
+  const what = 'a refused path with a non-ASCII name';
+  return { attacks: [what], open: out.ok || r.at('refs/heads/task-1') !== null ? [what] : [] };
 });
 
 test(`adversarial guards / push.prepush-hook (${doc('Each checkout also gets a pre-push hook that refuses the default branch')}): git itself refuses a push to the default branch from the checkout, however it is spelled`, { skip: !posix && 'POSIX hook' }, async () => {
@@ -1028,7 +1079,8 @@ test(`adversarial guards / redact.before-store (${doc('Secrets in event payloads
   assert.ok(stored('an ordinary line').every((s) => s.raw.includes('an ordinary line')), 'control: ordinary text is stored as it is');
 });
 
-test(`adversarial guards / redact.before-store (${doc('Secrets in event payloads and transcripts are redacted before they are stored')}): a Discord bot token is redacted before it is stored`, { todo: 'closes with #889 (an open issue; no fix PR yet)' }, () => {
+knownHole(`adversarial guards / redact.before-store (${doc('Secrets in event payloads and transcripts are redacted before they are stored')}): a Discord bot token is redacted before it is stored`, 'PR #921 (#889)', {}, () => {
   const token = [`M${alnum(23)}`, alnum(6), alnum(27)].join('.');
-  assert.deepEqual(stored(`bot token=${token} in a log line`).filter((s) => s.raw.includes(token)).map((s) => s.where), [], 'stores that kept the token');
+  const stores = stored(`bot token=${token} in a log line`);
+  return { attacks: stores.map((s) => `a Discord bot token kept by ${s.where}`), open: stores.filter((s) => s.raw.includes(token)).map((s) => `a Discord bot token kept by ${s.where}`) };
 });
