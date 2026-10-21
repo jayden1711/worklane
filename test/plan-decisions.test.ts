@@ -1,7 +1,7 @@
 // Plans cite decisions: the plan contract's Decisions section, checked against the decision records that exist.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, linkSync, mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, linkSync, mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { BRAND } from '../src/brand.js';
@@ -157,10 +157,89 @@ test('regression: a decisions file or folder entry that is docs/process.md under
   linkSync(join(repo, 'docs', 'process.md'), join(repo, 'decisions.md'));
   const refs = decisionIndex(repo, []).map((e) => e.ref);
   assert.deepEqual(refs, ['docs/design.md § 8. Roles', 'docs/decisions/0002-csv.md'], refs.join(' | '));
-  // A record that only links to some other file is indexed as before.
+  // A record that links to another record path is indexed (round 5: a link to any other file isn't; see below).
   const other = mkdtempSync(join(tmpdir(), 'records-'));
   mkdirSync(join(other, 'docs'), { recursive: true });
-  writeFileSync(join(other, 'docs', 'notes.md'), '# Notes\n\n## D-1: Kept\nKept.\n');
-  symlinkSync('notes.md', join(other, 'docs', 'decisions.md'));
-  assert.deepEqual(decisionIndex(other, []).map((e) => e.ref), ['docs/decisions.md § D-1: Kept']);
+  writeFileSync(join(other, 'decisions.md'), '# Notes\n\n## D-1: Kept\nKept.\n');
+  symlinkSync('../decisions.md', join(other, 'docs', 'decisions.md'));
+  assert.deepEqual(decisionIndex(other, []).map((e) => e.ref), ['decisions.md § D-1: Kept', 'docs/decisions.md § D-1: Kept']);
+});
+
+const PAGE = '# Process\n\n## Who merges\nAn agent merges.\n\n## The critical set\nTwo reviews.\n';
+
+// WHY (#920 round 5): a planning worktree sits inside its clone (worktree.root's default). A committed record linking
+// out of it, to the clone's own docs/process.md, is another inode than the worktree's page, and in CI it dangles, so
+// neither the identity check nor the locked test saw it.
+test("regression: a record whose real path leaves the checkout is never indexed (a planning worktree nested in its clone, linking to the clone's files)", () => {
+  const clone = mkdtempSync(join(tmpdir(), 'clone-'));
+  mkdirSync(join(clone, 'docs'), { recursive: true });
+  writeFileSync(join(clone, 'docs', 'process.md'), PAGE);
+  writeFileSync(join(clone, 'notes.md'), '# Notes\n\n## D-1: Agents merge\nAgents merge everything.\n');
+  const wt = join(clone, '.claude', 'worktrees', 'plan-1');
+  mkdirSync(join(wt, 'docs', 'adr'), { recursive: true });
+  writeFileSync(join(wt, 'docs', 'process.md'), PAGE);
+  writeFileSync(join(wt, 'docs', 'design.md'), '# Design\n\n## 8. Roles\nThe roles.\n');
+  symlinkSync('../../../../docs/process.md', join(wt, 'docs', 'decisions.md'));
+  symlinkSync('../../../notes.md', join(wt, 'decisions.md'));
+  symlinkSync('../../../../../notes.md', join(wt, 'docs', 'adr', '0001-merges.md'));
+  // A decisions folder that is the clone's docs/: each entry in it is outside the checkout.
+  symlinkSync('../../../docs', join(wt, 'decisions'));
+  assert.deepEqual(decisionIndex(wt, []).map((e) => e.ref), ['docs/design.md § 8. Roles']);
+  // The checkout reached through a symlink of its own still indexes what is inside it.
+  const via = join(mkdtempSync(join(tmpdir(), 'via-')), 'wt');
+  symlinkSync(wt, via);
+  assert.deepEqual(decisionIndex(via, []).map((e) => e.ref), ['docs/design.md § 8. Roles']);
+  // The clone itself indexes its own records.
+  writeFileSync(join(clone, 'decisions.md'), '# Decisions\n\n## D-1: Kept\nKept.\n');
+  assert.deepEqual(decisionIndex(clone, []).map((e) => e.ref), ['decisions.md § D-1: Kept']);
+});
+
+// WHY (#920 round 5, adversarial pass): every record path is locked in the engine's repo, but a record that links to
+// another file in the checkout (notes/x.md) would take its text from a file nothing locks: once the link merged, a
+// change to the target changed the record. Measured on the first round-5 build: both were indexed.
+test('regression: a record that links to a file in the checkout that is not itself a record path is never indexed; a link between record paths is', () => {
+  const repo = mkdtempSync(join(tmpdir(), 'records-'));
+  mkdirSync(join(repo, 'docs'), { recursive: true });
+  mkdirSync(join(repo, 'notes'), { recursive: true });
+  writeFileSync(join(repo, 'notes', '0001-merges.md'), '# Who lands changes\nAn agent lands every change after one look.\n');
+  writeFileSync(join(repo, 'notes', 'all.md'), '# All\n\n## D-9: Lands\nAn agent lands it.\n');
+  symlinkSync('../notes', join(repo, 'docs', 'adr'));
+  symlinkSync('notes/all.md', join(repo, 'decisions.md'));
+  assert.deepEqual(decisionIndex(repo, []).map((e) => e.ref), []);
+  // Links that lead to record paths: a folder to a record folder, a file to a record file.
+  mkdirSync(join(repo, 'docs', 'decisions'), { recursive: true });
+  writeFileSync(join(repo, 'docs', 'decisions', '0002-csv.md'), '# Exports are CSV\nEvery export is CSV.\n');
+  writeFileSync(join(repo, 'docs', 'design.md'), '# Design\n\n## 8. Roles\nThe roles.\n');
+  symlinkSync('docs/decisions', join(repo, 'decisions'));
+  symlinkSync('design.md', join(repo, 'docs', 'DECISIONS.md'));
+  assert.deepEqual(decisionIndex(repo, []).map((e) => e.ref), ['docs/DECISIONS.md § 8. Roles', 'docs/design.md § 8. Roles', 'decisions/0002-csv.md', 'docs/decisions/0002-csv.md']);
+});
+
+// WHY (#920 round 5): when docs/process.md can't be read, no record could be told apart from it, and a hard link to it
+// was indexed. Unsure fails closed: no record is indexed. A page that is simply absent is a sure answer.
+test('regression: when docs/process.md exists but cannot be read (a symlink loop), no record is indexed; when it is absent, records are', () => {
+  const repo = mkdtempSync(join(tmpdir(), 'records-'));
+  mkdirSync(join(repo, 'docs'), { recursive: true });
+  symlinkSync('process.md', join(repo, 'docs', 'process.md'));
+  writeFileSync(join(repo, 'decisions.md'), '# Decisions\n\n## D-1: Kept\nKept.\n');
+  writeFileSync(join(repo, 'docs', 'design.md'), '# Design\n\n## 8. Roles\nThe roles.\n');
+  assert.deepEqual(decisionIndex(repo, []).map((e) => e.ref), []);
+  const absent = mkdtempSync(join(tmpdir(), 'records-'));
+  writeFileSync(join(absent, 'decisions.md'), '# Decisions\n\n## D-1: Kept\nKept.\n');
+  assert.deepEqual(decisionIndex(absent, []).map((e) => e.ref), ['decisions.md § D-1: Kept']);
+});
+
+test('regression: an unsearchable docs/ with a top-level decisions.md hard-linked to docs/process.md indexes nothing', () => {
+  const repo = mkdtempSync(join(tmpdir(), 'records-'));
+  mkdirSync(join(repo, 'docs'), { recursive: true });
+  writeFileSync(join(repo, 'docs', 'process.md'), PAGE);
+  linkSync(join(repo, 'docs', 'process.md'), join(repo, 'decisions.md'));
+  chmodSync(join(repo, 'docs'), 0o600);
+  try {
+    // A user who can't search docs/ can't tell the hard link from the page: nothing. One who can (root) finds the same
+    // inode and skips it: nothing either way.
+    assert.deepEqual(decisionIndex(repo, []).map((e) => e.ref), []);
+  } finally {
+    chmodSync(join(repo, 'docs'), 0o755);
+  }
 });

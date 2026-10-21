@@ -4,13 +4,17 @@
 // controls (#858). Before this, a docs-only or tests-only change to any of them was L0 and could merge by itself on a
 // PASS, and the Dockerfile waited only where a review.yaml kept `deploy-config`. Now each is self-modification in the
 // engine's repo: L3, never auto-merged, whatever review.yaml says (src/review.ts SELF_MODIFICATION_PARTS). A managed
-// app's same-named files keep the categories its own review.yaml gives them, as before.
+// app's same-named files keep the categories its own review.yaml gives them, as before. The same holds for the engine
+// repo's merge process (docs/process.md), the planners' decision records and the code that indexes them (#920).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
+import { BRAND } from '../src/brand.js';
 import { loadConfig } from '../src/config/load.js';
 import { mergeDecision, waitCategoriesOf, type MergeInput } from '../src/merge-policy.js';
+import { DECISION_DIRS, DECISION_FILES, recordEntries } from '../src/plan-decisions.js';
 import { computeLevel, DEFAULT_CATEGORIES, SELF_MODIFICATION, selfModificationPart, type LevelResult, type LockScope } from '../src/review.js';
 import { repoRoot } from './helpers.js';
 
@@ -59,12 +63,31 @@ const tests = 'the tests of the harness controls';
 const image = "the engine's container image";
 const deploys = "the engine's deployment files";
 const mergeProcess = "the engine repo's merge process";
+const records = "the planners' decision records";
+const index = "the planners' decisions index";
 /** Each path the lock is for, with the part that names it. Some are files the repo has; the rest are new ones under a lock's glob. */
 const locked = [
   // How the engine repo's own PRs are merged (owner, 2026-10-21): locked like the design rules.
   ['docs/process.md', mergeProcess],
   // The test that keeps the process out of the planners' decisions index: removing it would reopen that route.
   ['test/plan-decisions.test.ts', tests],
+  // The planners' decision records (#920): a copy of the process in one, whole, in part or reworded, waits like the
+  // page. None is in the repo yet but docs/design.md, the design rules' (NOT_YET_FILES in test/merge-policy.test.ts).
+  ['decisions.md', records],
+  ['DECISIONS.md', records],
+  ['docs/decisions.md', records],
+  ['docs/DECISIONS.md', records],
+  [`${BRAND.configDir}/decisions.md`, records],
+  ['decisions', records],
+  ['decisions/0001-x.md', records],
+  ['docs/decisions', records],
+  ['docs/decisions/0001-x.md', records],
+  ['docs/adr', records],
+  ['docs/adr/0001-x.md', records],
+  [`${BRAND.configDir}/decisions`, records],
+  [`${BRAND.configDir}/decisions/0001-x.md`, records],
+  // The code that builds the index and keeps the page, and a record that leaves the checkout, out of it.
+  ['src/plan-decisions.ts', index],
   ['docs/guardrails.md', pages],
   ['docs/security.md', pages],
   ['docs/security-model.md', pages],
@@ -91,7 +114,7 @@ const locked = [
   ['docker-compose.prod.yml', deploys],
 ] as const;
 /** The ones the repo has today: each must stay a real file, so a rename can't leave this test checking nothing. */
-const present = ['docs/process.md', 'test/plan-decisions.test.ts', 'docs/guardrails.md', 'docs/security.md','SECURITY.md', 'test/docs-guardrails.test.ts', 'test/adversarial/adversarial.test.ts', 'test/adversarial/todo.json', 'test/adversarial/controls.json', 'test/adversarial/cases/locked-paths.json', 'test/engine-guard-locks.test.ts', 'test/not-yet-files-locks.test.ts', 'Dockerfile'];
+const present = ['docs/process.md', 'test/plan-decisions.test.ts', 'src/plan-decisions.ts', 'docs/guardrails.md', 'docs/security.md','SECURITY.md', 'test/docs-guardrails.test.ts', 'test/adversarial/adversarial.test.ts', 'test/adversarial/todo.json', 'test/adversarial/controls.json', 'test/adversarial/cases/locked-paths.json', 'test/engine-guard-locks.test.ts', 'test/not-yet-files-locks.test.ts', 'Dockerfile'];
 
 test('regression: a change to the security pages, their citations test, the adversarial suite or the Dockerfile is L3, self-modification and never auto-merges (this repo, the example, and a review.yaml that drops every category)', () => {
   for (const path of present) assert.ok(existsSync(join(repoRoot, path)), `${path} is a real file`);
@@ -113,7 +136,7 @@ test('regression: a change to the security pages, their citations test, the adve
     }
   }
   // The globs name these files only: a neighbour of each is no part of the lock.
-  for (const path of ['docs/guide.md', 'docs/securityx.txt', 'docs/design/security.md', 'README.md', 'test/totals.test.ts', 'test/adversarial.test.ts', 'sub/Dockerfile', 'composer.json', 'sub/Containerfile', 'apps/x/compose.yaml', 'apps/x/deploy', 'deploy.md', 'deployment.yaml', 'Deploy', 'compose', 'docker-compose']) assert.equal(selfModificationPart(path), null, path);
+  for (const path of ['docs/decisions-old.md', 'docs/adrs/0001-x.md', 'src/decisions.md', 'notes/decisions.md', 'src/plan-decisions-view.ts', 'docs/guide.md', 'docs/securityx.txt', 'docs/design/security.md', 'README.md', 'test/totals.test.ts', 'test/adversarial.test.ts', 'sub/Dockerfile', 'composer.json', 'sub/Containerfile', 'apps/x/compose.yaml', 'apps/x/deploy', 'deploy.md', 'deployment.yaml', 'Deploy', 'compose', 'docker-compose']) assert.equal(selfModificationPart(path), null, path);
 });
 
 test("a managed app's same-named files are unchanged: no engine lock, the categories its review.yaml gives them", () => {
@@ -121,6 +144,20 @@ test("a managed app's same-named files are unchanged: no engine lock, the catego
   const before: Record<string, [string, string[]]> = {
     'docs/process.md': ['L0', ['docs']],
     'test/plan-decisions.test.ts': ['L0', ['tests']],
+    'decisions.md': ['L0', ['docs']],
+    'DECISIONS.md': ['L0', ['docs']],
+    'docs/decisions.md': ['L0', ['docs']],
+    'docs/DECISIONS.md': ['L0', ['docs']],
+    [`${BRAND.configDir}/decisions.md`]: ['L3', ['docs', 'harness-config']],
+    decisions: ['L1', ['app-non-money']],
+    'decisions/0001-x.md': ['L0', ['docs']],
+    'docs/decisions': ['L0', ['docs']],
+    'docs/decisions/0001-x.md': ['L0', ['docs']],
+    'docs/adr': ['L0', ['docs']],
+    'docs/adr/0001-x.md': ['L0', ['docs']],
+    [`${BRAND.configDir}/decisions`]: ['L3', ['harness-config']],
+    [`${BRAND.configDir}/decisions/0001-x.md`]: ['L3', ['docs', 'harness-config']],
+    'src/plan-decisions.ts': ['L1', ['app-non-money']],
     'docs/guardrails.md': ['L0', ['docs']],
     'docs/security.md': ['L0', ['docs']],
     'docs/security-model.md': ['L0', ['docs']],
@@ -168,4 +205,31 @@ test("this repo's review.yaml holds each of them, and the engine's deployment fi
     assert.ok(d.reasons.includes(`high-risk: engine-guards (${path})`), `${path}: ${d.reasons.join(' | ')}`);
   }
   assert.ok(own.levels.L3_human.when.includes('engine-guards') && own.merge.wait_categories.includes('engine-guards'));
+});
+
+// WHY (#920): the planners read every decision record as a recorded decision, and the index code can't recognise a copy
+// of docs/process.md under another name, whole, in part or reworded. So every path the index reads is locked, from the
+// index's own lists: a record the index would read in a checkout is L3 self-modification in the engine's repo.
+test("regression: every decision record the planners' index reads is self-modification in the engine's repo, read from the index's own lists", () => {
+  const dir = mkdtempSync(join(tmpdir(), 'records-'));
+  const paths = [...DECISION_FILES, ...DECISION_DIRS.flatMap((d) => [`${d}/0001-x.md`, `${d}/sub/0002-y.md`])];
+  for (const path of paths) {
+    // The index reads it: one record at this path in a checkout of its own.
+    const repo = mkdtempSync(join(dir, 'r-'));
+    mkdirSync(join(repo, dirname(path)), { recursive: true });
+    writeFileSync(join(repo, path), '# Merges\n\n## Who merges\nAn agent merges.\n');
+    const nested = path.includes('/sub/');
+    assert.equal(recordEntries(repo).length, nested ? 0 : 1, `${path}: the index reads it`);
+    // And the lock holds it, under every review.yaml.
+    assert.notEqual(selfModificationPart(path), null, path);
+    for (const [name, rc] of configs) {
+      const lvl = levelOf(path, rc, undefined);
+      assert.equal(lvl.level, 'L3', `${path} under ${name}: ${lvl.reasons.join(' | ')}`);
+      assert.deepEqual(lvl.categories[SELF_MODIFICATION], [path], `${path} under ${name}`);
+    }
+    assert.deepEqual(levelOf(path, own, undefined).categories['engine-guards'], [path], `${path}: engine-guards`);
+  }
+  // A folder itself (a symlink to anywhere) is locked too.
+  for (const d of DECISION_DIRS) assert.equal(selfModificationPart(d), records, d);
+  for (const f of DECISION_FILES) assert.ok(locked.some(([p]) => p === f) || f === 'docs/design.md', `${f} is in the locked list`);
 });

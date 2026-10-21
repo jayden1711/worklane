@@ -4,19 +4,21 @@
 // decision records the checkout keeps (a decisions file or folder, and docs/design.md). A plan that cites what
 // isn't there, or has no section, is refused before plan review; plan review then checks the plan against what
 // it cites and against the index (src/coordinator/decisions.ts).
-import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
-import { basename, dirname, join } from 'node:path';
-import { BRAND } from './brand.js';
+import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
+import { basename, dirname, isAbsolute, join, posix, relative, sep } from 'node:path';
 import { redactString } from './events/redact.js';
 import type { EventPayload, StoredEvent } from './events/types.js';
+import { DECISION_DIRS, DECISION_FILES } from './review.js';
 
 /** The whole section when nothing recorded bears on the plan. Never beside citations. */
 export const NOTHING_RECORDED = 'nothing recorded on this';
 
-/** Decision record files, repo-relative; each one present (exact name) is indexed by its headings. */
-export const DECISION_FILES = ['decisions.md', 'DECISIONS.md', 'docs/decisions.md', 'docs/DECISIONS.md', `${BRAND.configDir}/decisions.md`, 'docs/design.md'];
-/** Decision record folders: each markdown file in one is an entry (one decision per file). */
-export const DECISION_DIRS = ['decisions', 'docs/decisions', 'docs/adr', `${BRAND.configDir}/decisions`];
+/**
+ * Decision record files, repo-relative; each one present (exact name) is indexed by its headings. Decision record
+ * folders: each markdown file in one is an entry (one decision per file). Both lists live in src/review.ts, where the
+ * same lists lock every record path as self-modification in the engine's repo (#920).
+ */
+export { DECISION_DIRS, DECISION_FILES };
 
 export interface DecisionEntry {
   /** How a plan cites it: `decision <id>` or `<file> § <heading>` (or `<file>` for a one-decision file). */
@@ -84,27 +86,60 @@ function headingAliases(file: string, heading: string): string[] {
 /**
  * How the engine repo's own PRs are merged (owner, 2026-10-21): process, never a recorded decision. A decisions file
  * or folder entry that is this file under another name (a symlink, a hard link) is not indexed, so a plan can't cite
- * it to let the engine merge more. A copy of its text is held by test/plan-decisions.test.ts (locked).
+ * it to let the engine merge more. This code can't recognise a copy of the page's text under another name, whole, in
+ * part or reworded: in the engine's repo every decision record path, and this file, is self-modification instead
+ * (src/review.ts), so a PR that adds or changes one waits for the owner's process like the page itself.
  */
 export const PROCESS_DOC = 'docs/process.md';
 
-/** The file's identity (device and inode, through symlinks), or null when it can't be read. */
+/** No file at the path (ENOENT): the one stat error that is a sure answer. */
+const ABSENT = 'absent';
+
+/** The file's identity (device and inode, through symlinks); ABSENT when there is none; null on any other error. */
 function identity(path: string): string | null {
   try {
     const s = statSync(path, { bigint: true });
     return `${s.dev}:${s.ino}`;
-  } catch {
-    return null;
+  } catch (e) {
+    return (e as NodeJS.ErrnoException | null)?.code === 'ENOENT' ? ABSENT : null;
   }
 }
 
-/** The decision records the checkout keeps, as index entries. */
+/**
+ * The decision records the checkout keeps, as index entries. Fails closed: a record is indexed only when its real path
+ * is inside the checkout (a symlink out of it, say from a planning worktree nested in a clone to the clone's own
+ * files, is not) and is itself a record path (a link to any other file is not), it isn't docs/process.md under another
+ * name, and all of that could be told. When the page exists but can't be read (EACCES, ELOOP, ...), no record is
+ * indexed, since any of them could be it.
+ */
 export function recordEntries(repo: string): DecisionEntry[] {
   const out: DecisionEntry[] = [];
-  const processDoc = identity(join(repo, PROCESS_DOC));
-  const isProcessDoc = (rel: string) => processDoc !== null && identity(join(repo, rel)) === processDoc;
+  let root: string;
+  try {
+    root = realpathSync(repo);
+  } catch {
+    return out;
+  }
+  const page = identity(join(repo, PROCESS_DOC));
+  if (page === null) return out;
+  const indexable = (rel: string): boolean => {
+    let real: string;
+    try {
+      real = realpathSync(join(repo, rel));
+    } catch {
+      return false;
+    }
+    const inside = relative(root, real);
+    if (!inside || inside === '..' || inside.startsWith(`..${sep}`) || isAbsolute(inside)) return false;
+    // A link inside the checkout counts only when it leads to another record path: those are locked in the engine's
+    // repo, and any other file isn't, so a later change to it would change the record with nothing holding it.
+    const at = inside.split(sep).join('/');
+    if (!DECISION_FILES.includes(at) && !DECISION_DIRS.includes(posix.dirname(at))) return false;
+    const id = identity(join(repo, rel));
+    return id !== null && id !== ABSENT && id !== page;
+  };
   for (const file of DECISION_FILES) {
-    if (!present(repo, file) || isProcessDoc(file)) continue;
+    if (!present(repo, file) || !indexable(file)) continue;
     for (const s of sectionsOf(readFileSync(join(repo, file), 'utf8'))) out.push({ ref: `${file} § ${s.heading}`, aliases: headingAliases(file, s.heading), title: s.heading, text: s.text });
   }
   for (const dir of DECISION_DIRS) {
@@ -116,7 +151,7 @@ export function recordEntries(repo: string): DecisionEntry[] {
     }
     for (const name of names) {
       const file = `${dir}/${name}`;
-      if (isProcessDoc(file)) continue;
+      if (!indexable(file)) continue;
       const md = readFileSync(join(repo, file), 'utf8');
       const title = /^#{1,6}\s+(.+?)\s*#*\s*$/m.exec(md)?.[1] ?? name.slice(0, -3);
       const id = /^([A-Za-z]{0,10}-?\d+)[-_ ]/.exec(name)?.[1];

@@ -313,6 +313,19 @@ export function hidesSubmodules(f: Pick<ChangeFile, 'submoduleIgnores'>): boolea
 }
 
 /**
+ * The decision records planner and plan-review agents read as recorded decisions: the decisions index
+ * (src/plan-decisions.ts) indexes each file here present by its exact name by its headings, and each markdown file in
+ * each folder here as one entry. Defined here, beside the lock below, so the index and the lock read one list: a path
+ * added here is locked by the same change (#920). src/plan-decisions.ts re-exports them; it can't hold them, since
+ * this module is in the agents' tool guard's import tree and the index's module would pull its imports in with it.
+ */
+export const DECISION_FILES = ['decisions.md', 'DECISIONS.md', 'docs/decisions.md', 'docs/DECISIONS.md', `${BRAND.configDir}/decisions.md`, 'docs/design.md'];
+/** Decision record folders: each markdown file in one is an entry (one decision per file). */
+export const DECISION_DIRS = ['decisions', 'docs/decisions', 'docs/adr', `${BRAND.configDir}/decisions`];
+/** Those records as lock globs: each file, and each folder itself (a symlink to anywhere) and everything under it. */
+const DECISION_RECORD_GLOBS = [...DECISION_FILES, ...DECISION_DIRS.flatMap((d) => [d, `${d}/**`])];
+
+/**
  * The harness changing its own controls: the merge policy, the main watch and the push guard, the updater, the review
  * levels and guardrails, the machine's setup scripts, the engine's container image, deployment files and CI workflows, sign-in and
  * credentials, who may approve, the evaluator and the agent runner, the sandbox, the push gate, denylist and secret scan,
@@ -410,6 +423,15 @@ export const SELF_MODIFICATION_PARTS: { what: string; globs: string[] }[] = [
   // How the engine repo's own PRs are merged and who reviews them (owner, 2026-10-21): a docs-only change was L0 and
   // could merge itself, so a PR could drop its own second review. Kept out of the decisions index (src/plan-decisions.ts).
   { what: "the engine repo's merge process", globs: ['docs/process.md'] },
+  // The planners' decision records (#920): planner and plan-review agents read each one as a recorded decision, and a
+  // plan may cite it. A docs-only record was L0 and merged itself, so a PR could put the merge process above, whole,
+  // in part or reworded, where planners read it as a decision; the index code can't recognise a copy. Read from the
+  // index's own lists (DECISION_FILES, DECISION_DIRS above), so the two can't drift. Only docs/design.md exists yet
+  // (NOT_YET_FILES in test/merge-policy.test.ts). In the engine's repo only: a managed app's records keep their
+  // categories (engineSourceGlob).
+  { what: "the planners' decision records", globs: DECISION_RECORD_GLOBS },
+  // The code that builds that index: what it reads, and what it leaves out (docs/process.md, a record linked elsewhere).
+  { what: "the planners' decisions index", globs: ['src/plan-decisions.ts'] },
   // What the engine publicly claims its guards do and which gaps are open (#705), and how to report one: a docs-only
   // change was L0 and merged itself, so a PR could rewrite a claim with nothing holding it (#858).
   { what: 'the public security claims', globs: ['docs/guardrails.md', 'docs/security*.md', 'SECURITY.md'] },
@@ -448,8 +470,12 @@ const ENGINE_TREE = ['src/', 'scripts/', 'test/', 'docs/', 'deploy/'];
  * Matched exactly, so no other glob stands aside through it.
  */
 const ENGINE_ROOT_FILES = ['SECURITY.md', 'Dockerfile*', 'dockerfile*', 'Containerfile*', 'deploy', 'compose.*', 'docker-compose.*'];
-/** Whether a locked glob names the engine's own source (so it holds only in the engine's repo). */
-export const engineSourceGlob = (glob: string): boolean => ENGINE_TREE.some((d) => glob.startsWith(d)) || ENGINE_ROOT_FILES.includes(glob);
+/**
+ * Whether a locked glob names the engine's own source (so it holds only in the engine's repo). The decision records'
+ * globs are the engine's too (#920): a managed app's own decisions file or folder keeps the categories its
+ * review.yaml gives it, as before. Matched exactly, so no other glob stands aside through them.
+ */
+export const engineSourceGlob = (glob: string): boolean => ENGINE_TREE.some((d) => glob.startsWith(d)) || ENGINE_ROOT_FILES.includes(glob) || DECISION_RECORD_GLOBS.includes(glob);
 
 /** The locked categories in this scope: all of them in the engine's repo; in a managed app's, those that hold in every repo. */
 export function lockedCategories(scope: LockScope | undefined): Record<string, string[]> {
