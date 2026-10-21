@@ -27,6 +27,11 @@
 // scrub(), which every printed line goes through, first withholds every word shaped like an instance id or an instance
 // image name (pins.ts TASK_SHAPE), in any of its decoded, normalised or look-alike spellings (withholdTasks), whoever
 // writes it, before it splits or cuts anything.
+//
+// `images` (#748, slice 4) writes each selected task's image reference into the held-out store (images.ts), as the
+// bench user only, after `select`. It takes no argument either: the tasks come from the store's manifest, each name
+// from the task's own instance id under SWE-bench's naming, each digest from the registry's manifest for that name,
+// taken only when pins.json pins it. It prints keys, counts and digests, never an instance id or an image name.
 import { realpathSync } from 'node:fs';
 import { userInfo } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -37,6 +42,7 @@ import { MODE_MAX_USD, PER_TASK_MAX_USD, REAPPROVE_MEAN_USD } from './caps.js';
 import { Docker, limitsFrom, type DockerOptions, type Limits } from './container.js';
 import { downloadDataset, httpsFetcher, type Fetcher } from './download.js';
 import { assertResearchOff, BENCH_SETTINGS } from './driver.js';
+import { httpsRegistry, writeImages, type ImagesSummary, type RegistryFetch } from './images.js';
 import { benchHome, benchRoot, type BenchLayout } from './paths.js';
 import { loadPins, PINS_FILE, TASK_SHAPE, type Pins } from './pins.js';
 import { sandboxProbe, SRT_LABEL } from './probe.js';
@@ -62,6 +68,8 @@ export interface CliDeps {
   out: (line: string) => void;
   /** `download`'s one HTTP request at a time (default: Node's fetch, no redirect followed; tests pass a stand-in). */
   fetch?: Fetcher;
+  /** `images`' one registry request at a time (default: Node's fetch, to the registry only; tests pass a stand-in). */
+  registry?: RegistryFetch;
 }
 
 export type CheckStatus = 'PASS' | 'FAIL' | 'SKIP';
@@ -365,6 +373,8 @@ const USAGE = [
   '              store (0700; the file 0600), verified before it is kept. Takes no argument: only that file sets a pin.',
   '  select      the tasks the pinned rule and seed choose from the pinned rows, as a manifest in the held-out store,',
   "              and the smoke run's plan. Takes no argument: prints keys (t01, ...), never an instance id.",
+  "  images      each selected task's image reference (its own name, at a pinned digest the registry serves for it) into",
+  '              the held-out store, after bench select. Takes no argument: prints keys, counts and digests only. No image is pulled.',
   '  help        this text',
 ];
 
@@ -375,8 +385,40 @@ export function smokePlan(keys: readonly string[]): string[] {
     `smoke run plan: tasks ${smoke.join(' ')} (the first ${MODE_TASKS.smoke} of the ${keys.length}; the baseline runs ${keys[0]}..${keys.at(-1)}, with the same rule and seed, and again on each release)`,
     `  caps: at most $${MODE_MAX_USD.smoke} for the round (--spend), $${PER_TASK_MAX_USD} per task; a round averaging over $${REAPPROVE_MEAN_USD} per task needs the owner's re-approval before the baseline`,
     '  the run takes its tasks from the held-out store (the manifest, the rows, the images file): no instance id or image name on any command line',
-    "  still to come before it can run: task setup (slice 4: images.json written from the store, never typed; the clones), the engine's runner seam and the test relay (slices 5 and 6, #701), and bench run (slice 7)",
+    "  still to come before it can run: the rest of task setup (slice 4: the images file by bench images, then the clones and the image pulls), the engine's runner seam and the test relay (slices 5 and 6, #701), and bench run (slice 7)",
   ];
+}
+
+/**
+ * `bench images`: as the bench user, every selected task's image reference into the held-out store (images.ts), then
+ * the run's own check of it (loadTasks, smoke and baseline). Prints keys, counts and digests only. Its exit code.
+ */
+export async function images(d: CliDeps, pins: () => Pins = loadPins): Promise<number> {
+  d.out("bench images (#748): each selected task's pinned image reference into the held-out store; registry manifests only: no image pulled, no container, no model call");
+  const say = (status: string, name: string, detail: string) => d.out(`  ${status}  ${name.padEnd(9)}  ${scrub(detail, d.env)}`);
+  let layout: BenchLayout;
+  let p: Pins;
+  let s: ImagesSummary;
+  try {
+    requireBenchUser(d.env, d.user, d.uid, d.euid);
+    layout = benchRoot(d.env, benchHome(d.env, d.passwdHome));
+    p = pins();
+    s = await writeImages(layout, d.uid, p, d.registry ?? httpsRegistry);
+  } catch (e) {
+    say('FAIL', 'images', message(e));
+    return 1;
+  }
+  say('PASS', 'images', `${s.keys.length} tasks, ${s.keys[0]}..${s.keys.at(-1)}: each a pinned digest under its own task's name; the images file (0600, in the store) ${s.written ? 'written' : 'was already there, the same: kept'}, sha256 ${s.sha256}`);
+  try {
+    const smoke = loadTasks(layout, d.uid, p, 'smoke');
+    const baseline = loadTasks(layout, d.uid, p, 'baseline');
+    say('PASS', 'run check', `the run takes it: the smoke's ${smoke.map((t) => t.key).join(' ')}, and the baseline's ${baseline.length} tasks`);
+  } catch (e) {
+    say('FAIL', 'run check', message(e));
+    return 1;
+  }
+  d.out('  next: bench select now passes every line; the clones and the image pulls are the rest of task setup (slice 4, still to come)');
+  return 0;
 }
 
 /** `bench select`: as the bench user, the pinned selection into the held-out store, and the smoke's plan. Its exit code. */
@@ -456,6 +498,7 @@ export function main(argv: readonly string[], deps: Partial<CliDeps> = {}): numb
     docker: deps.docker ?? { docker: 'docker' },
     ...(deps.host ? { host: deps.host } : {}),
     ...(deps.fetch ? { fetch: deps.fetch } : {}),
+    ...(deps.registry ? { registry: deps.registry } : {}),
     // INVARIANT: the only way out: every line, whoever writes it, is scrubbed on its full text before any cut (#851 round 2),
     // and has every word shaped like a task withheld first (#748 slice 3; scrub() does that before anything else).
     out: (l) => sink(scrub(l, env, LINE_MAX)),
@@ -468,7 +511,8 @@ export function main(argv: readonly string[], deps: Partial<CliDeps> = {}): numb
   if (command === 'preflight' && extra.length === 0) return printPreflight(d);
   if (command === 'download' && extra.length === 0) return download(d);
   if (command === 'select' && extra.length === 0) return select(d);
-  const takesNone = command === 'preflight' || command === 'download' || command === 'select';
+  if (command === 'images' && extra.length === 0) return images(d);
+  const takesNone = command === 'preflight' || command === 'download' || command === 'select' || command === 'images';
   d.out(command === undefined ? 'no command' : takesNone ? `${command} takes no arguments, not ${scrub(extra.join(' '), env, 200)}` : `unknown command: ${scrub(command, env, 200)}`);
   for (const l of USAGE) d.out(l);
   return 2;
