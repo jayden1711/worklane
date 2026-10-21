@@ -336,9 +336,13 @@ Not defended by it (**inferred**; the messages being built from keys is what cov
 - an id split across a real space, or across two lines;
 - an id in base64 or another encoding not listed above;
 - ASCII stand-ins (`~` for `-`, `O` or `l` for a digit);
-- an id whose digits are all replaced by letters.
+- an id whose digits are all replaced by letters;
+- digits used as the separators in a word whose own digits are non-ASCII too (`example٠٠proj٠٤٢٤٢`), or fullwidth zeros as the separators (`example００proj−４２４２`: after NFKC, an ASCII stand-in). These aren't look-alikes of `_` or `-`. Catching them would withhold Arabic-Indic dates such as `٢٠٢٦-١٠`, which are kept.
 
-It errs closed: a word with two non-ASCII characters in a row that later reaches a `-` and a digit (`éé-1`, `東京都-1`), or three non-ASCII characters before a digit, is withheld (measured). The messages being built from keys is what covers those.
+It errs closed (measured), withholding:
+- a word with two non-ASCII characters in a row that later reaches a `-` and a digit (`éé-1`, `東京都-1`);
+- three non-ASCII characters before a digit;
+- decomposed (NFD) text with two marks on one letter, or with marks next to `_` before `-N` (`Việt-1`, `Nguyễn-3`, a decomposed `ä_ö-1`). The composed (NFC) forms are kept. The messages being built from keys is what covers those.
 
 **Image references** live in the store, in `images.json`: `{"<instance id>": "<name>@sha256:<digest>", ...}`, a 0600 file of the bench user.
 - **Producing it belongs to task setup (slice 4), still to come.** It will be a command that reads the ids from the store's manifest or rows and writes the file. Until then, `bench select` reports the images line as FAIL.

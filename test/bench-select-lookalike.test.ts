@@ -77,3 +77,54 @@ test('ordinary words the bench prints, and ordinary non-ASCII text, stay as they
   const changed = keep.filter((s) => withholdTasks(s) !== s);
   assert.deepEqual(changed, [], `kept ${keep.length - changed.length} of ${keep.length}`);
 });
+
+// Round 5 (folded in from its own file in round 6, unchanged: a new test file tipped test/ci-affected.test.ts's
+// "a one-test change selects < 1/5" guard): combining marks used as an id's separators (`̲` drawn as `_`, `̶` as `-`)
+// are withheld too: the loose reading reads a mark, and a character carrying marks, as a placeholder, as well as
+// dropping it.
+
+test('combining marks as the separators are withheld through main()', async () => {
+  const { main, withholdTasks, WITHHELD } = await cli();
+  const cases: [string, string][] = [
+    ['example̲̲proj−4242', 'combining low lines as underscores, a minus sign'],
+    ['example̲̲proj‐4242', 'combining low lines as underscores, a Unicode hyphen'],
+    ['example̠̠proj−4242', 'combining minus signs below as underscores'],
+    ['example‗‗proj̶4242', 'a combining long stroke as the hyphen'],
+    ['example̲̲proj̶4242', 'combining low lines and a combining long stroke'],
+    ['exampl̲e̲proj−4242', 'underlined letters as underscores'],
+    ['sweb.eval.x86_64.example̲1776̲proj-4242', 'an image name, combining low lines around 1776'],
+    ['example٠٠proj٠4242', 'Arabic-Indic zeros as the separators'],
+  ];
+  for (const [arg, why] of cases) {
+    assert.equal(withholdTasks(arg), WITHHELD, why);
+    for (const argv of [[arg], ['select', arg]]) {
+      const out: string[] = [];
+      assert.equal(main(argv, { out: (l) => out.push(l) }), 2, why);
+      assert.doesNotMatch(out.join('\n'), /proj/, `${why}: ${out[0]}`);
+    }
+  }
+});
+
+test('words with ordinary accents, composed or decomposed, stay as they are', async () => {
+  const { withholdTasks } = await cli();
+  const keep = ['naïve', 'naïve', 'résumé—2024', 'résumé—2024', 'café-1', 'Ångström', 'Zürich-2', 'Zürich-2', 'São_Paulo-3', 'São_Paulo-3', 'piña_colada', 'é__x', 'mañana-10', '٢٠٢٦-١٠', '२०२०'];
+  assert.deepEqual(keep.filter((s) => withholdTasks(s) !== s), []);
+});
+
+// Round 6: an image name whose `1776` carries a mark on one digit, with marks as its underscores.
+
+test('marks inside 1776 in an image name are withheld through main()', async () => {
+  const { main, withholdTasks, WITHHELD } = await cli();
+  for (const [arg, why] of [
+    ['sweb.eval.x86_64.example̲17́76̲proj-4242', 'low lines around 1776, an acute on one 7'],
+    ['sweb.eval.x86_64.example̲1́7́7́6̲́proj-4242', 'an acute on every digit'],
+    ['sweb.eval.x86_64.example‿1‗7‗7‗6‿proj-4242', 'look-alikes between the digits'],
+  ] as const) {
+    assert.equal(withholdTasks(arg), WITHHELD, why);
+    for (const argv of [[arg], ['select', arg]]) {
+      const out: string[] = [];
+      assert.equal(main(argv, { out: (l) => out.push(l) }), 2, why);
+      assert.doesNotMatch(out.join('\n'), /proj/, `${why}: ${out[0]}`);
+    }
+  }
+});

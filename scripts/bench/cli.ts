@@ -224,8 +224,12 @@ const loose = (s: string, digit = DIGIT): string =>
  */
 const looseReadings = (s: string): string[] => [loose(s), loose(s.replace(/\p{M}/gu, ANY)), loose(s.replace(/[^\p{M}]\p{M}+/gu, ANY)), loose(s, ANY)];
 
-/** `_1776_`, an instance image name's mark, read loosely: ANY in an underscore's place, DIGIT in a digit's. Fixed width. */
-const LOOSE_1776 = /[_\x01][1\x02][7\x02][7\x02][6\x02][_\x01]/;
+/**
+ * `_1776_`, an instance image name's mark, read loosely: ANY in an underscore's place, DIGIT in a digit's, and any ANYs
+ * between them (#884 round 6: a mark on one digit, read as ANY), as the tail scan allows. Each `\x01*` ends at the next
+ * fixed class, and words are at most WORD_MAX long.
+ */
+const LOOSE_1776 = /[_\x01]\x01*[1\x02]\x01*[7\x02]\x01*[7\x02]\x01*[6\x02]\x01*[_\x01]/;
 
 /**
  * Whether `s` (a loose reading) holds an instance id's tail, in linear time: two underscore places (`_` or ANY), then
