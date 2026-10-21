@@ -1,7 +1,7 @@
 // Headless Chrome or Chromium over the DevTools protocol, with no browser dependency: find the binary, start
 // it on a temporary profile, and talk to a page over the WebSocket Node ships with (22.4+). Shared by the
 // dashboard's own browser checks (scripts/dev/control-dashboard.mjs) and the project-app runner (run.ts).
-import { spawn, type ChildProcess } from 'node:child_process';
+import { spawn, type ChildProcess } from '../os/child-process.js';
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';

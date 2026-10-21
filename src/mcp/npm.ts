@@ -2,7 +2,7 @@
 // version, its tarball's integrity the registry's own, its whole dependency tree locked and installed with no install
 // script run, and no bin links (the tree hash refuses links). A package any of whose dependencies needs an install
 // script is refused (Q7). Nothing here runs the package.
-import { execFileSync } from 'node:child_process';
+import { execFileSync } from '../os/child-process.js';
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';

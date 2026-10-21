@@ -2,7 +2,7 @@
 // over the open PRs this instance opened (watchedPrs: a person's PR is never among them). The git work happens in a
 // scratch worktree of the coordinator's clone; the only push is checkedPush to the PR's own branch, pinned to the
 // head it read (never over someone else's push, never the default branch). Nothing runs under an emergency stop.
-import { spawnSync } from 'node:child_process';
+import { spawnSync } from '../os/child-process.js';
 import { join } from 'node:path';
 import { BRAND } from '../brand.js';
 import type { PullRequest } from '../backlog/types.js';
