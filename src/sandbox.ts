@@ -69,6 +69,18 @@ export function withDeniedReads<T extends object>(settings: T, paths: readonly s
   };
 }
 
+/**
+ * A copy of a run's settings whose sandbox also denies these paths to its commands, with no Read rule: for a
+ * directory holding the run's own checkout, which the sandbox binds back as the run's writable cwd and a Read deny
+ * rule could not. Settings with no sandbox are returned as they are.
+ */
+export function withSandboxDeniedReads<T extends object>(settings: T, paths: readonly string[]): T {
+  const add = paths.map(abs);
+  const s = settings as T & { sandbox?: { filesystem?: { denyRead?: string[] } } };
+  if (!add.length || !s.sandbox) return settings;
+  return { ...s, sandbox: { ...s.sandbox, filesystem: { ...s.sandbox.filesystem, denyRead: [...new Set([...(s.sandbox.filesystem?.denyRead ?? []), ...add])] } } };
+}
+
 /** A copy of a run's settings whose commands may also reach `hosts` (for one run; the lane is unchanged). */
 export function withAllowedDomains<T extends object>(settings: T, hosts: string[]): T {
   const s = settings as T & { sandbox?: { network?: { allowedDomains?: string[] } } };

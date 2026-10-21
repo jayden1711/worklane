@@ -21,7 +21,7 @@ import { RunRecorder, runIssue } from './run-record.js';
 import { RunFeed } from './run-feed.js';
 import { StuckDetector, stuckAction, type StuckMode, type StuckVerdict } from './stuck.js';
 import { RefusalTracker, type RefusedRequest } from './domain-requests.js';
-import { allowedDomainsOf, withAllowedDomains, withDeniedReads } from './sandbox.js';
+import { allowedDomainsOf, withAllowedDomains, withDeniedReads, withSandboxDeniedReads } from './sandbox.js';
 import { runReadDenials } from './read-denials.js';
 import { loadedSetProblem, type InitLoaded, type PluginRun } from './plugins/run.js';
 import { mcpRunArgs, type McpRun } from './mcp/client.js';
@@ -732,7 +732,10 @@ export class CliRunner implements AgentRunner {
     // Every account profile's login file for this user, whichever it runs on: denied to its commands like its own.
     const withLogins = allowed && runAs && this.login ? withDeniedReads(allowed, this.login.credentialFiles(runAs)) : allowed;
     // The task's and project's own denials on top: the sandbox's when it is on, the Read rules always.
-    const laneSettings = ownDenials.paths.length ? withDeniedReads(withLogins ?? {}, ownDenials.paths) : withLogins;
+    const withOwn = ownDenials.paths.length ? withDeniedReads(withLogins ?? {}, ownDenials.paths) : withLogins;
+    // The places task checkouts are made, hidden whole by the sandbox only (it binds the run's own checkout back as its
+    // cwd): a worktree made there after the start is hidden too (src/read-denials.ts siblingCheckouts).
+    const laneSettings = withOwn && ownDenials.sandboxOnly?.length ? withSandboxDeniedReads(withOwn, ownDenials.sandboxOnly) : withOwn;
     // The run's harness variables are pinned in --settings too: a project file's env would otherwise override them.
     const pinned = guard ? runSettings(guard, laneSettings, Object.fromEntries(Object.entries(env).filter((kv): kv is [string, string] => kv[0].startsWith(`${BRAND.envPrefix}_`) && kv[1] !== undefined))) : laneSettings;
     // An API-key instance: the key comes from its file through claude's apiKeyHelper (only a path is passed here),

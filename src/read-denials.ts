@@ -71,7 +71,7 @@ function capPerCheckout(entries: Set<string>, own: string[], checkouts: string[]
  * (B5glob, measured by the round-8 delta check). One mount per checkout bounds that, and no run reads another task's
  * checkout at all. A checkout made after the start is covered only by the globs over `places` (see runReadDenials).
  */
-function siblingCheckouts(linked: string[], places: string[], own: string[], keep: string[]): string[] | { error: string } {
+function siblingCheckouts(linked: string[], places: string[], own: string[], keep: string[], cwd: string): { siblings: string[]; places: string[] } | { error: string } {
   const forms = (p: string) => [...new Set([resolve(p), realOrNull(p) ?? resolve(p)])];
   const holds = (paths: string[]) => {
     const all = paths.flatMap(forms);
@@ -79,13 +79,20 @@ function siblingCheckouts(linked: string[], places: string[], own: string[], kee
   };
   const holdsKept = holds([...own, ...keep]);
   const holdsMain = holds(keep);
+  const holdsOwn = holds(own);
+  const ownIsCwd = own.every((c) => forms(c).some((f) => forms(cwd).includes(f)));
   const found = new Set<string>();
+  const whole: string[] = [];
   for (const l of linked) found.add(resolve(l));
   for (const place of places) {
-    // A place that holds the main checkout or the run's own (a worktree root of ".." in the project's config) holds
-    // more than task checkouts (the instance's task files and bundles beside the repository): only the worktrees git
-    // lists there are hidden.
+    // A place that holds the main checkout (a worktree root of ".." in the project's config) holds more than task
+    // checkouts (the instance's task files and bundles beside the repository): only the worktrees git lists there are
+    // hidden.
     if (holdsMain(place)) continue;
+    // Hidden whole in the sandbox, so a checkout made there after the start is hidden too (round 10's open B5glob
+    // case): the run's own checkout beneath it is bound back by the sandbox as its cwd, which it may write (measured,
+    // srt 0.0.78 and bwrap: read, write and git there work). Only when the cwd is that checkout: a cwd below it would
+    // bring back only itself, so the place is left to the per-checkout entries.
     let entries;
     try {
       entries = readdirSync(place, { withFileTypes: true });
@@ -94,10 +101,12 @@ function siblingCheckouts(linked: string[], places: string[], own: string[], kee
       if (code === 'ENOENT' || code === 'ENOTDIR') continue;
       return { error: `${place}, where task checkouts are made, can't be listed (${code ?? firstLine(e)}), so the other checkouts there can't be hidden` };
     }
+    // A place that isn't there yet isn't hidden whole: the per-pattern globs cover a worktree made there later.
+    if (!holdsOwn(place) || ownIsCwd) whole.push(resolve(place));
     // Directories only, never followed: a link there could lead anywhere, the main checkout among them.
     for (const e of entries) if (e.isDirectory()) found.add(join(place, e.name));
   }
-  return [...found].filter((c) => c !== '/' && !holdsKept(c)).sort();
+  return { siblings: [...found].filter((c) => c !== '/' && !holdsKept(c)).sort(), places: whole };
 }
 
 const GLOB = /[*?]/;
@@ -542,7 +551,7 @@ function linksToDirectory(link: string): boolean {
  * object store chain that can't be followed in full, or a main checkout that can't be found (no `repo`, and a git
  * directory that leads nowhere back), is an error, and the run doesn't start.
  */
-export function runReadDenials(o: { cwd: string; home: string | undefined; taskFile?: string; repo?: string; defaultBranch?: string; startSecrets?: readonly string[]; readsNothing?: boolean }): { paths: string[] } | { error: string } {
+export function runReadDenials(o: { cwd: string; home: string | undefined; taskFile?: string; repo?: string; defaultBranch?: string; startSecrets?: readonly string[]; readsNothing?: boolean }): { paths: string[]; sandboxOnly?: string[] } | { error: string } {
   let hidden: string[] = [];
   if (o.taskFile) {
     try {
@@ -626,10 +635,13 @@ export function runReadDenials(o: { cwd: string; home: string | undefined; taskF
   const base = main ?? root;
   const taskPlaces = [...new Set([...worktreeRoots.map((w) => resolve(base, w)), join(projectStateDir(base), 'worktrees')])];
   // Every other task checkout is hidden whole (the owner's decision, round 10), always: see siblingCheckouts.
-  const siblings = siblingCheckouts(repo.linked, taskPlaces, [root, ...repo.checkouts.slice(0, 1)], [...(main ? [main] : []), ...repo.stores, ...(repo.common ? [repo.common] : []), ...(o.taskFile ? [o.taskFile] : [])]);
-  if ('error' in siblings) return siblings;
+  const other = siblingCheckouts(repo.linked, taskPlaces, [root, ...repo.checkouts.slice(0, 1)], [...(main ? [main] : []), ...repo.stores, ...(repo.common ? [repo.common] : []), ...(o.taskFile ? [o.taskFile] : [])], o.cwd);
+  if ('error' in other) return other;
+  const { siblings } = other;
+  // The places themselves go to the sandbox only: a Read rule can't be carved back for the run's own checkout.
+  const whole = other.places.length ? { sandboxOnly: other.places.map(asEntry) } : {};
   const all = sources.flat();
-  if (!all.length) return { paths: siblings.map(asEntry) };
+  if (!all.length) return { paths: siblings.map(asEntry), ...whole };
   // A bracket the project or the task wrote is a character to the hook and a class to the sandbox: no entry means
   // the same to both. One in a path the runner resolved is written as "?" instead (asEntry).
   const written = all.find((p) => !p.startsWith('!') && SANDBOX_ONLY_GLOB.test(p));
@@ -681,7 +693,7 @@ export function runReadDenials(o: { cwd: string; home: string | undefined; taskF
       if (base === '' || base === '/') return { error: `${p} starts with a pattern; the sandbox needs a directory to start from, so it can't be denied` };
     }
   }
-  return { paths: [...entries] };
+  return { paths: [...entries], ...whole };
 
   /** One source's entries, its own exceptions applied to its own patterns only; an error stops the run. */
   function addSource(patterns: string[]): { error: string } | null {
