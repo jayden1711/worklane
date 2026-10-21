@@ -19,6 +19,7 @@ import { CHAT_LANE } from './intake/chat.js';
 // through src/research.ts or src/intake/chat.ts, which aren't locked: a change there can't swap them under this file.
 import { RESEARCH_ROOT_ENV } from './guard/research.js';
 import { CHAT_KEY_GLOBS, CHAT_ROOT_ENV } from './guard/chat.js';
+import { GUARD_ON_FAILURE } from './agent-settings.js';
 import { fileURLToPath } from 'node:url';
 
 /**
@@ -484,7 +485,7 @@ export function researchLanes(i: Instance, base: { runAs?: RunAs } | undefined):
   const settingsFor = (denyRead: string[], hook: boolean): ResearchLaneSettings => {
     const s = sandboxSettings({ lane: { allowedDomains: [] }, denyRead });
     const deny = [...s.permissions.deny, ...denyRead.map((p) => `Glob(/${p.startsWith('/') ? p : `/${p}`}/**)`), ...denyRead.map((p) => `Grep(/${p.startsWith('/') ? p : `/${p}`}/**)`)];
-    const hooks = hook ? { hooks: { PreToolUse: [{ matcher: '.*', hooks: [{ type: 'command', command: `${RESEARCH_ROOT_ENV}=${JSON.stringify(researchRoot)} node ${JSON.stringify(HOOK_MAIN)} pre-tool-use || exit 2`, timeout: 30 }] }] } } : {};
+    const hooks = hook ? { hooks: { PreToolUse: [{ matcher: '.*', hooks: [{ type: 'command', command: `${RESEARCH_ROOT_ENV}=${JSON.stringify(researchRoot)} node ${JSON.stringify(HOOK_MAIN)} pre-tool-use || exit 2`, timeout: 30, onFailure: GUARD_ON_FAILURE }] }] } } : {};
     return { ...(i.policy.sandbox ? { sandbox: s.sandbox } : {}), permissions: { deny }, ...hooks };
   };
   // The chat channels' lane: the checkout read-only, like research-repo, under the instance's own guardrail hooks,

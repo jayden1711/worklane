@@ -6,7 +6,7 @@ import { mkdirSync, mkdtempSync, readFileSync, realpathSync, symlinkSync, writeF
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { BRAND } from '../src/brand.js';
-import { runHook, type HookOutput } from '../src/hook.js';
+import { runHook, type HookInput, type HookOutput } from '../src/hook.js';
 import { exampleProject } from './helpers.js';
 
 const P = BRAND.envPrefix;
@@ -133,17 +133,20 @@ function cases(t: ReturnType<typeof trees>): Case[] {
 /** The guard's whole answer as one line: exit code, stdout and stderr, byte for byte but for the names written as placeholders. */
 const answer = (r: HookOutput, shown: (s: string) => string) => [`exit ${r.exitCode}`, ...(r.stdout ? [`stdout ${shown(r.stdout)}`] : []), ...(r.stderr ? [`stderr ${shown(r.stderr)}`] : [])].join(' | ');
 
+/** How a case is run: in this process (runHook, the default), or through the guard's own process (test/hook-deadline.test.ts). */
+export type CaseRunner = (event: string, input: HookInput, env: NodeJS.ProcessEnv) => Promise<HookOutput>;
+
 /**
  * Each case's name and the guard's answer. Its temporary paths are written as <T> (and the project as <P>), and the
  * engine's names as <cli>, <PREFIX> and <configDir>, so the answers compare across machines and a rename.
  */
-export async function runCorpus(): Promise<Record<string, string>> {
+export async function runCorpus(run: CaseRunner = runHook): Promise<Record<string, string>> {
   const t = trees();
   const shown = (s: string) => s.split(t.project).join('<P>').split(t.base).join('<T>').split(BRAND.configDir).join('<configDir>').split(`${P}_`).join('<PREFIX>_').split(`[${BRAND.cli}]`).join('[<cli>]');
   const out: Record<string, string> = {};
   for (const k of cases(t)) {
     if (k.name in out) throw new Error(`two corpus cases are named ${k.name}`);
-    const r = await runHook(k.event ?? 'pre-tool-use', { hook_event_name: 'PreToolUse', cwd: k.cwd, tool_name: k.tool, tool_input: k.input, session_id: 's' }, { ...process.env, ...k.env });
+    const r = await run(k.event ?? 'pre-tool-use', { hook_event_name: 'PreToolUse', cwd: k.cwd, tool_name: k.tool, tool_input: k.input, session_id: 's' }, { ...process.env, ...k.env });
     out[k.name] = answer(r, shown);
   }
   return out;

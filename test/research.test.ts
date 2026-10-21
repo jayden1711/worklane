@@ -266,6 +266,8 @@ test('the research lane denies every read of the checkout, its worktrees and the
   // The guard's own entry, not the CLI (#665).
   assert.match(cmd, /hook-main\.js" pre-tool-use \|\| exit 2$/);
   assert.doesNotMatch(cmd, /cli\.js/);
+  // A research hook that times out, can't start or crashes blocks the call, as the instance's guard does.
+  assert.equal((r.hooks as { PreToolUse: { hooks: { onFailure?: string }[] }[] }).PreToolUse[0]!.hooks[0]!.onFailure, 'block');
   assert.equal(lanes[RESEARCH_LANE]!.runAs?.user, 'wl-inst-agent', 'as the agent user');
   const withRepo = lanes[RESEARCH_REPO_LANE]!.settings;
   assert.ok(!withRepo.permissions.deny.some((d) => d.includes(checkout)), 'repo access: the checkout is readable');
