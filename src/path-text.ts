@@ -29,12 +29,17 @@ export const hasEdgeSpace = (path: string): boolean => /(?:^|\/) | (?:\/|$)/.tes
 /**
  * Whether a path holds a character outside ASCII other than an accent on an ASCII letter (#763): a letter of another
  * script, a fullwidth or mathematical letter, a long s, a symbol, a no-break space, the braille blank. Any of them can
- * read as an ASCII character it isn't (a Cyrillic e as `e`). An accented letter is one whose canonical decomposition
- * (NFD) is an ASCII letter and combining marks (`naïve`, `café`). WHY a rule and not Unicode's look-alike table: this
- * module imports nothing (test/review-packet.test.ts), so it escapes every such name, look-alike or not. The
- * replacement character is left to isNonUtf8Path.
+ * read as an ASCII character it isn't (a Cyrillic e as `e`). An accented letter is a character whose canonical
+ * decomposition (NFD) is an ASCII letter and then at least one combining mark (`naïve`, `café`). INVARIANT: nothing
+ * else counts, so a character that decomposes to a bare ASCII one (the Kelvin sign to K), a lone combining mark, or a
+ * sign with an overlay is escaped (#763 round 2). WHY a rule and not Unicode's look-alike table: this module imports
+ * nothing (test/review-packet.test.ts), so it escapes every such name, look-alike or not. The replacement character
+ * is left to isNonUtf8Path.
  */
-export const hasNonAccentCharacter = (path: string): boolean => /\P{ASCII}/u.test(path.normalize('NFD').replace(/\p{M}/gu, '').replaceAll('�', ''));
+export const hasNonAccentCharacter = (path: string): boolean => {
+  for (const ch of path) if (/\P{ASCII}/u.test(ch) && ch !== '�' && !/^[A-Za-z]\p{M}+$/u.test(ch.normalize('NFD'))) return true;
+  return false;
+};
 
 /** Whether a path's first segment (its top-level directory, or a file at the root) has a character outside ASCII. */
 export const hasNonAsciiTopLevel = (path: string): boolean => /[^\x00-\x7f]/.test(path.split('/')[0]!);

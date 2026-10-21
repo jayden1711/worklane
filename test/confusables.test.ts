@@ -124,10 +124,11 @@ test('#763: the braille blank is the Braille script\'s first character, and no o
 });
 
 test('#763: hasNonAccentCharacter (how text shows a path): any character outside ASCII but an accent on an ASCII letter, without the look-alike table', () => {
-  const yes = [`docs/r${C.cyrillicE}leasing.md`, `a${C.divisionSlash}b`, `x${C.cyrillicDze}y`, `docs/${C.fullwidthR}x.md`, `docs/a${C.noBreakSpace}b.md`, `docs/a${BRAILLE_BLANK}b.md`, `docs/relea${C.longS}ing.md`, `docs/${C.han}.md`];
+  const yes = [`docs/r${C.cyrillicE}leasing.md`, `a${C.divisionSlash}b`, `x${C.cyrillicDze}y`, `docs/${C.fullwidthR}x.md`, `docs/a${C.noBreakSpace}b.md`, `docs/a${BRAILLE_BLANK}b.md`, `docs/relea${C.longS}ing.md`, `docs/${C.han}.md`, `docs/nai${C.combiningDiaeresis}ve.md`];
   assert.deepEqual(yes.map(hasNonAccentCharacter), yes.map(() => true));
-  // Accents, precomposed or combining; ASCII; and the replacement character, which isNonUtf8Path shows as JSON.
-  const no = [`docs/na${C.iDiaeresis}ve.md`, `docs/nai${C.combiningDiaeresis}ve.md`, `docs/caf${C.eAcute}.md`, 'src/x.ts', 'web/say"hi".ts', 'docs/a b.md', 'docs/a�b.md'];
+  // Precomposed accents; ASCII; and the replacement character, which isNonUtf8Path shows as JSON. (A lone combining
+  // mark, as in a decomposed name, is escaped: only a character that is an ASCII letter with marks counts as an accent.)
+  const no = [`docs/na${C.iDiaeresis}ve.md`, `docs/caf${C.eAcute}.md`, 'src/x.ts', 'web/say"hi".ts', 'docs/a b.md', 'docs/a�b.md'];
   assert.deepEqual(no.map(hasNonAccentCharacter), no.map(() => false));
   // So shownPath escapes each of the first and shows each accented name as itself.
   assert.deepEqual(yes.map(shownPath), yes.map(escapedPath));
