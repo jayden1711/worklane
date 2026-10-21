@@ -190,6 +190,7 @@ function reach(source: string, allowed: string[]): string[] {
   visit(src);
   return out;
 }
+// check-table: never-grow
 const PACKET_ALLOWED = ['../brand.js:BRAND', '../backlog/types.js:DoneWhenList', '../events/types.js:EventPayload', '../path-text.js:shownPath', '../pr-rules.js:RiskClass', '../receipts.js:receiptLines', '../receipts.js:receiptSummary', '../receipts.js:CheckRecord'];
 
 test('no new approval path: the packet and the receipts it uses are text from the record, and reach nothing that approves, merges, runs or calls out', () => {

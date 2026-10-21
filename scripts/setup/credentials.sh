@@ -36,8 +36,11 @@
 #       Bill the agents' runs to an Anthropic API key instead of the agent user's Claude login. The key is pasted
 #       (not shown) or read from <key-file>, and installed for wl-<name>-agent only (0400, in a 0700 directory
 #       of its own). claude reads it through apiKeyHelper, as the agent user: it is never in an environment, the
-#       coordinator user can't read it, and the sandbox denies it to agent commands. Prints the credentials.yaml
-#       line to add. Spend caps (daily_budget_usd, each role's budget_usd, --max-budget-usd) apply as before.
+#       coordinator user can't read it, and the sandbox denies it to agent commands. Once claude reports an API-key
+#       login as the agent user, writes the key's path into the instance's credentials.yaml (agent_api_key) through
+#       the engine's config code, as wl-<name> (which must have one: credentials.sh <name> github-app first), then
+#       refreshes the instance's account record (claude-account.sh status), as `claude` does (issue #897).
+#       Spend caps (daily_budget_usd, each role's budget_usd, --max-budget-usd) apply as before.
 #   bash scripts/setup/credentials.sh <name> intake-discord
 #       Work intake (docs/intake.md): the chat bot's token. Pasted at a hidden prompt, or on stdin when there is no
 #       terminal (automation); never an argument, never echoed. Installed for wl-<name> only (0400, in a 0700
@@ -99,12 +102,28 @@ install_secret() {
   local file="$1" secret="$2"
   printf '%s' "$secret" | sudo -u "$coord" sh -c 'umask 077; mkdir -p "$(dirname "$1")"; chmod 0700 "$(dirname "$1")"; rm -f "$1"; cat > "$1"; chmod 0400 "$1"' _ "$file"
 }
-# An intake instance's credentials.yaml must be there to write into: said before any secret is asked for.
+# An instance's credentials.yaml must be there to write into (an intake credential, the agents' API key): said before
+# any secret is asked for. Checked as $coord, bounded by root (#904, run_as_bounded): a process of $coord's can't hold
+# root here by stopping the check.
 intake_creds_ready() {
   id -u "$coord" >/dev/null 2>&1 || { echo "no $coord; run instance.sh $name first" >&2; exit 1; }
-  local creds
+  local creds rc=0
   creds="$(home_of "$coord")/.local/state/worklane/instances/$name/credentials.yaml"
-  sudo -u "$coord" test -f "$creds" || { echo "no $creds yet: the instance's GitHub credential comes first (credentials.sh $name github-app ...); nothing installed" >&2; exit 1; }
+  run_as_bounded "$coord" "$AGENT_CHECK_SECONDS" /dev/null '[ -f "$1" ]' "$creds" || rc=$?
+  [ "$rc" -eq 0 ] && return 0
+  cut_off_status "$rc" && { echo "checking, as $coord, that $creds is there didn't finish within $AGENT_CHECK_SECONDS s; nothing installed" >&2; exit 1; }
+  echo "no $creds yet: the instance's GitHub credential comes first (credentials.sh $name github-app ...); nothing installed" >&2; exit 1
+}
+# One step as <user>, bounded by root (#904, run_as_bounded_input: this shell's stdin is that user's): the user's own
+# files and processes can't hold root here. Its output goes through a file of root's, shown after. Failed or cut off:
+# exit 1, credentials.yaml as it was.
+#   bounded_step <what> <user> <script> [args...]
+bounded_step() {
+  local what="$1" user="$2" out rc=0; shift 2
+  out="$(mktemp)"
+  run_as_bounded_input "$user" "$AGENT_CHECK_SECONDS" "$out" "$@" || rc=$?
+  head -c 4096 -- "$out"; rm -f -- "$out"
+  [ "$rc" -eq 0 ] || { echo "$what as $user failed or didn't finish within $AGENT_CHECK_SECONDS s (exit $rc); credentials.yaml is as it was: run this again" >&2; exit 1; }
 }
 # One secret at a hidden prompt, or one line of stdin when there is no terminal; whitespace removed. Never echoed.
 read_secret() {
@@ -231,6 +250,8 @@ JS
     ;;
   api-key)
     id -u "$agent" >/dev/null 2>&1 || { echo "no $agent; run instance.sh $name first" >&2; exit 1; }
+    # credentials.yaml must be there to write into, so say so before asking for the key.
+    intake_creds_ready
     dir="$(home_of "$agent")/.config/$name-claude-key"
     file="$dir/api_key"
     if [ -n "$flag" ]; then
@@ -241,12 +262,14 @@ JS
     fi
     case "$key" in sk-ant-*) ;; *) unset key; echo "that doesn't look like an Anthropic API key (sk-ant-...); nothing installed" >&2; exit 1 ;; esac
     say "install the key for $agent only ($file, 0400, in a 0700 directory)"
-    printf '%s' "$key" | sudo -u "$agent" sh -c 'umask 077; mkdir -p "$1"; chmod 0700 "$1"; rm -f "$2"; cat > "$2"; chmod 0400 "$2"' _ "$dir" "$file"
+    # Each step as $agent is bounded by root (#904, bounded_step): the agent's own files and processes can't hold root.
+    # The key reaches it on stdin only, from a builtin printf: never an argument, never a file of root's.
+    bounded_step "installing the key" "$agent" 'exec 2>&1; umask 077; mkdir -p "$1"; chmod 0700 "$1"; rm -f "$2"; cat > "$2"; chmod 0400 "$2"' "$dir" "$file" < <(printf '%s' "$key")
     unset key
     # claude auth status (the runner's preflight, run as the agent user) reads the agent's own settings; runs get the
     # same helper in --settings from the coordinator, which passes only this path.
     say "point $agent's Claude settings at it (apiKeyHelper), keeping its other settings"
-    (cd / && sudo -u "$agent" node --input-type=module - "$(home_of "$agent")/.claude/settings.json" "cat -- $file") <<'JS'
+    bounded_step "writing the apiKeyHelper entry" "$agent" 'exec 2>&1; exec node --input-type=module - "$1" "$2"' "$(home_of "$agent")/.claude/settings.json" "cat -- $file" <<'JS'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 const [file, helper] = process.argv.slice(2);
@@ -255,12 +278,21 @@ s.apiKeyHelper = helper;
 mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
 writeFileSync(file, `${JSON.stringify(s, null, 2)}\n`, { mode: 0o600 });
 JS
-    say "check, as $agent: claude reports API-key auth"
-    sudo -iu "$agent" claude auth status --json
-    echo "In credentials.yaml set:"
-    echo "  agent_api_key: $file"
-    echo "then restart the instance. Its agents bill to this key; to go back to the Claude login, remove that line"
-    echo "and the apiKeyHelper entry from $(home_of "$agent")/.claude/settings.json."
+    say "check, as $agent: claude reports an API-key login"
+    # Only then is the instance switched to the key: an instance whose agent user claude doesn't sign in with it keeps
+    # its credentials.yaml as it was.
+    claude_api_key_login_ok "$agent" || { echo "claude auth status, as $agent, doesn't report an API-key login (${CLAUDE_API_KEY_LOGINS//|/ or }); the key and the apiKeyHelper entry are in place, credentials.yaml is not changed: run this again once claude answers" >&2; exit 1; }
+    echo "$agent is signed in to Claude with the API key, per claude auth status"
+    # The entry in credentials.yaml, written by the engine's own config code as $coord: validated against the schema,
+    # the file's other settings kept. Only the path is passed; $coord can't read the key. Never a hand edit.
+    say "write the key's path into $name's credentials.yaml, as $coord"
+    # Bounded by root (#904, bounded_step): the coordinator's own files and processes can't hold root here. No stdin.
+    bounded_step "writing agent_api_key" "$coord" 'worklane instance set-agent-api-key "$1" --file "$2" 2>&1' "$name" "$file" </dev/null
+    # The first-run step reads the agent's login from claude-account's status.json: this instance's records, refreshed.
+    # Best effort, and bounded by root (#904): it runs claude as the agent user.
+    (close_fds; exec timeout -s KILL "$ACCOUNT_STATUS_SECONDS" bash "$here/claude-account.sh" status "$name") </dev/null >/dev/null 2>&1 || true
+    echo "then restart the instance. Its agents bill to this key; to go back to the Claude login, remove agent_api_key"
+    echo "from credentials.yaml and the apiKeyHelper entry from $(home_of "$agent")/.claude/settings.json."
     ;;
   intake-discord)
     id -u "$coord" >/dev/null 2>&1 || { echo "no $coord; run instance.sh $name first" >&2; exit 1; }
