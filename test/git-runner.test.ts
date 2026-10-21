@@ -119,6 +119,14 @@ test('the runner\'s settings go on last: a caller\'s environment can\'t turn rep
   assert.deepEqual({ ...gitEnv({ GIT_GRAFT_FILE: grafts, GIT_NO_REPLACE_OBJECTS: '0' }) }, { ...GIT_FIXED_ENV, ...graphOff });
   // A caller's own config pairs stay; the fixed pair goes after them (a later pair wins).
   assert.deepEqual({ ...gitEnv({ GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'core.commitGraph', GIT_CONFIG_VALUE_0: 'true' }) }, { ...GIT_FIXED_ENV, GIT_CONFIG_COUNT: '2', GIT_CONFIG_KEY_0: 'core.commitGraph', GIT_CONFIG_VALUE_0: 'true', GIT_CONFIG_KEY_1: 'core.commitGraph', GIT_CONFIG_VALUE_1: 'false' });
+  // A count on Object.prototype is never read (#846): the fixed pair is pair 0, and nothing else is counted.
+  const proto = Object.prototype as Record<string, unknown>;
+  proto.GIT_CONFIG_COUNT = '1';
+  try {
+    assert.deepEqual({ ...gitEnv({}) }, { ...GIT_FIXED_ENV, ...graphOff });
+  } finally {
+    delete proto.GIT_CONFIG_COUNT;
+  }
   // Replace refs: `--no-replace-objects` is in the argument list, which no environment takes back.
   const decoy = git(r.work, 'commit-tree', `${r.base}^{tree}`, '-p', r.base, '-m', 'docs');
   git(r.work, 'replace', r.head, decoy);

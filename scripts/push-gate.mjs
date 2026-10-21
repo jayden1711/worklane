@@ -32,7 +32,8 @@ const ZERO = /^0+$/;
 // config pair in the environment after any the caller set.
 const GIT_FIXED_ARGS = ['--no-replace-objects', '-c', 'core.commitGraph=false'];
 const graphOff = (e) => {
-  const n = Number.isSafeInteger(Number(e.GIT_CONFIG_COUNT ?? '0')) && Number(e.GIT_CONFIG_COUNT ?? '0') >= 0 ? Number(e.GIT_CONFIG_COUNT ?? '0') : 0;
+  const c = Number(Object.hasOwn(e, 'GIT_CONFIG_COUNT') ? e.GIT_CONFIG_COUNT : '0');
+  const n = Number.isSafeInteger(c) && c >= 0 ? c : 0;
   return { ...e, [`GIT_CONFIG_KEY_${n}`]: 'core.commitGraph', [`GIT_CONFIG_VALUE_${n}`]: 'false', GIT_CONFIG_COUNT: String(n + 1) };
 };
 const GIT_ENV = graphOff({ ...process.env, GIT_NO_REPLACE_OBJECTS: '1', GIT_GRAFT_FILE: join(devNull, 'no-grafts') });

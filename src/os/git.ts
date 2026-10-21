@@ -69,7 +69,8 @@ export const GIT_FIXED_ENV: Readonly<Record<string, string>> = Object.freeze({
  */
 export function gitEnv(env?: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const out: NodeJS.ProcessEnv = { ...(env ?? process.env), ...GIT_FIXED_ENV };
-  let n = Number(out.GIT_CONFIG_COUNT ?? '0');
+  // Own keys only: an unset count must never be read through Object.prototype (#846).
+  let n = Number(Object.hasOwn(out, 'GIT_CONFIG_COUNT') ? out.GIT_CONFIG_COUNT : '0');
   if (!Number.isSafeInteger(n) || n < 0) n = 0;
   for (const [k, v] of GIT_FIXED_CONFIG) {
     out[`GIT_CONFIG_KEY_${n}`] = k;
