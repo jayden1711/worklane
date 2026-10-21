@@ -176,6 +176,19 @@ const CASES: Record<string, { mode: Mode; on: (f: Fx, w: World) => SetupContext 
   service: { mode: 'local', on: (_f, w) => void (w.service = true), off: () => {}, done: /dev\.\S+ is running/, not: /isn't running/ },
   linger: { mode: 'local', on: (_f, w) => void (w.linger = true), off: (_f, w) => void (w.linger = false) },
   'first-task': { mode: 'local', on: (_f, w) => void (w.readyIssue = true), off: () => {}, done: /an issue is labelled ready/, not: /no issue is labelled ready yet/ },
+  // #739: the server's, as the coordinator judged the issue (test/server-first-hour.test.ts has the rest).
+  'server-first-task': {
+    mode: 'server',
+    on: (f) => {
+      const log = new EventLog(join(f.ctx('server').stateDir, 'events.db'));
+      log.append('issue.seen', { issue: 3, title: 't', labels: ['ready'], author: 'ada', owner: null, actionable: true, why: 'opened by writer ada' }, 'c');
+      log.close();
+    },
+    // An instance's state dir always exists (a missing one is an error, never "no log yet").
+    off: (f) => void mkdirSync(f.ctx('server').stateDir, { recursive: true }),
+    done: /#3/,
+    not: /event log yet/,
+  },
 };
 
 function editConfig(f: Fx, edit: (yaml: string) => string) {

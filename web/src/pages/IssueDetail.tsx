@@ -1,6 +1,6 @@
 import { Fragment, useEffect, useState } from 'react';
 import { ArrowLeft } from 'lucide-react';
-import { api, type CheckRun, type State } from '../api';
+import { api, type ServedCheckRun, type State } from '../api';
 import { navigate, typing } from '../App';
 import { DotPill, Meter, RecordsTable } from '../components/patterns';
 import { ago, Avatar, Badge, Card, Empty, LevelBadge, StatusBadge, EST_NOTE, estUsd } from '../components/ui';
@@ -39,23 +39,31 @@ const CHECK_DOT = { pass: 'green', fail: 'red', unavailable: 'orange', skipped: 
 /**
  * Every run of the coordinator's own checks, newest first, each as a records table
  * (Beautiful UI's diff and records tables): a failing row is tinted red and carries
- * the end of its output, open on the latest run.
+ * the end of its output, open on the latest run. A viewer's runs (src/checks-viewer.ts,
+ * #837) have each check's name and result only: no exit column, head or output, and a
+ * note that those are the owners' and writers'.
  */
-export function Checks({ runs }: { runs: CheckRun[] }) {
+export function Checks({ runs }: { runs: ServedCheckRun[] }) {
+  const forViewer = runs.some((r) => r.forViewer === true);
   return (
     <section className="space-y-2" aria-label="Checks run by the coordinator" data-testid="checks-card">
       <div className="text-[13px] font-medium text-ink">Checks run by the coordinator</div>
+      {forViewer && (
+        <div className="text-[12px] text-ink-3" data-testid="checks-viewer-note">
+          Each check's output, exit code and the commit it ran on are for the instance's owners and writers.
+        </div>
+      )}
       {runs.length ? (
         runs.map((r, i) => (
           <div key={r.id} data-check-run={r.id} className="space-y-1.5">
             <div className="flex flex-wrap items-center gap-2 text-[12px] text-ink-3">
               <span className="font-medium text-ink-2">{r.stage}</span>
-              {r.head && <span className="font-mono">{r.head.slice(0, 8)}</span>}
+              {!r.forViewer && r.head && <span className="font-mono">{r.head.slice(0, 8)}</span>}
               <span title={r.at}>{ago(r.at)}</span>
               {i === 0 && <Badge tone="info">latest</Badge>}
             </div>
-            <RecordsTable testId="checks-table" head={['Check', 'Result', 'Exit']} className="[&_th:nth-child(2)]:w-32 [&_th:nth-child(3)]:w-20">
-              {r.checks.map((c, j) => {
+            <RecordsTable testId="checks-table" head={r.forViewer ? ['Check', 'Result'] : ['Check', 'Result', 'Exit']} className="[&_th:nth-child(2)]:w-32 [&_th:nth-child(3)]:w-20">
+              {(r.checks as { check: string; status: string; exitCode?: number | null; tail?: string | null }[]).map((c, j) => {
                 const failed = c.status === 'fail';
                 return (
                   <Fragment key={j}>
@@ -66,9 +74,9 @@ export function Checks({ runs }: { runs: CheckRun[] }) {
                       <td className="primitive-table-cell">
                         <DotPill tone={CHECK_DOT[c.status as keyof typeof CHECK_DOT] ?? 'ink'}>{c.status}</DotPill>
                       </td>
-                      <td className="primitive-table-cell text-[12.5px] tabular-nums text-ink-2">{c.exitCode ?? '-'}</td>
+                      {!r.forViewer && <td className="primitive-table-cell text-[12.5px] tabular-nums text-ink-2">{c.exitCode ?? '-'}</td>}
                     </tr>
-                    {c.tail && (
+                    {!r.forViewer && c.tail && (
                       <tr className="border-b border-line last:border-0">
                         <td colSpan={3} className="px-3 pb-2.5">
                           <details open={i === 0 && failed}>
@@ -94,12 +102,12 @@ export function Checks({ runs }: { runs: CheckRun[] }) {
 export function IssueDetail({ state, issue }: { state: State; issue: number }) {
   const t = state.tasks.find((x) => x.issue === issue);
   const [events, setEvents] = useState<RawEvent[]>([]);
-  const [checks, setChecks] = useState<CheckRun[]>([]);
+  const [checks, setChecks] = useState<ServedCheckRun[]>([]);
   useEffect(() => {
     api<RawEvent[]>(`/api/events?issue=${issue}`)
       .then(setEvents)
       .catch(() => setEvents([]));
-    api<CheckRun[]>(`/api/checks?issue=${issue}`)
+    api<ServedCheckRun[]>(`/api/checks?issue=${issue}`)
       .then(setChecks)
       .catch(() => setChecks([]));
   }, [issue, state.lastId]);
