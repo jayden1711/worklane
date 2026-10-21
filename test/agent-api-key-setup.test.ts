@@ -18,7 +18,8 @@ import { parse } from 'yaml';
 import { BRAND } from '../src/brand.js';
 import { AGENT, canHide, coordinatorView, engineInstance, KEY, posix, setupDir } from './api-key-fixtures.js';
 
-const HOST_TOOLS = ['sudo', 'systemctl', 'loginctl', 'launchctl', 'getent', 'useradd', 'usermod', 'gh', 'docker', 'tailscale', 'timeout', 'shred'];
+/** Not `timeout`: lib.sh's run_as_bounded uses it (#904), and it runs nothing of the machine's. */
+const HOST_TOOLS = ['sudo', 'systemctl', 'loginctl', 'launchctl', 'getent', 'useradd', 'usermod', 'gh', 'docker', 'tailscale', 'shred'];
 
 process.env[`${BRAND.envPrefix}_STATE_DIR`] = mkdtempSync(join(tmpdir(), 'agent-api-key-setup-state-'));
 
@@ -51,6 +52,8 @@ sudo() {
   HOME="$T/homes/$user" "$@"
 }
 claude_status_json() { cat "$T/claude-status-$1" 2>/dev/null || true; }
+# lib.sh's run_as_bounded runs for real (#904); only who it runs as is stood in: this user, with that user's HOME.
+as_user_argv() { AS_USER=(env HOME="$T/homes/$1"); }
 `,
   );
   const stub = (file: string, body: string) => {

@@ -5,7 +5,7 @@ import './quiet-sqlite.js';
 // INVARIANT: before any engine module: a <PREFIX>_SYSTEM_ROOT not honoured here stops the CLI before anything starts.
 import './os/system-root-guard.js';
 import { execFileSync } from './os/child-process.js';
-import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, readSync, statSync } from 'node:fs';
 import { basename, join, resolve } from 'node:path';
 import { BRAND } from './brand.js';
 import { GITHUB_API, GITHUB_WEB } from './github-hosts.js';
@@ -52,7 +52,7 @@ import { SetupOver, startSetupHub } from './hub-setup.js';
 import { breakGlassHub, runAppManifest, VIEWER_USER } from './setup/app-manifest.js';
 import { seedDemo } from './demo.js';
 import { desktopBinary, runDesktop } from './desktop.js';
-import { credentialProblems, initInstance, instanceAgentHome, serverAgentHome, instanceFilesProblem, instanceProblems, instancesDir, listInstances, loadInstance, loadInstanceCredentials, loadInstanceSetup, policiesForRepo, setAgentApiKey, setDiscordToken, setGithubApp, setIntakeCredential } from './instance.js';
+import { agentApiKeyOfText, CREDENTIALS_TEXT_MAX, credentialProblems, initInstance, instanceAgentHome, serverAgentHome, instanceFilesProblem, instanceProblems, instancesDir, listInstances, loadInstance, loadInstanceCredentials, loadInstanceSetup, policiesForRepo, setAgentApiKey, setDiscordToken, setGithubApp, setIntakeCredential } from './instance.js';
 import { readServerAutoConfig, serverAutoConfig, type ServerAutoConfigLine } from './server-auto-config.js';
 import { canaryRefusal, checkCanary, fileCanary } from './canary.js';
 import { sandboxVerdict } from './testrun/status.js';
@@ -234,6 +234,8 @@ usage: ${BRAND.cli} <command> [options]
   instance set-agent-api-key <name> --file <path>
                                    point credentials.yaml at the agent user's API key file (credentials.sh
                                    api-key runs it); the key is never an argument, and never readable here
+  instance agent-api-key-of        read-only: the agent_api_key of the credentials.yaml text on stdin, as the
+                                   engine loads it (add-project.sh runs it); exit 1 when it names none
   instance set-discord-token <name> --file <path>
                                    point credentials.yaml at the chat bot's token file (credentials.sh
                                    intake-discord runs it); the token is never an argument
@@ -1287,6 +1289,26 @@ async function main(argv: string[]): Promise<number> {
           return 1;
         }
         console.log(`wrote ${file} (intake.${key}: ${tokenFile}; the rest kept)`);
+        return 0;
+      }
+      if (sub === 'agent-api-key-of' && rest.length === 0) {
+        // add-project.sh's, as root (#904): credentials.yaml's bytes on stdin (read by the coordinator user, capped),
+        // parsed as the engine loads them, so add-project judges the path the runner will use. Prints agent_api_key, or
+        // exits 1 when the text doesn't load or names none. Reads nothing but stdin, writes nothing.
+        const buf = Buffer.alloc(CREDENTIALS_TEXT_MAX + 1);
+        let n = 0;
+        try {
+          for (let r = 1; n < buf.length && r > 0; n += r) r = readSync(0, buf, n, buf.length - n, null);
+        } catch {
+          return 1;
+        }
+        if (n > CREDENTIALS_TEXT_MAX) {
+          console.error(`credentials.yaml is over ${CREDENTIALS_TEXT_MAX} bytes: not read`);
+          return 1;
+        }
+        const key = agentApiKeyOfText(buf.subarray(0, n).toString('utf8'));
+        if (!key) return 1;
+        console.log(key);
         return 0;
       }
       if (sub === 'set-agent-api-key' && target) {

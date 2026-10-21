@@ -186,13 +186,20 @@ done_claude_token() {
   claude_api_key_login_ok "$agent" || return 1
   echo "$agent bills to an Anthropic API key ($k, its own, open to nobody else), and claude reports an API-key login as that user"
 }
-# The key file credentials.yaml's agent_api_key names, read as the coordinator user (the file is its own: root reads
-# nothing at a path it could point elsewhere), and only a path apiKeyHelper can name (src/runner.ts apiKeyHelperCommand)
-# in the normal form the engine's schema takes (no //, /./, /../ or trailing /: src/os normalAbsolute).
+# The key file credentials.yaml's agent_api_key names, exactly as the engine loads it (#904: one parser; a line picked
+# out of the text can differ from the YAML, e.g. in a flow mapping). The file's bytes are read as the coordinator user
+# (its own file: root opens nothing at a path it could point elsewhere), bounded by root and capped at 64 KiB, into a
+# file of root's; root's engine (`instance agent-api-key-of`) parses them, schema and all. Only when the file names
+# agent_api_key at all, so an instance without one never runs the engine here. Then only a path apiKeyHelper can name
+# (src/runner.ts apiKeyHelperCommand) in the normal form the schema takes (no //, /./, /../ or trailing /).
 agent_api_key_path() {
-  local k
-  k="$(run_as "$coord" '[ -f "$1" ] && [ ! -L "$1" ] || exit 0; sed -n "s/^agent_api_key: *//p" "$1" | head -n 1' "$(creds)")" || return 1
-  k="${k//\"/}"; k="${k//\'/}"; k="${k%%[[:space:]]*}"
+  local k="" tmp
+  run_as_bounded "$coord" "$AGENT_CHECK_SECONDS" /dev/null '[ -f "$1" ] && [ ! -L "$1" ] && grep -q agent_api_key -- "$1" && [ "$(wc -c < "$1")" -le 65536 ]' "$(creds)" || return 1
+  tmp="$(mktemp)" || return 1
+  if run_as_bounded "$coord" "$AGENT_CHECK_SECONDS" "$tmp" '[ -f "$1" ] && [ ! -L "$1" ] && exec head -c 65537 -- "$1"' "$(creds)"; then
+    k="$( (cd / && timeout -s KILL "$AGENT_CHECK_SECONDS" "$ENGINE_CLI" instance agent-api-key-of < "$tmp" 2>/dev/null 9>&-) || true)"
+  fi
+  rm -f -- "$tmp"
   [[ "$k" =~ ^/[A-Za-z0-9._/-]+$ ]] || return 1
   [[ "$k/" != *//* && "$k/" != */./* && "$k/" != */../* ]] || return 1
   printf '%s' "$k"

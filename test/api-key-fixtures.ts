@@ -49,6 +49,9 @@ home_of() { echo "$T/homes/$1"; }
 user_exists() { [ -e "$T/users/$1" ]; }
 unit_active() { [ -e "$T/active/$1" ]; }
 run_as() { local user="$1" script="$2"; shift 2; echo "run_as $user" >> "$T/calls"; HOME="$T/homes/$user" bash -euo pipefail -c "$script" _ "$@"; }
+# lib.sh's run_as_bounded runs for real; only who it runs as is stood in (this user, that user's HOME, a claude
+# stand-in for it first on PATH, AGENT_SIDE marking its processes). Root's timeout stays outside it, as with sudo.
+as_user_argv() { echo "run_as $1" >> "$T/calls"; AS_USER=(env HOME="$T/homes/$1" PATH="$T/agent-bin:$PATH" AGENT_SIDE="$T"); }
 claude_status_json() { cat "$T/claude-status-$1" 2>/dev/null || true; }
 claude_login_ok() { :; }
 install_claude_token() { cat > /dev/null; echo "install_claude_token $1" >> "$T/calls"; }
@@ -67,7 +70,12 @@ SETUP_POLL_SECONDS=0 SETUP_WAIT_SECONDS=0
     writeFileSync(file, `#!/usr/bin/env bash\nset -euo pipefail\nT=${JSON.stringify(T)}\necho "${step} $*" >> "$T/calls"\n${body}\n`);
     chmodSync(file, 0o755);
   };
-  stub(join(T, 'bin', 'worklane'), 'worklane', 'exit 2');
+  // The engine's CLI: its own `instance agent-api-key-of` (the parse add-project relies on, #904) runs for real.
+  stub(join(T, 'bin', 'worklane'), 'worklane', `if [ "$1 $2" = "instance agent-api-key-of" ]; then exec ${JSON.stringify(process.execPath)} ${JSON.stringify(engineCli)} "$@"; fi\nexit 2`);
+  // claude as the agent user sees it: what <root>/claude-status-<user> says, or nothing.
+  mkdirSync(join(T, 'agent-bin'));
+  writeFileSync(join(T, 'agent-bin', 'claude'), `#!/bin/sh\ncat ${JSON.stringify(T)}/claude-status-"$(basename "$HOME")" 2>/dev/null || true\n`);
+  chmodSync(join(T, 'agent-bin', 'claude'), 0o755);
   stub(join(s, 'instance.sh'), 'instance', 'exit 1');
   stub(join(s, 'checkout.sh'), 'checkout', 'mkdir -p "$T/srv/$1/${2#*/}/.git" "$T/srv/$1/${2#*/}/.worklane"');
   stub(join(s, 'service.sh'), 'service', 'touch "$T/active/worklane-$1.service"');
@@ -87,7 +95,8 @@ printf '[Service]\\nExecStart=/usr/local/bin/worklane dashboard --hub %s --servi
   mkdirSync(join(inst, 'state'), { recursive: true });
   writeFileSync(join(inst, 'instance.yaml'), `version: 1\nname: ${name}\nrepos:\n  - path: "x"\n    repo: example/alpha\n`);
   const creds = join(inst, 'credentials.yaml');
-  writeFileSync(creds, 'version: 1\ngithub:\n  kind: app\n  app_id: 91\n  installation_id: 4242\n');
+  // As setGithubApp writes it (the engine's schema needs every field: #904 has add-project read it through the engine).
+  writeFileSync(creds, `version: 1\ngithub:\n  kind: app\n  app_id: 91\n  installation_id: 4242\n  key_path: ${join(T, 'homes', coord, '.config', `${name}-app`, 'private-key.pem')}\n`);
   mkdirSync(join(T, 'homes', coord, '.config', `${name}-app`), { recursive: true });
   writeFileSync(join(T, 'homes', coord, '.config', `${name}-app`, 'private-key.pem'), 'key');
   mkdirSync(join(T, 'homes', 'wl-dash', '.local', 'state', 'worklane', 'dashboard-hub'), { recursive: true });

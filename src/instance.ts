@@ -620,6 +620,20 @@ export function isInstalledKeyPath(agentHome: string, keyFile: string, instance?
   return new RegExp(`^${esc(agentHome)}/\\.config/${dir}-claude-key/api_key$`).test(keyFile);
 }
 
+/** The most of credentials.yaml add-project hands the engine to read (#904): far more than any real one. */
+export const CREDENTIALS_TEXT_MAX = 65_536;
+
+/**
+ * credentials.yaml's agent_api_key, exactly as the engine loads it (#904): the same parse (unique keys) and the same
+ * schema as loadInstance, so add-project judges the value the runner will use, never a line a text match picked out
+ * (a flow mapping can put another `agent_api_key:` at column 0). Null when the text doesn't load, or names none.
+ */
+export function agentApiKeyOfText(text: string): string | null {
+  const errors: ConfigError[] = [];
+  const c = readYaml(CredentialsFile, 'credentials.yaml', errors, text);
+  return errors.length || !c ? null : (c.agent_api_key ?? null);
+}
+
 /** A server instance's agent user, as the setup scripts make it (instance.sh, credentials.sh): `wl-<instance>-agent`. */
 export const serverAgentUser = (instance: string): string => `wl-${instance}-agent`;
 

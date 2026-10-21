@@ -60,6 +60,20 @@ run_as() {
   (cd / && sudo -H -u "$user" env GIT_TERMINAL_PROMPT=0 bash -euo pipefail -c "$script" _ "$@")
 }
 
+# How root runs a command as another user, as run_as does: sudo, never a login shell (a test stands in for it).
+as_user_argv() { AS_USER=(sudo -H -u "$1" env GIT_TERMINAL_PROMPT=0); }
+# run_as with a bound that user can't freeze (#904). The timeout is root's, outside sudo -u, so no process of that user
+# can signal it; past the bound it sends SIGKILL to its whole process group, the user's processes started for this
+# included, a stopped (SIGSTOP) one too. Nothing of the caller's reaches that user's processes: no stdin, stdout to
+# <out> (a file root made, or /dev/null), stderr dropped, fd 9 (add-project's lock) closed; so one left behind holds
+# no pipe of ours and no lock. Exit 137 when cut off.
+#   run_as_bounded <user> <seconds> <out> <script> [args...]
+run_as_bounded() {
+  local user="$1" secs="$2" out="$3" script="$4"; shift 4
+  as_user_argv "$user"
+  (cd / && exec timeout -s KILL "$secs" "${AS_USER[@]}" bash -euo pipefail -c "$script" _ "$@") </dev/null >"$out" 2>/dev/null 9>&-
+}
+
 say() { printf '\n== %s\n' "$*"; }
 
 # Create a user with a private home, if it doesn't exist yet.
@@ -751,10 +765,16 @@ claude_status_json() {
 # same), as claude auth status names them.
 CLAUDE_API_KEY_LOGINS='api_key|api_key_helper'
 # Whether claude, as this user, reports one of those (issue #897): signed in, through an API key. No claude, or no
-# answer within claude_status_json's minute: no.
+# answer within AGENT_STATUS_SECONDS: no. Bounded by root (run_as_bounded, #904): add-project asks this under its
+# machine-wide lock, and the user owns the process that answers. Its answer goes through a file of root's, never a pipe.
+AGENT_STATUS_SECONDS=60
 claude_api_key_login_ok() {
-  local out
-  out="$(claude_status_json "$1" </dev/null)"
+  local out tmp
+  command -v claude >/dev/null 2>&1 || return 1
+  tmp="$(mktemp)" || return 1
+  run_as_bounded "$1" "$AGENT_STATUS_SECONDS" "$tmp" 'exec claude auth status --json' || true
+  out="$(head -c 65536 -- "$tmp")"
+  rm -f -- "$tmp"
   printf '%s' "$out" | grep -q '"loggedIn": *true' && printf '%s' "$out" | grep -Eq "\"authMethod\": *\"($CLAUDE_API_KEY_LOGINS)\""
 }
 # Whether a path is where credentials.sh <name> api-key installs an agent's key (#904): <agent home>/.config/
@@ -767,20 +787,21 @@ agent_key_path_ok() { [[ "$2" =~ ^"$1"/\.config/[a-z][a-z0-9-]{0,20}-claude-key/
 # credentials.sh writes it), read as that user (#904): so the login claude reports is the one the runner gives runs
 # (it passes `cat -- <agent_api_key>`). The settings only, never the key.
 #   agent_key_helper_ok <agent user> <settings file> <path>
-# Bounded (#904, as #613's steps are): the agent user owns what is checked, so it could make either a FIFO or put it on
-# a mount that never answers, while add-project holds the machine-wide lock. Each check runs under timeout -k, with no
-# stdin; the settings are opened without following a link and without blocking (a FIFO opens at once), anything but
-# a regular file of at most 64 KiB is refused, and the read is capped.
+# Bounded by root (#904, run_as_bounded): the agent user owns what is checked and the processes checking it, so it
+# could make a FIFO, put it on a mount that never answers, or stop (SIGSTOP) the check, while add-project holds the
+# machine-wide lock; past AGENT_CHECK_SECONDS root kills them all. The settings are opened without following a link
+# and without blocking (a FIFO opens at once), anything but a regular file of at most 64 KiB is refused, and the read
+# is capped.
 AGENT_CHECK_SECONDS=20
 AGENT_KEY_HELPER_JS='const fs=require("fs"),c=fs.constants,MAX=65536;let ok=false;try{const fd=fs.openSync(process.argv[1],c.O_RDONLY|c.O_NONBLOCK|c.O_NOFOLLOW);try{const st=fs.fstatSync(fd);if(st.isFile()&&st.size<=MAX){const b=Buffer.alloc(MAX+1);let n=0,r=0;while(n<b.length&&(r=fs.readSync(fd,b,n,b.length-n,null))>0)n+=r;if(n<=MAX){const s=JSON.parse(b.subarray(0,n).toString("utf8"));ok=!!s&&typeof s==="object"&&!Array.isArray(s)&&s.apiKeyHelper===process.argv[2]}}}finally{fs.closeSync(fd)}}catch{}process.exit(ok?0:1)'
-agent_key_helper_ok() { run_as "$1" 'exec timeout -k "$1" "$2" "$3" -e "$4" "$5" "$6"' "$CLAUDE_KILL_AFTER_SECONDS" "$AGENT_CHECK_SECONDS" "$(command -v node)" "$AGENT_KEY_HELPER_JS" "$2" "cat -- $3" </dev/null; }
+agent_key_helper_ok() { run_as_bounded "$1" "$AGENT_CHECK_SECONDS" /dev/null 'exec "$1" -e "$2" "$3" "$4"' "$(command -v node)" "$AGENT_KEY_HELPER_JS" "$2" "cat -- $3"; }
 # Whether a path is this agent user's own API key file, as that user finds it (issue #897): a plain file (not a link),
 # its own, not empty, with one link, and open to nobody else (no group or other read or write bit). Checked as that
 # user, never as root, since the path comes from credentials.yaml, which the coordinator user writes; bounded as above
 # (test and find only stat it: a FIFO is not a plain file). The key is never read.
 #   agent_key_file_ok <agent user> <path>
 AGENT_KEY_FILE_SH='[ -f "$1" ] && [ ! -L "$1" ] && [ -O "$1" ] && [ -s "$1" ] && [ -n "$(find "$1" -maxdepth 0 -type f -links 1 ! -perm -g=r ! -perm -g=w ! -perm -o=r ! -perm -o=w -print)" ]'
-agent_key_file_ok() { run_as "$1" 'exec timeout -k "$1" "$2" bash -c "$3" _ "$4"' "$CLAUDE_KILL_AFTER_SECONDS" "$AGENT_CHECK_SECONDS" "$AGENT_KEY_FILE_SH" "$2" </dev/null; }
+agent_key_file_ok() { run_as_bounded "$1" "$AGENT_CHECK_SECONDS" /dev/null "$AGENT_KEY_FILE_SH" "$2"; }
 # Whether the API takes this user's Claude login (issue #463: claude auth status says a credential is configured, not
 # that it works): one minimal real call as that user, the cheapest model, a one-word answer, one turn, a hard budget
 # cap. A refused call costs nothing; an answered one about one short Haiku turn. Prints nothing and succeeds when

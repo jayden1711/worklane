@@ -86,7 +86,8 @@ test("#904 round 3: an instance renamed since its key was installed (the key's d
   const r = m.run();
   assert.equal(r.status, 0, r.stderr);
   assert.equal(tokenStep(r.events).state, 'done', tokenStep(r.events).detail);
-  assert.equal((m.calls().match(/run_as wl-alpha-agent\n/g) ?? []).length, 2, 'the key file and the settings, each checked as the agent user');
+  // #904 round 5: claude auth status runs as the agent user through the same root-bounded run (no longer a stand-in).
+  assert.equal((m.calls().match(/run_as wl-alpha-agent\n/g) ?? []).length, 3, 'the key file, the settings and claude auth status, each as the agent user');
   assert.equal(m.hostCalls(), '', 'no host tool was reached');
 });
 
