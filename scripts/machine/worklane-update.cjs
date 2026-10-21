@@ -1579,8 +1579,9 @@ async function run(deps) {
 
 async function runOnce(deps, seen) {
   const cfg = deps.config();
-  watchSigners(deps, cfg);
+  // Read-only and never throws: said every run, updates on or off (#898).
   watchSudoers(deps);
+  watchSigners(deps, cfg);
   if (!cfg || cfg.enabled !== true) {
     stuckCheck(deps, cfg, null); // off: never an alert, and an open one is closed
     return 'disabled';
@@ -2187,11 +2188,18 @@ const CHECK_PATH = '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 /**
  * `machine-helper.sh --check` of the engine in `engineDir`: { state: current|absent|stale|unknown, detail, fix? }, or
- * null when that engine has no machine-helper.sh. fix is the command the check named for a stale rule.
+ * null when that engine has no machine-helper.sh, or this process isn't `owner` (root: the updater; anything else, a
+ * test with the real deps, never runs the installed engine's script). The script and the lib.sh it sources must be
+ * `owner`'s regular files, writable by no one else, or nothing runs (unknown, said why).
  */
-function machineSudoersCheck(engineDir, exec = execFileSync) {
+function machineSudoersCheck(engineDir, exec = execFileSync, owner = 0) {
+  if (typeof process.getuid !== 'function' || process.getuid() !== owner) return null;
   const script = path.join(engineDir, 'scripts', 'setup', 'machine-helper.sh');
   if (!fs.existsSync(script)) return null;
+  for (const f of [script, path.join(engineDir, 'scripts', 'setup', 'lib.sh')]) {
+    const problem = rootFileProblem(readRootFile(f), owner, f);
+    if (problem) return { state: 'unknown', detail: `the machine helper's sudoers rule wasn't checked: ${problem}` };
+  }
   let out;
   let status = 0;
   try {

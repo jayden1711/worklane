@@ -74,6 +74,8 @@ SETUP_POLL_SECONDS=0
 `;
   writeFileSync(join(s, 'lib.sh'), lib);
   writeFileSync(join(real, 'lib.sh'), lib);
+  chmodSync(join(real, 'lib.sh'), 0o644);
+  chmodSync(join(real, 'machine-helper.sh'), 0o644);
   const stub = (file: string, step: string, body: string) => {
     writeFileSync(file, `#!/usr/bin/env bash\nset -euo pipefail\nT=${JSON.stringify(T)}\necho "${step} $*" >> "$T/calls"\n${body}\n`);
     chmodSync(file, 0o755);
@@ -237,7 +239,7 @@ test('#898: machine-helper.sh --check says absent, current or stale (with the ex
 type Check = { state: string; detail: string; fix?: string } | null;
 const updater = () =>
   createRequire(import.meta.url)(join(repoRoot, 'scripts', 'machine', 'worklane-update.cjs')) as {
-    machineSudoersCheck(engineDir: string, exec?: typeof execFileSync): Check;
+    machineSudoersCheck(engineDir: string, exec?: typeof execFileSync, owner?: number): Check;
     run(deps: Record<string, unknown>): Promise<string>;
     SUDOERS_INCIDENT: string;
   };
@@ -249,15 +251,29 @@ test('#898: the updater reads machine-helper.sh --check of the installed engine:
   // The check's own PATH, with the host tools' stand-ins first.
   const exec = ((file: string, args: string[], o: Record<string, unknown>) =>
     execFileSync(file, args, { ...o, env: { ...(o.env as Record<string, string>), PATH: `${join(m.T, 'host-bin')}:${(o.env as Record<string, string>).PATH}` } })) as unknown as typeof execFileSync;
+  const me = process.getuid!();
   writeFileSync(join(m.T, 'sudoers-machine'), olderRule(m.expected('alpha', 'old')));
-  const stale = updater().machineSudoersCheck(engine, exec)!;
+  const stale = updater().machineSudoersCheck(engine, exec, me)!;
   assert.equal(stale.state, 'stale');
   assert.equal(stale.fix, `sudo bash ${engine}/scripts/setup/machine-helper.sh alpha old`);
   assert.match(stale.detail, /is not what machine-helper\.sh writes for alpha old/);
   writeFileSync(join(m.T, 'sudoers-machine'), m.expected('alpha', 'old'));
-  assert.equal(updater().machineSudoersCheck(engine, exec)!.state, 'current');
+  assert.equal(updater().machineSudoersCheck(engine, exec, me)!.state, 'current');
   // An engine with no machine-helper.sh: nothing to say.
-  assert.equal(updater().machineSudoersCheck(join(m.T, 'no-engine'), exec), null);
+  assert.equal(updater().machineSudoersCheck(join(m.T, 'no-engine'), exec, me), null);
+  // Run by anyone but its owner (root, for the updater: a test with the real deps), it runs nothing at all.
+  let ran = 0;
+  const counting = ((...a: Parameters<typeof execFileSync>) => ((ran += 1), (exec as (...x: unknown[]) => unknown)(...a))) as unknown as typeof execFileSync;
+  if (me !== 0) assert.equal(updater().machineSudoersCheck(engine, counting), null);
+  // A script or lib.sh someone else could write is never run: unknown, said why.
+  for (const f of ['machine-helper.sh', 'lib.sh']) {
+    chmodSync(join(engine, 'scripts', 'setup', f), 0o664);
+    const r = updater().machineSudoersCheck(engine, counting, me)!;
+    assert.equal(r.state, 'unknown');
+    assert.match(r.detail, new RegExp(`${f.replace('.', '\\.')} is writable by group or others`));
+    chmodSync(join(engine, 'scripts', 'setup', f), 0o644);
+  }
+  assert.equal(ran, 0, 'nothing was run');
   assert.equal(m.hostCalls(), '');
 });
 
