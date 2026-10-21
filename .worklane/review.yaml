@@ -54,6 +54,24 @@ categories:
     - .githooks/**
     - docs/releasing.md
     - docs/design.md
+    - docs/process.md  # how the engine repo's own PRs are merged (owner, 2026-10-21); also locked in code
+    - test/plan-decisions.test.ts  # keeps docs/process.md out of the decisions index; also locked in code
+    # The planners' decision records (every path the decisions index reads; docs/design.md is above) and the code that
+    # builds the index (#920). Also locked in code (src/review.ts self-modification, from the index's own lists).
+    - decisions.md
+    - DECISIONS.md
+    - docs/decisions.md
+    - docs/DECISIONS.md
+    - .worklane/decisions.md
+    - decisions
+    - decisions/**
+    - docs/decisions
+    - docs/decisions/**
+    - docs/adr
+    - docs/adr/**
+    - .worklane/decisions
+    - .worklane/decisions/**
+    - src/plan-decisions.ts
     - docs/design/**  # the architecture docs (#698): listed here only, not locked in code
     # The public security claims, the test that keeps their citations true, the adversarial suite and the test that
     # holds these locks (#858). Also locked in code (src/review.ts self-modification).
