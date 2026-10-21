@@ -81,44 +81,62 @@ for (const [what, line] of [
 
 // ---- One snapshot for every walk: a shallow file written mid-check changes nothing.
 
-/** Runs `fn` with node:child_process's execFileSync wrapped: `during(args)` runs before each call it is handed. */
+/**
+ * Runs `fn` with node:child_process's execFileSync and spawnSync wrapped: `during(args)` runs before each call either
+ * is handed.
+ */
 async function withExecHook<T>(during: (args: string[]) => (() => void) | void, fn: () => T): Promise<T> {
   const cp = createRequire(import.meta.url)('node:child_process') as Record<string, (...a: unknown[]) => unknown>;
-  const orig = cp.execFileSync!;
-  cp.execFileSync = (...a: unknown[]) => {
-    const after = during(Array.isArray(a[1]) ? a[1].map(String) : []);
-    try {
-      return orig(...a);
-    } finally {
-      after?.();
-    }
-  };
+  const orig = { execFileSync: cp.execFileSync!, spawnSync: cp.spawnSync! };
+  for (const name of ['execFileSync', 'spawnSync'] as const) {
+    cp[name] = (...a: unknown[]) => {
+      const after = during(Array.isArray(a[1]) ? a[1].map(String) : []);
+      try {
+        return orig[name](...a);
+      } finally {
+        after?.();
+      }
+    };
+  }
   syncBuiltinESMExports();
   try {
     return fn();
   } finally {
-    cp.execFileSync = orig;
+    Object.assign(cp, orig);
     syncBuiltinESMExports();
   }
 }
 
-/** A cut at D written into the repo while the range's `log` walk runs, and removed again as soon as it ends. */
-const toggleDuringLog = (r: ReturnType<typeof repo>) => (args: string[]) => {
-  if (!(args.includes('log') && args.includes('--name-only'))) return;
-  writeFileSync(r.shallow, `${r.drop}\n`);
-  return () => rmSync(r.shallow, { force: true });
+/**
+ * A cut at D written into the repo while each walk of the range runs (`git log --name-only` before #928; its
+ * `rev-list` and `diff-tree --stdin` after it; `rev-list --objects`), and removed again as soon as it ends. `fired`
+ * counts the walks it hit, so the test can't pass with the hook never reaching a walk.
+ */
+const toggleDuringNameWalk = (r: ReturnType<typeof repo>) => {
+  const hook = (args: string[]) => {
+    if (!(args.includes('rev-list') || args.includes('diff-tree') || (args.includes('log') && args.includes('--name-only')))) return;
+    hook.fired++;
+    writeFileSync(r.shallow, `${r.drop}\n`);
+    return () => rmSync(r.shallow, { force: true });
+  };
+  hook.fired = 0;
+  return hook;
 };
 
 test('a shallow file written while the walks run, and removed before they end, can\'t hide the key from pushProblems', async () => {
   const r = repo();
-  const p = await withExecHook(toggleDuringLog(r), () => pushProblems(r.work, r.base, r.head, LIMITS));
+  const hook = toggleDuringNameWalk(r);
+  const p = await withExecHook(hook, () => pushProblems(r.work, r.base, r.head, LIMITS));
+  assert.ok(hook.fired > 0, 'the hook reached the name walk');
   assert.ok(keyFound(p), p.join('\n'));
   assert.ok(!existsSync(r.shallow));
 });
 
 test('the same toggle can\'t get checkedPush to land the key on the remote', async () => {
   const r = repo();
-  const res = await withExecHook(toggleDuringLog(r), () => checkedPush({ cwd: r.work, remote: r.remote, base: r.base, head: r.head, ref: 'refs/heads/task', limits: LIMITS, guard, force: true }));
+  const hook = toggleDuringNameWalk(r);
+  const res = await withExecHook(hook, () => checkedPush({ cwd: r.work, remote: r.remote, base: r.base, head: r.head, ref: 'refs/heads/task', limits: LIMITS, guard, force: true }));
+  assert.ok(hook.fired > 0, 'the hook reached the name walk');
   assert.ok(!res.ok && 'refused' in res && keyFound(res.refused), JSON.stringify(res));
   assert.equal(pushedKey(r.remote, r.head), false);
 });
