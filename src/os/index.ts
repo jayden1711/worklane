@@ -945,6 +945,24 @@ export function seatbeltProfile(home: string, hide: readonly string[]): string {
 }
 
 /**
+ * The profile a project command on macOS runs under: seatbeltProfile, for a home that is already its own canonical
+ * path. Seatbelt matches canonical paths (a profile names /private/tmp, never /tmp), so a configured home reached
+ * through a symlink (/var/... is /private/var/...) would match nothing: the whole home writable, its ~/.claude*
+ * readable. Such a home, or one that can't be resolved, is refused, never rewritten (#798 round 11; Linux resolves
+ * the home itself, in its wrapper). `real` is for tests.
+ */
+export function seatbeltProfileFor(home: string, hide: readonly string[], real: (p: string) => string = realpathSync): string {
+  let canonical: string;
+  try {
+    canonical = real(home);
+  } catch (e) {
+    throw new Error(`can't sandbox a project command for an agent user whose home ${JSON.stringify(home)} can't be resolved (${e instanceof Error ? e.message : String(e)}); set the instance's run_as.agent_home to its real home`);
+  }
+  if (canonical !== home) throw new Error(`can't sandbox a project command for an agent user whose home ${JSON.stringify(home)} isn't its canonical path (${JSON.stringify(canonical)}): macOS's sandbox matches canonical paths, so it would protect nothing there; set the instance's run_as.agent_home to ${JSON.stringify(canonical)}`);
+  return seatbeltProfile(home, hide);
+}
+
+/**
  * How to spawn a project command: bash with pipefail and a clean environment. With `runAs`, as the agent user and
  * always in a sandbox hiding its Claude logins, its API key and `runAs.hide` (#713): bubblewrap, or macOS's
  * sandbox-exec. No way to run one as the agent user without it; `sandboxTool` is for tests.
@@ -986,7 +1004,7 @@ export function projectCommand(command: string, runAs?: ProjectRunAs, projectEnv
   // INVARIANT: a proxy only from root's network.json, as for every child (src/network.ts).
   const full = outboundEnv(env);
   if (process.platform === 'darwin') {
-    const [f, a] = asUser(runAs.user, '/usr/bin/sandbox-exec', ['-p', seatbeltProfile(home, hide), file, ...args], full);
+    const [f, a] = asUser(runAs.user, '/usr/bin/sandbox-exec', ['-p', seatbeltProfileFor(home, hide), file, ...args], full);
     return { file: f, args: a, env: { PATH: ownEnv().get('PATH') ?? '/usr/bin:/bin' } };
   }
   // The wrapper's bash gets no environment at all; the command gets exactly `full`, from the env -i inside bwrap.
