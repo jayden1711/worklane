@@ -4,7 +4,7 @@ import { spawn, spawnSync } from '../os/child-process.js';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { gitConfigRefusal, gitEnv } from '../os/git.js';
+import { gitConfigRefusal, gitEnv, gitExecFileSync, gitSnapshot, type GitSnapshot } from '../os/git.js';
 import { findTool } from '../tool-path.js';
 
 export interface Finding {
@@ -72,7 +72,33 @@ export function scanRange(cwd: string, range: string, binary = findTool('gitleak
   // As scanCommit: no gitleaks (and so no git) on a config the guard refuses (#926).
   const refused = gitConfigRefusal(cwd);
   if (refused) return Promise.resolve({ status: 'unavailable', error: refused });
-  return scanAsync(binary, (report) => ['git', '--redact', '--no-banner', '--log-opts', range, '--report-format', 'json', '--report-path', report, '--exit-code', String(LEAKS_EXIT), '.'], cwd);
+  // gitleaks walks the range with git: through one gitSnapshot whose shallow file was checked, so a cut written or
+  // removed while it runs changes nothing, and a cut inside the range is never "clean" (#927). Commit ids only there.
+  let snap: GitSnapshot;
+  let ids: string;
+  try {
+    const m = /^([^.].*?)\.\.([^.].*)$/.exec(range);
+    if (!m) throw new Error(`${range} is not a base..head range`);
+    const id = (r: string) => gitExecFileSync(['rev-parse', '--verify', '--end-of-options', `${r}^{commit}`], { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+    const [base, head] = [id(m[1]!), id(m[2]!)];
+    snap = gitSnapshot(cwd);
+    const cut = (() => {
+      try {
+        return snap.cutInRange(base, head);
+      } catch (e) {
+        snap.dispose();
+        throw e;
+      }
+    })();
+    if (cut.length) {
+      snap.dispose();
+      return Promise.resolve({ status: 'unavailable', error: `the repo's history is cut inside ${range} (a shallow boundary at ${cut[0]!.slice(0, 12)}): it can't be scanned whole` });
+    }
+    ids = `${base}..${head}`;
+  } catch (e) {
+    return Promise.resolve({ status: 'unavailable', error: `can't read ${range} whole: ${String((e as Error).message).split('\n')[0]}` });
+  }
+  return scanAsync(binary, (report) => ['git', '--redact', '--no-banner', '--log-opts', ids, '--report-format', 'json', '--report-path', report, '--exit-code', String(LEAKS_EXIT), '.'], cwd, snap.env).finally(() => snap.dispose());
 }
 
 /** Scan one file without blocking (a dashboard upload). Findings name the rule, never the secret (--redact). */
@@ -81,13 +107,13 @@ export function scanFile(path: string, binary = findTool('gitleaks')): Promise<S
   return scanAsync(binary, (report) => ['dir', path, '--redact', '--no-banner', '--max-decode-depth', '2', '--report-format', 'json', '--report-path', report, '--exit-code', String(LEAKS_EXIT)], undefined);
 }
 
-function scanAsync(binary: string, args: (report: string) => string[], cwd: string | undefined): Promise<ScanResult> {
+function scanAsync(binary: string, args: (report: string) => string[], cwd: string | undefined, env?: NodeJS.ProcessEnv): Promise<ScanResult> {
   const dir = mkdtempSync(join(tmpdir(), 'scan-'));
   const report = join(dir, 'report.json');
   return new Promise((resolve) => {
     // gitleaks runs git itself (`git log -p`): with the git runner's settings, so a replace ref or a graft can't swap
     // the commits it reads (#807).
-    const child = spawn(binary, args(report), { ...(cwd ? { cwd } : {}), stdio: ['ignore', 'ignore', 'pipe'], env: gitEnv() });
+    const child = spawn(binary, args(report), { ...(cwd ? { cwd } : {}), stdio: ['ignore', 'ignore', 'pipe'], env: gitEnv(env) });
     let err = '';
     child.stderr.on('data', (d: Buffer) => (err = (err + d.toString()).slice(-2000)));
     const done = (r: ScanResult) => {

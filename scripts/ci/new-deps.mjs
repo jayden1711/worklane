@@ -147,7 +147,7 @@ export function check({ basePkg, headPkg, baseLock, headLock, body }) {
 // The git runner's settings (#807; src/os/git.ts, scripts/lib/git.cjs): replace refs off and no graft file. Written
 // out here because CI runs the base's copy of this file alone, from a temp dir (new-deps.yml), so it imports nothing
 // of the repo's; test/git-runner.test.ts checks they are the runner's.
-const GIT_FIXED_ARGS = ['--no-replace-objects'];
+const GIT_FIXED_ARGS = ['--no-replace-objects', '-c', 'core.commitGraph=false'];
 const GIT_ENV = { ...process.env, GIT_NO_REPLACE_OBJECTS: '1', GIT_GRAFT_FILE: join(devNull, 'no-grafts') };
 const runGit = (args, opts) => execFileSync('git', [...GIT_FIXED_ARGS, ...args], { ...opts, env: GIT_ENV });
 const git = (...a) => runGit(a, { encoding: 'utf8', maxBuffer: 256 * 1024 * 1024 });

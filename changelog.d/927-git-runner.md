@@ -14,6 +14,10 @@
   owner.
 - **A shallow cut in a pushed range is refused (#927):** a `.git/shallow` (a shallow clone's, or one written by hand)
   that cuts the range being pushed made the push limits read only part of it. The push is now refused, and the
-  message names `git fetch --unshallow`. A shallow clone still pushes changes that lie wholly above its cut.
+  message names `git fetch --unshallow`. A shallow clone still pushes changes that lie wholly above its cut. The push
+  limits and the change's secret scan read one checked copy of the shallow file, so changing it while they run
+  changes nothing, and a shallow file with a line git might read differently is refused.
+- **The commit-graph is off for every git the engine runs (#927):** a forged commit-graph could make a walk skip a
+  commit; git now reads each commit's own parents (measured: about 30 ms more for three walks over 2,900 commits).
 - **What the owner sees (#927):** the decision diff, the fix-forward culprit diff and the patch hash show a file's
   lines even when the change's `.gitattributes` marks it `-diff` or `binary`.

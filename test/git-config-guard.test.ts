@@ -205,7 +205,9 @@ test('#926 a caller that hands git its own environment is still guarded: the mar
   const pairs: [string, string][] = [];
   for (let i = 0; i < Number(env.GIT_CONFIG_COUNT); i++) pairs.push([env[`GIT_CONFIG_KEY_${i}`]!, env[`GIT_CONFIG_VALUE_${i}`]!]);
   // The caller's own pairs come after the guard's: its hooks dir (the coordinator's own) and its credential helper win.
-  assert.deepEqual(pairs.at(-1), ['core.hooksPath', '/mine/hooks']);
+  // (#927's fixed config, the commit-graph off, comes last of all.)
+  assert.deepEqual(pairs.at(-2), ['core.hooksPath', '/mine/hooks']);
+  assert.deepEqual(pairs.at(-1), ['core.commitGraph', 'false']);
   assert.deepEqual(pairs[0], ['credential.helper', '']);
   // Off: a process that isn't an instance's coordinator keeps its git as it was (local mode, the owner's own config).
   const plain = { ...gitEnv({ PATH: process.env.PATH, GIT_CONFIG_GLOBAL: '/tmp/mine' }) };

@@ -28,8 +28,15 @@ const ZERO = /^0+$/;
 // `git replace` or a graft in the repo can't swap the commits, trees or blobs scanned here. Written out here because
 // the hook runs this file alone, fetched from origin (scripts/push-gate-hook.mjs GATE_CODE), so it imports nothing
 // new; test/git-runner.test.ts checks they are the runner's.
-const GIT_FIXED_ARGS = ['--no-replace-objects'];
-const GIT_ENV = { ...process.env, GIT_NO_REPLACE_OBJECTS: '1', GIT_GRAFT_FILE: join(devNull, 'no-grafts') };
+// The commit-graph is off too (a forged one can skip a commit), in the arguments and, for gitleaks' own gits, as a
+// config pair in the environment after any the caller set.
+const GIT_FIXED_ARGS = ['--no-replace-objects', '-c', 'core.commitGraph=false'];
+const graphOff = (e) => {
+  const c = Number(Object.hasOwn(e, 'GIT_CONFIG_COUNT') ? e.GIT_CONFIG_COUNT : '0');
+  const n = Number.isSafeInteger(c) && c >= 0 ? c : 0;
+  return { ...e, [`GIT_CONFIG_KEY_${n}`]: 'core.commitGraph', [`GIT_CONFIG_VALUE_${n}`]: 'false', GIT_CONFIG_COUNT: String(n + 1) };
+};
+const GIT_ENV = graphOff({ ...process.env, GIT_NO_REPLACE_OBJECTS: '1', GIT_GRAFT_FILE: join(devNull, 'no-grafts') });
 const runGit = (args, opts) => execFileSync('git', [...GIT_FIXED_ARGS, ...args], { ...opts, env: GIT_ENV });
 const git = (...a) => runGit(a, { encoding: 'utf8', maxBuffer: 256 * 1024 * 1024 });
 

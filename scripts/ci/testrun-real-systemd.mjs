@@ -58,7 +58,7 @@ const socketFromHere = (path) => new Promise((resolve) => {
 const repo = mkdtempSync(join(homedir(), 'repo-'));
 // The git runner's settings (#807; src/os/git.ts, scripts/lib/git.cjs): replace refs off and no graft file. Written
 // out here because the job copies this file alone into the VM (ci-slow.yml); test/git-runner.test.ts checks them.
-const GIT_FIXED_ARGS = ['--no-replace-objects'];
+const GIT_FIXED_ARGS = ['--no-replace-objects', '-c', 'core.commitGraph=false'];
 const GIT_ENV = { PATH: '/usr/bin:/bin', HOME: homedir(), GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1', GIT_NO_REPLACE_OBJECTS: '1', GIT_GRAFT_FILE: join(devNull, 'no-grafts') };
 const git = (...a) => execFileSync('git', [...GIT_FIXED_ARGS, '-C', repo, '-c', 'user.name=ci', '-c', 'user.email=ci@example.com', ...a], { encoding: 'utf8', env: GIT_ENV }).trim();
 git('init', '-q', '-b', 'main');

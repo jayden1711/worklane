@@ -115,7 +115,18 @@ test('the runner\'s settings go on last: a caller\'s environment can\'t turn rep
   const want = ['keys/secret.pem', 'weights.bin'];
   assert.deepEqual(names(gitExecFileSync(['log', '--format=', '--name-only', `${r.base}..${r.head}`], { cwd: r.work, encoding: 'utf8', env })), want);
   assert.deepEqual(names(gitSpawnSync(['log', '--format=', '--name-only', `${r.base}..${r.head}`], { cwd: r.work, encoding: 'utf8', env }).stdout), want);
-  assert.deepEqual({ ...gitEnv({ GIT_GRAFT_FILE: grafts, GIT_NO_REPLACE_OBJECTS: '0' }) }, { ...GIT_FIXED_ENV });
+  const graphOff = { GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'core.commitGraph', GIT_CONFIG_VALUE_0: 'false' };
+  assert.deepEqual({ ...gitEnv({ GIT_GRAFT_FILE: grafts, GIT_NO_REPLACE_OBJECTS: '0' }) }, { ...GIT_FIXED_ENV, ...graphOff });
+  // A caller's own config pairs stay; the fixed pair goes after them (a later pair wins).
+  assert.deepEqual({ ...gitEnv({ GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'core.commitGraph', GIT_CONFIG_VALUE_0: 'true' }) }, { ...GIT_FIXED_ENV, GIT_CONFIG_COUNT: '2', GIT_CONFIG_KEY_0: 'core.commitGraph', GIT_CONFIG_VALUE_0: 'true', GIT_CONFIG_KEY_1: 'core.commitGraph', GIT_CONFIG_VALUE_1: 'false' });
+  // A count on Object.prototype is never read (#846): the fixed pair is pair 0, and nothing else is counted.
+  const proto = Object.prototype as Record<string, unknown>;
+  proto.GIT_CONFIG_COUNT = '1';
+  try {
+    assert.deepEqual({ ...gitEnv({}) }, { ...GIT_FIXED_ENV, ...graphOff });
+  } finally {
+    delete proto.GIT_CONFIG_COUNT;
+  }
   // Replace refs: `--no-replace-objects` is in the argument list, which no environment takes back.
   const decoy = git(r.work, 'commit-tree', `${r.base}^{tree}`, '-p', r.base, '-m', 'docs');
   git(r.work, 'replace', r.head, decoy);
@@ -144,7 +155,9 @@ test('scripts/lib/git.cjs (scripts run without a build) has the engine runner\'s
   assert.deepEqual([...scripts.GIT_FIXED_ARGS], [...engine.GIT_FIXED_ARGS]);
   assert.deepEqual({ ...scripts.GIT_FIXED_ENV }, { ...engine.GIT_FIXED_ENV });
   // What the files that run on their own write out (ITS_OWN, below) is these values.
-  assert.deepEqual([...engine.GIT_FIXED_ARGS], ['--no-replace-objects']);
+  assert.deepEqual(scripts.GIT_FIXED_CONFIG.map((p) => [...p]), engine.GIT_FIXED_CONFIG.map((p) => [...p]));
+  assert.deepEqual({ ...scripts.gitEnv({ GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'a.b', GIT_CONFIG_VALUE_0: 'c' }) }, { ...engine.gitEnv({ GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'a.b', GIT_CONFIG_VALUE_0: 'c' }) });
+  assert.deepEqual([...engine.GIT_FIXED_ARGS], ['--no-replace-objects', '-c', 'core.commitGraph=false']);
   assert.deepEqual({ ...engine.GIT_FIXED_ENV }, { GIT_NO_REPLACE_OBJECTS: '1', GIT_GRAFT_FILE: join(devNull, 'no-grafts') });
   const r = repo();
   const decoy = git(r.work, 'commit-tree', `${r.base}^{tree}`, '-p', r.base, '-m', 'docs');
@@ -183,7 +196,7 @@ const RUNNERS = new Set(['src/os/git.ts', 'scripts/lib/git.cjs']);
  * A file that runs on its own (copied alone, or fetched alone from origin) can't import a runner: it holds the
  * settings itself, written out exactly so, and the test below ties them to the runner's values.
  */
-const ITS_OWN = [/const GIT_FIXED_ARGS = (?:Object\.freeze\()?\['--no-replace-objects'\]/, /GIT_NO_REPLACE_OBJECTS: '1', GIT_GRAFT_FILE: join\(devNull, 'no-grafts'\)/];
+const ITS_OWN = [/const GIT_FIXED_ARGS = (?:Object\.freeze\()?\['--no-replace-objects', '-c', 'core\.commitGraph=false'\]/, /GIT_NO_REPLACE_OBJECTS: '1', GIT_GRAFT_FILE: join\(devNull, 'no-grafts'\)/];
 /** A runner that takes any command (`run(cmd, args)`), and so gives git the settings by its name. */
 const BY_NAME = (fn: string, call: string) => [new RegExp(`${fn}\\(${call}`)];
 
@@ -201,7 +214,7 @@ const OUTSIDE_THE_RUNNER: Record<string, { n: number; why: string; must?: RegExp
   'src/starter-ci.ts': { n: 3, why: "`run('git', ...)`: realRun, here, spawns through commandSpawnSync", must: BY_NAME('commandSpawnSync', 'cmd, args, ') },
   'src/testrun/host.ts': { n: 1, why: "`run('git', gitArgs(...), { env: gitEnv(...) })`: the async runner, given the settings by hand", must: [/run\('git', gitArgs\(\[/, /env: gitEnv\(\{ PATH/] },
   // Text that names git without starting it.
-  'src/scan/secrets.ts': { n: 2, why: "gitleaks' `git` subcommand; gitleaks runs git itself, so it gets gitEnv()", must: [/'--exit-code', String\(LEAKS_EXIT\), '\.'\], \{ cwd, encoding: 'utf8', timeout: 120_000, env: gitEnv\(\) \}/, /stdio: \['ignore', 'ignore', 'pipe'\], env: gitEnv\(\) \}/] },
+  'src/scan/secrets.ts': { n: 2, why: "gitleaks' `git` subcommand; gitleaks runs git itself, so it gets gitEnv()", must: [/'--exit-code', String\(LEAKS_EXIT\), '\.'\], \{ cwd, encoding: 'utf8', timeout: 120_000, env: gitEnv\(\) \}/, /stdio: \['ignore', 'ignore', 'pipe'\], env: gitEnv\(env\) \}/] },
   'src/review.ts': { n: 2, why: "`'git'`: the name of a way to read a .gitattributes line" },
   'src/plugins/approval.ts': { n: 1, why: "`z.literal('git')`: a plugin source's type" },
   'src/updater-setup.ts': { n: 1, why: 'a comment quoting an allowed-signers line (namespaces="git")' },
@@ -209,9 +222,9 @@ const OUTSIDE_THE_RUNNER: Record<string, { n: number; why: string; must?: RegExp
   'scripts/verify-release-tag.mjs': { n: 2, why: "ssh-keygen's `-n git`: the signature namespace" },
   // Runs on its own, with the settings written out.
   'scripts/push-gate-hook.mjs': { n: 1, why: 'runGit: setup-hooks copies this file alone into the hooks dir; it hands the gate the settings in its environment too', must: [...ITS_OWN, /\{ \.\.\.process\.env, GIT_DIR: gitDir, \.\.\.GIT_FIXED_ENV \}/] },
-  'scripts/push-gate.mjs': { n: 2, why: "runGit, and gitleaks' `git` subcommand (with GIT_ENV): the hook runs this file alone, fetched from origin (GATE_CODE)", must: [...ITS_OWN, /\{ encoding: 'utf8', env: GIT_ENV \}/] },
+  'scripts/push-gate.mjs': { n: 2, why: "runGit, and gitleaks' `git` subcommand (with GIT_ENV): the hook runs this file alone, fetched from origin (GATE_CODE)", must: [...ITS_OWN, /\{ encoding: 'utf8', env: GIT_ENV \}/, /const GIT_ENV = graphOff\(\{ \.\.\.process\.env, /, /\[`GIT_CONFIG_KEY_\$\{n\}`\]: 'core\.commitGraph', \[`GIT_CONFIG_VALUE_\$\{n\}`\]: 'false'/] },
   'scripts/ci/new-deps.mjs': { n: 1, why: "runGit: CI runs the base's copy of this file alone, from a temp dir (new-deps.yml)", must: ITS_OWN },
-  'scripts/ci/testrun-real-systemd.mjs': { n: 1, why: 'its git: the job copies this file alone into the VM (ci-slow.yml)', must: [/const GIT_FIXED_ARGS = \['--no-replace-objects'\]/, /GIT_NO_REPLACE_OBJECTS: '1', GIT_GRAFT_FILE: join\(devNull, 'no-grafts'\)/, /execFileSync\('git', \[\.\.\.GIT_FIXED_ARGS, /] },
+  'scripts/ci/testrun-real-systemd.mjs': { n: 1, why: 'its git: the job copies this file alone into the VM (ci-slow.yml)', must: [/const GIT_FIXED_ARGS = \['--no-replace-objects', '-c', 'core\.commitGraph=false'\]/, /GIT_NO_REPLACE_OBJECTS: '1', GIT_GRAFT_FILE: join\(devNull, 'no-grafts'\)/, /execFileSync\('git', \[\.\.\.GIT_FIXED_ARGS, /] },
   'scripts/machine/worklane-update.cjs': {
     n: 7,
     why: "the root updater, installed alone in /usr/local/libexec: its reads of the verification clone carry VERIFY_GIT_ARGS (replace refs off); that clone is root's own, which no agent can write a graft into; the three ls-remote calls read no object",

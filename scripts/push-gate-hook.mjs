@@ -44,7 +44,7 @@ class NotOnOrigin extends Refusal {}
  * hooks dir), so it can't import them; test/git-runner.test.ts checks they are the runner's. The gate gets them too,
  * in its environment, so every git it and gitleaks run has them, whichever gate origin holds.
  */
-export const GIT_FIXED_ARGS = Object.freeze(['--no-replace-objects']);
+export const GIT_FIXED_ARGS = Object.freeze(['--no-replace-objects', '-c', 'core.commitGraph=false']);
 export const GIT_FIXED_ENV = Object.freeze({ GIT_NO_REPLACE_OBJECTS: '1', GIT_GRAFT_FILE: join(devNull, 'no-grafts') });
 /** execFileSync of git, with the settings. Every git this file runs comes through here. */
 const runGit = (args, opts = {}) => execFileSync('git', [...GIT_FIXED_ARGS, ...args], { ...opts, env: { ...(opts.env || process.env), ...GIT_FIXED_ENV } });
