@@ -57,9 +57,11 @@ run_as "$coord" '
     git -c credential.helper= -c "credential.helper=$helper" clone -q "https://github.com/$3.git" "$2"
   fi
   cd "$2"
-  # The listing first, on its own: a config git can not read stops here (set -e), never passes as clean.
-  listing="$(git config --list --name-only --show-scope --includes)"
-  planted="$(printf "%s\n" "$listing" | awk -F "\t" "\$1 == \"local\" || \$1 == \"worktree\" { print \$2 }" | grep -Ei "$refused" || true)"
+  # The listing first, on its own: a config git can not read stops here (set -e, pipefail), never passes as clean.
+  # NUL-separated (scope, then the key and its value on the next lines), as the engine reads it: a key never holds a
+  # newline, but a subsection may hold "=" or a space, so the key is all of the first line, nothing parsed out of it.
+  listing="$(git config --list --show-scope --includes -z | tr "\000\n" "\002\001")"
+  planted="$(printf "%s" "$listing" | awk -v RS="\002" -v FS="\001" "NR % 2 == 1 { s = \$0; next } s == \"local\" || s == \"worktree\" { print \$1 }" | grep -Ei "$refused" || true)"
   if [ -n "$planted" ]; then
     echo "refusing to run git in $2: its git config sets $(printf "%s" "$planted" | tr "\n" " ")which names a command or a host for git; take it out of .git/config (git config --unset ...), then run this again" >&2
     exit 1

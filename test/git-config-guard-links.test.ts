@@ -172,6 +172,22 @@ test("#926 round 2: checkout.sh's clone follows a system-level url.insteadOf (CI
   assert.equal(git(dest, 'rev-parse', 'HEAD'), git(m.bare, 'rev-parse', 'main'));
 });
 
+test("#926 round 2: checkout.sh's own check refuses a planted key in the checkout's config, whatever its subsection holds", { skip: process.platform === 'win32' && 'bash' }, () => {
+  const m = mirror();
+  const sh = readFileSync(join(repoRoot, 'scripts', 'setup', 'checkout.sh'), 'utf8');
+  const section = [...sh.matchAll(/run_as "\$coord" '\n([\s\S]*?)\n\s*' /g)].map((x) => x[1]!)[0]!;
+  const dest = join(m.base, 'srv', 'alpha');
+  mkdirSync(join(m.base, 'srv'));
+  const run = () => execFileSync('bash', ['-c', `set -euo pipefail\nworklane() { :; }\n${section}`, '_', 'alpha', dest, 'example/alpha'], { encoding: 'utf8', env: m.env, stdio: ['ignore', 'pipe', 'pipe'] });
+  run();
+  // A subsection with "=" and a space in it: the key is read whole, never cut at either.
+  git(dest, 'config', 'url.https://evil.example/a=b c.insteadOf', 'https://github.com/example/alpha');
+  assert.throws(run, /refusing to run git in .*url\.https:\/\/evil\.example\/a=b c\.insteadof/);
+  git(dest, 'config', '--remove-section', 'url.https://evil.example/a=b c');
+  git(dest, 'config', 'filter.x.smudge', 'touch planted');
+  assert.throws(run, /refusing to run git in .*filter\.x\.smudge/);
+});
+
 test("#926 round 2: a guarded fetch follows a system-level url.insteadOf, and still refuses one in the checkout's own config", async () => {
   const m = mirror();
   const repo = join(m.base, 'checkout');
