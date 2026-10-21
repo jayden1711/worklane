@@ -242,4 +242,14 @@ A person's own session isn't affected.
 - #844: environment reads see only variables that are set.
 - #845: the hardened install verifies the release tag.
 
-An adversarial suite (#707) will add attack tests for these guards. Its page will be linked here once it lands.
+**Attack tests (#707).** `test/adversarial/adversarial.test.ts` attacks the merge decision, and `test/adversarial/guards.test.ts` attacks the guards around the agents, pushes and secrets, each through its own entry point. For the second file, a guarantee counts as **covered** only when:
+- it isn't open on main;
+- every mutant listed for it in `test/adversarial/mutants.json` is killed by the suite.
+
+A mutant breaks the guarantee in memory, and some case of that guarantee must then fail on an assertion: a case that crashes isn't a kill. Each mutant's anchor must start in code, never in a comment.
+
+To re-measure, run `node test/adversarial/run-mutants.mjs` after a build. With `--whole` it also checks that no other case fails.
+
+A mutant found to survive is added to the list, and its guarantee isn't covered until a case kills it. A guarantee open on main is listed as open, with its issue.
+
+A guarantee whose code lives in modules the suite never loads can't be measured this way, and is listed as unmeasured, not covered. Today that is the refusal to activate a rule that blocks a must-allow example: it is the exit of `guardrails check` and doctor's fail, in `src/cli.ts` and `src/doctor.ts`.
