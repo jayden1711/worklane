@@ -25,8 +25,9 @@ function jobNames(dir: string): Set<string> {
   return out;
 }
 
+/** The workflow files in `dir`: `.yml` or `.yaml` in any case (whether GitHub reads `.YML` is unsure, so it counts). */
 function workflowFiles(dir: string): string[] {
-  return readdirSync(dir).filter((x) => /\.ya?ml$/.test(x));
+  return readdirSync(dir).filter((x) => /\.ya?ml$/i.test(x)).sort();
 }
 
 /** What a check name still holds when this can't evaluate it: an expression GitHub would evaluate on the runner. */
@@ -55,6 +56,11 @@ function matrixCombos(matrix: unknown): Record<string, unknown>[] | null {
   const { include = [], exclude = [], ...axes } = matrix;
   if (!Array.isArray(include) || !Array.isArray(exclude) || !include.every(isRecord) || !exclude.every(isRecord)) return null;
   if (!Object.values(axes).every(Array.isArray)) return null;
+  // Keys that differ only in case (`view` and `View`, or an `Include` axis): whether GitHub reads them as one key is
+  // unsure, and the combinations differ either way, so the matrix counts as unreadable.
+  const keys = [...Object.keys(axes), ...include.flatMap((e) => Object.keys(e)), ...exclude.flatMap((e) => Object.keys(e))];
+  if (Object.keys(axes).some((k) => /^(in|ex)clude$/i.test(k))) return null;
+  if (new Set(keys.map((k) => k.toLowerCase())).size !== new Set(keys).size) return null;
   let combos: Record<string, unknown>[] = Object.keys(axes).length ? [{}] : [];
   for (const [k, values] of Object.entries(axes) as [string, unknown[]][]) combos = combos.flatMap((c) => values.map((v) => ({ ...c, [k]: v })));
   combos = combos.filter((c) => !exclude.some((e) => Object.entries(e).every(([k, v]) => same(c[k], v))));
@@ -73,26 +79,45 @@ function matrixCombos(matrix: unknown): Record<string, unknown>[] | null {
   return [...combos, ...added];
 }
 
-/** The check names one workflow file can create (see jobNames). */
-function fileJobNames(file: string): Set<string> {
+/** Whether `v` holds a YAML merge key (`<<`) anywhere: the `yaml` parser keeps it as a plain key. */
+function hasMergeKey(v: unknown, seen = new Set<unknown>()): boolean {
+  if (typeof v !== 'object' || v === null || seen.has(v)) return false;
+  seen.add(v);
+  if (!Array.isArray(v) && Object.hasOwn(v, '<<')) return true;
+  return Object.values(v).some((x) => hasMergeKey(x, seen));
+}
+
+/** The check names one job can create (see jobNames). */
+function jobCheckNames(key: string, job: Job): Set<string> {
   const out = new Set<string>();
-  const wf = parse(readFileSync(file, 'utf8')) as { jobs?: Record<string, Job> };
-  for (const [key, job] of Object.entries(wf.jobs ?? {})) {
-    const name = String(job.name ?? key);
-    const matrix = job.strategy?.matrix;
-    const combos = matrix === undefined ? [{}] : matrixCombos(matrix);
-    if (!combos) {
-      out.add(`${name} (${UNRESOLVED} matrix ${JSON.stringify(matrix)} }})`);
-      continue;
-    }
-    for (const c of combos) {
-      // GitHub's expression contexts and property names ignore case, and spacing inside ${{ }} is free.
-      const vars = new Map(Object.entries(c).map(([k, v]) => [k.toLowerCase(), v]));
-      if (name.includes(UNRESOLVED)) out.add(name.replace(/\$\{\{\s*matrix\.([\w-]+)\s*\}\}/gi, (m, k: string) => (vars.has(k.toLowerCase()) ? shown(vars.get(k.toLowerCase())) : m)));
-      else out.add(Object.keys(c).length ? `${name} (${Object.values(c).map(shown).join(', ')})` : name);
-    }
+  // A merge key: whether Actions merges it (YAML 1.1) or not (1.2, as parsed here) is unsure, so the job fails closed.
+  if (hasMergeKey(job)) return new Set([`${key} (${UNRESOLVED} merge key }})`]);
+  // A name that isn't a non-blank string (`''`, a number, a list): what GitHub shows is unsure, so it fails closed.
+  if (job.name !== undefined && (typeof job.name !== 'string' || job.name.trim() === '')) return new Set([`${key} (${UNRESOLVED} name ${JSON.stringify(job.name)} }})`]);
+  const name = (job.name as string | undefined) ?? key;
+  const matrix = job.strategy?.matrix;
+  const combos = matrix === undefined ? [{}] : matrixCombos(matrix);
+  // A matrix this can't read, or one with no combination at all (`{}`, `include: []`, an empty axis, everything
+  // excluded): what GitHub shows for it is unsure, possibly a failed job under its own name, so it fails closed.
+  if (!combos || combos.length === 0) return new Set([`${name} (${UNRESOLVED} matrix ${JSON.stringify(matrix)} }})`]);
+  for (const c of combos) {
+    // GitHub's expression contexts and property names ignore case, and spacing inside ${{ }} is free.
+    const vars = new Map(Object.entries(c).map(([k, v]) => [k.toLowerCase(), v]));
+    if (name.includes(UNRESOLVED)) out.add(name.replace(/\$\{\{\s*matrix\.([\w-]+)\s*\}\}/gi, (m, k: string) => (vars.has(k.toLowerCase()) ? shown(vars.get(k.toLowerCase())) : m)));
+    else out.add(Object.keys(c).length ? `${name} (${Object.values(c).map(shown).join(', ')})` : name);
   }
   return out;
+}
+
+/** Each job in one workflow file, by key, with the check names it can create. */
+function fileJobs(file: string): [string, Set<string>][] {
+  const wf = parse(readFileSync(file, 'utf8')) as { jobs?: Record<string, Job> };
+  return Object.entries(wf.jobs ?? {}).map(([key, job]) => [key, jobCheckNames(key, job)]);
+}
+
+/** The check names one workflow file can create (see jobNames). */
+function fileJobNames(file: string): Set<string> {
+  return new Set(fileJobs(file).flatMap(([, names]) => [...names]));
 }
 
 /**
@@ -131,9 +156,12 @@ function workflowProblems(wf: Workflow): string[] {
   return out;
 }
 
-/** The workflow files in `dir` that may make a `desktop` check (mayName). */
+/**
+ * Every job in `dir`'s workflows that may make a `desktop` check (mayName), as `file:job`. Jobs, not files: a second
+ * job inside ci.yml is a twin too.
+ */
 function desktopMakers(dir: string): string[] {
-  return workflowFiles(dir).filter((f) => mayName(fileJobNames(join(dir, f)), 'desktop'));
+  return workflowFiles(dir).flatMap((f) => fileJobs(join(dir, f)).filter(([, names]) => mayName(names, 'desktop')).map(([key]) => `${f}:${key}`));
 }
 
 /** The names in `required` that no workflow in `dir` defines: checks nothing will ever run. */
@@ -207,7 +235,7 @@ test('the desktop check stays one more release: one job that only succeeds, on e
   const ci = parse(readFileSync(join(workflows, 'ci.yml'), 'utf8')) as Workflow;
   assert.deepEqual(notOnlySuccess(ci.jobs?.desktop), [], 'ci.yml\'s desktop job: one `true` step on GitHub\'s runner, nothing that could skip, fail or rename it');
   assert.deepEqual(workflowProblems(ci), [], 'ci.yml runs on every push to main (where the updater reads it) and every pull request, with no filter and no workflow defaults');
-  assert.deepEqual(desktopMakers(workflows), ['ci.yml'], 'one job makes the desktop check: no second run of that name can be the one an updater reads (a name this can\'t evaluate counts as one)');
+  assert.deepEqual(desktopMakers(workflows), ['ci.yml:desktop'], 'one job makes the desktop check: no second run of that name, in any file, ci.yml included, can hide or be read for the no-op (a name this can\'t evaluate counts as one)');
   assert.ok(requiredChecks().includes('desktop'), 'config.yaml still requires desktop, until #877 removes the job and the check together');
   assert.ok(updaterDefaults().includes('desktop'), 'a new install\'s updater still lists desktop, until #877');
 });
@@ -232,6 +260,16 @@ const TWIN_FIXTURES: [string, string, boolean][] = [
   ['an axis from an expression, the name not using it (unreadable, so it fails closed)','jobs:\n  shots:\n    strategy: { matrix: { view: "${{ fromJSON(needs.plan.outputs.views) }}" } }\n    runs-on: x\n', true],
   ['another context, ${{ github.job }}', 'jobs:\n  shots:\n    name: ${{ github.job }}\n    runs-on: x\n', true],
   ['a matrix key the matrix lacks', 'jobs:\n  shots:\n    name: ${{ matrix.other }}\n    strategy: { matrix: { view: [phone] } }\n    runs-on: x\n', true],
+  // Round 4 (#746 delta check): a matrix with no combination at all fails closed, whatever GitHub makes of it.
+  ['a job keyed desktop, an empty matrix', 'jobs:\n  desktop:\n    strategy: { matrix: {} }\n    runs-on: x\n', true],
+  ['a job keyed desktop, an empty include', 'jobs:\n  desktop:\n    strategy: { matrix: { include: [] } }\n    runs-on: x\n', true],
+  ['a job keyed desktop, an empty axis', 'jobs:\n  desktop:\n    strategy: { matrix: { view: [] } }\n    runs-on: x\n', true],
+  ['name: desktop, every combination excluded', 'jobs:\n  shots:\n    name: desktop\n    strategy: { matrix: { view: [a], exclude: [{ view: a }] } }\n    runs-on: x\n', true],
+  // Round 4 (#746 second adversarial review, round 3): shapes GitHub may read otherwise than this helper fail closed.
+  ['matrix keys that differ only in case', 'jobs:\n  shots:\n    name: ${{ matrix.view }}\n    strategy: { matrix: { view: [desktop], include: [{ View: phone }] } }\n    runs-on: x\n', true],
+  ['a merge key, the name overridden', 'jobs:\n  base: &base\n    name: shots\n    runs-on: x\n  shots2:\n    <<: *base\n    name: desktop\n', true],
+  ['a merge key, the name from the anchor', 'env:\n  X: &n { name: desktop }\njobs:\n  shots:\n    <<: *n\n    runs-on: x\n', true],
+  ["name: '' on a job keyed desktop", "jobs:\n  desktop:\n    name: ''\n    runs-on: x\n", true],
   ['a name with more around the value', 'jobs:\n  shots:\n    name: shots ${{ matrix.view }}\n    strategy: { matrix: { view: [desktop, phone] } }\n    runs-on: x\n', false],
   ['no name: the values in parentheses', 'jobs:\n  shots:\n    strategy: { matrix: { view: [desktop] } }\n    runs-on: x\n', false],
   ['no name, include entries only', 'jobs:\n  shots:\n    strategy: { matrix: { include: [{ view: desktop }] } }\n    runs-on: x\n', false],
@@ -239,13 +277,42 @@ const TWIN_FIXTURES: [string, string, boolean][] = [
   ['an include entry that adds a key only', 'jobs:\n  shots:\n    name: ${{ matrix.view }}\n    strategy: { matrix: { view: [phone], include: [{ size: big }] } }\n    runs-on: x\n', false],
 ];
 
-test('a second workflow that may make a desktop check is caught, whatever its name is built from (#746 second adversarial review)', () => {
-  for (const [label, yml, makes] of TWIN_FIXTURES) {
+/** ci.yml with only the no-op job, as the fixtures start from. */
+const NOOP_CI = "jobs:\n  desktop:\n    runs-on: ubuntu-latest\n    steps:\n      - run: 'true'\n";
+
+/**
+ * A second job INSIDE ci.yml that makes a `desktop` check (round 4: the backstop counted files, so these passed).
+ * v0.5.2 keeps only the run of a name that started last: a red twin that started first is never read, and it
+ * installs (measured by the second adversarial review), so these are fail-open twins, not only stalls.
+ */
+const CI_TWIN_FIXTURES: [string, string][] = [
+  ['name: desktop, a failing step', "  desktop-screens:\n    name: desktop\n    runs-on: ubuntu-latest\n    steps:\n      - run: 'false'\n"],
+  ["name: ${{ 'desktop' }}", "  shots:\n    name: ${{ 'desktop' }}\n    runs-on: ubuntu-latest\n    steps:\n      - run: 'false'\n"],
+  ['a matrix over [desktop, phone]', "  shots:\n    name: ${{ matrix.view }}\n    strategy: { matrix: { view: [desktop, phone] } }\n    runs-on: ubuntu-latest\n    steps:\n      - run: 'false'\n"],
+];
+
+/** A workflow file name the backstop must read: `.yml` or `.yaml`, any case. */
+const FILE_NAME_FIXTURES = ['other.YML', 'other.Yaml'];
+
+test('a second job that may make a desktop check is caught, in another workflow or in ci.yml, whatever its name is built from (#746 adversarial reviews)', () => {
+  const makers = (files: Record<string, string>) => {
     const dir = mkdtempSync(join(tmpdir(), 'wf-'));
-    writeFileSync(join(dir, 'ci.yml'), "jobs:\n  desktop:\n    runs-on: ubuntu-latest\n    steps:\n      - run: 'true'\n");
-    writeFileSync(join(dir, 'other.yml'), yml);
-    assert.deepEqual(desktopMakers(dir), makes ? ['ci.yml', 'other.yml'] : ['ci.yml'], label);
+    writeFileSync(join(dir, 'ci.yml'), NOOP_CI);
+    for (const [f, text] of Object.entries(files)) writeFileSync(join(dir, f), text);
+    return desktopMakers(dir);
+  };
+  assert.deepEqual(makers({}), ['ci.yml:desktop'], 'the no-op job alone');
+  for (const [label, yml, makes] of TWIN_FIXTURES) {
+    const got = makers({ 'other.yml': yml });
+    assert.equal(got[0], 'ci.yml:desktop', label);
+    assert.equal(got.length > 1, makes, `${label}: ${JSON.stringify(got)}`);
   }
+  for (const [label, job] of CI_TWIN_FIXTURES) {
+    const got = makers({ 'ci.yml': NOOP_CI + job });
+    assert.equal(got.length, 2, `in ci.yml, ${label}: ${JSON.stringify(got)}`);
+    assert.equal(got[0], 'ci.yml:desktop');
+  }
+  for (const f of FILE_NAME_FIXTURES) assert.deepEqual(makers({ [f]: 'jobs:\n  desktop:\n    runs-on: x\n' }), ['ci.yml:desktop', `${f}:desktop`], f);
 });
 
 test('matrix names expand as GitHub gives them: include, exclude, case and spacing', () => {
