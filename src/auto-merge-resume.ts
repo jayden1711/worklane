@@ -1,6 +1,7 @@
 // WHY (#776, owner decision on #698 decision 1, amended in #775): resuming auto-merge after a stop is not turning it on.
 // It stays an owner's action on the dashboard, audited. But a stop the default branch caused (a red main after an
-// auto-merge, `red_main`; or the main watch's unaccounted commit, `main_watch`) resumes only when main's required
+// auto-merge, `red_main`; the main watch's unaccounted commit, `main_watch`; or required checks that never reported on
+// an auto-merge's commit, `main_unknown`, #731) resumes only when main's required
 // checks are green on its current tip, measured at that moment, or with an owner's explicit acknowledgement, a typed
 // reason recorded in the event log with who and when. Any other stop resumes as before.
 //
@@ -16,8 +17,11 @@ import type { JudgedChecks } from './check-source.js';
 import { killTree, spawnDetached } from './os/index.js';
 import { requiredOutcomes } from './pr-watch.js';
 
-/** Who stopped auto-merge, as the stop file and `merge.stopped` record it. */
-export const STOP_BY = ['red_main', 'main_watch', 'owner'] as const;
+/**
+ * Who stopped auto-merge, as the stop file and `merge.stopped` record it. `main_unknown` (#731): main's required checks
+ * never reported on an auto-merge's commit (no answer, a read that never answered, an error), so main isn't known green.
+ */
+export const STOP_BY = ['red_main', 'main_watch', 'main_unknown', 'owner'] as const;
 export type StopBy = (typeof STOP_BY)[number];
 
 /** The only stops that resume as before (no green main needed). Anything else, or nothing, waits for green main. */
