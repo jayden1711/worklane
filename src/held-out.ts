@@ -9,6 +9,7 @@ import { HELD_OUT_ENV, HELD_OUT_GLOB } from './held-out-paths.js';
 import { REPLIER_ROLE, REPLY_STAGES } from './intake/replier.js';
 import { CONTRACT_PARTS } from './role-contract.js';
 import { ownerOnlyDir, writeOwnerOnly } from './os/index.js';
+import { ownEnv, type EnvSource } from './os/own-env.js';
 import { assertNotPairwise, neutralDir, parseCases, type Ask, type EvalCase } from './skilleval.js';
 
 export { HELD_OUT_ENV, HELD_OUT_GLOB };
@@ -17,8 +18,8 @@ export { HELD_OUT_ENV, HELD_OUT_GLOB };
 export const HELD_OUT_CASES = 5;
 
 /** The held-out store: the coordinator's state, never a repository. */
-export function heldOutDir(stateDir: string, env: NodeJS.ProcessEnv = process.env): string {
-  return env[HELD_OUT_ENV] || join(stateDir, 'evals', 'held-out');
+export function heldOutDir(stateDir: string, env: EnvSource = process.env): string {
+  return ownEnv(env).get(HELD_OUT_ENV) || join(stateDir, 'evals', 'held-out');
 }
 
 const VALID_ROLE = /^[a-z][a-z0-9_-]{0,40}$/;

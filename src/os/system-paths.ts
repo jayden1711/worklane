@@ -23,6 +23,7 @@
 import { lstatSync, readFileSync } from 'node:fs';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { BRAND } from '../brand.js';
+import { ownEnv, type EnvSource } from './own-env.js';
 
 /** The variable that moves every system location under one directory (tests only; test/isolate.ts). */
 export const SYSTEM_ROOT_VAR = `${BRAND.envPrefix}_SYSTEM_ROOT`;
@@ -60,14 +61,15 @@ const currentUid = (): number | null => (typeof process.getuid === 'function' ? 
  * Why <PREFIX>_SYSTEM_ROOT may not be honoured in this process, or null when it may (unset, or a test process the
  * preload marked). INVARIANT: an allowlist: only the preload's mark makes it honoured; root and systemd never.
  */
-export function systemRootRefusal(env: NodeJS.ProcessEnv = process.env, uid: number | null = currentUid()): string | null {
-  const root = env[SYSTEM_ROOT_VAR];
+export function systemRootRefusal(source: EnvSource = process.env, uid: number | null = currentUid()): string | null {
+  const env = ownEnv(source);
+  const root = env.get(SYSTEM_ROOT_VAR);
   if (!root) return null;
   const no = (why: string) => `${SYSTEM_ROOT_VAR} is set (${root}), and ${why}. It is honoured only in a test process the test preload marked (test/isolate.ts): unset it.`;
   if (uid === 0) return no('this process runs as root');
-  const sd = SYSTEMD_MARKERS.find((k) => env[k] !== undefined);
+  const sd = SYSTEMD_MARKERS.find((k) => env.get(k) !== undefined);
   if (sd) return no(`systemd started this process (${sd} is set)`);
-  const token = env[TEST_TOKEN_VAR];
+  const token = env.get(TEST_TOKEN_VAR);
   if (!token || !/^[0-9a-f]{64}$/.test(token)) return no(`${TEST_TOKEN_VAR} doesn't carry the test preload's token`);
   if (!isAbsolute(root)) return no('it is not an absolute path');
   const posix = process.platform !== 'win32';
@@ -92,11 +94,12 @@ type Proc = { argv: readonly string[]; execArgv: readonly string[] };
  * test preload marked it, or a test run started it (TEST_RUN_VAR, markTestRun). The engine never starts itself any of
  * these ways, and never sets one of these variables outside a test run.
  */
-export function testRunSign(env: NodeJS.ProcessEnv = process.env, proc: Proc = process): string | null {
-  if (env.NODE_TEST_CONTEXT !== undefined) return 'NODE_TEST_CONTEXT is set';
+export function testRunSign(source: EnvSource = process.env, proc: Proc = process): string | null {
+  const env = ownEnv(source);
+  if (env.get('NODE_TEST_CONTEXT') !== undefined) return 'NODE_TEST_CONTEXT is set';
   if (proc.execArgv.includes('--test')) return 'node runs with --test';
   if (/\.test\.[cm]?[jt]s$/.test(proc.argv[1] ?? '')) return `its main module is a test file (${proc.argv[1]})`;
-  for (const k of [TEST_RUN_VAR, TEST_TOKEN_VAR, TEST_MACHINE_VAR]) if (env[k] !== undefined) return `${k} is set`;
+  for (const k of [TEST_RUN_VAR, TEST_TOKEN_VAR, TEST_MACHINE_VAR]) if (env.get(k) !== undefined) return `${k} is set`;
   return null;
 }
 
@@ -241,10 +244,11 @@ let decided: { key: string; refusal: string | null } | null = null;
 /** `p` (an absolute system path) on this machine: itself, or under <PREFIX>_SYSTEM_ROOT when that is honoured here. */
 export function systemPath(p: string): string {
   if (!p.startsWith('/')) throw new Error(`systemPath: ${p} is not absolute`);
-  const root = process.env[SYSTEM_ROOT_VAR];
+  const env = ownEnv();
+  const root = env.get(SYSTEM_ROOT_VAR);
   if (!root) return p;
-  const key = [root, process.env[TEST_TOKEN_VAR], ...SYSTEMD_MARKERS.map((k) => process.env[k])].join('\0');
-  if (decided?.key !== key) decided = { key, refusal: systemRootRefusal() };
+  const key = [root, env.get(TEST_TOKEN_VAR), ...SYSTEMD_MARKERS.map((k) => env.get(k))].join('\0');
+  if (decided?.key !== key) decided = { key, refusal: systemRootRefusal(env) };
   if (decided.refusal) throw new SystemRootRefused(decided.refusal);
   return join(root, p);
 }
@@ -257,8 +261,8 @@ export function systemPath(p: string): string {
  * other command. A checkout's dashboard (`dashboard --service --root <dir>`, which `dashboard --detach` starts in the
  * person's own session) is none: every unit's dashboard is an instance's (--instance) or the hub's.
  */
-export function serviceModeRefusal(argv: string[], env: NodeJS.ProcessEnv = process.env): string | null {
-  if (!env[SYSTEM_ROOT_VAR]) return null;
+export function serviceModeRefusal(argv: string[], source: EnvSource = process.env): string | null {
+  if (!ownEnv(source).get(SYSTEM_ROOT_VAR)) return null;
   const args: string[] = [];
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === '--root' || argv[i] === '--instance') i++;
