@@ -25,7 +25,7 @@
 // for a name that can't be handed back to git, from its blobs). review.ts flags a change that adds such a mark, since
 // GitHub and a checkout still honour it.
 import { Buffer, isUtf8 } from 'node:buffer';
-import { spawnSync } from 'node:child_process';
+import { spawnSync } from '../os/child-process.js';
 import type { SizeFile } from '../pr-rules.js';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';

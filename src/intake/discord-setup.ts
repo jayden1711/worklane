@@ -11,7 +11,7 @@
 // Opening the step, loading the channels and reviewing a change write nothing: only a confirmed change does, and
 // only to intake.yaml.
 import { outboundEnv } from '../network.js';
-import { spawn } from 'node:child_process';
+import { spawn } from '../os/child-process.js';
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
