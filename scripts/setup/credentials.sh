@@ -269,9 +269,16 @@ JS
     # The entry in credentials.yaml, written by the engine's own config code as $coord: validated against the schema,
     # the file's other settings kept. Only the path is passed; $coord can't read the key. Never a hand edit.
     say "write the key's path into $name's credentials.yaml, as $coord"
-    run_as "$coord" 'worklane instance set-agent-api-key "$1" --file "$2"' "$name" "$file"
+    # Bounded by root (#904, run_as_bounded): the coordinator's own files and processes can't hold root here. Its
+    # answer goes through a file of root's, shown after.
+    out="$(mktemp)"
+    rc=0
+    run_as_bounded "$coord" "$AGENT_CHECK_SECONDS" "$out" 'worklane instance set-agent-api-key "$1" --file "$2" 2>&1' "$name" "$file" || rc=$?
+    head -c 4096 -- "$out"; rm -f -- "$out"
+    [ "$rc" -eq 0 ] || { echo "writing agent_api_key as $coord failed or didn't finish within $AGENT_CHECK_SECONDS s (exit $rc); credentials.yaml is as it was: run this again" >&2; exit 1; }
     # The first-run step reads the agent's login from claude-account's status.json: this instance's records, refreshed.
-    bash "$here/claude-account.sh" status "$name" >/dev/null 2>&1 || true
+    # Best effort, and bounded by root (#904): it runs claude as the agent user.
+    (close_fds; exec timeout -s KILL "$ACCOUNT_STATUS_SECONDS" bash "$here/claude-account.sh" status "$name") </dev/null >/dev/null 2>&1 || true
     echo "then restart the instance. Its agents bill to this key; to go back to the Claude login, remove agent_api_key"
     echo "from credentials.yaml and the apiKeyHelper entry from $(home_of "$agent")/.claude/settings.json."
     ;;

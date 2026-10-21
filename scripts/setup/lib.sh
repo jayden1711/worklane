@@ -62,16 +62,27 @@ run_as() {
 
 # How root runs a command as another user, as run_as does: sudo, never a login shell (a test stands in for it).
 as_user_argv() { AS_USER=(sudo -H -u "$1" env GIT_TERMINAL_PROMPT=0); }
+# Close every file descriptor above 2 this shell holds (#904): add-project's event stream (fd 3), its lock (fd 9),
+# anything else inherited. For a subshell about to start what another user, or a parse of their bytes, runs: nothing
+# of the caller's then depends on sudo's closefrom, or on a process that outlives the bound.
+close_fds() {
+  local fd me="$BASHPID"
+  for fd in $(ls /proc/"$me"/fd 2>/dev/null || seq 3 255); do
+    [ "$fd" -gt 2 ] 2>/dev/null && { eval "exec $fd>&-"; } 2>/dev/null
+  done
+  return 0
+}
 # run_as with a bound that user can't freeze (#904). The timeout is root's, outside sudo -u, so no process of that user
 # can signal it; past the bound it sends SIGKILL to its whole process group, the user's processes started for this
-# included, a stopped (SIGSTOP) one too. Nothing of the caller's reaches that user's processes: no stdin, stdout to
-# <out> (a file root made, or /dev/null), stderr dropped, fd 9 (add-project's lock) closed; so one left behind holds
-# no pipe of ours and no lock. Exit 137 when cut off.
+# included, a stopped (SIGSTOP) one too. Of the caller's, that user's processes get only /dev/null as stdin, <out> (a
+# file root made, or /dev/null) as stdout, and /dev/null as stderr: every other descriptor is closed first
+# (close_fds), so one that escapes the group (setsid) or outlives the bound holds no pipe of the caller's and no lock.
+# Exit 137 when cut off.
 #   run_as_bounded <user> <seconds> <out> <script> [args...]
 run_as_bounded() {
   local user="$1" secs="$2" out="$3" script="$4"; shift 4
   as_user_argv "$user"
-  (cd / && exec timeout -s KILL "$secs" "${AS_USER[@]}" bash -euo pipefail -c "$script" _ "$@") </dev/null >"$out" 2>/dev/null 9>&-
+  (close_fds; cd / && exec timeout -s KILL "$secs" "${AS_USER[@]}" bash -euo pipefail -c "$script" _ "$@") </dev/null >"$out" 2>/dev/null
 }
 
 say() { printf '\n== %s\n' "$*"; }
@@ -768,6 +779,9 @@ CLAUDE_API_KEY_LOGINS='api_key|api_key_helper'
 # answer within AGENT_STATUS_SECONDS: no. Bounded by root (run_as_bounded, #904): add-project asks this under its
 # machine-wide lock, and the user owns the process that answers. Its answer goes through a file of root's, never a pipe.
 AGENT_STATUS_SECONDS=60
+# claude-account.sh status for one instance, run by root under a bound of root's (credentials.sh api-key, #904): a
+# status and one minimal real call per agent user, each bounded inside, all of it here.
+ACCOUNT_STATUS_SECONDS=300
 claude_api_key_login_ok() {
   local out tmp
   command -v claude >/dev/null 2>&1 || return 1

@@ -197,7 +197,7 @@ agent_api_key_path() {
   run_as_bounded "$coord" "$AGENT_CHECK_SECONDS" /dev/null '[ -f "$1" ] && [ ! -L "$1" ] && grep -q agent_api_key -- "$1" && [ "$(wc -c < "$1")" -le 65536 ]' "$(creds)" || return 1
   tmp="$(mktemp)" || return 1
   if run_as_bounded "$coord" "$AGENT_CHECK_SECONDS" "$tmp" '[ -f "$1" ] && [ ! -L "$1" ] && exec head -c 65537 -- "$1"' "$(creds)"; then
-    k="$( (cd / && timeout -s KILL "$AGENT_CHECK_SECONDS" "$ENGINE_CLI" instance agent-api-key-of < "$tmp" 2>/dev/null 9>&-) || true)"
+    k="$( (close_fds; cd / && exec timeout -s KILL "$AGENT_CHECK_SECONDS" "$ENGINE_CLI" instance agent-api-key-of < "$tmp" 2>/dev/null) || true)"
   fi
   rm -f -- "$tmp"
   [[ "$k" =~ ^/[A-Za-z0-9._/-]+$ ]] || return 1
