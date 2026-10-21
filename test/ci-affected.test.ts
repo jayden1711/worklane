@@ -18,14 +18,34 @@ const ci = (await import(pathToFileURL(script).href)) as {
   forceAll: (f: string) => string | null;
   runtimePath: (f: string) => string;
   sourcePath: (p: string) => string;
+  compiledPaths: (dir: string) => { runtimePath: (f: string) => string; sourcePath: (p: string) => string };
   wholeRead: (dir: string) => (file: string) => readonly string[] | null;
 };
 const git = (cwd: string, ...a: string[]) => execFileSync('git', a, { cwd, encoding: 'utf8' }).trim();
 
-/** A repo shaped like the engine: src/ and test/ built into dist/, test/helpers.ts, docs, templates, a script. */
+/**
+ * A repo shaped like the engine: src/, test/ and scripts/bench/ built into dist/ (its tsconfig says so),
+ * test/helpers.ts, docs, templates, a script, and an updater-like module that loads an installed engine's file.
+ */
+const UPDATER = [
+  "const path = require('node:path');",
+  'const OPT = process.env.OPT;',
+  'function watch() {',
+  "  const f = path.join(OPT, 'current', 'dist', 'src', 'watch.js');",
+  '  // runtime-import: src/watch.ts',
+  "  return import(require('node:url').pathToFileURL(f).href);",
+  '}',
+  'module.exports = { watch };',
+  '',
+].join('\n');
 const FIXTURE: Record<string, string> = {
   'package.json': '{ "name": "fixture", "files": ["dist/src", "templates"] }\n',
-  'tsconfig.json': '{}\n',
+  'tsconfig.json': '{ "compilerOptions": { "outDir": "dist", "rootDir": "." }, "include": ["src/**/*.ts", "test/**/*.ts", "scripts/bench/**/*.ts"] }\n',
+  'scripts/bench/auth.ts': "export const auth = () => 'ok';\n",
+  'test/bench-cli.test.ts': "import { auth } from '../scripts/bench/auth.js';\nconsole.log(auth());\n",
+  'src/watch.ts': 'export const raise = () => 1;\n',
+  'scripts/up.cjs': UPDATER,
+  'test/up.test.ts': "import { createRequire } from 'node:module';\nimport { join } from 'node:path';\nimport { repoRoot } from './helpers.js';\nconst u = createRequire(import.meta.url)(join(repoRoot, 'scripts', 'up.cjs'));\nu.watch();\n",
   '.nvmrc': '24\n',
   '.github/workflows/ci.yml': 'name: ci\n',
   'scripts/ci/shard.mjs': 'export {};\n',
@@ -96,6 +116,55 @@ test('the graph on the fixture: imports, the helpers\' names, built paths back t
   assert.deepEqual(facts('test/helpers.ts'), { edges: [], reads: [], opaque: [], lists: false }, 'described, not scanned');
   assert.deepEqual(facts('src/pack.ts').reads, ['package.json', 'README.md', 'src', 'templates'].sort(), 'a src/ module reading its install directory reads the package\'s files');
   assert.deepEqual([...reach(g, 'test/cli.test.ts').files].sort(), ['src/a.ts', 'src/b.ts', 'src/cli.ts', 'test/cli.test.ts', 'test/helpers.ts']);
+  assert.deepEqual(facts('test/bench-cli.test.ts'), { edges: ['scripts/bench/auth.ts'], reads: [], opaque: [], lists: false }, 'tsc builds scripts/bench/ too (tsconfig include)');
+  assert.deepEqual(facts('scripts/up.cjs'), { edges: ['src/watch.ts'], reads: [], opaque: [], lists: false }, 'the import of an installed path, declared');
+  assert.deepEqual([...reach(g, 'test/up.test.ts').files].sort(), ['scripts/up.cjs', 'src/watch.ts', 'test/helpers.ts', 'test/up.test.ts']);
+});
+
+test('a runtime import is followed only through a declaration that names a file and matches the code; else it stays unresolved', () => {
+  const opaque = (updater: string) => {
+    const files: Record<string, string> = { 'src/watch.ts': 'export const w = 1;\n', 'src/c.ts': 'export const c = 1;\n', 'scripts/up.cjs': updater };
+    const g = buildGraph({ files: Object.keys(files), read: (f) => files[f]!, runtimePath: ci.runtimePath, sourcePath: ci.sourcePath });
+    const x = g.facts.get('scripts/up.cjs')!;
+    return { edges: [...x.edges].sort(), opaque: x.opaque };
+  };
+  const declare = (line: string) => UPDATER.replace('  // runtime-import: src/watch.ts', line);
+  const IMPORT = "unresolved import(require('node:url').pathToFileURL(f).href)";
+  assert.deepEqual(opaque(UPDATER), { edges: ['src/watch.ts'], opaque: [] }, 'declared, and the code names its built path');
+  const both = declare('  // runtime-import: src/watch.ts, src/c.ts').replace("'watch.js');", "process.env.C ? 'watch.js' : 'c.js');\n  const c = 'dist/src/c.js';");
+  assert.deepEqual(opaque(both), { edges: ['src/c.ts', 'src/watch.ts'], opaque: [] }, 'two files, each named');
+  const elsewhere = declare('  // runtime-import: src/c.ts').replace('function watch', "const C = path.join(OPT, 'dist', 'src', 'c.js');\nfunction watch");
+  assert.deepEqual(opaque(elsewhere), { edges: [], opaque: [`${IMPORT} (declared src/c.ts, but the code around it never names dist/src/c.js)`] }, 'named in the module, but not in the block the import is in');
+  assert.deepEqual(opaque(declare('')), { edges: [], opaque: [IMPORT] }, 'no declaration: unresolved, as before');
+  assert.deepEqual(opaque(declare('  // runtime-import: src/gone.ts')), { edges: [], opaque: [`${IMPORT} (declared src/gone.ts, which isn't a file)`] }, 'a declared file that does not exist');
+  assert.deepEqual(opaque(declare('  // runtime-import: src/c.ts')), { edges: [], opaque: [`${IMPORT} (declared src/c.ts, but the code around it never names dist/src/c.js)`] }, 'a file the code does not load: the declaration is wrong');
+  assert.deepEqual(opaque(declare('  // runtime-import: src/watch.ts, src/gone.ts')), { edges: [], opaque: [`${IMPORT} (declared src/gone.ts, which isn't a file)`] }, 'one bad name spoils the declaration');
+  assert.deepEqual(opaque(declare('  // runtime-import:')), { edges: [], opaque: [`${IMPORT} (declared nothing)`] }, 'an empty declaration');
+  assert.deepEqual(opaque(declare('  // runtime-import: src/watch.ts\n')), { edges: [], opaque: [IMPORT] }, 'not the line right above the import');
+  assert.deepEqual(opaque(declare("  const s = '// runtime-import: src/watch.ts';")), { edges: [], opaque: [IMPORT] }, 'in a string, not a comment');
+  assert.deepEqual(opaque(declare('  // runtime-import: ../outside.ts')), { edges: [], opaque: [`${IMPORT} (declared ../outside.ts, which isn't a file)`] }, 'outside the repo');
+  // No block around the import (a top-level arrow): nothing narrower than the whole file to check against, so refused,
+  // whether the declared file is named only by other code there (route C) or by the import's own path.
+  const top = (file: string) => [
+    "const path = require('node:path');",
+    'const OPT = process.env.OPT;',
+    "const other = path.join(OPT, 'dist', 'src', 'c.js');",
+    "const f = path.join(OPT, 'current', 'dist', 'src', 'watch.js');",
+    `// runtime-import: ${file}`,
+    "const watch = () => import(require('node:url').pathToFileURL(f).href);",
+    'module.exports = { watch, other };',
+    '',
+  ].join('\n');
+  for (const file of ['src/c.ts', 'src/watch.ts']) {
+    assert.deepEqual(opaque(top(file)), { edges: [], opaque: [`${IMPORT} (declared at the top level: no {…} around the import to check ${file} against)`] }, `top level: ${file}`);
+  }
+  // The real updater names dist/src/cli.js elsewhere: declaring src/cli.ts for its watchdog import is still refused.
+  const updater = 'scripts/machine/worklane-update.cjs';
+  const real = readFileSync(join(repoRoot, updater), 'utf8');
+  assert.ok(real.includes('// runtime-import: src/watchdog/index.ts\n') && real.includes("'dist', 'src', 'cli.js'"));
+  const files = git(repoRoot, 'ls-files').split('\n');
+  const swapped = buildGraph({ files, read: (f) => (f === updater ? real.replace('runtime-import: src/watchdog/index.ts', 'runtime-import: src/cli.ts') : ''), runtimePath: ci.runtimePath, sourcePath: ci.sourcePath });
+  assert.deepEqual(swapped.facts.get(updater)!.opaque, [`${IMPORT} (declared src/cli.ts, but the code around it never names dist/src/cli.js)`]);
 });
 
 test('a pull request selects the tests that reach the change, and the unfollowable test; nothing else', () => {
@@ -107,6 +176,8 @@ test('a pull request selects the tests that reach the change, and the unfollowab
     assert.deepEqual(f.change(append('test/b.test.ts')), ['test/b.test.ts', 'test/dyn.test.ts'], 'a test file selects itself');
     assert.deepEqual(f.change(append('docs/free.md', 'more\n')), ['test/dyn.test.ts'], 'documentation nothing names or reads: only the always-run test');
     assert.deepEqual(f.change((d) => writeFileSync(join(d, 'docs', 'new.md'), '# new\n')), ['test/dyn.test.ts', 'test/list.test.ts'], 'a new file changes what git ls-files lists');
+    assert.deepEqual(f.change(append('src/watch.ts')), ['test/dyn.test.ts', 'test/pack.test.ts', 'test/up.test.ts'], 'the file a runtime import declares selects what loads the module (and the package)');
+    assert.deepEqual(f.change(append('scripts/bench/auth.ts')), ['test/bench-cli.test.ts', 'test/dyn.test.ts'], 'a scripts/bench/ source tsc builds');
   } finally {
     rmSync(f.dir, { recursive: true, force: true });
   }
@@ -202,6 +273,56 @@ test('on the engine itself: a one-test change or a doc nothing names runs a smal
   const affected = plan('src/testrun/affected.ts');
   assert.ok(affected.tests.includes('test/ci-affected.test.ts') && affected.tests.includes('test/testrun-select.test.ts'));
   assert.equal(plan('test/helpers.ts').all, 'test/helpers.ts: the helpers every test uses');
+  // The updater loads the installed engine's watchdog at run time, and declares which source that is: a change to
+  // it selects every test that loads the updater, and a one-test change none of them.
+  const updater = 'scripts/machine/worklane-update.cjs';
+  assert.deepEqual(g.facts.get(updater)!.opaque, []);
+  assert.ok(g.facts.get(updater)!.edges.has('src/watchdog/index.ts'));
+  const loaders = all.filter((t) => reach(g, t).files.has(updater));
+  const watchdog = plan('src/watchdog/index.ts');
+  assert.equal(watchdog.all, null);
+  for (const t of loaders) assert.ok(watchdog.tests.includes(t), `${t} loads the updater`);
+  for (const t of ['canary', 'drain', 'helpers', 'lookback', 'migrate', 'redact', 'stuck'].map((n) => `test/update-${n}.test.ts`).concat('test/updater-self.test.ts')) {
+    assert.ok(loaders.includes(t), `${t} loads the updater`);
+    assert.ok(!one.tests.includes(t), `${t} runs only when its change reaches it: ${one.why[t]}`);
+  }
+  // scripts/bench/ is built too: a test's import of its built file is that source.
+  const bench = g.facts.get('test/bench.test.ts')!;
+  assert.ok(bench.edges.has('scripts/bench/auth.ts'));
+  assert.deepEqual(bench.opaque.filter((o) => o.includes('bench')), []);
+  assert.ok(plan('scripts/bench/auth.ts').tests.includes('test/bench.test.ts'));
+});
+
+test('what tsc builds comes from tsconfig.json: each `<dir>/**/*.ts` it includes, and nothing else', () => {
+  const ts = JSON.parse(readFileSync(join(repoRoot, 'tsconfig.json'), 'utf8')) as { include: string[] };
+  const dirs = ts.include.flatMap((i) => /^(.+)\/\*\*\/\*\.ts$/.exec(i)?.[1] ?? []);
+  assert.ok(dirs.includes('scripts/bench'), 'the bench is built');
+  for (const d of dirs) {
+    assert.equal(ci.runtimePath(`${d}/x/y.ts`), `dist/${d}/x/y.js`, d);
+    assert.equal(ci.sourcePath(`dist/${d}/x/y.js`), `${d}/x/y.js`, d);
+    assert.equal(ci.sourcePath(`dist/${d}`), d, d);
+  }
+  for (const f of ['scripts/ci/affected.mjs', 'scripts/dev/x.ts', 'web/src/x.ts', 'srcx/a.ts']) assert.equal(ci.runtimePath(f), f, f);
+  for (const p of ['dist/web/x.js', 'dist/scripts/ci/x.js', 'dist/srcx/a.js']) assert.equal(ci.sourcePath(p), p, p);
+  // A tsconfig this can't read the same way maps nothing: an import of a built file stays unresolved (all).
+  const dir = mkdtempSync(join(tmpdir(), 'ci-affected-ts-'));
+  try {
+    const at = (tsconfig: string) => {
+      writeFileSync(join(dir, 'tsconfig.json'), tsconfig);
+      return ci.compiledPaths(dir);
+    };
+    const odd = at('{ "compilerOptions": { "outDir": "out", "rootDir": "." }, "include": ["lib/**/*.ts", "src/*.ts", "x/**/*"] }');
+    assert.equal(odd.runtimePath('lib/a.ts'), 'out/lib/a.js');
+    assert.equal(odd.sourcePath('out/lib/a.js'), 'lib/a.js');
+    assert.equal(odd.runtimePath('src/a.ts'), 'src/a.ts', 'not a <dir>/**/*.ts');
+    assert.equal(odd.runtimePath('x/a.ts'), 'x/a.ts');
+    for (const t of ['{ "compilerOptions": { "outDir": "dist" }, "include": ["src/**/*.ts"] }', '{ "compilerOptions": { "rootDir": "." }, "include": ["src/**/*.ts"] }', '{ "compilerOptions": { "outDir": "dist", "rootDir": "src" }, "include": ["src/**/*.ts"] }', '{ "compilerOptions": { "outDir": "../dist", "rootDir": "." }, "include": ["src/**/*.ts"] }', '{ "compilerOptions": { "outDir": "dist", "rootDir": "." }, "include": ["../src/**/*.ts"] }']) {
+      assert.equal(at(t).runtimePath('src/a.ts'), 'src/a.ts', t);
+    }
+    assert.throws(() => at('{ "include": [ // a comment\n "src/**/*.ts"] }'), 'not JSON: the plan fails (CI goes red) rather than guess');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('the lexer: strings and templates read, comments and regular expressions skipped, code left searchable', () => {

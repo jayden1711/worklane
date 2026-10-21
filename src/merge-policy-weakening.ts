@@ -265,6 +265,9 @@ export const MARKERS: readonly string[] = [
   'swiftlint:disable', 'rubocop:disable', 'rubocop:todo', 'istanbul ignore', 'c8 ignore', 'v8 ignore', 'pragma: no cover',
   'nosec', 'nosemgrep', 'NOSONAR', 'gitleaks:allow', '@SuppressWarnings', '@Suppress(', '#pragma warning disable', 'phpcs:ignore', '@phpstan-ignore', '@psalm-suppress',
   'shellcheck disable', 'stylelint-disable', 'yamllint disable', 'hadolint ignore',
+  // A test selected less: a declared runtime import turns tests that ran on every change into selected ones
+  // (src/testrun/affected.ts, #881).
+  'runtime-import:',
 ];
 /** MARKERS as one regex of escaped literal alternatives (no quantifier): the same substrings, in one pass per line. */
 const MARK = new RegExp(MARKERS.map((m) => m.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|'));

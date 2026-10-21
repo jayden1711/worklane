@@ -1863,6 +1863,7 @@ function watchSigners(deps, cfg) {
 function watchdog() {
   const f = path.join(OPT, 'current', 'dist', 'src', 'watchdog', 'index.js');
   if (!fs.existsSync(f)) return Promise.resolve(null);
+  // runtime-import: src/watchdog/index.ts
   return import(require('node:url').pathToFileURL(f).href).catch(() => null);
 }
 
