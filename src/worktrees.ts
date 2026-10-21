@@ -109,14 +109,45 @@ export function worktreePath(o: WorktreeOptions, name: string): string {
   return resolve(o.repo, o.root, `${BRAND.cli}-${name}`);
 }
 
-/** The worktree itself, before any setup: on a new branch at `base`, recorded as ours first. */
+/**
+ * Why each worktree the coordinator makes is locked (`git worktree lock`), as git records it.
+ * WHY (#890 round 12): every run's sandbox hides every other task checkout whole, so inside it a sibling's `.git`
+ * looks missing, and `git worktree prune` (or gc) run there removed every sibling's record, breaking each running task
+ * (measured). git never prunes a locked worktree. Only the coordinator's own removal unlocks one, just before removing
+ * it. A write deny on the records instead would break every worker's own commit (measured, round 11).
+ */
+export const WORKTREE_LOCK_REASON = `${BRAND.cli} task worktree: removed only by its coordinator`;
+
+/** Lock the worktree at `path` against pruning; throws when git can't. */
+export function lockWorktree(repo: string, path: string): void {
+  git(repo, 'worktree', 'lock', '--reason', WORKTREE_LOCK_REASON, path);
+}
+
+/** Unlock the worktree at `path` for its removal; one that isn't locked, or isn't there, is left as it is. */
+export function unlockWorktree(repo: string, path: string): void {
+  spawnSync('git', ['worktree', 'unlock', path], { cwd: repo, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+}
+
+/**
+ * Every worktree in our ownership record that is still on disk, locked: one made before locking came in (round 12),
+ * on an existing install, is locked the next time the coordinator makes a worktree (the pool refills at start).
+ */
+function lockOwned(o: WorktreeOptions): void {
+  // Best effort: git refuses one already locked, and a record it can't lock (broken by hand) never stops a new
+  // worktree being made.
+  for (const p of owned(o)) if (existsSync(p)) spawnSync('git', ['worktree', 'lock', '--reason', WORKTREE_LOCK_REASON, p], { cwd: o.repo, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+}
+
+/** The worktree itself, before any setup: on a new branch at `base`, recorded as ours first, and locked. */
 function addWorktree(o: WorktreeOptions, name: string, branch: string, base: string): string {
   const path = worktreePath(o, name);
   if (existsSync(path)) removeWorktree(o, name);
+  lockOwned(o);
   setOwned(o, [...owned(o), path]); // recorded before creation, so a crash mid-way is still cleaned up
   excludeSandboxPlaceholders(o.repo);
   const sparse = o.sparseExclude ?? [];
   git(o.repo, 'worktree', 'add', '-q', ...(sparse.length ? ['--no-checkout'] : []), '-B', branch, path, base);
+  lockWorktree(o.repo, path);
   if (sparse.length) checkoutSparse(o.repo, path, sparse);
   return path;
 }
@@ -167,6 +198,7 @@ export function createWorktree(o: WorktreeOptions, name: string, branch: string,
 export function removeWorktree(o: WorktreeOptions, name: string): boolean {
   const path = worktreePath(o, name);
   if (!owned(o).includes(path)) throw new Error(`refusing to remove ${path}: not created by ${BRAND.cli}`);
+  unlockWorktree(o.repo, path);
   spawnSync('git', ['worktree', 'remove', '--force', path], { cwd: o.repo, encoding: 'utf8' });
   spawnSync('git', ['worktree', 'prune'], { cwd: o.repo });
   const gone = !existsSync(path) && !git(o.repo, 'worktree', 'list', '--porcelain').includes(`worktree ${path}\n`);
