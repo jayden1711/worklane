@@ -33,10 +33,13 @@ const git = (cwd: string, ...a: string[]) =>
   execFileSync('git', a, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, [MARK]: '', GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null' } }).trim();
 const commit = (cwd: string, msg: string) => git(cwd, '-c', 'user.email=a@example.com', '-c', 'user.name=a', '-c', 'commit.gpgsign=false', 'commit', '-q', '-m', msg);
 
-/** Runs `f` as an instance's coordinator: with the mark in this process's environment, taken off after. */
-async function asCoordinator<T>(f: () => T | Promise<T>): Promise<T> {
+/**
+ * Runs `f` as an instance's coordinator: with the mark in this process's environment (instanceEnv sets it to the
+ * instance's checkout, `repo`), taken off after.
+ */
+async function asCoordinator<T>(f: () => T | Promise<T>, repo?: string): Promise<T> {
   const before = process.env[MARK];
-  process.env[MARK] = '1';
+  process.env[MARK] = repo ?? '1';
   try {
     return await f();
   } finally {
@@ -123,7 +126,7 @@ for (const [kind, plant] of Object.entries(PLANTS)) {
       } catch (e) {
         return { ok: false, why: String((e as { stderr?: unknown }).stderr ?? (e as Error).message) };
       }
-    });
+    }, l.repo);
     assert.equal(l.ran(kind), false, `the planted ${kind} ran during worktree add`);
     if (refusedOutright) {
       assert.equal(made.ok, false, `worktree add went ahead with ${kind} in the config`);
@@ -139,7 +142,7 @@ for (const [kind, plant] of Object.entries(PLANTS)) {
     plant(l);
     const base = git(l.repo, 'rev-parse', 'origin/main');
     const head = git(l.repo, 'rev-parse', 'origin/topic');
-    const pick = await asCoordinator(() => gitSpawnSync(['cherry-pick', `${base}..${head}`], { cwd: path, encoding: 'utf8' }));
+    const pick = await asCoordinator(() => gitSpawnSync(['cherry-pick', `${base}..${head}`], { cwd: path, encoding: 'utf8' }), l.repo);
     assert.equal(l.ran(kind), false, `the planted ${kind} ran during cherry-pick`);
     assert.notEqual(pick.status, 0, `the cherry-pick went through with ${kind} in the config`);
     if (refusedOutright) assert.match(pick.stderr, /refusing to run git/);
@@ -156,7 +159,7 @@ for (const [kind, plant] of Object.entries(PLANTS)) {
     git(l.seed, 'push', '-q', 'origin', 'main');
     const before = git(l.repo, 'rev-parse', 'refs/remotes/origin/main');
     plant(l);
-    await asCoordinator(() => startConfig({ repo: l.repo, remote: 'origin', fallback: cfg }));
+    await asCoordinator(() => startConfig({ repo: l.repo, remote: 'origin', fallback: cfg }), l.repo);
     assert.equal(l.ran(kind), false, `the planted ${kind} ran during fetch`);
     assert.equal(redirected(l), false, 'the fetch went to the host the rewrite named');
     const after = git(l.repo, 'rev-parse', 'refs/remotes/origin/main');
@@ -187,7 +190,7 @@ test('#926 every entry point of the runner is guarded: each refuses git with an 
     });
     out.gitExecFile = await new Promise<string>((done) => void gitExecFile(['checkout', '-q', '-f', 'origin/topic', '--', 'b.txt'], opts, (_e, _o, err) => done(err)));
     return out;
-  });
+  }, l.repo);
   for (const [entry, stderr] of Object.entries(outcomes)) assert.match(stderr, /refusing to run git.*include\.path/, `${entry}: ${stderr}`);
   assert.equal(l.ran('include'), false);
   assert.equal(existsSync(join(l.repo, 'b.txt')), false, 'no checkout happened');
@@ -195,7 +198,8 @@ test('#926 every entry point of the runner is guarded: each refuses git with an 
 
 test('#926 a caller that hands git its own environment is still guarded: the mark is the process\'s, and the settings go on last', async () => {
   const env = await asCoordinator(() => ({ ...gitEnv({ PATH: process.env.PATH, GIT_CONFIG_GLOBAL: '/tmp/mine', GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'core.hooksPath', GIT_CONFIG_VALUE_0: '/mine/hooks' }) }));
-  assert.equal(env.GIT_CONFIG_NOSYSTEM, '1');
+  // System config is root's and read (#926 round 2: it routes github.com on a machine, and in CI); global isn't.
+  assert.equal(env.GIT_CONFIG_NOSYSTEM, undefined);
   assert.equal(env.GIT_CONFIG_GLOBAL, '/dev/null');
   assert.equal(env[MARK], '1', 'the mark goes on to every git the guarded git starts');
   const pairs: [string, string][] = [];
@@ -213,8 +217,8 @@ test("#926 an instance's coordinator environment carries the mark, and git authe
   const home = mkdtempSync(join(tmpdir(), 'git-guard-home-'));
   const pairsOf = (env: NodeJS.ProcessEnv) => Array.from({ length: Number(env.GIT_CONFIG_COUNT) }, (_, n) => [env[`GIT_CONFIG_KEY_${n}`], env[`GIT_CONFIG_VALUE_${n}`]]);
   for (const github of [{ kind: 'gh-config-dir', path: join(home, 'gh') }, { kind: 'app', app_id: 1, installation_id: 2, key_path: join(home, 'key.pem') }]) {
-    const env = instanceEnv({ name: 'shop', home, stateDir: join(home, 'state'), credentials: { github } } as unknown as Instance, {});
-    assert.equal(env[MARK], '1', github.kind);
+    const env = instanceEnv({ name: 'shop', home, stateDir: join(home, 'state'), repo: { path: '/srv/x/shop', repo: 'example/shop' }, credentials: { github } } as unknown as Instance, {});
+    assert.equal(env[MARK], '/srv/x/shop', `${github.kind}: the mark names the checkout`);
     const helpers = pairsOf(env).filter(([k]) => k === 'credential.helper');
     // A reset, then the instance's own helper: what a config file named is cleared, global config isn't read.
     assert.equal(helpers.length, 2, github.kind);
@@ -323,7 +327,7 @@ test('#926 a whole landing as an instance\'s coordinator: with nothing planted i
     await f.c.tick();
     await f.c.idle();
     await f.c.tick();
-  });
+  }, f.repo);
   assert.equal(landed(f.log), 'landed');
 });
 
@@ -335,7 +339,7 @@ test('#926 a whole landing as an instance\'s coordinator: a signing program plan
     // The change is queued to land: an agent's write to .git/config now names its program for signing.
     PLANTS.gpg!(f);
     await f.c.tick();
-  });
+  }, f.repo);
   assert.equal(f.ran('gpg'), false, 'the planted gpg.program ran during the landing');
   assert.notEqual(landed(f.log), 'landed');
 });

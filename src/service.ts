@@ -162,7 +162,8 @@ export function instanceEnv(i: Instance, base: NodeJS.ProcessEnv = process.env):
   env[`${BRAND.envPrefix}_INSTANCE`] = i.name;
   // #926: every git this process runs (all through src/os/git.ts) is guarded: no system or global config, no command
   // or host a config file names, and none run at all while a file sets one of those it can't set over.
-  env[GIT_GUARD_VAR] = '1';
+  // The mark is the checkout's path: a guarded git in one of its worktrees is pinned to it (src/os/git.ts pinRepo).
+  env[GIT_GUARD_VAR] = i.repo?.path ?? '1';
   // INVARIANT: no inherited variable decides where the coordinator's children (gh, git, claude) send credentials;
   // only root's network.json sets a proxy (src/network.ts). This env becomes the coordinator's process.env.
   return outboundEnv(env);

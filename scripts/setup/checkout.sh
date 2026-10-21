@@ -46,9 +46,10 @@ fi
 say "clone $repo into $dest as $coord (authenticated by the App, through the credential helper)"
 run_as "$coord" '
   export WORKLANE_INSTANCE="$1"
-  # As the engine runs an instance git (src/os/git.ts, #926): no system or global config, and never on a config that
-  # names a command or a host for git (the same keys as its REFUSED_KEYS; test/git-config-guard.test.ts ties them).
-  export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null
+  # As the engine runs an instance git (src/os/git.ts, #926): never on a repo config that names a command or a host
+  # for git (the same keys as its REFUSED_KEYS; test/git-config-guard.test.ts ties them). System config belongs to
+  # root and is read: it is how a machine (or the fake GitHub in CI) routes github.com, and the first clone, into a
+  # new directory, has no repo config to read. Only the repo config (local and worktree scope) is checked.
   refused="^(include\.path|includeif\..*\.path|filter\..*\.(clean|smudge|process)|diff\..*\.(command|textconv)|merge\..*\.driver|(mergetool|difftool)\..*\.cmd|url\..*\.(insteadof|pushinsteadof)|remote\..*\.(uploadpack|receivepack|proxy|proxyauthmethod|vcs)|http\.(.*\.)?(ssl[a-z]*|proxy[a-z]*|schannel[a-z]*|pinnedpubkey|curloptresolve|extraheader|cookiefile|savecookies|followredirects)|core\.(worktree|gitproxy|hookspath)|submodule\..*\.update)$"
   # The instance is on the helper line itself: `sudo -u <coordinator> git ...` clears the environment.
   helper="!/usr/local/bin/worklane git-credential --instance $1"
@@ -58,7 +59,7 @@ run_as "$coord" '
   cd "$2"
   # The listing first, on its own: a config git can not read stops here (set -e), never passes as clean.
   listing="$(git config --list --name-only --show-scope --includes)"
-  planted="$(printf "%s\n" "$listing" | awk -F "\t" "\$1 != \"command\" { print \$2 }" | grep -Ei "$refused" || true)"
+  planted="$(printf "%s\n" "$listing" | awk -F "\t" "\$1 == \"local\" || \$1 == \"worktree\" { print \$2 }" | grep -Ei "$refused" || true)"
   if [ -n "$planted" ]; then
     echo "refusing to run git in $2: its git config sets $(printf "%s" "$planted" | tr "\n" " ")which names a command or a host for git; take it out of .git/config (git config --unset ...), then run this again" >&2
     exit 1

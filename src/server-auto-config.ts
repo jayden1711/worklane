@@ -19,6 +19,7 @@ import { GITHUB_API } from './github-hosts.js';
 import { installationTokens } from './github-app.js';
 import { instanceConfigProblems, loadInstanceSetup, type PolicyFile } from './instance.js';
 import { machineOwners } from './machine-owners.js';
+import { coordinatorHooksDir } from './push-guard.js';
 import { writeOwnerOnly } from './os/index.js';
 import { coordinatorUser } from './setup/app-manifest.js';
 
@@ -123,15 +124,39 @@ export interface ServerAutoConfigLine {
 }
 
 /**
- * Mark this process as an instance's (GIT_GUARD_VAR) and add `pairs` after its git config pairs; the returned function
- * puts every variable it touched back as it was.
+ * The git config auto-config runs with (#926), as the coordinator's (instanceEnv): the mark, naming the checkout a
+ * worktree's git is pinned to; no credential helper but the App's; and the coordinator's own hooks dir (its instance
+ * home, this user's only), never the repo's, whose hooks a rewritten worktree link could swap for an agent's.
  */
-function markAsInstance(pairs: [string, string][]): () => void {
+export function autoConfigGitPairs(name: string, home: string): [string, string][] {
+  return [
+    ['credential.helper', ''],
+    ['credential.helper', `!"${process.execPath}" "${fileURLToPath(new URL('./cli.js', import.meta.url))}" git-credential --instance ${name}`],
+    ['core.hooksPath', coordinatorHooksDir(home)],
+  ];
+}
+
+/** autoConfigGitPairs as an environment of its own, with the mark: what a git started by auto-config gets. */
+export function autoConfigGitEnv(name: string, repo: string, home: string): Record<string, string> {
+  const pairs = autoConfigGitPairs(name, home);
+  const env: Record<string, string> = { [GIT_GUARD_VAR]: repo, GIT_CONFIG_COUNT: String(pairs.length) };
+  pairs.forEach(([k, v], n) => {
+    env[`GIT_CONFIG_KEY_${n}`] = k;
+    env[`GIT_CONFIG_VALUE_${n}`] = v;
+  });
+  return env;
+}
+
+/**
+ * Mark this process as `repo`'s instance's (GIT_GUARD_VAR) and add `pairs` after its git config pairs; the returned
+ * function puts every variable it touched back as it was.
+ */
+function markAsInstance(repo: string, pairs: [string, string][]): () => void {
   const env = process.env;
   const n = /^\d{1,4}$/.test(env.GIT_CONFIG_COUNT ?? '') ? Number(env.GIT_CONFIG_COUNT) : 0;
   const names = [GIT_GUARD_VAR, 'GIT_CONFIG_COUNT', ...pairs.flatMap((_, k) => [`GIT_CONFIG_KEY_${n + k}`, `GIT_CONFIG_VALUE_${n + k}`])];
   const before = new Map(names.map((v) => [v, env[v]]));
-  env[GIT_GUARD_VAR] = '1';
+  env[GIT_GUARD_VAR] = repo;
   pairs.forEach(([k, v], j) => {
     env[`GIT_CONFIG_KEY_${n + j}`] = k;
     env[`GIT_CONFIG_VALUE_${n + j}`] = v;
@@ -161,9 +186,9 @@ export async function serverAutoConfig(name: string, o: { answers?: Record<strin
   const owner = o.owner ?? machineOwners()[0];
   // #926: the checkout is agent-writable, and the agent user runs the project's commands in a scratch worktree of it.
   // While auto-config runs, this process is marked as its instance's, so every git it runs is guarded (src/os/git.ts),
-  // as the coordinator's is. The guard clears every credential helper a config file names (checkout.sh's App helper
-  // in .git/config among them): git authenticates through the App's helper set here, as instanceEnv sets it.
-  const unmark = markAsInstance([['credential.helper', ''], ['credential.helper', `!"${process.execPath}" "${fileURLToPath(new URL('./cli.js', import.meta.url))}" git-credential --instance ${name}`]]);
+  // as the coordinator's is: pinned to the checkout's own .git in that worktree, with the App's credential helper (the
+  // guard clears the one checkout.sh wrote into .git/config) and the coordinator's own hooks dir.
+  const unmark = markAsInstance(i.repo.path, autoConfigGitPairs(name, i.home));
   const r = await autoConfigure({
     root: i.repo.path,
     repo: i.repo.repo,
