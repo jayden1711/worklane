@@ -57,6 +57,7 @@ export const HOOK_IMPORTS: readonly string[] = [
   'src/provider-hosts.ts',
   'src/providers.ts',
   'src/quiet-sqlite.ts',
+  'src/read-denials.ts',
   'src/research.ts',
   'src/routing.ts',
   'src/run-feed.ts',
