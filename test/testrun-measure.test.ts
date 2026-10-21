@@ -268,7 +268,7 @@ test('no check, no PR: a measure records only testrun.measure, so the PR runs, t
   const names = [...reach].map((f) => f.slice(join(repoRoot, 'src').length + 1));
   for (const bad of ['testrun/checks.ts', 'testrun/index.ts', 'testrun/setup.ts', 'github-app.ts', 'coordinator/test-runs.ts', 'coordinator/pr-batch.ts']) assert.ok(!names.includes(bad), `measure.ts reaches ${bad}`);
   const cli = readFileSync(join(repoRoot, 'src', 'testrun', 'measure-cli.ts'), 'utf8');
-  assert.deepEqual([...cli.matchAll(/^import [^'"]*['"]([^'"]+)['"]/gm)].map((m) => m[1]).sort(), ['../brand.js', '../events/log.js', '../instance.js', '../os/child-process.js', './host.js', './measure.js', './workspace.js', 'node:path']);
+  assert.deepEqual([...cli.matchAll(/^import [^'"]*['"]([^'"]+)['"]/gm)].map((m) => m[1]).sort(), ['../brand.js', '../events/log.js', '../instance.js', '../os/git.js', './host.js', './measure.js', './workspace.js', 'node:path']);
 });
 
 test('the helper sees exactly what a PR run of the tier sends it: the same calls, command and env, the measured value aside', { skip: !hasPerl && 'perl for the flock holder' }, async () => {
