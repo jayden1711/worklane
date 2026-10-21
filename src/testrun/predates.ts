@@ -7,7 +7,7 @@
 // Only then is anything here called a predates; an up-to-date head that lacks a script deleted it itself.
 // Every git question is asked of the coordinator's clone (the head and the default branch are fetched there), and
 // any that can't be answered counts as "no": this never turns a run into a predates on a guess.
-import { spawnSync } from 'node:child_process';
+import { spawnSync } from '../os/child-process.js';
 import { parse } from 'yaml';
 import { BRAND } from '../brand.js';
 import { defaultBranch } from './workspace.js';

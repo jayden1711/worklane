@@ -2,7 +2,7 @@
 // intake.yaml's `voice` and `siri` keys, an instance's Siri device token store and gateway token, the hub unit's
 // --siri-port, and the tailnet's 8443 forward to the old gateway. Nothing reads or serves any of them now; doctor
 // fails until they are gone, and names the step that removes each.
-import { spawnSync } from 'node:child_process';
+import { spawnSync } from './os/child-process.js';
 import { existsSync, lstatSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { BRAND } from './brand.js';

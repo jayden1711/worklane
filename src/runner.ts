@@ -3,7 +3,7 @@
 // the agent's environment is built from an allowlist: no GitHub token, no
 // git credential helper, no SSH agent, so an agent can't push or write to
 // GitHub even if it tries. It proposes; the coordinator acts.
-import { spawn, spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from './os/child-process.js';
 import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';

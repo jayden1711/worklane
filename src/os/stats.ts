@@ -4,7 +4,7 @@
 // /proc and systemd; elsewhere memory, load and units are null (not measured),
 // disk comes from statfs on every platform. Nothing here throws: whatever can't
 // be read is null, with the reason in `unavailable`.
-import { execFileSync } from 'node:child_process';
+import { execFileSync } from './child-process.js';
 import { readdirSync, readFileSync, statfsSync } from 'node:fs';
 
 export interface MemoryStats {

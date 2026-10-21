@@ -10,7 +10,7 @@
 //   that passes the workflow-pin test (the Actions App is never proposed as a pin: any workflow posts as it).
 // - The block is valid under the engine's own schema, or it isn't offered: no duplicate key, no name the schema or
 //   YAML can't take (those are comments).
-import { execFileSync } from 'node:child_process';
+import { execFileSync } from './os/child-process.js';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { parse, parseDocument } from 'yaml';

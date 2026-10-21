@@ -1,6 +1,6 @@
 // The deploy gate's real git and GitHub calls, and setting it up at coordinator start (only with tests.yaml
 // deploy_gate, and only once the instance's test runs are set up: the gate runs its tiers through them).
-import { spawnSync } from 'node:child_process';
+import { spawnSync } from '../os/child-process.js';
 import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';

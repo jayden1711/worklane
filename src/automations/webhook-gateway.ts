@@ -11,7 +11,7 @@
 //   node is refused (a program here can't reach it through the tailnet name either);
 // - ten refused deliveries from one node in ten minutes lock that node out for fifteen.
 // Refusals made here go to the hub's own hooks-audit.jsonl; the instance logs the rest.
-import { execFileSync } from 'node:child_process';
+import { execFileSync } from '../os/child-process.js';
 import { appendFileSync, readFileSync } from 'node:fs';
 import { createServer, request, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { assertLoopbackHost } from '../dashboard-auth.js';
