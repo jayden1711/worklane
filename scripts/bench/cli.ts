@@ -32,13 +32,19 @@
 // bench user only, after `select`. It takes no argument either: the tasks come from the store's manifest, each name
 // from the task's own instance id under SWE-bench's naming, each digest from the registry's manifest for that name,
 // taken only when pins.json pins it. It prints keys, counts and digests, never an instance id or an image name.
+//
+// `pull --tasks smoke|baseline` (#748, slice 4) pulls that task set's images by their pinned digests and reads each
+// back, then puts each task's base tree in the held-out store, copied out of its image's /testbed through the bench's
+// own container runner (pull.ts): a bare remote with one commit and a clone of it. `--tasks` is the one argument, and
+// it is required: the same choice `bench run` makes, never a default. It prints keys and counts only.
 import { realpathSync } from 'node:fs';
 import { userInfo } from 'node:os';
 import { fileURLToPath } from 'node:url';
+import { redactString } from '../../src/events/redact.js';
 import { currentUser } from '../../src/os/index.js';
 import { benchLane, runtimeDir } from './agent.js';
 import { LOGIN_SWITCH_VAR, requireBenchUser, requireClaudePin, requireSubscription } from './auth.js';
-import { MODE_MAX_USD, PER_TASK_MAX_USD, REAPPROVE_MEAN_USD } from './caps.js';
+import { isMode, MODE_MAX_USD, PER_TASK_MAX_USD, REAPPROVE_MEAN_USD, type Mode } from './caps.js';
 import { Docker, limitsFrom, type DockerOptions, type Limits } from './container.js';
 import { downloadDataset, httpsFetcher, type Fetcher } from './download.js';
 import { assertResearchOff, BENCH_SETTINGS } from './driver.js';
@@ -46,7 +52,8 @@ import { httpsRegistry, writeImages, type ImagesSummary, type RegistryFetch } fr
 import { benchHome, benchRoot, type BenchLayout } from './paths.js';
 import { loadPins, PINS_FILE, TASK_SHAPE, type Pins } from './pins.js';
 import { sandboxProbe, SRT_LABEL } from './probe.js';
-import { loadTasks, MODE_TASKS, RowsUnpinned, writeSelection, type SelectionSummary } from './select.js';
+import { baseTree, pullTasks, Refused, TREE_CAPS, TREES, type TreeCaps } from './pull.js';
+import { loadTasks, MODE_TASKS, RowsUnpinned, writeSelection, type SelectedTask, type SelectionSummary } from './select.js';
 import { heldOutCheck } from './store.js';
 
 export interface CliDeps {
@@ -82,10 +89,11 @@ export interface Check {
 
 /** A variable whose value may be a credential (container.ts SECRET_NAME without the daemon's names, which are paths). */
 const SECRET_VAR = /KEY|TOKEN|SECRET|PASSW|CREDENTIAL|AUTH|COOKIE|SESSION/i;
-/** Token shapes: Anthropic keys and OAuth tokens, GitHub tokens, Slack tokens, AWS key ids, JWTs. */
-const TOKEN_SHAPE = /sk-ant-[\w-]+|\bgh[opsur]_\w{16,}|\bgithub_pat_\w{16,}|\bxox[abprs]-[\w-]+|\bAKIA[0-9A-Z]{16}\b|\beyJ[\w-]{8,}\.[\w-]{8,}\.[\w-]+/g;
-/** An email address: its domain ends in a letters-only label, so a package spec such as `name@0.0.79` is not one. */
-const EMAIL = /[\w.+-]+@[\w-]+(?:\.[\w-]+)*\.[A-Za-z]{2,}\b/g;
+/**
+ * An email address: its domain ends in a letters-only label, so a package spec such as `name@0.0.79` is not one. Read
+ * after the token masks, so a mask may stand in a label (`x@wld_[redacted].com`): the address is still found.
+ */
+const EMAIL = /(?:[\w.+-]|\[redacted\])+@(?:[\w-]|\[redacted\])+(?:\.(?:[\w-]|\[redacted\])+)*\.[A-Za-z]{2,}\b/g;
 /** What scrub() keeps of one detail, and of one printed line. */
 export const DETAIL_MAX = 400;
 const LINE_MAX = 1000;
@@ -99,7 +107,8 @@ const PATH_VALUE = /^(\/|unix:)/;
  * or switch the login (PIECE_MIN characters or more), and every piece of such a value of PIECE_MIN or more that starts
  * or ends it (#851 round 2: a message cut short upstream, as the driver's checks cut a child's stderr, ends in a
  * prefix of the value; this redacts it whatever cut it); every token-shaped string. Email addresses become [email];
- * control and format characters (an ANSI escape's ESC, a bell, a bidi override) a space. Cut to at most `max`
+ * every control character (an ANSI escape's ESC, a bell, a line break) a space; a format character (a zero-width
+ * space, a bidi override) is dropped, before the token shapes are looked for. Cut to at most `max`
  * characters only after all of that.
  *
  * INVARIANT (#884 round 2): first of all, every word shaped like a task is withheld (withholdTasks), on the text as it
@@ -120,7 +129,11 @@ export function scrub(text: string, env: NodeJS.ProcessEnv, max = DETAIL_MAX): s
       for (const piece of [v.slice(0, n), v.slice(v.length - n)]) if (s.includes(piece)) s = s.split(piece).join('[redacted]');
     }
   }
-  s = s.replace(TOKEN_SHAPE, '[redacted]').replace(EMAIL, '[email]').replace(/[\p{Cc}\p{Cf}]/gu, ' ');
+  // A format character (a zero-width space, a bidi override) is dropped before the token shapes are looked for, so it
+  // can't split one (#889 round 3). Then the shared redactor, its broad rules too (a token cut short, a value after a
+  // secret's name); it finds a token right after an ANSI escape itself (its glue points). Then emails, as before, and
+  // every control character becomes a space.
+  s = redactString(s.replace(/\p{Cf}/gu, ''), { broad: true, mask: '[redacted]' }).replace(EMAIL, '[email]').replace(/\p{Cc}/gu, ' ');
   return s.length > max ? `${s.slice(0, max - 3)}...` : s;
 }
 
@@ -375,8 +388,15 @@ const USAGE = [
   "              and the smoke run's plan. Takes no argument: prints keys (t01, ...), never an instance id.",
   "  images      each selected task's image reference (its own name, at a pinned digest the registry serves for it) into",
   '              the held-out store, after bench select. Takes no argument: prints keys, counts and digests only. No image is pulled.',
+  '  pull --tasks smoke|baseline',
+  "              that task set's images, by their pinned digests only (never a tag), each read back; then each task's base",
+  "              tree, copied out of its image's /testbed (no upstream fetch) into the held-out store as a bare remote with one",
+  '              commit and a clone of it. After bench images. --tasks is required. Prints keys and counts only.',
   '  help        this text',
 ];
+
+/** What `bench pull` says about its one argument when it is anything else. */
+export const PULL_ARGS = 'pull takes --tasks smoke or --tasks baseline (the task set bench run will take), and nothing else';
 
 /** The smoke run's plan, for `bench select`: keys and caps only. */
 export function smokePlan(keys: readonly string[]): string[] {
@@ -385,7 +405,8 @@ export function smokePlan(keys: readonly string[]): string[] {
     `smoke run plan: tasks ${smoke.join(' ')} (the first ${MODE_TASKS.smoke} of the ${keys.length}; the baseline runs ${keys[0]}..${keys.at(-1)}, with the same rule and seed, and again on each release)`,
     `  caps: at most $${MODE_MAX_USD.smoke} for the round (--spend), $${PER_TASK_MAX_USD} per task; a round averaging over $${REAPPROVE_MEAN_USD} per task needs the owner's re-approval before the baseline`,
     '  the run takes its tasks from the held-out store (the manifest, the rows, the images file): no instance id or image name on any command line',
-    "  still to come before it can run: the rest of task setup (slice 4: the images file by bench images, then the clones and the image pulls), the engine's runner seam and the test relay (slices 5 and 6, #701), and bench run (slice 7)",
+    "  task setup (slice 4): bench images, then bench pull --tasks smoke (the images by digest, and each task's base tree in the store)",
+    "  still to come before it can run: the engine's runner seam and the test relay (slices 5 and 6, #701), and bench run (slice 7)",
   ];
 }
 
@@ -417,7 +438,63 @@ export async function images(d: CliDeps, pins: () => Pins = loadPins): Promise<n
     say('FAIL', 'run check', message(e));
     return 1;
   }
-  d.out('  next: bench select now passes every line; the clones and the image pulls are the rest of task setup (slice 4, still to come)');
+  d.out('  next: bench select now passes every line; then bench pull --tasks smoke pulls the images and puts each base tree in the store');
+  return 0;
+}
+
+/**
+ * `bench pull --tasks <mode>`: as the bench user, the task set's images pulled by their pinned digests and read back
+ * (pull.ts pullTasks), then each task's base tree into the held-out store (pull.ts baseTree), one task at a time,
+ * stopping at the first refusal. Prints keys and counts only. Its exit code.
+ */
+export async function pull(d: CliDeps, mode: Mode, pins: () => Pins = loadPins, capsIn: Partial<TreeCaps> = {}): Promise<number> {
+  // Tests lower a cap; anything they don't name is the bench's own (TREE_CAPS).
+  const caps: TreeCaps = { ...TREE_CAPS, ...capsIn };
+  d.out(`bench pull (#748): the ${mode} tasks' images by pinned digest, and each task's base tree from its own image into the held-out store; no model call, no upstream fetch`);
+  const say = (status: string, name: string, detail: string) => d.out(`  ${status}  ${name.padEnd(9)}  ${scrub(detail, d.env)}`);
+  const o: DockerOptions = { ...d.docker, env: d.env };
+  let layout: BenchLayout;
+  let p: Pins;
+  let tasks: readonly SelectedTask[];
+  try {
+    if (!isMode(mode)) throw new Error(PULL_ARGS);
+    requireBenchUser(d.env, d.user, d.uid, d.euid);
+    layout = benchRoot(d.env, benchHome(d.env, d.passwdHome));
+    p = pins();
+    tasks = loadTasks(layout, d.uid, p, mode);
+  } catch (e) {
+    say('FAIL', 'tasks', message(e));
+    return 1;
+  }
+  say('PASS', 'tasks', `${mode}: ${tasks.map((t) => t.key).join(' ')}, each a pinned digest under its own task's name (the store's images.json)`);
+  let docker: Docker;
+  try {
+    docker = new Docker(o, d.host ? limitsFrom(d.env, d.host) : limitsFrom(d.env));
+    docker.preflight();
+  } catch (e) {
+    say('FAIL', 'docker', message(e));
+    return 1;
+  }
+  say('PASS', 'docker', "this user's daemon is rootless; every container gets the limits, read back before anything runs in it");
+  try {
+    pullTasks(layout, d.uid, p, mode, o, tasks);
+  } catch (e) {
+    // pullTasks' own refusals name keys only; anything else (loadTasks' again) names keys too.
+    say('FAIL', 'pull', message(e));
+    return 1;
+  }
+  say('PASS', 'pull', `${tasks.length} images pulled by digest, none by tag; each digest read back as images.json and pins.json give it`);
+  for (const t of tasks) {
+    try {
+      const r = await baseTree(layout, d.uid, t, o, docker, caps);
+      say('PASS', t.key, `base tree: /testbed's tree at base_commit (HEAD checked, bound by its commit's hash), its tree hash recorded; a bare remote with one commit and a clone of it, in the store${r.kept ? ' (already there, verified: kept)' : ''}`);
+    } catch (e) {
+      say('FAIL', t.key, e instanceof Refused ? e.message : "its base tree was refused (the store's check failed): nothing kept");
+      return 1;
+    }
+  }
+  say('PASS', 'trees', `${tasks.length} base trees in the store (${TREES}/<key>/), none with upstream history`);
+  d.out(`  next: the ${mode} run's task setup is done; bench run (still to come) copies each task's tree into its own folder`);
   return 0;
 }
 
@@ -512,6 +589,13 @@ export function main(argv: readonly string[], deps: Partial<CliDeps> = {}): numb
   if (command === 'download' && extra.length === 0) return download(d);
   if (command === 'select' && extra.length === 0) return select(d);
   if (command === 'images' && extra.length === 0) return images(d);
+  if (command === 'pull') {
+    // Exactly `--tasks <mode>`: never a default, and nothing else (an argument would sit in the shell's history).
+    if (extra.length === 2 && extra[0] === '--tasks' && isMode(extra[1])) return pull(d, extra[1]);
+    d.out(PULL_ARGS);
+    for (const l of USAGE) d.out(l);
+    return 2;
+  }
   const takesNone = command === 'preflight' || command === 'download' || command === 'select' || command === 'images';
   d.out(command === undefined ? 'no command' : takesNone ? `${command} takes no arguments, not ${scrub(extra.join(' '), env, 200)}` : `unknown command: ${scrub(command, env, 200)}`);
   for (const l of USAGE) d.out(l);

@@ -170,6 +170,15 @@ export interface Sent {
   status: number | null;
   stdout: string;
   stderr: string;
+  /** The command printed past its byte cap and was ended: what it printed is not all there. */
+  overflow?: boolean;
+}
+
+/** A command's output passed its byte cap (TaskRunner.exec's `maxOutBytes`): it was ended, and nothing of it is used. */
+export class OutputTooLarge extends Error {
+  constructor(readonly cap: number) {
+    super(`its output went over ${cap} bytes: ended and refused`);
+  }
 }
 
 /** Runs the docker CLI (tests pass a stand-in). */
@@ -182,17 +191,49 @@ export const spawnDocker: DockerCall = (docker, args, o) => {
 };
 
 /** Runs the docker CLI without blocking, ended (its process killed) when `signal` fires (tests pass a stand-in). */
-export type DockerCallAsync = (docker: string, args: readonly string[], o: { env: NodeJS.ProcessEnv; timeoutMs: number; input?: Buffer; signal?: AbortSignal }) => Promise<Sent>;
+export type DockerCallAsync = (docker: string, args: readonly string[], o: { env: NodeJS.ProcessEnv; timeoutMs: number; input?: Buffer; signal?: AbortSignal; maxOutBytes?: number }) => Promise<Sent>;
 
+/**
+ * The docker CLI, without blocking. With `maxOutBytes`, the first byte of stdout and stderr together past it ends the
+ * CLI (SIGKILL) and drops what was kept: the answer is `overflow`, with no output, so memory stays bounded by the cap.
+ */
 const spawnDockerAsync: DockerCallAsync = (docker, args, o) =>
   new Promise((resolve) => {
-    const out: Buffer[] = [];
-    const err: Buffer[] = [];
+    let out: Buffer[] = [];
+    let err: Buffer[] = [];
+    let bytes = 0;
+    let overflow = false;
     const child = spawn(docker, args, { env: o.env, timeout: o.timeoutMs, ...(o.signal ? { signal: o.signal } : {}), stdio: ['pipe', 'pipe', 'pipe'] });
-    child.stdout.on('data', (b: Buffer) => out.push(b));
-    child.stderr.on('data', (b: Buffer) => err.push(b));
-    child.on('error', (e) => resolve({ status: null, stdout: Buffer.concat(out).toString('utf8'), stderr: `${Buffer.concat(err).toString('utf8')}${String(e)}` }));
-    child.on('close', (status) => resolve({ status, stdout: Buffer.concat(out).toString('utf8'), stderr: Buffer.concat(err).toString('utf8') }));
+    const take = (into: Buffer[]) => (b: Buffer) => {
+      if (overflow) return;
+      bytes += b.length;
+      if (o.maxOutBytes !== undefined && bytes > o.maxOutBytes) {
+        overflow = true;
+        out = [];
+        err = [];
+        child.kill('SIGKILL');
+        return;
+      }
+      into.push(b);
+    };
+    child.stdout.on('data', (b: Buffer) => take(out)(b));
+    child.stderr.on('data', (b: Buffer) => take(err)(b));
+    // WHY: never throw in an event handler (an output too long for one string would): the caller's finally must run.
+    const text = (parts: Buffer[]): string => {
+      try {
+        return Buffer.concat(parts).toString('utf8');
+      } catch {
+        overflow = true;
+        return '';
+      }
+    };
+    const done = (status: number | null, extra = '') => {
+      const stdout = text(out);
+      const stderr = `${text(err)}${extra}`;
+      resolve({ status, stdout: overflow ? '' : stdout, stderr: overflow ? '' : stderr, ...(overflow ? { overflow: true } : {}) });
+    };
+    child.on('error', (e) => done(null, String(e)));
+    child.on('close', (status) => done(status));
     child.stdin.on('error', () => {});
     child.stdin.end(o.input ?? undefined);
   });
@@ -229,13 +270,16 @@ function send(o: DockerOptions, verbs: readonly string[], args: string[], row: T
 }
 
 /** send, for a task's commands: the same checks, then the docker CLI without blocking, ended when `signal` fires. */
-async function sendAsync(o: DockerOptions, verbs: readonly string[], args: string[], row: TaskRow, timeoutMs: number, signal: AbortSignal | undefined, input?: Buffer, base?: Buffer): Promise<Sent> {
+async function sendAsync(o: DockerOptions, verbs: readonly string[], args: string[], row: TaskRow, timeoutMs: number, signal: AbortSignal | undefined, input?: Buffer, base?: Buffer, maxOutBytes?: number): Promise<Sent> {
   check(verbs, args, row, input, base);
   if (signal?.aborted) throw new Error("not run: the task's wall-clock cap has passed");
-  const opt = { env: dockerEnv(o.env), timeoutMs, ...(input ? { input } : {}), ...(signal ? { signal } : {}) };
-  if (o.callAsync) return o.callAsync(o.docker, args, opt);
-  if (o.call) return o.call(o.docker, args, opt);
-  return spawnDockerAsync(o.docker, args, opt);
+  const opt = { env: dockerEnv(o.env), timeoutMs, ...(input ? { input } : {}), ...(signal ? { signal } : {}), ...(maxOutBytes !== undefined ? { maxOutBytes } : {}) };
+  const r = o.callAsync ? await o.callAsync(o.docker, args, opt) : o.call ? o.call(o.docker, args, opt) : await spawnDockerAsync(o.docker, args, opt);
+  // Checked here too, whatever ran the CLI: a stand-in, or a callAsync that doesn't cap.
+  if (maxOutBytes !== undefined && (r.overflow || Buffer.byteLength(r.stdout) + Buffer.byteLength(r.stderr) > maxOutBytes)) throw new OutputTooLarge(maxOutBytes);
+  // With no cap, output too long for one string is dropped, never read as an empty success.
+  if (r.overflow) throw new Error("refused: this docker command's output was too long to read");
+  return r;
 }
 
 /** Whether this daemon is rootless, from `docker info --format '{{json .SecurityOptions}}'`. */
@@ -358,11 +402,15 @@ export class TaskRunner {
     private signal?: AbortSignal,
   ) {}
 
-  /** argv in the container, in `cwd` (under WORK), with only `env` beyond the image's own. Never blocks the driver. */
-  async exec(cwd: string, argv: readonly string[], env: Record<string, string> = {}, timeoutMs = 15 * 60_000, input?: Buffer): Promise<Sent> {
+  /**
+   * argv in the container, in `cwd` (under WORK), with only `env` beyond the image's own. Never blocks the driver. With
+   * `maxOutBytes`, a command that prints more than that (stdout and stderr together) is ended and refused
+   * (OutputTooLarge), keeping none of it.
+   */
+  async exec(cwd: string, argv: readonly string[], env: Record<string, string> = {}, timeoutMs = 15 * 60_000, input?: Buffer, maxOutBytes?: number): Promise<Sent> {
     if (!argv.length) throw new Error('nothing to run');
     const args = ['exec', ...(input ? ['--interactive'] : []), '--workdir', posix.normalize(cwd), ...Object.entries(env).flatMap(([k, v]) => ['--env', `${k}=${v}`]), this.c.name, ...argv];
-    return sendAsync(this.o, ['exec'], args, this.row, timeoutMs, this.signal, input, this.base);
+    return sendAsync(this.o, ['exec'], args, this.row, timeoutMs, this.signal, input, this.base, maxOutBytes);
   }
 
   /** Replace `dst` (under WORK) in the container with the tree in `tar` (a tar stream of a worktree's files). */

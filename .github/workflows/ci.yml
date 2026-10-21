@@ -79,11 +79,24 @@ jobs:
       # A project command run as another user starts in bubblewrap (#713), installed as every machine installs it
       # (machine.sh, as ci-slow's jobs do). The tests that run one for real (separate-users' git check as nobody, the
       # isolation tests) then run on every PR; PROJECT_SANDBOX_REQUIRED=1 below makes a missing sandbox fail them.
-      - name: bubblewrap (machine.sh), startable by another user
+      # The read-only agent home's pins and way tests (#798) stand in for root and a second user in a user namespace
+      # (`unshare --user --map-root-user --map-auto --mount`, nothing real touched). This runner gets what that needs:
+      # subordinate ids for its user, and an AppArmor rule that lets /usr/bin/unshare (only) create user namespaces;
+      # the machine-wide restriction stays on. PROJECT_SANDBOX_REQUIRED=1 makes those tests fail here, never skip.
+      - name: bubblewrap (machine.sh), startable by another user; user namespaces for the stand-in tests
         shell: bash
         run: |
           sudo apt-get update -q && sudo bash scripts/setup/machine.sh
           sudo -n -u nobody /usr/bin/bwrap --dev-bind / / --unshare-user --unshare-pid --die-with-parent --proc /proc -- /bin/sh -c :
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends uidmap
+          me="$(id -un)"
+          grep -q "^$me:" /etc/subuid || sudo usermod --add-subuids 1000000-1065535 "$me"
+          grep -q "^$me:" /etc/subgid || sudo usermod --add-subgids 1000000-1065535 "$me"
+          if [ "$(sysctl -n kernel.apparmor_restrict_unprivileged_userns 2>/dev/null || echo 0)" = 1 ]; then
+            printf '%s\n' 'abi <abi/4.0>,' 'include <tunables/global>' 'profile ci-unshare /usr/bin/unshare flags=(unconfined) {' '  userns,' '}' | sudo tee /etc/apparmor.d/ci-unshare > /dev/null
+            sudo apparmor_parser -r /etc/apparmor.d/ci-unshare
+          fi
+          unshare --user --map-root-user --map-auto --mount /bin/sh -c 'mount -t tmpfs none /mnt && echo "user namespace: ok"'
       - name: this shard's tests
         shell: bash
         env:

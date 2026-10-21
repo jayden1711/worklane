@@ -108,6 +108,476 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { execFileSync } = require('node:child_process');
 
+// The shared redactor (src/events/redact.ts), as a generated copy: this file is installed alone and loads no engine
+// module (scripts/lib/redact-vendor.mjs; test/redact-vendored.test.ts checks the copy is exactly that module).
+// BEGIN generated from src/events/redact.ts: do not edit (node scripts/gen-redact-vendor.mjs --write)
+const sharedRedact = (() => {
+const exports = {};
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.CUT_MARGIN = exports.UNSCANNABLE = exports.MAX_PASSES = exports.UNSCANNABLE_KIND = exports.TRACKER = exports.REDACTION_PATTERNS = exports.isDashboardKey = exports.DASHBOARD_KEY_PREFIX = void 0;
+exports.secretKinds = secretKinds;
+exports.fixedPoint = fixedPoint;
+exports.redactString = redactString;
+exports.redactCut = redactCut;
+exports.readWindow = readWindow;
+exports.redactRecords = redactRecords;
+exports.redact = redact;
+const credentialShaped = (v) => (/[a-z]/.test(v) && /[A-Z]/.test(v) && /\d/.test(v)) || /^[0-9a-fA-F]{32,}$/.test(v);
+const basicShaped = (v) => /[0-9+/=]/.test(v) || (v.length >= 16 && v.length % 4 !== 1 && /[a-z]/.test(v) && /[A-Z]/.test(v)) || basicPair(v);
+function basicPair(v) {
+    let text;
+    try {
+        text = atob(v);
+    }
+    catch {
+        return false;
+    }
+    return /^[\x20-\x7e]*:[\x20-\x7e]*$/.test(text);
+}
+// check-table: never-shrink
+const CREDENTIAL_WORDS = new Set(['token', 'secret', 'secrets', 'password', 'passwd', 'pwd', 'pass', 'passphrase', 'jwt', 'bearer', 'credential', 'credentials', 'authorization']);
+// check-table: never-shrink
+const CREDENTIAL_ENDINGS = ['token', 'secret', 'password', 'passwd', 'accesskey'];
+const credentialWord = (w) => CREDENTIAL_WORDS.has(w) || CREDENTIAL_ENDINGS.some((e) => w.endsWith(e));
+// check-table: never-shrink
+const KEY_QUALIFIERS = new Set(['api', 'access', 'secret', 'private', 'signing', 'encryption', 'master', 'client', 'app', 'auth', 'account', 'service', 'license', 'deploy', 'admin', 'webhook', 'session', 'ssh', 'hmac', 'consumer']);
+function credentialKey(k) {
+    const words = k
+        .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+        .replace(/([A-Z])([A-Z][a-z])/g, '$1 $2')
+        .toLowerCase()
+        .split(/[ _-]+/)
+        .filter(Boolean);
+    const last = words.at(-1) ?? '';
+    if (words.some(credentialWord) || last === 'auth')
+        return true;
+    if (last === 'key')
+        return words.length === 1 || KEY_QUALIFIERS.has(words.at(-2));
+    return last.endsWith('key') && KEY_QUALIFIERS.has(last.slice(0, -3));
+}
+exports.DASHBOARD_KEY_PREFIX = 'wld_';
+const DASHBOARD_KEY_BODY = '[A-Za-z0-9_-]{32,}';
+const isDashboardKey = (key) => new RegExp(`^${exports.DASHBOARD_KEY_PREFIX}${DASHBOARD_KEY_BODY}$`).test(key);
+exports.isDashboardKey = isDashboardKey;
+const KEY_LINE = /-----(BEGIN|END) [A-Z ]*PRIVATE KEY(?: BLOCK)?-----/g;
+function orphanEnd(m) {
+    let open = false;
+    let cut = -1;
+    KEY_LINE.lastIndex = 0;
+    for (let k = KEY_LINE.exec(m); k; k = KEY_LINE.exec(m)) {
+        if (k[1] === 'BEGIN')
+            open = true;
+        else if (open)
+            open = false;
+        else
+            cut = k.index + k[0].length;
+    }
+    return cut === -1 ? m : `[REDACTED PRIVATE KEY]${m.slice(cut)}`;
+}
+// check-table: never-shrink
+const PATTERNS = [
+    [new RegExp(`${exports.DASHBOARD_KEY_PREFIX}${DASHBOARD_KEY_BODY}(?![A-Za-z0-9_-])`, 'g'), `${exports.DASHBOARD_KEY_PREFIX}[REDACTED]`, 'dashboard key'],
+    [/gh[pousr]_[A-Za-z0-9]{30,}(?![A-Za-z0-9])/g, 'gh*_[REDACTED]', 'GitHub token'],
+    [/github_pat_[A-Za-z0-9_]{40,}/g, 'github_pat_[REDACTED]', 'GitHub token'],
+    [/sk-ant-[A-Za-z0-9_-]{20,}/g, 'sk-[REDACTED]', 'API key (sk-)'],
+    [/\bsk-(?:ant-)?[A-Za-z0-9_-]{20,}\b/g, 'sk-[REDACTED]', 'API key (sk-)'],
+    [/(^|[^A-Za-z0-9_])([sr]k)_(?:live|test)_([A-Za-z0-9]{16,})(?![A-Za-z0-9_])/g, (m, pre, k, v) => (/\d/.test(v) ? `${pre}${k}_[REDACTED]` : m), 'Stripe key'],
+    [/AIza[0-9A-Za-z_-]{35}(?![0-9A-Za-z_-])/g, 'AIza[REDACTED]', 'Google API key'],
+    [
+        /(^|[^A-Za-z0-9_-])(?=([A-Za-z0-9_-]*?)eyJ)\2eyJ(?=[A-Za-z0-9_-]{8})(?=([A-Za-z0-9_-]+))\3\.(?=[A-Za-z0-9_-]{8})(?=([A-Za-z0-9_-]+))\4\.[A-Za-z0-9_-]*(?:\.[A-Za-z0-9_-]*)*/g,
+        '$1$2[REDACTED JWT]',
+        'JWT',
+    ],
+    [/(?:AKIA|ASIA)[A-Z0-9]{16}(?![A-Za-z0-9])/g, 'AKIA[REDACTED]', 'AWS access key'],
+    [/xoxe[.-][A-Za-z0-9.-]{10,}(?![A-Za-z0-9])/g, 'xoxe-[REDACTED]', 'Slack token'],
+    [/xox[abprs]-[A-Za-z0-9-]{10,}(?![A-Za-z0-9])/g, 'xox-[REDACTED]', 'Slack token'],
+    [/xapp-[A-Za-z0-9-]{10,}(?![A-Za-z0-9])/g, 'xapp-[REDACTED]', 'Slack app-level token'],
+    [/lin_(?:api|oauth)_[A-Za-z0-9]{20,}(?![A-Za-z0-9])/g, 'lin_[REDACTED]', 'Linear key'],
+    [/https:\/\/hooks\.slack\.com\/services\/[A-Za-z0-9/]+/g, 'https://hooks.slack.com/services/[REDACTED]', 'Slack webhook'],
+    [/tskey-[A-Za-z0-9_-]+/g, 'tskey-[REDACTED]', 'Tailscale key'],
+    [/-----BEGIN [A-Z ]*PRIVATE KEY(?: BLOCK)?-----(?:[\s\S]*?-----END [A-Z ]*PRIVATE KEY(?: BLOCK)?-----|[\s\S]*)/g, '[REDACTED PRIVATE KEY]', 'private key'],
+    [/^[\s\S]*-----END [A-Z ]*PRIVATE KEY(?: BLOCK)?-----/, orphanEnd, 'private key'],
+    [/\b(bearer)\s+[A-Za-z0-9._~+/-]{20,}=*/gi, '$1 [REDACTED]', 'bearer token'],
+    [/\b(basic)(\s+)([A-Za-z0-9+/]{8,}={0,2})/gi, (m, s, sp, v) => (basicShaped(v) ? `${s}${sp}[REDACTED]` : m), 'Basic credential'],
+    [/([a-z0-9+.-]{1,32}:\/\/[^:/\s@]+):[^@\s/]+@/gi, '$1:[REDACTED]@', 'password in a URL'],
+    [/\b0x[0-9a-fA-F]{64}(?![A-Za-z0-9])/g, '0x[REDACTED-32-BYTES]', '32-byte hex key'],
+    [
+        /(\\?")([A-Za-z0-9_-]+)\1(\s*:\s*)\1([A-Za-z0-9_\-.+/=~]{16,})\1/g,
+        (m, q, k, sep, v) => (credentialKey(k) && credentialShaped(v) ? `${q}${k}${q}${sep}${q}[REDACTED]${q}` : m),
+        'secret under a JSON key',
+    ],
+    [/(^|[^A-Za-z0-9])[A-Za-z0-9_-]{23,28}\.[A-Za-z0-9_-]{6,7}\.[A-Za-z0-9_-]{27,}\b/g, '$1[REDACTED]', 'Discord bot token'],
+];
+// check-table: never-shrink
+const BROAD = [
+    [/(?:gh[pousr]_|github_pat_)[A-Za-z0-9_]{8,}/g, (k) => k, 'GitHub token, cut short'],
+    [/sk-ant-[A-Za-z0-9_-]+/g, (k) => k, 'Anthropic key, cut short'],
+    [/\b(gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-ant-[A-Za-z0-9_-]{10,}|xox[abprs]-[A-Za-z0-9-]{10,})/g, (k) => k, "the updater's token rule"],
+    [/xox[abprs]-[A-Za-z0-9_-]+/g, (k) => k, 'Slack token, cut short'],
+    [/eyJ[A-Za-z0-9_-]{8,512}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*/g, (k) => k, 'JWT after a hyphen'],
+    [/\b(bearer)\s+[A-Za-z0-9._~+/=-]{8,}/gi, (k) => `$1 ${k}`, 'short bearer token'],
+    [/([a-z0-9+.-]{1,32}:\/\/)[^\s/@]+@/gi, (k) => `$1${k}@`, 'user info in a URL'],
+    [/\b([A-Za-z_]*(?:token|secret|password|passwd|api[_-]?key))(\s*[=:]\s*)("[^"]*"|'[^']*'|\S+)/gi, (k) => `$1$2${k}`, 'value after a secret name'],
+];
+const CODE_HEADS = new Set(['this', 'self', 'super', 'opts', 'options', 'o', 'ctx', 'context', 'config', 'cfg', 'conf', 'settings', 'props', 'state', 'env', 'process', 'module', 'exports', 'window', 'document', 'globalThis', 'args', 'params', 'req', 'res', 'request', 'response', 'obj', 'result', 'item', 'e', 'err', 'x']);
+function internalHost(m, pre, name) {
+    const lower = name.toLowerCase();
+    const labels = name.split('.').slice(0, lower.endsWith('.home.arpa') || lower.endsWith('.ts.net') ? -2 : -1);
+    const suffix = name.slice(labels.join('.').length + 1);
+    const prose = suffix !== suffix.toLowerCase() && suffix !== suffix.toUpperCase();
+    const code = !labels.some((l) => l.includes('-')) && (CODE_HEADS.has(labels[0]) || labels.some((l) => /[a-z][A-Z]/.test(l)));
+    return prose || code ? m : `${pre}[internal-host]`;
+}
+const OCTET = '(?:25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)';
+const PRIVATE_V4 = [
+    `10\\.${OCTET}`,
+    '172\\.(?:1[6-9]|2\\d|3[01])',
+    '192\\.168',
+    '100\\.(?:6[4-9]|[7-9]\\d|1[01]\\d|12[0-7])',
+    '169\\.254',
+].join('|');
+const IDENTIFIERS = [
+    [/(^|[^A-Za-z0-9._%+-])(?!git@)[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}(?![A-Za-z0-9-])/g, '$1[email]', 'email'],
+    [
+        /(^|[^\w.~/:-]|file:\/\/)\/(?:home|Users|mnt\/[A-Za-z]\/Users)\/([^\s/"'`<>()[\]{},;|\\]+)/g,
+        (m, pre, user) => (user === 'runner' ? m : `${pre}~`),
+        'home path',
+    ],
+    [/(^|[^\w])[A-Za-z]:[\\/][Uu]sers[\\/]([^\\/\s"'`<>|]+)/g, '$1~', 'home path'],
+    [/(^|[^A-Za-z0-9./-]|\/\/)([A-Za-z0-9][A-Za-z0-9.-]*\.(?:internal|localdomain|lan|corp|intranet|home\.arpa|ts\.net|local))(?![A-Za-z0-9-]|\.[A-Za-z0-9])/gi, internalHost, 'internal host'],
+    [new RegExp(`(^|[^\\w.])(?:${PRIVATE_V4})\\.${OCTET}\\.${OCTET}(?![\\w-]|\\.\\d)`, 'g'), '$1[private-ip]', 'private IP'],
+    [/(^|[^\w:])f(?:[cd][0-9a-f]{2}|e[89ab][0-9a-f]):(?:[0-9a-f]{0,4}:){1,6}[0-9a-f]{0,4}(?![\w:])/gi, '$1[private-ip]', 'private IP'],
+];
+exports.REDACTION_PATTERNS = [
+    ...PATTERNS.map(([re, rep, kind]) => ({ kind, re, rep, group: 'secret' })),
+    ...BROAD.map(([re, rep, kind]) => ({ kind, re, rep: rep('[REDACTED]'), group: 'broad' })),
+    ...IDENTIFIERS.map(([re, rep, kind]) => ({ kind, re, rep, group: 'identifier' })),
+];
+// check-table: never-shrink
+const GLUED_PREFIXES = ['ghp_', 'gho_', 'ghu_', 'ghs_', 'ghr_', 'github_pat_', 'sk-', 'sk_live_', 'sk_test_', 'rk_live_', 'rk_test_', 'xoxa-', 'xoxb-', 'xoxe', 'xoxp-', 'xoxr-', 'xoxs-', 'xapp-', 'lin_api_', 'lin_oauth_', 'AKIA', 'ASIA', 'AIza', 'eyJ', '0x', 'Bearer', 'bearer', 'BEARER', 'Basic', 'basic', 'BASIC', exports.DASHBOARD_KEY_PREFIX];
+// check-table: never-shrink
+const GLUE_PARTS = [
+    String.raw `(?:\u001b|\\u001[bB]|\\x1[bB]|\\033|\\e|\^\[)(?:\[[0-?]*[ -/]*[@-~]|[ -/]+[0-~]|[0-~])`,
+    String.raw `\u009b[0-?]*[ -/]*[@-~]`,
+    String.raw `\\(?:u[0-9A-Fa-f]{4}|[nrtbf"\\/])`,
+];
+const GLUE = new RegExp(GLUE_PARTS.join('|'), 'g');
+function gluePoints(s) {
+    const cuts = [...s.matchAll(GLUE)].map((m) => m.index + m[0].length);
+    for (let at = s.indexOf('_'); at !== -1; at = s.indexOf('_', at + 1))
+        if (GLUED_PREFIXES.some((p) => s.startsWith(p, at + 1)))
+            cuts.push(at + 1);
+    return [...new Set(cuts)].filter((c) => c < s.length).sort((a, b) => a - b);
+}
+function freeMark(s) {
+    const held = new Set();
+    for (let i = 0; i < s.length; i++) {
+        const c = s.charCodeAt(i);
+        if (c >= 0xe000 && c <= 0xf8ff)
+            held.add(c);
+    }
+    for (let c = 0xe000; c <= 0xf8ff; c++)
+        if (!held.has(c))
+            return String.fromCharCode(c);
+    return null;
+}
+const expand = (rep, m, groups) => rep.replace(/\$(\d|\$|&)/g, (_, k) => (k === '$' ? '$' : k === '&' ? m : String(groups[Number(k) - 1] ?? '')));
+const breaks = (s) => s.split('\n').length - 1;
+function applyKeepingLines(s, re, rep) {
+    return s.replace(re, (m, ...rest) => {
+        const groups = rest.slice(0, -2).filter((g) => typeof g !== 'object');
+        const out = typeof rep === 'string' ? expand(rep, m, groups) : rep(m, ...groups);
+        return out + '\n'.repeat(Math.max(0, breaks(m) - breaks(out)));
+    });
+}
+exports.TRACKER = Object.freeze({ identifiers: true });
+const apply = (s, re, rep) => (typeof rep === 'string' ? s.replace(re, rep) : s.replace(re, rep));
+const MACHINE_BLOCKS = [
+    ['```done_when', /[^\S\n]*\n/y],
+    ['```research', /[ \t]*\r?\n/y],
+];
+function outsideMachineBlocks(s, f) {
+    const spans = [];
+    for (const [open, lineBreak] of MACHINE_BLOCKS) {
+        for (let at = s.indexOf(open); at !== -1;) {
+            lineBreak.lastIndex = at + open.length;
+            if (!lineBreak.test(s)) {
+                at = s.indexOf(open, at + open.length);
+                continue;
+            }
+            const close = s.indexOf('\n```', lineBreak.lastIndex);
+            if (close === -1)
+                break;
+            spans.push([at, close + 4]);
+            at = s.indexOf(open, close + 4);
+        }
+    }
+    if (!spans.length)
+        return f(s);
+    spans.sort((a, b) => a[0] - b[0]);
+    let out = '';
+    let from = 0;
+    for (const [a, b] of spans) {
+        if (a < from)
+            continue;
+        out += f(s.slice(from, a)) + s.slice(a, b);
+        from = b;
+    }
+    return out + f(s.slice(from));
+}
+exports.UNSCANNABLE_KIND = 'text too large to scan';
+function secretKinds(s) {
+    const kinds = new Set();
+    try {
+        for (const [re, rep, kind] of PATTERNS) {
+            re.lastIndex = 0;
+            if (apply(s, re, rep) !== s)
+                kinds.add(kind);
+        }
+    }
+    catch (e) {
+        if (e instanceof RangeError)
+            return [exports.UNSCANNABLE_KIND];
+        throw e;
+    }
+    return [...kinds].sort();
+}
+const globals = new Map();
+const globalOf = (re) => {
+    let g = globals.get(re);
+    if (!g)
+        globals.set(re, (g = re.flags.includes('g') ? re : new RegExp(re.source, `${re.flags}g`)));
+    return g;
+};
+function spansOf(t, re, rep, rank, out) {
+    const g = globalOf(re);
+    g.lastIndex = 0;
+    for (let m = g.exec(t); m; m = g.exec(t)) {
+        const whole = m[0];
+        g.lastIndex = Math.max(m.index + 1, m.index + whole.length - 64);
+        const groups = m.slice(1).map((x) => x ?? '');
+        const r = typeof rep === 'string' ? expand(rep, whole, groups) : rep(whole, ...groups);
+        if (r === whole) {
+            g.lastIndex = m.index + 1;
+            continue;
+        }
+        let a = 0;
+        while (a < whole.length && a < r.length && whole[a] === r[a])
+            a++;
+        let b = 0;
+        while (b < whole.length - a && b < r.length - a && whole[whole.length - 1 - b] === r[r.length - 1 - b])
+            b++;
+        if (whole.length - b > a)
+            out.push([m.index + a, m.index + whole.length - b, r.slice(a, r.length - b), rank]);
+    }
+}
+const SHAPE_RULES = PATTERNS.map(([re, rep]) => [re, rep]);
+// check-table: never-shrink
+const BROAD_RULES = [...SHAPE_RULES, ...BROAD.map(([re, rep]) => [re, rep('[REDACTED]')])];
+function allSpans(s, rules) {
+    const spans = [];
+    rules.forEach(([re, rep], i) => spansOf(s, re, rep, i, spans));
+    readAt(s, gluePoints(s), rules, spans);
+    return spans;
+}
+function replaceOnce(s, keepLines) {
+    const spans = allSpans(s, SHAPE_RULES);
+    if (!spans.length)
+        return s;
+    spans.sort((x, y) => x[0] - y[0] || y[1] - x[1] || x[3] - y[3]);
+    let out = '';
+    let at = 0;
+    for (let i = 0; i < spans.length;) {
+        const a = spans[i][0];
+        let b = spans[i][1];
+        let j = i + 1;
+        for (; j < spans.length && spans[j][0] < b; j++)
+            b = Math.max(b, spans[j][1]);
+        let pick;
+        for (let k = i; k < j; k++)
+            if (spans[k][0] === a && spans[k][1] === b && (!pick || spans[k][3] < pick[3]))
+                pick = spans[k];
+        const rep = pick ? pick[2] : '[REDACTED]';
+        out += s.slice(at, a) + rep + (keepLines ? '\n'.repeat(Math.max(0, breaks(s.slice(a, b)) - breaks(rep))) : '');
+        at = b;
+        i = j;
+    }
+    return out + s.slice(at);
+}
+exports.MAX_PASSES = 8;
+function fixedPoint(s, pass, keepLines = false) {
+    let out = s;
+    for (let i = 0; i < exports.MAX_PASSES; i++) {
+        const again = pass(out);
+        if (again === out)
+            return out;
+        out = again;
+    }
+    return exports.UNSCANNABLE + (keepLines ? '\n'.repeat(breaks(s)) : '');
+}
+function replaceUnion(s, keepLines) {
+    return fixedPoint(s, (t) => replaceOnce(t, keepLines), keepLines);
+}
+function maskOnce(s, mask, keepLines) {
+    const spans = allSpans(s, BROAD_RULES);
+    const word = (i) => /[A-Za-z0-9_]/.test(s[i] ?? '');
+    readAt(s, [...new Set(spans.flatMap(([a, b]) => [a, b]))].filter((c) => c > 0 && c < s.length && word(c - 1) && word(c)).sort((a, b) => a - b), BROAD_RULES, spans);
+    const masks = [];
+    if (mask)
+        for (let at = s.indexOf(mask); at !== -1; at = s.indexOf(mask, at + mask.length))
+            masks.push([at, at + mask.length]);
+    const kept = outside(merged(spans.map(([a, b]) => [a, b])), masks);
+    if (!kept.length)
+        return s;
+    let out = '';
+    let at = 0;
+    for (const [a, b] of kept) {
+        out += s.slice(at, a) + mask + (keepLines ? '\n'.repeat(breaks(s.slice(a, b))) : '');
+        at = b;
+    }
+    return out + s.slice(at);
+}
+function merged(spans) {
+    const sorted = spans.filter(([a, b]) => b > a).sort((x, y) => x[0] - y[0]);
+    const out = [];
+    for (const [a, b] of sorted) {
+        const last = out.at(-1);
+        if (last && a <= last[1])
+            last[1] = Math.max(last[1], b);
+        else
+            out.push([a, b]);
+    }
+    return out;
+}
+function readAt(s, cuts, rules, spans) {
+    if (!cuts.length)
+        return;
+    const markChar = freeMark(s);
+    if (markChar === null) {
+        for (const [i, c] of cuts.entries()) {
+            const piece = s.slice(c, cuts[i + 1] ?? s.length);
+            const more = [];
+            rules.forEach(([re, rep], k) => spansOf(piece, re, rep, k, more));
+            for (const [a, b, r, k] of more)
+                spans.push([a + c, b + c, r, k]);
+        }
+        return;
+    }
+    let marked = '';
+    let from = 0;
+    for (const c of cuts) {
+        marked += s.slice(from, c) + markChar;
+        from = c;
+    }
+    marked += s.slice(from);
+    const back = (p) => {
+        let lo = 0;
+        let hi = cuts.length;
+        while (lo < hi) {
+            const mid = (lo + hi) >> 1;
+            if (cuts[mid] + mid < p)
+                lo = mid + 1;
+            else
+                hi = mid;
+        }
+        return p - lo;
+    };
+    const more = [];
+    rules.forEach(([re, rep], k) => spansOf(marked, re, rep, k, more));
+    for (const [a, b, r, k] of more)
+        spans.push([back(a), back(b), r.split(markChar).join(''), k]);
+}
+function outside(spans, regions) {
+    const out = [];
+    let r = 0;
+    for (const [a, b] of spans) {
+        while (r < regions.length && regions[r][1] <= a)
+            r++;
+        let from = a;
+        for (let k = r; k < regions.length && regions[k][0] < b; k++) {
+            const [x, y] = regions[k];
+            if (x > from)
+                out.push([from, x]);
+            from = Math.max(from, y);
+        }
+        if (from < b)
+            out.push([from, b]);
+    }
+    return out;
+}
+function maskUnion(s, mask, keepLines) {
+    return fixedPoint(s, (t) => maskOnce(t, mask, keepLines), keepLines);
+}
+exports.UNSCANNABLE = '[REDACTED: too large to scan]';
+function redactString(s, o = {}) {
+    try {
+        return redactOrThrow(s, o);
+    }
+    catch (e) {
+        if (e instanceof RangeError)
+            return exports.UNSCANNABLE + (o.keepLines ? '\n'.repeat(breaks(s)) : '');
+        throw e;
+    }
+}
+function redactOrThrow(s, o) {
+    const put = o.keepLines ? applyKeepingLines : apply;
+    let out = o.broad ? maskUnion(s, o.mask ?? '[REDACTED]', o.keepLines === true) : replaceUnion(s, o.keepLines === true);
+    if (o.identifiers)
+        out = outsideMachineBlocks(out, (part) => IDENTIFIERS.reduce((t, [re, rep]) => put(t, re, rep), part));
+    return out;
+}
+exports.CUT_MARGIN = 16 * 1024;
+function redactCut(s, max, o = {}) {
+    const r = redactString(s.length > max + exports.CUT_MARGIN ? readWindow(s, max + exports.CUT_MARGIN) : s, o);
+    return r.length > max ? r.slice(0, max) : r;
+}
+function readWindow(s, end) {
+    if (s.length <= end)
+        return s;
+    for (let i = end - 1; i >= 0; i--)
+        if (/\s/.test(s[i]))
+            return s.slice(0, i + 1);
+    return '';
+}
+function redactRecords(records, o = {}) {
+    const lines = redactString(records.join('\n'), { ...o, keepLines: true }).split('\n');
+    const out = [];
+    let at = 0;
+    for (const r of records) {
+        const n = breaks(r) + 1;
+        out.push(lines.slice(at, at + n).join('\n'));
+        at += n;
+    }
+    return out;
+}
+function redact(value, o = {}) {
+    if (typeof value === 'string')
+        return redactString(value, o);
+    if (Array.isArray(value))
+        return value.map((v) => redact(v, o));
+    if (value && typeof value === 'object')
+        return Object.fromEntries(redactKeys(Object.entries(value), o));
+    return value;
+}
+function redactKeys(entries, o) {
+    const keys = entries.map(([k]) => redactString(k, o));
+    const used = new Set(entries.filter(([k], i) => keys[i] === k).map(([k]) => k));
+    return entries.map(([k, v], i) => {
+        let key = keys[i];
+        if (key !== k) {
+            const base = key;
+            for (let n = 2; used.has(key); n++)
+                key = `${base} (${n})`;
+            used.add(key);
+        }
+        return [key, redact(v, o)];
+    });
+}
+return exports;
+})();
+// END generated from src/events/redact.ts
+
 // Fixed paths: the installed updater takes none from its caller.
 const CONFIG = '/etc/worklane/updates.json';
 const LOG = '/var/lib/worklane/updates.jsonl';
@@ -894,14 +1364,13 @@ function health(samples, startedAt, now) {
   return now - startedAt >= HEALTH_MS ? 'failed' : 'wait';
 }
 
-/** Secrets that could appear in a service's journal, replaced before anything is logged. */
+/**
+ * Secrets that could appear in a service's journal, replaced before anything is logged: the shared redactor's every
+ * shape (sharedRedact, the generated copy of src/events/redact.ts at the top of this file, #889), and its broad rules
+ * (a token cut short, a clone URL's user:token@, a value after a secret's name, a short bearer token), as [redacted].
+ */
 function redact(text) {
-  return String(text)
-    .replace(/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g, '[redacted key]')
-    .replace(/\b(gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-ant-[A-Za-z0-9_-]{10,}|xox[abprs]-[A-Za-z0-9-]{10,})/g, '[redacted]')
-    .replace(/\b(bearer)\s+[A-Za-z0-9._~+/=-]{8,}/gi, '$1 [redacted]')
-    .replace(/\b([a-z][a-z0-9+.-]*:\/\/)[^\s/@]+@/gi, '$1[redacted]@') // WHY: a clone URL can carry user:token@
-    .replace(/\b([A-Za-z_]*(?:token|secret|password|passwd|api[_-]?key))(\s*[=:]\s*)("[^"]*"|'[^']*'|\S+)/gi, '$1$2[redacted]');
+  return sharedRedact.redactString(String(text), { broad: true, mask: '[redacted]' });
 }
 
 /**
@@ -1620,6 +2089,8 @@ async function run(deps) {
 
 async function runOnce(deps, seen) {
   const cfg = deps.config();
+  // Read-only and never throws: said every run, updates on or off (#898).
+  watchSudoers(deps);
   watchSigners(deps, cfg);
   if (!cfg || cfg.enabled !== true) {
     stuckCheck(deps, cfg, null); // off: never an alert, and an open one is closed
@@ -2231,6 +2702,133 @@ function signersChangeText(c) {
 }
 const SIGNERS_ACK = 'sudo bash /opt/worklane/current/scripts/setup/updates.sh --acknowledge-signers';
 
+// ---------- the machine helper's sudoers rule, watched (#898) ----------
+
+// syncHelpers keeps the machine helper's bytes in step with the engine, but its sudoers rule is machine-helper.sh's and
+// is never touched here: after an upgrade the rule can be an older engine's (missing a command the new helper takes,
+// or naming one it no longer should). Every run, the installed engine's `machine-helper.sh --check` (read-only) says
+// whether it is current; a stale one is named in the journal and as an incident, with the exact command that rewrites
+// it. Nothing here writes the rule: only that script does, and only ever its own output.
+// The check says which of two cases applies (the owner's rule):
+//   - "stale" (exit 3): the rewrite only drops grants, so the command needs no flag;
+//   - "wider" (exit 4): the engine's rule grants what the installed one doesn't, so the command carries
+//     --replace-sudoers, root's explicit yes.
+const SUDOERS_INCIDENT = 'machine_sudoers_stale';
+const CHECK_PATH = '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin';
+const CHECK_EXIT = { 0: ['absent', 'current'], 3: ['stale'], 4: ['wider'] };
+
+/**
+ * `machine-helper.sh --check` of the engine in `engineDir`: { state: current|absent|stale|wider|unknown, detail, fix? },
+ * or null when that engine has no machine-helper.sh, or when this process isn't `owner`. The owner is root for the
+ * updater; anyone else (a test with the real deps) never runs the installed engine's script. The script and the lib.sh
+ * it sources must be `owner`'s regular files, writable by no one else, or nothing runs (unknown, said why). For stale and
+ * wider, detail is the check's last line followed by the difference it printed, and fix is the command that line names.
+ */
+function machineSudoersCheck(engineDir, exec = execFileSync, owner = 0, top = '/') {
+  if (typeof process.getuid !== 'function' || process.getuid() !== owner) return null;
+  if (!fs.existsSync(path.join(engineDir, 'scripts', 'setup', 'machine-helper.sh'))) return null;
+  const unchecked = (why) => ({ state: 'unknown', detail: `the machine helper's sudoers rule wasn't checked: ${why}` });
+  // The whole path, as the machine helper's rootScript() checks the engine's add-project.sh before running it as root.
+  // The engine directory is resolved once (/opt/worklane/current is a link), and below it nothing may be a link: the
+  // script and the lib.sh it sources must be where the resolved engine has them. Every directory from them up to `top`
+  // (/ on a machine) must be `owner`'s and writable by no one else. bash then runs the resolved path, so the dirname "$0"
+  // it sources lib.sh from is the directory checked here.
+  let real;
+  try {
+    real = fs.realpathSync(engineDir);
+  } catch (e) {
+    return unchecked(firstLine(e));
+  }
+  const setup = path.join(real, 'scripts', 'setup');
+  const script = path.join(setup, 'machine-helper.sh');
+  for (const f of [script, path.join(setup, 'lib.sh')]) {
+    let resolved;
+    try {
+      resolved = fs.realpathSync(f);
+    } catch (e) {
+      return unchecked(firstLine(e));
+    }
+    if (resolved !== f) return unchecked(`${f} goes through a link (to ${resolved})`);
+    const problem = rootFileProblem(readRootFile(f), owner, f) || pathProblem(path.dirname(f), owner, top);
+    if (problem) return unchecked(problem);
+  }
+  let out;
+  let status = 0;
+  try {
+    out = exec('bash', [script, '--check'], { encoding: 'utf8', cwd: '/', env: { PATH: CHECK_PATH, LANG: 'C.UTF-8' }, stdio: ['ignore', 'pipe', 'pipe'], timeout: 60_000 });
+  } catch (e) {
+    out = e && e.stdout;
+    status = e && typeof e.status === 'number' ? e.status : -1;
+    if (status !== 3 && status !== 4) return { state: 'unknown', detail: `couldn't check the machine helper's sudoers rule: ${firstLine(e)}` };
+  }
+  const lines = String(out || '').trim().split('\n');
+  const line = lines.pop() || '';
+  const m = /^(absent|current|stale|wider): /.exec(line);
+  // INVARIANT: a state counts only with its own exit code (CHECK_EXIT); anything else is unknown.
+  if (!m || !(CHECK_EXIT[status] || []).includes(m[1])) return { state: 'unknown', detail: `the machine helper's sudoers check gave no answer: ${line.slice(0, 300)}` };
+  if (m[1] === 'absent' || m[1] === 'current') return { state: m[1], detail: line.slice(0, 600) };
+  // The command the check named, through the engine path it was given (the current link), not the resolved one.
+  const logical = (t) => t.split(`${real}/`).join(`${engineDir.replace(/\/+$/, '')}/`);
+  const diff = lines.filter((l) => /^[+-]/.test(l) && !/^(\+\+\+|---) /.test(l));
+  // INVARIANT (#902 round 7, F3): a pinned --replace-sudoers command is never shown beside a diff cut to fit. For
+  // wider, the incident says how many lines the engine's rule adds and drops, and its fix is `--check` at a root shell,
+  // which prints the whole diff and the pinned command together.
+  if (m[1] === 'wider') {
+    const added = diff.filter((l) => l.startsWith('+')).length;
+    const dropped = diff.length - added;
+    const fix = `sudo bash ${engineDir.replace(/\/+$/, '')}/scripts/setup/machine-helper.sh --check`;
+    const detail = `wider: the engine's rule grants what the installed machine helper rule doesn't (${added} line${added === 1 ? '' : 's'} added, ${dropped} dropped); run the fix at a root shell for the whole diff and the command, pinned to it, that installs it`;
+    return { state: 'wider', detail: detail.slice(0, 600), fix: fix.slice(0, 300) };
+  }
+  const fix = /: (sudo (?:bash|rm -f) \S.*)$/.exec(line);
+  const detail = logical(`${line}${diff.length ? ` The diff: ${diff.join(' | ')}` : ''}`);
+  return { state: m[1], detail: detail.slice(0, 600), ...(fix ? { fix: logical(fix[1]).slice(0, 300) } : {}) };
+}
+
+/** The first directory from `dir` up to `top` (inclusive) that isn't `owner`'s alone, or null when none. */
+function pathProblem(dir, owner, top = '/') {
+  let p = dir;
+  for (;;) {
+    let st;
+    try {
+      st = fs.lstatSync(p);
+    } catch {
+      return `${p} is missing`;
+    }
+    if (!st.isDirectory()) return `${p} isn't a directory`;
+    if (st.uid !== owner || st.mode & 0o022) return `${p} isn't ${owner === 0 ? "root's" : `uid ${owner}'s`} alone (owner ${st.uid}, mode ${(st.mode & 0o777).toString(8)})`;
+    if (p === top) return null;
+    const up = path.dirname(p);
+    if (up === p) return null;
+    p = up;
+  }
+}
+
+/**
+ * Every run, updates on or off: a stale or wider machine helper rule is said and raised, its detail saying which, its
+ * fix the command for that case. A current rule, or none, closes it. Never throws.
+ */
+function watchSudoers(deps) {
+  if (typeof deps.sudoersCheck !== 'function') return;
+  let r;
+  try {
+    r = deps.sudoersCheck();
+  } catch (e) {
+    r = { state: 'unknown', detail: `couldn't check the machine helper's sudoers rule: ${firstLine(e)}` };
+  }
+  if (!r) return;
+  try {
+    if (r.state === 'stale' || r.state === 'wider') {
+      if (typeof deps.warn === 'function') deps.warn(`machine_sudoers_stale: ${r.detail}`);
+      if (typeof deps.raiseIncident === 'function') deps.raiseIncident(SUDOERS_INCIDENT, 'machine-helper', r.detail, r.fix || 'sudo bash /opt/worklane/current/scripts/setup/machine-helper.sh --check');
+    } else if (r.state === 'current' || r.state === 'absent') {
+      if (typeof deps.resolveIncident === 'function') deps.resolveIncident(SUDOERS_INCIDENT, 'machine-helper');
+    } else if (typeof deps.warn === 'function') deps.warn(r.detail);
+  } catch {
+    // the journal has what was said; an alert never stops an update
+  }
+}
+
 /** Every run, before anything else: the signers file against its record. A change is logged, said on stderr, and raised. */
 function watchSigners(deps, cfg) {
   if (typeof deps.signersCheck !== 'function') return;
@@ -2387,6 +2985,8 @@ function realDeps(print = (line) => process.stdout.write(`${line}\n`), files = {
     signersCheck: (file) => checkSigners(file),
     signersHold: () => signersHold(),
     signersAcknowledged: () => takeAcknowledged(),
+    // The installed engine's check, through the current link: the command it names is the one that stays valid.
+    sudoersCheck: () => machineSudoersCheck(path.join(OPT, 'current')),
     // stderr is the unit's journal: a line there needs neither the dashboard nor a coordinator.
     warn: (line) => process.stderr.write(`${line}\n`),
     switchTo: (sha) => {
@@ -2424,6 +3024,7 @@ if (require.main === module) {
   );
 }
 module.exports = { slotPid, drainStep, drainDeadline, drainAfterMs, inFlight, reopen, DRAIN, DRAIN_TTL_MS, DRAIN_INSTALL_TTL_MS, DRAIN_MARGIN_MS, redactDeep, appendLog, sandboxOnTimeout, sandboxCommand, parseSandbox, sandboxVerdict, sandboxWaitMs, verifySandbox, SANDBOX_INCIDENT, SANDBOX_POLL_MS, stuckStep, stuckAlertMs, STUCK_INCIDENT, IDLE_AFTER_MS, journalLine, makeNote, realDeps, chooseCommit, checkRunsOf, firstParentLine, lookbackOf, pendingWaitMs, saveJson, CHECKS_SPACING_MS, VERDICT_TTL_MS, syncHelpers, HELPERS, canaryConfig, canaryCommand, dailyDue, DAY_MS, channelOf, newer, parseTags, newestRelease, verifyRelease, parseInstance, migrateCommand, restoreCommand, parseMigrate, repoFromUrl, fastForward, evaluateChecks, RETIRED_CHECKS, ENGINE_CHECK_SOURCES, checkPins, ruleApps, quiet, parseUnits, parseShow, health, redact, buildCommand, binTargets, binProblems, installTree, run, BUILD_SCRIPT, HEALTH_MS, STABLE_MS };
+Object.assign(module.exports, { SUDOERS_INCIDENT, machineSudoersCheck, watchSudoers });
 Object.assign(module.exports, { SIGNERS_STATE, SIGNERS_INCIDENT, signersDigest, readSignersState, checkSigners, expectSigners, recordSigners, signersHold, acknowledgeSigners, takeAcknowledged, signersChangeText });
 Object.assign(module.exports, { SELF, SELF_PREV, SELF_RECORD, SELF_OFF, SELF_ROLLBACK, readRootFile, selfUpdateOff, verifiedUpdater, syncSelf, setupBefore, setupRecord });
 Object.assign(module.exports, { releaseBase });
