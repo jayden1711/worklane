@@ -246,4 +246,10 @@ A person's own session isn't affected.
 - it isn't open on main;
 - every mutant listed for it in `test/adversarial/mutants.json` is killed by the suite.
 
-A mutant breaks the guarantee in memory, and some case of that guarantee must then fail. Run `node test/adversarial/run-mutants.mjs` after a build to re-measure; `--whole` also checks that no other guarantee's case fails. A mutant found to survive is added to the list, and its guarantee isn't covered until a case kills it. A guarantee open on main is listed as open, with its issue.
+A mutant breaks the guarantee in memory, and some case of that guarantee must then fail on an assertion: a case that crashes isn't a kill. Each mutant's anchor must start in code, never in a comment.
+
+To re-measure, run `node test/adversarial/run-mutants.mjs` after a build. With `--whole` it also checks that no other case fails.
+
+A mutant found to survive is added to the list, and its guarantee isn't covered until a case kills it. A guarantee open on main is listed as open, with its issue.
+
+A guarantee whose code lives in modules the suite never loads can't be measured this way, and is listed as unmeasured, not covered. Today that is the refusal to activate a rule that blocks a must-allow example: it is the exit of `guardrails check` and doctor's fail, in `src/cli.ts` and `src/doctor.ts`.

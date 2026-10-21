@@ -41,14 +41,17 @@ import { checkGuardrails } from '../../src/guardrails/check.js';
 import { globToRegExp } from '../../src/guardrails/glob.js';
 import { runHook, type HookOutput } from '../../src/hook.js';
 import { agentSettings } from '../../src/install.js';
-import { laneRuns, PolicyFile, type Instance } from '../../src/instance.js';
+import { laneRuns, PolicyFile, researchLanes, type Instance } from '../../src/instance.js';
+import { CHAT_LANE } from '../../src/intake/chat.js';
 import { withDeniedReads } from '../../src/sandbox.js';
+import { HELD_OUT_ENV } from '../../src/held-out-paths.js';
+import { expSecretGlobs } from '../../src/experiments/paths.js';
 import { RunFeed } from '../../src/run-feed.js';
 import { which } from '../../src/os/index.js';
 import { checkedPush, type PushLimits } from '../../src/push-check.js';
 import { installPrePushHook } from '../../src/push-guard.js';
 import { RunRecorder } from '../../src/run-record.js';
-import { CliRunner, type RunRequest } from '../../src/runner.js';
+import { CliRunner, type RunAs, type RunRequest } from '../../src/runner.js';
 import { scanCommit, scanFile, scanPath, scanRange } from '../../src/scan/secrets.js';
 import { engineCli, exampleProject, repoRoot, STDIN_LINE } from '../helpers.js';
 
@@ -166,9 +169,9 @@ function guardProject(p: { network?: boolean } = {}) {
   const taskFile = join(tasks, 'exp-1.json');
   writeFileSync(taskFile, JSON.stringify({ id: 'exp-1', done_when: [{ manual: 'checked by the coordinator' }], frozen: [], hidden: ['evals-secret/**'] }));
   // `projectDir`: the session's project as the agent CLI names it (CLAUDE_PROJECT_DIR); the checkout unless said.
-  const call = async (tool: string, input: Record<string, unknown>, o: { cwd?: string; task?: string | null; agent?: boolean; projectDir?: string } = {}): Promise<Answer> => {
+  const call = async (tool: string, input: Record<string, unknown>, o: { cwd?: string; task?: string | null; agent?: boolean; projectDir?: string; env?: Record<string, string> } = {}): Promise<Answer> => {
     const task = o.agent === false || o.task === null ? {} : { [TASK]: o.task ?? taskFile };
-    const env = { ...process.env, CLAUDE_PROJECT_DIR: o.projectDir ?? dir, [STATE]: stateDir, ...(o.agent === false ? {} : { [AGENT]: '1' }), ...task };
+    const env = { ...process.env, CLAUDE_PROJECT_DIR: o.projectDir ?? dir, [STATE]: stateDir, ...(o.agent === false ? {} : { [AGENT]: '1' }), ...task, ...o.env };
     return answerOf(await runHook('pre-tool-use', { hook_event_name: 'PreToolUse', cwd: o.cwd ?? dir, tool_name: tool, tool_input: input, session_id: 'adversarial' }, env));
   };
   return { dir, tasks, taskFile, call };
@@ -179,12 +182,14 @@ interface ToolAttack {
   tool: string;
   input: Record<string, unknown>;
   cwd?: string;
+  /** Variables the run's environment adds (the hook reads some of its secret paths from there). */
+  env?: Record<string, string>;
 }
 const bash = (what: string, command: string, cwd?: string): ToolAttack => ({ what, tool: 'Bash', input: { command }, ...(cwd ? { cwd } : {}) });
 
 /** The answer for each attack that isn't a deny by `rule`. */
 const refusedBy = (g: ReturnType<typeof guardProject>, rule: RegExp, o: { task?: string | null } = {}) => async (a: ToolAttack) => {
-  const v = await g.call(a.tool, a.input, { ...(a.cwd ? { cwd: a.cwd } : {}), ...o });
+  const v = await g.call(a.tool, a.input, { ...(a.cwd ? { cwd: a.cwd } : {}), ...(a.env ? { env: a.env } : {}), ...o });
   return v.decision === 'deny' && rule.test(v.reason) ? null : `${v.decision} ${v.reason}`.trim();
 };
 
@@ -298,6 +303,15 @@ test(`adversarial guards / tool.no-read-secrets (${doc('- read secret files;')})
     bash('cat a held-out eval case', `cat ${join(g.tasks, 'store', 'evals', 'held-out', 'case-1.json')}`),
     { what: 'Read a dashboard key', tool: 'Read', input: { file_path: join(g.tasks, 'store', 'dashboard-token') } },
     bash('cat a dashboard key', `cat ${join(g.tasks, 'store', 'dashboard-token')}`),
+    // The held-out store this instance names (wherever it is), and the experiments' state and files.
+    { what: 'Read the held-out store the instance names', tool: 'Read', input: { file_path: join(g.tasks, 'named-store', 'case-1.json') }, env: { [HELD_OUT_ENV]: join(g.tasks, 'named-store') } },
+    ...expSecretGlobs().map((glob, i) => ({ what: `Read an experiment's file (${i + 1} of ${expSecretGlobs().length})`, tool: 'Read', input: { file_path: join(glob.replace(/\/\*\*$/, ''), 'job-1', 'out.json') } })),
+    // What the guard can't read a path from is refused, never let through.
+    bash("an option's value after =", 'grep --file=.env pattern'),
+    bash('a word that expands to too many paths to check', `cat ${'{a,b}'.repeat(7)}.env`),
+    { what: 'a Glob pattern with a backslash', tool: 'Glob', input: { pattern: 'src/\\*.js' } },
+    { what: 'a Grep glob with a backslash', tool: 'Grep', input: { pattern: 'x', glob: 'src/\\*.js' } },
+    { what: 'a tool given more values than the guard checks', tool: 'mcp__files__read', input: { paths: Array.from({ length: 1001 }, (_, i) => `src/f${i}.js`) } },
   ];
   assert.deepEqual(await letThrough(secrets, refusedBy(g, /secret-path/)), [], 'reads of secret files the guard let through');
 
@@ -357,6 +371,7 @@ test(`adversarial guards / tool.domain-allowlist (${doc('- fetch a domain outsid
     ['a name that ends like a wildcard entry, without its dot', 'https://evilnpmjs.org/'],
     ['a name that ends with an exact entry, without a dot before it', 'https://evildocs.github.com/'],
     ['a name that ends with an exact entry after another label', 'https://evil.docs.github.com/'],
+    ['a wildcard entry inside a name, not at its end', 'https://registry.npmjs.org.evil.example/'],
     ['an allowed name as a path', 'https://evil.example/docs.github.com'],
     ['an IPv4 literal', 'http://127.0.0.1:8080/'],
     ['an IPv6 literal', 'http://[::1]/'],
@@ -428,8 +443,14 @@ test(`adversarial guards / tool.unreadable-task-file-denies (${doc("A task file 
   ];
   assert.deepEqual(
     await letThrough(files, async (f) => {
-      const v = await g.call('Read', { file_path: join(g.dir, 'src', 'price.js') }, { task: f.path });
-      return v.decision === 'deny' && /task file .* can't be read/.test(v.reason) ? null : `${v.decision} ${v.reason}`.trim();
+      // Every kind of call: a file tool, the shell, the web.
+      const calls: [string, Record<string, unknown>][] = [['Read', { file_path: join(g.dir, 'src', 'price.js') }], ['Bash', { command: 'cat src/price.js' }], ['WebFetch', { url: 'https://docs.github.com/x', prompt: 'x' }]];
+      const through: string[] = [];
+      for (const [tool, input] of calls) {
+        const v = await g.call(tool, input, { task: f.path });
+        if (!(v.decision === 'deny' && /task file .* can't be read/.test(v.reason))) through.push(`${tool}: ${v.decision} ${v.reason}`.trim());
+      }
+      return through.length ? through.join('; ') : null;
     }),
     [],
     'task files the guard skipped instead of refusing the call',
@@ -459,12 +480,17 @@ test(`adversarial guards / tool.hook-covers-tools (${doc('A hook runs before eve
 });
 
 test(`adversarial guards / tool.hook-covers-tools (${doc('A hook runs before every agent tool call')}): a run's --settings sends every tool the guard's rules decide on to the hook`, { skip: !posix && 'POSIX stand-in claude' }, async () => {
-  // What a run's --settings really carries: runSettings rebuilds the hooks from the instance's and the lane's.
-  const cwd = mkdtempSync(join(tmpdir(), 'adv-cwd-'));
-  const { r, s } = await agentRun({ guardrails: instanceHome(JSON.stringify(goodSettings()), cwd).guardrails, cwd });
-  assert.ok(s.ran(), `${r.reason}: ${r.detail}`);
-  const atRun = (s.log().settings as { hooks?: Record<string, { matcher?: string; hooks: { command: string }[] }[]> }).hooks?.PreToolUse ?? [];
-  assert.deepEqual(toolsMissed("a run's --settings", atRun), [], "tools a run's guard hook never sees");
+  // What a run's --settings really carries: runSettings rebuilds the hooks from the instance's and the lane's. With no
+  // lanes, and in the sandboxed lanes every instance has.
+  const missed: string[] = [];
+  for (const lanes of [false, true]) {
+    const cwd = mkdtempSync(join(tmpdir(), 'adv-cwd-'));
+    const { r, s } = await agentRun({ guardrails: instanceHome(JSON.stringify(goodSettings()), cwd).guardrails, cwd, ...(lanes ? { lanes: sandboxLanes(cwd).lanes } : {}) });
+    assert.ok(s.ran(), `${r.reason}: ${r.detail}`);
+    const atRun = (s.log().settings as { hooks?: Record<string, { matcher?: string; hooks: { command: string }[] }[]> }).hooks?.PreToolUse ?? [];
+    missed.push(...toolsMissed(`a run's --settings${lanes ? ', in a sandboxed lane' : ''}`, atRun));
+  }
+  assert.deepEqual(missed, [], "tools a run's guard hook never sees");
 });
 
 // ---- Agent runs: the settings check, the sandbox settings, the environment. ----
@@ -531,7 +557,7 @@ const bothLaneKinds = <T extends { what: string }>(items: readonly T[]) => items
 const request = (cwd: string, more: Partial<RunRequest> = {}): RunRequest => ({ role: 'worker', prompt: 'p', cwd, model: 'm', allowedTools: [], maxTurns: 1, maxBudgetUsd: 1, stallMs: 30_000, timeoutMs: 30_000, ...more });
 
 /** One agent run through the real runner with a stand-in claude; settled, so work a killed run would have done shows. */
-async function agentRun(o: { guardrails?: () => Settings; lanes?: ReturnType<typeof laneRuns>; base?: NodeJS.ProcessEnv; mode?: Mode; staleFrom?: string; cwd?: string; req?: Partial<RunRequest> }) {
+async function agentRun(o: { guardrails?: () => Settings; lanes?: Lanes; base?: NodeJS.ProcessEnv; mode?: Mode; staleFrom?: string; cwd?: string; req?: Partial<RunRequest> }) {
   const s = standIn(o.mode, o.staleFrom);
   const cwd = o.cwd ?? mkdtempSync(join(tmpdir(), 'adv-cwd-'));
   const r = await new CliRunner('cli', o.base ?? { PATH: process.env.PATH, HOME: fixtureHome() }, s.bin, undefined, o.lanes, undefined, {}, o.guardrails).run(request(cwd, o.req));
@@ -588,6 +614,11 @@ test(`adversarial guards / settings.required (${doc("An agent run starts only wi
   const inLane = await agentRun({ guardrails: instanceHome(JSON.stringify(good), laneCwd).guardrails, cwd: laneCwd, lanes: sandboxLanes(laneCwd).lanes });
   assert.ok(inLane.r.reason === 'succeeded' && inLane.s.worked(), `control: a run in a sandboxed lane starts (${inLane.r.reason}: ${inLane.r.detail})`);
   assert.deepEqual(agentSettingsProblems(inLane.s.log().settings as Settings), [], "a sandboxed run's --settings fall short of the agent settings checks");
+  // The chat lane runs under the instance's hooks too (only the no-repo research lane brings its own): no agent
+  // settings, no chat run.
+  const chatCwd = mkdtempSync(join(tmpdir(), 'adv-cwd-'));
+  const chat = await agentRun({ guardrails: instanceHome(null, chatCwd).guardrails, cwd: chatCwd, lanes: sandboxLanes(chatCwd).lanes, req: { lane: CHAT_LANE } });
+  assert.ok(chat.r.reason === 'failed' && /not starting/.test(chat.r.detail) && !chat.s.ran(), `a chat-lane run without agent settings: ${chat.r.reason}: ${chat.r.detail.slice(0, 200)}${chat.s.ran() ? ' (claude ran)' : ''}`);
 });
 
 test(`adversarial guards / settings.project-loosen-refused (${doc('A project `.claude/settings.json` that could loosen them refuses the run')}): a checkout's own settings that could loosen the run refuse it`, { skip: !posix && 'POSIX stand-in claude' }, async () => {
@@ -619,6 +650,14 @@ test(`adversarial guards / settings.project-loosen-refused (${doc('A project `.c
     return r.reason === 'failed' && /could loosen agent runs|can't be read/.test(r.detail) && !s.ran() ? null : `${r.reason}: ${r.detail.slice(0, 200)}${s.ran() ? ' (claude ran)' : ''}`;
   });
   assert.deepEqual(left, [], 'project settings a run started with anyway');
+  // The chat lane too: it runs under the instance's hooks, so a checkout's loosening settings refuse it as well.
+  {
+    const cwd = mkdtempSync(join(tmpdir(), 'adv-cwd-'));
+    mkdirSync(join(cwd, '.claude'));
+    writeFileSync(join(cwd, '.claude', 'settings.json'), JSON.stringify({ permissions: { allow: ['Bash(*)'] } }));
+    const { r, s } = await agentRun({ guardrails: instanceHome(JSON.stringify(goodSettings()), cwd).guardrails, cwd, lanes: sandboxLanes(cwd).lanes, req: { lane: CHAT_LANE } });
+    assert.ok(r.reason === 'failed' && /could loosen agent runs/.test(r.detail) && !s.ran(), `a chat-lane run with loosening project settings: ${r.reason}: ${r.detail.slice(0, 200)}${s.ran() ? ' (claude ran)' : ''}`);
+  }
   // Control: hooks and tightening rules are fine; a settings.local.json beside them is never loaded (project only).
   const cwd = mkdtempSync(join(tmpdir(), 'adv-cwd-'));
   mkdirSync(join(cwd, '.claude'));
@@ -650,12 +689,18 @@ test(`adversarial guards / settings.applied-echo (${doc("Every run's `--settings
     return r.reason === 'failed' && !s.worked() ? null : `${r.reason}${s.worked() ? ' (the agent worked)' : ''}: ${r.detail.slice(0, 200)}`;
   });
   assert.deepEqual(left, [], 'runs that went on without their settings confirmed');
+  // A run with a lane's settings and no instance guardrails still gets a check value, and stops when it isn't echoed.
+  const bare = await agentRun({ cwd, mode: 'dropped', lanes: sandboxLanes(cwd).lanes });
+  assert.ok(bare.r.reason === 'failed' && !bare.s.worked(), `a lane run with no instance guardrails whose settings claude dropped: ${bare.r.reason}${bare.s.worked() ? ' (the agent worked)' : ''}`);
   const second = await agentRun({ guardrails, cwd });
   assert.notEqual(readFileSync(second.s.value, 'utf8'), readFileSync(first.s.value, 'utf8'), "each run's check value is its own");
 });
 
 /** The lanes an instance with the sandbox on gives the runner (src/instance.ts laneRuns), for a checkout at `cwd`. */
-function sandboxLanes(cwd: string): { lanes: ReturnType<typeof laneRuns>; base: string } {
+/** A runner's lanes: each lane's settings, and whether it brings its own hooks (no run-as: the runner would sudo). */
+type Lanes = Record<string, { settings?: object; ownHooks?: boolean }>;
+
+function sandboxLanes(cwd: string, o: { evalLane?: boolean } = {}): { lanes: Lanes; base: string } {
   const base = mkdtempSync(join(tmpdir(), 'adv-lanes-'));
   // INVARIANT: the fixture writes only under `base`, never this process's home. On macOS test/isolate.ts doesn't move
   // HOME, so a home-relative write would land in the person's real home. So the lane is worked out for an agent user
@@ -666,17 +711,22 @@ function sandboxLanes(cwd: string): { lanes: ReturnType<typeof laneRuns>; base: 
   for (const d of ['.ssh', '.aws', '.config/gh', '.gnupg', '.docker', '.claude']) mkdirSync(join(home, d), { recursive: true });
   for (const f of ['.netrc', '.npmrc', '.pypirc', '.docker/config.json', '.claude/.credentials.json']) writeFileSync(join(home, f), '');
   mkdirSync(join(base, 'inst-home'));
+  // `evalLane`: the policy also has an eval lane, run as the instance's eval user (a fixture home too).
+  const evalHome = join(base, 'eval-home');
+  if (o.evalLane) mkdirSync(evalHome);
   const inst = {
     name: 'adversarial',
     runAs: { user: 'adversarial-agent', home, hide: [] },
-    evalAs: null,
+    evalAs: o.evalLane ? { user: 'adversarial-eval', home: evalHome } : null,
     home: join(base, 'inst-home'),
     stateDir: join(base, 'state'),
     repo: { path: cwd, repo: 'example/adversarial' },
-    policy: PolicyFile.parse({ version: 1, budget: { daily_usd: 20 }, agents: { max_workers: 2 }, land_mode: 'pr', sandbox: true }),
+    policy: PolicyFile.parse({ version: 1, budget: { daily_usd: 20 }, agents: { max_workers: 2 }, land_mode: 'pr', sandbox: true, ...(o.evalLane ? { lanes: { default: {}, eval: { run_as: 'eval' } } } : {}) }),
     credentials: {},
   } as unknown as Instance;
-  const lanes = Object.fromEntries(Object.entries(laneRuns(inst)).map(([name, lane]) => [name, lane.settings ? { settings: lane.settings } : {}]));
+  // The policy's lanes, and the research and chat lanes every instance has (src/instance.ts researchLanes).
+  const all: Record<string, { settings?: object; ownHooks?: boolean }> = { ...laneRuns(inst), ...researchLanes(inst, { runAs: (inst as { runAs: RunAs }).runAs }) };
+  const lanes = Object.fromEntries(Object.entries(all).map(([name, lane]) => [name, { ...(lane.settings ? { settings: lane.settings } : {}), ...(lane.ownHooks ? { ownHooks: true } : {}) }]));
   return { lanes, base };
 }
 
@@ -716,15 +766,23 @@ const sandboxed = () =>
   })());
 
 test(`adversarial guards / sandbox.fail-closed (${doc("If the sandbox can't start, the run exits instead of running unsandboxed")}): every sandboxed run's settings say no sandbox, no run`, { skip: !posix && 'POSIX stand-in claude' }, async () => {
-  for (const { what, settings } of await sandboxed()) {
+  for (const { what, settings } of [...(await sandboxed()), ...otherLanes()]) {
     assert.equal(settings.sandbox?.enabled, true, `${what}: the sandbox is on`);
     assert.equal(settings.sandbox?.failIfUnavailable, true, `${what}: a sandbox that can't start ends the run`);
   }
 });
 
 test(`adversarial guards / sandbox.no-unsandboxed-retry (${doc("A blocked command can't be retried outside the sandbox")}): every sandboxed run's settings refuse a retry outside it`, { skip: !posix && 'POSIX stand-in claude' }, async () => {
-  for (const { what, settings } of await sandboxed()) assert.equal(settings.sandbox?.allowUnsandboxedCommands, false, `${what}: no unsandboxed retry`);
+  for (const { what, settings } of [...(await sandboxed()), ...otherLanes()]) assert.equal(settings.sandbox?.allowUnsandboxedCommands, false, `${what}: no unsandboxed retry`);
 });
+
+/** Every lane but the default one, as its own settings (no run): the research and chat lanes, and an eval lane. */
+function otherLanes(): { what: string; settings: SandboxSettings }[] {
+  const { lanes } = sandboxLanes(mkdtempSync(join(tmpdir(), 'adv-cwd-')), { evalLane: true });
+  const out = Object.entries(lanes).filter(([name]) => name !== 'default').map(([name, lane]) => ({ what: `the ${name} lane's own settings`, settings: (lane.settings ?? {}) as SandboxSettings }));
+  assert.ok(out.some((x) => x.what.includes(' eval ')) && out.length >= 4, `the other lanes: ${out.map((x) => x.what).join(', ')}`);
+  return out;
+}
 
 const isGlob = (p: string) => /[*?[{]/.test(p);
 const unrooted = (p: string) => p.replace(/^\/+/, '');
@@ -802,12 +860,15 @@ knownHole(`adversarial guards / tool.no-read-secrets (${doc('- read secret files
 });
 
 test(`adversarial guards / tool.unreadable-task-file-denies (${doc("A task file the guard can't read denies the call")}): a guard hook that fails rather than answers (a timeout, a crash) blocks the call`, { skip: !posix && 'POSIX stand-in claude' }, async () => {
-  const cwd = mkdtempSync(join(tmpdir(), 'adv-cwd-'));
-  const { r, s } = await agentRun({ guardrails: instanceHome(JSON.stringify(goodSettings()), cwd).guardrails, cwd });
-  assert.ok(s.ran(), `${r.reason}: ${r.detail}`);
-  const pre = ((s.log().settings as SandboxSettings).hooks?.PreToolUse ?? []).flatMap((e) => e.hooks).filter((h) => h.type === 'command');
-  assert.ok(pre.length > 0, 'the run carries a guard hook');
-  assert.deepEqual(pre.filter((h) => h.onFailure !== 'block').map((h) => h.command.slice(0, 80)), [], 'guard hooks a failure lets the call through');
+  // With no lanes, and in the sandboxed lanes every instance has.
+  for (const lanes of [false, true]) {
+    const cwd = mkdtempSync(join(tmpdir(), 'adv-cwd-'));
+    const { r, s } = await agentRun({ guardrails: instanceHome(JSON.stringify(goodSettings()), cwd).guardrails, cwd, ...(lanes ? { lanes: sandboxLanes(cwd).lanes } : {}) });
+    assert.ok(s.ran(), `${r.reason}: ${r.detail}`);
+    const pre = ((s.log().settings as SandboxSettings).hooks?.PreToolUse ?? []).flatMap((e) => e.hooks).filter((h) => h.type === 'command');
+    assert.ok(pre.length > 0, 'the run carries a guard hook');
+    assert.deepEqual(pre.filter((h) => h.onFailure !== 'block').map((h) => h.command.slice(0, 80)), [], `guard hooks a failure lets the call through${lanes ? ', in a sandboxed lane' : ''}`);
+  }
 });
 
 test(`adversarial guards / pushgate.no-hatch-in-env (${doc('No agent starts with the hatch in its environment')}): the hatch reaches no agent run, from the coordinator's environment or a project's`, { skip: !posix && 'POSIX stand-in claude' }, async () => {
@@ -825,7 +886,7 @@ test(`adversarial guards / pushgate.no-hatch-in-env (${doc('No agent starts with
 const run = (cwd: string, ...a: string[]) => execFileSync('git', a, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 
 /** A checkout with one commit on `branch` (its default), pushed to a bare remote (`base`); `put` and `commit` add to it. */
-function pushRepo(branch = 'main') {
+function pushRepo(branch = 'main', baseFiles: Record<string, string> = {}) {
   const root = mkdtempSync(join(tmpdir(), 'adv-push-'));
   const dir = join(root, 'work');
   const remote = join(root, 'remote.git');
@@ -843,6 +904,7 @@ function pushRepo(branch = 'main') {
     return run(dir, 'rev-parse', 'HEAD');
   };
   put('README.md', 'A project.\n');
+  for (const [p, text] of Object.entries(baseFiles)) put(p, text);
   const base = commit('base');
   run(dir, 'remote', 'add', 'origin', remote);
   run(dir, 'push', '-q', 'origin', branch);
@@ -888,7 +950,10 @@ const lines = (n: number, tag = 'l') => Array.from({ length: n }, (_, i) => `${t
 const bigLine = (bytes = 20_000) => `${'x'.repeat(bytes)}\n`;
 
 test(`adversarial guards / push.size-limit (${doc('refuses a change over the push limits')}): checkedPush refuses a change over the limits, wherever in the range it hides`, async () => {
-  const changes: { what: string; make: (r: ReturnType<typeof pushRepo>) => void }[] = [
+  const changes: { what: string; base?: Record<string, string>; make: (r: ReturnType<typeof pushRepo>) => void }[] = [
+    // Removed lines count as well as added ones: a file of 21 lines on the base, deleted.
+    { what: 'over the line limit in removed lines', base: { 'old.txt': lines(21) }, make: (r) => (unlinkSync(join(r.dir, 'old.txt')), r.commit()) },
+    { what: 'a CI workflow named .yaml', make: (r) => (r.put('.github/workflows/x.yaml', 'on: push\n'), r.commit()) },
     { what: 'over the line limit', make: (r) => (r.put('a.txt', lines(21)), r.commit()) },
     { what: 'over the line limit across commits', make: (r) => [1, 2, 3].forEach((n) => (r.put(`a${n}.txt`, lines(8)), r.commit())) },
     { what: 'a file over the size limit', make: (r) => (r.put('big.txt', bigLine()), r.commit()) },
@@ -933,7 +998,7 @@ test(`adversarial guards / push.size-limit (${doc('refuses a change over the pus
     },
   ];
   const left = await letThrough(changes, (c) => {
-    const r = pushRepo();
+    const r = pushRepo('main', c.base);
     c.make(r);
     const head = run(r.dir, 'rev-parse', 'HEAD');
     const out = checkedPush({ cwd: r.dir, remote: 'origin', base: r.base, head, ref: 'refs/heads/task-1', limits, guard: guardOf([]) });
@@ -955,6 +1020,10 @@ test(`adversarial guards / push.prepush-hook (${doc('Each checkout also gets a p
     // The remote's own default (origin/HEAD) is refused too, whatever the hook was told.
     run(r.dir, 'push', '-q', 'origin', `${B}:refs/heads/trunk`);
     run(r.dir, 'remote', 'set-head', 'origin', 'trunk');
+    // The checkout already has a pre-push hook of someone else's, which lets everything through: installing ours keeps
+    // it (chained after ours), and never leaves it in our place.
+    writeFileSync(join(r.dir, '.git', 'hooks', 'pre-push'), '#!/bin/sh\nexit 0\n');
+    chmodSync(join(r.dir, '.git', 'hooks', 'pre-push'), 0o755);
     installPrePushHook(join(r.dir, '.git', 'hooks'), { branches: [B] });
     r.put('a.txt', 'a\n');
     r.commit();
@@ -1091,6 +1160,10 @@ test(`adversarial guards / pushgate.no-hatch-skip-swap (${doc("An agent can't se
     bash('cp over the hook', 'cp /dev/null .git/hooks/pre-push'),
     bash('rm the hook', 'rm .git/hooks/pre-push'),
     bash('a redirect into the git config', 'echo x >> .git/config'),
+    bash("a redirect into a worktree's own git config", 'echo x >> .git/config.worktree'),
+    bash("a redirect into the user's git config", 'echo x >> ~/.gitconfig'),
+    { what: "Write the user's git config", tool: 'Write', input: { file_path: join(homedir(), '.gitconfig'), content: '[core]\n' } },
+    { what: 'MultiEdit the hatch into a shell rc', tool: 'MultiEdit', input: { file_path: join(homedir(), '.bashrc'), edits: [{ old_string: 'a', new_string: `export ${HATCH}=1` }] } },
     { what: 'Write the hook', tool: 'Write', input: { file_path: join(g.dir, '.git', 'hooks', 'pre-push'), content: 'exit 0' } },
     { what: 'Edit the git config', tool: 'Edit', input: { file_path: join(g.dir, '.git', 'config'), old_string: 'a', new_string: 'b' } },
   ];
@@ -1300,21 +1373,107 @@ knownHole(`adversarial guards / redact.before-store (${doc('Secrets in event pay
 
 const MutantList = z.strictObject({
   about: z.string().min(1),
-  guarantees: z.record(z.string().regex(/^[a-z]+\.[a-z-]+$/), z.union([z.strictObject({ status: z.enum(['covered', 'extra']) }), z.strictObject({ status: z.literal('open'), see: z.array(z.string().regex(/^#\d+$/)).min(1) })])),
+  guarantees: z.record(
+    z.string().regex(/^[a-z]+\.[a-z-]+$/),
+    z.union([
+      z.strictObject({ status: z.enum(['covered', 'extra']) }),
+      z.strictObject({ status: z.literal('open'), see: z.array(z.string().regex(/^#\d+$/)).min(1) }),
+      // Its code lives in modules this suite never loads, so no mutant here can measure it.
+      z.strictObject({ status: z.literal('unmeasured'), why: z.string().min(1) }),
+    ]),
+  ),
   mutants: z.array(
     z.strictObject({
       id: z.string().regex(/^[a-z0-9]+-[A-Za-z0-9]+$/),
       kills: z.array(z.string()).min(1),
       breaks: z.string().min(1),
-      edits: z.array(z.strictObject({ file: z.string().regex(/^(dist\/src|scripts)\/[\w/.-]+\.m?js$/), from: z.string().min(1), to: z.string() })).min(1),
+      // `inString`: the anchor is text inside a string the code emits (a generated script), not code.
+      edits: z.array(z.strictObject({ file: z.string().regex(/^(dist\/src|scripts)\/[\w/.-]+\.m?js$/), from: z.string().min(1), to: z.string(), inString: z.literal(true).optional() })).min(1),
     }),
   ).min(1),
+});
+
+/**
+ * Where offset `at` of JavaScript source `src` is: in code, a comment, or a string (quotes, a template's text). A
+ * regex literal's body is code: the pattern runs. A small scanner for what tsc emits and scripts/*.mjs hold, not a
+ * parser: a `/` starts a regex where an expression can start (after an operator, an opening bracket, a comma or one
+ * of a few keywords), and is skipped whole so a quote or `//` inside it isn't misread.
+ */
+function sourcePlace(src: string, at: number): 'code' | 'comment' | 'string' {
+  const exprStart = /[([{,;:=!&|?+\-*%<>~^]$|\b(?:return|typeof|case|in|of|delete|void|throw|new|else|do|yield|await)$/;
+  const braces: number[] = []; // for each open template `${`, the brace depth it opened at
+  let depth = 0;
+  let i = 0;
+  const place = (start: number, end: number, kind: 'comment' | 'string') => (at >= start && at < end ? kind : null);
+  while (i < src.length && i <= at) {
+    const c = src[i]!;
+    const next = src[i + 1];
+    let end = -1;
+    let kind: 'comment' | 'string' | null = null;
+    if (c === '/' && next === '/') ((end = src.indexOf('\n', i)), (kind = 'comment'));
+    else if (c === '/' && next === '*') ((end = src.indexOf('*/', i + 2) + 2), (kind = 'comment'));
+    else if (c === "'" || c === '"') {
+      let j = i + 1;
+      while (j < src.length && src[j] !== c && src[j] !== '\n') j += src[j] === '\\' ? 2 : 1;
+      ((end = j + 1), (kind = 'string'));
+    } else if (c === '`' || (c === '}' && braces.length && braces.at(-1) === depth)) {
+      if (c === '}') braces.pop();
+      let j = i + 1;
+      while (j < src.length && src[j] !== '`' && !(src[j] === '$' && src[j + 1] === '{')) j += src[j] === '\\' ? 2 : 1;
+      if (src[j] === '$') braces.push(depth);
+      ((end = src[j] === '$' ? j + 2 : j + 1), (kind = 'string'));
+    } else if (c === '/' && exprStart.test(src.slice(Math.max(0, i - 12), i).trimEnd())) {
+      let j = i + 1;
+      let inClass = false;
+      while (j < src.length && src[j] !== '\n' && (inClass || src[j] !== '/')) {
+        if (src[j] === '\\') j++;
+        else if (src[j] === '[') inClass = true;
+        else if (src[j] === ']') inClass = false;
+        j++;
+      }
+      // A regex body is code: skip it whole, with no place of its own.
+      if (at < j + 1) return 'code';
+      i = j + 1;
+      continue;
+    }
+    if (kind) {
+      // A comment includes its opener; a string doesn't (an anchor that starts with a string's quote starts in code).
+      const hit = place(kind === 'comment' ? i : i + 1, end < 0 ? src.length : end, kind);
+      if (hit) return hit;
+      i = end < 0 ? src.length : end;
+      continue;
+    }
+    if (c === '{') depth++;
+    else if (c === '}') depth--;
+    i++;
+  }
+  return 'code';
+}
+
+test('adversarial guards / the mutant list: an anchor in a comment or an unmarked string is refused (the scanner, on known text)', () => {
+  const src = "const a = 1; // a comment here\nconst s = 'in a string';\nconst t = `text ${a + 1} more`;\nconst r = /a\\/b/g;\nif (a) return x;";
+  const at = (s: string) => sourcePlace(src, src.indexOf(s));
+  assert.deepEqual([at('a comment'), at('in a string'), at('text'), at('a + 1'), at('more'), at('a\\/b'), at('if (a)'), at('const s')], ['comment', 'string', 'string', 'code', 'string', 'code', 'code', 'code']);
+  // The round-6 review's probe J1, an anchor inside a comment of the built guard: refused.
+  const engine = readFileSync(join(repoRoot, 'dist', 'src', 'guardrails', 'engine.js'), 'utf8');
+  const j1 = '// Network: agents may only fetch allowlisted domains; new ones need approval.';
+  assert.ok(engine.includes(j1), 'the probe text is still in the built guard');
+  assert.equal(sourcePlace(engine, engine.indexOf(j1)), 'comment');
+  assert.equal(sourcePlace(src, src.indexOf("'in a string'")), 'code', "an anchor that starts with a string's own quote starts in code");
 });
 
 test('adversarial guards / the mutant list: it parses, each mutant names real code and a guarantee with cases here, and each covered guarantee has mutants', () => {
   const list = MutantList.parse(JSON.parse(readFileSync(join(repoRoot, 'test', 'adversarial', 'mutants.json'), 'utf8')));
   const ids = list.mutants.map((m) => m.id);
   assert.deepEqual(ids.filter((id, i) => ids.indexOf(id) !== i), [], 'duplicate mutant ids');
+  assert.deepEqual(listProblems(list), [], 'the mutant list is out of step with the code or this file');
+  // The round-6 review's probe J1 (an anchor inside a comment of the built guard), as a list of its own: refused.
+  const j1 = { ...list, mutants: [{ id: 'r6-J1', kills: ['tool.domain-allowlist'], breaks: 'an anchor inside a comment', edits: [{ file: 'dist/src/guardrails/engine.js', from: '// Network: agents may only fetch allowlisted domains; new ones need approval.', to: '// Network: (comment changed)' }] }] };
+  assert.deepEqual(listProblems(j1).filter((p) => p.startsWith('r6-J1:')), ['r6-J1: its anchor in dist/src/guardrails/engine.js starts in a comment']);
+});
+
+/** Every way a mutant list is out of step with the built code or this file; [] when it is in step. */
+function listProblems(list: z.infer<typeof MutantList>): string[] {
   const source = readFileSync(join(repoRoot, 'test', 'adversarial', 'guards.test.ts'), 'utf8');
   const problems: string[] = [];
   for (const g of Object.keys(list.guarantees)) if (!source.includes(`adversarial guards / ${g} (`)) problems.push(`${g}: no case in this file`);
@@ -1327,7 +1486,14 @@ test('adversarial guards / the mutant list: it parses, each mutant names real co
       const n = existsSync(file) ? readFileSync(file, 'utf8').split(e.from).length - 1 : -1;
       if (n !== 1) problems.push(`${m.id}: ${n < 0 ? `${e.file} doesn't exist` : `its anchor is in ${e.file} ${n} times`}`);
       if (e.to === e.from) problems.push(`${m.id}: an edit that changes nothing`);
+      // An anchor starts in code: never in a comment, and in a string only when the edit says so (a generated script).
+      if (n === 1) {
+        const text = readFileSync(file, 'utf8');
+        const where = sourcePlace(text, text.indexOf(e.from));
+        const want = e.inString ? 'string' : 'code';
+        if (where !== want) problems.push(`${m.id}: its anchor in ${e.file} starts in a ${where}${e.inString ? ', not in the string it says' : ''}`);
+      }
     }
   }
-  assert.deepEqual(problems, [], 'the mutant list is out of step with the code or this file');
-});
+  return problems;
+}

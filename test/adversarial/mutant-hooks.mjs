@@ -1,3 +1,4 @@
+// lint-test
 // The in-memory mutant for test/adversarial/run-mutants.mjs: a module load hook that rewrites one listed module's
 // source as it loads, in the suite's process and in every node process it starts (NODE_OPTIONS). No file on disk
 // changes. An anchor not found exactly once fails the load, so a stale mutant can't pass as killed.
@@ -8,9 +9,10 @@ let id = '';
 
 export async function initialize(data) {
   id = data.id;
-  const list = JSON.parse(readFileSync(new URL('./mutants.json', import.meta.url), 'utf8'));
+  // The list: test/adversarial/mutants.json unless the runner was given another (a scratch list to measure).
+  const list = JSON.parse(readFileSync(data.list ?? new URL('./mutants.json', import.meta.url), 'utf8'));
   const m = list.mutants.find((x) => x.id === id);
-  if (!m) throw new Error(`no mutant ${id} in test/adversarial/mutants.json`);
+  if (!m) throw new Error(`no mutant ${id} in the mutant list`);
   edits = m.edits;
 }
 
