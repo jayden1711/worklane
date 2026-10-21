@@ -215,6 +215,7 @@ export function redactString(s: string, o: RedactTextOptions = {}): string {
 export function redact<T>(value: T, o: RedactTextOptions = {}): T {
   if (typeof value === 'string') return redactString(value, o) as T;
   if (Array.isArray(value)) return value.map((v) => redact(v, o)) as T;
-  if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, redact(v, o)])) as T;
+  // A key is redacted like a value (#972): a secret in a key's place is stored no more than one in a value's.
+  if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([k, v]) => [redactString(k, o), redact(v, o)])) as T;
   return value;
 }

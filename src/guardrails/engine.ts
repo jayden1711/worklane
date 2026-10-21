@@ -2,13 +2,14 @@
 // own permissions: deny > ask > (no objection). "none" means the hook says
 // nothing and the normal permission flow continues; the engine never returns
 // "allow", because a hook's allow would bypass the user's own prompts.
-import { isAbsolute, relative, resolve } from 'node:path';
+import { dirname, isAbsolute, relative, resolve } from 'node:path';
 import type { GuardrailsConfig, Rule } from '../config/schema.js';
 import { basename, splitCommands, type SimpleCommand } from './shell.js';
 import { connectionsIn, fingerprint } from './fingerprint.js';
 import { globToRegExp } from './glob.js';
 import { pushHookFileRefusal, pushHookShellRefusal } from './push-hook.js';
 import { callAccesses, Secrets } from './access.js';
+import { asWritten, hardLinked, Reach } from './reach.js';
 import { BRAND } from '../brand.js';
 
 /**
@@ -84,6 +85,110 @@ function relToRoot(root: string, cwd: string, p: string): string {
   return relative(root, abs).split('\\').join('/');
 }
 
+/**
+ * A path a call names, as the guard judges it. `rels`: relative to the project root, the name as given and the file it
+ * reaches; `reached`: that file's absolute path; `unresolved`: where it leads can't be told (the call is refused).
+ */
+interface Names {
+  rels: string[];
+  reached: string[];
+  unresolved: boolean;
+}
+
+/**
+ * One call's paths, judged by the file each one reaches as well as by its name. WHY (#972): protected-path checks
+ * decide on the file a write really reaches. Both readings of a path's `..` are resolved: as written, the way the file
+ * system takes it, and tidied first, the way a tool may take it.
+ */
+class Paths {
+  private readonly reach = new Reach();
+  private readonly realRoot: string | null;
+
+  constructor(private readonly root: string) {
+    this.realRoot = this.reach.of(resolve(root));
+  }
+
+  private readonly seen = new Map<string, Names>();
+
+  names(p: string, base: string): Names {
+    const key = `${base}\0${p}`;
+    const known = this.seen.get(key);
+    if (known) return known;
+    const n = this.judge(p, base);
+    this.seen.set(key, n);
+    return n;
+  }
+
+  private judge(p: string, base: string): Names {
+    const rels = [relToRoot(this.root, base, p)];
+    const reached: string[] = [];
+    let unresolved = this.realRoot === null;
+    for (const w of new Set([asWritten(resolve(base), p), isAbsolute(p) ? p : resolve(base, p)])) {
+      const r = this.reach.of(w);
+      if (r === null) {
+        unresolved = true;
+        continue;
+      }
+      reached.push(r);
+      if (this.realRoot !== null) rels.push(relative(this.realRoot, r).split('\\').join('/'));
+    }
+    return { rels, reached, unresolved };
+  }
+}
+
+/** A path as a reason names it: its start and its length, when it is long. */
+const clip = (s: string) => (s.length > 200 ? `${s.slice(0, 200)}... (${s.length} characters)` : s);
+
+/** The paths an Edit tool or a shell command's parsed writes name. */
+function writeTargets(call: ToolCall, commands: SimpleCommand[]): string[] {
+  const targets: string[] = [];
+  if (EDIT_TOOLS.has(call.tool)) {
+    const p = filePathOf(call);
+    if (p) targets.push(p);
+  }
+  for (const c of commands) targets.push(...c.writes);
+  return targets;
+}
+
+/** The value of an option given as `--long=v`, `--long v`, `-x v` (also at the end of a cluster) or `-xv`; null if absent. */
+function optionOf(args: string[], short: string, long: string): { value: string; at: number } | null {
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]!;
+    if (a === '--') return null;
+    if (a.startsWith(`${long}=`)) return { value: a.slice(long.length + 1), at: -1 };
+    if (a === long || new RegExp(`^-[A-Za-z]*${short}$`).test(a)) return args[i + 1] === undefined ? null : { value: args[i + 1]!, at: i + 1 };
+    const m = new RegExp(`^-${short}(.+)$`).exec(a);
+    if (m) return { value: m[1]!, at: -1 };
+  }
+  return null;
+}
+
+/**
+ * What a command that makes a link (ln, link, cp with a link option, rsync --link-dest) links to, and where the new
+ * links go; null for any other command.
+ */
+function linkMade(c: SimpleCommand): { sources: string[]; dest: string | null } | null {
+  const [cmd, ...args] = c.argv;
+  const base = basename(cmd ?? '');
+  const linking = base === 'ln' || base === 'link' || (base === 'cp' && args.some((a) => a === '--link' || a === '--symbolic-link' || /^-[A-Za-z]*[ls][A-Za-z]*$/.test(a)));
+  if (linking) {
+    const target = base === 'link' ? null : optionOf(args, 't', '--target-directory');
+    const operands = args.filter((a, i) => !a.startsWith('-') && i !== target?.at);
+    if (target) return { sources: operands, dest: target.value };
+    return operands.length < 2 ? { sources: operands, dest: null } : { sources: operands.slice(0, -1), dest: operands.at(-1)! };
+  }
+  if (base === 'rsync') {
+    const sources: string[] = [];
+    args.forEach((a, i) => {
+      if (a.startsWith('--link-dest=')) sources.push(a.slice('--link-dest='.length));
+      else if (a === '--link-dest' && args[i + 1] !== undefined) sources.push(args[i + 1]!);
+    });
+    const operands = args.filter((a) => !a.startsWith('-'));
+    return sources.length ? { sources, dest: operands.at(-1) ?? null } : null;
+  }
+  return null;
+}
+
 function optionValue(argv: string[], flags: string[]): string | null | undefined {
   for (let i = 1; i < argv.length; i++) {
     const a = argv[i]!;
@@ -109,18 +214,13 @@ function matchesCliEnv(m: Extract<Rule['match'], { cli_env: unknown }>['cli_env'
   return m.environments.includes(env);
 }
 
-function ruleMatches(rule: Rule, call: ToolCall, commands: SimpleCommand[], ctx: EvalContext): boolean {
+function ruleMatches(rule: Rule, call: ToolCall, commands: SimpleCommand[], ctx: EvalContext, paths: () => Paths): boolean {
   const m = rule.match;
   const unless = rule.unless ? new RegExp(rule.unless.pattern) : null;
   if ('path' in m) {
     const res = m.path.globs.map((g) => globToRegExp(g));
-    const targets: string[] = [];
-    if (EDIT_TOOLS.has(call.tool)) {
-      const p = filePathOf(call);
-      if (p) targets.push(p);
-    }
-    for (const c of commands) targets.push(...c.writes);
-    return targets.some((t) => res.some((re) => re.test(relToRoot(ctx.projectRoot, call.cwd, t))));
+    // The name given and the file reached (#972): a path rule matches either.
+    return writeTargets(call, commands).some((t) => paths().names(t, call.cwd).rels.some((rel) => res.some((re) => re.test(rel))));
   }
   if (call.tool !== 'Bash') return false;
   for (const c of commands) {
@@ -181,10 +281,13 @@ export function evaluate(call: ToolCall, cfg: GuardrailsConfig, ctx: EvalContext
   const commands = call.tool === 'Bash' && typeof call.input.command === 'string' ? splitCommands(call.input.command) : [];
   let ask: Verdict | null = null;
   const mode = ctx.agent ? 'agent' : 'interactive';
+  // Made on first use: a call that names no path to write touches no file here.
+  let callPaths: Paths | undefined;
+  const paths = () => (callPaths ??= new Paths(ctx.projectRoot));
 
   for (const rule of cfg.rules) {
     if (!rule.applies_to.includes(mode)) continue;
-    if (!ruleMatches(rule, call, commands, ctx)) continue;
+    if (!ruleMatches(rule, call, commands, ctx, paths)) continue;
     if (rule.action === 'block') return { decision: 'deny', rule: rule.id, reason: rule.reason };
     ask ??= { decision: 'ask', rule: rule.id, reason: rule.reason };
   }
@@ -194,20 +297,42 @@ export function evaluate(call: ToolCall, cfg: GuardrailsConfig, ctx: EvalContext
   // file block, no domain allowlist.
   if (!ctx.agent) return ask ?? { decision: 'none' };
 
-  // Harness files: agents may not write them.
+  // Harness files: agents may not write them. WHY (#972): the check decides on the file a write really reaches as well
+  // as on the name it is given, and refuses a write when it can't tell which file that is. That refusal (`unsure`)
+  // comes after the other checks, so a write they refuse is refused for their reason.
+  const targets = writeTargets(call, commands);
+  let unsure: Verdict | null = null;
   {
-    const targets: string[] = [];
-    if (EDIT_TOOLS.has(call.tool)) {
-      const p = filePathOf(call);
-      if (p) targets.push(p);
-    }
-    for (const c of commands) targets.push(...c.writes);
+    const judged = targets.map((t) => ({ t, n: paths().names(t, call.cwd) }));
     // A target may be a directory (rm -rf .claude, mv x .claude): it matches if anything under it would.
-    const hit = targets.find((t) => isProtectedPath(relToRoot(ctx.projectRoot, call.cwd, t), cfg));
-    if (hit && AGENTS_MD_RES.some((re) => re.test(relToRoot(ctx.projectRoot, call.cwd, hit)))) {
-      return { decision: 'deny', rule: 'agents-md', reason: `${hit}: agents never write AGENTS.md; a line reaches it only when an owner promotes a learning on the dashboard` };
+    for (const { t, n } of judged) {
+      const rel = n.rels.find((r) => isProtectedPath(r, cfg));
+      if (rel === undefined) continue;
+      if (AGENTS_MD_RES.some((re) => re.test(rel))) {
+        return { decision: 'deny', rule: 'agents-md', reason: `${t}: agents never write AGENTS.md; a line reaches it only when an owner promotes a learning on the dashboard` };
+      }
+      return { decision: 'deny', rule: 'protected-path', reason: `${t} is harness config; change it through a reviewed proposal` };
     }
-    if (hit) return { decision: 'deny', rule: 'protected-path', reason: `${hit} is harness config; change it through a reviewed proposal` };
+    for (const { t, n } of judged) {
+      if (n.unresolved) unsure ??= { decision: 'deny', rule: 'protected-path', reason: `${clip(t)}: the guard can't tell which file this write reaches, so it can't check it isn't harness config; write to a plain path in the project` };
+      else if (n.reached.some(hardLinked)) unsure ??= { decision: 'deny', rule: 'protected-path', reason: `${clip(t)} has more than one hard link, so a write to it changes a file the guard can't check by this name; agents write only files with one name` };
+    }
+    // A link that leads to harness config: whatever later writes through it, an agent never makes one. A link's own
+    // text may be read from the folder the link is made in, so each source is judged from the call's directory and
+    // from the destination's (as a folder, and the folder it is in).
+    for (const c of commands) {
+      const link = linkMade(c);
+      if (!link) continue;
+      const dest = link.dest === null ? null : resolve(call.cwd, link.dest);
+      const bases = [...new Set([resolve(call.cwd), ...(dest === null ? [] : [dest, dirname(dest)])])];
+      for (const o of link.sources) {
+        for (const base of bases) {
+          const n = paths().names(o, base);
+          if (n.rels.some((r) => isProtectedPath(r, cfg))) return { decision: 'deny', rule: 'protected-path', reason: `${clip(o)} is harness config; agents never make a link to it` };
+          if (n.unresolved) unsure ??= { decision: 'deny', rule: 'protected-path', reason: `${clip(o)}: the guard can't tell which file a link to this leads to, so it can't check it isn't harness config` };
+        }
+      }
+    }
   }
 
   // WHY: the push gate's first-time-setup hatch and git's pre-push hook are a person's, never an agent's (push-hook.ts).
@@ -216,6 +341,13 @@ export function evaluate(call: ToolCall, cfg: GuardrailsConfig, ctx: EvalContext
     const p = EDIT_TOOLS.has(call.tool) ? filePathOf(call) : null;
     const refusal = (p ? pushHookFileRefusal(p, abs(p), call.input) : null) ?? (call.tool === 'Bash' && typeof call.input.command === 'string' ? pushHookShellRefusal(call.input.command, commands, abs) : null);
     if (refusal) return { decision: 'deny', rule: refusal.rule, reason: refusal.reason };
+    // The same files judged by the file each write reaches (#972).
+    for (const t of targets) {
+      for (const r of paths().names(t, call.cwd).reached) {
+        const hit = pushHookFileRefusal(t, r, t === p ? call.input : {});
+        if (hit) return { decision: 'deny', rule: hit.rule, reason: hit.reason };
+      }
+    }
   }
 
   // Commit identity: the harness sets it; an agent never commits as anyone it chooses.
@@ -235,6 +367,8 @@ export function evaluate(call: ToolCall, cfg: GuardrailsConfig, ctx: EvalContext
       if (why) return { decision: 'deny', rule: 'secret-path', reason: why };
     }
   }
+
+  if (unsure) return unsure;
 
   // Network: agents may only fetch allowlisted domains; new ones need approval.
   if (call.tool === 'WebFetch' && typeof call.input.url === 'string') {
