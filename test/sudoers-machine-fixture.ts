@@ -13,7 +13,7 @@ import { repoRoot } from './helpers.js';
 const setupDir = join(repoRoot, 'scripts', 'setup');
 export const helperSrc = join(repoRoot, 'scripts', 'machine', 'worklane-machine.cjs');
 const TOKEN = `sk-ant-oat01-${'Q'.repeat(40)}`;
-const HOST_TOOLS = ['sudo', 'visudo', 'id', 'useradd', 'usermod', 'groupadd', 'getent', 'install', 'chown', 'systemctl', 'systemd-run', 'journalctl', 'launchctl', 'loginctl', 'gh', 'docker', 'tailscale', 'claude', 'setfacl'];
+const HOST_TOOLS = ['sudo', 'visudo', 'id', 'useradd', 'usermod', 'userdel', 'groupadd', 'groupdel', 'getent', 'install', 'chown', 'systemctl', 'systemd-run', 'journalctl', 'launchctl', 'loginctl', 'gh', 'docker', 'tailscale', 'claude', 'setfacl', 'pgrep', 'pkill', 'findmnt', 'losetup', 'mount', 'umount'];
 
 export type Step = { step: string; state: string; detail: string; retry?: string };
 
@@ -65,6 +65,15 @@ install_claude_token() {
 SRV_ROOT="$T/srv" ENGINE_CLI="$T/bin/worklane" MACHINE_HELPER="$T/helper" MACHINE_SUDOERS="$T/sudoers-machine" HUB_UNIT="$T/hub.service" ADD_PROJECT_LOCK="$T/lock"
 ADD_PROJECT_NEW="$T/add-project-new" ADD_PROJECT_NEW_UID=${process.getuid?.() ?? 0} HELPER_RULES="$T/helper-rules.json" MACHINE_SUDOERS_LOCK="$T/locks/sudoers.lock" MACHINE_SUDOERS_LOCK_UID=${process.getuid?.() ?? 0}
 SETUP_POLL_SECONDS=0
+# instance-remove.sh resets PATH to lib.sh's ROOT_PATH (#902 round 9, N3): here the stand-ins come first on it, and every
+# host tool is a function too, which no PATH reset drops. node is this test's own.
+ROOT_PATH="$T/host-bin:/usr/bin:/bin" REMOVED_ARCHIVE="$T/removed"
+${HOST_TOOLS.map((t) => `${t}() { echo "${t} $*" >> "$T/host-calls"; return 1; }`).join('\n')}
+node() { ${JSON.stringify(process.execPath)} "$@"; }
+# The machine's groups and sudoers files, in the temp dir.
+group_exists() { [ -e "$T/groups/$1" ]; }
+sudoers_installed() { [ -e "$T/sudoers.d/$1" ]; }
+remove_sudoers() { echo "remove_sudoers $1" >> "$T/calls"; if [ "$1" = worklane-machine ]; then rm -f -- "$MACHINE_SUDOERS"; else rm -f -- "$T/sudoers.d/$1"; fi; }
 `;
   writeFileSync(join(s, 'lib.sh'), lib);
   writeFileSync(join(real, 'lib.sh'), lib);

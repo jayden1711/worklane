@@ -70,7 +70,8 @@ export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 # installed one, or the installed one isn't in the engine's own shape), stop now, nothing changed, naming that command.
 if [ -z "$print" ] && [ -z "$abort" ]; then
   pre=()
-  for m in $({ helper_instances; echo "$new"; } | sort -u); do if [ "$m" = "$new" ] || user_exists "wl-$m"; then pre+=("$m"); fi; done
+  # Only names machine-helper.sh takes (#902 round 9): one reserved since (machine, console) is left out, a narrowing.
+  for m in $({ helper_instances; echo "$new"; } | sort -u); do if [ "$m" = "$new" ] || { instance_name_ok "$m" && user_exists "wl-$m"; }; then pre+=("$m"); fi; done
   machine_sudoers_preflight "$here" "wl-$new" "${pre[@]}" || { echo "refused: $old is not renamed, nothing changed: the machine helper's rule needs root's --replace-sudoers first (above), then run this again" >&2; exit 1; }
 fi
 NODE="$(command -v node)" || { echo "needs node on root's PATH (node.sh)" >&2; exit 1; }
@@ -352,7 +353,7 @@ step_services() {
   v="$(old_limit CPUWeight)"; [[ "$v" =~ ^[0-9]+$ ]] && args+=(--cpu-weight "$v")
   v="$(old_limit TasksMax)"; [[ "$v" =~ ^[0-9]+$ ]] && args+=(--tasks-max "$v")
   bash "$here/service.sh" "$new" "${args[@]}"
-  names="$({ helper_instances; echo "$new"; } | sort -u | while read -r n; do if user_exists "wl-$n"; then echo "$n"; fi; done | tr '\n' ' ')"
+  names="$({ helper_instances; echo "$new"; } | sort -u | while read -r n; do if instance_name_ok "$n" && user_exists "wl-$n"; then echo "$n"; fi; done | tr '\n' ' ')"
   # shellcheck disable=SC2086 # one word per instance name
   # The one user this rename adds on purpose: its new name's (#902 round 6). machine-helper.sh checks the rest at write time.
   bash "$here/machine-helper.sh" "--may-add=$new" $names

@@ -774,6 +774,10 @@ ENGINE_CLI=/usr/local/bin/worklane
 # add-project's wait for a repo's setup PR to merge: how often it checks, and (empty: its --timeout) for how long.
 SETUP_POLL_SECONDS=20 SETUP_WAIT_SECONDS=""
 ADD_PROJECT_LOCK=/run/lock/worklane-add-project.lock
+# instance-remove.sh's PATH once it runs as root, and where it keeps a removed instance's history (#902 round 9, N3:
+# set here, so a test's lib points both into its temp dir and every host tool the script reaches is the test's).
+ROOT_PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+REMOVED_ARCHIVE=/var/lib/worklane/removed
 # Every writer of the machine helper's rule holds this lock from its check to its write: machine-helper.sh, and
 # instance-remove.sh when it takes the rule away (#902 round 6).
 MACHINE_SUDOERS_LOCK=/run/worklane-machine/sudoers.lock   # in a root-only 0700 directory (machine_sudoers_lock)
@@ -809,12 +813,15 @@ new_instance_write() {
 # needs --replace-sudoers), never marked by mistake.
 new_instance_mark() { new_instance_write "$1" "$1" || echo "note: $1 could not be put on $ADD_PROJECT_NEW; its first add will wait for --replace-sudoers" >&2; }
 # instance.sh, before it makes anything: $1 goes on the list only when nothing of an instance by that name is on this
-# machine yet (#902 round 8, A1). That means none of its users, no checkout root, no hub entry, and no place in the
-# machine helper's rule. A coordinator root took out of the rule and deleted by hand, with its agent user, checkout or
-# hub entry left, is no new instance: its next add waits for --replace-sudoers.
+# machine yet (#902 round 8, A1). That means none of its users, no group wl-<n>-work, no sudoers file of its own
+# (worklane-<n>: userdel leaves both, #902 round 9, N2), no checkout root, no hub entry, and no place in the machine
+# helper's rule. A coordinator root took out of the rule and deleted by hand, with any of those left, is no new
+# instance: its next add waits for --replace-sudoers.
+group_exists() { getent group "$1" >/dev/null 2>&1; }
 new_instance_mark_if_new() {
   local n="$1" u
   for u in "wl-$n" "wl-$n-agent" "wl-$n-eval"; do if user_exists "$u"; then return 0; fi; done
+  if group_exists "wl-$n-work" || sudoers_installed "worklane-$n"; then return 0; fi
   if [ -e "$SRV_ROOT/$n" ] || [ -L "$SRV_ROOT/$n" ]; then return 0; fi
   if { hub_instances; helper_instances; } | grep -qx -- "$n"; then return 0; fi
   new_instance_mark "$n"
@@ -946,8 +953,25 @@ instance_name_problem() {
   fi
 }
 instance_name_ok() { [ -z "$(instance_name_problem "$1")" ]; }
-# Refuse a name that can't be an instance's, saying why: `need_instance_name <name> [<what it is>]`.
-need_instance_name() { local why; why="$(instance_name_problem "$1")"; [ -z "$why" ] || { echo "${2:-instance name} ${1:-(none)}: $why" >&2; exit 2; }; }
+# Refuse a name that can't be an instance's, saying why: `need_instance_name <name> [<what it is>] [kept]`. With kept,
+# for an instance already on the machine (served, checked or removed; never made): kept_instance_name_problem.
+need_instance_name() {
+  local why
+  if [ "${3:-}" = kept ]; then why="$(kept_instance_name_problem "$1")"; else why="$(instance_name_problem "$1")"; fi
+  [ -z "$why" ] || { echo "${2:-instance name} ${1:-(none)}: $why" >&2; exit 2; }
+}
+# The names reserved after an instance could already have one (#902 round 8: their sudoers files are the machine's
+# own). Nothing new is made under either; an instance made before keeps working where it is: what serves, turns off or
+# removes what it already has takes its name (#902 round 9; decision guide 2 and 3). It never goes back into the
+# machine helper's rule: every list passed to machine-helper.sh holds instance_name_ok names only. As
+# src/instance-name.ts LATER_RESERVED and keptInstanceNameProblem.
+LATER_RESERVED_NAMES="machine console"
+kept_instance_name_problem() {
+  local n
+  for n in $LATER_RESERVED_NAMES; do if [ "${1:-}" = "$n" ]; then return 0; fi; done
+  instance_name_problem "${1:-}"
+}
+kept_instance_name_ok() { [ -z "$(kept_instance_name_problem "$1")" ]; }
 # Why a name can't be a CI runner's (ci-runner.sh --name; nothing when it can): an instance's shape, never agent, eval
 # or work (wl-ci-<x> is then instance ci's), nor ending in -docker or -reset (another runner's units). As
 # src/instance-name.ts ciRunnerNameProblem.

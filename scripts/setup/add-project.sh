@@ -301,7 +301,10 @@ all_instances() { { helper_instances; hub_instances; echo "$name"; } | grep -E '
 helper_names() {
   local n
   for n in $(all_instances); do
-    if user_exists "wl-$n"; then echo "$n"; else echo "note: $n is named, but there is no wl-$n; left out" >&2; fi
+    # Only names machine-helper.sh takes (#902 round 9): an instance made before its name was reserved (machine,
+    # console) is left out of the rule, which only narrows it.
+    if ! instance_name_ok "$n"; then echo "note: $n is a name the instance-name rules refuse now ($(instance_name_problem "$n")); left out of the machine helper's rule" >&2
+    elif user_exists "wl-$n"; then echo "$n"; else echo "note: $n is named, but there is no wl-$n; left out" >&2; fi
   done
 }
 one_line() { tr '\n' ' ' | sed 's/ $//'; }

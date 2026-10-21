@@ -110,6 +110,7 @@ test('#902 round 6 B1: right before its write, machine-helper.sh refuses if the 
   // The lock every writer takes: machine-helper.sh and instance-remove.sh's removal.
   assert.match(sh, /\nmachine_sudoers_lock\n/);
   assert.match(lib, /\n {2}flock -w 120 8 \|\|/);
-  assert.match(readFileSync(join(repoRoot, 'scripts', 'setup', 'instance-remove.sh'), 'utf8'), /\n\s*machine_sudoers_lock\n\s*remove_sudoers worklane-machine/);
+  // Round 9: under the lock, the rule is checked again (no other instance in it now) right before it goes.
+  assert.match(readFileSync(join(repoRoot, 'scripts', 'setup', 'instance-remove.sh'), 'utf8'), /\n\s*machine_sudoers_lock\n(\s*#[^\n]*\n)*\s*if \[ "\$\(helper_mode\)" != remove \]; then\n\s*exec 8>&-\n\s*refuse [^\n]*\n\s*fi\n\s*remove_sudoers worklane-machine/);
   assert.equal(m.hostCalls(), '');
 });

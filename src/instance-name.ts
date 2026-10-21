@@ -96,6 +96,29 @@ export function instanceNameProblem(s: unknown, max = INSTANCE_NAME_MAX): string
   return null;
 }
 
+/**
+ * Names reserved after an instance could already have one (#902 round 8): machine and console, whose sudoers files are
+ * the machine's own. Nothing new is made under either: instanceNameProblem refuses both, and so does every place that
+ * makes an instance. An instance made before keeps working where it is (#902 round 9; decision guide 2 and 3): its
+ * instance.yaml loads, so it exports, and the scripts that serve, turn off or remove what it already has take its name
+ * (lib.sh kept_instance_name_problem holds the same list). It never goes back into the machine helper's rule.
+ */
+export const LATER_RESERVED: readonly string[] = ['machine', 'console'];
+
+/** Why `s` can't name an instance that is already on a machine, or null: instanceNameProblem, but for LATER_RESERVED. */
+export function keptInstanceNameProblem(s: unknown, max = INSTANCE_NAME_MAX): string | null {
+  return typeof s === 'string' && LATER_RESERVED.includes(s) ? null : instanceNameProblem(s, max);
+}
+
+/**
+ * The shape every instance name has had (lowercase letters, digits and dashes, starting with a letter, at most 21), and
+ * no more. Only for a change that tightens (auto_merge off, a coordinator's set-policy): such a change must reach an
+ * instance under any name it has, as policy-kill.ts's kill switch does. Anything that could loosen keeps instanceNameOk.
+ */
+export function instanceNameShapeOk(s: unknown): s is string {
+  return typeof s === 'string' && new RegExp(`^[a-z][a-z0-9-]{0,${INSTANCE_NAME_MAX - 1}}$`).test(s);
+}
+
 /** A name an instance may have on a machine (scripts/setup, the machine helper and add-project take exactly these). */
 export function instanceNameOk(s: unknown): s is string {
   return instanceNameProblem(s) === null;

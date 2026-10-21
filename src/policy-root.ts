@@ -18,7 +18,7 @@ import { join } from 'node:path';
 import { parseDocument } from 'yaml';
 import { BRAND } from './brand.js';
 import { PolicyFile } from './instance.js';
-import { instanceNameOk } from './instance-name.js';
+import { instanceNameOk, instanceNameProblem, instanceNameShapeOk, keptInstanceNameProblem } from './instance-name.js';
 import { isRoot, processIdentity, UNKNOWN_IDENTITY, userHomeDir, userPresence, userUid } from './os/index.js';
 import { readInOwnedDir, replaceInOwnedDir } from './os/root-file.js';
 import { aliasInstance, armedSwitches, clearKillSwitches, ensureSpare, instanceId, killAutoMerge, recordDir, retakeId, sharedWith, sweepOrphanIds } from './policy-kill.js';
@@ -46,8 +46,9 @@ export interface PolicyRootDeps {
 }
 
 /** An instance's policy.yaml on this machine: its coordinator's instance home (real path), and that user's uid. */
-export function instancePolicy(instance: string, d: PolicyRootDeps = {}): { dir: string; file: string; coordUid: number } {
-  if (!instanceNameOk(instance)) throw new Error(`${instance}: not an instance name`);
+export function instancePolicy(instance: string, d: PolicyRootDeps = {}, tightenOnly = false): { dir: string; file: string; coordUid: number } {
+  // tightenOnly: the caller only tightens (#902 round 9): a name reserved since an instance could have it is taken too.
+  if (!(tightenOnly ? keptInstanceNameProblem(instance) === null : instanceNameOk(instance))) throw new Error(`${instance}: not an instance name`);
   const user = `wl-${instance}`;
   const home = (d.home ?? userHomeDir)(user);
   const coordUid = (d.uid ?? userUid)(user);
@@ -221,7 +222,9 @@ export interface OwnFlags {
  * make it (unless `acceptLoose`). Returns the keys an admin should check, and which are loose.
  */
 export function ownPolicy(instance: string, d: PolicyRootDeps = {}, flags: OwnFlags = {}): { file: string; keys: Record<string, unknown>; loose: string[] } {
-  const { dir, file, coordUid } = instancePolicy(instance, d);
+  // Taking a policy over only tightens it (its coordinator can no longer write it), so an instance made before its name
+  // was reserved is taken over too (#902 round 9).
+  const { dir, file, coordUid } = instancePolicy(instance, d, true);
   const rootUid = d.rootUid ?? 0;
   const markers = d.markerDir ?? POLICY_ROOT_DIR;
   return withPolicyLock(markers, instance, d.lockWaitMs ?? LOCK_WAIT_MS, () => {
@@ -261,6 +264,10 @@ export function setPolicy(instance: string, key: string, arg: string, by: string
   const value = decodePolicyValue(key, arg);
   if (value === undefined) throw new Error(`${arg} isn't a value for ${key}`);
   if (by && /^wl-/.test(by) && Object.hasOwn(HELPER_ONLY, key) && HELPER_ONLY[key] !== arg) throw new Error(`${key}: ${arg} loosens the instance, which is an admin's, at a root shell (sudo ${BRAND.cli} policy set ${instance} ${key} ${arg}); a dashboard may only tighten it`);
+  // An instance made before its name was reserved (machine, console): only tightened, from any caller, as a
+  // coordinator's route is (#902 round 9; decision guide 2). Anything that could loosen keeps the instance-name rules.
+  const legacy = keptInstanceNameProblem(instance) === null && !instanceNameOk(instance);
+  if (legacy && Object.hasOwn(HELPER_ONLY, key) && HELPER_ONLY[key] !== arg) throw new Error(`${key}: ${arg} could loosen ${instance}, a name the instance-name rules refuse now (${instanceNameProblem(instance)}): its policy only tightens`);
   const markers = d.markerDir ?? POLICY_ROOT_DIR;
   // auto_merge off: root's kill switch alone (src/policy-kill.ts), before any lock or read of policy.yaml, so nothing
   // (another writer's lock, a stale one, a huge or corrupt policy.yaml) can hold it up. Its `from` is unknown: unread.
@@ -269,14 +276,16 @@ export function setPolicy(instance: string, key: string, arg: string, by: string
     // Only a definite "no such user" counts; a lookup that fails counts as there (round 8).
     const uid = d.uid;
     const presence = d.presence ?? (uid ? (u: string) => (uid(u) === null ? 'absent' : 'exists') : userPresence);
-    if (!instanceNameOk(instance) || (presence(`wl-${instance}`) === 'absent' && instanceId(instance, markers) === null)) throw new Error(`no instance ${instance} on this machine`);
+    // Any name in the shape every name has had, as killAutoMerge takes it (#902 round 9): an instance made before its
+    // name was reserved (machine, console) turns off too.
+    if (!instanceNameShapeOk(instance) || (presence(`wl-${instance}`) === 'absent' && instanceId(instance, markers) === null)) throw new Error(`no instance ${instance} on this machine`);
     killAutoMerge(instance, markers);
     return { key, from: null, to: false };
   }
   // auto_merge on: the kill switches there now, before anything waits (root's lock included), are the only ones it may
   // clear; an OFF that starts any time after this leaves a switch of its own name, which stays.
   const seen = key === 'auto_merge' && value === true ? armedSwitches(instance, markers) : [];
-  const { dir, file, coordUid } = instancePolicy(instance, d);
+  const { dir, file, coordUid } = instancePolicy(instance, d, legacy);
   if (policyRecord(instance, markers) === null) throw new Error(`${file} isn't root's yet: make it so first (${ownCommand(instance)})`);
   return withPolicyLock(markers, instance, d.lockWaitMs ?? LOCK_WAIT_MS, () => {
     const rec = policyRecord(instance, markers);
@@ -289,10 +298,11 @@ export function setPolicy(instance: string, key: string, arg: string, by: string
     const from = getIn(doc.toJS(), pathOf(key)) ?? null;
     // The coordinator's route (the helper, for a dashboard) only tightens, every key (the owner's decision of
     // 2026-10-19; round 11): the value in effect now is the ceiling. Loosening is an admin's, here at a root shell.
-    if (by && /^wl-/.test(by)) {
+    // So does a name the instance-name rules refuse now (legacy, above), from any caller.
+    if ((by && /^wl-/.test(by)) || legacy) {
       const intake = key.startsWith('settings.intake.') ? intakeCapsBeside(dir, coordUid, rootUid) : null;
       const past = tightenProblem(key, value, rootInEffect(key, parsePolicy(text, file), intake), policySetCommand(instance, key, arg));
-      if (past) throw new Error(`refused: ${past}`);
+      if (past) throw new Error(`refused: ${past}${legacy ? ` (${instance} is a name the instance-name rules refuse now: its policy only tightens)` : ''}`);
     }
     doc.setIn(pathOf(key), value);
     const out = doc.toString();

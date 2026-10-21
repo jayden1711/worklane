@@ -63,7 +63,8 @@ test('#902 round 7 F1: the lock sits in a directory only root can enter; without
   assert.match(none.stderr, /needs flock/);
   // Both writers take it, by that one function.
   assert.match(readFileSync(join(repoRoot, 'scripts', 'setup', 'machine-helper.sh'), 'utf8'), /\nmachine_sudoers_lock\n/);
-  assert.match(readFileSync(join(repoRoot, 'scripts', 'setup', 'instance-remove.sh'), 'utf8'), /\n\s*machine_sudoers_lock\n\s*remove_sudoers worklane-machine/);
+  // Round 9: under the lock, the rule is checked again (no other instance in it now) right before it goes.
+  assert.match(readFileSync(join(repoRoot, 'scripts', 'setup', 'instance-remove.sh'), 'utf8'), /\n\s*machine_sudoers_lock\n(\s*#[^\n]*\n)*\s*if \[ "\$\(helper_mode\)" != remove \]; then\n\s*exec 8>&-\n\s*refuse [^\n]*\n\s*fi\n\s*remove_sudoers worklane-machine/);
   assert.equal(m.hostCalls(), '');
 });
 

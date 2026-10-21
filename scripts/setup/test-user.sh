@@ -71,7 +71,11 @@ case "$cmd" in
   update-helper) [ "${#pos[@]}" -eq 1 ] && [ -z "$print" ] || { echo "$usage" >&2; exit 2; }; name=helper ;; # no instance: a placeholder name, never used
   *) echo "$usage" >&2; exit 2 ;;
 esac
+# check and remove take an instance made before its name was reserved (machine, console; #902 round 9): what it has
+# already is checked and removed. Nothing is installed under such a name.
+if [ "$cmd" = check ] || [ "$cmd" = remove ]; then need_instance_name "$name" "the instance name" kept; else
 need_instance_name "$name" "the instance name"
+fi
 [[ "$memory_max" =~ ^[1-9][0-9]*[KMGT]$ ]] || { echo "--memory-max: a size such as 6G, got $memory_max" >&2; exit 2; }
 for w in "$cpu_weight" "$io_weight"; do [[ "$w" =~ ^[0-9]+$ ]] && [ "$w" -ge 1 ] && [ "$w" -le 10000 ] || { echo "weights are 1 to 10000, got $w" >&2; exit 2; }; done
 if [ -z "$cpus" ]; then n="$(getconf _NPROCESSORS_ONLN)"; if [ "$n" -gt 8 ]; then cpus="$((n - 8))-$((n - 1))"; else cpus="0-$((n - 1))"; fi; fi

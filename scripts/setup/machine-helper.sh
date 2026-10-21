@@ -84,12 +84,14 @@ if [ "${1:-}" = --check ]; then
   [ "$#" -eq 1 ] || { echo "usage: machine-helper.sh --check" >&2; exit 2; }
   [ -e "$MACHINE_SUDOERS" ] || { echo "absent: no $MACHINE_SUDOERS: the machine helper has no rule on this machine"; exit 0; }
   names=() users=()
-  for n in $(helper_instances); do if user_exists "wl-$n"; then names+=("$n"); users+=("wl-$n"); fi; done
+  # Only names this script takes (the instance-name rules), so the command printed runs (#902 round 9). An instance made
+  # before its name was reserved (machine, console) is left out: rewriting the rule without it only narrows it.
+  for n in $(helper_instances); do if instance_name_ok "$n" && user_exists "wl-$n"; then names+=("$n"); users+=("wl-$n"); fi; done
   if [ "${#names[@]}" -eq 0 ]; then
     # In the engine's own shape, naming no user that is here: removing it only narrows. Anything else (a rule this
     # can't read the users of, as the engine writes them) fails closed: wider.
     if machine_sudoers_shape < "$MACHINE_SUDOERS" >/dev/null 2>&1; then
-      echo "stale: $MACHINE_SUDOERS names no coordinator user on this machine; remove it, as root: sudo rm -f $MACHINE_SUDOERS"
+      echo "stale: $MACHINE_SUDOERS names no coordinator user on this machine that the engine keeps in it; remove it, as root: sudo rm -f $MACHINE_SUDOERS"
       exit 3
     fi
     # Its users line can't be read: the command names the instances on this machine from the hub and the checkouts.
