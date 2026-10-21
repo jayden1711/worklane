@@ -17,9 +17,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { BRAND } from '../src/brand.js';
 import * as names from '../src/instance-name.js';
-import { setPolicyRootUid } from '../src/policy-gate.js';
+import { ownCommand, setPolicyRootUid } from '../src/policy-gate.js';
 import { ownPolicy, setPolicy, type PolicyRootDeps } from '../src/policy-root.js';
 import { repoRoot } from './helpers.js';
+import { keptProblems, REFUSED_NAMES } from './legacy-kept-names.js';
 
 const posix = process.platform !== 'win32';
 const linux = process.platform !== 'linux' && 'a Linux machine install (POSIX owners, /proc/self/fd)';
@@ -90,15 +91,28 @@ test('#902 round 10: wl-test-console is a test user, so another instance\'s run 
   }
 });
 
-test('#902 round 10: the helpers\' kept names and the setup scripts\' are the engine\'s LATER_RESERVED', () => {
+test('#902 round 11: the helpers\' kept names are the engine\'s LATER_RESERVED, by behaviour: every refused name through every kept verb and is_test_user', { skip: !posix && 'bash' }, () => {
   assert.deepEqual([...later].sort(), ['console', 'machine']);
   const libText = readFileSync(lib, 'utf8');
   assert.match(libText, new RegExp(`^LATER_RESERVED_NAMES="${later.join(' ')}"$`, 'm'));
-  for (const f of [exp, testrun, testUser]) {
-    const kept = /# kept: ([a-z ]+)\n/.exec(readFileSync(f, 'utf8'));
-    assert.ok(kept, `${f} names the names it keeps`);
-    assert.deepEqual(kept[1]!.split(' ').sort(), [...later].sort(), f);
-  }
+  // Each name the list uses is one the instance-name rules refuse (src/instance-name.ts), so none passes by being valid.
+  for (const n of [...REFUSED_NAMES, ...later]) assert.notEqual(names.instanceNameProblem(n), null, n);
+  const src = { exp: readFileSync(exp, 'utf8'), testrun: readFileSync(testrun, 'utf8'), testUser: readFileSync(testUser, 'utf8'), lib: libText };
+  assert.deepEqual(keptProblems(src, later), []);
+  // A widened kept set (the round-10 review's mutant: hub kept by the experiment helper, exp-x by the test-run
+  // helper's check) is caught, as is one in is_test_user.
+  const mutant = {
+    ...src,
+    exp: src.exp.replace('if [ "$name" = machine ] || [ "$name" = console ]; then why=""', 'if [ "$name" = machine ] || [ "$name" = console ] || [ "$name" = hub ]; then why=""'),
+    testrun: src.testrun.replace('case "$cmd" in wipe | check | version) if [ "$name" = machine ] || [ "$name" = console ]; then', 'case "$cmd" in wipe | check | version) if [ "$name" = machine ] || [ "$name" = console ] || [ "$name" = exp-x ]; then'),
+  };
+  assert.notEqual(mutant.exp, src.exp);
+  assert.notEqual(mutant.testrun, src.testrun);
+  const caught = keptProblems(mutant, later);
+  assert.ok(caught.some((p) => p.startsWith('exp hub stop: taken')) && caught.some((p) => p.startsWith('testrun exp-x check: taken')), caught.join('\n'));
+  const tuMutant = { ...src, testUser: src.testUser.replace('[ "$n" = console ] ||', '[ "$n" = console ] || [ "$n" = agent ] ||') };
+  assert.notEqual(tuMutant.testUser, src.testUser);
+  assert.ok(keptProblems(tuMutant, later).some((p) => p.startsWith('test-user.sh is_test_user wl-test-agent: yes')));
 });
 
 test('#902 round 10: under a name reserved since, policy own --retake and --accept-loose are refused: root\'s policy is never taken over looser', { skip: linux }, () => {
@@ -123,8 +137,12 @@ test('#902 round 10: under a name reserved since, policy own --retake and --acce
       renameSync(join(dir, '.x'), file);
       assert.throws(() => ownPolicy('console', deps, flags), /console is a name the instance-name rules refuse now/, JSON.stringify(flags));
     }
-    // Root's record still covers only the file it wrote: nothing reads or changes the planted one as root's.
-    assert.throws(() => setPolicy('console', 'budget.daily_usd', '10', null, deps), /isn't what root last wrote/);
+    // Root's record still covers only the file it wrote: nothing reads or changes the planted one as root's. The way out
+    // it names is the instance's removal, never a --retake that is refused (round 11).
+    assert.throws(() => setPolicy('console', 'budget.daily_usd', '10', null, deps), /isn't what root last wrote.*instance-remove\.sh console \(/);
+    assert.doesNotMatch(ownCommand('console', '--retake'), /policy own/);
+    assert.equal(ownCommand('alpha', '--retake'), `sudo ${BRAND.cli} policy own alpha --retake`);
+    assert.equal(ownCommand('console'), `sudo ${BRAND.cli} policy own console`);
   } finally {
     setPolicyRootUid(0);
   }

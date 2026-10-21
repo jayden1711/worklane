@@ -149,8 +149,9 @@ instance_name_problem() {
 why="$(instance_name_problem "$name")"
 # kept: machine console
 # An instance made before those two names were reserved (#902: their sudoers files are the machine's own) still stops,
-# wipes, prunes and checks what it has (decision guide 2). Every verb that makes something keeps the rule above. The same
-# names as lib.sh LATER_RESERVED_NAMES (a test keeps them equal).
+# wipes, prunes and checks what it has (decision guide 2). Every other verb keeps the rule above, so it starts no job of
+# its own. check still starts root's own fixed probe units (as its job and scorer users), as for any instance. The same
+# names as lib.sh LATER_RESERVED_NAMES (test/legacy-kept-names.ts checks every refused name against these verbs).
 case "$cmd" in stop | wipe | prune | check | version) if [ "$name" = machine ] || [ "$name" = console ]; then why=""; fi ;; esac
 [ -z "$why" ] || die "instance name $name: $why"
 juser="wl-exp-$name"

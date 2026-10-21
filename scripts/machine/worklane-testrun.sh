@@ -210,8 +210,10 @@ instance_name_problem() {
 why="$(instance_name_problem "$name")"
 # kept: machine console
 # An instance made before those two names were reserved (#902: their sudoers files are the machine's own) still wipes
-# and checks what it has (decision guide 2). Every verb that makes or runs something keeps the rule above, so its own
-# test runs stop. The same names as lib.sh LATER_RESERVED_NAMES (a test keeps them equal).
+# and checks what it has (decision guide 2). Every other verb keeps the rule above, so it starts no test run of its own.
+# check still makes and runs root's own fixed probe (a run from root's one-commit bundle, the fixed probe command, then
+# wiped), as for any instance: no command, GPU or network the coordinator chooses reaches it. The same names as lib.sh
+# LATER_RESERVED_NAMES (test/legacy-kept-names.ts checks every refused name against these verbs).
 case "$cmd" in wipe | check | version) if [ "$name" = machine ] || [ "$name" = console ]; then why=""; fi ;; esac
 [ -z "$why" ] || die "instance name $name: $why"
 user="wl-test-$name"
