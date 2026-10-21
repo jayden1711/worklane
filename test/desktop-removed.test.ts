@@ -80,9 +80,10 @@ function matrixCombos(matrix: unknown): Map<string, unknown>[] | null {
   // then (an empty or dropped suffix?) is unsure, so the matrix counts as unreadable (as src/check-pin-block.ts does).
   const values = [...(Object.values(axes) as unknown[][]).flat(), ...include.flatMap((e) => Object.values(e)), ...exclude.flatMap((e) => Object.values(e))];
   if (values.some((v) => v === null || typeof v === 'object' || (typeof v === 'string' && v.trim() === ''))) return null;
-  // A number JS and GitHub may print differently (`22.00000000000001`: JS keeps the digits, a 15-digit format drops
-  // them): only an integer below 1e15 prints the same both ways (round 8).
-  if (values.some((v) => typeof v === 'number' && !(Number.isInteger(v) && Math.abs(v) < 1e15))) return null;
+  // A number JS and GitHub may print differently makes the matrix unreadable: `22.00000000000001` (JS keeps the
+  // digits, a 15-digit format drops them; round 8) and -0 (JS prints `0`, .NET `-0`; round 9). Every other integer
+  // below 1e15 in size is taken to print the same both ways (inferred, not measured on GitHub).
+  if (values.some((v) => typeof v === 'number' && (!(Number.isInteger(v) && Math.abs(v) < 1e15) || Object.is(v, -0)))) return null;
   let combos: Map<string, unknown>[] = Object.keys(axes).length ? [new Map()] : [];
   for (const [k, values] of Object.entries(axes) as [string, unknown[]][]) combos = combos.flatMap((c) => values.map((v) => new Map([...c, [k, v]])));
   combos = combos.filter((c) => !exclude.some((e) => Object.entries(e).every(([k, v]) => c.has(k) && same(c.get(k), v))));
@@ -129,6 +130,9 @@ function jobCheckNames(key: string, job: Job): Set<string> {
   // A name that isn't a non-blank string (`''`, a number, a list): what GitHub shows is unsure, so it fails closed.
   if (job.name !== undefined && (typeof job.name !== 'string' || job.name.trim() === '')) return new Set([`${key} (${UNRESOLVED} name ${JSON.stringify(job.name)} }})`]);
   const name = (job.name as string | undefined) ?? key;
+  // A `strategy` that isn't a plain mapping (a whole `${{ fromJSON(...) }}` expression, null, a list): GitHub may
+  // expand it into a matrix, `test (ubuntu-latest, 22)`, where this would read a bare `test` (round 9). Unresolved.
+  if (job.strategy !== undefined && !isRecord(job.strategy)) return new Set([`${name} (${UNRESOLVED} strategy ${JSON.stringify(job.strategy)} }})`]);
   const matrix = job.strategy?.matrix;
   const combos = matrix === undefined ? [new Map<string, unknown>()] : matrixCombos(matrix);
   // A matrix this can't read, or one with no combination at all (`{}`, `include: []`, an empty axis, everything
@@ -614,6 +618,10 @@ const NAME_TWIN_FIXTURES: [string, string][] = [
   ['A3 a value 22.00000000000001 in the suffix', "jobs:\n  test:\n    strategy: { matrix: { os: [ubuntu-latest], node: [22.00000000000001] } }\n    runs-on: x\n    steps: [ { run: 'false' } ]\n"],
   ['A3 a value 22.00000000000001 through ${{ matrix.node }}', "jobs:\n  twin:\n    name: test (ubuntu-latest, ${{ matrix.node }})\n    strategy: { matrix: { node: [22.00000000000001] } }\n    runs-on: x\n    steps: [ { run: 'false' } ]\n"],
   ['A4 a literal name full-ci / scope', "jobs:\n  twin:\n    name: full-ci / scope\n    runs-on: x\n    steps: [ { run: 'false' } ]\n"],
+  // Round 9: a whole `strategy` that is an expression (GitHub may expand it), and a -0 matrix value.
+  ['R9-1 a job keyed test, its whole strategy an expression', "jobs:\n  test:\n    strategy: >-\n      ${{ fromJSON('{\"matrix\":{\"os\":[\"ubuntu-latest\"],\"node\":[22]}}') }}\n    runs-on: x\n    steps: [ { run: 'false' } ]\n"],
+  ['R9-1 a job keyed bootstrap, its whole strategy an expression', "jobs:\n  bootstrap:\n    strategy: >-\n      ${{ fromJSON('{\"matrix\":{\"os\":[\"ubuntu-latest\"]}}') }}\n    runs-on: x\n    steps: [ { run: 'false' } ]\n"],
+  ['R9-4 a matrix value -0', "jobs:\n  lint:\n    strategy: { matrix: { v: [-0] } }\n    runs-on: x\n    steps: [ { run: 'false' } ]\n"],
 ];
 
 test('a job GitHub may name as a twin of another check is caught: matrix keys, numbers, reusable-workflow names (round 8)', () => {
