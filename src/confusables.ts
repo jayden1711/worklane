@@ -79,17 +79,20 @@ function normalized(s: string, form: 'NFD' | 'NFKC'): string {
  * The work one change's look-alike check may do, in steps (PAIR_COST, WALK_COST, FORM_CHAR_COST and
  * RUN_HOLD_CHAR_COST below), charged as the work is done. Once it is overdrawn, the path being compared and every
  * further path count as look-alikes, not compared (#763 rounds 6 to 8), and no further work is done on them (round
- * 10). Sized (round 10) so that the slowest shape found, 5,000 paths, takes under half of LOOKALIKE_BOUND_MS for one
- * computeLevel on the machine measured; it was 2 billion until round 9, which took 7.46 s on CI. A change of every
- * file in this repo doesn't spend it.
+ * 10). Sized (round 11) so that spending all of it adds a few tenths of a second to one computeLevel (at most about
+ * 0.9 ns a unit measured, so about 0.2 s at a light load), keeping the slowest shape found under half of
+ * LOOKALIKE_BOUND_MS on CI's Node 24 with what main's own matching costs beside it. It was 2 billion until round 9
+ * (7.46 s on CI) and 1 billion in round 10 (a coarse test took 4.28 s on CI's Node 24). A change of every file in this
+ * repo doesn't spend it; about 130 paths of 1,000 characters outside ASCII do (fails closed: they wait).
  */
-export const LOOKALIKE_BUDGET = 1_000_000_000;
+export const LOOKALIKE_BUDGET = 200_000_000;
 /**
- * The time bound (#763 rounds 9 and 10), in ms: one computeLevel of up to 5,000 changed paths of up to 1,020
- * characters, its look-alike check included, budget spent or not. Past that size main's own per-path category
- * matching grows on its own. The tests that hold it count budget units (deterministic: test/confusable-*.test.ts);
- * one coarse wall-clock test (test/confusable-mark-runs.test.ts) runs the slowest shape found against it in a child
- * process. Measured on one machine under load; how fast another machine is, is a guess.
+ * The time bound (#763 rounds 9 to 11), in ms: one computeLevel of up to 5,000 changed paths of up to 1,020
+ * characters, its look-alike check included, budget spent or not. Past that size main's own per-path category and
+ * money matching grows on its own, and with a money list of many `**` globs main's own matching alone can take most
+ * of it (measured: 1.3 to 2.2 s locally under 200 such globs). The tests that hold it count budget units
+ * (deterministic: test/confusable-budget-units.test.ts); one coarse wall-clock test there runs the slowest compared
+ * shape found against it in a child process. Measured on one machine under load; how fast another is, is a guess.
  */
 export const LOOKALIKE_BOUND_MS = 6_000;
 
@@ -508,7 +511,7 @@ export const FORM_CHAR_COST = 20;
  * comparing a path of that length costs (1,400 to 1,500 units a character for 1,000-character paths outside ASCII
  * under the engine's review.yaml, measured with the round-10 probes). So holding a path for its run is never cheaper
  * on the budget than comparing it, and the budget runs out after about as many such paths as compared ones (about
- * 1,300 of 1,020 characters at LOOKALIKE_BUDGET). Before round 10 a path refused partway through a pass was charged
+ * 130 of 1,020 characters at LOOKALIKE_BUDGET since round 11). Before round 10 a path refused partway through a pass was charged
  * that pass's input only: 90,000 of them added 31.6 s (measured by the round-9 delta check).
  */
 export const RUN_HOLD_CHAR_COST = 1_500;
@@ -610,6 +613,9 @@ export function lookalikeOf(path: string, patterns: readonly Protected[], budget
             overdrawn();
             return { like: g.what };
           }
+          // Round 11: charged after each form, not only after the pattern, so the budget is overdrawn by at most one
+          // form's two walks (a pattern's 18 walks of a 4,096-character form were about 9 million units).
+          if (overdrawn()) return spent;
         }
       } else {
         const p = r.res[i]!;
