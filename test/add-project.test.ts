@@ -44,6 +44,7 @@ as_root() { :; }
 home_of() { echo "$T/homes/$1"; }
 user_exists() { [ -e "$T/users/$1" ]; }
 unit_active() { [ -e "$T/active/$1" ]; }
+sudo_version() { echo 1.9.15; }
 run_as() { local user="$1" script="$2"; shift 2; HOME="$T/homes/$user" bash -euo pipefail -c "$script" _ "$@"; }
 ensure_instance_home() {
   local d="$T/homes/wl-$1/.local/state/worklane/instances/$1"
@@ -83,9 +84,11 @@ echo "OK: App x (id 91), installation 4242"`);
   stub(join(s, 'checkout.sh'), 'checkout', 'mkdir -p "$T/srv/$1/${2#*/}/.git"; [ -e "$T/no-config" ] && exit 0; mkdir -p "$T/srv/$1/${2#*/}/.worklane"; printf "suites: {}\\n" > "$T/srv/$1/${2#*/}/.worklane/tests.yaml"');
   stub(join(s, 'service.sh'), 'service', 'touch "$T/active/worklane-$1.service"');
   stub(join(s, 'test-user.sh'), 'test-user', 'touch "$T/users/wl-test-$2" "$T/active/worklane-test-$2-docker.service"');
+  // What the real one writes (#898: the step is done only while the rule is exactly that): the helper, and the rule.
   stub(join(s, 'machine-helper.sh'), 'machine-helper', `cp "$T/scripts/machine/worklane-machine.cjs" "$T/helper"
-users=""; for n in "$@"; do users="\${users:+$users, }wl-$n"; done
-printf 'Cmnd_Alias WORKLANE_MACHINE = x\\n%s ALL=(root) NOPASSWD: WORKLANE_MACHINE\\n' "$users" > "$T/sudoers-machine"`);
+source "$T/scripts/setup/lib.sh"
+users=(); for n in "$@"; do users+=("wl-$n"); done
+sudoers_bytes "$(machine_sudoers "\${users[@]}")" > "$T/sudoers-machine"`);
   stub(join(s, 'dashboards.sh'), 'dashboards', `none=""; if [ "\${1:-}" = --no-instances ]; then none=1; shift; fi
 opts=""; while [ "$#" -gt 0 ] && [ "\${1#--}" != "$1" ]; do opts="$opts $1 $2"; shift 2; done
 hub=""; for n in "$@"; do hub="\${hub:+$hub,}$n=$T/homes/wl-$n/state"; touch "$T/active/worklane-dashboard-$n.service"; done

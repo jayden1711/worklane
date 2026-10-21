@@ -23,7 +23,8 @@
 #                   minutes) for the PR to merge, then brings the checkout up to it; still open then, it stops as
 #                   "waiting" (exit 3), saying for what, and a rerun picks up here
 #   test-user      test-user.sh install <name>, when the repo's tests.yaml has test_run
-#   machine-helper  machine-helper.sh with every instance on the machine (the ones it lists now, the hub's, and this)
+#   machine-helper  machine-helper.sh with every instance on the machine (the ones it lists now, the hub's, and this);
+#                   done only while its sudoers rule is byte for byte what that writes for them (an upgrade reruns it)
 #   dashboards      dashboards.sh with every instance, keeping the hub's settings (its unit has them); the first
 #                   project on a machine gives --client-id and --public-url instead
 #
@@ -282,10 +283,18 @@ helper_names() {
   done
 }
 one_line() { tr '\n' ' ' | sed 's/ $//'; }
+# Done only when a rerun would change nothing: the helper's bytes, this instance in its rule, and the rule byte for byte
+# what machine-helper.sh writes for these instances (#898). The updater keeps the helper's bytes in step but never
+# sudoers, so after an upgrade the bytes match while the rule is an older engine's (or was written for an older sudo, or
+# edited): that reruns machine-helper.sh, the one writer of the rule, so it only ever ends up equal to its output.
 done_machine_helper() {
+  local names
   [ -f "$MACHINE_HELPER" ] && cmp -s "$MACHINE_HELPER" "$here/../machine/worklane-machine.cjs" || return 1
   helper_instances | grep -qx "$name" || return 1
-  echo "the machine helper is installed and lists $coord"
+  names="$(helper_names 2>/dev/null)"
+  # shellcheck disable=SC2086 # one word per instance name
+  machine_sudoers_current $names || return 1
+  echo "the machine helper is installed, lists $coord, and its sudoers rule is what machine-helper.sh writes for $(printf '%s\n' "$names" | one_line)"
 }
 do_machine_helper() {
   # shellcheck disable=SC2046 # one word per instance name

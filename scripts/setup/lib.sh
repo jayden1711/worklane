@@ -71,11 +71,18 @@ ensure_user() {
 ensure_group() { groupadd -f "$1"; }
 ensure_member() { usermod -aG "$2" "$1"; }
 
+# The bytes install_sudoers writes for <content>: the one place they are made, so a check that a rule is current
+# (sudoers_current) compares exactly what an install would write.
+sudoers_bytes() { printf '%s\n' "$1"; }
+
+# Whether <file> holds byte for byte what install_sudoers writes for <content>. A missing file never does.
+sudoers_current() { [ -f "$1" ] && sudoers_bytes "$2" | cmp -s - "$1"; }
+
 # Install a sudoers file safely: write a dotted temp name (sudo ignores
 # names with a dot), validate it, and only then move it into place.
 install_sudoers() {
   local name="$1" content="$2" tmp="/etc/sudoers.d/.$1.tmp"
-  printf '%s\n' "$content" > "$tmp"
+  sudoers_bytes "$content" > "$tmp"
   chmod 0440 "$tmp"
   if ! visudo -cf "$tmp"; then rm -f "$tmp"; echo "sudoers $name is invalid; nothing installed" >&2; exit 1; fi
   mv -f "$tmp" "/etc/sudoers.d/$name"
@@ -222,6 +229,16 @@ machine_sudoers() {
 helper_instances() {
   [ -f "$MACHINE_SUDOERS" ] || return 0
   sed -n 's/^\(wl-[-a-z0-9, ]*\) ALL=(root) NOPASSWD: WORKLANE_MACHINE$/\1/p' "$MACHINE_SUDOERS" | tr ',' '\n' | sed -e 's/^ *wl-//' -e 's/ *$//' | grep -E '^[a-z][a-z0-9-]{0,20}$' || true
+}
+
+# Whether the installed machine helper rule ($MACHINE_SUDOERS) is byte for byte what machine-helper.sh writes for these
+# instances: machine_sudoers for their coordinator users, as install_sudoers writes it (#898). The helper's own bytes
+# say nothing about it: the updater keeps those in step with the engine and never touches sudoers. Only reads.
+machine_sudoers_current() {
+  local n users=()
+  [ "$#" -ge 1 ] || return 1
+  for n in "$@"; do users+=("wl-$n"); done
+  sudoers_current "$MACHINE_SUDOERS" "$(machine_sudoers "${users[@]}")"
 }
 
 # Tailscale for the dashboard hub (tailscale.sh). The install is pinned: Tailscale's own apt repository for this

@@ -33,8 +33,31 @@
 #   - Makes /etc/worklane/slots.json root:root 0644: until now the agent-slots group could
 #     write any content to it; from now on the cap changes only through the helper.
 # Re-run it with the full list after adding an instance.
+#
+#   bash scripts/setup/machine-helper.sh --check      whether the installed rule is current; changes nothing (#898)
+#
+# One line on stdout: "absent: ..." (no rule here) or "current: ..." (byte for byte what this script writes for the
+# instances the rule names whose coordinator users exist), exit 0; "stale: ...", ending with the exact command that
+# rewrites it, exit 3. The updater keeps the helper's bytes in step with the engine but never sudoers, so after an
+# upgrade the rule can be an older engine's: the updater runs this every run and names a stale rule (journal, incident).
 source "$(dirname "$0")/lib.sh"
 as_root "$@"
+if [ "${1:-}" = --check ]; then
+  [ "$#" -eq 1 ] || { echo "usage: machine-helper.sh --check" >&2; exit 2; }
+  [ -e "$MACHINE_SUDOERS" ] || { echo "absent: no $MACHINE_SUDOERS: the machine helper has no rule on this machine"; exit 0; }
+  names=()
+  for n in $(helper_instances); do if user_exists "wl-$n"; then names+=("$n"); fi; done
+  if [ "${#names[@]}" -eq 0 ]; then
+    echo "stale: $MACHINE_SUDOERS names no coordinator user on this machine; remove it, as root: sudo rm -f $MACHINE_SUDOERS"
+    exit 3
+  fi
+  if machine_sudoers_current "${names[@]}"; then
+    echo "current: $MACHINE_SUDOERS is what machine-helper.sh writes for ${names[*]}"
+    exit 0
+  fi
+  echo "stale: $MACHINE_SUDOERS is not what machine-helper.sh writes for ${names[*]} (an older engine's rule, one for another sudo version, or an edit); rewrite it, as root: sudo bash $(cd "$(dirname "$0")" && pwd)/machine-helper.sh ${names[*]}"
+  exit 3
+fi
 [ "$#" -ge 1 ] || { echo "usage: machine-helper.sh <name> [<name>...]" >&2; exit 2; }
 users=()
 for name in "$@"; do

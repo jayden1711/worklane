@@ -1236,6 +1236,7 @@ async function run(deps) {
 async function runOnce(deps, seen) {
   const cfg = deps.config();
   watchSigners(deps, cfg);
+  watchSudoers(deps);
   if (!cfg || cfg.enabled !== true) {
     stuckCheck(deps, cfg, null); // off: never an alert, and an open one is closed
     return 'disabled';
@@ -1824,6 +1825,63 @@ function signersChangeText(c) {
 }
 const SIGNERS_ACK = 'sudo bash /opt/worklane/current/scripts/setup/updates.sh --acknowledge-signers';
 
+// ---------- the machine helper's sudoers rule, watched (#898) ----------
+
+// syncHelpers keeps the machine helper's bytes in step with the engine, but its sudoers rule is machine-helper.sh's and
+// is never touched here: after an upgrade the rule can be an older engine's (missing a command the new helper takes,
+// or naming one it no longer should). Every run, the installed engine's `machine-helper.sh --check` (read-only) says
+// whether it is current; a stale one is named in the journal and as an incident, with the exact command that rewrites
+// it. Nothing here writes the rule: only that script does, and only ever its own output.
+const SUDOERS_INCIDENT = 'machine_sudoers_stale';
+const CHECK_PATH = '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin';
+
+/**
+ * `machine-helper.sh --check` of the engine in `engineDir`: { state: current|absent|stale|unknown, detail, fix? }, or
+ * null when that engine has no machine-helper.sh. fix is the command the check named for a stale rule.
+ */
+function machineSudoersCheck(engineDir, exec = execFileSync) {
+  const script = path.join(engineDir, 'scripts', 'setup', 'machine-helper.sh');
+  if (!fs.existsSync(script)) return null;
+  let out;
+  let status = 0;
+  try {
+    out = exec('bash', [script, '--check'], { encoding: 'utf8', cwd: '/', env: { PATH: CHECK_PATH, LANG: 'C.UTF-8' }, stdio: ['ignore', 'pipe', 'pipe'], timeout: 60_000 });
+  } catch (e) {
+    out = e && e.stdout;
+    status = e && typeof e.status === 'number' ? e.status : -1;
+    if (status !== 3) return { state: 'unknown', detail: `couldn't check the machine helper's sudoers rule: ${firstLine(e)}` };
+  }
+  const line = String(out || '').trim().split('\n').pop() || '';
+  const m = /^(absent|current|stale): /.exec(line);
+  // INVARIANT: only exit 3 with a "stale:" line is stale, and only exit 0 says current or absent; anything else is unknown.
+  if (!m || (m[1] === 'stale') !== (status === 3)) return { state: 'unknown', detail: `the machine helper's sudoers check gave no answer: ${line.slice(0, 300)}` };
+  if (m[1] !== 'stale') return { state: m[1], detail: line.slice(0, 600) };
+  const fix = / as root: (sudo .+)$/.exec(line);
+  return { state: 'stale', detail: line.slice(0, 600), ...(fix ? { fix: fix[1].slice(0, 300) } : {}) };
+}
+
+/** Every run, updates on or off: a stale machine helper rule is said and raised; a current one (or none) closes it. Never throws. */
+function watchSudoers(deps) {
+  if (typeof deps.sudoersCheck !== 'function') return;
+  let r;
+  try {
+    r = deps.sudoersCheck();
+  } catch (e) {
+    r = { state: 'unknown', detail: `couldn't check the machine helper's sudoers rule: ${firstLine(e)}` };
+  }
+  if (!r) return;
+  try {
+    if (r.state === 'stale') {
+      if (typeof deps.warn === 'function') deps.warn(`machine_sudoers_stale: ${r.detail}`);
+      if (typeof deps.raiseIncident === 'function') deps.raiseIncident(SUDOERS_INCIDENT, 'machine-helper', r.detail, r.fix || 'sudo bash /opt/worklane/current/scripts/setup/machine-helper.sh --check');
+    } else if (r.state === 'current' || r.state === 'absent') {
+      if (typeof deps.resolveIncident === 'function') deps.resolveIncident(SUDOERS_INCIDENT, 'machine-helper');
+    } else if (typeof deps.warn === 'function') deps.warn(r.detail);
+  } catch {
+    // the journal has what was said; an alert never stops an update
+  }
+}
+
 /** Every run, before anything else: the signers file against its record. A change is logged, said on stderr, and raised. */
 function watchSigners(deps, cfg) {
   if (typeof deps.signersCheck !== 'function') return;
@@ -1962,6 +2020,8 @@ function realDeps(print = (line) => process.stdout.write(`${line}\n`), files = {
     signersCheck: (file) => checkSigners(file),
     signersHold: () => signersHold(),
     signersAcknowledged: () => takeAcknowledged(),
+    // The installed engine's check, through the current link: the command it names is the one that stays valid.
+    sudoersCheck: () => machineSudoersCheck(path.join(OPT, 'current')),
     // stderr is the unit's journal: a line there needs neither the dashboard nor a coordinator.
     warn: (line) => process.stderr.write(`${line}\n`),
     switchTo: (sha) => {
@@ -1999,5 +2059,6 @@ if (require.main === module) {
   );
 }
 module.exports = { slotPid, drainStep, drainDeadline, drainAfterMs, inFlight, reopen, DRAIN, DRAIN_TTL_MS, DRAIN_INSTALL_TTL_MS, DRAIN_MARGIN_MS, redactDeep, appendLog, sandboxOnTimeout, sandboxCommand, parseSandbox, sandboxVerdict, sandboxWaitMs, verifySandbox, SANDBOX_INCIDENT, SANDBOX_POLL_MS, stuckStep, stuckAlertMs, STUCK_INCIDENT, IDLE_AFTER_MS, journalLine, makeNote, realDeps, chooseCommit, checkRunsOf, firstParentLine, lookbackOf, pendingWaitMs, saveJson, CHECKS_SPACING_MS, VERDICT_TTL_MS, syncHelpers, HELPERS, canaryConfig, canaryCommand, dailyDue, DAY_MS, channelOf, newer, parseTags, newestRelease, verifyRelease, parseInstance, migrateCommand, restoreCommand, parseMigrate, repoFromUrl, fastForward, evaluateChecks, RETIRED_CHECKS, quiet, parseUnits, parseShow, health, redact, buildCommand, binTargets, binProblems, installTree, run, BUILD_SCRIPT, HEALTH_MS, STABLE_MS };
+Object.assign(module.exports, { SUDOERS_INCIDENT, machineSudoersCheck, watchSudoers });
 Object.assign(module.exports, { SIGNERS_STATE, SIGNERS_INCIDENT, signersDigest, readSignersState, checkSigners, expectSigners, recordSigners, signersHold, acknowledgeSigners, takeAcknowledged, signersChangeText });
 Object.assign(module.exports, { SELF, SELF_PREV, SELF_RECORD, SELF_OFF, SELF_ROLLBACK, readRootFile, selfUpdateOff, verifiedUpdater, syncSelf, setupBefore, setupRecord });
