@@ -30,6 +30,7 @@
 import { realpathSync } from 'node:fs';
 import { userInfo } from 'node:os';
 import { fileURLToPath } from 'node:url';
+import { redactString } from '../../src/events/redact.js';
 import { currentUser } from '../../src/os/index.js';
 import { benchLane, runtimeDir } from './agent.js';
 import { LOGIN_SWITCH_VAR, requireBenchUser, requireClaudePin, requireSubscription } from './auth.js';
@@ -74,8 +75,6 @@ export interface Check {
 
 /** A variable whose value may be a credential (container.ts SECRET_NAME without the daemon's names, which are paths). */
 const SECRET_VAR = /KEY|TOKEN|SECRET|PASSW|CREDENTIAL|AUTH|COOKIE|SESSION/i;
-/** Token shapes: Anthropic keys and OAuth tokens, GitHub tokens, Slack tokens, AWS key ids, JWTs. */
-const TOKEN_SHAPE = /sk-ant-[\w-]+|\bgh[opsur]_\w{16,}|\bgithub_pat_\w{16,}|\bxox[abprs]-[\w-]+|\bAKIA[0-9A-Z]{16}\b|\beyJ[\w-]{8,}\.[\w-]{8,}\.[\w-]+/g;
 /** An email address: its domain ends in a letters-only label, so a package spec such as `name@0.0.79` is not one. */
 const EMAIL = /[\w.+-]+@[\w-]+(?:\.[\w-]+)*\.[A-Za-z]{2,}\b/g;
 /** What scrub() keeps of one detail, and of one printed line. */
@@ -112,7 +111,8 @@ export function scrub(text: string, env: NodeJS.ProcessEnv, max = DETAIL_MAX): s
       for (const piece of [v.slice(0, n), v.slice(v.length - n)]) if (s.includes(piece)) s = s.split(piece).join('[redacted]');
     }
   }
-  s = s.replace(TOKEN_SHAPE, '[redacted]').replace(EMAIL, '[email]').replace(/[\p{Cc}\p{Cf}]/gu, ' ');
+  // Token shapes through the shared redactor (#889), its broad rules too (a token cut short, a value after a secret's name).
+  s = redactString(s, { broad: true, mask: '[redacted]' }).replace(EMAIL, '[email]').replace(/[\p{Cc}\p{Cf}]/gu, ' ');
   return s.length > max ? `${s.slice(0, max - 3)}...` : s;
 }
 

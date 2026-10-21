@@ -74,6 +74,9 @@ export const SHAPES: readonly StandIn[] = [
   t('Tailscale key', 'a Tailscale auth key', `tskey-auth-k${upper(10)}CNTRL-${run(33)}`),
   t('Tailscale key', 'a Tailscale API token', `tskey-api-k${upper(10)}CNTRL-${run(33)}`),
   t('Tailscale key', 'a Tailscale client secret', `tskey-client-k${upper(10)}CNTRL-${run(33)}`),
+  // A dashboard key (#889: prefixed, so it is found standing alone), with a `-` and a `_` as base64url has. The prefix
+  // is written out: keys already issued carry it, so changing it is a change this list must see.
+  t('dashboard key', 'a dashboard key', `${j('_', 'wld', run(30, 'kQ9-zX_7mP2v'))}Ab`),
   // The rest of the shapes the shared redactor knows.
   t('Stripe key', 'a Stripe live key', j('_', 'sk', 'live', run(24))),
   t('Stripe key', 'a Stripe restricted key', j('_', 'rk', 'live', run(24))),

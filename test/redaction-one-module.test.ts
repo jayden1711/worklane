@@ -19,7 +19,6 @@ import assert from 'node:assert/strict';
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import ts from 'typescript';
-import { BRAND } from '../src/brand.js';
 import { repoRoot } from './helpers.js';
 import { SHAPES } from './token-standins.js';
 
@@ -30,16 +29,6 @@ const CODE = /\.(?:ts|tsx|mts|cts|js|mjs|cjs)$/;
 const CALLS = new Set(['replace', 'replaceAll', 'split']);
 const BEFORE = 'deploy failed:';
 const AFTER = '(exit 1)';
-
-/**
- * Own redactors found today and not moved by #889, each with why: still found (so the list only shrinks), and no other
- * one passes. Adding an entry is a loosening (registered never-grow).
- */
-const KNOWN_OWN_REDACTORS: readonly { path: string; why: string }[] = [
-  { path: 'scripts/bench/cli.ts', why: "the bench's scrub: its TOKEN_SHAPE is broader than the shared shapes (a GitHub token from 16 characters, any sk-ant- or xox- run), for a token cut short; redactString alone would narrow it" },
-  { path: `scripts/machine/${BRAND.cli}-update.cjs`, why: "the root updater's journal redact(): a standalone CommonJS script that loads no engine module; broader than the shared shapes (GitHub from 20 characters, sk-ant- from 10)" },
-  { path: 'src/gh-login.ts', why: "safeLine masks a GitHub token from 8 characters (gh's output may cut one short), as [hidden]; redactString alone would narrow it" },
-];
 
 /** A regex from a literal's text (`/a+/gi`), or null when it doesn't compile here. */
 function literal(text: string): RegExp | null {
@@ -176,7 +165,6 @@ test('no module but src/events/redact.ts redacts a token shape with its own rege
   const texts = new Map(files.map((f) => [f, readFileSync(join(repoRoot, f), 'utf8')]));
   for (const [f, text] of texts) if (f !== SHARED) for (const [k, v] of bindings(parse(f, text))) global.set(k, v);
   const found = files.filter((f) => f !== SHARED).flatMap((f) => ownRedactors(f, texts.get(f)!, global).map((x) => `${f}:${x}`));
-  const known = new Set(KNOWN_OWN_REDACTORS.map((k) => k.path));
-  assert.deepEqual(found.filter((x) => !known.has(x.slice(0, x.indexOf(':')))), [], 'add the shape to PATTERNS in src/events/redact.ts and call redactString');
-  for (const k of KNOWN_OWN_REDACTORS) assert.ok(found.some((x) => x.startsWith(`${k.path}:`)), `${k.path} no longer has its own redactor: take it out of KNOWN_OWN_REDACTORS`);
+  // No exception: a module whose text may cut a token short uses the shared redactor's broad rules (`broad: true`).
+  assert.deepEqual(found, [], 'add the shape to PATTERNS (or BROAD) in src/events/redact.ts and call redactString');
 });

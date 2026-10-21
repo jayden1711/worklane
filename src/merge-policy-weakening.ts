@@ -63,8 +63,7 @@ export const CHECK_TABLES: readonly CheckTable[] = [
   { path: 'scripts/lib/denylist.mjs', table: 'SKIP', kind: 'never-grow' },
   { path: 'src/guardrails/engine.ts', table: 'AGENT_EDITABLE', kind: 'never-grow' },
   { path: 'scripts/bench/pins.ts', table: 'SELECTION_RULES', kind: 'never-grow' },
-  // #889: the modules that still redact a token shape on their own, and the one-module lint's good fixtures.
-  { path: 'test/redaction-one-module.test.ts', table: 'KNOWN_OWN_REDACTORS', kind: 'never-grow' },
+  // #889: the one-module lint's good fixtures.
   { path: 'test/redaction-one-module.test.ts', table: 'GOOD_SOURCES', kind: 'never-grow' },
   // The lints' rules and bad fixtures, and the guards' lists: taking one out is a loosening.
   { path: 'test/change-files-renames.test.ts', table: 'READER_WORDS', kind: 'never-shrink' },
@@ -89,6 +88,11 @@ export const CHECK_TABLES: readonly CheckTable[] = [
   { path: 'test/runner-golden.test.ts', table: 'GUARD', kind: 'never-shrink' },
   // #889: the shared redactor's one list of credential shapes, a stand-in for each, and the one-module lint's bad fixtures.
   { path: 'src/events/redact.ts', table: 'PATTERNS', kind: 'never-shrink' },
+  { path: 'src/events/redact.ts', table: 'BROAD', kind: 'never-shrink' },
+  // The root updater's generated copy of that module (test/redact-vendored.test.ts holds it to the module).
+  { path: `scripts/machine/${BRAND.cli}-update.cjs`, table: 'PATTERNS', kind: 'never-shrink' },
+  { path: `scripts/machine/${BRAND.cli}-update.cjs`, table: 'CREDENTIAL_WORDS', kind: 'never-shrink' },
+  { path: 'test/redact-records-keys.test.ts', table: 'CUT_SHORT', kind: 'never-shrink' },
   { path: 'test/token-standins.ts', table: 'SHAPES', kind: 'never-shrink' },
   { path: 'test/redaction-one-module.test.ts', table: 'BAD_SOURCES', kind: 'never-shrink' },
   // The guards' own tables (their files are guard files too; the table names what was taken out).

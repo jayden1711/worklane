@@ -36,7 +36,7 @@ import { EventCache, type OpenRead } from './events/cache.js';
 import { compress, compressibleType, MIN_COMPRESS_BYTES, mayCompressApi, requestEncoding, StaticCompressed, type Encoding } from './dashboard-compress.js';
 import { dashboardProof, NONCE, PROOF_PATH } from './dashboard-proof.js';
 import { localDay } from './local-day.js';
-import { redactString } from './events/redact.js';
+import { DASHBOARD_KEY_PREFIX, redactRecords, redactString } from './events/redact.js';
 import type { EventPayload, StoredEvent } from './events/types.js';
 import { acceptGit, acceptMerge, protectionView, type AcceptGit, type AcceptTarget } from './main-watch.js';
 import { deployGateView } from './deploy-gate/gate.js';
@@ -884,8 +884,15 @@ const journalctl: JournalReader = (unit, lines) => {
   return { status: r.status, stdout: r.stdout ?? '', stderr: `${r.stderr ?? ''}${r.error ? r.error.message : ''}` };
 };
 
-const clip = (s: string) => redactString(s.length > 2000 ? `${s.slice(0, 2000)} …` : s);
-/** Lines read above a service log file's kept lines, so a private key that starts there is redacted whole (a 4096-bit key is about 50 lines). */
+/** A message cut to 2,000 characters, redacted first: a cut made before would leave a long secret's body unfound (#889). */
+const clip = (s: string) => {
+  const r = redactString(s);
+  return r.length > 2000 ? `${r.slice(0, 2000)} …` : r;
+};
+/**
+ * Records read above the kept ones (journal entries or log-file lines), so a private key that starts there is
+ * redacted whole (a 4096-bit key is about 50 lines).
+ */
 const KEY_MARGIN = 100;
 
 /**
@@ -898,20 +905,25 @@ const KEY_MARGIN = 100;
 export function readServiceLog(src: LogSource, lines = 200, read: JournalReader = journalctl): ServiceLog {
   let problem: string | null = null;
   if (src.unit) {
-    const r = read(src.unit, lines);
+    // KEY_MARGIN entries more than are shown, read for redaction only.
+    const r = read(src.unit, lines + KEY_MARGIN);
     if (r.status === 0) {
-      const entries: LogEntry[] = [];
+      const records: LogEntry[] = [];
       for (const l of r.stdout.split('\n')) {
         if (!l.trim()) continue;
         try {
           const j = JSON.parse(l) as { MESSAGE?: string | number[] | null; PRIORITY?: string; __REALTIME_TIMESTAMP?: string };
           const msg = typeof j.MESSAGE === 'string' ? j.MESSAGE : Array.isArray(j.MESSAGE) ? Buffer.from(j.MESSAGE).toString('utf8') : '';
           const us = Number(j.__REALTIME_TIMESTAMP);
-          entries.push({ at: Number.isFinite(us) && us > 0 ? new Date(us / 1000).toISOString() : null, priority: j.PRIORITY !== undefined && /^\d$/.test(j.PRIORITY) ? Number(j.PRIORITY) : null, message: clip(msg) });
+          records.push({ at: Number.isFinite(us) && us > 0 ? new Date(us / 1000).toISOString() : null, priority: j.PRIORITY !== undefined && /^\d$/.test(j.PRIORITY) ? Number(j.PRIORITY) : null, message: msg });
         } catch {
           // not a journal record
         }
       }
+      // journald keeps a service's output one line per entry: the entries are redacted as one text (#889), so a private
+      // key logged a line at a time is found whole. An entry that was inside one comes back empty and is left out.
+      const shown = redactRecords(records.map((e) => e.message));
+      const entries = records.flatMap((e, i) => (shown[i]!.trim() || !e.message.trim() ? [{ ...e, message: clip(shown[i]!) }] : [])).slice(-lines);
       if (entries.length) return { source: 'journal', unit: src.unit, entries, problem: null };
       problem = `no lines of ${src.unit} this user can read. Either the service hasn't logged yet, or the journal isn't kept on disk split per user, so the service's own user can't read its lines: run scripts/setup/journal.sh on the machine (as an admin).`;
     } else {
@@ -920,11 +932,11 @@ export function readServiceLog(src: LogSource, lines = 200, read: JournalReader 
   }
   if (src.file && existsSync(src.file)) {
     const text = readFileSync(src.file, 'utf8');
-    // The last lines, and KEY_MARGIN more above them, are redacted as one text before they are split, so a secret over
-    // several lines (a private key, even one that starts above the kept lines) is found whole (#889); each line is
-    // redacted again as it is clipped.
+    // The last lines, and KEY_MARGIN more above them, are redacted as one text, so a secret over several lines (a
+    // private key, even one that starts above the kept lines) is found whole (#889); each line is redacted again as it
+    // is clipped.
     const tail = text.split('\n').filter((l) => l.trim()).slice(-(lines + KEY_MARGIN));
-    const kept = redactString(tail.join('\n')).split('\n').filter((l) => l.trim()).slice(-lines);
+    const kept = redactRecords(tail).filter((l) => l.trim()).slice(-lines);
     const entries = kept.map((message) => ({ at: null, priority: null, message: clip(message) }));
     return { source: 'file', unit: src.unit, entries, problem: entries.length ? null : problem };
   }
@@ -1047,11 +1059,16 @@ export function loopbackHostHeader(host: string | undefined, port: number | unde
 /** GET: the key page's help (the key file's path and a copy command), loopback only, never the key. */
 export const KEY_HELP_PATH = '/api/key-help';
 
+/**
+ * The dashboard's key: the one in its file, whatever its shape (a key from before #889 keeps working until it is
+ * rotated; doctor asks for that), or a new one, DASHBOARD_KEY_PREFIX and 24 random bytes, a shape the shared
+ * redactor always finds.
+ */
 export function dashboardToken(stateDir: string): string {
   const f = join(stateDir, 'dashboard-token');
   if (existsSync(f)) return readFileSync(f, 'utf8').trim();
   mkdirSync(stateDir, { recursive: true });
-  const t = randomBytes(24).toString('base64url');
+  const t = `${DASHBOARD_KEY_PREFIX}${randomBytes(24).toString('base64url')}`;
   writeFileSync(f, t, { mode: 0o600 });
   return t;
 }

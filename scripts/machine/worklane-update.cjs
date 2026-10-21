@@ -108,6 +108,220 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { execFileSync } = require('node:child_process');
 
+// The shared redactor (src/events/redact.ts), as a generated copy: this file is installed alone and loads no engine
+// module (scripts/lib/redact-vendor.mjs; test/redact-vendored.test.ts checks the copy is exactly that module).
+// BEGIN generated from src/events/redact.ts: do not edit (node scripts/gen-redact-vendor.mjs --write)
+const sharedRedact = (() => {
+const exports = {};
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.TRACKER = exports.REDACTION_PATTERNS = exports.isDashboardKey = exports.DASHBOARD_KEY_PREFIX = void 0;
+exports.secretKinds = secretKinds;
+exports.redactString = redactString;
+exports.redactRecords = redactRecords;
+exports.redact = redact;
+const credentialShaped = (v) => (/[a-z]/.test(v) && /[A-Z]/.test(v) && /\d/.test(v)) || /^[0-9a-fA-F]{32,}$/.test(v);
+const CREDENTIAL_WORDS = new Set(['token', 'secret', 'secrets', 'password', 'passwd', 'pwd', 'pass', 'passphrase', 'jwt', 'bearer', 'credential', 'credentials', 'authorization']);
+const CREDENTIAL_ENDINGS = ['token', 'secret', 'password', 'passwd', 'accesskey'];
+const credentialWord = (w) => CREDENTIAL_WORDS.has(w) || CREDENTIAL_ENDINGS.some((e) => w.endsWith(e));
+const KEY_QUALIFIERS = new Set(['api', 'access', 'secret', 'private', 'signing', 'encryption', 'master', 'client', 'app', 'auth', 'account', 'service', 'license', 'deploy', 'admin', 'webhook', 'session', 'ssh', 'hmac', 'consumer']);
+function credentialKey(k) {
+    const words = k
+        .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+        .replace(/([A-Z])([A-Z][a-z])/g, '$1 $2')
+        .toLowerCase()
+        .split(/[ _-]+/)
+        .filter(Boolean);
+    const last = words.at(-1) ?? '';
+    if (words.some(credentialWord) || last === 'auth')
+        return true;
+    if (last === 'key')
+        return words.length === 1 || KEY_QUALIFIERS.has(words.at(-2));
+    return last.endsWith('key') && KEY_QUALIFIERS.has(last.slice(0, -3));
+}
+exports.DASHBOARD_KEY_PREFIX = 'wld_';
+const DASHBOARD_KEY_BODY = '[A-Za-z0-9_-]{32,}';
+const isDashboardKey = (key) => new RegExp(`^${exports.DASHBOARD_KEY_PREFIX}${DASHBOARD_KEY_BODY}$`).test(key);
+exports.isDashboardKey = isDashboardKey;
+const PATTERNS = [
+    [new RegExp(`(^|[^A-Za-z0-9_-])${exports.DASHBOARD_KEY_PREFIX}${DASHBOARD_KEY_BODY}(?![A-Za-z0-9_-])`, 'g'), `$1${exports.DASHBOARD_KEY_PREFIX}[REDACTED]`, 'dashboard key'],
+    [/\b(gh[pousr]_[A-Za-z0-9]{30,})\b/g, 'gh*_[REDACTED]', 'GitHub token'],
+    [/\bgithub_pat_[A-Za-z0-9_]{40,}\b/g, 'github_pat_[REDACTED]', 'GitHub token'],
+    [/\bsk-(?:ant-)?[A-Za-z0-9_-]{20,}\b/g, 'sk-[REDACTED]', 'API key (sk-)'],
+    [/(^|[^A-Za-z0-9_])([sr]k)_(?:live|test)_([A-Za-z0-9]{16,})(?![A-Za-z0-9_])/g, (m, pre, k, v) => (/\d/.test(v) ? `${pre}${k}_[REDACTED]` : m), 'Stripe key'],
+    [/(^|[^A-Za-z0-9_-])AIza[0-9A-Za-z_-]{35}(?![0-9A-Za-z_-])/g, '$1AIza[REDACTED]', 'Google API key'],
+    [/(^|[^A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]*/g, '$1[REDACTED JWT]', 'JWT'],
+    [/\b(AKIA|ASIA)[A-Z0-9]{16}\b/g, 'AKIA[REDACTED]', 'AWS access key'],
+    [/\bxoxe[.-][A-Za-z0-9.-]{10,}\b/g, 'xoxe-[REDACTED]', 'Slack token'],
+    [/\bxox[abprs]-[A-Za-z0-9-]{10,}\b/g, 'xox-[REDACTED]', 'Slack token'],
+    [/\bxapp-[A-Za-z0-9-]{10,}\b/g, 'xapp-[REDACTED]', 'Slack app-level token'],
+    [/\blin_(?:api|oauth)_[A-Za-z0-9]{20,}\b/g, 'lin_[REDACTED]', 'Linear key'],
+    [/https:\/\/hooks\.slack\.com\/services\/[A-Za-z0-9/]+/g, 'https://hooks.slack.com/services/[REDACTED]', 'Slack webhook'],
+    [/tskey-[A-Za-z0-9_-]+/g, 'tskey-[REDACTED]', 'Tailscale key'],
+    [/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g, '[REDACTED PRIVATE KEY]', 'private key'],
+    [/\b(Bearer|bearer|BEARER)\s+[A-Za-z0-9._~+/-]{20,}=*/g, '$1 [REDACTED]', 'bearer token'],
+    [/\b([a-z][a-z0-9+.-]*:\/\/[^:/\s@]+):[^@\s/]+@/gi, '$1:[REDACTED]@', 'password in a URL'],
+    [/\b0x[0-9a-fA-F]{64}\b/g, '0x[REDACTED-32-BYTES]', '32-byte hex key'],
+    [
+        /(\\?")([A-Za-z0-9_-]+)\1(\s*:\s*)\1([A-Za-z0-9_\-.+/=~]{16,})\1/g,
+        (m, q, k, sep, v) => (credentialKey(k) && credentialShaped(v) ? `${q}${k}${q}${sep}${q}[REDACTED]${q}` : m),
+        'secret under a JSON key',
+    ],
+    [/(^|[^A-Za-z0-9])[A-Za-z0-9_-]{23,28}\.[A-Za-z0-9_-]{6,7}\.[A-Za-z0-9_-]{27,}\b/g, '$1[REDACTED]', 'Discord bot token'],
+];
+const BROAD = [
+    [/(^|[^A-Za-z0-9_])(?:gh[pousr]_|github_pat_)[A-Za-z0-9_]{8,}/g, (k) => `$1${k}`, 'GitHub token, cut short'],
+    [/sk-ant-[A-Za-z0-9_-]+/g, (k) => k, 'Anthropic key, cut short'],
+    [/(^|[^A-Za-z0-9_])xox[abprs]-[A-Za-z0-9_-]+/g, (k) => `$1${k}`, 'Slack token, cut short'],
+    [/(^|[^A-Za-z0-9_])eyJ[A-Za-z0-9_-]{8,512}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]+/g, (k) => `$1${k}`, 'JWT after a hyphen'],
+    [/\b(bearer)\s+[A-Za-z0-9._~+/=-]{8,}/gi, (k) => `$1 ${k}`, 'short bearer token'],
+    [/(^|[^a-z0-9+.-])([a-z][a-z0-9+.-]*:\/\/)[^\s/@]+@/gi, (k) => `$1$2${k}@`, 'user info in a URL'],
+    [/\b([A-Za-z_]*(?:token|secret|password|passwd|api[_-]?key))(\s*[=:]\s*)("[^"]*"|'[^']*'|\S+)/gi, (k) => `$1$2${k}`, 'value after a secret name'],
+];
+const CODE_HEADS = new Set(['this', 'self', 'super', 'opts', 'options', 'o', 'ctx', 'context', 'config', 'cfg', 'conf', 'settings', 'props', 'state', 'env', 'process', 'module', 'exports', 'window', 'document', 'globalThis', 'args', 'params', 'req', 'res', 'request', 'response', 'obj', 'result', 'item', 'e', 'err', 'x']);
+function internalHost(m, pre, name) {
+    const lower = name.toLowerCase();
+    const labels = name.split('.').slice(0, lower.endsWith('.home.arpa') || lower.endsWith('.ts.net') ? -2 : -1);
+    const suffix = name.slice(labels.join('.').length + 1);
+    const prose = suffix !== suffix.toLowerCase() && suffix !== suffix.toUpperCase();
+    const code = !labels.some((l) => l.includes('-')) && (CODE_HEADS.has(labels[0]) || labels.some((l) => /[a-z][A-Z]/.test(l)));
+    return prose || code ? m : `${pre}[internal-host]`;
+}
+const OCTET = '(?:25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)';
+const PRIVATE_V4 = [
+    `10\\.${OCTET}`,
+    '172\\.(?:1[6-9]|2\\d|3[01])',
+    '192\\.168',
+    '100\\.(?:6[4-9]|[7-9]\\d|1[01]\\d|12[0-7])',
+    '169\\.254',
+].join('|');
+const IDENTIFIERS = [
+    [/(^|[^A-Za-z0-9._%+-])(?!git@)[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}(?![A-Za-z0-9-])/g, '$1[email]', 'email'],
+    [
+        /(^|[^\w.~/:-]|file:\/\/)\/(?:home|Users|mnt\/[A-Za-z]\/Users)\/([^\s/"'`<>()[\]{},;|\\]+)/g,
+        (m, pre, user) => (user === 'runner' ? m : `${pre}~`),
+        'home path',
+    ],
+    [/(^|[^\w])[A-Za-z]:[\\/][Uu]sers[\\/]([^\\/\s"'`<>|]+)/g, '$1~', 'home path'],
+    [/(^|[^A-Za-z0-9./-]|\/\/)([A-Za-z0-9][A-Za-z0-9.-]*\.(?:internal|localdomain|lan|corp|intranet|home\.arpa|ts\.net|local))(?![A-Za-z0-9-]|\.[A-Za-z0-9])/gi, internalHost, 'internal host'],
+    [new RegExp(`(^|[^\\w.])(?:${PRIVATE_V4})\\.${OCTET}\\.${OCTET}(?![\\w-]|\\.\\d)`, 'g'), '$1[private-ip]', 'private IP'],
+    [/(^|[^\w:])f(?:[cd][0-9a-f]{2}|e[89ab][0-9a-f]):(?:[0-9a-f]{0,4}:){1,6}[0-9a-f]{0,4}(?![\w:])/gi, '$1[private-ip]', 'private IP'],
+];
+exports.REDACTION_PATTERNS = [
+    ...PATTERNS.map(([re, rep, kind]) => ({ kind, re, rep, group: 'secret' })),
+    ...BROAD.map(([re, rep, kind]) => ({ kind, re, rep: rep('[REDACTED]'), group: 'broad' })),
+    ...IDENTIFIERS.map(([re, rep, kind]) => ({ kind, re, rep, group: 'identifier' })),
+];
+const GLUED_PREFIXES = ['ghp_', 'gho_', 'ghu_', 'ghs_', 'ghr_', 'github_pat_', 'sk-', 'sk_live_', 'sk_test_', 'rk_live_', 'rk_test_', 'xoxa-', 'xoxb-', 'xoxe', 'xoxp-', 'xoxr-', 'xoxs-', 'xapp-', 'lin_api_', 'lin_oauth_', 'AKIA', 'ASIA', 'AIza', 'eyJ', '0x', 'Bearer', 'bearer', 'BEARER', exports.DASHBOARD_KEY_PREFIX];
+function afterUnderscore(s, f) {
+    const cuts = [];
+    for (let at = s.indexOf('_'); at !== -1; at = s.indexOf('_', at + 1))
+        if (GLUED_PREFIXES.some((p) => s.startsWith(p, at + 1)))
+            cuts.push(at + 1);
+    if (!cuts.length)
+        return s;
+    let out = '';
+    let from = 0;
+    for (const c of [...cuts, s.length]) {
+        out += from === 0 ? s.slice(0, c) : f(s.slice(from, c));
+        from = c;
+    }
+    return out;
+}
+const expand = (rep, m, groups) => rep.replace(/\$(\d|\$|&)/g, (_, k) => (k === '$' ? '$' : k === '&' ? m : String(groups[Number(k) - 1] ?? '')));
+const breaks = (s) => s.split('\n').length - 1;
+function applyKeepingLines(s, re, rep) {
+    return s.replace(re, (m, ...rest) => {
+        const groups = rest.slice(0, -2).filter((g) => typeof g !== 'object');
+        const out = typeof rep === 'string' ? expand(rep, m, groups) : rep(m, ...groups);
+        return out + '\n'.repeat(Math.max(0, breaks(m) - breaks(out)));
+    });
+}
+exports.TRACKER = Object.freeze({ identifiers: true });
+const apply = (s, re, rep) => (typeof rep === 'string' ? s.replace(re, rep) : s.replace(re, rep));
+const MACHINE_BLOCKS = [
+    ['```done_when', /[^\S\n]*\n/y],
+    ['```research', /[ \t]*\r?\n/y],
+];
+function outsideMachineBlocks(s, f) {
+    const spans = [];
+    for (const [open, lineBreak] of MACHINE_BLOCKS) {
+        for (let at = s.indexOf(open); at !== -1;) {
+            lineBreak.lastIndex = at + open.length;
+            if (!lineBreak.test(s)) {
+                at = s.indexOf(open, at + open.length);
+                continue;
+            }
+            const close = s.indexOf('\n```', lineBreak.lastIndex);
+            if (close === -1)
+                break;
+            spans.push([at, close + 4]);
+            at = s.indexOf(open, close + 4);
+        }
+    }
+    if (!spans.length)
+        return f(s);
+    spans.sort((a, b) => a[0] - b[0]);
+    let out = '';
+    let from = 0;
+    for (const [a, b] of spans) {
+        if (a < from)
+            continue;
+        out += f(s.slice(from, a)) + s.slice(a, b);
+        from = b;
+    }
+    return out + f(s.slice(from));
+}
+function secretKinds(s) {
+    const kinds = new Set();
+    for (const [re, rep, kind] of PATTERNS) {
+        re.lastIndex = 0;
+        if (apply(s, re, rep) !== s)
+            kinds.add(kind);
+    }
+    return [...kinds].sort();
+}
+function redactString(s, o = {}) {
+    const put = o.keepLines ? applyKeepingLines : apply;
+    let out = s;
+    if (o.broad) {
+        for (const [re, rep, kind] of PATTERNS)
+            if (kind === 'private key')
+                out = put(out, re, rep);
+        const mask = (o.mask ?? '[REDACTED]').replace(/\$/g, '$$$$');
+        for (const [re, rep] of BROAD)
+            out = put(out, re, rep(mask));
+    }
+    const secrets = (t) => PATTERNS.reduce((x, [re, rep]) => put(x, re, rep), t);
+    out = afterUnderscore(secrets(out), secrets);
+    if (o.identifiers)
+        out = outsideMachineBlocks(out, (part) => IDENTIFIERS.reduce((t, [re, rep]) => put(t, re, rep), part));
+    return out;
+}
+function redactRecords(records, o = {}) {
+    const lines = redactString(records.join('\n'), { ...o, keepLines: true }).split('\n');
+    const out = [];
+    let at = 0;
+    for (const r of records) {
+        const n = breaks(r) + 1;
+        out.push(lines.slice(at, at + n).join('\n'));
+        at += n;
+    }
+    return out;
+}
+function redact(value, o = {}) {
+    if (typeof value === 'string')
+        return redactString(value, o);
+    if (Array.isArray(value))
+        return value.map((v) => redact(v, o));
+    if (value && typeof value === 'object')
+        return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, redact(v, o)]));
+    return value;
+}
+return exports;
+})();
+// END generated from src/events/redact.ts
+
 // Fixed paths: the installed updater takes none from its caller.
 const CONFIG = '/etc/worklane/updates.json';
 const LOG = '/var/lib/worklane/updates.jsonl';
@@ -894,14 +1108,13 @@ function health(samples, startedAt, now) {
   return now - startedAt >= HEALTH_MS ? 'failed' : 'wait';
 }
 
-/** Secrets that could appear in a service's journal, replaced before anything is logged. */
+/**
+ * Secrets that could appear in a service's journal, replaced before anything is logged: the shared redactor's every
+ * shape (sharedRedact, the generated copy of src/events/redact.ts at the top of this file, #889), and its broad rules
+ * (a token cut short, a clone URL's user:token@, a value after a secret's name, a short bearer token), as [redacted].
+ */
 function redact(text) {
-  return String(text)
-    .replace(/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g, '[redacted key]')
-    .replace(/\b(gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-ant-[A-Za-z0-9_-]{10,}|xox[abprs]-[A-Za-z0-9-]{10,})/g, '[redacted]')
-    .replace(/\b(bearer)\s+[A-Za-z0-9._~+/=-]{8,}/gi, '$1 [redacted]')
-    .replace(/\b([a-z][a-z0-9+.-]*:\/\/)[^\s/@]+@/gi, '$1[redacted]@') // WHY: a clone URL can carry user:token@
-    .replace(/\b([A-Za-z_]*(?:token|secret|password|passwd|api[_-]?key))(\s*[=:]\s*)("[^"]*"|'[^']*'|\S+)/gi, '$1$2[redacted]');
+  return sharedRedact.redactString(String(text), { broad: true, mask: '[redacted]' });
 }
 
 /**

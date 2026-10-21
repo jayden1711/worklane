@@ -2,6 +2,7 @@
 // path redacts through it. Each stand-in in test/token-standins.ts goes through redactString, and through each path
 // that stores or sends text: the event log, issue comments (file and GitHub backlogs), the superfan's digest,
 // the notifications (an incident post, a merge post, a chat notice) and the dashboard's service-log view.
+// Round 2 (dashboard keys, the broad rules, the journal view, glued shapes): test/redact-records-keys.test.ts.
 import './helpers.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -20,7 +21,7 @@ import type { Incident } from '../src/watchdog/incidents.js';
 import { mergePostText } from '../src/merge-posts.js';
 import { mainWatchPost } from '../src/intake/channel.js';
 import { readServiceLog } from '../src/dashboard.js';
-import { leaks, run, SHAPES, type StandIn } from './token-standins.js';
+import { leaks, SHAPES, type StandIn } from './token-standins.js';
 
 const scratch = (p: string) => mkdtempSync(join(tmpdir(), p));
 /** Each stand-in in a log line, and as an environment assignment. */
@@ -35,10 +36,10 @@ const survivors = async (out: (text: string) => string | Promise<string>) => {
 const coordinatorRedact = (s: string) => scrub(redactPii(s, { names: [], patterns: [] }));
 
 test('every secret pattern of the shared redactor has a stand-in, and secretKinds names each stand-in by its kind', () => {
-  const kinds = [...new Set(REDACTION_PATTERNS.filter((p) => p.secret).map((p) => p.kind))];
+  const kinds = [...new Set(REDACTION_PATTERNS.filter((p) => p.group === 'secret').map((p) => p.kind))];
   assert.deepEqual(kinds.filter((k) => !SHAPES.some((s) => s.kind === k)), [], 'add a stand-in to test/token-standins.ts for each new pattern');
   assert.deepEqual(SHAPES.filter((s) => !secretKinds(s.value).includes(s.kind)).map((s) => s.what), []);
-  for (const k of ['GitHub token', 'API key (sk-)', 'Discord bot token', 'Slack token', 'Slack app-level token', 'Slack webhook', 'Linear key', 'Tailscale key']) {
+  for (const k of ['GitHub token', 'API key (sk-)', 'Discord bot token', 'Slack token', 'Slack app-level token', 'Slack webhook', 'Linear key', 'Tailscale key', 'dashboard key']) {
     assert.ok(kinds.includes(k), `the shared redactor knows ${k}`);
   }
 });
@@ -148,13 +149,6 @@ test('dashboard: a private key that starts above the kept lines of the log file 
   const shown = readServiceLog({ unit: null, file }, 10).entries;
   assert.ok(!leaks(JSON.stringify(shown), pem.secret), JSON.stringify(shown));
   assert.equal(shown.at(-1)!.message, 'line 7');
-});
-
-test('not covered, by decision: a bare 32-character key with no prefix (a commit hash, a digest or an id looks the same); in a Bearer header it is redacted', () => {
-  const bare = run(32);
-  const hex = 'a3f1c9e0b2d4f6a8'.repeat(2);
-  for (const v of [bare, hex]) assert.equal(redactString(`key ${v} rotated`), `key ${v} rotated`);
-  assert.ok(!redactString(`Authorization: Bearer ${bare}`).includes(bare));
 });
 
 test('Discord and Tailscale patterns run in linear time on hostile input', () => {
