@@ -2183,22 +2183,48 @@ const SIGNERS_ACK = 'sudo bash /opt/worklane/current/scripts/setup/updates.sh --
 // or naming one it no longer should). Every run, the installed engine's `machine-helper.sh --check` (read-only) says
 // whether it is current; a stale one is named in the journal and as an incident, with the exact command that rewrites
 // it. Nothing here writes the rule: only that script does, and only ever its own output.
+// The check says which of two cases applies (the owner's rule):
+//   - "stale" (exit 3): the rewrite only drops grants, so the command needs no flag;
+//   - "wider" (exit 4): the engine's rule grants what the installed one doesn't, so the command carries
+//     --replace-sudoers, root's explicit yes.
 const SUDOERS_INCIDENT = 'machine_sudoers_stale';
 const CHECK_PATH = '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin';
+const CHECK_EXIT = { 0: ['absent', 'current'], 3: ['stale'], 4: ['wider'] };
 
 /**
- * `machine-helper.sh --check` of the engine in `engineDir`: { state: current|absent|stale|unknown, detail, fix? }, or
- * null when that engine has no machine-helper.sh, or this process isn't `owner` (root: the updater; anything else, a
- * test with the real deps, never runs the installed engine's script). The script and the lib.sh it sources must be
- * `owner`'s regular files, writable by no one else, or nothing runs (unknown, said why).
+ * `machine-helper.sh --check` of the engine in `engineDir`: { state: current|absent|stale|wider|unknown, detail, fix? },
+ * or null when that engine has no machine-helper.sh, or when this process isn't `owner`. The owner is root for the
+ * updater; anyone else (a test with the real deps) never runs the installed engine's script. The script and the lib.sh
+ * it sources must be `owner`'s regular files, writable by no one else, or nothing runs (unknown, said why). For stale and
+ * wider, detail is the check's last line followed by the difference it printed, and fix is the command that line names.
  */
-function machineSudoersCheck(engineDir, exec = execFileSync, owner = 0) {
+function machineSudoersCheck(engineDir, exec = execFileSync, owner = 0, top = '/') {
   if (typeof process.getuid !== 'function' || process.getuid() !== owner) return null;
-  const script = path.join(engineDir, 'scripts', 'setup', 'machine-helper.sh');
-  if (!fs.existsSync(script)) return null;
-  for (const f of [script, path.join(engineDir, 'scripts', 'setup', 'lib.sh')]) {
-    const problem = rootFileProblem(readRootFile(f), owner, f);
-    if (problem) return { state: 'unknown', detail: `the machine helper's sudoers rule wasn't checked: ${problem}` };
+  if (!fs.existsSync(path.join(engineDir, 'scripts', 'setup', 'machine-helper.sh'))) return null;
+  const unchecked = (why) => ({ state: 'unknown', detail: `the machine helper's sudoers rule wasn't checked: ${why}` });
+  // The whole path, as the machine helper's rootScript() checks the engine's add-project.sh before running it as root.
+  // The engine directory is resolved once (/opt/worklane/current is a link), and below it nothing may be a link: the
+  // script and the lib.sh it sources must be where the resolved engine has them. Every directory from them up to `top`
+  // (/ on a machine) must be `owner`'s and writable by no one else. bash then runs the resolved path, so the dirname "$0"
+  // it sources lib.sh from is the directory checked here.
+  let real;
+  try {
+    real = fs.realpathSync(engineDir);
+  } catch (e) {
+    return unchecked(firstLine(e));
+  }
+  const setup = path.join(real, 'scripts', 'setup');
+  const script = path.join(setup, 'machine-helper.sh');
+  for (const f of [script, path.join(setup, 'lib.sh')]) {
+    let resolved;
+    try {
+      resolved = fs.realpathSync(f);
+    } catch (e) {
+      return unchecked(firstLine(e));
+    }
+    if (resolved !== f) return unchecked(`${f} goes through a link (to ${resolved})`);
+    const problem = rootFileProblem(readRootFile(f), owner, f) || pathProblem(path.dirname(f), owner, top);
+    if (problem) return unchecked(problem);
   }
   let out;
   let status = 0;
@@ -2207,18 +2233,45 @@ function machineSudoersCheck(engineDir, exec = execFileSync, owner = 0) {
   } catch (e) {
     out = e && e.stdout;
     status = e && typeof e.status === 'number' ? e.status : -1;
-    if (status !== 3) return { state: 'unknown', detail: `couldn't check the machine helper's sudoers rule: ${firstLine(e)}` };
+    if (status !== 3 && status !== 4) return { state: 'unknown', detail: `couldn't check the machine helper's sudoers rule: ${firstLine(e)}` };
   }
-  const line = String(out || '').trim().split('\n').pop() || '';
-  const m = /^(absent|current|stale): /.exec(line);
-  // INVARIANT: only exit 3 with a "stale:" line is stale, and only exit 0 says current or absent; anything else is unknown.
-  if (!m || (m[1] === 'stale') !== (status === 3)) return { state: 'unknown', detail: `the machine helper's sudoers check gave no answer: ${line.slice(0, 300)}` };
-  if (m[1] !== 'stale') return { state: m[1], detail: line.slice(0, 600) };
-  const fix = / as root: (sudo .+)$/.exec(line);
-  return { state: 'stale', detail: line.slice(0, 600), ...(fix ? { fix: fix[1].slice(0, 300) } : {}) };
+  const lines = String(out || '').trim().split('\n');
+  const line = lines.pop() || '';
+  const m = /^(absent|current|stale|wider): /.exec(line);
+  // INVARIANT: a state counts only with its own exit code (CHECK_EXIT); anything else is unknown.
+  if (!m || !(CHECK_EXIT[status] || []).includes(m[1])) return { state: 'unknown', detail: `the machine helper's sudoers check gave no answer: ${line.slice(0, 300)}` };
+  if (m[1] === 'absent' || m[1] === 'current') return { state: m[1], detail: line.slice(0, 600) };
+  // The command the check named, through the engine path it was given (the current link), not the resolved one.
+  const logical = (t) => t.split(`${real}/`).join(`${engineDir.replace(/\/+$/, '')}/`);
+  const fix = /: (sudo (?:bash|rm -f) \S.*)$/.exec(line);
+  const diff = lines.filter((l) => /^[+-]/.test(l) && !/^(\+\+\+|---) /.test(l));
+  const detail = logical(`${line}${diff.length ? ` The diff: ${diff.join(' | ')}` : ''}`);
+  return { state: m[1], detail: detail.slice(0, 600), ...(fix ? { fix: logical(fix[1]).slice(0, 300) } : {}) };
 }
 
-/** Every run, updates on or off: a stale machine helper rule is said and raised; a current one (or none) closes it. Never throws. */
+/** The first directory from `dir` up to `top` (inclusive) that isn't `owner`'s alone, or null when none. */
+function pathProblem(dir, owner, top = '/') {
+  let p = dir;
+  for (;;) {
+    let st;
+    try {
+      st = fs.lstatSync(p);
+    } catch {
+      return `${p} is missing`;
+    }
+    if (!st.isDirectory()) return `${p} isn't a directory`;
+    if (st.uid !== owner || st.mode & 0o022) return `${p} isn't ${owner === 0 ? "root's" : `uid ${owner}'s`} alone (owner ${st.uid}, mode ${(st.mode & 0o777).toString(8)})`;
+    if (p === top) return null;
+    const up = path.dirname(p);
+    if (up === p) return null;
+    p = up;
+  }
+}
+
+/**
+ * Every run, updates on or off: a stale or wider machine helper rule is said and raised, its detail saying which, its
+ * fix the command for that case. A current rule, or none, closes it. Never throws.
+ */
 function watchSudoers(deps) {
   if (typeof deps.sudoersCheck !== 'function') return;
   let r;
@@ -2229,7 +2282,7 @@ function watchSudoers(deps) {
   }
   if (!r) return;
   try {
-    if (r.state === 'stale') {
+    if (r.state === 'stale' || r.state === 'wider') {
       if (typeof deps.warn === 'function') deps.warn(`machine_sudoers_stale: ${r.detail}`);
       if (typeof deps.raiseIncident === 'function') deps.raiseIncident(SUDOERS_INCIDENT, 'machine-helper', r.detail, r.fix || 'sudo bash /opt/worklane/current/scripts/setup/machine-helper.sh --check');
     } else if (r.state === 'current' || r.state === 'absent') {

@@ -1,156 +1,42 @@
 // Issue #898: the machine helper's sudoers rule follows the engine. add-project's machine-helper step is done only
 // when the installed rule is byte for byte what machine-helper.sh writes for these instances (machine_sudoers): the
 // helper's bytes alone (which the updater keeps in step) never make it done. A rerun then rewrites the rule through
-// machine-helper.sh, so it can only ever end up equal to that script's output, never wider. `machine-helper.sh --check`
-// says whether the rule is current, changing nothing, and the updater names a stale one with the exact command.
+// machine-helper.sh, on its own only when that drops grants; a rule the engine's would widen waits for root's
+// --replace-sudoers (test/machine-sudoers-narrow.test.ts has the owner's cases). `machine-helper.sh --check` says
+// which case applies, changing nothing, and the updater names it with the exact command.
 //
-// Every setup script add-project runs is stood in for (as in add-project.test.ts), the paths point into a temp dir,
-// and every host tool the scripts might reach (sudo, visudo, id, systemctl, ...) is a recording stand-in first on PATH
-// that exits 1: the test asserts none was called.
+// The machine is test/sudoers-machine-fixture.ts: stand-ins for every setup script, temp paths, and recording
+// stand-ins (exit 1) first on PATH for every host tool; each test asserts none was called.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync, spawnSync } from 'node:child_process';
-import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { KINDS } from '../src/watchdog/index.js';
 import { repoRoot } from './helpers.js';
+import { machine, olderRule } from './sudoers-machine-fixture.js';
 
 const posix = process.platform !== 'win32';
-const setupDir = join(repoRoot, 'scripts', 'setup');
-const helperSrc = join(repoRoot, 'scripts', 'machine', 'worklane-machine.cjs');
-const TOKEN = `sk-ant-oat01-${'Q'.repeat(40)}`;
-const HOST_TOOLS = ['sudo', 'visudo', 'id', 'useradd', 'usermod', 'groupadd', 'getent', 'install', 'chown', 'systemctl', 'systemd-run', 'journalctl', 'launchctl', 'loginctl', 'gh', 'docker', 'tailscale', 'claude', 'setfacl'];
+const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&');
 
-type Step = { step: string; state: string; detail: string; retry?: string };
-
-/**
- * A machine in a temp dir. The real add-project.sh and machine-helper.sh sit beside a lib.sh that sources the real
- * one and points its paths, user and unit checks into the temp dir; sudo's version comes from <root>/sudo-version.
- * The stand-in machine-helper.sh writes what the real one writes: the helper's bytes, and printf '%s\n' of
- * machine_sudoers for the instances it is given (install_sudoers' format). "old" is on the machine already.
- */
-function machine(sudoVersion = '1.9.15', rule = true) {
-  const T = mkdtempSync(join(tmpdir(), 'sudoers-rerun-'));
-  const s = join(T, 'scripts', 'setup');
-  const real = join(T, 'real', 'scripts', 'setup');
-  mkdirSync(s, { recursive: true });
-  mkdirSync(real, { recursive: true });
-  mkdirSync(join(T, 'scripts', 'machine'), { recursive: true });
-  mkdirSync(join(T, 'real', 'scripts', 'machine'), { recursive: true });
-  for (const d of ['users', 'active', 'homes', 'srv', 'bin', 'host-bin']) mkdirSync(join(T, d), { recursive: true });
-  copyFileSync(join(setupDir, 'add-project.sh'), join(s, 'add-project.sh'));
-  copyFileSync(helperSrc, join(T, 'scripts', 'machine', 'worklane-machine.cjs'));
-  // The real machine-helper.sh, for --check, in a tree of its own with the same lib.
-  copyFileSync(join(setupDir, 'machine-helper.sh'), join(real, 'machine-helper.sh'));
-  copyFileSync(helperSrc, join(T, 'real', 'scripts', 'machine', 'worklane-machine.cjs'));
-  writeFileSync(join(T, 'sudo-version'), `${sudoVersion}\n`);
-  const lib = `source ${JSON.stringify(join(setupDir, 'lib.sh'))}
-T=${JSON.stringify(T)}
-as_root() { :; }
-home_of() { echo "$T/homes/$1"; }
-user_exists() { [ -e "$T/users/$1" ]; }
-unit_active() { [ -e "$T/active/$1" ]; }
-sudo_version() { cat "$T/sudo-version"; }
-run_as() { local user="$1" script="$2"; shift 2; HOME="$T/homes/$user" bash -euo pipefail -c "$script" _ "$@"; }
-ensure_instance_home() {
-  local d="$T/homes/wl-$1/.local/state/worklane/instances/$1"
-  mkdir -p "$d/state"
-  printf 'version: 1\\nname: %s\\nrepos:\\n  - path: "x"\\n    repo: %s\\n' "$1" "$2" > "$d/instance.yaml"
-  printf 'version: 1\\nbudget: { daily_usd: 20 }\\nagents: { max_workers: 2 }\\nland_mode: pr\\nauto_merge: false\\n' > "$d/policy.yaml"
-}
-claude_login_ok() { :; }
-# The policy step's root ownership (#726), stood in as add-project.test.ts does: root's once owned.
-own_policy() { touch "$T/owned-$1"; }
-policy_root_ok() { [ -e "$T/owned-$1" ]; }
-POLICY_ROOT_DIR="$T/policy-root"
-install_claude_token() {
-  mkdir -p "$T/homes/$1/.claude"
-  { printf '{"claudeAiOauth":{"accessToken":"'; cat; printf '"}}'; } > "$T/homes/$1/.claude/.credentials.json"
-}
-SRV_ROOT="$T/srv" ENGINE_CLI="$T/bin/worklane" MACHINE_HELPER="$T/helper" MACHINE_SUDOERS="$T/sudoers-machine" HUB_UNIT="$T/hub.service" ADD_PROJECT_LOCK="$T/lock"
-SETUP_POLL_SECONDS=0
-`;
-  writeFileSync(join(s, 'lib.sh'), lib);
-  writeFileSync(join(real, 'lib.sh'), lib);
-  chmodSync(join(real, 'lib.sh'), 0o644);
-  chmodSync(join(real, 'machine-helper.sh'), 0o644);
-  const stub = (file: string, step: string, body: string) => {
-    writeFileSync(file, `#!/usr/bin/env bash\nset -euo pipefail\nT=${JSON.stringify(T)}\necho "${step} $*" >> "$T/calls"\n${body}\n`);
-    chmodSync(file, 0o755);
-  };
-  // Every host tool: recorded, and refused.
-  for (const tool of HOST_TOOLS) {
-    writeFileSync(join(T, 'host-bin', tool), `#!/bin/sh\necho "${tool} $*" >> ${JSON.stringify(join(T, 'host-calls'))}\nexit 1\n`);
-    chmodSync(join(T, 'host-bin', tool), 0o755);
-  }
-  stub(join(s, 'instance.sh'), 'instance', 'touch "$T/users/wl-$1" "$T/users/wl-$1-agent"; mkdir -p "$T/srv/$1"');
-  stub(join(T, 'bin', 'worklane'), 'app', `[ "$1" = app-manifest ] || exit 2
-d="$T/homes/wl-$2/.local/state/worklane/instances/$2"; printf 'version: 1\\ngithub:\\n  kind: app\\n  app_id: 91\\n' > "$d/credentials.yaml"
-mkdir -p "$T/homes/wl-$2/.config/$2-app"; echo key > "$T/homes/wl-$2/.config/$2-app/private-key.pem"`);
-  stub(join(s, 'checkout.sh'), 'checkout', 'mkdir -p "$T/srv/$1/${2#*/}/.git" "$T/srv/$1/${2#*/}/.worklane"; printf "suites: {}\\n" > "$T/srv/$1/${2#*/}/.worklane/tests.yaml"');
-  stub(join(s, 'service.sh'), 'service', 'touch "$T/active/worklane-$1.service"');
-  stub(join(s, 'test-user.sh'), 'test-user', ':');
-  stub(join(s, 'machine-helper.sh'), 'machine-helper', `cp "$T/scripts/machine/worklane-machine.cjs" "$T/helper"
-source "$T/scripts/setup/lib.sh"
-users=(); for n in "$@"; do users+=("wl-$n"); done
-content="$(machine_sudoers "\${users[@]}")"
-printf '%s\\n' "$content" > "$T/sudoers-machine"`);
-  stub(join(s, 'dashboards.sh'), 'dashboards', `opts=""; while [ "$#" -gt 0 ] && [ "\${1#--}" != "$1" ]; do opts="$opts $1 $2"; shift 2; done
-hub=""; for n in "$@"; do hub="\${hub:+$hub,}$n=$T/homes/wl-$n/state"; touch "$T/active/worklane-dashboard-$n.service"; done
-printf '[Service]\\nExecStart=/usr/local/bin/worklane dashboard --hub %s --service%s --signin-dir /x\\n' "$hub" "$opts" > "$T/hub.service"`);
-  for (const u of ['wl-old', 'wl-old-agent']) writeFileSync(join(T, 'users', u), '');
-  mkdirSync(join(T, 'homes', 'wl-old', '.local', 'state', 'worklane', 'instances', 'old', 'state'), { recursive: true });
-  writeFileSync(join(T, 'hub.service'), `[Service]\nExecStart=/usr/local/bin/worklane dashboard --hub old=${T}/homes/wl-old/state --service --client-id Iv1.signin0001 --public-url https://hub.example.test --signin-dir /x\n`);
-  const hubTok = join(T, 'homes', 'wl-dash', '.local', 'state', 'worklane', 'dashboard-hub');
-  mkdirSync(hubTok, { recursive: true });
-  writeFileSync(join(hubTok, 'dashboard-token'), 't');
-  const env = { PATH: `${join(T, 'host-bin')}:${process.env.PATH ?? '/usr/bin:/bin'}`, HOME: T, LANG: 'C.UTF-8' };
-  /** machine_sudoers for these instances, as install_sudoers writes it: the content and one newline. */
-  const expected = (...names: string[]) => {
-    const r = spawnSync('bash', ['-c', 'source "$1"; shift; c="$(machine_sudoers "$@")"; printf "%s\\n" "$c"', '_', join(s, 'lib.sh'), ...names.map((n) => `wl-${n}`)], { encoding: 'utf8', env });
-    assert.equal(r.status, 0, r.stderr);
-    return r.stdout;
-  };
-  const sudoers = () => readFileSync(join(T, 'sudoers-machine'), 'utf8');
-  // The machine's rule before alpha: what machine-helper.sh wrote for old.
-  if (rule) writeFileSync(join(T, 'sudoers-machine'), expected('old'));
-  copyFileSync(helperSrc, join(T, 'helper'));
-  const run = () => {
-    const r = spawnSync('bash', [join(s, 'add-project.sh'), 'alpha', 'example/alpha'], { encoding: 'utf8', input: `${TOKEN}\n`, env });
-    const lines = r.stdout.split('\n').filter(Boolean);
-    return { ...r, events: lines.map((l) => JSON.parse(l) as Step) };
-  };
-  const check = () => spawnSync('bash', [join(real, 'machine-helper.sh'), '--check'], { encoding: 'utf8', env });
-  const calls = () => (existsSync(join(T, 'calls')) ? readFileSync(join(T, 'calls'), 'utf8').trim().split('\n').filter(Boolean) : []);
-  const hostCalls = () => (existsSync(join(T, 'host-calls')) ? readFileSync(join(T, 'host-calls'), 'utf8') : '');
-  const helperRuns = () => calls().filter((c) => c.startsWith('machine-helper ')).length;
-  const step = (r: { events: Step[] }) => r.events.find((e) => e.step === 'machine-helper' && e.state === 'done');
-  return { T, s, real, env, expected, sudoers, run, check, calls, hostCalls, helperRuns, step };
-}
-
-/** An older engine's rule for these users: the same shape, one command fewer (the newest one it lacks). */
-function olderRule(current: string) {
-  const lines = current.split('\n');
-  const i = lines.findIndex((l) => /^ {4}\S/.test(l));
-  return [...lines.slice(0, i), ...lines.slice(i + 1)].join('\n');
-}
-
-test('#898: a rerun after an upgrade rewrites a machine helper rule that differs from what machine-helper.sh writes, though the helper\'s bytes match and the instance is listed', { skip: !posix }, () => {
+test('#898: a rerun after an upgrade does not take the helper\'s bytes and a listed instance as done: a rule the engine\'s would widen waits for --replace-sudoers, which installs it byte for byte', { skip: !posix }, () => {
   const m = machine();
   const first = m.run();
   assert.equal(first.status, 0, first.stderr);
   assert.equal(m.helperRuns(), 1);
   assert.equal(m.sudoers(), m.expected('alpha', 'old'), 'the first run installs exactly machine-helper.sh\'s rule');
 
-  // An older engine wrote the rule; the updater has since put the helper's bytes in step (it never touches sudoers).
-  writeFileSync(join(m.T, 'sudoers-machine'), olderRule(m.expected('alpha', 'old')));
-  assert.notEqual(m.sudoers(), m.expected('alpha', 'old'));
+  // An older engine wrote the rule (one command fewer); the updater has since put the helper's bytes in step.
+  const older = olderRule(m.expected('alpha', 'old'));
+  m.setSudoers(older);
   const again = m.run();
-  assert.equal(again.status, 0, again.stderr);
-  assert.equal(m.helperRuns(), 2, 'the machine-helper step ran again: the bytes matching and the instance listed are not enough');
-  assert.ok(m.calls().filter((c) => c.startsWith('machine-helper ')).every((c) => c === 'machine-helper alpha old'), m.calls().join('\n'));
+  assert.equal(again.status, 3, again.stderr);
+  assert.equal(m.helperRuns(), 1, 'not rewritten on its own: the engine\'s rule is wider');
+  assert.equal(m.sudoers(), older);
+  const replaced = m.run(['--replace-sudoers']);
+  assert.equal(replaced.status, 0, replaced.stderr);
+  assert.ok(m.calls().includes('machine-helper --replace-sudoers alpha old'), m.calls().join('\n'));
   assert.equal(m.sudoers(), m.expected('alpha', 'old'), 'byte for byte what machine-helper.sh writes for these instances');
 
   // Current now: the next rerun skips it, and says why.
@@ -164,65 +50,68 @@ test('#898: a rerun after an upgrade rewrites a machine helper rule that differs
 test('#898: a rule wider than machine-helper.sh\'s is rewritten to exactly its output, never kept', { skip: !posix }, () => {
   const m = machine();
   assert.equal(m.run().status, 0);
-  writeFileSync(join(m.T, 'sudoers-machine'), `${m.expected('alpha', 'old')}wl-alpha ALL=(root) NOPASSWD: ALL\n`);
+  m.setSudoers(`${m.expected('alpha', 'old')}wl-alpha ALL=(root) NOPASSWD: ALL\n`);
   const r = m.run();
   assert.equal(r.status, 0, r.stderr);
   assert.equal(m.helperRuns(), 2);
   assert.equal(m.sudoers(), m.expected('alpha', 'old'));
   assert.ok(!m.sudoers().includes('NOPASSWD: ALL\n'), 'the added line is gone');
   // A rule that names an instance whose user is gone is not current either: the rerun names only the ones there.
-  writeFileSync(join(m.T, 'sudoers-machine'), m.expected('alpha', 'old').replace('wl-alpha, wl-old ALL=', 'wl-alpha, wl-gone, wl-old ALL='));
+  m.setSudoers(m.expected('alpha', 'old').replace('wl-alpha, wl-old ALL=', 'wl-alpha, wl-gone, wl-old ALL='));
   assert.equal(m.run().status, 0);
   assert.equal(m.helperRuns(), 3);
   assert.equal(m.sudoers(), m.expected('alpha', 'old'));
   assert.equal(m.hostCalls(), '');
 });
 
-test('#898: a sudo upgraded past 1.9.10 since the rule was written: the rerun installs the pattern rules it now can', { skip: !posix }, () => {
+test('#898: a sudo upgraded past 1.9.10 since the rule was written: its pattern rules widen it, so they wait for --replace-sudoers', { skip: !posix }, () => {
   const m = machine('1.9.9');
   assert.equal(m.run().status, 0);
   assert.ok(!m.sudoers().includes('^add-project'), 'an older sudo: no pattern rules');
   writeFileSync(join(m.T, 'sudo-version'), '1.9.15\n');
-  const r = m.run();
+  const waits = m.run();
+  assert.equal(waits.status, 3, waits.stderr);
+  assert.equal(m.helperRuns(), 1);
+  const r = m.run(['--replace-sudoers']);
   assert.equal(r.status, 0, r.stderr);
-  assert.equal(m.helperRuns(), 2);
   assert.ok(m.sudoers().includes('^add-project'), 'the pattern rules, now that sudo reads them');
   assert.equal(m.sudoers(), m.expected('alpha', 'old'));
 });
 
-test('#898: machine-helper.sh --check says absent, current or stale (with the exact command that rewrites it), and changes nothing', { skip: !posix }, () => {
+test('#898: machine-helper.sh --check says absent, current, stale (no flag) or wider (with --replace-sudoers), and changes nothing', { skip: !posix }, () => {
   const m = machine();
   writeFileSync(join(m.T, 'users', 'wl-alpha'), '');
   const snapshot = () => readdirSync(m.T, { recursive: true }).map(String).sort().map((f) => {
     const st = statSync(join(m.T, f));
     return `${f} ${st.mode} ${st.isFile() ? readFileSync(join(m.T, f), 'utf8') : ''}`;
   });
-  const fix = `sudo bash ${m.real}/machine-helper.sh alpha old`;
   const file = join(m.T, 'sudoers-machine');
 
-  writeFileSync(file, m.expected('alpha', 'old'));
+  m.setSudoers(m.expected('alpha', 'old'));
   let before = snapshot();
   let r = m.check();
   assert.equal(r.status, 0, r.stderr);
   assert.equal(r.stdout, `current: ${file} is what machine-helper.sh writes for alpha old\n`);
   assert.deepEqual(snapshot(), before, 'nothing written');
 
-  writeFileSync(file, olderRule(m.expected('alpha', 'old')));
+  // One command fewer than the engine's: wider, the command with the flag.
+  m.setSudoers(olderRule(m.expected('alpha', 'old')));
   before = snapshot();
   r = m.check();
-  assert.equal(r.status, 3, r.stderr);
-  assert.match(r.stdout, new RegExp(`^stale: ${file.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&')} is not what machine-helper\\.sh writes for alpha old`));
-  assert.ok(r.stdout.trimEnd().endsWith(`rewrite it, as root: ${fix}`), r.stdout);
+  assert.equal(r.status, 4, r.stderr);
+  assert.ok(r.stdout.trimEnd().endsWith(`wider: rerun as root with --replace-sudoers to install the engine's rule: sudo bash ${m.real}/machine-helper.sh --replace-sudoers alpha old`), r.stdout);
+  assert.match(r.stdout, new RegExp(`^--- installed ${esc(file)}\\n\\+\\+\\+ engine \\(machine-helper\\.sh\\)\\n`));
   assert.deepEqual(snapshot(), before, 'nothing written');
 
-  // Wider than its output: stale too.
-  writeFileSync(file, `${m.expected('alpha', 'old')}wl-alpha ALL=(root) NOPASSWD: ALL\n`);
+  // Wider than its output (a hand-added line): stale, and the rewrite needs no flag.
+  m.setSudoers(`${m.expected('alpha', 'old')}wl-alpha ALL=(root) NOPASSWD: ALL\n`);
   r = m.check();
   assert.equal(r.status, 3);
-  assert.ok(r.stdout.trimEnd().endsWith(fix));
+  assert.match(r.stdout, /^-wl-alpha ALL=\(root\) NOPASSWD: ALL$/m);
+  assert.ok(r.stdout.trimEnd().endsWith(`rewrite it, as root: sudo bash ${m.real}/machine-helper.sh alpha old`), r.stdout);
 
   // No user left for any instance it names: the command removes it, as instance-remove.sh does for the last one.
-  writeFileSync(file, m.expected('alpha', 'old').replace('wl-alpha, wl-old ALL=', 'wl-gone ALL='));
+  m.setSudoers(m.expected('alpha', 'old').replace('wl-alpha, wl-old ALL=', 'wl-gone ALL='));
   r = m.check();
   assert.equal(r.status, 3);
   assert.ok(r.stdout.trimEnd().endsWith(`sudo rm -f ${file}`), r.stdout);
@@ -239,12 +128,12 @@ test('#898: machine-helper.sh --check says absent, current or stale (with the ex
 type Check = { state: string; detail: string; fix?: string } | null;
 const updater = () =>
   createRequire(import.meta.url)(join(repoRoot, 'scripts', 'machine', 'worklane-update.cjs')) as {
-    machineSudoersCheck(engineDir: string, exec?: typeof execFileSync, owner?: number): Check;
+    machineSudoersCheck(engineDir: string, exec?: typeof execFileSync, owner?: number, top?: string): Check;
     run(deps: Record<string, unknown>): Promise<string>;
     SUDOERS_INCIDENT: string;
   };
 
-test('#898: the updater reads machine-helper.sh --check of the installed engine: a stale rule with its exact fix command', { skip: !posix }, () => {
+test('#898: the updater reads machine-helper.sh --check of the installed engine: stale or wider, each with its exact command', { skip: !posix }, () => {
   const m = machine();
   writeFileSync(join(m.T, 'users', 'wl-alpha'), '');
   const engine = join(m.T, 'real');
@@ -252,15 +141,21 @@ test('#898: the updater reads machine-helper.sh --check of the installed engine:
   const exec = ((file: string, args: string[], o: Record<string, unknown>) =>
     execFileSync(file, args, { ...o, env: { ...(o.env as Record<string, string>), PATH: `${join(m.T, 'host-bin')}:${(o.env as Record<string, string>).PATH}` } })) as unknown as typeof execFileSync;
   const me = process.getuid!();
-  writeFileSync(join(m.T, 'sudoers-machine'), olderRule(m.expected('alpha', 'old')));
-  const stale = updater().machineSudoersCheck(engine, exec, me)!;
+  const check = (dir = engine, x = exec) => updater().machineSudoersCheck(dir, x, me, m.T);
+  m.setSudoers(olderRule(m.expected('alpha', 'old')));
+  const wider = check()!;
+  assert.equal(wider.state, 'wider');
+  assert.equal(wider.fix, `sudo bash ${engine}/scripts/setup/machine-helper.sh --replace-sudoers alpha old`);
+  assert.match(wider.detail, /^wider: rerun as root with --replace-sudoers to install the engine's rule: .* The diff: \+/);
+  m.setSudoers(`${m.expected('alpha', 'old')}wl-alpha ALL=(root) NOPASSWD: ALL\n`);
+  const stale = check()!;
   assert.equal(stale.state, 'stale');
   assert.equal(stale.fix, `sudo bash ${engine}/scripts/setup/machine-helper.sh alpha old`);
-  assert.match(stale.detail, /is not what machine-helper\.sh writes for alpha old/);
-  writeFileSync(join(m.T, 'sudoers-machine'), m.expected('alpha', 'old'));
-  assert.equal(updater().machineSudoersCheck(engine, exec, me)!.state, 'current');
+  assert.match(stale.detail, /The diff: -wl-alpha ALL=\(root\) NOPASSWD: ALL/);
+  m.setSudoers(m.expected('alpha', 'old'));
+  assert.equal(check()!.state, 'current');
   // An engine with no machine-helper.sh: nothing to say.
-  assert.equal(updater().machineSudoersCheck(join(m.T, 'no-engine'), exec, me), null);
+  assert.equal(check(join(m.T, 'no-engine')), null);
   // Run by anyone but its owner (root, for the updater: a test with the real deps), it runs nothing at all.
   let ran = 0;
   const counting = ((...a: Parameters<typeof execFileSync>) => ((ran += 1), (exec as (...x: unknown[]) => unknown)(...a))) as unknown as typeof execFileSync;
@@ -268,21 +163,47 @@ test('#898: the updater reads machine-helper.sh --check of the installed engine:
   // A script or lib.sh someone else could write is never run: unknown, said why.
   for (const f of ['machine-helper.sh', 'lib.sh']) {
     chmodSync(join(engine, 'scripts', 'setup', f), 0o664);
-    const r = updater().machineSudoersCheck(engine, counting, me)!;
+    const r = check(engine, counting)!;
     assert.equal(r.state, 'unknown');
-    assert.match(r.detail, new RegExp(`${f.replace('.', '\\.')} is writable by group or others`));
+    assert.match(r.detail, new RegExp(`${esc(f)} is writable by group or others`));
     chmodSync(join(engine, 'scripts', 'setup', f), 0o644);
   }
+  // Nor through a directory someone else could write, anywhere up the path (#902 review: the whole path).
+  for (const d of [join(engine, 'scripts', 'setup'), join(engine, 'scripts'), engine]) {
+    chmodSync(d, 0o777);
+    const r = check(engine, counting)!;
+    assert.equal(r.state, 'unknown', d);
+    assert.match(r.detail, new RegExp(`${esc(d)} isn't uid ${me}'s alone`));
+    chmodSync(d, 0o755);
+  }
+  // Nor through a link below the engine: scripts/setup a symlink to a copy elsewhere.
+  const elsewhere = join(m.T, 'elsewhere');
+  renameSync(join(engine, 'scripts', 'setup'), elsewhere);
+  symlinkSync(elsewhere, join(engine, 'scripts', 'setup'));
+  const linked = check(engine, counting)!;
+  assert.equal(linked.state, 'unknown');
+  assert.match(linked.detail, /goes through a link/);
   assert.equal(ran, 0, 'nothing was run');
+  // The engine directory itself through a link (as /opt/worklane/current is): resolved, checked, run; the command it
+  // names keeps the path it was given.
+  const engine2 = join(m.T, 'engine2');
+  mkdirSync(join(engine2, 'scripts'), { recursive: true });
+  for (const d of [engine2, join(engine2, 'scripts')]) chmodSync(d, 0o755);
+  renameSync(elsewhere, join(engine2, 'scripts', 'setup'));
+  symlinkSync(engine2, join(m.T, 'current'));
+  m.setSudoers(olderRule(m.expected('alpha', 'old')));
+  const viaLink = check(join(m.T, 'current'))!;
+  assert.equal(viaLink.state, 'wider');
+  assert.equal(viaLink.fix, `sudo bash ${join(m.T, 'current')}/scripts/setup/machine-helper.sh --replace-sudoers alpha old`);
   assert.equal(m.hostCalls(), '');
 });
 
-test('#898: every updater run, updates on or off, names a stale rule in the journal and as an incident with the fix; a current one closes it', async () => {
+test('#898: every updater run, updates on or off, names a stale or wider rule in the journal and as an incident with its fix; a current one closes it', async () => {
   const u = updater();
   const warned: string[] = [];
   const raised: string[][] = [];
   const resolved: string[][] = [];
-  let answer: Check = { state: 'stale', detail: 'stale: /etc/sudoers.d/worklane-machine is not what machine-helper.sh writes for alpha; rewrite it, as root: sudo bash /opt/worklane/current/scripts/setup/machine-helper.sh alpha', fix: 'sudo bash /opt/worklane/current/scripts/setup/machine-helper.sh alpha' };
+  let answer: Check = { state: 'stale', detail: 'stale: /etc/sudoers.d/worklane-machine is not what machine-helper.sh writes for alpha, and rewriting it only drops grants; rewrite it, as root: sudo bash /opt/worklane/current/scripts/setup/machine-helper.sh alpha', fix: 'sudo bash /opt/worklane/current/scripts/setup/machine-helper.sh alpha' };
   const deps = {
     config: () => null,
     sudoersCheck: () => answer,
@@ -299,6 +220,10 @@ test('#898: every updater run, updates on or off, names a stale rule in the jour
   await u.run(deps);
   assert.deepEqual(resolved, [[u.SUDOERS_INCIDENT, 'machine-helper']]);
   assert.equal(warned.length, 1, 'nothing said when it is current');
+  answer = { state: 'wider', detail: "wider: rerun as root with --replace-sudoers to install the engine's rule: sudo bash /opt/worklane/current/scripts/setup/machine-helper.sh --replace-sudoers alpha", fix: 'sudo bash /opt/worklane/current/scripts/setup/machine-helper.sh --replace-sudoers alpha' };
+  await u.run(deps);
+  assert.deepEqual(raised.at(-1), [u.SUDOERS_INCIDENT, 'machine-helper', answer.detail, answer.fix]);
+  assert.match(warned.at(-1)!, /^machine_sudoers_stale: wider: /);
   // A check that throws never stops the run.
   const throwing = { ...deps, sudoersCheck: () => { throw new Error('boom'); } };
   assert.equal(await u.run(throwing), 'disabled');

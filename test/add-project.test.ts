@@ -109,7 +109,9 @@ printf '[Service]\\nExecStart=/usr/local/bin/worklane dashboard --hub %s --servi
   // "old": an instance set up earlier, in the machine helper's rule and the hub.
   for (const u of ['wl-old', 'wl-old-agent']) writeFileSync(join(T, 'users', u), '');
   mkdirSync(join(instDir('old'), 'state'), { recursive: true });
-  writeFileSync(join(T, 'sudoers-machine'), 'Cmnd_Alias WORKLANE_MACHINE = x\nwl-old ALL=(root) NOPASSWD: WORKLANE_MACHINE\n');
+  // Its rule as machine-helper.sh wrote it for old (#898: a placeholder rule would be narrower than the engine's, and
+  // adding alpha would wait for --replace-sudoers).
+  writeFileSync(join(T, 'sudoers-machine'), spawnSync('bash', ['-c', 'source "$1"; c="$(machine_sudoers wl-old)"; printf "%s\\n" "$c"', '_', join(s, 'lib.sh')], { encoding: 'utf8', env: { PATH: process.env.PATH ?? '/usr/bin:/bin', HOME: T } }).stdout);
   writeFileSync(join(T, 'hub.service'), `[Service]\nExecStart=/usr/local/bin/worklane dashboard --hub old=${instDir('old')}/state --service --client-id Iv1.signin0001 --public-url https://hub.example.test --signin-dir /x --console-user admin --console-devices tag:owner\n`);
   // The hub is up: its token, which the App step needs.
   const hubTok = join(T, 'homes', 'wl-dash', '.local', 'state', 'worklane', 'dashboard-hub');

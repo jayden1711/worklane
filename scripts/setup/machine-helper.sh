@@ -38,37 +38,71 @@
 #     write any content to it; from now on the cap changes only through the helper.
 # Re-run it with the full list after adding an instance.
 #
+#   bash scripts/setup/machine-helper.sh --replace-sudoers <name> [<name>...]
+#
+# The owner's rule (#898): the rule is rewritten on its own only when the result is narrower than or equal to what is
+# installed. That means every grant this script would write is there already (each command, user spec and user,
+# whitespace aside), so the rewrite only drops grants. The users named here are the exception: at a root shell you
+# name them on purpose. When this script's rule would grant anything else the installed one doesn't (an engine that
+# added a command, a sudo upgraded past 1.9.10), it changes nothing. It prints a unified diff
+# ("--- installed <file>", "+++ engine (machine-helper.sh)") and the line "rerun as root with --replace-sudoers to
+# install the engine's rule: <command>", then exits 3. --replace-sudoers, at a root shell once you've read the diff,
+# writes the rule whole. A machine's first install (no rule yet) needs no flag. No sudoers rule lets a coordinator run
+# this script; through the helper a coordinator reaches only add-project.sh, with exactly a name and a repo.
+#
 #   bash scripts/setup/machine-helper.sh --check      whether the installed rule is current; changes nothing (#898)
 #
-# One line on stdout: "absent: ..." (no rule here) or "current: ..." (byte for byte what this script writes for the
-# instances the rule names whose coordinator users exist), exit 0; "stale: ...", ending with the exact command that
-# rewrites it, exit 3. The updater keeps the helper's bytes in step with the engine but never sudoers, so after an
-# upgrade the rule can be an older engine's: the updater runs this every run and names a stale rule (journal, incident).
+# The diff, if any, then one last line on stdout:
+#   - "absent: ..." (no rule here), exit 0;
+#   - "current: ..." (byte for byte what this script writes for the instances the rule names whose coordinator users
+#     exist), exit 0;
+#   - "stale: ...", exit 3: the rewrite only drops grants, so the line ends with the command that rewrites it, which
+#     needs no flag;
+#   - "wider: rerun as root with --replace-sudoers to install the engine's rule: <command>", exit 4: this engine's rule
+#     grants what the installed one doesn't.
+# The updater keeps the helper's bytes in step with the engine but never touches sudoers, so after an upgrade the rule
+# can be an older engine's. The updater runs this check every run and names either case (journal, incident).
 source "$(dirname "$0")/lib.sh"
 as_root "$@"
+here="$(cd "$(dirname "$0")" && pwd)"
 if [ "${1:-}" = --check ]; then
   [ "$#" -eq 1 ] || { echo "usage: machine-helper.sh --check" >&2; exit 2; }
   [ -e "$MACHINE_SUDOERS" ] || { echo "absent: no $MACHINE_SUDOERS: the machine helper has no rule on this machine"; exit 0; }
-  names=()
-  for n in $(helper_instances); do if user_exists "wl-$n"; then names+=("$n"); fi; done
+  names=() users=()
+  for n in $(helper_instances); do if user_exists "wl-$n"; then names+=("$n"); users+=("wl-$n"); fi; done
   if [ "${#names[@]}" -eq 0 ]; then
     echo "stale: $MACHINE_SUDOERS names no coordinator user on this machine; remove it, as root: sudo rm -f $MACHINE_SUDOERS"
     exit 3
   fi
-  if machine_sudoers_current "${names[@]}"; then
+  rule="$(machine_sudoers "${users[@]}")"
+  if sudoers_current "$MACHINE_SUDOERS" "$rule"; then
     echo "current: $MACHINE_SUDOERS is what machine-helper.sh writes for ${names[*]}"
     exit 0
   fi
-  echo "stale: $MACHINE_SUDOERS is not what machine-helper.sh writes for ${names[*]} (an older engine's rule, one for another sudo version, or an edit); rewrite it, as root: sudo bash $(cd "$(dirname "$0")" && pwd)/machine-helper.sh ${names[*]}"
-  exit 3
+  sudoers_unified_diff "$MACHINE_SUDOERS" "$rule"
+  if sudoers_only_narrows "$MACHINE_SUDOERS" "$rule"; then
+    echo "stale: $MACHINE_SUDOERS is not what machine-helper.sh writes for ${names[*]}, and rewriting it only drops grants (an older engine's, or an edit); rewrite it, as root: sudo bash $here/machine-helper.sh ${names[*]}"
+    exit 3
+  fi
+  echo "wider: rerun as root with --replace-sudoers to install the engine's rule: sudo bash $here/machine-helper.sh --replace-sudoers ${names[*]}"
+  exit 4
 fi
-[ "$#" -ge 1 ] || { echo "usage: machine-helper.sh <name> [<name>...]" >&2; exit 2; }
+replace=""
+if [ "${1:-}" = --replace-sudoers ]; then replace=1; shift; fi
+[ "$#" -ge 1 ] || { echo "usage: machine-helper.sh [--replace-sudoers] <name> [<name>...]" >&2; exit 2; }
 users=()
 for name in "$@"; do
   need_instance_name "$name"
-  id -u "wl-$name" >/dev/null 2>&1 || { echo "no wl-$name; run instance.sh $name first" >&2; exit 1; }
+  user_exists "wl-$name" || { echo "no wl-$name; run instance.sh $name first" >&2; exit 1; }
   users+=("wl-$name")
 done
+# Before anything changes: a rule that would grant more than the installed one waits for --replace-sudoers (#898).
+rule="$(machine_sudoers "${users[@]}")"
+if [ -z "$replace" ] && ! sudoers_only_narrows "$MACHINE_SUDOERS" "$rule" "${users[@]}"; then
+  sudoers_unified_diff "$MACHINE_SUDOERS" "$rule"
+  echo "rerun as root with --replace-sudoers to install the engine's rule: sudo bash $here/machine-helper.sh --replace-sudoers $*"
+  exit 3
+fi
 command -v node >/dev/null || { echo "needs node on root's PATH (node.sh)" >&2; exit 1; }
 [ -d /etc/worklane ] || { echo "no /etc/worklane; run machine.sh first" >&2; exit 1; }
 

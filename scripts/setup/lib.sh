@@ -237,6 +237,82 @@ machine_sudoers_current() {
   sudoers_current "$MACHINE_SUDOERS" "$(machine_sudoers "${users[@]}")"
 }
 
+# The grants a sudoers text on stdin makes, one per line, whitespace normalised (#898):
+#   - "alias <NAME> <command>" for each command of a Cmnd_Alias;
+#   - "spec <hosts=(runas) tags: commands>" for each user spec;
+#   - "user <name>" for each user a spec names;
+#   - "other <line>" for anything else (Defaults, another alias kind, an #include or @include).
+# A line ending in \ goes on into the next. Comments and blank lines grant nothing and are left out. A comment ending
+# in \ takes the lines it continues into with it: whatever sudo makes of that, those lines never count as granted here,
+# which fails closed (the engine's rule then looks wider). An #include is not a comment, so it is kept.
+sudoers_grants() {
+  LC_ALL=C awk '
+    { sub(/\r$/, "") }
+    buf == "" && /^[ \t]*[#@]include/ { line = $0; gsub(/[ \t]+/, " ", line); sub(/^ /, "", line); print "other " line; next }
+    skip { if ($0 !~ /\\[ \t]*$/) skip = 0; next }
+    buf == "" && /^[ \t]*#/ { if ($0 ~ /\\[ \t]*$/) skip = 1; next }
+    /\\[ \t]*$/ { sub(/\\[ \t]*$/, ""); buf = buf $0 " "; next }
+    {
+      line = buf $0; buf = ""
+      gsub(/[ \t]+/, " ", line); sub(/^ /, "", line); sub(/ $/, "", line)
+      if (line == "") next
+      if (line ~ /^Cmnd_Alias [A-Z0-9_]+ ?=/) {
+        name = line; sub(/^Cmnd_Alias /, "", name); sub(/ ?=.*$/, "", name)
+        rest = line; sub(/^[^=]*= ?/, "", rest)
+        n = split(rest, c, / ?, ?/)
+        for (i = 1; i <= n; i++) if (c[i] != "") print "alias " name " " c[i]
+        next
+      }
+      if (line ~ /^[a-z_%+][^ =]*(, ?[^ ,=]+)* [^ ,=]+=/) {
+        match(line, / [^ ,=]+=/)
+        users = substr(line, 1, RSTART - 1); spec = substr(line, RSTART + 1)
+        n = split(users, u, / ?, ?/)
+        for (i = 1; i <= n; i++) if (u[i] != "") print "user " u[i]
+        print "spec " spec
+        next
+      }
+      print "other " line
+    }
+    END { if (buf != "") print "other " buf }'
+}
+
+# What replacing sudoers file $1 by content $2 would change in its grants (#898). It prints "+ <grant>" for each grant
+# it would add and "- <grant>" for each it would drop, sorted. A file it can't read counts as granting nothing, so every
+# grant of $2 shows as added.
+sudoers_grant_diff() {
+  local have want
+  have="$({ sudoers_grants < "$1"; } 2>/dev/null | LC_ALL=C sort -u)" || have=""
+  want="$(sudoers_bytes "$2" | sudoers_grants | LC_ALL=C sort -u)"
+  LC_ALL=C comm -13 <(printf '%s\n' "$have") <(printf '%s\n' "$want") | sed -n 's/^\(..*\)$/+ \1/p'
+  LC_ALL=C comm -23 <(printf '%s\n' "$have") <(printf '%s\n' "$want") | sed -n 's/^\(..*\)$/- \1/p'
+}
+
+# Whether replacing sudoers file $1 by content $2 only drops grants (#898). The owner's rule: the machine helper's rule
+# is rewritten on its own only when the result is narrower than or equal to what is installed. So every grant $2 makes
+# (each command, each user spec, each user named, whitespace normalised) must be in $1 already. The one exception is
+# the users $3..., named on purpose by the caller: machine-helper.sh's own arguments at a root shell, or add-project's
+# instance on its first add. A user added any other way is a widening, like a command. With no $1 yet (a machine's
+# first install) there is nothing to be wider than. Only reads; prints nothing.
+sudoers_only_narrows() {
+  local file="$1" content="$2" d l
+  shift 2
+  [ -e "$file" ] || [ -L "$file" ] || return 0
+  d="$(sudoers_grant_diff "$file" "$content")"
+  while IFS= read -r l; do
+    case "$l" in
+      "+ user "*) printf '%s\n' "$@" | grep -qxF -- "${l#+ user }" || return 1 ;;
+      "+ "*) return 1 ;;
+    esac
+  done <<<"$d"
+  return 0
+}
+
+# The difference between installed sudoers file $1 and content $2 as a unified diff, labelled for the owner's runbook:
+# "--- installed <file>" and "+++ engine (machine-helper.sh)". Prints nothing when they are the same.
+sudoers_unified_diff() {
+  diff -u --label "installed $1" --label "engine (machine-helper.sh)" -- "$1" <(sudoers_bytes "$2") || true
+}
+
 # Tailscale for the dashboard hub (tailscale.sh). The install is pinned: Tailscale's own apt repository for this
 # distribution, every package checked by apt against the one signing key whose fingerprint is here, and this version.
 # Change the version and the fingerprint only in a reviewed commit, the fingerprint only to one Tailscale publishes.

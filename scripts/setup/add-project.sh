@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # Add a project to this machine in one go, as root (review it first): every setup step for one instance, in order.
 #
-#   sudo bash scripts/setup/add-project.sh <name> <owner/repo> [--public-url https://<host>] [--client-id <id>] [--timeout <minutes>]
+#   sudo bash scripts/setup/add-project.sh <name> <owner/repo> [--public-url https://<host>] [--client-id <id>] [--timeout <minutes>] [--replace-sudoers]
+#
+# --replace-sudoers is root's alone, at a root shell: the machine helper (a coordinator's add-project) passes exactly
+# the name and repo, never a flag.
 #
 # The steps (each skipped, as "done", when it is done already, so a rerun picks up where an earlier one stopped):
 #   instance        instance.sh <name>, and the instance home as engine.sh makes it
@@ -25,7 +28,10 @@
 #                   "waiting" (exit 3), saying for what, and a rerun picks up here
 #   test-user      test-user.sh install <name>, when the repo's tests.yaml has test_run
 #   machine-helper  machine-helper.sh with every instance on the machine (the ones it lists now, the hub's, and this);
-#                   done only while its sudoers rule is byte for byte what that writes for them (an upgrade reruns it)
+#                   done only while its sudoers rule is byte for byte what that writes for them. Otherwise it reruns
+#                   on its own only when that only drops grants (and adds this instance's user). A rule that would
+#                   grant more (a newer engine's commands) waits (exit 3), showing the difference, for root's
+#                   --replace-sudoers (#898)
 #   dashboards      dashboards.sh with every instance, keeping the hub's settings (its unit has them); the first
 #                   project on a machine gives --client-id and --public-url instead
 #
@@ -39,16 +45,17 @@
 source "$(dirname "$0")/lib.sh"
 as_root "$@"
 here="$(cd "$(dirname "$0")" && pwd)"
-usage="usage: add-project.sh <name> <owner/repo> [--public-url https://<host>] [--client-id <sign-in App client id>] [--timeout <minutes>]"
+usage="usage: add-project.sh <name> <owner/repo> [--public-url https://<host>] [--client-id <sign-in App client id>] [--timeout <minutes>] [--replace-sudoers]"
 [ "$#" -ge 2 ] || { echo "$usage" >&2; exit 2; }
 name="$1" repo="$2"
 shift 2
-public_url="" client_id="" timeout=15
+public_url="" client_id="" timeout=15 replace_sudoers=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --public-url) public_url="${2:-}"; shift 2 ;;
     --client-id) client_id="${2:-}"; shift 2 ;;
     --timeout) timeout="${2:-}"; shift 2 ;;
+    --replace-sudoers) replace_sudoers=1; shift ;;
     *) echo "$usage" >&2; exit 2 ;;
   esac
 done
@@ -297,7 +304,8 @@ one_line() { tr '\n' ' ' | sed 's/ $//'; }
 # Done only when a rerun would change nothing: the helper's bytes, this instance in its rule, and the rule byte for byte
 # what machine-helper.sh writes for these instances (#898). The updater keeps the helper's bytes in step but never
 # sudoers, so after an upgrade the bytes match while the rule is an older engine's (or was written for an older sudo, or
-# edited): that reruns machine-helper.sh, the one writer of the rule, so it only ever ends up equal to its output.
+# edited). That reruns machine-helper.sh, the one writer of the rule, so the rule only ever ends up equal to its output.
+# The rerun happens on its own only when it narrows (do_machine_helper).
 done_machine_helper() {
   local names
   [ -f "$MACHINE_HELPER" ] && cmp -s "$MACHINE_HELPER" "$here/../machine/worklane-machine.cjs" || return 1
@@ -307,9 +315,30 @@ done_machine_helper() {
   machine_sudoers_current $names || return 1
   echo "the machine helper is installed, lists $coord, and its sudoers rule is what machine-helper.sh writes for $(printf '%s\n' "$names" | one_line)"
 }
+# The owner's rule (#898): on its own, the rewrite only drops grants. The one user it may add is this instance's
+# coordinator, on its first add (what adding a project is). On a rerun, where the rule names it already, it adds no user
+# at all: a hub-only instance's user counts as a widening too. Anything wider (a newer engine's commands, a sudo that
+# now reads patterns, another user) waits, exit 3, showing the unified diff and the command with --replace-sudoers.
+# That flag is root's, at a root shell: the machine helper runs this script with exactly a name and a repo.
 do_machine_helper() {
-  # shellcheck disable=SC2046 # one word per instance name
-  bash "$here/machine-helper.sh" $(helper_names)
+  local names n users=() allow=() rule
+  names="$(helper_names)"
+  for n in $names; do users+=("wl-$n"); done
+  helper_instances | grep -qx "$name" || allow=("$coord")
+  rule="$(machine_sudoers "${users[@]}")"
+  if [ -n "$replace_sudoers" ]; then
+    echo "--replace-sudoers: the machine helper's rule becomes machine-helper.sh's, whatever it adds"
+  elif sudoers_only_narrows "$MACHINE_SUDOERS" "$rule" "${allow[@]}"; then
+    [ ! -e "$MACHINE_SUDOERS" ] || sudoers_unified_diff "$MACHINE_SUDOERS" "$rule"
+    echo "the machine helper's rule, for $(printf '%s\n' "$names" | one_line): it grants nothing the installed one doesn't${allow[*]:+ but ${allow[*]}}"
+  else
+    sudoers_unified_diff "$MACHINE_SUDOERS" "$rule"
+    echo "rerun as root with --replace-sudoers to install the engine's rule: $again --replace-sudoers"
+    echo "waiting: rerun as root with --replace-sudoers to install the engine's rule: $again --replace-sudoers"
+    exit 3
+  fi
+  # shellcheck disable=SC2086 # one word per instance name
+  bash "$here/machine-helper.sh" ${replace_sudoers:+--replace-sudoers} $names
 }
 detail_machine_helper() { echo "the machine helper lists $(helper_names 2>/dev/null | one_line)"; }
 alone_machine_helper() { echo "sudo bash $here/machine-helper.sh $(helper_names 2>/dev/null | one_line)"; }
