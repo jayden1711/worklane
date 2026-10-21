@@ -1247,14 +1247,14 @@ function releaseBase(deps, cfg, current) {
   try {
     const tag = newestRelease(parseTags(deps.exec('git', ['ls-remote', '--tags', cfg.repo_url, 'refs/tags/v*'])).filter((t) => t.commit === current));
     if (!tag) return { ok: false, reason: `no release tag vX.Y.Z on ${cfg.repo_url} names it` };
-    const v = deps.verifyRelease(cfg.repo_url, tag.tag, cfg.allowed_signers || ALLOWED_SIGNERS);
-    if (!v || !v.ok) return { ok: false, reason: (v && v.reason) || `${tag.tag} didn't verify` };
+    const proof = deps.verifyRelease(cfg.repo_url, tag.tag, cfg.allowed_signers || ALLOWED_SIGNERS);
+    if (!proof || !proof.ok) return { ok: false, reason: (proof && proof.reason) || `${tag.tag} didn't verify` };
     // INVARIANT: one tag object throughout, as on the release channel (#764): the one ls-remote listed, verified, at the installed commit.
-    if (v.object !== tag.object || v.commit !== current) {
-      return { ok: false, reason: `${tag.tag} moved between ls-remote and its verification: ls-remote said tag object ${short(tag.object)} at ${short(current)}, the one verified is ${short(v.object)} at ${short(v.commit)}` };
+    if (proof.object !== tag.object || proof.commit !== current) {
+      return { ok: false, reason: `${tag.tag} moved between ls-remote and its verification: ls-remote said tag object ${short(tag.object)} at ${short(current)}, the one verified is ${short(proof.object)} at ${short(proof.commit)}` };
     }
-    if (!OBJECT_ID.test(String(v.base))) return { ok: false, reason: `${tag.tag}'s main commit isn't an object id` };
-    return { ok: true, base: v.base, tag: tag.tag };
+    if (!OBJECT_ID.test(String(proof.base))) return { ok: false, reason: `${tag.tag}'s main commit isn't an object id` };
+    return { ok: true, base: proof.base, tag: tag.tag };
   } catch (e) {
     return { ok: false, reason: `couldn't check the release tags: ${firstLine(e)}` };
   }
