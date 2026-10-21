@@ -56,7 +56,7 @@
     "react-dom": "19.3.0",
     "tailwindcss": "4.3.3",
     "typescript": "^5.6.3",
-    "vite": "8.3.0"
+    "vite": "8.3.3"
   },
   "dependencies": {
     "@anthropic-ai/sandbox-runtime": "0.0.78",
