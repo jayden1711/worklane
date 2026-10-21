@@ -277,9 +277,11 @@ test('every pattern runs in linear time on 100 KB of hostile input', () => {
     ['" + a', run('a', '"')], ['" + a_', run('a_', '"', '":"')], ['"a', run('"a')], ['"x-api-key":"', run('"x-api-key":"')],
     ['"a_b_key": + value', run('a_b_', '"', `key":"${'Aa1'.repeat(6)}"`)], ['//a.lan', run('//a.lan')], ['/a.lan', run('/a.lan')],
     ['a.Internal ', run('a.Internal ')], ['aB.local ', run('aB.local ')], ['this.a.internal', run('a.', 'this.', 'internal')],
+    // Long runs of letters with `.`, `-` or `+` (a URL scheme's characters), and with `://` at the end (#889 round 4).
+    ['ab.', run('ab.')], ['ab-', run('ab-')], ['ab+', run('ab+')], ['ab. + ://', run('ab.', '', '://x:y@')], ['a.b-c+', run('a.b-c+')],
   ];
-  // The URL-password pattern predates #644 and is quadratic on these shapes too: a follow-up, not this change.
-  const KNOWN_SLOW = new Set(['password in a URL']);
+  // None: the URL-password pattern, quadratic on these shapes before, takes a bounded scheme since #889 round 4.
+  const KNOWN_SLOW = new Set<string>([]);
   const slow: string[] = [];
   for (const { kind, re, rep } of REDACTION_PATTERNS) {
     if (KNOWN_SLOW.has(kind)) continue;
