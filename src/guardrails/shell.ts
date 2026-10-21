@@ -17,6 +17,8 @@ export interface SimpleCommand {
    * counts as a write to `.claude/x`.
    */
   writes: string[];
+  /** Files read by input redirection (`< file`); a here-document's word is not one. */
+  reads: string[];
 }
 
 const COPY_LIKE = new Set(['cp', 'ln', 'install', 'rsync']);
@@ -268,6 +270,7 @@ export function splitCommands(src: string, depth = 0): SimpleCommand[] {
   const result: SimpleCommand[] = [];
   let words: string[] = [];
   let writes: string[] = [];
+  let reads: string[] = [];
   let pendingRedirect: string | null = null;
 
   const flush = () => {
@@ -280,11 +283,11 @@ export function splitCommands(src: string, depth = 0): SimpleCommand[] {
       k++;
     }
     const argv = stripWrappers(words.slice(k), assignments);
-    if (argv.length || Object.keys(assignments).length || writes.length) {
+    if (argv.length || Object.keys(assignments).length || writes.length || reads.length) {
       const base = argv.length ? basename(argv[0]!) : '';
       if (base === 'tee') for (const f of argv.slice(1)) if (!f.startsWith('-')) writes.push(f);
       writes.push(...argumentWrites(base, argv));
-      result.push({ argv, assignments, writes });
+      result.push({ argv, assignments, writes, reads });
       // Re-parse the script given to a shell or eval.
       if (SHELLS.has(base)) {
         const ci = argv.findIndex((x, idx) => idx > 0 && /^-[a-z]*c[a-z]*$/.test(x));
@@ -296,11 +299,13 @@ export function splitCommands(src: string, depth = 0): SimpleCommand[] {
     }
     words = [];
     writes = [];
+    reads = [];
   };
 
   for (const t of tokens) {
     if (pendingRedirect !== null) {
       if (!t.op && WRITE_REDIRECTS.has(pendingRedirect) && !t.text.startsWith('/dev/')) writes.push(t.text);
+      if (!t.op && pendingRedirect === '<') reads.push(t.text);
       pendingRedirect = null;
       if (!t.op) continue;
     }
