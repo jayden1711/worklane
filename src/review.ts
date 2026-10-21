@@ -329,6 +329,37 @@ export function hidesSubmodules(f: Pick<ChangeFile, 'submoduleIgnores'>): boolea
 }
 
 /**
+ * The decision records planner and plan-review agents read as recorded decisions: the decisions index
+ * (src/plan-decisions.ts) indexes each file here present by its exact name by its headings, and each markdown file in
+ * each folder here as one entry. Defined here, beside the lock below, so the index and the lock read one list: a path
+ * added here is locked by the same change (#920). src/plan-decisions.ts re-exports them; it can't hold them, since
+ * this module is in the agents' tool guard's import tree and the index's module would pull its imports in with it.
+ */
+export const DECISION_FILES = ['decisions.md', 'DECISIONS.md', 'docs/decisions.md', 'docs/DECISIONS.md', `${BRAND.configDir}/decisions.md`, 'docs/design.md'];
+/** Decision record folders: each markdown file in one is an entry (one decision per file). */
+export const DECISION_DIRS = ['decisions', 'docs/decisions', 'docs/adr', `${BRAND.configDir}/decisions`];
+/** Those records as lock globs: each file, and each folder itself (a symlink to anywhere) and everything under it. */
+const DECISION_RECORD_GLOBS = [...DECISION_FILES, ...DECISION_DIRS.flatMap((d) => [d, `${d}/**`])];
+
+/**
+ * Each glob stays in the first part that lists it and leaves every later one, so one path has one part and one name
+ * (#920: docs/design.md is a decision record too, and stays "the release procedure and the design rules"). The lock is
+ * the same either way: the first part still holds the glob. Only a repeat is dropped, never a glob's only listing.
+ */
+function onePartPerGlob(parts: { what: string; globs: string[] }[]): { what: string; globs: string[] }[] {
+  const seen = new Set<string>();
+  return parts.map((p) => {
+    const globs: string[] = [];
+    for (const g of p.globs) {
+      if (seen.has(g)) continue;
+      seen.add(g);
+      globs.push(g);
+    }
+    return { what: p.what, globs };
+  });
+}
+
+/**
  * The harness's config in a repo: the config folder (tests.yaml says what a project command runs and with what
  * environment, review.yaml these levels), Claude Code's project settings and CLAUDE.md. Locked (#798, in
  * LOCKED_CATEGORIES below): before, it was L3 only because the default review.yaml listed it, so a repo's review.yaml
@@ -350,7 +381,7 @@ const HARNESS_CONFIG_GLOBS =[`${BRAND.configDir}/**`, '.claude/**', 'CLAUDE.md']
  */
 export const SELF_MODIFICATION = 'self-modification';
 // check-table: never-shrink
-export const SELF_MODIFICATION_PARTS: { what: string; globs: string[] }[] = [
+export const SELF_MODIFICATION_PARTS: { what: string; globs: string[] }[] = onePartPerGlob([
   { what: 'the merge policy', globs: ['src/merge-policy*', 'src/coordinator/merge-flow*', 'src/pr-rules*'] },
   { what: 'the main watch', globs: ['src/main-watch*', 'src/github/main-watch-api*'] },
   { what: 'the push guard', globs: ['src/push-guard*', 'src/push-check*'] },
@@ -438,9 +469,23 @@ export const SELF_MODIFICATION_PARTS: { what: string; globs: string[] }[] = [
       'test/engine-guard-locks.test.ts',
       // The test that keeps each lock glob that matches no file yet paired with its lock (#885).
       'test/not-yet-files-locks.test.ts',
+      // The test that keeps the engine repo's merge process (docs/process.md) out of the planners' decisions index.
+      'test/plan-decisions.test.ts',
     ],
   },
   { what: 'the release procedure and the design rules', globs: ['docs/releasing.md', 'docs/design.md'] },
+  // How the engine repo's own PRs are merged and who reviews them (owner, 2026-10-21): a docs-only change was L0 and
+  // could merge itself, so a PR could drop its own second review. Kept out of the decisions index (src/plan-decisions.ts).
+  { what: "the engine repo's merge process", globs: ['docs/process.md'] },
+  // The planners' decision records (#920): planner and plan-review agents read each one as a recorded decision, and a
+  // plan may cite it. A docs-only record was L0 and merged itself, so a PR could put the merge process above, whole,
+  // in part or reworded, where planners read it as a decision; the index code can't recognise a copy. Read from the
+  // index's own lists (DECISION_FILES, DECISION_DIRS above), so the two can't drift. Only docs/design.md exists yet
+  // (NOT_YET_FILES in test/merge-policy.test.ts), and it stays named by the design rules' part above (onePartPerGlob).
+  // In the engine's repo only: a managed app's records keep their categories (engineSourceGlob).
+  { what: "the planners' decision records", globs: DECISION_RECORD_GLOBS },
+  // The code that builds that index: what it reads, and what it leaves out (docs/process.md, a record linked elsewhere).
+  { what: "the planners' decisions index", globs: ['src/plan-decisions.ts'] },
   // What the engine publicly claims its guards do and which gaps are open (#705), and how to report one: a docs-only
   // change was L0 and merged itself, so a PR could rewrite a claim with nothing holding it (#858).
   { what: 'the public security claims', globs: ['docs/guardrails.md', 'docs/security*.md', 'SECURITY.md'] },
@@ -448,7 +493,7 @@ export const SELF_MODIFICATION_PARTS: { what: string; globs: string[] }[] = [
   { what: 'the coordinator', globs: ['src/coordinator/**'] },
   // A study's definition (docs: the experiments design): its eval, editable paths and budget are what a job may touch.
   { what: 'the experiment studies', globs: [`${BRAND.configDir}/experiments.yaml`] },
-];
+]);
 
 // check-table: never-shrink
 export const LOCKED_CATEGORIES: Record<string, string[]> = {
@@ -483,8 +528,12 @@ const ENGINE_TREE = ['src/', 'scripts/', 'test/', 'docs/', 'deploy/'];
  */
 // check-table: never-grow
 const ENGINE_ROOT_FILES = ['SECURITY.md', 'Dockerfile*', 'dockerfile*', 'Containerfile*', 'deploy', 'compose.*', 'docker-compose.*'];
-/** Whether a locked glob names the engine's own source (so it holds only in the engine's repo). */
-export const engineSourceGlob = (glob: string): boolean => ENGINE_TREE.some((d) => glob.startsWith(d)) || ENGINE_ROOT_FILES.includes(glob);
+/**
+ * Whether a locked glob names the engine's own source (so it holds only in the engine's repo). The decision records'
+ * globs are the engine's too (#920): a managed app's own decisions file or folder keeps the categories its
+ * review.yaml gives it, as before. Matched exactly, so no other glob stands aside through them.
+ */
+export const engineSourceGlob = (glob: string): boolean => ENGINE_TREE.some((d) => glob.startsWith(d)) || ENGINE_ROOT_FILES.includes(glob) || DECISION_RECORD_GLOBS.includes(glob);
 
 /** The locked categories in this scope: all of them in the engine's repo; in a managed app's, those that hold in every repo. */
 export function lockedCategories(scope: LockScope | undefined): Record<string, string[]> {
