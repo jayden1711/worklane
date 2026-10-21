@@ -4,7 +4,7 @@
 // does fail at sudo (a machine set up before the record existed), the failure says what to run instead.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { spawn } from './script-child-process.js';
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';

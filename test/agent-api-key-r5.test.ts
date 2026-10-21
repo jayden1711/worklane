@@ -6,7 +6,7 @@
 //   (SIGSTOP) never holds add-project, and with it the machine-wide lock: root's timeout kills it.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { spawnSync } from './script-child-process.js';
 import { appendFileSync, existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';

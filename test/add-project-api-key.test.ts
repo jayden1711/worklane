@@ -6,7 +6,7 @@
 // Every setup script and host tool is a stand-in here (test/api-key-fixtures.ts): no sudo, no claude, no systemd.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { spawnSync } from './script-child-process.js';
 import { chmodSync, renameSync, symlinkSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { isInstalledKeyPath } from '../src/instance.js';

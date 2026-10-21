@@ -2,7 +2,7 @@
 // .github/workflows/ci-batch.yml): the pure decisions, then whole runs of the script against a fake GitHub.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn, spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from './script-child-process.js';
 import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';

@@ -1,7 +1,7 @@
 // dashboards.sh in a temporary root, for the #742 tests: its lib.sh sources the real one, then points the machine's
 // paths into the root and stands in for what needs root (users, ACLs, systemd, sudo). One instance, alpha, is ready
 // for it. Nothing here runs a real sudo, setfacl or systemctl.
-import { spawnSync } from 'node:child_process';
+import { spawnSync } from './script-child-process.js';
 import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';

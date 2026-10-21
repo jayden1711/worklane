@@ -5,7 +5,7 @@
 // scripts/ci/loopback-github.mjs into it; that stand-in is held to this machine below.)
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { spawnSync } from './script-child-process.js';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
 import { generateKeyPairSync } from 'node:crypto';

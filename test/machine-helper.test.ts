@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { machineTool, spawnSync } from './script-child-process.js';
 import { generateKeyPairSync } from 'node:crypto';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
@@ -128,7 +128,13 @@ const signerRefused = (k: string): string[][] => [
   ['set-update-channel', 'main'],
 ];
 
-const sudoers = (...users: string[]) => spawnSync('bash', ['-c', 'source "$1"; shift; machine_sudoers "$@"', '_', join(setup, 'lib.sh'), ...users], { encoding: 'utf8' });
+/**
+ * machine_sudoers on a sudo that reads patterns (1.9.10 or later). The version is stood in (#991): it was this machine's
+ * own `sudo -V`; sudoersWithSudo below gives others.
+ */
+const sudoers = (...users: string[]) => spawnSync('bash', ['-c', 'source "$1"; shift; sudo_version() { echo 1.9.15; }; machine_sudoers "$@"', '_', join(setup, 'lib.sh'), ...users], { encoding: 'utf8' });
+/** The machine's own visudo, on purpose (#991, machineTool): it only checks a rule file (-cf); where none, skipped. */
+const VISUDO = machineTool('visudo');
 
 /** The helper as root's sudoers rules name it (lib.sh), and the engine's, on a real machine. */
 const HELPER_AS_ROOT = onRealMachine(MACHINE_HELPER);
@@ -168,11 +174,11 @@ test('the sudoers rule lists exactly the 36 commands, no patterns but add-projec
   assert.match(r.stdout, /^wl-alpha, wl-beta ALL=\(root\) NOPASSWD: WORKLANE_MACHINE$/m);
   assert.doesNotMatch(r.stdout, /wl-dash/);
   for (const bad of [['wl-dash'], ['wl-alpha', 'wl-dash'], ['root'], ['wl-alpha ALL'], []]) assert.notEqual(sudoers(...bad).status, 0, JSON.stringify(bad));
-  const visudo = spawnSync('visudo', ['--version']).status === 0;
+  const visudo = spawnSync(VISUDO, ['--version']).status === 0;
   if (visudo) {
     const f = join(mkdtempSync(join(tmpdir(), 'sudoers-')), 'rule');
     writeFileSync(f, r.stdout);
-    assert.equal(spawnSync('visudo', ['-cf', f]).status, 0, 'visudo accepts it');
+    assert.equal(spawnSync(VISUDO, ['-cf', f]).status, 0, 'visudo accepts it');
   }
 });
 
@@ -511,10 +517,10 @@ test('the pattern rules (add-project, stage-update-signer, discard-update-signer
     assert.match(r.stdout, new RegExp(`^# Not here: add-project, stage-update-signer and discard-update-signer\\. This sudo \\(${(v ?? '').replace(/p\d+$/, '')}\\) is older than 1\\.9\\.10 and would read their patterns as literal text\\.$`, 'm'));
     // Every other rule is there as on a newer sudo.
     assert.deepEqual(commands(r.stdout), newer, `sudo ${v}: the rest unchanged`);
-    if (spawnSync('visudo', ['--version']).status === 0) {
+    if (spawnSync(VISUDO, ['--version']).status === 0) {
       const f = join(mkdtempSync(join(tmpdir(), 'sudoers-')), 'rule');
       writeFileSync(f, r.stdout);
-      assert.equal(spawnSync('visudo', ['-cf', f]).status, 0, `sudo ${v}: visudo accepts the rule without them`);
+      assert.equal(spawnSync(VISUDO, ['-cf', f]).status, 0, `sudo ${v}: visudo accepts the rule without them`);
     }
   }
   // machine-helper.sh says which it did, refuses (to stderr) to install them on an older sudo, and records it for the dashboard.

@@ -18,7 +18,7 @@ import { startDashboard } from '../src/dashboard.js';
 import { EventLog } from '../src/events/log.js';
 import { setDiscordToken } from '../src/instance.js';
 import { INTAKE_FILE, loadIntakeConfig } from '../src/intake/config.js';
-import { spawnSync } from 'node:child_process';
+import { spawnSync } from './script-child-process.js';
 import { discordChannelsCommand, listDiscordChannelRows, type ChannelRow } from '../src/intake/discord-channels.js';
 import { API } from '../src/intake/discord.js';
 import { applyIntake, botView, DiscordSetupError, discordSetupView, INVITE_PERMISSION_INTEGER, INVITE_PERMISSIONS, inviteUrl, lineDiff, listingRunner, discordListingStandIn, engineRunCli, ENGINE_CLI, listingEnv, planIntake, tokenState, type RunCli } from '../src/intake/discord-setup.js';

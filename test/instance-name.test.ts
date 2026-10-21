@@ -5,7 +5,7 @@
 // the names the scripts make are held to ENGINE_NAMES, which no two allowed names can map onto the same string.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { spawnSync } from './script-child-process.js';
 import { createRequire } from 'node:module';
 import { mkdtempSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';

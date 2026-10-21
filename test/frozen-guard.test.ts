@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync, spawnSync } from 'node:child_process';
+import { execFileSync, machineTool, spawnSync } from './script-child-process.js';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -83,18 +83,20 @@ test('instance.sh makes the instance root sticky for new instances', () => {
   assert.match(readFileSync(join(repoRoot, 'scripts', 'setup', 'instance.sh'), 'utf8'), /install -d -o "\$coord" -g "\$work" -m 3770 "\/srv\/worklane\/\$name"/);
 });
 
-// Separate users for real (CI runners with passwordless sudo): the agent's hook runs as another user.
+// Separate users for real (CI runners with passwordless sudo): the agent's hook runs as another user, through the
+// machine's own sudo on purpose (#991, machineTool); elsewhere its stand-in answers, and these skip.
 const other = 'nobody';
-const canSwitch = posix && spawnSync('sudo', ['-n', '-u', other, 'true']).status === 0;
+const SUDO = machineTool('sudo');
+const canSwitch = posix && spawnSync(SUDO, ['-n', '-u', other, 'true']).status === 0;
 const cli = join(repoRoot, 'dist', 'src', 'cli.js');
 
 // A disposable CI runner may be changed: there, let the other user reach the engine (traverse only, o+x, on the
 // directories above it; a runner's home is 0750). Never on a developer's machine.
 const disposableCi = process.platform === 'linux' && process.env.GITHUB_ACTIONS === 'true';
 function reachableBy(user: string, path: string): boolean {
-  const can = () => spawnSync('sudo', ['-n', '-u', user, 'test', '-r', path]).status === 0;
+  const can = () => spawnSync(SUDO, ['-n', '-u', user, 'test', '-r', path]).status === 0;
   if (can() || !disposableCi) return can();
-  for (let d = dirname(path); d !== dirname(d); d = dirname(d)) if ((statSync(d).mode & 0o001) === 0) execFileSync('sudo', ['-n', 'chmod', 'o+x', d]);
+  for (let d = dirname(path); d !== dirname(d); d = dirname(d)) if ((statSync(d).mode & 0o001) === 0) execFileSync(SUDO, ['-n', 'chmod', 'o+x', d]);
   return can();
 }
 
@@ -111,11 +113,11 @@ test('acceptance: with separate users, the agent user can read its task file (so
   writeFileSync(file, JSON.stringify({ id: 'issue-1', done_when: [{ repro: true }], frozen: ['test/repro.test.js'] }));
   // As the coordinator sets it up: owner us, group the agent's, 2750 and 0640 (chgrp needs root here only
   // because the test user isn't in that group; the coordinator is in the agents' group).
-  execFileSync('sudo', ['-n', 'chgrp', group, tasks, file]);
+  execFileSync(SUDO, ['-n', 'chgrp', group, tasks, file]);
   chmodSync(tasks, 0o2750);
   chmodSync(file, 0o640);
   const hookAs = (taskFile: string, path: string) =>
-    spawnSync('sudo', ['-n', '-u', other, 'env', `${AGENT}=1`, `${TASK}=${taskFile}`, `${BRAND.envPrefix}_STATE_DIR=${stateDir}`, `PATH=${process.env.PATH}`, process.execPath, cli, 'hook', 'pre-tool-use'], {
+    spawnSync(SUDO, ['-n', '-u', other, 'env', `${AGENT}=1`, `${TASK}=${taskFile}`, `${BRAND.envPrefix}_STATE_DIR=${stateDir}`, `PATH=${process.env.PATH}`, process.execPath, cli, 'hook', 'pre-tool-use'], {
       cwd: dir,
       input: JSON.stringify({ hook_event_name: 'PreToolUse', cwd: dir, tool_name: 'Edit', tool_input: { file_path: join(dir, path) } }),
       encoding: 'utf8',
@@ -124,7 +126,7 @@ test('acceptance: with separate users, the agent user can read its task file (so
   assert.equal(blocked?.permissionDecision, 'deny', 'the frozen test is guarded for the agent user');
   assert.doesNotMatch(blocked!.permissionDecisionReason, /can't be read/, 'because the file was read, not because it failed');
   assert.notEqual(decision(hookAs(file, 'src/price.js'))?.permissionDecision, 'deny');
-  assert.notEqual(spawnSync('sudo', ['-n', '-u', other, 'sh', '-c', `echo '{}' > "${file}"`]).status, 0, 'the agent user cannot rewrite it');
+  assert.notEqual(spawnSync(SUDO, ['-n', '-u', other, 'sh', '-c', `echo '{}' > "${file}"`]).status, 0, 'the agent user cannot rewrite it');
   // A task file the agent user can't read (wrong group) fails closed.
   const hidden = join(root, 'hidden.json');
   writeFileSync(hidden, readFileSync(file));
