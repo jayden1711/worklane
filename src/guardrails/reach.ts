@@ -2,7 +2,7 @@
 // way the file system will resolve it when the tool acts. A path that can't be resolved is null, and a caller refuses
 // it rather than judge it by its name alone.
 import { lstatSync, readlinkSync, realpathSync } from 'node:fs';
-import { basename, dirname, isAbsolute, join, parse, sep } from 'node:path';
+import { dirname, isAbsolute, join, parse, sep } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { PATH_MAX } from './access.js';
 import { ownFolderLink } from '../os/process-links.js';
@@ -57,27 +57,38 @@ export class Reach {
    */
   of(written: string): string | null {
     if (!isAbsolute(written)) return null;
-    let cur = parse(written).root;
-    const todo = partsOf(written.slice(cur.length));
+    // `head`: the existing part reached so far, with no link left in it; `tail`: the parts after it that aren't there.
+    let head = parse(written).root;
+    const tail: string[] = [];
+    const todo = partsOf(written.slice(head.length));
     let links = 0;
     while (todo.length) {
-      if (this.spent()) return null;
       const part = todo.pop()!;
       if (part === '.') continue;
-      if (part === '..') {
-        cur = dirname(cur);
+      // Past a part that isn't there, nothing is looked up (no link can be there): text only, charged to the clock.
+      if (tail.length) {
+        if (this.now() > this.deadline) return null;
+        if (part === '..') tail.pop();
+        else tail.push(part);
         continue;
       }
-      const next = cur.endsWith(sep) ? cur + part : cur + sep + part;
+      if (this.spent()) return null;
+      if (part === '..') {
+        head = dirname(head);
+        continue;
+      }
+      const next = head.endsWith(sep) ? head + part : head + sep + part;
       let link = false;
       try {
         link = lstatSync(next).isSymbolicLink();
       } catch (e) {
-        // Not there: a write creates it as written (or fails).
         if (!missing(e)) return null;
+        // Not there: a write creates it as written (or fails).
+        tail.push(part);
+        continue;
       }
       if (!link) {
-        cur = next;
+        head = next;
         continue;
       }
       if (++links > MAX_LINKS || ownFolderLink(next)) return null;
@@ -88,30 +99,11 @@ export class Reach {
         return null;
       }
       if (to.length > PATH_MAX) return null;
-      // An absolute one starts again from its root; a relative one from the folder it is in (cur).
-      if (isAbsolute(to)) cur = parse(to).root;
+      // An absolute one starts again from its root; a relative one from the folder it is in (head).
+      if (isAbsolute(to)) head = parse(to).root;
       todo.push(...partsOf(isAbsolute(to) ? to.slice(parse(to).root.length) : to));
     }
-    return this.spelled(cur);
-  }
-
-  /** `p` with its existing part as the file system spells it, the rest as it is; null if that can't be read. */
-  private spelled(p: string): string | null {
-    let head = p;
-    const tail: string[] = [];
-    for (;;) {
-      if (this.spent()) return null;
-      try {
-        lstatSync(head);
-        break;
-      } catch (e) {
-        if (!missing(e)) return null;
-      }
-      const up = dirname(head);
-      if (up === head) return null;
-      tail.unshift(basename(head));
-      head = up;
-    }
+    // The existing part as the file system spells it (its case, on a system that ignores case), then the rest.
     try {
       const real = realpathSync.native(head);
       return tail.length ? join(real, ...tail) : real;

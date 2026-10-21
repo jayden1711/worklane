@@ -34,6 +34,12 @@ test('reach: too many links, or a spent budget, can not be told', () => {
   const late = new Reach(() => t, 10);
   t = 11;
   assert.equal(late.of(join(d, 'a/b')), null, 'past the time budget');
-  const deep = new Reach();
-  assert.equal(deep.of(`/${'x/'.repeat(STEP_LIMIT + 1)}`), null, 'past the step budget');
+  assert.equal(new Reach().of(`${d}/a/${'b/../'.repeat(STEP_LIMIT)}`), null, 'past the step budget');
+});
+
+test('reach: parts past one that is not there are taken as text, however many', () => {
+  const d = dir();
+  const many = `${d}/a/${'x/'.repeat(STEP_LIMIT + 1)}x`;
+  assert.equal(new Reach().of(many), many);
+  assert.equal(new Reach().of(`${d}/gone/../a/b`), join(d, 'a/b'));
 });
