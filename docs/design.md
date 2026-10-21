@@ -708,3 +708,33 @@ What exists, and where it deviates from the plan above:
 5. **Production DB:** agents get no production DB access until the project owner creates a read-only role (§12.1).
 6. **Deploy CLIs:** the hook resolves the linked environment. Project release scripts should target production explicitly, so a checkout can stay linked to staging.
 7. **Code of Conduct contact** is set. Security reports use GitHub private vulnerability reporting.
+
+## 20. How the engine repo itself is merged (owner decision, 2026-10-21)
+
+The sections above say how the harness merges a project's PRs. This one is the process for this repo's own PRs, which builders write, reviewers check and an orchestrator merges.
+
+- **The orchestrator merges every PR** once it has:
+  - passed an independent final check: a separate reviewer's PASS on its current head;
+  - passed the combined check: the batch merged together on a do-not-merge draft PR, with CI green on that tree;
+  - green required CI.
+- **The critical set needs more.** A PR in it also needs a second, independent adversarial reviewer to pass it. The critical set is:
+  - merge policy;
+  - review levels;
+  - locks and the tool guard;
+  - sudoers and root helpers;
+  - setup and machine scripts;
+  - release signing and the updater;
+  - CI workflows.
+- **The orchestrator runs the batch-merge procedure itself:**
+  - strict up-to-date is turned off for the batch, then back on, on any exit;
+  - each merge is pinned to its tested head;
+  - after every step, main's tree is checked against the tested combined tree;
+  - no admin bypass, no force.
+- **Reviewers and builders never merge.**
+- **The owner is brought only:**
+  - release signing;
+  - turning `auto_merge` on for a project;
+  - direction changes;
+  - steps that need the owner's hands or GitHub admin rights.
+- **A weekly summary of critical merges goes to the owner.**
+- **The `[PROTECTED: owner merges]` title marker does not mean the owner merges the PR.** It means the PR is in the critical set and needs the second adversarial review before the orchestrator merges it.
