@@ -22,8 +22,8 @@ import { instanceNameOk } from './instance-name.js';
 import { isRoot, processIdentity, UNKNOWN_IDENTITY, userHomeDir, userPresence, userUid } from './os/index.js';
 import { readInOwnedDir, replaceInOwnedDir } from './os/root-file.js';
 import { aliasInstance, armedSwitches, clearKillSwitches, ensureSpare, instanceId, killAutoMerge, recordDir, retakeId, sharedWith, sweepOrphanIds } from './policy-kill.js';
-import { decodePolicyValue, HELPER_ONLY, ownCommand, POLICY_ROOT_DIR, POLICY_SET_KEYS, policyRecord, type PolicyRecord, readPolicyChecked, recordText, sha256 } from './policy-gate.js';
-import { type Limits, LIMITS_PATH, loadLimits, settingsProblems } from './settings.js';
+import { decodePolicyValue, HELPER_ONLY, ownCommand, POLICY_ROOT_DIR, POLICY_SET_KEYS, policyRecord, type PolicyRecord, policySetCommand, readPolicyChecked, recordText, sha256, tightenProblem } from './policy-gate.js';
+import { intakeCapsBeside, type Limits, LIMITS_PATH, loadLimits, rootInEffect, settingsProblems } from './settings.js';
 
 const FILE = 'policy.yaml';
 const LOCK_WAIT_MS = 10_000;
@@ -287,6 +287,13 @@ export function setPolicy(instance: string, key: string, arg: string, by: string
     if (rec.file !== file || rec.sha256 !== sha256(text)) throw new Error(`${file} isn't what root last wrote there (an earlier or other file put back in its place), so nothing is changed: an admin checks it, then ${ownCommand(instance, '--retake')}`);
     const doc = parseDocument(text);
     const from = getIn(doc.toJS(), pathOf(key)) ?? null;
+    // The coordinator's route (the helper, for a dashboard) only tightens, every key (the owner's decision of
+    // 2026-10-19; round 11): the value in effect now is the ceiling. Loosening is an admin's, here at a root shell.
+    if (by && /^wl-/.test(by)) {
+      const intake = key.startsWith('settings.intake.') ? intakeCapsBeside(dir, coordUid, rootUid) : null;
+      const past = tightenProblem(key, value, rootInEffect(key, parsePolicy(text, file), intake), policySetCommand(instance, key, arg));
+      if (past) throw new Error(`refused: ${past}`);
+    }
     doc.setIn(pathOf(key), value);
     const out = doc.toString();
     const next = parsePolicy(out, file);

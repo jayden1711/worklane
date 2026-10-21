@@ -24,6 +24,7 @@
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { existsSync, readFileSync, rmSync } from 'node:fs';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { hostname } from 'node:os';
 import { join } from 'node:path';
 import { BRAND } from './brand.js';
@@ -223,7 +224,7 @@ export async function startSetupHub(o: SetupHubOptions): Promise<{ server: Serve
 <pre>sudo cat ${esc(tok.file)}</pre>
 <form method="post" action="/setup/unlock"><label for="token">Setup token (works once)</label><input id="token" name="token" type="password" autocomplete="off" required>
 <button type="submit">Continue</button></form>${note ? `<p class="bad">${esc(note)}</p>` : ''}</div>
-${loopback ? `<p class="mut">This machine has no https origin yet, so this page answers on the machine only (or through an ssh tunnel to it), and the sign-in App waits for screen ${HTTPS_SCREEN}, Tailscale and HTTPS: the page shows how once you are in.</p>` : ''}
+${loopback ? `<p class="mut">This machine has no https origin yet, so this page answers on the machine only (or through an ssh tunnel to it), and the sign-in App waits for an https origin: your own (--public-url), or screen ${HTTPS_SCREEN}, Tailscale and HTTPS. The page shows both once you are in.</p>` : ''}
 <p class="mut">The token goes only into this form: never into a link. By hand instead: make the App on GitHub, then <code>credentials.sh dashboard-signin</code> and <code>dashboards.sh --client-id &lt;id&gt; --public-url ${esc(origin ?? 'https://<machine>.<tailnet>.ts.net')} &lt;name&gt;...</code></p>`,
     );
 
@@ -241,19 +242,25 @@ ${loopback ? `<p class="mut">This machine has no https origin yet, so this page 
 
   // INVARIANT: loopback mode never starts GitHub's manifest flow: it has no origin for GitHub to send the browser back to.
   const ts = o.tailscaleScript ?? 'scripts/setup/tailscale.sh';
+  const rerun = o.rerunCommand ?? 'sudo bash scripts/bootstrap.sh --hardened <name> <owner/repo>';
+  // WHY (#739): the origin is a choice, not a Tailscale prerequisite: the same install command, given an origin of yours.
+  const rerunOwn = rerun.includes(' --hardened ') ? rerun.replace(' --hardened ', ' --hardened --public-url https://<your host> ') : `${rerun} --public-url https://<your host>`;
   const httpsFirstPage = (res: ServerResponse, status = 200) =>
     send(
       res,
       status,
       'Connect GitHub: https first',
       `<p>People sign in to the dashboard with GitHub, through a GitHub App of its own. GitHub makes that App in a few clicks, then sends your browser back to the hub at its https address. This machine has none yet: this page answers only here, through your ssh tunnel.</p>
-<div class="card" data-testid="signin-app-needs-https" data-next-screen="${HTTPS_SCREEN}"><p><strong>Screen ${HTTPS_SCREEN} first: Tailscale and HTTPS.</strong> It gives this machine its https address on your tailnet (never the public internet). With no project here yet, its steps run as root on this machine, one at a time:</p>
+<div class="card" data-testid="signin-app-needs-https" data-next-screen="${HTTPS_SCREEN}"><p><strong>An https address first: one of your own, or Tailscale (screen ${HTTPS_SCREEN}).</strong> GitHub sends your browser back to it, and people reach the dashboard there. Pick one.</p>
+<div data-testid="https-choice-own"><p><strong>An origin of your own.</strong> A name you control whose https server (your reverse proxy, with its certificate) forwards to http://127.0.0.1:${(server.address() as AddressInfo | null)?.port ?? o.port ?? 0}/ on this machine, and to nothing else. Then run the install command again with it; it restarts this page at that address with a new setup token, and the App step goes on there:</p>
+<pre>${esc(rerunOwn)}</pre></div>
+<div data-testid="https-choice-tailscale"><p><strong>Or Tailscale: screen ${HTTPS_SCREEN}, Tailscale and HTTPS.</strong> It gives this machine its https address on your tailnet (never the public internet). With no project here yet, its steps run as root on this machine, one at a time:</p>
 <pre>sudo bash ${esc(ts)} install
 sudo bash ${esc(ts)} up
 sudo bash ${esc(ts)} serve</pre>
 <p class="mut">install: Tailscale's signed package. up: prints a login link; open it and approve this machine. serve: https on this machine's tailnet name to the hub, and to nothing else. Turn on MagicDNS and HTTPS certificates in <a href="https://login.tailscale.com/admin/dns" rel="noreferrer">Tailscale's DNS settings</a> before serve. The same steps are the Machine page's Tailscale and HTTPS panel once a project is here.</p>
 <p>Then run the install command again. It finds this machine's tailnet name, restarts this page at that https address with a new setup token, and the App step goes on there:</p>
-<pre>${esc(o.rerunCommand ?? 'sudo bash scripts/bootstrap.sh --hardened <name> <owner/repo>')}</pre></div>`,
+<pre>${esc(rerun)}</pre></div></div>`,
     );
 
   const finish = (why: string) => {

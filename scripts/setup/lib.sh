@@ -126,11 +126,14 @@ refuse_if_open() {
   exit 1
 }
 
-# The sudoers rule for the machine helper: each coordinator user named may run exactly the 34
+# The sudoers rule for the machine helper: each coordinator user named may run exactly the 36
 # allowed commands (set-slots 1..16, set-updates on, set-updates off, set-test-slots 1..8, claude-account status,
-# claude-account switch, install-updater, set-update-channel release, tailscale install, tailscale up, tailscale serve,
-# tailscale public-url) as root, and nothing else.
+# install-updater, set-update-channel release, tailscale install, tailscale up, tailscale serve, tailscale public-url,
+# and set-policy's three tightenings below) as root, and nothing else.
 # Listed one by one, no wildcards or patterns. Never for the dashboard viewer (wl-dash).
+# No other claude-account command (#758): switch, profile-add and login took a Claude credential (#711, #749), and
+# use, remove and failover managed the account profiles the engine no longer has (#736). The helper refuses each, and
+# no rule names one, so an older rule that did is gone on the next machine-helper.sh run (install_sudoers replaces it).
 #
 # And `add-project <name> <owner/repo>`, the one command whose arguments can't be listed: a fixed pattern of exactly
 # two arguments of those shapes (sudo's anchored regular expression, sudo 1.9.10 or later; an older sudo matches it
@@ -141,30 +144,21 @@ refuse_if_open() {
 # after the type), which the helper checks again (it decodes the key). Staging writes only the helper's pending list:
 # no rule here lets a coordinator write the updater's allowed signers file, or follow main instead of releases.
 #
-# And the agents' Claude account profiles (issue #464): `claude-account profile-add|remove <profile>` and
-# `claude-account use <profile>`, the relayed sign-in `claude-account login <profile>`, and `claude-account failover
-# <order|off> back|stay`: six anchored patterns, each one profile's name (lowercase letters, digits and dashes), or
-# an order (names joined by +: never a comma, which sudoers reads as the end of a command), and nothing else. No
-# pattern takes an instance: each step is for the asking coordinator's own instance,
-# which the helper takes from SUDO_USER, so a coordinator can never name another instance, or every instance.
-# Those, the two signer rules and add-project are written only when this machine's sudo reads them as patterns (sudo_regex_ok): an
+# The plugin steps, set-policy, the two signer rules and add-project are written only when this machine's sudo reads them as patterns (sudo_regex_ok): an
 # older sudo would take a pattern as literal text, so they are left out there, the rule says so in a comment, and
 # machine-helper.sh records it in HELPER_RULES for the dashboard (which then shows the root command instead).
 HELPER_RULES=/etc/worklane/helper-rules.json
 MACHINE_HELPER=/usr/local/libexec/worklane-machine
 MACHINE_SUDOERS=/etc/sudoers.d/worklane-machine   # what install_sudoers worklane-machine writes
 ADD_PROJECT_SUDOERS_ARGS='^add-project [a-z][a-z0-9-]* [A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9_.-]+$'
+# One key of the asking coordinator's root policy.yaml (issue #726): a key and a value of these characters; the helper
+# takes only its fixed keys, each in its exact shape, and never a loosening (src/policy-gate.ts). No instance.
+POLICY_SUDOERS_ARGS='^set-policy [a-z][a-z_.]* [a-z0-9.+-]+$'
+# Its three tightenings (the engine's HELPER_ONLY: test/policy-edit.test.ts holds them equal), each listed whole, so
+# every sudo, however old, matches them exactly, as it does set-updates off: turning auto_merge off, land_mode back to
+# pr and main_watch back to auto work from a dashboard on any sudo (#726).
+POLICY_TIGHTEN_ARGS=('set-policy auto_merge off' 'set-policy land_mode pr' 'set-policy main_watch auto')
 SIGNER_SUDOERS_ARGS='[A-Za-z0-9][A-Za-z0-9._+-]*@[A-Za-z0-9][A-Za-z0-9.-]* ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI[A-Za-z0-9+/]{43}$'
-# Whether this machine's sudo is 1.9.10 or later, the first that reads a command's arguments written ^...$ as a regular
-# expression (from `sudo -V`'s first line, "Sudo version X.Y.Z[pN]"). Unknown is no.
-PROFILE_SUDOERS_ARGS=(
-  '^claude-account profile-add [a-z][a-z0-9-]*$'
-  '^claude-account remove [a-z][a-z0-9-]*$'
-  '^claude-account use [a-z][a-z0-9-]*$'
-  '^claude-account login [a-z][a-z0-9-]*$'
-  '^claude-account failover [a-z][a-z0-9+-]* back$'
-  '^claude-account failover [a-z][a-z0-9+-]* stay$'
-)
 # The plugin steps (src/plugins/, plugins.sh): an id, and for a fetch an https URL with a commit (and a subdirectory),
 # for a stage a digest and roles. sudoers needs ':' escaped, so the patterns say '.' where the helper, which checks every
 # argument exactly again, requires 'https:' and 'sha256:'. No instance: the helper takes the asking coordinator's from SUDO_USER.
@@ -182,6 +176,8 @@ PLUGIN_SUDOERS_ARGS=(
   '^mcp-snapshot [a-z0-9][a-z0-9-]*$'
   '^mcp-stage [a-z0-9][a-z0-9-]* sha256.[0-9a-f]{64} [a-z][a-z0-9+-]* [a-z0-9*.+-]+ [A-Za-z0-9_+]+$'
 )
+# Whether this machine's sudo is 1.9.10 or later, the first that reads a command's arguments written ^...$ as a regular
+# expression (from `sudo -V`'s first line, "Sudo version X.Y.Z[pN]"). Unknown is no.
 SUDO_REGEX_MIN=1.9.10
 sudo_version() { sudo -V 2>/dev/null | sed -n 's/^Sudo version \([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\).*/\1/p' | head -n 1; }
 sudo_regex_ok() {
@@ -201,23 +197,23 @@ machine_sudoers() {
   for n in $(seq 1 16); do cmds+=("$MACHINE_HELPER set-slots $n"); done
   cmds+=("$MACHINE_HELPER set-updates on" "$MACHINE_HELPER set-updates off")
   for n in $(seq 1 8); do cmds+=("$MACHINE_HELPER set-test-slots $n"); done
-  cmds+=("$MACHINE_HELPER claude-account status" "$MACHINE_HELPER claude-account switch")
+  cmds+=("$MACHINE_HELPER claude-account status")
   cmds+=("$MACHINE_HELPER install-updater" "$MACHINE_HELPER set-update-channel release")
   # Tailscale (tailscale.sh): four fixed commands. sudo matches a listed command's arguments exactly, so none takes an
   # auth key, a flag, a URL or a port.
   cmds+=("$MACHINE_HELPER tailscale install" "$MACHINE_HELPER tailscale up" "$MACHINE_HELPER tailscale serve" "$MACHINE_HELPER tailscale public-url")
+  for n in "${POLICY_TIGHTEN_ARGS[@]}"; do cmds+=("$MACHINE_HELPER $n"); done
   if sudo_regex_ok; then
     cmds+=("$MACHINE_HELPER ^stage-update-signer $SIGNER_SUDOERS_ARGS" "$MACHINE_HELPER ^discard-update-signer $SIGNER_SUDOERS_ARGS")
-    for n in "${PROFILE_SUDOERS_ARGS[@]}"; do cmds+=("$MACHINE_HELPER $n"); done
     for n in "${PLUGIN_SUDOERS_ARGS[@]}"; do cmds+=("$MACHINE_HELPER $n"); done
-    cmds+=("$MACHINE_HELPER $ADD_PROJECT_SUDOERS_ARGS")
+    cmds+=("$MACHINE_HELPER $POLICY_SUDOERS_ARGS" "$MACHINE_HELPER $ADD_PROJECT_SUDOERS_ARGS")
   else
     signer_rules=0
   fi
-  printf '# Coordinators may change the machine slot caps and the update switch, switch the agents'"'"' Claude account, put the machine on Tailscale, add a project, and set the engine updater up (install it, follow releases, stage a release signer for an admin to confirm), through one validating helper.\n'
+  printf '# Coordinators may change the machine slot caps and the update switch, refresh the agents'"'"' Claude account status, put the machine on Tailscale, add a project, and set the engine updater up (install it, follow releases, stage a release signer for an admin to confirm), through one validating helper.\n'
   [ "$signer_rules" = 1 ] || printf '# Not here: add-project, stage-update-signer and discard-update-signer. This sudo (%s) is older than %s and would read their patterns as literal text.\n' "$(sudo_version || true)" "$SUDO_REGEX_MIN"
-  [ "$signer_rules" = 1 ] || printf '# Not here either, for the same reason: the claude-account profile commands (profile-add, use, remove, login, failover).\n'
   [ "$signer_rules" = 1 ] || printf '# Nor the plugin steps (plugin-fetch, plugin-stage, plugin-withdraw, plugin-remove, mcp-fetch, mcp-preview, mcp-snapshot, mcp-stage): plugins.sh at a root shell instead.\n'
+  [ "$signer_rules" = 1 ] || printf '# Nor set-policy: a root policy.yaml changes at a root shell instead (worklane policy set), but for its three tightenings, listed whole (auto_merge off, land_mode pr, main_watch auto).\n'
   printf 'Cmnd_Alias WORKLANE_MACHINE = %s' "${cmds[0]}"
   for n in "${cmds[@]:1}"; do printf ', \\\n    %s' "$n"; done
   local users="$1"; shift

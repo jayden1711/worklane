@@ -65,6 +65,18 @@ function answerAsk(log: EventLog, r: MachineRequest, answer: 'ran' | 'failed', d
   }
 }
 
+/** A policy change root's helper made: settings.changed, from its last line (`<cli> policy set` prints {key, from, to}). */
+function policyChanged(d: MachineRequestDeps, r: MachineRequest, output: string) {
+  try {
+    const c = JSON.parse(output.trim().split('\n').pop() ?? '') as { key?: unknown; from?: unknown; to?: unknown };
+    if (typeof c.key !== 'string') return;
+    const key = c.key.startsWith('settings.') ? c.key.slice('settings.'.length) : `policy.${c.key}`;
+    d.log.append('settings.changed', { key, from: c.from ?? null, to: c.to ?? null, by: r.by, at: new Date((d.now ?? Date.now)()).toISOString() }, r.by, 'human');
+  } catch {
+    // no change line: machine.finished holds the helper's output
+  }
+}
+
 /** Run every pending machine request in this instance's log, once each. Returns how many ran. */
 export function runMachineRequests(d: MachineRequestDeps): number {
   const now = d.now ?? Date.now;
@@ -83,7 +95,8 @@ export function runMachineRequests(d: MachineRequestDeps): number {
     // Checked again here, whatever the dashboard checked: a request written any other way can't widen what runs.
     // Q13: a plugin step (via the Plugins page) is the instance owner's to ask for, and the dashboard checked that role;
     // it is for this instance alone and approves nothing. Every other machine change still needs a machine owner.
-    const instanceStep = r.via === 'plugins' && (PLUGIN_STEPS as readonly string[]).includes(r.args[0] ?? '');
+    // A change to this instance's root policy.yaml (#726) is its owner's to ask for too, and the helper refuses loosening.
+    const instanceStep = (r.via === 'plugins' && (PLUGIN_STEPS as readonly string[]).includes(r.args[0] ?? '')) || (r.via === 'policy' && r.args[0] === 'set-policy');
     const why = (instanceStep ? null : requesterRefusal(r, d.ownersFile)) ?? machineRefusal(r.args);
     if (why) {
       d.log.append('machine.finished', { id: r.id, outcome: 'refused', detail: why.slice(0, 1000) }, d.instance, 'coordinator');
@@ -101,6 +114,7 @@ export function runMachineRequests(d: MachineRequestDeps): number {
     const out = c.rule.run(r.args.slice(1), d.exec);
     const detail = (out.ok ? out.output : out.error).slice(0, 1000);
     d.log.append('machine.finished', { id: r.id, outcome: out.ok ? 'done' : 'failed', detail }, d.instance, 'coordinator');
+    if (out.ok && r.args[0] === 'set-policy') policyChanged(d, r, out.output);
     answerAsk(d.log, r, out.ok ? 'ran' : 'failed', detail);
     ran++;
   }

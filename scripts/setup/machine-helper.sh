@@ -10,10 +10,9 @@
 #     exactly `set-slots <1..16>`, `set-updates on|off` and `set-test-slots <1..8>`, writes atomically, and logs each
 #     change to /var/lib/worklane/machine-changes.jsonl and the journal. And `add-project <name> <owner/repo>`,
 #     which runs the installed engine's add-project.sh as root with exactly those (checked) arguments.
-#     And `claude-account status` (claude-account.sh status), and the account profiles (issue #464): `claude-account
-#     remove|use <profile>`, each its own unit, for the asking coordinator's instance alone. Nothing through the helper
-#     takes a Claude credential (issue #711): the sudoers rule below still lists `claude-account switch`, `profile-add`
-#     and `login` (lib.sh's machine_sudoers), and the helper refuses each of them, as claude-account.sh does.
+#     And `claude-account status` (claude-account.sh status), its own unit. No other claude-account command: nothing
+#     through the helper takes a Claude credential (issue #711) or manages account profiles (#736). The helper refuses
+#     switch, profile-add, login, use, remove and failover, and the sudoers rule below lists none of them (#758).
 #     And the engine updater's setup: `install-updater` (the installed engine's updates.sh, no arguments),
 #     `set-update-channel release` (updates.json's channel, nothing else; following main is updates.sh --channel main,
 #     at a root shell) and `stage-update-signer <principal> ssh-ed25519 <public key>`, which records a release signer
@@ -27,9 +26,14 @@
 #     in the helper adds or changes an approved plugin: an admin confirms a staged one with plugins.sh confirm. And the MCP
 #     server steps: `mcp-fetch <id> <npm package> <x.y.z>`, `mcp-preview <id> <plugin> <server>`, `mcp-snapshot <id>` and
 #     `mcp-stage <id> sha256:<hex> <role+role> <host+host|none> <SECRET+SECRET|none>`, confirmed the same way.
-#   - Lets each coordinator user wl-<name> run exactly those 34 commands as root (sudoers,
-#     listed one by one), and add-project, stage-update-signer, discard-update-signer and the claude-account profile commands with arguments of their
-#     fixed shapes (a pattern each; sudo 1.9.10 or later). The dashboard viewer wl-dash gets nothing.
+#     And `set-policy <key> <value>` (issue #726): one key of the asking coordinator's own root policy.yaml, through the
+#     installed engine as root; never sandbox or allow_same_user, and land_mode, main_watch and auto_merge only toward
+#     pr, auto and off.
+#   - Lets each coordinator user wl-<name> run exactly those 36 commands as root (sudoers,
+#     listed one by one, set-policy's three tightenings among them, on every sudo), and add-project, set-policy, stage-update-signer, discard-update-signer and the plugin steps with arguments of their
+#     fixed shapes (a pattern each; sudo 1.9.10 or later). The dashboard viewer wl-dash gets nothing. The rule is
+#     written whole each run, so a rule an older engine installed (with claude-account switch, profile-add, login, use,
+#     remove and failover) is replaced, not added to.
 #   - Makes /etc/worklane/slots.json root:root 0644: until now the agent-slots group could
 #     write any content to it; from now on the cap changes only through the helper.
 # Re-run it with the full list after adding an instance.
@@ -91,14 +95,14 @@ chown root:root /etc/worklane/slots.json
 chmod 0644 /etc/worklane/slots.json
 cat /etc/worklane/slots.json
 
-say "sudoers: ${users[*]} may run exactly the helper's 34 commands, add-project <name> <owner/repo>, stage-update-signer or discard-update-signer <principal> ssh-ed25519 <public key>, and claude-account profile-add|remove|use <profile> (its own instance only)"
+say "sudoers: ${users[*]} may run exactly the helper's 36 commands (claude-account status, and set-policy auto_merge off, land_mode pr and main_watch auto among them), add-project <name> <owner/repo>, stage-update-signer or discard-update-signer <principal> ssh-ed25519 <public key>, the plugin steps and set-policy <key> <value> (its own instance only)"
 install_sudoers worklane-machine "$(machine_sudoers "${users[@]}")"
 if sudo_regex_ok; then
-  echo "sudo $(sudo_version): $SUDO_REGEX_MIN or later, so the add-project, stage-update-signer, discard-update-signer and claude-account profile rules are installed"
+  echo "sudo $(sudo_version): $SUDO_REGEX_MIN or later, so the add-project, stage-update-signer, discard-update-signer, plugin and set-policy rules are installed"
   left_out='[]'
 else
-  echo "REFUSED: the add-project, stage-update-signer, discard-update-signer and claude-account profile rules are NOT installed. This machine's sudo ($(sudo_version || echo unknown)) is older than $SUDO_REGEX_MIN, which would read their argument patterns as literal text. Every other rule is installed. The dashboard shows the root commands instead: add a project at a root shell with add-project.sh <name> <owner/repo>, and a release signer with updates.sh --signer." >&2
-  left_out='["add-project","stage-update-signer","discard-update-signer","claude-account-profiles","plugins"]'
+  echo "REFUSED: the add-project, stage-update-signer, discard-update-signer, plugin and set-policy rules are NOT installed. This machine's sudo ($(sudo_version || echo unknown)) is older than $SUDO_REGEX_MIN, which would read their argument patterns as literal text. Every other rule is installed. The dashboard shows the root commands instead: add a project at a root shell with add-project.sh <name> <owner/repo>, and a release signer with updates.sh --signer." >&2
+  left_out='["add-project","stage-update-signer","discard-update-signer","plugins","set-policy"]'
 fi
 # For the dashboard (0644, written whole): which of the helper's commands this machine's sudo rule leaves out, so a
 # page shows the root command for them instead of a button that would only fail.
@@ -113,8 +117,16 @@ for u in "${users[@]}"; do
   if sudo -n -l -U "$u" "$MACHINE_HELPER" set-slots 17 >/dev/null 2>&1; then echo "FAIL: $u may run set-slots 17" >&2; exit 1; fi
   sudo -n -l -U "$u" "$MACHINE_HELPER" set-test-slots 2 >/dev/null || { echo "FAIL: $u can't run set-test-slots 2" >&2; exit 1; }
   if sudo -n -l -U "$u" "$MACHINE_HELPER" set-test-slots 9 >/dev/null 2>&1; then echo "FAIL: $u may run set-test-slots 9" >&2; exit 1; fi
-  sudo -n -l -U "$u" "$MACHINE_HELPER" claude-account switch >/dev/null || { echo "FAIL: $u can't run claude-account switch" >&2; exit 1; }
-  if sudo -n -l -U "$u" "$MACHINE_HELPER" claude-account switch --token-from x >/dev/null 2>&1; then echo "FAIL: $u may pass claude-account switch its own arguments" >&2; exit 1; fi
+  # The one claude-account command is status (#758): on every sudo, no rule lets a coordinator switch the account,
+  # add, use or remove a profile, relay a sign-in or set failover, with or without arguments.
+  sudo -n -l -U "$u" "$MACHINE_HELPER" claude-account status >/dev/null || { echo "FAIL: $u can't run claude-account status" >&2; exit 1; }
+  # The older rule's own cases are here too: what it let a coordinator run, and what it never did.
+  for bad in "switch" "switch --token-from x" "switch --json" "profile-add work" "remove work" "use work" "use default" "login work" "failover work+default back" "failover off stay" \
+    "profile-add" "profile-add Work" "profile-add work x" "profile-add work --token-from x" "remove work x" "use" "use work a b" "use ../x" "use work --for x" "use work;id" "use work alpha" "use default alpha" "use work all" "profile-add work alpha" "confirm-profile work" "use work --token-from x" \
+    "login work alpha" "login work --for x" "login" "login Work" "failover work+default back ci" "failover off stay alpha" "failover work,default back" "failover work+Home back" "failover work maybe" "failover work+default back --for x" "status x" "status --json" "uninstall"; do
+    # shellcheck disable=SC2086 # each case is its words
+    if sudo -n -l -U "$u" "$MACHINE_HELPER" claude-account $bad >/dev/null 2>&1; then echo "FAIL: $u may run claude-account $bad" >&2; exit 1; fi
+  done
   for ok in install up serve public-url; do
     sudo -n -l -U "$u" "$MACHINE_HELPER" tailscale "$ok" >/dev/null || { echo "FAIL: $u can't run tailscale $ok" >&2; exit 1; }
   done
@@ -142,16 +154,6 @@ for u in "${users[@]}"; do
     echo "FAIL: sudo $(sudo_version) should match the stage-update-signer pattern, and $u can't run it" >&2; exit 1
   fi
   if sudo_regex_ok; then
-    for ok in "profile-add work" "remove work" "use work" "use default" "login work" "failover work+default back" "failover off stay"; do
-      # shellcheck disable=SC2086 # each case is its words
-      sudo -n -l -U "$u" "$MACHINE_HELPER" claude-account $ok >/dev/null 2>&1 || { echo "FAIL: sudo $(sudo_version) should match the claude-account $ok pattern, and $u can't run it" >&2; exit 1; }
-    done
-    for bad in "profile-add" "profile-add Work" "profile-add work x" "profile-add work --token-from x" "remove work x" "use" "use work a b" "use ../x" "use work --for x" "use work;id" "use work alpha" "use default alpha" "use work all" "profile-add work alpha" "confirm-profile work" "use work --token-from x" "login work alpha" "login work --for x" "login" "login Work" "failover work+default back ci" "failover off stay alpha" "failover work,default back" "failover work+Home back" "failover work maybe" "failover work+default back --for x"; do
-      # shellcheck disable=SC2086 # each case is its words
-      if sudo -n -l -U "$u" "$MACHINE_HELPER" claude-account $bad >/dev/null 2>&1; then echo "FAIL: $u may run claude-account $bad" >&2; exit 1; fi
-    done
-  fi
-  if sudo_regex_ok; then
     sha="$(printf '0%.0s' $(seq 1 40))" dig="sha256:$(printf 'a%.0s' $(seq 1 64))"
     for ok in "plugin-fetch kit https://example.com/o/kit.git $sha" "plugin-fetch kit https://example.com/o/mono $sha plugins/kit" "plugin-stage kit $dig builder" "plugin-stage kit $dig builder+reviewer" "plugin-withdraw kit" "plugin-remove kit" "mcp-fetch notes notes-server 1.2.3" "mcp-fetch notes @scope/notes 1.2.3" "mcp-fetch notes @scope/notes 1.2.3 registry.npmjs.org" "mcp-preview kit-notes kit notes" "mcp-snapshot kit-notes" "mcp-stage kit-notes $dig builder api.example.com NOTES_TOKEN" "mcp-stage kit-notes $dig builder none none"; do
       # shellcheck disable=SC2086 # each case is its words
@@ -162,6 +164,29 @@ for u in "${users[@]}"; do
       "mcp-fetch notes notes-server latest" "mcp-fetch notes notes-server 1.2.3 x" "mcp-preview kit-notes kit notes alpha" "mcp-snapshot kit-notes alpha" "mcp-stage kit-notes $dig builder api.example.com" "mcp-stage kit-notes $dig builder x;id none" "mcp-confirm kit-notes $dig"; do
       # shellcheck disable=SC2086 # each case is its words
       if sudo -n -l -U "$u" "$MACHINE_HELPER" $bad >/dev/null 2>&1; then echo "FAIL: $u may run $bad" >&2; exit 1; fi
+    done
+  fi
+  if sudo_regex_ok; then
+    sudo -n -l -U "$u" "$MACHINE_HELPER" set-policy auto_merge on >/dev/null 2>&1 || { echo "FAIL: sudo $(sudo_version) should match the set-policy pattern, and $u can't run it" >&2; exit 1; }
+    for bad in "set-policy auto_merge" "set-policy auto_merge on x" "set-policy Auto on" "set-policy auto_merge ON" "set-policy auto_merge on;id"; do
+      # shellcheck disable=SC2086 # each case is its words
+      if sudo -n -l -U "$u" "$MACHINE_HELPER" $bad >/dev/null 2>&1; then echo "FAIL: $u may run $bad" >&2; exit 1; fi
+    done
+  fi
+  # set-policy's three tightenings are listed whole on every sudo: each runs, nothing may follow one, and on an older
+  # sudo (no pattern) no other set-policy does.
+  for ok in "auto_merge off" "land_mode pr" "main_watch auto"; do
+    # shellcheck disable=SC2086 # each case is its words
+    sudo -n -l -U "$u" "$MACHINE_HELPER" set-policy $ok >/dev/null 2>&1 || { echo "FAIL: $u can't run set-policy $ok, which every sudo should list whole" >&2; exit 1; }
+  done
+  for bad in "auto_merge off x" "land_mode pr --x"; do
+    # shellcheck disable=SC2086 # each case is its words
+    if sudo -n -l -U "$u" "$MACHINE_HELPER" set-policy $bad >/dev/null 2>&1; then echo "FAIL: $u may run set-policy $bad" >&2; exit 1; fi
+  done
+  if ! sudo_regex_ok; then
+    for bad in "auto_merge on" "land_mode direct" "main_watch off" "budget.daily_usd 30"; do
+      # shellcheck disable=SC2086 # each case is its words
+      if sudo -n -l -U "$u" "$MACHINE_HELPER" set-policy $bad >/dev/null 2>&1; then echo "FAIL: $u may run set-policy $bad on sudo $(sudo_version || echo unknown), which has no set-policy pattern" >&2; exit 1; fi
     done
   fi
   if sudo_regex_ok && ! sudo -n -l -U "$u" "$MACHINE_HELPER" add-project probe-name example-owner/probe.repo >/dev/null 2>&1; then
