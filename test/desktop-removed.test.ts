@@ -480,6 +480,7 @@ const NAMES_IT = /\bTauri\b|(^|[^\w.-])desktop\/|build:desktop|_DESKTOP\b|\bdesk
  * .worklane/review.yaml, whose `engine` globs keep `desktop/**` (owner-only review for the folder) until #877:
  * dropping a glob is a loosening, the owner's call, so it goes with the job's removal, not here.
  */
+// check-table: never-grow
 const MAY_NAME_IT = new Set(['CHANGELOG.md', 'docs/progress.md', 'docs/prior-art.md', '.worklane/review.yaml']);
 
 function filesUnder(dir: string, keep: (p: string) => boolean): string[] {
@@ -506,6 +507,7 @@ test('the desktop check stays one more release: one job that only succeeds, on e
  * `desktop` run that could be red (the "red twin"); the false ones show the fail-closed rule isn't "every name".
  * The first seven are the second adversarial review's (#746); the four it found missed come after the controls.
  */
+// check-table: never-shrink
 const TWIN_FIXTURES: [string, string, boolean][] = [
   ['a job keyed desktop', 'jobs:\n  desktop:\n    runs-on: x\n', true],
   ['name: desktop', 'jobs:\n  shots:\n    name: desktop\n    runs-on: x\n', true],
@@ -617,6 +619,7 @@ const NOOP_CI = "jobs:\n  desktop:\n    runs-on: ubuntu-latest\n    steps:\n    
  * v0.5.2 keeps only the run of a name that started last: a red twin that started first is never read, and it
  * installs (measured by the second adversarial review), so these are fail-open twins, not only stalls.
  */
+// check-table: never-shrink
 const CI_TWIN_FIXTURES: [string, string][] = [
   ['name: desktop, a failing step', "  desktop-screens:\n    name: desktop\n    runs-on: ubuntu-latest\n    steps:\n      - run: 'false'\n"],
   ["name: ${{ 'desktop' }}", "  shots:\n    name: ${{ 'desktop' }}\n    runs-on: ubuntu-latest\n    steps:\n      - run: 'false'\n"],
@@ -625,9 +628,11 @@ const CI_TWIN_FIXTURES: [string, string][] = [
 ];
 
 /** A workflow file name the backstop must read: `.yml` or `.yaml`, any case. */
+// check-table: never-shrink
 const FILE_NAME_FIXTURES = ['other.YML', 'other.Yaml'];
 
 /** Workflow files whose bytes this can't read as GitHub might (round 6): each holds a `name: desktop` job. */
+// check-table: never-shrink
 const BYTE_FIXTURES: [string, Buffer][] = [
   ['UTF-16LE with a BOM', Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from('jobs:\n  twin:\n    name: desktop\n    runs-on: x\n', 'utf16le')])],
   ['UTF-16BE with a BOM', Buffer.from(String.fromCharCode(0xfeff) + 'jobs:\n  twin:\n    name: desktop\n    runs-on: x\n', 'utf16le').swap16()],
@@ -674,6 +679,7 @@ const BARE_BASE_CI = BASE_CI + '  dco:\n    runs-on: x\n  build:\n    runs-on: x
  * BOM at a line start is skipped there but read as part of a key here; `%YAML 1.1` makes `022` octal here. Each file
  * must count as unsure (`<file>:?`). [label, file, text, unsure]
  */
+// check-table: never-shrink
 const UNSURE_TEXT_FIXTURES: [string, string, string, boolean][] = [
   ['L1 NEL ends a comment, then name: desktop', 'other.yml', 'jobs:\n  t:\n    runs-on: x\n    # c' + String.fromCharCode(0x85) + '    name: desktop\n', true],
   ['L2 LS, then permissions: write-all', 'other.yml', 'jobs:\n  t:\n    runs-on: x\n    # c' + String.fromCharCode(0x2028) + '    permissions: write-all\n', true],
@@ -732,6 +738,7 @@ const UNSURE_TEXT_FIXTURES: [string, string, string, boolean][] = [
  * `test (ubuntu-latest, 22)` (BASE_CI makes it) where JS object and number semantics named them otherwise, and a
  * literal name of the `<caller> / <callee>` shape. Each must leave checkTwins non-empty. [label, other.yml]
  */
+// check-table: never-shrink
 const NAME_TWIN_FIXTURES: [string, string][] = [
   ['A1 an include entry with a key toString', "jobs:\n  test:\n    strategy: { matrix: { os: [ubuntu-latest], include: [ { toString: 22 } ] } }\n    runs-on: x\n    steps: [ { run: 'false' } ]\n"],
   ['A1 an include entry with a key constructor', "jobs:\n  test:\n    strategy: { matrix: { os: [ubuntu-latest], include: [ { constructor: 22 } ] } }\n    runs-on: x\n    steps: [ { run: 'false' } ]\n"],
@@ -785,6 +792,7 @@ test('a job GitHub may name as a twin of another check is caught: matrix keys, n
  * one job that makes two runs of one name (a matrix name that leaves out a key that varies, or two equal
  * combinations): a v0.5.2 updater reads only the newest, so the second hides a red first.
  */
+// check-table: never-shrink
 const BARE_NAME_FIXTURES: [string, string, string][] = [
   ['S1 a job keyed desktop, a matrix, if: false', 'other.yml', "jobs:\n  desktop:\n    if: false\n    strategy: { matrix: { v: [a] } }\n    runs-on: x\n    steps: [ { run: 'false' } ]\n"],
   ['S1b the same, an if false on push and pull_request', 'other.yml', "jobs:\n  desktop:\n    if: github.event_name == 'schedule'\n    strategy: { matrix: { v: [a] } }\n    runs-on: x\n    steps: [ { run: 'false' } ]\n"],

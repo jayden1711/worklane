@@ -35,6 +35,10 @@ test('outside the plan: a high-risk or design path the plan did not list is name
 function repo() {
   const dir = exampleProject().dir;
   const base = git(dir, 'rev-parse', 'HEAD');
+  // The default branch on its remote, at the base: the merge decision fetches its tip (#869).
+  git(join(dir, '..'), 'init', '-q', '--bare', 'origin.git');
+  git(dir, 'remote', 'add', 'origin', join(dir, '..', 'origin.git'));
+  git(dir, 'push', '-q', 'origin', `${base}:refs/heads/main`);
   mkdirSync(join(dir, 'src'), { recursive: true });
   writeFileSync(join(dir, 'src', 'a.ts'), 'export const a = 1;\n');
   mkdirSync(join(dir, 'src', 'migrations'));

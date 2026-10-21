@@ -1,3 +1,4 @@
+// lint-test
 // Issue #726: on a single machine an instance's policy.yaml is root's, and only root changes it. Stand-ins only: no
 // test runs as root, so "root" is this test's own uid where a root-owned file has to exist (setPolicyRootUid,
 // PolicyRootDeps.rootUid), and the real root (uid 0) where the coordinator user's own file must be refused.

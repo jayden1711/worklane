@@ -65,4 +65,5 @@ export function scanText(rules, path, text) {
   return hits;
 }
 
+// check-table: never-grow
 export const SKIP = new Set(['.denylist.json', '.denylist-allow', 'package-lock.json', 'LICENSE']);
