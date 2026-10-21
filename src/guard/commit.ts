@@ -15,6 +15,12 @@ export interface CommitScope {
   untracked: boolean;
   /** The current HEAD commit's own changes. */
   head: boolean;
+  /** The line shows changes as diffs before the commit. */
+  diffReads?: boolean;
+  /** The line shows commits (log or show) before the commit. */
+  logReads?: boolean;
+  /** The line asks for signatures to be shown. */
+  signatureReads?: boolean;
 }
 
 export interface CommitScan {
@@ -23,7 +29,11 @@ export interface CommitScan {
   scope: CommitScope;
 }
 
-export type CommitPlan = { refuse: string } | { scans: CommitScan[] };
+/**
+ * The scans, and `reads`: the other checkouts the line's reads before the commit run in, whose config is checked for
+ * programs git runs while reading (src/scan/secrets.ts checkReadPrograms) though nothing there is committed.
+ */
+export type CommitPlan = { refuse: string } | { scans: CommitScan[]; reads?: string[] };
 
 /** A git query the plan needs, run by the caller: argv after `git`, from `cwd`. */
 export type GitQuery = (cwd: string, args: string[]) => { status: number | null; stdout: string };
@@ -344,9 +354,7 @@ class Parser {
       if (c === '{' || c === '}' || c === '!' || c === '^') this.fail(`an unquoted ${c}`);
       if ((c === '~' || c === '=') && this.i === start) this.fail(`a word starting with ${c}`);
       // WHY: a `[` is a pattern only with a `]` after it in the word; alone (as the test command `[`) it is a letter.
-      const rest = s.slice(this.i + 1);
-      const end = rest.search(/[\s;&|<>()]/);
-      if (c === '*' || c === '?' || (c === '[' && (end < 0 ? rest : rest.slice(0, end)).includes(']'))) {
+      if (c === '*' || c === '?' || (c === '[' && this.closesLater())) {
         w.text += EXPANSION;
         w.bare = true;
         this.i++;
@@ -357,6 +365,30 @@ class Parser {
     }
     if (this.i === start) this.fail(`an unexpected ${s[this.i] ?? 'end'}`);
     return w;
+  }
+
+  /**
+   * Whether a `]` comes later in the word that holds the `[` at this.i. The word runs to the first unquoted, unescaped
+   * separator: an escaped or quoted separator is part of it, and any `]` in it counts (more is treated as a pattern).
+   */
+  private closesLater(): boolean {
+    const s = this.s;
+    let q: string | null = null;
+    for (let j = this.i + 1; j < s.length; j++) {
+      const d = s[j]!;
+      if (d === ']') return true;
+      if (q) {
+        if (d === '\\' && q === '"') j++;
+        else if (d === q) q = null;
+        continue;
+      }
+      if (d === '\\') {
+        if (s[j + 1] === ']') return true;
+        j++;
+      } else if (d === "'" || d === '"') q = d;
+      else if (DELIMS.has(d)) return false;
+    }
+    return false;
   }
 
   /** `$NAME`, `${NAME}`, a special parameter, or `$( ... )`; `$((`, `$'`, `$"` and other forms are unmodelled. */
@@ -522,6 +554,14 @@ function commitEffects(rest: Word[]): { worktree: boolean; amend: boolean } {
 }
 
 const STAGING = new Set(['add', 'rm', 'mv']);
+/** git log options that show no diff: anything else may show one, and a diff runs the programs that render it. */
+const LOG_NO_DIFF = /^(--oneline|-n|--max-count(=.*)?|-[0-9]+|--(format|pretty)(=.*)?|--graph|--(no-)?decorate(=.*)?|--all|--reverse|--(since|after|until|before|author|committer|grep|date)(=.*)?|--first-parent|--(no-)?merges|--abbrev-commit|-s|--no-patch|--no-color|--color(=.*)?)$/;
+
+/** Whether `git log` with these words (after the subcommand) may show a diff. */
+function logShowsDiffs(words: string[]): boolean {
+  return words.some((t, i) => t.startsWith('-') && !LOG_NO_DIFF.test(t) && !(/^(-n|--max-count|--format|--pretty|--since|--after|--until|--before|--author|--committer|--grep|--date)$/.test(words[i - 1] ?? '')));
+}
+
 // WHY: git commands that only read, which ordinary work runs before a commit; none may write a file (see beforeRefusal).
 const READ_ONLY_GIT = new Set(['status', 'rev-parse', 'diff', 'log', 'show']);
 const READ_ONLY = new Set(['true', ':', 'pwd', 'echo', 'cat', 'head', 'tail', 'wc', 'grep', 'ls']);
@@ -723,7 +763,7 @@ function unseenInUnread(command: string, raw: SimpleCommand[]): string | null {
   if (new RegExp(String.raw`\|&?\s*(?:(?:sudo|env|exec|command|nohup|nice|time)\s+)*(?:${sh})(?![\w.-])`).test(command)) return 'text fed to a shell';
   if (new RegExp(String.raw`(?:^|[\s;&|(])(?:${sh})(?![\w.-])[^\n;&|]*<<`).test(command)) return 'text fed to a shell';
   if (/\benv\b[^\n;&|]*\s(?:-[a-zA-Z]*S|--sp)/.test(command)) return 'a program that splits a string into a command';
-  for (const m of command.matchAll(/(?:^|[\s;&|(])xargs((?:[ \t]+[^\s;&|)]+)*)/g)) {
+  for (const m of command.matchAll(/(?:^|[\s;&|(])(?:[^\s;&|()]*\/)?xargs((?:[ \t]+[^\s;&|)]+)*)/g)) {
     if (xargsReplaces(m[1]!.trim().split(/[ \t]+/))) return 'a program that builds a command from its input';
   }
   return null;
@@ -734,7 +774,8 @@ function unseenInUnread(command: string, raw: SimpleCommand[]): string | null {
  * count: they end at the first word that isn't one, the command it runs.
  */
 function xargsReplaces(args: string[]): boolean {
-  const VALUE = new Set(['-n', '-P', '-L', '-s', '-d', '-E', '-a', '-l', '--max-args', '--max-procs', '--max-lines', '--max-chars', '--delimiter', '--eof', '--arg-file']);
+  // WHY: only options whose value is the next word; -l, -e, -i and their long forms take theirs attached, if at all.
+  const VALUE = new Set(['-n', '-P', '-L', '-s', '-d', '-E', '-a', '--max-args', '--max-procs', '--max-chars', '--delimiter', '--arg-file', '--process-slot-var']);
   for (let i = 0; i < args.length; i++) {
     const o = args[i]!;
     if (o === '--') return false;
@@ -930,6 +971,8 @@ export function commitPlan(command: string, p: PlanEnv): CommitPlan | null {
 
   let dirs = new Set([p.cwd]);
   let staging = false;
+  const reads: Pick<CommitScope, 'diffReads' | 'logReads' | 'signatureReads'> = {};
+  const readTops = new Set<string>();
   try {
     for (const pl of list.slice(0, top)) {
       for (const c of pl) {
@@ -941,7 +984,22 @@ export function commitPlan(command: string, p: PlanEnv): CommitPlan | null {
           if (typeof next === 'string') return refuse(next);
           dirs = next;
         }
-        if (isGitName(name) && STAGING.has(gitWords(c.words).sub ?? '')) staging = true;
+        if (!isGitName(name)) continue;
+        const read = gitWords(c.words);
+        if (STAGING.has(read.sub ?? '')) staging = true;
+        const words = read.rest.map((w) => w.text);
+        if (read.sub === 'diff' || read.sub === 'show' || (read.sub === 'log' && logShowsDiffs(words)) || (read.sub === 'status' && words.some((t) => /^(-v+|--verbose)$/.test(t)))) reads.diffReads = true;
+        if (read.sub === 'log' || read.sub === 'show') reads.logReads = true;
+        if (words.some((t) => t.includes('%G') || /^--show-sig/.test(t))) reads.signatureReads = true;
+        // WHY: a read in another checkout runs under that checkout's config; its programs are checked there too.
+        if (read.dirs.length) {
+          for (const d of dirs) {
+            const r = p.git(d, [...read.dirs.flatMap((x) => ['-C', x]), 'rev-parse', '--show-toplevel']);
+            const at = r.stdout.trim();
+            if (r.status !== 0 || !at || !isAbsolute(at)) return refuse('a git command before the commit runs in a folder that is not a checkout the scan can check');
+            readTops.add(at);
+          }
+        }
       }
     }
     for (const c of list[top]!) {
@@ -957,7 +1015,7 @@ export function commitPlan(command: string, p: PlanEnv): CommitPlan | null {
     }
     const g = gitWords(commit.words);
     const { worktree, amend } = commitEffects(g.rest);
-    const scope: CommitScope = { unstaged: worktree || staging, untracked: staging, head: amend };
+    const scope: CommitScope = { unstaged: worktree || staging, untracked: staging, head: amend, ...reads };
     // INVARIANT (#971): every place the commit may run resolves to a checkout the scan reads, or the line is refused;
     // a place that isn't one is never skipped, so a plan is never "nothing to scan".
     const tops = new Set<string>();
@@ -968,7 +1026,7 @@ export function commitPlan(command: string, p: PlanEnv): CommitPlan | null {
       tops.add(top);
     }
     if (!tops.size) return refuse('no checkout to scan');
-    return { scans: [...tops].map((t) => ({ top: t, scope })) };
+    return { scans: [...tops].map((t) => ({ top: t, scope })), reads: [...readTops].filter((t) => !tops.has(t)) };
   } catch (e) {
     if (e instanceof Unmodelled) return refuse(e.message);
     throw e;

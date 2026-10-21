@@ -50,6 +50,19 @@ export interface CommitScanScope {
   unstaged: boolean;
   untracked: boolean;
   head: boolean;
+  /** The line shows changes as diffs before the commit, so programs that render a diff run. */
+  diffReads?: boolean;
+  /** The line shows commits before the commit (log or show). */
+  logReads?: boolean;
+  /** The line asks for commits' signatures to be shown. */
+  signatureReads?: boolean;
+}
+
+/** One file of a comparison: its content after the commit, and before it (null: the file is new). */
+interface Compared {
+  path: string;
+  now: Buffer;
+  before: Buffer | null;
 }
 
 /**
@@ -57,54 +70,94 @@ export interface CommitScanScope {
  * changes, and as `scope` says, tracked files' unstaged changes, untracked files that aren't ignored, and the current
  * commit (an amend records it again).
  * INVARIANT (#971): the scan reads content, never a diff git renders: blobs by object id and files from disk, with the
- * changed paths from the change reader (src/coordinator/change-files.ts). So nothing the checkout's own settings say
- * about showing a change changes what is scanned. Of each changed file, the lines its earlier version didn't have are
- * scanned, as a diff's added lines were.
+ * changed paths from the change reader (src/coordinator/change-files.ts). Each changed file is scanned whole, after
+ * and before; a secret counts when the file holds it more times after than before. So no placement of a change, and
+ * nothing the checkout's own settings say about showing one, changes what is found.
  */
 export function scanCommit(top: string, scope: CommitScanScope, binary = findTool('gitleaks')): ScanResult {
   if (!binary) return { status: 'unavailable', error: 'gitleaks not found on PATH' };
   const tmp = mkdtempSync(join(tmpdir(), 'scan-commit-'));
   try {
-    noReadPrograms(top);
-    const routes: [string, () => Map<string, string>][] = [['staged changes', () => stagedContent(top)]];
-    if (scope.unstaged || scope.untracked) routes.push(['unstaged changes', () => worktreeContent(top)]);
-    if (scope.untracked) routes.push(['untracked files', () => untrackedContent(top)]);
-    if (scope.head) routes.push(['the commit being amended', () => headContent(top)]);
+    checkReadPrograms(top, scope);
+    const comparisons: [string, () => Compared[]][] = [['staged changes', () => stagedContent(top)]];
+    if (scope.unstaged || scope.untracked) comparisons.push(['unstaged changes', () => worktreeContent(top)]);
+    if (scope.untracked) comparisons.push(['untracked files', () => untrackedContent(top)]);
+    if (scope.head) for (const [i, read] of headContent(top).entries()) comparisons.push([`the commit being amended (parent ${i + 1})`, read]);
     // WHY: the checkout's own rules, as the scan of its diff read them before; never a rules file the content brings.
     const own = join(top, '.gitleaks.toml');
     const config = join(tmp, 'gitleaks.toml');
     writeFileSync(config, existsSync(own) ? readFileSync(own) : '[extend]\nuseDefault = true\n');
-    // WHY (#971): never an ignore list: not one on disk, and not one the commit itself brings (see below).
+    // WHY (#971): never an ignore list: not one on disk, and not one the commit itself brings (see SCANNER_NAMES).
     const noIgnores = join(tmp, 'no-ignores');
     writeFileSync(noIgnores, '');
-    const findings: Finding[] = [];
-    for (const [i, [what, read]] of routes.entries()) {
-      const files = read();
-      if (!files.size) continue;
-      const dir = join(tmp, `route-${i}`);
-      for (const [path, text] of files) {
-        const parts = path.split('/');
-        if (!path || path.startsWith('/') || parts.some((p) => p === '..' || p === '')) throw new Error(`an unexpected path from git: ${JSON.stringify(path)}`);
-        // WHY: the commit's own files are content to scan, never the scanner's settings: each one goes under a fixed
-        // folder below the scan's root, so no name of theirs can be a file the scanner reads at its root.
-        const at = join(dir, CONTENT_DIR, path);
-        mkdirSync(dirname(at), { recursive: true });
-        writeFileSync(at, Buffer.concat([TEXT_PREFIX, Buffer.from(text, 'latin1')]));
+    // WHY: the report holds the secrets themselves (they are compared), so it lives in the scan's own temporary folder
+    // and is deleted as soon as it is read; only rule names and paths leave this function.
+    const scan = (root: string, scannerNamed: boolean): Map<string, string[]> => {
+      const report = `${root}.json`;
+      const r = spawnSync(binary, ['dir', '.', '--config', config, '--gitleaks-ignore-path', noIgnores, '--no-banner', '--report-format', 'json', '--report-path', report, '--exit-code', String(LEAKS_EXIT)], { cwd: root, encoding: 'utf8', timeout: 120_000 });
+      if (r.error) throw r.error;
+      const keys = new Map<string, string[]>();
+      if (r.status === 0) return keys;
+      if (r.status !== LEAKS_EXIT) throw new Error(`gitleaks exited ${r.status}: ${(r.stderr || '').trim().split('\n').pop()}`);
+      try {
+        for (const f of JSON.parse(readFileSync(report, 'utf8')) as { RuleID: string; File: string; Secret: string }[]) {
+          let file = f.File.replace(/^\.\//, '');
+          if (scannerNamed) file = file.slice(SCANNER_DIR.length + 1);
+          keys.set(file, [...(keys.get(file) ?? []), `${f.RuleID}\0${f.Secret}`]);
+        }
+      } finally {
+        rmSync(report, { force: true });
       }
-      const report = join(tmp, `report-${i}.json`);
-      const r = spawnSync(binary, ['dir', '.', '--config', config, '--gitleaks-ignore-path', noIgnores, '--redact', '--no-banner', '--report-format', 'json', '--report-path', report, '--exit-code', String(LEAKS_EXIT)], { cwd: dir, encoding: 'utf8', timeout: 120_000 });
-      if (r.error) return { status: 'unavailable', error: r.error.message };
-      if (r.status === LEAKS_EXIT) {
-        const raw = JSON.parse(readFileSync(report, 'utf8')) as { RuleID: string; File: string }[];
-        findings.push(...raw.map((f) => ({ rule: f.RuleID, file: `${f.File.replace(`${CONTENT_DIR}/`, '')} (${what})`, line: 0 })));
-      } else if (r.status !== 0) return { status: 'unavailable', error: `gitleaks exited ${r.status}: ${(r.stderr || '').trim().split('\n').pop()}` };
+      return keys;
+    };
+    const findings: Finding[] = [];
+    for (const [i, [what, read]] of comparisons.entries()) {
+      const files = read();
+      if (!files.length) continue;
+      const side = (name: string, pick: (c: Compared) => Buffer | null) => {
+        const keys = new Map<string, string[]>();
+        for (const [k, scannerName] of [[0, false], [1, true]] as const) {
+          const root = join(tmp, `c${i}-${name}-${k}`);
+          let any = false;
+          for (const c of files) {
+            const content = pick(c);
+            if (content === null || SCANNER_NAMES.has(c.path) !== scannerName) continue;
+            const parts = c.path.split('/');
+            if (!c.path || c.path.startsWith('/') || parts.some((p) => p === '..' || p === '')) throw new Error(`an unexpected path from git: ${JSON.stringify(c.path)}`);
+            // WHY: a file the scanner would read as its own settings at its root goes, as content, a folder lower.
+            const at = join(root, scannerName ? SCANNER_DIR : '', c.path);
+            mkdirSync(dirname(at), { recursive: true });
+            writeFileSync(at, Buffer.concat([TEXT_PREFIX, text(content)]));
+            any = true;
+          }
+          if (any) for (const [file, found] of scan(root, scannerName)) keys.set(file, found);
+        }
+        return keys;
+      };
+      const after = side('after', (c) => c.now);
+      const before = side('before', (c) => c.before);
+      for (const [file, found] of after) {
+        for (const key of introduced(before.get(file) ?? [], found)) findings.push({ rule: key.split('\0')[0]!, file: `${file} (${what})`, line: 0 });
+      }
     }
     return findings.length ? { status: 'leaks', findings } : { status: 'clean' };
   } catch (e) {
-    return { status: 'unavailable', error: (e as Error).message.split('\n')[0]!.slice(0, 300) };
+    return { status: 'unavailable', error: (e as Error).message.split('\n')[0]!.slice(0, 400) };
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
+}
+
+/**
+ * The keys (`rule\0secret`) `after` holds more times than `before`. WHY (#971): a secret counts as new by how often a
+ * file holds it, never by where a diff would place the lines around it.
+ */
+export function introduced(before: string[], after: string[]): string[] {
+  const had = new Map<string, number>();
+  for (const k of before) had.set(k, (had.get(k) ?? 0) + 1);
+  const seen = new Map<string, number>();
+  for (const k of after) seen.set(k, (seen.get(k) ?? 0) + 1);
+  return [...seen].filter(([k, n]) => n > (had.get(k) ?? 0)).map(([k]) => k);
 }
 
 const ZERO = /^0+$/;
@@ -114,8 +167,12 @@ const ZERO = /^0+$/;
  * whether the scanner reads the file.
  */
 const TEXT_PREFIX = Buffer.alloc(65_536, 0x0a);
-/** The folder below each scan root that holds the commit's files. */
-const CONTENT_DIR = 'commit';
+/** Names the scanner reads as its own settings at the root of what it scans; such a file of the commit goes lower. */
+const SCANNER_NAMES = new Set(['.gitleaksignore', '.gitleaks.toml', '.gitleaksbaseline']);
+const SCANNER_DIR = 'scanner-named';
+
+/** The bytes the scanner reads for a file: NUL bytes dropped, so text spread across them is read as text. */
+const text = (b: Buffer) => Buffer.from(b.toString('latin1').replace(/\0/g, ''), 'latin1');
 
 /** git in the checkout, for an object or a revision (never a list of changes: those come from the change reader). */
 function gitOut(top: string, args: string[], input?: string): Buffer {
@@ -142,145 +199,46 @@ function objects(top: string, ids: string[]): Buffer[] {
   return got;
 }
 
-/**
- * The lines `now` adds to `before`, placed as a line diff's hunks place them: each run of added lines whole, a blank
- * line between runs; NUL bytes dropped. WHY (#971): computed here, so no config or attribute of the checkout can
- * change which lines count as added; a line seen elsewhere in the earlier version still counts where it is added.
- */
-function newLines(before: Buffer | null, now: Buffer): string {
-  const text = (b: Buffer) => b.toString('latin1').replace(/\0/g, '');
-  const lines = text(now).split('\n');
-  if (!before) return lines.join('\n');
-  const added = slideWidened(lines, addedLines(text(before).split('\n'), lines));
-  const out: string[] = [];
-  lines.forEach((l, i) => {
-    if (added[i]) out.push(l);
-    else if (out.length && out.at(-1) !== '') out.push('');
-  });
-  return out.join('\n');
-}
-
-/**
- * `added` widened over every placement a line diff could give each run of added lines. INVARIANT (#971): a run of
- * added lines can slide across the unchanged lines next to it while the line it leaves equals the line it takes (a
- * diff may place it anywhere along that range); every line of every such placement is scanned, whichever one a diff
- * would pick.
- */
-export function slideWidened(b: string[], added: boolean[]): boolean[] {
-  const out = [...added];
-  for (let s = 0; s < b.length; ) {
-    if (!added[s]) {
-      s++;
-      continue;
-    }
-    let e = s;
-    while (e < b.length && added[e]) e++;
-    for (let k = 1; s - k >= 0 && b[s - k] === b[e - k]; k++) out[s - k] = true;
-    for (let k = 0; e + k < b.length && b[e + k] === b[s + k]; k++) out[e + k] = true;
-    s = e;
-  }
-  return out;
-}
-
-/** The most work the line diff does (edit steps times the diagonals it keeps) before it counts every line as added. */
-const DIFF_BUDGET = 10_000_000;
-
-/**
- * Which lines of `b` a shortest edit script from `a` inserts (Myers' algorithm). Over DIFF_BUDGET it marks every line
- * of `b` as added: more is scanned, never less.
- */
-export function addedLines(a: string[], b: string[]): boolean[] {
-  const added = new Array<boolean>(b.length).fill(false);
-  let pre = 0;
-  while (pre < a.length && pre < b.length && a[pre] === b[pre]) pre++;
-  let suf = 0;
-  while (suf < a.length - pre && suf < b.length - pre && a[a.length - 1 - suf] === b[b.length - 1 - suf]) suf++;
-  const A = a.slice(pre, a.length - suf);
-  const B = b.slice(pre, b.length - suf);
-  const n = A.length;
-  const m = B.length;
-  const all = () => {
-    for (let i = 0; i < m; i++) added[pre + i] = true;
-    return added;
-  };
-  if (!m) return added;
-  if (!n) return all();
-  const max = n + m;
-  const off = max + 1;
-  let v: Int32Array = new Int32Array(2 * max + 3);
-  const trace: Int32Array[] = [];
-  let found = -1;
-  for (let d = 0; d <= max && found < 0; d++) {
-    if ((d + 1) * v.length > DIFF_BUDGET) return all();
-    trace.push(v.slice());
-    for (let k = -d; k <= d; k += 2) {
-      let x = k === -d || (k !== d && v[off + k - 1]! < v[off + k + 1]!) ? v[off + k + 1]! : v[off + k - 1]! + 1;
-      let y = x - k;
-      while (x < n && y < m && A[x] === B[y]) {
-        x++;
-        y++;
-      }
-      v[off + k] = x;
-      if (x >= n && y >= m) {
-        found = d;
-        break;
-      }
-    }
-  }
-  let x = n;
-  let y = m;
-  for (let d = found; d > 0; d--) {
-    v = trace[d]!;
-    const k = x - y;
-    const prevK = k === -d || (k !== d && v[off + k - 1]! < v[off + k + 1]!) ? k + 1 : k - 1;
-    const prevX = v[off + prevK]!;
-    const prevY = prevX - prevK;
-    while (x > prevX && y > prevY) {
-      x--;
-      y--;
-    }
-    if (x === prevX) added[pre + prevY] = true;
-    x = prevX;
-    y = prevY;
-  }
-  return added;
-}
-
 interface RawEntry {
   path: string;
+  mode: string;
   before: string | null;
   /** The new object id; null when the new side is the file on disk. */
   after: string | null;
 }
 
-/** The changed files of a raw change list that have content after it: no deletes, conflicts or submodule links. */
-function rawEntries(raw: string): RawEntry[] {
+const objectId = (id: string | undefined) => (!id || ZERO.test(id.replace(/\.+$/, '')) ? null : id.replace(/\.+$/, ''));
+
+/** Every entry of a raw change list with content after it (no deletes or conflicts), submodule links included. */
+function rawAll(raw: string): RawEntry[] {
   const parts = raw.split('\0');
   const out: RawEntry[] = [];
   for (let i = 0; i + 1 < parts.length; i += 2) {
     const meta = parts[i]!;
     if (!meta.startsWith(':')) throw new Error('an unexpected change list from git');
     const [, newMode, before, after, status] = meta.slice(1).split(' ');
-    if (!status || status.startsWith('D') || status.startsWith('U') || newMode === '160000' || newMode === '000000') continue;
-    out.push({ path: parts[i + 1]!, before: !before || ZERO.test(before.replace(/\.+$/, '')) ? null : before.replace(/\.+$/, ''), after: !after || ZERO.test(after.replace(/\.+$/, '')) ? null : after.replace(/\.+$/, '') });
+    if (!status || status.startsWith('D') || status.startsWith('U') || newMode === '000000') continue;
+    out.push({ path: parts[i + 1]!, mode: newMode ?? '', before: objectId(before), after: objectId(after) });
   }
   return out;
 }
 
-/** Each entry's new lines: both sides read as objects, or the new side from disk when it has no object id. */
-function entryContent(top: string, entries: RawEntry[], into = new Map<string, string>()): Map<string, string> {
+/** The changed files of a raw change list that have content after it: no deletes, conflicts or submodule links. */
+const rawEntries = (raw: string) => rawAll(raw).filter((e) => e.mode !== '160000');
+
+/** Each entry, both sides read as objects, or the new side from disk when it has no object id. */
+function entryContent(top: string, entries: RawEntry[]): Compared[] {
   const before = objects(top, entries.filter((e) => e.before).map((e) => e.before!));
   const after = objects(top, entries.filter((e) => e.after).map((e) => e.after!));
   let b = 0;
   let a = 0;
+  const out: Compared[] = [];
   for (const e of entries) {
     const old = e.before ? before[b++]! : null;
     const now = e.after ? after[a++]! : fromDisk(top, e.path);
-    if (now === null) continue;
-    const text = newLines(old, now);
-    into.set(e.path, into.has(e.path) ? `${into.get(e.path)}\n\n${text}` : text);
+    if (now !== null) out.push({ path: e.path, now, before: old });
   }
-  return into;
+  return out;
 }
 
 /** A file's content on disk as git would store it: a link's target, a file's bytes; null for anything else. */
@@ -306,23 +264,25 @@ function headId(top: string): string | null {
   return r.status === 0 ? r.stdout.trim() : null;
 }
 
-function stagedContent(top: string): Map<string, string> {
-  return entryContent(top, rawEntries(rawChanges(top, ['--cached', headId(top) ?? emptyTree(top)])));
+const stagedRaw = (top: string) => rawChanges(top, ['--cached', headId(top) ?? emptyTree(top)]);
+
+function stagedContent(top: string): Compared[] {
+  return entryContent(top, rawEntries(stagedRaw(top)));
 }
 
-function worktreeContent(top: string): Map<string, string> {
+function worktreeContent(top: string): Compared[] {
   const entries = rawEntries(rawChanges(top, []));
   storedAsOnDisk(top, entries.filter((e) => !e.after).map((e) => e.path));
   return entryContent(top, entries);
 }
 
-function untrackedContent(top: string): Map<string, string> {
+function untrackedContent(top: string): Compared[] {
   const paths = untrackedNames(top);
   storedAsOnDisk(top, paths);
-  const out = new Map<string, string>();
+  const out: Compared[] = [];
   for (const path of paths) {
     const now = fromDisk(top, path);
-    if (now !== null) out.set(path, newLines(null, now));
+    if (now !== null) out.push({ path, now, before: null });
   }
   return out;
 }
@@ -346,47 +306,73 @@ function storedAsOnDisk(top: string, paths: string[]) {
   }
 }
 
-/** Config whose value names a program git runs when it reads changes, or a driver whose programs it runs. */
-const PROGRAM_KEYS = [/^diff\.external$/, /^diff\..+\.(textconv|command)$/];
+/** Config that names a program git runs to show a change as a diff. */
+const DIFF_PROGRAM_KEYS = [/^diff\.external$/, /^diff\..+\.(textconv|command)$/];
+/** Config that names a program git runs to check a signature. */
+const SIGNATURE_PROGRAM_KEY = /^gpg\.(.+\.)?program$/;
 const FILTER_KEY = /^filter\.(.+)\.(clean|smudge|process)$/;
-const OFF = new Set(['', 'false', 'no', 'off', '0']);
+const OFF = new Set(['false', 'no', 'off', '0']);
+const ON = new Set(['', 'true', 'yes', 'on', '1']);
 
 /**
- * Throws when the checkout's effective config names a program git may run while reading its changes: in the reads a
- * line may run before a commit, or in the scan's own change listing. INVARIANT (#971): such a program could change
- * what is committed after the scan has read it, so the commit is refused (fail closed), never scanned around it.
+ * Throws when the effective config of the checkout at `top`, or of a submodule checked out in it, names a program
+ * git may run while it reads changes: in the reads `scope` says the line runs before the commit, or in the scan's own
+ * change listing. INVARIANT (#971): such a program could change what is committed after the scan has read it, so the
+ * commit is refused (fail closed), never scanned around it.
  */
-function noReadPrograms(top: string) {
+export function checkReadPrograms(top: string, scope: CommitScanScope, depth = 0) {
+  if (depth > 8) throw new Error('submodules nested too deep to check');
   const entries = gitOut(top, ['config', '--list', '-z']).toString('utf8').split('\0').filter(Boolean);
   const filters = new Set<string>();
+  let showSignature = false;
+  let signer = '';
   for (const e of entries) {
     const nl = e.indexOf('\n');
     const key = (nl < 0 ? e : e.slice(0, nl)).toLowerCase();
-    const value = nl < 0 ? 'true' : e.slice(nl + 1);
-    if (key === 'core.fsmonitor' && !OFF.has(value.trim().toLowerCase())) throw new Error('the checkout\'s config names a file-system monitor, a program git runs while it reads changes');
-    if (PROGRAM_KEYS.some((re) => re.test(key))) throw new Error(`the checkout's config names a program git runs while it reads changes (${key})`);
+    const value = (nl < 0 ? '' : e.slice(nl + 1)).trim().toLowerCase();
+    // WHY: a boolean monitor is git's own daemon; any other value is the path of a program git runs.
+    if (key === 'core.fsmonitor' && !OFF.has(value) && !ON.has(value)) throw new Error('the checkout\'s config names a file-system monitor program, which git runs while it reads changes');
+    if (scope.diffReads && DIFF_PROGRAM_KEYS.some((re) => re.test(key))) throw new Error(`the checkout's config names a program git runs to show a diff (${key}), and the line shows one before it commits`);
+    if (key === 'log.showsignature') showSignature = ON.has(value);
+    if (SIGNATURE_PROGRAM_KEY.test(key)) signer = key;
     const f = FILTER_KEY.exec(key);
     if (f) filters.add(f[1]!);
   }
-  if (!filters.size) return;
-  // WHY: a filter's programs run only for files that name it; any file that names one refuses the commit.
-  const paths = [...new Set([...presentNames(top, null), ...untrackedNames(top)])];
-  if (!paths.length) return;
-  if (paths.some((p) => p.includes('�'))) throw new Error('a file in this checkout has a name that is not UTF-8, so its attributes can\'t be checked');
-  const out = gitOut(top, ['check-attr', '-z', '--stdin', 'filter'], `${paths.join('\0')}\0`).toString('utf8').split('\0');
-  for (let i = 0; i + 2 < out.length; i += 3) {
-    if (filters.has(out[i + 2]!.toLowerCase())) throw new Error('the checkout\'s config names a filter its files use, a program git runs while it reads changes');
+  if (scope.logReads && (scope.signatureReads || showSignature) && signer) throw new Error(`the checkout's config names a program git runs to check signatures (${signer}), and the line shows signatures before it commits`);
+  const tracked = filters.size ? [...new Set([...presentNames(top, null), ...untrackedNames(top)])] : [];
+  if (tracked.some((p) => p.includes('�'))) throw new Error('a file in this checkout has a name that is not UTF-8, so its attributes can\'t be checked');
+  if (tracked.length) {
+    const out = gitOut(top, ['check-attr', '-z', '--stdin', 'filter'], `${tracked.join('\0')}\0`).toString('utf8').split('\0');
+    for (let i = 0; i + 2 < out.length; i += 3) {
+      if (filters.has(out[i + 2]!.toLowerCase())) {
+        throw new Error(`this checkout's files use a filter its config names (${out[i + 2]}), a program git runs while it reads changes, so agent commits here are refused; a person commits here, or the owner removes the filter from this checkout's config`);
+      }
+    }
   }
+  // WHY: a read and the scan's own listing reach into each checked-out submodule under that submodule's own config.
+  for (const sub of submodules(top)) checkReadPrograms(sub, scope, depth + 1);
 }
 
-/** The current commit's changes against each of its parents (none: the empty tree). */
-function headContent(top: string): Map<string, string> {
+/** The checked-out submodules of the checkout at `top`: links in HEAD's tree or staged, with a checkout there. */
+function submodules(top: string): string[] {
+  const paths = new Set<string>();
+  const head = headId(top);
+  if (head) {
+    for (const rec of gitOut(top, ['ls-tree', '-r', '-z', '--full-tree', head]).toString('utf8').split('\0')) {
+      const tab = rec.indexOf('\t');
+      if (tab > 0 && rec.startsWith('160000 ')) paths.add(rec.slice(tab + 1));
+    }
+  }
+  for (const e of rawAll(stagedRaw(top))) if (e.mode === '160000') paths.add(e.path);
+  return [...paths].map((p) => join(top, p)).filter((p) => existsSync(join(p, '.git')));
+}
+
+/** The current commit's changes against each of its parents (none: the empty tree), one comparison per parent. */
+function headContent(top: string): (() => Compared[])[] {
   const head = headId(top);
   if (!head) throw new Error('there is no commit to amend');
   const parents = gitOut(top, ['rev-list', '--parents', '-n', '1', head]).toString('latin1').trim().split(/\s+/).slice(1);
-  const out = new Map<string, string>();
-  for (const parent of parents.length ? parents : [emptyTree(top)]) entryContent(top, rawEntries(rawChanges(top, [parent, head])), out);
-  return out;
+  return (parents.length ? parents : [emptyTree(top)]).map((parent) => () => entryContent(top, rawEntries(rawChanges(top, [parent, head]))));
 }
 
 /**

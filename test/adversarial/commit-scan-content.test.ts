@@ -65,16 +65,16 @@ async function refused(cwd: string, command: string, why: RegExp, what = command
   assert.match(d.reason, why, JSON.stringify(what));
 }
 
-test('the line diff marks the lines a shortest edit inserts, wherever else they appear', () => {
-  const addedLines = (secrets as Record<string, unknown>).addedLines as ((a: string[], b: string[]) => boolean[]) | undefined;
-  assert.equal(typeof addedLines, 'function', 'the scan computes its own line diff');
-  const f = addedLines!;
-  assert.deepEqual(f(['a', 'b', 'c'], ['a', 'b', 'c']), [false, false, false]);
-  assert.deepEqual(f(['a', 'c'], ['a', 'b', 'c']), [false, true, false]);
-  assert.deepEqual(f(['B', 'p', 'E'], ['B', 'p', 'E', 'B', 'k', 'E']), [false, false, false, true, true, true]);
-  assert.deepEqual(f(['x', 's'], ['x', 's', 's']), [false, false, true]);
-  assert.deepEqual(f([], ['a']), [true]);
-  assert.deepEqual(f(['a', 'b'], ['b']), [false]);
+test('a secret counts as new when a file holds it more times after the commit than before', () => {
+  // WHY (round 5): the scan stopped placing added lines (round 3 and 4); it compares whole files' findings instead.
+  const introduced = (secrets as Record<string, unknown>).introduced as ((a: string[], b: string[]) => string[]) | undefined;
+  assert.equal(typeof introduced, 'function', 'the scan compares findings before and after');
+  const f = introduced!;
+  assert.deepEqual(f(['k'], ['k']), []);
+  assert.deepEqual(f([], ['k']), ['k']);
+  assert.deepEqual(f(['k'], ['k', 'k']), ['k'], 'a secret added again is new');
+  assert.deepEqual(f(['k', 'j'], ['j']), [], 'a removed secret is not');
+  assert.deepEqual(f(['k'], ['j', 'k']), ['j']);
 });
 
 test('attack: lines a secret needs as context are scanned where they are added, even if the file had them before', { skip }, async () => {

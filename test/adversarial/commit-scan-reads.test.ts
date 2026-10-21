@@ -69,14 +69,12 @@ async function refused(cwd: string, command: string, why: RegExp, what = command
   assert.match(d.reason, why, JSON.stringify(what));
 }
 
-test('every placement a diff could give a run of added lines is scanned', () => {
-  const widen = (secrets as Record<string, unknown>).slideWidened as ((b: string[], added: boolean[]) => boolean[]) | undefined;
-  assert.equal(typeof widen, 'function', 'the scan widens each run of added lines');
-  const b = ['B', 'p1', 'p2', 'E', 'B', 'r1', 'r2', 'E', 'B', 'q1', 'q2', 'E'];
-  const one = [false, false, false, false, false, true, true, true, true, false, false, false];
-  assert.deepEqual(widen!(b, one), [false, false, false, true, true, true, true, true, true, false, false, false]);
-  assert.deepEqual(widen!(['x', 'a', 'x'], [false, true, false]), [false, true, false], 'a run that cannot slide stays as it is');
-  assert.deepEqual(widen!(['a', 'a', 'a'], [false, false, true]), [true, true, true], 'it slides as far as the lines repeat');
+test('a secret is new by how often a file holds it, so no placement of a change matters', () => {
+  // WHY (round 5): the slide widening of round 4 is gone; whole files' findings are compared instead.
+  const introduced = (secrets as Record<string, unknown>).introduced as ((a: string[], b: string[]) => string[]) | undefined;
+  assert.equal(typeof introduced, 'function', 'the scan compares findings before and after');
+  assert.deepEqual(introduced!(['a', 'b'], ['b', 'a', 'c']), ['c']);
+  assert.deepEqual(introduced!(['a', 'a'], ['a', 'a', 'a']), ['a']);
 });
 
 test('attack: a multi-line secret is found whichever placement a diff gives its lines', { skip }, async () => {

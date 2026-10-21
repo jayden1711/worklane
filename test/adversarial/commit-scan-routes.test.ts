@@ -132,9 +132,8 @@ test('attack: the checkout\'s git settings for showing changes do not hide what 
     ['external diff', (d) => git(d, 'config', 'diff.external', 'true')],
   ];
   for (const [what, set] of shapes) {
-    // WHY (round 4): a setting that names a program git runs while reading changes refuses the commit before the scan
-    // reads anything; the others are found by the scan.
-    const why = what === 'text conversion' || what === 'external diff' ? /commit secret scan could not run/ : FOUND;
+    // WHY (round 5): none of these lines shows a diff before it commits, so no diff program runs; the scan finds each.
+    const why = FOUND;
     // Staged content, working-tree content, untracked content and the commit being amended: each route the scan has.
     const a = checkout('a');
     set(a);

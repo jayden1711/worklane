@@ -20,7 +20,7 @@ import { TaskFile } from './contract.js';
 import { HELD_OUT_ENV, HELD_OUT_GLOB } from './held-out-paths.js';
 import { DASHBOARD_KEY_GLOB } from './dashboard-key-paths.js';
 import { expSecretGlobs } from './experiments/paths.js';
-import { scanCommit, scanPath } from './scan/secrets.js';
+import { checkReadPrograms, scanCommit, scanPath } from './scan/secrets.js';
 import { commitPlan } from './guard/commit.js';
 import { checkWorkingFile, formatFindings } from './comment-policy.js';
 
@@ -166,6 +166,15 @@ function preToolUse(input: HookInput, env: NodeJS.ProcessEnv): HookOutput {
       return decide('deny', plan.refuse);
     }
     if (plan && !plan.scans.length) return decide('deny', 'the commit secret scan found no checkout to scan for this commit, so it isn\'t let through unscanned');
+    // WHY (#971): the line's reads in other checkouts run under those checkouts' config, so it is checked there too.
+    for (const other of plan?.reads ?? []) {
+      try {
+        checkReadPrograms(other, plan!.scans[0]!.scope);
+      } catch (e) {
+        log(root, 'secrets.jsonl', { source: 'commit', session: input.session_id, status: 'unavailable' });
+        return decide('deny', `commit secret scan could not run (${(e as Error).message.split('\n')[0]!.slice(0, 400)}); not committing unscanned`);
+      }
+    }
     for (const { top, scope } of plan?.scans ?? []) {
       const r = scanCommit(top, scope);
       if (r.status !== 'clean') {
