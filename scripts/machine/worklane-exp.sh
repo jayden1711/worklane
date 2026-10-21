@@ -134,6 +134,7 @@ instance_name_problem() {
   elif [ "$n" = dash ]; then echo "wl-dash is the dashboard viewer"
   elif [ "$n" = hub ] || [ "$n" = hub-setup ]; then echo "worklane-dashboard-$n.service is the dashboard hub's"
   elif [ "$n" = update ] || [ "$n" = tailscale ] || [ "$n" = claude-account ] || [ "$n" = egress ]; then echo "worklane-$n.service is the machine's own"
+  elif [ "$n" = machine ] || [ "$n" = console ]; then echo "/etc/sudoers.d/worklane-$n is the machine's own sudoers file"
   elif [ "$n" = agent ] || [ "$n" = eval ] || [ "$n" = work ] || [ "$n" = mcp ] || [ "$n" = mcpc ] || [ "$n" = mcpctl ]; then echo "its test user wl-test-$n would be instance test's $n name, and wl-ci-$n the $n name of instance ci"
   elif [[ "$n" == test-* ]]; then echo "wl-$n is the test user of instance ${n#test-}"
   elif [[ "$n" == ci-* ]]; then echo "wl-$n is the user of CI runner ${n#ci-}"
@@ -146,6 +147,12 @@ instance_name_problem() {
 }
 [[ "$name" =~ ^[a-z][a-z0-9-]{0,20}$ ]] || die "usage: worklane-exp <name> version|eval-put|eval-seal|create|job|stop|wipe|prune|check ..."
 why="$(instance_name_problem "$name")"
+# kept: machine console
+# An instance made before those two names were reserved (#902: their sudoers files are the machine's own) still stops,
+# wipes, prunes and checks what it has (decision guide 2). Every other verb keeps the rule above, so it starts no job of
+# its own. check still starts root's own fixed probe units (as its job and scorer users), as for any instance. The same
+# names as lib.sh LATER_RESERVED_NAMES (test/legacy-kept-names.ts checks every refused name against these verbs).
+case "$cmd" in stop | wipe | prune | check | version) if [ "$name" = machine ] || [ "$name" = console ]; then why=""; fi ;; esac
 [ -z "$why" ] || die "instance name $name: $why"
 juser="wl-exp-$name"
 suser="wl-score-$name"
