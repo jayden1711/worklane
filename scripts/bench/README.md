@@ -14,6 +14,7 @@ What is here so far:
 - **Preflight** (`paths.ts`, `auth.ts`, `caps.ts`, `usage.ts`): the bench user, login and CLI pin checks, the caps, and the usage meter with its clean stop.
 - **Containers** (`container.ts`, `agent.ts`, `hidden.ts`, `probe.ts`): the rootless Docker launcher with required limits, the exec-only task runner, the hidden-field guards, the agents' environment and sandbox, and the srt sandbox probe.
 - **Driver** (`driver.ts`, `confirm.ts`, `grade.ts`, `aggregate.ts`, `store.ts`): the run loop, the sandbox confirmation, patch export, the predictions for grading, and the aggregate. `srt-fingerprint.mjs` compares a sandbox-runtime release with the build a Claude Code binary bundles.
+- **The `bench` command** (`cli.ts`): `bench preflight` runs the model-free, container-free checks above and prints a PASS/FAIL/SKIP line each (setup step 6).
 
 Still to come:
 - the PR-mode task runner on the replay harness (`src/harness-evals/replay.ts`), with stub CI;
@@ -21,11 +22,11 @@ Still to come:
 - task selection;
 - the pinned-download scripts;
 - the grading run and the B0, B1 and `claude -p` baselines;
-- the `bench` command.
+- the `bench` command's other subcommands (`run` and the rest; `preflight` is here).
 
 ## How it is isolated
 
-- **One OS user runs everything:** the bench user (default `wl-bench`, `WORKLANE_BENCH_USER` names another). It has its own clone of this repo at the pinned commit, its own `claude`, its own rootless Docker, and data in `~/bench` (`WORKLANE_BENCH_ROOT` overrides it). There is no sudo and no switching users. The driver refuses to start as any other user.
+- **One OS user runs everything:** the bench user (default `wl-bench`, `WORKLANE_BENCH_USER` names another). It has its own clone of this repo at the pinned commit, its own `claude`, its own rootless Docker, and data in `~/bench` (`WORKLANE_BENCH_ROOT` overrides it). There is no sudo and no switching users. The driver refuses to start as any other user, and as root (uid 0 or the name root) even when `WORKLANE_BENCH_USER` names it.
   - Its home is the one in the user database (its passwd entry), never `$HOME`: a `$HOME` that differs is refused, since claude would follow it to another login. Log in with `sudo -iu wl-bench`, which sets it right.
   - A bench root through a link that doesn't resolve (dangling, or a loop) is refused.
 - **No API key.** `claude` is the unmodified CLI, signed in once by the owner through Anthropic's own `/login`.
@@ -90,7 +91,7 @@ Two checks that an agent really can't reach the daemon's sockets or the credenti
 
 1. **The srt probe (no model call).**
    - **Why srt:** Claude Code 2.1.303 has no command that runs a command in its own sandbox without a model, so this check runs under `srt`, the CLI of sandbox-runtime, the library Claude Code's sandbox is built on.
-   - **The version:** `srt --version` must be exactly `0.0.79` (step 3 installs it), or the run is refused.
+   - **The version:** `srt --version` must be exactly `0.0.79` (step 4 of the setup installs it), or the run is refused.
    - **Label:** sandbox-runtime 0.0.79 is close to, not identical with, the build bundled in Claude Code 2.1.303. `srt-fingerprint.mjs` compares the binary's `[Sandbox Linux]` log strings with each release's. On 2026-10-18 it placed the bundled build between 0.0.79 (1 string apart each way) and 0.0.80 (4 apart each way).
    - **What it does:** with the agents' own lane settings (the same `denyRead`, no hosts), it tries to connect to each Docker socket (`$XDG_RUNTIME_DIR/docker.sock`, `/run/docker.sock`, `/var/run/docker.sock`, a unix `DOCKER_HOST`), the user bus (`$XDG_RUNTIME_DIR/bus`) and the rootless containerd socket, and to open `~/.claude.json`, `~/.netrc`, `~/.npmrc` and `~/.pypirc`. It reports only what each one is and never reads a byte.
    - **The verdict:** every attempt must be refused, with the lane's deny rule for the path in place. A missing file counts as refused only when its rule is there; the deny rule is checked in the settings, and whether the path exists on the host is recorded beside it.
@@ -116,7 +117,7 @@ Two checks that an agent really can't reach the daemon's sockets or the credenti
      - **"all refused"** only when every attempt was refused and the model ran nothing but the listed commands;
      - **"sandbox confirmation: model declined"** when the model ran any other command or tool call (a `server_tool_use` included), or skipped a listed one. The run goes on only because the srt probe passed, and the summary says so in a warning;
      - when every attempt was refused but the OS sandbox didn't refuse every `node -e` read itself (`os_sandbox_read_deny` false), the summary warns that the sandbox's own read-deny rests on the srt probe.
-3. **Keeping the probe current.** On each new sandbox-runtime release, run `node scripts/bench/srt-fingerprint.mjs <unpacked package> ~/.local/share/claude/versions/<pin>`. When a release shows no difference, switch `SRT_VERSION` (`probe.ts`) and step 3's install to it, as a reviewed change.
+3. **Keeping the probe current.** On each new sandbox-runtime release, run `node scripts/bench/srt-fingerprint.mjs <unpacked package> ~/.local/share/claude/versions/<pin>`. When a release shows no difference, switch `SRT_VERSION` (`probe.ts`) and step 4's install (its version and checksums) to it, as a reviewed change.
 
 ## Caps (usage-equivalent dollars)
 
@@ -205,12 +206,62 @@ Then, in that shell:
     ~/.local/bin/claude                            # then /login, then /exit
     ~/.local/bin/claude auth status                # expect a claude.ai sign-in
 
-    # the bench's own clone, at the pinned commit
-    git clone <this repository> ~/src/bench-engine && git -C ~/src/bench-engine checkout <pinned sha>
+### 4. sandbox-runtime for the srt probe (as the bench user)
 
-    # sandbox-runtime for the srt probe: this exact version, for this user only (no repo dependency)
-    npm install -g --prefix ~/.local @anthropic-ai/sandbox-runtime@0.0.79
-    ~/.local/bin/srt --version                     # expect 0.0.79
+Where it comes from: the npm registry, package `@anthropic-ai/sandbox-runtime`, version **0.0.79** (`SRT_VERSION` in `probe.ts`), tarball `https://registry.npmjs.org/@anthropic-ai/sandbox-runtime/-/sandbox-runtime-0.0.79.tgz`. Its registry checksums (read from `npm view @anthropic-ai/sandbox-runtime@0.0.79 dist` on 2026-10-19):
+- integrity: `sha512-WjBmS9fbTpnQwQkM9SU+JjhM2CcXo9eWEELktY1100RMvTy/jPhP44yZ3NXhh+GHB350OgPbM3+FubE5WVRtSA==`
+- shasum (sha1): `89b8735f51ad38791cb1a2913b616745dc5c04dc`
+
+Fetch the tarball, check it against the pin, and install that file, for this user only (it is no repo dependency). The install is chained on the check, so a checksum mismatch, a failed fetch or a missing `openssl` installs nothing (`test/bench-cli.test.ts` runs this block with stand-ins):
+
+    mkdir -p ~/src/srt-0.0.79 && cd ~/src/srt-0.0.79 &&
+      npm pack @anthropic-ai/sandbox-runtime@0.0.79 &&
+      test "sha512-$(openssl dgst -sha512 -binary anthropic-ai-sandbox-runtime-0.0.79.tgz | base64 -w0)" = "sha512-WjBmS9fbTpnQwQkM9SU+JjhM2CcXo9eWEELktY1100RMvTy/jPhP44yZ3NXhh+GHB350OgPbM3+FubE5WVRtSA==" &&
+      echo "checksum OK" &&
+      npm install -g --ignore-scripts --prefix ~/.local ./anthropic-ai-sandbox-runtime-0.0.79.tgz
+    ~/.local/bin/srt --version                     # expect 0.0.79 (no such file: the checksum didn't match, nothing was installed)
+    cd ~
+
+The tarball is pinned; its four dependencies (`zod`, `commander`, `node-forge`, `@pondwader/socks5-server`) are resolved by npm within their semver ranges when it installs (**inferred** from the package's metadata: it ships no lock file). `--ignore-scripts` keeps any of their install scripts from running as the bench user; sandbox-runtime 0.0.79 has none of its own (`npm view ... scripts`, measured by the #851 review).
+
+### 5. The bench's own clone, at the pinned commit (as the bench user)
+
+The clone comes from this repository's own URL: `repository.url` in `package.json`, without its `git+` prefix (written there, not here, so this folder names no project). The pinned commit is a commit on `main` that has `scripts/bench/cli.ts`: for the first preflight, the merge commit of the PR that added it. Every run records the CLI version and the results; keep the commit you used with them.
+
+If `~/src/bench-engine` already exists (an earlier clone), move it aside first (`mv ~/src/bench-engine ~/src/bench-engine.old`): `git clone` refuses a folder that is there and not empty, and the chain then stops. Replace the two PASTE_ values first. Each command is chained on the one before, so a clone at any other commit is never built or installed:
+
+    BENCH_REPO=PASTE_THE_HTTPS_CLONE_URL
+    BENCH_SHA=PASTE_THE_40_HEX_PINNED_COMMIT
+    git clone "$BENCH_REPO" ~/src/bench-engine &&
+      git -C ~/src/bench-engine checkout --detach "$BENCH_SHA" &&
+      test "$(git -C ~/src/bench-engine rev-parse HEAD)" = "$BENCH_SHA" &&
+      (cd ~/src/bench-engine && npm ci --ignore-scripts && npm run build) &&
+      mkdir -p ~/.local/bin &&
+      printf '#!/bin/sh\nexec node %s/src/bench-engine/dist/scripts/bench/cli.js "$@"\n' "$HOME" > ~/.local/bin/bench &&
+      chmod 755 ~/.local/bin/bench &&
+      echo "bench installed at $BENCH_SHA"
+
+### 6. The preflight
+
+From the admin account:
+
+    sudo -iu wl-bench
+
+Then, in that shell (a new login shell, so `~/.local/bin` is on PATH: Ubuntu's default `~/.profile` adds it when it exists, **inferred**; otherwise run `~/.local/bin/bench preflight`):
+
+    bench preflight
+
+It runs every check a run makes before any model call or container, as the bench user only (it refuses any other user, and root, before anything else runs), and prints one line per check: PASS, FAIL (with why) or SKIP. It exits 0 only when every check passes. It starts no container, makes no model call, downloads nothing and keeps nothing on disk (the srt probe's settings go in a 0600 temporary file, removed when srt ends); it prints no variable's value, no token and no account detail but the login's method and plan. The checks:
+
+- the bench user (never root: neither the real nor the effective uid is 0, and both are known), and HOME is its home in the user database; when either fails nothing else runs;
+- the bench root (outside every checkout, credential store and engine state), and the held-out store: not made yet, or a folder of this user at exactly 0700, with no link anywhere from the bench root down to it;
+- research-on-demand off (every cap 0);
+- `claude --version` is the pin, and `claude auth status` reports a claude.ai login on Anthropic's own API (no login-switching variable set);
+- the srt probe (step 4's srt, the agents' lane): every socket and credential attempt refused;
+- `docker info`: this user's daemon is rootless, through an absolute `DOCKER_HOST` (no docker context);
+- the containers' limits are valid for this machine.
+
+Left to the run: the limits read back from a probe container (it needs a task image), and the sandbox confirmation, the run's first model call.
 
 ## Data and results
 
