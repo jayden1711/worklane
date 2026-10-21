@@ -28,6 +28,7 @@ export const HOOK_IMPORTS: readonly string[] = [
   'src/network.ts',
   'src/optimize.ts',
   'src/os/index.ts',
+  'src/os/own-env.ts',
   'src/os/system-paths.ts',
   'src/os/system-root-guard.ts',
   'src/preview/config.ts',
