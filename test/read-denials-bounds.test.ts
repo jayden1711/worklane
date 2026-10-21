@@ -103,7 +103,7 @@ test('#890: a crafted "*a*a…*b" pattern with an exception can\'t hang the coor
   writeFileSync(join(dir, 'a'.repeat(40)), 'x');
   // In a child process with a hard limit: a hung matcher would block this process's event loop for good.
   const mod = new URL('../src/read-denials.js', import.meta.url).href;
-  const script = `const { runReadDenials } = await import(${JSON.stringify(mod)}); const t = Date.now(); const r = runReadDenials({ cwd: ${JSON.stringify(dir)}, home: '/h' }); process.stdout.write(JSON.stringify({ ms: Date.now() - t, error: r.error ?? null }));`;
+  const script = `const { runReadDenials } = await import(${JSON.stringify(mod)}); const t = performance.now(); const r = runReadDenials({ cwd: ${JSON.stringify(dir)}, home: '/h' }); process.stdout.write(JSON.stringify({ ms: performance.now() - t, error: r.error ?? null }));`;
   const r = spawnSync(process.execPath, ['--input-type=module', '-e', script], { encoding: 'utf8', timeout: 10_000 });
   assert.equal(r.status, 0, `finished within 10 s (signal ${r.signal}): ${r.stderr.slice(0, 300)}`);
   const out = JSON.parse(r.stdout) as { ms: number };

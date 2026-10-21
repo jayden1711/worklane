@@ -30,7 +30,8 @@ test('#890: globMatcher agrees with globToRegExp on random globs and paths', () 
 
 test('#890: globMatcher stays linear on "*a*a…*b" against a long name', () => {
   const p = `${'*a'.repeat(30)}*b`;
-  const t = Date.now();
+  const t = performance.now();
   assert.equal(globMatcher(p).test('a'.repeat(200)), false);
-  assert.ok(Date.now() - t < 1_000, `${Date.now() - t} ms`);
+  const ms = performance.now() - t;
+  assert.ok(ms < 1_000, `${ms} ms`);
 });
