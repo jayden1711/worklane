@@ -30,8 +30,8 @@ export function readReceiptEvents(dbPath: string): ReceiptEvent[] {
  * A7): a file in a receipts directory is whatever its writer put there; a huge one is refused from its size.
  */
 export const RECEIPTS_MAX_BYTES = 64 * 1024 * 1024;
-/** The most bytes a signer's chain state file holds (it is a few hundred). */
-const STATE_MAX_BYTES = 64 * 1024;
+/** The most bytes a signer's chain state file holds: its fixed receipts are a chain's prefix (#918 round 7). */
+const STATE_MAX_BYTES = RECEIPTS_MAX_BYTES;
 
 /**
  * A regular file's text, at most `max` bytes: never through a link, never a FIFO, device or directory (#918 round 4,
@@ -62,7 +62,12 @@ function readRegular(file: string, max: number, what: string, oneName = false): 
       n += r;
     }
     if (n > st.size) throw new ReceiptError(`${what} ${file} grew while it was read`);
-    return buf.subarray(0, n).toString('utf8');
+    const bytes = buf.subarray(0, n);
+    const text = bytes.toString('utf8');
+    // Compared as bytes (#918 round 7 advisory): a byte that isn't UTF-8 would decode to U+FFFD and read the same as
+    // a real one, so a file that isn't valid UTF-8 is refused.
+    if (!Buffer.from(text, 'utf8').equals(bytes)) throw new ReceiptError(`${what} ${file} is not valid UTF-8: refused`);
+    return text;
   } finally {
     closeSync(fd);
   }
@@ -166,7 +171,7 @@ function parseState(path: string, text: string | null): ChainState | null {
     parsed = undefined;
   }
   const st = ChainStateSchema.safeParse(parsed);
-  if (!st.success) throw new ReceiptError(`the signer's chain state ${path} is unreadable; nothing was signed (restore it, or start a new chain with --genesis: root or the owner only)`);
+  if (!st.success) throw new ReceiptError(`the signer's chain state ${path} is unreadable; nothing was signed (root or the owner restores it from a backup; a new chain takes a new key)`);
   return st.data;
 }
 
@@ -174,10 +179,9 @@ function parseState(path: string, text: string | null): ChainState | null {
  * The signer's chain state, written BEFORE the receipts it names (#918 round 5; see signLog), and flushed to disk
  * before they are written (syncToDisk): without that, a power loss could keep the new receipts and an older state.
  */
-function writeState(path: string, state: ChainState, before: string | null): void {
-  // The state it replaces is kept beside it, `<state>.prev` (owner-only), for the owner's recovery after a rotation
-  // whose receipts write failed (#918 round 6, 3c). The signer itself never reads it.
-  if (before !== null) replaceOwnerOnly(`${path}.prev`, before);
+function writeState(path: string, state: ChainState): void {
+  // No copy of the state it replaces is kept (#918 round 7: round 6's `<state>.prev` was a way to roll the signer
+  // back; the fixed receipts in the state make every recovery a give-back instead).
   replaceOwnerOnly(path, `${canonicalJson(state)}\n`);
   syncToDisk(path);
 }
@@ -229,7 +233,7 @@ function asOnlySigner<T>(state: string, fn: (own: ChainState | null, unchanged: 
     const unchanged = () => {
       if (readStateText(state) !== text) throw new ReceiptError(`the signer's chain state ${state} changed while this run signed (another writer); nothing was written`);
     };
-    return fn(parseState(state, text), unchanged, (next) => writeState(state, next, text));
+    return fn(parseState(state, text), unchanged, (next) => writeState(state, next));
   } finally {
     got.lock.release();
   }

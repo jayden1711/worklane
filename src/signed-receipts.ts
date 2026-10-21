@@ -317,7 +317,20 @@ export const CHAIN_STATE_SCHEMA = `${BRAND.cli}.receipt-state/v1`;
  * receipts file is signed on only when it extends this head, so a file truncated, deleted or swapped for another
  * chain (one a retired start key signed and rotated to this key included) is never extended.
  */
-export const ChainStateSchema = z.strictObject({ schema: z.literal(CHAIN_STATE_SCHEMA), count: positive, head: hex64, start: KeyRef });
+export const ChainStateSchema = z.strictObject({
+  schema: z.literal(CHAIN_STATE_SCHEMA),
+  count: positive,
+  head: hex64,
+  start: KeyRef,
+  /**
+   * The receipts the current key can't make again, kept whole (#918 round 7): the chain from its start through its
+   * latest `key.rotated`. A `chain.started` or `key.rotated` carries the time it was made, and the receipts before a
+   * rotation were signed by a key the signer no longer holds. With them kept, a missing, emptied or short receipts
+   * file is always given back byte for byte from this and the log, or refused when the log changed: never a recovery
+   * that deletes the state and so lets the same key start a second chain.
+   */
+  fixed: z.array(EnvelopeSchema).min(1),
+});
 export type ChainState = z.infer<typeof ChainStateSchema>;
 
 /**
@@ -338,38 +351,57 @@ export function receiptId(env: Envelope): string {
   return sha256(Buffer.from(env.payload, 'base64'));
 }
 
-/** The signer's chain state after `envelopes`, a chain that starts from `start`. */
+/** The signer's chain state after `envelopes`, a chain that starts from `start` (`fixed`: through its last rotation). */
 export function chainStateOf(envelopes: readonly Envelope[], start: { keyid: string; spki: string }): ChainState {
-  return ChainStateSchema.parse({ schema: CHAIN_STATE_SCHEMA, count: envelopes.length, head: receiptId(envelopes.at(-1)!), start: { keyid: start.keyid, spki: start.spki } });
+  let last = 0;
+  for (const [i, e] of envelopes.entries()) if ((statementOf(e) as { kind?: unknown } | null)?.kind === 'key.rotated') last = i;
+  const fixed = envelopes.slice(0, last + 1).map((e) => ({ payloadType: e.payloadType, payload: e.payload, signatures: e.signatures.map((s) => ({ keyid: s.keyid, sig: s.sig })) }));
+  return ChainStateSchema.parse({ schema: CHAIN_STATE_SCHEMA, count: envelopes.length, head: receiptId(envelopes.at(-1)!), start: { keyid: start.keyid, spki: start.spki }, fixed });
 }
 
 /** The words every refusal about the signer's own head uses. */
 const headOf = (own: ChainState) => `the signer's own chain head is receipt ${own.count} (${own.head})`;
 
 /**
- * The chain so far, for a signer about to extend it, and whether it is behind the signer's own head.
+ * The chain so far, for a signer about to extend it (`base`, verified as `state`), and whether it is behind the
+ * signer's own head.
  * - 'genesis': there must be no receipts. A file the signer has no state for is someone else's, never adopted.
- * - Its own state: the receipts must be there (a missing or empty file was deleted or truncated) and verify from the
- *   start key the state names, and this key must be the chain's current one. Receipts that reach the state's count
- *   must hold its head at its place (not cut back and replaced, not another chain). Receipts short of it are `behind`:
- *   the state is written before the receipts (#918 round 5), so a failed or killed run leaves them so, and so does a
- *   cut. The caller signs them again from the log and accepts only the very head the state names (signEvents).
+ * - Its own state: the receipts, if any, must verify from the start key the state names and agree with the state's
+ *   fixed receipts (ChainState.fixed) as far as both go; receipts that reach the state's count must hold its head at
+ *   its place (not cut back and replaced, not another chain). The chain to extend is the receipts, or the state's
+ *   fixed receipts when the receipts are shorter (missing or emptied included). If that is short of the state's head
+ *   it is `behind`: the state is written before the receipts (#918 round 5), so a failed or killed run leaves it so,
+ *   and so does a cut. The caller signs the rest again from the log and accepts only the very head the state names.
+ *   And this key must be the current key of the chain it extends.
  */
-function chainSoFar(existing: readonly unknown[], signer: ReceiptSigner, from: ChainFrom): { state: Extract<ChainResult, { ok: true }>; behind: ChainState | null } {
+function chainSoFar(existing: readonly unknown[], signer: ReceiptSigner, from: ChainFrom): { state: Extract<ChainResult, { ok: true }>; base: readonly unknown[]; behind: ChainState | null } {
   if (from === 'genesis') {
     if (existing.length) throw new ReceiptError("there are receipts already, and the signer has no chain state of its own: they are someone else's chain, never adopted; nothing was signed");
-    return { state: { ok: true, count: 0, head: null, ids: [], keys: [], statements: [] }, behind: null };
+    return { state: { ok: true, count: 0, head: null, ids: [], keys: [], statements: [] }, base: [], behind: null };
   }
   const own = ChainStateSchema.parse(from);
-  if (!existing.length) throw new ReceiptError(`the receipts are missing or empty, but ${headOf(own)}: they were deleted or truncated; nothing was signed`);
   const start = keyOfRef(own.start);
   if (!start) throw new ReceiptError("the signer's chain state names a start key that is unreadable, or isn't the key its id names; nothing was signed");
-  const state = verifyChain(existing, { keys: [start] });
-  if (!state.ok) throw new ReceiptError(`the receipts so far don't verify from the signer's start key (receipt ${state.index + 1}: ${state.problem}); nothing was signed`);
-  if (state.count >= own.count && state.ids[own.count - 1] !== own.head) throw new ReceiptError(`the receipts don't extend the chain this signer signed (${headOf(own)}): they were truncated and replaced, or forked; nothing was signed`);
+  const fixed = verifyChain(own.fixed, { keys: [start] });
+  if (!fixed.ok || fixed.count > own.count) throw new ReceiptError("the signer's chain state is damaged (its fixed receipts don't verify from its start key); nothing was signed");
+  let state = fixed;
+  let base: readonly unknown[] = own.fixed;
+  if (existing.length) {
+    const found = verifyChain(existing, { keys: [start] });
+    if (!found.ok) throw new ReceiptError(`the receipts so far don't verify from the signer's start key (receipt ${found.index + 1}: ${found.problem}); nothing was signed`);
+    const both = Math.min(found.count, fixed.count);
+    const agree = found.ids.slice(0, both).every((id, i) => id === fixed.ids[i]);
+    if (!agree || (found.count >= own.count && found.ids[own.count - 1] !== own.head)) {
+      throw new ReceiptError(`the receipts don't extend the chain this signer signed (${headOf(own)}): they were truncated and replaced, or forked; nothing was signed`);
+    }
+    if (found.count >= fixed.count) {
+      state = found;
+      base = existing;
+    }
+  }
   const mine = keyId(signer.publicKey);
   if (state.keys.at(-1) !== mine) throw new ReceiptError(`this key (${mine}) is not the chain's current key (${state.keys.at(-1)}); nothing was signed`);
-  return { state, behind: state.count < own.count ? own : null };
+  return { state, base, behind: state.count < own.count ? own : null };
 }
 
 function parsed<T extends (typeof RECEIPT_EVENTS)[number]>(e: ReceiptEvent, type: T): EventPayload<T> {
@@ -407,15 +439,16 @@ function bodyOf(e: ReceiptEvent, version: string | null, decided: Map<string, st
  * after this (unchanged when nothing was added).
  */
 export function signEvents(existing: readonly unknown[], events: readonly ReceiptEvent[], signer: ReceiptSigner, o: SignOptions): { envelopes: Envelope[]; added: number; head: string | null; state: ChainState } {
-  const { state, behind } = chainSoFar(existing, signer, o.from);
-  const r = extend(existing, state, events, signer, o.now ?? (() => new Date().toISOString()));
-  // Receipts behind the signer's own head are signed again from the log. Merge receipts take their time, version and
-  // digest from the log, and ed25519 is deterministic, so an unchanged log gives back the very receipts the state
-  // names; a log changed meanwhile, or a rotation or start that can't be made again, gives another id: refused.
+  const { state, base, behind } = chainSoFar(existing, signer, o.from);
+  const r = extend(base, state, events, signer, o.now ?? (() => new Date().toISOString()));
+  // Receipts behind the signer's own head are signed again from the log, onto its fixed receipts. Merge receipts take
+  // their time, version and digest from the log, and ed25519 is deterministic, so an unchanged log gives back the very
+  // receipts the state names; a log changed meanwhile gives another id: refused.
   if (behind && (r.envelopes.length < behind.count || receiptId(r.envelopes[behind.count - 1]!) !== behind.head)) {
-    throw new ReceiptError(`the receipts are short of the chain this signer signed (${headOf(behind)}), and signing them again from the log doesn't give that head back: the log changed under receipts already signed, or they were replaced; nothing was signed`);
+    throw new ReceiptError(`the receipts are ${existing.length ? 'short of' : 'missing or empty, short of'} the chain this signer signed (${headOf(behind)}), and signing them again from the log doesn't give that head back: the log changed under receipts already signed, or they were replaced; nothing was signed`);
   }
-  return { ...r, state: chainStateOf(r.envelopes, o.from === 'genesis' ? keyRef(signer.publicKey) : o.from.start) };
+  // `added`: receipts the receipts file gains (given back or new).
+  return { ...r, added: r.envelopes.length - existing.length, state: chainStateOf(r.envelopes, o.from === 'genesis' ? keyRef(signer.publicKey) : o.from.start) };
 }
 
 /** `existing` (verified as `state`) extended with a receipt for each merge event in `events` after its last one. */
@@ -473,9 +506,9 @@ function extend(existing: readonly unknown[], state: Extract<ChainResult, { ok: 
  */
 export function rotateChain(existing: readonly unknown[], signer: ReceiptSigner, next: KeyObject, o: SignOptions & { from: ChainState }): Envelope[] {
   const now = o.now ?? (() => new Date().toISOString());
-  const { state, behind } = chainSoFar(existing, signer, o.from);
+  const { state, base, behind } = chainSoFar(existing, signer, o.from);
   // A rotation is never made on receipts short of the signer's head: sign first, which brings them back.
-  if (behind) throw new ReceiptError(`the receipts are short of the chain this signer signed (${headOf(behind)}): run sign first; nothing was rotated`);
+  if (behind || base !== existing) throw new ReceiptError(`the receipts are short of the chain this signer signed (${headOf(o.from)}): run sign first; nothing was rotated`);
   if (!state.count) throw new ReceiptError('there is no chain to rotate: sign with the new key to start one');
   if (next.type !== 'public' || next.asymmetricKeyType !== 'ed25519') throw new ReceiptError('the next key is an ed25519 public key');
   if (keyId(next) === keyId(signer.publicKey)) throw new ReceiptError('the next key is the key already in use');

@@ -170,7 +170,7 @@ test('an option given with no value is a usage error (exit 2)', () => {
   }
 });
 
-test('the state a run replaces is kept as <state>.prev, for recovering a failed rotation', () => {
+test('no copy of a replaced state is kept to roll back to (round 7: the state keeps what a recovery needs)', () => {
   const f = fixtureLog();
   const a = keys();
   const b = keys();
@@ -180,7 +180,7 @@ test('the state a run replaces is kept as <state>.prev, for recovering a failed 
   const before = readFileSync(state, 'utf8');
   const r = cli('rotate', '--out', out, '--key', a.privFile, '--next', b.pubFile, '--state', state);
   assert.equal(r.status, 0, r.stderr);
-  assert.equal(text(`${state}.prev`), before);
+  assert.ok(!existsSync(`${state}.prev`), 'round 6 kept <state>.prev, a way to roll the signer back');
   assert.notEqual(readFileSync(state, 'utf8'), before);
 });
 
