@@ -8,10 +8,8 @@ import { BRAND } from './brand.js';
 import { openReadOnly } from './events/read-only.js';
 import { tryLock } from './locks.js';
 import { notOwnerOnlyDir, processIdentity, processPlace, replaceOwnerOnly, syncToDisk, UNKNOWN_IDENTITY } from './os/index.js';
-import { AT_UNRECORDED, canonicalJson, chainStateOf, ChainStateSchema, FIELD_READ_MAX, keyId, keySigner, logDigest, PAYLOAD_READ_MAX, predecessorOf, predecessorOfState, ReceiptError, RECEIPT_EVENTS, rotateChain, signEvents, statementOf, type ChainState, type Envelope, type Predecessor, type ReceiptEvent, type ReceiptSigner } from './signed-receipts.js';
+import { AT_UNRECORDED, canonicalJson, chainStateOf, ChainStateSchema, columnHash, FIELD_READ_MAX, keyId, keySigner, PAYLOAD_READ_MAX, predecessorOf, predecessorOfState, ReceiptError, rotateChain, signEvents, statementOf, type ChainState, type Envelope, type Predecessor, type ReceiptEvent, type ReceiptSigner, type Unread } from './signed-receipts.js';
 
-/** The bytes of one log column hashed per query, at most (a longer one takes several queries). */
-const HASH_CHUNK = 64 * 1024 * 1024;
 const LOG_COLUMNS = ['ts', 'type', 'actor', 'payload'] as const;
 type LogColumn = (typeof LOG_COLUMNS)[number];
 
@@ -19,13 +17,23 @@ type LogColumn = (typeof LOG_COLUMNS)[number];
  * The event log must be the shape the signer reads (round 13, the round-12 second review's rows 4 and 5): `events` a
  * table, not a view (a view can yield rows without end, and `sign` ran on holding its lock), whose `id` is its
  * INTEGER PRIMARY KEY with rowids (so every id is an integer), in a UTF-8 database (column bytes are hashed and read
- * as UTF-8). Anything else is refused before a row is read: fail closed, with the reason.
+ * as UTF-8). Anything else is refused before a row is read: fail closed, with the reason. Checked inside the read
+ * transaction the rows are read in (openLog), so the table checked is the table read (round 14).
  */
 function checkLogShape(db: ReturnType<typeof openReadOnly>, path: string): void {
   const refuse = (why: string) => new ReceiptError(`the event log ${path} isn't one the signer reads: its "events" must be a table with id INTEGER PRIMARY KEY and rowids, in a UTF-8 database (${why}); nothing was signed`);
   const objects = db.prepare("SELECT type, sql FROM sqlite_master WHERE name = 'events'").all() as { type: string; sql: string | null }[];
   if (objects.length !== 1 || objects[0]!.type !== 'table') throw refuse(objects.length ? `it is a ${objects.map((o) => o.type).join(', ')}` : 'there is none');
-  if (/without\s+rowid/i.test(objects[0]!.sql ?? '')) throw refuse('it is a WITHOUT ROWID table');
+  // SQLite's own word on rowids (round 14: a comment inside "WITHOUT /*x*/ ROWID" got past round 13's text match).
+  let listed: { schema: string; type: string; wr: number }[] = [];
+  try {
+    listed = db.prepare("PRAGMA table_list('events')").all() as typeof listed;
+  } catch {
+    throw refuse("SQLite couldn't list it");
+  }
+  const main = listed.filter((t) => t.schema === 'main');
+  if (main.length !== 1 || main[0]!.type !== 'table') throw refuse('it is not a plain table');
+  if (main[0]!.wr || /without\s+rowid/i.test(objects[0]!.sql ?? '')) throw refuse('it is a WITHOUT ROWID table');
   const columns = db.prepare('PRAGMA table_info(events)').all() as { name: string; type: string; pk: number; notnull: number }[];
   const keys = columns.filter((c) => c.pk > 0);
   if (keys.length !== 1 || keys[0]!.name !== 'id' || keys[0]!.type.toUpperCase() !== 'INTEGER') throw refuse('its id is not its INTEGER PRIMARY KEY');
@@ -35,62 +43,116 @@ function checkLogShape(db: ReturnType<typeof openReadOnly>, path: string): void 
   if (encoding !== 'UTF-8') throw refuse(`the database is ${encoding ?? 'of no known'} encoding`);
 }
 
+/** One read of an event log (openLog): its rows in id order, one at a time, and its last id; then close it. */
+export interface LogRead {
+  rows(): Generator<ReceiptEvent>;
+  lastId(): bigint;
+  close(): void;
+}
+
 /**
- * Every event in an events database opened read-only, oldest first. Each column is hashed from its bytes as stored
- * (`hashes`, for the log digest), in chunks of HASH_CHUNK. Only what a receipt can use is read as text: ts, type and
- * actor up to FIELD_READ_MAX bytes, and the payload of a kind receipts are made from up to PAYLOAD_READ_MAX bytes,
- * parsed. A field past its bound is never read (`unread`). WHY (#918 round 13): round 12 read every row whole with
- * `.all()` and hashed each event as one string, so one appended 90 MB event stopped every `sign` for good (the
- * round-12 second review, row 1). Rows are read one at a time.
+ * An events database opened read-only as ONE read transaction: its shape checked (checkLogShape), then its rows read,
+ * from the same snapshot. WHY (#918 round 14): round 13 checked the shape and read the rows in separate reads, so a
+ * coordinator flipping `events` between a table and a view got the view read, and a slow view hung `sign` holding the
+ * signer's lock (the round-13 second review, rows 3 and 3b, measured). The log is in WAL mode (src/events/log.ts), so
+ * the snapshot doesn't hold back the coordinator's writes.
+ *
+ * Each row is given out and dropped (rows() is a generator; extend keeps no row). Each column comes as its bytes in
+ * one `CAST(… AS BLOB)` (a row is at most SQLite's 1 GB, a Uint8Array, never one string) and is hashed with its
+ * storage class (columnHash). Only what a receipt can use is read as text: ts, type and actor up to FIELD_READ_MAX
+ * bytes; a merge event's payload up to PAYLOAD_READ_MAX, a coordinator.started's up to FIELD_READ_MAX (it holds a
+ * version, which is cut past REDACT_MAX anyway). A field past its bound, not UTF-8, or NULL is never read as text
+ * (`unread`). WHY (#918 rounds 13 and 14): round 12 hashed each event as one string, and round 13 kept every row and
+ * parsed payload until signing ended, so one large event, or a few large `coordinator.started` events, or a few
+ * million small events, ran every `sign` and every successor out of memory for good.
  */
-export function readReceiptEvents(dbPath: string): ReceiptEvent[] {
+export function openLog(dbPath: string): LogRead {
   if (!existsSync(dbPath)) throw new ReceiptError(`no event log at ${dbPath}`);
-  const read: ReadonlySet<string> = new Set(RECEIPT_EVENTS);
-  const kinds = RECEIPT_EVENTS.map((k) => `'${k}'`).join(', ');
   const db = openReadOnly(dbPath);
   try {
+    db.exec('BEGIN');
     checkLogShape(db, dbPath);
-    const size = (c: LogColumn) => `length(CAST(${c} AS BLOB))`;
-    const inline = (c: LogColumn) => (c === 'payload' ? `CAST(type AS TEXT) IN (${kinds}) AND ${size(c)} <= ${PAYLOAD_READ_MAX}` : `${size(c)} <= ${FIELD_READ_MAX}`);
-    const query = db.prepare(`SELECT id, ${LOG_COLUMNS.map((c) => `${size(c)} AS ${c}_n, CASE WHEN ${inline(c)} THEN CAST(${c} AS BLOB) END AS ${c}_b`).join(', ')} FROM events ORDER BY id`);
+  } catch (e) {
+    db.close();
+    throw e;
+  }
+  let open = true;
+  const close = () => {
+    if (!open) return;
+    open = false;
+    try {
+      db.exec('COMMIT');
+    } finally {
+      db.close();
+    }
+  };
+  const merge: ReadonlySet<string> = new Set(['merge.decided', 'merge.done', 'merge.failed']);
+  // A payload that isn't JSON reads as undefined: its event is then signed as unsignable, never ending the chain
+  // (#918 round 11, P3).
+  const json = (t: string): unknown => {
+    try {
+      return JSON.parse(t) as unknown;
+    } catch {
+      return undefined;
+    }
+  };
+  /** Bytes as text: null when there are none (NULL), past `max`, or not UTF-8 (round 14: never U+FFFD in a receipt). */
+  const asText = (storage: string, b: Uint8Array | null, max: number): { text: string } | Unread => {
+    const bytes = b?.byteLength ?? 0;
+    if (storage === 'null') return { bytes: 0, why: 'null' };
+    if (bytes > max) return { bytes, why: 'bound' };
+    const buf = b ? Buffer.from(b.buffer, b.byteOffset, b.byteLength) : Buffer.alloc(0);
+    const text = buf.toString('utf8');
+    return Buffer.from(text, 'utf8').equals(buf) ? { text } : { bytes, why: 'not-utf8' };
+  };
+  function* rows(): Generator<ReceiptEvent> {
+    const query = db.prepare(`SELECT id, rowid AS rid, ${LOG_COLUMNS.map((c) => `typeof(${c}) AS ${c}_t, CAST(${c} AS BLOB) AS ${c}_b`).join(', ')} FROM events ORDER BY id`);
     // Every integer read as a BigInt (#918 round 12): an id past 2^53 is read exactly, never refused as "too large".
     query.setReadBigInts(true);
-    const chunks = Object.fromEntries(LOG_COLUMNS.map((c) => [c, db.prepare(`SELECT substr(CAST(${c} AS BLOB), ?, ?) AS b FROM events WHERE id = ?`)])) as Record<LogColumn, ReturnType<typeof db.prepare>>;
-    const hashOf = (c: LogColumn, id: bigint, n: number, bytes: Uint8Array | null): string => {
-      const h = createHash('sha256');
-      if (bytes) h.update(bytes);
-      else for (let at = 1; at <= n; at += HASH_CHUNK) h.update((chunks[c].get(at, HASH_CHUNK, id) as { b: Uint8Array }).b);
-      return h.digest('hex');
-    };
-    const text = (b: Uint8Array) => Buffer.from(b.buffer, b.byteOffset, b.byteLength).toString('utf8');
-    // A payload that isn't JSON reads as undefined: its event is then signed as unsignable, never ending the chain
-    // (#918 round 11, P3).
-    const json = (t: string): unknown => {
-      try {
-        return JSON.parse(t) as unknown;
-      } catch {
-        return undefined;
-      }
-    };
-    const events: ReceiptEvent[] = [];
     for (const row of query.iterate() as Iterable<Record<string, unknown>>) {
       const id = row.id;
-      // A rowid is always an integer; checked anyway, so nothing else reaches BigInt() (round 13).
-      if (typeof id !== 'bigint') throw new ReceiptError(`the event log ${dbPath} has an id that isn't an integer; nothing was signed`);
-      const n = (c: LogColumn) => Number(row[`${c}_n`] as bigint);
+      // A rowid alias is always an integer, and is the rowid; checked anyway (round 13; round 14: `INTEGER PRIMARY KEY
+      // DESC` is no rowid alias).
+      if (typeof id !== 'bigint' || row.rid !== id) throw new ReceiptError(`the event log ${dbPath} has an id that isn't its integer rowid; nothing was signed`);
+      const t = (c: LogColumn) => String(row[`${c}_t`]);
       const b = (c: LogColumn) => (row[`${c}_b`] as Uint8Array | null) ?? null;
-      const hashes = { ts: hashOf('ts', id, n('ts'), b('ts')), type: hashOf('type', id, n('type'), b('type')), actor: hashOf('actor', id, n('actor'), b('actor')), payload: hashOf('payload', id, n('payload'), b('payload')) };
-      const type = b('type') ? text(b('type')!) : '';
+      const hashes = { ts: columnHash(t('ts'), b('ts') ?? ''), type: columnHash(t('type'), b('type') ?? ''), actor: columnHash(t('actor'), b('actor') ?? ''), payload: columnHash(t('payload'), b('payload') ?? '') };
+      const typeRead = asText(t('type'), b('type'), FIELD_READ_MAX);
+      const type = 'text' in typeRead ? typeRead.text : '';
       const unread: NonNullable<ReceiptEvent['unread']> = {};
-      if (!b('ts')) unread.ts = n('ts');
-      if (!b('actor')) unread.actor = n('actor');
-      if (read.has(type) && !b('payload')) unread.payload = n('payload');
-      const payload = read.has(type) && b('payload') ? json(text(b('payload')!)) : undefined;
-      events.push({ id, ts: b('ts') ? text(b('ts')!) : '', type, actor: b('actor') ? text(b('actor')!) : '', payload, hashes, ...(Object.keys(unread).length ? { unread } : {}) });
+      const field = (c: 'ts' | 'actor') => {
+        const r = asText(t(c), b(c), FIELD_READ_MAX);
+        if ('text' in r) return r.text;
+        unread[c] = r;
+        return '';
+      };
+      const ts = field('ts');
+      const actor = field('actor');
+      let payload: unknown;
+      if (merge.has(type) || type === 'coordinator.started') {
+        const r = asText(t('payload'), b('payload'), merge.has(type) ? PAYLOAD_READ_MAX : FIELD_READ_MAX);
+        if ('text' in r) payload = json(r.text);
+        else if (merge.has(type)) unread.payload = r;
+      }
+      yield { id, ts, type, actor, payload, hashes, ...(Object.keys(unread).length ? { unread } : {}) };
     }
-    return events;
+  }
+  const lastId = () => {
+    const r = db.prepare('SELECT max(id) AS m FROM events');
+    r.setReadBigInts(true);
+    const m = (r.get() as { m: unknown }).m;
+    return typeof m === 'bigint' && m > 0n ? m : 0n;
+  };
+  return { rows, lastId, close };
+}
+
+/** `fn` over the log at `dbPath`, read once (openLog), closed after. */
+function withLog<T>(dbPath: string, fn: (log: LogRead) => T): T {
+  const log = openLog(dbPath);
+  try {
+    return fn(log);
   } finally {
-    db.close();
+    log.close();
   }
 }
 
@@ -448,7 +510,7 @@ export function signLog(o: { log: string; out: string; state: string; genesis?: 
 
 /** What `sign` did: the receipts it added, the chain's length and head, and how many it couldn't read (round 12). */
 /** `skipped` (round 13): merge events at ids <= 0, never receipted (no receipt holds such an id). */
-export type SignResult = { added: number; count: number; head: string | null; unsignable: number; unrecorded: number; skipped: number };
+export type SignResult = { added: number; count: number; head: string | null; unsignable: number; unrecorded: number; unreadInstance: number; skipped: number };
 
 /**
  * signLog's body, as the only signer of the chain at `statePath` (asOnlySigner). `after`: the chain a new chain
@@ -466,8 +528,11 @@ function signAs(o: { log: string; out: string; state: string; genesis?: boolean;
       ensureSaved(own);
     }
     const existing = readReceiptFiles(o.out);
-    const events = readReceiptEvents(o.log);
-    const r = signEvents(existing, events, o.signer, { from: own ?? 'genesis', ...(after ? { after: after.previous } : {}) });
+    // One pass over one read of the log, keeping no row (round 14).
+    const r = withLog(o.log, (log) => signEvents(existing, log.rows(), o.signer, { from: own ?? 'genesis', ...(after ? { after: after.previous } : {}), maxBytes: RECEIPTS_MAX_BYTES }));
+    // A chain starts once its log has its first event, so the registry always knows the log by it (round 14: a start
+    // over an empty log knew it by path alone, and the coordinator moving its log blocked every successor).
+    if (!own && r.first === null) throw new ReceiptError(`the event log ${o.log} has no event yet: a chain starts once the log has its first event (the registry knows a log by it); nothing was signed`);
     const text = r.added ? receiptsText(r.envelopes) : null;
     unchanged();
     let ref = own?.registry ?? null;
@@ -482,7 +547,7 @@ function signAs(o: { log: string; out: string; state: string; genesis?: boolean;
         stateText({ ...ended, ended: { successor: keyId(o.signer.publicKey), head: ended.head } });
       }
       stateText({ ...r.state, registry: { path: registry!, count: Number.MAX_SAFE_INTEGER, head: '0'.repeat(64) } });
-      ref = recordStart(registry!, o.signer, statePath, { path: realLog(o.log), first: events.length ? logDigest('', events[0]!) : null }, after);
+      ref = recordStart(registry!, o.signer, statePath, { path: realLog(o.log), first: r.first }, after);
       if (after?.held) markEnded(after.held, after.previous, o.signer);
     }
     const next = { ...r.state, registry: ref };
@@ -490,13 +555,14 @@ function signAs(o: { log: string; out: string; state: string; genesis?: boolean;
     // Round 13: from here on, a rerun of this start is refused (recordStart), so a deleted state never starts again.
     if (!own) recordSaved(registry!, ref!.head);
     if (text !== null) writeReceipts(o.out, text);
-    const added = r.envelopes.slice(existing.length).map((e) => statementOf(e) as { kind?: string; at?: string });
+    const added = r.envelopes.slice(existing.length).map((e) => statementOf(e) as { kind?: string; at?: string; cut?: Record<string, unknown> });
     return {
       added: r.added,
       count: r.envelopes.length,
       head: r.head,
       unsignable: added.filter((s) => s.kind === 'event.unsignable').length,
       unrecorded: added.filter((s) => s.kind !== 'chain.started' && s.kind !== 'key.rotated' && s.at === AT_UNRECORDED).length,
+      unreadInstance: added.filter((s) => s.cut?.instance !== undefined && s.cut.instance !== null && typeof s.cut.instance === 'object' && ['unread', 'not-utf8', 'null'].includes(String((s.cut.instance as { of?: unknown }).of))).length,
       skipped: r.skipped,
     };
   });
@@ -814,7 +880,7 @@ function fromCopy(path: string, log: string, signer: ReceiptSigner, registry: st
   }
   if (readable) throw new ReceiptError(`the ended chain's state ${started.state} can be read: succeed it from its state (--after ${started.state}), never from a copy; nothing was signed`);
   if (dirname(started.state) === dirname(statePath)) throw new ReceiptError(`a successor's state goes in a directory of its own, not the ended chain's (${dirname(started.state)}); nothing was signed`);
-  const now = readReceiptEvents(log).reduce((m, e) => (BigInt(e.id) > m ? BigInt(e.id) : m), 0n);
+  const now = withLog(log, (l) => l.lastId());
   const event = BigInt(p.event) > now ? BigInt(p.event) : now;
   return { previous: { ...p, event: event.toString() }, chain: reg.ids[at]!, held: null };
 }

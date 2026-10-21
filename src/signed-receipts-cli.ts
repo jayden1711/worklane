@@ -139,7 +139,7 @@ export async function receiptsCommand(sub: string | undefined, rest: string[]): 
         say(`${r.added} new receipts signed with key ${keyId(signer.publicKey)}; ${r.count} in the chain, head ${r.head ?? 'none'}`);
         // WHY (#918 round 12): a merge event the signer couldn't read, or a time it couldn't keep, is said every time,
         // never only counted by verify.
-        say(`of the new receipts, ${r.unsignable} event.unsignable (a merge event the signer couldn't read as a decision or result) and ${r.unrecorded} with at "unrecorded" (the log's time was empty or past the bound); verify lists each`);
+        say(`of the new receipts, ${r.unsignable} event.unsignable (a merge event the signer couldn't read as a decision or result), ${r.unrecorded} with at "unrecorded" (the log's time was empty, past the bound, NULL or not UTF-8) and ${r.unreadInstance} with its instance unread (the log's actor past the bound, NULL or not UTF-8); verify lists each`);
         // Round 13: a merge event no receipt can hold (an id <= 0) is said, never passed over silently.
         if (r.skipped) say(`SKIPPED: ${r.skipped} merge events at ids <= 0 in the log, which no receipt can hold: compare them with the repository's merges`);
         say(NOT_ROOT_SIGNED);
@@ -172,6 +172,13 @@ export async function receiptsCommand(sub: string | undefined, rest: string[]): 
     warn(`${BRAND.cli} receipts: ${e instanceof Error ? e.message : String(e)}`);
     return 1;
   }
+}
+
+/** Why a log field was never read as text (a cut's `of`, round 14), with its size in bytes. */
+function unreadWhy(of: string, bytes: number): string {
+  if (of === 'null') return 'NULL, never read';
+  if (of === 'not-utf8') return `not UTF-8 (${bytes} bytes), never read`;
+  return `past the signer's read bound (${bytes} bytes), never read`;
 }
 
 function done(args: string[]) {
@@ -249,8 +256,13 @@ function verify(args: string[]): number {
     if (s.kind === 'event.unsignable') say(`UNSIGNABLE: receipt ${i + 1}: event ${s.event} (${s.type}): ${s.problem}; no decision or result was read from it (log.digest binds the event as stored)`);
     if ((s.kind === 'merge.decided' || s.kind === 'merge.result' || s.kind === 'event.unsignable') && s.at === AT_UNRECORDED) {
       const cut = s.cut.at;
-      const why = !cut ? 'the log said so itself' : cut.of === 'unread' ? `the log's time was past the signer's read bound (${cut.length} bytes), never read` : `the log's time was ${cut.length ? `past the bound (${cut.length} characters)` : 'empty'}, so the signer kept none of it`;
+      const why = !cut ? 'the log said so itself' : cut.of === 'whole' || cut.of === 'kept' ? `the log's time was ${cut.length ? `past the bound (${cut.length} characters)` : 'empty'}, so the signer kept none of it` : `the log's time was ${unreadWhy(cut.of, cut.length)}`;
       say(`UNRECORDED TIME: receipt ${i + 1}: event ${s.event}: at is "${AT_UNRECORDED}": ${why}`);
+    }
+    // Round 14 (the round-13 final check, 3b): an instance the signer never read is shown too.
+    if (s.kind === 'merge.decided' || s.kind === 'merge.result' || s.kind === 'event.unsignable') {
+      const inst = s.cut.instance;
+      if (inst && inst.of !== 'whole' && inst.of !== 'kept') say(`UNREAD INSTANCE: receipt ${i + 1}: event ${s.event}: instance is "": the log's actor was ${unreadWhy(inst.of, inst.length)}`);
     }
   }
   say("A receipt proves only that the chain's key holder signed that the log said this, in this order; never that the log said it, or that an attested field was true.");

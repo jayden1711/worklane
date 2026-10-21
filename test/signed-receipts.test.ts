@@ -117,7 +117,7 @@ test('signing again receipts only what is new, continuing the same chain', () =>
   const s = signed();
   const first = verifyChain(s.envs, { keys: [s.pub] });
   assert.ok(first.ok);
-  assert.deepEqual(signLog({ log: s.path, out: s.out, state: s.state, signer: s.signer }), { added: 0, count: 5, head: first.head, unsignable: 0, unrecorded: 0, skipped: 0 });
+  assert.deepEqual(signLog({ log: s.path, out: s.out, state: s.state, signer: s.signer }), { added: 0, count: 5, head: first.head, unsignable: 0, unrecorded: 0, unreadInstance: 0, skipped: 0 });
   s.log.append('merge.decided', { issue: 9, number: 43, head: sha('d'), auto: true, reasons: [] }, 'inst');
   const again = signLog({ log: s.path, out: s.out, state: s.state, signer: s.signer });
   assert.equal(again.added, 1);
