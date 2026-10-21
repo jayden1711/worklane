@@ -941,7 +941,14 @@ export function seatbeltProfile(home: string, hide: readonly string[]): string {
   const re = (s: string) => s.replace(/[.*+?^$()[\]{}|]/g, '\\$&');
   const h = re(plain);
   const rules = [`(regex #"^${h}/\\.claude")`, `(regex #"^${h}/\\.config/[^/]*-claude-key(/|$)")`, ...hide.map((p) => `(subpath "${p}")`)];
-  return `(version 1)\n(allow default)\n(deny file-read* file-write* ${rules.join(' ')})\n(deny file-write* (subpath "${plain}"))\n`;
+  // Every directory above the home, itself (literal: not what it holds), can't be written: renamed, removed or
+  // replaced. Else, with a home under a directory the agent owns, a command could rename that directory away and put
+  // one holding a planted ~/.bashrc in its place (#798 round 13: the macOS form of the Linux wrapper's
+  // `above "$hr/."`; untested on a real macOS).
+  const above: string[] = [];
+  for (let d = posixPath.dirname(plain); d !== '/' && d !== '.'; d = posixPath.dirname(d)) above.push(d);
+  const way = above.length > 0 ? `(deny file-write* ${above.map((d) => `(literal "${d}")`).join(' ')})\n` : '';
+  return `(version 1)\n(allow default)\n(deny file-read* file-write* ${rules.join(' ')})\n(deny file-write* (subpath "${plain}"))\n${way}`;
 }
 
 /**

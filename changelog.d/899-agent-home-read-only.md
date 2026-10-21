@@ -1,8 +1,9 @@
 ### Upgrading (from v0.5.2)
 
-- **A project command can no longer write the agent user's home directly (#798).** Checks, worktree setup, full runs, suite tuning, a browser flow's app and auto-config run as the agent user in a sandbox, and the agent's home is now read-only there. Some ways around that remain: `docs/auth.md` lists them all, under "What the read-only home does not stop". Before, a command could plant `~/.bashrc`, `~/.profile`, `~/.gitconfig`, `~/.npmrc`, `~/.ssh/config` or a `~/.local/bin` entry for a later agent-user process outside the sandbox to run. What changes for a project:
+- **A project command can no longer write the agent user's home directly (#798).** Checks, worktree setup, full runs, suite tuning, a browser flow's app, auto-config and a deploy's trigger and verify run as the agent user in a sandbox, and the agent's home is now read-only there. Some ways around that remain: `docs/auth.md` lists them all, under "What the read-only home does not stop". Before, a command could plant `~/.bashrc`, `~/.profile`, `~/.gitconfig`, `~/.npmrc`, `~/.ssh/config` or a `~/.local/bin` entry for a later agent-user process outside the sandbox to run. What changes for a project:
   - On Linux, `~/.cache` and `~/.npm` are writable but start empty for every command and are thrown away after it. Each command downloads its dependencies again.
   - A write anywhere else in the home fails with "Read-only file system", apart from the masked `~/.claude*` directories and any directory `credentials.yaml` hides under the home, which are empty throwaway tmpfs mounts too. That includes Go's `~/go`, `~/.cargo`, `~/.m2`, `~/.gradle`, `pip install --user` and pnpm's store. Point such a cache outside the home in `tests.yaml` (for example `GOMODCACHE=/tmp/gomod`).
+  - A deploy trigger or verify (`deploy.yaml`, a project command since #919) that writes the agent's home, such as `~/.kube/cache`, `~/.config/...` or `~/.docker`, now gets "Read-only file system". Point the tool's cache or config outside the home (for example `KUBECACHEDIR` or `DOCKER_CONFIG`). The whole home stays read-only by the owner's decision; #912 is the follow-up.
   - Browsers installed in the agent's `~/.cache/ms-playwright` are hidden inside the sandbox. Set `PLAYWRIGHT_BROWSERS_PATH` to a directory outside the home.
   - On macOS nothing in the home is writable, `~/.npm` included. The home must be configured at its canonical path: one reached through a symlink (`/var/...` is `/private/var/...` there), or one that can't be resolved, is refused, because macOS's sandbox matches canonical paths and would protect nothing there. Set `run_as.agent_home` to the path the refusal names.
   - An agent home that isn't a directory, or is `/`, is refused: set `run_as.agent_home` in `instance.yaml` to the agent user's real home.
@@ -36,7 +37,7 @@
 
 ### Guardrail changes: what each one does
 
-- **Agent home read-only to project commands (#798).** The project-command sandbox (`projectCommand`, `src/os/index.ts`) binds the agent user's home read-only, under the credential masks. On Linux, `~/.cache` and `~/.npm` are throwaway tmpfs mounts. On macOS, the profile denies every write under the home, but a link leading out of it is followed (macOS isn't in CI); a home that isn't its own canonical path, or can't be resolved, is refused (`seatbeltProfileFor`), since the profile's rules match canonical paths only. On Linux, each symlink directly in the home or in `~/.config` is walked hop by hop, by the same rule as the credential paths. A run is refused in seven cases:
+- **Agent home read-only to project commands (#798).** The project-command sandbox (`projectCommand`, `src/os/index.ts`) binds the agent user's home read-only, under the credential masks. On Linux, `~/.cache` and `~/.npm` are throwaway tmpfs mounts. On macOS, the profile denies every write under the home, but a link leading out of it is followed (macOS isn't in CI); a home that isn't its own canonical path, or can't be resolved, is refused (`seatbeltProfileFor`), since the profile's rules match canonical paths only; and each directory above the home is denied writes itself, so none can be renamed away and replaced (untested on a real macOS). On Linux, each symlink directly in the home or in `~/.config` is walked hop by hop, by the same rule as the credential paths. A run is refused in seven cases:
   - a hop outside the home could be re-aimed (a link in a directory the agent can write);
   - a hop is the agent's own;
   - a dangling link passes through a directory the agent can write;
@@ -50,7 +51,7 @@
   A project command can't write the home directly, nor anything an allowed link in it reaches. The ways around that are listed in full in `docs/auth.md`, under "What the read-only home does not stop". Among them:
   - a link deeper in the home, or inside what an allowed link reaches, that leads somewhere writable (After install);
   - a hard link made outside the sandbox to a home file (`~/.cache` and `~/.npm` included), or to a file an allowed link reaches: a command writes the file through its other name (After install covers the home's);
-  - a FIFO or socket in the home, or a socket outside it: what a command writes reaches a live agent-user process outside the sandbox (#933);
+  - a FIFO or socket in the home, or any IPC channel outside it: what a command writes reaches a live agent-user process outside the sandbox (#933);
   - on macOS, links: the profile walks none, so a link leading out of the home is followed and written through.
 
   A link to a directory above the home (`~/.x -> ..`) is bound read-only over the home's own mounts, so for that layout `~/.cache` and `~/.npm` are read-only too.
