@@ -27,7 +27,7 @@ const M1 = sha('c');
 const sign = (o: Record<string, unknown>) => signLog(o as unknown as Parameters<typeof signLog>[0]);
 const rotate = (o: Record<string, unknown>) => rotateFile(o as unknown as Parameters<typeof rotateFile>[0]);
 const text = (p: string) => (existsSync(p) ? readFileSync(p, 'utf8') : null);
-type St = { kind: string; event?: number; decision?: { auto: boolean; reasons: string[] }; previous?: unknown; cut?: Record<string, { sha256: string; length: number }> };
+type St = { kind: string; event?: number; decision?: { auto: boolean; reasons: string[] }; previous?: unknown; cut?: Record<string, { sha256: string; length: number; of?: string }> };
 const statements = (out: string) => (readReceiptFiles(out) as Envelope[]).map((e) => statementOf(e) as St);
 
 function keys(): { pub: KeyObject; signer: ReceiptSigner } {
@@ -81,11 +81,16 @@ test('a successor chain with a new key never signs the events the ended chain si
     if (from !== 'state') copyFileSync(old.out, after);
     const k2 = keys();
     const out = outFile();
-    sign({ log: old.f.path, out, state: stateFile(), genesis: true, after, signer: k2.signer });
+    const state2 = stateFile();
+    sign({ log: old.f.path, out, state: state2, genesis: true, after, signer: k2.signer });
+    // From the state: only the event after the ended chain's last one (decision 43, event 6). From a copy (round 10):
+    // only events after the log's last one when it started, so not even event 6; the next one, event 7, is signed.
+    old.f.log.append('merge.decided', { issue: 10, number: 44, head: sha('e'), auto: true, reasons: [] }, 'inst');
+    sign({ log: old.f.path, out, state: state2, signer: k2.signer });
     const st = statements(out);
     assert.ok(verifyChain(readReceiptFiles(out), { keys: [k2.pub] }).ok);
-    // Only the event after the ended chain's last one (decision 43, event 6); the edited decision 42 (event 4) never.
-    assert.deepEqual(st.filter((s) => s.kind !== 'chain.started').map((s) => s.event), [6], `${from}: ${JSON.stringify(st.map((s) => s.event))}`);
+    // Never the edited decision 42 (event 4), nor anything else the ended chain covered.
+    assert.deepEqual(st.filter((s) => s.kind !== 'chain.started').map((s) => s.event), from === 'state' ? [6, 7] : [7], `${from}: ${JSON.stringify(st.map((s) => s.event))}`);
     assert.ok(st[0]!.previous, `${from}: chain.started names the chain it succeeds`);
   }
 });
@@ -126,8 +131,10 @@ test('one oversized free-text field is cut in its receipt, with the SHA-256 of t
   const envs = readReceiptFiles(out) as Envelope[];
   assert.ok(verifyChain(envs, { keys: [k.pub] }).ok);
   const last = statementOf(envs.at(-1)!) as St;
-  assert.ok(last.decision!.reasons[0]!.length < 4096, 'the reason is cut');
-  assert.deepEqual(last.cut?.['decision.reasons.0'], { sha256: createHash('sha256').update(huge, 'utf8').digest('hex'), length: huge.length });
+  // Round 10: a string past the redaction bound is never redacted and never kept; the receipt records its length,
+  // and the digest of what it keeps (""), never a digest of unredacted text.
+  assert.equal(last.decision!.reasons[0], '', 'none of the reason is kept');
+  assert.deepEqual(last.cut?.['decision.reasons.0'], { sha256: createHash('sha256').update('""', 'utf8').digest('hex'), length: huge.length, of: 'kept' });
 });
 
 test('a directory --out is refused before the state is written', () => {

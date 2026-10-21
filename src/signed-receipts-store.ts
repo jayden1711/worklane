@@ -7,7 +7,7 @@ import { BRAND } from './brand.js';
 import { openReadOnly } from './events/read-only.js';
 import { tryLock } from './locks.js';
 import { notOwnerOnlyDir, processIdentity, processPlace, replaceOwnerOnly, syncToDisk, UNKNOWN_IDENTITY } from './os/index.js';
-import { canonicalJson, chainStateOf, ChainStateSchema, keySigner, predecessorOf, predecessorOfState, ReceiptError, RECEIPT_EVENTS, rotateChain, signEvents, type ChainState, type Envelope, type Predecessor, type ReceiptEvent, type ReceiptSigner } from './signed-receipts.js';
+import { canonicalJson, chainStateOf, ChainStateSchema, keyId, keySigner, predecessorOf, predecessorOfState, ReceiptError, RECEIPT_EVENTS, rotateChain, signEvents, type ChainState, type Envelope, type Predecessor, type ReceiptEvent, type ReceiptSigner } from './signed-receipts.js';
 
 /**
  * Every event in an events database opened read-only, oldest first, each with its payload as stored (`raw`, for the
@@ -26,7 +26,8 @@ export function readReceiptEvents(dbPath: string): ReceiptEvent[] {
 }
 
 /**
- * The most bytes of receipts read for one chain, all its files together (some 30,000 receipts). WHY (#918 round 4,
+ * The most bytes of receipts read for one chain, all its files together (some 30,000 ordinary receipts, but only
+ * about 40 of the worst case: a receipt can be about 1.6 MB, docs/design.md §5a `cut`). WHY (#918 round 4,
  * A7): a file in a receipts directory is whatever its writer put there; a huge one is refused from its size.
  */
 export const RECEIPTS_MAX_BYTES = 64 * 1024 * 1024;
@@ -152,20 +153,33 @@ function statePlace(state: string, out: string): string {
       return resolve(p);
     }
   };
-  const given = dirname(resolve(state));
-  const stateDir = real(given);
+  const stateDir = real(dirname(resolve(state)));
   const outDir = real(dirname(resolve(out)));
   const rel = relative(join(outDir, basename(out)), join(stateDir, basename(state)));
   const inOut = rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel);
   if (stateDir === outDir || inOut) {
     throw new ReceiptError(`the signer's chain state must be kept separate from the receipts: ${state} is in the directory of ${out}`);
   }
-  // The path as given, then the real one. notOwnerOnlyDir refuses a link as the directory itself, and its ownedPath a
-  // path any other user can redirect (on Linux, any link on the way: a link's own mode reads 0777). And from here on
-  // only the real path is used, so a link flipped after this check changes nothing read or written.
-  const why = notOwnerOnlyDir(given) ?? notOwnerOnlyDir(stateDir);
+  return ownedStatePath(state);
+}
+
+/**
+ * A chain state's path, checked and resolved once (statePlace, and an ended chain's state for --after): the directory
+ * as given, then its real one, must be only this user's. notOwnerOnlyDir refuses a link as the directory itself, and
+ * its ownedPath a path any other user can redirect (on Linux, any link on the way: a link's own mode reads 0777). From
+ * here on only the real path is used, so a link flipped after this check changes nothing read or written.
+ */
+function ownedStatePath(state: string): string {
+  const given = dirname(resolve(state));
+  let real = resolve(given);
+  try {
+    real = realpathSync(given);
+  } catch {
+    // Missing: notOwnerOnlyDir names it below.
+  }
+  const why = notOwnerOnlyDir(given) ?? notOwnerOnlyDir(real);
   if (why) throw new ReceiptError(`the signer's chain state goes in a directory only the signer can write, reached through no link: ${why}`);
-  return join(stateDir, basename(state));
+  return join(real, basename(state));
 }
 
 /**
@@ -326,7 +340,12 @@ export function signLog(o: { log: string; out: string; state: string; genesis?: 
   const statePath = statePlace(o.state, o.out);
   outIsFile(o.out);
   if (o.after !== undefined && !o.genesis) throw new ReceiptError('--after names the chain a new chain succeeds: it goes with --genesis only');
-  const after = o.after === undefined ? undefined : endedChain(o.after);
+  if (o.after !== undefined) {
+    // Before the ended chain is marked: the new chain's own preconditions (they are checked again under its lock).
+    if (lstatSync(statePath, { throwIfNoEntry: false })) throw new ReceiptError(`the signer already has a chain (its state is ${o.state}): --genesis never starts over it; nothing was signed`);
+    if (lstatSync(o.out, { throwIfNoEntry: false })) throw new ReceiptError(`--genesis never replaces anything at --out (${o.out}); nothing was signed`);
+  }
+  const after = o.after === undefined ? undefined : endedChain(o.after, o.log, o.signer);
   return asOnlySigner(statePath, (own, unchanged, save) => {
     if (own && o.genesis) throw new ReceiptError(`the signer already has a chain (its state is ${o.state}): --genesis never starts over it; nothing was signed`);
     if (!own && !o.genesis) throw new ReceiptError(`the signer has no chain state at ${o.state}: a new chain starts only with --genesis (root or the owner only); nothing was signed`);
@@ -350,7 +369,7 @@ export function signLog(o: { log: string; out: string; state: string; genesis?: 
  * signed it. A copy of the receipts shorter than what the old chain signed would let the successor sign events the old
  * one also signed: give the state when it can be read (docs/design.md §5a).
  */
-function endedChain(path: string): Predecessor {
+function endedChain(path: string, log: string, signer: ReceiptSigner): Predecessor {
   const there = lstatSync(path, { throwIfNoEntry: false });
   if (!there) throw new ReceiptError(`--after ${path}: nothing there; give the ended chain's state, or a copy of its receipts`);
   if (!there.isDirectory()) {
@@ -361,10 +380,36 @@ function endedChain(path: string): Predecessor {
     } catch {
       parsed = null;
     }
-    const st = ChainStateSchema.safeParse(parsed);
-    if (st.success) return predecessorOfState(st.data);
+    if (ChainStateSchema.safeParse(parsed).success) return endState(path, signer);
   }
-  return predecessorOf(readReceiptFiles(path));
+  // From a copy of its receipts (round 10, #918 round-9 review rows 3 and 3b): a copy may be cut short, before
+  // events the ended chain signed, or before a rotation to a key it doesn't name. So the successor starts after the
+  // log's last event now, whatever the copy reaches: it never signs an event that already existed. Events in the gap
+  // stay unreceipted, which an auditor sees against the merges; none is signed twice.
+  const p = predecessorOf(readReceiptFiles(path));
+  const now = readReceiptEvents(log).reduce((m, e) => Math.max(m, e.id), 0);
+  return { ...p, event: Math.max(p.event, now) };
+}
+
+/**
+ * Mark the ended chain at `path` ended, under its own lock, and give the chain a successor names (round 10, #918
+ * round-9 review rows 1 and 2): its state records the successor's start key and the head it succeeded, so it never
+ * signs or rotates again (even once the log is restored), and no second successor starts from it. Run again by the
+ * same successor key (a genesis that failed after the mark), it marks nothing new.
+ */
+function endState(path: string, signer: ReceiptSigner): Predecessor {
+  return asOnlySigner(ownedStatePath(path), (own, unchanged, save) => {
+    if (!own) throw new ReceiptError(`--after ${path}: the ended chain's state is gone; nothing was signed`);
+    const p = predecessorOfState(own);
+    const mine = keyId(signer.publicKey);
+    if (p.keys.includes(mine)) throw new ReceiptError(`this key (${mine}) signed the chain it would succeed: a successor takes a new key; nothing was signed`);
+    if (own.ended && own.ended.successor !== mine) throw new ReceiptError(`the chain at ${path} already has a successor, started by key ${own.ended.successor}: a chain has one successor; nothing was signed`);
+    if (!own.ended) {
+      unchanged();
+      save({ ...own, ended: { successor: mine, head: own.head } });
+    }
+    return p;
+  });
 }
 
 /**

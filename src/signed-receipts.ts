@@ -6,7 +6,7 @@
 import { createHash, createPublicKey, sign as edSign, verify as edVerify, type KeyObject } from 'node:crypto';
 import { z } from 'zod';
 import { BRAND } from './brand.js';
-import { redact } from './events/redact.js';
+import { redactString } from './events/redact.js';
 import { EventSchemas, type EventPayload } from './events/types.js';
 
 /** The statement's schema and version: a verifier refuses any other (a new field is a new version). */
@@ -49,14 +49,20 @@ const Verified = z.array(z.strictObject({ field: z.string().min(1).max(100), how
  * redaction). Empty when nothing was cut. WHY (#918 round 9, route 2): one oversized event made a receipt nothing
  * could read; a cut field attests its first part and the digest of the whole (docs/design.md §5a, VERIFIES vs ATTESTS).
  */
-const Cut = z.record(z.string().min(1), z.strictObject({ sha256: hex64, length: positive }));
+const Cut = z.record(z.string().min(1), z.strictObject({ sha256: hex64, length: positive, of: z.enum(['whole', 'kept']) }));
 const eventFields = { instance: z.string(), event: positive, verified: Verified, log: z.strictObject({ digest: hex64 }), cut: Cut };
 /**
  * The chain a new chain succeeds, named in its `chain.started` (#918 round 9, route 1): every key that signed it (its
  * predecessors' included), its head, and the last log event it receipted. The new chain receipts only events after
  * that one, with a key not among these. Null for a first chain.
  */
-const Previous = z.strictObject({ keys: z.array(hex64).min(1), head: hex64, event: z.number().int().min(0) });
+const Previous = z.strictObject({
+  keys: z.array(hex64).min(1),
+  head: hex64,
+  event: z.number().int().min(0),
+  /** Read from the ended chain's own state, or from a copy of its receipts (round 10: a copy may be cut short). */
+  from: z.enum(['state', 'copy']),
+});
 export type Predecessor = z.infer<typeof Previous>;
 
 /**
@@ -261,6 +267,7 @@ export function verifyChain(envelopes: readonly unknown[], o: { keys: readonly K
   let current: KeyObject | null = null;
   let prev: string | null = null;
   let lastEvent = 0;
+  let previousKeys: readonly string[] = [];
   const ids: string[] = [];
   const keys: string[] = [];
   const statements: Statement[] = [];
@@ -292,6 +299,11 @@ export function verifyChain(envelopes: readonly unknown[], o: { keys: readonly K
       const declared = keyOfRef(s.key);
       if (!declared) return fail(0, "the chain's start key is unreadable, or isn't the key its id names");
       if (!trusted.has(s.key.keyid)) return fail(0, `the chain was started by key ${s.key.keyid}, which is not a key given to verify against`);
+      // A successor (round 10, #918 round-9 review row 4): never started by a key that signed the chain it
+      // succeeds, and receipting only events after that chain's last one.
+      if (s.previous?.keys.includes(s.key.keyid)) return fail(0, `the chain was started by key ${s.key.keyid}, which signed the chain it succeeds`);
+      previousKeys = s.previous?.keys ?? [];
+      lastEvent = s.previous?.event ?? 0;
       current = declared;
       keys.push(s.key.keyid);
     } else if (s.kind === 'chain.started') return fail(i, 'a second chain start inside the chain');
@@ -311,6 +323,7 @@ export function verifyChain(envelopes: readonly unknown[], o: { keys: readonly K
       const next = keyOfRef(s.next);
       if (!next) return fail(i, "the key it rotates to is unreadable, or isn't the key its id names");
       if (s.next.keyid === signing) return fail(i, 'it rotates to the key already in use');
+      if (previousKeys.includes(s.next.keyid)) return fail(i, 'it rotates to a key that signed the chain this one succeeds');
       current = next;
       keys.push(s.next.keyid);
     }
@@ -346,6 +359,12 @@ export const ChainStateSchema = z.strictObject({
   fixed: z.array(EnvelopeSchema).min(1),
   /** The last log event the chain receipted (its predecessor's, before its own first): where a successor starts. */
   event: z.number().int().min(0),
+  /**
+   * Set when a successor started from this chain (round 10): the successor's start key and the head it succeeded.
+   * An ended chain never signs or rotates again, and has one successor only. WHY (#918 round-9 review, rows 1 and 2):
+   * an ended chain resumed beside its successor once the log was restored, and a second successor started from it.
+   */
+  ended: z.strictObject({ successor: hex64, head: hex64 }).nullable(),
 });
 export type ChainState = z.infer<typeof ChainStateSchema>;
 
@@ -376,12 +395,12 @@ export function chainStateOf(envelopes: readonly Envelope[], start: { keyid: str
   let last = 0;
   for (const [i, e] of envelopes.entries()) if ((statementOf(e) as { kind?: unknown } | null)?.kind === 'key.rotated') last = i;
   const fixed = envelopes.slice(0, last + 1).map((e) => ({ payloadType: e.payloadType, payload: e.payload, signatures: e.signatures.map((s) => ({ keyid: s.keyid, sig: s.sig })) }));
-  return ChainStateSchema.parse({ schema: CHAIN_STATE_SCHEMA, count: envelopes.length, head: receiptId(envelopes.at(-1)!), start: { keyid: start.keyid, spki: start.spki }, fixed, event: lastEventOf(envelopes) });
+  return ChainStateSchema.parse({ schema: CHAIN_STATE_SCHEMA, count: envelopes.length, head: receiptId(envelopes.at(-1)!), start: { keyid: start.keyid, spki: start.spki }, fixed, event: lastEventOf(envelopes), ended: null });
 }
 
 /** The chain a successor names, from the ended chain's own state: its keys (from its fixed receipts), head and last event. */
 export function predecessorOfState(s: ChainState): Predecessor {
-  return Previous.parse({ ...predecessorOf(s.fixed), head: s.head, event: s.event });
+  return Previous.parse({ ...predecessorOf(s.fixed), head: s.head, event: s.event, from: 'state' });
 }
 
 /** The last log event a chain receipted: its last merge receipt's, or, with none, its predecessor's (or 0). */
@@ -407,7 +426,7 @@ export function predecessorOf(envelopes: readonly unknown[]): Predecessor {
   if (!start) throw new ReceiptError('the chain to succeed has no readable start: give its own state, or a copy of its receipts');
   const r = verifyChain(envelopes, { keys: [start] });
   if (!r.ok) throw new ReceiptError(`the chain to succeed doesn't verify (receipt ${r.index + 1}: ${r.problem}): give its own state, or a copy of its receipts`);
-  return Previous.parse({ keys: [...new Set([...(st?.previous?.keys ?? []), ...r.keys])], head: r.head, event: lastEventOf(envelopes as Envelope[]) });
+  return Previous.parse({ keys: [...new Set([...(st?.previous?.keys ?? []), ...r.keys])], head: r.head, event: lastEventOf(envelopes as Envelope[]), from: 'copy' });
 }
 
 /** The words every refusal about the signer's own head uses. */
@@ -431,6 +450,7 @@ function chainSoFar(existing: readonly unknown[], signer: ReceiptSigner, from: C
     return { state: { ok: true, count: 0, head: null, ids: [], keys: [], statements: [] }, base: [], behind: null };
   }
   const own = ChainStateSchema.parse(from);
+  if (own.ended) throw new ReceiptError(`this chain ended: key ${own.ended.successor} started its successor after its head ${own.ended.head}. An ended chain never signs or rotates again; nothing was signed`);
   const start = keyOfRef(own.start);
   if (!start) throw new ReceiptError("the signer's chain state names a start key that is unreadable, or isn't the key its id names; nothing was signed");
   const fixed = verifyChain(own.fixed, { keys: [start] });
@@ -462,30 +482,51 @@ function parsed<T extends (typeof RECEIPT_EVENTS)[number]>(e: ReceiptEvent, type
 }
 
 /** A merge event's receipt body, redacted (the log redacts on write already; this holds for any source). */
-/** The most UTF-16 code units a string in a receipt keeps, and the most items a list keeps (cutToBound). */
+/** The most UTF-16 code units a string in a receipt keeps, and the most items a list keeps (redactBounded). */
 export const TEXT_MAX = 1024;
 export const ITEMS_MAX = 64;
+/**
+ * The longest string the redactor is run on (UTF-16 code units). A longer one is never redacted and never kept: the
+ * receipt holds no text of it. WHY (#918 round-9 review, row 6): the private-key pattern is quadratic on repeated
+ * BEGIN markers, and round 9 ran it on the whole value before the cut (a 6.9 MB reason took 125 s, holding the
+ * signer's lock). Keeping none of an unredacted string also means no part of a secret it holds reaches a receipt.
+ */
+export const REDACT_MAX = 16 * 1024;
+
+type CutEntry = { sha256: string; length: number; of: 'whole' | 'kept' };
+/** A value's SHA-256 over its canonical JSON (a lone surrogate is escaped there, never read as U+FFFD: row 7). */
+const digestOf = (v: unknown) => sha256(Buffer.from(canonicalJson(v), 'utf8'));
 
 /**
- * `v` with every string past TEXT_MAX and every list past ITEMS_MAX cut to that bound, each cut recorded in `cut` by
- * its dotted path with the SHA-256 (of the string's UTF-8, or of the list's canonical JSON) and length of the whole.
- * WHY (#918 round 9, route 2): one event with a 50 MiB reason made a receipts file over the read cap, which nothing
- * could verify, and every chain over that log stalled there. Bounded, a receipt stays small whatever the log holds.
+ * `v` redacted and bounded, every cut recorded in `cut` by its dotted path:
+ * - a string up to REDACT_MAX is redacted whole; past TEXT_MAX it is cut, with `of: 'whole'`: the length and SHA-256
+ *   of the whole redacted value (whoever holds the text can redact it the same way and check);
+ * - a string past REDACT_MAX is kept as "" and never redacted, with `of: 'kept'`: its length, and the digest of what
+ *   the receipt keeps; never a digest of unredacted text, which could confirm a guessed secret;
+ * - a list past ITEMS_MAX keeps its first items, with `of: 'kept'`: its length and the digest of the kept items.
+ * Each string is redacted on its own, as redact() does for an object's values. WHY (#918 rounds 9 and 10): one event
+ * with a 50 MiB reason made receipts nothing could read, and one oversized string stalled the redactor.
  */
-function cutToBound(v: unknown, path: string, cut: Record<string, { sha256: string; length: number }>): unknown {
+function redactBounded(v: unknown, path: string, cut: Record<string, CutEntry>): unknown {
   if (typeof v === 'string') {
-    if (v.length <= TEXT_MAX) return v;
-    cut[path] = { sha256: sha256(Buffer.from(v, 'utf8')), length: v.length };
-    const kept = v.slice(0, TEXT_MAX);
+    if (v.length > REDACT_MAX) {
+      cut[path] = { length: v.length, sha256: digestOf(''), of: 'kept' };
+      return '';
+    }
+    const r = redactString(v);
+    if (r.length <= TEXT_MAX) return r;
+    cut[path] = { length: r.length, sha256: digestOf(r), of: 'whole' };
+    const kept = r.slice(0, TEXT_MAX);
     const end = kept.charCodeAt(kept.length - 1);
     // Never half a surrogate pair at the cut.
     return end >= 0xd800 && end <= 0xdbff ? kept.slice(0, -1) : kept;
   }
   if (Array.isArray(v)) {
-    if (v.length > ITEMS_MAX) cut[path] = { sha256: sha256(Buffer.from(canonicalJson(v), 'utf8')), length: v.length };
-    return v.slice(0, ITEMS_MAX).map((x, i) => cutToBound(x, `${path}.${i}`, cut));
+    const kept = v.slice(0, ITEMS_MAX).map((x, i) => redactBounded(x, `${path}.${i}`, cut));
+    if (v.length > ITEMS_MAX) cut[path] = { length: v.length, sha256: digestOf(kept), of: 'kept' };
+    return kept;
   }
-  if (v !== null && typeof v === 'object') return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, cutToBound(x, path ? `${path}.${k}` : k, cut)]));
+  if (v !== null && typeof v === 'object') return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, redactBounded(x, path ? `${path}.${k}` : k, cut)]));
   return v;
 }
 
@@ -495,8 +536,8 @@ function bodyOf(e: ReceiptEvent, version: string | null, decided: Map<string, st
   // the event-derived text needs.
   const signer = { verified: [], log: { digest } };
   const bounded = <T>(body: T) => {
-    const cut: Record<string, { sha256: string; length: number }> = {};
-    return { ...(cutToBound(redact(body), '', cut) as T), ...signer, cut };
+    const cut: Record<string, CutEntry> = {};
+    return { ...(redactBounded(body, '', cut) as T), ...signer, cut };
   };
   if (e.type === 'merge.decided') {
     const p = parsed(e, 'merge.decided');
