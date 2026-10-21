@@ -77,13 +77,13 @@ test('#763: an ASCII look-alike of a money-list glob (r, n for m; 1 or capital I
   heldAsMoneyLookalikes(money, ['payrnents/charge.ts', 'bi1ling/charge.ts', 'biIling/charge.ts', 'rnoney.txt'], ['payments/charge.ts', 'billing/charge.ts', 'money.txt'], 'other/charge.ts');
 });
 
-test('#763: an ASCII or mixed look-alike of a money-list regex literal waits: the regex, as written, is tested against readings of the path', () => {
+test('#763: an ASCII or mixed look-alike of a money-list regex line converted to a glob (round 6) waits like one of any glob', () => {
   const money = moneyFrom(['/payments/', '/billing/']);
   heldAsMoneyLookalikes(money, ['src/payrnents/charge.ts', 'src/bi1ling/charge.ts', 'src/biIling/charge.ts', `src/p${CYRILLIC_A}yrnents/charge.ts`], ['src/payments/charge.ts', 'src/billing/charge.ts'], 'src/other/charge.ts');
-  // A quantifier's braces and an escape keep their digits and letters: a Cyrillic look-alike of an exact path waits.
+  // A line with no mechanical glob form (a class, \d) is refused: every path waits, the look-alike as much as the rest.
   const exact = moneyFrom(['/^lib\\/p[a]y\\d{1}\\.ts$/']);
   assert.deepEqual(judge(`lib/p${CYRILLIC_A}y1.ts`, exact).map((r) => [r.level, r.auto]), Array(2).fill(['L3', false]));
-  assert.deepEqual(judge('lib/pay1.ts', exact).map((r) => r.reason), [undefined, undefined]);
+  assert.ok(judge('src/other/charge.ts', exact).every((r) => r.level === 'L3' && !r.auto && r.reason?.includes("isn't a glob")));
 });
 
 /** The characters shaped like an accented ASCII letter (NFD: a letter and marks) that aren't their own NFC form. */

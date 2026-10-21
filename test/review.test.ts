@@ -598,8 +598,13 @@ test('money paths load from the project source of truth (regex literals in a JS 
   const [self, ...res] = loadMoneyPaths(dir, { file: 'plan.js', pattern: 'const MONEY = \\[([\\s\\S]*?)\\];' }, 'HEAD');
   assert.ok(self!.test('plan.js') && !self!.test('src/plan.js'), 'the list file itself first');
   assert.equal(res.length, 2);
-  assert.ok(res[0]!.test('server/sweep/x.js') && !res[0]!.test('server/games/x.js'));
-  assert.ok(!res.some((r) => r.test('nope/x')), 'only the MONEY list');
+  // #763 round 6 (the owner's call: money paths are globs only): the alternation has no mechanical glob form, so that
+  // line is refused (it counts every path as a money path and holds every change, naming the line); the plain one is
+  // converted to a glob.
+  assert.ok(res[0] instanceof review.RefusedMoneyLine && res[0].line === '/^server\\/(ledger|sweep)\\//', String(res[0]));
+  assert.ok(res[0]!.test('server/sweep/x.js') && res[0]!.test('server/games/x.js'), 'a refused line fails closed');
+  assert.ok(res[1] instanceof review.MoneyGlob && res[1].glob === 'shared/**' && res[1].test('shared/x.js') && !res[1].test('nope/x'));
+  assert.ok(!res.some((r) => (r instanceof review.MoneyGlob ? r.glob : r instanceof review.RefusedMoneyLine ? r.line : '').includes('nope')), 'only the MONEY list');
 });
 
 test('review.yaml categories: a site can send all docs to the evaluator and name its own pages for a human', () => {

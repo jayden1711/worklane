@@ -8,7 +8,7 @@ import { globToRegExp } from './guardrails/glob.js';
 import { BRAND } from './brand.js';
 import { HOOK_IMPORTS } from './hook-imports.js';
 import { escapedPath, hasControlCharacter, hasInvisibleCharacter, hasNonAsciiTopLevel, isNonUtf8Path, shownPath, shownPaths } from './path-text.js';
-import { lookalikeOf, type Lookalike, type Protected } from './confusables.js';
+import { LOOKALIKE_BUDGET, lookalikeOf, type Lookalike, type Protected } from './confusables.js';
 
 // The odd-name tests and how a reason shows a path live in src/path-text.ts (one module the merge policy, the conflict
 // fix and the coordinator share); re-exported here for the callers that read them with the review levels.
@@ -566,17 +566,147 @@ export function loadMoneyPaths(repo: string, src: ReviewConfig['money_path_sourc
     text = m[1] ?? m[0];
   }
   const self = new MoneyGlob(new RegExp(`^${file.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`), file);
-  const literals = [...text.matchAll(/\/((?:\\\/|[^/\n])+)\/([gimsuy]*)/g)].map((m) => new RegExp(m[1]!, m[2]!.replace('g', '')));
-  if (literals.length) return [self, ...literals];
-  return [self, ...text.split('\n').map((l) => l.trim()).filter((l) => l && !l.startsWith('#')).map((g) => new MoneyGlob(globToRegExp(g), g))];
+  return [self, ...moneyListEntries(text)];
 }
 
 /**
- * A money path that came from a glob line of the money list (or is the list file's own name): it matches as its
- * RegExp, unchanged, and keeps the glob, so the look-alike check (#763) compares it by skeleton like a locked glob
- * (`payrnents/` with r, n for the m of `payments/**`). A regex literal from the list stays a plain RegExp, compared
- * as src/confusables.ts lookalikeOf says (as written, on readings of the path). Note: a list line with two slashes
- * (`src/payments/**`) is read as a regex literal (`/payments/`), as before.
+ * The money list's entries (#763 round 6, the owner's call: money paths are globs only). How a line is read:
+ * - A `/regex/flags` token is a regex: a whole line `/.../flags` (a trailing comma allowed), or such a token that
+ *   starts the line or follows a space, a comma, `[`, `(`, `=` or `:`, and ends the line or comes before a space, a
+ *   comma, `;`, `]` or `)`. `src/payments/**` holds no token (its first `/` follows a letter), so it is a glob.
+ * - A regex is converted to a glob when that is mechanical (regexToGlob), and refused otherwise: a RefusedMoneyLine,
+ *   which holds every change until the list is fixed. Never dropped.
+ * - With no regex token in the text, each line is a glob, as on main.
+ * - With one, main read only the regex literals; the other lines are read as globs too now, unless they hold a space
+ *   (code around a list in a `pattern`-extracted file).
+ * - INVARIANT (no regression for an existing install): main read every `/.../` in the text as a regex, a glob line's
+ *   `/payments/` in `src/payments/**` included. Each of those is still read, converted (unanchored, so `**payments**`)
+ *   or refused, beside the line's own reading, so no path main counted as a money path stops counting.
+ */
+export function moneyListEntries(text: string): RegExp[] {
+  const out: RegExp[] = [];
+  const seen = new Set<string>();
+  const add = (line: string, body: string, flags: string) => {
+    if (seen.has(`${body}/${flags}`)) return;
+    seen.add(`${body}/${flags}`);
+    const r = regexToGlob(body, flags);
+    out.push('glob' in r ? new MoneyGlob(globToRegExp(r.glob), r.glob) : new RefusedMoneyLine(line, r.why, r.suggestion));
+  };
+  const lines = text.split('\n').map((l) => l.trim()).filter((l) => l && !l.startsWith('#'));
+  const TOKEN = /(?<=^|[\s,[(=:])\/((?:\\.|[^/\\\n])+)\/([a-z]*)(?=$|[\s,;\])])/g;
+  const regexMode = lines.some((l) => [...l.matchAll(TOKEN)].length > 0);
+  for (const line of lines) {
+    const tokens = [...line.matchAll(TOKEN)];
+    for (const t of tokens) add(t[0], t[1]!, t[2]!);
+    if (!tokens.length && (!regexMode || !/\s/.test(line))) {
+      if (!seen.has(`glob:${line}`)) out.push(new MoneyGlob(globToRegExp(line), line));
+      seen.add(`glob:${line}`);
+    }
+  }
+  // Main's reading, kept: every /.../ in the text (its old pattern), converted or refused.
+  for (const m of text.matchAll(/\/((?:\\\/|[^/\n])+)\/([gimsuy]*)/g)) add(m[0], m[1]!, m[2]!);
+  return out;
+}
+
+/**
+ * A regex body and flags as a glob, when the conversion is mechanical (#763 round 6). Mechanical means only:
+ * - literal characters, and an escaped character that isn't a letter or a digit (`\/`, `\.`, `\-`), except `*` and
+ *   `?`, which a glob can't spell;
+ * - `.*` (or `.*?`) as `**`; `[^/]*` as `*`; `[^/]+` as `?*`; `[^/]` as `?` (`\/` inside the class too);
+ * - `^` at the start and `$` at the end, as anchors; a side without one gets `**`, as the regex matches anywhere;
+ * - the flags d, g, m, s, u, y (they don't change which of these paths match, beyond a path with a newline, which
+ *   waits anyway).
+ * The glob matches every path the regex does (where a `**` before a slash makes that slash optional, it matches more:
+ * fails closed). Anything else (`i`, a class, `\d`, `|`, a group, `+` or `?` on a literal, a lone `.`) isn't
+ * mechanical: the line is refused, with a suggested glob (the same conversion, with each part it can't read as `**`).
+ */
+export function regexToGlob(body: string, flags: string): { glob: string } | { why: string; suggestion: string } {
+  let glob = '';
+  let loose = '';
+  let why = '';
+  if (/[^dgmsuy]/.test(flags)) why = `its flags (${flags}) ask for more than a glob says (a glob matches case as written)`;
+  let i = 0;
+  const start = body.startsWith('^');
+  if (start) i = 1;
+  let end = false;
+  // The suggestion (loose) is a glob matching at least what the regex does: each part it can't convert reads as **.
+  let lastLiteral = 0;
+  const wide = () => {
+    if (!loose.endsWith('**')) loose += '**';
+    lastLiteral = 0;
+  };
+  /** Where the group or class that opens at `j` closes (one past it), past escapes. */
+  const closing = (j: number, open: string, close: string): number => {
+    let depth = 0;
+    for (let k = j; k < body.length; k++) {
+      if (body[k] === '\\') k++;
+      else if (body[k] === open && (open === '(' || k === j)) depth++;
+      else if (body[k] === close && --depth === 0) return k + 1;
+    }
+    return body.length;
+  };
+  while (i < body.length) {
+    const rest = body.slice(i);
+    if (rest === '$') {
+      end = true;
+      break;
+    }
+    const wild = /^(?:\.\*\??|\[\^(?:\\\/|\/)\](?:\*|\+)?)/.exec(rest);
+    if (wild) {
+      const w = wild[0];
+      const part = w.startsWith('.') ? '**' : w.endsWith('*') ? '*' : w.endsWith('+') ? '?*' : '?';
+      glob += part;
+      loose += part;
+      lastLiteral = 0;
+      i += w.length;
+      continue;
+    }
+    if (rest[0] === '\\') {
+      const c = rest.length > 1 ? String.fromCodePoint(rest.codePointAt(1)!) : '';
+      if (c && /^[^A-Za-z0-9*?]$/u.test(c)) {
+        glob += c;
+        loose += c;
+        lastLiteral = c.length;
+        i += 1 + c.length;
+        continue;
+      }
+    }
+    const c = String.fromCodePoint(rest.codePointAt(0)!);
+    if (rest[0] === '\\' || /^[.*+?()[\]{}|^$]$/.test(c)) {
+      why ||= `"${rest.slice(0, 12)}" has no mechanical glob form`;
+      if (rest[0] === '\\') {
+        const n = rest.length > 1 ? String.fromCodePoint(rest.codePointAt(1)!) : '';
+        // A word boundary matches no character: leaving it out only widens the suggestion.
+        if (n !== 'b' && n !== 'B') wide();
+        i += 1 + n.length;
+      } else if (c === '(' || c === '[') {
+        wide();
+        i = closing(i, c, c === '(' ? ')' : ']');
+      } else if (c === '|') {
+        // An alternative anywhere: the suggestion has to match every path.
+        loose = '**';
+        i = body.length;
+      } else {
+        // A quantifier: it applies to the literal before it, which the suggestion can't keep.
+        if (/^[*+?{]$/.test(c) && lastLiteral) loose = loose.slice(0, -lastLiteral);
+        wide();
+        i = c === '{' ? Math.max(i + 1, body.indexOf('}', i) + 1) : i + c.length;
+      }
+      continue;
+    }
+    glob += c;
+    loose += c;
+    lastLiteral = c.length;
+    i += c.length;
+  }
+  const wrap = (g: string) => `${start ? '' : '**'}${g}${end ? '' : '**'}`.replace(/\*{3,}/g, '**');
+  return why ? { why, suggestion: wrap(loose) } : { glob: wrap(glob) };
+}
+
+/**
+ * A money path that came from a glob line of the money list, a regex line converted to a glob, or the list file's
+ * own name: it matches as its RegExp and keeps the glob, so the look-alike check (#763) compares it by skeleton like
+ * a locked glob (`payrnents/` with r, n for the m of `payments/**`).
  */
 export class MoneyGlob extends RegExp {
   constructor(
@@ -586,6 +716,29 @@ export class MoneyGlob extends RegExp {
     super(re.source, re.flags);
   }
 }
+
+/**
+ * A money-list line that is a regex with no mechanical glob form (#763 round 6). It matches every path, so every
+ * change counts as touching a money path, and the look-alike check holds every changed path as not compared, naming
+ * the line, until the list is fixed (fails closed; never dropped). moneyListProblems lists these for doctor.
+ */
+export class RefusedMoneyLine extends RegExp {
+  constructor(
+    readonly line: string,
+    readonly why: string,
+    readonly suggestion: string,
+  ) {
+    super('');
+  }
+  /** The text a hold and doctor show. */
+  get reason(): string {
+    return `the money list's line ${JSON.stringify(this.line)} isn't a glob (${this.why}); money paths are globs only: write it as one, for example ${this.suggestion}`;
+  }
+}
+
+/** Each refused money-list line (RefusedMoneyLine): what doctor reports, with a suggested glob. */
+export const moneyListProblems = (money: readonly RegExp[]): { line: string; why: string; suggestion: string }[] =>
+  money.filter((re): re is RefusedMoneyLine => re instanceof RefusedMoneyLine).map(({ line, why, suggestion }) => ({ line, why, suggestion }));
 
 export function computeLevel(input: LevelInput, cfg: ReviewConfig, extraCategories: Record<string, string[]> = {}): LevelResult {
   const defs = { ...DEFAULT_CATEGORIES, ...cfg.categories, ...extraCategories, ...lockedCategories(input.scope) };
@@ -617,16 +770,22 @@ export function computeLevel(input: LevelInput, cfg: ReviewConfig, extraCategori
   const waiting = new Set([...cfg.levels.L3_human.when, ...(cfg.merge?.wait_categories ?? []), 'ci-config', ...Object.keys(lockedCategories(input.scope))]);
   const protectedPaths: Protected[] = [
     ...Object.entries(defs).flatMap(([c, globs]) => (waiting.has(c) ? globs.map((glob) => ({ glob, what: `${shownPath(glob)} (${c})` })) : [])),
-    // A money glob by skeleton, its own RegExp deciding what is its own; a regex literal by the path's readings.
-    ...input.moneyPaths.map((re): Protected => (re instanceof MoneyGlob ? { glob: re.glob, own: re, what: 'a money path' } : { re, what: 'a money path' })),
+    // A money glob by skeleton, its own RegExp deciding what is its own; a refused line holds every path (round 6).
+    // (Its RegExp is passed as `own` only when it isn't the glob's own, as for the list file's name, so the look-alike
+    // check matches globs in linear time.)
+    ...input.moneyPaths.map((re): Protected =>
+      re instanceof RefusedMoneyLine ? { refused: re.reason, what: 'a money path' } : re instanceof MoneyGlob ? { glob: re.glob, ...(re.source === globToRegExp(re.glob).source ? {} : { own: re }), what: 'a money path' } : { re, what: 'a money path' },
+    ),
   ];
   // A path another odd-path category holds already (an invisible character, a top-level name outside ASCII, ...) waits
   // on that floor at L3; it isn't compared again, so its reason stays the one that says what is odd about it.
   const oddAlready = new Set(ODD_PATH_CATEGORIES.filter((c) => c !== CONFUSABLE_PATH).flatMap((c) => categories[c] ?? []));
   const lookalikes = new Map<string, Lookalike>();
+  // INVARIANT: one budget for the whole change, so its look-alike work is bounded whatever its number of files (#763).
+  const budget = { left: LOOKALIKE_BUDGET };
   for (const f of input.files) {
     if (oddAlready.has(f.path)) continue;
-    const hit = lookalikeOf(f.path, protectedPaths);
+    const hit = lookalikeOf(f.path, protectedPaths, budget);
     if (hit) {
       lookalikes.set(f.path, hit);
       add(CONFUSABLE_PATH, f.path);

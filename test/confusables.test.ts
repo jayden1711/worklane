@@ -12,9 +12,29 @@ import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CONFUSABLES, CONFUSABLES_SOURCE } from '../src/confusables-data.js';
-import { BRAILLE_BLANK, lookalikeOf, MAX_CHECKED_PATH, skeleton } from '../src/confusables.js';
+import { BRAILLE_BLANK, globMatches, lookalikeOf, MAX_CHECKED_PATH, skeleton } from '../src/confusables.js';
+import { globToRegExp } from '../src/guardrails/glob.js';
 import { escapedPath, hasInvisibleCharacter, hasNonAccentCharacter, shownPath } from '../src/path-text.js';
 import { repoRoot } from './helpers.js';
+
+test('#763: the look-alike check\'s glob matcher answers as globToRegExp does, in linear time', () => {
+  const pieces = ['a', 'b', '/', '**', '*', '?', '**/', 'ab', '.', 'x/', './', '\n'];
+  const chars = ['a', 'b', '/', '.', 'x', '\n'];
+  let seed = 7;
+  const rnd = (n: number) => {
+    seed = (seed * 1103515245 + 12345) % 2147483648;
+    return seed % n;
+  };
+  for (let t = 0; t < 50_000; t++) {
+    const glob = Array.from({ length: 1 + rnd(7) }, () => pieces[rnd(pieces.length)]).join('');
+    const path = Array.from({ length: rnd(14) }, () => chars[rnd(chars.length)]).join('');
+    assert.equal(globMatches(glob, path), globToRegExp(glob).test(path), `${JSON.stringify(glob)} ${JSON.stringify(path)}`);
+  }
+  // Four ** on 4,096 characters: a RegExp backtracks for many seconds on this; the matcher takes well under 50 ms.
+  const t0 = performance.now();
+  assert.equal(globMatches('**a**a**a**b', 'a'.repeat(4096)), false);
+  assert.ok(performance.now() - t0 < 50, `${performance.now() - t0} ms`);
+});
 
 /** The pinned upstream file: Unicode 17.0.0's security/confusables.txt, as published (sha256 of its bytes). */
 const PINNED = {

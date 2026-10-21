@@ -3,18 +3,23 @@
 // by scripts/dev/confusables-data.mjs). Locked with the review levels (src/review.ts SELF_MODIFICATION_PARTS).
 //
 // INVARIANT: bounded and fail closed. A path over MAX_CHECKED_PATH characters, or whose skeleton grows past
-// MAX_CHECKED_SKELETON, or with more than MAX_READINGS readings to test a money regex against, isn't compared at all:
-// it counts as a look-alike (the owner reads it). A money regex is never rewritten: it runs as the owner wrote it, on
-// a bounded set of readings of the path, so it takes the time it takes on the path itself, times that bound.
+// MAX_CHECKED_SKELETON, or a path reached once a change's work budget (LOOKALIKE_BUDGET) is spent, isn't compared at
+// all: it counts as a look-alike (the owner reads it). Every protected pattern is a glob (money paths too, since
+// round 6), compared by skeleton with a linear-time glob matcher (globMatch), never a backtracking RegExp.
 import { CONFUSABLES } from './confusables-data.js';
-import { globToRegExp } from './guardrails/glob.js';
 
 /** The longest path (in UTF-16 code units) compared; a longer one counts as a look-alike. Linux's PATH_MAX is 4096 bytes. */
 export const MAX_CHECKED_PATH = 1024;
 /** The longest skeleton compared (a character can map to up to 18): a path whose skeleton is longer counts as a look-alike. */
 export const MAX_CHECKED_SKELETON = 4096;
-/** The most readings of one path a money regex is tested against; a path with more counts as a look-alike. */
-export const MAX_READINGS = 1024;
+/**
+ * The work one change's look-alike check may do, in glob-matching steps: each path costs the length of it and its
+ * forms (as they are and read) times the patterns' total length (globMatch's work). Once it is spent, every further
+ * path counts as a look-alike, not compared (#763 round 6). Sized from measurements in the PR: a change of every file
+ * in this repo under its own review.yaml (1,423 paths, 308 patterns) costs about 925 million and 1.2 s; the budget
+ * is about twice that.
+ */
+export const LOOKALIKE_BUDGET = 2_000_000_000;
 
 let table: Map<number, string> | undefined;
 /** Each character's prototype, read once from the generated table: one mapping a line, the character then its prototype. */
@@ -145,29 +150,12 @@ function reading(s: string): string {
 }
 
 /**
- * The readings of a string a money regex is tested against (#763 round 5): for each group of ASCII spellings that
- * share a skeleton (asciiGroups) and that the string uses, the string as it is, or with every use of one spelling
- * read as another (every 1 as l, every l as I, every r, n as m, ...), across the groups in every combination. null
- * when there are more than `cap` (the caller holds the path). It covers a look-alike that spells one group's member
- * one way throughout (`payrnents`, `0001` as `OOO1`); a path that needs one spelling read two ways is the residual.
- */
-function substitutions(s: string, cap: number): string[] | null {
-  let out = [s];
-  for (const g of asciiGroups()) {
-    const present = g.filter((m) => s.includes(m));
-    if (!present.length) continue;
-    const swaps = present.flatMap((from) => g.filter((to) => to !== from).map((to) => [from, to] as const));
-    if (out.length * (swaps.length + 1) > cap) return null;
-    out = out.flatMap((r) => [r, ...swaps.map(([from, to]) => r.split(from).join(to))]);
-  }
-  return out;
-}
-
-/**
  * A protected path pattern: a glob (compared by skeleton; `own`, when given, decides what is the glob's own instead
- * of the glob itself, as a money glob's RegExp does) or a regex (a money-list regex literal: see lookalikeOf).
+ * of the glob itself, as a money glob's RegExp does); a refused money-list line (`refused`: every path counts as not
+ * compared, with that text, #763 round 6); or a bare RegExp from a caller that built its own money paths rather than
+ * through loadMoneyPaths (tests do), tested as written against the path's skeleton forms and ASCII readings only.
  */
-export type Protected = { glob: string; what: string; own?: RegExp } | { re: RegExp; what: string };
+export type Protected = { glob: string; what: string; own?: RegExp } | { refused: string; what: string } | { re: RegExp; what: string };
 
 /** A glob with each literal run (everything but `*` and `?`) mapped by `f`. A mapped `*` or `?` widens it: fails closed. */
 const mapGlob = (glob: string, f: (s: string) => string): string => glob.split(/([*?]+)/).map((part, i) => (i % 2 ? part : f(part))).join('');
@@ -191,20 +179,96 @@ const ASCII_FORMS: readonly Form[] = ['skeleton'];
 const WIDE_FORMS: readonly Form[] = ['skeleton', 'caseless', 'compat-skeleton', 'compat-caseless', 'skeleton-compat', 'skeleton-compat-caseless'];
 
 /**
- * Compiled globs, by kind and glob: as written (raw), a form's mapping, or a form's mapping then read (`read:`, where
+ * A glob's parts, as globToRegExp (src/guardrails/glob.ts) reads it: a leading `./` dropped, a trailing `/` meaning
+ * everything under; `**` followed by `/` (any directories, or none), `**` (anything), `*` (anything but a slash), `?`
+ * (one character but a slash), and literal characters (UTF-16 code units, as that RegExp compares them).
+ */
+type GlobPart = { k: 'lit'; c: string } | { k: 'one' } | { k: 'star' } | { k: 'any' } | { k: 'dirs' };
+function globParts(glob: string): GlobPart[] {
+  let g = glob.replace(/^\.\//, '');
+  if (g.endsWith('/')) g += '**';
+  const out: GlobPart[] = [];
+  for (let i = 0; i < g.length; i++) {
+    const c = g[i]!;
+    if (c === '*' && g[i + 1] === '*') {
+      i++;
+      if (g[i + 1] === '/') {
+        i++;
+        out.push({ k: 'dirs' });
+      } else out.push({ k: 'any' });
+    } else if (c === '*') out.push({ k: 'star' });
+    else if (c === '?') out.push({ k: 'one' });
+    else out.push({ k: 'lit', c });
+  }
+  return out;
+}
+
+/**
+ * Whether `s` matches the glob `parts`, in linear time: a state-set walk over the parts (time is the string's length
+ * times the parts', whatever the glob), never a backtracking RegExp, so no glob and no path makes it slow (#763 round
+ * 6: a glob of four `**` took 25 s on a 1,000-character path as a RegExp). Same answers as globToRegExp.
+ */
+function globMatch(parts: readonly GlobPart[], s: string): boolean {
+  const m = parts.length;
+  const close = (at: Uint8Array) => {
+    for (let k = 0; k < m; k++) if (at[k] && parts[k]!.k !== 'lit' && parts[k]!.k !== 'one') at[k + 1] = 1;
+  };
+  let at = new Uint8Array(m + 1);
+  let inside = new Uint8Array(m);
+  at[0] = 1;
+  close(at);
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i]!;
+    const next = new Uint8Array(m + 1);
+    const nextInside = new Uint8Array(m);
+    let live = false;
+    for (let k = 0; k < m; k++) {
+      const p = parts[k]!;
+      if (at[k]) {
+        if (p.k === 'lit') {
+          if (ch === p.c) next[k + 1] = 1;
+        } else if (p.k === 'one') {
+          if (ch !== '/') next[k + 1] = 1;
+        } else if (p.k === 'star') {
+          if (ch !== '/') next[k] = 1;
+        } else if (p.k === 'any') next[k] = 1;
+        else {
+          nextInside[k] = 1;
+          if (ch === '/') next[k + 1] = 1;
+        }
+      }
+      if (inside[k]) {
+        nextInside[k] = 1;
+        if (ch === '/') next[k + 1] = 1;
+      }
+    }
+    close(next);
+    for (let k = 0; k <= m && !live; k++) live = next[k] === 1 || (k < m && nextInside[k] === 1);
+    if (!live) return false;
+    at = next;
+    inside = nextInside;
+  }
+  return at[m] === 1;
+}
+
+/** Whether `s` matches `glob`, as globToRegExp(glob).test(s) answers, in linear time (globMatch). */
+export const globMatches = (glob: string, s: string): boolean => globMatch(globParts(glob), s);
+
+/**
+ * Glob parts, by kind and glob: as written (raw), a form's mapping, or a form's mapping then read (`read:`, where
  * r, n is m again, so a glob's `?` stands for the one character m is). Bounded: cleared when it holds too many.
  */
-const compiled = new Map<string, RegExp>();
-function compile(kind: 'raw' | Form | `read:${Form}`, glob: string): RegExp {
+const parsed = new Map<string, GlobPart[]>();
+function compile(kind: 'raw' | Form | `read:${Form}`, glob: string): GlobPart[] {
   const key = `${kind}\0${glob}`;
-  let re = compiled.get(key);
-  if (!re) {
-    if (compiled.size > 4096) compiled.clear();
+  let parts = parsed.get(key);
+  if (!parts) {
+    if (parsed.size > 4096) parsed.clear();
     const form = kind.startsWith('read:') ? FORMS[kind.slice(5) as Form] : kind === 'raw' ? null : FORMS[kind as Form];
-    re = globToRegExp(!form ? glob : kind.startsWith('read:') ? mapGlob(glob, (s) => reading(form(s))) : mapGlob(glob, form));
-    compiled.set(key, re);
+    parts = globParts(!form ? glob : kind.startsWith('read:') ? mapGlob(glob, (s) => reading(form(s))) : mapGlob(glob, form));
+    parsed.set(key, parts);
   }
-  return re;
+  return parts;
 }
 
 /** Why a path counts as a look-alike: of which protected pattern, or that it wasn't compared (too long, or a failure). */
@@ -219,47 +283,45 @@ export type Lookalike = { like: string } | { unchecked: string };
  * m), so a glob's `?` stands for an m spelled r, n. A path a pattern matches as itself is that pattern's own and not
  * a look-alike of it.
  *
- * A money-list regex literal is never rewritten. It is tested, as written, against readings of the path: its
- * skeleton forms and their readings, its ASCII readings, and the substitutions of each (every 1 read as l, every r, n
- * as m, and so on, in every combination; see substitutions). More than MAX_READINGS of them hold the path. Residual
- * (no sound check exists without an automaton): a path that needs one spelling read two ways, as when a real l and a
- * look-alike l for I sit in one name.
+ * Case: an ASCII path is compared as written (its skeleton), so `Billing/` is no look-alike of `billing/**` unless the
+ * glob says `Billing`; a path with a character outside ASCII is also compared caseless (a case-insensitive file
+ * system may open it as the protected file).
+ *
+ * `budget`, when given, is the change's remaining work (LOOKALIKE_BUDGET): this path's cost comes off it, and a path
+ * that costs more than is left isn't compared and counts as a look-alike.
  * null: no look-alike. Fails closed (see the module's INVARIANT).
  */
-export function lookalikeOf(path: string, patterns: readonly Protected[]): Lookalike | null {
+export function lookalikeOf(path: string, patterns: readonly Protected[], budget?: { left: number }): Lookalike | null {
   if (path.length > MAX_CHECKED_PATH) return { unchecked: `longer than ${MAX_CHECKED_PATH} characters` };
   try {
+    const refused = patterns.find((p): p is { refused: string; what: string } => 'refused' in p);
+    if (refused) return { unchecked: refused.refused };
+    const spent = { unchecked: `this change's look-alike work budget (${LOOKALIKE_BUDGET} glob-matching steps) is spent` };
+    if (budget && budget.left <= 0) return spent;
     const wide = nonAscii(path);
     const bare = withoutBlanks(path);
     const variants = bare === path ? [path] : [path, bare];
     const forms = variants.flatMap((v) => (wide ? WIDE_FORMS : ASCII_FORMS).map((f) => [f, FORMS[f](v)] as const));
     if (forms.some(([, s]) => s.length > MAX_CHECKED_SKELETON)) return { unchecked: `its skeleton is longer than ${MAX_CHECKED_SKELETON} characters` };
-    let texts: string[] | null | undefined;
-    const regexTexts = (): string[] | null => {
-      if (texts !== undefined) return texts;
-      const bases = new Set<string>(variants);
-      if (wide || bare !== path) for (const s of variants.flatMap((v) => [v, compat(v)])) for (const r of [asciiReading(s), asciiReading(fold(s))]) bases.add(r);
-      for (const [, s] of forms) bases.add(reading(s));
-      // Lower case too: Unicode's ASCII look-alikes are lower case (r, n for m), and a case-insensitive regex reads it.
-      for (const b of [...bases]) bases.add(b.toLowerCase());
-      const all = new Set<string>(forms.map(([, s]) => s));
-      for (const b of bases) {
-        const subs = substitutions(b, MAX_READINGS);
-        if (!subs) return (texts = null);
-        for (const r of subs) all.add(r);
-        if (all.size > MAX_READINGS) return (texts = null);
+    if (budget) {
+      // A glob match costs the string's length times the glob's parts (globMatch), done for the path and each form, as
+      // they are and read.
+      const width = patterns.reduce((n, p) => n + ('glob' in p ? p.glob.length + 1 : 1), 0);
+      const cost = 2 * width * (path.length + 1 + forms.reduce((n, [, s]) => n + s.length + 1, 0));
+      if (cost > budget.left) {
+        budget.left = 0;
+        return spent;
       }
-      return (texts = [...all]);
-    };
+      budget.left -= cost;
+    }
     for (const p of patterns) {
       if ('glob' in p) {
-        if ((p.own ?? compile('raw', p.glob)).test(path)) continue;
-        if (forms.some(([f, s]) => compile(f, p.glob).test(s) || compile(`read:${f}`, p.glob).test(reading(s)))) return { like: p.what };
-      } else {
+        if (p.own ? p.own.test(path) : globMatch(compile('raw', p.glob), path)) continue;
+        if (forms.some(([f, s]) => globMatch(compile(f, p.glob), s) || globMatch(compile(`read:${f}`, p.glob), reading(s)))) return { like: p.what };
+      } else if ('re' in p) {
         if (p.re.test(path)) continue;
-        const rs = regexTexts();
-        if (!rs) return { unchecked: `more than ${MAX_READINGS} readings to test a money regex against` };
-        if (rs.some((r) => p.re.test(r))) return { like: p.what };
+        const readings = [...forms.map(([, s]) => s), ...(wide || bare !== path ? variants.map((v) => asciiReading(v)) : [])];
+        if (readings.some((r) => p.re.test(r))) return { like: p.what };
       }
     }
     return null;
