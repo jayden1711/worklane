@@ -1,6 +1,6 @@
 // Runtime inputs for guardrail evaluation: stored fingerprint sets and CLI
 // link resolvers. Fingerprints are stored machine-locally, hashes only.
-import { execFileSync } from 'node:child_process';
+import { execFileSync } from '../os/child-process.js';
 import { createHash } from 'node:crypto';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';

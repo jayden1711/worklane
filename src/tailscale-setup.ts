@@ -15,7 +15,7 @@
 //
 // Nothing here runs unless an owner asks: a machine without tailscale, or an owner who skips the screen, changes
 // nothing, and the hub keeps its URL.
-import { execFile } from 'node:child_process';
+import { execFile } from './os/child-process.js';
 import { readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { BRAND } from './brand.js';

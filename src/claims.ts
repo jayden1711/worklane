@@ -7,7 +7,7 @@
 //   release = delete it, expecting our lease
 // Two coordinators (one per human) racing for the same issue: exactly one
 // push succeeds. Labels and assignees are cosmetic and follow the ref.
-import { execFileSync, spawnSync } from 'node:child_process';
+import { execFileSync, spawnSync } from './os/child-process.js';
 import { BRAND } from './brand.js';
 
 export interface Lease {

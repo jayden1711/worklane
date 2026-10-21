@@ -4,7 +4,7 @@
 // service. Read-only is enforced by the database role; the client adds a
 // READ ONLY transaction and refuses multi-statement SQL as defense in depth.
 // No production credential ever reaches the agent's machine.
-import { spawnSync } from 'node:child_process';
+import { spawnSync } from './os/child-process.js';
 import { BRAND } from './brand.js';
 import { shimsNeedShell } from './os/index.js';
 

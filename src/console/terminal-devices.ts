@@ -17,7 +17,7 @@
 //    MagicDNS name and its tags, from the control plane. The Tailscale-User-* headers are never used: serve sets
 //    them only for user-owned nodes, and they name a user, not a device.
 // The break-glass port (the token, loopback only; #197) never identifies a device: nothing there says which device.
-import { execFileSync } from 'node:child_process';
+import { execFileSync } from '../os/child-process.js';
 import type { IncomingMessage } from 'node:http';
 import { loopbackPeerUid } from '../os/index.js';
 

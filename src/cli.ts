@@ -4,7 +4,7 @@
 import './quiet-sqlite.js';
 // INVARIANT: before any engine module: a <PREFIX>_SYSTEM_ROOT not honoured here stops the CLI before anything starts.
 import './os/system-root-guard.js';
-import { execFileSync } from 'node:child_process';
+import { execFileSync } from './os/child-process.js';
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { basename, join, resolve } from 'node:path';
 import { BRAND } from './brand.js';
