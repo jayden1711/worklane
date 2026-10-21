@@ -571,7 +571,7 @@ function linksToDirectory(link: string): boolean {
  * object store chain that can't be followed in full, or a main checkout that can't be found (no `repo`, and a git
  * directory that leads nowhere back), is an error, and the run doesn't start.
  */
-export function runReadDenials(o: { cwd: string; home: string | undefined; taskFile?: string; repo?: string; defaultBranch?: string; startSecrets?: readonly string[]; readsNothing?: boolean }): { paths: string[]; sandboxOnly?: string[] } | { error: string } {
+export function runReadDenials(o: { cwd: string; home: string | undefined; taskFile?: string; repo?: string; defaultBranch?: string; startSecrets?: readonly string[]; readsNothing?: boolean; places?: readonly string[] }): { paths: string[]; sandboxOnly?: string[] } | { error: string } {
   let hidden: string[] = [];
   if (o.taskFile) {
     try {
@@ -653,7 +653,12 @@ export function runReadDenials(o: { cwd: string; home: string | undefined; taskF
   const sources = [...new Map([...configs.map((c) => c.guardrails.secret_paths), ...extra, hidden].map((s) => [JSON.stringify(s), s])).values()].filter((s) => s.length);
   const worktreeRoots = [...new Set(configs.map((c) => c.tests.worktree.root))];
   const base = main ?? root;
-  const taskPlaces = [...new Set([...worktreeRoots.map((w) => resolve(base, w)), join(projectStateDir(base), 'worktrees')])];
+  const configPlaces = [...new Set([...worktreeRoots.map((w) => resolve(base, w)), join(projectStateDir(base), 'worktrees')])];
+  // The places hidden whole, their directories counted as other checkouts (round 15): the coordinator's own, as it
+  // passes them (its start root and the engine's), always, whatever the configs now name. A root only a config names
+  // is never hidden whole: a main-checkout role could name /usr and take every run's Bash away (measured, G), and the
+  // coordinator makes no worktree there. Without the coordinator's (a runner built outside an instance), the configs'.
+  const taskPlaces = o.places ? [...new Set(o.places.map((p) => resolve(p)))] : configPlaces;
   // Every other task checkout is hidden whole (the owner's decision, round 10), always: see siblingCheckouts.
   const other = siblingCheckouts(repo.linked, taskPlaces, [root, ...repo.checkouts.slice(0, 1)], [...(main ? [main] : []), ...(repo.common ? [repo.common] : []), ...(o.taskFile ? [o.taskFile] : [])], o.cwd);
   if ('error' in other) return other;
@@ -695,7 +700,8 @@ export function runReadDenials(o: { cwd: string; home: string | undefined; taskF
   // worktree, the run's own among them. What this lists inside a checkout hidden whole (siblingCheckouts) is dropped
   // below; the globs stay, for a checkout made after the start, and the sandbox mounts nothing beneath a directory it
   // already hides (measured, round 10: 3000 matches under a hidden sibling add no mount).
-  const parents = new Set([...taskPlaces, ...repo.linked.map((l) => dirname(l))]);
+  // The late-worktree globs go over every place any config names too: a per-pattern glob, never a whole mount.
+  const parents = new Set([...taskPlaces, ...configPlaces, ...repo.linked.map((l) => dirname(l))]);
   parents.delete('/');
   const under = [...parents].map((d) => join(d, '*'));
   const relative = (p: string) => !(p === '~' || p.startsWith('~/') || isAbsolute(p));
