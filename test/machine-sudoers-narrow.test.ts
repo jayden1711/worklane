@@ -42,10 +42,13 @@ test('#898 owner rule: a stale-only rule (a grant the engine no longer writes) i
 test('#898 owner rule: an installed rule narrower than the engine\'s is NOT rewritten: the diff is shown, and the step waits for --replace-sudoers', { skip: !posix }, () => {
   const m = machine();
   assert.equal(m.run().status, 0);
+  // #904: the first run, before any Claude login, reads the coordinator's credentials.yaml as that user, once.
+  assert.equal(m.asUser(), 'wl-alpha\n');
   const { rule, command } = withoutCommand(m.expected('alpha', 'old'));
   m.setSudoers(rule);
   const r = m.run();
   assert.equal(r.status, 3, r.stderr);
+  assert.equal(m.asUser(), 'wl-alpha\n', 'the waiting rerun runs nothing as another user');
   assert.equal(m.helperRuns(), 1, 'machine-helper.sh never ran');
   assert.equal(m.sudoers(), rule, 'the installed rule is as it was');
   assert.ok(r.stderr.includes(header(m)), r.stderr);

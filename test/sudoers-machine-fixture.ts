@@ -47,6 +47,9 @@ user_exists() { [ -e "$T/users/$1" ]; }
 unit_active() { [ -e "$T/active/$1" ]; }
 sudo_version() { cat "$T/sudo-version"; }
 run_as() { local user="$1" script="$2"; shift 2; HOME="$T/homes/$user" bash -euo pipefail -c "$script" _ "$@"; }
+# run_as_bounded's way to another user (#904: claude-token's done check reads the coordinator's credentials.yaml), stood
+# in as run_as is: that user's home, never sudo. Each use is recorded in <root>/as-user, so a test can see it.
+as_user_argv() { echo "$1" >> "$T/as-user"; AS_USER=(env HOME="$T/homes/$1"); }
 ensure_instance_home() {
   local d="$T/homes/wl-$1/.local/state/worklane/instances/$1"
   mkdir -p "$d/state"
@@ -139,8 +142,10 @@ printf '[Service]\\nExecStart=/usr/local/bin/worklane dashboard --hub %s --servi
   const calls = () => (existsSync(join(T, 'calls')) ? readFileSync(join(T, 'calls'), 'utf8').trim().split('\n').filter(Boolean) : []);
   const hostCalls = () => (existsSync(join(T, 'host-calls')) ? readFileSync(join(T, 'host-calls'), 'utf8') : '');
   const helperRuns = () => calls().filter((c) => c.startsWith('machine-helper ')).length;
+  /** The users run_as_bounded ran something as (#904), one per line, in order. */
+  const asUser = () => (existsSync(join(T, 'as-user')) ? readFileSync(join(T, 'as-user'), 'utf8') : '');
   const step = (r: { events: Step[] }) => r.events.find((e) => e.step === 'machine-helper' && e.state === 'done');
-  return { T, s, real, env, expected, pin, sudoers, setSudoers, run, helper, check, calls, hostCalls, helperRuns, step };
+  return { T, s, real, env, expected, pin, sudoers, setSudoers, run, helper, check, calls, hostCalls, helperRuns, asUser, step };
 }
 
 /** An older engine's rule for these users: the same shape, one command fewer. Returns the rule and the command. */
