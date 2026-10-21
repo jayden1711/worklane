@@ -8,6 +8,7 @@ import { join } from 'node:path';
 import type { AppConfig, FlowStep } from '../config/schema.js';
 import { redactString } from '../events/redact.js';
 import { killTree, killTreeAs, projectCommand, spawnDetached, type ProjectRunAs } from '../os/index.js';
+import { ownEnv } from '../os/own-env.js';
 import { browserTimeouts, findChrome, launchChrome, portInUse, sleep, stopTree, track, until, type Cdp } from './cdp.js';
 import { targetExpr } from './targets.js';
 import { summarizeTrace, TRACE_CATEGORIES, type TraceEvent, type TraceSummary } from './trace.js';
@@ -186,7 +187,7 @@ export async function runFlow(o: { app: AppConfig; flow: string; cwd: string; ou
   const steps = o.app.flows[o.flow];
   if (!steps) throw new Error(`no flow "${o.flow}" in app.yaml (it has: ${Object.keys(o.app.flows).join(', ')})`);
   // undefined: look for one; null: there is none (what a machine without a browser, or a test, says).
-  const chrome = o.chrome === undefined ? findChrome(process.env.CHROME) : o.chrome;
+  const chrome = o.chrome === undefined ? findChrome(ownEnv().get('CHROME')) : o.chrome;
   if (!chrome) return { flow: o.flow, skipped: 'no Chrome or Chromium on this machine (set CHROME to its path); browser checks skipped' };
   const { port } = o.app.start;
   if (await portInUse(port)) throw new Error(`port ${port} is already in use, so the app can't be started on it`);
@@ -250,7 +251,7 @@ export function isOnOrigin(url: string, origin: string): boolean {
 export async function runFlowAt(o: { app: AppConfig; flow: string; origin: string; outDir: string; chrome?: string | null; noSandbox?: boolean; chromeProfileRoot?: string }): Promise<FlowRun> {
   const steps = o.app.flows[o.flow];
   if (!steps) throw new Error(`no flow "${o.flow}" in app.yaml (it has: ${Object.keys(o.app.flows).join(', ')})`);
-  const chrome = o.chrome === undefined ? findChrome(process.env.CHROME) : o.chrome;
+  const chrome = o.chrome === undefined ? findChrome(ownEnv().get('CHROME')) : o.chrome;
   if (!chrome) return { flow: o.flow, skipped: 'no Chrome or Chromium on this machine (set CHROME to its path); browser checks skipped' };
   const base = new URL(o.origin).origin;
   return drive({ ...o, chrome, steps, base, allow: (url) => isOnOrigin(url, base), t0: Date.now() });

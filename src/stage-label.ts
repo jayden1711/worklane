@@ -9,10 +9,9 @@
 // judge reads only the run's redacted record, never the repo or the web, and every call counts against the day's cap.
 import type { DoneWhenList } from './backlog/types.js';
 import type { AgentRunner, RunRequest } from './runner.js';
+import type { Stage } from './stage-names.js';
 
-/** In pipeline order: the plan, the build, its checks, the evaluator's review; the harness last. */
-export const STAGES = ['plan', 'wrong files', 'right files, wrong place', 'wrong or incomplete change', 'verification', 'review', 'environment/harness'] as const;
-export type Stage = (typeof STAGES)[number];
+export { STAGES, type Stage } from './stage-names.js';
 
 /** The labels the judge picks from. environment/harness, plan and review are code's alone; verification is the judge's only for a run that ran its checks. */
 export const JUDGE_STAGES = ['wrong files', 'right files, wrong place', 'wrong or incomplete change', 'verification'] as const satisfies readonly Stage[];

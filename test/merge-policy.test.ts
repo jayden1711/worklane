@@ -152,7 +152,11 @@ test('self-modification: every glob names real engine files (none dead), and the
     ['src/install.ts', "the agents' tool guard's hook commands"],
     ['src/instance.ts', "the agents' tool guard's hook commands"],
     ['src/config/load.ts', "the agents' tool guard"],
-    ['src/events/redact.ts', "the agents' tool guard"],
+    ['src/guard/chat.ts', "the agents' tool guard"],
+    // Out of the guard's import tree since #785, and still locked under parts of their own.
+    ['src/events/redact.ts', 'sign-in, credentials or secrets'],
+    ['src/agent-settings.ts', 'what an agent run is given'],
+    ['src/plugins/approval.ts', 'what an agent run is given'],
     ['src/managed-apps.ts', 'where the self-modification locks apply'],
     ['scripts/setup/managed-apps.sh', 'the machine setup'],
     ['scripts/push-gate.mjs', 'the push gate, denylist and secret scan'],
@@ -848,6 +852,26 @@ test("weakening (owner's rule, 2026-10-19): an added line with a skip, only or s
   assert.deepEqual(weakens({ 'docs/lint.md': '# x\n' }, { 'docs/lint.md': '# x\n- `// @ts-ignore`: never; use `@ts-expect-error` with why.\n' }), []);
 });
 
+test('weakening: a test-selection declaration (`// runtime-import:`, src/testrun/affected.ts) added or changed waits, in any file but docs; taken out it does not', () => {
+  const decl = '  // runtime-import: src/watchdog/index.ts';
+  const body = (d: string) => `function watchdog() {\n  const f = path.join(OPT, 'current', 'dist', 'src', 'watchdog', 'index.js');\n${d}\n  return import(require('node:url').pathToFileURL(f).href);\n}\n`;
+  const bare = body('').replace('\n\n', '\n');
+  for (const path of ['scripts/up.cjs', 'src/x/y.ts', 'lib/loader.mjs', 'scripts/machine/worklane-update.cjs', 'test/a.test.ts']) {
+    assert.deepEqual(kinds(weakens({ [path]: bare }, { [path]: body(decl) })), [MARKER], `${path}: added`);
+    assert.deepEqual(kinds(weakens({ [path]: body(decl) }, { [path]: body('  // runtime-import: src/cli.ts') })).filter((k) => k !== GUARD), [MARKER], `${path}: changed to another file`);
+  }
+  // The routes the review measured past the selector's own check: each needs an added declaration, so each waits.
+  const routes: Record<string, string> = {
+    'a decoy literal beside a wrong declaration (A)': body("  const decoy = 'dist/src/cli.js';\n  // runtime-import: src/cli.ts"),
+    'a declaration inside a multi-line template literal (B)': body('  const s = `\n  // runtime-import: src/cli.ts\n  `; void s;'),
+    'a top-level arrow with no block around it (C)': "const f = path.join(OPT, 'dist', 'src', 'watchdog', 'index.js');\n// runtime-import: src/cli.ts\nconst w = () => import(require('node:url').pathToFileURL(f).href);\n",
+  };
+  for (const [what, after] of Object.entries(routes)) assert.deepEqual(kinds(weakens({ 'scripts/up.cjs': bare }, { 'scripts/up.cjs': after })), [MARKER], what);
+  // Taken out, the import is unresolved again and its tests run on every change: no wait. A doc naming it adds none.
+  assert.deepEqual(weakens({ 'src/x/y.ts': body(decl) }, { 'src/x/y.ts': bare }), []);
+  assert.deepEqual(weakens({ 'docs/selection.md': '# x\n' }, { 'docs/selection.md': '# x\n- `// runtime-import: src/x.ts` declares it.\n' }), []);
+});
+
 test("weakening: bounded and fail closed: too many changed characters, a diff that doesn't match its counts, a file that isn't text, a table file it can't read, a git failure", () => {
   const one = (f: Partial<ChangeFile>, before: (p: string) => string | null = () => null) =>
     kinds(weakening.weakeningReasons({ files: [{ path: 'test/math.test.ts', added: 0, removed: 0, addedLines: [], removedLines: [], ...f }], deleted: new Set(), before, after: () => null, scope: undefined }));
@@ -1269,8 +1293,9 @@ test('acceptance (#869): through the merge decision, a new marked allowlist and 
 });
 
 /**
- * Every registration before the marks (main at ec3fd42e, #869): CHECK_TABLES and LINT_TESTS as they were. Each is
- * still registered, with the same kind, by its mark or the central list. Taking one out loosens this test.
+ * Every registration before the marks (main at a5df2254, #869): CHECK_TABLES and LINT_TESTS as they were, the queue's
+ * and the owner's lines included. Each is still registered, with the same kind, by its mark or the central list.
+ * Taking one out loosens this test.
  */
 // check-table: never-shrink
 const REGISTERED_BEFORE_MARKS: readonly { path: string; table?: string; kind: string }[] = [
@@ -1288,6 +1313,9 @@ const REGISTERED_BEFORE_MARKS: readonly { path: string; table?: string; kind: st
   { path: 'test/merge-policy.test.ts', table: 'NOT_A_CHECK', kind: 'never-grow' },
   { path: 'test/merge-policy.test.ts', table: 'NOT_A_LINT', kind: 'never-grow' },
   { path: 'test/review-packet.test.ts', table: 'PACKET_ALLOWED', kind: 'never-grow' },
+  { path: 'test/raw-check-reads.ts', table: 'RAW_READS_ALLOWED', kind: 'never-grow' },
+  { path: 'test/raw-check-reads.ts', table: 'JUDGED_CASTS_ALLOWED', kind: 'never-grow' },
+  { path: 'test/raw-check-reads.ts', table: 'MAKERS_ALLOWED', kind: 'never-grow' },
   { path: 'test/owner-terminal-rerun.test.ts', table: 'FIRST_TIME_ONLY', kind: 'never-grow' },
   { path: 'scripts/lib/denylist.mjs', table: 'SKIP', kind: 'never-grow' },
   { path: 'src/guardrails/engine.ts', table: 'AGENT_EDITABLE', kind: 'never-grow' },
@@ -1295,6 +1323,7 @@ const REGISTERED_BEFORE_MARKS: readonly { path: string; table?: string; kind: st
   { path: 'test/review.test.ts', table: 'LOCK_SCOPE_BAD', kind: 'never-shrink' },
   { path: 'test/review.test.ts', table: 'GUARD_MODULES', kind: 'never-shrink' },
   { path: 'test/review.test.ts', table: 'GUARD_ENTRIES', kind: 'never-shrink' },
+  { path: 'test/review.test.ts', table: 'GUARD_TREE', kind: 'never-shrink' },
   { path: 'test/slot-dir-writes.test.ts', table: 'SLOT_NAMES', kind: 'never-shrink' },
   { path: 'test/slot-dir-writes.test.ts', table: 'WRITE_CALLS', kind: 'never-shrink' },
   { path: 'test/slot-dir-writes.test.ts', table: 'CHMOD_BY_NAME', kind: 'never-shrink' },
@@ -1314,6 +1343,7 @@ const REGISTERED_BEFORE_MARKS: readonly { path: string; table?: string; kind: st
   { path: 'src/hook-imports.ts', table: 'HOOK_IMPORTS', kind: 'never-shrink' },
   { path: 'src/delegation.ts', table: 'NEVER_LOOSEN', kind: 'never-shrink' },
   { path: 'src/guardrails/engine.ts', table: 'BUILTIN_PROTECTED', kind: 'never-shrink' },
+  { path: `scripts/machine/${BRAND.cli}-machine.cjs`, table: 'POLICY_ONLY', kind: 'never-shrink' },
   { path: 'scripts/push-gate-hook.mjs', table: 'GATE_RULES', kind: 'never-shrink' },
   { path: 'scripts/push-gate-hook.mjs', table: 'GATE_CODE', kind: 'never-shrink' },
   { path: 'scripts/push-gate.mjs', table: 'ATTRIBUTION', kind: 'never-shrink' },
@@ -1333,6 +1363,7 @@ const REGISTERED_BEFORE_MARKS: readonly { path: string; table?: string; kind: st
   { path: 'test/claude-credential-guard.test.ts', kind: 'lint' },
   { path: 'test/download-retry.test.ts', kind: 'lint' },
   { path: 'test/owner-terminal-removed.test.ts', kind: 'lint' },
+  { path: 'test/policy-edit.test.ts', kind: 'lint' },
   { path: 'test/testrun-measure.test.ts', kind: 'lint' },
   { path: 'test/update-helpers.test.ts', kind: 'lint' },
   { path: 'test/web-buttons.test.ts', kind: 'lint' },
@@ -1348,7 +1379,7 @@ test('registration (#869): every check registered before the marks is still regi
     for (const t of marks.tables) now.add(`${path} ${t.table} ${t.kind}`);
     if (marks.lint) now.add(`${path} lint`);
   }
-  assert.equal(REGISTERED_BEFORE_MARKS.length, 64, 'the 44 tables and 20 lint tests main registered');
+  assert.equal(REGISTERED_BEFORE_MARKS.length, 70, 'the 49 tables and 21 lint tests main registered');
   const lost = REGISTERED_BEFORE_MARKS.map((r) => (r.table === undefined ? `${r.path} lint` : `${r.path} ${r.table} ${r.kind}`)).filter((k) => !now.has(k));
   assert.deepEqual(lost, []);
 });

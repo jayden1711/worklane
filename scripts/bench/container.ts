@@ -175,7 +175,8 @@ export interface Sent {
 /** Runs the docker CLI (tests pass a stand-in). */
 export type DockerCall = (docker: string, args: readonly string[], o: { env: NodeJS.ProcessEnv; timeoutMs: number; input?: Buffer }) => Sent;
 
-const spawnDocker: DockerCall = (docker, args, o) => {
+/** The docker CLI itself (download.ts pulls images through it, behind its own argv check). */
+export const spawnDocker: DockerCall = (docker, args, o) => {
   const r = spawnSync(docker, args, { env: o.env, encoding: 'utf8', timeout: o.timeoutMs, maxBuffer: 64 * 1024 * 1024, ...(o.input ? { input: o.input } : {}) });
   return { status: r.status, stdout: r.stdout ?? '', stderr: r.stderr ?? (r.error ? String(r.error) : '') };
 };

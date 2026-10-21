@@ -6,13 +6,12 @@ import { join } from 'node:path';
 import { BRAND } from '../src/brand.js';
 import { loadConfig } from '../src/config/load.js';
 import { runHook } from '../src/hook.js';
+import { blockedHost, RESEARCH_ROOT_ENV, RESEARCH_TOOLS } from '../src/guard/research.js';
 import {
   acceptResearch,
-  blockedHost,
   RESEARCH_DEFAULT_CAPS,
   RESEARCH_PROMPT,
   RESEARCH_SCHEMA,
-  RESEARCH_TOOLS,
   ResearchMeter,
   researchCapHold,
   researchComment,
@@ -23,7 +22,6 @@ import {
   researchUsageToday,
   RESEARCH_LANE,
   RESEARCH_REPO_LANE,
-  RESEARCH_ROOT_ENV,
   writeResearchBundle,
 } from '../src/research.js';
 import { researchLanes, type Instance } from '../src/instance.js';
@@ -203,8 +201,11 @@ test('research caps are instance settings: engine defaults, owner-only changes, 
   const policyPath = join(d, 'policy.yaml');
   writeFileSync(policyPath, 'version: 1\nbudget: { daily_usd: 20 }\nagents: { max_workers: 4 }\n', { mode: 0o600 });
   const base = { policyPath, cfg, eventsDb: join(d, 'events.db'), limitsPath: join(d, 'limits.json') };
-  assert.deepEqual(changeSetting({ ...base, key: 'research.max_fetches_per_day', value: 60, by: owner }), { from: RESEARCH_DEFAULT_CAPS.max_fetches_per_day, to: 60 });
-  assert.throws(() => changeSetting({ ...base, key: 'research.max_fetches_per_day', value: 61, by: 'someone-else' }), (e: Error) => e instanceof SettingsError && /only the owner/.test(e.message));
+  // The dashboard only tightens (#726 round 11, the owner's decision of 2026-10-19): a raise past the value in effect
+  // is the admin's (an edit of the file here); until then this raised it to 60. A lowering is written.
+  assert.throws(() => changeSetting({ ...base, key: 'research.max_fetches_per_day', value: 60, by: owner }), /research\.max_fetches_per_day 60 would loosen it \(now 40\)/);
+  assert.deepEqual(changeSetting({ ...base, key: 'research.max_fetches_per_day', value: 30, by: owner }), { from: RESEARCH_DEFAULT_CAPS.max_fetches_per_day, to: 30 });
+  assert.throws(() => changeSetting({ ...base, key: 'research.max_fetches_per_day', value: 20, by: 'someone-else' }), (e: Error) => e instanceof SettingsError && /only the owner/.test(e.message));
   writeFileSync(base.limitsPath, JSON.stringify({ research: { max_fetches_per_day: 50 } }));
   assert.equal(loadLimits(base.limitsPath).research.max_fetches_per_day, 50);
   assert.throws(() => changeSetting({ ...base, key: 'research.max_fetches_per_day', value: 70, by: owner }), /research\.max_fetches_per_day 70 is over 50/);
@@ -212,7 +213,7 @@ test('research caps are instance settings: engine defaults, owner-only changes, 
 
 // ---- repo access: off by default, structural when off
 
-test('repo access is an instance setting: off by default, only the owner turns it on', () => {
+test('repo access is an instance setting: off by default; turning it on is the admin\'s, never the dashboard\'s (#726 round 11)', () => {
   const cfg = loadConfig(exampleProject().dir);
   const owner = cfg.project.owners.default;
   assert.equal(researchRepoAccess({}), false);
@@ -223,7 +224,9 @@ test('repo access is an instance setting: off by default, only the owner turns i
   const base = { policyPath, cfg, eventsDb: join(d, 'events.db'), limitsPath: join(d, 'limits.json') };
   assert.throws(() => changeSetting({ ...base, key: 'research.repo_access', value: true, by: 'someone-else' }), /only the owner/);
   assert.throws(() => changeSetting({ ...base, key: 'research.repo_access', value: 'yes', by: owner }), /refused/);
-  assert.deepEqual(changeSetting({ ...base, key: 'research.repo_access', value: true, by: owner }), { from: false, to: true });
+  // The owner's decision of 2026-10-19: the dashboard only tightens; until then the owner turned it on here.
+  assert.throws(() => changeSetting({ ...base, key: 'research.repo_access', value: true, by: owner }), /research\.repo_access true would loosen it \(now false\).*edit .*policy\.yaml \(settings\.research\.repo_access: true\), or its Helm value/);
+  assert.equal(readFileSync(policyPath, 'utf8'), 'version: 1\nbudget: { daily_usd: 20 }\n', 'nothing written');
 });
 
 test('without repo access the run is in its bundle (research lane); with it, a read-only worktree (research-repo lane)', () => {

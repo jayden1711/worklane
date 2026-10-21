@@ -20,6 +20,7 @@ import { candidateVerdict, episodes, FIX_FORWARD_LABEL, revertFirstReasons } fro
 import { computeLevel } from '../src/review.js';
 import { passGate } from '../src/testrun/gate.js';
 import { GATE_MODES, guardGate } from './gate-helpers.js';
+import { asJudged } from './helpers.js';
 
 const sha = (n: number) => n.toString(16).padStart(40, 'c');
 const check = (conclusion: string, id: number, name = 'ci'): CommitCheck => ({ name, source: 'check_run', status: 'completed', conclusion, id });
@@ -65,6 +66,7 @@ function fixture(o: { prs: number; files?: Record<number, string[]>; cfg?: { max
     },
     config: () => ({ max_attempts: 2, revert_first_paths: [], ...o.cfg }),
     required: () => ['ci'],
+    checks: async (sha) => asJudged(await backlog.checks(sha)),
     probeTimeoutMin: () => 90,
     testRuns: o.testRuns ?? null,
     tiers: () => [{ name: 'unit', kind: 'fast' }],
