@@ -296,9 +296,12 @@ test('a hide path in a directory the agent owns but made unsearchable is refused
   mkdirSync(join(home, 'keys'), { recursive: true });
   writeFileSync(join(home, 'keys', 'open'), `${value}\n`, { mode: 0o600 });
   const runAs = { user: 'shop-agent', home, hide: [join(home, 'keys', 'open')] };
-  // One command makes the directory unsearchable (it owns it; the mask can't stop a chmod), the next would find the
-  // path "absent", get no mask, make it searchable again and read the key.
-  asStandIn(`chmod 000 ${join(home, 'keys')}`, runAs, root);
+  // The agent user makes the directory unsearchable (it owns it; the mask can't stop a chmod), the next command would
+  // find the path "absent", get no mask, make it searchable again and read the key. Since #798 a sandboxed command
+  // can't (its home is read-only there); the agent user outside the sandbox still can, so the walk still refuses.
+  const tried = asStandIn(`chmod 000 ${join(home, 'keys')} 2>&1`, runAs, root);
+  assert.match(tried.stdout, /Read-only file system/, 'a sandboxed command chmods nothing in its home');
+  chmodSync(join(home, 'keys'), 0o000);
   const next = asStandIn(`chmod 700 ${join(home, 'keys')}; cat ${join(home, 'keys', 'open')} 2>&1; true`, runAs, root);
   chmodSync(join(home, 'keys'), 0o700);
   assert.ok(!next.stdout.includes(value), `the key was read: ${next.stdout}`);
@@ -321,7 +324,10 @@ for (const [where, mode] of [['~', 0o311], ['~', 0o100], ['~/.config', 0o311], [
     const dir = where === '~' ? home : join(home, '.config');
     const runAs = { user: 'shop-agent', home, hide: [] };
     try {
-      asStandIn(`chmod ${mode.toString(8)} ${JSON.stringify(dir)}`, runAs, root);
+      // Since #798 a sandboxed command can't chmod its home (read-only there); the agent user outside it still can.
+      const tried = asStandIn(`chmod ${mode.toString(8)} ${JSON.stringify(dir)} 2>&1`, runAs, root);
+      assert.match(tried.stdout, /Read-only file system/, 'a sandboxed command chmods nothing in its home');
+      chmodSync(dir, mode);
       const next = asStandIn(`cat ${join(home, '.claude', '.credentials.json')} ${join(home, '.config', 'shop-claude-key', 'api_key')} 2>&1; true`, runAs, root);
       for (const v of [login, key]) assert.ok(!next.stdout.includes(v), `read: ${next.stdout}`);
       assert.equal(next.status, osAdapter.SANDBOX_UNAVAILABLE, next.stderr);
@@ -415,12 +421,22 @@ test('a sandboxed command can\'t rename a directory above a hidden path to unmas
   const prov = `PLANTED-${randomBytes(12).toString('hex')}`;
   mkdirSync(join(home, 'keys', 'provider'), { recursive: true });
   writeFileSync(join(home, 'keys', 'provider', 'open'), `${prov}\n`, { mode: 0o600 });
-  const runAs = { user: 'shop-agent', home, hide: [join(home, 'keys', 'provider', 'open')] };
-  const mv = asStandIn('mv ~/.config ~/cfg2; mv ~/keys ~/k2; mv ~/keys/provider ~/p2; echo touched > ~/.config/still-writable', runAs, root);
-  const r = asStandIn('cat ~/cfg2/shop-claude-key/api_key ~/k2/provider/open ~/p2/open ~/.config/shop-claude-key/api_key ~/keys/provider/open 2>&1; true', runAs, root);
-  for (const v of [key, prov]) assert.ok(!r.stdout.includes(v), `a renamed parent unmasked a secret: ${r.stdout}`);
-  assert.match(mv.stderr, /busy/i, 'each rename is refused');
-  assert.equal(readFileSync(join(home, '.config', 'still-writable'), 'utf8'), 'touched\n', 'the directory\'s contents stay writable');
+  // And one outside the home (credentials.yaml may name any path), where the directories above it are bound onto
+  // themselves: a rename there is refused as busy.
+  const srv = join(root, 'srv');
+  const out = `PLANTED-${randomBytes(12).toString('hex')}`;
+  mkdirSync(join(srv, 'keys', 'provider'), { recursive: true });
+  writeFileSync(join(srv, 'keys', 'provider', 'open'), `${out}\n`, { mode: 0o600 });
+  const runAs = { user: 'shop-agent', home, hide: [join(home, 'keys', 'provider', 'open'), join(srv, 'keys', 'provider', 'open')] };
+  const mv = asStandIn(`mv ~/.config ~/cfg2; mv ~/keys ~/k2; mv ~/keys/provider ~/p2; echo touched > ~/.config/still-writable; mv ${srv}/keys ${srv}/k2; mv ${srv}/keys/provider ${srv}/p2; echo touched > ${srv}/keys/still-writable`, runAs, root);
+  const r = asStandIn(`cat ~/cfg2/shop-claude-key/api_key ~/k2/provider/open ~/p2/open ~/.config/shop-claude-key/api_key ~/keys/provider/open ${srv}/k2/provider/open ${srv}/p2/open ${srv}/keys/provider/open 2>&1; true`, runAs, root);
+  for (const v of [key, prov, out]) assert.ok(!r.stdout.includes(v), `a renamed parent unmasked a secret: ${r.stdout}`);
+  // Under the home: refused, the home being read-only inside the sandbox (#798); outside it: busy, as before.
+  const lines = mv.stderr.trim().split('\n');
+  for (const what of ['.config', 'keys', join('keys', 'provider')]) assert.ok(lines.some((l) => l.includes(`'${join(home, what)}'`) && /Read-only file system/.test(l)), `~ rename of ${what} not refused: ${mv.stderr}`);
+  assert.ok(lines.some((l) => l.includes(`'${join(srv, 'keys')}'`) && /busy/i.test(l)), `rename outside the home not refused: ${mv.stderr}`);
+  assert.ok(!existsSync(join(home, '.config', 'still-writable')), 'the home stays read-only (#798)');
+  assert.equal(readFileSync(join(srv, 'keys', 'still-writable'), 'utf8'), 'touched\n', 'the directory\'s contents stay writable outside the home');
 });
 
 test('a symlink on the way to a hidden path, in a directory the agent can write, is refused: a command could swap it', { skip: !posix && 'bubblewrap is Linux only' }, () => {
