@@ -69,7 +69,7 @@ test('#898 owner rule: with --replace-sudoers (root, at a root shell) the narrow
   assert.equal(m.hostCalls(), '');
 });
 
-test('#898 owner rule: a hand-added line is only ever dropped, never kept or widened: with the engine\'s rule also wider it waits; on its own it is dropped and nothing added', { skip: !posix }, () => {
+test('#898 owner rule: a hand-added line is never kept, and never dropped while the engine\'s rule adds: with the engine\'s rule also wider it waits; on its own it waits too (#902 round 3: a line outside the engine\'s shape fails closed)', { skip: !posix }, () => {
   const m = machine();
   assert.equal(m.run().status, 0);
   const hand = 'wl-alpha ALL=(root) NOPASSWD: ALL\n';
@@ -80,10 +80,11 @@ test('#898 owner rule: a hand-added line is only ever dropped, never kept or wid
   assert.equal(m.sudoers(), narrowerPlusHand, 'never rewritten to drop one line while adding another');
   m.setSudoers(`${m.expected('alpha', 'old')}${hand}`);
   const r = m.run();
-  assert.equal(r.status, 0, r.stderr);
-  assert.equal(m.sudoers(), m.expected('alpha', 'old'));
+  assert.equal(r.status, 3, r.stderr);
   assert.deepEqual(changed(r.stderr, '-'), [`-${hand.trimEnd()}`]);
   assert.deepEqual(changed(r.stderr, '+'), []);
+  assert.equal(m.run(['--replace-sudoers']).status, 0);
+  assert.equal(m.sudoers(), m.expected('alpha', 'old'));
   assert.equal(m.hostCalls(), '');
 });
 

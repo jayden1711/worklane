@@ -15,7 +15,7 @@ import { createRequire } from 'node:module';
 import { join } from 'node:path';
 import { KINDS } from '../src/watchdog/index.js';
 import { repoRoot } from './helpers.js';
-import { machine, olderRule } from './sudoers-machine-fixture.js';
+import { machine, olderRule, withCommand } from './sudoers-machine-fixture.js';
 
 const posix = process.platform !== 'win32';
 const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&');
@@ -47,11 +47,15 @@ test('#898: a rerun after an upgrade does not take the helper\'s bytes and a lis
   assert.equal(m.hostCalls(), '', 'no host tool was reached');
 });
 
-test('#898: a rule wider than machine-helper.sh\'s is rewritten to exactly its output, never kept', { skip: !posix }, () => {
+test('#898: a rule with a line outside the engine\'s shape is never kept, and never rewritten without root: --replace-sudoers makes it exactly machine-helper.sh\'s', { skip: !posix }, () => {
   const m = machine();
   assert.equal(m.run().status, 0);
   m.setSudoers(`${m.expected('alpha', 'old')}wl-alpha ALL=(root) NOPASSWD: ALL\n`);
-  const r = m.run();
+  // #902 round 3, fail closed: a line the engine never writes is a doubt, so the rerun waits for root's flag.
+  const waits = m.run();
+  assert.equal(waits.status, 3, waits.stderr);
+  assert.equal(m.helperRuns(), 1);
+  const r = m.run(['--replace-sudoers']);
   assert.equal(r.status, 0, r.stderr);
   assert.equal(m.helperRuns(), 2);
   assert.equal(m.sudoers(), m.expected('alpha', 'old'));
@@ -103,12 +107,19 @@ test('#898: machine-helper.sh --check says absent, current, stale (no flag) or w
   assert.match(r.stdout, new RegExp(`^--- installed ${esc(file)}\\n\\+\\+\\+ engine \\(machine-helper\\.sh\\)\\n`));
   assert.deepEqual(snapshot(), before, 'nothing written');
 
-  // Wider than its output (a hand-added line): stale, and the rewrite needs no flag.
-  m.setSudoers(`${m.expected('alpha', 'old')}wl-alpha ALL=(root) NOPASSWD: ALL\n`);
+  // A command the engine no longer writes, in the engine's own shape: stale, and the rewrite needs no flag.
+  m.setSudoers(withCommand(m.expected('alpha', 'old'), `${m.T}/helper claude-account switch`));
   r = m.check();
   assert.equal(r.status, 3);
-  assert.match(r.stdout, /^-wl-alpha ALL=\(root\) NOPASSWD: ALL$/m);
+  assert.ok(r.stdout.includes(`\n-    ${m.T}/helper claude-account switch, \\\n`), r.stdout);
   assert.ok(r.stdout.trimEnd().endsWith(`rewrite it, as root: sudo bash ${m.real}/machine-helper.sh alpha old`), r.stdout);
+
+  // A hand-added line outside that shape: wider (#902 round 3, fail closed), the command with the flag.
+  m.setSudoers(`${m.expected('alpha', 'old')}wl-alpha ALL=(root) NOPASSWD: ALL\n`);
+  r = m.check();
+  assert.equal(r.status, 4);
+  assert.match(r.stdout, /^-wl-alpha ALL=\(root\) NOPASSWD: ALL$/m);
+  assert.ok(r.stdout.trimEnd().endsWith(`--replace-sudoers alpha old`), r.stdout);
 
   // No user left for any instance it names: the command removes it, as instance-remove.sh does for the last one.
   m.setSudoers(m.expected('alpha', 'old').replace('wl-alpha, wl-old ALL=', 'wl-gone ALL='));
@@ -147,11 +158,11 @@ test('#898: the updater reads machine-helper.sh --check of the installed engine:
   assert.equal(wider.state, 'wider');
   assert.equal(wider.fix, `sudo bash ${engine}/scripts/setup/machine-helper.sh --replace-sudoers alpha old`);
   assert.match(wider.detail, /^wider: rerun as root with --replace-sudoers to install the engine's rule: .* The diff: \+/);
-  m.setSudoers(`${m.expected('alpha', 'old')}wl-alpha ALL=(root) NOPASSWD: ALL\n`);
+  m.setSudoers(withCommand(m.expected('alpha', 'old'), `${m.T}/helper claude-account switch`));
   const stale = check()!;
   assert.equal(stale.state, 'stale');
   assert.equal(stale.fix, `sudo bash ${engine}/scripts/setup/machine-helper.sh alpha old`);
-  assert.match(stale.detail, /The diff: -wl-alpha ALL=\(root\) NOPASSWD: ALL/);
+  assert.match(stale.detail, /The diff: -\s+\S+\/helper claude-account switch, \\/);
   m.setSudoers(m.expected('alpha', 'old'));
   assert.equal(check()!.state, 'current');
   // An engine with no machine-helper.sh: nothing to say.

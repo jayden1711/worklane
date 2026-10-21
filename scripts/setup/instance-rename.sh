@@ -65,6 +65,14 @@ instance_name_ok "$new" || { echo "the new name $new: lowercase letters, digits 
 as_root "$@"
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 [[ "${SUDO_USER:-}" != wl-* ]] || { echo "instance-rename is an admin's, at the machine's terminal: not $SUDO_USER's" >&2; exit 1; }
+# Before anything changes (#898): the services step rewrites the machine helper's rule with <new> added, the one user
+# this rename adds on purpose. When anything more would need --replace-sudoers (the engine's rule is wider than the
+# installed one, or the installed one isn't in the engine's own shape), stop now, nothing changed, naming that command.
+if [ -z "$print" ] && [ -z "$abort" ]; then
+  pre=()
+  for m in $({ helper_instances; echo "$new"; } | sort -u); do if [ "$m" = "$new" ] || user_exists "wl-$m"; then pre+=("$m"); fi; done
+  machine_sudoers_preflight "$here" "wl-$new" "${pre[@]}" || { echo "refused: $old is not renamed, nothing changed: the machine helper's rule needs root's --replace-sudoers first (above), then run this again" >&2; exit 1; }
+fi
 NODE="$(command -v node)" || { echo "needs node on root's PATH (node.sh)" >&2; exit 1; }
 records() { "$NODE" "$here/instance-records.cjs" "$@"; }
 refuse() { echo "refused: $*" >&2; exit 1; }

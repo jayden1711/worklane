@@ -62,6 +62,7 @@ install_claude_token() {
   { printf '{"claudeAiOauth":{"accessToken":"'; cat; printf '"}}'; } > "$T/homes/$1/.claude/.credentials.json"
 }
 SRV_ROOT="$T/srv" ENGINE_CLI="$T/bin/worklane" MACHINE_HELPER="$T/helper" MACHINE_SUDOERS="$T/sudoers-machine" HUB_UNIT="$T/hub.service" ADD_PROJECT_LOCK="$T/lock"
+ADD_PROJECT_NEW="$T/add-project-new"
 SETUP_POLL_SECONDS=0
 `;
   writeFileSync(join(s, 'lib.sh'), lib);

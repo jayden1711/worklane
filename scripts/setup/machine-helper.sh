@@ -41,14 +41,15 @@
 #   bash scripts/setup/machine-helper.sh --replace-sudoers <name> [<name>...]
 #
 # The owner's rule (#898): the rule is rewritten on its own only when the result is narrower than or equal to what is
-# installed. That means every grant this script would write is there already (each command, user spec and user,
-# whitespace aside), so the rewrite only drops grants. The users named here are the exception: at a root shell you
-# name them on purpose. When this script's rule would grant anything else the installed one doesn't (an engine that
-# added a command, a sudo upgraded past 1.9.10), it changes nothing. It prints a unified diff
-# ("--- installed <file>", "+++ engine (machine-helper.sh)") and the line "rerun as root with --replace-sudoers to
-# install the engine's rule: <command>", then exits 3. --replace-sudoers, at a root shell once you've read the diff,
-# writes the rule whole. A machine's first install (no rule yet) needs no flag. No sudoers rule lets a coordinator run
-# this script; through the helper a coordinator reaches only add-project.sh, with exactly a name and a repo.
+# installed, and it fails closed. That holds only when the installed rule is in this script's own exact shape (lib.sh
+# machine_sudoers_shape) and this script's rule only drops whole commands or users from it. The users named here are
+# the exception: at a root shell you name them on purpose.
+# Anything else changes nothing: a command it lacks (a newer engine's, or a sudo upgraded past 1.9.10), or any line,
+# tag, Defaults, include, negation or escape outside that shape. It prints a unified diff (minus side "installed
+# <file>", plus side "engine (machine-helper.sh)") and the line "rerun as root with --replace-sudoers to install the
+# engine's rule: <command>", then exits 3. --replace-sudoers, at a root shell once you've read the diff, writes the rule
+# whole. A machine's first install (no rule yet) needs no flag. No sudoers rule lets a coordinator run this script;
+# through the helper a coordinator reaches only add-project.sh, with exactly a name and a repo.
 #
 #   bash scripts/setup/machine-helper.sh --check      whether the installed rule is current; changes nothing (#898)
 #
@@ -71,8 +72,14 @@ if [ "${1:-}" = --check ]; then
   names=() users=()
   for n in $(helper_instances); do if user_exists "wl-$n"; then names+=("$n"); users+=("wl-$n"); fi; done
   if [ "${#names[@]}" -eq 0 ]; then
-    echo "stale: $MACHINE_SUDOERS names no coordinator user on this machine; remove it, as root: sudo rm -f $MACHINE_SUDOERS"
-    exit 3
+    # In the engine's own shape, naming no user that is here: removing it only narrows. Anything else (a rule this
+    # can't read the users of, as the engine writes them) fails closed: wider.
+    if machine_sudoers_shape < "$MACHINE_SUDOERS" >/dev/null 2>&1; then
+      echo "stale: $MACHINE_SUDOERS names no coordinator user on this machine; remove it, as root: sudo rm -f $MACHINE_SUDOERS"
+      exit 3
+    fi
+    echo "wider: rerun as root with --replace-sudoers to install the engine's rule: sudo bash $here/machine-helper.sh --replace-sudoers <every instance on this machine>"
+    exit 4
   fi
   rule="$(machine_sudoers "${users[@]}")"
   if sudoers_current "$MACHINE_SUDOERS" "$rule"; then

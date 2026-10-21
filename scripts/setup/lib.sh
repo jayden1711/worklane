@@ -237,78 +237,98 @@ machine_sudoers_current() {
   sudoers_current "$MACHINE_SUDOERS" "$(machine_sudoers "${users[@]}")"
 }
 
-# The grants a sudoers text on stdin makes, one per line, whitespace normalised (#898):
-#   - "alias <NAME> <command>" for each command of a Cmnd_Alias;
-#   - "spec <hosts=(runas) tags: commands>" for each user spec;
-#   - "user <name>" for each user a spec names;
-#   - "other <line>" for anything else (Defaults, another alias kind, an #include or @include).
-# A line ending in \ goes on into the next. Comments and blank lines grant nothing and are left out. A comment ending
-# in \ takes the lines it continues into with it: whatever sudo makes of that, those lines never count as granted here,
-# which fails closed (the engine's rule then looks wider). An #include is not a comment, so it is kept.
-sudoers_grants() {
-  LC_ALL=C awk '
-    { sub(/\r$/, "") }
-    buf == "" && /^[ \t]*[#@]include/ { line = $0; gsub(/[ \t]+/, " ", line); sub(/^ /, "", line); print "other " line; next }
-    skip { if ($0 !~ /\\[ \t]*$/) skip = 0; next }
-    buf == "" && /^[ \t]*#/ { if ($0 ~ /\\[ \t]*$/) skip = 1; next }
-    /\\[ \t]*$/ { sub(/\\[ \t]*$/, ""); buf = buf $0 " "; next }
+# The machine helper's rule read in the engine's own shape, or nothing (#898, #902 round 3: fail closed). On stdin, a
+# text machine_sudoers writes, as install_sudoers writes it:
+#   - comment lines, each starting "# ": never an #include or #includedir, never "#<digits>" (sudoers reads that as a
+#     uid), never one ending in \;
+#   - then exactly one "Cmnd_Alias WORKLANE_MACHINE = " block, one command a line: the first on the alias line, the
+#     rest indented four spaces, each but the last ending ", \";
+#   - then exactly one "<users> ALL=(root) NOPASSWD: WORKLANE_MACHINE" line, its users wl-<name> joined by ", ";
+#   - and nothing else.
+# Every command is "$MACHINE_HELPER <arguments>": words of the characters the engine's own commands use, one space
+# apart. That means no "!", no backslash, no comma, colon, equals sign, quote or tab.
+# It prints "cmd <command>" for each command and "user <user>" for each user, and exits 0. On anything else, exit 1:
+# a tab, a CR, a blank line, a second alias or spec, a tag, a Defaults or include line, a negation, an escape, or
+# anything it can't place. The caller then treats the rule as one only --replace-sudoers may replace.
+machine_sudoers_shape() {
+  LC_ALL=C awk -v H="$MACHINE_HELPER" -v A='^[]A-Za-z0-9^$.*+[{}/@_~-]+( []A-Za-z0-9^$.*+[{}/@_~-]+)*$' \
+    -v S='^wl-[a-z][a-z0-9-]*(, wl-[a-z][a-z0-9-]*)* ALL=[(]root[)] NOPASSWD: WORKLANE_MACHINE$' '
+    function bad() { failed = 1; exit 1 }
     {
-      line = buf $0; buf = ""
-      gsub(/[ \t]+/, " ", line); sub(/^ /, "", line); sub(/ $/, "", line)
-      if (line == "") next
-      if (line ~ /^Cmnd_Alias [A-Z0-9_]+ ?=/) {
-        name = line; sub(/^Cmnd_Alias /, "", name); sub(/ ?=.*$/, "", name)
-        rest = line; sub(/^[^=]*= ?/, "", rest)
-        n = split(rest, c, / ?, ?/)
-        for (i = 1; i <= n; i++) if (c[i] != "") print "alias " name " " c[i]
+      line = $0
+      if (line ~ /[\r\t]/) bad()
+      if (st == 0 && substr(line, 1, 1) == "#") {
+        if (substr(line, 1, 2) != "# " || line ~ /\\$/) bad()
         next
       }
-      if (line ~ /^[a-z_%+][^ =]*(, ?[^ ,=]+)* [^ ,=]+=/) {
-        match(line, / [^ ,=]+=/)
-        users = substr(line, 1, RSTART - 1); spec = substr(line, RSTART + 1)
-        n = split(users, u, / ?, ?/)
-        for (i = 1; i <= n; i++) if (u[i] != "") print "user " u[i]
-        print "spec " spec
-        next
-      }
-      print "other " line
+      if (st == 0) {
+        if (substr(line, 1, 30) != "Cmnd_Alias WORKLANE_MACHINE = ") bad()
+        rest = substr(line, 31); st = 1
+      } else if (st == 1) {
+        if (substr(line, 1, 4) != "    ") bad()
+        rest = substr(line, 5)
+      } else if (st == 2) {
+        if (line !~ S) bad()
+        u = line; sub(/ ALL=.*$/, "", u)
+        n = split(u, us, ", ")
+        for (i = 1; i <= n; i++) print "user " us[i]
+        st = 3; next
+      } else bad()
+      more = 0
+      if (substr(rest, length(rest) - 2) == ", \\") { more = 1; rest = substr(rest, 1, length(rest) - 3) }
+      if (index(rest, H " ") != 1) bad()
+      if (substr(rest, length(H) + 2) !~ A) bad()
+      print "cmd " rest
+      if (!more) st = 2
     }
-    END { if (buf != "") print "other " buf }'
+    END { if (failed || st != 3) exit 1 }'
 }
 
-# What replacing sudoers file $1 by content $2 would change in its grants (#898). It prints "+ <grant>" for each grant
-# it would add and "- <grant>" for each it would drop, sorted. A file it can't read counts as granting nothing, so every
-# grant of $2 shows as added.
-sudoers_grant_diff() {
-  local have want
-  have="$({ sudoers_grants < "$1"; } 2>/dev/null | LC_ALL=C sort -u)" || have=""
-  want="$(sudoers_bytes "$2" | sudoers_grants | LC_ALL=C sort -u)"
-  LC_ALL=C comm -13 <(printf '%s\n' "$have") <(printf '%s\n' "$want") | sed -n 's/^\(..*\)$/+ \1/p'
-  LC_ALL=C comm -23 <(printf '%s\n' "$have") <(printf '%s\n' "$want") | sed -n 's/^\(..*\)$/- \1/p'
-}
-
-# Whether replacing sudoers file $1 by content $2 only drops grants (#898). The owner's rule: the machine helper's rule
-# is rewritten on its own only when the result is narrower than or equal to what is installed. So every grant $2 makes
-# (each command, each user spec, each user named, whitespace normalised) must be in $1 already. The one exception is
-# the users $3..., named on purpose by the caller: machine-helper.sh's own arguments at a root shell, or add-project's
-# instance on its first add. A user added any other way is a widening, like a command. With no $1 yet (a machine's
-# first install) there is nothing to be wider than. Only reads; prints nothing.
+# Whether replacing the installed rule $1 by content $2 only narrows it (#898). The owner's rule: the rule is rewritten
+# on its own only when the result is narrower than or equal to what is installed.
+#   - $1 must be a regular file (no link, no NUL) in the engine's own shape (machine_sudoers_shape), and so must $2.
+#   - Every command of $2 must be one of $1's, byte for byte.
+#   - Every user of $2 must be one of $1's, unless it is among $3...: users the caller adds on purpose, which are
+#     machine-helper.sh's own arguments at a root shell, or the instance add-project is creating.
+# So the rewrite only drops whole commands or users. Anything else, including any doubt, is wider: only root's
+# --replace-sudoers replaces it. With no $1 yet (a machine's first install) there is nothing to be wider than.
+# Only reads; prints nothing.
 sudoers_only_narrows() {
-  local file="$1" content="$2" d l
+  local file="$1" content="$2" have want l
   shift 2
   [ -e "$file" ] || [ -L "$file" ] || return 0
-  d="$(sudoers_grant_diff "$file" "$content")"
+  [ -f "$file" ] && [ ! -L "$file" ] || return 1
+  tr -d '\000' < "$file" | cmp -s - "$file" || return 1
+  have="$(machine_sudoers_shape < "$file")" || return 1
+  want="$(sudoers_bytes "$content" | machine_sudoers_shape)" || return 1
   while IFS= read -r l; do
-    case "$l" in
-      "+ user "*) printf '%s\n' "$@" | grep -qxF -- "${l#+ user }" || return 1 ;;
-      "+ "*) return 1 ;;
-    esac
-  done <<<"$d"
+    grep -qxF -- "$l" <<<"$have" && continue
+    case "$l" in "user "*) printf '%s\n' "$@" | grep -qxF -- "${l#user }" && continue ;; esac
+    return 1
+  done <<<"$want"
   return 0
 }
 
+# Before a setup script's first change (instance-remove.sh, instance-rename.sh): stop when rewriting the machine
+# helper's rule for instances $3... would need --replace-sudoers (#898). $1 is the script's directory, for the command.
+# $2 is the one user the script adds on purpose (the renamed instance's), or empty. When it would need the flag, it
+# prints the diff and the command and returns 1, so the script stops with nothing changed. With no instance left to
+# name, or no rule naming any, there is nothing to check.
+machine_sudoers_preflight() {
+  local dir="$1" allow="$2" n users=() others=() rule
+  shift 2
+  [ "$#" -gt 0 ] || return 0
+  for n in "$@"; do users+=("wl-$n"); [ "wl-$n" = "$allow" ] || others+=("$n"); done
+  rule="$(machine_sudoers "${users[@]}")" || return 1
+  sudoers_only_narrows "$MACHINE_SUDOERS" "$rule" ${allow:+"$allow"} && return 0
+  sudoers_unified_diff "$MACHINE_SUDOERS" "$rule"
+  # The command names the instances there now: the one the script adds on purpose is added by the script itself.
+  echo "rerun as root with --replace-sudoers to install the engine's rule: sudo bash $dir/machine-helper.sh --replace-sudoers ${others[*]}"
+  return 1
+}
+
 # The difference between installed sudoers file $1 and content $2 as a unified diff, labelled for the owner's runbook:
-# "--- installed <file>" and "+++ engine (machine-helper.sh)". Prints nothing when they are the same.
+# its minus side "installed <file>", its plus side "engine (machine-helper.sh)". Prints nothing when they are the same.
 sudoers_unified_diff() {
   diff -u --label "installed $1" --label "engine (machine-helper.sh)" -- "$1" <(sudoers_bytes "$2") || true
 }
@@ -631,6 +651,10 @@ ENGINE_CLI=/usr/local/bin/worklane
 # add-project's wait for a repo's setup PR to merge: how often it checks, and (empty: its --timeout) for how long.
 SETUP_POLL_SECONDS=20 SETUP_WAIT_SECONDS=""
 ADD_PROJECT_LOCK=/run/lock/worklane-add-project.lock
+# The instances add-project.sh is creating: root's list, one name a line, 0600 (#898). A name goes on it when
+# add-project makes the instance's coordinator user, and comes off once the machine helper's rule names it. Only such
+# an instance's coordinator is added to that rule without --replace-sudoers.
+ADD_PROJECT_NEW=/var/lib/worklane/add-project-new
 user_exists() { id -u "$1" >/dev/null 2>&1; }
 unit_active() { systemctl is-active -q "$1"; }
 

@@ -59,6 +59,15 @@ as_root "$@"
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 # Never through a coordinator's sudo, even one a rule might let through by mistake.
 [[ "${SUDO_USER:-}" != wl-* ]] || { echo "instance-remove is an admin's, at the machine's terminal: not $SUDO_USER's" >&2; exit 1; }
+# Before anything changes (#898): the machine helper's rule is rewritten below for every other instance it names. When
+# that would need --replace-sudoers (the engine's rule is wider than the installed one, or the installed one isn't in the
+# engine's own shape), stop now, nothing changed, naming that command. After it, the rule no longer names this
+# instance, and a rerun goes on.
+if [ -z "$print" ] && helper_instances | grep -qx "$name"; then
+  pre=()
+  for m in $(helper_instances | grep -vx "$name" || true); do if user_exists "wl-$m"; then pre+=("$m"); fi; done
+  machine_sudoers_preflight "$here" "" ${pre[@]+"${pre[@]}"} || { echo "refused: $name is not removed, nothing changed: the machine helper's rule needs root's --replace-sudoers first (above), then run this again" >&2; exit 1; }
+fi
 NODE="$(command -v node)" || { echo "needs node on root's PATH (node.sh)" >&2; exit 1; }
 records() { "$NODE" "$here/instance-records.cjs" "$@"; }
 ARCHIVE=/var/lib/worklane/removed
