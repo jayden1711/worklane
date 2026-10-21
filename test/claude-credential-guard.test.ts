@@ -1,3 +1,4 @@
+// lint-test
 // Issue #711: no dashboard route takes a Claude credential. Every request body the dashboard reads goes through
 // src/claude-credential-guard.ts first, so a token from `claude setup-token`, or the one-time code Anthropic's sign-in
 // page shows, is refused whatever the route; the routes that once took one answer 410 Gone. Checked: the guard itself;

@@ -115,6 +115,7 @@ test('A1, control: the same merge, with a PR test that calls the code it changes
 const CALC = 'export function add(a, b) {\n  /*\n   * Adds.\n   */\n  // plain sum\n  const s = a + b;\n  return s;\n}\nexport function sub(a, b) {\n  return a - b;\n}\n';
 const ADD_TEST = callsTest('src/calc.js', 'add', 'add(1, 2)', '3');
 
+// check-table: never-shrink
 const ONLY: Record<string, string> = {
   'a line comment inside a function the test runs': CALC.replace('  const s', '  // still a plain sum\n  const s'),
   'a line inside a block comment, with no comment mark of its own': CALC.replace('   * Adds.\n', '   * Adds.\n     and more words here\n'),

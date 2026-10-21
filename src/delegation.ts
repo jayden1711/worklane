@@ -15,6 +15,7 @@ import { DIFF_HIDING_ATTRIBUTES, LOCKED_CATEGORIES, ODD_PATH_CATEGORIES } from '
  * isn't ASCII), a .gitattributes mark that hides a diff (review.ts DIFF_HIDING_ATTRIBUTES), the locked ones
  * (review.ts). The repo's own L3 too.
  */
+// check-table: never-shrink
 export const NEVER_LOOSEN = ['money-path', 'migration', 'auth', 'secrets', 'deploy-config', 'release-config', 'harness-config', 'guardrail-config', 'deletes-data', 'ci-config', 'dependency', ...ODD_PATH_CATEGORIES, DIFF_HIDING_ATTRIBUTES] as const;
 
 export function protectedCategories(review: { levels: { L3_human: { when: string[] } } }): Set<string> {

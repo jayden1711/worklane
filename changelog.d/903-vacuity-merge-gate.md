@@ -2,9 +2,9 @@
 
 - **A PR that changes app code waits for you unless its own tests are shown to run that code (#784).** Only a measured yes lets it auto-merge.
   - Its tests are the test files it adds or changes and the `test:` files its task's `done_when` names. They must call an assertion; importing an assertion module is not one.
-  - Each is run with `runner.one` under Node's V8 coverage, in a scratch worktree at the PR's head, with the setup, the run and the coverage read off the coordinator's thread. Each runs twice: as it is, and with every test skipped. The PR's tests must run code on a changed line of at least one of its app files more often than loading them does.
-  - Every module the tests loaded more often than the skipped run did (an import in a test's body, a `?query` copy, what such a module imports) is also loaded on its own, and taken away as many times as the extra loads, within one 120 s budget. What loading a module runs doesn't count, even in a file the PR adds and however a test's body imports it: its top level, a class's static fields, a helper called at load, a call at the test file's top level. One limit: a timer or listener a module starts as it loads runs longer while a test waits, and that counts.
-  - The PR's lines are measured from where it meets the default branch's tip as the remote reports it (never the clone's ref), so what it merged in or was rebased onto is never its own. The PR waits until the clone has that tip. A renamed file's lines are the ones its rename changed. Blank lines, whitespace and comments are not changed code: a PR with nothing else in its app files waits.
+  - Each is run with `runner.one` under Node's V8 coverage, in a scratch worktree at the PR's head, with the setup, the run and the coverage read off the coordinator's thread. Each runs twice: as it is, and with every test skipped. The PR's tests must run code the PR changed in at least one of its app files more often than loading them does, measured by character against V8's block ranges (an untaken branch on a changed line doesn't count; a removal counts where it was).
+  - Every module the tests loaded more often than the skipped run did (an import in a test's body, a `?query` copy, what such a module imports) is also loaded on its own, and taken away as many times as the extra loads, within one 120 s budget. What loading a module runs doesn't count, even in a file the PR adds and however a test's body imports it: its top level, a class's static fields, a helper called at load, a call at the test file's top level. Limits: a timer or an `async_hooks`/exit listener a module starts as it loads runs more as the tests do things or wait, and that counts; so does code after a call that threw.
+  - The PR's lines are measured from where it meets the default branch's tip, fetched from the remote for the decision (never a cached tip or the clone's ref), so what it merged in or was rebased onto is never its own. If that fetch fails, the PR waits for you, named. A measurement counts only from the base it measured. A renamed file's lines are the ones its rename changed. Blank lines, whitespace and comments are not changed code: a PR with nothing else in its app files waits.
   - JavaScript is measured as it is, TypeScript under Node's own type stripping, and a build (`dist/`) through its source map (`<file>.js.map`). Code tsx, vitest, jest or a loader transforms counts for nothing.
 - **Which installs lose auto-merge of app-code PRs:**
   - every repo whose `.worklane/tests.yaml` has `vacuity.dynamic: false`, which is what `worklane init` wrote before;
@@ -21,7 +21,8 @@
   - its tests ran none of the app code it changes;
   - runner.one is not `node --test` with only the test runner's own options;
   - a merge brings in another branch's commits;
-  - the default branch's tip can't be read from the remote;
+  - the default branch can't be fetched from the remote for the decision;
+  - a test file is over 1 MiB (more than the gate reads for its assertions);
   - a module the tests loaded more often can't be loaded on its own, or those loads ran past their time budget;
   - nothing to measure (its app-code changes are only blank lines, whitespace, comments or renames);
   - the coverage run failed, or wrote no coverage;

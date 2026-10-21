@@ -98,16 +98,19 @@ test('A1, must hold: the clone\'s fetch of main is still at the claim base, behi
   assert.deepEqual([d.auto, d.reasons], [false, [FOREIGN]]);
 });
 
-test('A1, must hold: no answer from the remote on main\'s tip, and the PR has a merge', async () => {
-  // #784 round 7: the tip is the remote's (ls-remote), never the clone's ref; here no ls-remote answered.
+test('A1, must hold: the remote can\'t be fetched, and the PR has a merge', async () => {
+  // #784 rounds 7, 8: the tip is the remote's, fetched for the decision, never the clone's ref; here the fetch fails.
   const t = mergedMain('none');
-  (t.c as unknown as { defaultTip: string }).defaultTip = '';
+  execFileSync('git', ['remote', 'set-url', 'origin', join(t.dir, '..', 'no-such-remote.git')], { cwd: t.dir });
   const { d } = await decided(t);
-  assert.deepEqual([d.auto, d.reasons], [false, ["design: vacuity: the default branch's tip on the remote isn't known here (ls-remote failed or hasn't run), so the PR's own change can't be told from the default branch's"]]);
+  // The weakening check (#869) holds on the same failed fetch, beside it.
+  assert.equal(d.auto, false);
+  assert.ok(d.reasons.includes("design: vacuity: the default branch couldn't be fetched from the remote for this decision, so the PR's own change can't be told from the default branch's"), d.reasons.join(' | '));
 });
 
 // ---- runner.one: the test runner's own options only
 
+// check-table: never-shrink
 const REFUSED = [
   'node --test --env-file=.env {file}',
   'node --test --env-file-if-exists=.env {file}',

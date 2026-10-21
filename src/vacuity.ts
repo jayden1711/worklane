@@ -9,8 +9,11 @@
 //           its coverage away as many times as the extra evaluations (round 7). Only code that ran more often than all
 //           that counts, so a helper a module calls as it loads (`const T = build()`, tsc's __decorate, esbuild's
 //           __name) counts for nothing even when the PR adds the whole file or a test's body imports it, once or many
-//           times, directly or through another module; and only code on the lines the PR changes that hold code
-//           (codeSpans). Not seen: work a module starts as it loads that keeps running (a timer) while a test waits.
+//           times, directly or through another module; and only code on the characters the PR changes that are code
+//           (codeRanges, round 8: by V8's block ranges, so an untaken branch on a changed line doesn't count; a build's
+//           sources by line). Not seen: work a module starts as it loads that keeps running and that the tests' own
+//           activity triggers (a timer while a test waits, an async_hooks or exit listener), and code after a call
+//           that threw (V8 counts a block as run once entered).
 import { spawn, spawnSync } from './os/child-process.js';
 import { lstatSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -35,20 +38,75 @@ export function countAssertions(src: string, pattern: string): number {
 }
 
 /**
- * The lines that bring a module in (import ... from, a bare import, `x = require(...)`, `x = await import(...)`): the
- * name of an assertion module in them is no assertion (#784 round 4: `import assert from 'node:assert'` alone counted 2).
+ * `src` without comments, in one pass (#784 round 8: stripComments's lazy `/*` match is quadratic on many unclosed
+ * openers, 13.5 s at 512 KiB on the coordinator's thread). A `//` after `:` or `\` starts none, as there; a `/*` with no
+ * end takes the rest of the text with it (so less is counted, never more).
  */
-const MODULE_LINES = [
-  /^[ \t]*import\b[\s\S]*?\bfrom[ \t]*['"][^'"\n]*['"][ \t]*;?/gm,
-  /^[ \t]*import[ \t]*['"][^'"\n]*['"][ \t]*;?/gm,
-  /^[ \t]*(?:const|let|var)\b[^=\n]*=[ \t]*(?:await[ \t]+)?(?:require|import)[ \t]*\([ \t]*['"][^'"\n]*['"][ \t]*\)[^;\n]*;?/gm,
-];
+function withoutComments(src: string): string {
+  const out: string[] = [];
+  let from = 0;
+  let i = 0;
+  while (i < src.length) {
+    const c = src.charCodeAt(i);
+    if (c !== 47 /* / */) {
+      i++;
+      continue;
+    }
+    const next = src.charCodeAt(i + 1);
+    if (next === 42 /* * */) {
+      out.push(src.slice(from, i));
+      const end = src.indexOf('*/', i + 2);
+      if (end < 0) return out.join('');
+      i = from = end + 2;
+    } else if (next === 47 && !(i > 0 && (src[i - 1] === ':' || src[i - 1] === '\\'))) {
+      out.push(src.slice(from, i));
+      const end = src.indexOf('\n', i);
+      if (end < 0) return out.join('');
+      i = from = end;
+    } else i++;
+  }
+  out.push(src.slice(from));
+  return out.join('');
+}
 
-/** Assertion calls in a test: matches of `pattern` outside comments and outside the lines that import modules. */
+/** How many lines an `import` may span to its `from '…'` (a longer one: only its first line is taken out). */
+const IMPORT_SPAN = 200;
+const IMPORT_START = /^[ \t]*import\b/;
+const FROM_SPECIFIER = /\bfrom[ \t]*['"][^'"\n]*['"][ \t]*;?/;
+const BARE_IMPORT = /^[ \t]*import[ \t]*['"][^'"\n]*['"][ \t]*;?/;
+const REQUIRE_LINE = /^[ \t]*(?:const|let|var)\b[^=\n]*=[ \t]*(?:await[ \t]+)?(?:require|import)[ \t]*\([ \t]*['"][^'"\n]*['"][ \t]*\)[^;\n]*;?/;
+
+/**
+ * Assertion calls in a test: matches of `pattern` outside comments and outside the lines that bring a module in
+ * (`import … from '…'`, over up to IMPORT_SPAN lines; a bare import; `x = require(…)`, `x = await import(…)`): the name
+ * of an assertion module in them is no assertion (#784 round 4: `import assert from 'node:assert'` alone counted 2).
+ * Linear in the text (round 8), line by line, the next `from '…'` line found once for every line.
+ */
 export function countAssertionCalls(src: string, pattern: string): number {
-  let text = stripComments(src);
-  for (const re of MODULE_LINES) text = text.replace(re, '');
-  return [...text.matchAll(new RegExp(pattern, 'g'))].length;
+  const lines = withoutComments(src).split('\n');
+  // For each line, the first line at or after it that names a module after `from`.
+  const nextFrom = new Array<number>(lines.length + 1).fill(Infinity);
+  for (let k = lines.length - 1; k >= 0; k--) nextFrom[k] = FROM_SPECIFIER.test(lines[k]!) ? k : nextFrom[k + 1]!;
+  const kept: string[] = [];
+  // What follows a statement on its line stays (a call after `import … from '…';` counts).
+  const after = (line: string, re: RegExp) => {
+    const m = re.exec(line)!;
+    return line.slice(m.index + m[0].length);
+  };
+  for (let k = 0; k < lines.length; k++) {
+    const line = lines[k]!;
+    if (BARE_IMPORT.test(line)) kept.push(after(line, BARE_IMPORT));
+    else if (IMPORT_START.test(line)) {
+      // From `import` to its `from '…'`; an `import` with none near: only its own line.
+      const end = nextFrom[k]!;
+      if (end - k <= IMPORT_SPAN) {
+        kept.push(after(lines[end]!, FROM_SPECIFIER));
+        k = end;
+      }
+    } else if (REQUIRE_LINE.test(line)) kept.push(after(line, REQUIRE_LINE));
+    else kept.push(line);
+  }
+  return [...kept.join('\n').matchAll(new RegExp(pattern, 'g'))].length;
 }
 
 interface V8Range {
@@ -265,18 +323,22 @@ const KEYWORDS_BEFORE_REGEX = new Set(['return', 'typeof', 'instanceof', 'in', '
  * right, a misread only makes a line count for less. Where both misread, with a `/` needing each reading and a quote
  * or backtick after the wrong one, a comment line can still read as code (inferred).
  */
-export function codeLines(text: string): { code: boolean[]; inComment: boolean[] } {
+export function codeLines(text: string): { code: boolean[]; inComment: boolean[]; mask: Uint8Array } {
   const a = lexLines(text, false);
   const b = lexLines(text, true);
-  if (!a.settled && !b.settled) return { code: a.code.map(() => false), inComment: a.inComment.map(() => true) };
-  return { code: a.code.map((c, i) => c && b.code[i] === true), inComment: a.inComment.map((c, i) => c || b.inComment[i] === true) };
+  if (!a.settled && !b.settled) return { code: a.code.map(() => false), inComment: a.inComment.map(() => true), mask: new Uint8Array(text.length) };
+  // `mask[i]`: character i is code in both readings (#784 round 8: a change is measured by its characters).
+  const mask = new Uint8Array(text.length);
+  for (let i = 0; i < text.length; i++) mask[i] = a.mask[i]! & b.mask[i]!;
+  return { code: a.code.map((c, i) => c && b.code[i] === true), inComment: a.inComment.map((c, i) => c || b.inComment[i] === true), mask };
 }
 
 /** One reading of codeLines: `slashIsRegex`, every `/` that starts no comment starts a regular expression. */
-function lexLines(text: string, slashIsRegex: boolean): { code: boolean[]; inComment: boolean[]; settled: boolean } {
+function lexLines(text: string, slashIsRegex: boolean): { code: boolean[]; inComment: boolean[]; mask: Uint8Array; settled: boolean } {
   type State = 'code' | 'line' | 'block' | 'sq' | 'dq' | 'tpl' | 're' | 'class';
   const code: boolean[] = [false];
   const inComment: boolean[] = [];
+  const mask = new Uint8Array(text.length);
   let s: State = text.startsWith('#!') ? 'line' : 'code';
   // For each `${` open: how many `{` its expression has open.
   const braces: number[] = [];
@@ -295,8 +357,10 @@ function lexLines(text: string, slashIsRegex: boolean): { code: boolean[]; inCom
     }
     // `\` then a line break: the string or template goes on to the next line.
     const escapes = () => {
-      if (text[i + 1] !== '\n') i++;
-      else {
+      if (text[i + 1] !== '\n') {
+        i++;
+        mask[i] = 1;
+      } else {
         inComment[line] = false;
         line++;
         code[line] = true;
@@ -313,6 +377,7 @@ function lexLines(text: string, slashIsRegex: boolean): { code: boolean[]; inCom
     }
     if (s !== 'code') {
       code[line] = true;
+      mask[i] = 1;
       if (c === '\\') escapes();
       else if (s === 'sq' && c === "'") [s, prev] = ['code', 'a'];
       else if (s === 'dq' && c === '"') [s, prev] = ['code', 'a'];
@@ -337,6 +402,7 @@ function lexLines(text: string, slashIsRegex: boolean): { code: boolean[]; inCom
       continue;
     }
     code[line] = true;
+    mask[i] = 1;
     if (/[A-Za-z0-9_$]/.test(c)) {
       word = /[A-Za-z0-9_$]/.test(prev === 'a' ? (text[i - 1] ?? '') : '') ? word + c : c;
       prev = 'a';
@@ -362,7 +428,7 @@ function lexLines(text: string, slashIsRegex: boolean): { code: boolean[]; inCom
     } else prev = c;
   }
   inComment[line] = s === 'block';
-  return { code: code.map(Boolean), inComment, settled: (s === 'code' || s === 'line') && braces.length === 0 };
+  return { code: code.map(Boolean), inComment, mask, settled: (s === 'code' || s === 'line') && braces.length === 0 };
 }
 
 /**
@@ -374,46 +440,105 @@ export interface ChangedHunkSpots {
   at: number;
   added: number[];
   removedCode: boolean;
+  /**
+   * For each added line, the columns [start, end) the change took on it, when the hunk replaced as many lines as it
+   * added (each paired with its old line, the common start and end left out); null: the whole line (#784 round 8).
+   */
+  cols?: ([number, number] | null)[];
+}
+
+/** Character ranges [start, end) of a text. */
+export type CharRanges = [number, number][];
+
+/**
+ * The columns a hunk's change took on each added line (ChangedHunkSpots.cols, #784 round 8): when it replaced as many
+ * lines as it added, each added line against the line it replaced, the common start and end left out (a change that
+ * only took characters away: the character after where they were). Otherwise every line whole (null), and so is a
+ * line with less code than the line it replaced (code commented out: a removal, measured where it was).
+ */
+export function changedColumns(added: readonly string[], removed: readonly string[]): ([number, number] | null)[] {
+  if (added.length !== removed.length) return added.map(() => null);
+  const codeChars = (t: string) => codeLines(t).mask.reduce((n, m) => n + m, 0);
+  return added.map((a, k) => {
+    const r = removed[k]!;
+    if (codeChars(a) < codeChars(r)) return null;
+    let p = 0;
+    while (p < a.length && p < r.length && a[p] === r[p]) p++;
+    let s = 0;
+    while (s < a.length - p && s < r.length - p && a[a.length - 1 - s] === r[r.length - 1 - s]) s++;
+    const end = a.length - s;
+    if (p < end) return [p, end];
+    return a.length ? [Math.min(p, a.length - 1), Math.min(p, a.length - 1) + 1] : null;
+  });
 }
 
 /**
- * The lines of a changed file (its head text) a test must run code on (#784 round 5): each added line that holds code
- * (codeLines: a blank, whitespace-only or comment line is no change to measure); and, for a hunk that removed code and
- * added none, the nearest code line on either side of where it was, unless that spot is inside a block comment. Empty:
- * nothing to measure in this file.
+ * The characters of a changed file (its head text) a test must run code on (#784 round 8, by character, not by line):
+ * on each added line, the part the change took (`cols`, else the whole line), only its code characters (codeLines'
+ * mask: no whitespace, no comment); and, for a hunk that removed code and added none, the first code character at or
+ * after where it was, unless that spot is inside a block comment: the code that now runs in the removed code's place,
+ * never its neighbours above. Empty: nothing to measure in this file.
  */
-export function codeSpans(text: string, hunks: readonly ChangedHunkSpots[]): LineSpans {
-  const { code, inComment } = codeLines(text);
-  const n = code.length;
-  const has = (l: number) => l >= 1 && l <= n && code[l - 1] === true;
-  // The nearest code line at or above each line, and at or below it (0: none).
-  const up = new Array<number>(n + 2).fill(0);
-  const down = new Array<number>(n + 2).fill(0);
-  for (let l = 1; l <= n; l++) up[l] = has(l) ? l : up[l - 1]!;
-  for (let l = n; l >= 1; l--) down[l] = has(l) ? l : down[l + 1]!;
-  const out: LineSpans = [];
+export function codeRanges(text: string, hunks: readonly ChangedHunkSpots[]): CharRanges {
+  const { inComment, mask } = codeLines(text);
+  const starts = lineStarts(text);
+  const lines = starts.length - 1;
+  const out: CharRanges = [];
+  // The runs of code characters in [a, b).
+  const codeIn = (a: number, b: number) => {
+    const runs: CharRanges = [];
+    for (let i = Math.max(0, a); i < Math.min(b, text.length); i++) {
+      if (!mask[i]) continue;
+      const last = runs.at(-1);
+      if (last && last[1] === i) last[1] = i + 1;
+      else runs.push([i, i + 1]);
+    }
+    return runs;
+  };
   for (const h of hunks) {
-    const added = h.added.filter(has);
-    for (const l of added) out.push([l, l]);
-    if (added.length || !h.removedCode) continue;
-    if (h.at >= 1 && h.at <= n && inComment[h.at - 1]) continue;
-    const a = h.at >= 1 ? up[Math.min(h.at, n)]! : 0;
-    const b = h.at + 1 <= n ? down[Math.max(1, h.at + 1)]! : 0;
-    if (a) out.push([a, a]);
-    if (b) out.push([b, b]);
+    let added = 0;
+    h.added.forEach((l, k) => {
+      if (l < 1 || l > lines) return;
+      const [a, b] = [starts[l - 1]!, starts[l]!];
+      const c = h.cols?.[k];
+      const runs = codeIn(c ? a + c[0] : a, c ? a + c[1] : b);
+      added += runs.length;
+      out.push(...runs);
+    });
+    // A line replaced by one (paired by `cols`) is measured by what its change took on it alone: if none of that is code
+    // (a comment added at its end), it is no change to measure.
+    const paired = h.added.length > 0 && h.cols?.length === h.added.length && h.cols.every((c) => c !== null);
+    if (added || !h.removedCode || paired) continue;
+    if (h.at >= 1 && h.at <= lines && inComment[h.at - 1]) continue;
+    const from =h.at >= lines ? text.length : starts[Math.max(0, h.at)]!;
+    let p = from;
+    while (p < text.length && !mask[p]) p++;
+    if (p < text.length) out.push([p, p + 1]);
   }
   return out;
 }
 
-/** Whether any of `spans` (1-based lines of `text`) holds code that ran (`ranges`). */
-function ranOn(ranges: [number, number][], starts: number[], spans: LineSpans | null): boolean {
-  if (!spans) return ranges.length > 0;
-  const lines = starts.length - 1;
-  return spans.some(([l1, l2]) => {
-    const a = starts[Math.max(1, l1) - 1];
-    const b = starts[Math.min(lines, l2)];
-    return a !== undefined && b !== undefined && a < b && overlaps(ranges, a, b);
-  });
+/** The 1-based lines `ranges` fall on (for a build's sources, which its map places by line). */
+function linesOf(starts: number[], ranges: CharRanges): LineSpans {
+  const out: LineSpans = [];
+  for (const [a, b] of ranges) {
+    let l = 1;
+    while (l < starts.length - 1 && starts[l]! <= a) l++;
+    let m = l;
+    while (m < starts.length - 1 && starts[m]! < b) m++;
+    out.push([l, m]);
+  }
+  return out;
+}
+
+/**
+ * Whether code ran (`ranges`, V8's innermost block counts: an untaken branch, the other arm of a `?:`, an unevaluated
+ * right side of `??`/`||`/`&&` are ranges of their own) on any of `changed`, the changed characters (#784 round 8);
+ * null: anywhere.
+ */
+function ranOn(ranges: [number, number][], changed: CharRanges | null): boolean {
+  if (!changed) return ranges.length > 0;
+  return changed.some(([a, b]) => overlaps(ranges, a, b));
 }
 
 const B64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
@@ -547,16 +672,19 @@ export function measureTouched(coverageDir: string, root: string, appPaths: stri
   const wanted = hunks ? new Set(Object.keys(hunks)) : only ? new Set(only) : null;
   if (hunks && only) for (const f of [...wanted!]) if (!only.includes(f)) wanted!.delete(f);
   const isApp = (rel: string) => !rel.startsWith('..') && res.some((re) => re.test(rel)) && (!wanted || wanted.has(rel));
-  // Each changed file's lines with code, from its text at the head (the worktree's).
-  const spans = new Map<string, LineSpans>();
+  // Each changed file's changed code characters, from its text at the head (the worktree's), and the lines they are on
+  // (a build's map places code by line).
+  const changed = new Map<string, { chars: CharRanges; lines: LineSpans }>();
   if (hunks) {
     for (const f of wanted!) {
       const text = textOf(join(realRoot, f), SCRIPT_BYTES);
-      spans.set(f, text === null ? [] : codeSpans(text, hunks[f]!));
+      const chars = text === null ? [] : codeRanges(text, hunks[f]!);
+      changed.set(f, { chars, lines: text === null ? [] : linesOf(lineStarts(text), chars) });
     }
-    if (![...spans.values()].some((s) => s.length)) throw new CoverageUnreadable(NOTHING_TO_MEASURE);
+    if (![...changed.values()].some((s) => s.chars.length)) throw new CoverageUnreadable(NOTHING_TO_MEASURE);
   }
-  const spansOf = (rel: string): LineSpans | null => (hunks ? (spans.get(rel) ?? []) : null);
+  const charsOf = (rel: string): CharRanges | null => (hunks ? (changed.get(rel)?.chars ?? []) : null);
+  const spansOf = (rel: string): LineSpans | null => (hunks ? (changed.get(rel)?.lines ?? []) : null);
   // Every process's segments of each script under the root: the test runs' summed (`ran`), and what loading accounts
   // for (`loaded`): the test baseline's, plus each load-only run's times how many more times the tests evaluated the
   // script it loaded than the test baseline did (#784 round 7).
@@ -612,7 +740,7 @@ export function measureTouched(coverageDir: string, root: string, appPaths: stri
     const ranges = ranMore(ran, [loaded]);
     if (!ranges.length) continue;
     if (isApp(rel)) {
-      if (ranOn(ranges, lineStarts(text), spansOf(rel))) touched.add(rel);
+      if (ranOn(ranges, charsOf(rel))) touched.add(rel);
       continue;
     }
     for (const [src, lines] of mappedLines(file, ranges, text, realRoot, budget)) {

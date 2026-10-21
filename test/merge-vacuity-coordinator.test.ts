@@ -53,7 +53,7 @@ function prWith(files: Record<string, string>, tune: (c: ReturnType<typeof loadC
   const c = new Coordinator({ cfg, log, backlog: new FileBacklog(join(dir, '..', 'b.json')), runner: new FakeRunner(() => ({})), repo: dir, instance: 'i', stateDir: join(dir, '..', 'state'), autoMerge: () => true }) as unknown as Gate;
   knownTip(c, dir, base);
   const pr: PullRequest = { number: 9, url: 'u', head: 'b', base: 'main', headSha: head, draft: false, state: 'open', title: 't', mergeable: true, mergeableState: 'clean' };
-  return { c, pr, w, log, dir };
+  return { c, pr, w, log, dir, base };
 }
 
 /** The decision, after the coverage run the gate asks for (once), as the next PR-watch pass makes it. */
@@ -74,7 +74,7 @@ test('gate: a PR whose new test asserts but runs none of the app code it changes
   assert.equal(then.auto, false);
   assert.deepEqual(then.reasons, ['design: vacuity: its tests (test/other.test.js) ran none of the app code it changes (src/price.js)']);
   const m = t.log.read(0, ['vacuity.measured']).map((e) => e.payload as { head: string; tests: string[]; touched: string[]; error: string | null });
-  assert.deepEqual(m, [{ issue: 7, number: 9, head: t.pr.headSha, tests: ['test/other.test.js'], touched: [], error: null }], 'the run is on the record, at this head');
+  assert.deepEqual(m, [{ issue: 7, number: 9, head: t.pr.headSha, tests: ['test/other.test.js'], touched: [], error: null, base: t.base }], 'the run is on the record, at this head and the base it measured from');
 });
 
 test('gate: importing the changed file without calling it is not exercising it', async () => {
@@ -122,7 +122,8 @@ test('gate: fail closed: a runner.one other than node --test (here one that writ
 
 test('gate: fail closed: runs that start and never finish stop being retried and hold the PR', () => {
   const t = prWith({ 'src/price.js': PRICE, 'test/price-more.test.js': TOUCHES });
-  for (let i = 0; i < 3; i++) t.log.append('vacuity.started', { issue: 7, number: 9, head: t.pr.headSha, tests: ['test/price-more.test.js'] }, 'i');
+  // Started from the base the gate measures from now (#784 round 8: a run from another base doesn't count).
+  for (let i = 0; i < 3; i++) t.log.append('vacuity.started', { issue: 7, number: 9, head: t.pr.headSha, tests: ['test/price-more.test.js'], base: t.base }, 'i');
   const d = t.c.mergeDecisionFor(7, 9, t.pr);
   assert.deepEqual([d.auto, d.reasons, d.vacuityRun], [false, ['design: vacuity: its coverage run started 3 times at this head and never finished'], undefined]);
 });

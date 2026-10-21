@@ -507,11 +507,13 @@ export function changedLinesCommand(base: string, head: string): string[] {
 
 /**
  * One hunk of a file's changes as changedLineNumbers reads them: `at`, the line at the head its removed lines followed
- * (0: the file's start); `added`, the lines it added (1-based, at the head); `removed`, the text it removed.
+ * (0: the file's start); `added`, the lines it added (1-based, at the head), and `addedText`, their text; `removed`, the
+ * text it removed.
  */
 export interface ChangedHunk {
   at: number;
   added: number[];
+  addedText: string[];
   removed: string[];
 }
 
@@ -545,9 +547,12 @@ export function changedLineNumbers(diff: string): Map<string, ChangedHunk[]> {
       }
       next = Number(m[1]);
       // `+c,0`: nothing added, the removed lines followed line c; otherwise they stood where line c now is.
-      hunk = { at: m[2] === '0' ? next : next - 1, added: [], removed: [] };
+      hunk = { at: m[2] === '0' ? next : next - 1, added: [], addedText: [], removed: [] };
       cur.push(hunk);
-    } else if (hunk && l.startsWith('+')) hunk.added.push(next++);
+    } else if (hunk && l.startsWith('+')) {
+      hunk.added.push(next++);
+      hunk.addedText.push(l.slice(1));
+    }
     else if (hunk && l.startsWith('-')) hunk.removed.push(l.slice(1));
   }
   return out;
@@ -580,6 +585,41 @@ export function exactMoves(cwd: string, base: string, head: string): Map<string,
     if (from !== undefined) out.set(from, path);
   }
   return out;
+}
+
+/**
+ * The files of `rev`'s whole tree that hold any of `needles` (fixed strings; every file read as text, no textconv),
+ * each read by nameOf. For the merge decision's check for a weakened test, lint or guard (src/merge-policy-weakening.ts):
+ * which files carry a mark that registers a check (#869). git grep searches only below the directory it runs in, so it
+ * runs from the top of the worktree. No file matching is an empty list; any other failure throws.
+ */
+export function filesWithText(cwd: string, rev: string, needles: string[]): string[] {
+  const top = must(run(cwd, ['rev-parse', '--show-toplevel'])).replace(/\n$/, '');
+  const r = spawnSync('git', withGit(['grep', '-l', '-z', '-a', '-F', '--no-color', '--no-textconv', ...needles.flatMap((n) => ['-e', n]), rev, '--']), {
+    cwd: top,
+    encoding: 'buffer',
+    maxBuffer: MAX_BUFFER,
+  });
+  if (r.error) throw r.error;
+  if (r.status === 1 && !r.stderr.length) return [];
+  if (r.status !== 0) throw new Error(`git grep in ${rev} failed: ${(r.stderr.toString('utf8') || `exit ${r.status}`).trim().slice(0, 500)}`);
+  // -z with a tree: "rev:path NUL" for each file.
+  const prefix = Buffer.from(`${rev}:`);
+  return fields(r.stdout)
+    .filter((b) => b.length)
+    .map((b) => {
+      if (!b.subarray(0, prefix.length).equals(prefix)) throw new Error(`git grep in ${rev}: a name that doesn't start with the revision`);
+      return nameOf(b.subarray(prefix.length));
+    });
+}
+
+/**
+ * Where two commits meet (git merge-base): for the merge decision's check for a weakened test, lint or guard, the
+ * point a change met the default branch's tip, so a mark there that the change's head lacks was taken out by the change
+ * (#869). Throws when git fails or there is none.
+ */
+export function mergeBaseOf(cwd: string, a: string, b: string): string {
+  return must(run(cwd, ['merge-base', a, b])).trim();
 }
 
 /**

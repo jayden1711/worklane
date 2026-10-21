@@ -28,10 +28,13 @@ import { instructionEvalReasons, mergeDecision, neverAutoMerge, outsidePlanReaso
 import { deferDelay, deferrable, isBehind, mergeDeferral, mergeMessage, MergePass, mergeRefusal, type Deferral } from '../merge-policy-train.js';
 import { weakeningOf } from '../merge-policy-weakening.js';
 import { baselineRunnerOne, coverageRunnerOne, PLAIN_TEST_PATH, VACUITY_UNMEASURED, vacuityCheck, type VacuityCheck } from '../merge-policy-vacuity.js';
-import { codeLines, CoverageUnreadable, LOAD_BUDGET_MS, readTouchedInChild, type ChangedHunkSpots, type LoadRun } from '../vacuity.js';
+import { changedColumns, codeLines, CoverageUnreadable, LOAD_BUDGET_MS, readTouchedInChild, type ChangedHunkSpots, type LoadRun } from '../vacuity.js';
 
 /** A coverage run to make: vacuityCheck's, with the commit the PR's change is measured from (its changed lines). */
 type VacuityRun = NonNullable<VacuityCheck['run']> & { base: string };
+
+/** The longest the default branch's fetch for a merge decision may take (defaultTipNow); past it, it failed. */
+const DEFAULT_TIP_FETCH_MS = 60_000;
 import { MainWatch, repoGit, type MainWatchDeps, type Trip } from '../main-watch.js';
 import { carriedHead, mergeInBase, type MergeIn } from '../pr-hygiene.js';
 import { alertTarget, directPushKey, directPushText, ownerMentions } from '../direct-push-alert.js';
@@ -330,9 +333,47 @@ export abstract class MergeFlow extends FixRuns {
       .filter((p) => now - (this.prPolled.get(p.number) ?? 0) >= interval)
       .sort((a, b) => (this.prPolled.get(a.number) ?? 0) - (this.prPolled.get(b.number) ?? 0))
       .slice(0, Math.max(10, this.d.cfg.tests.land.parallel_merges));
-    for (const watched of due) {
-      this.prPolled.set(watched.number, now);
-      await this.watchPr(watched);
+    // The default branch's tip for this pass's merge decisions, fetched once, off the event loop and bounded (#784
+    // round 8): every decision of the pass reads it (defaultTipNow), so the pass that would merge a PR has it fresh.
+    if (due.length) this.tipThisPass = await this.defaultTipFetched();
+    try {
+      for (const watched of due) {
+        this.prPolled.set(watched.number, now);
+        await this.watchPr(watched);
+      }
+    } finally {
+      this.tipThisPass = undefined;
+    }
+  }
+
+  /** The default branch's tip this watch pass fetched (null: the fetch failed); undefined outside a pass. */
+  private tipThisPass: string | null | undefined;
+
+  /**
+   * defaultTipNow's fetch as a child the pass awaits (#784 round 8: the coordinator's thread never waits on the
+   * remote), killed past DEFAULT_TIP_FETCH_MS or on shutdown; null when it fails.
+   */
+  private async defaultTipFetched(): Promise<string | null> {
+    const signal = this.shutdown.signal;
+    const ok = await new Promise<boolean>((done) => {
+      if (signal.aborted) return done(false);
+      const child = spawn('git', ['fetch', '-q', this.remote, `+refs/heads/${this.branch}:refs/remotes/${this.remote}/${this.branch}`], { cwd: this.d.repo, stdio: 'ignore' });
+      const stop = () => child.kill('SIGKILL');
+      const timer = setTimeout(stop, DEFAULT_TIP_FETCH_MS);
+      signal.addEventListener('abort', stop, { once: true });
+      const end = (r: boolean) => {
+        clearTimeout(timer);
+        signal.removeEventListener('abort', stop);
+        done(r);
+      };
+      child.on('error', () => end(false));
+      child.on('close', (code) => end(code === 0));
+    });
+    if (!ok) return null;
+    try {
+      return this.git(this.d.repo, 'rev-parse', '--verify', '-q', `refs/remotes/${this.remote}/${this.branch}^{commit}`) || null;
+    } catch {
+      return null;
     }
   }
 
@@ -604,6 +645,22 @@ export abstract class MergeFlow extends FixRuns {
   }
 
   /**
+   * The default branch's tip, fetched now into its remote-tracking ref by an explicit refspec (a clone whose configured
+   * refspec doesn't map the branch would leave that ref stale); null when the fetch or the read fails (the merge
+   * decision then waits). Within a watch pass, the tip that pass fetched off the event loop (defaultTipFetched, #784
+   * round 8); outside one (the batcher's own question, a test), fetched here, bounded by DEFAULT_TIP_FETCH_MS.
+   */
+  private defaultTipNow(): string | null {
+    if (this.tipThisPass !== undefined) return this.tipThisPass;
+    try {
+      execFileSync('git', ['fetch', '-q', this.remote, `+refs/heads/${this.branch}:refs/remotes/${this.remote}/${this.branch}`], { cwd: this.d.repo, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: DEFAULT_TIP_FETCH_MS });
+      return this.git(this.d.repo, 'rev-parse', '--verify', '-q', `refs/remotes/${this.remote}/${this.branch}^{commit}`) || null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
    * The policy's call on a ready PR at its current head. `vacuityRun`: its tests' coverage run at this head, still to
    * come (watchPr's startVacuityRun starts it in the background when that is all that holds the PR; the pass after it decides).
    */
@@ -627,12 +684,14 @@ export abstract class MergeFlow extends FixRuns {
     } catch {
       // an unreadable policy is "off"
     }
-    // #784 round 5 (A1): for vacuity, the PR's own change is measured from where its head meets the default branch's
-    // current tip, so the default branch's files and tests a merge brought in (a conflict fix's: fix-runs.ts) are never
-    // taken for the PR's own.
-    const { base: vacuityBase, foreign, tip } = this.vacuityBase(base, pr.headSha);
+    // The default branch's tip, fetched from the remote now (one bounded fetch, for the weakening check and vacuity).
+    const tipNow = this.defaultTipNow();
+    // #784 rounds 5 to 8 (A1): for vacuity, the PR's own change is measured from where its head meets that tip, so the
+    // default branch's files and tests a merge or a rebase brought in (a conflict fix's: fix-runs.ts) are never taken
+    // for the PR's own.
+    const { base: vacuityBase, foreign, tip } = this.vacuityBase(base, pr.headSha, tipNow);
     const vacuityFiles = vacuityBase === base ? files : this.changeFiles(this.d.repo, vacuityBase, pr.headSha);
-    const vacuity = this.vacuityFor(n, number, pr.headSha, vacuityFiles.map((f) => f.path), foreign, tip);
+    const vacuity = this.vacuityFor(n, number, pr.headSha, vacuityFiles.map((f) => f.path), foreign, tip, vacuityBase);
     const decided = mergeDecision({
       branch: pr.head,
       openedByHarness: this.openedByUs(number),
@@ -656,11 +715,12 @@ export abstract class MergeFlow extends FixRuns {
       // A planned task: high-risk or design-level files its approved plan didn't list hold the merge: the repo's
       // high-risk categories and the engine's own, whether or not this repo's merge rules hold them elsewhere.
       claimedProtected: this.claimedClass(n) === 'protected',
-      // A test, lint or guard the change removes or loosens, read from the change itself (#783).
-      weakening: weakeningOf(this.d.repo, base, pr.headSha, files, lockScopeOf(this.d)),
+      // A test, lint or guard the change removes or loosens, read from the change itself (#783), with the checks the
+      // default branch registers now (its tip, fetched here) as well as at the change's base (#869).
+      weakening: weakeningOf(this.d.repo, base, pr.headSha, files, lockScopeOf(this.d), tipNow),
       // The PR's own tests, run under coverage, must execute app code it changes (#784).
       vacuity: vacuity.reasons,
-      vacuityPending: vacuity.run !== undefined || vacuity.wait === true,
+      vacuityPending: vacuity.run !== undefined,
       outsidePlan: plan ? outsidePlanReasons({ planFiles: plan.files ?? [], level, waitCategories: [...new Set([...waitCategoriesOf(review), ...DEFAULT_REVIEW.levels.L3_human.when])], newTopLevel }) : [],
     });
     const d = vacuity.run ? { ...decided, vacuityRun: { ...vacuity.run, base: vacuityBase } } : decided;
@@ -1613,35 +1673,18 @@ export abstract class MergeFlow extends FixRuns {
    * base otherwise (a rewritten default branch). A PR that merged the default branch in, or was rebased onto it, then
    * shows only its own lines: never the default branch's change and the tests that came with it.
    *
-   * The tip is the one the remote gave (watchPrs' ls-remote, `defaultTip`), never the clone's `<remote>/<branch>` ref,
-   * which any process with the clone can write (#926) and which a fetch may not have brought up yet (round 7). `tip`:
-   * 'unknown' with no ls-remote answer (the PR holds); 'stale' when the clone hasn't that commit or its ref says
-   * otherwise (the PR waits, and is decided again once a fetch brings the ref up to it).
+   * The tip is `tipNow`: the default branch fetched from the remote on this very decision (defaultTipNow, an explicit
+   * refspec, bounded), never a cached answer or a ref read on its own, which may be old (round 8: a 15 s old tip let a
+   * rebase onto a newer main through) or written over (#926). Null (the fetch failed, timed out, or a lock file or a
+   * refspec stopped it): `tip` is 'unknown' and the PR holds, named, at once; it never waits on it.
    *
    * `foreign` (#784 round 6, fail closed): a merge commit between that base and the head has a merged-in parent the
    * tip doesn't have (another branch, or one can't be read). Its change then can't be told from what it merged, and the
    * PR holds.
    */
-  private vacuityBase(base: string, head: string): { base: string; foreign: boolean; tip?: 'unknown' | 'stale' } {
-    const sha = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
-    const ref = () => {
-      const r = spawnSync('git', ['--no-replace-objects', 'rev-parse', '--verify', '--quiet', `refs/remotes/${this.remote}/${this.branch}^{commit}`], { cwd: this.d.repo, encoding: 'utf8' });
-      return r.status === 0 ? r.stdout.trim() : '';
-    };
-    const have = (c: string) => spawnSync('git', ['--no-replace-objects', 'cat-file', '-e', `${c}^{commit}`], { cwd: this.d.repo }).status === 0;
-    let tip = this.defaultTip;
-    if (!sha.test(tip) || ref() !== tip || !have(tip)) {
-      // Not settled: ask the remote again now (watchPrs asks at most every TIP_CHECK_MS), and fetch the branch when the
-      // clone's ref isn't that, so a ref written over (#926) or not yet fetched is brought to what the remote says.
-      const r = spawnSync('git', ['ls-remote', this.remote, `refs/heads/${this.branch}`], { cwd: this.d.repo, encoding: 'utf8' });
-      const fresh = r.status === 0 ? (r.stdout.split(/\s/)[0] ?? '') : '';
-      if (sha.test(fresh)) {
-        tip = fresh;
-        if (ref() !== tip || !have(tip)) spawnSync('git', ['fetch', '-q', this.remote, this.branch], { cwd: this.d.repo });
-      }
-    }
-    if (!sha.test(tip)) return { base, foreign: false, tip: 'unknown' };
-    if (!have(tip) || ref() !== tip) return { base, foreign: false, tip: 'stale' };
+  private vacuityBase(base: string, head: string, tipNow: string | null): { base: string; foreign: boolean; tip?: 'unknown' } {
+    const tip = tipNow ?? '';
+    if (!/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(tip)) return { base, foreign: false, tip: 'unknown' };
     const r = spawnSync('git', ['--no-replace-objects', 'merge-base', tip, head], { cwd: this.d.repo, encoding: 'utf8' });
     const mb = r.status === 0 ? r.stdout.trim() : '';
     const from = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(mb) && mb !== base && mb !== head && this.isAncestor(base, mb) ? mb : base;
@@ -1656,7 +1699,7 @@ export abstract class MergeFlow extends FixRuns {
    * Whether the PR's own tests run the app code it changes, at this head (src/merge-policy-vacuity.ts), from the head's
    * files and this head's coverage runs. Every git read is in atHead, so a failing one holds the PR (vacuityCheck).
    */
-  private vacuityFor(n: number, number: number, head: string, changed: string[], foreignMerge = false, tip?: 'unknown' | 'stale'): VacuityCheck {
+  private vacuityFor(n: number, number: number, head: string, changed: string[], foreignMerge: boolean, tip: 'unknown' | undefined, from: string): VacuityCheck {
     // change-files.ts's guards (#683): no replace ref swaps a blob, no attributes file changes what is read.
     const git = (args: string[]) => execFileSync('git', ['--no-replace-objects', '-c', 'core.attributesFile=/dev/null', ...args], { cwd: this.d.repo, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 64 * 1024 * 1024 });
     // The test files the task's agreed done_when names: what the coordinator's own verification ran.
@@ -1670,7 +1713,11 @@ export abstract class MergeFlow extends FixRuns {
       there ??= new Set(git(['--literal-pathspecs', 'ls-tree', '-r', '-z', head, '--', ...new Set([...changed, ...contractTests])]).split('\0').filter(Boolean).map((entry) => entry.slice(entry.indexOf('\t') + 1)));
       return there.has(p) ? git(['show', `${head}:${p}`]) : null;
     };
-    const runs = this.d.log.read(0, ['vacuity.started', 'vacuity.measured']).filter((e) => (e.payload as { number: number; head: string }).number === number && (e.payload as { head: string }).head === head);
+    // This head's runs measured from this same base (#784 round 8): a run from another base measured another change.
+    const runs = this.d.log.read(0, ['vacuity.started', 'vacuity.measured']).filter((e) => {
+      const p = e.payload as { number: number; head: string; base?: string };
+      return p.number === number && p.head === head && p.base === from;
+    });
     const last = runs.filter((e) => e.type === 'vacuity.measured').at(-1)?.payload as EventPayload<'vacuity.measured'> | undefined;
     return vacuityCheck({
       cfg: this.d.cfg.tests.vacuity,
@@ -1691,7 +1738,7 @@ export abstract class MergeFlow extends FixRuns {
    */
   private async vacuityRun(w: EventPayload<'pr.opened'>, pr: PullRequest, run: VacuityRun) {
     const { issue: n, number } = w;
-    this.emit('vacuity.started', { issue: n, number, head: pr.headSha, tests: run.tests });
+    this.emit('vacuity.started', { issue: n, number, head: pr.headSha, tests: run.tests, base: run.base });
     // Per PR, not per issue: two PRs of one issue never share (or remove) each other's scratch worktree.
     const name = `pr-${number}-vacuity`;
     const branch = `${BRAND.cli}/vacuity-pr-${number}`;
@@ -1775,7 +1822,7 @@ export abstract class MergeFlow extends FixRuns {
       }
       spawnSync('git', ['branch', '-D', branch], { cwd: this.d.repo });
       // A shutdown cut it short: nothing was measured, so nothing is recorded; a later start runs it again (capped).
-      if (!this.shutdown.signal.aborted) this.emit('vacuity.measured', { issue: n, number, head: pr.headSha, tests: run.tests, touched, error: error === null ? null : error.slice(0, 500) });
+      if (!this.shutdown.signal.aborted) this.emit('vacuity.measured', { issue: n, number, head: pr.headSha, tests: run.tests, touched, error: error === null ? null : error.slice(0, 500), base: run.base });
     }
   }
 
@@ -1783,7 +1830,8 @@ export abstract class MergeFlow extends FixRuns {
    * The hunks a PR changes in each of `files` (src/coordinator/change-files.ts changedLinesCommand: renames paired,
    * whitespace and blank lines left out, hunks never joined, as text, with its guards), run as a child the coordinator
    * awaits and a shutdown kills. Each hunk says whether the text it removed held code (codeLines); the reader process
-   * keeps the added lines that hold code (codeSpans). A git failure throws: the run fails, and the PR waits.
+   * keeps the changed characters that are code (codeRanges); `cols` pairs each added line with the line it replaced,
+   * so only the part the change took is measured. A git failure throws: the run fails, and the PR waits.
    */
   private async changedHunks(base: string, head: string, files: string[]): Promise<Record<string, ChangedHunkSpots[]>> {
     const signal = this.shutdown.signal;
@@ -1812,7 +1860,7 @@ export abstract class MergeFlow extends FixRuns {
     const byFile = changedLineNumbers(text);
     const out: Record<string, ChangedHunkSpots[]> = {};
     // A removal counts only where it took code away: removed lines all blank or comments make no change to measure.
-    for (const f of files) out[f] = (byFile.get(f) ?? []).map((h) => ({ at: h.at, added: h.added, removedCode: h.removed.length > 0 && codeLines(h.removed.join('\n')).code.some(Boolean) }));
+    for (const f of files) out[f] = (byFile.get(f) ?? []).map((h) => ({ at: h.at, added: h.added, removedCode: h.removed.length > 0 && codeLines(h.removed.join('\n')).code.some(Boolean), cols: changedColumns(h.addedText, h.removed) }));
     return out;
   }
 

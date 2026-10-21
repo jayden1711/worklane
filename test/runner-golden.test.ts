@@ -226,6 +226,7 @@ const FULL_REQUEST_ENV = {
 };
 const FULL_REQUEST_SETTINGS_ENV = { '<PREFIX>_AGENT': '1', '<PREFIX>_ROLE': 'worker', '<PREFIX>_TASK_FILE': '<case>/task.md', '<PREFIX>_PROJECT_STATE_DIR': '<case>/state', '<PREFIX>_ALLOW_HOSTS': 'example.org' };
 const FULL_REQUEST_FLAGS = ['--model', 'opus', ...FIXED_FLAGS, '--max-turns', '30', '--max-budget-usd', '2.5', '--effort', 'high', '--allowedTools', 'Read', 'Bash', '--disallowedTools', 'WebSearch', '--append-system-prompt-file', '<tmp>/<cli>-run-XXXXXX/system-prompt.md', '--json-schema', { type: 'object' }, '--resume', 'session-1'];
+// check-table: never-shrink
 const GUARD = { disableAllHooks: false, hooks: HOOKS, permissions: { allow: ['Bash(npm test)'], deny: ['Read(//srv/secrets/**)'] } };
 /** sudo's argv up to the program, in order: `env -i` and the agent user's whole environment. */
 const sudoTo = (extra: string[]) => [

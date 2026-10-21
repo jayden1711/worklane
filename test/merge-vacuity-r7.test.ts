@@ -18,6 +18,7 @@ import type { EventPayload } from '../src/events/types.js';
 import * as policy from '../src/merge-policy-vacuity.js';
 import { FakeRunner } from '../src/runner.js';
 import { exampleProject } from './helpers.js';
+import { remoteAt } from './vacuity-tip.js';
 
 const git = (cwd: string, ...a: string[]) => execFileSync('git', a, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 type Run = { tests: string[]; appPaths: string[] };
@@ -51,8 +52,10 @@ function gate(dir: string, base: string, head: string, o: { tip?: string; ref?: 
   log.append('pr.opened', w, 'i');
   log.append('eval.verdict', { issue: 7, head, patch_hash: 'h', patch_correct: true, test_correct: true, confidence: 'high', advice: '', design_change: false }, 'i');
   const c = new Coordinator({ cfg, log, backlog: new FileBacklog(join(dir, '..', 'b.json')), runner: new FakeRunner(() => ({})), repo: dir, instance: 'i', stateDir: join(dir, '..', 'state'), autoMerge: () => true }) as unknown as Gate;
-  git(dir, 'update-ref', 'refs/remotes/origin/main', o.ref ?? o.tip ?? base);
-  (c as unknown as { defaultTip: string }).defaultTip = o.tip ?? base;
+  // #784 round 8: a real remote at `tip`; the clone's own ref then set to `ref` (stale, or written over).
+  remoteAt(dir, o.tip ?? base);
+  if (o.ref) git(dir, 'update-ref', 'refs/remotes/origin/main', o.ref);
+  (c as unknown as { defaultTip: string }).defaultTip = o.ref ?? o.tip ?? base;
   const p: PullRequest = { number: 9, url: 'u', head: 'b', base: 'main', headSha: head, draft: false, state: 'open', title: 't', mergeable: true, mergeableState: 'clean' };
   return { c, w, p, log, dir, head };
 }
@@ -70,7 +73,7 @@ async function decided(t: ReturnType<typeof gate>) {
 }
 
 const ranNone = (tests: string, app: string) => `design: vacuity: its tests (${tests}) ran none of the app code it changes (${app})`;
-const PENDING = 'design: vacuity: its tests have not yet been run under coverage at this head';
+const UNFETCHED = "design: vacuity: the default branch couldn't be fetched from the remote for this decision, so the PR's own change can't be told from the default branch's";
 const H = "import { test } from 'node:test';\nimport assert from 'node:assert/strict';\n";
 const TABLE = 'export function buildTable(n) {\n  return Array.from({ length: n }, (_, i) => i * 2);\n}\nexport const TABLE = buildTable(4);\n\nexport function price(x) {\n  return x * 3;\n}\n';
 const bodyImport = (spec: string) => `${H}test('loads', async () => {\n  const m = await import('${spec}');\n  assert.ok(m.TABLE.length);\n});\n`;
@@ -145,12 +148,11 @@ function rebased() {
   return { dir, base, main, head };
 }
 
-test('A1, must hold: rebased onto main while the clone\'s ref is still the claim base: it waits, never measured from the ref', async () => {
+test('A1, must hold: rebased onto main while the clone\'s ref is still the claim base: measured from the remote\'s main', async () => {
+  // Round 8: the decision fetches the remote's main itself, so the stale ref never decides (round 7 waited here).
   const r = rebased();
-  const t = gate(r.dir, r.base, r.head, { tip: r.main, ref: r.base });
-  const { d, first } = await decided(t);
-  assert.equal(first.vacuityRun, undefined, 'no run until the clone has the tip');
-  assert.deepEqual([d.auto, d.reasons], [false, [PENDING]]);
+  const { d } = await decided(gate(r.dir, r.base, r.head, { tip: r.main, ref: r.base }));
+  assert.deepEqual([d.auto, d.reasons], [false, [ranNone('test/cart.test.js', 'src/cart.js')]]);
 });
 
 test('A1, must hold: rebased onto main, the ref brought up to the tip: measured from main, the PR\'s own test runs none of its code', async () => {
@@ -159,7 +161,7 @@ test('A1, must hold: rebased onto main, the ref brought up to the tip: measured 
   assert.deepEqual([d.auto, d.reasons], [false, [ranNone('test/cart.test.js', 'src/cart.js')]]);
 });
 
-test('A1, must hold: the clone\'s ref written to the PR\'s head (#926): it waits', async () => {
+test('A1, must hold: the clone\'s ref written to the PR\'s head (#926): fetched back, measured from the remote\'s main', async () => {
   const dir = exampleProject().dir;
   const base = commit(dir, { 'dist/.keep': '', 'src/cart.js': CART, 'src/util.js': UTIL });
   git(dir, 'checkout', '-q', '-b', 'pr');
@@ -169,16 +171,20 @@ test('A1, must hold: the clone\'s ref written to the PR\'s head (#926): it waits
   git(dir, 'checkout', '-q', 'pr');
   git(dir, 'merge', '-q', '--no-edit', '--no-ff', 'main');
   const head = git(dir, 'rev-parse', 'HEAD');
-  const { d, first } = await decided(gate(dir, base, head, { tip: main, ref: head }));
-  assert.equal(first.vacuityRun, undefined);
-  assert.deepEqual([d.auto, d.reasons], [false, [PENDING]]);
+  const { d } = await decided(gate(dir, base, head, { tip: main, ref: head }));
+  assert.deepEqual([d.auto, d.reasons], [false, [ranNone('test/cart.test.js', 'src/cart.js')]]);
 });
 
-test('A1, must hold: the tip the remote gave is not in the clone: it waits', async () => {
+test('A1, must hold: the remote can\'t be fetched: it holds, named, at once', async () => {
+  // Round 8: no wait on a tip; a failed fetch is a hold the owner hears of (round 7 waited, unannounced).
   const r = rebased();
-  const missing = 'f'.repeat(40);
-  const { d } = await decided(gate(r.dir, r.base, r.head, { tip: missing, ref: r.base }));
-  assert.deepEqual([d.auto, d.reasons], [false, [PENDING]]);
+  const t = gate(r.dir, r.base, r.head, { tip: r.main });
+  git(r.dir, 'remote', 'set-url', 'origin', join(r.dir, '..', 'no-such-remote.git'));
+  const { d, first } = await decided(t);
+  assert.equal(first.vacuityRun, undefined);
+  // The weakening check (#869) holds on the same failed fetch, beside it.
+  assert.equal(d.auto, false);
+  assert.ok(d.reasons.includes(UNFETCHED), d.reasons.join(' | '));
 });
 
 // ---- a reporter destination stays in the worktree
