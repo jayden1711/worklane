@@ -357,7 +357,7 @@ const KINDS = {
   'table-grown': 'adds or changes an entry in an allowlist, exception or good-fixture list',
   'allow-file': "adds a line to an allowlist file or a package manager's settings file",
   'table-used': "changes a check's or guard's table outside its own list",
-  'table-hidden': "adds a line that could hide a check's table from the line reader, an escaped name or a declaration with its name on the next line",
+  'table-hidden': "adds a line that could hide a check's table from the line reader, an escaped name, a name on the next line or a global binding",
   'guard-lines': 'removes or changes a line of a guard or lint',
   marker: 'adds a line with a skip, only or lint or type-check suppression mark',
 } as const;
@@ -414,33 +414,212 @@ export function withoutComments(l: string): string {
   return out;
 }
 
+/** Words after which a `/` starts a regex literal (an operand comes next). */
+const REGEX_AFTER_WORD = new Set(['return', 'typeof', 'instanceof', 'in', 'of', 'new', 'delete', 'void', 'throw', 'case', 'do', 'else', 'yield', 'await', 'default', 'extends']);
 /**
- * A line's code alone: its comments taken out (as withoutComments) and every string's text too, its quotes kept. A
- * string left open runs to the end of the line. One pass, no quantifier.
+ * Other reserved and contextual words: a `/` after one of them is one it can't place (unsure). After any other word
+ * (a name, a number, `this`, `null`, `true`) it is a division.
  */
-export function codeOnly(l: string): string {
-  let out = '';
-  let quote = '';
-  for (let k = 0; k < l.length; k++) {
-    const c = l[k]!;
-    if (quote) {
-      if (c === '\\') k++;
-      else if (c === quote) {
-        quote = '';
-        out += c;
-      }
-    } else if (c === '\\') out += c + (l[++k] ?? '');
-    else if (c === '/' && l[k + 1] === '/') break;
-    else if (c === '/' && l[k + 1] === '*') {
-      const end = l.indexOf('*/', k + 2);
-      if (end === -1) break;
-      k = end + 1;
-    } else {
-      if (c === "'" || c === '"' || c === '`') quote = c;
-      out += c;
+const RESERVED_WORD = new Set(['break', 'catch', 'class', 'const', 'continue', 'debugger', 'enum', 'export', 'finally', 'for', 'function', 'if', 'import', 'let', 'static', 'switch', 'try', 'var', 'while', 'with', 'as', 'satisfies', 'keyof', 'from', 'get', 'set', 'async', 'type', 'interface', 'declare', 'namespace', 'module', 'abstract', 'readonly', 'public', 'private', 'protected', 'implements', 'package']);
+/** Line terminators besides `\n`: each ends a `//` comment, and a quoted string or regex literal can't hold one unescaped. */
+const OTHER_LINE_END = new Set([String.fromCharCode(13), String.fromCharCode(0x2028), String.fromCharCode(0x2029)]);
+/** Keywords whose `( ... )` is a condition, so a `/` after its `)` starts a regex literal (`if (x) /re/.test(s)`). */
+const CONDITION_WORD = new Set(['if', 'while', 'for', 'with']);
+const isWordChar = (c: string) => (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c === '_' || c === '$';
+
+/**
+ * Each line's code, read over the whole file at once (#886's round-5 review): the state (a string, a template and its
+ * `${...}`, a regex literal, a comment) carries from line to line, so a line that closes a template, or a regex
+ * literal that holds a quote, is read as what it is. Comments and the text of strings and templates are left out
+ * (the quotes are kept); a regex literal's text is kept, so it reads as code. Where it can't tell a regex literal
+ * from a division (a `/` after `}`, or a `)` it can't place), or a string runs off its line, it stops reading and every
+ * later character, of every later line, is code: unsure reads as code, so what it holds waits. One pass, no regex.
+ */
+export function codeLinesOf(text: string): string[] {
+  const out: string[] = [];
+  let line = '';
+  let mode: 'code' | 'line-comment' | 'block-comment' | "'" | '"' | 'template' | 'regex' | 'class' = 'code';
+  let unsure = false;
+  // The brace depth at each open template expression's `${`, and the code's brace depth.
+  const holes: number[] = [];
+  let depth = 0;
+  // Each open `(`: whether it is a condition's; and the last `)` closed.
+  const parens: boolean[] = [];
+  let lastParenCondition = false;
+  // The last significant code character, the one before it, and the word ending at it (if it ends one).
+  let last = '';
+  let beforeLast = '';
+  let word = '';
+  let wordAfterDot = false;
+  const sig = (c: string, w = '') => {
+    beforeLast = last;
+    last = c;
+    word = w;
+  };
+  const newline = () => {
+    out.push(line);
+    line = '';
+  };
+  for (let k = 0; k < text.length; k++) {
+    const c = text[k]!;
+    if (unsure) {
+      if (c === '\n') newline();
+      else line += c;
+      continue;
     }
+    if (c === '\n') {
+      newline();
+      if (mode === 'line-comment') mode = 'code';
+      // A quoted string or a regex literal never runs past its line (an escaped newline is skipped below).
+      else if (mode === "'" || mode === '"' || mode === 'regex' || mode === 'class') unsure = true;
+      continue;
+    }
+    // The other line terminators end a `//` comment too, mid-line by this file's lines; one unescaped in a quoted
+    // string or a regex literal is one it can't place.
+    if (OTHER_LINE_END.has(c)) {
+      if (mode === 'line-comment') mode = 'code';
+      else if (mode === 'regex' || mode === 'class' || ((mode === "'" || mode === '"') && c === String.fromCharCode(13))) {
+        unsure = true;
+        line += c;
+      }
+      continue;
+    }
+    // A backslash in a string, template or regex escapes the next character (a newline included).
+    if (c === '\\' && mode !== 'code' && mode !== 'line-comment' && mode !== 'block-comment') {
+      if (mode === 'regex' || mode === 'class') line += c;
+      const n = text[k + 1];
+      if (n === undefined) continue;
+      k++;
+      if (n === '\n') newline();
+      else if (mode === 'regex' || mode === 'class') line += n;
+      continue;
+    }
+    if (mode === 'line-comment') continue;
+    if (mode === 'block-comment') {
+      if (c === '*' && text[k + 1] === '/') {
+        k++;
+        mode = 'code';
+      }
+      continue;
+    }
+    if (mode === "'" || mode === '"') {
+      if (c === mode) {
+        line += c;
+        mode = 'code';
+        sig('"', 'string');
+      }
+      continue;
+    }
+    if (mode === 'template') {
+      if (c === '`') {
+        line += c;
+        mode = 'code';
+        sig('"', 'string');
+      } else if (c === '$' && text[k + 1] === '{') {
+        k++;
+        line += '${';
+        holes.push(depth);
+        mode = 'code';
+        sig('{');
+      }
+      continue;
+    }
+    if (mode === 'regex' || mode === 'class') {
+      line += c;
+      if (mode === 'class' && c === ']') mode = 'regex';
+      else if (mode === 'regex' && c === '[') mode = 'class';
+      else if (mode === 'regex' && c === '/') {
+        mode = 'code';
+        sig('"', 'regex');
+      }
+      continue;
+    }
+    // Code. A hashbang line is a comment; `<!--` and `-->` are comments in a script and code in a module: unsure.
+    if (k === 0 && c === '#' && text[1] === '!') {
+      mode = 'line-comment';
+      continue;
+    }
+    if (text.startsWith('<!--', k) || text.startsWith('-->', k)) {
+      unsure = true;
+      line += c;
+      continue;
+    }
+    if (c === '/' && text[k + 1] === '/') {
+      mode = 'line-comment';
+      k++;
+      continue;
+    }
+    if (c === '/' && text[k + 1] === '*') {
+      mode = 'block-comment';
+      k++;
+      continue;
+    }
+    if (c === '/') {
+      // A regex literal where an operand comes next; a division after one. Anything it can't place: unsure.
+      let regex: boolean | null;
+      if (last === '' || '(,=:[&|?;{~^*%<>'.includes(last)) regex = true;
+      else if (last === '+' || last === '-') regex = beforeLast !== last;
+      else if (last === '!') regex = !(isWordChar(beforeLast) || beforeLast === ')' || beforeLast === ']');
+      else if (last === ')') regex = lastParenCondition;
+      else if (last === ']' || last === '"') regex = false;
+      else if (isWordChar(last)) regex = wordAfterDot ? false : REGEX_AFTER_WORD.has(word) ? true : RESERVED_WORD.has(word) ? null : false;
+      else regex = null;
+      if (regex === null) {
+        unsure = true;
+        line += c;
+        continue;
+      }
+      line += c;
+      if (regex) mode = 'regex';
+      else sig('/');
+      continue;
+    }
+    line += c;
+    if (c === "'" || c === '"') mode = c;
+    else if (c === '`') mode = 'template';
+    else if (c === '{') {
+      depth++;
+      sig(c);
+    } else if (c === '}') {
+      if (holes.length && holes[holes.length - 1] === depth) {
+        holes.pop();
+        mode = 'template';
+        line = line.slice(0, -1);
+      } else {
+        depth--;
+        sig(c);
+      }
+    } else if (c === '(') {
+      parens.push(CONDITION_WORD.has(word));
+      sig(c);
+    } else if (c === ')') {
+      lastParenCondition = parens.pop() ?? false;
+      sig(c);
+    } else if (isWordChar(c)) {
+      const extends_ = k > 0 && isWordChar(text[k - 1]!) && isWordChar(last);
+      // A word after a `.` is a property (`x.in / 2`, a division), never a keyword.
+      if (!extends_) wordAfterDot = last === '.';
+      sig(c, extends_ ? word + c : c);
+    }
+    else if (c !== ' ' && c !== '\t' && c !== '\r') sig(c);
   }
+  out.push(line);
   return out;
+}
+
+/** A name on the global object (`globalThis`, `global`, `self`, `window`), in a line's code. */
+const GLOBAL_NAME = /(?<![\w$])(?:globalThis|global|self|window)(?![\w$])/;
+
+/** Whether a line's code has a computed key built from strings (`{ ['CHE' + 'CKS']: x }`): a `[...]` holding a quote, then `:`. */
+function computedStringKey(code: string): boolean {
+  for (let k = code.indexOf('['); k !== -1; k = code.indexOf('[', k + 1)) {
+    const end = code.indexOf(']', k + 1);
+    if (end === -1) return false;
+    const inner = code.slice(k + 1, end);
+    if (!(inner.includes("'") || inner.includes('"') || inner.includes('`'))) continue;
+    if (code.slice(end + 1).trimStart().startsWith(':')) return true;
+  }
+  return false;
 }
 
 /** Whether a line's code ends with `const`, `let` or `var` and no name after it: the name is on another line. */
@@ -712,17 +891,31 @@ export function weakeningReasons(i: WeakeningInput): string[] {
     }
   }
 
-  // In a registered table's file, an added line that could declare a table where the line reader can't see it waits
-  // (#886's round-4 review): a `\u` escape outside a string or comment (an identifier spelled with an escape, as
-  // `CHECKS`), or a `const`, `let` or `var` with no name after it on its line (the name on the next line). With the
-  // table's old lines kept as dead text (in a comment or a template), either one would give the live table a
-  // declaration the reader never matches. A regex literal or a multi-line template holding `\u` waits too (a false hold).
+  // In a registered table's file, an added line that could give the live table a binding the line reader never matches
+  // waits (#886's rounds 4 and 5): with the table's old lines kept as dead text (in a comment or a template), the live
+  // one could be declared under a name written with a `\u` escape, or with its name on the next line, or bound on the
+  // global object. So, in the line's code as codeLinesOf reads the whole file after the change (a regex literal's text
+  // counts as code, and so does all of the file after anything it can't place): a `\u`; a `const`, `let` or `var` with
+  // no name after it; `globalThis`, `global`, `self` or `window`; or a computed key built from strings. A regex
+  // literal holding one of these waits too (a false hold).
   const tableFiles = new Set(tables.filter((t) => !t.path.endsWith('.json') && i.files.some((f) => f.path === t.path)).map((t) => t.path));
   for (const p of tableFiles) {
-    for (const l of i.files.find((f) => f.path === p)?.addedLines ?? []) {
-      const code = codeOnly(l);
-      if (code.includes('\\u') || namelessDeclaration(code)) hit('table-hidden', p, l.trim());
+    const added = new Set(i.files.find((f) => f.path === p)?.addedLines ?? []);
+    let text: string | null;
+    try {
+      text = i.after(p);
+    } catch (e) {
+      hit('unreadable', p, String((e as Error).message ?? e));
+      continue;
     }
+    if (text === null || !added.size) continue;
+    const lines = text.split('\n');
+    // JSX text isn't JS: in a .jsx or .tsx file every line reads as code.
+    const code = /\.[jt]sx$/.test(p) ? lines : codeLinesOf(text);
+    lines.forEach((l, k) => {
+      const c = code[k] ?? l;
+      if (added.has(l) && (c.includes('\\u') || namelessDeclaration(c) || GLOBAL_NAME.test(c) || computedStringKey(c))) hit('table-hidden', p, l.trim());
+    });
   }
 
   const out: string[] = [];

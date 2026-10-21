@@ -542,10 +542,14 @@ export abstract class MergeFlow extends FixRuns {
     }
   }
 
-  /** The default branch's tip, fetched now; null when the fetch or the read fails (the merge decision then waits). */
+  /**
+   * The default branch's tip, fetched now into its remote-tracking ref by an explicit refspec (a clone whose configured
+   * refspec doesn't map the branch would leave that ref stale); null when the fetch or the read fails (the merge
+   * decision then waits).
+   */
   private defaultTipNow(): string | null {
     try {
-      this.git(this.d.repo, 'fetch', '-q', this.remote, this.branch);
+      this.git(this.d.repo, 'fetch', '-q', this.remote, `+refs/heads/${this.branch}:refs/remotes/${this.remote}/${this.branch}`);
       return this.git(this.d.repo, 'rev-parse', '--verify', '-q', `refs/remotes/${this.remote}/${this.branch}^{commit}`) || null;
     } catch {
       return null;

@@ -17,7 +17,7 @@ const GUARD = 'removes or changes a line of a guard or lint';
 const GONE = "removes or renames a check's or guard's table";
 const REG_GONE = 'removes or changes the mark that registers a check, a check-table or lint-test line';
 const USED = "changes a check's or guard's table outside its own list";
-const HIDDEN = "adds a line that could hide a check's table from the line reader, an escaped name or a declaration with its name on the next line";
+const HIDDEN = "adds a line that could hide a check's table from the line reader, an escaped name, a name on the next line or a global binding";
 const kinds = (reasons: string[]) => reasons.map((r) => r.slice(weakening.WEAKENING_REASON.length).replace(/ \(.*$/s, ''));
 
 type Files = Record<string, string | null>;

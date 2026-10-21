@@ -768,7 +768,9 @@ test('weakening: a registered table waits on an entry added to an allowlist, or 
   // identifier, so in a registered table's file an added `eval(` or `Function(` line waits.
   // (round 10's review: as whole words, so `eval (` with a space waits too)
   for (const line of ["eval('ALL' + 'OWED')['test/c.test.ts'] = 1;", "eval ('ALL' + 'OWED')['test/c.test.ts'] = 1;", "new Function('t', 't.x = 1')(globalThis);", "Function('return this')().ALLOWED_X = 1;"]) {
-    assert.deepEqual(kinds(weakensRaw({ 'test/no-clock-helpers.test.ts': clock }, { 'test/no-clock-helpers.test.ts': `${clock}${line}\n` })), ['changes a check\'s or guard\'s table outside its own list'], line);
+    // A line naming the global object waits a second way too (#886's round 5: a global binding can hide a table).
+    const global = line.includes('globalThis') ? ["adds a line that could hide a check's table from the line reader, an escaped name, a name on the next line or a global binding"] : [];
+    assert.deepEqual(kinds(weakensRaw({ 'test/no-clock-helpers.test.ts': clock }, { 'test/no-clock-helpers.test.ts': `${clock}${line}\n` })), ['changes a check\'s or guard\'s table outside its own list', ...global], line);
   }
   // An added line inside the table's own literal is read as an entry, not as a use.
   assert.deepEqual(kinds(weakensRaw({ 'test/no-clock-helpers.test.ts': clock }, { 'test/no-clock-helpers.test.ts': clock.replace("  'test/a.test.ts': 1,\n", "  'test/a.test.ts': 1,\n  'test/b.test.ts': 1,\n") })), [GROWN]);
