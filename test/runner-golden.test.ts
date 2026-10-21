@@ -186,7 +186,8 @@ function same(actual: unknown, golden: unknown): void {
 // The golden values, as main starts them (recorded on 3e193c77). Shared parts are written once; every value is literal.
 const hookCommand = (event: string) => `E="<case>/engine.js"; if [ -f "$E" ]; then <PREFIX>_HOOK=1 node "$E" ${event} || exit 2; elif [ "$<PREFIX>_AGENT" = 1 ]; then echo "engine missing" >&2; exit 2; else :; fi`;
 const HOOKS = {
-  PreToolUse: [{ hooks: [{ type: 'command', command: hookCommand('pre-tool-use') }] }],
+  // onFailure "block" (src/agent-settings.ts guardsFailClosed): added to every run's guard hook, settings written before it too.
+  PreToolUse: [{ hooks: [{ type: 'command', command: hookCommand('pre-tool-use'), onFailure: 'block' }] }],
   SessionStart: [{ hooks: [{ type: 'command', command: hookCommand('session-start') }] }],
   SessionEnd: [{ hooks: [{ type: 'command', command: hookCommand('session-end') }] }],
 };
