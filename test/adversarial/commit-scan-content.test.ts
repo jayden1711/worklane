@@ -145,7 +145,10 @@ test('attack: a working-tree file git would store as other bytes refuses the com
     git(s, 'config', 'filter.conv.clean', 'cat');
     writeFileSync(join(s, 'ok.js'), 'export const ok = 1;\n');
     execFileSync('git', ['-C', s, '-c', 'filter.conv.clean=cat', 'add', 'ok.js'], { stdio: 'ignore' });
-    assert.equal((await decide(s, 'git commit -m x')).decision, 'allow', `${attr}: a staged change is read from the index, as stored`);
+    // WHY (round 4): a filter the config names is a program git may run while reading changes, so it refuses even a
+    // staged change; an encoding attribute alone doesn't, and a staged change is read from the index, as stored.
+    if (attr.includes('filter')) await refused(s, 'git commit -m x', NOT_RUN, `${attr}, staged`);
+    else assert.equal((await decide(s, 'git commit -m x')).decision, 'allow', `${attr}: a staged change is read from the index, as stored`);
   }
 });
 

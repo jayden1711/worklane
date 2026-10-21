@@ -4,7 +4,7 @@ import { spawn, spawnSync } from '../os/child-process.js';
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { rawChanges, untrackedNames } from '../coordinator/change-files.js';
+import { presentNames, rawChanges, untrackedNames } from '../coordinator/change-files.js';
 import { findTool } from '../tool-path.js';
 
 export interface Finding {
@@ -65,6 +65,7 @@ export function scanCommit(top: string, scope: CommitScanScope, binary = findToo
   if (!binary) return { status: 'unavailable', error: 'gitleaks not found on PATH' };
   const tmp = mkdtempSync(join(tmpdir(), 'scan-commit-'));
   try {
+    noReadPrograms(top);
     const routes: [string, () => Map<string, string>][] = [['staged changes', () => stagedContent(top)]];
     if (scope.unstaged || scope.untracked) routes.push(['unstaged changes', () => worktreeContent(top)]);
     if (scope.untracked) routes.push(['untracked files', () => untrackedContent(top)]);
@@ -84,17 +85,18 @@ export function scanCommit(top: string, scope: CommitScanScope, binary = findToo
       for (const [path, text] of files) {
         const parts = path.split('/');
         if (!path || path.startsWith('/') || parts.some((p) => p === '..' || p === '')) throw new Error(`an unexpected path from git: ${JSON.stringify(path)}`);
-        // WHY: the commit's own files are content to scan, never the scanner's settings.
-        const at = path === '.gitleaksignore' ? '.gitleaksignore.content' : path;
-        mkdirSync(dirname(join(dir, at)), { recursive: true });
-        writeFileSync(join(dir, at), Buffer.concat([TEXT_PREFIX, Buffer.from(text, 'latin1')]));
+        // WHY: the commit's own files are content to scan, never the scanner's settings: each one goes under a fixed
+        // folder below the scan's root, so no name of theirs can be a file the scanner reads at its root.
+        const at = join(dir, CONTENT_DIR, path);
+        mkdirSync(dirname(at), { recursive: true });
+        writeFileSync(at, Buffer.concat([TEXT_PREFIX, Buffer.from(text, 'latin1')]));
       }
       const report = join(tmp, `report-${i}.json`);
       const r = spawnSync(binary, ['dir', '.', '--config', config, '--gitleaks-ignore-path', noIgnores, '--redact', '--no-banner', '--report-format', 'json', '--report-path', report, '--exit-code', String(LEAKS_EXIT)], { cwd: dir, encoding: 'utf8', timeout: 120_000 });
       if (r.error) return { status: 'unavailable', error: r.error.message };
       if (r.status === LEAKS_EXIT) {
         const raw = JSON.parse(readFileSync(report, 'utf8')) as { RuleID: string; File: string }[];
-        findings.push(...raw.map((f) => ({ rule: f.RuleID, file: `${f.File} (${what})`, line: 0 })));
+        findings.push(...raw.map((f) => ({ rule: f.RuleID, file: `${f.File.replace(`${CONTENT_DIR}/`, '')} (${what})`, line: 0 })));
       } else if (r.status !== 0) return { status: 'unavailable', error: `gitleaks exited ${r.status}: ${(r.stderr || '').trim().split('\n').pop()}` };
     }
     return findings.length ? { status: 'leaks', findings } : { status: 'clean' };
@@ -112,6 +114,8 @@ const ZERO = /^0+$/;
  * whether the scanner reads the file.
  */
 const TEXT_PREFIX = Buffer.alloc(65_536, 0x0a);
+/** The folder below each scan root that holds the commit's files. */
+const CONTENT_DIR = 'commit';
 
 /** git in the checkout, for an object or a revision (never a list of changes: those come from the change reader). */
 function gitOut(top: string, args: string[], input?: string): Buffer {
@@ -147,13 +151,35 @@ function newLines(before: Buffer | null, now: Buffer): string {
   const text = (b: Buffer) => b.toString('latin1').replace(/\0/g, '');
   const lines = text(now).split('\n');
   if (!before) return lines.join('\n');
-  const added = addedLines(text(before).split('\n'), lines);
+  const added = slideWidened(lines, addedLines(text(before).split('\n'), lines));
   const out: string[] = [];
   lines.forEach((l, i) => {
     if (added[i]) out.push(l);
     else if (out.length && out.at(-1) !== '') out.push('');
   });
   return out.join('\n');
+}
+
+/**
+ * `added` widened over every placement a line diff could give each run of added lines. INVARIANT (#971): a run of
+ * added lines can slide across the unchanged lines next to it while the line it leaves equals the line it takes (a
+ * diff may place it anywhere along that range); every line of every such placement is scanned, whichever one a diff
+ * would pick.
+ */
+export function slideWidened(b: string[], added: boolean[]): boolean[] {
+  const out = [...added];
+  for (let s = 0; s < b.length; ) {
+    if (!added[s]) {
+      s++;
+      continue;
+    }
+    let e = s;
+    while (e < b.length && added[e]) e++;
+    for (let k = 1; s - k >= 0 && b[s - k] === b[e - k]; k++) out[s - k] = true;
+    for (let k = 0; e + k < b.length && b[e + k] === b[s + k]; k++) out[e + k] = true;
+    s = e;
+  }
+  return out;
 }
 
 /** The most work the line diff does (edit steps times the diagonals it keeps) before it counts every line as added. */
@@ -302,12 +328,12 @@ function untrackedContent(top: string): Map<string, string> {
 }
 
 /** Attributes under which git stores something other than a working-tree file's bytes. */
-const CONVERTING = ['filter', 'working-tree-encoding'];
+const CONVERTING = ['filter', 'working-tree-encoding', 'ident'];
 
 /**
  * Throws unless git stores each of these working-tree files as the bytes on disk the scan reads. INVARIANT (#971): a
- * file with a filter or an encoding attribute, from any attributes source (the worktree's, the index's, the repo's or
- * the user's), refuses the commit; the scan never runs a filter itself.
+ * file with a filter, an encoding or an ident attribute, from any attributes source (the worktree's, the index's, the
+ * repo's or the user's), refuses the commit; the scan never runs a filter itself.
  */
 function storedAsOnDisk(top: string, paths: string[]) {
   if (!paths.length) return;
@@ -317,6 +343,39 @@ function storedAsOnDisk(top: string, paths: string[]) {
     for (let i = 0; i + 2 < out.length; i += 3) {
       if (out[i + 2] !== 'unspecified' && out[i + 2] !== 'unset') throw new Error(`a file in this commit has a ${out[i + 1]} attribute, so git stores other bytes than the scan reads`);
     }
+  }
+}
+
+/** Config whose value names a program git runs when it reads changes, or a driver whose programs it runs. */
+const PROGRAM_KEYS = [/^diff\.external$/, /^diff\..+\.(textconv|command)$/];
+const FILTER_KEY = /^filter\.(.+)\.(clean|smudge|process)$/;
+const OFF = new Set(['', 'false', 'no', 'off', '0']);
+
+/**
+ * Throws when the checkout's effective config names a program git may run while reading its changes: in the reads a
+ * line may run before a commit, or in the scan's own change listing. INVARIANT (#971): such a program could change
+ * what is committed after the scan has read it, so the commit is refused (fail closed), never scanned around it.
+ */
+function noReadPrograms(top: string) {
+  const entries = gitOut(top, ['config', '--list', '-z']).toString('utf8').split('\0').filter(Boolean);
+  const filters = new Set<string>();
+  for (const e of entries) {
+    const nl = e.indexOf('\n');
+    const key = (nl < 0 ? e : e.slice(0, nl)).toLowerCase();
+    const value = nl < 0 ? 'true' : e.slice(nl + 1);
+    if (key === 'core.fsmonitor' && !OFF.has(value.trim().toLowerCase())) throw new Error('the checkout\'s config names a file-system monitor, a program git runs while it reads changes');
+    if (PROGRAM_KEYS.some((re) => re.test(key))) throw new Error(`the checkout's config names a program git runs while it reads changes (${key})`);
+    const f = FILTER_KEY.exec(key);
+    if (f) filters.add(f[1]!);
+  }
+  if (!filters.size) return;
+  // WHY: a filter's programs run only for files that name it; any file that names one refuses the commit.
+  const paths = [...new Set([...presentNames(top, null), ...untrackedNames(top)])];
+  if (!paths.length) return;
+  if (paths.some((p) => p.includes('�'))) throw new Error('a file in this checkout has a name that is not UTF-8, so its attributes can\'t be checked');
+  const out = gitOut(top, ['check-attr', '-z', '--stdin', 'filter'], `${paths.join('\0')}\0`).toString('utf8').split('\0');
+  for (let i = 0; i + 2 < out.length; i += 3) {
+    if (filters.has(out[i + 2]!.toLowerCase())) throw new Error('the checkout\'s config names a filter its files use, a program git runs while it reads changes');
   }
 }
 

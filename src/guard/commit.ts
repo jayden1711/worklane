@@ -343,7 +343,10 @@ class Parser {
       if (c === '`') this.fail('a backquote substitution');
       if (c === '{' || c === '}' || c === '!' || c === '^') this.fail(`an unquoted ${c}`);
       if ((c === '~' || c === '=') && this.i === start) this.fail(`a word starting with ${c}`);
-      if (c === '*' || c === '?' || c === '[') {
+      // WHY: a `[` is a pattern only with a `]` after it in the word; alone (as the test command `[`) it is a letter.
+      const rest = s.slice(this.i + 1);
+      const end = rest.search(/[\s;&|<>()]/);
+      if (c === '*' || c === '?' || (c === '[' && (end < 0 ? rest : rest.slice(0, end)).includes(']'))) {
         w.text += EXPANSION;
         w.bare = true;
         this.i++;
@@ -693,7 +696,9 @@ function looseCommits(loose: SimpleCommand[]): { commits: number; indirect: bool
 const KEYWORDS = new Set(['if', 'then', 'else', 'elif', 'fi', 'do', 'done', 'while', 'until', '!', 'time', '{', '}', 'case', 'esac', 'for', 'select', 'in', 'function', 'coproc']);
 const keywordsBefore = (argv: string[]) => {
   let i = 0;
-  while (i < argv.length - 1 && KEYWORDS.has(argv[i]!)) i++;
+  while (i < argv.length && KEYWORDS.has(argv[i]!)) i++;
+  // WHY: after a keyword the matcher also keeps a command's own VAR=value words; the command comes after them.
+  while (i < argv.length && ASSIGNMENT.test(argv[i]!)) i++;
   return i;
 };
 
@@ -706,7 +711,8 @@ function unseenInUnread(command: string, raw: SimpleCommand[]): string | null {
   for (const c of raw) {
     const argv = c.argv.slice(keywordsBefore(c.argv));
     const run = argv[0] ?? '';
-    if (NONLITERAL.test(run)) return 'a command whose name is expanded';
+    // WHY: the test commands `[` and `[[` are names, not patterns.
+    if (run !== '[' && run !== '[[' && NONLITERAL.test(run)) return 'a command whose name is expanded';
     const at = argv.findIndex((t, k) => k > 0 && isGitName(t));
     if (at > 0 && !NON_EXEC.has(basename(run))) {
       const sub = argv.slice(at + 1).find((t) => !t.startsWith('-'));
@@ -717,13 +723,31 @@ function unseenInUnread(command: string, raw: SimpleCommand[]): string | null {
   if (new RegExp(String.raw`\|&?\s*(?:(?:sudo|env|exec|command|nohup|nice|time)\s+)*(?:${sh})(?![\w.-])`).test(command)) return 'text fed to a shell';
   if (new RegExp(String.raw`(?:^|[\s;&|(])(?:${sh})(?![\w.-])[^\n;&|]*<<`).test(command)) return 'text fed to a shell';
   if (/\benv\b[^\n;&|]*\s(?:-[a-zA-Z]*S|--sp)/.test(command)) return 'a program that splits a string into a command';
-  if (/\bxargs\b[^\n;&|]*\s(?:-[a-zA-Z]*[iIJ]|--repl)/.test(command)) return 'a program that builds a command from its input';
+  for (const m of command.matchAll(/(?:^|[\s;&|(])xargs((?:[ \t]+[^\s;&|)]+)*)/g)) {
+    if (xargsReplaces(m[1]!.trim().split(/[ \t]+/))) return 'a program that builds a command from its input';
+  }
   return null;
+}
+
+/**
+ * Whether xargs, given the words after it, builds its command from its input (a replace string). Only its own options
+ * count: they end at the first word that isn't one, the command it runs.
+ */
+function xargsReplaces(args: string[]): boolean {
+  const VALUE = new Set(['-n', '-P', '-L', '-s', '-d', '-E', '-a', '-l', '--max-args', '--max-procs', '--max-lines', '--max-chars', '--delimiter', '--eof', '--arg-file']);
+  for (let i = 0; i < args.length; i++) {
+    const o = args[i]!;
+    if (o === '--') return false;
+    if (!o.startsWith('-') || o === '-') return false;
+    if (/^--repl/.test(o) || /^-[0prtx]*[iIJ]/.test(o)) return true;
+    if (VALUE.has(o)) i++;
+  }
+  return false;
 }
 
 // INVARIANT (#971): only programs with no option or setting that runs another program (no pager, preprocessor,
 // alias or hook): print or test text, list or move files, or report on them. A program that can run one is not here.
-const NON_EXEC = new Set(['echo', 'printf', 'which', 'type', 'whereis', 'hash', 'help', 'test', '[',
+const NON_EXEC = new Set(['echo', 'which', 'type', 'whereis', 'help',
   'ls', 'cat', 'head', 'tail', 'wc', 'grep', 'egrep', 'fgrep', 'cd', 'pushd', 'mkdir', 'rmdir', 'rm', 'cp', 'mv', 'touch', 'stat',
   'file', 'du', 'realpath', 'readlink', 'basename', 'dirname']);
 const SHELLS = new Set(['sh', 'bash', 'zsh', 'dash', 'ksh', 'mksh', 'ash', 'fish', 'csh', 'tcsh', 'busybox']);
@@ -762,7 +786,7 @@ function unseenProgram(list: Cmd[][]): string | null {
     const words = c.words.map((w) => w.text);
     for (const [k, t] of words.entries()) {
       const b = basename(t);
-      if (b === 'xargs' && words.slice(k + 1).some((o) => /^-[a-zA-Z]*[iIJ]/.test(o) || /^--repl/.test(o))) return 'a program that builds a command from its input';
+      if (b === 'xargs' && xargsReplaces(words.slice(k + 1))) return 'a program that builds a command from its input';
       if (b === 'env') {
         for (const o of words.slice(k + 1)) {
           if (!o.startsWith('-') && !ASSIGNMENT.test(o)) break;

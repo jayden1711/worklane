@@ -132,26 +132,29 @@ test('attack: the checkout\'s git settings for showing changes do not hide what 
     ['external diff', (d) => git(d, 'config', 'diff.external', 'true')],
   ];
   for (const [what, set] of shapes) {
+    // WHY (round 4): a setting that names a program git runs while reading changes refuses the commit before the scan
+    // reads anything; the others are found by the scan.
+    const why = what === 'text conversion' || what === 'external diff' ? /commit secret scan could not run/ : FOUND;
     // Staged content, working-tree content, untracked content and the commit being amended: each route the scan has.
     const a = checkout('a');
     set(a);
     writeFileSync(join(a, 'config.js'), SECRET);
     git(a, 'add', 'config.js');
-    await refused(a, 'git commit -m x', FOUND);
+    await refused(a, 'git commit -m x', why);
     const w = checkout('w');
     set(w);
     writeFileSync(join(w, 'config.js'), SECRET);
-    await refused(w, 'git commit -am x', FOUND);
+    await refused(w, 'git commit -am x', why);
     const u = checkout('u');
     set(u);
     writeFileSync(join(u, 'new.js'), SECRET);
-    await refused(u, 'git add -A && git commit -m x', FOUND);
+    await refused(u, 'git add -A && git commit -m x', why);
     const h = checkout('h');
     set(h);
     writeFileSync(join(h, 'config.js'), SECRET);
     git(h, 'add', 'config.js');
     git(h, 'commit', '-q', '-m', 'unscanned');
-    await refused(h, 'git commit --amend --no-edit', FOUND);
+    await refused(h, 'git commit --amend --no-edit', why);
     assert.ok(true, what);
   }
 });
