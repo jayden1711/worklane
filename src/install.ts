@@ -10,7 +10,7 @@ import { gitExecFileSync } from './os/git.js';
 import { chmodSync, cpSync, existsSync, mkdirSync, readFileSync, readlinkSync, renameSync, writeFileSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { agentSettingsPath, HOOK_MARKER, installCommand, type HookEntry, type Settings } from './agent-settings.js';
+import { agentSettingsPath, GUARD_ON_FAILURE, HOOK_MARKER, installCommand, type HookEntry, type Settings } from './agent-settings.js';
 import { BRAND } from './brand.js';
 import { loadConfig, type Config } from './config/load.js';
 import { instancesDir, policiesForRepo } from './instance.js';
@@ -173,7 +173,8 @@ export function mergeSettings(existing: Settings, enginePath: string, preApprove
   const s: Settings = structuredClone(existing);
   const hooks = { ...(s.hooks ?? {}) };
   const ours: Record<string, HookEntry> = {
-    PreToolUse: { matcher: 'Bash|Edit|Write|MultiEdit|NotebookEdit|WebFetch|Read|Grep|Glob', hooks: [{ type: 'command', command: hookCommand(enginePath, 'pre-tool-use'), timeout: 30 }] },
+    // onFailure "block": a guard that times out, can't start or crashes blocks the call (src/agent-settings.ts GUARD_ON_FAILURE).
+    PreToolUse: { matcher: 'Bash|Edit|Write|MultiEdit|NotebookEdit|WebFetch|Read|Grep|Glob', hooks: [{ type: 'command', command: hookCommand(enginePath, 'pre-tool-use'), timeout: 30, onFailure: GUARD_ON_FAILURE }] },
     SessionStart: { hooks: [{ type: 'command', command: hookCommand(enginePath, 'session-start'), timeout: 30 }] },
     SessionEnd: { hooks: [{ type: 'command', command: hookCommand(enginePath, 'session-end'), timeout: 300 }] },
     // The post-edit check: feedback only, so it never fails the edit (see hookCommand).
