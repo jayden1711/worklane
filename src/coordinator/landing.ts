@@ -19,7 +19,9 @@ import { fullRunLock } from '../slots.js';
 import { baselineGate, latestBaseline } from '../baseline.js';
 import { createWorktree, removeWorktree } from '../worktrees.js';
 import { Decisions } from './decisions.js';
-import { sh, evalLines, pushRefusal, DEFAULT_REVIEW, lockScopeOf } from './shared.js';
+import { evalLines, pushRefusal, DEFAULT_REVIEW, lockScopeOf } from './shared.js';
+import { SANDBOX_UNAVAILABLE } from '../os/index.js';
+import { redactString } from '../events/redact.js';
 import { slotDeferringSince } from './wait-caps.js';
 import { optimizePrLines } from '../optimize.js';
 
@@ -398,24 +400,49 @@ export abstract class Landing extends Decisions {
   /**
    * Trigger a deploy, then confirm the environment serves the exact sha. A skipped deploy is a failure. `issue`:
    * the issue whose landing triggered it, recorded on each deploy event (so deploy.verified ends that task).
+   * The trigger and verify come from deploy.yaml, which an approved PR can change: they are project commands (#799),
+   * run as the agent user in its sandbox, with the project's environment, under the command timeout, redacted. One
+   * refused, timed out or stopped by a shutdown is a failed deploy, never a verified one.
    */
   async deploy(env: string, trigger: string, verify: string, sha: string, issue?: number, polls = 60, pollMs = 15_000): Promise<boolean> {
     const of = issue === undefined ? {} : { issue };
-    this.emit('deploy.requested', { env, sha, ...of });
-    const t = await sh(trigger, this.d.repo);
-    if (t.code !== 0) {
-      this.emit('deploy.failed', { env, sha, why: `trigger failed: ${t.tail}`, ...of });
+    const failed = (why: string) => {
+      this.emit('deploy.failed', { env, sha, why, ...of });
       return false;
-    }
+    };
+    this.emit('deploy.requested', { env, sha, ...of });
+    const t = await this.deployStep(trigger, this.commandTimeoutMs);
+    if (t.code !== 0) return failed(`trigger failed: ${t.tail}`);
     for (let i = 0; i < polls; i++) {
-      const v = await sh(verify, this.d.repo, 120_000);
+      const v = await this.deployStep(verify, VERIFY_TIMEOUT_MS);
       if (v.code === 0 && v.out.includes(sha)) {
         this.emit('deploy.verified', { env, sha, ...of });
         return true;
       }
+      // Refused, or the coordinator is shutting down: asking again can't verify it.
+      if (v.refused) return failed(`verify refused or stopped: ${v.tail}`);
       await new Promise((r) => setTimeout(r, pollMs));
     }
-    this.emit('deploy.failed', { env, sha, why: `${env} did not report ${sha.slice(0, 8)} after ${(polls * pollMs) / 60_000} min`, ...of });
-    return false;
+    return failed(`${env} did not report ${sha.slice(0, 8)} after ${(polls * pollMs) / 60_000} min`);
+  }
+
+  /**
+   * A deploy command, through the one path every project command takes (project()). `refused`: it never ran or was
+   * stopped, because its sandbox refused it (a runAs without its hide list, a hidden path it can't make safe, no
+   * sandbox to start) or the coordinator is shutting down. Never run another way. `tail` always says why it failed.
+   */
+  private async deployStep(command: string, timeoutMs: number): Promise<{ code: number | null; tail: string; out: string; refused: boolean }> {
+    try {
+      const r = await this.project(command, this.d.repo, { timeoutMs });
+      // Stopped by a shutdown mid-run: its output so far may be empty, so the reason is named, never left blank.
+      if (this.shutdown.signal.aborted) return { ...r, code: null, tail: r.tail.startsWith('not run:') ? r.tail : `stopped: the coordinator is shutting down${r.tail ? `\n${r.tail}` : ''}`, refused: true };
+      const tail = r.code === null ? `no exit code (timed out after ${Math.round(Math.min(timeoutMs, this.commandTimeoutMs) / 1000)} s, or did not start)${r.tail ? `\n${r.tail}` : ''}` : r.tail;
+      return { ...r, tail, refused: this.d.commandsAs !== undefined && r.code === SANDBOX_UNAVAILABLE && /project command not run/.test(r.tail) };
+    } catch (e) {
+      return { code: null, tail: `not run: ${redactString(e instanceof Error ? e.message : String(e))}`, out: '', refused: true };
+    }
   }
 }
+
+/** How long one verify poll may take (and never longer than tests.yaml command_timeout_s). */
+const VERIFY_TIMEOUT_MS = 120_000;
