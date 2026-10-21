@@ -11,6 +11,7 @@ export const HOOK_IMPORTS: readonly string[] = [
   'src/backlog/types.ts',
   'src/brand.ts',
   'src/bundle.ts',
+  'src/check-source.ts',
   'src/checkout.ts',
   'src/ci-none.ts',
   'src/claude-auth-failure.ts',
