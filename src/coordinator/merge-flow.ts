@@ -15,7 +15,7 @@ import type { EventPayload, StoredEvent } from '../events/types.js';
 import { writeGroupOnly } from '../os/index.js';
 import { computeLevel } from '../review.js';
 import { shownPath, shownPaths } from '../path-text.js';
-import type { Episode } from '../fix-forward.js';
+import { FIX_FORWARD_EVENTS, openEpisode, type Episode } from '../fix-forward.js';
 import { instructionTargets } from '../skilleval.js';
 import { checkedPush } from '../push-check.js';
 import { conflictTrigger } from '../conflicts.js';
@@ -410,6 +410,19 @@ export abstract class MergeFlow extends FixRuns {
     this.vacuityRuns.set(w.number, going);
   }
 
+  /**
+   * A fix-forward PR the vacuity gate holds while the default branch is red (#784, the owner's decision: it waits for
+   * them): said at once on the ops channel, the urgent path fix-forward's own red-main posts take (opsPost, as
+   * fixForward's `post`), once per PR and head (its key; opsPost sends a key once). Main stays red until it merges.
+   */
+  private async redMainFixHeld(w: EventPayload<'pr.opened'>, pr: PullRequest, reasons: string[]) {
+    if (!reasons.some((r) => r.startsWith('design: vacuity: '))) return;
+    const ep = openEpisode(this.d.log.read(0, [...FIX_FORWARD_EVENTS]));
+    if (!ep?.attempts.some((a) => a.attempt.issue === w.issue)) return;
+    const text = [`${this.branch} is still red, and fix-forward's fix waits for you: #${w.number} (${pr.url}) at ${pr.headSha.slice(0, 12)}.`, 'The merge gate holds it because its tests are not shown to run the code it changes:', ...reasons.filter((r) => r.startsWith('design: vacuity: ')).map((r) => `- ${r}`), 'Merge it once you are satisfied, or let fix-forward fall back to its revert.'].join('\n');
+    await this.opsPost(`vacuity-fix-forward:${w.number}:${pr.headSha}`, text);
+  }
+
   /** Wait for the coverage runs going now (tests, and a graceful shutdown). */
   protected async vacuityIdle(): Promise<void> {
     while (this.vacuityRuns.size) await Promise.all([...this.vacuityRuns.values()]);
@@ -712,7 +725,10 @@ export abstract class MergeFlow extends FixRuns {
       }
     }
     if (!prior || prior.auto !== d.auto) this.emit('merge.decided', { issue: n, number, head: pr.headSha, auto: d.auto, reasons: d.reasons, ...(d.auto ? {} : { why: d.why }) });
-    if (!d.auto) return this.waitForOwner(w, pr.headSha, d.reasons, d.advice);
+    if (!d.auto) {
+      await this.redMainFixHeld(w, pr, d.reasons);
+      return this.waitForOwner(w, pr.headSha, d.reasons, d.advice);
+    }
     // Again right before merging: the combined gate can take minutes, and a stop raised meanwhile must hold the merge.
     if (this.emergencyInForce()) return;
     if (batching) return this.mergeTested(w, pr, 'auto');

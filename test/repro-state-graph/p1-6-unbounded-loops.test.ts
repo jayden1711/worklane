@@ -6,7 +6,7 @@ import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fullRunLock } from '../../src/slots.js';
 import { FakeRunner } from '../../src/runner.js';
-import { approve, commitAll, conflictOnMain, coordinator, easyIssue, fixture, green, openPr, readAll, realMerges, skip, waitForCount, type OpenPr } from './harness.js';
+import { approve, commitAll, conflictOnMain, coordinator, coverageRunsDone, easyIssue, fixture, green, openPr, readAll, realMerges, skip, waitForCount, type OpenPr } from './harness.js';
 
 /** Treat every PR as due on the next pass (time passing between polls). */
 const pollNow = (t: OpenPr) => (t.c as unknown as { prPolled: Map<number, number> }).prPolled.clear();
@@ -65,6 +65,7 @@ test('mergeable recheck: a PR GitHub reports as still computing on every poll is
   for (let i = 0; i < 20; i++) {
     pollNow(t);
     await t.c.tick();
+    await coverageRunsDone(t.c); // #784: the merge gate's coverage run, started by the first poll, off the tick
   }
   const decided = t.f.log.read(0, ['merge.decided']).length;
   assert.ok(decided > 0, `after ${polls} polls of a mergeable state that stays "unknown", the PR waits for the owner (merge.decided); got none, and no other event naming it: ${[...new Set(t.f.log.read().filter((e) => (e.payload as { number?: number }).number === t.opened.number).map((e) => e.type))].join(', ')}`);

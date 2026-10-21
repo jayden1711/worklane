@@ -6,6 +6,7 @@ import assert from 'node:assert/strict';
 import { mergeDecision, type MergeInput } from '../src/merge-policy.js';
 import { VACUITY_TRIES, VACUITY_UNMEASURED, vacuityCheck, type VacuityConfig, type VacuityMeasured } from '../src/merge-policy-vacuity.js';
 import { selfModificationPart } from '../src/review.js';
+import { BRAND } from '../src/brand.js';
 
 const cfg: VacuityConfig = { test_globs: ['test/**/*.test.js'], assertion_pattern: '\\b(assert|expect)\\b', app_paths: ['src/**'], dynamic: true };
 const ASSERTS = "import assert from 'node:assert/strict';\nassert.equal(1, 1);\n";
@@ -90,8 +91,9 @@ test('vacuity: what counts as changed app code: types-only and config, data, doc
   }
 });
 
-test('vacuity: no vacuity section in tests.yaml: decided as before (the gate needs app_paths and test_globs to know what to ask)', () => {
-  assert.deepEqual(check({ files: { 'src/a.js': 'x' }, cfg: undefined }), { reasons: [] });
+test('vacuity: no vacuity section in tests.yaml: changed code waits, naming the missing section; tests, docs and config alone do not (the owner\'s decision)', () => {
+  assert.deepEqual(check({ files: { 'src/a.js': 'x', 'lib/b.py': 'y' }, cfg: undefined }).reasons, [`design: vacuity: tests.yaml has no vacuity section, so nothing shows its tests run the code it changes (src/a.js, lib/b.py); \`${BRAND.cli} doctor\` shows the section to add`]);
+  assert.deepEqual(check({ files: { 'test/a.test.js': 'x', 'src/a.test.ts': 'x', 'README.md': 'x', 'src/c.json': 'x', 'src/gone.js': null }, cfg: undefined }), { reasons: [] }, 'the tamper guard\'s own test globs, no-runtime files and deleted files');
 });
 
 test('vacuity: fail closed: a head it cannot read holds the PR, never reads as one with nothing to check', () => {

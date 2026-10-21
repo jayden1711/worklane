@@ -6,10 +6,16 @@
 import { spawnSync } from 'node:child_process';
 import { lstatSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { isAbsolute, join, relative, resolve } from 'node:path';
+import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { globToRegExp } from './guardrails/glob.js';
 import { childEnv, readRegularFile, shellCommand } from './os/index.js';
+
+/**
+ * The test files of a repo whose tests.yaml has no vacuity section: one list for the coordinator's tamper guard and the
+ * merge gate's no-section hold (src/merge-policy-vacuity.ts).
+ */
+export const FALLBACK_TEST_GLOBS: readonly string[] = ['test/**', '**/*.test.*'];
 
 export function stripComments(src: string): string {
   return src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:\\])\/\/.*$/gm, '$1');
@@ -95,21 +101,69 @@ function readCoverageDir(dir: string): V8Coverage[] {
   return out;
 }
 
+/** What the source maps of a coverage run may add up to before the reader stops mapping (they are the build's: hostile too). */
+export const SOURCE_MAP_LIMITS = { maps: 1024, mapBytes: 8 * 1024 * 1024, totalBytes: 64 * 1024 * 1024 } as const;
+
+const under = (p: string, base: string) => {
+  const rel = relative(base, p);
+  return rel !== '' && !rel.startsWith('..') && !isAbsolute(rel);
+};
+
 /**
- * App files in which at least one non-top-level function ran. The coverage directory is read as hostile input
- * (readCoverageDir: throws CoverageUnreadable), and only script paths under `root` are resolved on disk.
+ * The files under `realRoot` (repo-relative) a built script was compiled from, by its source map: the `<file>.map`
+ * beside it (what tsc, esbuild and the like write), read as hostile input: a regular file, not a symlink, within the
+ * byte limits (`budget`, shared by every map of the run), opened without following a link or waiting on a FIFO. A map
+ * it can't read, or one over the limits, maps nothing: that coverage then counts for no source file, so the PR waits.
+ */
+function sourcesOf(file: string, realRoot: string, budget: { maps: number; bytes: number }): string[] {
+  const map = `${file}.map`;
+  let size: number;
+  try {
+    const s = lstatSync(map);
+    if (!s.isFile()) return [];
+    size = s.size;
+  } catch {
+    return [];
+  }
+  if (size > SOURCE_MAP_LIMITS.mapBytes || budget.maps >= SOURCE_MAP_LIMITS.maps || budget.bytes + size > SOURCE_MAP_LIMITS.totalBytes) return [];
+  budget.maps++;
+  budget.bytes += size;
+  const r = readRegularFile(map, size);
+  if (r.kind !== 'file') return [];
+  let m: { sources?: unknown; sourceRoot?: unknown };
+  try {
+    m = JSON.parse(r.text) as typeof m;
+  } catch {
+    return [];
+  }
+  if (!m || typeof m !== 'object' || !Array.isArray(m.sources)) return [];
+  const base = resolve(dirname(map), typeof m.sourceRoot === 'string' ? m.sourceRoot : '');
+  const out: string[] = [];
+  for (const s of m.sources.slice(0, 1000)) {
+    if (typeof s !== 'string' || s.startsWith('webpack:') || /^[a-z][a-z0-9+.-]*:\/\//i.test(s)) continue;
+    const src = resolve(base, s);
+    if (under(src, realRoot)) out.push(relative(realRoot, src).split('\\').join('/'));
+  }
+  return out;
+}
+
+/**
+ * App files in which at least one non-top-level function ran: the script's own path, or, for a built script outside
+ * the app paths (dist/), each app file its source map names. The coverage directory is read as hostile input
+ * (readCoverageDir: throws CoverageUnreadable), so are the maps (sourcesOf), and only script paths under `root` are
+ * resolved on disk.
  */
 export function touchedAppFiles(coverageDir: string, root: string, appPaths: string[]): string[] {
   const res = appPaths.map((g) => globToRegExp(g));
   const realRoot = realpathSync(root);
-  const under = (p: string, base: string) => {
-    const rel = relative(base, p);
-    return rel !== '' && !rel.startsWith('..') && !isAbsolute(rel);
-  };
+  const isApp = (rel: string) => !rel.startsWith('..') && res.some((re) => re.test(rel));
+  const budget = { maps: 0, bytes: 0 };
+  const mapped = new Map<string, string[]>();
   const touched = new Set<string>();
   for (const cov of readCoverageDir(coverageDir)) {
     for (const script of cov.result) {
       if (!script.url.startsWith('file:')) continue;
+      if (!script.functions.some((fn) => fn.functionName !== '' && (fn.ranges[0]?.count ?? 0) > 0)) continue;
       let file: string;
       try {
         const named = resolve(fileURLToPath(script.url));
@@ -119,9 +173,14 @@ export function touchedAppFiles(coverageDir: string, root: string, appPaths: str
       } catch {
         continue;
       }
+      if (!under(file, realRoot)) continue;
       const rel = relative(realRoot, file).split('\\').join('/');
-      if (rel.startsWith('..') || !res.some((re) => re.test(rel))) continue;
-      if (script.functions.some((fn) => fn.functionName !== '' && (fn.ranges[0]?.count ?? 0) > 0)) touched.add(rel);
+      if (isApp(rel)) {
+        touched.add(rel);
+        continue;
+      }
+      if (!mapped.has(file)) mapped.set(file, sourcesOf(file, realRoot, budget));
+      for (const src of mapped.get(file)!) if (isApp(src)) touched.add(src);
     }
   }
   return [...touched].sort();

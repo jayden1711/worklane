@@ -19,7 +19,7 @@ import { EventLog } from '../src/events/log.js';
 import type { EventPayload } from '../src/events/types.js';
 import { FakeRunner } from '../src/runner.js';
 import { exampleProject, repoRoot } from './helpers.js';
-import { approve, green, openPr, skip } from './repro-state-graph/harness.js';
+import { approve, openPr, passing, skip } from './repro-state-graph/harness.js';
 
 const posix = process.platform === 'win32' && 'POSIX file types (FIFO, /dev/zero)';
 const TOKEN = `ghp_${'A1b2C3d4'.repeat(5)}`;
@@ -171,8 +171,9 @@ test('watch: a coverage run that sleeps never holds up the PR watch: the pass en
   // Its checks pass as the task's verification runs them; under the gate's coverage run, the test sleeps 30 s first.
   const t = await openPr({ 'evaluator-verdict': approve() }, { autoMerge: () => true, edit: (cfg) => void (cfg.tests.runner.one = 'if [ -n "$NODE_V8_COVERAGE" ]; then sleep 30; fi; node --test --test-reporter=spec {file}') });
   const ticks = t.f.log.read(0, ['coordinator.tick']).length;
+  t.f.backlog.setChecks(t.pr().headSha, passing);
   const t0 = performance.now();
-  await green(t);
+  await t.c.tick(); // one pass, exactly (the harness's green would wait for the run)
   const ms = performance.now() - t0;
   try {
     assert.ok(ms < 15_000, `the pass took ${Math.round(ms)} ms: it waited on the coverage run`);
@@ -180,7 +181,7 @@ test('watch: a coverage run that sleeps never holds up the PR watch: the pass en
     assert.equal(t.f.log.read(0, ['vacuity.started']).length, 1, 'the run started');
     assert.equal(t.f.log.read(0, ['merge.done']).length, 0, 'not merged while it runs');
     assert.equal(t.f.log.read(0, ['merge.decided']).length, 0, 'and not sent to the owner either');
-    await green(t);
+    await t.c.tick();
     assert.equal(t.f.log.read(0, ['vacuity.started']).length, 1, 'one run per PR at a time, not one per pass');
     assert.equal(t.f.log.read(0, ['merge.done']).length, 0);
   } finally {

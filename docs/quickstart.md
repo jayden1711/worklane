@@ -310,8 +310,9 @@ That command mounts your Claude login.
    - `protection.strict` is `false` (the default). Set it to `true` only to opt this repo in to strict.
 2. In **`.worklane/tests.yaml`**, `runner.changed`, `runner.full` and `runner.one` are your real test commands, and `vacuity.test_globs` matches your test files.
    - With a `vacuity` section, the merge gate holds any PR that changes app code (`vacuity.app_paths`) unless its own tests (the test files it adds or changes) assert something and, each run with `runner.one` under Node's V8 coverage in a scratch worktree, call a function in at least one app file it changes. Importing a file without calling anything in it doesn't count. Files with no runtime code don't need a test: types-only (`.d.ts`), and config, data, docs and assets (`.json`, `.yaml`, `.toml`, `.md`, `.css`, images). Any other kind counts as code.
-   - The run needs `vacuity.dynamic: true` and a `runner.one` that runs the test files in Node. Coverage is matched by path, so the tests must run the source files themselves, not a build of them in `dist/`. Every other case waits for you, with the reason named: `dynamic: false`, no test, no assertion, a test path that isn't plain (letters, digits, `.`, `_`, `-`, `/`), a failed run, or one that never finishes.
-   - Without a `vacuity` section, PRs are decided as before.
+   - The run needs `vacuity.dynamic: true` and a `runner.one` that runs one test file in Node (`node --test {file}`, `tsx --test {file}`, `vitest run {file}`, `jest {file}`). `worklane init` turns it on when it finds one of those. A test that runs a build (`dist/`) counts for the source files the build's source map (`<file>.js.map` beside it) names. Every other case waits for you, with the reason named: `dynamic: false`, no test, no assertion, a test path that isn't plain (letters, digits, `.`, `_`, `-`, `/`), coverage it can't map, a failed run, or one that never finishes.
+   - Without a `vacuity` section, every PR that changes code (any file but tests, docs, config, data and assets) waits for you too.
+   - `worklane doctor` says which case your repo is in, with the lines to paste into tests.yaml to turn the run on.
 3. Run `worklane doctor --root <repo>` until it passes, and commit `.worklane/`.
 
 ### Moving to a server later

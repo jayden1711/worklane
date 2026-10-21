@@ -15,7 +15,7 @@ import { EventLog } from '../src/events/log.js';
 import type { EventPayload } from '../src/events/types.js';
 import { FakeRunner } from '../src/runner.js';
 import { exampleProject } from './helpers.js';
-import { approve, green, openPr, skip } from './repro-state-graph/harness.js';
+import { afterCoverageRun, approve, green, openPr, passing, skip } from './repro-state-graph/harness.js';
 
 const git = (cwd: string, ...a: string[]) => execFileSync('git', a, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 
@@ -139,14 +139,15 @@ test('gate: docs, config and types-only changes need no run (control)', () => {
 });
 
 // Through the PR watch itself (watchPr, then mergeOrWait): one pass starts the run in the background (the PR waits,
-// unannounced), and the pass after it decides.
+// unannounced), and the pass after it decides (the harness's green makes that pass once the run ends).
 
 test('watch: a fix whose repro test calls the fixed code is measured, then auto-merges on the next pass (control)', { skip }, async () => {
   const t = await openPr({ 'evaluator-verdict': approve() }, { autoMerge: () => true });
-  await green(t);
+  t.f.backlog.setChecks(t.pr().headSha, passing);
+  await t.c.tick();
+  assert.equal(t.f.log.read(0, ['vacuity.started']).length, 1, 'the first pass starts the run');
   assert.equal(t.f.log.read(0, ['merge.done']).length, 0, 'not before its run');
-  await t.c.idle();
-  await green(t);
+  await afterCoverageRun(t.c);
   const measured = t.f.log.read(0, ['vacuity.measured']).map((e) => e.payload as EventPayload<'vacuity.measured'>);
   // The repro it commits, then the test its done_when names (test/price.test.js, unchanged).
   assert.deepEqual(measured.map((m) => [m.head, m.tests, m.touched, m.error]), [[t.opened.head, ['test/repro-qty.test.js', 'test/price.test.js'], ['src/price.js'], null]]);
@@ -166,9 +167,6 @@ test('watch: fail closed: a coverage run that fails holds the PR for the owner, 
   // Passes as the task's own checks run it; fails only under the gate's coverage run.
   const t = await openPr({ 'evaluator-verdict': approve() }, { autoMerge: () => true, edit: (cfg) => void (cfg.tests.runner.one = 'node --test --test-reporter=spec {file} && test -z "$NODE_V8_COVERAGE"') });
   await green(t);
-  await t.c.idle();
-  await green(t);
-  await t.c.idle();
   await green(t);
   assert.equal(t.f.log.read(0, ['merge.done']).length, 0, 'not merged');
   const decided = t.f.log.read(0, ['merge.decided']).map((e) => e.payload as EventPayload<'merge.decided'>);
