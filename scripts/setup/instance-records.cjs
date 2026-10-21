@@ -65,6 +65,7 @@ const ITEMS = [
   { kind: 'shared', rename: 'rekey', what: 'incidents', by: 'the coordinator and the watchdog (src/watchdog/incidents.ts)' },
   { kind: 'shared', rename: 'rekey', what: 'pending-signers', by: "the machine helper's stage-update-signer" },
   { kind: 'shared', rename: 'drop', note: "staged plugin approvals aren't moved: stage them again for the new name", what: 'plugin-pending', by: "the machine helper's plugin-stage" },
+  { kind: 'shared', rename: 'drop', note: 'the new name is no instance add-project is creating: the rename adds its coordinator to the machine helper\'s rule itself', what: 'add-project-new', by: 'instance.sh, as it makes the coordinator (#898); machine-helper.sh takes it off' },
   { kind: 'shared', rename: 'drop', note: "root's word that its repo is a managed app isn't moved: every self-modification lock applies to the new name until root runs managed-apps.sh add <new> <owner/repo>", what: 'managed-apps', by: 'managed-apps.sh add' },
   { kind: 'path', rename: 'drop', note: "the new name's coordinator writes its own when its chat bot connects", what: '/var/lib/worklane/agent-slots/discord-claim-<name>.json', by: 'the coordinator (src/intake/discord-claims.ts)' },
   { kind: 'path', rename: 'drop', note: "plugins aren't moved: approve them again for the new name (plugins.sh confirm); its MCP broker and secrets aren't either (mcp-broker.sh <new>, then its secrets)", what: '/etc/worklane/plugins/<name>.json', by: 'plugins.sh confirm (the allowlist)' },
@@ -126,6 +127,7 @@ const SHARED_FILES = [
   { at: '/var/lib/worklane/claude-account', item: 'claude-profiles, claude-status, claude-paused (switch.jsonl, profile-ops.jsonl: logs, kept)' },
   { at: '/var/lib/worklane/agent-slots', item: 'incidents, discord-claim-<name>.json (the slot locks name no instance)' },
   { at: '/var/lib/worklane/pending-signers.json', item: 'pending-signers' },
+  { at: '/var/lib/worklane/add-project-new', item: 'add-project-new' },
   { at: '/var/lib/worklane/init', item: '/var/lib/worklane/init/<name>.json' },
   { at: '/var/lib/worklane/canary.json', item: "canary (the canary run in progress: taken with updates.json's canary)" },
   { at: '/var/lib/worklane-test', item: '/var/lib/worklane-test/<name>' },
@@ -342,6 +344,7 @@ const P = {
   paused: '/var/lib/worklane/claude-account/paused',
   slots: '/var/lib/worklane/agent-slots',
   pending: '/var/lib/worklane/pending-signers.json',
+  addProjectNew: '/var/lib/worklane/add-project-new',
   managedApps: '/etc/worklane/managed-apps.json',
 };
 const INCIDENTS = 'incidents.json';
@@ -522,6 +525,19 @@ const SHARED = {
       s.users = s.users.filter((u) => !(u && u.instance === name));
       writeKeeping(f, JSON.stringify(s) + '\n');
       return mine;
+    },
+  },
+  // Root's list of the instances being created (lib.sh ADD_PROJECT_NEW), one name a line: this one's.
+  'add-project-new': {
+    file: P.addProjectNew,
+    get: (prefix, name) => (pausedLines(at(prefix, P.addProjectNew)).includes(name) ? [name] : null),
+    drop: (prefix, name) => {
+      const f = at(prefix, P.addProjectNew);
+      const lines = pausedLines(f);
+      if (!lines.includes(name)) return null;
+      const rest = lines.filter((l) => l !== name);
+      writeKeeping(f, rest.length ? rest.join('\n') + '\n' : '', 0o600);
+      return [name];
     },
   },
   'claude-paused': {

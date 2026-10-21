@@ -13,7 +13,7 @@
 // way (#767): exact from the unit with the new URL, or the placeholder.
 import { existsSync, readFileSync } from 'node:fs';
 import { BRAND } from '../brand.js';
-import { instanceNameOk } from '../instance-name.js';
+import { keptInstanceNameProblem } from '../instance-name.js';
 import { readRegularFile } from '../os/index.js';
 import { asRoot, libexecPath, SYSTEM_ROOTS, unitPath } from '../os/system-paths.js';
 
@@ -142,7 +142,8 @@ const UNIT_OPTIONS: Record<string, string> = {
  * The patterns dashboards.sh itself holds each printed value to (it refuses anything else, exit 2), so doctor never
  * prints a value dashboards.sh would refuse, and none can hold a control character, a quote, a backtick or a glob.
  * test/owner-terminal-rerun.test.ts reads them back out of scripts/setup/dashboards.sh, so the two can't drift.
- * Instance names are held to dashboards.sh's need_instance_name (lib.sh instance_name_problem): instanceNameOk.
+ * Instance names are held to dashboards.sh's need_instance_name ... kept (lib.sh kept_instance_name_problem):
+ * keptInstanceNameProblem, which also takes an instance made before its name was reserved (#902 round 9).
  */
 export const HUB_VALUE_PATTERNS = {
   /** dashboards.sh: [[ "$client_id" =~ ... ]] */
@@ -203,7 +204,7 @@ export function parseHubUnit(text: string): HubSettings | { error: string } {
   if (hub !== '-') {
     for (const item of hub.split(',')) {
       const name = item.slice(0, item.indexOf('='));
-      if (!item.includes('=') || !instanceNameOk(name)) return { error: "its --hub has an item that isn't <name>=<state> with an instance name dashboards.sh takes" };
+      if (!item.includes('=') || keptInstanceNameProblem(name) !== null) return { error: "its --hub has an item that isn't <name>=<state> with an instance name dashboards.sh takes" };
       instances.push(name);
     }
   }
