@@ -5,5 +5,7 @@
   form of the name matched no glob, and such a file was pushed). The workflow check and the SKILL.md lint read the
   same names; the lint reads each skill from the head's tree by its bytes, so a skill whose name isn't valid UTF-8 is
   linted too, and a touched SKILL.md it can't read (a symbolic link, a submodule link, one over 1 MB) is refused,
-  never skipped or judged by a link's target. The tests that hold the rename and odd-name guarantees now wait for the owner like the other guard
+  never skipped or judged by a link's target. The names come from plumbing (`rev-list` into `diff-tree`), so a
+  repo's log config (`log.showSignature`, `log.showRoot`) can't change them; a path with a ".", ".." or ".git" part
+  (only a crafted tree has one) is refused; and the size limit reads past replace refs. The tests that hold the rename and odd-name guarantees now wait for the owner like the other guard
   tests.

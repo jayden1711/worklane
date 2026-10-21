@@ -23,7 +23,9 @@ export const DEFAULT_PUSH_LIMITS: PushLimits = { max_file_mb: 10, max_changed_li
 const WORKFLOWS = '.github/workflows/';
 const MB = 1024 * 1024;
 
-const git = (cwd: string, args: string[], input?: string) => execFileSync('git', args, { cwd, encoding: 'utf8', maxBuffer: 256 * MB, stdio: ['pipe', 'pipe', 'pipe'], ...(input !== undefined ? { input } : {}) });
+// Replace refs off (#928, round 4): a `git replace` of a 3 MB blob with a small one got past the size limit (measured).
+// #927 moves this onto its git runner, which sets the same and more.
+const git = (cwd: string, args: string[], input?: string) => execFileSync('git', ['--no-replace-objects', ...args], { cwd, encoding: 'utf8', maxBuffer: 256 * MB, stdio: ['pipe', 'pipe', 'pipe'], ...(input !== undefined ? { input } : {}) });
 
 const list = (paths: string[], n = 10) => `${paths.slice(0, n).join(', ')}${paths.length > n ? ` and ${paths.length - n} more` : ''}`;
 /** Changed paths in a problem's text, each as shownPath shows it (#683): `rev-list --objects` prints a name as it is. */
@@ -43,6 +45,11 @@ export function pushProblems(cwd: string, base: string, head: string, limits: Pu
   const refuseRes = limits.refuse_paths.map((g) => ({ g, re: globToRegExp(g) }));
   const refused = touched.filter((p) => refuseRes.some(({ re }) => re.test(p)));
   if (refused.length) problems.push(`touches paths that are never pushed (${listPaths(refused)}), matching push.refuse_paths; remove them from every commit on the branch, not just the last one`);
+
+  // A name no checkout would write: a crafted tree can hold an empty, ".", ".." or ".git" segment, and
+  // `./secrets/x.pem` matched no `secrets/**` glob (measured, #928's round-4 check). Fails closed.
+  const unwritable = touched.filter((p) => p.split('/').some((s) => s === '' || s === '.' || s === '..' || s.toLowerCase() === '.git'));
+  if (unwritable.length) problems.push(`has paths no checkout would write (${listPaths(unwritable)}): an empty, ".", ".." or ".git" part; a tree like that is crafted, not committed by git`);
 
   // Every blob new in the range, with its path: a file added and then deleted is still pushed.
   const paths = new Map<string, string>();

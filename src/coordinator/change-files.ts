@@ -139,7 +139,21 @@ export function changedNames(cwd: string, args: string[], o: NameListOptions = {
  */
 export function rangeNames(cwd: string, range: string): string[] {
   if (range.startsWith('-')) throw new Error(`rangeNames: ${range} is not a range`);
-  return [...new Set(names(must(runBytes(cwd, ['log', '--format=', '--name-only', '--no-renames', '--diff-merges=first-parent', '--ignore-submodules=none', '-z', range]))))];
+  // Plumbing only (#724, round 4): `git log` is porcelain and reads log.* config. log.showSignature glued a signature
+  // check's text to the first name ("No signature\nsecrets/k.key", so 1 problem became 0, measured) and
+  // log.showRoot=false hid a root commit's files. rev-list and diff-tree read none of it: each commit of the range
+  // against its first parent, a root against the empty tree.
+  const commits = must(run(cwd, ['rev-list', range]));
+  if (!commits.trim()) return [];
+  return [...new Set(names(must(plumbingBytes(cwd, ['diff-tree', '--stdin', '-r', '--root', '-m', '--first-parent', '--no-renames', '--name-only', '--no-commit-id', '-z'], commits))))];
+}
+
+/** runBytes with `input` on git's stdin. */
+function plumbingBytes(cwd: string, args: string[], input: string): Buffer | Error {
+  const r = spawnSync('git', withGit(args), { cwd, input: Buffer.from(input, 'utf8'), encoding: 'buffer', maxBuffer: MAX_BUFFER });
+  if (r.error) return r.error;
+  if (r.status !== 0) return new Error(`git ${args.join(' ').slice(0, 200)} failed: ${(r.stderr.toString('utf8') || `exit ${r.status}`).trim().slice(0, 500)}`);
+  return r.stdout;
 }
 
 /** A tree entry as blobsByName reads it: a regular file's text, or why it wasn't read. */
