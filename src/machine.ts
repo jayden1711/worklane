@@ -35,7 +35,7 @@ function runHelper(args: string[], exec: Exec): MachineResult {
     const text = `${err.stderr ?? ''}`.trim() || err.message;
     // sudo -n refuses rather than prompting: the rule isn't installed for this user (or not for these arguments).
     if (/password is required|not allowed to execute|may not run sudo|is not in the sudoers/i.test(text)) {
-      return { ok: false, error: `this user may not run ${MACHINE_HELPER} ${args.join(' ')} (sudo: ${text.split('\n')[0]!.replace(/^sudo:\s*/, '')}); an admin runs scripts/setup/machine-helper.sh with every instance once` };
+      return { ok: false, error: `this user may not run ${MACHINE_HELPER} ${args.join(' ')} (sudo: ${text.split('\n')[0]!.replace(/^sudo:\s*/, '')}); an admin runs scripts/setup/machine-helper.sh --check at a root shell, which shows the rule's difference from the engine's and the command that installs it` };
     }
     if (/command not found|no such file/i.test(text)) return { ok: false, error: `${MACHINE_HELPER} isn't installed; an admin runs scripts/setup/machine-helper.sh once` };
     return { ok: false, error: `${MACHINE_HELPER} ${args.join(' ')} failed: ${text.slice(0, 500)}` };
