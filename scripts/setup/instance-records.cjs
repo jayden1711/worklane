@@ -65,7 +65,7 @@ const ITEMS = [
   { kind: 'shared', rename: 'rekey', what: 'incidents', by: 'the coordinator and the watchdog (src/watchdog/incidents.ts)' },
   { kind: 'shared', rename: 'rekey', what: 'pending-signers', by: "the machine helper's stage-update-signer" },
   { kind: 'shared', rename: 'drop', note: "staged plugin approvals aren't moved: stage them again for the new name", what: 'plugin-pending', by: "the machine helper's plugin-stage" },
-  { kind: 'shared', rename: 'drop', note: 'the new name is no instance add-project is creating: the rename adds its coordinator to the machine helper\'s rule itself', what: 'add-project-new', by: 'add-project.sh (its instance step, #898)' },
+  { kind: 'shared', rename: 'drop', note: 'the new name is no instance add-project is creating: the rename adds its coordinator to the machine helper\'s rule itself', what: 'add-project-new', by: 'instance.sh, as it makes the coordinator (#898); machine-helper.sh takes it off' },
   { kind: 'shared', rename: 'drop', note: "root's word that its repo is a managed app isn't moved: every self-modification lock applies to the new name until root runs managed-apps.sh add <new> <owner/repo>", what: 'managed-apps', by: 'managed-apps.sh add' },
   { kind: 'path', rename: 'drop', note: "the new name's coordinator writes its own when its chat bot connects", what: '/var/lib/worklane/agent-slots/discord-claim-<name>.json', by: 'the coordinator (src/intake/discord-claims.ts)' },
   { kind: 'path', rename: 'drop', note: "plugins aren't moved: approve them again for the new name (plugins.sh confirm); its MCP broker and secrets aren't either (mcp-broker.sh <new>, then its secrets)", what: '/etc/worklane/plugins/<name>.json', by: 'plugins.sh confirm (the allowlist)' },
@@ -527,7 +527,7 @@ const SHARED = {
       return mine;
     },
   },
-  // add-project.sh's list of the instances it is creating (lib.sh ADD_PROJECT_NEW), one name a line: this one's.
+  // Root's list of the instances being created (lib.sh ADD_PROJECT_NEW), one name a line: this one's.
   'add-project-new': {
     file: P.addProjectNew,
     get: (prefix, name) => (pausedLines(at(prefix, P.addProjectNew)).includes(name) ? [name] : null),

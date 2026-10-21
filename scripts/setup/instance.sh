@@ -12,6 +12,9 @@ eval_user=""
 coord="wl-$name" agent="wl-$name-agent" work="wl-$name-work"
 
 say "users"
+# A coordinator made here, now, is a new instance's: on root's list until the machine helper's rule names it, so its
+# first add puts it in that rule without --replace-sudoers, whichever way it is added (#898). One already there isn't.
+user_exists "$coord" || new_instance_mark "$name"
 ensure_user "$coord"
 ensure_user "$agent"
 [ -n "$eval_user" ] && ensure_user "$eval_user"

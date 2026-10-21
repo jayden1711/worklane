@@ -30,7 +30,8 @@
 #   machine-helper  machine-helper.sh with every instance on the machine (the ones it lists now, the hub's, and this);
 #                   done only while its sudoers rule is byte for byte what that writes for them. Otherwise it reruns
 #                   on its own only when the installed rule is in the engine's own shape and the rerun only drops
-#                   whole commands or users (it adds a user only for the instance this add-project is creating).
+#                   whole commands or users (it adds a user only for an instance being created: instance.sh made
+#                   its coordinator, and no machine-helper.sh run has named it in the rule since).
 #                   Anything else waits (exit 3), showing the difference, for root's --replace-sudoers (#898)
 #   dashboards      dashboards.sh with every instance, keeping the hub's settings (its unit has them); the first
 #                   project on a machine gives --client-id and --public-url instead
@@ -118,23 +119,11 @@ done_instance() {
   user_exists "$coord" && user_exists "$agent" && [ -d "$SRV_ROOT/$name" ] && [ -f "$(inst_dir)/instance.yaml" ] || return 1
   echo "users $coord and $agent, $SRV_ROOT/$name and the instance home are there"
 }
+# instance.sh puts a coordinator it makes on root's list of instances being created (lib.sh ADD_PROJECT_NEW, #898).
 do_instance() {
-  # Its coordinator made here, now: the instance this add-project creates (#898). It is on root's list of new instances
-  # until the machine helper's rule names it, so a rerun that resumes this add still adds it without the flag. A
-  # coordinator user that was there already is never added that way.
-  user_exists "$coord" || new_mark
   bash "$here/instance.sh" "$name"
   ensure_instance_home "$name" "$repo"
 }
-# Root's list of the instances add-project is creating (lib.sh ADD_PROJECT_NEW): written whole, 0600.
-new_marked() { grep -qx -- "$name" "$ADD_PROJECT_NEW" 2>/dev/null; }
-new_write() {
-  mkdir -p "$(dirname "$ADD_PROJECT_NEW")"
-  ( umask 077; { grep -vx -- "$name" "$ADD_PROJECT_NEW" 2>/dev/null || true; "$@"; } > "$ADD_PROJECT_NEW.tmp" )
-  mv -f "$ADD_PROJECT_NEW.tmp" "$ADD_PROJECT_NEW"
-}
-new_mark() { new_write echo "$name"; }
-new_clear() { [ ! -f "$ADD_PROJECT_NEW" ] || new_write true; }
 detail_instance() { done_instance; }
 alone_instance() { echo "sudo bash $here/instance.sh $name"; }
 
@@ -329,9 +318,10 @@ done_machine_helper() {
   echo "the machine helper is installed, lists $coord, and its sudoers rule is what machine-helper.sh writes for $(printf '%s\n' "$names" | one_line)"
 }
 # The owner's rule (#898), failing closed (lib.sh sudoers_only_narrows): on its own, the rewrite only drops whole
-# commands or users from a rule in the engine's own shape. The one user it may add is the coordinator of the instance
-# this add-project is creating: one whose user it made itself, on root's list of new instances until the rule names it.
-# A user that was there already, which root took out of the rule say, or a hub-only instance's, counts as a widening.
+# commands or users from a rule in the engine's own shape. The one user it may add is the coordinator of an instance
+# being created: on root's list (lib.sh ADD_PROJECT_NEW) from instance.sh making its user until a machine-helper.sh run
+# names it in the rule. A user named in the rule before, which root then took out say, or a hub-only instance's,
+# counts as a widening.
 # So does a newer engine's command, a sudo that now reads patterns, or any line outside that shape. Each waits (exit 3),
 # showing the unified diff and the command with --replace-sudoers. That flag is root's, at a root shell: the machine
 # helper runs this script with exactly a name and a repo.
@@ -339,7 +329,7 @@ do_machine_helper() {
   local names n users=() allow=() rule
   names="$(helper_names)"
   for n in $names; do users+=("wl-$n"); done
-  if new_marked; then allow=("$coord"); fi
+  if new_instance_marked "$name"; then allow=("$coord"); fi
   rule="$(machine_sudoers "${users[@]}")"
   if [ -n "$replace_sudoers" ]; then
     echo "--replace-sudoers: the machine helper's rule becomes machine-helper.sh's, whatever it adds"
@@ -413,6 +403,6 @@ run_step service
 run_step test-user
 run_step machine-helper
 # The rule names this instance now: it is no longer one being created (#898).
-if helper_instances | grep -qx "$name"; then new_clear; fi
+if helper_instances | grep -qx "$name"; then new_instance_clear "$name"; fi
 run_step dashboards
 echo "added $name ($repo)"

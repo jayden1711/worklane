@@ -62,7 +62,7 @@ install_claude_token() {
   { printf '{"claudeAiOauth":{"accessToken":"'; cat; printf '"}}'; } > "$T/homes/$1/.claude/.credentials.json"
 }
 SRV_ROOT="$T/srv" ENGINE_CLI="$T/bin/worklane" MACHINE_HELPER="$T/helper" MACHINE_SUDOERS="$T/sudoers-machine" HUB_UNIT="$T/hub.service" ADD_PROJECT_LOCK="$T/lock"
-ADD_PROJECT_NEW="$T/add-project-new"
+ADD_PROJECT_NEW="$T/add-project-new" ADD_PROJECT_NEW_UID=${process.getuid?.() ?? 0}
 SETUP_POLL_SECONDS=0
 `;
   writeFileSync(join(s, 'lib.sh'), lib);
@@ -80,7 +80,8 @@ SETUP_POLL_SECONDS=0
     writeFileSync(join(T, 'host-bin', tool), `#!/bin/sh\necho "${tool} $*" >> ${JSON.stringify(join(T, 'host-calls'))}\nexit 1\n`);
     chmodSync(join(T, 'host-bin', tool), 0o755);
   }
-  stub(join(s, 'instance.sh'), 'instance', 'touch "$T/users/wl-$1" "$T/users/wl-$1-agent"; mkdir -p "$T/srv/$1"');
+  // As the real instance.sh: a coordinator it makes goes on root's list of instances being created (#898).
+  stub(join(s, 'instance.sh'), 'instance', 'source "$T/scripts/setup/lib.sh"; user_exists "wl-$1" || new_instance_mark "$1"; touch "$T/users/wl-$1" "$T/users/wl-$1-agent"; mkdir -p "$T/srv/$1"');
   stub(join(T, 'bin', 'worklane'), 'app', `[ "$1" = app-manifest ] || exit 2
 d="$T/homes/wl-$2/.local/state/worklane/instances/$2"; printf 'version: 1\\ngithub:\\n  kind: app\\n  app_id: 91\\n' > "$d/credentials.yaml"
 mkdir -p "$T/homes/wl-$2/.config/$2-app"; echo key > "$T/homes/wl-$2/.config/$2-app/private-key.pem"`);

@@ -71,7 +71,7 @@ install_claude_token() {
   echo "install_claude_token $1" >> "$T/calls"
 }
 SRV_ROOT="$T/srv" ENGINE_CLI="$T/bin/worklane" MACHINE_HELPER="$T/helper" MACHINE_SUDOERS="$T/sudoers-machine" HUB_UNIT="$T/hub.service" ADD_PROJECT_LOCK="$T/lock"
-ADD_PROJECT_NEW="$T/add-project-new"
+ADD_PROJECT_NEW="$T/add-project-new" ADD_PROJECT_NEW_UID=${process.getuid?.() ?? 0}
 SETUP_POLL_SECONDS=0 SETUP_WAIT_SECONDS="$(cat "$T/wait-seconds" 2>/dev/null || true)"
 `,
   );
@@ -79,7 +79,8 @@ SETUP_POLL_SECONDS=0 SETUP_WAIT_SECONDS="$(cat "$T/wait-seconds" 2>/dev/null || 
     writeFileSync(file, `#!/usr/bin/env bash\nset -euo pipefail\nT=${JSON.stringify(T)}\necho "${step} $*" >> "$T/calls"\nif [ -e "$T/fail-${step}" ]; then echo "${step} went wrong: $(cat "$T/fail-${step}")" >&2; exit 1; fi\n${body}\n`);
     chmodSync(file, 0o755);
   };
-  stub(join(s, 'instance.sh'), 'instance', 'touch "$T/users/wl-$1" "$T/users/wl-$1-agent"; mkdir -p "$T/srv/$1"');
+  // As the real instance.sh: a coordinator it makes goes on root's list of instances being created (#898).
+  stub(join(s, 'instance.sh'), 'instance', 'source "$T/scripts/setup/lib.sh"; user_exists "wl-$1" || new_instance_mark "$1"; touch "$T/users/wl-$1" "$T/users/wl-$1-agent"; mkdir -p "$T/srv/$1"');
   // `instance auto-config`: the setup PR, open; merged from the check numbered in <root>/merge-after on.
   stub(join(T, 'bin', 'worklane'), 'app', `if [ "$1 $2" = "policy check" ]; then [ ! -e "$T/gate-refuses-$3" ]; exit $?; fi
 if [ "$1 $2" = "instance auto-config" ]; then

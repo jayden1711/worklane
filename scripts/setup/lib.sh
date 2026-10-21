@@ -322,8 +322,16 @@ machine_sudoers_preflight() {
   rule="$(machine_sudoers "${users[@]}")" || return 1
   sudoers_only_narrows "$MACHINE_SUDOERS" "$rule" ${allow:+"$allow"} && return 0
   sudoers_unified_diff "$MACHINE_SUDOERS" "$rule"
-  # The command names the instances there now: the one the script adds on purpose is added by the script itself.
-  echo "rerun as root with --replace-sudoers to install the engine's rule: sudo bash $dir/machine-helper.sh --replace-sudoers ${others[*]}"
+  # The command names the instances there now: the one the script adds on purpose is added by the script itself. When
+  # the rule's users line can't be read, they come from the hub and the checkouts, so the command always runs.
+  if [ "${#others[@]}" -eq 0 ]; then
+    for n in $(machine_instances_here); do [ "wl-$n" = "$allow" ] || others+=("$n"); done
+  fi
+  if [ "${#others[@]}" -eq 0 ]; then
+    echo "no instance's coordinator is on this machine to rewrite the rule for: remove it, as root: sudo rm -f $MACHINE_SUDOERS"
+  else
+    echo "rerun as root with --replace-sudoers to install the engine's rule: sudo bash $dir/machine-helper.sh --replace-sudoers ${others[*]}"
+  fi
   return 1
 }
 
@@ -651,10 +659,54 @@ ENGINE_CLI=/usr/local/bin/worklane
 # add-project's wait for a repo's setup PR to merge: how often it checks, and (empty: its --timeout) for how long.
 SETUP_POLL_SECONDS=20 SETUP_WAIT_SECONDS=""
 ADD_PROJECT_LOCK=/run/lock/worklane-add-project.lock
-# The instances add-project.sh is creating: root's list, one name a line, 0600 (#898). A name goes on it when
-# add-project makes the instance's coordinator user, and comes off once the machine helper's rule names it. Only such
-# an instance's coordinator is added to that rule without --replace-sudoers.
+# The instances being created: root's list, one name a line, a regular file of root's, 0600, one link (#898).
+#   - A name goes on it where its coordinator user is made: instance.sh, which only root runs. That covers
+#     add-project's instance step, a by-hand instance.sh, and instance-rename.sh's users step.
+#   - It comes off wherever the machine helper's rule is written: machine-helper.sh, for every name it writes.
+#   - Only a name on it lets add-project add that instance's coordinator to the rule without --replace-sudoers.
+# A list that isn't exactly that (a link, another owner or mode, a second link) marks nothing, so the flag is needed.
 ADD_PROJECT_NEW=/var/lib/worklane/add-project-new
+ADD_PROJECT_NEW_UID=0   # its owner: root
+# Whether instance $1 is on the list, read only from a list that is exactly root's 0600 regular file.
+new_instance_marked() {
+  local f="$ADD_PROJECT_NEW"
+  [ -f "$f" ] && [ ! -L "$f" ] && [ "$(command stat -c '%u %a %h' -- "$f" 2>/dev/null)" = "$ADD_PROJECT_NEW_UID 600 1" ] || return 1
+  grep -qxF -- "$1" "$f"
+}
+# The list rewritten whole: its names, if it is a list new_instance_marked would read, without $1, then $2 (a name to
+# add, or nothing). The temp file is created exclusively (set -C: O_EXCL, so never through a link or over a file there
+# already). A temp file left there refuses the write.
+new_instance_write() {
+  local f="$ADD_PROJECT_NEW" tmp="$ADD_PROJECT_NEW.tmp" keep=""
+  if [ -f "$f" ] && [ ! -L "$f" ] && [ "$(command stat -c '%u %a %h' -- "$f" 2>/dev/null)" = "$ADD_PROJECT_NEW_UID 600 1" ]; then
+    keep="$(grep -vxF -- "$1" "$f" || true)"
+  fi
+  mkdir -p "$(dirname "$f")"
+  [ ! -e "$tmp" ] && [ ! -L "$tmp" ] || return 1
+  ( set -C; umask 077; { [ -z "$keep" ] || printf '%s\n' "$keep"; [ -z "${2:-}" ] || printf '%s\n' "$2"; } > "$tmp" ) || return 1
+  mv -f -T -- "$tmp" "$f"
+}
+# instance.sh, as it makes wl-$1: $1 goes on the list. Failing to write it leaves $1 unmarked (its first add then
+# needs --replace-sudoers), never marked by mistake.
+new_instance_mark() { new_instance_write "$1" "$1" || echo "note: $1 could not be put on $ADD_PROJECT_NEW; its first add will wait for --replace-sudoers" >&2; }
+# machine-helper.sh, for every name it writes into the rule: each comes off. Failing that, the list goes, so no name it
+# held marks anything (each then needs the flag).
+new_instance_clear() {
+  local n
+  [ -e "$ADD_PROJECT_NEW" ] || [ -L "$ADD_PROJECT_NEW" ] || return 0
+  for n in "$@"; do
+    new_instance_marked "$n" || continue
+    new_instance_write "$n" || { rm -f -- "$ADD_PROJECT_NEW"; echo "note: $ADD_PROJECT_NEW could not be rewritten: removed" >&2; return 0; }
+  done
+}
+# The instances on this machine whose coordinator user exists: from the machine helper's rule, the hub and the
+# checkouts' root. For a command that must name them when the rule's own users line can't be read.
+machine_instances_here() {
+  local n
+  for n in $({ helper_instances; hub_instances; ls -1 "$SRV_ROOT" 2>/dev/null; } | grep -E '^[a-z][a-z0-9-]{0,20}$' | sort -u); do
+    if user_exists "wl-$n"; then echo "$n"; fi
+  done
+}
 user_exists() { id -u "$1" >/dev/null 2>&1; }
 unit_active() { systemctl is-active -q "$1"; }
 

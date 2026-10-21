@@ -78,7 +78,13 @@ if [ "${1:-}" = --check ]; then
       echo "stale: $MACHINE_SUDOERS names no coordinator user on this machine; remove it, as root: sudo rm -f $MACHINE_SUDOERS"
       exit 3
     fi
-    echo "wider: rerun as root with --replace-sudoers to install the engine's rule: sudo bash $here/machine-helper.sh --replace-sudoers <every instance on this machine>"
+    # Its users line can't be read: the command names the instances on this machine from the hub and the checkouts.
+    here_now="$(machine_instances_here | tr '\n' ' ' | sed 's/ $//')"
+    if [ -z "$here_now" ]; then
+      echo "wider: $MACHINE_SUDOERS isn't in the engine's own shape and no instance's coordinator is on this machine; remove it, as root: sudo rm -f $MACHINE_SUDOERS"
+    else
+      echo "wider: rerun as root with --replace-sudoers to install the engine's rule: sudo bash $here/machine-helper.sh --replace-sudoers $here_now"
+    fi
     exit 4
   fi
   rule="$(machine_sudoers "${users[@]}")"
@@ -110,6 +116,9 @@ if [ -z "$replace" ] && ! sudoers_only_narrows "$MACHINE_SUDOERS" "$rule" "${use
   echo "rerun as root with --replace-sudoers to install the engine's rule: sudo bash $here/machine-helper.sh --replace-sudoers $*"
   exit 3
 fi
+# Every name this run writes into the rule is no longer an instance being created (#898): off root's list now, before
+# anything is written. If the run then fails, those names need --replace-sudoers to be added, which fails closed.
+new_instance_clear "$@"
 command -v node >/dev/null || { echo "needs node on root's PATH (node.sh)" >&2; exit 1; }
 [ -d /etc/worklane ] || { echo "no /etc/worklane; run machine.sh first" >&2; exit 1; }
 
