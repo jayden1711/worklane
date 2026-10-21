@@ -18,9 +18,9 @@ What is here so far:
 - **Pinned downloads** (`pins.json`, `pins.ts`, `download.ts`): `bench download` fetches the dataset file at its pinned revision and sha256 into the held-out store, and `pullImage` pulls a task image by pinned digest only (step 7). The dataset isn't pinned yet, so `bench download` refuses until the owner records the pin.
 - **Task selection** (`select.ts`): `bench select` chooses the tasks by a fixed rule and seed from the pinned rows, writes the manifest into the held-out store, and prints keys and the smoke run's plan, never an instance id (step 8). `loadTasks` hands the run its tasks and their image references from the store. The rows aren't pinned yet, so `bench select` refuses and prints their digest for the owner to record.
 - **Task images** (`images.ts`): `bench images` writes each selected task's image reference into the held-out store, from the store's manifest, with each digest taken only when `pins.json` pins it (step 9). No image digest is pinned yet, so it refuses.
+- **Pulls and base trees** (`pull.ts`): `bench pull --tasks smoke|baseline` pulls that task set's images by their pinned digests (never a tag) and reads each digest back. It then copies each task's base tree out of its own image's `/testbed`, through the bench's container runner, into the held-out store, as a bare remote with one commit (no upstream history) and a clone of it (step 10).
 
 Still to come:
-- the rest of task setup: the base tree, a local clone with no upstream history, a local bare remote, and the image pulls;
 - the PR-mode task runner on the replay harness (`src/harness-evals/replay.ts`), with stub CI, and the agent's test relay into the container: both need the engine's runner seam (#701);
 - `bench run`, the grading run and the B0, B1 and `claude -p` baselines.
 
@@ -230,7 +230,7 @@ The tarball is pinned; its four dependencies (`zod`, `commander`, `node-forge`, 
 
 The clone comes from this repository's own URL: `repository.url` in `package.json`, without its `git+` prefix (written there, not here, so this folder names no project). The pinned commit is a commit on `main` that has `scripts/bench/cli.ts`: for the first preflight, the merge commit of the PR that added it. Every run records the CLI version and the results; keep the commit you used with them.
 
-If `~/src/bench-engine` already exists (an earlier clone), move it aside first (`mv ~/src/bench-engine ~/src/bench-engine.old`): `git clone` refuses a folder that is there and not empty, and the chain then stops. Replace the two PASTE_ values first. Each command is chained on the one before, so a clone at any other commit is never built or installed:
+If `~/src/bench-engine` already exists (an earlier clone), move it aside first, under a name of its own each time (`mv ~/src/bench-engine ~/src/bench-engine.$(date +%Y%m%d-%H%M%S)`): `git clone` refuses a folder that is there and not empty, and the chain then stops. A fixed name such as `bench-engine.old` works only once; the next `mv` would put the clone inside it. This step is redone after every reviewed change to `pins.json`, since the bench reads its pins from this clone. Replace the two PASTE_ values first. Each command is chained on the one before, so a clone at any other commit is never built or installed:
 
     BENCH_REPO=PASTE_THE_HTTPS_CLONE_URL
     BENCH_SHA=PASTE_THE_40_HEX_PINNED_COMMIT
@@ -288,7 +288,9 @@ What it does, in order:
 - fetches the bytes into memory over https, from the pinned host, through at most five redirects (each to a pinned host or its subdomain, with no credentials and no port), up to `max_bytes`. Their sha256 must equal the pin. Until then it makes and writes nothing, not even the store;
 - makes the store and its `dataset/` folder (0700, one folder at a time, never through a link), then writes a new temporary file there. That file is created exclusively, refuses a link and is 0600. It is synced and read back, and renamed to its name only when the read-back matches the pin.
 
-Images (`download.ts` `pullImage`): only `docker pull <name>@sha256:<digest>` and `docker image inspect` (to read the digest back) are sent. The argv is built only from a reference `pins.ts` checked: a pinned digest, no tag, no port, no option. The argv is checked again before docker runs. No command takes an image name on the command line, since the bench user's shell history is readable by the agents (**inferred**: the sandbox's read-deny list doesn't name it). Task selection hands each task's reference over from the store.
+**Collecting the image digests is not built yet (an open gap).** No command lists the `latest` manifest digests of SWE-bench Verified's images. Without them, `image_digests` stays empty and step 9 refuses. Collecting them by hand would mean typing image names, which carry instance ids, into a shell. On the bench user's account that is ruled out above, since its shell history is readable by the agents. Whether to add a `bench digests` command (the registry lookups `bench images` makes, for every row of the pinned dataset, printing only the sorted set) or to collect them some other way is a decision still to make.
+
+Images (`download.ts` `pullImage`, called by `bench pull`, step 10): only `docker pull <name>@sha256:<digest>` and `docker image inspect` (to read the digest back) are sent. The argv is built only from a reference `pins.ts` checked: a pinned digest, no tag, no port, no option. The argv is checked again before docker runs. No command takes an image name on the command line, since the bench user's shell history is readable by the agents (**inferred**: the sandbox's read-deny list doesn't name it). Task selection hands each task's reference over from the store.
 
 ### 8. The rows and the task selection (on the bench machine only)
 
@@ -375,27 +377,164 @@ Only when every task has its reference, and the store and the manifest pass thei
 
 It prints keys, counts and the file's sha256. A refusal names keys, and the digest the registry served when that digest isn't pinned, so the owner can check it. Never an instance id or an image name, and every line goes through the withholding backstop above. Then `bench select` passes every line.
 
+### 10. The pulls and the base trees (on the bench machine only)
+
+After `bench images`, run, as the bench user:
+
+    bench pull --tasks smoke
+
+`--tasks` is its one argument, and it is required: `smoke` (`t01` to `t04`) or `baseline` (all 50), the same choice `bench run` takes. There is no default, and anything else exits 2 before anything runs. Run `bench pull --tasks baseline` before the baseline run; it keeps the smoke's trees as they are.
+
+What it does, in order, stopping at the first refusal:
+- **The tasks:** from the store only, as the run takes them (`loadTasks`): the manifest checked against the pins, and each task's reference from `images.json`, a pinned digest under the task's own name. A missing or odd `images.json` refuses before any docker command.
+- **The daemon:** this user's Docker daemon must be rootless (as the preflight checks).
+- **The pulls:** each image goes through `pullImage`: `docker pull <name>@sha256:<digest>`, never a tag. Its digest is read back from the daemon (`RepoDigests`) and must be the one `images.json` and `pins.json` give. Then `images.json` is read again, and if it changed during the pulls nothing more happens.
+- **The base trees**, one task at a time. The source comes from the task's own image, never from upstream: no fetch, no network, no GitHub.
+  - A throwaway container is started from the image, with the run's own limits, `--network none` and no mount. The limits are read back before anything runs in it. The commands only read `/testbed`; whatever the container does goes when it is removed.
+  - **With git metadata in `/testbed`:** its HEAD must be the task's `base_commit`, or the task is refused. Then base_commit's own commit object (none of its parents) and exactly its tree's objects are packed out. On the host the commit must hash to `base_commit` and name that tree, so the tree is base_commit's by its hash, not by the container's word. The tree hash is recorded.
+  - **With no git metadata in `/testbed`:** its files (ignored ones too) are hashed into a tree in a throwaway repository in the container, outside `/testbed`, and that tree is copied out. Its id is recorded as the content hash, and the output says HEAD was not checked against `base_commit`.
+  - On the host: one root commit on that tree (fixed author and date), in a fresh bare remote that holds exactly that commit's objects (no upstream history, checked), and a clone of it, with that bare remote as its `origin`. A record, `tree.json` (0600), keeps the key, the instance id, `base_commit`, the image digest, the source, the tree and the commit. It is all built in a temporary folder, and renamed to `trees/<key>/` in the store only when done, never over anything.
+  - **Run again:** a task's tree already there is kept when it is the same task from the same image, and its bare remote and clone still check out. Anything else there (another task's or another image's tree, an unfinished one, a link) is refused and left as it is: move it aside to build it again.
+- **Where the trees live:** `state/evals/held-out/swebench/trees/<key>/` (`remote.git`, `clone`, `tree.json`), inside the held-out store. The agents' sandbox denies the store, so no agent ever sees the task set. `bench run` (still to come) copies one task's tree into that task's own folder when the task starts.
+
+It prints keys and counts only: never an instance id, an image name, a digest beside its key or a tree hash. docker's own error text names the image, so a failure says only its stage and exit status. Every line goes through the withholding backstop. To see why a docker command failed, read the daemon's log (`journalctl --user -u docker`, as the bench user; **inferred**, not run here) rather than typing the image name.
+
+**Not known until the first real pull (inferred, not measured here):**
+- that every SWE-bench image's `/testbed` is a git checkout at `base_commit`, with `git`, `sh`, `printf` and `base64` in the image. A missing tool fails closed, as a refusal;
+- how long the pulls take (each image is several GB) and how much space the trees take.
+
 ## The smoke run plan
 
 The 4-task smoke on current main, in this order. Each step needs the one before it:
 1. **Setup and preflight** (steps 1 to 6): `bench preflight` passes as the bench user. Done by the owner on 2026-10-18; confirm with the preflight.
 2. **Pins and download** (step 7): the owner records the dataset's revision and sha256 and the image digests; `bench download`.
 3. **Rows and selection** (step 8): the rows file and its digest recorded, then `bench select` writes the manifest. It prints the plan: `t01` to `t04`, at most $40 for the round, $15 per task. Its images line stays FAIL until step 4 writes `images.json`.
-4. **Task setup** (slice 4):
-   - `bench images` (step 9) writes `images.json` from the store, never typed. Built; it needs the image digests pinned;
+4. **Task setup** (slice 4, built; it needs the image digests pinned, which has no command yet: see step 7):
+   - `bench images` (step 9) writes `images.json` from the store, never typed;
    - then `bench select` passes every line;
-   - still to come:
-     - each task's base tree, a local clone with no upstream history, and a local bare remote;
-     - images pulled with `pullImage`. It reads the digest back for the pinned name, so an image whose digest isn't the one its own repository serves fails there (**inferred**). `loadTasks` checks only that an image's name is its task's own, and that its digest is pinned; `bench images` took each digest from the registry for that name.
+   - then `bench pull --tasks smoke` (step 10) pulls the four images by digest, reading each back, and puts each task's base tree in the store: a bare remote with one commit and a clone of it. `pullImage` reads the digest back for the pinned name, so an image whose digest isn't the one its own repository serves fails there (**inferred**). `loadTasks` checks only that an image's name is its task's own, and that its digest is pinned; `bench images` took each digest from the registry for that name.
 5. **The engine's runner seam and the test relay** (still to come; #701, Lane C and Lane A): the engine's check and test commands run through the bench's `TaskRunner`.
 6. **`bench run --tasks smoke --spend <usd>`** (still to come): with `--spend` at most 40. Its first model call is the sandbox confirmation. It stops cleanly at any usage limit, with no retry.
 7. **Grading** of the exported patches in fresh containers, then the aggregate. If the round averaged over $8 per task, the baseline needs the owner's re-approval.
+
+## The owner's steps, in order (from a new machine to the smoke run)
+
+Each block below is copied from the setup step it names, and a test (`test/bench-pull.test.ts`) holds each one equal to that step's commands, so the two can't drift apart. Each step says how sure it is: **done** (the owner did it, with the date), **measured** (a test runs it, with stand-ins), **inferred** (nobody has run it here).
+
+The bench reads its pins from the bench user's own clone (`scripts/bench/pins.json` in `~/src/bench-engine`). So after each reviewed change to `pins.json` merges, redo step E at that merge commit before the next `bench` command.
+
+**A. Docker Engine, as an admin account with sudo (setup step 1).** Done by the owner on 2026-10-18 (the smoke run plan, step 1). Skip it when `bench preflight` (F) passes. Otherwise (**inferred**: it needs sudo, so it is not run here):
+
+    sudo apt-get update
+    sudo apt-get install -y ca-certificates curl uidmap slirp4netns
+    sudo install -m 0755 -d /etc/apt/keyrings
+    sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+    sudo chmod a+r /etc/apt/keyrings/docker.asc
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | sudo tee /etc/apt/sources.list.d/docker.list
+    sudo apt-get update
+    apt-cache madison docker-ce | head -3          # pick VERSION
+    sudo apt-get install -y docker-ce=VERSION docker-ce-cli=VERSION containerd.io docker-ce-rootless-extras=VERSION
+    sudo apt-mark hold docker-ce docker-ce-cli docker-ce-rootless-extras containerd.io
+    sudo systemctl disable --now docker.service docker.socket
+    sudo rm -f /var/run/docker.sock
+
+**B. The bench user, its subordinate ids, linger and cgroup delegation, as the admin account (setup step 2).** Done on 2026-10-18. Otherwise (**inferred**). Replace `<start>-<end>` only if the `grep` shows no line:
+
+    sudo apt-get install -y bubblewrap socat         # the sandbox's own dependencies (Claude Code's and srt's)
+    sudo useradd -m -s /bin/bash wl-bench
+    grep wl-bench /etc/subuid /etc/subgid          # one line in each; if missing:
+    sudo usermod --add-subuids <start>-<end> --add-subgids <start>-<end> wl-bench
+    sudo loginctl enable-linger wl-bench           # its user manager: /run/user/<uid> and a user bus
+    sudo mkdir -p /etc/systemd/system/user@.service.d
+    printf '[Service]\nDelegate=cpu cpuset io memory pids\n' | sudo tee /etc/systemd/system/user@.service.d/delegate.conf
+    sudo systemctl daemon-reload
+    sudo systemctl restart user@$(id -u wl-bench).service
+    cat /sys/fs/cgroup/user.slice/user-$(id -u wl-bench).slice/user@$(id -u wl-bench).service/cgroup.controllers
+                                                   # expect: cpuset cpu io memory pids
+    chmod 750 "$HOME"                              # as the admin account, on its own home
+    sudo -u wl-bench ls "$HOME"                    # expect: Permission denied
+
+**C. As the bench user: its profile, rootless Docker, Claude Code at the pin, and the sign-in (setup step 3).** Done on 2026-10-18. Otherwise (**inferred**). Everything after the first line runs in the bench user's shell:
+
+    sudo -iu wl-bench
+    echo 'export XDG_RUNTIME_DIR=/run/user/$(id -u)' >> ~/.profile
+    echo 'export DBUS_SESSION_BUS_ADDRESS=unix:path=$XDG_RUNTIME_DIR/bus' >> ~/.profile
+    echo 'export DOCKER_HOST=unix://$XDG_RUNTIME_DIR/docker.sock' >> ~/.profile
+    echo 'export DISABLE_UPDATES=1' >> ~/.profile
+    . ~/.profile
+    # rootless Docker
+    dockerd-rootless-setuptool.sh install
+    systemctl --user enable --now docker
+    docker info | grep -E 'Context|rootless|Cgroup'   # expect rootless, cgroup v2, the systemd driver, no limit warnings
+    # Claude Code at the pin. The installer works only with DISABLE_UPDATES unset:
+    curl -fsSL https://claude.ai/install.sh | env -u DISABLE_UPDATES bash -s 2.1.303
+    ~/.local/bin/claude --version                  # expect 2.1.303 (Claude Code)
+    # sign in with the owner's account, through Anthropic's own flow, in this terminal
+    ~/.local/bin/claude                            # then /login, then /exit
+    ~/.local/bin/claude auth status                # expect a claude.ai sign-in
+
+**D. sandbox-runtime for the srt probe, as the bench user (setup step 4).** Done on 2026-10-18. The checksum gate is **measured** (a test runs this block with stand-ins); the real install is **inferred**:
+
+    mkdir -p ~/src/srt-0.0.79 && cd ~/src/srt-0.0.79 &&
+      npm pack @anthropic-ai/sandbox-runtime@0.0.79 &&
+      test "sha512-$(openssl dgst -sha512 -binary anthropic-ai-sandbox-runtime-0.0.79.tgz | base64 -w0)" = "sha512-WjBmS9fbTpnQwQkM9SU+JjhM2CcXo9eWEELktY1100RMvTy/jPhP44yZ3NXhh+GHB350OgPbM3+FubE5WVRtSA==" &&
+      echo "checksum OK" &&
+      npm install -g --ignore-scripts --prefix ~/.local ./anthropic-ai-sandbox-runtime-0.0.79.tgz
+    ~/.local/bin/srt --version                     # expect 0.0.79 (no such file: the checksum didn't match, nothing was installed)
+    cd ~
+
+**E. The bench's own clone at the pinned commit, as the bench user (setup step 5).** Redo it now: a clone from 2026-10-18 predates `bench select`, `bench images` and `bench pull`. Pin a commit on `main` that has `bench pull`, and redo this step after each change to `pins.json` merges. First move the old clone aside, under a new name each time: `mv ~/src/bench-engine ~/src/bench-engine.$(date +%Y%m%d-%H%M%S)`. Then replace the two PASTE_ values and run (**inferred**; the block's syntax is **measured**):
+
+    BENCH_REPO=PASTE_THE_HTTPS_CLONE_URL
+    BENCH_SHA=PASTE_THE_40_HEX_PINNED_COMMIT
+    git clone "$BENCH_REPO" ~/src/bench-engine &&
+      git -C ~/src/bench-engine checkout --detach "$BENCH_SHA" &&
+      test "$(git -C ~/src/bench-engine rev-parse HEAD)" = "$BENCH_SHA" &&
+      (cd ~/src/bench-engine && npm ci --ignore-scripts && npm run build) &&
+      mkdir -p ~/.local/bin &&
+      printf '#!/bin/sh\nexec node %s/src/bench-engine/dist/scripts/bench/cli.js "$@"\n' "$HOME" > ~/.local/bin/bench &&
+      chmod 755 ~/.local/bin/bench &&
+      echo "bench installed at $BENCH_SHA"
+
+**F. The preflight (setup step 6).** From the admin account. Every line must be PASS. Its checks are **measured** with stand-ins; on the machine they are **inferred**:
+
+    sudo -iu wl-bench
+    bench preflight
+
+**G. The dataset pin and the download (setup step 7).** The dataset's Hugging Face page gives the commit to pin (40 hex) and the parquet file's SHA256 (**inferred**: check that it is the file `path` names). Record both in `pins.json` (`dataset.revision`, `dataset.sha256`) as a reviewed change. Once that merges, redo E at that commit. Then, as the bench user (**measured** with a stand-in fetch; the real download is **inferred**):
+
+    bench download
+
+**H. The rows and the selection (setup step 8).** As the bench user:
+- Convert the parquet file into `rows.jsonl`. This needs Python and pyarrow on the bench machine, and is **not run here**. Replace PASTE_THE_PINNED_FILE_NAME with the file name `bench download` printed.
+- Run `bench select`. It refuses and prints the rows' canonical sha256. Record that as `selection.rows_sha256` in `pins.json` (a reviewed change).
+- Once that merges, redo E, then run `bench select` again. It writes the manifest. Its images line stays FAIL until J.
+
+The selection is **measured** with fixture rows:
+
+      cd ~/bench/state/evals/held-out/swebench/dataset &&
+        umask 077 &&
+        python3 -I -c 'import json, sys, pyarrow.parquet as pq; [print(json.dumps(r)) for r in pq.read_table(sys.argv[1]).to_pylist()]' PASTE_THE_PINNED_FILE_NAME > rows.jsonl.new &&
+        chmod 600 rows.jsonl.new && mv rows.jsonl.new rows.jsonl
+    bench select
+
+**I. The image digests: blocked.** `image_digests` needs at least 100 pinned digests, including every selected task's. No command collects them yet (step 7, "Collecting the image digests is not built yet"). That needs a decision before J can run.
+
+**J. The task images (setup step 9).** Once the digests are pinned and merged, redo E. Then, as the bench user (**measured** with a stand-in registry; the real lookups are **inferred**), run the command below. After it, `bench select` passes every line:
+
+    bench images
+
+**K. The pulls and the base trees (setup step 10).** As the bench user. This is **measured** with a stand-in docker, and the in-container scripts are **measured** with `sh` on a stand-in `/testbed`. The real pulls and copies are **inferred**:
+
+    bench pull --tasks smoke
+
+**L. The smoke run: not built yet.** It needs the engine's runner seam and the test relay (#701), then `bench run --tasks smoke --spend <usd>`, with `--spend` at most 40 (the smoke run plan, steps 5 and 6).
 
 ## Data and results
 
 Everything lives under `$HOME/bench`, outside every repository and engine state dir. The driver refuses a root inside a git checkout, a credential store or real engine state. Results are private.
 
-- `state/evals/held-out/swebench/`: the dataset copy (`dataset/<sha256>-<name>`, 0600, step 7), the rows (`dataset/rows.jsonl`, step 8), the manifest (`manifest.json`), the image references (`images.json`), the predictions and grades (0700).
+- `state/evals/held-out/swebench/`: the dataset copy (`dataset/<sha256>-<name>`, 0600, step 7), the rows (`dataset/rows.jsonl`, step 8), the manifest (`manifest.json`), the image references (`images.json`), each task's base tree (`trees/<key>/`: `remote.git`, `clone` and `tree.json`, step 10), the predictions and grades (0700).
 - `runs/<run>/<key>/`: each task's clone, local remote and engine state.
 - `runs/<run>/patches/<key>/<label>.diff`: the exported patches (`final`, `attempt-N`, `b0`, `b1`, `bare`).
 - `runs/<run>/sandbox.json`: the two sandbox checks, per attempt, and the confirmation's usage.
