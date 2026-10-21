@@ -220,14 +220,17 @@ test('long words and paths are settled fast: refused, or (a plain shell word no 
 test('a huge directory is read one entry at a time against the budget: the time budget ends the walk mid-directory', () => {
   const p = mkdtempSync(join(tmpdir(), 'flat-'));
   writeFileSync(join(p, 'target'), '');
-  // A symlink costs a stat; listing them all before the budget is looked at took about 480 ms here (#887 review).
-  for (let i = 0; i < 200_000; i++) symlinkSync('target', join(p, `l${i}`));
-  const secrets = new Secrets(['**/.env'], { projectRoot: p, home: join(p, 'no-home') }, { ms: 50 });
-  const started = performance.now();
+  // A symlink costs a stat; listing them all before the budget was looked at ran 698 ms past a 50 ms one (#887 review).
+  const entries = 2_000;
+  for (let i = 0; i < entries; i++) symlinkSync('target', join(p, `l${i}`));
+  // WHY (#887 review, round 6): a clock that moves one step per read, not the runner's, so the bound is exact on any
+  // runner: a budget of 50 steps is spent after at most 50 reads, and the walk reads it every 16 entries.
+  let reads = 0;
+  const secrets = new Secrets(['**/.env'], { projectRoot: p, home: join(p, 'no-home') }, { ms: 50, now: () => reads++ });
   const why = secrets.reached({ kind: 'tree', target: p, filter: null }, p, 'Grep');
-  const ms = performance.now() - started;
   assert.match(why ?? '', /too large to check/);
-  assert.ok(ms < 250, `the walk ran ${Math.round(ms)} ms past a 50 ms budget`);
+  assert.ok(secrets.charged < entries, `the walk read all ${entries} entries before the budget stopped it`);
+  assert.ok(secrets.charged <= 16 * 51, `the walk charged ${secrets.charged} entries, past one 16-entry interval after the deadline`);
 });
 
 test('the time budget runs on a monotonic clock: a wall clock that stands still or steps back never stops it firing', (t) => {

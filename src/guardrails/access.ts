@@ -348,10 +348,13 @@ export class Secrets {
    */
   private seen = 0;
   private readonly deadline: number;
+  /** The clock the budget runs on: the monotonic one, unless a test gives its own (#887 review, round 6). */
+  private readonly now: () => number;
 
   /** One instance per tool call: its budget is the call's. */
-  constructor(globs: string[], private readonly ctx: SecretContext, limits: { ms?: number } = {}) {
-    this.deadline = performance.now() + (limits.ms ?? WALK_MS);
+  constructor(globs: string[], private readonly ctx: SecretContext, limits: { ms?: number; now?: () => number } = {}) {
+    this.now = limits.now ?? (() => performance.now());
+    this.deadline = this.now() + (limits.ms ?? WALK_MS);
     const parse = (g: string) => {
       const p = parseGlob(g, ctx);
       return p ? [p] : [];
@@ -411,7 +414,12 @@ export class Secrets {
 
   /** Whether the call's time budget is spent. */
   private late(): boolean {
-    return performance.now() > this.deadline;
+    return this.now() > this.deadline;
+  }
+
+  /** How many walked entries the call has charged to its budget so far. */
+  get charged(): number {
+    return this.seen;
   }
 
   /** Whether the call's budget is spent, counting one more walked entry. */
