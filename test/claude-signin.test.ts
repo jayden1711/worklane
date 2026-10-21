@@ -264,7 +264,8 @@ test("server, the terminal's way: credentials.sh claude takes the setup token at
   assert.doesNotMatch(bs, /claude setup-token/);
   assert.match(bs, /echo " {3}sudo bash scripts\/setup\/add-project\.sh \$NAME \$GITHUB"/);
   const ap = readFileSync(join(repoRoot, 'scripts', 'setup', 'add-project.sh'), 'utf8');
-  assert.match(ap, /echo "waiting: the agents' Claude login, which only root installs, on this machine: sudo bash \$here\/credentials\.sh \$name claude \(it asks for the token claude setup-token prints, not shown\)/);
+  // The whole line, both routes (#897: the API key's too), the secret never shown; anchored at both ends.
+  assert.match(ap, /^ *echo "waiting: the agents' Claude login, which only root installs, on this machine: sudo bash \$here\/credentials\.sh \$name claude \(it asks for the token claude setup-token prints\), or the same with api-key for claude \(it asks for an Anthropic API key\), neither shown; or sudo -u \$agent -i claude auth login"$/m);
 });
 
 test("claude's login and status get no host-redirect variable (#391): ANTHROPIC_BASE_URL, provider switches and proxies are stripped; the relay's BROWSER kept", () => {

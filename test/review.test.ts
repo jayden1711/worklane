@@ -74,6 +74,7 @@ test("regression: a change to the agents' tool guard (src/hook.ts) is self-modif
 // hidden paths live beside src/hook.ts. Unlocked, a change to any of them widened what the guard allows at L1.
 // The read-only lanes' tools and refusals moved from src/intake/run.ts, src/intake/chat.ts and src/research.ts to the
 // guard's own modules (#785): the guard decides with these now, and doesn't load the others.
+// check-table: never-shrink
 const GUARD_MODULES = [
   'src/held-out-paths.ts', 'src/dashboard-key-paths.ts', 'src/experiments/paths.ts',
   'src/guard/intake.ts', 'src/guard/chat.ts', 'src/guard/research.ts', 'src/contract.ts',
@@ -157,6 +158,7 @@ test('the import reader sees every import form, and reports one it cannot name',
 // the guardrail rules' loader (src/config/load.ts, schema.ts), the chat reply's secret check (src/events/redact.ts) and
 // the live environment the guardrails key on (src/adapters/railway.ts): each could change what the guard allows at L1.
 /** The guard's code (src/hook.ts) and its process entry (src/hook-main.ts, what the installed hook commands run). */
+// check-table: never-shrink
 const GUARD_ENTRIES = ['src/hook.ts', 'src/hook-main.ts'];
 
 // WHY (#785): the tree is what has to be locked, so its size is how much ordinary engine work can never merge on its
@@ -164,6 +166,7 @@ const GUARD_ENTRIES = ['src/hook.ts', 'src/hook-main.ts'];
 // this list is a change to a locked test. Each module is here because the guard decides with it (src/hook.ts, the
 // lanes' rules in src/guard/, the guardrails and their config loader with every config section it validates, the
 // secret scan, the OS adapter) or because one of those imports it.
+// check-table: never-shrink
 const GUARD_TREE = [
   'src/ack-reason.ts', 'src/adapters/railway.ts', 'src/automations/cron.ts', 'src/automations/schema.ts', 'src/backlog/types.ts', 'src/brand.ts',
   'src/check-source.ts', 'src/checkout.ts', 'src/ci-none.ts', 'src/comment-policy.ts', 'src/config/load.ts', 'src/config/schema.ts', 'src/confusables.ts',
@@ -492,6 +495,7 @@ const NOT_PLAIN = /a module loaded by a path that is not a plain string/;
 const LOOSE = /require or createRequire other than called directly with a plain string/;
 const BUILT = "'./managed-' + 'apps.js'";
 /** What the lint must refuse, and why: each a fixture, so none is ever planted in src/ (#771). The file is src/x.ts unless named. */
+// check-table: never-shrink
 export const LOCK_SCOPE_BAD: [string, string, RegExp, string?][] = [
   // PR #765's round-1 review: the module edge.
   ['the escaped name alone in the file, through a namespace', `${NAMESPACE}m.readLock\\u0053cope(a, b);`, MODULE],
@@ -556,6 +560,7 @@ export const LOCK_SCOPE_BAD: [string, string, RegExp, string?][] = [
   ['createRequire passed as an argument', `const m = load(createRequire, ${BUILT});`, LOOSE],
 ];
 /** What it must let through. */
+// check-table: never-grow
 export const LOCK_SCOPE_GOOD: [string, string, string?][] = [
   ['the plain import and two-argument calls', `${IMPORTED}readLockScope(i.name, i.repo.repo);\nconst f = () => readLockScope(a, b).scope;`],
   // Once imported, the function takes the instance and its repo and nothing else, so what a file does with it is no matter.
