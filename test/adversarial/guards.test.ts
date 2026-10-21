@@ -1183,11 +1183,14 @@ function stored(text: string): { where: string; raw: string }[] {
 }
 
 test(`adversarial guards / redact.before-store (${doc('Secrets in event payloads and transcripts are redacted before they are stored')}): no credential shape the redactor knows reaches the event log or a run record`, () => {
-  // Two values of each shape in one string: every match is redacted, not only the first.
+  // Each shape twice: on its own (a short string), and two values of it in one longer string, so every match is
+  // redacted, not only the first. Both forms stay: neither stands in for the other.
+  const kept = (what: string, text: string, secrets: string[]) =>
+    stored(text).flatMap((s) => secrets.flatMap((secret, n) => (s.raw.includes(secret) || s.raw === '(no record written)' ? [`${what}${secrets.length > 1 ? ` (value ${n + 1} of ${secrets.length})` : ''} in ${s.where}`] : [])));
   const second = corpus();
   const left = corpus().flatMap((c, i) => {
     const d = second[i]!;
-    return stored(`${c.text} then ${d.text}`).flatMap((s) => [c.secret, d.secret].flatMap((secret, n) => (s.raw.includes(secret) || s.raw === '(no record written)' ? [`${c.what} (value ${n + 1} of 2) in ${s.where}`] : [])));
+    return [...kept(`${c.what}, alone`, c.text, [c.secret]), ...kept(`${c.what}, twice in one string`, `${c.text} then ${d.text}`, [c.secret, d.secret])];
   });
   assert.deepEqual(left, [], 'secrets stored as they were');
   assert.ok(stored('an ordinary line').every((s) => s.raw.includes('an ordinary line')), 'control: ordinary text is stored as it is');
