@@ -138,10 +138,14 @@ test('gate: docs, config and types-only changes need no run (control)', () => {
   assert.deepEqual([d.auto, d.reasons, d.vacuityRun], [true, [], undefined]);
 });
 
-// Through the PR watch itself (watchPr, then mergeOrWait): the run is made in the pass that decides.
+// Through the PR watch itself (watchPr, then mergeOrWait): one pass starts the run in the background (the PR waits,
+// unannounced), and the pass after it decides.
 
-test('watch: a fix whose repro test calls the fixed code is measured and auto-merges in the same pass (control)', { skip }, async () => {
+test('watch: a fix whose repro test calls the fixed code is measured, then auto-merges on the next pass (control)', { skip }, async () => {
   const t = await openPr({ 'evaluator-verdict': approve() }, { autoMerge: () => true });
+  await green(t);
+  assert.equal(t.f.log.read(0, ['merge.done']).length, 0, 'not before its run');
+  await t.c.idle();
   await green(t);
   const measured = t.f.log.read(0, ['vacuity.measured']).map((e) => e.payload as EventPayload<'vacuity.measured'>);
   // The repro it commits, then the test its done_when names (test/price.test.js, unchanged).
@@ -162,6 +166,9 @@ test('watch: fail closed: a coverage run that fails holds the PR for the owner, 
   // Passes as the task's own checks run it; fails only under the gate's coverage run.
   const t = await openPr({ 'evaluator-verdict': approve() }, { autoMerge: () => true, edit: (cfg) => void (cfg.tests.runner.one = 'node --test --test-reporter=spec {file} && test -z "$NODE_V8_COVERAGE"') });
   await green(t);
+  await t.c.idle();
+  await green(t);
+  await t.c.idle();
   await green(t);
   assert.equal(t.f.log.read(0, ['merge.done']).length, 0, 'not merged');
   const decided = t.f.log.read(0, ['merge.decided']).map((e) => e.payload as EventPayload<'merge.decided'>);

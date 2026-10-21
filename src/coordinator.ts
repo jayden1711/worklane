@@ -186,6 +186,7 @@ export class Coordinator extends AutomationRuns {
     await this.harnessEvalRun;
     await this.expLoop?.idle();
     await this.prBatchIdle();
+    await this.vacuityIdle();
   }
 
   private ciMeter: CiMetrics | null = null;
@@ -276,6 +277,7 @@ export class Coordinator extends AutomationRuns {
       ...(this.inStep ? [`tick step: ${this.inStep}`] : []),
       ...[...this.active.keys()].map((n) => `task #${n}`),
       ...[...this.live.values()].map((l) => `${l.role} run${l.issue !== null ? ` for #${l.issue}` : ''}`),
+      ...[...this.vacuityRuns.keys()].map((pr) => `vacuity coverage run for PR #${pr}`),
       ...(this.poolBusy ? ['worktree pool refill'] : []),
     ];
   }

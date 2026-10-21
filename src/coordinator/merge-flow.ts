@@ -28,7 +28,7 @@ import { instructionEvalReasons, mergeDecision, neverAutoMerge, outsidePlanReaso
 import { deferDelay, deferrable, isBehind, mergeDeferral, mergeMessage, MergePass, mergeRefusal, type Deferral } from '../merge-policy-train.js';
 import { weakeningOf } from '../merge-policy-weakening.js';
 import { VACUITY_UNMEASURED, vacuityCheck, type VacuityCheck } from '../merge-policy-vacuity.js';
-import { touchedAppFiles } from '../vacuity.js';
+import { CoverageUnreadable, touchedAppFiles } from '../vacuity.js';
 import { MainWatch, repoGit, type MainWatchDeps, type Trip } from '../main-watch.js';
 import { carriedHead, mergeInBase, type MergeIn } from '../pr-hygiene.js';
 import { alertTarget, directPushKey, directPushText, ownerMentions } from '../direct-push-alert.js';
@@ -376,18 +376,23 @@ export abstract class MergeFlow extends FixRuns {
     }
     if (!r.ready && r.failed.length) await this.maybeFix(w, pr, r);
     if (!r.ready) return;
-    await this.vacuityBeforeDeciding(w, pr);
+    this.startVacuityRun(w, pr);
     await (batching ? this.batchOrMerge(w, pr) : this.mergeOrWait(w, pr));
   }
 
+  /** The merge gate's coverage runs going now, by PR number: one at a time per PR, never on the coordinator's tick. */
+  protected readonly vacuityRuns = new Map<number, Promise<void>>();
+
   /**
-   * The merge gate's coverage run (#784), in this pass, before the decision or the batch queue reads the policy:
-   * only when it is all that holds the PR at this head. Not under an emergency stop, nor while an agent works on the
-   * issue (its head is about to move); the PR then just isn't decided yet (mergeOrWait).
+   * The merge gate's coverage run (#784), started in the background as the combined check is (it runs the PR's own
+   * code, which may take as long as its command timeout): only when it is all that holds the PR at this head. Not
+   * under an emergency stop, nor while an agent works on the issue (its head is about to move). Meanwhile the PR stays
+   * held by VACUITY_UNMEASURED and mergeOrWait returns before deciding; the run's result is keyed to the head it ran
+   * on, so a head that moves meanwhile is measured afresh.
    */
-  private async vacuityBeforeDeciding(w: EventPayload<'pr.opened'>, pr: PullRequest) {
+  private startVacuityRun(w: EventPayload<'pr.opened'>, pr: PullRequest) {
     const v = this.d.cfg.tests.vacuity;
-    if (!v?.dynamic || !this.d.cfg.tests.runner.one || this.emergencyInForce() || this.active.has(w.issue)) return;
+    if (!v?.dynamic || !this.d.cfg.tests.runner.one || this.emergencyInForce() || this.active.has(w.issue) || this.vacuityRuns.has(w.number)) return;
     let run: VacuityCheck['run'];
     try {
       const d = this.mergeDecisionFor(w.issue, w.number, pr);
@@ -395,7 +400,19 @@ export abstract class MergeFlow extends FixRuns {
     } catch {
       return; // the decision itself fails the same way in mergeOrWait (or the batcher), and holds there
     }
-    if (run) await this.vacuityRun(w, pr, run);
+    if (!run) return;
+    const going = this.vacuityRun(w, pr, run)
+      .catch((e: Error) => void this.emit('coordinator.error', { instance: this.d.instance, where: `vacuity run #${w.number}`, kind: 'error', message: redactString(e.message).slice(0, 500) }))
+      .finally(() => {
+        this.vacuityRuns.delete(w.number);
+        this.prPolled.delete(w.number); // decide on the next pass, not after the poll interval
+      });
+    this.vacuityRuns.set(w.number, going);
+  }
+
+  /** Wait for the coverage runs going now (tests, and a graceful shutdown). */
+  protected async vacuityIdle(): Promise<void> {
+    while (this.vacuityRuns.size) await Promise.all([...this.vacuityRuns.values()]);
   }
 
   /** A PR ready on its fast checks: the merge policy once a batch with this head passed, else the batch queue. */
@@ -563,7 +580,7 @@ export abstract class MergeFlow extends FixRuns {
 
   /**
    * The policy's call on a ready PR at its current head. `vacuityRun`: its tests' coverage run at this head, still to
-   * come (watchPr's vacuityBeforeDeciding makes it when that is all that holds the PR, then the decision is made again).
+   * come (watchPr's startVacuityRun starts it in the background when that is all that holds the PR; the pass after it decides).
    */
   mergeDecisionFor(n: number, number: number, pr: PullRequest): MergeDecision & { vacuityRun?: NonNullable<VacuityCheck['run']> } {
     const review: ReviewConfig = this.d.cfg.review ?? DEFAULT_REVIEW;
@@ -650,8 +667,8 @@ export abstract class MergeFlow extends FixRuns {
       return; // otherwise already waiting for the owner
     }
     const d = this.mergeDecisionFor(n, number, pr);
-    // Nothing holds it but its tests' coverage run at this head, not made this pass (watchPr's vacuityBeforeDeciding
-    // skipped it): not merged, and not sent to the owner either; a later pass measures it and decides (#784).
+    // Nothing holds it but its tests' coverage run at this head, still to come (watchPr's startVacuityRun runs it in
+    // the background): not merged, and not sent to the owner either; the pass after the run decides (#784).
     if (d.reasons.length === 1 && d.reasons[0] === VACUITY_UNMEASURED) return;
     if (d.auto) {
       // The merge train put it off (behind its base under strict protection, or its base moved mid-merge): not before
@@ -1536,10 +1553,12 @@ export abstract class MergeFlow extends FixRuns {
           break;
         }
         if (error === null && !existsSync(cov)) error = 'no coverage was written (runner.one must run the tests in Node for a coverage run)';
+        // The directory and its files are the test's: read as hostile input, bounded, and only fixed text on failure.
         if (error === null) touched = touchedAppFiles(cov, path, run.appPaths);
       }
     } catch (e) {
-      error = (e as Error).message;
+      // CoverageUnreadable's message is fixed text; anything else (a worktree or git failure) is redacted.
+      error = e instanceof CoverageUnreadable ? e.message : redactString((e as Error).message.split('\n')[0] ?? '');
     } finally {
       try {
         removeWorktree(this.wt, name);
