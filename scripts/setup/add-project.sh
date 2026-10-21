@@ -17,8 +17,9 @@
 #                   never echoed or logged. With none (the machine helper, for a dashboard, gives no stdin) the step
 #                   waits (exit 3) for root to install the login (credentials.sh <name> claude): a dashboard never
 #                   takes a Claude credential (issue #711). An Anthropic API key counts as the login too (issue #897):
-#                   done when credentials.yaml names the agent's key file (credentials.sh <name> api-key writes it),
-#                   that file is the agent user's own and open to nobody else, and claude reports an API-key login.
+#                   done when credentials.yaml names the agent's key file where credentials.sh <name> api-key
+#                   installs and writes it, that file is the agent user's own and open to nobody else, the agent's
+#                   own settings name it as their apiKeyHelper, and claude reports an API-key login.
 #   checkout        checkout.sh <name> <owner/repo>; a repo with no config gets auto-config's setup PR (through the App)
 #   policy          the default policy, auto_merge off, $20/day, 2 workers, shown for you to change; made root's (0644,
 #                   the coordinator reads it and never writes it; an earlier install's on a rerun, its content kept)
@@ -167,16 +168,21 @@ alone_app() { echo "sudo $ENGINE_CLI app-manifest $name $repo"; }
 
 # --- claude-token
 done_claude_token() {
-  local f k
+  local f k ah
   f="$(home_of "$agent")/.claude/.credentials.json"
   if [ -f "$f" ] && grep -q '"accessToken"' "$f"; then
     echo "$agent has a Claude login"
     return 0
   fi
-  # Issue #897: or an Anthropic API key (credentials.sh <name> api-key). credentials.yaml names the key file, the file
-  # is the agent user's own and open to nobody else, and claude, as the agent user, reports an API-key login.
+  # Issue #897: or an Anthropic API key (credentials.sh <name> api-key). credentials.yaml names the key file, where
+  # credentials.sh installs it; the file is the agent user's own and open to nobody else; the agent's own settings name
+  # that same file as their apiKeyHelper (#904: the one the runner gives runs, so the login claude reports is that
+  # file's); and claude, as the agent user, reports an API-key login.
   k="$(agent_api_key_path)" || return 1
+  ah="$(home_of "$agent")"
+  agent_key_path_ok "$ah" "$k" || return 1
   agent_key_file_ok "$agent" "$k" || return 1
+  agent_key_helper_ok "$agent" "$ah/.claude/settings.json" "$k" || return 1
   claude_api_key_login_ok "$agent" || return 1
   echo "$agent bills to an Anthropic API key ($k, its own, open to nobody else), and claude reports an API-key login as that user"
 }

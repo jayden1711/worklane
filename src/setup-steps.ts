@@ -16,7 +16,7 @@ import { loadConfig, type Config } from './config/load.js';
 import { hookChecks, type Settings } from './agent-settings.js';
 import { loadFingerprintSets } from './guardrails/context.js';
 import { GIT_HOOK_MARKER } from './install.js';
-import { instanceFilesProblem, instancesDir, loadInstance, loadInstanceCredentials, readPolicy } from './instance.js';
+import { instanceFilesProblem, instancesDir, isInstalledKeyPath, loadInstance, loadInstanceCredentials, readPolicy } from './instance.js';
 import { githubRepoOf } from './managed-apps.js';
 import { INTAKE_FILE, loadIntakeConfig } from './intake/config.js';
 import { MACHINE_HELPER } from './machine.js';
@@ -138,6 +138,8 @@ export const HUB_SETUP_UNIT = `${BRAND.cli}-dashboard-hub-setup.service`;
 /** What a server instance's steps read from it: its credentials and its home. */
 export interface InstanceFacts {
   home: string;
+  /** The agent user's home (instance.yaml run_as.agent_home), when its agents run as their own user. */
+  agentHome?: string | undefined;
   credentials: {
     github: { kind: 'app'; key_path: string } | { kind: 'gh-config-dir'; path: string };
     claude?: { config_dir: string } | undefined;
@@ -1124,6 +1126,9 @@ export const SETUP_STEPS: readonly SetupStep[] = [
       if (seen.kind !== 'hidden') return existsSync(key) ? ok(`agent API key installed (${key})`) : no(`credentials.yaml names ${key}, which isn't there`);
       // WHY (#897): the key is in the agent user's home, which the coordinator user can't see into, as intended. What
       // claude auth status (and its minimal real call) found as that user, as root recorded it, is the real state.
+      // WHY (#904): the record says the agent is signed in, not with which file: only the key's own place counts, never
+      // another file of that home (one missing, or private, which the runner would send to the API as the key).
+      if (!i.agentHome || !isInstalledKeyPath(i.agentHome, key)) return no(`credentials.yaml names ${key}, which is not where credentials.sh <name> api-key installs the key (${i.agentHome ?? "the agent user's home"}/.config/<name>-claude-key/api_key), in a home this user can't see. As root: sudo bash ${k.m.engine}/scripts/setup/credentials.sh ${k.c.instance} api-key`);
       const s = readAccountStatus(k.m.claudeAccountDir);
       const u = s?.users.find((x) => x.instance === k.c.instance && x.kind === 'agent');
       const when = s?.at ? ` at ${s.at}` : '';
@@ -1340,7 +1345,7 @@ function defaultFacts(name: string | null): () => InstanceFacts | { error: strin
     if (!name) return { error: 'no instance: these steps are a server instance\'s' };
     try {
       const i = loadInstance(name, instancesDir());
-      return { home: i.home, credentials: i.credentials as InstanceFacts['credentials'] };
+      return { home: i.home, agentHome: i.runAs?.home, credentials: i.credentials as InstanceFacts['credentials'] };
     } catch (e) {
       return { error: `instance ${name} can't be read here: ${firstLine((e as Error).message)}` };
     }

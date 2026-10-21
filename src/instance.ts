@@ -607,18 +607,42 @@ export function setDiscordToken(file: string, tokenFile: string): void {
 }
 
 /**
+ * Whether a path is where credentials.sh <name> api-key installs an agent's key (#904): `<agent home>/.config/
+ * <instance>-claude-key/api_key`, and nothing else of that home. Any instance name's directory: a rename keeps its old
+ * name (scripts/setup/instance-records.cjs carry moves the agent's home, not the directory's name). As lib.sh's
+ * agent_key_path_ok.
+ */
+export function isInstalledKeyPath(agentHome: string, keyFile: string): boolean {
+  const home = agentHome.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`^${home}/\\.config/[a-z][a-z0-9-]{0,20}-claude-key/api_key$`).test(keyFile);
+}
+
+/** The agent user's home an instance's agents run in (instance.yaml run_as.agent_home), or null when they don't run as their own user. */
+export function instanceAgentHome(instanceName: string, dir = instancesDir()): string | null {
+  const errors: ConfigError[] = [];
+  const inst = readYaml(InstanceFile, join(dir, instanceName, 'instance.yaml'), errors);
+  if (errors.length || !inst) throw new ConfigInvalid(errors);
+  return inst.run_as?.agent_home ?? null;
+}
+
+/**
  * Point credentials.yaml at the agent user's Anthropic API key file (agent_api_key), validated before it is written
  * (0600, renamed into place); its one writer (credentials.sh <name> api-key, as the coordinator user, once root has
  * installed the file and claude reports an API-key login as the agent user). Only the path: the key is never read.
  * The file is the agent user's, in its own home, so this user normally can't see it at all; that is the case it is
  * meant for. Refused: a path apiKeyHelper can't name (src/runner.ts apiKeyHelperCommand) or the schema refuses (not in
- * normal form), no such file, a link or anything but a plain file, and a file this user could read: open to its group
- * or others, or this user's own (the coordinator must never be able to read the key).
+ * normal form), any path but where credentials.sh installs the key in the agent's home (isInstalledKeyPath; #904: the
+ * runner sends that file to the API), an instance with no agent home, no such file, a link or anything but a plain
+ * file, and a file this user could read: open to its group or others, or this user's own (the coordinator must never
+ * be able to read the key).
  */
-export function setAgentApiKey(file: string, keyFile: string): void {
+export function setAgentApiKey(file: string, keyFile: string, agentHome: string | null): void {
   if (!/^\/[A-Za-z0-9._/-]+$/.test(keyFile)) throw new Error(`the key file ${JSON.stringify(keyFile)} must be an absolute path, with letters, digits and . _ - / only (apiKeyHelper names it)`);
   if (!normalAbsolute(keyFile)) throw new Error(`the key file ${keyFile} ${NOT_NORMAL_ABSOLUTE}`);
   if (!existsSync(file)) throw new Error(`no ${file}: the instance's GitHub credential comes first (credentials.sh <name> github-app writes it)`);
+  if (!agentHome) throw new Error("the instance's agents don't run as their own user (instance.yaml has no run_as), so there is no agent home to hold an API key; nothing written");
+  // WHY (#904): any other file, however private to the agent user, the runner would send to the API as the key.
+  if (!isInstalledKeyPath(agentHome, keyFile)) throw new Error(`${keyFile} is not where credentials.sh <name> api-key installs the key (${agentHome}/.config/<name>-claude-key/api_key); nothing written`);
   let st;
   try {
     st = lstatSync(keyFile);

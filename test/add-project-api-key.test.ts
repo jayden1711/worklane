@@ -9,6 +9,7 @@ import { spawnSync } from 'node:child_process';
 import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { isInstalledKeyPath } from '../src/instance.js';
 import { RUNTIME_LOGINS } from '../src/runner.js';
 import { repoRoot } from './helpers.js';
 
@@ -53,6 +54,8 @@ sudo_regex_ok() { :; }
 own_policy() { touch "$T/owned-$1"; }
 policy_root_ok() { [ -e "$T/owned-$1" ]; }
 POLICY_ROOT_DIR="$T/policy-root"
+# #902's list of instances new to the machine (unused before it lands): into the temp dir, never /var/lib.
+ADD_PROJECT_NEW="$T/add-project-new" ADD_PROJECT_NEW_UID=${process.getuid?.() ?? 0}
 SRV_ROOT="$T/srv" ENGINE_CLI="$T/bin/worklane" MACHINE_HELPER="$T/helper" MACHINE_SUDOERS="$T/sudoers-machine" HUB_UNIT="$T/hub.service" ADD_PROJECT_LOCK="$T/lock"
 SETUP_POLL_SECONDS=0 SETUP_WAIT_SECONDS=0
 `,
@@ -87,13 +90,22 @@ printf '[Service]\\nExecStart=/usr/local/bin/worklane dashboard --hub %s --servi
   mkdirSync(join(T, 'homes', 'wl-dash', '.local', 'state', 'worklane', 'dashboard-hub'), { recursive: true });
   writeFileSync(join(T, 'homes', 'wl-dash', '.local', 'state', 'worklane', 'dashboard-hub', 'dashboard-token'), 't');
 
-  const keyFile = join(T, 'homes', agent, '.config', `${name}-claude-key`, 'api_key');
-  /** What credentials.sh <name> api-key leaves: the key file (0400, in a 0700 dir), its line in credentials.yaml, and claude's answer. */
-  const keyed = (o: { mode?: number; line?: string | null; auth?: object | null } = {}) => {
-    mkdirSync(dirname(keyFile), { recursive: true, mode: 0o700 });
-    writeFileSync(keyFile, KEY);
-    chmodSync(keyFile, o.mode ?? 0o400);
-    if (o.line !== null) writeFileSync(creds, `${readFileSync(creds, 'utf8')}${o.line ?? `agent_api_key: ${keyFile}`}\n`);
+  const agentHome = join(T, 'homes', agent);
+  const keyFile = join(agentHome, '.config', `${name}-claude-key`, 'api_key');
+  /**
+   * What credentials.sh <name> api-key leaves: the key file (0400, in a 0700 dir), its line in credentials.yaml, the
+   * agent's own settings.json apiKeyHelper (`cat -- <helper>`, default the key file; null: no settings), and claude's answer.
+   */
+  const keyed = (o: { mode?: number; line?: string | null; helper?: string | null; auth?: object | null; file?: string } = {}) => {
+    const file = o.file ?? keyFile;
+    mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
+    writeFileSync(file, KEY);
+    chmodSync(file, o.mode ?? 0o400);
+    if (o.line !== null) writeFileSync(creds, `${readFileSync(creds, 'utf8')}${o.line ?? `agent_api_key: ${file}`}\n`);
+    if (o.helper !== null) {
+      mkdirSync(join(agentHome, '.claude'), { recursive: true, mode: 0o700 });
+      writeFileSync(join(agentHome, '.claude', 'settings.json'), `${JSON.stringify({ theme: 'dark', apiKeyHelper: `cat -- ${o.helper ?? file}` }, null, 2)}\n`, { mode: 0o600 });
+    }
     const auth = o.auth === undefined ? { loggedIn: true, authMethod: 'api_key_helper', apiProvider: 'firstParty' } : o.auth;
     if (auth) writeFileSync(join(T, `claude-status-${agent}`), JSON.stringify(auth, null, 2));
   };
@@ -104,7 +116,15 @@ printf '[Service]\\nExecStart=/usr/local/bin/worklane dashboard --hub %s --servi
   };
   const calls = () => (existsSync(join(T, 'calls')) ? readFileSync(join(T, 'calls'), 'utf8') : '');
   const hostCalls = () => (existsSync(join(T, 'host-calls')) ? readFileSync(join(T, 'host-calls'), 'utf8') : '');
-  return { T, s, run, keyed, keyFile, creds, calls, hostCalls, agent, coord };
+  /** Another file of the agent user's own, private (0600), not empty: the kind a forged agent_api_key would name. */
+  const privateFile = (rel: string) => {
+    const f = join(agentHome, rel);
+    mkdirSync(dirname(f), { recursive: true, mode: 0o700 });
+    writeFileSync(f, 'not a key: a private file of the agent user\n', { mode: 0o600 });
+    chmodSync(f, 0o600);
+    return f;
+  };
+  return { T, s, run, keyed, keyFile, creds, calls, hostCalls, agent, coord, agentHome, privateFile };
 }
 
 const tokenStep = (events: Step[]) => events.filter((e) => e.step === 'claude-token').at(-1)!;
@@ -144,6 +164,23 @@ test('issue #897: anything short of a working API-key setup still waits for root
       renameSync(m.creds, `${m.creds}.real`);
       symlinkSync(`${m.creds}.real`, m.creds);
     },
+    // #904 round 3: the key file credentials.yaml names, the one the agent's settings name and the one claude was
+    // checked with must be one, and the one credentials.sh installs: never another private file of the agent's.
+    "credentials.yaml names another private file of the agent's (~/.ssh/id_ed25519, 0600); its settings still name the key": (m) => {
+      const f = m.privateFile('.ssh/id_ed25519');
+      m.keyed({ line: `agent_api_key: ${f}`, helper: m.keyFile });
+    },
+    "credentials.yaml and the agent's settings both name ~/.ssh/id_ed25519 (0600)": (m) => {
+      const f = m.privateFile('.ssh/id_ed25519');
+      m.keyed({ file: f, mode: 0o600 });
+    },
+    "credentials.yaml names the agent's own settings.json": (m) => {
+      m.keyed({ line: `agent_api_key: ${join(m.agentHome, '.claude', 'settings.json')}`, helper: join(m.agentHome, '.claude', 'settings.json') });
+      chmodSync(join(m.agentHome, '.claude', 'settings.json'), 0o600);
+    },
+    "the key's place, but in another user's home": (m) => m.keyed({ file: join(m.T, 'homes', 'wl-other-agent', '.config', 'alpha-claude-key', 'api_key') }),
+    "the agent's settings name another key helper": (m) => m.keyed({ helper: join(m.agentHome, '.config', 'beta-claude-key', 'api_key') }),
+    "the agent has no settings.json": (m) => m.keyed({ helper: null }),
     'claude reports a subscription login': (m) => m.keyed({ auth: { loggedIn: true, authMethod: 'claude.ai' } }),
     'claude reports no login': (m) => m.keyed({ auth: { loggedIn: false, authMethod: 'none' } }),
     'claude gives no answer': (m) => m.keyed({ auth: null }),
@@ -159,6 +196,16 @@ test('issue #897: anything short of a working API-key setup still waits for root
   }
 });
 
+test("#904 round 3: an instance renamed since its key was installed (the key's directory keeps the old name's) still passes; the agent's settings are read as the agent user", { skip: !posix }, () => {
+  const m = machine();
+  m.keyed({ file: join(m.agentHome, '.config', 'old-name-claude-key', 'api_key') });
+  const r = m.run();
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(tokenStep(r.events).state, 'done', tokenStep(r.events).detail);
+  assert.equal((m.calls().match(/run_as wl-alpha-agent\n/g) ?? []).length, 2, 'the key file and the settings, each checked as the agent user');
+  assert.equal(m.hostCalls(), '', 'no host tool was reached');
+});
+
 test('issue #897: the waiting message names both routes, the API key included, whole within the 400 characters a step line keeps, for the longest instance name', { skip: !posix }, () => {
   const name = 'abcdefghijklmnopqrstu';
   const m = machine(name);
@@ -172,6 +219,30 @@ test('issue #897: the waiting message names both routes, the API key included, w
     `the agents' Claude login, which only root installs, on this machine: sudo bash ${m.s}/credentials.sh ${name} claude (it asks for the token claude setup-token prints), or the same with api-key for claude (it asks for an Anthropic API key), neither shown; or sudo -u wl-${name}-agent -i claude auth login`,
   );
   assert.ok(m.s.length >= '/opt/worklane/current/scripts/setup'.length, m.s);
+});
+
+test("#904 round 3: lib.sh's agent_key_path_ok and the engine's isInstalledKeyPath take exactly the same paths", { skip: !posix }, () => {
+  const home = '/var/lib/agents/wl-alpha-agent';
+  const paths = [
+    `${home}/.config/alpha-claude-key/api_key`,
+    `${home}/.config/old-name-claude-key/api_key`,
+    `${home}/.config/a-claude-key/api_key`,
+    `${home}/.ssh/id_ed25519`,
+    `${home}/.claude/settings.json`,
+    `${home}/.config/alpha-claude-key/other`,
+    `${home}/.config/Alpha-claude-key/api_key`,
+    `${home}/.config/alpha-claude-key/api_key/x`,
+    `${home}/.config/-claude-key/api_key`,
+    `${home}/.config/x/alpha-claude-key/api_key`,
+    `${home}x/.config/alpha-claude-key/api_key`,
+    `/var/lib/agents/wl-beta-agent/.config/alpha-claude-key/api_key`,
+    `${home}/.config/abcdefghijklmnopqrstuv-claude-key/api_key`,
+  ];
+  const script = 'source "$1"; shift; h="$1"; shift; for p in "$@"; do if agent_key_path_ok "$h" "$p"; then echo yes; else echo no; fi; done';
+  const r = spawnSync('bash', ['-c', script, '_', join(setupDir, 'lib.sh'), home, ...paths], { encoding: 'utf8', env: { PATH: '/usr/bin:/bin' } });
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(r.stdout.trim().split('\n'), paths.map((p) => (isInstalledKeyPath(home, p) ? 'yes' : 'no')));
+  assert.deepEqual(paths.map((p) => isInstalledKeyPath(home, p)), [true, true, true, false, false, false, false, false, false, false, false, false, false]);
 });
 
 test("issue #897: lib.sh's API-key logins are the api_key runtime's (src/runner.ts RUNTIME_LOGINS)", { skip: !posix }, () => {

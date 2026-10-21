@@ -757,6 +757,18 @@ claude_api_key_login_ok() {
   out="$(claude_status_json "$1")"
   printf '%s' "$out" | grep -q '"loggedIn": *true' && printf '%s' "$out" | grep -Eq "\"authMethod\": *\"($CLAUDE_API_KEY_LOGINS)\""
 }
+# Whether a path is where credentials.sh <name> api-key installs an agent's key (#904): <agent home>/.config/
+# <instance>-claude-key/api_key, and nothing else of that home (never ~/.ssh/id_ed25519 or the like, which the runner
+# would send to the API as the key). Any instance name's directory: a rename keeps its old name (instance-records.cjs
+# carry moves the agent's home, not the directory's name). As src/instance.ts isInstalledKeyPath.
+#   agent_key_path_ok <agent home> <path>
+agent_key_path_ok() { [[ "$2" =~ ^"$1"/\.config/[a-z][a-z0-9-]{0,20}-claude-key/api_key$ ]]; }
+# Whether the agent user's own Claude settings name exactly that key file as their apiKeyHelper (`cat -- <path>`, as
+# credentials.sh writes it), read as that user (#904): so the login claude reports is the one the runner gives runs
+# (it passes `cat -- <agent_api_key>`). The settings only, never the key.
+#   agent_key_helper_ok <agent user> <settings file> <path>
+AGENT_KEY_HELPER_JS='const fs=require("fs");let s=null;try{s=JSON.parse(fs.readFileSync(process.argv[1],"utf8"))}catch{}process.exit(s&&typeof s==="object"&&s.apiKeyHelper===process.argv[2]?0:1)'
+agent_key_helper_ok() { run_as "$1" '"$1" -e "$2" "$3" "$4"' "$(command -v node)" "$AGENT_KEY_HELPER_JS" "$2" "cat -- $3"; }
 # Whether a path is this agent user's own API key file, as that user finds it (issue #897): a plain file (not a link),
 # its own, not empty, and open to nobody else (no group or other read or write bit). Checked as that user, never as
 # root, since the path comes from credentials.yaml, which the coordinator user writes. The key is never read.
