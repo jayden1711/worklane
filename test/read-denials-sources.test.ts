@@ -129,5 +129,7 @@ test('#890: a checkout under the worktree root that git no longer lists still ge
   for (const n of ['.env', '.env.local', '.env.example']) writeFileSync(join(orphan, n), 'x\n');
   const p = paths(runReadDenials({ cwd: dir, home: '/h' }));
   for (const n of ['.env', '.env.local']) assert.ok(await hides(p, join(orphan, n)), `${n} hidden: ${JSON.stringify(p)}`);
-  assert.equal(await hides(p, join(orphan, '.env.example')), false, 'the exception stays readable');
+  // Since round 10 (the owner's decision), another task checkout is hidden whole: its exception too.
+  assert.ok(p.includes(orphan), JSON.stringify(p));
+  assert.equal(await hides(p, join(orphan, '.env.example')), true, 'hidden with the rest of the checkout');
 });

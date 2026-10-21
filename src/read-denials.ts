@@ -60,6 +60,46 @@ function capPerCheckout(entries: Set<string>, own: string[], checkouts: string[]
   return null;
 }
 
+/**
+ * Every other task checkout of the repository, each to be hidden from the run whole, as one entry (the owner's
+ * decision, 2026-10-21): each linked worktree git lists, and each directory directly in a place task checkouts are
+ * made (`places`: the project's worktree root and the engine's own, unless the place holds a `keep` path), a checkout
+ * git no longer lists among them. Never one that is, or holds, the run's own checkout (`own`) or a path in `keep` (the
+ * main checkout, the common git directory and its stores), compared as written and by real path.
+ * WHY: a pattern worked out in another checkout costs mounts there, and a glob is expanded again by the sandbox at
+ * each command: 3000 files a `**` glob matched in one worktree pushed every other run past bwrap's argument limit
+ * (B5glob, measured by the round-8 delta check). One mount per checkout bounds that, and no run reads another task's
+ * checkout at all. A checkout made after the start is covered only by the globs over `places` (see runReadDenials).
+ */
+function siblingCheckouts(linked: string[], places: string[], own: string[], keep: string[]): string[] | { error: string } {
+  const forms = (p: string) => [...new Set([resolve(p), realOrNull(p) ?? resolve(p)])];
+  const holds = (paths: string[]) => {
+    const all = paths.flatMap(forms);
+    return (c: string) => forms(c).some((f) => all.some((k) => k === f || k.startsWith(`${f === '/' ? '' : f}/`)));
+  };
+  const holdsKept = holds([...own, ...keep]);
+  const holdsMain = holds(keep);
+  const found = new Set<string>();
+  for (const l of linked) found.add(resolve(l));
+  for (const place of places) {
+    // A place that holds the main checkout or the run's own (a worktree root of ".." in the project's config) holds
+    // more than task checkouts (the instance's task files and bundles beside the repository): only the worktrees git
+    // lists there are hidden.
+    if (holdsMain(place)) continue;
+    let entries;
+    try {
+      entries = readdirSync(place, { withFileTypes: true });
+    } catch (e) {
+      const code = (e as NodeJS.ErrnoException).code;
+      if (code === 'ENOENT' || code === 'ENOTDIR') continue;
+      return { error: `${place}, where task checkouts are made, can't be listed (${code ?? firstLine(e)}), so the other checkouts there can't be hidden` };
+    }
+    // Directories only, never followed: a link there could lead anywhere, the main checkout among them.
+    for (const e of entries) if (e.isDirectory()) found.add(join(place, e.name));
+  }
+  return [...found].filter((c) => c !== '/' && !holdsKept(c)).sort();
+}
+
 const GLOB = /[*?]/;
 /** Glob syntax to the sandbox, a plain character to a guardrail path: a pattern holding one can't be passed as written. */
 const SANDBOX_ONLY_GLOB = /[[\]]/;
@@ -166,6 +206,8 @@ interface Repository {
   mainUnknown: boolean;
   linked: string[];
   stores: string[];
+  /** The common git directory; null outside a repository. */
+  common: string | null;
 }
 
 /**
@@ -193,7 +235,7 @@ export function gitStores(start: string, withStores = true, repoCommon?: string)
       lstatSync(dotGit);
       break;
     } catch {
-      if (dirname(dir) === dir) return { checkouts: [], main: null, mainUnknown: false, linked: [], stores: [] };
+      if (dirname(dir) === dir) return { checkouts: [], main: null, mainUnknown: false, linked: [], stores: [], common: null };
       dir = dirname(dir);
       dotGit = join(dir, '.git');
     }
@@ -225,7 +267,7 @@ export function gitStores(start: string, withStores = true, repoCommon?: string)
       const g = optional(join(common, 'worktrees', n, 'gitdir'))?.trim();
       if (g) linked.push(dirname(resolve(common, 'worktrees', n, g)));
     }
-    const repo = { checkouts: [...new Set([dir, ...(main ? [main] : []), ...linked])], main, mainUnknown, linked };
+    const repo = { checkouts: [...new Set([dir, ...(main ? [main] : []), ...linked])], main, mainUnknown, linked, common };
     if (!withStores) return { ...repo, stores: [] };
     const borrowed = alternates(common);
     if ('error' in borrowed) return borrowed;
@@ -581,13 +623,19 @@ export function runReadDenials(o: { cwd: string; home: string | undefined; taskF
   // hook, which applies the config's exceptions to them too).
   const sources = [...new Map([...configs.map((c) => c.guardrails.secret_paths), ...extra, hidden].map((s) => [JSON.stringify(s), s])).values()].filter((s) => s.length);
   const worktreeRoots = [...new Set(configs.map((c) => c.tests.worktree.root))];
+  const base = main ?? root;
+  const taskPlaces = [...new Set([...worktreeRoots.map((w) => resolve(base, w)), join(projectStateDir(base), 'worktrees')])];
+  // Every other task checkout is hidden whole (the owner's decision, round 10), always: see siblingCheckouts.
+  const siblings = siblingCheckouts(repo.linked, taskPlaces, [root, ...repo.checkouts.slice(0, 1)], [...(main ? [main] : []), ...repo.stores, ...(repo.common ? [repo.common] : []), ...(o.taskFile ? [o.taskFile] : [])]);
+  if ('error' in siblings) return siblings;
   const all = sources.flat();
-  if (!all.length) return { paths: [] };
+  if (!all.length) return { paths: siblings.map(asEntry) };
   // A bracket the project or the task wrote is a character to the hook and a class to the sandbox: no entry means
   // the same to both. One in a path the runner resolved is written as "?" instead (asEntry).
   const written = all.find((p) => !p.startsWith('!') && SANDBOX_ONLY_GLOB.test(p));
   if (written) return { error: `${written} has "[" or "]", which the sandbox reads as a pattern; it can't be denied as written` };
-  const roots = [...new Set([root, ...(main ? [main] : []), ...repo.checkouts])];
+  // Patterns are worked out in the run's own checkout and the main checkout only: every other checkout is hidden whole.
+  const roots = [...new Set([root, ...repo.checkouts.slice(0, 1), ...(main ? [main] : [])])];
   const anchored = (ps: string[], under = roots) => {
     const out: string[] = [];
     for (const p of ps) {
@@ -608,9 +656,10 @@ export function runReadDenials(o: { cwd: string; home: string | undefined; taskF
   // time. Not for a command already running when the worktree appears: its mounts were fixed when it was wrapped.
   // A pattern an exception overlaps is listed at the start instead, in every directory under each parent (a checkout
   // git no longer lists among them), the exception left out: over a parent, a glob would hide the exception in every
-  // worktree, the run's own among them.
-  const base = main ?? root;
-  const parents = new Set([...worktreeRoots.map((w) => resolve(base, w)), join(projectStateDir(base), 'worktrees'), ...repo.linked.map((l) => dirname(l))]);
+  // worktree, the run's own among them. What this lists inside a checkout hidden whole (siblingCheckouts) is dropped
+  // below; the globs stay, for a checkout made after the start, and the sandbox mounts nothing beneath a directory it
+  // already hides (measured, round 10: 3000 matches under a hidden sibling add no mount).
+  const parents = new Set([...taskPlaces, ...repo.linked.map((l) => dirname(l))]);
   parents.delete('/');
   const under = [...parents].map((d) => join(d, '*'));
   const relative = (p: string) => !(p === '~' || p.startsWith('~/') || isAbsolute(p));
@@ -618,6 +667,10 @@ export function runReadDenials(o: { cwd: string; home: string | undefined; taskF
     const added = addSource(patterns);
     if (added) return added;
   }
+  // What a pattern listed inside a checkout hidden whole is covered by that one entry, and counts for nothing.
+  const hiddenWhole = siblings.map(asEntry);
+  for (const e of [...entries]) if (hiddenWhole.some((s) => e === s || e.startsWith(`${s}/`))) entries.delete(e);
+  for (const s of hiddenWhole) entries.add(s);
   const capped = capPerCheckout(entries, [root, ...(main ? [main] : [])], roots, [...parents]);
   if (capped) return capped;
   if (hidden.length) for (const s of repo.stores) out.add(s);
