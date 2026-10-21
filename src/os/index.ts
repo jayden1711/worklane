@@ -4,7 +4,7 @@ import { execFileSync, spawn } from './child-process.js';
 import { chmodSync, chownSync, closeSync, constants as fsConstants, existsSync, fstatSync, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, readSync, realpathSync, renameSync, rmSync, statSync, statfsSync, writeFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { testRunSign } from './system-paths.js';
-import { availableParallelism, homedir, loadavg, userInfo } from 'node:os';
+import { availableParallelism, homedir, hostname, loadavg, userInfo } from 'node:os';
 import { basename, delimiter, dirname, join, posix as posixPath, resolve as resolvePath, sep } from 'node:path';
 import { BRAND } from '../brand.js';
 import { ownEnv, type OwnEnv } from './own-env.js';
@@ -667,6 +667,24 @@ export function pidAlive(pid: number): boolean {
   } catch (e) {
     return (e as NodeJS.ErrnoException).code === 'EPERM';
   }
+}
+
+/**
+ * Where this process's pid means something: its pid namespace (Linux: /proc/self/ns/pid), this boot (Linux:
+ * /proc/sys/kernel/random/boot_id) and the host name. A pid recorded under one place can be checked with pidAlive only
+ * from the same place. Null where it can't be read, or this OS has no such answer: a caller that must know refuses
+ * (#918 round 6: a lock taken in another pid namespace looked dead from here, and was taken over while its holder ran).
+ */
+export function processPlace(): { pidns: string | null; boot: string | null; host: string } {
+  const read = (f: () => string): string | null => {
+    try {
+      return f().trim() || null;
+    } catch {
+      return null;
+    }
+  };
+  if (process.platform !== 'linux') return { pidns: null, boot: null, host: hostname() };
+  return { pidns: read(() => readlinkSync('/proc/self/ns/pid')), boot: read(() => readFileSync('/proc/sys/kernel/random/boot_id', 'utf8')), host: hostname() };
 }
 
 /** processIdentity of a process that answers signal 0 but whose identity can't be read: running, as far as anyone can tell. */

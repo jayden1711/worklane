@@ -65,7 +65,8 @@ function values(args: string[], name: string): string[] {
   for (let i = args.indexOf(name); i >= 0; i = args.indexOf(name)) {
     const v = args[i + 1];
     args.splice(i, 2);
-    if (v === undefined || v.startsWith('--')) throw new ReceiptError(`${name} needs a value`);
+    // A usage error (exit 2), as a missing option is (#918 round 6, 3b).
+    if (v === undefined || v.startsWith('--')) throw new Usage(`${name} needs a value`);
     out.push(v);
   }
   return out;

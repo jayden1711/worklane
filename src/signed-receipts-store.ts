@@ -6,7 +6,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'nod
 import { BRAND } from './brand.js';
 import { openReadOnly } from './events/read-only.js';
 import { tryLock } from './locks.js';
-import { notOwnerOnlyDir, replaceOwnerOnly, syncToDisk } from './os/index.js';
+import { notOwnerOnlyDir, processIdentity, processPlace, replaceOwnerOnly, syncToDisk, UNKNOWN_IDENTITY } from './os/index.js';
 import { canonicalJson, chainStateOf, ChainStateSchema, keySigner, ReceiptError, RECEIPT_EVENTS, rotateChain, signEvents, type ChainState, type Envelope, type ReceiptEvent, type ReceiptSigner } from './signed-receipts.js';
 
 /**
@@ -39,7 +39,7 @@ const STATE_MAX_BYTES = 64 * 1024;
  * opened without following a link and without waiting on a FIFO, and checked through that descriptor, so what is
  * checked is what is read. `what` names it in a refusal.
  */
-function readRegular(file: string, max: number, what: string): string {
+function readRegular(file: string, max: number, what: string, oneName = false): string {
   // Where the OS has no O_NOFOLLOW (native Windows), this check is the one that refuses a link.
   if (lstatSync(file).isSymbolicLink()) throw new ReceiptError(`${what} ${file} is a link: only a regular file is read`);
   let fd: number;
@@ -53,6 +53,7 @@ function readRegular(file: string, max: number, what: string): string {
     const st = fstatSync(fd);
     if (!st.isFile()) throw new ReceiptError(`${what} ${file} is not a regular file (a FIFO, device or directory): only a regular file is read`);
     if (st.size > max) throw new ReceiptError(`${what} ${file} is ${st.size} bytes, over the ${max} read here`);
+    if (oneName && st.nlink !== 1) throw new ReceiptError(`${what} ${file} has ${st.nlink} names (a hard link): refused`);
     const buf = Buffer.alloc(st.size + 1);
     let n = 0;
     while (n < buf.length) {
@@ -87,11 +88,23 @@ export function readReceiptFiles(path: string): unknown[] {
     budget -= Buffer.byteLength(text, 'utf8');
     return text.split('\n').flatMap((line, i) => {
       if (!line.trim()) return [];
+      let value: unknown;
       try {
-        return [JSON.parse(line) as unknown];
+        value = JSON.parse(line) as unknown;
       } catch {
         throw new ReceiptError(`${file}:${i + 1} is not JSON`);
       }
+      // WHY (#918 round 6, row 8): a line is exactly the canonical JSON of what it holds, as the signer writes it. A
+      // duplicate key (JSON.parse keeps the last; another reader may keep the first), other spacing or key order is
+      // refused, so no reader can read a line two ways.
+      let canonical: string | null = null;
+      try {
+        canonical = canonicalJson(value);
+      } catch {
+        canonical = null;
+      }
+      if (canonical !== line) throw new ReceiptError(`${file}:${i + 1} is not one receipt in canonical JSON (a duplicate key, other spacing or key order): refused`);
+      return [value];
     });
   });
 }
@@ -102,11 +115,15 @@ function writeReceipts(path: string, envelopes: readonly Envelope[]): void {
 }
 
 /**
- * Where the signer keeps its chain state, checked: in a directory only this user can change (notOwnerOnlyDir), and
- * not the receipts' directory (whoever may write that may not reach the state; #918 round 4).
+ * Where the signer keeps its chain state, checked, as the one path every later step uses: the state's directory
+ * resolved ONCE to its real path, joined with the file's name. Checked:
+ * - the directory as given is only this user's (notOwnerOnlyDir): not a link itself, and no directory on the way
+ *   (nor any link there) can be changed by another user (ownedPath), so no one else can redirect it;
+ * - its real directory is only this user's too, and isn't the receipts' (compared by real path), nor inside `--out`.
+ * WHY (#918 round 6, row 1): round 5 checked the real path but read and wrote the path as given, so a directory link
+ * in a directory others could write, flipped after the check, made the signer read a set-back state.
  */
-function statePlace(state: string, out: string): void {
-  // Compared by real path (#918 round 5: `--out` spelled through a link to the state's directory was accepted).
+function statePlace(state: string, out: string): string {
   const real = (p: string) => {
     try {
       return realpathSync(p);
@@ -114,21 +131,29 @@ function statePlace(state: string, out: string): void {
       return resolve(p);
     }
   };
-  const stateDir = real(dirname(resolve(state)));
+  const given = dirname(resolve(state));
+  const stateDir = real(given);
   const outDir = real(dirname(resolve(out)));
   const rel = relative(join(outDir, basename(out)), join(stateDir, basename(state)));
   const inOut = rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel);
   if (stateDir === outDir || inOut) {
     throw new ReceiptError(`the signer's chain state must be kept separate from the receipts: ${state} is in the directory of ${out}`);
   }
-  const why = notOwnerOnlyDir(stateDir);
-  if (why) throw new ReceiptError(`the signer's chain state goes in a directory only the signer can write: ${why}`);
+  // The path as given, then the real one. notOwnerOnlyDir refuses a link as the directory itself, and its ownedPath a
+  // path any other user can redirect (on Linux, any link on the way: a link's own mode reads 0777). And from here on
+  // only the real path is used, so a link flipped after this check changes nothing read or written.
+  const why = notOwnerOnlyDir(given) ?? notOwnerOnlyDir(stateDir);
+  if (why) throw new ReceiptError(`the signer's chain state goes in a directory only the signer can write, reached through no link: ${why}`);
+  return join(stateDir, basename(state));
 }
 
-/** The signer's chain state file's text, or null when there is none. Refused: a link, or a file that isn't one. */
+/**
+ * The signer's chain state file's text, or null when there is none. Refused: a link, a file that isn't one, or one
+ * with a second name (a hard link would be a second path to it, and a second lock: #918 round 6, row 5).
+ */
 function readStateText(path: string): string | null {
   if (!lstatSync(path, { throwIfNoEntry: false })) return null;
-  return readRegular(path, STATE_MAX_BYTES, "the signer's chain state");
+  return readRegular(path, STATE_MAX_BYTES, "the signer's chain state", true);
 }
 
 /** The signer's chain state from its file's text (readStateText), or null when it has none. */
@@ -149,28 +174,82 @@ function parseState(path: string, text: string | null): ChainState | null {
  * The signer's chain state, written BEFORE the receipts it names (#918 round 5; see signLog), and flushed to disk
  * before they are written (syncToDisk): without that, a power loss could keep the new receipts and an older state.
  */
-function writeState(path: string, state: ChainState): void {
+function writeState(path: string, state: ChainState, before: string | null): void {
+  // The state it replaces is kept beside it, `<state>.prev` (owner-only), for the owner's recovery after a rotation
+  // whose receipts write failed (#918 round 6, 3c). The signer itself never reads it.
+  if (before !== null) replaceOwnerOnly(`${path}.prev`, before);
   replaceOwnerOnly(path, `${canonicalJson(state)}\n`);
   syncToDisk(path);
 }
 
+/** The signer's lock: one per state directory (#918 round 6, row 5: one per state path let a hard-linked alias in). */
+const SIGNER_LOCK = '.receipts-signer.lock';
+
+/**
+ * Called by tryLock when it judged the lock at `lock` stale (its pid answers no signal from here), before it takes
+ * it over: refuses unless the lock was taken in this very place (the same pid namespace, boot and host, each known).
+ * WHY (#918 round 6, row 2): a holder in another pid namespace, or on another host sharing the directory, looks dead
+ * from here while it runs, and was taken over. A lock that can't be read is never taken over either. Fails closed:
+ * such a lock stays until the owner removes it, once no signer runs. tryLock itself is unchanged for its other callers.
+ */
+function samePlace(lock: string, here: ReturnType<typeof processPlace>): void {
+  let theirs: unknown;
+  try {
+    if (!lstatSync(lock, { throwIfNoEntry: false })) return; // gone meanwhile: tryLock competes for it afresh
+    theirs = JSON.parse((JSON.parse(readRegular(lock, 4096, 'the signer lock')) as { owner?: string }).owner ?? '');
+  } catch {
+    theirs = null;
+  }
+  const t = theirs as Partial<ReturnType<typeof processPlace>> | null;
+  const known = here.pidns && here.boot;
+  if (!t || !known || t.pidns !== here.pidns || t.boot !== here.boot || t.host !== here.host) {
+    throw new ReceiptError(`the signer lock ${lock} names a process this one can't check (another pid namespace, boot or host, or unreadable): never taken over. Remove it by hand once no signer runs; nothing was signed`);
+  }
+}
+
 /**
  * Run `fn` as the only signer of the chain state at `state` (#918 round 5, row 2: two `sign` runs at once, with the
- * log edited between their reads, each signed its own version of an event). An exclusive lock beside the state, in
- * its owner-only directory (tryLock: created whole or not at all; one whose process is gone is taken over), is held
- * from the first read to the last write; one already held refuses. And the state must still be what `fn` read just
- * before it writes (`unchanged`): a writer that took no lock is refused too.
+ * log edited between their reads, each signed its own version of an event). An exclusive lock in the state's
+ * owner-only directory (SIGNER_LOCK, by tryLock: created whole or not at all) is held from the first read to the last
+ * write; one already held refuses. A lock whose pid is gone is taken over only when it was taken in the same pid
+ * namespace, boot and host (samePlace). A pid reused since makes a dead holder look alive: refused, and the owner
+ * removes the lock. And the state must still be what `fn` read just before it writes (`unchanged`): a writer that
+ * took no lock is refused too.
  */
-function asOnlySigner<T>(state: string, fn: (own: ChainState | null, unchanged: () => void) => T): T {
-  const got = tryLock(`${state}.lock`, `${BRAND.cli} receipts`);
-  if (!('lock' in got)) throw new ReceiptError(`another sign or rotate holds the signer's lock (${state}.lock${got.holder ? `, pid ${got.holder.pid}` : ''}); nothing was signed`);
+function asOnlySigner<T>(state: string, fn: (own: ChainState | null, unchanged: () => void, save: (next: ChainState) => void) => T): T {
+  const lock = join(dirname(state), SIGNER_LOCK);
+  // A FIFO or anything else at the lock's name would hang or fool the lock's reader: refused before it reads.
+  const there = lstatSync(lock, { throwIfNoEntry: false });
+  if (there && !there.isFile()) throw new ReceiptError(`${lock} is not a regular file: remove it by hand once no signer runs; nothing was signed`);
+  const place = processPlace();
+  const got = tryLock(lock, JSON.stringify({ by: `${BRAND.cli} receipts`, ...place, identity: processIdentity(process.pid) }), { inspected: () => samePlace(lock, place) });
+  if (!('lock' in got)) throw new ReceiptError(`${holderGone(got.holder, place) ? `the signer lock ${lock} names pid ${got.holder?.pid}, which now belongs to another process (a pid reused since its holder died): remove the lock by hand once no signer runs` : `another sign or rotate holds the signer's lock (${lock}${got.holder ? `, pid ${got.holder.pid}` : ''})`}; nothing was signed`);
   try {
     const text = readStateText(state);
-    return fn(parseState(state, text), () => {
+    const unchanged = () => {
       if (readStateText(state) !== text) throw new ReceiptError(`the signer's chain state ${state} changed while this run signed (another writer); nothing was written`);
-    });
+    };
+    return fn(parseState(state, text), unchanged, (next) => writeState(state, next, text));
   } finally {
     got.lock.release();
+  }
+}
+
+/**
+ * Whether a lock whose pid answers signal 0 was taken by a process that is gone: taken in this very place, recording
+ * the holder's identity (processIdentity: boot and start time), which that pid no longer has. Still refused, never
+ * taken over (tryLock, shared, takes over only a pid that answers no signal), but named for what it is, so the owner
+ * knows the lock is safe to remove (#918 round 6: a reused pid makes a dead holder look alive).
+ */
+function holderGone(holder: { pid: number; owner: string } | null, here: ReturnType<typeof processPlace>): boolean {
+  if (!holder) return false;
+  try {
+    const t = JSON.parse(holder.owner) as Partial<ReturnType<typeof processPlace>> & { identity?: string | null };
+    if (!here.pidns || !here.boot || t.pidns !== here.pidns || t.boot !== here.boot || t.host !== here.host || !t.identity || t.identity === UNKNOWN_IDENTITY) return false;
+    const now = processIdentity(holder.pid);
+    return now !== UNKNOWN_IDENTITY && now !== t.identity;
+  } catch {
+    return false;
   }
 }
 
@@ -212,8 +291,8 @@ export function loadPublicKey(path: string): KeyObject {
  * them byte for byte; otherwise it refuses.
  */
 export function signLog(o: { log: string; out: string; state: string; genesis?: boolean; signer: ReceiptSigner }): { added: number; count: number; head: string | null } {
-  statePlace(o.state, o.out);
-  return asOnlySigner(o.state, (own, unchanged) => {
+  const statePath = statePlace(o.state, o.out);
+  return asOnlySigner(statePath, (own, unchanged, save) => {
     if (own && o.genesis) throw new ReceiptError(`the signer already has a chain (its state is ${o.state}): --genesis never starts over it; nothing was signed`);
     if (!own && !o.genesis) throw new ReceiptError(`the signer has no chain state at ${o.state}: a new chain starts only with --genesis (root or the owner only); nothing was signed`);
     if (o.genesis && lstatSync(o.out, { throwIfNoEntry: false })) {
@@ -222,7 +301,7 @@ export function signLog(o: { log: string; out: string; state: string; genesis?: 
     const existing = readReceiptFiles(o.out);
     const r = signEvents(existing, readReceiptEvents(o.log), o.signer, { from: own ?? 'genesis' });
     unchanged();
-    if (!own || canonicalJson(own) !== canonicalJson(r.state)) writeState(o.state, r.state);
+    if (!own || canonicalJson(own) !== canonicalJson(r.state)) save(r.state);
     if (r.added) writeReceipts(o.out, r.envelopes);
     return { added: r.added, count: r.envelopes.length, head: r.head };
   });
@@ -235,13 +314,13 @@ export function signLog(o: { log: string; out: string; state: string; genesis?: 
  * owner restores the receipts or the state.
  */
 export function rotateFile(o: { out: string; state: string; signer: ReceiptSigner; next: KeyObject }): { count: number; head: string | null } {
-  statePlace(o.state, o.out);
-  return asOnlySigner(o.state, (own, unchanged) => {
+  const statePath = statePlace(o.state, o.out);
+  return asOnlySigner(statePath, (own, unchanged, save) => {
     if (!own) throw new ReceiptError(`the signer has no chain state at ${o.state}: there is no chain of its own to rotate`);
     const envelopes = rotateChain(readReceiptFiles(o.out), o.signer, o.next, { from: own });
     const state = chainStateOf(envelopes, own.start);
     unchanged();
-    writeState(o.state, state);
+    save(state);
     writeReceipts(o.out, envelopes);
     return { count: envelopes.length, head: state.head };
   });

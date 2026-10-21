@@ -15,7 +15,7 @@ import { generateKeyPairSync, type KeyObject } from 'node:crypto';
 import { chmodSync, existsSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createRequire, syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { EventLog } from '../src/events/log.js';
 import { canonicalJson, keySigner, receiptId, verifyChain, type Envelope, type ReceiptSigner } from '../src/signed-receipts.js';
@@ -306,4 +306,7 @@ test('the state is on disk (fsync) before the receipts it names are written, so 
   );
   const synced = seen.indexOf(`fsync ${state}`);
   assert.ok(synced >= 0 && synced > seen.indexOf(`publish ${state}`) && synced < seen.indexOf(`publish ${out}`), seen.join('; '));
+  // And its directory, so the rename that put it there is on disk too (round 6 advisory).
+  const dirSynced = seen.indexOf(`fsync ${dirname(state)}`);
+  assert.ok(dirSynced > seen.indexOf(`publish ${state}`) && dirSynced < seen.indexOf(`publish ${out}`), seen.join('; '));
 });
