@@ -144,6 +144,23 @@ test('tool guard writes: a link-making command is read however its options are s
   }
 });
 
+test('tool guard writes: a link-making command is judged in every order it may read its words, and where its links are made', () => {
+  const { root } = project();
+  for (const command of [
+    'POSIXLY_CORRECT=1 ln -s x -t ../.claude lk0',
+    'POSIXLY_CORRECT=1 ln -s x --suffix ../.claude lk0',
+    'env POSIXLY_CORRECT=1 ln -s x -t ../.claude lk0 && echo x > lk0/.claude/settings.json',
+    'export POSIXLY_CORRECT=1; ln -s x -t ../.claude lk0',
+    'POSIXLY_CORRECT=1 cp -s src/a.ts -t .claude/settings.json lk0',
+    `POSIXLY_CORRECT=1 cp -s ${root}/src/a.ts -t ${root}/.claude/settings.json ${root}/lk0 && echo x > ${root}/lk0/settings.json`,
+    'cp -s src/a.ts --target-directory=.claude',
+    `ln -s src/a.ts --target-directory=${BRAND.configDir}`,
+  ]) assert.equal(bash(root, command).decision, 'deny', command);
+  for (const command of ['ln -s src/a.ts b.ts', 'ln -s ../src/a.ts docs/', 'cp -s src/a.ts docs/', `ln -s ../../src/a.ts ${BRAND.configDir}/roles/`]) {
+    assert.equal(bash(root, command).decision, 'none', command);
+  }
+});
+
 test('tool guard writes: plain writes, links to plain files, reads and people sessions are unchanged', () => {
   const { root, out } = project();
   symlinkSync('src', join(root, 'code'));

@@ -154,7 +154,8 @@ function writeTargets(call: ToolCall, commands: SimpleCommand[]): string[] {
 
 /** A command's long options and whether each takes a value: the next word or after `=` (required), or only after `=`. */
 type LongOptions = Readonly<Record<string, 'none' | 'optional' | 'required'>>;
-/** GNU cp's long options (coreutils 9). */
+/** GNU cp's long options (coreutils 9). One added lets a word through that is refused today, so the list never grows on its own. */
+// check-table: never-grow
 const CP_LONG: LongOptions = {
   archive: 'none', 'attributes-only': 'none', backup: 'optional', context: 'optional', 'copy-contents': 'none', debug: 'none', dereference: 'none',
   force: 'none', help: 'none', interactive: 'none', 'keep-directory-symlink': 'none', link: 'none', 'no-clobber': 'none', 'no-dereference': 'none',
@@ -162,13 +163,15 @@ const CP_LONG: LongOptions = {
   reflink: 'optional', 'remove-destination': 'none', sparse: 'required', 'strip-trailing-slashes': 'none', suffix: 'required', 'symbolic-link': 'none',
   'target-directory': 'required', update: 'optional', verbose: 'none', version: 'none',
 };
-/** GNU ln's long options (coreutils 9). */
+/** GNU ln's long options (coreutils 9). As CP_LONG: never grows on its own. */
+// check-table: never-grow
 const LN_LONG: LongOptions = {
   backup: 'optional', directory: 'none', force: 'none', help: 'none', interactive: 'none', logical: 'none', 'no-dereference': 'none',
   'no-target-directory': 'none', physical: 'none', relative: 'none', suffix: 'required', symbolic: 'none', 'target-directory': 'required',
   verbose: 'none', version: 'none',
 };
 /** cp's and ln's short options that take a value: the rest of their cluster, or the next word. */
+// check-table: never-shrink
 const SHORT_WITH_VALUE = new Set(['S', 't']);
 
 interface ReadArgs {
@@ -180,14 +183,19 @@ interface ReadArgs {
 
 /**
  * A command's arguments as GNU getopt_long reads them: a long option by its name or any prefix that names only it,
- * short options clustered, options among the operands, and everything after `--` an operand.
+ * short options clustered, and everything after `--` an operand. Options among the operands, by default; with
+ * `stopAtOperand`, the way it reads them when told to stop at the first operand (every later word an operand).
  */
-function readArgs(args: string[], longs: LongOptions): ReadArgs {
+function readArgs(args: string[], longs: LongOptions, stopAtOperand = false): ReadArgs {
   const out: ReadArgs = { opts: [], operands: [] };
   for (let i = 0; i < args.length; i++) {
     const a = args[i]!;
     if (a === '--') {
       out.operands.push(...args.slice(i + 1));
+      break;
+    }
+    if (stopAtOperand && !(a.startsWith('-') && a.length > 1)) {
+      out.operands.push(...args.slice(i));
       break;
     }
     if (a.startsWith('--')) {
@@ -214,22 +222,38 @@ function readArgs(args: string[], longs: LongOptions): ReadArgs {
   return out;
 }
 
+/** One reading of a link-making command: what the new links lead to, and the folder or name they are made at. */
+interface LinkReading {
+  sources: string[];
+  dest: string | null;
+}
+
+/** A cp or ln reading's links, or null when that reading makes none (a cp without a link option). */
+function linksOf(base: string, read: ReadArgs): LinkReading | null {
+  if (base === 'cp' && !read.opts.some((o) => ['link', 'symbolic-link', 'l', 's'].includes(o.name))) return null;
+  const target = read.opts.findLast((o) => o.name === 'target-directory' || o.name === 't');
+  const { operands } = read;
+  if (target) return { sources: operands, dest: target.value ?? null };
+  return operands.length < 2 ? { sources: operands, dest: null } : { sources: operands.slice(0, -1), dest: operands.at(-1)! };
+}
+
 /**
  * What a command that makes a link (ln, link, cp with a link option, rsync --link-dest) links to, and where the new
- * links go; `unreadable` when a cp or ln option can't be read (refused: it might make one); null for any other command.
+ * links go, in every way the command may read its words; `unreadable` when a cp or ln option can't be read (refused:
+ * it might make one); null for any other command.
  */
-function linkMade(c: SimpleCommand): { sources: string[]; dest: string | null } | { unreadable: string } | null {
+function linkMade(c: SimpleCommand): { readings: LinkReading[] } | { unreadable: string } | null {
   const [cmd, ...args] = c.argv;
   const base = basename(cmd ?? '');
-  if (base === 'link') return { sources: args.filter((a) => !a.startsWith('-')), dest: null };
+  if (base === 'link') return { readings: [{ sources: args.filter((a) => !a.startsWith('-')), dest: null }] };
   if (base === 'cp' || base === 'ln') {
-    const read = readArgs(args, base === 'cp' ? CP_LONG : LN_LONG);
+    const longs = base === 'cp' ? CP_LONG : LN_LONG;
+    const read = readArgs(args, longs);
     if (read.unknown !== undefined) return { unreadable: read.unknown };
-    if (base === 'cp' && !read.opts.some((o) => ['link', 'symbolic-link', 'l', 's'].includes(o.name))) return null;
-    const target = read.opts.findLast((o) => o.name === 'target-directory' || o.name === 't');
-    const { operands } = read;
-    if (target) return { sources: operands, dest: target.value ?? null };
-    return operands.length < 2 ? { sources: operands, dest: null } : { sources: operands.slice(0, -1), dest: operands.at(-1)! };
+    // WHY (#972): whether the command reads options past its first operand is set by its environment, which the
+    // guard can't see; so a word that looks like an option after one is judged both ways.
+    const readings = [linksOf(base, read), linksOf(base, readArgs(args, longs, true))].filter((r): r is LinkReading => r !== null);
+    return readings.length ? { readings } : null;
   }
   if (base === 'rsync') {
     // Exact, and any prefix that can only mean it (`--link-`, `--link-d`...), for an rsync that takes one.
@@ -243,7 +267,7 @@ function linkMade(c: SimpleCommand): { sources: string[]; dest: string | null } 
       if (value !== undefined) sources.push(value);
     });
     const operands = args.filter((a) => !a.startsWith('-'));
-    return sources.length ? { sources, dest: operands.at(-1) ?? null } : null;
+    return sources.length ? { readings: [{ sources, dest: operands.at(-1) ?? null }] } : null;
   }
   return null;
 }
@@ -376,9 +400,10 @@ export function evaluate(call: ToolCall, cfg: GuardrailsConfig, ctx: EvalContext
       if (n.unresolved) unsure ??= { decision: 'deny', rule: 'protected-path', reason: `${clip(t)}: the guard can't tell which file this write reaches, so it can't check it isn't harness config; write to a plain path in the project` };
       else if (n.reached.some(hardLinked)) unsure ??= { decision: 'deny', rule: 'protected-path', reason: `${clip(t)} has more than one hard link, so a write to it changes a file the guard can't check by this name; agents write only files with one name` };
     }
-    // A link that leads to harness config: whatever later writes through it, an agent never makes one. A link's own
-    // text may be read from the folder the link is made in, so each source is judged from the call's directory and
-    // from the destination's (as a folder, and the folder it is in).
+    // A link that leads to harness config, or that is made inside it: whatever later writes through it, an agent never
+    // makes one. A link's own text may be read from the folder the link is made in, so each source is judged from the
+    // call's directory and from the destination's (as a folder, and the folder it is in). Every reading of the
+    // command's words is judged (linkMade).
     for (const c of commands) {
       const link = linkMade(c);
       if (!link) continue;
@@ -386,13 +411,23 @@ export function evaluate(call: ToolCall, cfg: GuardrailsConfig, ctx: EvalContext
         unsure ??= { decision: 'deny', rule: 'protected-path', reason: `${basename(c.argv[0] ?? '')}: the guard can't read the option ${clip(link.unreadable)}, so it can't check what the command links or writes; spell each option out in full` };
         continue;
       }
-      const dest = link.dest === null ? null : resolve(call.cwd, link.dest);
-      const bases = [...new Set([resolve(call.cwd), ...(dest === null ? [] : [dest, dirname(dest)])])];
-      for (const o of link.sources) {
-        for (const base of bases) {
-          const n = paths().names(o, base);
-          if (n.rels.some((r) => isProtectedPath(r, cfg))) return { decision: 'deny', rule: 'protected-path', reason: `${clip(o)} is harness config; agents never make a link to it` };
-          if (n.unresolved) unsure ??= { decision: 'deny', rule: 'protected-path', reason: `${clip(o)}: the guard can't tell which file a link to this leads to, so it can't check it isn't harness config` };
+      for (const reading of link.readings) {
+        const dest = reading.dest === null ? null : resolve(call.cwd, reading.dest);
+        const bases = [...new Set([resolve(call.cwd), ...(dest === null ? [] : [dest, dirname(dest)])])];
+        for (const o of reading.sources) {
+          for (const base of bases) {
+            const n = paths().names(o, base);
+            if (n.rels.some((r) => isProtectedPath(r, cfg))) return { decision: 'deny', rule: 'protected-path', reason: `${clip(o)} is harness config; agents never make a link to it` };
+            if (n.unresolved) unsure ??= { decision: 'deny', rule: 'protected-path', reason: `${clip(o)}: the guard can't tell which file a link to this leads to, so it can't check it isn't harness config` };
+          }
+        }
+        // Where the new links are made: the destination itself, or each source's name in it (in the call's directory
+        // when there is none).
+        const made = reading.dest === null ? reading.sources.map((s) => basename(s)) : [reading.dest, ...reading.sources.map((s) => `${reading.dest!.replace(/\/+$/, '')}/${basename(s)}`)];
+        for (const m of made) {
+          const n = paths().names(m, call.cwd);
+          if (n.rels.some((r) => isProtectedPath(r, cfg))) return { decision: 'deny', rule: 'protected-path', reason: `${clip(m)} is harness config; agents never make a link in it` };
+          if (n.unresolved) unsure ??= { decision: 'deny', rule: 'protected-path', reason: `${clip(m)}: the guard can't tell where this link would be made, so it can't check it isn't harness config` };
         }
       }
     }
