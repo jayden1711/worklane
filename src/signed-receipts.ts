@@ -27,7 +27,17 @@ const KeyRef = z.strictObject({ keyid: hex64, spki: z.string().min(1) });
  * value it found. Every field not listed is ATTESTED: the coordinator's claim as its log recorded it. Slice 1's
  * signer checks nothing itself, so the list is empty; slice 3 fills it without a format change.
  */
-const Verified = z.array(z.strictObject({ field: z.string().min(1).max(100), how: z.string().min(1).max(200), found: z.union([z.string(), z.number().int(), z.boolean(), z.null(), z.array(z.string())]) }));
+/** The most bytes one `verified` entry's `found` may take in canonical JSON (a check-run list fits many times over). */
+const FOUND_MAX = 64 * 1024;
+/** Whether `v` is a canonical JSON value (canonicalJson: integers only, plain objects) within FOUND_MAX bytes. */
+function foundFits(v: unknown): boolean {
+  try {
+    return Buffer.byteLength(canonicalJson(v), 'utf8') <= FOUND_MAX;
+  } catch {
+    return false;
+  }
+}
+const Verified = z.array(z.strictObject({ field: z.string().min(1).max(100), how: z.string().min(1).max(200), found: z.unknown().refine(foundFits, `any canonical JSON value of at most ${FOUND_MAX} bytes`) }));
 /**
  * The event a receipt stands for: the actor the log names, the event's id there, what the signer verified itself,
  * and `log.digest`: a running SHA-256 over every event in the log up to this one (logDigest), as the signer read it.
@@ -95,10 +105,14 @@ export interface ReceiptEvent {
   raw?: string;
 }
 
-/** The log's running digest after event `e`: SHA-256 over the digest before it and the event as stored. */
+/**
+ * The log's running digest after event `e`: SHA-256 over the canonical JSON of [the digest before it, the event's id,
+ * time, type, actor and payload as stored]. INVARIANT: an unambiguous encoding (each field a JSON value, so no byte can
+ * move from one field to the next and keep the digest: #918 round 3 measured that with newline-joined fields).
+ */
 export function logDigest(before: string, e: ReceiptEvent): string {
   return createHash('sha256')
-    .update(`${before}\n${e.id}\n${e.ts}\n${e.type}\n${e.actor}\n${e.raw ?? JSON.stringify(e.payload)}`)
+    .update(canonicalJson([before, e.id, e.ts, e.type, e.actor, e.raw ?? JSON.stringify(e.payload ?? null)]), 'utf8')
     .digest('hex');
 }
 
@@ -108,8 +122,13 @@ export interface FieldCheck {
   found: unknown;
   /** The statement's own value at `field`, when it has one. */
   claimed?: unknown;
-  /** match / mismatch: the signer's value against the statement's; derived: a fact the statement has no field for. */
-  result: 'match' | 'mismatch' | 'derived';
+  /**
+   * - match / mismatch: the signer's value against the coordinator's claim (only a mismatch is flagged: verify exits 3);
+   * - unrecorded: the claim is null, which means the deciding engine didn't record it (an event logged before #717
+   *   step 1). The coordinator claimed nothing, so the signer's value is the only one: never a mismatch;
+   * - derived: a fact the statement has no field for (e.g. `result.tree`).
+   */
+  result: 'match' | 'mismatch' | 'unrecorded' | 'derived';
 }
 
 /** What the signer verified in a receipt, each against the coordinator's claim; [] when it verified nothing. */
@@ -119,6 +138,7 @@ export function fieldChecks(s: Statement): FieldCheck[] {
     let at: unknown = s;
     for (const k of v.field.split('.')) at = at !== null && typeof at === 'object' && Object.hasOwn(at, k) ? (at as Record<string, unknown>)[k] : undefined;
     if (at === undefined) return { ...v, result: 'derived' as const };
+    if (at === null) return { ...v, claimed: null, result: 'unrecorded' as const };
     return { ...v, claimed: at, result: canonicalJson(at) === canonicalJson(v.found) ? ('match' as const) : ('mismatch' as const) };
   });
 }

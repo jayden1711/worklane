@@ -180,7 +180,10 @@ function verify(args: string[]): number {
   else {
     const fields = [...new Set(checks.map((c) => `${c.field} (${c.how})`))];
     console.log(`verified independently by the signer: ${checks.length} field checks, of ${fields.join(', ')}; every other field is attested (the coordinator's claim as its log recorded it)`);
+    const unrecorded = checks.filter((c) => c.result === 'unrecorded').length;
+    if (unrecorded) console.log(`of those, ${unrecorded} the deciding engine didn't record (null): the signer's value is the only one, not a mismatch`);
   }
+  console.log("a verified list is the key holder's word: verify checks who signed, not which program did the checking");
   for (const c of flagged) console.log(`FLAGGED: receipt ${c.receipt}: ${c.field}: the coordinator claimed ${JSON.stringify(c.claimed).slice(0, 100)}, the signer found ${JSON.stringify(c.found).slice(0, 100)} (${c.how})`);
   console.log('A receipt proves what the log said and in what order, signed by the chain key; never that an attested field was true.');
   return flagged.length ? EXIT_FLAGGED : 0;

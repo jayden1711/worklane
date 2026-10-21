@@ -25,7 +25,7 @@ worklane receipts verify receipts/ --key customer-receipts.pub
   - the **head**.
 - **Exit 1:** `FAILED: receipt N of M: <why>`. One was changed, reordered, inserted or dropped, or a key you didn't give signed it.
 - **Exit 2:** a usage error. Passing a private key as `--key` counts as one, and so does an `--anchor` that isn't a receipt id (64 lowercase hex characters). An empty `--anchor` is refused rather than skipped, so a script with an unset variable fails loudly.
-- **Exit 3:** every receipt is authentic, but the signer flagged a field. It found something different from what the coordinator claimed, and prints `FLAGGED: receipt N: <field>: the coordinator claimed X, the signer found Y`.
+- **Exit 3:** every receipt is authentic, but the signer flagged a field. It found something different from what the coordinator claimed, and prints `FLAGGED: receipt N: <field>: the coordinator claimed X, the signer found Y`. A field the engine left `null` that the signer filled in is not a flag.
 
 **Keep the head.** Next time, pass it with `--anchor <head>`. A chain that lost receipts at its end still looks whole on its own, and only the anchor shows they're gone.
 
@@ -37,7 +37,15 @@ A receipt field is one of two kinds, and `verify` tells you which:
 - **Verified:** the signer checked it itself, from git or GitHub with its own read-only access. Each receipt lists those checks.
 - **Attested:** only the coordinator's claim, signed as the log recorded it.
 
-In slice 1 nothing is verified: `verify` prints `verified independently by the signer: none`. The table in [design.md §5a](design.md#5a-signed-receipts-717) lists, field by field, what the installed signer will check and how.
+Each verified field is reported in one of these ways:
+- **Match:** the signer's value equals the coordinator's claim.
+- **Mismatch:** the signer found something else. It is flagged, and `verify` exits 3.
+- **Unrecorded:** the claim is `null`. The deciding engine didn't record that field, so the signer's value is the only one. This is not a flag.
+- **Derived:** a fact the receipt has no field for, such as the merge commit's tree.
+
+**A `verified` list is the key holder's word.** `verify` checks which key signed, not which program did the checking. Trust a `verified` list only as far as you trust that the key is held by the customer's separate signer user, and nothing else.
+
+In slice 1 nothing is verified: `verify` prints `verified independently by the signer: none`. Any key holder can run `sign`, which can include the coordinator, so the chain fields themselves (`seq`, `prev`, `log.digest`) are only as independent as whoever ran it. The table in [design.md §5a](design.md#5a-signed-receipts-717) lists, field by field, what the installed signer will check and how.
 
 ## What a receipt proves, and what it never does
 

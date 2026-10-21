@@ -181,8 +181,15 @@ A signed receipt is a merge decision or merge result, signed and chained so that
   - `decision`: auto, level, reasons and why.
 - **`merge.result`:** pr, head, merged, the merge `commit`, `reconciled`, `why`, and `decision`, which is the id of the chain's latest decision receipt for that head. A held PR may never merge, so the result is its own receipt rather than a field of the decision.
 - **Both merge kinds also carry:**
-  - **`verified`:** what the signer checked itself, as `{field, how, found}`. `field` is a dotted path in the statement, or a fact only the signer derives, such as `result.tree`. A field not listed is attested.
-  - **`log.digest`:** a running SHA-256 over every event in the log up to this one, as the signer read it.
+  - **`verified`:** what the signer checked itself, as `{field, how, found}`.
+    - `field` is a dotted path in the statement, or a fact only the signer derives, such as `result.tree`.
+    - `found` is any canonical-JSON value up to 64 KiB, for example check runs as `[{name, id, conclusion}]`.
+    - A field not listed is attested.
+    - Each check reads as one of:
+      - **match** or **mismatch** against the coordinator's claim; only a mismatch is flagged;
+      - **unrecorded:** the claim is `null`, so the deciding engine didn't record it and the signer's value is the only one. Never a mismatch, so events logged before step 1 don't flag;
+      - **derived:** the statement has no such field.
+  - **`log.digest`:** a running SHA-256 over every event in the log up to this one, as the signer read it. Each step hashes the canonical JSON of `[digest before, id, ts, type, actor, payload as stored]`. That encoding is unambiguous: no byte can move from one field to the next and keep the digest.
 - **`null` means the deciding engine didn't record it.** It's never filled in later from somewhere else.
 
 **Envelope.** Each statement is signed in a DSSE envelope (in-toto's format, reused rather than invented):
@@ -219,7 +226,7 @@ This catches any receipt that was changed, reordered, inserted, or dropped from 
   - **A duplicate or a reorder:** event ids must rise strictly, and an id seen twice is refused (built).
   - **A gap or a fork in the log:** `log.digest` at each receipt is the running hash of every event up to it. A log that no longer hashes to what was signed (an event edited, dropped, or inserted before a signed one) is refused, and nothing more is signed (built).
   - It never signs on top of a receipts file that doesn't verify (built).
-- **It re-derives facts itself where it can,** with a read-only identity: its own clone or fetch, and a read-only GitHub token. It records each check in `verified`, and flags any mismatch with the coordinator's claim. A flagged receipt is still signed: the evidence is the point. `verify` exits 3 on a flag. Slice 3 decides which mismatches refuse to sign instead.
+- **It re-derives facts itself where it can,** with a read-only identity: its own clone or fetch, and a read-only GitHub token. It records each check in `verified`, and flags any mismatch with the coordinator's claim. A null claim is *unrecorded*, not a mismatch. A flagged receipt is still signed: the evidence is the point. `verify` exits 3 on a flag. Slice 3 decides which mismatches refuse to sign instead.
   - The merge commit and its tree, from git.
   - The policy commit: main's tip at the decision's time, from git's reflog of the fetched ref (as far as the fetches cover).
   - The PR head and its changed files, from git and GitHub.
@@ -229,7 +236,7 @@ This catches any receipt that was changed, reordered, inserted, or dropped from 
 
 | Field | Slice 1 | Slice 3 signer (planned) |
 |---|---|---|
-| `seq`, `prev`, `log.digest`, `event` order | **Verifies** (its own chain and its own read of the log) | Verifies |
+| `seq`, `prev`, `log.digest`, `event` order | Chain data computed and checked by the signing tool. In slice 1 that tool can be run by the coordinator itself, so this is not independent of it, and no claim is checked | Verifies, as the separate signer user: its own chain and its own read of the log |
 | `instance`, `at`, `engine.version` | Attests (the log's actor, clock and `coordinator.started`) | Attests: nothing outside the coordinator knows them |
 | `inputs.issue`, `inputs.pr` | Attests | Verifies the PR exists and links the issue (GitHub), else attests |
 | `inputs.head` | Attests | Verifies against GitHub's PR head at signing time (it can have moved: then flagged, not proven) |
@@ -241,6 +248,8 @@ This catches any receipt that was changed, reordered, inserted, or dropped from 
 | `merge.result` `why` | Attests | Attests |
 
 `verify` prints how many fields the signer verified itself, and that every other field is attested. A receipt never implies more than was checked.
+
+**A `verified` list is only the key holder's word.** `verify` checks which key signed a receipt, not which program did the checking. A key holder other than the installed signer user can write any `verified` list it likes, and in slice 1 any key holder can run `sign`.
 
 **Format readiness for slice 3.** Slice 1's chain is the signer's own chain: `seq`, `prev` over the previous payload it signed, `chain.started`, `key.rotated`, and `log.digest`. `verified` exists from v1, empty in slice 1. So slice 3 fills fields without a format change (inferred from the table above). Two things slice 3 may still want, each a v2 if it does:
 - a refusal recorded in the chain, rather than only reported by the signer;
@@ -257,7 +266,7 @@ This catches any receipt that was changed, reordered, inserted, or dropped from 
   - 0: verified.
   - 1: failed; it names the first bad receipt.
   - 2: a usage error, including a private key passed as `--key`, or an `--anchor` that isn't a receipt id (an empty one included: an anchor given is never skipped).
-  - 3: authentic, but the signer flagged a field it found different from the coordinator's claim.
+  - 3: authentic, but the signer flagged a field it found different from the coordinator's claim. An *unrecorded* (null) claim the signer filled is not a flag.
 - **Output:**
   - the head, for the auditor to keep as the next anchor;
   - what the signer verified, against what it only attests.

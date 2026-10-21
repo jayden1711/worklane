@@ -5,7 +5,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { generateKeyPairSync, type KeyObject } from 'node:crypto';
-import { copyFileSync, existsSync, lstatSync, mkdtempSync, readFileSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, lstatSync, mkdtempSync, readdirSync, readFileSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { BRAND } from '../src/brand.js';
@@ -359,7 +359,9 @@ test('keygen creates each key file itself: never through a planted link, never o
   for (const f of ['c.key', 'c.pub']) {
     assert.ok(lstatSync(join(dir, f)).isFile());
     assert.equal(statSync(join(dir, f)).mode & 0o777, 0o600, f);
+    assert.equal(statSync(join(dir, f)).nlink, 1, `${f}: its staging name is gone`);
   }
+  assert.deepEqual(readdirSync(dir).filter((f) => f.startsWith('.')), [], 'no staging or temp file is left behind');
 });
 
 test('the signer refuses a log that changed under receipts it already signed: an event edited, dropped or inserted (#918 round 2)', () => {
@@ -388,17 +390,45 @@ test('verify shows what the signer verified against what it only attests, and fl
   const ev = (id: number, type: string, payload: unknown): ReceiptEvent => ({ id, ts: `2026-10-20T00:00:0${id}.000Z`, type, actor: 'inst', payload });
   const envs = signEvents([], [ev(1, 'coordinator.started', { instance: 'inst', pid: 1, version: '1' }), ev(2, 'merge.decided', { issue: 1, number: 2, head: H1, auto: true, reasons: [] })], k.signer).envelopes;
   const st = statementOf(envs[1]!) as Record<string, unknown>;
-  const checked = sealWith(k, { ...st, verified: [{ field: 'inputs.head', how: 'git', found: H1 }, { field: 'policy.commit', how: 'git', found: M1 }, { field: 'result.tree', how: 'git', found: H2 }] });
-  const chain = [envs[0]!, checked];
-  const r = verifyChain(chain, { keys: [k.pub] });
-  assert.ok(r.ok, JSON.stringify(r));
-  assert.deepEqual(fieldChecks(r.statements[1]!).map((c) => [c.field, c.result]), [['inputs.head', 'match'], ['policy.commit', 'mismatch'], ['result.tree', 'derived']]);
   const dir = mkdtempSync(join(tmpdir(), 'rvf-'));
   const pub = join(dir, 'k.pub');
   writeFileSync(pub, k.pub.export({ type: 'spki', format: 'pem' }).toString());
-  writeFileSync(join(dir, 'r.jsonl'), `${chain.map((e) => canonicalJson(e)).join('\n')}\n`);
-  const out = receiptsCli('verify', join(dir, 'r.jsonl'), '--key', pub);
-  assert.equal(out.status, 3, out.stderr);
-  assert.match(out.stdout, /verified independently by the signer: 3 field checks/);
-  assert.match(out.stdout, /FLAGGED: receipt 2: policy\.commit: the coordinator claimed null, the signer found "c{40}" \(git\)/);
+  const verifyWith = (verified: unknown[]) => {
+    const chain = [envs[0]!, sealWith(k, { ...st, verified })];
+    writeFileSync(join(dir, 'r.jsonl'), `${chain.map((e) => canonicalJson(e)).join('\n')}\n`);
+    return { r: verifyChain(chain, { keys: [k.pub] }), out: receiptsCli('verify', join(dir, 'r.jsonl'), '--key', pub) };
+  };
+  // A null claim (the engine didn't record it) is "unrecorded": the signer's value is the only one, never a mismatch.
+  // `found` holds any canonical JSON value: check runs as [{name, id, conclusion}] fit slice 1's format (#918 round 3).
+  const runs = [{ name: 'ci', id: 5, conclusion: 'success' }];
+  const filled = verifyWith([
+    { field: 'inputs.head', how: 'git', found: H1 },
+    { field: 'policy.commit', how: 'git', found: M1 },
+    { field: 'inputs.check_runs', how: 'github', found: runs },
+    { field: 'result.tree', how: 'git', found: H2 },
+  ]);
+  assert.ok(filled.r.ok, JSON.stringify(filled.r));
+  assert.deepEqual(fieldChecks(filled.r.statements[1]!).map((c) => [c.field, c.result]), [['inputs.head', 'match'], ['policy.commit', 'unrecorded'], ['inputs.check_runs', 'unrecorded'], ['result.tree', 'derived']]);
+  assert.equal(filled.out.status, 0, filled.out.stdout + filled.out.stderr);
+  assert.match(filled.out.stdout, /verified independently by the signer: 4 field checks/);
+  assert.doesNotMatch(filled.out.stdout, /FLAGGED/);
+  // A claim the signer found different is flagged, exit 3.
+  const wrong = verifyWith([{ field: 'inputs.head', how: 'git', found: H2 }]);
+  assert.ok(wrong.r.ok);
+  assert.equal(wrong.out.status, 3, wrong.out.stderr);
+  assert.match(wrong.out.stdout, /FLAGGED: receipt 2: inputs\.head: the coordinator claimed "a{40}", the signer found "b{40}" \(git\)/);
+  // `found` is bounded: an oversized value is not a valid receipt.
+  assert.ok(!verifyWith([{ field: 'inputs.files', how: 'git', found: ['x'.repeat(70_000)] }]).r.ok);
+});
+
+test('the log digest is unambiguous: bytes moved across a field boundary are a changed log (#918 round 3)', () => {
+  const k = keys();
+  const at = (id: number) => `2026-10-20T00:00:0${id}.000Z`;
+  const started: ReceiptEvent = { id: 1, ts: at(1), type: 'coordinator.started', actor: 'inst', payload: { instance: 'inst', pid: 1, version: '1' } };
+  const seen: ReceiptEvent = { id: 2, ts: at(2), type: 'issue.seen', actor: 'inst', payload: undefined, raw: '{"issue":1}\n{"x":2}' };
+  const decided: ReceiptEvent = { id: 3, ts: at(3), type: 'merge.decided', actor: 'inst', payload: { issue: 1, number: 2, head: H1, auto: true, reasons: [] } };
+  const first = signEvents([], [started, seen, decided], k.signer).envelopes;
+  const shifted: ReceiptEvent = { ...seen, actor: 'inst\n{"issue":1}', raw: '{"x":2}' };
+  assert.throws(() => signEvents(first, [started, shifted, decided], k.signer), /log changed/);
+  assert.equal(signEvents(first, [started, seen, decided], k.signer).added, 0, 'the same log is no change');
 });

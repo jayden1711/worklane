@@ -1,7 +1,7 @@
 // OS adapter layer. This is the only module allowed to branch on the
 // platform (test/os-boundary.test.ts enforces it).
 import { execFileSync, spawn } from './child-process.js';
-import { chmodSync, chownSync, closeSync, constants as fsConstants, existsSync, fchmodSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, readSync, realpathSync, renameSync, rmSync, statSync, statfsSync, writeFileSync, writeSync } from 'node:fs';
+import { chmodSync, chownSync, closeSync, constants as fsConstants, existsSync, fstatSync, linkSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, readSync, realpathSync, renameSync, rmSync, statSync, statfsSync, writeFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { testRunSign } from './system-paths.js';
 import { availableParallelism, homedir, loadavg, userInfo } from 'node:os';
@@ -135,19 +135,32 @@ export function writeOwnerOnly(file: string, data: string): void {
 }
 
 /**
- * Create `file` holding `data`, this user's only (0600), as a new file at that very name: O_CREAT|O_EXCL|O_NOFOLLOW,
- * so it never writes through a link (dangling or not) and never over anything; either throws EEXIST. For a secret
- * made once and never replaced, such as a receipt key (#717). Windows has no O_NOFOLLOW; O_EXCL still refuses a name
- * that exists.
+ * Create `file` holding `data`, this user's only (0600), never replacing anything and never writing through a link:
+ * for a secret made once, such as a receipt key (#717). The data goes through writeOwnerOnly (the reviewed writer)
+ * to a staging name beside it with a random part, then is published with linkSync(staged, file): link(2) fails with
+ * EEXIST when anything is at `file`, a dangling link included, and never follows one there. The staging name (and
+ * writeOwnerOnly's own temp name, after a failed write) is removed whatever happens. Throws EEXIST when `file` was
+ * taken. The published file is read back: content that isn't `data` (the staging name swapped meanwhile) is removed
+ * and refused.
  */
 export function createOwnerOnly(file: string, data: string): void {
-  const fd = openSync(file, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | (fsConstants.O_NOFOLLOW ?? 0), 0o600);
+  const staged = join(dirname(file), `.${basename(file)}.${randomBytes(8).toString('hex')}.new`);
+  let published = false;
   try {
-    if (process.platform !== 'win32') fchmodSync(fd, 0o600);
-    writeSync(fd, data);
-    fsyncSync(fd);
+    writeOwnerOnly(staged, data);
+    linkSync(staged, file);
+    published = true;
+    if (!lstatSync(file).isFile() || readFileSync(file, 'utf8') !== data) {
+      rmSync(file, { force: true });
+      throw new Error(`${file} doesn't hold what was written (its staging file was replaced); removed`);
+    }
+  } catch (e) {
+    // WHY: once linked, `file` is this call's own new name; a failed check leaves no half-made key behind.
+    if (published) rmSync(file, { force: true });
+    throw e;
   } finally {
-    closeSync(fd);
+    rmSync(staged, { force: true });
+    rmSync(`${staged}.${process.pid}.tmp`, { force: true });
   }
 }
 
