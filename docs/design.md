@@ -653,7 +653,7 @@ Hooks are POSIX shell commands. Claude Code runs them with `sh` on macOS and Lin
 
 Enforcement is layered, so no single layer is trusted:
 1. Credentials that make the action impossible
-2. PreToolUse hook
+2. PreToolUse hook. It answers within 10 s or refuses the call: the process Claude Code waits on holds that deadline and runs no guard code, the guard decides in a child of it, and only that child's own verdict lets a call through (`src/hook-deadline.ts`). Its hook also sets `onFailure: "block"`, so a hook that times out, can't start or crashes blocks the call too
 3. Settings deny rules
 4. OS sandbox on Bash (macOS and Linux)
 5. Post-run diff and policy check in the coordinator: the only layer that works on every OS, and the one that can't be bypassed by subprocesses

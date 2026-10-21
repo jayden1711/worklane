@@ -38,7 +38,27 @@ export const GUARDED_EVENTS = ['PreToolUse', 'SessionStart', 'SessionEnd'] as co
 
 export interface HookEntry {
   matcher?: string;
-  hooks: { type: 'command'; command: string; timeout?: number }[];
+  hooks: { type: 'command'; command: string; timeout?: number; onFailure?: 'continue' | 'block' }[];
+}
+
+/**
+ * What Claude Code does when a PreToolUse guard hook fails rather than answers: it times out, can't start, exits with a
+ * code other than 0 or 2, or prints invalid output. "block" counts the failure as exit code 2, so the tool call is
+ * blocked; without it the call goes ahead (Claude Code's hooks reference; the setting's schema and its description,
+ * read in the pinned 2.1.296 package, src/tool-install.ts: `onFailure: "continue" | "block"`, from 2.1.295 on).
+ * The guard also refuses on its own when it runs out of time (src/hook-deadline.ts); this covers what it can't: a
+ * process that never starts, or is killed.
+ */
+export const GUARD_ON_FAILURE = 'block' as const;
+
+/**
+ * These hooks with every PreToolUse command hook failing closed (GUARD_ON_FAILURE). WHY at each run (runSettings), not
+ * only at install: an instance's agent settings written before this keep working, and get it with the engine update.
+ */
+export function guardsFailClosed(hooks: Record<string, HookEntry[]>): Record<string, HookEntry[]> {
+  const pre = hooks.PreToolUse;
+  if (!pre) return hooks;
+  return { ...hooks, PreToolUse: pre.map((e) => (Array.isArray(e?.hooks) ? { ...e, hooks: e.hooks.map((h) => (h?.type === 'command' ? { ...h, onFailure: GUARD_ON_FAILURE } : h)) } : e)) };
 }
 export type Settings = Record<string, unknown> & {
   hooks?: Record<string, HookEntry[]>;
@@ -192,7 +212,7 @@ export function runSettings(ours: Settings, lane: object | undefined, pinnedEnv:
   return {
     ...l,
     ...ours,
-    hooks,
+    hooks: guardsFailClosed(hooks),
     permissions: { ...perm('allow'), ...perm('deny'), ...perm('ask') },
     env: { ...(ours.env ?? {}), ...(l.env ?? {}), ...pinnedEnv },
     disableAllHooks: false,
