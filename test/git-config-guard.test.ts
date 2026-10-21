@@ -242,7 +242,7 @@ test('#926 the guard reads the listing git prints: each refused key, from a file
   // checkout.sh's own check (run as the coordinator before its pull) is this one, through the CLI: no second parser
   // or key list in shell (round 3: a shell parser read a listing with control bytes differently).
   const sh = readFileSync(join(repoRoot, 'scripts', 'setup', 'checkout.sh'), 'utf8');
-  assert.match(sh, /^ {2}worklane git-config-check "\$2"$/m);
+  assert.match(sh, /^ {2}if ! check="\$\(worklane git-config-check "\$2" 2>&1\)"; then$/m);
   assert.doesNotMatch(sh, /refused=|--show-scope/);
 });
 

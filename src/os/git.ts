@@ -119,6 +119,7 @@ export const GIT_GUARD_ENV: Readonly<Record<string, string>> = Object.freeze({
  * set over here. credential.helper's empty value clears every helper a file named (URL-scoped ones too, measured), so
  * only one the caller adds after it is used.
  */
+// check-table: never-shrink
 export const GIT_GUARD_PAIRS: readonly (readonly [string, string])[] = Object.freeze([
   ['credential.helper', ''],
   ['core.fsmonitor', 'false'],
@@ -146,6 +147,7 @@ export const GIT_GUARD_PAIRS: readonly (readonly [string, string])[] = Object.fr
  * include adds a file, insteadOf and gitProxy are lists, a driver or remote has any name, a URL-scoped http key beats
  * the plain one). Matched on git's own spelling of the key, folded to lower case.
  */
+// check-table: never-shrink
 export const REFUSED_KEYS: readonly (readonly [RegExp, string])[] = Object.freeze([
   [/^include\.path$|^includeif\..*\.path$/, 'which reads another file in as config'],
   [/^filter\..*\.(?:clean|smudge|process)$/, 'a filter driver, a command git runs on checkout and add'],
@@ -258,10 +260,13 @@ export function configRefusal(listing: string): string | null {
     if (scope === 'system' || scope === 'global') continue;
     if (key === 'core.hookspath' && ours.has(key)) continue;
     const hit = REFUSED_KEYS.find(([re]) => re.test(key));
-    if (hit) return `the git config ${origin.replace(/^file:/, '')} sets ${key}, ${hit[1]}; an instance's coordinator runs nothing a checkout's config names. Take it out of that file`;
+    if (hit) return `the git config ${shown(origin.replace(/^file:/, ''))} sets ${shown(key)}, ${hit[1]}; an instance's coordinator runs nothing a checkout's config names. Take it out of that file`;
   }
   return null;
 }
+
+/** A name as a refusal shows it: control bytes escaped (\xNN), so a key can't rewrite the line a person reads. */
+const shown = (s: string): string => s.replace(/[\u0000-\u001f\u007f]/g, (c) => `\\x${c.charCodeAt(0).toString(16).padStart(2, '0')}`);
 
 /** For a guarded git: the config this call would read, refused or not (see the header). Null when it may run. */
 function preflight(file: string, args: readonly string[], cwd: string | URL | undefined, env: NodeJS.ProcessEnv): string | null {
@@ -408,6 +413,24 @@ function pinRepo(args: readonly string[], cwd: string | URL | undefined, env: No
   return { env };
 }
 
+/** `args` without the options that pick a repo or a directory (-C, --git-dir, --work-tree, --bare): for a config read in an empty place. */
+function withoutDirOptions(args: readonly string[]): string[] {
+  const out: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]!;
+    if (!a.startsWith('-')) {
+      out.push(...args.slice(i));
+      break;
+    }
+    if (a === '-C' || a === '--git-dir' || a === '--work-tree') i++;
+    else if (!/^--(?:git-dir|work-tree)=|^--bare$/.test(a)) {
+      out.push(a);
+      if (VALUED.has(a)) out.push(args[++i] ?? '');
+    }
+  }
+  return out;
+}
+
 /** In place of a refused git: this node, printing why on stderr and ending with git's own status for a fatal error. */
 const REFUSE = "process.stderr.write(process.argv[1] + '\\n'); process.exitCode = 128;";
 
@@ -417,7 +440,12 @@ function prepare<O extends { cwd?: string | URL | undefined; env?: NodeJS.Proces
   const full = gitArgs(args);
   if (!marked(env)) return [file, full, { ...options, env }];
   const pinned = options.shell ? { refused: 'a shell would run it, which this guard does not read' } : pinRepo(full, options.cwd, env);
-  const why = 'refused' in pinned ? pinned.refused : preflight(file, full, options.cwd, pinned.env);
+  // A git that makes a new repo (init, clone) reads no repo's config but the one it makes, which has none yet: its
+  // config read is judged in an empty place, never the caller's cwd, whose repo is not the one being made (#926
+  // round 4: a snapshot's `init` from a process whose cwd was CI's checkout was refused for that checkout's config).
+  const sub = subcommand(full);
+  const creates = sub === 'init' || sub === 'clone';
+  const why = 'refused' in pinned ? pinned.refused : creates ? preflight(file, withoutDirOptions(full), tmpdir(), { ...pinned.env, GIT_CEILING_DIRECTORIES: tmpdir() }) : preflight(file, full, options.cwd, pinned.env);
   if (!why && !('refused' in pinned)) return [file, full, { ...options, env: pinned.env }];
   return [process.execPath, ['-e', REFUSE, `${BRAND.cli}: refusing to run git here: ${why} (#926)`], { ...options, env: {}, shell: false }];
 }

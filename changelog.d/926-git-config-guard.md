@@ -23,6 +23,7 @@
   credential helper but the instance's own, no fsmonitor, editor, pager, external diff, ssh, askpass or signing
   program of a file's; no `ext::` transport, submodule recursion or bundle URIs), and first reads the config it would
   use: if a file sets an include, a filter, diff or merge driver, a URL rewrite, a remote's command or proxy, an
-  `http.*` proxy, TLS or header setting, `core.worktree`, `core.gitProxy` or `core.hooksPath`, it runs no git at all.
+  `http.*` proxy, TLS or header setting, `core.worktree`, `core.gitProxy`, or `core.hooksPath` when the engine sets no hooks dir of its own for that git
+  (the coordinator and auto-config always do), it runs no git at all.
   gitleaks is refused on such a checkout too (the scan reports itself unavailable, so the change isn't accepted).
   `checkout.sh` runs the same check before its own pull (`worklane git-config-check`, the engine's own reading). Local mode is unchanged: the owner's own config is theirs.

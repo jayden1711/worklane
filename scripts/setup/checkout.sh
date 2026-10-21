@@ -56,7 +56,13 @@ run_as "$coord" '
   # The engine itself reads the listing (git-config-check, its own parser): no second parser in shell to disagree with
   # it. It fails (and set -e stops this) on such a key, or on a config it can not read. System config belongs to root
   # and is read, as git does: it is how a machine (or the fake GitHub in CI) routes github.com.
-  worklane git-config-check "$2"
+  if ! check="$(worklane git-config-check "$2" 2>&1)"; then
+    case "$check" in
+      "unknown command: git-config-check"*) echo "refusing to run git in $2: the installed engine is older than this script (it has no git-config-check); update the engine (engine.sh), then run this again" >&2 ;;
+      *) printf "%s\n" "$check" >&2 ;;
+    esac
+    exit 1
+  fi
   # Later fetches and pushes from this checkout use the App too; nothing else can authenticate here.
   git config --replace-all credential.helper ""
   git config --add credential.helper "$helper"
