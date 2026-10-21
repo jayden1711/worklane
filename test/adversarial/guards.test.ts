@@ -27,7 +27,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -412,14 +412,22 @@ test(`adversarial guards / tool.unreadable-task-file-denies (${doc("A task file 
   assert.notEqual((await g.call('Read', { file_path: join(g.dir, 'src', 'price.js') })).decision, 'deny', 'control: a readable task file lets an ordinary read through');
 });
 
-test(`adversarial guards / tool.hook-covers-tools (${doc('A hook runs before every agent tool call')}): every tool the guard's rules decide on reaches the hook`, () => {
-  const pre = (agentSettings(engineCli, [], [], []).hooks?.PreToolUse ?? []).filter((e) => e.hooks.some((h) => h.command.includes(`${BRAND.envPrefix}_HOOK=1`)));
-  assert.equal(pre.length, 1, 'one guard hook entry');
-  const matcher = pre[0]!.matcher;
-  const reaches = (tool: string) => matcher === undefined || matcher === '*' || new RegExp(`^(?:${matcher})$`).test(tool);
+test(`adversarial guards / tool.hook-covers-tools (${doc('A hook runs before every agent tool call')}): every tool the guard's rules decide on reaches the hook`, { skip: !posix && 'POSIX stand-in claude' }, async () => {
   // The tools src/guardrails/engine.ts decides on: its EDIT_TOOLS and its file-reading READ_TOOLS, Bash and WebFetch.
   const tools = ['Bash', 'Edit', 'Write', 'MultiEdit', 'NotebookEdit', 'WebFetch', 'Read', 'Grep', 'Glob'];
-  assert.deepEqual(tools.filter((t) => !reaches(t)), [], `tools the guard hook's matcher (${matcher}) never sends to the guard`);
+  const missed = (where: string, entries: { matcher?: string; hooks: { command: string }[] }[]) => {
+    const pre = entries.filter((e) => e.hooks.some((h) => h.command.includes(`${BRAND.envPrefix}_HOOK=1`)));
+    assert.equal(pre.length, 1, `${where}: one guard hook entry`);
+    const matcher = pre[0]!.matcher;
+    const reaches = (tool: string) => matcher === undefined || matcher === '*' || new RegExp(`^(?:${matcher})$`).test(tool);
+    return tools.filter((t) => !reaches(t)).map((t) => `${where}: ${t} (matcher ${matcher})`);
+  };
+  // What install writes, and what a run's --settings really carries (runSettings rebuilds the hooks).
+  const cwd = mkdtempSync(join(tmpdir(), 'adv-cwd-'));
+  const { r, s } = await agentRun({ guardrails: instanceHome(JSON.stringify(goodSettings()), cwd).guardrails, cwd });
+  assert.ok(s.ran(), `${r.reason}: ${r.detail}`);
+  const atRun = (s.log().settings as { hooks?: Record<string, { matcher?: string; hooks: { command: string }[] }[]> }).hooks?.PreToolUse ?? [];
+  assert.deepEqual([...missed('install', agentSettings(engineCli, [], [], []).hooks?.PreToolUse ?? []), ...missed("a run's --settings", atRun)], [], 'tools the guard hook never sees');
 });
 
 // ---- Agent runs: the settings check, the sandbox settings, the environment. ----
@@ -505,6 +513,8 @@ test(`adversarial guards / settings.required (${doc("An agent run starts only wi
     { what: 'a JSON array', content: '[]' },
     { what: 'no PreToolUse guard hook', content: without((s) => delete s.hooks!.PreToolUse) },
     { what: 'no SessionEnd hook', content: without((s) => delete s.hooks!.SessionEnd) },
+    { what: 'no SessionStart hook', content: without((s) => delete s.hooks!.SessionStart) },
+    { what: "a guard hook whose missing-engine agent branch doesn't exit 2", content: without((s) => (ours(s, 'PreToolUse').command = ours(s, 'PreToolUse').command.replace('>&2; exit 2;', '>&2; exit 0;'))) },
     { what: 'the guard hook twice', content: without((s) => s.hooks!.PreToolUse!.push(structuredClone(s.hooks!.PreToolUse![0]!))) },
     { what: 'a guard hook that does not fail closed', content: without((s) => (ours(s, 'PreToolUse').command = ours(s, 'PreToolUse').command.replaceAll('|| exit 2', '|| true'))) },
     { what: 'a guard hook whose engine is gone', content: without((s) => (ours(s, 'PreToolUse').command = ours(s, 'PreToolUse').command.replace(/E="[^"]+"/, `E="${join(tmpdir(), 'no-engine.js')}"`))) },
@@ -590,6 +600,14 @@ test(`adversarial guards / settings.applied-echo (${doc("Every run's `--settings
 /** The lanes an instance with the sandbox on gives the runner (src/instance.ts laneRuns), for a checkout at `cwd`. */
 function sandboxLanes(cwd: string) {
   const base = mkdtempSync(join(tmpdir(), 'adv-lanes-'));
+  // Every path the lane denies exists, as the kind it is on a real machine (src/sandbox.ts homeCredentialStores; the
+  // instance home; claude's login file), so the Read-rule cases can tell a file entry from a directory one. The home
+  // is this test process's own (test/isolate.ts).
+  for (const d of ['.ssh', '.aws', '.config/gh', '.gnupg', '.docker']) mkdirSync(join(homedir(), d), { recursive: true });
+  for (const f of ['.netrc', '.npmrc', '.pypirc', '.docker/config.json']) if (!existsSync(join(homedir(), f))) writeFileSync(join(homedir(), f), '');
+  mkdirSync(join(base, 'inst-home'));
+  mkdirSync(join(base, 'agent-claude'));
+  writeFileSync(join(base, 'agent-claude', '.credentials.json'), '{}');
   const inst = {
     name: 'adversarial',
     runAs: null,
@@ -634,22 +652,50 @@ test(`adversarial guards / sandbox.no-unsandboxed-retry (${doc("A blocked comman
   for (const { what, settings } of await sandboxed()) assert.equal(settings.sandbox?.allowUnsandboxedCommands, false, `${what}: no unsandboxed retry`);
 });
 
-test(`adversarial guards / sandbox.read-tool-same-deny (${doc('The Read tool is denied the same paths as the commands')}): every path the sandbox hides from commands is denied to the Read tool`, { skip: !posix && 'POSIX stand-in claude' }, async () => {
+const isGlob = (p: string) => /[*?[{]/.test(p);
+const unrooted = (p: string) => p.replace(/^\/+/, '');
+/**
+ * Whether the sandbox's denyRead hides `target` from commands, as sandbox-runtime reads an entry: a path hides itself
+ * and everything under it, a trailing `/**` is that directory, and any other glob matches by its pattern.
+ */
+const sandboxHides = (entries: string[], target: string) =>
+  entries.some((e) => {
+    const p = e.replace(/\/\*\*$/, '');
+    return isGlob(p) ? globToRegExp(unrooted(p)).test(unrooted(target)) : target === p || target.startsWith(`${p}/`);
+  });
+/** The paths a run's Read rules name (Claude Code's `Read(//<absolute path>)` form), each as an absolute path or glob. */
+const readRulePaths = (deny: string[] | undefined) => (deny ?? []).flatMap((x) => /^Read\((\/\/.*)\)$/.exec(x)?.[1]?.slice(1) ?? []);
+/** Whether a Read rule denies `target`, read as the gitignore-style pattern it is: `p/**` is what's under p, never p itself. */
+const readRuleDenies = (rules: string[], target: string) => rules.some((r) => (isGlob(r) ? globToRegExp(unrooted(r)).test(unrooted(target)) : target === r));
+/** Each denyRead entry, as a file or a directory on this machine (the fixture made every one), or `missing`. */
+const entryKinds = (entries: string[]) => entries.filter((e) => !isGlob(e)).map((e) => ({ entry: e.replace(/\/\*\*$/, ''), kind: !existsSync(e.replace(/\/\*\*$/, '')) ? 'missing' : statSync(e.replace(/\/\*\*$/, '')).isDirectory() ? 'dir' : 'file' }));
+
+test(`adversarial guards / sandbox.read-tool-same-deny (${doc('The Read tool is denied the same paths as the commands')}): everything under each directory the sandbox hides from commands is denied to the Read tool`, { skip: !posix && 'POSIX stand-in claude' }, async () => {
   for (const { what, settings } of await sandboxed()) {
-    const denied = settings.sandbox?.filesystem?.denyRead ?? [];
-    assert.ok(denied.length > 0, `${what}: the sandbox hides something`);
-    const rules = new Set(settings.permissions?.deny ?? []);
-    assert.deepEqual(denied.filter((p) => !rules.has(`Read(/${p}/**)`)), [], `${what}: paths hidden from commands but not from the Read tool`);
+    const kinds = entryKinds(settings.sandbox?.filesystem?.denyRead ?? []);
+    assert.deepEqual(kinds.filter((k) => k.kind === 'missing').map((k) => k.entry), [], `${what}: the fixture made every denied path, so each is a file or a directory`);
+    const dirs = kinds.filter((k) => k.kind === 'dir');
+    assert.ok(dirs.length > 0, `${what}: the sandbox hides a directory`);
+    const rules = readRulePaths(settings.permissions?.deny);
+    assert.deepEqual(dirs.filter((k) => !readRuleDenies(rules, `${k.entry}/a-file`)).map((k) => k.entry), [], `${what}: directories hidden from commands whose files the Read tool may read`);
   }
 });
 
-/** Whether one of `entries` (a denyRead path or glob) covers `target`: it, or a directory over it. */
-const covers = (entries: string[], target: string) =>
-  entries.some((e) => {
-    const plain = e.replace(/\/\*\*$/, '');
-    if (target === plain || target.startsWith(`${plain}/`)) return true;
-    return /[*?[{]/.test(e) && globToRegExp(e.replace(/^\//, '')).test(target.replace(/^\//, ''));
-  });
+knownHole(`adversarial guards / sandbox.read-tool-same-deny (${doc('The Read tool is denied the same paths as the commands')}): Read rules for file entries`, "the owner's private issue", { skip: !posix && 'POSIX stand-in claude' }, async () => {
+  const attacks: string[] = [];
+  const open: string[] = [];
+  for (const { what, settings } of await sandboxed()) {
+    const files = entryKinds(settings.sandbox?.filesystem?.denyRead ?? []).filter((k) => k.kind === 'file');
+    assert.ok(files.length > 0, `${what}: the sandbox hides a file`);
+    const rules = readRulePaths(settings.permissions?.deny);
+    files.forEach((f, i) => {
+      const name = `${what}: file entry ${i + 1} of ${files.length}`;
+      attacks.push(name);
+      if (!readRuleDenies(rules, f.entry)) open.push(name);
+    });
+  }
+  return { attacks, open };
+});
 
 knownHole(`adversarial guards / tool.no-read-secrets (${doc('- read secret files;')}): a task's hidden paths and the project's secret files are denied by the sandbox and the Read rules too, not only by the hook`, 'PR #893 (#890)', { skip: !posix && 'POSIX stand-in claude' }, async () => {
   const { dir } = exampleProject();
@@ -662,10 +708,10 @@ knownHole(`adversarial guards / tool.no-read-secrets (${doc('- read secret files
   assert.ok(s.ran(), `${r.reason}: ${r.detail}`);
   const settings = s.log().settings as SandboxSettings;
   const denyRead = settings.sandbox?.filesystem?.denyRead ?? [];
-  const readRules = (settings.permissions?.deny ?? []).flatMap((x) => /^Read\((\/\/.*)\)$/.exec(x)?.[1]?.slice(1) ?? []);
+  const readRules = readRulePaths(settings.permissions?.deny);
   const checks = [['the hidden file', join(dir, 'evals-secret', 'score.py')], ['.env', join(dir, '.env')]].flatMap(([what, target]) => [
-    { what: `a command reads ${what} (the sandbox doesn't hide it)`, open: !covers(denyRead, target!) },
-    { what: `the Read tool reads ${what} (no Read rule denies it)`, open: !covers(readRules, target!) },
+    { what: `a command reads ${what} (the sandbox doesn't hide it)`, open: !sandboxHides(denyRead, target!) },
+    { what: `the Read tool reads ${what} (no Read rule denies it)`, open: !readRuleDenies(readRules, target!) },
   ]);
   return { attacks: checks.map((c) => c.what), open: checks.filter((c) => c.open).map((c) => c.what) };
 });
@@ -693,14 +739,14 @@ test(`adversarial guards / pushgate.no-hatch-in-env (${doc('No agent starts with
 
 const run = (cwd: string, ...a: string[]) => execFileSync('git', a, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 
-/** A checkout with one commit on main, pushed to a bare remote (`base`); `put` and `commit` add to it. */
-function pushRepo() {
+/** A checkout with one commit on `branch` (its default), pushed to a bare remote (`base`); `put` and `commit` add to it. */
+function pushRepo(branch = 'main') {
   const root = mkdtempSync(join(tmpdir(), 'adv-push-'));
   const dir = join(root, 'work');
   const remote = join(root, 'remote.git');
-  execFileSync('git', ['init', '-q', '--bare', '-b', 'main', remote]);
+  execFileSync('git', ['init', '-q', '--bare', '-b', branch, remote]);
   mkdirSync(dir);
-  run(dir, 'init', '-q', '-b', 'main');
+  run(dir, 'init', '-q', '-b', branch);
   for (const [k, v] of [['user.email', 'ada@example.com'], ['user.name', 'Ada'], ['commit.gpgsign', 'false'], ['core.autocrlf', 'false']]) run(dir, 'config', k!, v!);
   const put = (p: string, text: string) => {
     mkdirSync(dirname(join(dir, p)), { recursive: true });
@@ -714,37 +760,41 @@ function pushRepo() {
   put('README.md', 'A project.\n');
   const base = commit('base');
   run(dir, 'remote', 'add', 'origin', remote);
-  run(dir, 'push', '-q', 'origin', 'main');
+  run(dir, 'push', '-q', 'origin', branch);
   const at = (ref: string) => spawnSync('git', ['rev-parse', '--verify', '-q', ref], { cwd: remote, encoding: 'utf8' }).stdout.trim() || null;
   return { root, dir, remote, base, put, commit, at };
 }
 
-const guardOf = (blocked: string[]) => ({ defaultBranch: 'main', blocked: (ref: string) => blocked.push(ref) });
+const guardOf = (blocked: string[], defaultBranch = 'main') => ({ defaultBranch, blocked: (ref: string) => blocked.push(ref) });
 
 test(`adversarial guards / push.default-branch-refused (${doc('It refuses the default branch however the ref is spelled')}): checkedPush never pushes the default branch, however the ref is spelled`, async () => {
-  const r = pushRepo();
+  // A default branch that isn't `main`, so a refusal that only knows `main` fails here.
+  const D = 'trunk';
+  const r = pushRepo(D);
   r.put('a.txt', 'a\n');
   const head = r.commit();
   const limits: PushLimits = { max_file_mb: 10, max_changed_lines: 1500, refuse_paths: [] };
   const refs = [
-    { what: 'its name', ref: 'main' },
-    { what: 'its full ref', ref: 'refs/heads/main' },
-    { what: 'heads/', ref: 'heads/main' },
-    { what: 'a forced name', ref: '+main' },
-    { what: 'a forced full ref', ref: '+refs/heads/main' },
-    { what: 'a refspec with a source', ref: 'HEAD:main' },
-    { what: 'a refspec with a full destination', ref: 'task:refs/heads/main' },
-    { what: 'a forced refspec', ref: '+HEAD:refs/heads/main' },
+    { what: 'its name', ref: D },
+    { what: 'its full ref', ref: `refs/heads/${D}` },
+    { what: 'heads/', ref: `heads/${D}` },
+    { what: 'a forced name', ref: `+${D}` },
+    { what: 'a forced full ref', ref: `+refs/heads/${D}` },
+    { what: 'a refspec with a source', ref: `HEAD:${D}` },
+    { what: 'a refspec with a full destination', ref: `task:refs/heads/${D}` },
+    { what: 'a forced refspec', ref: `+HEAD:refs/heads/${D}` },
   ];
   const left = await letThrough(refs, (x) => {
     const blocked: string[] = [];
-    const out = [checkedPush({ cwd: r.dir, remote: 'origin', base: r.base, head, ref: x.ref, limits, guard: guardOf(blocked) }), checkedPush({ cwd: r.dir, remote: 'origin', base: r.base, head, ref: x.ref, limits, guard: guardOf(blocked), force: true, expect: r.base })];
+    const out = [checkedPush({ cwd: r.dir, remote: 'origin', base: r.base, head, ref: x.ref, limits, guard: guardOf(blocked, D) }), checkedPush({ cwd: r.dir, remote: 'origin', base: r.base, head, ref: x.ref, limits, guard: guardOf(blocked, D), force: true, expect: r.base })];
     const refused = out.every((o) => !o.ok && 'refused' in o && /default branch/.test(o.refused.join(' ')));
-    return refused && blocked.length === 2 && blocked.every((b) => b === 'refs/heads/main') && r.at('refs/heads/main') === r.base ? null : JSON.stringify({ out, blocked, main: r.at('refs/heads/main') });
+    return refused && blocked.length === 2 && blocked.every((b) => b === `refs/heads/${D}`) && r.at(`refs/heads/${D}`) === r.base ? null : JSON.stringify({ out, blocked, default: r.at(`refs/heads/${D}`) });
   });
   assert.deepEqual(left, [], 'default-branch pushes checkedPush let through');
-  assert.deepEqual(checkedPush({ cwd: r.dir, remote: 'origin', base: r.base, head, ref: 'refs/heads/task-1', limits, guard: guardOf([]) }), { ok: true }, 'control: a task branch is pushed');
-  assert.equal(r.at('refs/heads/task-1'), head);
+  for (const ref of ['refs/heads/task-1', 'refs/heads/main']) {
+    assert.deepEqual(checkedPush({ cwd: r.dir, remote: 'origin', base: r.base, head, ref, limits, guard: guardOf([], D) }), { ok: true }, `control: ${ref} (not the default branch) is pushed`);
+    assert.equal(r.at(ref), head);
+  }
 });
 
 const limits: PushLimits = { max_file_mb: 0.01, max_changed_lines: 20, refuse_paths: ['secrets/**'] };
@@ -779,7 +829,7 @@ test(`adversarial guards / push.size-limit (${doc('refuses a change over the pus
   assert.deepEqual(checkedPush({ cwd: r.dir, remote: 'origin', base: r.base, head, ref: 'refs/heads/task-1', limits, guard: guardOf([]) }), { ok: true }, 'control: a change at the limits is pushed');
 });
 
-knownHole(`adversarial guards / push.size-limit (${doc('refuses a change over the push limits')}): a replace ref of the pushed commit hides nothing from checkedPush`, 'PR #927 (#807)', {}, () => {
+knownHole(`adversarial guards / push.size-limit (${doc('refuses a change over the push limits')}): a replace ref of the pushed commit hides nothing from checkedPush`, 'PR #927 (#807), or PR #928 (#724) if it lands first (it closes this too)', {}, () => {
   const attacks = ['a refused path', 'a file over the size limit'];
   const left: string[] = [];
   for (const [what, file, text] of [[attacks[0]!, 'secrets/key.pem', 'stand-in\n'], [attacks[1]!, 'big.txt', bigLine()]] as const) {
@@ -804,34 +854,38 @@ knownHole(`adversarial guards / push.size-limit (${doc('refuses a change over th
 });
 
 test(`adversarial guards / push.prepush-hook (${doc('Each checkout also gets a pre-push hook that refuses the default branch')}): git itself refuses a push to the default branch from the checkout, however it is spelled`, { skip: !posix && 'POSIX hook' }, async () => {
+  // The configured default branch isn't `main`, so a hook that only knows `main` fails here.
+  const B = 'release';
   const setup = () => {
-    const r = pushRepo();
+    const r = pushRepo(B);
     // The remote's own default (origin/HEAD) is refused too, whatever the hook was told.
-    run(r.dir, 'push', '-q', 'origin', 'main:refs/heads/trunk');
+    run(r.dir, 'push', '-q', 'origin', `${B}:refs/heads/trunk`);
     run(r.dir, 'remote', 'set-head', 'origin', 'trunk');
-    installPrePushHook(join(r.dir, '.git', 'hooks'), { branches: ['main'] });
+    installPrePushHook(join(r.dir, '.git', 'hooks'), { branches: [B] });
     r.put('a.txt', 'a\n');
     r.commit();
     return r;
   };
   const pushes = [
-    { what: 'HEAD to its name', args: ['origin', 'HEAD:main'] },
-    { what: 'HEAD to its full ref', args: ['origin', 'HEAD:refs/heads/main'] },
-    { what: 'a forced refspec', args: ['origin', '+HEAD:main'] },
-    { what: '--force', args: ['--force', 'origin', 'HEAD:main'] },
-    { what: 'the local branch of that name', args: ['origin', 'main'] },
-    { what: 'beside a task branch', args: ['origin', 'HEAD:refs/heads/task-1', 'HEAD:refs/heads/main'] },
+    { what: 'HEAD to its name', args: ['origin', `HEAD:${B}`] },
+    { what: 'HEAD to its full ref', args: ['origin', `HEAD:refs/heads/${B}`] },
+    { what: 'a forced refspec', args: ['origin', `+HEAD:${B}`] },
+    { what: '--force', args: ['--force', 'origin', `HEAD:${B}`] },
+    { what: 'the local branch of that name', args: ['origin', B] },
+    { what: 'beside a task branch', args: ['origin', 'HEAD:refs/heads/task-1', `HEAD:refs/heads/${B}`] },
     { what: "the remote's own default branch", args: ['origin', 'HEAD:trunk'] },
   ];
   const left = await letThrough(pushes, (p) => {
     const r = setup();
     const out = spawnSync('git', ['push', '-q', ...p.args], { cwd: r.dir, encoding: 'utf8' });
-    const untouched = r.at('refs/heads/main') === r.base && r.at('refs/heads/trunk') === r.base && r.at('refs/heads/task-1') === null;
+    const untouched = r.at(`refs/heads/${B}`) === r.base && r.at('refs/heads/trunk') === r.base && r.at('refs/heads/task-1') === null;
     return out.status !== 0 && /refusing to push/.test(out.stderr) && untouched ? null : `exit ${out.status}: ${out.stderr.trim().slice(0, 200)}`;
   });
   assert.deepEqual(left, [], 'default-branch pushes the hook let through');
-  const r = setup();
-  assert.equal(spawnSync('git', ['push', '-q', 'origin', 'HEAD:refs/heads/task-1'], { cwd: r.dir, encoding: 'utf8' }).status, 0, 'control: a task branch goes through the hook');
+  for (const ref of ['refs/heads/task-1', 'refs/heads/main']) {
+    const r = setup();
+    assert.equal(spawnSync('git', ['push', '-q', 'origin', `HEAD:${ref}`], { cwd: r.dir, encoding: 'utf8' }).status, 0, `control: ${ref} (not a default branch) goes through the hook`);
+  }
 });
 
 // ---- The push gate (scripts/push-gate.mjs), as a checkout's pre-push hook. ----
@@ -1052,7 +1106,7 @@ function corpus(): { what: string; text: string; secret: string }[] {
   ];
 }
 
-/** What each store kept of `text`: the event log's stored payload, and the run record's file. */
+/** What each store kept of `text`: the event log's stored payload (written at once, and held then flushed), and the run record's file. */
 function stored(text: string): { where: string; raw: string }[] {
   const log = new EventLog(':memory:');
   let events: string;
@@ -1062,6 +1116,22 @@ function stored(text: string): { where: string; raw: string }[] {
   } finally {
     log.close();
   }
+  // The buffered path: while the storage refuses writes (a full disk, stood in for at the log's own insert), events
+  // wait in memory (hold) and are written later (flush). Two appends: the one that fails, and one held behind it.
+  const buffered = new EventLog(':memory:', { buffer: {} });
+  let held: string;
+  try {
+    const own = buffered as unknown as { insert?: unknown };
+    own.insert = () => {
+      throw Object.assign(new Error('No space left on device'), { code: 'ENOSPC' });
+    };
+    for (let i = 0; i < 2; i++) buffered.append('issue.seen', { issue: 7, title: text, labels: [text], author: 'ada', owner: null, actionable: true, why: text }, 'adversarial');
+    delete own.insert;
+    assert.equal(buffered.flush().written, 2, 'the held events were written once the storage took them');
+    held = (buffered.db.prepare('SELECT payload FROM events').all() as { payload: string }[]).map((x) => x.payload).join('\n');
+  } finally {
+    buffered.close();
+  }
   const stateDir = mkdtempSync(join(tmpdir(), 'adv-state-'));
   const rec = new RunRecorder(stateDir, { role: 'worker', model: 'm', cwd: stateDir });
   rec.line({ type: 'assistant', message: { content: [{ type: 'text', text }, { type: 'tool_use', id: 't1', name: 'Bash', input: { command: `echo ${text}` } }] } });
@@ -1069,6 +1139,7 @@ function stored(text: string): { where: string; raw: string }[] {
   const file = rec.finish({ reason: 'failed', costUsd: 0, turns: 1, model: 'm', final: text, detail: text });
   return [
     { where: 'the event log', raw: events },
+    { where: 'the event log, held while its storage was full', raw: held },
     { where: 'the run record', raw: file ? readFileSync(file, 'utf8') : '(no record written)' },
   ];
 }
