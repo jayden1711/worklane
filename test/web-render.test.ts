@@ -99,6 +99,8 @@ interface Render {
   renderProtection(protection: unknown, brand: string): string;
   renderDeployGate(gate: unknown): string;
   renderMainWatchAlert(protection: unknown): string;
+  ackVisibleChars(text: string): number;
+  isResumeRequest(answer: unknown): boolean;
   renderPrs(view: unknown): string;
   renderLiveFeed(items: unknown[], ended: boolean): string;
   renderConsole(data: unknown): string;
@@ -1108,6 +1110,28 @@ test('the protection mode on the Machine page, the last commit checked for write
   const none = r.renderMainWatchAlert({ ...alert, alert: { ...alert.alert, revert: null, no_revert: why } });
   assert.match(none, /data-testid="main-watch-alert-no-revert"[^>]*>No revert PR was opened: opening the revert PR failed: git revert of cccccccc .*conflicts with later commits: CONFLICT \(content\): Merge conflict in a\.txt\./);
   assert.match(r.renderMainWatchAlert({ ...alert, alert: { ...alert.alert, revert: null } }), /No revert PR was opened\./, 'no reason known: says so plainly');
+});
+
+test('a stop in force that is not the main watch\'s (a red main after an auto-merge) shows its banner, and an admin its resume (#776)', () => {
+  const red = { mode: 'main_watch' as const, detail: '', lastChecked: null, alert: null, stopped: "main's required checks failed (ci) on `cccccccc` after auto-merging #12", canClear: false };
+  const banner = r.renderMainWatchAlert(red);
+  assert.match(banner, /data-testid="auto-merge-stopped"[\s\S]*Auto-merge is stopped[\s\S]*required checks failed \(ci\) on `cccccccc` after auto-merging #12/);
+  assert.doesNotMatch(banner, /main-watch-clear/, 'only an admin gets the resume');
+  assert.doesNotMatch(banner, /Unaccounted commit/, 'not the main watch alert');
+  assert.match(r.renderMainWatchAlert({ ...red, canClear: true }), /data-testid="main-watch-clear"[^>]*>Clear and resume auto-merge/);
+  assert.equal(r.renderMainWatchAlert({ mode: 'main_watch' }), '', "a viewer's: nothing");
+});
+
+test('a resume answer that is a recorded request (the coordinator decides, #776 on #727) is told apart from a resume done now', () => {
+  assert.equal(r.isResumeRequest({ ok: true, how: 'requested', acknowledged: false, message: 'Recorded.' }), true);
+  assert.equal(r.isResumeRequest({ ok: true, how: 'as_before' }), false);
+  assert.equal(r.isResumeRequest(null), false);
+});
+
+test("the acknowledgement form counts visible characters as the server does: blanks that print nothing don't count (#776)", () => {
+  assert.equal(r.ackVisibleChars('the fix PR is ready'), 15);
+  for (const ch of ['ㅤ', 'ᅟ', 'ᅠ', 'ﾠ', '⠀', '​', '️']) assert.equal(r.ackVisibleChars(ch.repeat(12)), 0, `U+${ch.codePointAt(0)!.toString(16).toUpperCase()}`);
+  assert.equal(r.ackVisibleChars('한국어'), 3);
 });
 
 test("the main watch banner past a revert-PR cap: the trip's revert PR and why this commit has none of its own; past the day's cap, why none", () => {
