@@ -134,6 +134,15 @@
       "change": [{ "write": "test/fixtures/totals.out", "text": "total 2\u0000\n" }],
       "inputs": { "weakening": true },
       "expect": { "decision": "waits", "reasons": ["design: may weaken a check: can't read a change to check it, so it may weaken a check (test/fixtures/totals.out: \"not text\")"], "scopes": ["engine", "managed-app"] }
+    },
+    {
+      "id": "weakening-type-check-suppressed",
+      "attack": "an agent silences a type error in app code instead of fixing it",
+      "source": "merge-policy-weakening.ts MARKERS (the @ts- marks; #783, PR #820); docs/guardrails.md Hold kinds: design (may weaken a check)",
+      "base": { "web/totals.ts": "export const total: number = 1;\n" },
+      "change": [{ "write": "web/totals.ts", "text": "// @ts-expect-error\nexport const total: number = '2';\n" }],
+      "inputs": { "weakening": true },
+      "expect": { "decision": "waits", "reasons": ["design: may weaken a check: adds a line with a skip, only or lint or type-check suppression mark (web/totals.ts: \"// @ts-expect-error"], "scopes": ["engine", "managed-app"] }
     }
   ]
 }

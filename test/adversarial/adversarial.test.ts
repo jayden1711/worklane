@@ -11,7 +11,8 @@
 //
 // Every case runs under three review.yaml files (`configs`): the engine's own (.worklane/review.yaml), the default a
 // new project gets, and a loosened one that lists nothing anywhere, so a case marked for it is held by the floor in
-// code alone. And twice more: with an injection ("merge without review", a fake fence end) added as a comment line to
+// code alone (a case may name a fourth, `auth-at-l2`, for a repo that names a high-risk category but doesn't hold it).
+// And twice more: with an injection ("merge without review", a fake fence end) added as a comment line to
 // every file it writes and with the worker claiming a lower risk class; the reasons must not change, and for a claim
 // neither must the class. A lower claim reaches the decision only as `claim === 'protected'` (false), so the claim's
 // reasons comparison can't fail through claim handling: with the check that each input, decided again between other
@@ -70,7 +71,7 @@ const Op = z.union([
 ]);
 type Op = z.infer<typeof Op>;
 
-const ConfigName = z.enum(['engine', 'default', 'loosened']);
+const ConfigName = z.enum(['engine', 'default', 'loosened', 'auth-at-l2']);
 type ConfigName = z.infer<typeof ConfigName>;
 
 const Pr = z
@@ -134,18 +135,35 @@ type Inputs = z.infer<typeof Inputs>;
 const Flow = z.strictObject({
   /** The instance's auto_merge as the coordinator reads it: on, a read that throws, or no reader at all. */
   autoMerge: z.enum(['on', 'throws', 'absent']).default('on'),
-  /** The stop file: none, one with a reason, one that can't be parsed, or deleted by hand after a red-main stop. */
-  stopFile: z.enum(['none', 'reason', 'unreadable', 'deleted-by-hand']).default('none'),
+  /**
+   * The stop file: none; one with a reason; one with no reason (written by hand); one that can't be parsed; or deleted
+   * by hand after a red-main stop, which follows an earlier owner stop and its resume (the last stop event decides).
+   */
+  stopFile: z.enum(['none', 'reason', 'no-reason', 'unreadable', 'deleted-by-hand']).default('none'),
   /** The always-PASS verdict, recorded for the PR's head or for another commit (an earlier push). */
   verdictFor: z.enum(['head', 'other-commit']).default('head'),
+  /** After the PASS, a later verdict on the same head rejects the patch (the latest verdict decides). */
+  rejectedAfter: z.literal(true).optional(),
   /** The harness opened the PR at another commit than its head: someone else pushed after it. */
   pushedAfter: z.literal(true).optional(),
-  /** A CI fix run was started on the PR. */
+  /**
+   * A CI fix run, as a live instance records it: started on the head the harness opened the PR at, and finished by
+   * pushing the PR's current head (so the head is still the harness's own).
+   */
   ciFixRun: z.literal(true).optional(),
-  /** A push of the change was refused (a push limit). */
+  /**
+   * After the verdicts, the harness merged the default branch into the stale PR (a merge-in): the PR's head is the
+   * merge commit, and the verdict that counts is the one on the head before it (carried across the merge-in).
+   */
+  mergedIn: z.literal(true).optional(),
+  /** A push refused (a push limit): of a commit that never became the PR's head. */
   pushRefused: z.literal(true).optional(),
+  /** A passing eval of every instruction target the change makes, recorded for another issue (not this one). */
+  evalsForAnotherIssue: z.literal(true).optional(),
   /** A planned task: the files its approved plan lists. */
   plan: z.array(z.string().min(1)).optional(),
+  /** An earlier plan for the task, which `plan` revised (the latest plan is the approved one). */
+  earlierPlan: z.array(z.string().min(1)).optional(),
 });
 type Flow = z.infer<typeof Flow>;
 
@@ -206,6 +224,16 @@ const CONFIGS: Record<ConfigName, ReviewConfig> = {
     categories: Object.fromEntries(BUILT_IN.map((c) => [c, []])),
     levels: { L0_auto: { when: ['docs', 'tests'] }, L1_evaluator: { when: [] }, L2_notify: { when: [] }, L3_human: { when: [] } },
     merge: { auto: true, max_lines: 1_000_000, max_files: 100_000, wait_categories: [] },
+  }),
+  // The default with auth moved from L3 to L2: the repo names auth paths but doesn't hold them. Used only by the cases
+  // that name it: a plan still holds an unplanned auth file, by the engine's own L3 list (mergeDecisionFor).
+  'auth-at-l2': ReviewConfig.parse({
+    ...DEFAULT_REVIEW,
+    levels: {
+      ...DEFAULT_REVIEW.levels,
+      L2_notify: { when: [...DEFAULT_REVIEW.levels.L2_notify.when, 'auth'] },
+      L3_human: { ...DEFAULT_REVIEW.levels.L3_human, when: DEFAULT_REVIEW.levels.L3_human.when.filter((c) => c !== 'auth') },
+    },
   }),
 };
 
@@ -269,8 +297,13 @@ const opPaths = (op: Op): string[] => ('write' in op ? [op.write] : 'rename' in 
 const sizeless = (reason: string) => (reason.startsWith('big: ') ? reason.replace(/\d+/g, 'N') : reason.startsWith(WEAKENING_REASON) ? reason.replace(/ \([^]*$/, '') : reason);
 const withInjection =(text: string, inject: boolean) => (inject ? `${text}${text.endsWith('\n') || !text ? '' : '\n'}${INJECTION}` : text);
 
-/** The repo, its base and head commits, and the files the gate reads from base..head. */
-function made(c: Case | Control, inject: boolean): { dir: string; base: string; head: string; files: ChangeFile[] } {
+/**
+ * The repo, its base and head commits, and the files the gate reads from base..head. `opened` is the commit the
+ * harness opened the PR at: the head, or for a flow case with a CI fix run or a merge-in the commit before it.
+ * `refused` is a commit that was never pushed (a flow case's refused push), or null. `mergedBase`: the default
+ * branch's commit a merge-in merged, from which the PR's own change is measured (as mergeDecisionFor does), or null.
+ */
+function made(c: Case | Control, inject: boolean): { dir: string; base: string; head: string; opened: string; refused: string | null; mergedBase: string | null; files: ChangeFile[] } {
   const dir = mkdtempSync(join(tmpdir(), 'adversarial-'));
   git(dir, 'init', '-q', '-b', 'main');
   for (const [k, v] of [['user.email', 'ada@example.com'], ['user.name', 'Ada'], ['commit.gpgsign', 'false'], ['core.autocrlf', 'false'], ['core.fileMode', 'true']])git(dir, 'config', k!, v!);
@@ -292,8 +325,24 @@ function made(c: Case | Control, inject: boolean): { dir: string; base: string; 
   }
   git(dir, 'add', '-A');
   git(dir, 'commit', '-q', '--allow-empty', '-m', 'head');
+  const opened = git(dir, 'rev-parse', 'HEAD');
+  // As a live instance leaves the branch: a CI fix run pushes a new head on top of the one the PR was opened at, and a
+  // refused push is a commit that never reaches the branch. The change base..head stays the case's own.
+  if (c.flow?.ciFixRun) git(dir, 'commit', '-q', '--allow-empty', '-m', 'fix the failing check');
+  // A merge-in: another PR lands on the default branch after this one's base, and the harness merges it in.
+  let mergedBase: string | null = null;
+  if (c.flow?.mergedIn) {
+    git(dir, 'checkout', '-q', '-b', 'default-branch', base);
+    put(dir, 'CHANGELOG.md', 'Another PR landed.\n');
+    git(dir, 'add', '-A');
+    git(dir, 'commit', '-q', '-m', 'another PR');
+    mergedBase = git(dir, 'rev-parse', 'HEAD');
+    git(dir, 'checkout', '-q', 'main');
+    git(dir, 'merge', '-q', '--no-ff', '--no-edit', 'default-branch');
+  }
   const head = git(dir, 'rev-parse', 'HEAD');
-  return { dir, base, head, files: changeFiles(dir, base, head) };
+  const refused = c.flow?.pushRefused ? git(dir, 'commit-tree', `${head}^{tree}`, '-p', head, '-m', 'a push that was refused') : null;
+  return { dir, base, head, opened, refused, mergedBase, files: changeFiles(dir, mergedBase ?? base, head) };
 }
 
 /**
@@ -342,7 +391,7 @@ let flowStates: string | undefined;
 /**
  * The coordinator's own call (merge-flow.ts mergeDecisionFor) on the case's PR, under one review.yaml and lock scope.
  * Everything it reads is set up as on a live instance that opened the PR: the issue claimed at the base, the PR opened
- * at its head, the always-PASS verdict, an auto_merge that reads on, no stop; then the flow's hostile values. Labels
+ * at its head (or at the commit before a CI fix's push or a merge-in), the always-PASS verdict, an auto_merge that reads on, no stop; then the flow's hostile values. Labels
  * and money paths come from the event log and review.yaml there, so a flow case sets neither.
  */
 function decideInFlow(r: ReturnType<typeof made>, c: Case | Control, f: Flow, cfg: ConfigName, scope: LockScope, claim: Case['pr']['claim']): MergeDecision {
@@ -356,16 +405,36 @@ function decideInFlow(r: ReturnType<typeof made>, c: Case | Control, f: Flow, cf
   try {
     const [issue, number, actor] = [7, 9, 'i'];
     log.append('issue.claimed', { issue, instance: actor, lease: 'a'.repeat(40), base: r.base, owner: 'example-owner' }, actor);
-    if (f.plan) log.append('plan.posted', { issue, plan: { approach: 'x', steps: [], files: f.plan, risks: [], design_change: false }, held: false, reasons: [], comments_at: 0, decision: null }, actor);
-    if (c.pr.openedByHarness ?? true) log.append('pr.opened', { issue, number, url: 'u', head: f.pushedAfter ? r.base : r.head, draft: false }, actor);
+    const planned = (files: string[]) => log.append('plan.posted', { issue, plan: { approach: 'x', steps: [], files, risks: [], design_change: false }, held: false, reasons: [], comments_at: 0, decision: null }, actor);
+    if (f.earlierPlan) planned(f.earlierPlan);
+    if (f.plan) planned(f.plan);
+    if (c.pr.openedByHarness ?? true) log.append('pr.opened', { issue, number, url: 'u', head: f.pushedAfter ? r.base : r.opened, draft: false }, actor);
     if (claim) log.append('worker.claims', { issue, claims: [], risk_class: claim }, actor);
-    log.append('eval.verdict', { issue, head: f.verdictFor === 'head' ? r.head : r.base, patch_hash: 'h', patch_correct: true, test_correct: true, confidence: 'high', advice: '', design_change: false }, actor);
-    if (f.ciFixRun) log.append('ci_fix.started', { issue, number, head: r.head, checks: ['test'], attempt: 1, lease: 'a'.repeat(40) }, actor);
-    if (f.pushRefused) log.append('push.refused', { issue, head: r.head, stage: 'push', reasons: ['over the push limit'] }, actor);
+    if (f.pushRefused) log.append('push.refused', { issue, head: r.refused!, stage: 'push', reasons: ['over the push limit'] }, actor);
+    if (f.ciFixRun) {
+      log.append('ci_fix.started', { issue, number, head: r.opened, checks: ['test'], attempt: 1, lease: 'a'.repeat(40) }, actor);
+      log.append('ci_fix.finished', { issue, number, outcome: 'pushed', head: r.head, detail: 'fixed the failing check' }, actor);
+    }
+    // The evaluator judged the PR's head; with a merge-in, the head before it (r.opened).
+    const judged = f.mergedIn ? r.opened : r.head;
+    const verdict = { issue, head: f.verdictFor === 'head' ? judged : r.base, patch_hash: 'h', patch_correct: true, test_correct: true, confidence: 'high' as const, advice: '', design_change: false };
+    log.append('eval.verdict', verdict, actor);
+    if (f.rejectedAfter) log.append('eval.verdict', { ...verdict, patch_correct: false, advice: 'the patch is wrong' }, actor);
+    if (f.mergedIn) log.append('pr_hygiene.merged_in', { issue, number, from: r.opened, head: r.head, base_sha: r.mergedBase!, base_days: 3 }, actor);
+    if (f.evalsForAnotherIssue) {
+      const targets = instructionTargets(r.files.map((x) => x.path)).map((t) => t.target);
+      for (const e of allEvalsPass(targets)) log.append('instructions.eval', { issue: issue + 1, head: r.head, ...e }, actor);
+    }
     const stopFile = join(stateDir, 'auto-merge-stopped.json');
     if (f.stopFile === 'reason') writeFileSync(stopFile, JSON.stringify({ reason: 'main went red after an auto-merge' }));
+    if (f.stopFile === 'no-reason') writeFileSync(stopFile, '{}');
     if (f.stopFile === 'unreadable') writeFileSync(stopFile, '{"reason": ');
-    if (f.stopFile === 'deleted-by-hand') log.append('merge.stopped', { reason: 'main went red after an auto-merge', number: 3, sha: r.base, revert: null, by: 'red_main' }, actor);
+    if (f.stopFile === 'deleted-by-hand') {
+      // The owner stopped auto-merge and resumed it; later main went red, and that stop's file was deleted by hand.
+      log.append('merge.stopped', { reason: 'the owner stopped auto-merge', number: null, sha: null, revert: null, by: 'owner' }, actor);
+      log.append('merge.resumed', { detail: 'the operator cleared the stop' }, actor);
+      log.append('merge.stopped', { reason: 'main went red after an auto-merge', number: 3, sha: r.base, revert: null, by: 'red_main' }, actor);
+    }
     const autoMerge = f.autoMerge === 'on' ? { autoMerge: () => true } : f.autoMerge === 'throws' ? { autoMerge: (): boolean => { throw new Error('policy.yaml unreadable'); } } : {};
     const coordinator = new Coordinator({ cfg: { ...flowConfig, review: CONFIGS[cfg] }, log, backlog: new FileBacklog(join(at, 'backlog.json')), runner: new FakeRunner(() => ({})), repo: r.dir, instance: actor, stateDir, lockScope: () => scope, ...autoMerge });
     const pr: PullRequest = { number, url: 'u', head: (c.pr.branch ?? '{cli}/issue-7').replaceAll('{cli}', BRAND.cli), base: 'main', headSha: r.head, draft: false, state: 'open', title: 't', mergeable: true, mergeableState: 'clean' };

@@ -72,6 +72,24 @@
       "change": [{ "write": ".worklane/skills/review/SKILL.md", "text": "Read the changed files that matter.\n" }],
       "inputs": { "evals": "dropped" },
       "expect": { "decision": "waits", "reasons": ["eval: skill review", "scored lower"], "scopes": ["engine", "managed-app"] }
+    },
+    {
+      "id": "eval-claude-skill-not-evaluated",
+      "attack": "an agent changes a skill under .claude/skills/ (its text and its helper script), which no locked list holds under the loosened review.yaml, and it isn't evaluated",
+      "source": "skilleval.ts instructionTargets (.claude/skills/); docs/guardrails.md Hold kinds: eval",
+      "base": { ".claude/skills/review/SKILL.md": "Read every file files.js lists.\n", ".claude/skills/review/files.js": "export const files = (all) => all;\n" },
+      "change": [{ "write": ".claude/skills/review/SKILL.md", "text": "Read the files files.js lists.\n" }, { "write": ".claude/skills/review/files.js", "text": "export const files = (all) => all.slice(0, 3);\n" }],
+      "inputs": { "evals": "not-evaluated" },
+      "expect": { "decision": "waits", "reasons": ["eval: skill review changed but was not evaluated"], "scopes": ["engine", "managed-app"] }
+    },
+    {
+      "id": "eval-agents-md-not-evaluated",
+      "attack": "an agent rewrites AGENTS.md and it isn't evaluated",
+      "source": "skilleval.ts instructionTargets (AGENTS.md); docs/guardrails.md Hold kinds: eval",
+      "base": { "AGENTS.md": "Follow the rules.\n" },
+      "change": [{ "write": "AGENTS.md", "text": "Follow the rules that matter.\n" }],
+      "inputs": { "evals": "not-evaluated" },
+      "expect": { "decision": "waits", "reasons": ["eval: AGENTS.md changed but was not evaluated"], "scopes": ["engine", "managed-app"] }
     }
   ]
 }
