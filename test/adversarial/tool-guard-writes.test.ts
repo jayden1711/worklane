@@ -161,6 +161,26 @@ test('tool guard writes: a link-making command is judged in every order it may r
   }
 });
 
+test('tool guard writes: a link made inside harness config is refused even when its text leads out of the destination', () => {
+  const { root } = project();
+  // Each source's text, read from the destination folder, names a plain file (or nothing), so only the check on
+  // where the link is made refuses these.
+  for (const command of [
+    'ln -s -t .claude ../src/a.ts',
+    'ln -st .claude ../evil/settings.json',
+    `ln -s -t ${BRAND.configDir} ../evil/config.yaml`,
+    'ln -s --target-directory=.claude ../evil/settings.json',
+    'cp -s -t .claude ../evil/settings.json',
+  ]) {
+    const v = bash(root, command);
+    assert.equal(v.decision, 'deny', command);
+    assert.match(v.reason ?? '', /agents never make a link in it/, command);
+  }
+  for (const command of ['ln -s -t docs ../src/a.ts', 'ln -st docs ../evil/settings.json', `ln -s -t ${BRAND.configDir}/roles ../../src/a.ts`]) {
+    assert.equal(bash(root, command).decision, 'none', command);
+  }
+});
+
 test('tool guard writes: plain writes, links to plain files, reads and people sessions are unchanged', () => {
   const { root, out } = project();
   symlinkSync('src', join(root, 'code'));
