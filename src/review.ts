@@ -575,7 +575,7 @@ export function loadMoneyPaths(repo: string, src: ReviewConfig['money_path_sourc
  * A money path that came from a glob line of the money list (or is the list file's own name): it matches as its
  * RegExp, unchanged, and keeps the glob, so the look-alike check (#763) compares it by skeleton like a locked glob
  * (`payrnents/` with r, n for the m of `payments/**`). A regex literal from the list stays a plain RegExp, compared
- * as src/confusables.ts lookalikeOf says (its letters mapped to their skeletons). Note: a list line with two slashes
+ * as src/confusables.ts lookalikeOf says (as written, on readings of the path). Note: a list line with two slashes
  * (`src/payments/**`) is read as a regex literal (`/payments/`), as before.
  */
 export class MoneyGlob extends RegExp {

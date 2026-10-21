@@ -1,7 +1,6 @@
-// #763 round 4: an ASCII look-alike of a money-list regex literal waits whatever the regex's syntax: the `i` flag
-// (both cases' skeletons), a dot or other one-character wildcard (one or two characters), a named group and its
-// back-reference (copied, never mapped), a character class (its members' skeletons as alternatives); and a regex the
-// look-alike check can't map holds every path it doesn't match.
+// #763 rounds 4 and 5: an ASCII look-alike of a money-list regex literal waits under the `i` flag, a dot or other
+// one-character wildcard, a named group and its back-reference, and a character class. Since round 5 the regex isn't
+// rewritten: it runs as written on readings of the path (test/confusable-readings.test.ts has the rest).
 //
 // WHY the one look-alike character here is written as itself with a name: no committed file holds a code point
 // number (#763).
@@ -12,7 +11,6 @@ import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ReviewConfig } from '../src/config/schema.js';
-import { lookalikeOf } from '../src/confusables.js';
 import { mergeDecision, waitCategoriesOf } from '../src/merge-policy.js';
 import { computeLevel, escapedPath, loadMoneyPaths, type ChangeFile } from '../src/review.js';
 
@@ -51,7 +49,7 @@ function held(money: RegExp[], lookalikes: string[], real: string[]) {
   for (const path of real) assert.deepEqual(judge(path, money), { level: 'L3', reason: undefined, auto: false }, path);
 }
 
-test('#763: under the i flag a regex stands for both cases\' skeletons: an all-capitals payments regex holds r, n for m; a lower-case iban regex holds l or 1 for I', () => {
+test('#763: under the i flag an all-capitals payments regex holds r, n for m; a lower-case iban regex holds l or 1 for I', () => {
   const money = moneyFrom(['/PAYMENTS/i', '/iban/i']);
   held(money, ['src/payrnents/charge.ts', 'src/PAYRNENTS/charge.ts', `src/p${CYRILLIC_A}yrnents/charge.ts`, 'src/lBAN/x.ts', 'src/1BAN/x.ts', 'src/lban/x.ts'], ['src/payments/charge.ts', 'src/PAYMENTS/charge.ts', 'src/IBAN/x.ts', 'src/iban/x.ts']);
   assert.deepEqual(judge('src/other/x.ts', money), { level: 'L1', reason: undefined, auto: true });
@@ -61,35 +59,20 @@ test('#763: the i flag holds an all-capitals look-alike of a lower-case regex to
   held(moneyFrom(['/billing/i']), ['src/BI1LING/x.ts', 'src/bi1ling/x.ts'], ['src/billing/x.ts', 'src/BILLING/x.ts']);
 });
 
-test('#763: a dot, a negated class and a class escape stand for one or two characters, so r, n for m under one waits too', () => {
+test('#763: r, n for m under a dot, a negated class or a class escape waits too', () => {
   held(moneyFrom(['/pay.ents/']), ['src/payrnents/x.ts'], ['src/payments/x.ts']);
   held(moneyFrom(['/pay[^x]ents/']), ['src/payrnents/x.ts'], ['src/payments/x.ts']);
   held(moneyFrom(['/pay\\wents/']), ['src/payrnents/x.ts'], ['src/payments/x.ts']);
 });
 
-test('#763: a named group and its back-reference are copied, not mapped, so a regex holding one still holds the look-alike', () => {
+test('#763: a regex with a named group and its back-reference holds the look-alike', () => {
   const money = moneyFrom(['/(?<money>payments)(?:-\\k<money>)?/']);
   held(money, ['src/payrnents/charge.ts', `src/p${CYRILLIC_A}yrnents/charge.ts`], ['src/payments/charge.ts']);
 });
 
-test('#763: a plain character class carries its members\' skeletons, a range spelled out; a negated class\'s own path is still its own', () => {
+test('#763: a regex with a character class holds the look-alike; a negated class\'s own path is still its own', () => {
   const money = moneyFrom(['/pay[m]ents/', '/bil[a-z]ing/']);
   held(money, ['src/payrnents/charge.ts', 'src/bil1ing/x.ts'], ['src/payments/charge.ts', 'src/billing/x.ts']);
   const negated = moneyFrom(['/^lib\\/[^x]ay\\.ts$/']);
   assert.deepEqual(judge('lib/pay.ts', negated).reason, undefined);
-});
-
-test('#763: a money regex the look-alike check can\'t map holds every path it doesn\'t match, with a reason that says so (fails closed)', () => {
-  /** A regex whose source, as the check reads it, is no regex: the rewrite can't compile it. */
-  class Unmappable extends RegExp {
-    override get source(): string {
-      return '(';
-    }
-  }
-  const money = [new Unmappable('payments')];
-  assert.equal(lookalikeOf('src/payments/charge.ts', [{ re: money[0]!, what: 'm' }]), null);
-  assert.deepEqual(lookalikeOf('src/other/x.ts', [{ re: money[0]!, what: 'm' }]), { unchecked: "a money-list regex the look-alike check can't map" });
-  const level = computeLevel({ files: [{ path: 'src/other/x.ts', added: 1, removed: 0 }], labels: [], moneyPaths: money, scope: undefined }, REVIEW);
-  assert.equal(level.level, 'L3');
-  assert.ok(level.reasons.some((r) => r.includes("(not compared: a money-list regex the look-alike check can't map)")), level.reasons.join('\n'));
 });

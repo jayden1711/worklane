@@ -3,8 +3,9 @@
 // by scripts/dev/confusables-data.mjs). Locked with the review levels (src/review.ts SELF_MODIFICATION_PARTS).
 //
 // INVARIANT: bounded and fail closed. A path over MAX_CHECKED_PATH characters, or whose skeleton grows past
-// MAX_CHECKED_SKELETON, isn't compared at all: it counts as a look-alike (the owner reads it), so no input makes the
-// glob matching slow and none slips past it unread.
+// MAX_CHECKED_SKELETON, or with more than MAX_READINGS readings to test a money regex against, isn't compared at all:
+// it counts as a look-alike (the owner reads it). A money regex is never rewritten: it runs as the owner wrote it, on
+// a bounded set of readings of the path, so it takes the time it takes on the path itself, times that bound.
 import { CONFUSABLES } from './confusables-data.js';
 import { globToRegExp } from './guardrails/glob.js';
 
@@ -12,6 +13,8 @@ import { globToRegExp } from './guardrails/glob.js';
 export const MAX_CHECKED_PATH = 1024;
 /** The longest skeleton compared (a character can map to up to 18): a path whose skeleton is longer counts as a look-alike. */
 export const MAX_CHECKED_SKELETON = 4096;
+/** The most readings of one path a money regex is tested against; a path with more counts as a look-alike. */
+export const MAX_READINGS = 1024;
 
 let table: Map<number, string> | undefined;
 /** Each character's prototype, read once from the generated table: one mapping a line, the character then its prototype. */
@@ -28,16 +31,27 @@ function prototypes(): Map<number, string> {
 
 const IGNORABLE = /^\p{Default_Ignorable_Code_Point}$/u;
 
+/** The combining dot above, taken from an e with a dot above (written as itself) so no code point number is needed. */
+export const COMBINING_DOT_ABOVE = 'ė'.normalize('NFD').slice(1);
+/** The dotless i, which a combining dot above turns into a plain-looking i. */
+const DOTLESS_I = 'ı';
+/** A character whose own dot hides a combining dot above after it (Soft_Dotted: i, j and kin), or the dotless i. */
+const HIDES_DOT = (ch: string): boolean => ch === DOTLESS_I || /^\p{Soft_Dotted}$/u.test(ch);
+
 /**
  * UTS #39 skeleton(X): NFD, drop default-ignorable code points, map each character to its prototype, NFD again. Two
  * strings are confusable when their skeletons are equal (`docs/releasing.md` with a Cyrillic e for its first e, and
- * `docs/releasing.md`; `rn` and `m`).
+ * `docs/releasing.md`; `rn` and `m`). Also drops a combining dot above after a soft-dotted letter or a dotless i
+ * (with only other marks between), which the letter's own dot hides (UTS #39 section 5.4, #763 round 5).
  */
 export function skeleton(s: string): string {
   const t = prototypes();
   let out = '';
+  let base = '';
   for (const ch of s.normalize('NFD')) {
     if (IGNORABLE.test(ch)) continue;
+    if (!/^\p{M}$/u.test(ch)) base = ch;
+    else if (ch === COMBINING_DOT_ABOVE && HIDES_DOT(base)) continue;
     out += t.get(ch.codePointAt(0)!) ?? ch;
   }
   return out.normalize('NFD');
@@ -102,6 +116,54 @@ function asciiReading(path: string): string {
 }
 
 /**
+ * The groups of printable ASCII spellings that share a skeleton, from Unicode's table: l, 1, I and the vertical bar;
+ * O and 0; m and r, n; the apostrophe and the backquote; the double quote and two apostrophes. Read once.
+ */
+let groups: string[][] | undefined;
+function asciiGroups(): string[][] {
+  if (groups) return groups;
+  const by = new Map<string, Set<string>>();
+  for (let cp = 32; cp < 127; cp++) {
+    const c = String.fromCharCode(cp);
+    const s = skeleton(c);
+    if (s === c || !/^[ -~]+$/.test(s)) continue;
+    const g = by.get(s) ?? new Set([s]);
+    g.add(c);
+    by.set(s, g);
+  }
+  return (groups = [...by.values()].map((g) => [...g]));
+}
+
+/** A string with each multi-character spelling of a group read as the group's one-character spelling (r, n as m). */
+function reading(s: string): string {
+  let out = s;
+  for (const g of asciiGroups()) {
+    const one = g.find((m) => m.length === 1);
+    if (one) for (const m of g) if (m.length > 1) out = out.split(m).join(one);
+  }
+  return out;
+}
+
+/**
+ * The readings of a string a money regex is tested against (#763 round 5): for each group of ASCII spellings that
+ * share a skeleton (asciiGroups) and that the string uses, the string as it is, or with every use of one spelling
+ * read as another (every 1 as l, every l as I, every r, n as m, ...), across the groups in every combination. null
+ * when there are more than `cap` (the caller holds the path). It covers a look-alike that spells one group's member
+ * one way throughout (`payrnents`, `0001` as `OOO1`); a path that needs one spelling read two ways is the residual.
+ */
+function substitutions(s: string, cap: number): string[] | null {
+  let out = [s];
+  for (const g of asciiGroups()) {
+    const present = g.filter((m) => s.includes(m));
+    if (!present.length) continue;
+    const swaps = present.flatMap((from) => g.filter((to) => to !== from).map((to) => [from, to] as const));
+    if (out.length * (swaps.length + 1) > cap) return null;
+    out = out.flatMap((r) => [r, ...swaps.map(([from, to]) => r.split(from).join(to))]);
+  }
+  return out;
+}
+
+/**
  * A protected path pattern: a glob (compared by skeleton; `own`, when given, decides what is the glob's own instead
  * of the glob itself, as a money glob's RegExp does) or a regex (a money-list regex literal: see lookalikeOf).
  */
@@ -112,141 +174,37 @@ const mapGlob = (glob: string, f: (s: string) => string): string => glob.split(/
 
 /**
  * The ways a name is compared, each applied to the path and to a glob's literal runs alike: UTS #39's skeleton, the
- * caseless one, and each of the compatibility form (compat).
+ * caseless one, each of the compatibility form (compat), and the skeleton's own compatibility form skeletonized
+ * again (a character that reaches ASCII only in that order, #763 round 5).
  */
-const FORMS: Record<'skeleton' | 'caseless' | 'compat-skeleton' | 'compat-caseless', (s: string) => string> = {
+const FORMS: Record<'skeleton' | 'caseless' | 'compat-skeleton' | 'compat-caseless' | 'skeleton-compat' | 'skeleton-compat-caseless', (s: string) => string> = {
   skeleton,
   caseless,
   'compat-skeleton': (s) => skeleton(compat(s)),
   'compat-caseless': (s) => caseless(compat(s)),
+  'skeleton-compat': (s) => skeleton(compat(skeleton(s))),
+  'skeleton-compat-caseless': (s) => fold(skeleton(compat(skeleton(fold(s))))),
 };
 type Form = keyof typeof FORMS;
 /** For a pure-ASCII path only the skeleton: its compatibility form is itself, and case counts only outside ASCII. */
 const ASCII_FORMS: readonly Form[] = ['skeleton'];
-const WIDE_FORMS: readonly Form[] = ['skeleton', 'caseless', 'compat-skeleton', 'compat-caseless'];
+const WIDE_FORMS: readonly Form[] = ['skeleton', 'caseless', 'compat-skeleton', 'compat-caseless', 'skeleton-compat', 'skeleton-compat-caseless'];
 
-/** Compiled globs, by form and glob. Bounded: cleared when it holds too many (the globs come from review.yaml). */
+/**
+ * Compiled globs, by kind and glob: as written (raw), a form's mapping, or a form's mapping then read (`read:`, where
+ * r, n is m again, so a glob's `?` stands for the one character m is). Bounded: cleared when it holds too many.
+ */
 const compiled = new Map<string, RegExp>();
-function compile(kind: 'raw' | Form, glob: string): RegExp {
+function compile(kind: 'raw' | Form | `read:${Form}`, glob: string): RegExp {
   const key = `${kind}\0${glob}`;
   let re = compiled.get(key);
   if (!re) {
     if (compiled.size > 4096) compiled.clear();
-    re = globToRegExp(kind === 'raw' ? glob : mapGlob(glob, FORMS[kind]));
+    const form = kind.startsWith('read:') ? FORMS[kind.slice(5) as Form] : kind === 'raw' ? null : FORMS[kind as Form];
+    re = globToRegExp(!form ? glob : kind.startsWith('read:') ? mapGlob(glob, (s) => reading(form(s))) : mapGlob(glob, form));
     compiled.set(key, re);
   }
   return re;
-}
-
-/** A string as a regex matches it literally, outside a class (only syntax characters escaped, as the u flag allows). */
-const reLiteral = (s: string): string => s.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&');
-
-/**
- * The skeletons a literal character of a regex stands for that the regex doesn't match already: its own, and under
- * the `i` flag its lower and upper case's too (a capital M stands for an m, whose skeleton is r, n).
- */
-function skeletonsOf(c: string, ci: boolean): string[] {
-  const forms = ci ? [c, c.toLowerCase(), c.toUpperCase()] : [c];
-  const same = (s: string) => s === c || (ci && s.toLowerCase() === c.toLowerCase());
-  return [...new Set(forms.map(skeleton))].filter((s) => !same(s));
-}
-
-/** Where the syntax that starts at `i` ends (one past it): an escape, a group opening, a class or a quantifier's braces. */
-function syntaxEnd(src: string, i: number, sets: boolean): number {
-  const to = (close: string, from: number) => {
-    const j = src.indexOf(close, from);
-    return j < 0 ? src.length : j + 1;
-  };
-  const c = src[i];
-  if (c === '\\') {
-    const n = src[i + 1];
-    if ((n === 'k' && src[i + 2] === '<') || ((n === 'p' || n === 'P' || n === 'u') && src[i + 2] === '{')) return to(n === 'k' ? '>' : '}', i + 2);
-    if (n === 'u') return i + 6;
-    if (n === 'x') return i + 4;
-    if (n === 'c') return i + 3;
-    if (n !== undefined && /[0-9]/.test(n)) return i + 1 + /^[0-9]+/.exec(src.slice(i + 1))![0].length;
-    return i + 2;
-  }
-  if (c === '(' && src[i + 1] === '?') {
-    // A named group's name, copied as it is; a lookbehind; a modifier group's flags; then its : = or !.
-    if (src[i + 2] === '<' && src[i + 3] !== '=' && src[i + 3] !== '!') return to('>', i + 3);
-    let j = i + 2;
-    while (j < src.length && /[A-Za-z-]/.test(src[j]!)) j++;
-    if (src[j] === '<' && (src[j + 1] === '=' || src[j + 1] === '!')) return j + 2;
-    return src[j] === ':' || src[j] === '=' || src[j] === '!' ? j + 1 : j;
-  }
-  if (c === '[') {
-    // To the class's closing bracket, past escapes (and nested classes under the v flag).
-    let depth = 0;
-    for (let j = i; j < src.length; j++) {
-      if (src[j] === '\\') j++;
-      else if (src[j] === '[' && (j === i || sets)) depth++;
-      else if (src[j] === ']' && --depth === 0) return j + 1;
-    }
-    return src.length;
-  }
-  if (c === '{' && /^\{[0-9]+(,[0-9]*)?\}/.test(src.slice(i))) return to('}', i);
-  return i;
-}
-
-/** The members of a plain (not negated) class's source that are literal characters, its ranges spelled out (ASCII only). */
-function classMembers(cls: string): string[] {
-  const body = [...cls.slice(1, -1)];
-  const out: string[] = [];
-  for (let k = 0; k < body.length; k++) {
-    if (body[k] === '\\') {
-      k++;
-      continue;
-    }
-    if (body[k + 1] === '-' && body[k + 2] !== undefined && body[k + 2] !== '\\') {
-      const [a, b] = [body[k]!.codePointAt(0)!, Math.min(body[k + 2]!.codePointAt(0)!, 127)];
-      for (let cp = a; cp <= b; cp++) out.push(String.fromCodePoint(cp));
-      k += 2;
-    } else out.push(body[k]!);
-  }
-  return out;
-}
-
-/**
- * A regex (a money-list regex literal) rewritten to match a path's skeleton (#763): each literal character outside
- * other syntax as itself or the skeletons it stands for (skeletonsOf: under `i`, both cases'), and each plain class
- * as itself or its members' skeletons; a dot, a negated class and a class escape as one or two of what they stand
- * for. Other escapes, group names and back-references, lookarounds, modifier flags and quantifier braces are copied
- * as they are. A regex naming payments then holds the path spelled with r, n for its m. null when the
- * rewritten source isn't a valid regex: lookalikeOf then holds every path the regex doesn't match (fails closed).
- */
-const skeletonRegExps = new WeakMap<RegExp, RegExp | null>();
-function skeletonRegExp(re: RegExp): RegExp | null {
-  if (skeletonRegExps.has(re)) return skeletonRegExps.get(re)!;
-  const src = re.source;
-  const ci = re.flags.includes('i');
-  const sets = re.flags.includes('v');
-  let out = '';
-  for (let i = 0; i < src.length; ) {
-    const end = syntaxEnd(src, i, sets);
-    if (end > i) {
-      const part = src.slice(i, end);
-      const alts = part.startsWith('[') && !part.startsWith('[^') ? [...new Set(classMembers(part).flatMap((m) => skeletonsOf(m, ci)))] : [];
-      // A negated class or a class escape stands for one character, which may be one whose skeleton is two (m).
-      const oneOfAny = part.startsWith('[^') || /^\\([wWdDsS]$|[pP]\{)/.test(part);
-      out += alts.length ? `(?:${part}|${alts.map(reLiteral).join('|')})` : oneOfAny ? `(?:${part}${part}?)` : part;
-      i = end;
-      continue;
-    }
-    const c = String.fromCodePoint(src.codePointAt(i)!);
-    const alts = /^[\\^$.|?*+()[\]{}/]$/.test(c) ? [] : skeletonsOf(c, ci);
-    // A dot stands for one character, which may be one whose skeleton is two (m: r, n).
-    out += c === '.' ? '(?:..?)' : alts.length ? `(?:${reLiteral(c)}|${alts.map(reLiteral).join('|')})` : c;
-    i += c.length;
-  }
-  let mapped: RegExp | null;
-  try {
-    mapped = new RegExp(out, re.flags.replace(/[gy]/g, ''));
-  } catch {
-    mapped = null;
-  }
-  skeletonRegExps.set(re, mapped);
-  return mapped;
 }
 
 /** Why a path counts as a look-alike: of which protected pattern, or that it wasn't compared (too long, or a failure). */
@@ -255,14 +213,17 @@ export type Lookalike = { like: string } | { unchecked: string };
 /**
  * Whether `path` reads as a path one of `patterns` protects without being one: its skeleton (UTS #39) matches the
  * pattern's skeleton, or, for a name with a character outside ASCII, its caseless skeleton matches (a case-insensitive
- * file system may open it as the protected file: a long s for an s), or either of its compatibility form's does (a
+ * file system may open it as the protected file: a long s for an s), or one of its compatibility forms' does (a
  * fullwidth letter), while the path itself doesn't match that pattern. A name with a blank-looking character (a
- * space, a no-break space, the braille blank) is compared without them too. A path a pattern matches as itself is
- * that pattern's own and not a look-alike of it. Regexes (money-list regex literals) are tested against the path's
- * skeleton forms and ASCII readings, and, mapped by skeletonRegExp, against its skeleton forms; a regex it can't map
- * holds every path the regex doesn't match. A dot, a negated class and a class escape (`\w`, `\p{L}`) stand for one
- * or two characters (a skeleton of two, as m's is). Residual: a wildcard standing for a character whose skeleton is
- * longer than two (only characters outside ASCII have one).
+ * space, a no-break space, the braille blank) is compared without them too. Each form is also compared read (r, n as
+ * m), so a glob's `?` stands for an m spelled r, n. A path a pattern matches as itself is that pattern's own and not
+ * a look-alike of it.
+ *
+ * A money-list regex literal is never rewritten. It is tested, as written, against readings of the path: its
+ * skeleton forms and their readings, its ASCII readings, and the substitutions of each (every 1 read as l, every r, n
+ * as m, and so on, in every combination; see substitutions). More than MAX_READINGS of them hold the path. Residual
+ * (no sound check exists without an automaton): a path that needs one spelling read two ways, as when a real l and a
+ * look-alike l for I sit in one name.
  * null: no look-alike. Fails closed (see the module's INVARIANT).
  */
 export function lookalikeOf(path: string, patterns: readonly Protected[]): Lookalike | null {
@@ -273,20 +234,32 @@ export function lookalikeOf(path: string, patterns: readonly Protected[]): Looka
     const variants = bare === path ? [path] : [path, bare];
     const forms = variants.flatMap((v) => (wide ? WIDE_FORMS : ASCII_FORMS).map((f) => [f, FORMS[f](v)] as const));
     if (forms.some(([, s]) => s.length > MAX_CHECKED_SKELETON)) return { unchecked: `its skeleton is longer than ${MAX_CHECKED_SKELETON} characters` };
-    // A regex can't be skeletonized, so it is tested against the path's skeleton forms (fails closed: any path whose
-    // skeleton the regex matches is held) and, for a name outside ASCII or with a blank, its ASCII readings.
-    const readings = [...forms.map(([, s]) => s), ...(wide || bare !== path ? variants.flatMap((v) => [v, compat(v)]).flatMap((s) => [asciiReading(s), asciiReading(fold(s))]) : [])];
+    let texts: string[] | null | undefined;
+    const regexTexts = (): string[] | null => {
+      if (texts !== undefined) return texts;
+      const bases = new Set<string>(variants);
+      if (wide || bare !== path) for (const s of variants.flatMap((v) => [v, compat(v)])) for (const r of [asciiReading(s), asciiReading(fold(s))]) bases.add(r);
+      for (const [, s] of forms) bases.add(reading(s));
+      // Lower case too: Unicode's ASCII look-alikes are lower case (r, n for m), and a case-insensitive regex reads it.
+      for (const b of [...bases]) bases.add(b.toLowerCase());
+      const all = new Set<string>(forms.map(([, s]) => s));
+      for (const b of bases) {
+        const subs = substitutions(b, MAX_READINGS);
+        if (!subs) return (texts = null);
+        for (const r of subs) all.add(r);
+        if (all.size > MAX_READINGS) return (texts = null);
+      }
+      return (texts = [...all]);
+    };
     for (const p of patterns) {
       if ('glob' in p) {
         if ((p.own ?? compile('raw', p.glob)).test(path)) continue;
-        if (forms.some(([f, s]) => compile(f, p.glob).test(s))) return { like: p.what };
+        if (forms.some(([f, s]) => compile(f, p.glob).test(s) || compile(`read:${f}`, p.glob).test(reading(s)))) return { like: p.what };
       } else {
         if (p.re.test(path)) continue;
-        if (readings.some((r) => p.re.test(r))) return { like: p.what };
-        const mapped = skeletonRegExp(p.re);
-        // A regex the rewrite can't map can't be judged for look-alikes: every path it doesn't match waits (fails closed).
-        if (!mapped) return { unchecked: `a money-list regex the look-alike check can't map` };
-        if (forms.some(([, s]) => mapped.test(s))) return { like: p.what };
+        const rs = regexTexts();
+        if (!rs) return { unchecked: `more than ${MAX_READINGS} readings to test a money regex against` };
+        if (rs.some((r) => p.re.test(r))) return { like: p.what };
       }
     }
     return null;

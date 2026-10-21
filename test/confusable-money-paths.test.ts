@@ -77,7 +77,7 @@ test('#763: an ASCII look-alike of a money-list glob (r, n for m; 1 or capital I
   heldAsMoneyLookalikes(money, ['payrnents/charge.ts', 'bi1ling/charge.ts', 'biIling/charge.ts', 'rnoney.txt'], ['payments/charge.ts', 'billing/charge.ts', 'money.txt'], 'other/charge.ts');
 });
 
-test('#763: an ASCII or mixed look-alike of a money-list regex literal waits: the regex, its letters mapped to their skeletons, is tested against the path\'s skeleton', () => {
+test('#763: an ASCII or mixed look-alike of a money-list regex literal waits: the regex, as written, is tested against readings of the path', () => {
   const money = moneyFrom(['/payments/', '/billing/']);
   heldAsMoneyLookalikes(money, ['src/payrnents/charge.ts', 'src/bi1ling/charge.ts', 'src/biIling/charge.ts', `src/p${CYRILLIC_A}yrnents/charge.ts`], ['src/payments/charge.ts', 'src/billing/charge.ts'], 'src/other/charge.ts');
   // A quantifier's braces and an escape keep their digits and letters: a Cyrillic look-alike of an exact path waits.
