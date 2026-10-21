@@ -73,6 +73,8 @@ process.env.PATH = bin;
 function newCase(authMethod: string) {
   const root = mkdtempSync(join(tmpdir(), 'golden-case-'));
   for (const d of ['work', 'userhome', 'state', 'instance']) mkdirSync(join(root, d));
+  // The task file fullRequest names, as the coordinator writes one: a run whose task file can't be read doesn't start (#890).
+  writeFileSync(join(root, 'task.md'), JSON.stringify({ id: 'golden', done_when: [{ manual: 'x' }] }));
   writeFileSync(LOG, '');
   writeFileSync(AUTH, authMethod);
   return root;

@@ -21,6 +21,7 @@ import { RunFeed } from './run-feed.js';
 import { StuckDetector, stuckAction, type StuckMode, type StuckVerdict } from './stuck.js';
 import { RefusalTracker, type RefusedRequest } from './domain-requests.js';
 import { allowedDomainsOf, withAllowedDomains, withDeniedReads } from './sandbox.js';
+import { runReadDenials } from './read-denials.js';
 import { loadedSetProblem, type InitLoaded, type PluginRun } from './plugins/run.js';
 import { mcpRunArgs, type McpRun } from './mcp/client.js';
 import { limitHit, USAGE_LIMIT_TEXT, type LimitHit, type RateLimitInfo } from './usage-limit.js';
@@ -647,6 +648,10 @@ export class CliRunner implements AgentRunner {
       const refusal = projectSettingsRefusal(req.cwd, guard);
       if (refusal) return { reason: 'failed', detail: `${refusal}; not starting`, costUsd: 0, turns: 0, model: req.model };
     }
+    // INVARIANT (#890): a guarded run's task hidden paths and project secret paths are denied by its OS sandbox and
+    // its Read rules too, not only by the hook; when they can't be worked out, the run doesn't start.
+    const ownDenials = guard ? runReadDenials({ cwd: req.cwd, home: runEnv.HOME, ...(req.taskFile ? { taskFile: req.taskFile } : {}) }) : { paths: [] };
+    if ('error' in ownDenials) return { reason: 'failed', detail: `${ownDenials.error}; not starting`, costUsd: 0, turns: 0, model: req.model };
     // Preflight, inside the login's start lock: an unreadable status that mentions a token refresh (or any other
     // transient error) is reported with its text, and run() waits it out instead of starting claude.
     const status = req.provider ? { method: 'provider', text: '' } : claudeAuthStatus(runEnv, runAs, this.bin);
@@ -687,7 +692,9 @@ export class CliRunner implements AgentRunner {
     // An "allow once" host reaches this run's commands only; the lane's own settings are never changed.
     const allowed = req.allowOnce?.length && lane?.settings ? withAllowedDomains(lane.settings, req.allowOnce) : lane?.settings;
     // Every account profile's login file for this user, whichever it runs on: denied to its commands like its own.
-    const laneSettings = allowed && runAs && this.login ? withDeniedReads(allowed, this.login.credentialFiles(runAs)) : allowed;
+    const withLogins = allowed && runAs && this.login ? withDeniedReads(allowed, this.login.credentialFiles(runAs)) : allowed;
+    // The task's and project's own denials on top: the sandbox's when it is on, the Read rules always.
+    const laneSettings = ownDenials.paths.length ? withDeniedReads(withLogins ?? {}, ownDenials.paths) : withLogins;
     // The run's harness variables are pinned in --settings too: a project file's env would otherwise override them.
     const pinned = guard ? runSettings(guard, laneSettings, Object.fromEntries(Object.entries(env).filter((kv): kv is [string, string] => kv[0].startsWith(`${BRAND.envPrefix}_`) && kv[1] !== undefined))) : laneSettings;
     // An API-key instance: the key comes from its file through claude's apiKeyHelper (only a path is passed here),
@@ -709,7 +716,7 @@ export class CliRunner implements AgentRunner {
     const check = locked ? settingsCheckValue() : null;
     const settings = locked && check ? { ...locked, ...NO_ATTRIBUTION, [SETTINGS_CHECK_KEY]: check } : undefined;
     const agentFile = guard ? agentSettingsFileOf(guard) : undefined;
-    const settingsName = guard ? `the instance's agent settings${agentFile ? ` ${agentFile}` : ''}${laneSettings ? ", with the lane's" : ''}` : laneSettings ? "the lane's settings" : "the run's own settings";
+    const settingsName = guard ? `the instance's agent settings${agentFile ? ` ${agentFile}` : ''}${withLogins ? ", with the lane's" : ''}` : laneSettings ? "the lane's settings" : "the run's own settings";
     // Requests refused for the network, from the same stream the record and the feed read.
     const refusals = new RefusalTracker([...allowedDomainsOf(lane?.settings), ...(req.allowOnce ?? [])]);
     // The stuck-run guard reads the same stream; a stop verdict ends the run only in mode 'on'.
