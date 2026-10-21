@@ -1,7 +1,8 @@
 // What a change touches, as the review levels, the merge decision, the guards and the content checks read it (#683).
 //
 // Every reader in src/ of which paths a change touches or how many lines it changes goes through this module, except
-// two listed by name with why in test/change-files-renames.test.ts (src/comment-policy.ts and src/push-check.ts).
+// one listed by name with why in test/change-files-renames.test.ts (src/comment-policy.ts). The push limits read
+// theirs here too (rangeNames, #724).
 // That test is a word list, not a proof: it fails on a reader word (--name-only, --numstat, diff-tree, a `+++`
 // header, ...) in a file of src/ or scripts/ it doesn't list, but a flag built by concatenation, or a header regex
 // that never spells the header, gets past it.
@@ -129,6 +130,16 @@ const nameList = (cwd: string, args: string[], o: NameListOptions) =>
  */
 export function changedNames(cwd: string, args: string[], o: NameListOptions = {}): string[] {
   return names(must(nameList(cwd, args, o)));
+}
+
+/**
+ * The paths any commit in `range` (base..head) touches, not just its net diff: a file added and removed again still
+ * counts. A merge is read against its first parent; every submodule link is seen. Each path read by nameOf, once, so a
+ * name git would C-quote (a non-ASCII byte, a newline, a quote) is itself (#724). Throws when git fails.
+ */
+export function rangeNames(cwd: string, range: string): string[] {
+  if (range.startsWith('-')) throw new Error(`rangeNames: ${range} is not a range`);
+  return [...new Set(names(must(runBytes(cwd, ['log', '--format=', '--name-only', '--no-renames', '--diff-merges=first-parent', '--ignore-submodules=none', '-z', range]))))];
 }
 
 /** changedNames, or null when git fails (an unknown commit, no repo). */

@@ -6,7 +6,7 @@
 // The coordinator also runs pushProblems on each change before verifying it,
 // so a doomed change is caught before a long test run.
 import { execFileSync, spawnSync } from './os/child-process.js';
-import { sizeFiles } from './coordinator/change-files.js';
+import { rangeNames, sizeFiles } from './coordinator/change-files.js';
 import { globToRegExp } from './guardrails/glob.js';
 import { shownPath } from './path-text.js';
 import { lintSkill, SKILL_SECTIONS } from './skill-lint.js';
@@ -33,8 +33,9 @@ const listPaths = (paths: string[], n = 10) => list(paths.map(shownPath), n);
 export function pushProblems(cwd: string, base: string, head: string, limits: PushLimits): string[] {
   const range = `${base}..${head}`;
   const problems: string[] = [];
-  // Paths touched by any commit in the range, not just the net diff.
-  const touched = [...new Set(git(cwd, ['log', '--format=', '--name-only', '--no-renames', '--diff-merges=first-parent', range]).split('\n').filter(Boolean))];
+  // Paths touched by any commit in the range, not just the net diff, each as itself (#724): a name git would quote
+  // (a non-ASCII byte, a newline, a quote) is matched by its own bytes, not its quoted text.
+  const touched = rangeNames(cwd, range);
 
   const workflows = touched.filter((p) => p.startsWith(WORKFLOWS));
   if (workflows.length) problems.push(`changes CI workflows (${listPaths(workflows)}): the harness's GitHub credential has no Workflows permission, so GitHub refuses this push; a human makes workflow changes`);

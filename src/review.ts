@@ -402,6 +402,9 @@ export const SELF_MODIFICATION_PARTS: { what: string; globs: string[] }[] = [
       'test/engine-guard-locks.test.ts',
       // The test that keeps each lock glob that matches no file yet paired with its lock (#885).
       'test/not-yet-files-locks.test.ts',
+      // The rename, odd-byte and control-character guarantees, and the scan that keeps every changed-name reader in
+      // one helper (#688, locked by #724).
+      'test/change-files-renames.test.ts',
     ],
   },
   { what: 'the release procedure and the design rules', globs: ['docs/releasing.md', 'docs/design.md'] },
