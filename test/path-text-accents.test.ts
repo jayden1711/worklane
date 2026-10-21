@@ -23,8 +23,8 @@ function bareSingletons(): string[] {
   return out;
 }
 
-/** The rule: an accent on an ASCII letter is a character whose NFD is an ASCII letter then at least one combining mark. */
-const isAccent = (c: string) => /^[A-Za-z]\p{M}+$/u.test(c.normalize('NFD'));
+/** The rule: an accent on an ASCII letter is its own NFC form, and its NFD is an ASCII letter then at least one combining mark. */
+const isAccent = (c: string) => c === c.normalize('NFC') && /^[A-Za-z]\p{M}+$/u.test(c.normalize('NFD'));
 
 test('#763: the characters outside ASCII that decompose to a bare ASCII character (the Kelvin sign, the Greek question mark, the Greek varia) show escaped, never raw', () => {
   const singles = bareSingletons();

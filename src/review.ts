@@ -565,10 +565,26 @@ export function loadMoneyPaths(repo: string, src: ReviewConfig['money_path_sourc
     if (!m) throw new Error(`money_path_source: pattern not found in ${src.file}`);
     text = m[1] ?? m[0];
   }
-  const self = new RegExp(`^${file.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`);
+  const self = new MoneyGlob(new RegExp(`^${file.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`), file);
   const literals = [...text.matchAll(/\/((?:\\\/|[^/\n])+)\/([gimsuy]*)/g)].map((m) => new RegExp(m[1]!, m[2]!.replace('g', '')));
   if (literals.length) return [self, ...literals];
-  return [self, ...text.split('\n').map((l) => l.trim()).filter((l) => l && !l.startsWith('#')).map((g) => globToRegExp(g))];
+  return [self, ...text.split('\n').map((l) => l.trim()).filter((l) => l && !l.startsWith('#')).map((g) => new MoneyGlob(globToRegExp(g), g))];
+}
+
+/**
+ * A money path that came from a glob line of the money list (or is the list file's own name): it matches as its
+ * RegExp, unchanged, and keeps the glob, so the look-alike check (#763) compares it by skeleton like a locked glob
+ * (`payrnents/` with r, n for the m of `payments/**`). A regex literal from the list stays a plain RegExp, compared
+ * as src/confusables.ts lookalikeOf says (its letters mapped to their skeletons). Note: a list line with two slashes
+ * (`src/payments/**`) is read as a regex literal (`/payments/`), as before.
+ */
+export class MoneyGlob extends RegExp {
+  constructor(
+    re: RegExp,
+    readonly glob: string,
+  ) {
+    super(re.source, re.flags);
+  }
 }
 
 export function computeLevel(input: LevelInput, cfg: ReviewConfig, extraCategories: Record<string, string[]> = {}): LevelResult {
@@ -601,7 +617,8 @@ export function computeLevel(input: LevelInput, cfg: ReviewConfig, extraCategori
   const waiting = new Set([...cfg.levels.L3_human.when, ...(cfg.merge?.wait_categories ?? []), 'ci-config', ...Object.keys(lockedCategories(input.scope))]);
   const protectedPaths: Protected[] = [
     ...Object.entries(defs).flatMap(([c, globs]) => (waiting.has(c) ? globs.map((glob) => ({ glob, what: `${shownPath(glob)} (${c})` })) : [])),
-    ...input.moneyPaths.map((re) => ({ re, what: 'a money path' })),
+    // A money glob by skeleton, its own RegExp deciding what is its own; a regex literal by the path's readings.
+    ...input.moneyPaths.map((re): Protected => (re instanceof MoneyGlob ? { glob: re.glob, own: re, what: 'a money path' } : { re, what: 'a money path' })),
   ];
   // A path another odd-path category holds already (an invisible character, a top-level name outside ASCII, ...) waits
   // on that floor at L3; it isn't compared again, so its reason stays the one that says what is odd about it.

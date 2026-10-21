@@ -29,15 +29,16 @@ export const hasEdgeSpace = (path: string): boolean => /(?:^|\/) | (?:\/|$)/.tes
 /**
  * Whether a path holds a character outside ASCII other than an accent on an ASCII letter (#763): a letter of another
  * script, a fullwidth or mathematical letter, a long s, a symbol, a no-break space, the braille blank. Any of them can
- * read as an ASCII character it isn't (a Cyrillic e as `e`). An accented letter is a character whose canonical
- * decomposition (NFD) is an ASCII letter and then at least one combining mark (`naïve`, `café`). INVARIANT: nothing
- * else counts, so a character that decomposes to a bare ASCII one (the Kelvin sign to K), a lone combining mark, or a
- * sign with an overlay is escaped (#763 round 2). WHY a rule and not Unicode's look-alike table: this module imports
+ * read as an ASCII character it isn't (a Cyrillic e as `e`). An accented letter is a character that is its own NFC
+ * form and whose canonical decomposition (NFD) is an ASCII letter and then at least one combining mark (`naïve`,
+ * `café`). INVARIANT: nothing else counts, so a character that decomposes to a bare ASCII one (the Kelvin sign to K),
+ * a lone combining mark, a sign with an overlay (#763 round 2), or a twin of an accented letter that isn't its NFC
+ * form (the Angstrom sign beside the A with a ring above, round 3) is escaped. WHY a rule and not Unicode's look-alike table: this module imports
  * nothing (test/review-packet.test.ts), so it escapes every such name, look-alike or not. The replacement character
  * is left to isNonUtf8Path.
  */
 export const hasNonAccentCharacter = (path: string): boolean => {
-  for (const ch of path) if (/\P{ASCII}/u.test(ch) && ch !== '�' && !/^[A-Za-z]\p{M}+$/u.test(ch.normalize('NFD'))) return true;
+  for (const ch of path) if (/\P{ASCII}/u.test(ch) && ch !== '�' && !(ch === ch.normalize('NFC') && /^[A-Za-z]\p{M}+$/u.test(ch.normalize('NFD')))) return true;
   return false;
 };
 

@@ -101,8 +101,11 @@ function asciiReading(path: string): string {
   return out;
 }
 
-/** A protected path pattern: a glob (compared by skeleton) or a regex (a money path, compared by its ASCII reading). */
-export type Protected = { glob: string; what: string } | { re: RegExp; what: string };
+/**
+ * A protected path pattern: a glob (compared by skeleton; `own`, when given, decides what is the glob's own instead
+ * of the glob itself, as a money glob's RegExp does) or a regex (a money-list regex literal: see lookalikeOf).
+ */
+export type Protected = { glob: string; what: string; own?: RegExp } | { re: RegExp; what: string };
 
 /** A glob with each literal run (everything but `*` and `?`) mapped by `f`. A mapped `*` or `?` widens it: fails closed. */
 const mapGlob = (glob: string, f: (s: string) => string): string => glob.split(/([*?]+)/).map((part, i) => (i % 2 ? part : f(part))).join('');
@@ -135,6 +138,46 @@ function compile(kind: 'raw' | Form, glob: string): RegExp {
   return re;
 }
 
+/**
+ * A regex with each literal letter or digit (outside a class, an escape or a quantifier's braces) replaced by its
+ * skeleton, so it can be tested against a path's skeleton: a regex naming payments then holds the path spelled with
+ * r, n for its m. null when the mapped source isn't a valid regex (a group name holding such a letter, say): that
+ * regex is tested against the path's skeleton and readings as written.
+ */
+const skeletonRegExps = new WeakMap<RegExp, RegExp | null>();
+function skeletonRegExp(re: RegExp): RegExp | null {
+  if (skeletonRegExps.has(re)) return skeletonRegExps.get(re)!;
+  const src = re.source;
+  let out = '';
+  let inClass = false;
+  let inBraces = false;
+  for (let i = 0; i < src.length; i++) {
+    const c = src[i]!;
+    if (c === '\\') {
+      out += c + (src[i + 1] ?? '');
+      i++;
+    } else if (inClass || inBraces) {
+      out += c;
+      if (c === (inClass ? ']' : '}')) inClass = inBraces = false;
+    } else if (c === '[' || c === '{') {
+      out += c;
+      if (c === '[') inClass = true;
+      else inBraces = true;
+    } else {
+      const s = /^[A-Za-z0-9]$/.test(c) ? skeleton(c) : c;
+      out += s === c ? c : `(?:${s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})`;
+    }
+  }
+  let mapped: RegExp | null;
+  try {
+    mapped = new RegExp(out, re.flags.replace(/[gy]/g, ''));
+  } catch {
+    mapped = null;
+  }
+  skeletonRegExps.set(re, mapped);
+  return mapped;
+}
+
 /** Why a path counts as a look-alike: of which protected pattern, or that it wasn't compared (too long, or a failure). */
 export type Lookalike = { like: string } | { unchecked: string };
 
@@ -144,7 +187,9 @@ export type Lookalike = { like: string } | { unchecked: string };
  * file system may open it as the protected file: a long s for an s), or either of its compatibility form's does (a
  * fullwidth letter), while the path itself doesn't match that pattern. A name with a blank-looking character (a
  * space, a no-break space, the braille blank) is compared without them too. A path a pattern matches as itself is
- * that pattern's own and not a look-alike of it. Regexes (money paths) are tested against the path's ASCII readings.
+ * that pattern's own and not a look-alike of it. Regexes (money-list regex literals) are tested against the path's
+ * skeleton forms and ASCII readings, and, mapped by skeletonRegExp, against its skeleton forms. A letter inside a
+ * regex's character class isn't mapped (a residual: a money list of globs is compared fully).
  * null: no look-alike. Fails closed (see the module's INVARIANT).
  */
 export function lookalikeOf(path: string, patterns: readonly Protected[]): Lookalike | null {
@@ -155,14 +200,18 @@ export function lookalikeOf(path: string, patterns: readonly Protected[]): Looka
     const variants = bare === path ? [path] : [path, bare];
     const forms = variants.flatMap((v) => (wide ? WIDE_FORMS : ASCII_FORMS).map((f) => [f, FORMS[f](v)] as const));
     if (forms.some(([, s]) => s.length > MAX_CHECKED_SKELETON)) return { unchecked: `its skeleton is longer than ${MAX_CHECKED_SKELETON} characters` };
-    const readings = wide || bare !== path ? variants.flatMap((v) => [v, compat(v)]).flatMap((s) => [asciiReading(s), asciiReading(fold(s))]) : [];
+    // A regex can't be skeletonized, so it is tested against the path's skeleton forms (fails closed: any path whose
+    // skeleton the regex matches is held) and, for a name outside ASCII or with a blank, its ASCII readings.
+    const readings = [...forms.map(([, s]) => s), ...(wide || bare !== path ? variants.flatMap((v) => [v, compat(v)]).flatMap((s) => [asciiReading(s), asciiReading(fold(s))]) : [])];
     for (const p of patterns) {
       if ('glob' in p) {
-        if (compile('raw', p.glob).test(path)) continue;
+        if ((p.own ?? compile('raw', p.glob)).test(path)) continue;
         if (forms.some(([f, s]) => compile(f, p.glob).test(s))) return { like: p.what };
       } else {
         if (p.re.test(path)) continue;
         if (readings.some((r) => p.re.test(r))) return { like: p.what };
+        const mapped = skeletonRegExp(p.re);
+        if (mapped && forms.some(([, s]) => mapped.test(s))) return { like: p.what };
       }
     }
     return null;
