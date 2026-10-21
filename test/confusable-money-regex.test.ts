@@ -12,7 +12,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { computeLevel, escapedPath, MoneyGlob, moneyListCheck, moneyListEntries, moneyListProblems, RefusedMoneyLine, regexToGlob, type ChangeFile } from '../src/review.js';
+import { computeLevel, escapedPath, MONEY_COMMENT_SYNTAX, MoneyGlob, moneyListCheck, moneyListEntries,moneyListProblems, RefusedMoneyLine, regexToGlob, type ChangeFile } from '../src/review.js';
 
 const CYRILLIC_A = 'а';
 
@@ -47,9 +47,11 @@ test('#763: a line is a regex only as a /.../flags token; src/payments/** is a g
   // A list of globs: each line a glob. Main read the /payments/ inside the first line as a regex, so that stays too,
   // as main's own RegExp for money-path membership only (round 7: never refused, never compared for look-alikes).
   assert.deepEqual(read('src/payments/**\nbilling/**\n**/ledger.ts'), ['src/payments/**', 'billing/**', '**/ledger.ts', '/payments/']);
-  // A list of regexes, one a line (a trailing comma allowed), or a code array: tokens converted or refused.
+  // A list of regexes, one a line (a trailing comma allowed): each converted or refused.
   assert.deepEqual(read('/^lib\\/pay\\.ts$/,\n/billing/i'), ['lib/pay.ts', 'refused /billing/i']);
-  assert.deepEqual(read('const MONEY = [/^src\\/payments\\//, /invoice/];'), ['src/payments/**', '**invoice**']);
+  // Round 10 (the coordinator's decision: every line read whole): a code line holding regexes beside other text is
+  // refused, never read in part (it was read as its two regexes); main's readings of it stay for membership.
+  assert.deepEqual(read('const MONEY = [/^src\\/payments\\//, /invoice/];'), ['refused const MONEY = [/^src\\/payments\\//, /invoice/];', '/^src\\/payments\\//', '/invoice/']);
   // Beside a regex line, a glob line without a space is read as a glob too (main read only the regex).
   assert.deepEqual(read('/invoice/\nbilling/**'), ['**invoice**', 'billing/**']);
   // There, a list item is refused rather than skipped as code (round 7), and code stays code.
@@ -75,7 +77,10 @@ test('#763: doctor\'s money-list check fails on each refused line with its sugge
   };
   const src = { file: 'money.txt' } as Parameters<typeof moneyListCheck>[1];
   commit('/billing/i\npayments/**\n');
-  assert.deepEqual(moneyListCheck(dir, src, 'HEAD'), { level: 'fail', detail: '/billing/i isn\'t a glob (its flags (i) ask for more than a glob says (a glob matches case as written)): every PR waits until it is rewritten as globs, for example **billing**' });
+  assert.deepEqual(moneyListCheck(dir, src, 'HEAD'), {
+    level: 'fail',
+    detail: `/billing/i isn't a glob (its flags (i) ask for more than a glob says (a glob matches case as written)): every PR waits until it is rewritten as globs, for example **billing**\neach line is read whole (a comment is ${MONEY_COMMENT_SYNTAX})`,
+  });
   commit('/^src\\/payments\\//\nbilling/**\n');
   assert.equal(moneyListCheck(dir, src, 'HEAD').level, 'ok');
   assert.equal(moneyListCheck(dir, src, 'origin/main').level, 'warn');

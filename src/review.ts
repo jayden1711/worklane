@@ -603,10 +603,13 @@ const REGEX_LITERAL = String.raw`\/((?:\\.|\[(?:\\.|[^\]\\\n])*\]|[^/\\\n[])+)\/
 
 /**
  * The money list's entries (#763 round 6, the owner's call: money paths are globs only). How a line is read:
- * - A `/regex/flags` token is a regex: a whole line `/.../flags` (a trailing comma allowed), or such a token that
- *   starts the line or follows a space, a comma, `[`, `(`, `=` or `:`, and ends the line or comes before a space, a
- *   comma, `;`, `]` or `)`, read as JS reads a regex literal (REGEX_LITERAL, round 8). `src/payments/**` holds no
- *   token (its first `/` follows a letter), so it is a glob.
+ * - Round 10 (the coordinator's decision): each line is read whole. Its comment comes off first, by one syntax
+ *   (withoutComment, MONEY_COMMENT_SYNTAX, which doctor names); what is left is exactly one `/regex/flags` (a trailing
+ *   comma allowed), read as JS reads a regex literal (REGEX_LITERAL, round 8), or one glob line. A line holding a
+ *   regex token (one that starts the line or follows a space, a comma, `[`, `(`, `=` or `:`, and ends it or comes
+ *   before a space, a comma, `;`, `]` or `)`) beside other text is refused, never read in part: before, a glob line
+ *   whose comment named a path between slashes was read as that regex alone, its glob dropped (the round-9 review).
+ *   `src/payments/**` holds no token (its first `/` follows a letter), so it is a glob.
  * - A regex is converted to a glob when that is mechanical (regexToGlob), and refused otherwise, as is one that
  *   isn't a valid regex at all (round 7): a RefusedMoneyLine, which holds every change until the list is fixed.
  * - Every other line is a glob line (globLine): read as the glob it is, never refused for what main made of it
@@ -638,9 +641,12 @@ export function moneyListEntries(text: string): RegExp[] {
   const once = (key: string): boolean => !seen.has(key) && !!seen.add(key);
   /** Each glob line's entry, by its glob: one entry a glob, its `before` set from every line that reads as it. */
   const globs = new Map<string, MoneyGlob>();
-  const lines =text.split('\n').map((l) => l.trim()).filter((l) => l && !l.startsWith('#'));
+  const lines = text.split('\n').map((l) => l.trim()).filter((l) => l && !l.startsWith('#'));
   const TOKEN = new RegExp(`(?<=^|[\\s,[(=:])${REGEX_LITERAL}(?=$|[\\s,;\\])])`, 'g');
-  const regexMode = lines.some((l) => [...l.matchAll(TOKEN)].length > 0);
+  const WHOLE_REGEX = new RegExp(`^${REGEX_LITERAL},?$`);
+  const hasToken = (s: string): boolean => [...s.matchAll(TOKEN)].length > 0;
+  // Round 10: each line read whole, once its comment is off (withoutComment, the one syntax).
+  const regexMode = lines.some((l) => hasToken(withoutComment(l)));
   // Main's reading (its pattern, before any line is read): did it find a /.../ at all, and which compiled.
   const fragments = [...text.matchAll(/\/((?:\\\/|[^/\n])+)\/([gimsuy]*)/g)];
   /** Main's RegExps, one a fragment, or null when one didn't compile (main threw for the whole list). */
@@ -676,12 +682,20 @@ export function moneyListEntries(text: string): RegExp[] {
     if (once(`kept:${re.source}/${re.flags}`)) out.push(new KeptMoneyReading(re.source, re.flags));
   };
   for (const line of lines) {
-    const tokens = [...line.matchAll(TOKEN)];
-    for (const t of tokens) regex(t[0], t[1]!, t[2]!);
-    if (tokens.length) continue;
+    const rest = withoutComment(line);
+    // Round 10: a line is one regex, whole (a trailing comma allowed), or holds none: never a regex read out of it.
+    const whole = WHOLE_REGEX.exec(rest);
+    if (whole) {
+      regex(rest.replace(/,$/, ''), whole[1]!, whole[2]!);
+      continue;
+    }
+    if (hasToken(rest)) {
+      if (once(`refused:${line}`)) out.push(new RefusedMoneyLine(line, 'it holds a regex beside other text (one line is one glob or one regex, read whole)', '**'));
+      continue;
+    }
     // Beside regexes, a line with a space is code, unless it is a list item (`- billing/**`), which is refused below.
-    if (regexMode && (/\s/.test(unwrapped(line).replace(/^-\s+/, '')) || !/[A-Za-z0-9]/.test(line) || line.startsWith('//'))) continue;
-    const g = globLine(line);
+    if (regexMode && (/\s/.test(unwrapped(rest).replace(/^-\s+/, '')) || !/[A-Za-z0-9]/.test(rest) || rest.startsWith('//'))) continue;
+    const g = globLine(rest);
     if ('glob' in g) {
       let entry = globs.get(g.glob);
       if (!entry) {
@@ -707,12 +721,32 @@ export function moneyListEntries(text: string): RegExp[] {
   return out;
 }
 
-/** A line with a trailing ` # comment` and quotes around the whole of it taken off (globLine's mechanical part). */
+/**
+ * A money-list line without its trailing comment (#763 round 10: the one comment syntax, which doctor names too): a `#`
+ * or `//` that follows a blank (a space or a tab), outside quotes (`'`, `"` or a backquote), starts a comment that
+ * runs to the end of the line. A line that starts with `#` is a comment line. Nothing else is a comment: a `#` or `//`
+ * inside a regex literal after a blank ends the line there too, and what is left is refused (fails closed).
+ */
+export function withoutComment(line: string): string {
+  let quote = '';
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i]!;
+    if (quote) {
+      if (c === quote) quote = '';
+    } else if (c === "'" || c === '"' || c === '`') quote = c;
+    else if (i > 0 && (line[i - 1] === ' ' || line[i - 1] === '\t') && (c === '#' || (c === '/' && line[i + 1] === '/'))) return line.slice(0, i).trimEnd();
+  }
+  return line;
+}
+
+/** The text of a line once its comment (withoutComment) and quotes around the whole of it are off (globLine's mechanical part). */
 function unwrapped(line: string): string {
-  // A ` # ` or (round 8) ` // ` comment: no git path holds `//`, so the line as written matched nothing there.
-  const bare = /^(.*?\S)\s+(?:#|\/\/).*$/.exec(line)?.[1] ?? line;
+  const bare = withoutComment(line);
   return /^(['"`])([^'"`\\]*)\1,?$/.exec(bare)?.[2] ?? bare;
 }
+
+/** What doctor says a money-list comment is (round 10): the syntax withoutComment reads. */
+export const MONEY_COMMENT_SYNTAX = 'a # or // after a space or tab, outside quotes, to the end of the line; or a line that starts with #';
 
 /**
  * What in a glob line the glob matcher (globToRegExp) reads literally, though other glob dialects read it as syntax,
@@ -734,6 +768,8 @@ export function globLineProblem(glob: string): string | null {
   if (/^\//.test(glob)) return 'a git path never starts with /';
   if (/\/\//.test(glob)) return 'a git path never holds //';
   if (/[,;]$/.test(glob)) return 'a trailing , or ; is read as part of the name';
+  // Round 10: `./` alone is the empty glob, which matches no path.
+  if (glob.replace(/^\.\//, '') === '') return 'it names no path (./ alone matches nothing)';
   // Round 9: a `.` or `..` segment (a leading `./` aside, which the matcher drops): git stores neither.
   if (/(?:^|\/)\.\.?(?:\/|$)/.test(glob.replace(/^\.\//, ''))) return 'a git path never has a . or .. segment';
   return null;
@@ -849,7 +885,9 @@ export function regexToGlob(body: string, flags: string): { glob: string } | { w
       const part = w.startsWith('.') ? '**' : w.endsWith('*') ? '*' : w.endsWith('+') || flags.includes('u') ? '?*' : '?';
       glob += part;
       loose += part;
-      lastLiteral = 0;
+      // Round 10: a quantifier after it (`[^/]?`, `[^/]{0,2}`) may match none of it, so it can be trimmed like a
+      // literal and the suggestion reads `**` there (was: `src/x?**.ts` for `^src\/x[^/]?\.ts$`, missing src/x.ts).
+      lastLiteral = part.length;
       i += w.length;
       continue;
     }
@@ -962,10 +1000,12 @@ export function moneyListCheck(repo: string, src: ReviewConfig['money_path_sourc
     return { level: 'warn', detail: (e as Error).message };
   }
   const refused = money.filter((re): re is RefusedMoneyLine => re instanceof RefusedMoneyLine);
-  if (!refused.length) return { level: 'ok', detail: 'money paths are globs only: every line of the money list is a glob or converts to one' };
+  // Round 10: doctor names the one comment syntax, so an owner knows what is read and what isn't.
+  const comments = `(a comment is ${MONEY_COMMENT_SYNTAX})`;
+  if (!refused.length) return { level: 'ok', detail: `money paths are globs only: every line of the money list, read whole, is one glob or one regex that converts to one ${comments}` };
   return {
     level: 'fail',
-    detail: refused.map((p) => `${p.line} ${p.literal ? 'would be read literally' : "isn't a glob"} (${p.why}): every PR waits until it is rewritten as globs, for example ${p.suggestion}`).join('\n'),
+    detail: [...refused.map((p) => `${p.line} ${p.literal ? 'would be read literally' : "isn't a glob"} (${p.why}): every PR waits until it is rewritten as globs, for example ${p.suggestion}`), `each line is read whole ${comments}`].join('\n'),
   };
 }
 
