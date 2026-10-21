@@ -7,10 +7,10 @@
 // with everything under it; a trailing `/**` means the directory; any other glob is expanded to what exists each
 // time a command is wrapped, following symlinked directories. A path that doesn't exist then hides nothing, and `[`
 // `]` are glob syntax there (`?` is any one character but "/").
-import { existsSync, lstatSync, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
+import { existsSync, lstatSync, readdirSync, realpathSync, statSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, posix, resolve } from 'node:path';
 import { BRAND } from './brand.js';
-import { ConfigInvalid, loadConfig, loadConfigAt } from './config/load.js';
+import { ConfigInvalid, loadConfig, loadConfigAt, readRegular } from './config/load.js';
 import { TaskFile } from './contract.js';
 import { projectStateDir } from './guardrails/context.js';
 import { spawnSync } from './os/child-process.js';
@@ -72,6 +72,8 @@ const SANDBOX_ONLY_GLOB = /[[\]]/;
 const asEntry = (p: string) => p.replace(/[[\]]/g, '?');
 
 const firstLine = (e: unknown) => (e as Error).message.split('\n')[0]!.slice(0, 200);
+/** Why a config didn't load: each of its errors (a ConfigInvalid's first line names none), or the error's first line. */
+const configWhy = (e: unknown) => (e instanceof ConfigInvalid ? e.errors.map((x) => `${x.file}${x.path ? ` at ${x.path}` : ''}: ${x.message}`).join('; ').slice(0, 400) : firstLine(e));
 /** One step of a compiled glob: a character, any one but "/", any run but "/", any run, or a jump (an optional part). */
 type Step = { k: 'char'; c: string } | { k: 'one' } | { k: 'star' } | { k: 'any' } | { k: 'skip'; to: number };
 
@@ -177,8 +179,13 @@ interface Repository {
  * (core.worktree, which a submodule's git directory holds); a bare repository has none. A git directory made apart
  * from its checkout (`git init --separate-git-dir`) records nothing that leads back (measured, git 2.43.0), so
  * `mainUnknown` is set, and the caller needs the checkout from elsewhere or refuses.
+ *
+ * `repoCommon` (the real path of the instance's own repository's common git directory): the common git directory
+ * `start` leads to must be that one, or nothing more is read and git isn't run. WHY (round 9): a worktree's `.git` is
+ * a file its agent can write, so it can lead to a git directory of the agent's own making, whose config or alternates
+ * is a FIFO: git waits on it until its timeout, holding the coordinator's process (measured: 60 s per run start).
  */
-export function gitStores(start: string, withStores = true): Repository | { error: string } {
+export function gitStores(start: string, withStores = true, repoCommon?: string): Repository | { error: string } {
   let dir = resolve(start);
   let dotGit = join(dir, '.git');
   for (;;) {
@@ -192,13 +199,13 @@ export function gitStores(start: string, withStores = true): Repository | { erro
     }
   }
   try {
-    let gitDir = dotGit;
-    if (!lstatSync(dotGit).isDirectory()) {
-      const m = /^gitdir: *(.+)$/m.exec(readFileSync(dotGit, 'utf8'));
-      if (!m) return { error: `${dotGit} names no git directory` };
-      gitDir = resolve(dir, m[1]!.trim());
+    const at = gitDirsAt(dir);
+    if ('error' in at) return at;
+    if (repoCommon !== undefined && realOrNull(at.common) !== repoCommon) {
+      return { error: `${dotGit} leads to the git directory ${at.common}, not the repository's own (${repoCommon}), so it isn't read and git isn't run on it` };
     }
-    const common = resolve(gitDir, optional(join(gitDir, 'commondir'))?.trim() || '.');
+    // From here on, the checked real path, never the one the agent's files spelled (a link it could swap after the check).
+    const common = repoCommon ?? at.common;
     let main: string | null = null;
     let mainUnknown = false;
     if (basename(common) === '.git') main = dirname(common);
@@ -239,6 +246,32 @@ export function gitStores(start: string, withStores = true): Repository | { erro
     return { error: `the git repository at ${dotGit} can't be read (${firstLine(e)})` };
   }
 }
+
+/**
+ * The git directory and the common git directory `<dir>/.git` leads to: the directory itself, or the one a `.git`
+ * file names (and its commondir). The agent of a worktree can write that file, and so lead to commondir files of its
+ * own: each is read with readRegular, never a read that waits on a FIFO (see there). Other failures throw.
+ */
+export function gitDirsAt(dir: string): { gitDir: string; common: string } | { error: string } {
+  const dotGit = join(dir, '.git');
+  let gitDir = dotGit;
+  if (!lstatSync(dotGit).isDirectory()) {
+    const text = readRegular(dotGit);
+    if (text === null) return { error: `${dotGit} went away while it was read` };
+    const m = /^gitdir: *(.+)$/m.exec(text);
+    if (!m) return { error: `${dotGit} names no git directory` };
+    gitDir = resolve(dir, m[1]!.trim());
+  }
+  return { gitDir, common: resolve(gitDir, optional(join(gitDir, 'commondir'))?.trim() || '.') };
+}
+
+const realOrNull = (p: string) => {
+  try {
+    return realpathSync(p);
+  } catch {
+    return null;
+  }
+};
 
 /**
  * git, run on the git directory `common` alone: with none of this process's GIT_* variables, a C locale, no prompt,
@@ -350,14 +383,9 @@ function linkTargets(dirs: string[]): string[] {
   return out;
 }
 
-/** A file's text, or null when there is none; any other failure throws. */
+/** A file's text, or null when there is none; anything but a regular file of bounded size, or any other failure, throws. */
 function optional(file: string): string | null {
-  try {
-    return readFileSync(file, 'utf8');
-  } catch (e) {
-    if ((e as NodeJS.ErrnoException).code === 'ENOENT') return null;
-    throw e;
-  }
+  return readRegular(file);
 }
 
 function listing(dir: string): string[] {
@@ -464,6 +492,10 @@ function linksToDirectory(link: string): boolean {
  * `repo` is the instance's repository path, the coordinator's own record of the main checkout: always a checkout here,
  * whatever the run's `.git` says.
  *
+ * Every file read here from the run's checkout (its agent can write them: `.git`, the commondir and gitdir files it
+ * leads to, the config folder's files, the task file) is read with readRegular: only a regular file of bounded size,
+ * never a read that waits on a FIFO, which in the coordinator's process would hold every run and stop (round 9).
+ *
  * Fail closed: a task file or project config that can't be read, a pattern the sandbox can't take as written, an
  * object store chain that can't be followed in full, or a main checkout that can't be found (no `repo`, and a git
  * directory that leads nowhere back), is an error, and the run doesn't start.
@@ -472,7 +504,9 @@ export function runReadDenials(o: { cwd: string; home: string | undefined; taskF
   let hidden: string[] = [];
   if (o.taskFile) {
     try {
-      hidden = TaskFile.parse(JSON.parse(readFileSync(o.taskFile, 'utf8'))).hidden;
+      const text = readRegular(o.taskFile);
+      if (text === null) throw new Error('missing');
+      hidden = TaskFile.parse(JSON.parse(text)).hidden;
     } catch (e) {
       return { error: `the task file ${o.taskFile} can't be read (${firstLine(e)}), so its hidden paths can't be denied` };
     }
@@ -489,9 +523,22 @@ export function runReadDenials(o: { cwd: string; home: string | undefined; taskF
   try {
     cfg = loadConfig(root);
   } catch (e) {
-    return { error: `the guardrails in ${root} can't load (${firstLine(e)}), so its secret paths can't be denied` };
+    return { error: `the guardrails in ${root} can't load (${configWhy(e)}), so its secret paths can't be denied` };
   }
-  const repo = gitStores(root, hidden.length > 0);
+  // The instance's own repository's common git directory: the run's checkout must lead to it (see gitStores).
+  let repoCommon: string | undefined;
+  if (o.repo) {
+    try {
+      const at = gitDirsAt(resolve(o.repo));
+      if ('error' in at) return at;
+      const real = realOrNull(at.common);
+      if (real === null) return { error: `the repository's git directory ${at.common} isn't there, so the run's can't be checked against it` };
+      repoCommon = real;
+    } catch (e) {
+      return { error: `the repository at ${o.repo} can't be read (${firstLine(e)}), so the run's git directory can't be checked against it` };
+    }
+  }
+  const repo = gitStores(root, hidden.length > 0, repoCommon);
   if ('error' in repo) return repo;
   const main = o.repo ? resolve(o.repo) : repo.main;
   if (!main && repo.mainUnknown) return { error: `the main checkout of the repository around ${o.cwd} can't be found (its git directory isn't <checkout>/.git and records no core.worktree), so its hidden and secret paths can't be denied` };
@@ -503,12 +550,13 @@ export function runReadDenials(o: { cwd: string; home: string | undefined; taskF
     try {
       configs.push(loadConfig(main));
     } catch (e) {
-      return { error: `the guardrails in ${main} can't load (${firstLine(e)}), so its secret paths can't be denied` };
+      return { error: `the guardrails in ${main} can't load (${configWhy(e)}), so its secret paths can't be denied` };
     }
   }
-  // The default branch is the one the coordinator names (it started with it), never one a config an agent can write
-  // names: a main-checkout run could point default_branch at a ref that isn't there (measured, round-7 review). Its
-  // committed config is never skipped:
+  // The default branch is the one the coordinator names (it started with it), never one a config read here names: a
+  // main-checkout run could point default_branch at a ref that isn't there (measured, round-7 review). The coordinator
+  // takes it from the config it started with, which a restart re-reads from the main checkout's working tree: that
+  // route is #963, not closed here. Its committed config is never skipped:
   // - it loads: its secret_paths count;
   // - it is invalid: the run doesn't start;
   // - there is none there (no such ref, or no config folder at it): the secret_paths of the config the coordinator
@@ -523,7 +571,7 @@ export function runReadDenials(o: { cwd: string; home: string | undefined; taskF
       configs.push(loadConfigAt(main ?? root, ref));
     } catch (e) {
       const missing = e instanceof ConfigInvalid && e.errors.every((x) => x.message === `missing at ${ref}`);
-      if (!missing || !o.startSecrets) return { error: `the guardrails on the default branch (origin/${o.defaultBranch}) can't be read (${firstLine(e)}), so its secret paths can't be denied` };
+      if (!missing || !o.startSecrets) return { error: `the guardrails on the default branch (origin/${o.defaultBranch}) can't be read (${configWhy(e)}), so its secret paths can't be denied` };
       extra.push([...o.startSecrets]);
     }
   }
