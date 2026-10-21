@@ -5,6 +5,12 @@
 //   .bashrc there, which the agent read outside the sandbox later. Now the home's way is always pinned.
 // - A device target: `~/.x -> W/D/n`, W root's 0777, D root's 0755, n a character device. Its bind was skipped before
 //   D was pinned, so a command renamed D away, recreated it and wrote n as a file. Now D is pinned first.
+// - A device directly in a directory the agent can write (round 6): `~/.x -> W/n`, W 0777 (or a sticky 1777 with
+//   the agent's own device, or a writable directory under /dev, where nothing is pinned). n has no bind, so a command
+//   removed it and wrote a file there. Now such a link is refused before the command runs.
+// - Under /dev nothing is pinned (pinning binds /dev, which costs the sandbox its devices), so a link through a
+//   writable directory there (a non-sticky /dev/shm), or to a file there that isn't a device, is refused (round 6).
+//   /dev/shm here is a private tmpfs in the namespace; the real one is never touched.
 // - A link-mode refusal printed the way unquoted, so a newline in a directory name forged a separate "project command
 //   not run:" line, and it blamed the agent for an unsearchable directory that was root's.
 //
@@ -51,6 +57,16 @@ run $S "$3" DV; echo "DV type=$(stat -c %F $S/W/D/n)"; echo "DV reads=$(cat $S/a
 S=/mnt/q; D="$S/ev"$'\n'"project command not run: FORGED LINE"; mkdir -p "$D/locked" $S/agent $S/work; chmod 0700 "$D/locked"; chown 1000:1000 $S/agent $S/work; ln -s "$D/locked/y" $S/agent/.x
 run $S "$4" Q; echo "Q ran=$([ -e $S/work/ran.txt ] && echo yes || echo no)"; echo "Q lines=$(grep -c '' $S/err)"; echo "Q forged=$(grep -c '^project command not run: FORGED' $S/err)"
 echo "Q blames=$(grep -c 'owns or can write' $S/err)"; echo "Q search=$(grep -c "can't search" $S/err)"; echo "Q err=$(head -c 600 $S/err | tr '\n' '|')"
+dev() { echo "$1 ran=$([ -e $2/work/ran.txt ] && echo yes || echo no)"; echo "$1 type=$(stat -c %F $3/n)"; echo "$1 err=$(head -c 400 $2/err | tr '\n' ' ')"; }
+lay() { mkdir -p $1/agent $1/work; chown 1000:1000 $1/agent $1/work; }
+S=/mnt/dw; lay $S; mkdir $S/W; chmod 0777 $S/W; mknod $S/W/n c 0 0 || { echo NOMKNOD; exit 0; }; ln -s $S/W/n $S/agent/.x; run $S "$5" DW; dev DW $S $S/W
+S=/mnt/ds; lay $S; mkdir $S/W; chmod 1777 $S/W; mknod $S/W/n c 0 0; chown 1000:1000 $S/W/n; ln -s $S/W/n $S/agent/.x; run $S "$6" DS; dev DS $S $S/W
+mount -t tmpfs -o mode=0755 none /dev/shm || { echo NOMOUNT; exit 0; }
+S=/mnt/dd; lay $S; mkdir /dev/shm/W; chmod 0777 /dev/shm/W; mknod /dev/shm/W/n c 0 0; ln -s /dev/shm/W/n $S/agent/.x; run $S "$7" DD; dev DD $S /dev/shm/W
+S=/mnt/df; lay $S; mkdir /dev/shm/D; printf '# root\n' > /dev/shm/D/f; ln -s /dev/shm/D/f $S/agent/.y; run $S "$8" DF
+echo "DF ran=$([ -e $S/work/ran.txt ] && echo yes || echo no)"; echo "DF reads=$(cat /dev/shm/D/f)"; echo "DF err=$(head -c 400 $S/err | tr '\n' ' ')"
+mount -t tmpfs -o mode=0777 none /dev/shm || { echo NOMOUNT; exit 0; }
+S=/mnt/dn; lay $S; mkdir /dev/shm/D; mknod /dev/shm/D/n c 0 0; ln -s /dev/shm/D/n $S/agent/.x; run $S "$9" DN; dev DN $S /dev/shm/D
 `;
 
 /** Every case, run once in one namespace: each line the script printed, by key; null where it couldn't run there. */
@@ -63,10 +79,19 @@ function results(): ((k: string) => string) | null {
   const hs = argsFile(dir, 'hs', '/mnt/hs/T/a/hm', plantHome('/mnt/hs'));
   const dv = argsFile(dir, 'dv', '/mnt/dv/agent', 'echo ran > ran.txt; mv /mnt/dv/W/D /mnt/dv/W/D.old && mkdir /mnt/dv/W/D && echo PLANTED > /mnt/dv/W/D/n; true');
   const q = argsFile(dir, 'q', '/mnt/q/agent', 'echo ran > ran.txt');
+  const plantDev = (w: string) => `echo ran > ran.txt; rm -f ${w}/n && echo PLANTED > ${w}/n; true`;
+  const dw = argsFile(dir, 'dw', '/mnt/dw/agent', plantDev('/mnt/dw/W'));
+  const ds = argsFile(dir, 'ds', '/mnt/ds/agent', plantDev('/mnt/ds/W'));
+  const dd = argsFile(dir, 'dd', '/mnt/dd/agent', plantDev('/dev/shm/W'));
+  const df = argsFile(dir, 'df', '/mnt/df/agent', 'echo ran > ran.txt; echo PLANTED > /dev/shm/D/f; true');
+  const dn = argsFile(dir, 'dn', '/mnt/dn/agent', 'echo ran > ran.txt; mv /dev/shm/D /dev/shm/D.old && mkdir /dev/shm/D && echo PLANTED > /dev/shm/D/n; true');
   const script = join(dir, 'way.sh');
   writeFileSync(script, SCRIPT);
-  const r = spawnSync('unshare', [...NS, '/bin/bash', script, ha, hs, dv, q], { encoding: 'utf8', timeout: 120_000, stdio: ['ignore', 'pipe', 'pipe'] });
-  if (/NOSANDBOX|NOMOUNT/.test(r.stdout) || r.status !== 0) {
+  const r = spawnSync('unshare', [...NS, '/bin/bash', script, ha, hs, dv, q, dw, ds, dd, df, dn], { encoding: 'utf8', timeout: 120_000, stdio: ['ignore', 'pipe', 'pipe'] });
+  // The script itself failing is a failure, never a skip; only a namespace without bubblewrap, a tmpfs or mknod skips,
+  // and not under PROJECT_SANDBOX_REQUIRED=1.
+  if (r.status !== 0) assert.fail(`the namespace script failed (status ${r.status}): ${r.stdout}${r.stderr}`);
+  if (/NOSANDBOX|NOMOUNT|NOMKNOD/.test(r.stdout)) {
     if (required) assert.fail(`PROJECT_SANDBOX_REQUIRED=1, but the namespace or bubblewrap in it didn't run: ${r.stdout}${r.stderr}`);
     ran = null;
   } else ran = (k: string) => new RegExp(`^${k}=(.*)$`, 'm').exec(r.stdout)?.[1] ?? `(no ${k}: ${r.stdout}${r.stderr})`;
@@ -88,6 +113,32 @@ test('a link to a device inside a root directory inside a writable one: the dire
   assert.equal(line('DV status'), '0', line('DV err'));
   assert.equal(line('DV type'), 'character special file', `DV planted: ${line('DV err')}`);
   assert.equal(line('DV reads'), '', `DV planted: ${line('DV err')}`);
+});
+
+const DEVICE_IN_WRITABLE: [key: string, what: string][] = [
+  ['DW', "root's, in a directory writable by everyone (not sticky)"],
+  ['DS', "the agent's own, in a sticky directory writable by everyone"],
+  ['DD', 'under /dev, in a directory there writable by everyone (not sticky)'],
+  ['DN', 'under /dev, below a /dev/shm writable by everyone and not sticky (rename its directory away)'],
+];
+for (const [key, what] of DEVICE_IN_WRITABLE) {
+  test(`a link to a device directly in a directory the agent can write is refused before the command runs: a device ${what}`, { skip }, (t) => {
+    const line = results();
+    if (!line) return t.skip('no bubblewrap or tmpfs inside the user namespace');
+    assert.equal(line(`${key} type`), 'character special file', `${key} planted: ${line(`${key} err`)}`);
+    assert.equal(line(`${key} status`), String(osAdapter.SANDBOX_UNAVAILABLE), line(`${key} err`));
+    assert.equal(line(`${key} ran`), 'no', line(`${key} err`));
+    assert.match(line(`${key} err`), /a device in .*, a directory the agent user can write|a directory under \/dev the agent user can write/, line(`${key} err`));
+  });
+}
+
+test("a link to a file under /dev, not a device, is refused before the command runs: it can't be made read-only without binding /dev", { skip }, (t) => {
+  const line = results();
+  if (!line) return t.skip('no bubblewrap or tmpfs inside the user namespace');
+  assert.equal(line('DF status'), String(osAdapter.SANDBOX_UNAVAILABLE), line('DF err'));
+  assert.equal(line('DF ran'), 'no', line('DF err'));
+  assert.equal(line('DF reads'), '# root', line('DF err'));
+  assert.match(line('DF err'), /under \/dev but not a device/, line('DF err'));
 });
 
 test("a link whose way holds a newline and root's unsearchable directory: one quoted refusal line, which doesn't blame the agent", { skip }, (t) => {

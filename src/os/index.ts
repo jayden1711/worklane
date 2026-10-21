@@ -782,19 +782,28 @@ const LINUX_SANDBOX = [
   '    c=${todo%%/*}; if [ "$c" = "$todo" ]; then todo=; else todo=${todo#*/}; fi',
   // A `..` (only in a root link's target; hide paths with one are refused) binds the directory it leaves first: no
   // command can remove or rename it.
-  '    case $c in ""|.) continue ;; ..) [ -n "$cur" ] && above "$cur/."; cur=${cur%/*}; st "${cur:-/}"',
+  // (In link mode, a `..` that leaves a directory under /dev is refused: pinning it would bind /dev, below.)
+  '    case $c in ""|.) continue ;; ..) if [ -n "$lk" ]; then case $cur in /dev|/dev/*) unres "$1" "climbs out of a directory under /dev with .. (pinning it would cost the sandbox its devices)"; return 2 ;; esac; fi',
+  '      [ -n "$cur" ] && above "$cur/."; cur=${cur%/*}; st "${cur:-/}"',
   '      if [ "$S" -ne 0 ]; then unres "$1" "cannot be checked ($E)"; return 2; fi',
   '      cw=0; if [ "$U" = "$UID" ] || [ -w "$cur/" ]; then cw=1 own=1; fi; hop "$cur"; continue ;; esac',
   `    if [ "\${#c}" -gt 255 ] || [ $((\${#cur} + \${#c} + 1)) -ge 4096 ]; then unres "$1" "resolves to a name too long to check"; return 2; fi`,
   '    st "$cur/$c"',
   '    if [ "$S" -ne 0 ]; then',
   '      case $E in "No such file or directory"|"Not a directory") P=$cur/$c PW=$cw; return 1 ;; "Permission denied") if [ "$own" = 0 ]; then P=$cur/$c PW=$cw; return 1; fi',
-    // (A link's walk starts in the home, the agent's own, so own is 1 from the start: any directory it can't search is
+  // (A link's walk starts in the home, the agent's own, so own is 1 from the start: any directory it can't search is
   // refused there, root's too, and the refusal says only that.)
   '        if [ -n "$lk" ]; then unres "$1" "goes through a directory the agent user can\'t search, so where it leads can\'t be checked"; else',
   '        unres "$1" "goes through a directory the agent user owns or can write but cannot search now (it could make it searchable again)"; fi; return 2 ;; esac',
   '      unres "$1" "cannot be checked ($E)"; return 2',
   '    fi',
+  // (Link mode, #798 round 6: a way into /proc or /sys is refused, as add() refuses a credential there: pinning it
+  // would bind the host's /proc over the sandbox's own, and show the command every process outside it (#713). Under
+  // /dev, a symlink (/dev/stdout, /dev/fd/N) or a directory the agent can write is refused too: pinning either binds
+  // /dev, which costs the sandbox its devices. Fail closed, naming the link, rather than run without them.)
+  '    if [ -n "$lk" ]; then case $cur/$c in /proc|/proc/*|/sys|/sys/*) unres "$1" "goes through /proc or /sys (its sandbox would have to show the command the processes outside it)"; return 2 ;;',
+  '      /dev|/dev/*) if [ "$T" = "symbolic link" ]; then unres "$1" "goes through a symlink under /dev (binding its way would cost the sandbox its devices)"; return 2; fi',
+  '        if [ "$T" = directory ] && { [ "$U" = "$UID" ] || [ -w "$cur/$c/" ]; }; then unres "$1" "goes through a directory under /dev the agent user can write (pinning it would cost the sandbox its devices)"; return 2; fi ;; esac; fi',
   '    case $T in',
   '      "symbolic link") n=$((n + 1)); if [ "$n" -gt 40 ] || [ "$cw" = 1 ]; then refuse "$cur/$c"; return 2; fi',
   '        above "$cur/$c"; t=$("$rl" -- "$cur/$c") || { refuse "$cur/$c"; return 2; }',
@@ -833,12 +842,18 @@ const LINUX_SANDBOX = [
   // - every directory above what the link reaches is pinned (bound onto itself, as add() pins a credential's way), so
   //   none can be renamed away and recreated (`~/.profile -> W/D/c`, W writable: `mv W/D` is refused), and what it
   //   reaches outside the home is bound read-only (lbinds): nothing under it is written through the link, nor
-  //   directly; a device (/dev/null) isn't bound (writing it plants nothing), but outside /dev the directories above
-  //   it are pinned all the same (`~/.x -> W/D/n`, n a device: `mv W/D` is refused);
+  //   directly; a device (/dev/null) isn't bound (writing it plants nothing): one in a directory the agent can write
+  //   is refused (it could be removed and replaced by a file), and outside /dev the directories above it are pinned
+  //   all the same (`~/.x -> W/D/n`, n a device: `mv W/D` is refused); under /dev, where nothing is pinned, a
+  //   writable directory anywhere between /dev and the device refuses it;
   // - a dangling link is refused when any directory on its way outside the home is writable (a command could create
   //   its target, or rename a directory below it away and recreate it), else the directories above it are pinned;
   // - one reaching / or the command's working directory is refused (binding it read-only would take the command's
-  //   own directory too).
+  //   own directory too);
+  // - one whose way enters /proc or /sys is refused, as add() refuses a credential there (pinning its way would bind
+  //   the host's /proc over the sandbox's own); under /dev only a device is allowed, reached through no symlink, no
+  //   `..` and no directory there the agent can write (pinning any of them would bind /dev and cost the sandbox its
+  //   devices): anything else is refused, naming the link, rather than run without devices.
   // Every refusal names its link, all at once. Bounded: past LINK_CAP symlinks in one directory, refused rather than
   // run with some unchecked. ~/.cache and ~/.npm become throwaway mounts, never through a link (a write there would
   // reach, and outlive the command at, what it points to): refused as links at all. Named residuals: links deeper in
@@ -847,21 +862,30 @@ const LINUX_SANDBOX = [
   // another instance's agent user's sandboxed command among them.
   'lbinds=(); lk=; cwd=$(pwd -P) || cwd=/',
   `if [ -n "$hr" ]; then for n in .cache .npm; do p=$hr/$n; st "$p"; if [ "$S" -eq 0 ] && [ "$T" = "symbolic link" ]; then named[$p]=1; note "project command not run: \${p@Q} is a symlink; a project command's ~/.cache and ~/.npm are throwaway directories its sandbox mounts there, never through a link (a write would reach, and outlive the command at, what it points to). Make it a real directory: as the agent user, sudo -u $u rm -- \${p@Q}"; fi; done; fi`,
-  `links() { local o n=0 p s x; o=$("$fnd" "$1" -mindepth 1 -maxdepth 1 -type l -printf "%f/" 2>/dev/null) || { note "project command not run: \${1@Q} cannot be listed for symlinks that could lead out of the agent user's home"; return; }`,
+  `links() { local o n=0 p s x d w; o=$("$fnd" "$1" -mindepth 1 -maxdepth 1 -type l -printf "%f/" 2>/dev/null) || { note "project command not run: \${1@Q} cannot be listed for symlinks that could lead out of the agent user's home"; return; }`,
   `  while [ -n "$o" ]; do n=$((n + 1)); if [ "$n" -gt ${LINK_CAP} ]; then note "project command not run: \${1@Q} holds more than ${LINK_CAP} symlinks to check for one leading out of the agent user's home; remove the ones it doesn't need"; return; fi`,
   // (A link already refused, on the way to a credential or as a cache, is named once, by that refusal.)
   '    p=$1/${o%%/*}; o=${o#*/}; [ -n "${named[$p]}" ] && continue',
   '    lk=$p; walk "${p#"$hr"/}" "$hr"; s=$?; lk=; [ "$s" -eq 2 ] && continue; if [ "$s" -eq 0 ]; then x=$R; else x=$P; fi',
   `    if [ "$OW" = 1 ]; then note "project command not run: \${p@Q} is a symlink to \${x@Q}, outside the agent user's home, through \${OWAT@Q}, which the agent user owns: its own files outside its home are not made part of the sandbox's view of it, fail closed. Move what it holds into the home and drop the link, or point the link at a path the agent user doesn't own; to remove it, as the agent user: sudo -u $u rm -- \${p@Q}"; continue; fi`,
+  // Under /dev, only a device is allowed (round 6): anything else there, or a dangling link, would need /dev bound to
+  // make it read-only or pin its way, which costs the sandbox its devices: refused, naming the link.
+  `    case $x in /dev|/dev/*) if [ "$s" -eq 1 ] || { [ "$RT" != "character special file" ] && [ "$RT" != "block special file" ]; }; then note "project command not run: \${p@Q} is a symlink to \${x@Q}, under /dev but not a device (or missing): its sandbox can't make that read-only without binding /dev, which would cost it its devices. Point it elsewhere, or remove it as the agent user: sudo -u $u rm -- \${p@Q}"; continue; fi ;; esac`,
   // A dangling link: nothing to bind, so refused when any directory on its way outside the home is one the agent can
   // write: a command could create the target there, or rename a directory below it away and recreate it (fail closed).
   `    if [ "$s" -eq 1 ]; then case $x in "$hr"|"$hr"/*) ;; *) if [ "$PW" = 1 ] || [ "$AW" = 1 ]; then note "project command not run: \${p@Q} is a symlink to \${x@Q}, which doesn't exist, on a way outside the agent user's home through a directory it can write: a command could create it there, for an agent-user process outside the sandbox to read later. Point it elsewhere, or remove it as the agent user: sudo -u $u rm -- \${p@Q}"; else above "$x"; fi ;; esac; continue; fi`,
-  // A device: no read-only bind (writing it plants nothing), but the directories above it are pinned first, so none
-  // can be renamed away and the device's path recreated as a file. Not under /dev: binding /dev onto itself costs the
-  // sandbox its devices (nodev), and /dev's writable directories (/dev/shm, /dev/mqueue) are sticky: no one renames
-  // root's directory there but root. (A link to /dev/null stays as cheap as it was.)
+  // A device: no read-only bind (writing it plants nothing; bound, it couldn't be opened: nodev), so nothing keeps it
+  // in place. Refused when the directory it is in is one the agent can write (#798 round 6): a command could remove it
+  // and put a file there, sticky directory or not (the device may be the agent's own). Else the directories above it
+  // are pinned first, so none can be renamed away and the device's path recreated as a file. Under /dev nothing is
+  // pinned (binding /dev onto itself costs the sandbox its devices), so there every directory between /dev and the
+  // device is checked instead, and one the agent can write refuses the link: nothing rests on /dev's writable
+  // directories being sticky. (A link to /dev/null stays as cheap as it was.)
   '    case $x in "$hr"|"$hr"/*) continue ;; esac',
-  '    if [ "$RT" = "character special file" ] || [ "$RT" = "block special file" ]; then case $x in /dev/*) ;; *) above "$x" ;; esac; continue; fi',
+  '    if [ "$RT" = "character special file" ] || [ "$RT" = "block special file" ]; then d=${x%/*} w=',
+  '      case $x in /dev/*) while [ -n "$d" ]; do [ -w "$d/" ] && w=$d; [ "$d" = /dev ] && break; d=${d%/*}; done ;; *) [ -w "${d:-/}/" ] && w=${d:-/} ;; esac',
+  `      if [ -n "$w" ]; then note "project command not run: \${p@Q} is a symlink to \${x@Q}, a device in or below \${w@Q}, a directory the agent user can write: nothing keeps a device in place there, so a command could remove it and put a file in its stead, for an agent-user process outside the sandbox to read through the link later. Point it elsewhere, or remove it as the agent user: sudo -u $u rm -- \${p@Q}"; continue; fi`,
+  '      case $x in /dev/*) ;; *) above "$x" ;; esac; continue; fi',
   `    case "$cwd/" in "$x"/*) note "project command not run: \${p@Q} is a symlink to \${x@Q}, outside the agent user's home, which holds the command's working directory: the sandbox can't make it read-only and still run the command there. Point it elsewhere, or remove it as the agent user: sudo -u $u rm -- \${p@Q}"; continue ;; esac`,
   `    [ "$x" = / ] && { note "project command not run: \${p@Q} is a symlink to /: the sandbox can't make that read-only and still run the command. Remove it as the agent user: sudo -u $u rm -- \${p@Q}"; continue; }`,
   // Every directory above the target pinned (as add() pins a credential's), then the target read-only.

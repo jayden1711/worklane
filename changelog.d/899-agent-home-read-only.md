@@ -6,15 +6,18 @@
   - Browsers installed in the agent's `~/.cache/ms-playwright` are hidden inside the sandbox. Set `PLAYWRIGHT_BROWSERS_PATH` to a directory outside the home.
   - On macOS nothing in the home is writable, `~/.npm` included.
   - An agent home that isn't a directory, or is `/`, is refused: set `run_as.agent_home` in `instance.yaml` to the agent user's real home.
-  - On Linux, a symlink directly in the agent's home, or directly in its `~/.config`, is checked hop by hop before the command runs. A project command is refused, before it runs, in three cases. The refusal names each link, the path that makes it unsafe, and the command that removes it as the agent user.
+  - On Linux, a symlink directly in the agent's home, or directly in its `~/.config`, is checked hop by hop before the command runs. A project command is refused, before it runs, in these cases. The refusal names each link, the path that makes it unsafe, and the command that removes it as the agent user.
     - A hop outside the home could be re-aimed: a link sitting in a directory the agent user can write. An example is `~/.profile` pointing to `/srv/x/hop/profile`, where `/srv/x/hop` is a link back into the home in a directory the agent can write.
     - A hop outside the home is the agent user's own: a directory on the way, or the file the link ends at. An example is `~/.ssh` pointing to an agent-owned `/srv/x`.
     - A dangling link passes, outside the home, through a directory the agent can write.
+    - A link ends at a device in a directory the agent user can write (under `/dev`: in or below one). Nothing can keep a device in place there, so a command could replace it with a file.
+    - A link's way enters `/proc` or `/sys`, such as `~/.x -> /proc/1/comm` or `~/.x -> /dev/stdout`. Pinning that way would bind the host's `/proc` over the sandbox's own and show the command every process outside it.
+    - A link reaches under `/dev` anything but a device, or a device through a symlink, a `..` or a directory the agent user can write there. Pinning any of those would bind `/dev` and leave the command without working devices, so the run is refused instead, naming the link.
     - `~/.cache` or `~/.npm` is a symlink at all.
     - Either directory holds more than 500 symlinks.
   - Any other link out of the home is allowed. Examples are a skeleton's `~/.ghcup -> /usr/local/.ghcup` (writable by everyone on a CI runner) and `~/.bash_history -> /dev/null`.
     - Inside this agent's sandbox, what the link reaches is read-only.
-    - Every directory on its way is pinned there, so none can be renamed away and recreated. That includes the way to a device it ends at, except under `/dev`: binding `/dev` would cost the sandbox its devices, and the directories there that others can write are sticky.
+    - Every directory on its way is pinned there, so none can be renamed away and recreated. That includes the way to a device it ends at, except under `/dev`, where binding would cost the sandbox its devices. There, a device in or below a directory the agent user can write is refused instead, so nothing depends on those directories being sticky.
     - The home's own way is always pinned too, so a directory above the home can't be renamed away and the home's path recreated.
     - That holds only in this agent user's sandboxes. If a directory the link reaches can be written by other users, they still can write it. That includes another instance's agent user, through its own project commands. On such a machine, give the agent user a skeleton without that link.
   - A link that stays inside the home all the way is fine too.
@@ -33,13 +36,16 @@
 
 ### Guardrail changes: what each one does
 
-- **Agent home read-only to project commands (#798).** The project-command sandbox (`projectCommand`, `src/os/index.ts`) binds the agent user's home read-only, under the credential masks. On Linux, `~/.cache` and `~/.npm` are throwaway tmpfs mounts. On macOS, the profile denies every write under the home, but a link leading out of it is followed (macOS isn't in CI). On Linux, each symlink directly in the home or in `~/.config` is walked hop by hop, by the same rule as the credential paths. A run is refused in four cases:
+- **Agent home read-only to project commands (#798).** The project-command sandbox (`projectCommand`, `src/os/index.ts`) binds the agent user's home read-only, under the credential masks. On Linux, `~/.cache` and `~/.npm` are throwaway tmpfs mounts. On macOS, the profile denies every write under the home, but a link leading out of it is followed (macOS isn't in CI). On Linux, each symlink directly in the home or in `~/.config` is walked hop by hop, by the same rule as the credential paths. A run is refused in seven cases:
   - a hop outside the home could be re-aimed (a link in a directory the agent can write);
   - a hop is the agent's own;
   - a dangling link passes through a directory the agent can write;
+  - a link ends at a device in a directory the agent can write (under `/dev`: in or below one);
+  - a link's way enters `/proc` or `/sys` (its pins would bind the host's `/proc` over the sandbox's own);
+  - a link reaches under `/dev` anything but a device, or a device through a symlink, a `..` or a writable directory there (its pins would bind `/dev`);
   - a cache is a link.
 
-  Any other link is allowed. Every directory above what it reaches is pinned, and the target itself is bound read-only. A device target isn't bound (writing it plants nothing), but the directories above it are pinned, except under `/dev`. The home itself and every directory above it are always pinned.
+  Any other link is allowed. Every directory above what it reaches is pinned, and the target itself is bound read-only. A device target isn't bound (writing it plants nothing). It is refused when the agent can write its directory (under `/dev`, any directory between `/dev` and it); otherwise the directories above it are pinned, except under `/dev`. The home itself and every directory above it are always pinned.
 
   A project command can't write the home, nor anything an allowed link in it reaches. Three things fall outside that:
   - a link deeper in the home whose way out the agent user can change (After install);
