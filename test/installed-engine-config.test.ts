@@ -184,7 +184,7 @@ const labelEvent = (event: 'labeled' | 'unlabeled', login: string, at: string, n
 const workflow = () => readFileSync(join(repoRoot, '.github', 'workflows', 'installed-engine-config.yml'), 'utf8');
 /** The check's scripts as this checkout has them, to commit into a fixture's main. */
 const checkScripts = () =>
-  Object.fromEntries(['scripts/ci/installed-engine-config.mjs', 'scripts/lib/engine-pin.mjs', 'scripts/verify-release-tag.mjs'].map((f) => [f, readFileSync(join(repoRoot, f), 'utf8')]));
+  Object.fromEntries(['scripts/ci/installed-engine-config.mjs', 'scripts/lib/engine-pin.mjs', 'scripts/verify-release-tag.mjs', 'scripts/lib/git.cjs'].map((f) => [f, readFileSync(join(repoRoot, f), 'utf8')]));
 
 const refused = (r: { code: number | null; out: string }, why: RegExp) => {
   assert.equal(r.code, 1, r.out);

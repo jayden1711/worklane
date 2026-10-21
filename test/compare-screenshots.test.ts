@@ -33,6 +33,9 @@ function fakeRepo(): string {
   git(origin, 'init', '-q', '--bare', '-b', 'main');
   mkdirSync(join(repo, 'scripts', 'dev'), { recursive: true });
   for (const f of ['compare-screenshots.mjs', 'children.mjs']) copyFileSync(join(repoRoot, 'scripts', 'dev', f), join(repo, 'scripts', 'dev', f));
+  // The git runner compare-screenshots.mjs imports (#807).
+  mkdirSync(join(repo, 'scripts', 'lib'), { recursive: true });
+  copyFileSync(join(repoRoot, 'scripts', 'lib', 'git.cjs'), join(repo, 'scripts', 'lib', 'git.cjs'));
   writeFileSync(
     join(repo, 'scripts', 'dev', 'screenshots.mjs'),
     [
