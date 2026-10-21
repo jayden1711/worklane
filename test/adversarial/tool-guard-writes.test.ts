@@ -123,6 +123,27 @@ test('tool guard writes: an agent never makes a link to harness config', () => {
   assert.equal(bash(root, 'ln -s ../.claude lk', true, join(root, 'src')).decision, 'deny');
 });
 
+test('tool guard writes: a link-making command is read however its options are spelled, and one the guard cannot read is refused', () => {
+  const { root } = project();
+  for (const command of [
+    'cp --sym .claude lk',
+    'cp --symbolic .claude/settings.json lk',
+    'cp --li .claude/settings.json lk',
+    'cp -R --sym .claude bk',
+    'cp --sym .claude lk && echo x > lk/settings.json',
+    'ln -s --target=src ../.claude',
+    'ln -s --t=src ../.claude',
+    'ln -s --target src ../.claude',
+    'ln -st src ../.claude',
+    'rsync -a --link-d=../.claude src/ bk/',
+    'cp --no-such-option src/a.ts docs/',
+    'ln --s src/a.ts b.ts',
+  ]) assert.equal(bash(root, command).decision, 'deny', command);
+  for (const command of ['cp --recursive --preserve=mode src docs/', 'cp --verb src/a.ts docs/', 'ln --symbolic src/a.ts b.ts', 'cp -- -x y', 'rsync -a --links src/ bk/']) {
+    assert.equal(bash(root, command).decision, 'none', command);
+  }
+});
+
 test('tool guard writes: plain writes, links to plain files, reads and people sessions are unchanged', () => {
   const { root, out } = project();
   symlinkSync('src', join(root, 'code'));

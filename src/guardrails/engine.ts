@@ -150,38 +150,95 @@ function writeTargets(call: ToolCall, commands: SimpleCommand[]): string[] {
   return targets;
 }
 
-/** The value of an option given as `--long=v`, `--long v`, `-x v` (also at the end of a cluster) or `-xv`; null if absent. */
-function optionOf(args: string[], short: string, long: string): { value: string; at: number } | null {
+/** A command's long options and whether each takes a value: the next word or after `=` (required), or only after `=`. */
+type LongOptions = Readonly<Record<string, 'none' | 'optional' | 'required'>>;
+/** GNU cp's long options (coreutils 9). */
+const CP_LONG: LongOptions = {
+  archive: 'none', 'attributes-only': 'none', backup: 'optional', context: 'optional', 'copy-contents': 'none', debug: 'none', dereference: 'none',
+  force: 'none', help: 'none', interactive: 'none', 'keep-directory-symlink': 'none', link: 'none', 'no-clobber': 'none', 'no-dereference': 'none',
+  'no-preserve': 'required', 'no-target-directory': 'none', 'one-file-system': 'none', parents: 'none', preserve: 'optional', recursive: 'none',
+  reflink: 'optional', 'remove-destination': 'none', sparse: 'required', 'strip-trailing-slashes': 'none', suffix: 'required', 'symbolic-link': 'none',
+  'target-directory': 'required', update: 'optional', verbose: 'none', version: 'none',
+};
+/** GNU ln's long options (coreutils 9). */
+const LN_LONG: LongOptions = {
+  backup: 'optional', directory: 'none', force: 'none', help: 'none', interactive: 'none', logical: 'none', 'no-dereference': 'none',
+  'no-target-directory': 'none', physical: 'none', relative: 'none', suffix: 'required', symbolic: 'none', 'target-directory': 'required',
+  verbose: 'none', version: 'none',
+};
+/** cp's and ln's short options that take a value: the rest of their cluster, or the next word. */
+const SHORT_WITH_VALUE = new Set(['S', 't']);
+
+interface ReadArgs {
+  opts: { name: string; value: string | undefined }[];
+  operands: string[];
+  /** The first long option that names none of the command's, or more than one: the guard can't tell what it does. */
+  unknown?: string;
+}
+
+/**
+ * A command's arguments as GNU getopt_long reads them: a long option by its name or any prefix that names only it,
+ * short options clustered, options among the operands, and everything after `--` an operand.
+ */
+function readArgs(args: string[], longs: LongOptions): ReadArgs {
+  const out: ReadArgs = { opts: [], operands: [] };
   for (let i = 0; i < args.length; i++) {
     const a = args[i]!;
-    if (a === '--') return null;
-    if (a.startsWith(`${long}=`)) return { value: a.slice(long.length + 1), at: -1 };
-    if (a === long || new RegExp(`^-[A-Za-z]*${short}$`).test(a)) return args[i + 1] === undefined ? null : { value: args[i + 1]!, at: i + 1 };
-    const m = new RegExp(`^-${short}(.+)$`).exec(a);
-    if (m) return { value: m[1]!, at: -1 };
+    if (a === '--') {
+      out.operands.push(...args.slice(i + 1));
+      break;
+    }
+    if (a.startsWith('--')) {
+      const eq = a.indexOf('=');
+      const given = eq < 0 ? a.slice(2) : a.slice(2, eq);
+      const hits = Object.hasOwn(longs, given) ? [given] : Object.keys(longs).filter((n) => given && n.startsWith(given));
+      if (hits.length !== 1) {
+        out.unknown ??= a;
+        continue;
+      }
+      const name = hits[0]!;
+      out.opts.push({ name, value: eq >= 0 ? a.slice(eq + 1) : longs[name] === 'required' ? args[++i] : undefined });
+    } else if (a.startsWith('-') && a.length > 1) {
+      for (let j = 1; j < a.length; j++) {
+        const c = a[j]!;
+        if (SHORT_WITH_VALUE.has(c)) {
+          out.opts.push({ name: c, value: j + 1 < a.length ? a.slice(j + 1) : args[++i] });
+          break;
+        }
+        out.opts.push({ name: c, value: undefined });
+      }
+    } else out.operands.push(a);
   }
-  return null;
+  return out;
 }
 
 /**
  * What a command that makes a link (ln, link, cp with a link option, rsync --link-dest) links to, and where the new
- * links go; null for any other command.
+ * links go; `unreadable` when a cp or ln option can't be read (refused: it might make one); null for any other command.
  */
-function linkMade(c: SimpleCommand): { sources: string[]; dest: string | null } | null {
+function linkMade(c: SimpleCommand): { sources: string[]; dest: string | null } | { unreadable: string } | null {
   const [cmd, ...args] = c.argv;
   const base = basename(cmd ?? '');
-  const linking = base === 'ln' || base === 'link' || (base === 'cp' && args.some((a) => a === '--link' || a === '--symbolic-link' || /^-[A-Za-z]*[ls][A-Za-z]*$/.test(a)));
-  if (linking) {
-    const target = base === 'link' ? null : optionOf(args, 't', '--target-directory');
-    const operands = args.filter((a, i) => !a.startsWith('-') && i !== target?.at);
-    if (target) return { sources: operands, dest: target.value };
+  if (base === 'link') return { sources: args.filter((a) => !a.startsWith('-')), dest: null };
+  if (base === 'cp' || base === 'ln') {
+    const read = readArgs(args, base === 'cp' ? CP_LONG : LN_LONG);
+    if (read.unknown !== undefined) return { unreadable: read.unknown };
+    if (base === 'cp' && !read.opts.some((o) => ['link', 'symbolic-link', 'l', 's'].includes(o.name))) return null;
+    const target = read.opts.findLast((o) => o.name === 'target-directory' || o.name === 't');
+    const { operands } = read;
+    if (target) return { sources: operands, dest: target.value ?? null };
     return operands.length < 2 ? { sources: operands, dest: null } : { sources: operands.slice(0, -1), dest: operands.at(-1)! };
   }
   if (base === 'rsync') {
+    // Exact, and any prefix that can only mean it (`--link-`, `--link-d`...), for an rsync that takes one.
     const sources: string[] = [];
     args.forEach((a, i) => {
-      if (a.startsWith('--link-dest=')) sources.push(a.slice('--link-dest='.length));
-      else if (a === '--link-dest' && args[i + 1] !== undefined) sources.push(args[i + 1]!);
+      if (!a.startsWith('--')) return;
+      const eq = a.indexOf('=');
+      const name = eq < 0 ? a.slice(2) : a.slice(2, eq);
+      if (name.length < 'link-'.length || !'link-dest'.startsWith(name)) return;
+      const value = eq >= 0 ? a.slice(eq + 1) : args[i + 1];
+      if (value !== undefined) sources.push(value);
     });
     const operands = args.filter((a) => !a.startsWith('-'));
     return sources.length ? { sources, dest: operands.at(-1) ?? null } : null;
@@ -323,6 +380,10 @@ export function evaluate(call: ToolCall, cfg: GuardrailsConfig, ctx: EvalContext
     for (const c of commands) {
       const link = linkMade(c);
       if (!link) continue;
+      if ('unreadable' in link) {
+        unsure ??= { decision: 'deny', rule: 'protected-path', reason: `${basename(c.argv[0] ?? '')}: the guard can't read the option ${clip(link.unreadable)}, so it can't check what the command links or writes; spell each option out in full` };
+        continue;
+      }
       const dest = link.dest === null ? null : resolve(call.cwd, link.dest);
       const bases = [...new Set([resolve(call.cwd), ...(dest === null ? [] : [dest, dirname(dest)])])];
       for (const o of link.sources) {
