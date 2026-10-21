@@ -323,7 +323,8 @@ export function hidesSubmodules(f: Pick<ChangeFile, 'submoduleIgnores'>): boolea
  */
 export const SELF_MODIFICATION = 'self-modification';
 export const SELF_MODIFICATION_PARTS: { what: string; globs: string[] }[] = [
-  { what: 'the merge policy', globs: ['src/merge-policy*', 'src/coordinator/merge-flow*', 'src/pr-rules*'] },
+  // src/vacuity.ts: what the merge gate counts as an assertion and as app code run (#784, src/merge-policy-vacuity.ts).
+  { what: 'the merge policy', globs: ['src/merge-policy*', 'src/coordinator/merge-flow*', 'src/pr-rules*', 'src/vacuity.ts'] },
   { what: 'the main watch', globs: ['src/main-watch*', 'src/github/main-watch-api*'] },
   { what: 'the push guard', globs: ['src/push-guard*', 'src/push-check*'] },
   { what: 'the updater', globs: ['src/updates*', `scripts/machine/${BRAND.cli}-update*`] },
@@ -365,6 +366,8 @@ export const SELF_MODIFICATION_PARTS: { what: string; globs: string[] }[] = [
       'test/managed-apps.test.ts',
       // The merge reconciliation's cases: only the engine's own App's merge is reconciled, never another's (#733).
       'test/merge-idempotent.test.ts',
+      // The merge gate's vacuity check: tests that run none of the changed code never auto-merge (#784).
+      'test/vacuity.test.ts', 'test/merge-policy-vacuity.test.ts', 'test/merge-vacuity-coordinator.test.ts',
     ],
   },
   { what: 'the release procedure and the design rules', globs: ['docs/releasing.md', 'docs/design.md'] },

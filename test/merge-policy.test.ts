@@ -119,6 +119,8 @@ test('self-modification: every glob names real engine files (none dead), and the
     ['src/merge-policy.ts', 'the merge policy'],
     ['src/coordinator/merge-flow.ts', 'the merge policy'],
     ['src/pr-rules.ts', 'the merge policy'],
+    ['src/merge-policy-vacuity.ts', 'the merge policy'],
+    ['src/vacuity.ts', 'the merge policy'],
     ['src/main-watch.ts', 'the main watch'],
     ['src/push-guard.ts', 'the push guard'],
     ['src/updates.ts', 'the updater'],
@@ -1045,7 +1047,8 @@ const reasonFor = (kind: string, path: string, line: string) => `${weakening.WEA
 test('acceptance (#783): a PR that deletes an assertion waits for the owner, with its code change or without one', () => {
   const head = MATH_TEST.replace('  assert.equal(add(1, 2), 3);\n', '');
   const why = reasonFor(ASSERTION, 'test/math.test.ts', 'assert.equal(add(1, 2), 3);');
-  assert.deepEqual(decideChange({ 'src/math.ts': MATH, 'test/math.test.ts': MATH_TEST }, { 'src/math.ts': MATH_CHANGED, 'test/math.test.ts': head }), { auto: false, reasons: [why], why: [] });
+  // With the code change, #784's hold too: the example project's test globs (test/**/*.test.js) match no test here.
+  assert.deepEqual(decideChange({ 'src/math.ts': MATH, 'test/math.test.ts': MATH_TEST }, { 'src/math.ts': MATH_CHANGED, 'test/math.test.ts': head }), { auto: false, reasons: [why, "design: vacuity: it changes app code (src/math.ts) and no test: it adds or changes none, and its task's done_when names none"], why: [] });
   assert.deepEqual(decideChange({ 'test/math.test.ts': MATH_TEST }, { 'test/math.test.ts': head }), { auto: false, reasons: [why], why: [] });
 });
 

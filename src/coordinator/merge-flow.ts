@@ -3,7 +3,8 @@
 import { startRefusal, TestRunHeld } from '../testrun/gate.js';
 import { CI_NONE_MAIN_WATCH, ciIsNone, headChecks, requiredFor } from '../ci-none.js';
 import type { Coordinator } from '../coordinator.js';
-import { spawnSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 import { readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { BRAND } from '../brand.js';
@@ -12,7 +13,7 @@ import { type CommitCheck, type DoneWhenList, type PullRequest } from '../backlo
 import type { EventPayload, StoredEvent } from '../events/types.js';
 import { writeGroupOnly } from '../os/index.js';
 import { computeLevel } from '../review.js';
-import { shownPaths } from '../path-text.js';
+import { shownPath, shownPaths } from '../path-text.js';
 import type { Episode } from '../fix-forward.js';
 import { instructionTargets } from '../skilleval.js';
 import { checkedPush } from '../push-check.js';
@@ -25,6 +26,8 @@ import { checksFor, effectiveClass, riskClassOf, rulesetHold } from '../pr-rules
 import { instructionEvalReasons, mergeDecision, neverAutoMerge, outsidePlanReasons, REVERT_BRANCH_PREFIX, waitCategoriesOf, type MergeDecision } from '../merge-policy.js';
 import { deferDelay, deferrable, isBehind, mergeDeferral, mergeMessage, MergePass, mergeRefusal, type Deferral } from '../merge-policy-train.js';
 import { weakeningOf } from '../merge-policy-weakening.js';
+import { VACUITY_UNMEASURED, vacuityCheck, type VacuityCheck } from '../merge-policy-vacuity.js';
+import { touchedAppFiles } from '../vacuity.js';
 import { MainWatch, repoGit, type MainWatchDeps, type Trip } from '../main-watch.js';
 import { carriedHead, mergeInBase, type MergeIn } from '../pr-hygiene.js';
 import { alertTarget, directPushKey, directPushText, ownerMentions } from '../direct-push-alert.js';
@@ -337,7 +340,27 @@ export abstract class MergeFlow extends FixRuns {
       this.emit('pr.unready', { issue: n, number, head: pr.headSha, why: r.reasons.join('; ').slice(0, 1000) });
     }
     if (!r.ready && r.failed.length) await this.maybeFix(w, pr, r);
-    if (r.ready) await (batching ? this.batchOrMerge(w, pr) : this.mergeOrWait(w, pr));
+    if (!r.ready) return;
+    await this.vacuityBeforeDeciding(w, pr);
+    await (batching ? this.batchOrMerge(w, pr) : this.mergeOrWait(w, pr));
+  }
+
+  /**
+   * The merge gate's coverage run (#784), in this pass, before the decision or the batch queue reads the policy:
+   * only when it is all that holds the PR at this head. Not under an emergency stop, nor while an agent works on the
+   * issue (its head is about to move); the PR then just isn't decided yet (mergeOrWait).
+   */
+  private async vacuityBeforeDeciding(w: EventPayload<'pr.opened'>, pr: PullRequest) {
+    const v = this.d.cfg.tests.vacuity;
+    if (!v?.dynamic || !this.d.cfg.tests.runner.one || this.emergencyInForce() || this.active.has(w.issue)) return;
+    let run: VacuityCheck['run'];
+    try {
+      const d = this.mergeDecisionFor(w.issue, w.number, pr);
+      if (d.reasons.length === 1 && d.reasons[0] === VACUITY_UNMEASURED) run = d.vacuityRun;
+    } catch {
+      return; // the decision itself fails the same way in mergeOrWait (or the batcher), and holds there
+    }
+    if (run) await this.vacuityRun(w, pr, run);
   }
 
   /** A PR ready on its fast checks: the merge policy once a batch with this head passed, else the batch queue. */
@@ -497,8 +520,11 @@ export abstract class MergeFlow extends FixRuns {
     }
   }
 
-  /** The policy's call on a ready PR at its current head. */
-  mergeDecisionFor(n: number, number: number, pr: PullRequest): MergeDecision {
+  /**
+   * The policy's call on a ready PR at its current head. `vacuityRun`: its tests' coverage run at this head, still to
+   * come (watchPr's vacuityBeforeDeciding makes it when that is all that holds the PR, then the decision is made again).
+   */
+  mergeDecisionFor(n: number, number: number, pr: PullRequest): MergeDecision & { vacuityRun?: NonNullable<VacuityCheck['run']> } {
     const review: ReviewConfig = this.d.cfg.review ?? DEFAULT_REVIEW;
     // A stale-PR merge-in head: the PR's own change is measured from the default branch it merged (src/pr-hygiene.ts).
     const mergeIns = this.mergeInsOf();
@@ -518,7 +544,8 @@ export abstract class MergeFlow extends FixRuns {
     } catch {
       // an unreadable policy is "off"
     }
-    const d = mergeDecision({
+    const vacuity = this.vacuityFor(n, number, pr.headSha, files.map((f) => f.path));
+    const decided = mergeDecision({
       branch: pr.head,
       openedByHarness: this.openedByUs(number),
       policyOn,
@@ -543,8 +570,12 @@ export abstract class MergeFlow extends FixRuns {
       claimedProtected: this.claimedClass(n) === 'protected',
       // A test, lint or guard the change removes or loosens, read from the change itself (#783).
       weakening: weakeningOf(this.d.repo, base, pr.headSha, files, lockScopeOf(this.d)),
+      // The PR's own tests, run under coverage, must execute app code it changes (#784).
+      vacuity: vacuity.reasons,
+      vacuityPending: vacuity.run !== undefined,
       outsidePlan: plan ? outsidePlanReasons({ planFiles: plan.files ?? [], level, waitCategories: [...new Set([...waitCategoriesOf(review), ...DEFAULT_REVIEW.levels.L3_human.when])], newTopLevel }) : [],
     });
+    const d = vacuity.run ? { ...decided, vacuityRun: vacuity.run } : decided;
     // A head a conflict fix pushed: its own reasons to wait (outside the hunks, risky files, an unsure evaluator).
     const fix = this.d.log.read(0, ['conflict_fix.finished']).map((e) => e.payload as EventPayload<'conflict_fix.finished'>).filter((p) => p.number === number && p.outcome === 'pushed' && p.head === pr.headSha).at(-1);
     if (fix?.reasons.length) return { ...d, auto: false, reasons: [...d.reasons, ...fix.reasons] };
@@ -578,6 +609,9 @@ export abstract class MergeFlow extends FixRuns {
       return; // otherwise already waiting for the owner
     }
     const d = this.mergeDecisionFor(n, number, pr);
+    // Nothing holds it but its tests' coverage run at this head, not made this pass (watchPr's vacuityBeforeDeciding
+    // skipped it): not merged, and not sent to the owner either; a later pass measures it and decides (#784).
+    if (d.reasons.length === 1 && d.reasons[0] === VACUITY_UNMEASURED) return;
     if (d.auto) {
       // The merge train put it off (behind its base under strict protection, or its base moved mid-merge): not before
       // its retry time. Behind is never a human's call, and never merged by merging the default branch in.
@@ -1258,6 +1292,79 @@ export abstract class MergeFlow extends FixRuns {
       spawnSync('git', ['branch', '-D', `${BRAND.cli}/combined-${n}`], { cwd: this.d.repo });
       this.emit('light_check.finished', { issue: n, number, head: pr.headSha, main_sha: mainSha, overlap, outcome, wait_ms: Math.max(0, Date.now() - t0), detail });
       this.prPolled.delete(number); // decide on the next pass, not after the poll interval
+    }
+  }
+
+  /**
+   * Whether the PR's own tests run the app code it changes, at this head (src/merge-policy-vacuity.ts), from the head's
+   * files and this head's coverage runs. Every git read is in atHead, so a failing one holds the PR (vacuityCheck).
+   */
+  private vacuityFor(n: number, number: number, head: string, changed: string[]): VacuityCheck {
+    const git = (args: string[]) => execFileSync('git', args, { cwd: this.d.repo, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 64 * 1024 * 1024 });
+    // The test files the task's agreed done_when names: what the coordinator's own verification ran.
+    const contract = this.events(n).filter((e) => e.type === 'contract.agreed').at(-1)?.payload as EventPayload<'contract.agreed'> | undefined;
+    const contractTests = (contract?.done_when ?? []).map((d) => d.test).filter((t): t is string => typeof t === 'string' && t.length > 0);
+    // Which of those paths the head has: its tree entries for exactly those paths (literal pathspecs: a name with `*`
+    // in it is only itself), each `<mode> <type> <object>\t<path>`. Any entry counts, so a submodule link is there,
+    // and reading it as a file throws: it waits.
+    let there: Set<string> | null = null;
+    const atHead = (p: string) => {
+      there ??= new Set(git(['--literal-pathspecs', 'ls-tree', '-r', '-z', head, '--', ...new Set([...changed, ...contractTests])]).split('\0').filter(Boolean).map((entry) => entry.slice(entry.indexOf('\t') + 1)));
+      return there.has(p) ? git(['show', `${head}:${p}`]) : null;
+    };
+    const runs = this.d.log.read(0, ['vacuity.started', 'vacuity.measured']).filter((e) => (e.payload as { number: number; head: string }).number === number && (e.payload as { head: string }).head === head);
+    const last = runs.filter((e) => e.type === 'vacuity.measured').at(-1)?.payload as EventPayload<'vacuity.measured'> | undefined;
+    return vacuityCheck({
+      cfg: this.d.cfg.tests.vacuity,
+      runOne: this.d.cfg.tests.runner.one,
+      changed,
+      contractTests,
+      atHead,
+      runs: { started: runs.filter((e) => e.type === 'vacuity.started').length, last: last ? { tests: last.tests, touched: last.touched, error: last.error } : null },
+    });
+  }
+
+  /**
+   * Run each of the PR's tests with runner.one under V8 coverage, in a scratch worktree at its head, and record which
+   * app files had a function run (src/vacuity.ts touchedAppFiles). A test that fails, a run that writes no coverage, a
+   * setup that fails: an error on the record, and the PR waits.
+   */
+  private async vacuityRun(w: EventPayload<'pr.opened'>, pr: PullRequest, run: NonNullable<VacuityCheck['run']>) {
+    const { issue: n, number } = w;
+    this.emit('vacuity.started', { issue: n, number, head: pr.headSha, tests: run.tests });
+    const name = `issue-${n}-vacuity`;
+    const branch = `${BRAND.cli}/vacuity-${n}`;
+    let touched: string[] = [];
+    let error: string | null = null;
+    try {
+      const one = this.d.cfg.tests.runner.one;
+      if (!one) throw new Error('tests.yaml runner.one is not set');
+      const { path, setupErrors } = createWorktree(this.wt, name, branch, pr.headSha);
+      if (setupErrors.length) error = `the scratch worktree's setup failed: ${setupErrors.join('; ')}`;
+      else {
+        // A directory the change can't know the name of, so it can't ship coverage files of its own there.
+        const cov = join(path, `.${BRAND.cli}-coverage-${randomBytes(8).toString('hex')}`);
+        for (const t of run.tests) {
+          // A plain path (PLAIN_TEST_PATH, checked before any run is asked for): put in the command as it is.
+          const r = await this.project(one.replaceAll('{file}', t), path, { NODE_V8_COVERAGE: cov });
+          if (r.code === 0) continue;
+          error = `${shownPath(t)} ${r.code === null ? 'did not finish (timed out or stopped)' : `exited ${r.code}`}: ${r.tail.split('\n').filter(Boolean).slice(-3).join(' / ')}`;
+          break;
+        }
+        if (error === null && !existsSync(cov)) error = 'no coverage was written (runner.one must run the tests in Node for a coverage run)';
+        if (error === null) touched = touchedAppFiles(cov, path, run.appPaths);
+      }
+    } catch (e) {
+      error = (e as Error).message;
+    } finally {
+      try {
+        removeWorktree(this.wt, name);
+      } catch {
+        // already gone
+      }
+      spawnSync('git', ['branch', '-D', branch], { cwd: this.d.repo });
+      // A shutdown cut it short: nothing was measured, so nothing is recorded; a later start runs it again (capped).
+      if (!this.shutdown.signal.aborted) this.emit('vacuity.measured', { issue: n, number, head: pr.headSha, tests: run.tests, touched, error: error === null ? null : error.slice(0, 500) });
     }
   }
 

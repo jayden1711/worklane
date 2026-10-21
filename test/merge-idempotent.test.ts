@@ -38,6 +38,9 @@ function world(o: { batching?: boolean; autoMerge?: boolean; engineBot?: { login
   f.cfg.project.land_mode = 'pr';
   f.cfg.project.required_checks = o.batching ? ['ci', 'full'] : ['ci'];
   f.cfg.project.combined_check = false;
+  // Its PRs each add a module with no test, and these cases are about reconciling a merge, not the vacuity gate: no
+  // vacuity section, so they are decided as before #784 (test/merge-vacuity-coordinator.test.ts covers the gate).
+  delete f.cfg.tests.vacuity;
   if (o.batching) f.cfg.tests.land.pr_batch = { enabled: true, max: 8, shards: 1, fast_checks: ['ci'], full_checks: ['full'] };
   appendFileSync(join(f.repo, CONFIG_PATH), `\nrequired_checks: ${JSON.stringify(f.cfg.project.required_checks)}\n`);
   git(f.repo, 'add', CONFIG_PATH);

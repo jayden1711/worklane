@@ -64,10 +64,14 @@ function decide(withPlan: boolean) {
 test('merge: a planned PR that also changes a migration outside its plan is held, even where the repo does not hold migrations', () => {
   const d = decide(true);
   assert.equal(d.auto, false);
-  assert.deepEqual(d.reasons, ['not in the approved plan: high-risk: migration (src/migrations/001.sql)']);
+  assert.deepEqual(d.reasons, [VACUITY, 'not in the approved plan: high-risk: migration (src/migrations/001.sql)']);
 });
 
 test('merge: only for tasks that had a plan; the same PR without one is decided as before', () => {
   const d = decide(false);
-  assert.deepEqual([d.auto, d.reasons], [true, []]);
+  // No plan reason; only #784's own hold is left (the change adds app code and no test).
+  assert.deepEqual([d.auto, d.reasons], [false, [VACUITY]]);
 });
+
+/** #784: the example project's vacuity config holds a change to app code that comes with no test. */
+const VACUITY = "design: vacuity: it changes app code (src/a.ts, src/migrations/001.sql) and no test: it adds or changes none, and its task's done_when names none";
