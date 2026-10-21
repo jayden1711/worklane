@@ -90,7 +90,8 @@ test('#890: an exception that arrives through the default branch\'s committed co
   addExceptions(side, ['!/**']);
   git(side, 'commit', '-q', '-am', 'except everything');
   git(dir, 'update-ref', 'refs/remotes/origin/main', git(side, 'rev-parse', 'HEAD'));
-  const p = paths(runReadDenials({ cwd: dir, home: '/h', taskFile: task(HIDDEN) }));
+  // (The default branch is the one the coordinator names, round 8.)
+  const p = paths(runReadDenials({ cwd: dir, home: '/h', taskFile: task(HIDDEN), defaultBranch: 'main' }));
   for (const t of [join(dir, '.env'), join(dir, '.env.local'), join(dir, 'evals-secret', 'score.py')]) {
     assert.ok(await hides(p, t), `${t} hidden: ${JSON.stringify(p)}`);
   }

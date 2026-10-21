@@ -86,7 +86,8 @@ test('#890: a worktree whose secret_paths were emptied still denies them: the ma
   // The main checkout's working tree emptied too: the default branch's committed config still counts.
   git(dir, 'update-ref', 'refs/remotes/origin/main', 'HEAD');
   emptySecrets(dir);
-  const q = paths(runReadDenials({ cwd: wt, home: '/h' }));
+  // (The default branch is the one the coordinator names, round 8.)
+  const q = paths(runReadDenials({ cwd: wt, home: '/h', defaultBranch: 'main' }));
   for (const t of [join(dir, '.env'), join(wt, '.env')]) assert.ok(await hides(q, t), `${t} hidden with only the default branch's config: ${JSON.stringify(q)}`);
 });
 

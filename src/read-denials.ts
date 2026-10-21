@@ -10,14 +10,55 @@
 import { existsSync, lstatSync, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, posix, resolve } from 'node:path';
 import { BRAND } from './brand.js';
-import { ConfigInvalid, loadConfig, loadConfigAt } from './config/load.js';
+import { loadConfig, loadConfigAt } from './config/load.js';
 import { TaskFile } from './contract.js';
 import { projectStateDir } from './guardrails/context.js';
-import { globToRegExp } from './guardrails/glob.js';
 import { spawnSync } from './os/child-process.js';
 
 /** Directory entries listed, at most, to expand one pattern that has an exception; past it the pattern is denied whole. */
 export const EXPAND_LIMIT = 5000;
+
+/**
+ * Listed entries one checkout may give a run, at most. WHY: every entry is a mount, and sandbox-runtime refuses a
+ * profile past 9000 bwrap arguments, failing every command (measured, round-7 review: 3000 files in one worktree did
+ * that to every other run). Past it, another checkout is denied whole (one mount, stricter); the run's own checkout or
+ * the main checkout past it refuses the run, since denying either whole would hide the source the run works on.
+ */
+export const CHECKOUT_ENTRY_LIMIT = 100;
+
+/** Entries a run may have in all; past it the run doesn't start rather than every command failing. */
+export const ENTRY_LIMIT = 2000;
+
+/**
+ * Keep each checkout's listed entries under CHECKOUT_ENTRY_LIMIT (see there). A literal entry belongs to the deepest
+ * checkout it is under: one of `checkouts`, or a directory directly under one of `parents` (a worktree, listed or one
+ * git no longer lists). `own` (the run's own checkout and the main one) is never denied whole: past the limit, an error.
+ */
+function capPerCheckout(entries: Set<string>, own: string[], checkouts: string[], parents: string[]): { error: string } | null {
+  const ownSet = new Set(own.map(asEntry));
+  const dirs = checkouts.map(asEntry);
+  const places = parents.map(asEntry);
+  const owners = new Map<string, string[]>();
+  for (const e of entries) {
+    if (GLOB.test(e)) continue;
+    let owner = '';
+    for (const c of dirs) if (e.startsWith(`${c}/`) && c.length > owner.length) owner = c;
+    for (const p of places) {
+      if (!e.startsWith(`${p}/`)) continue;
+      const child = `${p}/${e.slice(p.length + 1).split('/')[0]}`;
+      if (child !== e && child.length > owner.length) owner = child;
+    }
+    if (owner) owners.set(owner, [...(owners.get(owner) ?? []), e]);
+  }
+  for (const [owner, list] of owners) {
+    if (list.length <= CHECKOUT_ENTRY_LIMIT) continue;
+    if (ownSet.has(owner)) return { error: `${owner} has ${list.length} files its secret or hidden patterns list, more than ${CHECKOUT_ENTRY_LIMIT}: denying each would overflow the sandbox, so the run can't start` };
+    for (const e of list) entries.delete(e);
+    entries.add(owner);
+  }
+  if (entries.size > ENTRY_LIMIT) return { error: `the run would be denied ${entries.size} paths, more than ${ENTRY_LIMIT}: the sandbox can't take them all, so the run can't start` };
+  return null;
+}
 
 const GLOB = /[*?]/;
 /** Glob syntax to the sandbox, a plain character to a guardrail path: a pattern holding one can't be passed as written. */
@@ -31,8 +72,77 @@ const SANDBOX_ONLY_GLOB = /[[\]]/;
 const asEntry = (p: string) => p.replace(/[[\]]/g, '?');
 
 const firstLine = (e: unknown) => (e as Error).message.split('\n')[0]!.slice(0, 200);
-/** An absolute pattern's regex, matched against an absolute path without its leading "/". */
-const absRe = (p: string) => globToRegExp(p.slice(1));
+/** One step of a compiled glob: a character, any one but "/", any run but "/", any run, or a jump (an optional part). */
+type Step = { k: 'char'; c: string } | { k: 'one' } | { k: 'star' } | { k: 'any' } | { k: 'skip'; to: number };
+
+/**
+ * A guardrail glob as src/guardrails/glob.ts's globToRegExp reads it (leading "./" dropped; a trailing "/" is "/**";
+ * `**` followed by "/" is an optional "anything/"; `**` anything; `*` anything but "/"; `?` one character but "/"),
+ * matched in linear time: every state of the pattern is tracked at once (a Thompson automaton), never backtracked.
+ * WHY: the patterns come from a config an agent can write, and this runs in the coordinator's own process: as a
+ * backtracking regex, "*a*a…*a*b" against a long name took 13 s at 10 pairs and over a minute at 12 (measured,
+ * round-7 review), which would hold every run and every stop. Same characters as the regex: UTF-16 code units.
+ */
+export function globMatcher(glob: string): { test: (s: string) => boolean } {
+  let g = glob.replace(/^\.\//, '');
+  if (g.endsWith('/')) g += '**';
+  const steps: Step[] = [];
+  for (let i = 0; i < g.length; i++) {
+    const c = g[i]!;
+    if (c === '*' && g[i + 1] === '*') {
+      i++;
+      if (g[i + 1] === '/') {
+        i++;
+        const at = steps.length;
+        steps.push({ k: 'skip', to: at + 3 }, { k: 'any' }, { k: 'char', c: '/' });
+      } else steps.push({ k: 'any' });
+    } else if (c === '*') steps.push({ k: 'star' });
+    else if (c === '?') steps.push({ k: 'one' });
+    else steps.push({ k: 'char', c });
+  }
+  const end = steps.length;
+  /** `from` and every state reachable from it without reading a character. */
+  const close = (from: number[], into: Uint8Array) => {
+    const todo = [...from];
+    while (todo.length) {
+      const s = todo.pop()!;
+      if (into[s]) continue;
+      into[s] = 1;
+      if (s === end) continue;
+      const st = steps[s]!;
+      if (st.k === 'star' || st.k === 'any') todo.push(s + 1);
+      else if (st.k === 'skip') todo.push(s + 1, st.to);
+    }
+  };
+  return {
+    test(text: string): boolean {
+      let cur = new Uint8Array(end + 1);
+      close([0], cur);
+      for (let i = 0; i < text.length; i++) {
+        const c = text[i]!;
+        const next: number[] = [];
+        for (let s = 0; s < end; s++) {
+          if (!cur[s]) continue;
+          const st = steps[s]!;
+          if (st.k === 'char') {
+            if (c === st.c) next.push(s + 1);
+          } else if (st.k === 'one') {
+            if (c !== '/') next.push(s + 1);
+          } else if (st.k === 'star') {
+            if (c !== '/') next.push(s);
+          } else if (st.k === 'any') next.push(s);
+        }
+        if (!next.length) return false;
+        cur = new Uint8Array(end + 1);
+        close(next, cur);
+      }
+      return cur[end] === 1;
+    },
+  };
+}
+
+/** An absolute pattern's matcher, tested against an absolute path without its leading "/". */
+const absRe = (p: string) => globMatcher(p.slice(1));
 
 /**
  * The nearest directory at or above `start` holding the config folder, found exactly as the hook finds its project
@@ -358,7 +468,7 @@ function linksToDirectory(link: string): boolean {
  * object store chain that can't be followed in full, or a main checkout that can't be found (no `repo`, and a git
  * directory that leads nowhere back), is an error, and the run doesn't start.
  */
-export function runReadDenials(o: { cwd: string; home: string | undefined; taskFile?: string; repo?: string }): { paths: string[] } | { error: string } {
+export function runReadDenials(o: { cwd: string; home: string | undefined; taskFile?: string; repo?: string; defaultBranch?: string; readsNothing?: boolean }): { paths: string[] } | { error: string } {
   let hidden: string[] = [];
   if (o.taskFile) {
     try {
@@ -369,7 +479,12 @@ export function runReadDenials(o: { cwd: string; home: string | undefined; taskF
   }
   // A guarded run with no project root has every call denied by the hook (`no <config> found`): it doesn't start.
   const root = projectRoot(o.cwd);
-  if (!root) return { error: `no ${BRAND.configDir} folder found at or above ${o.cwd}, so its project root (and secret paths) can't be found` };
+  if (!root) {
+    // A run that can read nothing (no tool allowed, every reading tool refused: the experiment monitor) needs no
+    // project; any other guarded run without one doesn't start.
+    if (o.readsNothing) return { paths: [] };
+    return { error: `no ${BRAND.configDir} folder found at or above ${o.cwd}, so its project root (and secret paths) can't be found` };
+  }
   let cfg;
   try {
     cfg = loadConfig(root);
@@ -391,12 +506,16 @@ export function runReadDenials(o: { cwd: string; home: string | undefined; taskF
       return { error: `the guardrails in ${main} can't load (${firstLine(e)}), so its secret paths can't be denied` };
     }
   }
-  const branch = configs[configs.length - 1]!.project.project.default_branch;
-  try {
-    configs.push(loadConfigAt(main ?? root, `refs/remotes/origin/${branch}`));
-  } catch (e) {
-    const missing = e instanceof ConfigInvalid && e.errors.every((x) => x.message.startsWith('missing at'));
-    if (!missing) return { error: `the guardrails on the default branch (origin/${branch}) can't load (${firstLine(e)}), so its secret paths can't be denied` };
+  // The default branch is the one the coordinator names (it started with it), never one a config an agent can write
+  // names: a main-checkout run could point default_branch at a ref that isn't there (measured, round-7 review). With
+  // a branch, its committed config must load: a missing or invalid one refuses the run, never skipped. Without one
+  // (a runner built outside an instance), there is no committed source.
+  if (o.defaultBranch) {
+    try {
+      configs.push(loadConfigAt(main ?? root, `refs/remotes/origin/${o.defaultBranch}`));
+    } catch (e) {
+      return { error: `the guardrails on the default branch (origin/${o.defaultBranch}) can't be read (${firstLine(e)}), so its secret paths can't be denied` };
+    }
   }
   // Each source is worked out on its own, its exceptions applied to its own patterns only, and the results unioned:
   // an exception ("!/**", "!./.env") one source adds, the run's own checkout's above all (its agent can write it),
@@ -441,6 +560,8 @@ export function runReadDenials(o: { cwd: string; home: string | undefined; taskF
     const added = addSource(patterns);
     if (added) return added;
   }
+  const capped = capPerCheckout(entries, [root, ...(main ? [main] : [])], roots, [...parents]);
+  if (capped) return capped;
   if (hidden.length) for (const s of repo.stores) out.add(s);
   for (const p of entries) {
     if (GLOB.test(p)) {
