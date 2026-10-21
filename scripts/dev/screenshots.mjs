@@ -234,10 +234,11 @@ if (existsSync(join(engine, 'dist', 'src', 'settings.js'))) {
   if (init.status === 0 && existsSync(join(home, 'instance.yaml'))) {
     const yml = join(home, 'instance.yaml');
     writeFileSync(yml, readFileSync(yml, 'utf8').replace(/^ {2}agent_home: .*$/m, `  agent_home: ${JSON.stringify(homedir())}`));
-    writeFileSync(join(home, 'policy.yaml'), 'version: 1\nbudget: { daily_usd: 40 }\nagents: { max_workers: 4 }\nland_mode: direct\nsettings:\n  daily_budget_usd: 25\n');
+    // workers 3 as an admin's edit: the dashboard only tightens (#726), so the shot's change is a lowering.
+    writeFileSync(join(home, 'policy.yaml'), 'version: 1\nbudget: { daily_usd: 40 }\nagents: { max_workers: 4 }\nland_mode: direct\nsettings:\n  daily_budget_usd: 25\n  workers: 3\n');
     try {
       inst = await serve(['--instance', 'shop', '--user', 'example-owner', '--no-open', '--port', String(port + 2)]);
-      await fetch(`${inst.base}/api/instance-settings`, { method: 'POST', headers: { authorization: `Bearer ${inst.token}`, 'content-type': 'application/json' }, body: JSON.stringify({ key: 'workers', value: 3 }) });
+      await fetch(`${inst.base}/api/instance-settings`, { method: 'POST', headers: { authorization: `Bearer ${inst.token}`, 'content-type': 'application/json' }, body: JSON.stringify({ key: 'daily_budget_usd', value: 20 }) });
     } catch (e) {
       console.error(`no instance dashboard (${e.message.split('\n')[0]}); the instance settings shot is skipped`);
     }

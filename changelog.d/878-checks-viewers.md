@@ -1,0 +1,3 @@
+### Upgrading (from v0.5.2)
+
+- **A viewer's issue page shows each check's name and result, never its output (#837).** `GET /api/checks?issue=N` gave every role each check's exit code, the end of a failing check's output and the commit it ran on. Anyone who isn't an owner or writer, including a role the dashboard doesn't know, now gets each run's time and stage and each check's name and pass or fail, and nothing else. A land gate shows by its tier only, without its verdict note. That is no more than `/api/events` already showed them, since `check.result` was never on the viewers' list. Their issue page lists the checks with a note that the output, exit codes and commit are for the owners and writers. The owner and writers see the page as before.

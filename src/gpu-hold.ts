@@ -6,7 +6,7 @@
 // WHY: the harness's own runs take the lock; your jobs don't, unless they go through this. Nothing here asks the
 // driver (no nvidia-smi): it is the lock and nothing else. Only the <cli>-gpu group's one member (the owner; root's
 // scripts/setup/testrun-gpu.sh holder) can open a lock: anyone who could would be able to keep the GPU runs waiting.
-import { spawn } from 'node:child_process';
+import { spawn } from './os/child-process.js';
 import { accessSync, constants, existsSync, readFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { BRAND } from './brand.js';

@@ -13,7 +13,7 @@ import { applyExperiment, EXP_ACTIONS, ExperimentsError, experimentsOn, experime
 import { PINS_FILE } from './experiments/store.js';
 import { handleHook, hooksGatewayToken } from './automations/webhook.js';
 import { AUTOMATIONS_FILE, AutomationsPolicy, limitsInForce } from './automations/schema.js';
-import { spawnSync } from 'node:child_process';
+import { spawnSync } from './os/child-process.js';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
@@ -74,7 +74,7 @@ import { boardForViewer, boardView } from './board.js';
 import { goalGraph } from './goal-graph.js';
 import { MACHINE_CHANGES, MACHINE_HELPER, machineChanges, SLOTS_MAX, SLOTS_MIN, TEST_SLOTS_MAX, TEST_SLOTS_MIN, addProjectCommand } from './machine.js';
 import { isMachineOwner, MACHINE_OWNERS_FILE, machineChangeRefusal, machineOwners } from './machine-owners.js';
-import { MachineRequestError, machineRequests, requestAddProject, requestMachineChange, settingArgs, MACHINE_EVENTS, type MachineRequest } from './machine-requests.js';
+import { MachineRequestError, machineRequests, requestAddProject, requestMachineChange, requestPolicyChange, settingArgs, MACHINE_EVENTS, type MachineRequest } from './machine-requests.js';
 import { ENGINE_CURRENT, installedEngine, lastCheck, UPDATES_CONFIG, UPDATES_LOG, UPDATES_STATE, updateLog, updatesPanel, updateSettings, type UpdatesDrain } from './updates.js';
 import { updateDrain } from './update-drain.js';
 import type { SlotPathLike } from './slot-file.js';
@@ -90,6 +90,7 @@ import { constraintsView } from './checks-from-feedback.js';
 import { digestMarkdown, waitingCached, waitingCount } from './digest.js';
 import { forViewers, stateForViewer, viewerActivity, viewerMaySee, VIEWER_EVENTS } from './viewer-events.js';
 import { prsForViewer } from './prs-viewer.js';
+import { checksFor } from './checks-viewer.js';
 import { METRICS_DEFINITIONS, trustForViewer, trustView } from './trust.js';
 import { deliveryMetrics } from './merge-metrics.js';
 import { flakyView, releaseByOwner } from './flaky.js';
@@ -1379,6 +1380,18 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
     }
   };
 
+  /** For a root policy.yaml (#726): a checked change recorded for the coordinator to run through root's helper; its id. */
+  const policyRequester = (who: Who) => (args: string[]) => {
+    const log = new EventLog(opts.eventsDb);
+    try {
+      const r = requestPolicyChange(log, { args, by: who.login, breakGlass: who.via === 'break-glass' });
+      audit(who, 'policy.requested', { args, request: r.id });
+      return r.id;
+    } finally {
+      log.close();
+    }
+  };
+
   const state = (who: Who) => {
     // INVARIANT (#633): every part of the state is of one read of the log, so an event another process appends while
     // it is put together is in all of it (the projection, its lastId, the waiting count) or in none.
@@ -2116,9 +2129,11 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           if (!opts.policyFile) return json(res, 400, { error: 'settings are an instance\'s: this dashboard serves a checkout' });
           const body = (await readBody(req)) as { key?: string; value?: unknown };
           try {
-            const r = changeSetting({ policyPath: opts.policyFile, cfg: opts.cfg, eventsDb: opts.eventsDb, key: String(body.key ?? ''), value: body.value, by: who.login, owner: isOwnerHere, ...(opts.limitsPath ? { limitsPath: opts.limitsPath } : {}) });
-            audit(who, 'settings.changed', { key: String(body.key ?? ''), from: r.from, to: r.to });
-            return json(res, 200, { ok: true, ...r });
+            const r = changeSetting({ policyPath: opts.policyFile, cfg: opts.cfg, eventsDb: opts.eventsDb, key: String(body.key ?? ''), value: body.value, by: who.login, owner: isOwnerHere, request: policyRequester(who), ...(opts.limitsPath ? { limitsPath: opts.limitsPath } : {}), ...(opts.machine?.helperRulesPath ? { helperRulesFile: opts.machine.helperRulesPath } : {}) });
+            // A root policy.yaml: only queued for the coordinator (root's helper runs it; it logs settings.changed then).
+            if (r.requested) audit(who, 'settings.queued', { key: String(body.key ?? ''), from: r.from, to: r.to, request: r.requested, note: 'queued for the coordinator' });
+            else audit(who, 'settings.changed', { key: String(body.key ?? ''), from: r.from, to: r.to });
+            return json(res, 200, { ok: true, ...r, ...(r.requested ? { queued: true } : {}) });
           } catch (e) {
             if (e instanceof SettingsError) return json(res, /only the owner/.test(e.message) ? 403 : 400, { error: e.message });
             throw e;
@@ -2329,13 +2344,16 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           };
           if (!opts.policyFile) return refused(400, "the policy is a server instance's: this dashboard serves a checkout");
           if (!isOwnerHere) return refused(403, `only the instance's owners (admin on ${repo}) may change its policy; @${who.login} is a ${who.role}`);
-          const o = { path: opts.policyFile, cfg: opts.cfg, values, ...(opts.limitsPath ? { limitsPath: opts.limitsPath } : {}) };
+          const o = { path: opts.policyFile, cfg: opts.cfg, values, ...(opts.limitsPath ? { limitsPath: opts.limitsPath } : {}), ...(opts.machine?.helperRulesPath ? { helperRulesFile: opts.machine.helperRulesPath } : {}) };
           try {
             if (body.confirm !== true) return json(res, 200, { ok: true, changes: planPolicy(o).changes, confirmed: false });
-            const changes = applyPolicy({ ...o, eventsDb: opts.eventsDb, by: who.login });
+            // A root policy.yaml: each change only queued for the coordinator (root's helper runs it).
+            const requests: string[] = [];
+            const ask = policyRequester(who);
+            const changes = applyPolicy({ ...o, eventsDb: opts.eventsDb, by: who.login, request: (args) => { const id = ask(args); requests.push(id); return id; } });
             setupCache.delete('policy');
-            audit(who, 'first_run.policy', { changes });
-            return json(res, 200, { ok: true, changes, confirmed: true });
+            audit(who, 'first_run.policy', { changes, ...(requests.length ? { requests, note: 'queued for the coordinator' } : {}) });
+            return json(res, 200, { ok: true, changes, confirmed: true, ...(requests.length ? { queued: true } : {}) });
           } catch (e) {
             if (e instanceof PolicyEditError) return refused(400, e.message);
             throw e;
@@ -2777,10 +2795,12 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           audit(who, 'machine.tailscale', { action, request: r.id });
           return json(res, 200, { ok: true, pending: true, request: r });
         }
+        // An issue's check runs, shaped by role (src/checks-viewer.ts, #837): a viewer, or any role not owner or
+        // writer, gets each check's name and result only, never its output, exit code or the commit it ran on.
         if (url.pathname === '/api/checks' && req.method === 'GET') {
           const issue = Number(url.searchParams.get('issue'));
           if (!Number.isInteger(issue) || issue <= 0) return json(res, 400, { error: 'issue must be a number' });
-          return json(res, 200, checkResults(eventCache.all(), issue));
+          return json(res, 200, checksFor(who.role, checkResults(eventCache.all(), issue)));
         }
         // A goal's task graph (src/goal-graph.ts), read-only, for everyone with a role, like the goal's own page. Built
         // from the events this person may see (a viewer's are the allowlisted ones), so it shows no goal or task a

@@ -1,6 +1,6 @@
 // WHY: item 33 wiring (src/learnings.ts): notes when a task ends, and an owner's promote filed as an AGENTS.md PR
 // built from the default branch with git plumbing (no worktree, no agent), labelled review:L3, never merged here.
-import { spawnSync } from 'node:child_process';
+import { spawnSync } from '../os/child-process.js';
 import { randomBytes } from 'node:crypto';
 import { mkdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';

@@ -4,13 +4,14 @@
 import './quiet-sqlite.js';
 // INVARIANT: before any engine module: a <PREFIX>_SYSTEM_ROOT not honoured here stops the CLI before anything starts.
 import './os/system-root-guard.js';
-import { execFileSync } from 'node:child_process';
+import { execFileSync } from './os/child-process.js';
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { basename, join, resolve } from 'node:path';
 import { BRAND } from './brand.js';
 import { GITHUB_API, GITHUB_WEB } from './github-hosts.js';
 import { ConfigInvalid, loadConfig } from './config/load.js';
 import { doctor } from './doctor.js';
+import { ghTipRuns } from './check-pin-block.js';
 import { engineRoot, initCommand, MODES, type Mode } from './init.js';
 import { renamedFrom } from './instance-rename.js';
 import { SIRI_PORT_IGNORED } from './voice-removed.js';
@@ -142,6 +143,12 @@ usage: ${BRAND.cli} <command> [options]
   slots                            machine-wide agent slots in use (all harnesses) and the cap
   plugins show --instance name     the instance's approved plugins (root's allowlist, checked);
                                    fetch, stage, confirm and remove are root's (scripts/setup/plugins.sh)
+  policy own <instance> [--retake] [--accept-loose] | policy set <instance> <key> <value>
+                                   root: make a machine instance's policy.yaml root's (its content
+                                   kept; a changed or loose one only with the flag, an admin's), or
+                                   change one key of it (the machine helper's set-policy)
+  policy check <instance>          whether the engine would read that policy.yaml (root's, as root
+                                   last wrote it); reads only
   stop-all [reason]                emergency stop: halt every agent on this machine, across
                                    instances; tasks requeue. resume-all lifts it
   coordinator run [--once] [--instance name]
@@ -515,7 +522,7 @@ async function main(argv: string[]): Promise<number> {
         return 2;
       }
       const instance = instanceOpt;
-      const checks = doctor(root, { agentshield: flag(args, '--agentshield'), ...(policy ? { policy } : {}), ...(instance ? { instance } : {}), ...(modeOpt ? { mode: modeOpt as Mode } : {}) });
+      const checks = doctor(root, { agentshield: flag(args, '--agentshield'), ...(policy ? { policy } : {}), ...(instance ? { instance } : {}), ...(modeOpt ? { mode: modeOpt as Mode } : {}), tipRuns: ghTipRuns });
       if (json) console.log(JSON.stringify(checks, null, 2));
       else for (const c of checks) console.log(`${c.level === 'ok' ? 'ok  ' : c.level === 'warn' ? 'WARN' : c.level === 'off' ? 'off ' : 'FAIL'}  ${c.name}: ${c.detail.replaceAll('\n', '\n        ')}`);
       return checks.some((c) => c.level === 'fail') ? 1 : 0;
@@ -768,6 +775,11 @@ async function main(argv: string[]): Promise<number> {
     case 'plugins': {
       const { pluginsCommand } = await import('./plugins/cli.js');
       return pluginsCommand(sub, rest, instanceOpt);
+    }
+
+    case 'policy': {
+      const { policyCommand } = await import('./policy-root.js');
+      return policyCommand(sub, rest);
     }
 
     case 'slots': {

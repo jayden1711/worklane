@@ -13,6 +13,8 @@ import { ConfigInvalid, loadConfig, type Config, type ConfigError } from './conf
 import { defaultAgentPath, homeOf, homesRoot, normalAbsolute, normalHome, NOT_NORMAL_ABSOLUTE, replaceFileAtomically, stateDir, userExists, type ProjectRunAs } from './os/index.js';
 import type { RunAs } from './runner.js';
 import { homeCredentialStores, sandboxSettings } from './sandbox.js';
+import { policyInstance, readPolicyChecked } from './policy-gate.js';
+import { autoMergeKilled } from './policy-kill.js';
 import { RESEARCH_DIR, RESEARCH_LANE, RESEARCH_REPO_LANE } from './research.js';
 import { CHAT_LANE } from './intake/chat.js';
 // WHY (#785): the env the guard reads and the chat lane's deny rules come from the guard's own locked modules, never
@@ -277,12 +279,12 @@ export function instancesDir(): string {
   return ownEnv().get(`${BRAND.envPrefix}_INSTANCES_DIR`) ?? join(stateDir(), 'instances');
 }
 
-function readYaml<S extends z.ZodType>(schema: S, file: string, errors: ConfigError[]): z.infer<S> | undefined {
-  if (!existsSync(file)) {
+function readYaml<S extends z.ZodType>(schema: S, file: string, errors: ConfigError[], text?: string): z.infer<S> | undefined {
+  if (text === undefined && !existsSync(file)) {
     errors.push({ file, path: '', message: 'missing' });
     return undefined;
   }
-  const doc = parseDocument(readFileSync(file, 'utf8'), { uniqueKeys: true });
+  const doc = parseDocument(text ?? readFileSync(file, 'utf8'), { uniqueKeys: true });
   if (doc.errors.length) {
     for (const e of doc.errors) errors.push({ file, path: '', message: e.message.split('\n')[0]! });
     return undefined;
@@ -291,6 +293,22 @@ function readYaml<S extends z.ZodType>(schema: S, file: string, errors: ConfigEr
   if (r.success) return r.data;
   for (const i of r.error.issues) errors.push({ file, path: i.path.join('.'), message: i.message });
   return undefined;
+}
+
+/**
+ * A policy.yaml, unless root's record says it is root's and it isn't: then refused, and never read (src/policy-gate.ts).
+ * Root's auto_merge kill switch (src/policy-kill.ts) is checked first: while it is there, auto_merge is off, whatever
+ * the file says.
+ */
+function readPolicyYaml(file: string, errors: ConfigError[]): PolicyFile | undefined {
+  const killed = autoMergeKilled(policyInstance(file));
+  const r = readPolicyChecked(file);
+  if (r && 'refused' in r) {
+    errors.push({ file, path: '', message: r.refused });
+    return undefined;
+  }
+  const policy = readYaml(PolicyFile, file, errors, r?.text);
+  return policy && killed ? { ...policy, auto_merge: false } : policy;
 }
 
 /** Every way the repo's config loosens the instance policy. A repo may only tighten it. */
@@ -319,7 +337,7 @@ export function loadInstance(instanceName: string, dir = instancesDir()): Instan
   if (!existsSync(home)) throw new ConfigInvalid([{ file: home, path: '', message: `no instance "${instanceName}"; run \`${BRAND.cli} instance init\`` }]);
   const errors: ConfigError[] = [];
   const inst = readYaml(InstanceFile, join(home, 'instance.yaml'), errors);
-  const policy = readYaml(PolicyFile, join(home, 'policy.yaml'), errors);
+  const policy = readPolicyYaml(join(home, 'policy.yaml'), errors);
   const credentials = readYaml(CredentialsFile, join(home, 'credentials.yaml'), errors);
   if (inst && inst.name !== instanceName) errors.push({ file: join(home, 'instance.yaml'), path: 'name', message: `"${inst.name}" does not match the directory "${instanceName}"` });
   if (errors.length || !inst || !policy || !credentials) throw new ConfigInvalid(errors);
@@ -377,10 +395,19 @@ export function instanceProblems(i: Instance): string[] {
   return out;
 }
 
+/**
+ * Whether an instance merges its own PRs by its policy (the coordinator asks before each merge): root's kill switch
+ * (src/policy-kill.ts) first, and while it is there the policy is never read, so no lock, parse or bad file can turn
+ * it back on. A policy that doesn't load throws (the coordinator reads that as off).
+ */
+export function instanceAutoMerge(instanceName: string, dir = instancesDir()): boolean {
+  return !autoMergeKilled(instanceName) && loadInstance(instanceName, dir).policy.auto_merge;
+}
+
 /** A policy file on its own, e.g. a copy of an instance's, to check a repo config against. */
 export function readPolicy(file: string): { policy: PolicyFile | undefined; errors: ConfigError[] } {
   const errors: ConfigError[] = [];
-  return { policy: readYaml(PolicyFile, file, errors), errors };
+  return { policy: readPolicyYaml(file, errors), errors };
 }
 
 /**
@@ -523,7 +550,7 @@ export function loadInstanceSetup(instanceName: string, dir = instancesDir()): {
   const home = join(dir, instanceName);
   const errors: ConfigError[] = [];
   const inst = readYaml(InstanceFile, join(home, 'instance.yaml'), errors);
-  const policy = readYaml(PolicyFile, join(home, 'policy.yaml'), errors);
+  const policy = readPolicyYaml(join(home, 'policy.yaml'), errors);
   const credentials = readYaml(CredentialsFile, join(home, 'credentials.yaml'), errors);
   if (errors.length || !inst || !policy || !credentials) throw new ConfigInvalid(errors);
   const repoPath = resolve(home, inst.repos[0]!.path);
