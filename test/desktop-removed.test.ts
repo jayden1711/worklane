@@ -25,9 +25,13 @@ function jobNames(dir: string): Set<string> {
   return out;
 }
 
-/** The workflow files in `dir`: `.yml` or `.yaml` in any case (whether GitHub reads `.YML` is unsure, so it counts). */
-function workflowFiles(dir: string): string[] {
-  return readdirSync(dir).filter((x) => /\.ya?ml$/i.test(x)).sort();
+/**
+ * The workflow files in `dir`. Whether GitHub runs a `.YML` or `.Yaml` file is unsure, and each use takes the closed
+ * side: the twin search (`anyCase`) reads them, since one might make a check; "every required check is a job some
+ * workflow defines" (jobNames) doesn't, since one might never run.
+ */
+function workflowFiles(dir: string, anyCase = false): string[] {
+  return readdirSync(dir).filter((x) => (anyCase ? /\.ya?ml$/i : /\.ya?ml$/).test(x)).sort();
 }
 
 /** What a check name still holds when this can't evaluate it: an expression GitHub would evaluate on the runner. */
@@ -61,6 +65,10 @@ function matrixCombos(matrix: unknown): Record<string, unknown>[] | null {
   const keys = [...Object.keys(axes), ...include.flatMap((e) => Object.keys(e)), ...exclude.flatMap((e) => Object.keys(e))];
   if (Object.keys(axes).some((k) => /^(in|ex)clude$/i.test(k))) return null;
   if (new Set(keys.map((k) => k.toLowerCase())).size !== new Set(keys).size) return null;
+  // A value that isn't a plain, non-blank scalar (null, an object or list, '' or blanks): how GitHub names the job
+  // then (an empty or dropped suffix?) is unsure, so the matrix counts as unreadable (as src/check-pin-block.ts does).
+  const values = [...(Object.values(axes) as unknown[][]).flat(), ...include.flatMap((e) => Object.values(e)), ...exclude.flatMap((e) => Object.values(e))];
+  if (values.some((v) => v === null || typeof v === 'object' || (typeof v === 'string' && v.trim() === ''))) return null;
   let combos: Record<string, unknown>[] = Object.keys(axes).length ? [{}] : [];
   for (const [k, values] of Object.entries(axes) as [string, unknown[]][]) combos = combos.flatMap((c) => values.map((v) => ({ ...c, [k]: v })));
   combos = combos.filter((c) => !exclude.some((e) => Object.entries(e).every(([k, v]) => same(c[k], v))));
@@ -87,11 +95,22 @@ function hasMergeKey(v: unknown, seen = new Set<unknown>()): boolean {
   return Object.values(v).some((x) => hasMergeKey(x, seen));
 }
 
+/** Whether `v` has a key that is one of `names` in another case (`Name:`, `Jobs:`): how GitHub reads it is unsure. */
+const otherCase = (v: unknown, names: string[]) => isRecord(v) && Object.keys(v).some((k) => names.includes(k.toLowerCase()) && !names.includes(k));
+
+/**
+ * Whether GitHub may show `name` as another name: leading or trailing white space, a line break (a `|` or `>+`
+ * block scalar keeps one), a no-break space or a format character (zero-width and the like). It may trim or drop
+ * them, so such a name fails closed.
+ */
+const unsureName = (name: string) => /^\s|\s$|[^\S ]|\u0085|\p{Cf}/u.test(name);
+
 /** The check names one job can create (see jobNames). */
 function jobCheckNames(key: string, job: Job): Set<string> {
   const out = new Set<string>();
   // A merge key: whether Actions merges it (YAML 1.1) or not (1.2, as parsed here) is unsure, so the job fails closed.
   if (hasMergeKey(job)) return new Set([`${key} (${UNRESOLVED} merge key }})`]);
+  if (otherCase(job, ['name', 'strategy']) || otherCase(job.strategy, ['matrix'])) return new Set([`${key} (${UNRESOLVED} a key in another case }})`]);
   // A name that isn't a non-blank string (`''`, a number, a list): what GitHub shows is unsure, so it fails closed.
   if (job.name !== undefined && (typeof job.name !== 'string' || job.name.trim() === '')) return new Set([`${key} (${UNRESOLVED} name ${JSON.stringify(job.name)} }})`]);
   const name = (job.name as string | undefined) ?? key;
@@ -106,18 +125,47 @@ function jobCheckNames(key: string, job: Job): Set<string> {
     if (name.includes(UNRESOLVED)) out.add(name.replace(/\$\{\{\s*matrix\.([\w-]+)\s*\}\}/gi, (m, k: string) => (vars.has(k.toLowerCase()) ? shown(vars.get(k.toLowerCase())) : m)));
     else out.add(Object.keys(c).length ? `${name} (${Object.values(c).map(shown).join(', ')})` : name);
   }
-  return out;
+  return new Set([...out].map((n) => (unsureName(n) ? `${key} (${UNRESOLVED} name ${JSON.stringify(n)} }})` : n)));
 }
 
-/** Each job in one workflow file, by key, with the check names it can create. */
+/**
+ * Each job in one workflow file, by key, with the check names it can create. A merge key anywhere in the file (at
+ * its root, under `jobs:` or in a job) adds an entry `<<` with an unresolved name: whether Actions merges it, and so
+ * which jobs the file has, is unsure, so the file may make any check. A `<<` under `jobs:` is not read as a job.
+ * A root key `Jobs` (or `JOBS`) adds an unresolved entry `Jobs` the same way.
+ */
 function fileJobs(file: string): [string, Set<string>][] {
   const wf = parse(readFileSync(file, 'utf8')) as { jobs?: Record<string, Job> };
-  return Object.entries(wf.jobs ?? {}).map(([key, job]) => [key, jobCheckNames(key, job)]);
+  const jobs = Object.entries(wf.jobs ?? {})
+    .filter(([key]) => key !== '<<')
+    .map(([key, job]): [string, Set<string>] => [key, jobCheckNames(key, job)]);
+  if (hasMergeKey(wf)) jobs.push(['<<', new Set([`<< (${UNRESOLVED} merge key }})`])]);
+  // `Jobs:` and the like: whether GitHub reads it as `jobs` is unsure (most likely it refuses the file), so it fails closed.
+  if (otherCase(wf, ['jobs'])) jobs.push(['Jobs', new Set([`Jobs (${UNRESOLVED} a key in another case }})`])]);
+  return jobs;
 }
 
 /** The check names one workflow file can create (see jobNames). */
 function fileJobNames(file: string): Set<string> {
   return new Set(fileJobs(file).flatMap(([, names]) => [...names]));
+}
+
+/**
+ * The workflows and jobs in `dir` that let a step post a check run of any name, `desktop` included, through the
+ * Checks API: `checks: write` or `write-all`, keys and values in any case. The protection is by design: the repo's
+ * default workflow token is read-only and each workflow sets its own `permissions` without `checks`. This is a
+ * backstop beside it until #877 removes the check.
+ */
+function checkWriters(dir: string): string[] {
+  const grants = (p: unknown) => (typeof p === 'string' && p.trim().toLowerCase() === 'write-all') || (isRecord(p) && Object.entries(p).some(([k, v]) => k.toLowerCase() === 'checks' && String(v).trim().toLowerCase() === 'write'));
+  const perms = (o: unknown) => (isRecord(o) ? Object.entries(o).filter(([k]) => k.toLowerCase() === 'permissions').map(([, v]) => v) : []);
+  const out: string[] = [];
+  for (const f of workflowFiles(dir, true)) {
+    const wf = parse(readFileSync(join(dir, f), 'utf8')) as Record<string, unknown>;
+    if (perms(wf).some(grants)) out.push(f);
+    for (const [key, job] of Object.entries(isRecord(wf.jobs) ? wf.jobs : {})) if (perms(job).some(grants)) out.push(`${f}:${key}`);
+  }
+  return out;
 }
 
 /**
@@ -161,7 +209,7 @@ function workflowProblems(wf: Workflow): string[] {
  * job inside ci.yml is a twin too.
  */
 function desktopMakers(dir: string): string[] {
-  return workflowFiles(dir).flatMap((f) => fileJobs(join(dir, f)).filter(([, names]) => mayName(names, 'desktop')).map(([key]) => `${f}:${key}`));
+  return workflowFiles(dir, true).flatMap((f) => fileJobs(join(dir, f)).filter(([, names]) => mayName(names, 'desktop')).map(([key]) => `${f}:${key}`));
 }
 
 /** The names in `required` that no workflow in `dir` defines: checks nothing will ever run. */
@@ -208,6 +256,33 @@ test('a required check whose job was removed first is caught, matrix names expan
   assert.deepEqual([...jobNames(dir)].sort(), ['lint all', 'shard 1/2', 'shard 2/2', 'test (ubuntu-latest, 22)', 'test (ubuntu-latest, 24)']);
   // The desktop job gone, its check still required: the order #744 forbids.
   assert.deepEqual(undefinedChecks(dir, ['test (ubuntu-latest, 22)', 'desktop', 'lint all', 'lint']), ['desktop', 'lint']);
+});
+
+test('no workflow or job may post a check run through the Checks API: no checks: write, no write-all (round 5)', () => {
+  assert.deepEqual(checkWriters(workflows), [], 'a step with checks: write could post a red desktop check run');
+  const writers = (yml: string) => {
+    const dir = mkdtempSync(join(tmpdir(), 'wf-'));
+    writeFileSync(join(dir, 'w.yml'), yml);
+    return checkWriters(dir);
+  };
+  assert.deepEqual(writers('permissions: write-all\njobs:\n  a:\n    runs-on: x\n'), ['w.yml']);
+  assert.deepEqual(writers('permissions: { checks: write }\njobs:\n  a:\n    runs-on: x\n'), ['w.yml']);
+  assert.deepEqual(writers('jobs:\n  a:\n    permissions: { contents: read, checks: write }\n    runs-on: x\n'), ['w.yml:a']);
+  assert.deepEqual(writers('jobs:\n  a:\n    permissions: write-all\n    runs-on: x\n'), ['w.yml:a']);
+  assert.deepEqual(writers('Permissions: { Checks: Write }\njobs:\n  a:\n    runs-on: x\n'), ['w.yml'], 'any case');
+  assert.deepEqual(writers('permissions: { checks: read, contents: write }\njobs:\n  a:\n    permissions: read-all\n    runs-on: x\n'), [], 'reading checks is fine');
+});
+
+test('a required check defined only in a .YML or .Yaml file counts as undefined: GitHub may never run it (round 5)', () => {
+  for (const f of ['ci.YML', 'lint.Yaml']) {
+    const dir = mkdtempSync(join(tmpdir(), 'wf-'));
+    writeFileSync(join(dir, 'ci.yml'), 'jobs:\n  desktop:\n    runs-on: x\n');
+    writeFileSync(join(dir, f), 'jobs:\n  lint:\n    runs-on: x\n');
+    assert.deepEqual(undefinedChecks(dir, ['desktop', 'lint']), ['lint'], f);
+  }
+  const dir = mkdtempSync(join(tmpdir(), 'wf-'));
+  writeFileSync(join(dir, 'lint.yml'), 'jobs:\n  lint:\n    runs-on: x\n');
+  assert.deepEqual(undefinedChecks(dir, ['lint']), [], 'lint.yml defines it');
 });
 
 /** Text that names the removed app: its folder, its framework, its build script, its window, its env var or flag. */
@@ -270,7 +345,27 @@ const TWIN_FIXTURES: [string, string, boolean][] = [
   ['a merge key, the name overridden', 'jobs:\n  base: &base\n    name: shots\n    runs-on: x\n  shots2:\n    <<: *base\n    name: desktop\n', true],
   ['a merge key, the name from the anchor', 'env:\n  X: &n { name: desktop }\njobs:\n  shots:\n    <<: *n\n    runs-on: x\n', true],
   ["name: '' on a job keyed desktop", "jobs:\n  desktop:\n    name: ''\n    runs-on: x\n", true],
-  ['a name with more around the value', 'jobs:\n  shots:\n    name: shots ${{ matrix.view }}\n    strategy: { matrix: { view: [desktop, phone] } }\n    runs-on: x\n', false],
+  // Round 5 (#746 delta check): a merge key above the job level fails closed too.
+  ['a merge key under jobs:, from an anchor', "x: &j { desktop: { runs-on: x, steps: [ { run: 'false' } ] } }\njobs:\n  <<: *j\n  shots:\n    runs-on: x\n", true],
+  ['a merge key at the workflow root', "x: &w { jobs: { desktop: { runs-on: x, steps: [ { run: 'false' } ] } } }\n<<: *w\n", true],
+  ['a merge key under jobs:, inline', 'jobs:\n  <<: { desktop: { runs-on: x } }\n', true],
+  // Round 5 (#746 third adversarial review): names GitHub may trim, and matrix values it may drop, fail closed.
+  ['F1 a trailing space, "desktop "', 'jobs:\n  shots:\n    name: "desktop "\n    runs-on: x\n', true],
+  ['F1 a leading space, " desktop"', 'jobs:\n  shots:\n    name: " desktop"\n    runs-on: x\n', true],
+  ['F2 a | block scalar (keeps a line break)', 'jobs:\n  shots:\n    name: |\n      desktop\n    runs-on: x\n', true],
+  ['F2 a >+ block scalar', 'jobs:\n  shots:\n    name: >+\n      desktop\n\n    runs-on: x\n', true],
+  ['F3 a no-break space after desktop', 'jobs:\n  shots:\n    name: "desktop\\u00a0"\n    runs-on: x\n', true],
+  ['F3 a zero-width space after desktop', 'jobs:\n  shots:\n    name: "desktop\\u200b"\n    runs-on: x\n', true],
+  ["F4 name: desktop, a matrix value ''", "jobs:\n  shots:\n    name: desktop\n    strategy: { matrix: { v: [''] } }\n    runs-on: x\n", true],
+  ["F4 a job keyed desktop, a matrix value ''", "jobs:\n  desktop:\n    strategy: { matrix: { v: [''] } }\n    runs-on: x\n", true],
+  ["F4 name: desktop, a blank matrix value '  '", "jobs:\n  shots:\n    name: desktop\n    strategy: { matrix: { v: ['  '] } }\n    runs-on: x\n", true],
+  ['F5 name: desktop, a null matrix value', 'jobs:\n  shots:\n    name: desktop\n    strategy: { matrix: { v: [~] } }\n    runs-on: x\n', true],
+  ['F5 name: desktop, an object matrix value', 'jobs:\n  shots:\n    name: desktop\n    strategy: { matrix: { v: [{}] } }\n    runs-on: x\n', true],
+  ['F5 a job keyed desktop, a null matrix value', 'jobs:\n  desktop:\n    strategy: { matrix: { v: [~] } }\n    runs-on: x\n', true],
+  ['F5 a job keyed desktop, an object matrix value', 'jobs:\n  desktop:\n    strategy: { matrix: { v: [{}] } }\n    runs-on: x\n', true],
+  ['F5 a job keyed desktop, a null value in an include entry', 'jobs:\n  desktop:\n    strategy: { matrix: { include: [{ v: ~ }] } }\n    runs-on: x\n', true],
+  ['R2 Name: desktop (another case)', 'jobs:\n  shots:\n    Name: desktop\n    runs-on: x\n', true],
+  ['R2 Jobs: (another case) with a job keyed desktop', 'Jobs:\n  desktop:\n    runs-on: x\n', true],  ['a name with more around the value', 'jobs:\n  shots:\n    name: shots ${{ matrix.view }}\n    strategy: { matrix: { view: [desktop, phone] } }\n    runs-on: x\n', false],
   ['no name: the values in parentheses', 'jobs:\n  shots:\n    strategy: { matrix: { view: [desktop] } }\n    runs-on: x\n', false],
   ['no name, include entries only', 'jobs:\n  shots:\n    strategy: { matrix: { include: [{ view: desktop }] } }\n    runs-on: x\n', false],
   ['desktop excluded', 'jobs:\n  shots:\n    name: ${{ matrix.view }}\n    strategy: { matrix: { view: [desktop, phone], exclude: [{ view: desktop }] } }\n    runs-on: x\n', false],
@@ -289,6 +384,7 @@ const CI_TWIN_FIXTURES: [string, string][] = [
   ['name: desktop, a failing step', "  desktop-screens:\n    name: desktop\n    runs-on: ubuntu-latest\n    steps:\n      - run: 'false'\n"],
   ["name: ${{ 'desktop' }}", "  shots:\n    name: ${{ 'desktop' }}\n    runs-on: ubuntu-latest\n    steps:\n      - run: 'false'\n"],
   ['a matrix over [desktop, phone]', "  shots:\n    name: ${{ matrix.view }}\n    strategy: { matrix: { view: [desktop, phone] } }\n    runs-on: ubuntu-latest\n    steps:\n      - run: 'false'\n"],
+  ['a merge key under jobs: bringing in a red name: desktop job (round 5)', "  <<: { desktop-red: { name: desktop, runs-on: x, steps: [ { run: 'false' } ] } }\n"],
 ];
 
 /** A workflow file name the backstop must read: `.yml` or `.yaml`, any case. */
