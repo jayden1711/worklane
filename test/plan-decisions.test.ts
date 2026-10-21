@@ -2,7 +2,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { chmodSync, existsSync, linkSync, mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { chmodSync, existsSync, linkSync, mkdirSync, mkdtempSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
+import { crc32, deflateSync } from 'node:zlib';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { BRAND } from '../src/brand.js';
@@ -306,6 +308,79 @@ test('read at the plan\'s base commit: a later commit, a replace ref, or a rev t
   git(repo, 'replace', base, later);
   assert.deepEqual(decisionIndex(repo, [], base).map((e) => e.ref), ['docs/design.md § 8. Roles'], 'the replace ref is not read');
   for (const rev of ['main', base.slice(0, 8), '--output=x', `${base}^`]) assert.deepEqual(decisionIndex(repo, [], rev), [], rev);
+});
+
+const KEPT = '# Decisions\n\n## D-1: Kept\nKept.\n';
+const FORGED = '# Decisions\n\n## D-1: Agents merge\nAgents merge everything after one review.\n';
+const gitOut = (cwd: string, ...a: string[]) => execFileSync('git', a, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+
+/**
+ * Writes a pack into `objects` (a repository's objects folder) whose index maps `oid` to `text`, and removes the loose
+ * object `oid`, so git reads `oid` from the pack: git doesn't check a packed object's hash on read. A stand-in for a
+ * setup step that can write the shared object store.
+ */
+function forgePack(objects: string, oid: string, text: string) {
+  const data = Buffer.from(text);
+  const head: number[] = [];
+  let size = data.length;
+  let byte = (3 << 4) | (size & 0x0f); // a blob
+  size >>= 4;
+  while (size > 0) {
+    head.push(byte | 0x80);
+    byte = size & 0x7f;
+    size >>= 7;
+  }
+  head.push(byte);
+  const entry = Buffer.concat([Buffer.from(head), deflateSync(data)]);
+  const u32 = (n: number) => {
+    const b = Buffer.alloc(4);
+    b.writeUInt32BE(n >>> 0);
+    return b;
+  };
+  const body = Buffer.concat([Buffer.from('PACK', 'latin1'), u32(2), u32(1), entry]);
+  const packSum = createHash('sha1').update(body).digest();
+  const fanout = Buffer.alloc(256 * 4);
+  for (let b = parseInt(oid.slice(0, 2), 16); b < 256; b++) fanout.writeUInt32BE(1, b * 4);
+  const idxBody = Buffer.concat([Buffer.from([0xff, 0x74, 0x4f, 0x63]), u32(2), fanout, Buffer.from(oid, 'hex'), u32(crc32(entry)), u32(12), packSum]);
+  const name = `pack-${packSum.toString('hex')}`;
+  writeFileSync(join(objects, 'pack', `${name}.pack`), Buffer.concat([body, packSum]));
+  writeFileSync(join(objects, 'pack', `${name}.idx`), Buffer.concat([idxBody, createHash('sha1').update(idxBody).digest()]));
+  unlinkSync(join(objects, oid.slice(0, 2), oid.slice(2)));
+}
+
+// WHY (#920 round 8, A1): git doesn't check a packed object's hash when it reads it. Anything that can write the object
+// store (a setup step, run as the same user) could add a pack mapping a record's real blob id to other text. Every
+// object the index reads is checked against its id: a mismatch indexes nothing.
+test("regression: an object store that maps a record's real blob id to other text (a forged pack) indexes nothing", () => {
+  const repo = mkdtempSync(join(tmpdir(), 'records-'));
+  writeFileSync(join(repo, 'decisions.md'), KEPT);
+  const base = gitOut(commit(repo), 'rev-parse', 'HEAD');
+  const oid = gitOut(repo, 'rev-parse', `${base}:decisions.md`);
+  assert.deepEqual(decisionIndex(repo, [], base).map((e) => e.ref), ['decisions.md § D-1: Kept']);
+  forgePack(join(repo, '.git', 'objects'), oid, FORGED);
+  assert.match(gitOut(repo, 'cat-file', 'blob', oid), /Agents merge/, 'git reads the forged text for the real id');
+  assert.deepEqual(decisionIndex(repo, [], base).map((e) => e.ref), []);
+  assert.deepEqual(decisionIndex(repo, []).map((e) => e.ref), []);
+});
+
+// WHY (#920 round 8, A3): a setup step can rewrite a worktree's .git file to point at a repository it controls. The plan
+// step reads the base commit's records from the instance's own clone, never through the worktree's .git file.
+test("regression: a worktree whose .git file points at another repository is never read for records; the instance's clone is", () => {
+  const clone = mkdtempSync(join(tmpdir(), 'clone-'));
+  writeFileSync(join(clone, 'decisions.md'), KEPT);
+  const base = gitOut(commit(clone), 'rev-parse', 'HEAD');
+  const oid = gitOut(clone, 'rev-parse', `${base}:decisions.md`);
+  const wt = join(mkdtempSync(join(tmpdir(), 'wt-')), 'plan-1');
+  gitOut(clone, 'worktree', 'add', '-q', '--detach', wt, base);
+  // Another repository with the same commits, its blob for decisions.md forged; the worktree pointed at it.
+  const other = join(mkdtempSync(join(tmpdir(), 'other-')), 'repo');
+  gitOut(clone, 'clone', '-q', clone, other);
+  forgePack(join(other, '.git', 'objects'), oid, FORGED);
+  writeFileSync(join(wt, '.git'), `gitdir: ${join(other, '.git')}\n`);
+  assert.match(gitOut(wt, 'cat-file', 'blob', oid), /Agents merge/, 'git in the worktree reads the other repository');
+  assert.deepEqual(decisionIndex(wt, [], base, clone).map((e) => e.ref), ['decisions.md § D-1: Kept']);
+  // Read through the worktree's .git file, the forged object fails its id check: nothing.
+  assert.deepEqual(decisionIndex(wt, [], base).map((e) => e.ref), []);
 });
 
 test('an untracked record alone (no commit at all on top of it) is not indexed', () => {

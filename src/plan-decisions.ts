@@ -4,6 +4,7 @@
 // decision records the checkout keeps (a decisions file or folder, and docs/design.md). A plan that cites what
 // isn't there, or has no section, is refused before plan review; plan review then checks the plan against what
 // it cites and against the index (src/coordinator/decisions.ts).
+import { createHash } from 'node:crypto';
 import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, posix, relative, sep } from 'node:path';
 import { redactString } from './events/redact.js';
@@ -112,63 +113,134 @@ const GIT_LIMITS = { maxBuffer: 64 * 1024 * 1024, timeout: 60_000 };
 /** Whether a tree entry's path is a record path: a decisions file, or a file directly in a decisions folder. */
 const isRecordPath = (path: string) => DECISION_FILES.includes(path) || DECISION_DIRS.includes(posix.dirname(path));
 
+/** A full object id: SHA-1 (40 hex) or SHA-256 (64 hex). */
+const OBJECT_ID = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
+
 /**
- * The records git tracks at `rev` (the plan's base commit; HEAD when not given), by path, with each one's text read
- * from its blob; or null when that can't be told (not a checkout's top, a rev that isn't HEAD or a full commit id, git
- * failing, output it can't read). Only regular
- * files count (mode 100644 or 100755): a symlink (120000) or a submodule (160000) at a record path is no record. The
- * working tree is never read for a record's text: a file a setup step, an install script or a pooled worktree left
- * there untracked, or an edit not committed, is no record (#920). Paths are git's exact bytes, whatever the
- * filesystem's case.
+ * The objects with these ids, each of the type asked for, read with `git cat-file --batch` in `cwd`'s repository, and
+ * each one's id recomputed from its content (`<type> <size>\0<content>`, hashed as the id's length says): or null when
+ * any is missing, of another type, or doesn't hash to its id. git doesn't check a packed object's hash when it reads it,
+ * so a pack whose index maps a real id to other content would otherwise be read as that id (#920 round 8).
  */
-function committedRecords(repo: string, rev: string): Map<string, string> | null {
-  if (rev !== 'HEAD' && !/^[0-9a-f]{40,64}$/.test(rev)) return null;
-  // Replace refs (refs/replace) could stand another tree in for the commit's own: never read through them.
-  const git = (args: string[], input?: string) => spawnSync('git', ['--no-replace-objects', '--literal-pathspecs', ...args], { cwd: repo, input, ...GIT_LIMITS });
-  const top = git(['rev-parse', '--show-cdup']);
-  if (top.error || top.status !== 0 || top.stdout.toString().trim() !== '') return null;
-  const ls = git(['ls-tree', '-r', '-z', '--full-tree', rev, '--', ...DECISION_FILES, ...DECISION_DIRS]);
-  if (ls.error || ls.status !== 0) return null;
-  const entries: { path: string; oid: string }[] = [];
-  for (const rec of ls.stdout.toString('utf8').split('\0')) {
-    if (!rec) continue;
-    const m = /^(\d{6}) ([a-z]+) ([0-9a-f]{40,64})\t([\s\S]+)$/.exec(rec);
-    if (!m) return null;
-    const [, mode, type, oid, path] = m;
-    if (type !== 'blob' || (mode !== '100644' && mode !== '100755') || !isRecordPath(path!)) continue;
-    entries.push({ path: path!, oid: oid! });
-  }
-  const out = new Map<string, string>();
-  if (!entries.length) return out;
-  const cat = git(['cat-file', '--batch'], `${entries.map((e) => e.oid).join('\n')}\n`);
-  if (cat.error || cat.status !== 0) return null;
-  const buf = cat.stdout as Buffer;
+function verifiedObjects(cwd: string, wanted: { oid: string; type: 'commit' | 'tree' | 'blob' }[]): Map<string, Buffer> | null {
+  const out = new Map<string, Buffer>();
+  if (!wanted.length) return out;
+  if (!wanted.every((w) => OBJECT_ID.test(w.oid))) return null;
+  // Replace refs (refs/replace) could stand another object in for the one asked for: never read through them.
+  const r = spawnSync('git', ['--no-replace-objects', 'cat-file', '--batch'], { cwd, input: `${wanted.map((w) => w.oid).join('\n')}\n`, ...GIT_LIMITS });
+  if (r.error || r.status !== 0) return null;
+  const buf = r.stdout as Buffer;
   let at = 0;
-  for (const e of entries) {
+  for (const w of wanted) {
     const nl = buf.indexOf(0x0a, at);
     if (nl < 0) return null;
-    const head = /^([0-9a-f]{40,64}) blob (\d+)$/.exec(buf.subarray(at, nl).toString('utf8'));
-    if (!head || head[1] !== e.oid) return null;
+    const head = /^([0-9a-f]+) ([a-z]+) (\d+)$/.exec(buf.subarray(at, nl).toString('utf8'));
+    if (!head || head[1] !== w.oid || head[2] !== w.type) return null;
     const start = nl + 1;
-    const end = start + Number(head[2]);
+    const end = start + Number(head[3]);
     if (end >= buf.length || buf[end] !== 0x0a) return null;
-    out.set(e.path, buf.subarray(start, end).toString('utf8'));
+    const body = buf.subarray(start, end);
+    const id = createHash(w.oid.length === 40 ? 'sha1' : 'sha256').update(`${w.type} ${body.length}\0`).update(body).digest('hex');
+    if (id !== w.oid) return null;
+    out.set(w.oid, body);
     at = end + 1;
   }
   return out;
 }
 
+/** A tree object's entries, by name: mode and id. null when it can't be read as a tree. */
+function treeEntries(body: Buffer, idBytes: number): Map<string, { mode: string; oid: string }> | null {
+  const out = new Map<string, { mode: string; oid: string }>();
+  let at = 0;
+  while (at < body.length) {
+    const sp = body.indexOf(0x20, at);
+    const nul = sp < 0 ? -1 : body.indexOf(0x00, sp);
+    if (sp < 0 || nul < 0 || nul + 1 + idBytes > body.length) return null;
+    const mode = body.subarray(at, sp).toString('latin1');
+    if (!/^[0-7]{5,6}$/.test(mode)) return null;
+    out.set(body.subarray(sp + 1, nul).toString('utf8'), { mode, oid: body.subarray(nul + 1, nul + 1 + idBytes).toString('hex') });
+    at = nul + 1 + idBytes;
+  }
+  return out;
+}
+
+/** Regular files only: a symlink (120000) or a submodule (160000) at a record path is no record. */
+const REGULAR = new Set(['100644', '100755']);
+
 /**
- * The decision records the checkout keeps, as index entries. Fails closed. A record is indexed only when git tracks it
- * at the checkout's HEAD as a regular file at a record path, and its text is read from git, never from the working
- * tree (committedRecords). Then, as a second check on the working tree: its real path is inside the checkout (a
- * symlink out of it, say from a planning worktree nested in a clone to the clone's own files, is not) and is itself a
- * record path, it isn't docs/process.md under another name (a hard link), and all of that could be told. When git
- * can't tell, or the page exists but can't be read (EACCES, ELOOP, ...), no record is indexed.
+ * The records committed at `rev`, by path, with each one's text; or null when that can't be told. `rev` is the plan's
+ * base commit, as the coordinator gives it; HEAD only when no base is given (then resolved in `checkout`, which must be
+ * its repository's top). The objects are read from `objects`, the instance's own clone when the coordinator says so,
+ * never through a worktree's .git file, which a setup step could point elsewhere (#920 round 8).
+ *
+ * Every object read, the commit, each tree down to a record and each record's blob, is checked against its id
+ * (verifiedObjects), so no object store, however written, can change what a base commit's records say. The working tree
+ * is never read for a record's text: a file left there untracked, or an edit not committed, is no record. Paths are the
+ * tree's exact bytes, whatever the filesystem's case. Any failure or mismatch: null, and no record is indexed.
  */
-export function recordEntries(repo: string, rev = 'HEAD'): DecisionEntry[] {
+function committedRecords(checkout: string, rev: string, objects: string): Map<string, string> | null {
+  let base = rev;
+  if (rev === 'HEAD') {
+    const git = (args: string[]) => spawnSync('git', ['--no-replace-objects', ...args], { cwd: checkout, encoding: 'utf8', ...GIT_LIMITS });
+    const top = git(['rev-parse', '--show-cdup']);
+    if (top.error || top.status !== 0 || top.stdout.trim() !== '') return null;
+    const head = git(['rev-parse', '--verify', '--quiet', 'HEAD^{commit}']);
+    if (head.error || head.status !== 0) return null;
+    base = head.stdout.trim();
+  }
+  if (!OBJECT_ID.test(base)) return null;
+  const idBytes = base.length / 2;
+  const commit = verifiedObjects(objects, [{ oid: base, type: 'commit' }])?.get(base);
+  const treeLine = commit && /^tree ([0-9a-f]+)\n/.exec(commit.toString('utf8'));
+  if (!treeLine || treeLine[1]!.length !== base.length) return null;
+  // Walk down from the root tree to every folder a record path names, one level per read.
+  const folders = new Set<string>(['']);
+  for (const p of [...DECISION_FILES.map((f) => posix.dirname(f)), ...DECISION_DIRS]) {
+    for (let d = p; d !== '.' && d !== ''; d = posix.dirname(d)) folders.add(d);
+  }
+  const trees = new Map<string, Map<string, { mode: string; oid: string }>>();
+  let level: { path: string; oid: string }[] = [{ path: '', oid: treeLine[1]! }];
+  while (level.length) {
+    const got = verifiedObjects(objects, level.map((t) => ({ oid: t.oid, type: 'tree' as const })));
+    if (!got) return null;
+    const next: { path: string; oid: string }[] = [];
+    for (const t of level) {
+      const entries = treeEntries(got.get(t.oid)!, idBytes);
+      if (!entries) return null;
+      trees.set(t.path, entries);
+      for (const [name, e] of entries) {
+        const path = t.path ? `${t.path}/${name}` : name;
+        if (e.mode === '40000' && folders.has(path)) next.push({ path, oid: e.oid });
+      }
+    }
+    level = next;
+  }
+  const blobs: { path: string; oid: string }[] = [];
+  for (const file of DECISION_FILES) {
+    const dir = posix.dirname(file);
+    const e = trees.get(dir === '.' ? '' : dir)?.get(posix.basename(file));
+    if (e && REGULAR.has(e.mode)) blobs.push({ path: file, oid: e.oid });
+  }
+  for (const dir of DECISION_DIRS) {
+    for (const [name, e] of trees.get(dir) ?? []) if (REGULAR.has(e.mode)) blobs.push({ path: `${dir}/${name}`, oid: e.oid });
+  }
+  const got = verifiedObjects(objects, blobs.map((b) => ({ oid: b.oid, type: 'blob' as const })));
+  if (!got) return null;
+  return new Map(blobs.map((b) => [b.path, got.get(b.oid)!.toString('utf8')]));
+}
+
+/**
+ * The decision records of the plan's base commit, as index entries. Fails closed. A record is indexed only when it is a
+ * regular file at a record path in the base commit (`rev`; the checkout's HEAD only when no base is given), with its
+ * text read from git objects whose ids are checked, never from the working tree (committedRecords). Then, as a second
+ * check on the working tree: its real path is inside the checkout (a symlink out of it, say from a planning worktree
+ * nested in a clone to the clone's own files, is not) and is itself a record path, it isn't docs/process.md under
+ * another name (a hard link), and all of that could be told. When git can't tell, or the page exists but can't be read
+ * (EACCES, ELOOP, ...), no record is indexed.
+ */
+export function recordEntries(repo: string, rev = 'HEAD', objects = repo): DecisionEntry[] {
   const out: DecisionEntry[] = [];
-  const committed = committedRecords(repo, rev);
+  const committed = committedRecords(repo, rev, objects);
   if (!committed) return out;
   let root: string;
   try {
@@ -230,9 +302,12 @@ export function madeEntries(events: readonly StoredEvent[]): DecisionEntry[] {
   return [...out.values()];
 }
 
-/** The decisions index a plan is checked against: the decisions already made, then the checkout's records. */
-export function decisionIndex(repo: string, events: readonly StoredEvent[], rev = 'HEAD'): DecisionEntry[] {
-  return [...madeEntries(events), ...recordEntries(repo, rev)];
+/**
+ * The decisions index a plan is checked against: the decisions made, then the records of the plan's base commit `rev`
+ * (HEAD when not given), read from the repository at `objects` (the instance's clone; the checkout when not given).
+ */
+export function decisionIndex(repo: string, events: readonly StoredEvent[], rev = 'HEAD', objects = repo): DecisionEntry[] {
+  return [...madeEntries(events), ...recordEntries(repo, rev, objects)];
 }
 
 /** The entry a citation names, or null. */

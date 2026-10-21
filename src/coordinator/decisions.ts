@@ -38,8 +38,9 @@ export abstract class Decisions extends Recovery {
     }
     const note = decided?.answer === 'revise' ? decided.note : null;
     // The decisions index: the decisions made and the decision records committed at the plan's base (#920: read at the
-    // base commit itself, so nothing a setup step writes or commits in the worktree is a record).
-    const index = decisionIndex(path, this.d.log.read(0, ['decision.asked', 'decision.answered']), base);
+    // base commit itself, from the instance's own clone with every object's id checked, so nothing a setup step writes
+    // or commits in the worktree, or points the worktree's .git at, is a record).
+    const index = decisionIndex(path, this.d.log.read(0, ['decision.asked', 'decision.answered']), base, this.d.repo);
     let sentBack: string[] = [];
     let plan: Plan | null = null;
     for (let round = 0; !plan; round++) {
