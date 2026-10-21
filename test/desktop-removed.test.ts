@@ -85,6 +85,9 @@ function matrixCombos(matrix: unknown): Map<string, unknown>[] | null {
   // then (an empty or dropped suffix?) is unsure, so the matrix counts as unreadable (as src/check-pin-block.ts does).
   const values = [...(Object.values(axes) as unknown[][]).flat(), ...include.flatMap((e) => Object.values(e)), ...exclude.flatMap((e) => Object.values(e))];
   if (values.some((v) => v === null || typeof v === 'object' || (typeof v === 'string' && v.trim() === ''))) return null;
+  // A string value with a leading or trailing blank (`'q '`): whether GitHub trims it before it matches an exclude or
+  // include entry, or names the job, is unsure, so the matrix is unreadable (round 13).
+  if (values.some((v) => typeof v === 'string' && /^\s|\s$/.test(v))) return null;
   // A number JS and GitHub may print differently makes the matrix unreadable: `22.00000000000001` (JS keeps the
   // digits, a 15-digit format drops them; round 8) and -0 (JS prints `0`, .NET `-0`; round 9). Every other integer
   // below 1e15 in size is taken to print the same both ways (inferred, not measured on GitHub). It is written in
@@ -98,6 +101,9 @@ function matrixCombos(matrix: unknown): Map<string, unknown>[] | null {
   for (const [k, vs] of Object.entries(axes) as [string, unknown[]][]) for (const v of vs) note(k, v);
   for (const e of [...include, ...exclude]) for (const [k, v] of Object.entries(e)) note(k, v);
   for (const vs of byKey.values()) {
+    // One key holding values of two YAML types (`true` and `1`, `'1.0'` and `1`, `'1e0'` and `1`, `false` and `0`):
+    // whether GitHub converts one to the other when it matches is unsure, so the matrix is unreadable (round 13).
+    if (new Set(vs.map((v) => typeof v)).size > 1) return null;
     const seen = new Map<string, unknown>();
     for (const v of vs) {
       const loose = fold(String(v));
@@ -567,6 +573,13 @@ const TWIN_FIXTURES: [string, string, boolean][] = [
   // Round 12 (#746 second adversarial review of 00ed28c2): GitHub reads 0xffffffff as -1 (32-bit), `yaml` as
   // 4294967295, so the exclude empties the product on GitHub only, and include desktop and phone stand alone.
   ['H1b a hex exclude 0xffffffff against an axis -1; include desktop and phone stand alone on GitHub', "jobs:\n  shots:\n    name: ${{ matrix.v }}\n    strategy:\n      matrix:\n        k: [-1]\n        exclude: [ { k: 0xffffffff } ]\n        include: [ { v: desktop }, { v: phone } ]\n    runs-on: x\n    steps: [ { run: 'false' } ]\n", true],
+  // Round 13 (the round 11 delta check's list, #948): pairs GitHub may match loosely where the helper doesn't. One
+  // key holding values of two YAML types, or a string with a leading or trailing space, makes the matrix unreadable.
+  ['Y1 an exclude 1 against an axis true', "jobs:\n  shots:\n    name: ${{ matrix.v }}\n    strategy:\n      matrix:\n        k: [true]\n        exclude: [ { k: 1 } ]\n        include: [ { v: desktop }, { v: phone } ]\n    runs-on: x\n    steps: [ { run: 'false' } ]\n", true],
+  ["Y2 an exclude 1 against an axis '1.0'", "jobs:\n  shots:\n    name: ${{ matrix.v }}\n    strategy:\n      matrix:\n        k: ['1.0']\n        exclude: [ { k: 1 } ]\n        include: [ { v: desktop }, { v: phone } ]\n    runs-on: x\n    steps: [ { run: 'false' } ]\n", true],
+  ["Y3 an exclude 1 against an axis '1e0'", "jobs:\n  shots:\n    name: ${{ matrix.v }}\n    strategy:\n      matrix:\n        k: ['1e0']\n        exclude: [ { k: 1 } ]\n        include: [ { v: desktop }, { v: phone } ]\n    runs-on: x\n    steps: [ { run: 'false' } ]\n", true],
+  ['Y4 an exclude 0 against an axis false', "jobs:\n  shots:\n    name: ${{ matrix.v }}\n    strategy:\n      matrix:\n        k: [false]\n        exclude: [ { k: 0 } ]\n        include: [ { v: desktop }, { v: phone } ]\n    runs-on: x\n    steps: [ { run: 'false' } ]\n", true],
+  ["Y5 an exclude q against an axis 'q '", "jobs:\n  shots:\n    name: ${{ matrix.v }}\n    strategy:\n      matrix:\n        k: ['q ']\n        exclude: [ { k: q } ]\n        include: [ { v: desktop }, { v: phone } ]\n    runs-on: x\n    steps: [ { run: 'false' } ]\n", true],
   ['a name with more around the value', 'jobs:\n  shots:\n    name: shots ${{ matrix.view }}\n    strategy: { matrix: { view: [desktop, phone] } }\n    runs-on: x\n', false],
   ['no name: the values in parentheses', 'jobs:\n  shots:\n    strategy: { matrix: { view: [desktop] } }\n    runs-on: x\n', false],
   ['no name, include entries only', 'jobs:\n  shots:\n    strategy: { matrix: { include: [{ view: desktop }] } }\n    runs-on: x\n', false],
