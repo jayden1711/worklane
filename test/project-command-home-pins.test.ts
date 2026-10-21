@@ -54,7 +54,10 @@ function results(): ((k: string) => string) | null {
   const script = join(dir, 'pins.sh');
   writeFileSync(script, SCRIPT);
   const r = spawnSync('unshare', [...NS, '/bin/bash', script, s1, s2], { encoding: 'utf8', timeout: 120_000, stdio: ['ignore', 'pipe', 'pipe'] });
-  if (/NOSANDBOX|NOMOUNT/.test(r.stdout) || r.status !== 0) {
+  // The script itself failing is a failure, never a skip; only a namespace without bubblewrap or a tmpfs skips, and
+  // not under PROJECT_SANDBOX_REQUIRED=1.
+  if (r.status !== 0) assert.fail(`the namespace script failed (status ${r.status}): ${r.stdout}${r.stderr}`);
+  if (/NOSANDBOX|NOMOUNT/.test(r.stdout)) {
     if (required) assert.fail(`PROJECT_SANDBOX_REQUIRED=1, but the namespace or bubblewrap in it didn't run: ${r.stdout}${r.stderr}`);
     ran = null;
   } else ran = (k: string) => new RegExp(`^${k}=(.*)$`, 'm').exec(r.stdout)?.[1] ?? `(no ${k}: ${r.stdout}${r.stderr})`;
