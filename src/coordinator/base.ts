@@ -253,10 +253,13 @@ export abstract class CoordinatorBase {
     return envWithCores(this.d.cfg.tests.env, this.coreShare());
   }
 
-  /** A project command (check, gate, pre-land step): it runs agent-written code, so it runs as the agent user. */
-  protected project(command: string, cwd: string) {
+  /**
+   * A project command (check, gate, pre-land step, deploy trigger and verify): it runs code an agent or an approved PR
+   * wrote, so it runs as the agent user, in its sandbox. `timeoutMs`: at most the command timeout.
+   */
+  protected project(command: string, cwd: string, timeoutMs = this.commandTimeoutMs) {
     const share = this.coreShare();
-    return sh(withCores(command, share), cwd, this.commandTimeoutMs, this.d.commandsAs, envWithCores(this.d.cfg.tests.env, share), this.shutdown.signal);
+    return sh(withCores(command, share), cwd, Math.min(timeoutMs, this.commandTimeoutMs), this.d.commandsAs, envWithCores(this.d.cfg.tests.env, share), this.shutdown.signal);
   }
 
   /** How long a project command or an agent run may take (tests.yaml command_timeout_s). */
