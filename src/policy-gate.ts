@@ -79,12 +79,13 @@ export const policyRootUid = (): number => rootUid;
  * The root shell command that makes an instance's policy.yaml root's, keeping its content and showing its keys. A
  * flag says what an admin checked first (policyCommand): `--retake`, a recorded file that changed since root wrote
  * it; `--accept-loose`, a policy looser than a coordinator could make it. Setup never passes either. For an instance
- * made before its name was reserved (machine, console), `policy own` refuses both flags (#902 round 10), so the command
- * named instead is its removal (#902 round 11), never one that would be refused.
+ * made before its name was reserved (machine, console), `policy own` refuses `--retake` (#902 rounds 10, 12), so where
+ * that is needed the command named instead is its removal (#902 round 11), never one that would be refused.
+ * `--accept-loose` alone (a first takeover) works for such a name, and is named as for any other.
  */
 export const ownCommand = (instance: string, ...flags: ('--retake' | '--accept-loose')[]) =>
-  flags.length && LATER_RESERVED.includes(instance)
-    ? `sudo bash ${asRoot.opt('current/scripts/setup/instance-remove.sh')} ${instance} (${instance} is a name reserved since: its policy is never taken over with ${flags.join(' ')}; remove the instance, then add it again under another name)`
+  flags.includes('--retake') && LATER_RESERVED.includes(instance)
+    ? `sudo bash ${asRoot.opt('current/scripts/setup/instance-remove.sh')} ${instance} (${instance} is a name reserved since: its policy is never taken over with --retake; remove the instance, then add it again under another name)`
     : `sudo ${BRAND.cli} policy own ${instance}${flags.map((f) => ` ${f}`).join('')}`;
 
 /** Whether root's record covers this instance (any answer but "none" does: an unreadable record refuses, never skips). */

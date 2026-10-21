@@ -222,12 +222,14 @@ export interface OwnFlags {
  * make it (unless `acceptLoose`). Returns the keys an admin should check, and which are loose.
  */
 export function ownPolicy(instance: string, d: PolicyRootDeps = {}, flags: OwnFlags = {}): { file: string; keys: Record<string, unknown>; loose: string[] } {
-  // An instance made before its name was reserved (machine, console) is taken over only as a first takeover of a file
-  // no looser than its coordinator could make it, or as root's own file unchanged (#902 round 10): that only tightens.
-  // --retake (a file changed since root wrote it) and --accept-loose (one looser than its coordinator could make) can
-  // each adopt a looser policy, so under such a name both are refused, and the gate keeps refusing a file root didn't
-  // write (fail closed).
-  if (!instanceNameOk(instance) && (flags.retake || flags.acceptLoose)) throw new Error(`${instance} is a name the instance-name rules refuse now (${instanceNameProblem(instance)}): its policy is never taken over with --retake or --accept-loose, which could loosen it; it only tightens (policy set)`);
+  // An instance made before its name was reserved (machine, console) is taken over as a first takeover (no record of
+  // root's yet), with --accept-loose when its file is looser than its coordinator could make it, or as root's own file
+  // unchanged. Each makes a file its coordinator could write root's, which root then only tightens (policy set): never
+  // looser than it already was (#902 rounds 10, 12). --retake, which adopts a recorded file changed since root wrote it
+  // (one looser than root left it, say), is refused under such a name, and the gate keeps refusing that file (fail
+  // closed). --accept-loose without --retake reaches only a first takeover: a recorded file that changed is refused
+  // below either way.
+  if (!instanceNameOk(instance) && flags.retake) throw new Error(`${instance} is a name the instance-name rules refuse now (${instanceNameProblem(instance)}): its policy is never taken over with --retake, which could loosen what root wrote; it only tightens (policy set)`);
   const { dir, file, coordUid } = instancePolicy(instance, d, true);
   const rootUid = d.rootUid ?? 0;
   const markers = d.markerDir ?? POLICY_ROOT_DIR;

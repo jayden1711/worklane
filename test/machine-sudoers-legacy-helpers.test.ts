@@ -132,10 +132,16 @@ test('#902 round 10: under a name reserved since, policy own --retake and --acce
     // alone took over at e3d70d67), or land_mode direct and auto_merge on (--retake --accept-loose).
     const budget = 'version: 1\nbudget: { daily_usd: 80 }\nagents: { max_workers: 4 }\nland_mode: pr\nauto_merge: false\n';
     const direct = 'version: 1\nbudget: { daily_usd: 80 }\nagents: { max_workers: 4 }\nland_mode: direct\nauto_merge: true\n';
-    for (const [text, flags] of [[budget, { retake: true }], [direct, { retake: true, acceptLoose: true }], [direct, { acceptLoose: true }]] as const) {
+    // Round 12: --accept-loose alone reaches only a first takeover; a recorded file that changed is refused as for any
+    // name, without --retake, which this name never gets.
+    for (const [text, flags, why] of [
+      [budget, { retake: true }, /console is a name the instance-name rules refuse now/],
+      [direct, { retake: true, acceptLoose: true }, /console is a name the instance-name rules refuse now/],
+      [direct, { acceptLoose: true }, /isn't what root last wrote/],
+    ] as const) {
       writeFileSync(join(dir, '.x'), text, { mode: 0o600 });
       renameSync(join(dir, '.x'), file);
-      assert.throws(() => ownPolicy('console', deps, flags), /console is a name the instance-name rules refuse now/, JSON.stringify(flags));
+      assert.throws(() => ownPolicy('console', deps, flags), why, JSON.stringify(flags));
     }
     // Root's record still covers only the file it wrote: nothing reads or changes the planted one as root's. The way out
     // it names is the instance's removal, never a --retake that is refused (round 11).
