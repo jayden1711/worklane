@@ -313,6 +313,16 @@ export function hidesSubmodules(f: Pick<ChangeFile, 'submoduleIgnores'>): boolea
 }
 
 /**
+ * The harness's config in a repo: the config folder (tests.yaml says what a project command runs and with what
+ * environment, review.yaml these levels), Claude Code's project settings and CLAUDE.md. Locked (#798, in
+ * LOCKED_CATEGORIES below): before, it was L3 only because the default review.yaml listed it, so a repo's review.yaml
+ * could drop it from L3 or redefine its globs to nothing. Now always L3 and never auto-merged; its globs always hold,
+ * and a repo may only add to them.
+ */
+export const HARNESS_CONFIG = 'harness-config';
+const HARNESS_CONFIG_GLOBS = [`${BRAND.configDir}/**`, '.claude/**', 'CLAUDE.md'];
+
+/**
  * The harness changing its own controls: the merge policy, the main watch and the push guard, the updater, the review
  * levels and guardrails, the machine's setup scripts and CI workflows, sign-in and credentials, who may approve, the
  * evaluator and the agent runner, the sandbox, the push gate, denylist and secret scan, the tests that hold those
@@ -373,15 +383,6 @@ export const SELF_MODIFICATION_PARTS: { what: string; globs: string[] }[] = [
   // A study's definition (docs: the experiments design): its eval, editable paths and budget are what a job may touch.
   { what: 'the experiment studies', globs: [`${BRAND.configDir}/experiments.yaml`] },
 ];
-
-/**
- * The harness's config in a repo: the config folder (tests.yaml says what a project command runs and with what
- * environment, review.yaml these levels), Claude Code's project settings and CLAUDE.md. Locked (#798): before, it was
- * L3 only because the default review.yaml listed it, so a repo's review.yaml could drop it from L3 or redefine its
- * globs to nothing. Now always L3 and never auto-merged; its globs always hold, and a repo may only add to them.
- */
-export const HARNESS_CONFIG = 'harness-config';
-const HARNESS_CONFIG_GLOBS = [`${BRAND.configDir}/**`, '.claude/**', 'CLAUDE.md'];
 
 export const LOCKED_CATEGORIES: Record<string, string[]> = {
   [AGENT_INSTRUCTIONS]: [`${BRAND.configDir}/roles/**`, `${BRAND.configDir}/skills/**`, 'AGENTS.md', '**/CLAUDE.md'],
