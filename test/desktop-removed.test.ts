@@ -9,9 +9,10 @@
 // release notes still names the removed app.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdtempSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, relative } from 'node:path';
+import { dirname, join, relative, resolve, sep } from 'node:path';
+import ts from 'typescript';
 import { isNode, isPair, isScalar, parse, parseDocument, visit } from 'yaml';
 import { fileURLToPath } from 'node:url';
 import { LINT_MARK, registrationsOf, weakeningReasons } from '../src/merge-policy-weakening.js';
@@ -1021,12 +1022,52 @@ test('a later change that narrows one of these rules waits for the owner: this f
 });
 
 /**
- * The modules this file may load, since round 18: node built-ins it uses, yaml, and the weakening module. Not a local
- * helper such as test/helpers.ts, which no hold covers; and not `node:module`, `node:vm` or `node:child_process`,
- * which could load one.
+ * The modules this file may load, since round 18: node built-ins it uses, yaml, typescript (its import reader, round
+ * 19) and the weakening module. Not a local helper such as test/helpers.ts, which no hold covers; and not
+ * `node:module`, `node:vm` or `node:child_process`, which could load one.
  */
 // check-table: never-grow
-const MAY_IMPORT = new Set(['node:test', 'node:assert/strict', 'node:fs', 'node:os', 'node:path', 'node:url', 'yaml', '../src/merge-policy-weakening.js']);
+const MAY_IMPORT = new Set(['node:test', 'node:assert/strict', 'node:fs', 'node:os', 'node:path', 'node:url', 'yaml', 'typescript', '../src/merge-policy-weakening.js']);
+
+/**
+ * The packages this backstop, its preload and their modules load, each pinned to its lockfile integrity (round 19).
+ * A swapped tarball, an `npm:` alias or a `file:` spec changes the lockfile entry; a bump changes it too, so a bump of
+ * either needs this line changed, which waits for the owner.
+ */
+// check-table: never-shrink
+const PINNED_PACKAGES: Record<string, string> = { yaml: 'sha512-3NxN8+78OdzbT7C/WjGsyfPAtJaN3FNDsWxv7Y7mcDsT/oOmgW8BpyQQFFBnvZE3j9Y2Sdz1ULFLezL7Eb2yFw==', typescript: 'sha512-jl1vZzPDinLr9eUt3J/t7V6FgNEw9QjvBPdysz9KfQDD41fQrC2Y4vKQdiaUpFT4bXlb1RHhLpp8wtm6M5TgSw==' };
+
+/** Text that loads a module no import statement names (split, so this line never holds it). */
+// check-table: never-shrink
+const LOADER_WORDS = ['getBuiltin' + 'Module', 'create' + 'Require'];
+
+/**
+ * Why a file's text may load a module outside MAY_IMPORT (round 19): every module TypeScript's own reader finds
+ * (static imports and exports in any spelling or spacing, dynamic imports, requires), a dynamic import or require it
+ * may not see, and text that loads a module by name at run time. Strings and comments are not imports.
+ */
+function importProblems(text: string): string[] {
+  const out = ts.preProcessFile(text, true, true).importedFiles.map((f) => f.fileName).filter((s) => !MAY_IMPORT.has(s)).map((s) => `imports ${s}`);
+  if (/\bimport\s*\(|\brequire\s*\(/.test(text)) out.push('a dynamic import or require');
+  for (const w of LOADER_WORDS) if (text.includes(w)) out.push(`the text ${w}`);
+  return out;
+}
+
+/**
+ * Round 19 (#746 reviews of 87cf2165): lines that load a local helper, each added after this file's imports, which
+ * the round 18 line-start reader missed. Each must give importProblems something. [label, line]
+ */
+// check-table: never-shrink
+const IMPORT_FORM_FIXTURES: [string, string][] = [
+  ['indented', "  import './helpers.js';"],
+  ['a tab first', "\timport { engineCli } from './helpers.js';"],
+  ['a comment first', "/* x */ import './helpers.js';"],
+  ['no space, side effect', "import'./helpers.js';"],
+  ['no space, named', "import{engineCli}from'./helpers.js';"],
+  ['export * with no space', "export*from'./helpers.js';"],
+  ['a comment between a dynamic import and its paren',"await import/**/('./helpers.js');"],
+  ['a built-in loader by name', 'const m = process.' + 'getBuiltin' + "Module('node:module');"],
+];
 
 /** The #783/#869 hold for a change to the files in `edits` (path to [text before, text after]), lines as a diff gives them. */
 function holdOf(edits: Record<string, [string, string]>): string[] {
@@ -1047,13 +1088,15 @@ function holdOf(edits: Record<string, [string, string]>): string[] {
   return weakeningReasons({ files, deleted: new Set(), before: (p) => edits[p]?.[0] ?? null, after: (p) => edits[p]?.[1] ?? null, scope: undefined });
 }
 
-test('everything this backstop runs is held: it imports only node: modules, yaml and the weakening module, and finds the repo itself (round 18)', () => {
+test('this backstop imports only MAY_IMPORT, in any spelling, and finds the repo itself (rounds 18 and 19)', () => {
   const P = 'test/desktop-removed.test.ts';
   const text = readFileSync(join(repoRoot, P), 'utf8');
-  const from = [...text.matchAll(/^(?:import|export)\s[^'"]*?\sfrom\s+['"]([^'"]+)['"]/gm), ...text.matchAll(/^import\s+['"]([^'"]+)['"]/gm)].map((m) => m[1]!);
-  assert.ok(from.includes('yaml') && from.includes('node:test'), `the import list was read: ${JSON.stringify(from)}`);
-  assert.deepEqual(from.filter((s) => !MAY_IMPORT.has(s)), [], 'no module outside MAY_IMPORT: no local helper outside the hold');
-  assert.ok(!/\bimport\s*\(|\brequire\s*\(/.test(text), 'no dynamic import or require');
+  const from = ts.preProcessFile(text, true, true).importedFiles.map((f) => f.fileName);
+  assert.ok(from.includes('yaml') && from.includes('node:test') && from.includes('typescript'), `the import list was read: ${JSON.stringify(from)}`);
+  assert.deepEqual(importProblems(text), [], 'no module outside MAY_IMPORT: no local helper outside the hold');
+  const anchor = "import { LINT_MARK, registrationsOf, weakeningReasons } from '../src/merge-policy-weakening.js';\n";
+  assert.equal(text.split(anchor).length, 2, 'the last import is there once');
+  for (const [label, line] of IMPORT_FORM_FIXTURES) assert.notDeepEqual(importProblems(text.replace(anchor, () => `${anchor}${line}\n`)), [], label);
   // The second adversarial review of 2fd92b5d (T1): a changed repoRoot line in test/helpers.ts got no hold (measured
   // then), and it could point this file at another tree. This file no longer reads helpers.ts, and the same change
   // here is held.
@@ -1067,5 +1110,70 @@ test('everything this backstop runs is held: it imports only node: modules, yaml
   ] as const) {
     const reasons = holdOf({ [P]: [text, after] });
     assert.ok(reasons.some((r) => r.includes('removes or changes a line of a guard or lint')), `${label}: ${JSON.stringify(reasons)}`);
+  }
+});
+
+/**
+ * The built modules that run in this backstop's process, from its preload (test/isolate.ts) and itself: each local
+ * module as its source path, and each package it names. Read with TypeScript's own import reader, so every spelling
+ * counts; a module with no source fails the caller.
+ */
+function builtClosure(): { local: string[]; packages: Set<string>; built: string[] } {
+  const seen = new Set<string>();
+  const packages = new Set<string>();
+  const todo = [join(repoRoot, 'dist', 'test', 'isolate.js'), fileURLToPath(import.meta.url)];
+  while (todo.length) {
+    const f = todo.pop()!;
+    if (seen.has(f)) continue;
+    seen.add(f);
+    for (const { fileName } of ts.preProcessFile(readFileSync(f, 'utf8'), true, true).importedFiles) {
+      if (fileName.startsWith('.') || fileName.startsWith('/')) todo.push(resolve(dirname(f), fileName));
+      else packages.add(fileName);
+    }
+  }
+  const built = [...seen].sort();
+  const local = built.map((f) => relative(repoRoot, f).split(sep).join('/').replace(/^dist\//, '').replace(/\.js$/, '.ts'));
+  return { local, packages, built };
+}
+
+test('every module this backstop runs is held: a changed line of any local one waits for the owner (round 19)', () => {
+  const { local, built } = builtClosure();
+  // Round 19 (#746 second adversarial review of 87cf2165, row 1): src/brand.ts and src/os/{system-paths,own-env,
+  // child-process}.ts ran here and no hold covered them; one changed line turned this backstop green over a red twin.
+  for (const m of ['test/isolate.ts', 'test/desktop-removed.test.ts', 'src/merge-policy-weakening.ts', 'src/brand.ts', 'src/os/child-process.ts']) assert.ok(local.includes(m), `the closure was read: ${m}`);
+  for (const p of local) {
+    assert.ok(existsSync(join(repoRoot, p)), `${p}: a built module with no source`);
+    const before = readFileSync(join(repoRoot, p), 'utf8');
+    const line = before.split('\n').find((l) => l.trim() !== '')!;
+    const reasons = holdOf({ [p]: [before, before.replace(line, () => `${line} // changed`)] });
+    assert.ok(reasons.some((r) => r.includes('removes or changes a line of a guard or lint')), `${p} runs in this backstop's process, so it must be a guard file: ${JSON.stringify(reasons)}`);
+  }
+  // A module that loads another by name at run time would load it unseen.
+  for (const f of built) if (f !== fileURLToPath(import.meta.url)) for (const w of LOADER_WORDS) assert.ok(!readFileSync(f, 'utf8').includes(w), `${relative(repoRoot, f)}: ${w}`);
+});
+
+test('the packages this backstop runs are the locked ones, from the repo\'s own node_modules (round 19)', () => {
+  const { packages, built } = builtClosure();
+  const named = [...packages].filter((s) => !s.startsWith('node:'));
+  assert.deepEqual(named.sort(), Object.keys(PINNED_PACKAGES).sort(), 'every package in the closure is pinned, and every pin is used');
+  const lock = JSON.parse(readFileSync(join(repoRoot, 'package-lock.json'), 'utf8')) as { packages: Record<string, { integrity?: string; link?: boolean }> };
+  const pkg = JSON.parse(readFileSync(join(repoRoot, 'package.json'), 'utf8')) as { name?: string };
+  const root = realpathSync(repoRoot);
+  for (const [name, integrity] of Object.entries(PINNED_PACKAGES)) {
+    // A swapped tarball, an alias or a file: or link: spec changes the lockfile entry.
+    assert.equal(lock.packages[`node_modules/${name}`]?.integrity, integrity, `${name}: the lockfile's integrity`);
+    assert.ok(!lock.packages[`node_modules/${name}`]?.link, `${name}: not a link`);
+    assert.notEqual(pkg.name, name, `${name}: the package isn't the repo itself (a self-reference resolves first)`);
+    // Resolved where npm ci put it: not a node_modules under dist/ (Node looks there first), not a symlink elsewhere.
+    const dir = join(repoRoot, 'node_modules', name);
+    assert.ok(lstatSync(dir).isDirectory() && !lstatSync(dir).isSymbolicLink(), `${name}: node_modules/${name} is a plain directory`);
+    const at = realpathSync(fileURLToPath(import.meta.resolve(name)));
+    assert.ok(at.startsWith(join(root, 'node_modules', name) + sep), `${name} resolves to ${at}`);
+  }
+  // No node_modules between any built module and the repo's top, where Node would look before the repo's own.
+  const top = resolve(repoRoot);
+  for (const f of built) {
+    assert.ok(f.startsWith(top + sep), `${f} is in the repo`);
+    for (let d = dirname(f); d !== top && d.startsWith(top + sep); d = dirname(d)) assert.ok(!existsSync(join(d, 'node_modules')), `${relative(top, join(d, 'node_modules'))} would shadow a package`);
   }
 });
