@@ -51,7 +51,7 @@ import { SetupOver, startSetupHub } from './hub-setup.js';
 import { breakGlassHub, runAppManifest, VIEWER_USER } from './setup/app-manifest.js';
 import { seedDemo } from './demo.js';
 import { desktopBinary, runDesktop } from './desktop.js';
-import { credentialProblems, initInstance, instanceFilesProblem, instanceProblems, instancesDir, listInstances, loadInstance, loadInstanceCredentials, loadInstanceSetup, policiesForRepo, setDiscordToken, setGithubApp, setIntakeCredential } from './instance.js';
+import { credentialProblems, initInstance, instanceFilesProblem, instanceProblems, instancesDir, listInstances, loadInstance, loadInstanceCredentials, loadInstanceSetup, policiesForRepo, setAgentApiKey, setDiscordToken, setGithubApp, setIntakeCredential } from './instance.js';
 import { readServerAutoConfig, serverAutoConfig, type ServerAutoConfigLine } from './server-auto-config.js';
 import { canaryRefusal, checkCanary, fileCanary } from './canary.js';
 import { sandboxVerdict } from './testrun/status.js';
@@ -223,6 +223,9 @@ usage: ${BRAND.cli} <command> [options]
   instance list | show <name>      instances on this machine; show checks policy and credentials
   instance set-github-app <name> --app-id <n> --installation-id <n> --key <path>
                                    point credentials.yaml at the instance's App (credentials.sh github-app runs it)
+  instance set-agent-api-key <name> --file <path>
+                                   point credentials.yaml at the agent user's API key file (credentials.sh
+                                   api-key runs it); the key is never an argument, and never readable here
   instance set-discord-token <name> --file <path>
                                    point credentials.yaml at the chat bot's token file (credentials.sh
                                    intake-discord runs it); the token is never an argument
@@ -1271,6 +1274,28 @@ async function main(argv: string[]): Promise<number> {
         console.log(`wrote ${file} (intake.${key}: ${tokenFile}; the rest kept)`);
         return 0;
       }
+      if (sub === 'set-agent-api-key' && target) {
+        // credentials.sh api-key, after root installed the key for the agent user and claude reported an API-key login
+        // as that user: the entry in credentials.yaml, validated, the rest kept. Only the path: never the key (#897).
+        const keyFile = option(rest, '--file');
+        if (!keyFile?.startsWith('/') || rest.length !== 1) {
+          console.error('usage: instance set-agent-api-key <name> --file <absolute path to the agent user\'s key file>');
+          return 2;
+        }
+        const file = join(instancesDir(), target, 'credentials.yaml');
+        if (!existsSync(join(instancesDir(), target, 'instance.yaml'))) {
+          console.error(`no instance "${target}" for this user (${join(instancesDir(), target)}): \`${BRAND.cli} instance init\` first`);
+          return 1;
+        }
+        try {
+          setAgentApiKey(file, keyFile);
+        } catch (e) {
+          console.error((e as Error).message);
+          return 1;
+        }
+        console.log(`wrote ${file} (agent_api_key: ${keyFile}; the rest kept)`);
+        return 0;
+      }
       if (sub === 'set-discord-token' && target) {
         // credentials.sh intake-discord, after it installed the token file: the entry in credentials.yaml, validated,
         // the rest kept. Only the file's path is passed: the token is never an argument.
@@ -1347,7 +1372,7 @@ async function main(argv: string[]): Promise<number> {
         console.log(JSON.stringify(line));
         return line.kind === 'failed' ? 1 : 0;
       }
-      console.error('usage: instance init <name> --repo <path> --github <owner/repo> [--agent-user <user>] [--agent-home <dir>] | instance list | instance show <name> | instance set-github-app <name> ... | instance set-discord-token <name> --file <path> | instance set-intake-credential <name> <key> --file <path> | instance auto-config <name> [--answer <id>=<choice>]... | instance renamed <new name> --from <old name>');
+      console.error('usage: instance init <name> --repo <path> --github <owner/repo> [--agent-user <user>] [--agent-home <dir>] | instance list | instance show <name> | instance set-github-app <name> ... | instance set-agent-api-key <name> --file <path> | instance set-discord-token <name> --file <path> | instance set-intake-credential <name> <key> --file <path> | instance auto-config <name> [--answer <id>=<choice>]... | instance renamed <new name> --from <old name>');
       return 2;
     }
 

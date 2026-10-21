@@ -36,8 +36,11 @@
 #       Bill the agents' runs to an Anthropic API key instead of the agent user's Claude login. The key is pasted
 #       (not shown) or read from <key-file>, and installed for wl-<name>-agent only (0400, in a 0700 directory
 #       of its own). claude reads it through apiKeyHelper, as the agent user: it is never in an environment, the
-#       coordinator user can't read it, and the sandbox denies it to agent commands. Prints the credentials.yaml
-#       line to add. Spend caps (daily_budget_usd, each role's budget_usd, --max-budget-usd) apply as before.
+#       coordinator user can't read it, and the sandbox denies it to agent commands. Once claude reports an API-key
+#       login as the agent user, writes the key's path into the instance's credentials.yaml (agent_api_key) through
+#       the engine's config code, as wl-<name> (which must have one: credentials.sh <name> github-app first), then
+#       refreshes the instance's account record (claude-account.sh status), as `claude` does (issue #897).
+#       Spend caps (daily_budget_usd, each role's budget_usd, --max-budget-usd) apply as before.
 #   bash scripts/setup/credentials.sh <name> intake-discord
 #       Work intake (docs/intake.md): the chat bot's token. Pasted at a hidden prompt, or on stdin when there is no
 #       terminal (automation); never an argument, never echoed. Installed for wl-<name> only (0400, in a 0700
@@ -99,7 +102,8 @@ install_secret() {
   local file="$1" secret="$2"
   printf '%s' "$secret" | sudo -u "$coord" sh -c 'umask 077; mkdir -p "$(dirname "$1")"; chmod 0700 "$(dirname "$1")"; rm -f "$1"; cat > "$1"; chmod 0400 "$1"' _ "$file"
 }
-# An intake instance's credentials.yaml must be there to write into: said before any secret is asked for.
+# An instance's credentials.yaml must be there to write into (an intake credential, the agents' API key): said before
+# any secret is asked for.
 intake_creds_ready() {
   id -u "$coord" >/dev/null 2>&1 || { echo "no $coord; run instance.sh $name first" >&2; exit 1; }
   local creds
@@ -231,6 +235,8 @@ JS
     ;;
   api-key)
     id -u "$agent" >/dev/null 2>&1 || { echo "no $agent; run instance.sh $name first" >&2; exit 1; }
+    # credentials.yaml must be there to write into, so say so before asking for the key.
+    intake_creds_ready
     dir="$(home_of "$agent")/.config/$name-claude-key"
     file="$dir/api_key"
     if [ -n "$flag" ]; then
@@ -255,12 +261,19 @@ s.apiKeyHelper = helper;
 mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
 writeFileSync(file, `${JSON.stringify(s, null, 2)}\n`, { mode: 0o600 });
 JS
-    say "check, as $agent: claude reports API-key auth"
-    sudo -iu "$agent" claude auth status --json
-    echo "In credentials.yaml set:"
-    echo "  agent_api_key: $file"
-    echo "then restart the instance. Its agents bill to this key; to go back to the Claude login, remove that line"
-    echo "and the apiKeyHelper entry from $(home_of "$agent")/.claude/settings.json."
+    say "check, as $agent: claude reports an API-key login"
+    # Only then is the instance switched to the key: an instance whose agent user claude doesn't sign in with it keeps
+    # its credentials.yaml as it was.
+    claude_api_key_login_ok "$agent" || { echo "claude auth status, as $agent, doesn't report an API-key login (${CLAUDE_API_KEY_LOGINS//|/ or }); the key and the apiKeyHelper entry are in place, credentials.yaml is not changed: run this again once claude answers" >&2; exit 1; }
+    echo "$agent is signed in to Claude with the API key, per claude auth status"
+    # The entry in credentials.yaml, written by the engine's own config code as $coord: validated against the schema,
+    # the file's other settings kept. Only the path is passed; $coord can't read the key. Never a hand edit.
+    say "write the key's path into $name's credentials.yaml, as $coord"
+    run_as "$coord" 'worklane instance set-agent-api-key "$1" --file "$2"' "$name" "$file"
+    # The first-run step reads the agent's login from claude-account's status.json: this instance's records, refreshed.
+    bash "$here/claude-account.sh" status "$name" >/dev/null 2>&1 || true
+    echo "then restart the instance. Its agents bill to this key; to go back to the Claude login, remove agent_api_key"
+    echo "from credentials.yaml and the apiKeyHelper entry from $(home_of "$agent")/.claude/settings.json."
     ;;
   intake-discord)
     id -u "$coord" >/dev/null 2>&1 || { echo "no $coord; run instance.sh $name first" >&2; exit 1; }

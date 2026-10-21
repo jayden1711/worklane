@@ -574,6 +574,44 @@ export function setDiscordToken(file: string, tokenFile: string): void {
   setIntakeCredential(file, 'discord_token', tokenFile);
 }
 
+/**
+ * Point credentials.yaml at the agent user's Anthropic API key file (agent_api_key), validated before it is written
+ * (0600, renamed into place); its one writer (credentials.sh <name> api-key, as the coordinator user, once root has
+ * installed the file and claude reports an API-key login as the agent user). Only the path: the key is never read.
+ * The file is the agent user's, in its own home, so this user normally can't see it at all; that is the case it is
+ * meant for. Refused: a path apiKeyHelper can't name (src/runner.ts apiKeyHelperCommand) or the schema refuses (not in
+ * normal form), no such file, a link or anything but a plain file, and a file this user could read: open to its group
+ * or others, or this user's own (the coordinator must never be able to read the key).
+ */
+export function setAgentApiKey(file: string, keyFile: string): void {
+  if (!/^\/[A-Za-z0-9._/-]+$/.test(keyFile)) throw new Error(`the key file ${JSON.stringify(keyFile)} must be an absolute path, with letters, digits and . _ - / only (apiKeyHelper names it)`);
+  if (!normalAbsolute(keyFile)) throw new Error(`the key file ${keyFile} ${NOT_NORMAL_ABSOLUTE}`);
+  if (!existsSync(file)) throw new Error(`no ${file}: the instance's GitHub credential comes first (credentials.sh <name> github-app writes it)`);
+  let st;
+  try {
+    st = lstatSync(keyFile);
+  } catch (e) {
+    const code = (e as NodeJS.ErrnoException).code;
+    // WHY: EACCES is the expected answer: the key is in the agent user's home, which this user can't search.
+    if (code !== 'EACCES' && code !== 'EPERM') throw new Error(`no key file ${keyFile}`);
+  }
+  if (st) {
+    if (!st.isFile()) throw new Error(`${keyFile} is not a plain file`);
+    // WHY: POSIX only; Windows has no owners or mode bits to read.
+    if (typeof process.getuid === 'function') {
+      if (st.mode & 0o077) throw new Error(`${keyFile} is open to its group or others (mode ${(st.mode & 0o777).toString(8)}); the key is the agent user's alone (credentials.sh <name> api-key installs it 0400)`);
+      if (st.uid === process.getuid()) throw new Error(`${keyFile} is this user's own: the key must be the agent user's, which this user can't read (credentials.sh <name> api-key installs it so)`);
+    }
+  }
+  const doc = parseDocument(readFileSync(file, 'utf8'));
+  if (doc.errors.length) throw new Error(`${file} isn't valid YAML: ${doc.errors[0]!.message.split('\n')[0]}`);
+  doc.set('agent_api_key', keyFile);
+  const r = CredentialsFile.safeParse(doc.toJS());
+  if (!r.success) throw new Error(`${file} would not be valid: ${r.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ')}`);
+  // WHY: lineWidth 0, so a long path doesn't re-wrap the file's other lines (add-project reads the entry as one line).
+  replaceFileAtomically(file, doc.toString({ lineWidth: 0 }), 0o600, dirname(file));
+}
+
 /** The intake credentials credentials.yaml names (under `intake:`), each a path to a 0400 file. */
 export const INTAKE_CREDENTIAL_KEYS = ['discord_token', 'slack_app_token', 'slack_bot_token', 'linear_api_key'] as const;
 export type IntakeCredentialKey = (typeof INTAKE_CREDENTIAL_KEYS)[number];

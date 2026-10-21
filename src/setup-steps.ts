@@ -24,7 +24,7 @@ import { MACHINE_OWNERS_FILE, readMachineOwners } from './machine-owners.js';
 import { CLAUDE_ACCOUNT_DIR, readAccountStatus } from './claude-account.js';
 import { readWatchState } from './main-watch.js';
 import { OFFSITE_FILE } from './offsite-backup.js';
-import { lingerEnabled, nodePathProblem, serviceManagerCheck, serviceManagerEnv, serviceProgram, serviceRunning, systemUnitActive } from './os/index.js';
+import { fileAccess, lingerEnabled, nodePathProblem, serviceManagerCheck, serviceManagerEnv, serviceProgram, serviceRunning, systemUnitActive } from './os/index.js';
 import { findTool, withToolPath } from './tool-path.js';
 import { FULL_RUN_LOCK } from './testrun/run.js';
 import { modelWarnings } from './model-routing.js';
@@ -674,9 +674,9 @@ export const SETUP_STEPS: readonly SetupStep[] = [
     optional: false,
     reach: 'all',
     // Issue #711: never through the dashboard, which never takes a Claude credential; root installs it on the machine.
-    today: "As root on the machine: run `claude setup-token` on a machine signed in to the agents' Claude account, then paste the token it prints at credentials.sh <name> claude's hidden prompt; or sign in there as the agent user (sudo -u wl-<name>-agent -i claude auth login). The dashboard never takes the token.",
+    today: "As root on the machine: run `claude setup-token` on a machine signed in to the agents' Claude account, then paste the token it prints at credentials.sh <name> claude's hidden prompt; or sign in there as the agent user (sudo -u wl-<name>-agent -i claude auth login); or bill the agents to an Anthropic API key instead: credentials.sh <name> api-key. The dashboard never takes the token or the key.",
     fix: { kind: 'signin', label: 'Show how' },
-    automation: 'scripts/setup/credentials.sh <name> claude (paste the token claude setup-token prints at its hidden prompt), or scripts/setup/add-project.sh <name> <owner/repo> at a root shell (its claude-token step)',
+    automation: 'scripts/setup/credentials.sh <name> claude (paste the token claude setup-token prints at its hidden prompt), or scripts/setup/add-project.sh <name> <owner/repo> at a root shell (its claude-token step); an API key instead: scripts/setup/credentials.sh <name> api-key',
     detect: (k) => {
       const i = k.inst();
       // WHY: add-project and credentials.sh keep the login in the agent user's own home, out of this user's sight;
@@ -1104,14 +1104,23 @@ export const SETUP_STEPS: readonly SetupStep[] = [
     modes: ['server'],
     optional: true,
     reach: 'few',
-    today: 'credentials.sh <name> api-key (or provider-key, eval-key) prompts for the key, then set it in credentials.yaml by hand and restart the instance.',
+    today: 'credentials.sh <name> api-key prompts for the key and writes agent_api_key into credentials.yaml itself; provider-key and eval-key print the line to set in credentials.yaml by hand. Then restart the instance.',
     fix: { kind: 'outside', url: 'https://console.anthropic.com/settings/keys', label: "Anthropic's console", why: "the key is made in the provider's console" },
     detect: (k) => {
       const i = k.inst();
       if (isErr(i)) return no(i.error);
       const key = i.credentials.agent_api_key;
       if (!key) return no('none set (only for API-key billing)');
-      return existsSync(key) ? ok(`agent API key installed (${key})`) : no(`credentials.yaml names ${key}, which isn't there`);
+      const seen = fileAccess(key);
+      if (seen.kind === 'file') return ok(`agent API key installed (${key})`);
+      if (seen.kind !== 'hidden') return existsSync(key) ? ok(`agent API key installed (${key})`) : no(`credentials.yaml names ${key}, which isn't there`);
+      // WHY (#897): the key is in the agent user's home, which the coordinator user can't see into, as intended. What
+      // claude auth status (and its minimal real call) found as that user, as root recorded it, is the real state.
+      const s = readAccountStatus(k.m.claudeAccountDir);
+      const u = s?.users.find((x) => x.instance === k.c.instance && x.kind === 'agent');
+      const when = s?.at ? ` at ${s.at}` : '';
+      if (u?.loggedIn && u.apiOk !== false && RUNTIME_LOGINS.api_key.includes(u.authMethod ?? '')) return ok(`agent API key set (${key}), in ${u.user}'s home, which this user can't see, as intended; ${u.user} is signed in with it (${u.authMethod}), per claude auth status as that user${when}`);
+      return no(`credentials.yaml names ${key}, in a home this user can't see (as intended), and root's account record shows no working API-key login for the instance's agent user${u ? ` (${u.error ?? (u.loggedIn ? `signed in with ${u.authMethod ?? 'no login method recorded'}` : 'not signed in')}${when})` : ''}. As root: sudo bash ${k.m.engine}/scripts/setup/claude-account.sh status ${k.c.instance}`);
     },
   },
   {

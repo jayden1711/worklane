@@ -702,6 +702,23 @@ claude_status_json() {
   command -v claude >/dev/null 2>&1 || return 0
   (cd / && sudo -H -u "$1" timeout 60 ${2:+env "CLAUDE_CONFIG_DIR=$2"} claude auth status --json 2>/dev/null) || true
 }
+# The logins an instance billed to an API key runs on (src/runner.ts RUNTIME_LOGINS.api_key; a test keeps the two the
+# same), as claude auth status names them.
+CLAUDE_API_KEY_LOGINS='api_key|api_key_helper'
+# Whether claude, as this user, reports one of those (issue #897): signed in, through an API key. No claude, or no
+# answer within claude_status_json's minute: no.
+claude_api_key_login_ok() {
+  local out
+  out="$(claude_status_json "$1")"
+  printf '%s' "$out" | grep -q '"loggedIn": *true' && printf '%s' "$out" | grep -Eq "\"authMethod\": *\"($CLAUDE_API_KEY_LOGINS)\""
+}
+# Whether a path is this agent user's own API key file, as that user finds it (issue #897): a plain file (not a link),
+# its own, not empty, and open to nobody else (no group or other read or write bit). Checked as that user, never as
+# root, since the path comes from credentials.yaml, which the coordinator user writes. The key is never read.
+#   agent_key_file_ok <agent user> <path>
+agent_key_file_ok() {
+  run_as "$1" '[ -f "$1" ] && [ ! -L "$1" ] && [ -O "$1" ] && [ -s "$1" ] && [ -z "$(find "$1" -maxdepth 0 \( -perm -g=r -o -perm -g=w -o -perm -o=r -o -perm -o=w \) -print)" ]' "$2"
+}
 # Whether the API takes this user's Claude login (issue #463: claude auth status says a credential is configured, not
 # that it works): one minimal real call as that user, the cheapest model, a one-word answer, one turn, a hard budget
 # cap. A refused call costs nothing; an answered one about one short Haiku turn. Prints nothing and succeeds when
