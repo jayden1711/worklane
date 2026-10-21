@@ -256,7 +256,8 @@ mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
 writeFileSync(file, `${JSON.stringify(s, null, 2)}\n`, { mode: 0o600 });
 JS
     say "check, as $agent: claude reports API-key auth"
-    sudo -iu "$agent" claude auth status --json
+    # Never a login shell (#798): it would source the agent's ~/.profile and ~/.bashrc as root starts it.
+    (cd / && sudo -H -u "$agent" claude auth status --json)
     echo "In credentials.yaml set:"
     echo "  agent_api_key: $file"
     echo "then restart the instance. Its agents bill to this key; to go back to the Claude login, remove that line"
