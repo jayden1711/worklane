@@ -2,7 +2,7 @@
 
 A signed receipt records one merge decision or merge result an instance made, signed with the instance's key and chained to the receipt before it. You can check a set of receipts offline, with only the receipts and the public key: no engine, no account and no network. The design, and what is built so far, is in [design.md §5a](design.md#5a-signed-receipts-717).
 
-**Built so far (slice 1).** Receipts cover merge decisions and their results. They are signed by whoever runs `<cli> receipts sign` with the key file, so they're *not yet root-signed*: no installed signer keeps the key away from the coordinator yet. The policy commit, changed files, check run ids and review level are `null` until the merge record carries them.
+**Built so far (slice 1).** Receipts cover merge decisions and their results. They are signed by whoever runs `worklane receipts sign` with the key file, so they're *not yet root-signed*: no installed signer keeps the key away from the coordinator yet. The policy commit, changed files, check run ids and review level are `null` until the merge record carries them.
 
 ## What you need
 
@@ -12,7 +12,7 @@ A signed receipt records one merge decision or merge result an instance made, si
 ## Check them
 
 ```
-<cli> receipts verify receipts/ --key customer-receipts.pub
+worklane receipts verify receipts/ --key customer-receipts.pub
 ```
 
 - **Exit 0:** every receipt verified. You see the counts by kind, the chain's keys in order (more than one after a rotation), and the **head**.
