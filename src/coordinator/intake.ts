@@ -1,5 +1,5 @@
 // Work intake (docs/intake.md): pulling the sources, triage, filing or asking, replies, and recovery after a restart.
-import { execFileSync } from 'node:child_process';
+import { gitExecFileSync } from '../os/git.js';
 import { createHash } from 'node:crypto';
 import { readFileSync, existsSync, rmSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -225,7 +225,7 @@ export abstract class Intake extends QuickReplies {
     if (rep?.result !== 'fixed_on_main' || !rep.commit) return t;
     const { commit, ...rest } = rep;
     try {
-      execFileSync('git', ['merge-base', '--is-ancestor', commit, `refs/remotes/${this.remote}/${this.branch}`], { cwd: this.d.repo, stdio: 'ignore', timeout: 10_000 });
+      gitExecFileSync(['merge-base', '--is-ancestor', commit, `refs/remotes/${this.remote}/${this.branch}`], { cwd: this.d.repo, stdio: 'ignore', timeout: 10_000 });
       return t;
     } catch {
       return { ...t, reproduction: rest };
@@ -462,7 +462,7 @@ export abstract class Intake extends QuickReplies {
     const includes = (deploy: string, sha: string) => {
       if (deploy === sha) return true;
       try {
-        execFileSync('git', ['merge-base', '--is-ancestor', sha, deploy], { cwd: this.d.repo, stdio: 'ignore' });
+        gitExecFileSync(['merge-base', '--is-ancestor', sha, deploy], { cwd: this.d.repo, stdio: 'ignore' });
         return true;
       } catch {
         return false;

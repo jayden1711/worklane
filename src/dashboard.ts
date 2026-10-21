@@ -14,6 +14,7 @@ import { PINS_FILE } from './experiments/store.js';
 import { handleHook, hooksGatewayToken } from './automations/webhook.js';
 import { AUTOMATIONS_FILE, AutomationsPolicy, limitsInForce } from './automations/schema.js';
 import { spawnSync } from 'node:child_process';
+import { gitSpawnSync } from './os/git.js';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
@@ -1259,7 +1260,7 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
   };
   /** The test files the repo's runner can name (the first-task form's picker): tracked files that look like tests. */
   const testFiles = (): string[] => {
-    const r = spawnSync('git', ['ls-files'], { cwd: opts.root, encoding: 'utf8', maxBuffer: 32 * 1024 * 1024 });
+    const r = gitSpawnSync(['ls-files'], { cwd: opts.root, encoding: 'utf8', maxBuffer: 32 * 1024 * 1024 });
     if (r.status !== 0) return [];
     return r.stdout.split('\n').filter((f) => /(^|\/)(tests?|__tests__|spec)\/.+\.[a-z]+$|\.(test|spec)\.[cm]?[jt]sx?$|_test\.(go|py|rb)$|(^|\/)test_[^/]+\.py$/.test(f)).slice(0, 300);
   };
@@ -2246,7 +2247,7 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
         if (url.pathname === '/api/first-run/checks-seen' && req.method === 'GET') {
           if (!isWriter(who.role)) return json(res, 403, { error: writersOnly('the first-run checklist is', who) });
           const branch = opts.cfg.project.project.default_branch;
-          const sha = spawnSync('git', ['rev-parse', `origin/${branch}`], { cwd: opts.root, encoding: 'utf8' }).stdout.trim();
+          const sha = gitSpawnSync(['rev-parse', `origin/${branch}`], { cwd: opts.root, encoding: 'utf8' }).stdout.trim();
           if (!/^[0-9a-f]{40}$/.test(sha)) return json(res, 200, { checks: [], error: `origin/${branch} isn't fetched here` });
           const gh = actionDeps().gh;
           const runs = gh(['api', `repos/${repo}/commits/${sha}/check-runs`, '--jq', '.check_runs[].name']);

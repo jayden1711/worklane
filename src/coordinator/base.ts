@@ -1,7 +1,7 @@
 // The coordinator's state and the helpers every part uses: its fields and constructor (the runner wrapper),
 // events, git, project commands, paths and task files, the governor, cost, asking, blocking and releasing.
 import type { Coordinator } from '../coordinator.js';
-import { execFileSync } from 'node:child_process';
+import { gitExecFileSync } from '../os/git.js';
 import { randomBytes } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import { BRAND } from '../brand.js';
@@ -297,7 +297,7 @@ export abstract class CoordinatorBase {
   }
 
   protected git(cwd: string, ...args: string[]) {
-    return execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+    return gitExecFileSync(args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
   }
 
   protected emit<T extends Parameters<EventLog['append']>[0]>(type: T, payload: EventPayload<T>) {

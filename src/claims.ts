@@ -7,7 +7,7 @@
 //   release = delete it, expecting our lease
 // Two coordinators (one per human) racing for the same issue: exactly one
 // push succeeds. Labels and assignees are cosmetic and follow the ref.
-import { execFileSync, spawnSync } from 'node:child_process';
+import { gitExecFileSync, gitSpawnSync } from './os/git.js';
 import { BRAND } from './brand.js';
 
 export interface Lease {
@@ -27,7 +27,7 @@ export interface ClaimOptions {
 export const claimRef = (issue: number) => `refs/${BRAND.cli}/claims/issue-${issue}`;
 
 function git(repo: string, args: string[], input?: string): string {
-  return execFileSync('git', args, { cwd: repo, encoding: 'utf8', input, stdio: ['pipe', 'pipe', 'pipe'] }).trim();
+  return gitExecFileSync(args, { cwd: repo, encoding: 'utf8', input, stdio: ['pipe', 'pipe', 'pipe'] }).trim();
 }
 
 /** A parentless commit holding the lease as its message. CAS needs no ancestry. */
@@ -39,7 +39,7 @@ function leaseCommit(repo: string, lease: Lease): string {
 /** Push `newSha` (or delete, when null) to the claim ref, only if it currently equals `expect` ('' = absent). */
 function casPush(repo: string, remote: string, issue: number, expect: string, newSha: string | null): boolean {
   const ref = claimRef(issue);
-  const r = spawnSync('git', ['push', '--porcelain', `--force-with-lease=${ref}:${expect}`, remote, `${newSha ?? ''}:${ref}`], { cwd: repo, encoding: 'utf8' });
+  const r = gitSpawnSync(['push', '--porcelain', `--force-with-lease=${ref}:${expect}`, remote, `${newSha ?? ''}:${ref}`], { cwd: repo, encoding: 'utf8' });
   if (r.status === 0) return true;
   if (/\[rejected\]|stale info|already exists|fetch first/.test(r.stdout + r.stderr)) return false;
   throw new Error(`claim push failed: ${(r.stderr || r.stdout).trim().split('\n').pop()}`);

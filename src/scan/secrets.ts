@@ -4,6 +4,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { gitEnv } from '../os/git.js';
 import { findTool } from '../tool-path.js';
 
 export interface Finding {
@@ -49,7 +50,7 @@ export function scanCommit(cwd: string, includeUnstaged: boolean, binary = findT
   if (!binary) return { status: 'unavailable', error: 'gitleaks not found on PATH' };
   const findings: Finding[] = [];
   for (const args of includeUnstaged ? [['--staged'], []] : [['--staged']]) {
-    const r = spawnSync(binary, ['git', '--pre-commit', ...args, '--redact', '--no-banner', '--exit-code', String(LEAKS_EXIT), '.'], { cwd, encoding: 'utf8', timeout: 120_000 });
+    const r = spawnSync(binary, ['git', '--pre-commit', ...args, '--redact', '--no-banner', '--exit-code', String(LEAKS_EXIT), '.'], { cwd, encoding: 'utf8', timeout: 120_000, env: gitEnv() });
     if (r.error) return { status: 'unavailable', error: r.error.message };
     if (r.status === LEAKS_EXIT) findings.push({ rule: 'see gitleaks output', file: '(staged changes)', line: 0 });
     else if (r.status !== 0) return { status: 'unavailable', error: `gitleaks exited ${r.status}` };
@@ -78,7 +79,9 @@ function scanAsync(binary: string, args: (report: string) => string[], cwd: stri
   const dir = mkdtempSync(join(tmpdir(), 'scan-'));
   const report = join(dir, 'report.json');
   return new Promise((resolve) => {
-    const child = spawn(binary, args(report), { ...(cwd ? { cwd } : {}), stdio: ['ignore', 'ignore', 'pipe'] });
+    // gitleaks runs git itself (`git log -p`): with the git runner's settings, so a replace ref or a graft can't swap
+    // the commits it reads (#807).
+    const child = spawn(binary, args(report), { ...(cwd ? { cwd } : {}), stdio: ['ignore', 'ignore', 'pipe'], env: gitEnv() });
     let err = '';
     child.stderr.on('data', (d: Buffer) => (err = (err + d.toString()).slice(-2000)));
     const done = (r: ScanResult) => {

@@ -12,8 +12,8 @@
 // (never origin again), with origin's URL as its remote, checked out at <commit> by id.
 // It prints `verified <tag>: tag object <id>, commit <id>` and exits 0, or names why and exits 1 with no checkout.
 'use strict';
-const { execFileSync } = require('node:child_process');
 const path = require('node:path');
+const { commandExecFileSync, gitExecFileSync } = require('../lib/git.cjs');
 const { verifyRelease } = require('../machine/worklane-update.cjs');
 
 const fail = (msg) => {
@@ -26,7 +26,8 @@ if (!/^v[0-9]+\.[0-9]+\.[0-9]+$/.test(tag || '')) fail(`"${tag}" isn't a release
 if (!/^[0-9a-f]{40}$/.test(commit || '')) fail(`"${commit}" isn't a full commit id: a release is installed only at the commit scripts/bootstrap.sh pins`);
 if (!path.isAbsolute(signers)) fail(`the allowed signers file must be an absolute path, not ${signers}`);
 
-const exec = (file, args) => execFileSync(file, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 300_000 });
+// git (the updater's verifyRelease runs it through exec) through the git runner (#807).
+const exec = (file, args) => commandExecFileSync(file, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 300_000 });
 const gitDir = path.join(work, 'verify.git');
 const v = verifyRelease(url, tag, signers, exec, gitDir);
 if (!v.ok) fail(v.reason);
@@ -34,7 +35,7 @@ if (v.commit !== commit) fail(`${tag} is signed and names itself, but points at 
 
 // The source to build: the verified objects only, at the pinned commit by id.
 const src = path.join(work, 'src');
-const git = (...a) => exec('git', ['--no-replace-objects', ...a]).trim();
+const git = (...a) => gitExecFileSync(a, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 300_000 }).trim();
 try {
   git('clone', '-q', '--no-checkout', gitDir, src);
   git('-C', src, 'remote', 'set-url', 'origin', url);

@@ -14,7 +14,8 @@
 //     (default release-signer): `ssh-keygen -Y verify` on the tag's payload, as git itself checks it. Not
 //     `git verify-tag`, which matches the signer to the tagger's email.
 // On success it prints `verified <tag> <commit> <key fingerprint>` and exits 0.
-import { execFileSync, spawnSync } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
+import { gitExecFileSync } from './lib/git.cjs';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -39,7 +40,7 @@ if (!commit) fail(usage);
 if (!/^[0-9a-f]{40}$/.test(commit)) fail(`--commit must be a full commit id, not "${commit}"`);
 if (!/^[\w.@-]+$/.test(principal)) fail(`a principal of letters, digits, ".", "@", "_" or "-", not "${principal}"`);
 
-const git = (...a) => execFileSync('git', a, { stdio: ['ignore', 'pipe', 'pipe'] });
+const git = (...a) => gitExecFileSync(a, { stdio: ['ignore', 'pipe', 'pipe'] });
 const gitText = (...a) => {
   try {
     return git(...a).toString('utf8').trim();

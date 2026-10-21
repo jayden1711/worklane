@@ -11,6 +11,7 @@
 // - The block is valid under the engine's own schema, or it isn't offered: no duplicate key, no name the schema or
 //   YAML can't take (those are comments).
 import { execFileSync } from 'node:child_process';
+import { gitExecFileSync } from './os/git.js';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { parse, parseDocument } from 'yaml';
@@ -58,7 +59,7 @@ export interface PinPlan {
 type Git = (repo: string, args: string[]) => string | null;
 const gitIn: Git = (repo, args) => {
   try {
-    return execFileSync('git', ['-C', repo, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 20_000, maxBuffer: 64 * 1024 * 1024 });
+    return gitExecFileSync(['-C', repo, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 20_000, maxBuffer: 64 * 1024 * 1024 });
   } catch {
     return null;
   }

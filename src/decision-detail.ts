@@ -9,7 +9,7 @@
 //   - a viewer gets only the fields VIEWER_DECISION_FIELDS allows (src/viewer-events.ts), never the context;
 //   - a writer gets the context too, as the agent runs it comes from (mayReadRuns), minus the owner-only parts;
 //   - the owners also get the owner-only parts: raw check output, the tamper guard's flags, and the diff.
-import { execFile } from 'node:child_process';
+import { gitExecFile } from './os/git.js';
 import { BRAND } from './brand.js';
 import { DEFAULT_REVIEW } from './coordinator/shared.js';
 import { isOwner, isWriter, mayAnswerKind, type Role } from './dashboard-auth.js';
@@ -348,9 +348,14 @@ export function decisionDetail(id: string, d: DetailDeps): DecisionDetail | null
 export async function decisionDiff(root: string, base: string, head: string): Promise<{ diff: string; truncated: boolean } | { diff: null; why: string }> {
   if (!SHA.test(base) || !SHA.test(head)) return { diff: null, why: 'no commits recorded for this change' };
   const MAX = 512 * 1024;
+  // Every file's lines whatever the change's attributes say (#807): a file its .gitattributes marks `-diff` or
+  // `binary` (or gives a textconv or an external diff) shows as it is, not as "Binary files differ"; the user's
+  // attributes file is not read. Output past the buffer is shown cut, like output past MAX.
+  const args = ['-c', 'core.attributesFile=/dev/null', 'diff', '--no-color', '--text', '--no-textconv', '--no-ext-diff', '--ignore-submodules=none', `${base}..${head}`];
   return new Promise((done) => {
-    execFile('git', ['diff', '--no-color', '--no-ext-diff', `${base}..${head}`], { cwd: root, env: { ...withToolPath(), GIT_TERMINAL_PROMPT: '0' }, timeout: 15_000, maxBuffer: 8 * 1024 * 1024, encoding: 'utf8' }, (err, stdout, stderr) => {
-      if (err) return done({ diff: null, why: `not in this checkout's git: ${(stderr || err.message).trim().split('\n')[0]}` });
+    gitExecFile(args, { cwd: root, env: { ...withToolPath(), GIT_TERMINAL_PROMPT: '0' }, timeout: 15_000, maxBuffer: 8 * 1024 * 1024, encoding: 'utf8' }, (err, stdout, stderr) => {
+      if (err && !(err.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER' && stdout)) return done({ diff: null, why: `not in this checkout's git: ${(stderr || err.message).trim().split('\n')[0]}` });
+      if (err) return done({ diff: redactString(stdout.slice(0, MAX)), truncated: true });
       const truncated = stdout.length > MAX;
       done({ diff: redactString(truncated ? stdout.slice(0, MAX) : stdout), truncated });
     });

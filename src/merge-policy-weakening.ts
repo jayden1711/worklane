@@ -60,6 +60,9 @@ export const CHECK_TABLES: readonly CheckTable[] = [
   { path: 'test/raw-check-reads.ts', table: 'JUDGED_CASTS_ALLOWED', kind: 'never-grow' },
   { path: 'test/raw-check-reads.ts', table: 'MAKERS_ALLOWED', kind: 'never-grow' },
   { path: 'test/owner-terminal-rerun.test.ts', table: 'FIRST_TIME_ONLY', kind: 'never-grow' },
+  // The git runner scan's exceptions (#807): a file let start git outside the runner, and the runners it skips.
+  { path: 'test/git-runner.test.ts', table: 'OUTSIDE_THE_RUNNER', kind: 'never-grow' },
+  { path: 'test/git-runner.test.ts', table: 'RUNNERS', kind: 'never-grow' },
   { path: 'scripts/lib/denylist.mjs', table: 'SKIP', kind: 'never-grow' },
   { path: 'src/guardrails/engine.ts', table: 'AGENT_EDITABLE', kind: 'never-grow' },
   // The lints' rules and bad fixtures, and the guards' lists: taking one out is a loosening.
@@ -124,6 +127,7 @@ export const LINT_TESTS: readonly string[] = [
   'test/web-buttons.test.ts',
   'test/superfan.test.ts',
   'test/claude-accounts-retired.test.ts',
+  'test/git-runner.test.ts',
 ];
 
 /**

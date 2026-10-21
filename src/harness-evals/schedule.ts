@@ -1,7 +1,7 @@
 // When the harness eval suite runs: on this machine, from the nightly window (tests.yaml nightly_at), at most once a
 // day; weekly, and when the engine running here changed src/ since the last run. Which engine is running comes from
 // the engine itself: its git commit, or the commit its install directory is named after (/opt/<cli>/<sha>).
-import { spawnSync } from 'node:child_process';
+import { gitSpawnSync } from '../os/git.js';
 import { existsSync, realpathSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -15,7 +15,7 @@ const SHA = /^[0-9a-f]{40}$/;
 /** The commit of the engine running this code, or null when it can't tell. */
 export function engineSha(root: string = ENGINE_ROOT): string | null {
   if (existsSync(join(root, '.git'))) {
-    const r = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+    const r = gitSpawnSync(['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
     const sha = r.status === 0 ? r.stdout.trim() : '';
     if (SHA.test(sha)) return sha;
   }
@@ -31,7 +31,7 @@ export function engineSha(root: string = ENGINE_ROOT): string | null {
 export function srcChanged(from: string, to: string, clones: string[]): boolean | null {
   for (const cwd of clones) {
     if (!existsSync(join(cwd, '.git'))) continue;
-    const r = spawnSync('git', ['diff', '--quiet', from, to, '--', 'src/'], { cwd, stdio: 'ignore' });
+    const r = gitSpawnSync(['diff', '--quiet', from, to, '--', 'src/'], { cwd, stdio: 'ignore' });
     if (r.status === 0) return false;
     if (r.status === 1) return true;
   }

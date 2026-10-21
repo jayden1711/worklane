@@ -8,7 +8,7 @@
 //   node scripts/ci/affected.mjs --event pull_request --base <rev>   the selected test files (test/x.test.ts), one per line
 //   node scripts/ci/affected.mjs --event push                        every test file (any event but pull_request)
 //   add --explain for why each one was selected (on stderr)
-import { execFileSync } from 'node:child_process';
+import { gitExecFileSync } from '../lib/git.cjs';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -96,7 +96,7 @@ export async function plan(dir, changed, added = new Set()) {
   return a.selectTests(g, changed, { isTest, forceAll, added });
 }
 
-const git = (dir, ...args) => execFileSync('git', args, { cwd: dir, encoding: 'utf8', maxBuffer: 64 << 20 }).split('\0').filter(Boolean);
+const git = (dir, ...args) => gitExecFileSync(args, { cwd: dir, encoding: 'utf8', maxBuffer: 64 << 20 }).split('\0').filter(Boolean);
 
 function arg(args, name) {
   const i = args.indexOf(name);

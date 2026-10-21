@@ -5,7 +5,7 @@
 // don't read. A test-run tier that needs them says `full_checkout: true` (test_run.tiers).
 //
 // Non-cone sparse checkout ("/*" then "!/<dir>/" per directory): everything, minus those directories.
-import { execFileSync } from 'node:child_process';
+import { gitExecFileSync } from './os/git.js';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { z } from 'zod';
@@ -58,7 +58,7 @@ export function sparsePatterns(dirs: readonly string[]): string {
   return ['/*', ...dirs.map((d) => `!/${normalizeSparseDir(d)}/`)].join('\n') + '\n';
 }
 
-const git = (cwd: string, ...args: string[]) => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+const git = (cwd: string, ...args: string[]) => gitExecFileSync(args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 
 /**
  * Make the linked worktree at `path` (added with --no-checkout) sparse, leaving `dirs` out, and check its HEAD out.

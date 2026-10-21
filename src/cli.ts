@@ -71,6 +71,7 @@ import { sourceViewCommand } from './intake/source-view.js';
 import { intakeCheckCommand } from './intake/check.js';
 import { installService, stableNodePath, uninstallService } from './os/index.js';
 import { ownEnv } from './os/own-env.js';
+import { gitExecFileSync } from './os/git.js';
 import { projectStateDir } from './guardrails/context.js';
 import { fileURLToPath } from 'node:url';
 
@@ -284,7 +285,7 @@ function option(args: string[], name: string): string | undefined {
 }
 
 function changedTestFiles(root: string, globs: string[], branch: string): string[] {
-  const base = execFileSync('git', ['merge-base', `origin/${branch}`, 'HEAD'], { cwd: root, encoding: 'utf8' }).trim();
+  const base = gitExecFileSync(['merge-base', `origin/${branch}`, 'HEAD'], { cwd: root, encoding: 'utf8' }).trim();
   // A renamed test file is an added one, and is checked (with renames on it was R, and skipped); a valid UTF-8 path as itself (#683).
   const files = changedNames(root, ['--diff-filter=AM', base]);
   const res = globs.map((g) => globToRegExp(g));
@@ -1011,8 +1012,8 @@ async function main(argv: string[]): Promise<number> {
       const gh = i.credentials.github;
       const identity = i.commitIdentity ?? (gh.kind === 'app' ? await appBotIdentity({ appId: gh.app_id, installationId: gh.installation_id, keyPath: gh.key_path }) : { name: `${BRAND.cli}-${i.name}`, email: `${BRAND.cli}-${i.name}@users.noreply.invalid` });
       const main = cfg.project.project.default_branch;
-      execFileSync('git', ['fetch', '-q', 'origin', main], { cwd: i.repo.path, stdio: 'inherit' });
-      const base = execFileSync('git', ['rev-parse', `origin/${main}`], { cwd: i.repo.path, encoding: 'utf8' }).trim();
+      gitExecFileSync(['fetch', '-q', 'origin', main], { cwd: i.repo.path, stdio: 'inherit' });
+      const base = gitExecFileSync(['rev-parse', `origin/${main}`], { cwd: i.repo.path, encoding: 'utf8' }).trim();
       const dryRun = flag(rest, '--dry-run');
       const r = await tune({
         wt: { repo: i.repo.path, root: cfg.tests.worktree.root, stateDir: i.stateDir, setup: cfg.tests.worktree.setup, ...(i.runAs ? { runAs: i.runAs } : {}), env: cfg.tests.env },

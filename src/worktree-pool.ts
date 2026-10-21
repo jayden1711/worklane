@@ -7,7 +7,7 @@
 // When main moves and the files that pin the install (worktree.setup_key) didn't change, a pooled worktree
 // follows main by a checkout in place, keeping what its setup installed, so a merge doesn't empty the pool. It is
 // still set up on main only and handed to one task, never back: no task's change reaches another's dependencies.
-import { execFileSync } from 'node:child_process';
+import { gitExecFileSync } from './os/git.js';
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -29,7 +29,7 @@ export interface PoolEntry {
 export const POOL_MIN_FREE_GB = 10;
 
 const poolFile = (o: WorktreeOptions) => join(o.stateDir, 'worktree-pool.json');
-const git = (cwd: string, ...args: string[]) => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+const git = (cwd: string, ...args: string[]) => gitExecFileSync(args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 
 export function readPool(o: WorktreeOptions): PoolEntry[] {
   try {

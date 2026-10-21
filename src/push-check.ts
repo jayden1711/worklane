@@ -5,9 +5,9 @@
 // leaves a SKILL.md that fails the skill lint.
 // The coordinator also runs pushProblems on each change before verifying it,
 // so a doomed change is caught before a long test run.
-import { execFileSync, spawnSync } from 'node:child_process';
 import { sizeFiles } from './coordinator/change-files.js';
 import { globToRegExp } from './guardrails/glob.js';
+import { gitExecFileSync, gitSpawnSync } from './os/git.js';
 import { shownPath } from './path-text.js';
 import { lintSkill, SKILL_SECTIONS } from './skill-lint.js';
 import { defaultBranchRefusal, type PushGuard } from './push-guard.js';
@@ -23,7 +23,7 @@ export const DEFAULT_PUSH_LIMITS: PushLimits = { max_file_mb: 10, max_changed_li
 const WORKFLOWS = '.github/workflows/';
 const MB = 1024 * 1024;
 
-const git = (cwd: string, args: string[], input?: string) => execFileSync('git', args, { cwd, encoding: 'utf8', maxBuffer: 256 * MB, stdio: ['pipe', 'pipe', 'pipe'], ...(input !== undefined ? { input } : {}) });
+const git = (cwd: string, args: string[], input?: string) => gitExecFileSync(args, { cwd, encoding: 'utf8', maxBuffer: 256 * MB, stdio: ['pipe', 'pipe', 'pipe'], ...(input !== undefined ? { input } : {}) });
 
 const list = (paths: string[], n = 10) => `${paths.slice(0, n).join(', ')}${paths.length > n ? ` and ${paths.length - n} more` : ''}`;
 /** Changed paths in a problem's text, each as shownPath shows it (#683): `rev-list --objects` prints a name as it is. */
@@ -69,7 +69,7 @@ export function pushProblems(cwd: string, base: string, head: string, limits: Pu
   // Skills the change adds or edits must pass the skill lint as they stand at head.
   const badSkills: string[] = [];
   for (const p of touched.filter((t) => t === 'SKILL.md' || t.endsWith('/SKILL.md'))) {
-    const r = spawnSync('git', ['show', `${head}:${p}`], { cwd, encoding: 'utf8', maxBuffer: 16 * MB });
+    const r = gitSpawnSync(['show',`${head}:${p}`], { cwd, encoding: 'utf8', maxBuffer: 16 * MB });
     if (r.status !== 0) continue; // deleted by the change
     const lint = lintSkill(r.stdout);
     if (lint.length) badSkills.push(`${shownPath(p)} (${lint.join('; ')})`);
@@ -94,7 +94,7 @@ export function checkedPush(o: { cwd: string; remote: string; base: string; head
   const refused = pushProblems(o.cwd, o.base, o.head, o.limits);
   if (refused.length) return { ok: false, refused };
   const lease = o.expect ? [`--force-with-lease=${o.ref}:${o.expect}`] : [];
-  const push = spawnSync('git', ['push', ...lease, o.remote, `${o.force ? '+' : ''}${o.head}:${o.ref}`], { cwd: o.cwd, encoding: 'utf8' });
+  const push = gitSpawnSync(['push',...lease, o.remote, `${o.force ? '+' : ''}${o.head}:${o.ref}`], { cwd: o.cwd, encoding: 'utf8' });
   if (push.status !== 0) return { ok: false, error: (push.stderr || '').trim() };
   return { ok: true };
 }

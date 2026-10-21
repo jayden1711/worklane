@@ -2,7 +2,7 @@
 // over the open PRs this instance opened (watchedPrs: a person's PR is never among them). The git work happens in a
 // scratch worktree of the coordinator's clone; the only push is checkedPush to the PR's own branch, pinned to the
 // head it read (never over someone else's push, never the default branch). Nothing runs under an emergency stop.
-import { spawnSync } from 'node:child_process';
+import { gitSpawnSync } from '../os/git.js';
 import { join } from 'node:path';
 import { BRAND } from '../brand.js';
 import type { PullRequest } from '../backlog/types.js';
@@ -111,8 +111,8 @@ export abstract class PrHygiene extends Gardener {
     const { issue: n, number } = w;
     const dir = join(this.d.stateDir, 'pr-hygiene', `pr-${number}`);
     const clean = () => {
-      spawnSync('git', ['worktree', 'remove', '--force', dir], { cwd: this.d.repo });
-      spawnSync('git', ['worktree', 'prune'], { cwd: this.d.repo });
+      gitSpawnSync(['worktree', 'remove', '--force', dir], { cwd: this.d.repo });
+      gitSpawnSync(['worktree', 'prune'], { cwd: this.d.repo });
     };
     clean();
     try {

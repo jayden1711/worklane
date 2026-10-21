@@ -3,7 +3,7 @@
 // Who may do what is here too, so the page and the tests share one rule: owners start, resume, approve, decline and
 // archive; writers (and owners) pause and stop a running job, the safe direction; viewers nothing (403, no nav item).
 import { createHash } from 'node:crypto';
-import { execFileSync } from 'node:child_process';
+import { gitExecFileSync } from '../os/git.js';
 import type { Role } from '../dashboard-auth.js';
 import type { EventLog } from '../events/log.js';
 import type { EventPayload, StoredEvent } from '../events/types.js';
@@ -51,7 +51,7 @@ export const noExperimentsHere = (instance: string | undefined) =>
 
 const show = (repo: string) => (commit: string, path: string) => {
   try {
-    return execFileSync('git', ['show', `${commit}:${path}`], { cwd: repo, stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: 64 * 1024 * 1024 });
+    return gitExecFileSync(['show', `${commit}:${path}`], { cwd: repo, stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: 64 * 1024 * 1024 });
   } catch {
     return null;
   }
@@ -67,7 +67,7 @@ const diffOf = (repo: string, commit: string | null): string[] => {
 };
 const tipOf = (site: ExpSite) => {
   try {
-    return execFileSync('git', ['rev-parse', `origin/${site.branch}`], { cwd: site.repo, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+    return gitExecFileSync(['rev-parse', `origin/${site.branch}`], { cwd: site.repo, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
   } catch {
     return null;
   }

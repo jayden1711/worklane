@@ -1,7 +1,8 @@
 // WHY: the first-run page fixes some steps itself (Fix kind 'action'). Each action shows its plan before anything
 // happens and runs the CLI's own code for the step; the dashboard runs it for owners only, confirmed and audited.
 import { join } from 'node:path';
-import { execFileSync, spawnSync } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
+import { commandSpawnSync, gitExecFileSync } from './os/git.js';
 import { BRAND } from './brand.js';
 import type { Config } from './config/load.js';
 import { refreshFingerprints, type RefreshResult } from './guardrails/context.js';
@@ -54,7 +55,7 @@ export function systemActionDeps(): ActionDeps {
 }
 
 const gitCommonHooks = (root: string) => {
-  const common = execFileSync('git', ['rev-parse', '--git-common-dir'], { cwd: root, encoding: 'utf8' }).trim();
+  const common = gitExecFileSync(['rev-parse', '--git-common-dir'], { cwd: root, encoding: 'utf8' }).trim();
   return join(common.startsWith('/') ? common : join(root, common), 'hooks');
 };
 
@@ -147,7 +148,8 @@ export const ACTIONS: Record<ActionId, ActionDef> = {
     }),
     run: async (c) => {
       for (const cmd of defaultBranchCommands(c)) {
-        const r = spawnSync(cmd[0]!, cmd.slice(1), { cwd: c.root, encoding: 'utf8', timeout: 120_000, env: withToolPath() });
+        // The git commands below (defaultBranchCommands) through the git runner (#807).
+        const r = commandSpawnSync(cmd[0]!, cmd.slice(1), { cwd: c.root, encoding: 'utf8', timeout: 120_000, env: withToolPath() });
         if (r.status !== 0) return { ok: false, detail: `${cmd.join(' ')} failed: ${(r.stderr || r.error?.message || '').trim().split('\n')[0]}` };
       }
       return { ok: true, detail: `fetched origin/${c.cfg.project.project.default_branch}; origin/HEAD set` };

@@ -1,7 +1,8 @@
 // Worktrees the coordinator creates and owns. It never lists, touches or
 // removes a worktree it didn't create: names carry our prefix AND must be in
 // our ownership record, so other sessions' worktrees are always safe.
-import { execFileSync, spawn, spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
+import { gitExecFileSync, gitSpawnSync } from './os/git.js';
 import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmdirSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { BRAND } from './brand.js';
@@ -38,7 +39,7 @@ function setOwned(o: WorktreeOptions, list: string[]) {
   writeGroupOnly(ownedFile(o), JSON.stringify([...new Set(list)], null, 2));
 }
 
-const git = (cwd: string, ...args: string[]) => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+const git = (cwd: string, ...args: string[]) => gitExecFileSync(args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 
 /**
  * What Claude Code's sandbox leaves in a worktree: on Linux it protects paths by mounting over them, so a missing one
@@ -167,8 +168,8 @@ export function createWorktree(o: WorktreeOptions, name: string, branch: string,
 export function removeWorktree(o: WorktreeOptions, name: string): boolean {
   const path = worktreePath(o, name);
   if (!owned(o).includes(path)) throw new Error(`refusing to remove ${path}: not created by ${BRAND.cli}`);
-  spawnSync('git', ['worktree', 'remove', '--force', path], { cwd: o.repo, encoding: 'utf8' });
-  spawnSync('git', ['worktree', 'prune'], { cwd: o.repo });
+  gitSpawnSync(['worktree', 'remove', '--force', path], { cwd: o.repo, encoding: 'utf8' });
+  gitSpawnSync(['worktree', 'prune'], { cwd: o.repo });
   const gone = !existsSync(path) && !git(o.repo, 'worktree', 'list', '--porcelain').includes(`worktree ${path}\n`);
   if (gone) setOwned(o, owned(o).filter((p) => p !== path));
   return gone;

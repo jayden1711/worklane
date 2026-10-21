@@ -1,7 +1,7 @@
 // CI fix runs and conflict fix runs on the harness's own PRs.
 import { localDoneWhen } from '../testrun/local.js';
 import type { Coordinator } from '../coordinator.js';
-import { spawnSync } from 'node:child_process';
+import { gitSpawnSync } from '../os/git.js';
 import { randomBytes } from 'node:crypto';
 import { BRAND } from '../brand.js';
 import type { ReviewConfig } from '../config/schema.js';
@@ -314,7 +314,7 @@ export abstract class FixRuns extends Landing {
         const why = s.no_change_needed ?? `it made no commit (${s.summary})`;
         return await give(trigger.kind === 'ci' ? `the fix run found the failure isn't caused by this change: ${why}` : `the fix run changed nothing for the review: ${why}`);
       }
-      if (spawnSync('git', ['merge-base', '--is-ancestor', pr.headSha, head], { cwd: path }).status !== 0) return await give('the fix run rewrote the branch history instead of adding commits');
+      if (gitSpawnSync(['merge-base', '--is-ancestor', pr.headSha, head], { cwd: path }).status !== 0) return await give('the fix run rewrote the branch history instead of adding commits');
       const change = await this.inspect(n, path, claimed.base, head, repro);
       if ('rejected' in change) return await give(`the fix was rejected: ${change.rejected}`);
       const checks = await this.verify(n, path, head, doneWhen, repro);
@@ -422,7 +422,7 @@ export abstract class FixRuns extends Landing {
     const baseSha = this.git(this.d.repo, 'rev-parse', `${this.remote}/${baseRef}`);
     // The branch already contains its base: GitHub's merge check is behind. Look again soon instead.
     this.git(this.d.repo, 'fetch', '-q', this.remote, `+refs/heads/${pr.head}:refs/remotes/${this.remote}/${pr.head}`);
-    if (spawnSync('git', ['merge-base', '--is-ancestor', baseSha, pr.headSha], { cwd: this.d.repo }).status === 0) {
+    if (gitSpawnSync(['merge-base', '--is-ancestor', baseSha, pr.headSha], { cwd: this.d.repo }).status === 0) {
       this.prPolled.set(number, Date.now() - (this.d.prPollMs ?? 60_000) + MERGEABLE_RECHECK_MS);
       return;
     }
@@ -476,7 +476,7 @@ export abstract class FixRuns extends Landing {
 
   /** git, returning null instead of throwing (a path missing at a commit, an unmerged index entry). */
   protected gitOrNull(cwd: string, ...args: string[]): string | null {
-    const r = spawnSync('git', args, { cwd, encoding: 'utf8' });
+    const r = gitSpawnSync(args, { cwd, encoding: 'utf8' });
     return r.status === 0 ? r.stdout.replace(/\n$/, '') : null;
   }
 
@@ -562,7 +562,7 @@ export abstract class FixRuns extends Landing {
         if (this.gitOrNull(path, 'rev-parse', 'HEAD^1') !== pr.headSha || this.gitOrNull(path, 'rev-parse', 'HEAD^2') !== baseSha) return await give('the fix run did not finish the merge commit of the branch and its base (it rewrote history, added commits, or left the merge uncommitted)');
         // Exactly as committed (no trimming): the comparison is line for line, the last line included.
         const committed = (f: string) => {
-          const r = spawnSync('git', ['show', `HEAD:${f}`], { cwd: path, encoding: 'utf8' });
+          const r = gitSpawnSync(['show', `HEAD:${f}`], { cwd: path, encoding: 'utf8' });
           return r.status === 0 ? r.stdout : null;
         };
         const resolved = Object.fromEntries(files.map((f) => [f, committed(f)]));

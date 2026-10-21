@@ -3,6 +3,7 @@
 // that can't run reports why, and a feature the setup's mode can't have is
 // listed as off, with why.
 import { execFileSync, spawnSync } from 'node:child_process';
+import { gitExecFileSync } from './os/git.js';
 import { existsSync, lstatSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { agentRecordWarning } from './setup-steps.js';
@@ -210,7 +211,7 @@ export function doctor(rootArg: string, opts: { agentshield?: boolean; /** A pol
   if (!gl) add('gitleaks', 'fail', `not on PATH or in ${toolBin()}: commit and transcript scans cannot run`);
   else add('gitleaks', 'ok', execFileSync(gl, ['version'], { encoding: 'utf8' }).trim());
   try {
-    const common = execFileSync('git', ['rev-parse', '--git-common-dir'], { cwd: root, encoding: 'utf8' }).trim();
+    const common = gitExecFileSync(['rev-parse', '--git-common-dir'], { cwd: root, encoding: 'utf8' }).trim();
     const hook = join(resolve(root, common), 'hooks', 'pre-commit');
     if (existsSync(hook) && readFileSync(hook, 'utf8').includes(GIT_HOOK_MARKER)) add('pre-commit', 'ok', 'gitleaks pre-commit installed');
     else add('pre-commit', 'warn', `not installed (\`${BRAND.cli} install --git-hooks\`); the land queue still re-scans`);

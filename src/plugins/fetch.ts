@@ -4,6 +4,7 @@
 // DynamicUser) is the root side's job (scripts/setup/plugins.sh); this module is the part that is the same wherever it
 // runs, and it never executes a file it fetched.
 import { execFileSync } from 'node:child_process';
+import { gitExecFileSync } from '../os/git.js';
 import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -43,7 +44,7 @@ export function gitSafety(allowFile: boolean, pin?: string): string[] {
   return ['-c', 'http.followRedirects=false', ...(pin ? ['-c', `http.curloptResolve=${pin}`] : []), '-c', 'core.hooksPath=/dev/null', '-c', 'protocol.allow=never', '-c', 'protocol.https.allow=always', ...(allowFile ? ['-c', 'protocol.file.allow=always'] : []), '-c', 'submodule.recurse=false', '-c', 'core.symlinks=true', '-c', 'advice.detachedHead=false'];
 }
 function git(cwd: string, home: string, args: string[], allowFile: boolean, pin?: string): string {
-  return execFileSync('git', [...gitSafety(allowFile, pin), ...args], {
+  return gitExecFileSync([...gitSafety(allowFile, pin), ...args], {
     cwd,
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'pipe'],

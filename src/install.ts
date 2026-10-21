@@ -6,7 +6,7 @@
 // checkout's .claude/settings.json (keeping the project's own entries), for
 // local runs without an instance. Re-running is safe: our entries are
 // recognized by a marker and replaced, never duplicated.
-import { execFileSync } from 'node:child_process';
+import { gitExecFileSync } from './os/git.js';
 import { chmodSync, cpSync, existsSync, mkdirSync, readFileSync, readlinkSync, renameSync, writeFileSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -201,7 +201,7 @@ function readJson(path: string): Settings {
 export function gitRemoteRepo(root: string): string | null {
   try {
     // WHY trim: git ends its answer with a newline; the shared parser (src/managed-apps.ts) takes a URL as given.
-    return githubRepoOf(execFileSync('git', ['remote', 'get-url', 'origin'], { cwd: root, encoding: 'utf8' }).trim());
+    return githubRepoOf(gitExecFileSync(['remote', 'get-url', 'origin'], { cwd: root, encoding: 'utf8' }).trim());
   } catch {
     return null;
   }
@@ -345,14 +345,14 @@ export function installGitHooks(root: string, cfg: Config, engineCli = fileURLTo
  * `branches` (the config's, when there is one) and whatever origin/HEAD names at push time.
  */
 export function installCheckoutPrePush(root: string, branches: string[], engineCli?: string, node: string = stableNodePath().path): string {
-  const common = execFileSync('git', ['rev-parse', '--git-common-dir'], { cwd: root, encoding: 'utf8' }).trim();
+  const common = gitExecFileSync(['rev-parse', '--git-common-dir'], { cwd: root, encoding: 'utf8' }).trim();
   // WHY (#468): the checkout's hook runs node by Homebrew's stable bin/node (or this node's own path), as the service does.
   return installPrePushHook(join(resolve(root, common), 'hooks'), { branches, node, ...(engineCli ? { engine: engineCli } : {}) });
 }
 
 /** gitleaks pre-commit hook in the repo's common hooks dir, chaining any existing hook. */
 export function installGitHook(root: string): string {
-  const common = execFileSync('git', ['rev-parse', '--git-common-dir'], { cwd: root, encoding: 'utf8' }).trim();
+  const common = gitExecFileSync(['rev-parse', '--git-common-dir'], { cwd: root, encoding: 'utf8' }).trim();
   const hooksDir = join(resolve(root, common), 'hooks');
   mkdirSync(hooksDir, { recursive: true });
   const hook = join(hooksDir, 'pre-commit');

@@ -25,7 +25,7 @@
 // for a name that can't be handed back to git, from its blobs). review.ts flags a change that adds such a mark, since
 // GitHub and a checkout still honour it.
 import { Buffer, isUtf8 } from 'node:buffer';
-import { spawnSync } from 'node:child_process';
+import { gitSpawnSync } from '../os/git.js';
 import type { SizeFile } from '../pr-rules.js';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -57,7 +57,7 @@ function withGit(args: string[]): string[] {
 
 /** Run git; its stdout, untrimmed (a path may start or end with a space), or an Error saying why it failed. */
 function run(cwd: string, args: string[], timeout?: number): string | Error {
-  const r = spawnSync('git', withGit(args), { cwd, encoding: 'utf8', maxBuffer: MAX_BUFFER, ...(timeout ? { timeout } : {}) });
+  const r = gitSpawnSync(withGit(args), { cwd, encoding: 'utf8', maxBuffer: MAX_BUFFER, ...(timeout ? { timeout } : {}) });
   if (r.error) return r.error;
   if (r.status !== 0) return new Error(`git ${args.join(' ').slice(0, 200)} failed: ${(r.stderr || `exit ${r.status}`).trim().slice(0, 500)}`);
   return r.stdout;
@@ -65,7 +65,7 @@ function run(cwd: string, args: string[], timeout?: number): string | Error {
 
 /** run, with stdout as bytes: for output that holds paths. */
 function runBytes(cwd: string, args: string[], timeout?: number): Buffer | Error {
-  const r = spawnSync('git', withGit(args), { cwd, encoding: 'buffer', maxBuffer: MAX_BUFFER, ...(timeout ? { timeout } : {}) });
+  const r = gitSpawnSync(withGit(args), { cwd, encoding: 'buffer', maxBuffer: MAX_BUFFER, ...(timeout ? { timeout } : {}) });
   if (r.error) return r.error;
   if (r.status !== 0) return new Error(`git ${args.join(' ').slice(0, 200)} failed: ${(r.stderr.toString('utf8') || `exit ${r.status}`).trim().slice(0, 500)}`);
   return r.stdout;
@@ -166,6 +166,15 @@ export function rawChanges(cwd: string, args: string[]): string {
 /** `git diff --stat` against `rev`, as text for a person or a prompt (a rename as both its paths). Never parsed. */
 export function diffStatText(cwd: string, rev: string): string {
   return must(run(cwd, ['diff', '--stat', '--no-renames', '--no-color', ...nameArgs([rev])])).trim();
+}
+
+/**
+ * `git diff <args>` as a patch, for a person, a prompt or a hash (#807): every file's lines whatever the attributes say
+ * (a `-diff` or `binary` mark, a textconv or an external diff), and every submodule link. `args` as changedNames takes
+ * them. Never parsed.
+ */
+export function patchText(cwd: string, args: string[]): string {
+  return must(run(cwd, ['diff', '--no-color', ...AS_TEXT, ...nameArgs(args)]));
 }
 
 /** `git show --stat --patch` of one commit, as text for a person. Never parsed. */
@@ -288,7 +297,7 @@ function treePaths(cwd: string, rev: string): Map<string, Buffer> {
  */
 function attributeStates(cwd: string, rev: string, paths: Buffer[]): Map<string, Map<string, string>> | null {
   const input = Buffer.concat(paths.flatMap((p) => [p, Buffer.from([0])]));
-  const r = spawnSync('git', withGit(['check-attr', `--source=${rev}`, '-z', '--stdin', ...OUTCOME_ATTRIBUTES]), { cwd, input, encoding: 'buffer', maxBuffer: MAX_BUFFER, env: { ...process.env, GIT_ATTR_NOSYSTEM: '1' } });
+  const r = gitSpawnSync(withGit(['check-attr', `--source=${rev}`, '-z', '--stdin', ...OUTCOME_ATTRIBUTES]), { cwd, input, encoding: 'buffer', maxBuffer: MAX_BUFFER, env: { ...process.env, GIT_ATTR_NOSYSTEM: '1' } });
   if (r.error || r.status !== 0) return null;
   const out = new Map<string, Map<string, string>>();
   // -z: "path NUL attribute NUL state NUL" for each path and attribute.
@@ -344,7 +353,7 @@ const OUTCOME_SHOWN = 10;
 
 /** git's exit status and stdout, for the calls whose status is an answer (`cat-file -e`, `config --get-regexp`). */
 function runStatus(cwd: string, args: string[]): { status: number | null; stdout: string } {
-  const r = spawnSync('git', withGit(args), { cwd, encoding: 'utf8', maxBuffer: MAX_BUFFER });
+  const r = gitSpawnSync(withGit(args), { cwd, encoding: 'utf8', maxBuffer: MAX_BUFFER });
   return { status: r.error ? null : r.status, stdout: r.stdout ?? '' };
 }
 

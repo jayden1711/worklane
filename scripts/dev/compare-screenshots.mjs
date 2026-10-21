@@ -7,11 +7,11 @@
 // Writes <out>/before/*.png and <out>/after/*.png (light and dark per page).
 // Stopped (Ctrl-C, a signal) or failing partway, it stops the step it is running, whose own clean-up
 // stops what that step started (the screenshot script's dashboards and Chrome), and removes its clones.
-import { spawn, spawnSync } from 'node:child_process';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { commandSpawn, gitSpawnSync } from '../lib/git.cjs';
 import { exitCleanup } from './children.mjs';
 
 const arg = (name, fallback) => {
@@ -24,11 +24,12 @@ const cleanup = exitCleanup();
 const run = (cmd, args, cwd) =>
   new Promise((ok, fail) => {
     // npm is npm.cmd on Windows, which only a shell resolves.
-    const p = cleanup.track(spawn(cmd, args, { cwd, stdio: 'inherit', shell: process.platform === 'win32' && cmd === 'npm' }));
+    // A caller's git (the command named git) through the git runner (#807).
+    const p = cleanup.track(commandSpawn(cmd, args, { cwd, stdio: 'inherit', shell: process.platform === 'win32' && cmd === 'npm' }));
     p.on('error', fail);
     p.on('exit', (code, signal) => (code === 0 ? ok() : fail(new Error(`${cmd} ${args.join(' ')} failed in ${cwd}${signal ? ` (${signal})` : ''}`))));
   });
-const git = (...args) => spawnSync('git', args, { cwd: repo, encoding: 'utf8' }).stdout.trim();
+const git = (...args) => gitSpawnSync(args, { cwd: repo, encoding: 'utf8' }).stdout.trim();
 
 await run('git', ['fetch', '-q', 'origin'], repo);
 const base = arg('--base', 'origin/main');

@@ -19,10 +19,19 @@
 // email (a squash merge's DCO trailers) is dropped whole, name included.
 import { execFileSync, spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
+import { devNull } from 'node:os';
+import { join } from 'node:path';
 import { loadRules, scanText, SKIP } from './lib/denylist.mjs';
 
 const ZERO = /^0+$/;
-const git = (...a) => execFileSync('git', a, { encoding: 'utf8', maxBuffer: 256 * 1024 * 1024 });
+// The git runner's settings (#807; src/os/git.ts, scripts/lib/git.cjs): replace refs off and no graft file, so a
+// `git replace` or a graft in the repo can't swap the commits, trees or blobs scanned here. Written out here because
+// the hook runs this file alone, fetched from origin (scripts/push-gate-hook.mjs GATE_CODE), so it imports nothing
+// new; test/git-runner.test.ts checks they are the runner's.
+const GIT_FIXED_ARGS = ['--no-replace-objects'];
+const GIT_ENV = { ...process.env, GIT_NO_REPLACE_OBJECTS: '1', GIT_GRAFT_FILE: join(devNull, 'no-grafts') };
+const runGit = (args, opts) => execFileSync('git', [...GIT_FIXED_ARGS, ...args], { ...opts, env: GIT_ENV });
+const git = (...a) => runGit(a, { encoding: 'utf8', maxBuffer: 256 * 1024 * 1024 });
 
 function fail(why) {
   console.error(`push gate: REFUSED. ${why}`);
@@ -69,7 +78,7 @@ function repoOwner() {
   if (fromEnv) return fromEnv[1].toLowerCase();
   let url;
   try {
-    url = execFileSync('git', ['remote', 'get-url', 'origin'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+    url = runGit(['remote', 'get-url', 'origin'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
   } catch {
     return null; // no origin: no allowance
   }
@@ -180,7 +189,8 @@ function scanTree(rules, tip) {
 
 function gitleaks(commits) {
   if (!commits.length) return;
-  const r = spawnSync('gitleaks', ['git', '--no-banner', '--redact', '--exit-code', '1', '--log-opts', `--no-walk ${commits.join(' ')}`, '.'], { encoding: 'utf8' });
+  // gitleaks runs git itself: with the same settings, in its environment.
+  const r = spawnSync('gitleaks', ['git', '--no-banner', '--redact', '--exit-code', '1', '--log-opts', `--no-walk ${commits.join(' ')}`, '.'], { encoding: 'utf8', env: GIT_ENV });
   if (r.error) fail(`gitleaks could not run (${r.error.code ?? r.error.message}); install it, the gate never skips the secret scan`);
   if (r.status === 1) fail(`gitleaks found a secret:\n${(r.stdout + r.stderr).trim().slice(-3000)}`);
   if (r.status !== 0) fail(`gitleaks exited ${r.status}:\n${r.stderr.trim().slice(-1000)}`);

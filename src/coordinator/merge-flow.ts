@@ -4,7 +4,7 @@ import { startRefusal, TestRunHeld } from '../testrun/gate.js';
 import { CI_NONE_MAIN_WATCH, ciIsNone, requiredFor } from '../ci-none.js';
 import { PinnedChecks, type JudgedChecks } from '../check-source.js';
 import type { Coordinator } from '../coordinator.js';
-import { spawnSync } from 'node:child_process';
+import { gitSpawnSync } from '../os/git.js';
 import { readFileSync, existsSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { BRAND } from '../brand.js';
@@ -19,7 +19,7 @@ import { instructionTargets } from '../skilleval.js';
 import { checkedPush } from '../push-check.js';
 import { conflictTrigger } from '../conflicts.js';
 import { abortMerge, mergeBaseInto } from '../merge-base.js';
-import { changedNamesOrNull } from './change-files.js';
+import { changedNamesOrNull, patchText } from './change-files.js';
 import { lightOutcome } from '../light-check.js';
 import { readiness, requiredOutcomes, type Readiness } from '../pr-watch.js';
 import { checksFor, effectiveClass, riskClassOf, rulesetHold } from '../pr-rules.js';
@@ -123,12 +123,19 @@ export abstract class MergeFlow extends FixRuns {
           return git('rev-parse', '--verify', '-q', `${this.remote}/${this.branch}`);
         },
         parent: (sha) => git('rev-parse', '--verify', '-q', `${sha}^1`),
-        isAncestor: (a, b) => spawnSync('git', ['merge-base', '--is-ancestor', a, b], { cwd: this.d.repo }).status === 0,
+        isAncestor: (a, b) => gitSpawnSync(['merge-base', '--is-ancestor', a, b], { cwd: this.d.repo }).status === 0,
         firstParents: (from, to) => (git('rev-list', '--first-parent', '--reverse', `${from}..${to}`) ?? '').split('\n').filter(Boolean),
         subject: (sha) => git('log', '-1', '--format=%s', sha) ?? '',
         // A rename as both its paths and a valid UTF-8 path as itself, so a locked category on either one holds (#683).
         files: (sha) => changedNamesOrNull(this.d.repo, [`${sha}^1`, sha]) ?? [],
-        diff: (sha) => git('diff', `${sha}^1`, sha) ?? '',
+        // The culprit's patch as text whatever its attributes say (#807): a `-diff` file shows its lines, not "Binary files differ".
+        diff: (sha) => {
+          try {
+            return patchText(this.d.repo, [`${sha}^1`, sha]);
+          } catch {
+            return '';
+          }
+        },
       },
       config: () => this.d.cfg.project.fix_forward,
       required: () => this.requiredChecks(),
@@ -307,7 +314,7 @@ export abstract class MergeFlow extends FixRuns {
     // A merge into the default branch (by anyone) is when PRs start conflicting: look at all of them now.
     if (this.watchedPrs().length && now - this.tipCheckedAt >= TIP_CHECK_MS) {
       this.tipCheckedAt = now;
-      const r = spawnSync('git', ['ls-remote', this.remote, `refs/heads/${this.branch}`], { cwd: this.d.repo, encoding: 'utf8' });
+      const r = gitSpawnSync(['ls-remote', this.remote, `refs/heads/${this.branch}`], { cwd: this.d.repo, encoding: 'utf8' });
       const tip = r.status === 0 ? (r.stdout.split(/\s/)[0] ?? '') : '';
       if (tip && tip !== this.defaultTip) {
         if (this.defaultTip) this.prPolled.clear();
@@ -447,7 +454,7 @@ export abstract class MergeFlow extends FixRuns {
     if (!attempt) return;
     if (pr.state === 'merged' && pr.mergeCommit) this.git(this.d.repo, 'fetch', '-q', this.remote, this.branch);
     const commit = (sha: string) => {
-      if (spawnSync('git', ['merge-base', '--is-ancestor', sha, `${this.remote}/${this.branch}`], { cwd: this.d.repo }).status !== 0) return null;
+      if (gitSpawnSync(['merge-base', '--is-ancestor', sha, `${this.remote}/${this.branch}`], { cwd: this.d.repo }).status !== 0) return null;
       const out = this.gitOrNull(this.d.repo, 'log', '-1', '--format=%P%n%B', sha, '--');
       if (out === null) return null;
       const [parents = '', ...message] = out.split('\n');
@@ -547,7 +554,7 @@ export abstract class MergeFlow extends FixRuns {
     const files = this.changeFiles(this.d.repo, base, pr.headSha);
     const labels = (this.events(n).filter((e) => e.type === 'issue.seen').at(-1)?.payload as { labels?: string[] } | undefined)?.labels ?? [];
     const level = computeLevel({ files, labels, moneyPaths: this.moneyPaths(review.money_path_source), scope: lockScopeOf(this.d) }, review);
-    const exists = (p: string) => spawnSync('git', ['cat-file', '-e', `${base}:${p}`], { cwd: this.d.repo }).status === 0;
+    const exists = (p: string) => gitSpawnSync(['cat-file', '-e', `${base}:${p}`], { cwd: this.d.repo }).status === 0;
     const newTopLevel = [...new Set(files.map((f) => f.path.split('/')).filter((s) => s.length > 1).map((s) => s[0]!))].filter((d) => !exists(d)).map((d) => `${d}/`);
     // The verdict on this head, or on the head the harness's merge-ins of the default branch were made on.
     const judged = carriedHead(mergeIns, number, pr.headSha);
@@ -1173,15 +1180,15 @@ export abstract class MergeFlow extends FixRuns {
       this.emit('coordinator.error', { instance: this.d.instance, where: `revert ${name}`, kind: 'error', message: why.slice(0, 500) });
       return { why: why.slice(0, 500) };
     };
-    spawnSync('git', ['worktree', 'remove', '--force', dir], { cwd: this.d.repo });
+    gitSpawnSync(['worktree', 'remove', '--force', dir], { cwd: this.d.repo });
     try {
       this.git(this.d.repo, 'worktree', 'add', '-q', '--detach', dir, tip);
       const parents = this.git(this.d.repo, 'rev-list', '--parents', '-n', '1', sha).split(' ').length - 1;
       // A range: newest first (git revert's order), into one commit (no pre-commit or commit-msg hook, as git revert itself).
       const rv = range
-        ? spawnSync('git', [...as, 'revert', '--no-commit', `${range[0]}^..${range.at(-1)}`], { cwd: dir, encoding: 'utf8' })
-        : spawnSync('git', [...as, 'revert', ...(parents > 1 ? ['-m', '1'] : []), '--no-edit', sha], { cwd: dir, encoding: 'utf8' });
-      const done = rv.status === 0 && range ? spawnSync('git', [...as, 'commit', '-q', '--no-verify', '-m', `${title}\n\nThis reverts commits ${range[0]}^..${range.at(-1)}.`], { cwd: dir, encoding: 'utf8' }) : rv;
+        ? gitSpawnSync([...as, 'revert', '--no-commit', `${range[0]}^..${range.at(-1)}`], { cwd: dir, encoding: 'utf8' })
+        : gitSpawnSync([...as, 'revert', ...(parents > 1 ? ['-m', '1'] : []), '--no-edit', sha], { cwd: dir, encoding: 'utf8' });
+      const done = rv.status === 0 && range ? gitSpawnSync([...as, 'commit', '-q', '--no-verify', '-m', `${title}\n\nThis reverts commits ${range[0]}^..${range.at(-1)}.`], { cwd: dir, encoding: 'utf8' }) : rv;
       if (done.status !== 0) {
         const lines = `${done.stdout ?? ''}\n${done.stderr ?? ''}`.split('\n').map((l) => l.trim()).filter(Boolean);
         const conflicts = lines.filter((l) => l.startsWith('CONFLICT'));
@@ -1194,8 +1201,8 @@ export abstract class MergeFlow extends FixRuns {
       const pr = await this.d.backlog.openPr(branch, this.branch, title, body, { headSha: head });
       return { url: pr.url, number: pr.number };
     } finally {
-      spawnSync('git', ['worktree', 'remove', '--force', dir], { cwd: this.d.repo });
-      spawnSync('git', ['worktree', 'prune'], { cwd: this.d.repo });
+      gitSpawnSync(['worktree', 'remove', '--force', dir], { cwd: this.d.repo });
+      gitSpawnSync(['worktree', 'prune'], { cwd: this.d.repo });
     }
   }
 
@@ -1301,9 +1308,9 @@ export abstract class MergeFlow extends FixRuns {
    */
   private revertRange(sha: string, through: string, commits: number): string[] | null {
     const tip = `${this.remote}/${this.branch}`;
-    if (spawnSync('git', ['merge-base', '--is-ancestor', through, tip], { cwd: this.d.repo }).status !== 0) return null;
+    if (gitSpawnSync(['merge-base', '--is-ancestor', through, tip], { cwd: this.d.repo }).status !== 0) return null;
     // Parents before children whatever the commit dates say, so only the checks below decide.
-    const r = spawnSync('git', ['rev-list', '--topo-order', '--parents', '--reverse', `${sha}^..${through}`], { cwd: this.d.repo, encoding: 'utf8' });
+    const r = gitSpawnSync(['rev-list', '--topo-order', '--parents', '--reverse', `${sha}^..${through}`], { cwd: this.d.repo, encoding: 'utf8' });
     if (r.status !== 0) return null;
     const rows = r.stdout.split('\n').filter(Boolean).map((l) => l.split(' '));
     if (rows.length < 2 || rows.length > Math.min(commits, 250) || rows[0]![0] !== sha || rows.at(-1)![0] !== through) return null;
@@ -1313,7 +1320,7 @@ export abstract class MergeFlow extends FixRuns {
 
   /** Whether `a` is `b` or an ancestor of it, in the clone. */
   private isAncestor(a: string, b: string) {
-    return spawnSync('git', ['merge-base', '--is-ancestor', a, b], { cwd: this.d.repo }).status === 0;
+    return gitSpawnSync(['merge-base', '--is-ancestor', a, b], { cwd: this.d.repo }).status === 0;
   }
 
   /**
@@ -1374,7 +1381,7 @@ export abstract class MergeFlow extends FixRuns {
     } catch {
       who = null;
     }
-    const s = spawnSync('git', ['log', '-1', '--format=%s', sha], { cwd: this.d.repo, encoding: 'utf8' });
+    const s = gitSpawnSync(['log', '-1', '--format=%s', sha], { cwd: this.d.repo, encoding: 'utf8' });
     const subject = redactString(s.status === 0 ? s.stdout.trim() : '').slice(0, 300);
     this.emit('main_watch.direct_push', { sha, url, kind: push.kind, pusher: who?.login ?? null, pusher_from: who?.from ?? null, subject, alert: push.alert });
     await this.directPushOutbound();
@@ -1439,7 +1446,7 @@ export abstract class MergeFlow extends FixRuns {
       } catch {
         // already gone
       }
-      spawnSync('git', ['branch', '-D', `${BRAND.cli}/combined-${n}`], { cwd: this.d.repo });
+      gitSpawnSync(['branch', '-D', `${BRAND.cli}/combined-${n}`], { cwd: this.d.repo });
       this.emit('light_check.finished', { issue: n, number, head: pr.headSha, main_sha: mainSha, overlap, outcome, wait_ms: Math.max(0, Date.now() - t0), detail });
       this.prPolled.delete(number); // decide on the next pass, not after the poll interval
     }

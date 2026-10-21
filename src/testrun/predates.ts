@@ -7,7 +7,7 @@
 // Only then is anything here called a predates; an up-to-date head that lacks a script deleted it itself.
 // Every git question is asked of the coordinator's clone (the head and the default branch are fetched there), and
 // any that can't be answered counts as "no": this never turns a run into a predates on a guess.
-import { spawnSync } from 'node:child_process';
+import { gitSpawnSync } from '../os/git.js';
 import { parse } from 'yaml';
 import { BRAND } from '../brand.js';
 import { defaultBranch } from './workspace.js';
@@ -25,7 +25,7 @@ export interface Predates {
 }
 
 function git(repo: string, ...args: string[]): { ok: boolean; out: string } {
-  const r = spawnSync('git', ['-C', repo, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 60_000, maxBuffer: 16 * 1024 * 1024 });
+  const r = gitSpawnSync(['-C', repo, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 60_000, maxBuffer: 16 * 1024 * 1024 });
   return { ok: r.status === 0, out: r.stdout ?? '' };
 }
 
@@ -71,7 +71,7 @@ export function configBehind(repo: string, sha: string): string | null {
   if (!base) return null;
   const c = configCommit(repo, base.sha);
   if (!c) return null;
-  const r = spawnSync('git', ['-C', repo, 'merge-base', '--is-ancestor', c, sha], { stdio: 'ignore', timeout: 60_000 });
+  const r = gitSpawnSync(['-C', repo, 'merge-base', '--is-ancestor', c, sha], { stdio: 'ignore', timeout: 60_000 });
   // 1: not an ancestor. Anything else (0, or an error) is no evidence of an old head.
   return r.status === 1 ? c : null;
 }

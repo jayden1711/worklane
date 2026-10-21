@@ -4,10 +4,10 @@
 // graded is exactly what was exported. It then writes SWE-bench predictions (one set per label: each needs its own
 // harness run id) into the held-out store, the only place a task key meets its instance id. The official harness
 // grades them in fresh containers from the pristine images, after the whole run.
-import { execFileSync } from 'node:child_process';
 import { lstatSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { gitExecFileSync } from '../../src/os/git.js';
 import { ownerOnlyDir, writeOwnerOnly } from '../../src/os/index.js';
 import type { BenchLayout } from './paths.js';
 import { readManifest, TASK_KEY, writeStore } from './store.js';
@@ -45,8 +45,8 @@ export function exportPatch(o: { layout: BenchLayout; runId: string; key: string
   }
   const bare = mkdtempSync(join(tmpdir(), 'bench-export-'));
   try {
-    execFileSync('git', ['init', '--bare', '-q', '--template=', bare], { env: GIT_ENV(), timeout: 60_000 });
-    const diff = execFileSync('git', [...GIT_HARDENED, '--git-dir', bare, 'diff', '--binary', '--no-color', '--no-ext-diff', '--no-textconv', '--src-prefix=a/', '--dst-prefix=b/', o.base, o.head, '--'], {
+    gitExecFileSync(['init', '--bare', '-q', '--template=', bare], { env: GIT_ENV(), timeout: 60_000 });
+    const diff = gitExecFileSync([...GIT_HARDENED, '--git-dir', bare, 'diff', '--binary', '--no-color', '--no-ext-diff', '--no-textconv', '--src-prefix=a/', '--dst-prefix=b/', o.base, o.head, '--'], {
       env: GIT_ENV({ GIT_ALTERNATE_OBJECT_DIRECTORIES: objects }),
       encoding: 'utf8',
       maxBuffer: 64 * 1024 * 1024,

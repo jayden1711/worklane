@@ -2,7 +2,7 @@
 // baseline) plus any extra nightly tiers (e.g. mutation testing), queued
 // behind the machine-wide full-run lock, the project's idle probe and the
 // load gate, so they never overlap another full run.
-import { execFileSync } from 'node:child_process';
+import { gitExecFileSync } from './os/git.js';
 import { fileURLToPath } from 'node:url';
 import { BRAND } from './brand.js';
 import type { Config } from './config/load.js';
@@ -17,8 +17,8 @@ export function queueBaselineRun(root: string, cfg: Config, eventsDb: string, ac
   const fmt = cfg.tests.failures;
   if (!fmt) throw new Error('tests.yaml needs a failures: { section, item } format to record a baseline');
   const branch = cfg.project.project.default_branch;
-  execFileSync('git', ['fetch', '-q', 'origin', branch], { cwd: root });
-  const sha = execFileSync('git', ['rev-parse', `origin/${branch}`], { cwd: root, encoding: 'utf8' }).trim();
+  gitExecFileSync(['fetch', '-q', 'origin', branch], { cwd: root });
+  const sha = gitExecFileSync(['rev-parse', `origin/${branch}`], { cwd: root, encoding: 'utf8' }).trim();
   const state = projectStateDir(root);
   const name = `baseline-${sha.slice(0, 8)}`;
   const wt = { repo: root, root: cfg.tests.worktree.root, stateDir: state, setup: cfg.tests.worktree.setup, ...(runAs ? { runAs } : {}) };

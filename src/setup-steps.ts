@@ -4,7 +4,7 @@
 // and it checks them with these detectors), `doctor` (one line per step) and the dashboard's first-run page
 // (GET /api/first-run). A detector only looks: it runs read-only commands (`claude auth status`, `gh auth status`,
 // `git rev-parse`, the service manager's status) and reads files; it never changes anything.
-import { spawnSync } from 'node:child_process';
+import { commandSpawnSync } from './os/git.js';
 import { Worker } from 'node:worker_threads';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -96,7 +96,8 @@ export function systemProbe(o: { managerEnv?: ManagerEnv } = {}): SetupProbe {
   return {
     which: (cmd) => findTool(cmd),
     run: (cmd, args, o = {}) => {
-      const r = spawnSync(cmd, args, { encoding: 'utf8', timeout: 30_000, env: probeEnv(o), ...(o.cwd ? { cwd: o.cwd } : {}) });
+      // A caller's git (the command named git) through the git runner (#807).
+      const r = commandSpawnSync(cmd, args, { encoding: 'utf8', timeout: 30_000, env: probeEnv(o), ...(o.cwd ? { cwd: o.cwd } : {}) });
       return { status: r.error ? null : r.status, stdout: r.stdout ?? '', stderr: r.error ? r.error.message : (r.stderr ?? '') };
     },
     serviceRunning,
