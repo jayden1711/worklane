@@ -369,7 +369,13 @@ do_machine_helper() {
   return "$rc"
 }
 detail_machine_helper() { echo "the machine helper lists $(helper_names 2>/dev/null | one_line)"; }
-alone_machine_helper() { echo "sudo bash $here/machine-helper.sh $(helper_names 2>/dev/null | one_line)"; }
+# The step alone, as the step runs it (#902 round 7, F2): with --may-add=, naming only the instance being created, if
+# any, so a later paste is checked against the rule as it is then and never adds a user root took out.
+alone_machine_helper() {
+  local may=""
+  if new_instance_marked "$name"; then may="$name"; fi
+  echo "sudo bash $here/machine-helper.sh --may-add=$may $(helper_names 2>/dev/null | one_line)"
+}
 
 state_of() { echo "$(home_of "wl-$1")/.local/state/worklane/instances/$1/state"; }
 dash_names() {

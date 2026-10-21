@@ -347,7 +347,7 @@ if helper_instances | grep -qx "$name"; then
     bash "$here/machine-helper.sh" --may-add= $helper_now
   else
     # Under the lock every writer of the rule takes (#902 round 6).
-    if command -v flock >/dev/null 2>&1; then exec 8> "$MACHINE_SUDOERS_LOCK"; flock -w 120 8 || { echo "another run is writing $MACHINE_SUDOERS; run this again once it is done" >&2; exit 1; }; fi
+    machine_sudoers_lock
     remove_sudoers worklane-machine
     # The helper stays installed, so the next add-project puts a rule back only with root's --replace-sudoers (#902
     # round 5: a rule taken away is never put back on its own).

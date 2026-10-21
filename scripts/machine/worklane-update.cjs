@@ -2300,8 +2300,18 @@ function machineSudoersCheck(engineDir, exec = execFileSync, owner = 0, top = '/
   if (m[1] === 'absent' || m[1] === 'current') return { state: m[1], detail: line.slice(0, 600) };
   // The command the check named, through the engine path it was given (the current link), not the resolved one.
   const logical = (t) => t.split(`${real}/`).join(`${engineDir.replace(/\/+$/, '')}/`);
-  const fix = /: (sudo (?:bash|rm -f) \S.*)$/.exec(line);
   const diff = lines.filter((l) => /^[+-]/.test(l) && !/^(\+\+\+|---) /.test(l));
+  // INVARIANT (#902 round 7, F3): a pinned --replace-sudoers command is never shown beside a diff cut to fit. For
+  // wider, the incident says how many lines the engine's rule adds and drops, and its fix is `--check` at a root shell,
+  // which prints the whole diff and the pinned command together.
+  if (m[1] === 'wider') {
+    const added = diff.filter((l) => l.startsWith('+')).length;
+    const dropped = diff.length - added;
+    const fix = `sudo bash ${engineDir.replace(/\/+$/, '')}/scripts/setup/machine-helper.sh --check`;
+    const detail = `wider: the engine's rule grants what the installed machine helper rule doesn't (${added} line${added === 1 ? '' : 's'} added, ${dropped} dropped); run the fix at a root shell for the whole diff and the command, pinned to it, that installs it`;
+    return { state: 'wider', detail: detail.slice(0, 600), fix: fix.slice(0, 300) };
+  }
+  const fix = /: (sudo (?:bash|rm -f) \S.*)$/.exec(line);
   const detail = logical(`${line}${diff.length ? ` The diff: ${diff.join(' | ')}` : ''}`);
   return { state: m[1], detail: detail.slice(0, 600), ...(fix ? { fix: logical(fix[1]).slice(0, 300) } : {}) };
 }

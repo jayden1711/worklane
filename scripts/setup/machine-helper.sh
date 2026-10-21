@@ -102,7 +102,7 @@ if [ "${1:-}" = --check ]; then
   fi
   sudoers_unified_diff "$MACHINE_SUDOERS" "$rule"
   if sudoers_only_narrows "$MACHINE_SUDOERS" "$rule"; then
-    echo "stale: $MACHINE_SUDOERS is not what machine-helper.sh writes for ${names[*]}, and rewriting it only drops grants (an older engine's, or an edit); rewrite it, as root: sudo bash $here/machine-helper.sh ${names[*]}"
+    echo "stale: $MACHINE_SUDOERS is not what machine-helper.sh writes for ${names[*]}, and rewriting it only drops grants (an older engine's, or an edit); rewrite it, as root: sudo bash $here/machine-helper.sh --may-add= ${names[*]}"
     exit 3
   fi
   echo "wider: rerun as root with --replace-sudoers to install the engine's rule: sudo bash $here/machine-helper.sh --replace-sudoers=$(sudoers_pin "$rule") ${names[*]}"
@@ -131,15 +131,15 @@ for name in "$@"; do
   users+=("wl-$name")
 done
 [ -n "$may_set" ] || may=("${users[@]}")
-# One writer of the rule at a time, from this check to its write (#902 round 6): every writer takes this lock
-# (lib.sh MACHINE_SUDOERS_LOCK).
-if command -v flock >/dev/null 2>&1; then
-  exec 8> "$MACHINE_SUDOERS_LOCK"
-  flock -w 120 8 || { echo "another run is writing $MACHINE_SUDOERS; run this again once it is done" >&2; exit 1; }
-fi
+# One writer of the rule at a time, from this check to its write (#902 rounds 6, 7): every writer takes this lock,
+# which only root can open, and none writes without it (lib.sh machine_sudoers_lock).
+machine_sudoers_lock
 # Before anything changes: a rule that would grant more than the installed one waits for --replace-sudoers (#898).
 rule="$(machine_sudoers "${users[@]}")"
 seen="$(sudoers_state "$MACHINE_SUDOERS")"
+# A first install, read now: this run installs the helper before it writes the rule (#902 round 7, CI).
+first=0
+if [ "$seen" = absent ] && machine_helper_never_set_up; then first=1; fi
 rerun="sudo bash $here/machine-helper.sh --replace-sudoers=$(sudoers_pin "$rule") $*"
 if [ -z "$pin" ] && ! sudoers_only_narrows "$MACHINE_SUDOERS" "$rule" ${may[@]+"${may[@]}"}; then
   sudoers_unified_diff "$MACHINE_SUDOERS" "$rule"
@@ -187,11 +187,12 @@ chmod 0644 /etc/worklane/slots.json
 cat /etc/worklane/slots.json
 
 say "sudoers: ${users[*]} may run exactly the helper's 36 commands (claude-account status, and set-policy auto_merge off, land_mode pr and main_watch auto among them), add-project <name> <owner/repo>, stage-update-signer or discard-update-signer <principal> ssh-ed25519 <public key>, the plugin steps and set-policy <key> <value> (its own instance only)"
-# The one check, again, at write time (#902 round 6), under the lock: the rule must still be what the check above
+# The one check, again, at write time (#902 rounds 6, 7), under the lock: the rule must still be what the check above
 # read, and the rule written must still only narrow it, or carry root's pin. It runs here and once more inside
-# install_sudoers, right before its move (SUDOERS_PRECOMMIT), after visudo. Otherwise nothing is written (exit 3).
-machine_sudoers_commit_ok "$seen" "$pin" "$rule" ${may[@]+"${may[@]}"} || exit 3
-machine_helper_precommit() { machine_sudoers_commit_ok "$seen" "$pin" "$rule" ${may[@]+"${may[@]}"}; }
+# install_sudoers, right before its move (SUDOERS_PRECOMMIT), after visudo, where the temp file must also hold byte
+# for byte the rule checked. Otherwise nothing is written (exit 3).
+machine_sudoers_commit_ok "$seen" "$pin" "$rule" "$first" ${may[@]+"${may[@]}"} || exit 3
+machine_helper_precommit() { machine_sudoers_precommit "$1" "$seen" "$pin" "$rule" "$first" ${may[@]+"${may[@]}"}; }
 SUDOERS_PRECOMMIT=machine_helper_precommit
 install_sudoers worklane-machine "$(machine_sudoers "${users[@]}")"
 SUDOERS_PRECOMMIT=""

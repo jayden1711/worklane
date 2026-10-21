@@ -112,7 +112,7 @@ test('#898: machine-helper.sh --check says absent, current, stale (no flag) or w
   r = m.check();
   assert.equal(r.status, 3);
   assert.ok(r.stdout.includes(`\n-    ${m.T}/helper claude-account switch, \\\n`), r.stdout);
-  assert.ok(r.stdout.trimEnd().endsWith(`rewrite it, as root: sudo bash ${m.real}/machine-helper.sh alpha old`), r.stdout);
+  assert.ok(r.stdout.trimEnd().endsWith(`rewrite it, as root: sudo bash ${m.real}/machine-helper.sh --may-add= alpha old`), r.stdout);
 
   // A hand-added line outside that shape: wider (#902 round 3, fail closed), the command with the flag.
   m.setSudoers(`${m.expected('alpha', 'old')}wl-alpha ALL=(root) NOPASSWD: ALL\n`);
@@ -156,12 +156,15 @@ test('#898: the updater reads machine-helper.sh --check of the installed engine:
   m.setSudoers(olderRule(m.expected('alpha', 'old')));
   const wider = check()!;
   assert.equal(wider.state, 'wider');
-  assert.equal(wider.fix, `sudo bash ${engine}/scripts/setup/machine-helper.sh --replace-sudoers=${m.pin('alpha', 'old')} alpha old`);
-  assert.match(wider.detail, /^wider: rerun as root with --replace-sudoers to install the engine's rule: .* The diff: \+/);
+  // #902 round 7 (F3): for wider, the fix is --check at a root shell (the whole diff and its pinned command together),
+  // and the detail carries no pinned command beside a cut diff.
+  assert.equal(wider.fix, `sudo bash ${engine}/scripts/setup/machine-helper.sh --check`);
+  assert.match(wider.detail, /^wider: the engine's rule grants what the installed machine helper rule doesn't \(1 line added, 0 dropped\)/);
+  assert.doesNotMatch(wider.detail, /--replace-sudoers=/);
   m.setSudoers(withCommand(m.expected('alpha', 'old'), `${m.T}/helper claude-account switch`));
   const stale = check()!;
   assert.equal(stale.state, 'stale');
-  assert.equal(stale.fix, `sudo bash ${engine}/scripts/setup/machine-helper.sh alpha old`);
+  assert.equal(stale.fix, `sudo bash ${engine}/scripts/setup/machine-helper.sh --may-add= alpha old`);
   assert.match(stale.detail, /The diff: -\s+\S+\/helper claude-account switch, \\/);
   m.setSudoers(m.expected('alpha', 'old'));
   assert.equal(check()!.state, 'current');
@@ -205,7 +208,7 @@ test('#898: the updater reads machine-helper.sh --check of the installed engine:
   m.setSudoers(olderRule(m.expected('alpha', 'old')));
   const viaLink = check(join(m.T, 'current'))!;
   assert.equal(viaLink.state, 'wider');
-  assert.equal(viaLink.fix, `sudo bash ${join(m.T, 'current')}/scripts/setup/machine-helper.sh --replace-sudoers=${m.pin('alpha', 'old')} alpha old`);
+  assert.equal(viaLink.fix, `sudo bash ${join(m.T, 'current')}/scripts/setup/machine-helper.sh --check`);
   assert.equal(m.hostCalls(), '');
 });
 

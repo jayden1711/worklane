@@ -71,7 +71,7 @@ install_claude_token() {
   echo "install_claude_token $1" >> "$T/calls"
 }
 SRV_ROOT="$T/srv" ENGINE_CLI="$T/bin/worklane" MACHINE_HELPER="$T/helper" MACHINE_SUDOERS="$T/sudoers-machine" HUB_UNIT="$T/hub.service" ADD_PROJECT_LOCK="$T/lock"
-ADD_PROJECT_NEW="$T/add-project-new" ADD_PROJECT_NEW_UID=${process.getuid?.() ?? 0} HELPER_RULES="$T/helper-rules.json" MACHINE_SUDOERS_LOCK="$T/sudoers-lock"
+ADD_PROJECT_NEW="$T/add-project-new" ADD_PROJECT_NEW_UID=${process.getuid?.() ?? 0} HELPER_RULES="$T/helper-rules.json" MACHINE_SUDOERS_LOCK="$T/locks/sudoers.lock" MACHINE_SUDOERS_LOCK_UID=${process.getuid?.() ?? 0}
 SETUP_POLL_SECONDS=0 SETUP_WAIT_SECONDS="$(cat "$T/wait-seconds" 2>/dev/null || true)"
 `,
   );

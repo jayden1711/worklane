@@ -85,30 +85,31 @@ test('#902 round 6 B1: right before its write, machine-helper.sh refuses if the 
   m.setSudoers(m.expected('alpha', 'old'));
   const run = (script: string) => spawnSync('bash', ['-c', `source "$1"; ${script}`, '_', join(m.s, 'lib.sh')], { encoding: 'utf8', env: m.env });
   // Unchanged since the check: the write goes ahead.
-  const same = run('seen="$(sudoers_state "$MACHINE_SUDOERS")"; machine_sudoers_commit_ok "$seen" "" "$(machine_sudoers wl-alpha wl-old)"; echo "rc=$?"');
+  const same = run('seen="$(sudoers_state "$MACHINE_SUDOERS")"; machine_sudoers_commit_ok "$seen" "" "$(machine_sudoers wl-alpha wl-old)" 0; echo "rc=$?"');
   assert.match(same.stdout, /rc=0$/m, same.stdout + same.stderr);
   // Root's concurrent change between the check and the write (wl-alpha taken out): refused, exit 3, nothing written.
   appendFileSync(join(m.T, 'roots-rule'), m.expected('old'));
-  const changed = run('seen="$(sudoers_state "$MACHINE_SUDOERS")"; cat "$T/roots-rule" > "$MACHINE_SUDOERS"; rc=0; machine_sudoers_commit_ok "$seen" "" "$(machine_sudoers wl-alpha wl-old)" || rc=$?; echo "rc=$rc"');
+  const changed = run('seen="$(sudoers_state "$MACHINE_SUDOERS")"; cat "$T/roots-rule" > "$MACHINE_SUDOERS"; rc=0; machine_sudoers_commit_ok "$seen" "" "$(machine_sudoers wl-alpha wl-old)" 0 || rc=$?; echo "rc=$rc"');
   assert.match(changed.stdout, /rc=3$/m, changed.stdout + changed.stderr);
   assert.match(changed.stdout, /changed while this ran; nothing written/);
   assert.equal(m.sudoers(), m.expected('old'));
   // Root deletes the rule after the early check and before the write: refused too, and the rule stays away.
   m.setSudoers(m.expected('alpha', 'old'));
-  const deleted = run('seen="$(sudoers_state "$MACHINE_SUDOERS")"; rm -f "$MACHINE_SUDOERS"; rc=0; machine_sudoers_commit_ok "$seen" "" "$(machine_sudoers wl-alpha wl-old)" || rc=$?; echo "rc=$rc"');
+  const deleted = run('seen="$(sudoers_state "$MACHINE_SUDOERS")"; rm -f "$MACHINE_SUDOERS"; rc=0; machine_sudoers_commit_ok "$seen" "" "$(machine_sudoers wl-alpha wl-old)" 0 || rc=$?; echo "rc=$rc"');
   assert.match(deleted.stdout, /rc=3$/m, deleted.stdout + deleted.stderr);
   assert.ok(!existsSync(join(m.T, 'sudoers-machine')), 'not put back');
   // And machine-helper.sh writes only through that check: right before install_sudoers, and again inside it, after
   // visudo and right before its move (SUDOERS_PRECOMMIT); a failing check removes the temp file and moves nothing.
   const sh = readFileSync(join(repoRoot, 'scripts', 'setup', 'machine-helper.sh'), 'utf8');
-  assert.match(sh, /\nmachine_sudoers_commit_ok "\$seen" "\$pin" "\$rule" \$\{may\[@\]\+"\$\{may\[@\]\}"\} \|\| exit 3\nmachine_helper_precommit\(\) \{ machine_sudoers_commit_ok "\$seen" "\$pin" "\$rule" \$\{may\[@\]\+"\$\{may\[@\]\}"\}; \}\nSUDOERS_PRECOMMIT=machine_helper_precommit\ninstall_sudoers worklane-machine /);
+  assert.match(sh, /\nmachine_sudoers_commit_ok "\$seen" "\$pin" "\$rule" "\$first" \$\{may\[@\]\+"\$\{may\[@\]\}"\} \|\| exit 3\nmachine_helper_precommit\(\) \{ machine_sudoers_precommit "\$1" "\$seen" "\$pin" "\$rule" "\$first" \$\{may\[@\]\+"\$\{may\[@\]\}"\}; \}\nSUDOERS_PRECOMMIT=machine_helper_precommit\ninstall_sudoers worklane-machine /);
   const lib = readFileSync(join(repoRoot, 'scripts', 'setup', 'lib.sh'), 'utf8');
   const install = lib.slice(lib.indexOf('install_sudoers() {'), lib.indexOf('\n}\n', lib.indexOf('install_sudoers() {')));
   assert.ok(install.indexOf('visudo -cf') < install.indexOf('"$SUDOERS_PRECOMMIT"') && install.indexOf('"$SUDOERS_PRECOMMIT"') < install.indexOf('mv -f'), install);
-  assert.match(install, /! "\$SUDOERS_PRECOMMIT"; then rm -f "\$tmp";[^\n]*exit 3; fi/);
+  assert.match(install, /! "\$SUDOERS_PRECOMMIT" "\$tmp"; then rm -f "\$tmp";[^\n]*exit 3; fi/);
   assert.match(lib, /^SUDOERS_PRECOMMIT=""$/m, 'set empty by lib.sh itself: never from the environment');
   // The lock every writer takes: machine-helper.sh and instance-remove.sh's removal.
-  assert.match(sh, /flock -w 120 8/);
-  assert.match(readFileSync(join(repoRoot, 'scripts', 'setup', 'instance-remove.sh'), 'utf8'), /MACHINE_SUDOERS_LOCK"; flock -w 120 8[^\n]*\n\s*remove_sudoers worklane-machine/);
+  assert.match(sh, /\nmachine_sudoers_lock\n/);
+  assert.match(lib, /\n {2}flock -w 120 8 \|\|/);
+  assert.match(readFileSync(join(repoRoot, 'scripts', 'setup', 'instance-remove.sh'), 'utf8'), /\n\s*machine_sudoers_lock\n\s*remove_sudoers worklane-machine/);
   assert.equal(m.hostCalls(), '');
 });
