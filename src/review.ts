@@ -314,6 +314,17 @@ export function hidesSubmodules(f: Pick<ChangeFile, 'submoduleIgnores'>): boolea
 }
 
 /**
+ * The harness's config in a repo: the config folder (tests.yaml says what a project command runs and with what
+ * environment, review.yaml these levels), Claude Code's project settings and CLAUDE.md. Locked (#798, in
+ * LOCKED_CATEGORIES below): before, it was L3 only because the default review.yaml listed it, so a repo's review.yaml
+ * could drop it from L3 or redefine its globs to nothing. Now always L3 and never auto-merged; its globs always hold,
+ * and a repo may only add to them.
+ */
+export const HARNESS_CONFIG = 'harness-config';
+// check-table: never-shrink
+const HARNESS_CONFIG_GLOBS =[`${BRAND.configDir}/**`, '.claude/**', 'CLAUDE.md'];
+
+/**
  * The harness changing its own controls: the merge policy, the main watch and the push guard, the updater, the review
  * levels and guardrails, the machine's setup scripts, the engine's container image, deployment files and CI workflows, sign-in and
  * credentials, who may approve, the evaluator and the agent runner, the sandbox, the push gate, denylist and secret scan,
@@ -433,6 +444,7 @@ export const SELF_MODIFICATION_PARTS: { what: string; globs: string[] }[] = [
 export const LOCKED_CATEGORIES: Record<string, string[]> = {
   [AGENT_INSTRUCTIONS]: [`${BRAND.configDir}/roles/**`, `${BRAND.configDir}/skills/**`, 'AGENTS.md', '**/CLAUDE.md'],
   [SELF_MODIFICATION]: SELF_MODIFICATION_PARTS.flatMap((p) => p.globs),
+  [HARNESS_CONFIG]: HARNESS_CONFIG_GLOBS,
 };
 
 /**
@@ -472,7 +484,7 @@ export function lockedCategories(scope: LockScope | undefined): Record<string, s
 
 /** Locked categories that are always L3, whatever review.yaml's levels list. */
 // check-table: never-shrink
-const ALWAYS_L3 = [SELF_MODIFICATION];
+const ALWAYS_L3 = [SELF_MODIFICATION, HARNESS_CONFIG];
 
 /** What a change to this path changes, in plain words (the self-modification part it falls in, in this scope), or null. */
 export function selfModificationPart(path: string, scope?: LockScope): string | null {
@@ -491,7 +503,7 @@ export const DEFAULT_CATEGORIES: Record<string, string[]> = {
     '**/Cargo.toml', '**/Cargo.lock', '**/go.mod', '**/go.sum', '**/Gemfile', '**/Gemfile.lock',
   ],
   'ci-config': ['.github/**', '.gitlab-ci.yml', '.circleci/**'],
-  'harness-config': [`${BRAND.configDir}/**`, '.claude/**', 'CLAUDE.md'],
+  [HARNESS_CONFIG]: HARNESS_CONFIG_GLOBS,
   'guardrail-config': [`${BRAND.configDir}/guardrails.yaml`],
   migration: ['**/migrations/**', '**/*.sql', 'prisma/schema.prisma'],
   'deploy-config': ['.github/workflows/**', 'railway.json', 'railway.toml', 'deploy/**', 'Dockerfile', 'fly.toml', 'render.yaml'],
@@ -575,7 +587,10 @@ export function loadMoneyPaths(repo: string, src: ReviewConfig['money_path_sourc
 }
 
 export function computeLevel(input: LevelInput, cfg: ReviewConfig, extraCategories: Record<string, string[]> = {}): LevelResult {
-  const defs = { ...DEFAULT_CATEGORIES, ...cfg.categories, ...extraCategories, ...lockedCategories(input.scope) };
+  const own = { ...DEFAULT_CATEGORIES, ...cfg.categories, ...extraCategories };
+  const locked = lockedCategories(input.scope);
+  // harness-config's built-in globs always hold, beside whatever a repo adds to it (#798): never fewer.
+  const defs = { ...own, ...locked, [HARNESS_CONFIG]: [...new Set([...(locked[HARNESS_CONFIG] ?? HARNESS_CONFIG_GLOBS), ...(own[HARNESS_CONFIG] ?? [])])] };
   const res = Object.fromEntries(Object.entries(defs).map(([k, globs]) => [k, globs.map((g) => globToRegExp(g))]));
   const categories: Record<string, string[]> = {};
   const add = (cat: string, path: string) => (categories[cat] ??= []).push(path);

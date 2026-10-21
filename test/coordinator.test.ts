@@ -2665,8 +2665,11 @@ test('auto-merge: main green after it is recorded and nothing stops', { skip }, 
 
 // ---- instruction evals
 
-/** The eval reasons alone: an instructions change also always waits as high-risk (agent-instructions). */
-const evalOnly = (reasons: string[]) => reasons.filter((r) => !r.startsWith('high-risk: agent-instructions'));
+/**
+ * The eval reasons alone: an instructions change also always waits as high-risk (agent-instructions), and one in the
+ * config folder as harness-config too (#798).
+ */
+const evalOnly = (reasons: string[]) => reasons.filter((r) => !r.startsWith('high-risk: agent-instructions') && !r.startsWith('high-risk: harness-config'));
 
 const AGENTS_CASES = '## 1. Ledger alert\n**Situation**\n- An alert fires on the ledger.\n\n**Correct**\n- Reads the alert row first.\n\n**Wrong**\n- Edits the ledger by hand.\n';
 
@@ -2691,7 +2694,8 @@ async function instructionsPr(o: { base: string | null; head: string; cases?: bo
   f.cfg.project.required_checks = ['ci'];
   if (o.enabled === false) f.cfg.agents.instruction_evals.enabled = false;
   if (o.cap) f.cfg.agents.instruction_evals.cap_usd = o.cap;
-  // A project that lets its role prompts change through tasks (the example protects its whole config folder).
+  // A project that lets its role prompts change through tasks (the example protects its whole config folder). It also
+  // drops harness-config from L3, which since #798 changes nothing: the config folder is always L3 (asked below).
   if (file.startsWith(BRAND.configDir)) {
     f.cfg.guardrails.protected_paths = f.cfg.guardrails.protected_paths.filter((g) => !g.startsWith(BRAND.configDir));
     if (f.cfg.review) f.cfg.review.levels.L3_human.when = f.cfg.review.levels.L3_human.when.filter((c) => c !== 'harness-config');
@@ -2730,6 +2734,15 @@ async function instructionsPr(o: { base: string | null; head: string; cases?: bo
   await c.tick();
   await c.idle();
   await c.tick();
+  // A change in the config folder is harness-config, always L3 (#798): the owner is asked before its PR opens, and
+  // approves it there; the merge itself still waits (the agents' instructions never auto-merge).
+  if (file.startsWith(BRAND.configDir)) {
+    assert.equal((lastOf(f.log, 'review.level_set') as { level: string }).level, 'L3', 'the config folder is always L3');
+    assert.equal(f.log.read(0, ['pr.opened']).length, 0, 'no PR before the owner approves');
+    f.backlog.humanComment(n, 'example-owner', `/${BRAND.cli} approve`);
+    await c.tick(); // records the answer and queues landing
+    await c.tick(); // opens the PR
+  }
   const opened = lastOf(f.log, 'pr.opened') as { number: number; head: string };
   f.backlog.setChecks(opened.head, passing);
   await c.tick();
@@ -2781,7 +2794,7 @@ test("instruction evals: no drop, no eval reason; the change still waits, becaus
   const t = await instructionsPr({ base: 'Read before you act.\n', head: 'Read the alert, then act.\n' });
   assert.equal((lastOf(t.f.log, 'instructions.eval') as { dropped: boolean }).dropped, false);
   assert.equal(t.decided.auto, false);
-  assert.deepEqual(t.decided.reasons, [`high-risk: agent-instructions (${SKILL_FILE})`]);
+  assert.deepEqual(t.decided.reasons, [`high-risk: agent-instructions (${SKILL_FILE})`, `high-risk: harness-config (${SKILL_FILE})`]);
   assert.ok(!t.pr.merged);
 });
 
