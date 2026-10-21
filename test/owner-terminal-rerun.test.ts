@@ -373,6 +373,7 @@ test('a new sign-in App (app-manifest --signin): the rerun keeps the hub\'s sett
  * what follows "dashboards.sh" on a line (up to the next one) when it gives both --client-id and --public-url; it must
  * name [--siri, [--hooks and --machine-devices. Only these may not, each shown only when there is no hub yet.
  */
+// check-table: never-grow
 const FIRST_TIME_ONLY: { file: string; has: string; why: string }[] = [
   { file: 'scripts/setup/tailscale.sh', has: 'no dashboard hub on this machine yet', why: 'behind [ -f "$HUB_UNIT" ] ||: only with no hub unit' },
   { file: 'src/hub-setup.ts', has: 'By hand instead: make the App on GitHub', why: "the setup-mode page: dashboards.sh --setup is refused once the sign-in App's client secret exists, and no hub unit is written without it" },
