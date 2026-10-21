@@ -1030,9 +1030,11 @@ test('a later change that narrows one of these rules waits for the owner: this f
 const MAY_IMPORT = new Set(['node:test', 'node:assert/strict', 'node:fs', 'node:os', 'node:path', 'node:url', 'yaml', 'typescript', '../src/merge-policy-weakening.js']);
 
 /**
- * The packages this backstop, its preload and their modules load, each pinned to its lockfile integrity (round 19).
- * A swapped tarball, an `npm:` alias or a `file:` spec changes the lockfile entry; a bump changes it too, so a bump of
- * either needs this line changed, which waits for the owner.
+ * The packages this backstop, its preload and their modules load, each with its lockfile entry pinned to this
+ * integrity (round 19). npm ci checks the installed tarball against the lockfile; the installed bytes themselves are
+ * not read here, which is why ci.yml runs this backstop before any package script or unheld file (round 20). A
+ * swapped tarball, an `npm:` alias or a `file:` spec changes the lockfile entry; so does any bump (Dependabot,
+ * `npm update`), which then turns this test red until the owner changes this line.
  */
 // check-table: never-shrink
 const PINNED_PACKAGES: Record<string, string> = { yaml: 'sha512-3NxN8+78OdzbT7C/WjGsyfPAtJaN3FNDsWxv7Y7mcDsT/oOmgW8BpyQQFFBnvZE3j9Y2Sdz1ULFLezL7Eb2yFw==', typescript: 'sha512-jl1vZzPDinLr9eUt3J/t7V6FgNEw9QjvBPdysz9KfQDD41fQrC2Y4vKQdiaUpFT4bXlb1RHhLpp8wtm6M5TgSw==' };
@@ -1042,12 +1044,45 @@ const PINNED_PACKAGES: Record<string, string> = { yaml: 'sha512-3NxN8+78OdzbT7C/
 const LOADER_WORDS = ['getBuiltin' + 'Module', 'create' + 'Require'];
 
 /**
- * Why a file's text may load a module outside MAY_IMPORT (round 19): every module TypeScript's own reader finds
- * (static imports and exports in any spelling or spacing, dynamic imports, requires), a dynamic import or require it
- * may not see, and text that loads a module by name at run time. Strings and comments are not imports.
+ * The modules a TS or JS text names, from a full parse (round 20; round 19's ts.preProcessFile is a scanner, and a
+ * regex literal holding a quote, a backtick or `/*` made it skip the import after it): import and export
+ * declarations, TypeScript's import-equals require, dynamic import and require calls, and import types. `computed` counts a
+ * dynamic import or require whose name isn't a literal. What a parse can't see: code built from parts at run time
+ * (`new Function`, a computed `eval`), the pure-addition class of #992.
+ */
+function importsIn(text: string, kind: ts.ScriptKind): { names: string[]; computed: number } {
+  const file = ts.createSourceFile(kind === ts.ScriptKind.JS ? 'x.js' : 'x.ts', text, ts.ScriptTarget.Latest, false, kind);
+  const names: string[] = [];
+  let computed = 0;
+  const literal = (e: ts.Node | undefined) => (e && (ts.isStringLiteral(e) || ts.isNoSubstitutionTemplateLiteral(e)) ? e.text : null);
+  const named = (e: ts.Node | undefined) => {
+    const n = literal(e);
+    if (n === null) computed++;
+    else names.push(n);
+  };
+  const walk = (n: ts.Node): void => {
+    if (ts.isImportDeclaration(n) || ts.isExportDeclaration(n)) {
+      if (n.moduleSpecifier) named(n.moduleSpecifier);
+    } else if (ts.isImportEqualsDeclaration(n) && ts.isExternalModuleReference(n.moduleReference)) named(n.moduleReference.expression);
+    else if (ts.isCallExpression(n) && (n.expression.kind === ts.SyntaxKind.ImportKeyword || (ts.isIdentifier(n.expression) && n.expression.text === 'require'))) named(n.arguments[0]);
+    else if (ts.isImportTypeNode(n) && ts.isLiteralTypeNode(n.argument)) named(n.argument.literal);
+    ts.forEachChild(n, walk);
+  };
+  walk(file);
+  return { names, computed };
+}
+
+/**
+ * Why a file's text may load a module outside MAY_IMPORT (rounds 19 and 20): every module a full parse finds, a
+ * dynamic import or require by a computed name, round 18's line-start readers and its dynamic-import and require text
+ * check (kept beside the parse), and text that loads a module by name at run time. Strings and comments are not
+ * imports.
  */
 function importProblems(text: string): string[] {
-  const out = ts.preProcessFile(text, true, true).importedFiles.map((f) => f.fileName).filter((s) => !MAY_IMPORT.has(s)).map((s) => `imports ${s}`);
+  const { names, computed } = importsIn(text, ts.ScriptKind.TS);
+  const r18 = [...text.matchAll(/^(?:import|export)\s[^'"]*?\sfrom\s+['"]([^'"]+)['"]/gm), ...text.matchAll(/^import\s+['"]([^'"]+)['"]/gm)].map((m) => m[1]!);
+  const out = [...new Set([...names, ...r18])].filter((s) => !MAY_IMPORT.has(s)).map((s) => `imports ${s}`);
+  if (computed > 0) out.push('a dynamic import or require by a computed name');
   if (/\bimport\s*\(|\brequire\s*\(/.test(text)) out.push('a dynamic import or require');
   for (const w of LOADER_WORDS) if (text.includes(w)) out.push(`the text ${w}`);
   return out;
@@ -1067,6 +1102,10 @@ const IMPORT_FORM_FIXTURES: [string, string][] = [
   ['export * with no space', "export*from'./helpers.js';"],
   ['a comment between a dynamic import and its paren',"await import/**/('./helpers.js');"],
   ['a built-in loader by name', 'const m = process.' + 'getBuiltin' + "Module('node:module');"],
+  // Round 20 (#746 final check of 7b420051): a regex literal that made round 19's scanner skip the import after it.
+  ['a regex literal holding a quote, then an import', "const q1 = /'/; import './helpers.js';"],
+  ['a regex literal holding a backtick, then an import', "const q2 = /`/;\nimport './helpers.js';"],
+  ['a regex literal holding a comment opener, then an import', "const q3 = /a\\/*/;\nimport './helpers.js';"],
 ];
 
 /** The #783/#869 hold for a change to the files in `edits` (path to [text before, text after]), lines as a diff gives them. */
@@ -1088,10 +1127,10 @@ function holdOf(edits: Record<string, [string, string]>): string[] {
   return weakeningReasons({ files, deleted: new Set(), before: (p) => edits[p]?.[0] ?? null, after: (p) => edits[p]?.[1] ?? null, scope: undefined });
 }
 
-test('this backstop imports only MAY_IMPORT, in any spelling, and finds the repo itself (rounds 18 and 19)', () => {
+test('this backstop imports only MAY_IMPORT, in every spelling a parse can see, and finds the repo itself (rounds 18 to 20)', () => {
   const P = 'test/desktop-removed.test.ts';
   const text = readFileSync(join(repoRoot, P), 'utf8');
-  const from = ts.preProcessFile(text, true, true).importedFiles.map((f) => f.fileName);
+  const from = importsIn(text, ts.ScriptKind.TS).names;
   assert.ok(from.includes('yaml') && from.includes('node:test') && from.includes('typescript'), `the import list was read: ${JSON.stringify(from)}`);
   assert.deepEqual(importProblems(text), [], 'no module outside MAY_IMPORT: no local helper outside the hold');
   const anchor = "import { LINT_MARK, registrationsOf, weakeningReasons } from '../src/merge-policy-weakening.js';\n";
@@ -1115,29 +1154,37 @@ test('this backstop imports only MAY_IMPORT, in any spelling, and finds the repo
 
 /**
  * The built modules that run in this backstop's process, from its preload (test/isolate.ts) and itself: each local
- * module as its source path, and each package it names. Read with TypeScript's own import reader, so every spelling
- * counts; a module with no source fails the caller.
+ * module as its source path, each package it names, and how many dynamic imports or requires by a computed name they
+ * hold. Read with a full parse (importsIn, round 20), so every spelling a parse can see counts; a module with no
+ * source fails the caller. Code built from parts at run time stays outside it (#992).
  */
-function builtClosure(): { local: string[]; packages: Set<string>; built: string[] } {
+function builtClosure(): { local: string[]; packages: Set<string>; built: string[]; computed: number } {
   const seen = new Set<string>();
   const packages = new Set<string>();
+  let computed = 0;
   const todo = [join(repoRoot, 'dist', 'test', 'isolate.js'), fileURLToPath(import.meta.url)];
   while (todo.length) {
     const f = todo.pop()!;
     if (seen.has(f)) continue;
     seen.add(f);
-    for (const { fileName } of ts.preProcessFile(readFileSync(f, 'utf8'), true, true).importedFiles) {
-      if (fileName.startsWith('.') || fileName.startsWith('/')) todo.push(resolve(dirname(f), fileName));
-      else packages.add(fileName);
+    const read = importsIn(readFileSync(f, 'utf8'), ts.ScriptKind.JS);
+    computed += read.computed;
+    for (const name of read.names) {
+      if (name.startsWith('.') || name.startsWith('/')) todo.push(resolve(dirname(f), name));
+      else packages.add(name);
     }
   }
   const built = [...seen].sort();
   const local = built.map((f) => relative(repoRoot, f).split(sep).join('/').replace(/^dist\//, '').replace(/\.js$/, '.ts'));
-  return { local, packages, built };
+  return { local, packages, built, computed };
 }
 
-test('every module this backstop runs is held: a changed line of any local one waits for the owner (round 19)', () => {
-  const { local, built } = builtClosure();
+test('every module this backstop runs, as a parse finds them, is held: a changed line of any local one waits for the owner (rounds 19 and 20)', () => {
+  const { local, built, computed } = builtClosure();
+  assert.equal(computed, 0, 'no dynamic import or require by a computed name in the closure');
+  // Round 20 (#746 final check of 7b420051): a regex literal holding a backtick hid the import after it from round
+  // 19's scanner, in a built module. The parse finds it.
+  assert.deepEqual(importsIn("const zzq = /`/;\nimport './zz-extra.js';\n", ts.ScriptKind.JS).names, ['./zz-extra.js'], 'a built text with a regex literal, then an import');
   // Round 19 (#746 second adversarial review of 87cf2165, row 1): src/brand.ts and src/os/{system-paths,own-env,
   // child-process}.ts ran here and no hold covered them; one changed line turned this backstop green over a red twin.
   for (const m of ['test/isolate.ts', 'test/desktop-removed.test.ts', 'src/merge-policy-weakening.ts', 'src/brand.ts', 'src/os/child-process.ts']) assert.ok(local.includes(m), `the closure was read: ${m}`);
@@ -1154,6 +1201,9 @@ test('every module this backstop runs is held: a changed line of any local one w
 
 test('the packages this backstop runs are the locked ones, from the repo\'s own node_modules (round 19)', () => {
   const { packages, built } = builtClosure();
+  // What this pins is the lockfile entry and where each package resolves; npm ci checks the installed tarball against
+  // that integrity. Code that runs before this test could still change the installed bytes, which is why ci.yml runs
+  // this backstop before any such step (round 20, the next test).
   const named = [...packages].filter((s) => !s.startsWith('node:'));
   assert.deepEqual(named.sort(), Object.keys(PINNED_PACKAGES).sort(), 'every package in the closure is pinned, and every pin is used');
   const lock = JSON.parse(readFileSync(join(repoRoot, 'package-lock.json'), 'utf8')) as { packages: Record<string, { integrity?: string; link?: boolean }> };
@@ -1176,4 +1226,43 @@ test('the packages this backstop runs are the locked ones, from the repo\'s own 
     assert.ok(f.startsWith(top + sep), `${f} is in the repo`);
     for (let d = dirname(f); d !== top && d.startsWith(top + sep); d = dirname(d)) assert.ok(!existsSync(join(d, 'node_modules')), `${relative(top, join(d, 'node_modules'))} would shadow a package`);
   }
+});
+
+/**
+ * Round 20 (#746 second adversarial review of 7b420051, A1 to A5): ci.yml's test shards ran `npm ci` (with its
+ * prepare script), `build:web` and machine.sh before their tests. A changed line in scripts/prepare.mjs,
+ * scripts/web-licenses.mjs or machine.sh, or a changed vite lockfile entry, ran on the same checkout first and could
+ * hide a twin from this backstop. So every shard now starts with exactly these steps, and nothing the hold doesn't
+ * cover runs before this backstop has run: checkout, Node, an install with no package scripts, a build with the
+ * locked typescript straight from node_modules, then this file alone. [step, as parsed]
+ */
+// check-table: never-shrink
+const SHARD_FIRST_STEPS: [string, (s: Record<string, unknown>) => boolean][] = [
+  ['checkout, the merge commit and its base', (s) => String(s.uses).startsWith('actions/checkout@') && same(Object.keys(s).sort(), ['uses', 'with']) && same(s.with, { 'fetch-depth': 2 })],
+  ['setup-node, the matrix version, the npm cache', (s) => String(s.uses).startsWith('actions/setup-node@') && same(Object.keys(s).sort(), ['uses', 'with']) && same(s.with, { 'node-version': '${{ matrix.node }}', cache: 'npm' })],
+  ['npm ci with no package scripts', (s) => same(s, { run: 'npm ci --ignore-scripts' })],
+  ['the locked tsc, no npm script', (s) => same(s, { run: 'node node_modules/typescript/bin/tsc -p tsconfig.json' })],
+  ['this backstop, alone', (s) => same(s, { name: 'the desktop backstop, before anything unheld runs', run: 'node --import=./dist/test/isolate.js --test dist/test/desktop-removed.test.js' })],
+];
+
+test('ci.yml runs this backstop first in every test shard, before any package script or unheld file (round 20)', () => {
+  const wf = parse(readFileSync(join(workflows, 'ci.yml'), 'utf8')) as { jobs: Record<string, Record<string, unknown>> };
+  const shards = Object.entries(wf.jobs).filter(([id]) => id.startsWith('test-shard-'));
+  assert.ok(shards.length >= 2, 'found the test shard jobs');
+  // Every job that runs the test suite is a shard, so none runs it otherwise.
+  for (const [id, job] of Object.entries(wf.jobs)) if (JSON.stringify(job).includes('dist/test/isolate.js')) assert.ok(id.startsWith('test-shard-'), `${id} runs tests: only the shards may`);
+  for (const [id, job] of shards) {
+    // No job-wide env (a NODE_OPTIONS there would load code into every step), defaults, container or services.
+    assert.deepEqual(Object.keys(job).sort(), ['name', 'runs-on', 'steps', 'strategy'], `${id}: no env, defaults, container or services`);
+    const steps = job.steps as Record<string, unknown>[];
+    SHARD_FIRST_STEPS.forEach(([label, ok], i) => assert.ok(ok(steps[i] ?? {}), `${id} step ${i + 1} must be ${label}: ${JSON.stringify(steps[i])}`));
+    // A later install runs no package scripts either.
+    for (const s of steps) if (/\bnpm (ci|install|i|rebuild)\b/.test(String(s.run ?? ''))) assert.match(String(s.run), /--ignore-scripts/, `${id}: ${String(s.run)}`);
+  }
+  // A reorder is caught: the old order (npm ci with scripts, first) fails.
+  const old = shards[0]![1].steps as Record<string, unknown>[];
+  const reordered = [old[0]!, old[1]!, { run: 'npm ci' }, ...old.slice(3)];
+  assert.ok(!SHARD_FIRST_STEPS.every(([, ok], i) => ok(reordered[i] ?? {})), 'npm ci with scripts first fails');
+  const swapped = [old[0]!, old[1]!, old[2]!, old[4]!, old[3]!, ...old.slice(5)];
+  assert.ok(!SHARD_FIRST_STEPS.every(([, ok], i) => ok(swapped[i] ?? {})), 'the backstop before its build fails');
 });

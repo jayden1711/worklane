@@ -47,7 +47,20 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
           cache: npm
-      - run: npm ci
+      # Before any file the merge hold doesn't cover runs (#746 round 20): install with no package scripts (prepare,
+      # postinstall), build with the locked typescript straight from node_modules (no npm script), and run the desktop
+      # backstop alone, then the other lint tests. Only after that: npm run build (what prepare did), the dashboard UI,
+      # machine.sh and this shard's tests. test/desktop-removed.test.ts holds these first steps and their order.
+      - run: npm ci --ignore-scripts
+      - run: node node_modules/typescript/bin/tsc -p tsconfig.json
+      - name: the desktop backstop, before anything unheld runs
+        run: node --import=./dist/test/isolate.js --test dist/test/desktop-removed.test.js
+      - name: the other lint tests, before anything unheld runs
+        shell: bash
+        run: |
+          mapfile -t files < <(grep -lx '// lint-test' test/*.test.ts | grep -vx 'test/desktop-removed.test.ts' | sed -e 's#^test/#dist/test/#' -e 's#\.ts$#.js#')
+          [ "${#files[@]}" -gt 0 ] || { echo "no lint tests found" >&2; exit 1; }
+          node --import=./dist/test/isolate.js --test "${files[@]}"
       - name: install gitleaks
         shell: bash
         env:
