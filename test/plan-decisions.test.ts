@@ -1,7 +1,7 @@
 // Plans cite decisions: the plan contract's Decisions section, checked against the decision records that exist.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { existsSync, linkSync, mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { BRAND } from '../src/brand.js';
@@ -144,4 +144,23 @@ test("the engine repo's own merge process is not a recorded decision: docs/proce
   writeFileSync(join(repo, 'docs', 'process.md'), '# Process\n\n## 1. Merges\nAgents merge everything.\n');
   writeFileSync(join(repo, 'docs', 'design.md'), '# Design\n\n## 8. Roles\nThe roles.\n');
   assert.deepEqual(decisionIndex(repo, []).map((e) => e.ref), ['docs/design.md § 8. Roles']);
+});
+
+test('regression: a decisions file or folder entry that is docs/process.md under another name (a symlink, a hard link) is never indexed; any other record still is', () => {
+  const repo = mkdtempSync(join(tmpdir(), 'records-'));
+  mkdirSync(join(repo, 'docs', 'decisions'), { recursive: true });
+  writeFileSync(join(repo, 'docs', 'process.md'), '# Process\n\n## Who merges\nAn agent merges.\n\n## The critical set\nTwo reviews.\n');
+  writeFileSync(join(repo, 'docs', 'design.md'), '# Design\n\n## 8. Roles\nThe roles.\n');
+  writeFileSync(join(repo, 'docs', 'decisions', '0002-csv.md'), '# Exports are CSV\nEvery export is CSV.\n');
+  symlinkSync('../process.md', join(repo, 'docs', 'decisions', '0001-merge.md'));
+  symlinkSync('process.md', join(repo, 'docs', 'decisions.md'));
+  linkSync(join(repo, 'docs', 'process.md'), join(repo, 'decisions.md'));
+  const refs = decisionIndex(repo, []).map((e) => e.ref);
+  assert.deepEqual(refs, ['docs/design.md § 8. Roles', 'docs/decisions/0002-csv.md'], refs.join(' | '));
+  // A record that only links to some other file is indexed as before.
+  const other = mkdtempSync(join(tmpdir(), 'records-'));
+  mkdirSync(join(other, 'docs'), { recursive: true });
+  writeFileSync(join(other, 'docs', 'notes.md'), '# Notes\n\n## D-1: Kept\nKept.\n');
+  symlinkSync('notes.md', join(other, 'docs', 'decisions.md'));
+  assert.deepEqual(decisionIndex(other, []).map((e) => e.ref), ['docs/decisions.md § D-1: Kept']);
 });

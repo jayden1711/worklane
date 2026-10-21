@@ -63,6 +63,8 @@ const mergeProcess = "the engine repo's merge process";
 const locked = [
   // How the engine repo's own PRs are merged (owner, 2026-10-21): locked like the design rules.
   ['docs/process.md', mergeProcess],
+  // The test that keeps the process out of the planners' decisions index: removing it would reopen that route.
+  ['test/plan-decisions.test.ts', tests],
   ['docs/guardrails.md', pages],
   ['docs/security.md', pages],
   ['docs/security-model.md', pages],
@@ -89,7 +91,7 @@ const locked = [
   ['docker-compose.prod.yml', deploys],
 ] as const;
 /** The ones the repo has today: each must stay a real file, so a rename can't leave this test checking nothing. */
-const present = ['docs/process.md', 'docs/guardrails.md','docs/security.md', 'SECURITY.md', 'test/docs-guardrails.test.ts', 'test/adversarial/adversarial.test.ts', 'test/adversarial/todo.json', 'test/adversarial/controls.json', 'test/adversarial/cases/locked-paths.json', 'test/engine-guard-locks.test.ts', 'test/not-yet-files-locks.test.ts', 'Dockerfile'];
+const present = ['docs/process.md', 'test/plan-decisions.test.ts', 'docs/guardrails.md', 'docs/security.md','SECURITY.md', 'test/docs-guardrails.test.ts', 'test/adversarial/adversarial.test.ts', 'test/adversarial/todo.json', 'test/adversarial/controls.json', 'test/adversarial/cases/locked-paths.json', 'test/engine-guard-locks.test.ts', 'test/not-yet-files-locks.test.ts', 'Dockerfile'];
 
 test('regression: a change to the security pages, their citations test, the adversarial suite or the Dockerfile is L3, self-modification and never auto-merges (this repo, the example, and a review.yaml that drops every category)', () => {
   for (const path of present) assert.ok(existsSync(join(repoRoot, path)), `${path} is a real file`);
@@ -118,6 +120,7 @@ test("a managed app's same-named files are unchanged: no engine lock, the catego
   // As measured on main before the lock, under the example review.yaml in a managed app's repo.
   const before: Record<string, [string, string[]]> = {
     'docs/process.md': ['L0', ['docs']],
+    'test/plan-decisions.test.ts': ['L0', ['tests']],
     'docs/guardrails.md': ['L0', ['docs']],
     'docs/security.md': ['L0', ['docs']],
     'docs/security-model.md': ['L0', ['docs']],

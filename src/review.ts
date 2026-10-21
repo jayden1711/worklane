@@ -402,6 +402,8 @@ export const SELF_MODIFICATION_PARTS: { what: string; globs: string[] }[] = [
       'test/engine-guard-locks.test.ts',
       // The test that keeps each lock glob that matches no file yet paired with its lock (#885).
       'test/not-yet-files-locks.test.ts',
+      // The test that keeps the engine repo's merge process (docs/process.md) out of the planners' decisions index.
+      'test/plan-decisions.test.ts',
     ],
   },
   { what: 'the release procedure and the design rules', globs: ['docs/releasing.md', 'docs/design.md'] },

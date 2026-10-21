@@ -81,11 +81,30 @@ function headingAliases(file: string, heading: string): string[] {
   return [...new Set(a.map(normRef))];
 }
 
+/**
+ * How the engine repo's own PRs are merged (owner, 2026-10-21): process, never a recorded decision. A decisions file
+ * or folder entry that is this file under another name (a symlink, a hard link) is not indexed, so a plan can't cite
+ * it to let the engine merge more. A copy of its text is held by test/plan-decisions.test.ts (locked).
+ */
+export const PROCESS_DOC = 'docs/process.md';
+
+/** The file's identity (device and inode, through symlinks), or null when it can't be read. */
+function identity(path: string): string | null {
+  try {
+    const s = statSync(path, { bigint: true });
+    return `${s.dev}:${s.ino}`;
+  } catch {
+    return null;
+  }
+}
+
 /** The decision records the checkout keeps, as index entries. */
 export function recordEntries(repo: string): DecisionEntry[] {
   const out: DecisionEntry[] = [];
+  const processDoc = identity(join(repo, PROCESS_DOC));
+  const isProcessDoc = (rel: string) => processDoc !== null && identity(join(repo, rel)) === processDoc;
   for (const file of DECISION_FILES) {
-    if (!present(repo, file)) continue;
+    if (!present(repo, file) || isProcessDoc(file)) continue;
     for (const s of sectionsOf(readFileSync(join(repo, file), 'utf8'))) out.push({ ref: `${file} § ${s.heading}`, aliases: headingAliases(file, s.heading), title: s.heading, text: s.text });
   }
   for (const dir of DECISION_DIRS) {
@@ -97,6 +116,7 @@ export function recordEntries(repo: string): DecisionEntry[] {
     }
     for (const name of names) {
       const file = `${dir}/${name}`;
+      if (isProcessDoc(file)) continue;
       const md = readFileSync(join(repo, file), 'utf8');
       const title = /^#{1,6}\s+(.+?)\s*#*\s*$/m.exec(md)?.[1] ?? name.slice(0, -3);
       const id = /^([A-Za-z]{0,10}-?\d+)[-_ ]/.exec(name)?.[1];
