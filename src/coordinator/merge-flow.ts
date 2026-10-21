@@ -5,7 +5,7 @@ import { CI_NONE_MAIN_WATCH, ciIsNone, requiredFor } from '../ci-none.js';
 import { PinnedChecks, type JudgedChecks } from '../check-source.js';
 import type { Coordinator } from '../coordinator.js';
 import { spawnSync } from 'node:child_process';
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { BRAND } from '../brand.js';
 import type { ReviewConfig } from '../config/schema.js';
@@ -33,7 +33,9 @@ import { redactString } from '../events/redact.js';
 import { takeOpsPost } from '../watchdog/post.js';
 import { createWorktree, removeWorktree } from '../worktrees.js';
 import { approveMerge, mergeApproval } from '../decide.js';
-import { mayAnswerKind, type Role } from '../dashboard-auth.js';
+import { isOwner, mayAnswerKind, type Role } from '../dashboard-auth.js';
+import { isRecordedAck } from '../ack-reason.js';
+import { createHash } from 'node:crypto';
 import type { ChatPerson } from '../intake/people.js';
 import { mayMerge, mergesPending, mergeTurn, PrBatcher, PR_BATCH_EVENTS } from './pr-batch.js';
 import { FixRuns } from './fix-runs.js';
@@ -43,6 +45,16 @@ import { lit, reviewPacket, type PacketInput } from './review-packet.js';
 import { MERGEABLE_RECHECK_MS, TIP_CHECK_MS, DEFAULT_REVIEW, lockScopeOf } from './shared.js';
 import { LIGHT_PENDING_CAP, MAIN_CHECKS_MIN_POLLS, MAIN_CHECKS_TIMEOUT_MS, MERGEABLE_CAP, PollCounter, pollsFor } from './wait-caps.js';
 import { ATTEMPT_EVENTS, failedTries, openAttempt, reconcileMerge } from '../merge-policy-reconcile.js';
+import { mainNow, mayResume, stopWaitsForGreen, type MainState } from '../auto-merge-resume.js';
+
+/** How often a pending resume request has main measured again while it isn't green (#776): each look is recorded. */
+export const RESUME_MEASURE_MS = 60_000;
+
+/**
+ * At most this many owner-role lookups (GitHub's permission API) in one pass over resume requests (#776 round 3): one
+ * per login, and only for the stop in force, so the cost stays constant however many requests are logged.
+ */
+export const RESUME_ROLE_LOOKUPS_PER_PASS = 3;
 
 export abstract class MergeFlow extends FixRuns {
   /** Defined in a later part (or in Coordinator); declared here for the calls in this one. */
@@ -148,6 +160,8 @@ export abstract class MergeFlow extends FixRuns {
   protected readonly mergePass = new MergePass(() => this.d.cfg.tests.land.parallel_merges);
   /** The merge train's clock for deferrals (tests move it). */
   protected trainNow: () => number = () => Date.now();
+  /** The clock resume requests are re-measured and retried by, against their events' times (tests move it). */
+  protected resumeNow: () => number = () => Date.now();
 
   // ---------------------------------------------------------------- PR batches
 
@@ -383,7 +397,13 @@ export abstract class MergeFlow extends FixRuns {
 
   /** Why auto-merge is stopped for this instance, or null. Persisted in a file only the operator clears. */
   autoMergeStopped(): string | null {
-    if (!existsSync(this.stopFile)) return null;
+    if (!existsSync(this.stopFile)) {
+      // #776: a stop the default branch caused, its file deleted by hand, holds until watchMerges logs merge.resumed
+      // (main measured green) or writes it back; nothing merges in between, whatever step runs first.
+      const last = this.d.log.read(0, ['merge.stopped', 'merge.resumed']).at(-1);
+      if (last?.type !== 'merge.stopped' || !stopWaitsForGreen((last.payload as EventPayload<'merge.stopped'>).by)) return null;
+      return `the stop file was deleted by hand; auto-merge stays stopped until ${this.branch} is measured green on its tip (${(last.payload as EventPayload<'merge.stopped'>).reason})`;
+    }
     try {
       return String((JSON.parse(readFileSync(this.stopFile, 'utf8')) as { reason?: string }).reason ?? 'stopped');
     } catch {
@@ -852,8 +872,10 @@ export abstract class MergeFlow extends FixRuns {
    */
   protected async watchMerges() {
     const stopped = this.d.log.read(0, ['merge.stopped', 'merge.resumed']).at(-1);
-    if (stopped?.type === 'merge.stopped' && !existsSync(this.stopFile)) this.emit('merge.resumed', { detail: 'the operator cleared the stop' });
-    const judged = new Set(this.d.log.read(0, ['merge.main_result']).map((e) => (e.payload as { sha: string }).sha));
+    if (stopped?.type === 'merge.stopped' && !existsSync(this.stopFile)) await this.stopGoneByHand(stopped.id, stopped.payload as EventPayload<'merge.stopped'>);
+    // The stop in force answers resume requests: its merge.stopped, or, with none logged for it, the stop file itself.
+    else if (existsSync(this.stopFile)) await this.resumeRequested(stopped?.type === 'merge.stopped' ? stopped.id : null, stopped?.id ?? 0);
+    const judged =new Set(this.d.log.read(0, ['merge.main_result']).map((e) => (e.payload as { sha: string }).sha));
     const now = Date.now();
     for (const e of this.d.log.read(0, ['merge.done'])) {
       const m = e.payload as EventPayload<'merge.done'>;
@@ -926,7 +948,7 @@ export abstract class MergeFlow extends FixRuns {
   }
 
   private get stopResume() {
-    return `Auto-merge is stopped on this instance until the operator deletes \`${this.stopFile}\`; until then every PR waits for you.`;
+    return `Auto-merge is stopped on this instance until an admin resumes it on the dashboard, once ${this.branch}'s required checks are green on its tip (or with an acknowledgement there, recorded); until then every PR waits for you.`;
   }
 
   /** Who is told about a red default branch: the owner of the issue behind one of `shas` (a harness merge), else the default owner. */
@@ -936,8 +958,145 @@ export abstract class MergeFlow extends FixRuns {
   }
 
   private stopFor(reason: string, number: number | null, sha: string, revert: string | null) {
-    writeGroupOnly(this.stopFile, JSON.stringify({ reason, number, sha, revert, at: new Date().toISOString() }, null, 2));
-    this.emit('merge.stopped', { reason, number, sha, revert });
+    // Logged first (#776): a crash between the two leaves a logged stop with no file, which autoMergeStopped holds.
+    this.emit('merge.stopped', { reason, number, sha, revert, by: 'red_main' });
+    writeGroupOnly(this.stopFile, JSON.stringify({ reason, by: 'red_main', number, sha, revert, at: new Date().toISOString() }, null, 2));
+  }
+
+  /** The default branch's required checks on its tip now (src/auto-merge-resume.ts): what a stop waits for. */
+  private mainNow(): Promise<MainState> {
+    // #727: the required checks judged by the pinned-source verdict readiness and the main watch use (JudgedChecks).
+    return mainNow({ repo: this.d.repo, remote: this.remote, branch: this.branch, required: this.requiredChecks(), checks: (sha) => this.headChecksOf(sha, this.requiredChecks()) });
+  }
+
+  /** mainNow, recorded (merge.main_measured), so the dashboard can show the coordinator's last look; `request`: the request it answers. */
+  private async measuredMain(request: number | null, key: { stop: number | null; file: string | null } = { stop: null, file: null }): Promise<MainState> {
+    const main = await this.mainNow();
+    this.emit('merge.main_measured', { tip: main.tip, green: main.green, why: main.green ? null : main.why.slice(0, 1000), request, stop: key.stop, file: key.stop === null ? key.file : null });
+    return main;
+  }
+
+  /** The stop file's bytes and identity (sha256, as the dashboard keys a request), or null when it can't be read. */
+  private stopFileNow(): { raw: string; id: string } | null {
+    let raw: string;
+    try {
+      raw = readFileSync(this.stopFile, 'utf8');
+    } catch {
+      return existsSync(this.stopFile) ? { raw: '', id: createHash('sha256').update('').digest('hex') } : null;
+    }
+    return { raw, id: createHash('sha256').update(raw).digest('hex') };
+  }
+
+  /**
+   * Why the coordinator won't act on resume request `e`, or null: it acts only on a person's request (`source: human`)
+   * whose actor is an owner of the repo now, looked up fresh as the dashboard looks them up (roleOf; with none, the
+   * instance's default owner), with an acknowledgement, if any, that passes the dashboard's own validator. Fail closed.
+   */
+  private async requestCheck(e: StoredEvent, pass: { roles: Map<string, Promise<{ role: Role | null } | { error: string }>>; left: number }): Promise<'ok' | 'wait' | { ignore: string } | { defer: string }> {
+    if (e.source !== 'human') return { ignore: `not a person's request (source ${e.source}, actor ${e.actor})` };
+    const ack = (e.payload as EventPayload<'merge.resume_requested'>).ack;
+    if (ack !== null && !isRecordedAck(ack)) return { ignore: 'its acknowledgement is not a typed reason the dashboard accepts' };
+    const roleOf = this.d.roleOf;
+    if (!roleOf) return e.actor.toLowerCase() === this.d.cfg.project.owners.default.toLowerCase() ? 'ok' : { ignore: `@${e.actor} is not the instance's default owner` };
+    // At most one lookup per login per pass, and RESUME_ROLE_LOOKUPS_PER_PASS in all (#776 round 3: bounded).
+    const key = e.actor.toLowerCase();
+    let looked = pass.roles.get(key);
+    if (!looked) {
+      if (pass.left <= 0) return 'wait';
+      pass.left--;
+      looked = roleOf(e.actor, { fresh: true, strict: true }).then(
+        (role) => ({ role }),
+        (err: unknown) => ({ error: String((err as Error)?.message ?? err).replace(/\s+/g, ' ').slice(0, 300) }),
+      );
+      pass.roles.set(key, looked);
+    }
+    const r = await looked;
+    // A lookup that failed is no answer: the request stays pending and is retried (round 3). Only a lookup that answered non-owner ignores it.
+    if ('error' in r) return { defer: `couldn't check @${e.actor}'s owner role (${r.error}); will retry` };
+    return isOwner(r.role) ? 'ok' : { ignore: `@${e.actor} is not an owner of ${this.d.cfg.project.project.repo} now` };
+  }
+
+  /**
+   * An admin's resume requests on the dashboard (merge.resume_requested) for the stop in force (#776 on #727, the
+   * owner's decision): the coordinator is the only judge. The stop in force is the log's last merge.stopped (`stopId`)
+   * or, with none logged for it, the stop file by its identity (#776 round 2: never left unanswered). Each request is
+   * acted on only if it is a human owner's (requestRefusal; otherwise logged as ignored, with why). It measures main's
+   * tip (recorded) and resumes only if green under the pinned-source verdict, or on a recorded acknowledgement;
+   * otherwise the stop stays, measured again every RESUME_MEASURE_MS. A request for another stop, or a stop that
+   * changes while main is measured, resumes nothing.
+   */
+  private async resumeRequested(stopId: number | null, since: number) {
+    const file = this.stopFileNow();
+    if (!file) return;
+    const named = this.d.log.read(since, ['merge.resume_requested']).filter((e) => {
+      const p = e.payload as EventPayload<'merge.resume_requested'>;
+      return stopId !== null ? p.stop === stopId : p.stop === null && p.file === file.id;
+    });
+    const ignored = new Set(this.d.log.read(since, ['merge.resume_ignored']).map((e) => (e.payload as EventPayload<'merge.resume_ignored'>).request));
+    const pending = named.filter((e) => !ignored.has(e.id));
+    const latest = pending.at(-1);
+    if (!latest) return;
+    const looked = this.d.log.read(latest.id, ['merge.main_measured']).at(-1);
+    if ((latest.payload as EventPayload<'merge.resume_requested'>).ack === null && looked && this.resumeNow() - Date.parse(looked.ts) < RESUME_MEASURE_MS) return;
+    // Only the latest request a human owner made counts (round 3): walked newest first, who asked is checked when it
+    // is acted on, within the pass's lookup bound. A request that isn't one is logged as ignored, with why; one whose
+    // owner role couldn't be read waits (logged, retried every RESUME_MEASURE_MS); the older ones are superseded.
+    const deferred = new Map(this.d.log.read(since, ['merge.resume_deferred']).map((e) => [(e.payload as EventPayload<'merge.resume_deferred'>).request, e] as const));
+    const pass = { roles: new Map<string, Promise<{ role: Role | null } | { error: string }>>(), left: RESUME_ROLE_LOOKUPS_PER_PASS };
+    let asked: StoredEvent | undefined;
+    for (const e of [...pending].reverse()) {
+      const before = deferred.get(e.id);
+      if (before && this.resumeNow() - Date.parse(before.ts) < RESUME_MEASURE_MS) return;
+      const c = await this.requestCheck(e, pass);
+      if (c === 'wait') return;
+      if (c === 'ok') {
+        asked = e;
+        break;
+      }
+      if ('defer' in c) return void this.emit('merge.resume_deferred', { request: e.id, why: c.defer });
+      this.emit('merge.resume_ignored', { request: e.id, why: c.ignore });
+    }
+    if (!asked) return;
+    for (const e of pending) if (e.id < asked.id) this.emit('merge.resume_ignored', { request: e.id, why: `superseded by request ${asked.id}` });
+    const ack = (asked.payload as EventPayload<'merge.resume_requested'>).ack;
+    const key = { stop: stopId, file: file.id };
+    const v = await mayResume({ gated: true, ack, measure: () => this.measuredMain(asked.id, key) });
+    // A new stop (or a resume) logged, or the stop file changed, while main was measured: this request was for the stop before it.
+    const lastNow = this.d.log.read(0, ['merge.stopped', 'merge.resumed']).at(-1);
+    if ((stopId !== null ? lastNow?.id !== stopId : (lastNow?.id ?? 0) > since) || this.stopFileNow()?.id !== file.id) return;
+    if (!v.ok) return;
+    const main = v.main!;
+    const how = v.how === 'green' && main.green ? `with ${this.branch} green on ${main.tip.slice(0, 8)}, measured by the coordinator` : `acknowledging ${this.branch} isn't green (${main.green ? 'green' : main.why.slice(0, 300)}${main.tip ? `, tip ${main.tip.slice(0, 8)}` : ''}): "${(ack ?? '').slice(0, 500)}"`;
+    let reason = 'stopped';
+    if (stopId !== null) reason = (this.d.log.read(stopId - 1, ['merge.stopped'])[0]?.payload as EventPayload<'merge.stopped'> | undefined)?.reason ?? reason;
+    else {
+      try {
+        reason = String((JSON.parse(file.raw) as { reason?: unknown }).reason ?? reason);
+      } catch {
+        reason = 'the stop file is unreadable';
+      }
+    }
+    // The file first: a crash before the log line leaves no file and the stop logged, which stopGoneByHand measures again.
+    rmSync(this.stopFile, { force: true });
+    this.emit('merge.resumed', { detail: `@${asked.actor} resumed auto-merge from the dashboard, ${how} (${reason.slice(0, 300)})` });
+  }
+
+  /**
+   * The stop file is gone and no resume was logged: deleted by hand (#776). A stop the default branch caused waits for
+   * green main on every surface, so it is written back (`restored`) unless main's required checks are green on its tip
+   * now; the dashboard's acknowledgement is the way past a main that isn't. Any other stop resumes as before.
+   */
+  private async stopGoneByHand(id: number, p: EventPayload<'merge.stopped'>) {
+    if (!stopWaitsForGreen(p.by)) return this.emit('merge.resumed', { detail: 'the operator cleared the stop' });
+    const main = await this.measuredMain(null, { stop: id, file: null });
+    // The dashboard removes the file before it logs merge.resumed: a resume (or a new stop) since means it wasn't a hand.
+    const last = this.d.log.read(0, ['merge.stopped', 'merge.resumed']).at(-1);
+    if (last?.id !== id || existsSync(this.stopFile)) return;
+    if (main.green) return this.emit('merge.resumed', { detail: `the operator cleared the stop by hand, with ${this.branch} green on ${main.tip.slice(0, 8)}` });
+    const by = p.by ?? (p.reason.startsWith('main watch: ') ? 'main_watch' : 'red_main');
+    const restored = `the stop file was deleted by hand while ${main.why}, so it was written back; an admin resumes on the dashboard once ${this.branch} is green, or with an acknowledgement there`;
+    this.emit('merge.stopped', { reason: p.reason, number: p.number, sha: p.sha, revert: p.revert, by, restored });
+    writeGroupOnly(this.stopFile, JSON.stringify({ reason: p.reason, by, number: p.number, sha: p.sha, revert: p.revert, at: new Date().toISOString(), restored }, null, 2));
   }
 
   /**
@@ -1099,8 +1258,10 @@ export abstract class MergeFlow extends FixRuns {
     if (before.some((e) => (e.payload as EventPayload<'main_watch.unaccounted'>).sha === o.sha)) return;
     const url = `https://github.com/${this.d.cfg.project.project.repo}/commit/${o.sha}`;
     const reason = `main watch: ${o.reason}`;
-    if (!existsSync(this.stopFile)) writeGroupOnly(this.stopFile, JSON.stringify({ reason, by: 'main_watch', number: o.number, sha: o.sha, revert: null, at: new Date().toISOString() }, null, 2));
-    this.emit('merge.stopped', { reason, number: o.number, sha: o.sha, revert: null });
+    // Logged before the file (#776), as stopFor does.
+    const had = existsSync(this.stopFile);
+    this.emit('merge.stopped', { reason, number: o.number, sha: o.sha, revert: null, by: 'main_watch' });
+    if (!had) writeGroupOnly(this.stopFile, JSON.stringify({ reason, by: 'main_watch', number: o.number, sha: o.sha, revert: null, at: new Date().toISOString() }, null, 2));
     // Landed without a PR: the ops channel hears of it now, before the revert PR is made.
     if (o.push) await this.directPushNoted(o.sha, url, o.push);
     let revert: { url: string; number: number } | null = null;

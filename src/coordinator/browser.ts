@@ -13,6 +13,7 @@ import { askedFlows, browserGate, type BrowserGate } from '../browser/gate.js';
 import { runFlow, type FlowEvidence } from '../browser/run.js';
 import { BRAND } from '../brand.js';
 import type { ProjectRunAs } from '../os/index.js';
+import { ownEnv } from '../os/own-env.js';
 import { createWorktreeAsync, removeWorktree, type WorktreeOptions } from '../worktrees.js';
 
 /** A flow's run at the base commit: its evidence, or why there is none. */
@@ -134,7 +135,7 @@ export async function browserChecks(o: {
   const gate = browserGate({ app: o.app, changed: o.changed, asked });
   const run = o.run ?? runBrowserCheck;
   // No browser: no baseline either (the flows themselves are unavailable), and no base worktree made for nothing.
-  const chrome = o.chrome === undefined ? findChrome(process.env.CHROME) : o.chrome;
+  const chrome = o.chrome === undefined ? findChrome(ownEnv().get('CHROME')) : o.chrome;
   const source = o.app && chrome && gate.flows.length ? (o.baseline?.(chrome) ?? null) : null;
   const results: { flow: string; result: BrowserCheckResult; before: FlowEvidence | null; baselineUnavailable?: string }[] = [];
   const notes: string[] = [];

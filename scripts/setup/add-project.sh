@@ -20,7 +20,8 @@
 #                   done when credentials.yaml names the agent's key file (credentials.sh <name> api-key writes it),
 #                   that file is the agent user's own and open to nobody else, and claude reports an API-key login.
 #   checkout        checkout.sh <name> <owner/repo>; a repo with no config gets auto-config's setup PR (through the App)
-#   policy          the default policy, auto_merge off, $20/day, 2 workers, shown for you to change
+#   policy          the default policy, auto_merge off, $20/day, 2 workers, shown for you to change; made root's (0644,
+#                   the coordinator reads it and never writes it; an earlier install's on a rerun, its content kept)
 #   service         service.sh <name>, once the checkout has its config: for a setup PR, it waits (up to --timeout
 #                   minutes) for the PR to merge, then brings the checkout up to it; still open then, it stops as
 #                   "waiting" (exit 3), saying for what, and a rerun picks up here
@@ -234,14 +235,24 @@ policy_text() {
   usd="$(sed -n 's/.*daily_usd: *\([0-9.]*\).*/\1/p' "$f" | head -1)"
   w="$(sed -n 's/.*max_workers: *\([0-9]*\).*/\1/p' "$f" | head -1)"
   [ "$am" = true ] && am=on || am=off
-  echo "auto_merge $am, \$${usd:-?}/day, ${w:-?} workers: change them in the dashboard's Settings, or in $f"
+  # Root's kill switch says off, whatever policy.yaml says (src/policy-kill.ts).
+  if auto_merge_killed "$name"; then am="off (root's kill switch)"; fi
+  # The dashboard's route is root's helper's set-policy, whose sudoers rule a sudo older than 1.9.10 leaves out (lib.sh).
+  if sudo_regex_ok; then
+    echo "auto_merge $am, \$${usd:-?}/day, ${w:-?} workers: change them in the dashboard's Settings (through root's helper), or as root with $ENGINE_CLI policy set $name <key> <value>; turning auto_merge on is root's alone"
+  else
+    echo "auto_merge $am, \$${usd:-?}/day, ${w:-?} workers: change them as root with $ENGINE_CLI policy set $name <key> <value> (this machine's sudo is older than 1.9.10, so the dashboard only turns auto_merge off, land_mode to pr and main_watch to auto)"
+  fi
 }
+# Done only once the policy is root's (issue #726): an earlier install's, which its coordinator user could rewrite, is
+# made root's on a rerun, its content kept, and its isolation and merge keys shown.
 done_policy() {
-  [ -f "$(policy_file)" ] || return 1
+  policy_root_ok "$name" "$(policy_file)" || return 1
   policy_text
 }
 do_policy() {
   run_as "$coord" 'umask 077; [ -f "$1" ] || printf "%s\n" "version: 1" "budget: { daily_usd: 20 }" "agents: { max_workers: 2 }" "land_mode: pr" "auto_merge: false" > "$1"' "$(policy_file)"
+  own_policy "$name"
 }
 detail_policy() { policy_text; }
 

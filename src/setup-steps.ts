@@ -10,6 +10,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { BRAND } from './brand.js';
+import { deferUntilFirstPr, detectWriterTask } from './setup-first-pr.js';
 import { AUTH_CHECK, authFailedDetail, isAuthFailure } from './claude-auth-failure.js';
 import { redactString } from './events/redact.js';
 import { loadConfig, type Config } from './config/load.js';
@@ -31,6 +32,7 @@ import { modelWarnings } from './model-routing.js';
 import { ENGINE_CURRENT, UPDATES_CONFIG } from './updates.js';
 import { instanceRuntime, instanceUnit, localServiceEnv, serviceLabel } from './service.js';
 import { asRoot, etcPath, unitPath } from './os/system-paths.js';
+import { ownEnv } from './os/own-env.js';
 import { ciChoiceProblem } from './ci-choice.js';
 import { CI_NONE_MEANS, ciIsNone, requiredFor } from './ci-none.js';
 import { parse as parseYaml } from 'yaml';
@@ -231,11 +233,12 @@ export const GROUPS: readonly GroupDef[] = [
   // WHY: the id stays 'discord' (setup discord, doctor and init name it); the group holds every chat intake source.
   { id: 'discord', title: 'Intake sources', optional: true, modes: MODES, walked: true },
   { id: 'tailscale', title: 'Tailscale', optional: true, modes: ['server'], walked: true },
-  { id: 'updates', title: 'Engine updates', optional: false, modes: ['server'], walked: false },
   { id: 'extras', title: 'Extras', optional: true, modes: MODES, walked: false },
   { id: 'service', title: 'Start', optional: false, modes: ['local'], walked: false },
-  // WHY (#468): after Start, how to give the harness work; local mode only for now (the owner, 2026-10-15).
-  { id: 'first-task', title: 'Your first task', optional: false, modes: ['local'], walked: false },
+  // WHY (#468): after Start, how to give the harness work. #739: a server's too, after its coordinator runs.
+  { id: 'first-task', title: 'Your first task', optional: false, modes: MODES, walked: false },
+  // WHY (#739): the updater comes after the first task, and blocks nothing until the first PR (src/setup-first-pr.ts).
+  { id: 'updates', title: 'Engine updates', optional: false, modes: ['server'], walked: false },
 ];
 
 /** How many installs reach a step (the audit's estimate from where it sits on the path, not usage data). */
@@ -264,6 +267,11 @@ export interface SetupStep {
   automation?: string;
   /** It asks GitHub (or another service) over the network: checked less often, to spare the API's rate limit. */
   network?: boolean;
+  /**
+   * WHY (#739): 'first-pr': required, but only once the instance opened its first PR. Before that it is listed and
+   * counted (doctor's line too), as optional, so it never stands between a new server and its first task.
+   */
+  after?: 'first-pr';
   detect: (c: Checking) => Detected | null;
 }
 
@@ -464,8 +472,8 @@ export function detectClaudeLogin(p: Pick<SetupProbe, 'which' | 'run' | 'service
   const shown = method.replace(/[^A-Za-z0-9._-]/g, '?').slice(0, 40);
   const how = `signed in${method !== 'unknown' ? ` (${shown})` : ' with no login method named'}, per \`claude auth status\`${managerNote}`;
   if (!RUNTIME_LOGINS[runtime.kind].includes(method)) return refuse(`${how}, but the agents would refuse it: ${needs}, so every run would stop with auth_mismatch`);
-  // Never a key's value in the cache key.
-  const identity = JSON.stringify([runtime.kind, method, parsed?.email ?? null, parsed?.orgId ?? null, fromManager, mgr.env.CLAUDE_CONFIG_DIR ?? null]);
+  // Never a key's value in the cache key. WHY (#786): the manager's own CLAUDE_CONFIG_DIR, never Object.prototype's.
+  const identity = JSON.stringify([runtime.kind, method, parsed?.email ?? null, parsed?.orgId ?? null, fromManager, ownEnv(mgr.env).get('CLAUDE_CONFIG_DIR') ?? null]);
   const prove = () => proveClaudeLogin({ run: (cmd, args) => p.run(cmd, args, as) });
   const proof = memo ? memo(identity, prove) : prove();
   return fixed(proof.done ? ok(`${how}; ${proof.detail}`) : no(`${how}, but the API refused it: ${proof.detail}`));
@@ -976,7 +984,7 @@ export const SETUP_STEPS: readonly SetupStep[] = [
     modes: ['server'],
     optional: false,
     reach: 'most',
-    today: "Edit the instance's policy.yaml (auto_merge, land_mode, budget, workers); the Settings page changes workers and budget.",
+    today: "Edit the instance's policy.yaml (auto_merge, land_mode, budget, workers); the Settings page only lowers workers and budget (raising them is the admin's).",
     fix: { kind: 'form', form: 'policy', label: 'Review' },
     automation: "the instance's policy.yaml: budget.daily_usd, agents.max_workers, land_mode, auto_merge, main_watch",
     detect: (k) => {
@@ -1086,6 +1094,7 @@ export const SETUP_STEPS: readonly SetupStep[] = [
     title: 'Engine updater set up',
     modes: ['server'],
     optional: false,
+    after: 'first-pr',
     reach: 'most',
     today: '`sudo bash scripts/setup/updates.sh` installs it (off); `--signer <principal> ssh-ed25519 <public key>` adds a release signer to /etc/<cli>/allowed_signers (or `--confirm-signer <fingerprint>` for one staged on the Machine page), and `--channel release|main` picks what it follows; then turn updates on from the Machine page.',
     fix: { kind: 'screen', path: '/machine', label: "the Machine page's Updater setup" },
@@ -1266,6 +1275,21 @@ export const SETUP_STEPS: readonly SetupStep[] = [
       return Number(r.stdout.trim()) > 0 ? ok('an issue is labelled ready: the coordinator picks it up when it runs') : no('no issue is labelled ready yet: the coordinator has nothing to work on');
     },
   },
+  // Your first task (server, #739): detected, not a form. An issue filed from the page would be the App's, which the
+  // coordinator never counts as a writer's; so it is the coordinator's own verdict that says done.
+  {
+    id: 'server-first-task',
+    group: 'first-task',
+    rows: [20],
+    title: "A writer's issue ready for the harness",
+    modes: ['server'],
+    optional: false,
+    reach: 'all',
+    today: "As one of the repo's writers (owners.writers in config.yaml), open an issue on GitHub whose body has a fenced ```done_when block (a test or a command that passes when it is done), with the ready label (or have a writer add it). An issue the instance's App opened doesn't count.",
+    fix: { kind: 'outside', url: null, label: 'GitHub, signed in as one of the writers', why: "an issue filed from this page would be the App's, which the coordinator doesn't count as a writer's", command: 'gh issue create --label ready --title "<what to do>" --body-file <a file with **Outcome:** and a ```done_when block>' },
+    automation: 'gh issue create --label ready --title "<what to do>" --body-file <a file with **Outcome:** and a ```done_when block> (signed in to gh as one of the writers)',
+    detect: (k) => detectWriterTask(k.c.stateDir),
+  },
 ];
 
 export interface StepView {
@@ -1380,6 +1404,7 @@ export function checkSetup(c: SetupContext, p: SetupProbe, o: { cache?: DetectCa
     if (!r) continue;
     steps.push({ id: s.id, group: s.group, rows: s.rows, title: s.title, optional: s.optional, walk: !!s.walk?.includes(c.mode), reach: s.reach, done: r.done, detail: r.detail, today: s.today, fix: r.fix ?? s.fix, automation: s.automation ?? null, skipped: !!c.skipped?.includes(s.id), network: !!s.network, checkedAt: new Date(at).toISOString() });
   }
+  deferUntilFirstPr(steps, SETUP_STEPS, c.stateDir);
   const groups: GroupView[] = GROUPS.filter((g) => g.modes.includes(c.mode))
     .map((g) => {
       const mine = steps.filter((s) => s.group === g.id);

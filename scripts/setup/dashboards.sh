@@ -161,7 +161,7 @@ EOF
   if [ -n "$loopback" ]; then
     echo "setup-mode hub, loopback only: http://127.0.0.1:4399/"
     echo "  open it on this machine, or from your computer through: ssh -L 4399:127.0.0.1:4399 <you>@<this machine>"
-    echo "  no https origin yet: the sign-in App waits for one (the page shows Tailscale and HTTPS first); then: --setup --public-url"
+    echo "  no https origin yet: the sign-in App waits for one: your own https origin, or Tailscale and HTTPS (the page shows both); then: --setup --public-url"
   else
     echo "setup-mode hub: $public_url"
     echo "  open it there: tailscale serve --bg --https=443 http://127.0.0.1:4399 first (GitHub sends the browser back to that URL)"

@@ -98,7 +98,7 @@ sudo bash scripts/setup/dashboards.sh --setup --loopback
 
 - The same unit, page and one-time token, on `http://127.0.0.1:4399/`. From your own computer, `ssh -L 4399:127.0.0.1:4399 <you>@<server>` first, then open that URL.
 - It answers only a request made on the machine itself (through the tunnel) to a loopback name: anything carrying a proxy's headers (`tailscale serve` adds them) or another `Host` is refused, as on the break-glass port. Its session cookie is `setup-loopback` (HttpOnly, SameSite=Strict; not Secure, since the page is plain http on loopback).
-- The sign-in App step never starts GitHub's manifest flow here: GitHub sends the browser back to an https address, and there isn't one. The page shows Tailscale and HTTPS (the wizard's screen 7) first, as root commands: `scripts/setup/tailscale.sh install`, `up` and `serve`. Then run the install command (or `--setup --public-url https://<name>`) again: setup mode restarts at the origin with a new token, and the App step goes on there.
+- The sign-in App step never starts GitHub's manifest flow here: GitHub sends the browser back to an https address, and there isn't one. The page offers the choice: an origin of your own (a name whose https server forwards to the hub's port on this machine), given as `--public-url https://<host>` to the install command run again; or Tailscale and HTTPS (the wizard's screen 7), as root commands: `scripts/setup/tailscale.sh install`, `up` and `serve`, then the install command (or `--setup --public-url https://<name>`) again. Either way setup mode restarts at the origin with a new token, and the App step goes on there.
 
 The first-run page's "Dashboard sign-in (GitHub App)" step shows the `--setup` command, and says when the hub is in setup mode.
 
