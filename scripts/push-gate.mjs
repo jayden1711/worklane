@@ -31,9 +31,11 @@ const ZERO = /^0+$/;
 // The commit-graph is off too (a forged one can skip a commit), in the arguments and, for gitleaks' own gits, as a
 // config pair in the environment after any the caller set.
 const GIT_FIXED_ARGS = ['--no-replace-objects', '-c', 'core.commitGraph=false'];
+// A count git refuses is left as it is, with no pair added, so git still refuses it (as src/os/git.ts gitEnv).
 const graphOff = (e) => {
-  const c = Number(Object.hasOwn(e, 'GIT_CONFIG_COUNT') ? e.GIT_CONFIG_COUNT : '0');
-  const n = Number.isSafeInteger(c) && c >= 0 ? c : 0;
+  const raw = Object.hasOwn(e, 'GIT_CONFIG_COUNT') ? e.GIT_CONFIG_COUNT : undefined;
+  const n = raw === undefined || raw === '' ? 0 : /^[ \t\n\v\f\r]*\+?[0-9]+$/.test(raw) ? Number(raw) : NaN;
+  if (!Number.isSafeInteger(n)) return e;
   return { ...e, [`GIT_CONFIG_KEY_${n}`]: 'core.commitGraph', [`GIT_CONFIG_VALUE_${n}`]: 'false', GIT_CONFIG_COUNT: String(n + 1) };
 };
 const GIT_ENV = graphOff({ ...process.env, GIT_NO_REPLACE_OBJECTS: '1', GIT_GRAFT_FILE: join(devNull, 'no-grafts') });

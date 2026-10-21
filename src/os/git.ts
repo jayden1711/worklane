@@ -64,14 +64,24 @@ export const GIT_FIXED_ENV: Readonly<Record<string, string>> = Object.freeze({
 });
 
 /**
+ * A GIT_CONFIG_COUNT as git reads it (strtoul, base 10, over the whole value): optional leading whitespace and `+`,
+ * then digits; empty or unset is 0. Anything else git refuses ("bogus count", or "too many entries" for a minus).
+ */
+const CONFIG_COUNT = /^[ \t\n\v\f\r]*\+?[0-9]+$/;
+
+/**
  * `env` (or this process's environment), with the fixed settings on top and the fixed config pairs after its own
- * GIT_CONFIG_COUNT pairs (a later pair wins). A count that isn't a whole number is git's refusal anyway; it is replaced.
+ * GIT_CONFIG_COUNT pairs (a later pair wins). A count git refuses (`0x1`, `1e0`, `1 `, `abc`, `-1`) is left as it is,
+ * with no pair added, so git still refuses it: read with Number(), it became a count git never accepted, and the
+ * caller's first pair was applied where plain git ran nothing (#927's second review, #1001). The fixed arguments
+ * still turn the commit-graph off for the runner's own gits.
  */
 export function gitEnv(env?: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const out: NodeJS.ProcessEnv = { ...(env ?? process.env), ...GIT_FIXED_ENV };
   // Own keys only: an unset count must never be read through Object.prototype (#846).
-  let n = Number(Object.hasOwn(out, 'GIT_CONFIG_COUNT') ? out.GIT_CONFIG_COUNT : '0');
-  if (!Number.isSafeInteger(n) || n < 0) n = 0;
+  const raw = Object.hasOwn(out, 'GIT_CONFIG_COUNT') ? out.GIT_CONFIG_COUNT : undefined;
+  let n = raw === undefined || raw === '' ? 0 : CONFIG_COUNT.test(raw) ? Number(raw) : NaN;
+  if (!Number.isSafeInteger(n)) return out;
   for (const [k, v] of GIT_FIXED_CONFIG) {
     out[`GIT_CONFIG_KEY_${n}`] = k;
     out[`GIT_CONFIG_VALUE_${n}`] = v;
