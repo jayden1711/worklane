@@ -787,6 +787,8 @@ export abstract class MergeFlow extends FixRuns {
     // main's per-decision fetch did (#869, #886).
     const passed = this.mergeDecisionFor(n, number, pr);
     const d = passed.auto ? await this.onFreshTip(() => this.mergeDecisionFor(n, number, pr)) : passed;
+    // A shutdown that cut that fetch short decides nothing (its failed fetch would hold the PR at this head; round 10).
+    if (passed.auto && this.shutdown.signal.aborted) return;
     // Nothing holds it but its tests' coverage run at this head, still to come (watchPr's startVacuityRun runs it in
     // the background): not merged, and not sent to the owner either; the pass after the run decides (#784).
     if (d.reasons.length === 1 && d.reasons[0] === VACUITY_UNMEASURED) return;
