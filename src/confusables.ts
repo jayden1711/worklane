@@ -2,24 +2,30 @@
 // (https://www.unicode.org/reports/tr39/#def-skeleton), from Unicode's own table (src/confusables-data.ts, generated
 // by scripts/dev/confusables-data.mjs). Locked with the review levels (src/review.ts SELF_MODIFICATION_PARTS).
 //
-// INVARIANT: bounded and fail closed. A path over MAX_CHECKED_PATH characters, or whose skeleton grows past
-// MAX_CHECKED_SKELETON, or a path reached once a change's work budget (LOOKALIKE_BUDGET, charged per comparison, per
-// character walked and per form made) is spent, isn't compared (further): it counts as a look-alike (the owner reads it). Every protected pattern is a glob (money paths too, since
-// round 6), compared by skeleton with a linear-time glob matcher (globMatch), never a backtracking RegExp.
+// INVARIANT: bounded and fail closed. A path over MAX_CHECKED_PATH characters, or with a run of more than MAX_MARK_RUN
+// combining marks, or one of whose forms grows past MAX_CHECKED_SKELETON at any pass, or a path reached once a
+// change's work budget (LOOKALIKE_BUDGET, charged per comparison, per character walked and per character a form's
+// pass reads and makes) is spent, isn't compared (further): it counts as a look-alike (the owner reads it). Every
+// protected pattern is a glob (money paths too, since round 6), compared by skeleton with a linear-time glob matcher
+// (globMatch), never a backtracking RegExp.
 import { CONFUSABLES } from './confusables-data.js';
 
 /** The longest path (in UTF-16 code units) compared; a longer one counts as a look-alike. Linux's PATH_MAX is 4096 bytes. */
 export const MAX_CHECKED_PATH = 1024;
 /** The longest skeleton compared (a character can map to up to 18): a path whose skeleton is longer counts as a look-alike. */
 export const MAX_CHECKED_SKELETON = 4096;
+/** The longest run of combining marks compared (UAX #15's stream-safe limit): a path with a longer one counts as a look-alike. */
+export const MAX_MARK_RUN = 30;
+const MARK_RUN = new RegExp(`\\p{M}{${MAX_MARK_RUN + 1}}`, 'u');
 /**
  * The work one change's look-alike check may do, in steps (PAIR_COST, WALK_COST, FORM_CHAR_COST below), charged as
  * the work is done. Once it is overdrawn, the path being compared and every further path count as look-alikes, not
- * compared (#763 rounds 6 and 7). Measured in the PR (round 7, scratchpad probes on a loaded 16-core machine): a step
- * costs about 0.4 to 1.1 ns across the shapes probed (short and long paths, inside and outside ASCII, few or 400
- * globs, globs that keep the walk alive), so spending the budget takes about 0.8 to 2.2 s; the slowest single
- * computeLevel measured, crafted to spend it, took about 2.5 s. A change of every file in this repo (1,424 paths)
- * doesn't spend it. How fast another machine spends it is a guess.
+ * compared (#763 rounds 6 to 8). Measured in the PR (round 8, scratchpad probes on a loaded 16-core machine): a step
+ * costs about 0.2 to 1.1 ns across the 20 shapes probed (short and long paths, inside and outside ASCII, few or 400
+ * globs, globs that keep the walk alive, characters whose forms grow 7 or 18 times, runs of 30 combining marks), so
+ * spending the budget takes at most about 2.2 s; the slowest single computeLevel measured, crafted to spend it, took
+ * about 2.7 s (main's own category matching included). A change of every file in this repo doesn't spend it. How
+ * fast another machine spends it is a guess.
  */
 export const LOOKALIKE_BUDGET = 2_000_000_000;
 
@@ -51,7 +57,7 @@ const HIDES_DOT = (ch: string): boolean => ch === DOTLESS_I || /^\p{Soft_Dotted}
  * `docs/releasing.md`; `rn` and `m`). Also drops a combining dot above after a soft-dotted letter or a dotless i
  * (with only other marks between), which the letter's own dot hides (UTS #39 section 5.4, #763 round 5).
  */
-export function skeleton(s: string): string {
+export function skeleton(s: string, cap = Infinity): string {
   const t = prototypes();
   let out = '';
   let base = '';
@@ -60,6 +66,8 @@ export function skeleton(s: string): string {
     if (!/^\p{M}$/u.test(ch)) base = ch;
     else if (ch === COMBINING_DOT_ABOVE && HIDES_DOT(base)) continue;
     out += t.get(ch.codePointAt(0)!) ?? ch;
+    // Past `cap` the caller compares nothing (#763 round 8): stop here, over it, rather than build the rest.
+    if (out.length > cap) return out;
   }
   return out.normalize('NFD');
 }
@@ -71,8 +79,6 @@ export function skeleton(s: string): string {
  */
 const fold = (s: string): string => s.toUpperCase().toLowerCase();
 
-/** The caseless skeleton: a name a case-insensitive file system may open as another's, and that reads as it. */
-const caseless = (s: string): string => fold(skeleton(fold(s)));
 
 /** Whether a string has a character outside ASCII. */
 const nonAscii = (s: string): boolean => /\P{ASCII}/u.test(s);
@@ -170,21 +176,55 @@ const mapGlob = (glob: string, f: (s: string) => string): string => glob.split(/
  * folded, so a Cyrillic letter beside a capital I for an l, `docs/R` + a Cyrillic e + `Ieasing.md`, folded first
  * reads as `reieasing`, while its skeleton folded reads as `releasing`).
  */
-const FORMS: Record<
-  'skeleton' | 'caseless' | 'skeleton-fold' | 'compat-skeleton' | 'compat-caseless' | 'compat-skeleton-fold' | 'skeleton-compat' | 'skeleton-compat-caseless' | 'skeleton-compat-fold',
-  (s: string) => string
-> = {
-  skeleton,
-  caseless,
-  'skeleton-fold': (s) => fold(skeleton(s)),
-  'compat-skeleton': (s) => skeleton(compat(s)),
-  'compat-caseless': (s) => caseless(compat(s)),
-  'compat-skeleton-fold': (s) => fold(skeleton(compat(s))),
-  'skeleton-compat': (s) => skeleton(compat(skeleton(s))),
-  'skeleton-compat-caseless': (s) => fold(skeleton(compat(skeleton(fold(s))))),
-  'skeleton-compat-fold': (s) => fold(skeleton(compat(skeleton(s)))),
-};
-type Form = keyof typeof FORMS;
+type Pass = 'fold' | 'skeleton' | 'compat';
+/** Each form as its passes, in order (#763 round 8: a path's forms are made pass by pass, each charged and capped). */
+const PASSES = {
+  skeleton: ['skeleton'],
+  caseless: ['fold', 'skeleton', 'fold'],
+  'skeleton-fold': ['skeleton', 'fold'],
+  'compat-skeleton': ['compat', 'skeleton'],
+  'compat-caseless': ['compat', 'fold', 'skeleton', 'fold'],
+  'compat-skeleton-fold': ['compat', 'skeleton', 'fold'],
+  'skeleton-compat': ['skeleton', 'compat', 'skeleton'],
+  'skeleton-compat-caseless': ['fold', 'skeleton', 'compat', 'skeleton', 'fold'],
+  'skeleton-compat-fold': ['skeleton', 'compat', 'skeleton', 'fold'],
+} as const satisfies Record<string, readonly Pass[]>;
+type Form = keyof typeof PASSES;
+const pass = (p: Pass, s: string, cap = Infinity): string => (p === 'fold' ? fold(s) : p === 'compat' ? compat(s) : skeleton(s, cap));
+/** Each form as one function, for a glob's literal runs (a glob is the owner's config, not the change's). */
+const FORMS = Object.fromEntries(Object.entries(PASSES).map(([f, ps]) => [f, (s: string) => ps.reduce((x: string, p: Pass) => pass(p, x), s)])) as Record<Form, (s: string) => string>;
+
+/**
+ * A path's forms `kinds`, made pass by pass (#763 round 8): passes the forms share are made once (each form's prefix
+ * of passes is remembered); `charge` is called with each pass's input length before it runs and its output length
+ * after, and a true answer (the budget is overdrawn) stops it ('spent'); a pass whose output is over
+ * MAX_CHECKED_SKELETON stops it too ('over', the skeleton stopping as soon as it gets there). The plain skeleton is
+ * the first form, so a path whose skeleton is over the cap builds nothing else. Before round 8 every form was built in
+ * full, each later one re-reading the grown string, and charged by the path's length only: an Arabic ligature the
+ * skeleton turns into 18 characters made a computeLevel take 16 to 24 s (measured by the round-7 delta check).
+ */
+function pathForms(v: string, kinds: readonly Form[], charge: (n: number) => boolean): [Form, string][] | 'spent' | 'over' {
+  const made = new Map<string, string>();
+  const out: [Form, string][] = [];
+  for (const f of kinds) {
+    let s = v;
+    let key = '';
+    for (const p of PASSES[f]) {
+      key += `/${p}`;
+      let next = made.get(key);
+      if (next === undefined) {
+        if (charge(s.length + 1)) return 'spent';
+        next = pass(p, s, MAX_CHECKED_SKELETON);
+        if (charge(next.length + 1)) return 'spent';
+        if (next.length > MAX_CHECKED_SKELETON) return 'over';
+        made.set(key, next);
+      }
+      s = next;
+    }
+    out.push([f, s]);
+  }
+  return out;
+}
 /** For a pure-ASCII path only the skeleton: its compatibility form is itself, and case counts only outside ASCII. */
 const ASCII_FORMS: readonly Form[] = ['skeleton'];
 const WIDE_FORMS: readonly Form[] = Object.keys(FORMS) as Form[];
@@ -368,11 +408,12 @@ function formOf(g: Ready['globs'][number], f: Form): readonly [Compiled, Compile
  *   short globs spent about 12 s under the engine's own review.yaml (6,000 paths) and 81 s under a config of 400 globs
  *   before the budget ran out (measured by the round-6 review);
  * - WALK_COST: one part of a glob visited for one character of the string (about 4 to 6 ns measured);
- * - FORM_CHAR_COST: one character of one form of a path (skeleton, fold, NFKC, reading) or of a glob's form made.
+ * - FORM_CHAR_COST: one character a pass of a path's form reads or makes (skeleton, fold, NFKC; round 8: the grown
+ *   string, not the path's length), one character of a reading, or of a glob's form made.
  */
 export const PAIR_COST = 50;
 export const WALK_COST = 5;
-export const FORM_CHAR_COST = 100;
+export const FORM_CHAR_COST = 20;
 
 /** Why a path counts as a look-alike: of which protected pattern, or that it wasn't compared (too long, or a failure). */
 export type Lookalike = { like: string } | { unchecked: string };
@@ -396,6 +437,10 @@ export type Lookalike = { like: string } | { unchecked: string };
  */
 export function lookalikeOf(path: string, patterns: readonly Protected[], budget?: { left: number }): Lookalike | null {
   if (path.length > MAX_CHECKED_PATH) return { unchecked: `longer than ${MAX_CHECKED_PATH} characters` };
+  // Normalizing a run of combining marks sorts it, in time that grows faster than its length (#763 round 8, measured:
+  // 1,000 marks out of order cost about 1.6 ns a budget unit where everything else costs at most 1.1). A run longer
+  // than Unicode's stream-safe limit (UAX #15: 30) isn't compared: no name needs one.
+  if (MARK_RUN.test(path)) return { unchecked: `it has a run of more than ${MAX_MARK_RUN} combining marks` };
   try {
     const r = readied(patterns);
     if (r.refused) return { unchecked: r.refused.refused };
@@ -405,19 +450,26 @@ export function lookalikeOf(path: string, patterns: readonly Protected[], budget
     const bare = withoutBlanks(path);
     const variants = bare === path ? [path] : [path, bare];
     const kinds = wide ? WIDE_FORMS : ASCII_FORMS;
-    // The forms' cost is charged before they are computed: FORM_CHAR_COST for each character of the path, each form.
-    if (budget) {
-      const before = FORM_CHAR_COST * variants.length * kinds.length * (path.length + 1);
-      if (before > budget.left) {
-        budget.left = 0;
-        return spent;
-      }
-      budget.left -= before;
+    // Each form once, pass by pass, and its reading once, each charged FORM_CHAR_COST a character of what it reads and
+    // makes, before and as it is made (#763 rounds 7 and 8). A pass over MAX_CHECKED_SKELETON stops it: not compared.
+    const charge = (n: number): boolean => {
+      if (!budget) return false;
+      budget.left -= FORM_CHAR_COST * n;
+      return budget.left < 0;
+    };
+    const over = { unchecked: `its skeleton is longer than ${MAX_CHECKED_SKELETON} characters` };
+    const forms: (readonly [Form, string])[] = [];
+    for (const v of variants) {
+      const made = pathForms(v, kinds, charge);
+      if (made === 'spent') return spent;
+      if (made === 'over') return over;
+      forms.push(...made);
     }
-    // Each form once, and its reading once (#763 round 7: outside the pattern loop).
-    const forms = variants.flatMap((v) => kinds.map((f) => [f, FORMS[f](v)] as const));
-    if (forms.some(([, s]) => s.length > MAX_CHECKED_SKELETON)) return { unchecked: `its skeleton is longer than ${MAX_CHECKED_SKELETON} characters` };
-    const read = forms.map(([f, s]) => [f, s, reading(s)] as const);
+    const read: (readonly [Form, string, string])[] = [];
+    for (const [f, s] of forms) {
+      if (charge(2 * (s.length + 1))) return spent;
+      read.push([f, s, reading(s)]);
+    }
     const asciiReadings = r.res.length && (wide || bare !== path) ? variants.map((v) => asciiReading(v)) : [];
     // INVARIANT (#763 round 7): the work is charged as it is done, after each pattern: every comparison PAIR_COST
     // whatever its length, every character walked WALK_COST times the glob's parts, every character of a glob's form
