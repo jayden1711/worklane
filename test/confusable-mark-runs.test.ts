@@ -148,12 +148,12 @@ for (const [shape, config] of [
   ['no-break-space-split halves', 'engine'],
   ['blank-split then voiced marks', 'short400'],
 ] as const) {
-  test(`#763 round 9: 5,000 paths, ${shape}, under ${config === 'engine' ? "the engine's review.yaml" : '400 short globs'}: held for the run, one computeLevel within LOOKALIKE_BOUND_MS`, () => {
+  // Round 10: the time is held in budget units (test/confusable-budget-units.test.ts), not by a wall-clock assertion.
+  test(`#763 round 9: 5,000 paths, ${shape}, under ${config === 'engine' ? "the engine's review.yaml" : '400 short globs'}: held for the run`, () => {
     const r = timed(config === 'engine' ? engine() : ReviewConfig.parse(SHORT400), shape);
     assert.equal(r.level, 'L3');
     // Held for the run of marks, not because the work budget ran out on them.
     assert.ok(r.held.includes(RUN) && !r.held.includes('budget'), `${Math.round(r.ms)} ms: ${r.held.slice(0, 400)}`);
-    assert.ok(r.ms < confusables.LOOKALIKE_BOUND_MS, `${Math.round(r.ms)} ms`);
   });
 }
 
@@ -161,7 +161,8 @@ test('#763 round 9: src/confusables.ts normalizes only in normalized(), which ch
   const src = readFileSync(join(repoRoot, 'src', 'confusables.ts'), 'utf8');
   const code = src.split('\n').filter((l) => !/^\s*(?:\/\/|\*|\/\*)/.test(l));
   const calls = code.filter((l) => /normalize(?!d)/.test(l));
-  assert.deepEqual(calls.map((l) => l.trim()), ['return s.normalize(form);']);
-  const helper = /function normalized\(s: string, form: 'NFD' \| 'NFKC'\): string \{\n\s*if \(overMarkRun\(s\)\) throw new MarkRunOver\([^\n]*\);\n\s*return s\.normalize\(form\);\n\}/;
+  assert.deepEqual(calls.map((l) => l.trim()), ['const out = s.normalize(form);']);
+  // Round 10: the helper counts what it reads before the check, and what it makes (normed, which pathForms charges).
+  const helper = /function normalized\(s: string, form: 'NFD' \| 'NFKC'\): string \{\n\s*normed \+= s\.length \+ 1;\n\s*if \(overMarkRun\(s\)\) throw new MarkRunOver\([^\n]*\);\n\s*const out = s\.normalize\(form\);\n\s*normed \+= out\.length \+ 1;\n\s*return out;\n\}/;
   assert.match(src, helper);
 });

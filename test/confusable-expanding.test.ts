@@ -2,7 +2,8 @@
 // form re-read the grown string, while the forms were charged by the path's length: one computeLevel took 16 to 24 s
 // (measured by the round-7 delta check). Now each pass is charged by what it reads and makes, the skeleton stops at
 // the cap, and the plain skeleton comes first. A long run of combining marks (sorting it grows faster than its
-// length) isn't compared at all. Each timing runs in a child process with a timeout.
+// length) isn't compared at all. Each run is in a child process with a timeout. Round 10: the bound is held in budget
+// units (test/confusable-budget-units.test.ts, the ligature shapes among them), not by a wall-clock assertion here.
 //
 // WHY the ligature is written as itself, with a name: no committed file holds a code point number; the first test
 // checks it is the character its name says.
@@ -14,7 +15,6 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { parse } from 'yaml';
 import { BRAND } from '../src/brand.js';
-import { LOOKALIKE_BOUND_MS as BOUND_MS } from '../src/confusables.js';
 import { ReviewConfig } from '../src/config/schema.js';
 import { computeLevel, type ChangeFile } from '../src/review.js';
 import { repoRoot } from './helpers.js';
@@ -43,17 +43,14 @@ console.log(JSON.stringify({ ms: performance.now() - t, level: r.level }));`;
   return JSON.parse(r.stdout.trim()) as { ms: number; level: string };
 }
 
-test('#763 round 8: 5,000 paths of 1,000 ligatures under the engine\'s review.yaml: one computeLevel within the bound, and held', () => {
-  const r = timed(engine(), 1_000, 5_000);
-  assert.ok(r.ms < BOUND_MS, `${Math.round(r.ms)} ms`);
-  assert.equal(r.level, 'L3');
+test('#763 round 8: 5,000 paths of 1,000 ligatures under the engine\'s review.yaml: one computeLevel finishes, and held', () => {
+  assert.equal(timed(engine(), 1_000, 5_000).level, 'L3');
 });
 
-test('#763 round 8: 5,000 paths of 220 ligatures (forms just under the cap) against 400 short globs: within the bound', () => {
+test('#763 round 8: 5,000 paths of 220 ligatures (forms just under the cap) against 400 short globs: finishes, held once the budget is spent', () => {
   const LEVELS = { L0_auto: { when: ['docs-only', 'tests-only'], max_lines: 200 }, L1_evaluator: { when: ['app-non-money'], max_lines: 400, max_files: 10 }, L2_notify: { when: ['dependency'] } };
   const cfg = ReviewConfig.parse({ version: 1, categories: { crit: Array.from({ length: 400 }, (_, i) => `svc${i}/**`) }, levels: { ...LEVELS, L3_human: { when: ['crit'], over_lines: 100_000_000 } } });
-  const r = timed(cfg, 220, 5_000);
-  assert.ok(r.ms < BOUND_MS, `${Math.round(r.ms)} ms`);
+  assert.equal(timed(cfg, 220, 5_000).level, 'L3');
 });
 
 test('#763 round 8: a path with a run of more than 30 combining marks isn\'t compared: it is held, naming why', () => {

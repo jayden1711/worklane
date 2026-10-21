@@ -26,18 +26,37 @@ export const MAX_MARK_RUN = 30;
  * characters outside \p{M} whose NFKC form starts with a non-starter, and every non-starter is \p{M}.
  */
 export const HALFWIDTH_SOUND_MARKS = 'ﾞﾟ';
-/** A run of characters that are combining marks or whose NFKC form starts with one (a non-starter). */
-const MARKS = new RegExp(`[\\p{M}${HALFWIDTH_SOUND_MARKS}]+`, 'gu');
+/** A character that is a combining mark or whose NFKC form starts with one (a non-starter). */
+const MARK = new RegExp(`^[\\p{M}${HALFWIDTH_SOUND_MARKS}]$`, 'u');
+/** Each code point's kind, filled as met (0 not yet, 1 not a mark, 2 a mark: MARK), made on first use. */
+let markKinds: Uint8Array | undefined;
 /**
- * Whether `s` has a run of more than MAX_MARK_RUN marks (MARKS), counted in characters. One pass: each run is matched
- * once, greedily (#763 round 9: a pattern of 31 marks retried from every mark of a run, 160 microseconds on a
- * 1,000-character path of runs of 30, measured, where this takes about 9).
+ * Whether `s` has a run of more than MAX_MARK_RUN marks (MARK), counted in characters. One pass over its code units,
+ * each code point classified once per process (#763 round 10: a global RegExp's runs cost about 37 ns a character,
+ * measured by the round-9 adversarial review; round 9's first version, a pattern of 31 marks retried from every
+ * mark, cost 160 microseconds a 1,000-character path).
  */
 function overMarkRun(s: string): boolean {
-  MARKS.lastIndex = 0;
-  for (let m = MARKS.exec(s); m; m = MARKS.exec(s)) if (m[0].length > MAX_MARK_RUN && [...m[0]].length > MAX_MARK_RUN) return true;
+  let run = 0;
+  for (let i = 0; i < s.length; i++) {
+    const c = s.codePointAt(i)!;
+    if (c > 65535) i++;
+    let kind = 1;
+    if (c >= 128) {
+      markKinds ??= new Uint8Array(17 * 65536);
+      kind = markKinds[c]!;
+      if (kind === 0) markKinds[c] = kind = MARK.test(String.fromCodePoint(c)) ? 2 : 1;
+    }
+    if (kind === 1) run = 0;
+    else if (++run > MAX_MARK_RUN) return true;
+  }
   return false;
 }
+/**
+ * Characters every normalization and skeleton read or made (#763 round 10): normalized and skeleton count what they
+ * do as they do it, so a pass refused partway (MarkRunOver) is charged for the part it did (pathForms).
+ */
+let normed = 0;
 /** Thrown by normalized for a string with a longer run than MAX_MARK_RUN; lookalikeOf holds the path for it. */
 class MarkRunOver extends Error {}
 /**
@@ -50,21 +69,27 @@ class MarkRunOver extends Error {}
  * line of this module normalizes.
  */
 function normalized(s: string, form: 'NFD' | 'NFKC'): string {
+  normed += s.length + 1;
   if (overMarkRun(s)) throw new MarkRunOver(`a run of more than ${MAX_MARK_RUN} combining marks`);
-  return s.normalize(form);
+  const out = s.normalize(form);
+  normed += out.length + 1;
+  return out;
 }
 /**
- * The work one change's look-alike check may do, in steps (PAIR_COST, WALK_COST, FORM_CHAR_COST below), charged as
- * the work is done. Once it is overdrawn, the path being compared and every further path count as look-alikes, not
- * compared (#763 rounds 6 to 8). Sized so that spending it all keeps one computeLevel within LOOKALIKE_BOUND_MS. A
- * change of every file in this repo doesn't spend it.
+ * The work one change's look-alike check may do, in steps (PAIR_COST, WALK_COST, FORM_CHAR_COST and
+ * RUN_HOLD_CHAR_COST below), charged as the work is done. Once it is overdrawn, the path being compared and every
+ * further path count as look-alikes, not compared (#763 rounds 6 to 8), and no further work is done on them (round
+ * 10). Sized (round 10) so that the slowest shape found, 5,000 paths, takes under half of LOOKALIKE_BOUND_MS for one
+ * computeLevel on the machine measured; it was 2 billion until round 9, which took 7.46 s on CI. A change of every
+ * file in this repo doesn't spend it.
  */
-export const LOOKALIKE_BUDGET = 2_000_000_000;
+export const LOOKALIKE_BUDGET = 1_000_000_000;
 /**
- * The time bound (#763 round 9), in ms: one computeLevel, its look-alike check included, budget spent or not. The
- * timing tests (test/confusable-time-bound.test.ts, test/confusable-expanding.test.ts and
- * test/confusable-mark-runs.test.ts) hold the slowest shapes found in review to it, each in a child process. Held on
- * the machines those tests run on; how fast another machine is, is a guess.
+ * The time bound (#763 rounds 9 and 10), in ms: one computeLevel of up to 5,000 changed paths of up to 1,020
+ * characters, its look-alike check included, budget spent or not. Past that size main's own per-path category
+ * matching grows on its own. The tests that hold it count budget units (deterministic: test/confusable-*.test.ts);
+ * one coarse wall-clock test (test/confusable-mark-runs.test.ts) runs the slowest shape found against it in a child
+ * process. Measured on one machine under load; how fast another machine is, is a guess.
  */
 export const LOOKALIKE_BOUND_MS = 6_000;
 
@@ -100,13 +125,19 @@ export function skeleton(s: string, cap = Infinity): string {
   const t = prototypes();
   let out = '';
   let base = '';
-  for (const ch of normalized(s, 'NFD')) {
+  const nfd = normalized(s, 'NFD');
+  // What the loop reads (round 10); what it makes is counted when it is normalized, or here when it stops at `cap`.
+  normed += nfd.length;
+  for (const ch of nfd) {
     if (IGNORABLE.test(ch)) continue;
     if (!/^\p{M}$/u.test(ch)) base = ch;
     else if (ch === COMBINING_DOT_ABOVE && HIDES_DOT(base)) continue;
     out += t.get(ch.codePointAt(0)!) ?? ch;
     // Past `cap` the caller compares nothing (#763 round 8): stop here, over it, rather than build the rest.
-    if (out.length > cap) return out;
+    if (out.length > cap) {
+      normed += out.length;
+      return out;
+    }
   }
   return normalized(out, 'NFD');
 }
@@ -229,7 +260,12 @@ const PASSES = {
   'skeleton-compat-fold': ['skeleton', 'compat', 'skeleton', 'fold'],
 } as const satisfies Record<string, readonly Pass[]>;
 type Form = keyof typeof PASSES;
-const pass = (p: Pass, s: string, cap = Infinity): string => (p === 'fold' ? fold(s) : p === 'compat' ? compat(s) : skeleton(s, cap));
+function pass(p: Pass, s: string, cap = Infinity): string {
+  if (p !== 'fold') return p === 'compat' ? compat(s) : skeleton(s, cap);
+  const out = fold(s);
+  normed += s.length + out.length + 2;
+  return out;
+}
 /** Each form as one function, for a glob's literal runs (a glob is the owner's config, not the change's). */
 const FORMS = Object.fromEntries(Object.entries(PASSES).map(([f, ps]) => [f, (s: string) => ps.reduce((x: string, p: Pass) => pass(p, x), s)])) as Record<Form, (s: string) => string>;
 
@@ -252,9 +288,16 @@ function pathForms(v: string, kinds: readonly Form[], charge: (n: number) => boo
       key += `/${p}`;
       let next = made.get(key);
       if (next === undefined) {
-        if (charge(s.length + 1)) return 'spent';
-        next = pass(p, s, MAX_CHECKED_SKELETON);
-        if (charge(next.length + 1)) return 'spent';
+        // No pass once the budget is spent; each pass is charged what it read and made (normed), even when
+        // normalized refuses it partway (round 10: such a pass was charged its input only, 7.5 to 11 ns a unit).
+        if (charge(0)) return 'spent';
+        const before = normed;
+        try {
+          next = pass(p, s, MAX_CHECKED_SKELETON);
+        } finally {
+          charge(normed - before);
+        }
+        if (charge(0)) return 'spent';
         if (next.length > MAX_CHECKED_SKELETON) return 'over';
         made.set(key, next);
       }
@@ -460,6 +503,15 @@ function formOf(g: Ready['globs'][number], f: Form): readonly [Compiled, Compile
 export const PAIR_COST = 50;
 export const WALK_COST = 5;
 export const FORM_CHAR_COST = 20;
+/**
+ * The least a path held for a run of marks is charged, per character of the path (#763 round 10): about what
+ * comparing a path of that length costs (1,400 to 1,500 units a character for 1,000-character paths outside ASCII
+ * under the engine's review.yaml, measured with the round-10 probes). So holding a path for its run is never cheaper
+ * on the budget than comparing it, and the budget runs out after about as many such paths as compared ones (about
+ * 1,300 of 1,020 characters at LOOKALIKE_BUDGET). Before round 10 a path refused partway through a pass was charged
+ * that pass's input only: 90,000 of them added 31.6 s (measured by the round-9 delta check).
+ */
+export const RUN_HOLD_CHAR_COST = 1_500;
 
 /** Why a path counts as a look-alike: of which protected pattern, or that it wasn't compared (too long, or a failure). */
 export type Lookalike = { like: string } | { unchecked: string };
@@ -483,30 +535,42 @@ export type Lookalike = { like: string } | { unchecked: string };
  */
 export function lookalikeOf(path: string, patterns: readonly Protected[], budget?: { left: number }): Lookalike | null {
   if (path.length > MAX_CHECKED_PATH) return { unchecked: `longer than ${MAX_CHECKED_PATH} characters` };
-  // Normalizing a run of combining marks sorts it, in time that grows faster than its length (#763 round 8). A run
-  // longer than Unicode's stream-safe limit (UAX #15: 30) isn't compared: no name needs one. Here the path as
-  // written; normalized checks every string the check normalizes too (round 9: a run that only forms once blanks are
-  // taken out, or under NFKC).
-  if (overMarkRun(path)) return { unchecked: `it has a run of more than ${MAX_MARK_RUN} combining marks` };
+  const spent = { unchecked: `this change's look-alike work budget (${LOOKALIKE_BUDGET} glob-matching steps) is spent` };
+  // Each form once, pass by pass, and its reading once, each charged FORM_CHAR_COST a character of what it reads and
+  // makes, as it is made (#763 rounds 7, 8 and 10). A pass over MAX_CHECKED_SKELETON stops it: not compared.
+  const charge = (n: number): boolean => {
+    if (!budget) return false;
+    budget.left -= FORM_CHAR_COST * n;
+    // Spent at 0 too (round 10): charge(0) is the check before any work.
+    return budget.left <= 0;
+  };
+  // A path held for a run of marks: charged at least RUN_HOLD_CHAR_COST a character in all (round 10).
+  const start = budget?.left ?? 0;
+  const heldForRun = (why: string): Lookalike => {
+    if (budget) budget.left = Math.min(budget.left, start - RUN_HOLD_CHAR_COST * (path.length + 1));
+    return { unchecked: why };
+  };
   try {
     const r = readied(patterns);
     if (r.refused) return { unchecked: r.refused.refused };
-    const spent = { unchecked: `this change's look-alike work budget (${LOOKALIKE_BUDGET} glob-matching steps) is spent` };
-    if (budget && budget.left <= 0) return spent;
+    // INVARIANT (#763 round 10): no work on a path once the budget is spent, and every read of the path below is
+    // charged by its length before it is made (the run checks and the blank-free variant), so a path held for its run
+    // costs the budget what it cost the machine.
+    if (charge(0)) return spent;
+    // Normalizing a run of combining marks sorts it, in time that grows faster than its length (#763 round 8). A run
+    // longer than Unicode's stream-safe limit (UAX #15: 30) isn't compared: no name needs one. Here the path as
+    // written; normalized checks every string the check normalizes too (round 9: a run that only forms once blanks
+    // are taken out, or under NFKC).
+    charge(path.length + 1);
+    if (overMarkRun(path)) return heldForRun(`it has a run of more than ${MAX_MARK_RUN} combining marks`);
     const wide = nonAscii(path);
+    charge(path.length + 1);
     const bare = withoutBlanks(path);
     const variants = bare === path ? [path] : [path, bare];
     // The blank-free variant's runs before any form is made (round 9): normalized would refuse it anyway, after the
     // path's own forms.
-    if (bare !== path && overMarkRun(bare)) throw new MarkRunOver('without its blanks');
+    if (bare !== path && (charge(bare.length + 1), overMarkRun(bare))) throw new MarkRunOver('without its blanks');
     const kinds = wide ? WIDE_FORMS : ASCII_FORMS;
-    // Each form once, pass by pass, and its reading once, each charged FORM_CHAR_COST a character of what it reads and
-    // makes, before and as it is made (#763 rounds 7 and 8). A pass over MAX_CHECKED_SKELETON stops it: not compared.
-    const charge = (n: number): boolean => {
-      if (!budget) return false;
-      budget.left -= FORM_CHAR_COST * n;
-      return budget.left < 0;
-    };
     const over = { unchecked: `its skeleton is longer than ${MAX_CHECKED_SKELETON} characters` };
     const forms: (readonly [Form, string])[] = [];
     for (const v of variants) {
@@ -565,7 +629,7 @@ export function lookalikeOf(path: string, patterns: readonly Protected[], budget
     }
     return null;
   } catch (e) {
-    if (e instanceof MarkRunOver) return { unchecked: `it has a run of more than ${MAX_MARK_RUN} combining marks once its blanks are taken out or it is normalized` };
+    if (e instanceof MarkRunOver) return heldForRun(`it has a run of more than ${MAX_MARK_RUN} combining marks once its blanks are taken out or it is normalized`);
     return { unchecked: `the check failed: ${(e as Error).message}` };
   }
 }
