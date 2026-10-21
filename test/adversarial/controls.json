@@ -30,6 +30,32 @@
       "base": { "src/totals.ts": "export const total = 1;\n" },
       "change": [{ "write": "src/totals.ts", "text": "export const total = 2;\n" }],
       "expect": { "decision": "merges", "configs": ["default", "loosened"], "scopes": ["engine", "managed-app"] }
+    },
+    {
+      "id": "control-planned-app-change",
+      "attack": "a planned task whose PR changes only what its plan lists",
+      "source": "the suite's own control (outside-plan cases)",
+      "base": { "web/totals.js": "export const total = 1;\n" },
+      "change": [{ "write": "web/totals.js", "text": "export const total = 2;\n" }],
+      "inputs": { "plan": ["web/totals.js"] },
+      "expect": { "decision": "merges", "configs": ["engine", "default", "loosened"], "scopes": ["engine", "managed-app"] }
+    },
+    {
+      "id": "control-test-added-weakening-read",
+      "attack": "a new test, with the change read for a weakened test, lint or guard",
+      "source": "the suite's own control (weakening cases)",
+      "change": [{ "write": "test/round.test.ts", "text": "test('totals round', () => {\n  assert.equal(round(2.5), 3);\n});\n" }],
+      "inputs": { "weakening": true },
+      "expect": { "decision": "merges", "configs": ["engine", "default", "loosened"], "scopes": ["engine", "managed-app"] }
+    },
+    {
+      "id": "control-app-change-in-flow",
+      "attack": "a small app change outside every locked path, decided by the coordinator's own mergeDecisionFor",
+      "source": "the suite's own control (flow cases)",
+      "base": { "web/totals.js": "export const total = 1;\n" },
+      "change": [{ "write": "web/totals.js", "text": "export const total = 2;\n" }],
+      "flow": {},
+      "expect": { "decision": "merges", "configs": ["engine", "default", "loosened"], "scopes": ["engine", "managed-app"] }
     }
   ]
 }
