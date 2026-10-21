@@ -123,7 +123,8 @@ function globAccesses(input: Record<string, unknown>, cwd: string): Access[] {
   const path = str(input.path);
   const base = resolve(cwd, path ?? '.');
   // The path is checked as a path too, whatever the pattern points at: an absolute or `..` pattern leaves it (#887 review).
-  const own: Access[] = path ? [{ kind: 'path', target: base }] : [];
+  // As written too, as before #847 (round 5): an absolute path keeps its `..` for an absolute glob (Secrets.written).
+  const own: Access[] = path ? [{ kind: 'path', target: base }, ...(path !== base ? [{ kind: 'path' as const, target: path }] : [])] : [];
   const pattern = str(input.pattern) ?? '**';
   if (pattern.length > PATH_MAX) return [...own, tooLong('Glob pattern')];
   const bad = escaped(pattern, 'Glob pattern');
@@ -144,17 +145,20 @@ function mayBeSeveral(glob: string): boolean {
 }
 
 function grepAccesses(input: Record<string, unknown>, cwd: string): Access[] {
-  const base = resolve(cwd, str(input.path) ?? '.');
+  const path = str(input.path);
+  const base = resolve(cwd, path ?? '.');
+  // Its path as written too, as before #847 (round 5): see globAccesses.
+  const own: Access[] = path ? [{ kind: 'path', target: path }] : [];
   const glob = str(input.glob);
-  if (glob && glob.length > PATH_MAX) return [tooLong('Grep glob')];
+  if (glob && glob.length > PATH_MAX) return [...own, tooLong('Grep glob')];
   const bad = glob ? escaped(glob, 'Grep glob') : null;
-  if (bad) return [bad];
+  if (bad) return [...own, bad];
   // WHY (#887 review): whether the glob reaches ripgrep as one --glob or several is undocumented, so such a glob filters nothing.
   const alts = glob && !mayBeSeveral(glob) ? alternatives(glob) : null;
-  if (!alts) return [{ kind: 'tree', target: base, filter: null }];
+  if (!alts) return [...own, { kind: 'tree', target: base, filter: null }];
   // ripgrep matches a glob without a slash against each name at any depth, and one with a slash against the path
   // under the searched directory. Both readings are checked, so neither is the one that slips through.
-  const out: Access[] = [{ kind: 'tree', target: base, filter: alts.map((a) => `**/${a.replace(/^\/+/, '')}`) }];
+  const out: Access[] = [...own, { kind: 'tree', target: base, filter: alts.map((a) => `**/${a.replace(/^\/+/, '')}`) }];
   for (const a of alts) if (a.includes('/')) out.push(patternAccess(base, a.replace(/^\/+/, '')));
   return out;
 }
@@ -316,6 +320,8 @@ interface Glob {
   rest: Segs;
   /** It names a directory to start from: a walk for it never skips .git or node_modules (#887 review). */
   literalStart: boolean;
+  /** An absolute glob ("/..."): before #847 it was tested on the path as the call wrote it, `..` kept (see Secrets.written). */
+  fromRoot: boolean;
 }
 
 function parseGlob(g: string, ctx: SecretContext): Glob | null {
@@ -326,7 +332,7 @@ function parseGlob(g: string, ctx: SecretContext): Glob | null {
   if (rest.endsWith('/')) rest += '**';
   const s = split(rest);
   const anywhere = !home && !s.literal.length && (s.rest[0] ?? '').includes('**');
-  return { base, homeOnly: home, re: globToRegExp(rest), at: anywhere ? '/' : resolve(base, ...s.literal), rest: segsOf(s.rest), literalStart: s.literal.length > 0 };
+  return { base, homeOnly: home, re: globToRegExp(rest), at: anywhere ? '/' : resolve(base, ...s.literal), rest: segsOf(s.rest), literalStart: s.literal.length > 0, fromRoot: !home && isAbsolute(g) };
 }
 
 /**
@@ -354,22 +360,35 @@ export class Secrets {
     this.neg = globs.filter((g) => g.startsWith('!')).flatMap((g) => parse(g.slice(1)));
   }
 
-  private static hit(g: Glob, abs: string, dirToo: boolean): boolean {
-    const rel = posixRel(g.base, abs);
+  /** `written`: the path as the call wrote it (Secrets.written), which an absolute glob is tested on instead of `abs`. */
+  private static hit(g: Glob, abs: string, dirToo: boolean, written?: string): boolean {
+    const rel = written !== undefined && g.fromRoot ? written.split('\\').join('/').replace(/^\//, '') : posixRel(g.base, abs);
     if (g.homeOnly && rel.startsWith('..')) return false;
     return g.re.test(rel) || (dirToo && g.re.test(`${rel}/`));
   }
 
-  /** Is this absolute path a secret, or (`dirToo`) a directory every path under which is one? */
-  at(abs: string, dirToo = true): boolean {
-    return this.pos.some((g) => Secrets.hit(g, abs, dirToo)) && !this.neg.some((g) => Secrets.hit(g, abs, false));
+  /**
+   * Is this absolute path a secret, or (`dirToo`) a directory every path under which is one? With `written`, an absolute
+   * glob (and its exclusions) is tested on the path as written instead, as before #847.
+   */
+  at(abs: string, dirToo = true, written?: string): boolean {
+    return this.pos.some((g) => Secrets.hit(g, abs, dirToo, written)) && !this.neg.some((g) => Secrets.hit(g, abs, false, written));
+  }
+
+  private expanded(target: string): string {
+    const home = this.ctx.home;
+    return home && (target === '~' || target.startsWith('~/')) ? resolve(home, target.slice(2)) : target;
   }
 
   /** A path as the call names it, made absolute ("~" is the home directory). */
   absolute(target: string, cwd: string): string {
-    const home = this.ctx.home;
-    const expanded = home && (target === '~' || target.startsWith('~/')) ? resolve(home, target.slice(2)) : target;
-    return resolve(cwd, expanded);
+    return resolve(cwd, this.expanded(target));
+  }
+
+  /** A path as the call wrote it, made absolute only when it is relative: an absolute one keeps its `..` and `.` segments. */
+  written(target: string, cwd: string): string {
+    const e = this.expanded(target);
+    return isAbsolute(e) ? e : resolve(cwd, e);
   }
 
   /**
@@ -461,6 +480,14 @@ export class Secrets {
     // WHY (#887 review): the budget covers every access, path checks too, not only the walks.
     if (this.late()) return `this call is too large to check for secret or hidden files (over ${WALK_MS / 1000} s); give ${tool} fewer or shorter paths`;
     const abs = this.absolute(a.target, cwd);
+    // WHY (#887 review, round 5): before #847 an absolute glob was tested on an absolute path as written, `..` kept, so
+    // a path that steps into a directory it covers and back out was refused. That form is tested too, by its text alone
+    // (no file touched), and refused past WORD_MAX before the match.
+    const written = this.written(a.target, cwd);
+    if (written !== abs) {
+      if (written.length > WORD_MAX) return `a path longer than ${WORD_MAX} characters as written can't be checked for secret files`;
+      if (this.at(abs, true, written)) return `${clip(a.target)} holds credentials; agents never read them`;
+    }
     if (abs.length > PATH_MAX) {
       // A tool's path that long is refused.
       if (a.kind !== 'path' || a.from !== 'word') return `a path longer than ${PATH_MAX} characters can't be checked for secret files`;
