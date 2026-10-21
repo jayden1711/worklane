@@ -750,8 +750,14 @@ const LINUX_SANDBOX = [
   'above() { local d=$1 n; while d=${d%/*}; [ -n "$d" ]; do [ -n "${seen[$d]}" ] && continue; seen[$d]=1; dirs+=("$d"); n=${d//[!\\/]/}; [ "${#n}" -gt "$maxd" ] && maxd=${#n}; done; }',
   // Refusals collected, each once, so one message names every path. Quoted: the agent names them (no forged lines).
   'note() { [ -n "${said[$1]}" ] && return; said[$1]=1; bad+=("$1"); }',
-  `refuse() { local t; named[$1]=1; t=$("$rl" -- "$1" 2>/dev/null); note "project command not run: \${1@Q} is a symlink (to \${t@Q}) the agent user could change (it owns or can write its directory), on the way to a credential its sandbox hides, so one project command could swap it for the next. If you didn't create it, remove it as the agent user: sudo -u $u rm -- \${1@Q}. If you did, replace it with a real directory the agent may read, or name the credential's real path in credentials.yaml"; }`,
-  `unres() { note "project command not run: \${1@Q} $2; name the credential's real path in credentials.yaml"; }`,
+  // (Set while a link in the home is checked (`links` below), $lk names it: the refusals then speak of that link.)
+  `refuse() { local t; named[$1]=1; t=$("$rl" -- "$1" 2>/dev/null); if [ -n "$lk" ]; then note "project command not run: \${lk@Q} is a symlink in the agent user's home that leads through \${1@Q}, a symlink (to \${t@Q}) the agent user could re-aim (it owns or can write its directory): a command could point it elsewhere and write, through \${lk@Q}, what an agent-user process outside the sandbox reads later. Point \${lk@Q} at the real path, or remove it as the agent user: sudo -u $u rm -- \${lk@Q}"; return; fi; note "project command not run: \${1@Q} is a symlink (to \${t@Q}) the agent user could change (it owns or can write its directory), on the way to a credential its sandbox hides, so one project command could swap it for the next. If you didn't create it, remove it as the agent user: sudo -u $u rm -- \${1@Q}. If you did, replace it with a real directory the agent may read, or name the credential's real path in credentials.yaml"; }`,
+  `unres() { if [ -n "$lk" ]; then note "project command not run: \${lk@Q}, a symlink in the agent user's home, leads to a path that $2 (at \${cur:-/}); point it at the real path, or remove it as the agent user: sudo -u $u rm -- \${lk@Q}"; return; fi; note "project command not run: \${1@Q} $2; name the credential's real path in credentials.yaml"; }`,
+  // Link mode only (#798): a directory or file on a link's way, by the cw the walk just worked out. In the home it is
+  // read-only inside the sandbox (not the agent's to change there: cw=0); above the home it is bound onto itself (its
+  // writable siblings don't matter); anywhere else, one the agent owns or can write is where a command could plant or
+  // re-aim: OW, with the first such path in OWAT.
+  'hop() { local d=${1:-/}; [ -n "$lk" ] && [ "$cw" = 1 ] || return 0; case $d in "$hr"|"$hr"/*) cw=0; return 0 ;; esac; [ "$d" = / ] && return 0; case $hr in "$d"/*) return 0 ;; esac; [ "$OW" = 1 ] || OWAT=$d; OW=1; }',
   // INVARIANT (#787 rounds 7, 8): each decision about a component rests on ONE lstat (its type and owner, or its
   // errno), never two tests the agent could change in between. Stable because the agent can't change who owns a
   // directory, or whether one it doesn't own is writable to it. Resolved one component and symlink at a time:
@@ -762,28 +768,31 @@ const LINUX_SANDBOX = [
   //   coordinator's, unopenable by that name. Under the agent's own, it could make it searchable again: refused;
   // - any other error, or a name too long to check: refused.
   `st() { local o; o=$("$stt" -c '%F/%u' -- "$1" 2>&1); S=$?; if [ "$S" -eq 0 ]; then T=\${o%/*} U=\${o##*/}; else E=\${o##*: }; fi; }`,
-  'walk() { local todo=${1#/} cur= c t n=0 own=0 cw=0',
-  '  if [ -w / ]; then cw=1 own=1; fi',
+  // `walk <path>` from /; `walk <relative path> <home>` from the (resolved) home, for a link in it (link mode).
+  'walk() { local todo=${1#/} cur= c t n=0 own=0 cw=0; OW=0 OWAT= P=',
+  '  if [ -n "$2" ]; then cur=$2 todo=$1 own=1; elif [ -w / ]; then cw=1 own=1; fi',
   '  while [ -n "$todo" ]; do',
   '    c=${todo%%/*}; if [ "$c" = "$todo" ]; then todo=; else todo=${todo#*/}; fi',
   // A `..` (only in a root link's target; hide paths with one are refused) binds the directory it leaves first: no
   // command can remove or rename it.
   '    case $c in ""|.) continue ;; ..) [ -n "$cur" ] && above "$cur/."; cur=${cur%/*}; st "${cur:-/}"',
   '      if [ "$S" -ne 0 ]; then unres "$1" "cannot be checked ($E)"; return 2; fi',
-  '      cw=0; if [ "$U" = "$UID" ] || [ -w "$cur/" ]; then cw=1 own=1; fi; continue ;; esac',
+  '      cw=0; if [ "$U" = "$UID" ] || [ -w "$cur/" ]; then cw=1 own=1; fi; hop "$cur"; continue ;; esac',
   `    if [ "\${#c}" -gt 255 ] || [ $((\${#cur} + \${#c} + 1)) -ge 4096 ]; then unres "$1" "resolves to a name too long to check"; return 2; fi`,
   '    st "$cur/$c"',
   '    if [ "$S" -ne 0 ]; then',
-  '      case $E in "No such file or directory"|"Not a directory") return 1 ;; "Permission denied") if [ "$own" = 0 ]; then return 1; fi',
+  '      case $E in "No such file or directory"|"Not a directory") P=$cur/$c; return 1 ;; "Permission denied") if [ "$own" = 0 ]; then P=$cur/$c; return 1; fi',
   '        unres "$1" "goes through a directory the agent user owns or can write but cannot search now (it could make it searchable again)"; return 2 ;; esac',
   '      unres "$1" "cannot be checked ($E)"; return 2',
   '    fi',
   '    case $T in',
   '      "symbolic link") n=$((n + 1)); if [ "$n" -gt 40 ] || [ "$cw" = 1 ]; then refuse "$cur/$c"; return 2; fi',
   '        above "$cur/$c"; t=$("$rl" -- "$cur/$c") || { refuse "$cur/$c"; return 2; }',
-  '        case $t in /*) cur= cw=0; if [ -w / ]; then cw=1 own=1; fi ;; esac; todo=${t#/}${todo:+/$todo} ;;',
-  '      directory) cur=$cur/$c; cw=0; if [ "$U" = "$UID" ] || [ -w "$cur/" ]; then cw=1 own=1; fi ;;',
-  '      *) cur=$cur/$c cw=0 ;;',
+  '        case $t in /*) cur= cw=0; if [ -w / ]; then cw=1 own=1; fi; hop / ;; esac; todo=${t#/}${todo:+/$todo} ;;',
+  '      directory) cur=$cur/$c; cw=0; if [ "$U" = "$UID" ] || [ -w "$cur/" ]; then cw=1 own=1; fi; hop "$cur" ;;',
+  // (In link mode, a file the agent owns or can write counts as a hop too; a device, such as /dev/null, doesn't: a
+  // write to it plants nothing.)
+  '      *) cur=$cur/$c cw=0; if [ -n "$lk" ] && [ "$T" != "character special file" ] && [ "$T" != "block special file" ] && { [ "$U" = "$UID" ] || [ -w "$cur" ]; }; then cw=1; hop "$cur"; cw=0; fi ;;',
   '    esac',
   '  done; R=${cur:-/} RT=$T; }',
   'add() { local r; case $1 in /proc|/proc/*|/sys|/sys/*|/dev|/dev/*) unres "$1" "is under /proc, /sys or /dev"; return ;; esac',
@@ -797,35 +806,50 @@ const LINUX_SANDBOX = [
   'walk "$h"; hw=$?; hr= cfg=',
   'if [ "$hw" -eq 0 ] && [ "$RT" = directory ] && [ "$R" != / ]; then hr=$R; list "$hr" ".claude*"; walk "$hr/.config"; if [ $? -eq 0 ] && [ "$RT" = directory ]; then cfg=$R; list "$R" "*-claude-key"; fi',
   `elif [ "$hw" -ne 2 ]; then note "project command not run: the agent user's home \${h@Q} is not a directory (other than /) its sandbox can make read-only, so a command could plant config there that the agent user reads outside the sandbox; set the instance's run_as.agent_home to the agent user's real home"; fi`,
-  // INVARIANT (#798): the read-only home is only as good as where its links lead. A symlink directly in the home or
-  // directly in ~/.config that resolves (every link followed, `..` and a missing tail included: readlink -m) outside
-  // the home would let a command write, through it, what an agent-user process outside the sandbox reads later
-  // (~/.profile, ~/.ssh, ~/.local to /tmp): refused, all named at once. Bounded: past LINK_CAP symlinks in one
+  // INVARIANT (#798): the read-only home is only as good as where its links lead. Each symlink directly in the home or
+  // directly in ~/.config is walked from the home, one component and one link at a time, with walk's own rule (link
+  // mode, `hop`): every hop outside the home (a directory, a link, the file it ends at) must be one the agent user
+  // neither owns nor can write, and a link is only followed from a directory it can't write. Else a command could
+  // write there, or re-aim a hop (`~/.profile -> /x/hop/profile`, `/x/hop -> ~/dotfiles`, /x the agent's) and then
+  // write through the home's link, what an agent-user process outside the sandbox reads later: refused, every link
+  // named at once. Allowed: links inside the home (read-only), a device (/dev/null), and links whose every hop only
+  // root can change (a skeleton's `~/.ghcup -> /usr/local/.ghcup`); what those reach is bound read-only in the
+  // sandbox, so nothing under it is written either. One that reaches / or the command's working directory is refused
+  // (binding it read-only would take the command's own directory too). Bounded: past LINK_CAP symlinks in one
   // directory, refused rather than run with some unchecked. ~/.cache and ~/.npm become throwaway mounts, never through
   // a link (a write there would reach, and outlive the command at, what it points to): refused as links at all.
-  `links() { local o n=0 p t; o=$("$fnd" "$1" -mindepth 1 -maxdepth 1 -type l -printf "%f/" 2>/dev/null) || { note "project command not run: \${1@Q} cannot be listed for symlinks that could lead out of the agent user's home"; return; }`,
+  // Links deeper in the home (~/.ssh/config) are not walked: a named residual.
+  'lbinds=(); lk=; cwd=$(pwd -P) || cwd=/',
+  `if [ -n "$hr" ]; then for n in .cache .npm; do p=$hr/$n; st "$p"; if [ "$S" -eq 0 ] && [ "$T" = "symbolic link" ]; then named[$p]=1; note "project command not run: \${p@Q} is a symlink; a project command's ~/.cache and ~/.npm are throwaway directories its sandbox mounts there, never through a link (a write would reach, and outlive the command at, what it points to). Make it a real directory: as the agent user, sudo -u $u rm -- \${p@Q}"; fi; done; fi`,
+  `links() { local o n=0 p s x; o=$("$fnd" "$1" -mindepth 1 -maxdepth 1 -type l -printf "%f/" 2>/dev/null) || { note "project command not run: \${1@Q} cannot be listed for symlinks that could lead out of the agent user's home"; return; }`,
   `  while [ -n "$o" ]; do n=$((n + 1)); if [ "$n" -gt ${LINK_CAP} ]; then note "project command not run: \${1@Q} holds more than ${LINK_CAP} symlinks to check for one leading out of the agent user's home; remove the ones it doesn't need"; return; fi`,
-  // (A link already refused on the way to a credential is named once, by that refusal.)
-  '    p=$1/${o%%/*}; o=${o#*/}; [ -n "${named[$p]}" ] && continue; t=$("$rl" -m -- "$p" 2>/dev/null) || t=',
-  `    case $t in "$hr"|"$hr"/*) ;; *) note "project command not run: \${p@Q} is a symlink to \${t@Q}, outside the agent user's home: through it a command could write what an agent-user process outside the sandbox reads later. Replace it with the real file or directory, or a link inside the home; to remove it, as the agent user: sudo -u $u rm -- \${p@Q}" ;; esac`,
+  // (A link already refused, on the way to a credential or as a cache, is named once, by that refusal.)
+  '    p=$1/${o%%/*}; o=${o#*/}; [ -n "${named[$p]}" ] && continue',
+  '    lk=$p; walk "${p#"$hr"/}" "$hr"; s=$?; lk=; [ "$s" -eq 2 ] && continue; if [ "$s" -eq 0 ]; then x=$R; else x=$P; fi',
+  `    if [ "$OW" = 1 ]; then note "project command not run: \${p@Q} is a symlink to \${x@Q}, outside the agent user's home, through \${OWAT@Q}, which the agent user owns or can write: a command could write there, or re-aim it, what an agent-user process outside the sandbox reads later. Replace it with the real file or directory, or a link inside the home or to a path only root can change; to remove it, as the agent user: sudo -u $u rm -- \${p@Q}"; continue; fi`,
+  '    [ "$s" -eq 1 ] && continue; case $x in "$hr"|"$hr"/*) continue ;; esac; [ "$RT" = "character special file" ] || [ "$RT" = "block special file" ] && continue',
+  `    case "$cwd/" in "$x"/*) note "project command not run: \${p@Q} is a symlink to \${x@Q}, outside the agent user's home, which holds the command's working directory: the sandbox can't make it read-only and still run the command there. Point it elsewhere, or remove it as the agent user: sudo -u $u rm -- \${p@Q}"; continue ;; esac`,
+  `    [ "$x" = / ] && { note "project command not run: \${p@Q} is a symlink to /: the sandbox can't make that read-only and still run the command. Remove it as the agent user: sudo -u $u rm -- \${p@Q}"; continue; }`,
+  '    lbinds+=(--ro-bind "$x" "$x")',
   '  done; }',
-  `if [ -n "$hr" ]; then links "$hr"; [ -n "$cfg" ] && links "$cfg"; for n in .cache .npm; do p=$hr/$n; st "$p"; if [ "$S" -eq 0 ] && [ "$T" = "symbolic link" ]; then note "project command not run: \${p@Q} is a symlink; a project command's ~/.cache and ~/.npm are throwaway directories its sandbox mounts there, never through a link (a write would reach, and outlive the command at, what it points to). Make it a real directory: as the agent user, sudo -u $u rm -- \${p@Q}"; fi; done; fi`,
+  'if [ -n "$hr" ]; then links "$hr"; [ -n "$cfg" ] && links "$cfg"; fi',
   'while [ "$#" -gt 0 ] && [ "$1" != -- ]; do add "$1"; shift; done; shift',
   `if [ "\${#bad[@]}" -gt 0 ]; then printf '%s\\n' "\${bad[@]}" >&2; exit ${SANDBOX_UNAVAILABLE}; fi`,
   'binds=(); for ((i = 1; i <= maxd; i++)); do for d in "${dirs[@]}"; do n=${d//[!\\/]/}; [ "${#n}" -eq "$i" ] && binds+=(--bind "$d" "$d"); done; done',
-  // INVARIANT (#798): the agent's home is read-only inside the sandbox, so no command can plant config (~/.bashrc,
-  // ~/.profile, ~/.gitconfig, ~/.npmrc, ~/.ssh, ~/.local/bin, ...) that a later agent-user process outside it reads:
-  // a login shell, git, npm, the agent's own claude. After the binds above (it covers those under the home: nothing in
+  // INVARIANT (#798): the agent's home is read-only inside the sandbox, so no command can write config into it
+  // (~/.bashrc, ~/.profile, ~/.gitconfig, ~/.npmrc, ~/.ssh, ~/.local/bin, ...) for a later agent-user process outside
+  // it to read: a login shell, git, npm, the agent's own claude. (Through a link that leads out of it: see below.) After the binds above (it covers those under the home: nothing in
   // it can be renamed now), before the masks (they still hide what's under it). Only its caches are writable, each an
   // empty tmpfs that is gone when the command ends: never a persistent directory, since ~/.cache holds what unsandboxed
   // processes run (corepack, go-build, browsers) and ~/.npm what npx runs. A cache made only if absent (npm fails on a
-  // read-only one), and only over a real directory (one that is a symlink was refused above). What a link elsewhere in
-  // the home leads to stays read-only only inside the home: links leading out of it directly in the home or ~/.config
-  // were refused above; one deeper down (~/.ssh/config, a link to /tmp) is followed where it leads.
+  // read-only one), and only over a real directory (one that is a symlink was refused above). A link directly in the
+  // home or ~/.config was walked hop by hop above: refused if any hop outside the home is the agent's to change, else
+  // what it reaches outside the home is bound read-only (lbinds, after the home). A link deeper down (~/.ssh/config to
+  // /tmp/x) is not walked: followed wherever it leads, a named residual.
   'homes=(--ro-bind "$hr" "$hr"); for n in .cache .npm; do p=$hr/$n; st "$p"; if [ "$S" -ne 0 ] && [ "$E" = "No such file or directory" ]; then "$mkd" -m 700 -- "$p" 2>/dev/null; st "$p"; fi; if [ "$S" -eq 0 ] && [ "$T" = directory ]; then homes+=(--tmpfs "$p"); fi; done',
   `box=(${PROJECT_SANDBOX_ARGS.join(' ')})`,
   `if ! err=$("$b" "\${box[@]}" -- /bin/sh -c : 2>&1); then printf '%s\\n' "project command not run: its sandbox didn't start ($err); ${SANDBOX_FIX}" >&2; exit ${SANDBOX_UNAVAILABLE}; fi`,
-  'exec "$b" "${box[@]}" "${binds[@]}" "${homes[@]}" "${hide[@]}" -- "$@"',
+  'exec "$b" "${box[@]}" "${binds[@]}" "${homes[@]}" "${lbinds[@]}" "${hide[@]}" -- "$@"',
 ].join('\n');
 
 /**
