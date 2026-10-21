@@ -169,7 +169,7 @@ const GUARD_TREE = [
   'src/check-source.ts', 'src/checkout.ts', 'src/ci-none.ts', 'src/comment-policy.ts', 'src/config/load.ts', 'src/config/schema.ts', 'src/contract.ts',
   'src/cross-eval.ts', 'src/dashboard-auth.ts', 'src/dashboard-key-paths.ts', 'src/delegation.ts', 'src/deploy-gate/config.ts',
   'src/events/types.ts', 'src/experiments/paths.ts', 'src/governor-holds.ts', 'src/guard/chat.ts', 'src/guard/intake.ts',
-  'src/guard/research.ts', 'src/guardrails/context.ts', 'src/guardrails/engine.ts', 'src/guardrails/fingerprint.ts',
+  'src/guard/research.ts', 'src/guardrails/access.ts', 'src/guardrails/context.ts', 'src/guardrails/engine.ts', 'src/guardrails/fingerprint.ts',
   'src/guardrails/glob.ts', 'src/guardrails/push-hook.ts', 'src/guardrails/shell.ts', 'src/held-out-paths.ts', 'src/hook-imports.ts',
   'src/hook-main.ts', 'src/hook.ts', 'src/model-routing.ts', 'src/network.ts', 'src/optimize.ts', 'src/os/child-process.ts', 'src/os/index.ts',
   'src/os/own-env.ts', 'src/os/system-paths.ts', 'src/os/system-root-guard.ts', 'src/path-text.ts', 'src/preview/config.ts', 'src/project-env.ts',
