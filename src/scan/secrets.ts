@@ -1,9 +1,9 @@
 // Secret scanning behind an adapter (gitleaks today; betterleaks later).
 // A scanner that can't run is reported as unavailable, never as "clean".
 import { spawn, spawnSync } from '../os/child-process.js';
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { delimiter, dirname, join, resolve as resolvePath } from 'node:path';
 import { presentNames, rawChanges, untrackedNames } from '../coordinator/change-files.js';
 import { findTool } from '../tool-path.js';
 
@@ -63,6 +63,8 @@ interface Compared {
   path: string;
   now: Buffer;
   before: Buffer | null;
+  /** `now` was read from the working tree, not from git. */
+  disk?: boolean;
 }
 
 /**
@@ -236,9 +238,9 @@ function entryContent(top: string, entries: RawEntry[]): Compared[] {
   for (const e of entries) {
     const old = e.before ? before[b++]! : null;
     const now = e.after ? after[a++]! : fromDisk(top, e.path);
-    if (now !== null) out.push({ path: e.path, now, before: old });
+    if (now !== null) out.push({ path: e.path, now, before: old, disk: !e.after });
   }
-  return out;
+  return lfsContent(top, out);
 }
 
 /** A file's content on disk as git would store it: a link's target, a file's bytes; null for anything else. */
@@ -298,10 +300,14 @@ const CONVERTING = ['filter', 'working-tree-encoding', 'ident'];
 function storedAsOnDisk(top: string, paths: string[]) {
   if (!paths.length) return;
   if (paths.some((p) => p.includes('�'))) throw new Error('a file in this commit has a name that is not UTF-8, so its attributes can\'t be checked');
+  let lfs: boolean | undefined;
   for (const where of [[], ['--cached']]) {
     const out = gitOut(top, ['check-attr', '-z', '--stdin', ...where, ...CONVERTING], `${paths.join('\0')}\0`).toString('utf8').split('\0');
     for (let i = 0; i + 2 < out.length; i += 3) {
-      if (out[i + 2] !== 'unspecified' && out[i + 2] !== 'unset') throw new Error(`a file in this commit has a ${out[i + 1]} attribute, so git stores other bytes than the scan reads`);
+      if (out[i + 2] === 'unspecified' || out[i + 2] === 'unset') continue;
+      // WHY (owner, 2026-10-21): the standard large-file filter stores the file's own bytes, read from disk here.
+      if (out[i + 1] === 'filter' && out[i + 2] === 'lfs' && (lfs ??= lfsStandard(top))) continue;
+      throw new Error(`a file in this commit has a ${out[i + 1]} attribute, so git stores other bytes than the scan reads`);
     }
   }
 }
@@ -339,6 +345,12 @@ export function checkReadPrograms(top: string, scope: CommitScanScope, depth = 0
     if (f) filters.add(f[1]!);
   }
   if (scope.logReads && (scope.signatureReads || showSignature) && signer) throw new Error(`the checkout's config names a program git runs to check signatures (${signer}), and the line shows signatures before it commits`);
+  // WHY (owner, 2026-10-21): the standard large-file filter, exactly as its installer writes it, is allowed; it stores
+  // the file's own bytes, which the scan reads (lfsContent). Any other value, or any other filter, still refuses.
+  if (filters.has('lfs') && lfsStandard(top)) {
+    filters.delete('lfs');
+    lfsProgramIsFile();
+  }
   const tracked = filters.size ? [...new Set([...presentNames(top, null), ...untrackedNames(top)])] : [];
   if (tracked.some((p) => p.includes('�'))) throw new Error('a file in this checkout has a name that is not UTF-8, so its attributes can\'t be checked');
   if (tracked.length) {
@@ -351,6 +363,84 @@ export function checkReadPrograms(top: string, scope: CommitScanScope, depth = 0
   }
   // WHY: a read and the scan's own listing reach into each checked-out submodule under that submodule's own config.
   for (const sub of submodules(top)) checkReadPrograms(sub, scope, depth + 1);
+}
+
+/** The large-file filter's config exactly as its standard install writes it (#971, owner 2026-10-21). */
+const LFS_STANDARD: Record<string, string> = {
+  'filter.lfs.clean': 'git-lfs clean -- %f',
+  'filter.lfs.smudge': 'git-lfs smudge -- %f',
+  'filter.lfs.process': 'git-lfs filter-process',
+  'filter.lfs.required': 'true',
+};
+
+/**
+ * Whether the effective config's large-file filter is exactly the standard one: each of its four keys present, every
+ * value it has (from any config source) the standard string, and the object store where the scan reads it.
+ */
+function lfsStandard(top: string): boolean {
+  const seen = new Map<string, string[]>();
+  for (const e of gitOut(top, ['config', '--list', '-z']).toString('utf8').split('\0').filter(Boolean)) {
+    const nl = e.indexOf('\n');
+    const key = (nl < 0 ? e : e.slice(0, nl)).toLowerCase();
+    if (key.startsWith('filter.lfs.') || key === 'lfs.storage') seen.set(key, [...(seen.get(key) ?? []), nl < 0 ? '' : e.slice(nl + 1)]);
+  }
+  if (seen.has('lfs.storage')) return false;
+  return Object.entries(LFS_STANDARD).every(([k, v]) => (seen.get(k) ?? []).length > 0 && seen.get(k)!.every((x) => x === v));
+}
+
+/** Throws when a `git-lfs` that git would run (the first on PATH) is not a regular file. */
+function lfsProgramIsFile() {
+  for (const dir of (process.env.PATH ?? '').split(delimiter).filter(Boolean)) {
+    const p = join(dir, 'git-lfs');
+    if (!existsSync(p) && !isLink(p)) continue;
+    let ok = false;
+    try {
+      ok = statSync(p).isFile();
+    } catch {
+      ok = false;
+    }
+    if (!ok) throw new Error(`the git-lfs git would run (${p}) is not a regular file`);
+    return;
+  }
+}
+
+const isLink = (p: string) => {
+  try {
+    return lstatSync(p).isSymbolicLink();
+  } catch {
+    return false;
+  }
+};
+
+const LFS_POINTER = /^version https:\/\/git-lfs\.github\.com\/spec\/v1\noid sha256:([0-9a-f]{64})\nsize ([0-9]+)\n/;
+
+/**
+ * Each compared file whose large-file filter is the standard one, with any side that is a large-file pointer read as
+ * the object it points to, from the checkout's large-file store. INVARIANT (#971): a pointer whose object isn't there
+ * refuses the commit; it is never scanned as the pointer text.
+ */
+function lfsContent(top: string, files: Compared[]): Compared[] {
+  if (!files.length || !lfsStandard(top)) return files;
+  const paths = files.map((f) => f.path);
+  if (paths.some((p) => p.includes('�'))) throw new Error('a file in this commit has a name that is not UTF-8, so its attributes can\'t be checked');
+  const tracked = new Set<string>();
+  for (const where of [[], ['--cached']]) {
+    const out = gitOut(top, ['check-attr', '-z', '--stdin', ...where, 'filter'], `${paths.join('\0')}\0`).toString('utf8').split('\0');
+    for (let i = 0; i + 2 < out.length; i += 3) if (out[i + 2] === 'lfs') tracked.add(out[i]!);
+  }
+  if (!tracked.size) return files;
+  const store = join(resolvePath(top, gitOut(top, ['rev-parse', '--git-common-dir']).toString('utf8').trim()), 'lfs', 'objects');
+  const read = (b: Buffer | null): Buffer | null => {
+    if (b === null || b.length > 1024) return b;
+    const m = LFS_POINTER.exec(b.toString('latin1'));
+    if (!m) return b;
+    const oid = m[1]!;
+    const at = join(store, oid.slice(0, 2), oid.slice(2, 4), oid);
+    if (!existsSync(at)) throw new Error('a large-file pointer in this commit names an object that is not in the checkout\'s large-file store');
+    return readFileSync(at);
+  };
+  // WHY: a side read from disk is the file's own bytes already (what the filter stores); only stored sides are pointers.
+  return files.map((f) => (tracked.has(f.path) ? { ...f, now: f.disk ? f.now : read(f.now)!, before: read(f.before) } : f));
 }
 
 /** The checked-out submodules of the checkout at `top`: links in HEAD's tree or staged, with a checkout there. */
