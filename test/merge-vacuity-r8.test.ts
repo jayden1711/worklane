@@ -113,8 +113,8 @@ test('A1, must hold: a lock file stops the fetch of a newer main: it holds, name
   const t = gate(r.dir, r.base, r.head, seen);
   const { d, first } = await decided(t);
   assert.equal(first.vacuityRun, undefined);
-  assert.equal(d.auto, false);
-  assert.ok(d.reasons.includes(UNFETCHED), d.reasons.join(' | '));
+  // The weakening check (#869) holds on the same failed fetch, beside it: exactly these two (#784 round 9).
+  assert.deepEqual([d.auto, d.reasons], [false, [`design: may weaken a check: the check for a removed or weakened test, lint or guard could not run ("the default branch's current tip couldn't be read, so its registered checks can't be")`, UNFETCHED]]);
 });
 
 test('A1, must hold: a clone whose configured refspec doesn\'t map the default branch: fetched by an explicit one', async () => {

@@ -182,9 +182,8 @@ test('A1, must hold: the remote can\'t be fetched: it holds, named, at once', as
   git(r.dir, 'remote', 'set-url', 'origin', join(r.dir, '..', 'no-such-remote.git'));
   const { d, first } = await decided(t);
   assert.equal(first.vacuityRun, undefined);
-  // The weakening check (#869) holds on the same failed fetch, beside it.
-  assert.equal(d.auto, false);
-  assert.ok(d.reasons.includes(UNFETCHED), d.reasons.join(' | '));
+  // The weakening check (#869) holds on the same failed fetch, beside it: exactly these two (#784 round 9).
+  assert.deepEqual([d.auto, d.reasons], [false, [`design: may weaken a check: the check for a removed or weakened test, lint or guard could not run ("the default branch's current tip couldn't be read, so its registered checks can't be")`, UNFETCHED]]);
 });
 
 // ---- a reporter destination stays in the worktree
