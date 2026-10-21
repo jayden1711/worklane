@@ -754,7 +754,7 @@ CLAUDE_API_KEY_LOGINS='api_key|api_key_helper'
 # answer within claude_status_json's minute: no.
 claude_api_key_login_ok() {
   local out
-  out="$(claude_status_json "$1")"
+  out="$(claude_status_json "$1" </dev/null)"
   printf '%s' "$out" | grep -q '"loggedIn": *true' && printf '%s' "$out" | grep -Eq "\"authMethod\": *\"($CLAUDE_API_KEY_LOGINS)\""
 }
 # Whether a path is where credentials.sh <name> api-key installs an agent's key (#904): <agent home>/.config/
@@ -767,15 +767,20 @@ agent_key_path_ok() { [[ "$2" =~ ^"$1"/\.config/[a-z][a-z0-9-]{0,20}-claude-key/
 # credentials.sh writes it), read as that user (#904): so the login claude reports is the one the runner gives runs
 # (it passes `cat -- <agent_api_key>`). The settings only, never the key.
 #   agent_key_helper_ok <agent user> <settings file> <path>
-AGENT_KEY_HELPER_JS='const fs=require("fs");let s=null;try{s=JSON.parse(fs.readFileSync(process.argv[1],"utf8"))}catch{}process.exit(s&&typeof s==="object"&&s.apiKeyHelper===process.argv[2]?0:1)'
-agent_key_helper_ok() { run_as "$1" '"$1" -e "$2" "$3" "$4"' "$(command -v node)" "$AGENT_KEY_HELPER_JS" "$2" "cat -- $3"; }
+# Bounded (#904, as #613's steps are): the agent user owns what is checked, so it could make either a FIFO or put it on
+# a mount that never answers, while add-project holds the machine-wide lock. Each check runs under timeout -k, with no
+# stdin; the settings are opened without following a link and without blocking (a FIFO opens at once), anything but
+# a regular file of at most 64 KiB is refused, and the read is capped.
+AGENT_CHECK_SECONDS=20
+AGENT_KEY_HELPER_JS='const fs=require("fs"),c=fs.constants,MAX=65536;let ok=false;try{const fd=fs.openSync(process.argv[1],c.O_RDONLY|c.O_NONBLOCK|c.O_NOFOLLOW);try{const st=fs.fstatSync(fd);if(st.isFile()&&st.size<=MAX){const b=Buffer.alloc(MAX+1);let n=0,r=0;while(n<b.length&&(r=fs.readSync(fd,b,n,b.length-n,null))>0)n+=r;if(n<=MAX){const s=JSON.parse(b.subarray(0,n).toString("utf8"));ok=!!s&&typeof s==="object"&&!Array.isArray(s)&&s.apiKeyHelper===process.argv[2]}}}finally{fs.closeSync(fd)}}catch{}process.exit(ok?0:1)'
+agent_key_helper_ok() { run_as "$1" 'exec timeout -k "$1" "$2" "$3" -e "$4" "$5" "$6"' "$CLAUDE_KILL_AFTER_SECONDS" "$AGENT_CHECK_SECONDS" "$(command -v node)" "$AGENT_KEY_HELPER_JS" "$2" "cat -- $3" </dev/null; }
 # Whether a path is this agent user's own API key file, as that user finds it (issue #897): a plain file (not a link),
-# its own, not empty, and open to nobody else (no group or other read or write bit). Checked as that user, never as
-# root, since the path comes from credentials.yaml, which the coordinator user writes. The key is never read.
+# its own, not empty, with one link, and open to nobody else (no group or other read or write bit). Checked as that
+# user, never as root, since the path comes from credentials.yaml, which the coordinator user writes; bounded as above
+# (test and find only stat it: a FIFO is not a plain file). The key is never read.
 #   agent_key_file_ok <agent user> <path>
-agent_key_file_ok() {
-  run_as "$1" '[ -f "$1" ] && [ ! -L "$1" ] && [ -O "$1" ] && [ -s "$1" ] && [ -z "$(find "$1" -maxdepth 0 \( -perm -g=r -o -perm -g=w -o -perm -o=r -o -perm -o=w \) -print)" ]' "$2"
-}
+AGENT_KEY_FILE_SH='[ -f "$1" ] && [ ! -L "$1" ] && [ -O "$1" ] && [ -s "$1" ] && [ -n "$(find "$1" -maxdepth 0 -type f -links 1 ! -perm -g=r ! -perm -g=w ! -perm -o=r ! -perm -o=w -print)" ]'
+agent_key_file_ok() { run_as "$1" 'exec timeout -k "$1" "$2" bash -c "$3" _ "$4"' "$CLAUDE_KILL_AFTER_SECONDS" "$AGENT_CHECK_SECONDS" "$AGENT_KEY_FILE_SH" "$2" </dev/null; }
 # Whether the API takes this user's Claude login (issue #463: claude auth status says a credential is configured, not
 # that it works): one minimal real call as that user, the cheapest model, a one-word answer, one turn, a hard budget
 # cap. A refused call costs nothing; an answered one about one short Haiku turn. Prints nothing and succeeds when

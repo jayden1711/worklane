@@ -52,7 +52,7 @@ import { SetupOver, startSetupHub } from './hub-setup.js';
 import { breakGlassHub, runAppManifest, VIEWER_USER } from './setup/app-manifest.js';
 import { seedDemo } from './demo.js';
 import { desktopBinary, runDesktop } from './desktop.js';
-import { credentialProblems, initInstance, instanceAgentHome, instanceFilesProblem, instanceProblems, instancesDir, listInstances, loadInstance, loadInstanceCredentials, loadInstanceSetup, policiesForRepo, setAgentApiKey, setDiscordToken, setGithubApp, setIntakeCredential } from './instance.js';
+import { credentialProblems, initInstance, instanceAgentHome, serverAgentHome, instanceFilesProblem, instanceProblems, instancesDir, listInstances, loadInstance, loadInstanceCredentials, loadInstanceSetup, policiesForRepo, setAgentApiKey, setDiscordToken, setGithubApp, setIntakeCredential } from './instance.js';
 import { readServerAutoConfig, serverAutoConfig, type ServerAutoConfigLine } from './server-auto-config.js';
 import { canaryRefusal, checkCanary, fileCanary } from './canary.js';
 import { sandboxVerdict } from './testrun/status.js';
@@ -1303,7 +1303,8 @@ async function main(argv: string[]): Promise<number> {
           return 1;
         }
         try {
-          setAgentApiKey(file, keyFile, instanceAgentHome(target));
+          // The agent's home from the user database, never instance.yaml's agent_home (this user writes that file).
+          setAgentApiKey(file, keyFile, { instance: target, runsAsAgent: instanceAgentHome(target) !== null, agentHome: serverAgentHome(target) });
         } catch (e) {
           console.error((e as Error).message);
           return 1;

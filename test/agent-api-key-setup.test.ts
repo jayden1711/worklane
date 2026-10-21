@@ -2,10 +2,12 @@
 // - `credentials.sh <name> api-key` writes credentials.yaml's agent_api_key itself, as the coordinator user through
 //   the engine's own config code (`instance set-agent-api-key`, path only), once claude reports an API-key login as
 //   the agent user; then refreshes the instance's account record (claude-account.sh status), as the `claude` branch does.
-// - `instance set-agent-api-key` takes only a path apiKeyHelper can name, to a key file this user can't read.
+// - `instance set-agent-api-key` takes only this instance's key place in its agent user's home (the user database's,
+//   never instance.yaml's), to a key file this user can't read. Defense in depth, not a boundary: the coordinator user
+//   writes credentials.yaml anyway.
 // - The setup step other-keys, run as the coordinator user (who can't see into the agent user's home), reports the key
-//   from root's account record, never "isn't there".
-// Every host tool is a stand-in: no sudo, no claude, no real state.
+//   from root's account record, never "isn't there", and only at that place.
+// Every host tool is a stand-in: no sudo, no claude, no real user database, no real state.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
@@ -14,15 +16,8 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { parse } from 'yaml';
 import { BRAND } from '../src/brand.js';
-import { checkSetup, type InstanceFacts, type MachinePaths, type SetupContext, type SetupProbe, type SetupView } from '../src/setup-steps.js';
-import { projectStateDir } from '../src/guardrails/context.js';
-import { engineCli, exampleProject, repoRoot } from './helpers.js';
+import { AGENT, canHide, coordinatorView, engineInstance, KEY, posix, setupDir } from './api-key-fixtures.js';
 
-const posix = process.platform !== 'win32';
-/** A directory mode 000 hides what is in it from this user, unless this user is root. */
-const canHide = posix && process.getuid?.() !== 0;
-const setupDir = join(repoRoot, 'scripts', 'setup');
-const KEY = `sk-ant-api03-${'K'.repeat(40)}`;
 const HOST_TOOLS = ['sudo', 'systemctl', 'loginctl', 'launchctl', 'getent', 'useradd', 'usermod', 'gh', 'docker', 'tailscale', 'timeout', 'shred'];
 
 process.env[`${BRAND.envPrefix}_STATE_DIR`] = mkdtempSync(join(tmpdir(), 'agent-api-key-setup-state-'));
@@ -121,28 +116,6 @@ test('issue #897: credentials.sh api-key leaves credentials.yaml alone when clau
   }
 });
 
-/** An instance home for this user, in a temp instances dir, and the engine's CLI run against it. */
-function engineInstance(o: { runAs?: boolean } = {}) {
-  const T = mkdtempSync(join(tmpdir(), 'set-agent-key-'));
-  const dir = join(T, 'instances', 'alpha');
-  mkdirSync(dir, { recursive: true });
-  const agentHome = join(T, 'agent-home');
-  const runAs = o.runAs === false ? '' : `run_as:\n  agent_user: wl-alpha-agent\n  agent_home: ${agentHome}\n`;
-  writeFileSync(join(dir, 'instance.yaml'), `version: 1\nname: alpha\nrepos:\n  - path: x\n    repo: example/alpha\n${runAs}`);
-  /** Where credentials.sh <name> api-key installs the key: the agent's home, .config/<name>-claude-key/api_key. */
-  const installed = join(agentHome, '.config', 'alpha-claude-key', 'api_key');
-  mkdirSync(dirname(installed), { recursive: true });
-  const creds = join(dir, 'credentials.yaml');
-  const text = 'version: 1\n# the App\ngithub:\n  kind: app\n  app_id: 91\n  installation_id: 4242\n  key_path: /x/private-key.pem\n';
-  writeFileSync(creds, text, { mode: 0o600 });
-  const cli = (...args: string[]) =>
-    spawnSync(process.execPath, [engineCli, 'instance', 'set-agent-api-key', 'alpha', ...args], {
-      encoding: 'utf8',
-      env: { PATH: process.env.PATH ?? '/usr/bin:/bin', HOME: T, [`${BRAND.envPrefix}_STATE_DIR`]: join(T, 'state'), [`${BRAND.envPrefix}_INSTANCES_DIR`]: join(T, 'instances') },
-    });
-  return { T, creds, text, cli, agentHome, installed };
-}
-
 test("issue #897: instance set-agent-api-key points credentials.yaml at a key file in a home this user can't see, the rest kept, 0600", { skip: !canHide && 'needs POSIX modes, not as root' }, () => {
   const e = engineInstance();
   const home = e.agentHome;
@@ -198,55 +171,6 @@ test('issue #897: instance set-agent-api-key refuses a key file this user could 
   assert.equal(readFileSync(shared.creds, 'utf8'), shared.text);
 });
 
-/** A server instance whose agent_api_key is in a home this user (the coordinator) can't see, and root's account record. */
-function coordinatorView(record: object | null, o: { key?: (agentHome: string) => string; agentHome?: boolean } = {}) {
-  const { dir } = exampleProject();
-  const m = mkdtempSync(join(tmpdir(), 'other-keys-machine-'));
-  const machine: MachinePaths = {
-    enginePackage: join(m, 'package.json'),
-    engine: join(m, 'opt-current'),
-    helper: join(m, 'helper'),
-    machineOwners: join(m, 'machine-owners.json'),
-    updatesConfig: join(m, 'updates.json'),
-    allowedSigners: join(m, 'allowed_signers'),
-    hubUnitFile: join(m, 'hub.service'),
-    fullRunLock: join(m, 'full-run.lock'),
-    claudeAccountDir: join(m, 'claude-account'),
-  };
-  if (record) {
-    mkdirSync(machine.claudeAccountDir, { recursive: true });
-    writeFileSync(join(machine.claudeAccountDir, 'status.json'), JSON.stringify({ at: '2026-10-20T10:00:00Z', users: [record] }));
-  }
-  const home = mkdtempSync(join(tmpdir(), 'other-keys-instance-'));
-  const agentHome = join(home, 'agent-home');
-  const installed = join(agentHome, '.config', 'shop-claude-key', 'api_key');
-  mkdirSync(dirname(installed), { recursive: true });
-  writeFileSync(installed, KEY, { mode: 0o400 });
-  const key = o.key ? o.key(agentHome) : installed;
-  const facts: InstanceFacts = { home, credentials: { github: { kind: 'app', key_path: join(home, 'app.pem') }, agent_api_key: key }, ...(o.agentHome === false ? {} : { agentHome }) };
-  const ctx: SetupContext = { mode: 'server', root: dir, repo: 'example-org/example-shop', instance: 'shop', stateDir: projectStateDir(dir), policyFile: join(home, 'policy.yaml'), openQuestions: 0, setupPr: null, machine, instanceFacts: () => facts };
-  const probe: SetupProbe = {
-    which: (c) => `/stand-in/${c}`,
-    serviceManagerEnv: () => ({ env: {} }),
-    run: () => ({ status: 1, stdout: '', stderr: 'no stand-in' }),
-    serviceRunning: () => false,
-    systemUnitActive: () => false,
-    linger: () => null,
-  };
-  const step = (v: SetupView) => v.groups.flatMap((g) => g.steps).find((s) => s.id === 'other-keys')!;
-  const check = () => {
-    chmodSync(agentHome, 0o000);
-    try {
-      return step(checkSetup(ctx, probe));
-    } finally {
-      chmodSync(agentHome, 0o700);
-    }
-  };
-  return { key, check };
-}
-
-const AGENT = { instance: 'shop', kind: 'agent', user: 'wl-shop-agent', stored: false, logged_in: true, auth_method: 'api_key_helper', api_ok: true };
-
 test("issue #897: doctor's other-keys, as the coordinator user, reports the agent's key from root's account record, never as missing", { skip: !canHide && 'needs POSIX modes, not as root' }, () => {
   const v = coordinatorView(AGENT);
   const s = v.check();
@@ -266,20 +190,15 @@ test("issue #897: other-keys, as the coordinator user, is not done when root's r
 
 test("#904 round 3: other-keys, as the coordinator user, certifies only the key where credentials.sh installs it, whatever root's record says", { skip: !canHide && 'needs POSIX modes, not as root' }, () => {
   const notInstalled = /not where credentials\.sh <name> api-key installs the key/;
-  const cases: Record<string, [Parameters<typeof coordinatorView>[1], RegExp]> = {
-    'a missing file in the hidden home': [{ key: (h) => join(h, 'no-such-key') }, notInstalled],
-    "another private file of the agent's": [{ key: (h) => join(h, '.ssh', 'id_ed25519') }, notInstalled],
-    // In a home this user can see, so main's own answer: missing.
-    "the key's place in another home": [{ key: (h) => join(dirname(h), 'other-home', '.config', 'shop-claude-key', 'api_key') }, /isn't there/],
-    'no agent home known (instance.yaml has no run_as)': [{ agentHome: false }, notInstalled],
+  const cases: Record<string, Parameters<typeof coordinatorView>[1]> = {
+    'a missing file in the hidden home': { key: (h) => join(h, 'no-such-key') },
+    "another private file of the agent's": { key: (h) => join(h, '.ssh', 'id_ed25519') },
+    "the key's place in another home": { key: (h) => join(dirname(h), 'other-home', '.config', 'shop-claude-key', 'api_key') },
+    'no agent home known (no such agent user, or no run_as)': { agentHome: false },
   };
-  for (const [why, [o, re]] of Object.entries(cases)) {
-    const v = coordinatorView(AGENT, o);
-    const s = v.check();
+  for (const [why, o] of Object.entries(cases)) {
+    const s = coordinatorView(AGENT, o).check();
     assert.equal(s.done, false, `${why}: ${s.detail}`);
-    assert.match(s.detail, re, why);
+    assert.match(s.detail, notInstalled, why);
   }
-  // Renamed since: the key's directory keeps the old name's, still the agent's own key place.
-  const renamed = coordinatorView(AGENT, { key: (h) => join(h, '.config', 'old-name-claude-key', 'api_key') }).check();
-  assert.equal(renamed.done, true, renamed.detail);
 });

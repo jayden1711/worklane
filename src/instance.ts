@@ -608,13 +608,26 @@ export function setDiscordToken(file: string, tokenFile: string): void {
 
 /**
  * Whether a path is where credentials.sh <name> api-key installs an agent's key (#904): `<agent home>/.config/
- * <instance>-claude-key/api_key`, and nothing else of that home. Any instance name's directory: a rename keeps its old
- * name (scripts/setup/instance-records.cjs carry moves the agent's home, not the directory's name). As lib.sh's
- * agent_key_path_ok.
+ * <instance>-claude-key/api_key`, and nothing else of that home. Without `instance`, any instance name's directory
+ * (lib.sh's agent_key_path_ok, add-project's rule, which ties the path to the agent's own apiKeyHelper besides; a
+ * rename keeps the directory's old name). With it, only that instance's: the engine's rule (set-agent-api-key,
+ * other-keys), which can't see the agent's settings, so a renamed instance reruns credentials.sh <new> api-key.
  */
-export function isInstalledKeyPath(agentHome: string, keyFile: string): boolean {
-  const home = agentHome.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  return new RegExp(`^${home}/\\.config/[a-z][a-z0-9-]{0,20}-claude-key/api_key$`).test(keyFile);
+export function isInstalledKeyPath(agentHome: string, keyFile: string, instance?: string): boolean {
+  const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const dir = instance === undefined ? '[a-z][a-z0-9-]{0,20}' : esc(instance);
+  return new RegExp(`^${esc(agentHome)}/\\.config/${dir}-claude-key/api_key$`).test(keyFile);
+}
+
+/** A server instance's agent user, as the setup scripts make it (instance.sh, credentials.sh): `wl-<instance>-agent`. */
+export const serverAgentUser = (instance: string): string => `wl-${instance}-agent`;
+
+/**
+ * The home of a server instance's agent user, from the user database (#904): never instance.yaml's run_as.agent_home,
+ * which the coordinator user writes. Null when there is no such user.
+ */
+export function serverAgentHome(instance: string, lookup: (user: string) => string | null = homeOf): string | null {
+  return lookup(serverAgentUser(instance));
 }
 
 /** The agent user's home an instance's agents run in (instance.yaml run_as.agent_home), or null when they don't run as their own user. */
@@ -636,13 +649,15 @@ export function instanceAgentHome(instanceName: string, dir = instancesDir()): s
  * file, and a file this user could read: open to its group or others, or this user's own (the coordinator must never
  * be able to read the key).
  */
-export function setAgentApiKey(file: string, keyFile: string, agentHome: string | null): void {
+export function setAgentApiKey(file: string, keyFile: string, o: { instance: string; runsAsAgent: boolean; agentHome: string | null }): void {
   if (!/^\/[A-Za-z0-9._/-]+$/.test(keyFile)) throw new Error(`the key file ${JSON.stringify(keyFile)} must be an absolute path, with letters, digits and . _ - / only (apiKeyHelper names it)`);
   if (!normalAbsolute(keyFile)) throw new Error(`the key file ${keyFile} ${NOT_NORMAL_ABSOLUTE}`);
   if (!existsSync(file)) throw new Error(`no ${file}: the instance's GitHub credential comes first (credentials.sh <name> github-app writes it)`);
-  if (!agentHome) throw new Error("the instance's agents don't run as their own user (instance.yaml has no run_as), so there is no agent home to hold an API key; nothing written");
-  // WHY (#904): any other file, however private to the agent user, the runner would send to the API as the key.
-  if (!isInstalledKeyPath(agentHome, keyFile)) throw new Error(`${keyFile} is not where credentials.sh <name> api-key installs the key (${agentHome}/.config/<name>-claude-key/api_key); nothing written`);
+  if (!o.runsAsAgent) throw new Error("the instance's agents don't run as their own user (instance.yaml has no run_as), so there is no agent home to hold an API key; nothing written");
+  if (!o.agentHome) throw new Error(`no agent user ${serverAgentUser(o.instance)} on this machine (the user database has no home for it); nothing written`);
+  // WHY (#904): any other file, however private to the agent user, the runner would send to the API as the key. The home
+  // is the user database's (serverAgentHome), never instance.yaml's, and only this instance's key directory counts.
+  if (!isInstalledKeyPath(o.agentHome, keyFile, o.instance)) throw new Error(`${keyFile} is not where credentials.sh <name> api-key installs the key (${o.agentHome}/.config/${o.instance}-claude-key/api_key); nothing written`);
   let st;
   try {
     st = lstatSync(keyFile);
@@ -653,6 +668,7 @@ export function setAgentApiKey(file: string, keyFile: string, agentHome: string 
   }
   if (st) {
     if (!st.isFile()) throw new Error(`${keyFile} is not a plain file`);
+    if (st.nlink !== 1) throw new Error(`${keyFile} has ${st.nlink} links: the key is one file of its own (credentials.sh <name> api-key installs it so)`);
     // WHY: POSIX only; Windows has no owners or mode bits to read.
     if (typeof process.getuid === 'function') {
       if (st.mode & 0o077) throw new Error(`${keyFile} is open to its group or others (mode ${(st.mode & 0o777).toString(8)}); the key is the agent user's alone (credentials.sh <name> api-key installs it 0400)`);

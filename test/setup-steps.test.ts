@@ -5,9 +5,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { delimiter, join } from 'node:path';
+import { delimiter, dirname, join } from 'node:path';
 import { toolBin } from '../src/tool-path.js';
 import { BRAND } from '../src/brand.js';
 import { loadConfig } from '../src/config/load.js';
@@ -162,7 +162,25 @@ const CASES: Record<string, { mode: Mode; on: (f: Fx, w: World) => SetupContext 
   tailscale: { mode: 'server', on: (_f, w) => { w.tools.add('tailscale'); w.tailscale = '{"BackendState":"Running","Self":{"DNSName":"box.example.com."}}'; }, off: (_f, w) => { w.tools.add('tailscale'); w.tailscale = '{"BackendState":"NeedsLogin"}'; }, done: /box\.example\.com/ },
   'machine-devices': { mode: 'server', on: (f) => writeFileSync(f.machine.hubUnitFile, 'ExecStart=x --machine-devices tag:owner\n'), off: (f) => writeFileSync(f.machine.hubUnitFile, 'ExecStart=x\n'), done: /machine devices: tag:owner/ },
   updater: { mode: 'server', on: (f) => { writeFileSync(f.machine.updatesConfig, '{}'); writeFileSync(f.machine.allowedSigners, 'k'); }, off: (f) => writeFileSync(f.machine.updatesConfig, '{}'), not: /installs nothing until/ },
-  'other-keys': { mode: 'server', on: (f) => { writeFileSync(join(f.home, 'key'), 'k'); f.facts.credentials.agent_api_key = join(f.home, 'key'); }, off: () => {} },
+  // #904: done is an agent's key where credentials.sh installs it, in its agent user's home (hidden from this, the
+  // coordinator user, as on a server), with root's record of that user signed in with it. A key file this user owns
+  // and can see is never the agent's, so it is not done (test/agent-api-key-bounds.test.ts).
+  'other-keys': {
+    mode: 'server',
+    on: (f) => {
+      const agentHome = join(f.home, 'agent-home');
+      const key = join(agentHome, '.config', 'shop-claude-key', 'api_key');
+      mkdirSync(dirname(key), { recursive: true });
+      writeFileSync(key, 'k', { mode: 0o400 });
+      f.facts.agentHome = agentHome;
+      f.facts.credentials.agent_api_key = key;
+      mkdirSync(f.machine.claudeAccountDir, { recursive: true });
+      writeFileSync(join(f.machine.claudeAccountDir, 'status.json'), JSON.stringify({ at: '2026-10-20T10:00:00Z', users: [{ instance: 'shop', kind: 'agent', user: 'wl-shop-agent', logged_in: true, auth_method: 'api_key_helper', api_ok: true }] }));
+      chmodSync(agentHome, 0o000);
+      process.once('exit', () => chmodSync(agentHome, 0o700));
+    },
+    off: () => {},
+  },
   backup: { mode: 'server', on: (f) => writeFileSync(join(f.home, 'offsite-backup.yaml'), 'x'), off: () => {} },
   'more-owners': { mode: 'server', on: (f) => writeFileSync(f.machine.machineOwners, '{"owners":["ada","bo"]}', { mode: 0o644 }), off: (f) => writeFileSync(f.machine.machineOwners, '{"owners":["ada"]}', { mode: 0o644 }) },
   'deploy-gate': { mode: 'local', on: (f) => writeFileSync(join(f.dir, BRAND.configDir, 'deploy.yaml'), 'version: 1\nenvironments:\n  - name: staging\n    verify: "true"\n'), off: () => {}, done: /staging/ },
