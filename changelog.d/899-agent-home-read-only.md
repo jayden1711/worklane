@@ -51,8 +51,9 @@
   A project command can't write the home directly, nor anything an allowed link in it reaches. The ways around that are listed in full in `docs/auth.md`, under "What the read-only home does not stop". Among them:
   - a link deeper in the home, or inside what an allowed link reaches, that leads somewhere writable (After install);
   - a hard link made outside the sandbox to a home file (`~/.cache` and `~/.npm` included), or to a file an allowed link reaches: a command writes the file through its other name (After install covers the home's);
-  - a FIFO or socket in the home, or any IPC channel outside it: what a command writes reaches a live agent-user process outside the sandbox (#933);
-  - on macOS, links: the profile walks none, so a link leading out of the home is followed and written through.
+  - a FIFO or socket in the home, or any IPC channel outside it (the sandbox shares the network and IPC namespaces): what a command writes reaches a live agent-user process outside the sandbox (#933);
+  - files outside the home that a later process outside the sandbox reads, such as the checkout's `.claude/settings.json` hooks and `.git/config` (#958, #926);
+  - on macOS, links: the profile walks none, so a link leading out of the home is followed and written through. The macOS profile as a whole is untested on a real Mac, and whether a command can mount over the home there is unknown.
 
   A link to a directory above the home (`~/.x -> ..`) is bound read-only over the home's own mounts, so for that layout `~/.cache` and `~/.npm` are read-only too.
 - **harness-config locked (#798).** `src/review.ts` lists `harness-config` in `LOCKED_CATEGORIES` and `ALWAYS_L3`: it is always L3 and always waits. Its built-in globs always hold, and a repo's `review.yaml` may only add to them.
