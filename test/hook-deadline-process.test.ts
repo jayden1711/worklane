@@ -103,10 +103,10 @@ test('a guard stuck in synchronous code, or left waiting for its input, is refus
 
 test("the #887 review's slow call (an 18,000-entry tree, ls with 300 */*/* words, then cat of a hidden file) is refused within the budget", async (t) => {
   const { dir: project, stateDir } = exampleProject();
-  // 18,000 files: 30 directories of 30 directories of 20 files.
+  // 18,000 files, each one a match of */*/*: 30 directories of 30 directories of 20 files, at the project's root.
   for (let a = 0; a < 30; a++) {
     for (let b = 0; b < 30; b++) {
-      const d = join(project, 'tree', `a${a}`, `b${b}`);
+      const d = join(project, `a${a}`, `b${b}`);
       mkdirSync(d, { recursive: true });
       for (let c = 0; c < 20; c++) writeFileSync(join(d, `f${c}.txt`), '');
     }
