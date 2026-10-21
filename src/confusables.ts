@@ -138,35 +138,106 @@ function compile(kind: 'raw' | Form, glob: string): RegExp {
   return re;
 }
 
+/** A string as a regex matches it literally, outside a class (only syntax characters escaped, as the u flag allows). */
+const reLiteral = (s: string): string => s.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&');
+
 /**
- * A regex with each literal letter or digit (outside a class, an escape or a quantifier's braces) replaced by its
- * skeleton, so it can be tested against a path's skeleton: a regex naming payments then holds the path spelled with
- * r, n for its m. null when the mapped source isn't a valid regex (a group name holding such a letter, say): that
- * regex is tested against the path's skeleton and readings as written.
+ * The skeletons a literal character of a regex stands for that the regex doesn't match already: its own, and under
+ * the `i` flag its lower and upper case's too (a capital M stands for an m, whose skeleton is r, n).
+ */
+function skeletonsOf(c: string, ci: boolean): string[] {
+  const forms = ci ? [c, c.toLowerCase(), c.toUpperCase()] : [c];
+  const same = (s: string) => s === c || (ci && s.toLowerCase() === c.toLowerCase());
+  return [...new Set(forms.map(skeleton))].filter((s) => !same(s));
+}
+
+/** Where the syntax that starts at `i` ends (one past it): an escape, a group opening, a class or a quantifier's braces. */
+function syntaxEnd(src: string, i: number, sets: boolean): number {
+  const to = (close: string, from: number) => {
+    const j = src.indexOf(close, from);
+    return j < 0 ? src.length : j + 1;
+  };
+  const c = src[i];
+  if (c === '\\') {
+    const n = src[i + 1];
+    if ((n === 'k' && src[i + 2] === '<') || ((n === 'p' || n === 'P' || n === 'u') && src[i + 2] === '{')) return to(n === 'k' ? '>' : '}', i + 2);
+    if (n === 'u') return i + 6;
+    if (n === 'x') return i + 4;
+    if (n === 'c') return i + 3;
+    if (n !== undefined && /[0-9]/.test(n)) return i + 1 + /^[0-9]+/.exec(src.slice(i + 1))![0].length;
+    return i + 2;
+  }
+  if (c === '(' && src[i + 1] === '?') {
+    // A named group's name, copied as it is; a lookbehind; a modifier group's flags; then its : = or !.
+    if (src[i + 2] === '<' && src[i + 3] !== '=' && src[i + 3] !== '!') return to('>', i + 3);
+    let j = i + 2;
+    while (j < src.length && /[A-Za-z-]/.test(src[j]!)) j++;
+    if (src[j] === '<' && (src[j + 1] === '=' || src[j + 1] === '!')) return j + 2;
+    return src[j] === ':' || src[j] === '=' || src[j] === '!' ? j + 1 : j;
+  }
+  if (c === '[') {
+    // To the class's closing bracket, past escapes (and nested classes under the v flag).
+    let depth = 0;
+    for (let j = i; j < src.length; j++) {
+      if (src[j] === '\\') j++;
+      else if (src[j] === '[' && (j === i || sets)) depth++;
+      else if (src[j] === ']' && --depth === 0) return j + 1;
+    }
+    return src.length;
+  }
+  if (c === '{' && /^\{[0-9]+(,[0-9]*)?\}/.test(src.slice(i))) return to('}', i);
+  return i;
+}
+
+/** The members of a plain (not negated) class's source that are literal characters, its ranges spelled out (ASCII only). */
+function classMembers(cls: string): string[] {
+  const body = [...cls.slice(1, -1)];
+  const out: string[] = [];
+  for (let k = 0; k < body.length; k++) {
+    if (body[k] === '\\') {
+      k++;
+      continue;
+    }
+    if (body[k + 1] === '-' && body[k + 2] !== undefined && body[k + 2] !== '\\') {
+      const [a, b] = [body[k]!.codePointAt(0)!, Math.min(body[k + 2]!.codePointAt(0)!, 127)];
+      for (let cp = a; cp <= b; cp++) out.push(String.fromCodePoint(cp));
+      k += 2;
+    } else out.push(body[k]!);
+  }
+  return out;
+}
+
+/**
+ * A regex (a money-list regex literal) rewritten to match a path's skeleton (#763): each literal character outside
+ * other syntax as itself or the skeletons it stands for (skeletonsOf: under `i`, both cases'), and each plain class
+ * as itself or its members' skeletons; a dot, a negated class and a class escape as one or two of what they stand
+ * for. Other escapes, group names and back-references, lookarounds, modifier flags and quantifier braces are copied
+ * as they are. A regex naming payments then holds the path spelled with r, n for its m. null when the
+ * rewritten source isn't a valid regex: lookalikeOf then holds every path the regex doesn't match (fails closed).
  */
 const skeletonRegExps = new WeakMap<RegExp, RegExp | null>();
 function skeletonRegExp(re: RegExp): RegExp | null {
   if (skeletonRegExps.has(re)) return skeletonRegExps.get(re)!;
   const src = re.source;
+  const ci = re.flags.includes('i');
+  const sets = re.flags.includes('v');
   let out = '';
-  let inClass = false;
-  let inBraces = false;
-  for (let i = 0; i < src.length; i++) {
-    const c = src[i]!;
-    if (c === '\\') {
-      out += c + (src[i + 1] ?? '');
-      i++;
-    } else if (inClass || inBraces) {
-      out += c;
-      if (c === (inClass ? ']' : '}')) inClass = inBraces = false;
-    } else if (c === '[' || c === '{') {
-      out += c;
-      if (c === '[') inClass = true;
-      else inBraces = true;
-    } else {
-      const s = /^[A-Za-z0-9]$/.test(c) ? skeleton(c) : c;
-      out += s === c ? c : `(?:${s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})`;
+  for (let i = 0; i < src.length; ) {
+    const end = syntaxEnd(src, i, sets);
+    if (end > i) {
+      const part = src.slice(i, end);
+      const alts = part.startsWith('[') && !part.startsWith('[^') ? [...new Set(classMembers(part).flatMap((m) => skeletonsOf(m, ci)))] : [];
+      // A negated class or a class escape stands for one character, which may be one whose skeleton is two (m).
+      const oneOfAny = part.startsWith('[^') || /^\\([wWdDsS]$|[pP]\{)/.test(part);
+      out += alts.length ? `(?:${part}|${alts.map(reLiteral).join('|')})` : oneOfAny ? `(?:${part}${part}?)` : part;
+      i = end;
+      continue;
     }
+    const c = String.fromCodePoint(src.codePointAt(i)!);
+    const alts = /^[\\^$.|?*+()[\]{}/]$/.test(c) ? [] : skeletonsOf(c, ci);
+    // A dot stands for one character, which may be one whose skeleton is two (m: r, n).
+    out += c === '.' ? '(?:..?)' : alts.length ? `(?:${reLiteral(c)}|${alts.map(reLiteral).join('|')})` : c;
+    i += c.length;
   }
   let mapped: RegExp | null;
   try {
@@ -188,8 +259,10 @@ export type Lookalike = { like: string } | { unchecked: string };
  * fullwidth letter), while the path itself doesn't match that pattern. A name with a blank-looking character (a
  * space, a no-break space, the braille blank) is compared without them too. A path a pattern matches as itself is
  * that pattern's own and not a look-alike of it. Regexes (money-list regex literals) are tested against the path's
- * skeleton forms and ASCII readings, and, mapped by skeletonRegExp, against its skeleton forms. A letter inside a
- * regex's character class isn't mapped (a residual: a money list of globs is compared fully).
+ * skeleton forms and ASCII readings, and, mapped by skeletonRegExp, against its skeleton forms; a regex it can't map
+ * holds every path the regex doesn't match. A dot, a negated class and a class escape (`\w`, `\p{L}`) stand for one
+ * or two characters (a skeleton of two, as m's is). Residual: a wildcard standing for a character whose skeleton is
+ * longer than two (only characters outside ASCII have one).
  * null: no look-alike. Fails closed (see the module's INVARIANT).
  */
 export function lookalikeOf(path: string, patterns: readonly Protected[]): Lookalike | null {
@@ -211,7 +284,9 @@ export function lookalikeOf(path: string, patterns: readonly Protected[]): Looka
         if (p.re.test(path)) continue;
         if (readings.some((r) => p.re.test(r))) return { like: p.what };
         const mapped = skeletonRegExp(p.re);
-        if (mapped && forms.some(([, s]) => mapped.test(s))) return { like: p.what };
+        // A regex the rewrite can't map can't be judged for look-alikes: every path it doesn't match waits (fails closed).
+        if (!mapped) return { unchecked: `a money-list regex the look-alike check can't map` };
+        if (forms.some(([, s]) => mapped.test(s))) return { like: p.what };
       }
     }
     return null;
