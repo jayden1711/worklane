@@ -607,6 +607,98 @@ export function setDiscordToken(file: string, tokenFile: string): void {
   setIntakeCredential(file, 'discord_token', tokenFile);
 }
 
+/**
+ * Whether a path is where credentials.sh <name> api-key installs an agent's key (#904): `<agent home>/.config/
+ * <instance>-claude-key/api_key`, and nothing else of that home. Without `instance`, any instance name's directory
+ * (lib.sh's agent_key_path_ok, add-project's rule, which ties the path to the agent's own apiKeyHelper besides; a
+ * rename keeps the directory's old name). With it, only that instance's: the engine's rule (set-agent-api-key,
+ * other-keys), which can't see the agent's settings, so a renamed instance reruns credentials.sh <new> api-key.
+ */
+export function isInstalledKeyPath(agentHome: string, keyFile: string, instance?: string): boolean {
+  const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const dir = instance === undefined ? '[a-z][a-z0-9-]{0,20}' : esc(instance);
+  return new RegExp(`^${esc(agentHome)}/\\.config/${dir}-claude-key/api_key$`).test(keyFile);
+}
+
+/** The most of credentials.yaml add-project hands the engine to read (#904): far more than any real one. */
+export const CREDENTIALS_TEXT_MAX = 65_536;
+
+/**
+ * credentials.yaml's agent_api_key, exactly as the engine loads it (#904): the same parse (unique keys) and the same
+ * schema as loadInstance, so add-project judges the value the runner will use, never a line a text match picked out
+ * (a flow mapping can put another `agent_api_key:` at column 0). Null when the text doesn't load, or names none.
+ */
+export function agentApiKeyOfText(text: string): string | null {
+  const errors: ConfigError[] = [];
+  const c = readYaml(CredentialsFile, 'credentials.yaml', errors, text);
+  return errors.length || !c ? null : (c.agent_api_key ?? null);
+}
+
+/** A server instance's agent user, as the setup scripts make it (instance.sh, credentials.sh): `wl-<instance>-agent`. */
+export const serverAgentUser = (instance: string): string => `wl-${instance}-agent`;
+
+/**
+ * The home of a server instance's agent user, from the user database (#904): never instance.yaml's run_as.agent_home,
+ * which the coordinator user writes. Null when there is no such user.
+ */
+export function serverAgentHome(instance: string, lookup: (user: string) => string | null = homeOf): string | null {
+  return lookup(serverAgentUser(instance));
+}
+
+/** The agent user's home an instance's agents run in (instance.yaml run_as.agent_home), or null when they don't run as their own user. */
+export function instanceAgentHome(instanceName: string, dir = instancesDir()): string | null {
+  const errors: ConfigError[] = [];
+  const inst = readYaml(InstanceFile, join(dir, instanceName, 'instance.yaml'), errors);
+  if (errors.length || !inst) throw new ConfigInvalid(errors);
+  return inst.run_as?.agent_home ?? null;
+}
+
+/**
+ * Point credentials.yaml at the agent user's Anthropic API key file (agent_api_key), validated before it is written
+ * (0600, renamed into place); its one writer (credentials.sh <name> api-key, as the coordinator user, once root has
+ * installed the file and claude reports an API-key login as the agent user). Only the path: the key is never read.
+ * The file is the agent user's, in its own home, so this user normally can't see it at all; that is the case it is
+ * meant for. Refused: a path apiKeyHelper can't name (src/runner.ts apiKeyHelperCommand) or the schema refuses (not in
+ * normal form), any path but where credentials.sh installs the key in the agent's home (isInstalledKeyPath; #904: the
+ * runner sends that file to the API), an instance with no agent home, no such file, a link or anything but a plain
+ * file, and a file this user could read: open to its group or others, or this user's own (the coordinator must never
+ * be able to read the key).
+ */
+export function setAgentApiKey(file: string, keyFile: string, o: { instance: string; runsAsAgent: boolean; agentHome: string | null }): void {
+  if (!/^\/[A-Za-z0-9._/-]+$/.test(keyFile)) throw new Error(`the key file ${JSON.stringify(keyFile)} must be an absolute path, with letters, digits and . _ - / only (apiKeyHelper names it)`);
+  if (!normalAbsolute(keyFile)) throw new Error(`the key file ${keyFile} ${NOT_NORMAL_ABSOLUTE}`);
+  if (!existsSync(file)) throw new Error(`no ${file}: the instance's GitHub credential comes first (credentials.sh <name> github-app writes it)`);
+  if (!o.runsAsAgent) throw new Error("the instance's agents don't run as their own user (instance.yaml has no run_as), so there is no agent home to hold an API key; nothing written");
+  if (!o.agentHome) throw new Error(`no agent user ${serverAgentUser(o.instance)} on this machine (the user database has no home for it); nothing written`);
+  // WHY (#904): any other file, however private to the agent user, the runner would send to the API as the key. The home
+  // is the user database's (serverAgentHome), never instance.yaml's, and only this instance's key directory counts.
+  if (!isInstalledKeyPath(o.agentHome, keyFile, o.instance)) throw new Error(`${keyFile} is not where credentials.sh <name> api-key installs the key (${o.agentHome}/.config/${o.instance}-claude-key/api_key); nothing written`);
+  let st;
+  try {
+    st = lstatSync(keyFile);
+  } catch (e) {
+    const code = (e as NodeJS.ErrnoException).code;
+    // WHY: EACCES is the expected answer: the key is in the agent user's home, which this user can't search.
+    if (code !== 'EACCES' && code !== 'EPERM') throw new Error(`no key file ${keyFile}`);
+  }
+  if (st) {
+    if (!st.isFile()) throw new Error(`${keyFile} is not a plain file`);
+    if (st.nlink !== 1) throw new Error(`${keyFile} has ${st.nlink} links: the key is one file of its own (credentials.sh <name> api-key installs it so)`);
+    // WHY: POSIX only; Windows has no owners or mode bits to read.
+    if (typeof process.getuid === 'function') {
+      if (st.mode & 0o077) throw new Error(`${keyFile} is open to its group or others (mode ${(st.mode & 0o777).toString(8)}); the key is the agent user's alone (credentials.sh <name> api-key installs it 0400)`);
+      if (st.uid === process.getuid()) throw new Error(`${keyFile} is this user's own: the key must be the agent user's, which this user can't read (credentials.sh <name> api-key installs it so)`);
+    }
+  }
+  const doc = parseDocument(readFileSync(file, 'utf8'));
+  if (doc.errors.length) throw new Error(`${file} isn't valid YAML: ${doc.errors[0]!.message.split('\n')[0]}`);
+  doc.set('agent_api_key', keyFile);
+  const r = CredentialsFile.safeParse(doc.toJS());
+  if (!r.success) throw new Error(`${file} would not be valid: ${r.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ')}`);
+  // WHY: lineWidth 0, so a long path doesn't re-wrap the file's other lines (add-project reads the entry as one line).
+  replaceFileAtomically(file, doc.toString({ lineWidth: 0 }), 0o600, dirname(file));
+}
+
 /** The intake credentials credentials.yaml names (under `intake:`), each a path to a 0400 file. */
 export const INTAKE_CREDENTIAL_KEYS = ['discord_token', 'slack_app_token', 'slack_bot_token', 'linear_api_key'] as const;
 export type IntakeCredentialKey = (typeof INTAKE_CREDENTIAL_KEYS)[number];

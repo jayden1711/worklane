@@ -21,6 +21,10 @@ categories:
     - test/push-hook-guard.test.ts
     - test/push-gate.test.ts
     - test/push-gate-hook.test.ts
+    - test/change-files-renames.test.ts
+    - test/push-skill-names.test.ts
+    - test/push-skill-links.test.ts
+    - test/push-names-plumbing.test.ts
     - test/main-watch.test.ts
     - test/main-watch-coordinator.test.ts
     - test/denylist.test.ts

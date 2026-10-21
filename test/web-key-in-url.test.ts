@@ -1,3 +1,4 @@
+// lint-test
 // The web app never puts the dashboard key in a URL: its live streams are read with fetch (web/src/sse.ts) and
 // send the key in the Authorization header, like every other call; nothing in web/src builds a URL with the key or
 // opens an EventSource (which can't send headers). A source check, the stream module against a real dashboard and

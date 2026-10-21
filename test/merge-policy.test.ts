@@ -25,6 +25,7 @@ import { EventLog } from '../src/events/log.js';
 import * as weakening from '../src/merge-policy-weakening.js';
 import type { ChangeFile, LockScope } from '../src/review.js';
 import { FakeRunner } from '../src/runner.js';
+import { parse } from 'yaml';
 
 const cfg = loadConfig(exampleProject().dir);
 const review = cfg.review!;
@@ -103,6 +104,7 @@ const engineFiles = execFileSync('git', ['ls-files'], { cwd: repoRoot, encoding:
  * the deployment manifests, locked before the first one lands (#703 adds it). Each entry must still
  * match no file, so the first file under it takes the entry out and its glob is checked like the others.
  */
+// check-table: never-grow
 const NOT_YET_FILES = [`${BRAND.configDir}/experiments.yaml`, 'deploy/**', 'deploy', 'compose.*', 'docker-compose.*', 'dockerfile*', 'Containerfile*'];
 
 test('self-modification: every glob names real engine files (none dead), and the list is the one the owner approved', () => {
@@ -176,6 +178,10 @@ test('self-modification: every glob names real engine files (none dead), and the
     ['test/push-gate.test.ts', 'the tests of the harness controls'],
     ['test/package-files.test.ts', 'the tests of the harness controls'],
     ['test/managed-apps.test.ts', 'the tests of the harness controls'],
+    ['test/change-files-renames.test.ts', 'the tests of the harness controls'],
+    ['test/push-skill-names.test.ts', 'the tests of the harness controls'],
+    ['test/push-skill-links.test.ts', 'the tests of the harness controls'],
+    ['test/push-names-plumbing.test.ts', 'the tests of the harness controls'],
     ['docs/releasing.md', 'the release procedure and the design rules'],
     ['docs/design.md', 'the release procedure and the design rules'],
     ['src/coordinator/base.ts', 'the coordinator'],
@@ -188,6 +194,38 @@ test('self-modification: every glob names real engine files (none dead), and the
   }
   // Nothing else in the engine falls in it by accident.
   for (const path of ['src/dashboard.ts', 'src/experiments/study.ts', 'web/src/pages/Waiting.tsx', 'test/helpers.ts', 'test/dashboard.test.ts', 'docs/notes-for-the-test.md', 'README.md', 'scripts/release.mjs']) assert.equal(part(path), undefined, path);
+});
+
+test('the rename and odd-name tests are locked (#724): a one-line change to test/change-files-renames.test.ts is self-modification, L3, never a tests-only L0', () => {
+  const cfg = ReviewConfig.parse({ version: 1, levels: { L0_auto: { when: ['docs-only', 'tests-only'], max_lines: 200 }, L1_evaluator: { when: [] }, L2_notify: { when: [] }, L3_human: { when: [] } } });
+  const path = 'test/change-files-renames.test.ts';
+  const r = computeLevel({ files: [{ path, added: 1, removed: 1 }], labels: [], moneyPaths: [], scope: undefined }, cfg);
+  assert.deepEqual([r.level, r.categories[SELF_MODIFICATION], selfModificationPart(path)], ['L3', [path], 'the tests of the harness controls']);
+  // Under the engine's own review.yaml too: listed in engine-guards.
+  const engine = ReviewConfig.parse(parse(readFileSync(join(repoRoot, BRAND.configDir, 'review.yaml'), 'utf8')));
+  assert.ok(engine.categories['engine-guards']?.includes(path), 'listed in .worklane/review.yaml engine-guards');
+  assert.equal(computeLevel({ files: [{ path, added: 1, removed: 1 }], labels: [], moneyPaths: [], scope: undefined }, engine).level, 'L3');
+});
+
+test('the push limits\' SKILL.md lint tests are locked (#724): a one-line change to either is self-modification, L3, never a tests-only L0', () => {
+  const cfg = ReviewConfig.parse({ version: 1, levels: { L0_auto: { when: ['docs-only', 'tests-only'], max_lines: 200 }, L1_evaluator: { when: [] }, L2_notify: { when: [] }, L3_human: { when: [] } } });
+  const engine = ReviewConfig.parse(parse(readFileSync(join(repoRoot, BRAND.configDir, 'review.yaml'), 'utf8')));
+  for (const path of ['test/push-skill-names.test.ts', 'test/push-skill-links.test.ts']) {
+    const r = computeLevel({ files: [{ path, added: 1, removed: 1 }], labels: [], moneyPaths: [], scope: undefined }, cfg);
+    assert.deepEqual([r.level, r.categories[SELF_MODIFICATION], selfModificationPart(path)], ['L3', [path], 'the tests of the harness controls'], path);
+    assert.ok(engine.categories['engine-guards']?.includes(path), `${path}: listed in .worklane/review.yaml engine-guards`);
+    assert.equal(computeLevel({ files: [{ path, added: 1, removed: 1 }], labels: [], moneyPaths: [], scope: undefined }, engine).level, 'L3', path);
+  }
+});
+
+test('the push limits\' plumbing-names tests are locked (#724): a one-line change is self-modification, L3, never a tests-only L0', () => {
+  const cfg = ReviewConfig.parse({ version: 1, levels: { L0_auto: { when: ['docs-only', 'tests-only'], max_lines: 200 }, L1_evaluator: { when: [] }, L2_notify: { when: [] }, L3_human: { when: [] } } });
+  const engine = ReviewConfig.parse(parse(readFileSync(join(repoRoot, BRAND.configDir, 'review.yaml'), 'utf8')));
+  const path = 'test/push-names-plumbing.test.ts';
+  const r = computeLevel({ files: [{ path, added: 1, removed: 1 }], labels: [], moneyPaths: [], scope: undefined }, cfg);
+  assert.deepEqual([r.level, r.categories[SELF_MODIFICATION], selfModificationPart(path)], ['L3', [path], 'the tests of the harness controls']);
+  assert.ok(engine.categories['engine-guards']?.includes(path), 'listed in .worklane/review.yaml engine-guards');
+  assert.equal(computeLevel({ files: [{ path, added: 1, removed: 1 }], labels: [], moneyPaths: [], scope: undefined }, engine).level, 'L3');
 });
 
 test('regression: a change to the evaluator, the sandbox, the denylist, a guard test or the release rules waits for the owner, even a tests-only or docs-only one, whatever review.yaml tries', () => {
@@ -488,10 +526,13 @@ const MATH_TEST = [
 const MATH = 'export const add = (a: number, b: number) => a + b;\nexport const sub = (a: number, b: number) => a - b;\n';
 /** The code, changed: a change to the test alongside it is one that also changes code. */
 const MATH_CHANGED = MATH.replace('a - b', 'b - a');
-/** A lint's allowlist and its rules, under the names the registry reads (CHECK_TABLES). */
-const CLOCK_LINT = "const ALLOWED: Record<string, number> = {\n  'test/a.test.ts': 1,\n  'test/b.test.ts': 2,\n};\n";
-const READER_LINT = 'const READER_WORDS: Record<string, RegExp> = {\n  numstat: /numstat/g,\n  raw: /--raw\\b/g,\n};\n';
-const DELEGATION = "export const NEVER_LOOSEN = ['money-path', 'migration', 'auth'] as const;\n\nexport const floor = () => new Set<string>([...NEVER_LOOSEN]);\n";
+/**
+ * A lint's allowlist and its rules, each registered by its mark (#869: a lint test's `// lint-test` line, a table's
+ * `// check-table: <kind>` line before it), as the real files carry them.
+ */
+const CLOCK_LINT = "// lint-test\n// check-table: never-grow\nconst ALLOWED: Record<string, number> = {\n  'test/a.test.ts': 1,\n  'test/b.test.ts': 2,\n};\n";
+const READER_LINT = '// lint-test\n// check-table: never-shrink\nconst READER_WORDS: Record<string, RegExp> = {\n  numstat: /numstat/g,\n  raw: /--raw\\b/g,\n};\n';
+const DELEGATION = "// check-table: never-shrink\nexport const NEVER_LOOSEN = ['money-path', 'migration', 'auth'] as const;\n\nexport const floor = () => new Set<string>([...NEVER_LOOSEN]);\n";
 const ESLINT = '{\n  "rules": {\n    "eqeqeq": "error",\n    "no-eval": "error"\n  }\n}\n';
 
 /**
@@ -643,7 +684,7 @@ test('weakening: a deleted test file waits; a pure rename does not, unless it le
     ['tests/conftest.py', 'tests/old/conftest.py', 'def pytest_configure(config):\n    config.option.strict = True\n'],
     ['test/tsconfig.json', 'test/old/tsconfig.json', '{\n  "compilerOptions": { "strict": true }\n}\n'],
     ['test/jest.config.js', 'test/old/jest.config.js', 'module.exports = { testMatch: ["**/*.test.js"] };\n'],
-    ['test/brand.test.ts', 'test/brand-name.test.ts', MATH_TEST],
+    ['test/brand.test.ts', 'test/brand-name.test.ts', `// lint-test\n${MATH_TEST}`],
     ['test/isolate.ts', 'test/isolate-old.ts', 'export const isolate = true;\n'],
     ['test/no-clock-helpers.test.ts', 'test/no-clock-helpers2.test.ts', CLOCK_LINT],
   ] as [string, string, string][]) assert.ok(moved(from, to, text).includes(GUARD) || moved(from, to, text).includes(GONE), `${from} -> ${to}: ${moved(from, to, text).join(' | ')}`);
@@ -676,12 +717,14 @@ test('weakening: a guard or lint file waits on any line removed or changed, a li
     'tsconfig.json', 'eslint.config.js', '.eslintrc.json', 'vitest.config.ts', 'jest.config.js', 'cypress.config.ts', '.lintstagedrc.json', '.semgrep.yml', '.rubocop.yml', 'deno.json',
     'mypy.ini', '.pre-commit-config.yaml', '.github/CODEOWNERS', `${BRAND.configDir}/checks/lint.mjs`, 'scripts/ci/affected.mjs', 'src/push-guard.ts', 'test/pipefail.test.ts',
   ]) {
+    // A lint test is one by its mark (#869).
+    const lint = path === 'test/pipefail.test.ts' ? '// lint-test\n' : '';
     for (const scope of [undefined, 'managed-app'] as const) {
       const engineOnly = scope && /^(?:src|scripts|test)\//.test(path);
-      assert.deepEqual(kinds(weakens({ [path]: 'one\ntwo\n' }, { [path]: 'one\n' }, scope)), engineOnly ? [] : [GUARD], `${path} ${String(scope)}`);
-      assert.deepEqual(kinds(weakens({ [path]: 'one\ntwo\n' }, { [path]: 'one\nthree\n' }, scope)), engineOnly ? [] : [GUARD], `${path} ${String(scope)}: changed`);
+      assert.deepEqual(kinds(weakens({ [path]: `${lint}one\ntwo\n` }, { [path]: `${lint}one\n` }, scope)), engineOnly ? [] : [GUARD], `${path} ${String(scope)}`);
+      assert.deepEqual(kinds(weakens({ [path]: `${lint}one\ntwo\n` }, { [path]: `${lint}one\nthree\n` }, scope)), engineOnly ? [] : [GUARD], `${path} ${String(scope)}: changed`);
     }
-    assert.deepEqual(weakens({ [path]: 'one\n' }, { [path]: 'one\ntwo\n' }), [], `${path}: added`);
+    assert.deepEqual(weakens({ [path]: `${lint}one\n` }, { [path]: `${lint}one\ntwo\n` }), [], `${path}: added`);
   }
   // A rule taken out of a lint's config.
   assert.deepEqual(kinds(weakens({ '.eslintrc.json': ESLINT }, { '.eslintrc.json': ESLINT.replace('    "eqeqeq": "error",\n', '') })), [GUARD]);
@@ -697,12 +740,12 @@ test('weakening: a registered table waits on an entry added to an allowlist, or 
   assert.deepEqual(kinds(weakens({ 'test/no-clock-helpers.test.ts': CLOCK_LINT }, { 'test/no-clock-helpers.test.ts': CLOCK_LINT.replace("  'test/b.test.ts': 2,\n", "  'test/b.test.ts': 2,\n  'test/c.test.ts': 1,\n") })), [GROWN]);
   assert.deepEqual(kinds(weakens({ 'test/no-clock-helpers.test.ts': CLOCK_LINT }, { 'test/no-clock-helpers.test.ts': CLOCK_LINT.replace("'test/b.test.ts': 2", "'test/b.test.ts': 3") })), [GROWN, GUARD]);
   // An entry added after the last one (its comma added to the line before) is one entry added.
-  const last = "export const LOCK_SCOPE_GOOD = [\n  'a'\n];\n";
+  const last = "// check-table: never-grow\nexport const LOCK_SCOPE_GOOD = [\n  'a'\n];\n";
   assert.deepEqual(kinds(weakens({ 'test/review.test.ts': last }, { 'test/review.test.ts': last.replace("  'a'\n", "  'a',\n  'b'\n") })), [GROWN]);
   // A rule list shrunk: in a lint test, and in a test that isn't one (a bad-fixture list).
   assert.deepEqual(kinds(weakens({ 'test/change-files-renames.test.ts': READER_LINT }, { 'test/change-files-renames.test.ts': READER_LINT.replace('  raw: /--raw\\b/g,\n', '') })), [SHRUNK, GUARD]);
   assert.deepEqual(weakens({ 'test/change-files-renames.test.ts': READER_LINT }, { 'test/change-files-renames.test.ts': READER_LINT.replace('  raw: /--raw\\b/g,\n', '  raw: /--raw\\b/g,\n  stat: /--stat/g,\n') }), []);
-  const bad = "const NAMES_BAD = [\n  '',\n  '../up',\n];\n";
+  const bad = "// check-table: never-shrink\nconst NAMES_BAD = [\n  '',\n  '../up',\n];\n";
   assert.deepEqual(kinds(weakens({ 'test/add-project.test.ts': bad }, { 'test/add-project.test.ts': bad.replace("  '../up',\n", '') })), [SHRUNK]);
   assert.deepEqual(kinds(weakens({ 'test/add-project.test.ts': bad }, { 'test/add-project.test.ts': bad.replace('];', '].slice(1);') })), [SHRUNK]);
   const both = `${bad}const REPOS_BAD = [];\n`;
@@ -718,10 +761,10 @@ test('weakening: a registered table waits on an entry added to an allowlist, or 
   assert.deepEqual(kinds(weakens({ 'package.json': pkg }, { 'package.json': pkg.replace('"lint": "eslint ."', '"lint": "eslint .",\n    "fmt": "prettier ."') })), [MARKER]);
   // Round 4's review: the reader fails closed, never reads around a trick. A decoy declaration (in a comment) before
   // the table, an entry or a comment at column 0 inside it: the change waits.
-  const allowed = "const ALLOWED = [\n  'a',\n];\nconst BAD_SHAPE = [];\n";
+  const allowed = "// check-table: never-grow\nconst ALLOWED = [\n  'a',\n];\nconst BAD_SHAPE = [];\n";
   const decoy = `/*\nconst ALLOWED = [\n  'a',\n];\n*/\n${allowed}`;
   assert.deepEqual(kinds(weakensRaw({ 'test/instance-name.test.ts': decoy }, { 'test/instance-name.test.ts': decoy.replace("];\nconst BAD_SHAPE", "  'b',\n];\nconst BAD_SHAPE") })), [UNREADABLE], 'a decoy, then an entry added');
-  const names = "/*\nconst NAMES_BAD = [\n  '',\n  '../up',\n];\n*/\nconst NAMES_BAD = [\n  '',\n  '../up',\n];\nconst REPOS_BAD = [];\n";
+  const names = "/*\nconst NAMES_BAD = [\n  '',\n  '../up',\n];\n*/\n// check-table: never-shrink\nconst NAMES_BAD = [\n  '',\n  '../up',\n];\nconst REPOS_BAD = [];\n";
   assert.deepEqual(kinds(weakensRaw({ 'test/add-project.test.ts': names }, { 'test/add-project.test.ts': names.replace("  '../up',\n];\nconst REPOS_BAD", "];\nconst REPOS_BAD") })), [UNREADABLE], 'a decoy, then an entry removed');
   assert.deepEqual(kinds(weakensRaw({ 'test/instance-name.test.ts': allowed }, { 'test/instance-name.test.ts': allowed.replace("  'a',\n", "  'a',\n'b',\n") })), [UNREADABLE], 'an entry at column 0');
   assert.deepEqual(kinds(weakensRaw({ 'test/instance-name.test.ts': allowed }, { 'test/instance-name.test.ts': allowed.replace("  'a',\n", "  'a',\n// fine\n  'b',\n") })), [UNREADABLE], 'a comment at column 0');
@@ -733,7 +776,7 @@ test('weakening: a registered table waits on an entry added to an allowlist, or 
     assert.deepEqual(kinds(weakensRaw({ 'test/instance-name.test.ts': allowed }, { 'test/instance-name.test.ts': head })), [UNREADABLE], `decoy + ${real}`);
     assert.ok(weakensRaw({ 'test/instance-name.test.ts': allowed }, { 'test/instance-name.test.ts': allowed.replace('const ALLOWED = [', real) }).length, `${real} alone`);
   }
-  const spaced = "var  ALLOWED = [\n  'a',\n];\nconst BAD_SHAPE = [];\n";
+  const spaced = "// check-table: never-grow\nvar  ALLOWED = [\n  'a',\n];\nconst BAD_SHAPE = [];\n";
   assert.deepEqual(kinds(weakensRaw({ 'test/instance-name.test.ts': spaced }, { 'test/instance-name.test.ts': spaced.replace("  'a',\n", "  'a',\n  'b',\n") })), [GROWN], '`var` with two spaces is read');
   // A one-line table is one line; its entries changing is a change.
   // Round 6's review: a declaring line that opens no bracket (its list on the next line) isn't a one-line table: the
@@ -741,39 +784,41 @@ test('weakening: a registered table waits on an entry added to an allowlist, or 
   // Round 7's review: a declaring line whose brackets balance but hold no list after the `=` (a type, a comment, an
   // empty constructor), with the list on the next lines: unreadable, the change waits.
   // Round 8's review: a bracket in a comment opens nothing, even with the list on the next line at the same indent.
-  const commented = "const ALLOWED = // see [docs]\n[\n  'a',\n];\nconst BAD_SHAPE = [];\n";
+  const commented = "// check-table: never-grow\nconst ALLOWED = // see [docs]\n[\n  'a',\n];\nconst BAD_SHAPE = [];\n";
   assert.deepEqual(kinds(weakensRaw({ 'test/instance-name.test.ts': commented }, { 'test/instance-name.test.ts': commented.replace("  'a',\n", "  'a',\n  'b',\n") })), [UNREADABLE], 'a bracket in a comment');
-  const inString = "const ALLOWED = ['// not a comment', 'a'];\nconst BAD_SHAPE = [];\n";
+  const inString = "// check-table: never-grow\nconst ALLOWED = ['// not a comment', 'a'];\nconst BAD_SHAPE = [];\n";
   assert.deepEqual(kinds(weakensRaw({ 'test/instance-name.test.ts': inString }, { 'test/instance-name.test.ts': `${inString}// a note\n` })), [], 'a // inside a string is no comment');
   // Round 8's review: a registered allowlist grown by a line outside its literal (index assignment, Object.assign,
   // .push, .add, a spread declared again) waits: in a registered table's file, an added line that names the table
   // outside the table's own lines.
-  const clock = "const ALLOWED: Record<string, number> = {\n  'test/a.test.ts': 1,\n};\nconst files = ['x'];\n";
+  const clock = "// check-table: never-grow\nconst ALLOWED: Record<string, number> = {\n  'test/a.test.ts': 1,\n};\nconst files = ['x'];\n";
   for (const line of ["ALLOWED['test/c.test.ts'] = 1;", "Object.assign(ALLOWED, { 'test/c.test.ts': 1 });", "(ALLOWED as unknown as string[]).push('test/c.test.ts');", "new Set(Object.keys(ALLOWED)).add('test/c.test.ts');", "const ALLOWED_TOO = { ...ALLOWED, 'test/c.test.ts': 1 };"]) {
     assert.deepEqual(kinds(weakensRaw({ 'test/no-clock-helpers.test.ts': clock }, { 'test/no-clock-helpers.test.ts': `${clock}${line}\n` })), ['changes a check\'s or guard\'s table outside its own list'], line);
   }
   for (const path of ['test/change-files-renames.test.ts', 'test/no-wall-clock-durations.test.ts']) {
     const table = path.includes('renames') ? 'OUTSIDE_THE_HELPER' : 'ALLOWED';
     const others = weakening.CHECK_TABLES.filter((x) => x.path === path && x.table !== table).map((x) => `const ${x.table} = [];\n`).join('');
-    const text = `const ${table} = {\n  a: 1,\n};\n${others}`;
+    const text = `// check-table: never-grow\nconst ${table} = {\n  a: 1,\n};\n${others}`;
     assert.ok(kinds(weakensRaw({ [path]: text }, { [path]: `${text}${table}.b = 2;\n` })).includes("changes a check's or guard's table outside its own list"), path);
   }
   // Round 9's review: a name built at run time (`eval('ALL' + 'OWED')`, `Function(...)`) isn't matched by the
   // identifier, so in a registered table's file an added `eval(` or `Function(` line waits.
   // (round 10's review: as whole words, so `eval (` with a space waits too)
   for (const line of ["eval('ALL' + 'OWED')['test/c.test.ts'] = 1;", "eval ('ALL' + 'OWED')['test/c.test.ts'] = 1;", "new Function('t', 't.x = 1')(globalThis);", "Function('return this')().ALLOWED_X = 1;"]) {
-    assert.deepEqual(kinds(weakensRaw({ 'test/no-clock-helpers.test.ts': clock }, { 'test/no-clock-helpers.test.ts': `${clock}${line}\n` })), ['changes a check\'s or guard\'s table outside its own list'], line);
+    // A line naming the global object waits a second way too (#886's round 5: a global binding can hide a table).
+    const global = line.includes('globalThis') ? ["adds a line that could hide a check's table from the line reader, an escaped name, a name on the next line or a global binding"] : [];
+    assert.deepEqual(kinds(weakensRaw({ 'test/no-clock-helpers.test.ts': clock }, { 'test/no-clock-helpers.test.ts': `${clock}${line}\n` })), ['changes a check\'s or guard\'s table outside its own list', ...global], line);
   }
   // An added line inside the table's own literal is read as an entry, not as a use.
   assert.deepEqual(kinds(weakensRaw({ 'test/no-clock-helpers.test.ts': clock }, { 'test/no-clock-helpers.test.ts': clock.replace("  'test/a.test.ts': 1,\n", "  'test/a.test.ts': 1,\n  'test/b.test.ts': 1,\n") })), [GROWN]);
   for (const decl of ['const ALLOWED: string[] =\n  [', 'const ALLOWED = // see [docs]\n  [', 'const ALLOWED = new Set()\n  .add(']) {
     const close = decl.endsWith('(') ? '  );' : '  ];';
-    const text = `${decl}\n    'a',\n${close}\nconst BAD_SHAPE = [];\n`;
+    const text = `// check-table: never-grow\n${decl}\n    'a',\n${close}\nconst BAD_SHAPE = [];\n`;
     assert.deepEqual(kinds(weakensRaw({ 'test/instance-name.test.ts': text }, { 'test/instance-name.test.ts': text.replace("    'a',\n", "    'a',\n    'b',\n") })), [UNREADABLE], decl);
   }
-  const split = "const ALLOWED:\n  string[] = [\n  'a',\n];\nconst BAD_SHAPE = [];\n";
+  const split = "// check-table: never-grow\nconst ALLOWED:\n  string[] = [\n  'a',\n];\nconst BAD_SHAPE = [];\n";
   assert.deepEqual(kinds(weakensRaw({ 'test/instance-name.test.ts': split }, { 'test/instance-name.test.ts': split.replace("  'a',\n", "  'a',\n  'b',\n") })), [UNREADABLE], 'a declaration with its bracket on the next line');
-  const one = "const ALLOWED = ['a'];\nconst BAD_SHAPE = [];\n";
+  const one = "// check-table: never-grow\nconst ALLOWED = ['a'];\nconst BAD_SHAPE = [];\n";
   // Since round 6 its declaring line changing makes it wait as unreadable (a decoy can't stand in for it).
   assert.deepEqual(kinds(weakensRaw({ 'test/instance-name.test.ts': one }, { 'test/instance-name.test.ts': one.replace("['a']", "['a', 'b']") })), [UNREADABLE]);
   // A table only after the change is new (a new lint and its allowlist): nothing to loosen. On neither side: nothing
@@ -888,7 +933,7 @@ test("weakening: bounded and fail closed: too many changed characters, a diff th
     throw new Error('no blob');
   };
   assert.deepEqual(kinds(weakening.weakeningReasons({ files: [{ path: 'package.json', added: 1, removed: 1, addedLines: ['x'], removedLines: ['y'] }], deleted: new Set(), before: boom, after: boom, scope: undefined })), [UNREADABLE]);
-  const r = weakening.weakeningOf(exampleProject().dir, 'no-such-rev', 'HEAD', [{ path: 'test/math.test.ts', added: 1, removed: 1, addedLines: ['x'], removedLines: ['y'] }], undefined);
+  const r = weakening.weakeningOf(exampleProject().dir, 'no-such-rev', 'HEAD', [{ path: 'test/math.test.ts', added: 1, removed: 1, addedLines: ['x'], removedLines: ['y'] }], undefined, 'HEAD');
   assert.equal(r.length, 1);
   assert.match(r[0]!, /^design: may weaken a check: the check for a removed or weakened test, lint or guard could not run/);
   // The patterns are linear: substrings, and one regex of literal alternatives with no quantifier.
@@ -899,19 +944,19 @@ test('weakening: weakeningOf reads the deleted paths from git and never a table 
   const dir = exampleProject().dir;
   const g = (...a: string[]) => execFileSync('git', a, { cwd: dir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
   mkdirSync(join(dir, 'test'), { recursive: true });
-  writeFileSync(join(dir, 'test', 'add-project.test.ts'), `const NAMES_BAD = [\n  '',\n];\n${'// pad\n'.repeat(Math.ceil(weakening.MAX_TABLE_FILE / 7))}`);
+  writeFileSync(join(dir, 'test', 'add-project.test.ts'), `// check-table: never-shrink\nconst NAMES_BAD = [\n  '',\n];\n${'// pad\n'.repeat(Math.ceil(weakening.MAX_TABLE_FILE / 7))}`);
   writeFileSync(join(dir, 'test', 'old.test.ts'), 'export const two = 2;\n');
   g('add', '-A');
   g('commit', '-q', '-m', 'big');
   const base = g('rev-parse', 'HEAD');
-  writeFileSync(join(dir, 'test', 'add-project.test.ts'), "const NAMES_BAD = [\n  '',\n];\n");
+  writeFileSync(join(dir, 'test', 'add-project.test.ts'), "// check-table: never-shrink\nconst NAMES_BAD = [\n  '',\n];\n");
   g('rm', '-q', 'test/old.test.ts');
   g('commit', '-q', '-am', 'small');
   const head = g('rev-parse', 'HEAD');
   const r = weakening.weakeningOf(dir, base, head, [
     { path: 'test/add-project.test.ts', added: 0, removed: 1, addedLines: [], removedLines: ['// pad'] },
     { path: 'test/old.test.ts', added: 0, removed: 1, addedLines: [], removedLines: ['export const two = 2;'] },
-  ], undefined);
+  ], undefined, base);
   assert.deepEqual(kinds(r), [UNREADABLE, DELETED]);
   assert.match(r[0]!, /over 500000: not read/);
 });
@@ -936,7 +981,7 @@ test('weakening (round 6 review): only a regular file can be a pure rename; a sy
   const moves = changes.exactMoves(dir, base, head);
   assert.equal(moves.get('test/plain.test.ts'), 'test/sum.test.ts', 'a regular file is paired');
   assert.equal(moves.has('test/link.test.ts'), false, 'a symlink is not');
-  const r = weakening.weakeningOf(dir, base, head, changes.changeFiles(dir, base, head), undefined);
+  const r = weakening.weakeningOf(dir, base, head, changes.changeFiles(dir, base, head), undefined, base);
   assert.ok(kinds(r).includes(DELETED), r.join(' | '));
   assert.ok(r.some((x) => x.includes('test/link.test.ts')), r.join(' | '));
   assert.ok(!r.some((x) => x.includes('plain.test.ts') || x.includes('sum.test.ts')), r.join(' | '));
@@ -950,7 +995,8 @@ test('weakening: the merge decision waits on it whatever the level, so it still 
 
 // ---- Backstops (lints that read the repo), beside the merge-time check above: they keep its registries whole.
 
-/** Tables in test/ and scripts/ that look like a check's but hold no check, each with why. Never grows without the owner (CHECK_TABLES). */
+/** Tables in test/ and scripts/ that look like a check's but hold no check, each with why. Never grows without the owner (its mark). */
+// check-table: never-grow
 const NOT_A_CHECK: readonly { path: string; table: string; why: string }[] = [
   { path: 'scripts/rename.mjs', table: 'SKIP', why: 'the files the product-rename tool leaves alone; it checks nothing' },
   { path: 'test/decision-fixture.ts', table: 'OWNER_ONLY', why: 'marker strings a decision card shows only the owner; no rule' },
@@ -958,7 +1004,8 @@ const NOT_A_CHECK: readonly { path: string; table: string; why: string }[] = [
   { path: 'test/loop-control.test.ts', table: 'WORDS', why: 'words a scripted agent writes; no rule' },
 ];
 
-/** Tests that list `src/` or `scripts/` files but aren't lint tests, each with why. Never grows without the owner (CHECK_TABLES). */
+/** Tests that list `src/` or `scripts/` files but aren't lint tests, each with why. Never grows without the owner (its mark). */
+// check-table: never-grow
 const NOT_A_LINT: readonly { path: string; why: string }[] = [
   { path: 'test/avatars.test.ts', why: 'the avatar suite; one test walks web/src' },
   { path: 'test/bench.test.ts', why: 'the bench suite; one test reads scripts/bench for a word' },
@@ -993,13 +1040,56 @@ function repoFiles(dirs: string[], re: RegExp): string[] {
   return files;
 }
 
-test('weakening backstop: each registered table is found where it is registered, and every check-shaped table in test/ and scripts/ is registered or says why not', () => {
-  for (const t of weakening.CHECK_TABLES) {
-    assert.ok(existsSync(join(repoRoot, t.path)), `${t.path} is a real file`);
-    const text = readFileSync(join(repoRoot, t.path), 'utf8');
-    const read = weakening.tableLines(text, t.table);
-    assert.ok(read?.length, `${t.path} ${t.table} is found`);
-    if (read!.length !== 1) continue;
+/** A file's marks (#869), as the hold reads them; none from a module that has no reader for them. */
+const marksOf = (text: string): { tables: { table: string; kind: weakening.TableKind }[]; lint: boolean; problems: string[] } =>
+  weakening.registrationsOf?.(text) ?? { tables: [], lint: false, problems: [] };
+/** Whether a path is one a mark is read in (JS and TS). */
+const markable = (p: string) => (weakening.MARKABLE ?? /\.[cm]?[jt]sx?$/).test(p);
+/** A folder the backstops don't scan: fixtures and node_modules (as repoFiles). */
+const unscanned = (p: string) => /(?:^|\/)(?:fixtures|node_modules)\//.test(p);
+
+/**
+ * What the backstops find wrong with the registries, for a repo given as its files (path to text). Tables: each
+ * registered table (the central list's, and every `// check-table: <kind>` mark's, #869) is found where it is
+ * registered; an allowlist's name is marked never-grow (a rule list's name may carry either mark); every
+ * mark is well formed and stands right before a declaration; every check-shaped table in test/ and scripts/ is
+ * registered or in NOT_A_CHECK. Lints: every test that lists src/ or scripts/ files is a lint test (`// lint-test`, or
+ * the central list) or in NOT_A_LINT. `listing` is the tests that list sources.
+ */
+function registryProblems(texts: ReadonlyMap<string, string>): { tables: string[]; lints: string[]; listing: string[] } {
+  const tables: string[] = [];
+  const lints: string[] = [];
+  const registered: { path: string; table: string; kind: string }[] = [...weakening.CHECK_TABLES];
+  const lintTests = new Set<string>(weakening.LINT_TESTS);
+  for (const [path, text] of texts) {
+    if (!markable(path)) continue;
+    const marks = marksOf(text);
+    for (const p of marks.problems) tables.push(`${path}: ${p}`);
+    for (const t of marks.tables) registered.push({ path, ...t });
+    if (marks.lint) lintTests.add(path);
+  }
+  for (const t of registered) {
+    const text = texts.get(t.path);
+    if (text === undefined) {
+      tables.push(`${t.path} is not a real file`);
+      continue;
+    }
+    // An allowlist's name is never-grow (#869). A rule list's name may carry either mark: its floor holds it on
+    // shrinking whatever the mark says, and a never-grow mark adds a growth hold (a mark only adds).
+    const allow = weakening.ALLOW_NAMED?.test(t.table);
+    if (allow && t.kind !== 'never-grow') tables.push(`${t.path} ${t.table}: its name says it allows or exempts something, so it is never-grow`);
+    let read: string[] | null;
+    try {
+      read = weakening.tableLines(text, t.table);
+    } catch (e) {
+      tables.push(`${t.path} ${t.table}: ${(e as Error).message}`);
+      continue;
+    }
+    if (!read?.length) {
+      tables.push(`${t.path} ${t.table} is not found`);
+      continue;
+    }
+    if (read.length !== 1) continue;
     // A one-line table holds its whole list on that line: a bracket after its `=` (or its key's `:`), every bracket
     // closed, and the next line no deeper (round 7's review).
     const lines = text.split('\n');
@@ -1009,26 +1099,38 @@ test('weakening backstop: each registered table is found where it is registered,
     const code = line.trimStart().startsWith('"') ? line : weakening.withoutComments(line);
     const value = code.slice(code.search(/=(?!>)|":/) + 1);
     const count = (s: string, set: string) => [...s].filter((c) => set.includes(c)).length;
-    assert.ok(count(value, '[({') > 0 && count(value, '[({') === count(value, '])}'), `${t.path} ${t.table}: its list is on its declaring line`);
+    if (!(count(value, '[({') > 0 && count(value, '[({') === count(value, '])}'))) tables.push(`${t.path} ${t.table}: its list is not on its declaring line`);
     const next = lines.slice(at + 1).find((l) => l.trim());
     const indent = (l: string) => l.length - l.trimStart().length;
-    assert.ok(next === undefined || indent(next) <= indent(line), `${t.path} ${t.table}: nothing of it on the next line`);
+    if (!(next === undefined || indent(next) <= indent(line))) tables.push(`${t.path} ${t.table}: something of it is on the next line`);
   }
-  const named = new Set(weakening.CHECK_TABLES.map((t) => `${t.path} ${t.table}`));
+  const named = new Set(registered.map((t) => `${t.path} ${t.table}`));
   const notChecks = new Set(NOT_A_CHECK.map((t) => `${t.path} ${t.table}`));
-  const found = repoFiles(['test', 'scripts'], /\.(?:ts|mjs|cjs|js)$/).flatMap((f) => checkShapedTables(readFileSync(join(repoRoot, f), 'utf8')).map((n) => `${f} ${n}`));
-  assert.deepEqual(found.filter((k) => !named.has(k) && !notChecks.has(k)), [], 'register each in CHECK_TABLES (never-grow for an allowlist or good fixtures, never-shrink for rules or bad fixtures), or say why it is no check in NOT_A_CHECK');
-  for (const k of notChecks) assert.ok(found.includes(k) && !named.has(k), `${k}: NOT_A_CHECK names only a check-shaped table that isn't registered`);
+  const scanned = [...texts.keys()].filter((f) => /^(?:test|scripts)\/.*\.(?:ts|mjs|cjs|js)$/.test(f) && !unscanned(f));
+  const found = scanned.flatMap((f) => checkShapedTables(texts.get(f)!).map((n) => `${f} ${n}`));
+  for (const k of found) if (!named.has(k) && !notChecks.has(k)) tables.push(`${k}: register it with a \`// check-table: <kind>\` line right before it (never-grow for an allowlist or good fixtures, never-shrink for rules or bad fixtures), or say why it is no check in NOT_A_CHECK`);
+  for (const k of notChecks) if (!found.includes(k) || named.has(k)) tables.push(`${k}: NOT_A_CHECK names only a check-shaped table that isn't registered`);
+  const listing = [...texts.keys()].filter((f) => /^test\/.*\.test\.ts$/.test(f) && !unscanned(f) && LISTS_SOURCES.test(texts.get(f)!));
+  for (const f of listing) if (!lintTests.has(f) && !NOT_A_LINT.some((x) => x.path === f)) lints.push(`${f}: give it a \`// lint-test\` line (it checks a rule over those files), or add it to NOT_A_LINT with why`);
+  for (const x of NOT_A_LINT) if (!listing.includes(x.path) || lintTests.has(x.path)) lints.push(`${x.path}: NOT_A_LINT names only a listing test that isn't a lint test`);
+  for (const p of lintTests) if (!texts.has(p)) lints.push(`${p} is not a real file`);
+  return { tables, lints, listing };
+}
+
+/** The repo's files the backstops read: test/ and scripts/ (as repoFiles walks them), every JS or TS file git tracks, and each central table's file. */
+function repoTexts(): Map<string, string> {
+  const paths = new Set([...repoFiles(['test', 'scripts'], /\.(?:ts|mjs|cjs|js)$/), ...engineFiles.filter(markable), ...weakening.CHECK_TABLES.map((t) => t.path), ...weakening.LINT_TESTS]);
+  return new Map([...paths].filter((p) => existsSync(join(repoRoot, p))).map((p) => [p, readFileSync(join(repoRoot, p), 'utf8')]));
+}
+
+test('weakening backstop: each registered table is found where it is registered, and every check-shaped table in test/ and scripts/ is registered or says why not', () => {
+  assert.deepEqual(registryProblems(repoTexts()).tables, []);
 });
 
 test('weakening backstop: every test that lists src/ or scripts/ files is a registered lint test or says why it is not', () => {
-  const tests = repoFiles(['test'], /\.test\.ts$/);
-  const lists = tests.filter((f) => LISTS_SOURCES.test(readFileSync(join(repoRoot, f), 'utf8')));
-  assert.ok(lists.length > 10, `${lists.length} tests list sources`);
-  const named = new Set([...weakening.LINT_TESTS, ...NOT_A_LINT.map((x) => x.path)]);
-  assert.deepEqual(lists.filter((f) => !named.has(f)), [], 'add each to LINT_TESTS (it checks a rule over those files) or to NOT_A_LINT with why');
-  for (const x of NOT_A_LINT) assert.ok(lists.includes(x.path) && !weakening.LINT_TESTS.includes(x.path), `${x.path}: NOT_A_LINT names only a listing test that isn't in LINT_TESTS`);
-  for (const p of weakening.LINT_TESTS) assert.ok(existsSync(join(repoRoot, p)), `${p} is a real file`);
+  const found = registryProblems(repoTexts());
+  assert.ok(found.listing.length > 10, `${found.listing.length} tests list sources`);
+  assert.deepEqual(found.lints, []);
 });
 
 /**
@@ -1051,6 +1153,11 @@ function decideChange(base: Record<string, string>, head: Record<string, string 
     return g('rev-parse', 'HEAD');
   };
   const before = commit(base);
+  // The default branch on its remote, at the base (claimed at its tip): the merge decision fetches its tip and reads
+  // the checks it registers (#869).
+  execFileSync('git', ['init', '-q', '--bare', join(dir, '..', 'origin.git')], { stdio: 'ignore' });
+  g('remote', 'add', 'origin', join(dir, '..', 'origin.git'));
+  g('push', '-q', 'origin', `${before}:refs/heads/main`);
   const after = commit(head);
   const cfg = loadConfig(dir);
   cfg.project.land_mode = 'pr';
@@ -1117,4 +1224,302 @@ test('acceptance (#783): a mark beside a byte that is not UTF-8 waits for the ow
   const d = decideChange({ 'app/a.js': 'one\n' }, { 'app/a.js': Buffer.concat([Buffer.from('one\n// @ts-nocheck\nconst s = "caf'), Buffer.from([0xe9]), Buffer.from('";\n')]) });
   assert.equal(d.auto, false);
   assert.ok(d.reasons.some((r) => r.startsWith(`${weakening.WEAKENING_REASON}${MARKER}`)), d.reasons.join(' | '));
+});
+
+// ---- A check registers itself where it is declared (#869): a `// check-table: <kind>` line right before a table, a
+// `// lint-test` line in a lint test. Adding one needs no edit to a locked file; taking one away, or loosening one,
+// waits for the owner. The fixtures spell the marks with `\n` escapes, so no line of this file is a mark by accident.
+
+const REG_GONE = 'removes or changes the mark that registers a check, a check-table or lint-test line';
+/** A new allowlist, registered by its mark. */
+const NEW_TABLE = "// check-table: never-grow\nconst NEW_ALLOWED = [\n  'src/a.ts',\n];\n";
+/** A new lint test with its allowlist: it walks src/ and fails on a file its allowlist doesn't name. */
+const NEW_LINT = `// lint-test\nimport { readdirSync } from 'node:fs';\n\n${NEW_TABLE}\nfor (const f of readdirSync('src')) if (!NEW_ALLOWED.includes(f)) throw new Error(f);\n`;
+const grownTable = (t: string) => t.replace("  'src/a.ts',\n", "  'src/a.ts',\n  'src/b.ts',\n");
+
+test('registration (#869): a marked table is held by its mark, from the text before the change; adding a marked table or lint test never waits', () => {
+  const p = 'test/new.test.ts';
+  const change = (was: string | null, now: string | null, scope?: LockScope) => kinds(weakens({ [p]: was }, { [p]: now }, scope));
+  assert.deepEqual(change(NEW_TABLE, grownTable(NEW_TABLE)), [GROWN], 'an entry added to a marked allowlist');
+  assert.deepEqual(change(NEW_TABLE, NEW_TABLE.replace("  'src/a.ts',\n", '')), [], 'an entry taken out of it tightens');
+  // Adding a check: a new marked table, a new lint test, a mark put on a table that had none.
+  assert.deepEqual(change('const x = 1;\n', `const x = 1;\n${NEW_TABLE}`), []);
+  assert.deepEqual(weakens({}, { 'test/new-lint.test.ts': NEW_LINT }), []);
+  assert.deepEqual(change(NEW_TABLE.replace('// check-table: never-grow\n', ''), NEW_TABLE), []);
+  // A lint test is a guard file by its mark: any line taken out of it waits.
+  const lint = '// lint-test\nconst files = 1;\nrun(files);\n';
+  assert.deepEqual(change(lint, lint.replace('run(files);\n', '')), [GUARD]);
+  assert.deepEqual(change(lint, `${lint}run(files + 1);\n`), [], 'a line added to a lint test');
+  // Engine-only paths stand aside in a managed app's repo, as the central list's did; a mark elsewhere holds there too.
+  assert.deepEqual(change(NEW_TABLE, grownTable(NEW_TABLE), 'managed-app'), []);
+  assert.deepEqual(kinds(weakens({ 'lib/rules.ts': NEW_TABLE }, { 'lib/rules.ts': grownTable(NEW_TABLE) }, 'managed-app')), [GROWN]);
+});
+
+test("registration (#869): removing a mark, changing its kind, detaching it, or deleting a marked table or lint test waits for the owner", () => {
+  const p = 'test/new.test.ts';
+  const change = (was: string | null, now: string | null) => kinds(weakens({ [p]: was }, { [p]: now }));
+  assert.deepEqual(change(NEW_TABLE, NEW_TABLE.replace('// check-table: never-grow\n', '')), [REG_GONE], 'the mark removed');
+  assert.deepEqual(change(NEW_TABLE, NEW_TABLE.replace('never-grow', 'never-shrink')), [REG_GONE], 'never-grow changed to never-shrink');
+  assert.deepEqual(change(NEW_TABLE, NEW_TABLE.replace('const NEW_ALLOWED', '/** why */\nconst NEW_ALLOWED')), [REG_GONE], 'a line put between the mark and its table');
+  // Then the next change grows it: the default branch still has the mark right before it, so it waits.
+  assert.deepEqual(change(NEW_TABLE, grownTable(NEW_TABLE).replace('// check-table: never-grow\n', '')), [REG_GONE, GROWN], 'the mark removed and the table grown');
+  assert.deepEqual(change(NEW_TABLE, 'const x = 1;\n'), [GONE], 'the marked table deleted');
+  assert.deepEqual(change(NEW_TABLE, NEW_TABLE.replace('NEW_ALLOWED', 'NEW_ALLOWED_TOO')), [GONE], 'the marked table renamed');
+  assert.deepEqual(change(NEW_TABLE, null), [DELETED, GONE], 'its file deleted');
+  // The lint mark.
+  assert.deepEqual(change(NEW_LINT, NEW_LINT.replace('// lint-test\n', '')), [REG_GONE, GUARD], 'the lint-test line removed');
+  assert.deepEqual(change(NEW_LINT, NEW_LINT.replace('// lint-test\n', '// lint-test: off\n')), [REG_GONE, GUARD], 'the lint-test line changed');
+  // A lint test or a marked table's file is never a pure rename.
+  for (const text of [NEW_LINT, NEW_TABLE]) assert.ok(kinds(weakens({ [p]: text }, { [p]: null, 'test/renamed.test.ts': text })).includes(DELETED), text);
+});
+
+test("registration (#869): a table's name sets its floor: an allowlist's name holds growth and a rule list's name holds shrinking, whatever its mark says; a mark only adds", () => {
+  const p = 'test/new.test.ts';
+  const change = (was: string, now: string) => kinds(weakens({ [p]: was }, { [p]: now }));
+  const table = (kind: string, name: string) => `// check-table: ${kind}\nconst ${name} = [\n  'a',\n  'b',\n];\n`;
+  const grow = (t: string) => t.replace("  'b',\n", "  'b',\n  'c',\n");
+  const shrink = (t: string) => t.replace("  'b',\n", '');
+  // An allowlist marked never-shrink: its growth still waits, and so does its shrinking (the mark adds that).
+  assert.deepEqual(change(table('never-shrink', 'NEW_ALLOWED'), grow(table('never-shrink', 'NEW_ALLOWED'))), [GROWN]);
+  assert.deepEqual(change(table('never-shrink', 'NEW_ALLOWED'), shrink(table('never-shrink', 'NEW_ALLOWED'))), [SHRUNK]);
+  // A rule list marked never-grow: its shrinking still waits, and so does its growth.
+  assert.deepEqual(change(table('never-grow', 'NEW_RULES'), shrink(table('never-grow', 'NEW_RULES'))), [SHRUNK]);
+  assert.deepEqual(change(table('never-grow', 'NEW_RULES'), grow(table('never-grow', 'NEW_RULES'))), [GROWN]);
+  // A name of both kinds is held both ways.
+  assert.deepEqual(change(table('never-grow', 'GOOD_WORDS'), shrink(table('never-grow', 'GOOD_WORDS'))), [SHRUNK]);
+  assert.deepEqual(change(table('never-shrink', 'GOOD_WORDS'), grow(table('never-shrink', 'GOOD_WORDS'))), [GROWN]);
+  // A name of neither kind: its mark alone.
+  assert.deepEqual(change(table('never-grow', 'NEW_PATHS'), shrink(table('never-grow', 'NEW_PATHS'))), []);
+  assert.deepEqual(change(table('never-shrink', 'NEW_PATHS'), grow(table('never-shrink', 'NEW_PATHS'))), []);
+  // The name words are the backstop's check-shaped words: the allowlist ones and the rule ones, none in both. ONLY
+  // stays in neither: FIRST_TIME_ONLY is an allowlist and MAKER_ONLY a guard's list.
+  const words = (re: RegExp | undefined) => (re?.source ?? '').split('|').filter(Boolean);
+  const allow = words(weakening.ALLOW_NAMED);
+  const rule = words(weakening.RULE_NAMED);
+  assert.deepEqual([...allow, ...rule, 'ONLY'].sort(), words(CHECK_TABLE_NAME).sort());
+});
+
+test('registration backstop (#869): a new allowlist and a new lint test pass with their marks and fail without them; a mark against its name, malformed or with no table after it fails', () => {
+  const repo = repoTexts();
+  const withFile = (path: string, text: string) => registryProblems(new Map([...repo, [path, text]]));
+  const p = 'test/new-lint.test.ts';
+  // With its marks: nothing to fix, and no locked file edited.
+  const marked = withFile(p, NEW_LINT);
+  assert.deepEqual([marked.tables, marked.lints], [[], []]);
+  assert.ok(marked.listing.includes(p), 'it lists the sources');
+  const bare = withFile(p, NEW_LINT.replace('// lint-test\n', '').replace('// check-table: never-grow\n', ''));
+  assert.deepEqual(bare.tables.filter((x) => x.startsWith(`${p} NEW_ALLOWED`)).length, 1, bare.tables.join(' | '));
+  assert.deepEqual(bare.lints.filter((x) => x.startsWith(p)).length, 1, bare.lints.join(' | '));
+  // A kind against its name: an allowlist's name marked never-shrink.
+  const against = withFile(p, NEW_LINT.replace('never-grow', 'never-shrink'));
+  assert.ok(against.tables.some((x) => x.includes('NEW_ALLOWED: its name says it allows')), against.tables.join(' | '));
+  // A mark that isn't one, or with no declaration on the next line: it would register nothing.
+  for (const odd of ['// check-table: never-grwo', '//check-table: never-grow', '/* check-table: never-grow */', '// check-table:never-grow', '// lint-test: rules', '//lint-test']) {
+    const r = withFile(p, NEW_LINT.replace('// check-table: never-grow', odd));
+    assert.ok(r.tables.some((x) => x.startsWith(`${p}: `)), `${odd}: ${r.tables.join(' | ')}`);
+  }
+  const orphan = withFile(p, NEW_LINT.replace('const NEW_ALLOWED', '/** why */\nconst NEW_ALLOWED'));
+  assert.ok(orphan.tables.some((x) => x.startsWith(`${p}: `)), orphan.tables.join(' | '));
+});
+
+test("registration backstop (#869): a mark only adds to its name's floor: a rule-named table registers with either mark, a name of both kinds registers as never-grow, and each is held on shrinking whatever its mark", () => {
+  const repo = repoTexts();
+  const p = 'test/new-rules.test.ts';
+  const problems = (text: string) => registryProblems(new Map([...repo, [p, text]])).tables;
+  const table = (kind: string, name: string) => `// check-table: ${kind}\nconst ${name} = [\n  'a',\n  'b',\n];\n`;
+  const grow = (t: string) => t.replace("  'b',\n", "  'b',\n  'c',\n");
+  const shrink = (t: string) => t.replace("  'b',\n", '');
+  const change = (was: string, now: string) => kinds(weakens({ [p]: was }, { [p]: now }));
+  // A rule list's name: either mark registers it. Marked never-grow (an allowlist of accepted rules), it is held both ways.
+  for (const name of ['SELECTION_RULES', 'NEW_RULES', 'X_GUARD']) {
+    for (const kind of ['never-grow', 'never-shrink']) {
+      const t = table(kind, name);
+      assert.deepEqual(problems(t), [], `${name} marked ${kind} registers`);
+      assert.deepEqual(change(t, shrink(t)), [SHRUNK], `${name} marked ${kind}, shrunk`);
+    }
+    assert.deepEqual(change(table('never-grow', name), grow(table('never-grow', name))), [GROWN], `${name} marked never-grow, grown`);
+  }
+  // A name of both kinds: marked never-grow it registers, and it is held both ways. Marked never-shrink, the allowlist
+  // name's rule (#869's acceptance) still fails it, and the hold still holds it both ways.
+  for (const name of ['KNOWN_BAD', 'ALLOWED_WORDS', 'SKIP_RULES', 'GUARD_EXCEPTIONS']) {
+    const t = table('never-grow', name);
+    assert.deepEqual(problems(t), [], `${name} marked never-grow registers`);
+    assert.deepEqual(change(t, shrink(t)), [SHRUNK], `${name} marked never-grow, shrunk`);
+    assert.deepEqual(change(t, grow(t)), [GROWN], `${name} marked never-grow, grown`);
+    const s = table('never-shrink', name);
+    assert.ok(problems(s).some((x) => x.includes(`${name}: its name says it allows`)), `${name} marked never-shrink: ${problems(s).join(' | ')}`);
+    assert.deepEqual([change(s, shrink(s)), change(s, grow(s))], [[SHRUNK], [GROWN]], `${name} marked never-shrink`);
+  }
+});
+
+test('acceptance (#869): through the merge decision, a new marked allowlist and lint test merge; growing it, or taking its mark away, waits for the owner', () => {
+  const p = 'test/new-lint.test.ts';
+  assert.deepEqual(decideChange({ 'test/math.test.ts': MATH_TEST }, { [p]: NEW_LINT }), { auto: true, reasons: [], why: [] });
+  assert.deepEqual(decideChange({ [p]: NEW_LINT }, { [p]: grownTable(NEW_LINT) }), { auto: false, reasons: [reasonFor(GROWN, p, "NEW_ALLOWED: 'src/b.ts'")], why: [] });
+  const unmarked = decideChange({ [p]: NEW_LINT }, { [p]: NEW_LINT.replace('// check-table: never-grow\n', '') });
+  assert.equal(unmarked.auto, false);
+  assert.ok(unmarked.reasons.some((r) => r.startsWith(`${weakening.WEAKENING_REASON}${REG_GONE}`)), unmarked.reasons.join(' | '));
+  const unlinted = decideChange({ [p]: NEW_LINT }, { [p]: NEW_LINT.replace('// lint-test\n', '') });
+  assert.equal(unlinted.auto, false);
+  assert.ok(unlinted.reasons.some((r) => r.startsWith(`${weakening.WEAKENING_REASON}${REG_GONE}`)), unlinted.reasons.join(' | '));
+});
+
+/**
+ * Every registration before the marks (main at 41f6dd42, #869): CHECK_TABLES and LINT_TESTS as they were, the queue's
+ * and the owner's lines included. Each is still registered, with the same kind, by its mark or the central list.
+ * Taking one out loosens this test.
+ */
+// check-table: never-shrink
+const REGISTERED_BEFORE_MARKS: readonly { path: string; table?: string; kind: string }[] = [
+  { path: 'test/change-files-renames.test.ts', table: 'OUTSIDE_THE_HELPER', kind: 'never-grow' },
+  { path: 'test/no-clock-helpers.test.ts', table: 'ALLOWED', kind: 'never-grow' },
+  { path: 'test/no-wall-clock-durations.test.ts', table: 'ALLOWED', kind: 'never-grow' },
+  { path: 'test/instance-name.test.ts', table: 'ALLOWED', kind: 'never-grow' },
+  { path: 'test/five-part-issues.test.ts', table: 'GOOD', kind: 'never-grow' },
+  { path: 'test/plugin-inspect.test.ts', table: 'GOOD', kind: 'never-grow' },
+  { path: 'scripts/setup/app-permissions.mjs', table: 'ALLOWED_UP_TO', kind: 'never-grow' },
+  { path: 'test/slot-path.test.ts', table: 'SLOT_SOURCES', kind: 'never-grow' },
+  { path: 'test/slot-dir-writes.test.ts', table: 'REVIEWED', kind: 'never-grow' },
+  { path: 'test/review.test.ts', table: 'LOCK_SCOPE_GOOD', kind: 'never-grow' },
+  { path: 'test/merge-policy.test.ts', table: 'NOT_YET_FILES', kind: 'never-grow' },
+  { path: 'test/merge-policy.test.ts', table: 'NOT_A_CHECK', kind: 'never-grow' },
+  { path: 'test/merge-policy.test.ts', table: 'NOT_A_LINT', kind: 'never-grow' },
+  { path: 'test/review-packet.test.ts', table: 'PACKET_ALLOWED', kind: 'never-grow' },
+  { path: 'test/raw-check-reads.ts', table: 'RAW_READS_ALLOWED', kind: 'never-grow' },
+  { path: 'test/raw-check-reads.ts', table: 'JUDGED_CASTS_ALLOWED', kind: 'never-grow' },
+  { path: 'test/raw-check-reads.ts', table: 'MAKERS_ALLOWED', kind: 'never-grow' },
+  { path: 'test/owner-terminal-rerun.test.ts', table: 'FIRST_TIME_ONLY', kind: 'never-grow' },
+  { path: 'scripts/lib/denylist.mjs', table: 'SKIP', kind: 'never-grow' },
+  { path: 'src/guardrails/engine.ts', table: 'AGENT_EDITABLE', kind: 'never-grow' },
+  { path: 'scripts/bench/pins.ts', table: 'SELECTION_RULES', kind: 'never-grow' },
+  { path: 'test/change-files-renames.test.ts', table: 'READER_WORDS', kind: 'never-shrink' },
+  { path: 'test/review.test.ts', table: 'LOCK_SCOPE_BAD', kind: 'never-shrink' },
+  { path: 'test/review.test.ts', table: 'GUARD_MODULES', kind: 'never-shrink' },
+  { path: 'test/review.test.ts', table: 'GUARD_ENTRIES', kind: 'never-shrink' },
+  { path: 'test/review.test.ts', table: 'GUARD_TREE', kind: 'never-shrink' },
+  { path: 'test/slot-dir-writes.test.ts', table: 'SLOT_NAMES', kind: 'never-shrink' },
+  { path: 'test/slot-dir-writes.test.ts', table: 'WRITE_CALLS', kind: 'never-shrink' },
+  { path: 'test/slot-dir-writes.test.ts', table: 'CHMOD_BY_NAME', kind: 'never-shrink' },
+  { path: 'test/slot-dir-writes.test.ts', table: 'FD_WRITES', kind: 'never-shrink' },
+  { path: 'test/slot-path.test.ts', table: 'MAKER_ONLY', kind: 'never-shrink' },
+  { path: 'test/child-process.test.ts', table: 'SPECIFIERS', kind: 'never-shrink' },
+  { path: 'test/child-process.test.ts', table: 'BINDINGS', kind: 'never-shrink' },
+  { path: 'test/child-process.test.ts', table: 'WORKER_SPECIFIERS', kind: 'never-shrink' },
+  { path: 'test/add-project.test.ts', table: 'NAMES_BAD', kind: 'never-shrink' },
+  { path: 'test/add-project.test.ts', table: 'REPOS_BAD', kind: 'never-shrink' },
+  { path: 'test/instance-name.test.ts', table: 'BAD_SHAPE', kind: 'never-shrink' },
+  { path: 'scripts/lib/changelog.mjs', table: 'GUARDRAIL_PATHS', kind: 'never-shrink' },
+  { path: 'test/machine-path-writes.test.ts', table: 'GUARD', kind: 'never-shrink' },
+  { path: 'test/runner-golden.test.ts', table: 'GUARD', kind: 'never-shrink' },
+  { path: 'src/review.ts', table: 'SELF_MODIFICATION_PARTS', kind: 'never-shrink' },
+  { path: 'src/review.ts', table: 'LOCKED_CATEGORIES', kind: 'never-shrink' },
+  { path: 'src/review.ts', table: 'ODD_PATH_CATEGORIES', kind: 'never-shrink' },
+  { path: 'src/review.ts', table: 'ALWAYS_L3', kind: 'never-shrink' },
+  { path: 'src/merge-policy.ts', table: 'FLOOR', kind: 'never-shrink' },
+  { path: 'src/hook-imports.ts', table: 'HOOK_IMPORTS', kind: 'never-shrink' },
+  { path: 'src/delegation.ts', table: 'NEVER_LOOSEN', kind: 'never-shrink' },
+  { path: 'src/guardrails/engine.ts', table: 'BUILTIN_PROTECTED', kind: 'never-shrink' },
+  { path: `scripts/machine/${BRAND.cli}-machine.cjs`, table: 'POLICY_ONLY', kind: 'never-shrink' },
+  { path: 'scripts/push-gate-hook.mjs', table: 'GATE_RULES', kind: 'never-shrink' },
+  { path: 'scripts/push-gate-hook.mjs', table: 'GATE_CODE', kind: 'never-shrink' },
+  { path: 'scripts/push-gate.mjs', table: 'ATTRIBUTION', kind: 'never-shrink' },
+  { path: 'package.json', table: 'scripts', kind: 'never-shrink' },
+  { path: 'test/pipefail.test.ts', kind: 'lint' },
+  { path: 'test/brand.test.ts', kind: 'lint' },
+  { path: 'test/testrun-gpu.test.ts', kind: 'lint' },
+  { path: 'test/boundaries.test.ts', kind: 'lint' },
+  { path: 'test/web-key-in-url.test.ts', kind: 'lint' },
+  { path: 'test/child-process.test.ts', kind: 'lint' },
+  { path: 'test/self-hosted-guard.test.ts', kind: 'lint' },
+  { path: 'test/package-deps.test.ts', kind: 'lint' },
+  { path: 'test/no-clock-helpers.test.ts', kind: 'lint' },
+  { path: 'test/no-wall-clock-durations.test.ts', kind: 'lint' },
+  { path: 'test/change-files-renames.test.ts', kind: 'lint' },
+  { path: 'test/slot-dir-writes.test.ts', kind: 'lint' },
+  { path: 'test/slot-path.test.ts', kind: 'lint' },
+  { path: 'test/claude-credential-guard.test.ts', kind: 'lint' },
+  { path: 'test/download-retry.test.ts', kind: 'lint' },
+  { path: 'test/owner-terminal-removed.test.ts', kind: 'lint' },
+  { path: 'test/policy-edit.test.ts', kind: 'lint' },
+  { path: 'test/testrun-measure.test.ts', kind: 'lint' },
+  { path: 'test/update-helpers.test.ts', kind: 'lint' },
+  { path: 'test/web-buttons.test.ts', kind: 'lint' },
+  { path: 'test/superfan.test.ts', kind: 'lint' },
+  { path: 'test/claude-accounts-retired.test.ts', kind: 'lint' },
+];
+
+test('registration (#869): every check registered before the marks is still registered, with the same kind (none lost in the move)', () => {
+  const now = new Set<string>([...weakening.CHECK_TABLES.map((t) => `${t.path} ${t.table} ${t.kind}`), ...weakening.LINT_TESTS.map((p) => `${p} lint`)]);
+  for (const [path, text] of repoTexts()) {
+    if (!markable(path)) continue;
+    const marks = marksOf(text);
+    for (const t of marks.tables) now.add(`${path} ${t.table} ${t.kind}`);
+    if (marks.lint) now.add(`${path} lint`);
+  }
+  assert.equal(REGISTERED_BEFORE_MARKS.length, 75, 'the 53 tables and 22 lint tests main registered');
+  const lost = REGISTERED_BEFORE_MARKS.map((r) => (r.table === undefined ? `${r.path} lint` : `${r.path} ${r.table} ${r.kind}`)).filter((k) => !now.has(k));
+  assert.deepEqual(lost, []);
+});
+
+/**
+ * The same registrations, through the hold itself: for each, the change it holds (a line taken out of a never-shrink
+ * table, a line put into a never-grow one, a line taken out of a lint test) gives a reason naming it. Each kind it is
+ * held by is tried: its old kind, and its name's floor (a rule list's name holds it on shrinking).
+ */
+test('registration (#869): every check registered before the marks is still held by the hold itself: its table shrunk or grown, or a line taken out of its lint test, waits, naming it', () => {
+  const texts = repoTexts();
+  const notHeld: string[] = [];
+  const reasonsFor = (path: string, was: string, now: string) => weakens({ [path]: was }, { [path]: now });
+  const names = (reasons: string[], kind: string, what: string) => reasons.some((r) => r.startsWith(`${weakening.WEAKENING_REASON}${kind} (`) && r.includes(what));
+  for (const r of REGISTERED_BEFORE_MARKS) {
+    const text = texts.get(r.path);
+    if (text === undefined) {
+      notHeld.push(`${r.path}: not read`);
+      continue;
+    }
+    const lines = text.split('\n');
+    if (r.table === undefined) {
+      // A lint test: its last line of code taken out waits as a guard's line.
+      let k = lines.length - 1;
+      while (k > 0 && (!lines[k]!.trim() || lines[k]!.trim() === weakening.LINT_MARK)) k--;
+      const now = lines.filter((_, j) => j !== k).join('\n');
+      if (!names(reasonsFor(r.path, text, now), GUARD, `${r.path}: `)) notHeld.push(`${r.path} lint`);
+      continue;
+    }
+    const head = new RegExp(`^(?:export\\s+)?(?:(?:const|let|var)\\s+${r.table}|"${r.table}"\\s*:)(?![\\w$])`);
+    const at = lines.findIndex((l) => head.test(l.trimStart()));
+    const table = at === -1 ? null : weakening.tableLines(text, r.table);
+    if (!table?.length) {
+      notHeld.push(`${r.path} ${r.table}: not found`);
+      continue;
+    }
+    const deep = (l: string) => l.trim() !== '' && l.length - l.trimStart().length > lines[at]!.length - lines[at]!.trimStart().length;
+    for (const kind of weakening.heldKinds(r.table, r.kind as weakening.TableKind)) {
+      let now: string;
+      let expect: string;
+      if (table.length === 1) {
+        // A one-line table: its declaring line changed waits, naming the table. Grown: an entry put first. Shrunk: its
+        // first entry taken out (to its first comma, or the whole list).
+        const line = lines[at]!;
+        const eq = line.search(/=(?!>)|":/);
+        const open = line.slice(eq).search(/[[{(]/) + eq;
+        const comma = line.indexOf(',', open);
+        const end = comma === -1 ? line.search(/[\]})][^\]})]*$/) : comma + 1;
+        const changed = kind === 'never-grow' ? `${line.slice(0, open + 1)}'held-probe', ${line.slice(open + 1)}` : `${line.slice(0, open + 1)}${line.slice(end).trimStart()}`;
+        if (changed === line) notHeld.push(`${r.path} ${r.table}: the probe changed nothing`);
+        now = lines.map((l, j) => (j === at ? changed : l)).join('\n');
+        expect = UNREADABLE;
+      } else if (kind === 'never-grow') {
+        const pad = ' '.repeat(lines[at]!.length - lines[at]!.trimStart().length + 2);
+        now = [...lines.slice(0, at + 1), `${pad}'held-probe',`, ...lines.slice(at + 1)].join('\n');
+        expect = GROWN;
+      } else {
+        const k = lines.findIndex((l, j) => j > at && deep(l));
+        now = lines.filter((_, j) => j !== k).join('\n');
+        expect = SHRUNK;
+      }
+      if (!names(reasonsFor(r.path, text, now), expect, `${r.table}: `)) notHeld.push(`${r.path} ${r.table} ${kind}`);
+    }
+  }
+  assert.deepEqual(notHeld, []);
 });

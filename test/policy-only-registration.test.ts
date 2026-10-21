@@ -1,5 +1,5 @@
 // #726 / #770: the machine helper's POLICY_ONLY (the one value of land_mode, main_watch and auto_merge a coordinator may
-// set) is a registered check table (src/merge-policy-weakening.ts CHECK_TABLES, never-shrink), so a PR that takes a
+// set) is a registered check table (its `// check-table: never-shrink` mark, #869), so a PR that takes a
 // key out of it waits for the owner. Measured through the merge decision's own path (merge-flow calls weakeningOf with
 // changeFiles): a real git change of the real helper file, found only through BRAND, so a rename keeps it.
 //
@@ -32,7 +32,8 @@ function reasonsFor(before: string, after: string): string[] {
   writeFileSync(join(dir, HELPER), after);
   g('commit', '-q', '-am', 'head');
   const head = g('rev-parse', 'HEAD');
-  return weakeningOf(dir, base, head, changeFiles(dir, base, head), undefined);
+  // The default branch's tip is the change's base here (claimed at the tip).
+  return weakeningOf(dir, base, head, changeFiles(dir, base, head), undefined, base);
 }
 /** The reasons that name the helper's POLICY_ONLY. */
 const naming = (r: string[]) => r.filter((x) => x.startsWith(WEAKENING_REASON) && x.includes(`${HELPER}: "POLICY_ONLY: `));
