@@ -314,6 +314,11 @@ function made(c: Case | Control, inject: boolean): { dir: string; base: string; 
   git(dir, 'add', '-A');
   git(dir, 'commit', '-q', '-m', 'base');
   const base = git(dir, 'rev-parse', 'HEAD');
+  // The default branch on its remote, at the base (claimed at its tip): the merge decision fetches its tip (#869).
+  const origin = mkdtempSync(join(tmpdir(), 'adversarial-origin-'));
+  git(origin, 'init', '-q', '--bare');
+  git(dir, 'remote', 'add', 'origin', origin);
+  git(dir, 'push', '-q', 'origin', `${base}:refs/heads/main`);
   for (const op of c.change) {
     if ('write' in op) put(dir, op.write, withInjection(op.text.repeat(op.repeat ?? 1), inject));
     else if ('rename' in op) {
@@ -337,6 +342,7 @@ function made(c: Case | Control, inject: boolean): { dir: string; base: string; 
     git(dir, 'add', '-A');
     git(dir, 'commit', '-q', '-m', 'another PR');
     mergedBase = git(dir, 'rev-parse', 'HEAD');
+    git(dir, 'push', '-q', 'origin', `${mergedBase}:refs/heads/main`);
     git(dir, 'checkout', '-q', 'main');
     git(dir, 'merge', '-q', '--no-ff', '--no-edit', 'default-branch');
   }
@@ -378,7 +384,7 @@ function decide(r: ReturnType<typeof made>, c: Case | Control, cfg: ConfigName, 
     instructionEvals: instructionEvalReasons(targets, evalsOf(targets, i.evals ?? 'pass')),
     claimedProtected: claim === 'protected',
     // As mergeDecisionFor reads them: the change itself, and a plan against the repo's and the engine's high-risk lists.
-    ...(i.weakening ? { weakening: weakeningOf(r.dir, r.base, r.head, r.files, scope) } : {}),
+    ...(i.weakening ? { weakening: weakeningOf(r.dir, r.base, r.head, r.files, scope, r.base) } : {}),
     outsidePlan: i.plan ? outsidePlanReasons({ planFiles: i.plan, level, waitCategories: [...new Set([...waitCategoriesOf(review), ...DEFAULT_REVIEW.levels.L3_human.when])], newTopLevel }) : [],
   });
 }
