@@ -3,10 +3,11 @@
 // drives each), and a module that needs a shape adds it there. A second list drifts: a Discord bot token was redacted
 // only in src/watchdog/incidents.ts, and passed through redactString everywhere else.
 //
-// The lint: every `replace`, `replaceAll` or `split` call (by `.`, `?.` or `['...']`) in src/, web/src/ and scripts/ (TypeScript and JavaScript)
-// whose pattern is a regex literal, a `new RegExp('...')` with a literal source, or a name bound to one (in the file,
-// or else any file's const of that name), is run on each token stand-in (test/token-standins.ts). A match that
-// takes in a whole token, and nothing of the words around it, is an own redactor for that shape.
+// The lint: every `replace`, `replaceAll` or `split` call (by `.`, `?.` or `['...']`) in src/, web/src/ and scripts/
+// (TypeScript and JavaScript) whose pattern is a regex literal, a `new RegExp('...')` with a literal source, or a name
+// bound to one (in the file, or else any file's const of that name), is run on each token stand-in
+// (test/token-standins.ts). A match that takes in a whole token, and nothing of the words around it, is an own
+// redactor for that shape.
 // Not caught: a pattern built at run time (a template with a substitution, String.raw, a concatenation, a function's
 // result), a regex passed through a parameter or kept in an object's property, a match found and then cut out by
 // string (match, then split and join), string methods other than these three, shell and other languages
