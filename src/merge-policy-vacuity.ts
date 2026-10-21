@@ -6,14 +6,17 @@
 // tests.yaml vacuity.test_globs matches them, and the `test:` files its task's agreed done_when names, which the
 // coordinator's own verification ran) hold an assertion call (an import of an assertion module is none), and, each run
 // with runner.one (`node --test`: coverageRunnerOne) under V8 coverage, they run code on a line the PR changes in at
-// least one of its app files more often than any baseline does: the same run with every test skipped (what loading the
-// test file and its imports runs), and each script that made a file touched, loaded on its own (what loading it runs,
-// wherever a test imports it, a test's body included). So what loading runs doesn't count: a module's top level, V8's
+// least one of its app files more often than loading accounts for: the same run with every test skipped (what loading
+// the test file and its static imports runs), plus, for every script the tests evaluated more often than that run did
+// (a dynamic import in a test's body, a copy with a query string, what such a module imports), that script loaded on
+// its own, times its extra evaluations (round 7). So what loading runs doesn't count: a module's top level, V8's
 // synthetic initializers, and a helper it calls as it loads, even in a file the PR adds (src/vacuity.ts
-// measureTouched). Only a changed line that holds code counts: a blank, whitespace-only or comment line, or a rename,
-// is nothing to measure, and a PR with nothing else waits. The PR's lines are measured from where its branch meets the
-// default branch's tip, so what it merged in from that branch is never its own; a merge that brings in a commit that
-// tip doesn't have (a fetch that is behind, another branch) holds. Anything else is a `design:` reason to wait: no
+// measureTouched). Every such script must load on its own within one time budget, or the PR waits. Only a changed line
+// that holds code counts: a blank, whitespace-only or comment line, or a rename, is nothing to measure, and a PR with
+// nothing else waits. The PR's lines are measured from where its branch meets the default branch's tip as the remote
+// gave it (ls-remote, never the clone's writable ref), so what it merged in or was rebased onto is never its own. The
+// PR waits while the clone hasn't that tip, or its ref says otherwise, and holds when the tip is unknown; a merge that
+// brings in a commit that tip doesn't have (another branch) holds. Anything else is a `design:` reason to wait: no
 // test, no assertion, a static-only config, no runner.one or another runner, a test path that would need quoting,
 // nothing measured after VACUITY_TRIES starts, a run that failed. The one exception is the reason given while the run
 // is still to come (VACUITY_UNMEASURED): the gate runs it and decides again.
@@ -72,6 +75,8 @@ export interface VacuityCheck {
   reasons: string[];
   /** `app`: the changed app files, the only ones the run records as touched (#784 round 3: bounded by the PR). */
   run?: { tests: string[]; appPaths: string[]; app: string[] };
+  /** No run yet and no reason: it waits (the clone hasn't the default branch's tip yet) and is decided again. */
+  wait?: true;
 }
 
 const list = (p: string[]) => `${p.slice(0, 3).map(shownPath).join(', ')}${p.length > 3 ? ` and ${p.length - 3} more` : ''}`;
@@ -125,7 +130,8 @@ const RUNNER_ONE = /^node --test((?: [^ ]+)*) \{file\}$/;
  */
 const RUNNER_OPTIONS: readonly RegExp[] = [
   /^--test-reporter=(?:spec|tap|dot|junit|lcov)$/,
-  /^--test-reporter-destination=(?:stdout|stderr|[A-Za-z0-9_][A-Za-z0-9._/-]*)$/,
+  // A file in the worktree: relative, no `..` segment (#784 round 7: Node writes wherever it points).
+  /^--test-reporter-destination=(?:stdout|stderr|(?!(?:.*\/)?\.\.(?:\/|$))[A-Za-z0-9_][A-Za-z0-9._/-]*)$/,
   /^--test-(?:timeout|concurrency)=\d+$/,
   /^--test-(?:name|skip)-pattern=[A-Za-z0-9._:/@-]+$/,
   /^--(?:experimental-)?test-isolation=(?:process|none)$/,
@@ -178,6 +184,11 @@ export function vacuityCheck(o: {
    * tip here doesn't have (#784 round 6). It then holds.
    */
   foreignMerge?: boolean;
+  /**
+   * The default branch's tip the change is measured from (#784 round 7): 'unknown' (no ls-remote answer), 'stale' (the
+   * clone lacks it, or its ref of the branch says otherwise); absent, it is known and in the clone.
+   */
+  tip?: 'unknown' | 'stale';
 }): VacuityCheck {
   if (!o.cfg) return noSection(o.changed, o.atHead);
   const cfg = o.cfg;
@@ -209,6 +220,11 @@ export function vacuityCheck(o: {
   else if (!o.runOne) reasons.push("design: vacuity: tests.yaml runner.one is not set, so its tests can't be run one by one under coverage");
   else if (!coverageRunnerOne(o.runOne)) reasons.push("design: vacuity: tests.yaml runner.one is not `node --test [options] {file}` with only the test runner's own options, the one form whose coverage the merge gate can measure");
   if (reasons.length) return { reasons };
+  // #784 round 7: what is the PR's own change is measured from the default branch's tip as the remote says it
+  // (ls-remote), never from a ref in the clone anything can write. Unknown: the PR holds. Not yet fetched, or a ref
+  // that says otherwise: it waits, unannounced, and is decided again once the clone has it.
+  if (o.tip === 'unknown') return { reasons: ["design: vacuity: the default branch's tip on the remote isn't known here (ls-remote failed or hasn't run), so the PR's own change can't be told from the default branch's"] };
+  if (o.tip === 'stale') return { reasons: [], wait: true };
   // A run of other tests than this head's (tests.yaml changed since) is not this head's.
   const last = o.runs.last && o.runs.last.tests.join('\0') === tests.join('\0') ? o.runs.last : null;
   if (!last) {

@@ -17,7 +17,7 @@ let answer: TouchedAnswer;
 try {
   if (raw.length > MAX_REQUEST) throw new CoverageUnreadable('the coverage read was asked too much');
   const req = JSON.parse(raw) as TouchedRequest;
-  answer = measureTouched(req.coverageDir, req.root, req.appPaths, req.only, req.hunks, req.baselineDir, req.loadDir);
+  answer = measureTouched(req.coverageDir, req.root, req.appPaths, req.only, req.hunks, req.baselineDir, req.loads ?? []);
 } catch (e) {
   answer = { error: e instanceof CoverageUnreadable ? e.message : 'the coverage read failed' };
 }

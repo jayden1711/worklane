@@ -19,6 +19,7 @@ import { EventLog } from '../src/events/log.js';
 import type { EventPayload } from '../src/events/types.js';
 import { FakeRunner } from '../src/runner.js';
 import { exampleProject, repoRoot } from './helpers.js';
+import { knownTip } from './vacuity-tip.js';
 import { approve, openPr, passing, skip } from './repro-state-graph/harness.js';
 
 const posix = process.platform === 'win32' && 'POSIX file types (FIFO, /dev/zero)';
@@ -141,6 +142,7 @@ function prWith(files: Record<string, string>) {
   const verdict = (h: string) => log.append('eval.verdict', { issue: 7, head: h, patch_hash: 'h', patch_correct: true, test_correct: true, confidence: 'high', advice: '', design_change: false }, 'i');
   verdict(head);
   const c = new Coordinator({ cfg, log, backlog: new FileBacklog(join(dir, '..', 'b.json')), runner: new FakeRunner(() => ({})), repo: dir, instance: 'i', stateDir: join(dir, '..', 'state'), autoMerge: () => true }) as unknown as Gate;
+  knownTip(c, dir, base);
   const prAt = (h: string): PullRequest => ({ number: 9, url: 'u', head: 'b', base: 'main', headSha: h, draft: false, state: 'open', title: 't', mergeable: true, mergeableState: 'clean' });
   return { c, w, log, head, prAt, commit, verdict };
 }
@@ -193,4 +195,36 @@ test('watch: a coverage run that sleeps never holds up the PR watch: the pass en
     await t.c.idle();
   }
   assert.equal(t.f.log.read(0, ['vacuity.measured']).length, 0, 'a run a shutdown cut short records nothing');
+});
+
+test('coordinator: a PR test whose body sleeps never holds the coordinator\'s thread or its decisions, and a shutdown kills the test run and records nothing', async () => {
+  // #784 round 7: the sleeping test run itself (the case above sleeps in the worktree's setup).
+  const sleeps = "import { test } from 'node:test';\nimport assert from 'node:assert/strict';\nimport { totalCents } from '../src/price.js';\ntest('t', async () => {\n  await new Promise((r) => setTimeout(r, 30_000));\n  assert.equal(totalCents([{ cents: 2, qty: 3 }]), 6);\n});\n";
+  const t = prWith({ 'src/price.js': PRICE, 'test/sleeps.test.js': sleeps });
+  const first = t.c.mergeDecisionFor(7, 9, t.prAt(t.head));
+  assert.ok(first.vacuityRun);
+  let stall = 0;
+  let last = performance.now();
+  const tick = setInterval(() => {
+    const now = performance.now();
+    stall = Math.max(stall, now - last);
+    last = now;
+  }, 10);
+  const run = t.c.vacuityRun(t.w, t.prAt(t.head), first.vacuityRun);
+  try {
+    await new Promise((r) => setTimeout(r, 2_000));
+    // Decided meanwhile, at once: still waiting for its run, never merged.
+    const t0 = performance.now();
+    const d = t.c.mergeDecisionFor(7, 9, t.prAt(t.head));
+    assert.ok(performance.now() - t0 < 1_000);
+    assert.deepEqual([d.auto, d.reasons], [false, ['design: vacuity: its tests have not yet been run under coverage at this head']]);
+  } finally {
+    const t1 = performance.now();
+    (t.c as unknown as { stop(): void }).stop();
+    await run;
+    clearInterval(tick);
+    assert.ok(performance.now() - t1 < 10_000, `the run took ${Math.round(performance.now() - t1)} ms to stop`);
+  }
+  assert.ok(stall < 1_000, `the event loop was held ${Math.round(stall)} ms`);
+  assert.equal(t.log.read(0, ['vacuity.measured']).length, 0, 'a run a shutdown cut short records nothing');
 });

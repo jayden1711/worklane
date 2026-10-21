@@ -25,6 +25,7 @@ import type { EventPayload } from '../src/events/types.js';
 import { IntakeConfig, type IntakeSource, type ReplyOptions } from '../src/intake/report.js';
 import { FakeRunner } from '../src/runner.js';
 import { exampleProject } from './helpers.js';
+import { knownTip } from './vacuity-tip.js';
 import { approve, green, openPr, skip } from './repro-state-graph/harness.js';
 
 // ---- (a) auto-config
@@ -96,6 +97,7 @@ function prWith(files: Record<string, string>, tune: (c: ReturnType<typeof loadC
   log.append('pr.opened', w, 'i');
   log.append('eval.verdict', { issue: 7, head, patch_hash: 'h', patch_correct: true, test_correct: true, confidence: 'high', advice: '', design_change: false }, 'i');
   const c = new Coordinator({ cfg, log, backlog: new FileBacklog(join(dir, '..', 'b.json')), runner: new FakeRunner(() => ({})), repo: dir, instance: 'i', stateDir: join(dir, '..', 'state'), autoMerge: () => true }) as unknown as Gate;
+  knownTip(c, dir, base);
   const pr: PullRequest = { number: 9, url: 'u', head: 'b', base: 'main', headSha: head, draft: false, state: 'open', title: 't', mergeable: true, mergeableState: 'clean' };
   return { c, w, pr, log };
 }

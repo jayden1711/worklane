@@ -1,7 +1,8 @@
 // What a change touches, as the review levels, the merge decision, the guards and the content checks read it (#683).
 //
 // Every reader in src/ of which paths a change touches or how many lines it changes goes through this module, except
-// two listed by name with why in test/change-files-renames.test.ts (src/comment-policy.ts and src/push-check.ts).
+// one listed by name with why in test/change-files-renames.test.ts (src/comment-policy.ts). The push limits read
+// theirs here too (rangeNames, #724).
 // That test is a word list, not a proof: it fails on a reader word (--name-only, --numstat, diff-tree, a `+++`
 // header, ...) in a file of src/ or scripts/ it doesn't list, but a flag built by concatenation, or a header regex
 // that never spells the header, gets past it.
@@ -129,6 +130,68 @@ const nameList = (cwd: string, args: string[], o: NameListOptions) =>
  */
 export function changedNames(cwd: string, args: string[], o: NameListOptions = {}): string[] {
   return names(must(nameList(cwd, args, o)));
+}
+
+/**
+ * The paths any commit in `range` (base..head) touches, not just its net diff: a file added and removed again still
+ * counts. A merge is read against its first parent; every submodule link is seen. Each path read by nameOf, once, so a
+ * name git would C-quote (a non-ASCII byte, a newline, a quote) is itself (#724). Throws when git fails.
+ */
+export function rangeNames(cwd: string, range: string): string[] {
+  if (range.startsWith('-')) throw new Error(`rangeNames: ${range} is not a range`);
+  // Plumbing only (#724, round 4): `git log` is porcelain and reads log.* config. log.showSignature glued a signature
+  // check's text to the first name ("No signature\nsecrets/k.key", so 1 problem became 0, measured) and
+  // log.showRoot=false hid a root commit's files. rev-list and diff-tree read none of it: each commit of the range
+  // against its first parent, a root against the empty tree.
+  const commits = must(run(cwd, ['rev-list', range]));
+  if (!commits.trim()) return [];
+  return [...new Set(names(must(plumbingBytes(cwd, ['diff-tree', '--stdin', '-r', '--root', '-m', '--first-parent', '--no-renames', '--name-only', '--no-commit-id', '-z'], commits))))];
+}
+
+/** runBytes with `input` on git's stdin. */
+function plumbingBytes(cwd: string, args: string[], input: string): Buffer | Error {
+  const r = spawnSync('git', withGit(args), { cwd, input: Buffer.from(input, 'utf8'), encoding: 'buffer', maxBuffer: MAX_BUFFER });
+  if (r.error) return r.error;
+  if (r.status !== 0) return new Error(`git ${args.join(' ').slice(0, 200)} failed: ${(r.stderr.toString('utf8') || `exit ${r.status}`).trim().slice(0, 500)}`);
+  return r.stdout;
+}
+
+/** A tree entry as blobsByName reads it: a regular file's text, or why it wasn't read. */
+export type TreeFile = { text: string } | { unread: string };
+
+/** The tree modes of a regular file: anything else (a symlink, 120000; a submodule link, 160000) is never read as one. */
+const REGULAR_FILE = new Set(['100644', '100755']);
+
+/**
+ * The entries of `rev`'s tree whose name, as nameOf reads it, is one of `names`: for each such name, every entry with
+ * it, read by object id and never by name, so a name that isn't valid UTF-8 (which can't be handed back to git) is
+ * still read (#724). Only a regular file of at most `maxBytes` is read; anything else says why it wasn't: a symlink
+ * (its blob is its target's path, not the file a checkout opens), a submodule link, a blob over the size, or one git
+ * can't give. A name with no entry at `rev` isn't in the map: that is the only "not there". Throws when the tree
+ * can't be listed.
+ */
+export function blobsByName(cwd: string, rev: string, names: string[], maxBytes = Infinity): Map<string, TreeFile[]> {
+  const out = new Map<string, TreeFile[]>();
+  const wanted = new Set(names);
+  if (!wanted.size) return out;
+  if (rev.startsWith('-')) throw new Error(`blobsByName: ${rev} is not a revision`);
+  // -r -z -l: "mode SP type SP object SP+ size TAB path NUL" for every file of the tree.
+  for (const rec of fields(must(runBytes(cwd, ['ls-tree', '-r', '-z', '-l', '--full-tree', rev])))) {
+    const tab = rec.indexOf(9);
+    if (tab === -1) continue;
+    const name = nameOf(rec.subarray(tab + 1));
+    if (!wanted.has(name)) continue;
+    const [mode, type, sha, size] = rec.subarray(0, tab).toString('latin1').split(/ +/);
+    const file = ((): TreeFile => {
+      if (mode === '120000') return { unread: 'a symbolic link, not a file' };
+      if (type !== 'blob' || !sha || !REGULAR_FILE.has(mode ?? '')) return { unread: `not a regular file (mode ${mode})` };
+      if (!(Number(size) <= maxBytes)) return { unread: `${size} bytes, over the ${maxBytes}-byte limit for it` };
+      const text = run(cwd, ['cat-file', 'blob', sha]);
+      return text instanceof Error ? { unread: 'git can\'t give its blob' } : { text };
+    })();
+    out.set(name, [...(out.get(name) ?? []), file]);
+  }
+  return out;
 }
 
 /** changedNames, or null when git fails (an unknown commit, no repo). */

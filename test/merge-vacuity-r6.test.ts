@@ -19,6 +19,7 @@ import * as policy from '../src/merge-policy-vacuity.js';
 import { FakeRunner } from '../src/runner.js';
 import * as vacuity from '../src/vacuity.js';
 import { exampleProject } from './helpers.js';
+import { knownTip } from './vacuity-tip.js';
 
 const git = (cwd: string, ...a: string[]) => execFileSync('git', a, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 type Run = { tests: string[]; appPaths: string[] };
@@ -49,6 +50,7 @@ function gate(dir: string, base: string, head: string, tune: (c: ReturnType<type
   log.append('pr.opened', w, 'i');
   log.append('eval.verdict', { issue: 7, head, patch_hash: 'h', patch_correct: true, test_correct: true, confidence: 'high', advice: '', design_change: false }, 'i');
   const c = new Coordinator({ cfg, log, backlog: new FileBacklog(join(dir, '..', 'b.json')), runner: new FakeRunner(() => ({})), repo: dir, instance: 'i', stateDir: join(dir, '..', 'state'), autoMerge: () => true }) as unknown as Gate;
+  knownTip(c, dir, base);
   const p: PullRequest = { number: 9, url: 'u', head: 'b', base: 'main', headSha: head, draft: false, state: 'open', title: 't', mergeable: true, mergeableState: 'clean' };
   return { c, w, p, log, dir, head };
 }
@@ -96,9 +98,12 @@ test('A1, must hold: the clone\'s fetch of main is still at the claim base, behi
   assert.deepEqual([d.auto, d.reasons], [false, [FOREIGN]]);
 });
 
-test('A1, must hold: no fetch of main in the clone at all, and the PR has a merge', async () => {
-  const { d } = await decided(mergedMain('none'));
-  assert.deepEqual([d.auto, d.reasons], [false, [FOREIGN]]);
+test('A1, must hold: no answer from the remote on main\'s tip, and the PR has a merge', async () => {
+  // #784 round 7: the tip is the remote's (ls-remote), never the clone's ref; here no ls-remote answered.
+  const t = mergedMain('none');
+  (t.c as unknown as { defaultTip: string }).defaultTip = '';
+  const { d } = await decided(t);
+  assert.deepEqual([d.auto, d.reasons], [false, ["design: vacuity: the default branch's tip on the remote isn't known here (ls-remote failed or hasn't run), so the PR's own change can't be told from the default branch's"]]);
 });
 
 // ---- runner.one: the test runner's own options only

@@ -20,6 +20,7 @@ import { coverageRunnerOne } from '../src/merge-policy-vacuity.js';
 import { FakeRunner } from '../src/runner.js';
 import { RATE, takeOpsPost } from '../src/watchdog/post.js';
 import { exampleProject, repoRoot } from './helpers.js';
+import { knownTip } from './vacuity-tip.js';
 import { approve, green, openPr, skip } from './repro-state-graph/harness.js';
 
 // ---- the reader's output and time: source maps naming made-up sources
@@ -85,6 +86,7 @@ test('vacuity.measured records only the touched files the PR changes: a map nami
   log.append('pr.opened', w, 'i');
   log.append('eval.verdict', { issue: 7, head, patch_hash: 'h', patch_correct: true, test_correct: true, confidence: 'high', advice: '', design_change: false }, 'i');
   const c = new Coordinator({ cfg, log, backlog: new FileBacklog(join(dir, '..', 'b.json')), runner: new FakeRunner(() => ({})), repo: dir, instance: 'i', stateDir: join(dir, '..', 'state'), autoMerge: () => true }) as unknown as Gate;
+  knownTip(c, dir, base);
   const pr: PullRequest = { number: 9, url: 'u', head: 'b', base: 'main', headSha: head, draft: false, state: 'open', title: 't', mergeable: true, mergeableState: 'clean' };
   const first = c.mergeDecisionFor(7, 9, pr);
   await c.vacuityRun(w, pr, first.vacuityRun!);

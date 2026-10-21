@@ -28,7 +28,7 @@ import { instructionEvalReasons, mergeDecision, neverAutoMerge, outsidePlanReaso
 import { deferDelay, deferrable, isBehind, mergeDeferral, mergeMessage, MergePass, mergeRefusal, type Deferral } from '../merge-policy-train.js';
 import { weakeningOf } from '../merge-policy-weakening.js';
 import { baselineRunnerOne, coverageRunnerOne, PLAIN_TEST_PATH, VACUITY_UNMEASURED, vacuityCheck, type VacuityCheck } from '../merge-policy-vacuity.js';
-import { codeLines, CoverageUnreadable, readTouchedInChild, type ChangedHunkSpots } from '../vacuity.js';
+import { codeLines, CoverageUnreadable, LOAD_BUDGET_MS, readTouchedInChild, type ChangedHunkSpots, type LoadRun } from '../vacuity.js';
 
 /** A coverage run to make: vacuityCheck's, with the commit the PR's change is measured from (its changed lines). */
 type VacuityRun = NonNullable<VacuityCheck['run']> & { base: string };
@@ -390,6 +390,9 @@ export abstract class MergeFlow extends FixRuns {
   /** The merge gate's coverage runs going now, by PR number: one at a time per PR, never on the coordinator's tick. */
   protected readonly vacuityRuns = new Map<number, Promise<void>>();
 
+  /** How long one coverage run's load-only runs may take in all (vacuity.ts LOAD_BUDGET_MS; a test sets less). */
+  protected vacuityLoadBudgetMs = LOAD_BUDGET_MS;
+
   /**
    * The merge gate's coverage run (#784), started in the background as the combined check is (it runs the PR's own
    * code, which may take as long as its command timeout): only when it is all that holds the PR at this head. Not
@@ -627,9 +630,9 @@ export abstract class MergeFlow extends FixRuns {
     // #784 round 5 (A1): for vacuity, the PR's own change is measured from where its head meets the default branch's
     // current tip, so the default branch's files and tests a merge brought in (a conflict fix's: fix-runs.ts) are never
     // taken for the PR's own.
-    const { base: vacuityBase, foreign } = this.vacuityBase(base, pr.headSha);
+    const { base: vacuityBase, foreign, tip } = this.vacuityBase(base, pr.headSha);
     const vacuityFiles = vacuityBase === base ? files : this.changeFiles(this.d.repo, vacuityBase, pr.headSha);
-    const vacuity = this.vacuityFor(n, number, pr.headSha, vacuityFiles.map((f) => f.path), foreign);
+    const vacuity = this.vacuityFor(n, number, pr.headSha, vacuityFiles.map((f) => f.path), foreign, tip);
     const decided = mergeDecision({
       branch: pr.head,
       openedByHarness: this.openedByUs(number),
@@ -657,7 +660,7 @@ export abstract class MergeFlow extends FixRuns {
       weakening: weakeningOf(this.d.repo, base, pr.headSha, files, lockScopeOf(this.d)),
       // The PR's own tests, run under coverage, must execute app code it changes (#784).
       vacuity: vacuity.reasons,
-      vacuityPending: vacuity.run !== undefined,
+      vacuityPending: vacuity.run !== undefined || vacuity.wait === true,
       outsidePlan: plan ? outsidePlanReasons({ planFiles: plan.files ?? [], level, waitCategories: [...new Set([...waitCategoriesOf(review), ...DEFAULT_REVIEW.levels.L3_human.when])], newTopLevel }) : [],
     });
     const d = vacuity.run ? { ...decided, vacuityRun: { ...vacuity.run, base: vacuityBase } } : decided;
@@ -1605,25 +1608,47 @@ export abstract class MergeFlow extends FixRuns {
   }
 
   /**
-   * Where vacuity measures a PR's change from (#784 round 5, A1): the merge base of its head and the default branch's
-   * tip (`<remote>/<branch>`), when the claim's base is that commit or an ancestor of it and it isn't the head itself;
-   * the claim's base otherwise (no tip in this clone, a rewritten default branch). A PR that merged the default branch
-   * in then shows only its own lines: never the default branch's change and the tests that came with it.
+   * Where vacuity measures a PR's change from (#784 rounds 5 to 7, A1): the merge base of its head and the default
+   * branch's tip, when the claim's base is that commit or an ancestor of it and it isn't the head itself; the claim's
+   * base otherwise (a rewritten default branch). A PR that merged the default branch in, or was rebased onto it, then
+   * shows only its own lines: never the default branch's change and the tests that came with it.
+   *
+   * The tip is the one the remote gave (watchPrs' ls-remote, `defaultTip`), never the clone's `<remote>/<branch>` ref,
+   * which any process with the clone can write (#926) and which a fetch may not have brought up yet (round 7). `tip`:
+   * 'unknown' with no ls-remote answer (the PR holds); 'stale' when the clone hasn't that commit or its ref says
+   * otherwise (the PR waits, and is decided again once a fetch brings the ref up to it).
    *
    * `foreign` (#784 round 6, fail closed): a merge commit between that base and the head has a merged-in parent the
-   * tip here doesn't have (the clone's fetch of the default branch is behind what the PR merged, or the PR merged
-   * another branch), or one can't be read. Its change then can't be told from what it merged, and the PR holds.
+   * tip doesn't have (another branch, or one can't be read). Its change then can't be told from what it merged, and the
+   * PR holds.
    */
-  private vacuityBase(base: string, head: string): { base: string; foreign: boolean } {
-    const tip = `refs/remotes/${this.remote}/${this.branch}`;
+  private vacuityBase(base: string, head: string): { base: string; foreign: boolean; tip?: 'unknown' | 'stale' } {
+    const sha = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
+    const ref = () => {
+      const r = spawnSync('git', ['--no-replace-objects', 'rev-parse', '--verify', '--quiet', `refs/remotes/${this.remote}/${this.branch}^{commit}`], { cwd: this.d.repo, encoding: 'utf8' });
+      return r.status === 0 ? r.stdout.trim() : '';
+    };
+    const have = (c: string) => spawnSync('git', ['--no-replace-objects', 'cat-file', '-e', `${c}^{commit}`], { cwd: this.d.repo }).status === 0;
+    let tip = this.defaultTip;
+    if (!sha.test(tip) || ref() !== tip || !have(tip)) {
+      // Not settled: ask the remote again now (watchPrs asks at most every TIP_CHECK_MS), and fetch the branch when the
+      // clone's ref isn't that, so a ref written over (#926) or not yet fetched is brought to what the remote says.
+      const r = spawnSync('git', ['ls-remote', this.remote, `refs/heads/${this.branch}`], { cwd: this.d.repo, encoding: 'utf8' });
+      const fresh = r.status === 0 ? (r.stdout.split(/\s/)[0] ?? '') : '';
+      if (sha.test(fresh)) {
+        tip = fresh;
+        if (ref() !== tip || !have(tip)) spawnSync('git', ['fetch', '-q', this.remote, this.branch], { cwd: this.d.repo });
+      }
+    }
+    if (!sha.test(tip)) return { base, foreign: false, tip: 'unknown' };
+    if (!have(tip) || ref() !== tip) return { base, foreign: false, tip: 'stale' };
     const r = spawnSync('git', ['--no-replace-objects', 'merge-base', tip, head], { cwd: this.d.repo, encoding: 'utf8' });
     const mb = r.status === 0 ? r.stdout.trim() : '';
     const from = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(mb) && mb !== base && mb !== head && this.isAncestor(base, mb) ? mb : base;
     // Each merge commit in from..head, with its parents: `<merge> <first parent> <merged-in parent>...`.
     const merges = spawnSync('git', ['--no-replace-objects', 'rev-list', '--merges', '--parents', `${from}..${head}`], { cwd: this.d.repo, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 });
     if (merges.status !== 0) return { base: from, foreign: true };
-    const tipThere = spawnSync('git', ['--no-replace-objects', 'rev-parse', '--verify', '--quiet', `${tip}^{commit}`], { cwd: this.d.repo }).status === 0;
-    const foreign = merges.stdout.split('\n').filter(Boolean).some((line) => line.split(' ').slice(2).some((p) => !tipThere || !this.isAncestor(p, tip)));
+    const foreign = merges.stdout.split('\n').filter(Boolean).some((line) => line.split(' ').slice(2).some((p) => !this.isAncestor(p, tip)));
     return { base: from, foreign };
   }
 
@@ -1631,7 +1656,7 @@ export abstract class MergeFlow extends FixRuns {
    * Whether the PR's own tests run the app code it changes, at this head (src/merge-policy-vacuity.ts), from the head's
    * files and this head's coverage runs. Every git read is in atHead, so a failing one holds the PR (vacuityCheck).
    */
-  private vacuityFor(n: number, number: number, head: string, changed: string[], foreignMerge = false): VacuityCheck {
+  private vacuityFor(n: number, number: number, head: string, changed: string[], foreignMerge = false, tip?: 'unknown' | 'stale'): VacuityCheck {
     // change-files.ts's guards (#683): no replace ref swaps a blob, no attributes file changes what is read.
     const git = (args: string[]) => execFileSync('git', ['--no-replace-objects', '-c', 'core.attributesFile=/dev/null', ...args], { cwd: this.d.repo, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 64 * 1024 * 1024 });
     // The test files the task's agreed done_when names: what the coordinator's own verification ran.
@@ -1653,6 +1678,7 @@ export abstract class MergeFlow extends FixRuns {
       changed,
       contractTests,
       foreignMerge,
+      ...(tip ? { tip } : {}),
       atHead,
       runs: { started: runs.filter((e) => e.type === 'vacuity.started').length, last: last ? { tests: last.tests, touched: last.touched, error: last.error } : null },
     });
@@ -1685,10 +1711,9 @@ export abstract class MergeFlow extends FixRuns {
         // Directories the change can't know the names of, so it can't ship coverage files of its own there.
         const cov = join(path, `.${BRAND.cli}-coverage-${randomBytes(8).toString('hex')}`);
         const baseline = join(path, `.${BRAND.cli}-coverage-${randomBytes(8).toString('hex')}`);
-        const loads = join(path, `.${BRAND.cli}-coverage-${randomBytes(8).toString('hex')}`);
         // No NODE_OPTIONS from the engine's own environment: nothing loads before the tests but what runner.one says
         // (#784 round 6).
-        const run1 = (command: string, dir: string) => this.project(command, path, { NODE_V8_COVERAGE: dir }, ['NODE_OPTIONS']);
+        const run1 = (command: string, dir: string, timeoutMs?: number) => this.project(command, path, { env: { NODE_V8_COVERAGE: dir }, unset: ['NODE_OPTIONS'], ...(timeoutMs === undefined ? {} : { timeoutMs }) });
         const failed = (what: string, r: { code: number | null; tail: string }) => `${what} ${r.code === null ? 'did not finish (timed out or stopped)' : `exited ${r.code}`}: ${r.tail.split('\n').filter(Boolean).slice(-3).join(' / ')}`;
         // Each test twice: as runner.one runs it, then with every test skipped (the baseline: only loading runs).
         for (const t of run.tests) {
@@ -1707,21 +1732,32 @@ export abstract class MergeFlow extends FixRuns {
         const req = { coverageDir: cov, baselineDir: baseline, root: path, appPaths: run.appPaths, only: run.app, hunks };
         const first = error === null ? await readTouchedInChild(req, undefined, this.shutdown.signal) : null;
         if (first && 'error' in first) error = first.error;
+        else if (first?.touched.length && !first.loads.length) touched = first.touched;
         else if (first?.touched.length) {
-          // Then each script that made a file touched, loaded on its own (#784 round 6): what loading it runs, wherever
-          // a test imports it (inside a test's body too), counts for nothing.
-          for (const s of first.scripts) {
-            if (!PLAIN_TEST_PATH.test(s)) {
-              error = `${shownPath(s)} has characters other than letters, digits, ".", "_", "-" and "/", so it can't be loaded on its own`;
+          // Then each script the tests evaluated more often than the test baseline did (an import in a test's body, a
+          // copy with a query string, what such a module imports), loaded on its own, one process each (#784 rounds 6,
+          // 7): what its loading runs, times its extra evaluations, counts for nothing. All of them within one time
+          // budget (this.vacuityLoadBudgetMs); past it the PR waits.
+          const loads: LoadRun[] = [];
+          const budget = this.vacuityLoadBudgetMs;
+          const deadline = performance.now() + budget;
+          for (const { script, extra } of first.loads) {
+            if (!PLAIN_TEST_PATH.test(script)) {
+              error = `${shownPath(script)} has characters other than letters, digits, ".", "_", "-" and "/", so it can't be loaded on its own`;
               break;
             }
-            const r = await run1(`node --import ./${s} --eval=0`, loads);
-            if (r.code === 0) continue;
-            error = failed(`${shownPath(s)}, loaded on its own,`, r);
+            const left = Math.ceil(deadline - performance.now());
+            const dir = join(path, `.${BRAND.cli}-coverage-${randomBytes(8).toString('hex')}`);
+            const r = left > 0 ? await run1(`node --import ./${script} --eval=0`, dir, left) : null;
+            if (r?.code === 0) {
+              loads.push({ dir, script, extra });
+              continue;
+            }
+            error = !r || (r.code === null && performance.now() >= deadline && !this.shutdown.signal.aborted) ? `the modules its tests import more often than loading the test files does took longer than ${Math.round(budget / 1000)} s in all to load on their own` : failed(`${shownPath(script)}, loaded on its own,`, r);
             break;
           }
           if (error === null) {
-            const second = await readTouchedInChild({ ...req, loadDir: loads }, undefined, this.shutdown.signal);
+            const second = await readTouchedInChild({ ...req, loads }, undefined, this.shutdown.signal);
             if ('error' in second) error = second.error;
             else touched = second.touched;
           }

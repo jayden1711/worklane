@@ -3,8 +3,8 @@
 - **A PR that changes app code waits for you unless its own tests are shown to run that code (#784).** Only a measured yes lets it auto-merge.
   - Its tests are the test files it adds or changes and the `test:` files its task's `done_when` names. They must call an assertion; importing an assertion module is not one.
   - Each is run with `runner.one` under Node's V8 coverage, in a scratch worktree at the PR's head, with the setup, the run and the coverage read off the coordinator's thread. Each runs twice: as it is, and with every test skipped. The PR's tests must run code on a changed line of at least one of its app files more often than loading them does.
-  - Each changed file a test ran is also loaded on its own. What loading a module runs doesn't count, even in a file the PR adds and even when a test's body imports it: its top level, a class's static fields, a helper called at load, a call at the test file's top level. One limit: a timer or listener a module starts as it loads runs longer while a test waits, and that counts.
-  - The PR's lines are measured from where it meets the default branch's tip, so what it merged in from that branch is never its own; a merge of commits the clone's copy of that branch doesn't have yet waits. A renamed file's lines are the ones its rename changed. Blank lines, whitespace and comments are not changed code: a PR with nothing else in its app files waits.
+  - Every module the tests loaded more often than the skipped run did (an import in a test's body, a `?query` copy, what such a module imports) is also loaded on its own, and taken away as many times as the extra loads, within one 120 s budget. What loading a module runs doesn't count, even in a file the PR adds and however a test's body imports it: its top level, a class's static fields, a helper called at load, a call at the test file's top level. One limit: a timer or listener a module starts as it loads runs longer while a test waits, and that counts.
+  - The PR's lines are measured from where it meets the default branch's tip as the remote reports it (never the clone's ref), so what it merged in or was rebased onto is never its own. The PR waits until the clone has that tip. A renamed file's lines are the ones its rename changed. Blank lines, whitespace and comments are not changed code: a PR with nothing else in its app files waits.
   - JavaScript is measured as it is, TypeScript under Node's own type stripping, and a build (`dist/`) through its source map (`<file>.js.map`). Code tsx, vitest, jest or a loader transforms counts for nothing.
 - **Which installs lose auto-merge of app-code PRs:**
   - every repo whose `.worklane/tests.yaml` has `vacuity.dynamic: false`, which is what `worklane init` wrote before;
@@ -20,8 +20,9 @@
   - its tests have no assertion;
   - its tests ran none of the app code it changes;
   - runner.one is not `node --test` with only the test runner's own options;
-  - a merge brings in commits the clone's copy of the default branch doesn't have;
-  - a changed file a test ran can't be loaded on its own;
+  - a merge brings in another branch's commits;
+  - the default branch's tip can't be read from the remote;
+  - a module the tests loaded more often can't be loaded on its own, or those loads ran past their time budget;
   - nothing to measure (its app-code changes are only blank lines, whitespace, comments or renames);
   - the coverage run failed, or wrote no coverage;
   - its coverage can't be mapped;

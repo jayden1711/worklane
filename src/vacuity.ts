@@ -4,12 +4,13 @@
 //  dynamic: run the file under NODE_V8_COVERAGE; it must execute code inside the app's paths. Code that runs as the
 //           module loads doesn't count: the module's own top level and V8's synthetic initializers (a class's static
 //           fields). The merge gate also runs each test a second time with none of its tests run (a baseline: the
-//           file and what it imports only load), and loads each script that made a file touched on its own (one more
-//           baseline each), and counts only code that ran more often in the real run than in any baseline, so a helper
-//           a module calls as it loads (`const T = build()`, tsc's __decorate, esbuild's __name) counts for nothing even
-//           when the PR adds the whole file or a test's body imports it; and only code on the lines the PR changes that
-//           hold code (codeSpans). Not seen: work a module starts as it loads that keeps running (a timer) while a test
-//           waits.
+//           file and what it imports only load), and loads on its own every script the tests evaluated more often than
+//           that (a dynamic import in a test's body, a copy with a query string, what such a module imports), taking
+//           its coverage away as many times as the extra evaluations (round 7). Only code that ran more often than all
+//           that counts, so a helper a module calls as it loads (`const T = build()`, tsc's __decorate, esbuild's
+//           __name) counts for nothing even when the PR adds the whole file or a test's body imports it, once or many
+//           times, directly or through another module; and only code on the lines the PR changes that hold code
+//           (codeSpans). Not seen: work a module starts as it loads that keeps running (a timer) while a test waits.
 import { spawn, spawnSync } from './os/child-process.js';
 import { lstatSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -216,11 +217,9 @@ function ranSegments(fns: V8Coverage['result'][number]['functions'], length: num
 }
 
 /**
- * Where code ran more times in the test runs (`ran`: every process's segments of one script, summed) than in the most
- * any baseline ran it (`baselines`: each one's segments summed), as sorted [start, end) offsets (#784 rounds 5, 6). The
- * baselines are the same tests with none of them run (what loading the test file and its imports runs) and each
- * changed script loaded on its own (what loading it runs, wherever a test imports it, a test's body included). The
- * most of them, not their sum: a test that loads a module and then calls it is never taken for one that only loaded it.
+ * Where code ran more times in the test runs (`ran`: every process's segments of one script, summed) than the most of
+ * `baselines` (each one's segments summed), as sorted [start, end) offsets (#784 rounds 5 to 7). measureTouched passes
+ * one: what loading accounts for, the test baseline plus each load-only run scaled by its extra evaluations.
  */
 function ranMore(ran: Segment[], baselines: Segment[][]): [number, number][] {
   const cuts = [...new Set([ran, ...baselines].flatMap((segs) => segs.flatMap(([a, b]) => [a, b])))].sort((x, y) => x - y);
@@ -537,11 +536,12 @@ export function touchedAppFiles(coverageDir: string, root: string, appPaths: str
 }
 
 /**
- * touchedAppFiles, and `scripts`: the scripts (paths under `root`) whose run code made a file touched, an app file
- * itself or a build's script whose map named it. `loadDir` (#784 round 6): the coverage of each of those scripts
- * loaded on its own, one process each; what any one of them ran is taken away too (ranMore).
+ * touchedAppFiles, and `loads`: every script under `root` the tests evaluated more often than the test baseline did
+ * (a dynamic import in a test's body, a copy with a query string, a module that such a module imports), with how many
+ * more times (#784 round 7). The gate loads each on its own and reads again with `loads`, each run's coverage taken
+ * away as many times as its script was evaluated more, on top of the test baseline's (ranMore).
  */
-export function measureTouched(coverageDir: string, root: string, appPaths: string[], only?: readonly string[], hunks?: Readonly<Record<string, readonly ChangedHunkSpots[]>>, baselineDir?: string, loadDir?: string): { touched: string[]; scripts: string[] } {
+export function measureTouched(coverageDir: string, root: string, appPaths: string[], only?: readonly string[], hunks?: Readonly<Record<string, readonly ChangedHunkSpots[]>>, baselineDir?: string, loads: readonly LoadRun[] = []): { touched: string[]; loads: { script: string; extra: number }[] } {
   const res = appPaths.map((g) => globToRegExp(g));
   const realRoot = realpathSync.native(root);
   const wanted = hunks ? new Set(Object.keys(hunks)) : only ? new Set(only) : null;
@@ -557,11 +557,14 @@ export function measureTouched(coverageDir: string, root: string, appPaths: stri
     if (![...spans.values()].some((s) => s.length)) throw new CoverageUnreadable(NOTHING_TO_MEASURE);
   }
   const spansOf = (rel: string): LineSpans | null => (hunks ? (spans.get(rel) ?? []) : null);
-  // Every process's segments of each script under the root: the test runs' summed, the test baseline's summed (group
-  // 0), and each load-only process its own group.
-  const scripts = new Map<string, { rel: string; text: string; ran: Segment[]; groups: Segment[][] }>();
-  const collect = (dir: string, into: 'ran' | 'baseline' | 'load') => {
-    for (const [n, cov] of readCoverageDir(dir).entries()) {
+  // Every process's segments of each script under the root: the test runs' summed (`ran`), and what loading accounts
+  // for (`loaded`): the test baseline's, plus each load-only run's times how many more times the tests evaluated the
+  // script it loaded than the test baseline did (#784 round 7).
+  const scripts = new Map<string, { rel: string; text: string; ran: Segment[]; loaded: Segment[] }>();
+  // How many times each script's top level ran, by file: in the test runs and in the test baseline.
+  const evals = new Map<string, { rel: string; ran: number; baseline: number }>();
+  const collect = (dir: string, into: 'ran' | 'baseline' | 'load', times = 1) => {
+    for (const cov of readCoverageDir(dir)) {
       for (const script of cov.result) {
         if (!script.url.startsWith('file:') || script.url.length > COVERAGE_LIMITS.urlChars) continue;
         let file: string;
@@ -574,62 +577,65 @@ export function measureTouched(coverageDir: string, root: string, appPaths: stri
           continue;
         }
         if (!under(file, realRoot)) continue;
+        const rel = relative(realRoot, file).split('\\').join('/');
+        // Its top level's run count: how many times this process evaluated it (a query string makes a new copy).
+        const top = script.functions.find((f) => f.functionName === '' && f.ranges[0]?.startOffset === 0);
+        if (into !== 'load' && top) {
+          const e = evals.get(file) ?? { rel, ran: 0, baseline: 0 };
+          e[into] += Math.max(0, top.ranges[0]!.count);
+          evals.set(file, e);
+        }
         let s = scripts.get(file);
         // A baseline only takes away from scripts the tests ran.
         if (!s && into !== 'ran') continue;
         if (!s) {
           const text = textOf(file, SCRIPT_BYTES);
           if (text === null) continue;
-          s = { rel: relative(realRoot, file).split('\\').join('/'), text, ran: [], groups: [[]] };
+          s = { rel, text, ran: [], loaded: [] };
           scripts.set(file, s);
         }
         const segs = ranSegments(script.functions, s.text.length, script.url);
         if (!segs) continue;
         if (into === 'ran') s.ran.push(...segs);
-        else if (into === 'baseline') s.groups[0]!.push(...segs);
-        else {
-          // One group per load process (coverage file), however many of its scripts it holds.
-          const key = n + 1;
-          while (s.groups.length <= key) s.groups.push([]);
-          s.groups[key]!.push(...segs);
-        }
+        else s.loaded.push(...segs.map(([a, b, c]): Segment => [a, b, c * times]));
       }
     }
   };
   collect(coverageDir, 'ran');
   if (baselineDir !== undefined) collect(baselineDir, 'baseline');
-  if (loadDir !== undefined) collect(loadDir, 'load');
+  for (const l of loads) collect(l.dir, 'load', l.extra);
   const budget = { maps: 0, bytes: 0, sources: 0 };
   const touched = new Set<string>();
-  const from = new Set<string>();
-  // For each source a build's map names: the lines whose code ran, by the script that ran them.
-  const mappedRan = new Map<string, Map<string, Set<number>>>();
-  for (const [file, { rel, text, ran, groups }] of scripts) {
-    const ranges = ranMore(ran, groups.filter((g) => g.length));
+  // For each source a build's map names: the lines whose code ran.
+  const mappedRan = new Map<string, Set<number>>();
+  for (const [file, { rel, text, ran, loaded }] of scripts) {
+    const ranges = ranMore(ran, [loaded]);
     if (!ranges.length) continue;
     if (isApp(rel)) {
-      if (ranOn(ranges, lineStarts(text), spansOf(rel))) {
-        touched.add(rel);
-        from.add(rel);
-      }
+      if (ranOn(ranges, lineStarts(text), spansOf(rel))) touched.add(rel);
       continue;
     }
     for (const [src, lines] of mappedLines(file, ranges, text, realRoot, budget)) {
-      if (!mappedRan.has(src)) mappedRan.set(src, new Map());
-      mappedRan.get(src)!.set(rel, lines);
+      if (!mappedRan.has(src)) mappedRan.set(src, new Set());
+      for (const l of lines) mappedRan.get(src)!.add(l);
     }
   }
-  for (const [src, by] of mappedRan) {
-    if (!isApp(src)) continue;
+  for (const [src, ran] of mappedRan) {
+    if (!isApp(src) || touched.has(src)) continue;
     const s = spansOf(src);
-    for (const [rel, ran] of by) {
-      if (!s ? ran.size > 0 : s.some(([a, b]) => [...ran].some((l) => l >= a && l <= b))) {
-        touched.add(src);
-        from.add(rel);
-      }
-    }
+    if (!s ? ran.size > 0 : s.some(([a, b]) => [...ran].some((l) => l >= a && l <= b))) touched.add(src);
   }
-  return { touched: [...touched].sort(), scripts: [...from].sort() };
+  // Every script the tests evaluated more often than the test baseline did: what each run as it loaded is still in
+  // `ran` until it is loaded on its own (the gate does, then reads again with `loads`).
+  const more = [...evals.values()].filter((e) => e.ran > e.baseline).map((e) => ({ script: e.rel, extra: e.ran - e.baseline }));
+  return { touched: [...touched].sort(), loads: more.sort((a, b) => (a.script < b.script ? -1 : 1)) };
+}
+
+/** A load-only run (#784 round 7): `dir`, its coverage; `extra`, how many more times the tests evaluated `script`. */
+export interface LoadRun {
+  dir: string;
+  script: string;
+  extra: number;
 }
 
 /** What the merge gate asks the reader process: touchedAppFiles's arguments. */
@@ -640,15 +646,21 @@ export interface TouchedRequest {
   appPaths: string[];
   only: string[];
   hunks: Record<string, ChangedHunkSpots[]>;
-  /** The load-only baselines' coverage (#784 round 6), once the scripts to load are known. */
-  loadDir?: string;
+  /** The load-only runs (#784 rounds 6, 7), once the scripts to load are known. */
+  loads?: LoadRun[];
 }
 
-/** What the reader answers: the touched files, and the scripts that touched them (measureTouched). */
-export type TouchedAnswer = { touched: string[]; scripts: string[] } | { error: string };
+/** What the reader answers: the touched files, and the scripts to load on their own (measureTouched). */
+export type TouchedAnswer = { touched: string[]; loads: { script: string; extra: number }[] } | { error: string };
 
 /** The most scripts a read may name to load on their own (more: the read fails, and the PR waits). */
 export const LOAD_SCRIPTS_MAX = 64;
+
+/**
+ * The time all of one gate run's load-only runs may take together (#784 round 7). Past it the run stops, and the PR
+ * waits with the reason named.
+ */
+export const LOAD_BUDGET_MS = 120_000;
 
 /** How long the reader process may take before the read counts as failed (the PR waits). */
 export const COVERAGE_READ_TIMEOUT_MS = 120_000;
@@ -693,13 +705,16 @@ export function readTouchedInChild(req: TouchedRequest, timeoutMs = COVERAGE_REA
     child.on('error', () => finish({ error: 'the coverage read could not start' }));
     child.on('close', () => {
       try {
-        const a = JSON.parse(out) as { touched?: unknown; scripts?: unknown; error?: unknown };
+        const a = JSON.parse(out) as { touched?: unknown; loads?: unknown; error?: unknown };
         if (typeof a.error === 'string') return finish({ error: a.error });
-        // The touched files are the PR's own; the scripts, relative paths under the worktree, at most LOAD_SCRIPTS_MAX.
+        // The touched files are the PR's own; the scripts, relative paths under the worktree, each with a whole number
+        // of extra evaluations, at most LOAD_SCRIPTS_MAX of them.
         const rel = (p: unknown) => typeof p === 'string' && p.length > 0 && p.length <= COVERAGE_LIMITS.urlChars && !isAbsolute(p) && !p.split('/').includes('..');
-        if (Array.isArray(a.touched) && a.touched.every((t) => typeof t === 'string' && req.only.includes(t)) && Array.isArray(a.scripts) && a.scripts.every(rel)) {
-          if (a.scripts.length > LOAD_SCRIPTS_MAX) return finish({ error: `the coverage read named more than ${LOAD_SCRIPTS_MAX} scripts to load on their own` });
-          return finish({ touched: a.touched as string[], scripts: a.scripts as string[] });
+        const load = (l: unknown) => !!l && typeof l === 'object' && rel((l as { script?: unknown }).script) && Number.isSafeInteger((l as { extra?: unknown }).extra) && ((l as { extra: number }).extra) > 0;
+        if (Array.isArray(a.touched) && a.touched.every((t) => typeof t === 'string' && req.only.includes(t)) && Array.isArray(a.loads) && a.loads.every(load)) {
+          const loads = (a.loads as { script: string; extra: number }[]).map((l) => ({ script: l.script, extra: l.extra }));
+          if (a.touched.length && loads.length > LOAD_SCRIPTS_MAX) return finish({ error: `the coverage read named more than ${LOAD_SCRIPTS_MAX} scripts to load on their own` });
+          return finish({ touched: a.touched as string[], loads });
         }
       } catch {
         // below
