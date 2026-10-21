@@ -59,7 +59,8 @@ run $S "$4" Q; echo "Q ran=$([ -e $S/work/ran.txt ] && echo yes || echo no)"; ec
 echo "Q blames=$(grep -c 'owns or can write' $S/err)"; echo "Q search=$(grep -c "can't search" $S/err)"; echo "Q err=$(head -c 600 $S/err | tr '\n' '|')"
 dev() { echo "$1 ran=$([ -e $2/work/ran.txt ] && echo yes || echo no)"; echo "$1 type=$(stat -c %F $3/n)"; echo "$1 err=$(head -c 400 $2/err | tr '\n' ' ')"; }
 lay() { mkdir -p $1/agent $1/work; chown 1000:1000 $1/agent $1/work; }
-S=/mnt/dw; lay $S; mkdir $S/W; chmod 0777 $S/W; mknod $S/W/n c 0 0 || { echo NOMKNOD; exit 0; }; ln -s $S/W/n $S/agent/.x; run $S "$5" DW; dev DW $S $S/W
+if ! mknod /mnt/mk c 0 0; then echo NOMKNOD; exit 0; fi
+S=/mnt/dw; lay $S; mkdir $S/W; chmod 0777 $S/W; mknod $S/W/n c 0 0; ln -s $S/W/n $S/agent/.x; run $S "$5" DW; dev DW $S $S/W
 S=/mnt/ds; lay $S; mkdir $S/W; chmod 1777 $S/W; mknod $S/W/n c 0 0; chown 1000:1000 $S/W/n; ln -s $S/W/n $S/agent/.x; run $S "$6" DS; dev DS $S $S/W
 mount -t tmpfs -o mode=0755 none /dev/shm || { echo NOMOUNT; exit 0; }
 S=/mnt/dd; lay $S; mkdir /dev/shm/W; chmod 0777 /dev/shm/W; mknod /dev/shm/W/n c 0 0; ln -s /dev/shm/W/n $S/agent/.x; run $S "$7" DD; dev DD $S /dev/shm/W
@@ -71,6 +72,8 @@ S=/mnt/dn; lay $S; mkdir /dev/shm/D; mknod /dev/shm/D/n c 0 0; ln -s /dev/shm/D/
 
 /** Every case, run once in one namespace: each line the script printed, by key; null where it couldn't run there. */
 let ran: ((k: string) => string) | null | undefined;
+/** Whether the namespace could make no device node: the device cases (DW to DN) skip then, the others still run. */
+let noMknod = false;
 function results(): ((k: string) => string) | null {
   if (ran !== undefined) return ran;
   const dir = mkdtempSync(join(tmpdir(), 'wl-798-way-'));
@@ -88,10 +91,12 @@ function results(): ((k: string) => string) | null {
   const script = join(dir, 'way.sh');
   writeFileSync(script, SCRIPT);
   const r = spawnSync('unshare', [...NS, '/bin/bash', script, ha, hs, dv, q, dw, ds, dd, df, dn], { encoding: 'utf8', timeout: 120_000, stdio: ['ignore', 'pipe', 'pipe'] });
-  // The script itself failing is a failure, never a skip; only a namespace without bubblewrap, a tmpfs or mknod skips,
-  // and not under PROJECT_SANDBOX_REQUIRED=1.
+  // The script itself failing is a failure, never a skip; only a namespace without bubblewrap or a tmpfs skips every
+  // case, and one without mknod the device cases (DW to DN) only; neither under PROJECT_SANDBOX_REQUIRED=1.
   if (r.status !== 0) assert.fail(`the namespace script failed (status ${r.status}): ${r.stdout}${r.stderr}`);
-  if (/NOSANDBOX|NOMOUNT|NOMKNOD/.test(r.stdout)) {
+  noMknod = /^NOMKNOD$/m.test(r.stdout);
+  if (noMknod && required) assert.fail(`PROJECT_SANDBOX_REQUIRED=1, but mknod didn't run in the namespace: ${r.stdout}${r.stderr}`);
+  if (/NOSANDBOX|NOMOUNT/.test(r.stdout)) {
     if (required) assert.fail(`PROJECT_SANDBOX_REQUIRED=1, but the namespace or bubblewrap in it didn't run: ${r.stdout}${r.stderr}`);
     ran = null;
   } else ran = (k: string) => new RegExp(`^${k}=(.*)$`, 'm').exec(r.stdout)?.[1] ?? `(no ${k}: ${r.stdout}${r.stderr})`;
@@ -125,6 +130,7 @@ for (const [key, what] of DEVICE_IN_WRITABLE) {
   test(`a link to a device directly in a directory the agent can write is refused before the command runs: a device ${what}`, { skip }, (t) => {
     const line = results();
     if (!line) return t.skip('no bubblewrap or tmpfs inside the user namespace');
+    if (noMknod) return t.skip('no mknod inside the user namespace');
     assert.equal(line(`${key} type`), 'character special file', `${key} planted: ${line(`${key} err`)}`);
     assert.equal(line(`${key} status`), String(osAdapter.SANDBOX_UNAVAILABLE), line(`${key} err`));
     assert.equal(line(`${key} ran`), 'no', line(`${key} err`));
@@ -135,6 +141,7 @@ for (const [key, what] of DEVICE_IN_WRITABLE) {
 test("a link to a file under /dev, not a device, is refused before the command runs: it can't be made read-only without binding /dev", { skip }, (t) => {
   const line = results();
   if (!line) return t.skip('no bubblewrap or tmpfs inside the user namespace');
+  if (noMknod) return t.skip('no mknod inside the user namespace');
   assert.equal(line('DF status'), String(osAdapter.SANDBOX_UNAVAILABLE), line('DF err'));
   assert.equal(line('DF ran'), 'no', line('DF err'));
   assert.equal(line('DF reads'), '# root', line('DF err'));

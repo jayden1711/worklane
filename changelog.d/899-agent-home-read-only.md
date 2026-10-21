@@ -6,7 +6,7 @@
   - Browsers installed in the agent's `~/.cache/ms-playwright` are hidden inside the sandbox. Set `PLAYWRIGHT_BROWSERS_PATH` to a directory outside the home.
   - On macOS nothing in the home is writable, `~/.npm` included.
   - An agent home that isn't a directory, or is `/`, is refused: set `run_as.agent_home` in `instance.yaml` to the agent user's real home.
-  - On Linux, a symlink directly in the agent's home, or directly in its `~/.config`, is checked hop by hop before the command runs. A project command is refused, before it runs, in these cases. The refusal names each link, the path that makes it unsafe, and the command that removes it as the agent user.
+  - On Linux, a symlink directly in the agent's home, or directly in its `~/.config` (wherever that leads), is checked hop by hop before the command runs. A project command is refused, before it runs, in these cases. The refusal names each link, the path that makes it unsafe, and the command that removes it as the agent user.
     - A hop outside the home could be re-aimed: a link sitting in a directory the agent user can write. An example is `~/.profile` pointing to `/srv/x/hop/profile`, where `/srv/x/hop` is a link back into the home in a directory the agent can write.
     - A hop outside the home is the agent user's own: a directory on the way, or the file the link ends at. An example is `~/.ssh` pointing to an agent-owned `/srv/x`.
     - A dangling link passes, outside the home, through a directory the agent can write.
@@ -47,9 +47,12 @@
 
   Any other link is allowed. Every directory above what it reaches is pinned, and the target itself is bound read-only. A device target isn't bound (writing it plants nothing). It is refused when the agent can write its directory (under `/dev`, any directory between `/dev` and it); otherwise the directories above it are pinned, except under `/dev`. The home itself and every directory above it are always pinned.
 
-  A project command can't write the home, nor anything an allowed link in it reaches. Three things fall outside that:
+  A project command can't write the home, nor anything an allowed link in it reaches. Four things fall outside that:
   - a link deeper in the home whose way out the agent user can change (After install);
   - a link inside what an allowed link reaches that leads somewhere writable;
-  - another user writing a directory that such a link reaches, because the pins and the read-only bind hold only in this agent user's own sandboxes. That user can be another instance's agent user, through its own sandboxed project commands.
+  - another user writing a directory that such a link reaches, because the pins and the read-only bind hold only in this agent user's own sandboxes. That user can be another instance's agent user, through its own sandboxed project commands;
+  - a link added to the home while a command runs (only a process outside the sandbox can add one): the walk and its pins are worked out once, when the command starts.
+
+  A link to a directory above the home (`~/.x -> ..`) is bound read-only over the home's own mounts, so for that layout `~/.cache` and `~/.npm` are read-only too.
 - **harness-config locked (#798).** `src/review.ts` lists `harness-config` in `LOCKED_CATEGORIES` and `ALWAYS_L3`: it is always L3 and always waits. Its built-in globs always hold, and a repo's `review.yaml` may only add to them.
 - **credentials.sh** checks an agent's API-key sign-in with `sudo -H -u <agent>`, never a login shell (#798).
