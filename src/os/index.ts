@@ -756,13 +756,15 @@ const LINUX_SANDBOX = [
   // Link mode only (#798): a directory or file on a link's way, by the owner ($U) and cw the walk just worked out. In
   // the home it is read-only inside the sandbox (not the agent's to change there: cw=0). Elsewhere one the agent owns
   // is refused (OW, the first such path in OWAT): the agent's own files outside its home, fail closed. One it can
-  // write but doesn't own (root's world- or group-writable directory) is pinned instead, as walk pins a credential's
-  // way: bound onto itself with every directory above it, so no command can rename or remove it, and cw stays 1, so
-  // a link found in it is refused (it could be re-aimed). What the link reaches is bound read-only (lbinds below).
+  // write but doesn't own (root's world- or group-writable directory) is pinned instead (AW records that one was):
+  // bound onto itself with the directories above it, and cw stays 1, so a link found in it is refused (it could be
+  // re-aimed). The directories below it on the way are pinned too, once the walk ends (links: `above` the target), so
+  // none of them can be renamed away and recreated. Only in this agent's sandboxes: another user who can write that
+  // directory, another instance's agent user's sandboxed command among them, still can (a named residual).
   // Above the home a directory is the way to the home itself: pinned when writable, never refused.
   'hop() { local d=${1:-/}; [ -n "$lk" ] || return 0; case $d in "$hr"|"$hr"/*) cw=0; return 0 ;; esac; [ "$d" = / ] && return 0',
   '  case $hr in "$d"/*) [ "$cw" = 1 ] && above "$d/."; return 0 ;; esac',
-  '  if [ "$U" = "$UID" ]; then [ "$OW" = 1 ] || OWAT=$d; OW=1; elif [ "$cw" = 1 ]; then above "$d/."; fi; }',
+  '  if [ "$U" = "$UID" ]; then [ "$OW" = 1 ] || OWAT=$d; OW=1; elif [ "$cw" = 1 ]; then above "$d/."; [ "$AW" = 1 ] || AWAT=$d; AW=1; fi; }',
   // INVARIANT (#787 rounds 7, 8): each decision about a component rests on ONE lstat (its type and owner, or its
   // errno), never two tests the agent could change in between. Stable because the agent can't change who owns a
   // directory, or whether one it doesn't own is writable to it. Resolved one component and symlink at a time:
@@ -774,7 +776,7 @@ const LINUX_SANDBOX = [
   // - any other error, or a name too long to check: refused.
   `st() { local o; o=$("$stt" -c '%F/%u' -- "$1" 2>&1); S=$?; if [ "$S" -eq 0 ]; then T=\${o%/*} U=\${o##*/}; else E=\${o##*: }; fi; }`,
   // `walk <path>` from /; `walk <relative path> <home>` from the (resolved) home, for a link in it (link mode).
-  'walk() { local todo=${1#/} cur= c t n=0 own=0 cw=0; OW=0 OWAT= P= PW=0',
+  'walk() { local todo=${1#/} cur= c t n=0 own=0 cw=0; OW=0 OWAT= AW=0 AWAT= P= PW=0',
   '  if [ -n "$2" ]; then cur=$2 todo=$1 own=1; elif [ -w / ]; then cw=1 own=1; fi',
   '  while [ -n "$todo" ]; do',
   '    c=${todo%%/*}; if [ "$c" = "$todo" ]; then todo=; else todo=${todo#*/}; fi',
@@ -793,7 +795,9 @@ const LINUX_SANDBOX = [
   '    case $T in',
   '      "symbolic link") n=$((n + 1)); if [ "$n" -gt 40 ] || [ "$cw" = 1 ]; then refuse "$cur/$c"; return 2; fi',
   '        above "$cur/$c"; t=$("$rl" -- "$cur/$c") || { refuse "$cur/$c"; return 2; }',
-  '        case $t in /*) cur= cw=0; if [ -w / ]; then cw=1 own=1; fi; hop / ;; esac; todo=${t#/}${todo:+/$todo} ;;',
+  // (Link mode: an absolute target in the home goes on from the home itself, its way there pinned once, rather than
+  // walking every directory above it again: the cost of many links in a deep home.)
+  '        case $t in /*) if [ -n "$lk" ] && { [ "$t" = "$hr" ] || [ "${t#"$hr"/}" != "$t" ]; }; then above "$hr/."; cur=$hr cw=0; t=${t#"$hr"}; else cur= cw=0; if [ -w / ]; then cw=1 own=1; fi; hop /; fi ;; esac; todo=${t#/}${todo:+/$todo} ;;',
   '      directory) cur=$cur/$c; cw=0; if [ "$U" = "$UID" ] || [ -w "$cur/" ]; then cw=1 own=1; fi; hop "$cur" ;;',
   // (In link mode, a file the agent owns or can write counts as a hop too; a device, such as /dev/null, doesn't: a
   // write to it plants nothing.)
@@ -819,16 +823,21 @@ const LINUX_SANDBOX = [
   //   with `/x/hop -> ~/dotfiles` and /x writable: the hop could be re-aimed);
   // - a directory or file outside the home that the agent owns is refused (its own files, fail closed);
   // - one it can write but doesn't own (root's world- or group-writable directory, such as a CI runner's
-  //   /usr/local/.ghcup that a skeleton's `~/.ghcup` points to) is pinned: bound onto itself with everything above it;
-  // - what the link reaches outside the home is bound read-only in the sandbox (lbinds), so nothing under it is
-  //   written through it, nor directly; a device (/dev/null) is left as it is (writing it plants nothing);
-  // - a dangling link is refused when the directory it stops in is writable (a command could create its target);
+  //   /usr/local/.ghcup that a skeleton's `~/.ghcup` points to) doesn't refuse the link: it is pinned;
+  // - every directory above what the link reaches is pinned (bound onto itself, as add() pins a credential's way), so
+  //   none can be renamed away and recreated (`~/.profile -> W/D/c`, W writable: `mv W/D` is refused), and what it
+  //   reaches outside the home is bound read-only (lbinds): nothing under it is written through the link, nor
+  //   directly; a device (/dev/null) is left as it is (writing it plants nothing);
+  // - a dangling link is refused when any directory on its way outside the home is writable (a command could create
+  //   its target, or rename a directory below it away and recreate it), else the directories above it are pinned;
   // - one reaching / or the command's working directory is refused (binding it read-only would take the command's
   //   own directory too).
   // Every refusal names its link, all at once. Bounded: past LINK_CAP symlinks in one directory, refused rather than
   // run with some unchecked. ~/.cache and ~/.npm become throwaway mounts, never through a link (a write there would
-  // reach, and outlive the command at, what it points to): refused as links at all. Not walked: links deeper in the
-  // home (~/.ssh/config), and links inside what an allowed link reaches: a named residual.
+  // reach, and outlive the command at, what it points to): refused as links at all. Named residuals: links deeper in
+  // the home (~/.ssh/config) and links inside what an allowed link reaches are not walked; and the pins and the
+  // read-only bind hold in this agent's sandboxes only: a directory other users can write is still theirs to write,
+  // another instance's agent user's sandboxed command among them.
   'lbinds=(); lk=; cwd=$(pwd -P) || cwd=/',
   `if [ -n "$hr" ]; then for n in .cache .npm; do p=$hr/$n; st "$p"; if [ "$S" -eq 0 ] && [ "$T" = "symbolic link" ]; then named[$p]=1; note "project command not run: \${p@Q} is a symlink; a project command's ~/.cache and ~/.npm are throwaway directories its sandbox mounts there, never through a link (a write would reach, and outlive the command at, what it points to). Make it a real directory: as the agent user, sudo -u $u rm -- \${p@Q}"; fi; done; fi`,
   `links() { local o n=0 p s x; o=$("$fnd" "$1" -mindepth 1 -maxdepth 1 -type l -printf "%f/" 2>/dev/null) || { note "project command not run: \${1@Q} cannot be listed for symlinks that could lead out of the agent user's home"; return; }`,
@@ -837,12 +846,14 @@ const LINUX_SANDBOX = [
   '    p=$1/${o%%/*}; o=${o#*/}; [ -n "${named[$p]}" ] && continue',
   '    lk=$p; walk "${p#"$hr"/}" "$hr"; s=$?; lk=; [ "$s" -eq 2 ] && continue; if [ "$s" -eq 0 ]; then x=$R; else x=$P; fi',
   `    if [ "$OW" = 1 ]; then note "project command not run: \${p@Q} is a symlink to \${x@Q}, outside the agent user's home, through \${OWAT@Q}, which the agent user owns: its own files outside its home are not made part of the sandbox's view of it, fail closed. Move what it holds into the home and drop the link, or point the link at a path the agent user doesn't own; to remove it, as the agent user: sudo -u $u rm -- \${p@Q}"; continue; fi`,
-  // A dangling link: nothing to bind, so refused when the directory it stops in is one a command could fill.
-  `    if [ "$s" -eq 1 ]; then case $x in "$hr"|"$hr"/*) ;; *) [ "$PW" = 1 ] && note "project command not run: \${p@Q} is a symlink to \${x@Q}, which doesn't exist, in a directory outside the agent user's home that it can write: a command could create it there, for an agent-user process outside the sandbox to read later. Point it elsewhere, or remove it as the agent user: sudo -u $u rm -- \${p@Q}" ;; esac; continue; fi`,
+  // A dangling link: nothing to bind, so refused when any directory on its way outside the home is one the agent can
+  // write: a command could create the target there, or rename a directory below it away and recreate it (fail closed).
+  `    if [ "$s" -eq 1 ]; then case $x in "$hr"|"$hr"/*) ;; *) if [ "$PW" = 1 ] || [ "$AW" = 1 ]; then note "project command not run: \${p@Q} is a symlink to \${x@Q}, which doesn't exist, on a way outside the agent user's home through a directory it can write: a command could create it there, for an agent-user process outside the sandbox to read later. Point it elsewhere, or remove it as the agent user: sudo -u $u rm -- \${p@Q}"; else above "$x"; fi ;; esac; continue; fi`,
   '    case $x in "$hr"|"$hr"/*) continue ;; esac; [ "$RT" = "character special file" ] || [ "$RT" = "block special file" ] && continue',
   `    case "$cwd/" in "$x"/*) note "project command not run: \${p@Q} is a symlink to \${x@Q}, outside the agent user's home, which holds the command's working directory: the sandbox can't make it read-only and still run the command there. Point it elsewhere, or remove it as the agent user: sudo -u $u rm -- \${p@Q}"; continue ;; esac`,
   `    [ "$x" = / ] && { note "project command not run: \${p@Q} is a symlink to /: the sandbox can't make that read-only and still run the command. Remove it as the agent user: sudo -u $u rm -- \${p@Q}"; continue; }`,
-  '    lbinds+=(--ro-bind "$x" "$x")',
+  // Every directory above the target pinned (as add() pins a credential's), then the target read-only.
+  '    above "$x"; lbinds+=(--ro-bind "$x" "$x")',
   '  done; }',
   'if [ -n "$hr" ]; then links "$hr"; [ -n "$cfg" ] && links "$cfg"; fi',
   'while [ "$#" -gt 0 ] && [ "$1" != -- ]; do add "$1"; shift; done; shift',

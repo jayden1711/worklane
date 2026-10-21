@@ -9,10 +9,13 @@
   - On Linux, a symlink directly in the agent's home, or directly in its `~/.config`, is checked hop by hop before the command runs. A project command is refused, before it runs, in three cases. The refusal names each link, the path that makes it unsafe, and the command that removes it as the agent user.
     - A hop outside the home could be re-aimed: a link sitting in a directory the agent user can write. An example is `~/.profile` pointing to `/srv/x/hop/profile`, where `/srv/x/hop` is a link back into the home in a directory the agent can write.
     - A hop outside the home is the agent user's own: a directory on the way, or the file the link ends at. An example is `~/.ssh` pointing to an agent-owned `/srv/x`.
-    - A dangling link would end in a directory the agent can write.
+    - A dangling link passes, outside the home, through a directory the agent can write.
     - `~/.cache` or `~/.npm` is a symlink at all.
     - Either directory holds more than 500 symlinks.
-  - Any other link out of the home is allowed, and what it reaches is read-only inside the sandbox. This includes a link into a directory the agent can write but doesn't own; that directory is also pinned, so no command can rename it. Examples are a skeleton's `~/.ghcup -> /usr/local/.ghcup` (writable by everyone on a CI runner) and `~/.bash_history -> /dev/null`.
+  - Any other link out of the home is allowed. Examples are a skeleton's `~/.ghcup -> /usr/local/.ghcup` (writable by everyone on a CI runner) and `~/.bash_history -> /dev/null`.
+    - Inside this agent's sandbox, what the link reaches is read-only.
+    - Every directory on its way is pinned there, so none can be renamed away and recreated.
+    - That holds only in this agent user's sandboxes. If a directory the link reaches can be written by other users, they still can write it. That includes another instance's agent user, through its own project commands. On such a machine, give the agent user a skeleton without that link.
   - A link that stays inside the home all the way is fine too.
   - A link that reaches `/`, or a directory that holds the command's working directory, is refused: it can't be made read-only without taking the command's own directory with it.
 - **`harness-config` always waits for you (#798).** Changes to the config folder (`tests.yaml` among them), `.claude/` and `CLAUDE.md` are L3 and never merge on their own, whatever a repo's `review.yaml` says. In a repo whose `review.yaml` left `harness-config` out of `L3_human`, such a change now asks you before its PR opens, as every L3 change does. A repo can still add its own paths to the category.
@@ -29,6 +32,17 @@
 
 ### Guardrail changes: what each one does
 
-- **Agent home read-only to project commands (#798).** The project-command sandbox (`projectCommand`, `src/os/index.ts`) binds the agent user's home read-only, under the credential masks. On Linux, `~/.cache` and `~/.npm` are throwaway tmpfs mounts. On macOS, the profile denies every write under the home, but a link leading out of it is followed (macOS isn't in CI). On Linux, each symlink directly in the home or in `~/.config` is walked hop by hop, by the same rule as the credential paths. A run is refused when a hop outside the home could be re-aimed (a link in a directory the agent can write), when a hop is the agent's own, or when a cache is a link. Any other link is allowed: the directories on its way that the agent can write are pinned, and its target is bound read-only. Nothing a project command writes in the home outlives it. The exceptions are links that aren't walked: a link deeper in the home whose way out the agent user can change (After install), and a link inside what an allowed link reaches that leads somewhere writable.
+- **Agent home read-only to project commands (#798).** The project-command sandbox (`projectCommand`, `src/os/index.ts`) binds the agent user's home read-only, under the credential masks. On Linux, `~/.cache` and `~/.npm` are throwaway tmpfs mounts. On macOS, the profile denies every write under the home, but a link leading out of it is followed (macOS isn't in CI). On Linux, each symlink directly in the home or in `~/.config` is walked hop by hop, by the same rule as the credential paths. A run is refused in four cases:
+  - a hop outside the home could be re-aimed (a link in a directory the agent can write);
+  - a hop is the agent's own;
+  - a dangling link passes through a directory the agent can write;
+  - a cache is a link.
+
+  Any other link is allowed. Every directory above what it reaches is pinned, and the target itself is bound read-only.
+
+  A project command can't write the home, nor anything an allowed link in it reaches. Three things fall outside that:
+  - a link deeper in the home whose way out the agent user can change (After install);
+  - a link inside what an allowed link reaches that leads somewhere writable;
+  - another user writing a directory that such a link reaches, because the pins and the read-only bind hold only in this agent user's own sandboxes. That user can be another instance's agent user, through its own sandboxed project commands.
 - **harness-config locked (#798).** `src/review.ts` lists `harness-config` in `LOCKED_CATEGORIES` and `ALWAYS_L3`: it is always L3 and always waits. Its built-in globs always hold, and a repo's `review.yaml` may only add to them.
 - **credentials.sh** checks an agent's API-key sign-in with `sudo -H -u <agent>`, never a login shell (#798).

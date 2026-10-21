@@ -19,7 +19,7 @@ import * as osAdapter from '../src/os/index.js';
 const posix = process.platform === 'linux';
 const BWRAP = '/usr/bin/bwrap';
 const sandboxRuns = posix && spawnSync(BWRAP, ['--dev-bind', '/', '/', '--unshare-user', '--unshare-pid', '--proc', '/proc', '--', '/bin/sh', '-c', ':']).status === 0;
-const realSkip = process.env.PROJECT_SANDBOX_REQUIRED === '1' ? false : !posix ? 'bubblewrap is Linux only' : !sandboxRuns && `no usable ${BWRAP} here (ci-slow's real-users job runs this with it)`;
+const realSkip = process.env.PROJECT_SANDBOX_REQUIRED === '1' ? false : !posix ? 'bubblewrap is Linux only' : !sandboxRuns && `no usable ${BWRAP} here (CI's test shards run this with it: PROJECT_SANDBOX_REQUIRED=1)`;
 
 function asStandIn(command: string, home: string, cwd: string) {
   const pc = osAdapter.projectCommand(command, { user: 'shop-agent', home, hide: [] }, {});
