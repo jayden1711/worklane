@@ -1,6 +1,6 @@
 ### Upgrading (from v0.5.2)
 
-- **A project command can no longer write the agent user's home (#798).** Checks, worktree setup, full runs, suite tuning, a browser flow's app and auto-config run as the agent user in a sandbox, and the agent's home is now read-only there. Before, a command could plant `~/.bashrc`, `~/.profile`, `~/.gitconfig`, `~/.npmrc`, `~/.ssh/config` or a `~/.local/bin` entry for a later agent-user process outside the sandbox to run. What changes for a project:
+- **A project command can no longer write the agent user's home directly (#798).** Checks, worktree setup, full runs, suite tuning, a browser flow's app and auto-config run as the agent user in a sandbox, and the agent's home is now read-only there. Some ways around that remain; Guardrail changes lists them all. Before, a command could plant `~/.bashrc`, `~/.profile`, `~/.gitconfig`, `~/.npmrc`, `~/.ssh/config` or a `~/.local/bin` entry for a later agent-user process outside the sandbox to run. What changes for a project:
   - On Linux, `~/.cache` and `~/.npm` are writable but start empty for every command and are thrown away after it. Each command downloads its dependencies again.
   - A write anywhere else in the home fails with "Read-only file system". That includes Go's `~/go`, `~/.cargo`, `~/.m2`, `~/.gradle`, `pip install --user` and pnpm's store. Point such a cache outside the home in `tests.yaml` (for example `GOMODCACHE=/tmp/gomod`).
   - Browsers installed in the agent's `~/.cache/ms-playwright` are hidden inside the sandbox. Set `PLAYWRIGHT_BROWSERS_PATH` to a directory outside the home.
@@ -26,7 +26,7 @@
 
 ### After install
 
-- **Optional, once, as root:** look for hard links into each agent user's home that a project command could have made before this release. Such a link would still let a later command write the file it points to: `find <agent home> -xdev -type f -links +1 -not -path '*/.cache/*' -not -path '*/.npm/*'`. Remove each one you didn't make. pnpm's store keeps legitimate hard links under `~/.local/share/pnpm`.
+- **Optional, once, as root:** look for hard links into each agent user's home made outside the sandbox, before this release (by a project command, back when it could) or since (pnpm's store makes them). Each one still lets a project command write the file it points to, from wherever the other name is: `find <agent home> -xdev -type f -links +1 -not -path '*/.cache/*' -not -path '*/.npm/*'`. Remove each one you didn't make. pnpm's store under `~/.local/share/pnpm` keeps hard links on purpose, but each is a write route into the home all the same: keep it only if you need it, and don't keep it unchecked.
 - **Optional, once, as root:** look for symlinks deeper in each agent user's home that leave it through a path the agent user can change. The sandbox checks only the links directly in the home and in `~/.config`. One deeper down, such as `~/.ssh/config` pointing to `/tmp/x`, is followed wherever it leads.
   1. List the links: `find <agent home> -xdev -type l`.
   2. For each one, show every hop on its way with its owner and mode: `namei -l <link>`, from util-linux.
@@ -45,13 +45,19 @@
   - a link reaches under `/dev` anything but a device, or a device through a symlink, a `..` or a writable directory there (its pins would bind `/dev`);
   - a cache is a link.
 
-  Any other link is allowed. Every directory above what it reaches is pinned, and the target itself is bound read-only. A device target isn't bound (writing it plants nothing). It is refused when the agent can write its directory (under `/dev`, any directory between `/dev` and it); otherwise the directories above it are pinned, except under `/dev`. The home itself and every directory above it are always pinned.
+  A link to `/` or to the command's working directory is refused too, as are more than 500 links in one directory, a way of more than 40 links and a way through a directory the agent user can't search. Any other link is allowed. Every directory above what it reaches is pinned, and the target itself is bound read-only. A device target isn't bound (writing it plants nothing). It is refused when the agent can write its directory (under `/dev`, any directory between `/dev` and it); otherwise the directories above it are pinned, except under `/dev`. The home itself and every directory above it are always pinned.
 
-  A project command can't write the home, nor anything an allowed link in it reaches. Four things fall outside that:
+  A project command can't write the home directly, nor anything an allowed link in it reaches. What falls outside that, all of it:
   - a link deeper in the home whose way out the agent user can change (After install);
   - a link inside what an allowed link reaches that leads somewhere writable;
-  - another user writing a directory that such a link reaches, because the pins and the read-only bind hold only in this agent user's own sandboxes. That user can be another instance's agent user, through its own sandboxed project commands;
-  - a link added to the home while a command runs (only a process outside the sandbox can add one): the walk and its pins are worked out once, when the command starts.
+  - a hard link to a home file made outside the sandbox, before this release or since (pnpm's store makes them): a command writes the file through its other name (After install). A command can't make a new one;
+  - a FIFO or socket that already exists in the home: what a command writes to it reaches the agent-user process at the other end, outside the sandbox, which may keep it or act on it (#933);
+  - a socket outside the home (`$XDG_RUNTIME_DIR`, the user bus, `systemd --user`, an abstract socket): a live agent-user process listening there is reachable from the sandbox in the same way (#933);
+  - a second mount of the home elsewhere, such as an admin's bind mount: it is writable;
+  - a link added to the home while a command runs (only a process outside the sandbox can add one): the walk and its pins are worked out once, when the command starts;
+  - another user writing a directory that an allowed link reaches, because the pins and the read-only bind hold only in this agent user's own sandboxes. That user can be another instance's agent user, through its own sandboxed project commands;
+  - a configured home (`run_as.agent_home`) that isn't the agent user's home in passwd, which a login shell and cron use: only the configured one is made read-only (#954);
+  - on macOS, links: the profile walks none, so a link leading out of the home is followed and written through.
 
   A link to a directory above the home (`~/.x -> ..`) is bound read-only over the home's own mounts, so for that layout `~/.cache` and `~/.npm` are read-only too.
 - **harness-config locked (#798).** `src/review.ts` lists `harness-config` in `LOCKED_CATEGORIES` and `ALWAYS_L3`: it is always L3 and always waits. Its built-in globs always hold, and a repo's `review.yaml` may only add to them.

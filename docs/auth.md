@@ -60,7 +60,9 @@ There is one runtime: the locally installed, unmodified `claude` binary, headles
   - a hard link to a home file made outside the sandbox, before this release or since (pnpm's store makes them), from a directory the agent user can write on the same filesystem, still lets a command write that file. A command can't make a new one (`Invalid cross-device link` from the cache, `Read-only file system` in the home);
   - a FIFO or socket that already exists in the home stays usable through the read-only mount: what a command writes to it reaches the agent-user process at the other end, outside the sandbox, which may keep it or act on it. A command can't create a new one there (see issue #933, on agent-owned paths and agent-user services outside the sandbox);
   - a second mount of the home elsewhere, such as an admin's bind mount, is a writable way to it;
-  - the sandbox protects the home configured as `run_as.agent_home`; nothing yet compares it with the agent user's home in passwd, which a login shell and cron use (issue #954).
+  - the sandbox protects the home configured as `run_as.agent_home`; nothing yet compares it with the agent user's home in passwd, which a login shell and cron use (issue #954);
+  - a live agent-user process is reachable through any socket outside the home too, such as one in `$XDG_RUNTIME_DIR`, the user's session bus, `systemd --user`, or an abstract socket (measured with an abstract socket): what a command sends reaches that process outside the sandbox (issue #933);
+  - on macOS, `seatbeltProfile` walks no links: a link leading out of the home is followed, and what it reaches can be written.
 
   The release notes' After install section has the checks, as root, for the first two: links deeper in the home (`namei -l` on each) and hard links (`find <agent home> -xdev -type f -links +1`). When bubblewrap can't start, the command doesn't run and says to run `scripts/setup/machine.sh`. What they print is redacted (`src/events/redact.ts`) before it reaches an event or a prompt;
 - `instanceEnv` still strips `ANTHROPIC_API_KEY` and `ANTHROPIC_AUTH_TOKEN` for every instance.
