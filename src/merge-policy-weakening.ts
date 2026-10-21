@@ -444,8 +444,9 @@ const isWordChar = (c: string) => (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z
  * non-null `x!`, a contextual word, `.`, or an operand on an earlier line (a semicolon may be inserted). It also
  * can't read a character outside printable ASCII, or whitespace other than a space, tab, CR or LF, outside a string
  * or comment. There, and where a string or regex runs off its line, it stops reading and every later character, of
- * every later line, is the raw text (comments and strings included): what an unsure line holds waits, and the checks
- * that read it skip nothing from that line on (`unsureFrom`, #886's round 8). One pass, no regex.
+ * every later line, and the whole line it gave up on, is the raw text (comments and strings included). From that line
+ * on (`unsureFrom`) the checks that read it pair and skip nothing (#886's rounds 8 and 9). A hand-written reader of JS
+ * can still be fooled by shapes not yet found: #941 replaces it with data-only JSON tables. One pass, no regex.
  */
 export function codeLinesOf(text: string): string[] {
   return codeOf(text).lines;
@@ -675,6 +676,9 @@ export function codeOf(text: string): { lines: string[]; unsureFrom: number } {
     else if (c !== ' ' && c !== '\t') sig(c, '', 'unknown');
   }
   out.push(line);
+  // The line it gave up on is read raw too, whole (a string or regex that ran off it may have hidden part of it as
+  // text, #886's round 9).
+  if (unsureFrom !== -1) out[unsureFrom] = text.split('\n')[unsureFrom] ?? out[unsureFrom]!;
   return { lines: out, unsureFrom };
 }
 
@@ -715,15 +719,20 @@ function usesGlobalName(code: string, localNames: ReadonlySet<string>, previous:
  * where a key stands (after `{` or `,`, or first on its line), then `:`. A ternary's `? ['a'] : []` is no key.
  */
 function computedStringKey(code: string, unsure: boolean): boolean {
+  // A raw line: nothing paired (a `]` in a string or comment can't end the brackets early).
+  if (unsure) return rawStringKey(code);
   for (let k = code.indexOf('['); k !== -1; k = code.indexOf('[', k + 1)) {
     const end = code.indexOf(']', k + 1);
     if (end === -1) return false;
     const inner = code.slice(k + 1, end);
     if (!(inner.includes("'") || inner.includes('"') || inner.includes('`'))) continue;
     const before = code.slice(0, k).trimEnd();
-    // On a line the reader gave up on, any `[...]` holding a quote, then `:`, counts.
-    if (!unsure && !(before === '' || before.endsWith('{') || before.endsWith(','))) continue;
-    if (code.slice(end + 1).trimStart().startsWith(':')) return true;
+    const after = code.slice(end + 1).trimStart();
+    // A bracket assignment of a name built from strings (`module.exports['CHE' + 'CKS'] = x`, #886's round 9), on
+    // whatever object: it can bind the live table where the reader doesn't look.
+    if ((inner.includes('+') || inner.includes('${')) && after.startsWith('=') && !after.startsWith('==') && !after.startsWith('=>')) return true;
+    if (!(before === '' || before.endsWith('{') || before.endsWith(','))) continue;
+    if (after.startsWith(':')) return true;
   }
   return false;
 }
@@ -733,6 +742,23 @@ function namelessDeclaration(code: string): boolean {
   const t = code.trimEnd();
   return ['const', 'let', 'var'].some((w) => t.endsWith(w) && !/[\w$.]/.test(t.charAt(t.length - w.length - 1)));
 }
+
+/**
+ * On a raw line (one the reader gave up on, or any line of a .jsx or .tsx file), what the line checks look for, with
+ * nothing paired or skipped (#886's round 9): a `[` with a quote after it and then a `:` or `=` anywhere later (a key
+ * or a bracket assignment of a string-built name, whatever a `]` in a string or comment does); a nameless declaration
+ * with the line's comments taken out too.
+ */
+function rawStringKey(line: string): boolean {
+  const open = line.indexOf('[');
+  if (open === -1) return false;
+  const quote = Math.min(...["'", '"', '`'].map((q) => line.indexOf(q, open + 1)).filter((n) => n !== -1));
+  if (!Number.isFinite(quote)) return false;
+  return line.indexOf(':', quote + 1) !== -1 || line.indexOf('=', quote + 1) !== -1;
+}
+
+/** A `with (` statement in a line's code: it binds an object's keys as names, so a table's name could read another list. */
+const WITH_STATEMENT = /(?<![\w$.])with\s*\(/;
 
 /**
  * A registered table's lines (as entries, blanks left out), or null when the text doesn't declare it. It is declared
@@ -1018,7 +1044,9 @@ export function weakeningReasons(i: WeakeningInput): string[] {
     // JSX text isn't JS: in a .jsx or .tsx file every line reads as code.
     const read = /\.[jt]sx$/.test(p) ? { lines, unsureFrom: 0 } : codeOf(text);
     const code = read.lines;
-    // From the first line the reader gave up on, the text is raw: no skip applies there (#886's round 8).
+    // From the first line the reader gave up on (that line included), the text is raw: the global-name check skips
+    // nothing there, the computed-key check pairs no brackets, and a nameless declaration is also looked for with the
+    // line's comments taken out (#886's rounds 8 and 9).
     const unsureAt = (k: number) => read.unsureFrom !== -1 && k >= read.unsureFrom;
     const localNames = new Set(code.filter((_, k) => !unsureAt(k)).flatMap((c) => [...c.matchAll(LOCAL_SELF)].map((m) => m[1]!)));
     // The code line before each line that has code (for a key first on its line).
@@ -1026,7 +1054,8 @@ export function weakeningReasons(i: WeakeningInput): string[] {
     lines.forEach((l, k) => {
       const c = code[k] ?? l;
       const unsure = unsureAt(k);
-      if (added.has(l) && (c.includes('\\u') || namelessDeclaration(c) || usesGlobalName(c, localNames, previous, unsure) || computedStringKey(c, unsure))) hit('table-hidden', p, l.trim());
+      const nameless = namelessDeclaration(c) || (unsure && namelessDeclaration(withoutComments(c)));
+      if (added.has(l) && (c.includes('\\u') || nameless || WITH_STATEMENT.test(c) || usesGlobalName(c, localNames, previous, unsure) || computedStringKey(c, unsure))) hit('table-hidden', p, l.trim());
       if (c.trim()) previous = c.trimEnd();
     });
   }
