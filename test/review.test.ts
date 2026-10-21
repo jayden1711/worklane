@@ -251,7 +251,7 @@ test("regression: the guard's process loads only modules of its pinned tree, and
       const holder = readFileSync(log, 'utf8').split('process ').find((s) => s.startsWith(`${event}\n`));
       assert.ok(holder, `${name}: the deadline's holder ran with the watch`);
       const held = holder.split('\n').filter((u) => u.startsWith(dist)).map((u) => `src/${u.slice(dist.length).replace(/\.js$/, '.ts')}`);
-      assert.deepEqual(held.sort(), ['src/brand.ts', 'src/hook-deadline.ts', 'src/hook-main.ts', 'src/os/own-env.ts', 'src/os/system-paths.ts', 'src/os/system-root-guard.ts', 'src/quiet-sqlite.ts'], `${name}: the deadline's holder loads only these`);
+      assert.deepEqual(held.sort(), ['src/brand.ts', 'src/hook-deadline.ts', 'src/hook-main.ts', 'src/os/child-process.ts', 'src/os/own-env.ts', 'src/os/system-paths.ts', 'src/os/system-root-guard.ts', 'src/quiet-sqlite.ts'], `${name}: the deadline's holder loads only these`);
     }
   }
 });

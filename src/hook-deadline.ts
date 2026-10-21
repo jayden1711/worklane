@@ -13,8 +13,10 @@
 // and wrote its verdict line (VERDICT_FD) saying so. Every other ending is a refusal: the deadline, a spawn error, a
 // signal, an exit code other than 0 or 2, a missing or different verdict, output past OUTPUT_CAP, or an error here.
 // A refusal is a deny decision on stdout, its reason on stderr, and exit code 2, which Claude Code blocks on.
-import { spawn } from 'node:child_process';
 import { BRAND } from './brand.js';
+// WHY (#846): every child the engine starts goes through the OS layer's spawn, which hands it a null-prototype copy of
+// this process's own environment variables (here, the same environment the guard got before).
+import { spawn } from './os/child-process.js';
 
 /**
  * How long the guard may take to decide one call. WHY 10 s: a third of the hook's 30 s timeout (src/install.ts), so
