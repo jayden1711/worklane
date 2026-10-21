@@ -78,17 +78,18 @@ export function loadPublicKey(path: string): KeyObject {
  * Receipt every merge decision and result in the log not yet receipted, onto the chain in `out` (started there when
  * the file is missing). Writes nothing when there is nothing new, or when it refuses (src/signed-receipts.ts).
  */
-export function signLog(o: { log: string; out: string; signer: ReceiptSigner }): { added: number; count: number; head: string | null } {
+export function signLog(o: { log: string; out: string; signer: ReceiptSigner; trust?: readonly KeyObject[] }): { added: number; count: number; head: string | null } {
   const existing = readReceiptFiles(o.out);
-  const r = signEvents(existing, readReceiptEvents(o.log), o.signer);
+  const r = signEvents(existing, readReceiptEvents(o.log), o.signer, { ...(o.trust ? { trust: o.trust } : {}) });
   if (r.added) writeReceipts(o.out, r.envelopes);
   return { added: r.added, count: r.envelopes.length, head: r.head };
 }
 
 /** Rotate the chain in `out` to `next`, signed by the current key. */
-export function rotateFile(o: { out: string; signer: ReceiptSigner; next: KeyObject }): { count: number; head: string | null } {
-  const envelopes = rotateChain(readReceiptFiles(o.out), o.signer, o.next);
+export function rotateFile(o: { out: string; signer: ReceiptSigner; next: KeyObject; trust?: readonly KeyObject[] }): { count: number; head: string | null } {
+  const trust = o.trust?.length ? o.trust : [o.signer.publicKey];
+  const envelopes = rotateChain(readReceiptFiles(o.out), o.signer, o.next, { trust });
   writeReceipts(o.out, envelopes);
-  const r = verifyChain(envelopes, { keys: 'chain' });
+  const r = verifyChain(envelopes, { keys: trust });
   return { count: envelopes.length, head: r.ok ? r.head : null };
 }

@@ -13,8 +13,8 @@ export const NOT_ROOT_SIGNED = `not yet root-signed: this signed with the key fi
 const USAGE = [
   `usage: ${BRAND.cli} receipts verify <file|dir> --key <pub> [--key <pub>]... [--anchor <receipt id>]`,
   `       ${BRAND.cli} receipts keygen --private <file> --public <file>`,
-  `       ${BRAND.cli} receipts sign --log <events.db> --key <private> --out <file>`,
-  `       ${BRAND.cli} receipts rotate --out <file> --key <current private> --next <new public>`,
+  `       ${BRAND.cli} receipts sign --log <events.db> --key <private> --out <file> [--trust <start pub>]...`,
+  `       ${BRAND.cli} receipts rotate --out <file> --key <current private> --next <new public> [--trust <start pub>]...`,
 ].join('\n');
 
 /** Every value of option `name`, taken out of `args`. */
@@ -58,9 +58,10 @@ export async function receiptsCommand(sub: string | undefined, rest: string[]): 
         const log = one(args, '--log');
         const key = one(args, '--key');
         const out = one(args, '--out');
+        const trust = values(args, '--trust').map(loadPublicKey);
         done(args);
         const signer = loadSigner(key);
-        const r = signLog({ log, out, signer });
+        const r = signLog({ log, out, signer, trust });
         console.log(`${r.added} new receipts signed with key ${keyId(signer.publicKey)}; ${r.count} in the chain, head ${r.head ?? 'none'}`);
         console.log(NOT_ROOT_SIGNED);
         return 0;
@@ -69,9 +70,10 @@ export async function receiptsCommand(sub: string | undefined, rest: string[]): 
         const out = one(args, '--out');
         const key = one(args, '--key');
         const next = one(args, '--next');
+        const trust = values(args, '--trust').map(loadPublicKey);
         done(args);
         const nextKey = loadPublicKey(next);
-        const r = rotateFile({ out, signer: loadSigner(key), next: nextKey });
+        const r = rotateFile({ out, signer: loadSigner(key), next: nextKey, trust });
         console.log(`the chain in ${out} now continues under key ${keyId(nextKey)} (${r.count} receipts, head ${r.head ?? 'none'}); sign with its private key from now on`);
         console.log(NOT_ROOT_SIGNED);
         return 0;

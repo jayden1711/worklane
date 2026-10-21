@@ -213,7 +213,9 @@ test('a rotated key: the chain follows the rotation, and only the current key si
   // The old key may not sign after the rotation; the new one may.
   s.log.append('merge.decided', { issue: 9, number: 43, head: sha('d'), auto: true, reasons: [] }, 'inst');
   assert.throws(() => signLog({ log: s.path, out: s.out, signer: s.signer }), /not the chain's current key/);
-  assert.equal(signLog({ log: s.path, out: s.out, signer: next.signer }).added, 1);
+  // The new key didn't start the chain: it extends it only when told the start key to trust.
+  assert.throws(() => signLog({ log: s.path, out: s.out, signer: next.signer }), /don't verify/);
+  assert.equal(signLog({ log: s.path, out: s.out, signer: next.signer, trust: [s.pub] }).added, 1);
   const envs = readReceiptFiles(s.out) as Envelope[];
   const r = verifyChain(envs, { keys: [s.pub] });
   assert.ok(r.ok, JSON.stringify(r));
@@ -232,7 +234,19 @@ test('a rotated key: the chain follows the rotation, and only the current key si
   bad[5] = sealWith(rogue, statementOf(envs[5]!));
   assert.ok(!verifyChain(bad, { keys: [s.pub] }).ok);
   // Rotating with a key that isn't the current one is refused.
-  assert.throws(() => rotateChain(envs, s.signer, rogue.pub), /not the chain's current key/);
+  assert.throws(() => rotateChain(envs, s.signer, rogue.pub, { trust: [s.pub] }), /not the chain's current key/);
+});
+
+test('a receipts file swapped for a chain someone else started (rotated to this key) is never extended', () => {
+  const s = signed();
+  const attacker = keys();
+  // Started by the attacker's key, then rotated to the real signer's key: valid on its own terms.
+  const fake = rotateChain(signEvents([], [], attacker.signer).envelopes, attacker.signer, s.pub, { trust: [attacker.pub] });
+  writeFileSync(s.out, `${fake.map((e) => canonicalJson(e)).join('\n')}\n`);
+  const before = readFileSync(s.out, 'utf8');
+  assert.throws(() => signLog({ log: s.path, out: s.out, signer: s.signer }), /not a key given to verify against/);
+  assert.equal(readFileSync(s.out, 'utf8'), before, 'nothing was written');
+  assert.ok(!verifyChain(fake, { keys: [s.pub] }).ok, "and an auditor holding the real key rejects it at its first receipt");
 });
 
 test('a planted secret in a decision or a failure never appears in its receipt', () => {

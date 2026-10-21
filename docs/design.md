@@ -216,6 +216,7 @@ This catches any receipt that was changed, reordered, inserted, or dropped from 
 
 **Rotation.**
 - **Planned:** a `key.rotated` receipt, signed by the current key, names the next key. After it, only the next key verifies. Auditors keep trusting the start key, and the verifier follows the rotations.
+- **The signer trusts a start key too.** It extends a chain only if the chain verifies from its own key, or, after a rotation, from a start key it's given with `--trust`. A file swapped for a chain someone else started, then rotated to this key, is never extended.
 - **Compromised key:** rotation can't help, because the holder of the stolen key can rotate too. Start a new chain with a new key, and publish out of band the old chain's last trusted head and the new public key.
 
 **Events, in order.**

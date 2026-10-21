@@ -171,20 +171,17 @@ export type ChainResult =
   | { ok: false; index: number; problem: string };
 
 /**
- * Verify a chain of receipts, in order. `keys`: the public keys the auditor trusts to have started the chain (each
- * rotation after that is signed by the key before it), or 'chain' to trust the key the first receipt declares (the
- * signer checking its own file before it extends it). `anchor`: a receipt id the chain must still hold (a head kept
- * from an earlier look), the one way to see a dropped tail. Fails at the first receipt that doesn't hold.
+ * Verify a chain of receipts, in order. `keys`: the public keys trusted to have started the chain (each rotation
+ * after that is signed by the key before it); a key a chain declares about itself is never trusted for that.
+ * `anchor`: a receipt id the chain must still hold (a head kept from an earlier look), the one way to see a dropped
+ * tail. Fails at the first receipt that doesn't hold; no receipts at all fail too.
  */
-export function verifyChain(envelopes: readonly unknown[], o: { keys: readonly KeyObject[] | 'chain'; anchor?: string }): ChainResult {
+export function verifyChain(envelopes: readonly unknown[], o: { keys: readonly KeyObject[]; anchor?: string }): ChainResult {
   const fail = (index: number, problem: string): ChainResult => ({ ok: false, index, problem });
-  let trusted: Map<string, KeyObject> | null = null;
-  if (o.keys !== 'chain') {
-    if (!o.keys.length) return fail(0, 'no public key given to verify against');
-    if (o.keys.some((k) => k.type !== 'public' || k.asymmetricKeyType !== 'ed25519')) return fail(0, 'a key given to verify against is not an ed25519 public key');
-    trusted = new Map(o.keys.map((k) => [keyId(k), k]));
-    if (!envelopes.length) return fail(0, 'no receipts');
-  }
+  if (!o.keys.length) return fail(0, 'no public key given to verify against');
+  if (o.keys.some((k) => k.type !== 'public' || k.asymmetricKeyType !== 'ed25519')) return fail(0, 'a key given to verify against is not an ed25519 public key');
+  const trusted = new Map(o.keys.map((k) => [keyId(k), k]));
+  if (!envelopes.length) return fail(0, 'no receipts');
   let current: KeyObject | null = null;
   let prev: string | null = null;
   let lastEvent = 0;
@@ -218,7 +215,7 @@ export function verifyChain(envelopes: readonly unknown[], o: { keys: readonly K
       if (s.kind !== 'chain.started') return fail(0, 'the first receipt does not start the chain: one before it was dropped, or they were reordered');
       const declared = keyOfRef(s.key);
       if (!declared) return fail(0, "the chain's start key is unreadable, or isn't the key its id names");
-      if (trusted && !trusted.has(s.key.keyid)) return fail(0, `the chain was started by key ${s.key.keyid}, which is not a key given to verify against`);
+      if (!trusted.has(s.key.keyid)) return fail(0, `the chain was started by key ${s.key.keyid}, which is not a key given to verify against`);
       current = declared;
       keys.push(s.key.keyid);
     } else if (s.kind === 'chain.started') return fail(i, 'a second chain start inside the chain');
@@ -249,10 +246,21 @@ export function verifyChain(envelopes: readonly unknown[], o: { keys: readonly K
   return { ok: true, count: ids.length, head: prev, ids, keys, statements };
 }
 
-/** The chain so far, verified against the key it declares, for a signer about to extend it. */
-function chainSoFar(existing: readonly unknown[], signer: ReceiptSigner): Extract<ChainResult, { ok: true }> {
-  const state = verifyChain(existing, { keys: 'chain' });
-  if (!state.ok) throw new ReceiptError(`the receipts so far don't verify (receipt ${state.index + 1}: ${state.problem}); nothing was signed`);
+/** How a signer extends a chain: the keys it trusts to have started it (default: its own key), and its clock. */
+export interface SignOptions {
+  trust?: readonly KeyObject[];
+  now?: () => string;
+}
+
+/**
+ * The chain so far, for a signer about to extend it: it must verify from a start key the signer trusts (its own key
+ * unless told others), so a file swapped for a chain someone else started is never extended (#717 adversarial pass:
+ * a chain started by another key and rotated to this one), and this key must be the chain's current one.
+ */
+function chainSoFar(existing: readonly unknown[], signer: ReceiptSigner, trust: readonly KeyObject[] | undefined): Extract<ChainResult, { ok: true }> {
+  if (!existing.length) return { ok: true, count: 0, head: null, ids: [], keys: [], statements: [] };
+  const state = verifyChain(existing, { keys: trust?.length ? trust : [signer.publicKey] });
+  if (!state.ok) throw new ReceiptError(`the receipts so far don't verify (receipt ${state.index + 1}: ${state.problem}); nothing was signed. After a rotation, pass the chain's start key as a trusted key`);
   const mine = keyId(signer.publicKey);
   if (state.count && state.keys.at(-1) !== mine) throw new ReceiptError(`this key (${mine}) is not the chain's current key (${state.keys.at(-1)}); nothing was signed`);
   return state;
@@ -284,11 +292,12 @@ function bodyOf(e: ReceiptEvent, version: string | null, decided: Map<string, st
 
 /**
  * Extend a chain with a receipt for each merge decision and result in `events` after the last one it receipts (a
- * new chain starts with its key). Refuses, signing nothing, when the chain so far doesn't verify, when the signer's
- * key isn't the chain's current one, or at an event that doesn't match its schema.
+ * new chain starts with its key). Refuses, signing nothing, when the chain so far doesn't verify from a trusted start
+ * key, when the signer's key isn't the chain's current one, or at an event that doesn't match its schema.
  */
-export function signEvents(existing: readonly unknown[], events: readonly ReceiptEvent[], signer: ReceiptSigner, now: () => string = () => new Date().toISOString()): { envelopes: Envelope[]; added: number; head: string | null } {
-  const state = chainSoFar(existing, signer);
+export function signEvents(existing: readonly unknown[], events: readonly ReceiptEvent[], signer: ReceiptSigner, o: SignOptions = {}): { envelopes: Envelope[]; added: number; head: string | null } {
+  const now = o.now ?? (() => new Date().toISOString());
+  const state = chainSoFar(existing, signer, o.trust);
   const envelopes = [...(existing as Envelope[])];
   let seq = state.count;
   let prev = state.head;
@@ -322,8 +331,9 @@ export function signEvents(existing: readonly unknown[], events: readonly Receip
 }
 
 /** Hand the chain to a new key: a key.rotated receipt signed by the current key. After it only `next` signs. */
-export function rotateChain(existing: readonly unknown[], signer: ReceiptSigner, next: KeyObject, now: () => string = () => new Date().toISOString()): Envelope[] {
-  const state = chainSoFar(existing, signer);
+export function rotateChain(existing: readonly unknown[], signer: ReceiptSigner, next: KeyObject, o: SignOptions = {}): Envelope[] {
+  const now = o.now ?? (() => new Date().toISOString());
+  const state = chainSoFar(existing, signer, o.trust);
   if (!state.count) throw new ReceiptError('there is no chain to rotate: sign with the new key to start one');
   if (next.type !== 'public' || next.asymmetricKeyType !== 'ed25519') throw new ReceiptError('the next key is an ed25519 public key');
   if (keyId(next) === keyId(signer.publicKey)) throw new ReceiptError('the next key is the key already in use');
