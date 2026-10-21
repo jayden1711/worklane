@@ -61,6 +61,42 @@ const DASHBOARD_KEY_BODY = '[A-Za-z0-9_-]{32,}';
 /** Whether `key` is a dashboard key of the current shape (prefixed). */
 export const isDashboardKey = (key: string): boolean => new RegExp(`^${DASHBOARD_KEY_PREFIX}${DASHBOARD_KEY_BODY}$`).test(key);
 
+const KEY_LINE = /-----(BEGIN|END) [A-Z ]*PRIVATE KEY(?: BLOCK)?-----/g;
+/**
+ * `m` (the text up to its last END line) with everything up to its last END that no BEGIN opened redacted; as it was
+ * when each END has its BEGIN. A BEGIN opens a key up to the next END, as the BEGIN rule reads it (#889 round 6: the
+ * rules read the text as it was, so a closed key's END is still there, and it is not an orphan). One scan: linear.
+ */
+function orphanEnd(m: string): string {
+  let open = false;
+  let cut = -1;
+  KEY_LINE.lastIndex = 0;
+  for (let k = KEY_LINE.exec(m); k; k = KEY_LINE.exec(m)) {
+    if (k[1] === 'BEGIN') open = true;
+    else if (open) open = false;
+    else cut = k.index + k[0].length;
+  }
+  return cut === -1 ? m : `[REDACTED PRIVATE KEY]${m.slice(cut)}`;
+}
+
+/**
+ * `m` (a run of three or more dotted parts after `pre`) with a JWT in it redacted, from its `eyJ` to the run's end: the first part
+ * holding `eyJ` and 8 more characters, followed by a part of 8 or more (the payload) and one more dot. Any part may be
+ * the header (#889 round 6: `name.eyJ...`, where the run's first part is a name, was found by main's rule from the
+ * dot); within a part, the header may be glued after anything (round 5). As it was when no part is a header. One walk
+ * over the parts: linear.
+ */
+function jwtIn(m: string, pre: string): string {
+  const parts = m.slice(pre.length).split('.');
+  let before = pre;
+  for (let i = 0; i + 2 < parts.length; i++) {
+    const at = parts[i]!.indexOf('eyJ');
+    if (at !== -1 && parts[i]!.length - at >= 11 && parts[i + 1]!.length >= 8) return `${before}${parts[i]!.slice(0, at)}[REDACTED JWT]`;
+    before += `${parts[i]}.`;
+  }
+  return m;
+}
+
 // Each pattern with what kind of secret it finds (secretKinds names the kind, never the value).
 const PATTERNS: [RegExp, Replacement, string][] = [
   // A dashboard key, wherever its prefix is (after a `-` or a letter too: `key-wld_...`): a match runs to the end of its
@@ -85,14 +121,10 @@ const PATTERNS: [RegExp, Replacement, string][] = [
   // Read from the start of the header's run of base64url characters, with no bound on its length (an `x5c` chain makes
   // a header several KB, #889 round 5); a function finds `eyJ` in that run, so a token glued after a letter, a digit or
   // `-` is found from its `eyJ` on. Each start is a run's start: linear.
-  [
-    /(^|[^A-Za-z0-9_-])([A-Za-z0-9_-]{11,})\.([A-Za-z0-9_-]{8,})\.[A-Za-z0-9_-]*(?:\.[A-Za-z0-9_-]+)*/g,
-    (m, pre, head) => {
-      const at = head!.indexOf('eyJ');
-      return at !== -1 && head!.length - at >= 11 ? `${pre}${head!.slice(0, at)}[REDACTED JWT]` : m;
-    },
-    'JWT',
-  ],
+  // Each of the first two parts is read whole, with no way back into it (a lookahead takes the run, a backreference
+  // steps over it): a run of millions of characters with no dot after it is passed in one step, not given back a
+  // character at a time until V8's backtracking stack overflows (#889 round 6). jwtIn checks the parts' lengths.
+  [/(^|[^A-Za-z0-9_-])(?=([A-Za-z0-9_-]+))\2\.(?=([A-Za-z0-9_-]+))\3\.[A-Za-z0-9_-]*(?:\.[A-Za-z0-9_-]+)*/g, (m, pre) => jwtIn(m, pre!), 'JWT'],
   [/(?:AKIA|ASIA)[A-Z0-9]{16}(?![A-Za-z0-9])/g, 'AKIA[REDACTED]', 'AWS access key'],
   // Slack's token-rotation and refresh tokens (xoxe-..., xoxe.xoxb-...), before the
   // other Slack tokens (one is inside it); then its app-level token (xapp-, Socket Mode).
@@ -110,7 +142,7 @@ const PATTERNS: [RegExp, Replacement, string][] = [
   // no BEGIN before it (a key whose start is above a window), from the start of the text to that END line. Each BEGIN
   // is read once (its match runs to its END or to the end), and the second rule has one start: linear.
   [/-----BEGIN [A-Z ]*PRIVATE KEY(?: BLOCK)?-----(?:[\s\S]*?-----END [A-Z ]*PRIVATE KEY(?: BLOCK)?-----|[\s\S]*)/g, '[REDACTED PRIVATE KEY]', 'private key'],
-  [/^[\s\S]*-----END [A-Z ]*PRIVATE KEY(?: BLOCK)?-----/, '[REDACTED PRIVATE KEY]', 'private key'],
+  [/^[\s\S]*-----END [A-Z ]*PRIVATE KEY(?: BLOCK)?-----/, orphanEnd, 'private key'],
   // The scheme is case-insensitive (RFC 9110): any case (#889). `bearer` is a word, so after a boundary.
   [/\b(bearer)\s+[A-Za-z0-9._~+/-]{20,}=*/gi, '$1 [REDACTED]', 'bearer token'],
   // HTTP Basic credentials (base64 of user:password; git's extraheader, src/dashboard-auth.ts's client id and secret),
@@ -296,30 +328,6 @@ function freeMark(s: string): string | null {
   return null;
 }
 
-/**
- * The second pass (#889): `f` again on `s` with a boundary at each glue point, so a token glued to a name, to an ANSI
- * escape or to a JSON escape is found from its start. The boundary is a mark no pattern takes in, inserted and taken
- * out again, so the text is otherwise kept as it was. When `s` holds every mark character, each piece after a glue
- * point is redacted on its own instead. The first pass ran on the text as it was, so nothing it found is lost.
- */
-function glued(s: string, f: (part: string) => string): string {
-  const cuts = gluePoints(s);
-  if (!cuts.length) return s;
-  const mark = freeMark(s);
-  if (mark === null) {
-    let out = s.slice(0, cuts[0]);
-    for (const [i, c] of cuts.entries()) out += f(s.slice(c, cuts[i + 1] ?? s.length));
-    return out;
-  }
-  let marked = '';
-  let from = 0;
-  for (const c of cuts) {
-    marked += s.slice(from, c) + mark;
-    from = c;
-  }
-  return f(marked + s.slice(from)).split(mark).join('');
-}
-
 /** `$1`, `$&` and `$$` in a replacement string, as String.prototype.replace reads them. */
 const expand = (rep: string, m: string, groups: unknown[]) => rep.replace(/\$(\d|\$|&)/g, (_, k: string) => (k === '$' ? '$' : k === '&' ? m : String(groups[Number(k) - 1] ?? '')));
 const breaks = (s: string) => s.split('\n').length - 1;
@@ -378,12 +386,23 @@ function outsideMachineBlocks(s: string, f: (part: string) => string): string {
   return out + f(s.slice(from));
 }
 
-/** The kinds of secret `s` looks like it holds (sorted, each once): names only, never a matched value. */
+/** The kind secretKinds names for a text it can't scan (#889 round 6): a caller that refuses a secret refuses it too. */
+export const UNSCANNABLE_KIND = 'text too large to scan';
+
+/**
+ * The kinds of secret `s` looks like it holds (sorted, each once): names only, never a matched value. A text with a
+ * run too long to scan (V8's RangeError, as in redactString) fails closed: it is named UNSCANNABLE_KIND.
+ */
 export function secretKinds(s: string): string[] {
   const kinds = new Set<string>();
-  for (const [re, rep, kind] of PATTERNS) {
-    re.lastIndex = 0;
-    if (apply(s, re, rep) !== s) kinds.add(kind);
+  try {
+    for (const [re, rep, kind] of PATTERNS) {
+      re.lastIndex = 0;
+      if (apply(s, re, rep) !== s) kinds.add(kind);
+    }
+  } catch (e) {
+    if (e instanceof RangeError) return [UNSCANNABLE_KIND];
+    throw e;
   }
   return [...kinds].sort();
 }
@@ -396,12 +415,16 @@ const globalOf = (re: RegExp) => {
   return g;
 };
 
+/** What a rule found: [start, end), what its replacement puts there, and the rule's place in its list. */
+type Span = [number, number, string, number];
+
 /**
  * Where `re` finds a secret in `t`, as [start, end) spans: each match's part its replacement takes out (what the match
  * and the replacement don't share at either end), so the scheme, the key's name or the separator a rule keeps is not
- * in the span. A match its replacement leaves as it was (a function that judged it no secret) gives none.
+ * in the span; with what the replacement puts there instead. A match its replacement leaves as it was (a function
+ * that judged it no secret) gives none.
  */
-function spansOf(t: string, re: RegExp, rep: Replacement, out: [number, number][]) {
+function spansOf(t: string, re: RegExp, rep: Replacement, rank: number, out: Span[]) {
   const g = globalOf(re);
   g.lastIndex = 0;
   for (let m = g.exec(t); m; m = g.exec(t)) {
@@ -417,12 +440,65 @@ function spansOf(t: string, re: RegExp, rep: Replacement, out: [number, number][
     while (a < whole.length && a < r.length && whole[a] === r[a]) a++;
     let b = 0;
     while (b < whole.length - a && b < r.length - a && whole[whole.length - 1 - b] === r[r.length - 1 - b]) b++;
-    if (whole.length - b > a) out.push([m.index! + a, m.index! + whole.length - b]);
+    if (whole.length - b > a) out.push([m.index! + a, m.index! + whole.length - b, r.slice(a, r.length - b), rank]);
   }
 }
 
+/** Every rule of the default mode: the shapes, each with its own marker. */
+const SHAPE_RULES: [RegExp, Replacement][] = PATTERNS.map(([re, rep]): [RegExp, Replacement] => [re, rep]);
 /** Every rule of the broad mode: the shapes and the broad rules, each shown with the default mask. */
-const BROAD_RULES: [RegExp, Replacement][] = [...PATTERNS.map(([re, rep]): [RegExp, Replacement] => [re, rep]), ...BROAD.map(([re, rep]): [RegExp, Replacement] => [re, rep('[REDACTED]')])];
+const BROAD_RULES: [RegExp, Replacement][] = [...SHAPE_RULES, ...BROAD.map(([re, rep]): [RegExp, Replacement] => [re, rep('[REDACTED]')])];
+
+/** What every rule of `rules` finds in `s`: on the text as it was, and again with a boundary at each glue point. */
+function allSpans(s: string, rules: readonly [RegExp, Replacement][]): Span[] {
+  const spans: Span[] = [];
+  rules.forEach(([re, rep], i) => spansOf(s, re, rep, i, spans));
+  readAt(s, gluePoints(s), rules, spans);
+  return spans;
+}
+
+/**
+ * The default mode (#889 round 6, the round-3+4 delta check's regression finding): every shape runs on the text as it
+ * was (and from each glue point), and each run of overlapping spans is replaced once. Order-free by design: no rule's
+ * match can take in the text another rule starts from (`wld_<key>-redis://u:<pw>@`, `<jwt>.Bearer <tok>`), so each
+ * shape hides at least what it hid alone; test/redact-default-union.test.ts holds this against main's rules on
+ * composed input. A span that is the whole run keeps its rule's marker (the first rule's, when several are); a run of
+ * spans that only overlap becomes `[REDACTED]`. One pass of replaceUnion.
+ */
+function replaceOnce(s: string, keepLines: boolean): string {
+  const spans = allSpans(s, SHAPE_RULES);
+  if (!spans.length) return s;
+  spans.sort((x, y) => x[0] - y[0] || y[1] - x[1] || x[3] - y[3]);
+  let out = '';
+  let at = 0;
+  for (let i = 0; i < spans.length; ) {
+    const a = spans[i]![0];
+    let b = spans[i]![1];
+    let j = i + 1;
+    for (; j < spans.length && spans[j]![0] < b; j++) b = Math.max(b, spans[j]![1]);
+    let pick: Span | undefined;
+    for (let k = i; k < j; k++) if (spans[k]![0] === a && spans[k]![1] === b && (!pick || spans[k]![3] < pick[3])) pick = spans[k];
+    const rep = pick ? pick[2] : '[REDACTED]';
+    out += s.slice(at, a) + rep + (keepLines ? '\n'.repeat(Math.max(0, breaks(s.slice(a, b)) - breaks(rep))) : '');
+    at = b;
+    i = j;
+  }
+  return out + s.slice(at);
+}
+
+/**
+ * The default mode: replaced once, then again on what that gave, until nothing changes (at most 3 times). A marker can
+ * make a boundary a later rule needs, as main's rules, applied in turn, had.
+ */
+function replaceUnion(s: string, keepLines: boolean): string {
+  let out = replaceOnce(s, keepLines);
+  for (let i = 0; i < 2 && out !== s; i++) {
+    const again = replaceOnce(out, keepLines);
+    if (again === out) break;
+    out = again;
+  }
+  return out;
+}
 
 /**
  * The broad mode (#889 round 3, the final check's regression finding): every rule runs on the text as it was, and the
@@ -432,18 +508,17 @@ const BROAD_RULES: [RegExp, Replacement][] = [...PATTERNS.map(([re, rep]): [RegE
  * are found the same way, on the text with a mark at each, mapped back. One pass of maskUnion.
  */
 function maskOnce(s: string, mask: string, keepLines: boolean): string {
-  const spans: [number, number][] = [];
-  for (const [re, rep] of BROAD_RULES) spansOf(s, re, rep, spans);
-  // Two more reads, each with boundaries marked in: the glue points; and where a span found begins or ends between two
-  // word characters (a module's own rules, applied in turn, saw a boundary where an earlier rule's replacement ended:
-  // `xoxa-...[here]_db_password=...`). Apart, so a boundary of one kind can't break a match the other needs.
+  // Every rule, on the text as it was and from each glue point (allSpans); then one more read with a boundary marked in
+  // where a span found begins or ends between two word characters (a module's own rules, applied in turn, saw a
+  // boundary where an earlier rule's replacement ended: `xoxa-...[here]_db_password=...`). Apart from the glue points,
+  // so a boundary of one kind can't break a match the other needs.
+  const spans = allSpans(s, BROAD_RULES);
   const word = (i: number) => /[A-Za-z0-9_]/.test(s[i] ?? '');
-  readAt(s, gluePoints(s), spans);
-  readAt(s, [...new Set(spans.flat())].filter((c) => c > 0 && c < s.length && word(c - 1) && word(c)).sort((a, b) => a - b), spans);
+  readAt(s, [...new Set(spans.flatMap(([a, b]) => [a, b]))].filter((c) => c > 0 && c < s.length && word(c - 1) && word(c)).sort((a, b) => a - b), BROAD_RULES, spans);
   // What is already a mask stays as it is: a rule that takes in a mask word (`token=[REDACTED]`) adds nothing.
   const masks: [number, number][] = [];
   if (mask) for (let at = s.indexOf(mask); at !== -1; at = s.indexOf(mask, at + mask.length)) masks.push([at, at + mask.length]);
-  const kept = outside(merged(spans), masks);
+  const kept = outside(merged(spans.map(([a, b]): [number, number] => [a, b])), masks);
   if (!kept.length) return s;
   let out = '';
   let at = 0;
@@ -466,17 +541,20 @@ function merged(spans: [number, number][]): [number, number][] {
   return out;
 }
 
-/** Every rule on `s` with a boundary marked in at each of `cuts` (sorted); the spans found, mapped back, go in `spans`. */
-function readAt(s: string, cuts: number[], spans: [number, number][]) {
+/**
+ * Every one of `rules` on `s` with a boundary marked in at each of `cuts` (sorted), so a token glued to what is before
+ * it is read from its start; the spans found, mapped back, go in `spans`. The boundary is a character no rule takes in
+ * (a private-use one the text doesn't hold); when the text holds them all, each piece after a cut is read on its own.
+ */
+function readAt(s: string, cuts: number[], rules: readonly [RegExp, Replacement][], spans: Span[]) {
   if (!cuts.length) return;
   const markChar = freeMark(s);
   if (markChar === null) {
-    // Every mark character is in the text: each piece after a cut is read on its own.
     for (const [i, c] of cuts.entries()) {
       const piece = s.slice(c, cuts[i + 1] ?? s.length);
-      const more: [number, number][] = [];
-      for (const [re, rep] of BROAD_RULES) spansOf(piece, re, rep, more);
-      for (const [a, b] of more) spans.push([a + c, b + c]);
+      const more: Span[] = [];
+      rules.forEach(([re, rep], k) => spansOf(piece, re, rep, k, more));
+      for (const [a, b, r, k] of more) spans.push([a + c, b + c, r, k]);
     }
     return;
   }
@@ -498,9 +576,9 @@ function readAt(s: string, cuts: number[], spans: [number, number][]) {
     }
     return p - lo;
   };
-  const more: [number, number][] = [];
-  for (const [re, rep] of BROAD_RULES) spansOf(marked, re, rep, more);
-  for (const [a, b] of more) spans.push([back(a), back(b)]);
+  const more: Span[] = [];
+  rules.forEach(([re, rep], k) => spansOf(marked, re, rep, k, more));
+  for (const [a, b, r, k] of more) spans.push([back(a), back(b), r.split(markChar).join(''), k]);
 }
 
 /**
@@ -553,10 +631,10 @@ export function redactString(s: string, o: RedactTextOptions = {}): string {
 
 function redactOrThrow(s: string, o: RedactTextOptions): string {
   const put = o.keepLines ? applyKeepingLines : apply;
-  // The broad mode masks the union of every rule's spans (maskUnion); the default mode applies the shapes in turn,
-  // each with its own marker, then again from each glue point (glued).
-  const secrets = (t: string) => PATTERNS.reduce((y, [re, rep]) => put(y, re, rep), t);
-  let out = o.broad ? maskUnion(s, o.mask ?? '[REDACTED]', o.keepLines === true) : glued(secrets(s), secrets);
+  // Both modes read every rule on the text as it was, so no rule's match hides another's: the broad mode masks the
+  // union of what the shapes and the broad rules find (maskUnion); the default mode replaces each run of what the
+  // shapes find, with its rule's marker (replaceUnion).
+  let out = o.broad ? maskUnion(s, o.mask ?? '[REDACTED]', o.keepLines === true) : replaceUnion(s, o.keepLines === true);
   if (o.identifiers) out = outsideMachineBlocks(out, (part) => IDENTIFIERS.reduce((t, [re, rep]) => put(t, re, rep), part));
   return out;
 }

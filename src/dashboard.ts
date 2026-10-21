@@ -884,7 +884,6 @@ const journalctl: JournalReader = (unit, lines) => {
   return { status: r.status, stdout: r.stdout ?? '', stderr: `${r.stderr ?? ''}${r.error ? r.error.message : ''}` };
 };
 
-/** A message cut to 2,000 characters, redacted first: a cut made before would leave a long secret's body unfound (#889). */
 /** How much of one log record is shown, and how much of it is read (redacted) to show that (#889 round 4). */
 const RECORD_SHOWN = 2000;
 const RECORD_READ = RECORD_SHOWN + 4096;

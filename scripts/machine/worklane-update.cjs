@@ -115,7 +115,7 @@ const sharedRedact = (() => {
 const exports = {};
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.CUT_MARGIN = exports.UNSCANNABLE = exports.TRACKER = exports.REDACTION_PATTERNS = exports.isDashboardKey = exports.DASHBOARD_KEY_PREFIX = void 0;
+exports.CUT_MARGIN = exports.UNSCANNABLE = exports.UNSCANNABLE_KIND = exports.TRACKER = exports.REDACTION_PATTERNS = exports.isDashboardKey = exports.DASHBOARD_KEY_PREFIX = void 0;
 exports.secretKinds = secretKinds;
 exports.redactString = redactString;
 exports.redactCut = redactCut;
@@ -146,6 +146,32 @@ exports.DASHBOARD_KEY_PREFIX = 'wld_';
 const DASHBOARD_KEY_BODY = '[A-Za-z0-9_-]{32,}';
 const isDashboardKey = (key) => new RegExp(`^${exports.DASHBOARD_KEY_PREFIX}${DASHBOARD_KEY_BODY}$`).test(key);
 exports.isDashboardKey = isDashboardKey;
+const KEY_LINE = /-----(BEGIN|END) [A-Z ]*PRIVATE KEY(?: BLOCK)?-----/g;
+function orphanEnd(m) {
+    let open = false;
+    let cut = -1;
+    KEY_LINE.lastIndex = 0;
+    for (let k = KEY_LINE.exec(m); k; k = KEY_LINE.exec(m)) {
+        if (k[1] === 'BEGIN')
+            open = true;
+        else if (open)
+            open = false;
+        else
+            cut = k.index + k[0].length;
+    }
+    return cut === -1 ? m : `[REDACTED PRIVATE KEY]${m.slice(cut)}`;
+}
+function jwtIn(m, pre) {
+    const parts = m.slice(pre.length).split('.');
+    let before = pre;
+    for (let i = 0; i + 2 < parts.length; i++) {
+        const at = parts[i].indexOf('eyJ');
+        if (at !== -1 && parts[i].length - at >= 11 && parts[i + 1].length >= 8)
+            return `${before}${parts[i].slice(0, at)}[REDACTED JWT]`;
+        before += `${parts[i]}.`;
+    }
+    return m;
+}
 const PATTERNS = [
     [new RegExp(`${exports.DASHBOARD_KEY_PREFIX}${DASHBOARD_KEY_BODY}(?![A-Za-z0-9_-])`, 'g'), `${exports.DASHBOARD_KEY_PREFIX}[REDACTED]`, 'dashboard key'],
     [/gh[pousr]_[A-Za-z0-9]{30,}(?![A-Za-z0-9])/g, 'gh*_[REDACTED]', 'GitHub token'],
@@ -154,14 +180,7 @@ const PATTERNS = [
     [/\bsk-(?:ant-)?[A-Za-z0-9_-]{20,}\b/g, 'sk-[REDACTED]', 'API key (sk-)'],
     [/(^|[^A-Za-z0-9_])([sr]k)_(?:live|test)_([A-Za-z0-9]{16,})(?![A-Za-z0-9_])/g, (m, pre, k, v) => (/\d/.test(v) ? `${pre}${k}_[REDACTED]` : m), 'Stripe key'],
     [/AIza[0-9A-Za-z_-]{35}(?![0-9A-Za-z_-])/g, 'AIza[REDACTED]', 'Google API key'],
-    [
-        /(^|[^A-Za-z0-9_-])([A-Za-z0-9_-]{11,})\.([A-Za-z0-9_-]{8,})\.[A-Za-z0-9_-]*(?:\.[A-Za-z0-9_-]+)*/g,
-        (m, pre, head) => {
-            const at = head.indexOf('eyJ');
-            return at !== -1 && head.length - at >= 11 ? `${pre}${head.slice(0, at)}[REDACTED JWT]` : m;
-        },
-        'JWT',
-    ],
+    [/(^|[^A-Za-z0-9_-])(?=([A-Za-z0-9_-]+))\2\.(?=([A-Za-z0-9_-]+))\3\.[A-Za-z0-9_-]*(?:\.[A-Za-z0-9_-]+)*/g, (m, pre) => jwtIn(m, pre), 'JWT'],
     [/(?:AKIA|ASIA)[A-Z0-9]{16}(?![A-Za-z0-9])/g, 'AKIA[REDACTED]', 'AWS access key'],
     [/xoxe[.-][A-Za-z0-9.-]{10,}(?![A-Za-z0-9])/g, 'xoxe-[REDACTED]', 'Slack token'],
     [/xox[abprs]-[A-Za-z0-9-]{10,}(?![A-Za-z0-9])/g, 'xox-[REDACTED]', 'Slack token'],
@@ -170,7 +189,7 @@ const PATTERNS = [
     [/https:\/\/hooks\.slack\.com\/services\/[A-Za-z0-9/]+/g, 'https://hooks.slack.com/services/[REDACTED]', 'Slack webhook'],
     [/tskey-[A-Za-z0-9_-]+/g, 'tskey-[REDACTED]', 'Tailscale key'],
     [/-----BEGIN [A-Z ]*PRIVATE KEY(?: BLOCK)?-----(?:[\s\S]*?-----END [A-Z ]*PRIVATE KEY(?: BLOCK)?-----|[\s\S]*)/g, '[REDACTED PRIVATE KEY]', 'private key'],
-    [/^[\s\S]*-----END [A-Z ]*PRIVATE KEY(?: BLOCK)?-----/, '[REDACTED PRIVATE KEY]', 'private key'],
+    [/^[\s\S]*-----END [A-Z ]*PRIVATE KEY(?: BLOCK)?-----/, orphanEnd, 'private key'],
     [/\b(bearer)\s+[A-Za-z0-9._~+/-]{20,}=*/gi, '$1 [REDACTED]', 'bearer token'],
     [/\b(basic)(\s+)([A-Za-z0-9+/]{8,}={0,2})(?![A-Za-z0-9+/=])/gi, (m, s, sp, v) => (basicShaped(v) ? `${s}${sp}[REDACTED]` : m), 'Basic credential'],
     [/([a-z][a-z0-9+.-]{0,31}:\/\/[^:/\s@]+):[^@\s/]+@/gi, '$1:[REDACTED]@', 'password in a URL'],
@@ -251,25 +270,6 @@ function freeMark(s) {
             return String.fromCharCode(c);
     return null;
 }
-function glued(s, f) {
-    const cuts = gluePoints(s);
-    if (!cuts.length)
-        return s;
-    const mark = freeMark(s);
-    if (mark === null) {
-        let out = s.slice(0, cuts[0]);
-        for (const [i, c] of cuts.entries())
-            out += f(s.slice(c, cuts[i + 1] ?? s.length));
-        return out;
-    }
-    let marked = '';
-    let from = 0;
-    for (const c of cuts) {
-        marked += s.slice(from, c) + mark;
-        from = c;
-    }
-    return f(marked + s.slice(from)).split(mark).join('');
-}
 const expand = (rep, m, groups) => rep.replace(/\$(\d|\$|&)/g, (_, k) => (k === '$' ? '$' : k === '&' ? m : String(groups[Number(k) - 1] ?? '')));
 const breaks = (s) => s.split('\n').length - 1;
 function applyKeepingLines(s, re, rep) {
@@ -314,12 +314,20 @@ function outsideMachineBlocks(s, f) {
     }
     return out + f(s.slice(from));
 }
+exports.UNSCANNABLE_KIND = 'text too large to scan';
 function secretKinds(s) {
     const kinds = new Set();
-    for (const [re, rep, kind] of PATTERNS) {
-        re.lastIndex = 0;
-        if (apply(s, re, rep) !== s)
-            kinds.add(kind);
+    try {
+        for (const [re, rep, kind] of PATTERNS) {
+            re.lastIndex = 0;
+            if (apply(s, re, rep) !== s)
+                kinds.add(kind);
+        }
+    }
+    catch (e) {
+        if (e instanceof RangeError)
+            return [exports.UNSCANNABLE_KIND];
+        throw e;
     }
     return [...kinds].sort();
 }
@@ -330,7 +338,7 @@ const globalOf = (re) => {
         globals.set(re, (g = re.flags.includes('g') ? re : new RegExp(re.source, `${re.flags}g`)));
     return g;
 };
-function spansOf(t, re, rep, out) {
+function spansOf(t, re, rep, rank, out) {
     const g = globalOf(re);
     g.lastIndex = 0;
     for (let m = g.exec(t); m; m = g.exec(t)) {
@@ -347,22 +355,60 @@ function spansOf(t, re, rep, out) {
         while (b < whole.length - a && b < r.length - a && whole[whole.length - 1 - b] === r[r.length - 1 - b])
             b++;
         if (whole.length - b > a)
-            out.push([m.index + a, m.index + whole.length - b]);
+            out.push([m.index + a, m.index + whole.length - b, r.slice(a, r.length - b), rank]);
     }
 }
-const BROAD_RULES = [...PATTERNS.map(([re, rep]) => [re, rep]), ...BROAD.map(([re, rep]) => [re, rep('[REDACTED]')])];
-function maskOnce(s, mask, keepLines) {
+const SHAPE_RULES = PATTERNS.map(([re, rep]) => [re, rep]);
+const BROAD_RULES = [...SHAPE_RULES, ...BROAD.map(([re, rep]) => [re, rep('[REDACTED]')])];
+function allSpans(s, rules) {
     const spans = [];
-    for (const [re, rep] of BROAD_RULES)
-        spansOf(s, re, rep, spans);
+    rules.forEach(([re, rep], i) => spansOf(s, re, rep, i, spans));
+    readAt(s, gluePoints(s), rules, spans);
+    return spans;
+}
+function replaceOnce(s, keepLines) {
+    const spans = allSpans(s, SHAPE_RULES);
+    if (!spans.length)
+        return s;
+    spans.sort((x, y) => x[0] - y[0] || y[1] - x[1] || x[3] - y[3]);
+    let out = '';
+    let at = 0;
+    for (let i = 0; i < spans.length;) {
+        const a = spans[i][0];
+        let b = spans[i][1];
+        let j = i + 1;
+        for (; j < spans.length && spans[j][0] < b; j++)
+            b = Math.max(b, spans[j][1]);
+        let pick;
+        for (let k = i; k < j; k++)
+            if (spans[k][0] === a && spans[k][1] === b && (!pick || spans[k][3] < pick[3]))
+                pick = spans[k];
+        const rep = pick ? pick[2] : '[REDACTED]';
+        out += s.slice(at, a) + rep + (keepLines ? '\n'.repeat(Math.max(0, breaks(s.slice(a, b)) - breaks(rep))) : '');
+        at = b;
+        i = j;
+    }
+    return out + s.slice(at);
+}
+function replaceUnion(s, keepLines) {
+    let out = replaceOnce(s, keepLines);
+    for (let i = 0; i < 2 && out !== s; i++) {
+        const again = replaceOnce(out, keepLines);
+        if (again === out)
+            break;
+        out = again;
+    }
+    return out;
+}
+function maskOnce(s, mask, keepLines) {
+    const spans = allSpans(s, BROAD_RULES);
     const word = (i) => /[A-Za-z0-9_]/.test(s[i] ?? '');
-    readAt(s, gluePoints(s), spans);
-    readAt(s, [...new Set(spans.flat())].filter((c) => c > 0 && c < s.length && word(c - 1) && word(c)).sort((a, b) => a - b), spans);
+    readAt(s, [...new Set(spans.flatMap(([a, b]) => [a, b]))].filter((c) => c > 0 && c < s.length && word(c - 1) && word(c)).sort((a, b) => a - b), BROAD_RULES, spans);
     const masks = [];
     if (mask)
         for (let at = s.indexOf(mask); at !== -1; at = s.indexOf(mask, at + mask.length))
             masks.push([at, at + mask.length]);
-    const kept = outside(merged(spans), masks);
+    const kept = outside(merged(spans.map(([a, b]) => [a, b])), masks);
     if (!kept.length)
         return s;
     let out = '';
@@ -385,7 +431,7 @@ function merged(spans) {
     }
     return out;
 }
-function readAt(s, cuts, spans) {
+function readAt(s, cuts, rules, spans) {
     if (!cuts.length)
         return;
     const markChar = freeMark(s);
@@ -393,10 +439,9 @@ function readAt(s, cuts, spans) {
         for (const [i, c] of cuts.entries()) {
             const piece = s.slice(c, cuts[i + 1] ?? s.length);
             const more = [];
-            for (const [re, rep] of BROAD_RULES)
-                spansOf(piece, re, rep, more);
-            for (const [a, b] of more)
-                spans.push([a + c, b + c]);
+            rules.forEach(([re, rep], k) => spansOf(piece, re, rep, k, more));
+            for (const [a, b, r, k] of more)
+                spans.push([a + c, b + c, r, k]);
         }
         return;
     }
@@ -420,10 +465,9 @@ function readAt(s, cuts, spans) {
         return p - lo;
     };
     const more = [];
-    for (const [re, rep] of BROAD_RULES)
-        spansOf(marked, re, rep, more);
-    for (const [a, b] of more)
-        spans.push([back(a), back(b)]);
+    rules.forEach(([re, rep], k) => spansOf(marked, re, rep, k, more));
+    for (const [a, b, r, k] of more)
+        spans.push([back(a), back(b), r.split(markChar).join(''), k]);
 }
 function outside(spans, regions) {
     const out = [];
@@ -466,8 +510,7 @@ function redactString(s, o = {}) {
 }
 function redactOrThrow(s, o) {
     const put = o.keepLines ? applyKeepingLines : apply;
-    const secrets = (t) => PATTERNS.reduce((y, [re, rep]) => put(y, re, rep), t);
-    let out = o.broad ? maskUnion(s, o.mask ?? '[REDACTED]', o.keepLines === true) : glued(secrets(s), secrets);
+    let out = o.broad ? maskUnion(s, o.mask ?? '[REDACTED]', o.keepLines === true) : replaceUnion(s, o.keepLines === true);
     if (o.identifiers)
         out = outsideMachineBlocks(out, (part) => IDENTIFIERS.reduce((t, [re, rep]) => put(t, re, rep), part));
     return out;
