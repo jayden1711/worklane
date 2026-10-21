@@ -6,7 +6,8 @@
 //     a file the coordinator user wrote in its place is never read, so the instance stops instead (fail closed);
 //   - the engine's own writers (the dashboard's Settings and Policy form) never write it; root changes one key of it
 //     at a time (`<cli> policy set`, the keys below), which never takes a loosening of land_mode or main_watch from a
-//     coordinator, nor sandbox or allow_same_user at all.
+//     coordinator, nor sandbox or allow_same_user at all. A dashboard change goes to root's machine helper
+//     (`<helper> set-policy <key> <value>`, through the coordinator), which runs it.
 // An instance with no such record (a laptop, a cloud or VM install, a machine whose setup hasn't run again since)
 // reads policy.yaml as before; doctor says when it is a machine install whose policy the coordinator can rewrite.
 //
@@ -19,6 +20,7 @@ import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import { BRAND } from './brand.js';
+import { HELPER_RULES, helperRules } from './machine.js';
 import { readRootFile } from './os/root-file.js';
 import { POLICY_ROOT_DIR } from './policy-kill.js';
 
@@ -68,6 +70,8 @@ let rootUid = 0;
 export function setPolicyRootUid(uid: number): void {
   rootUid = uid;
 }
+/** That uid, for a check that must read a file as root's helper will (src/settings.ts). */
+export const policyRootUid = (): number => rootUid;
 
 /**
  * The root shell command that makes an instance's policy.yaml root's, keeping its content and showing its keys. A
@@ -115,7 +119,7 @@ type Kind = 'number' | 'bool' | 'word' | 'windows';
 /**
  * Every key `<cli> policy set` changes (the Policy form's and the Settings page's), and how its value is written as one
  * plain word. Never sandbox, allow_same_user, lanes or the allowlists. test/policy-edit.test.ts holds this equal to
- * POLICY_KEYS plus settings.<SETTING_KEYS>.
+ * POLICY_KEYS plus settings.<SETTING_KEYS>, and to the machine helper's own copy.
  */
 export const POLICY_SET_KEYS: Readonly<Record<string, Kind>> = {
   'budget.daily_usd': 'number',
@@ -142,11 +146,58 @@ export const POLICY_SET_KEYS: Readonly<Record<string, Kind>> = {
   'settings.chat_attachments.retention_days': 'number',
 };
 
-/** The one value of each of these a coordinator may set (tightening); any other is an admin's, at a root shell (#698 decision 1). */
-export const HELPER_ONLY: Readonly<Record<string, string>> = { land_mode: 'pr', main_watch: 'auto' };
+/**
+ * The one value of each of these a coordinator may set (tightening); any other is an admin's, at a root shell (#698
+ * decision 1; auto_merge on is root's only, the owner's decision on #770). The machine helper holds the same table
+ * (POLICY_ONLY), and test/policy-edit.test.ts holds them equal. `policy own` derives what is loose from it too.
+ */
+export const HELPER_ONLY: Readonly<Record<string, string>> = { land_mode: 'pr', main_watch: 'auto', auto_merge: 'off' };
+
+/**
+ * Keys whose HELPER_ONLY value is the only one a dashboard sets on EVERY install, whether its policy.yaml is root's or
+ * the coordinator's (a laptop, cloud or VM install, or a machine not taken over yet): every HELPER_ONLY key. Turning
+ * auto_merge on, land_mode to direct or main_watch off is an admin's alone (the owner's decisions on #770: auto_merge
+ * 2026-10-18; land_mode and anything else that loosens, 2026-10-19, principle 6). test/policy-edit.test.ts holds it
+ * equal to HELPER_ONLY's keys.
+ */
+export const DASHBOARD_TIGHTEN_ONLY: readonly string[] = ['land_mode', 'main_watch', 'auto_merge'];
+
+/** The root shell command that sets one key of an instance's policy.yaml. */
+export const policySetCommand = (instance: string, key: string, arg: string) => `sudo ${BRAND.cli} policy set ${instance} ${key} ${arg}`;
+
+/**
+ * Why root's machine helper can't take `set-policy <key> <arg>` on this machine, or null when it can (or nothing says
+ * it can't). machine-helper.sh records the rules it left out in helper-rules.json's left_out: a sudo older than 1.9.10
+ * reads a command's argument pattern as literal text, so every pattern rule is left out together (lib.sh
+ * machine_sudoers), set-policy's among them. A record from before set-policy existed lists add-project instead, which
+ * means the same sudo. The HELPER_ONLY tightenings (auto_merge off, land_mode pr, main_watch auto) are listed whole on
+ * every sudo, so they are never missing: turning auto_merge off works on any sudo.
+ */
+export function policyHelperMissing(rulesFile = HELPER_RULES, change?: readonly [string, string]): string | null {
+  if (change && Object.hasOwn(HELPER_ONLY, change[0]) && HELPER_ONLY[change[0]] === change[1]) return null;
+  const r = helperRules(rulesFile);
+  if (!r || !(r.leftOut.includes('set-policy') || r.leftOut.includes('add-project'))) return null;
+  return `this machine's sudo (${r.sudo ?? 'version unknown'}) is older than 1.9.10, so root's helper has no set-policy rule here and a dashboard request would only fail`;
+}
 
 const NUMBER = /^(0|[1-9][0-9]{0,5})(\.[0-9]{1,2})?$/;
 const WINDOWS = /^(none|[0-2][0-9][0-5][0-9]-[0-2][0-9][0-5][0-9](\+[0-2][0-9][0-5][0-9]-[0-2][0-9][0-5][0-9]){0,7})$/;
+
+/** A value as the helper's argument (the inverse of decodePolicyValue), or null when it can't be one. */
+export function encodePolicyValue(key: string, value: unknown): string | null {
+  const kind = POLICY_SET_KEYS[key];
+  if (kind === 'bool') return typeof value === 'boolean' ? (value ? 'on' : 'off') : null;
+  if (kind === 'number') return typeof value === 'number' && NUMBER.test(String(value)) ? String(value) : null;
+  if (kind === 'word') return typeof value === 'string' && /^[a-z][a-z-]{0,15}$/.test(value) ? value : null;
+  if (kind === 'windows') {
+    if (!Array.isArray(value)) return null;
+    const hm = (s: unknown) => (typeof s === 'string' && /^\d\d:\d\d$/.test(s) ? s.replace(':', '') : null);
+    const parts = value.map((w: { from?: unknown; to?: unknown }) => (w && hm(w.from) && hm(w.to) ? `${hm(w.from)}-${hm(w.to)}` : null));
+    const out = parts.length ? parts.join('+') : 'none';
+    return parts.every((p) => p !== null) && WINDOWS.test(out) ? out : null;
+  }
+  return null;
+}
 
 /** The value a plain-word argument stands for (on|off, a number, a word, HHMM-HHMM+... or none), or undefined when it isn't one of its key's shape. */
 export function decodePolicyValue(key: string, arg: string): unknown {
@@ -156,4 +207,72 @@ export function decodePolicyValue(key: string, arg: string): unknown {
   if (kind === 'word') return /^[a-z][a-z-]{0,15}$/.test(arg) ? arg : undefined;
   if (kind === 'windows') return WINDOWS.test(arg) ? (arg === 'none' ? [] : arg.split('+').map((w) => ({ from: `${w.slice(0, 2)}:${w.slice(2, 4)}`, to: `${w.slice(5, 7)}:${w.slice(7, 9)}` }))) : undefined;
   return undefined;
+}
+
+/**
+ * The keys the dashboard and the coordinator's route only ever tighten, on every install (the owner's decision of
+ * 2026-10-19, principles 3 and 6): every key `policy set` takes but the HELPER_ONLY ones (tighten-only already). The
+ * value in effect now is the ceiling; loosening past it is root's or the admin's. How each loosens: a number up
+ * (budget, workers, every cap, attachment size and retention), a switch on (automations, ci_repair,
+ * research.repo_access), `stuck_guard` toward off (on, dry-run, off), `run_windows` to any time the current windows
+ * don't cover (none means any time).
+ */
+export const CEILING_KEYS: readonly string[] = Object.keys(POLICY_SET_KEYS).filter((k) => !Object.hasOwn(HELPER_ONLY, k));
+const STUCK_RANK: Readonly<Record<string, number>> = { off: 0, 'dry-run': 1, on: 2 };
+/** The minutes of a day a run_windows value allows ([] or none: all of them). */
+function windowMinutes(v: unknown): Set<number> | null {
+  if (!Array.isArray(v)) return null;
+  const all = new Set<number>();
+  if (!v.length) for (let m = 0; m < 1440; m++) all.add(m);
+  for (const w of v as { from?: unknown; to?: unknown }[]) {
+    const at = (s: unknown) => (typeof s === 'string' && /^\d\d:\d\d$/.test(s) ? Number(s.slice(0, 2)) * 60 + Number(s.slice(3)) : null);
+    const [a, b] = [at(w?.from), at(w?.to)];
+    if (a === null || b === null) return null;
+    for (let m = a; m !== b; m = (m + 1) % 1440) all.add(m);
+  }
+  return all;
+}
+/** Whether `value` is looser than root's `ceiling` for `key` (anything this can't compare counts as looser). */
+export function looserThan(key: string, value: unknown, ceiling: unknown): boolean {
+  const kind = POLICY_SET_KEYS[key];
+  if (kind === 'number') return typeof value !== 'number' || typeof ceiling !== 'number' || value > ceiling;
+  if (kind === 'bool') return value === true && ceiling !== true;
+  if (key === 'settings.stuck_guard') return !(String(value) in STUCK_RANK) || STUCK_RANK[String(value)]! < (STUCK_RANK[String(ceiling)] ?? 2);
+  if (kind === 'windows') {
+    const [v, c] = [windowMinutes(value), windowMinutes(ceiling)];
+    return !v || !c || [...v].some((m) => !c.has(m));
+  }
+  return true;
+}
+/**
+ * Why the dashboard or the coordinator's route may not set `key` to `value`: it loosens the value in effect now
+ * (`current`), or null. `current` undefined means the caller can't tell it (root, for a setting the repo's config
+ * decides; anyone, for an intake cap when intake.yaml doesn't load): then only turning a switch off is provably
+ * tighter, and anything else is refused (fail closed). `route` is what the admin runs instead.
+ */
+export function tightenProblem(key: string, value: unknown, current: unknown, route: string): string | null {
+  if (!CEILING_KEYS.includes(key)) return null;
+  const shown = (v: unknown) => (typeof v === 'object' ? JSON.stringify(v) : String(v));
+  const from = key.startsWith('settings.intake.') ? "intake.yaml beside it doesn't load" : "the repo's config sets it";
+  if (current === undefined) return POLICY_SET_KEYS[key] === 'bool' && value === false ? null : `${key} ${shown(value)}: the value in effect isn't in policy.yaml (${from}), so this route can't tell it would only tighten; an admin sets it (${route})`;
+  return looserThan(key, value, current) ? `${key} ${shown(value)} would loosen it (now ${shown(current)}): the dashboard only tightens; an admin does that (${route})` : null;
+}
+
+/** The admin's route for a value the dashboard may not set: root's command, or, before a takeover, own then set on a machine, or an edit of the file (or its Helm value) elsewhere. */
+export function adminRoute(path: string, key: string, arg: string, root: boolean, machine: boolean): string {
+  const instance = policyInstance(path);
+  if (root) return policySetCommand(instance, key, arg);
+  if (machine) return `${ownCommand(instance)}, then ${policySetCommand(instance, key, arg)}`;
+  return `edit ${path} (${key}: ${String(decodePolicyValue(key, arg))}), or its Helm value`;
+}
+
+/**
+ * Whether `set-policy <key> <arg>` is a change root's machine helper takes for a dashboard: a known key, its shape, and
+ * never a loosening. The helper (scripts/machine/<cli>-machine.cjs) holds the same table, and checks it again.
+ */
+export function policySetOk(args: readonly string[]): boolean {
+  if (args.length !== 2) return false;
+  const [key, arg] = args as [string, string];
+  if (!Object.hasOwn(POLICY_SET_KEYS, key) || decodePolicyValue(key, arg) === undefined) return false;
+  return !Object.hasOwn(HELPER_ONLY, key) || HELPER_ONLY[key] === arg;
 }

@@ -12,20 +12,28 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { BRAND } from '../src/brand.js';
 import { loadConfig } from '../src/config/load.js';
+import { EventLog } from '../src/events/log.js';
 import { instanceAutoMerge, loadInstanceSetup, readPolicy } from '../src/instance.js';
 import { processIdentity } from '../src/os/index.js';
 import { aliasInstance, armedSwitches, autoMergeKilled, idDir, instanceId, killAutoMerge } from '../src/policy-kill.js';
 import { applyPolicy, POLICY_KEYS, PolicyEditError, policyForm } from '../src/policy-edit.js';
 import { changeSetting, SETTING_KEYS, settingsReader, SettingsError } from '../src/settings.js';
-import { decodePolicyValue, POLICY_ROOT_DIR, POLICY_SET_KEYS, readPolicyChecked, setPolicyRootUid } from '../src/policy-gate.js';
+import { DASHBOARD_TIGHTEN_ONLY, decodePolicyValue, encodePolicyValue, HELPER_ONLY, POLICY_ROOT_DIR, POLICY_SET_KEYS, readPolicyChecked, setPolicyRootUid } from '../src/policy-gate.js';
+import * as gate from '../src/policy-gate.js';
 import { ownPolicy, policyCommand, setPolicy, type PolicyRootDeps } from '../src/policy-root.js';
 import { policyRootChecks } from '../src/doctor-policy-root.js';
+import { checkRootStep } from '../src/console/root-steps.js';
+import { MACHINE_HELPER } from '../src/machine.js';
+import { MachineRequestError, machineRequests, requestPolicyChange } from '../src/machine-requests.js';
+import { runMachineRequests } from '../src/coordinator/machine-requests.js';
 import { exampleProject, repoRoot } from './helpers.js';
 import { onRealMachine } from './isolate.js';
 
 const posix = process.platform !== 'win32';
 // A root policy is a Linux machine install's: the gate asks the kernel where the opened file is (/proc/self/fd).
 const skip = process.platform !== 'linux' && 'a Linux machine install (POSIX owners, /proc/self/fd)';
+const helperSrc = join(repoRoot, 'scripts', 'machine', 'worklane-machine.cjs');
+const helper = createRequire(import.meta.url)(helperSrc) as { parsePolicySet: (a: string[]) => { key: string; value: string } | null; POLICY_SET_KEYS: Record<string, string>; POLICY_ONLY: Record<string, string> };
 const cfg = loadConfig(exampleProject().dir);
 const me = posix ? process.getuid!() : 0;
 const POLICY = `version: 1
@@ -66,6 +74,14 @@ function asRoot<R>(fn: () => R): R {
     setPolicyRootUid(0);
   }
 }
+/** The helper through sudo, stood in: its own argument check, then the engine's `policy set` as root with SUDO_USER wl-<name>. */
+const helperStandIn = (name: string, deps: PolicyRootDeps, calls: string[][]) => (file: string, args: string[]) => {
+  calls.push([file, ...args]);
+  assert.deepEqual(args.slice(0, 2), ['-n', MACHINE_HELPER]);
+  const p = helper.parsePolicySet(args.slice(2));
+  if (!p) throw Object.assign(new Error('usage'), { stderr: 'usage: worklane-machine ...' });
+  return JSON.stringify(asRoot(() => setPolicy(name, p.key, p.value, `wl-${name}`, deps)));
+};
 
 test('an admin makes an existing coordinator-owned policy.yaml root\'s with its content unchanged, and is shown a loose key', { skip }, () => {
   const loose = `${POLICY}sandbox: false\n`;
@@ -106,7 +122,8 @@ test("the coordinator user's write to a root policy.yaml is refused", { skip }, 
   // The engine's own writers (Settings, the Policy form) never write it.
   asRoot(() => {
     assert.throws(() => changeSetting({ policyPath: m.file, cfg, eventsDb: join(m.T, 'events.db'), key: 'workers', value: 1, by: cfg.project.owners.default, owner: true }), (e: Error) => e instanceof SettingsError && /is root's/.test(e.message));
-    assert.throws(() => applyPolicy({ path: m.file, cfg, values: { auto_merge: true }, eventsDb: join(m.T, 'events.db'), by: 'olive' }), (e: Error) => e instanceof PolicyEditError && /is root's/.test(e.message));
+    // (A lowering: round 10 refuses a raise past root's value before this, #726.)
+    assert.throws(() => applyPolicy({ path: m.file, cfg, values: { 'budget.daily_usd': 40 }, eventsDb: join(m.T, 'events.db'), by: 'olive' }), (e: Error) => e instanceof PolicyEditError && /is root's/.test(e.message));
   });
   assert.equal(readFileSync(m.file, 'utf8'), text, 'nothing written');
   // A file the coordinator user puts in its place (here: a file of a uid that isn't root's) is never read.
@@ -140,8 +157,14 @@ test("root's policy set: one checked key, written root's with the file's comment
   const m = machineInstance('rootset');
   assert.throws(() => setPolicy('rootset', 'auto_merge', 'on', null, m.deps), /isn't root's yet/, 'only a policy setup made root\'s');
   ownPolicy('rootset', m.deps);
-  assert.deepEqual(setPolicy('rootset', 'auto_merge', 'on', 'wl-rootset', m.deps), { key: 'auto_merge', from: false, to: true });
-  assert.deepEqual(setPolicy('rootset', 'settings.run_windows', '0900-1700', 'wl-rootset', m.deps), { key: 'settings.run_windows', from: null, to: [{ from: '09:00', to: '17:00' }] });
+  assert.throws(() => setPolicy('rootset', 'auto_merge', 'on', 'wl-rootset', m.deps), /loosens the instance/, 'auto_merge on: root\'s alone');
+  assert.deepEqual(setPolicy('rootset', 'auto_merge', 'on', null, m.deps), { key: 'auto_merge', from: false, to: true });
+  // Round 11: the coordinator's route can't tell the windows in effect (the repo's config sets them), so setting them is
+  // the admin's; through 7289dac3 the coordinator's route set them. The admin's write is checked as before.
+  assert.throws(() => setPolicy('rootset', 'settings.run_windows', '0900-1700', 'wl-rootset', m.deps), /the value in effect isn't in policy\.yaml.*policy set rootset settings\.run_windows 0900-1700/);
+  assert.deepEqual(setPolicy('rootset', 'settings.run_windows', '0900-1700', null, m.deps), { key: 'settings.run_windows', from: null, to: [{ from: '09:00', to: '17:00' }] });
+  // Once root set them, the coordinator's route may narrow them.
+  assert.equal(setPolicy('rootset', 'settings.run_windows', '1000-1600', 'wl-rootset', m.deps).key, 'settings.run_windows');
   assert.match(readFileSync(m.file, 'utf8'), /# the operator's own notes stay/);
   assert.equal(statSync(m.file).mode & 0o777, 0o644);
   assert.equal(asRoot(() => readPolicy(m.file).policy?.auto_merge), true);
@@ -179,6 +202,239 @@ test('doctor: a machine install whose policy.yaml the coordinator can rewrite is
   const failed = policyRootChecks(m.instances, { machine: true })[0]!;
   assert.equal(failed.level, 'fail');
   assert.match(failed.detail, new RegExp(`sudo ${BRAND.cli} policy own doc.*won't start`));
+});
+
+test("a dashboard change to auto_merge (turning it off) and a Settings change still work, through root's helper", { skip }, () => {
+  const m = machineInstance('change');
+  ownPolicy('change', m.deps);
+  // Turning it on is root's alone (the owner's decision on #770): an admin at a root shell.
+  setPolicy('change', 'auto_merge', 'on', null, m.deps);
+  const log = new EventLog(':memory:');
+  const asked: string[][] = [];
+  const request = (args: string[]) => (asked.push(args), requestPolicyChange(log, { args, by: 'olive', breakGlass: false }).id);
+  asRoot(() => {
+    // auto_merge off alone on a root policy: asked for without reading policy.yaml, so its `from` is unknown (null).
+    assert.deepEqual(applyPolicy({ path: m.file, cfg, values: { auto_merge: false }, eventsDb: join(m.T, 'events.db'), by: 'olive', request }), [{ key: 'auto_merge', from: null, to: false }]);
+    assert.ok(changeSetting({ policyPath: m.file, cfg, eventsDb: join(m.T, 'events.db'), key: 'workers', value: 1, by: cfg.project.owners.default, owner: true, request }).requested);
+  });
+  assert.deepEqual(asked, [['set-policy', 'auto_merge', 'off'], ['set-policy', 'settings.workers', '1']]);
+  assert.match(readFileSync(m.file, 'utf8'), /auto_merge: true/, 'the dashboard wrote nothing itself');
+  // The coordinator's next tick: each through the helper, as root.
+  const calls: string[][] = [];
+  assert.equal(runMachineRequests({ log, instance: 'change', exec: helperStandIn('change', m.deps, calls) }), 2);
+  assert.deepEqual(calls.map((c) => c.slice(3)), asked);
+  assert.deepEqual(machineRequests(log.read(0)).map((r) => r.status), ['done', 'done']);
+  const p = asRoot(() => readPolicy(m.file).policy)!;
+  assert.equal(p.auto_merge, false);
+  assert.equal(p.settings.workers, 1);
+  assert.equal(statSync(m.file).mode & 0o777, 0o644);
+  assert.match(readFileSync(m.file, 'utf8'), /# the operator's own notes stay/);
+  const changed = log.read(0, ['settings.changed']).map((e) => e.payload as { key: string; from: unknown; to: unknown; by: string });
+  // auto_merge off is root's kill switch: policy.yaml is never read, so its `from` is unknown (null).
+  assert.deepEqual(changed.map((c) => [c.key, c.from, c.to, c.by]), [['policy.auto_merge', null, false, 'olive'], ['workers', null, 1, 'olive']]);
+});
+
+test("auto_merge on is root's alone (#770, the owner's decision): the dashboard never asks for it, the coordinator refuses a forged request, and the helper refuses it; off is taken everywhere", { skip }, () => {
+  const m = machineInstance('am-on');
+  ownPolicy('am-on', m.deps);
+  const text = readFileSync(m.file, 'utf8');
+  const log = new EventLog(':memory:');
+  let asked = 0;
+  const request = () => String(++asked);
+  // The Policy form refuses before asking, naming the root command.
+  asRoot(() => assert.throws(() => applyPolicy({ path: m.file, cfg, values: { auto_merge: true }, eventsDb: join(m.T, 'e.db'), by: 'olive', request }), new RegExp(`auto_merge true: loosening it is an admin's, at a root shell \\(sudo ${BRAND.cli} policy set am-on auto_merge on\\)`)));
+  assert.equal(asked, 0);
+  assert.throws(() => requestPolicyChange(log, { args: ['set-policy', 'auto_merge', 'on'], by: 'olive', breakGlass: false }), MachineRequestError);
+  // A request written to the log some other way: the coordinator refuses it, and never runs the helper.
+  log.append('machine.requested', { id: 'mr-am', args: ['set-policy', 'auto_merge', 'on'], by: 'olive', via: 'policy', ask: null }, 'olive', 'human');
+  const calls: string[][] = [];
+  runMachineRequests({ log, instance: 'am-on', exec: helperStandIn('am-on', m.deps, calls) });
+  assert.deepEqual(calls, []);
+  assert.equal(machineRequests(log.read(0))[0]!.status, 'refused');
+  // The helper: on is usage (the process too), off is taken; root's `policy set` from a coordinator refuses on.
+  assert.equal(helper.parsePolicySet(['set-policy', 'auto_merge', 'on']), null);
+  assert.deepEqual(helper.parsePolicySet(['set-policy', 'auto_merge', 'off']), { key: 'auto_merge', value: 'off' });
+  const r = spawnSync(process.execPath, [helperSrc, 'set-policy', 'auto_merge', 'on'], { encoding: 'utf8', env: { PATH: process.env.PATH ?? '', SUDO_USER: 'wl-am-on' } });
+  assert.equal(r.status, 2, r.stderr);
+  assert.throws(() => setPolicy('am-on', 'auto_merge', 'on', 'wl-am-on', m.deps), /loosens the instance/);
+  assert.equal(readFileSync(m.file, 'utf8'), text, 'nothing written');
+  // Only root, at a root shell; then the dashboard may turn it off again.
+  setPolicy('am-on', 'auto_merge', 'on', null, m.deps);
+  assert.equal(checkRootStep('set-policy', ['auto_merge', 'off']).allowed, true);
+  asRoot(() => applyPolicy({ path: m.file, cfg, values: { auto_merge: false }, eventsDb: join(m.T, 'e.db'), by: 'olive', request }));
+  assert.equal(asked, 1);
+  // The Policy form offers only off, and names the root command for on.
+  const f = asRoot(() => policyForm(m.file)).fields.find((x) => x.key === 'auto_merge')!;
+  assert.equal(f.only, false);
+  assert.equal(f.root, `sudo ${BRAND.cli} policy set am-on auto_merge on`);
+  // `policy own` (setup, no flag) never takes over a coordinator's file with it on.
+  const n = machineInstance('am-own', POLICY.replace('auto_merge: false', 'auto_merge: true'));
+  assert.throws(() => ownPolicy('am-own', n.deps), /auto_merge: true.*--accept-loose/);
+});
+
+test("auto_merge on is never the dashboard's on ANY install: an unrecorded policy (laptop, cloud, VM, or a machine not taken over) refuses it too, naming the admin's route, writing and logging nothing; off is still written, and the form offers only off (#770)", { skip }, () => {
+  const m = machineInstance('unrec', POLICY.replace('auto_merge: false', 'auto_merge: true'));
+  const events = join(m.T, 'events.db');
+  const changed = () => (existsSync(events) ? new EventLog(events).read(0, ['settings.changed']).length : 0);
+  // Its coordinator's file, read as before (no record); turning auto_merge off is written there, as before.
+  assert.deepEqual(applyPolicy({ path: m.file, cfg, values: { auto_merge: false }, eventsDb: events, by: 'olive', machine: false }), [{ key: 'auto_merge', from: true, to: false }]);
+  assert.match(readFileSync(m.file, 'utf8'), /auto_merge: false/);
+  assert.equal(changed(), 1);
+  const off = readFileSync(m.file, 'utf8');
+  // On: refused, nothing written or logged. A laptop, cloud or VM install: an admin edits the file (or the Helm value).
+  assert.throws(() => applyPolicy({ path: m.file, cfg, values: { auto_merge: true }, eventsDb: events, by: 'olive', machine: false }), new RegExp(`auto_merge true: that is an admin's alone, never this form's \\(edit ${m.file.replace(/[.]/g, '\\.')} \\(auto_merge: true\\), or its Helm value\\); here it may only be false`));
+  // A machine install not taken over yet: root takes it over, then sets it.
+  assert.throws(() => applyPolicy({ path: m.file, cfg, values: { auto_merge: true }, eventsDb: events, by: 'olive', machine: true }), new RegExp(`\\(sudo ${BRAND.cli} policy own unrec, then sudo ${BRAND.cli} policy set unrec auto_merge on\\)`));
+  assert.equal(readFileSync(m.file, 'utf8'), off, 'nothing written');
+  assert.equal(changed(), 1, 'nothing logged');
+  // The form offers only off, naming the route.
+  const f = policyForm(m.file, undefined, true).fields.find((x) => x.key === 'auto_merge')!;
+  assert.deepEqual([f.only, f.root], [false, `sudo ${BRAND.cli} policy own unrec, then sudo ${BRAND.cli} policy set unrec auto_merge on`]);
+  // Inverted (the owner's decision, 2026-10-19, principle 6): land_mode and main_watch are tighten-only on an
+  // unrecorded policy too. Until then this line held `only` undefined for land_mode here ("the brief: auto_merge only").
+  const form = policyForm(m.file, undefined, true).fields;
+  assert.deepEqual(['land_mode', 'main_watch'].map((k) => form.find((x) => x.key === k)!.only), ['pr', 'auto']);
+});
+
+test("land_mode is tighten-only on the dashboard on EVERY install (the owner's decision, 2026-10-19, principle 6): an unrecorded policy can't be set to direct, nor main_watch off, from the Policy form; pr and auto still can; the tables hold every HELPER_ONLY key (#770)", { skip }, () => {
+  assert.deepEqual([...DASHBOARD_TIGHTEN_ONLY].sort(), Object.keys(HELPER_ONLY).sort(), 'every key the helper only tightens is tighten-only on the dashboard everywhere');
+  for (const machine of [false, true]) {
+    const m = machineInstance(`ld${machine ? 'm' : 'l'}`);
+    const events = join(m.T, 'events.db');
+    const before = readFileSync(m.file, 'utf8');
+    // direct (and main_watch off): refused, naming the admin's route; nothing written, nothing logged.
+    assert.throws(() => applyPolicy({ path: m.file, cfg, values: { land_mode: 'direct' }, eventsDb: events, by: 'olive', machine }), /land_mode direct: that is an admin's alone, never this form's .*here it may only be pr/);
+    assert.throws(() => applyPolicy({ path: m.file, cfg, values: { main_watch: 'off' }, eventsDb: events, by: 'olive', machine }), /main_watch off: that is an admin's alone, never this form's .*here it may only be auto/);
+    assert.equal(readFileSync(m.file, 'utf8'), before, 'nothing written');
+    assert.equal(existsSync(events) ? new EventLog(events).read(0, ['settings.changed']).length : 0, 0, 'nothing logged');
+    // Back to pr (an admin had set direct by hand): still the form's to do.
+    writeFileSync(m.file, before.replace('land_mode: pr', 'land_mode: direct'));
+    assert.deepEqual(applyPolicy({ path: m.file, cfg, values: { land_mode: 'pr' }, eventsDb: events, by: 'olive', machine }), [{ key: 'land_mode', from: 'direct', to: 'pr' }]);
+    assert.match(readFileSync(m.file, 'utf8'), /land_mode: pr/);
+  }
+});
+
+test("turning auto_merge off (and land_mode back to pr, main_watch back to auto) works on a sudo older than 1.9.10 too: listed whole in sudoers, so the dashboard asks and the helper runs it; anything else is still refused up front (#770)", { skip }, () => {
+  const m = machineInstance('oldoff');
+  ownPolicy('oldoff', m.deps);
+  // An admin's loosenings, at a root shell.
+  for (const [k, v] of [['auto_merge', 'on'], ['land_mode', 'direct'], ['main_watch', 'off']] as const) setPolicy('oldoff', k, v, null, m.deps);
+  const rules = join(m.T, 'helper-rules.json');
+  writeFileSync(rules, JSON.stringify({ sudo: '1.9.9', patterns_min: '1.9.10', left_out: ['add-project', 'stage-update-signer', 'discard-update-signer', 'claude-account-profiles', 'plugins', 'set-policy'] }));
+  const log = new EventLog(':memory:');
+  const request = (args: string[]) => requestPolicyChange(log, { args, by: 'olive', breakGlass: false }).id;
+  asRoot(() => applyPolicy({ path: m.file, cfg, values: { auto_merge: false, land_mode: 'pr', main_watch: 'auto' }, eventsDb: join(m.T, 'e.db'), by: 'olive', request, helperRulesFile: rules }));
+  assert.deepEqual(machineRequests(log.read(0)).map((r) => r.args), [['set-policy', 'land_mode', 'pr'], ['set-policy', 'auto_merge', 'off'], ['set-policy', 'main_watch', 'auto']]);
+  // The coordinator's next tick, through the helper (as root's sudo lets it on that sudo: the literal rules).
+  const calls: string[][] = [];
+  assert.equal(runMachineRequests({ log, instance: 'oldoff', exec: helperStandIn('oldoff', m.deps, calls) }), 3);
+  const p = asRoot(() => readPolicy(m.file).policy)!;
+  assert.deepEqual([p.auto_merge, p.land_mode, p.main_watch], [false, 'pr', 'auto']);
+  // A change only the pattern rule takes is still refused up front, nothing asked.
+  let asked = 0;
+  assert.throws(() => asRoot(() => applyPolicy({ path: m.file, cfg, values: { 'budget.daily_usd': 40 }, eventsDb: join(m.T, 'e.db'), by: 'olive', request: () => String(++asked), helperRulesFile: rules })), /older than 1\.9\.10/);
+  assert.equal(asked, 0);
+  // The machine CLI turns it off too: an admin at a root shell, or a coordinator through sudo.
+  setPolicy('oldoff', 'auto_merge', 'on', null, m.deps);
+  assert.equal(quietly(() => policyCommand('set', ['oldoff', 'auto_merge', 'off'], m.deps, true)).code, 0);
+  assert.equal(asRoot(() => readPolicy(m.file).policy)!.auto_merge, false);
+  setPolicy('oldoff', 'auto_merge', 'on', null, m.deps);
+  assert.deepEqual(setPolicy('oldoff', 'auto_merge', 'off', 'wl-oldoff', m.deps), { key: 'auto_merge', from: null, to: false });
+});
+
+test("auto_merge OFF from the dashboard works with root's lock held by a live writer, with one a dead writer left, with an oversized and with a corrupt policy.yaml: through root's helper to the kill switch, and the engine reads off in all four (#726 round 4)", { skip }, () => {
+  const states: [string, (m: ReturnType<typeof machineInstance>) => () => void][] = [
+    // onRealMachine: throws unless root's directory is inside this test's system root (#815).
+    ['off-live', () => { const h = liveHolder(); onRealMachine(POLICY_ROOT_DIR); writeFileSync(join(POLICY_ROOT_DIR, '.off-live.lock'), h.line); return h.stop; }],
+    ['off-dead', () => { const r = spawnSync(process.execPath, ['-e', '']); onRealMachine(POLICY_ROOT_DIR); writeFileSync(join(POLICY_ROOT_DIR, '.off-dead.lock'), `${r.pid} gone\n`); return () => {}; }],
+    ['off-huge', (m) => { coordinatorWrites(m, `${POLICY}# ${'x'.repeat(2 * 1024 * 1024)}\n`); return () => {}; }],
+    ['off-corrupt', (m) => { coordinatorWrites(m, 'version: 1\nbudget: [ {{{ :\n'); return () => {}; }],
+  ];
+  for (const [name, plant] of states) {
+    const m = machineInstance(name);
+    ownPolicy(name, m.deps);
+    setPolicy(name, 'auto_merge', 'on', null, m.deps); // an admin's, at a root shell
+    const done = plant(m);
+    try {
+      const log = new EventLog(':memory:');
+      const request = (args: string[]) => requestPolicyChange(log, { args, by: 'olive', breakGlass: false }).id;
+      // The Policy form asks for it without reading policy.yaml.
+      assert.deepEqual(asRoot(() => applyPolicy({ path: m.file, cfg, values: { auto_merge: false }, eventsDb: join(m.T, 'e.db'), by: 'olive', request })), [{ key: 'auto_merge', from: null, to: false }], name);
+      // The coordinator runs it through root's helper (its own argument check, then `policy set` as root).
+      const calls: string[][] = [];
+      assert.equal(runMachineRequests({ log, instance: name, exec: helperStandIn(name, { ...m.deps, lockWaitMs: 100 }, calls) }), 1, name);
+      assert.deepEqual(machineRequests(log.read(0)).map((r) => r.status), ['done'], name);
+      assert.equal(autoMergeKilled(name), true, name);
+      assert.equal(instanceAutoMerge(name, m.instances), false, `${name}: the engine reads off`);
+    } finally {
+      done();
+    }
+  }
+});
+
+test("on a sudo older than 1.9.10 (helper-rules.json leaves set-policy out), Settings and the Policy form refuse up front, naming the root command, and record no request", { skip }, () => {
+  const m = machineInstance('oldsudo');
+  ownPolicy('oldsudo', m.deps);
+  const rules = join(m.T, 'helper-rules.json');
+  let asked = 0;
+  const request = () => String(++asked);
+  // (A lowering: round 11 refuses a raise from the dashboard before anything else.)
+  const settings = () => asRoot(() => changeSetting({ policyPath: m.file, cfg, eventsDb: join(m.T, 'e.db'), key: 'daily_budget_usd', value: 30, by: cfg.project.owners.default, owner: true, request, helperRulesFile: rules }));
+  const form = () => asRoot(() => applyPolicy({ path: m.file, cfg, values: { 'budget.daily_usd': 40 }, eventsDb: join(m.T, 'e.db'), by: 'olive', request, helperRulesFile: rules }));
+  // As machine-helper.sh writes it on such a sudo; and as an earlier one wrote it, before set-policy existed.
+  for (const leftOut of [['add-project', 'stage-update-signer', 'discard-update-signer', 'claude-account-profiles', 'plugins', 'set-policy'], ['add-project', 'stage-update-signer', 'discard-update-signer', 'claude-account-profiles', 'plugins']]) {
+    writeFileSync(rules, JSON.stringify({ sudo: '1.9.9', patterns_min: '1.9.10', left_out: leftOut }));
+    assert.throws(settings, new RegExp(`sudo \\(1\\.9\\.9\\) is older than 1\\.9\\.10.*sudo ${BRAND.cli} policy set oldsudo settings\\.daily_budget_usd 30`));
+    assert.throws(form, new RegExp(`sudo \\(1\\.9\\.9\\) is older than 1\\.9\\.10.*sudo ${BRAND.cli} policy set oldsudo budget\\.daily_usd 40`));
+    assert.equal(asked, 0, 'no request recorded');
+  }
+  // A sudo that takes the pattern (nothing left out), or no record at all: asked of the coordinator, as before.
+  writeFileSync(rules, JSON.stringify({ sudo: '1.9.15', patterns_min: '1.9.10', left_out: [] }));
+  assert.ok(settings().requested);
+  assert.equal(form().length, 1);
+  assert.equal(asked, 2);
+});
+
+test("root's helper refuses sandbox: false and allow_same_user: true from the dashboard (and a loosening of land_mode or main_watch)", { skip }, () => {
+  const loosen = [['sandbox', 'off'], ['allow_same_user', 'on'], ['land_mode', 'direct'], ['main_watch', 'off'], ['auto_merge', 'on'], ['lanes', 'none'], ['network_allow', 'none']];
+  for (const [k, v] of loosen) {
+    assert.equal(helper.parsePolicySet(['set-policy', k!, v!]), null, `${k} ${v}`);
+    assert.equal(checkRootStep('set-policy', [k!, v!]).allowed, false, `${k} ${v}`);
+    // The helper itself, as a process: usage, nothing run.
+    const r = spawnSync(process.execPath, [helperSrc, 'set-policy', k!, v!], { encoding: 'utf8', env: { PATH: process.env.PATH ?? '', SUDO_USER: 'wl-loose' } });
+    assert.equal(r.status, 2, `${k} ${v}: ${r.stderr}`);
+    assert.match(r.stderr, /usage: /);
+  }
+  assert.ok(helper.parsePolicySet(['set-policy', 'land_mode', 'pr']) && helper.parsePolicySet(['set-policy', 'main_watch', 'auto']), 'tightening is taken');
+  const m = machineInstance('helper-loose');
+  ownPolicy('helper-loose', m.deps);
+  const text = readFileSync(m.file, 'utf8');
+  const log = new EventLog(':memory:');
+  assert.throws(() => requestPolicyChange(log, { args: ['set-policy', 'sandbox', 'off'], by: 'olive', breakGlass: false }), MachineRequestError);
+  // The Policy form refuses before asking anything.
+  let asked = 0;
+  asRoot(() => assert.throws(() => applyPolicy({ path: m.file, cfg, values: { land_mode: 'direct' }, eventsDb: join(m.T, 'e.db'), by: 'olive', request: () => String(++asked) }), /loosening it is an admin's/));
+  assert.equal(asked, 0);
+  // A request written to the log some other way: the coordinator refuses it, and never runs the helper.
+  log.append('machine.requested', { id: 'mr-x', args: ['set-policy', 'allow_same_user', 'on'], by: 'olive', via: 'policy', ask: null }, 'olive', 'human');
+  const calls: string[][] = [];
+  runMachineRequests({ log, instance: 'helper-loose', exec: helperStandIn('helper-loose', m.deps, calls) });
+  assert.deepEqual(calls, []);
+  assert.equal(machineRequests(log.read(0))[0]!.status, 'refused');
+  assert.equal(readFileSync(m.file, 'utf8'), text);
+});
+
+test("the machine helper's set-policy tables are the engine's (its keys, and the one value of each a coordinator may set); a dashboard value passes as one plain word", () => {
+  assert.deepEqual(helper.POLICY_SET_KEYS, POLICY_SET_KEYS);
+  assert.deepEqual(helper.POLICY_ONLY, HELPER_ONLY);
+  const windows = [{ from: '09:00', to: '17:00' }, { from: '22:00', to: '06:00' }];
+  assert.equal(encodePolicyValue('settings.run_windows', windows), '0900-1700+2200-0600');
+  assert.deepEqual(decodePolicyValue('settings.run_windows', encodePolicyValue('settings.run_windows', windows)!), windows);
+  assert.equal(encodePolicyValue('settings.run_windows', []), 'none');
+  assert.equal(encodePolicyValue('auto_merge', 'yes'), null);
+  assert.equal(encodePolicyValue('budget.daily_usd', 12.5), '12.5');
+  assert.equal(encodePolicyValue('sandbox', false), null);
+  for (const [k, v] of [['settings.workers', '3'], ['settings.run_windows', '0900-1700'], ['automations.enabled', 'off'], ['settings.stuck_guard', 'dry-run']]) assert.ok(helper.parsePolicySet(['set-policy', k!, v!]), `${k} ${v}`);
 });
 
 /** `policyCommand`'s exit code, its output kept off the test's. */
@@ -563,7 +819,7 @@ ownPolicy(a.name, { home: () => a.home, uid: () => a.uid, rootUid: a.uid, rootGi
   assert.deepEqual(setPolicy('died', 'auto_merge', 'off', 'wl-died', { ...m.deps, lockWaitMs: 100 }), { key: 'auto_merge', from: null, to: false });
   assert.equal(autoMergeKilled('died'), true);
   // The next root writer breaks the dead holder's lock and goes on (here: an admin retaking the file, checked).
-  ownPolicy('died', { ...m.deps, lockWaitMs: 100 }, { retake: true });
+  ownPolicy('died', { ...m.deps, lockWaitMs: 100 }, { retake: true, acceptLoose: true });
   assert.equal(existsSync(lock), false);
   assert.equal(asRoot(() => readPolicy(m.file)).policy?.auto_merge, false, 'still off: only an admin turns it on');
 });
@@ -654,4 +910,170 @@ test("auto_merge off is root's kill switch alone: it opens no policy.yaml and no
   renameSync(flag, join(m.T, 'gone-dir'));
   writeFileSync(join(d, 'auto-merge-off.disarmed'), '');
   assert.equal(autoMergeKilled('kill'), true, 'an armed name, whatever follows');
+});
+
+// Every loosening key the coordinator's route takes, with root's value, one looser and (where there is one) one tighter.
+const CEILING_CASES: [key: string, root: string, looser: string[], tighter: string | null][] = [
+  ['budget.daily_usd', '10', ['11'], '5'],
+  ['agents.max_workers', '1', ['2'], null],
+  ['automations.enabled', 'off', ['on'], null],
+  ['settings.workers', '1', ['2'], null],
+  ['settings.daily_budget_usd', '10', ['11'], '5'],
+  ['settings.ci_repair.enabled', 'off', ['on'], null],
+  ['settings.ci_repair.max_fixes_per_pr', '2', ['3'], '1'],
+  ['settings.run_windows', '0900-1700', ['0800-1700', '0900-1800', 'none', '2200-0600'], '1000-1600'],
+  ['settings.research.max_searches_per_day', '5', ['6'], '4'],
+  ['settings.research.max_fetches_per_day', '5', ['6'], '4'],
+  ['settings.research.max_usd_per_day', '2', ['3'], '1'],
+  ['settings.research.repo_access', 'off', ['on'], null],
+  ['settings.intake.reports_per_sender_per_day', '5', ['6'], '4'],
+  ['settings.intake.drafts_per_day', '5', ['6'], '4'],
+  ['settings.intake.max_usd_per_day', '2', ['3'], '1'],
+  ['settings.stuck_guard', 'dry-run', ['off'], 'on'],
+  ['settings.chat_attachments.max_file_mb', '5', ['6'], '4'],
+  ['settings.chat_attachments.max_message_mb', '10', ['11'], '9'],
+  ['settings.chat_attachments.retention_days', '7', ['8'], '6'],
+];
+
+test("the coordinator's route only tightens, every loosening key, on a root policy: the value in effect is the ceiling; lowering works, raising back doesn't; root's command raises it (#726 rounds 10 and 11, the owner's decision of 2026-10-19)", { skip }, () => {
+  const CEILING_KEYS = (gate as Record<string, unknown>).CEILING_KEYS as string[] | undefined;
+  assert.ok(CEILING_KEYS, 'the tighten-only keys (src/policy-gate.ts CEILING_KEYS)');
+  assert.deepEqual([...CEILING_KEYS].sort(), Object.keys(POLICY_SET_KEYS).filter((k) => !Object.hasOwn(HELPER_ONLY, k)).sort(), 'every key policy set takes but the HELPER_ONLY ones');
+  assert.deepEqual(CEILING_CASES.map(([k]) => k).sort(), [...CEILING_KEYS].sort(), 'every key is tested');
+  const m = machineInstance('ceil');
+  ownPolicy('ceil', m.deps);
+  for (const [key, root, looser, tighter] of CEILING_CASES) {
+    // An admin, at a root shell: the value in effect.
+    setPolicy('ceil', key, root, null, m.deps);
+    // The coordinator's route (the helper runs `policy set` with SUDO_USER wl-<instance>): never looser.
+    for (const l of looser) assert.throws(() => setPolicy('ceil', key, l, 'wl-ceil', m.deps), /would loosen it .*policy set ceil /, `${key} ${l}`);
+    if (tighter) {
+      // Tighter: allowed; back up to root's value: now a raise, so refused (round 11; round 10 allowed it).
+      assert.equal(setPolicy('ceil', key, tighter, 'wl-ceil', m.deps).key, key, `${key} ${tighter}`);
+      assert.throws(() => setPolicy('ceil', key, root, 'wl-ceil', m.deps), /would loosen it/, `${key} back to ${root}`);
+    }
+    // Root's command raises it; the coordinator's route may then keep it there.
+    setPolicy('ceil', key, looser[0]!, null, m.deps);
+    assert.equal(setPolicy('ceil', key, looser[0]!, 'wl-ceil', m.deps).key, key, `${key} ${looser[0]} after root raised it`);
+  }
+});
+
+test("from the default policy.yaml a new instance gets, root's takeover leaves no Settings key loosenable: Settings and the helper's route refuse each raise, naming root's command, and lowering still goes (#726 round 11; the reviewer's measured keys)", { skip }, () => {
+  const m = machineInstance('dflt');
+  ownPolicy('dflt', m.deps);
+  let asked = 0;
+  const request = () => String(++asked);
+  for (const [key, value, arg] of [['research.repo_access', true, 'on'], ['ci_repair.enabled', true, 'on'], ['stuck_guard', 'off', 'off'], ['chat_attachments.retention_days', 365, '365'], ['chat_attachments.max_message_mb', 250, '250']] as const) {
+    assert.throws(() => asRoot(() => changeSetting({ policyPath: m.file, cfg, eventsDb: join(m.T, 'e.db'), key, value, by: cfg.project.owners.default, owner: true, request })), new RegExp(`settings\\.${key.replace(/\./g, '\\.')} .*(would loosen it|isn't in policy\\.yaml).*policy set dflt settings\\.${key.replace(/\./g, '\\.')} ${arg}`), `Settings ${key}`);
+    assert.throws(() => setPolicy('dflt', `settings.${key}`, arg, 'wl-dflt', m.deps), /would loosen it|isn't in policy\.yaml/, `helper ${key}`);
+  }
+  assert.equal(asked, 0, 'nothing asked');
+  // Lowering, and turning a switch off: queued for the helper, which runs it.
+  assert.ok(asRoot(() => changeSetting({ policyPath: m.file, cfg, eventsDb: join(m.T, 'e.db'), key: 'chat_attachments.retention_days', value: 7, by: cfg.project.owners.default, owner: true, request })).requested);
+  assert.equal(setPolicy('dflt', 'settings.chat_attachments.retention_days', '7', 'wl-dflt', m.deps).key, 'settings.chat_attachments.retention_days');
+  assert.equal(setPolicy('dflt', 'settings.ci_repair.enabled', 'off', 'wl-dflt', m.deps).key, 'settings.ci_repair.enabled');
+});
+
+test("on a root policy, Settings queues only a tightening root's `policy set` can prove: one it can't (ci_repair's cap, run windows, while the repo's config decides them) is refused up front, naming root's command, and nothing is asked; once policy.yaml holds the value, the same tightening is queued and the helper runs it (#726 round 12)", { skip }, () => {
+  // Through 72ead9a5 Settings queued both, and root's helper always refused them ("the value in effect isn't in policy.yaml").
+  const m = machineInstance('prov');
+  ownPolicy('prov', m.deps);
+  const asked: string[][] = [];
+  const request = (args: string[]) => (asked.push(args), String(asked.length));
+  const settings = (key: string, value: unknown) => asRoot(() => changeSetting({ policyPath: m.file, cfg, eventsDb: join(m.T, 'e.db'), key, value, by: cfg.project.owners.default, owner: true, request }));
+  const narrow = [{ from: '09:00', to: '17:00' }];
+  assert.throws(() => settings('ci_repair.max_fixes_per_pr', 1), new RegExp(`settings\\.ci_repair\\.max_fixes_per_pr 1: .*policy set prov settings\\.ci_repair\\.max_fixes_per_pr 1`));
+  assert.throws(() => settings('run_windows', narrow), new RegExp(`settings\\.run_windows .*policy set prov settings\\.run_windows 0900-1700`));
+  assert.equal(asked.length, 0, 'nothing asked');
+  // Turning ci_repair off is provable from the file alone: queued, and the helper runs it.
+  assert.ok(settings('ci_repair.enabled', false).requested);
+  assert.equal(setPolicy('prov', 'settings.ci_repair.enabled', 'off', 'wl-prov', m.deps).to, false);
+  // An admin puts the values in policy.yaml; from then on the dashboard's tightening is provable, queued and run.
+  setPolicy('prov', 'settings.ci_repair.max_fixes_per_pr', '2', null, m.deps);
+  setPolicy('prov', 'settings.run_windows', '0800-1800', null, m.deps);
+  assert.ok(settings('ci_repair.max_fixes_per_pr', 1).requested);
+  assert.ok(settings('run_windows', narrow).requested);
+  assert.deepEqual(asked.slice(1), [['set-policy', 'settings.ci_repair.max_fixes_per_pr', '1'], ['set-policy', 'settings.run_windows', '0900-1700']]);
+  for (const [, key, arg] of asked.slice(1)) assert.equal(setPolicy('prov', key!, arg!, 'wl-prov', m.deps).key, key);
+});
+
+test("root's `policy set` on the coordinator's route compares an intake cap with the one the engine applies (intake.yaml's beside policy.yaml), and Settings on a root policy refuses that raise up front; an intake.yaml root can't read refuses all but a value policy.yaml sets (#726 round 12)", { skip }, () => {
+  // Through 72ead9a5 root compared with the engine's defaults (10/20/2), so with intake.yaml at 5/3/1 it took 20.
+  const m = machineInstance('pint');
+  ownPolicy('pint', m.deps);
+  writeFileSync(join(m.dir, 'intake.yaml'), 'version: 1\ncaps: { drafts_per_day: 5, reports_per_sender_per_day: 3, max_usd_per_day: 1 }\n', { mode: 0o600 });
+  const asked: string[][] = [];
+  const request = (args: string[]) => (asked.push(args), String(asked.length));
+  assert.throws(() => setPolicy('pint', 'settings.intake.drafts_per_day', '20', 'wl-pint', m.deps), /intake\.drafts_per_day 20 would loosen it \(now 5\)/);
+  assert.throws(() => setPolicy('pint', 'settings.intake.max_usd_per_day', '2', 'wl-pint', m.deps), /max_usd_per_day 2 would loosen it \(now 1\)/);
+  assert.throws(() => asRoot(() => changeSetting({ policyPath: m.file, cfg, eventsDb: join(m.T, 'e.db'), key: 'intake.drafts_per_day', value: 20, by: cfg.project.owners.default, owner: true, request })), /would loosen it \(now 5\)/);
+  assert.equal(asked.length, 0, 'nothing asked');
+  assert.equal(setPolicy('pint', 'settings.intake.drafts_per_day', '4', 'wl-pint', m.deps).to, 4);
+  // A link in its place: root never follows it, so it can't tell what applies, and refuses (fail closed).
+  renameSync(join(m.dir, 'intake.yaml'), join(m.T, 'intake.yaml'));
+  symlinkSync(join(m.T, 'intake.yaml'), join(m.dir, 'intake.yaml'));
+  assert.throws(() => setPolicy('pint', 'settings.intake.reports_per_sender_per_day', '2', 'wl-pint', m.deps), /reports_per_sender_per_day 2: .*intake\.yaml/);
+  assert.equal(setPolicy('pint', 'settings.intake.drafts_per_day', '3', 'wl-pint', m.deps).to, 3, "policy.yaml's own value: still provable");
+});
+
+// Through e386a668 Settings read intake.yaml with the engine's loader (links followed, no size cap) and queued a
+// lowering root's helper then refused ("intake.yaml beside it doesn't load"), for each of these shapes.
+const INTAKE_CAPS = 'version: 1\ncaps: { drafts_per_day: 5, reports_per_sender_per_day: 3, max_usd_per_day: 1 }\n';
+const INTAKE_SHAPES: [string, (dir: string, T: string) => void][] = [
+  ['a symlink', (dir, T) => (writeFileSync(join(T, 'real-intake.yaml'), INTAKE_CAPS, { mode: 0o600 }), symlinkSync(join(T, 'real-intake.yaml'), join(dir, 'intake.yaml')))],
+  ['a dangling symlink', (dir, T) => symlinkSync(join(T, 'no-such-intake.yaml'), join(dir, 'intake.yaml'))],
+  ['a hard link', (dir, T) => (writeFileSync(join(dir, 'intake.yaml'), INTAKE_CAPS, { mode: 0o600 }), linkSync(join(dir, 'intake.yaml'), join(T, 'second-name.yaml')))],
+  ["a file over root's size cap", (dir) => writeFileSync(join(dir, 'intake.yaml'), `${INTAKE_CAPS}${'# padding\n'.repeat(210_000)}`, { mode: 0o600 })],
+];
+for (const [i, [what, make]] of INTAKE_SHAPES.entries()) {
+  test(`on a root policy, Settings reads intake.yaml as root's helper will (no link, one name, root's size cap) before it asks: ${what} is refused up front, naming root's command, and nothing is queued (#726 round 13)`, { skip }, () => {
+    const name = `ish${i}`;
+    const m = machineInstance(name);
+    ownPolicy(name, m.deps);
+    make(m.dir, m.T);
+    const asked: string[][] = [];
+    const request = (args: string[]) => (asked.push(args), String(asked.length));
+    assert.throws(() => asRoot(() => changeSetting({ policyPath: m.file, cfg, eventsDb: join(m.T, 'e.db'), key: 'intake.drafts_per_day', value: 4, by: cfg.project.owners.default, owner: true, request })), new RegExp(`intake\\.drafts_per_day 4: .*intake\\.yaml.*policy set ${name} settings\\.intake\\.drafts_per_day 4`), what);
+    assert.equal(asked.length, 0, `${what}: nothing asked`);
+    // Root's helper route agrees: it would refuse the same change.
+    assert.throws(() => setPolicy(name, 'settings.intake.drafts_per_day', '4', `wl-${name}`, m.deps), /intake\.yaml/, `${what}: root`);
+  });
+}
+
+test("an install root never took over (a laptop, cloud or VM; a machine not taken over yet) also only tightens from the dashboard: each loosening key's raise is refused, naming that install's route; lowering is written (#726 round 11, the owner's decision of 2026-10-19)", { skip }, () => {
+  for (const machine of [false, true]) {
+    const u = machineInstance(`unr${machine ? 'm' : 'l'}`);
+    const events = join(u.T, 'e.db');
+    const route = machine ? new RegExp(`policy own unr${machine ? 'm' : 'l'}, then .*policy set`) : /edit .*policy\.yaml \(.*\), or its Helm value/;
+    for (const values of [{ 'budget.daily_usd': 90 }, { 'agents.max_workers': 5 }, { 'automations.enabled': true }] as Record<string, unknown>[]) {
+      assert.throws(() => applyPolicy({ path: u.file, cfg, values, eventsDb: events, by: 'olive', machine }), (e: Error) => /would loosen it/.test(e.message) && route.test(e.message), JSON.stringify(values));
+    }
+    for (const [key, value] of [['research.repo_access', true], ['ci_repair.enabled', true], ['stuck_guard', 'off'], ['chat_attachments.retention_days', 365], ['workers', 3], ['daily_budget_usd', 45]] as const) {
+      assert.throws(() => changeSetting({ policyPath: u.file, cfg, eventsDb: events, key, value, by: cfg.project.owners.default, owner: true, machine }), (e: Error) => /would loosen it/.test(e.message) && route.test(e.message), `${key} ${String(value)}`);
+    }
+    // Lowering is written, as on main.
+    assert.deepEqual(applyPolicy({ path: u.file, cfg, values: { 'budget.daily_usd': 45 }, eventsDb: events, by: 'olive', machine }), [{ key: 'budget.daily_usd', from: 50, to: 45 }]);
+    assert.match(readFileSync(u.file, 'utf8'), /daily_usd: 45/);
+  }
+});
+
+test("the reviewer's case: an admin's budget, workers, automations off and ci_repair off at a root shell stay so; the helper's route, the Policy form and Settings can't set any of them back (#726 round 10)", { skip }, () => {
+  // (The reviewer's admin set budget 10 and workers 1; here 45 and 4, so this example repo's own config, which asks
+  // for at least 40 and 4, still loads.)
+  const m = machineInstance('reopen');
+  ownPolicy('reopen', m.deps);
+  for (const [k, v] of [['budget.daily_usd', '45'], ['agents.max_workers', '4'], ['automations.enabled', 'off'], ['settings.ci_repair.enabled', 'off']] as const) setPolicy('reopen', k, v, null, m.deps);
+  const text = readFileSync(m.file, 'utf8');
+  for (const [k, v] of [['budget.daily_usd', '50'], ['agents.max_workers', '5'], ['automations.enabled', 'on'], ['settings.ci_repair.enabled', 'on']] as const) assert.throws(() => setPolicy('reopen', k, v, 'wl-reopen', m.deps), /would loosen it/, `${k} ${v}`);
+  assert.equal(readFileSync(m.file, 'utf8'), text, 'nothing written');
+  // Up front, nothing asked: the Policy form and Settings.
+  let asked = 0;
+  const request = () => String(++asked);
+  assert.throws(() => asRoot(() => applyPolicy({ path: m.file, cfg, values: { 'budget.daily_usd': 50 }, eventsDb: join(m.T, 'e.db'), by: 'olive', request })), /budget\.daily_usd 50 would loosen it \(now 45\)/);
+  assert.throws(() => asRoot(() => applyPolicy({ path: m.file, cfg, values: { 'automations.enabled': true }, eventsDb: join(m.T, 'e.db'), by: 'olive', request })), /automations\.enabled true would loosen it \(now false\)/);
+  assert.throws(() => asRoot(() => changeSetting({ policyPath: m.file, cfg, eventsDb: join(m.T, 'e.db'), key: 'ci_repair.enabled', value: true, by: cfg.project.owners.default, owner: true, request })), /settings\.ci_repair\.enabled true would loosen it \(now false\)/);
+  assert.equal(asked, 0, 'nothing asked');
+  // Lowering still goes: queued for the helper.
+  asRoot(() => applyPolicy({ path: m.file, cfg, values: { 'budget.daily_usd': 42 }, eventsDb: join(m.T, 'e.db'), by: 'olive', request }));
+  assert.equal(asked, 1);
 });

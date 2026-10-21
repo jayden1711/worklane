@@ -29,7 +29,7 @@ export interface MachineRequest {
   /** The helper's arguments: set-slots <n>, set-updates on|off, set-test-slots <n>, add-project <name> <owner/repo>, claude-account status|use|remove|failover, tailscale install|up|serve|public-url. */
   args: string[];
   by: string;
-  via: 'settings' | 'ask' | 'add-project' | 'claude-account' | 'tailscale' | 'plugins';
+  via: 'settings' | 'ask' | 'add-project' | 'claude-account' | 'tailscale' | 'plugins' | 'policy';
   ask: string | null;
   /** Asked for on the owner's break-glass (no person named), which needs no machine owner. */
   breakGlass: boolean;
@@ -135,10 +135,20 @@ export function requestAddProject(log: EventLog, r: { name: unknown; repo: unkno
  * needed, because each step is for this instance alone (the helper takes it from sudo) and none approves anything (a
  * root admin confirms at a root shell). The helper's allowlist is checked here, and again by the coordinator.
  */
-export function requestPluginStep(log: EventLog, r: { args: string[]; by: string; breakGlass: boolean }): MachineRequest {
+export function requestPluginStep(log: EventLog, r: { args: string[]; by: string; breakGlass: boolean; via?: 'plugins' | 'policy' }): MachineRequest {
   const why = machineRefusal(r.args);
   if (why) throw new MachineRequestError(why, 400);
   const id = `mr-${randomBytes(6).toString('hex')}`;
-  log.append('machine.requested', { id, args: [...r.args], by: r.by, via: 'plugins', ask: null, ...(r.breakGlass ? { breakGlass: true } : {}) }, r.by, 'human');
+  log.append('machine.requested', { id, args: [...r.args], by: r.by, via: r.via ?? 'plugins', ask: null, ...(r.breakGlass ? { breakGlass: true } : {}) }, r.by, 'human');
   return machineRequests(log.read(0, [...MACHINE_EVENTS])).find((x) => x.id === id)!;
+}
+
+/**
+ * Record a change to a root policy.yaml (src/policy-gate.ts) for the coordinator to run through root's helper
+ * (`set-policy <key> <value>`, for the asking coordinator's instance alone). The instance's owner may ask, as for a
+ * plugin step (the caller checked the role): it changes this instance only, and the helper refuses any loosening.
+ */
+export function requestPolicyChange(log: EventLog, r: { args: string[]; by: string; breakGlass: boolean }): MachineRequest {
+  if (r.args[0] !== 'set-policy') throw new MachineRequestError('not a policy change', 400);
+  return requestPluginStep(log, { ...r, via: 'policy' });
 }

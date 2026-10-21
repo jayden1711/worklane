@@ -215,7 +215,12 @@ policy_text() {
   [ "$am" = true ] && am=on || am=off
   # Root's kill switch says off, whatever policy.yaml says (src/policy-kill.ts).
   if auto_merge_killed "$name"; then am="off (root's kill switch)"; fi
-  echo "auto_merge $am, \$${usd:-?}/day, ${w:-?} workers: change them as root with $ENGINE_CLI policy set $name <key> <value>"
+  # The dashboard's route is root's helper's set-policy, whose sudoers rule a sudo older than 1.9.10 leaves out (lib.sh).
+  if sudo_regex_ok; then
+    echo "auto_merge $am, \$${usd:-?}/day, ${w:-?} workers: change them in the dashboard's Settings (through root's helper), or as root with $ENGINE_CLI policy set $name <key> <value>; turning auto_merge on is root's alone"
+  else
+    echo "auto_merge $am, \$${usd:-?}/day, ${w:-?} workers: change them as root with $ENGINE_CLI policy set $name <key> <value> (this machine's sudo is older than 1.9.10, so the dashboard only turns auto_merge off, land_mode to pr and main_watch to auto)"
+  fi
 }
 # Done only once the policy is root's (issue #726): an earlier install's, which its coordinator user could rewrite, is
 # made root's on a rerun, its content kept, and its isolation and merge keys shown.
