@@ -78,6 +78,7 @@ const REFUSALS_FILE = 'src/os/system-paths.ts';
 /** In REFUSALS_FILE: the machine's locations as root sees them, never moved under the test's root. */
 const REAL_PATHS = new Set(['asRoot', 'SYSTEM_ROOTS']);
 /** The guard: test/isolate.ts onRealMachine. */
+// check-table: never-shrink
 const GUARD = { file: 'test/isolate.ts', fn: 'onRealMachine' };
 
 /** fs functions that create, write, move or remove a path: which arguments they write. */

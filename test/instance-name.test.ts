@@ -25,7 +25,9 @@ const helper = createRequire(import.meta.url)(join(machineDir, `${BRAND.cli}-mac
 /** Names that are another's: each prefix, suffix and exact name the rules refuse. */
 const REFUSED = ['exp-shop', 'score-shop', 'egress', 'test-foo', 'test-a-b', 'ci-x', 'ci-shop', 'dashboard-shop', 'dash', 'hub', 'hub-setup', 'update', 'tailscale', 'claude-account', 'agent', 'eval', 'work', 'shop-agent', 'shop-eval', 'shop-work', 'shop-mcp', 'shop-mcpc', 'shop-mcpctl', 'plugin-fetch-shop', 'mcp', 'mcpc', 'mcpctl'];
 /** Names that stay fine, hyphens and all (test and ci themselves: CI runs an instance named ci). */
+// check-table: never-grow
 const ALLOWED = ['shop', 'a', 'a-b-c', 'test', 'ci', 'exp', 'score', 'expert', 'egresses', 'tests', 'testx', 'cix', 'my-test-app', 'shop-ci', 'agents', 'dashboards', 'hubby', 'abcdefghijklmnopqrstu', 'mcps', 'shop-mcps', 'plugin-fetch', 'plugin-shop'];
+// check-table: never-shrink
 const BAD_SHAPE = ['', 'Shop', '1a', '-a', 'a_b', 'a b', 'abcdefghijklmnopqrstuv'];
 
 /** lib.sh's answer for each name: its message, or '' when the name may be an instance's. */
