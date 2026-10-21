@@ -107,6 +107,5 @@ test('#890: a project with no secret paths and no task: nothing added, and nothi
   const { dir } = exampleProject();
   const f = join(dir, '.worklane', 'guardrails.yaml');
   writeFileSync(f, readFileSync(f, 'utf8').replace(/^secret_paths:\n(?: {2}- .*\n)+/m, 'secret_paths: []\n'));
-  // No secret or hidden entry; only, in the sandbox, the places task checkouts are made, hidden whole (#890 r11, r13).
-  assert.deepEqual(runReadDenials({ cwd: dir, home: '/h' }), { paths: [], sandboxOnly: [join(dir, '.claude', 'worktrees'), join(projectStateDir(dir), 'worktrees')] });
+  assert.deepEqual(runReadDenials({ cwd: dir, home: '/h' }), { paths: [] });
 });

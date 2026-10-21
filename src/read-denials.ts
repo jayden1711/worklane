@@ -7,7 +7,7 @@
 // with everything under it; a trailing `/**` means the directory; any other glob is expanded to what exists each
 // time a command is wrapped, following symlinked directories. A path that doesn't exist then hides nothing, and `[`
 // `]` are glob syntax there (`?` is any one character but "/").
-import { existsSync, lstatSync, mkdirSync, readdirSync, realpathSync, statSync } from 'node:fs';
+import { existsSync, lstatSync, readdirSync, realpathSync, statSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, posix, resolve } from 'node:path';
 import { BRAND } from './brand.js';
 import { ConfigInvalid, loadConfig, loadConfigAt, readRegular } from './config/load.js';
@@ -65,13 +65,14 @@ function capPerCheckout(entries: Set<string>, own: string[], checkouts: string[]
  * decision, 2026-10-21): each linked worktree git lists, and each directory directly in a place task checkouts are
  * made (`places`: the project's worktree root and the engine's own, unless the place holds a `keep` path), a checkout
  * git no longer lists among them. Never one that is, or holds, the run's own checkout (`own`) or a path in `keep` (the
- * main checkout, the common git directory and its stores), compared as written and by real path.
+ * main checkout, the common git directory and the task file), compared as written and by real path. An object store
+ * is not kept: one inside another checkout or a place refuses the run first (storesOutsideOthers).
  * WHY: a pattern worked out in another checkout costs mounts there, and a glob is expanded again by the sandbox at
  * each command: 3000 files a `**` glob matched in one worktree pushed every other run past bwrap's argument limit
  * (B5glob, measured by the round-8 delta check). One mount per checkout bounds that, and no run reads another task's
  * checkout at all. A checkout made after the start is covered only by the globs over `places` (see runReadDenials).
  */
-function siblingCheckouts(linked: string[], places: string[], own: string[], keep: string[], cwd: string, create: boolean): { siblings: string[]; places: string[] } | { error: string } {
+function siblingCheckouts(linked: string[], places: string[], own: string[], keep: string[], cwd: string): { siblings: string[]; places: string[] } | { error: string } {
   const forms = (p: string) => [...new Set([resolve(p), realOrNull(p) ?? resolve(p)])];
   const holds = (paths: string[]) => {
     const all = paths.flatMap(forms);
@@ -89,16 +90,9 @@ function siblingCheckouts(linked: string[], places: string[], own: string[], kee
     // checkouts (the instance's task files and bundles beside the repository): only the worktrees git lists there are
     // hidden.
     if (holdsMain(place)) continue;
-    // Made now if it isn't there yet (round 13), so it is hidden whole from the start: a worktree made in it later
-    // (the first one, after a main-checkout run began) is hidden too, never read or counted entry by entry. Only in a
-    // git repository (`create`): outside one there are no task checkouts to make there.
-    if (create) {
-      try {
-        mkdirSync(place, { recursive: true });
-      } catch (e) {
-        return { error: `${place}, where task checkouts are made, can't be created (${(e as NodeJS.ErrnoException).code ?? firstLine(e)}), so a checkout made there later can't be hidden` };
-      }
-    }
+    // Never made here (round 14): a place may come from a config the run's agent can write, and this runs as the
+    // coordinator, outside any sandbox (round 13 made one under .git/hooks, measured). The coordinator makes its own
+    // places at its start (src/coordinator/recovery.ts); one that isn't there is left to the per-pattern globs.
     // Hidden whole in the sandbox, so a checkout made there after the start is hidden too (round 10's open B5glob
     // case): the run's own checkout beneath it is bound back by the sandbox as its cwd, which it may write (measured,
     // srt 0.0.78 and bwrap: read, write and git there work). Only when the cwd is that checkout: a cwd below it would
@@ -116,6 +110,21 @@ function siblingCheckouts(linked: string[], places: string[], own: string[], kee
     for (const e of entries) if (e.isDirectory()) found.add(join(place, e.name));
   }
   return { siblings: [...found].filter((c) => c !== '/' && !holdsKept(c)).sort(), places: whole };
+}
+
+/**
+ * The first object store that lies in one of `others` (another task's checkout, or a place they are made), compared
+ * as written and by real path; null when none does. A place that holds one of `kept` (the main checkout, the common
+ * git directory: a worktree root of "..") isn't one of them: the common directory is a store and sits there.
+ */
+function storeInOthers(stores: string[], others: string[], kept: string[]): { store: string; other: string } | null {
+  const forms = (p: string) => [...new Set([resolve(p), realOrNull(p) ?? resolve(p)])];
+  const under = (p: string, d: string) => forms(p).some((f) => forms(d).some((g) => f === g || f.startsWith(`${g === '/' ? '' : g}/`)));
+  for (const other of others) {
+    if (kept.some((k) => under(k, other))) continue;
+    for (const store of stores) if (under(store, other)) return { store, other };
+  }
+  return null;
 }
 
 const GLOB = /[*?]/;
@@ -646,9 +655,13 @@ export function runReadDenials(o: { cwd: string; home: string | undefined; taskF
   const base = main ?? root;
   const taskPlaces = [...new Set([...worktreeRoots.map((w) => resolve(base, w)), join(projectStateDir(base), 'worktrees')])];
   // Every other task checkout is hidden whole (the owner's decision, round 10), always: see siblingCheckouts.
-  const other = siblingCheckouts(repo.linked, taskPlaces, [root, ...repo.checkouts.slice(0, 1)], [...(main ? [main] : []), ...repo.stores, ...(repo.common ? [repo.common] : []), ...(o.taskFile ? [o.taskFile] : [])], o.cwd, repo.common !== null);
+  const other = siblingCheckouts(repo.linked, taskPlaces, [root, ...repo.checkouts.slice(0, 1)], [...(main ? [main] : []), ...(repo.common ? [repo.common] : []), ...(o.taskFile ? [o.taskFile] : [])], o.cwd);
   if ('error' in other) return other;
   const { siblings } = other;
+  // F2 (round 14): an object store must never sit in another checkout or a place: one there (an alternates line a
+  // main-checkout role wrote, naming a directory in a sibling) kept that sibling from being hidden whole (measured).
+  const inOther = storeInOthers(repo.stores, [...siblings, ...taskPlaces], [...(main ? [main] : []), ...(repo.common ? [repo.common] : [])]);
+  if (inOther) return { error: `the git object store ${inOther.store} lies in ${inOther.other}, another task's checkout or a place they are made, so that checkout couldn't be hidden whole` };
   // The places themselves go to the sandbox only: a Read rule can't be carved back for the run's own checkout.
   const whole = other.places.length ? { sandboxOnly: other.places.map(asEntry) } : {};
   const all = sources.flat();

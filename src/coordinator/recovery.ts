@@ -7,6 +7,9 @@ import { refuseInterruptedChats } from '../chat.js';
 import { refuseInterruptedTurns } from '../chat-conversations.js';
 import { withdrawClaudeCredentialAsks } from '../console/secrets.js';
 import { lockOwnedWorktrees } from '../worktrees.js';
+import { projectStateDir } from '../guardrails/context.js';
+import { mkdirSync } from 'node:fs';
+import { join, resolve } from 'node:path';
 import { ClosedIssueWatch } from './closed-issues.js';
 import { Intake } from './intake.js';
 import { RETRY_CAP } from './shared.js';
@@ -27,6 +30,16 @@ export abstract class Recovery extends Intake {
       lockOwnedWorktrees(this.wt);
     } catch (e) {
       this.emit('coordinator.error', { instance: this.d.instance, where: 'worktree locks', kind: 'error', message: (e as Error).message.slice(0, 500) });
+    }
+    // Its own places task worktrees are made in (#890 round 14): the start config's worktree root, fixed at start, and
+    // the engine's own. Made here, so every run's sandbox hides them whole from the start (a worktree made later
+    // included). Only these: a run's denials never make a directory, since a run's own config may name one.
+    for (const place of [resolve(this.d.repo, this.wt.root), join(projectStateDir(this.d.repo), 'worktrees')]) {
+      try {
+        mkdirSync(place, { recursive: true });
+      } catch (e) {
+        this.emit('coordinator.error', { instance: this.d.instance, where: 'worktree places', kind: 'error', message: `${place}: ${(e as Error).message}`.slice(0, 500) });
+      }
     }
     // Chat turns and intake reports cut off by a restart: each ended once, never run again.
     refuseInterruptedChats(this.d.stateDir);

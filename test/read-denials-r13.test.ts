@@ -2,8 +2,9 @@
 // - Worktrees the coordinator owns from before locking came in are locked when it starts (its recovery), not only at
 //   the next worktree it makes: `tests.worktree.pool` defaults to 0, so nothing may be made at start, and the first
 //   prune run inside an agent's sandbox would remove the unlocked records.
-// - A task-checkout place that isn't there when a run starts is made then, so it is hidden whole: a main-checkout run
-//   that started before the first worktree existed could read, and overflow on, that worktree (measured by the delta).
+// - A task-checkout place is hidden whole once it exists, so a main-checkout run that started before the first worktree
+//   existed can't read, or overflow on, that worktree (measured by the delta). Since round 14 the coordinator makes
+//   its own places at its start (read-denials-r14), never a run's denials.
 // - A long error keeps its last words: a cut at 200 characters turned "so it isn't read" into "so it is".
 import { exampleProject, repoRoot } from './helpers.js';
 import { test } from 'node:test';
@@ -83,10 +84,11 @@ test('#890 r13: a main-checkout run that starts before any worktree exists has t
   writeFileSync(g, readFileSync(g, 'utf8').replace(/^secret_paths:\n/m, 'secret_paths:\n  - "**/*.pem"\n'));
   const place = join(dir, '.claude', 'worktrees');
   assert.equal(existsSync(place), false);
+  // Made by the coordinator at its start (round 14; read-denials-r14 checks that), never by a run's denials.
+  mkdirSync(place, { recursive: true });
   const r = runReadDenials({ cwd: dir, home: mkdtempSync(join(tmpdir(), 'home-')), repo: dir });
   if ('error' in r) assert.fail(r.error);
   const d = r as { paths: string[]; sandboxOnly?: string[] };
-  assert.ok(existsSync(place), 'the place is made');
   assert.ok(d.sandboxOnly?.includes(place), JSON.stringify(d.sandboxOnly));
   // The first worktree, made after the run started, filled by its own agent.
   const first = join(place, 'first');
