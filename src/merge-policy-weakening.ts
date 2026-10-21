@@ -124,6 +124,8 @@ export const LINT_TESTS: readonly string[] = [
   'test/web-buttons.test.ts',
   'test/superfan.test.ts',
   'test/claude-accounts-retired.test.ts',
+  // The adversarial suite's guard cases (#707): every attack line is a rule, so any line taken out waits.
+  'test/adversarial/guards.test.ts',
 ];
 
 /**
