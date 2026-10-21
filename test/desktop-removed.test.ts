@@ -11,7 +11,7 @@ import assert from 'node:assert/strict';
 import { existsSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
-import { isScalar, parse, parseDocument, visit } from 'yaml';
+import { isNode, isScalar, parse, parseDocument, visit } from 'yaml';
 import { repoRoot } from './helpers.js';
 
 type Job = { name?: unknown; strategy?: { matrix?: unknown } };
@@ -87,7 +87,8 @@ function matrixCombos(matrix: unknown): Map<string, unknown>[] | null {
   if (values.some((v) => v === null || typeof v === 'object' || (typeof v === 'string' && v.trim() === ''))) return null;
   // A number JS and GitHub may print differently makes the matrix unreadable: `22.00000000000001` (JS keeps the
   // digits, a 15-digit format drops them; round 8) and -0 (JS prints `0`, .NET `-0`; round 9). Every other integer
-  // below 1e15 in size is taken to print the same both ways (inferred, not measured on GitHub).
+  // below 1e15 in size is taken to print the same both ways (inferred, not measured on GitHub). It is written in
+  // plain decimal: readWorkflow makes a file with any other spelling (`0xffffffff`, `+22`, `22.0`) unsure (round 12).
   if (values.some((v) => typeof v === 'number' && (!(Number.isInteger(v) && Math.abs(v) < 1e15) || Object.is(v, -0)))) return null;
   // Two values of one key that differ, but match once printed and case-folded (`'1'` and `1`, `'true'` and `true`,
   // `Q` and `q`): whether GitHub matches an exclude or include entry loosely is unsure, so the matrix is unreadable
@@ -184,6 +185,8 @@ function jobCheckNames(key: string, job: Job): Set<string> {
  * - any `%YAML` or `%TAG` directive (under `%YAML 1.1`, `022` reads as octal 18, and `<<` merges);
  * - a merge key anywhere, found in the YAML syntax tree, so every spelling counts (`<<`, `"<<"`, `!!merge <<`, and
  *   `<<` under `%YAML 1.1`, which the parser applies and leaves no key for): whether Actions merges it is unsure;
+ * - an explicit tag on any node, and a number scalar not written in plain decimal (round 12): GitHub resolves core
+ *   tags, and reads hex and octal as 32-bit numbers, where `yaml` does neither;
  * - a root, a `jobs`, or a job that isn't a plain mapping (a scalar, a list, `!!omap`), a `permissions` (at the root
  *   or in a job) that is neither a string nor a plain mapping, or any value anywhere that is neither a plain mapping,
  *   a list nor a scalar (a `Map`, a `Set`, binary data);
@@ -214,6 +217,22 @@ function readWorkflow(file: string): { wf: Record<string, unknown> | null; unsur
   let merge = false;
   visit(doc, { Pair: (_, p) => void (isScalar(p.key) && p.key.source === '<<' && (merge = true)) });
   if (merge || hasMergeKey(value)) return unsure('a merge key');
+  // One walk over every node, keys included (a function visitor: an object one with a Scalar key skips Node for
+  // scalars). Round 12, #746 second adversarial review of 00ed28c2:
+  // - an explicit tag, any form (`!!float 22`, `!!str`, `!`, `!x`), on any node: `yaml` leaves `!!float 22` the
+  //   string "22", GitHub's reader makes it the number 22 (inferred from the runner source);
+  // - a number not written in plain decimal (`0xffffffff`, `0o17`, `+22`, `022`, `2.2e1`, `22.0`, `.5`, `.inf`):
+  //   GitHub reads hex and octal as 32-bit, so `0xffffffff` is -1 there and 4294967295 here (inferred from the runner
+  //   source), and an exclude can then empty the product on GitHub only.
+  let tagged = false;
+  let number = false;
+  visit(doc, (_, n) => {
+    if (!isNode(n)) return;
+    if (n.tag !== undefined) tagged = true;
+    if (isScalar(n) && ['number', 'bigint'].includes(typeof n.value) && !/^-?(0|[1-9][0-9]*)$/.test(n.source ?? '')) number = true;
+  });
+  if (tagged) return unsure('an explicit tag');
+  if (number) return unsure('a number not in plain decimal');
   if (!plainAll(value)) return unsure('a value that is not a plain mapping, list or scalar, or a key outside printable ASCII');
   if (value.jobs !== undefined && !isRecord(value.jobs)) return unsure('jobs that are not a mapping');
   const jobs = Object.values(isRecord(value.jobs) ? value.jobs : {});
@@ -545,6 +564,9 @@ const TWIN_FIXTURES: [string, string, boolean][] = [
   ['Q1 an exclude that differs in case only (q, Q)', "jobs:\n  shots:\n    name: ${{ matrix.v }}\n    strategy:\n      matrix:\n        k: [q]\n        exclude: [ { k: Q } ]\n        include: [ { v: desktop }, { v: phone } ]\n    runs-on: x\n    steps: [ { run: 'false' } ]\n", true],
   ["Q2 an exclude that differs in type only (1, '1')", "jobs:\n  shots:\n    name: ${{ matrix.v }}\n    strategy:\n      matrix:\n        k: [1]\n        exclude: [ { k: '1' } ]\n        include: [ { v: desktop }, { v: phone } ]\n    runs-on: x\n    steps: [ { run: 'false' } ]\n", true],
   ["Q3 an exclude by a string for a boolean (true, 'true')", "jobs:\n  shots:\n    name: ${{ matrix.v }}\n    strategy:\n      matrix:\n        k: [true]\n        exclude: [ { k: 'true' } ]\n        include: [ { v: desktop }, { v: phone } ]\n    runs-on: x\n    steps: [ { run: 'false' } ]\n", true],
+  // Round 12 (#746 second adversarial review of 00ed28c2): GitHub reads 0xffffffff as -1 (32-bit), `yaml` as
+  // 4294967295, so the exclude empties the product on GitHub only, and include desktop and phone stand alone.
+  ['H1b a hex exclude 0xffffffff against an axis -1; include desktop and phone stand alone on GitHub', "jobs:\n  shots:\n    name: ${{ matrix.v }}\n    strategy:\n      matrix:\n        k: [-1]\n        exclude: [ { k: 0xffffffff } ]\n        include: [ { v: desktop }, { v: phone } ]\n    runs-on: x\n    steps: [ { run: 'false' } ]\n", true],
   ['a name with more around the value', 'jobs:\n  shots:\n    name: shots ${{ matrix.view }}\n    strategy: { matrix: { view: [desktop, phone] } }\n    runs-on: x\n', false],
   ['no name: the values in parentheses', 'jobs:\n  shots:\n    strategy: { matrix: { view: [desktop] } }\n    runs-on: x\n', false],
   ['no name, include entries only', 'jobs:\n  shots:\n    strategy: { matrix: { include: [{ view: desktop }] } }\n    runs-on: x\n', false],
@@ -606,6 +628,12 @@ test('a second job that may make a desktop check is caught, in another workflow 
 const BASE_CI = "on:\n  push:\n    branches: [main]\n  pull_request:\n    types: [opened, synchronize, reopened]\njobs:\n  desktop:\n    runs-on: ubuntu-latest\n    steps:\n      - run: 'true'\n  test:\n    strategy: { matrix: { os: [ubuntu-latest], node: [22, 24] } }\n    runs-on: x\n";
 
 /**
+ * BASE_CI with two plain jobs, `dco` (required) and `build` (not), for the round 10 skipped-matrix fixtures and,
+ * since round 12, the name-twin ones (so a `dco` twin among them is judged against a real `dco` job).
+ */
+const BARE_BASE_CI = BASE_CI + '  dco:\n    runs-on: x\n  build:\n    runs-on: x\n';
+
+/**
  * Round 7 (#746 adversarial review of 80395fcb): text another YAML reader (libyaml and its ports) reads otherwise.
  * A lone CR, NEL, LS or PS ends a comment there but not here, so the rest of the line is hidden from this reader; a
  * BOM at a line start is skipped there but read as part of a key here; `%YAML 1.1` makes `022` octal here. Each file
@@ -632,6 +660,29 @@ const UNSURE_TEXT_FIXTURES: [string, string, string, boolean][] = [
   ['%YAML 1.1: node 022 reads as octal 18, a test (ubuntu-latest, 22) twin elsewhere', 'other.yml', '%YAML 1.1\n---\njobs:\n  test:\n    strategy: { matrix: { os: [ubuntu-latest], node: [022] } }\n    runs-on: x\n', true],
   ['%YAML 1.2 (any directive)', 'other.yml', '%YAML 1.2\n---\njobs:\n  t:\n    runs-on: x\n', true],
   ['%TAG', 'other.yml', '%TAG !e! tag:yaml.org,2002:\n---\njobs:\n  t:\n    name: !e!str shots\n    runs-on: x\n', true],
+  // Round 12 (#746 second adversarial review of 00ed28c2): a number not in plain decimal, and an explicit tag, anywhere
+  // in the file. GitHub reads hex and octal as 32-bit and honours core tags `yaml` leaves unresolved.
+  ['N1 a hex number, 0x16, in a matrix', 'other.yml', 'jobs:\n  t:\n    strategy: { matrix: { v: [0x16] } }\n    runs-on: x\n', true],
+  ['N2 an octal number, 0o26', 'other.yml', 'jobs:\n  t:\n    strategy: { matrix: { v: [0o26] } }\n    runs-on: x\n', true],
+  ['N3 a leading plus, +22', 'other.yml', 'jobs:\n  t:\n    strategy: { matrix: { v: [+22] } }\n    runs-on: x\n', true],
+  ['N4 a leading zero, 022', 'other.yml', 'jobs:\n  t:\n    strategy: { matrix: { v: [022] } }\n    runs-on: x\n', true],
+  ['N5 an exponent, 2.2e1', 'other.yml', 'jobs:\n  t:\n    strategy: { matrix: { v: [2.2e1] } }\n    runs-on: x\n', true],
+  ['N6 a decimal point, 22.0', 'other.yml', 'jobs:\n  t:\n    strategy: { matrix: { v: [22.0] } }\n    runs-on: x\n', true],
+  ['N7 no integer part, .5', 'other.yml', 'jobs:\n  t:\n    strategy: { matrix: { v: [.5] } }\n    runs-on: x\n', true],
+  ['N8 .inf', 'other.yml', 'jobs:\n  t:\n    strategy: { matrix: { v: [.inf] } }\n    runs-on: x\n', true],
+  ['N9 a hex number outside any matrix, timeout-minutes: 0x10', 'other.yml', 'jobs:\n  t:\n    timeout-minutes: 0x10\n    runs-on: x\n', true],
+  ['N10 a hex number as a key', 'other.yml', 'jobs:\n  t:\n    env: { 0x10: a }\n    runs-on: x\n', true],
+  ['T1 !!float 22 in an exclude against an axis 22', 'other.yml', "jobs:\n  t:\n    name: ${{ matrix.n }}\n    strategy:\n      matrix:\n        k: [22]\n        exclude: [ { k: !!float 22 } ]\n        include: [ { n: dco }, { n: x } ]\n    runs-on: x\n", true],
+  ['T2 !!int 0x16 on an axis value', 'other.yml', 'jobs:\n  test:\n    strategy: { matrix: { os: [ubuntu-latest], node: [!!int 0x16] } }\n    runs-on: x\n', true],
+  ['T3 !!str on a name', 'other.yml', 'jobs:\n  t:\n    name: !!str shots\n    runs-on: x\n', true],
+  ['T4 the non-specific tag !, on a name', 'other.yml', 'jobs:\n  t:\n    name: ! shots\n    runs-on: x\n', true],
+  ['T5 a local tag !x, on a name', 'other.yml', 'jobs:\n  t:\n    name: !x shots\n    runs-on: x\n', true],
+  ['T6 a tag on a mapping, jobs: !!map', 'other.yml', 'jobs: !!map\n  t:\n    runs-on: x\n', true],
+  ['T7 a tag on a list, steps: !!seq', 'other.yml', "jobs:\n  t:\n    runs-on: x\n    steps: !!seq [ { run: 'true' } ]\n", true],
+  ['T8 a tag on a key, !!str name', 'other.yml', 'jobs:\n  t:\n    !!str name: shots\n    runs-on: x\n', true],
+  ['T9 a tag on an empty value', 'other.yml', 'jobs:\n  t:\n    runs-on: x\n    env: !!null\n', true],
+  ['control: plain decimal numbers, -1, 0, 22 and 4294967295', 'other.yml', 'jobs:\n  t:\n    strategy: { matrix: { v: [-1, 0, 22, 4294967295] } }\n    timeout-minutes: 10\n    runs-on: x\n', false],
+  ["control: '0x16' and \"+22\" quoted, ! inside a scalar, !! in a quoted name and in a comment", 'other.yml', "jobs:\n  t:\n    name: 'a!b !!c'\n    strategy: { matrix: { v: ['0x16', \"+22\", a!b] } }\n    runs-on: x # !!float 22\n", false],
   ['control: a BOM at offset 0 only', 'other.yml', String.fromCharCode(0xfeff) + 'jobs:\n  t:\n    runs-on: x\n', false],
   ['control: TAB in a comment', 'other.yml', 'jobs:\n  t:\n    runs-on: x # a\tb\n', false],
 ];
@@ -656,28 +707,33 @@ const NAME_TWIN_FIXTURES: [string, string][] = [
   // Round 11: an exclude by expression, so the include entry stands alone as GitHub builds it.
   ['E2b a green test (ubuntu-latest, 22) twin, an exclude by expression, needs: a slow job', "jobs:\n  slow:\n    runs-on: x\n    steps: [ { run: 'sleep 1500' } ]\n  test:\n    needs: slow\n    strategy:\n      matrix:\n        os: [ubuntu-latest]\n        k: [q]\n        exclude: [ { k: \"${{ 'q' }}\" } ]\n        include: [ { os: ubuntu-latest, node: 22 } ]\n    runs-on: x\n    steps: [ { run: 'true' } ]\n"],
   ['E2c a green dco twin, name ${{ matrix.n }}, an exclude by expression', "jobs:\n  t:\n    name: ${{ matrix.n }}\n    strategy:\n      matrix:\n        k: [q]\n        exclude: [ { k: \"${{ 'q' }}\" } ]\n        include: [ { n: dco }, { n: x } ]\n    runs-on: x\n    steps: [ { run: 'true' } ]\n"],
+  // Round 12 (#746 second adversarial review of 00ed28c2): hex and octal of 2^31 and above, which GitHub reads as
+  // 32-bit (0xffffffff is -1) and `yaml` does not (4294967295), and a core tag `yaml` leaves unresolved.
+  ['H1 a green test (ubuntu-latest, 22) twin, a hex exclude 0xffffffff against an axis -1, needs: a slow job', "jobs:\n  slow:\n    runs-on: x\n    steps: [ { run: 'sleep 1500' } ]\n  test:\n    needs: slow\n    strategy:\n      matrix:\n        os: [ubuntu-latest]\n        k: [-1]\n        exclude: [ { k: 0xffffffff } ]\n        include: [ { os: ubuntu-latest, node: 22 } ]\n    runs-on: x\n    steps: [ { run: 'true' } ]\n"],
+  ['H1c a green dco twin, name ${{ matrix.n }}, a hex exclude 0xffffffff against an axis -1', "jobs:\n  t:\n    name: ${{ matrix.n }}\n    strategy:\n      matrix:\n        k: [-1]\n        exclude: [ { k: 0xffffffff } ]\n        include: [ { n: dco }, { n: x } ]\n    runs-on: x\n    steps: [ { run: 'true' } ]\n"],
+  ['H1d the same, an octal exclude 0o37777777777', "jobs:\n  t:\n    name: ${{ matrix.n }}\n    strategy:\n      matrix:\n        k: [-1]\n        exclude: [ { k: 0o37777777777 } ]\n        include: [ { n: dco }, { n: x } ]\n    runs-on: x\n    steps: [ { run: 'true' } ]\n"],
+  ['H1e the same, the axis 0xffffffff and the exclude -1', "jobs:\n  t:\n    name: ${{ matrix.n }}\n    strategy:\n      matrix:\n        k: [0xffffffff]\n        exclude: [ { k: -1 } ]\n        include: [ { n: dco }, { n: x } ]\n    runs-on: x\n    steps: [ { run: 'true' } ]\n"],
+  ['H2 the reverse: an axis 4294967295, a hex exclude 0xffffffff; GitHub keeps test (ubuntu-latest, 22)', "jobs:\n  twin:\n    name: test (${{ matrix.os }}, ${{ matrix.node }})\n    strategy:\n      matrix:\n        os: [ubuntu-latest]\n        node: [22]\n        k: [4294967295]\n        exclude: [ { k: 0xffffffff } ]\n        include: [ { os: other, node: 1 } ]\n    runs-on: x\n    steps: [ { run: 'true' } ]\n"],
+  ["T1b an exclude !!float 22 against an axis '22'; GitHub may keep test (ubuntu-latest, 22)", "jobs:\n  twin:\n    name: test (${{ matrix.os }}, ${{ matrix.n }})\n    strategy:\n      matrix:\n        os: [ubuntu-latest]\n        n: [22]\n        k: ['22']\n        exclude: [ { k: !!float 22 } ]\n        include: [ { os: other, n: 1 } ]\n    runs-on: x\n    steps: [ { run: 'true' } ]\n"],
 ];
 
 test('a job GitHub may name as a twin of another check is caught: matrix keys, numbers, reusable-workflow names (round 8)', () => {
-  const REQUIRED = ['desktop', 'test (ubuntu-latest, 22)', 'test (ubuntu-latest, 24)'];
+  const REQUIRED = ['desktop', 'dco', 'test (ubuntu-latest, 22)', 'test (ubuntu-latest, 24)'];
   const base = mkdtempSync(join(tmpdir(), 'wf-'));
-  writeFileSync(join(base, 'ci.yml'), BASE_CI);
-  assert.deepEqual(checkTwins(base, REQUIRED), [], 'BASE_CI alone');
+  writeFileSync(join(base, 'ci.yml'), BARE_BASE_CI);
+  assert.deepEqual(checkTwins(base, REQUIRED), [], 'BARE_BASE_CI alone');
   for (const [label, yml] of NAME_TWIN_FIXTURES) {
     const dir = mkdtempSync(join(tmpdir(), 'wf-'));
-    writeFileSync(join(dir, 'ci.yml'), BASE_CI);
+    writeFileSync(join(dir, 'ci.yml'), BARE_BASE_CI);
     writeFileSync(join(dir, 'other.yml'), yml);
     assert.notDeepEqual(checkTwins(dir, REQUIRED), [], label);
   }
   // Integer matrix values below 1e15, and identifier keys, still resolve: a plain matrix is no twin.
   const ok = mkdtempSync(join(tmpdir(), 'wf-'));
-  writeFileSync(join(ok, 'ci.yml'), BASE_CI);
+  writeFileSync(join(ok, 'ci.yml'), BARE_BASE_CI);
   writeFileSync(join(ok, 'other.yml'), 'jobs:\n  lint:\n    strategy: { matrix: { node_v: [22, 999999999999999], os-x: [a] } }\n    runs-on: x\n');
   assert.deepEqual(checkTwins(ok, REQUIRED), [], 'lint (22, a), lint (999999999999999, a)');
 });
-
-/** BASE_CI with two plain jobs, `dco` (required) and `build` (not), for the round 10 skipped-matrix fixtures. */
-const BARE_BASE_CI = BASE_CI + '  dco:\n    runs-on: x\n  build:\n    runs-on: x\n';
 
 /**
  * Round 10 (#746 adversarial review of f5fafeca): a matrix job with an `if:` or `needs:` that GitHub skips gets one
