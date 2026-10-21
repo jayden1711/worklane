@@ -59,9 +59,9 @@ categories:
     - test/docs-guardrails.test.ts
     - test/adversarial/**
     - test/engine-guard-locks.test.ts
+    - test/not-yet-files-locks.test.ts
     # The engine's deployment files at the top of the repo, beside deploy/** (#858): they set how it runs, as the setup
-    # scripts do. Dockerfile* is also locked in code; a bare deploy path (a file or a symlink), the compose files and
-    # the rest are listed here only for now.
+    # scripts do. All of them are also locked in code (src/review.ts self-modification; #885).
     - deploy
     - Dockerfile*
     - dockerfile*

@@ -1,5 +1,6 @@
 // The engine's public security claims (docs/guardrails.md, docs/security*.md, SECURITY.md), the test that keeps their
-// citations true, the adversarial suite of hostile PRs, this file, and the engine's container image are its own
+// citations true, the adversarial suite of hostile PRs, this file, the engine's container image and its deployment
+// files at the top of the repo (a bare deploy path, the compose files; #885) are its own
 // controls (#858). Before this, a docs-only or tests-only change to any of them was L0 and could merge by itself on a
 // PASS, and the Dockerfile waited only where a review.yaml kept `deploy-config`. Now each is self-modification in the
 // engine's repo: L3, never auto-merged, whatever review.yaml says (src/review.ts SELF_MODIFICATION_PARTS). A managed
@@ -56,6 +57,7 @@ function decide(level: LevelResult, waitCategories: string[]) {
 const pages = 'the public security claims';
 const tests = 'the tests of the harness controls';
 const image = "the engine's container image";
+const deploys = "the engine's deployment files";
 /** Each path the lock is for, with the part that names it. Some are files the repo has; the rest are new ones under a lock's glob. */
 const locked = [
   ['docs/guardrails.md', pages],
@@ -69,11 +71,22 @@ const locked = [
   ['test/adversarial/cases/locked-paths.json', tests],
   ['test/adversarial/cases/new-group.json', tests],
   ['test/engine-guard-locks.test.ts', tests],
+  ['test/not-yet-files-locks.test.ts', tests],
   ['Dockerfile', image],
   ['Dockerfile.dev', image],
+  // None of these is in the repo yet (NOT_YET_FILES in test/merge-policy.test.ts); each is locked before it lands (#885).
+  ['dockerfile', image],
+  ['Containerfile', image],
+  ['Containerfile.dev', image],
+  ['deploy', deploys],
+  ['compose.yaml', deploys],
+  ['compose.yml', deploys],
+  ['compose.override.yaml', deploys],
+  ['docker-compose.yml', deploys],
+  ['docker-compose.prod.yml', deploys],
 ] as const;
 /** The ones the repo has today: each must stay a real file, so a rename can't leave this test checking nothing. */
-const present = ['docs/guardrails.md', 'docs/security.md', 'SECURITY.md', 'test/docs-guardrails.test.ts', 'test/adversarial/adversarial.test.ts', 'test/adversarial/todo.json', 'test/adversarial/controls.json', 'test/adversarial/cases/locked-paths.json', 'test/engine-guard-locks.test.ts', 'Dockerfile'];
+const present = ['docs/guardrails.md', 'docs/security.md', 'SECURITY.md', 'test/docs-guardrails.test.ts', 'test/adversarial/adversarial.test.ts', 'test/adversarial/todo.json', 'test/adversarial/controls.json', 'test/adversarial/cases/locked-paths.json', 'test/engine-guard-locks.test.ts', 'test/not-yet-files-locks.test.ts', 'Dockerfile'];
 
 test('regression: a change to the security pages, their citations test, the adversarial suite or the Dockerfile is L3, self-modification and never auto-merges (this repo, the example, and a review.yaml that drops every category)', () => {
   for (const path of present) assert.ok(existsSync(join(repoRoot, path)), `${path} is a real file`);
@@ -95,7 +108,7 @@ test('regression: a change to the security pages, their citations test, the adve
     }
   }
   // The globs name these files only: a neighbour of each is no part of the lock.
-  for (const path of ['docs/guide.md', 'docs/securityx.txt', 'docs/design/security.md', 'README.md', 'test/totals.test.ts', 'test/adversarial.test.ts', 'sub/Dockerfile', 'composer.json']) assert.equal(selfModificationPart(path), null, path);
+  for (const path of ['docs/guide.md', 'docs/securityx.txt', 'docs/design/security.md', 'README.md', 'test/totals.test.ts', 'test/adversarial.test.ts', 'sub/Dockerfile', 'composer.json', 'sub/Containerfile', 'apps/x/compose.yaml', 'apps/x/deploy', 'deploy.md', 'deployment.yaml', 'Deploy', 'compose', 'docker-compose']) assert.equal(selfModificationPart(path), null, path);
 });
 
 test("a managed app's same-named files are unchanged: no engine lock, the categories its review.yaml gives them", () => {
@@ -112,8 +125,18 @@ test("a managed app's same-named files are unchanged: no engine lock, the catego
     'test/adversarial/cases/locked-paths.json': ['L0', ['tests']],
     'test/adversarial/cases/new-group.json': ['L0', ['tests']],
     'test/engine-guard-locks.test.ts': ['L0', ['tests']],
+    'test/not-yet-files-locks.test.ts': ['L0', ['tests']],
     Dockerfile: ['L3', ['app-non-money', 'deploy-config']],
     'Dockerfile.dev': ['L1', ['app-non-money']],
+    dockerfile: ['L1', ['app-non-money']],
+    Containerfile: ['L1', ['app-non-money']],
+    'Containerfile.dev': ['L1', ['app-non-money']],
+    deploy: ['L1', ['app-non-money']],
+    'compose.yaml': ['L1', ['app-non-money']],
+    'compose.yml': ['L1', ['app-non-money']],
+    'compose.override.yaml': ['L1', ['app-non-money']],
+    'docker-compose.yml': ['L1', ['app-non-money']],
+    'docker-compose.prod.yml': ['L1', ['app-non-money']],
   };
   assert.deepEqual(Object.keys(before).sort(), locked.map(([p]) => p).sort(), 'every locked path is checked here');
   for (const [path, [level, categories]] of Object.entries(before)) {
