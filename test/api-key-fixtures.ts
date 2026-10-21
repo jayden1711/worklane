@@ -124,10 +124,11 @@ printf '[Service]\\nExecStart=/usr/local/bin/worklane dashboard --hub %s --servi
   };
   /** add-project, with no stdin (as the machine helper runs it), stopped by the test after `timeoutMs` if still running. */
   const run = (args: string[] = [name, 'example/alpha'], timeoutMs = 120_000) => {
-    const started = Date.now();
+    // A duration: the monotonic clock, never the wall clock (test/no-wall-clock-durations.test.ts, #582).
+    const started = performance.now();
     const r = spawnSync('bash', [join(s, 'add-project.sh'), ...args], { encoding: 'utf8', input: '', timeout: timeoutMs, killSignal: 'SIGKILL', env: { PATH: `${host}:${dirname(process.execPath)}:/usr/bin:/bin`, HOME: T } });
     const lines = (r.stdout ?? '').split('\n').filter(Boolean);
-    return { ...r, ms: Date.now() - started, events: lines.map((l) => JSON.parse(l) as Step) };
+    return { ...r, ms: performance.now() - started, events: lines.map((l) => JSON.parse(l) as Step) };
   };
   const calls = () => (existsSync(join(T, 'calls')) ? readFileSync(join(T, 'calls'), 'utf8') : '');
   const hostCalls = () => (existsSync(join(T, 'host-calls')) ? readFileSync(join(T, 'host-calls'), 'utf8') : '');

@@ -177,7 +177,8 @@ const CASES: Record<string, { mode: Mode; on: (f: Fx, w: World) => SetupContext 
       mkdirSync(f.machine.claudeAccountDir, { recursive: true });
       writeFileSync(join(f.machine.claudeAccountDir, 'status.json'), JSON.stringify({ at: '2026-10-20T10:00:00Z', users: [{ instance: 'shop', kind: 'agent', user: 'wl-shop-agent', logged_in: true, auth_method: 'api_key_helper', api_ok: true }] }));
       chmodSync(agentHome, 0o000);
-      process.once('exit', () => chmodSync(agentHome, 0o700));
+      // Searchable again before test/isolate.ts removes the test's temp dir at exit (its listener came first: prepend).
+      process.prependOnceListener('exit', () => chmodSync(agentHome, 0o700));
     },
     off: () => {},
   },
