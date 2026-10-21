@@ -325,8 +325,13 @@ done_machine_helper() {
 # names it in the rule. A user named in the rule before, which root then took out say, or a hub-only instance's,
 # counts as a widening.
 # So does a newer engine's command, a sudo that now reads patterns, or any line outside that shape. Each waits (exit 3),
-# showing the unified diff and the command with --replace-sudoers=<pin>, the pin of the rule it showed. That flag is
-# root's, at a root shell: the machine helper runs this script with exactly a name and a repo.
+# showing the unified diff and, on the line right after it, the command with --replace-sudoers=<pin>, the pin of the
+# rule it showed. That flag is root's, at a root shell: the machine helper runs this script with exactly a name and a
+# repo. The pin is never in the step's waiting detail (#902 round 8, A2): that line is the JSON the dashboard stores
+# and shows, with no diff beside it, so it names only commands that print the diff and its pin together at a root shell.
+sudoers_waiting_detail() {
+  echo "$1: at a root shell, rerun $again, or run sudo bash $here/machine-helper.sh --check; either prints the whole diff and the command pinned to it"
+}
 # This check is for the step's own waiting output. The one check that counts is machine-helper.sh's, at write time,
 # under its lock: this step passes it only --may-add for the one user it may add (#902 round 6), never its trust.
 do_machine_helper() {
@@ -342,7 +347,7 @@ do_machine_helper() {
     if [ "$pin" != "$replace_sudoers" ]; then
       echo "the engine's rule (above) is not the one --replace-sudoers=$replace_sudoers was printed for; nothing written"
       echo "rerun as root with --replace-sudoers to install the engine's rule: $again --replace-sudoers=$pin"
-      echo "waiting: rerun as root with --replace-sudoers to install the engine's rule: $again --replace-sudoers=$pin"
+      echo "waiting: $(sudoers_waiting_detail "the engine's machine helper rule is not the one that --replace-sudoers pin was printed for; nothing written")"
       exit 3
     fi
     echo "--replace-sudoers: the machine helper's rule becomes the engine's rule above"
@@ -356,7 +361,7 @@ do_machine_helper() {
   else
     sudoers_unified_diff "$MACHINE_SUDOERS" "$rule"
     echo "rerun as root with --replace-sudoers to install the engine's rule: $again --replace-sudoers=$pin"
-    echo "waiting: rerun as root with --replace-sudoers to install the engine's rule: $again --replace-sudoers=$pin"
+    echo "waiting: $(sudoers_waiting_detail "the engine's machine helper rule grants more than the installed one, which only root may widen")"
     exit 3
   fi
   rc=0

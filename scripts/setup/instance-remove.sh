@@ -14,6 +14,10 @@
 # a filesystem is mounted inside what it removes.
 #
 # Then, in order, each step skipped when already done, so a rerun finishes a removal that stopped part way:
+#   rule      first, the machine helper's rule without this instance's coordinator (#902 round 8): rewritten for the
+#             others when that only narrows it, else that one user taken out and nothing else changed (a widening
+#             is root's, a separate step); the last instance's removal takes the rule away. It refuses, changing
+#             nothing, only when the installed rule isn't in the engine's own shape.
 #   export    the instance's history (`worklane export`, as its coordinator: the event log and its state, never a
 #             secret) to /var/lib/worklane/removed/<name>-<time>.bundle, root's 0600, and what the shared root files
 #             hold for it to <name>-<time>.records.json beside it; both paths printed. Never skipped while its state
@@ -24,9 +28,9 @@
 #             account profiles, status and paused list, the canary, its incidents, signers it staged), its Discord
 #             claim, its init record, its sudoers files, /srv/worklane/<name>, its users (homes with them: the state,
 #             the App key, the credentials) and its group.
-#   machine   the machine helper's rule and the dashboard hub, rewritten with every other instance (the same way
-#             add-project.sh keeps them), and never with this one. The last instance's removal leaves the hub as it
-#             is (it shows that name as unreachable) and takes the helper's rule away.
+#   machine   the dashboard hub, rewritten with every other instance (the same way add-project.sh keeps it), and
+#             never with this one. The last instance's removal leaves the hub as it is (it shows that name as
+#             unreachable).
 # Another instance's records are never touched: every match is on the exact name.
 # Not here: its GitHub App and its repo. They are GitHub's: it prints what to do there, and changes nothing on GitHub.
 source "$(dirname "$0")/lib.sh"
@@ -59,14 +63,33 @@ as_root "$@"
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 # Never through a coordinator's sudo, even one a rule might let through by mistake.
 [[ "${SUDO_USER:-}" != wl-* ]] || { echo "instance-remove is an admin's, at the machine's terminal: not $SUDO_USER's" >&2; exit 1; }
-# Before anything changes (#898): the machine helper's rule is rewritten below for every other instance it names. When
-# that would need --replace-sudoers (the engine's rule is wider than the installed one, or the installed one isn't in the
-# engine's own shape), stop now, nothing changed, naming that command. After it, the rule no longer names this
-# instance, and a rerun goes on.
-if [ -z "$print" ] && helper_instances | grep -qx "$name"; then
-  pre=()
-  for m in $(helper_instances | grep -vx "$name" || true); do if user_exists "wl-$m"; then pre+=("$m"); fi; done
-  machine_sudoers_preflight "$here" "" ${pre[@]+"${pre[@]}"} || { echo "refused: $name is not removed, nothing changed: the machine helper's rule needs root's --replace-sudoers first (above), then run this again" >&2; exit 1; }
+# How the machine helper's rule loses this instance (#898; #902 round 8, A3), decided before anything changes:
+#   none     the rule doesn't name it (or this is instance machine, whose own sudoers file is that rule's: it goes with
+#            the registry's items, under the rule's lock)
+#   remove   no other instance's coordinator is left in it: the rule goes
+#   rewrite  the engine's rule for the others only narrows the installed one: machine-helper.sh writes it (--may-add=)
+#   drop     it would widen it (an older engine's rule, say): only this coordinator is taken out of the installed rule,
+#            nothing else changed (machine-helper.sh --drop); the widening stays root's, a separate step (--check)
+#   refuse   the installed rule isn't in the engine's own shape: nothing can be narrowed safely, so nothing changes
+# A removal is a revocation: it never waits on a widening (decision guide 2).
+helper_mode() {
+  local m pre=() users=()
+  if [ "$name" = machine ] || ! helper_instances | grep -qx "$name"; then echo none; return 0; fi
+  for m in $(helper_instances | grep -vx "$name" || true); do if user_exists "wl-$m"; then pre+=("$m"); users+=("wl-$m"); fi; done
+  if [ "${#pre[@]}" -eq 0 ]; then echo remove; return 0; fi
+  if sudoers_only_narrows "$MACHINE_SUDOERS" "$(machine_sudoers "${users[@]}")"; then echo rewrite; return 0; fi
+  if machine_sudoers_without "$MACHINE_SUDOERS" "wl-$name" > /dev/null; then echo drop; return 0; fi
+  echo refuse
+}
+helper_others() { local m; for m in $(helper_instances | grep -vx "$name" || true); do user_exists "wl-$m" && echo "$m"; done; return 0; }
+if [ -z "$print" ]; then
+  helper_step="$(helper_mode)"
+  if [ "$helper_step" = refuse ]; then
+    # shellcheck disable=SC2046 # one word per instance name
+    machine_sudoers_preflight "$here" "" $(helper_others) || true
+    echo "refused: $name is not removed, nothing changed: the machine helper's rule ($MACHINE_SUDOERS) isn't in the engine's own shape, so $name can't be taken out of it alone; replace it as above (root, at a root shell) or by hand, then run this again" >&2
+    exit 1
+  fi
 fi
 NODE="$(command -v node)" || { echo "needs node on root's PATH (node.sh)" >&2; exit 1; }
 records() { "$NODE" "$here/instance-records.cjs" "$@"; }
@@ -127,9 +150,12 @@ show_plan() {
   local em; for em in $(engine_mounts); do echo "  unmount  $em (an experiment job's output volume, its job cut off)"; n=$((n + 1)); done
   [ "$n" -gt 0 ] || echo "  nothing: no user, unit, file or record of $name is left"
   local h; h="$(remaining_helper | tr '\n' ' ')"
-  if helper_instances | grep -qx "$name"; then
-    if [ -n "$h" ]; then echo "  machine  the machine helper's rule, rewritten for: $h"; else echo "  machine  the machine helper's rule ($MACHINE_SUDOERS) removed: no other instance"; fi
-  fi
+  case "$(helper_mode)" in
+    rewrite) echo "  machine  first, the machine helper's rule, rewritten for: $h" ;;
+    drop) echo "  machine  first, the machine helper's rule: wl-$name taken out of it, nothing else changed (the engine's rule for $h would grant more: root's, a separate step)" ;;
+    remove) echo "  machine  first, the machine helper's rule ($MACHINE_SUDOERS) removed: no other instance" ;;
+    refuse) echo "  machine  the machine helper's rule ($MACHINE_SUDOERS) isn't in the engine's own shape: this would refuse, nothing changed" ;;
+  esac
   h="$(remaining_hub | tr '\n' ' ')"
   if hub_instances | grep -qx "$name"; then
     if [ -n "$h" ]; then echo "  machine  the dashboard hub, rewritten to serve: $h"; else echo "  machine  the dashboard hub: left as it is (no other instance to serve; it shows $name as unreachable until the next add-project)"; fi
@@ -184,6 +210,31 @@ if [ -z "$yes" ]; then
   read -r -p "Type the instance's name ($name) to remove it, anything else to stop: " typed
   [ "$typed" = "$name" ] || { echo "not removed: nothing changed"; exit 1; }
 fi
+
+# --- the machine helper's rule first (#902 round 8): its coordinator loses the helper before anything of it goes, and
+# while its users are all still there. machine-helper.sh, or the lock here, holds the rule's lock for the write.
+case "$helper_step" in
+  rewrite)
+    say "the machine helper's rule, without $name"
+    # It adds no user (#902 round 6): machine-helper.sh checks the rest at write time.
+    # shellcheck disable=SC2046 # one word per instance name
+    bash "$here/machine-helper.sh" --may-add= $(helper_others)
+    ;;
+  drop)
+    say "the machine helper's rule, without $name"
+    bash "$here/machine-helper.sh" "--drop=$name"
+    echo "the engine's rule for the other instances grants more than the installed one: that is root's, a separate step; see it, and the command pinned to it, with sudo bash $here/machine-helper.sh --check"
+    ;;
+  remove)
+    say "the machine helper's rule, without $name"
+    machine_sudoers_lock
+    remove_sudoers worklane-machine
+    exec 8>&-
+    # The helper stays installed, so the next add-project puts a rule back only with root's --replace-sudoers (#902
+    # round 5: a rule taken away is never put back on its own).
+    echo "removed $MACHINE_SUDOERS: no instance is left to run the machine helper; the next add-project shows the rule it would install and waits for --replace-sudoers"
+    ;;
+esac
 
 # --- export first: never skipped while the state is there
 
@@ -281,7 +332,20 @@ for line in "${ITEMS[@]}"; do
       echo "removed unit $w"
       ;;
     shared) ;; # taken out above, all at once
-    sudoers) exists sudoers "$w" && remove_sudoers "$w" && echo "removed the sudoers file $w" ;;
+    sudoers)
+      exists sudoers "$w" || continue
+      if [ "$w" = worklane-machine ]; then
+        # Instance machine, made before that name was reserved (#902 round 8): its own sudoers file is the machine
+        # helper's rule's file. It goes whole, under that rule's lock: a narrowing, and the next add-project shows the
+        # helper's rule and waits for root's --replace-sudoers.
+        machine_sudoers_lock
+        remove_sudoers "$w"
+        exec 8>&-
+        echo "removed the sudoers file $w: instance machine's, and the file the machine helper's rule is written to; the next add-project shows that rule and waits for --replace-sudoers"
+      else
+        remove_sudoers "$w" && echo "removed the sudoers file $w"
+      fi
+      ;;
     path) exists path "$w" && rm -rf --one-file-system -- "$w" && echo "removed $w" ;;
     glob) exists glob "$w" && rm -f -- "$w"* && echo "removed $w*" ;;
     user)
@@ -338,22 +402,7 @@ if [ -n "$stale_uids" ]; then
   if grep -qx '# --with-test-users' "$EGRESS_USERS"; then bash "$here/egress-firewall.sh" apply --with-test-users; else bash "$here/egress-firewall.sh" apply; fi
 fi
 
-say "the machine's helper rule and hub, without $name"
-helper_now="$(remaining_helper | tr '\n' ' ')"
-if helper_instances | grep -qx "$name"; then
-  if [ -n "$helper_now" ]; then
-    # shellcheck disable=SC2086 # one word per instance name
-    # It adds no user (#902 round 6): machine-helper.sh checks the rest at write time.
-    bash "$here/machine-helper.sh" --may-add= $helper_now
-  else
-    # Under the lock every writer of the rule takes (#902 round 6).
-    machine_sudoers_lock
-    remove_sudoers worklane-machine
-    # The helper stays installed, so the next add-project puts a rule back only with root's --replace-sudoers (#902
-    # round 5: a rule taken away is never put back on its own).
-    echo "removed $MACHINE_SUDOERS: no instance is left to run the machine helper; the next add-project shows the rule it would install and waits for --replace-sudoers"
-  fi
-fi
+say "the machine's hub, without $name"
 if hub_instances | grep -qx "$name"; then
   hub_now="$(remaining_hub | tr '\n' ' ')"
   if [ -n "$hub_now" ]; then

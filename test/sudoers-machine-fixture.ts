@@ -81,8 +81,9 @@ SETUP_POLL_SECONDS=0
     writeFileSync(join(T, 'host-bin', tool), `#!/bin/sh\necho "${tool} $*" >> ${JSON.stringify(join(T, 'host-calls'))}\nexit 1\n`);
     chmodSync(join(T, 'host-bin', tool), 0o755);
   }
-  // As the real instance.sh: a coordinator it makes goes on root's list of instances being created (#898).
-  stub(join(s, 'instance.sh'), 'instance', 'source "$T/scripts/setup/lib.sh"; user_exists "wl-$1" || new_instance_mark "$1"; touch "$T/users/wl-$1" "$T/users/wl-$1-agent"; mkdir -p "$T/srv/$1"');
+  // As the real instance.sh: a coordinator it makes goes on root's list of instances being created (#898), only when
+  // nothing of that instance is on the machine yet (#902 round 8, A1).
+  stub(join(s, 'instance.sh'), 'instance', 'source "$T/scripts/setup/lib.sh"; new_instance_mark_if_new "$1"; touch "$T/users/wl-$1" "$T/users/wl-$1-agent"; mkdir -p "$T/srv/$1"');
   stub(join(T, 'bin', 'worklane'), 'app', `[ "$1" = app-manifest ] || exit 2
 d="$T/homes/wl-$2/.local/state/worklane/instances/$2"; printf 'version: 1\\ngithub:\\n  kind: app\\n  app_id: 91\\n' > "$d/credentials.yaml"
 mkdir -p "$T/homes/wl-$2/.config/$2-app"; echo key > "$T/homes/wl-$2/.config/$2-app/private-key.pem"`);

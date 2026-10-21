@@ -350,6 +350,28 @@ machine_sudoers_preflight() {
   return 1
 }
 
+# The installed rule $1 with user $2 taken out of it and nothing else changed (#902 round 8, A3): what instance-remove.sh
+# installs when the engine's rule is wider than the installed one, so a removal (a revocation) never waits on a
+# widening. It only narrows: the same lines, one user fewer. It prints the content (as machine_sudoers does, no final
+# newline), or fails when $1 isn't in the engine's own shape (machine_sudoers_shape), doesn't name $2, or names no one
+# else.
+machine_sudoers_without() {
+  local file="$1" drop="$2"
+  [ -f "$file" ] && [ ! -L "$file" ] || return 1
+  tr -d '\000' < "$file" | cmp -s - "$file" || return 1
+  machine_sudoers_shape < "$file" > /dev/null || return 1
+  LC_ALL=C awk -v D="$drop" '
+    /^wl-[a-z0-9, -]* ALL=[(]root[)] NOPASSWD: WORKLANE_MACHINE$/ {
+      u = $0; sub(/ ALL=.*$/, "", u)
+      n = split(u, us, ", "); out = ""; found = 0
+      for (i = 1; i <= n; i++) { if (us[i] == D) { found = 1; continue }; out = out (out == "" ? "" : ", ") us[i] }
+      if (!found || out == "") exit 1
+      print out " ALL=(root) NOPASSWD: WORKLANE_MACHINE"
+      next
+    }
+    { print }' "$file"
+}
+
 # The difference between installed sudoers file $1 and content $2 as a unified diff, labelled for the owner's runbook:
 # its minus side "installed <file>", its plus side "engine (machine-helper.sh)". Prints nothing when they are the same.
 sudoers_unified_diff() {
@@ -411,7 +433,9 @@ machine_sudoers_precommit() {
   machine_sudoers_commit_ok "$@"
 }
 
-# The lock every writer of the machine helper's rule holds from its check to its write (#902 round 6, 7: F1). It sits
+# The lock every engine writer of the machine helper's rule holds from its check to its write (#902 round 6, 7: F1;
+# machine-helper.sh, its --drop, and instance-remove.sh; instance.sh can't write it, round 8). A root writer outside
+# the engine (a hand edit, visudo or rm, an older release's scripts) takes none. It sits
 # in a directory only root can enter (root's, 0700, not a link), so no other user can open, hold or plant it. Without
 # flock, or with that directory anything else, the run refuses: it never writes the rule unlocked.
 machine_sudoers_lock() {
@@ -784,6 +808,17 @@ new_instance_write() {
 # instance.sh, as it makes wl-$1: $1 goes on the list. Failing to write it leaves $1 unmarked (its first add then
 # needs --replace-sudoers), never marked by mistake.
 new_instance_mark() { new_instance_write "$1" "$1" || echo "note: $1 could not be put on $ADD_PROJECT_NEW; its first add will wait for --replace-sudoers" >&2; }
+# instance.sh, before it makes anything: $1 goes on the list only when nothing of an instance by that name is on this
+# machine yet (#902 round 8, A1). That means none of its users, no checkout root, no hub entry, and no place in the
+# machine helper's rule. A coordinator root took out of the rule and deleted by hand, with its agent user, checkout or
+# hub entry left, is no new instance: its next add waits for --replace-sudoers.
+new_instance_mark_if_new() {
+  local n="$1" u
+  for u in "wl-$n" "wl-$n-agent" "wl-$n-eval"; do if user_exists "$u"; then return 0; fi; done
+  if [ -e "$SRV_ROOT/$n" ] || [ -L "$SRV_ROOT/$n" ]; then return 0; fi
+  if { hub_instances; helper_instances; } | grep -qx -- "$n"; then return 0; fi
+  new_instance_mark "$n"
+}
 # machine-helper.sh, for every name it writes into the rule: each comes off. Failing that, the list goes, so no name it
 # held marks anything (each then needs the flag).
 new_instance_clear() {
@@ -899,6 +934,7 @@ instance_name_problem() {
   elif [ "$n" = dash ]; then echo "wl-dash is the dashboard viewer"
   elif [ "$n" = hub ] || [ "$n" = hub-setup ]; then echo "worklane-dashboard-$n.service is the dashboard hub's"
   elif [ "$n" = update ] || [ "$n" = tailscale ] || [ "$n" = claude-account ] || [ "$n" = egress ]; then echo "worklane-$n.service is the machine's own"
+  elif [ "$n" = machine ] || [ "$n" = console ]; then echo "/etc/sudoers.d/worklane-$n is the machine's own sudoers file"
   elif [ "$n" = agent ] || [ "$n" = eval ] || [ "$n" = work ] || [ "$n" = mcp ] || [ "$n" = mcpc ] || [ "$n" = mcpctl ]; then echo "its test user wl-test-$n would be instance test's $n name, and wl-ci-$n the $n name of instance ci"
   elif [[ "$n" == test-* ]]; then echo "wl-$n is the test user of instance ${n#test-}"
   elif [[ "$n" == ci-* ]]; then echo "wl-$n is the user of CI runner ${n#ci-}"

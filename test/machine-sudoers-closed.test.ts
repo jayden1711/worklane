@@ -3,13 +3,14 @@
 //     own exact shape and the engine's rule only drops whole commands or users from it. Anything else waits: a tag, a
 //     second spec or alias, a Defaults or include line, a negation, an escape, a CR.
 //   - A user is added without the flag only for the instance add-project is creating, never one root took out.
-//   - instance-remove.sh and instance-rename.sh check this before their first change, and stop with nothing changed.
+//   - instance-rename.sh checks this before its first change, and stops with nothing changed. instance-remove.sh stops
+//     so only for a rule outside the engine's shape: a removal never waits on a widening (round 8, A3).
 // Each installed rule below grants, as sudo reads it, less than the engine's rule (or can't be told), so rewriting it
 // to the engine's would widen it. The machine is test/sudoers-machine-fixture.ts, with recording stand-ins for every
 // host tool (none may be called).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, copyFileSync, existsSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, existsSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 import { repoRoot } from './helpers.js';
@@ -58,7 +59,11 @@ for (const [what, change] of VARIANTS) {
     assert.equal(m.sudoers(), installed, 'not rewritten');
     assert.equal(m.helperRuns(), 1);
     const wait = r.events.find((e) => e.step === 'machine-helper' && e.state === 'waiting');
-    assert.equal(wait?.detail, `${RERUN}sudo bash ${m.s}/add-project.sh alpha example/alpha --replace-sudoers=${m.pin('alpha', 'old')}`);
+    // #902 round 8, A2: the JSON the dashboard stores and shows carries no pin (no diff beside it there); it points root
+    // at the unpinned rerun or --check, which print both together at a root shell. The pin is on stderr, after the diff.
+    assert.equal(wait?.detail, `the engine's machine helper rule grants more than the installed one, which only root may widen: at a root shell, rerun sudo bash ${m.s}/add-project.sh alpha example/alpha, or run sudo bash ${m.s}/machine-helper.sh --check; either prints the whole diff and the command pinned to it`);
+    assert.doesNotMatch(r.stdout, /--replace-sudoers=|[0-9a-f]{64}/, 'no pin anywhere in the JSON output');
+    assert.ok(r.stderr.includes(`\n${RERUN}sudo bash ${m.s}/add-project.sh alpha example/alpha --replace-sudoers=${m.pin('alpha', 'old')}\n`), r.stderr);
     const c = m.check();
     assert.equal(c.status, 4, `${what}: ${c.stdout}`);
     assert.match(c.stdout.trimEnd().split('\n').pop()!, /^wider: rerun as root with --replace-sudoers to install the engine's rule: sudo bash \S+\/machine-helper\.sh --replace-sudoers=[0-9a-f]{64} [a-z]/);
@@ -101,12 +106,19 @@ function withAdminScripts(m: M) {
   return (file: string, ...args: string[]) => spawnSync('bash', [join(m.s, file), ...args], { encoding: 'utf8', input: '', env: m.env });
 }
 
-test('#902 instance-remove.sh stops before its first change when the machine helper\'s rule would need --replace-sudoers, naming that command', { skip: !posix }, () => {
+test('#902 instance-remove.sh stops before its first change only when the machine helper\'s rule is outside the engine\'s shape, naming the command that replaces it', { skip: !posix }, () => {
   const m = machine();
   const run = withAdminScripts(m);
   for (const u of ['wl-alpha', 'wl-alpha-agent']) writeFileSync(join(m.T, 'users', u), '');
-  const { rule } = withoutCommand(m.expected('alpha', 'old'));
+  // Round 8, A3: a removal is a revocation and never waits on a widening. An older engine's rule (the engine's rule
+  // for old alone would widen it) is no stop: alpha is taken out of it alone (machine-helper.sh --drop), later.
+  m.setSudoers(withoutCommand(m.expected('alpha', 'old')).rule);
+  const older = run('instance-remove.sh', 'alpha', '--yes');
+  assert.doesNotMatch(older.stdout + older.stderr, /--replace-sudoers|is not removed/);
+  // Outside the engine's shape: stopped, with the diff and the command pinned to it.
+  const rule = `${m.expected('alpha', 'old')}Defaults:wl-alpha requiretty\n`;
   m.setSudoers(rule);
+  rmSync(join(m.T, 'reached'), { force: true });
   const before = snapshot(m);
   const r = run('instance-remove.sh', 'alpha', '--yes');
   assert.equal(r.status, 1, r.stderr);

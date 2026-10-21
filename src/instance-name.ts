@@ -19,7 +19,7 @@ export const INSTANCE_FILE_NAME_MAX = 41;
 
 /** What each name the scripts make is derived from: an instance name, a CI runner name, or nothing (a fixed name). */
 export type NameOf = 'instance' | 'runner' | 'fixed' | 'test-run' | 'test-run-legacy' | 'snapshot' | 'exp-step';
-/** Every user, group and systemd unit the setup scripts make, with <n> the instance or runner name. */
+/** Every user, group, systemd unit and sudoers file the setup scripts make, with <n> the instance or runner name. */
 export const ENGINE_NAMES: readonly { readonly pattern: string; readonly of: NameOf }[] = [
   { pattern: 'wl-<n>', of: 'instance' },
   { pattern: 'wl-<n>-agent', of: 'instance' },
@@ -64,6 +64,14 @@ export const ENGINE_NAMES: readonly { readonly pattern: string; readonly of: Nam
   { pattern: `${BRAND.cli}-tailscale.service`, of: 'fixed' },
   { pattern: `${BRAND.cli}-test.slice`, of: 'fixed' },
   { pattern: `${BRAND.cli}-ci.slice`, of: 'fixed' },
+  // Sudoers files (install_sudoers in scripts/setup): an instance's coordinator rule, its test user's and its experiment
+  // users', and the machine's own two: the machine helper's rule and the owner console's (#902 round 8). An instance
+  // named machine would have written its coordinator rule over the helper's (instance.sh's install_sudoers).
+  { pattern: `/etc/sudoers.d/${BRAND.cli}-<n>`, of: 'instance' },
+  { pattern: `/etc/sudoers.d/${BRAND.cli}-test-<n>`, of: 'instance' },
+  { pattern: `/etc/sudoers.d/${BRAND.cli}-exp-<n>`, of: 'instance' },
+  { pattern: `/etc/sudoers.d/${BRAND.cli}-machine`, of: 'fixed' },
+  { pattern: `/etc/sudoers.d/${BRAND.cli}-console`, of: 'fixed' },
 ];
 
 /**
@@ -75,6 +83,7 @@ export function instanceNameProblem(s: unknown, max = INSTANCE_NAME_MAX): string
   if (s === 'dash') return 'wl-dash is the dashboard viewer';
   if (s === 'hub' || s === 'hub-setup') return `${BRAND.cli}-dashboard-${s}.service is the dashboard hub's`;
   if (s === 'update' || s === 'tailscale' || s === 'claude-account' || s === 'egress') return `${BRAND.cli}-${s}.service is the machine's own`;
+  if (s === 'machine' || s === 'console') return `/etc/sudoers.d/${BRAND.cli}-${s} is the machine's own sudoers file`;
   if (s === 'agent' || s === 'eval' || s === 'work' || s === 'mcp' || s === 'mcpc' || s === 'mcpctl') return `its test user wl-test-${s} would be instance test's ${s} name, and wl-ci-${s} the ${s} name of instance ci`;
   if (s.startsWith('test-')) return `wl-${s} is the test user of instance ${s.slice(5)}`;
   if (s.startsWith('ci-')) return `wl-${s} is the user of CI runner ${s.slice(3)}`;

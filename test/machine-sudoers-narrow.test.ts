@@ -52,7 +52,8 @@ test('#898 owner rule: an installed rule narrower than the engine\'s is NOT rewr
   assert.deepEqual(changed(r.stderr, '+'), [`+    ${command}, \\`]);
   const cmd = `sudo bash ${m.s}/add-project.sh alpha example/alpha --replace-sudoers=${m.pin('alpha', 'old')}`;
   assert.ok(r.stderr.includes(`\n${RERUN}${cmd}\n`), r.stderr);
-  assert.equal(waiting(r)?.detail, `${RERUN}${cmd}`);
+  assert.doesNotMatch(waiting(r)?.detail ?? '', /--replace-sudoers=/, 'the stored detail carries no pin (#902 round 8, A2)');
+  assert.match(waiting(r)?.detail ?? '', /machine-helper\.sh --check; either prints the whole diff and the command pinned to it$/);
   assert.ok(!r.events.some((e) => e.step === 'dashboards'), 'it stops there');
   assert.equal(m.hostCalls(), '');
 });
