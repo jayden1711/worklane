@@ -3,7 +3,7 @@
 // large map): run here, the coordinator's thread never waits on it, and readTouchedInChild (src/vacuity.ts) kills it
 // past its time limit. It reads one request (TouchedRequest) on stdin and writes one answer on stdout: the touched
 // files, or why it couldn't read them, as fixed text (CoverageUnreadable's), never a file's content.
-import { CoverageUnreadable, measureTouched, type TouchedAnswer, type TouchedRequest } from './vacuity.js';
+import { baseTextReader, CoverageUnreadable, measureTouched, type TouchedAnswer, type TouchedRequest } from './vacuity.js';
 
 const MAX_REQUEST = 4 * 1024 * 1024;
 
@@ -17,7 +17,7 @@ let answer: TouchedAnswer;
 try {
   if (raw.length > MAX_REQUEST) throw new CoverageUnreadable('the coverage read was asked too much');
   const req = JSON.parse(raw) as TouchedRequest;
-  answer = measureTouched(req.coverageDir, req.root, req.appPaths, req.only, req.hunks, req.baselineDir, req.loads ?? []);
+  answer = measureTouched(req.coverageDir, req.root, req.appPaths, req.only, req.hunks, req.baselineDir, req.loads ?? [], req.base && req.repo ? baseTextReader(req.repo, req.base) : undefined);
 } catch (e) {
   answer = { error: e instanceof CoverageUnreadable ? e.message : 'the coverage read failed' };
 }

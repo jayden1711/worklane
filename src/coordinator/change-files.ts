@@ -507,14 +507,15 @@ export function changedLinesCommand(base: string, head: string): string[] {
 
 /**
  * One hunk of a file's changes as changedLineNumbers reads them: `at`, the line at the head its removed lines followed
- * (0: the file's start); `added`, the lines it added (1-based, at the head), and `addedText`, their text; `removed`, the
- * text it removed.
+ * (0: the file's start); `added`, the lines it added (1-based, at the head); `removed`, the text it removed, from line
+ * `from` (1-based) of the file at the base, `oldPath` (a rename's old path).
  */
 export interface ChangedHunk {
   at: number;
   added: number[];
-  addedText: string[];
   removed: string[];
+  from: number;
+  oldPath: string;
 }
 
 /**
@@ -527,32 +528,34 @@ export function changedLineNumbers(diff: string): Map<string, ChangedHunk[]> {
   let cur: ChangedHunk[] | null = null;
   let hunk: ChangedHunk | null = null;
   let path = '';
+  let oldPath = '';
   let next = 0;
   for (const l of diff.split('\n')) {
     if (l.startsWith('diff --git ')) {
       const header = /^diff --git a\/(.*) b\/(.*)$/.exec(l);
       path = header ? header[2]! : l;
+      oldPath = header ? header[1]! : l;
       cur = null;
       hunk = null;
-    } else if (l.startsWith('rename to ') && !cur) path = l.slice('rename to '.length);
-    else if (l.startsWith('+++ ') && !cur) {
+    } else if (l.startsWith('rename from ') && !cur) oldPath = l.slice('rename from '.length);
+    else if (l.startsWith('rename to ') && !cur) path = l.slice('rename to '.length);
+    else if (l.startsWith('--- ') && !cur) {
+      if (l.startsWith('--- a/')) oldPath = l.slice('--- a/'.length);
+    } else if (l.startsWith('+++ ') && !cur) {
       if (l.startsWith('+++ b/')) path = l.slice('+++ b/'.length);
     } else if (l.startsWith('@@')) {
-      const m = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/.exec(l);
+      const m = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,(\d+))? @@/.exec(l);
       cur = out.get(path) ?? [];
       out.set(path, cur);
       if (!m) {
         hunk = null;
         continue;
       }
-      next = Number(m[1]);
+      next = Number(m[2]);
       // `+c,0`: nothing added, the removed lines followed line c; otherwise they stood where line c now is.
-      hunk = { at: m[2] === '0' ? next : next - 1, added: [], addedText: [], removed: [] };
+      hunk = { at: m[3] === '0' ? next : next - 1, added: [], removed: [], from: Number(m[1]), oldPath };
       cur.push(hunk);
-    } else if (hunk && l.startsWith('+')) {
-      hunk.added.push(next++);
-      hunk.addedText.push(l.slice(1));
-    }
+    } else if (hunk && l.startsWith('+')) hunk.added.push(next++);
     else if (hunk && l.startsWith('-')) hunk.removed.push(l.slice(1));
   }
   return out;

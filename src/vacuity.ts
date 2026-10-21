@@ -400,6 +400,11 @@ function lexLines(text: string, slashIsRegex: boolean): { code: boolean[]; inCom
       s = 'line';
       continue;
     }
+    // Script code's HTML-like comments (#784 round 10): `<!--` anywhere, `-->` first on a line, each to its end.
+    if ((c === '<' && text.startsWith('<!--', i)) || (c === '-' && !code[line] && text.startsWith('-->', i))) {
+      s = 'line';
+      continue;
+    }
     if (c === '/' && text[i + 1] === '*') {
       s = 'block';
       i++;
@@ -437,16 +442,36 @@ function lexLines(text: string, slashIsRegex: boolean): { code: boolean[]; inCom
 
 /**
  * One changed file's hunks as the merge gate hands them to the reader (from change-files.ts changedLineNumbers): `at`,
- * the head line the removed lines followed; `added`, the head lines added; `removed`, the text it removed.
+ * the head line the removed lines followed; `added`, the head lines added; `removed`, the text it removed, from line
+ * `from` of `oldPath` at the base (round 10: its code/comment mask is read there, in context).
  */
 export interface ChangedHunkSpots {
   at: number;
   added: number[];
   removed: string[];
+  from?: number;
+  oldPath?: string;
 }
 
 /** Character ranges [start, end) of a text. */
 export type CharRanges = [number, number][];
+
+/**
+ * A changed file's changed code (codeRanges): `chars`, code characters the change added or changed, any one of which
+ * counts if it ran; `needs`, one per removal, the head offsets that must all have run for it to count (-1: none can).
+ */
+export interface ChangedCode {
+  chars: CharRanges;
+  needs: number[][];
+}
+
+/**
+ * Removed code that crosses a block or clause boundary (#784 round 10): it may have run on a path the code on its sides
+ * never shows, so it never counts as run.
+ */
+const BOUNDARY = /[{}?:]|\|\||&&|\bcase\b|\bdefault\b|\belse\b|\bcatch\b|\bfinally\b/;
+/** Code that starts a sibling block or clause: a removal right before it is measured on both sides. */
+const CLAUSE_START = /^(?:\}|case\b|default\b|else\b|catch\b|finally\b)/;
 
 /** Why the gate can't measure a change it can't place by character (fixed text; the PR holds). */
 export const UNPLACEABLE = "a change too large to align character by character, so where it changed code can't be told";
@@ -500,19 +525,33 @@ function alignChars(a: readonly string[], r: readonly string[]): string[] | null
 }
 
 /**
- * The characters of a changed file (its head text) a test must run code on (#784 rounds 8, 9: by character, never by
- * line). Each hunk's removed text and added lines are aligned character by character, whitespace left out (alignChars):
- * every added character that is code at the head (codeLines' mask: no whitespace, no comment) counts; and every run of
- * removed characters that held code counts at its own place, the first code character at or after where it was in the
- * head (unless a removal that added nothing was inside a block comment). A shortened line, a split or joined one, a moved
- * one, a comment or blank line added beside: each measured at the characters that changed. Null: a hunk too large to
- * align, which the caller holds on; empty: nothing to measure in this file.
+ * The code of a changed file (its head text) a test must run (#784 rounds 8 to 10: by character, never by line). Each
+ * hunk's removed text and added lines are aligned character by character, whitespace left out (alignChars).
+ * - Every added character that is code at the head (codeLines' mask: no whitespace, no comment) counts if it ran.
+ * - The removed side's code/comment mask is read in its base file (`baseOf`: round 10), so an edited line inside a
+ *   block comment or JSDoc is comment, never code read out of context; a base file it can't read, or whose lines aren't
+ *   the removed ones, makes the change unplaceable (null).
+ * - Code taken away and none given in its place (a removal, code commented out) counts only when the code characters
+ *   on its sides ran (round 10): both, when it sat within a line; the one on its line, at a line's end or start; for
+ *   whole lines, the code after it, or both sides when that starts a sibling block or clause (`}`, `case`, `else`, ...).
+ *   Removed code that crosses a block or clause boundary (BOUNDARY) never counts. A removal inside a block comment
+ *   (nothing added) is none.
+ * Null: a hunk too large to align, or a removed side it can't place, which the caller holds on.
  */
-export function codeRanges(text: string, hunks: readonly ChangedHunkSpots[]): CharRanges | null {
+export function codeRanges(text: string, hunks: readonly ChangedHunkSpots[], baseOf?: (path: string) => string | null): ChangedCode | null {
   const { inComment, mask } = codeLines(text);
   const starts = lineStarts(text);
   const lines = starts.length - 1;
   const out: CharRanges = [];
+  const needs: number[][] = [];
+  const baseMasks = new Map<string, { text: string; mask: Uint8Array; starts: number[] } | null>();
+  const baseFile = (p: string) => {
+    if (!baseMasks.has(p)) {
+      const t = baseOf!(p);
+      baseMasks.set(p, t === null ? null : { text: t, mask: codeLines(t).mask, starts: lineStarts(t) });
+    }
+    return baseMasks.get(p)!;
+  };
   const blank = (c: string) => c === ' ' || c === '\t' || c === '\r' || c === '\n' || c === '\f' || c === '\v' || c === ' ' || c === '﻿';
   const push = (i: number) => {
     const last = out.at(-1);
@@ -524,6 +563,11 @@ export function codeRanges(text: string, hunks: readonly ChangedHunkSpots[]): Ch
     while (q < text.length && !mask[q]) q++;
     return q < text.length ? q : -1;
   };
+  const codeBefore = (i: number) => {
+    let q = Math.min(i, text.length) - 1;
+    while (q >= 0 && !mask[q]) q--;
+    return q;
+  };
   for (const h of hunks) {
     // The added side: its characters at the head, whitespace left out.
     const aOff: number[] = [];
@@ -531,9 +575,23 @@ export function codeRanges(text: string, hunks: readonly ChangedHunkSpots[]): Ch
       if (l < 1 || l > lines) continue;
       for (let i = starts[l - 1]!; i < starts[l]!; i++) if (!blank(text[i]!)) aOff.push(i);
     }
-    // The removed side: its characters, and which held code (its own text lexed).
+    // The removed side: its characters, and which held code, as lexed in the base file they came from (round 10);
+    // without a base reader (a direct call), its own text lexed.
     const rText = h.removed.join('\n');
-    const rMask = codeLines(rText).mask;
+    let rMask: Uint8Array;
+    if (baseOf && h.removed.length) {
+      const base = h.oldPath !== undefined && h.from !== undefined ? baseFile(h.oldPath) : null;
+      if (!base) return null;
+      rMask = new Uint8Array(rText.length);
+      let at = 0;
+      for (let k = 0; k < h.removed.length; k++) {
+        const line = h.removed[k]!;
+        const from = base.starts[h.from! - 1 + k];
+        if (from === undefined || base.text.slice(from, from + line.length) !== line) return null;
+        rMask.set(base.mask.subarray(from, from + line.length), at);
+        at += line.length + 1;
+      }
+    } else rMask = codeLines(rText).mask;
     const rIdx: number[] = [];
     for (let i = 0; i < rText.length; i++) if (!blank(rText[i]!)) rIdx.push(i);
     const ops = alignChars(aOff.map((i) => text[i]!), rIdx.map((i) => rText[i]!));
@@ -546,42 +604,67 @@ export function codeRanges(text: string, hunks: readonly ChangedHunkSpots[]): Ch
     let ri = 0;
     // One gap: a run of characters the change took or gave, or kept but turned from code to comment or back.
     let addedCode = false;
-    let removedCode = false;
-    const close = () => {
-      // Code taken away and none given in its place (a removal, code commented out): measured where it was, at the
-      // first code character now there. Code given in its place is measured itself.
-      if (removedCode && !addedCode && !(pureRemoval && h.at >= 1 && h.at <= lines && inComment[h.at - 1])) {
-        const q = codeFrom(ai < aOff.length ? aOff[ai]! : after);
-        if (q >= 0) push(q);
+    // The removed code characters of the gap (their places in rText), where it began at the head, and the last kept
+    // removed-side character before it.
+    let removed: number[] = [];
+    let gapAt = -1;
+    let lastKept = -1;
+    const close = (nextKept?: number) => {
+      // Code taken away and none given in its place (a removal, code commented out): it counts only where the code on
+      // its sides ran (round 10). Code given in its place is measured itself.
+      if (removed.length && !addedCode && !(pureRemoval && h.at >= 1 && h.at <= lines && inComment[h.at - 1])) {
+        const first = removed[0]!;
+        const last = removed.at(-1)!;
+        let code = '';
+        for (let i = first; i <= last; i++) code += rMask[i] ? rText[i] : ' ';
+        const p = ai < aOff.length ? aOff[ai]! : after;
+        const before = codeBefore(gapAt >= 0 ? gapAt : p);
+        const next = codeFrom(p);
+        const onLineBefore = lastKept >= 0 && !rText.slice(lastKept, first).includes('\n');
+        const onLineAfter = nextKept !== undefined && !rText.slice(last, nextKept).includes('\n');
+        let need: number[];
+        if (BOUNDARY.test(code)) need = [-1];
+        else if (onLineBefore && onLineAfter) need = [before, next];
+        else if (onLineBefore) need = [before];
+        else if (onLineAfter) need = [next];
+        else need = next < 0 || CLAUSE_START.test(text.slice(next, next + 8)) ? [before, next] : [next];
+        needs.push(need);
       }
-      addedCode = removedCode = false;
+      addedCode = false;
+      removed = [];
+      gapAt = -1;
     };
     for (const op of ops) {
       if (op === '=') {
         const aCode = mask[aOff[ai]!] === 1;
         const rCode = rMask[rIdx[ri]!] === 1;
         if (aCode !== rCode) {
+          if (gapAt < 0) gapAt = aOff[ai]!;
           if (aCode) {
             push(aOff[ai]!);
             addedCode = true;
-          } else removedCode = true;
-        } else close();
+          } else removed.push(rIdx[ri]!);
+        } else {
+          close(rIdx[ri]!);
+          lastKept = rIdx[ri]!;
+        }
         ai++;
         ri++;
       } else if (op === '+') {
+        if (gapAt < 0) gapAt = aOff[ai]!;
         if (mask[aOff[ai]!]) {
           push(aOff[ai]!);
           addedCode = true;
         }
         ai++;
       } else {
-        if (rMask[rIdx[ri]!]) removedCode = true;
+        if (rMask[rIdx[ri]!]) removed.push(rIdx[ri]!);
         ri++;
       }
     }
     close();
   }
-  return out.sort((x, y) => x[0] - y[0]);
+  return { chars: out.sort((x, y) => x[0] - y[0]), needs };
 }
 
 /** The 1-based lines `ranges` fall on (for a build's sources, which its map places by line). */
@@ -602,9 +685,9 @@ function linesOf(starts: number[], ranges: CharRanges): LineSpans {
  * right side of `??`/`||`/`&&` are ranges of their own) on any of `changed`, the changed characters (#784 round 8);
  * null: anywhere.
  */
-function ranOn(ranges: [number, number][], changed: CharRanges | null): boolean {
+function ranOn(ranges: [number, number][], changed: ChangedCode | null): boolean {
   if (!changed) return ranges.length > 0;
-  return changed.some(([a, b]) => overlaps(ranges, a, b));
+  return changed.chars.some(([a, b]) => overlaps(ranges, a, b)) || changed.needs.some((n) => n.every((o) => o >= 0 && overlaps(ranges, o, o + 1)));
 }
 
 const B64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
@@ -732,7 +815,7 @@ export function touchedAppFiles(coverageDir: string, root: string, appPaths: str
  * more times (#784 round 7). The gate loads each on its own and reads again with `loads`, each run's coverage taken
  * away as many times as its script was evaluated more, on top of the test baseline's (ranMore).
  */
-export function measureTouched(coverageDir: string, root: string, appPaths: string[], only?: readonly string[], hunks?: Readonly<Record<string, readonly ChangedHunkSpots[]>>, baselineDir?: string, loads: readonly LoadRun[] = []): { touched: string[]; loads: { script: string; extra: number }[] } {
+export function measureTouched(coverageDir: string, root: string, appPaths: string[], only?: readonly string[], hunks?: Readonly<Record<string, readonly ChangedHunkSpots[]>>, baselineDir?: string, loads: readonly LoadRun[] = [], baseOf?: (path: string) => string | null): { touched: string[]; loads: { script: string; extra: number }[] } {
   const res = appPaths.map((g) => globToRegExp(g));
   const realRoot = realpathSync.native(root);
   const wanted = hunks ? new Set(Object.keys(hunks)) : only ? new Set(only) : null;
@@ -740,19 +823,22 @@ export function measureTouched(coverageDir: string, root: string, appPaths: stri
   const isApp = (rel: string) => !rel.startsWith('..') && res.some((re) => re.test(rel)) && (!wanted || wanted.has(rel));
   // Each changed file's changed code characters, from its text at the head (the worktree's), and the lines they are on
   // (a build's map places code by line).
-  const changed = new Map<string, { chars: CharRanges; lines: LineSpans }>();
+  const changed = new Map<string, { code: ChangedCode; lines: LineSpans; needLines: number[][] }>();
   if (hunks) {
     for (const f of wanted!) {
       const text = textOf(join(realRoot, f), SCRIPT_BYTES);
-      const chars = text === null ? [] : codeRanges(text, hunks[f]!);
+      const code = text === null ? { chars: [], needs: [] } : codeRanges(text, hunks[f]!, baseOf);
       // A change it can't place by character holds the PR: never measured by the whole line instead (#784 round 9).
-      if (chars === null) throw new CoverageUnreadable(UNPLACEABLE);
-      changed.set(f, { chars, lines: text === null ? [] : linesOf(lineStarts(text), chars) });
+      if (code === null) throw new CoverageUnreadable(UNPLACEABLE);
+      const starts = text === null ? [0] : lineStarts(text);
+      const lineOf = (o: number) => (o < 0 ? 0 : linesOf(starts, [[o, o + 1]])[0]![0]);
+      changed.set(f, { code, lines: linesOf(starts, code.chars), needLines: code.needs.map((n) => n.map(lineOf)) });
     }
-    if (![...changed.values()].some((s) => s.chars.length)) throw new CoverageUnreadable(NOTHING_TO_MEASURE);
+    if (![...changed.values()].some((s) => s.code.chars.length || s.code.needs.length)) throw new CoverageUnreadable(NOTHING_TO_MEASURE);
   }
-  const charsOf = (rel: string): CharRanges | null => (hunks ? (changed.get(rel)?.chars ?? []) : null);
+  const codeOf = (rel: string): ChangedCode | null => (hunks ? (changed.get(rel)?.code ?? { chars: [], needs: [] }) : null);
   const spansOf = (rel: string): LineSpans | null => (hunks ? (changed.get(rel)?.lines ?? []) : null);
+  const needLinesOf = (rel: string): number[][] => changed.get(rel)?.needLines ?? [];
   // Every process's segments of each script under the root: the test runs' summed (`ran`), and what loading accounts
   // for (`loaded`): the test baseline's, plus each load-only run's times how many more times the tests evaluated the
   // script it loaded than the test baseline did (#784 round 7).
@@ -810,7 +896,7 @@ export function measureTouched(coverageDir: string, root: string, appPaths: stri
     const ranges = ranMore(ran, [loaded]);
     if (!ranges.length) continue;
     if (isApp(rel)) {
-      if (ranOn(ranges, charsOf(rel))) touched.add(rel);
+      if (ranOn(ranges, codeOf(rel))) touched.add(rel);
       continue;
     }
     for (const [src, lines] of mappedLines(file, ranges, text, realRoot, budget)) {
@@ -821,7 +907,8 @@ export function measureTouched(coverageDir: string, root: string, appPaths: stri
   for (const [src, ran] of mappedRan) {
     if (!isApp(src) || touched.has(src)) continue;
     const s = spansOf(src);
-    if (!s ? ran.size > 0 : s.some(([a, b]) => [...ran].some((l) => l >= a && l <= b))) touched.add(src);
+    const removals = needLinesOf(src).some((ls) => ls.every((l) => ran.has(l)));
+    if (!s ? ran.size > 0 : removals || s.some(([a, b]) => [...ran].some((l) => l >= a && l <= b))) touched.add(src);
   }
   // Every script the tests evaluated more often than the test baseline did: what each run as it loaded is still in
   // `ran` until it is loaded on its own (the gate does, then reads again with `loads`).
@@ -846,6 +933,24 @@ export interface TouchedRequest {
   hunks: Record<string, ChangedHunkSpots[]>;
   /** The load-only runs (#784 rounds 6, 7), once the scripts to load are known. */
   loads?: LoadRun[];
+  /** Where the PR's change is measured from, and the clone that has it: the base files its removed lines are read in. */
+  base?: string;
+  repo?: string;
+}
+
+/**
+ * A file's text at `base` in the clone `repo` (git show, with change-files.ts's guards: no replace refs, no attributes
+ * file), at most SCRIPT_BYTES; null when it can't be read. For the reader process only (it is synchronous).
+ */
+export function baseTextReader(repo: string, base: string): (path: string) => string | null {
+  const seen = new Map<string, string | null>();
+  return (path) => {
+    if (!seen.has(path)) {
+      const r = spawnSync('git', ['--no-replace-objects', '-c', 'core.attributesFile=/dev/null', 'show', `${base}:${path}`], { cwd: repo, encoding: 'utf8', maxBuffer: SCRIPT_BYTES, stdio: ['ignore', 'pipe', 'ignore'] });
+      seen.set(path, r.status === 0 && typeof r.stdout === 'string' ? r.stdout : null);
+    }
+    return seen.get(path)!;
+  };
 }
 
 /** What the reader answers: the touched files, and the scripts to load on their own (measureTouched). */

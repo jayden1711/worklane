@@ -1805,7 +1805,8 @@ export abstract class MergeFlow extends FixRuns {
         if (error === null && (!existsSync(cov) || !existsSync(baseline))) error = 'no coverage was written (runner.one must run the tests in Node for a coverage run)';
         // The directories and their files are the test's: read as hostile input, in a process of its own with a time
         // limit (the coordinator's thread never waits on it), bounded, and only fixed text on failure.
-        const req = { coverageDir: cov, baselineDir: baseline, root: path, appPaths: run.appPaths, only: run.app, hunks };
+        // `base` and `repo`: the reader lexes each hunk's removed lines in the base file they came from (round 10).
+        const req = { coverageDir: cov, baselineDir: baseline, root: path, appPaths: run.appPaths, only: run.app, hunks, base: run.base, repo: this.d.repo };
         const first = error === null ? await readTouchedInChild(req, undefined, this.shutdown.signal) : null;
         if (first && 'error' in first) error = first.error;
         else if (first?.touched.length && !first.loads.length) touched = first.touched;
@@ -1888,7 +1889,7 @@ export abstract class MergeFlow extends FixRuns {
     const byFile = changedLineNumbers(text);
     const out: Record<string, ChangedHunkSpots[]> = {};
     // The reader aligns each hunk's removed text with its added lines character by character (codeRanges).
-    for (const f of files) out[f] =(byFile.get(f) ?? []).map((h) => ({ at: h.at, added: h.added, removed: h.removed }));
+    for (const f of files) out[f] = (byFile.get(f) ?? []).map((h) => ({ at: h.at, added: h.added, removed: h.removed, from: h.from, oldPath: h.oldPath }));
     return out;
   }
 
