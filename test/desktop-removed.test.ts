@@ -85,9 +85,11 @@ function matrixCombos(matrix: unknown): Map<string, unknown>[] | null {
   // then (an empty or dropped suffix?) is unsure, so the matrix counts as unreadable (as src/check-pin-block.ts does).
   const values = [...(Object.values(axes) as unknown[][]).flat(), ...include.flatMap((e) => Object.values(e)), ...exclude.flatMap((e) => Object.values(e))];
   if (values.some((v) => v === null || typeof v === 'object' || (typeof v === 'string' && v.trim() === ''))) return null;
-  // A string value with a leading or trailing blank (`'q '`): whether GitHub trims it before it matches an exclude or
-  // include entry, or names the job, is unsure, so the matrix is unreadable (round 13).
-  if (values.some((v) => typeof v === 'string' && /^\s|\s$/.test(v))) return null;
+  // A string value outside the closed set names keep to (unsureName): any character outside printable ASCII (a tab,
+  // NEL from a `\N` escape, a no-break space; round 14), or a leading or trailing space (`'q '`; round 13). Whether
+  // GitHub trims or folds it before it matches an exclude or include entry, or names the job, is unsure, so the
+  // matrix is unreadable.
+  if (values.some((v) => typeof v === 'string' && unsureName(v))) return null;
   // A number JS and GitHub may print differently makes the matrix unreadable: `22.00000000000001` (JS keeps the
   // digits, a 15-digit format drops them; round 8) and -0 (JS prints `0`, .NET `-0`; round 9). Every other integer
   // below 1e15 in size is taken to print the same both ways (inferred, not measured on GitHub). It is written in
@@ -580,6 +582,11 @@ const TWIN_FIXTURES: [string, string, boolean][] = [
   ["Y3 an exclude 1 against an axis '1e0'", "jobs:\n  shots:\n    name: ${{ matrix.v }}\n    strategy:\n      matrix:\n        k: ['1e0']\n        exclude: [ { k: 1 } ]\n        include: [ { v: desktop }, { v: phone } ]\n    runs-on: x\n    steps: [ { run: 'false' } ]\n", true],
   ['Y4 an exclude 0 against an axis false', "jobs:\n  shots:\n    name: ${{ matrix.v }}\n    strategy:\n      matrix:\n        k: [false]\n        exclude: [ { k: 0 } ]\n        include: [ { v: desktop }, { v: phone } ]\n    runs-on: x\n    steps: [ { run: 'false' } ]\n", true],
   ["Y5 an exclude q against an axis 'q '", "jobs:\n  shots:\n    name: ${{ matrix.v }}\n    strategy:\n      matrix:\n        k: ['q ']\n        exclude: [ { k: q } ]\n        include: [ { v: desktop }, { v: phone } ]\n    runs-on: x\n    steps: [ { run: 'false' } ]\n", true],
+  // Round 14 (#746 delta check of b107cc97): NEL (U+0085), which JS `\s` doesn't match, through a YAML escape, so
+  // the file's text stays ASCII. Any matrix string value outside printable ASCII makes the matrix unreadable.
+  ['P1 an exclude q against an axis "q\\N" (NEL)', "jobs:\n  shots:\n    name: ${{ matrix.v }}\n    strategy:\n      matrix:\n        k: [\"q\\N\"]\n        exclude: [ { k: q } ]\n        include: [ { v: desktop }, { v: phone } ]\n    runs-on: x\n    steps: [ { run: 'false' } ]\n", true],
+  ['P2 an exclude q against an axis "q\\x85"', "jobs:\n  shots:\n    name: ${{ matrix.v }}\n    strategy:\n      matrix:\n        k: [\"q\\x85\"]\n        exclude: [ { k: q } ]\n        include: [ { v: desktop }, { v: phone } ]\n    runs-on: x\n    steps: [ { run: 'false' } ]\n", true],
+  ['P3 an exclude q against an axis "\\u0085q", NEL first', "jobs:\n  shots:\n    name: ${{ matrix.v }}\n    strategy:\n      matrix:\n        k: [\"\\u0085q\"]\n        exclude: [ { k: q } ]\n        include: [ { v: desktop }, { v: phone } ]\n    runs-on: x\n    steps: [ { run: 'false' } ]\n", true],
   ['a name with more around the value', 'jobs:\n  shots:\n    name: shots ${{ matrix.view }}\n    strategy: { matrix: { view: [desktop, phone] } }\n    runs-on: x\n', false],
   ['no name: the values in parentheses', 'jobs:\n  shots:\n    strategy: { matrix: { view: [desktop] } }\n    runs-on: x\n', false],
   ['no name, include entries only', 'jobs:\n  shots:\n    strategy: { matrix: { include: [{ view: desktop }] } }\n    runs-on: x\n', false],
