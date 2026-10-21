@@ -549,6 +549,11 @@ export class CliRunner implements AgentRunner {
      * run's read denials, at this name, never one a config an agent can write names.
      */
     private defaultBranch?: string,
+    /**
+     * The secret_paths of the config the coordinator started with, given only when it started without the default
+     * branch's (no config at origin yet, a first hour): they stand in for the default branch's while it has none.
+     */
+    private startSecrets?: readonly string[],
   ) {}
 
   /** The lane's user, on the login its runs use now. */
@@ -683,7 +688,7 @@ export class CliRunner implements AgentRunner {
     // A run with no tool allowed and every reading tool refused (the experiment monitor) reads nothing: it may run
     // outside a project.
     const readsNothing = req.allowedTools.length === 0 && READING_TOOLS.every((t) => req.disallowedTools?.includes(t));
-    const ownDenials = guard ? runReadDenials({ cwd: req.cwd, home: runEnv.HOME, readsNothing, ...(req.taskFile ? { taskFile: req.taskFile } : {}), ...(this.repoPath ? { repo: this.repoPath } : {}), ...(this.defaultBranch ? { defaultBranch: this.defaultBranch } : {}) }) : { paths: [] };
+    const ownDenials = guard ? runReadDenials({ cwd: req.cwd, home: runEnv.HOME, readsNothing, ...(req.taskFile ? { taskFile: req.taskFile } : {}), ...(this.repoPath ? { repo: this.repoPath } : {}), ...(this.defaultBranch ? { defaultBranch: this.defaultBranch } : {}), ...(this.startSecrets ? { startSecrets: this.startSecrets } : {}) }) : { paths: [] };
     if ('error' in ownDenials) return { reason: 'failed', detail: `${ownDenials.error}; not starting`, costUsd: 0, turns: 0, model: req.model };
     // Preflight, inside the login's start lock: an unreadable status that mentions a token refresh (or any other
     // transient error) is reported with its text, and run() waits it out instead of starting claude.

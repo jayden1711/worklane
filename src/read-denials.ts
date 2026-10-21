@@ -10,7 +10,7 @@
 import { existsSync, lstatSync, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, posix, resolve } from 'node:path';
 import { BRAND } from './brand.js';
-import { loadConfig, loadConfigAt } from './config/load.js';
+import { ConfigInvalid, loadConfig, loadConfigAt } from './config/load.js';
 import { TaskFile } from './contract.js';
 import { projectStateDir } from './guardrails/context.js';
 import { spawnSync } from './os/child-process.js';
@@ -468,7 +468,7 @@ function linksToDirectory(link: string): boolean {
  * object store chain that can't be followed in full, or a main checkout that can't be found (no `repo`, and a git
  * directory that leads nowhere back), is an error, and the run doesn't start.
  */
-export function runReadDenials(o: { cwd: string; home: string | undefined; taskFile?: string; repo?: string; defaultBranch?: string; readsNothing?: boolean }): { paths: string[] } | { error: string } {
+export function runReadDenials(o: { cwd: string; home: string | undefined; taskFile?: string; repo?: string; defaultBranch?: string; startSecrets?: readonly string[]; readsNothing?: boolean }): { paths: string[] } | { error: string } {
   let hidden: string[] = [];
   if (o.taskFile) {
     try {
@@ -507,21 +507,31 @@ export function runReadDenials(o: { cwd: string; home: string | undefined; taskF
     }
   }
   // The default branch is the one the coordinator names (it started with it), never one a config an agent can write
-  // names: a main-checkout run could point default_branch at a ref that isn't there (measured, round-7 review). With
-  // a branch, its committed config must load: a missing or invalid one refuses the run, never skipped. Without one
-  // (a runner built outside an instance), there is no committed source.
+  // names: a main-checkout run could point default_branch at a ref that isn't there (measured, round-7 review). Its
+  // committed config is never skipped:
+  // - it loads: its secret_paths count;
+  // - it is invalid: the run doesn't start;
+  // - there is none there (no such ref, or no config folder at it): the secret_paths of the config the coordinator
+  //   itself started with count instead, when it started without the default branch's (`startSecrets`, passed only
+  //   then: a first hour, before the config reaches origin); otherwise the run doesn't start (the default branch had
+  //   a config when the coordinator started, so its going missing is a change it didn't make).
+  // Without a branch (a runner built outside an instance), there is no committed source.
+  const extra: string[][] = [];
   if (o.defaultBranch) {
+    const ref = `refs/remotes/origin/${o.defaultBranch}`;
     try {
-      configs.push(loadConfigAt(main ?? root, `refs/remotes/origin/${o.defaultBranch}`));
+      configs.push(loadConfigAt(main ?? root, ref));
     } catch (e) {
-      return { error: `the guardrails on the default branch (origin/${o.defaultBranch}) can't be read (${firstLine(e)}), so its secret paths can't be denied` };
+      const missing = e instanceof ConfigInvalid && e.errors.every((x) => x.message === `missing at ${ref}`);
+      if (!missing || !o.startSecrets) return { error: `the guardrails on the default branch (origin/${o.defaultBranch}) can't be read (${firstLine(e)}), so its secret paths can't be denied` };
+      extra.push([...o.startSecrets]);
     }
   }
   // Each source is worked out on its own, its exceptions applied to its own patterns only, and the results unioned:
   // an exception ("!/**", "!./.env") one source adds, the run's own checkout's above all (its agent can write it),
   // never subtracts what another denies. The task's hidden paths take no exception from any config (stricter than the
   // hook, which applies the config's exceptions to them too).
-  const sources = [...new Map([...configs.map((c) => c.guardrails.secret_paths), hidden].map((s) => [JSON.stringify(s), s])).values()].filter((s) => s.length);
+  const sources = [...new Map([...configs.map((c) => c.guardrails.secret_paths), ...extra, hidden].map((s) => [JSON.stringify(s), s])).values()].filter((s) => s.length);
   const worktreeRoots = [...new Set(configs.map((c) => c.tests.worktree.root))];
   const all = sources.flat();
   if (!all.length) return { paths: [] };
