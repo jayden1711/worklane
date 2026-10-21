@@ -6,7 +6,7 @@
 // The coordinator also runs pushProblems on each change before verifying it,
 // so a doomed change is caught before a long test run.
 import { execFileSync, spawnSync } from './os/child-process.js';
-import { sizeFiles } from './coordinator/change-files.js';
+import { blobsByName, rangeNames, sizeFiles } from './coordinator/change-files.js';
 import { globToRegExp } from './guardrails/glob.js';
 import { shownPath } from './path-text.js';
 import { lintSkill, SKILL_SECTIONS } from './skill-lint.js';
@@ -23,7 +23,9 @@ export const DEFAULT_PUSH_LIMITS: PushLimits = { max_file_mb: 10, max_changed_li
 const WORKFLOWS = '.github/workflows/';
 const MB = 1024 * 1024;
 
-const git = (cwd: string, args: string[], input?: string) => execFileSync('git', args, { cwd, encoding: 'utf8', maxBuffer: 256 * MB, stdio: ['pipe', 'pipe', 'pipe'], ...(input !== undefined ? { input } : {}) });
+// Replace refs off (#928, round 4): a `git replace` of a 3 MB blob with a small one got past the size limit (measured).
+// #927 moves this onto its git runner, which sets the same and more.
+const git = (cwd: string, args: string[], input?: string) => execFileSync('git', ['--no-replace-objects', ...args], { cwd, encoding: 'utf8', maxBuffer: 256 * MB, stdio: ['pipe', 'pipe', 'pipe'], ...(input !== undefined ? { input } : {}) });
 
 const list = (paths: string[], n = 10) => `${paths.slice(0, n).join(', ')}${paths.length > n ? ` and ${paths.length - n} more` : ''}`;
 /** Changed paths in a problem's text, each as shownPath shows it (#683): `rev-list --objects` prints a name as it is. */
@@ -33,8 +35,9 @@ const listPaths = (paths: string[], n = 10) => list(paths.map(shownPath), n);
 export function pushProblems(cwd: string, base: string, head: string, limits: PushLimits): string[] {
   const range = `${base}..${head}`;
   const problems: string[] = [];
-  // Paths touched by any commit in the range, not just the net diff.
-  const touched = [...new Set(git(cwd, ['log', '--format=', '--name-only', '--no-renames', '--diff-merges=first-parent', range]).split('\n').filter(Boolean))];
+  // Paths touched by any commit in the range, not just the net diff, each as itself (#724): a name git would quote
+  // (a non-ASCII byte, a newline, a quote) is matched by its own bytes, not its quoted text.
+  const touched = rangeNames(cwd, range);
 
   const workflows = touched.filter((p) => p.startsWith(WORKFLOWS));
   if (workflows.length) problems.push(`changes CI workflows (${listPaths(workflows)}): the harness's GitHub credential has no Workflows permission, so GitHub refuses this push; a human makes workflow changes`);
@@ -42,6 +45,11 @@ export function pushProblems(cwd: string, base: string, head: string, limits: Pu
   const refuseRes = limits.refuse_paths.map((g) => ({ g, re: globToRegExp(g) }));
   const refused = touched.filter((p) => refuseRes.some(({ re }) => re.test(p)));
   if (refused.length) problems.push(`touches paths that are never pushed (${listPaths(refused)}), matching push.refuse_paths; remove them from every commit on the branch, not just the last one`);
+
+  // A name no checkout would write: a crafted tree can hold an empty, ".", ".." or ".git" segment, and
+  // `./secrets/x.pem` matched no `secrets/**` glob (measured, #928's round-4 check). Fails closed.
+  const unwritable = touched.filter((p) => p.split('/').some((s) => s === '' || s === '.' || s === '..' || s.toLowerCase() === '.git'));
+  if (unwritable.length) problems.push(`has paths no checkout would write (${listPaths(unwritable)}): an empty, ".", ".." or ".git" part; a tree like that is crafted, not committed by git`);
 
   // Every blob new in the range, with its path: a file added and then deleted is still pushed.
   const paths = new Map<string, string>();
@@ -66,13 +74,19 @@ export function pushProblems(cwd: string, base: string, head: string, limits: Pu
   const lines = sizeFiles(cwd, base, head, { renames: 'configured' }).reduce((s, f) => s + f.added.length + f.removed.length, 0);
   if (lines > limits.max_changed_lines) problems.push(`changes ${lines} lines, over the ${limits.max_changed_lines}-line limit (push.max_changed_lines); split it into smaller changes`);
 
-  // Skills the change adds or edits must pass the skill lint as they stand at head.
+  // Skills the change adds or edits must pass the skill lint as they stand at head. Each is read from head's tree by
+  // its bytes (#724): a name with no entry there was deleted by the change; one that isn't a regular file of at most
+  // SKILL_MAX_BYTES (a symlink, a submodule link, a huge blob) is a problem, never linted as something else or skipped.
   const badSkills: string[] = [];
-  for (const p of touched.filter((t) => t === 'SKILL.md' || t.endsWith('/SKILL.md'))) {
-    const r = spawnSync('git', ['show', `${head}:${p}`], { cwd, encoding: 'utf8', maxBuffer: 16 * MB });
-    if (r.status !== 0) continue; // deleted by the change
-    const lint = lintSkill(r.stdout);
-    if (lint.length) badSkills.push(`${shownPath(p)} (${lint.join('; ')})`);
+  // A skill is prose: a bigger SKILL.md is refused, never read whole.
+  const SKILL_MAX_BYTES = MB;
+  const skills = touched.filter((t) => t === 'SKILL.md' || t.endsWith('/SKILL.md'));
+  const atHead = blobsByName(cwd, head, skills, SKILL_MAX_BYTES);
+  for (const p of skills) {
+    for (const file of atHead.get(p) ?? []) {
+      const lint = 'text' in file ? lintSkill(file.text) : [`can't be read at the head: ${file.unread}`];
+      if (lint.length) badSkills.push(`${shownPath(p)} (${lint.join('; ')})`);
+    }
   }
   if (badSkills.length) problems.push(`has skills that fail the skill lint: ${list(badSkills, 5)}. Every SKILL.md needs these sections, none empty: ${SKILL_SECTIONS.join(', ')}`);
   return problems;
