@@ -1,0 +1,104 @@
+{
+  "group": "doubt and the evaluator's verdict",
+  "cases": [
+    {
+      "id": "doubt-no-verdict",
+      "attack": "a small app change with no evaluator verdict at all",
+      "source": "merge-policy.ts mergeDecision (any doubt); docs/guardrails.md Hold kinds: doubt",
+      "base": { "web/totals.js": "export const total = 1;\n" },
+      "change": [{ "write": "web/totals.js", "text": "export const total = 2;\n" }],
+      "inputs": { "verdict": null },
+      "expect": { "decision": "waits", "reasons": ["doubt: no evaluator verdict"], "scopes": ["engine", "managed-app"] }
+    },
+    {
+      "id": "doubt-patch-rejected",
+      "attack": "a small app change the evaluator rejected",
+      "source": "merge-policy.ts mergeDecision (any doubt); docs/guardrails.md Hold kinds: doubt",
+      "base": { "web/totals.js": "export const total = 1;\n" },
+      "change": [{ "write": "web/totals.js", "text": "export const total = 2;\n" }],
+      "inputs": { "verdict": { "patch_correct": false } },
+      "expect": { "decision": "waits", "reasons": ["doubt: the evaluator did not approve the patch"], "scopes": ["engine", "managed-app"] }
+    },
+    {
+      "id": "doubt-test-doubted",
+      "attack": "a small app change whose test the evaluator doubts",
+      "source": "merge-policy.ts mergeDecision (any doubt); docs/guardrails.md Hold kinds: doubt",
+      "base": { "web/totals.js": "export const total = 1;\n" },
+      "change": [{ "write": "web/totals.js", "text": "export const total = 2;\n" }],
+      "inputs": { "verdict": { "test_correct": false } },
+      "expect": { "decision": "waits", "reasons": ["doubt: the evaluator doubts the test"], "scopes": ["engine", "managed-app"] }
+    },
+    {
+      "id": "doubt-confidence-medium",
+      "attack": "a small app change the evaluator approved with medium confidence",
+      "source": "merge-policy.ts mergeDecision (any doubt); docs/guardrails.md Hold kinds: doubt",
+      "base": { "web/totals.js": "export const total = 1;\n" },
+      "change": [{ "write": "web/totals.js", "text": "export const total = 2;\n" }],
+      "inputs": { "verdict": { "confidence": "medium", "confidence_reason": "a claim no recorded check backs" } },
+      "expect": { "decision": "waits", "reasons": ["doubt: evaluator confidence medium: a claim no recorded check backs"], "scopes": ["engine", "managed-app"] }
+    },
+    {
+      "id": "doubt-confidence-low",
+      "attack": "a small app change the evaluator approved with low confidence and no reason",
+      "source": "merge-policy.ts mergeDecision (any doubt); docs/guardrails.md Hold kinds: doubt",
+      "base": { "web/totals.js": "export const total = 1;\n" },
+      "change": [{ "write": "web/totals.js", "text": "export const total = 2;\n" }],
+      "inputs": { "verdict": { "confidence": "low" } },
+      "expect": { "decision": "waits", "reasons": ["doubt: evaluator confidence low: no reason recorded"], "scopes": ["engine", "managed-app"] }
+    },
+    {
+      "id": "doubt-unread-file",
+      "attack": "a small app change with a file the evaluator didn't read",
+      "source": "merge-policy.ts mergeDecision (any doubt); docs/guardrails.md Hold kinds: doubt",
+      "base": { "web/totals.js": "export const total = 1;\n" },
+      "change": [{ "write": "web/totals.js", "text": "export const total = 2;\n" }],
+      "inputs": { "verdict": { "unread": ["web/totals.js"] } },
+      "expect": { "decision": "waits", "reasons": ["doubt: the evaluator did not read web/totals.js"], "scopes": ["engine", "managed-app"] }
+    },
+    {
+      "id": "doubt-no-design-answer",
+      "attack": "a small app change whose verdict gives no design-change answer (an older or failed verdict)",
+      "source": "merge-policy.ts mergeDecision (any doubt); docs/guardrails.md Hold kinds: doubt",
+      "base": { "web/totals.js": "export const total = 1;\n" },
+      "change": [{ "write": "web/totals.js", "text": "export const total = 2;\n" }],
+      "inputs": { "verdict": { "design_change": null } },
+      "expect": { "decision": "waits", "reasons": ["doubt: the evaluator gave no design-change answer"], "scopes": ["engine", "managed-app"] }
+    },
+    {
+      "id": "design-flagged-by-evaluator",
+      "attack": "a small app change the evaluator approved but flagged as a design change",
+      "source": "merge-policy.ts riskAndDesignReasons (the evaluator's flag is binding); docs/guardrails.md Hold kinds: design",
+      "base": { "web/totals.js": "export const total = 1;\n" },
+      "change": [{ "write": "web/totals.js", "text": "export const total = 2;\n" }],
+      "inputs": { "verdict": { "design_change": true, "design_reason": "totals move to a new store" } },
+      "expect": { "decision": "waits", "reasons": ["design: the evaluator flagged a design change: totals move to a new store"], "scopes": ["engine", "managed-app"] }
+    },
+    {
+      "id": "doubt-ci-fix-run",
+      "attack": "a small app change that needed a CI fix run",
+      "source": "merge-policy.ts mergeDecision (any doubt); docs/guardrails.md Hold kinds: doubt",
+      "base": { "web/totals.js": "export const total = 1;\n" },
+      "change": [{ "write": "web/totals.js", "text": "export const total = 2;\n" }],
+      "inputs": { "ciFixRuns": 1 },
+      "expect": { "decision": "waits", "reasons": ["doubt: 1 CI fix run(s) on this PR"], "scopes": ["engine", "managed-app"] }
+    },
+    {
+      "id": "doubt-foreign-push",
+      "attack": "a small app change whose branch someone other than the harness pushed to",
+      "source": "merge-policy.ts mergeDecision (any doubt); docs/guardrails.md Hold kinds: doubt",
+      "base": { "web/totals.js": "export const total = 1;\n" },
+      "change": [{ "write": "web/totals.js", "text": "export const total = 2;\n" }],
+      "inputs": { "foreignPush": true },
+      "expect": { "decision": "waits", "reasons": ["doubt: someone other than the harness pushed to the branch"], "scopes": ["engine", "managed-app"] }
+    },
+    {
+      "id": "doubt-push-limit",
+      "attack": "a small app change that once hit a push limit",
+      "source": "merge-policy.ts mergeDecision (any doubt); docs/guardrails.md Hold kinds: doubt",
+      "base": { "web/totals.js": "export const total = 1;\n" },
+      "change": [{ "write": "web/totals.js", "text": "export const total = 2;\n" }],
+      "inputs": { "pushLimitHit": true },
+      "expect": { "decision": "waits", "reasons": ["doubt: the change hit a push limit"], "scopes": ["engine", "managed-app"] }
+    }
+  ]
+}

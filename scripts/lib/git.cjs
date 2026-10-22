@@ -13,18 +13,32 @@ const GIT_FIXED_ENV = Object.freeze({ GIT_NO_REPLACE_OBJECTS: '1', GIT_GRAFT_FIL
 /** git config every git also gets through its environment (GIT_CONFIG_COUNT pairs), after the caller's own pairs. */
 const GIT_FIXED_CONFIG = Object.freeze([Object.freeze(['core.commitGraph', 'false'])]);
 
-/** `env` (or this process's environment), with the fixed settings on top and the fixed config pairs after its own. */
+/** The only GIT_CONFIG_COUNT read: a plain decimal 0 to 9999. Any other becomes a value git refuses. */
+const CANONICAL_CONFIG_COUNT = /^(?:0|[1-9][0-9]{0,3})$/;
+const REFUSED_CONFIG_COUNT = 'refused';
+
+/**
+ * `env` (or this process's environment), with the fixed settings on top, and the fixed config after the caller's own
+ * GIT_CONFIG_COUNT pairs and at the end of GIT_CONFIG_PARAMETERS (which git reads last). A count that isn't canonical
+ * is replaced with one git refuses, so the git fails closed (as src/os/git.ts gitEnv).
+ */
 const gitEnv = (env) => {
   const out = { ...(env || process.env), ...GIT_FIXED_ENV };
-  // Own keys only: an unset count must never be read through Object.prototype (#846).
-  let n = Number(Object.hasOwn(out, 'GIT_CONFIG_COUNT') ? out.GIT_CONFIG_COUNT : '0');
-  if (!Number.isSafeInteger(n) || n < 0) n = 0;
-  for (const [k, v] of GIT_FIXED_CONFIG) {
-    out[`GIT_CONFIG_KEY_${n}`] = k;
-    out[`GIT_CONFIG_VALUE_${n}`] = v;
-    n++;
-  }
-  out.GIT_CONFIG_COUNT = String(n);
+  // Own keys only: an unset value must never be read through Object.prototype (#846).
+  const own = (k) => (Object.hasOwn(out, k) ? out[k] : undefined);
+  const raw = own('GIT_CONFIG_COUNT');
+  if (raw === undefined || CANONICAL_CONFIG_COUNT.test(raw)) {
+    let n = raw === undefined ? 0 : Number(raw);
+    for (const [k, v] of GIT_FIXED_CONFIG) {
+      out[`GIT_CONFIG_KEY_${n}`] = k;
+      out[`GIT_CONFIG_VALUE_${n}`] = v;
+      n++;
+    }
+    out.GIT_CONFIG_COUNT = String(n);
+  } else out.GIT_CONFIG_COUNT = REFUSED_CONFIG_COUNT;
+  const params = own('GIT_CONFIG_PARAMETERS');
+  const fixed = GIT_FIXED_CONFIG.map(([k, v]) => `'${k}=${v}'`).join(' ');
+  out.GIT_CONFIG_PARAMETERS = params ? `${params} ${fixed}` : fixed;
   return out;
 };
 /** The argument list a git process gets: the fixed arguments, then `args`. */
@@ -48,6 +62,8 @@ const commandSpawn = (cmd, args, options = {}) => (isGitCommand(cmd) ? spawn(cmd
 exports.GIT_FIXED_ARGS = GIT_FIXED_ARGS;
 exports.GIT_FIXED_ENV = GIT_FIXED_ENV;
 exports.GIT_FIXED_CONFIG = GIT_FIXED_CONFIG;
+exports.CANONICAL_CONFIG_COUNT = CANONICAL_CONFIG_COUNT;
+exports.REFUSED_CONFIG_COUNT = REFUSED_CONFIG_COUNT;
 exports.gitEnv = gitEnv;
 exports.gitArgs = gitArgs;
 exports.isGitCommand = isGitCommand;

@@ -97,6 +97,11 @@ export const GIT_FIXED_ENV: Readonly<Record<string, string>> = Object.freeze({
   GIT_GRAFT_FILE: join(devNull, 'no-grafts'),
 });
 
+/** The only GIT_CONFIG_COUNT the runner reads: a plain decimal 0 to 9999, as the engine itself writes one. */
+export const CANONICAL_CONFIG_COUNT = /^(?:0|[1-9][0-9]{0,3})$/;
+/** What any other count becomes: a value git refuses ("bogus count") on every platform, so the git fails. */
+export const REFUSED_CONFIG_COUNT = 'refused';
+
 /**
  * The mark of a process (or a git) that runs for an instance, in checkouts agents can write (#926): the instance
  * checkout's absolute path, which a guarded git in a worktree is pinned to; '1' marks one with no checkout named (a
@@ -203,21 +208,33 @@ function guardEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
 }
 
 /**
- * `env` (or this process's environment), with the fixed settings on top and the fixed config pairs after its own
- * GIT_CONFIG_COUNT pairs (a later pair wins). A count that isn't a whole number is git's refusal anyway; it is replaced.
- * For an instance's git (#926), the guard's settings too: GIT_GUARD_PAIRS go ahead of all of those.
+ * `env` (or this process's environment), with the fixed settings on top, and the fixed config in it twice:
+ * - as GIT_CONFIG_COUNT pairs after the caller's own (a later pair wins). Only a canonical count is read. Any other
+ *   (`-0`, `+1`, ` 1`, `01`, `0x1`, `abc`, an overlong one) is replaced with REFUSED_CONFIG_COUNT, so git fails
+ *   instead of running: git's strtoul reads some of them (`-0`, `+1`) and refuses others, and a parse that tried to
+ *   match it got the sign wrong (#927 rounds 8 and 9). Fails closed;
+ * - appended to GIT_CONFIG_PARAMETERS (what `git -c` hands the gits it runs), which git reads after the COUNT pairs:
+ *   a caller's `git -c core.commitGraph=true` there would otherwise win (#927 round 9, measured).
+ * The fixed arguments turn the commit-graph off for the runner's own gits too; the environment covers the gits a
+ * program like gitleaks runs.
  */
 export function gitEnv(env?: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const out: NodeJS.ProcessEnv = { ...(env ?? process.env), ...GIT_FIXED_ENV };
-  // Own keys only: an unset count must never be read through Object.prototype (#846).
-  let n = Number(Object.hasOwn(out, 'GIT_CONFIG_COUNT') ? out.GIT_CONFIG_COUNT : '0');
-  if (!Number.isSafeInteger(n) || n < 0) n = 0;
-  for (const [k, v] of GIT_FIXED_CONFIG) {
-    out[`GIT_CONFIG_KEY_${n}`] = k;
-    out[`GIT_CONFIG_VALUE_${n}`] = v;
-    n++;
-  }
-  out.GIT_CONFIG_COUNT = String(n);
+  // Own keys only: an unset value must never be read through Object.prototype (#846).
+  const own = (k: string) => (Object.hasOwn(out, k) ? out[k] : undefined);
+  const raw = own('GIT_CONFIG_COUNT');
+  if (raw === undefined || CANONICAL_CONFIG_COUNT.test(raw)) {
+    let n = raw === undefined ? 0 : Number(raw);
+    for (const [k, v] of GIT_FIXED_CONFIG) {
+      out[`GIT_CONFIG_KEY_${n}`] = k;
+      out[`GIT_CONFIG_VALUE_${n}`] = v;
+      n++;
+    }
+    out.GIT_CONFIG_COUNT = String(n);
+  } else out.GIT_CONFIG_COUNT = REFUSED_CONFIG_COUNT;
+  const params = own('GIT_CONFIG_PARAMETERS');
+  const fixed = GIT_FIXED_CONFIG.map(([k, v]) => `'${k}=${v}'`).join(' ');
+  out.GIT_CONFIG_PARAMETERS = params ? `${params} ${fixed}` : fixed;
   return marked(out) ? guardEnv(out) : out;
 }
 

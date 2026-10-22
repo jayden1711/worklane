@@ -169,13 +169,13 @@ const GUARD_ENTRIES = ['src/hook.ts', 'src/hook-main.ts'];
 // check-table: never-shrink
 const GUARD_TREE = [
   'src/ack-reason.ts', 'src/adapters/railway.ts', 'src/automations/cron.ts', 'src/automations/schema.ts', 'src/backlog/types.ts', 'src/brand.ts',
-  'src/check-source.ts', 'src/checkout.ts', 'src/ci-none.ts', 'src/comment-policy.ts', 'src/config/load.ts', 'src/config/schema.ts', 'src/contract.ts',
-  'src/cross-eval.ts', 'src/dashboard-auth.ts', 'src/dashboard-key-paths.ts', 'src/delegation.ts', 'src/deploy-gate/config.ts',
-  'src/events/types.ts', 'src/experiments/paths.ts', 'src/governor-holds.ts', 'src/guard/chat.ts', 'src/guard/intake.ts',
+  'src/check-source.ts', 'src/checkout.ts', 'src/ci-none.ts', 'src/coordinator/change-files.ts', 'src/comment-policy.ts', 'src/config/load.ts', 'src/config/schema.ts', 'src/confusables.ts',
+  'src/confusables-data.ts', 'src/contract.ts', 'src/cross-eval.ts', 'src/dashboard-auth.ts', 'src/dashboard-key-paths.ts', 'src/delegation.ts', 'src/deploy-gate/config.ts',
+  'src/events/types.ts', 'src/experiments/paths.ts', 'src/governor-holds.ts', 'src/guard/chat.ts', 'src/guard/commit.ts', 'src/guard/intake.ts',
   'src/guard/research.ts', 'src/guardrails/access.ts', 'src/guardrails/context.ts', 'src/guardrails/engine.ts', 'src/guardrails/fingerprint.ts',
-  'src/guardrails/glob.ts', 'src/guardrails/push-hook.ts', 'src/guardrails/shell.ts', 'src/held-out-paths.ts', 'src/hook-imports.ts',
+  'src/guardrails/glob.ts', 'src/guardrails/push-hook.ts', 'src/guardrails/reach.ts', 'src/guardrails/shell.ts', 'src/held-out-paths.ts', 'src/hook-imports.ts',
   'src/hook-main.ts', 'src/hook.ts', 'src/model-routing.ts', 'src/network.ts', 'src/optimize.ts', 'src/os/child-process.ts', 'src/os/git.ts', 'src/os/index.ts',
-  'src/os/own-env.ts', 'src/os/system-paths.ts', 'src/os/system-root-guard.ts', 'src/path-text.ts', 'src/preview/config.ts', 'src/project-env.ts',
+  'src/os/own-env.ts', 'src/os/process-links.ts', 'src/os/system-paths.ts', 'src/os/system-root-guard.ts', 'src/path-text.ts', 'src/preview/config.ts', 'src/project-env.ts',
   'src/provider-hosts.ts', 'src/providers.ts', 'src/quiet-sqlite.ts', 'src/review.ts', 'src/roles.ts', 'src/routing.ts',
   'src/scan/secrets.ts', 'src/slot-file.ts', 'src/stage-names.ts', 'src/testrun/affected.ts', 'src/testrun/config.ts',
   'src/testrun/fetch.ts', 'src/testrun/network.ts', 'src/testrun/select.ts', 'src/tool-path.ts',
@@ -603,8 +603,13 @@ test('money paths load from the project source of truth (regex literals in a JS 
   const [self, ...res] = loadMoneyPaths(dir, { file: 'plan.js', pattern: 'const MONEY = \\[([\\s\\S]*?)\\];' }, 'HEAD');
   assert.ok(self!.test('plan.js') && !self!.test('src/plan.js'), 'the list file itself first');
   assert.equal(res.length, 2);
-  assert.ok(res[0]!.test('server/sweep/x.js') && !res[0]!.test('server/games/x.js'));
-  assert.ok(!res.some((r) => r.test('nope/x')), 'only the MONEY list');
+  // #763 round 6 (the owner's call: money paths are globs only): the alternation has no mechanical glob form, so that
+  // line is refused (it counts every path as a money path and holds every change, naming the line); the plain one is
+  // converted to a glob.
+  assert.ok(res[0] instanceof review.RefusedMoneyLine && res[0].line === '/^server\\/(ledger|sweep)\\//', String(res[0]));
+  assert.ok(res[0]!.test('server/sweep/x.js') && res[0]!.test('server/games/x.js'), 'a refused line fails closed');
+  assert.ok(res[1] instanceof review.MoneyGlob && res[1].glob === 'shared/**' && res[1].test('shared/x.js') && !res[1].test('nope/x'));
+  assert.ok(!res.some((r) => (r instanceof review.MoneyGlob ? r.glob : r instanceof review.RefusedMoneyLine ? r.line : '').includes('nope')), 'only the MONEY list');
 });
 
 test('review.yaml categories: a site can send all docs to the evaluator and name its own pages for a human', () => {

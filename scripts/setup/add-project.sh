@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # Add a project to this machine in one go, as root (review it first): every setup step for one instance, in order.
 #
-#   sudo bash scripts/setup/add-project.sh <name> <owner/repo> [--public-url https://<host>] [--client-id <id>] [--timeout <minutes>]
+#   sudo bash scripts/setup/add-project.sh <name> <owner/repo> [--public-url https://<host>] [--client-id <id>] [--timeout <minutes>] [--replace-sudoers=<pin>]
+#
+# --replace-sudoers is root's alone, at a root shell: the machine helper (a coordinator's add-project) passes exactly
+# the name and repo, never a flag.
 #
 # The steps (each skipped, as "done", when it is done already, so a rerun picks up where an earlier one stopped):
 #   instance        instance.sh <name>, and the instance home as engine.sh makes it
@@ -27,7 +30,12 @@
 #                   minutes) for the PR to merge, then brings the checkout up to it; still open then, it stops as
 #                   "waiting" (exit 3), saying for what, and a rerun picks up here
 #   test-user      test-user.sh install <name>, when the repo's tests.yaml has test_run
-#   machine-helper  machine-helper.sh with every instance on the machine (the ones it lists now, the hub's, and this)
+#   machine-helper  machine-helper.sh with every instance on the machine (the ones it lists now, the hub's, and this);
+#                   done only while its sudoers rule is byte for byte what that writes for them. Otherwise it reruns
+#                   on its own only when the installed rule is in the engine's own shape and the rerun only drops
+#                   whole commands or users (it adds a user only for an instance being created: instance.sh made
+#                   its coordinator, and no machine-helper.sh run has named it in the rule since).
+#                   Anything else waits (exit 3), showing the difference, for root's --replace-sudoers (#898)
 #   dashboards      dashboards.sh with every instance, keeping the hub's settings (its unit has them); the first
 #                   project on a machine gives --client-id and --public-url instead
 #
@@ -41,16 +49,19 @@
 source "$(dirname "$0")/lib.sh"
 as_root "$@"
 here="$(cd "$(dirname "$0")" && pwd)"
-usage="usage: add-project.sh <name> <owner/repo> [--public-url https://<host>] [--client-id <sign-in App client id>] [--timeout <minutes>]"
+usage="usage: add-project.sh <name> <owner/repo> [--public-url https://<host>] [--client-id <sign-in App client id>] [--timeout <minutes>] [--replace-sudoers=<pin>]"
 [ "$#" -ge 2 ] || { echo "$usage" >&2; exit 2; }
 name="$1" repo="$2"
 shift 2
-public_url="" client_id="" timeout=15
+public_url="" client_id="" timeout=15 replace_sudoers=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --public-url) public_url="${2:-}"; shift 2 ;;
     --client-id) client_id="${2:-}"; shift 2 ;;
     --timeout) timeout="${2:-}"; shift 2 ;;
+    # The pin of the rule a waiting run showed (#902 round 6); a bare flag would install whatever the rule is by then.
+    --replace-sudoers=*) replace_sudoers="${1#*=}"; [[ "$replace_sudoers" =~ ^[0-9a-f]{64}$ ]] || { echo "$usage" >&2; exit 2; }; shift ;;
+    --replace-sudoers) echo "--replace-sudoers takes the pin of the rule you were shown: --replace-sudoers=<sha256>, as the waiting run printed it" >&2; exit 2 ;;
     *) echo "$usage" >&2; exit 2 ;;
   esac
 done
@@ -113,6 +124,7 @@ done_instance() {
   user_exists "$coord" && user_exists "$agent" && [ -d "$SRV_ROOT/$name" ] && [ -f "$(inst_dir)/instance.yaml" ] || return 1
   echo "users $coord and $agent, $SRV_ROOT/$name and the instance home are there"
 }
+# instance.sh puts a coordinator it makes on root's list of instances being created (lib.sh ADD_PROJECT_NEW, #898).
 do_instance() {
   bash "$here/instance.sh" "$name"
   ensure_instance_home "$name" "$repo"
@@ -324,21 +336,89 @@ all_instances() { { helper_instances; hub_instances; echo "$name"; } | grep -E '
 helper_names() {
   local n
   for n in $(all_instances); do
-    if user_exists "wl-$n"; then echo "$n"; else echo "note: $n is named, but there is no wl-$n; left out" >&2; fi
+    # Only names machine-helper.sh takes (#902 round 9): an instance made before its name was reserved (machine,
+    # console) is left out of the rule, which only narrows it.
+    if ! instance_name_ok "$n"; then echo "note: $n is a name the instance-name rules refuse now ($(instance_name_problem "$n")); left out of the machine helper's rule" >&2
+    elif user_exists "wl-$n"; then echo "$n"; else echo "note: $n is named, but there is no wl-$n; left out" >&2; fi
   done
 }
 one_line() { tr '\n' ' ' | sed 's/ $//'; }
+# Done only when a rerun would change nothing: the helper's bytes, this instance in its rule, and the rule byte for byte
+# what machine-helper.sh writes for these instances (#898). The updater keeps the helper's bytes in step but never
+# sudoers, so after an upgrade the bytes match while the rule is an older engine's (or was written for an older sudo, or
+# edited). That reruns machine-helper.sh, the one writer of the rule, so the rule only ever ends up equal to its output.
+# The rerun happens on its own only when it narrows (do_machine_helper).
 done_machine_helper() {
+  local names
   [ -f "$MACHINE_HELPER" ] && cmp -s "$MACHINE_HELPER" "$here/../machine/worklane-machine.cjs" || return 1
   helper_instances | grep -qx "$name" || return 1
-  echo "the machine helper is installed and lists $coord"
+  names="$(helper_names 2>/dev/null)"
+  # shellcheck disable=SC2086 # one word per instance name
+  machine_sudoers_current $names || return 1
+  echo "the machine helper is installed, lists $coord, and its sudoers rule is what machine-helper.sh writes for $(printf '%s\n' "$names" | one_line)"
 }
+# The owner's rule (#898), failing closed (lib.sh sudoers_only_narrows): on its own, the rewrite only drops whole
+# commands or users from a rule in the engine's own shape. The one user it may add is the coordinator of an instance
+# being created: on root's list (lib.sh ADD_PROJECT_NEW) from instance.sh making its user until a machine-helper.sh run
+# names it in the rule. A user named in the rule before, which root then took out say, or a hub-only instance's,
+# counts as a widening.
+# So does a newer engine's command, a sudo that now reads patterns, or any line outside that shape. Each waits (exit 3),
+# showing the unified diff and, on the line right after it, the command with --replace-sudoers=<pin>, the pin of the
+# rule it showed. That flag is root's, at a root shell: the machine helper runs this script with exactly a name and a
+# repo. The pin is never in the step's waiting detail (#902 round 8, A2): that line is the JSON the dashboard stores
+# and shows, with no diff beside it, so it names only commands that print the diff and its pin together at a root shell.
+sudoers_waiting_detail() {
+  echo "$1: at a root shell, rerun $again, or run sudo bash $here/machine-helper.sh --check; either prints the whole diff and the command pinned to it"
+}
+# This check is for the step's own waiting output. The one check that counts is machine-helper.sh's, at write time,
+# under its lock: this step passes it only --may-add for the one user it may add (#902 round 6), never its trust.
 do_machine_helper() {
-  # shellcheck disable=SC2046 # one word per instance name
-  bash "$here/machine-helper.sh" $(helper_names)
+  local names n users=() allow=() rule pin rc
+  names="$(helper_names)"
+  for n in $names; do users+=("wl-$n"); done
+  if new_instance_marked "$name"; then allow=("$coord"); fi
+  rule="$(machine_sudoers "${users[@]}")"
+  pin="$(sudoers_pin "$rule")"
+  if [ -n "$replace_sudoers" ]; then
+    # What it installs, shown before anything is written (#902 round 5), and only the rule the pin was printed for.
+    sudoers_unified_diff "$MACHINE_SUDOERS" "$rule"
+    if [ "$pin" != "$replace_sudoers" ]; then
+      echo "the engine's rule (above) is not the one --replace-sudoers=$replace_sudoers was printed for; nothing written"
+      echo "rerun as root with --replace-sudoers to install the engine's rule: $again --replace-sudoers=$pin"
+      echo "waiting: $(sudoers_waiting_detail "the engine's machine helper rule is not the one that --replace-sudoers pin was printed for; nothing written")"
+      exit 3
+    fi
+    echo "--replace-sudoers: the machine helper's rule becomes the engine's rule above"
+  elif sudoers_only_narrows "$MACHINE_SUDOERS" "$rule" "${allow[@]}"; then
+    sudoers_unified_diff "$MACHINE_SUDOERS" "$rule"
+    if [ -e "$MACHINE_SUDOERS" ] || [ -L "$MACHINE_SUDOERS" ]; then
+      echo "the machine helper's rule, for $(printf '%s\n' "$names" | one_line): it grants nothing the installed one doesn't${allow[*]:+ but ${allow[*]}}"
+    else
+      echo "the machine helper's first rule, for $(printf '%s\n' "$names" | one_line): this machine never had the helper set up"
+    fi
+  else
+    sudoers_unified_diff "$MACHINE_SUDOERS" "$rule"
+    echo "rerun as root with --replace-sudoers to install the engine's rule: $again --replace-sudoers=$pin"
+    echo "waiting: $(sudoers_waiting_detail "the engine's machine helper rule grants more than the installed one, which only root may widen")"
+    exit 3
+  fi
+  rc=0
+  # shellcheck disable=SC2086 # one word per instance name
+  bash "$here/machine-helper.sh" ${replace_sudoers:+--replace-sudoers=$replace_sudoers} "--may-add=${allow[*]:+$name}" $names || rc=$?
+  if [ "$rc" -eq 3 ]; then
+    echo "waiting: machine-helper.sh's own check refused at write time (above): the rule changed while this ran, or needs root; rerun $again"
+    exit 3
+  fi
+  return "$rc"
 }
 detail_machine_helper() { echo "the machine helper lists $(helper_names 2>/dev/null | one_line)"; }
-alone_machine_helper() { echo "sudo bash $here/machine-helper.sh $(helper_names 2>/dev/null | one_line)"; }
+# The step alone, as the step runs it (#902 round 7, F2): with --may-add=, naming only the instance being created, if
+# any, so a later paste is checked against the rule as it is then and never adds a user root took out.
+alone_machine_helper() {
+  local may=""
+  if new_instance_marked "$name"; then may="$name"; fi
+  echo "sudo bash $here/machine-helper.sh --may-add=$may $(helper_names 2>/dev/null | one_line)"
+}
 
 state_of() { echo "$(home_of "wl-$1")/.local/state/worklane/instances/$1/state"; }
 dash_names() {
@@ -394,5 +474,7 @@ run_step policy
 run_step service
 run_step test-user
 run_step machine-helper
+# The rule names this instance now: it is no longer one being created (#898).
+if helper_instances | grep -qx "$name"; then new_instance_clear "$name"; fi
 run_step dashboards
 echo "added $name ($repo)"

@@ -14,7 +14,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { BRAND } from '../src/brand.js';
 import { gitSpawnSync } from '../src/os/git.js';
-import { createWorktree } from '../src/worktrees.js';
+import { createWorktree, worktreeOptions } from '../src/worktrees.js';
 import { installGitHook } from '../src/install.js';
 import { installPrePushHook } from '../src/push-guard.js';
 import * as autoConfig from '../src/server-auto-config.js';
@@ -114,7 +114,7 @@ test("#926 round 3: on a first install (no coordinator hooks dir yet), auto-conf
   const fn = (autoConfig as Record<string, unknown>).autoConfigGitEnv as (name: string, repo: string, home: string) => Record<string, string>;
   const own = fn('alpha', c.repo, home);
   assert.equal(existsSync(join(home, 'git-hooks')), false, 'a first install: no coordinator hooks dir');
-  const { path: wt } = createWorktree({ repo: c.repo, root: '../wt', stateDir: join(c.base, 'state'), setup: [] }, 'setup', `${BRAND.cli}/setup`, 'main');
+  const { path: wt } = createWorktree(worktreeOptions({ repo: c.repo, root: '../wt', stateDir: join(c.base, 'state'), setup: [], taskDir: null }), 'setup', `${BRAND.cli}/setup`, 'main');
   const token = 'ghp_' + [...randomBytes(36)].map((b) => 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'[b % 62]).join('');
   writeFileSync(join(wt, 'settings.js'), `export const token = '${token}';\n`);
   const env = { ...process.env, ...own };

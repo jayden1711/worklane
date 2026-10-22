@@ -117,7 +117,7 @@ Even when `mergeDecision` says yes, the merge call can still be held.
 
 **Tool guard.** A hook runs before every agent tool call (`src/hook.ts`), and the rules decide (`src/guardrails/engine.ts#evaluate`). Agents can't:
 
-- write the engine's config folder or `.claude/`, including by a shell redirect;
+- write the engine's config folder or `.claude/`, including by a shell redirect. The check decides on the file a write really reaches, not only on the name it is given, and refuses a write when it can't tell which file that is;
 - read secret files;
 - fetch a domain outside the allowlist.
 
@@ -125,6 +125,8 @@ A person's own session isn't affected.
 
 - Tests:
   - `test/guardrails.test.ts` › “protected harness files: agents denied (including shell redirects); humans unaffected”
+  - `test/adversarial/tool-guard-writes.test.ts` › “tool guard writes: every write tool and parsed shell write is judged by the file it reaches, for every protected path”
+  - `test/adversarial/tool-guard-writes.test.ts` › “tool guard writes: a write whose file the guard cannot tell is refused”
   - `test/guardrails.test.ts` › “secret files: agents may not read them by tool or shell; exclusions apply; humans unaffected”
   - `test/guardrails.test.ts` › “agents can only fetch allowlisted domains”
 - Label: measured.
@@ -181,6 +183,10 @@ A person's own session isn't affected.
 
 **Commit scan and redaction.** Agent commits are scanned before they happen. A scanner that can't run is reported as unavailable, never as clean. Secrets in event payloads and transcripts are redacted before they are stored.
 
+- The commit scan covers every commit form and checkout the guard allows: it scans what the commit will record, in the checkout it lands in, reading the content itself rather than a diff git renders. A command line whose commit it can't model is refused, never scanned narrowly (#971).
+  - Code: `src/guard/commit.ts#commitPlan`, `src/scan/secrets.ts#scanCommit`, `src/hook.ts#runHook`.
+  - Tests: `test/adversarial/commit-scan.test.ts` › “attack: a commit aimed at another checkout is scanned there”, `test/adversarial/commit-scan.test.ts` › “attack: a commit run where the model cannot follow it is refused”, `test/adversarial/commit-scan-routes.test.ts` › “attack: the checkout's git settings for showing changes do not hide what a commit records”, `test/commit-plan.test.ts` › “what the model cannot follow is refused, never scanned narrowly”
+  - Label: inferred until CI on main runs these tests (they pass locally, and fail on the commit before this change).
 - Code: `src/scan/secrets.ts#scanCommit`, `src/events/redact.ts#redact`.
 - Tests:
   - `test/install.test.ts` › “agent commits are secret-scanned before they happen”
@@ -221,16 +227,15 @@ A person's own session isn't affected.
 **Known open gaps.** Each has an open issue or a PR in review. None of the PRs in review counts as shipped until it merges.
 
 - **Hidden paths can be listed and searched (#847).** The tool guard refuses Read on a task's hidden paths, but allows Glob and Grep over them. So a Grep can print their contents, and a Glob can list their names. Label: measured by the evaluator on PR #839's review, as the issue cites.
-- **Child processes inherit `Object.prototype` keys (#846).** Node copies an env object's inherited enumerable keys into a child's environment. So code already running in the engine's process could reach every child the engine spawns. Label: measured in the issue (a scratch script on Node 22); the reach is inferred. In review: #844 makes the engine's own environment reads own-only, and #883 starts every child through `src/os/child-process.ts`, which gives it only the variables that are set.
 - **Tests can reach real host tools (#838).** A test that sets its own `PATH` to include `/usr/bin` or `/bin` runs the real `gh`, `loginctl` and similar tools. Label: measured in the issue. A GitHub token exported in the shell isn't stripped from test processes: `test/isolate.ts` removes only the engine's own variables and `AGENT_SLOTS_*`. Label: inferred, from reading `test/isolate.ts`; that such a token would reach those `gh` calls is inferred in the issue too (none was set in its measured run).
 - **Main needs 0 approvals.** On this repository, GitHub's rules for `main` require 0 approving reviews. Only the engine's own merge policy keeps its high-risk changes with the owner; GitHub doesn't. Label: measured (`gh api repos/<owner>/<repo>/rules/branches/main`, `required_approving_review_count` is `0`, 2026-10-19).
 - **The agents that build this repository act as the owner's account.** A move to a separate unprivileged account, with its own GitHub App and an owner-only update ruleset, is approved but not done. Label: measured (`gh api user` is the repository owner, 2026-10-19).
 - **A fresh hardened install trusts main as of its clone (#845's body).** On a fresh hardened install, the checkout is a clone of origin's main. So its release signers, its engine pin and every script root runs come from main at clone time.
   - With 0 required approvals, anyone who can land a change on main before that clone is trusted by it.
-  - #845 (in review) verifies the release tag before building as root, but this gap stays open. It closes with the owner-only update ruleset, or with an anchor the operator checks outside GitHub.
+  - #845 (merged) verifies the release tag before building as root, but this gap stays open. It closes with the owner-only update ruleset, or with an anchor the operator checks outside GitHub.
   - Label: measured by #845's round-1 reviewer, with throwaway keys.
 
-**Guard work in review, not shipped:**
+**Guard work merged after this page was first written** (label: measured, `gh pr view` shows each PR merged, 2026-10-20):
 
 - #820: a PR that removes or weakens a test, lint or guard waits for the owner.
 - #788 and #789: a required check counts only from the workflow or App pinned for its name.
@@ -238,6 +243,24 @@ A person's own session isn't affected.
 - #834: resuming auto-merge after a stop waits for green main.
 - #839: the tool guard's own module tree is locked.
 - #844: environment reads see only variables that are set.
+- #883 (closes #846): every child the engine spawns starts through `src/os/child-process.ts`, which gives it only the variables that are set, so it no longer inherits `Object.prototype`'s keys.
 - #845: the hardened install verifies the release tag.
 
-An adversarial suite (#707) will add attack tests for these guards. Its page will be linked here once it lands.
+The adversarial suite (#707, `test/adversarial/adversarial.test.ts`) holds attack cases for the merge decision: each one a hostile PR the gate must hold. Its cases cover #820 (`test/adversarial/cases/weakening.json`) and #839 (the `guard-folder-new-file` case). #788's pinned check source has no case yet: the suite doesn't drive the readiness check, so it is listed in `test/adversarial/todo.json`. Label: measured, by the suite's own run.
+
+Its flow cases (`test/adversarial/cases/flow.json`) are decided by the coordinator's own `mergeDecisionFor`, from an event log shaped as a live instance writes it. What they drive, and what they don't yet:
+
+- The verdict: the latest one on the PR's head, one with no design-change answer, and the one carried across a merge-in of the default branch (one merge-in, not a chain of them). After a merge-in, the change is measured from the default branch's commit merged in.
+- A CI fix run started on an earlier head, a refused push of a commit that never became the head (before or after the PR opened), and the task's latest plan, whose entries are exact paths.
+- The stop: a stop file with no reason; and, with the file deleted by hand, the last stop event, a stop event that names no cause, and a resume that was requested but hasn't happened.
+- The default branch's tip (#869): one that can't be fetched, and one that moved past the PR's base with a newly marked table. In every other flow case the tip is the base, or the commit a merge-in merged.
+- Evals: only a task with no eval recorded for it, including when another task's eval of the same skill passed. How an eval the task did run came out (an error, the cost cap, a lower score) is driven at the gate only (`test/adversarial/cases/instruction-evals.json`), not through the flow's reading of the log.
+- Not driven:
+  - the readiness check (above), and the reasons a conflict fix's pushed head adds;
+  - labels and money paths read from the log;
+  - new top-level modules and the size limits as `mergeDecisionFor` computes them (the gate cases compute their own);
+  - plans other than one task's own plan listing exact paths: an empty plan, another task's plan, an entry by file name only, an entry with a glob;
+  - a verdict recorded under another task at the same head.
+- Open on main: a stop file whose reason is an empty string doesn't stop auto-merge (#982). It is a todo line in `test/adversarial/todo.json`, not a case.
+
+Label: measured, by in-memory mutants on #957: each mutant that breaks one of the items above turns a case red. The mutants are the ones the reviews and the builder wrote; a green run under them bounds what they missed, it doesn't prove coverage. A later review's mutants found more the suite misses (#957, round 4): a design flag with no reason, a plan or verdict from another task, plan entries by name or glob, labels and money paths, the deletes-data word list, new top-level modules, size, an eval that loses a case at the same score, and the stop at the merge call. They are follow-ups, not cases yet.

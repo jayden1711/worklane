@@ -15,7 +15,7 @@ import { DEFAULT_REVIEW } from './coordinator/shared.js';
 import { isOwner, isWriter, mayAnswerKind, type Role } from './dashboard-auth.js';
 import type { DecisionContext } from './decision-context.js';
 import { happened, isInvestigation, optionEffects, type DetailKind } from './decision-effects.js';
-import { redactString } from './events/redact.js';
+import { redactCut } from './events/redact.js';
 import type { EventPayload, StoredEvent } from './events/types.js';
 import type { PrView } from './projection.js';
 import { computeLevel, loadMoneyPaths, selfModificationPart } from './review.js';
@@ -143,7 +143,9 @@ export function prSections(body: string | null | undefined): { failWithout: stri
     const h = heads[i]!;
     const end = heads.slice(i + 1).find((n) => n.level <= h.level)?.at ?? lines.length;
     const s = lines.slice(h.at + 1, end).join('\n').trim();
-    return s ? redactString(s.slice(0, 20_000)) : null;
+    // Redacted before it is cut, over the kept part and a margin only (#889): a cut first leaves a token or a key's
+    // body unfound, and the whole text could be any size.
+    return s ? redactCut(s, 20_000) : null;
   };
   return { failWithout: section(/fail[- ]?without/i), never: section(/\bnever\b/i) };
 }
@@ -344,20 +346,21 @@ export function decisionDetail(id: string, d: DetailDeps): DecisionDetail | null
   };
 }
 
-/** The change's diff, base..head, from the checkout's git (owners only: the route checks); redacted, capped. */
+/**
+ * The change's diff, base..head, from the checkout's git (owners only: the route checks); redacted, capped. main's
+ * arguments, through the git runner (#807): a binary file shows as "Binary files ... differ" (the owner, 2026-10-21:
+ * "Cut --text, land the runner.").
+ */
 export async function decisionDiff(root: string, base: string, head: string): Promise<{ diff: string; truncated: boolean } | { diff: null; why: string }> {
   if (!SHA.test(base) || !SHA.test(head)) return { diff: null, why: 'no commits recorded for this change' };
   const MAX = 512 * 1024;
-  // Every file's lines whatever the change's attributes say (#807): a file its .gitattributes marks `-diff` or
-  // `binary` (or gives a textconv or an external diff) shows as it is, not as "Binary files differ"; the user's
-  // attributes file is not read. Output past the buffer is shown cut, like output past MAX.
-  const args = ['-c', 'core.attributesFile=/dev/null', 'diff', '--no-color', '--text', '--no-textconv', '--no-ext-diff', '--ignore-submodules=none', `${base}..${head}`];
   return new Promise((done) => {
-    gitExecFile(args, { cwd: root, env: { ...withToolPath(), GIT_TERMINAL_PROMPT: '0' }, timeout: 15_000, maxBuffer: 8 * 1024 * 1024, encoding: 'utf8' }, (err, stdout, stderr) => {
-      if (err && !(err.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER' && stdout)) return done({ diff: null, why: `not in this checkout's git: ${(stderr || err.message).trim().split('\n')[0]}` });
-      if (err) return done({ diff: redactString(stdout.slice(0, MAX)), truncated: true });
+    gitExecFile(['diff', '--no-color', '--no-ext-diff', `${base}..${head}`], { cwd: root, env: { ...withToolPath(), GIT_TERMINAL_PROMPT: '0' }, timeout: 15_000, maxBuffer: 8 * 1024 * 1024, encoding: 'utf8' }, (err, stdout, stderr) => {
+      if (err) return done({ diff: null, why: `not in this checkout's git: ${(stderr || err.message).trim().split('\n')[0]}` });
       const truncated = stdout.length > MAX;
-      done({ diff: redactString(truncated ? stdout.slice(0, MAX) : stdout), truncated });
+      // Redacted before it is cut, over the kept part and a margin only (#889): up to 8 MB of diff, and the redaction is
+      // synchronous on the dashboard.
+      done({ diff: redactCut(stdout, MAX), truncated });
     });
   });
 }

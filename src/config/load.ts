@@ -1,5 +1,5 @@
 import { gitSpawnSync } from '../os/git.js';
-import { existsSync, readFileSync } from 'node:fs';
+import { closeSync, constants, existsSync, fstatSync, openSync, readSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { parseDocument } from 'yaml';
 import type { z } from 'zod';
@@ -53,13 +53,65 @@ function validate<S extends z.ZodType>(schema: S, value: unknown, file: string, 
   return undefined;
 }
 
-/** Load and validate every config file. Throws ConfigInvalid listing all errors. */
+/** The most readRegular reads by default: a config file, a `.git` pointer or a task file is a few KB. */
+export const REGULAR_FILE_MAX_BYTES = 1024 * 1024;
+
+/** A file readRegular won't read: not a regular file, or over its size cap. */
+export class NotRegularFile extends Error {}
+
+/**
+ * `file`'s text when it is a regular file of at most `max` bytes (a symlink is followed, as readFileSync follows it);
+ * null when there is none (ENOENT). A FIFO, socket, device or directory, or a file over `max`, throws NotRegularFile;
+ * any other failure throws as it is.
+ * THREAT (#890 round 9): an agent can put a FIFO at a name in its own checkout (`.git`, the config folder's YAML files), and
+ * readFileSync on a FIFO nobody writes to waits forever: in the coordinator's process that holds every run and every
+ * stop. So the file is checked before it is opened (a device is never opened), opened with O_NONBLOCK (a FIFO swapped
+ * in after the check opens at once instead of waiting), checked again on the descriptor, and read up to `max` + 1 bytes.
+ */
+export function readRegular(file: string, max = REGULAR_FILE_MAX_BYTES): string | null {
+  const notRegular = () => new NotRegularFile(`${file} isn't a regular file (a FIFO, socket, device or directory), so it isn't read`);
+  try {
+    if (!statSync(file).isFile()) throw notRegular();
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    throw e;
+  }
+  const fd = openSync(file, constants.O_RDONLY | (constants.O_NONBLOCK ?? 0));
+  try {
+    const st = fstatSync(fd);
+    if (!st.isFile()) throw notRegular();
+    const over = (n: number) => new NotRegularFile(`${file} is ${n} bytes, over ${max}, so it isn't read`);
+    if (st.size > max) throw over(st.size);
+    const buf = Buffer.alloc(max + 1);
+    let n = 0;
+    for (;;) {
+      const r = readSync(fd, buf, n, buf.length - n, null);
+      if (r === 0) break;
+      n += r;
+      if (n > max) throw over(n);
+    }
+    return buf.subarray(0, n).toString('utf8');
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/**
+ * Load and validate every config file. Throws ConfigInvalid listing all errors. Each file is read with readRegular:
+ * one that isn't a regular file, or is over its cap, is an error in the config, never waited on.
+ */
 export function loadConfig(root: string): Config {
   const dir = join(root, BRAND.configDir);
   if (!existsSync(dir)) throw new ConfigInvalid([{ file: BRAND.configDir, path: '', message: `missing; run \`${BRAND.cli} install\`` }]);
   return configFrom(root, (file) => {
     const path = join(dir, file);
-    return existsSync(path) ? readFileSync(path, 'utf8') : null;
+    if (!existsSync(path)) return null;
+    try {
+      return readRegular(path);
+    } catch (e) {
+      if (e instanceof NotRegularFile) throw new ConfigInvalid([{ file, path: '', message: e.message }]);
+      throw e;
+    }
   });
 }
 

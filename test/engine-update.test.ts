@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
+import { machineTool } from './isolate.js';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
@@ -514,9 +515,11 @@ test('the dashboard\'s reader: settings and the log, torn lines skipped', () => 
   assert.deepEqual(updateLog(join(dir, 'log2')).map((e) => e.event), ['held'], 'held entries reach the dashboard');
 });
 
-// The real build and install, on a disposable Linux CI runner with systemd and passwordless sudo.
-const systemCi = process.platform === 'linux' && process.env.GITHUB_ACTIONS === 'true' && spawnSync('sudo', ['-n', 'systemctl', '--version']).status === 0;
-const sudo = (args: string[], timeout = 120_000) => spawnSync('sudo', ['-n', ...args], { encoding: 'utf8', timeout });
+// The real build and install, on a disposable Linux CI runner with systemd and passwordless sudo: the machine's own
+// sudo on purpose (#991, machineTool); elsewhere its stand-in answers, and these skip.
+const SUDO = machineTool('sudo');
+const systemCi = process.platform === 'linux' && process.env.GITHUB_ACTIONS === 'true' && spawnSync(SUDO, ['-n', 'systemctl', '--version']).status === 0;
+const sudo = (args: string[], timeout = 120_000) => spawnSync(SUDO, ['-n', ...args], { encoding: 'utf8', timeout });
 
 test('acceptance: built as a DynamicUser and installed, the engine is readable by and starts as other users, exec\'d through a symlink like the services do', { skip: !systemCi && 'needs a disposable Linux CI runner with systemd', timeout: 30 * 60_000 }, (t) => {
   const node = process.execPath;

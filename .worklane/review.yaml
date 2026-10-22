@@ -33,11 +33,38 @@ categories:
     - test/managed-apps.test.ts
     - test/merge-idempotent.test.ts
     - test/git-runner.test.ts
+    - test/vacuity.test.ts
+    - test/merge-policy-vacuity.test.ts
+    - test/merge-vacuity-coordinator.test.ts
+    - test/merge-vacuity-hostile.test.ts
+    - test/merge-vacuity-decisions.test.ts
+    - test/merge-vacuity-doctor.test.ts
+    - test/merge-vacuity-bounds.test.ts
+    - test/merge-vacuity-precision.test.ts
+    - test/merge-vacuity-r5.test.ts
+    - test/merge-vacuity-r6.test.ts
+    - test/merge-vacuity-r7.test.ts
+    - test/merge-vacuity-r8.test.ts
+    - test/merge-vacuity-r9-tip.test.ts
+    - test/merge-vacuity-r9-precision.test.ts
+    - test/merge-vacuity-r9-limits.test.ts
+    - test/merge-vacuity-r10-shutdown.test.ts
+    - test/merge-vacuity-r10-removals.test.ts
+    - test/merge-vacuity-r10-cap.test.ts
+    - test/vacuity-tip.ts
+    - test/merge-vacuity-r11-removals.test.ts
+    - test/merge-vacuity-r11-diff.test.ts
+    - test/merge-vacuity-r11-align.test.ts
+    - test/merge-vacuity-r12.test.ts
+    - test/merge-vacuity-r13.test.ts
     # Listed here only, not locked in code: the tests' own machine (every test runs inside it), the check that engine
     # code never writes a slot-directory file in place (and that a slot path reaches no other writer, #772), and the
     # tests that assert the agents' tool guard denies a call.
     - test/isolate.ts
     - test/isolate.test.ts
+    # Listed here only (#991): the host tools every test process stands in for, and the guard's backstop.
+    - test/host-tools.ts
+    - test/script-host-tools.test.ts
     - test/slot-dir-writes.test.ts
     - test/slot-path.test.ts
     - test/eval-roles.test.ts
@@ -55,6 +82,24 @@ categories:
     - .githooks/**
     - docs/releasing.md
     - docs/design.md
+    - docs/process.md  # how the engine repo's own PRs are merged (owner, 2026-10-21); also locked in code
+    - test/plan-decisions.test.ts  # keeps docs/process.md out of the decisions index; also locked in code
+    # The planners' decision records (every path the decisions index reads; docs/design.md is above) and the code that
+    # builds the index (#920). Also locked in code (src/review.ts self-modification, from the index's own lists).
+    - decisions.md
+    - DECISIONS.md
+    - docs/decisions.md
+    - docs/DECISIONS.md
+    - .worklane/decisions.md
+    - decisions
+    - decisions/**
+    - docs/decisions
+    - docs/decisions/**
+    - docs/adr
+    - docs/adr/**
+    - .worklane/decisions
+    - .worklane/decisions/**
+    - src/plan-decisions.ts
     - docs/design/**  # the architecture docs (#698): listed here only, not locked in code
     # The public security claims, the test that keeps their citations true, the adversarial suite and the test that
     # holds these locks (#858). Also locked in code (src/review.ts self-modification).

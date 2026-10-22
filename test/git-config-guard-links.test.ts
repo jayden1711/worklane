@@ -15,7 +15,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { BRAND } from '../src/brand.js';
 import { gitSpawnSync } from '../src/os/git.js';
-import { createWorktree } from '../src/worktrees.js';
+import { createWorktree, worktreeOptions } from '../src/worktrees.js';
 import { instanceEnv } from '../src/service.js';
 import * as autoConfig from '../src/server-auto-config.js';
 import type { Instance } from '../src/instance.js';
@@ -59,7 +59,7 @@ function layout() {
   mkdirSync(home);
   const i = { name: 'shop', home, stateDir: join(home, 'state'), repo: { path: repo, repo: 'example/shop' }, credentials: { github: { kind: 'gh-config-dir', path: join(home, 'gh') } } } as unknown as Instance;
   const env = instanceEnv(i, { PATH: process.env.PATH });
-  const { path: wt } = createWorktree({ repo, root: '../wt', stateDir: join(base, 'state'), setup: [] }, 'w1', `${BRAND.cli}/w1`, 'main');
+  const { path: wt } = createWorktree(worktreeOptions({ repo, root: '../wt', stateDir: join(base, 'state'), setup: [], taskDir: null }), 'w1', `${BRAND.cli}/w1`, 'main');
   const id = readFileSync(join(wt, '.git'), 'utf8').trim().split('/').pop()!;
   const agentRepo = join(base, 'agent.git');
   git(base, 'init', '-q', '--bare', '-b', 'main', agentRepo);

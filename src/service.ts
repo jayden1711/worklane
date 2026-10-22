@@ -13,6 +13,7 @@ import { fileURLToPath } from 'node:url';
 import { appKeyAge, appKeyWarning, tokenWarning } from './reports.js';
 import { hostname, userInfo } from 'node:os';
 import { dirname, join } from 'node:path';
+import { worktreePlaces } from './worktrees.js';
 import { BRAND } from './brand.js';
 import { machineNetworkConfig, outboundEnv } from './network.js';
 import { providerHostsAtStart } from './provider-hosts.js';
@@ -124,6 +125,12 @@ export interface Site {
 }
 
 export const siteForRoot = (root: string): Site => ({ cfg: loadConfig(root), root, stateDir: projectStateDir(root), logPath: logPath(root) });
+/**
+ * Where the coordinator writes task files: beside the checkout when agents run as their own user, else its state's
+ * `tasks` (src/coordinator/base.ts paths). One answer for the coordinator and for the runner's kept paths (#890).
+ */
+export const agentTasksDir = (root: string, state: string, commandsAs: unknown): string => (commandsAs ? join(dirname(root), 'tasks') : join(state, 'tasks'));
+
 export const siteForInstance = (i: Instance): Site => ({ cfg: i.config, root: i.repo.path, stateDir: i.stateDir, logPath: join(i.stateDir, 'events.db'), policyFile: join(i.home, 'policy.yaml') });
 export const instanceServiceLabel = (name: string) => `dev.${BRAND.cli}.instance.${name}`;
 
@@ -321,7 +328,7 @@ export async function runInstanceCoordinator(name: string, opts: { once?: boolea
   const vendor = (agent: CliAgentName) => new CliAgentRunner(agent, { runAs: (lane) => lanes[lane]?.runAs, identity });
   // Approved plugins (src/plugins/run.ts): root's allowlist and store, checked before every run.
   const plugins = ({ role }: { role: string }) => pluginsForRun({ instance: i.name, instanceHome: i.home, role });
-  const claude = new CliRunner(instanceRuntime(i).runtime, process.env, 'claude', i.runAs ?? undefined, allLanes(i), identity, {}, () => guardrailSettings(i.home, i.name, i.repo.path), instanceRuntime(i).apiKeyFile, login, plugins, { instance: i.name, register: (role, ttlMs) => registerRun(i.name, role, ttlMs), end: (ticket) => endRun(i.name, ticket) });
+  const claude = new CliRunner(instanceRuntime(i).runtime, process.env, 'claude', i.runAs ?? undefined, allLanes(i), identity, {}, () => guardrailSettings(i.home, i.name, i.repo.path), instanceRuntime(i).apiKeyFile, login, plugins, { instance: i.name, register: (role, ttlMs) => registerRun(i.name, role, ttlMs), end: (ticket) => endRun(i.name, ticket) }, i.repo.path, start.cfg.project.project.default_branch, start.note === null ? undefined : start.cfg.guardrails.secret_paths, worktreePlaces(i.repo.path, start.cfg.tests.worktree.root, agentTasksDir(i.repo.path, i.stateDir, i.runAs ?? undefined)));
   return runSite(siteForInstance(i), { ...opts, instance: i.name, label: `instance ${name}`, lockScope, protection: watchApi, offsiteConfig: join(i.home, OFFSITE_FILE), ...(i.credentials.provider_keys ? { providerKeys: i.credentials.provider_keys } : {}), testRun, intake, roleOf, liveConfig, watchdog, incidents: incidentSink(i.name), accountSwitched: () => accountSwitchedAt(i.name), superfan: superfanView(i.name, i.stateDir), ...(i.runAs ? { experiments: { instance: i.name, pinsFile: join(i.home, PINS_FILE) } } : {}), automations: { file: join(i.home, AUTOMATIONS_FILE), policy: () => readPolicy(join(i.home, 'policy.yaml')).policy?.automations ?? AutomationsPolicy.parse(undefined) }, ...(mainWatch ? { mainWatch } : {}), ...(mergePosts ? { mergePosts } : {}), ...(ciMetrics ? { ciMetrics } : {}) }, withCliAgents(claude, { codex: vendor('codex'), gemini: vendor('gemini') }), expiry, tokens, i.runAs ?? undefined, gh.kind === 'app' ? gh.key_path : undefined, identity, () => instanceAutoMerge(name), settingsReader(join(i.home, 'policy.yaml')));
 }
 
@@ -380,7 +387,7 @@ export async function runSite(site: Site, opts: { /** The instance's name (its i
   }
   // Agents run as their own user: their task files go beside the checkout (/srv/<cli>/<name>/tasks), in the group
   // the checkout shares with them, readable but not writable by them. The coordinator's own state stays private.
-  const agentTasks = commandsAs ? { dir: join(dirname(root), 'tasks'), gid: statSync(root).gid } : undefined;
+  const agentTasks = commandsAs ? { dir: agentTasksDir(root, state, commandsAs), gid: statSync(root).gid } : undefined;
   // Before anything reads or writes it: state/ as this engine keeps it, whatever an older engine left.
   const tidied = tidyState(state, agentTasks ? { agentTasksDir: agentTasks.dir } : {});
   // INVARIANT: a write the full disk refuses never kills the coordinator: it waits in memory, in order, and the disk

@@ -13,7 +13,7 @@ import { FEEDBACK_CHECK_BRANCH_PREFIX } from '../merge-policy.js';
 import { shownPath, shownPaths } from '../path-text.js';
 import { checkedPush } from '../push-check.js';
 import { rolePrompt } from '../roles.js';
-import { removeSandboxPlaceholders } from '../worktrees.js';
+import { removeSandboxPlaceholders, unlockWorktree, WORKTREE_LOCK_REASON } from '../worktrees.js';
 import { changedStatuses } from './change-files.js';
 import { Optimizer } from './optimize.js';
 
@@ -64,9 +64,12 @@ export abstract class ChecksFromFeedback extends Optimizer {
     this.git(this.d.repo, 'fetch', '-q', this.remote, this.branch);
     const tip = this.git(this.d.repo, 'rev-parse', `${this.remote}/${this.branch}`);
     const dir = join(this.d.stateDir, 'feedback-checks', c.id);
+    unlockWorktree(this.d.repo, dir);
     gitSpawnSync(['worktree', 'remove', '--force', dir], { cwd: this.d.repo });
     try {
       this.git(this.d.repo, 'worktree', 'add', '-q', '--detach', dir, tip);
+      // Locked against a prune run inside another agent's sandbox, where it is hidden (src/worktrees.ts WORKTREE_LOCK_REASON).
+      this.git(this.d.repo, 'worktree', 'lock', '--reason', WORKTREE_LOCK_REASON, dir);
       const mode = checkMode(dir);
       const role = this.d.cfg.agents.roles.corrections ?? this.d.cfg.agents.roles.workers!;
       const r = await this.d.runner.run({
@@ -108,6 +111,7 @@ export abstract class ChecksFromFeedback extends Optimizer {
       await this.d.backlog.addLabels(pr.number, [CHECKS_LABEL]).catch(() => undefined);
       this.emit('feedback_check.proposed', { constraint: c.id, keys, kind: 'pr', number: pr.number, url: pr.url, mode: mode.kind, why: a.summary.slice(0, 1000) });
     } finally {
+      unlockWorktree(this.d.repo, dir);
       gitSpawnSync(['worktree', 'remove', '--force', dir], { cwd: this.d.repo });
       gitSpawnSync(['worktree', 'prune'], { cwd: this.d.repo });
     }

@@ -23,6 +23,9 @@ async function world() {
   const f = fixture();
   f.cfg.project.land_mode = 'pr';
   f.cfg.project.required_checks = ['ci'];
+  // Its PRs each add a module with no test, and these cases are about main's checks after a merge, not the vacuity
+  // gate (#784, test/merge-vacuity-*.test.ts cover it): its app code is somewhere these PRs never touch.
+  f.cfg.tests.vacuity = { ...f.cfg.tests.vacuity!, app_paths: ['app/**'] };
   mkdirSync(f.stateDir, { recursive: true });
   const a = f.backlog.open({ title: 'Add the order notes', body: body('Add src/notes-a.js'), author: 'example-owner', labels: ['ready'] });
   const b = f.backlog.open({ title: 'Add the refund notes', body: body('Add src/notes-b.js'), author: 'example-owner', labels: ['ready'] });

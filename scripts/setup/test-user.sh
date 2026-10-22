@@ -71,7 +71,11 @@ case "$cmd" in
   update-helper) [ "${#pos[@]}" -eq 1 ] && [ -z "$print" ] || { echo "$usage" >&2; exit 2; }; name=helper ;; # no instance: a placeholder name, never used
   *) echo "$usage" >&2; exit 2 ;;
 esac
+# check and remove take an instance made before its name was reserved (machine, console; #902 round 9): what it has
+# already is checked and removed. Nothing is installed under such a name.
+if [ "$cmd" = check ] || [ "$cmd" = remove ]; then need_instance_name "$name" "the instance name" kept; else
 need_instance_name "$name" "the instance name"
+fi
 [[ "$memory_max" =~ ^[1-9][0-9]*[KMGT]$ ]] || { echo "--memory-max: a size such as 6G, got $memory_max" >&2; exit 2; }
 for w in "$cpu_weight" "$io_weight"; do [[ "$w" =~ ^[0-9]+$ ]] && [ "$w" -ge 1 ] && [ "$w" -le 10000 ] || { echo "weights are 1 to 10000, got $w" >&2; exit 2; }; done
 if [ -z "$cpus" ]; then n="$(getconf _NPROCESSORS_ONLN)"; if [ "$n" -gt 8 ]; then cpus="$((n - 8))-$((n - 1))"; else cpus="0-$((n - 1))"; fi; fi
@@ -205,12 +209,14 @@ BASE=/var/lib/worklane-test
 
 # Whether user <u> is the test user of an instance on this machine: the helper's is_test_user, word for word (a test
 # keeps them equal). WHY not the pattern wl-test-*: instance test's agent, eval and MCP users are wl-test-agent,
-# wl-test-eval and wl-test-mcp.
+# wl-test-eval and wl-test-mcp. An instance made before machine and console were reserved (#902) keeps its test user,
+# as on main (#545: its entry on the wrapper's ACL must be no problem for another instance's run).
+# kept: machine console
 is_test_user() {
   local n
   [[ "$1" =~ ^wl-test-(.+)$ ]] || return 1
   n="${BASH_REMATCH[1]}"
-  [ -z "$(instance_name_problem "$n")" ] && [ -d "$BASE/$n" ] && [ ! -L "$BASE/$n" ]
+  { [ "$n" = machine ] || [ "$n" = console ] || [ -z "$(instance_name_problem "$n")" ]; } && [ -d "$BASE/$n" ] && [ ! -L "$BASE/$n" ]
 }
 
 # Why the wrapper's ACL lets anyone but the test users run it, or anyone but root write it: the helper's

@@ -51,7 +51,6 @@ import { HUB_BREAK_GLASS_PORT, HUB_PORT, hubMachineDevices, parseHubArg, signInF
 import { SetupOver, startSetupHub } from './hub-setup.js';
 import { breakGlassHub, runAppManifest, VIEWER_USER } from './setup/app-manifest.js';
 import { seedDemo } from './demo.js';
-import { desktopBinary, runDesktop } from './desktop.js';
 import { agentApiKeyOfText, CREDENTIALS_TEXT_MAX, credentialProblems, initInstance, instanceAgentHome, serverAgentHome, instanceFilesProblem, instanceProblems, instancesDir, listInstances, loadInstance, loadInstanceCredentials, loadInstanceSetup, policiesForRepo, setAgentApiKey, setDiscordToken, setGithubApp, setIntakeCredential } from './instance.js';
 import { readServerAutoConfig, serverAutoConfig, type ServerAutoConfigLine } from './server-auto-config.js';
 import { canaryRefusal, checkCanary, fileCanary } from './canary.js';
@@ -61,7 +60,8 @@ import { appBotIdentity, installationTokens } from './github-app.js';
 import { tune } from './tune.js';
 import { scanStuck } from './stuck.js';
 import { homeOf, openUrl, stateDir } from './os/index.js';
-import { backlogFor, instanceEnv, instanceTokens, instanceId, instanceServiceLabel, localServiceSpec, logPath, runCoordinator, runInstanceCoordinator, serviceLabel, status, writeInstanceHooks } from './service.js';
+import { agentTasksDir, backlogFor, instanceEnv, instanceTokens, instanceId, instanceServiceLabel, localServiceSpec, logPath, runCoordinator, runInstanceCoordinator, serviceLabel, status, writeInstanceHooks } from './service.js';
+import { worktreeOptions } from './worktrees.js';
 import { checkRepoScope } from './github-scope.js';
 import { EventLog } from './events/log.js';
 import { LABELS } from './backlog/types.js';
@@ -156,7 +156,7 @@ usage: ${BRAND.cli} <command> [options]
                                    run the coordinator in the foreground (the service runs this)
   up | down [--instance name]      install or remove the coordinator as a per-user service
                                    (launchd on macOS, systemd --user on Linux); survives sessions
-  dashboard [--instance name] [--port n] [--user login] [--no-open] [--app]
+  dashboard [--instance name] [--port n] [--user login] [--no-open]
                                    the live dashboard on 127.0.0.1 (reads the event log; with
                                    --instance, that instance's, as its coordinator user); its
                                    token is the owner's break-glass (--user: the login recorded)
@@ -211,6 +211,27 @@ usage: ${BRAND.cli} <command> [options]
                                    root's testrun-gpu.json lists (docs/test-runs.md "GPU")
   stuck-scan [--instance name]     read-only: how many recorded runs the stuck-run guard would have
                                    flagged or stopped (run as the coordinator user)
+  receipts verify <file|dir> --key <pub> [--key <pub>]... [--anchor <receipt id>]
+                                   check signed receipts offline: each signature by the chain's key, the order,
+                                   and that none was changed or dropped (a dropped tail only against --anchor, a
+                                   head kept from an earlier look); a dir: its *.jsonl in name order. Says which
+                                   fields the signer verified and which are only attested; exit 3: it flagged
+                                   one. Needs no engine state or network (docs/receipts.md)
+  receipts keygen --private <file> --public <file>
+                                   make an ed25519 receipt key pair; never overwrites a file
+  receipts sign --log <events.db> --key <private> --out <file> --state <file> [--genesis --registry <file> [--after <file>]]
+                                   receipt each merge decision and result in the log not yet receipted, chained
+                                   onto <file>, which must extend the signer's own chain head in --state (kept
+                                   apart, in a directory only the signer writes). --genesis starts a new chain
+                                   where there is none (root or the owner only), recorded in the signer's chain
+                                   registry (one per instance, holding one first chain); with --after, it
+                                   succeeds an ended chain (its state, or a copy of
+                                   its receipts when the state can't be read), from that chain's last event,
+                                   with a new key. The log is read by a child process, stopped after
+                                   --log-deadline seconds (600 by default). Not yet root-signed: it signs
+                                   as whoever runs it (#717)
+  receipts rotate --out <file> --key <current private> --next <new public> --state <file>
+                                   continue the chain under a new key, signed by the current one
   decide <id> <option> [--instance name]
                                    answer a decision as the owner (root or the coordinator user only;
                                    also: a comment /${BRAND.cli} <option> by whoever may answer its kind)
@@ -788,6 +809,11 @@ async function main(argv: string[]): Promise<number> {
       return policyCommand(sub, rest);
     }
 
+    case 'receipts': {
+      const { receiptsCommand } = await import('./signed-receipts-cli.js');
+      return receiptsCommand(sub, rest);
+    }
+
     case 'slots': {
       const st = slotStatus();
       const halt = emergencyStop();
@@ -960,7 +986,6 @@ async function main(argv: string[]): Promise<number> {
       const cfg = site.cfg;
       const userOpt = option(opts, '--user');
       const noOpen = flag(opts, '--no-open');
-      const app = flag(opts, '--app');
       let user = userOpt ?? process.env[`${BRAND.envPrefix}_USER`];
       // An instance's coordinator user has no personal GitHub login to ask: the owner unless --user says otherwise.
       if (!user && !instance) {
@@ -975,16 +1000,6 @@ async function main(argv: string[]): Promise<number> {
       if (portFile) writeDashboardPort(portFile, Number(new URL(d.url).port));
       console.log(`${BRAND.name} dashboard for ${cfg.project.project.name}${instance ? ` (instance ${instance})` : ''}, as @${user}\n  ${d.url} ${keyFileNote(d.keyFile)}\n(local only; Ctrl+C to stop)`);
       if (!webUiBuilt()) console.error(`the web UI isn't built in this engine (no ${join(DEFAULT_WEB_DIR, 'index.html')}): run \`npm run build:web\` in it, or reinstall it with the engine setup script`);
-      if (app) {
-        const bin = desktopBinary();
-        if (bin) {
-          // The window owns the session: closing it stops the server.
-          const code = await runDesktop(bin, d.url, `${cfg.project.project.name} · ${BRAND.name}`);
-          await d.close();
-          return code === 0 ? 0 : 1;
-        }
-        console.error(`desktop window not built (npm run build:desktop, or set ${BRAND.envPrefix}_DESKTOP); opening the browser instead`);
-      }
       // WHY: the setup page in the browser reloads itself onto this one (web/src/pages/FirstRun.tsx).
       if (!noOpen && !service && !fromSetup) openUrl(d.url);
       await new Promise(() => {});
@@ -1021,7 +1036,8 @@ async function main(argv: string[]): Promise<number> {
       const base = gitExecFileSync(['rev-parse', `origin/${main}`], { cwd: i.repo.path, encoding: 'utf8' }).trim();
       const dryRun = flag(rest, '--dry-run');
       const r = await tune({
-        wt: { repo: i.repo.path, root: cfg.tests.worktree.root, stateDir: i.stateDir, setup: cfg.tests.worktree.setup, ...(i.runAs ? { runAs: i.runAs } : {}), env: cfg.tests.env },
+        // Through worktreeOptions (#890 round 20): the root resolved once, here, and the instance's task directory kept.
+        wt: worktreeOptions({ repo: i.repo.path, root: cfg.tests.worktree.root, stateDir: i.stateDir, setup: cfg.tests.worktree.setup, ...(i.runAs ? { runAs: i.runAs } : {}), env: cfg.tests.env, taskDir: agentTasksDir(i.repo.path, i.stateDir, i.runAs ?? undefined) }),
         tests: cfg.tests,
         base,
         mainBranch: main,

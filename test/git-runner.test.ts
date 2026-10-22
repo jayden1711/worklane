@@ -116,10 +116,10 @@ test('the runner\'s settings go on last: a caller\'s environment can\'t turn rep
   const want = ['keys/secret.pem', 'weights.bin'];
   assert.deepEqual(names(gitExecFileSync(['log', '--format=', '--name-only', `${r.base}..${r.head}`], { cwd: r.work, encoding: 'utf8', env })), want);
   assert.deepEqual(names(gitSpawnSync(['log', '--format=', '--name-only', `${r.base}..${r.head}`], { cwd: r.work, encoding: 'utf8', env }).stdout), want);
-  const graphOff = { GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'core.commitGraph', GIT_CONFIG_VALUE_0: 'false' };
+  const graphOff = { GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'core.commitGraph', GIT_CONFIG_VALUE_0: 'false', GIT_CONFIG_PARAMETERS: "'core.commitGraph=false'" };
   assert.deepEqual({ ...gitEnv({ GIT_GRAFT_FILE: grafts, GIT_NO_REPLACE_OBJECTS: '0' }) }, { ...GIT_FIXED_ENV, ...graphOff });
   // A caller's own config pairs stay; the fixed pair goes after them (a later pair wins).
-  assert.deepEqual({ ...gitEnv({ GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'core.commitGraph', GIT_CONFIG_VALUE_0: 'true' }) }, { ...GIT_FIXED_ENV, GIT_CONFIG_COUNT: '2', GIT_CONFIG_KEY_0: 'core.commitGraph', GIT_CONFIG_VALUE_0: 'true', GIT_CONFIG_KEY_1: 'core.commitGraph', GIT_CONFIG_VALUE_1: 'false' });
+  assert.deepEqual({ ...gitEnv({ GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'core.commitGraph', GIT_CONFIG_VALUE_0: 'true' }) }, { ...GIT_FIXED_ENV, GIT_CONFIG_COUNT: '2', GIT_CONFIG_KEY_0: 'core.commitGraph', GIT_CONFIG_VALUE_0: 'true', GIT_CONFIG_KEY_1: 'core.commitGraph', GIT_CONFIG_VALUE_1: 'false', GIT_CONFIG_PARAMETERS: "'core.commitGraph=false'" });
   // A count on Object.prototype is never read (#846): the fixed pair is pair 0, and nothing else is counted.
   const proto = Object.prototype as Record<string, unknown>;
   proto.GIT_CONFIG_COUNT = '1';
@@ -217,7 +217,7 @@ const OUTSIDE_THE_RUNNER: Record<string, { n: number; why: string; must?: RegExp
   'src/starter-ci.ts': { n: 3, why: "`run('git', ...)`: realRun, here, spawns through commandSpawnSync", must: BY_NAME('commandSpawnSync', 'cmd, args, ') },
   'src/testrun/host.ts': { n: 1, why: "`run('git', gitArgs(...), { env: gitEnv(...) })`: the async runner, given the settings by hand", must: [/run\('git', gitArgs\(\[/, /env: gitEnv\(\{ PATH/] },
   // Text that names git without starting it.
-  'src/scan/secrets.ts': { n: 2, why: "gitleaks' `git` subcommand; gitleaks runs git itself, so it gets gitEnv()", must: [/'--exit-code', String\(LEAKS_EXIT\), '\.'\], \{ cwd, encoding: 'utf8', timeout: 120_000, env: gitEnv\(\) \}/, /stdio: \['ignore', 'ignore', 'pipe'\], env: gitEnv\(env\) \}/] },
+  'src/scan/secrets.ts': { n: 1, why: "gitleaks' `git` subcommand (scanRange); gitleaks runs git itself, so it gets gitEnv() over the snapshot's env. The commit scan's own gitleaks call went with #979 (it scans files, not git)", must: [/\['git', '--redact', '--no-banner', '--log-opts', ids,/, /stdio: \['ignore', 'ignore', 'pipe'\], env: gitEnv\(env\) \}/] },
   'src/review.ts': { n: 2, why: "`'git'`: the name of a way to read a .gitattributes line" },
   'src/plugins/approval.ts': { n: 1, why: "`z.literal('git')`: a plugin source's type" },
   'src/updater-setup.ts': { n: 1, why: 'a comment quoting an allowed-signers line (namespaces="git")' },

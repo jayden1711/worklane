@@ -17,7 +17,7 @@ import { gitExecFile, gitExecFileSync, gitSpawn, gitSpawnSync, commandSpawnSync,
 import { lockGitDir } from '../src/os/git-dir-lock.js';
 import { instanceEnv } from '../src/service.js';
 import type { Instance } from '../src/instance.js';
-import { createWorktree } from '../src/worktrees.js';
+import { createWorktree, worktreeOptions } from '../src/worktrees.js';
 import { FileBacklog } from '../src/backlog/file.js';
 import { EventLog } from '../src/events/log.js';
 import { Coordinator } from '../src/coordinator.js';
@@ -118,7 +118,7 @@ for (const [kind, plant] of Object.entries(PLANTS)) {
   test(`#926 worktree add (createWorktree): a planted ${kind} never runs${refusedOutright ? ', and git is refused' : ''}`, async () => {
     const l = layout();
     plant(l);
-    const wt = { repo: l.repo, root: '../wt', stateDir: join(l.base, 'state'), setup: [] };
+    const wt = worktreeOptions({ repo: l.repo, root: '../wt', stateDir: join(l.base, 'state'), setup: [], taskDir: null });
     const made = await asCoordinator(() => {
       try {
         createWorktree(wt, 'w1', `${BRAND.cli}/w1`, 'origin/main');
@@ -136,7 +136,7 @@ for (const [kind, plant] of Object.entries(PLANTS)) {
 
   test(`#926 cherry-pick (landing's call, in a worktree createWorktree made): a planted ${kind} never runs, and the pick doesn't go through`, async () => {
     const l = layout();
-    const wt = { repo: l.repo, root: '../wt', stateDir: join(l.base, 'state'), setup: [] };
+    const wt = worktreeOptions({ repo: l.repo, root: '../wt', stateDir: join(l.base, 'state'), setup: [], taskDir: null });
     // The land worktree is made first (before the plant), as landBatch makes it, at origin/main.
     const { path } = createWorktree(wt, 'land-b1', `${BRAND.cli}/land-b1`, 'origin/main');
     plant(l);

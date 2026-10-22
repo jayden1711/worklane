@@ -5,6 +5,7 @@
 // GitHub even if it tries. It proposes; the coordinator acts.
 import { spawn, spawnSync } from './os/child-process.js';
 import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { makePlace } from './worktrees.js';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 import { join, posix } from 'node:path';
@@ -21,7 +22,8 @@ import { RunRecorder, runIssue } from './run-record.js';
 import { RunFeed } from './run-feed.js';
 import { StuckDetector, stuckAction, type StuckMode, type StuckVerdict } from './stuck.js';
 import { RefusalTracker, type RefusedRequest } from './domain-requests.js';
-import { allowedDomainsOf, withAllowedDomains, withDeniedReads } from './sandbox.js';
+import { allowedDomainsOf, withAllowedDomains, withDeniedReads, withSandboxDeniedReads } from './sandbox.js';
+import { runReadDenials } from './read-denials.js';
 import { loadedSetProblem, type InitLoaded, type PluginRun } from './plugins/run.js';
 import { mcpRunArgs, type McpRun } from './mcp/client.js';
 import { limitHit, USAGE_LIMIT_TEXT, type LimitHit, type RateLimitInfo } from './usage-limit.js';
@@ -445,7 +447,13 @@ export interface RetryOptions {
 }
 
 /** Settings every instance run carries (Claude Code settings reference: each one only takes something away). */
-export const PLUGIN_LOCKS = { disableSkillShellExecution: true, disableClaudeAiConnectors: true, allowedMcpServers: [] as unknown[] } as const;
+/**
+ * The tools that read files or run commands (#890). A run with no tool allowed and all of these refused reads nothing,
+ * so it needs no project root for its read denials (the experiment monitor, src/coordinator.ts).
+ */
+const READING_TOOLS = ['Bash', 'Read', 'Edit', 'Write', 'Glob', 'Grep', 'Task'];
+
+export const PLUGIN_LOCKS ={ disableSkillShellExecution: true, disableClaudeAiConnectors: true, allowedMcpServers: [] as unknown[] } as const;
 /** The --effort values cliArgs passes (a mistyped one from anywhere is dropped, never put on the command line). */
 const EFFORT_FLAGS = new Set<string>(EFFORTS);
 
@@ -532,6 +540,26 @@ export class CliRunner implements AgentRunner {
      * the run ends. Null from register: no broker, so no servers. A refusal or failure: the run doesn't start.
      */
     private mcp?: { instance: string; register: (role: string, ttlMs: number) => Promise<McpRun | null>; end: (ticket: string) => Promise<void> },
+    /**
+     * The instance's repository path (its main checkout), for a guarded run's own read denials (#890): always one of
+     * the checkouts they cover, whatever the run's `.git` leads to.
+     */
+    private repoPath?: string,
+    /**
+     * The default branch the coordinator started with (#890): its committed guardrails count toward every guarded
+     * run's read denials, at this name, never one a config an agent can write names.
+     */
+    private defaultBranch?: string,
+    /**
+     * The secret_paths of the config the coordinator started with, given only when it started without the default
+     * branch's (no config at origin yet, a first hour): they stand in for the default branch's while it has none.
+     */
+    private startSecrets?: readonly string[],
+    /**
+     * The coordinator's own places task worktrees are made in (#890 round 15): its start config's root, resolved under
+     * the repository, and the engine's own. Every guarded run's sandbox hides them whole, whatever a config names.
+     */
+    private worktreePlaces?: readonly string[],
   ) {}
 
   /** The lane's user, on the login its runs use now. */
@@ -661,6 +689,26 @@ export class CliRunner implements AgentRunner {
       const refusal = projectSettingsRefusal(req.cwd, guard);
       if (refusal) return { reason: 'failed', detail: `${refusal}; not starting`, costUsd: 0, turns: 0, model: req.model };
     }
+    // INVARIANT (#890): a guarded run's task hidden paths and project secret paths are denied by its OS sandbox and
+    // its Read rules too, not only by the hook; when they can't be worked out, the run doesn't start.
+    // A run with no tool allowed and every reading tool refused (the experiment monitor) reads nothing: it may run
+    // outside a project.
+    const readsNothing = req.allowedTools.length === 0 && READING_TOOLS.every((t) => req.disallowedTools?.includes(t));
+    // The coordinator's own worktree places (round 16): a guarded runner given the repository path must be given them
+    // too (src/service.ts passes both), or its runs would hide no place whole; and each is made again here, in the
+    // coordinator's process, if it went missing since the start (the same write recover() makes), so it is hidden.
+    if (guard && this.repoPath && !this.worktreePlaces) return { reason: 'failed', detail: `this runner was given the repository path but not the coordinator's worktree places, so other task checkouts can't be hidden; not starting`, costUsd: 0, turns: 0, model: req.model };
+    if (guard) {
+      for (const place of this.worktreePlaces ?? []) {
+        try {
+          makePlace(place);
+        } catch (e) {
+          return { reason: 'failed', detail: `${place}, the coordinator's own place for task worktrees, can't be made (${(e as NodeJS.ErrnoException).code ?? (e as Error).message}); not starting`, costUsd: 0, turns: 0, model: req.model };
+        }
+      }
+    }
+    const ownDenials = guard ? runReadDenials({ cwd: req.cwd, home: runEnv.HOME, readsNothing, ...(req.taskFile ? { taskFile: req.taskFile } : {}), ...(this.repoPath ? { repo: this.repoPath } : {}), ...(this.defaultBranch ? { defaultBranch: this.defaultBranch } : {}), ...(this.startSecrets ? { startSecrets: this.startSecrets } : {}), ...(this.worktreePlaces ? { places: this.worktreePlaces } : {}) }) : { paths: [] };
+    if ('error' in ownDenials) return { reason: 'failed', detail: `${ownDenials.error}; not starting`, costUsd: 0, turns: 0, model: req.model };
     // Preflight, inside the login's start lock: an unreadable status that mentions a token refresh (or any other
     // transient error) is reported with its text, and run() waits it out instead of starting claude.
     const status = req.provider ? { method: 'provider', text: '' } : claudeAuthStatus(runEnv, runAs, this.bin);
@@ -701,7 +749,12 @@ export class CliRunner implements AgentRunner {
     // An "allow once" host reaches this run's commands only; the lane's own settings are never changed.
     const allowed = req.allowOnce?.length && lane?.settings ? withAllowedDomains(lane.settings, req.allowOnce) : lane?.settings;
     // Every account profile's login file for this user, whichever it runs on: denied to its commands like its own.
-    const laneSettings = allowed && runAs && this.login ? withDeniedReads(allowed, this.login.credentialFiles(runAs)) : allowed;
+    const withLogins = allowed && runAs && this.login ? withDeniedReads(allowed, this.login.credentialFiles(runAs)) : allowed;
+    // The task's and project's own denials on top: the sandbox's when it is on, the Read rules always.
+    const withOwn = ownDenials.paths.length ? withDeniedReads(withLogins ?? {}, ownDenials.paths) : withLogins;
+    // The places task checkouts are made, hidden whole by the sandbox only (it binds the run's own checkout back as its
+    // cwd): a worktree made there after the start is hidden too (src/read-denials.ts siblingCheckouts).
+    const laneSettings = withOwn && ownDenials.sandboxOnly?.length ? withSandboxDeniedReads(withOwn, ownDenials.sandboxOnly) : withOwn;
     // The run's harness variables are pinned in --settings too: a project file's env would otherwise override them.
     const pinned = guard ? runSettings(guard, laneSettings, Object.fromEntries(Object.entries(env).filter((kv): kv is [string, string] => kv[0].startsWith(`${BRAND.envPrefix}_`) && kv[1] !== undefined))) : laneSettings;
     // An API-key instance: the key comes from its file through claude's apiKeyHelper (only a path is passed here),
@@ -723,7 +776,7 @@ export class CliRunner implements AgentRunner {
     const check = locked ? settingsCheckValue() : null;
     const settings = locked && check ? { ...locked, ...NO_ATTRIBUTION, [SETTINGS_CHECK_KEY]: check } : undefined;
     const agentFile = guard ? agentSettingsFileOf(guard) : undefined;
-    const settingsName = guard ? `the instance's agent settings${agentFile ? ` ${agentFile}` : ''}${laneSettings ? ", with the lane's" : ''}` : laneSettings ? "the lane's settings" : "the run's own settings";
+    const settingsName = guard ? `the instance's agent settings${agentFile ? ` ${agentFile}` : ''}${withLogins ? ", with the lane's" : ''}` : laneSettings ? "the lane's settings" : "the run's own settings";
     // Requests refused for the network, from the same stream the record and the feed read.
     const refusals = new RefusalTracker([...allowedDomainsOf(lane?.settings), ...(req.allowOnce ?? [])]);
     // The stuck-run guard reads the same stream; a stop verdict ends the run only in mode 'on'.

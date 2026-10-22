@@ -12,6 +12,7 @@ import { abortMerge, mergeBaseInto } from '../merge-base.js';
 import { shownPaths } from '../path-text.js';
 import { abandoned, carriedHead, countsOf, daysBetween, heldReasons, HYGIENE_MARKER, hygieneDue, isStale, lastActivity, supersededBy, type HygieneCounts, type HygieneResult } from '../pr-hygiene.js';
 import { checkedPush } from '../push-check.js';
+import { unlockWorktree, WORKTREE_LOCK_REASON } from '../worktrees.js';
 import { Gardener } from './gardener.js';
 
 export abstract class PrHygiene extends Gardener {
@@ -111,12 +112,15 @@ export abstract class PrHygiene extends Gardener {
     const { issue: n, number } = w;
     const dir = join(this.d.stateDir, 'pr-hygiene', `pr-${number}`);
     const clean = () => {
+      unlockWorktree(this.d.repo, dir);
       gitSpawnSync(['worktree', 'remove', '--force', dir], { cwd: this.d.repo });
       gitSpawnSync(['worktree', 'prune'], { cwd: this.d.repo });
     };
     clean();
     try {
       this.git(this.d.repo, 'worktree', 'add', '-q', '--detach', dir, pr.headSha);
+      // Locked against a prune run inside an agent's sandbox, where it is hidden (src/worktrees.ts WORKTREE_LOCK_REASON).
+      this.git(this.d.repo, 'worktree', 'lock', '--reason', WORKTREE_LOCK_REASON, dir);
       const id = this.identity;
       const message = `Merge ${this.branch} into ${pr.head}\n\nIts base was ${days} day(s) old (pr_hygiene.stale_after_days: ${this.d.cfg.project.pr_hygiene.stale_after_days}); merged so CI runs again on the current ${this.branch}.\n\nSigned-off-by: ${id.name} <${id.email}>`;
       const m = mergeBaseInto(dir, tip, message, id);

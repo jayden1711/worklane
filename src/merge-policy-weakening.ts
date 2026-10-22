@@ -192,6 +192,12 @@ export const GUARD_FILES: readonly string[] = [
   'src/push-guard*',
   'src/push-check*',
   'src/review.ts',
+  // The look-alike check src/review.ts imports, and its table (#763): they run in the weakening backstop's process.
+  'src/confusables.ts',
+  'src/confusables-data.ts',
+  // What the planners' decisions index reads, and what it leaves out (#920): records committed at the base, never
+  // docs/process.md; known routes it doesn't close are under "Open routes into the decisions index" there (#975).
+  'src/plan-decisions.ts',
   'src/path-text.ts',
   'src/guardrails/**',
   'src/hook*',
@@ -204,6 +210,14 @@ export const GUARD_FILES: readonly string[] = [
   'scripts/lib/denylist.mjs',
   'scripts/verify-release-tag*',
   'test/isolate.ts',
+  // What else runs in a lint test's process through test/isolate.ts and the weakening module (#746 round 19): one
+  // changed line here could make a backstop read another tree, or hide a file from it.
+  'src/brand.ts',
+  'src/os/system-paths.ts',
+  'src/os/own-env.ts',
+  'src/os/child-process.ts',
+  // The git runner (#927): src/coordinator/change-files.ts reads through it, so it runs in a backstop's process too.
+  'src/os/git.ts',
 ];
 
 /** A package manager's settings: every one changes what install and each script run under (`script-shell=`, `ignore-scripts=`). */
