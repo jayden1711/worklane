@@ -256,7 +256,6 @@ const TEST_FILE = (() => {
   // --require or loader but this preload's own (#997 round 4: `node --import isolate --import x.mjs <pinned file>`
   // or `-e '...' <pinned file>` borrowed a pinned file's exceptions). NODE_OPTIONS too.
   const flags = [...process.execArgv, ...(process.env.NODE_OPTIONS ?? '').split(/\s+/).filter(Boolean)];
-  let ours = 0;
   for (let i = 0; i < flags.length; i++) {
     const f = flags[i]!;
     const [name, inline] = f.startsWith('--') && f.includes('=') ? [f.slice(0, f.indexOf('=')), f.slice(f.indexOf('=') + 1)] : [f, undefined];
@@ -264,7 +263,8 @@ const TEST_FILE = (() => {
     if (['--import', '--require', '-r', '--loader', '--experimental-loader'].includes(name)) {
       const target = inline ?? flags[++i] ?? '';
       const isSelf = name === '--import' && !/^[a-z]+:/i.test(target) ? resolve(target) === SELF : target.startsWith('file:') && fileURLToPath(target) === SELF;
-      if (!isSelf || ++ours > 1) return null;
+      // Node 24's test runner hands its children this preload twice (--import=x and --import x): the same module.
+      if (!isSelf) return null;
     }
   }
   const rel = relative(REPO, resolve(main)).split(sep).join('/');
