@@ -17,7 +17,7 @@ import type { ProjectRunAs } from './os/index.js';
 import { projectStateDir } from './guardrails/context.js';
 import { scaffoldConfig } from './install.js';
 import { defaultBranchRefusal } from './push-guard.js';
-import { createWorktree, removeWorktree, type WorktreeOptions } from './worktrees.js';
+import { createWorktree, removeWorktree, worktreeOptions, type WorktreeOptions } from './worktrees.js';
 
 export type Slot = 'setup' | 'full' | 'changed' | 'one';
 export const SLOTS: readonly Slot[] = ['setup', 'full', 'changed', 'one'];
@@ -637,7 +637,7 @@ export async function autoConfigure(o: AutoConfigOptions): Promise<AutoConfigRes
   }
   const base = git(['rev-parse', `origin/${branch}`]).stdout.trim();
   s.base = base;
-  const wt: WorktreeOptions = { repo: o.root, root: o.worktreeRoot ?? join(projectStateDir(o.root), 'worktrees'), stateDir: o.worktreeStateDir ?? projectStateDir(o.root), setup: [] };
+  const wt = setupWorktreeOptions(o.root, o.worktreeRoot, o.worktreeStateDir);
   let path: string;
   try {
     path = createWorktree(wt, 'setup', SETUP_BRANCH, base).path;
@@ -809,11 +809,19 @@ function prBody(p: Plan, s: AutoConfigState, branch: string, base: string, owner
  * WHY (#468): Confirm on the preview: the held draft is committed on a scratch worktree of its base, pushed to the
  * setup branch and opened as the setup PR. Nothing is pushed to the default branch.
  */
+/**
+ * The setup worktree's options (#890 round 20): through worktreeOptions, so the root is resolved once, here, and a link
+ * that appears on the way afterwards refuses the worktree. No task file is written for it (taskDir null).
+ */
+export function setupWorktreeOptions(root: string, worktreeRoot?: string, worktreeStateDir?: string): WorktreeOptions {
+  return worktreeOptions({ repo: root, root: worktreeRoot ?? join(projectStateDir(root), 'worktrees'), stateDir: worktreeStateDir ?? projectStateDir(root), setup: [], taskDir: null });
+}
+
 export async function proposeHeldDraft(o: Pick<AutoConfigOptions, 'io' | 'repo' | 'root' | 'state' | 'save' | 'worktreeRoot' | 'worktreeStateDir'>): Promise<AutoConfigResult> {
   const d = o.state.draft;
   if (!d) return { kind: 'failed', detail: 'nothing drafted to propose: draft the config first' };
   if (o.state.pr?.number) return { kind: 'failed', detail: `already proposed in PR #${o.state.pr.number}` };
-  const wt: WorktreeOptions = { repo: o.root, root: o.worktreeRoot ?? join(projectStateDir(o.root), 'worktrees'), stateDir: o.worktreeStateDir ?? projectStateDir(o.root), setup: [] };
+  const wt = setupWorktreeOptions(o.root, o.worktreeRoot, o.worktreeStateDir);
   let path: string;
   try {
     path = createWorktree(wt, 'setup', SETUP_BRANCH, d.base).path;

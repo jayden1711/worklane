@@ -6,6 +6,7 @@ import type { EventPayload, StoredEvent } from '../events/types.js';
 import { refuseInterruptedChats } from '../chat.js';
 import { refuseInterruptedTurns } from '../chat-conversations.js';
 import { withdrawClaudeCredentialAsks } from '../console/secrets.js';
+import { lockOwnedWorktrees, makePlace, worktreePlaces } from '../worktrees.js';
 import { ClosedIssueWatch } from './closed-issues.js';
 import { Intake } from './intake.js';
 import { RETRY_CAP } from './shared.js';
@@ -20,6 +21,23 @@ export abstract class Recovery extends Intake {
    * landings and open decisions resume from the log on their own.
    */
   async recover(): Promise<number[]> {
+    // The worktrees this coordinator owns, locked before any run starts (#890 round 13): one from before locking came
+    // in would otherwise be pruned by the first `git worktree prune` run inside an agent's sandbox, where it is hidden.
+    try {
+      lockOwnedWorktrees(this.wt);
+    } catch (e) {
+      this.emit('coordinator.error', { instance: this.d.instance, where: 'worktree locks', kind: 'error', message: (e as Error).message.slice(0, 500) });
+    }
+    // Its own places task worktrees are made in (#890 round 14): the start config's worktree root, fixed at start, and
+    // the engine's own. Made here, so every run's sandbox hides them whole from the start (a worktree made later
+    // included). Only these: a run's denials never make a directory, since a run's own config may name one.
+    for (const place of worktreePlaces(this.d.repo, this.wt.root, this.wt.taskDir)) {
+      try {
+        makePlace(place);
+      } catch (e) {
+        this.emit('coordinator.error', { instance: this.d.instance, where: 'worktree places', kind: 'error', message: `${place}: ${(e as Error).message}`.slice(0, 500) });
+      }
+    }
     // Chat turns and intake reports cut off by a restart: each ended once, never run again.
     refuseInterruptedChats(this.d.stateDir);
     refuseInterruptedTurns(this.d.stateDir);
