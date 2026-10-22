@@ -4,7 +4,8 @@
 // git credential helper, no SSH agent, so an agent can't push or write to
 // GitHub even if it tries. It proposes; the coordinator acts.
 import { spawn, spawnSync } from './os/child-process.js';
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { makePlace } from './worktrees.js';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 import { join, posix } from 'node:path';
@@ -700,7 +701,7 @@ export class CliRunner implements AgentRunner {
     if (guard) {
       for (const place of this.worktreePlaces ?? []) {
         try {
-          mkdirSync(place, { recursive: true });
+          makePlace(place);
         } catch (e) {
           return { reason: 'failed', detail: `${place}, the coordinator's own place for task worktrees, can't be made (${(e as NodeJS.ErrnoException).code ?? (e as Error).message}); not starting`, costUsd: 0, turns: 0, model: req.model };
         }

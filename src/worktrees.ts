@@ -3,9 +3,10 @@
 // our ownership record, so other sessions' worktrees are always safe.
 import { execFileSync, spawn, spawnSync } from './os/child-process.js';
 import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmdirSync, unlinkSync, writeFileSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { BRAND } from './brand.js';
 import { checkoutSparse } from './checkout.js';
+import { readRegular } from './config/load.js';
 import { redactString } from './events/redact.js';
 import { projectStateDir } from './guardrails/context.js';
 import { groupOnlyDir, projectCommand, writeGroupOnly, type ProjectRunAs } from './os/index.js';
@@ -128,23 +129,68 @@ export function holdsPath(dir: string, p: string): boolean {
 }
 
 /**
- * Where new worktrees are made: the worktree root, or, when the root is or holds the main checkout (`..`, `.`, ""), a
- * directory of the engine's own in it, `<root>/<cli>-worktrees`. WHY (#890 round 17): such a root can't be hidden from a
- * run whole (it holds the main checkout), and a name pattern over it is expanded only when a command is wrapped, so a
- * command already running read a worktree made later (measured). The directory is hidden whole like any other place,
- * so its mount covers commands already running too.
+ * The one test of whether a place can't be hidden whole (#890 round 18): it is, or holds, one of `kept` (the main
+ * checkout, the common git directory, the task file). worktreeDir and the run's denials (src/read-denials.ts
+ * siblingCheckouts) both use it, so they can't disagree on a root.
+ */
+export function holdsKept(place: string, kept: readonly (string | null | undefined)[]): boolean {
+  return kept.some((k) => typeof k === 'string' && k !== '' && holdsPath(place, k));
+}
+
+/** The common git directory of the checkout at `repo` (its `.git`, or the one a `.git` file leads to); null when unknown. */
+export function commonGitDir(repo: string): string | null {
+  const dotGit = join(repo, '.git');
+  try {
+    if (lstatSync(dotGit).isDirectory()) return dotGit;
+    const m = /^gitdir: *(.+)$/m.exec(readRegular(dotGit) ?? '');
+    if (!m) return null;
+    const gitDir = resolve(repo, m[1]!.trim());
+    return resolve(gitDir, readRegular(join(gitDir, 'commondir'))?.trim() || '.');
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Where new worktrees are made: the worktree root, or, when the root is or holds the main checkout or the common git
+ * directory (`..`, `.`, "", a separate git dir's parent), a directory of the engine's own in it, `<root>/<cli>-worktrees`.
+ * WHY (#890 rounds 17-18): such a root can't be hidden from a run whole, and a name pattern over it is expanded only
+ * when a command is wrapped, so a command already running read a worktree made later (measured). The directory is
+ * hidden whole like any other place, so its mount covers commands already running too.
  */
 export function worktreeDir(repo: string, root: string): string {
   const base = resolve(repo, root);
-  return holdsPath(base, repo) ? join(base, WORKTREE_DIR_NAME) : base;
+  return holdsKept(base, [repo, commonGitDir(repo)]) ? join(base, WORKTREE_DIR_NAME) : base;
 }
 
+/**
+ * Make one of the coordinator's places if it isn't there, never through a link (round 18, N1): a link there throws
+ * before anything is made, since a make, a mount or `git worktree add` would follow it anywhere.
+ */
+export function makePlace(place: string): void {
+  try {
+    if (lstatSync(place).isSymbolicLink()) throw new Error(`${place} is a link`);
+    return;
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e;
+  }
+  mkdirSync(place, { recursive: true });
+}
+
+/** Where a new worktree named `name` is made: always in worktreeDir (round 18), never at an old path. */
+function newWorktreePath(o: WorktreeOptions, name: string): string {
+  return join(worktreeDir(o.repo, o.root), `${WORKTREE_NAME_PREFIX}${name}`);
+}
+
+/**
+ * Where the worktree named `name` is, to find, reuse or remove it: one made before round 17 directly under a root that
+ * holds the main checkout stays at that old path while the ownership record has it; otherwise where a new one goes.
+ * Never used to make one (addWorktree makes every worktree at newWorktreePath).
+ */
 export function worktreePath(o: WorktreeOptions, name: string): string {
   const legacy = resolve(o.repo, o.root, `${WORKTREE_NAME_PREFIX}${name}`);
-  const dir = worktreeDir(o.repo, o.root);
-  // A worktree made before round 17 directly under such a root stays where it is (its record, its pooled install).
-  if (dir !== resolve(o.repo, o.root) && owned(o).includes(legacy)) return legacy;
-  return join(dir, `${WORKTREE_NAME_PREFIX}${name}`);
+  const fresh = newWorktreePath(o, name);
+  return fresh !== legacy && owned(o).includes(legacy) ? legacy : fresh;
 }
 
 /**
@@ -190,13 +236,22 @@ export function lockOwnedWorktrees(o: WorktreeOptions): void {
 
 /** The worktree itself, before any setup: on a new branch at `base`, recorded as ours first, and locked. */
 function addWorktree(o: WorktreeOptions, name: string, branch: string, base: string): string {
-  const path = worktreePath(o, name);
-  if (existsSync(path)) removeWorktree(o, name);
-  else if (owned(o).includes(path)) {
-    // Ours, its directory deleted some other way: its locked record would refuse this add ("missing but locked"), where
-    // before locking any prune cleared it. Unlocked and pruned here, ours only (a record still locked is kept).
-    unlockWorktree(o.repo, path);
-    spawnSync('git', ['worktree', 'prune'], { cwd: o.repo, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+  // Made only at the new path (round 18): an owned one at the old path under such a root is removed first, never made
+  // again there, where only its whole entry at a run's start (not a mount over its place) would cover it.
+  const path = newWorktreePath(o, name);
+  const old = worktreePath(o, name);
+  if (old !== path) {
+    if (existsSync(old)) removeAt(o, old);
+    else clearStale(o, old);
+  }
+  if (existsSync(path)) removeAt(o, path);
+  else clearStale(o, path);
+  // The place itself is never a link (round 18, N1): git would make the checkout wherever it leads.
+  const dir = dirname(path);
+  try {
+    if (lstatSync(dir).isSymbolicLink()) throw new Error(`${dir}, where ${BRAND.cli} makes its task worktrees, is a link; not making a worktree through it`);
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e;
   }
   lockOwnedWorktrees(o);
   setOwned(o, [...owned(o), path]); // recorded before creation, so a crash mid-way is still cleaned up
@@ -252,7 +307,20 @@ export function createWorktree(o: WorktreeOptions, name: string, branch: string,
 
 /** Remove one of OUR worktrees; refuses anything not in the ownership record. Verified after. */
 export function removeWorktree(o: WorktreeOptions, name: string): boolean {
-  const path = worktreePath(o, name);
+  return removeAt(o, worktreePath(o, name));
+}
+
+/**
+ * Ours at `path`, its directory deleted some other way: its locked record would refuse an add there ("missing but
+ * locked"), where before locking any prune cleared it. Unlocked and pruned, ours only (a record still locked is kept).
+ */
+function clearStale(o: WorktreeOptions, path: string): void {
+  if (!owned(o).includes(path)) return;
+  unlockWorktree(o.repo, path);
+  spawnSync('git', ['worktree', 'prune'], { cwd: o.repo, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+}
+
+function removeAt(o: WorktreeOptions, path: string): boolean {
   if (!owned(o).includes(path)) throw new Error(`refusing to remove ${path}: not created by ${BRAND.cli}`);
   unlockWorktree(o.repo, path);
   spawnSync('git', ['worktree', 'remove', '--force', path], { cwd: o.repo, encoding: 'utf8' });

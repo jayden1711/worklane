@@ -6,8 +6,7 @@ import type { EventPayload, StoredEvent } from '../events/types.js';
 import { refuseInterruptedChats } from '../chat.js';
 import { refuseInterruptedTurns } from '../chat-conversations.js';
 import { withdrawClaudeCredentialAsks } from '../console/secrets.js';
-import { lockOwnedWorktrees, worktreePlaces } from '../worktrees.js';
-import { mkdirSync } from 'node:fs';
+import { lockOwnedWorktrees, makePlace, worktreePlaces } from '../worktrees.js';
 import { ClosedIssueWatch } from './closed-issues.js';
 import { Intake } from './intake.js';
 import { RETRY_CAP } from './shared.js';
@@ -34,7 +33,7 @@ export abstract class Recovery extends Intake {
     // included). Only these: a run's denials never make a directory, since a run's own config may name one.
     for (const place of worktreePlaces(this.d.repo, this.wt.root)) {
       try {
-        mkdirSync(place, { recursive: true });
+        makePlace(place);
       } catch (e) {
         this.emit('coordinator.error', { instance: this.d.instance, where: 'worktree places', kind: 'error', message: `${place}: ${(e as Error).message}`.slice(0, 500) });
       }

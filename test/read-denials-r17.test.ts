@@ -3,9 +3,9 @@
 // when it wraps a command. So a command already running read a worktree made later, could rename one out of the
 // pattern for good, and links planted under the pattern took Bash away (all measured by the second review). Now the
 // coordinator makes its new worktrees under such a root in a directory of its own, `<root>/<cli>-worktrees`, made at
-// start and hidden whole, so a mount covers even commands already running. Worktrees made before stay where they
-// are, covered by the pattern; a pattern match that isn't a real directory refuses the run, by name. The main
-// checkout's name is checked against the pattern by real path too.
+// start and hidden whole, so a mount covers even commands already running. (Round 18 dropped the pattern: each old
+// worktree directory there is one whole entry, and a link or file so named is ignored, never refused; the last two
+// tests here were changed to that.)
 import { exampleProject, repoRoot } from './helpers.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -99,16 +99,17 @@ test('#890 r17: start root ".": a running main-checkout command can\'t rename a 
   assert.ok(existsSync(join(late, 'README.md')), 'still where the coordinator made it');
 });
 
-test('#890 r17: a link planted under the engine\'s worktree names refuses the run, by name', { skip }, () => {
+test('#890 r17: a link planted under the engine\'s worktree names is neither followed nor hidden', { skip }, () => {
+  // Round 17 refused this run; since round 18 (no name pattern) a link there is ignored: nothing mounts where it leads.
   const { dir, places, home } = coordinatorAt('.');
   const planted = join(dir, `${BRAND.cli}-evil`);
   symlinkSync('/usr', planted);
-  const r = denials({ cwd: dir, home, repo: dir, places });
-  assert.ok('error' in r, JSON.stringify(r).slice(0, 300));
-  assert.ok(r.error.includes(planted), r.error);
+  const d = ok(denials({ cwd: dir, home, repo: dir, places }));
+  for (const e of [...d.paths, ...(d.sandboxOnly ?? [])]) assert.ok(e !== planted && e !== '/usr' && !e.includes(`${BRAND.cli}-*`), `entry ${e}`);
 });
 
-test('#890 r17: a repository path that is a link to a directory named like the engine\'s worktrees, under a root of "..", refuses the run', { skip }, () => {
+test('#890 r17: a repository path that is a link to a directory named like the engine\'s worktrees, under a root of "..", never hides the main checkout', { skip }, () => {
+  // Round 17 refused this run; since round 18 (no name pattern) the real main checkout is simply never an entry.
   const { dir: made } = exampleProject();
   const real = join(dirname(made), `${BRAND.cli}-real`);
   renameSync(made, real);
@@ -116,9 +117,8 @@ test('#890 r17: a repository path that is a link to a directory named like the e
   symlinkSync(real, link);
   const places = worktreePlaces(link, '..');
   for (const p of places) mkdirSync(p, { recursive: true });
-  const r = denials({ cwd: link, home: mkdtempSync(join(tmpdir(), 'home-')), repo: link, places });
-  assert.ok('error' in r, JSON.stringify(r).slice(0, 300));
-  assert.match(r.error, /main checkout/);
+  const d = ok(denials({ cwd: link, home: mkdtempSync(join(tmpdir(), 'home-')), repo: link, places }));
+  for (const e of [...d.paths, ...(d.sandboxOnly ?? [])]) assert.ok(e !== real && e !== link && !e.includes(`${BRAND.cli}-*`), `entry ${e}`);
   // git still works in the real checkout.
   assert.equal(git(real, 'rev-parse', '--is-inside-work-tree'), 'true');
 });

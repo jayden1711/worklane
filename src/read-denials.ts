@@ -8,8 +8,8 @@
 // time a command is wrapped, following symlinked directories. A path that doesn't exist then hides nothing, and `[`
 // `]` are glob syntax there (`?` is any one character but "/").
 import { existsSync, lstatSync, readdirSync, realpathSync, statSync } from 'node:fs';
-import { basename, dirname, isAbsolute, join, posix, relative, resolve } from 'node:path';
-import { WORKTREE_NAME_PREFIX } from './worktrees.js';
+import { basename, dirname, isAbsolute, join, posix, resolve } from 'node:path';
+import { holdsKept, WORKTREE_NAME_PREFIX } from './worktrees.js';
 import { BRAND } from './brand.js';
 import { ConfigInvalid, loadConfig, loadConfigAt, readRegular } from './config/load.js';
 import { TaskFile } from './contract.js';
@@ -79,41 +79,36 @@ function siblingCheckouts(linked: string[], places: string[], own: string[], kee
     const all = paths.flatMap(forms);
     return (c: string) => forms(c).some((f) => all.some((k) => k === f || k.startsWith(`${f === '/' ? '' : f}/`)));
   };
-  const holdsKept = holds([...own, ...keep]);
-  const holdsMain = holds(keep);
+  const holdsKeptOrOwn = holds([...own, ...keep]);
   const holdsOwn = holds(own);
   const ownIsCwd = own.every((c) => forms(c).some((f) => forms(cwd).includes(f)));
   const found = new Set<string>();
   const whole: string[] = [];
   for (const l of linked) found.add(resolve(l));
   for (const place of places) {
-    // A place that holds the main checkout (a worktree root of "..", "." or "") holds more than task checkouts (the
-    // instance's task files and bundles beside the repository, or the main checkout itself), so it is never hidden
-    // whole. For the coordinator's own place (round 16, R1), the engine's worktrees there are hidden by their names
-    // instead: `<place>/<cli>-*`, which the sandbox expands at each command, so one made later is hidden too (measured:
-    // read before). The run's own checkout among them is bound back as its cwd (measured), as under a whole place.
-    if (holdsMain(place)) {
+    // The coordinator's own place is never a link (round 18, N1): a mount or a make would follow it anywhere.
+    if (coordinator) {
+      try {
+        if (lstatSync(place).isSymbolicLink()) return { error: `${place}, the coordinator's own place for task worktrees, is a link, so it can't be hidden where it leads` };
+      } catch {
+        // missing: refused below
+      }
+    }
+    // A place that holds the main checkout, the common git directory or the task file (a worktree root of "..", "."
+    // or "", a separate git dir's parent) holds more than task checkouts, so it is never hidden whole: the same test
+    // worktreeDir uses (holdsKept, round 18). The coordinator makes its new worktrees there in <place>/<cli>-worktrees,
+    // a place of its own hidden whole (round 17). Each worktree it made there before is one whole entry, if it is a
+    // real directory at the run's start; a link or a file of that name is neither hidden nor refused (round 18: a
+    // name pattern there was expanded only when a command was wrapped, followed links, and refused plain files).
+    if (holdsKept(place, keep)) {
       if (!coordinator) continue;
-      // Round 17: the coordinator makes its new worktrees in <place>/<cli>-worktrees (a place of its own, hidden whole);
-      // the pattern stays for those made here before, while they last. The sandbox expands it only when it wraps a
-      // command, so it covers a command started after such a worktree exists, never one made later (none is now).
-      // The first part under the place of `p`, compared as written and by real path (R3, round 17).
-      const firsts = (p: string) => forms(place).flatMap((d) => forms(p).map((f) => relative(d, f))).filter((r) => r !== '' && !r.startsWith('..') && !isAbsolute(r)).map((r) => r.split('/')[0]!);
-      const named = (p: string) => firsts(p).some((f) => f.startsWith(WORKTREE_NAME_PREFIX));
-      const main = coordinator.main;
-      if (main && named(main)) return { error: `the main checkout ${main} lies under a directory in its worktree root ${place} whose name matches the engine's worktree names (${WORKTREE_NAME_PREFIX}*), so they can't be hidden without hiding it` };
-      // A match that isn't a real directory (a link planted there, a file) would have the sandbox mount over wherever it
-      // leads, /usr among them, taking every run's Bash (R2, round 16, measured): refused, by name.
       let listed;
       try {
         listed = readdirSync(place, { withFileTypes: true });
       } catch (e) {
         return { error: `${place}, the coordinator's worktree root, can't be listed (${(e as NodeJS.ErrnoException).code ?? firstLine(e)}), so the engine's worktrees there can't be checked` };
       }
-      const odd = listed.find((e) => e.name.startsWith(WORKTREE_NAME_PREFIX) && !e.isDirectory());
-      if (odd) return { error: `${join(place, odd.name)} matches the engine's worktree names in its worktree root but isn't a directory (a link or a file), so it can't be hidden by name` };
-      // A cwd below its own checkout would bring back only itself: then the names are left to the per-checkout entries.
-      if (!own.some(named) || ownIsCwd) whole.push(join(resolve(place), `${WORKTREE_NAME_PREFIX}*`));
+      for (const e of listed) if (e.name.startsWith(WORKTREE_NAME_PREFIX) && e.isDirectory()) found.add(join(place, e.name));
       continue;
     }
     // Never made here (round 14): a place may come from a config the run's agent can write, and this runs as the
@@ -137,7 +132,7 @@ function siblingCheckouts(linked: string[], places: string[], own: string[], kee
     // Directories only, never followed: a link there could lead anywhere, the main checkout among them.
     for (const e of entries) if (e.isDirectory()) found.add(join(place, e.name));
   }
-  return { siblings: [...found].filter((c) => c !== '/' && !holdsKept(c)).sort(), places: whole };
+  return { siblings: [...found].filter((c) => c !== '/' && !holdsKeptOrOwn(c)).sort(), places: whole };
 }
 
 /**

@@ -2,7 +2,9 @@
 // - R1: a coordinator start root that is, or holds, the main checkout (`..`, `.`, `""`) left the coordinator's place
 //   unhidden, so a worktree it made later was read from every run (measured, probe `dotdot`). Such a place now gets a
 //   sandbox entry for the engine's worktree names, `<place>/<cli>-*`, expanded at each command; the run's own checkout
-//   is bound back as its cwd. A main checkout whose own name matches refuses the run.
+//   is bound back as its cwd. A main checkout whose own name matches refuses the run. (Since rounds 17-18 the late
+//   worktree goes in the engine's own directory under the root, hidden whole, and there is no name pattern: the first
+//   two tests here were changed to that.)
 // - R2: a coordinator place missing when a run starts was skipped without a word (measured). The runner (in the
 //   coordinator's process) makes the coordinator's own places again before working out the denials, and a place
 //   still missing then refuses the run, by name.
@@ -21,6 +23,7 @@ import { laneRuns, PolicyFile, type Instance } from '../src/instance.js';
 import { projectStateDir } from '../src/guardrails/context.js';
 import { runReadDenials } from '../src/read-denials.js';
 import { CliRunner, type RunRequest } from '../src/runner.js';
+import { createWorktree, worktreeDir, worktreePlaces } from '../src/worktrees.js';
 
 const linux = process.platform === 'linux';
 const skip = !linux && "sandbox-runtime's Linux rules, where CI runs";
@@ -65,13 +68,17 @@ function dotdot(mainName = 'example') {
 }
 
 test('#890 r16 (R1): with a start root of "..", a worktree the coordinator makes later is unreadable; the run\'s own checkout and the main checkout read and write as before', { skip, timeout: 120_000 }, async () => {
-  const { dir, place, own, places, home } = dotdot();
+  const { dir, place, own, home } = dotdot();
+  // Round 18: the coordinator's places as the service passes them (its own directory under the root, the root, the
+  // engine's), and the late worktree made where the coordinator makes it, not by a name pattern over the root.
+  const places = worktreePlaces(dir, '..');
+  for (const p of places) mkdirSync(p, { recursive: true });
   const fromOwn = ok(denials({ cwd: own, home, repo: dir, places }));
   const fromMain = ok(denials({ cwd: dir, home, repo: dir, places }));
-  for (const d of [fromOwn, fromMain]) assert.ok(d.sandboxOnly?.includes(join(place, `${BRAND.cli}-*`)), JSON.stringify(d.sandboxOnly));
+  for (const d of [fromOwn, fromMain]) assert.ok(d.sandboxOnly?.includes(worktreeDir(dir, '..')), JSON.stringify(d.sandboxOnly));
   // Made by the coordinator after both runs started.
-  const late = join(place, `${BRAND.cli}-c`);
-  git(dir, 'worktree', 'add', '-q', '-b', 'c', late, 'HEAD');
+  const late = createWorktree({ repo: dir, root: '..', stateDir: mkdtempSync(join(tmpdir(), 'wt-state-')), setup: [] }, 'c', 'c', 'HEAD').path;
+  assert.ok(late.startsWith(`${worktreeDir(dir, '..')}/`), late);
   writeFileSync(join(late, 'notes.txt'), 'LATE-C\n');
   if (!bwrapRuns) return;
   const run = async (d: { paths: string[]; sandboxOnly?: string[] }, cwd: string, cmd: string) => spawnSync('bash', ['-c', await wrap([...d.paths, ...(d.sandboxOnly ?? [])], cwd, cmd)], { cwd, encoding: 'utf8', timeout: 60_000 });
@@ -85,11 +92,12 @@ test('#890 r16 (R1): with a start root of "..", a worktree the coordinator makes
   assert.doesNotMatch(m.stdout, /LATE-C|MINE/);
 });
 
-test('#890 r16 (R1): a main checkout whose own name matches the engine\'s worktree names, under such a root, refuses the run', { skip }, () => {
+test('#890 r16 (R1): a main checkout whose own name matches the engine\'s worktree names, under such a root, is never hidden', { skip }, () => {
+  // Round 16 refused this run; since round 18 (no name pattern) each old worktree there is its own entry, and the main
+  // checkout, whatever its name, is never one.
   const { dir, own, places, home } = dotdot(`${BRAND.cli}-main`);
-  const r = denials({ cwd: own, home, repo: dir, places });
-  assert.ok('error' in r, JSON.stringify(r).slice(0, 300));
-  assert.match(r.error, /main checkout/);
+  const d = ok(denials({ cwd: own, home, repo: dir, places }));
+  assert.ok(!d.paths.includes(dir) && !(d.sandboxOnly ?? []).includes(dir), JSON.stringify(d));
 });
 
 test('#890 r16 (R2): a coordinator place missing at the run\'s start refuses its denials, by name', { skip }, () => {
