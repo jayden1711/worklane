@@ -383,7 +383,7 @@ test("#991 round 6: an inline PATH= in a command line gets the stand-ins ahead o
   // A value it can't read is refused (each changes into a missing directory first: nothing runs without the refusal).
   refused(() => cp.execSync(`cd ${MISSING} && PATH= sudo -V`), 'an empty PATH=');
   refused(() => cp.execSync(`cd ${MISSING} && PATH="$HOME/bin:$PATH" sudo -V`), 'a variable');
-  refused(() => cp.spawnSync('/bin/sh', ['-c', `cd ${MISSING} && PATH=bin:$PATH; sudo -V`]), 'a relative entry');
+  refused(() => cp.spawnSync('/bin/sh', ['-c', `cd ${MISSING} && PATH=bin:$PATH && sudo -V`]), 'a relative entry');
   // In an env -S string, which is checked but not rewritten, a machine PATH is refused.
   refused(() => cp.spawnSync('env', ['-C', MISSING, '-S', 'PATH=/usr/bin sudo -V']), 'env -S PATH=');
 });
@@ -423,6 +423,35 @@ test('#991 round 6: the options are read once, as Node reads them; env -S in a c
   const r = cp.spawnSync(process.execPath, [`--env-file=${envFile}`, '--import', './dist/test/isolate.js', '-e', report], { cwd: repoRoot, encoding: 'utf8' });
   assert.equal(r.status, 0, r.stderr);
   assert.equal(r.stdout, 'false', 'G6n: a child started with an --env-file');
+});
+
+test("#991 round 7: bash's PATH+= gets the stand-ins as PATH=$PATH... does; env's long options are read only spelled in full", { skip: !posix && 'POSIX' }, () => {
+  const g = guard();
+  const refused = (f: () => unknown, what: string) => assert.throws(f, /#991: /, what);
+  // Resolution only: the script asks `command -v sudo` and runs nothing else.
+  const root = mkdtempSync(join(tmpdir(), 'host-append-'));
+  const own = join(root, 'own');
+  mkdirSync(own);
+  const script = join(root, 'x.sh');
+  writeFileSync(script, 'command -v sudo || echo none\n');
+  const bashOut = (line: string) => String(cp.spawnSync('/bin/bash', ['-c', line], { encoding: 'utf8', env: { PATH: own } }).stdout).trim();
+  const standIn = (out: string, what: string) => assert.ok(findOn('sudo', SYSTEM) === null ? out === 'none' : out.startsWith(`${g.standInRoot}/`), `${what}: ${out}`);
+  // D5: a child PATH without the machine's directories, which a -c line appends; D5b, the same as PATH=$PATH:.
+  standIn(bashOut(`PATH+=:/usr/bin; /bin/sh ${script}`), 'D5, PATH+=');
+  standIn(bashOut(`export PATH+=:/usr/bin; /bin/sh ${script}`), 'D5, export PATH+=');
+  standIn(bashOut(`PATH=$PATH:/usr/bin; /bin/sh ${script}`), 'D5b, PATH=$PATH:');
+  // An append it can't read (onto the last entry), refused; nothing runs without the refusal.
+  refused(() => cp.spawnSync('/bin/bash', ['-c', `cd ${MISSING} && PATH+=/usr/bin && sudo -V`]), 'PATH+= onto an entry');
+  // D8/D9: an abbreviated long option (each starts in a missing directory: nothing runs without the refusal).
+  refused(() => cp.spawnSync('env', ['-C', MISSING, `--split=${MISSING}/sudo D8`]), 'D8 --split=');
+  refused(() => cp.spawnSync('env', ['-C', MISSING, '--spl', `${MISSING}/sudo D8b`]), 'D8b --spl');
+  refused(() => cp.spawnSync('env', ['-C', MISSING, '--ignore-env', 'sudo', 'D9c']), 'D9c --ignore-env');
+  refused(() => cp.spawnSync('env', ['-C', MISSING, '--uns', 'PATH', 'sudo', 'D9d']), 'D9d --uns');
+  refused(() => cp.spawnSync('timeout', ['5', 'env', '-C', MISSING, '--ch', MISSING, 'sudo', 'D9e']), 'behind a wrapper');
+  // D8d, the full spelling: read, and its by-path host tool refused as before.
+  refused(() => cp.spawnSync('env', ['-C', MISSING, `--split-string=${MISSING}/sudo D8d`]), 'D8d --split-string=');
+  // A full spelling with nothing to refuse still runs (resolution only).
+  standIn(String(cp.spawnSync('env', ['--chdir', root, '/bin/sh', script], { encoding: 'utf8', env: { PATH: SYSTEM } }).stdout).trim(), 'env --chdir');
 });
 
 // ---- The pins: who may take a real tool. ----

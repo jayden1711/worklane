@@ -11,10 +11,12 @@
 // state. Here those all point into a fresh temporary directory, whatever the shell said. So do the machine's own
 // locations (src/os/system-paths.ts: /etc/<cli>, /var/lib/<cli>, the root helpers in /usr/local/libexec, /opt/<cli>,
 // /run/lock): on a live machine a test read the real machine owners, helper, updates log and settings.
+// (child_process's default export is the module object every importer shares, so its functions can be wrapped.)
+import childProcess from 'node:child_process';
 import type * as Cp from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import { accessSync, chmodSync, constants as fsConstants, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { createRequire, syncBuiltinESMExports } from 'node:module';
+import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -167,7 +169,8 @@ export const ISOLATED = Symbol.for('test-isolation');
 //     file, or a whole argument (`env /usr/bin/sudo`, `timeout 5 /usr/bin/sudo`, `X=/usr/bin/sudo`), a refusal
 //     (thrown) when the stack names a test file and its stand-in otherwise (doctor runs gitleaks by path); as a word of
 //     a command line (a -c script, exec's line, an env -S string), a refusal whoever asked;
-//   - for a literal `PATH=` or `export PATH=` in a command line (exec's line, a -c script), whoever asked: the
+//   - for a literal `PATH=`, `PATH+=` (as `PATH=$PATH...`) or `export PATH=` in a command line (exec's line, a -c
+//     script), whoever asked: the
 //     stand-ins that value needs, inserted ahead of its first entry that would find a machine host tool
 //     (`PATH=/usr/bin sh x.sh`: x.sh's `sudo` is a stand-in); a refusal for a value it can't read (a relative or empty
 //     entry, a variable other than $PATH), and for one that needs stand-ins in an env -S string (not rewritten);
@@ -175,7 +178,8 @@ export const ISOLATED = Symbol.for('test-isolation');
 //     is a word of the command line (a path that only ends in one, ~/.config/gh, is not), and in argument form also
 //     behind a wrapper (`timeout 5 env -i sudo`, `nice bash -lc ...`); the stand-ins first in a PATH= given to `env`
 //     as an argument, there too. env's short options are read in a cluster too (-vS, -iS); an env -S string with an
-//     escape (\_) or a ${VAR}, which the word splitter doesn't read, is refused;
+//     escape (\_) or a ${VAR}, which the word splitter doesn't read, is refused, and so is a long option not spelled
+//     in full (--split=, --ignore-env, --uns), which env would take as its prefix;
 //   - off CI, no GITHUB_ACTIONS: deleted from a snapshot of its environment (each key read once), emptied in env's
 //     assignments, refused in a command line or an env -S string that names it.
 // Arguments that aren't strings are made strings, as Node makes them, before any of this, and the options object is
@@ -198,7 +202,7 @@ export const ISOLATED = Symbol.for('test-isolation');
 // unprivileged user with no sudo). The same holds for a tool named by path inside a script file, and for a login shell
 // or `env -i` whose command line names no host tool (it calls a function that does).
 // LIMIT, needing deliberately hostile test code (named limits since the owner's decision of 2026-10-21; a route a test
-// could take by accident blocks): a PATH built at run time (`P=/usr/bin; PATH=$P sudo`, `eval`), a child Node process
+// could take by accident blocks): a PATH whose name is built at run time (`V=PATH; eval "$V=/usr/bin"`), a child Node process
 // without this preload (it inherits the stand-ins on its PATH but none of the refusals, and a PATH it sets itself gets
 // no stand-ins), code that runs before this preload (an --import or --require ahead of it keeps the raw functions),
 // code that replaces these builtins or patches the exports after load, a Worker (its own module instances),
@@ -208,8 +212,8 @@ export const ISOLATED = Symbol.for('test-isolation');
 // whose environment says GITHUB_ACTIONS=true (CI, or anyone who sets it) holds the exceptions, as main's acceptance
 // runs do; there a test can start `node --import ./dist/test/isolate.js <a pinned test file>` and that file runs with
 // its exceptions, as it would on its own. Off CI, GITHUB_ACTIONS is deleted from what a child gets, emptied in env's
-// assignments, and refused in a command line or env -S that spells it, and a child that read an --env-file is never on
-// CI (nor are its children); but a command line that builds the name at run time (`export $V`, G3), or a script file
+// assignments, and refused in a command line or env -S that spells it, and an --env-file can't make a child on CI
+// (a process that read one is off CI, and drops GITHUB_ACTIONS for its own children); but a command line that builds the name at run time (`export $V`, G3), or a script file
 // that sets it, is its own.
 // `id` and `getent` are not stood in: they only read the user database, and scripts use their answers.
 
@@ -462,16 +466,18 @@ function standInsAhead(entries: readonly string[]): { dir: string; at: number } 
 }
 
 /**
- * A command line with each literal `PATH=` value (an assignment, or `export PATH=`) given the stand-ins ahead of the
- * first entry that would find a machine host tool (#997 round 6, ACC1/ACC2: `PATH=/usr/bin sh x.sh`, whose `sudo` by
+ * A command line with each literal `PATH=` value (an assignment, `PATH+=`, or `export PATH=`) given the stand-ins
+ * ahead of the first entry that would find a machine host tool (#997 round 6, ACC1/ACC2: `PATH=/usr/bin sh x.sh`, whose `sudo` by
  * name was the machine's). A value the guard can't read (a relative or empty entry, a variable other than $PATH, a
  * quote it can't close) is refused; `check` refuses one that would need the stand-ins too (an env -S string).
  */
 function standInsInPathAssignments(text: string, form: string, check: boolean): string {
   let out = '';
   let last = 0;
-  for (const m of text.matchAll(/(^|[\s;&|(`'"])((?:export\s+)?)PATH=/g)) {
-    const start = m.index + m[1]!.length + m[2]!.length + 'PATH='.length;
+  // Bash's `PATH+=<value>` is `PATH=$PATH<value>` (#997 round 7, D5), and is written back that way.
+  for (const m of text.matchAll(/(^|[\s;&|(`'"])((?:export\s+)?)PATH(\+?)=/g)) {
+    const name = m.index + m[1]!.length + m[2]!.length;
+    const start = name + m[0]!.length - m[1]!.length - m[2]!.length;
     // The value's raw text: to an unquoted blank or operator; a quote counts only where it closes.
     let end = start;
     let value = '';
@@ -487,15 +493,15 @@ function standInsInPathAssignments(text: string, form: string, check: boolean): 
         end++;
       }
     }
-    const entries = value.split(':');
+    const entries = (m[3] ? `$PATH${value}` : value).split(':');
     const unread = entries.find((e) => !/^\$(PATH|\{PATH\})$/.test(e) && !/^\/[\w./+@%,=-]*$/.test(e));
-    if (unread !== undefined) refuse(`${form}: PATH=${value} in its command line: ${unread || 'an empty entry (the current directory)'} is not an absolute path the guard can read (only absolute paths and $PATH)`);
+    if (unread !== undefined) refuse(`${form}: PATH${m[3]}=${value} in its command line: ${unread || 'an empty entry (the current directory)'} is not an absolute path the guard can read (only absolute paths and $PATH)`);
     const literal = entries.map((e, i) => [e, i] as const).filter(([e]) => !e.startsWith('$'));
     const ahead = standInsAhead(literal.map(([e]) => resolve(e)));
     if (ahead === null) continue;
-    if (check || !/^\/[\w./-]+$/.test(ahead.dir)) refuse(`${form}: PATH=${value} in its command line would find the machine's own host tools by name`);
+    if (check || !/^\/[\w./-]+$/.test(ahead.dir)) refuse(`${form}: PATH${m[3]}=${value} in its command line would find the machine's own host tools by name`);
     const at = literal[ahead.at]![1];
-    out += `${text.slice(last, start)}${[...entries.slice(0, at), ahead.dir, ...entries.slice(at)].join(':')}`;
+    out += `${text.slice(last, name)}PATH=${[...entries.slice(0, at), ahead.dir, ...entries.slice(at)].join(':')}`;
     last = end;
   }
   return out + text.slice(last);
@@ -645,6 +651,14 @@ function checkShellLine(form: string, text: string, options: readonly string[], 
   if (envI) refuse(`${form}: env -i with no PATH for a command line that names a host tool`);
 }
 
+/** GNU env's long options, spelled in full. */
+const ENV_LONG_OPTIONS = new Set(['--ignore-environment', '--null', '--unset', '--chdir', '--split-string', '--argv0', '--block-signal', '--default-signal', '--ignore-signal', '--list-signal-handling', '--debug', '--help', '--version']);
+/** Whether `a` is a prefix of one of env's long options, not the option spelled in full. */
+const abbreviatesEnvOption = (a: string) => {
+  const name = a.split('=')[0]!;
+  return name.length > 2 && name.startsWith('--') && !ENV_LONG_OPTIONS.has(name) && [...ENV_LONG_OPTIONS].some((o) => o.startsWith(name));
+};
+
 /** env's arguments, each PATH= given the stand-ins; refuses a cleared PATH for a command that names a host tool. */
 function envArguments(form: string, argv: string[], cwd: string, line: (text: string) => void): string[] {
   const out = [...argv];
@@ -663,6 +677,10 @@ function envArguments(form: string, argv: string[], cwd: string, line: (text: st
       if (a === '-S' || a === '--split-string') split = out[i + 1] ?? '';
       i += 2;
       continue;
+    } else if (abbreviatesEnvOption(a)) {
+      // GNU env takes any unambiguous prefix of a long option (--split=, --ignore-env, --uns): one not spelled in full
+      // is refused rather than read (#997 round 7, D8/D9). (One that abbreviates none, env itself refuses.)
+      refuse(`${form} env: ${a}, a long option not spelled in full (spell it out)`);
     } else if (a === '--unset=PATH') clears = true;
     else if (a.startsWith('--split-string=')) split = a.slice('--split-string='.length);
     else if (/^-[a-zA-Z]/.test(a) && !a.startsWith('--')) {
@@ -832,7 +850,7 @@ function execFileArgs(a: unknown, b: unknown, c: unknown): [readonly unknown[], 
 
 type Fn = (this: unknown, ...a: unknown[]) => unknown;
 if (POSIX) {
-  const cp = createRequire(import.meta.url)('node:child_process') as typeof Cp & Record<string, unknown>;
+  const cp = childProcess as typeof Cp & Record<string, unknown>;
   const raw = { spawn: cp.spawn as Fn, spawnSync: cp.spawnSync as Fn, execFile: cp.execFile as Fn, execFileSync: cp.execFileSync as Fn, exec: cp.exec as Fn, execSync: cp.execSync as Fn, fork: cp.fork as Fn };
   const custom = promisify.custom as symbol;
   // Node's own promisified forms ({ stdout, stderr }, the child on the promise), from the real functions.
