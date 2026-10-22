@@ -24,6 +24,13 @@ export interface WorktreeOptions {
   cacheEnv?: Record<string, string>;
   /** Directories left out of the worktree (tests.yaml checkout.sparse_exclude, src/checkout.ts). */
   sparseExclude?: readonly string[];
+  /** Where task files are written (#890 round 19): a root holding it gets the engine's own directory (keptPaths). */
+  taskDir?: string;
+  /**
+   * The root was resolved to its real path once, at the coordinator's start (#890 round 19, resolvedPath): a link that
+   * appears on the way to a worktree after that refuses the add instead of being followed.
+   */
+  rootResolved?: boolean;
 }
 
 const ownedFile = (o: WorktreeOptions) => join(o.stateDir, 'worktrees.json');
@@ -129,12 +136,18 @@ export function holdsPath(dir: string, p: string): boolean {
 }
 
 /**
- * The one test of whether a place can't be hidden whole (#890 round 18): it is, or holds, one of `kept` (the main
- * checkout, the common git directory, the task file). worktreeDir and the run's denials (src/read-denials.ts
- * siblingCheckouts) both use it, so they can't disagree on a root.
+ * The one test of whether a place can't be hidden whole (#890 round 18): it is, or holds, one of `kept`. Both
+ * worktreeDir and the run's denials (src/read-denials.ts siblingCheckouts) call it with keptPaths (round 19: one list
+ * too, not only one predicate; round 18 passed different lists, and a root holding only the task directory got new
+ * worktrees directly under it, measured).
  */
 export function holdsKept(place: string, kept: readonly (string | null | undefined)[]): boolean {
   return kept.some((k) => typeof k === 'string' && k !== '' && holdsPath(place, k));
+}
+
+/** The paths a worktree place must never hide (round 19, the one list): the main checkout, its common git dir, the task directory. */
+export function keptPaths(repo: string, taskDir?: string | null): string[] {
+  return [repo, commonGitDir(repo), taskDir].filter((p): p is string => typeof p === 'string' && p !== '');
 }
 
 /** The common git directory of the checkout at `repo` (its `.git`, or the one a `.git` file leads to); null when unknown. */
@@ -158,9 +171,9 @@ export function commonGitDir(repo: string): string | null {
  * when a command is wrapped, so a command already running read a worktree made later (measured). The directory is
  * hidden whole like any other place, so its mount covers commands already running too.
  */
-export function worktreeDir(repo: string, root: string): string {
+export function worktreeDir(repo: string, root: string, taskDir?: string | null): string {
   const base = resolve(repo, root);
-  return holdsKept(base, [repo, commonGitDir(repo)]) ? join(base, WORKTREE_DIR_NAME) : base;
+  return holdsKept(base, keptPaths(repo, taskDir)) ? join(base, WORKTREE_DIR_NAME) : base;
 }
 
 /**
@@ -168,18 +181,53 @@ export function worktreeDir(repo: string, root: string): string {
  * before anything is made, since a make, a mount or `git worktree add` would follow it anywhere.
  */
 export function makePlace(place: string): void {
-  try {
-    if (lstatSync(place).isSymbolicLink()) throw new Error(`${place} is a link`);
-    return;
-  } catch (e) {
-    if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e;
-  }
+  // `place` was resolved to its real path at the start (worktreePlaces): a link at it, or anywhere on the way to it,
+  // since then refuses (round 19), before anything is made.
+  const linked = linkOnTheWay(place);
+  if (linked) throw new Error(`${place}: ${linked}, so nothing is made through it`);
   mkdirSync(place, { recursive: true });
+  const after = linkOnTheWay(place);
+  if (after) throw new Error(`${place}: ${after}`);
+}
+
+/**
+ * Why the path to `p` (an absolute path resolved to its real path earlier) no longer is its real path: a link at `p`,
+ * or a link that appeared at any part on the way (the real path of its nearest existing part isn't that part). Null
+ * while it still is.
+ */
+export function linkOnTheWay(p: string): string | null {
+  let at = resolve(p);
+  for (;;) {
+    try {
+      if (lstatSync(at).isSymbolicLink()) return `${at} is a link`;
+      const real = realpathSync(at);
+      return real === at ? null : `${at} now leads to ${real} (a link on the way)`;
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e;
+      if (dirname(at) === at) return null;
+      at = dirname(at);
+    }
+  }
+}
+
+/** `p` resolved to its real path: its nearest existing part's real path, and the rest as written. */
+export function resolvedPath(p: string): string {
+  const abs = resolve(p);
+  let at = abs;
+  for (;;) {
+    try {
+      const real = realpathSync(at);
+      return at === abs ? real : join(real, abs.slice(at.length + 1));
+    } catch {
+      if (dirname(at) === at) return abs;
+      at = dirname(at);
+    }
+  }
 }
 
 /** Where a new worktree named `name` is made: always in worktreeDir (round 18), never at an old path. */
 function newWorktreePath(o: WorktreeOptions, name: string): string {
-  return join(worktreeDir(o.repo, o.root), `${WORKTREE_NAME_PREFIX}${name}`);
+  return join(worktreeDir(o.repo, o.root, o.taskDir), `${WORKTREE_NAME_PREFIX}${name}`);
 }
 
 /**
@@ -190,7 +238,21 @@ function newWorktreePath(o: WorktreeOptions, name: string): string {
 export function worktreePath(o: WorktreeOptions, name: string): string {
   const legacy = resolve(o.repo, o.root, `${WORKTREE_NAME_PREFIX}${name}`);
   const fresh = newWorktreePath(o, name);
-  return fresh !== legacy && owned(o).includes(legacy) ? legacy : fresh;
+  return fresh !== legacy && ownedAs(o, legacy) ? legacy : fresh;
+}
+
+/**
+ * The ownership record that is `p`, as written or by real path (round 19): a record written through a link (a root
+ * that is a link, before the coordinator resolved it at its start) still names the same worktree.
+ */
+function ownedAs(o: WorktreeOptions, p: string): string | undefined {
+  return owned(o).find((r) => r === p || (holdsPath(r, p) && holdsPath(p, r)));
+}
+
+/** Whether `path` is a worktree's old place: directly in a root that holds a kept path (before round 17). */
+function isOldPlace(o: WorktreeOptions, path: string): boolean {
+  const base = resolve(o.repo, o.root);
+  return worktreeDir(o.repo, o.root, o.taskDir) !== base && dirname(path) === base;
 }
 
 /**
@@ -199,10 +261,12 @@ export function worktreePath(o: WorktreeOptions, name: string): string {
  * name there). One helper, so the places the coordinator makes at its start (recovery) and the ones every guarded run
  * hides (src/service.ts into the runner) can't differ.
  */
-export function worktreePlaces(repo: string, root: string): string[] {
-  const base = resolve(repo, root);
-  const dir = worktreeDir(repo, root);
-  return [...new Set([dir, ...(dir !== base ? [base] : []), join(projectStateDir(repo), 'worktrees')])];
+export function worktreePlaces(repo: string, root: string, taskDir?: string | null): string[] {
+  // Resolved to real paths here, once, at the start (round 19): a configured root that is a link (or has one on its
+  // way) is used where it leads, as main did; a link that appears on the way later refuses (makePlace, the denials).
+  const base = resolvedPath(resolve(repo, root));
+  const dir = worktreeDir(repo, base, taskDir);
+  return [...new Set([dir, ...(dir !== base ? [base] : []), resolvedPath(join(projectStateDir(repo), 'worktrees'))])];
 }
 
 /**
@@ -246,12 +310,12 @@ function addWorktree(o: WorktreeOptions, name: string, branch: string, base: str
   }
   if (existsSync(path)) removeAt(o, path);
   else clearStale(o, path);
-  // The place itself is never a link (round 18, N1): git would make the checkout wherever it leads.
-  const dir = dirname(path);
-  try {
-    if (lstatSync(dir).isSymbolicLink()) throw new Error(`${dir}, where ${BRAND.cli} makes its task worktrees, is a link; not making a worktree through it`);
-  } catch (e) {
-    if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e;
+  // A root resolved at the coordinator's start (round 19): a link that appeared since, at the place or anywhere on the
+  // way, refuses the add, since git would make the checkout wherever it leads. A configured root that is a link was
+  // resolved then, so it works as on main (round 18 refused it, measured).
+  if (o.rootResolved) {
+    const linked = linkOnTheWay(dirname(path));
+    if (linked) throw new Error(`${dirname(path)}, where ${BRAND.cli} makes its task worktrees: ${linked}; not making a worktree through it`);
   }
   lockOwnedWorktrees(o);
   setOwned(o, [...owned(o), path]); // recorded before creation, so a crash mid-way is still cleaned up
@@ -315,18 +379,26 @@ export function removeWorktree(o: WorktreeOptions, name: string): boolean {
  * locked"), where before locking any prune cleared it. Unlocked and pruned, ours only (a record still locked is kept).
  */
 function clearStale(o: WorktreeOptions, path: string): void {
-  if (!owned(o).includes(path)) return;
-  unlockWorktree(o.repo, path);
+  const rec = ownedAs(o, path);
+  if (!rec) return;
+  unlockWorktree(o.repo, rec);
   spawnSync('git', ['worktree', 'prune'], { cwd: o.repo, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
 }
 
 function removeAt(o: WorktreeOptions, path: string): boolean {
-  if (!owned(o).includes(path)) throw new Error(`refusing to remove ${path}: not created by ${BRAND.cli}`);
-  unlockWorktree(o.repo, path);
-  spawnSync('git', ['worktree', 'remove', '--force', path], { cwd: o.repo, encoding: 'utf8' });
+  const rec = ownedAs(o, path);
+  if (!rec) throw new Error(`refusing to remove ${path}: not created by ${BRAND.cli}`);
+  unlockWorktree(o.repo, rec);
+  spawnSync('git', ['worktree', 'remove', '--force', rec], { cwd: o.repo, encoding: 'utf8' });
   spawnSync('git', ['worktree', 'prune'], { cwd: o.repo });
-  const gone = !existsSync(path) && !git(o.repo, 'worktree', 'list', '--porcelain').includes(`worktree ${path}\n`);
-  if (gone) setOwned(o, owned(o).filter((p) => p !== path));
+  const gone = !existsSync(path) && !git(o.repo, 'worktree', 'list', '--porcelain').includes(`worktree ${rec}\n`);
+  if (gone) {
+    setOwned(o, owned(o).filter((p) => p !== rec));
+    // An old worktree's name stays taken (round 19, G1): a run that started while it existed holds it as an entry,
+    // and srt follows a link at an entry's name on every command, so a link planted at the freed name would mount over
+    // wherever it led (/usr: those runs lost Bash, measured). An empty directory of the coordinator's keeps the name.
+    if (isOldPlace(o, path)) mkdirSync(path, { recursive: true });
+  }
   return gone;
 }
 

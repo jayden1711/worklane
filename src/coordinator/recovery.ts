@@ -31,7 +31,7 @@ export abstract class Recovery extends Intake {
     // Its own places task worktrees are made in (#890 round 14): the start config's worktree root, fixed at start, and
     // the engine's own. Made here, so every run's sandbox hides them whole from the start (a worktree made later
     // included). Only these: a run's denials never make a directory, since a run's own config may name one.
-    for (const place of worktreePlaces(this.d.repo, this.wt.root)) {
+    for (const place of worktreePlaces(this.d.repo, this.wt.root, this.wt.taskDir)) {
       try {
         makePlace(place);
       } catch (e) {

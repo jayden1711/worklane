@@ -9,7 +9,7 @@
 // `]` are glob syntax there (`?` is any one character but "/").
 import { existsSync, lstatSync, readdirSync, realpathSync, statSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, posix, resolve } from 'node:path';
-import { holdsKept, WORKTREE_NAME_PREFIX } from './worktrees.js';
+import { holdsKept, keptPaths, linkOnTheWay, WORKTREE_NAME_PREFIX } from './worktrees.js';
 import { BRAND } from './brand.js';
 import { ConfigInvalid, loadConfig, loadConfigAt, readRegular } from './config/load.js';
 import { TaskFile } from './contract.js';
@@ -86,13 +86,11 @@ function siblingCheckouts(linked: string[], places: string[], own: string[], kee
   const whole: string[] = [];
   for (const l of linked) found.add(resolve(l));
   for (const place of places) {
-    // The coordinator's own place is never a link (round 18, N1): a mount or a make would follow it anywhere.
+    // The coordinator's own place was resolved to its real path at its start (round 19): a link at it, or on the way to
+    // it, since then refuses (a mount would follow it anywhere). A configured root that is a link was resolved then.
     if (coordinator) {
-      try {
-        if (lstatSync(place).isSymbolicLink()) return { error: `${place}, the coordinator's own place for task worktrees, is a link, so it can't be hidden where it leads` };
-      } catch {
-        // missing: refused below
-      }
+      const linked = linkOnTheWay(place);
+      if (linked) return { error: `${place}, the coordinator's own place for task worktrees: ${linked}, so it can't be hidden where it leads` };
     }
     // A place that holds the main checkout, the common git directory or the task file (a worktree root of "..", "."
     // or "", a separate git dir's parent) holds more than task checkouts, so it is never hidden whole: the same test
@@ -683,7 +681,7 @@ export function runReadDenials(o: { cwd: string; home: string | undefined; taskF
   // coordinator makes no worktree there. Without the coordinator's (a runner built outside an instance), the configs'.
   const taskPlaces = o.places ? [...new Set(o.places.map((p) => resolve(p)))] : configPlaces;
   // Every other task checkout is hidden whole (the owner's decision, round 10), always: see siblingCheckouts.
-  const other = siblingCheckouts(repo.linked, taskPlaces, [root, ...repo.checkouts.slice(0, 1)], [...(main ? [main] : []), ...(repo.common ? [repo.common] : []), ...(o.taskFile ? [o.taskFile] : [])], o.cwd, o.places ? { main } : null);
+  const other = siblingCheckouts(repo.linked, taskPlaces, [root, ...repo.checkouts.slice(0, 1)], [...keptPaths(main ?? root, o.taskFile ? dirname(o.taskFile) : null), ...(repo.common ? [repo.common] : []), ...(o.taskFile ? [o.taskFile] : [])], o.cwd, o.places ? { main } : null);
   if ('error' in other) return other;
   const { siblings } = other;
   // F2 (round 14): an object store must never sit in another checkout or a place: one there (an alternates line a

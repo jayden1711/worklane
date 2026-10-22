@@ -122,13 +122,22 @@ test('#890 r18 (R2): a root that holds only the common git dir (a separate git d
   assert.ok(d.sandboxOnly?.includes(join(store, `${BRAND.cli}-worktrees`)), JSON.stringify(d.sandboxOnly));
 });
 
-test('#890 r18 (N1): a coordinator place that is a link refuses the run', { skip }, () => {
+test('#890 r18 (N1): a coordinator place that becomes a link after the start refuses the run', { skip }, () => {
+  // Round 18 refused a configured root that was a link from the start; round 19 (G3, the coordinator's decision)
+  // resolves the configured root once, at the start, so that works as on main, and only a link that appears later
+  // refuses. This test was changed to that (disclosed).
   const { dir } = exampleProject();
   const away = mkdtempSync(join(tmpdir(), 'away-'));
   mkdirSync(join(dir, '.claude'), { recursive: true });
   symlinkSync(away, join(dir, '.claude', 'worktrees'));
   const places = worktreePlaces(dir, '.claude/worktrees');
-  for (const p of places.slice(1)) mkdirSync(p, { recursive: true });
+  assert.equal(places[0], away, 'resolved to where the configured link leads');
+  for (const p of places) mkdirSync(p, { recursive: true });
+  ok(denials({ cwd: dir, home: mkdtempSync(join(tmpdir(), 'home-')), repo: dir, places }));
+  // Later, the resolved place itself is swapped for a link.
+  const elsewhere = mkdtempSync(join(tmpdir(), 'elsewhere-'));
+  renameSync(away, `${away}-was`);
+  symlinkSync(elsewhere, away);
   const r = denials({ cwd: dir, home: mkdtempSync(join(tmpdir(), 'home-')), repo: dir, places });
   assert.ok('error' in r, JSON.stringify(r).slice(0, 300));
   assert.match(r.error, /link/);
