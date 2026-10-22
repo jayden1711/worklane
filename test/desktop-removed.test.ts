@@ -1206,6 +1206,14 @@ test('the packages this backstop runs are the locked ones, from the repo\'s own 
   // this backstop before any such step (round 20, the next test).
   const named = [...packages].filter((s) => !s.startsWith('node:'));
   assert.deepEqual(named.sort(), Object.keys(PINNED_PACKAGES).sort(), 'every package in the closure is pinned, and every pin is used');
+  // Round 21: CI checks the same pins, and the installed files, before any pinned package runs (scripts/ci/check-pins.mjs,
+  // step 4 of SHARD_FIRST_STEPS). It must carry the same integrity strings, and a changed line of it must be held.
+  const CHECK = 'scripts/ci/check-pins.mjs';
+  const check = readFileSync(join(repoRoot, CHECK), 'utf8');
+  for (const [name, integrity] of Object.entries(PINNED_PACKAGES)) assert.ok(check.includes(`${name}: {\n    integrity: '${integrity}',`), `${CHECK} pins ${name} to the same integrity`);
+  const first = check.split('\n').find((l) => l.trim() !== '')!;
+  assert.ok(holdOf({ [CHECK]: [check, check.replace(first, () => `${first} // changed`)] }).some((r) => r.includes('removes or changes a line of a guard or lint')), `${CHECK} is held`);
+  assert.deepEqual(importsIn(check, ts.ScriptKind.JS).names.filter((s) => !s.startsWith('node:')), [], `${CHECK} loads built-ins only`);
   const lock = JSON.parse(readFileSync(join(repoRoot, 'package-lock.json'), 'utf8')) as { packages: Record<string, { integrity?: string; link?: boolean }> };
   const pkg = JSON.parse(readFileSync(join(repoRoot, 'package.json'), 'utf8')) as { name?: string };
   const root = realpathSync(repoRoot);
@@ -1234,19 +1242,29 @@ test('the packages this backstop runs are the locked ones, from the repo\'s own 
  * scripts/web-licenses.mjs or machine.sh, or a changed vite lockfile entry, ran on the same checkout first and could
  * hide a twin from this backstop. So every shard now starts with exactly these steps, and nothing the hold doesn't
  * cover runs before this backstop has run: checkout, Node, an install with no package scripts, a build with the
- * locked typescript straight from node_modules, then this file alone. [step, as parsed]
+ * locked typescript straight from node_modules, then this file alone. Round 21 (#746 reviews of d576000d): the pinned
+ * packages ran (tsc, then this file's own imports) before their pin was read, so scripts/ci/check-pins.mjs (a guard
+ * path) now checks their lockfile entries and installed files right after the install; and the other lint tests
+ * are held at step 7, before anything unheld. [step, as parsed]
  */
 // check-table: never-shrink
 const SHARD_FIRST_STEPS: [string, (s: Record<string, unknown>) => boolean][] = [
   ['checkout, the merge commit and its base', (s) => String(s.uses).startsWith('actions/checkout@') && same(Object.keys(s).sort(), ['uses', 'with']) && same(s.with, { 'fetch-depth': 2 })],
   ['setup-node, the matrix version, the npm cache', (s) => String(s.uses).startsWith('actions/setup-node@') && same(Object.keys(s).sort(), ['uses', 'with']) && same(s.with, { 'node-version': '${{ matrix.node }}', cache: 'npm' })],
   ['npm ci with no package scripts', (s) => same(s, { run: 'npm ci --ignore-scripts' })],
+  ['the pins, checked before any pinned package runs', (s) => same(s, { name: 'the pinned packages, before any of them runs', run: 'node scripts/ci/check-pins.mjs' })],
   ['the locked tsc, no npm script', (s) => same(s, { run: 'node node_modules/typescript/bin/tsc -p tsconfig.json' })],
-  ['this backstop, alone', (s) => same(s, { name: 'the desktop backstop, before anything unheld runs', run: 'node --import=./dist/test/isolate.js --test dist/test/desktop-removed.test.js' })],
+  ['this backstop, alone', (s) => same(s, { name: 'the desktop backstop, before anything unheld runs', run: 'node --import ./dist/test/isolate.js --test dist/test/desktop-removed.test.js' })],
+  ['the other lint tests', (s) => same(s, { name: 'the other lint tests, before anything unheld runs', shell: 'bash', run: OTHER_LINT_TESTS })],
 ];
 
-test('ci.yml runs this backstop first in every test shard, before any package script or unheld file (round 20)', () => {
+/** Step 7's script, exactly: every other `// lint-test` file, built, preloaded with the isolation; none found fails. */
+const OTHER_LINT_TESTS = "mapfile -t files < <(grep -lx '// lint-test' test/*.test.ts | grep -vx 'test/desktop-removed.test.ts' | sed -e 's#^test/#dist/test/#' -e 's#\\.ts$#.js#')\n[ \"${#files[@]}\" -gt 0 ] || { echo \"no lint tests found\" >&2; exit 1; }\nnode --import ./dist/test/isolate.js --test \"${files[@]}\"\n";
+
+test('ci.yml runs the pin check, then this backstop, then the other lint tests first in every test shard, before any package script or unheld file (rounds 20 and 21)', () => {
   const wf = parse(readFileSync(join(workflows, 'ci.yml'), 'utf8')) as { jobs: Record<string, Record<string, unknown>> };
+  // No workflow-wide env (a NODE_OPTIONS there reaches every step of every job) or defaults (a run shell), round 21.
+  assert.deepEqual(Object.keys(wf).sort(), ['concurrency', 'jobs', 'name', 'on', 'permissions'], 'ci.yml: no workflow-level env or defaults');
   const shards = Object.entries(wf.jobs).filter(([id]) => id.startsWith('test-shard-'));
   assert.ok(shards.length >= 2, 'found the test shard jobs');
   // Every job that runs the test suite is a shard, so none runs it otherwise.
@@ -1261,8 +1279,11 @@ test('ci.yml runs this backstop first in every test shard, before any package sc
   }
   // A reorder is caught: the old order (npm ci with scripts, first) fails.
   const old = shards[0]![1].steps as Record<string, unknown>[];
-  const reordered = [old[0]!, old[1]!, { run: 'npm ci' }, ...old.slice(3)];
-  assert.ok(!SHARD_FIRST_STEPS.every(([, ok], i) => ok(reordered[i] ?? {})), 'npm ci with scripts first fails');
-  const swapped = [old[0]!, old[1]!, old[2]!, old[4]!, old[3]!, ...old.slice(5)];
-  assert.ok(!SHARD_FIRST_STEPS.every(([, ok], i) => ok(swapped[i] ?? {})), 'the backstop before its build fails');
+  const fails = (steps: Record<string, unknown>[]) => !SHARD_FIRST_STEPS.every(([, ok], i) => ok(steps[i] ?? {}));
+  assert.ok(fails([old[0]!, old[1]!, { run: 'npm ci' }, ...old.slice(3)]), 'npm ci with scripts first fails');
+  assert.ok(fails([old[0]!, old[1]!, old[2]!, old[4]!, old[3]!, ...old.slice(5)]), 'tsc before the pin check fails');
+  assert.ok(fails([...old.slice(0, 4), old[5]!, old[4]!, ...old.slice(6)]), 'the backstop before its build fails');
+  assert.ok(fails([...old.slice(0, 6), { run: 'npm run build:web' }, ...old.slice(6)]), 'an unheld step before the other lint tests fails');
+  assert.ok(fails([...old.slice(0, 6), ...old.slice(7), old[6]!]), 'the other lint tests moved last fails');
+  assert.ok(fails([...old.slice(0, 3), ...old.slice(4)]), 'the pin check removed fails');
 });
