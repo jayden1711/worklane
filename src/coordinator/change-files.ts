@@ -233,9 +233,10 @@ export function diffStatText(cwd: string, rev: string): string {
 }
 
 /**
- * `git diff <args>` as a patch, for a person, a prompt or a hash (#807): every file's lines whatever the attributes say
- * (a `-diff` or `binary` mark, a textconv or an external diff), and every submodule link. `args` as changedNames takes
- * them. Never parsed.
+ * `git diff <args>` as a patch, for a hash only, never shown (#807): every file's lines whatever the attributes say
+ * (a `-diff` or `binary` mark, a textconv or an external diff), and every submodule link, a binary file's bytes
+ * included. `args` as changedNames takes them. Never parsed, and never put on a page, in a prompt or in an issue: the
+ * owner cut `--text` from every diff a person reads (#927).
  */
 export function patchText(cwd: string, args: string[]): string {
   return must(run(cwd, ['diff', '--no-color', ...AS_TEXT, ...nameArgs(args)]));

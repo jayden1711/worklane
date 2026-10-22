@@ -1,8 +1,9 @@
 ### Upgrading (from v0.5.2)
 
-- **Every git the engine's JS and TS code runs ignores replace refs and grafts (#927).** An agent could write
-  `refs/replace/*` or `.git/info/grafts` in the shared repo and make the push limits, the secret scan and the review
-  read other commits. The `.sh` helpers under `scripts/` don't go through the runner. A change's recorded
+- **Every git the engine's JS and TS code runs ignores replace refs and grafts, on git 2.42 and later (#927).** An
+  agent could write `refs/replace/*` or `.git/info/grafts` in the shared repo and make the push limits, the secret
+  scan and the review read other commits. Measured on git 2.43. Before 2.42, a config `core.useReplaceRefs=true` may
+  turn replace refs back on (inferred, not run). The `.sh` helpers under `scripts/` don't go through the runner. A change's recorded
   `patch_hash` now covers every file's lines, so it differs from an older engine's for the same change. Run
   `npm run setup:hooks` once after upgrading: until then, an install's old copy of the push-gate hook runs its own
   git calls (the one that loads the gate among them) without these settings. It keeps working.
@@ -13,7 +14,8 @@
 ### Guardrail changes: what each one does
 
 - **The git runner (#927):** `src/os/git.ts` (and `scripts/lib/git.cjs` for scripts) starts every git with replace
-  refs off and no graft file, over whatever environment the caller passes; gitleaks gets the same settings. A test
+  refs off and no graft file, over whatever environment the caller passes; gitleaks gets the same settings. Replace
+  refs stay off whatever the config says on git 2.42 and later (measured on 2.43; before 2.42, see above). A test
   fails on a git call in the JS and TS files under `src/` and `scripts/` that doesn't come through it (it doesn't
   read `.sh` files, git named in a shell string, or a name built at run time), and the runner and that test wait for
   the owner.
