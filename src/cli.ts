@@ -51,7 +51,6 @@ import { HUB_BREAK_GLASS_PORT, HUB_PORT, hubMachineDevices, parseHubArg, signInF
 import { SetupOver, startSetupHub } from './hub-setup.js';
 import { breakGlassHub, runAppManifest, VIEWER_USER } from './setup/app-manifest.js';
 import { seedDemo } from './demo.js';
-import { desktopBinary, runDesktop } from './desktop.js';
 import { agentApiKeyOfText, CREDENTIALS_TEXT_MAX, credentialProblems, initInstance, instanceAgentHome, serverAgentHome, instanceFilesProblem, instanceProblems, instancesDir, listInstances, loadInstance, loadInstanceCredentials, loadInstanceSetup, policiesForRepo, setAgentApiKey, setDiscordToken, setGithubApp, setIntakeCredential } from './instance.js';
 import { readServerAutoConfig, serverAutoConfig, type ServerAutoConfigLine } from './server-auto-config.js';
 import { canaryRefusal, checkCanary, fileCanary } from './canary.js';
@@ -156,7 +155,7 @@ usage: ${BRAND.cli} <command> [options]
                                    run the coordinator in the foreground (the service runs this)
   up | down [--instance name]      install or remove the coordinator as a per-user service
                                    (launchd on macOS, systemd --user on Linux); survives sessions
-  dashboard [--instance name] [--port n] [--user login] [--no-open] [--app]
+  dashboard [--instance name] [--port n] [--user login] [--no-open]
                                    the live dashboard on 127.0.0.1 (reads the event log; with
                                    --instance, that instance's, as its coordinator user); its
                                    token is the owner's break-glass (--user: the login recorded)
@@ -986,7 +985,6 @@ async function main(argv: string[]): Promise<number> {
       const cfg = site.cfg;
       const userOpt = option(opts, '--user');
       const noOpen = flag(opts, '--no-open');
-      const app = flag(opts, '--app');
       let user = userOpt ?? process.env[`${BRAND.envPrefix}_USER`];
       // An instance's coordinator user has no personal GitHub login to ask: the owner unless --user says otherwise.
       if (!user && !instance) {
@@ -1001,16 +999,6 @@ async function main(argv: string[]): Promise<number> {
       if (portFile) writeDashboardPort(portFile, Number(new URL(d.url).port));
       console.log(`${BRAND.name} dashboard for ${cfg.project.project.name}${instance ? ` (instance ${instance})` : ''}, as @${user}\n  ${d.url} ${keyFileNote(d.keyFile)}\n(local only; Ctrl+C to stop)`);
       if (!webUiBuilt()) console.error(`the web UI isn't built in this engine (no ${join(DEFAULT_WEB_DIR, 'index.html')}): run \`npm run build:web\` in it, or reinstall it with the engine setup script`);
-      if (app) {
-        const bin = desktopBinary();
-        if (bin) {
-          // The window owns the session: closing it stops the server.
-          const code = await runDesktop(bin, d.url, `${cfg.project.project.name} · ${BRAND.name}`);
-          await d.close();
-          return code === 0 ? 0 : 1;
-        }
-        console.error(`desktop window not built (npm run build:desktop, or set ${BRAND.envPrefix}_DESKTOP); opening the browser instead`);
-      }
       // WHY: the setup page in the browser reloads itself onto this one (web/src/pages/FirstRun.tsx).
       if (!noOpen && !service && !fromSetup) openUrl(d.url);
       await new Promise(() => {});

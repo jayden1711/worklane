@@ -76,7 +76,7 @@ test('the guard check: GitHub-hosted labels pass; self-hosted ones, or any other
 // the CI_SELF_HOSTED switch, falling back to GitHub's runners for everything else. That runner has no root, no
 // Chrome, no gh or jq, no secrets, and refuses loopback (so nothing a job serves on 127.0.0.1 itself, and no Docker
 // port): a job that needs any of these would fail or, worse, skip proof there, so it stays on GitHub. The test
-// shards (real Chrome, local servers), desktop (apt as root) and the slow real-systemd jobs are never routed.
+// shards (real Chrome, local servers) and the slow real-systemd jobs are never routed.
 // This repo's id (gh api repos/<owner>/<repo> --jq .id): a fork's copy never has it, and it survives a rename.
 const REPO_ID = '1409507019';
 const ROUTED: Record<string, string[]> = { 'ci.yml': ['agentshield', 'push-gate', 'denylist'], 'gitleaks.yml': ['scan'] };

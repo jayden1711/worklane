@@ -27,7 +27,6 @@
 // GitHub and a checkout still honour it.
 import { Buffer, isUtf8 } from 'node:buffer';
 import { gitSpawnSync } from '../os/git.js';
-import type { SizeFile } from '../pr-rules.js';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { attributeTransitionHides, isGitattributesPath, isGitmodulesPath, macrosDefined, OUTCOME_ATTRIBUTES, type ChangeFile } from '../review.js';
@@ -473,6 +472,15 @@ function changeFileLines(cwd: string, base: string, head: string): ChangeFile[] 
     });
 }
 
+/** One file of a change (git diff -M): its added and removed lines. A pure rename has none; a binary file its lines read as text (#693). */
+export interface SizeFile {
+  path: string;
+  /** A rename's old path. */
+  from?: string;
+  added: string[];
+  removed: string[];
+}
+
 /**
  * The change base..head as the size limit reads it (pr-rules.ts sizeVerdict): one `git diff -M -U0`, each file under
  * its new path, a rename's old path in `from`. Rename detection is on here on purpose: a pure rename counts 0 lines.
@@ -501,6 +509,76 @@ export function sizeFiles(cwd: string, base: string, head: string, o: { renames?
     else if (!inHunk && l.startsWith('rename from ')) cur.from = l.slice('rename from '.length);
     else if (!inHunk && l.startsWith('rename to ')) cur.path = l.slice('rename to '.length);
     else if (!inHunk && l.startsWith('+++ b/')) cur.path = l.slice('+++ b/'.length);
+  }
+  return out;
+}
+
+/**
+ * The git command for the merge gate's changed lines (#784): base..head with renames paired (-M: a renamed file's lines
+ * are only the ones it edited), no context (-U0), whitespace-only and blank-line changes left out (-w
+ * --ignore-blank-lines), hunks never joined across unchanged lines (diff.interHunkContext=0, as comment-policy.ts pins
+ * it, whatever the config says), the histogram algorithm pinned (diff.algorithm=histogram, #784 round 11: the default
+ * one can slide a removed function's lines onto a kept one's, so the kept code reads as changed and an added copy as
+ * kept), read as text (AS_TEXT) with this module's guards (withGit). merge-flow.ts runs it as a child the coordinator
+ * awaits; changedLineNumbers reads its output.
+ */
+export function changedLinesCommand(base: string, head: string): string[] {
+  return withGit(['-c', 'core.quotePath=false', '-c', 'diff.interHunkContext=0', '-c', 'diff.algorithm=histogram', 'diff', '-M', '-U0', '-w', '--ignore-blank-lines', '--no-color', ...AS_TEXT, '--src-prefix=a/', '--dst-prefix=b/', `${base}..${head}`]);
+}
+
+/**
+ * One hunk of a file's changes as changedLineNumbers reads them: `at`, the line at the head its removed lines followed
+ * (0: the file's start); `added`, the lines it added (1-based, at the head); `removed`, the text it removed, from line
+ * `from` (1-based) of the file at the base, `oldPath` (a rename's old path).
+ */
+export interface ChangedHunk {
+  at: number;
+  added: number[];
+  removed: string[];
+  from: number;
+  oldPath: string;
+}
+
+/**
+ * changedLinesCommand's output, by file at the head (a rename under its new path, its hunks from the rename pair): every
+ * hunk. A name git still quotes doesn't match any path asked about, so that file has no hunks (it fails closed: none of
+ * its code counts). A hunk header it can't read ends that file's hunks the same way.
+ */
+export function changedLineNumbers(diff: string): Map<string, ChangedHunk[]> {
+  const out = new Map<string, ChangedHunk[]>();
+  let cur: ChangedHunk[] | null = null;
+  let hunk: ChangedHunk | null = null;
+  let path = '';
+  let oldPath = '';
+  let next = 0;
+  for (const l of diff.split('\n')) {
+    if (l.startsWith('diff --git ')) {
+      const header = /^diff --git a\/(.*) b\/(.*)$/.exec(l);
+      path = header ? header[2]! : l;
+      oldPath = header ? header[1]! : l;
+      cur = null;
+      hunk = null;
+    } else if (l.startsWith('rename from ') && !cur) oldPath = l.slice('rename from '.length);
+    else if (l.startsWith('rename to ') && !cur) path = l.slice('rename to '.length);
+    // A name with a space ends in a TAB git adds on these two lines (round 11: N4); a TAB of the name itself is quoted.
+    else if (l.startsWith('--- ') && !cur) {
+      if (l.startsWith('--- a/')) oldPath = l.slice('--- a/'.length).replace(/\t$/, '');
+    } else if (l.startsWith('+++ ') && !cur) {
+      if (l.startsWith('+++ b/')) path = l.slice('+++ b/'.length).replace(/\t$/, '');
+    } else if (l.startsWith('@@')) {
+      const m = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,(\d+))? @@/.exec(l);
+      cur = out.get(path) ?? [];
+      out.set(path, cur);
+      if (!m) {
+        hunk = null;
+        continue;
+      }
+      next = Number(m[2]);
+      // `+c,0`: nothing added, the removed lines followed line c; otherwise they stood where line c now is.
+      hunk = { at: m[3] === '0' ? next : next - 1, added: [], removed: [], from: Number(m[1]), oldPath };
+      cur.push(hunk);
+    } else if (hunk && l.startsWith('+')) hunk.added.push(next++);
+    else if (hunk && l.startsWith('-')) hunk.removed.push(l.slice(1));
   }
   return out;
 }

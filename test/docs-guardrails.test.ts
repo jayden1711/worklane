@@ -10,6 +10,7 @@ import { dirname, join, normalize } from 'node:path';
 import ts from 'typescript';
 import { instructionEvalReasons, mergeDecision, outsidePlanReasons, type MergeInput, type MergeVerdict } from '../src/merge-policy.js';
 import { weakeningReasons } from '../src/merge-policy-weakening.js';
+import { vacuityCheck } from '../src/merge-policy-vacuity.js';
 import type { LevelResult } from '../src/review.js';
 import { repoRoot } from './helpers.js';
 
@@ -174,6 +175,10 @@ const everything: Required<MergeInput> = {
   claimedProtected: true,
   // A change that takes an assertion out of a test: the #783 hold, from its own function.
   weakening: weakeningReasons({ files: [{ path: 'test/a.test.ts', added: 0, removed: 1, addedLines: [], removedLines: ['  assert.ok(x);'] }], deleted: new Set(), before: () => null, after: () => null, scope: undefined }),
+  // A change to app code with no test: the #784 hold, from its own function.
+  vacuity: vacuityCheck({ cfg: { test_globs: ['test/**'], assertion_pattern: 'assert', app_paths: ['src/**'], dynamic: true }, runOne: 'node --test {file}', changed: ['src/a.ts'], atHead: () => 'x', runs: { started: 0, last: null } }).reasons,
+  // Its run still to come: a `design:` reason too, given only when nothing else holds (merge-policy-vacuity.test.ts).
+  vacuityPending: true,
 };
 
 /** The two switch reasons have no colon and share this kind. */

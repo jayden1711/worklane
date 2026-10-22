@@ -160,10 +160,27 @@ export const resolver = () => (req: RunRequest) => {
   return { summary: 'kept the quantity guard and the audit note' };
 };
 
-/** Required check green on the PR's head, then one poll. */
+/**
+ * Required check green on the PR's head, then one poll. When that poll started the merge gate's coverage run (#784: it
+ * runs off the coordinator's tick, and the PR waits for it), once it ends one more poll, which decides the PR as the one
+ * poll did before.
+ */
 export async function green(t: OpenPr) {
   t.f.backlog.setChecks(t.pr().headSha, passing);
+  const runs = t.f.log.read(0, ['vacuity.started']).length;
   await t.c.tick();
+  if (t.f.log.read(0, ['vacuity.started']).length > runs) await afterCoverageRun(t.c);
+}
+
+/** Wait for the merge gate's coverage runs going now (#784: they run off the coordinator's tick). */
+export async function coverageRunsDone(c: Coordinator) {
+  await (c as unknown as { vacuityIdle(): Promise<void> }).vacuityIdle();
+}
+
+/** Wait for the merge gate's coverage runs going now, then poll once more (#784: the pass after a run decides). */
+export async function afterCoverageRun(c: Coordinator) {
+  await coverageRunsDone(c);
+  await c.tick();
 }
 
 /** Merges for real on the test remote (a --no-ff merge commit of the PR head), as GitHub would. */

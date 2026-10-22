@@ -33,6 +33,7 @@ import { usernsUnsupportedProblem } from './testrun/status.js';
 import { openReadOnly } from './events/read-only.js';
 import { checkSetup, groupLevel, GROUPS, stepLevel, systemProbe, type SetupContext, type SetupProbe } from './setup-steps.js';
 import { modelWarnings } from './model-routing.js';
+import { vacuityDoctor } from './merge-policy-vacuity.js';
 import { HUB_UNIT_AS_ROOT, OWNER_TERMINAL_RERUN, ownerTerminalNotice, ownerTerminalRerun, type TerminalPaths } from './console/owner-terminal-removed.js';
 import { voiceSiriLeftoverCheck } from './doctor-voice-removed.js';
 import { DASHBOARD_KEY_PREFIX, isDashboardKey } from './events/redact.js';
@@ -91,6 +92,9 @@ export function doctor(rootArg: string, opts: { agentshield?: boolean; /** A pol
     const workflows = pinsNeeded ? ((tip ? workflowsAt(root, tip.sha) : null) ?? workflowsAt(root, origin)) : null;
     const pins = checkSourceDoctor(p, workflows, tip);
     add('required check sources', pins.level, pins.detail);
+    // #784: whether app-code PRs can auto-merge (their tests run under coverage), with the lines to add when not.
+    const vac = vacuityDoctor(cfg.tests);
+    add('vacuity gate', vac.level, vac.detail);
   } catch (e) {
     add('config', 'fail', e instanceof ConfigInvalid ? e.message : (e as Error).message);
   }

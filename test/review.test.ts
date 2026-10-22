@@ -169,9 +169,9 @@ const GUARD_ENTRIES = ['src/hook.ts', 'src/hook-main.ts'];
 // check-table: never-shrink
 const GUARD_TREE = [
   'src/ack-reason.ts', 'src/adapters/railway.ts', 'src/automations/cron.ts', 'src/automations/schema.ts', 'src/backlog/types.ts', 'src/brand.ts',
-  'src/check-source.ts', 'src/checkout.ts', 'src/ci-none.ts', 'src/comment-policy.ts', 'src/config/load.ts', 'src/config/schema.ts', 'src/contract.ts',
+  'src/check-source.ts', 'src/checkout.ts', 'src/ci-none.ts', 'src/coordinator/change-files.ts', 'src/comment-policy.ts', 'src/config/load.ts', 'src/config/schema.ts', 'src/contract.ts',
   'src/cross-eval.ts', 'src/dashboard-auth.ts', 'src/dashboard-key-paths.ts', 'src/delegation.ts', 'src/deploy-gate/config.ts',
-  'src/events/types.ts', 'src/experiments/paths.ts', 'src/governor-holds.ts', 'src/guard/chat.ts', 'src/guard/intake.ts',
+  'src/events/types.ts', 'src/experiments/paths.ts', 'src/governor-holds.ts', 'src/guard/chat.ts', 'src/guard/commit.ts', 'src/guard/intake.ts',
   'src/guard/research.ts', 'src/guardrails/access.ts', 'src/guardrails/context.ts', 'src/guardrails/engine.ts', 'src/guardrails/fingerprint.ts',
   'src/guardrails/glob.ts', 'src/guardrails/push-hook.ts', 'src/guardrails/reach.ts', 'src/guardrails/shell.ts', 'src/held-out-paths.ts', 'src/hook-imports.ts',
   'src/hook-main.ts', 'src/hook.ts', 'src/model-routing.ts', 'src/network.ts', 'src/optimize.ts', 'src/os/child-process.ts', 'src/os/git.ts', 'src/os/index.ts',
