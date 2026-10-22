@@ -14,6 +14,9 @@ import { join } from 'node:path';
 import { addProjectNameOk, addProjectRepoOk } from '../src/machine.js';
 import { checkRootStep } from '../src/console/root-steps.js';
 import { repoRoot } from './helpers.js';
+// #991: the preload (test/isolate.ts) gives every child recording stand-ins for the machine's host tools; this is
+// their record.
+import { hostCalls } from './isolate.js';
 
 const posix = process.platform !== 'win32';
 const setupDir = join(repoRoot, 'scripts', 'setup');
@@ -46,6 +49,9 @@ user_exists() { [ -e "$T/users/$1" ]; }
 unit_active() { [ -e "$T/active/$1" ]; }
 sudo_version() { echo 1.9.15; }
 run_as() { local user="$1" script="$2"; shift 2; HOME="$T/homes/$user" bash -euo pipefail -c "$script" _ "$@"; }
+# run_as_bounded's way to another user (#904: the claude-token check reads the coordinator's credentials.yaml), stood in
+# as run_as is: that user's home, never sudo (#991). Each use is recorded in <root>/as-user, so a test can see it.
+as_user_argv() { echo "$1" >> "$T/as-user"; AS_USER=(env HOME="$T/homes/$1"); }
 ensure_instance_home() {
   local d="$T/homes/wl-$1/.local/state/worklane/instances/$1"
   mkdir -p "$d/state"
@@ -158,7 +164,9 @@ printf '[Service]\\nExecStart=/usr/local/bin/worklane dashboard --hub %s --servi
     writeFileSync(join(T, 'homes', `wl-${n}-agent`, '.claude', '.credentials.json'), JSON.stringify({ claudeAiOauth: { accessToken: 'sk-ant-oat01-installed-by-root' } }));
   };
   const calls = () => (existsSync(join(T, 'calls')) ? readFileSync(join(T, 'calls'), 'utf8').trim().split('\n').filter(Boolean) : []);
-  return { T, s, run, runTty, signedIn, calls, instDir };
+  /** The users run_as_bounded ran something as (#904), one per line, in order. */
+  const asUser = () => (existsSync(join(T, 'as-user')) ? readFileSync(join(T, 'as-user'), 'utf8') : '');
+  return { T, s, run, runTty, signedIn, calls, asUser, instDir };
 }
 type Step = { step: string; state: string; detail: string; ask?: Record<string, string>; retry?: string };
 /** util-linux's script, for a pty: what CI's Ubuntu has; elsewhere the terminal tests skip. */
@@ -192,6 +200,25 @@ test('add-project runs the steps in order, one JSON line per change on stdout, a
   // The token on root's stdin reached the agent's own credentials, and no output.
   assert.match(readFileSync(join(m.T, 'homes', 'wl-alpha-agent', '.claude', '.credentials.json'), 'utf8'), new RegExp(TOKEN));
   assert.ok(!r.stdout.includes(TOKEN) && !r.stderr.includes(TOKEN), 'the token is never echoed');
+});
+
+// WHY (#991): since #904 the claude-token step's done check reads the coordinator's credentials.yaml as that user,
+// through lib.sh's run_as_bounded, whose way to another user (as_user_argv) is the machine's sudo. This file stood in
+// run_as but not that, and ran the script on the real PATH, so a fresh run reached the real `sudo -H -u wl-alpha`.
+test('#991: a fresh run, at a root shell or not, goes to another user only through the stand-in, and reaches no host tool', { skip: !posix }, async () => {
+  const before = hostCalls().length;
+  const m = machine();
+  const r = m.run();
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(hostCalls().slice(before), [], 'no host tool reached, sudo included');
+  assert.equal(m.asUser(), 'wl-alpha\n', "the claude-token check read the coordinator's credentials.yaml as wl-alpha");
+  if (hasScript) {
+    const t = machine();
+    const tty = await t.runTty(TOKEN);
+    assert.equal(tty.status, 0, tty.out.slice(-2000));
+    assert.deepEqual(hostCalls().slice(before), [], 'at a root shell too');
+    assert.equal(t.asUser(), 'wl-alpha\n');
+  }
 });
 
 test('at a root shell (a terminal), the claude-token step takes the token at its hidden prompt, for the agent user only, never echoed', { skip: !hasScript && 'no util-linux script for a terminal' }, async () => {
@@ -422,8 +449,34 @@ test("the script refuses a bad name or repo before any step", { skip: !posix }, 
   assert.deepEqual(m.calls(), []);
 });
 
+// WHY (#991): every test of a script that switches users stands in as_user_argv, so none runs the real one. This pins
+// it: run_as_bounded goes to another user exactly as run_as does, `sudo -H -u <user>`, never a login shell (-i
+// re-quotes the command, and a login shell runs that user's profile), and takes that argv from as_user_argv alone.
+test("#991: lib.sh's real as_user_argv is sudo -H -u <user>, no login shell, and run_as_bounded runs through it", { skip: !posix && 'bash' }, () => {
+  const lib = readFileSync(join(setupDir, 'lib.sh'), 'utf8');
+  assert.deepEqual(lib.split('\n').filter((l) => /^\s*as_user_argv\s*\(\)/.test(l)), ['as_user_argv() { AS_USER=(sudo -H -u "$1" env GIT_TERMINAL_PROMPT=0); }'], 'one definition, exactly this');
+  assert.match(lib, /\n {2}\(cd \/ && sudo -H -u "\$user" env GIT_TERMINAL_PROMPT=0 bash -euo pipefail -c "\$script" _ "\$@"\)\n/, "run_as's own switch is the same");
+  const bounded = lib.slice(lib.indexOf('\nrun_as_bounded_input() {'), lib.indexOf('\n}\n', lib.indexOf('\nrun_as_bounded_input() {')));
+  assert.match(bounded, /\n {2}as_user_argv "\$user"\n/);
+  assert.match(bounded, /exec timeout -s KILL "\$secs" "\$\{AS_USER\[@\]\}" bash -euo pipefail -c "\$script" _ "\$@"/, "root's bound outside the switch, the script as bash -c");
+  assert.doesNotMatch(bounded, /\bsudo\b/, 'no other way to another user');
+  // What it sets, read back from bash with nothing run: the array only.
+  const before = hostCalls().length;
+  const r = spawnSync('bash', ['-c', 'source "$1"; as_user_argv wl-alpha-agent; printf "%s\\n" "${AS_USER[@]}"', '_', join(setupDir, 'lib.sh')], { encoding: 'utf8' });
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(r.stdout.split('\n').filter(Boolean), ['sudo', '-H', '-u', 'wl-alpha-agent', 'env', 'GIT_TERMINAL_PROMPT=0']);
+  assert.ok(!r.stdout.split('\n').some((a) => /^-(i|s|-login|-shell)$|^-[A-Za-z]*[is][A-Za-z]*$/.test(a)), 'no -i, -s or --login');
+  assert.deepEqual(hostCalls().slice(before), [], 'nothing ran');
+});
+
+/**
+ * lib.sh's machine_sudoers for wl-alpha, on a machine whose sudo reads patterns (1.9.10 or later). The version is stood
+ * in (#991): it was this machine's own `sudo -V`, so the rule shape depended on the sudo of whoever ran the tests.
+ */
+const machineSudoers = () => spawnSync('bash', ['-c', 'source "$1"; sudo_version() { echo 1.9.15; }; machine_sudoers wl-alpha', '_', join(setupDir, 'lib.sh')], { encoding: 'utf8' });
+
 test('the sudoers rule lets coordinators run add-project only with its two argument shapes, as one anchored pattern', { skip: !posix && 'bash' }, () => {
-  const r = spawnSync('bash', ['-c', 'source "$1"; machine_sudoers wl-alpha', '_', join(setupDir, 'lib.sh')], { encoding: 'utf8' });
+  const r = machineSudoers();
   assert.equal(r.status, 0, r.stderr);
   const line = r.stdout.split('\n').find((l) => l.includes('add-project'))!;
   assert.equal(line.trim(), '/usr/local/libexec/worklane-machine ^add-project [a-z][a-z0-9-]* [A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9_.-]+$');
@@ -452,7 +505,7 @@ test("the policy step makes the instance's policy.yaml root's, and a rerun on an
 });
 
 test('the sudoers rule lets coordinators run set-policy with one anchored pattern of plain words (#726)', { skip: !posix && 'bash' }, () => {
-  const r = spawnSync('bash', ['-c', 'source "$1"; machine_sudoers wl-alpha', '_', join(setupDir, 'lib.sh')], { encoding: 'utf8' });
+  const r = machineSudoers();
   assert.equal(r.status, 0, r.stderr);
   const line = r.stdout.split('\n').find((l) => l.includes('^set-policy'))!.trim().replace(/, \\$/, '');
   const re = new RegExp(line.split(' ').slice(1).join(' '));
