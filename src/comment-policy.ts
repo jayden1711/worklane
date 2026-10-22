@@ -3,13 +3,13 @@
 // function, checkComments, for the PR diff check (checkRange, scripts/check-comments.mjs) and the agents' post-edit
 // hook (checkWorkingFile, wired in #330's second part), so the two can't drift. Comments are found by a line
 // scanner per language (no parser dependency).
-import { spawnSync } from './os/child-process.js';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { parseDocument } from 'yaml';
 import type { z } from 'zod';
 import { BRAND } from './brand.js';
 import { CommentPolicyConfig } from './config/schema.js';
+import { gitSpawnSync } from './os/git.js';
 
 export type CommentPolicy = z.infer<typeof CommentPolicyConfig>;
 
@@ -492,7 +492,7 @@ export function addedLines(diff: string): Map<string, Set<number>> {
 
 // INVARIANT: no command a checkout's or user's git config names runs here (#330): fsmonitor off, no textconv or external diff.
 const git = (cwd: string, args: string[], timeoutMs?: number) =>
-  spawnSync('git', ['-c', 'core.quotePath=false', '-c', 'core.fsmonitor=false', ...args], { cwd, encoding: 'utf8', maxBuffer: 256 * 1024 * 1024, ...(timeoutMs ? { timeout: timeoutMs } : {}) });
+  gitSpawnSync(['-c', 'core.quotePath=false', '-c', 'core.fsmonitor=false', ...args], { cwd, encoding: 'utf8', maxBuffer: 256 * 1024 * 1024, ...(timeoutMs ? { timeout: timeoutMs } : {}) });
 // INVARIANT: the hook and CI read the same new lines whatever the user's git config (prefixes, algorithm, context).
 const DIFF = [
   ...['-c', 'diff.noprefix=false', '-c', 'diff.mnemonicPrefix=false', '-c', 'diff.interHunkContext=0', '-c', 'diff.suppressBlankEmpty=false'],

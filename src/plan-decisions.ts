@@ -9,7 +9,7 @@ import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from 'n
 import { basename, dirname, isAbsolute, join, posix, relative, sep } from 'node:path';
 import { redactString } from './events/redact.js';
 import type { EventPayload, StoredEvent } from './events/types.js';
-import { spawnSync } from './os/child-process.js';
+import { gitSpawnSync } from './os/git.js';
 import { DECISION_DIRS, DECISION_FILES } from './review.js';
 
 /** The whole section when nothing recorded bears on the plan. Never beside citations. */
@@ -128,8 +128,9 @@ function verifiedObjects(cwd: string, wanted: { oid: string; type: 'commit' | 't
   const out = new Map<string, Buffer>();
   if (!wanted.length) return out;
   if (!wanted.every((w) => OBJECT_ID.test(w.oid))) return null;
-  // Replace refs (refs/replace) could stand another object in for the one asked for: never read through them.
-  const r = spawnSync('git', ['--no-replace-objects', 'cat-file', '--batch'], { cwd, input: `${wanted.map((w) => w.oid).join('\n')}\n`, ...GIT_LIMITS });
+  // Replace refs (refs/replace) could stand another object in for the one asked for: never read through them. Through
+  // the git runner (#807), which also sets grafts and the commit-graph off.
+  const r = gitSpawnSync(['--no-replace-objects', 'cat-file', '--batch'], { cwd, input: `${wanted.map((w) => w.oid).join('\n')}\n`, ...GIT_LIMITS });
   if (r.error || r.status !== 0) return null;
   const buf = r.stdout as Buffer;
   let at = 0;
@@ -183,7 +184,7 @@ const REGULAR = new Set(['100644', '100755']);
 function committedRecords(checkout: string, rev: string, objects: string): Map<string, string> | null {
   let base = rev;
   if (rev === 'HEAD') {
-    const git = (args: string[]) => spawnSync('git', ['--no-replace-objects', ...args], { cwd: checkout, encoding: 'utf8', ...GIT_LIMITS });
+    const git = (args: string[]) => gitSpawnSync(['--no-replace-objects', ...args], { cwd: checkout, encoding: 'utf8', ...GIT_LIMITS });
     const top = git(['rev-parse', '--show-cdup']);
     if (top.error || top.status !== 0 || top.stdout.trim() !== '') return null;
     const head = git(['rev-parse', '--verify', '--quiet', 'HEAD^{commit}']);

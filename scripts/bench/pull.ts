@@ -40,11 +40,11 @@
 // What is printed: keys and counts only, never an instance id, an image name, a digest beside its key or a tree hash.
 // docker's own words (they name the image) are never passed on: a failure says its stage and exit status. Every line
 // still goes through cli.ts scrub()'s withholding backstop.
-import { execFileSync } from 'node:child_process';
 import { randomBytes, createHash } from 'node:crypto';
 import { closeSync, constants, fstatSync, lstatSync, mkdirSync, openSync, readSync, renameSync, rmdirSync, rmSync, type Stats } from 'node:fs';
 import { join } from 'node:path';
 import { createInflate, inflateSync } from 'node:zlib';
+import { gitExecFileSync } from '../../src/os/git.js';
 import type { Mode } from './caps.js';
 import { LimitsNotApplied, OutputTooLarge, TaskRunner, WORK, type Docker, type DockerOptions, type TaskContainer } from './container.js';
 import { pullImage, PullRefused, writeVerified } from './download.js';
@@ -287,8 +287,10 @@ const GIT_ENV: NodeJS.ProcessEnv = { PATH: process.env.PATH, GIT_CONFIG_NOSYSTEM
 // objects, so their memory grew with the host's CPUs: an admitted 12.5 MB pack peaked index-pack at 0.86 to 1.96 GB
 // with git's default threads on 16 CPUs, 3.27 GB with 16, and 283 MiB with one (#947 round 4, measured in review).
 const GIT_HARDENED = ['-c', 'core.fsmonitor=false', '-c', 'core.hooksPath=/dev/null', '-c', 'protocol.allow=never', '-c', 'protocol.file.allow=always', '-c', 'pack.threads=1'];
+// Through the engine's git runner (#807): it sets replace refs, grafts and the commit-graph off last over GIT_ENV
+// (gitExecFileSync applies gitEnv to the env it is handed).
 const git = (args: readonly string[], input?: Buffer): string =>
-  execFileSync('git', [...GIT_HARDENED, ...args], { env: GIT_ENV, stdio: ['pipe', 'pipe', 'pipe'], timeout: 30 * 60_000, maxBuffer: 256 * 1024 * 1024, ...(input ? { input } : {}) })
+  gitExecFileSync([...GIT_HARDENED, ...args], { env: GIT_ENV, stdio: ['pipe', 'pipe', 'pipe'], timeout: 30 * 60_000, maxBuffer: 256 * 1024 * 1024, ...(input ? { input } : {}) })
     .toString('utf8')
     .trim();
 

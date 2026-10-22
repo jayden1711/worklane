@@ -31,7 +31,7 @@
 // The required_checks a commit is judged by are the ones in force when it landed: config.yaml as committed at its
 // first parent, read with git. Not the config loaded at startup: the clone's working tree isn't updated as the default
 // branch moves, so a check dropped since would still be required of every later merge, and never report.
-import { spawnSync } from './os/child-process.js';
+import { gitSpawnSync } from './os/git.js';
 import { createHash, randomBytes } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, renameSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -615,7 +615,7 @@ export function subjectPrNumber(subject: string): number | null {
 }
 
 export function repoGit(repo: string, remote: string, branch: string): WatchGit {
-  const git = (...a: string[]) => spawnSync('git', a, { cwd: repo, encoding: 'utf8' });
+  const git = (...a: string[]) => gitSpawnSync(a,{ cwd: repo, encoding: 'utf8' });
   return {
     tip: () => {
       git('fetch', '-q', remote, `+refs/heads/${branch}:refs/remotes/${remote}/${branch}`);
@@ -936,7 +936,7 @@ export interface AcceptGit extends WatchGit {
 
 /** AcceptGit over a clone (the instance's repo): the tip is fetched as the watch fetches it. */
 export function acceptGit(repo: string, remote: string, branch: string): AcceptGit {
-  const git = (...a: string[]) => spawnSync('git', a, { cwd: repo, encoding: 'utf8' });
+  const git = (...a: string[]) => gitSpawnSync(a,{ cwd: repo, encoding: 'utf8' });
   return {
     ...repoGit(repo, remote, branch),
     resolve: (ref) => {

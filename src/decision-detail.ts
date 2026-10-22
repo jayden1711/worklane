@@ -9,7 +9,7 @@
 //   - a viewer gets only the fields VIEWER_DECISION_FIELDS allows (src/viewer-events.ts), never the context;
 //   - a writer gets the context too, as the agent runs it comes from (mayReadRuns), minus the owner-only parts;
 //   - the owners also get the owner-only parts: raw check output, the tamper guard's flags, and the diff.
-import { execFile } from './os/child-process.js';
+import { gitExecFile } from './os/git.js';
 import { BRAND } from './brand.js';
 import { DEFAULT_REVIEW } from './coordinator/shared.js';
 import { isOwner, isWriter, mayAnswerKind, type Role } from './dashboard-auth.js';
@@ -346,12 +346,16 @@ export function decisionDetail(id: string, d: DetailDeps): DecisionDetail | null
   };
 }
 
-/** The change's diff, base..head, from the checkout's git (owners only: the route checks); redacted, capped. */
+/**
+ * The change's diff, base..head, from the checkout's git (owners only: the route checks); redacted, capped. main's
+ * arguments, through the git runner (#807): a binary file shows as "Binary files ... differ" (the owner, 2026-10-21:
+ * "Cut --text, land the runner.").
+ */
 export async function decisionDiff(root: string, base: string, head: string): Promise<{ diff: string; truncated: boolean } | { diff: null; why: string }> {
   if (!SHA.test(base) || !SHA.test(head)) return { diff: null, why: 'no commits recorded for this change' };
   const MAX = 512 * 1024;
   return new Promise((done) => {
-    execFile('git', ['diff', '--no-color', '--no-ext-diff', `${base}..${head}`], { cwd: root, env: { ...withToolPath(), GIT_TERMINAL_PROMPT: '0' }, timeout: 15_000, maxBuffer: 8 * 1024 * 1024, encoding: 'utf8' }, (err, stdout, stderr) => {
+    gitExecFile(['diff', '--no-color', '--no-ext-diff', `${base}..${head}`], { cwd: root, env: { ...withToolPath(), GIT_TERMINAL_PROMPT: '0' }, timeout: 15_000, maxBuffer: 8 * 1024 * 1024, encoding: 'utf8' }, (err, stdout, stderr) => {
       if (err) return done({ diff: null, why: `not in this checkout's git: ${(stderr || err.message).trim().split('\n')[0]}` });
       const truncated = stdout.length > MAX;
       // Redacted before it is cut, over the kept part and a margin only (#889): up to 8 MB of diff, and the redaction is

@@ -5,7 +5,7 @@
 //     and refuses to start unless GitHub enforces the branch's protection; a check that errors refuses too;
 //   - every direct land asks again just before its push, and pushes nothing unless the answer is "enforced".
 // A remote that is a local path (a bare repo on disk: the demo, the tests) has no protection to ask about: allowed.
-import { spawnSync } from './os/child-process.js';
+import { gitSpawnSync } from './os/git.js';
 import { existsSync } from 'node:fs';
 import type { EventLog } from './events/log.js';
 import type { EventPayload, StoredEvent } from './events/types.js';
@@ -15,7 +15,7 @@ export type Protection = Pick<MainWatchApi, 'protection'>;
 
 /** Whether `remote` in `repo` is a path on this machine (or file://), not a host that could protect a branch. */
 export function localRemote(repo: string, remote: string): boolean {
-  const r = spawnSync('git', ['remote', 'get-url', remote], { cwd: repo, encoding: 'utf8' });
+  const r = gitSpawnSync(['remote', 'get-url', remote], { cwd: repo, encoding: 'utf8' });
   const url = r.status === 0 ? r.stdout.trim() : '';
   if (!url) return false;
   return url.startsWith('file://') || existsSync(url);

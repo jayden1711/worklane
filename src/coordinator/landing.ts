@@ -1,5 +1,5 @@
 // Landing: the land queue and batches, the gates before landing, opening PRs, and what follows a landing (deploy).
-import { spawnSync } from '../os/child-process.js';
+import { gitSpawnSync } from '../os/git.js';
 import { randomBytes } from 'node:crypto';
 import { BRAND } from '../brand.js';
 import { type DoneWhenList } from '../backlog/types.js';
@@ -168,9 +168,9 @@ export abstract class Landing extends Decisions {
       }
       for (const q of batch) {
         const claimed = this.events(q.issue).filter((e) => e.type === 'issue.claimed').at(-1)!.payload as EventPayload<'issue.claimed'>;
-        const pick = spawnSync('git', ['cherry-pick', `${claimed.base}..${q.head}`], { cwd: path, encoding: 'utf8' });
+        const pick = gitSpawnSync(['cherry-pick', `${claimed.base}..${q.head}`], { cwd: path, encoding: 'utf8' });
         if (pick.status !== 0) {
-          spawnSync('git', ['cherry-pick', '--abort'], { cwd: path });
+          gitSpawnSync(['cherry-pick', '--abort'], { cwd: path });
           result(q.issue, 'conflict', null, `does not apply cleanly on ${tip.slice(0, 8)}${applied.length ? ` after ${applied.map((a) => `#${a.issue}`).join(', ')}` : ''}; never guessing at conflicts`);
           await this.block(q.issue, ownerOf(q.issue), `conflicts with ${this.branch}; needs a rebase`);
           continue;

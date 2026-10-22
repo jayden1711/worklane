@@ -1,7 +1,7 @@
 // `tune`: profile a project's test suite on this machine (a fresh worktree on main, set up as the agent user; the
 // suite at 1, 2, 4 and all cores' workers; time and peak worker memory) and propose tests.yaml's `cores.max` and
 // `{cores}` as a PR, under the usual push limits. Nothing changes until it is reviewed and merged.
-import { execFileSync, spawnSync } from './os/child-process.js';
+import { spawnSync } from './os/child-process.js';
 import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { freemem } from 'node:os';
 import { join } from 'node:path';
@@ -12,6 +12,7 @@ import type { TestsConfig } from './config/schema.js';
 import { CORES_PLACEHOLDER, envWithCores, withCores } from './cores.js';
 import { cpuCount, peakMemoryMb, projectCommand, withPeakMemory, writeGroupOnly, type ProjectRunAs } from './os/index.js';
 import { machineStats } from './os/stats.js';
+import { gitExecFileSync } from './os/git.js';
 import { checkedPush, type PushLimits } from './push-check.js';
 import { recommendWorkers, WORKER_VAR, type ProfileRun, type TuneProfile } from './tuning.js';
 import { createWorktree, removeWorktree, type WorktreeOptions } from './worktrees.js';
@@ -126,7 +127,7 @@ export async function tune(o: TuneOptions): Promise<TuneResult> {
     const after = applyTuning(before, rec.workers, setting);
     if (after === before) return { profile, recommendation: rec, changed: false };
     writeFileSync(file, after);
-    const git = (...a: string[]) => execFileSync('git', a, { cwd: path, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+    const git = (...a: string[]) => gitExecFileSync(a, { cwd: path, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
     git('add', '--', `${BRAND.configDir}/tests.yaml`);
     git('-c', `user.name=${o.identity.name}`, '-c', `user.email=${o.identity.email}`, 'commit', '-q', '-m', `Test workers: at most ${rec.workers}, from a profile on this machine`, '-m', rec.why);
     const head = git('rev-parse', 'HEAD');

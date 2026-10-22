@@ -10,7 +10,7 @@
 //   - its commit is a release commit: one commit on top of a commit on origin/main, changing only dist/, carrying
 //     dist/src/cli.js, with package.json at X.Y.Z (the shape scripts/release.mjs makes);
 // then writes ENGINE_TAG=vX.Y.Z and ENGINE_COMMIT=<that commit> into scripts/bootstrap.sh, and nothing else.
-import { execFileSync } from 'node:child_process';
+import { gitExecFileSync } from './lib/git.cjs';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { readPin, releaseProblem, writePin } from './lib/engine-pin.mjs';
 import { canVerify } from './lib/signing.mjs';
@@ -28,7 +28,7 @@ const fail = (msg) => {
 if (!/^v\d+\.\d+\.\d+$/.test(tag ?? '')) fail('usage: pin-engine.mjs vX.Y.Z [--allowed-signers <file>] [--bootstrap <path>]');
 const file = opt('bootstrap') ?? 'scripts/bootstrap.sh';
 const signers = opt('allowed-signers');
-const git = (...a) => execFileSync('git', a, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+const git = (...a) => gitExecFileSync(a, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 const ok = (...a) => {
   try {
     git(...a);
@@ -69,7 +69,7 @@ const facts = {
   parents: parents.length,
   // --no-renames: a file moved into dist/ still names the path it left. -z, untrimmed: a valid UTF-8 name as itself;
   // any other has its bad bytes read as U+FFFD, so it starts with `dist/` only if its bytes do (#683).
-  changed: parents.length === 1 ? execFileSync('git', ['diff', '--name-only', '--no-renames', '-z', parents[0], commit], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).split('\0').filter(Boolean) : [],
+  changed: parents.length === 1 ? gitExecFileSync(['diff', '--name-only', '--no-renames', '-z', parents[0], commit], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).split('\0').filter(Boolean) : [],
   hasCli: ok('cat-file', '-e', `${commit}:dist/src/cli.js`),
   version: (() => {
     try {

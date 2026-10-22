@@ -1,7 +1,8 @@
 // A self-contained demo: a copy of the example project with a local "GitHub"
 // remote and a file backlog, worked by the real coordinator with scripted
 // agents, so the event log (and the dashboard) shows every state for real.
-import { execFileSync, spawnSync } from './os/child-process.js';
+import { spawnSync } from './os/child-process.js';
+import { gitExecFileSync } from './os/git.js';
 import { cpSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -17,7 +18,7 @@ import { childEnv } from './os/index.js';
 import { DEFAULT_COMMIT_IDENTITY, FakeRunner, type RunRequest } from './runner.js';
 import { writeSlotFile } from './slot-file.js';
 
-const git = (cwd: string, ...a: string[]) => execFileSync('git', a, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+const git = (cwd: string, ...a: string[]) => gitExecFileSync(a, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 
 function commitAll(cwd: string, msg: string) {
   git(cwd, 'add', '-A');
