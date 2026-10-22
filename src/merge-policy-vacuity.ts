@@ -21,7 +21,7 @@
 // its own, times its extra evaluations (round 7). So what loading runs doesn't count: a module's top level, V8's
 // synthetic initializers, and a helper it calls as it loads, even in a file the PR adds (src/vacuity.ts
 // measureTouched). Every such script must load on its own within one time budget, or the PR waits. Only a changed line
-// that holds code counts: a blank, whitespace-only or comment line, or a rename, is nothing to measure, and a PR with
+// that holds code counts: a blank, whitespace-only or comment line, or a rename git pairs, is nothing to measure, and a PR with
 // nothing else waits. The PR's lines are measured from where its branch meets the default branch's tip as fetched from
 // the remote for the decision (round 8: by the watch pass, off the event loop, bounded; never a cached tip or a ref
 // read on its own), so what it merged in or was rebased onto is never its own, and a measurement counts only from the
@@ -39,7 +39,12 @@
 // where V8 makes no block range of its own, so a change there counts when the code around it ran (measured, round-8
 // reviews): an optional call's arguments, a default parameter, a destructuring default, a logical assignment's right
 // side (`??=`, `||=`, `&&=`), code in a string (`new Function('…')`), and built code, which its map places only by line.
-// Each of these has a todo test (merge-vacuity-r8, -r9-limits; B1 in -r6).
+// Each of these has a todo test (merge-vacuity-r8, -r9-limits; B1 in -r6). And two where an untested change merges
+// (round 13, measured): code moved in a way git doesn't pair (a file renamed and re-indented or edited, a function
+// moved into another file or within its file, moved code re-wrapped) reads as added code, so a test that runs it merges
+// the PR (todo tests R1, R3, R4 in merge-vacuity-r12; M3, M4b, M5b, R3s in -r13); and deleting an app file, or renaming
+// one out of app code (to a data file, a test path, or out of app_paths), leaves no app code to measure, so it merges
+// with no test and no run.
 //
 // What counts as changed app code: a file the PR changes, under vacuity.app_paths, not matched by a test glob, still
 // there at the head, and not one with no runtime code for a test to run (NO_RUNTIME_CODE: types only, config, data,
