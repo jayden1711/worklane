@@ -276,10 +276,11 @@ export abstract class CoordinatorBase {
   /**
    * The money paths as the default branch says them now: the list read at <remote>/<branch> (refreshed by every
    * fetch), never from this checkout's working tree, which is as old as the clone (#715). The one way the coordinator
-   * reads them.
+   * reads them. `at`: one commit of the default branch to read them at instead (a merge decision's tip, taken at its
+   * start, which its weakening check reads too: #1005).
    */
-  protected moneyPaths(src: ReviewConfig['money_path_source'] = this.d.cfg.review?.money_path_source): RegExp[] {
-    return loadMoneyPaths(this.d.repo, src, `refs/remotes/${this.remote}/${this.branch}`);
+  protected moneyPaths(src: ReviewConfig['money_path_source'] = this.d.cfg.review?.money_path_source, at: string = `refs/remotes/${this.remote}/${this.branch}`): RegExp[] {
+    return loadMoneyPaths(this.d.repo, src, at);
   }
 
   /**
