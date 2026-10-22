@@ -82,14 +82,10 @@ export const LOCKFILE_GLOBS = [
   '**/Pipfile.lock', '**/Cargo.lock', '**/go.sum', '**/Gemfile.lock', '**/composer.lock',
 ];
 
-/** One file of a change (git diff -M): its added and removed lines. A pure rename has none; a binary file its lines read as text (#693). */
-export interface SizeFile {
-  path: string;
-  /** A rename's old path. */
-  from?: string;
-  added: string[];
-  removed: string[];
-}
+// WHY (#971): SizeFile is declared beside its reader (src/coordinator/change-files.ts), so that module imports nothing
+// outside the agents' tool guard's tree, which reads changes through it.
+import type { SizeFile } from './coordinator/change-files.js';
+export type { SizeFile };
 
 export type SizeVerdict = { ok: true; lines: number; why: string } | { ok: false; lines: number; why: string };
 
