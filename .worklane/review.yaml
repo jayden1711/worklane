@@ -61,6 +61,9 @@ categories:
     # tests that assert the agents' tool guard denies a call.
     - test/isolate.ts
     - test/isolate.test.ts
+    # Listed here only (#991): the host tools every test process stands in for, and the guard's backstop.
+    - test/host-tools.ts
+    - test/script-host-tools.test.ts
     - test/slot-dir-writes.test.ts
     - test/slot-path.test.ts
     - test/eval-roles.test.ts
