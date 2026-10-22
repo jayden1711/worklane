@@ -34,6 +34,7 @@ type Guard = {
   MACHINE_TOOLS_ON_PURPOSE: readonly string[];
   testFile: string | null;
   onCi: boolean;
+  testFileFor: (execArgv: readonly string[], nodeOptions: string, argv1: string | undefined, cwd: string) => string | null;
   machineToolFor: (tool: string, testFile: string | null, onCi: boolean, path: string) => { kind: string; file: string };
 };
 function guard(): Guard {
@@ -301,6 +302,54 @@ test('#991 round 4: a machine host tool under another name (a link) is stood in 
     const found = String(cp.spawnSync('/bin/sh', ['-c', `command -v ${alias}`], { encoding: 'utf8', env: { PATH: SYSTEM } }).stdout).trim();
     assert.ok(found.startsWith(`${g.standInRoot}/`), `${alias}: ${found}`);
   }
+});
+
+test('#991 round 5: off CI a child never gets GITHUB_ACTIONS, whatever the env object does; env -S is a command line', { skip: !posix && 'POSIX' }, () => {
+  const g = guard();
+  const refused = (f: () => unknown, what: string) => assert.throws(f, /#991: /, what);
+  // Each child prints what its own preload saw and exits inside -e: nothing else runs.
+  const report = `process.stdout.write(JSON.stringify({ onCi: globalThis[Symbol.for('test-host-tools')].onCi, raw: process.env.GITHUB_ACTIONS ?? null })); process.exit(0);`;
+  const seen = (env: NodeJS.ProcessEnv) => {
+    const r = cp.spawnSync(process.execPath, ['--import', './dist/test/isolate.js', '-e', report], { cwd: repoRoot, encoding: 'utf8', env });
+    assert.equal(r.status, 0, r.stderr);
+    return JSON.parse(r.stdout) as { onCi: boolean; raw: string | null };
+  };
+  // G1: a getter that answers 'true' once, then nothing; G2: an accessor on the env object's prototype.
+  let reads = 0;
+  const g1 = { ...process.env } as NodeJS.ProcessEnv;
+  Object.defineProperty(g1, 'GITHUB_ACTIONS', { enumerable: true, configurable: true, get: () => (reads++ === 0 ? 'true' : undefined) });
+  const proto = {};
+  Object.defineProperty(proto, 'GITHUB_ACTIONS', { enumerable: true, get: () => 'true', set: () => {} });
+  const g2 = Object.assign(Object.create(proto) as NodeJS.ProcessEnv, process.env);
+  for (const [name, env] of [['G1', g1], ['G2', g2]] as const) {
+    const c = seen(env);
+    if (!g.onCi) assert.deepEqual(c, { onCi: false, raw: null }, `${name}: off CI the child never sees GITHUB_ACTIONS`);
+  }
+  // G4: GITHUB_ACTIONS inside env -S, off CI; G5: a host tool by path inside env -S, for any caller and behind a wrapper.
+  if (!g.onCi) refused(() => cp.spawnSync('env', ['-C', MISSING, '-S', 'GITHUB_ACTIONS=true true']), 'G4');
+  refused(() => cp.spawnSync('env', ['-C', MISSING, '-S', `${MISSING}/sudo G5`]), 'G5');
+  refused(() => cp.spawnSync('timeout', ['5', 'env', '-C', MISSING, '-S', `${MISSING}/sudo G5b`]), 'G5b');
+  refused(() => engineSpawnSync('env', ['-C', MISSING, `--split-string=${MISSING}/sudo G5c`]), 'G5c');
+  refused(() => cp.spawnSync('env', ['-C', MISSING, `-S${MISSING}/sudo G5d`]), 'G5d');
+});
+
+test('#991 round 5: only a path or file: URL to this preload counts as the preload, never a bare name; an --env-file drops the key', () => {
+  const g = guard();
+  const pinned = 'dist/test/setup-scripts.test.js';
+  const self = './dist/test/isolate.js';
+  // Controls: the preload alone, and Node 24's twice-over form, key the pinned file.
+  assert.equal(g.testFileFor(['--import', self], '', pinned, repoRoot), 'test/setup-scripts.test.ts');
+  assert.equal(g.testFileFor([`--import=${self}`, '--import', self], '', pinned, repoRoot), 'test/setup-scripts.test.ts');
+  assert.equal(g.testFileFor(['--import', pathToFileURL(join(repoRoot, 'dist', 'test', 'isolate.js')).href], '', pinned, repoRoot), 'test/setup-scripts.test.ts');
+  // K: a bare specifier is a package in node_modules, whatever its name.
+  assert.equal(g.testFileFor(['--import', self, '--import', 'dist/test/isolate.js'], '', pinned, repoRoot), null, 'K');
+  assert.equal(g.testFileFor(['--import', self], '--import dist/test/isolate.js', pinned, repoRoot), null, 'K in NODE_OPTIONS');
+  // G6: an env file can set GITHUB_ACTIONS.
+  assert.equal(g.testFileFor(['--import', self, '--env-file=x.env'], '', pinned, repoRoot), null, 'G6');
+  assert.equal(g.testFileFor(['--import', self, '--env-file-if-exists', 'x.env'], '', pinned, repoRoot), null, 'G6b');
+  // Round 4's: other code first.
+  assert.equal(g.testFileFor(['--import', self, '-e', 'x'], '', pinned, repoRoot), null);
+  assert.equal(g.testFileFor(['--import', self, '--require', './x.cjs'], '', pinned, repoRoot), null);
 });
 
 // ---- The pins: who may take a real tool. ----
