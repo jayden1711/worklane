@@ -433,40 +433,34 @@ function binaryLine(prefix: string, body: Buffer): string {
 }
 
 /**
- * What the owner's decision diff shows of `git diff --text` output (#927 round 10). A file whose diff lines hold a
- * NUL, invalid UTF-8 or a control byte text doesn't hold is binary: each of its lines shows only as text it decodes
- * to (UTF-16 or UTF-8, a NUL as NUL_MARK, a UTF-8 line at least MIN_BINARY_TEXT characters), and otherwise as a marker.
- * So no run of a binary file's bytes is shown, while its text lines are, and a NUL still separates what it separated
- * for the redaction rules that need a boundary. Every other file shows as it is.
+ * What the owner's decision diff shows of `git diff --text` output (#927 round 10). A hunk whose lines hold a NUL,
+ * invalid UTF-8 or a control byte text doesn't hold is binary: each of its lines shows only as text it decodes to
+ * (UTF-32, UTF-16 or UTF-8, a NUL as NUL_MARK, a UTF-8 line at least MIN_BINARY_TEXT characters), and otherwise as a
+ * marker. So no run of a binary file's bytes is shown, while its text lines are, and a NUL still separates what it
+ * separated for the redaction rules that need a boundary. Every other line shows as it is. A hunk runs from its `@@ `
+ * line to the first line that doesn't start with `+`, `-`, a space or `\`.
  */
 export function diffTextView(raw: Buffer): string {
-  const lines: Buffer[] = [];
+  const out: string[] = [];
+  let hunk: Buffer[] | null = null;
+  const isContent = (l: Buffer) => l[0] === 0x2b || l[0] === 0x2d || l[0] === 0x20;
+  const flush = () => {
+    if (!hunk) return;
+    const binary = hunk.some((l) => isContent(l) && utf8Text(l.subarray(1))?.includes('\0') !== false);
+    for (const l of hunk) out.push(binary && isContent(l) ? binaryLine(String.fromCharCode(l[0]!), l.subarray(1)) : l.toString('utf8'));
+    hunk = null;
+  };
   for (let at = 0; at <= raw.length; ) {
     const nl = raw.indexOf(0x0a, at);
-    const end = nl === -1 ? raw.length : nl;
-    lines.push(raw.subarray(at, end));
+    const l = raw.subarray(at, nl === -1 ? raw.length : nl);
+    if (hunk && l.length > 0 && (isContent(l) || l[0] === 0x5c)) hunk.push(l);
+    else {
+      flush();
+      if (l.subarray(0, 3).toString('latin1') === '@@ ') hunk = [];
+      out.push(l.toString('utf8'));
+    }
     if (nl === -1) break;
     at = nl + 1;
-  }
-  const out: string[] = [];
-  let file: Buffer[] = [];
-  const flush = () => {
-    let inHunk = false;
-    const content = (l: Buffer) => inHunk && l.length > 0 && (l[0] === 0x2b || l[0] === 0x2d || l[0] === 0x20);
-    const binary = file.some((l) => {
-      if (l.subarray(0, 3).toString('latin1') === '@@ ') inHunk = true;
-      return content(l) && utf8Text(l.subarray(1))?.includes('\0') !== false;
-    });
-    inHunk = false;
-    for (const l of file) {
-      if (l.subarray(0, 3).toString('latin1') === '@@ ') inHunk = true;
-      out.push(binary && content(l) ? binaryLine(String.fromCharCode(l[0]!), l.subarray(1)) : l.toString('utf8'));
-    }
-    file = [];
-  };
-  for (const l of lines) {
-    if (l.subarray(0, 11).toString('latin1') === 'diff --git ') flush();
-    file.push(l);
   }
   flush();
   return out.join('\n');
