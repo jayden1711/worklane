@@ -160,8 +160,9 @@ test('must hold: C1: one JSDoc line edited above a tested method is nothing to m
 });
 
 test('must hold: C2: one line edited inside a block comment in a tested function is nothing to measure', async () => {
-  const f = 'export function f(x) {\n  /* Old note\n     about x. */\n  return x + 1;\n}\n';
-  const d = await decided({ 'src/f.js': f }, { 'src/f.js': f.replace('     about x.', '     about y.'), 'test/x.test.js': calls('f.js', 'f', 'f(1)', '2') });
+  // Round 11: the second review's shape (a line of words alone inside the comment, which merged at round 9's head).
+  const f = 'export function f(x) {\n  /*\n    Old note about x.\n  */\n  return x;\n}\n';
+  const d = await decided({ 'src/f.js': f }, { 'src/f.js': f.replace('Old note', 'New note'), 'test/x.test.js': calls('f.js', 'f', 'f(1)', '1') });
   assert.deepEqual([d.auto, d.reasons], [false, [NOTHING]]);
 });
 

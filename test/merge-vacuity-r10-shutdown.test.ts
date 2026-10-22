@@ -89,10 +89,12 @@ test('shutdown during the watch pass\'s fetch: the pass decides nothing', async 
   const t = await world();
   // The ls-remote of watchPrs' tip check is skipped (just done).
   t.c.tipCheckedAt = Date.now();
+  const before = t.log.read(0).at(-1)!.id;
   const t0 = performance.now();
   const going = t.c.watchPrs();
   setTimeout(() => t.c.stop(), 300);
   await going;
   assert.ok(performance.now() - t0 < 10_000, 'the fetch was stopped');
-  assert.equal(decisions(t.log), 0, 'no hold and no merge recorded');
+  // Round 11: nothing at all, not even the PR's status (a pass that went on past the stop records it, decision or not).
+  assert.deepEqual(t.log.read(before).map((e) => e.type), [], 'the pass recorded nothing after the stop');
 });
