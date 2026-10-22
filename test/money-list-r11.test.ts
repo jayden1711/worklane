@@ -174,10 +174,15 @@ test('#763 round 11: a # after a no-break space and a CR-only list are refused; 
     assert.equal(moneyListProblems(money).length, 1, JSON.stringify(text));
     for (const path of ['billing/x.ts', 'payments/x.ts']) assert.equal(level(money, path).level, 'L3', `${JSON.stringify(text)}: ${path}`);
   }
-  for (const text of ["docs/owner's guide/billing/**", '  /^src\\/billing\\//, /* card data */']) {
+  for (const text of ["docs/owner's guide/billing/**"]) {
     const money = moneyListEntries(text);
     assert.deepEqual(moneyListProblems(money), [], text);
-    assert.equal(level(money, text.startsWith('docs') ? "docs/owner's guide/billing/x.ts" : 'src/billing/x.ts').level, 'L3', text);
+    assert.equal(level(money, "docs/owner's guide/billing/x.ts").level, 'L3', text);
     assert.equal(level(money, 'lib/other.ts').level, 'L1', `${text}: not every path`);
   }
+  // Round 12 (the coordinator's decision): block comments are not read, so the TS line with a trailing /* */ comment
+  // is refused (it was read in round 11), holding every path.
+  const ts = moneyListEntries('  /^src\\/billing\\//, /* card data */');
+  assert.equal(moneyListProblems(ts).length, 1);
+  assert.equal(level(ts, 'lib/other.ts').level, 'L3');
 });

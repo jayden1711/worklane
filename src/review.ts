@@ -671,7 +671,8 @@ const REGEX_LITERAL = String.raw`\/((?:\\.|\[(?:\\.|[^\]\\\n])*\]|[^/\\\n[])+)\/
  * - With no regex in the text, every line is a glob line, as on main. With one (a list of regexes, or code around
  *   one), main read only the regex literals; a line without a blank is a glob line there too. Round 11 (the
  *   coordinator's decision, moneyListLines): no line is skipped. A line with a blank there (`export const X = [`, a glob
- *   with a space) is refused, a line of only brackets is blank, and a `//` or `/*` line is a comment.
+ *   with a space) is refused, a line of only brackets is blank, and a `//` line is a comment (round 12: a `/*` line is
+ *   refused unless it is a valid glob; block comments are not read).
  * - INVARIANT (no regression for an existing install, round 7): main's own reading is kept as well, for money-path
  *   membership only (KeptMoneyReading: never compared for look-alikes, never refused): every `/.../` it found in the
  *   text, as the RegExp main made of it (`/payments/i` in `src/payments/invoices/**` included), and each line it read
@@ -696,8 +697,8 @@ export function moneyListEntries(text: string): RegExp[] {
 
 /**
  * What the money-list reader made of one line (#763 round 11, the coordinator's decision: no line is dropped). Every
- * line is blank, a comment, read (its entries: one glob, or a regex converted to one, or a glob and the same line
- * read whole when its comment cut a glob that holds ` #`), or refused (its RefusedMoneyLine). There is no other
+ * line is blank, a comment, read (its one entry, round 12: a glob, or a regex converted to one), or refused (its
+ * RefusedMoneyLine). There is no other
  * outcome, in a list of regexes too. `kept` is not a line: it is main's own reading of the text (KeptMoneyReading),
  * listed after the lines.
  */
@@ -783,8 +784,9 @@ export function moneyListLines(text: string): MoneyLine[] {
   const read = (line: string): MoneyLine => {
     const rest = withoutComment(line);
     // Round 11: a # or // after a blank other than a space or tab (a no-break or ideographic space) isn't a comment by
-    // the syntax, and as part of a name it matches nothing like what was meant: refused, never read silently.
-    if (/[^\S \t](?:#|\/\/)/u.test(rest)) return refuse(line, 'a # or // follows a blank other than a space or a tab: write a space before a comment', '**');
+    // the syntax, and as part of a name it matches nothing like what was meant: refused, never read silently. Round
+    // 12: a /* too.
+    if (/[^\S \t](?:#|\/\/|\/\*)/u.test(rest)) return refuse(line, 'a #, // or /* follows a blank other than a space or a tab: write a space before a # or // comment', '**');
     // Round 10: a line is one regex, whole (a trailing comma allowed), or holds none: never a regex read out of it.
     const whole = WHOLE_REGEX.exec(rest);
     if (whole) {
@@ -793,34 +795,42 @@ export function moneyListLines(text: string): MoneyLine[] {
     }
     // Round 11: a regex anywhere else in the line (`=> /^x\//.test(p)` too) refuses it, suggesting every path.
     if (ANY_REGEX.test(rest)) return refuse(line, 'it holds a regex beside other text (one line is one glob or one regex, read whole)', '**');
+    // Round 12 (the coordinator's decision): block comments are not read, so a /* that never closes can't hide the
+    // lines after it (round 11 read them as comments, and a list's globs went with them). A /* that opens the line or
+    // follows a blank (`/* old`, `/*.sql`, a TS line's trailing `/* note */`) refuses the line, as does any other line
+    // holding /* that isn't a valid glob; each suggests every path.
+    if (line.includes('/*')) {
+      const g = unquoted(rest);
+      const problem = globLineProblem(g);
+      if (/(?:^|\s)\/\*/.test(rest)) return refuse(line, 'it holds /* (block comments are not read: write # or // after a space, or one glob a line)', '**');
+      if (problem) return refuse(line, problem, '**', true);
+    }
     // Round 11: beside regexes, a line with a blank (code, or a glob with a space) is refused, never skipped.
     if (regexMode && /\s/.test(unwrapped(rest))) {
       return refuse(line, 'in a list of regexes, a line with a blank is code or a glob with a space: write one glob or one regex a line, or select the list with money_path_source.pattern', writableGlob(unwrapped(rest).replace(/\s/g, '?')));
     }
     const g = globLine(rest);
     if (!('glob' in g)) return refuse(line, g.why, g.suggestion, true);
-    const entries = [glob(g.glob, line)];
-    // Round 11: a comment cut from a glob line that is a glob as written too (`docs/Issue #12/**`): read it whole as
-    // well, so the comment syntax only ever widens what is read.
-    const asWritten = unquoted(line);
-    if (rest !== line && asWritten !== g.glob && !globLineProblem(asWritten)) entries.push(glob(asWritten, line));
-    return { kind: 'read', line, entries };
+    // Round 12: one entry a line (round 11 read a cut line twice, doubling the money RegExps for such lists). A comment
+    // cut that leaves a glob covering the line as written (`billing/** # card data`), or a quoted glob (the quotes end
+    // the name), reads that glob. Otherwise the ` #` may have been part of the name: if the line as written is a valid
+    // glob (`docs/Issue #12/**`, `billing.ts # card data`), the cut glob followed by `**` is read, which covers both
+    // readings (only ever wider); if it isn't (`docs/x # [legacy]`), the line is refused, as the cut can't be checked.
+    if (rest !== line && unquoted(rest) === rest && !globToRegExp(g.glob).test(line)) {
+      if (globLineProblem(line)) return refuse(line, 'its # or // may be part of the name, and the line as written isn\'t a valid glob: quote the glob before the comment', writableGlob(`${g.glob}**`));
+      return { kind: 'read', line, entries: [glob(`${g.glob}**`.replace(/\*{3,}$/, '**'), line)] };
+    }
+    return { kind: 'read', line, entries: [glob(g.glob, line)] };
   };
-  let inBlock = false;
   for (const line of raw) {
     let outcome: MoneyLine;
-    if (inBlock) {
-      // Inside a /* comment, to its */ (round 11); text after the */ is refused rather than read in part.
-      const end = line.indexOf('*/');
-      if (end >= 0) inBlock = false;
-      outcome = end < 0 || !line.slice(end + 2).trim() ? { kind: 'comment', line } : refuse(line, 'text after a /* comment ends on its line', '**');
-    } else if (PUNCTUATION_ONLY.test(line)) outcome = { kind: 'blank', line };
+    // Round 12: a line separator, a paragraph separator or a control character (a C1 control such as the next-line
+    // character, or a CR from CR-only line endings; a tab aside) can end a line in an editor's view, so the text after
+    // it would read as a line of its own that the reader never sees: refused, whatever the line is.
+    if (/[\p{Zl}\p{Zp}]|[^\P{Cc}\t]/u.test(line)) outcome = refuse(line, 'it holds a line or paragraph separator or a control character, which can hide a line', '**');
+    else if (PUNCTUATION_ONLY.test(line)) outcome = { kind: 'blank', line };
     else if (line.startsWith('#') || line.startsWith('//')) outcome = { kind: 'comment', line };
-    else if (line.startsWith('/*')) {
-      const end = line.indexOf('*/', 2);
-      if (end < 0) inBlock = true;
-      outcome = end < 0 || !line.slice(end + 2).trim() ? { kind: 'comment', line } : refuse(line, 'text after a /* comment ends on its line', '**');
-    } else outcome = read(line);
+    else outcome = read(line);
     result.push(outcome);
     // Main read this line as a glob as written when the text held no /.../ (a comment line `#...` aside).
     if (!fragments.length && line && !line.startsWith('#')) {
@@ -853,7 +863,7 @@ export function withoutComment(line: string): string {
     if (quote) {
       if (c === quote) quote = '';
     } else if ((c === "'" && !isApostrophe(line, i)) || c === '"' || c === '`') quote = c;
-    else if (i > 0 && (line[i - 1] === ' ' || line[i - 1] === '\t') && (c === '#' || (c === '/' && (line[i + 1] === '/' || line[i + 1] === '*')))) return line.slice(0, i).trimEnd();
+    else if (i > 0 && (line[i - 1] === ' ' || line[i - 1] === '\t') && (c === '#' || (c === '/' && line[i + 1] === '/'))) return line.slice(0, i).trimEnd();
   }
   return line;
 }
@@ -870,9 +880,12 @@ function unwrapped(line: string): string {
   return unquoted(withoutComment(line));
 }
 
-/** What doctor says a money-list comment is (rounds 10 and 11): the syntax withoutComment and moneyListLines read. */
+/**
+ * What doctor says a money-list comment is (rounds 10 to 12): the syntax withoutComment and moneyListLines read. Round
+ * 12 (the coordinator's decision): no block comments; a line holding a `/*` that isn't a valid glob is refused.
+ */
 export const MONEY_COMMENT_SYNTAX =
-  'a #, // or /* after a space or tab, outside quotes (an apostrophe inside a word is not a quote), to the end of the line; a line that starts with #, // or /* (a /* comment runs to its */); a line of only brackets, commas and semicolons is blank';
+  'a # or // after a space or tab, outside quotes (an apostrophe inside a word is not a quote), to the end of the line (when the glob before it does not cover the line as written, it is read with ** after it, covering both readings); a line that starts with # or //; a line of only brackets, commas and semicolons is blank; block comments (/* */) are not read';
 
 /**
  * What in a glob line the glob matcher (globToRegExp) reads literally, though other glob dialects read it as syntax,
@@ -892,7 +905,7 @@ export function globLineProblem(glob: string): string | null {
   if (/['"`]/.test(glob.replace(APOSTROPHE, ''))) return 'a quote is read as part of the name';
   // Round 11: a control character (a tab inside the name, or a CR from a CR-only line ending, which runs every line
   // together) is read as part of the name.
-  if (/[\x00-\x1f\x7f]/.test(glob)) return 'a control character (a tab, or a CR where lines end with CR alone) is read as part of the name';
+  if (/[\p{Cc}\p{Zl}\p{Zp}]/u.test(glob)) return 'a control character or a line separator (a tab, or a CR where lines end with CR alone) is read as part of the name';
   if (/\\/.test(glob)) return 'a backslash is read as part of the name (paths use /)';
   // Round 8: shapes no git path has, or punctuation of the list around it.
   if (/^\//.test(glob)) return 'a git path never starts with /';
@@ -951,7 +964,7 @@ function globLine(line: string): { glob: string } | { why: string; suggestion: s
   const why = globLineProblem(g);
   if (!why) return { glob: g };
   // Round 11: a control character may join lines (a CR-only list is one line): only every path covers them all.
-  if (/[\x00-\x1f\x7f]/.test(g)) return { why, suggestion: '**' };
+  if (/[\p{Cc}\p{Zl}\p{Zp}]/u.test(g)) return { why, suggestion: '**' };
   // A regex in quotes (`/billing/` in backticks, round 8): suggest what the regex would convert to.
   const re = new RegExp(`^${REGEX_LITERAL}$`).exec(/^(['"`])(.*)\1,?$/.exec(g)?.[2] ?? g);
   const r = re ? regexToGlob(re[1]!, re[2]!) : null;
@@ -1038,6 +1051,14 @@ export function regexToGlob(body: string, flags: string): { glob: string } | { w
       why ||= `"${rest.slice(0, 12)}" has no mechanical glob form`;
       if (rest[0] === '\\') {
         const n = rest.length > 1 ? String.fromCodePoint(rest.codePointAt(1)!) : '';
+        if (/^[xucCkpP1-9]$/.test(n)) {
+          // Round 12: an escape with a payload (`\x2f`, `b`, `\cJ`, `\k<name>`, `\p{L}`) or a backreference
+          // (`\1`): its payload isn't text, and reading it as text made the suggestion narrower (`billing**2f**` for
+          // `^billing\x2f`). The suggestion matches every path.
+          loose = '**';
+          i = body.length;
+          continue;
+        }
         // A word boundary matches no character: leaving it out only widens the suggestion.
         if (n !== 'b' && n !== 'B') wide();
         i += 1 + n.length;
@@ -1068,8 +1089,9 @@ export function regexToGlob(body: string, flags: string): { glob: string } | { w
   }
   const wrap = (g: string) => `${start ? '' : '**'}${g}${end ? '' : '**'}`.replace(/\*{3,}/g, '**');
   // Round 11: under the i flag each ASCII letter is `?` in the suggestion, so it matches every case the regex does (a
-  // glob matches case as written; `billing/**` missed `Billing/x.ts`).
-  if (flags.includes('i')) loose = loose.replace(/[A-Za-z]/g, '?');
+  // glob matches case as written; `billing/**` missed `Billing/x.ts`). Round 12: every character with another case,
+  // in any script (`é`, `σ`, `ß`, `ǆ`), not only ASCII; one outside the BMP (two code units) as `?*`.
+  if (flags.includes('i')) loose = [...loose].map((c) => (c.toLowerCase() !== c || c.toUpperCase() !== c ? (c.length > 1 ? '?*' : '?') : c)).join('');
   // The suggestion is written back as a glob line, so whatever globLineProblem would refuse in it reads as `?` there.
   return why ? { why, suggestion: writableGlob(wrap(loose)) } : { glob: wrap(glob) };
 }

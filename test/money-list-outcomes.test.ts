@@ -13,27 +13,19 @@ import * as review from '../src/review.js';
 /** The no-break space: the first space separator past ASCII (found by its property: no code point number here). */
 const NBSP = Array.from({ length: 128 }, (_, i) => String.fromCodePoint(128 + i)).find((c) => /^\p{Zs}$/u.test(c))!;
 
-/** The lines that are neither blank nor a comment, by the syntax doctor states (MONEY_COMMENT_SYNTAX), counted here. */
+/**
+ * The lines that are neither blank nor a comment, by the syntax doctor states (MONEY_COMMENT_SYNTAX), counted here:
+ * a line by itself, with no state carried from one line to the next (round 12: no block comments, so an unclosed
+ * `/*` can't turn the lines after it into comments; round 11's copy of the reader's block rule couldn't catch that).
+ */
 function contentLines(text: string): number {
   let n = 0;
-  let inBlock = false;
   for (const raw of text.split('\n')) {
     const line = raw.trim();
-    if (inBlock) {
-      const end = line.indexOf('*/');
-      if (end >= 0) {
-        inBlock = false;
-        if (line.slice(end + 2).trim()) n++;
-      }
-      continue;
-    }
-    if (/^[\s[\](){},;]*$/.test(line) || line.startsWith('#') || line.startsWith('//')) continue;
-    if (line.startsWith('/*')) {
-      const end = line.indexOf('*/', 2);
-      if (end < 0) inBlock = true;
-      else if (line.slice(end + 2).trim()) n++;
-      continue;
-    }
+    // A line holding a line or paragraph separator or a control character (a tab aside) counts whatever it is: it can
+    // end a line in an editor's view, so it is refused, comment or not (round 12).
+    const separator = [...line].some((c) => /\p{Zl}|\p{Zp}/u.test(c) || (/\p{Cc}/u.test(c) && c !== '\t'));
+    if (!separator && (/^[\s[\](){},;]*$/.test(line) || line.startsWith('#') || line.startsWith('//'))) continue;
     n++;
   }
   return n;
@@ -77,6 +69,11 @@ const SHAPES = [
   'const MONEY = [\n//payments\n/^ledger\\//,\n];',
   './\n.\nsrc/./billing/**\n',
   '\n\n#\n# a comment\n   \n',
+  // Round 12 (the round-11 reviews): an unclosed /*, a root glob that starts with /*, separators that end a line.
+  'src/**/ledger/**\n/* old\nbilling/**\n',
+  '/* card paths (see /[legacy/)\nsrc/payments/**\nbilling/**\n',
+  '/*.sql\nsrc/billing/**\n',
+  '/^payments\\//\n/* old\n/^billing\\//\n',
 ];
 
 test('#763 round 11: every line of the reviewers\' shapes is read or refused, none dropped', () => {
