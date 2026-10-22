@@ -890,7 +890,7 @@ function unwrapped(line: string): string {
  * 12 (the coordinator's decision): no block comments; a line holding a `/*` that isn't a valid glob is refused.
  */
 export const MONEY_COMMENT_SYNTAX =
-  'a # or // after a space or tab, outside quotes (an apostrophe inside a word is not a quote), to the end of the line (when the glob before it does not cover the line as written, it is read with ** after it, covering both readings, unless the line as written is not a valid glob, as with any // comment there: then the line is refused); a line that starts with # or //; a line of only brackets, commas and semicolons is blank; block comments (/* */) are not read';
+  'a # or // after a space or tab, outside quotes (an apostrophe inside a word is not a quote), to the end of the line (when the glob before it does not cover the line as written, it is read with ** after it, covering both readings, unless the line as written is not a valid glob, as with any // comment there: then the line is refused; a comment that itself holds * or ?, as in billing* # card**, can still leave a narrower glob than the line read as a glob); a line that starts with # or //; a line of only brackets, commas and semicolons is blank; block comments (/* */) are not read';
 
 /**
  * What in a glob line the glob matcher (globToRegExp) reads literally, though other glob dialects read it as syntax,
