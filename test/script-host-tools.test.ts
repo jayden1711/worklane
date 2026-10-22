@@ -33,6 +33,7 @@ type Guard = {
   REAL_HOST_TOOLS_ON_PURPOSE: readonly string[];
   MACHINE_TOOLS_ON_PURPOSE: readonly string[];
   testFile: string | null;
+  onCi: boolean;
   machineToolFor: (tool: string, testFile: string | null, onCi: boolean, path: string) => { kind: string; file: string };
 };
 function guard(): Guard {
@@ -229,6 +230,77 @@ test('#991 round 3: the guard and its backstop are engine-guards, and a change t
   for (const f of ['test/isolate.ts', 'test/host-tools.ts', 'test/script-host-tools.test.ts']) assert.match(guards, new RegExp(`^ {4}- ${f.replace(/[.]/g, '\\.')}$`, 'm'), f);
   const affected = (await import(pathToFileURL(join(repoRoot, 'scripts', 'ci', 'affected.mjs')).href)) as { forceAll: (f: string) => string | null };
   assert.ok(affected.forceAll('test/isolate.ts'), 'test/isolate.ts forces the whole suite');
+});
+
+test('#991 round 4: a host tool by path is refused or stood in for every caller, and behind a wrapper', { skip: !posix && 'POSIX' }, () => {
+  const g = guard();
+  const refused = (f: () => unknown, what: string) => assert.throws(f, /#991: /, what);
+  // Every command below starts in, or changes into, a missing directory first, or names a missing path: nothing real.
+  // E1-E3: a test through the engine's own seam (its frame is src/os/child-process.js).
+  refused(() => engineSpawnSync('sh', ['-c', `cd ${MISSING} && ${MISSING}/sudo E1`]), 'E1');
+  const before = g.hostCalls().length;
+  const e2 = engineSpawnSync('env', [`${MISSING}/sudo`, 'E2'], { encoding: 'utf8' });
+  const e3 = engineSpawnSync('timeout', ['5', `${MISSING}/systemctl`, 'E3'], { encoding: 'utf8' });
+  assert.deepEqual([e2.status, e3.status], [1, 1], 'the stand-ins answered');
+  assert.deepEqual(g.hostCalls().slice(before), [{ tool: 'sudo', args: ['E2'] }, { tool: 'systemctl', args: ['E3'] }]);
+  // E4, E8, E9: a vm frame named as the engine's; E5: a module outside the repo.
+  // The call to child_process is made in the named frame itself, so that frame is the caller the guard sees.
+  type Caller = (c: typeof cp, form: 'execSync' | 'spawnSync', a: string, b?: string[]) => unknown;
+  const asEngine = vm.runInThisContext('(c, form, a, b) => c[form](a, b)', { filename: join(repoRoot, 'dist', 'src', 'zz-forged.js') }) as Caller;
+  const outside = vm.runInThisContext('(c, form, a, b) => c[form](a, b)', { filename: '/nonexistent-991/zz-helper.mjs' }) as Caller;
+  refused(() => asEngine(cp, 'execSync', `cd ${MISSING} && ${MISSING}/sudo E4`), 'E4');
+  refused(() => outside(cp, 'spawnSync', 'sh', ['-c', `cd ${MISSING} && ${MISSING}/sudo E5`]), 'E5');
+  refused(() => asEngine(cp, 'spawnSync', 'sh', ['-c', `cd ${MISSING} && env -i ${MISSING}/sudo E8`]), 'E8');
+  refused(() => asEngine(cp, 'spawnSync', 'sh', ['-c', `cd ${MISSING} && command -p ${MISSING}/sudo E9`]), 'E9');
+  // Behind a wrapper in argument form: env -i, a login shell, and env's PATH=.
+  refused(() => cp.spawnSync('timeout', ['5', 'env', '-i', '-C', MISSING, 'sudo', '-V']), 'timeout env -i');
+  refused(() => cp.spawnSync('nice', ['bash', '-lc', `cd ${MISSING} && sudo -V`]), 'nice bash -lc');
+  refused(() => cp.spawnSync('setsid', ['env', '-i', '-C', MISSING, 'sh', '-c', 'if sudo -V; then :; fi']), 'setsid env -i sh -c');
+  const viaWrapper = String(cp.spawnSync('timeout', ['5', 'env', '-i', `PATH=${SYSTEM}`, 'sh', '-c', 'command -v sudo || echo none'], { encoding: 'utf8' }).stdout).trim();
+  assert.ok(findOn('sudo', SYSTEM) === null ? viaWrapper === 'none' : viaWrapper.startsWith(`${g.standInRoot}/`), `timeout env PATH=: ${viaWrapper}`);
+});
+
+test("#991 round 4: no child a test starts off CI is on CI, and a pinned file's exceptions need it as the process's own main module", { skip: !posix && 'POSIX' }, () => {
+  const g = guard();
+  // Each child prints what its own preload decided and exits inside an --import or -e, before any test file loads.
+  const report = `const g = globalThis[Symbol.for('test-host-tools')]; process.stdout.write(JSON.stringify({ onCi: g.onCi, testFile: g.testFile })); process.exit(0);`;
+  const child = (args: string[]) => {
+    const r = cp.spawnSync(process.execPath, args, { cwd: repoRoot, encoding: 'utf8', env: { ...process.env, GITHUB_ACTIONS: 'true' } });
+    assert.equal(r.status, 0, r.stderr);
+    return JSON.parse(r.stdout) as { onCi: boolean; testFile: string | null };
+  };
+  const data = (code: string) => `data:text/javascript,${encodeURIComponent(code)}`;
+  // C1: another --import ahead of a pinned file; C5: -e with a pinned file as an operand.
+  const c1 = child(['--import', './dist/test/isolate.js', '--import', data(report), 'dist/test/setup-scripts.test.js']);
+  const c5 = child(['--import', './dist/test/isolate.js', '-e', report, 'dist/test/setup-scripts.test.js']);
+  // C3: machineTool in a process that borrows engine-update.test.js as argv[1].
+  const c3code = `import(${JSON.stringify(pathToFileURL(join(repoRoot, 'dist', 'test', 'isolate.js')).href)}).then((m) => { let got; try { got = m.machineTool('sudo'); } catch (e) { got = 'refused'; } process.stdout.write(JSON.stringify({ onCi: globalThis[Symbol.for('test-host-tools')].onCi, testFile: globalThis[Symbol.for('test-host-tools')].testFile, got })); process.exit(0); });`;
+  const r3 = cp.spawnSync(process.execPath, ['--import', './dist/test/isolate.js', '--import', data(c3code), 'dist/test/engine-update.test.js'], { cwd: repoRoot, encoding: 'utf8', env: { ...process.env, GITHUB_ACTIONS: 'true' } });
+  assert.equal(r3.status, 0, r3.stderr);
+  const c3 = JSON.parse(r3.stdout) as { onCi: boolean; testFile: string | null; got: string };
+  for (const [name, c] of [['C1', c1], ['C3', c3], ['C5', c5]] as const) {
+    assert.equal(c.testFile, null, `${name}: no exception keyed to a borrowed argv[1]`);
+    if (!g.onCi) assert.equal(c.onCi, false, `${name}: off CI, GITHUB_ACTIONS never reaches a child`);
+  }
+  assert.equal(c3.got, 'refused', 'C3: machineTool refused');
+  if (!g.onCi) assert.throws(() => cp.execSync(`cd ${MISSING} && GITHUB_ACTIONS=true true`), /#991: /, 'off CI, a command line that sets it');
+});
+
+test('#991 round 4: a machine host tool under another name (a link) is stood in too', { skip: !posix && 'POSIX' }, () => {
+  const g = guard();
+  const machine = findOn('sudo', SYSTEM) ?? findOn('systemctl', SYSTEM);
+  if (machine === null) return;
+  const dir = mkdtempSync(join(tmpdir(), 'host-alias-'));
+  symlinkSync(machine, join(dir, 'zz-alias'));
+  const at = String(cp.spawnSync('/bin/sh', ['-c', 'command -v zz-alias'], { encoding: 'utf8', env: { PATH: `${dir}:${MISSING}` } }).stdout).trim();
+  assert.ok(at.startsWith(`${g.standInRoot}/`), `an own-dir link to the machine's ${basename(machine)}: ${at}`);
+  // The machine's own aliases (sudoedit -> sudo on Debian and Ubuntu), where there are any: resolution only.
+  for (const alias of ['sudoedit', 'reboot', 'poweroff']) {
+    const f = findOn(alias, SYSTEM);
+    if (f === null || !g.hostToolPath(f)) continue;
+    const found = String(cp.spawnSync('/bin/sh', ['-c', `command -v ${alias}`], { encoding: 'utf8', env: { PATH: SYSTEM } }).stdout).trim();
+    assert.ok(found.startsWith(`${g.standInRoot}/`), `${alias}: ${found}`);
+  }
 });
 
 // ---- The pins: who may take a real tool. ----

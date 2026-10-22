@@ -13,7 +13,7 @@
 // /run/lock): on a live machine a test read the real machine owners, helper, updates log and settings.
 import type * as Cp from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
-import { accessSync, chmodSync, constants as fsConstants, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { accessSync, chmodSync, constants as fsConstants, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { createRequire, syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
@@ -157,24 +157,30 @@ export const ISOLATED = Symbol.for('test-isolation');
 // INVARIANT: in every test process (POSIX), node:child_process's spawn, spawnSync, execFile, execFileSync, exec,
 // execSync and fork (execFile's and exec's promisified forms too, and every caller of them: the engine's
 // src/os/child-process.ts reads the live exports), and process.execve, start their child with:
-//   - first on its PATH, a directory of recording stand-ins for each host tool (HOST_TOOL_NAMES) that PATH would find
-//     on the machine: in a directory that isn't the test's own (inside this test machine or the repo), or through a
-//     test's own file whose real path leaves them (a link to the machine's tool). Relative and empty entries are
-//     resolved against the child's cwd first. A tool the machine lacks stays missing; a test's own stand-in answers;
-//   - for a host tool given by path outside the test's own directories (the file, fork's execPath, a `shell` option,
-//     process.execve's file): a refusal (thrown) when a test file asked, its stand-in when the engine's own code did
-//     (doctor finds gitleaks on PATH and runs it by path). From a test file, also any argument, or any word of a
-//     command line, that is such a path (`env /usr/bin/sudo`, `timeout 5 /usr/bin/sudo`, `sh -c '/usr/bin/sudo'`);
+//   - first on its PATH, a directory of recording stand-ins for each name that PATH would find a machine host tool
+//     under: a host tool's own name (HOST_TOOL_NAMES), or any name whose real path is one (sudoedit -> sudo,
+//     reboot -> systemctl), in a directory that isn't the test's own (inside this test machine or the repo), or a
+//     test's own file whose real path leaves them. Relative and empty entries are resolved against the child's cwd
+//     first. A tool the machine lacks stays missing; a test's own stand-in answers;
+//   - for a host tool given by path outside the test's own directories, whoever asked (a test file, the engine's own
+//     code, a vm frame, a module outside the repo): as the file, fork's execPath, a `shell` option, process.execve's
+//     file, or a whole argument (`env /usr/bin/sudo`, `timeout 5 /usr/bin/sudo`, `X=/usr/bin/sudo`), a refusal
+//     (thrown) when the stack names a test file and its stand-in otherwise (doctor runs gitleaks by path); as a word of
+//     a command line (a -c script, exec's line), a refusal whoever asked;
 //   - a refusal for `env -i` (or `-u PATH`) with no PATH=, `command -p` and a login shell, each when a host tool's name
-//     is a word of the command line (a path that only ends in one, ~/.config/gh, is not);
-//   - the stand-ins first in a PATH= given to `env` as an argument.
+//     is a word of the command line (a path that only ends in one, ~/.config/gh, is not), and in argument form also
+//     behind a wrapper (`timeout 5 env -i sudo`, `nice bash -lc ...`); the stand-ins first in a PATH= given to `env`
+//     as an argument, there too;
+//   - off CI, no GITHUB_ACTIONS (dropped from its environment, emptied in env's assignments).
 // Arguments that aren't strings are made strings, as Node makes them, before any of this.
 // Each stand-in records its call (hostCalls()) and exits 1, as a tool that can't answer; it runs nothing else.
-// process.binding's spawn_sync and process_wrap are refused. The pinned exceptions, never-grow, are keyed to this
-// test process's own test file (process.argv[1] when this preload ran, never a stack frame's name) and hold on CI only
-// (GITHUB_ACTIONS=true when this preload ran): the file in REAL_HOST_TOOLS_ON_PURPOSE starts its children untouched,
-// and machineTool() hands the CI acceptance runs in MACHINE_TOOLS_ON_PURPOSE the machine's own tool, found on this
-// process's PATH as loaded. Off CI, machineTool gives the stand-in, so a developer machine never runs the real tool.
+// process.binding's spawn_sync and process_wrap are refused. The pinned exceptions, never-grow, hold only while this
+// process's environment had GITHUB_ACTIONS=true when this preload ran (the gate main's acceptance runs use), and only
+// for process.argv[1]'s test file when node ran no code of its own before it (no -e/-p, no --import, --require or
+// loader but this preload, in argv or NODE_OPTIONS); a stack frame's name never keys them. The file in
+// REAL_HOST_TOOLS_ON_PURPOSE starts its children untouched, and machineTool() hands the CI acceptance runs in
+// MACHINE_TOOLS_ON_PURPOSE the machine's own tool, found on this process's PATH as loaded; off CI it gives the
+// stand-in. So a run whose environment lacks GITHUB_ACTIONS=true never takes a real tool through them.
 //
 // LIMIT: what a child does with its own PATH is its own. A script that sets PATH itself (several root scripts export
 // /usr/sbin:/usr/bin:...; claude-account.sh appends /usr/sbin; worklane-testrun.sh and ci-runner/reset.sh reset it),
@@ -184,9 +190,12 @@ export const ISOLATED = Symbol.for('test-isolation');
 // stand-ins on its PATH but none of the refusals, and a PATH it sets itself gets no stand-ins. So does code that runs
 // before this preload (an --import or --require ahead of it keeps the raw functions), code that replaces these
 // builtins or patches the exports after load, a Worker (its own module instances), child_process.ChildProcess used
-// directly, or a link to a tool that is under no host tool's name and on no PATH. Which caller asked (a test file or
-// the engine) is read from the stack, which code can name (vm's filename): that only chooses between a refusal and a
-// stand-in. `id` and `getent` are not stood in: they only read the user database, and scripts use their answers.
+// directly, or a link to a tool under another name whose real path is no machine host tool's (a copy, not a link).
+// The stack decides only whether a by-path argument is refused or stood in. A run whose environment says
+// GITHUB_ACTIONS=true (CI, or anyone who sets it) holds the exceptions, as main's acceptance runs do; there a test can
+// start `node --import ./dist/test/isolate.js <a pinned test file>` and that file runs with its exceptions, as it would
+// on its own. Off CI, a command line that names GITHUB_ACTIONS is refused, but a script file that sets it is its own.
+// `id` and `getent` are not stood in: they only read the user database, and scripts use their answers.
 
 /**
  * Every host tool a test must never run for real: test/host-tools.ts HOST_TOOLS but gitleaks, and more. gitleaks
@@ -243,6 +252,21 @@ const ON_CI = process.env.GITHUB_ACTIONS === 'true';
 const TEST_FILE = (() => {
   const main = process.argv[1];
   if (!main) return null;
+  // argv[1] is this process's main module only when node ran no code of its own first: no -e/-p, and no --import,
+  // --require or loader but this preload's own (#997 round 4: `node --import isolate --import x.mjs <pinned file>`
+  // or `-e '...' <pinned file>` borrowed a pinned file's exceptions). NODE_OPTIONS too.
+  const flags = [...process.execArgv, ...(process.env.NODE_OPTIONS ?? '').split(/\s+/).filter(Boolean)];
+  let ours = 0;
+  for (let i = 0; i < flags.length; i++) {
+    const f = flags[i]!;
+    const [name, inline] = f.startsWith('--') && f.includes('=') ? [f.slice(0, f.indexOf('=')), f.slice(f.indexOf('=') + 1)] : [f, undefined];
+    if (['-e', '--eval', '-p', '--print', '-i', '--interactive'].includes(name) || /^-[a-zA-Z]*[epi]$/.test(name) && !name.startsWith('--')) return null;
+    if (['--import', '--require', '-r', '--loader', '--experimental-loader'].includes(name)) {
+      const target = inline ?? flags[++i] ?? '';
+      const isSelf = name === '--import' && !/^[a-z]+:/i.test(target) ? resolve(target) === SELF : target.startsWith('file:') && fileURLToPath(target) === SELF;
+      if (!isSelf || ++ours > 1) return null;
+    }
+  }
   const rel = relative(REPO, resolve(main)).split(sep).join('/');
   const built = /^dist\/(test\/.+\.test)\.js$/.exec(rel);
   return built ? `${built[1]}.ts` : null;
@@ -286,10 +310,10 @@ let machineReal: Map<string, string> | null = null;
 /** The real path of each host tool the machine has, to its name. */
 const machineTools = () => {
   if (!machineReal) {
+    // Every copy the machine's directories hold, not only the first a PATH finds.
     machineReal = new Map();
-    for (const t of HOST_TOOL_NAMES) {
-      const f = findOn(t, machineDirs());
-      if (f !== null) machineReal.set(realOr(f), t);
+    for (const d of machineDirs()) {
+      for (const t of HOST_TOOL_NAMES) if (executable(join(d, t))) machineReal.set(realOr(join(d, t)), t);
     }
   }
   return machineReal;
@@ -298,9 +322,44 @@ const machineTools = () => {
 const dirTools = new Map<string, readonly string[]>();
 const toolsIn = (dir: string) => {
   let t = dirTools.get(dir);
-  if (!t) dirTools.set(dir, (t = HOST_TOOL_NAMES.filter((n) => executable(join(dir, n)))));
+  if (!t) dirTools.set(dir, (t = [...new Set([...HOST_TOOL_NAMES.filter((n) => executable(join(dir, n))), ...aliasesIn(dir)])]));
   return t;
 };
+/**
+ * The names in `dir` that are a machine host tool under another name (sudoedit -> sudo, reboot -> systemctl): an
+ * executable link whose real path is one (#997 round 4). Read again whenever the directory changes.
+ */
+const aliasCache = new Map<string, { mtime: number; names: readonly string[] }>();
+function aliasesIn(dir: string): readonly string[] {
+  let mtime: number;
+  try {
+    mtime = statSync(dir).mtimeMs;
+  } catch {
+    return [];
+  }
+  const hit = aliasCache.get(dir);
+  if (hit && hit.mtime === mtime) return hit.names;
+  const machine = machineTools();
+  const names: string[] = [];
+  let entries: string[] = [];
+  try {
+    entries = readdirSync(dir);
+  } catch {
+    // unreadable: none known
+  }
+  for (const n of entries) {
+    if (TOOLS.has(n) || /[\s'"\\]/.test(n)) continue;
+    const f = join(dir, n);
+    try {
+      if (!lstatSync(f).isSymbolicLink()) continue;
+    } catch {
+      continue;
+    }
+    if (machine.has(realOr(f)) && executable(f)) names.push(n);
+  }
+  aliasCache.set(dir, { mtime, names });
+  return names;
+}
 
 /** Whether `file` (absolute) is a host tool outside the test's own directories: by its name or its real path. */
 export function hostToolPath(file: string): boolean {
@@ -343,19 +402,19 @@ export function hostCalls(): { tool: string; args: string[] }[] {
  */
 export function withHostStandIns(path: string | undefined, cwd: string): string {
   const entries = (path ?? '/usr/bin:/bin').split(':').map((e) => (e === '' ? cwd : resolve(cwd, e)));
-  const left = new Set<string>(HOST_TOOL_NAMES);
+  // Each name a host tool goes by here (its own, or an alias's), as the first entry that has it finds it.
+  const seen = new Set<string>();
   const shadow: string[] = [];
   for (const e of entries) {
-    if (left.size === 0) break;
     if (isOwn(e)) {
-      for (const t of [...left]) {
+      for (const t of new Set([...HOST_TOOL_NAMES, ...aliasesIn(e)])) {
         const f = join(e, t);
-        if (!executable(f)) continue;
-        left.delete(t);
+        if (seen.has(t) || !executable(f)) continue;
+        seen.add(t);
         if (!isOwn(realOr(f))) shadow.push(t);
       }
     } else {
-      for (const t of toolsIn(e)) if (left.delete(t)) shadow.push(t);
+      for (const t of toolsIn(e)) if (!seen.has(t)) (seen.add(t), shadow.push(t));
     }
   }
   return (shadow.length ? [standInsFor(shadow.sort()), ...entries] : entries).join(':');
@@ -531,6 +590,8 @@ function envArguments(form: string, argv: string[], cwd: string): string[] {
   }
   let path = false;
   for (; i < out.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(out[i]!); i++) {
+    // Off CI, env can't tell its command it is on CI either.
+    if (!ON_CI && out[i]!.startsWith('GITHUB_ACTIONS=')) out[i] = 'GITHUB_ACTIONS=';
     if (!out[i]!.startsWith('PATH=')) continue;
     out[i] = `PATH=${withHostStandIns(out[i]!.slice(5), cwd)}`;
     path = true;
@@ -576,25 +637,51 @@ function guard(form: string, command: unknown, args: readonly unknown[], options
   const shellOption = typeof o.shell === 'string' && o.shell.includes('/') ? byPath(o.shell) : null;
   if (shellOption !== null && issued.has(shellOption)) return null;
   const shell = line || Boolean(o.shell);
-  if (shell) checkShellLine(form, [command, ...argv].join(' '), [], shellWords([command, ...argv].join(' ')));
-  else {
+  /** Refuses a command line (a -c script, exec's line) with a host tool by path among its words, whoever asked. */
+  const lineByPath = (text: string) => {
+    const named = hostToolPaths(shellWords(text), cwd);
+    if (named.length) refuse(`${form}: ${named[0]} in its command line: the machine's own ${basename(named[0]!)}, by path`);
+    // Off CI, a command line can't tell what it starts that it is on CI (the CI-only exceptions).
+    if (!ON_CI && /\bGITHUB_ACTIONS\b/.test(text)) refuse(`${form}: a command line that sets GITHUB_ACTIONS, off CI`);
+  };
+  if (shell) {
+    const text = [command, ...argv].join(' ');
+    checkShellLine(form, text, [], shellWords(text));
+    lineByPath(text);
+  } else {
     if (command.includes('/')) {
       const swapped = byPath(command);
       if (swapped !== null && issued.has(swapped)) return null; // the pinned acceptance run, as it was
       if (swapped !== null) file = swapped;
     }
-    const name = basename(command);
-    if (name === 'env') argv = envArguments(form, argv, cwd);
-    else if (SHELLS.has(name)) checkShellLine(form, argv.join(' '), shellOptions(argv), argWords(argv));
-  }
-  // From a test file, a host tool by path anywhere in its own arguments or command line (env, timeout, sh -c ...).
-  if (fromTest) {
-    const named = hostToolPaths(shell ? shellWords([command, ...argv].join(' ')) : argWords(argv), cwd);
-    if (named.length) refuse(`${form}: ${named[0]} in its command line: the machine's own ${basename(named[0]!)}, by path`);
+    // env or a shell anywhere in the argument list, behind timeout, nice, setsid or the like, as at its head: each
+    // checked, and a PATH= handed to env given the stand-ins (#997 round 4).
+    let all = [command, ...argv];
+    for (let i = 0; i < all.length; i++) {
+      const name = basename(all[i]!);
+      const rest = all.slice(i + 1);
+      if (name === 'env') all = [...all.slice(0, i + 1), ...envArguments(form, rest, cwd)];
+      else if (SHELLS.has(name)) checkShellLine(form, rest.join(' '), shellOptions(rest), argWords(rest));
+    }
+    // A host tool by path in the arguments, for every caller (#997 round 4): inside a -c script, refused; as a whole
+    // argument (env <path>, timeout 5 <path>, X=<path>), refused for a test file and its stand-in for the engine.
+    argv = all.slice(1).map((a, i, list) => {
+      if (i > 0 && SCRIPT_OPTION.test(list[i - 1]!)) {
+        lineByPath(a);
+        return a;
+      }
+      const prefix = /^[A-Za-z_]\w*=/.exec(a)?.[0] ?? '';
+      const value = a.slice(prefix.length);
+      if (!value.includes('/') || /\s/.test(value)) return a;
+      const swapped = byPath(value);
+      return swapped === null ? a : `${prefix}${swapped}`;
+    });
   }
   const env = (o.env || process.env) as Record<string, string | undefined>;
   const childEnv = Object.assign(Object.create(Object.getPrototypeOf(env) as object | null) as Record<string, string | undefined>, env);
   childEnv.PATH = withHostStandIns(env.PATH, cwd);
+  // Off CI, no child is told it is on CI: none of the CI-only exceptions can start in a process a test starts here.
+  if (!ON_CI && env.GITHUB_ACTIONS !== undefined) childEnv.GITHUB_ACTIONS = undefined;
   const extra: Options = { env: childEnv };
   if (shellOption !== null) extra.shell = shellOption;
   const childOptions = Object.assign(Object.create(Object.getPrototypeOf(o) as object | null) as Options, o, extra);
