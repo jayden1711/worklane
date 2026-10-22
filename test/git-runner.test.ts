@@ -116,10 +116,10 @@ test('the runner\'s settings go on last: a caller\'s environment can\'t turn rep
   const want = ['keys/secret.pem', 'weights.bin'];
   assert.deepEqual(names(gitExecFileSync(['log', '--format=', '--name-only', `${r.base}..${r.head}`], { cwd: r.work, encoding: 'utf8', env })), want);
   assert.deepEqual(names(gitSpawnSync(['log', '--format=', '--name-only', `${r.base}..${r.head}`], { cwd: r.work, encoding: 'utf8', env }).stdout), want);
-  const graphOff = { GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'core.commitGraph', GIT_CONFIG_VALUE_0: 'false' };
+  const graphOff = { GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'core.commitGraph', GIT_CONFIG_VALUE_0: 'false', GIT_CONFIG_PARAMETERS: "'core.commitGraph=false'" };
   assert.deepEqual({ ...gitEnv({ GIT_GRAFT_FILE: grafts, GIT_NO_REPLACE_OBJECTS: '0' }) }, { ...GIT_FIXED_ENV, ...graphOff });
   // A caller's own config pairs stay; the fixed pair goes after them (a later pair wins).
-  assert.deepEqual({ ...gitEnv({ GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'core.commitGraph', GIT_CONFIG_VALUE_0: 'true' }) }, { ...GIT_FIXED_ENV, GIT_CONFIG_COUNT: '2', GIT_CONFIG_KEY_0: 'core.commitGraph', GIT_CONFIG_VALUE_0: 'true', GIT_CONFIG_KEY_1: 'core.commitGraph', GIT_CONFIG_VALUE_1: 'false' });
+  assert.deepEqual({ ...gitEnv({ GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'core.commitGraph', GIT_CONFIG_VALUE_0: 'true' }) }, { ...GIT_FIXED_ENV, GIT_CONFIG_COUNT: '2', GIT_CONFIG_KEY_0: 'core.commitGraph', GIT_CONFIG_VALUE_0: 'true', GIT_CONFIG_KEY_1: 'core.commitGraph', GIT_CONFIG_VALUE_1: 'false', GIT_CONFIG_PARAMETERS: "'core.commitGraph=false'" });
   // A count on Object.prototype is never read (#846): the fixed pair is pair 0, and nothing else is counted.
   const proto = Object.prototype as Record<string, unknown>;
   proto.GIT_CONFIG_COUNT = '1';

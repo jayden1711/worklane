@@ -28,15 +28,18 @@ const ZERO = /^0+$/;
 // `git replace` or a graft in the repo can't swap the commits, trees or blobs scanned here. Written out here because
 // the hook runs this file alone, fetched from origin (scripts/push-gate-hook.mjs GATE_CODE), so it imports nothing
 // new; test/git-runner.test.ts checks they are the runner's.
-// The commit-graph is off too (a forged one can skip a commit), in the arguments and, for gitleaks' own gits, as a
-// config pair in the environment after any the caller set.
+// The commit-graph is off too (a forged one can skip a commit), in the arguments and, for gitleaks' own gits, in the
+// environment: a config pair after the caller's GIT_CONFIG_COUNT pairs, and at the end of GIT_CONFIG_PARAMETERS
+// (what `git -c` hands the gits it runs), which git reads last. A count that isn't a plain decimal 0 to 9999 is
+// replaced with one git refuses, so the git fails closed (as src/os/git.ts gitEnv).
 const GIT_FIXED_ARGS = ['--no-replace-objects', '-c', 'core.commitGraph=false'];
-// A count git refuses is left as it is, with no pair added, so git still refuses it (as src/os/git.ts gitEnv).
 const graphOff = (e) => {
   const raw = Object.hasOwn(e, 'GIT_CONFIG_COUNT') ? e.GIT_CONFIG_COUNT : undefined;
-  const n = raw === undefined || raw === '' ? 0 : /^[ \t\n\v\f\r]*\+?[0-9]+$/.test(raw) ? Number(raw) : NaN;
-  if (!Number.isSafeInteger(n)) return e;
-  return { ...e, [`GIT_CONFIG_KEY_${n}`]: 'core.commitGraph', [`GIT_CONFIG_VALUE_${n}`]: 'false', GIT_CONFIG_COUNT: String(n + 1) };
+  const params = Object.hasOwn(e, 'GIT_CONFIG_PARAMETERS') ? e.GIT_CONFIG_PARAMETERS : undefined;
+  const last = { GIT_CONFIG_PARAMETERS: params ? `${params} 'core.commitGraph=false'` : "'core.commitGraph=false'" };
+  if (raw !== undefined && !/^(?:0|[1-9][0-9]{0,3})$/.test(raw)) return { ...e, GIT_CONFIG_COUNT: 'refused', ...last };
+  const n = raw === undefined ? 0 : Number(raw);
+  return { ...e, [`GIT_CONFIG_KEY_${n}`]: 'core.commitGraph', [`GIT_CONFIG_VALUE_${n}`]: 'false', GIT_CONFIG_COUNT: String(n + 1), ...last };
 };
 const GIT_ENV = graphOff({ ...process.env, GIT_NO_REPLACE_OBJECTS: '1', GIT_GRAFT_FILE: join(devNull, 'no-grafts') });
 const runGit = (args, opts) => execFileSync('git', [...GIT_FIXED_ARGS, ...args], { ...opts, env: GIT_ENV });
