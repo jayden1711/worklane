@@ -31,15 +31,17 @@ export interface WorktreeOptions {
   taskDir: string | null;
   /**
    * The root was resolved to its real path once, when these options were built (#890 rounds 19-20, worktreeOptions): a
-   * link that appears on the way to a worktree after that refuses the add instead of being followed. Required, and
-   * only `true`: every WorktreeOptions comes from worktreeOptions (round 20: callers that built their own skipped the
-   * check, and a worktree was written through a planted link, measured).
+   * link that appears on the way to a worktree after that refuses the add instead of being followed. Required (round
+   * 20: callers that built their own skipped the check, and a worktree was written through a planted link, measured).
+   * What the type refuses is only a literal `rootResolved: true` outside this module, and options without the field.
+   * A literal that copies `rootResolved` from built options, or `{ ...built, root: other }`, still compiles: build
+   * options with worktreeOptions and change no root afterwards.
    */
   rootResolved: RootResolved;
 }
 
 declare const builtHere: unique symbol;
-/** `true`, typed so only this module sets it: a literal `rootResolved: true` elsewhere doesn't compile (round 20). */
+/** `true`, typed so a literal `rootResolved: true` outside this module doesn't compile (round 20); a copied one does. */
 export type RootResolved = true & { readonly [builtHere]: true };
 const ROOT_RESOLVED = true as RootResolved;
 
@@ -424,9 +426,14 @@ function removeAt(o: WorktreeOptions, path: string): boolean {
   return dropWhenGone(o, rec, !existsSync(path));
 }
 
+/** Whether git lists `rec` as a worktree of the repository. */
+function listedWorktree(o: WorktreeOptions, rec: string): boolean {
+  return git(o.repo, 'worktree', 'list', '--porcelain').includes(`worktree ${rec}\n`);
+}
+
 /** Drop `rec` from the ownership record once its directory is dealt with (`done`) and git no longer lists it. */
 function dropWhenGone(o: WorktreeOptions, rec: string, done: boolean): boolean {
-  const gone = done && !git(o.repo, 'worktree', 'list', '--porcelain').includes(`worktree ${rec}\n`);
+  const gone = done && !listedWorktree(o, rec);
   if (gone) setOwned(o, owned(o).filter((p) => p !== rec));
   return gone;
 }
@@ -446,6 +453,13 @@ function emptyInPlace(o: WorktreeOptions, rec: string, path: string): boolean {
     if (!st.isDirectory() || st.isSymbolicLink()) throw new Error(`${path}, an old ${BRAND.cli} worktree, isn't a real directory any more; not touching it`);
   };
   realDir();
+  // Data kept, as on main (round 20, the second review's FU1, measured): main's `git worktree remove` refused a
+  // directory git no longer lists as a worktree, and kept it. So only a listed one, or one already empty, is emptied;
+  // anything else is kept, logged, and reported as not removed.
+  if (!listedWorktree(o, rec) && readdirSync(path).length > 0) {
+    process.stderr.write(`${BRAND.cli}: kept ${path}: an old worktree of ours that git no longer lists, with files in it; not emptied\n`);
+    return false;
+  }
   for (const name of readdirSync(path)) rmSync(join(path, name), { recursive: true, force: true });
   realDir();
   spawnSync('git', ['worktree', 'prune'], { cwd: o.repo, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
