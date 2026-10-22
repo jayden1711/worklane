@@ -247,11 +247,16 @@ The adversarial suite (#707, `test/adversarial/adversarial.test.ts`) holds attac
 Its flow cases (`test/adversarial/cases/flow.json`) are decided by the coordinator's own `mergeDecisionFor`, from an event log shaped as a live instance writes it. What they drive, and what they don't yet:
 
 - The verdict: the latest one on the PR's head, one with no design-change answer, and the one carried across a merge-in of the default branch (one merge-in, not a chain of them). After a merge-in, the change is measured from the default branch's commit merged in.
-- A CI fix run started on an earlier head, a refused push of a commit that never became the head (before or after the PR opened), and the latest plan.
+- A CI fix run started on an earlier head, a refused push of a commit that never became the head (before or after the PR opened), and the task's latest plan, whose entries are exact paths.
 - The stop: a stop file with no reason; and, with the file deleted by hand, the last stop event, a stop event that names no cause, and a resume that was requested but hasn't happened.
 - The default branch's tip (#869): one that can't be fetched, and one that moved past the PR's base with a newly marked table. In every other flow case the tip is the base, or the commit a merge-in merged.
 - Evals: only a task with no eval recorded for it, including when another task's eval of the same skill passed. How an eval the task did run came out (an error, the cost cap, a lower score) is driven at the gate only (`test/adversarial/cases/instruction-evals.json`), not through the flow's reading of the log.
-- Not driven: the readiness check (above), the reasons a conflict fix's pushed head adds, and labels or money paths read from the log.
+- Not driven:
+  - the readiness check (above), and the reasons a conflict fix's pushed head adds;
+  - labels and money paths read from the log;
+  - new top-level modules and the size limits as `mergeDecisionFor` computes them (the gate cases compute their own);
+  - plans other than one task's own plan listing exact paths: an empty plan, another task's plan, an entry by file name only, an entry with a glob;
+  - a verdict recorded under another task at the same head.
 - Open on main: a stop file whose reason is an empty string doesn't stop auto-merge (#982). It is a todo line in `test/adversarial/todo.json`, not a case.
 
-Label: measured, by in-memory mutants on #957: each mutant that breaks one of the items above turns a case red. The mutants are the ones two reviews and the builder wrote; a green run under them bounds what they missed, it doesn't prove coverage.
+Label: measured, by in-memory mutants on #957: each mutant that breaks one of the items above turns a case red. The mutants are the ones the reviews and the builder wrote; a green run under them bounds what they missed, it doesn't prove coverage. A later review's mutants found more the suite misses (#957, round 4): a design flag with no reason, a plan or verdict from another task, plan entries by name or glob, labels and money paths, the deletes-data word list, new top-level modules, size, an eval that loses a case at the same score, and the stop at the merge call. They are follow-ups, not cases yet.
