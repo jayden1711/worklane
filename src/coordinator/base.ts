@@ -259,10 +259,12 @@ export abstract class CoordinatorBase {
   /**
    * A project command (check, gate, pre-land step, deploy trigger and verify): it runs code an agent or an approved PR
    * wrote, so it runs as the agent user, in its sandbox. `o.timeoutMs`: shorter than the command timeout, never longer.
+   * `o.env`: the harness's own variables for this one command (the vacuity gate's NODE_V8_COVERAGE), over tests.yaml
+   * env. `o.unset`: variables taken out of its environment, the engine's own included (the vacuity gate: NODE_OPTIONS).
    */
-  protected project(command: string, cwd: string, o: { timeoutMs?: number } = {}) {
+  protected project(command: string, cwd: string, o: { timeoutMs?: number; env?: Record<string, string>; unset?: readonly string[] } = {}) {
     const share = this.coreShare();
-    return sh(withCores(command, share), cwd, Math.min(o.timeoutMs ?? this.commandTimeoutMs, this.commandTimeoutMs), this.d.commandsAs, envWithCores(this.d.cfg.tests.env, share), this.shutdown.signal);
+    return sh(withCores(command, share), cwd, Math.min(o.timeoutMs ?? this.commandTimeoutMs, this.commandTimeoutMs), this.d.commandsAs, { ...envWithCores(this.d.cfg.tests.env, share), ...o.env }, this.shutdown.signal, o.unset);
   }
 
   /** How long a project command or an agent run may take (tests.yaml command_timeout_s). */

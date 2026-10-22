@@ -360,24 +360,34 @@ function addWorktree(o: WorktreeOptions, name: string, branch: string, base: str
 
 /**
  * createWorktree without blocking: the setup steps run as child processes the event loop waits on, for work
- * done in the background (a worktree pool refilling while the coordinator keeps going).
+ * done in the background (a worktree pool refilling while the coordinator keeps going). A leftover of ours at the path
+ * is removed the same way first. `signal` (a shutdown) kills a running step and skips the rest: a setup error.
  */
-export async function createWorktreeAsync(o: WorktreeOptions, name: string, branch: string, base: string): Promise<{ path: string; setupErrors: string[] }> {
+export async function createWorktreeAsync(o: WorktreeOptions, name: string, branch: string, base: string, signal?: AbortSignal): Promise<{ path: string; setupErrors: string[] }> {
+  if (existsSync(worktreePath(o, name)) && owned(o).includes(worktreePath(o, name))) await removeWorktreeAsync(o, name);
   const path = addWorktree(o, name, branch, base);
   const setupErrors: string[] = [];
   for (const step of o.setup) {
+    if (signal?.aborted) {
+      setupErrors.push(`${step}: not run (stopped)`);
+      break;
+    }
     const { file, args, env } = projectCommand(step, o.runAs, { ...o.env, ...o.cacheEnv });
     const r = await new Promise<{ status: number | null; stderr: string }>((resolve) => {
       let stderr = '';
       const child = spawn(file, args, { cwd: path, env, stdio: ['ignore', 'ignore', 'pipe'] });
-      const timer = setTimeout(() => child.kill('SIGKILL'), 900_000);
+      const stop = () => child.kill('SIGKILL');
+      signal?.addEventListener('abort', stop, { once: true });
+      const timer = setTimeout(stop, 900_000);
       child.stderr.on('data', (d: Buffer) => (stderr = (stderr + d.toString()).slice(-4000)));
       child.on('error', () => {
         clearTimeout(timer);
+        signal?.removeEventListener('abort', stop);
         resolve({ status: null, stderr });
       });
       child.on('close', (status) => {
         clearTimeout(timer);
+        signal?.removeEventListener('abort', stop);
         resolve({ status, stderr });
       });
     });
@@ -444,6 +454,28 @@ function dropWhenGone(o: WorktreeOptions, rec: string, done: boolean): boolean {
   const gone = done && !listedWorktree(o, rec);
   if (gone) setOwned(o, owned(o).filter((p) => p !== rec));
   return gone;
+}
+
+/**
+ * removeWorktree without blocking (#784: the merge gate's coverage run): `git worktree remove` (which deletes
+ * everything the worktree holds, however much a test left in it) and the prune run as child processes the event loop
+ * waits on. The same rules as removeAt (#890): ours by real path (ownedAs), unlocked first (every worktree of ours is
+ * locked), an old one emptied in place without freeing its name (emptyInPlace), and the record dropped by dropWhenGone.
+ */
+export async function removeWorktreeAsync(o: WorktreeOptions, name: string): Promise<boolean> {
+  const path = worktreePath(o, name);
+  const rec = ownedAs(o, path);
+  if (!rec) throw new Error(`refusing to remove ${path}: not created by ${BRAND.cli}`);
+  unlockWorktree(o.repo, rec);
+  if (isOldPlace(o, path)) return emptyInPlace(o, rec, path);
+  const run = (args: string[]) => new Promise<void>((done) => {
+    const child = spawn('git', args, { cwd: o.repo, stdio: 'ignore' });
+    child.on('error', () => done());
+    child.on('close', () => done());
+  });
+  await run(['worktree', 'remove', '--force', rec]);
+  await run(['worktree', 'prune']);
+  return dropWhenGone(o, rec, !existsSync(path));
 }
 
 /**

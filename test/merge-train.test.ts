@@ -23,6 +23,9 @@ function train(specs: { path: string; title?: string }[], edit?: (cfg: ReturnTyp
   f.cfg.project.land_mode = 'pr';
   f.cfg.project.required_checks = ['ci'];
   f.cfg.project.combined_check = false;
+  // Its PRs each add a module with no test, and these cases are about the train, not the vacuity gate (#784,
+  // test/merge-vacuity-*.test.ts cover it): its app code is somewhere these PRs never touch, so they are decided as before.
+  f.cfg.tests.vacuity = { ...f.cfg.tests.vacuity!, app_paths: ['app/**'] };
   edit?.(f.cfg);
   const base = git(f.repo, 'rev-parse', 'HEAD');
   const prs = specs.map((s, i) => {

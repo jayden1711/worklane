@@ -1,10 +1,10 @@
 // OS adapter layer. This is the only module allowed to branch on the
 // platform (test/os-boundary.test.ts enforces it).
 import { execFileSync, spawn } from './child-process.js';
-import { chmodSync, chownSync, closeSync, constants as fsConstants, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, readSync, realpathSync, renameSync, rmSync, statSync, statfsSync, writeFileSync } from 'node:fs';
+import { chmodSync, chownSync, closeSync, constants as fsConstants, existsSync, fstatSync, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, readSync, realpathSync, renameSync, rmSync, statSync, statfsSync, writeFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { testRunSign } from './system-paths.js';
-import { availableParallelism, homedir, loadavg, userInfo } from 'node:os';
+import { availableParallelism, homedir, hostname, loadavg, userInfo } from 'node:os';
 import { basename, delimiter, dirname, join, posix as posixPath, resolve as resolvePath, sep } from 'node:path';
 import { BRAND } from '../brand.js';
 import { ownEnv, type OwnEnv } from './own-env.js';
@@ -132,6 +132,111 @@ export function writeOwnerOnly(file: string, data: string): void {
   writeFileSync(tmp, data, { mode: 0o600 });
   if (process.platform !== 'win32') chmodSync(tmp, 0o600);
   renameSync(tmp, file);
+}
+
+/**
+ * A staging name beside `file` that no one else can know beforehand: `.<name>.<16 random hex>.new`. writeOwnerOnly
+ * writes it through its own `<staged>.<pid>.tmp`, so that name is unpredictable too. A process killed between
+ * staging and publishing leaves these names behind (0600, holding the data): nothing removes them but the next
+ * call's own, which has another name.
+ */
+function stagingName(file: string): string {
+  return join(dirname(file), `.${basename(file)}.${randomBytes(8).toString('hex')}.new`);
+}
+
+/** Remove a staging name and writeOwnerOnly's temp name for it, whatever is there (a link is removed, not followed). */
+function dropStaged(staged: string): void {
+  rmSync(staged, { force: true });
+  rmSync(`${staged}.${process.pid}.tmp`, { force: true });
+}
+
+/**
+ * Replace `file` with `data`, this user's only (0600), never writing through anything planted beside it (#918 round
+ * 4, A11: writeOwnerOnly's temp name `<file>.<pid>.tmp` can be guessed, and a link planted there was written through
+ * and chmod-ed). The data goes through writeOwnerOnly (the reviewed writer) to an unpredictable staging name
+ * (stagingName), which rename(2) then moves over `file`: a rename replaces whatever is at `file`, a link included,
+ * and never follows it. The staging names are removed on any failure.
+ */
+export function replaceOwnerOnly(file: string, data: string): void {
+  const staged = stagingName(file);
+  try {
+    writeOwnerOnly(staged, data);
+    renameSync(staged, file);
+  } finally {
+    dropStaged(staged);
+  }
+}
+
+/**
+ * Flush `file` and its directory entry to disk (fsync on each, opened read-only), so a write made after this can't
+ * outlive it on a power loss: for a receipt signer's chain state, which must be on disk before the receipts it names
+ * (#918 round 5). Native Windows can't open a directory: the file only there.
+ */
+export function syncToDisk(file: string): void {
+  const fd = openSync(file, 'r');
+  try {
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+  if (process.platform === 'win32') return;
+  const dir = openSync(dirname(file), 'r');
+  try {
+    fsyncSync(dir);
+  } finally {
+    closeSync(dir);
+  }
+}
+
+/**
+ * Create `file` holding `data`, this user's only (0600), never replacing anything and never writing through a link:
+ * for a secret made once, such as a receipt key (#717). The data goes through writeOwnerOnly (the reviewed writer)
+ * to a staging name beside it (stagingName), then is published with linkSync(staged, file): link(2) fails with
+ * EEXIST when anything is at `file`, a dangling link included, and never follows one there. The staging name (and
+ * writeOwnerOnly's own temp name, after a failed write) is removed whatever happens, but a kill leaves it (see
+ * stagingName). Throws EEXIST when `file` was taken. The published file is checked: it must be the very file staged
+ * (same inode), a regular file with exactly two names (staged and `file`), and, on POSIX, mode 0600 and this user's,
+ * holding `data`. Anything else (the staging name swapped meanwhile, for another file or a hard link to one: #918
+ * round 3 advisory) is removed and refused.
+ */
+export function createOwnerOnly(file: string, data: string): void {
+  const staged = stagingName(file);
+  let published = false;
+  try {
+    writeOwnerOnly(staged, data);
+    const made = lstatSync(staged);
+    linkSync(staged, file);
+    published = true;
+    const st = lstatSync(file);
+    const posixOk = process.platform === 'win32' || ((st.mode & 0o777) === 0o600 && st.uid === process.getuid?.());
+    if (!st.isFile() || st.ino !== made.ino || st.dev !== made.dev || st.nlink !== 2 || !posixOk || readFileSync(file, 'utf8') !== data) {
+      rmSync(file, { force: true });
+      throw new Error(`${file} isn't the file written (its staging file was replaced, or has another name); removed`);
+    }
+  } catch (e) {
+    // WHY: once linked, `file` is this call's own new name; a failed check leaves no half-made key behind.
+    if (published) rmSync(file, { force: true });
+    throw e;
+  } finally {
+    dropStaged(staged);
+  }
+}
+
+/**
+ * Why `dir` isn't a directory only this user (and root) can change, or null when it is: a real directory (not a
+ * link), this user's, writable by no group and no one else, on a path no one else can redirect (ownedPath). For a
+ * file only its writer may replace, such as a receipt signer's chain state (#918 round 4). Native Windows has no
+ * POSIX modes: null.
+ */
+export function notOwnerOnlyDir(dir: string): string | null {
+  if (process.platform === 'win32') return null;
+  const st = lstatSync(dir, { throwIfNoEntry: false });
+  if (!st) return `${dir} doesn't exist`;
+  if (!st.isDirectory()) return `${dir} is not a directory (or is a link)`;
+  if (st.uid !== process.getuid?.()) return `${dir} belongs to uid ${st.uid}, not this user`;
+  if (st.mode & 0o022) return `${dir} may be written by others than this user (mode ${(st.mode & 0o777).toString(8)})`;
+  if (!ownedPath(dir)) return `a directory on the way to ${dir} can be changed by another user`;
+  return null;
 }
 
 /** Write an executable file (a git hook) atomically, with exactly `mode` (0700: this user's only; or 0755). */
@@ -579,6 +684,24 @@ export function pidAlive(pid: number): boolean {
   } catch (e) {
     return (e as NodeJS.ErrnoException).code === 'EPERM';
   }
+}
+
+/**
+ * Where this process's pid means something: its pid namespace (Linux: /proc/self/ns/pid), this boot (Linux:
+ * /proc/sys/kernel/random/boot_id) and the host name. A pid recorded under one place can be checked with pidAlive only
+ * from the same place. Null where it can't be read, or this OS has no such answer: a caller that must know refuses
+ * (#918 round 6: a lock taken in another pid namespace looked dead from here, and was taken over while its holder ran).
+ */
+export function processPlace(): { pidns: string | null; boot: string | null; host: string } {
+  const read = (f: () => string): string | null => {
+    try {
+      return f().trim() || null;
+    } catch {
+      return null;
+    }
+  };
+  if (process.platform !== 'linux') return { pidns: null, boot: null, host: hostname() };
+  return { pidns: read(() => readlinkSync('/proc/self/ns/pid')), boot: read(() => readFileSync('/proc/sys/kernel/random/boot_id', 'utf8')), host: hostname() };
 }
 
 /** processIdentity of a process that answers signal 0 but whose identity can't be read: running, as far as anyone can tell. */
@@ -1525,11 +1648,6 @@ export function browserRelay(dir: string, urlFile: string): string | null {
   const file = join(dir, 'browser-relay');
   writeExecutable(file, `#!/bin/sh\numask 077\nprintf '%s\\n' "$1" > ${q(urlFile)}\n`, 0o700);
   return file;
-}
-
-/** A native executable's file name on this OS. */
-export function executableName(base: string): string {
-  return process.platform === 'win32' ? `${base}.exe` : base;
 }
 
 /** Free disk on the volume holding `path`: percent and GB. */

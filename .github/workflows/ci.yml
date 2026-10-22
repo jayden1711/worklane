@@ -47,7 +47,23 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
           cache: npm
-      - run: npm ci
+      # Before any file the merge hold doesn't cover runs (#746 rounds 20 and 21): install with no package scripts
+      # (prepare, postinstall); check the pinned packages' lockfile entries and installed files before either runs;
+      # build with the locked typescript straight from node_modules (no npm script); run the desktop backstop alone,
+      # then the other lint tests. Only after that: npm run build (what prepare did), the dashboard UI, machine.sh and
+      # this shard's tests. test/desktop-removed.test.ts holds these first steps and their order.
+      - run: npm ci --ignore-scripts
+      - name: the pinned packages, before any of them runs
+        run: node scripts/ci/check-pins.mjs
+      - run: node node_modules/typescript/bin/tsc -p tsconfig.json
+      - name: the desktop backstop, before anything unheld runs
+        run: node --import ./dist/test/isolate.js --test dist/test/desktop-removed.test.js
+      - name: the other lint tests, before anything unheld runs
+        shell: bash
+        run: |
+          mapfile -t files < <(grep -lx '// lint-test' test/*.test.ts | grep -vx 'test/desktop-removed.test.ts' | sed -e 's#^test/#dist/test/#' -e 's#\.ts$#.js#')
+          [ "${#files[@]}" -gt 0 ] || { echo "no lint tests found" >&2; exit 1; }
+          node --import ./dist/test/isolate.js --test "${files[@]}"
       - name: install gitleaks
         shell: bash
         env:
@@ -158,27 +174,16 @@ jobs:
           echo "test shard 1..4/4 (ubuntu-latest, 24): $RESULT"
           [ "$RESULT" = success ]
 
+  # Kept for one release after #744 removed what it tested, as a job that only succeeds: same job id, same check
+  # name. An install whose updater is v0.5.2's or older requires a successful "desktop" run on every commit it
+  # installs (it has no retired-check rule), and so does the release channel's check of a release's base commit.
+  # With no run it would wait forever. No `if`, `needs` or `name`: a skipped run is refused by that updater, and
+  # the check must keep the job id as its name. The release after the one that ships this removes the job and the
+  # check together (test/desktop-removed.test.ts holds this shape).
   desktop:
-    # The optional desktop window (desktop/, Tauri): its URL and navigation guards, against the locked crates.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Tauri's Linux build libraries (WebKitGTK)
-        run: sudo apt-get update -q && sudo apt-get install -y -q libwebkit2gtk-4.1-dev libsoup-3.0-dev libjavascriptcoregtk-4.1-dev libgtk-3-dev librsvg2-dev
-      # The crates and their build, keyed on the lockfile and the toolchain: a hit rebuilds only the app's own crate.
-      - name: rustc version (part of the cache key)
-        id: rustc
-        run: echo "version=$(rustc -V | tr ' ' '-')" >> "$GITHUB_OUTPUT"
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            ~/.cargo/git/db
-            desktop/target
-          key: desktop-cargo-${{ runner.os }}-${{ steps.rustc.outputs.version }}-${{ hashFiles('desktop/Cargo.lock') }}
-          restore-keys: desktop-cargo-${{ runner.os }}-${{ steps.rustc.outputs.version }}-
-      - run: cargo test --locked --manifest-path desktop/Cargo.toml
+      - run: 'true'
 
   agentshield:
     # Scan the hooks, permissions and settings a fresh install generates.

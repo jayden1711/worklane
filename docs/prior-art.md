@@ -196,7 +196,7 @@ No code has been copied so far. Everything below is a pattern we re-implement.
 | react-bits | 🚫 MIT + Commons Clause | skip |
 | Origin UI / coss | 🚫 AGPL-3.0 | skip |
 | Tremor | ✅ Apache-2.0 | stale since 2025-10; skip |
-| [Tauri](https://github.com/tauri-apps/tauri) v2.12 | ✅ Apache-2.0/MIT | desktop wrapper in step 6; v3 is alpha, so wait |
+| [Tauri](https://github.com/tauri-apps/tauri) v2.12 | ✅ Apache-2.0/MIT | used for a native wrapper in step 6, removed in #744: the dashboard runs in the browser |
 
 Live transport: **SSE**, one multiplexed stream that resumes from `Last-Event-ID`, with actions sent as POST. WebSocket only if a two-way terminal ever needs it.
 
