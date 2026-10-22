@@ -206,12 +206,16 @@ export function retryAfter(kind: 'rate_limit' | 'budget', now = Date.now()): { k
 /** How long a fix run waits on an issue claim held elsewhere (from the first time it found it so) before giving up. */
 export const CLAIM_HELD_GIVE_UP_MS = 3600_000;
 
-/** Run a project command without blocking the event loop (agents' streams and stall timers). Output capped. */
-export function sh(command: string, cwd: string, timeoutMs = COMMAND_TIMEOUT_MS, runAs?: ProjectRunAs, projectEnv: Record<string, string> = {}, signal?: AbortSignal): Promise<{ code: number | null; tail: string; out: string }> {
+/**
+ * Run a project command without blocking the event loop (agents' streams and stall timers). Output capped. `unset`:
+ * variables taken out of its environment, the engine's own included (the merge gate's coverage run: NODE_OPTIONS).
+ */
+export function sh(command: string, cwd: string, timeoutMs = COMMAND_TIMEOUT_MS, runAs?: ProjectRunAs, projectEnv: Record<string, string> = {}, signal?: AbortSignal, unset: readonly string[] = []): Promise<{ code: number | null; tail: string; out: string }> {
   return new Promise((resolveRun) => {
     // Aborted (the coordinator shutting down): never started, or killed like a timed-out command.
     if (signal?.aborted) return resolveRun({ code: null, tail: 'not run: the coordinator is shutting down', out: '' });
     const { file, args, env } = projectCommand(command, runAs, projectEnv);
+    for (const k of unset) delete env[k];
     const child = spawn(file, args, { cwd, env, stdio: ['ignore', 'pipe', 'pipe'], detached: spawnDetached });
     let out = '';
     const take = (d: Buffer) => {
