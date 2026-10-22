@@ -8,8 +8,8 @@
 //   - the installed directory, node_modules/<name>, is a plain directory whose files hash to the pinned tree hash
 //     (so bytes changed after the install, or by a swapped tarball whose lockfile line was put back, are refused);
 //   - the repo's own package.json isn't named after it (a self-reference resolves first);
-//   - Node's resolver, from every place in the checkout that loads code (dist/test/, dist/src/ and its folders,
-//     test/, the top), finds it in the top node_modules/<name>/, links resolved.
+//   - Node's resolver, from each place in LOADERS (the top, test/, dist/test/, dist/src/ and its os/, coordinator/
+//     and guardrails/ only), finds it in the top node_modules/<name>/, links resolved; the walk below covers the rest.
 // And for the whole checkout, outside .git and the top node_modules (round 22; a symlinked dist/node_modules and a
 // dist/test/package.json named yaml got past round 21's walk, which looked only at plain directories):
 //   - no entry named node_modules, of any type (a directory, a symlink, a file);
