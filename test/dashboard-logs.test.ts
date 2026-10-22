@@ -19,7 +19,8 @@ test('the service log comes from the unit\'s journal, read as this user, with se
     return { status: 0, stderr: '', stdout: [rec('tick: 0 dispatched', 1_700_000_000_000_000), rec(`push failed with ${token}`, 1_700_000_001_000_000, '3'), rec([104, 105], 1_700_000_002_000_000), 'not json'].join('\n') };
   };
   const log = readServiceLog({ unit: 'x.service', file: null }, 50, read);
-  assert.deepEqual(asked, [['x.service', 50]]);
+  // 50 shown, and 100 more above them read for redaction only (#889: a private key that starts above them).
+  assert.deepEqual(asked, [['x.service', 150]]);
   assert.equal(log.source, 'journal');
   assert.equal(log.problem, null);
   assert.deepEqual(log.entries.map((e) => [e.priority, e.message]), [[6, 'tick: 0 dispatched'], [3, 'push failed with gh*_[REDACTED]'], [6, 'hi']]);
