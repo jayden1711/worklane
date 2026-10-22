@@ -426,9 +426,17 @@ function removeAt(o: WorktreeOptions, path: string): boolean {
   return dropWhenGone(o, rec, !existsSync(path));
 }
 
-/** Whether git lists `rec` as a worktree of the repository. */
+/**
+ * Whether git lists `rec` as a worktree of the repository, compared as real paths (round 20, the second review's N1,
+ * measured): git prints real paths, and a record made under a repository path through a link spells it through the
+ * link, so a text match called a listed worktree unlisted. resolvedPath resolves the nearest existing part, so a
+ * removed directory still compares by its real parent.
+ */
 function listedWorktree(o: WorktreeOptions, rec: string): boolean {
-  return git(o.repo, 'worktree', 'list', '--porcelain').includes(`worktree ${rec}\n`);
+  const real = resolvedPath(rec);
+  return git(o.repo, 'worktree', 'list', '--porcelain')
+    .split('\n')
+    .some((l) => l.startsWith('worktree ') && resolvedPath(l.slice('worktree '.length)) === real);
 }
 
 /** Drop `rec` from the ownership record once its directory is dealt with (`done`) and git no longer lists it. */
