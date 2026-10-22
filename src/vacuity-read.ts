@@ -17,7 +17,9 @@ let answer: TouchedAnswer;
 try {
   if (raw.length > MAX_REQUEST) throw new CoverageUnreadable('the coverage read was asked too much');
   const req = JSON.parse(raw) as TouchedRequest;
-  answer = measureTouched(req.coverageDir, req.root, req.appPaths, req.only, req.hunks, req.baselineDir, req.loads ?? [], req.base && req.repo ? baseTextReader(req.repo, req.base) : undefined);
+  // Removed lines are lexed only in their base file (round 11): a request without the base or the clone is refused.
+  if (typeof req.base !== 'string' || !req.base || typeof req.repo !== 'string' || !req.repo) throw new CoverageUnreadable('the coverage read was asked without the base to read removed lines in');
+  answer = measureTouched(req.coverageDir, req.root, req.appPaths, req.only, req.hunks, req.baselineDir, req.loads ?? [], baseTextReader(req.repo, req.base));
 } catch (e) {
   answer = { error: e instanceof CoverageUnreadable ? e.message : 'the coverage read failed' };
 }

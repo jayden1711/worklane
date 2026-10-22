@@ -52,6 +52,8 @@ categories:
     - test/merge-vacuity-r10-cap.test.ts
     - test/vacuity-tip.ts
     - test/merge-vacuity-r11-removals.test.ts
+    - test/merge-vacuity-r11-diff.test.ts
+    - test/merge-vacuity-r11-align.test.ts
     # Listed here only, not locked in code: the tests' own machine (every test runs inside it), the check that engine
     # code never writes a slot-directory file in place (and that a slot path reaches no other writer, #772), and the
     # tests that assert the agents' tool guard denies a call.

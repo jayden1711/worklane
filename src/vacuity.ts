@@ -546,36 +546,59 @@ function alignChars(a: readonly string[], r: readonly string[]): string[] | null
   return [...new Array<string>(p).fill('='), ...mid, ...new Array<string>(s).fill('=')];
 }
 
+/** A line of a hunk side: its non-blank characters, and which of them are code. */
+interface HunkLine {
+  chars: string[];
+  code: boolean[];
+}
+
 /**
- * alignChars over a hunk given line by line (#784 round 10): the whole hunk first; when that is too large, its lines
- * first (a longest common subsequence of whole lines), then the characters of each changed run between equal lines,
- * line by line where the run has as many added lines as removed (a rename or reflow of each), else the run whole. Null
- * only when a run, or the line alignment itself, is too large: the change can't be placed, and the caller holds.
+ * alignChars over a hunk given line by line (#784 rounds 10, 11): the whole hunk first. When that is too large, its
+ * lines are paired by their code characters only (a longest common subsequence of lines keyed on code, so a comment
+ * edited on every line never shifts the pairing: L1), each pair then aligned by character. A run of changed lines
+ * between paired ones is aligned line by line only where it has as many added lines as removed and each such pair
+ * really aligns (at least half the code of the longer line kept); a run of unequal counts is aligned whole. Null when a
+ * run doesn't align line by line, or any alignment is too large: the change can't be placed, and the caller holds.
  */
-function alignHunk(aLines: readonly string[][], rLines: readonly string[][]): string[] | null {
-  const whole = alignChars(aLines.flat(), rLines.flat());
+function alignHunk(aLines: readonly HunkLine[], rLines: readonly HunkLine[]): string[] | null {
+  const whole = alignChars(aLines.flatMap((l) => l.chars), rLines.flatMap((l) => l.chars));
   if (whole) return whole;
-  const as = aLines.map((l) => l.join(''));
-  const rs = rLines.map((l) => l.join(''));
-  if ((as.length + 1) * (rs.length + 1) > ALIGN_CELLS) return null;
-  const w = rs.length + 1;
-  const lcs = new Int32Array((as.length + 1) * w);
-  for (let i = as.length - 1; i >= 0; i--) {
-    for (let j = rs.length - 1; j >= 0; j--) lcs[i * w + j] = as[i] === rs[j] ? lcs[(i + 1) * w + j + 1]! + 1 : Math.max(lcs[(i + 1) * w + j]!, lcs[i * w + j + 1]!);
+  const codeOf = (l: HunkLine) => l.chars.filter((_, k) => l.code[k]);
+  const ak = aLines.map((l) => codeOf(l).join(''));
+  const rk = rLines.map((l) => codeOf(l).join(''));
+  if ((ak.length + 1) * (rk.length + 1) > ALIGN_CELLS) return null;
+  const w = rk.length + 1;
+  const lcs = new Int32Array((ak.length + 1) * w);
+  for (let i = ak.length - 1; i >= 0; i--) {
+    for (let j = rk.length - 1; j >= 0; j--) lcs[i * w + j] = ak[i] === rk[j] ? lcs[(i + 1) * w + j + 1]! + 1 : Math.max(lcs[(i + 1) * w + j]!, lcs[i * w + j + 1]!);
   }
   const ops: string[] = [];
-  let ra: string[][] = [];
-  let rr: string[][] = [];
-  // A run of changed lines between equal ones, aligned by character.
+  // Two lines aligned by character; `same` (their code is the same): code only ever against code, so a comment edit
+  // never pairs a code character with a comment one.
+  const tagged = (l: HunkLine) => l.chars.map((c, k) => (l.code[k] ? 'c' : 'k') + c);
+  const pair = (a: HunkLine, r: HunkLine, same = false): boolean => {
+    const o = same ? alignChars(tagged(a), tagged(r)) : alignChars(a.chars, r.chars);
+    if (!o) return false;
+    ops.push(...o);
+    return true;
+  };
+  // Whether two lines' code really aligns: at least half the longer one's code characters kept.
+  const aligns = (a: HunkLine, r: HunkLine): boolean => {
+    const ac = codeOf(a);
+    const rc = codeOf(r);
+    const most = Math.max(ac.length, rc.length);
+    if (!most) return true;
+    const o = alignChars(ac, rc);
+    return !!o && o.filter((x) => x === '=').length * 2 >= most;
+  };
+  let ra: HunkLine[] = [];
+  let rr: HunkLine[] = [];
+  // A run of changed lines between paired ones.
   const flush = (): boolean => {
     if (ra.length === rr.length) {
-      for (let k = 0; k < ra.length; k++) {
-        const o = alignChars(ra[k]!, rr[k]!);
-        if (!o) return false;
-        ops.push(...o);
-      }
+      for (let k = 0; k < ra.length; k++) if (!aligns(ra[k]!, rr[k]!) || !pair(ra[k]!, rr[k]!)) return false;
     } else {
-      const o = alignChars(ra.flat(), rr.flat());
+      const o = alignChars(ra.flatMap((l) => l.chars), rr.flatMap((l) => l.chars));
       if (!o) return false;
       ops.push(...o);
     }
@@ -585,14 +608,13 @@ function alignHunk(aLines: readonly string[][], rLines: readonly string[][]): st
   };
   let i = 0;
   let j = 0;
-  while (i < as.length || j < rs.length) {
-    if (i < as.length && j < rs.length && as[i] === rs[j]) {
-      if (!flush()) return null;
-      for (const _ of aLines[i]!) ops.push('=');
+  while (i < ak.length || j < rk.length) {
+    if (i < ak.length && j < rk.length && ak[i] === rk[j]) {
+      if (!flush() || !pair(aLines[i]!, rLines[j]!, true)) return null;
       i++;
       j++;
-    } else if (j >= rs.length || (i < as.length && lcs[(i + 1) * w + j]! >= lcs[i * w + j + 1]!)) ra.push(aLines[i++]! as string[]);
-    else rr.push(rLines[j++]! as string[]);
+    } else if (j >= rk.length || (i < ak.length && lcs[(i + 1) * w + j]! >= lcs[i * w + j + 1]!)) ra.push(aLines[i++]!);
+    else rr.push(rLines[j++]!);
   }
   return flush() ? ops : null;
 }
@@ -645,17 +667,82 @@ export function codeRanges(text: string, hunks: readonly ChangedHunkSpots[], bas
   // continuation range of a list's last statement, so code removed from a list's end shows nowhere whether it was
   // reached (round 11: J1-J3, a jump just before it).
   const endsList = (q: number) => q >= 0 && (text[q] === '}' || /^(?:case|default)\b/.test(text.slice(q, q + 8)));
-  for (const h of hunks) {
+  const spots = baseOf ? joinToggled() : hunks;
+  if (!spots) return null;
+  /**
+   * The hunks, each run of them joined with the unchanged lines between them where those lines read differently at the
+   * base and the head (round 11: T1, a comment opened in one hunk and closed in another, or one closed): measured as
+   * one hunk, code turned into a comment is a removal and a comment turned into code is added code. The lines before
+   * the first hunk and after the last are compared too. Null: the unchanged lines aren't the same text at both ends
+   * (whitespace and blank lines aside), or the base file can't be read.
+   */
+  function joinToggled(): readonly ChangedHunkSpots[] | null {
+    if (!hunks.length) return hunks;
+    const oldPath = hunks[0]!.oldPath;
+    if (oldPath === undefined || hunks.some((h) => h.oldPath !== oldPath || h.from === undefined)) return null;
+    // A new file: nothing at the base, so no unchanged line.
+    if (hunks.length === 1 && hunks[0]!.from === 0 && !hunks[0]!.removed.length) return hunks;
+    const base = baseFile(oldPath);
+    if (!base) return null;
+    const baseLines = base.starts.length - 1;
+    // Each hunk's lines at the base and at the head, [first, last] (last = first - 1: none).
+    const span = hunks.map((h) => {
+      const bS = h.removed.length ? h.from! : h.from! + 1;
+      const hS = h.added.length ? h.added[0]! : h.at + 1;
+      return { h, bS, bE: bS + h.removed.length - 1, hS, hE: hS + h.added.length - 1 };
+    });
+    // Lines [l1, l2] of a text: their non-blank characters, and which of them are code.
+    const read = (t: string, m: Uint8Array, st: number[], l1: number, l2: number) => {
+      let chars = '';
+      let code = '';
+      for (let i = l1 >= 1 ? st[l1 - 1]! : 0; l2 >= l1 && i < (st[l2] ?? t.length); i++) {
+        if (blank(t[i]!)) continue;
+        chars += t[i];
+        code += m[i] ? '1' : '0';
+      }
+      return { chars, code };
+    };
+    // Whether the unchanged lines (base [b1, b2], head [h1, h2]) read differently; null: they aren't the same text.
+    const toggled = (b1: number, b2: number, h1: number, h2: number): boolean | null => {
+      const b = read(base.text, base.mask, base.starts, b1, b2);
+      const a = read(text, mask, starts, h1, h2);
+      return a.chars !== b.chars ? null : a.code !== b.code;
+    };
+    const first = toggled(1, span[0]!.bS - 1, 1, span[0]!.hS - 1);
+    const last = toggled(span.at(-1)!.bE + 1, baseLines, span.at(-1)!.hE + 1, lines);
+    if (first === null || last === null) return null;
+    const groups: (typeof span)[] = [[span[0]!]];
+    for (let k = 1; k < span.length; k++) {
+      const [p, q] = [span[k - 1]!, span[k]!];
+      const t = toggled(p.bE + 1, q.bS - 1, p.hE + 1, q.hS - 1);
+      if (t === null) return null;
+      if (t) groups.at(-1)!.push(q);
+      else groups.push([q]);
+    }
+    if (first) groups[0]!.unshift({ ...span[0]!, bS: 1, hS: 1 });
+    if (last) groups.at(-1)!.push({ ...span.at(-1)!, bE: baseLines, hE: lines });
+    return groups.map((g) => {
+      if (g.length === 1) return g[0]!.h;
+      const [bS, hS, bE, hE] = [g[0]!.bS, g[0]!.hS, g.at(-1)!.bE, g.at(-1)!.hE];
+      const removed: string[] = [];
+      for (let l = bS; l <= bE && l <= baseLines; l++) removed.push(base.text.slice(base.starts[l - 1], base.starts[l]).replace(/\n$/, ''));
+      const added: number[] = [];
+      for (let l = hS; l <= hE; l++) added.push(l);
+      return { at: hS - 1, added, removed, from: bS, oldPath };
+    });
+  }
+  for (const h of spots) {
     // The added side: its characters at the head, whitespace left out.
     const aOff: number[] = [];
-    const aLines: string[][] = [];
+    const aLines: HunkLine[] = [];
     for (const l of h.added) {
       if (l < 1 || l > lines) continue;
-      const line: string[] = [];
+      const line: HunkLine = { chars: [], code: [] };
       for (let i = starts[l - 1]!; i < starts[l]!; i++) {
         if (blank(text[i]!)) continue;
         aOff.push(i);
-        line.push(text[i]!);
+        line.chars.push(text[i]!);
+        line.code.push(mask[i] === 1);
       }
       aLines.push(line);
     }
@@ -677,12 +764,13 @@ export function codeRanges(text: string, hunks: readonly ChangedHunkSpots[], bas
       }
     } else rMask = codeLines(rText).mask;
     const rIdx: number[] = [];
-    const rLines: string[][] = h.removed.map(() => []);
+    const rLines: HunkLine[] = h.removed.map(() => ({ chars: [], code: [] }));
     for (let i = 0, k = 0; i < rText.length; i++) {
       if (rText[i] === '\n') k++;
       else if (!blank(rText[i]!)) {
         rIdx.push(i);
-        rLines[k]!.push(rText[i]!);
+        rLines[k]!.chars.push(rText[i]!);
+        rLines[k]!.code.push(rMask[i] === 1);
       }
     }
     const ops = alignHunk(aLines, rLines);
@@ -1016,9 +1104,12 @@ export interface TouchedRequest {
   hunks: Record<string, ChangedHunkSpots[]>;
   /** The load-only runs (#784 rounds 6, 7), once the scripts to load are known. */
   loads?: LoadRun[];
-  /** Where the PR's change is measured from, and the clone that has it: the base files its removed lines are read in. */
-  base?: string;
-  repo?: string;
+  /**
+   * Where the PR's change is measured from, and the clone that has it: the base files its removed lines are read in.
+   * The reader refuses a request without them (round 11), never lexing removed lines out of their file.
+   */
+  base: string;
+  repo: string;
 }
 
 /**
