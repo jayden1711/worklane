@@ -481,9 +481,9 @@ function gitWords(words: Word[]): GitWords {
 type Arg = 'flag' | 'value' | 'optional';
 // WHY: git commit's options, by name: whether each takes a value, and whether it makes the commit take working-tree
 // content (w) or rewrite the current commit (amend). A name is matched as git matches it (longOption).
-type Opt = [Arg, ('w' | 'amend')?];
+type Opt = [Arg, ('w' | 'amend' | 'interactive')?];
 const COMMIT_LONG: Record<string, Opt> = {
-  all: ['flag', 'w'], include: ['flag', 'w'], only: ['flag', 'w'], patch: ['flag', 'w'], interactive: ['flag', 'w'],
+  all: ['flag', 'w'], include: ['flag', 'w'], only: ['flag', 'w'], patch: ['flag', 'interactive'], interactive: ['flag', 'interactive'],
   'pathspec-from-file': ['value', 'w'], amend: ['flag', 'amend'],
   'pathspec-file-nul': ['flag'], message: ['value'], file: ['value'], 'reuse-message': ['value'], 'reedit-message': ['value'],
   fixup: ['value'], squash: ['value'], author: ['value'], date: ['value'], template: ['value'], cleanup: ['value'], trailer: ['value'],
@@ -494,7 +494,9 @@ const COMMIT_LONG: Record<string, Opt> = {
 };
 const SHORT_VALUE = new Set(['m', 'F', 'C', 'c', 't']);
 const SHORT_OPTIONAL = new Set(['u', 'S']);
-const SHORT_WORKTREE = new Set(['a', 'i', 'o', 'p']);
+const SHORT_WORKTREE = new Set(['a', 'i', 'o']);
+/** Long options that start interactive staging (any prefix git might take for them). */
+const INTERACTIVE_LONG = /^--(pa(t(c(h)?)?)?|in(t(e(r(a(c(t(i(v(e)?)?)?)?)?)?)?)?)?)(=|$)/;
 const SHORT_FLAG = new Set(['n', 'q', 'v', 's', 'e', 'z']);
 
 /** The long options a (possibly abbreviated, possibly negated) name can mean. */
@@ -534,6 +536,7 @@ function commitEffects(rest: Word[]): { worktree: boolean; amend: boolean } {
       if (!plain(w) && eq < 0) throw new Unmodelled('an expansion in a commit option');
       for (const [arg, effect] of longOption(name)) {
         if (effect === 'w') worktree = true;
+        if (effect === 'interactive') throw new Unmodelled('an interactive commit, which can edit what is committed after the scan');
         if (effect === 'amend') amend = true;
         if (arg === 'value' && eq < 0) i++;
       }
@@ -546,6 +549,7 @@ function commitEffects(rest: Word[]): { worktree: boolean; amend: boolean } {
         break;
       }
       if (SHORT_OPTIONAL.has(ch)) break;
+      if (ch === 'p') throw new Unmodelled('an interactive commit, which can edit what is committed after the scan');
       if (SHORT_WORKTREE.has(ch)) worktree = true;
       else if (!SHORT_FLAG.has(ch)) throw new Unmodelled(ch === EXPANSION ? 'an expansion in a commit option' : `the commit option -${ch}`);
     }
@@ -596,6 +600,8 @@ function beforeRefusal(c: Cmd, names: Set<string>, git: boolean): string | null 
     };
     if (READ_ONLY_GIT.has(g.sub) && g.rest.some((w) => risky(w.text))) return `git ${g.sub} with an option that writes a file or runs a program`;
     if (g.sub === 'add' && g.rest.some((w) => /^-[a-zA-Z]*[fe]/.test(w.text) || /^--(f|fo|for|forc|force|e|ed|edi|edit)$/.test(w.text))) return 'a staging option that adds ignored or edited content';
+    // WHY (#971): interactive staging can open an editor (from config or the environment) after the scan has read.
+    if (g.sub === 'add' && g.rest.some((w) => /^-[a-zA-Z]*[pi]/.test(w.text) || INTERACTIVE_LONG.test(w.text))) return 'interactive staging, which can edit what is staged after the scan';
     return null;
   }
   return names.has(name.text) ? null : `${name.text} before the commit`;

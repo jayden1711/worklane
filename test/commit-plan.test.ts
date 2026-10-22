@@ -82,7 +82,7 @@ test('the checkout: -C and directory changes are followed, every place the commi
 
 test('the content: working-tree forms, staging in the line and amends widen the scan', () => {
   const scope = (c: string) => scans(c)[0]!.scope;
-  for (const c of ['git commit -a -m x', 'git commit -am x', 'git commit -m x f', 'git commit -o -m x f', 'git commit -i -m x f', 'git commit --only -m x -- f', 'git commit --inc -m x f', 'git commit -p -m x', 'git commit --pathspec-from-file=list -m x']) {
+  for (const c of ['git commit -a -m x', 'git commit -am x', 'git commit -m x f', 'git commit -o -m x f', 'git commit -i -m x f', 'git commit --only -m x -- f', 'git commit --inc -m x f', 'git commit --pathspec-from-file=list -m x']) {
     assert.deepEqual(scope(c), { unstaged: true, untracked: false, head: false }, c);
   }
   for (const c of ['git commit -m notes.md', 'git commit -F notes.md', 'git commit -C HEAD', 'git commit --author "A <a@b>" -m x', 'git commit -mnotes.md']) {

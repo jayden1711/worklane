@@ -93,6 +93,7 @@ test('attack: a large-file filter that is not exactly the standard one still ref
     ['a different program', swap('filter.lfs.process', 'other-lfs filter-process')],
     ['a custom clean', swap('filter.lfs.clean', 'cat')],
     ['not required', swap('filter.lfs.required', 'false')],
+    ['the required key omitted', STANDARD.filter(([k]) => k !== 'filter.lfs.required')],
   ] as const) {
     const d = await decide(lfsCheckout(config, 'plain data\n'), 'git commit -m x');
     assert.equal(d.decision, 'deny', what);

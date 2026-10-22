@@ -101,7 +101,9 @@ test('attack: stored bytes that only begin like a large-file pointer are scanned
   configure(a, STANDARD);
   stageRaw(a, 'a.txt', `${lfsObject(a, 'plain data\n')}${SECRET}`);
   writeFileSync(join(a, '.gitattributes'), '*.txt filter=lfs diff=lfs merge=lfs -text\n');
-  await refused(a, 'git commit -m x', FOUND, 'attribute on disk only');
+  // WHY (round 7): such bytes, small and naming a pointer version, now refuse before the scan; either way, refused.
+  const STORED = /gitleaks found a secret in this commit|commit secret scan could not run/;
+  await refused(a, 'git commit -m x', STORED, 'attribute on disk only');
   // The attribute committed first, the blob staged by hand with an old file time.
   const c = checkout('c');
   configure(c, STANDARD);
@@ -110,7 +112,7 @@ test('attack: stored bytes that only begin like a large-file pointer are scanned
   git(c, 'commit', '-q', '-m', 'attributes');
   stageRaw(c, 'a.txt', `${lfsObject(c, 'plain data\n')}${SECRET}`);
   utimesSync(join(c, 'a.txt'), new Date(0), new Date(0));
-  await refused(c, 'git commit -m x', FOUND, 'attribute committed first');
+  await refused(c, 'git commit -m x', STORED, 'attribute committed first');
 });
 
 test('attack: a filter whose name matches the large-file one only without case gets no allowance', { skip }, async () => {
@@ -186,7 +188,8 @@ test('attack: with a diff filter configured, an interactive staging step before 
   const a = checkout();
   git(a, 'config', 'interactive.diffFilter', program());
   writeFileSync(join(a, 'notes.md'), 'edit\n');
-  await refused(a, 'echo y | git add -p notes.md && git commit -am x', NOT_RUN);
+  // WHY (round 7): interactive staging before a commit is now refused outright, whatever the config.
+  await refused(a, 'echo y | git add -p notes.md && git commit -am x', /commit secret scan could not run|the commit secret scan can't tell what this command line commits/);
 });
 
 test('attack: a nested checkout the line stages is checked like a submodule', { skip }, async () => {

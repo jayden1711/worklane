@@ -438,6 +438,8 @@ const isLink = (p: string) => {
   }
 };
 
+/** Any of the version names the large-file program accepts in a pointer. */
+const LFS_MARKER = /git-lfs|hawser|git-media/i;
 /** A whole large-file pointer, and nothing else: its object's id and size. */
 const LFS_POINTER = /^version https:\/\/git-lfs\.github\.com\/spec\/v1\noid sha256:([0-9a-f]{64})\nsize (0|[1-9][0-9]{0,15})\n$/;
 
@@ -461,10 +463,19 @@ function lfsContent(top: string, files: Compared[]): Compared[] {
   const read = (b: Buffer | null): Buffer | null => {
     if (b === null || b.length > 1024) return b;
     const m = LFS_POINTER.exec(b.toString('latin1'));
+    // INVARIANT (#971): the large-file program reads more spellings as a pointer than the one form read here; a small
+    // file that names any pointer version and isn't that exact form refuses the commit, never scanned as text alone.
+    if (!m && LFS_MARKER.test(b.toString('latin1'))) throw new Error('a large file in this commit looks like a large-file pointer but is not in its exact form, so the object it may name can\'t be read');
     if (!m) return b;
     const oid = m[1]!;
     const at = join(store, oid.slice(0, 2), oid.slice(2, 4), oid);
-    if (!existsSync(at)) throw new Error('a large-file pointer in this commit names an object that is not in the checkout\'s large-file store');
+    let st;
+    try {
+      st = lstatSync(at);
+    } catch {
+      throw new Error('a large-file pointer in this commit names an object that is not in the checkout\'s large-file store');
+    }
+    if (!st.isFile()) throw new Error('a large-file pointer in this commit names an object that is not a regular file in the checkout\'s large-file store');
     const object = readFileSync(at);
     if (object.length !== Number(m[2]) || createHash('sha256').update(object).digest('hex') !== oid) throw new Error('a large-file pointer in this commit names an object whose content does not match it');
     return Buffer.concat([b, Buffer.from('\n'), object]);
