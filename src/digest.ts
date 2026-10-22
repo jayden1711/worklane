@@ -20,6 +20,9 @@ interface Ev {
   payload: unknown;
 }
 
+/** The lead of a waiting PR that is fix-forward's fix for a red default branch: main stays red until it merges. */
+export const RED_MAIN_FIX = 'MAIN IS RED: this is fix-forward\'s fix, and main stays red until you merge it (or its revert path runs).';
+
 /** The owner-held states, in the order the digest lists them. */
 export const WAIT_KINDS = [
   'emergency_halt',
@@ -175,6 +178,8 @@ export interface WaitFold {
   checkHeld: Map<number, { ts: string; since: string; issue: number; head: string; held: string[] }>;
   holds: Map<number, { ts: string; by: number; files: string[] }>;
   deps: Map<number, { since: string; reason: string }>;
+  /** The issues fix-forward opened to fix a red default branch that isn't green yet (#784: their PRs are flagged). */
+  fixForward: Set<number>;
   merged: MergedFold;
   /** The PR batch events (and PR closes), in order, for batchesSince. */
   batch: Ev[];
@@ -200,6 +205,7 @@ export function waitFold(): WaitFold {
     checkHeld: new Map(),
     holds: new Map(),
     deps: new Map(),
+    fixForward: new Set(),
     merged: mergedFold(),
     batch: [],
   };
@@ -326,6 +332,12 @@ export function waitStep(f: WaitFold, e: Ev): void {
     case 'dependency.unblocked':
       f.deps.delete((p as { issue: number }).issue);
       break;
+    case 'fix_forward.attempt':
+      f.fixForward.add(Number(p.issue));
+      break;
+    case 'fix_forward.green':
+      f.fixForward.clear();
+      break;
   }
   // Read by more than one view: a PR's close ends its holds and is a batch's event too; a merge is both.
   if ((e.type === 'pr.closed' || e.type === 'merge.done') && typeof p.number === 'number') f.closed.add(p.number);
@@ -361,7 +373,8 @@ function itemsOf(f: WaitFold, tasks: readonly Pick<Task, 'issue' | 'status' | 'l
   for (const [issue, h] of f.planHeld) add('plan_held', h.ts, issue, null, h.reasons.length ? h.reasons.join('; ') : 'held for your approval', h.decision ? { decision: h.decision } : {});
 
   // PRs left for the owner to review and merge: not merged automatically, or a conflict fix gave up.
-  for (const [n, w] of f.needsOwner) if (!f.closed.has(n)) add('needs_owner', w.ts, w.issue, n, w.detail, { ...(w.why ? { why: w.why } : {}), ...(w.reasons ? { reasons: [...w.reasons] } : {}) });
+  // A fix-forward PR while the default branch is still red says so first: main stays red until it merges (#784).
+  for (const [n, w] of f.needsOwner) if (!f.closed.has(n)) add('needs_owner', w.ts, w.issue, n, f.fixForward.has(w.issue) ? `${RED_MAIN_FIX} ${w.detail}` : w.detail, { ...(w.why ? { why: w.why } : {}), ...(w.reasons ? { reasons: [...w.reasons] } : {}) });
   for (const [n, w] of f.ciGaveUp) if (!f.closed.has(n)) add('ci_fix_gave_up', w.ts, w.issue, n, w.reason);
 
   // Blocked tasks, of either kind: blocked on someone (issue.blocked), or a landing that failed.
