@@ -207,6 +207,12 @@ export const GUARD_FILES: readonly string[] = [
   'scripts/lib/denylist.mjs',
   'scripts/verify-release-tag*',
   'test/isolate.ts',
+  // What else runs in a lint test's process through test/isolate.ts and the weakening module (#746 round 19): one
+  // changed line here could make a backstop read another tree, or hide a file from it.
+  'src/brand.ts',
+  'src/os/system-paths.ts',
+  'src/os/own-env.ts',
+  'src/os/child-process.ts',
 ];
 
 /** A package manager's settings: every one changes what install and each script run under (`script-shell=`, `ignore-scripts=`). */
