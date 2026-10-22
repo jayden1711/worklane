@@ -1650,11 +1650,6 @@ export function browserRelay(dir: string, urlFile: string): string | null {
   return file;
 }
 
-/** A native executable's file name on this OS. */
-export function executableName(base: string): string {
-  return process.platform === 'win32' ? `${base}.exe` : base;
-}
-
 /** Free disk on the volume holding `path`: percent and GB. */
 export function diskFree(path: SlotPathLike): { freePct: number; freeGb: number; totalGb: number } {
   const st = statfsSlotDir(path); // statfsSync, through src/slot-file.ts so the slot dir (#772) can be measured too
