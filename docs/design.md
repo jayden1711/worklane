@@ -858,7 +858,7 @@ The scanner sits behind an adapter so it can move to betterleaks; gitleaks is in
   - Plane (AGPL) is a design reference only.
   - Served as static files, with its API and the SSE stream, by its own process, not the coordinator: `worklane dashboard` (`src/dashboard.ts`), on `127.0.0.1` only, with a per-install token. It reads the instance's event log and records answers in it. On a machine set up with separate users, each instance's dashboard is its own service (`worklane-dashboard-<name>.service`, as that instance's coordinator user `wl-<name>`), and a hub (`worklane-dashboard-hub.service`, as `wl-dash`) forwards to them, with GitHub sign-in (`scripts/setup/dashboards.sh`, docs/dashboard.md).
   - Live updates use **one SSE stream** that replays from `Last-Event-ID`. Actions are POSTs that become events.
-  - Tauri v2 wraps it in step 6. v3 is in alpha, so we wait.
+  - No native wrapper: it runs in the browser, with the same sign-in and guards (#744).
 - **Pages:**
 
   | Page | Contents |
@@ -967,7 +967,7 @@ What exists, and where it deviates from the plan above:
 | 3 | dashboard v0: Overview, Inbox, Decisions, Issues | |
 | 4 | N workers in worktrees; machine-wide slots and governor; tiered tests; batching + bisect | |
 | 5 | reports, scorecard, trust stages, learning loop, prod deploy verify | |
-| 6 | remaining pages, Tauri, shared relay | |
+| 6 | remaining pages, shared relay | |
 | 7 | security, red_attributor, ci_repair, qa_playtester, monitor, release_prep | |
 
 ## 19. Decisions from the first design review (2026-10-07)
