@@ -346,147 +346,21 @@ export function decisionDetail(id: string, d: DetailDeps): DecisionDetail | null
   };
 }
 
-const UTF8_STRICT = new TextDecoder('utf-8', { fatal: true });
-/** The control bytes a text line may hold besides NUL: tab, vertical tab, form feed, carriage return and escape. */
-const TEXT_CONTROLS = new Set([0x09, 0x0b, 0x0c, 0x0d, 0x1b]);
-/** What a NUL (a run of them) in a shown line becomes: not a letter, digit or `_`, so every redaction rule still sees a boundary there. */
-export const NUL_MARK = '␀';
-/** A binary file's line that is shown as UTF-8 text needs this many characters: random bytes almost never make one. */
-const MIN_BINARY_TEXT = 16;
-
-/** `b` as UTF-8 text, NULs kept as U+0000; or null for invalid UTF-8, DEL, or a control byte text doesn't hold. */
-function utf8Text(b: Buffer): string | null {
-  for (const c of b) if ((c < 0x20 && c !== 0 && !TEXT_CONTROLS.has(c)) || c === 0x7f) return null;
-  try {
-    return UTF8_STRICT.decode(b);
-  } catch {
-    return null;
-  }
-}
-
-/** `s` (whole units of `width` bytes) as UTF-16 or UTF-32 text, when its NULs fall as mostly-Latin text's do; or null. */
-function decodeWide(s: Buffer, width: 2 | 4): string | null {
-  const units = s.length / width;
-  if (units < 1) return null;
-  let t = '';
-  if (width === 2) {
-    let low = 0;
-    let high = 0;
-    for (let i = 0; i < s.length; i += 2) {
-      if (s[i] === 0) low++;
-      if (s[i + 1] === 0) high++;
-    }
-    const order = high >= units * 0.75 && low <= units * 0.25 ? 'utf-16le' : low >= units * 0.75 && high <= units * 0.25 ? 'utf-16be' : null;
-    if (!order) return null;
-    try {
-      t = new TextDecoder(order, { fatal: true, ignoreBOM: false }).decode(s);
-    } catch {
-      return null;
-    }
-  } else {
-    const unitLE = (i: number) => s[i]! | (s[i + 1]! << 8) | (s[i + 2]! << 16) | (s[i + 3]! << 24);
-    const unitBE = (i: number) => s[i + 3]! | (s[i + 2]! << 8) | (s[i + 1]! << 16) | (s[i]! << 24);
-    for (const read of [unitLE, unitBE]) {
-      const points: number[] = [];
-      let narrow = 0;
-      for (let i = 0; i < s.length; i += 4) points.push(read(i) >>> 0);
-      for (const p of points) if (p < 0x100) narrow++;
-      if (narrow < units * 0.75 || points.some((p) => p > 0x10ffff || (p >= 0xd800 && p <= 0xdfff))) continue;
-      t = String.fromCodePoint(...(points[0] === 0xfeff ? points.slice(1) : points));
-      break;
-    }
-    if (!t) return null;
-  }
-  for (const ch of t) {
-    const c = ch.codePointAt(0)!;
-    if ((c < 0x20 && c !== 0 && !TEXT_CONTROLS.has(c)) || c === 0x7f) return null;
-  }
-  return t;
-}
-
 /**
- * `b` as UTF-32 or UTF-16 text (little- or big-endian, as its NULs fall), or null. git splits such lines at the 0x0A
- * byte, so a line can start or end with the rest of a newline's unit; those NUL bytes are dropped. Only a line whose
- * NULs fall as mostly-Latin text's do is read so (random bytes don't), and only when it decodes cleanly to text.
+ * The change's diff, base..head, from the checkout's git (owners only: the route checks); redacted, capped. main's
+ * arguments, through the git runner (#807): a binary file shows as "Binary files ... differ" (the owner, 2026-10-21:
+ * "Cut --text, land the runner.").
  */
-function wideText(b: Buffer): string | null {
-  for (const width of [4, 2] as const) {
-    const r = b.length % width;
-    const tries = r === 0 ? [b] : [b.subarray(0, r).every((x) => x === 0) ? b.subarray(r) : null, b.subarray(b.length - r).every((x) => x === 0) ? b.subarray(0, b.length - r) : null];
-    for (const s of tries) {
-      const t = s && decodeWide(s, width);
-      if (t) return t;
-    }
-  }
-  return null;
-}
-
-/** One line of a binary file's diff (`prefix`, then its bytes) as shown: its text, or a marker that holds none of it. */
-function binaryLine(prefix: string, body: Buffer): string {
-  const wide = wideText(body);
-  const t = wide ?? utf8Text(body);
-  if (t !== null) {
-    const chars = t.replace(/\0/g, '').length;
-    if (wide !== null || chars === 0 || chars >= MIN_BINARY_TEXT) return `${prefix}${t.replace(/\0+/g, NUL_MARK)}`;
-  }
-  return `${prefix}[binary: ${body.length} bytes not shown]`;
-}
-
-/**
- * What the owner's decision diff shows of `git diff --text` output (#927 round 10). A hunk whose lines hold a NUL,
- * invalid UTF-8 or a control byte text doesn't hold is binary: each of its lines shows only as text it decodes to
- * (UTF-32, UTF-16 or UTF-8, a NUL as NUL_MARK, a UTF-8 line at least MIN_BINARY_TEXT characters), and otherwise as a
- * marker. So no run of a binary file's bytes is shown, while its text lines are, and a NUL still separates what it
- * separated for the redaction rules that need a boundary. Every other line shows as it is. A hunk runs from its `@@ `
- * line to the first line that doesn't start with `+`, `-`, a space or `\`.
- */
-export function diffTextView(raw: Buffer): string {
-  const out: string[] = [];
-  let hunk: Buffer[] | null = null;
-  const isContent = (l: Buffer) => l[0] === 0x2b || l[0] === 0x2d || l[0] === 0x20;
-  const flush = () => {
-    if (!hunk) return;
-    const binary = hunk.some((l) => isContent(l) && utf8Text(l.subarray(1))?.includes('\0') !== false);
-    for (const l of hunk) out.push(binary && isContent(l) ? binaryLine(String.fromCharCode(l[0]!), l.subarray(1)) : l.toString('utf8'));
-    hunk = null;
-  };
-  for (let at = 0; at <= raw.length; ) {
-    const nl = raw.indexOf(0x0a, at);
-    const l = raw.subarray(at, nl === -1 ? raw.length : nl);
-    if (hunk && l.length > 0 && (isContent(l) || l[0] === 0x5c)) hunk.push(l);
-    else {
-      flush();
-      if (l.subarray(0, 3).toString('latin1') === '@@ ') hunk = [];
-      out.push(l.toString('utf8'));
-    }
-    if (nl === -1) break;
-    at = nl + 1;
-  }
-  flush();
-  return out.join('\n');
-}
-
-/** The change's diff, base..head, from the checkout's git (owners only: the route checks); redacted, capped. */
 export async function decisionDiff(root: string, base: string, head: string): Promise<{ diff: string; truncated: boolean } | { diff: null; why: string }> {
   if (!SHA.test(base) || !SHA.test(head)) return { diff: null, why: 'no commits recorded for this change' };
   const MAX = 512 * 1024;
-  // Every file's lines whatever the change's attributes say (#807): a file its .gitattributes marks `-diff` or
-  // `binary` (or gives a textconv or an external diff) shows as it is, not as "Binary files differ"; the user's
-  // attributes file is not read. Output past the buffer is shown cut, like output past MAX.
-  const args = ['-c', 'core.attributesFile=/dev/null', 'diff', '--no-color', '--text', '--no-textconv', '--no-ext-diff', '--ignore-submodules=none', `${base}..${head}`];
   return new Promise((done) => {
-    // latin1: one character per byte, so the bytes come back as git wrote them (diffTextView reads them).
-    gitExecFile(args, { cwd: root, env: { ...withToolPath(), GIT_TERMINAL_PROMPT: '0' }, timeout: 15_000, maxBuffer: 8 * 1024 * 1024, encoding: 'latin1' }, (err, stdout, stderr) => {
-      if (err && !(err.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER' && stdout)) return done({ diff: null, why: `not in this checkout's git: ${(Buffer.from(stderr, 'latin1').toString('utf8') || err.message).trim().split('\n')[0]}` });
-      // `--text` stays (#807 F2): a NUL, or a `-diff` attribute, is also how a change hides its text from review as
-      // "binary". But a binary file's bytes are never shown (#927 round 10): where main showed "Binary files differ",
-      // its lines show only as the text they decode to (UTF-16 included), each NUL a boundary mark (diffTextView).
-      const shown = diffTextView(Buffer.from(stdout, 'latin1'));
+    gitExecFile(['diff', '--no-color', '--no-ext-diff', `${base}..${head}`], { cwd: root, env: { ...withToolPath(), GIT_TERMINAL_PROMPT: '0' }, timeout: 15_000, maxBuffer: 8 * 1024 * 1024, encoding: 'utf8' }, (err, stdout, stderr) => {
+      if (err) return done({ diff: null, why: `not in this checkout's git: ${(stderr || err.message).trim().split('\n')[0]}` });
+      const truncated = stdout.length > MAX;
       // Redacted before it is cut, over the kept part and a margin only (#889): up to 8 MB of diff, and the redaction is
-      // synchronous on the dashboard. Output past the buffer the same way: a token across the cut is redacted whole.
-      if (err) return done({ diff: redactCut(shown, MAX), truncated: true });
-      const truncated = shown.length > MAX;
-      done({ diff: redactCut(shown, MAX), truncated });
+      // synchronous on the dashboard.
+      done({ diff: redactCut(stdout, MAX), truncated });
     });
   });
 }

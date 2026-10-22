@@ -19,7 +19,7 @@ import { instructionTargets } from '../skilleval.js';
 import { checkedPush } from '../push-check.js';
 import { conflictTrigger } from '../conflicts.js';
 import { abortMerge, mergeBaseInto } from '../merge-base.js';
-import { changedNamesOrNull, patchText } from './change-files.js';
+import { changedNamesOrNull } from './change-files.js';
 import { lightOutcome } from '../light-check.js';
 import { readiness, requiredOutcomes, type Readiness } from '../pr-watch.js';
 import { checksFor, effectiveClass, riskClassOf, rulesetHold } from '../pr-rules.js';
@@ -128,14 +128,7 @@ export abstract class MergeFlow extends FixRuns {
         subject: (sha) => git('log', '-1', '--format=%s', sha) ?? '',
         // A rename as both its paths and a valid UTF-8 path as itself, so a locked category on either one holds (#683).
         files: (sha) => changedNamesOrNull(this.d.repo, [`${sha}^1`, sha]) ?? [],
-        // The culprit's patch as text whatever its attributes say (#807): a `-diff` file shows its lines, not "Binary files differ".
-        diff: (sha) => {
-          try {
-            return patchText(this.d.repo, [`${sha}^1`, sha]);
-          } catch {
-            return '';
-          }
-        },
+        diff: (sha) => git('diff', `${sha}^1`, sha) ?? '',
       },
       config: () => this.d.cfg.project.fix_forward,
       required: () => this.requiredChecks(),
