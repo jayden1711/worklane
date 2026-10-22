@@ -135,7 +135,7 @@ test('must hold: C1: a line replaced by one another app file removed (as at roun
 
 const MOVES = 'a named limit since round 13: moved code git does not pair reads as added code, so an untested change merges (follow-up: moved-code pairing)';
 
-// ---- M3: a function split out to a new file with a line edited inside: only what the edit adds counts
+// ---- M3: a function split out to a new file with a line edited inside (a named limit: the whole new file counts)
 
 const G = "export function f(x) {\n  return x + 1;\n}\nexport function g(u) {\n  return u.admin ? grant(u) : deny(u);\n}\nfunction grant(u) {\n  return 'all';\n}\nfunction grantAll(u) {\n  return 'everything';\n}\nfunction deny(u) {\n  return 'none';\n}\nfunction denyAll(u) {\n  return 'nothing';\n}\n";
 const G_A = 'export function f(x) {\n  return x + 1;\n}\n';
