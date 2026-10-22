@@ -12,7 +12,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSy
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runReadDenials } from '../src/read-denials.js';
-import { createWorktree, removeWorktree, worktreePath, type WorktreeOptions } from '../src/worktrees.js';
+import { createWorktree, removeWorktree, worktreeOptions, worktreePath, type WorktreeOptions } from '../src/worktrees.js';
 
 const linux = process.platform === 'linux';
 const bwrapRuns = linux && spawnSync('bwrap', ['--dev-bind', '/', '/', '--unshare-user', '--unshare-pid', '--proc', '/proc', '--', '/bin/sh', '-c', ':']).status === 0;
@@ -36,7 +36,7 @@ const locked = (dir: string) => {
 
 function fixture() {
   const { dir } = exampleProject();
-  const o: WorktreeOptions = { repo: dir, root: '.claude/worktrees', stateDir: mkdtempSync(join(tmpdir(), 'wt-state-')), setup: [] };
+  const o: WorktreeOptions = worktreeOptions({ repo: dir, root: '.claude/worktrees', stateDir: mkdtempSync(join(tmpdir(), 'wt-state-')), setup: [], taskDir: null });
   return { dir, o };
 }
 

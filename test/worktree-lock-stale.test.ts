@@ -9,13 +9,13 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createWorktree, type WorktreeOptions } from '../src/worktrees.js';
+import { createWorktree, worktreeOptions, type WorktreeOptions } from '../src/worktrees.js';
 
 const git = (cwd: string, ...a: string[]) => execFileSync('git', a, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 
 test('#890 r13: a worktree of ours deleted outside its removal can be made again at the same path, locked; another stays', () => {
   const { dir } = exampleProject();
-  const o: WorktreeOptions = { repo: dir, root: '.claude/worktrees', stateDir: mkdtempSync(join(tmpdir(), 'wt-state-')), setup: [] };
+  const o: WorktreeOptions = worktreeOptions({ repo: dir, root: '.claude/worktrees', stateDir: mkdtempSync(join(tmpdir(), 'wt-state-')), setup: [], taskDir: null });
   const gone = createWorktree(o, 'issue-1', 'b1', 'HEAD').path;
   const kept = createWorktree(o, 'issue-2', 'b2', 'HEAD').path;
   rmSync(gone, { recursive: true, force: true });

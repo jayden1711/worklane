@@ -9,7 +9,7 @@ import { fullRunLock } from './slots.js';
 import { EventLog } from './events/log.js';
 import { redactString } from './events/redact.js';
 import { recordBaseline } from './baseline.js';
-import { removeWorktree } from './worktrees.js';
+import { recordedWorktreeOptions, removeWorktree } from './worktrees.js';
 
 export interface Job {
   id: string;
@@ -31,7 +31,8 @@ export interface Job {
   /** After the command: record main's baseline from its output, then remove the worktree it ran in. */
   after?: {
     baseline?: { eventsDb: string; sha: string; section: string; item: string; actor: string };
-    cleanup?: { repo: string; root: string; stateDir: string; name: string };
+    /** `root` as resolved when the job was queued (#890 round 20); `taskDir` absent in records from before. */
+    cleanup?: { repo: string; root: string; stateDir: string; taskDir?: string | null; name: string };
   };
   result?: string;
   /** The project's suite runs agent-written code: as the instance's agent user, when there is one, in its sandbox. */
@@ -140,7 +141,7 @@ export async function runJob(stateDir: string, id: string, pollMs = 30_000): Pro
       }
       if (job.after?.cleanup) {
         try {
-          removeWorktree({ ...job.after.cleanup, setup: [] }, job.after.cleanup.name);
+          removeWorktree(recordedWorktreeOptions(job.after.cleanup), job.after.cleanup.name);
         } catch (e) {
           update({ error: `worktree cleanup: ${(e as Error).message}` });
         }

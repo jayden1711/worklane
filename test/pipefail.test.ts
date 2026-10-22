@@ -6,7 +6,7 @@ import { mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { childEnv, shellCommand } from '../src/os/index.js';
-import { createWorktree } from '../src/worktrees.js';
+import { createWorktree, worktreeOptions } from '../src/worktrees.js';
 import { repoRoot } from './helpers.js';
 
 const run = (command: string) => {
@@ -28,7 +28,7 @@ test('regression: a worktree setup step piped into cat reports its failure', () 
   writeFileSync(join(repo, 'a'), '1');
   git('add', 'a');
   git('-c', 'user.email=a@example.com', '-c', 'user.name=A', '-c', 'commit.gpgsign=false', 'commit', '-q', '-m', 'init');
-  const { setupErrors } = createWorktree({ repo, root: 'wt', stateDir: join(repo, 'state'), setup: ['node -e "process.exit(2)" | cat'] }, 'x', 'x', 'main');
+  const { setupErrors } = createWorktree(worktreeOptions({ repo, root: 'wt', stateDir: join(repo, 'state'), setup: ['node -e "process.exit(2)" | cat'], taskDir: null }), 'x', 'x', 'main');
   assert.equal(setupErrors.length, 1);
 });
 

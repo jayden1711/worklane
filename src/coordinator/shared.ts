@@ -17,6 +17,7 @@ import { type PendingMessage } from '../console.js';
 import type { InstanceSettings } from '../instance.js';
 import { type IntakeConfig, type IntakeSource } from '../intake/report.js';
 import type { PrTestRuns } from './test-runs.js';
+import type { WorktreeOptions } from '../worktrees.js';
 import type { TestRuns } from './pr-batch.js';
 import type { RoleOf } from '../dashboard-auth.js';
 import type { MainWatchApi } from '../main-watch.js';
@@ -113,7 +114,7 @@ export interface CoordinatorDeps {
   /** The clock (tests). */
   now?: () => Date;
   /** Nightly queuing (tests inject this). */
-  nightly?: (root: string, cfg: Config, eventsDb: string, actor: string, runAs?: ProjectRunAs) => { id: string }[];
+  nightly?: (root: string, cfg: Config, eventsDb: string, actor: string, runAs?: ProjectRunAs, wt?: WorktreeOptions) => { id: string }[];
   /** Machine readings (tests inject these). */
   machine?: { load(): number | null; disk(path: string): { freePct: number; totalGb: number; freeGb?: number } };
   /**

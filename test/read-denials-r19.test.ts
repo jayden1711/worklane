@@ -18,7 +18,7 @@ import { dirname, join } from 'node:path';
 import { BRAND } from '../src/brand.js';
 import { runReadDenials } from '../src/read-denials.js';
 import * as worktrees from '../src/worktrees.js';
-import { createWorktree, type WorktreeOptions } from '../src/worktrees.js';
+import { createWorktree, worktreeOptions, type WorktreeOptions } from '../src/worktrees.js';
 
 const linux = process.platform === 'linux';
 const skip = !linux && "sandbox-runtime's Linux rules, where CI runs";
@@ -96,7 +96,8 @@ test('#890 r19 (G3): a configured worktree root that is a link works, as on main
   mkdirSync(big);
   const link = join(dirname(dir), 'wt');
   symlinkSync(big, link);
-  const { path } = createWorktree(options({ repo: dir, root: link }), 'a', 'a', 'HEAD');
+  // Round 20: options come only from worktreeOptions, which resolves the linked root once, as the coordinator's start does.
+  const { path } = createWorktree(worktreeOptions({ repo: dir, root: link, setup: [], stateDir: mkdtempSync(join(tmpdir(), 'wt-state-')), taskDir: null }), 'a', 'a', 'HEAD');
   assert.equal(spawnSync('git', ['status', '--porcelain'], { cwd: path }).status, 0);
   const ps = places(dir, link);
   for (const p of ps) mkdirSync(p, { recursive: true });

@@ -61,7 +61,8 @@ import { appBotIdentity, installationTokens } from './github-app.js';
 import { tune } from './tune.js';
 import { scanStuck } from './stuck.js';
 import { homeOf, openUrl, stateDir } from './os/index.js';
-import { backlogFor, instanceEnv, instanceTokens, instanceId, instanceServiceLabel, localServiceSpec, logPath, runCoordinator, runInstanceCoordinator, serviceLabel, status, writeInstanceHooks } from './service.js';
+import { agentTasksDir, backlogFor, instanceEnv, instanceTokens, instanceId, instanceServiceLabel, localServiceSpec, logPath, runCoordinator, runInstanceCoordinator, serviceLabel, status, writeInstanceHooks } from './service.js';
+import { worktreeOptions } from './worktrees.js';
 import { checkRepoScope } from './github-scope.js';
 import { EventLog } from './events/log.js';
 import { LABELS } from './backlog/types.js';
@@ -1020,7 +1021,8 @@ async function main(argv: string[]): Promise<number> {
       const base = execFileSync('git', ['rev-parse', `origin/${main}`], { cwd: i.repo.path, encoding: 'utf8' }).trim();
       const dryRun = flag(rest, '--dry-run');
       const r = await tune({
-        wt: { repo: i.repo.path, root: cfg.tests.worktree.root, stateDir: i.stateDir, setup: cfg.tests.worktree.setup, ...(i.runAs ? { runAs: i.runAs } : {}), env: cfg.tests.env },
+        // Through worktreeOptions (#890 round 20): the root resolved once, here, and the instance's task directory kept.
+        wt: worktreeOptions({ repo: i.repo.path, root: cfg.tests.worktree.root, stateDir: i.stateDir, setup: cfg.tests.worktree.setup, ...(i.runAs ? { runAs: i.runAs } : {}), env: cfg.tests.env, taskDir: agentTasksDir(i.repo.path, i.stateDir, i.runAs ?? undefined) }),
         tests: cfg.tests,
         base,
         mainBranch: main,

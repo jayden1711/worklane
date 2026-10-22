@@ -23,7 +23,7 @@ import { laneRuns, PolicyFile, type Instance } from '../src/instance.js';
 import { projectStateDir } from '../src/guardrails/context.js';
 import { runReadDenials } from '../src/read-denials.js';
 import { CliRunner, type RunRequest } from '../src/runner.js';
-import { createWorktree, worktreeDir, worktreePlaces } from '../src/worktrees.js';
+import { createWorktree, worktreeDir, worktreeOptions, worktreePlaces } from '../src/worktrees.js';
 
 const linux = process.platform === 'linux';
 const skip = !linux && "sandbox-runtime's Linux rules, where CI runs";
@@ -77,7 +77,7 @@ test('#890 r16 (R1): with a start root of "..", a worktree the coordinator makes
   const fromMain = ok(denials({ cwd: dir, home, repo: dir, places }));
   for (const d of [fromOwn, fromMain]) assert.ok(d.sandboxOnly?.includes(worktreeDir(dir, '..')), JSON.stringify(d.sandboxOnly));
   // Made by the coordinator after both runs started.
-  const late = createWorktree({ repo: dir, root: '..', stateDir: mkdtempSync(join(tmpdir(), 'wt-state-')), setup: [] }, 'c', 'c', 'HEAD').path;
+  const late = createWorktree(worktreeOptions({ repo: dir, root: '..', stateDir: mkdtempSync(join(tmpdir(), 'wt-state-')), setup: [], taskDir: null }), 'c', 'c', 'HEAD').path;
   assert.ok(late.startsWith(`${worktreeDir(dir, '..')}/`), late);
   writeFileSync(join(late, 'notes.txt'), 'LATE-C\n');
   if (!bwrapRuns) return;

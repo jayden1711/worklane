@@ -17,7 +17,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { BRAND } from '../src/brand.js';
 import { runReadDenials } from '../src/read-denials.js';
-import { createWorktree, worktreeDir, worktreePlaces, type WorktreeOptions } from '../src/worktrees.js';
+import { createWorktree, worktreeDir, worktreeOptions, worktreePlaces, type WorktreeOptions } from '../src/worktrees.js';
 
 const linux = process.platform === 'linux';
 const skip = !linux && "sandbox-runtime's Linux rules, where CI runs";
@@ -61,7 +61,7 @@ function started(wrapped: string, cwd: string): Promise<{ stdout: string; stderr
 
 function coordinatorAt(root: string) {
   const { dir } = exampleProject();
-  const o: WorktreeOptions = { repo: dir, root, stateDir: mkdtempSync(join(tmpdir(), 'wt-state-')), setup: [] };
+  const o: WorktreeOptions = worktreeOptions({ repo: dir, root, stateDir: mkdtempSync(join(tmpdir(), 'wt-state-')), setup: [], taskDir: null });
   const places = worktreePlaces(dir, root);
   for (const p of places) mkdirSync(p, { recursive: true });
   return { dir, o, places, home: mkdtempSync(join(tmpdir(), 'home-')) };
