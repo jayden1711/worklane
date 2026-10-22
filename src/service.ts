@@ -167,7 +167,7 @@ export function instanceEnv(i: Instance, base: NodeJS.ProcessEnv = process.env):
   });
   if (i.credentials.claude) env.CLAUDE_CONFIG_DIR = i.credentials.claude.config_dir;
   env[`${BRAND.envPrefix}_INSTANCE`] = i.name;
-  // #926: every git this process runs (all through src/os/git.ts) is guarded: no system or global config, no command
+  // #926: every git this process runs (all through src/os/git.ts) is guarded: no global config, no command
   // or host a config file names, and none run at all while a file sets one of those it can't set over.
   // The mark is the checkout's path: a guarded git in one of its worktrees is pinned to it (src/os/git.ts pinRepo).
   env[GIT_GUARD_VAR] = i.repo?.path ?? '1';
