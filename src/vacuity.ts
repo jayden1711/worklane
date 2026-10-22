@@ -12,7 +12,8 @@
 //           times, directly or through another module; and only code on the characters the PR changes that are code
 //           (codeRanges, rounds 8 to 11: each hunk aligned by character, its lines paired by code first when large,
 //           against V8's block ranges, so code added in an untaken branch on a changed line doesn't count; a removal
-//           only where the code on both its sides ran within one innermost V8 range, never across a block or clause
+//           only where the code on both its sides ran and shares one innermost V8 range in every process (round 12;
+//           code moved between app files is no change), never across a block or clause
 //           boundary, holding a sub-statement or nested function, or at a statement list's end; removed lines lexed in
 //           their base file; comment toggles between hunks measured). Not seen: work a module starts as it loads that keeps running and that
 //           the tests' own activity triggers (a timer while a test waits, an async_hooks or exit listener); code
@@ -241,12 +242,12 @@ type Segment = [number, number, number];
 
 /**
  * How many times each part of a script's code ran, as [start, end, count] offsets with count > 0. One sweep over the
- * ranges of every function of the script but two kinds: each span takes the count of the innermost range around it, so
- * a block that didn't run, or a nested function never called, is not run code even inside a function that ran. Left
- * out: the module's own top level (the unnamed function at offset 0, which is what loading runs) and a class's static
- * initializers (`<static_initializer>`, run as the class is defined). An instance's field initializers
- * (`<instance_members_initializer>`) run when a test makes one, so they count (#784 round 9: since the baseline takes
- * away what loading runs, they need no leaving out). The top level must span exactly the script's text, or that text
+ * ranges of every function of the script but the top level: each span takes the count of the innermost range around it,
+ * so a block that didn't run, or a nested function never called, is not run code even inside a function that ran. Left
+ * out: the module's own top level (the unnamed function at offset 0, which is what loading runs). Nothing is left out by
+ * its name (round 12: a method named `'<static_x>'` hid its ranges, N1): a class's static initializers run as the class
+ * is defined, and an instance's field initializers when a test makes one, and the baseline takes away what loading runs
+ * (round 9). The top level must span exactly the script's text, or that text
  * and the one suffix Node's own TypeScript type stripping adds (`\n\n//# sourceURL=<the script's URL>`: the stripped
  * text keeps every offset). Null otherwise (it ran other text: a loader transformed it), so it counts for nothing.
  */
@@ -255,7 +256,7 @@ function ranSegments(fns: V8Coverage['result'][number]['functions'], length: num
   const end = top?.ranges[0]!.endOffset;
   if (end !== length && end !== length + `\n\n//# sourceURL=${url}`.length) return null;
   const rs = fns
-    .filter((f) => f !== top && !/^<static/.test(f.functionName))
+    .filter((f) => f !== top)
     .flatMap((f) => f.ranges)
     .filter((r) => r.startOffset < r.endOffset)
     .sort((a, b) => a.startOffset - b.startOffset || b.endOffset - a.endOffset);
@@ -629,23 +630,31 @@ function alignHunk(aLines: readonly HunkLine[], rLines: readonly HunkLine[]): st
  *   block comment or JSDoc is comment, never code read out of context; a base file it can't read, or whose lines aren't
  *   the removed ones, makes the change unplaceable (null).
  * - Code taken away and none given in its place (a removal, code commented out) counts only when the code characters
- *   on BOTH its sides ran within the same innermost V8 range (round 11: ranOn), within a line, at a line's end or start
+ *   on BOTH its sides ran within the same innermost V8 range, in every process (rounds 11, 12: ranOn), within a line, at a line's end or start
  *   or as whole lines alike. It never counts when the removed code crosses a block or clause boundary or opens a
  *   sub-statement or nested function (BOUNDARY), or when it ended a statement list (the code after it is `}`, `case` or
  *   `default`: V8 keeps no range there). A removal inside a block comment (nothing added) is none.
  * Null: a hunk too large to align, or a removed side it can't place, which the caller holds on.
  */
-export function codeRanges(text: string, hunks: readonly ChangedHunkSpots[], baseOf?: (path: string) => string | null): ChangedCode | null {
+export function codeRanges(text: string, hunks: readonly ChangedHunkSpots[], baseOf?: (path: string) => string | null, moved?: { head?: ReadonlySet<number>; base?: ReadonlyMap<string, ReadonlySet<number>> }): ChangedCode | null {
   const { inComment, mask } = codeLines(text);
   const starts = lineStarts(text);
   const lines = starts.length - 1;
+  // Lines of code moved here from another file, or from here to another (movedCode, round 12) are no change: read as
+  // if they held no code.
+  const unmark = (m: Uint8Array, st: number[], ls: ReadonlySet<number> | undefined) => {
+    for (const l of ls ?? []) if (l >= 1 && l < st.length) m.fill(0, st[l - 1], st[l]);
+  };
+  unmark(mask, starts, moved?.head);
   const out: CharRanges = [];
   const needs: number[][] = [];
   const baseMasks = new Map<string, { text: string; mask: Uint8Array; starts: number[] } | null>();
   const baseFile = (p: string) => {
     if (!baseMasks.has(p)) {
       const t = baseOf!(p);
-      baseMasks.set(p, t === null ? null : { text: t, mask: codeLines(t).mask, starts: lineStarts(t) });
+      const b = t === null ? null : { text: t, mask: codeLines(t).mask, starts: lineStarts(t) };
+      if (b) unmark(b.mask, b.starts, moved?.base?.get(p));
+      baseMasks.set(p, b);
     }
     return baseMasks.get(p)!;
   };
@@ -790,7 +799,7 @@ export function codeRanges(text: string, hunks: readonly ChangedHunkSpots[], bas
     let gapAt = -1;
     const close = () => {
       // Code taken away and none given in its place (a removal, code commented out): it counts only where the code on
-      // BOTH its sides ran, within the same innermost V8 range (round 11: ranOn); never across a boundary. Code given
+      // BOTH its sides ran, within the same innermost V8 range in every process (rounds 11, 12: ranOn); never across a boundary. Code given
       // in its place is measured itself.
       if (removed.length && !addedCode && !(pureRemoval && h.at >= 1 && h.at <= lines && inComment[h.at - 1])) {
         let code = '';
@@ -833,6 +842,100 @@ export function codeRanges(text: string, hunks: readonly ChangedHunkSpots[], bas
   return { chars: out.sort((x, y) => x[0] - y[0]), needs };
 }
 
+/**
+ * Code a PR moved from one app file to another (round 12: R1, R3, R4): git pairs a rename only by its similarity guess
+ * over raw text, so a moved file re-indented or edited, or code split out into a new file, reads as all added code.
+ * Each added line (`hunks`: the files measured, at the head) whose code characters (whitespace and comments left out)
+ * are a line some OTHER app file's hunks removed (`hunks` and `others`, as lexed at the base) is moved, and so is that
+ * removed line (each removed line pairs once). An added line whose code isn't a whole removed line but lies within the
+ * code another file removed (8 characters at least: a moved line split or joined) is moved too. Moved lines are no
+ * change: `head`, by file, the head lines that aren't added code; `base`, by base path, the base lines that aren't
+ * removed code. `left`: the `others` files with removed code nothing matched (a deleted file's guard, say), whose
+ * removal can't be measured at the head, so counts for nothing. Null: a base or head file it can't read, or whose lines
+ * aren't the hunks' (the change can't be placed).
+ */
+export interface MovedCode {
+  head: Map<string, Set<number>>;
+  base: Map<string, Set<number>>;
+  left: string[];
+}
+
+function movedCode(headOf: (path: string) => string | null, hunks: Readonly<Record<string, readonly ChangedHunkSpots[]>>, others: Readonly<Record<string, readonly ChangedHunkSpots[]>>, baseOf: (path: string) => string | null): MovedCode | null {
+  const read = new Map<string, { text: string; mask: Uint8Array; starts: number[] } | null>();
+  const lexed = (key: string, get: () => string | null) => {
+    if (!read.has(key)) {
+      const t = get();
+      read.set(key, t === null ? null : { text: t, mask: codeLines(t).mask, starts: lineStarts(t) });
+    }
+    return read.get(key)!;
+  };
+  const keyOf = (f: { text: string; mask: Uint8Array; starts: number[] }, l: number) => {
+    let k = '';
+    for (let i = f.starts[l - 1]!; i < f.starts[l]!; i++) if (f.mask[i] && !/\s/.test(f.text[i]!)) k += f.text[i];
+    return k;
+  };
+  // Every removed line's code, by its key, and every file's removed code in one string (for split or joined lines).
+  const removed = new Map<string, { file: string; oldPath: string; line: number; used: boolean }[]>();
+  const all: { file: string; oldPath: string; line: number; key: string; used: boolean }[] = [];
+  const pooled = new Map<string, string>();
+  for (const [file, hs] of [...Object.entries(hunks), ...Object.entries(others)]) {
+    for (const h of hs) {
+      if (!h.removed.length) continue;
+      if (h.oldPath === undefined || h.from === undefined) return null;
+      const base = lexed(`base:${h.oldPath}`, () => baseOf(h.oldPath!));
+      if (!base) return null;
+      for (let k = 0; k < h.removed.length; k++) {
+        const line = h.from + k;
+        const from = base.starts[line - 1];
+        if (from === undefined || base.text.slice(from, from + h.removed[k]!.length) !== h.removed[k]) return null;
+        const key = keyOf(base, line);
+        if (!key) continue;
+        const r = { file, oldPath: h.oldPath, line, key, used: false };
+        all.push(r);
+        const same = removed.get(key);
+        if (same) same.push(r);
+        else removed.set(key, [r]);
+        pooled.set(file, (pooled.get(file) ?? '') + key);
+      }
+    }
+  }
+  const out: MovedCode = { head: new Map(), base: new Map(), left: [] };
+  if (!all.length) return out;
+  const mark = (m: Map<string, Set<number>>, k: string, l: number) => m.set(k, (m.get(k) ?? new Set()).add(l));
+  const unmatched: { file: string; line: number; key: string }[] = [];
+  for (const [file, hs] of Object.entries(hunks)) {
+    const head = lexed(`head:${file}`, () => headOf(file));
+    if (!head) {
+      if (hs.some((h) => h.added.length)) return null;
+      continue;
+    }
+    for (const h of hs) {
+      for (const line of h.added) {
+        if (line < 1 || line >= head.starts.length) continue;
+        const key = keyOf(head, line);
+        if (!key) continue;
+        const r = removed.get(key)?.find((x) => !x.used && x.file !== file);
+        if (r) {
+          r.used = true;
+          mark(out.head, file, line);
+          mark(out.base, r.oldPath, r.line);
+        } else unmatched.push({ file, line, key });
+      }
+    }
+  }
+  for (const u of unmatched) {
+    if (u.key.length < 8) continue;
+    for (const [file, text] of pooled) {
+      if (file !== u.file && text.includes(u.key)) {
+        mark(out.head, u.file, u.line);
+        break;
+      }
+    }
+  }
+  out.left = [...new Set(all.filter((r) => !r.used && !(r.file in hunks)).map((r) => r.file))].sort();
+  return out;
+}
+
 /** The 1-based lines `ranges` fall on (for a build's sources, which its map places by line). */
 function linesOf(starts: number[], ranges: CharRanges): LineSpans {
   const out: LineSpans = [];
@@ -850,15 +953,17 @@ function linesOf(starts: number[], ranges: CharRanges): LineSpans {
  * Whether code ran (`ranges`, V8's innermost block counts: an untaken branch, the other arm of a `?:`, an unevaluated
  * right side of `??`/`||`/`&&` are ranges of their own) on any of `changed`, the changed characters (#784 round 8);
  * null: anywhere. A removal (`needs`, its two sides) counts only when both sides ran and lie in the same innermost V8
- * range (`pieces`, round 11): a jump just before it, a hoisted declaration or a closing `}` just after it, the end of an
- * arm, or code only loading ran, never stands in for the removed code.
+ * range (`pieces`, rounds 11, 12) in EVERY process that ran the script (`pieces`, one list per process; no range in a
+ * process is the script's top level there, which both sides must then share): a jump just before it, a hoisted
+ * declaration or a closing `}` just after it, the end of an arm, or code only loading ran, never stands in for the
+ * removed code, and a process that loaded the script without calling its function (one range for the whole function)
+ * never hides another process's finer ranges (Q1, I1).
  */
-function ranOn(ranges: [number, number][], changed: ChangedCode | null, pieces: readonly InnerPiece[]): boolean {
+function ranOn(ranges: [number, number][], changed: ChangedCode | null, pieces: readonly (readonly InnerPiece[])[]): boolean {
   if (!changed) return ranges.length > 0;
   const removal = (n: number[]) => {
     if (n.length !== 2 || n.some((o) => o < 0 || !overlaps(ranges, o, o + 1))) return false;
-    const a = innerAt(pieces, n[0]!);
-    return a !== null && a === innerAt(pieces, n[1]!);
+    return pieces.length > 0 && pieces.every((p) => innerAt(p, n[0]!) === innerAt(p, n[1]!));
   };
   return changed.chars.some(([a, b]) => overlaps(ranges, a, b)) || changed.needs.some(removal);
 }
@@ -988,7 +1093,7 @@ export function touchedAppFiles(coverageDir: string, root: string, appPaths: str
  * more times (#784 round 7). The gate loads each on its own and reads again with `loads`, each run's coverage taken
  * away as many times as its script was evaluated more, on top of the test baseline's (ranMore).
  */
-export function measureTouched(coverageDir: string, root: string, appPaths: string[], only?: readonly string[], hunks?: Readonly<Record<string, readonly ChangedHunkSpots[]>>, baselineDir?: string, loads: readonly LoadRun[] = [], baseOf?: (path: string) => string | null): { touched: string[]; loads: { script: string; extra: number }[] } {
+export function measureTouched(coverageDir: string, root: string, appPaths: string[], only?: readonly string[], hunks?: Readonly<Record<string, readonly ChangedHunkSpots[]>>, baselineDir?: string, loads: readonly LoadRun[] = [], baseOf?: (path: string) => string | null, elsewhere: Readonly<Record<string, readonly ChangedHunkSpots[]>> = {}): { touched: string[]; loads: { script: string; extra: number }[] } {
   const res = appPaths.map((g) => globToRegExp(g));
   const realRoot = realpathSync.native(root);
   const wanted = hunks ? new Set(Object.keys(hunks)) : only ? new Set(only) : null;
@@ -998,13 +1103,21 @@ export function measureTouched(coverageDir: string, root: string, appPaths: stri
   // (a build's map places code by line).
   const changed = new Map<string, { code: ChangedCode; lines: LineSpans }>();
   if (hunks) {
+    // Code moved between app files is no change (round 12): matched against what the PR removed from other app files,
+    // the measured ones and `elsewhere`'s (a deleted file, say), as read at the base.
+    const measured = Object.fromEntries([...wanted!].map((f) => [f, hunks[f]!]));
+    const others = Object.fromEntries(Object.entries(elsewhere).filter(([f]) => !wanted!.has(f) && !f.startsWith('..') && res.some((re) => re.test(f))));
+    const moved = baseOf ? movedCode((f) => textOf(join(realRoot, f), SCRIPT_BYTES), measured, others, baseOf) : { head: new Map(), base: new Map(), left: [] };
+    if (moved === null) throw new CoverageUnreadable(UNPLACEABLE);
     for (const f of wanted!) {
       const text = textOf(join(realRoot, f), SCRIPT_BYTES);
-      const code = text === null ? { chars: [], needs: [] } : codeRanges(text, hunks[f]!, baseOf);
+      const code = text === null ? { chars: [], needs: [] } : codeRanges(text, hunks[f]!, baseOf, { head: moved.head.get(f), base: moved.base });
       // A change it can't place by character holds the PR: never measured by the whole line instead (#784 round 9).
       if (code === null) throw new CoverageUnreadable(UNPLACEABLE);
       changed.set(f, { code, lines: linesOf(text === null ? [0] : lineStarts(text), code.chars) });
     }
+    // Code a deleted (or otherwise unmeasured) app file lost that no other file took: a removal no run can show.
+    for (const f of moved.left) changed.set(f, { code: { chars: [], needs: [[-1]] }, lines: [] });
     if (![...changed.values()].some((s) => s.code.chars.length || s.code.needs.length)) throw new CoverageUnreadable(NOTHING_TO_MEASURE);
   }
   const codeOf = (rel: string): ChangedCode | null => (hunks ? (changed.get(rel)?.code ?? { chars: [], needs: [] }) : null);
@@ -1012,7 +1125,7 @@ export function measureTouched(coverageDir: string, root: string, appPaths: stri
   // Every process's segments of each script under the root: the test runs' summed (`ran`), and what loading accounts
   // for (`loaded`): the test baseline's, plus each load-only run's times how many more times the tests evaluated the
   // script it loaded than the test baseline did (#784 round 7).
-  const scripts = new Map<string, { rel: string; text: string; ran: Segment[]; loaded: Segment[]; pieces: InnerPiece[] }>();
+  const scripts = new Map<string, { rel: string; text: string; ran: Segment[]; loaded: Segment[]; pieces: InnerPiece[][] }>();
   // How many times each script's top level ran, by file: in the test runs and in the test baseline.
   const evals = new Map<string, { rel: string; ran: number; baseline: number }>();
   const collect = (dir: string, into: 'ran' | 'baseline' | 'load', times = 1) => {
@@ -1048,11 +1161,12 @@ export function measureTouched(coverageDir: string, root: string, appPaths: stri
         }
         // A byte-order mark is no part of the script V8 ran: its offsets start after it (#784 round 9).
         const bom = s.text.charCodeAt(0) === 0xfeff ? 1 : 0;
-        // The script's innermost ranges, once (the same in every process that ran it).
+        // The script's innermost ranges in this process, kept per process (round 12: they differ between processes, since
+        // V8 gives a function a process never called one range and a function never compiled none, Q1/I1).
         const pieces: InnerPiece[] = [];
         const segs = ranSegments(script.functions, s.text.length - bom, script.url, pieces)?.map(([a, b, c]): Segment => [a + bom, b + bom, c]);
         if (!segs) continue;
-        if (into === 'ran' && !s.pieces.length) s.pieces = pieces.map(([a, b, x, y]): InnerPiece => [a + bom, b + bom, x + bom, y + bom]);
+        if (into === 'ran') s.pieces.push(pieces.map(([a, b, x, y]): InnerPiece => [a + bom, b + bom, x + bom, y + bom]));
         if (into === 'ran') s.ran.push(...segs);
         else s.loaded.push(...segs.map(([a, b, c]): Segment => [a, b, c * times]));
       }
@@ -1066,6 +1180,7 @@ export function measureTouched(coverageDir: string, root: string, appPaths: stri
   // For each source a build's map names: the lines whose code ran.
   const mappedRan = new Map<string, Set<number>>();
   for (const [file, { rel, text, ran, loaded, pieces }] of scripts) {
+    // (pieces: one list per process that ran the script.)
     const ranges = ranMore(ran, [loaded]);
     if (!ranges.length) continue;
     if (isApp(rel)) {
@@ -1104,6 +1219,8 @@ export interface TouchedRequest {
   appPaths: string[];
   only: string[];
   hunks: Record<string, ChangedHunkSpots[]>;
+  /** Every other file's hunks that took text away (round 12): code moved from an app file among them is no change. */
+  elsewhere?: Record<string, ChangedHunkSpots[]>;
   /** The load-only runs (#784 rounds 6, 7), once the scripts to load are known. */
   loads?: LoadRun[];
   /**
