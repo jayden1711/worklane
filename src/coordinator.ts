@@ -363,7 +363,8 @@ export class Coordinator extends AutomationRuns {
   private maybeNightly() {
     const last = this.d.log.read(0, ['nightly.queued']).at(-1)?.payload as { day: string } | undefined;
     if (!nightlyDue(this.d.cfg.tests.nightly_at, last?.day ?? null)) return;
-    const jobs = (this.d.nightly ?? queueNightly)(this.d.repo, this.d.cfg, this.d.log.path, this.d.instance, this.d.commandsAs);
+    // The coordinator's own options (#890 round 20): the root resolved at the start and the task directory kept.
+    const jobs = (this.d.nightly ?? queueNightly)(this.d.repo, this.d.cfg, this.d.log.path, this.d.instance, this.d.commandsAs, this.wt);
     this.emit('nightly.queued', { day: new Date().toLocaleDateString('en-CA'), jobs: jobs.map((j) => j.id) });
   }
 

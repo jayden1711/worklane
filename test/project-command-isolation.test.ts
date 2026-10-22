@@ -14,7 +14,7 @@ import { randomBytes } from 'node:crypto';
 // Namespace imports: run against the code before #713 (the fail-without), a name it lacks is undefined, not a load error.
 import * as osAdapter from '../src/os/index.js';
 import { sh } from '../src/coordinator/shared.js';
-import { createWorktree, createWorktreeAsync } from '../src/worktrees.js';
+import { createWorktree, createWorktreeAsync, worktreeOptions } from '../src/worktrees.js';
 import * as instance from '../src/instance.js';
 import type { CredentialsFile } from '../src/instance.js';
 import type { ProjectRunAs } from '../src/os/index.js';
@@ -132,7 +132,7 @@ test('a key a worktree setup step prints is not in its setup error', { skip: !po
   git('-c', 'user.email=a@example.com', '-c', 'user.name=A', '-c', 'commit.gpgsign=false', 'commit', '-q', '-m', 'init');
   const t = token();
   // Split in the step's text (its config), whole in what it prints.
-  const o = { repo, root: 'wt', stateDir: join(repo, 'state'), setup: [`echo "auth failed for ${t.slice(0, 7)}""${t.slice(7)}" >&2; exit 1`] };
+  const o = worktreeOptions({ repo, root: 'wt', stateDir: join(repo, 'state'), setup: [`echo "auth failed for ${t.slice(0, 7)}""${t.slice(7)}" >&2; exit 1`], taskDir: null });
   const sync = createWorktree(o, 'x', 'x', 'main').setupErrors;
   const async = (await createWorktreeAsync(o, 'y', 'y', 'main')).setupErrors;
   for (const e of [...sync, ...async]) {

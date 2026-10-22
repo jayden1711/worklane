@@ -40,7 +40,7 @@ import { carriedHead, mergeInBase, type MergeIn } from '../pr-hygiene.js';
 import { alertTarget, directPushKey, directPushText, ownerMentions } from '../direct-push-alert.js';
 import { redactString } from '../events/redact.js';
 import { takeOpsPost } from '../watchdog/post.js';
-import { createWorktree, createWorktreeAsync, removeWorktree, removeWorktreeAsync } from '../worktrees.js';
+import { createWorktree, createWorktreeAsync, removeWorktree, removeWorktreeAsync, unlockWorktree, WORKTREE_LOCK_REASON } from '../worktrees.js';
 import { approveMerge, mergeApproval } from '../decide.js';
 import { isOwner, mayAnswerKind, type Role } from '../dashboard-auth.js';
 import { isRecordedAck } from '../ack-reason.js';
@@ -1443,9 +1443,12 @@ export abstract class MergeFlow extends FixRuns {
       this.emit('coordinator.error', { instance: this.d.instance, where: `revert ${name}`, kind: 'error', message: why.slice(0, 500) });
       return { why: why.slice(0, 500) };
     };
+    unlockWorktree(this.d.repo, dir);
     spawnSync('git', ['worktree', 'remove', '--force', dir], { cwd: this.d.repo });
     try {
       this.git(this.d.repo, 'worktree', 'add', '-q', '--detach', dir, tip);
+      // Locked against a prune run inside an agent's sandbox, where it is hidden (src/worktrees.ts WORKTREE_LOCK_REASON).
+      this.git(this.d.repo, 'worktree', 'lock', '--reason', WORKTREE_LOCK_REASON, dir);
       const parents = this.git(this.d.repo, 'rev-list', '--parents', '-n', '1', sha).split(' ').length - 1;
       // A range: newest first (git revert's order), into one commit (no pre-commit or commit-msg hook, as git revert itself).
       const rv = range
@@ -1464,6 +1467,7 @@ export abstract class MergeFlow extends FixRuns {
       const pr = await this.d.backlog.openPr(branch, this.branch, title, body, { headSha: head });
       return { url: pr.url, number: pr.number };
     } finally {
+      unlockWorktree(this.d.repo, dir);
       spawnSync('git', ['worktree', 'remove', '--force', dir], { cwd: this.d.repo });
       spawnSync('git', ['worktree', 'prune'], { cwd: this.d.repo });
     }

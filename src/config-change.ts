@@ -9,7 +9,7 @@ import { parseDocument } from 'yaml';
 import { BRAND } from './brand.js';
 import { configFrom, loadConfig, type Config } from './config/load.js';
 import { projectStateDir } from './guardrails/context.js';
-import { createWorktree, removeWorktree, type WorktreeOptions } from './worktrees.js';
+import { createWorktree, removeWorktree, worktreeOptions, type WorktreeOptions } from './worktrees.js';
 import { checkedPush } from './push-check.js';
 import { listedModel, MODEL_TIERS } from './model-routing.js';
 import { ROUTING } from './routing.js';
@@ -173,7 +173,8 @@ export function proposeConfigChange(o: { root: string; cfg: Config; values: Part
   const stamp = (o.io?.now ?? (() => new Date()))().toISOString().replace(/[-:]/g, '').replace(/\..*$/, '').replace('T', '-');
   const branch = `${CONFIG_BRANCH_PREFIX}${stamp}`;
   const head = git(['rev-parse', `origin/${base}`], o.root).stdout.trim();
-  const wt: WorktreeOptions = { repo: o.root, root: join(projectStateDir(o.root), 'worktrees'), stateDir: projectStateDir(o.root), setup: [] };
+  // Through worktreeOptions (#890 round 20): the root resolved once, here; no task file is written for this worktree.
+  const wt: WorktreeOptions = worktreeOptions({ repo: o.root, root: join(projectStateDir(o.root), 'worktrees'), stateDir: projectStateDir(o.root), setup: [], taskDir: null });
   const name = `config-${stamp}`;
   const path = createWorktree(wt, name, branch, head).path;
   try {
