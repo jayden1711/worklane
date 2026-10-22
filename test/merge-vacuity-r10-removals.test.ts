@@ -64,7 +64,7 @@ const SWITCH = "export function role(r) {\n  switch (r) {\n    case 'guest':\n  
 const BREAK = "export function role(r) {\n  let out = 'none';\n  switch (r) {\n    case 'guest':\n      out = 'denied';\n      break;\n    case 'admin':\n      out = 'granted';\n  }\n  return out;\n}\n";
 
 /** Each: the file, before, after, a test that takes only the other path (holds), a test that takes the changed one (merges). */
-const CASES: Record<string, { file: string; before: string; after: string; hold: string; merge: string }> = {
+const CASES: Record<string, { file: string; before: string; after: string; hold: string; merge: string; falseHold?: true }> = {
   'E1: an untaken ternary arm shortened by a removal (-x * 2 to -x)': {
     file: 'abs.js',
     before: 'export function abs(x) {\n  return x > 0 ? x : -x * 2;\n}\n',
@@ -85,6 +85,9 @@ const CASES: Record<string, { file: string; before: string; after: string; hold:
     after: 'export function clamp(x) {\n  if (x < 0) return 1\n  return x\n}\n',
     hold: calls('clamp.js', 'clamp', 'clamp(5)', '5'),
     merge: calls('clamp.js', 'clamp', 'clamp(-5)', '1'),
+    // Round 11: a removal needs both its sides in one innermost V8 range; the `1` ends the if's arm and the code after
+    // is the next statement, so this control holds (a false hold, fail closed).
+    falseHold: true,
   },
   "A1a: a case's return removed, so it falls through": {
     file: 'role.js',
@@ -92,6 +95,9 @@ const CASES: Record<string, { file: string; before: string; after: string; hold:
     after: SWITCH.replace("      return 'denied';\n", ''),
     hold: calls('role.js', 'role', "role('admin')", "'granted'"),
     merge: calls('role.js', 'role', "role('guest')", "'granted'"),
+    // Round 11: code removed from the end of a statement list (here, before the next `case`) never counts, since V8
+    // keeps no range there (J1-J3), so this control holds (a false hold, fail closed). So do A1b and A1c.
+    falseHold: true,
   },
   "A1b: a case's break removed": {
     file: 'role.js',
@@ -99,6 +105,7 @@ const CASES: Record<string, { file: string; before: string; after: string; hold:
     after: BREAK.replace('      break;\n', ''),
     hold: calls('role.js', 'role', "role('admin')", "'granted'"),
     merge: calls('role.js', 'role', "role('guest')", "'granted'"),
+    falseHold: true,
   },
   "A1c: a case's break commented out": {
     file: 'role.js',
@@ -106,6 +113,7 @@ const CASES: Record<string, { file: string; before: string; after: string; hold:
     after: BREAK.replace('      break;\n', '      // break;\n'),
     hold: calls('role.js', 'role', "role('admin')", "'granted'"),
     merge: calls('role.js', 'role', "role('guest')", "'granted'"),
+    falseHold: true,
   },
 };
 
@@ -114,9 +122,9 @@ for (const [name, c] of Object.entries(CASES)) {
     const d = await decided({ [`src/${c.file}`]: c.before }, { [`src/${c.file}`]: c.after, 'test/x.test.js': c.hold });
     assert.deepEqual([d.auto, d.reasons], [false, [ranNone(`src/${c.file}`)]]);
   });
-  test(`control: ${name}: a test that takes the changed path merges`, async () => {
+  test(`control: ${name}: a test that takes the changed path ${c.falseHold ? 'still holds (a false hold since round 11)' : 'merges'}`, async () => {
     const d = await decided({ [`src/${c.file}`]: c.before }, { [`src/${c.file}`]: c.after, 'test/x.test.js': c.merge });
-    assert.deepEqual([d.auto, d.reasons], [true, []]);
+    assert.deepEqual([d.auto, d.reasons], c.falseHold ? [false, [ranNone(`src/${c.file}`)]] : [true, []]);
   });
 }
 

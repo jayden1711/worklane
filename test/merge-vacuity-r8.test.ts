@@ -188,11 +188,13 @@ test('precision, must hold: the same security check commented out instead of rem
   assert.deepEqual([d.auto, d.reasons], [false, [ranNone('test/access.test.js', 'src/access.js')]]);
 });
 
-test('precision, control: the same removal, a test that reaches the code in its place merges', async () => {
+test('precision, the same removal with a test that reaches the code in its place: held by design (round 11: removed code holding `if` crosses a boundary)', async () => {
+  // Round 8's control, which merged. Since round 11 a removed `if` statement never counts as run (a false hold, fail
+  // closed: the owner decides).
   const access = "export function access(user, cache) {\n  if (cache.has(user.id)) {\n    return cache.get(user.id);\n  }\n  if (!user.allowed) throw new Error('denied');\n  return 'computed';\n}\n";
   const computes = `${H}import { access } from '../src/access.js';\ntest('computed', () => { assert.equal(access({ id: 2 }, new Map()), 'computed'); });\n`;
   const { d } = await prDecided({ 'src/access.js': access }, { 'src/access.js': access.replace("  if (!user.allowed) throw new Error('denied');\n", ''), 'test/access.test.js': computes });
-  assert.deepEqual([d.auto, d.reasons], [true, []]);
+  assert.deepEqual([d.auto, d.reasons], [false, [ranNone('test/access.test.js', 'src/access.js')]]);
 });
 
 test('precision, control: the changed body of a single-line `if` that runs merges', async () => {

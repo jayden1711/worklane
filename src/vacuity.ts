@@ -248,7 +248,7 @@ type Segment = [number, number, number];
  * and the one suffix Node's own TypeScript type stripping adds (`\n\n//# sourceURL=<the script's URL>`: the stripped
  * text keeps every offset). Null otherwise (it ran other text: a loader transformed it), so it counts for nothing.
  */
-function ranSegments(fns: V8Coverage['result'][number]['functions'], length: number, url: string): Segment[] | null {
+function ranSegments(fns: V8Coverage['result'][number]['functions'], length: number, url: string, inner?: InnerPiece[]): Segment[] | null {
   const top = fns.find((f) => f.functionName === '' && f.ranges[0]?.startOffset === 0);
   const end = top?.ranges[0]!.endOffset;
   if (end !== length && end !== length + `\n\n//# sourceURL=${url}`.length) return null;
@@ -270,13 +270,31 @@ function ranSegments(fns: V8Coverage['result'][number]['functions'], length: num
       if (rs[j]!.endOffset > a) stack.push(rs[j]!);
       j++;
     }
-    const inner = stack.at(-1);
-    if (!inner || inner.count <= 0) continue;
+    const top2 = stack.at(-1);
+    if (top2) inner?.push([a, b, top2.startOffset, top2.endOffset]);
+    if (!top2 || top2.count <= 0) continue;
     const last = out.at(-1);
-    if (last && last[1] === a && last[2] === inner.count) last[1] = b;
-    else out.push([a, b, inner.count]);
+    if (last && last[1] === a && last[2] === top2.count) last[1] = b;
+    else out.push([a, b, top2.count]);
   }
   return out;
+}
+
+/** A piece [start, end) of a script and the innermost V8 range around it, [rangeStart, rangeEnd) (#784 round 11). */
+type InnerPiece = [number, number, number, number];
+
+/** The innermost V8 range around offset `o` of a script (`pieces` from ranSegments), as `start:end`, or null. */
+function innerAt(pieces: readonly InnerPiece[], o: number): string | null {
+  let lo = 0;
+  let hi = pieces.length - 1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    const [a, b, s, e] = pieces[mid]!;
+    if (o < a) hi = mid - 1;
+    else if (o >= b) lo = mid + 1;
+    else return `${s}:${e}`;
+  }
+  return null;
 }
 
 /**
@@ -467,12 +485,11 @@ export interface ChangedCode {
 }
 
 /**
- * Removed code that crosses a block or clause boundary (#784 round 10): it may have run on a path the code on its sides
- * never shows, so it never counts as run.
+ * Removed code that crosses a block or clause boundary, or holds a construct that opens a sub-statement or a nested
+ * function (#784 rounds 10, 11: a braceless `if`/`for`/`while` body, a concise arrow): it may have run on a path the
+ * code on its sides never shows, so it never counts as run.
  */
-const BOUNDARY = /[{}?:]|\|\||&&|\bcase\b|\bdefault\b|\belse\b|\bcatch\b|\bfinally\b/;
-/** Code that starts a sibling block or clause: a removal right before it is measured on both sides. */
-const CLAUSE_START = /^(?:\}|case\b|default\b|else\b|catch\b|finally\b)/;
+const BOUNDARY = /[{}?:]|\|\||&&|=>|\b(?:case|default|else|catch|finally|if|for|while|do|with|function|class|switch|try)\b/;
 
 /** Why the gate can't measure a change it can't place by character (fixed text; the PR holds). */
 export const UNPLACEABLE = "a change too large to align character by character, so where it changed code can't be told";
@@ -588,10 +605,10 @@ function alignHunk(aLines: readonly string[][], rLines: readonly string[][]): st
  *   block comment or JSDoc is comment, never code read out of context; a base file it can't read, or whose lines aren't
  *   the removed ones, makes the change unplaceable (null).
  * - Code taken away and none given in its place (a removal, code commented out) counts only when the code characters
- *   on its sides ran (round 10): both, when it sat within a line; the one on its line, at a line's end or start; for
- *   whole lines, the code after it, or both sides when that starts a sibling block or clause (`}`, `case`, `else`, ...).
- *   Removed code that crosses a block or clause boundary (BOUNDARY) never counts. A removal inside a block comment
- *   (nothing added) is none.
+ *   on BOTH its sides ran within the same innermost V8 range (round 11: ranOn), within a line, at a line's end or start
+ *   or as whole lines alike. It never counts when the removed code crosses a block or clause boundary or opens a
+ *   sub-statement or nested function (BOUNDARY), or when it ended a statement list (the code after it is `}`, `case` or
+ *   `default`: V8 keeps no range there). A removal inside a block comment (nothing added) is none.
  * Null: a hunk too large to align, or a removed side it can't place, which the caller holds on.
  */
 export function codeRanges(text: string, hunks: readonly ChangedHunkSpots[], baseOf?: (path: string) => string | null): ChangedCode | null {
@@ -624,6 +641,10 @@ export function codeRanges(text: string, hunks: readonly ChangedHunkSpots[], bas
     while (q >= 0 && !mask[q]) q--;
     return q;
   };
+  // Whether head offset `q` ends a statement list (a `}`, or the `case`/`default` of the next clause): V8 drops the
+  // continuation range of a list's last statement, so code removed from a list's end shows nowhere whether it was
+  // reached (round 11: J1-J3, a jump just before it).
+  const endsList = (q: number) => q >= 0 && (text[q] === '}' || /^(?:case|default)\b/.test(text.slice(q, q + 8)));
   for (const h of hunks) {
     // The added side: its characters at the head, whitespace left out.
     const aOff: number[] = [];
@@ -674,31 +695,19 @@ export function codeRanges(text: string, hunks: readonly ChangedHunkSpots[], bas
     let ri = 0;
     // One gap: a run of characters the change took or gave, or kept but turned from code to comment or back.
     let addedCode = false;
-    // The removed code characters of the gap (their places in rText), where it began at the head, and the last kept
-    // removed-side character before it.
+    // The removed code characters of the gap (their places in rText), and where it began at the head.
     let removed: number[] = [];
     let gapAt = -1;
-    let lastKept = -1;
-    const close = (nextKept?: number) => {
+    const close = () => {
       // Code taken away and none given in its place (a removal, code commented out): it counts only where the code on
-      // its sides ran (round 10). Code given in its place is measured itself.
+      // BOTH its sides ran, within the same innermost V8 range (round 11: ranOn); never across a boundary. Code given
+      // in its place is measured itself.
       if (removed.length && !addedCode && !(pureRemoval && h.at >= 1 && h.at <= lines && inComment[h.at - 1])) {
-        const first = removed[0]!;
-        const last = removed.at(-1)!;
         let code = '';
-        for (let i = first; i <= last; i++) code += rMask[i] ? rText[i] : ' ';
+        for (let i = removed[0]!; i <= removed.at(-1)!; i++) code += rMask[i] ? rText[i] : ' ';
         const p = ai < aOff.length ? aOff[ai]! : after;
-        const before = codeBefore(gapAt >= 0 ? gapAt : p);
         const next = codeFrom(p);
-        const onLineBefore = lastKept >= 0 && !rText.slice(lastKept, first).includes('\n');
-        const onLineAfter = nextKept !== undefined && !rText.slice(last, nextKept).includes('\n');
-        let need: number[];
-        if (BOUNDARY.test(code)) need = [-1];
-        else if (onLineBefore && onLineAfter) need = [before, next];
-        else if (onLineBefore) need = [before];
-        else if (onLineAfter) need = [next];
-        else need = next < 0 || CLAUSE_START.test(text.slice(next, next + 8)) ? [before, next] : [next];
-        needs.push(need);
+        needs.push(BOUNDARY.test(code) || endsList(next) ? [-1] : [codeBefore(gapAt >= 0 ? gapAt : p), next]);
       }
       addedCode = false;
       removed = [];
@@ -714,10 +723,7 @@ export function codeRanges(text: string, hunks: readonly ChangedHunkSpots[], bas
             push(aOff[ai]!);
             addedCode = true;
           } else removed.push(rIdx[ri]!);
-        } else {
-          close(rIdx[ri]!);
-          lastKept = rIdx[ri]!;
-        }
+        } else close();
         ai++;
         ri++;
       } else if (op === '+') {
@@ -753,11 +759,18 @@ function linesOf(starts: number[], ranges: CharRanges): LineSpans {
 /**
  * Whether code ran (`ranges`, V8's innermost block counts: an untaken branch, the other arm of a `?:`, an unevaluated
  * right side of `??`/`||`/`&&` are ranges of their own) on any of `changed`, the changed characters (#784 round 8);
- * null: anywhere.
+ * null: anywhere. A removal (`needs`, its two sides) counts only when both sides ran and lie in the same innermost V8
+ * range (`pieces`, round 11): a jump just before it, a hoisted declaration or a closing `}` just after it, the end of an
+ * arm, or code only loading ran, never stands in for the removed code.
  */
-function ranOn(ranges: [number, number][], changed: ChangedCode | null): boolean {
+function ranOn(ranges: [number, number][], changed: ChangedCode | null, pieces: readonly InnerPiece[]): boolean {
   if (!changed) return ranges.length > 0;
-  return changed.chars.some(([a, b]) => overlaps(ranges, a, b)) || changed.needs.some((n) => n.every((o) => o >= 0 && overlaps(ranges, o, o + 1)));
+  const removal = (n: number[]) => {
+    if (n.length !== 2 || n.some((o) => o < 0 || !overlaps(ranges, o, o + 1))) return false;
+    const a = innerAt(pieces, n[0]!);
+    return a !== null && a === innerAt(pieces, n[1]!);
+  };
+  return changed.chars.some(([a, b]) => overlaps(ranges, a, b)) || changed.needs.some(removal);
 }
 
 const B64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
@@ -893,26 +906,23 @@ export function measureTouched(coverageDir: string, root: string, appPaths: stri
   const isApp = (rel: string) => !rel.startsWith('..') && res.some((re) => re.test(rel)) && (!wanted || wanted.has(rel));
   // Each changed file's changed code characters, from its text at the head (the worktree's), and the lines they are on
   // (a build's map places code by line).
-  const changed = new Map<string, { code: ChangedCode; lines: LineSpans; needLines: number[][] }>();
+  const changed = new Map<string, { code: ChangedCode; lines: LineSpans }>();
   if (hunks) {
     for (const f of wanted!) {
       const text = textOf(join(realRoot, f), SCRIPT_BYTES);
       const code = text === null ? { chars: [], needs: [] } : codeRanges(text, hunks[f]!, baseOf);
       // A change it can't place by character holds the PR: never measured by the whole line instead (#784 round 9).
       if (code === null) throw new CoverageUnreadable(UNPLACEABLE);
-      const starts = text === null ? [0] : lineStarts(text);
-      const lineOf = (o: number) => (o < 0 ? 0 : linesOf(starts, [[o, o + 1]])[0]![0]);
-      changed.set(f, { code, lines: linesOf(starts, code.chars), needLines: code.needs.map((n) => n.map(lineOf)) });
+      changed.set(f, { code, lines: linesOf(text === null ? [0] : lineStarts(text), code.chars) });
     }
     if (![...changed.values()].some((s) => s.code.chars.length || s.code.needs.length)) throw new CoverageUnreadable(NOTHING_TO_MEASURE);
   }
   const codeOf = (rel: string): ChangedCode | null => (hunks ? (changed.get(rel)?.code ?? { chars: [], needs: [] }) : null);
   const spansOf = (rel: string): LineSpans | null => (hunks ? (changed.get(rel)?.lines ?? []) : null);
-  const needLinesOf = (rel: string): number[][] => changed.get(rel)?.needLines ?? [];
   // Every process's segments of each script under the root: the test runs' summed (`ran`), and what loading accounts
   // for (`loaded`): the test baseline's, plus each load-only run's times how many more times the tests evaluated the
   // script it loaded than the test baseline did (#784 round 7).
-  const scripts = new Map<string, { rel: string; text: string; ran: Segment[]; loaded: Segment[] }>();
+  const scripts = new Map<string, { rel: string; text: string; ran: Segment[]; loaded: Segment[]; pieces: InnerPiece[] }>();
   // How many times each script's top level ran, by file: in the test runs and in the test baseline.
   const evals = new Map<string, { rel: string; ran: number; baseline: number }>();
   const collect = (dir: string, into: 'ran' | 'baseline' | 'load', times = 1) => {
@@ -943,13 +953,16 @@ export function measureTouched(coverageDir: string, root: string, appPaths: stri
         if (!s) {
           const text = textOf(file, SCRIPT_BYTES);
           if (text === null) continue;
-          s = { rel, text, ran: [], loaded: [] };
+          s = { rel, text, ran: [], loaded: [], pieces: [] };
           scripts.set(file, s);
         }
         // A byte-order mark is no part of the script V8 ran: its offsets start after it (#784 round 9).
         const bom = s.text.charCodeAt(0) === 0xfeff ? 1 : 0;
-        const segs = ranSegments(script.functions, s.text.length - bom, script.url)?.map(([a, b, c]): Segment => [a + bom, b + bom, c]);
+        // The script's innermost ranges, once (the same in every process that ran it).
+        const pieces: InnerPiece[] = [];
+        const segs = ranSegments(script.functions, s.text.length - bom, script.url, pieces)?.map(([a, b, c]): Segment => [a + bom, b + bom, c]);
         if (!segs) continue;
+        if (into === 'ran' && !s.pieces.length) s.pieces = pieces.map(([a, b, x, y]): InnerPiece => [a + bom, b + bom, x + bom, y + bom]);
         if (into === 'ran') s.ran.push(...segs);
         else s.loaded.push(...segs.map(([a, b, c]): Segment => [a, b, c * times]));
       }
@@ -962,11 +975,11 @@ export function measureTouched(coverageDir: string, root: string, appPaths: stri
   const touched = new Set<string>();
   // For each source a build's map names: the lines whose code ran.
   const mappedRan = new Map<string, Set<number>>();
-  for (const [file, { rel, text, ran, loaded }] of scripts) {
+  for (const [file, { rel, text, ran, loaded, pieces }] of scripts) {
     const ranges = ranMore(ran, [loaded]);
     if (!ranges.length) continue;
     if (isApp(rel)) {
-      if (ranOn(ranges, codeOf(rel))) touched.add(rel);
+      if (ranOn(ranges, codeOf(rel), pieces)) touched.add(rel);
       continue;
     }
     for (const [src, lines] of mappedLines(file, ranges, text, realRoot, budget)) {
@@ -976,9 +989,9 @@ export function measureTouched(coverageDir: string, root: string, appPaths: stri
   }
   for (const [src, ran] of mappedRan) {
     if (!isApp(src) || touched.has(src)) continue;
+    // A build's sources are placed by line only, so a removal there never counts (round 11: no V8 range to test its sides).
     const s = spansOf(src);
-    const removals = needLinesOf(src).some((ls) => ls.every((l) => ran.has(l)));
-    if (!s ? ran.size > 0 : removals || s.some(([a, b]) => [...ran].some((l) => l >= a && l <= b))) touched.add(src);
+    if (!s ? ran.size > 0 : s.some(([a, b]) => [...ran].some((l) => l >= a && l <= b))) touched.add(src);
   }
   // Every script the tests evaluated more often than the test baseline did: what each run as it loaded is still in
   // `ran` until it is loaded on its own (the gate does, then reads again with `loads`).

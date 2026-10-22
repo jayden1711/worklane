@@ -453,6 +453,7 @@ export const SELF_MODIFICATION_PARTS: { what: string; globs: string[] }[] = oneP
       'test/merge-vacuity-bounds.test.ts', 'test/merge-vacuity-precision.test.ts', 'test/merge-vacuity-r5.test.ts', 'test/merge-vacuity-r6.test.ts',
       'test/merge-vacuity-r7.test.ts', 'test/merge-vacuity-r8.test.ts', 'test/merge-vacuity-r9-tip.test.ts', 'test/merge-vacuity-r9-precision.test.ts', 'test/merge-vacuity-r9-limits.test.ts',
       'test/merge-vacuity-r10-shutdown.test.ts', 'test/merge-vacuity-r10-removals.test.ts', 'test/merge-vacuity-r10-cap.test.ts', 'test/vacuity-tip.ts',
+      'test/merge-vacuity-r11-removals.test.ts',
       // The test that keeps the security pages' citations true, the adversarial suite of hostile PRs (its runner, its
       // cases, controls and todo list), and the test that holds these locks (#858).
       'test/docs-guardrails.test.ts',

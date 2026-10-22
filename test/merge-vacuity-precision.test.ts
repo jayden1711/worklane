@@ -132,9 +132,14 @@ test('attack 4, must hold: a bundle map naming two sources, the PR changes the o
   assert.deepEqual([d.auto, d.reasons], [false, [ranNone('test/fa.test.js', 'src/b.js')]]);
 });
 
-test('attack 4, control: the same bundle, the PR changes the source whose code ran', async () => {
-  const { d } = await decided(pr({ 'src/a.js': SRC_A.replace('x + 1', 'x + 0 + 1'), 'src/b.js': SRC_B }, { 'src/a.js': SRC_A, 'dist/bundle.js': BUNDLE, 'dist/bundle.js.map': BUNDLE_MAP, 'test/fa.test.js': FA_TEST }));
+test('attack 4, control: the same bundle, the PR adds code to the source whose code ran', async () => {
+  const { d } = await decided(pr({ 'src/a.js': SRC_A, 'src/b.js': SRC_B }, { 'src/a.js': SRC_A.replace('x + 1', 'x + 0 + 1'), 'dist/bundle.js': BUNDLE, 'dist/bundle.js.map': BUNDLE_MAP, 'test/fa.test.js': FA_TEST }));
   assert.deepEqual([d.auto, d.reasons], [true, []]);
+});
+
+test('attack 4, control: the same bundle, a removal from the source whose code ran still holds (a false hold since round 11: a build has no V8 range per source character)', async () => {
+  const { d } = await decided(pr({ 'src/a.js': SRC_A.replace('x + 1', 'x + 0 + 1'), 'src/b.js': SRC_B }, { 'src/a.js': SRC_A, 'dist/bundle.js': BUNDLE, 'dist/bundle.js.map': BUNDLE_MAP, 'test/fa.test.js': FA_TEST }));
+  assert.deepEqual([d.auto, d.reasons], [false, [ranNone('test/fa.test.js', 'src/a.js')]]);
 });
 
 // ---- (attack 6, attack 11) the coordinator's thread: the coverage read and the worktree's setup run off it
