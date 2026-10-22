@@ -167,39 +167,50 @@ export const ISOLATED = Symbol.for('test-isolation');
 //     file, or a whole argument (`env /usr/bin/sudo`, `timeout 5 /usr/bin/sudo`, `X=/usr/bin/sudo`), a refusal
 //     (thrown) when the stack names a test file and its stand-in otherwise (doctor runs gitleaks by path); as a word of
 //     a command line (a -c script, exec's line, an env -S string), a refusal whoever asked;
+//   - for a literal `PATH=` or `export PATH=` in a command line (exec's line, a -c script), whoever asked: the
+//     stand-ins that value needs, inserted ahead of its first entry that would find a machine host tool
+//     (`PATH=/usr/bin sh x.sh`: x.sh's `sudo` is a stand-in); a refusal for a value it can't read (a relative or empty
+//     entry, a variable other than $PATH), and for one that needs stand-ins in an env -S string (not rewritten);
 //   - a refusal for `env -i` (or `-u PATH`) with no PATH=, `command -p` and a login shell, each when a host tool's name
 //     is a word of the command line (a path that only ends in one, ~/.config/gh, is not), and in argument form also
 //     behind a wrapper (`timeout 5 env -i sudo`, `nice bash -lc ...`); the stand-ins first in a PATH= given to `env`
-//     as an argument, there too;
+//     as an argument, there too. env's short options are read in a cluster too (-vS, -iS); an env -S string with an
+//     escape (\_) or a ${VAR}, which the word splitter doesn't read, is refused;
 //   - off CI, no GITHUB_ACTIONS: deleted from a snapshot of its environment (each key read once), emptied in env's
 //     assignments, refused in a command line or an env -S string that names it.
-// Arguments that aren't strings are made strings, as Node makes them, before any of this.
+// Arguments that aren't strings are made strings, as Node makes them, before any of this, and the options object is
+// read once (every key a for-in reaches and every option Node reads, accessors included) into the snapshot Node gets.
 // Each stand-in records its call (hostCalls()) and exits 1, as a tool that can't answer; it runs nothing else.
 // process.binding's spawn_sync and process_wrap are refused. The pinned exceptions, never-grow, hold only while this
-// process's environment had GITHUB_ACTIONS=true when this preload ran (the gate main's acceptance runs use), and only
+// process's environment had GITHUB_ACTIONS=true when this preload ran and it read no --env-file (the gate main's
+// acceptance runs use), and only
 // for process.argv[1]'s test file when node ran no code of its own before it (no -e/-p, no --import, --require or
 // loader but this preload by its path, no --env-file, in argv or NODE_OPTIONS); a stack frame's name never keys them. The file in
 // REAL_HOST_TOOLS_ON_PURPOSE starts its children untouched, and machineTool() hands the CI acceptance runs in
 // MACHINE_TOOLS_ON_PURPOSE the machine's own tool, found on this process's PATH as loaded; off CI it gives the
 // stand-in. So a run whose environment lacks GITHUB_ACTIONS=true never takes a real tool through them.
 //
-// LIMIT: what a child does with its own PATH is its own. A script that sets PATH itself (several root scripts export
-// /usr/sbin:/usr/bin:...; claude-account.sh appends /usr/sbin; worklane-testrun.sh and ci-runner/reset.sh reset it),
-// an inline PATH= in a command line (`env PATH=/usr/bin sudo` in a shell line, `PATH=/usr/bin:/bin; sudo`), a login
-// shell or `env -i` whose command line names no host tool (it calls a function that does), or a tool named by path
-// inside a script file, finds the machine's tool past this. A child Node process without this preload inherits the
-// stand-ins on its PATH but none of the refusals, and a PATH it sets itself gets no stand-ins. So does code that runs
-// before this preload (an --import or --require ahead of it keeps the raw functions), code that replaces these
-// builtins or patches the exports after load, a Worker (its own module instances), child_process.ChildProcess used
-// directly, or a tool under another name that is a copy or a hard link (only a symbolic link is followed). An
-// interpreter's own inline program (perl -e, awk, python3 -c: their quoting isn't the shell's) or a script on stdin is
-// not read either. The stack decides only whether a by-path argument is refused or stood in. A run whose environment
-// says GITHUB_ACTIONS=true (CI, or anyone who sets it) holds the exceptions, as main's acceptance runs do; there a test
-// can start `node --import ./dist/test/isolate.js <a pinned test file>` and that file runs with its exceptions, as it
-// would on its own. Off CI, GITHUB_ACTIONS is deleted from what a child gets, emptied in env's assignments, and refused
-// in a command line or env -S that spells it; a command line that builds the name at run time (`export $V`), or a
-// script file that sets it, is its own. Since the owner's decision (2026-10-21): routes that need deliberately hostile
-// test code (a test written to get around this) are named limits; a route a test could take by accident blocks.
+// LIMIT, reachable by accident: a script that sets its own PATH. Several root scripts export /usr/sbin:/usr/bin:...,
+// claude-account.sh appends /usr/sbin, worklane-testrun.sh and ci-runner/reset.sh reset it; a test that runs such a
+// script without rewriting its `export PATH=` line hands the script's own `sudo` (by name) the machine's. No
+// child_process preload can close this: the PATH is set inside the child, after it starts. By the owner's decision
+// (2026-10-21) it is a named limit, and its structural fix is the approved wl-dev migration (tests run as an
+// unprivileged user with no sudo). The same holds for a tool named by path inside a script file, and for a login shell
+// or `env -i` whose command line names no host tool (it calls a function that does).
+// LIMIT, needing deliberately hostile test code (named limits since the owner's decision of 2026-10-21; a route a test
+// could take by accident blocks): a PATH built at run time (`P=/usr/bin; PATH=$P sudo`, `eval`), a child Node process
+// without this preload (it inherits the stand-ins on its PATH but none of the refusals, and a PATH it sets itself gets
+// no stand-ins), code that runs before this preload (an --import or --require ahead of it keeps the raw functions),
+// code that replaces these builtins or patches the exports after load, a Worker (its own module instances),
+// child_process.ChildProcess used directly, or a tool under another name that is a copy or a hard link (only a symbolic
+// link is followed). An interpreter's own inline program (perl -e, awk, python3 -c: their quoting isn't the shell's) or
+// a script on stdin is not read either. The stack decides only whether a by-path argument is refused or stood in. A run
+// whose environment says GITHUB_ACTIONS=true (CI, or anyone who sets it) holds the exceptions, as main's acceptance
+// runs do; there a test can start `node --import ./dist/test/isolate.js <a pinned test file>` and that file runs with
+// its exceptions, as it would on its own. Off CI, GITHUB_ACTIONS is deleted from what a child gets, emptied in env's
+// assignments, and refused in a command line or env -S that spells it, and a child that read an --env-file is never on
+// CI (nor are its children); but a command line that builds the name at run time (`export $V`, G3), or a script file
+// that sets it, is its own.
 // `id` and `getent` are not stood in: they only read the user database, and scripts use their answers.
 
 /**
@@ -252,7 +263,15 @@ const MACHINE_DIRS = ['/usr/local/sbin', '/usr/local/bin', '/usr/sbin', '/usr/bi
 /** This process's PATH as the shell gave it, before any test changes it. */
 const PATH_AT_LOAD = process.env.PATH ?? '';
 /** Whether this process runs on CI, as this preload found it (a test can't turn the exceptions on later). */
-const ON_CI = process.env.GITHUB_ACTIONS === 'true';
+const ON_CI = onCiFor(process.env.GITHUB_ACTIONS, process.execArgv, process.env.NODE_OPTIONS ?? '');
+/**
+ * Whether a process with this GITHUB_ACTIONS and these startup flags is on CI: GITHUB_ACTIONS=true, and read from no
+ * --env-file (#997 round 6, G6n: an env file's GITHUB_ACTIONS made a child on CI, which handed it on to its own).
+ */
+export function onCiFor(githubActions: string | undefined, execArgv: readonly string[], nodeOptions: string): boolean {
+  const flags = [...execArgv, ...nodeOptions.split(/\s+/).filter(Boolean)];
+  return githubActions === 'true' && !flags.some((f) => /^--env-file(-if-exists)?(=|$)/.test(f));
+}
 /** The test file this process runs (test/x.test.ts), from its own argv as this preload found it; null if none. */
 /**
  * The test file a process with these startup flags, NODE_OPTIONS and argv[1], started in `cwd`, is keyed to; null
@@ -412,10 +431,21 @@ export function hostCalls(): { tool: string; args: string[] }[] {
  */
 export function withHostStandIns(path: string | undefined, cwd: string): string {
   const entries = (path ?? '/usr/bin:/bin').split(':').map((e) => (e === '' ? cwd : resolve(cwd, e)));
+  const ahead = standInsAhead(entries);
+  return (ahead ? [ahead.dir, ...entries] : entries).join(':');
+}
+
+/**
+ * For absolute PATH entries: the stand-ins they need, and the index of the first entry that would find a machine host
+ * tool (the stand-ins go anywhere before it); null if none would.
+ */
+function standInsAhead(entries: readonly string[]): { dir: string; at: number } | null {
   // Each name a host tool goes by here (its own, or an alias's), as the first entry that has it finds it.
   const seen = new Set<string>();
   const shadow: string[] = [];
-  for (const e of entries) {
+  let at = -1;
+  entries.forEach((e, i) => {
+    const before = shadow.length;
     if (isOwn(e)) {
       for (const t of new Set([...HOST_TOOL_NAMES, ...aliasesIn(e)])) {
         const f = join(e, t);
@@ -426,8 +456,49 @@ export function withHostStandIns(path: string | undefined, cwd: string): string 
     } else {
       for (const t of toolsIn(e)) if (!seen.has(t)) (seen.add(t), shadow.push(t));
     }
+    if (at < 0 && shadow.length > before) at = i;
+  });
+  return shadow.length ? { dir: standInsFor(shadow.sort()), at } : null;
+}
+
+/**
+ * A command line with each literal `PATH=` value (an assignment, or `export PATH=`) given the stand-ins ahead of the
+ * first entry that would find a machine host tool (#997 round 6, ACC1/ACC2: `PATH=/usr/bin sh x.sh`, whose `sudo` by
+ * name was the machine's). A value the guard can't read (a relative or empty entry, a variable other than $PATH, a
+ * quote it can't close) is refused; `check` refuses one that would need the stand-ins too (an env -S string).
+ */
+function standInsInPathAssignments(text: string, form: string, check: boolean): string {
+  let out = '';
+  let last = 0;
+  for (const m of text.matchAll(/(^|[\s;&|(`'"])((?:export\s+)?)PATH=/g)) {
+    const start = m.index + m[1]!.length + m[2]!.length + 'PATH='.length;
+    // The value's raw text: to an unquoted blank or operator; a quote counts only where it closes.
+    let end = start;
+    let value = '';
+    while (end < text.length && !/[\s;&|()<>`]/.test(text[end]!)) {
+      const c = text[end]!;
+      const close = c === "'" || c === '"' ? text.indexOf(c, end + 1) : -1;
+      if (close > 0) {
+        value += text.slice(end + 1, close);
+        end = close + 1;
+      } else if (c === "'" || c === '"') break;
+      else {
+        value += c;
+        end++;
+      }
+    }
+    const entries = value.split(':');
+    const unread = entries.find((e) => !/^\$(PATH|\{PATH\})$/.test(e) && !/^\/[\w./+@%,=-]*$/.test(e));
+    if (unread !== undefined) refuse(`${form}: PATH=${value} in its command line: ${unread || 'an empty entry (the current directory)'} is not an absolute path the guard can read (only absolute paths and $PATH)`);
+    const literal = entries.map((e, i) => [e, i] as const).filter(([e]) => !e.startsWith('$'));
+    const ahead = standInsAhead(literal.map(([e]) => resolve(e)));
+    if (ahead === null) continue;
+    if (check || !/^\/[\w./-]+$/.test(ahead.dir)) refuse(`${form}: PATH=${value} in its command line would find the machine's own host tools by name`);
+    const at = literal[ahead.at]![1];
+    out += `${text.slice(last, start)}${[...entries.slice(0, at), ahead.dir, ...entries.slice(at)].join(':')}`;
+    last = end;
   }
-  return (shadow.length ? [standInsFor(shadow.sort()), ...entries] : entries).join(':');
+  return out + text.slice(last);
 }
 
 function refuse(what: string): never {
@@ -592,15 +663,31 @@ function envArguments(form: string, argv: string[], cwd: string, line: (text: st
       if (a === '-S' || a === '--split-string') split = out[i + 1] ?? '';
       i += 2;
       continue;
-    } else if (a === '-uPATH' || a === '--unset=PATH') clears = true;
-    else if (a.startsWith('--split-string=') || /^-S./.test(a)) split = a.replace(/^(--split-string=|-S)/, '');
-    else if (/^-[a-zA-Z]+$/.test(a)) clears ||= a.includes('i');
-    else if (!a.startsWith('--')) break;
+    } else if (a === '--unset=PATH') clears = true;
+    else if (a.startsWith('--split-string=')) split = a.slice('--split-string='.length);
+    else if (/^-[a-zA-Z]/.test(a) && !a.startsWith('--')) {
+      // A short-option cluster (#997 round 6, S1: -vS, -iS): -i anywhere, and -u, -C or -S taking the rest of the
+      // cluster, or the next argument.
+      let next = false;
+      for (let j = 1; j < a.length; j++) {
+        const c = a[j]!;
+        if (c === 'i') clears = true;
+        else if ('uCS'.includes(c)) {
+          const rest = a.slice(j + 1);
+          const value = rest || out[i + 1] || '';
+          next = rest === '';
+          if (c === 'u' && value === 'PATH') clears = true;
+          if (c === 'S') split = value;
+          break;
+        }
+      }
+      if (next) i++;
+    } else if (!a.startsWith('--')) break;
     i++;
   }
   let path = false;
   for (; i < out.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(out[i]!); i++) {
-    // Off CI, env can't tell its command it is on CI either.
+    // Off CI, a GITHUB_ACTIONS= handed to env as an argument is emptied.
     if (!ON_CI && out[i]!.startsWith('GITHUB_ACTIONS=')) out[i] = 'GITHUB_ACTIONS=';
     if (!out[i]!.startsWith('PATH=')) continue;
     out[i] = `PATH=${withHostStandIns(out[i]!.slice(5), cwd)}`;
@@ -608,7 +695,9 @@ function envArguments(form: string, argv: string[], cwd: string, line: (text: st
   }
   const rest = out.slice(i);
   // env -S / --split-string is a command line of its own (#997 round 5, G4/G5): a host tool by path among its words, or
-  // off CI a GITHUB_ACTIONS, is refused there as in any command line.
+  // off CI a GITHUB_ACTIONS, is refused there as in any command line. env reads escapes (\_ is a space) and ${VAR} in
+  // that string, which the word splitter doesn't: a string with either is refused (#997 round 6, S2/S3).
+  if (/\\|\$\{/.test(split)) refuse(`${form} env: an -S string with an escape or a \${VAR} (${split}), which the guard does not read`);
   if (split) line(split);
   if (clears && !path && namesHostTool([...shellWords(split), ...argWords(rest)])) refuse(`${form} env: a cleared PATH (env -i or -u PATH) and no PATH= for ${rest[0] ?? split}, which names a host tool`);
   if (rest.length && SHELLS.has(basename(rest[0]!))) checkShellLine(form, rest.slice(1).join(' '), shellOptions(rest.slice(1)), argWords(rest.slice(1)));
@@ -616,6 +705,21 @@ function envArguments(form: string, argv: string[], cwd: string, line: (text: st
 }
 
 type Options = Record<string, unknown>;
+
+/** The option names Node's spawn family reads, inherited or not. */
+const OPTION_NAMES = ['cwd', 'env', 'argv0', 'stdio', 'detached', 'uid', 'gid', 'serialization', 'shell', 'windowsVerbatimArguments', 'windowsHide', 'signal', 'timeout', 'killSignal', 'maxBuffer', 'encoding', 'input', 'execPath', 'execArgv', 'silent'];
+/**
+ * `options` (none: {}) as a null-prototype snapshot: every key a for-in reaches and every option Node reads, each
+ * read once (#997 round 6, O1/O2). Node gets this, so what the guard judged is what the child starts with.
+ */
+function snapshotOptions(options: unknown): Options {
+  const out = Object.create(null) as Options;
+  if (options == null) return out;
+  const from = options as Options;
+  for (const k in from) out[k] = from[k];
+  for (const k of OPTION_NAMES) if (!(k in out) && k in from) out[k] = from[k];
+  return out;
+}
 
 /**
  * What a child starts with, or null to start it untouched (a file in REAL_HOST_TOOLS_ON_PURPOSE, or a pinned
@@ -630,7 +734,9 @@ function guard(form: string, command: unknown, args: readonly unknown[], options
   let argv = args.map((a) => (typeof a === 'string' ? a : String(a)));
   const caller = callerFile();
   const fromTest = caller === null || caller.startsWith('test/');
-  const o = (options ?? {}) as Options;
+  // The options as Node would read them, read once (#997 round 6, O1/O2: an `env` or `cwd` accessor answered the guard
+  // one thing and Node another). Node is handed this snapshot.
+  const o = snapshotOptions(options);
   if (!line && ON_CI && byName.size && byName.has(command) && !o.shell) return null;
   const cwd = typeof o.cwd === 'string' ? resolve(o.cwd) : o.cwd instanceof URL ? fileURLToPath(o.cwd) : process.cwd();
   /** A host tool by path: null when it is none; the pinned machine path, untouched; else refused, or its stand-in. */
@@ -651,15 +757,19 @@ function guard(form: string, command: unknown, args: readonly unknown[], options
   const shell = line || Boolean(o.shell);
   /** Refuses a command line (a -c script, exec's line) with a host tool by path among its words, whoever asked. */
   const lineByPath = (text: string) => {
-    const named = hostToolPaths(shellWords(text), cwd);
+    const ws = shellWords(text);
+    const named = hostToolPaths(ws, cwd);
     if (named.length) refuse(`${form}: ${named[0]} in its command line: the machine's own ${basename(named[0]!)}, by path`);
-    // Off CI, a command line can't tell what it starts that it is on CI (the CI-only exceptions).
+    // Off CI, a command line that spells GITHUB_ACTIONS is refused (one that builds the name at run time, G3, is a named
+    // limit: see LIMIT).
     if (!ON_CI && /\bGITHUB_ACTIONS\b/.test(text)) refuse(`${form}: a command line that sets GITHUB_ACTIONS, off CI`);
   };
   if (shell) {
     const text = [command, ...argv].join(' ');
     checkShellLine(form, text, [], shellWords(text));
     lineByPath(text);
+    file = standInsInPathAssignments(command, form, false);
+    argv = argv.map((a) => standInsInPathAssignments(a, form, false));
   } else {
     if (command.includes('/')) {
       const swapped = byPath(command);
@@ -672,7 +782,7 @@ function guard(form: string, command: unknown, args: readonly unknown[], options
     for (let i = 0; i < all.length; i++) {
       const name = basename(all[i]!);
       const rest = all.slice(i + 1);
-      if (name === 'env') all = [...all.slice(0, i + 1), ...envArguments(form, rest, cwd, lineByPath)];
+      if (name === 'env') all = [...all.slice(0, i + 1), ...envArguments(form, rest, cwd, (text) => (lineByPath(text), standInsInPathAssignments(text, form, true)))];
       else if (SHELLS.has(name)) checkShellLine(form, rest.join(' '), shellOptions(rest), argWords(rest));
     }
     // A host tool by path in the arguments, for every caller (#997 round 4): inside a -c script, refused; as a whole
@@ -680,7 +790,7 @@ function guard(form: string, command: unknown, args: readonly unknown[], options
     argv = all.slice(1).map((a, i, list) => {
       if (i > 0 && SCRIPT_OPTION.test(list[i - 1]!)) {
         lineByPath(a);
-        return a;
+        return standInsInPathAssignments(a, form, false);
       }
       const prefix = /^[A-Za-z_]\w*=/.exec(a)?.[0] ?? '';
       const value = a.slice(prefix.length);
@@ -696,7 +806,8 @@ function guard(form: string, command: unknown, args: readonly unknown[], options
   const childEnv = Object.create(null) as Record<string, string | undefined>;
   for (const k in env) childEnv[k] = env[k];
   childEnv.PATH = withHostStandIns(childEnv.PATH, cwd);
-  // Off CI, no child is told it is on CI: none of the CI-only exceptions can start in a process a test starts here.
+  // Off CI, the child's environment carries no GITHUB_ACTIONS. (A command line or script that builds the name at run
+  // time, G3, is a named limit: see LIMIT.)
   if (!ON_CI) delete childEnv.GITHUB_ACTIONS;
   const extra: Options = { env: childEnv };
   if (shellOption !== null) extra.shell = shellOption;
@@ -747,7 +858,7 @@ if (POSIX) {
       const [options, callback] = typeof a === 'function' ? [undefined, a] : [a, b];
       const g = guard('exec', command, [], options, true);
       if (!g) return promised ? to.call(this, command, ...[a].filter((x) => x !== undefined)) : to.call(this, command, a, b);
-      return promised ? to.call(this, command, g.options) : to.call(this, command, g.options, callback);
+      return promised ? to.call(this, g.file, g.options) : to.call(this, g.file, g.options, callback);
     };
   const execFile = execFileWith(raw.execFile, false);
   Object.defineProperty(execFile, custom, { value: execFileWith(rawExecFileP, true), enumerable: false });
@@ -761,13 +872,14 @@ if (POSIX) {
     exec,
     execSync: function (this: unknown, command: unknown, options?: unknown) {
       const g = guard('execSync', command, [], options, true);
-      return g ? raw.execSync.call(this, command, g.options) : raw.execSync.call(this, command, options);
+      return g ? raw.execSync.call(this, g.file, g.options) : raw.execSync.call(this, command, options);
     },
     fork: function (this: unknown, modulePath: unknown, a?: unknown, b?: unknown) {
       const n = argsAndOptions(a, b);
-      // fork starts options.execPath (node by default): judged as the command.
-      const execPath = (n?.[1] as Options | undefined)?.execPath;
-      const g = n && guard('fork', typeof execPath === 'string' ? execPath : process.execPath, [], n[1], false);
+      // fork starts options.execPath (node by default): judged as the command, from the one snapshot of the options.
+      const snap = n && (n[1] == null || (typeof n[1] === 'object' && !Array.isArray(n[1]))) ? snapshotOptions(n[1]) : undefined;
+      const execPath = snap?.execPath;
+      const g = n && guard('fork', typeof execPath === 'string' ? execPath : process.execPath, [], snap ?? n[1], false);
       if (!g) return raw.fork.call(this, modulePath, a, b);
       if (typeof execPath === 'string' && g.file !== execPath) g.options.execPath = g.file;
       return raw.fork.call(this, modulePath, n![0], g.options);
@@ -796,6 +908,7 @@ if (POSIX) {
 (globalThis as Record<symbol, unknown>)[Symbol.for('test-host-tools')] = Object.freeze({
   installed: POSIX,
   onCi: ON_CI,
+  onCiFor,
   testFile: TEST_FILE,
   testFileFor,
   machineToolFor,

@@ -34,6 +34,7 @@ type Guard = {
   MACHINE_TOOLS_ON_PURPOSE: readonly string[];
   testFile: string | null;
   onCi: boolean;
+  onCiFor: (githubActions: string | undefined, execArgv: readonly string[], nodeOptions: string) => boolean;
   testFileFor: (execArgv: readonly string[], nodeOptions: string, argv1: string | undefined, cwd: string) => string | null;
   machineToolFor: (tool: string, testFile: string | null, onCi: boolean, path: string) => { kind: string; file: string };
 };
@@ -350,6 +351,78 @@ test('#991 round 5: only a path or file: URL to this preload counts as the prelo
   // Round 4's: other code first.
   assert.equal(g.testFileFor(['--import', self, '-e', 'x'], '', pinned, repoRoot), null);
   assert.equal(g.testFileFor(['--import', self, '--require', './x.cjs'], '', pinned, repoRoot), null);
+});
+
+test("#991 round 6: an inline PATH= in a command line gets the stand-ins ahead of the machine's directories; one the guard can't read is refused", { skip: !posix && 'POSIX' }, () => {
+  const g = guard();
+  const refused = (f: () => unknown, what: string) => assert.throws(f, /#991: /, what);
+  // Resolution only: every command below asks `command -v sudo` and runs nothing else.
+  const root = mkdtempSync(join(tmpdir(), 'host-path-'));
+  const own = join(root, 'own');
+  const ownSudo = join(root, 'own-sudo');
+  mkdirSync(own);
+  mkdirSync(ownSudo);
+  writeFileSync(join(ownSudo, 'sudo'), '#!/bin/sh\nexit 0\n');
+  chmodSync(join(ownSudo, 'sudo'), 0o755);
+  const script = join(root, 'x.sh');
+  writeFileSync(script, 'command -v sudo || echo none\n');
+  const env = { PATH: SYSTEM };
+  const execOut = (line: string, e: NodeJS.ProcessEnv = env) => String(cp.execSync(line, { encoding: 'utf8', env: e })).trim();
+  const shOut = (line: string, e: NodeJS.ProcessEnv = env) => String(cp.spawnSync('/bin/sh', ['-c', line], { encoding: 'utf8', env: e }).stdout).trim();
+  const standIn = (out: string, what: string) => assert.ok(findOn('sudo', SYSTEM) === null ? out === 'none' : out.startsWith(`${g.standInRoot}/`), `${what}: ${out}`);
+  // ACC1/ACC2: a script run with a machine PATH of its own, whose `sudo` by name was the machine's.
+  standIn(execOut(`PATH=/usr/bin /bin/sh ${script}`), 'ACC1, exec line');
+  standIn(shOut(`PATH=/usr/bin; /bin/sh ${script}`), 'ACC2, a -c script');
+  standIn(execOut(`export PATH=/usr/bin:$PATH; command -v sudo || echo none`), 'export PATH=');
+  standIn(shOut(`PATH="/usr/bin:/bin"; command -v sudo || echo none`), 'a quoted value');
+  standIn(shOut(`PATH=$PATH:/usr/bin; command -v sudo || echo none`, { PATH: own }), '$PATH, then the machine');
+  // Controls: the test's own directory answers first, and one with no host tool stays as it is.
+  assert.equal(execOut(`PATH=${ownSudo}:/usr/bin /bin/sh ${script}`), join(ownSudo, 'sudo'), "the test's own sudo, ahead");
+  assert.equal(shOut(`PATH=${own}; command -v sudo || echo none`), 'none', 'only its own directory');
+  standIn(execOut(`PATH="${own}:$PATH" /bin/sh ${script}`), 'its own directory, then $PATH');
+  // A value it can't read is refused (each changes into a missing directory first: nothing runs without the refusal).
+  refused(() => cp.execSync(`cd ${MISSING} && PATH= sudo -V`), 'an empty PATH=');
+  refused(() => cp.execSync(`cd ${MISSING} && PATH="$HOME/bin:$PATH" sudo -V`), 'a variable');
+  refused(() => cp.spawnSync('/bin/sh', ['-c', `cd ${MISSING} && PATH=bin:$PATH; sudo -V`]), 'a relative entry');
+  // In an env -S string, which is checked but not rewritten, a machine PATH is refused.
+  refused(() => cp.spawnSync('env', ['-C', MISSING, '-S', 'PATH=/usr/bin sudo -V']), 'env -S PATH=');
+});
+
+test('#991 round 6: the options are read once, as Node reads them; env -S in a cluster, with an escape or a ${VAR}; an --env-file child is off CI', { skip: !posix && 'POSIX' }, () => {
+  const g = guard();
+  const refused = (f: () => unknown, what: string) => assert.throws(f, /#991: /, what);
+  // O1: an env accessor on the options object's prototype, with a setter that drops writes. Resolution only.
+  const proto = {};
+  Object.defineProperty(proto, 'env', { enumerable: true, get: () => ({ PATH: SYSTEM, GITHUB_ACTIONS: 'true' }), set: () => {} });
+  const o1 = Object.assign(Object.create(proto) as cp.SpawnSyncOptions, { encoding: 'utf8' });
+  // (The variable's name is spelled as a pattern: a command line that spells it is refused off CI.)
+  const [sudoAt, ga] = String(cp.spawnSync('/bin/sh', ['-c', 'command -v sudo || echo none; env | grep -c "^GITHUB_ACTION[S]=" || true'], o1).stdout).trim().split('\n');
+  assert.ok(findOn('sudo', SYSTEM) === null ? sudoAt === 'none' : sudoAt!.startsWith(`${g.standInRoot}/`), `O1: ${sudoAt}`);
+  if (!g.onCi) assert.equal(ga, '0', 'O1: off CI, no GITHUB_ACTIONS');
+  // O2: a cwd getter read once; any later read would answer a missing directory.
+  let reads = 0;
+  const here = mkdtempSync(join(tmpdir(), 'host-cwd-'));
+  const o2 = { encoding: 'utf8' } as cp.SpawnSyncOptions;
+  Object.defineProperty(o2, 'cwd', { enumerable: true, get: () => (++reads === 1 ? here : MISSING) });
+  const r2 = cp.spawnSync('/bin/true', [], o2);
+  assert.deepEqual({ status: r2.status, reads }, { status: 0, reads: 1 }, `O2: ${String(r2.error ?? '')}`);
+  // S1: -S inside a short-option cluster; S2: env's own escape; S3: ${VAR}, which env expands.
+  refused(() => cp.spawnSync('env', ['-C', MISSING, '-vS', `${MISSING}/sudo S1`]), 'S1');
+  refused(() => cp.spawnSync('env', ['-C', MISSING, '-iS', 'sudo S1b']), 'S1b');
+  refused(() => cp.spawnSync('env', ['-C', MISSING, '-vS', `${MISSING}/sudo\\_S1c`]), 'S1c');
+  refused(() => cp.spawnSync('env', ['-C', MISSING, '-S', `${MISSING}/sudo\\_S2`]), 'S2');
+  refused(() => cp.spawnSync('env', ['-C', MISSING, '-S', '${X} S3'], { env: { ...process.env, X: `${MISSING}/sudo` } }), 'S3');
+  // G6n: a child that read an --env-file is never on CI, whatever the file set.
+  assert.equal(g.onCiFor('true', ['--env-file=x.env'], ''), false, 'G6n');
+  assert.equal(g.onCiFor('true', [], '--env-file-if-exists=x.env'), false, 'G6n in NODE_OPTIONS');
+  assert.equal(g.onCiFor('true', ['--import', './dist/test/isolate.js'], ''), true, 'control: on CI');
+  assert.equal(g.onCiFor(undefined, [], ''), false, 'control: off CI');
+  const envFile = join(mkdtempSync(join(tmpdir(), 'host-envfile-')), 'ga.env');
+  writeFileSync(envFile, 'GITHUB_ACTIONS=true\n');
+  const report = `process.stdout.write(JSON.stringify(globalThis[Symbol.for('test-host-tools')].onCi)); process.exit(0);`;
+  const r = cp.spawnSync(process.execPath, [`--env-file=${envFile}`, '--import', './dist/test/isolate.js', '-e', report], { cwd: repoRoot, encoding: 'utf8' });
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(r.stdout, 'false', 'G6n: a child started with an --env-file');
 });
 
 // ---- The pins: who may take a real tool. ----
