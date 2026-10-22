@@ -51,6 +51,34 @@ test('a REAL changed to the next double under a signed receipt is a log edit: re
   assert.throws(() => sign({ log: f.path, ...A, signer: k }), /log changed/);
 });
 
+// Round 16: a REAL is hashed as its 8 IEEE-754 bytes. Round 15 hashed quote()'s text, which writes 0.0 and -0.0, and
+// some neighbouring doubles, the same (the round-15 reviews, measured): each such edit under a signed receipt is refused.
+for (const [from, to] of [
+  [0.0, -0.0],
+  [6.62192789667149e243, 6.6219278966714905e243],
+  [9.35553159930226e-191, 9.355531599302261e-191],
+] as const) {
+  test(`a REAL changed from ${from} to ${Object.is(to, -0) ? '-0.0' : to} under a signed receipt is a log edit: refused`, () => {
+    assert.notEqual(Buffer.from(new Float64Array([from]).buffer).toString('hex'), Buffer.from(new Float64Array([to]).buffer).toString('hex'), 'two different doubles');
+    const f = fixtureLog();
+    const db = new DatabaseSync(f.path);
+    db.exec('ALTER TABLE events RENAME TO old_events; CREATE TABLE events (id INTEGER PRIMARY KEY AUTOINCREMENT, ts NOT NULL, type TEXT NOT NULL, actor TEXT NOT NULL, source TEXT NOT NULL, payload TEXT NOT NULL); INSERT INTO events SELECT * FROM old_events; DROP TABLE old_events');
+    db.prepare('INSERT INTO events (ts, type, actor, source, payload) VALUES (?, ?, ?, ?, ?)').run(from, 'merge.decided', 'inst', 'inst', DECISION);
+    db.exec('UPDATE events SET ts = CAST(ts AS REAL) WHERE id = 2');
+    db.close();
+    const k = keySigner(generateKeyPairSync('ed25519').privateKey);
+    const A = { out: join(f.dir, 'receipts.jsonl'), state: fresh('chain-state.json') };
+    sign({ log: f.path, ...A, genesis: true, registry: fresh('registry.jsonl'), signer: k });
+    const w = new DatabaseSync(f.path);
+    w.prepare('UPDATE events SET ts = ? WHERE id = 2').run(to);
+    const now = w.prepare('SELECT typeof(ts) AS t, ts AS v FROM events WHERE id = 2').get() as { t: string; v: number };
+    w.close();
+    assert.equal(now.t, 'real');
+    assert.ok(Object.is(now.v, to), `stored ${now.v}`);
+    assert.throws(() => sign({ log: f.path, ...A, signer: k }), /log changed/);
+  });
+}
+
 test('decisions after a coordinator.started the signer never read say so: engine.version is cut as unread', () => {
   const f = fixtureLog();
   const db = new DatabaseSync(f.path);

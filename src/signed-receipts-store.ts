@@ -1,6 +1,5 @@
 // Signed receipts on disk (#717): the event log read read-only, the receipts as JSON lines (one DSSE envelope each),
 // the signer's own chain state, and ed25519 keys as PEM files. The format and the checks are src/signed-receipts.ts.
-import { spawnSync } from 'node:child_process';
 import { createHash, createPrivateKey, createPublicKey, type KeyObject } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
@@ -9,6 +8,9 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'nod
 import { BRAND } from './brand.js';
 import { openReadOnly } from './events/read-only.js';
 import { tryLock } from './locks.js';
+// The one way src/ starts a process (#846): it gives the child only the environment's own keys (round 16: node's own
+// spawnSync copies inherited ones too, so the log child could have started with a planted NODE_OPTIONS).
+import { spawnSync } from './os/child-process.js';
 import { notOwnerOnlyDir, processIdentity, processPlace, replaceOwnerOnly, syncToDisk, UNKNOWN_IDENTITY } from './os/index.js';
 import { AT_UNRECORDED, canonicalJson, chainStateOf, ChainStateSchema, columnHash, FIELD_READ_MAX, JSON_VALUES_MAX, keyId, keySigner, moreJsonValuesThan, PAYLOAD_READ_MAX, predecessorOf, predecessorOfState, ReceiptError, rotateChain, signEvents, statementOf, type ChainState, type Envelope, type Predecessor, type ReceiptEvent, type ReceiptSigner, type ScanQuery, type ScanResult, type Unread } from './signed-receipts.js';
 
@@ -108,11 +110,13 @@ export function openLog(dbPath: string): LogRead {
     return Buffer.from(text, 'utf8').equals(buf) ? { text } : { bytes, why: 'not-utf8' };
   };
   function* rows(): Generator<ReceiptEvent> {
-    // A REAL as quote() writes it (round 15): `CAST(real AS BLOB)` is 15 significant digits, so 1.0 and
-    // 1.0000000000000002 read the same and an edit between them kept the digest (the round-14 final check, 3c); quote()
-    // gives the digits that read back to the very double.
+    // A REAL is hashed as its 8 IEEE-754 bytes as stored (`_r`, read as the very double), never as decimal text (round
+    // 16). WHY: round 14's `CAST(real AS BLOB)` wrote 15 significant digits (1.0 and 1.0000000000000002 read the same),
+    // and round 15's quote() still wrote 0.0 and -0.0, and some neighbouring doubles at large exponents, the same, so an
+    // edit between them under a signed receipt kept the digest (the round-15 reviews, measured). Its text (`_b`, from
+    // quote()) is only what a receipt shows.
     const bytesOf = (c: LogColumn) => `CASE typeof(${c}) WHEN 'real' THEN CAST(quote(${c}) AS BLOB) ELSE CAST(${c} AS BLOB) END`;
-    const query = db.prepare(`SELECT id, rowid AS rid, ${LOG_COLUMNS.map((c) => `typeof(${c}) AS ${c}_t, ${bytesOf(c)} AS ${c}_b`).join(', ')} FROM events ORDER BY id`);
+    const query = db.prepare(`SELECT id, rowid AS rid, ${LOG_COLUMNS.map((c) => `typeof(${c}) AS ${c}_t, ${bytesOf(c)} AS ${c}_b, CASE typeof(${c}) WHEN 'real' THEN ${c} END AS ${c}_r`).join(', ')} FROM events ORDER BY id`);
     // Every integer read as a BigInt (#918 round 12): an id past 2^53 is read exactly, never refused as "too large".
     query.setReadBigInts(true);
     for (const row of query.iterate() as Iterable<Record<string, unknown>>) {
@@ -122,7 +126,15 @@ export function openLog(dbPath: string): LogRead {
       if (typeof id !== 'bigint' || row.rid !== id) throw new ReceiptError(`the event log ${dbPath} has an id that isn't its integer rowid; nothing was signed`);
       const t = (c: LogColumn) => String(row[`${c}_t`]);
       const b = (c: LogColumn) => (row[`${c}_b`] as Uint8Array | null) ?? null;
-      const hashes = { ts: columnHash(t('ts'), b('ts') ?? ''), type: columnHash(t('type'), b('type') ?? ''), actor: columnHash(t('actor'), b('actor') ?? ''), payload: columnHash(t('payload'), b('payload') ?? '') };
+      const stored = (c: LogColumn): Uint8Array | string => {
+        if (t(c) !== 'real') return b(c) ?? '';
+        const v = row[`${c}_r`];
+        if (typeof v !== 'number') throw new ReceiptError(`the event log ${dbPath} has a REAL that didn't read as a number; nothing was signed`);
+        const eight = Buffer.alloc(8);
+        eight.writeDoubleBE(v);
+        return eight;
+      };
+      const hashes = { ts: columnHash(t('ts'), stored('ts')), type: columnHash(t('type'), stored('type')), actor: columnHash(t('actor'), stored('actor')), payload: columnHash(t('payload'), stored('payload')) };
       const typeRead = asText(t('type'), b('type'), FIELD_READ_MAX);
       const type = 'text' in typeRead ? typeRead.text : '';
       const unread: NonNullable<ReceiptEvent['unread']> = {};
@@ -176,6 +188,7 @@ export type LogChildQuery = { log: string } & ({ op: 'scan'; scan: ScanQuery } |
  * or a ReceiptError naming the log and why the read stopped. Nothing is written by the child.
  */
 function inLogChild<T>(q: LogChildQuery, deadlineMs: number): T {
+  checkDeadline(deadlineMs);
   const r = spawnSync(process.execPath, [`--max-old-space-size=${LOG_HEAP_MB}`, '--no-warnings', LOG_CHILD], { input: JSON.stringify(q), encoding: 'utf8', timeout: deadlineMs, killSignal: 'SIGKILL', maxBuffer: 4 * RECEIPTS_MAX_BYTES, stdio: ['pipe', 'pipe', 'pipe'] });
   const why = (s: string) => new ReceiptError(`reading the event log ${q.log} ${s}; nothing was signed`);
   if ((r.error as NodeJS.ErrnoException | undefined)?.code === 'ETIMEDOUT') throw why(`took over ${Math.round(deadlineMs / 1000)} s (a FIFO beside the log, or a log too large for the deadline): its reader was killed`);
@@ -191,6 +204,13 @@ function inLogChild<T>(q: LogChildQuery, deadlineMs: number): T {
   if (!answer) throw why(`failed (exit ${r.status}: ${printableTail(r.stderr)})`);
   if (!answer.ok) throw new ReceiptError(answer.error ?? `reading the event log ${q.log} failed; nothing was signed`);
   return answer.result as T;
+}
+/**
+ * A log deadline must be a positive whole number of milliseconds (round 16, the round-15 second review's A1):
+ * spawnSync reads a `timeout` of 0 as "none", so 0 would have read the log with no deadline at all. Fail closed.
+ */
+function checkDeadline(ms: number): void {
+  if (!Number.isSafeInteger(ms) || ms <= 0) throw new ReceiptError(`the log deadline is ${String(ms)} ms: it must be a positive whole number of milliseconds (never 0, which would mean none); nothing was signed`);
 }
 const printableTail = (s: string) => s.trim().split('\n').slice(-2).join(' ').slice(0, 300);
 
@@ -536,6 +556,7 @@ export function loadPublicKey(path: string): KeyObject {
  * them byte for byte; otherwise it refuses.
  */
 export function signLog(o: { log: string; out: string; state: string; genesis?: boolean; after?: string; registry?: string; signer: ReceiptSigner; logDeadlineMs?: number }): SignResult {
+  if (o.logDeadlineMs !== undefined) checkDeadline(o.logDeadlineMs);
   const statePath = statePlace(o.state, o.out);
   outIsFile(o.out);
   if (o.after !== undefined && !o.genesis) throw new ReceiptError('--after names the chain a new chain succeeds: it goes with --genesis only');
