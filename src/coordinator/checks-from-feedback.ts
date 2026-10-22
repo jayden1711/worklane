@@ -3,7 +3,7 @@
 // repo has sgconfig.yml) or a test, written by one run in a scratch worktree and checked before it is pushed; or an
 // issue, when the constraint (its evidence's files, or the draft's) is in a protected area. The PR is never recorded
 // as the harness's (no pr.opened) and its branch never auto-merges. See src/checks-from-feedback.ts.
-import { spawnSync } from '../os/child-process.js';
+import { gitSpawnSync } from '../os/git.js';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { BRAND } from '../brand.js';
@@ -65,7 +65,7 @@ export abstract class ChecksFromFeedback extends Optimizer {
     const tip = this.git(this.d.repo, 'rev-parse', `${this.remote}/${this.branch}`);
     const dir = join(this.d.stateDir, 'feedback-checks', c.id);
     unlockWorktree(this.d.repo, dir);
-    spawnSync('git', ['worktree', 'remove', '--force', dir], { cwd: this.d.repo });
+    gitSpawnSync(['worktree', 'remove', '--force', dir], { cwd: this.d.repo });
     try {
       this.git(this.d.repo, 'worktree', 'add', '-q', '--detach', dir, tip);
       // Locked against a prune run inside another agent's sandbox, where it is hidden (src/worktrees.ts WORKTREE_LOCK_REASON).
@@ -112,8 +112,8 @@ export abstract class ChecksFromFeedback extends Optimizer {
       this.emit('feedback_check.proposed', { constraint: c.id, keys, kind: 'pr', number: pr.number, url: pr.url, mode: mode.kind, why: a.summary.slice(0, 1000) });
     } finally {
       unlockWorktree(this.d.repo, dir);
-      spawnSync('git', ['worktree', 'remove', '--force', dir], { cwd: this.d.repo });
-      spawnSync('git', ['worktree', 'prune'], { cwd: this.d.repo });
+      gitSpawnSync(['worktree', 'remove', '--force', dir], { cwd: this.d.repo });
+      gitSpawnSync(['worktree', 'prune'], { cwd: this.d.repo });
     }
   }
 

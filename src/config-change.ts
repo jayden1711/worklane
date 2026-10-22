@@ -3,6 +3,7 @@
 // the same loader the coordinator uses, and proposed as a PR from a branch of their own; nothing is pushed to the
 // default branch, and nothing in the checkout is touched.
 import { spawnSync } from './os/child-process.js';
+import { gitSpawnSync } from './os/git.js';
 import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { parseDocument } from 'yaml';
@@ -75,7 +76,7 @@ export interface ConfigChange {
 
 type Git = (args: string[], cwd: string) => { status: number | null; stdout: string; stderr: string };
 const realGit: Git = (args, cwd) => {
-  const r = spawnSync('git', args, { cwd, encoding: 'utf8' });
+  const r = gitSpawnSync(args, { cwd, encoding: 'utf8' });
   return { status: r.status, stdout: r.stdout ?? '', stderr: r.stderr ?? '' };
 };
 

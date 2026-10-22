@@ -4,7 +4,7 @@
 // schema and checks as at start, and swapped in whole. A config that fails validation is never applied: the last
 // good one stays, and why is recorded. Settings read once at start (below) keep their running value until a restart.
 // Merges are still judged by the config at their own parent (main-watch.ts requiredAt): this is for everything else.
-import { spawnSync } from '../os/child-process.js';
+import { gitSpawnSync } from '../os/git.js';
 import { BRAND } from '../brand.js';
 import { ConfigInvalid, loadConfigAt, type Config, type ConfigError } from './load.js';
 
@@ -13,7 +13,7 @@ export const CONFIG_INCIDENT = 'config_invalid';
 
 /** The git tree of the config directory at `rev`, or null (no such rev, or no config there). */
 export function configTree(repo: string, rev: string): string | null {
-  const r = spawnSync('git', ['rev-parse', '-q', '--verify', `${rev}:${BRAND.configDir}`], { cwd: repo, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+  const r = gitSpawnSync(['rev-parse', '-q', '--verify', `${rev}:${BRAND.configDir}`], { cwd: repo, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
   return r.status === 0 ? r.stdout.trim() : null;
 }
 
@@ -148,7 +148,7 @@ export class LiveConfig {
   }
 
   private sha(): string | null {
-    const r = spawnSync('git', ['rev-parse', '-q', '--verify', `${this.ref}^{commit}`], { cwd: this.o.repo, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+    const r = gitSpawnSync(['rev-parse', '-q', '--verify', `${this.ref}^{commit}`], { cwd: this.o.repo, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
     return r.status === 0 ? r.stdout.trim() : null;
   }
 }
@@ -159,7 +159,7 @@ export class LiveConfig {
  */
 export function startConfig(o: { repo: string; remote: string; fallback: Config; check?: (cfg: Config) => ConfigError[] }): { cfg: Config; tree: string | null; note: string | null } {
   const branch = o.fallback.project.project.default_branch;
-  spawnSync('git', ['fetch', '-q', o.remote, `+refs/heads/${branch}:refs/remotes/${o.remote}/${branch}`], { cwd: o.repo, stdio: 'ignore', timeout: 60_000 });
+  gitSpawnSync(['fetch', '-q', o.remote, `+refs/heads/${branch}:refs/remotes/${o.remote}/${branch}`], { cwd: o.repo, stdio: 'ignore', timeout: 60_000 });
   const ref = `refs/remotes/${o.remote}/${branch}`;
   const tree = configTree(o.repo, ref);
   // WHY (#715): whenever main's config can't run (none there, or invalid), the checkout's config as committed (the

@@ -8,7 +8,7 @@
 //   doesn't stop the coordinator;
 // - there is no terminal: open questions are recorded, and answered with `instance auto-config <name> --answer`.
 // Its state is the coordinator's own (auto-config.json in the instance's state dir); each run prints one JSON line.
-import { spawnSync } from './os/child-process.js';
+import { gitSpawnSync } from './os/git.js';
 import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { parseDocument } from 'yaml';
@@ -143,7 +143,7 @@ export async function serverAutoConfig(name: string, o: { answers?: Record<strin
     ...(o.timeoutMs ? { timeoutMs: o.timeoutMs } : {}),
     io: {
       git: (args, cwd) => {
-        const p = spawnSync('git', args, { cwd, encoding: 'utf8', env: { ...process.env, ...identity, GIT_TERMINAL_PROMPT: '0', [`${BRAND.envPrefix}_INSTANCE`]: name }, timeout: 300_000 });
+        const p = gitSpawnSync(args, { cwd, encoding: 'utf8', env: { ...process.env, ...identity, GIT_TERMINAL_PROMPT: '0', [`${BRAND.envPrefix}_INSTANCE`]: name }, timeout: 300_000 });
         return { status: p.error ? null : p.status, stdout: p.stdout ?? '', stderr: p.error ? p.error.message : (p.stderr ?? '') };
       },
       gh: (args) => gh(args),

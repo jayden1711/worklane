@@ -4,6 +4,7 @@
 // closed (deny or block with a reason); the generated settings also append
 // `|| exit 2`, so a missing or crashing engine blocks instead of allowing.
 import { spawnSync } from './os/child-process.js';
+import { gitSpawnSync } from './os/git.js';
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { childEnv, shellCommand } from './os/index.js';
@@ -190,7 +191,7 @@ function preToolUse(input: HookInput, env: NodeJS.ProcessEnv): HookOutput {
 
 /** A read-only git query for the commit model: its exit status and output, never an exception. */
 function gitQuery(dir: string, args: string[]): { status: number | null; stdout: string } {
-  const r = spawnSync('git', args, { cwd: dir, encoding: 'utf8', timeout: 5_000 });
+  const r = gitSpawnSync(args, { cwd: dir, encoding: 'utf8', timeout: 5_000 });
   return { status: r.error ? null : r.status, stdout: r.stdout ?? '' };
 }
 

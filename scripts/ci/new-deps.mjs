@@ -16,6 +16,8 @@
 // else from the event payload at $GITHUB_EVENT_PATH (pull_request.body). Exit 1 with each problem when any.
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
+import { devNull } from 'node:os';
+import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 export const SPEC_FIELDS = ['dependencies', 'optionalDependencies', 'peerDependencies'];
@@ -142,12 +144,18 @@ export function check({ basePkg, headPkg, baseLock, headLock, body }) {
   return { changed: [...changed].map(([name, c]) => ({ name, versions: [...c.versions], licences: [...c.licences], why: c.why })), problems };
 }
 
-const git = (...a) => execFileSync('git', a, { encoding: 'utf8', maxBuffer: 256 * 1024 * 1024 });
+// The git runner's settings (#807; src/os/git.ts, scripts/lib/git.cjs): replace refs off and no graft file. Written
+// out here because CI runs the base's copy of this file alone, from a temp dir (new-deps.yml), so it imports nothing
+// of the repo's; test/git-runner.test.ts checks they are the runner's.
+const GIT_FIXED_ARGS = ['--no-replace-objects', '-c', 'core.commitGraph=false'];
+const GIT_ENV = { ...process.env, GIT_NO_REPLACE_OBJECTS: '1', GIT_GRAFT_FILE: join(devNull, 'no-grafts') };
+const runGit = (args, opts) => execFileSync('git', [...GIT_FIXED_ARGS, ...args], { ...opts, env: GIT_ENV });
+const git = (...a) => runGit(a, { encoding: 'utf8', maxBuffer: 256 * 1024 * 1024 });
 /** A JSON file at a revision; null when the revision doesn't have it. */
 function jsonAt(rev, path) {
   let text;
   try {
-    text = execFileSync('git', ['show', `${rev}:${path}`], { encoding: 'utf8', maxBuffer: 256 * 1024 * 1024, stdio: ['ignore', 'pipe', 'ignore'] });
+    text = runGit(['show', `${rev}:${path}`], { encoding: 'utf8', maxBuffer: 256 * 1024 * 1024, stdio: ['ignore', 'pipe', 'ignore'] });
   } catch {
     git('rev-parse', '--verify', '--quiet', `${rev}^{commit}`); // a bad revision fails loudly; a missing file is null
     return null;

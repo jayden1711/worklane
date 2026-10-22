@@ -32,6 +32,7 @@ categories:
     - test/package-files.test.ts
     - test/managed-apps.test.ts
     - test/merge-idempotent.test.ts
+    - test/git-runner.test.ts
     - test/vacuity.test.ts
     - test/merge-policy-vacuity.test.ts
     - test/merge-vacuity-coordinator.test.ts

@@ -2,13 +2,13 @@
 // coordinator owns: merge a base into the checked-out branch and report what
 // conflicted. Merge commits only here (the default strategy); conflict
 // markers use diff3 style so a resolver also sees the common ancestor.
-import { spawnSync } from './os/child-process.js';
+import { gitSpawnSync } from './os/git.js';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { changedNames, changedNamesOrNull, presentNames } from './coordinator/change-files.js';
 import { isNonUtf8Path } from './review.js';
 
-const git = (cwd: string, ...a: string[]) => spawnSync('git', a, { cwd, encoding: 'utf8' });
+const git = (cwd: string, ...a: string[]) => gitSpawnSync(a, { cwd, encoding: 'utf8' });
 /** A blob's id at `rev:path` (or the index's, `:path`), or null when there is none. */
 const blob = (cwd: string, spec: string) => {
   const r = git(cwd, 'rev-parse', '--verify', '-q', spec);
