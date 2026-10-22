@@ -556,15 +556,30 @@ export abstract class MergeFlow extends FixRuns {
     }
   }
 
+  /**
+   * The default branch as one merge decision reads it (#1005): its tip, fetched once (defaultTipNow), and every policy
+   * input the decision takes from that branch read at that one commit: the money-path list here, the checks it
+   * registers by weakeningOf(tip). Read at the remote-tracking ref instead, as last fetched, the list could be older
+   * than the tip the weakening check reads, and miss a path the default branch added since. `tip` null (the fetch or
+   * the read failed): the decision waits, as before (weakeningOf's reason), and the list is read at the ref as last
+   * fetched, only to name the money paths the change touches among its reasons.
+   */
+  private policyAtTipNow(review: ReviewConfig): { tip: string | null; moneyPaths: RegExp[] } {
+    const tip = this.defaultTipNow();
+    return { tip, moneyPaths: tip === null ? this.moneyPaths(review.money_path_source) : this.moneyPaths(review.money_path_source, tip) };
+  }
+
   /** The policy's call on a ready PR at its current head. */
   mergeDecisionFor(n: number, number: number, pr: PullRequest): MergeDecision {
     const review: ReviewConfig = this.d.cfg.review ?? DEFAULT_REVIEW;
+    // First, before anything is read from the default branch: its one commit for this decision (#1005).
+    const policy = this.policyAtTipNow(review);
     // A stale-PR merge-in head: the PR's own change is measured from the default branch it merged (src/pr-hygiene.ts).
     const mergeIns = this.mergeInsOf();
     const base = mergeInBase(mergeIns, number, pr.headSha) ?? (this.events(n).filter((e) => e.type === 'issue.claimed').at(-1)!.payload as EventPayload<'issue.claimed'>).base;
     const files = this.changeFiles(this.d.repo, base, pr.headSha);
     const labels = (this.events(n).filter((e) => e.type === 'issue.seen').at(-1)?.payload as { labels?: string[] } | undefined)?.labels ?? [];
-    const level = computeLevel({ files, labels, moneyPaths: this.moneyPaths(review.money_path_source), scope: lockScopeOf(this.d) }, review);
+    const level = computeLevel({ files, labels, moneyPaths: policy.moneyPaths, scope: lockScopeOf(this.d) }, review);
     const exists = (p: string) => spawnSync('git', ['cat-file', '-e', `${base}:${p}`], { cwd: this.d.repo }).status === 0;
     const newTopLevel = [...new Set(files.map((f) => f.path.split('/')).filter((s) => s.length > 1).map((s) => s[0]!))].filter((d) => !exists(d)).map((d) => `${d}/`);
     // The verdict on this head, or on the head the harness's merge-ins of the default branch were made on.
@@ -601,8 +616,9 @@ export abstract class MergeFlow extends FixRuns {
       // high-risk categories and the engine's own, whether or not this repo's merge rules hold them elsewhere.
       claimedProtected: this.claimedClass(n) === 'protected',
       // A test, lint or guard the change removes or loosens, read from the change itself (#783), with the checks the
-      // default branch registers now (its tip, fetched here) as well as at the change's base (#869).
-      weakening: weakeningOf(this.d.repo, base, pr.headSha, files, lockScopeOf(this.d), this.defaultTipNow()),
+      // default branch registers now (its tip, fetched at the decision's start, the commit the money paths were read at:
+      // #1005) as well as at the change's base (#869).
+      weakening: weakeningOf(this.d.repo, base, pr.headSha, files, lockScopeOf(this.d), policy.tip),
       outsidePlan: plan ? outsidePlanReasons({ planFiles: plan.files ?? [], level, waitCategories: [...new Set([...waitCategoriesOf(review), ...DEFAULT_REVIEW.levels.L3_human.when])], newTopLevel }) : [],
     });
     // A head a conflict fix pushed: its own reasons to wait (outside the hunks, risky files, an unsure evaluator).
