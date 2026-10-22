@@ -1,6 +1,7 @@
-// #1005: one merge decision reads every policy input it takes from the default branch at one commit, its tip fetched
-// at the decision's start: the money-path list as well as the registered checks. A clone whose remote-tracking default
-// branch is older than the remote's (the list gained a path since its last fetch) must not decide on the older list.
+// #1005: one merge decision reads the money-path list and the registered checks from the default branch at one commit,
+// its tip taken at the decision's start (review.yaml itself still comes from the running config). A clone whose
+// remote-tracking default branch is older than the remote's (the list gained a path since its last fetch) must not
+// decide on the older list.
 // Scratch repos only; no repo file is read or edited.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
