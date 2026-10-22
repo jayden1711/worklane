@@ -798,7 +798,8 @@ export function moneyListLines(text: string): MoneyLine[] {
     // Round 12 (the coordinator's decision): block comments are not read, so a /* that never closes can't hide the
     // lines after it (round 11 read them as comments, and a list's globs went with them). A /* that opens the line or
     // follows a blank (`/* old`, `/*.sql`, a TS line's trailing `/* note */`) refuses the line, as does any other line
-    // holding /* that isn't a valid glob; each suggests every path.
+    // holding /* that isn't a valid glob; each suggests every path. (A one-line `/* note */` doesn't reach here: it
+    // parses as one regex literal above and is refused as an invalid regex, with that regex's suggestion, `** note**`.)
     if (line.includes('/*')) {
       const g = unquoted(rest);
       const problem = globLineProblem(g);
@@ -811,11 +812,15 @@ export function moneyListLines(text: string): MoneyLine[] {
     }
     const g = globLine(rest);
     if (!('glob' in g)) return refuse(line, g.why, g.suggestion, true);
-    // Round 12: one entry a line (round 11 read a cut line twice, doubling the money RegExps for such lists). A comment
-    // cut that leaves a glob covering the line as written (`billing/** # card data`), or a quoted glob (the quotes end
-    // the name), reads that glob. Otherwise the ` #` may have been part of the name: if the line as written is a valid
-    // glob (`docs/Issue #12/**`, `billing.ts # card data`), the cut glob followed by `**` is read, which covers both
-    // readings (only ever wider); if it isn't (`docs/x # [legacy]`), the line is refused, as the cut can't be checked.
+    // Round 12: one read entry a line (round 11 read a cut line twice). Main's own reading of such a line (the line as
+    // written) is still kept beside it (KeptMoneyReading), so a list of commented or quoted globs carries about two
+    // RegExps a line against main's one (measured by the round-12 review: about twice main's matching; a follow-up). A
+    // comment cut that leaves a glob covering the line as written (`billing/** # card data`), or a quoted glob (the
+    // quotes end the name), reads that glob. Otherwise the ` #` may have been part of the name: if the line as written
+    // is a valid glob (`docs/Issue #12/**`, `billing.ts # card data`), the cut glob followed by `**` is read, which
+    // covers both readings; if it isn't (`docs/x # [legacy]`, any `<glob> // note`), the line is refused, as the cut
+    // can't be checked. "Covers" reads the line as a path, so a comment that itself holds `*` or `?`
+    // (`billing* # card**`) can read narrower than the line as written read as a glob (a follow-up).
     if (rest !== line && unquoted(rest) === rest && !globToRegExp(g.glob).test(line)) {
       if (globLineProblem(line)) return refuse(line, 'its # or // may be part of the name, and the line as written isn\'t a valid glob: quote the glob before the comment', writableGlob(`${g.glob}**`));
       return { kind: 'read', line, entries: [glob(`${g.glob}**`.replace(/\*{3,}$/, '**'), line)] };
@@ -885,7 +890,7 @@ function unwrapped(line: string): string {
  * 12 (the coordinator's decision): no block comments; a line holding a `/*` that isn't a valid glob is refused.
  */
 export const MONEY_COMMENT_SYNTAX =
-  'a # or // after a space or tab, outside quotes (an apostrophe inside a word is not a quote), to the end of the line (when the glob before it does not cover the line as written, it is read with ** after it, covering both readings); a line that starts with # or //; a line of only brackets, commas and semicolons is blank; block comments (/* */) are not read';
+  'a # or // after a space or tab, outside quotes (an apostrophe inside a word is not a quote), to the end of the line (when the glob before it does not cover the line as written, it is read with ** after it, covering both readings, unless the line as written is not a valid glob, as with any // comment there: then the line is refused); a line that starts with # or //; a line of only brackets, commas and semicolons is blank; block comments (/* */) are not read';
 
 /**
  * What in a glob line the glob matcher (globToRegExp) reads literally, though other glob dialects read it as syntax,
@@ -999,8 +1004,10 @@ export function regexToGlob(body: string, flags: string): { glob: string } | { w
   const start = body.startsWith('^');
   if (start) i = 1;
   let end = false;
-  // The suggestion (loose) is a glob matching at least what the regex does (under the i flag, each ASCII letter as
-  // `?`, round 11): each part it can't convert reads as **.
+  // The suggestion (loose) is meant to match at least what the regex does (under the i flag, each cased character as
+  // `?`, rounds 11 and 12): each part it can't convert reads as **. It is a hint the owner checks, not a guarantee:
+  // two shapes are known to give a narrower one (round-12 review: a `)` inside a class inside a group, which
+  // `closing` counts, and a space at the regex's edge, which writableGlob trims; follow-ups).
   let lastLiteral = 0;
   const wide = () => {
     if (!loose.endsWith('**')) loose += '**';
@@ -1052,7 +1059,7 @@ export function regexToGlob(body: string, flags: string): { glob: string } | { w
       if (rest[0] === '\\') {
         const n = rest.length > 1 ? String.fromCodePoint(rest.codePointAt(1)!) : '';
         if (/^[xucCkpP1-9]$/.test(n)) {
-          // Round 12: an escape with a payload (`\x2f`, `b`, `\cJ`, `\k<name>`, `\p{L}`) or a backreference
+          // Round 12: an escape with a payload (`\x2f`, a backslash-u escape with four hex digits, `\cJ`, `\k<name>`, `\p{L}`) or a backreference
           // (`\1`): its payload isn't text, and reading it as text made the suggestion narrower (`billing**2f**` for
           // `^billing\x2f`). The suggestion matches every path.
           loose = '**';

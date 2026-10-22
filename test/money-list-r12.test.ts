@@ -6,8 +6,8 @@
 // - a /* after a no-break space, a line or paragraph separator, or a C1 control joining two globs, read silently;
 // - a comment cut that left a glob not covering the line as written (`docs/Issue #12/[id]/**`), read as the cut alone,
 //   and a cut line read as two entries;
-// - suggestions narrower than their regex: an escape with a payload (`\x2f`, `b`, `\cJ`, `\k<p>`), and, under the
-//   i flag, letters outside ASCII (`é`, `σ`, `ß`, `ǆ`).
+// - suggestions narrower than their regex: an escape with a payload (`\x2f`, a backslash-u escape with four hex
+//   digits, `\cJ`, `\k<p>`), and, under the i flag, letters outside ASCII (`é`, `σ`, `ß`, `ǆ`).
 //
 // WHY the letters and separators are written as themselves or found by their properties: no committed file holds a
 // code point number (#763).
@@ -97,7 +97,8 @@ test('#763 round 12: a comment cut never narrows and gives one entry a line', ()
   assert.deepEqual(moneyListProblems(money), []);
   assert.equal(money.filter((e) => e instanceof MoneyGlob).length, 3, money.map(String).join(' '));
   for (const p of ['docs/Issue #12/x.ts', 'docs/Issue', 'billing.ts', 'src/billing/x.ts']) assert.ok(money.some((e) => e instanceof MoneyGlob && e.test(p)), p);
-  // 200 commented four-`**` globs: 200 entries, as main has 200 RegExps (round 11 had 400).
+  // 200 commented four-`**` globs: 200 read globs (round 11 read 400). Main's own reading of each line is kept beside
+  // them (KeptMoneyReading), so the list carries about twice main's RegExps (a follow-up, round-12 review).
   const many = Array.from({ length: 200 }, (_, i) => `**x**y**z${i}q** # card`).join('\n');
   assert.equal(moneyListEntries(many).filter((e) => e instanceof MoneyGlob).length, 200);
 });
