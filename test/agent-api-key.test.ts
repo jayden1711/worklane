@@ -19,6 +19,8 @@ const KEY_FILE = '/home/user/.config/x-claude-key/api_key';
 function standIn(authMethod: string) {
   const dir = mkdtempSync(join(tmpdir(), 'claude-key-'));
   const bin = join(dir, 'claude');
+  // Fixture user switching only: execute the recording CLI, never the host's sudo or another user's account.
+  writeFileSync(join(dir, 'sudo'), '#!/bin/sh\nshift 4\nexec "$@"\n', { mode: 0o755 });
   writeFileSync(
     bin,
     `#!/usr/bin/env node
@@ -42,6 +44,9 @@ const settingsOf = (argv: string[]) => {
   const i = argv.indexOf('--settings');
   return i >= 0 ? (JSON.parse(argv[i + 1]!) as { apiKeyHelper?: string }) : null;
 };
+function installedRunner(s: ReturnType<typeof standIn>) {
+  return new CliRunner('api_key', { PATH: `${s.dir}:${process.env.PATH ?? ''}`, CLAUDE_CONFIG_DIR: join(s.dir, 'cfg'), ANTHROPIC_API_KEY: 'sk-ant-' + 'y'.repeat(30) }, s.bin, { user: 'wl-x-agent', home: '/home/user' }, undefined, undefined, {}, undefined, KEY_FILE, undefined, undefined, undefined, undefined, undefined, undefined, undefined, 'x');
+}
 
 test('instance billing: an API key only when credentials.yaml names one; the environment never carries a key', () => {
   const fake = (extra: object) => ({ name: 'x', home: '/tmp/x-home', stateDir: '/tmp/x', credentials: { version: 1, github: { kind: 'gh-config-dir', path: '/tmp/gh' }, ...extra } }) as unknown as Instance;
@@ -57,10 +62,10 @@ test('instance billing: an API key only when credentials.yaml names one; the env
 
 test('the runner gives claude the key through apiKeyHelper (a path, never the key) and keeps --max-budget-usd; a login runner gives none', { skip: posixOnly }, async () => {
   const key = standIn('api_key_helper');
-  const keyed = await new CliRunner('api_key', { PATH: process.env.PATH ?? '', CLAUDE_CONFIG_DIR: join(key.dir, 'cfg'), ANTHROPIC_API_KEY: 'sk-ant-' + 'y'.repeat(30) }, key.bin, undefined, undefined, undefined, {}, undefined, KEY_FILE).run(req(key.dir));
+  const keyed = await installedRunner(key).run(req(key.dir));
   assert.equal(keyed.reason, 'succeeded', keyed.detail);
   const got = key.got();
-  assert.equal(settingsOf(got.argv)?.apiKeyHelper, `cat -- ${KEY_FILE}`);
+  assert.equal(settingsOf(got.argv)?.apiKeyHelper, apiKeyHelperCommand(KEY_FILE, { instance: 'x', user: 'wl-x-agent' }));
   const budget = got.argv.indexOf('--max-budget-usd');
   assert.equal(got.argv[budget + 1], '1.25', 'the run is still capped by its budget');
   assert.equal(got.env.ANTHROPIC_API_KEY, undefined, 'the helper is the only way in: no key from the environment');
@@ -75,7 +80,7 @@ test('the runner gives claude the key through apiKeyHelper (a path, never the ke
 
 test('an API-key runner refuses to start when claude reports a login: no silent billing switch', { skip: posixOnly }, async () => {
   const s = standIn('claude.ai');
-  const r = await new CliRunner('api_key', { PATH: process.env.PATH ?? '', CLAUDE_CONFIG_DIR: join(s.dir, 'cfg') }, s.bin, undefined, undefined, undefined, {}, undefined, KEY_FILE).run(req(s.dir));
+  const r = await installedRunner(s).run(req(s.dir));
   assert.equal(r.reason, 'auth_mismatch');
 });
 

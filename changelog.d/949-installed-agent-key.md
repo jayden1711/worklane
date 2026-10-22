@@ -1,0 +1,3 @@
+### Guardrail changes: what each one does
+
+- An instance's API-key helper checks the configured file against its agent user's passwd home and this instance's installed key location (#949). It refuses an unknown instance or agent identity, a noncanonical path, a nonregular file, multiple links, another owner's file, group/other permissions or more than 64 KiB. The coordinator never reads the key. The helper checks and reads one descriptor, but its earlier pathname check can still race a concurrent ancestor-directory swap; this is not a race-free filesystem binding. Provider keys use their existing separate flow.

@@ -11,6 +11,7 @@ import { tmpdir } from 'node:os';
 import { join, posix } from 'node:path';
 import { agentSettingsFileOf, NO_ATTRIBUTION, projectSettingsRefusal, runSettings, SETTINGS_CHECK_KEY, settingsAppliedProblem, settingsCheckValue, type Settings } from './agent-settings.js';
 import { BRAND } from './brand.js';
+import { serverAgentUser } from './instance.js';
 import type { CliAgentName } from './providers.js';
 import { logRefusalOnce, providerHostRefusal } from './provider-hosts.js';
 import { safeProjectEnv } from './project-env.js';
@@ -240,10 +241,41 @@ export function agentEnv(base: EnvSource, runtime: 'cli' | 'api_key', extra: Rec
 
 /**
  * claude's apiKeyHelper for an API-key file: a command claude runs (as the user it runs as) to read the key. The
- * path is refused unless it is absolute and plain (no quote, space or shell character), so it can't become a command.
+ * path is refused unless it is absolute and plain (no quote, space or shell character). An installed instance key
+ * is checked against the agent's passwd home and its open descriptor; provider keys keep their separate path flow.
  */
-export function apiKeyHelperCommand(file: string): string {
+export function apiKeyHelperCommand(file: string, installed?: { instance: string; user: string }): string {
   if (!/^\/[A-Za-z0-9._/-]+$/.test(file)) throw new Error(`API key file path ${JSON.stringify(file)} must be absolute, with letters, digits and . _ - / only`);
+  if (installed) {
+    if (!/^[a-z][a-z0-9-]{0,20}$/.test(installed.instance) || installed.user !== serverAgentUser(installed.instance)) throw new Error('API key needs this instance\'s own agent user');
+    const q = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
+    // The coordinator cannot inspect the agent's private home. Check and read one descriptor as the agent instead.
+    // LIMIT: canonical-path checking and open are separate; a concurrent ancestor-directory swap can race them.
+    const script = String.raw`
+const fs = require('node:fs'), os = require('node:os'), path = require('node:path');
+let fd;
+try {
+  const [file, instance, user] = process.argv.slice(1);
+  const who = os.userInfo();
+  if (who.username !== user || who.uid !== process.getuid() || !path.isAbsolute(who.homedir) || path.resolve(who.homedir) !== who.homedir) throw Error();
+  const expected = path.join(who.homedir, '.config', instance + '-claude-key', 'api_key');
+  if (file !== expected || fs.realpathSync(file) !== expected) throw Error();
+  fd = fs.openSync(expected, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
+  const st = fs.fstatSync(fd);
+  if (!st.isFile() || st.nlink !== 1 || st.uid !== who.uid || (st.mode & 0o077) || st.size > 65536) throw Error();
+  const bytes = Buffer.alloc(65537);
+  let used = 0, n;
+  while (used < bytes.length && (n = fs.readSync(fd, bytes, used, bytes.length - used, null))) used += n;
+  if (used > 65536) throw Error();
+  fs.writeSync(1, bytes.subarray(0, used));
+} catch {
+  process.stderr.write('Installed agent API key refused: check its path, identity, owner, links and private mode.\n');
+  process.exitCode = 1;
+} finally {
+  if (fd !== undefined) fs.closeSync(fd);
+}`;
+    return `NODE_OPTIONS= NODE_PATH= ${q(process.execPath)} -e ${q(script)} -- ${q(file)} ${q(installed.instance)} ${q(installed.user)}`;
+  }
   return `cat -- ${file}`;
 }
 
@@ -560,6 +592,8 @@ export class CliRunner implements AgentRunner {
      * the repository, and the engine's own. Every guarded run's sandbox hides them whole, whatever a config names.
      */
     private worktreePlaces?: readonly string[],
+    /** Instance identity for its installed agent API key; never inferred from credentials.yaml's path. */
+    private instanceName?: string,
   ) {}
 
   /** The lane's user, on the login its runs use now. */
@@ -632,6 +666,17 @@ export class CliRunner implements AgentRunner {
   /** One try. `started` releases the login's start lock: once claude has answered (its token is fresh), or ended. */
   private async runOnce(req: RunRequest, started: () => void): Promise<RunResult> {
     if (req.provider?.kind === 'cli') return { reason: 'failed', detail: `${req.provider.name} runs on its own CLI, not claude; not starting`, costUsd: 0, turns: 0, model: req.model };
+    if (!req.provider && this.runtime === 'api_key' && this.apiKeyFile && (!this.instanceName || !/^[a-z][a-z0-9-]{0,20}$/.test(this.instanceName) || !this.runAs || this.runAs.user !== serverAgentUser(this.instanceName))) {
+      return { reason: 'failed', detail: 'an installed API key needs the instance identity and its own agent user; not starting', costUsd: 0, turns: 0, model: req.model };
+    }
+    let installedHelper: string | undefined;
+    if (!req.provider && this.runtime === 'api_key' && this.apiKeyFile) {
+      try {
+        installedHelper = apiKeyHelperCommand(this.apiKeyFile, { instance: this.instanceName!, user: this.runAs!.user });
+      } catch {
+        return { reason: 'failed', detail: 'the installed API key path is not a plain absolute path; not starting', costUsd: 0, turns: 0, model: req.model };
+      }
+    }
     const base = agentBase(this.base, req.provider ? 'provider' : this.apiKeyFile ? 'key-file' : 'plain');
     // A provider run's config dir is empty (no stored login, nothing of the agent's own settings), unless it runs as
     // another user, whose own dir it keeps; either way the key comes only from apiKeyHelper below.
@@ -763,7 +808,7 @@ export class CliRunner implements AgentRunner {
     const keyed = req.provider
       ? { ...(pinned ?? {}), apiKeyHelper: apiKeyHelperCommand(req.provider.keyFile) }
       : this.runtime === 'api_key' && this.apiKeyFile && asAgent
-        ? { ...(pinned ?? {}), apiKeyHelper: apiKeyHelperCommand(this.apiKeyFile) }
+        ? { ...(pinned ?? {}), apiKeyHelper: installedHelper! }
         : pinned;
     // An instance's runs: no skill or command runs inline shell while rendering; no claude.ai connector; and no MCP
     // server from anywhere (plugins, settings, --mcp-config) but the ones the run is given, of which there are none yet.
