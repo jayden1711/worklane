@@ -8,9 +8,10 @@
 //   doesn't stop the coordinator;
 // - there is no terminal: open questions are recorded, and answered with `instance auto-config <name> --answer`.
 // Its state is the coordinator's own (auto-config.json in the instance's state dir); each run prints one JSON line.
-import { gitSpawnSync } from './os/git.js';
+import { GIT_GUARD_VAR, gitSpawnSync } from './os/git.js';
 import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { parseDocument } from 'yaml';
 import { autoConfigure, emptyAutoConfig, type AutoConfigResult, type AutoConfigState, type RunResult } from './auto-config.js';
 import { BRAND } from './brand.js';
@@ -121,6 +122,55 @@ export interface ServerAutoConfigLine {
   questions: string[];
 }
 
+/**
+ * The git config auto-config runs with (#926): the mark, naming the checkout a worktree's git is pinned to; no
+ * credential helper but the App's; and the checkout's own hooks dir by its absolute path (`<checkout>/.git/hooks`,
+ * which checkout.sh's `install --git-hooks-only` fills, the gitleaks pre-commit and the default-branch pre-push, and
+ * locks to the coordinator), so its commit and push run those hooks as before #926, on a first install too, and never
+ * hooks a rewritten worktree link could name.
+ */
+export function autoConfigGitPairs(name: string, repo: string): [string, string][] {
+  return [
+    ['credential.helper', ''],
+    ['credential.helper', `!"${process.execPath}" "${fileURLToPath(new URL('./cli.js', import.meta.url))}" git-credential --instance ${name}`],
+    ['core.hooksPath', join(repo, '.git', 'hooks')],
+  ];
+}
+
+/** autoConfigGitPairs as an environment of its own, with the mark: what a git started by auto-config gets. */
+export function autoConfigGitEnv(name: string, repo: string): Record<string, string> {
+  const pairs = autoConfigGitPairs(name, repo);
+  const env: Record<string, string> = { [GIT_GUARD_VAR]: repo, GIT_CONFIG_COUNT: String(pairs.length) };
+  pairs.forEach(([k, v], n) => {
+    env[`GIT_CONFIG_KEY_${n}`] = k;
+    env[`GIT_CONFIG_VALUE_${n}`] = v;
+  });
+  return env;
+}
+
+/**
+ * Mark this process as `repo`'s instance's (GIT_GUARD_VAR) and add `pairs` after its git config pairs; the returned
+ * function puts every variable it touched back as it was.
+ */
+function markAsInstance(repo: string, pairs: [string, string][]): () => void {
+  const env = process.env;
+  const n = /^\d{1,4}$/.test(env.GIT_CONFIG_COUNT ?? '') ? Number(env.GIT_CONFIG_COUNT) : 0;
+  const names = [GIT_GUARD_VAR, 'GIT_CONFIG_COUNT', ...pairs.flatMap((_, k) => [`GIT_CONFIG_KEY_${n + k}`, `GIT_CONFIG_VALUE_${n + k}`])];
+  const before = new Map(names.map((v) => [v, env[v]]));
+  env[GIT_GUARD_VAR] = repo;
+  pairs.forEach(([k, v], j) => {
+    env[`GIT_CONFIG_KEY_${n + j}`] = k;
+    env[`GIT_CONFIG_VALUE_${n + j}`] = v;
+  });
+  env.GIT_CONFIG_COUNT = String(n + pairs.length);
+  return () => {
+    for (const [v, was] of before) {
+      if (was === undefined) delete env[v];
+      else env[v] = was;
+    }
+  };
+}
+
 /** Run auto-config for an instance, as its coordinator user: one line saying where it stands. */
 export async function serverAutoConfig(name: string, o: { answers?: Record<string, string>; timeoutMs?: number; fetchImpl?: Fetch; owner?: string } = {}): Promise<ServerAutoConfigLine> {
   const i = loadInstanceSetup(name);
@@ -135,6 +185,11 @@ export async function serverAutoConfig(name: string, o: { answers?: Record<strin
   const worktrees = join(dirname(i.repo.path), '.setup');
   if (!existsSync(worktrees)) mkdirSync(worktrees, { recursive: true });
   const owner = o.owner ?? machineOwners()[0];
+  // #926: the checkout is agent-writable, and the agent user runs the project's commands in a scratch worktree of it.
+  // While auto-config runs, this process is marked as its instance's, so every git it runs is guarded (src/os/git.ts),
+  // as the coordinator's is: pinned to the checkout's own .git in that worktree, with the App's credential helper (the
+  // guard clears the one checkout.sh wrote into .git/config) and the checkout's own hooks (gitleaks, the pre-push).
+  const unmark = markAsInstance(i.repo.path, autoConfigGitPairs(name, i.repo.path));
   const r = await autoConfigure({
     root: i.repo.path,
     repo: i.repo.repo,
@@ -157,7 +212,7 @@ export async function serverAutoConfig(name: string, o: { answers?: Record<strin
     ...(owner ? { owner } : {}),
     adjust: (cfgDir) => fitToPolicy(cfgDir, i.policy),
     check: (cfg) => instanceConfigProblems(cfg, i.repo.repo, i.policy).map((e) => `${e.file}${e.path ? ` ${e.path}` : ''}: ${e.message}`),
-  });
+  }).finally(unmark);
   save();
   const answer = `sudo -H -u ${coordinatorUser(name)} ${BRAND.cli} instance auto-config ${name} --answer <id>=<choice>`;
   const detail = r.kind === 'questions' ? r.detail.replace(/Run `[^`]*` in a terminal to answer, or `[^`]*`/, `answer with \`${answer}\``) : r.kind === 'merged' ? `the config is on ${r.branch}` : r.detail;
