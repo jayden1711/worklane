@@ -216,6 +216,8 @@ export const GUARD_FILES: readonly string[] = [
   'src/os/system-paths.ts',
   'src/os/own-env.ts',
   'src/os/child-process.ts',
+  // The git runner (#927): src/coordinator/change-files.ts reads through it, so it runs in a backstop's process too.
+  'src/os/git.ts',
 ];
 
 /** A package manager's settings: every one changes what install and each script run under (`script-shell=`, `ignore-scripts=`). */

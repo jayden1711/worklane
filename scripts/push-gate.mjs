@@ -19,10 +19,31 @@
 // email (a squash merge's DCO trailers) is dropped whole, name included.
 import { execFileSync, spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
+import { devNull } from 'node:os';
+import { join } from 'node:path';
 import { loadRules, scanText, SKIP } from './lib/denylist.mjs';
 
 const ZERO = /^0+$/;
-const git = (...a) => execFileSync('git', a, { encoding: 'utf8', maxBuffer: 256 * 1024 * 1024 });
+// The git runner's settings (#807; src/os/git.ts, scripts/lib/git.cjs): replace refs off and no graft file, so a
+// `git replace` or a graft in the repo can't swap the commits, trees or blobs scanned here. Written out here because
+// the hook runs this file alone, fetched from origin (scripts/push-gate-hook.mjs GATE_CODE), so it imports nothing
+// new; test/git-runner.test.ts checks they are the runner's.
+// The commit-graph is off too (a forged one can skip a commit), in the arguments and, for gitleaks' own gits, in the
+// environment: a config pair after the caller's GIT_CONFIG_COUNT pairs, and at the end of GIT_CONFIG_PARAMETERS
+// (what `git -c` hands the gits it runs), which git reads last. A count that isn't a plain decimal 0 to 9999 is
+// replaced with one git refuses, so the git fails closed (as src/os/git.ts gitEnv).
+const GIT_FIXED_ARGS = ['--no-replace-objects', '-c', 'core.commitGraph=false'];
+const graphOff = (e) => {
+  const raw = Object.hasOwn(e, 'GIT_CONFIG_COUNT') ? e.GIT_CONFIG_COUNT : undefined;
+  const params = Object.hasOwn(e, 'GIT_CONFIG_PARAMETERS') ? e.GIT_CONFIG_PARAMETERS : undefined;
+  const last = { GIT_CONFIG_PARAMETERS: params ? `${params} 'core.commitGraph=false'` : "'core.commitGraph=false'" };
+  if (raw !== undefined && !/^(?:0|[1-9][0-9]{0,3})$/.test(raw)) return { ...e, GIT_CONFIG_COUNT: 'refused', ...last };
+  const n = raw === undefined ? 0 : Number(raw);
+  return { ...e, [`GIT_CONFIG_KEY_${n}`]: 'core.commitGraph', [`GIT_CONFIG_VALUE_${n}`]: 'false', GIT_CONFIG_COUNT: String(n + 1), ...last };
+};
+const GIT_ENV = graphOff({ ...process.env, GIT_NO_REPLACE_OBJECTS: '1', GIT_GRAFT_FILE: join(devNull, 'no-grafts') });
+const runGit = (args, opts) => execFileSync('git', [...GIT_FIXED_ARGS, ...args], { ...opts, env: GIT_ENV });
+const git = (...a) => runGit(a, { encoding: 'utf8', maxBuffer: 256 * 1024 * 1024 });
 
 function fail(why) {
   console.error(`push gate: REFUSED. ${why}`);
@@ -69,7 +90,7 @@ function repoOwner() {
   if (fromEnv) return fromEnv[1].toLowerCase();
   let url;
   try {
-    url = execFileSync('git', ['remote', 'get-url', 'origin'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+    url = runGit(['remote', 'get-url', 'origin'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
   } catch {
     return null; // no origin: no allowance
   }
@@ -181,7 +202,8 @@ function scanTree(rules, tip) {
 
 function gitleaks(commits) {
   if (!commits.length) return;
-  const r = spawnSync('gitleaks', ['git', '--no-banner', '--redact', '--exit-code', '1', '--log-opts', `--no-walk ${commits.join(' ')}`, '.'], { encoding: 'utf8' });
+  // gitleaks runs git itself: with the same settings, in its environment.
+  const r = spawnSync('gitleaks', ['git', '--no-banner', '--redact', '--exit-code', '1', '--log-opts', `--no-walk ${commits.join(' ')}`, '.'], { encoding: 'utf8', env: GIT_ENV });
   if (r.error) fail(`gitleaks could not run (${r.error.code ?? r.error.message}); install it, the gate never skips the secret scan`);
   if (r.status === 1) fail(`gitleaks found a secret:\n${(r.stdout + r.stderr).trim().slice(-3000)}`);
   if (r.status !== 0) fail(`gitleaks exited ${r.status}:\n${r.stderr.trim().slice(-1000)}`);

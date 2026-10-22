@@ -1,7 +1,7 @@
 // Risk-based review levels, computed by code from what a change touches.
 // The highest matching level wins; a failed or low-confidence evaluator
 // verdict bumps it up one; an agent can raise its own level, never lower it.
-import { spawnSync } from './os/child-process.js';
+import { gitSpawnSync } from './os/git.js';
 import { posix } from 'node:path';
 import type { ReviewConfig } from './config/schema.js';
 import { globToRegExp } from './guardrails/glob.js';
@@ -386,6 +386,9 @@ export const SELF_MODIFICATION_PARTS: { what: string; globs: string[] }[] = oneP
   { what: 'the merge policy', globs: ['src/merge-policy*', 'src/coordinator/merge-flow*', 'src/pr-rules*', 'src/vacuity.ts', 'src/vacuity-read.ts'] },
   { what: 'the main watch', globs: ['src/main-watch*', 'src/github/main-watch-api*'] },
   { what: 'the push guard', globs: ['src/push-guard*', 'src/push-check*'] },
+  // The one way the engine and its scripts run git, with replace refs and grafts off (#807): every reader above reads
+  // through it.
+  { what: 'the git runner', globs: ['src/os/git.ts', 'scripts/lib/git.cjs'] },
   { what: 'the updater', globs: ['src/updates*', `scripts/machine/${BRAND.cli}-update*`] },
   // src/path-text.ts holds the odd-name tests computeLevel raises on (moved out of src/review.ts, #683), so it stays locked with it.
   // src/confusables*: the look-alike check and its Unicode table (#763).
@@ -477,6 +480,8 @@ export const SELF_MODIFICATION_PARTS: { what: string; globs: string[] }[] = oneP
       'test/engine-guard-locks.test.ts',
       // The test that keeps each lock glob that matches no file yet paired with its lock (#885).
       'test/not-yet-files-locks.test.ts',
+      // The replace-ref and graft routes, and the scan that every git call goes through the git runner (#807).
+      'test/git-runner.test.ts',
       // The test that keeps the engine repo's merge process (docs/process.md) out of the planners' decisions index.
       'test/plan-decisions.test.ts',
     ],
@@ -639,7 +644,7 @@ export interface LevelResult {
 export function loadMoneyPaths(repo: string, src: ReviewConfig['money_path_source'], rev: string): RegExp[] {
   if (!src) return [];
   const file = posix.normalize(src.file).replace(/^\.\//, '');
-  const shown = spawnSync('git', ['show', `${rev}:${file}`], { cwd: repo, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 16 * 1024 * 1024 });
+  const shown = gitSpawnSync(['show',`${rev}:${file}`], { cwd: repo, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 16 * 1024 * 1024 });
   if (shown.status !== 0) throw new Error(`money_path_source: ${file} isn't readable at ${rev}: ${(shown.stderr || shown.error?.message || '').trim().split('\n')[0]}`);
   let text = shown.stdout;
   if (src.pattern) {

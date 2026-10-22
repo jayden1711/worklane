@@ -3,7 +3,7 @@
 //   npm run rename -- <newname> [--dry-run]
 // Reads the current name from src/brand.ts, then rewrites the three case
 // variants (Name, name, NAME) in every tracked or new non-ignored text file.
-import { execFileSync } from 'node:child_process';
+import { gitExecFileSync } from './lib/git.cjs';
 import { readFileSync, writeFileSync } from 'node:fs';
 
 // Files that mention the name as data, not as our identity.
@@ -31,7 +31,7 @@ const pairs = [
   [current, next],
 ];
 
-const files = execFileSync('git', ['ls-files', '-co', '--exclude-standard'], { encoding: 'utf8' })
+const files = gitExecFileSync(['ls-files', '-co', '--exclude-standard'], { encoding: 'utf8' })
   .split('\n')
   .filter((f) => f && !SKIP.has(f));
 

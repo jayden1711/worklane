@@ -12,7 +12,8 @@
 //           agent's Claude token and the checkout). Init never installs tools there: that stays the owner's step.
 //
 // What local mode can't do is listed plainly (unavailableIn), in doctor and on the dashboard, never left to fail.
-import { spawn, spawnSync } from './os/child-process.js';
+import { spawn } from './os/child-process.js';
+import { commandSpawnSync } from './os/git.js';
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { delimiter, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -653,7 +654,8 @@ export function systemIo(o: { interactive: boolean }): InitIo {
   return {
     which: (cmd) => findTool(cmd),
     run: (cmd, args, opt = {}) => {
-      const r = spawnSync(cmd, args, { encoding: 'utf8', timeout: 60_000, env: probeEnv(opt), ...(opt.cwd ? { cwd: opt.cwd } : {}) });
+      // A caller's git (the command named git) through the git runner (#807).
+      const r = commandSpawnSync(cmd, args, { encoding: 'utf8', timeout: 60_000, env: probeEnv(opt), ...(opt.cwd ? { cwd: opt.cwd } : {}) });
       return { status: r.error ? null : r.status, stdout: r.stdout ?? '', stderr: r.error ? r.error.message : (r.stderr ?? '') };
     },
     serviceManagerEnv: () => serviceManagerEnv(MANAGER_LOGIN_VARS),

@@ -1,4 +1,4 @@
-import { spawnSync } from '../os/child-process.js';
+import { gitSpawnSync } from '../os/git.js';
 import { closeSync, constants, existsSync, fstatSync, openSync, readSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { parseDocument } from 'yaml';
@@ -120,7 +120,7 @@ export function loadConfig(root: string): Config {
  * schema and checks as loadConfig. Throws ConfigInvalid listing all errors. `dir` stays the checkout's.
  */
 export function loadConfigAt(root: string, rev: string): Config {
-  const git = (...args: string[]) => spawnSync('git', args, { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 16 * 1024 * 1024 });
+  const git = (...args: string[]) => gitSpawnSync(args, { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 16 * 1024 * 1024 });
   if (git('rev-parse', '-q', '--verify', `${rev}:${BRAND.configDir}`).status !== 0) throw new ConfigInvalid([{ file: BRAND.configDir, path: '', message: `missing at ${rev}` }]);
   const show = (file: string) => {
     const r = git('show', `${rev}:${BRAND.configDir}/${file}`);

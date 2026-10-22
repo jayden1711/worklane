@@ -18,7 +18,7 @@
 // it is refused inside an agent run, and each use prints a loud line and is appended to HATCH_LOG in the git dir.
 import { execFileSync, spawnSync } from 'node:child_process';
 import { appendFileSync, chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir, userInfo } from 'node:os';
+import { devNull, tmpdir, userInfo } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -40,8 +40,19 @@ class Refusal extends Error {}
 /** A refusal that first-time setup may answer with PUSH_GATE_BOOTSTRAP=1 (origin doesn't hold the gate yet). */
 class NotOnOrigin extends Refusal {}
 
+/**
+ * The git runner's settings (#807; src/os/git.ts, scripts/lib/git.cjs): replace refs off and no graft file, over the
+ * caller's environment. Written out here because this file runs on its own (setup-hooks copies it alone into the
+ * hooks dir), so it can't import them; test/git-runner.test.ts checks they are the runner's. The gate gets them too,
+ * in its environment, so every git it and gitleaks run has them, whichever gate origin holds.
+ */
+export const GIT_FIXED_ARGS = Object.freeze(['--no-replace-objects', '-c', 'core.commitGraph=false']);
+export const GIT_FIXED_ENV = Object.freeze({ GIT_NO_REPLACE_OBJECTS: '1', GIT_GRAFT_FILE: join(devNull, 'no-grafts') });
+/** execFileSync of git, with the settings. Every git this file runs comes through here. */
+const runGit = (args, opts = {}) => execFileSync('git', [...GIT_FIXED_ARGS, ...args], { ...opts, env: { ...(opts.env || process.env), ...GIT_FIXED_ENV } });
+
 function git(args, opts = {}) {
-  return execFileSync('git', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 64 * 1024 * 1024, ...opts });
+  return runGit(args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 64 * 1024 * 1024, ...opts });
 }
 const tryGit = (args, opts) => {
   try {
@@ -93,7 +104,7 @@ function extractFromRev(rev, label, dir) {
       throw new NotOnOrigin(`${label} has no ${path}.`);
     }
     mkdirSync(dirname(join(dir, path)), { recursive: true });
-    writeFileSync(join(dir, path), execFileSync('git', ['show', `${rev}:${path}`], { maxBuffer: 64 * 1024 * 1024 }));
+    writeFileSync(join(dir, path), runGit(['show', `${rev}:${path}`], { maxBuffer: 64 * 1024 * 1024 }));
   }
 }
 
@@ -229,7 +240,7 @@ function main(argv) {
     if (hookMode) noteIfHookIsOld();
     // WHY: the gate reads its rules (and gitleaks its config) from the directory it runs in, so it runs in the
     // private copy; GIT_DIR points its git commands at this repo, and nothing else of the checkout is in reach.
-    const env = { ...process.env, GIT_DIR: gitDir };
+    const env = { ...process.env, GIT_DIR: gitDir, ...GIT_FIXED_ENV };
     for (const k of ['GIT_WORK_TREE', 'GIT_INDEX_FILE', 'GIT_PREFIX']) delete env[k];
     const r = spawnSync(process.execPath, [join(dir, GATE_CODE[0]), ...argv], { cwd: dir, stdio: 'inherit', env });
     if (r.error) throw r.error;

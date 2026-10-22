@@ -10,6 +10,7 @@
 // (scripts/lib/release-tree.mjs): raw bytes, no line-ending conversion.
 // On success it prints `same as the signed tree: <n> files at <commit>` and exits 0.
 import { execFileSync } from 'node:child_process';
+import { gitExecFileSync } from './lib/git.cjs';
 import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -26,7 +27,7 @@ const fail = (msg) => {
 if (!tgz || !commit || !existsSync(tgz)) fail('usage: verify-release-tree.mjs <package.tgz> --commit <sha>');
 let sha;
 try {
-  sha = execFileSync('git', ['rev-parse', '--verify', `${commit}^{commit}`], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+  sha = gitExecFileSync(['rev-parse', '--verify', `${commit}^{commit}`], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 } catch {
   fail(`${commit} is not a commit here`);
 }

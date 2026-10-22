@@ -3,7 +3,7 @@
 
 // INVARIANT: the host is always the sandbox host (no flag picks another; only a test passes MeasureIo.host), and no
 // checks dependency, token or App key is loaded here: a measure can't post a check.
-import { execFileSync } from '../os/child-process.js';
+import { gitExecFileSync } from '../os/git.js';
 import { join } from 'node:path';
 import { BRAND } from '../brand.js';
 import { EventLog } from '../events/log.js';
@@ -68,7 +68,7 @@ export async function measureCommand(instance: string | undefined, sub: string |
     const given = args.sha ?? defaultBranch(i.repo.path)?.sha ?? '';
     plan = planMeasure(config, { sha: given, tiers: args.tiers, sets: args.sets });
     try {
-      plan.sha = execFileSync('git', ['-C', i.repo.path, 'rev-parse', '--verify', '-q', `${plan.sha}^{commit}`], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+      plan.sha = gitExecFileSync(['-C', i.repo.path, 'rev-parse', '--verify', '-q', `${plan.sha}^{commit}`], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
     } catch {
       throw new MeasureRefused(`${plan.sha} is not a commit in ${i.repo.path}; nothing was started`);
     }

@@ -1,6 +1,6 @@
 // Skill lint: every SKILL.md has the six sections a skill needs to be used and checked, each with something in it.
 // Validate (how to check the result) matters most: a skill whose result can't be checked is a guess.
-import { execFileSync } from './os/child-process.js';
+import { gitExecFileSync } from './os/git.js';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
@@ -38,7 +38,7 @@ export function lintSkill(text: string): string[] {
 
 /** Every tracked SKILL.md in a git checkout (forward-slash paths, relative to `root`). */
 export function trackedSkills(root: string): string[] {
-  return execFileSync('git', ['ls-files', '-z', '--', '*SKILL.md'], { cwd: root, encoding: 'utf8' })
+  return gitExecFileSync(['ls-files', '-z', '--', '*SKILL.md'], { cwd: root, encoding: 'utf8' })
     .split('\0')
     .filter((p) => p === 'SKILL.md' || p.endsWith('/SKILL.md'));
 }

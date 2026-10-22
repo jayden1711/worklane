@@ -1,6 +1,6 @@
 // WHY: item 33 wiring (src/learnings.ts): notes when a task ends, and an owner's promote filed as an AGENTS.md PR
 // built from the default branch with git plumbing (no worktree, no agent), labelled review:L3, never merged here.
-import { spawnSync } from '../os/child-process.js';
+import { gitSpawnSync } from '../os/git.js';
 import { randomBytes } from 'node:crypto';
 import { mkdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
@@ -44,15 +44,15 @@ export abstract class Learnings extends ChecksFromFeedback {
   private async fileAgentsMdPr(fp: string, line: string, by: string): Promise<{ pr: { url: string; number: number } | null; detail: string }> {
     this.git(this.d.repo, 'fetch', '-q', this.remote, this.branch);
     const base = this.git(this.d.repo, 'rev-parse', `${this.remote}/${this.branch}`);
-    const shown = spawnSync('git', ['show', `${base}:${AGENTS_MD}`], { cwd: this.d.repo, encoding: 'utf8' });
+    const shown = gitSpawnSync(['show', `${base}:${AGENTS_MD}`], { cwd: this.d.repo, encoding: 'utf8' });
     const next = withLearning(shown.status === 0 ? shown.stdout : null, line);
     if (next === null) return { pr: null, detail: `the line is in ${AGENTS_MD} on ${this.branch} already` };
-    const blob = spawnSync('git', ['hash-object', '-w', '--stdin'], { cwd: this.d.repo, encoding: 'utf8', input: next }).stdout.trim();
+    const blob = gitSpawnSync(['hash-object', '-w', '--stdin'], { cwd: this.d.repo, encoding: 'utf8', input: next }).stdout.trim();
     mkdirSync(this.d.stateDir, { recursive: true });
     const index = join(this.d.stateDir, `learning-${randomBytes(3).toString('hex')}.index`);
     const env = { ...process.env, GIT_INDEX_FILE: index, GIT_AUTHOR_NAME: this.identity.name, GIT_AUTHOR_EMAIL: this.identity.email, GIT_COMMITTER_NAME: this.identity.name, GIT_COMMITTER_EMAIL: this.identity.email };
     const g = (args: string[], input?: string) => {
-      const r = spawnSync('git', args, { cwd: this.d.repo, encoding: 'utf8', env, ...(input !== undefined ? { input } : {}) });
+      const r = gitSpawnSync(args, { cwd: this.d.repo, encoding: 'utf8', env, ...(input !== undefined ? { input } : {}) });
       if (r.status !== 0) throw new Error(`git ${args[0]} failed: ${(r.stderr || '').trim().slice(-300)}`);
       return r.stdout.trim();
     };

@@ -4,7 +4,7 @@ import { startRefusal, TestRunHeld } from '../testrun/gate.js';
 import { CI_NONE_MAIN_WATCH, ciIsNone, requiredFor } from '../ci-none.js';
 import { PinnedChecks, type JudgedChecks } from '../check-source.js';
 import type { Coordinator } from '../coordinator.js';
-import { execFileSync, spawn, spawnSync } from '../os/child-process.js';
+import { gitExecFileSync, gitSpawn, gitSpawnSync } from '../os/git.js';
 import { randomBytes } from 'node:crypto';
 import { readFileSync, existsSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
@@ -132,7 +132,7 @@ export abstract class MergeFlow extends FixRuns {
           return git('rev-parse', '--verify', '-q', `${this.remote}/${this.branch}`);
         },
         parent: (sha) => git('rev-parse', '--verify', '-q', `${sha}^1`),
-        isAncestor: (a, b) => spawnSync('git', ['merge-base', '--is-ancestor', a, b], { cwd: this.d.repo }).status === 0,
+        isAncestor: (a, b) => gitSpawnSync(['merge-base', '--is-ancestor', a, b], { cwd: this.d.repo }).status === 0,
         firstParents: (from, to) => (git('rev-list', '--first-parent', '--reverse', `${from}..${to}`) ?? '').split('\n').filter(Boolean),
         subject: (sha) => git('log', '-1', '--format=%s', sha) ?? '',
         // A rename as both its paths and a valid UTF-8 path as itself, so a locked category on either one holds (#683).
@@ -320,7 +320,7 @@ export abstract class MergeFlow extends FixRuns {
     // A merge into the default branch (by anyone) is when PRs start conflicting: look at all of them now.
     if (this.watchedPrs().length && now - this.tipCheckedAt >= TIP_CHECK_MS) {
       this.tipCheckedAt = now;
-      const r = spawnSync('git', ['ls-remote', this.remote, `refs/heads/${this.branch}`], { cwd: this.d.repo, encoding: 'utf8' });
+      const r = gitSpawnSync(['ls-remote', this.remote, `refs/heads/${this.branch}`], { cwd: this.d.repo, encoding: 'utf8' });
       const tip = r.status === 0 ? (r.stdout.split(/\s/)[0] ?? '') : '';
       if (tip && tip !== this.defaultTip) {
         if (this.defaultTip) this.prPolled.clear();
@@ -380,7 +380,7 @@ export abstract class MergeFlow extends FixRuns {
     const signal = this.shutdown.signal;
     const ok = await new Promise<boolean>((done) => {
       if (signal.aborted) return done(false);
-      const child = spawn('git', ['fetch', '-q', this.remote, `+refs/heads/${this.branch}:refs/remotes/${this.remote}/${this.branch}`], { cwd: this.d.repo, stdio: 'ignore' });
+      const child = gitSpawn(['fetch', '-q', this.remote, `+refs/heads/${this.branch}:refs/remotes/${this.remote}/${this.branch}`], { cwd: this.d.repo, stdio: 'ignore' });
       const stop = () => child.kill('SIGKILL');
       const timer = setTimeout(stop, this.tipFetchMs);
       signal.addEventListener('abort', stop, { once: true });
@@ -576,7 +576,7 @@ export abstract class MergeFlow extends FixRuns {
     if (!attempt) return;
     if (pr.state === 'merged' && pr.mergeCommit) this.git(this.d.repo, 'fetch', '-q', this.remote, this.branch);
     const commit = (sha: string) => {
-      if (spawnSync('git', ['merge-base', '--is-ancestor', sha, `${this.remote}/${this.branch}`], { cwd: this.d.repo }).status !== 0) return null;
+      if (gitSpawnSync(['merge-base', '--is-ancestor', sha, `${this.remote}/${this.branch}`], { cwd: this.d.repo }).status !== 0) return null;
       const out = this.gitOrNull(this.d.repo, 'log', '-1', '--format=%P%n%B', sha, '--');
       if (out === null) return null;
       const [parents = '', ...message] = out.split('\n');
@@ -676,7 +676,7 @@ export abstract class MergeFlow extends FixRuns {
   private defaultTipNow(): string | null {
     if (this.tipThisPass !== undefined) return this.tipThisPass;
     try {
-      execFileSync('git', ['fetch', '-q', this.remote, `+refs/heads/${this.branch}:refs/remotes/${this.remote}/${this.branch}`], { cwd: this.d.repo, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: DEFAULT_TIP_FETCH_MS });
+      gitExecFileSync(['fetch', '-q', this.remote, `+refs/heads/${this.branch}:refs/remotes/${this.remote}/${this.branch}`], { cwd: this.d.repo, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: DEFAULT_TIP_FETCH_MS });
       return this.git(this.d.repo, 'rev-parse', '--verify', '-q', `refs/remotes/${this.remote}/${this.branch}^{commit}`) || null;
     } catch {
       return null;
@@ -712,7 +712,7 @@ export abstract class MergeFlow extends FixRuns {
     const files = this.changeFiles(this.d.repo, base, pr.headSha);
     const labels = (this.events(n).filter((e) => e.type === 'issue.seen').at(-1)?.payload as { labels?: string[] } | undefined)?.labels ?? [];
     const level = computeLevel({ files, labels, moneyPaths: policy.moneyPaths, scope: lockScopeOf(this.d) }, review);
-    const exists = (p: string) => spawnSync('git', ['cat-file', '-e', `${base}:${p}`], { cwd: this.d.repo }).status === 0;
+    const exists = (p: string) => gitSpawnSync(['cat-file', '-e', `${base}:${p}`], { cwd: this.d.repo }).status === 0;
     const newTopLevel = [...new Set(files.map((f) => f.path.split('/')).filter((s) => s.length > 1).map((s) => s[0]!))].filter((d) => !exists(d)).map((d) => `${d}/`);
     // The verdict on this head, or on the head the harness's merge-ins of the default branch were made on.
     const judged = carriedHead(mergeIns, number, pr.headSha);
@@ -1444,7 +1444,7 @@ export abstract class MergeFlow extends FixRuns {
       return { why: why.slice(0, 500) };
     };
     unlockWorktree(this.d.repo, dir);
-    spawnSync('git', ['worktree', 'remove', '--force', dir], { cwd: this.d.repo });
+    gitSpawnSync(['worktree', 'remove', '--force', dir], { cwd: this.d.repo });
     try {
       this.git(this.d.repo, 'worktree', 'add', '-q', '--detach', dir, tip);
       // Locked against a prune run inside an agent's sandbox, where it is hidden (src/worktrees.ts WORKTREE_LOCK_REASON).
@@ -1452,9 +1452,9 @@ export abstract class MergeFlow extends FixRuns {
       const parents = this.git(this.d.repo, 'rev-list', '--parents', '-n', '1', sha).split(' ').length - 1;
       // A range: newest first (git revert's order), into one commit (no pre-commit or commit-msg hook, as git revert itself).
       const rv = range
-        ? spawnSync('git', [...as, 'revert', '--no-commit', `${range[0]}^..${range.at(-1)}`], { cwd: dir, encoding: 'utf8' })
-        : spawnSync('git', [...as, 'revert', ...(parents > 1 ? ['-m', '1'] : []), '--no-edit', sha], { cwd: dir, encoding: 'utf8' });
-      const done = rv.status === 0 && range ? spawnSync('git', [...as, 'commit', '-q', '--no-verify', '-m', `${title}\n\nThis reverts commits ${range[0]}^..${range.at(-1)}.`], { cwd: dir, encoding: 'utf8' }) : rv;
+        ? gitSpawnSync([...as, 'revert', '--no-commit', `${range[0]}^..${range.at(-1)}`], { cwd: dir, encoding: 'utf8' })
+        : gitSpawnSync([...as, 'revert', ...(parents > 1 ? ['-m', '1'] : []), '--no-edit', sha], { cwd: dir, encoding: 'utf8' });
+      const done = rv.status === 0 && range ? gitSpawnSync([...as, 'commit', '-q', '--no-verify', '-m', `${title}\n\nThis reverts commits ${range[0]}^..${range.at(-1)}.`], { cwd: dir, encoding: 'utf8' }) : rv;
       if (done.status !== 0) {
         const lines = `${done.stdout ?? ''}\n${done.stderr ?? ''}`.split('\n').map((l) => l.trim()).filter(Boolean);
         const conflicts = lines.filter((l) => l.startsWith('CONFLICT'));
@@ -1468,8 +1468,8 @@ export abstract class MergeFlow extends FixRuns {
       return { url: pr.url, number: pr.number };
     } finally {
       unlockWorktree(this.d.repo, dir);
-      spawnSync('git', ['worktree', 'remove', '--force', dir], { cwd: this.d.repo });
-      spawnSync('git', ['worktree', 'prune'], { cwd: this.d.repo });
+      gitSpawnSync(['worktree', 'remove', '--force', dir], { cwd: this.d.repo });
+      gitSpawnSync(['worktree', 'prune'], { cwd: this.d.repo });
     }
   }
 
@@ -1575,9 +1575,9 @@ export abstract class MergeFlow extends FixRuns {
    */
   private revertRange(sha: string, through: string, commits: number): string[] | null {
     const tip = `${this.remote}/${this.branch}`;
-    if (spawnSync('git', ['merge-base', '--is-ancestor', through, tip], { cwd: this.d.repo }).status !== 0) return null;
+    if (gitSpawnSync(['merge-base', '--is-ancestor', through, tip], { cwd: this.d.repo }).status !== 0) return null;
     // Parents before children whatever the commit dates say, so only the checks below decide.
-    const r = spawnSync('git', ['rev-list', '--topo-order', '--parents', '--reverse', `${sha}^..${through}`], { cwd: this.d.repo, encoding: 'utf8' });
+    const r = gitSpawnSync(['rev-list', '--topo-order', '--parents', '--reverse', `${sha}^..${through}`], { cwd: this.d.repo, encoding: 'utf8' });
     if (r.status !== 0) return null;
     const rows = r.stdout.split('\n').filter(Boolean).map((l) => l.split(' '));
     if (rows.length < 2 || rows.length > Math.min(commits, 250) || rows[0]![0] !== sha || rows.at(-1)![0] !== through) return null;
@@ -1587,7 +1587,7 @@ export abstract class MergeFlow extends FixRuns {
 
   /** Whether `a` is `b` or an ancestor of it, in the clone. */
   private isAncestor(a: string, b: string) {
-    return spawnSync('git', ['--no-replace-objects', 'merge-base', '--is-ancestor', a, b], { cwd: this.d.repo }).status === 0;
+    return gitSpawnSync(['--no-replace-objects', 'merge-base', '--is-ancestor', a, b], { cwd: this.d.repo }).status === 0;
   }
 
   /**
@@ -1648,7 +1648,7 @@ export abstract class MergeFlow extends FixRuns {
     } catch {
       who = null;
     }
-    const s = spawnSync('git', ['log', '-1', '--format=%s', sha], { cwd: this.d.repo, encoding: 'utf8' });
+    const s = gitSpawnSync(['log', '-1', '--format=%s', sha], { cwd: this.d.repo, encoding: 'utf8' });
     const subject = redactString(s.status === 0 ? s.stdout.trim() : '').slice(0, 300);
     this.emit('main_watch.direct_push', { sha, url, kind: push.kind, pusher: who?.login ?? null, pusher_from: who?.from ?? null, subject, alert: push.alert });
     await this.directPushOutbound();
@@ -1713,7 +1713,7 @@ export abstract class MergeFlow extends FixRuns {
       } catch {
         // already gone
       }
-      spawnSync('git', ['branch', '-D', `${BRAND.cli}/combined-${n}`], { cwd: this.d.repo });
+      gitSpawnSync(['branch', '-D', `${BRAND.cli}/combined-${n}`], { cwd: this.d.repo });
       this.emit('light_check.finished', { issue: n, number, head: pr.headSha, main_sha: mainSha, overlap, outcome, wait_ms: Math.max(0, Date.now() - t0), detail });
       this.prPolled.delete(number); // decide on the next pass, not after the poll interval
     }
@@ -1737,11 +1737,11 @@ export abstract class MergeFlow extends FixRuns {
   private vacuityBase(base: string, head: string, tipNow: string | null): { base: string; foreign: boolean; tip?: 'unknown' } {
     const tip = tipNow ?? '';
     if (!/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(tip)) return { base, foreign: false, tip: 'unknown' };
-    const r = spawnSync('git', ['--no-replace-objects', 'merge-base', tip, head], { cwd: this.d.repo, encoding: 'utf8' });
+    const r = gitSpawnSync(['--no-replace-objects', 'merge-base', tip, head], { cwd: this.d.repo, encoding: 'utf8' });
     const mb = r.status === 0 ? r.stdout.trim() : '';
     const from = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(mb) && mb !== base && mb !== head && this.isAncestor(base, mb) ? mb : base;
     // Each merge commit in from..head, with its parents: `<merge> <first parent> <merged-in parent>...`.
-    const merges = spawnSync('git', ['--no-replace-objects', 'rev-list', '--merges', '--parents', `${from}..${head}`], { cwd: this.d.repo, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 });
+    const merges = gitSpawnSync(['--no-replace-objects', 'rev-list', '--merges', '--parents', `${from}..${head}`], { cwd: this.d.repo, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 });
     if (merges.status !== 0) return { base: from, foreign: true };
     const foreign = merges.stdout.split('\n').filter(Boolean).some((line) => line.split(' ').slice(2).some((p) => !this.isAncestor(p, tip)));
     return { base: from, foreign };
@@ -1753,7 +1753,7 @@ export abstract class MergeFlow extends FixRuns {
    */
   private vacuityFor(n: number, number: number, head: string, changed: string[], foreignMerge: boolean, tip: 'unknown' | undefined, from: string): VacuityCheck {
     // change-files.ts's guards (#683): no replace ref swaps a blob, no attributes file changes what is read.
-    const git = (args: string[]) => execFileSync('git', ['--no-replace-objects', '-c', 'core.attributesFile=/dev/null', ...args], { cwd: this.d.repo, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 64 * 1024 * 1024 });
+    const git = (args: string[]) => gitExecFileSync(['--no-replace-objects', '-c', 'core.attributesFile=/dev/null', ...args], { cwd: this.d.repo, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 64 * 1024 * 1024 });
     // The test files the task's agreed done_when names: what the coordinator's own verification ran.
     const contract = this.events(n).filter((e) => e.type === 'contract.agreed').at(-1)?.payload as EventPayload<'contract.agreed'> | undefined;
     const contractTests = (contract?.done_when ?? []).map((d) => d.test).filter((t): t is string => typeof t === 'string' && t.length > 0);
@@ -1873,7 +1873,7 @@ export abstract class MergeFlow extends FixRuns {
       } catch {
         // already gone
       }
-      spawnSync('git', ['branch', '-D', branch], { cwd: this.d.repo });
+      gitSpawnSync(['branch', '-D', branch], { cwd: this.d.repo });
       // A shutdown cut it short: nothing was measured, so nothing is recorded; a later start runs it again (capped).
       if (!this.shutdown.signal.aborted) this.emit('vacuity.measured', { issue: n, number, head: pr.headSha, tests: run.tests, touched, error: error === null ? null : error.slice(0, 500), base: run.base });
     }
@@ -1891,7 +1891,7 @@ export abstract class MergeFlow extends FixRuns {
     const text = await new Promise<string>((done, fail) => {
       let s = '';
       // change-files.ts's command: renames paired, whitespace and blank lines left out, hunks never joined, as text.
-      const child = spawn('git', changedLinesCommand(base, head), { cwd: this.d.repo, stdio: ['ignore', 'pipe', 'ignore'] });
+      const child = gitSpawn(changedLinesCommand(base, head), { cwd: this.d.repo, stdio: ['ignore', 'pipe', 'ignore'] });
       const stop = () => child.kill('SIGKILL');
       signal.addEventListener('abort', stop, { once: true });
       child.stdout!.setEncoding('utf8');

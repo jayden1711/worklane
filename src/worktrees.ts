@@ -1,7 +1,8 @@
 // Worktrees the coordinator creates and owns. It never lists, touches or
 // removes a worktree it didn't create: names carry our prefix AND must be in
 // our ownership record, so other sessions' worktrees are always safe.
-import { execFileSync, spawn, spawnSync } from './os/child-process.js';
+import { spawn, spawnSync } from './os/child-process.js';
+import { gitExecFileSync, gitSpawn, gitSpawnSync } from './os/git.js';
 import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmdirSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join, relative, resolve } from 'node:path';
 import { BRAND } from './brand.js';
@@ -77,7 +78,7 @@ function setOwned(o: WorktreeOptions, list: string[]) {
   writeGroupOnly(ownedFile(o), JSON.stringify([...new Set(list)], null, 2));
 }
 
-const git = (cwd: string, ...args: string[]) => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+const git = (cwd: string, ...args: string[]) => gitExecFileSync(args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 
 /**
  * What Claude Code's sandbox leaves in a worktree: on Linux it protects paths by mounting over them, so a missing one
@@ -316,7 +317,7 @@ export function lockWorktree(repo: string, path: string): void {
 
 /** Unlock the worktree at `path` for its removal; one that isn't locked, or isn't there, is left as it is. */
 export function unlockWorktree(repo: string, path: string): void {
-  spawnSync('git', ['worktree', 'unlock', path], { cwd: repo, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+  gitSpawnSync(['worktree', 'unlock', path], { cwd: repo, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
 }
 
 /**
@@ -326,7 +327,7 @@ export function unlockWorktree(repo: string, path: string): void {
 export function lockOwnedWorktrees(o: WorktreeOptions): void {
   // Best effort: git refuses one already locked, and a record it can't lock (broken by hand) never stops a new
   // worktree being made.
-  for (const p of owned(o)) if (existsSync(p)) spawnSync('git', ['worktree', 'lock', '--reason', WORKTREE_LOCK_REASON, p], { cwd: o.repo, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+  for (const p of owned(o)) if (existsSync(p)) gitSpawnSync(['worktree', 'lock', '--reason', WORKTREE_LOCK_REASON, p], { cwd: o.repo, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
 }
 
 /** The worktree itself, before any setup: on a new branch at `base`, recorded as ours first, and locked. */
@@ -423,7 +424,7 @@ function clearStale(o: WorktreeOptions, path: string): void {
   const rec = ownedAs(o, path);
   if (!rec) return;
   unlockWorktree(o.repo, rec);
-  spawnSync('git', ['worktree', 'prune'], { cwd: o.repo, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+  gitSpawnSync(['worktree', 'prune'], { cwd: o.repo, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
 }
 
 function removeAt(o: WorktreeOptions, path: string): boolean {
@@ -431,8 +432,8 @@ function removeAt(o: WorktreeOptions, path: string): boolean {
   if (!rec) throw new Error(`refusing to remove ${path}: not created by ${BRAND.cli}`);
   unlockWorktree(o.repo, rec);
   if (isOldPlace(o, path)) return emptyInPlace(o, rec, path);
-  spawnSync('git', ['worktree', 'remove', '--force', rec], { cwd: o.repo, encoding: 'utf8' });
-  spawnSync('git', ['worktree', 'prune'], { cwd: o.repo });
+  gitSpawnSync(['worktree', 'remove', '--force', rec], { cwd: o.repo, encoding: 'utf8' });
+  gitSpawnSync(['worktree', 'prune'], { cwd: o.repo });
   return dropWhenGone(o, rec, !existsSync(path));
 }
 
@@ -469,7 +470,7 @@ export async function removeWorktreeAsync(o: WorktreeOptions, name: string): Pro
   unlockWorktree(o.repo, rec);
   if (isOldPlace(o, path)) return emptyInPlace(o, rec, path);
   const run = (args: string[]) => new Promise<void>((done) => {
-    const child = spawn('git', args, { cwd: o.repo, stdio: 'ignore' });
+    const child = gitSpawn(args, { cwd: o.repo, stdio: 'ignore' });
     child.on('error', () => done());
     child.on('close', () => done());
   });
@@ -502,7 +503,7 @@ function emptyInPlace(o: WorktreeOptions, rec: string, path: string): boolean {
   }
   for (const name of readdirSync(path)) rmSync(join(path, name), { recursive: true, force: true });
   realDir();
-  spawnSync('git', ['worktree', 'prune'], { cwd: o.repo, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+  gitSpawnSync(['worktree', 'prune'], { cwd: o.repo, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
   realDir();
   return dropWhenGone(o, rec, readdirSync(path).length === 0);
 }

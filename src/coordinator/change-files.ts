@@ -26,7 +26,7 @@
 // for a name that can't be handed back to git, from its blobs). review.ts flags a change that adds such a mark, since
 // GitHub and a checkout still honour it.
 import { Buffer, isUtf8 } from 'node:buffer';
-import { spawnSync } from '../os/child-process.js';
+import { gitSpawnSync } from '../os/git.js';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { attributeTransitionHides, isGitattributesPath, isGitmodulesPath, macrosDefined, OUTCOME_ATTRIBUTES, type ChangeFile } from '../review.js';
@@ -56,16 +56,16 @@ function withGit(args: string[]): string[] {
 }
 
 /** Run git; its stdout, untrimmed (a path may start or end with a space), or an Error saying why it failed. */
-function run(cwd: string, args: string[], timeout?: number): string | Error {
-  const r = spawnSync('git', withGit(args), { cwd, encoding: 'utf8', maxBuffer: MAX_BUFFER, ...(timeout ? { timeout } : {}) });
+function run(cwd: string, args: string[], timeout?: number, env?: NodeJS.ProcessEnv): string | Error {
+  const r = gitSpawnSync(withGit(args), { cwd, encoding: 'utf8', maxBuffer: MAX_BUFFER, ...(timeout ? { timeout } : {}), ...(env ? { env } : {}) });
   if (r.error) return r.error;
   if (r.status !== 0) return new Error(`git ${args.join(' ').slice(0, 200)} failed: ${(r.stderr || `exit ${r.status}`).trim().slice(0, 500)}`);
   return r.stdout;
 }
 
 /** run, with stdout as bytes: for output that holds paths. */
-function runBytes(cwd: string, args: string[], timeout?: number): Buffer | Error {
-  const r = spawnSync('git', withGit(args), { cwd, encoding: 'buffer', maxBuffer: MAX_BUFFER, ...(timeout ? { timeout } : {}) });
+function runBytes(cwd: string, args: string[], timeout?: number, env?: NodeJS.ProcessEnv): Buffer | Error {
+  const r = gitSpawnSync(withGit(args), { cwd, encoding: 'buffer', maxBuffer: MAX_BUFFER, ...(timeout ? { timeout } : {}), ...(env ? { env } : {}) });
   if (r.error) return r.error;
   if (r.status !== 0) return new Error(`git ${args.join(' ').slice(0, 200)} failed: ${(r.stderr.toString('utf8') || `exit ${r.status}`).trim().slice(0, 500)}`);
   return r.stdout;
@@ -134,22 +134,23 @@ export function changedNames(cwd: string, args: string[], o: NameListOptions = {
 /**
  * The paths any commit in `range` (base..head) touches, not just its net diff: a file added and removed again still
  * counts. A merge is read against its first parent; every submodule link is seen. Each path read by nameOf, once, so a
- * name git would C-quote (a non-ASCII byte, a newline, a quote) is itself (#724). Throws when git fails.
+ * name git would C-quote (a non-ASCII byte, a newline, a quote) is itself (#724). Throws when git fails. `env`: a
+ * gitSnapshot's, so the walk reads the push limits' one checked view of the history (#807).
  */
-export function rangeNames(cwd: string, range: string): string[] {
+export function rangeNames(cwd: string, range: string, env?: NodeJS.ProcessEnv): string[] {
   if (range.startsWith('-')) throw new Error(`rangeNames: ${range} is not a range`);
   // Plumbing only (#724, round 4): `git log` is porcelain and reads log.* config. log.showSignature glued a signature
   // check's text to the first name ("No signature\nsecrets/k.key", so 1 problem became 0, measured) and
   // log.showRoot=false hid a root commit's files. rev-list and diff-tree read none of it: each commit of the range
   // against its first parent, a root against the empty tree.
-  const commits = must(run(cwd, ['rev-list', range]));
+  const commits = must(run(cwd, ['rev-list', range], undefined, env));
   if (!commits.trim()) return [];
-  return [...new Set(names(must(plumbingBytes(cwd, ['diff-tree', '--stdin', '-r', '--root', '-m', '--first-parent', '--no-renames', '--name-only', '--no-commit-id', '-z'], commits))))];
+  return [...new Set(names(must(plumbingBytes(cwd, ['diff-tree', '--stdin', '-r', '--root', '-m', '--first-parent', '--no-renames', '--name-only', '--no-commit-id', '-z'], commits, env))))];
 }
 
 /** runBytes with `input` on git's stdin. */
-function plumbingBytes(cwd: string, args: string[], input: string): Buffer | Error {
-  const r = spawnSync('git', withGit(args), { cwd, input: Buffer.from(input, 'utf8'), encoding: 'buffer', maxBuffer: MAX_BUFFER });
+function plumbingBytes(cwd: string, args: string[], input: string, env?: NodeJS.ProcessEnv): Buffer | Error {
+  const r = gitSpawnSync(withGit(args), { cwd, input: Buffer.from(input, 'utf8'), encoding: 'buffer', maxBuffer: MAX_BUFFER, ...(env ? { env } : {}) });
   if (r.error) return r.error;
   if (r.status !== 0) return new Error(`git ${args.join(' ').slice(0, 200)} failed: ${(r.stderr.toString('utf8') || `exit ${r.status}`).trim().slice(0, 500)}`);
   return r.stdout;
@@ -167,15 +168,15 @@ const REGULAR_FILE = new Set(['100644', '100755']);
  * still read (#724). Only a regular file of at most `maxBytes` is read; anything else says why it wasn't: a symlink
  * (its blob is its target's path, not the file a checkout opens), a submodule link, a blob over the size, or one git
  * can't give. A name with no entry at `rev` isn't in the map: that is the only "not there". Throws when the tree
- * can't be listed.
+ * can't be listed. `env`: a gitSnapshot's, as for rangeNames (`rev` must then be a commit id: a snapshot has no refs).
  */
-export function blobsByName(cwd: string, rev: string, names: string[], maxBytes = Infinity): Map<string, TreeFile[]> {
+export function blobsByName(cwd: string, rev: string, names: string[], maxBytes = Infinity, env?: NodeJS.ProcessEnv): Map<string, TreeFile[]> {
   const out = new Map<string, TreeFile[]>();
   const wanted = new Set(names);
   if (!wanted.size) return out;
   if (rev.startsWith('-')) throw new Error(`blobsByName: ${rev} is not a revision`);
   // -r -z -l: "mode SP type SP object SP+ size TAB path NUL" for every file of the tree.
-  for (const rec of fields(must(runBytes(cwd, ['ls-tree', '-r', '-z', '-l', '--full-tree', rev])))) {
+  for (const rec of fields(must(runBytes(cwd, ['ls-tree', '-r', '-z', '-l', '--full-tree', rev], undefined, env)))) {
     const tab = rec.indexOf(9);
     if (tab === -1) continue;
     const name = nameOf(rec.subarray(tab + 1));
@@ -185,7 +186,7 @@ export function blobsByName(cwd: string, rev: string, names: string[], maxBytes 
       if (mode === '120000') return { unread: 'a symbolic link, not a file' };
       if (type !== 'blob' || !sha || !REGULAR_FILE.has(mode ?? '')) return { unread: `not a regular file (mode ${mode})` };
       if (!(Number(size) <= maxBytes)) return { unread: `${size} bytes, over the ${maxBytes}-byte limit for it` };
-      const text = run(cwd, ['cat-file', 'blob', sha]);
+      const text = run(cwd, ['cat-file', 'blob', sha], undefined, env);
       return text instanceof Error ? { unread: 'git can\'t give its blob' } : { text };
     })();
     out.set(name, [...(out.get(name) ?? []), file]);
@@ -228,6 +229,16 @@ export function rawChanges(cwd: string, args: string[]): string {
 /** `git diff --stat` against `rev`, as text for a person or a prompt (a rename as both its paths). Never parsed. */
 export function diffStatText(cwd: string, rev: string): string {
   return must(run(cwd, ['diff', '--stat', '--no-renames', '--no-color', ...nameArgs([rev])])).trim();
+}
+
+/**
+ * `git diff <args>` as a patch, for a hash only, never shown (#807): every file's lines whatever the attributes say
+ * (a `-diff` or `binary` mark, a textconv or an external diff), and every submodule link, a binary file's bytes
+ * included. `args` as changedNames takes them. Never parsed, and never put on a page, in a prompt or in an issue: the
+ * owner cut `--text` from every diff a person reads (#927).
+ */
+export function patchText(cwd: string, args: string[]): string {
+  return must(run(cwd, ['diff', '--no-color', ...AS_TEXT, ...nameArgs(args)]));
 }
 
 /** `git show --stat --patch` of one commit, as text for a person. Never parsed. */
@@ -350,7 +361,7 @@ function treePaths(cwd: string, rev: string): Map<string, Buffer> {
  */
 function attributeStates(cwd: string, rev: string, paths: Buffer[]): Map<string, Map<string, string>> | null {
   const input = Buffer.concat(paths.flatMap((p) => [p, Buffer.from([0])]));
-  const r = spawnSync('git', withGit(['check-attr', `--source=${rev}`, '-z', '--stdin', ...OUTCOME_ATTRIBUTES]), { cwd, input, encoding: 'buffer', maxBuffer: MAX_BUFFER, env: { ...process.env, GIT_ATTR_NOSYSTEM: '1' } });
+  const r = gitSpawnSync(withGit(['check-attr', `--source=${rev}`, '-z', '--stdin', ...OUTCOME_ATTRIBUTES]), { cwd, input, encoding: 'buffer', maxBuffer: MAX_BUFFER, env: { ...process.env, GIT_ATTR_NOSYSTEM: '1' } });
   if (r.error || r.status !== 0) return null;
   const out = new Map<string, Map<string, string>>();
   // -z: "path NUL attribute NUL state NUL" for each path and attribute.
@@ -406,7 +417,7 @@ const OUTCOME_SHOWN = 10;
 
 /** git's exit status and stdout, for the calls whose status is an answer (`cat-file -e`, `config --get-regexp`). */
 function runStatus(cwd: string, args: string[]): { status: number | null; stdout: string } {
-  const r = spawnSync('git', withGit(args), { cwd, encoding: 'utf8', maxBuffer: MAX_BUFFER });
+  const r = gitSpawnSync(withGit(args), { cwd, encoding: 'utf8', maxBuffer: MAX_BUFFER });
   return { status: r.error ? null : r.status, stdout: r.stdout ?? '' };
 }
 
@@ -609,7 +620,7 @@ export function exactMoves(cwd: string, base: string, head: string): Map<string,
  */
 export function filesWithText(cwd: string, rev: string, needles: string[]): string[] {
   const top = must(run(cwd, ['rev-parse', '--show-toplevel'])).replace(/\n$/, '');
-  const r = spawnSync('git', withGit(['grep', '-l', '-z', '-a', '-F', '--no-color', '--no-textconv', ...needles.flatMap((n) => ['-e', n]), rev, '--']), {
+  const r = gitSpawnSync(withGit(['grep', '-l', '-z', '-a', '-F', '--no-color', '--no-textconv', ...needles.flatMap((n) => ['-e', n]), rev, '--']), {
     cwd: top,
     encoding: 'buffer',
     maxBuffer: MAX_BUFFER,

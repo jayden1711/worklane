@@ -11,7 +11,7 @@
 // back in the queue), and nothing is merged twice.
 import { TestRunHeld } from '../testrun/gate.js';
 import { GPU_NO_REPEAT, gpuRunsNotToRepeat } from '../testrun/gpu.js';
-import { spawnSync } from '../os/child-process.js';
+import { gitSpawnSync } from '../os/git.js';
 import { BRAND } from '../brand.js';
 import type { CommitCheck, PullRequest } from '../backlog/types.js';
 import type { JudgedChecks } from '../check-source.js';
@@ -623,7 +623,7 @@ export class PrBatcher {
   }
 
   private git(...args: string[]) {
-    return spawnSync('git', args, { cwd: this.d.repo, encoding: 'utf8' });
+    return gitSpawnSync(args, { cwd: this.d.repo, encoding: 'utf8' });
   }
 
   private gitOk(...args: string[]): string {

@@ -3,7 +3,8 @@
 // step is decided from events plus GitHub, so a restart picks up where the
 // log says it was. Agents only ever propose: they commit on their own
 // branch in their own worktree; everything outward-facing happens here.
-import { execFileSync, spawn, spawnSync } from './os/child-process.js';
+import { spawn } from './os/child-process.js';
+import { gitExecFileSync, gitSpawnSync } from './os/git.js';
 import { createHash, randomBytes } from 'node:crypto';
 import { cpSync, mkdirSync, readFileSync, existsSync, rmSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -38,7 +39,7 @@ import { DEFAULT_HOTSPOTS, estimateFiles, fileIndex, holdReason, hotspotsIn, pic
 import { TaskGraph } from './coordinator/task-graph.js';
 import { bodyHash, childBody, GOAL_LABEL, GOAL_SPLIT_LABEL, GOAL_SPLIT_SCHEMA, readGoalSplit, splitComment } from './goal-split.js';
 import { changedFiles } from './merge-base.js';
-import { changedNames, diffStatText, rawChanges, untrackedNames } from './coordinator/change-files.js';
+import { changedNames, diffStatText, patchText, rawChanges, untrackedNames } from './coordinator/change-files.js';
 import { importsOf, lightCheckPlan, lightCheckWait } from './light-check.js';
 import { readRun, runsForIssue } from './run-record.js';
 import { claimsOf, unbackedClaims, type CheckRecord } from './receipts.js';
@@ -511,7 +512,7 @@ export class Coordinator extends AutomationRuns {
    */
   refreshConfig(): void {
     this.liveCfg ??= new LiveConfig({ repo: this.d.repo, remote: this.remote, branch: this.branch, ...(this.d.liveConfig?.tree !== undefined ? { tree: this.d.liveConfig.tree } : {}), ...(this.d.liveConfig?.check ? { check: this.d.liveConfig.check } : {}) });
-    spawnSync('git', ['fetch', '-q', this.remote, `+refs/heads/${this.branch}:refs/remotes/${this.remote}/${this.branch}`], { cwd: this.d.repo, stdio: 'ignore', timeout: 60_000 });
+    gitSpawnSync(['fetch', '-q', this.remote, `+refs/heads/${this.branch}:refs/remotes/${this.remote}/${this.branch}`], { cwd: this.d.repo, stdio: 'ignore', timeout: 60_000 });
     const r = this.liveCfg.poll(this.repoCfg);
     if (r.kind === 'same') return;
     if (r.kind === 'invalid') {
@@ -831,7 +832,7 @@ export class Coordinator extends AutomationRuns {
     this.poolBusy = true;
     this.poolRefill = (async () => {
       try {
-        spawnSync('git', ['fetch', '-q', this.remote, this.branch], { cwd: this.d.repo });
+        gitSpawnSync(['fetch', '-q', this.remote, this.branch], { cwd: this.d.repo });
         const base = this.git(this.d.repo, 'rev-parse', `${this.remote}/${this.branch}`);
         const wt = this.wt;
         const keyFiles = this.d.cfg.tests.worktree.setup_key;
@@ -1521,7 +1522,8 @@ export class Coordinator extends AutomationRuns {
     }
     const added = files.reduce((s, f) => s + f.added, 0);
     const removed = files.reduce((s, f) => s + f.removed, 0);
-    const patchHash = createHash('sha256').update(this.git(path, 'diff', `${base}..${head}`)).digest('hex');
+    // Over every file's lines, whatever the change's attributes say: a `-diff` file's new content is a new hash (#807).
+    const patchHash = createHash('sha256').update(patchText(path, [`${base}..${head}`])).digest('hex');
     this.emit('change.proposed', { issue: n, branch: this.paths(n).branch, base, head, files: names, lines: added + removed, added, removed, patch_hash: patchHash });
     return { files, tampered, patchHash };
   }
@@ -1791,10 +1793,10 @@ export class Coordinator extends AutomationRuns {
     const imports: Record<string, string[]> = {};
     if (mainChanged.length) {
       // -z, as prFiles: a valid UTF-8 path as itself, so an import of a file with an odd byte in its name still resolves.
-      const tree = new Set(execFileSync('git', ['ls-tree', '-r', '-z', '--name-only', pr.headSha], { cwd: this.d.repo, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 256 * 1024 * 1024 }).split('\0').filter(Boolean));
+      const tree = new Set(gitExecFileSync(['ls-tree', '-r', '-z', '--name-only', pr.headSha], { cwd: this.d.repo, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 256 * 1024 * 1024 }).split('\0').filter(Boolean));
       for (const f of prFiles) {
         if (!/\.((m|c)?(j|t)sx?|py)$/.test(f)) continue;
-        const r = spawnSync('git', ['show', `${pr.headSha}:${f}`], { cwd: this.d.repo, encoding: 'utf8' });
+        const r = gitSpawnSync(['show', `${pr.headSha}:${f}`], { cwd: this.d.repo, encoding: 'utf8' });
         if (r.status === 0) imports[f] = importsOf(f, r.stdout, tree);
       }
     }
@@ -1842,7 +1844,7 @@ export class Coordinator extends AutomationRuns {
     // The monitor reads on the cheaper model routing gives a reflection (the short read-only run before a retry).
     const monitorModel = routeRun(this.d.cfg, 'reflection');
     const show = (commit: string, path: string) => {
-      const r = spawnSync('git', ['show', `${commit}:${path}`], { cwd: this.d.repo, maxBuffer: 64 * 1024 * 1024 });
+      const r = gitSpawnSync(['show', `${commit}:${path}`], { cwd: this.d.repo, maxBuffer: 64 * 1024 * 1024 });
       return r.status === 0 ? r.stdout : null;
     };
     return {
@@ -1903,7 +1905,7 @@ export class Coordinator extends AutomationRuns {
               });
           this.emit('run.cost', { issue: null, role: 'experimenter', model: r.model, usd: r.costUsd, turns: r.turns });
           const files = o.hide.filter((h) => !h.includes('*'));
-          if (files.length) execFileSync('git', ['checkout', o.commit, '--', ...files], { cwd: path, stdio: 'ignore' });
+          if (files.length) gitExecFileSync(['checkout', o.commit, '--', ...files], { cwd: path, stdio: 'ignore' });
           return await then(r, path, lines.join('\n'));
         } finally {
           try {
@@ -1933,7 +1935,7 @@ export class Coordinator extends AutomationRuns {
       },
       bundle: (ref, commit) => {
         this.git(this.d.repo, 'update-ref', ref, commit);
-        const r = spawnSync('git', ['bundle', 'create', '-q', '-', ref], { cwd: this.d.repo, maxBuffer: 1024 * 1024 * 1024 });
+        const r = gitSpawnSync(['bundle', 'create', '-q', '-', ref], { cwd: this.d.repo, maxBuffer: 1024 * 1024 * 1024 });
         if (r.status !== 0) throw new Error(`git bundle ${ref}: ${r.stderr.toString().slice(0, 300)}`);
         return r.stdout;
       },
