@@ -10,9 +10,11 @@
 //           that counts, so a helper a module calls as it loads (`const T = build()`, tsc's __decorate, esbuild's
 //           __name) counts for nothing even when the PR adds the whole file or a test's body imports it, once or many
 //           times, directly or through another module; and only code on the characters the PR changes that are code
-//           (codeRanges, rounds 8 to 10: each hunk aligned by character, by line first when large, against V8's block
-//           ranges, so code added in an untaken branch on a changed line doesn't count; a removal only where the code
-//           on its sides ran, never across a block or clause boundary; removed lines lexed in their base file). Not seen: work a module starts as it loads that keeps running and that
+//           (codeRanges, rounds 8 to 11: each hunk aligned by character, its lines paired by code first when large,
+//           against V8's block ranges, so code added in an untaken branch on a changed line doesn't count; a removal
+//           only where the code on both its sides ran within one innermost V8 range, never across a block or clause
+//           boundary, holding a sub-statement or nested function, or at a statement list's end; removed lines lexed in
+//           their base file; comment toggles between hunks measured). Not seen: work a module starts as it loads that keeps running and that
 //           the tests' own activity triggers (a timer while a test waits, an async_hooks or exit listener); code
 //           after a call that threw (V8 counts a block as run once entered); and where V8 makes no block range (an
 //           optional call's arguments, a default parameter or destructuring default, a logical assignment's right
