@@ -8,7 +8,8 @@
 // with runner.one (`node --test`: coverageRunnerOne) under V8 coverage, they run code on a character the PR changes
 // (rounds 8, 9: each hunk aligned by character; V8's innermost block range around a changed code character ran, so an
 // untaken branch or arm on a changed line doesn't count, whether the change adds code or reflows lines; a removal
-// counts only when the code on both its sides ran within one innermost V8 range, never across a block or clause
+// counts only when the code on both its sides ran and shares one innermost V8 range in every process (round 12), and
+// code moved between app files is no change (round 12); never across a block or clause
 // boundary, holding a sub-statement or nested function, or at a statement list's end (round 11); the removed side is
 // lexed in its base file, and unchanged lines a comment toggle turned are measured with their hunks; the diff is
 // git's histogram one; a change too large to align, or a large hunk whose lines don't pair, holds) in at least one of
