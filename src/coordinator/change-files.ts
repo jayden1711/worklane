@@ -27,7 +27,6 @@
 // GitHub and a checkout still honour it.
 import { Buffer, isUtf8 } from 'node:buffer';
 import { spawnSync } from '../os/child-process.js';
-import type { SizeFile } from '../pr-rules.js';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { attributeTransitionHides, isGitattributesPath, isGitmodulesPath, macrosDefined, OUTCOME_ATTRIBUTES, type ChangeFile } from '../review.js';
@@ -460,6 +459,15 @@ function changeFileLines(cwd: string, base: string, head: string): ChangeFile[] 
       if (!blob) throw new Error(`changeFiles: no blobs for ${JSON.stringify(path)} in ${range}`);
       return { path, added: blobLines(cwd, blob.new), removed: blobLines(cwd, blob.old), addedLines: added, removedLines: removed };
     });
+}
+
+/** One file of a change (git diff -M): its added and removed lines. A pure rename has none; a binary file its lines read as text (#693). */
+export interface SizeFile {
+  path: string;
+  /** A rename's old path. */
+  from?: string;
+  added: string[];
+  removed: string[];
 }
 
 /**
