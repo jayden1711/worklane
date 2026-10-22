@@ -1,6 +1,8 @@
 // Signed receipts on disk (#717): the event log read read-only, the receipts as JSON lines (one DSSE envelope each),
 // the signer's own chain state, and ed25519 keys as PEM files. The format and the checks are src/signed-receipts.ts.
+import { spawnSync } from 'node:child_process';
 import { createHash, createPrivateKey, createPublicKey, type KeyObject } from 'node:crypto';
+import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
 import { closeSync, constants, existsSync, fstatSync, lstatSync, openSync, readdirSync, readFileSync, readSync, realpathSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
@@ -8,7 +10,7 @@ import { BRAND } from './brand.js';
 import { openReadOnly } from './events/read-only.js';
 import { tryLock } from './locks.js';
 import { notOwnerOnlyDir, processIdentity, processPlace, replaceOwnerOnly, syncToDisk, UNKNOWN_IDENTITY } from './os/index.js';
-import { AT_UNRECORDED, canonicalJson, chainStateOf, ChainStateSchema, columnHash, FIELD_READ_MAX, keyId, keySigner, PAYLOAD_READ_MAX, predecessorOf, predecessorOfState, ReceiptError, rotateChain, signEvents, statementOf, type ChainState, type Envelope, type Predecessor, type ReceiptEvent, type ReceiptSigner, type Unread } from './signed-receipts.js';
+import { AT_UNRECORDED, canonicalJson, chainStateOf, ChainStateSchema, columnHash, FIELD_READ_MAX, JSON_VALUES_MAX, keyId, keySigner, moreJsonValuesThan, PAYLOAD_READ_MAX, predecessorOf, predecessorOfState, ReceiptError, rotateChain, signEvents, statementOf, type ChainState, type Envelope, type Predecessor, type ReceiptEvent, type ReceiptSigner, type ScanQuery, type ScanResult, type Unread } from './signed-receipts.js';
 
 const LOG_COLUMNS = ['ts', 'type', 'actor', 'payload'] as const;
 type LogColumn = (typeof LOG_COLUMNS)[number];
@@ -106,7 +108,11 @@ export function openLog(dbPath: string): LogRead {
     return Buffer.from(text, 'utf8').equals(buf) ? { text } : { bytes, why: 'not-utf8' };
   };
   function* rows(): Generator<ReceiptEvent> {
-    const query = db.prepare(`SELECT id, rowid AS rid, ${LOG_COLUMNS.map((c) => `typeof(${c}) AS ${c}_t, CAST(${c} AS BLOB) AS ${c}_b`).join(', ')} FROM events ORDER BY id`);
+    // A REAL as quote() writes it (round 15): `CAST(real AS BLOB)` is 15 significant digits, so 1.0 and
+    // 1.0000000000000002 read the same and an edit between them kept the digest (the round-14 final check, 3c); quote()
+    // gives the digits that read back to the very double.
+    const bytesOf = (c: LogColumn) => `CASE typeof(${c}) WHEN 'real' THEN CAST(quote(${c}) AS BLOB) ELSE CAST(${c} AS BLOB) END`;
+    const query = db.prepare(`SELECT id, rowid AS rid, ${LOG_COLUMNS.map((c) => `typeof(${c}) AS ${c}_t, ${bytesOf(c)} AS ${c}_b`).join(', ')} FROM events ORDER BY id`);
     // Every integer read as a BigInt (#918 round 12): an id past 2^53 is read exactly, never refused as "too large".
     query.setReadBigInts(true);
     for (const row of query.iterate() as Iterable<Record<string, unknown>>) {
@@ -130,9 +136,13 @@ export function openLog(dbPath: string): LogRead {
       const actor = field('actor');
       let payload: unknown;
       if (merge.has(type) || type === 'coordinator.started') {
-        const r = asText(t('payload'), b('payload'), merge.has(type) ? PAYLOAD_READ_MAX : FIELD_READ_MAX);
+        const bytes = b('payload');
+        // Counted before it is parsed (round 15): a payload of more JSON values than any merge event needs is never
+        // parsed, so one event can't take the reader's heap.
+        const max = merge.has(type) ? PAYLOAD_READ_MAX : FIELD_READ_MAX;
+        const r: { text: string } | Unread = bytes && bytes.byteLength <= max && moreJsonValuesThan(bytes, JSON_VALUES_MAX) ? { bytes: bytes.byteLength, why: 'values' } : asText(t('payload'), bytes, max);
         if ('text' in r) payload = json(r.text);
-        else if (merge.has(type)) unread.payload = r;
+        else unread.payload = r;
       }
       yield { id, ts, type, actor, payload, hashes, ...(Object.keys(unread).length ? { unread } : {}) };
     }
@@ -146,8 +156,49 @@ export function openLog(dbPath: string): LogRead {
   return { rows, lastId, close };
 }
 
-/** `fn` over the log at `dbPath`, read once (openLog), closed after. */
-function withLog<T>(dbPath: string, fn: (log: LogRead) => T): T {
+/**
+ * How long one read of the event log may take before its child process is killed (round 15), and the heap it gets.
+ * WHY a child (#918 round 15, the orchestrator's decision after three rounds of stalls): a FIFO at `<log>-journal`
+ * (or at the log itself) blocked SQLite's open for good while `sign` held the signer's lock (the round-14 second review,
+ * rows 1, 1b and 2, measured), and before it a view and the heap. The signer process never opens the log: a child
+ * does, under a deadline and a heap limit, and when either is hit it is killed, the refusal says so, the lock is
+ * released and nothing is written. 10 minutes is about 7 times a 7M-row log (86 s, the round-14 final check).
+ */
+export const LOG_DEADLINE_MS = 10 * 60 * 1000;
+export const LOG_HEAP_MB = 1024;
+const LOG_CHILD = fileURLToPath(new URL('./signed-receipts-log-child.js', import.meta.url));
+
+/** What the log child is asked: a scan for a chain (scanEvents), or the log's last id. */
+export type LogChildQuery = { log: string } & ({ op: 'scan'; scan: ScanQuery } | { op: 'lastId' });
+
+/**
+ * Run `q` in the log child (signed-receipts-log-child.ts), at most `deadlineMs`, with LOG_HEAP_MB of heap; its answer,
+ * or a ReceiptError naming the log and why the read stopped. Nothing is written by the child.
+ */
+function inLogChild<T>(q: LogChildQuery, deadlineMs: number): T {
+  const r = spawnSync(process.execPath, [`--max-old-space-size=${LOG_HEAP_MB}`, '--no-warnings', LOG_CHILD], { input: JSON.stringify(q), encoding: 'utf8', timeout: deadlineMs, killSignal: 'SIGKILL', maxBuffer: 4 * RECEIPTS_MAX_BYTES, stdio: ['pipe', 'pipe', 'pipe'] });
+  const why = (s: string) => new ReceiptError(`reading the event log ${q.log} ${s}; nothing was signed`);
+  if ((r.error as NodeJS.ErrnoException | undefined)?.code === 'ETIMEDOUT') throw why(`took over ${Math.round(deadlineMs / 1000)} s (a FIFO beside the log, or a log too large for the deadline): its reader was killed`);
+  if (r.error) throw why(`failed (${r.error.message})`);
+  if (r.signal) throw why(`stopped: its reader died (${r.signal}${r.signal === 'SIGABRT' ? `: out of its ${LOG_HEAP_MB} MB heap` : r.signal === 'SIGKILL' ? ': killed, as by the system when memory runs out' : ''})`);
+  type Answer = { ok: boolean; result?: T; error?: string };
+  let answer: Answer | null;
+  try {
+    answer = JSON.parse(r.stdout) as Answer;
+  } catch {
+    answer = null;
+  }
+  if (!answer) throw why(`failed (exit ${r.status}: ${printableTail(r.stderr)})`);
+  if (!answer.ok) throw new ReceiptError(answer.error ?? `reading the event log ${q.log} failed; nothing was signed`);
+  return answer.result as T;
+}
+const printableTail = (s: string) => s.trim().split('\n').slice(-2).join(' ').slice(0, 300);
+
+/** The log scanner signLog uses: each scan in the log child (inLogChild). */
+const childScanner = (log: string, deadlineMs: number) => (scan: ScanQuery) => inLogChild<ScanResult>({ log, op: 'scan', scan }, deadlineMs);
+
+/** `fn` over the log at `dbPath`, read once (openLog), closed after. Only the log child calls it (round 15). */
+export function withLog<T>(dbPath: string, fn: (log: LogRead) => T): T {
   const log = openLog(dbPath);
   try {
     return fn(log);
@@ -484,7 +535,7 @@ export function loadPublicKey(path: string): KeyObject {
  * file and an edited log be signed again). The next run gives the missing receipts back only if the log still makes
  * them byte for byte; otherwise it refuses.
  */
-export function signLog(o: { log: string; out: string; state: string; genesis?: boolean; after?: string; registry?: string; signer: ReceiptSigner }): SignResult {
+export function signLog(o: { log: string; out: string; state: string; genesis?: boolean; after?: string; registry?: string; signer: ReceiptSigner; logDeadlineMs?: number }): SignResult {
   const statePath = statePlace(o.state, o.out);
   outIsFile(o.out);
   if (o.after !== undefined && !o.genesis) throw new ReceiptError('--after names the chain a new chain succeeds: it goes with --genesis only');
@@ -498,7 +549,7 @@ export function signLog(o: { log: string; out: string; state: string; genesis?: 
   if (lstatSync(o.out, { throwIfNoEntry: false })) throw new ReceiptError(`--genesis never replaces anything at --out (${o.out}); nothing was signed`);
   const after = o.after;
   const oldPath = chainStateAt(after);
-  if (oldPath === null) return signAs(o, statePath, registry, fromCopy(after, o.log, o.signer, registry!, statePath));
+  if (oldPath === null) return signAs(o, statePath, registry, fromCopy(after, o.log, o.signer, registry!, statePath, o.logDeadlineMs ?? LOG_DEADLINE_MS));
   if (dirname(oldPath) === dirname(statePath)) throw new ReceiptError(`a successor's state goes in a directory of its own, not the ended chain's (${dirname(oldPath)}); nothing was signed`);
   // WHY (#918 round 12, Race C): the ended chain's lock is held from the read of its state through its ended mark, so
   // it can't sign, rotate or be succeeded meanwhile. Round 11 read the state unlocked and locked it only for the mark:
@@ -516,7 +567,7 @@ export type SignResult = { added: number; count: number; head: string | null; un
  * signLog's body, as the only signer of the chain at `statePath` (asOnlySigner). `after`: the chain a new chain
  * succeeds; its lock is already held when it is read from its state (signLog).
  */
-function signAs(o: { log: string; out: string; state: string; genesis?: boolean; signer: ReceiptSigner }, statePath: string, registry: string | null, after: Ended | null): SignResult {
+function signAs(o: { log: string; out: string; state: string; genesis?: boolean; signer: ReceiptSigner; logDeadlineMs?: number }, statePath: string, registry: string | null, after: Ended | null): SignResult {
   return asOnlySigner(statePath, (own, unchanged, save) => {
     if (own && o.genesis) throw new ReceiptError(`the signer already has a chain (its state is ${o.state}): --genesis never starts over it; nothing was signed`);
     if (!own && !o.genesis) throw new ReceiptError(`the signer has no chain state at ${o.state}: a new chain starts only with --genesis (root or the owner only); nothing was signed`);
@@ -529,7 +580,9 @@ function signAs(o: { log: string; out: string; state: string; genesis?: boolean;
     }
     const existing = readReceiptFiles(o.out);
     // One pass over one read of the log, keeping no row (round 14).
-    const r = withLog(o.log, (log) => signEvents(existing, log.rows(), o.signer, { from: own ?? 'genesis', ...(after ? { after: after.previous } : {}), maxBytes: RECEIPTS_MAX_BYTES }));
+    // One pass over one read of the log, keeping no row (round 14), in the log child (round 15): this process never
+    // opens the log.
+    const r = signEvents(existing, childScanner(o.log, o.logDeadlineMs ?? LOG_DEADLINE_MS), o.signer, { from: own ?? 'genesis', ...(after ? { after: after.previous } : {}), maxBytes: RECEIPTS_MAX_BYTES });
     // A chain starts once its log has its first event, so the registry always knows the log by it (round 14: a start
     // over an empty log knew it by path alone, and the coordinator moving its log blocked every successor).
     if (!own && r.first === null) throw new ReceiptError(`the event log ${o.log} has no event yet: a chain starts once the log has its first event (the registry knows a log by it); nothing was signed`);
@@ -861,7 +914,7 @@ function fromState(path: string, signer: ReceiptSigner, registry: string): Ended
  * `chain.started` key started, never another its `previous.keys` name (round 11 took the first of those, so a
  * successor's successor was a dead end).
  */
-function fromCopy(path: string, log: string, signer: ReceiptSigner, registry: string, statePath: string): Ended {
+function fromCopy(path: string, log: string, signer: ReceiptSigner, registry: string, statePath: string, deadlineMs: number): Ended {
   const mine = keyId(signer.publicKey);
   const envelopes = readReceiptFiles(path);
   const p = predecessorOf(envelopes);
@@ -880,7 +933,7 @@ function fromCopy(path: string, log: string, signer: ReceiptSigner, registry: st
   }
   if (readable) throw new ReceiptError(`the ended chain's state ${started.state} can be read: succeed it from its state (--after ${started.state}), never from a copy; nothing was signed`);
   if (dirname(started.state) === dirname(statePath)) throw new ReceiptError(`a successor's state goes in a directory of its own, not the ended chain's (${dirname(started.state)}); nothing was signed`);
-  const now = withLog(log, (l) => l.lastId());
+  const now = BigInt(inLogChild<string>({ log, op: 'lastId' }, deadlineMs));
   const event = BigInt(p.event) > now ? BigInt(p.event) : now;
   return { previous: { ...p, event: event.toString() }, chain: reg.ids[at]!, held: null };
 }

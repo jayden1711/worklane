@@ -155,7 +155,7 @@ export interface ReceiptEvent {
   unread?: { ts?: Unread; actor?: Unread; payload?: Unread };
 }
 /** A log field not read as text: its size in bytes, and why (round 14). */
-export type Unread = { bytes: number; why: 'bound' | 'not-utf8' | 'null' };
+export type Unread = { bytes: number; why: 'bound' | 'values' | 'not-utf8' | 'null' };
 
 /**
  * A log column's hash: SHA-256 over its SQLite storage class (`text`, `blob`, `integer`, `real` or `null`), a NUL, and
@@ -559,7 +559,31 @@ export const FIELD_READ_MAX = 64 * 1024;
 export const PAYLOAD_READ_MAX = 64 * 1024 * 1024;
 
 type CutEntry = { sha256: string; length: number; of: 'whole' | 'kept' | 'unread' | 'not-utf8' | 'null' };
-const UNREAD_OF = { bound: 'unread', 'not-utf8': 'not-utf8', null: 'null' } as const;
+const UNREAD_OF = { bound: 'unread', values: 'unread', 'not-utf8': 'not-utf8', null: 'null' } as const;
+
+/**
+ * The most JSON values (containers, keys and list items, counted from the `[`, `{`, `,` and `:` outside strings) a
+ * payload the signer parses may hold (round 15). No merge event needs more (a decision's lists are cut at ITEMS_MAX
+ * items anyway); a payload with more is never parsed, and its event is `event.unsignable`. WHY: one 64 MiB merge payload
+ * of flat `[[],…]` (22M values) took about 13× its size in heap to parse, and a 512 MB heap aborted (the round-14
+ * final check, 3d, measured).
+ */
+export const JSON_VALUES_MAX = 65_536;
+
+/** Whether the JSON text in `bytes` holds more than `max` values (a linear scan, never a parse). */
+export function moreJsonValuesThan(bytes: Uint8Array, max: number): boolean {
+  let n = 0;
+  let inString = false;
+  for (let i = 0; i < bytes.length; i++) {
+    const c = bytes[i]!;
+    if (inString) {
+      if (c === 0x5c) i++; // a backslash escapes the next byte
+      else if (c === 0x22) inString = false;
+    } else if (c === 0x22) inString = true;
+    else if ((c === 0x5b || c === 0x7b || c === 0x2c || c === 0x3a) && ++n > max) return true;
+  }
+  return false;
+}
 /** A value's SHA-256 over its canonical JSON (a lone surrogate is escaped there, never read as U+FFFD: row 7). */
 const digestOf = (v: unknown) => sha256(Buffer.from(canonicalJson(v), 'utf8'));
 
@@ -596,16 +620,22 @@ function redactBounded(v: unknown, path: string, cut: Record<string, CutEntry>):
   return v;
 }
 
-function bodyOf(e: ReceiptEvent, version: string | null, decided: Map<string, string>, digest: string): Body | null {
+/**
+ * A merge event's receipt body, redacted and bounded, or null for any other kind. `version`: the engine version the
+ * last coordinator.started gave, and `versionUnread` when that payload was never read (round 15: cut as
+ * `engine.version`). A merge.result's `decision` is null here: the receipt ids it names exist only once signed, so the
+ * signer fills it (extend).
+ */
+function bodyOf(e: ReceiptEvent, version: string | null, versionUnread: Unread | null, digest: string): Body | null {
   const common = { at: e.ts, instance: e.actor, event: BigInt(e.id).toString() };
   // Slice 1 verifies nothing itself: every field is attested (see Verified). Added after the redactor, which only
   // the event-derived text needs.
   const signer = { verified: [], log: { digest } };
-  const bounded = <T>(body: T) => {
+  const bounded = <T extends { kind: string }>(body: T) => {
     const cut: Record<string, CutEntry> = {};
     const out = redactBounded(body, '', cut) as T & { at: string };
     // A field past the store's read bound was never read (round 13): the receipt keeps none of it, and says so.
-    for (const [field, u] of [['at', e.unread?.ts], ['instance', e.unread?.actor]] as const) {
+    for (const [field, u] of [['at', e.unread?.ts], ['instance', e.unread?.actor], ['engine.version', body.kind === 'merge.decided' ? (versionUnread ?? undefined) : undefined]] as const) {
       if (u !== undefined) cut[field] = { length: u.bytes, sha256: digestOf(''), of: UNREAD_OF[u.why] };
     }
     // WHY (#918 round 11, P3): a `ts` that is empty, or cut to nothing (over REDACT_MAX), would make `at` "", which
@@ -623,7 +653,15 @@ function bodyOf(e: ReceiptEvent, version: string | null, decided: Map<string, st
   const unreadPayload = e.unread?.payload;
   if (unreadPayload !== undefined) {
     const u = unreadPayload;
-    return unsignable(u.why === 'bound' ? `its payload is ${u.bytes} bytes, past the ${PAYLOAD_READ_MAX} the signer reads: never read` : u.why === 'null' ? 'its payload is NULL' : `its payload (${u.bytes} bytes) isn't UTF-8: never read`);
+    return unsignable(
+      u.why === 'bound'
+        ? `its payload is ${u.bytes} bytes, past the ${PAYLOAD_READ_MAX} the signer reads: never read`
+        : u.why === 'values'
+          ? `its payload (${u.bytes} bytes) holds more than ${JSON_VALUES_MAX} JSON values, which no merge event needs: never parsed`
+          : u.why === 'null'
+            ? 'its payload is NULL'
+            : `its payload (${u.bytes} bytes) isn't UTF-8: never read`,
+    );
   }
   if (e.type === 'merge.decided') {
     const r = EventSchemas['merge.decided'].safeParse(e.payload);
@@ -636,7 +674,7 @@ function bodyOf(e: ReceiptEvent, version: string | null, decided: Map<string, st
   const done = e.type === 'merge.done' ? (r.data as EventPayload<'merge.done'>) : null;
   const p = done ?? (r.data as EventPayload<'merge.failed'>);
   const why = done ? null : (p as EventPayload<'merge.failed'>).why;
-  return bounded({ ...common, kind: 'merge.result' as const, issue: p.issue, pr: p.number, head: p.head, merged: !!done, commit: done?.sha ?? null, reconciled: done?.reconciled === true, why, decision: decided.get(`${p.number}@${p.head}`) ?? null });
+  return bounded({ ...common, kind: 'merge.result' as const, issue: p.issue, pr: p.number, head: p.head, merged: !!done, commit: done?.sha ?? null, reconciled: done?.reconciled === true, why, decision: null as string | null });
 }
 
 /** What `at` says when the log's `ts` was empty or past the bound (the receipt's `cut.at` records which). */
@@ -649,14 +687,15 @@ export const AT_UNRECORDED = 'unrecorded';
  * under receipts already signed, or at an event that doesn't match its schema. `state`: the signer's chain state
  * after this (unchanged when nothing was added).
  */
-export function signEvents(existing: readonly unknown[], events: Iterable<ReceiptEvent>, signer: ReceiptSigner, o: SignOptions): { envelopes: Envelope[]; added: number; head: string | null; state: ChainState; skipped: number; first: string | null } {
+export function signEvents(existing: readonly unknown[], events: Iterable<ReceiptEvent> | LogScanner, signer: ReceiptSigner, o: SignOptions): { envelopes: Envelope[]; added: number; head: string | null; state: ChainState; skipped: number; first: string | null } {
   if (o.after && o.from !== 'genesis') throw new ReceiptError('only a new chain (genesis) names a chain it succeeds');
   // WHY (#918 round 9, routes 1b, 1c): a key that signed the ended chain, or a chain before it, never starts its
   // successor, so the same key never signs a second version of what it signed there.
   const mine = keyId(signer.publicKey);
   if (o.after?.keys.includes(mine)) throw new ReceiptError(`this key (${mine}) signed the chain it would succeed: a successor takes a new key; nothing was signed`);
   const { state, base, behind } = chainSoFar(existing, signer, o.from);
-  const r = extend(base, state, events, signer, o.now ?? (() => new Date().toISOString()), o.after ? Previous.parse(o.after) : null, o.maxBytes ?? Infinity);
+  const scan: LogScanner = typeof events === 'function' ? events : (q) => scanEvents(events, q);
+  const r = extend(base, state, scan, signer, o.now ?? (() => new Date().toISOString()), o.after ? Previous.parse(o.after) : null, o.maxBytes ?? Infinity);
   // Receipts behind the signer's own head are signed again from the log, onto its fixed receipts. Merge receipts take
   // their time, version and digest from the log, and ed25519 is deterministic, so an unchanged log gives back the very
   // receipts the state names; a log changed meanwhile gives another id: refused.
@@ -668,16 +707,96 @@ export function signEvents(existing: readonly unknown[], events: Iterable<Receip
 }
 
 /**
- * `existing` (verified as `state`) extended with a receipt for each merge event in `events` after its last one, in one
- * pass over `events` in id order (round 14). `first`: the log's digest step at its first event (null: no event).
- *
- * WHY one pass, keeping no event (#918 round 14): round 13 kept every row and parsed payload until signing ended, and a
- * few large events or a few million small ones ran every `sign`, and every successor, out of heap for good (the
- * round-13 reviews, measured). Kept across rows now: the running digest, the digests the receipts already signed
- * expect (one per receipt), the latest engine version, the decided map, and the receipts, which stop at `maxBytes`.
+ * What a log scan needs to know of the chain (round 15): the last event it receipted, the digest each of its receipts
+ * expects at its event, and the most bytes the new receipts' bodies may take.
  */
-function extend(existing: readonly unknown[], state: Extract<ChainResult, { ok: true }>, events: Iterable<ReceiptEvent>, signer: ReceiptSigner, now: () => string, after: Predecessor | null, maxBytes: number): { envelopes: Envelope[]; added: number; head: string | null; skipped: number; first: string | null } {
+export interface ScanQuery {
+  last: string;
+  expected: [string, string][];
+  maxBytes: number;
+}
+/**
+ * What a log scan gives back (round 15): the log's digest step at its first event (null: no event), how many merge
+ * events at ids <= 0 it passed over, and the receipt body of each merge event after `last`, in id order (a
+ * merge.result's `decision` still null). Plain JSON: the store's scan runs in a child process (signed-receipts-log-child).
+ */
+export interface ScanResult {
+  first: string | null;
+  skipped: number;
+  items: unknown[];
+}
+/** A scan of a log by query: scanEvents over events in memory, or the store's child process over a log file. */
+export type LogScanner = (q: ScanQuery) => ScanResult;
+
+/**
+ * One pass over `events` in id order (round 14), keeping no event: the running digest, each receipted event checked
+ * against the digest its receipt holds, and a body for each merge event after `q.last`. WHY one pass (#918 round 14):
+ * round 13 kept every row and parsed payload until signing ended, and a few large events or a few million small ones
+ * ran every `sign`, and every successor, out of heap for good (the round-13 reviews, measured). Kept across rows: the
+ * running digest, the expected digests (one per receipt), the latest engine version, and the bodies, refused as they
+ * grow past `q.maxBytes`. Pure: the store runs it in a child process with a deadline and a heap limit (round 15).
+ */
+export function scanEvents(events: Iterable<ReceiptEvent>, q: ScanQuery): ScanResult {
+  const last = BigInt(q.last);
+  // The log as read now must hash, at each event already receipted, to what that receipt recorded: an event edited,
+  // dropped or inserted before it is a log that changed under signed receipts, and nothing more is signed. Ids are
+  // compared as BigInt, keyed by their decimal text (round 12). Every receipted id is at or before `last`, so every
+  // check is done before the first new body.
+  const expected = new Map<string, string>(q.expected);
+  const changed = (event: string) => new ReceiptError(`the log changed under receipts already signed (at event ${event}: an event before it was edited, dropped or inserted, or it is gone); nothing was signed`);
+  const allSeen = () => {
+    const missing = [...expected.keys()].sort((a, b) => (BigInt(a) < BigInt(b) ? -1 : 1))[0];
+    if (missing !== undefined) throw changed(missing);
+  };
+  // An array (from a caller in memory) is put in id order; the store's rows come in id order, and are checked to.
+  const ordered: Iterable<ReceiptEvent> = Array.isArray(events) ? [...(events as ReceiptEvent[])].sort((a, b) => (BigInt(a.id) < BigInt(b.id) ? -1 : BigInt(a.id) > BigInt(b.id) ? 1 : 0)) : events;
+  let digest = '';
+  let first: string | null = null;
+  let before: bigint | null = null;
+  let version: string | null = null;
+  let versionUnread: Unread | null = null;
   let skipped = 0;
+  let bytes = 0;
+  const items: Body[] = [];
+  for (const e of ordered) {
+    const eventId = BigInt(e.id);
+    if (before !== null && eventId <= before) throw new ReceiptError(eventId === before ? `event ${eventId} appears twice in the log; nothing was signed` : `the log's events came out of id order (${eventId} after ${before}); nothing was signed`);
+    before = eventId;
+    digest = logDigest(digest, e);
+    first ??= digest;
+    const want = expected.get(eventId.toString());
+    if (want !== undefined) {
+      if (want !== digest) throw changed(eventId.toString());
+      expected.delete(eventId.toString());
+    }
+    if (eventId > last) allSeen();
+    if (e.type === 'coordinator.started') {
+      // A coordinator.started that doesn't match its schema leaves the version unrecorded (null) for the decisions
+      // after it, rather than ending the chain (#918 round 11, P3). One the store never read is cut as such (round 15).
+      versionUnread = e.unread?.payload ?? null;
+      const v = EventSchemas['coordinator.started'].safeParse(e.payload);
+      version = v.success ? (v.data as EventPayload<'coordinator.started'>).version : null;
+      continue;
+    }
+    // A merge event at an id <= 0 is never receipted (no receipt holds such an id): counted, so it is never passed
+    // over silently (round 13, the round-12 second review's row 2).
+    if (eventId <= 0n && (e.type === 'merge.decided' || e.type === 'merge.done' || e.type === 'merge.failed')) skipped++;
+    if (eventId <= last) continue;
+    const body = bodyOf(e, version, versionUnread, digest);
+    if (!body) continue;
+    bytes += Buffer.byteLength(canonicalJson(body), 'utf8');
+    if (bytes > q.maxBytes) throw new ReceiptError(`the receipts would be over the ${q.maxBytes} bytes a receipts file may hold; nothing was written`);
+    items.push(body);
+  }
+  allSeen();
+  return { first, skipped, items };
+}
+
+/**
+ * `existing` (verified as `state`) extended with a receipt for each merge event the log scan gives (`scan`), signed
+ * here in order. `first`: the log's digest step at its first event (null: no event).
+ */
+function extend(existing: readonly unknown[], state: Extract<ChainResult, { ok: true }>, scan: LogScanner, signer: ReceiptSigner, now: () => string, after: Predecessor | null, maxBytes: number): { envelopes: Envelope[]; added: number; head: string | null; skipped: number; first: string | null } {
   const envelopes = [...(existing as Envelope[])];
   let bytes = envelopes.reduce((n, e) => n + Buffer.byteLength(canonicalJson(e), 'utf8') + 1, 0);
   let seq = state.count;
@@ -701,53 +820,16 @@ function extend(existing: readonly unknown[], state: Extract<ChainResult, { ok: 
     if (s.kind === 'merge.decided') decided.set(`${s.inputs.pr}@${s.inputs.head}`, state.ids[i]!);
     if (isEventReceipt(s)) last = BigInt(s.event);
   }
-  // The log as read now must hash, at each event already receipted, to what that receipt recorded: an event edited,
-  // dropped or inserted before it is a log that changed under signed receipts, and nothing more is signed. Ids are
-  // compared as BigInt, keyed by their decimal text (round 12). Every receipted id is at or before `last`, so every
-  // check is done before the first new receipt.
-  const expected = new Map<string, string>();
-  for (const s of state.statements) if (isEventReceipt(s)) expected.set(s.event, s.log.digest);
-  const changed = (event: string) => new ReceiptError(`the log changed under receipts already signed (at event ${event}: an event before it was edited, dropped or inserted, or it is gone); nothing was signed`);
-  const allSeen = () => {
-    const missing = [...expected.keys()].sort((a, b) => (BigInt(a) < BigInt(b) ? -1 : 1))[0];
-    if (missing !== undefined) throw changed(missing);
-  };
-  // An array (from a caller in memory) is put in id order; the store's rows come in id order, and are checked to.
-  const ordered: Iterable<ReceiptEvent> = Array.isArray(events) ? [...(events as ReceiptEvent[])].sort((a, b) => (BigInt(a.id) < BigInt(b.id) ? -1 : BigInt(a.id) > BigInt(b.id) ? 1 : 0)) : events;
-  let digest = '';
-  let first: string | null = null;
-  let before: bigint | null = null;
-  let version: string | null = null;
-  for (const e of ordered) {
-    const eventId = BigInt(e.id);
-    if (before !== null && eventId <= before) throw new ReceiptError(eventId === before ? `event ${eventId} appears twice in the log; nothing was signed` : `the log's events came out of id order (${eventId} after ${before}); nothing was signed`);
-    before = eventId;
-    digest = logDigest(digest, e);
-    first ??= digest;
-    const want = expected.get(eventId.toString());
-    if (want !== undefined) {
-      if (want !== digest) throw changed(eventId.toString());
-      expected.delete(eventId.toString());
-    }
-    if (eventId > last) allSeen();
-    if (e.type === 'coordinator.started') {
-      // A coordinator.started that doesn't match its schema leaves the version unrecorded (null) for the decisions
-      // after it, rather than ending the chain (#918 round 11, P3).
-      const v = EventSchemas['coordinator.started'].safeParse(e.payload);
-      version = v.success ? (v.data as EventPayload<'coordinator.started'>).version : null;
-      continue;
-    }
-    // A merge event at an id <= 0 is never receipted (no receipt holds such an id): counted, so it is never passed
-    // over silently (round 13, the round-12 second review's row 2).
-    if (eventId <= 0n && (e.type === 'merge.decided' || e.type === 'merge.done' || e.type === 'merge.failed')) skipped++;
-    if (eventId <= last) continue;
-    const body = bodyOf(e, version, decided, digest);
-    if (!body) continue;
+  const expected: [string, string][] = state.statements.filter(isEventReceipt).map((s) => [s.event, s.log.digest]);
+  const s = scan({ last: last.toString(), expected, maxBytes });
+  for (const item of s.items) {
+    const body = item as Body;
+    // A result names the chain's latest decision for its PR head, which only the signer knows (its receipt ids).
+    if (body.kind === 'merge.result') body.decision = decided.get(`${body.pr}@${body.head}`) ?? null;
     const id = push(body);
     if (body.kind === 'merge.decided') decided.set(`${body.inputs.pr}@${body.inputs.head}`, id);
   }
-  allSeen();
-  return { envelopes, added: seq - state.count, head: prev, skipped, first };
+  return { envelopes, added: seq - state.count, head: prev, skipped: s.skipped, first: s.first };
 }
 
 /**

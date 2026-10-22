@@ -226,7 +226,9 @@ usage: ${BRAND.cli} <command> [options]
                                    registry (one per instance, holding one first chain); with --after, it
                                    succeeds an ended chain (its state, or a copy of
                                    its receipts when the state can't be read), from that chain's last event,
-                                   with a new key. Not yet root-signed: it signs as whoever runs it (#717)
+                                   with a new key. The log is read by a child process, stopped after
+                                   --log-deadline seconds (600 by default). Not yet root-signed: it signs
+                                   as whoever runs it (#717)
   receipts rotate --out <file> --key <current private> --next <new public> --state <file>
                                    continue the chain under a new key, signed by the current one
   decide <id> <option> [--instance name]

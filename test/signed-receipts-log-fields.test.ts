@@ -45,7 +45,11 @@ const chain = (path: string, dir: string) => {
 
 test('a NULL hashes apart from "" and is cut as null, never as unread', () => {
   const f = fixtureLog();
-  const db = new DatabaseSync(f.path);
+  // Defensive mode off (round 15): Node 24 opens a connection in SQLite's defensive mode, which refuses writing the
+  // schema ("table sqlite_master may not be modified"); Node 22 has neither the option nor the mode on. The coordinator
+  // opens its own database as it likes.
+  const db = new DatabaseSync(f.path, { defensive: false } as unknown as ConstructorParameters<typeof DatabaseSync>[1]);
+  (db as unknown as { enableDefensive?: (on: boolean) => void }).enableDefensive?.(false);
   // The coordinator rebuilds its table so ts takes a NULL, then writes NOT NULL back into the schema's text.
   const sql = (db.prepare("SELECT sql FROM sqlite_master WHERE name = 'events'").get() as { sql: string }).sql;
   db.exec(`ALTER TABLE events RENAME TO old_events; ${sql.replace(/ts TEXT NOT NULL/, 'ts TEXT')}; INSERT INTO events SELECT * FROM old_events; DROP TABLE old_events`);

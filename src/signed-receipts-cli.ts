@@ -32,7 +32,7 @@ function createKeyFile(path: string, data: string) {
 const USAGE = [
   `usage: ${BRAND.cli} receipts verify <file|dir> --key <pub> [--key <pub>]... [--anchor <receipt id>]`,
   `       ${BRAND.cli} receipts keygen --private <file> --public <file>`,
-  `       ${BRAND.cli} receipts sign --log <events.db> --key <private> --out <file> --state <file> [--genesis --registry <file> [--after <ended chain's state or receipts>]]`,
+  `       ${BRAND.cli} receipts sign --log <events.db> --key <private> --out <file> --state <file> [--genesis --registry <file> [--after <ended chain's state or receipts>]] [--log-deadline <seconds>]`,
   `       ${BRAND.cli} receipts rotate --out <file> --key <current private> --next <new public> --state <file>`,
 ].join('\n');
 
@@ -131,11 +131,15 @@ export async function receiptsCommand(sub: string | undefined, rest: string[]): 
         const after = values(args, '--after');
         if (after.length > 1) throw new Usage('give --after once');
         const registry = values(args, '--registry');
+        // Round 15: how long the log's reader may take (LOG_DEADLINE_MS by default), for a log that honestly needs more.
+        const deadlines = values(args, '--log-deadline');
+        if (deadlines.length > 1 || (deadlines.length && !/^[1-9][0-9]{0,5}$/.test(deadlines[0]!))) throw new Usage('--log-deadline takes a whole number of seconds, once');
+        const deadline = deadlines.length ? Number(deadlines[0]) : null;
         if (registry.length > 1) throw new Usage('give --registry once');
         if (genesis !== (registry.length === 1)) throw new Usage('--genesis and --registry go together: a new chain is recorded in the signer\'s registry, an existing one names its registry in its state');
         done(args);
         const signer = loadSigner(key);
-        const r = signLog({ log, out, state, signer, ...(genesis ? { genesis, registry: registry[0]! } : {}), ...(after.length ? { after: after[0]! } : {}) });
+        const r = signLog({ log, out, state, signer, ...(genesis ? { genesis, registry: registry[0]! } : {}), ...(after.length ? { after: after[0]! } : {}), ...(deadline === null ? {} : { logDeadlineMs: deadline * 1000 }) });
         say(`${r.added} new receipts signed with key ${keyId(signer.publicKey)}; ${r.count} in the chain, head ${r.head ?? 'none'}`);
         // WHY (#918 round 12): a merge event the signer couldn't read, or a time it couldn't keep, is said every time,
         // never only counted by verify.
