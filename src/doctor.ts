@@ -16,7 +16,8 @@ import { GIT_HOOK_MARKER, legacyHookChecks } from './install.js';
 import { instancesDir, loadInstance, policiesForRepo, policyViolations, readPolicy } from './instance.js';
 import { instanceTargets, planMigrations, projectConfigFiles, type Targets } from './migrations.js';
 import { projectStateDir } from './guardrails/context.js';
-import { canRunAgents, detectOs, diskFree, fileAccess, nvidiaNodes, shimsNeedShell, userUid, wslAvailable } from './os/index.js';
+import { canRunAgents, detectOs, diskFree, fileAccess, homeOf, nvidiaNodes, shimsNeedShell, stateDir, userUid, wslAvailable } from './os/index.js';
+import { VIEWER_USER } from './setup/app-manifest.js';
 import { diskFloorCheck } from './governor-holds.js';
 import { policyRootChecks } from './doctor-policy-root.js';
 import { findTool, toolBin } from './tool-path.js';
@@ -33,6 +34,7 @@ import { checkSetup, groupLevel, GROUPS, stepLevel, systemProbe, type SetupConte
 import { modelWarnings } from './model-routing.js';
 import { HUB_UNIT_AS_ROOT, OWNER_TERMINAL_RERUN, ownerTerminalNotice, ownerTerminalRerun, type TerminalPaths } from './console/owner-terminal-removed.js';
 import { voiceSiriLeftoverCheck } from './doctor-voice-removed.js';
+import { DASHBOARD_KEY_PREFIX, isDashboardKey } from './events/redact.js';
 
 /** off: not available in this setup's mode (said why; never a failure). */
 export type Level = 'ok' | 'warn' | 'fail' | 'off';
@@ -257,7 +259,41 @@ export function doctor(rootArg: string, opts: { agentshield?: boolean; /** A pol
   if (cfg?.tests.test_run) out.push(networkCheck());
   if (opts.agentshield) out.push(agentShield(root));
   out.push(...policyRootChecks());
+  // #889: each dashboard key this user can read: the local one, each instance's and the hub's (its own user's state dir,
+  // or the viewer user's when doctor runs as root): an older key asks for rotation.
+  const viewerHome = homeOf(VIEWER_USER);
+  const keyDirs: [string, string][] = [['local', projectStateDir(root)], ...instances.map((n): [string, string] => [n, join(instancesDir(), n, 'state')]), ['hub', join(stateDir(), 'dashboard-hub')], ...(viewerHome ? [['hub', join(viewerHome, '.local', 'state', BRAND.cli, 'dashboard-hub')] as [string, string]] : [])];
+  const seen = new Set<string>();
+  for (const [where, dir] of keyDirs) {
+    const file = join(dir, 'dashboard-token');
+    if (seen.has(file)) continue;
+    seen.add(file);
+    const k = dashboardKeyCheck(file, where);
+    if (k) out.push(k);
+  }
   return out;
+}
+
+/**
+ * A dashboard key file (#889): a key from before keys had DASHBOARD_KEY_PREFIX still opens the dashboard, but a shape
+ * the redactor can't tell from a commit hash or an id, so it may show in a log or a post in clear: rotate it. Null
+ * when there is no file or this user can't read it. The key is read and never shown.
+ */
+export function dashboardKeyCheck(file: string, where: string, read: (f: string) => string = (f) => readFileSync(f, 'utf8')): DoctorCheck | null {
+  let key: string;
+  try {
+    key = read(file).trim();
+  } catch {
+    return null;
+  }
+  if (!key) return null;
+  const name = `dashboard key ${where}`;
+  if (isDashboardKey(key)) return { name, level: 'ok', detail: `${file}: the current key format (${DASHBOARD_KEY_PREFIX}...), redacted wherever it appears` };
+  return {
+    name,
+    level: 'warn',
+    detail: `${file} holds a dashboard key in the older format (no ${DASHBOARD_KEY_PREFIX} prefix). It still works, but the redactor can't tell it from a commit hash or an id, so it could show in a log or a post. Rotate it: remove the file and restart what serves that dashboard (the instance's service, or \`${BRAND.cli} dashboard\`); a new key is written, and the page asks for it once. On a server with the hub, then run scripts/setup/dashboards.sh as root so the hub can read the new key.`,
+  };
 }
 
 /**
