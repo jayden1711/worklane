@@ -357,11 +357,15 @@ export async function decisionDiff(root: string, base: string, head: string): Pr
   return new Promise((done) => {
     gitExecFile(args, { cwd: root, env: { ...withToolPath(), GIT_TERMINAL_PROMPT: '0' }, timeout: 15_000, maxBuffer: 8 * 1024 * 1024, encoding: 'utf8' }, (err, stdout, stderr) => {
       if (err && !(err.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER' && stdout)) return done({ diff: null, why: `not in this checkout's git: ${(stderr || err.message).trim().split('\n')[0]}` });
+      // A NUL-free view (#927 round 9): `--text` shows a binary file's bytes, and UTF-16 text (a NUL between ASCII
+      // characters) went past every redaction rule, where main showed "Binary files differ". `--text` stays: a NUL, or
+      // a `-diff` attribute, is also how a change hides its lines from review as "binary".
+      const shown = stdout.replace(/\0/g, '');
       // Redacted before it is cut, over the kept part and a margin only (#889): up to 8 MB of diff, and the redaction is
       // synchronous on the dashboard. Output past the buffer the same way: a token across the cut is redacted whole.
-      if (err) return done({ diff: redactCut(stdout, MAX), truncated: true });
-      const truncated = stdout.length > MAX;
-      done({ diff: redactCut(stdout, MAX), truncated });
+      if (err) return done({ diff: redactCut(shown, MAX), truncated: true });
+      const truncated = shown.length > MAX;
+      done({ diff: redactCut(shown, MAX), truncated });
     });
   });
 }
