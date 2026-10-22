@@ -1,10 +1,11 @@
 // #626: claude (2.1.296, the pinned CLI) drops a whole --settings over one invalid value, deny rules and hooks
 // included, and says nothing. A run whose --settings claude didn't apply is stopped before the agent's first turn,
 // naming the settings; a run whose settings were applied goes on as before.
-import { STDIN_LINE, engineCli } from './helpers.js';
+import { STDIN_LINE, engineCli, repoRoot } from './helpers.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, cpSync, existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { BRAND } from '../src/brand.js';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { agentSettingsPath, guardrailSettings } from '../src/agent-settings.js';
@@ -65,6 +66,9 @@ setTimeout(() => {
 function instance() {
   const home = mkdtempSync(join(tmpdir(), 'settings-applied-home-'));
   const cwd = mkdtempSync(join(tmpdir(), 'settings-applied-cwd-'));
+  // A project, as every guarded run's cwd is: one with no config folder doesn't start (#890), as its hook would deny
+  // every call.
+  cpSync(join(repoRoot, 'examples', 'basic', BRAND.configDir), join(cwd, BRAND.configDir), { recursive: true });
   writeFileSync(agentSettingsPath(home), JSON.stringify(agentSettings(engineCli, [], [], [])), { mode: 0o600 });
   return { home, cwd, guardrails: () => guardrailSettings(home, 'shop', cwd) };
 }

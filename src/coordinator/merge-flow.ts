@@ -40,7 +40,7 @@ import { carriedHead, mergeInBase, type MergeIn } from '../pr-hygiene.js';
 import { alertTarget, directPushKey, directPushText, ownerMentions } from '../direct-push-alert.js';
 import { redactString } from '../events/redact.js';
 import { takeOpsPost } from '../watchdog/post.js';
-import { createWorktree, createWorktreeAsync, removeWorktree, removeWorktreeAsync } from '../worktrees.js';
+import { createWorktree, createWorktreeAsync, removeWorktree, removeWorktreeAsync, unlockWorktree, WORKTREE_LOCK_REASON } from '../worktrees.js';
 import { approveMerge, mergeApproval } from '../decide.js';
 import { isOwner, mayAnswerKind, type Role } from '../dashboard-auth.js';
 import { isRecordedAck } from '../ack-reason.js';
@@ -684,17 +684,34 @@ export abstract class MergeFlow extends FixRuns {
   }
 
   /**
+   * The default branch's tip for one merge decision, taken once (defaultTipNow), and the money-path list read at that
+   * one commit (#1005): the same commit the weakening check reads the registered checks at (weakeningOf(tip)) and
+   * vacuity measures from. Read at the remote-tracking ref instead, as last fetched, the list could be older than the
+   * tip the weakening check reads, and miss a path the default branch added since. review.yaml itself (including
+   * money_path_source) still comes from the running config. `tip` null (the fetch or the read failed): the decision
+   * waits, as before (weakeningOf's reason), and the list is read at the ref as last fetched, only to name the money
+   * paths the change touches among its reasons.
+   */
+  private policyAtTipNow(review: ReviewConfig): { tip: string | null; moneyPaths: RegExp[] } {
+    const tip = this.defaultTipNow();
+    return { tip, moneyPaths: tip === null ? this.moneyPaths(review.money_path_source) : this.moneyPaths(review.money_path_source, tip) };
+  }
+
+  /**
    * The policy's call on a ready PR at its current head. `vacuityRun`: its tests' coverage run at this head, still to
    * come (watchPr's startVacuityRun starts it in the background when that is all that holds the PR; the pass after it decides).
    */
   mergeDecisionFor(n: number, number: number, pr: PullRequest): MergeDecision & { vacuityRun?: VacuityRun } {
     const review: ReviewConfig = this.d.cfg.review ?? DEFAULT_REVIEW;
+    // First, before the money-path list is read: the default branch's tip for this decision, the one commit the list,
+    // the weakening check and vacuity all read (#1005).
+    const policy = this.policyAtTipNow(review);
     // A stale-PR merge-in head: the PR's own change is measured from the default branch it merged (src/pr-hygiene.ts).
     const mergeIns = this.mergeInsOf();
     const base = mergeInBase(mergeIns, number, pr.headSha) ?? (this.events(n).filter((e) => e.type === 'issue.claimed').at(-1)!.payload as EventPayload<'issue.claimed'>).base;
     const files = this.changeFiles(this.d.repo, base, pr.headSha);
     const labels = (this.events(n).filter((e) => e.type === 'issue.seen').at(-1)?.payload as { labels?: string[] } | undefined)?.labels ?? [];
-    const level = computeLevel({ files, labels, moneyPaths: this.moneyPaths(review.money_path_source), scope: lockScopeOf(this.d) }, review);
+    const level = computeLevel({ files, labels, moneyPaths: policy.moneyPaths, scope: lockScopeOf(this.d) }, review);
     const exists = (p: string) => gitSpawnSync(['cat-file', '-e', `${base}:${p}`], { cwd: this.d.repo }).status === 0;
     const newTopLevel = [...new Set(files.map((f) => f.path.split('/')).filter((s) => s.length > 1).map((s) => s[0]!))].filter((d) => !exists(d)).map((d) => `${d}/`);
     // The verdict on this head, or on the head the harness's merge-ins of the default branch were made on.
@@ -707,8 +724,9 @@ export abstract class MergeFlow extends FixRuns {
     } catch {
       // an unreadable policy is "off"
     }
-    // The default branch's tip, fetched from the remote now (one bounded fetch, for the weakening check and vacuity).
-    const tipNow = this.defaultTipNow();
+    // The default branch's tip taken at the decision's start (one bounded fetch, for the money-path list, the weakening
+    // check and vacuity: #1005).
+    const tipNow = policy.tip;
     // #784 rounds 5 to 8 (A1): for vacuity, the PR's own change is measured from where its head meets that tip, so the
     // default branch's files and tests a merge or a rebase brought in (a conflict fix's: fix-runs.ts) are never taken
     // for the PR's own.
@@ -739,7 +757,8 @@ export abstract class MergeFlow extends FixRuns {
       // high-risk categories and the engine's own, whether or not this repo's merge rules hold them elsewhere.
       claimedProtected: this.claimedClass(n) === 'protected',
       // A test, lint or guard the change removes or loosens, read from the change itself (#783), with the checks the
-      // default branch registers now (its tip, fetched here) as well as at the change's base (#869).
+      // default branch registers now (its tip, taken at the decision's start, the commit the money paths were read at:
+      // #1005) as well as at the change's base (#869).
       weakening: weakeningOf(this.d.repo, base, pr.headSha, files, lockScopeOf(this.d), tipNow),
       // The PR's own tests, run under coverage, must execute app code it changes (#784).
       vacuity: vacuity.reasons,
@@ -1424,9 +1443,12 @@ export abstract class MergeFlow extends FixRuns {
       this.emit('coordinator.error', { instance: this.d.instance, where: `revert ${name}`, kind: 'error', message: why.slice(0, 500) });
       return { why: why.slice(0, 500) };
     };
+    unlockWorktree(this.d.repo, dir);
     gitSpawnSync(['worktree', 'remove', '--force', dir], { cwd: this.d.repo });
     try {
       this.git(this.d.repo, 'worktree', 'add', '-q', '--detach', dir, tip);
+      // Locked against a prune run inside an agent's sandbox, where it is hidden (src/worktrees.ts WORKTREE_LOCK_REASON).
+      this.git(this.d.repo, 'worktree', 'lock', '--reason', WORKTREE_LOCK_REASON, dir);
       const parents = this.git(this.d.repo, 'rev-list', '--parents', '-n', '1', sha).split(' ').length - 1;
       // A range: newest first (git revert's order), into one commit (no pre-commit or commit-msg hook, as git revert itself).
       const rv = range
@@ -1445,6 +1467,7 @@ export abstract class MergeFlow extends FixRuns {
       const pr = await this.d.backlog.openPr(branch, this.branch, title, body, { headSha: head });
       return { url: pr.url, number: pr.number };
     } finally {
+      unlockWorktree(this.d.repo, dir);
       gitSpawnSync(['worktree', 'remove', '--force', dir], { cwd: this.d.repo });
       gitSpawnSync(['worktree', 'prune'], { cwd: this.d.repo });
     }

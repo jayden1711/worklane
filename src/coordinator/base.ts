@@ -3,7 +3,7 @@
 import type { Coordinator } from '../coordinator.js';
 import { gitExecFileSync } from '../os/git.js';
 import { randomBytes } from 'node:crypto';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { BRAND } from '../brand.js';
 import type { Config } from '../config/load.js';
 import { claim, release } from '../claims.js';
@@ -28,7 +28,7 @@ import { localDay, nextLocalMidnight } from '../local-day.js';
 import type { PushGuard } from '../push-guard.js';
 import type { DeployGate } from '../deploy-gate/gate.js';
 import type { TestRuns } from './pr-batch.js';
-import { removeWorktree, type WorktreeOptions } from '../worktrees.js';
+import { removeWorktree, worktreeOptions, type WorktreeOptions } from '../worktrees.js';
 import { prepareDepCache } from '../dep-cache.js';
 import { seen } from '../intake/store.js';
 import { stuckMode } from '../settings.js';
@@ -240,7 +240,10 @@ export abstract class CoordinatorBase {
     };
     this.repoCfg = d.cfg;
     this.remote = d.remote ?? 'origin';
-    this.wtBase = { repo: d.repo, root: d.cfg.tests.worktree.root, stateDir: d.stateDir, setup: d.cfg.tests.worktree.setup, env: d.cfg.tests.env, ...(d.commandsAs ? { runAs: d.commandsAs } : {}) };
+    // The worktree root resolved to its real path once, here, from the start config (#890 round 19): a root that is a
+    // link works as on main, and a link that appears on the way later refuses an add (WorktreeOptions.rootResolved).
+    // The task directory is one of the paths a worktree place must never hide (keptPaths).
+    this.wtBase = worktreeOptions({ repo: d.repo, root: d.cfg.tests.worktree.root, taskDir: d.agentTasks?.dir ?? join(d.stateDir, 'tasks'), stateDir: d.stateDir, setup: d.cfg.tests.worktree.setup, env: d.cfg.tests.env, ...(d.commandsAs ? { runAs: d.commandsAs } : {}) });
   }
 
   /** This task's share of the machine's cores right now: the cores over the agents running (cores.ts). */
@@ -276,10 +279,11 @@ export abstract class CoordinatorBase {
   /**
    * The money paths as the default branch says them now: the list read at <remote>/<branch> (refreshed by every
    * fetch), never from this checkout's working tree, which is as old as the clone (#715). The one way the coordinator
-   * reads them.
+   * reads them. `at`: one commit of the default branch to read them at instead (a merge decision's tip, taken at its
+   * start, which its weakening check reads too: #1005).
    */
-  protected moneyPaths(src: ReviewConfig['money_path_source'] = this.d.cfg.review?.money_path_source): RegExp[] {
-    return loadMoneyPaths(this.d.repo, src, `refs/remotes/${this.remote}/${this.branch}`);
+  protected moneyPaths(src: ReviewConfig['money_path_source'] = this.d.cfg.review?.money_path_source, at: string = `refs/remotes/${this.remote}/${this.branch}`): RegExp[] {
+    return loadMoneyPaths(this.d.repo, src, at);
   }
 
   /**

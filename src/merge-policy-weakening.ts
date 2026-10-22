@@ -192,6 +192,9 @@ export const GUARD_FILES: readonly string[] = [
   'src/push-guard*',
   'src/push-check*',
   'src/review.ts',
+  // The look-alike check src/review.ts imports, and its table (#763): they run in the weakening backstop's process.
+  'src/confusables.ts',
+  'src/confusables-data.ts',
   // What the planners' decisions index reads, and what it leaves out (#920): records committed at the base, never
   // docs/process.md; known routes it doesn't close are under "Open routes into the decisions index" there (#975).
   'src/plan-decisions.ts',
