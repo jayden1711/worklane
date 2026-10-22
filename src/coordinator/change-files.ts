@@ -498,11 +498,13 @@ export function sizeFiles(cwd: string, base: string, head: string, o: { renames?
  * The git command for the merge gate's changed lines (#784): base..head with renames paired (-M: a renamed file's lines
  * are only the ones it edited), no context (-U0), whitespace-only and blank-line changes left out (-w
  * --ignore-blank-lines), hunks never joined across unchanged lines (diff.interHunkContext=0, as comment-policy.ts pins
- * it, whatever the config says), read as text (AS_TEXT) with this module's guards (withGit). merge-flow.ts runs it as a
- * child the coordinator awaits; changedLineNumbers reads its output.
+ * it, whatever the config says), the histogram algorithm pinned (diff.algorithm=histogram, #784 round 11: the default
+ * one can slide a removed function's lines onto a kept one's, so the kept code reads as changed and an added copy as
+ * kept), read as text (AS_TEXT) with this module's guards (withGit). merge-flow.ts runs it as a child the coordinator
+ * awaits; changedLineNumbers reads its output.
  */
 export function changedLinesCommand(base: string, head: string): string[] {
-  return withGit(['-c', 'core.quotePath=false', '-c', 'diff.interHunkContext=0', 'diff', '-M', '-U0', '-w', '--ignore-blank-lines', '--no-color', ...AS_TEXT, '--src-prefix=a/', '--dst-prefix=b/', `${base}..${head}`]);
+  return withGit(['-c', 'core.quotePath=false', '-c', 'diff.interHunkContext=0', '-c', 'diff.algorithm=histogram', 'diff', '-M', '-U0', '-w', '--ignore-blank-lines', '--no-color', ...AS_TEXT, '--src-prefix=a/', '--dst-prefix=b/', `${base}..${head}`]);
 }
 
 /**
@@ -539,10 +541,11 @@ export function changedLineNumbers(diff: string): Map<string, ChangedHunk[]> {
       hunk = null;
     } else if (l.startsWith('rename from ') && !cur) oldPath = l.slice('rename from '.length);
     else if (l.startsWith('rename to ') && !cur) path = l.slice('rename to '.length);
+    // A name with a space ends in a TAB git adds on these two lines (round 11: N4); a TAB of the name itself is quoted.
     else if (l.startsWith('--- ') && !cur) {
-      if (l.startsWith('--- a/')) oldPath = l.slice('--- a/'.length);
+      if (l.startsWith('--- a/')) oldPath = l.slice('--- a/'.length).replace(/\t$/, '');
     } else if (l.startsWith('+++ ') && !cur) {
-      if (l.startsWith('+++ b/')) path = l.slice('+++ b/'.length);
+      if (l.startsWith('+++ b/')) path = l.slice('+++ b/'.length).replace(/\t$/, '');
     } else if (l.startsWith('@@')) {
       const m = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,(\d+))? @@/.exec(l);
       cur = out.get(path) ?? [];
