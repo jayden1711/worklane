@@ -12,8 +12,8 @@
 //           times, directly or through another module; and only code on the characters the PR changes that are code
 //           (codeRanges, rounds 8 to 11: each hunk aligned by character, its lines paired by code first when large,
 //           against V8's block ranges, so code added in an untaken branch on a changed line doesn't count; a removal
-//           only where the code on both its sides ran and shares one innermost V8 range in every process (round 12;
-//           code moved between app files is no change), never across a block or clause
+//           only where the code on both its sides ran and shares one innermost V8 range in every process (round 12),
+//           never across a block or clause
 //           boundary, holding a sub-statement or nested function, or at a statement list's end; removed lines lexed in
 //           their base file; comment toggles between hunks measured). Not seen: work a module starts as it loads that keeps running and that
 //           the tests' own activity triggers (a timer while a test waits, an async_hooks or exit listener); code
@@ -636,25 +636,17 @@ function alignHunk(aLines: readonly HunkLine[], rLines: readonly HunkLine[]): st
  *   `default`: V8 keeps no range there). A removal inside a block comment (nothing added) is none.
  * Null: a hunk too large to align, or a removed side it can't place, which the caller holds on.
  */
-export function codeRanges(text: string, hunks: readonly ChangedHunkSpots[], baseOf?: (path: string) => string | null, moved?: { head?: ReadonlySet<number>; base?: ReadonlyMap<string, ReadonlySet<number>> }): ChangedCode | null {
+export function codeRanges(text: string, hunks: readonly ChangedHunkSpots[], baseOf?: (path: string) => string | null): ChangedCode | null {
   const { inComment, mask } = codeLines(text);
   const starts = lineStarts(text);
   const lines = starts.length - 1;
-  // Lines of code moved here from another file, or from here to another (movedCode, round 12) are no change: read as
-  // if they held no code.
-  const unmark = (m: Uint8Array, st: number[], ls: ReadonlySet<number> | undefined) => {
-    for (const l of ls ?? []) if (l >= 1 && l < st.length) m.fill(0, st[l - 1], st[l]);
-  };
-  unmark(mask, starts, moved?.head);
   const out: CharRanges = [];
   const needs: number[][] = [];
   const baseMasks = new Map<string, { text: string; mask: Uint8Array; starts: number[] } | null>();
   const baseFile = (p: string) => {
     if (!baseMasks.has(p)) {
       const t = baseOf!(p);
-      const b = t === null ? null : { text: t, mask: codeLines(t).mask, starts: lineStarts(t) };
-      if (b) unmark(b.mask, b.starts, moved?.base?.get(p));
-      baseMasks.set(p, b);
+      baseMasks.set(p, t === null ? null : { text: t, mask: codeLines(t).mask, starts: lineStarts(t) });
     }
     return baseMasks.get(p)!;
   };
@@ -842,100 +834,6 @@ export function codeRanges(text: string, hunks: readonly ChangedHunkSpots[], bas
   return { chars: out.sort((x, y) => x[0] - y[0]), needs };
 }
 
-/**
- * Code a PR moved from one app file to another (round 12: R1, R3, R4): git pairs a rename only by its similarity guess
- * over raw text, so a moved file re-indented or edited, or code split out into a new file, reads as all added code.
- * Each added line (`hunks`: the files measured, at the head) whose code characters (whitespace and comments left out)
- * are a line some OTHER app file's hunks removed (`hunks` and `others`, as lexed at the base) is moved, and so is that
- * removed line (each removed line pairs once). An added line whose code isn't a whole removed line but lies within the
- * code another file removed (8 characters at least: a moved line split or joined) is moved too. Moved lines are no
- * change: `head`, by file, the head lines that aren't added code; `base`, by base path, the base lines that aren't
- * removed code. `left`: the `others` files with removed code nothing matched (a deleted file's guard, say), whose
- * removal can't be measured at the head, so counts for nothing. Null: a base or head file it can't read, or whose lines
- * aren't the hunks' (the change can't be placed).
- */
-export interface MovedCode {
-  head: Map<string, Set<number>>;
-  base: Map<string, Set<number>>;
-  left: string[];
-}
-
-function movedCode(headOf: (path: string) => string | null, hunks: Readonly<Record<string, readonly ChangedHunkSpots[]>>, others: Readonly<Record<string, readonly ChangedHunkSpots[]>>, baseOf: (path: string) => string | null): MovedCode | null {
-  const read = new Map<string, { text: string; mask: Uint8Array; starts: number[] } | null>();
-  const lexed = (key: string, get: () => string | null) => {
-    if (!read.has(key)) {
-      const t = get();
-      read.set(key, t === null ? null : { text: t, mask: codeLines(t).mask, starts: lineStarts(t) });
-    }
-    return read.get(key)!;
-  };
-  const keyOf = (f: { text: string; mask: Uint8Array; starts: number[] }, l: number) => {
-    let k = '';
-    for (let i = f.starts[l - 1]!; i < f.starts[l]!; i++) if (f.mask[i] && !/\s/.test(f.text[i]!)) k += f.text[i];
-    return k;
-  };
-  // Every removed line's code, by its key, and every file's removed code in one string (for split or joined lines).
-  const removed = new Map<string, { file: string; oldPath: string; line: number; used: boolean }[]>();
-  const all: { file: string; oldPath: string; line: number; key: string; used: boolean }[] = [];
-  const pooled = new Map<string, string>();
-  for (const [file, hs] of [...Object.entries(hunks), ...Object.entries(others)]) {
-    for (const h of hs) {
-      if (!h.removed.length) continue;
-      if (h.oldPath === undefined || h.from === undefined) return null;
-      const base = lexed(`base:${h.oldPath}`, () => baseOf(h.oldPath!));
-      if (!base) return null;
-      for (let k = 0; k < h.removed.length; k++) {
-        const line = h.from + k;
-        const from = base.starts[line - 1];
-        if (from === undefined || base.text.slice(from, from + h.removed[k]!.length) !== h.removed[k]) return null;
-        const key = keyOf(base, line);
-        if (!key) continue;
-        const r = { file, oldPath: h.oldPath, line, key, used: false };
-        all.push(r);
-        const same = removed.get(key);
-        if (same) same.push(r);
-        else removed.set(key, [r]);
-        pooled.set(file, (pooled.get(file) ?? '') + key);
-      }
-    }
-  }
-  const out: MovedCode = { head: new Map(), base: new Map(), left: [] };
-  if (!all.length) return out;
-  const mark = (m: Map<string, Set<number>>, k: string, l: number) => m.set(k, (m.get(k) ?? new Set()).add(l));
-  const unmatched: { file: string; line: number; key: string }[] = [];
-  for (const [file, hs] of Object.entries(hunks)) {
-    const head = lexed(`head:${file}`, () => headOf(file));
-    if (!head) {
-      if (hs.some((h) => h.added.length)) return null;
-      continue;
-    }
-    for (const h of hs) {
-      for (const line of h.added) {
-        if (line < 1 || line >= head.starts.length) continue;
-        const key = keyOf(head, line);
-        if (!key) continue;
-        const r = removed.get(key)?.find((x) => !x.used && x.file !== file);
-        if (r) {
-          r.used = true;
-          mark(out.head, file, line);
-          mark(out.base, r.oldPath, r.line);
-        } else unmatched.push({ file, line, key });
-      }
-    }
-  }
-  for (const u of unmatched) {
-    if (u.key.length < 8) continue;
-    for (const [file, text] of pooled) {
-      if (file !== u.file && text.includes(u.key)) {
-        mark(out.head, u.file, u.line);
-        break;
-      }
-    }
-  }
-  out.left = [...new Set(all.filter((r) => !r.used && !(r.file in hunks)).map((r) => r.file))].sort();
-  return out;
-}
-
 /** The 1-based lines `ranges` fall on (for a build's sources, which its map places by line). */
 function linesOf(starts: number[], ranges: CharRanges): LineSpans {
   const out: LineSpans = [];
@@ -1093,7 +991,7 @@ export function touchedAppFiles(coverageDir: string, root: string, appPaths: str
  * more times (#784 round 7). The gate loads each on its own and reads again with `loads`, each run's coverage taken
  * away as many times as its script was evaluated more, on top of the test baseline's (ranMore).
  */
-export function measureTouched(coverageDir: string, root: string, appPaths: string[], only?: readonly string[], hunks?: Readonly<Record<string, readonly ChangedHunkSpots[]>>, baselineDir?: string, loads: readonly LoadRun[] = [], baseOf?: (path: string) => string | null, elsewhere: Readonly<Record<string, readonly ChangedHunkSpots[]>> = {}): { touched: string[]; loads: { script: string; extra: number }[] } {
+export function measureTouched(coverageDir: string, root: string, appPaths: string[], only?: readonly string[], hunks?: Readonly<Record<string, readonly ChangedHunkSpots[]>>, baselineDir?: string, loads: readonly LoadRun[] = [], baseOf?: (path: string) => string | null): { touched: string[]; loads: { script: string; extra: number }[] } {
   const res = appPaths.map((g) => globToRegExp(g));
   const realRoot = realpathSync.native(root);
   const wanted = hunks ? new Set(Object.keys(hunks)) : only ? new Set(only) : null;
@@ -1103,21 +1001,13 @@ export function measureTouched(coverageDir: string, root: string, appPaths: stri
   // (a build's map places code by line).
   const changed = new Map<string, { code: ChangedCode; lines: LineSpans }>();
   if (hunks) {
-    // Code moved between app files is no change (round 12): matched against what the PR removed from other app files,
-    // the measured ones and `elsewhere`'s (a deleted file, say), as read at the base.
-    const measured = Object.fromEntries([...wanted!].map((f) => [f, hunks[f]!]));
-    const others = Object.fromEntries(Object.entries(elsewhere).filter(([f]) => !wanted!.has(f) && !f.startsWith('..') && res.some((re) => re.test(f))));
-    const moved = baseOf ? movedCode((f) => textOf(join(realRoot, f), SCRIPT_BYTES), measured, others, baseOf) : { head: new Map(), base: new Map(), left: [] };
-    if (moved === null) throw new CoverageUnreadable(UNPLACEABLE);
     for (const f of wanted!) {
       const text = textOf(join(realRoot, f), SCRIPT_BYTES);
-      const code = text === null ? { chars: [], needs: [] } : codeRanges(text, hunks[f]!, baseOf, { head: moved.head.get(f), base: moved.base });
+      const code = text === null ? { chars: [], needs: [] } : codeRanges(text, hunks[f]!, baseOf);
       // A change it can't place by character holds the PR: never measured by the whole line instead (#784 round 9).
       if (code === null) throw new CoverageUnreadable(UNPLACEABLE);
       changed.set(f, { code, lines: linesOf(text === null ? [0] : lineStarts(text), code.chars) });
     }
-    // Code a deleted (or otherwise unmeasured) app file lost that no other file took: a removal no run can show.
-    for (const f of moved.left) changed.set(f, { code: { chars: [], needs: [[-1]] }, lines: [] });
     if (![...changed.values()].some((s) => s.code.chars.length || s.code.needs.length)) throw new CoverageUnreadable(NOTHING_TO_MEASURE);
   }
   const codeOf = (rel: string): ChangedCode | null => (hunks ? (changed.get(rel)?.code ?? { chars: [], needs: [] }) : null);
@@ -1180,7 +1070,6 @@ export function measureTouched(coverageDir: string, root: string, appPaths: stri
   // For each source a build's map names: the lines whose code ran.
   const mappedRan = new Map<string, Set<number>>();
   for (const [file, { rel, text, ran, loaded, pieces }] of scripts) {
-    // (pieces: one list per process that ran the script.)
     const ranges = ranMore(ran, [loaded]);
     if (!ranges.length) continue;
     if (isApp(rel)) {
@@ -1219,8 +1108,6 @@ export interface TouchedRequest {
   appPaths: string[];
   only: string[];
   hunks: Record<string, ChangedHunkSpots[]>;
-  /** Every other file's hunks that took text away (round 12): code moved from an app file among them is no change. */
-  elsewhere?: Record<string, ChangedHunkSpots[]>;
   /** The load-only runs (#784 rounds 6, 7), once the scripts to load are known. */
   loads?: LoadRun[];
   /**

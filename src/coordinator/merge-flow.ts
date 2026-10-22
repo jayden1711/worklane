@@ -20,7 +20,7 @@ import { instructionTargets } from '../skilleval.js';
 import { checkedPush } from '../push-check.js';
 import { conflictTrigger } from '../conflicts.js';
 import { abortMerge, mergeBaseInto } from '../merge-base.js';
-import { changedLineNumbers, changedLinesCommand, changedNamesOrNull, type ChangedHunk } from './change-files.js';
+import { changedLineNumbers, changedLinesCommand, changedNamesOrNull } from './change-files.js';
 import { lightOutcome } from '../light-check.js';
 import { readiness, requiredOutcomes, type Readiness } from '../pr-watch.js';
 import { checksFor, effectiveClass, riskClassOf, rulesetHold } from '../pr-rules.js';
@@ -1778,9 +1778,7 @@ export abstract class MergeFlow extends FixRuns {
       if (!one) throw new Error('tests.yaml runner.one is not set');
       if (!coverageRunnerOne(one)) throw new Error('tests.yaml runner.one is not `node --test [options] {file}`');
       // The PR's hunks in each of its app files: only code that ran on their lines that hold code counts (#784 rounds 4, 5).
-      // And every other file's hunks that took text away (a deleted file, say): code moved from there is no change
-      // (round 12; the reader keeps only app files').
-      const { hunks, elsewhere } = await this.changedHunks(run.base, pr.headSha, run.app);
+      const hunks = await this.changedHunks(run.base, pr.headSha, run.app);
       // Its setup steps (the PR's own install scripts) run as child processes the coordinator awaits, off its tick; a
       // shutdown stops them.
       const { path, setupErrors } = await createWorktreeAsync(this.wt, name, branch, pr.headSha, this.shutdown.signal);
@@ -1808,7 +1806,7 @@ export abstract class MergeFlow extends FixRuns {
         // The directories and their files are the test's: read as hostile input, in a process of its own with a time
         // limit (the coordinator's thread never waits on it), bounded, and only fixed text on failure.
         // `base` and `repo`: the reader lexes each hunk's removed lines in the base file they came from (round 10).
-        const req = { coverageDir: cov, baselineDir: baseline, root: path, appPaths: run.appPaths, only: run.app, hunks, elsewhere, base: run.base, repo: this.d.repo };
+        const req = { coverageDir: cov, baselineDir: baseline, root: path, appPaths: run.appPaths, only: run.app, hunks, base: run.base, repo: this.d.repo };
         const first = error === null ? await readTouchedInChild(req, undefined, this.shutdown.signal) : null;
         if (first && 'error' in first) error = first.error;
         else if (first?.touched.length && !first.loads.length) touched = first.touched;
@@ -1862,10 +1860,9 @@ export abstract class MergeFlow extends FixRuns {
    * The hunks a PR changes in each of `files` (src/coordinator/change-files.ts changedLinesCommand: renames paired,
    * whitespace and blank lines left out, hunks never joined, as text, with its guards), run as a child the coordinator
    * awaits and a shutdown kills. Each hunk carries the text it removed; the reader process aligns each hunk's removed text with its added lines by character and keeps the changed code characters
-   * (codeRanges). `elsewhere`: every other file's hunks that took text away, which code moved into `files` is matched
-   * against (round 12). A git failure throws: the run fails, and the PR waits.
+   * (codeRanges). A git failure throws: the run fails, and the PR waits.
    */
-  private async changedHunks(base: string, head: string, files: string[]): Promise<{ hunks: Record<string, ChangedHunkSpots[]>; elsewhere: Record<string, ChangedHunkSpots[]> }> {
+  private async changedHunks(base: string, head: string, files: string[]): Promise<Record<string, ChangedHunkSpots[]>> {
     const signal = this.shutdown.signal;
     if (signal.aborted) throw new Error('stopped: the coordinator is shutting down');
     const text = await new Promise<string>((done, fail) => {
@@ -1891,16 +1888,9 @@ export abstract class MergeFlow extends FixRuns {
     });
     const byFile = changedLineNumbers(text);
     const out: Record<string, ChangedHunkSpots[]> = {};
-    const spots = (hs: ChangedHunk[]) => hs.map((h) => ({ at: h.at, added: h.added, removed: h.removed, from: h.from, oldPath: h.oldPath }));
     // The reader aligns each hunk's removed text with its added lines character by character (codeRanges).
-    for (const f of files) out[f] = spots(byFile.get(f) ?? []);
-    const elsewhere: Record<string, ChangedHunkSpots[]> = {};
-    for (const [f, hs] of byFile) {
-      if (files.includes(f)) continue;
-      const taken = hs.filter((h) => h.removed.length);
-      if (taken.length) elsewhere[f] = spots(taken).map((h) => ({ ...h, added: [] }));
-    }
-    return { hunks: out, elsewhere };
+    for (const f of files) out[f] = (byFile.get(f) ?? []).map((h) => ({ at: h.at, added: h.added, removed: h.removed, from: h.from, oldPath: h.oldPath }));
+    return out;
   }
 
   /** The worker's own risk class for the issue's change (worker.claims), if it gave one. */
