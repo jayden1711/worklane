@@ -59,7 +59,7 @@ import { nightlyDue, queueNightly } from './nightly.js';
 import { buildReport, dueSlot, recentRunRecords, weeklyDue } from './reports.js';
 import { readTuneProfile, tuningInput, tuningProposals } from './tuning.js';
 import { baselineGate, latestBaseline } from './baseline.js';
-import { countAssertions } from './vacuity.js';
+import { countAssertions, FALLBACK_TEST_GLOBS } from './vacuity.js';
 import { createWorktree, removeSandboxPlaceholders, removeWorktree } from './worktrees.js';
 import { refillPool, setupKey, takeFromPool } from './worktree-pool.js';
 import { seen } from './intake/store.js';
@@ -186,6 +186,7 @@ export class Coordinator extends AutomationRuns {
     await this.harnessEvalRun;
     await this.expLoop?.idle();
     await this.prBatchIdle();
+    await this.vacuityIdle();
   }
 
   private ciMeter: CiMetrics | null = null;
@@ -276,6 +277,7 @@ export class Coordinator extends AutomationRuns {
       ...(this.inStep ? [`tick step: ${this.inStep}`] : []),
       ...[...this.active.keys()].map((n) => `task #${n}`),
       ...[...this.live.values()].map((l) => `${l.role} run${l.issue !== null ? ` for #${l.issue}` : ''}`),
+      ...[...this.vacuityRuns.keys()].map((pr) => `vacuity coverage run for PR #${pr}`),
       ...(this.poolBusy ? ['worktree pool refill'] : []),
     ];
   }
@@ -1502,7 +1504,7 @@ export class Coordinator extends AutomationRuns {
     // Tamper guard: tests deleted, skipped, focused, or with fewer assertions.
     const tampered: string[] = [];
     const pattern = this.d.cfg.tests.vacuity?.assertion_pattern ?? '\\b(assert|expect|check)\\b';
-    const testRes = (this.d.cfg.tests.vacuity?.test_globs ?? ['test/**', '**/*.test.*']).map((g) => globToRegExp(g));
+    const testRes = (this.d.cfg.tests.vacuity?.test_globs ?? FALLBACK_TEST_GLOBS).map((g) => globToRegExp(g));
     for (const f of files.filter((x) => testRes.some((re) => re.test(x.path)))) {
       const after = existsSync(join(path, f.path)) ? readFileSync(join(path, f.path), 'utf8') : null;
       let before: string | null = null;
