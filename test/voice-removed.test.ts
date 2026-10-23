@@ -162,13 +162,12 @@ test("upgrade: intake.yaml's voice and siri keys still load (intake stays on), a
   assert.deepEqual(wired.sources.map((x) => x.name).filter((n) => n === 'voice'), [], 'no voice source');
 });
 
-/** A port nothing listens on, right now. */
-async function freePort(): Promise<number> {
-  const srv = createServer();
+/** Reserve the old gateway's candidate until the legitimate hub listeners have their own ports. */
+async function reservedPort() {
+  const srv = createServer((socket) => socket.destroy());
   await new Promise<void>((ok) => srv.listen(0, '127.0.0.1', ok));
   const port = (srv.address() as { port: number }).port;
-  await new Promise<void>((ok) => srv.close(() => ok()));
-  return port;
+  return { port, reserved: srv };
 }
 const listening = (port: number) =>
   new Promise<boolean>((ok) => {
@@ -178,15 +177,19 @@ const listening = (port: number) =>
   });
 
 test('upgrade: no Siri gateway listens, whatever the hub is given (the option an older caller passed); --siri-port on the CLI only warns', async () => {
-  const port = await freePort();
+  const { port, reserved } = await reservedPort();
   const hubState = mkdtempSync(join(tmpdir(), 'voice-removed-hub-'));
   // An older caller's option, passed as it was: ignored.
-  const h = await startHub({ instances: [], stateDir: hubState, port: 0, breakGlassPort: 0, siri: { port } } as unknown as Parameters<typeof startHub>[0]);
+  let h: Awaited<ReturnType<typeof startHub>> | undefined;
   try {
+    h = await startHub({ instances: [], stateDir: hubState, port: 0, breakGlassPort: 0, siri: { port } } as unknown as Parameters<typeof startHub>[0]);
+    assert.notEqual(new URL(h.url).port, String(port), 'the hub cannot reuse the reserved candidate');
+    await new Promise<void>((ok) => reserved.close(() => ok()));
     assert.equal(await listening(port), false, `nothing on ${port}`);
     assert.ok(!('siriUrl' in h), 'no gateway URL');
   } finally {
-    await h.close();
+    if (reserved.listening) await new Promise<void>((ok) => reserved.close(() => ok()));
+    await h?.close();
   }
   // The hub as an older unit starts it (`dashboard --hub ... --siri-port 4397`, a service mode a test can't run on its
   // isolated machine): --siri-port is still read, so it is accepted and the hub starts, and it only prints the warning;
