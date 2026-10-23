@@ -18,6 +18,7 @@ import { EventLog } from '../src/events/log.js';
 import { canonicalJson, keySigner, type Envelope, type ReceiptSigner } from '../src/signed-receipts.js';
 import { readReceiptFiles, signLog } from '../src/signed-receipts-store.js';
 import { engineCli } from './helpers.js';
+import { processIdentity, processPlace } from '../src/os/index.js';
 
 const POSIX = process.platform !== 'win32';
 const LINUX = process.platform === 'linux';
@@ -114,7 +115,7 @@ test('a signer lock from this very place whose pid is gone is taken over (pin)',
   sign({ log: f.path, out, state, genesis: true, signer: k.signer });
   f.held();
   const here = { by: 'a signer that died', pidns: readlinkSync('/proc/self/ns/pid'), boot: readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim(), host: hostname() };
-  const stale = JSON.stringify({ pid: deadPid(), owner: JSON.stringify(here), acquiredAt: new Date().toISOString() });
+  const stale = JSON.stringify({ pid: deadPid(), owner: JSON.stringify(here), acquiredAt: new Date().toISOString(), place: processPlace(), identity: processIdentity(process.pid) });
   for (const lock of LOCK_NAMES(state)) writeFileSync(lock, stale, { mode: 0o600 });
   assert.equal(sign({ log: f.path, out, state, signer: k.signer }).added, 2);
 });

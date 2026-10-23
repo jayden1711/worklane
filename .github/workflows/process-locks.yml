@@ -1,0 +1,40 @@
+name: native process locks
+on:
+  pull_request:
+    paths:
+      - src/locks.ts
+      - src/slot-file.ts
+      - src/os/**
+      - test/locks*.test.ts
+      - test/native-flock.test.ts
+      - Dockerfile
+      - scripts/ci/native-locks-docker.mjs
+      - .github/workflows/process-locks.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  native-locks:
+    name: native locks (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci --ignore-scripts --no-audit --no-fund && npm run build
+      - name: exercise actual native ownership and crash recovery
+        env:
+          TMPDIR: ${{ runner.temp }}
+        run: node --import ./dist/test/isolate.js --test dist/test/native-flock.test.js dist/test/locks.test.js dist/test/locks-process.test.js dist/test/locks-reaper.test.js dist/test/locks-stdio.test.js
+      - name: candidate foreground coordinator with local Docker volumes
+        if: runner.os == 'Linux'
+        env:
+          TMPDIR: ${{ runner.temp }}
+        run: node scripts/ci/native-locks-docker.mjs

@@ -468,8 +468,8 @@ function samePlace(lock: string, here: ReturnType<typeof processPlace>): void {
  * log edited between their reads, each signed its own version of an event). An exclusive lock in the state's
  * owner-only directory (SIGNER_LOCK, by tryLock: created whole or not at all) is held from the first read to the last
  * write; one already held refuses. A lock whose pid is gone is taken over only when it was taken in the same pid
- * namespace, boot and host (samePlace). A pid reused since makes a dead holder look alive: refused, and the owner
- * removes the lock. And the state must still be what `fn` read just before it writes (`unchanged`): a writer that
+ * namespace, boot and host (samePlace), with the shared lock's recorded process identity proving it gone. A legacy
+ * lock without that proof is refused. And the state must still be what `fn` read just before it writes (`unchanged`): a writer that
  * took no lock is refused too.
  */
 function asOnlySigner<T>(state: string, fn: (own: ChainState | null, unchanged: () => void, save: (next: ChainState) => void) => T): T {
@@ -502,9 +502,9 @@ function withLock<T>(lock: string, busy: string, fn: () => T): T {
 
 /**
  * Whether a lock whose pid answers signal 0 was taken by a process that is gone: taken in this very place, recording
- * the holder's identity (processIdentity: boot and start time), which that pid no longer has. Still refused, never
- * taken over (tryLock, shared, takes over only a pid that answers no signal), but named for what it is, so the owner
- * knows the lock is safe to remove (#918 round 6: a reused pid makes a dead holder look alive).
+ * the holder's identity (processIdentity: boot and start time), which that pid no longer has. A legacy lock without
+ * the shared lock's top-level identity is still refused, but named for what it is so the owner can investigate
+ * removing it (#918 round 6: a reused pid makes a dead holder look alive).
  */
 function holderGone(holder: { pid: number; owner: string } | null, here: ReturnType<typeof processPlace>): boolean {
   if (!holder) return false;

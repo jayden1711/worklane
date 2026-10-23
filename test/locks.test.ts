@@ -7,13 +7,18 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { CLAIM_ABANDONED_MS, tryLock } from '../src/locks.js';
+import { processIdentity, processPlace } from '../src/os/index.js';
 import { repoRoot } from './helpers.js';
+
+const place = processPlace();
+const knownPlace = !!(place.host && place.boot && place.pidns);
+const dead = () => ({ pid: 2147483646, owner: 'dead', acquiredAt: 'then', place, identity: processIdentity(process.pid) });
 
 test('regression: twelve processes racing for one lock, including over a stale one, leave exactly one holder', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'lockrace-'));
   const lockPath = join(dir, 'x.lock');
   // A stale lock from a dead process: everyone will try to take it over at once.
-  writeFileSync(lockPath, JSON.stringify({ pid: 2147483646, owner: 'dead', acquiredAt: 'then' }));
+  writeFileSync(lockPath, JSON.stringify(dead()));
   const locks = join(repoRoot, 'dist', 'src', 'locks.js');
   const child = (k: number) =>
     new Promise<string>((res) => {
@@ -26,7 +31,7 @@ test('regression: twelve processes racing for one lock, including over a stale o
       p.on('exit', () => res(out.trim()));
     });
   const results = await Promise.all(Array.from({ length: 12 }, (_, k) => child(k)));
-  assert.equal(results.filter((r) => r === 'got').length, 1, results.join(','));
+  assert.equal(results.filter((r) => r === 'got').length, knownPlace ? 1 : 0, results.join(','));
 });
 
 test('regression: a takeover never removes a lock it did not inspect (five-step interleaving)', () => {
@@ -34,7 +39,8 @@ test('regression: a takeover never removes a lock it did not inspect (five-step 
   // lock. 4. B, acting on what it read, does its takeover step. 5. C tries in the middle of B's takeover.
   // Exactly one of A, B, C may come away holding the lock, and it must be the one recorded in the file.
   const lockPath = join(mkdtempSync(join(tmpdir(), 'lockstep-')), 'x.lock');
-  writeFileSync(lockPath, JSON.stringify({ pid: 2147483646, owner: 'dead', acquiredAt: 'then' }));
+  const stale = JSON.stringify(dead());
+  writeFileSync(lockPath, stale);
   let a: ReturnType<typeof tryLock> | undefined;
   let c: ReturnType<typeof tryLock> | undefined;
   const b = tryLock(lockPath, 'B', {
@@ -48,18 +54,19 @@ test('regression: a takeover never removes a lock it did not inspect (five-step 
   c ??= tryLock(lockPath, 'C');
   const results = { A: a!, B: b, C: c };
   const holders = Object.entries(results).filter(([, r]) => 'lock' in r).map(([k]) => k);
-  assert.deepEqual(holders.length, 1, `holders: ${holders.join(', ')}`);
-  assert.equal((JSON.parse(readFileSync(lockPath, 'utf8')) as { owner: string }).owner, holders[0], 'the lock on disk is the holder\'s');
+  assert.deepEqual(holders.length, knownPlace ? 1 : 0, `holders: ${holders.join(', ')}`);
+  if (knownPlace) assert.equal((JSON.parse(readFileSync(lockPath, 'utf8')) as { owner: string }).owner, holders[0], 'the lock on disk is the holder\'s');
+  else assert.equal(readFileSync(lockPath, 'utf8'), stale, 'unknown place never permits a takeover');
 });
 
-test('a takeover claim left by a crashed or stalled taker is cleared; a live, recent one is respected', () => {
+test('a takeover claim left by a proved-dead taker is cleared; a live one is respected at every age', () => {
   const dir = mkdtempSync(join(tmpdir(), 'lockclaim-'));
   const lockPath = join(dir, 'x.lock');
-  const stale = JSON.stringify({ pid: 2147483646, owner: 'dead', acquiredAt: 'then' });
+  const stale = JSON.stringify(dead());
   const claimPath = `${lockPath}.${createHash('sha256').update(stale).digest('hex').slice(0, 16)}.claim`;
   const attempt = (claim: object) => {
     writeFileSync(lockPath, stale);
-    writeFileSync(claimPath, JSON.stringify(claim));
+    writeFileSync(claimPath, JSON.stringify({ place, identity: processIdentity(process.pid), ...claim }));
     // acquireLock polls tryLock; two tries model that: the first clears an abandoned claim, the second takes the lock.
     const first = tryLock(lockPath, 'me');
     return 'lock' in first ? first : tryLock(lockPath, 'me');
@@ -69,7 +76,7 @@ test('a takeover claim left by a crashed or stalled taker is cleared; a live, re
     if (ok) r.lock.release();
     return ok;
   };
-  assert.equal(got(attempt({ pid: 2147483646, at: Date.now() })), true, 'its taker is dead');
-  assert.equal(got(attempt({ pid: process.pid, at: Date.now() - CLAIM_ABANDONED_MS - 1000 })), true, 'its taker stalled past the limit');
+  assert.equal(got(attempt({ pid: 2147483646, at: Date.now() })), knownPlace, 'only a known-place dead taker is proved stale');
+  assert.equal(got(attempt({ pid: process.pid, at: Date.now() - CLAIM_ABANDONED_MS - 1000 })), false, 'age never proves a live taker gone');
   assert.equal(got(attempt({ pid: process.pid, at: Date.now() })), false, 'a live taker is mid-takeover: leave it');
 });
