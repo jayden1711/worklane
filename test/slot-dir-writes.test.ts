@@ -61,6 +61,7 @@ import { tryTestSlot } from '../src/testrun/slots.js';
 import { INCIDENTS_FILE, readIncidents } from '../src/watchdog/incidents.js';
 import { takeOpsPost } from '../src/watchdog/post.js';
 import { PID_LIMIT, repoRoot } from './helpers.js';
+import { processIdentity, processPlace } from '../src/os/index.js';
 
 // ---------------------------------------------------------------------------------------------------------------
 // The lint
@@ -1019,7 +1020,7 @@ function removalLeft(dir: string): void {
 }
 
 /** A lock whose holder is dead (above any pid), as a crashed holder leaves it. */
-const staleLock = (dir: string, name: string) => writeFileSync(join(dir, name), JSON.stringify({ pid: PID_LIMIT + 1, owner: 'gone', acquiredAt: new Date(0).toISOString() }));
+const staleLock = (dir: string, name: string) => writeFileSync(join(dir, name), JSON.stringify({ pid: PID_LIMIT + 1, owner: 'gone', acquiredAt: new Date(0).toISOString(), place: processPlace(), identity: processIdentity(process.pid) }));
 
 /** A temp file a crashed writer left under this process's pid, 0444 (another user's, or a removal's): #661. */
 const leftoverTemp = (path: string) => {
@@ -1346,6 +1347,8 @@ for (const c of CASES) test(`writeSlotFile's fs calls, ${c.name}`, () => checkCa
  */
 async function variant(name: string, swaps: [from: string, to: string][]): Promise<SlotWriter> {
   let text = readFileSync(new URL('../src/slot-file.js', import.meta.url), 'utf8').replace(/^\/\/# sourceMappingURL=.*$/m, '');
+  // The copied helper retains the real OS adapter. Mutants still change only the helper's own fs operations.
+  text = text.replace("'./os/index.js'", JSON.stringify(new URL('../src/os/index.js', import.meta.url).href));
   for (const [from, to] of swaps) {
     assert.equal(text.split(from).length, 2, `${name}: ${from} is in the compiled helper exactly once (if the helper changed, update this variant)`);
     text = text.replace(from, () => to);

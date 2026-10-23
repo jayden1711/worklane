@@ -1,6 +1,6 @@
 // OS adapter layer. This is the only module allowed to branch on the
 // platform (test/os-boundary.test.ts enforces it).
-import { execFileSync, spawn } from './child-process.js';
+import { execFileSync, spawn, spawnSync } from './child-process.js';
 import { chmodSync, chownSync, closeSync, constants as fsConstants, existsSync, fstatSync, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, readSync, realpathSync, renameSync, rmSync, statSync, statfsSync, writeFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { testRunSign } from './system-paths.js';
@@ -688,7 +688,7 @@ export function pidAlive(pid: number): boolean {
 
 /**
  * Where this process's pid means something: its pid namespace (Linux: /proc/self/ns/pid), this boot (Linux:
- * /proc/sys/kernel/random/boot_id) and the host name. A pid recorded under one place can be checked with pidAlive only
+ * /proc/sys/kernel/random/boot_id; Darwin: kern.bootsessionuuid) and the host name. A pid recorded under one place can be checked with pidAlive only
  * from the same place. Null where it can't be read, or this OS has no such answer: a caller that must know refuses
  * (#918 round 6: a lock taken in another pid namespace looked dead from here, and was taken over while its holder ran).
  */
@@ -700,6 +700,7 @@ export function processPlace(): { pidns: string | null; boot: string | null; hos
       return null;
     }
   };
+  if (process.platform === 'darwin') return { pidns: 'darwin-host', boot: read(darwinBoot), host: hostname() };
   if (process.platform !== 'linux') return { pidns: null, boot: null, host: hostname() };
   return { pidns: read(() => readlinkSync('/proc/self/ns/pid')), boot: read(() => readFileSync('/proc/sys/kernel/random/boot_id', 'utf8')), host: hostname() };
 }
@@ -707,14 +708,27 @@ export function processPlace(): { pidns: string | null; boot: string | null; hos
 /** processIdentity of a process that answers signal 0 but whose identity can't be read: running, as far as anyone can tell. */
 export const UNKNOWN_IDENTITY = 'unknown';
 
+/** Whether a recorded identity has this OS's known start-identity format for the recorded place. */
+export function processIdentityInPlace(identity: unknown, place: ReturnType<typeof processPlace>): identity is string {
+  if (!['linux', 'darwin'].includes(process.platform) || !place.host || !place.boot || !place.pidns || typeof identity !== 'string') return false;
+  return identity.startsWith(`${place.boot}:`) && /^\d+$/.test(identity.slice(place.boot.length + 1));
+}
+
 /**
  * Who `pid` is beyond its number, or null when no such process runs. On Linux: this boot's id and the process's start
  * time (/proc/sys/kernel/random/boot_id, field 22 of /proc/<pid>/stat), so a pid reused after its process died, or
- * after a reboot, reads as someone else. Elsewhere: its number alone, while it runs. A running process whose /proc
+ * after a reboot, reads as someone else. Darwin uses the boot session UUID and stored start time read by ps (seconds, so a collision stays busy). Elsewhere: its number alone, while it runs. A running process whose /proc
  * entry can't be read is UNKNOWN_IDENTITY (never "gone").
  */
 export function processIdentity(pid: number): string | null {
   if (!pidAlive(pid)) return null;
+  if (process.platform === 'darwin') {
+    try {
+      const boot = darwinBoot();
+      const output = execFileSync('/bin/ps', ['-o', 'stat=', '-o', 'lstart=', '-p', String(pid)], { encoding: 'utf8', env: NATIVE_ENV, timeout: 1000, stdio: ['ignore', 'pipe', 'ignore'] });
+      return darwinProcessIdentity(output, boot);
+    } catch { return pidAlive(pid) ? UNKNOWN_IDENTITY : null; }
+  }
   if (process.platform !== 'linux') return `pid-${pid}`;
   try {
     const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
@@ -726,9 +740,30 @@ export function processIdentity(pid: number): string | null {
     const boot = readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim();
     return start && /^\d+$/.test(start) ? `${boot}:${start}` : UNKNOWN_IDENTITY;
   } catch (e) {
-    // Gone between the signal and the read: no such process. Anything else: it runs, unread.
-    return (e as NodeJS.ErrnoException).code === 'ENOENT' || (e as NodeJS.ErrnoException).code === 'ESRCH' ? null : UNKNOWN_IDENTITY;
+    // A hidden /proc entry (for example hidepid=2) can be missing while the process still answers signal 0.
+    // Only a second liveness check can distinguish that from a process gone since the first check.
+    return ((e as NodeJS.ErrnoException).code === 'ENOENT' || (e as NodeJS.ErrnoException).code === 'ESRCH') && !pidAlive(pid) ? null : UNKNOWN_IDENTITY;
   }
+}
+
+/** Fixed locale/timezone and no injected loader or tool search path for native identity/locking helpers. */
+const NATIVE_ENV = { PATH: '/usr/bin:/bin', LC_ALL: 'C', TZ: 'UTC' };
+
+function darwinBoot(): string {
+  const boot = execFileSync('/usr/sbin/sysctl', ['-n', 'kern.bootsessionuuid'], { encoding: 'utf8', env: NATIVE_ENV, timeout: 1000, stdio: ['ignore', 'pipe', 'ignore'] }).trim().toLowerCase();
+  if (!/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(boot)) throw new Error('unreadable boot session identity');
+  return boot;
+}
+
+/** Darwin ps reads the stored start time. Second-resolution collisions stay busy; they never prove death. */
+export function darwinProcessIdentity(output: string, boot: string): string | null {
+  const match = /^\s*([A-Z][^\s]*)\s+([^\n]+)\s*$/.exec(output);
+  if (!match) return UNKNOWN_IDENTITY;
+  if (match[1]![0] === 'Z') return null;
+  const start = match[2]!.trim();
+  if (!/^(Mon|Tue|Wed|Thu|Fri|Sat|Sun) (Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) +\d{1,2} \d{2}:\d{2}:\d{2} \d{4}$/.test(start)) return UNKNOWN_IDENTITY;
+  const time = Date.parse(start + ' GMT');
+  return Number.isFinite(time) && time >= 0 ? `${boot}:${time}` : UNKNOWN_IDENTITY;
 }
 
 export function wslAvailable(): boolean {
@@ -1722,6 +1757,63 @@ export function flockHeld(path: string): boolean | null {
   } catch (e) {
     return (e as { status?: number }).status === 1 ? true : null;
   }
+}
+
+/** Supported native Linux local filesystem families. Network, overlay, FUSE and unknown semantics fail closed. */
+export function nativeFlockSupported(type: number, platform: NodeJS.Platform = process.platform): boolean {
+  if (platform !== 'linux') return false;
+  switch (type) {
+    case 0xef53: // ext2/3/4
+    case 0x58465342: // XFS
+    case 0x9123683e: // Btrfs
+    case 0x01021994: // tmpfs
+      return true;
+    default: return false;
+  }
+}
+
+/** A fixed-size subset of Darwin fstatfs64: little-endian flags followed by its 16-byte filesystem name. */
+export function darwinFlockFilesystemSupported(record: Buffer): boolean {
+  if (record.length !== 20 || !(record.readUInt32LE(0) & 0x1000)) return false; // MNT_LOCAL
+  const name = record.subarray(4);
+  const nul = name.indexOf(0);
+  return nul > 0 && name.subarray(nul).every((value) => value === 0) && ['apfs', 'hfs'].includes(name.subarray(0, nul).toString('utf8'));
+}
+
+/** Inspectable helper invocation: neither backend reopens a pathname or explicitly unlocks the shared description. */
+export function nativeFlockInvocation(platform: NodeJS.Platform): { command: string; args: string[] } {
+  if (platform === 'linux') return { command: '/usr/bin/flock', args: ['--exclusive', '--nonblock', '--conflict-exit-code', '75', '3'] };
+  if (platform === 'darwin') return { command: '/usr/bin/perl', args: ['-e', 'use Config; use Fcntl qw(LOCK_EX LOCK_NB); use Errno qw(EAGAIN EWOULDBLOCK); exit 70 unless $Config{d_flock} eq "define"; open(my $f, "<&=3") or exit 71; exit 0 if flock($f, LOCK_EX|LOCK_NB); exit(($! == EWOULDBLOCK || $! == EAGAIN) ? 75 : 72);'] };
+  throw new Error('native file locks require a supported POSIX backend');
+}
+
+/**
+ * Nonblocking exclusive flock on fd. The caller owns/closes fd; it must be a CLOEXEC descriptor.
+ * Native flock belongs to the open file description. Explicit stdio fd 3 shares that description with this helper;
+ * helper exit closes its duplicate but MUST NOT issue LOCK_UN. The parent's descriptor keeps the lock alive.
+ * Missing tooling, unsupported filesystems and helper failures refuse acquisition, never fall back to file leases.
+ */
+export function tryNativeFlock(fd: number): boolean {
+  if (process.platform === 'linux') {
+    // Node has no fstatfs API. Linux's self-fd reference resolves the descriptor's actual filesystem.
+    if (!nativeFlockSupported(statfsSync(`/proc/self/fd/${fd}`).type)) throw new Error('native file locks require a supported local filesystem');
+  } else if (process.platform === 'darwin') {
+    if (!['x64', 'arm64'].includes(process.arch)) throw new Error('unsupported Darwin native-lock ABI');
+    // XNU SYS_fstatfs64=346; struct statfs64 is 2168 bytes on both supported 64-bit little-endian ABIs.
+    // A canary catches unexpected structure writes; only flags/name leave the helper, never mount paths.
+    const probe = spawnSync('/usr/bin/perl', ['-e', 'use Config; exit 70 unless $^O eq "darwin" && $Config{ptrsize} == 8 && $Config{longsize} == 8 && $Config{byteorder} eq "12345678"; my $tail="G" x (4096-2168); my $b=("\\0" x 2168).$tail; syscall(346,3,$b)==0 or exit 71; substr($b,2168) eq $tail or exit 72; print substr($b,64,4),substr($b,72,16);'], {
+      stdio: ['ignore', 'pipe', 'pipe', fd], env: NATIVE_ENV, timeout: 1000, killSignal: 'SIGKILL', maxBuffer: 4096,
+    });
+    if (probe.error || probe.signal || probe.status !== 0 || !darwinFlockFilesystemSupported(probe.stdout)) throw new Error('native filesystem helper failed; requires local APFS or HFS');
+  } else throw new Error('native file locks require a supported POSIX backend');
+  const helper = nativeFlockInvocation(process.platform);
+  const r = spawnSync(helper.command, helper.args, {
+    stdio: ['ignore', 'ignore', 'pipe', fd],
+    env: NATIVE_ENV,
+    timeout: 5000, killSignal: 'SIGKILL', maxBuffer: 4096,
+  });
+  if (r.error || r.signal || (r.status !== 0 && r.status !== 75)) throw new Error('native file lock helper failed; refusing unlocked operation');
+  return r.status === 0;
 }
 
 /** A held flock(2) lock, kept by a small holder process until released (or this process exits: its stdin closes). */

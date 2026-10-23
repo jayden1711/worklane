@@ -38,6 +38,8 @@ worklane dashboard --detach
 
 The last command starts that repo's dashboard in the background and prints one URL, last: the first-run wizard, `http://127.0.0.1:4317/first-run`. That's where every setup step after the install happens, including installing the tools the agents need (Claude Code, gitleaks, gh). The URL never carries a key: the page asks for it once, and the key stays in a file only you can read.
 
+Native locks require local APFS/HFS and the system Perl on macOS, or a supported local filesystem and util-linux `flock` on Linux/WSL2. Use WSL2’s Linux filesystem for state and slots, and the documented local Docker volumes in containers. Missing facilities refuse acquisition; see [lock requirements](docs/slots.md).
+
 Without a global install, `npx @worklane/cli init` in the repo installs the engine under `~/.local` and walks the same setup steps in the terminal.
 
 On a Debian or Ubuntu server, where each project runs as users of its own, use the install script from a checkout of this repo, as root:
