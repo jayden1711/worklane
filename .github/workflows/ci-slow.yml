@@ -2455,10 +2455,12 @@ jobs:
           delta_uid="$(id -u wl-delta)"
           # #555, in the shared group agent-slots: a stale slot lock of delta's (its holder's pid dead) and a directory
           # of delta's, both group-writable; and ci's own stale slot lock, which nothing may touch.
-          S=/var/lib/worklane/agent-slots; dead="$(sh -c 'echo $$')"
-          printf '{"pid":%s,"owner":"delta stale","acquiredAt":"2026-10-16T00:00:00Z"}' "$dead" | sudo install -o wl-delta -g agent-slots -m 0660 /dev/stdin "$S/agent-951.lock"
+          S=/var/lib/worklane/agent-slots
+          # A real departed process supplies the known namespace/boot/start proof required by #960.
+          dead_record="$(node --input-type=module -e 'const m = await import("/opt/worklane/current/dist/src/os/index.js"); const place = m.processPlace(); const identity = m.processIdentity(process.pid); if (!m.processIdentityInPlace(identity, place)) throw Error("unknown fixture process identity"); process.stdout.write(JSON.stringify({pid:process.pid,place,identity,acquiredAt:"2026-10-16T00:00:00Z"}));')"
+          printf '%s' "$dead_record" | jq '. + {owner:"delta stale"}' | sudo install -o wl-delta -g agent-slots -m 0660 /dev/stdin "$S/agent-951.lock"
           sudo install -d -o wl-delta -g agent-slots -m 2770 "$S/delta-gwdir"
-          printf '{"pid":%s,"owner":"ci stale","acquiredAt":"2026-10-16T00:00:00Z"}' "$dead" | sudo install -o wl-ci -g agent-slots -m 0660 /dev/stdin "$S/agent-950.lock"
+          printf '%s' "$dead_record" | jq '. + {owner:"ci stale"}' | sudo install -o wl-ci -g agent-slots -m 0660 /dev/stdin "$S/agent-950.lock"
           ci_lock="$(sudo stat -c '%U:%G %a' "$S/agent-950.lock") $(sudo sha256sum "$S/agent-950.lock" | cut -d' ' -f1)"
           # The removal holds the updater off for its whole run: while it waits for the typed name, the updater's own
           # quiet check says the machine is busy, and delta's coordinator stays stopped.
