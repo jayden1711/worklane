@@ -162,7 +162,7 @@ test("upgrade: intake.yaml's voice and siri keys still load (intake stays on), a
   assert.deepEqual(wired.sources.map((x) => x.name).filter((n) => n === 'voice'), [], 'no voice source');
 });
 
-/** Reserve the old gateway's candidate until the legitimate hub listeners have their own ports. */
+/** Allocate distinct candidates together; callers release them before binding their explicit listeners. */
 async function reservedPort() {
   const srv = createServer((socket) => socket.destroy());
   await new Promise<void>((ok) => srv.listen(0, '127.0.0.1', ok));
@@ -177,18 +177,23 @@ const listening = (port: number) =>
   });
 
 test('upgrade: no Siri gateway listens, whatever the hub is given (the option an older caller passed); --siri-port on the CLI only warns', async () => {
-  const { port, reserved } = await reservedPort();
+  const reservations: Awaited<ReturnType<typeof reservedPort>>[] = [];
   const hubState = mkdtempSync(join(tmpdir(), 'voice-removed-hub-'));
-  // An older caller's option, passed as it was: ignored.
   let h: Awaited<ReturnType<typeof startHub>> | undefined;
   try {
-    h = await startHub({ instances: [], stateDir: hubState, port: 0, breakGlassPort: 0, siri: { port } } as unknown as Parameters<typeof startHub>[0]);
-    assert.notEqual(new URL(h.url).port, String(port), 'the hub cannot reuse the reserved candidate');
-    await new Promise<void>((ok) => reserved.close(() => ok()));
+    for (let i = 0; i < 3; i++) reservations.push(await reservedPort());
+    const [siri, hub, breakGlass] = reservations;
+    const port = siri!.port;
+    assert.equal(new Set(reservations.map((r) => r.port)).size, 3);
+    await Promise.all(reservations.map(({ reserved }) => new Promise<void>((ok) => reserved.close(() => ok()))));
+    // The removed gateway's candidate is AVAILABLE at startup, as for the original stimulus. The legitimate
+    // listeners have explicit different ports, so they cannot accidentally reuse it through port:0 allocation.
+    h = await startHub({ instances: [], stateDir: hubState, port: hub!.port, breakGlassPort: breakGlass!.port, siri: { port } } as unknown as Parameters<typeof startHub>[0]);
+    assert.equal(Number(new URL(h.url).port), hub!.port);
     assert.equal(await listening(port), false, `nothing on ${port}`);
     assert.ok(!('siriUrl' in h), 'no gateway URL');
   } finally {
-    if (reserved.listening) await new Promise<void>((ok) => reserved.close(() => ok()));
+    await Promise.all(reservations.filter(({ reserved }) => reserved.listening).map(({ reserved }) => new Promise<void>((ok) => reserved.close(() => ok()))));
     await h?.close();
   }
   // The hub as an older unit starts it (`dashboard --hub ... --siri-port 4397`, a service mode a test can't run on its
