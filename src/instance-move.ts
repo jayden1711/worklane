@@ -16,6 +16,7 @@ import { dirname, join, relative, sep } from 'node:path';
 import { openWaiting } from './events/open.js';
 import { BRAND } from './brand.js';
 import { writeGroupOnly, writeOwnerOnly } from './os/index.js';
+import { isNativeGuardPath } from './slot-file.js';
 
 export const BUNDLE_FORMAT = `${BRAND.cli}-bundle`;
 const EVENTS = 'events.db';
@@ -76,7 +77,7 @@ export function exportBundle(o: { stateDir: string; root: string | null; repo: s
   for (const p of walk(o.stateDir).map(posix).sort()) {
     // The event log's own WAL and shared-memory files are in its snapshot already.
     if (p === `${EVENTS}-wal` || p === `${EVENTS}-shm`) continue;
-    const why = LEAVE_OUT.find(([re]) => re.test(p))?.[1];
+    const why = isNativeGuardPath(p) ? 'a machine-local native lock guard' : LEAVE_OUT.find(([re]) => re.test(p))?.[1];
     if (why) {
       left.push({ path: `state/${p}`, why });
       continue;
@@ -85,7 +86,10 @@ export function exportBundle(o: { stateDir: string; root: string | null; repo: s
     files.push({ path: `state/${p}`, data: data.toString('base64') });
   }
   const cfgDir = o.root ? join(o.root, BRAND.configDir) : null;
-  for (const p of cfgDir ? walk(cfgDir).map(posix).sort() : []) files.push({ path: `config/${p}`, data: readFileSync(join(cfgDir!, p)).toString('base64') });
+  for (const p of cfgDir ? walk(cfgDir).map(posix).sort() : []) {
+    if (isNativeGuardPath(p)) left.push({ path: `config/${p}`, why: 'a machine-local native lock guard' });
+    else files.push({ path: `config/${p}`, data: readFileSync(join(cfgDir!, p)).toString('base64') });
+  }
   const bundle: Bundle = { format: BUNDLE_FORMAT, version: 1, createdAt: (o.now ?? new Date()).toISOString(), from: { repo: o.repo, host: o.host }, files };
   mkdirSync(dirname(o.out), { recursive: true });
   // The history names people and issues: the bundle is its maker's alone.
@@ -125,6 +129,10 @@ export function importBundle(o: { file: string; stateDir: string; root: string |
   for (const f of b.files) {
     const data = Buffer.from(f.data, 'base64');
     const rel = f.path.slice(f.path.indexOf('/') + 1);
+    if (isNativeGuardPath(rel)) {
+      r.skipped.push({ path: f.path, why: 'a machine-local native lock guard' });
+      continue;
+    }
     if (f.path.startsWith('state/')) {
       // init's checklist is the machine's it was walked on; an instance walks its own (server mode).
       if (o.instance && rel === 'init.json') {

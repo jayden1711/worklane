@@ -1,11 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
-import { chmodSync, existsSync, mkdtempSync, readdirSync, statSync, utimesSync, writeFileSync } from 'node:fs';
+import { spawn, spawnSync } from 'node:child_process';
+import { chmodSync, existsSync, mkdtempSync, readFileSync, readdirSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { GitHubBacklog, GitHubError } from '../src/backlog/github.js';
+import { tryLock } from '../src/locks.js';
 import { budgetFor, BudgetPaused, credentialKey, GitHubBudget } from '../src/github/budget.js';
 
 /** src/github/budget.ts MAX_PAUSE_S: the longest pause that counts. */
@@ -197,41 +198,58 @@ test('GitHub itself cannot set an endless pause or window: Retry-After is capped
   await c.take('x');
 });
 
-test('a held budget lock never blocks the event loop; one stuck past a few seconds is broken', async () => {
+test('a held or unknown budget lock stays intact, even aged or future dated; busy accounting lets calls go', async () => {
   const dir = fresh();
   const key = credentialKey('token-k');
   const b = new GitHubBudget(key, dir, { maxWaitMs: 0 });
-  const lock = join(dir, `github-budget-${key}.lock`);
-  // Held now by a live process (this one's pid: alive everywhere): observe and pause give up at once.
-  writeFileSync(lock, JSON.stringify({ pid: process.pid, owner: 'held', acquiredAt: new Date().toISOString() }));
-  // Elapsed times on the monotonic clock: a wall-clock step can't make them pass or fail.
-  const since = (t: number) => Math.round(performance.now() - t);
-  let t0 = performance.now();
-  b.observe('core', { 'x-ratelimit-remaining': '0', 'x-ratelimit-reset': String(inAnHour()) });
-  b.pause('secondary_rate_limited', 60);
-  let took = since(t0);
-  assert.ok(took < 100, `observe and pause took ${took} ms synchronously`);
-  t0 = performance.now();
-  await b.take('x'); // waits LOCK_WAIT_MS at most, then lets the call go
-  took = since(t0);
-  assert.ok(took < 2000, `take waited ${took} ms`);
-  // Held for a minute by a "live" pid: stuck or planted. It is broken, and the budget works again.
-  writeFileSync(lock, JSON.stringify({ pid: process.pid, owner: 'stuck', acquiredAt: new Date(Date.now() - 60_000).toISOString() }));
+  const path = join(dir, `github-budget-${key}.lock`);
+  const held = tryLock(path, 'held');
+  assert.ok('lock' in held);
+  try {
+    const record = JSON.parse(readFileSync(path, 'utf8'));
+    for (const acquiredAt of [new Date().toISOString(), new Date(Date.now() - 60_000).toISOString(), '3000-01-01T00:00:00.000Z']) {
+      const text = JSON.stringify({ ...record, acquiredAt });
+      writeFileSync(path, text);
+      const t0 = performance.now();
+      b.observe('core', { 'x-ratelimit-remaining': '0', 'x-ratelimit-reset': String(inAnHour()) });
+      b.pause('secondary_rate_limited', 60);
+      assert.ok(performance.now() - t0 < 100, 'observe and pause do not wait');
+      await b.take('x');
+      assert.ok(performance.now() - t0 < 2000, 'busy accounting bounds its wait');
+      assert.equal(readFileSync(path, 'utf8'), text, 'a live successor record cannot be renamed or removed');
+      assert.equal(existsSync(join(dir, `github-budget-${key}.json`)), false);
+    }
+    writeFileSync(path, JSON.stringify(record)); // restore exact record for its own release
+  } finally {
+    held.lock.release();
+  }
+  const unknown = JSON.stringify({ pid: process.pid, owner: 'legacy', acquiredAt: '3000-01-01T00:00:00.000Z' });
+  writeFileSync(path, unknown);
+  await b.take('x');
+  assert.equal(readFileSync(path, 'utf8'), unknown, 'unknown identity is not proof of abandonment');
+});
+
+test('budget accounting automatically recovers a known-dead owner through the shared protocol', async () => {
+  const dir = fresh();
+  const key = credentialKey('token-recover');
+  const locksModule = new URL('../src/locks.js', import.meta.url).href;
+  const path = join(dir, `github-budget-${key}.lock`);
+  const child = spawnSync(process.execPath, ['--input-type=module', '-e', `
+    import { tryLock } from ${JSON.stringify(locksModule)};
+    const got = tryLock(process.argv[1], 'exiting budget holder');
+    if (!('lock' in got)) process.exit(1);
+    // Exit without release: leave the actual identity record and let the kernel close ownership.
+  `, path], { env: process.env, encoding: 'utf8', timeout: 5000 });
+  assert.equal(child.status, 0, child.stderr);
+  assert.ok(existsSync(path));
+  const b = new GitHubBudget(key, dir, { maxWaitMs: 0 });
+  const t0 = performance.now();
   seed(b, 10);
   assert.equal(b.read().resources.core?.remaining, 10);
-  t0 = performance.now();
   await b.take('x');
-  took = since(t0);
-  assert.ok(took < 200, `took ${took} ms`);
+  assert.ok(performance.now() - t0 < 200, 'known-dead recovery does not wait out the busy deadline');
   assert.equal(b.read().resources.core?.remaining, 9);
-  // Dated in the future: no real holder writes that, so it is broken too (else it would hold for good).
-  writeFileSync(lock, JSON.stringify({ pid: process.pid, owner: 'planted', acquiredAt: '3000-01-01T00:00:00.000Z' }));
-  t0 = performance.now();
-  await b.take('x');
-  took = since(t0);
-  assert.ok(took < 200, `a future-dated lock cost ${took} ms`);
-  assert.equal(b.read().resources.core?.remaining, 8);
-  assert.equal(existsSync(lock), false, 'the planted lock is gone');
+  assert.equal(existsSync(path), false);
 });
 
 test('state files of tokens no longer used are removed (App tokens rotate hourly); live ones are kept', async () => {

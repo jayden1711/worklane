@@ -22,6 +22,7 @@
 import { randomBytes } from 'node:crypto';
 import { closeSync, fchmodSync, constants, existsSync, fstatSync, linkSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, rmSync, statfsSync, statSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
+import { tryNativeFlock } from './os/index.js';
 
 declare const SLOT_PATH: unique symbol;
 
@@ -186,10 +187,10 @@ export function makeSlotFileDir(file: SlotPathLike): void {
   makeSlotDir(f.dir);
 }
 /** Remove a file (`force`: no error when it is missing). */
-export const removeSlotFile = (file: SlotPathLike, o: { force?: boolean } = {}): void => onPath(file, (f) => rmSync(f, { force: o.force === true }));
-export const renameSlotFile = (from: SlotPathLike, to: SlotPathLike): void => onPaths(from, to, (a, b) => renameSync(a, b));
+export const removeSlotFile = (file: SlotPathLike, o: { force?: boolean } = {}): void => { mutableFile(file); onPath(file, (f) => rmSync(f, { force: o.force === true })); };
+export const renameSlotFile = (from: SlotPathLike, to: SlotPathLike): void => { mutableFile(from); mutableFile(to); onPaths(from, to, (a, b) => renameSync(a, b)); };
 /** A hard link `to` the file at `from` (EEXIST when `to` exists). */
-export const linkSlotFile = (from: SlotPathLike, to: SlotPathLike): void => onPaths(from, to, (a, b) => linkSync(a, b));
+export const linkSlotFile = (from: SlotPathLike, to: SlotPathLike): void => { mutableFile(from); mutableFile(to); onPaths(from, to, (a, b) => linkSync(a, b)); };
 /** What readRegularSlotFile found (os/index.ts readRegularFile adds `unsupported`, native Windows). */
 export type RegularRead = { kind: 'missing' | 'hidden' | 'unsupported' | 'symlink' | 'not-file' } | { kind: 'too-big'; size: number } | { kind: 'file'; uid: number; mode: string; text: string };
 
@@ -233,7 +234,52 @@ export interface SlotWrite {
 
 /** Write `file` whole: a reader sees the old content or the new, never part of it. On failure nothing is left behind. */
 export function writeSlotFile(file: SlotPathLike, data: string, o: SlotWrite = {}): void {
+  mutableFile(file);
   onPath(file, (f) => place(f, data, o));
+}
+
+/** Stable native-lock inodes are reserved: normal publication, release, reaping and rename never mutate them. */
+export function isNativeGuardPath(file: string): boolean {
+  const name = basename(file).normalize('NFKC').replace(/\p{Default_Ignorable_Code_Point}/gu, '').toLowerCase();
+  return name.startsWith('.') && /\.flock(?:\.\d+\.[0-9a-f]{16}\.tmp)?$/.test(name);
+}
+
+function mutableFile(file: SlotPathLike): void {
+  if (isNativeGuardPath(slotFileName(file))) throw new Error('native lock guards cannot be removed, renamed, linked or replaced');
+}
+
+/**
+ * A per-resource, permanent read-only inode, held for the logical Lock's entire lifetime. Never export its path/fd.
+ * Initial contents AND mode are prepared on a private descriptor before atomic hard-link publication, including
+ * with umask 077. A crash during initialization leaves either no guard or a complete usable guard (plus a temp).
+ * Every engine using this directory must use this protocol; upgrade with all old processes stopped.
+ */
+export function trySlotFileGuard(file: SlotPathLike): { release(): void } | null {
+  mutableFile(file);
+  let guardPath: SlotPathLike;
+  if (typeof file === 'string') guardPath = join(dirname(file), `.${basename(file)}.flock`);
+  else {
+    const f = fileOf.get(file);
+    if (!f) throw new TypeError(OPAQUE);
+    guardPath = fileIn(f.dir, `.${f.name}.flock`);
+  }
+  return onPath(guardPath, (guard) => {
+    try { place(guard, '', { replace: false, mode: 0o444, exactMode: true }); }
+    catch (e) { if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e; }
+    const guardFd = openSync(guard, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    let held = false;
+    try {
+      const opened = fstatSync(guardFd);
+      // State privacy tidy may tighten 0444 to 0660. Mode is not the locking primitive; inode identity is.
+      if (!opened.isFile() || opened.size !== 0) throw new Error('native lock guard must be an empty regular file');
+      if (!tryNativeFlock(guardFd)) return null;
+      const current = lstatSync(guard);
+      if (opened.dev !== current.dev || opened.ino !== current.ino || !current.isFile()) throw new Error('native lock guard changed during acquisition');
+      held = true;
+      let released = false;
+      return { release() { if (!released) { released = true; closeSync(guardFd); } } };
+    } finally { if (!held) closeSync(guardFd); }
+  });
 }
 
 function place(file: string, data: string, o: SlotWrite): void {

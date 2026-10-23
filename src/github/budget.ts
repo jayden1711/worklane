@@ -16,10 +16,10 @@
 // any coordinator user may create, rename over and remove files in it, but a file another user created is theirs. So
 // the state is never written in place: a new copy (0660) is renamed over it. No subdirectory either: one made by one
 // user would follow that user's umask and could shut the others out.
-import { createHash, randomBytes } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import { tryLock, type Lock } from '../locks.js';
 import { slotsDir } from '../os/index.js';
-import { linkSlotFile, listSlotDir, makeSlotDir, readSlotFile, removeSlotFile, renameSlotFile, slotFile, slotSibling, statSlotFile, writeSlotFile, type SlotPathLike } from '../slot-file.js';
+import { listSlotDir, makeSlotDir, readSlotFile, removeSlotFile, slotFile, statSlotFile, writeSlotFile, type SlotPathLike } from '../slot-file.js';
 
 /** How long take() waits out a pause or an exhausted budget before refusing (the caller sees GitHub's own kind of error). */
 export const DEFAULT_MAX_WAIT_MS = 10_000;
@@ -31,11 +31,6 @@ export const MAX_PAUSE_S = 15 * 60;
 export const MAX_WINDOW_S = 3600 + 300;
 /** take() waits this long for the lock, then lets the call go. */
 export const LOCK_WAIT_MS = 500;
-/**
- * The lock is held for microseconds: one dated more than this before now, or after now, or not dated at all, is stuck
- * or planted, and is broken whatever its pid.
- */
-export const LOCK_STALE_MS = 5_000;
 /** A state file unchanged this long belongs to a token no longer used (App installation tokens rotate hourly): removed. */
 export const PRUNE_AFTER_MS = 2 * 3600_000;
 const PRUNE_EVERY_MS = 10 * 60_000;
@@ -200,27 +195,11 @@ export class GitHubBudget {
     return lock ? this.under(lock, fn) : null;
   }
 
-  /** One try. A lock held longer than LOCK_STALE_MS is broken first: it is moved aside, and put back if it changed meanwhile. */
+  /** One try through the shared protocol. Age never grants authority to remove another owner's record. */
   private lock(path = this.lockPath): Lock | null {
     try {
       const r = tryLock(path, `github-budget pid ${process.pid}`);
-      if ('lock' in r) return r.lock;
-      const seen = readSlotFile(path);
-      const at = Date.parse((JSON.parse(seen) as { acquiredAt?: string }).acquiredAt ?? '');
-      // Fresh only if dated within LOCK_STALE_MS of now, either way: a lock dated in the future is planted, not held.
-      if (Number.isFinite(at) && Math.abs(Date.now() - at) <= LOCK_STALE_MS) return null;
-      const aside = slotSibling(path, `.${process.pid}.${randomBytes(4).toString('hex')}.stale`);
-      renameSlotFile(path, aside);
-      if (readSlotFile(aside) !== seen) {
-        try {
-          linkSlotFile(aside, path); // a fresh lock was taken in between: give it back
-        } catch {
-          // taken again since: theirs stands
-        }
-      }
-      removeSlotFile(aside, { force: true });
-      const again = tryLock(path, `github-budget pid ${process.pid}`);
-      return 'lock' in again ? again.lock : null;
+      return 'lock' in r ? r.lock : null;
     } catch {
       return null;
     }

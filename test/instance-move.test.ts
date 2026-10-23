@@ -3,7 +3,7 @@ import { restoreIsolated } from './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { gzipSync } from 'node:zlib';
@@ -11,9 +11,44 @@ import { BRAND } from '../src/brand.js';
 import { EventLog } from '../src/events/log.js';
 import { projectStateDir } from '../src/guardrails/context.js';
 import { exportBundle, importBundle, readBundle } from '../src/instance-move.js';
+import { tryLock } from '../src/locks.js';
 import { engineCli, exampleProject } from './helpers.js';
 
 const posix = process.platform === 'win32' && 'POSIX file modes';
+
+test('native lock guard inodes never travel in exports or imports, even while the target owns a lock', () => {
+  const state = mkdtempSync(join(tmpdir(), 'move-native-'));
+  const { dir: root } = exampleProject();
+  const guard = join(state, '.coordinator.lock.flock');
+  const cfgGuard = join(root, BRAND.configDir, '.config.lock.flock');
+  writeFileSync(guard, '', { mode: 0o444 });
+  const orphanName = '.coordinator.lock.flock.123.0123456789abcdef.tmp';
+  linkSync(guard, join(state, orphanName));
+  writeFileSync(cfgGuard, '', { mode: 0o444 });
+  const out = join(state, 'out.bundle');
+  const exported = exportBundle({ stateDir: state, root, repo: null, host: 'fixture', out });
+  const excluded = ['state/.coordinator.lock.flock', `state/${orphanName}`, 'config/.config.lock.flock'];
+  for (const path of excluded) {
+    assert.ok(!exported.files.includes(path));
+    assert.ok(exported.left.some((entry) => entry.path === path && /native lock guard/.test(entry.why)));
+  }
+  const b = readBundle(out);
+  b.files = excluded.map((path) => ({ path, data: Buffer.from('must not replace an inode').toString('base64') }));
+  writeFileSync(out, gzipSync(JSON.stringify(b)).toString('base64'));
+  const target = mkdtempSync(join(tmpdir(), 'move-native-target-'));
+  const owned = tryLock(join(target, 'coordinator.lock'), 'import target');
+  assert.ok('lock' in owned);
+  linkSync(join(target, '.coordinator.lock.flock'), join(target, orphanName));
+  try {
+    const before = statSync(join(target, '.coordinator.lock.flock'));
+    const imported = importBundle({ file: out, stateDir: target, root, instance: false });
+    assert.equal(imported.skipped.length, 3);
+    assert.deepEqual([statSync(join(target, '.coordinator.lock.flock')).dev, statSync(join(target, '.coordinator.lock.flock')).ino], [before.dev, before.ino]);
+    assert.equal(statSync(join(target, '.coordinator.lock.flock')).mode & 0o777, 0o444);
+    assert.equal(readFileSync(cfgGuard, 'utf8'), '');
+    assert.ok(!('lock' in tryLock(join(target, 'coordinator.lock'), 'contender')));
+  } finally { owned.lock.release(); }
+});
 
 /** A laptop's state: history, init's checklist, findings, and what must never travel. */
 function laptop() {
