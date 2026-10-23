@@ -19,6 +19,7 @@ import { intakeForInstance } from '../src/intake/wire.js';
 import { exportBundle, importBundle, readBundle } from '../src/instance-move.js';
 import { SIRI_PORT_IGNORED, VOICE_REMOVED } from '../src/voice-removed.js';
 import { asPerson, exampleProject, exampleRoles, repoRoot } from './helpers.js';
+import { ephemeralStart, refusedPort } from './held-port.js';
 
 const OWNER = 'example-owner';
 const SIRI_PORT_OPTION = '--siri-port';
@@ -162,13 +163,6 @@ test("upgrade: intake.yaml's voice and siri keys still load (intake stays on), a
   assert.deepEqual(wired.sources.map((x) => x.name).filter((n) => n === 'voice'), [], 'no voice source');
 });
 
-/** Allocate distinct candidates together; callers release them before binding their explicit listeners. */
-async function reservedPort() {
-  const srv = createServer((socket) => socket.destroy());
-  await new Promise<void>((ok) => srv.listen(0, '127.0.0.1', ok));
-  const port = (srv.address() as { port: number }).port;
-  return { port, reserved: srv };
-}
 const listening = (port: number) =>
   new Promise<boolean>((ok) => {
     const c = createConnection({ port, host: '127.0.0.1' });
@@ -177,24 +171,27 @@ const listening = (port: number) =>
   });
 
 test('upgrade: no Siri gateway listens, whatever the hub is given (the option an older caller passed); --siri-port on the CLI only warns', async () => {
-  const reservations: Awaited<ReturnType<typeof reservedPort>>[] = [];
+  const candidate = await refusedPort();
+  const port = candidate.port;
+  const control = createServer((socket) => socket.destroy());
   const hubState = mkdtempSync(join(tmpdir(), 'voice-removed-hub-'));
   let h: Awaited<ReturnType<typeof startHub>> | undefined;
   try {
-    for (let i = 0; i < 3; i++) reservations.push(await reservedPort());
-    const [siri, hub, breakGlass] = reservations;
-    const port = siri!.port;
-    assert.equal(new Set(reservations.map((r) => r.port)).size, 3);
-    await Promise.all(reservations.map(({ reserved }) => new Promise<void>((ok) => reserved.close(() => ok()))));
-    // The removed gateway's candidate is AVAILABLE at startup, as for the original stimulus. The legitimate
-    // listeners have explicit different ports, so they cannot accidentally reuse it through port:0 allocation.
-    h = await startHub({ instances: [], stateDir: hubState, port: hub!.port, breakGlassPort: breakGlass!.port, siri: { port } } as unknown as Parameters<typeof startHub>[0]);
-    assert.equal(Number(new URL(h.url).port), hub!.port);
+    assert.ok(port < ephemeralStart(), 'connect cannot choose the destination as its own source port');
+    // The held endpoint is NOT a listener. Prove an explicit Node gateway could still bind this candidate;
+    // a restored gateway must not be hidden by EADDRINUSE, as a listening reservation would hide it.
+    await new Promise<void>((ok, fail) => { control.once('error', fail); control.listen(port, '127.0.0.1', ok); });
+    assert.equal(await listening(port), true, 'positive control: an explicit gateway can listen here');
+    await new Promise<void>((ok) => control.close(() => ok()));
+    // The old option and both legitimate port:0 listeners are passed exactly as before. Their automatic
+    // allocation cannot reuse the non-ephemeral candidate; Linux TCP simultaneous open cannot fake a listener.
+    h = await startHub({ instances: [], stateDir: hubState, port: 0, breakGlassPort: 0, siri: { port } } as unknown as Parameters<typeof startHub>[0]);
     assert.equal(await listening(port), false, `nothing on ${port}`);
     assert.ok(!('siriUrl' in h), 'no gateway URL');
   } finally {
-    await Promise.all(reservations.filter(({ reserved }) => reserved.listening).map(({ reserved }) => new Promise<void>((ok) => reserved.close(() => ok()))));
+    if (control.listening) await new Promise<void>((ok) => control.close(() => ok()));
     await h?.close();
+    await candidate.close();
   }
   // The hub as an older unit starts it (`dashboard --hub ... --siri-port 4397`, a service mode a test can't run on its
   // isolated machine): --siri-port is still read, so it is accepted and the hub starts, and it only prints the warning;
