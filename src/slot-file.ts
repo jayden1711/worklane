@@ -269,6 +269,9 @@ export function trySlotFileGuard(file: SlotPathLike): { release(): void } | null
     const guardFd = openSync(guard, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
     let held = false;
     try {
+      // Inheriting standard streams explicitly clears CLOEXEC on fd 0/1/2 in a child. Refuse before any
+      // helper or JSON mutation if a caller closed one: Node/libuv also requires valid stdio for spawning.
+      if (guardFd < 3) throw new Error('native locking requires open standard descriptors; redirect unused streams to /dev/null');
       const opened = fstatSync(guardFd);
       // State privacy tidy may tighten 0444 to 0660. Mode is not the locking primitive; inode identity is.
       if (!opened.isFile() || opened.size !== 0) throw new Error('native lock guard must be an empty regular file');

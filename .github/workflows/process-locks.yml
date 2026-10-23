@@ -32,7 +32,7 @@ jobs:
       - name: exercise actual native ownership and crash recovery
         env:
           TMPDIR: ${{ runner.temp }}
-        run: node --import ./dist/test/isolate.js --test dist/test/native-flock.test.js dist/test/locks.test.js dist/test/locks-process.test.js dist/test/locks-reaper.test.js
+        run: node --import ./dist/test/isolate.js --test dist/test/native-flock.test.js dist/test/locks.test.js dist/test/locks-process.test.js dist/test/locks-reaper.test.js dist/test/locks-stdio.test.js
       - name: candidate foreground coordinator with local Docker volumes
         if: runner.os == 'Linux'
         env:
