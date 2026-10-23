@@ -298,7 +298,7 @@ There is no launchd or systemd in a container, so run the coordinator in the for
 docker run -it -v "$PWD:/repo" -v "$HOME/.claude:/home/user/.claude" -v worklane-state:/home/user/.local/state -v worklane-slots:/home/user/.agent-slots worklane worklane coordinator run --root /repo
 ```
 
-That command mounts your Claude login. State and slot locks use the same named local volumes across invocations, including on Docker Desktop; the image also declares these volume paths. Keep these volumes on a supported local filesystem (see [slots.md](slots.md)), with every container sharing a resource using the same volumes. A host bind or a remote volume driver is not assumed to provide native locking; unsupported filesystems refuse acquisition. Do not copy or remove guard inodes while any client runs.
+That command mounts your Claude login. State and slot locks use the same named local volumes across invocations, including on Docker Desktop; the image also declares these volume paths. Keep these volumes on a supported local filesystem (see [slots.md](slots.md)), with every container sharing a resource using the same volumes. A host bind or a remote volume driver is not assumed to provide native locking; unsupported filesystems refuse acquisition. Do not copy or remove guard inodes while any client runs. A recreated container normally has a different PID namespace/hostname: records left by a crash then remain foreign and busy, rather than being judged dead. Stop all clients and independently establish abandonment before removing those JSON records; retain guard inodes. Graceful shutdown releases records normally.
 
 ### Setting up a project by hand
 
