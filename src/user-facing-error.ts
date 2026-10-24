@@ -81,13 +81,32 @@ export const INTERNAL_ERROR_TEXT = 'the dashboard hit an internal error; the det
 /** The end of a fixed text whose detail went to logDetail (issue #882). */
 export const DETAIL_LOGGED = "the detail is in the dashboard's log on the machine";
 
+const MAX_CAUSES = 4;
+const MAX_CAUSE_CHARS = 2000;
+
+/**
+ * An error's `cause` chain, outermost first: each one's message (or text), at most MAX_CAUSES of them, each clipped.
+ * The stack an Error prints leaves its cause out, and the engine's refusals keep their raw detail there (#882).
+ */
+export function causeChain(e: unknown): string[] {
+  const out: string[] = [];
+  for (let c = e instanceof Error ? e.cause : undefined; c !== undefined && out.length < MAX_CAUSES; c = c instanceof Error ? c.cause : undefined) {
+    out.push((c instanceof Error ? `${c.name}: ${c.message}` : String(c)).slice(0, MAX_CAUSE_CHARS));
+  }
+  return out;
+}
+
+/** An error's message and its causes, for a terminal (a root shell's CLI), where the detail is the admin's to see. */
+export const messageWithCauses = (e: unknown): string => [e instanceof Error ? e.message : String(e), ...causeChain(e)].join(': ');
+
 /**
  * An error's detail, or a raw text (a child's stderr, GitHub's answer), to the server's own log on the machine only,
  * through the shared redactor, after `what` (which names the route, never its query). The page gets a fixed text.
  */
 export function logDetail(what: string, e: unknown, log: (line: string) => void = (l) => console.error(l)): void {
   try {
-    log(redactString(`${what}: ${e instanceof Error ? (e.stack ?? `${e.name}: ${e.message}`) : String(e)}`));
+    const causes = causeChain(e).map((c) => `\n  cause: ${c}`).join('');
+    log(redactString(`${what}: ${e instanceof Error ? (e.stack ?? `${e.name}: ${e.message}`) : String(e)}${causes}`));
   } catch {
     // A log (or a thrown value's own stack or toString) that throws never turns the fixed answer into a crash.
   }

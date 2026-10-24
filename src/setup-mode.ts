@@ -225,7 +225,7 @@ export function editDraft(file: string, root: string, values: Record<string, unk
     configFrom(root, (f) => e.texts[f] ?? d.yaml[f] ?? null);
   } catch (err) {
     if (err instanceof ConfigChangeError) throw new SetupModeError(err.message, 400, { cause: err.cause });
-    throw new SetupModeError(`refused: ${(err as Error).message.split('\n').slice(1).map((l) => l.trim()).join('; ') || (err as Error).message}`);
+    throw new SetupModeError(`refused: ${(err as Error).message.split('\n').slice(1).map((l) => l.trim()).join('; ') || (err as Error).message}`, 400, { cause: err });
   }
   if (confirm) {
     s.autoConfig!.draft = { ...d, yaml: { ...d.yaml, ...e.texts } };

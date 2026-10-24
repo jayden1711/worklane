@@ -23,6 +23,7 @@ import type { StuckMode } from './stuck.js';
 import { etcPath } from './os/system-paths.js';
 import { adminRoute, decodePolicyValue, encodePolicyValue, policyHelperMissing, policyInstance, policyRootUid, policySetCommand, policySetOk, readPolicyChecked, tightenProblem } from './policy-gate.js';
 import { MACHINE_HELPER } from './machine.js';
+import { causeChain } from './user-facing-error.js';
 
 /** The machine's bounds on instance settings: root-owned, outside every instance's home. */
 export const LIMITS_PATH = etcPath('limits.json');
@@ -165,7 +166,7 @@ export function settingsReader(policyPath: string, limitsPath = LIMITS_PATH): ()
       const problems = settingsProblems(policy.settings, loadLimits(limitsPath), policy);
       last = problems.length ? { settings: {}, error: `settings refused: ${problems.join('; ')}` } : { settings: policy.settings, error: null };
     } catch (e) {
-      last = { settings: {}, error: `policy settings unusable: ${(e as Error).message.split('\n')[0]}` };
+      last = { settings: {}, error: `policy settings unusable: ${[(e as Error).message.split('\n')[0], ...causeChain(e)].join(': ')}` };
     }
     return last;
   };

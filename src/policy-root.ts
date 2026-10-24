@@ -24,6 +24,7 @@ import { readInOwnedDir, replaceInOwnedDir } from './os/root-file.js';
 import { aliasInstance, armedSwitches, clearKillSwitches, ensureSpare, instanceId, killAutoMerge, recordDir, retakeId, sharedWith, sweepOrphanIds } from './policy-kill.js';
 import { decodePolicyValue, HELPER_ONLY, ownCommand, POLICY_ROOT_DIR, POLICY_SET_KEYS, policyRecord, type PolicyRecord, policySetCommand, readPolicyChecked, recordText, sha256, tightenProblem } from './policy-gate.js';
 import { intakeCapsBeside, type Limits, LIMITS_PATH, loadLimits, rootInEffect, settingsProblems } from './settings.js';
+import { messageWithCauses } from './user-facing-error.js';
 
 const FILE = 'policy.yaml';
 const LOCK_WAIT_MS = 10_000;
@@ -362,7 +363,7 @@ export function policyCommand(sub: string | undefined, rest: string[], deps: Pol
       else console.log(`${rest[0]}: policy.yaml is root's, and what root last wrote there`);
       return why ? 1 : 0;
     } catch (e) {
-      console.error((e as Error).message);
+      console.error(messageWithCauses(e));
       return 1;
     }
   }
@@ -392,7 +393,7 @@ export function policyCommand(sub: string | undefined, rest: string[], deps: Pol
       return 0;
     }
   } catch (e) {
-    console.error((e as Error).message);
+    console.error(messageWithCauses(e));
     return 1;
   }
   console.error(usage);
