@@ -3,6 +3,7 @@
 // big or in doubt waits for a human; so does everything while the instance's
 // kill switch is off or auto-merge is stopped. "Ready" (required checks green
 // on the exact evaluated commit, evaluator approved) is decided before this.
+import { STOP_NO_REASON } from './auto-merge-stop.js';
 import { BRAND } from './brand.js';
 import { shownPath } from './path-text.js';
 import { AGENT_INSTRUCTIONS, CONFUSABLE_PATH, CONTROL_CHARACTER_PATH, DIFF_HIDING_ATTRIBUTES, INVISIBLE_CHARACTER_PATH, LOCKED_CATEGORIES, NON_ASCII_TOP_LEVEL_PATH, NON_UTF8_PATH, ODD_PATH_CATEGORIES, SELF_MODIFICATION, selfModificationPart, type LevelResult } from './review.js';
@@ -47,7 +48,7 @@ export interface MergeInput {
   policyOn: boolean;
   /** review.yaml merge.auto. */
   repoOn: boolean;
-  /** Why auto-merge is stopped for this instance (main went red after one), or null. */
+  /** Why auto-merge is stopped for this instance (main went red after one), or null. Any string holds, even an empty one. */
   stopped: string | null;
   /** Review categories of the whole change, with the paths in each (computeLevel). */
   level: LevelResult;
@@ -245,7 +246,7 @@ export function mergeDecision(i: MergeInput): MergeDecision {
   const reasons: string[] = [...neverAutoMerge({ branch: i.branch, openedByHarness: i.openedByHarness })];
   if (!i.policyOn) reasons.push('auto-merge is off for this instance (policy.yaml auto_merge)');
   if (!i.repoOn) reasons.push("auto-merge is off for this repo (review.yaml merge.auto)");
-  if (i.stopped) reasons.push(`auto-merge is stopped: ${i.stopped}`);
+  if (typeof i.stopped === 'string') reasons.push(`auto-merge is stopped: ${i.stopped.trim() ? i.stopped : STOP_NO_REASON}`);
 
   // High-risk paths or categories, and design-level: the evaluator's flag is binding; new dependencies and new
   // top-level modules are seen in code too.
