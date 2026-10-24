@@ -7,6 +7,7 @@
 import { existsSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { BRAND } from './brand.js';
+import { redactCut } from './events/redact.js';
 import { readFeed } from './run-feed.js';
 import { RUNS_DIR } from './run-record.js';
 
@@ -19,7 +20,7 @@ export type StuckMode = 'off' | 'dry-run' | 'on';
 export interface StuckVerdict {
   kind: 'flag' | 'stop';
   tool: string;
-  /** The repeated input, clipped for display. */
+  /** The repeated input, redacted and then clipped for display (#988). */
   input: string;
   /** Identical calls in a row (any result), and identical failures in a row, when the verdict was reached. */
   repeats: number;
@@ -69,9 +70,9 @@ export class StuckDetector {
     this.repeats++;
     this.failures = ok ? 0 : this.failures + 1;
     if (this.repeats > this.longest.repeats || this.failures > this.longest.failures) {
-      Object.assign(this.longest, { repeats: Math.max(this.longest.repeats, this.repeats), failures: Math.max(this.longest.failures, this.failures), tool: c.tool, input: c.input.slice(0, 300) });
+      Object.assign(this.longest, { repeats: Math.max(this.longest.repeats, this.repeats), failures: Math.max(this.longest.failures, this.failures), tool: c.tool, input: redactCut(c.input, 300) });
     }
-    const verdict = (kind: StuckVerdict['kind']): StuckVerdict => ({ kind, tool: c.tool, input: c.input.slice(0, 300), repeats: this.repeats, failures: this.failures });
+    const verdict = (kind: StuckVerdict['kind']): StuckVerdict => ({ kind, tool: c.tool, input: redactCut(c.input, 300), repeats: this.repeats, failures: this.failures });
     if (!this.stopped && this.failures >= STUCK_STOP_AT) {
       this.stopped = true;
       return verdict('stop');
