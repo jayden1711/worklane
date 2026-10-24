@@ -85,6 +85,14 @@
       "expect": { "decision": "merges", "configs": ["engine", "default", "loosened"], "scopes": ["engine", "managed-app"] }
     },
     {
+      "id": "control-default-branch-lint-file-only-at-tip-grown",
+      "attack": "a lint test made on the default branch after this PR's base; the PR merges the default branch in, then only adds a rule to it",
+      "source": "the suite's own control (flow-default-branch-lint-file-only-at-tip: only a rule taken out of a tip-only lint test holds it)",
+      "change": [{ "write": "test/no-shell.test.ts", "text": "// lint-test\nimport { test } from 'node:test';\n\nconst BANNED = [\n  'execSync',\n  'spawnSync',\n  'execFileSync',\n];\n\ntest('no shell calls in src', () => {});\n" }],
+      "flow": { "tipMoved": { "test/no-shell.test.ts": "// lint-test\nimport { test } from 'node:test';\n\nconst BANNED = [\n  'execSync',\n  'spawnSync',\n];\n\ntest('no shell calls in src', () => {});\n" }, "tipMergedIn": true },
+      "expect": { "decision": "merges", "configs": ["engine", "default", "loosened"], "scopes": ["engine", "managed-app"] }
+    },
+    {
       "id": "control-default-branch-mark-kept-by-stale-pr",
       "attack": "a stale PR (it never merged the default branch in) that edits a file elsewhere, beside a table the default branch marked never-shrink since",
       "source": "the suite's own control (flow-default-branch-mark-taken-out-after-merge: a head older than the mark keeps it through the merge)",
