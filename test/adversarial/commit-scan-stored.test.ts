@@ -101,8 +101,8 @@ test('attack: stored bytes that only begin like a large-file pointer are scanned
   configure(a, STANDARD);
   stageRaw(a, 'a.txt', `${lfsObject(a, 'plain data\n')}${SECRET}`);
   writeFileSync(join(a, '.gitattributes'), '*.txt filter=lfs diff=lfs merge=lfs -text\n');
-  // WHY (round 7): such bytes, small and naming a pointer version, now refuse before the scan; either way, refused.
-  const STORED = /gitleaks found a secret in this commit|commit secret scan could not run/;
+  // WHY (round 7, #1010): such bytes, small and naming a pointer version, refuse before the scan, with this reason.
+  const STORED = /commit secret scan could not run \(a large file in this commit looks like a large-file pointer but is not in its exact form\b/;
   await refused(a, 'git commit -m x', STORED, 'attribute on disk only');
   // The attribute committed first, the blob staged by hand with an old file time.
   const c = checkout('c');
