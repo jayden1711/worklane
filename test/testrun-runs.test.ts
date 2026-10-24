@@ -494,6 +494,15 @@ test('GPU: a granted command stopped at its cap marks the run gpu_stopped, and i
   assert.match(res.tiers[1]!.summary, /^GPU: yes .*\ntier cuda timed out after 15 min \(the GPU runs' max_minutes in root's testrun-gpu\.json, after 2 s waiting for the GPU, 900\)/);
 });
 
+test('#968: a granted command stopped at its own timeout_s is named so, however long the helper took before the lock: the GPU\'s max_minutes was not the cap', { skip: !hasPerl && 'perl' }, async () => {
+  const r = rig(GPU_TIERS);
+  // A free lock (waited 0 s) after 3 s of the helper's own setup: the unit got the 1797 s left of 1800, under 60 min.
+  const g = gpuHost(r.host, { ...GRANT, maxS: 1797, waitedS: 0 }, { timesOut: true });
+  const res = await runTestRun({ ...r.deps, host: g.h, gpuOptIn: () => ({ state: 'on', devices: [0], maxMinutes: 60 }) }, { repo: r.dir, sha: r.sha, kind: 'fast', prs: [] });
+  assert.equal(res.ok, false);
+  assert.match(res.tiers[1]!.summary, /^GPU: yes .*\ntier cuda timed out after 30 min \(its timeout_s in tests\.yaml test_run, 1800\)/);
+});
+
 // ---------------------------------------------------------- Network (src/testrun/network.ts, docs/test-runs.md "Network")
 
 /** The rig's host, with what the helper would say of a command that asks for the network, and every call in order. */
