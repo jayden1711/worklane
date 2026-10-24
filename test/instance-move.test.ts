@@ -90,6 +90,9 @@ test("export: a killed owner-only write's staging file (.<name>.<16 hex>.new) is
   writeFileSync(join(l.stateDir, '.init.json.0123456789abcdef.new'), '{"version":1,"mode":"half-written"}');
   mkdirSync(join(l.stateDir, 'intake'), { recursive: true });
   writeFileSync(join(l.stateDir, 'intake', '.alerts.json.fedcba9876543210.new'), '{}');
+  // Not staging names: not hidden, or no 16 hex digits.
+  writeFileSync(join(l.stateDir, 'notes.v2.0123456789abcdef.new'), 'kept');
+  writeFileSync(join(l.stateDir, 'intake', 'notes.new'), 'kept');
   const out = join(mkdtempSync(join(tmpdir(), 'move-out-')), 'b.bundle');
   const r = exportBundle({ stateDir: l.stateDir, root, repo: null, host: 'laptop', out });
   for (const path of ['state/.init.json.0123456789abcdef.new', 'state/intake/.alerts.json.fedcba9876543210.new']) {
@@ -97,6 +100,7 @@ test("export: a killed owner-only write's staging file (.<name>.<16 hex>.new) is
     assert.ok(r.left.some((x) => x.path === path && x.why === 'a temporary file'), `${path} isn't listed as left out`);
   }
   assert.ok(r.files.includes('state/init.json'), 'the file itself still travels');
+  for (const path of ['state/notes.v2.0123456789abcdef.new', 'state/intake/notes.new']) assert.ok(r.files.includes(path), `${path} was left out`);
 });
 
 test('import: the history and checklist into a fresh state dir, readable there; history of its own refused unless --force', { skip: posix }, () => {

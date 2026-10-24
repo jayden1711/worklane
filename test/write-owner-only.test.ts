@@ -1,8 +1,8 @@
 // writeOwnerOnly never writes through, or sets the mode of, a link planted beside the file it writes (#950): not one
 // planted before the write at the old guessable temp name, not one planted at its own staging name, and not one
 // swapped in for its temp file mid-write by a racer who lists the directory. A staging file swapped mid-write for
-// any other file, or for a link to itself, is refused, and the mode is 0600 whatever the umask. Fixture files in temp
-// dirs only.
+// any other file, or for a link to itself, is refused; a link swapped in after that check is never written through or
+// chmod-ed; and the mode is 0600 whatever the umask. Fixture files in temp dirs only.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { lstatSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
@@ -136,6 +136,36 @@ test('writeOwnerOnly refuses a staging file swapped mid-write for a link to the 
   assert.ok(lstatSync(file).isFile(), 'the link was published as the file');
   assert.equal(readFileSync(file, 'utf8'), 'OLD\n', 'the file is left as it was');
   assert.deepEqual(readdirSync(dir).sort(), [basename(file), basename(victim)].sort(), 'nothing left beside it');
+});
+
+test('writeOwnerOnly never writes through, or sets the mode of, a link swapped in after its check of the staging name', { skip: !POSIX && 'symlinks need privileges on Windows' }, () => {
+  const { dir, file, victim } = fixture();
+  type Lstat = (p: string, o?: object) => unknown;
+  const fs = createRequire(import.meta.url)('node:fs') as { lstatSync: Lstat };
+  const real = fs.lstatSync;
+  let swapped = '';
+  fs.lstatSync = (p, o) => {
+    const st = real(p, o);
+    const name = basename(String(p));
+    if (!swapped && dirname(String(p)) === dir && name !== basename(file) && name !== basename(victim)) {
+      swapped = name;
+      rmSync(p, { force: true });
+      symlinkSync(victim, p);
+    }
+    return st;
+  };
+  syncBuiltinESMExports();
+  try {
+    writeOwnerOnly(file, 'NEW SECRET\n');
+  } catch {
+    // refusing is allowed too
+  } finally {
+    fs.lstatSync = real;
+    syncBuiltinESMExports();
+  }
+  assert.ok(swapped, 'the racer saw the check of the staging name');
+  assert.equal(mode(victim), 0o644, 'the link swapped in after the check had its target chmod-ed');
+  assert.equal(readFileSync(victim, 'utf8'), 'THE KEY', 'the data went into the link swapped in after the check');
 });
 
 test('writeOwnerOnly leaves the file 0600 whatever the umask', { skip: !POSIX && 'POSIX modes' }, () => {
