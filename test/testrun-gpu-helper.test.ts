@@ -53,7 +53,12 @@ echo ran`,
   stub('runuser', 'while [ "$1" != -- ]; do shift; done; shift; exec "$@"');
   stub('install', `a=(); while [ "$#" -gt 0 ]; do case "$1" in -o|-g) shift 2 ;; *) a+=("$1"); shift ;; esac; done; exec ${real('install')} "\${a[@]}"`);
   const gnuStat = spawnSync(real('stat')!, ['--version']).status === 0;
-  stub('stat', gnuStat ? `exec ${real('stat')} "$@"` : `[ "$1" = -c ] || exit 9; f="$2"; f="\${f//%U/%Su}"; f="\${f//%G/%Sg}"; f="\${f//%a/%Lp}"; shift 2; exec ${real('stat')} -f "$f" "$@"`);
+  // A stat of the locks' directories or files takes as long as the file `slowstat` says: a slow lock-file setup.
+  stub(
+    'stat',
+    `case "\${*: -1}" in '${join(dir, 'run')}'*) sleep "$(cat '${dir}/slowstat' 2>/dev/null || echo 0)" ;; esac
+${gnuStat ? `exec ${real('stat')} "$@"` : `[ "$1" = -c ] || exit 9; f="$2"; f="\${f//%U/%Su}"; f="\${f//%G/%Sg}"; f="\${f//%a/%Lp}"; shift 2; exec ${real('stat')} -f "$f" "$@"`}`,
+  );
   // flock(1): the real one where there is one (Linux); else the same call through perl on the inherited fd.
   if (real('flock')) symlinkSync(real('flock')!, join(bin, 'flock'));
   else
@@ -150,7 +155,8 @@ exec perl -e 'use Fcntl qw(:flock); open(my $f, "<&=", $ARGV[0]) or exit 2; my $
   /** The systemd-run call of run <id>. */
   const call = (id: string) => calls().find((c) => c.argv.some((x) => x.startsWith(`--unit=worklane-test-shop_${id}_`)))!;
   const setGroup = (line: string | null) => (line === null ? rmSync(join(dir, 'group'), { force: true }) : writeFileSync(join(dir, 'group'), `${line.replace('<g>', myGroup)}\n`));
-  return { dir, dev, file, lockDir, myGroup, setGroup, exec, execAsync, calls, call, nodes, optIn, setSleep: (s: number) => writeFileSync(join(dir, 'sleep'), String(s)), done: () => rmSync(dir, { recursive: true, force: true }) };
+  const setSlowStat = (s: number) => writeFileSync(join(dir, 'slowstat'), String(s));
+  return { dir, dev, file, lockDir, myGroup, setGroup, exec, execAsync, calls, call, nodes, optIn, setSleep: (s: number) => writeFileSync(join(dir, 'sleep'), String(s)), setSlowStat, done: () => rmSync(dir, { recursive: true, force: true }) };
 }
 
 type Call = { argv: string[]; start: number; end: number; lock: string };
@@ -181,10 +187,14 @@ test('GPU on for the instance: PrivateDevices=yes kept, exactly nvidiactl, nvidi
   try {
     h.nodes(...ALL_NODES);
     h.optIn({ other: [1], shop: [0] });
+    // The lock's five stats take 3 s in all: the setup is slow, the lock itself free.
+    h.setSlowStat(0.6);
     const r = h.exec('fast-a-1', 60, true);
+    h.setSlowStat(0);
     assert.equal(r.status, 0, r.stderr);
     const d = (n: string) => join(h.dev, n);
-    // max: what is left of the 60 s once the helper got there (a moment on a slow machine); waited: for the lock alone.
+    // max: what is left of the 60 s once the helper got there (a moment on a slow machine); waited: for the lock alone,
+    // never its file's setup.
     const line = r.stderr.split('\n')[0]!;
     const m = new RegExp(`^worklane-testrun: gpu 0 \\(devices ${d('nvidiactl')} ${d('nvidia-uvm')} ${d('nvidia0')}; max (\\d+) s; waited ([01]) s\\)$`).exec(line);
     assert.ok(m && Number(m[1]) <= 60 && Number(m[1]) >= 55, line);
