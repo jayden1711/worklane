@@ -40,11 +40,12 @@
 // reviews): an optional call's arguments, a default parameter, a destructuring default, a logical assignment's right
 // side (`??=`, `||=`, `&&=`), code in a string (`new Function('…')`), and built code, which its map places only by line.
 // Each of these has a todo test (merge-vacuity-r8, -r9-limits; B1 in -r6). And two where an untested change merges
-// (round 13, measured): code moved in a way git doesn't pair (a file renamed and re-indented or edited, a function
-// moved into another file or within its file, moved code re-wrapped) reads as added code, so a test that runs it merges
-// the PR (todo tests R1, R3, R4 in merge-vacuity-r12; M3, M4b, M5b, R3s in -r13); and deleting an app file, or renaming
-// one out of app code (to a data file, a test path, or out of app_paths), leaves no app code to measure, so it merges
-// with no test and no run.
+// (round 13): code moved in a way git doesn't pair (a file renamed and re-indented or edited, a function moved into
+// another file or within its file, moved code re-wrapped) reads as added code, so a test that runs it merges the PR
+// (measured: todo tests R1, R3, R4 in merge-vacuity-r12; M3, M4b, M5b, R3s in -r13); and deleting an app file, or
+// renaming one out of app code (to a data file, a test path, or out of app_paths), leaves no app code to measure, so
+// it merges with no test and no run (measured for a deletion, a rename to .json and a rename to a test path; inferred
+// for a move out of app_paths, which the same app-code filter drops).
 //
 // What counts as changed app code: a file the PR changes, under vacuity.app_paths, not matched by a test glob, still
 // there at the head, and not one with no runtime code for a test to run (NO_RUNTIME_CODE: types only, config, data,
