@@ -17,7 +17,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { BRAND } from '../src/brand.js';
 import * as names from '../src/instance-name.js';
-import { ownCommand, setPolicyRootUid } from '../src/policy-gate.js';
+import { ownCommand, retakeClause, setPolicyRootUid } from '../src/policy-gate.js';
 import { ownPolicy, setPolicy, type PolicyRootDeps } from '../src/policy-root.js';
 import { repoRoot } from './helpers.js';
 import { keptProblems, REFUSED_NAMES } from './legacy-kept-names.js';
@@ -115,7 +115,7 @@ test('#902 round 11: the helpers\' kept names are the engine\'s LATER_RESERVED, 
   assert.ok(keptProblems(tuMutant, later).some((p) => p.startsWith('test-user.sh is_test_user wl-test-agent: yes')));
 });
 
-test('#902 round 10: under a name reserved since, policy own --retake and --accept-loose are refused: root\'s policy is never taken over looser', { skip: linux }, () => {
+test('#902 rounds 10, 12: under a name reserved since, policy own --retake is refused, with --accept-loose or without: root\'s policy is never taken over looser', { skip: linux }, () => {
   const me = process.getuid!();
   const T = realpathSync(mkdtempSync(join(tmpdir(), 'legacy-own-')));
   const dir = join(T, 'home', 'wl-console', '.local', 'state', BRAND.cli, 'instances', 'console');
@@ -146,8 +146,8 @@ test('#902 round 10: under a name reserved since, policy own --retake and --acce
     // Root's record still covers only the file it wrote: nothing reads or changes the planted one as root's. The way out
     // it names is the instance's removal, never a --retake that is refused (round 11).
     assert.throws(() => setPolicy('console', 'budget.daily_usd', '10', null, deps), /isn't what root last wrote.*instance-remove\.sh console \(/);
-    assert.doesNotMatch(ownCommand('console', '--retake'), /policy own/);
-    assert.equal(ownCommand('alpha', '--retake'), `sudo ${BRAND.cli} policy own alpha --retake`);
+    assert.doesNotMatch(retakeClause('console', (c) => c), /policy own/);
+    assert.equal(retakeClause('alpha', (c) => c), `sudo ${BRAND.cli} policy own alpha --retake`);
     assert.equal(ownCommand('console'), `sudo ${BRAND.cli} policy own console`);
   } finally {
     setPolicyRootUid(0);

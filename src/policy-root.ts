@@ -22,7 +22,7 @@ import { instanceNameOk, instanceNameProblem, instanceNameShapeOk, keptInstanceN
 import { isRoot, processIdentity, UNKNOWN_IDENTITY, userHomeDir, userPresence, userUid } from './os/index.js';
 import { readInOwnedDir, replaceInOwnedDir } from './os/root-file.js';
 import { aliasInstance, armedSwitches, clearKillSwitches, ensureSpare, instanceId, killAutoMerge, recordDir, retakeId, sharedWith, sweepOrphanIds } from './policy-kill.js';
-import { decodePolicyValue, HELPER_ONLY, ownCommand, POLICY_ROOT_DIR, POLICY_SET_KEYS, policyRecord, type PolicyRecord, policySetCommand, readPolicyChecked, recordText, sha256, tightenProblem } from './policy-gate.js';
+import { decodePolicyValue, HELPER_ONLY, ownCommand, POLICY_ROOT_DIR, POLICY_SET_KEYS, policyRecord, type PolicyRecord, policySetCommand, readPolicyChecked, recordText, retakeClause, sha256, tightenProblem } from './policy-gate.js';
 import { intakeCapsBeside, type Limits, LIMITS_PATH, loadLimits, rootInEffect, settingsProblems } from './settings.js';
 
 const FILE = 'policy.yaml';
@@ -239,10 +239,11 @@ export function ownPolicy(instance: string, d: PolicyRootDeps = {}, flags: OwnFl
     const text = readInOwnedDir(dir, FILE, coordUid, [coordUid, rootUid]);
     const rec = policyRecord(instance, markers);
     const written = rec !== null && !('problem' in rec) && rec.sha256 === sha256(text);
-    if (rec !== null && !written && !flags.retake) throw new Error(`${file} isn't what root last wrote there (${'problem' in rec ? rec.problem : 'its content changed since'}), so it is left as it is: a process running as its coordinator user may have put it there. An admin checks it at a root shell, then takes it over as it is with ${ownCommand(instance, '--retake')}`);
+    if (rec !== null && !written && !flags.retake) throw new Error(`${file} isn't what root last wrote there (${'problem' in rec ? rec.problem : 'its content changed since'}), so it is left as it is: a process running as its coordinator user may have put it there. An admin checks it at a root shell, then ${retakeClause(instance, (c) => `takes it over as it is with ${c}`)}`);
     const policy = parsePolicy(text, file);
     const loose = beyondCoordinator(policy, loadLimits(d.limitsPath ?? LIMITS_PATH));
-    if (!written && loose.length && !flags.acceptLoose) throw new Error(`${file} is looser than its coordinator could make it (${loose.join('; ')}), so it is left as it is, not root's: a process running as its coordinator user may have written that. An admin checks it at a root shell, then changes it, or takes it over as it is with ${ownCommand(instance, ...(rec !== null ? (['--retake'] as const) : []), '--accept-loose')}`);
+    const takeOver = (c: string) => `changes it, or takes it over as it is with ${c}`;
+    if (!written && loose.length && !flags.acceptLoose) throw new Error(`${file} is looser than its coordinator could make it (${loose.join('; ')}), so it is left as it is, not root's: a process running as its coordinator user may have written that. An admin checks it at a root shell, then ${rec !== null ? retakeClause(instance, takeOver, '--accept-loose') : takeOver(ownCommand(instance, '--accept-loose'))}`);
     // Its id and a disarmed kill switch first, so any auto_merge off from now on needs no new space
     // (src/policy-kill.ts): with no room, nothing is taken over. A new id only on a first takeover (with its spare), or
     // an admin's --retake of a recorded instance whose pointer is gone: that one reads off, so its new id is made with
@@ -296,10 +297,10 @@ export function setPolicy(instance: string, key: string, arg: string, by: string
   return withPolicyLock(markers, instance, d.lockWaitMs ?? LOCK_WAIT_MS, () => {
     const rec = policyRecord(instance, markers);
     if (rec === null) throw new Error(`${file} isn't root's yet: make it so first (${ownCommand(instance)})`);
-    if ('problem' in rec) throw new Error(`${file}: ${rec.problem}, so nothing is changed: an admin checks it, then ${ownCommand(instance, '--retake')}`);
+    if ('problem' in rec) throw new Error(`${file}: ${rec.problem}, so nothing is changed: an admin checks it, then ${retakeClause(instance, (c) => c)}`);
     const rootUid = d.rootUid ?? 0;
     const text = readInOwnedDir(dir, FILE, coordUid, [rootUid]);
-    if (rec.file !== file || rec.sha256 !== sha256(text)) throw new Error(`${file} isn't what root last wrote there (an earlier or other file put back in its place), so nothing is changed: an admin checks it, then ${ownCommand(instance, '--retake')}`);
+    if (rec.file !== file || rec.sha256 !== sha256(text)) throw new Error(`${file} isn't what root last wrote there (an earlier or other file put back in its place), so nothing is changed: an admin checks it, then ${retakeClause(instance, (c) => c)}`);
     const doc = parseDocument(text);
     const from = getIn(doc.toJS(), pathOf(key)) ?? null;
     // The coordinator's route (the helper, for a dashboard) only tightens, every key (the owner's decision of
@@ -377,7 +378,7 @@ export function policyCommand(sub: string | undefined, rest: string[], deps: Pol
       const r = ownPolicy(args[0]!, deps, { retake: flags.includes('--retake'), acceptLoose: flags.includes('--accept-loose') });
       console.log(`${r.file} is root's now (0644), its content as it was:\n${Object.entries(r.keys).map(([k, v]) => `  ${k}: ${String(v)}`).join('\n')}`);
       // A name reserved after it was made is never retaken (#902 round 13): only policy set changes its policy now.
-      if (r.loose.length) console.log(`CHECK: ${r.loose.join('; ')}: looser than its coordinator could make it. If you didn't set it, change it with sudo ${BRAND.cli} policy set ${args[0]} <key> <value>${instanceNameOk(args[0]) ? `, or edit the file as root and then run ${ownCommand(args[0]!, '--retake', '--accept-loose')}` : ` (it only tightens: ${args[0]} was made before that name was reserved, so a file edited by hand is never taken over again)`}.`);
+      if (r.loose.length) console.log(`CHECK: ${r.loose.join('; ')}: looser than its coordinator could make it. If you didn't set it, change it with sudo ${BRAND.cli} policy set ${args[0]} <key> <value>${instanceNameOk(args[0]) ? `, or edit the file as root and then run ${retakeClause(args[0]!, (c) => c, '--accept-loose')}` : ` (it only tightens: ${args[0]} was made before that name was reserved, so a file edited by hand is never taken over again)`}.`);
       return 0;
     }
     if (sub === 'set' && rest.length === 3 && !flags.length) {
