@@ -31,17 +31,18 @@ export const POLICY_ROOT_DIR = etcPath('policy-root');
 export const RESERVED_SINCE: readonly string[] = ['machine', 'console'];
 
 /**
- * What an admin runs where root's `policy own <instance> --retake` is the way out: `own`, that command as the caller
- * words it. For a name reserved since, `policy own` refuses --retake (#902 rounds 10, 12), so the way out named is the
- * instance's removal instead. Every message that would name --retake goes through here (src/policy-gate.ts
- * ownCommand too), so none ever names one that is refused (#902 round 13).
+ * What an admin does where root's `policy own <instance> --retake` is the way out, as the words after "an admin":
+ * `clause(own)`, the caller's whole clause around `own`, that command as the caller words it. For a name reserved
+ * since, `policy own` refuses --retake (#902 rounds 10, 12), so the clause is the instance's removal instead, worded
+ * for a removal (#985). Every message that would name --retake goes through here (src/policy-gate.ts retakeClause
+ * too), so none ever names one that is refused (#902 round 13), or calls the removal a takeover.
  */
-export function retakeCommand(instance: string, own: string): string {
-  if (!RESERVED_SINCE.includes(instance)) return own;
-  return `sudo bash ${asRoot.opt('current/scripts/setup/instance-remove.sh')} ${instance} (${instance} was made before that name was reserved, so root never takes its policy over again: remove the instance, then add it again under another name)`;
+export function retakeWayOut(instance: string, own: string, clause: (own: string) => string): string {
+  if (!RESERVED_SINCE.includes(instance)) return clause(own);
+  return `removes the instance with sudo bash ${asRoot.opt('current/scripts/setup/instance-remove.sh')} ${instance} (${instance} was made before that name was reserved, so root never takes its policy over again), then adds it again under another name`;
 }
-/** This module's own messages' way out: `policy own <instance> --retake`, or the removal (retakeCommand). */
-const retake = (instance: string) => retakeCommand(instance, `\`policy own ${instance} --retake\``);
+/** This module's own messages' way out: `policy own <instance> --retake` in `clause`, or the removal (retakeWayOut). */
+const retake = (instance: string, clause: (own: string) => string) => retakeWayOut(instance, `\`policy own ${instance} --retake\``, clause);
 
 /** A name no file in the record directory can have, so it is never an instance's. */
 const fileName = (instance: string) => !!instance && instance !== '.' && instance !== '..' && !/[/\\\0]/.test(instance);
@@ -287,9 +288,9 @@ function mintId(instance: string, dir: string, armAt: Date | null): string {
 export function ensureId(instance: string, dir = POLICY_ROOT_DIR, mint: false | 'spare' | Date = 'spare'): string {
   if (!fileName(instance)) throw new Error(`${instance}: not an instance name`);
   const p = instanceId(instance, dir);
-  if (p && 'problem' in p) throw new Error(`root's ${idPointerPath(instance, dir)} can't be used (${p.problem}): auto_merge reads off until an admin runs ${retake(instance)}`);
+  if (p && 'problem' in p) throw new Error(`root's ${idPointerPath(instance, dir)} can't be used (${p.problem}): auto_merge reads off until an admin ${retake(instance, (c) => `runs ${c}`)}`);
   if (p) return p.id;
-  if (mint === false) throw new Error(`no ${idPointerPath(instance, dir)} for an instance root took over: auto_merge reads off until an admin runs ${retake(instance)}`);
+  if (mint === false) throw new Error(`no ${idPointerPath(instance, dir)} for an instance root took over: auto_merge reads off until an admin ${retake(instance, (c) => `runs ${c}`)}`);
   return mintId(instance, dir, mint === 'spare' ? null : mint);
 }
 
@@ -299,7 +300,7 @@ export function ensureId(instance: string, dir = POLICY_ROOT_DIR, mint: false | 
  */
 export function ensureSpare(instance: string, dir = POLICY_ROOT_DIR, mint: false | 'spare' | Date = false): void {
   const id = ensureId(instance, dir, mint);
-  if (dirMissing(id, dir)) throw new Error(`root's ${idDir(id, dir)} is gone, so auto_merge reads off: an admin runs ${retake(instance)} (it keeps auto_merge off)`);
+  if (dirMissing(id, dir)) throw new Error(`root's ${idDir(id, dir)} is gone, so auto_merge reads off: an admin ${retake(instance, (c) => `runs ${c} (it keeps auto_merge off)`)}`);
   sweepTemps(idDir(id, dir));
   writeSpare(idDir(id, dir));
 }
@@ -367,7 +368,7 @@ export function sweepOrphanIds(dir = POLICY_ROOT_DIR): void {
  */
 export function aliasInstance(from: string, to: string, dir = POLICY_ROOT_DIR): string {
   if (!fileName(to)) throw new Error(`${to}: not an instance name`);
-  if (instanceId(from, dir) === null && recorded(from, dir)) throw new Error(`${from} was taken over (root's record is there) but has no ${idPointerPath(from, dir)}, so auto_merge reads off; a new id would read on. An admin runs ${retake(from)} first (it keeps auto_merge off)`);
+  if (instanceId(from, dir) === null && recorded(from, dir)) throw new Error(`${from} was taken over (root's record is there) but has no ${idPointerPath(from, dir)}, so auto_merge reads off; a new id would read on. An admin ${retake(from, (c) => `runs ${c} first (it keeps auto_merge off)`)}`);
   const id = ensureId(from, dir, 'spare');
   ensureSpare(from, dir);
   const got = linkPointer(to, id, dir);
@@ -429,7 +430,7 @@ export function killAutoMerge(instance: string, dir = POLICY_ROOT_DIR, at = new 
   if (!fileName(instance)) throw new Error(`${instance}: not an instance name`);
   const p = instanceId(instance, dir);
   // It reads off already (fail closed), and that is the truth to say: no switch is armed, and none is needed to stop merges.
-  if (p && 'problem' in p) throw new Error(`root's ${idPointerPath(instance, dir)} can't be used (${p.problem}), so ${instance}'s auto_merge reads off already; no switch could be armed for it. An admin runs ${retake(instance)}, which keeps it off`);
+  if (p && 'problem' in p) throw new Error(`root's ${idPointerPath(instance, dir)} can't be used (${p.problem}), so ${instance}'s auto_merge reads off already; no switch could be armed for it. An admin ${retake(instance, (c) => `runs ${c}, which keeps it off`)}`);
   try {
     if (p) armIn(p.id, dir, at);
     else ensureId(instance, dir, at);
