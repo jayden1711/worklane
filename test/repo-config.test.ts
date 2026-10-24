@@ -275,3 +275,45 @@ test("#882: the Repo config form's Propose failing on a raw error naming a path 
     await s.d.close();
   }
 });
+
+/** console.error's lines while `f` runs. */
+async function logged<T>(f: () => Promise<T>): Promise<{ out: T; lines: string[] }> {
+  const lines: string[] = [];
+  const was = console.error;
+  console.error = (...a: unknown[]) => void lines.push(a.map(String).join(' '));
+  try {
+    return { out: await f(), lines };
+  } finally {
+    console.error = was;
+  }
+}
+
+test("#882: Propose refused by GitHub (gh pr create) answers the engine's own words; GitHub's text is in the dashboard's log only", async () => {
+  const f = fixture();
+  const said = 'GraphQL: Resource not accessible by integration (createPullRequest)';
+  const s = await dashboard(f.dir, (args) => (args[0] === 'pr' && args[1] === 'create' ? { status: 1, stdout: '', stderr: `${said}\n` } : { status: 1, stdout: '', stderr: 'no stand-in' }));
+  try {
+    const { out: r, lines } = await logged(() => s.post('/api/first-run/repo-config', 'example-owner', { values: { daily_budget_usd: 25 }, confirm: true }));
+    assert.equal(r.status, 400, JSON.stringify(r.body));
+    assert.match(r.body.error!, new RegExp(`^${BRAND.cli}/config-\\d{8}-\\d{6} is pushed, but opening its PR failed; the detail is in the dashboard's log on the machine$`));
+    assert.ok(!r.body.error!.includes('GraphQL'), r.body.error);
+    assert.ok(lines.some((l) => l.includes('POST /api/first-run/repo-config') && l.includes(said)), `GitHub's text is logged: ${JSON.stringify(lines)}`);
+  } finally {
+    await s.d.close();
+  }
+});
+
+test("#882: Propose failing in git (the fetch from an origin that isn't there) answers the engine's own words; git's text and its path are in the dashboard's log only", async () => {
+  const f = fixture();
+  const gone = join(tmpdir(), `repo-config-gone-${process.pid}`, 'X.git');
+  f.git('remote', 'set-url', 'origin', gone);
+  const s = await dashboard(f.dir, ghStandIn().gh);
+  try {
+    const { out: r, lines } = await logged(() => s.post('/api/first-run/repo-config', 'example-owner', { values: { daily_budget_usd: 25 }, confirm: true }));
+    assert.equal(r.status, 400, JSON.stringify(r.body));
+    assert.deepEqual(r.body, { error: "git fetch origin main failed; the detail is in the dashboard's log on the machine" });
+    assert.ok(lines.some((l) => l.includes('POST /api/first-run/repo-config') && l.includes(gone) && l.includes('does not appear to be a git repository')), `git's text is logged: ${JSON.stringify(lines)}`);
+  } finally {
+    await s.d.close();
+  }
+});

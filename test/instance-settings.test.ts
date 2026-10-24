@@ -180,3 +180,30 @@ test('a change outside the bounds, of an unknown setting, or by anyone but the o
     await z.d.close();
   }
 });
+
+test("#882: a change refused on the machine's limits file or the policy file answers the engine's own words; the file's path and the parser's text are in the dashboard's log only", async () => {
+  const s = setup();
+  writeFileSync(s.limitsPath, '{not json');
+  const x = await serve(s);
+  const lines: string[] = [];
+  const was = console.error;
+  console.error = (...a: unknown[]) => void lines.push(a.map(String).join(' '));
+  try {
+    const r = await x.post('workers', 2);
+    const body = (await r.json()) as { error: string };
+    writeFileSync(s.policyFile, 'version: 1\nbudget: { daily_usd: lots }\n');
+    const policy = await fetch(`${x.base}/api/first-run/policy`, { method: 'POST', headers: x.h, body: JSON.stringify({ values: { auto_merge: false } }) });
+    const policyBody = (await policy.json()) as { error: string };
+    console.error = was;
+    assert.equal(r.status, 400, JSON.stringify(body));
+    assert.deepEqual(body, { error: "the machine's limits file is unreadable; the detail is in the dashboard's log on the machine" });
+    assert.equal(policy.status, 400, JSON.stringify(policyBody));
+    assert.match(policyBody.error, /^this instance's policy\.yaml is invalid: budget\.daily_usd: .+; the detail is in the dashboard's log on the machine$/);
+    for (const text of [body.error, policyBody.error]) for (const leak of [s.dir, tmpdir(), 'JSON']) assert.ok(!text.includes(leak), `${leak} in ${text}`);
+    assert.ok(lines.some((l) => l.includes('POST /api/instance-settings') && l.includes(s.limitsPath) && l.includes('JSON')), `the limits file's path and the parser's text are logged: ${JSON.stringify(lines)}`);
+    assert.ok(lines.some((l) => l.includes('POST /api/first-run/policy') && l.includes(s.policyFile)), `the policy file's path is logged: ${JSON.stringify(lines)}`);
+  } finally {
+    console.error = was;
+    await x.d.close();
+  }
+});

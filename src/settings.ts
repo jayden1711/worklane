@@ -48,7 +48,11 @@ export const Limits = z.strictObject({
 });
 export type Limits = z.infer<typeof Limits>;
 
+/** A refusal the page shows as it is: the engine's words. A path or a raw error goes in `cause`, logged only (#882). */
 export class SettingsError extends Error {}
+
+/** readPolicyChecked's refusal, which names the file and root's record, as the page says it; the refusal is the cause. */
+export const POLICY_CHECK_REFUSED = "refused: this instance's policy.yaml isn't the file root last wrote, so something may have changed it; an admin checks it at a root shell";
 
 /** The machine's limits: the engine's defaults when there's no limits file; an unreadable or invalid one is an error. */
 export function loadLimits(path = LIMITS_PATH): Limits {
@@ -57,10 +61,10 @@ export function loadLimits(path = LIMITS_PATH): Limits {
   try {
     raw = JSON.parse(readFileSync(path, 'utf8'));
   } catch (e) {
-    throw new SettingsError(`limits file ${path} is unreadable: ${(e as Error).message}`);
+    throw new SettingsError("the machine's limits file is unreadable", { cause: `limits file ${path}: ${(e as Error).message}` });
   }
   const r = Limits.safeParse(raw);
-  if (!r.success) throw new SettingsError(`limits file ${path} is invalid: ${r.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ')}`);
+  if (!r.success) throw new SettingsError(`the machine's limits file is invalid: ${r.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ')}`, { cause: `limits file ${path}` });
   return r.data;
 }
 
@@ -309,7 +313,7 @@ export function changeSetting(o: { policyPath: string; cfg: Config; eventsDb: st
   if (!(SETTING_KEYS as readonly string[]).includes(o.key)) throw new SettingsError(`unknown setting ${o.key}; settings are ${SETTING_KEYS.join(', ')}`);
   const key = o.key as SettingKey;
   const checked = readPolicyChecked(o.policyPath);
-  if (checked && 'refused' in checked) throw new SettingsError(checked.refused);
+  if (checked && 'refused' in checked) throw new SettingsError(POLICY_CHECK_REFUSED, { cause: checked.refused });
   const text = checked ? checked.text : readFileSync(o.policyPath, 'utf8');
   const doc = parseDocument(text);
   const before = PolicyFile.parse(doc.toJS());
@@ -342,8 +346,8 @@ export function changeSetting(o: { policyPath: string; cfg: Config; eventsDb: st
     if (unproven) throw new SettingsError(`refused: ${unproven}`);
     // Up front, nothing recorded: on a sudo whose rule leaves set-policy out, a request would only fail at the helper.
     const missing = policyHelperMissing(o.helperRulesFile, [`settings.${key}`, arg]);
-    if (missing) throw new SettingsError(`${o.policyPath} is root's, and ${missing}: an admin changes it at a root shell (${root})`);
-    if (!o.request) throw new SettingsError(`${o.policyPath} is root's: an admin changes it at a root shell (${root})`);
+    if (missing) throw new SettingsError(`this instance's policy.yaml is root's, and ${missing}: an admin changes it at a root shell (${root})`);
+    if (!o.request) throw new SettingsError(`this instance's policy.yaml is root's: an admin changes it at a root shell (${root})`);
     return { from, to, requested: o.request(['set-policy', `settings.${key}`, arg]) };
   }
   // Atomic: a temp file in the same directory, the original's owner, 0600; then rename over it.

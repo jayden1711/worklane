@@ -94,6 +94,17 @@ export function logDetail(what: string, e: unknown, log: (line: string) => void 
 }
 
 /**
+ * An engine refusal's own text for the page (ConfigChangeError, SettingsError, SetupModeError, PolicyEditError: the
+ * engine's words). Its `cause`, where the refusal has one (a child's stderr, GitHub's answer, a path), goes to the log
+ * only, after `what`, and the text says so.
+ */
+export function refusalText(what: string, e: Error, log: (line: string) => void = (l) => console.error(l)): string {
+  if (e.cause === undefined) return e.message;
+  logDetail(what, e.cause, log);
+  return `${e.message}; ${DETAIL_LOGGED}`;
+}
+
+/**
  * A server's last answer to an error (the dashboard's and the hub's request handlers): a UserFacingError's status and
  * vetted text, and for anything else a 500 with INTERNAL_ERROR_TEXT. The detail (which may name a path under the
  * instance home, a file's text or a child's stderr) goes to the server's own log on the machine only, through the

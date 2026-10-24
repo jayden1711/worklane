@@ -125,7 +125,7 @@ import { INTAKE_FILE } from './intake/config.js';
 import { checkRootStep } from './console/root-steps.js';
 import { accountSet, CLAUDE_ACCOUNT_DIR, claudeAccountGate, claudeAccountView, mayViewClaudeAccount, requestClaudeAccount } from './claude-account.js';
 import { CREDENTIAL_ROUTE_GONE, refuseClaudeCredential, REMOVED_CREDENTIAL_PATHS } from './claude-credential-guard.js';
-import { DETAIL_LOGGED, errorAnswer, logDetail, userFacing } from './user-facing-error.js';
+import { DETAIL_LOGGED, errorAnswer, logDetail, refusalText, userFacing } from './user-facing-error.js';
 import { isTailscaleAction, mayViewTailscale, noTailscaleView, requestTailscale, stepsStamp, TAILSCALE_DIR, tailscaleStatus, tailscaleView, type TailscaleStatus } from './tailscale-setup.js';
 import { asksFrom, ASK_EVENTS } from './console/asks.js';
 import { incidentsView } from './watchdog/view.js';
@@ -2182,7 +2182,7 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
             else audit(who, 'settings.changed', { key: String(body.key ?? ''), from: r.from, to: r.to });
             return json(res, 200, { ok: true, ...r, ...(r.requested ? { queued: true } : {}) });
           } catch (e) {
-            if (e instanceof SettingsError) return json(res, /only the owner/.test(e.message) ? 403 : 400, { error: e.message });
+            if (e instanceof SettingsError) return json(res, /only the owner/.test(e.message) ? 403 : 400, { error: refusalText(`${req.method} ${url.pathname}`, e) });
             throw e;
           }
         }
@@ -2278,7 +2278,7 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
                 m = mergeConfigPrHere(who, pr.number, true);
               } catch (e) {
                 if (!(e instanceof ConfigChangeError)) logDetail(`${req.method} ${url.pathname}: merging PR #${pr.number}`, e);
-                m = { status: 400, body: { error: e instanceof ConfigChangeError ? e.message : `not merged here; ${DETAIL_LOGGED}` } };
+                m = { status: 400, body: { error: e instanceof ConfigChangeError ? refusalText(`${req.method} ${url.pathname}: merging PR #${pr.number}`, e) : `not merged here; ${DETAIL_LOGGED}` } };
               }
               if (m.status !== 200) return json(res, 200, { ok: true, number: pr.number, url: pr.url, merged: false, why: `PR #${pr.number} opened: merge it on GitHub (${String(m.body.error ?? 'not merged here')})`, confirmed: true });
               return json(res, 200, { ...m.body, url: pr.url });
@@ -2289,8 +2289,8 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
             const m = mergeConfigPrHere(who, n, body.confirm === true);
             return m.status === 200 ? json(res, 200, m.body) : refused(m.status, String(m.body.error));
           } catch (e) {
-            if (e instanceof SetupModeError) return refused(e.status, e.message);
-            if (e instanceof ConfigChangeError) return refused(400, e.message);
+            if (e instanceof SetupModeError) return refused(e.status, refusalText(`${req.method} ${url.pathname}`, e));
+            if (e instanceof ConfigChangeError) return refused(400, refusalText(`${req.method} ${url.pathname}`, e));
             throw e;
           }
         }
@@ -2338,7 +2338,7 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
             if (n > 0) trackConfigPr(opts.stateDir, { number: n, url: r.url, kind: 'config', base: liveCfg().project.project.default_branch, head: r.head });
             return json(res, 200, { ok: true, ...r, confirmed: true });
           } catch (e) {
-            if (e instanceof ConfigChangeError) return refused(400, e.message);
+            if (e instanceof ConfigChangeError) return refused(400, refusalText(`${req.method} ${url.pathname}`, e));
             logDetail(`${req.method} ${url.pathname} failed`, e);
             return refused(500, `the config change wasn't proposed; ${DETAIL_LOGGED}`);
           }
@@ -2358,7 +2358,7 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
             const m = mergeConfigPrHere(who, body.number, body.confirm === true);
             return m.status === 200 ? json(res, 200, m.body) : refused(m.status, String(m.body.error));
           } catch (e) {
-            if (e instanceof ConfigChangeError) return refused(400, e.message);
+            if (e instanceof ConfigChangeError) return refused(400, refusalText(`${req.method} ${url.pathname}`, e));
             throw e;
           }
         }
@@ -2385,7 +2385,7 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
             audit(who, 'first_run.config_synced', { number: rec.number, synced: after.synced, detail: (after.why ?? mergedLine(after)).slice(0, 300) });
             return json(res, 200, { ok: true, number: rec.number, synced: after.synced, detail: after.synced ? mergedLine(after) : after.why, record: after, confirmed: true });
           } catch (e) {
-            if (e instanceof ConfigChangeError) return refused(400, e.message);
+            if (e instanceof ConfigChangeError) return refused(400, refusalText(`${req.method} ${url.pathname}`, e));
             throw e;
           }
         }
@@ -2411,7 +2411,7 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
             audit(who, 'first_run.policy', { changes, ...(requests.length ? { requests, note: 'queued for the coordinator' } : {}) });
             return json(res, 200, { ok: true, changes, confirmed: true, ...(requests.length ? { queued: true } : {}) });
           } catch (e) {
-            if (e instanceof PolicyEditError) return refused(400, e.message);
+            if (e instanceof PolicyEditError) return refused(400, refusalText(`${req.method} ${url.pathname}`, e));
             throw e;
           }
         }
