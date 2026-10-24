@@ -113,6 +113,38 @@ function gateBinary(file: string, bytes: Buffer) {
   return gateRange(r.dir, base);
 }
 
+/** Compressed-looking bytes with "author: secretproject" in a text run. */
+const tagged = () => Buffer.concat([noise(64), Buffer.from([0xfe, 0]), Buffer.from('author: secretproject'), Buffer.from([0, 0xff]), noise(64)]);
+
+test('push gate scans a binary that is only in the pushed tip\'s tree, not in any pushed commit (#989)', { skip }, () => {
+  const r = repo();
+  writeFileSync(join(r.dir, 'image.png'), tagged());
+  r.git('add', 'image.png');
+  r.git('commit', '-q', '-m', 'add image');
+  const base = r.git('rev-parse', 'HEAD');
+  r.commit('ok.md', 'fine\n', 'clean');
+  const p = gateRange(r.dir, base);
+  assert.notEqual(p.status, 0, 'refused');
+  assert.match(p.stderr, /[0-9a-f]{8} image\.png: denied term "secretproject" in a binary file/);
+});
+
+test('push gate applies .denylist-allow to a binary: an entry for its path lets it through, one for another path does not (#989)', { skip }, () => {
+  for (const [glob, ok] of [['image.png', true], ['other.png', false]] as const) {
+    const r = repo();
+    r.commit('.denylist-allow', `${glob} secretproject\n`, 'allow');
+    const base = r.git('rev-parse', 'HEAD');
+    writeFileSync(join(r.dir, 'image.png'), tagged());
+    r.git('add', 'image.png');
+    r.git('commit', '-q', '-m', 'add image');
+    const p = gateRange(r.dir, base);
+    if (ok) assert.equal(p.status, 0, `${glob}: ${p.stderr}`);
+    else {
+      assert.notEqual(p.status, 0, `${glob}: refused`);
+      assert.match(p.stderr, /image\.png: denied term "secretproject" in a binary file/, glob);
+    }
+  }
+});
+
 test('push gate allows a binary file whose bytes only look like a denylist pattern: binaries are scanned for hashed terms only (#989)', { skip }, () => {
   const p = gateBinary('data.bin', Buffer.concat([Buffer.from([0, 0x7f]), Buffer.from(` ${['D', '123'].join('')} ${[10, 1, 2, 3].join('.')} `), Buffer.from([0])]));
   assert.equal(p.status, 0, p.stderr);

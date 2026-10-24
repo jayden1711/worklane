@@ -69,7 +69,7 @@ export function scanText(rules, path, text) {
 const ASCII_RUN = /[\t\n\r\x20-\x7e]+/g;
 const UTF16LE_RUN = /(?:[\t\n\r\x20-\x7e]\0)+/g;
 // Compressed bytes hold a short term by chance: about one 3-letter hit per 4 MB of random bytes against this repo's
-// terms, and still one per 150 MB in runs of 8 (#989). A term this long, or in a run this long, is not chance.
+// terms, and still one per 150 MB in runs of 8 (#989). A term this long, or in a run this long, is rarely chance.
 const BINARY_RUN = 8;
 const BINARY_TERM = 6;
 
