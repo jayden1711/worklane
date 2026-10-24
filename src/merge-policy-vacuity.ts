@@ -39,10 +39,13 @@
 // where V8 makes no block range of its own, so a change there counts when the code around it ran (measured, round-8
 // reviews): an optional call's arguments, a default parameter, a destructuring default, a logical assignment's right
 // side (`??=`, `||=`, `&&=`), code in a string (`new Function('…')`), and built code, which its map places only by line.
-// Each of these has a todo test (merge-vacuity-r8, -r9-limits; B1 in -r6). And two where an untested change merges
-// (round 13): code moved in a way git doesn't pair (a file renamed and re-indented or edited, a function moved into
-// another file or within its file, moved code re-wrapped) reads as added code, so a test that runs it merges the PR
-// (measured: todo tests R1, R3, R4 in merge-vacuity-r12; M3, M4b, M5b, R3s in -r13); and deleting an app file, or
+// Each of these has a todo test (merge-vacuity-r8, -r9-limits; B1 in -r6). And two where an untested change merges:
+// code moved in a way git doesn't pair is measured as if git had paired it (#1014: a file renamed and re-indented or
+// edited, a function moved into another file or within its file, moved code re-wrapped; must-holds R1, R3, R4 in
+// merge-vacuity-r12, M3, M4b, M4b1, M5b, M5c, A6, R3s in -r13), but only a top-level statement moved whole, paired by
+// its code or its declared name: one renamed as it moved, or moved inside a statement that stays (a method within its
+// class, a statement into another function), still reads as added code, so a test that runs it merges the PR
+// (inferred: the pairing's rules); and deleting an app file, or
 // renaming one out of app code (to a data file, a test path, or out of app_paths), leaves no app code to measure, so
 // it merges with no test and no run (measured for a deletion, a file renamed to .json and one renamed to a test path;
 // inferred for a move out of app_paths, which the same app-code filter drops).
