@@ -1,9 +1,11 @@
 // writeOwnerOnly never writes through, or sets the mode of, a link planted beside the file it writes (#950): not one
 // planted before the write at the old guessable temp name, not one planted at its own staging name, and not one
-// swapped in for its temp file mid-write by a racer who lists the directory. Fixture files in temp dirs only.
+// swapped in for its temp file mid-write by a racer who lists the directory. A staging file swapped mid-write for
+// any other file, or for a link to itself, is refused, and the mode is 0600 whatever the umask. Fixture files in temp
+// dirs only.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { lstatSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { lstatSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createRequire, syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
@@ -86,6 +88,67 @@ test('writeOwnerOnly never sets the mode of a link swapped in for its temp file 
   assert.match(String(err), /replaced/, 'the write is refused, not published');
   assert.equal(readFileSync(file, 'utf8'), 'OLD\n', 'the file is left as it was');
   assert.deepEqual(readdirSync(dir).sort(), [basename(file), basename(victim)].sort(), 'no staging name (or swapped link) left behind');
+});
+
+/**
+ * Run `fn` with a racer hooked on the write to a descriptor: once, as the data goes in, `swap` gets the one name beside
+ * `keep` that isn't theirs (the staging file) and a directory of its own to move it to.
+ */
+function racingDescriptorWrite(dir: string, keep: string[], swap: (staged: string, aside: string) => void, fn: () => void): void {
+  const fs = createRequire(import.meta.url)('node:fs') as typeof import('node:fs');
+  const real = fs.writeFileSync;
+  const aside = mkdtempSync(join(tmpdir(), 'woo-aside-'));
+  let raced = false;
+  fs.writeFileSync = ((...a: Parameters<typeof fs.writeFileSync>) => {
+    real(...a);
+    if (raced || typeof a[0] !== 'number') return;
+    raced = true;
+    const names = readdirSync(dir).filter((n) => !keep.includes(n));
+    assert.equal(names.length, 1, `one staging name beside the file: ${names.join(', ')}`);
+    swap(join(dir, names[0]!), join(aside, 'moved'));
+  }) as typeof fs.writeFileSync;
+  syncBuiltinESMExports();
+  try {
+    fn();
+  } finally {
+    fs.writeFileSync = real;
+    syncBuiltinESMExports();
+  }
+  assert.ok(raced, 'the racer saw the write');
+}
+
+test('writeOwnerOnly refuses a staging file swapped mid-write for a regular file of the same name', { skip: !POSIX && 'POSIX renames under an open file' }, () => {
+  const { dir, file, victim } = fixture();
+  racingDescriptorWrite(dir, [basename(file), basename(victim)], (staged, aside) => {
+    renameSync(staged, aside);
+    writeFileSync(staged, 'THEIRS\n', { mode: 0o600 });
+  }, () => assert.throws(() => writeOwnerOnly(file, 'NEW SECRET\n'), /replaced/, 'the file written is no longer at the staging name'));
+  assert.equal(readFileSync(file, 'utf8'), 'OLD\n', 'the file is left as it was');
+  assert.deepEqual(readdirSync(dir).sort(), [basename(file), basename(victim)].sort(), 'nothing left beside it');
+});
+
+test('writeOwnerOnly refuses a staging file swapped mid-write for a link to the very file it wrote', { skip: !POSIX && 'symlinks need privileges on Windows' }, () => {
+  const { dir, file, victim } = fixture();
+  racingDescriptorWrite(dir, [basename(file), basename(victim)], (staged, aside) => {
+    renameSync(staged, aside);
+    symlinkSync(aside, staged);
+  }, () => assert.throws(() => writeOwnerOnly(file, 'NEW SECRET\n'), /replaced/, 'a link at the staging name is refused, even to the file written'));
+  assert.ok(lstatSync(file).isFile(), 'the link was published as the file');
+  assert.equal(readFileSync(file, 'utf8'), 'OLD\n', 'the file is left as it was');
+  assert.deepEqual(readdirSync(dir).sort(), [basename(file), basename(victim)].sort(), 'nothing left beside it');
+});
+
+test('writeOwnerOnly leaves the file 0600 whatever the umask', { skip: !POSIX && 'POSIX modes' }, () => {
+  const { file } = fixture();
+  rmSync(file);
+  const before = process.umask(0o277);
+  try {
+    writeOwnerOnly(file, 'NEW SECRET\n');
+  } finally {
+    process.umask(before);
+  }
+  assert.equal(mode(file), 0o600);
+  assert.equal(readFileSync(file, 'utf8'), 'NEW SECRET\n');
 });
 
 test('writeOwnerOnly never opens a link planted at its own staging name, even one predicted', { skip: !POSIX && 'symlinks need privileges on Windows' }, () => {
