@@ -60,7 +60,7 @@ const occurrences = (t: string, x: string) => t.split(x).length - 1;
 /** Pieces each function-backed rule declines or accepts, by the rule's kind. */
 const PIECES: Record<string, string[]> = {
   'Stripe key': [`${'sk'}_live_`, `${'rk'}_test_`, 'abcdefghijklmnopqrst', run(18, 'Q7rZ4kX2m9TbW3pL'), ' ', '-', '.', '_', 'x'],
-  'secret under a JSON key': ['"', '\\"', 'key', 'cacheKey', 'token', 'api_key', ':', ': ', 'issue-644-aaaaaaaaaaaa', run(20, 'Q7rZ4kX2m9TbW3pL'), ','],
+  'secret under a JSON key': ['"', '\\"', "'", 'key', 'cacheKey', 'token', 'api_key', ':', ': ', ' => ', 'issue-644-aaaaaaaaaaaa', run(20, 'Q7rZ4kX2m9TbW3pL'), ','],
   // A Basic value (base64 of `u:` and a password), put together at run time.
   'Basic credential': ['Basic ', 'basic ', 'Authentication', Buffer.from(['u', 'Ch8641A7E2'].join(':')).toString('base64'), '==', '=', ' ', 'x', '+'],
   'private key': [KEY_BEGIN, KEY_END, '\n', 'body', ' '],
