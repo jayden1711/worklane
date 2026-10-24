@@ -41,6 +41,12 @@ test('a secret glued after an escape sequence, a backslash escape or `_` is name
     ['32-byte hex key', `0x${'7e9b5d3c1f0a2468'.repeat(4)}`, '7e9b5d3c1f0a2468'.repeat(4)],
     ['API key (sk-)', `${'sk'}-proj-${run(48)}`, run(48)],
   ];
+  // A value with JSON-escaped slashes: no glue point may split it, so each part is hidden from every glue point.
+  const parts = [run(12, 'aB3cD4eF5'), run(12, 'gH6iJ7kL8'), run(12, 'mN9oP0qR1')];
+  const basic = Buffer.from(`deploy:${run(20)}???abc???xyz`).toString('base64');
+  assert.ok(basic.split('/').length >= 3, 'the Basic value holds two slashes');
+  for (const p of parts) glued.push(['bearer token', `Bearer ${parts.join('\\/')}`, p]);
+  for (const p of basic.split('/')) glued.push(['Basic credential', `Basic ${basic.split('/').join('\\/')}`, p]);
   for (const g of GLUES) for (const [kind, value, secret] of glued) missed.push(...shown(`log ${g}${value} end`, secret, kind));
   // A credential after a newline in raw JSON text: the escape is glued to it.
   missed.push(...shown(`{"detail":"retry\\nBearer ${tok}"}`, tok, 'bearer token'));
