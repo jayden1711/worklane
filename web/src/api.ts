@@ -54,6 +54,12 @@ export interface Decision {
   effects?: { option: string; does: string }[];
 }
 
+/**
+ * A path in the project's repository, raw as the engine read it (a changed file, a file a run wrote). A page shows it
+ * through shownPath (web/src/path-text.ts) or FileChip, never as it is: test/web-shown-path.test.ts fails otherwise.
+ */
+export type ChangedPath = string;
+
 /** A decision's (or a held PR's, `pr-<n>`) detail, GET /api/decisions/:id (src/decision-detail.ts). Null: not recorded. */
 export interface DecisionDetail {
   id: string;
@@ -73,13 +79,13 @@ export interface DecisionDetail {
   summary?: { happened: string; agent: string | null };
   reasoning?: string[];
   receipts?: string[];
-  findings?: { list: { claim: string; evidence: string; file?: string; line?: number; severity?: string; confidence?: string }[]; confidence: string | null; unverified: string[] } | null;
-  change?: { base: string | null; head: string | null; files: { path: string; added: number | null; removed: number | null }[]; filesMore: number; level: string | null; levelReasons: string[]; source: 'asked' | 'log' } | null;
-  verdict?: { patch_correct: boolean; test_correct: boolean; confidence: string; confidenceReason: string | null; advice: string; unread: string[]; unverifiedClaims: string[]; designChange: boolean | null; designReason: string | null } | null;
+  findings?: { list: { claim: string; evidence: string; file?: ChangedPath; line?: number; severity?: string; confidence?: string }[]; confidence: string | null; unverified: string[] } | null;
+  change?: { base: string | null; head: string | null; files: { path: ChangedPath; added: number | null; removed: number | null }[]; filesMore: number; level: string | null; levelReasons: string[]; source: 'asked' | 'log' } | null;
+  verdict?: { patch_correct: boolean; test_correct: boolean; confidence: string; confidenceReason: string | null; advice: string; unread: ChangedPath[]; unverifiedClaims: string[]; designChange: boolean | null; designReason: string | null } | null;
   tests?: { check: string; status: string; duration_ms: number | null; tail?: string }[] | null;
   tampered?: string[];
   pr?: { number: number; url: string; head: string; phase: string; draft: boolean; checks: { name: string; outcome: string }[]; checksOnHead: boolean; waitReasons: string[]; why: { category: string; text: string }[] } | null;
-  impact?: { flags: { flag: 'money-path' | 'auth' | 'secrets'; files: string[] | null }[]; others: string[]; note: string | null };
+  impact?: { flags: { flag: 'money-path' | 'auth' | 'secrets'; files: ChangedPath[] | null }[]; others: string[]; note: string | null };
   runs?: { id: string; role: string; model: string; startedAt: string; endedAt: string | null; reason: string | null }[] | null;
   auth?: { failed: { at: string; role: string; detail: string }[]; held: { login: string; detail: string; since: string } | null };
   diff?: 'owner' | 'owners-only' | 'none';
@@ -118,7 +124,7 @@ export interface RunRecord {
   costUsd: number | null;
   turns: number | null;
   steps: RunStep[];
-  files: string[];
+  files: ChangedPath[];
   otherTools: number;
   final: string;
   truncated: boolean;
@@ -152,8 +158,8 @@ export interface PrView {
   merged: { at: string; sha: string; url: string; auto: boolean } | null;
   mergeFailed: { at: string; why: string } | null;
   mainResult: { at: string; outcome: 'green' | 'red' | 'timed_out'; failed: string[] } | null;
-  conflict: { state: 'detected' | 'running' | 'done'; at: string; attempt: number; outcome: string | null; files: string[]; waitsOwner: boolean; reasons: string[]; detail: string } | null;
-  lightCheck: { state: 'running' | 'done'; at: string; mainSha: string; overlap: string[]; outcome: string | null; waitMs: number | null; detail: string } | null;
+  conflict: { state: 'detected' | 'running' | 'done'; at: string; attempt: number; outcome: string | null; files: ChangedPath[]; waitsOwner: boolean; reasons: string[]; detail: string } | null;
+  lightCheck: { state: 'running' | 'done'; at: string; mainSha: string; overlap: ChangedPath[]; outcome: string | null; waitMs: number | null; detail: string } | null;
   phase: 'waiting' | 'fixing' | 'resolving' | 'light_check' | 'gave_up' | 'checks' | 'ready' | 'auto_merged' | 'merged' | 'closed';
 }
 
@@ -213,7 +219,7 @@ export interface HealthView {
     mergedPrs: number;
     conflicts: { count: number; needOwner: number; minutesToMerged: number[]; medianMinutes: number | null; perMergedPr: number };
     lightChecks: { count: number; minutesAdded: number; perMergedPr: number; outcomes: Record<string, number> };
-    holds: { count: number; minutesWaited: number; perMergedPr: number; byFile: { file: string; minutes: number; count: number }[] };
+    holds: { count: number; minutesWaited: number; perMergedPr: number; byFile: { file: ChangedPath; minutes: number; count: number }[] };
     flags: string[];
   };
   suggestions: string[];
@@ -224,7 +230,7 @@ export interface PrsView {
   refused: { at: string; issue: number; title: string; head: string; stage: string; reasons: string[] }[];
   stops: { at: string; kind: 'stopped' | 'resumed'; reason: string; number: number | null; revert: string | null }[];
   /** Tasks held on a hotspot (another task is changing the same files): still held (until null), or released. */
-  holds: { issue: number; title: string; by: number; files: string[]; reason: string; since: string; until: string | null; waitedMs: number | null; kind?: 'files' | 'dependency' }[];
+  holds: { issue: number; title: string; by: number; files: ChangedPath[]; reason: string; since: string; until: string | null; waitedMs: number | null; kind?: 'files' | 'dependency' }[];
   /** Whether this instance merges its own PRs now, and why (or why not). */
   autoMerge: { on: boolean; policy: boolean | null; repo: boolean | null; stopped: string | null; why: string };
   /** The latest stale-PR pass: its counts and their line; null before the first (absent from an older server). */
@@ -2368,7 +2374,7 @@ export interface ExpLogRow {
   stage2: ExpStage2[];
   seeds: number;
   motivation: string;
-  change: { commit: string | null; files: string[] };
+  change: { commit: string | null; files: ChangedPath[] };
   config: Record<string, string | number>;
   minutes: number | null;
   waited_s: number | null;
@@ -2406,7 +2412,7 @@ export type ExpStudy =
       current: { n: number; job: string | null; kind: string; hypothesis: string; approval: string[]; since: string } | null;
       spend: { agentToday: number; agentPerDay: number; agentTotal: number; agentAll: number; gpuHoursToday: number; gpuHoursPerDay: number; jobs: number; maxJobs: number };
       counts: { jobs: number; kept: number; explore: number; crash: number; screened: number };
-      held: { n: number; hypothesis: string; variable: string; why: string; commit: string | null; files: string[]; stage2: ExpStage2[]; monitor: { flagged: boolean; findings: string[] } | null } | null;
+      held: { n: number; hypothesis: string; variable: string; why: string; commit: string | null; files: ChangedPath[]; stage2: ExpStage2[]; monitor: { flagged: boolean; findings: string[] } | null } | null;
       points: { n: number; value: number | null; kept: boolean }[];
       log: ExpLogRow[];
     });

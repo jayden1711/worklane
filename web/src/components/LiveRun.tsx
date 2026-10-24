@@ -3,10 +3,11 @@
 // the instance's own server, and, for the owner, the console: a message for the agent
 // (held until its current turn ends) and Stop. Everything arrives redacted and capped.
 import { useEffect, useRef, useState } from 'react';
-import { api, apiPath, liveStream } from '../api';
+import { api, apiPath, liveStream, type ChangedPath } from '../api';
 import type { Stream } from '../sse';
 import { Loading, StatusMark, ToolRow } from './patterns';
 import { ago, Badge, Button, Card, cx, EST_NOTE, estUsd } from './ui';
+import { shownPath } from '../path-text';
 
 export type FeedItem = { seq: number; at: string } & (
   | { kind: 'start'; run: string; issue: number | null; role: string; model: string }
@@ -14,7 +15,7 @@ export type FeedItem = { seq: number; at: string } & (
   | { kind: 'thinking'; text: string }
   | { kind: 'tool'; id: string; tool: string; input: string }
   | { kind: 'tool_result'; id: string; status: 'ok' | 'error'; output: string }
-  | { kind: 'diff'; id: string; tool: string; file: string; diff: string }
+  | { kind: 'diff'; id: string; tool: string; file: ChangedPath; diff: string }
   | { kind: 'message'; id: string; state: 'queued' | 'delivered' | 'dropped'; text?: string }
   | { kind: 'truncated'; why: 'bytes' | 'lines' }
   | { kind: 'end'; reason: string; costUsd: number; turns: number }
@@ -56,12 +57,12 @@ export interface LiveList {
 export const liveRunFor = (r: { issue: number; role: string }, live: LiveList | null | undefined) => live?.runs.find((x) => x.issue === r.issue && x.role === r.role)?.run ?? null;
 
 /** A diff's lines, + green and - red, the rest quiet. */
-function Diff({ file, tool, diff }: { file: string; tool: string; diff: string }) {
+function Diff({ file, tool, diff }: { file: ChangedPath; tool: string; diff: string }) {
   return (
     <div className="overflow-hidden rounded-control bg-surface shadow-hairline" data-testid="live-diff">
       <div className="flex items-center gap-2 border-b border-line px-2.5 py-1.5 font-mono text-[11.5px]">
         <span className="text-ink-3">{tool}</span>
-        <span className="min-w-0 truncate text-ink">{file}</span>
+        <span className="min-w-0 truncate text-ink">{shownPath(file)}</span>
       </div>
       <pre className="max-h-80 overflow-auto py-1 font-mono text-[11.5px] leading-[1.7]">
         {diff.split('\n').map((l, i) => (
