@@ -396,7 +396,9 @@ const KEYWORDS_BEFORE_REGEX = new Set(['return', 'typeof', 'instanceof', 'in', '
  * string, template, comment or regular expression still open at the end), no line holds code. So where one reading is
  * right, a misread only makes a line count for less. Where both misread, with a `/` needing each reading and a quote
  * or backtick after the wrong one, a comment line can still read as code (inferred). `top[i]`: line i starts outside
- * every bracket, string, template and comment in both readings (a top-level statement can start there: topUnits).
+ * every bracket, string, template and comment (a top-level statement can start there: topUnits), as the first reading
+ * says when it ends cleanly: the second turns a division inside brackets (`Math.round(u / 2)`) into a regular
+ * expression that takes the `)`, so no later line would start outside them (#1014's adversarial review, P1).
  */
 export function codeLines(text: string): { code: boolean[]; inComment: boolean[]; mask: Uint8Array; top: boolean[] } {
   const a = lexLines(text, false);
@@ -405,7 +407,7 @@ export function codeLines(text: string): { code: boolean[]; inComment: boolean[]
   // `mask[i]`: character i is code in both readings (#784 round 8: a change is measured by its characters).
   const mask = new Uint8Array(text.length);
   for (let i = 0; i < text.length; i++) mask[i] = a.mask[i]! & b.mask[i]!;
-  return { code: a.code.map((c, i) => c && b.code[i] === true), inComment: a.inComment.map((c, i) => c || b.inComment[i] === true), mask, top: a.top.map((t, i) => t && b.top[i] === true) };
+  return { code: a.code.map((c, i) => c && b.code[i] === true), inComment: a.inComment.map((c, i) => c || b.inComment[i] === true), mask, top: a.settled ? a.top : b.top };
 }
 
 /** One reading of codeLines: `slashIsRegex`, every `/` that starts no comment starts a regular expression. */
@@ -936,8 +938,9 @@ const MOVE_PAIR_CELLS = 8 * ALIGN_CELLS;
  * that hold code are all removed, from any app file at the base (`hunks`' removed lines, and `elsewhere`'s: the removed
  * line spans of app files not measured, a deleted one say): first one with the same code (MOVE_NOISE and whitespace
  * left out), then one with the same declared name. Each source pairs once. A statement moved inside a statement that
- * stays (two lines swapped in a function) is in no moved unit: reordering is a change. A file with no moved unit, or
- * whose moved units can't be placed, is not in the map: it is measured as git paired it. measureTouched counts a file
+ * stays (two lines swapped in a function) is in no moved unit: reordering is a change. A file with no moved unit is
+ * not in the map: it is measured as git paired it. A moved unit it can't place throws UNPLACEABLE (the PR holds, as
+ * for a hunk). measureTouched counts a file
  * only where both this and codeRanges count it, so pairing only ever takes away (M1, D1: a dead copy of an edited
  * line's old text never makes the edit count).
  */
@@ -1022,7 +1025,8 @@ function movedCode(
     ms.sort((x, y) => x.unit.first - y.unit.first);
     const hunks = ms.map(({ unit, from }): ChangedHunkSpots => ({ at: unit.first - 1, added: Array.from({ length: unit.last - unit.first + 1 }, (_, k) => unit.first + k), removed: from.lines, from: from.first, oldPath: from.path }));
     const m = codeRanges(text, hunks, baseOf, true);
-    if (!m) continue;
+    // A moved unit it can't place holds the PR, as a hunk does: never its file measured as added code instead (P2).
+    if (!m) throw new CoverageUnreadable(UNPLACEABLE);
     // The unit's lines, as offsets: what codeRanges found there gives way to the unit measured against its source.
     const starts = lineStarts(text);
     const inUnit = (o: number) => ms.some(({ unit }) => o >= starts[unit.first - 1]! && o < starts[unit.last]!);

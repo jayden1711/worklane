@@ -239,3 +239,67 @@ test('control: R3s: the same re-wrapped move with a tested factor changed merges
   const d = await decided({ 'src/a.js': M_BASE }, { 'src/a.js': M_A, 'src/c.js': wrapped, 'test/x.test.js': calls('c.js', 'h', 'h(2)', '6') });
   assert.deepEqual([d.auto, d.reasons], [true, []]);
 });
+
+// ---- P1 (#1014's adversarial review): a division inside brackets never turns the pairing off for the rest of a file
+
+const HALF = 'export function half(u) {\n  return Math.round(u / 2);\n}\n';
+
+test('must hold: P1a: M5c with a division inside a call above g in the file g left', async () => {
+  const d = await decided({ 'src/s.js': HALF + S }, { 'src/s.js': (HALF + S).replace(S_G, '').replace("'all'", "'everything'"), 'src/c.js': S_C, 'test/x.test.js': calls('c.js', 'g', 'g({})', '3') });
+  assert.deepEqual([d.auto, d.reasons], hold('src/c.js, src/s.js'));
+});
+
+test('must hold: P1b: M5c with a division inside a call above g in the file g moved to', async () => {
+  const c = `import { combine, alpha, beta } from './s.js';\n${HALF}${S_G}`;
+  const d = await decided({ 'src/s.js': S }, { 'src/s.js': S.replace(S_G, '').replace("'all'", "'everything'"), 'src/c.js': c, 'test/x.test.js': calls('c.js', 'g', 'g({})', '3') });
+  assert.deepEqual([d.auto, d.reasons], hold('src/c.js, src/s.js'));
+});
+
+test('control: P1: the same with a multiplication holds', async () => {
+  const times = HALF.replace('u / 2', 'u * 2');
+  const d = await decided({ 'src/s.js': times + S }, { 'src/s.js': (times + S).replace(S_G, '').replace("'all'", "'everything'"), 'src/c.js': S_C, 'test/x.test.js': calls('c.js', 'g', 'g({})', '3') });
+  assert.deepEqual([d.auto, d.reasons], hold('src/c.js, src/s.js'));
+});
+
+// ---- P2: a moved unit that can't be placed holds the PR, never its file measured as added code
+
+const lines = (n: number, line: (i: number) => string) => Array.from({ length: n }, (_, i) => line(i)).join('');
+const BIG_G = `export function g(u) {\n${lines(297, (i) => `  const v${i} = u.a${i} + ${i};\n`)}  return u;\n}\n`;
+const P_H = 'export function h(x) {\n  return x * 2;\n}\n';
+const UNPLACED = "design: vacuity: its coverage run failed: a change too large to align character by character, so where it changed code can't be told";
+
+test('must hold: P2: a 300-line g moved and rewritten untested into 280 lines, beside a tested unchanged h', async () => {
+  const rewritten = `export function g(u) {\n${lines(277, (i) => `  const w${i} = u.b${i} * ${i};\n`)}  return u;\n}\n`;
+  const d = await decided({ 'src/a.js': M_A + BIG_G + P_H }, { 'src/a.js': M_A, 'src/c.js': rewritten + P_H, 'test/x.test.js': calls('c.js', 'h', 'h(2)', '4') });
+  assert.deepEqual([d.auto, d.reasons], [false, [UNPLACED]]);
+});
+
+test('control: P2: the same move with a small untested rewrite of g holds as ran none', async () => {
+  const d = await decided({ 'src/a.js': M_A + BIG_G + P_H }, { 'src/a.js': M_A, 'src/c.js': BIG_G.replace('u.a5 + 5', 'u.a5 + 6') + P_H, 'test/x.test.js': calls('c.js', 'h', 'h(2)', '4') });
+  assert.deepEqual([d.auto, d.reasons], hold('src/a.js, src/c.js'));
+});
+
+// ---- P3m, P3d, P5: a file counts only where it counts both with and without the pairing, in app code and through dist/
+
+const PG = "export function g(u) {\n  if (u.admin) {\n    return 'all';\n  }\n  return 'none';\n}\n";
+const PG_HEAD = "export function g(u) { // c1\n  if (u.admin) { // c2\n    return 'everything'; // c3\n  } // c4\n  return 'none'; // c5\n} // c6\n";
+const BG = "export function g(u) {\n  if (u.admin) {\n    return 'everything';\n  }\n  return 'nothing';\n}\n";
+const map = (file: string, src: string, n: number) => JSON.stringify({ version: 3, file, sources: [src], names: [], mappings: ['AAAA', ...Array.from({ length: n - 1 }, () => 'AACA')].join(';') });
+const fromDist = (file: string, name: string, call: string, want: string) => `${H}import { ${name} } from '../dist/${file}';\ntest('${name}', () => { assert.deepEqual(${call}, ${want}); });\n`;
+
+test('must hold: P3m: g edited in place on every line (an untaken arm), a closer same-named g removed from b.js: only the pairing counts it', async () => {
+  const d = await decided({ 'src/a.js': PG, 'src/b.js': A6_K + BG }, { 'src/a.js': PG_HEAD, 'src/b.js': A6_K, 'test/x.test.js': calls('a.js', 'g', 'g({})', "'none'") });
+  assert.deepEqual([d.auto, d.reasons], hold('src/a.js, src/b.js'));
+});
+
+test('must hold: P3d: P3m through dist/ with an identity map', async () => {
+  const before = { 'src/a.js': PG, 'src/b.js': A6_K + BG, 'dist/a.js': PG, 'dist/a.js.map': map('a.js', '../src/a.js', 6) };
+  const d = await decided(before, { 'src/a.js': PG_HEAD, 'src/b.js': A6_K, 'dist/a.js': PG_HEAD, 'test/x.test.js': fromDist('a.js', 'g', 'g({})', "'none'") });
+  assert.deepEqual([d.auto, d.reasons], hold('src/a.js, src/b.js'));
+});
+
+test('must hold: P5: R3 through dist/ with an identity map', async () => {
+  const c = "export function g(u) {\n  return 'ok';\n}\n" + P_H;
+  const d = await decided({ 'src/a.js': M_BASE }, { 'src/a.js': M_A, 'src/c.js': c, 'dist/c.js': c, 'dist/c.js.map': map('c.js', '../src/c.js', 6), 'test/x.test.js': fromDist('c.js', 'h', 'h(2)', '4') });
+  assert.deepEqual([d.auto, d.reasons], hold('src/a.js, src/c.js'));
+});
