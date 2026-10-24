@@ -5,11 +5,12 @@
 //
 // The lint is an allowlist. In the server's route files (SCANNED), a caught error (a catch clause's binding; the
 // parameter of a `.catch(...)` callback, of `.then(...)`'s second one, or of an `'error'` listener added with on, once
-// or addListener; a parameter typed `unknown`, `any` or `Error` and named like one: e, err, error, ex, cause, reason)
-// may appear only as: the left of `instanceof`; the object of a `.code` read (an errno word, cast or not); an argument
-// of logDetail or errorAnswer; what `throw` throws, `Promise.reject` rejects, or a `new Promise` executor's `reject`
-// rejects; the first argument of a function in the same file whose first parameter the lint takes for an error (so it
-// scans that function too). Anywhere it is narrowed to one of the engine's own error classes (`if (e instanceof
+// or addListener; a parameter named like one, e, err, error, ex, cause or reason, and typed `unknown`, `any` or a type
+// whose name ends in Error or Exception) may appear only as: the left of `instanceof`; the object of a `.code` read (an
+// errno word, cast or not); an argument of logDetail or errorAnswer called by that bare name (not a method of it, and
+// not refusalText, which shows the message); what `throw` throws, `Promise.reject` rejects, or a `new Promise`
+// executor's `reject` rejects; the first argument of a function in the same file, called by its bare name, whose first
+// parameter the lint takes for an error (so it scans that function too). Anywhere it is narrowed to one of the engine's own error classes (`if (e instanceof
 // AskError)`, `e instanceof AskError ? e.message : ...`, `e instanceof AskError && ...`, or after `if (!(e instanceof
 // AskError)) throw e`), whose texts the engine writes, any use is allowed. An engine class is one the file declares or
 // imports from src/ (a relative import): not a built-in, not a name bound to one (`const Raw = Error`), not a package's
@@ -17,12 +18,14 @@
 // property, `String(e)`, `${e}`, `+ e`, destructuring (`const { message } = e`, `catch ({ message })`), passing it to
 // any other function (JSON.stringify, inspect, format, a helper, a local function named reject), putting it in an
 // object or array, or assigning it to another name.
-// Not caught: a raw text that never was an error binding (a child's stderr, a field of a result), an engine error
-// class whose text quotes a raw one (each keeps raw text in `cause`, shown by refusalText as "logged"), an error that
-// reaches a route through a value the lint doesn't know is one (a result's `error` field, a rejected promise awaited
-// without a catch binding, a typed parameter under another name), a narrowed branch that reads a property of an engine
-// error holding raw text, a module of src/ that exports a built-in class under an engine name, an errno `.code` put in
-// an answer, and text outside these files.
+// Not caught: a raw text that never was an error binding (a child's stderr, a field of a result); an engine error
+// class whose message quotes a raw one (each keeps raw text in `cause`, which refusalText logs, but nothing checks a
+// throw's message); an error that reaches a route through a value the lint doesn't know is one (a result's `error`
+// field, a rejected promise awaited without a catch binding); a parameter holding an error under another name (`x`,
+// `failure`) or typed otherwise (a type alias, an object type, `Record<...>`, a generic `T`); a narrowed branch that
+// reads a property of an engine error holding raw text; a module of src/ that exports a built-in class under an engine
+// name; a local function shadowing logDetail or errorAnswer, or one the lint scans that hands its error on through
+// another name; an errno `.code` put in an answer; and text outside these files.
 import './helpers.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -37,6 +40,14 @@ const SCANNED_DIRS = ['src/console'];
 /** src/setup/app-manifest.ts is the hub's half up to this line; the runner's half after it prints to a terminal. */
 const RUNNER_HALF = "// The runner's half.";
 const TYPED = new Set([ts.SyntaxKind.UnknownKeyword, ts.SyntaxKind.AnyKeyword]);
+/** `unknown`, `any`, or a type named like an error (`Error`, `NodeJS.ErrnoException`, `FlowError`), alone or in a union. */
+const errorTyped = (t: ts.TypeNode | undefined): boolean => {
+  if (!t) return false;
+  if (TYPED.has(t.kind)) return true;
+  if (ts.isUnionTypeNode(t)) return t.types.some(errorTyped);
+  if (!ts.isTypeReferenceNode(t)) return false;
+  return /(?:Error|Exception)$/.test(ts.isIdentifier(t.typeName) ? t.typeName.text : t.typeName.right.text);
+};
 /** A typed parameter is taken for an error by its name: an `unknown` request value under another name is not one. */
 const ERROR_NAME = /^(?:e|err|error|ex|cause|reason)$/;
 
@@ -93,7 +104,10 @@ function narrowed(n: ts.Node, scope: ts.Node, name: string, engine: ReadonlySet<
   return false;
 }
 
-/** The functions an error binding may be passed to whole: they log it, or answer with a fixed text. */
+/**
+ * The functions an error binding may be passed to whole, called by their bare name: they log it, or answer with a
+ * fixed text. Not refusalText: it shows the message, so it takes only an error narrowed to an engine class.
+ */
 const SINKS = new Set(['logDetail', 'errorAnswer']);
 /**
  * A rejection, which is a throw: `Promise.reject(e)`, or the `reject` a `new Promise((resolve, reject) => ...)`
@@ -124,8 +138,10 @@ function disallowed(id: ts.Identifier, scanned: ReadonlySet<string>): string | n
   if (ts.isElementAccessExpression(p) && p.expression === n) return '[...]';
   if (ts.isCallExpression(p) && p.arguments.includes(n as ts.Expression)) {
     const callee = strip(p.expression);
-    const name = ts.isIdentifier(callee) ? callee.text : ts.isPropertyAccessExpression(callee) ? callee.name.text : '?';
-    return SINKS.has(name) || rejects(p) || (scanned.has(name) && p.arguments[0] === n) ? null : `passed to ${name}()`;
+    // A bare name only: a method of that name (`h.logDetail(e)`, `ui.reject(e)`) is some other object's.
+    const bare = ts.isIdentifier(callee) ? callee.text : null;
+    if (rejects(p) || (bare !== null && (SINKS.has(bare) || (scanned.has(bare) && p.arguments[0] === n)))) return null;
+    return `passed to ${bare ?? (ts.isPropertyAccessExpression(callee) ? `.${callee.name.text}` : '?')}()`;
   }
   if (ts.isCallExpression(p) && p.expression === n) return '()';
   if (ts.isVariableDeclaration(p) && p.initializer === n) return ts.isIdentifier(p.name) ? `assigned to ${p.name.text}` : 'destructured';
@@ -161,7 +177,7 @@ export function rawErrorReads(path: string, text: string): string[] {
   const firstIsError = (f: ts.SignatureDeclaration) => {
     const q = f.parameters[0];
     const t = q?.type;
-    return !!q && ts.isIdentifier(q.name) && ERROR_NAME.test(q.name.text) && !!t && (TYPED.has(t.kind) || (ts.isTypeReferenceNode(t) && ts.isIdentifier(t.typeName) && t.typeName.text === 'Error'));
+    return !!q && ts.isIdentifier(q.name) && ERROR_NAME.test(q.name.text) && errorTyped(t);
   };
   const collect = (n: ts.Node) => {
     if (ts.isFunctionDeclaration(n) && n.name && firstIsError(n)) scanned.add(n.name.text);
@@ -187,7 +203,7 @@ export function rawErrorReads(path: string, text: string): string[] {
     if ((ts.isArrowFunction(n) || ts.isFunctionExpression(n) || ts.isFunctionDeclaration(n) || ts.isMethodDeclaration(n)) && n.body) {
       for (const q of n.parameters) {
         const t = q.type;
-        const typed = !!t && (TYPED.has(t.kind) || (ts.isTypeReferenceNode(t) && ts.isIdentifier(t.typeName) && t.typeName.text === 'Error'));
+        const typed = errorTyped(t);
         if (!(typed && (!ts.isIdentifier(q.name) || ERROR_NAME.test(q.name.text))) && !(errorCallback(n) && q === n.parameters[0])) continue;
         if (ts.isIdentifier(q.name)) scan(n, q.name.text, n.body);
         else found.push(`${at(q)}: error parameter destructured`);
@@ -247,6 +263,13 @@ const BAD_SOURCES: readonly string[] = [
   'p.then((v) => v, (e) => json(res, 500, { error: e.message }));',
   "up.addListener('error', (e) => json(res, 502, { error: e.message }));",
   'const reject = (x: unknown) => json(res, 500, { error: x });\ntry { f(); } catch (e) { reject(e); }',
+  // #882 round 4 (R11d): a parameter typed as an error class by name, and a sink's name called as a method.
+  'const show = (e: NodeJS.ErrnoException) => json(res, 500, { error: e.message });',
+  'function show(err: FlowError | null) { return json(res, 400, { error: err?.message }); }',
+  'try { f(); } catch (e) { ui.reject(e); }',
+  'try { f(); } catch (e) { h.logDetail(e); }',
+  'try { f(); } catch (e) { this.errorAnswer(e); }',
+  "try { f(); } catch (e) { return refused(400, refusalText('x', e as Error)); }",
 ];
 /** Good sources: none reads a raw error as text. */
 // check-table: never-grow
