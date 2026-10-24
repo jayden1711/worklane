@@ -24,6 +24,7 @@ import { BRAND } from './brand.js';
 import { starterCiView } from './starter-ci.js';
 import { CI_NONE_MEANS, ciIsNone } from './ci-none.js';
 import { acknowledgement, stopWaitsForGreen } from './auto-merge-resume.js';
+import { readStopFile, stopFilePath } from './auto-merge-stop.js';
 
 /** Which CI judges a PR, and under No CI what that means (#469): the PR, land and Settings pages say it. */
 const ciMode = (cfg: Config) => (ciIsNone(cfg.project) ? { kind: 'none' as const, means: CI_NONE_MEANS } : { kind: 'github' as const, means: null });
@@ -691,16 +692,8 @@ export function autoMergeState(o: { policyFile: string | null; repoAuto: boolean
       policyProblem = `the instance policy can't be read (${r.errors.map((e) => e.message).join('; ') || 'unreadable'}), so auto-merge counts as off`;
     }
   }
-  const stopFile = join(o.stateDir, 'auto-merge-stopped.json');
-  let stopped: string | null = null;
-  if (existsSync(stopFile)) {
-    try {
-      stopped = String((JSON.parse(readFileSync(stopFile, 'utf8')) as { reason?: string }).reason ?? 'stopped');
-    } catch {
-      stopped = 'the stop file is unreadable';
-    }
-  }
-  const on = policy === true && o.repoAuto !== false && !stopped;
+  const stopped = readStopFile(stopFilePath(o.stateDir))?.reason ?? null;
+  const on = policy === true && o.repoAuto !== false && stopped === null;
   const why = !o.policyFile
     ? 'no instance: only an instance merges its own PRs'
     : policy !== true
@@ -720,7 +713,7 @@ export function autoMergeState(o: { policyFile: string | null; repoAuto: boolean
  */
 export function protectionState(o: { stateDir: string; repo: string; events: StoredEvent[]; role: Role | null }) {
   const view = protectionView(join(o.stateDir, 'main-watch.json'), o.repo);
-  const stop = readStopFile(o.stateDir);
+  const stop = readStopFile(stopFilePath(o.stateDir));
   const last = o.events.filter((e) => e.type === 'main_watch.unaccounted').at(-1);
   const p = last?.payload as EventPayload<'main_watch.unaccounted'> | undefined;
   // A commit with no revert PR of its own: why (a cap, no_revert), and its trip's revert PR when the trip has one.
@@ -772,19 +765,6 @@ export function acceptTarget(body: { sha?: unknown; pr?: unknown }): AcceptTarge
   return hasSha ? { sha: String(body.sha) } : { pr: Number(body.pr) };
 }
 
-function readStopFile(stateDir: string): { reason: string; by: string | null; raw: string } | null {
-  const file = join(stateDir, 'auto-merge-stopped.json');
-  if (!existsSync(file)) return null;
-  let raw = '';
-  try {
-    raw = readFileSync(file, 'utf8');
-    const j = JSON.parse(raw) as { reason?: unknown; by?: unknown };
-    return { reason: String(j.reason ?? 'stopped'), by: typeof j.by === 'string' ? j.by : null, raw };
-  } catch {
-    return { reason: 'the stop file is unreadable', by: null, raw };
-  }
-}
-
 /** The coordinator's last measurement of the default branch for a stop it caused (merge.main_measured), as recorded. */
 export type MainMeasured = { at: string; tip: string | null; green: boolean; why: string | null };
 
@@ -824,7 +804,7 @@ export function lastMainMeasured(events: readonly StoredEvent[], key: StopKey): 
  * verdict, or on the acknowledgement. Fail closed: the stop file's `by` and the last merge.stopped both count.
  */
 export function clearAutoMergeStop(o: { stateDir: string; eventsDb: string; by: string; ack?: string | null }): ClearResult {
-  const stop = readStopFile(o.stateDir);
+  const stop = readStopFile(stopFilePath(o.stateDir));
   if (!stop) return { ok: false, status: 409, error: 'auto-merge is not stopped' };
   const log = new EventLog(o.eventsDb);
   try {
@@ -832,7 +812,7 @@ export function clearAutoMergeStop(o: { stateDir: string; eventsDb: string; by: 
     const last = stops.at(-1);
     const gated = stopWaitsForGreen(stop.by) || (last?.type === 'merge.stopped' && stopWaitsForGreen((last.payload as EventPayload<'merge.stopped'>).by));
     if (!gated) {
-      rmSync(join(o.stateDir, 'auto-merge-stopped.json'), { force: true });
+      rmSync(stopFilePath(o.stateDir), { force: true });
       log.append('merge.resumed', { detail: `@${o.by} cleared the stop on the dashboard (${stop.reason.slice(0, 300)})` }, o.by, 'human');
       return { ok: true, reason: stop.reason, how: 'as_before' };
     }

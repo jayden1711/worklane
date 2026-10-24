@@ -77,6 +77,14 @@ test('merge policy: the kill switch, the repo switch and a stop each make every 
   assert.match(mergeDecision(clean({ stopped: 'main went red after #4' })).reasons.join(), /auto-merge is stopped: main went red after #4/);
 });
 
+test('regression (#982): a stop with an empty or blank reason still makes every PR wait, and says it gives no reason', () => {
+  for (const stopped of ['', '  \n']) {
+    const d = mergeDecision(clean({ stopped }));
+    assert.equal(d.auto, false, JSON.stringify(stopped));
+    assert.deepEqual(d.reasons, ['auto-merge is stopped: stopped (the stop file gives no reason)']);
+  }
+});
+
 test("regression: a change to the agents' role prompts, skills, AGENTS.md or any CLAUDE.md never auto-merges, whatever review.yaml tries", () => {
   // A review.yaml that tries to drop it: the category redefined to nothing, no harness-config at L3, no waits.
   const loose = {
