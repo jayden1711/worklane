@@ -15,7 +15,9 @@
   steps, name the file, not its path. Messages the engine writes itself, such as a config validation error or "main is
   protected already; not replaced", still reach the page. The Discord, Slack and Linear steps still show the token
   file's and `intake.yaml`'s paths and the root-shell commands to run, and a policy loosening refused on an install
-  without root's helper still names `policy.yaml`'s path in its "edit" hint.
+  without root's helper still names `policy.yaml`'s path in its "edit" hint. Not fixed yet (#1064): when a merged
+  config PR's checkout can't be brought up to date, the merge's and the sync's detail still quote git's output, and the
+  first-run view's GitHub checks still quote gh's first error line.
 
 ### Guardrail changes: what each one does
 
