@@ -36,7 +36,6 @@ export interface ActionResult {
   shown?: string;
 }
 
-
 export interface ActionContext {
   mode: Mode;
   root: string;
