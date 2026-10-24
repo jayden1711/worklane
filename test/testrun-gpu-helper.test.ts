@@ -235,7 +235,10 @@ test('#968: "waited" is the wait for the lock alone, never its file\'s setup: a 
     h.setSlowStat(0.6);
     const r = h.exec('fast-a-1', 60, true);
     assert.equal(r.status, 0, r.stderr);
-    assert.match(r.stderr.split('\n')[0]!, /^worklane-testrun: gpu 0 \(devices .*; waited [01] s\)$/);
+    const m = /^worklane-testrun: gpu 0 \(devices .*; max (\d+) s; waited [01] s\)$/.exec(r.stderr.split('\n')[0]!);
+    assert.ok(m, r.stderr);
+    // The setup still counts against the run's 60 s: the unit gets what is left after it.
+    assert.ok(Number(m[1]) <= 57, r.stderr);
   } finally {
     h.done();
   }

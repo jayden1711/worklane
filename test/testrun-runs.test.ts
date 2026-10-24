@@ -513,6 +513,17 @@ test('#968: root lowers max_minutes while the run goes on: the helper\'s cap (it
   assert.match(res.tiers[1]!.summary, /^GPU: yes .*\ntier cuda timed out after 10 min \(the GPU runs' max_minutes in root's testrun-gpu\.json, after 0 s waiting for the GPU, 600\)/);
 });
 
+test('#968: root changes max_minutes after the helper read it: what the helper read (at the run\'s start here) is still named as the cap', { skip: !hasPerl && 'perl' }, async () => {
+  // [at the run's start, at the tier's end, the unit's max]: lowered after the helper read 25, raised after it read 10.
+  for (const [start, end, maxS] of [[25, 10, 1500], [10, 60, 600]] as const) {
+    const r = rig(GPU_TIERS);
+    const g = gpuHost(r.host, { ...GRANT, maxS, waitedS: 0 }, { timesOut: true });
+    const reads: number[] = [start, end];
+    const res = await runTestRun({ ...r.deps, host: g.h, gpuOptIn: () => ({ state: 'on', devices: [0], maxMinutes: reads.length > 1 ? reads.shift()! : reads[0]! }) }, { repo: r.dir, sha: r.sha, kind: 'fast', prs: [] });
+    assert.match(res.tiers[1]!.summary, new RegExp(`\\ntier cuda timed out after ${start} min \\(the GPU runs' max_minutes in root's testrun-gpu\\.json, after 0 s waiting for the GPU, ${maxS}\\)`), `${start} then ${end}`);
+  }
+});
+
 test('#968: the timeout\'s cap: max_minutes below timeout_s but not what capped the unit, and root\'s file unread (the helper\'s numbers alone)', { skip: !hasPerl && 'perl' }, async () => {
   const cases: [string, Partial<GpuGrant>, GpuOptIn, RegExp][] = [
     // 25 min (1500 s) under the tier's 1800 s, but the helper got there 400 s in: 1400 s left was the cap.
