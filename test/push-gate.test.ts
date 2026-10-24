@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { delimiter, join } from 'node:path';
@@ -24,7 +25,7 @@ function repo() {
   git('init', '-q', '-b', 'main');
   for (const [k, v] of [['user.name', 'Ada'], ['user.email', 'ada@example.com'], ['commit.gpgsign', 'false']]) git('config', k!, v!);
   const real = JSON.parse(readFileSync(join(repoRoot, '.denylist.json'), 'utf8')) as { patterns: string[] };
-  writeFileSync(join(dir, '.denylist.json'), JSON.stringify({ hashed: [sha('secretproject'), sha('otherhandle')], patterns: real.patterns }));
+  writeFileSync(join(dir, '.denylist.json'), JSON.stringify({ hashed: [sha('secretproject'), sha('otherhandle'), sha('zqx'), sha('qzxwvk')], patterns: real.patterns }));
   writeFileSync(join(dir, 'README.md'), 'hello\n');
   git('add', '-A');
   git('commit', '-q', '-m', 'init');
@@ -99,14 +100,42 @@ test('push gate scans a file holding a NUL byte for denied terms, in the pushed 
   }
 });
 
-test('push gate allows a binary file whose bytes only look like a denylist pattern: binaries are scanned for hashed terms only (#989)', { skip }, () => {
+/** Deterministic bytes that look compressed (a SHA-256 chain), `n` blocks of 32. */
+const noise = (n: number) => Buffer.concat(Array.from({ length: n }, (_, i) => createHash('sha256').update(`block ${i}`).digest()));
+
+/** The gate over one commit adding `file` with `bytes`. */
+function gateBinary(file: string, bytes: Buffer) {
   const r = repo();
   const base = r.git('rev-parse', 'HEAD');
-  writeFileSync(join(r.dir, 'data.bin'), Buffer.concat([Buffer.from([0, 0x7f]), Buffer.from(` ${['D', '123'].join('')} ${[10, 1, 2, 3].join('.')} `), Buffer.from([0])]));
-  r.git('add', 'data.bin');
-  r.git('commit', '-q', '-m', 'add data');
-  const p = gateRange(r.dir, base);
+  writeFileSync(join(r.dir, file), bytes);
+  r.git('add', file);
+  r.git('commit', '-q', '-m', `add ${file}`);
+  return gateRange(r.dir, base);
+}
+
+test('push gate allows a binary file whose bytes only look like a denylist pattern: binaries are scanned for hashed terms only (#989)', { skip }, () => {
+  const p = gateBinary('data.bin', Buffer.concat([Buffer.from([0, 0x7f]), Buffer.from(` ${['D', '123'].join('')} ${[10, 1, 2, 3].join('.')} `), Buffer.from([0])]));
   assert.equal(p.status, 0, p.stderr);
+});
+
+test('push gate allows a short denied term that compressed bytes hold only by chance (#989)', { skip }, () => {
+  // Between non-printable bytes, and in a short run of symbols: what a 3-letter term looks like in a compressed image.
+  const p = gateBinary('image.png', Buffer.concat([noise(64), Buffer.from([0x9c]), Buffer.from('zqx'), Buffer.from([0x01, 0]), noise(64), Buffer.from([0xfe]), Buffer.from('#zqx]'), Buffer.from([0x02]), noise(64)]));
+  assert.equal(p.status, 0, p.stderr);
+});
+
+test('push gate refuses a denied term in a text run inside a binary file: a short term in a run of 8 or more, one of 6 letters or more anywhere, UTF-16LE too (#989)', { skip }, () => {
+  const cases = [
+    ['a short term in a run of text', Buffer.from('built by zqx'), 'zqx'],
+    ['a 6-letter term alone between non-printable bytes', Buffer.from('qzxwvk'), 'qzxwvk'],
+    ['a term in UTF-16LE text', Buffer.from('author: secretproject', 'utf16le'), 'secretproject'],
+    ['a short term in UTF-16LE text', Buffer.from('built by zqx', 'utf16le'), 'zqx'],
+  ] as const;
+  for (const [what, text, term] of cases) {
+    const p = gateBinary('image.png', Buffer.concat([noise(64), Buffer.from([0xfe, 0]), text, Buffer.from([0, 0xff]), noise(64)]));
+    assert.notEqual(p.status, 0, `${what}: refused`);
+    assert.match(p.stderr, new RegExp(`image\\.png: denied term "${term}" in a binary file`), what);
+  }
 });
 
 test('push gate allows a clean push; the author\'s own sign-off is not a leak; placeholders are fine', { skip }, () => {

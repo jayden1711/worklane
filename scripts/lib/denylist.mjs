@@ -65,14 +65,27 @@ export function scanText(rules, path, text) {
   return hits;
 }
 
+// Binary text runs, as strings(1) finds them: printable ASCII, and the same as UTF-16LE (each character then a NUL).
+const ASCII_RUN = /[\t\n\r\x20-\x7e]+/g;
+const UTF16LE_RUN = /(?:[\t\n\r\x20-\x7e]\0)+/g;
+// Compressed bytes hold a short term by chance: about one 3-letter hit per 4 MB of random bytes against this repo's
+// terms, and still one per 150 MB in runs of 8 (#989). A term this long, or in a run this long, is not chance.
+const BINARY_RUN = 8;
+const BINARY_TERM = 6;
+
 /**
- * Every denied hashed term in a blob holding a NUL byte, as "path: why" strings. The regex patterns are not run: their
- * short shapes (a letter and digits, a dotted quad) match by chance in binary data, a hashed term only when it's there.
+ * Every denied hashed term in a blob holding a NUL byte, as "path: why" strings: a term in a text run of at least
+ * BINARY_RUN characters, or a term of at least BINARY_TERM characters in any run, token boundaries as in text. The
+ * regex patterns are not run: their short shapes (a letter and digits, a dotted quad) match binary data by chance.
  */
 export function scanBinary(rules, path, text) {
   const hits = new Set();
-  for (const t of tokens(text)) {
-    if (rules.hashed.has(sha(t)) && !rules.allow.some((a) => a.term === t && a.re.test(path))) hits.add(`${path}: denied term "${t}" in a binary file (it holds a NUL byte)`);
+  const runs = [...text.matchAll(ASCII_RUN)].map((m) => m[0]).concat([...text.matchAll(UTF16LE_RUN)].map((m) => m[0].replaceAll('\0', '')));
+  for (const run of runs) {
+    for (const t of tokens(run)) {
+      if ((run.length < BINARY_RUN && t.length < BINARY_TERM) || !rules.hashed.has(sha(t))) continue;
+      if (!rules.allow.some((a) => a.term === t && a.re.test(path))) hits.add(`${path}: denied term "${t}" in a binary file (it holds a NUL byte)`);
+    }
   }
   return [...hits];
 }
