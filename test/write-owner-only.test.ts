@@ -1,6 +1,6 @@
 // writeOwnerOnly never writes through, or sets the mode of, a link planted beside the file it writes (#950): not one
-// planted before the write at the old guessable temp name, and not one swapped in for its temp file mid-write by a
-// racer who lists the directory. Fixture files in temp dirs only.
+// planted before the write at the old guessable temp name, not one planted at its own staging name, and not one
+// swapped in for its temp file mid-write by a racer who lists the directory. Fixture files in temp dirs only.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { lstatSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
@@ -39,9 +39,12 @@ test('writeOwnerOnly never writes through a link planted at the old guessable te
 test('writeOwnerOnly never sets the mode of a link swapped in for its temp file mid-write', { skip: !POSIX && 'symlinks need privileges on Windows' }, () => {
   const { dir, file, victim } = fixture();
   const fs = createRequire(import.meta.url)('node:fs') as typeof import('node:fs');
-  const real = { writeFileSync: fs.writeFileSync, writeSync: fs.writeSync };
+  const real = { openSync: fs.openSync, writeFileSync: fs.writeFileSync, writeSync: fs.writeSync };
   const swapped: string[] = [];
-  /** The racer: after the data is written, every name beside the file but its own becomes a link to the victim. */
+  /**
+   * The racer: as soon as the temp file is opened (or, at the latest, once data is written to it), every name beside
+   * the file but its own becomes a link to the victim, and stays one for the rest of the write.
+   */
   const race = () => {
     if (swapped.length) return;
     for (const name of readdirSync(dir)) {
@@ -52,6 +55,11 @@ test('writeOwnerOnly never sets the mode of a link swapped in for its temp file 
       swapped.push(name);
     }
   };
+  fs.openSync = ((...a: Parameters<typeof fs.openSync>) => {
+    const fd = real.openSync(...a);
+    if (dirname(String(a[0])) === dir) race();
+    return fd;
+  }) as typeof fs.openSync;
   fs.writeFileSync = ((...a: Parameters<typeof fs.writeFileSync>) => {
     real.writeFileSync(...a);
     if (dirname(String(a[0])) === dir || typeof a[0] === 'number') race();
@@ -78,4 +86,24 @@ test('writeOwnerOnly never sets the mode of a link swapped in for its temp file 
   assert.match(String(err), /replaced/, 'the write is refused, not published');
   assert.equal(readFileSync(file, 'utf8'), 'OLD\n', 'the file is left as it was');
   assert.deepEqual(readdirSync(dir).sort(), [basename(file), basename(victim)].sort(), 'no staging name (or swapped link) left behind');
+});
+
+test('writeOwnerOnly never opens a link planted at its own staging name, even one predicted', { skip: !POSIX && 'symlinks need privileges on Windows' }, () => {
+  const { dir, file, victim } = fixture();
+  const crypto = createRequire(import.meta.url)('node:crypto') as typeof import('node:crypto');
+  const real = crypto.randomBytes;
+  crypto.randomBytes = ((n: number) => Buffer.alloc(n, 0xab)) as typeof crypto.randomBytes;
+  syncBuiltinESMExports();
+  const planted = join(dir, `.${basename(file)}.${'ab'.repeat(8)}.new`);
+  symlinkSync(victim, planted);
+  try {
+    assert.throws(() => writeOwnerOnly(file, 'NEW SECRET\n'), { code: 'EEXIST' }, 'a name that is taken is refused, not opened');
+  } finally {
+    crypto.randomBytes = real;
+    syncBuiltinESMExports();
+  }
+  assert.equal(readFileSync(victim, 'utf8'), 'THE KEY', 'the data went into the planted link');
+  assert.equal(mode(victim), 0o644, 'the planted link target was chmod-ed');
+  assert.ok(lstatSync(planted).isSymbolicLink(), "the planted link is left as it was: not this call's to remove");
+  assert.equal(readFileSync(file, 'utf8'), 'OLD\n', 'the file is left as it was');
 });
