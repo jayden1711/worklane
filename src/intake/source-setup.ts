@@ -23,7 +23,7 @@ import type { EventLog } from '../events/log.js';
 import { CredentialsFile, setIntakeCredential, type IntakeCredentialKey } from '../instance.js';
 import { currentUser, replaceFileAtomically } from '../os/index.js';
 import { instanceUnit } from '../service.js';
-import { INTAKE_FILE, loadIntakeConfig } from './config.js';
+import { INTAKE_FILE, intakeErrorByName, loadIntakeConfig } from './config.js';
 import { DiscordSetupError, lineDiff, type RunCli } from './discord-setup.js';
 import { IntakeConfig, intakeWarnings, LINEAR_ID, SLACK_ID } from './report.js';
 import type { LinearView, SlackView } from './source-view.js';
@@ -279,7 +279,7 @@ export function planSourceIntake(o: { kind: SourceKind; path: string; values: Re
   if (unknown.length) throw new DiscordSetupError(`not set here: ${unknown.join(', ')}; this step writes ${keys.join(', ')}`);
   if (o.view.kind !== o.kind) throw new DiscordSetupError(`the view is ${o.view.kind}'s, not ${o.kind}'s`);
   const loaded = loadIntakeConfig(o.path);
-  if (loaded && 'error' in loaded) throw new DiscordSetupError(`refused: ${loaded.error}`);
+  if (loaded && 'error' in loaded) throw new DiscordSetupError(`refused: ${intakeErrorByName(o.path, loaded.error)}`);
   const before = loaded ? readFileSync(o.path, 'utf8') : null;
   const doc = parseDocument(before ?? 'version: 1\n');
   const cfg = loaded?.config ?? IntakeConfig.parse({ version: 1 });
@@ -334,7 +334,7 @@ export function applySourceIntake(o: { kind: SourceKind; path: string; values: R
   if (plan.hash !== o.expect) throw new DiscordSetupError(`${INTAKE_FILE} or the ${o.kind} view changed since the change was shown: nothing written; review it again`, 409);
   replaceFileAtomically(o.path, plan.text, 0o600, dirname(o.path));
   const check = loadIntakeConfig(o.path);
-  if (!check || 'error' in check) throw new DiscordSetupError(`${INTAKE_FILE} was written, but it does not load: ${check ? check.error : 'it is missing'}`, 409);
+  if (!check || 'error' in check) throw new DiscordSetupError(`${INTAKE_FILE} was written, but it does not load: ${check ? intakeErrorByName(o.path, check.error) : 'it is missing'}`, 409);
   return plan;
 }
 
@@ -376,7 +376,7 @@ export function sourceSetupView(o: { kind: SourceKind; instance: string; home: s
     intake: {
       file,
       exists: loaded !== null,
-      error: loaded && 'error' in loaded ? loaded.error : null,
+      error: loaded && 'error' in loaded ? intakeErrorByName(file, loaded.error) : null,
       values: sourceFormValues(o.kind, cfg),
       warnings: loaded && !('error' in loaded) ? loaded.warnings.filter((w) => w.startsWith(`${o.kind} `)) : [],
       // Counts only: who may send stays in the file.
