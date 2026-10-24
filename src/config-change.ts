@@ -64,6 +64,10 @@ export interface RepoConfigForm {
 
 export const repoConfigForm = (cfg: Config): RepoConfigForm => ({ values: repoConfigValues(cfg), owner: cfg.project.owners.default, branch: cfg.project.project.default_branch, repo: cfg.project.project.repo, models: WORKER_MODELS, defaultModel: DEFAULT_WORKER_MODEL, modelListed: listedModel(repoConfigValues(cfg).workers_model) });
 
+/**
+ * A refusal the page shows as it is. INVARIANT (#882): its message is the engine's own words; a child's stderr or
+ * GitHub's answer goes in `cause`, which a route logs and never shows (refusalText, src/user-facing-error.ts).
+ */
 export class ConfigChangeError extends Error {}
 
 export interface ConfigChange {
@@ -167,7 +171,7 @@ export function proposeConfigChange(o: { root: string; cfg: Config; values: Part
   const base = o.cfg.project.project.default_branch;
   const repo = o.cfg.project.project.repo;
   const fetched = git(['fetch', '-q', 'origin', base], o.root);
-  if (fetched.status !== 0) throw new ConfigChangeError(`git fetch origin ${base} failed: ${fetched.stderr.trim().split('\n')[0] ?? ''}`);
+  if (fetched.status !== 0) throw new ConfigChangeError(`git fetch origin ${base} failed`, { cause: fetched.stderr.trim() });
   const changes = planConfigChange({ root: o.root, cfg: o.cfg, values: o.values, git });
   const e = edited(o.root, o.cfg, o.values, git);
   const stamp = (o.io?.now ?? (() => new Date()))().toISOString().replace(/[-:]/g, '').replace(/\..*$/, '').replace('T', '-');
@@ -181,17 +185,17 @@ export function proposeConfigChange(o: { root: string; cfg: Config; values: Part
     for (const [f, text] of Object.entries(e.texts)) writeFileSync(join(path, BRAND.configDir, f), text);
     loadConfig(path);
     const add = git(['add', '--', ...Object.keys(e.texts).map((f) => `${BRAND.configDir}/${f}`)], path);
-    if (add.status !== 0) throw new ConfigChangeError(`git add failed: ${add.stderr.trim()}`);
+    if (add.status !== 0) throw new ConfigChangeError('git add failed', { cause: add.stderr.trim() });
     const msg = `Config from the first-run page: ${changes.map((c) => c.key).join(', ')}`;
     const commit = git(['commit', '-q', '-m', msg], path);
-    if (commit.status !== 0) throw new ConfigChangeError(`git commit failed: ${(commit.stderr || commit.stdout).trim().split('\n')[0]}`);
+    if (commit.status !== 0) throw new ConfigChangeError('git commit failed', { cause: (commit.stderr || commit.stdout).trim() });
     const sha = git(['rev-parse', 'HEAD'], path).stdout.trim();
     // INVARIANT: through checkedPush like every engine push: the push limits, and never the default branch.
     const push = checkedPush({ cwd: path, remote: 'origin', base: head, head: sha, ref: `refs/heads/${branch}`, limits: o.cfg.guardrails.push, guard: { defaultBranch: base, blocked: () => undefined } });
-    if (!push.ok) throw new ConfigChangeError(`pushing ${branch} failed: ${'refused' in push ? push.refused.join('; ') : (push.error.split('\n')[0] ?? '')}`);
+    if (!push.ok) throw 'refused' in push ? new ConfigChangeError(`pushing ${branch} failed: ${push.refused.join('; ')}`) : new ConfigChangeError(`pushing ${branch} failed`, { cause: push.error });
     const body = [`Proposed from the ${BRAND.name} first-run page by @${o.by}. Merge it to apply; nothing changes until then.`, '', '| file | key | from | to |', '|---|---|---|---|', ...changes.map((c) => `| ${c.file} | ${c.key} | \`${JSON.stringify(c.from)}\` | \`${JSON.stringify(c.to)}\` |`)].join('\n');
     const pr = gh(['pr', 'create', '--repo', repo, '--base', base, '--head', branch, '--title', msg, '--body', body], o.root);
-    if (pr.status !== 0) throw new ConfigChangeError(`${branch} is pushed, but opening its PR failed: ${pr.stderr.trim().split('\n')[0] ?? ''}`);
+    if (pr.status !== 0) throw new ConfigChangeError(`${branch} is pushed, but opening its PR failed`, { cause: pr.stderr.trim() });
     return { changes, branch, url: pr.stdout.trim().split('\n').pop() ?? '', head: sha };
   } finally {
     try {

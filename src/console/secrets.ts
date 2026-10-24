@@ -11,6 +11,7 @@ import type { IncomingMessage } from 'node:http';
 import type { EventLog } from '../events/log.js';
 import { CLAUDE_ASK_WITHDRAWN, CREDENTIAL_REFUSED, holdsClaudeCredential } from '../claude-credential-guard.js';
 import { installOwnerOnlySecret } from '../os/index.js';
+import { DETAIL_LOGGED, logDetail } from '../user-facing-error.js';
 import { AskError, asks, isClaudeCredentialAsk, recordAnswer, type Ask, type Role } from './asks.js';
 
 export const MAX_SECRET = 16_384;
@@ -97,15 +98,17 @@ export function storeSecret(log: EventLog, id: string, a: { by: string; role: Ro
     try {
       file = installOwnerOnlySecret(a.dir, ask.credential, value);
     } catch (e) {
-      // The OS error names the path, never the value; keep only its first line.
-      throw new AskError(`couldn't install the secret: ${String((e as Error).message).split('\n')[0]}`);
+      // The OS error names the path, never the value: the log may have it, the page not (#882).
+      logDetail(`installing the secret for ask ${id}`, e);
+      throw new AskError(`couldn't install the secret; ${DETAIL_LOGGED}`);
     }
     let more: string | void;
     try {
       more = rule?.stored?.(ask, file);
     } catch (e) {
       // It was given the path only, so its message can't hold the value.
-      throw new AskError(`the secret is installed at ${file}, but the step after it failed: ${String((e as Error).message).split('\n')[0]}`);
+      logDetail(`the step after installing the secret for ask ${id}`, e);
+      throw new AskError(`the secret is installed, but the step after it failed; ${DETAIL_LOGGED}`);
     }
     return `installed ${file} (0400, this user only)${more ? `; ${more}` : ''}`;
   });

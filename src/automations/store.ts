@@ -5,7 +5,7 @@
 // one rule: owners create, edit, delete and resume; writers may pause and run now; viewers nothing.
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, statSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { basename, dirname } from 'node:path';
 import { parse, stringify } from 'yaml';
 import type { Role } from '../dashboard-auth.js';
 import type { EventLog } from '../events/log.js';
@@ -36,24 +36,29 @@ export interface Loaded {
 const EMPTY: AutomationsFile = { version: 1, automations: [] };
 export const digestOf = (text: string) => createHash('sha256').update(text).digest('hex').slice(0, 16);
 
-/** Read automations.yaml. Absent: none. Unsafe permissions or an invalid file: none run, and `error` says why. */
+/**
+ * Read automations.yaml. Absent: none. Unsafe permissions or an invalid file: none run, and `error` says why. The
+ * error names the file by its name only, never its path under the instance home: the dashboard shows it (#882).
+ */
 export function loadAutomations(path: string): Loaded {
   if (!existsSync(path)) return { file: EMPTY, text: '', error: null };
+  const name = basename(path);
   const uid = typeof process.getuid === 'function' ? process.getuid() : null;
   if (uid !== null) {
     const st = statSync(path);
-    if (st.mode & 0o077) return { file: EMPTY, text: '', error: `${path} is readable or writable by its group or others; it decides what runs and spends, so only its owner may (chmod 600)` };
-    if (st.uid !== uid && st.uid !== 0) return { file: EMPTY, text: '', error: `${path} belongs to another user; it must be this service's own file` };
+    if (st.mode & 0o077) return { file: EMPTY, text: '', error: `${name} is readable or writable by its group or others; it decides what runs and spends, so only its owner may (chmod 600)` };
+    if (st.uid !== uid && st.uid !== 0) return { file: EMPTY, text: '', error: `${name} belongs to another user; it must be this service's own file` };
   }
   const text = readFileSync(path, 'utf8');
   let raw: unknown;
   try {
     raw = parse(text) ?? { version: 1 };
   } catch (e) {
-    return { file: EMPTY, text, error: `${path} is not valid YAML: ${(e as Error).message.split('\n')[0]}` };
+    // The YAML parser's first line says where (line and column), never the file's path.
+    return { file: EMPTY, text, error: `${name} is not valid YAML: ${(e as Error).message.split('\n')[0]}` };
   }
   const r = AutomationsFile.safeParse(raw);
-  if (!r.success) return { file: EMPTY, text, error: `${path} is invalid: ${r.error.issues.map((i) => `${i.path.join('.') || '(top level)'}: ${i.message}`).join('; ')}` };
+  if (!r.success) return { file: EMPTY, text, error: `${name} is invalid: ${r.error.issues.map((i) => `${i.path.join('.') || '(top level)'}: ${i.message}`).join('; ')}` };
   return { file: r.data, text, error: null };
 }
 

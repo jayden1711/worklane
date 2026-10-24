@@ -117,13 +117,22 @@ test('Protect the default branch: protection that exists is never replaced; GitH
   } finally {
     await s.d.close();
   }
+  // #882: GitHub's own text goes to the dashboard's log, never the page or the audit; the page gets the engine's words.
   const refusing = github({ refuse: 'gh: Must have admin rights to Repository. (HTTP 404)' });
   const s2 = await dashboard(dir, { setupActions: { gh: refusing.gh } });
+  const lines: string[] = [];
+  const was = console.error;
+  console.error = (...a: unknown[]) => void lines.push(a.map(String).join(' '));
   try {
     const r = await s2.post('/api/first-run/actions/protection', 'example-owner', { confirm: true });
+    console.error = was;
     assert.equal(r.status, 500);
-    assert.match(r.body.error!, /^GitHub refused: gh: Must have admin rights/);
+    assert.deepEqual(r.body, { error: "GitHub refused to protect main (only a repo admin may); the detail is in the dashboard's log on the machine" });
+    assert.ok(lines.some((l) => l.includes('POST /api/first-run/actions/protection failed') && l.includes('gh: Must have admin rights to Repository. (HTTP 404)')), `GitHub's text is logged: ${JSON.stringify(lines)}`);
+    const audited = s2.events(['dashboard.audit']).find((a) => a.action === 'first_run.action') as { detail: { detail: string } };
+    assert.doesNotMatch(audited.detail.detail, /Must have admin rights/, 'nor in the audit the page reads');
   } finally {
+    console.error = was;
     await s2.d.close();
   }
 });

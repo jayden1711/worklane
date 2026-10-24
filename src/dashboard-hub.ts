@@ -26,7 +26,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { DEFAULT_WEB_DIR, dashboardToken, json, serveStatic, tokenGiven, warmStatic } from './dashboard.js';
 import { refuseKeyInUrl } from './dashboard-key-url.js';
-import { errorAnswer } from './user-facing-error.js';
+import { errorAnswer, logDetail } from './user-facing-error.js';
 import { compressStream, mayCompressApi, requestEncoding } from './dashboard-compress.js';
 import { assertLoopbackHost, authorizeUrl, breakGlassAllowed, clearSessionCookie, clearStateCookie, CSRF_HEADER, DEVICE_HEADER, isDeviceView, FRESH_HEADER, LOGIN_HEADER, loginFromCode, parseCookies, ROLE_CACHE_MS, SESSION_COOKIE, sessionCookie, Sessions, SignInStates, STATE_COOKIE, stateCookie, type Role, type SessionOf, type SignInConfig } from './dashboard-auth.js';
 import { deviceRefusal, parseDeviceList, type DeviceOptions } from './console/terminal-devices.js';
@@ -168,8 +168,11 @@ const upstream = new Agent({ keepAlive: true });
 
 const readToken = (i: HubInstance): string | null => {
   try {
-    return readFileSync(i.tokenFile, 'utf8').trim() || null;
-  } catch {
+    const token = readFileSync(i.tokenFile, 'utf8').trim() || null;
+    if (!token) logDetail(`instance ${i.name}'s dashboard token`, `${i.tokenFile} is empty`);
+    return token;
+  } catch (e) {
+    logDetail(`instance ${i.name}'s dashboard token`, e);
     return null;
   }
 };
@@ -182,7 +185,7 @@ const readToken = (i: HubInstance): string | null => {
  */
 function forward(i: HubInstance, req: IncomingMessage, res: ServerResponse, path: string, search: URLSearchParams, login: string | null, deviceOk = false): void {
   const token = readToken(i);
-  if (!token) return json(res, 502, { error: `can't read instance ${i.name}'s dashboard token (${i.tokenFile}): is its dashboard running, and the hub allowed to read it?` });
+  if (!token) return json(res, 502, { error: `can't read instance ${i.name}'s dashboard token: is its dashboard running, and the hub allowed to read it?` });
   search.delete('t');
   const qs = search.toString();
   const headers: Record<string, string> = { authorization: `Bearer ${token}`, 'content-type': req.headers['content-type'] ?? 'application/json' };
@@ -219,7 +222,8 @@ function forward(i: HubInstance, req: IncomingMessage, res: ServerResponse, path
     r.pipe(res);
   });
   up.on('error', (e) => {
-    if (!res.headersSent) json(res, 502, { error: `instance ${i.name}'s dashboard isn't answering on 127.0.0.1:${i.port} (${e.message})` });
+    logDetail(`forwarding ${req.method ?? '?'} ${path} to instance ${i.name}`, e);
+    if (!res.headersSent) json(res, 502, { error: `instance ${i.name}'s dashboard isn't answering on 127.0.0.1:${i.port}; the detail is in the hub's log on the machine` });
     else res.end();
   });
   res.on('close', () => up.destroy());
@@ -274,7 +278,7 @@ function probe(i: HubInstance, login: string | null): Promise<{ up: boolean; err
       });
     });
     r.on('timeout', () => r.destroy(new Error('timed out')));
-    r.on('error', (e) => done({ up: false, error: e.message, role: null }));
+    r.on('error', (e: NodeJS.ErrnoException) => done({ up: false, error: `not answering (${typeof e.code === 'string' && /^[A-Z_]{1,40}$/.test(e.code) ? e.code : 'error'})`, role: null }));
     r.end();
   });
 }
@@ -388,7 +392,8 @@ export async function startHub(opts: HubOptions): Promise<{ server: Server; brea
         try {
           login = await loginFromCode(signIn, code);
         } catch (e) {
-          return page(res, 403, `sign-in failed: ${(e as Error).message}`);
+          logDetail(`${req.method} ${url.pathname}: GitHub sign-in`, e);
+          return page(res, 403, "sign-in failed: GitHub didn't confirm it; sign in again (the detail is in the hub's log on the machine)");
         }
         const s = sessions.create(login);
         return redirect(res, '/', [sessionCookie(s.id), clearStateCookie()]);

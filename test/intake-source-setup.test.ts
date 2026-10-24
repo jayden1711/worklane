@@ -18,7 +18,8 @@ import { EventLog } from '../src/events/log.js';
 import { INTAKE_FILE } from '../src/intake/config.js';
 import { LINEAR_API } from '../src/intake/linear.js';
 import { SLACK_API } from '../src/intake/slack.js';
-import { intakeSourcesSummary, planSourceIntake, slackManifest, SLACK_SCOPES, type SourceView } from '../src/intake/source-setup.js';
+import { credStates, intakeSourcesSummary, planSourceIntake, slackManifest, SLACK_SCOPES, type SourceView } from '../src/intake/source-setup.js';
+import { tokenState } from '../src/intake/discord-setup.js';
 import { sourceViewCommand } from '../src/intake/source-view.js';
 import { asPerson, exampleProject, exampleRoles } from './helpers.js';
 
@@ -193,4 +194,16 @@ test("the dashboard's Slack and Linear steps: looking changes nothing; owners on
   } finally {
     await dash.close();
   }
+});
+
+test("#882: credentials.yaml unreadable or invalid is named by its name in the Slack and Linear steps and the Discord step, never its path", () => {
+  const dir = mkdtempSync(join(tmpdir(), 'creds-name-'));
+  const file = join(dir, 'credentials.yaml');
+  const errors = () => [...credStates(file, 'slack').map((c) => c.error), tokenState(file).error];
+  const missing = errors();
+  writeFileSync(file, 'version: 1\ngithub: 3\n', { mode: 0o600 });
+  const invalid = errors();
+  for (const e of missing) assert.equal(e, "can't read credentials.yaml (ENOENT)");
+  for (const e of invalid) assert.match(e ?? '', /^credentials\.yaml is invalid: /);
+  for (const e of [...missing, ...invalid]) assert.ok(!e!.includes(dir), `${dir} in ${e}`);
 });

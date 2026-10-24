@@ -189,3 +189,20 @@ test('discord-command: "run <command>" and its text; nothing else', () => {
   assert.equal(parseRunCommand('please run deps'), null);
   assert.equal(parseRunCommand('run ../x'), null);
 });
+
+test("#882: automations.yaml refused names the file, never its path under the instance home", { skip: process.platform === 'win32' && 'POSIX modes' }, () => {
+  const dir = mkdtempSync(join(tmpdir(), 'automations-name-'));
+  const path = join(dir, 'automations.yaml');
+  writeFileSync(path, 'version: 1\nautomations: []\n', { mode: 0o644 });
+  chmodSync(path, 0o644);
+  const open = loadAutomations(path).error!;
+  chmodSync(path, 0o600);
+  writeFileSync(path, 'version: 1\nautomations: [ {{ :\n');
+  const yaml = loadAutomations(path).error!;
+  writeFileSync(path, 'version: 2\n');
+  const invalid = loadAutomations(path).error!;
+  for (const [error, why] of [[open, /^automations\.yaml is readable or writable by its group or others/], [yaml, /^automations\.yaml is not valid YAML: /], [invalid, /^automations\.yaml is invalid: /]] as const) {
+    assert.match(error, why);
+    assert.ok(!error.includes(dir), `${dir} in ${error}`);
+  }
+});
