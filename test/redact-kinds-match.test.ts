@@ -28,9 +28,12 @@ function shown(s: string, secret: string, kind: string): string[] {
   return out;
 }
 
-/** What may sit right before a token (the glue points): escape sequences in each encoding, backslash escapes, `_`. */
+/**
+ * What may sit right before a token (the glue points): escape sequences in each encoding, backslash escapes, `_`. Some
+ * end in a digit (`\u0026`, `ESC 7`), so a cut kept only after a letter is caught.
+ */
 const ESC = String.fromCharCode(27);
-const GLUES = [`${ESC}[1m`, `${ESC}[0;32m`, '\\u001b[1m', '\\x1b[0m', '\\033[31m', '\\e[1m', '^[[1m', `${String.fromCharCode(0x9b)}1m`, '\\n', '\\t', '\\"', '\\\\', 'MY_', 'x_'];
+const GLUES = [`${ESC}[1m`, `${ESC}[0;32m`, `${ESC}7`, '\\u001b[1m', '\\x1b[0m', '\\033[31m', '\\e[1m', '^[[1m', `${String.fromCharCode(0x9b)}1m`, '\\n', '\\t', '\\"', '\\\\', '\\u0026', '\\u0022', 'MY_', 'x_'];
 
 test('a secret glued after an escape sequence, a backslash escape or `_` is named by secretKinds, as redaction hides it', () => {
   const missed: string[] = [];
@@ -100,6 +103,23 @@ test('a JWT in standard base64 or with padding is hidden whole', () => {
   assert.deepEqual(missed, []);
   // What a JWT is not: a path, prose and base64 with no JSON header.
   for (const s of ['eyJ is how base64 JSON starts.', 'see src/eyJ/a.b and docs/x.y', `${b64({ a: 1 }).slice(3)}.${run(12)}.${run(12)}`]) assert.deepEqual(secretKinds(s), [], s);
+});
+
+test('secretKinds names every kind of every pass: one a marker exposes in a later pass, and each of several', () => {
+  // A Stripe key glued before a GitHub token, and a Google key glued before a private key: the first shape's end is
+  // seen only once the second's marker replaces what followed it.
+  const stripe = `${'sk'}_live_${run(24)}`;
+  const github = `${'ghp'}_${run(36)}`;
+  const google = `AI${'za'}${run(35)}`;
+  const key = ['-----BEGIN', 'RSA', 'PRIVATE', 'KEY-----'].join(' ');
+  const cases: [string, string[], string][] = [
+    [`${stripe}${github}`, ['GitHub token', 'Stripe key'], run(24)],
+    [`${google}${key}${run(64)}`, ['Google API key', 'private key'], run(35)],
+  ];
+  for (const [s, kinds, secret] of cases) {
+    assert.ok(!leaks(redactString(s), secret), `redaction hides it: ${redactString(s)}`);
+    assert.deepEqual(secretKinds(s), kinds, s.slice(0, 24));
+  }
 });
 
 /** Every input of this corpus, for the property test: the stand-ins in many settings, and seeded random compositions. */

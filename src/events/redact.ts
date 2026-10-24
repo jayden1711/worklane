@@ -306,9 +306,9 @@ export interface RedactTextOptions {
 // check-table: never-shrink
 const GLUED_PREFIXES = ['ghp_', 'gho_', 'ghu_', 'ghs_', 'ghr_', 'github_pat_', 'sk-', 'sk_live_', 'sk_test_', 'rk_live_', 'rk_test_', 'xoxa-', 'xoxb-', 'xoxe', 'xoxp-', 'xoxr-', 'xoxs-', 'xapp-', 'lin_api_', 'lin_oauth_', 'AKIA', 'ASIA', 'AIza', 'eyJ', '0x', 'Bearer', 'bearer', 'BEARER', 'Basic', 'basic', 'BASIC', DASHBOARD_KEY_PREFIX];
 /**
- * What ends in a letter or digit and may sit right before a token (#889): an escape sequence (a coloured log line,
- * `ESC[1m`, in any of the encodings below) and a backslash escape in raw JSON or C-style text (`\n`, `\t`, `\"`). A
- * cut point goes after each. Only the shapes with no distinctive prefix need it (Discord, Bearer, Basic, Stripe, `0x`,
+ * What may sit right before a token (#889): an escape sequence (a coloured log line, `ESC[1m`, in any of the encodings
+ * below) and a backslash escape in raw JSON or C-style text (`\n`, `\t`, `\"`). A cut point goes after each that ends
+ * in a word character: a letter, a digit (`\u0026`, `ESC 7`) or `_` (gluePoints). Only the shapes with no distinctive prefix need it (Discord, Bearer, Basic, Stripe, `0x`,
  * a plain `sk-`, a JSON value): the others are found wherever their prefix is. Each start reads a bounded stretch,
  * but a CSI's parameter run: one scan each, linear.
  */
