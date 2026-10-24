@@ -34,7 +34,7 @@ import { InstanceSettingsView, type InstanceSettingsData } from './components/In
 import { ActivityPage } from './pages/Activity';
 import { Agents } from './pages/Agents';
 import { DecisionCard, Decisions } from './pages/Decisions';
-import type { Decision } from './api';
+import type { Decision, ExpLogRow, RunRecord } from './api';
 import { Badge, Button } from './components/ui';
 import { ValuePill } from './components/patterns';
 import { Deploys } from './pages/Deploys';
@@ -64,7 +64,7 @@ import { LogsPage } from './pages/Logs';
 import { CoordinatorErrors, Overview } from './pages/Overview';
 import { PullRequests, PullRequestsView } from './pages/PullRequests';
 import { Reports } from './pages/Reports';
-import { RunDetail, RunList, RunResearchView, RunsRefused, RunWhy, type RunResearchData } from './pages/RunDetail';
+import { RunDetail, RunList, RunResearchView, RunsRefused, RunSteps, RunWhy, type RunResearchData } from './pages/RunDetail';
 import { SettingsPage } from './pages/Settings';
 import { BoardCardView, BoardPage, BoardTestRuns, BoardView, type InstanceBoard } from './pages/Board';
 import { MachinePage, MachineSlots } from './pages/Machine';
@@ -79,7 +79,7 @@ import { DecisionDetailView, DETAIL_SECTIONS } from './pages/DecisionDetail';
 import type { DecisionDetail, DecisionDiff, DecisionPrBody } from './api';
 import { PausedScope, UsageBanner, UsageLines } from './components/Usage';
 import { AutomationDetail } from './components/Automations';
-import { StudyPage } from './components/Experiments';
+import { ResearchLog, StudyPage } from './components/Experiments';
 import type { UsageInfo } from './api';
 
 export const pages = {
@@ -112,6 +112,10 @@ export const renderGoalGraph = (graph: GoalGraph) => renderToStaticMarkup(<GoalG
 export const renderIssue = (state: State, issue: number) => renderToStaticMarkup(<IssueDetail state={state} issue={issue} />);
 export const renderChecks = (runs: CheckRun[]) => renderToStaticMarkup(<Checks runs={runs} />);
 export const renderRunList = (issue: number) => renderToStaticMarkup(<RunList issue={issue} lastId={0} />);
+/** #768: a run's steps and the files it wrote; an experiment's research log; the path display both use. */
+export const renderRunSteps = (run: RunRecord) => renderToStaticMarkup(<RunSteps run={run} />);
+export const renderResearchLog = (rows: ExpLogRow[]) => renderToStaticMarkup(<ResearchLog rows={rows} />);
+export { shownPath, shownPaths } from './path-text';
 export const renderInstances = (hub: HubInfo, current: string, all = false, status?: Record<string, DotStatus>, why?: Record<string, string>) => renderToStaticMarkup(<InstanceList hub={hub} current={current} all={all} onSelect={() => {}} {...(status ? { status } : {})} {...(why ? { why } : {})} />);
 export const renderHealthPage = (all: InstanceIncidents[], target?: string) => renderToStaticMarkup(<IncidentsHealthView all={all} {...(target ? { target } : {})} />);
 export { healthPass, loadIncidents, mergeIncidents, nextHub, refreshHub, statusOf, whyOf } from './api';

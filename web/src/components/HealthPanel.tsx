@@ -6,6 +6,7 @@ import { useEffect, useState } from 'react';
 import { api, hub, instanceScope, onInstance, type HealthView } from '../api';
 import { DotPill, Meter, RecordsTable } from './patterns';
 import { ago, Badge, Card, cx, EST_NOTE, estUsd } from './ui';
+import { shownPath } from '../path-text';
 
 type Machine = NonNullable<HealthView['machine']>;
 type Unit = NonNullable<Machine['units']>[number];
@@ -451,8 +452,8 @@ export function HealthPanelView({ view, instances }: { view: HealthView; instanc
               <td className="primitive-table-cell text-[12.5px] tabular-nums text-ink-2">{view.merge.holds.count}</td>
               <td className="primitive-table-cell text-[12.5px] tabular-nums text-ink-2">{view.merge.holds.minutesWaited} waited</td>
               <td className="primitive-table-cell text-[12.5px] tabular-nums text-ink-2">{view.merge.holds.perMergedPr} min</td>
-              <td className="primitive-table-cell truncate font-mono text-[12px] text-ink-3" title={view.merge.holds.byFile.map((f) => `${f.file}: ${f.minutes} min (${f.count})`).join(', ')}>
-                {view.merge.holds.byFile[0] ? `most on ${view.merge.holds.byFile[0].file}` : '–'}
+              <td className="primitive-table-cell truncate font-mono text-[12px] text-ink-3" title={view.merge.holds.byFile.map((f) => `${shownPath(f.file)}: ${f.minutes} min (${f.count})`).join(', ')}>
+                {view.merge.holds.byFile[0] ? `most on ${shownPath(view.merge.holds.byFile[0].file)}` : '–'}
               </td>
             </tr>
           </RecordsTable>
