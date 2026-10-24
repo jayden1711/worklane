@@ -78,6 +78,37 @@ test('push gate scans a file the pushed .gitattributes marks -diff or binary, ev
   }
 });
 
+test('push gate scans a file holding a NUL byte for denied terms, in the pushed tip and in a file deleted again before the push (#989)', { skip }, () => {
+  const blob = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0, 0, 0xff]), Buffer.from('author=SecretProject;'), Buffer.from([0, 1, 2])]);
+  for (const keep of [true, false]) {
+    const r = repo();
+    const base = r.git('rev-parse', 'HEAD');
+    writeFileSync(join(r.dir, 'logo.png'), blob);
+    r.git('add', 'logo.png');
+    r.git('commit', '-q', '-m', 'add logo');
+    if (!keep) {
+      r.git('rm', '-q', 'logo.png');
+      r.git('commit', '-q', '-m', 'drop logo');
+    }
+    const p = gateRange(r.dir, base);
+    assert.notEqual(p.status, 0, `kept=${keep}: refused`);
+    assert.match(p.stderr, /logo\.png: denied term "secretproject" in a binary file/, `kept=${keep}`);
+    const hook = r.push();
+    assert.notEqual(hook.status, 0, `kept=${keep}: the pre-push hook refuses it too`);
+    assert.equal(spawnSync('git', ['ls-remote', 'origin', 'refs/heads/feature'], { cwd: r.dir, encoding: 'utf8' }).stdout, '', 'nothing reached the remote');
+  }
+});
+
+test('push gate allows a binary file whose bytes only look like a denylist pattern: binaries are scanned for hashed terms only (#989)', { skip }, () => {
+  const r = repo();
+  const base = r.git('rev-parse', 'HEAD');
+  writeFileSync(join(r.dir, 'data.bin'), Buffer.concat([Buffer.from([0, 0x7f]), Buffer.from(` ${['D', '123'].join('')} ${[10, 1, 2, 3].join('.')} `), Buffer.from([0])]));
+  r.git('add', 'data.bin');
+  r.git('commit', '-q', '-m', 'add data');
+  const p = gateRange(r.dir, base);
+  assert.equal(p.status, 0, p.stderr);
+});
+
 test('push gate allows a clean push; the author\'s own sign-off is not a leak; placeholders are fine', { skip }, () => {
   const r = repo();
   r.commit('docs.md', 'paths like /home/example/x and /Users/you/x are placeholders; 192.0.2.5 is documentation\n', 'Add docs\n\nSigned-off-by: Ada <ada@example.com>');

@@ -65,5 +65,17 @@ export function scanText(rules, path, text) {
   return hits;
 }
 
+/**
+ * Every denied hashed term in a blob holding a NUL byte, as "path: why" strings. The regex patterns are not run: their
+ * short shapes (a letter and digits, a dotted quad) match by chance in binary data, a hashed term only when it's there.
+ */
+export function scanBinary(rules, path, text) {
+  const hits = new Set();
+  for (const t of tokens(text)) {
+    if (rules.hashed.has(sha(t)) && !rules.allow.some((a) => a.term === t && a.re.test(path))) hits.add(`${path}: denied term "${t}" in a binary file (it holds a NUL byte)`);
+  }
+  return [...hits];
+}
+
 // check-table: never-grow
 export const SKIP = new Set(['.denylist.json', '.denylist-allow', 'package-lock.json', 'LICENSE']);
