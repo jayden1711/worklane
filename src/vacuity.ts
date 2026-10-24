@@ -34,12 +34,55 @@ import { childEnv, readRegularFile, shellCommand } from './os/index.js';
  */
 export const FALLBACK_TEST_GLOBS: readonly string[] = ['test/**', '**/*.test.*'];
 
+/** Where `.` stops and a multiline `$` matches: JavaScript's line terminators. */
+const lineEnd = (c: number) => c === 10 || c === 13 || c === 0x2028 || c === 0x2029;
+
+/**
+ * `src` without comments, in one pass each, as the regular expressions it replaces read it (#986: their lazy `/*` match
+ * was quadratic on many unclosed openers, 13.5 s at 512 KiB on the coordinator's thread). First every `/*` to the first
+ * closer after it (from an opener with no closer after it on, the text stays); then, in what is left, every `//` not right
+ * after `:` or `\`, to its line's end.
+ */
 export function stripComments(src: string): string {
-  return src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:\\])\/\/.*$/gm, '$1');
+  const blocks: string[] = [];
+  let from = 0;
+  for (let i = src.indexOf('/*'); i >= 0; i = src.indexOf('/*', from)) {
+    const end = src.indexOf('*/', i + 2);
+    if (end < 0) break;
+    blocks.push(src.slice(from, i));
+    from = end + 2;
+  }
+  blocks.push(src.slice(from));
+  const text = blocks.join('');
+  const out: string[] = [];
+  from = 0;
+  for (let i = text.indexOf('//'); i >= 0; ) {
+    if (i > 0 && (text[i - 1] === ':' || text[i - 1] === '\\')) {
+      i = text.indexOf('//', i + 1);
+      continue;
+    }
+    out.push(text.slice(from, i));
+    let end = i + 2;
+    while (end < text.length && !lineEnd(text.charCodeAt(end))) end++;
+    from = end;
+    i = text.indexOf('//', end);
+  }
+  out.push(text.slice(from));
+  return out.join('');
 }
 
-/** Matches of `pattern` outside comments (the coordinator's tamper guard compares these before and after a change). */
-export function countAssertions(src: string, pattern: string): number {
+/**
+ * The longest text (UTF-16 code units) the tamper guard counts assertions in. Past it the count is never taken, so a
+ * test file of any size holds the coordinator's thread for a bounded time; the guard flags the file instead (#986).
+ */
+export const ASSERTION_COUNT_CHARS = 1024 * 1024;
+
+/**
+ * Matches of `pattern` outside comments (the coordinator's tamper guard compares these before and after a change).
+ * Null: `src` is longer than ASSERTION_COUNT_CHARS, and isn't counted.
+ */
+export function countAssertions(src: string, pattern: string): number | null {
+  if (src.length > ASSERTION_COUNT_CHARS) return null;
   return [...stripComments(src).matchAll(new RegExp(pattern, 'g'))].length;
 }
 
