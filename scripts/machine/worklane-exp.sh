@@ -280,23 +280,27 @@ gpu_lock_file() {
 
 # Take each granted GPU's lock for run <id>, in ascending order, waiting at most until the run's deadline (epoch seconds). Each
 # lock's fd stays open in this helper (and the systemd-run it starts) until it exits. On a wait that reaches the
-# deadline: the line saying who holds it, and exit 1, with nothing started.
+# deadline: the line saying who holds it, and exit 1, with nothing started. GPU_WAITED: the seconds spent in flock
+# alone, summed over the GPUs (never the lock files' setup).
 GPU_FDS=()
 GPU_LOCKS=()
+GPU_WAITED=0
 gpu_lock() {
-  local id="$1" deadline="$2" started="$3" i f fd=19 left
+  local id="$1" deadline="$2" started="$3" i f fd=19 left t0
   for i in "${GPU_IDX[@]}"; do
     f="$(gpu_lock_file "$i")" || exit 2
     # A fixed fd per lock (20 and up; at most 16 GPUs), opened read-only: the number alone goes through eval.
     fd=$((fd + 1))
     eval "exec $fd<\"\$f\""
-    left=$((deadline - $(date +%s)))
+    t0="$(date +%s)"
+    left=$((deadline - t0))
     if [ "$left" -lt 1 ] || ! flock -x -w "$left" "$fd"; then
       if [ "$left" -lt 1 ] && flock -x -n "$fd"; then :; else
         echo "worklane-exp: gpu $i: still held after $(($(date +%s) - started)) s, the run's timeout (held by $(gpu_holder "$f"))" >&2
         exit 1
       fi
     fi
+    GPU_WAITED=$((GPU_WAITED + $(date +%s) - t0))
     GPU_FDS+=("$fd"); GPU_LOCKS+=("$f")
     # The note a waiting run's message names. Root's file: only this helper writes it; it is emptied again at the end.
     printf '%s/%s since %s\n' "$name" "$id" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$f" 2>/dev/null || true
@@ -559,7 +563,7 @@ job() {
       locked="$(date +%s)"
       # A wait that reaches WAIT_MAX exits 1 here, saying who holds the GPU: no record, nothing ran (the engine logs it).
       gpu_lock "$job" $((locked + wait_max)) "$locked"
-      waited=$(($(date +%s) - locked))
+      waited=$GPU_WAITED
       gpu=("${GPU_PROPS[@]}")
     fi
   fi
