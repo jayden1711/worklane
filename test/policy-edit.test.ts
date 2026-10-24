@@ -1109,3 +1109,17 @@ test("#882: an unreadable limits file: root's `policy set` prints its path and t
   const r = settingsReader(plain.file, plain.deps.limitsPath!)();
   assert.match(r.error ?? '', new RegExp(`^policy settings unusable: the machine's limits file is unreadable: limits file ${plain.deps.limitsPath!.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}: .*JSON`));
 });
+
+test("#882: root's `policy check` prints an error's cause after its message", () => {
+  const lines: string[] = [];
+  const was = console.error;
+  console.error = (...a: unknown[]) => void lines.push(a.map(String).join(' '));
+  let code: number;
+  try {
+    code = policyCommand('check', ['check-cause'], { home: () => { throw new Error("the user database can't be read", { cause: new Error('EIO: i/o error, read') }); } }, false);
+  } finally {
+    console.error = was;
+  }
+  assert.equal(code, 1);
+  assert.deepEqual(lines, ["the user database can't be read: Error: EIO: i/o error, read"]);
+});
