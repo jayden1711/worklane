@@ -187,14 +187,10 @@ test('GPU on for the instance: PrivateDevices=yes kept, exactly nvidiactl, nvidi
   try {
     h.nodes(...ALL_NODES);
     h.optIn({ other: [1], shop: [0] });
-    // The lock's five stats take 3 s in all: the setup is slow, the lock itself free.
-    h.setSlowStat(0.6);
     const r = h.exec('fast-a-1', 60, true);
-    h.setSlowStat(0);
     assert.equal(r.status, 0, r.stderr);
     const d = (n: string) => join(h.dev, n);
-    // max: what is left of the 60 s once the helper got there (a moment on a slow machine); waited: for the lock alone,
-    // never its file's setup.
+    // max: what is left of the 60 s once the helper got there (a moment on a slow machine); waited: for the lock alone.
     const line = r.stderr.split('\n')[0]!;
     const m = new RegExp(`^worklane-testrun: gpu 0 \\(devices ${d('nvidiactl')} ${d('nvidia-uvm')} ${d('nvidia0')}; max (\\d+) s; waited ([01]) s\\)$`).exec(line);
     assert.ok(m && Number(m[1]) <= 60 && Number(m[1]) >= 55, line);
@@ -217,6 +213,42 @@ test('GPU on for the instance: PrivateDevices=yes kept, exactly nvidiactl, nvidi
     assert.ok(!props(h.call('fast-a-3').argv).some((p) => p.startsWith('SupplementaryGroups=')), 'no device group for a run that does not ask');
     // After the command, the lock's note is emptied and it is free.
     assert.equal(readFileSync(join(h.lockDir, '0.lock'), 'utf8'), '');
+  } finally {
+    h.done();
+  }
+});
+
+test('#968: "waited" is the wait for the lock alone, never its file\'s setup: a slow setup of a free lock waits 0 s', { skip: !posix && 'bash' }, () => {
+  const h = gpuHelper();
+  try {
+    h.nodes('nvidiactl', 'nvidia-uvm', 'nvidia0');
+    h.optIn({ shop: [0] });
+    // The lock's five stats take 3 s in all; nobody holds it.
+    h.setSlowStat(0.6);
+    const r = h.exec('fast-a-1', 60, true);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stderr.split('\n')[0]!, /^worklane-testrun: gpu 0 \(devices .*; waited [01] s\)$/);
+  } finally {
+    h.done();
+  }
+});
+
+test('#968: "waited" sums the waits of every GPU the run locks, not only the last one\'s', { skip: !posix && 'bash' }, async () => {
+  const h = gpuHelper();
+  try {
+    h.nodes('nvidiactl', 'nvidia-uvm', 'nvidia0', 'nvidia1');
+    h.optIn({ shop: [0, 1] });
+    assert.equal(h.exec('fast-x-0', 30, true).status, 0, 'the locks made');
+    // GPU 0 (locked first) held for 3 s; GPU 1 free.
+    const held = await holdFlock(join(h.lockDir, '0.lock'), 'exclusive');
+    const run = h.execAsync('fast-a-1', 60, true);
+    await new Promise((r) => setTimeout(r, 3000));
+    await held.release();
+    const r = await run;
+    assert.equal(r.status, 0, r.stderr);
+    const line = r.stderr.split('\n')[0]!;
+    assert.match(line, /^worklane-testrun: gpu 0,1 \(devices /);
+    assert.ok(Number(/waited (\d+) s/.exec(line)![1]) >= 2, line);
   } finally {
     h.done();
   }
