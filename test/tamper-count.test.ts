@@ -29,7 +29,7 @@ test('the stripped text and the count are the same as the regular expressions ga
     '/* open\nassert(1)\n// close */ expect(2)\n',
     '// a note /* that opens\nassert(1)\n*/ check(2)\n',
     'a//* c */ assert(1)\n:/* c */// assert(2)\n/*/ assert(3) */ expect(4)\n/**/check(5)',
-    "glob('src/*'); assert(1);\nglob('test/**'); expect(2) // tail\n",
+    "pick('lib/*'); assert(1);\npick('test/**'); expect(2) // tail\n",
     'assert(1) // \r assert(2)\n// x\u2028assert(3)\u2029// y\r\nassert(4)',
     '/* unclosed\nassert(1)\n/* still */ expect(2)\n',
     '',

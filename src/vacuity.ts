@@ -87,9 +87,9 @@ export function countAssertions(src: string, pattern: string): number | null {
 }
 
 /**
- * `src` without comments, in one pass (#784 round 8: stripComments's lazy `/*` match is quadratic on many unclosed
- * openers, 13.5 s at 512 KiB on the coordinator's thread). A `//` after `:` or `\` starts none, as there; a `/*` with no
- * end takes the rest of the text with it (so less is counted, never more).
+ * `src` without comments, in one pass (#784 round 8: a lazy `/*` regular expression is quadratic on many unclosed
+ * openers, 13.5 s at 512 KiB). A `//` after `:` or `\` starts none, as in stripComments; unlike there, a `/*` with no
+ * end takes the rest of the text with it (so less is counted, never more), and a `//` comment hides a `/*` in it.
  */
 function withoutComments(src: string): string {
   const out: string[] = [];
