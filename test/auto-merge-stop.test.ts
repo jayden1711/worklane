@@ -1,10 +1,10 @@
 // lint-test
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
-import { readStopFile, STOP_NO_REASON, STOP_UNREADABLE, stopFilePath } from '../src/auto-merge-stop.js';
+import { readStopFile, STOP_NO_REASON, STOP_UNREADABLE, stopFilePath, stopFilePresent } from '../src/auto-merge-stop.js';
 import { autoMergeState } from '../src/dashboard.js';
 import { readStop } from '../src/watchdog/wire.js';
 import { repoRoot } from './helpers.js';
@@ -53,6 +53,28 @@ test("regression (#982): the dashboard's auto-merge state and the watchdog read 
     assert.equal(st.stopped, s.reason, s.name);
     assert.equal(st.why, `stopped: ${s.reason}; the operator clears it`, s.name);
     assert.equal(readStop(dir)?.reason, s.reason, `${s.name}: watchdog`);
+  }
+});
+
+test("regression (#982): a stop file whose presence can't be checked (a state dir that can't be entered) holds, fail closed", () => {
+  // Root enters any directory, and Windows has no POSIX modes: there is no check that fails to test there.
+  if (process.platform === 'win32' || process.getuid?.() === 0) return;
+  const dir = mkdtempSync(join(tmpdir(), 'am-stop-'));
+  const state = join(dir, 'state');
+  mkdirSync(state);
+  writeFileSync(stopFilePath(state), JSON.stringify({ reason: 'main went red after #12' }));
+  const policy = policyOn(dir);
+  chmodSync(state, 0o000);
+  try {
+    assert.throws(() => lstatSync(stopFilePath(state)), { code: 'EACCES' }, 'the fixture: checking the stop file fails with EACCES');
+    assert.equal(stopFilePresent(stopFilePath(state)), true);
+    assert.equal(readStopFile(stopFilePath(state))?.reason, STOP_UNREADABLE);
+    const st = autoMergeState({ policyFile: policy, repoAuto: true, stateDir: state });
+    assert.equal(st.on, false);
+    assert.equal(st.stopped, STOP_UNREADABLE);
+    assert.equal(readStop(state)?.reason, STOP_UNREADABLE, 'watchdog');
+  } finally {
+    chmodSync(state, 0o700);
   }
 });
 
