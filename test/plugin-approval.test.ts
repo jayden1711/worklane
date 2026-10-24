@@ -177,3 +177,14 @@ test('a snapshot taken with secrets is valid only for the network it was taken w
   assert.throws(() => recordOf(readPreview('xi', 'kit-notes'), ['builder'], { network: ['api.example.com', 'other.example'], secrets: [] }), /taken with network api\.example\.com/);
   assert.ok(recordOf(readPreview('xi', 'kit-notes'), ['builder'], { network: ['api.example.com'], secrets: [] }));
 });
+
+test("#882: a preview that isn't the one asked for is refused by the plugin's id, never the preview file's path", () => {
+  previewed('omicron', 'kit');
+  const f = join(previewDir('omicron', 'kit'), 'preview.json');
+  writeFileSync(f, JSON.stringify({ ...JSON.parse(readFileSync(f, 'utf8')), id: 'other' }));
+  assert.throws(() => readPreview('omicron', 'kit'), (e: Error) => {
+    assert.equal(e.message, "the preview of kit isn't omicron's kit: fetch it again");
+    assert.ok(!e.message.includes(f) && !e.message.includes('/'), e.message);
+    return true;
+  });
+});

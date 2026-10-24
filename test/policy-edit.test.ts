@@ -18,7 +18,8 @@ import { instanceAutoMerge, loadInstanceSetup, readPolicy } from '../src/instanc
 import { processIdentity } from '../src/os/index.js';
 import { aliasInstance, armedSwitches, autoMergeKilled, idDir, instanceId, killAutoMerge } from '../src/policy-kill.js';
 import { applyPolicy, POLICY_KEYS, PolicyEditError, policyForm } from '../src/policy-edit.js';
-import { changeSetting, SETTING_KEYS, settingsReader, SettingsError } from '../src/settings.js';
+import { changeSetting, POLICY_CHECK_REFUSED, SETTING_KEYS, settingsReader, SettingsError } from '../src/settings.js';
+import { DETAIL_LOGGED, refusalText } from '../src/user-facing-error.js';
 import { DASHBOARD_TIGHTEN_ONLY, decodePolicyValue, encodePolicyValue, HELPER_ONLY, POLICY_ROOT_DIR, POLICY_SET_KEYS, readPolicyChecked, setPolicyRootUid } from '../src/policy-gate.js';
 import * as gate from '../src/policy-gate.js';
 import { ownPolicy, policyCommand, setPolicy, type PolicyRootDeps } from '../src/policy-root.js';
@@ -141,7 +142,16 @@ test("the coordinator user's write to a root policy.yaml is refused", { skip }, 
   writeFileSync(join(m.dir, 'instance.yaml'), 'version: 1\nname: refuse\nrepos:\n  - path: "x"\n    repo: example/refuse\n');
   writeFileSync(join(m.dir, 'credentials.yaml'), 'version: 1\ngithub: { kind: gh-config-dir, path: "/x" }\n');
   assert.throws(() => loadInstanceSetup('refuse', m.instances), /refused/, 'the instance does not load: it fails closed');
-  assert.throws(() => changeSetting({ policyPath: m.file, cfg, eventsDb: join(m.T, 'events.db'), key: 'workers', value: 1, by: cfg.project.owners.default, owner: true }), /refused/);
+  assert.throws(() => changeSetting({ policyPath: m.file, cfg, eventsDb: join(m.T, 'events.db'), key: 'workers', value: 1, by: cfg.project.owners.default, owner: true }), (e: Error) => {
+    // #882: the page gets the engine's words; the gate's refusal, which names the file and root's record, is the
+    // cause, which the route logs (refusalText).
+    assert.ok(e instanceof SettingsError);
+    assert.equal(e.message, POLICY_CHECK_REFUSED);
+    const lines: string[] = [];
+    assert.equal(refusalText('POST /api/instance-settings', e, (l) => lines.push(l)), `${POLICY_CHECK_REFUSED}; ${DETAIL_LOGGED}`);
+    assert.ok(lines.some((l) => l.includes(m.file) && l.includes('policy own refuse')), `the refusal is logged: ${JSON.stringify(lines)}`);
+    return true;
+  });
   // Even "root's" own uid: never through a link, nor a file with a second name.
   const l = machineInstance('refuse-link');
   ownPolicy('refuse-link', l.deps);
@@ -1077,4 +1087,25 @@ test("the reviewer's case: an admin's budget, workers, automations off and ci_re
   // Lowering still goes: queued for the helper.
   asRoot(() => applyPolicy({ path: m.file, cfg, values: { 'budget.daily_usd': 42 }, eventsDb: join(m.T, 'e.db'), by: 'olive', request }));
   assert.equal(asked, 1);
+});
+
+test("#882: an unreadable limits file: root's `policy set` prints its path and the parser's text, and the coordinator's settings reader says them", { skip }, () => {
+  const m = machineInstance('limits-cause');
+  ownPolicy('limits-cause', m.deps);
+  writeFileSync(m.deps.limitsPath!, '{not json');
+  const lines: string[] = [];
+  const was = console.error;
+  console.error = (...a: unknown[]) => void lines.push(a.map(String).join(' '));
+  let code: number;
+  try {
+    code = asRoot(() => policyCommand('set', ['limits-cause', 'budget.daily_usd', '40'], m.deps, true));
+  } finally {
+    console.error = was;
+  }
+  assert.equal(code, 1);
+  assert.ok(lines.some((l) => l.startsWith("the machine's limits file is unreadable: limits file ") && l.includes(m.deps.limitsPath!) && l.includes('JSON')), JSON.stringify(lines));
+  const plain = machineInstance('limits-cause-reader');
+  writeFileSync(plain.deps.limitsPath!, '{not json');
+  const r = settingsReader(plain.file, plain.deps.limitsPath!)();
+  assert.match(r.error ?? '', new RegExp(`^policy settings unusable: the machine's limits file is unreadable: limits file ${plain.deps.limitsPath!.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}: .*JSON`));
 });

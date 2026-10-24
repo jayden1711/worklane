@@ -29,7 +29,7 @@ async function logged<T>(f: () => Promise<T>): Promise<{ result: T; lines: strin
   }
 }
 
-async function hub() {
+async function hub(o: { tokenFile?: string } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'hub-500-'));
   const { dir: root } = exampleProject();
   const d = await startDashboard({ root, cfg: loadConfig(root), eventsDb: join(dir, 'events.db'), stateDir: join(dir, 'inst'), user: 'example-owner', roleOf: exampleRoles, slotsDir: join(dir, 'slots') });
@@ -42,7 +42,7 @@ async function hub() {
     return new Response(null, { status: 204 });
   }) as typeof fetch;
   const h = await startHub({
-    instances: [{ name: 'a', port: Number(new URL(d.url).port), tokenFile: d.keyFile }],
+    instances: [{ name: 'a', port: Number(new URL(d.url).port), tokenFile: o.tokenFile ?? d.keyFile }],
     stateDir: join(dir, 'hub'),
     webDir: web,
     signIn: { clientId: 'Iv1.testclient01', clientSecret: 'secret', sessionSecret: 's'.repeat(48), publicUrl: 'https://hub.example.test', fetch: signInFetch },
@@ -104,6 +104,23 @@ test("#864: the hub's break-glass port answers the same fixed 500", async () => 
     assertOpaque(r.status, r.text, 'break-glass port');
     assert.ok(lines.some((l) => l.includes(SECRET_PATH)), 'the detail is logged');
     assert.ok(!lines.some((l) => l.includes(TOKEN)), 'redacted');
+  } finally {
+    await s.close();
+  }
+});
+
+test("#882: an instance whose dashboard token the hub can't read answers 502 naming the instance, never the token file's path; the reason is in the hub's log", async () => {
+  const gone = join(mkdtempSync(join(tmpdir(), 'hub-token-')), 'state', 'dashboard-token');
+  const s = await hub({ tokenFile: gone });
+  try {
+    const { result: r, lines } = await logged(async () => {
+      const res = await fetch(`${s.glass}/api/i/a/state`, { headers: { authorization: `Bearer ${s.h.token}` } });
+      return { status: res.status, text: await res.text() };
+    });
+    assert.equal(r.status, 502, r.text);
+    assert.deepEqual(JSON.parse(r.text), { error: "can't read instance a's dashboard token: is its dashboard running, and the hub allowed to read it?" });
+    for (const leak of [gone, tmpdir(), 'ENOENT']) assert.ok(!r.text.includes(leak), `${leak} in ${r.text}`);
+    assert.ok(lines.some((l) => l.includes("instance a's dashboard token") && l.includes('ENOENT') && l.includes(gone)), `the reason is logged: ${JSON.stringify(lines)}`);
   } finally {
     await s.close();
   }

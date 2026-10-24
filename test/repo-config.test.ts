@@ -13,6 +13,7 @@ import { startDashboard } from '../src/dashboard.js';
 import { EventLog } from '../src/events/log.js';
 import { projectStateDir } from '../src/guardrails/context.js';
 import { install } from '../src/install.js';
+import { trackConfigPr } from '../src/config-pr.js';
 import type { RunResult, SetupProbe, SetupView } from '../src/setup-steps.js';
 import { asPerson, exampleProject, exampleRoles } from './helpers.js';
 
@@ -313,6 +314,49 @@ test("#882: Propose failing in git (the fetch from an origin that isn't there) a
     assert.equal(r.status, 400, JSON.stringify(r.body));
     assert.deepEqual(r.body, { error: "git fetch origin main failed; the detail is in the dashboard's log on the machine" });
     assert.ok(lines.some((l) => l.includes('POST /api/first-run/repo-config') && l.includes(gone) && l.includes('does not appear to be a git repository')), `git's text is logged: ${JSON.stringify(lines)}`);
+  } finally {
+    await s.d.close();
+  }
+});
+
+test("#882: the checks GitHub ran, when GitHub doesn't answer: the page says so in the engine's words; gh's text is in the dashboard's log only", async () => {
+  const f = fixture();
+  const said = 'HTTP 403: Resource not accessible by integration (https://api.github.com/repos/example-org/example-shop/commits)';
+  const s = await dashboard(f.dir, (args) => (args[0] === 'api' ? { status: 1, stdout: '', stderr: `${said}\n` } : { status: 1, stdout: '', stderr: 'no stand-in' }));
+  try {
+    const { out: v, lines } = await logged(() => s.get('/api/first-run/checks-seen'));
+    assert.deepEqual(v, { checks: [], error: "GitHub didn't answer; the detail is in the dashboard's log on the machine" });
+    assert.ok(lines.some((l) => l.includes('GET /api/first-run/checks-seen') && l.includes(said)), `gh's text is logged: ${JSON.stringify(lines)}`);
+  } finally {
+    await s.d.close();
+  }
+});
+
+test("#882: a config PR's merge when gh can't read the PR answers the engine's own words; gh's text is in the dashboard's log only", async () => {
+  const f = fixture();
+  trackConfigPr(projectStateDir(f.dir), { number: 7, url: 'https://github.com/example-org/example-shop/pull/7', kind: 'config', base: 'main', head: 'a'.repeat(40) });
+  const said = 'GraphQL: Could not resolve to a PullRequest with the number of 7. (repository.pullRequest)';
+  const s = await dashboard(f.dir, (args) => (args[0] === 'pr' && args[1] === 'view' ? { status: 1, stdout: '', stderr: `${said}\n` } : { status: 1, stdout: '', stderr: 'no stand-in' }));
+  try {
+    const { out: r, lines } = await logged(() => s.post('/api/first-run/repo-config/merge', 'example-owner', { number: 7 }));
+    assert.equal(r.status, 400, JSON.stringify(r.body));
+    assert.deepEqual(r.body, { error: "can't read PR #7 on example-org/example-shop; the detail is in the dashboard's log on the machine" });
+    assert.ok(lines.some((l) => l.includes('POST /api/first-run/repo-config/merge') && l.includes(said)), `gh's text is logged: ${JSON.stringify(lines)}`);
+  } finally {
+    await s.d.close();
+  }
+});
+
+test("#882: Fetch the default branch failing in git answers the engine's own words; git's text and the origin's path are in the dashboard's log only", async () => {
+  const f = fixture();
+  const gone = join(tmpdir(), `repo-config-gone-${process.pid}-fetch`, 'X.git');
+  f.git('remote', 'set-url', 'origin', gone);
+  const s = await dashboard(f.dir, ghStandIn().gh);
+  try {
+    const { out: r, lines } = await logged(() => s.post('/api/first-run/actions/default-branch', 'example-owner', { confirm: true }));
+    assert.equal(r.status, 500, JSON.stringify(r.body));
+    assert.deepEqual(r.body, { error: "git fetch -q origin main failed; the detail is in the dashboard's log on the machine" });
+    assert.ok(lines.some((l) => l.includes('POST /api/first-run/actions/default-branch failed') && l.includes(gone)), `git's text is logged: ${JSON.stringify(lines)}`);
   } finally {
     await s.d.close();
   }

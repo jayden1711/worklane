@@ -4,7 +4,7 @@ import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { loadConfig } from '../src/config/load.js';
-import { instanceSettingsView, startDashboard } from '../src/dashboard.js';
+import { autoMergeState, instanceSettingsView, startDashboard } from '../src/dashboard.js';
 import { EventLog } from '../src/events/log.js';
 import { asPerson, exampleProject, exampleRole, exampleRoles } from './helpers.js';
 
@@ -206,4 +206,32 @@ test("#882: a change refused on the machine's limits file or the policy file ans
     console.error = was;
     await x.d.close();
   }
+});
+
+/** console.error's lines while `f` runs. */
+function logged<T>(f: () => T): { out: T; lines: string[] } {
+  const lines: string[] = [];
+  const was = console.error;
+  console.error = (...a: unknown[]) => void lines.push(a.map(String).join(' '));
+  try {
+    return { out: f(), lines };
+  } finally {
+    console.error = was;
+  }
+}
+
+test("#882: the Settings page's view, with the machine's limits file unreadable: the page says the detail is logged, and the log line names the file's path and the parser's text", () => {
+  const s = setup();
+  writeFileSync(s.limitsPath, '{not json');
+  const { out: v, lines } = logged(() => instanceSettingsView({ policyFile: s.policyFile, cfg: s.cfg, user: s.user, role: exampleRole(s.user), limitsPath: s.limitsPath }));
+  assert.equal('limitsError' in v ? v.limitsError : null, "the machine's limits file is unreadable or invalid; the detail is in the dashboard's log on the machine");
+  assert.ok(lines.some((l) => l.includes("the machine's limits file") && l.includes(`cause: limits file ${s.limitsPath}`) && l.includes('JSON')), `the path and the parser's text are logged: ${JSON.stringify(lines)}`);
+});
+
+test("#882: auto-merge's state with the instance policy unreadable says so in the engine's words; the parser's errors, which quote the file, are in the dashboard's log only", () => {
+  const s = setup();
+  writeFileSync(s.policyFile, 'version: 1\nbudget: [ {{ :\n');
+  const { out: a, lines } = logged(() => autoMergeState({ policyFile: s.policyFile, repoAuto: null, stateDir: s.dir }));
+  assert.equal(a.why, "the instance policy can't be read (the detail is in the dashboard's log on the machine), so auto-merge counts as off");
+  assert.ok(lines.some((l) => l.includes('auto-merge: the instance policy') && l.includes('Flow map')), `the parser's errors are logged: ${JSON.stringify(lines)}`);
 });
