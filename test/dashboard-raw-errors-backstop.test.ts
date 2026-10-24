@@ -28,10 +28,12 @@
 // `failure`) or typed otherwise (a type alias, an object type, `Record<...>`, a generic `T`), outside the callbacks
 // above, including a named handler passed to `.catch` (`.catch(onFail)`, read where it is declared); a Node-style
 // callback whose error parameter has another name (`(problem, stdout) => ...`); a narrowed branch that reads a property
-// of an engine error holding raw text, its `.cause` included; a module of src/ that exports a built-in class under an
-// engine name; a local function shadowing logDetail or errorAnswer, or one the lint scans that hands its error on
-// through another name; `arguments` in a function that isn't passed as an error callback; an errno `.code` put in an
-// answer; and text outside these files.
+// of an engine error holding raw text, its `.cause` included, or one that assigns the binding a new value (`e = new
+// Error(raw)`) and then reads it; a listener for an event whose name doesn't end in error (`'uncaughtException'`,
+// `'unhandledRejection'`); a call by bracket access (`p['catch'](...)`, `up['on']('error', ...)`); a module of src/
+// that exports a built-in class under an engine name; a local function shadowing logDetail or errorAnswer, or one the
+// lint scans that hands its error on through another name; `arguments` in a function that isn't passed as an error
+// callback; an errno `.code` put in an answer; and text outside these files.
 import './helpers.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
