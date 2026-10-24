@@ -185,7 +185,7 @@ const PATTERNS = [
     [/(^|[^A-Za-z0-9_])([sr]k)_(?:live|test)_([A-Za-z0-9]{16,})(?![A-Za-z0-9_])/g, (m, pre, k, v) => (/\d/.test(v) ? `${pre}${k}_[REDACTED]` : m), 'Stripe key'],
     [/AIza[0-9A-Za-z_-]{35}(?![0-9A-Za-z_-])/g, 'AIza[REDACTED]', 'Google API key'],
     [
-        /(^|[^A-Za-z0-9_-])(?=([A-Za-z0-9_-]*?)eyJ)\2eyJ(?=[A-Za-z0-9_-]{8})(?=([A-Za-z0-9_-]+))\3\.(?=[A-Za-z0-9_-]{8})(?=([A-Za-z0-9_-]+))\4\.[A-Za-z0-9_-]*(?:\.[A-Za-z0-9_-]*)*/g,
+        /(^|[^A-Za-z0-9_+/-])(?=([A-Za-z0-9_+/-]*?)eyJ)\2eyJ(?=[A-Za-z0-9_+/-]{8})(?=([A-Za-z0-9_+/-]+))\3=*\.(?=[A-Za-z0-9_+/-]{8})(?=([A-Za-z0-9_+/-]+))\4=*\.[A-Za-z0-9_+/=-]*(?:\.[A-Za-z0-9_+/=-]*)*/g,
         '$1$2[REDACTED JWT]',
         'JWT',
     ],
@@ -198,13 +198,13 @@ const PATTERNS = [
     [/tskey-[A-Za-z0-9_-]+/g, 'tskey-[REDACTED]', 'Tailscale key'],
     [/-----BEGIN [A-Z ]*PRIVATE KEY(?: BLOCK)?-----(?:[\s\S]*?-----END [A-Z ]*PRIVATE KEY(?: BLOCK)?-----|[\s\S]*)/g, '[REDACTED PRIVATE KEY]', 'private key'],
     [/^[\s\S]*-----END [A-Z ]*PRIVATE KEY(?: BLOCK)?-----/, orphanEnd, 'private key'],
-    [/\b(bearer)\s+[A-Za-z0-9._~+/-]{20,}=*/gi, '$1 [REDACTED]', 'bearer token'],
-    [/\b(basic)(\s+)([A-Za-z0-9+/]{8,}={0,2})/gi, (m, s, sp, v) => (basicShaped(v) ? `${s}${sp}[REDACTED]` : m), 'Basic credential'],
+    [/\b(bearer)\s+(?:[A-Za-z0-9._~+/-]|\\\/){20,}=*/gi, '$1 [REDACTED]', 'bearer token'],
+    [/\b(basic)(\s+)((?:[A-Za-z0-9+/]|\\\/){8,}={0,2})/gi, (m, s, sp, v) => (basicShaped(v) ? `${s}${sp}[REDACTED]` : m), 'Basic credential'],
     [/([a-z0-9+.-]{1,32}:\/\/[^:/\s@]+):[^@\s/]+@/gi, '$1:[REDACTED]@', 'password in a URL'],
     [/\b0x[0-9a-fA-F]{64}(?![A-Za-z0-9])/g, '0x[REDACTED-32-BYTES]', '32-byte hex key'],
     [
-        /(\\?")([A-Za-z0-9_-]+)\1(\s*:\s*)\1([A-Za-z0-9_\-.+/=~]{16,})\1/g,
-        (m, q, k, sep, v) => (credentialKey(k) && credentialShaped(v) ? `${q}${k}${q}${sep}${q}[REDACTED]${q}` : m),
+        /(\\?"|')([A-Za-z0-9_-]+)\1(\s*(?::|=>)\s*)(\\?"|')([A-Za-z0-9_\-.+/=~]{16,})\4/g,
+        (m, q, k, sep, vq, v) => (credentialKey(k) && credentialShaped(v) ? `${q}${k}${q}${sep}${vq}[REDACTED]${vq}` : m),
         'secret under a JSON key',
     ],
     [/(^|[^A-Za-z0-9])[A-Za-z0-9_-]{23,28}\.[A-Za-z0-9_-]{6,7}\.[A-Za-z0-9_-]{27,}\b/g, '$1[REDACTED]', 'Discord bot token'],
@@ -264,7 +264,7 @@ const GLUE_PARTS = [
 ];
 const GLUE = new RegExp(GLUE_PARTS.join('|'), 'g');
 function gluePoints(s) {
-    const cuts = [...s.matchAll(GLUE)].map((m) => m.index + m[0].length);
+    const cuts = [...s.matchAll(GLUE)].map((m) => m.index + m[0].length).filter((c) => /\w/.test(s[c - 1]));
     for (let at = s.indexOf('_'); at !== -1; at = s.indexOf('_', at + 1))
         if (GLUED_PREFIXES.some((p) => s.startsWith(p, at + 1)))
             cuts.push(at + 1);
@@ -330,11 +330,7 @@ exports.UNSCANNABLE_KIND = 'text too large to scan';
 function secretKinds(s) {
     const kinds = new Set();
     try {
-        for (const [re, rep, kind] of PATTERNS) {
-            re.lastIndex = 0;
-            if (apply(s, re, rep) !== s)
-                kinds.add(kind);
-        }
+        replaceUnion(s, false, (rank) => kinds.add(PATTERNS[rank][2]));
     }
     catch (e) {
         if (e instanceof RangeError)
@@ -381,8 +377,11 @@ function allSpans(s, rules) {
     readAt(s, gluePoints(s), rules, spans);
     return spans;
 }
-function replaceOnce(s, keepLines) {
+function replaceOnce(s, keepLines, found) {
     const spans = allSpans(s, SHAPE_RULES);
+    if (found)
+        for (const sp of spans)
+            found(sp[3]);
     if (!spans.length)
         return s;
     spans.sort((x, y) => x[0] - y[0] || y[1] - x[1] || x[3] - y[3]);
@@ -416,8 +415,8 @@ function fixedPoint(s, pass, keepLines = false) {
     }
     return exports.UNSCANNABLE + (keepLines ? '\n'.repeat(breaks(s)) : '');
 }
-function replaceUnion(s, keepLines) {
-    return fixedPoint(s, (t) => replaceOnce(t, keepLines), keepLines);
+function replaceUnion(s, keepLines, found) {
+    return fixedPoint(s, (t) => replaceOnce(t, keepLines, found), keepLines);
 }
 function maskOnce(s, mask, keepLines) {
     const spans = allSpans(s, BROAD_RULES);
