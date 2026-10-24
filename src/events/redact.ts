@@ -678,8 +678,18 @@ export const CUT_MARGIN = 16 * 1024;
  * dashboard) stay responsive.
  */
 export function redactCut(s: string, max: number, o: RedactTextOptions = {}): string {
-  const r = redactString(s.length > max + CUT_MARGIN ? readWindow(s, max + CUT_MARGIN) : s, o);
-  return r.length > max ? r.slice(0, max) : r;
+  return redactClip(s, max, o).text;
+}
+
+/**
+ * redactCut's text, and how many characters of it weren't shown (0: all of it was), for a store that marks its cuts
+ * (#988): of the redacted text when all of `s` was read, else of `s` itself.
+ */
+export function redactClip(s: string, max: number, o: RedactTextOptions = {}): { text: string; more: number } {
+  const windowed = s.length > max + CUT_MARGIN;
+  const r = redactString(windowed ? readWindow(s, max + CUT_MARGIN) : s, o);
+  if (!windowed && r.length <= max) return { text: r, more: 0 };
+  return { text: r.slice(0, max), more: (windowed ? s.length : r.length) - max };
 }
 
 /**
