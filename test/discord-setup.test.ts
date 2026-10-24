@@ -603,3 +603,18 @@ test("a checkout's dashboard has no Discord step: it says why and refuses the re
     await dash.close();
   }
 });
+
+test("#882: an intake.yaml the engine refuses is named by its name in the Discord step and its plan, never its path", { skip: !posix && 'POSIX modes' }, () => {
+  const i = instance();
+  writeFileSync(i.intake, 'version: 1\n', { mode: 0o644 });
+  fs.chmodSync(i.intake, 0o644);
+  assert.throws(() => planIntake({ path: i.intake, values: { 'discord.guild': ALPHA }, channels: [] }), (e: Error) => {
+    assert.ok(e instanceof DiscordSetupError);
+    assert.match(e.message, new RegExp(`^refused: ${INTAKE_FILE.replace('.', '\\.')} is readable by its group or others`));
+    assert.ok(!e.message.includes(i.dir), e.message);
+    return true;
+  });
+  const view = discordSetupView({ home: i.home, instance: 'shop', role: 'owner', asks: [], engineRoot: repoRoot });
+  assert.match(String(view.intake.error), new RegExp(`^${INTAKE_FILE.replace('.', '\\.')} is readable`));
+  assert.ok(!String(view.intake.error).includes(i.dir));
+});

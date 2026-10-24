@@ -14,7 +14,7 @@ import { outboundEnv } from '../network.js';
 import { spawn } from '../os/child-process.js';
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parse, parseDocument } from 'yaml';
 import { z } from 'zod';
@@ -25,7 +25,7 @@ import type { EventLog } from '../events/log.js';
 import { CredentialsFile, setDiscordToken } from '../instance.js';
 import { currentUser, replaceFileAtomically } from '../os/index.js';
 import { instanceUnit } from '../service.js';
-import { INTAKE_FILE, loadIntakeConfig } from './config.js';
+import { INTAKE_FILE, intakeErrorByName, loadIntakeConfig } from './config.js';
 import type { BotApplication, ChannelRow } from './discord-channels.js';
 import { IntakeConfig, intakeWarnings } from './report.js';
 import { lineDiff } from '../line-diff.js';
@@ -188,10 +188,10 @@ export function tokenState(credentialsFile: string): TokenState {
   let file: string | undefined;
   try {
     const r = CredentialsFile.safeParse(parse(readFileSync(credentialsFile, 'utf8')));
-    if (!r.success) return { configured: false, file: null, present: false, error: `${credentialsFile} is invalid: ${r.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ')}` };
+    if (!r.success) return { configured: false, file: null, present: false, error: `${basename(credentialsFile)} is invalid: ${r.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ')}` };
     file = r.data.intake?.discord_token;
   } catch (e) {
-    return { configured: false, file: null, present: false, error: `can't read ${credentialsFile} (${(e as NodeJS.ErrnoException).code ?? 'error'})` };
+    return { configured: false, file: null, present: false, error: `can't read ${basename(credentialsFile)} (${(e as NodeJS.ErrnoException).code ?? 'error'})` };
   }
   // INVARIANT: existence only; the token file is never opened here.
   return { configured: !!file, file: file ?? null, present: !!file && existsSync(file), error: null };
@@ -309,7 +309,7 @@ export function planIntake(o: { path: string; values: Record<string, unknown>; c
   const unknown = Object.keys(o.values).filter((k) => !INTAKE_FORM_KEYS.includes(k));
   if (unknown.length) throw new DiscordSetupError(`not set here: ${unknown.join(', ')}; this step writes ${INTAKE_FORM_KEYS.join(', ')}`);
   const loaded = loadIntakeConfig(o.path);
-  if (loaded && 'error' in loaded) throw new DiscordSetupError(`refused: ${loaded.error}`);
+  if (loaded && 'error' in loaded) throw new DiscordSetupError(`refused: ${intakeErrorByName(o.path, loaded.error)}`);
   const before = loaded ? readFileSync(o.path, 'utf8') : null;
   const doc = parseDocument(before ?? 'version: 1\n');
   const cfg = loaded?.config ?? IntakeConfig.parse({ version: 1 });
@@ -373,7 +373,7 @@ export function applyIntake(o: { path: string; values: Record<string, unknown>; 
   if (plan.hash !== o.expect) throw new DiscordSetupError(`${INTAKE_FILE} or the bot's channels changed since the change was shown: nothing written; review it again`, 409);
   replaceFileAtomically(o.path, plan.text, 0o600, dirname(o.path));
   const check = loadIntakeConfig(o.path);
-  if (!check || 'error' in check) throw new DiscordSetupError(`${INTAKE_FILE} was written, but it does not load: ${check ? check.error : 'it is missing'}`, 409);
+  if (!check || 'error' in check) throw new DiscordSetupError(`${INTAKE_FILE} was written, but it does not load: ${check ? intakeErrorByName(o.path, check.error) : 'it is missing'}`, 409);
   return plan;
 }
 
@@ -410,7 +410,7 @@ export function discordSetupView(o: { instance: string; home: string; asks: read
     token: tokenState(join(o.home, 'credentials.yaml')),
     ask: ask ? { ...ask, canAnswer: o.role === 'owner' } : null,
     invite: { integer: INVITE_PERMISSION_INTEGER, permissions: INVITE_PERMISSIONS.map((p) => ({ ...p })) },
-    intake: { file, exists: loaded !== null, error: loaded && 'error' in loaded ? loaded.error : null, values: intakeFormValues(cfg), warnings: loaded && !('error' in loaded) ? loaded.warnings : [] },
+    intake: { file, exists: loaded !== null, error: loaded && 'error' in loaded ? intakeErrorByName(file, loaded.error) : null, values: intakeFormValues(cfg), warnings: loaded && !('error' in loaded) ? loaded.warnings : [] },
     form: INTAKE_FORM.map((f) => ({ ...f })),
     automation: {
       token: `sudo bash ${join(o.engineRoot, 'scripts', 'setup', 'credentials.sh')} ${o.instance} ${DISCORD_CREDENTIAL}`,

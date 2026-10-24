@@ -9,9 +9,10 @@ import { EventLog } from './events/log.js';
 import { policyViolations, PolicyFile } from './instance.js';
 import { MACHINE_HELPER } from './machine.js';
 import { replaceFileAtomically } from './os/index.js';
-import { loadLimits, settingsProblems } from './settings.js';
+import { loadLimits, POLICY_CHECK_REFUSED, SettingsError, settingsProblems } from './settings.js';
 import { adminRoute, DASHBOARD_TIGHTEN_ONLY, decodePolicyValue, encodePolicyValue, HELPER_ONLY, policyHelperMissing, policyInstance, policyRecord, policySetCommand, policySetOk, readPolicyChecked, tightenProblem } from './policy-gate.js';
 import { autoMergeKilled } from './policy-kill.js';
+import { DETAIL_LOGGED, logDetail, refusalText } from './user-facing-error.js';
 
 /**
  * Who sets `key` to `arg` when this form may not, and how: on a root policy, root's `policy set`; on a machine
@@ -56,16 +57,17 @@ export interface PolicyFormView {
   canTurnOff?: boolean;
 }
 
+/** A refusal the page shows as it is: the engine's words. A path or a raw error goes in `cause`, logged only (#882). */
 export class PolicyEditError extends Error {}
 
 const get = (p: PolicyFile, k: PolicyKey): number | boolean | string => (k === 'budget.daily_usd' ? p.budget.daily_usd : k === 'agents.max_workers' ? p.agents.max_workers : k === 'automations.enabled' ? p.automations.enabled : p[k]);
 
 function read(path: string): { doc: ReturnType<typeof parseDocument>; policy: PolicyFile; root: boolean } {
   const checked = readPolicyChecked(path);
-  if (checked && 'refused' in checked) throw new PolicyEditError(checked.refused);
+  if (checked && 'refused' in checked) throw new PolicyEditError(POLICY_CHECK_REFUSED, { cause: checked.refused });
   const doc = parseDocument(checked ? checked.text : readFileSync(path, 'utf8'));
   const r = PolicyFile.safeParse(doc.toJS());
-  if (!r.success) throw new PolicyEditError(`${path} is invalid: ${r.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ')}`);
+  if (!r.success) throw new PolicyEditError(`this instance's policy.yaml is invalid: ${r.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ')}`, { cause: path });
   // Root's kill switch (src/policy-kill.ts): auto_merge reads off while it is there, as the engine reads it.
   return { doc, policy: autoMergeKilled(policyInstance(path)) ? { ...r.data, auto_merge: false } : r.data, root: !!checked };
 }
@@ -78,7 +80,13 @@ export function policyForm(path: string, limitsPath?: string, machine = existsSy
     ({ policy, root } = read(path));
     limits = loadLimits(limitsPath);
   } catch (e) {
-    return { fields: [], fixed: [], error: (e as Error).message.split('\n')[0] ?? 'unreadable', ...(rootRecorded(path) ? { canTurnOff: true } : {}) };
+    let error: string;
+    if (e instanceof PolicyEditError || e instanceof SettingsError) error = refusalText('the policy form', e);
+    else {
+      logDetail('the policy form: reading the policy', e);
+      error = `this instance's policy.yaml can't be read; ${DETAIL_LOGGED}`;
+    }
+    return { fields: [], fixed: [], error, ...(rootRecorded(path) ? { canTurnOff: true } : {}) };
   }
   // A HELPER_ONLY key only toward its one value here, on every install (DASHBOARD_TIGHTEN_ONLY: land_mode pr,
   // main_watch auto, auto_merge off). Any other value is an admin's, named as its route.
@@ -176,7 +184,7 @@ export function planPolicy(o: { path: string; cfg: Config; values: Record<string
 export function applyPolicy(o: { path: string; cfg: Config; values: Record<string, unknown>; eventsDb: string; by: string; limitsPath?: string; request?: (args: string[]) => string; helperRulesFile?: string; machine?: boolean }): PolicyChange[] {
   const plan = planPolicy(o);
   if (plan.root) {
-    if (!o.request) throw new PolicyEditError(`${o.path} is root's: an admin changes it at a root shell (${plan.changes.map((c) => policySetCommand(policyInstance(o.path), c.key, encodePolicyValue(c.key, c.to) ?? '<value>')).join('; ')})`);
+    if (!o.request) throw new PolicyEditError(`this instance's policy.yaml is root's: an admin changes it at a root shell (${plan.changes.map((c) => policySetCommand(policyInstance(o.path), c.key, encodePolicyValue(c.key, c.to) ?? '<value>')).join('; ')})`);
     for (const c of plan.changes) o.request(['set-policy', c.key, encodePolicyValue(c.key, c.to)!]);
     return plan.changes;
   }
