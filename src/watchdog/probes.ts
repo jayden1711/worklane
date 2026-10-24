@@ -231,7 +231,7 @@ export interface InstanceFacts {
   events: StoredEvent[];
   now: number;
   stallHours?: number;
-  /** The auto-merge stop file (state/auto-merge-stopped.json), when there is one. */
+  /** The auto-merge stop file (src/auto-merge-stop.ts), when there is one. */
   stop: { reason: string; by: string | null } | null;
   /** The agent user's Claude sign-in, as `claude auth status` reports it (never the token); null: not checked. */
   auth: { loggedIn: boolean; expiresAt?: string | null } | null;
