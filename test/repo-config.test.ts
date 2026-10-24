@@ -4,7 +4,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { BRAND } from '../src/brand.js';
@@ -163,7 +163,6 @@ test('#468: the worker model is one of the engine\'s own list (MODEL_TIERS), its
   const f = fixture();
   // A hand-edited model the list doesn't have, on the default branch: shown as it is, and a change to anything else keeps it.
   const agents = join(f.dir, BRAND.configDir, 'agents.yaml');
-  const { writeFileSync } = await import('node:fs');
   writeFileSync(agents, readFileSync(agents, 'utf8').replace(/model: sonnet/, 'model: claude-sonnet-4-5'));
   f.git('commit', '-qam', 'hand-edited model');
   f.git('push', '-q', 'origin', 'HEAD:main');
@@ -208,7 +207,6 @@ test('Fetch the default branch: origin/main not fetched here is fetched (no loca
 test("#468 a model the engine doesn't list is a config warning, never a refusal: the config loads, doctor warns, the first-run step stays done and says so; full Anthropic ids are listed", async () => {
   const { listedModel, modelWarnings } = await import('../src/model-routing.js');
   const { doctor } = await import('../src/doctor.js');
-  const { writeFileSync } = await import('node:fs');
   for (const m of ['haiku', 'sonnet', 'opus', 'claude-sonnet-4-5', 'claude-opus-4-1-20250805', 'claude-3-5-haiku-20241022']) assert.ok(listedModel(m), m);
   for (const m of ['gpt-5', 'claude-instant', 'sonnet-ish', 'claude-', 'local']) assert.equal(listedModel(m), false, m);
   const f = fixture();
@@ -250,6 +248,30 @@ test('the Repo config form, No CI (#469): ci: none is refused where tests.yaml h
     assert.equal(preview.status, 200, JSON.stringify(preview.body));
     assert.deepEqual(preview.body.changes, [{ file: `${BRAND.configDir}/config.yaml`, key: 'ci', to: 'none' }]);
   } finally {
+    await s.d.close();
+  }
+});
+
+test("#882: the Repo config form's Propose failing on a raw error naming a path answers 500 with a fixed text; the detail is in the dashboard's log", async () => {
+  const f = fixture();
+  const gh = ghStandIn();
+  const s = await dashboard(f.dir, gh.gh);
+  // The scratch worktrees' directory is a file: making the worktree there fails with an OS error that names its path.
+  const wts = join(projectStateDir(f.dir), 'worktrees');
+  writeFileSync(wts, 'not a directory');
+  const lines: string[] = [];
+  const was = console.error;
+  console.error = (...a: unknown[]) => void lines.push(a.map(String).join(' '));
+  try {
+    const r = await s.post('/api/first-run/repo-config', 'example-owner', { values: { daily_budget_usd: 25 }, confirm: true });
+    console.error = was;
+    assert.equal(r.status, 500, JSON.stringify(r.body));
+    assert.deepEqual(r.body, { error: "the config change wasn't proposed; the detail is in the dashboard's log on the machine" });
+    const text = JSON.stringify(r.body);
+    for (const leak of [f.dir, wts, tmpdir(), 'ENOTDIR', 'EEXIST', '/']) assert.ok(!text.includes(leak), `${leak} in ${text}`);
+    assert.ok(lines.some((l) => l.includes('POST /api/first-run/repo-config failed') && l.includes(wts)), `the detail, with its path, is logged: ${JSON.stringify(lines)}`);
+  } finally {
+    console.error = was;
     await s.d.close();
   }
 });

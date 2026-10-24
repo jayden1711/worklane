@@ -29,7 +29,7 @@ import { acknowledgement, stopWaitsForGreen } from './auto-merge-resume.js';
 const ciMode = (cfg: Config) => (ciIsNone(cfg.project) ? { kind: 'none' as const, means: CI_NONE_MEANS } : { kind: 'github' as const, means: null });
 import { GITHUB_API } from './github-hosts.js';
 import { AVATAR_ROUTE, Avatars, peopleOf, type AvatarOptions } from './avatars.js';
-import { loadConfig, loadConfigAt, type Config } from './config/load.js';
+import { ConfigInvalid, loadConfig, loadConfigAt, type Config } from './config/load.js';
 import { fastForwardCheckout, systemGit, type GitRun } from './checkout-sync.js';
 import { EventLog } from './events/log.js';
 import { EventCache, type OpenRead } from './events/cache.js';
@@ -116,7 +116,7 @@ import { configReady, draftView, editDraft, newDraftJob, originPlan, proposeDraf
 import { systemProbe } from './setup-steps.js';
 import { gitRemoteRepo } from './install.js';
 import type { InitIo } from './init.js';
-import { actionPlan, ACTIONS, isActionId, systemActionDeps, type ActionDeps, type ActionId, type ActionPlan } from './setup-actions.js';
+import { actionPlan, ACTIONS, isActionId, systemActionDeps, type ActionDeps, type ActionId, type ActionPlan, type ActionResult } from './setup-actions.js';
 import { ClaudeSignin, claudeServerView, systemSigninDeps, type SigninDeps } from './claude-signin.js';
 import { GhLogin, GhLoginError, type GhLoginDeps } from './gh-login.js';
 import { applySourceIntake, credDef, credStates, intakeSourcesSummary, planSourceIntake, sourceSecretRules, sourceSetupView, sourceTokenAsk, sourceView, type SourceKind, type SourceView } from './intake/source-setup.js';
@@ -125,7 +125,7 @@ import { INTAKE_FILE } from './intake/config.js';
 import { checkRootStep } from './console/root-steps.js';
 import { accountSet, CLAUDE_ACCOUNT_DIR, claudeAccountGate, claudeAccountView, mayViewClaudeAccount, requestClaudeAccount } from './claude-account.js';
 import { CREDENTIAL_ROUTE_GONE, refuseClaudeCredential, REMOVED_CREDENTIAL_PATHS } from './claude-credential-guard.js';
-import { errorAnswer, userFacing } from './user-facing-error.js';
+import { DETAIL_LOGGED, errorAnswer, logDetail, userFacing } from './user-facing-error.js';
 import { isTailscaleAction, mayViewTailscale, noTailscaleView, requestTailscale, stepsStamp, TAILSCALE_DIR, tailscaleStatus, tailscaleView, type TailscaleStatus } from './tailscale-setup.js';
 import { asksFrom, ASK_EVENTS } from './console/asks.js';
 import { incidentsView } from './watchdog/view.js';
@@ -640,13 +640,15 @@ export function instanceSettingsView(o: Pick<DashboardOptions, 'policyFile' | 'c
   try {
     limits = loadLimits(o.limitsPath);
   } catch (e) {
-    limitsError = (e as Error).message;
+    logDetail("the instance settings: the machine's limits file", e);
+    limitsError = `the machine's limits file is unreadable or invalid; ${DETAIL_LOGGED}`;
   }
   let policy: PolicyFile;
   try {
     policy = PolicyFile.parse(parseDocument(readFileSync(o.policyFile, 'utf8')).toJS());
   } catch (e) {
-    return { ...base, canChange: false, available: false as const, why: `the instance policy can't be read: ${(e as Error).message.split('\n')[0]}` };
+    logDetail('the instance settings: the instance policy', e);
+    return { ...base, canChange: false, available: false as const, why: `the instance policy can't be read; ${DETAIL_LOGGED}` };
   }
   const s = policy.settings;
   const repo = repoConfigFiles(o.cfg.dir);
@@ -688,7 +690,8 @@ export function autoMergeState(o: { policyFile: string | null; repoAuto: boolean
     if (r.policy) policy = r.policy.auto_merge;
     else {
       policy = false;
-      policyProblem = `the instance policy can't be read (${r.errors.map((e) => e.message).join('; ') || 'unreadable'}), so auto-merge counts as off`;
+      logDetail('auto-merge: the instance policy', r.errors.map((e) => e.message).join('; ') || 'unreadable');
+      policyProblem = `the instance policy can't be read (${DETAIL_LOGGED}), so auto-merge counts as off`;
     }
   }
   const stopFile = join(o.stateDir, 'auto-merge-stopped.json');
@@ -1269,7 +1272,10 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
     if (!confirm) return { status: 200, body: { ok: true, number: plan.number, url: plan.url, merged: plan.merged, command: plan.command.join(' '), then, confirmed: false } };
     if (!plan.merged) {
       const r = gh(plan.command.slice(1));
-      if (r.status !== 0) return { status: 502, body: { error: `GitHub didn't merge PR #${plan.number}: ${(r.stderr || r.stdout).trim().split('\n')[0] ?? ''}`, url: plan.url } };
+      if (r.status !== 0) {
+        logDetail(`merging config PR #${plan.number}: GitHub answered`, (r.stderr || r.stdout).trim());
+        return { status: 502, body: { error: `GitHub didn't merge PR #${plan.number}; ${DETAIL_LOGGED}`, url: plan.url } };
+      }
     }
     const before = readConfigPrs(opts.stateDir).find((p) => p.number === plan.number)!;
     const after = settle(who, before, refreshConfigPr({ ...before, synced: false }, { repo: repoNow(), gh, git: checkoutGit() }));
@@ -1293,7 +1299,8 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
       const open = await b.openIssues();
       return keep({ issues: ignoredIssues(open, eventCache.all(), { repo }), error: null });
     } catch (e) {
-      return keep({ issues: ignoredCache?.v.issues ?? [], error: `GitHub didn't answer: ${(e as Error).message.split('\n')[0]}` });
+      logDetail('the ignored issues: listing the open issues', e);
+      return keep({ issues: ignoredCache?.v.issues ?? [], error: `GitHub didn't answer; ${DETAIL_LOGGED}` });
     }
   };
   /** The test files the repo's runner can name (the first-task form's picker): tracked files that look like tests. */
@@ -2111,7 +2118,8 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
             return json(res, 200, { pr: pr.number, ...prSections(await body), why: null });
           } catch (e) {
             prBodies.delete(pr.number);
-            return json(res, 200, { pr: pr.number, failWithout: null, never: null, why: `couldn't read the PR: ${(e as Error).message}` });
+            logDetail(`${req.method} ${url.pathname}: reading PR #${pr.number}`, e);
+            return json(res, 200, { pr: pr.number, failWithout: null, never: null, why: `couldn't read the PR; ${DETAIL_LOGGED}` });
           }
         }
         // Waiting on you: every owner-held state open now, with how long it has waited, and the digest's Markdown
@@ -2200,7 +2208,11 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
             try {
               repoConfig = repoConfigForm(loadConfigAt(opts.root, `origin/${opts.cfg.project.project.default_branch}`));
             } catch (e) {
-              repoConfig = { error: (e as Error).message.split('\n').slice(0, 2).join(' ') };
+              if (e instanceof ConfigInvalid) repoConfig = { error: e.message.split('\n').slice(0, 2).join(' ') };
+              else {
+                logDetail(`${req.method} ${url.pathname}: the default branch's config`, e);
+                repoConfig = { error: `the default branch's config doesn't load; ${DETAIL_LOGGED}` };
+              }
             }
           }
           const setup = opts.setupMode ? { setupMode: true, configReady: configReady(opts.root), draft } : { setupMode: false };
@@ -2265,7 +2277,8 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
               try {
                 m = mergeConfigPrHere(who, pr.number, true);
               } catch (e) {
-                m = { status: 400, body: { error: (e as Error).message } };
+                if (!(e instanceof ConfigChangeError)) logDetail(`${req.method} ${url.pathname}: merging PR #${pr.number}`, e);
+                m = { status: 400, body: { error: e instanceof ConfigChangeError ? e.message : `not merged here; ${DETAIL_LOGGED}` } };
               }
               if (m.status !== 200) return json(res, 200, { ok: true, number: pr.number, url: pr.url, merged: false, why: `PR #${pr.number} opened: merge it on GitHub (${String(m.body.error ?? 'not merged here')})`, confirmed: true });
               return json(res, 200, { ...m.body, url: pr.url });
@@ -2290,7 +2303,10 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           const gh = actionDeps().gh;
           const runs = gh(['api', `repos/${repo}/commits/${sha}/check-runs`, '--jq', '.check_runs[].name']);
           const statuses = gh(['api', `repos/${repo}/commits/${sha}/status`, '--jq', '.statuses[].context']);
-          if (runs.status !== 0 && statuses.status !== 0) return json(res, 200, { checks: [], error: `GitHub didn't answer: ${runs.stderr.trim().split('\n')[0] ?? ''}` });
+          if (runs.status !== 0 && statuses.status !== 0) {
+            logDetail(`${req.method} ${url.pathname}: GitHub answered`, runs.stderr.trim());
+            return json(res, 200, { checks: [], error: `GitHub didn't answer; ${DETAIL_LOGGED}` });
+          }
           const checks = [...new Set([runs, statuses].flatMap((r) => (r.status === 0 ? r.stdout.split('\n') : [])).map((s) => s.trim()).filter(Boolean))].sort();
           return json(res, 200, { checks, sha });
         }
@@ -2323,7 +2339,8 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
             return json(res, 200, { ok: true, ...r, confirmed: true });
           } catch (e) {
             if (e instanceof ConfigChangeError) return refused(400, e.message);
-            return refused(500, (e as Error).message.split('\n')[0] ?? 'failed');
+            logDetail(`${req.method} ${url.pathname} failed`, e);
+            return refused(500, `the config change wasn't proposed; ${DETAIL_LOGGED}`);
           }
         }
         // Merge a PR the Repo config form proposed, then bring this checkout up to the merged default branch (a
@@ -2431,10 +2448,17 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
           if (actionRunning) return refused(409, `${actionRunning} is running: one fix at a time`);
           actionRunning = id;
           try {
-            const r = await ACTIONS[id].run(actionContext(cfgNow), actionDeps()).catch((e: Error): { ok: boolean; detail: string } => ({ ok: false, detail: e.message.split('\n')[0] ?? 'failed' }));
+            const notDone = `${plan.label}: not done; ${DETAIL_LOGGED}`;
+            const r = await ACTIONS[id].run(actionContext(cfgNow), actionDeps()).catch((e: unknown): ActionResult => {
+              logDetail(`${req.method} ${url.pathname} failed`, e);
+              return { ok: false, detail: '', shown: notDone };
+            });
             setupCache.delete(plan.step);
-            audit(who, 'first_run.action', { action: id, ok: r.ok, detail: r.detail.slice(0, 300) });
-            return json(res, r.ok ? 200 : 500, r.ok ? { ok: true, detail: r.detail } : { error: r.detail });
+            // A failure's detail can be a tool's output or GitHub's own text: the log has it, the page and audit its shown text.
+            if (!r.ok && r.detail) logDetail(`${req.method} ${url.pathname} failed`, r.detail);
+            const said = r.ok ? r.detail : (r.shown ?? notDone);
+            audit(who, 'first_run.action', { action: id, ok: r.ok, detail: said.slice(0, 300) });
+            return json(res, r.ok ? 200 : 500, r.ok ? { ok: true, detail: r.detail } : { error: said });
           } finally {
             actionRunning = null;
           }

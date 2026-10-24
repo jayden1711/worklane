@@ -5,7 +5,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { BRAND } from '../src/brand.js';
@@ -97,6 +97,18 @@ async function dashboard(dir: string, tools: Set<string>, over: Partial<Dashboar
 
 const step = (v: SetupView, id: string) => v.groups.flatMap((g) => g.steps).find((s) => s.id === id)!;
 
+/** console.error's lines while `f` runs: where the dashboard logs a failure's detail. */
+async function logged<T>(f: () => Promise<T>): Promise<{ result: T; lines: string[] }> {
+  const lines: string[] = [];
+  const was = console.error;
+  console.error = (...a: unknown[]) => void lines.push(a.map(String).join(' '));
+  try {
+    return { result: await f(), lines };
+  } finally {
+    console.error = was;
+  }
+}
+
 test('Install the missing tools: the pinned plan shown first; confirmed by an owner, installed and checked against its checksum; a writer and an unconfirmed click change nothing; audited', async () => {
   const { dir } = fixture();
   const prefix = mkdtempSync(join(tmpdir(), 'setup-actions-prefix-'));
@@ -138,12 +150,34 @@ test('Install the missing tools: a download whose checksum differs installs noth
   const rel = fakeRelease(prefix);
   const tampered: Download = async (_url, file) => writeFileSync(file, 'not the release');
   const s = await dashboard(dir, tools, { setupActions: { which: (c) => (tools.has(c) ? `/stand-in/${c}` : null), prefix, plan: () => rel.plan, download: tampered } });
+  // #882: the checksum detail goes to the dashboard's log; the page gets the engine's own words.
+  const { result: r, lines } = await logged(() => s.act('install-tools', 'example-owner', { confirm: true }));
   try {
-    const r = await s.act('install-tools', 'example-owner', { confirm: true });
     assert.equal(r.status, 500);
-    assert.match(r.body.error!, /checksum mismatch .*nothing was installed/);
+    assert.deepEqual(r.body, { error: "installing gh 9.9.9 failed; the detail is in the dashboard's log on the machine" });
+    assert.ok(lines.some((l) => /POST \/api\/first-run\/actions\/install-tools failed: checksum mismatch .*nothing was installed/.test(l)), `the detail is logged: ${JSON.stringify(lines)}`);
     assert.equal(existsSync(join(prefix, 'bin', 'gh')), false);
     assert.equal(s.audit()[0]!.detail.ok, false);
+  } finally {
+    await s.d.close();
+  }
+});
+
+test('#882: a Fix that throws an OS error answers 500 with a fixed text, never the error; the detail is in the log', async () => {
+  const { dir } = fixture();
+  // The settings file the hooks merge into is a directory: reading it throws EISDIR, a raw OS error.
+  const settings = join(dir, '.claude', 'settings.json');
+  rmSync(settings, { force: true });
+  mkdirSync(settings);
+  const s = await dashboard(dir, new Set(['git', 'gitleaks', 'claude', 'gh']));
+  const { result: r, lines } = await logged(() => s.act('local-hooks', 'example-owner', { confirm: true }));
+  try {
+    assert.equal(r.status, 500, JSON.stringify(r.body));
+    assert.deepEqual(r.body, { error: "Install the hooks: not done; the detail is in the dashboard's log on the machine" });
+    const text = JSON.stringify(r.body);
+    for (const leak of [dir, tmpdir(), 'EISDIR', 'settings.json', '/']) assert.ok(!text.includes(leak), `${leak} in ${text}`);
+    assert.ok(lines.some((l) => l.includes('POST /api/first-run/actions/local-hooks failed') && l.includes('EISDIR')), `the detail is logged: ${JSON.stringify(lines)}`);
+    assert.doesNotMatch(JSON.stringify(s.audit()), new RegExp(dir.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')), 'nor in the audit');
   } finally {
     await s.d.close();
   }

@@ -13,7 +13,7 @@
 // they stay in intake.yaml by hand, as for Discord. Opening a step, loading a view and reviewing a change write nothing.
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { parse, parseDocument } from 'yaml';
 import { z } from 'zod';
 import { BRAND } from '../brand.js';
@@ -128,10 +128,11 @@ export function credStates(credentialsFile: string, kind: SourceKind): CredState
   let error: string | null = null;
   try {
     const r = CredentialsFile.safeParse(parse(readFileSync(credentialsFile, 'utf8')));
-    if (!r.success) error = `${credentialsFile} is invalid: ${r.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ')}`;
+    // By its name only, never its path under the instance home: the dashboard shows this (#882).
+    if (!r.success) error = `${basename(credentialsFile)} is invalid: ${r.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ')}`;
     else names = r.data.intake ?? {};
   } catch (e) {
-    error = `can't read ${credentialsFile} (${(e as NodeJS.ErrnoException).code ?? 'error'})`;
+    error = `can't read ${basename(credentialsFile)} (${(e as NodeJS.ErrnoException).code ?? 'error'})`;
   }
   // INVARIANT: existence only; no secret file is ever opened here.
   return SOURCE_CREDS[kind].map((c) => {

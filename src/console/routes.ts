@@ -13,6 +13,7 @@ import { EventLog } from '../events/log.js';
 import { ASK_EVENTS, AskError, asks, asksFrom, mayAnswerAsk } from './asks.js';
 import { requestRootStep } from './root-steps.js';
 import { MACHINE_EVENTS, machineRequests } from '../machine-requests.js';
+import { INTERNAL_ERROR_TEXT, logDetail } from '../user-facing-error.js';
 import { readSecretBody, secretsDir, storeSecret, type SecretRule } from './secrets.js';
 import { useSetupLink } from './links.js';
 import { ownerTerminalNotice } from './owner-terminal-removed.js';
@@ -134,8 +135,12 @@ export async function handleAskRoute(req: IncomingMessage, res: ServerResponse, 
     send(res, 200, { ok: true, ask });
   } catch (e) {
     if (e instanceof AskError) send(res, e.status, { error: e.message });
-    // Anything else on the secret route gets a fixed message: an unexpected error could carry the body.
-    else send(res, 500, { error: what === 'secret' ? "the secret couldn't be stored" : String((e as Error).message).slice(0, 300) });
+    else {
+      // Anything else gets a fixed message: an unexpected error could carry the body, a path or a child's output.
+      // Never the secret route's error in the log either: it could carry the value.
+      if (what !== 'secret') logDetail(`${req.method} ${url.pathname} failed`, e);
+      send(res, 500, { error: what === 'secret' ? "the secret couldn't be stored" : INTERNAL_ERROR_TEXT });
+    }
   } finally {
     log.close();
   }

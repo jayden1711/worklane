@@ -141,7 +141,7 @@ export function readPreview(instance: string, id: string): Preview {
   const f = join(previewDir(instance, id), 'preview.json');
   check(existsSync(f), `no preview of ${id} for ${instance}: fetch it first`);
   const p = JSON.parse(readFileSync(f, 'utf8')) as Preview;
-  check(p.instance === instance && p.id === id, `${f} is not ${instance}'s ${id}`);
+  check(p.instance === instance && p.id === id, `the preview of ${id} isn't ${instance}'s ${id}: fetch it again`);
   // Previews written before MCP servers existed are plugin previews.
   if ((p as { kind?: string }).kind === undefined) (p as PluginPreview).kind = 'plugin';
   return p;

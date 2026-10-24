@@ -78,6 +78,21 @@ export function userFacing<const T extends UserFacingText>(status: number, text:
 /** What an error answer says when the error isn't one meant for the page: never its message. */
 export const INTERNAL_ERROR_TEXT = 'the dashboard hit an internal error; the detail is in its log on the machine';
 
+/** The end of a fixed text whose detail went to logDetail (issue #882). */
+export const DETAIL_LOGGED = "the detail is in the dashboard's log on the machine";
+
+/**
+ * An error's detail, or a raw text (a child's stderr, GitHub's answer), to the server's own log on the machine only,
+ * through the shared redactor, after `what` (which names the route, never its query). The page gets a fixed text.
+ */
+export function logDetail(what: string, e: unknown, log: (line: string) => void = (l) => console.error(l)): void {
+  try {
+    log(redactString(`${what}: ${e instanceof Error ? (e.stack ?? `${e.name}: ${e.message}`) : String(e)}`));
+  } catch {
+    // A log (or a thrown value's own stack or toString) that throws never turns the fixed answer into a crash.
+  }
+}
+
 /**
  * A server's last answer to an error (the dashboard's and the hub's request handlers): a UserFacingError's status and
  * vetted text, and for anything else a 500 with INTERNAL_ERROR_TEXT. The detail (which may name a path under the
@@ -87,10 +102,6 @@ export const INTERNAL_ERROR_TEXT = 'the dashboard hit an internal error; the det
 export function errorAnswer(e: unknown, req: { method?: string | undefined }, pathname: string, log: (line: string) => void = (l) => console.error(l)): { status: number; body: { error: string } } {
   const shown = UserFacingError.shown(e);
   if (shown) return { status: shown.status, body: { error: shown.text } };
-  try {
-    log(redactString(`${req.method ?? '?'} ${pathname} failed: ${e instanceof Error ? (e.stack ?? `${e.name}: ${e.message}`) : String(e)}`));
-  } catch {
-    // A log (or a thrown value's own stack or toString) that throws never turns the fixed answer into a crash.
-  }
+  logDetail(`${req.method ?? '?'} ${pathname} failed`, e, log);
   return { status: 500, body: { error: INTERNAL_ERROR_TEXT } };
 }
