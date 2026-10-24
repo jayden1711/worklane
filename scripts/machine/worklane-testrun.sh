@@ -942,23 +942,27 @@ gpu_decide() {
 
 # Take each granted GPU's lock for run <id>, in ascending order, waiting at most until the run's deadline (epoch seconds). Each
 # lock's fd stays open in this helper (and the systemd-run it starts) until it exits. On a wait that reaches the
-# deadline: the line saying who holds it, and exit 1, with nothing started.
+# deadline: the line saying who holds it, and exit 1, with nothing started. GPU_WAITED: the seconds spent in flock
+# alone, summed over the GPUs (never the lock files' setup).
 GPU_FDS=()
 GPU_LOCKS=()
+GPU_WAITED=0
 gpu_lock() {
-  local id="$1" deadline="$2" started="$3" i f fd=19 left
+  local id="$1" deadline="$2" started="$3" i f fd=19 left t0
   for i in "${GPU_IDX[@]}"; do
     f="$(gpu_lock_file "$i")" || exit 2
     # A fixed fd per lock (20 and up; at most 16 GPUs), opened read-only: the number alone goes through eval.
     fd=$((fd + 1))
     eval "exec $fd<\"\$f\""
-    left=$((deadline - $(date +%s)))
+    t0="$(date +%s)"
+    left=$((deadline - t0))
     if [ "$left" -lt 1 ] || ! flock -x -w "$left" "$fd"; then
       if [ "$left" -lt 1 ] && flock -x -n "$fd"; then :; else
         echo "worklane-testrun: gpu $i: still held after $(($(date +%s) - started)) s, the run's timeout (held by $(gpu_holder "$f"))" >&2
         exit 1
       fi
     fi
+    GPU_WAITED=$((GPU_WAITED + $(date +%s) - t0))
     GPU_FDS+=("$fd"); GPU_LOCKS+=("$f")
     # The note a waiting run's message names. Root's file: only this helper writes it; it is emptied again at the end.
     printf '%s/%s since %s\n' "$name" "$id" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$f" 2>/dev/null || true
@@ -1296,7 +1300,7 @@ exec_cleanup() {
 }
 
 exec_run() {
-  local id="${1:-}" timeout="${2:-}" d t inaccessible p cmd flag kv rc=0 gpu=0 net="" granted=0 started locking waited runtime unit pid own=0
+  local id="${1:-}" timeout="${2:-}" d t inaccessible p cmd flag kv rc=0 gpu=0 net="" granted=0 started runtime unit pid own=0
   local -a envfile=() noexpand=() gpuprops=()
   local usage="usage: exec <id> <timeout_s> [--gpu] [--network <tier>] -- <command> (the run's variables on stdin, each NAME=value then a NUL)"
   [ "$#" -ge 2 ] || die "$usage"
@@ -1336,14 +1340,12 @@ exec_run() {
   if [ "$gpu" -eq 1 ]; then
     gpu_decide "$(systemd_version)"
     if [ "$GPU_ON" -eq 1 ]; then
-      locking="$(date +%s)"
       gpu_lock "$id" $((started + timeout)) "$started"
-      waited=$(($(date +%s) - locking))
       runtime=$((timeout - ($(date +%s) - started)))
       [ "$runtime" -ge 1 ] || { echo "worklane-testrun: gpu $(IFS=,; echo "${GPU_IDX[*]}"): still held after $(($(date +%s) - started)) s, the run's timeout (no time left to run)" >&2; exit 1; }
       [ "$runtime" -le "$GPU_MAX_S" ] || runtime="$GPU_MAX_S"
       gpuprops=("${GPU_PROPS[@]}")
-      echo "worklane-testrun: gpu $(IFS=,; echo "${GPU_IDX[*]}") (devices ${GPU_NODES[*]}; max $runtime s; waited $waited s${GPU_WHY:+; $GPU_WHY})" >&2
+      echo "worklane-testrun: gpu $(IFS=,; echo "${GPU_IDX[*]}") (devices ${GPU_NODES[*]}; max $runtime s; waited $GPU_WAITED s${GPU_WHY:+; $GPU_WHY})" >&2
     else
       echo "worklane-testrun: gpu none ($GPU_WHY)" >&2
     fi
