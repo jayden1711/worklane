@@ -59,7 +59,7 @@ import { nightlyDue, queueNightly } from './nightly.js';
 import { buildReport, dueSlot, recentRunRecords, weeklyDue } from './reports.js';
 import { readTuneProfile, tuningInput, tuningProposals } from './tuning.js';
 import { baselineGate, latestBaseline } from './baseline.js';
-import { countAssertions, FALLBACK_TEST_GLOBS } from './vacuity.js';
+import { ASSERTION_COUNT_CHARS, countAssertions, FALLBACK_TEST_GLOBS } from './vacuity.js';
 import { createWorktree, removeSandboxPlaceholders, removeWorktree } from './worktrees.js';
 import { refillPool, setupKey, takeFromPool } from './worktree-pool.js';
 import { seen } from './intake/store.js';
@@ -1502,28 +1502,40 @@ export class Coordinator extends AutomationRuns {
     const size = sizeVerdict(sizeFiles(path, base, head), { maxLines: review.max_pr_lines, generated: review.generated });
     if (!size.ok) return { rejected: `${size.why}. Make this change one self-contained part under ${review.max_pr_lines} lines, and say in your summary what is left for follow-up issues` };
     const files = this.changeFiles(path, base, head);
-    // Tamper guard: tests deleted, skipped, focused, or with fewer assertions.
+    const tampered = this.tamperFlags(path, base, files);
+    const added = files.reduce((s, f) => s + f.added, 0);
+    const removed = files.reduce((s, f) => s + f.removed, 0);
+    const patchHash = createHash('sha256').update(this.git(path, 'diff', `${base}..${head}`)).digest('hex');
+    this.emit('change.proposed', { issue: n, branch: this.paths(n).branch, base, head, files: names, lines: added + removed, added, removed, patch_hash: patchHash });
+    return { files, tampered, patchHash };
+  }
+
+  /** Tamper guard: tests deleted, skipped, focused, with fewer assertions, or too large to count them in. */
+  protected tamperFlags(path: string, base: string, files: ChangeFile[]): string[] {
     const tampered: string[] = [];
     const pattern = this.d.cfg.tests.vacuity?.assertion_pattern ?? '\\b(assert|expect|check)\\b';
     const testRes = (this.d.cfg.tests.vacuity?.test_globs ?? FALLBACK_TEST_GLOBS).map((g) => globToRegExp(g));
     for (const f of files.filter((x) => testRes.some((re) => re.test(x.path)))) {
       const after = existsSync(join(path, f.path)) ? readFileSync(join(path, f.path), 'utf8') : null;
       let before: string | null = null;
+      let tooLarge = false;
       try {
-        before = this.git(path, 'show', `${base}:${f.path}`);
-      } catch {
-        // new file
+        // A code unit takes at most 3 UTF-8 bytes, so a base text over this many bytes is over ASSERTION_COUNT_CHARS too.
+        before = execFileSync('git', ['show', `${base}:${f.path}`], { cwd: path, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 3 * ASSERTION_COUNT_CHARS }).trim();
+      } catch (e) {
+        // ENOBUFS: there at the base, too large to read; anything else, a new file.
+        tooLarge = (e as NodeJS.ErrnoException).code === 'ENOBUFS';
       }
       // Text for the owner, events and the evaluator: the path as shownPath shows it (#683).
-      if (before !== null && after === null) tampered.push(`deleted test ${shownPath(f.path)}`);
+      if ((before !== null || tooLarge) && after === null) tampered.push(`deleted test ${shownPath(f.path)}`);
       if (after !== null && /\.(skip|only|todo)\s*\(|\bxit\s*\(|\bxdescribe\s*\(/.test((f.addedLines ?? []).join('\n'))) tampered.push(`skipped/focused tests in ${shownPath(f.path)}`);
-      if (before !== null && after !== null && countAssertions(after, pattern) < countAssertions(before, pattern)) tampered.push(`fewer assertions in ${shownPath(f.path)}`);
+      if ((before !== null || tooLarge) && after !== null) {
+        const [b, a] = [before === null ? null : countAssertions(before, pattern), countAssertions(after, pattern)];
+        if (b === null || a === null) tampered.push(`assertions not counted in ${shownPath(f.path)}: over ${ASSERTION_COUNT_CHARS} characters before or after the change`);
+        else if (a < b) tampered.push(`fewer assertions in ${shownPath(f.path)}`);
+      }
     }
-    const added = files.reduce((s, f) => s + f.added, 0);
-    const removed = files.reduce((s, f) => s + f.removed, 0);
-    const patchHash = createHash('sha256').update(this.git(path, 'diff', `${base}..${head}`)).digest('hex');
-    this.emit('change.proposed', { issue: n, branch: this.paths(n).branch, base, head, files: names, lines: added + removed, added, removed, patch_hash: patchHash });
-    return { files, tampered, patchHash };
+    return tampered;
   }
 
   /** Browser baselines per (base, flow), kept across a task's attempts (src/coordinator/browser.ts). */
