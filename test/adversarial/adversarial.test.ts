@@ -88,7 +88,8 @@ const Pr = z
 
 /** How an instruction eval the change triggers came out (default: every one passes, visible and held-out). */
 /** `no-held-out`: a held-out score recorded as null; `held-out-absent`: a role's result with no held-out field at all. */
-const EvalOutcome = z.enum(['pass', 'not-evaluated', 'error', 'incomplete', 'dropped', 'no-held-out', 'held-out-absent', 'held-out-incomplete', 'held-out-dropped']);
+/** `dropped-same-score`: a case went pass → fail while another went fail → pass, so the score is unchanged. */
+const EvalOutcome = z.enum(['pass', 'not-evaluated', 'error', 'incomplete', 'dropped', 'dropped-same-score', 'no-held-out', 'held-out-absent', 'held-out-incomplete', 'held-out-dropped', 'held-out-dropped-same-score']);
 type EvalOutcome = z.infer<typeof EvalOutcome>;
 
 /**
@@ -260,6 +261,8 @@ const allEvalsPass = (targets: string[]): InstructionEvalResult[] =>
 /** Every instruction eval the change triggers, coming out as `outcome` (a case's `inputs.evals`). */
 function evalsOf(targets: string[], outcome: EvalOutcome): InstructionEvalResult[] {
   const lower = { result: { passed: 0, total: 1 }, changes: [{ id: '1', title: 'holds a risky change', base: 'pass', head: 'fail' }] };
+  // As skilleval.ts compareSet records a lost case at an unchanged score: dropped, with the score the same.
+  const swapped = { base: { passed: 1, total: 2 }, result: { passed: 1, total: 2 }, changes: [{ id: '1', title: 'holds a risky change', base: 'pass', head: 'fail' }, { id: '2', title: 'answers in one line', base: 'fail', head: 'pass' }] };
   return outcome === 'not-evaluated'
     ? []
     : allEvalsPass(targets).map((r) => {
@@ -267,6 +270,7 @@ function evalsOf(targets: string[], outcome: EvalOutcome): InstructionEvalResult
         if (outcome === 'error') return { ...r, error: 'the eval run failed' };
         if (outcome === 'incomplete') return { ...r, incomplete: true, cost_usd: 5 };
         if (outcome === 'dropped') return { ...r, dropped: true, ...lower };
+        if (outcome === 'dropped-same-score') return { ...r, dropped: true, ...swapped };
         if (outcome === 'no-held-out') return { ...r, held_out: null };
         if (outcome === 'held-out-absent') {
           const { held_out: _absent, ...rest } = r;
@@ -274,6 +278,7 @@ function evalsOf(targets: string[], outcome: EvalOutcome): InstructionEvalResult
         }
         if (outcome === 'held-out-incomplete') return { ...r, held_out: { ...h, incomplete: true } };
         if (outcome === 'held-out-dropped') return { ...r, held_out: { ...h, dropped: true, ...lower } };
+        if (outcome === 'held-out-dropped-same-score') return { ...r, held_out: { ...h, dropped: true, ...swapped } };
         return r;
       });
 }
