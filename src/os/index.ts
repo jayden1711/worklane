@@ -1,7 +1,7 @@
 // OS adapter layer. This is the only module allowed to branch on the
 // platform (test/os-boundary.test.ts enforces it).
 import { execFileSync, spawn, spawnSync } from './child-process.js';
-import { chmodSync, chownSync, closeSync, constants as fsConstants, existsSync, fstatSync, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, readSync, realpathSync, renameSync, rmSync, statSync, statfsSync, writeFileSync } from 'node:fs';
+import { chmodSync, chownSync, closeSync, constants as fsConstants, existsSync, fchmodSync, fstatSync, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, readSync, realpathSync, renameSync, rmSync, statSync, statfsSync, writeFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { testRunSign } from './system-paths.js';
 import { availableParallelism, homedir, hostname, loadavg, userInfo } from 'node:os';
@@ -126,45 +126,55 @@ export function ownerOnlyDir(dir: string): void {
   if (process.platform !== 'win32') chmodSync(dir, 0o700);
 }
 
-/** Write a file only this user can read (0600), atomically (a temp file in the same directory, then a rename). */
+/** A new file only: created exclusively, never through a link (O_NOFOLLOW where the OS has it; O_EXCL refuses one anyway). */
+const NEW_FILE = fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | (fsConstants.O_NOFOLLOW ?? 0);
+
+/**
+ * Write a file only this user can read (0600), atomically, never through anything planted beside it (#950; #918
+ * round 4, A11). The data goes to a new file at a staging name no one can know beforehand (stagingName), created
+ * exclusively without following a link (NEW_FILE); its mode is set and its data written through that one
+ * descriptor, never by name. Then rename(2) moves it over `file`: a rename replaces whatever is at `file`, a link
+ * included, and never follows it. A staging name that is no longer the file written (a link swapped in for it
+ * meanwhile) is refused, not published. The staging name is removed on any failure; a kill leaves it (stagingName).
+ */
 export function writeOwnerOnly(file: string, data: string): void {
-  const tmp = `${file}.${process.pid}.tmp`;
-  writeFileSync(tmp, data, { mode: 0o600 });
-  if (process.platform !== 'win32') chmodSync(tmp, 0o600);
-  renameSync(tmp, file);
+  const staged = stagingName(file);
+  // INVARIANT: one exclusive open; the mode and the data only through its descriptor, never by name (a name can be swapped).
+  const fd = openSync(staged, NEW_FILE, 0o600);
+  try {
+    let made;
+    try {
+      if (process.platform !== 'win32') fchmodSync(fd, 0o600);
+      writeFileSync(fd, data);
+      made = fstatSync(fd);
+    } finally {
+      closeSync(fd);
+    }
+    const now = lstatSync(staged, { throwIfNoEntry: false });
+    if (!now?.isFile() || now.ino !== made.ino || now.dev !== made.dev) throw new Error(`${staged} was replaced while ${file} was written; refusing to publish it`);
+    renameSync(staged, file);
+  } finally {
+    dropStaged(staged);
+  }
 }
 
 /**
- * A staging name beside `file` that no one else can know beforehand: `.<name>.<16 random hex>.new`. writeOwnerOnly
- * writes it through its own `<staged>.<pid>.tmp`, so that name is unpredictable too. A process killed between
- * staging and publishing leaves these names behind (0600, holding the data): nothing removes them but the next
+ * A staging name beside `file` that no one else can know beforehand: `.<name>.<16 random hex>.new`. A process
+ * killed between staging and publishing leaves it behind (0600, holding the data): nothing removes it but the next
  * call's own, which has another name.
  */
 function stagingName(file: string): string {
   return join(dirname(file), `.${basename(file)}.${randomBytes(8).toString('hex')}.new`);
 }
 
-/** Remove a staging name and writeOwnerOnly's temp name for it, whatever is there (a link is removed, not followed). */
+/** Remove a staging name, whatever is there (a link is removed, not followed). */
 function dropStaged(staged: string): void {
   rmSync(staged, { force: true });
-  rmSync(`${staged}.${process.pid}.tmp`, { force: true });
 }
 
-/**
- * Replace `file` with `data`, this user's only (0600), never writing through anything planted beside it (#918 round
- * 4, A11: writeOwnerOnly's temp name `<file>.<pid>.tmp` can be guessed, and a link planted there was written through
- * and chmod-ed). The data goes through writeOwnerOnly (the reviewed writer) to an unpredictable staging name
- * (stagingName), which rename(2) then moves over `file`: a rename replaces whatever is at `file`, a link included,
- * and never follows it. The staging names are removed on any failure.
- */
+/** Replace `file` with `data`, this user's only (0600): writeOwnerOnly, under the name the receipts store calls it by (#918). */
 export function replaceOwnerOnly(file: string, data: string): void {
-  const staged = stagingName(file);
-  try {
-    writeOwnerOnly(staged, data);
-    renameSync(staged, file);
-  } finally {
-    dropStaged(staged);
-  }
+  writeOwnerOnly(file, data);
 }
 
 /**
@@ -192,10 +202,10 @@ export function syncToDisk(file: string): void {
  * Create `file` holding `data`, this user's only (0600), never replacing anything and never writing through a link:
  * for a secret made once, such as a receipt key (#717). The data goes through writeOwnerOnly (the reviewed writer)
  * to a staging name beside it (stagingName), then is published with linkSync(staged, file): link(2) fails with
- * EEXIST when anything is at `file`, a dangling link included, and never follows one there. The staging name (and
- * writeOwnerOnly's own temp name, after a failed write) is removed whatever happens, but a kill leaves it (see
- * stagingName). Throws EEXIST when `file` was taken. The published file is checked: it must be the very file staged
- * (same inode), a regular file with exactly two names (staged and `file`), and, on POSIX, mode 0600 and this user's,
+ * EEXIST when anything is at `file`, a dangling link included, and never follows one there. The staging name is
+ * removed whatever happens, but a kill leaves it (see stagingName). Throws EEXIST when `file` was taken. The
+ * published file is checked: it must be the very file staged (same inode), a regular file with exactly two names
+ * (staged and `file`), and, on POSIX, mode 0600 and this user's,
  * holding `data`. Anything else (the staging name swapped meanwhile, for another file or a hard link to one: #918
  * round 3 advisory) is removed and refused.
  */
