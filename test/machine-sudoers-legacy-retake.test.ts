@@ -63,6 +63,9 @@ test('#902 round 13: no id or kill-switch error tells an admin to retake a reser
   for (const [what, m] of Object.entries(killMessages('alpha'))) assert.match(m, /policy own alpha --retake/, `${what}: ${m}`);
 });
 
+/** Valid names that only start or end like a reserved one: each keeps the retake. */
+const NEAR_MISSES = ['machines', 'console2', 'xmachine', 'my-console'];
+
 /** The words after "an admin" in each way-out message for a reserved name: the removal, worded as one (#985). */
 const removal = (n: string) => `removes the instance with sudo bash ${asRoot.opt('current/scripts/setup/instance-remove.sh')} ${n} (${n} was made before that name was reserved, so root never takes its policy over again), then adds it again under another name`;
 
@@ -146,24 +149,25 @@ function swappedWayOuts(n: string): [what: string, got: string, before: string, 
 }
 
 test('#985: for a reserved name each way-out message, in full, names the removal as a removal; any other name\'s is its retake', () => {
-  for (const n of [...LATER_RESERVED, 'alpha']) {
+  for (const n of [...LATER_RESERVED, ...NEAR_MISSES, 'alpha']) {
     for (const [what, got, before, retake] of wayOuts(n)) assert.equal(got, `${before}${LATER_RESERVED.includes(n) ? removal(n) : retake(n)}`, `${n}: ${what}`);
   }
 });
 
 test('#985: policy own\'s, policy set\'s and the gate\'s way outs for a reserved name, in full, name the removal as a removal', { skip: linux }, () => {
-  for (const n of [...LATER_RESERVED, 'alpha']) {
+  for (const n of [...LATER_RESERVED, ...NEAR_MISSES, 'alpha']) {
     for (const [what, got, before, retake] of swappedWayOuts(n)) assert.equal(got, `${before}${LATER_RESERVED.includes(n) ? removal(n) : retake(n)}`, `${n}: ${what}`);
   }
 });
 
-test('#902 round 13: policy own\'s CHECK line never suggests --retake for a reserved name', { skip: linux }, () => {
+/** policy own's CHECK line for `n`'s first takeover of a loose file with --accept-loose. */
+function checkLine(n: string): string {
   const me = process.getuid!();
   const T = realpathSync(mkdtempSync(join(tmpdir(), 'retake-check-')));
-  const dir = join(T, 'home', 'wl-console', '.local', 'state', BRAND.cli, 'instances', 'console');
+  const dir = join(T, 'home', `wl-${n}`, '.local', 'state', BRAND.cli, 'instances', n);
   mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, 'policy.yaml'), 'version: 1\nbudget: { daily_usd: 80 }\nagents: { max_workers: 4 }\nland_mode: direct\nauto_merge: true\n', { mode: 0o600 });
-  const deps: PolicyRootDeps = { home: (u) => (u === 'wl-console' ? join(T, 'home', 'wl-console') : null), uid: () => me, rootUid: me, rootGid: process.getgid!(), limitsPath: join(T, 'limits.json'), markerDir: join(T, 'markers') };
+  const deps: PolicyRootDeps = { home: (u) => (u === `wl-${n}` ? join(T, 'home', `wl-${n}`) : null), uid: () => me, rootUid: me, rootGid: process.getgid!(), limitsPath: join(T, 'limits.json'), markerDir: join(T, 'markers') };
   const out: string[] = [];
   const log = console.log;
   const err = console.error;
@@ -172,7 +176,7 @@ test('#902 round 13: policy own\'s CHECK line never suggests --retake for a rese
   setPolicyRootUid(me);
   let code: number;
   try {
-    code = policyCommand('own', ['console', '--accept-loose'], deps, true);
+    code = policyCommand('own', [n, '--accept-loose'], deps, true);
   } finally {
     setPolicyRootUid(0);
     console.log = log;
@@ -181,8 +185,14 @@ test('#902 round 13: policy own\'s CHECK line never suggests --retake for a rese
   assert.equal(code, 0, out.join('\n'));
   const check = out.find((l) => l.startsWith('CHECK: '));
   assert.ok(check, out.join('\n'));
-  assert.doesNotMatch(check, /--retake/, check);
-  assert.match(check, /policy set console <key> <value>/, check);
+  return check;
+}
+
+test('#902 round 13, #985: policy own\'s CHECK line, in full: policy set only for a reserved name, else also the retake', { skip: linux }, () => {
+  for (const n of [...LATER_RESERVED, ...NEAR_MISSES, 'alpha']) {
+    const tail = LATER_RESERVED.includes(n) ? ` (it only tightens: ${n} was made before that name was reserved, so a file edited by hand is never taken over again)` : `, or edit the file as root and then run sudo ${BRAND.cli} policy own ${n} --retake --accept-loose`;
+    assert.equal(checkLine(n), `CHECK: land_mode: direct; auto_merge: true: looser than its coordinator could make it. If you didn't set it, change it with sudo ${BRAND.cli} policy set ${n} <key> <value>${tail}.`, n);
+  }
 });
 
 test('#902 round 13: backstop: the message builders name `policy own … --retake` only through the one builder', () => {
