@@ -3,21 +3,26 @@
 // text (or a userFacing() one, src/user-facing-error.ts) and sends the detail to the server's log on the machine
 // (logDetail), because an error's message can name a path under the instance home or quote GitHub's own text.
 //
-// The lint is an allowlist. In the server's route files (SCANNED), a caught error (a catch clause's binding, a
-// `.catch(...)` or `.on('error', ...)` callback's parameter, a parameter typed `unknown`, `any` or `Error` and named
-// like one: e, err, error, ex, cause, reason) may appear
-// only as: the left of `instanceof`; the object of a `.code` read (an errno word, cast or not); an argument of
-// logDetail or errorAnswer; what `throw` throws or `reject` rejects; the first argument of a function in the same file
-// whose first parameter the lint takes for an error (so it scans that function too). Anywhere it is narrowed to one of the engine's own error classes
-// (`if (e instanceof AskError)`, `e instanceof AskError ? e.message : ...`, `e instanceof AskError && ...`, or after
-// `if (!(e instanceof AskError)) throw e`), whose texts the engine writes, any use is allowed. Everything else is
-// reported: `.message`, `.stack`, `.path`, `.stderr`, `.cause` or any other property, `String(e)`, `${e}`, `+ e`,
-// destructuring (`const { message } = e`, `catch ({ message })`), passing it to any other function (JSON.stringify,
-// inspect, format, a helper), putting it in an object or array, or assigning it to another name.
+// The lint is an allowlist. In the server's route files (SCANNED), a caught error (a catch clause's binding; the
+// parameter of a `.catch(...)` callback, of `.then(...)`'s second one, or of an `'error'` listener added with on, once
+// or addListener; a parameter typed `unknown`, `any` or `Error` and named like one: e, err, error, ex, cause, reason)
+// may appear only as: the left of `instanceof`; the object of a `.code` read (an errno word, cast or not); an argument
+// of logDetail or errorAnswer; what `throw` throws, `Promise.reject` rejects, or a `new Promise` executor's `reject`
+// rejects; the first argument of a function in the same file whose first parameter the lint takes for an error (so it
+// scans that function too). Anywhere it is narrowed to one of the engine's own error classes (`if (e instanceof
+// AskError)`, `e instanceof AskError ? e.message : ...`, `e instanceof AskError && ...`, or after `if (!(e instanceof
+// AskError)) throw e`), whose texts the engine writes, any use is allowed. An engine class is one the file declares or
+// imports from src/ (a relative import): not a built-in, not a name bound to one (`const Raw = Error`), not a package's
+// (`YAMLParseError`). Everything else is reported: `.message`, `.stack`, `.path`, `.stderr`, `.cause` or any other
+// property, `String(e)`, `${e}`, `+ e`, destructuring (`const { message } = e`, `catch ({ message })`), passing it to
+// any other function (JSON.stringify, inspect, format, a helper, a local function named reject), putting it in an
+// object or array, or assigning it to another name.
 // Not caught: a raw text that never was an error binding (a child's stderr, a field of a result), an engine error
-// class whose text quotes a raw one, an error that reaches a route through a value the lint doesn't know is one (a
-// result's `error` field, a rejected promise awaited without a catch binding, a typed parameter under another name),
-// a narrowed branch that reads a property of an engine error holding raw text, and text outside these files.
+// class whose text quotes a raw one (each keeps raw text in `cause`, shown by refusalText as "logged"), an error that
+// reaches a route through a value the lint doesn't know is one (a result's `error` field, a rejected promise awaited
+// without a catch binding, a typed parameter under another name), a narrowed branch that reads a property of an engine
+// error holding raw text, a module of src/ that exports a built-in class under an engine name, an errno `.code` put in
+// an answer, and text outside these files.
 import './helpers.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -26,13 +31,11 @@ import { join } from 'node:path';
 import ts from 'typescript';
 import { repoRoot } from './helpers.js';
 
-/** The files whose answers the lint reads: the dashboard, its console and plugin routes, the hub, its setup mode, the App manifest. */
-const SCANNED = ['src/dashboard.ts', 'src/dashboard-hub.ts', 'src/hub-setup.ts', 'src/plugins/dashboard.ts', 'src/setup/app-manifest.ts'];
+/** The files whose answers the lint reads: the dashboard, its console, plugin, chat, value-report and avatar routes, the hub, its setup mode, the App manifest, the webhooks. */
+const SCANNED = ['src/dashboard.ts', 'src/dashboard-hub.ts', 'src/hub-setup.ts', 'src/plugins/dashboard.ts', 'src/setup/app-manifest.ts', 'src/chat-routes.ts', 'src/value-report-route.ts', 'src/avatars.ts', 'src/automations/webhook.ts', 'src/automations/webhook-gateway.ts', 'src/governance-webhook.ts'];
 const SCANNED_DIRS = ['src/console'];
 /** src/setup/app-manifest.ts is the hub's half up to this line; the runner's half after it prints to a terminal. */
 const RUNNER_HALF = "// The runner's half.";
-/** Narrowing to one of these says nothing about who wrote the text. */
-const BUILTIN_ERRORS = new Set(['Error', 'TypeError', 'RangeError', 'SyntaxError', 'ReferenceError', 'EvalError', 'URIError', 'AggregateError', 'Object']);
 const TYPED = new Set([ts.SyntaxKind.UnknownKeyword, ts.SyntaxKind.AnyKeyword]);
 /** A typed parameter is taken for an error by its name: an `unknown` request value under another name is not one. */
 const ERROR_NAME = /^(?:e|err|error|ex|cause|reason)$/;
@@ -46,32 +49,44 @@ const isName = (e: ts.Expression, name: string) => {
   return ts.isIdentifier(s) && s.text === name;
 };
 
-/** `e instanceof C` (C one of the engine's own classes), positively, at the top of `cond` or of one of its `&&` sides. */
-function narrows(cond: ts.Expression, name: string): boolean {
+/** `e instanceof C` (C one of the engine's own classes, `engine`), positively, at the top of `cond` or of one of its `&&` sides. */
+function narrows(cond: ts.Expression, name: string, engine: ReadonlySet<string>): boolean {
   const c = strip(cond);
-  if (ts.isBinaryExpression(c) && c.operatorToken.kind === ts.SyntaxKind.AmpersandAmpersandToken) return narrows(c.left, name) || narrows(c.right, name);
-  return ts.isBinaryExpression(c) && c.operatorToken.kind === ts.SyntaxKind.InstanceOfKeyword && isName(c.left, name) && ts.isIdentifier(strip(c.right)) && !BUILTIN_ERRORS.has((strip(c.right) as ts.Identifier).text);
+  if (ts.isBinaryExpression(c) && c.operatorToken.kind === ts.SyntaxKind.AmpersandAmpersandToken) return narrows(c.left, name, engine) || narrows(c.right, name, engine);
+  return ts.isBinaryExpression(c) && c.operatorToken.kind === ts.SyntaxKind.InstanceOfKeyword && isName(c.left, name) && ts.isIdentifier(strip(c.right)) && engine.has((strip(c.right) as ts.Identifier).text);
+}
+
+/** The classes a file declares, and the names it imports from a module of src/ (a relative specifier): the only classes that narrow. */
+function engineClasses(sf: ts.SourceFile): Set<string> {
+  const out = new Set<string>();
+  for (const s of sf.statements) {
+    if (ts.isClassDeclaration(s) && s.name) out.add(s.name.text);
+    if (!ts.isImportDeclaration(s) || !ts.isStringLiteral(s.moduleSpecifier) || !s.moduleSpecifier.text.startsWith('.')) continue;
+    const b = s.importClause?.namedBindings;
+    if (b && ts.isNamedImports(b)) for (const el of b.elements) if (!el.isTypeOnly) out.add(el.name.text);
+  }
+  return out;
 }
 
 /** `if (!(e instanceof C)) throw ...` or `... return ...`: after it, `e` is a C. */
-function guards(s: ts.Statement, name: string): boolean {
+function guards(s: ts.Statement, name: string, engine: ReadonlySet<string>): boolean {
   if (!ts.isIfStatement(s) || s.elseStatement) return false;
   const c = strip(s.expression);
-  if (!ts.isPrefixUnaryExpression(c) || c.operator !== ts.SyntaxKind.ExclamationToken || !narrows(c.operand, name)) return false;
+  if (!ts.isPrefixUnaryExpression(c) || c.operator !== ts.SyntaxKind.ExclamationToken || !narrows(c.operand, name, engine)) return false;
   const t = s.thenStatement;
   const last = ts.isBlock(t) ? t.statements[t.statements.length - 1] : t;
   return !!last && (ts.isThrowStatement(last) || ts.isReturnStatement(last));
 }
 
 /** Whether the use at `n` is narrowed to an engine error class on its way up to `scope`. */
-function narrowed(n: ts.Node, scope: ts.Node, name: string): boolean {
+function narrowed(n: ts.Node, scope: ts.Node, name: string, engine: ReadonlySet<string>): boolean {
   for (let child = n, p = n.parent; p && child !== scope; child = p, p = p.parent) {
-    if (ts.isIfStatement(p) && child === p.thenStatement && narrows(p.expression, name)) return true;
-    if (ts.isConditionalExpression(p) && child === p.whenTrue && narrows(p.condition, name)) return true;
-    if (ts.isBinaryExpression(p) && p.operatorToken.kind === ts.SyntaxKind.AmpersandAmpersandToken && child === p.right && narrows(p.left, name)) return true;
+    if (ts.isIfStatement(p) && child === p.thenStatement && narrows(p.expression, name, engine)) return true;
+    if (ts.isConditionalExpression(p) && child === p.whenTrue && narrows(p.condition, name, engine)) return true;
+    if (ts.isBinaryExpression(p) && p.operatorToken.kind === ts.SyntaxKind.AmpersandAmpersandToken && child === p.right && narrows(p.left, name, engine)) return true;
     if (ts.isBlock(p) || ts.isSourceFile(p)) {
       const i = (p.statements as ts.NodeArray<ts.Statement>).indexOf(child as ts.Statement);
-      if (p.statements.slice(0, Math.max(i, 0)).some((s) => guards(s, name))) return true;
+      if (p.statements.slice(0, Math.max(i, 0)).some((s) => guards(s, name, engine))) return true;
     }
     if (p === scope) break;
   }
@@ -80,8 +95,22 @@ function narrowed(n: ts.Node, scope: ts.Node, name: string): boolean {
 
 /** The functions an error binding may be passed to whole: they log it, or answer with a fixed text. */
 const SINKS = new Set(['logDetail', 'errorAnswer']);
-/** A rejection, which is a throw. */
-const REJECTS = new Set(['reject']);
+/**
+ * A rejection, which is a throw: `Promise.reject(e)`, or the `reject` a `new Promise((resolve, reject) => ...)`
+ * executor binds (a local function of that name is not one).
+ */
+function rejects(call: ts.CallExpression): boolean {
+  const c = strip(call.expression);
+  if (ts.isPropertyAccessExpression(c)) return c.name.text === 'reject' && isName(c.expression, 'Promise');
+  if (!ts.isIdentifier(c)) return false;
+  for (let p: ts.Node | undefined = call.parent; p; p = p.parent) {
+    if (!ts.isFunctionLike(p)) continue;
+    const i = (p as ts.SignatureDeclaration).parameters.findIndex((q) => ts.isIdentifier(q.name) && q.name.text === c.text);
+    if (i < 0) continue;
+    return i === 1 && !!p.parent && ts.isNewExpression(p.parent) && isName(p.parent.expression, 'Promise');
+  }
+  return false;
+}
 
 /** A use of an error binding the allowlist doesn't take: `what`, or null when it is allowed. */
 function disallowed(id: ts.Identifier, scanned: ReadonlySet<string>): string | null {
@@ -96,7 +125,7 @@ function disallowed(id: ts.Identifier, scanned: ReadonlySet<string>): string | n
   if (ts.isCallExpression(p) && p.arguments.includes(n as ts.Expression)) {
     const callee = strip(p.expression);
     const name = ts.isIdentifier(callee) ? callee.text : ts.isPropertyAccessExpression(callee) ? callee.name.text : '?';
-    return SINKS.has(name) || REJECTS.has(name) || (scanned.has(name) && p.arguments[0] === n) ? null : `passed to ${name}()`;
+    return SINKS.has(name) || rejects(p) || (scanned.has(name) && p.arguments[0] === n) ? null : `passed to ${name}()`;
   }
   if (ts.isCallExpression(p) && p.expression === n) return '()';
   if (ts.isVariableDeclaration(p) && p.initializer === n) return ts.isIdentifier(p.name) ? `assigned to ${p.name.text}` : 'destructured';
@@ -111,6 +140,7 @@ function disallowed(id: ts.Identifier, scanned: ReadonlySet<string>): string | n
 export function rawErrorReads(path: string, text: string): string[] {
   const sf = ts.createSourceFile(path, text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
   const found: string[] = [];
+  const engine = engineClasses(sf);
   const scan = (scope: ts.Node, name: string, body: ts.Node) => {
     const visit = (n: ts.Node) => {
       // A nested function that binds the same name again shadows it.
@@ -118,7 +148,7 @@ export function rawErrorReads(path: string, text: string): string[] {
       if (ts.isCatchClause(n) && n !== scope && n.variableDeclaration && ts.isIdentifier(n.variableDeclaration.name) && n.variableDeclaration.name.text === name) return;
       // A property name (`x.e`, `{ e: 1 }`) is not the binding.
       const isRef = ts.isIdentifier(n) && n.text === name && !(n.parent && ((ts.isPropertyAccessExpression(n.parent) && n.parent.name === n) || (ts.isPropertyAssignment(n.parent) && n.parent.name === n)));
-      if (isRef && !narrowed(n, scope, name)) {
+      if (isRef && !narrowed(n, scope, name, engine)) {
         const what = disallowed(n as ts.Identifier, scanned);
         if (what) found.push(`${sf.getLineAndCharacterOfPosition(n.getStart()).line + 1}: ${name} ${what}`);
       }
@@ -144,8 +174,9 @@ export function rawErrorReads(path: string, text: string): string[] {
     if (!call || !ts.isCallExpression(call) || !call.arguments.includes(f as ts.Expression) || !ts.isPropertyAccessExpression(call.expression)) return false;
     const m = call.expression.name.text;
     if (m === 'catch') return true;
+    if (m === 'then') return call.arguments[1] === f;
     const first = call.arguments[0];
-    return (m === 'on' || m === 'once') && !!first && ts.isStringLiteralLike(first) && first.text === 'error';
+    return ['on', 'once', 'addListener', 'prependListener', 'prependOnceListener'].includes(m) && !!first && ts.isStringLiteralLike(first) && first.text === 'error';
   };
   const at = (n: ts.Node) => sf.getLineAndCharacterOfPosition(n.getStart()).line + 1;
   const visit = (n: ts.Node) => {
@@ -210,6 +241,12 @@ const BAD_SOURCES: readonly string[] = [
   'try { f(); } catch (e) { const x = e as Error; json(res, 500, { error: x.message }); }',
   // A helper that isn't scanned as taking an error.
   'const show = (x: string) => x;\ntry { f(); } catch (e) { json(res, 500, { error: show(e as string) }); }',
+  // #882 round 3: a class that isn't the engine's (a built-in under another name, a package's), and other error callbacks.
+  'const Raw = Error;\ntry { f(); } catch (e) { if (e instanceof Raw) return refused(404, e.message); }',
+  "import { YAMLParseError } from 'yaml';\ntry { f(); } catch (e) { if (e instanceof YAMLParseError) return refused(400, e.message); }",
+  'p.then((v) => v, (e) => json(res, 500, { error: e.message }));',
+  "up.addListener('error', (e) => json(res, 502, { error: e.message }));",
+  'const reject = (x: unknown) => json(res, 500, { error: x });\ntry { f(); } catch (e) { reject(e); }',
 ];
 /** Good sources: none reads a raw error as text. */
 // check-table: never-grow
@@ -226,11 +263,16 @@ const GOOD_SOURCES: readonly string[] = [
   'const check = (value: unknown) => typeof value === "string" ? value : String(value);',
   'const consoleError = (e: unknown) => { if (!(e instanceof ConsoleError)) throw e; return json(res, 400, { error: e.message }); };\ntry { f(); } catch (e) { return consoleError(e); }',
   'try { f(); } catch (e) { return Promise.reject(e); }',
+  'new Promise((resolve, reject) => { f().catch((e) => reject(e)); });',
+  'class FlowError extends Error {}\ntry { f(); } catch (e) { if (e instanceof FlowError) json(res, 400, { error: e.message }); }',
 ];
 
+/** The engine classes the fixtures narrow to, imported as a route file imports them. */
+const FIXTURE_IMPORTS = "import { AskError, ConsoleError, SettingsError } from './errors.js';\n";
+
 test('#882 backstop lint: it reports each bad source and no good one', () => {
-  assert.deepEqual(BAD_SOURCES.filter((s) => rawErrorReads('fixture.ts', s).length === 0), [], 'a bad source the lint misses');
-  assert.deepEqual(GOOD_SOURCES.flatMap((s) => rawErrorReads('fixture.ts', s).map((x) => `${s} -> ${x}`)), [], 'a good source the lint reports');
+  assert.deepEqual(BAD_SOURCES.filter((s) => rawErrorReads('fixture.ts', FIXTURE_IMPORTS + s).length === 0), [], 'a bad source the lint misses');
+  assert.deepEqual(GOOD_SOURCES.flatMap((s) => rawErrorReads('fixture.ts', FIXTURE_IMPORTS + s).map((x) => `${s} -> ${x}`)), [], 'a good source the lint reports');
 });
 
 test('#882 backstop: no dashboard, console, plugins, hub or App-manifest route reads a caught error as text (e.message, String(e), ${e}); only engine error classes are shown', () => {
