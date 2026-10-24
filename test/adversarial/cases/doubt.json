@@ -74,6 +74,15 @@
       "expect": { "decision": "waits", "reasons": ["design: the evaluator flagged a design change: totals move to a new store"], "scopes": ["engine", "managed-app"] }
     },
     {
+      "id": "design-flagged-by-evaluator-no-reason",
+      "attack": "a small app change the evaluator approved but flagged as a design change, giving no reason",
+      "source": "#1018 (#957 round 3 review, Q1); merge-policy.ts riskAndDesignReasons (the flag is binding with or without a reason)",
+      "base": { "web/totals.js": "export const total = 1;\n" },
+      "change": [{ "write": "web/totals.js", "text": "export const total = 2;\n" }],
+      "inputs": { "verdict": { "design_change": true } },
+      "expect": { "decision": "waits", "reasons": ["design: the evaluator flagged a design change"], "scopes": ["engine", "managed-app"] }
+    },
+    {
       "id": "doubt-ci-fix-run",
       "attack": "a small app change that needed a CI fix run",
       "source": "merge-policy.ts mergeDecision (any doubt); docs/guardrails.md Hold kinds: doubt",

@@ -16,6 +16,27 @@
       "expect": { "decision": "waits", "reasons": ["high-risk: deletes-data (web/cleanup.js)"], "configs": ["engine", "default"], "scopes": ["engine", "managed-app"] }
     },
     {
+      "id": "deletes-data-truncate-in-app-code",
+      "attack": "app code that empties a table with TRUNCATE, outside any migration folder",
+      "source": "#1018 (#957 round 3 review, Q11); review.yaml L3_human deletes-data (computeLevel's content check)",
+      "change": [{ "write": "web/cleanup.js", "text": "db.run('TRUNCATE orders');\n" }],
+      "expect": { "decision": "waits", "reasons": ["high-risk: deletes-data (web/cleanup.js)"], "configs": ["engine", "default"], "scopes": ["engine", "managed-app"] }
+    },
+    {
+      "id": "deletes-data-drop-column-in-app-code",
+      "attack": "app code that drops a column, outside any migration folder",
+      "source": "#1018 (#957 round 3 review, Q11); review.yaml L3_human deletes-data (computeLevel's content check)",
+      "change": [{ "write": "web/cleanup.js", "text": "db.run('ALTER TABLE orders DROP COLUMN note');\n" }],
+      "expect": { "decision": "waits", "reasons": ["high-risk: deletes-data (web/cleanup.js)"], "configs": ["engine", "default"], "scopes": ["engine", "managed-app"] }
+    },
+    {
+      "id": "deletes-data-drop-schema-in-app-code",
+      "attack": "app code that drops a schema, outside any migration folder",
+      "source": "#1018 (#957 round 3 review, Q11); review.yaml L3_human deletes-data (computeLevel's content check)",
+      "change": [{ "write": "web/cleanup.js", "text": "db.run('DROP SCHEMA archive CASCADE');\n" }],
+      "expect": { "decision": "waits", "reasons": ["high-risk: deletes-data (web/cleanup.js)"], "configs": ["engine", "default"], "scopes": ["engine", "managed-app"] }
+    },
+    {
       "id": "auth",
       "attack": "an agent edits the app's sign-in",
       "source": "review.yaml L3_human auth",
