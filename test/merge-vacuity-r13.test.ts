@@ -1,8 +1,10 @@
 // #784 round 13 (the round-12 second review M1-M5b, final check D0-D2, C1, R3s). Round 12's moved-code pairing is
 // taken out: a dead copy of an edited line's old text in another app file made the whole edited line count (M1, M1b,
 // M1c, D1, D2), and a replacement whose new line another file lost was judged as a removal (C1). These must-holds keep
-// that route closed. Code moved, edited, re-wrapped or reordered out of git's own pairing (M3, M4b, M5b, R3s) reads as
-// added code again, so an untested change merges: named limits, kept as todo tests (follow-up: moved-code pairing).
+// that route closed. Code moved, edited, re-wrapped or reordered out of git's own pairing (M3, M4b, M5b, R3s) read as
+// added code again at round 13, so an untested change merged. #1014 pairs moved code only to take measure away (a file
+// counts only where it counts both with and without the pairing): each holds, with M4b1, M5c and A6 (round 13's last
+// reviews), and the must-holds above still hold.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
@@ -133,15 +135,13 @@ test('must hold: C1: a line replaced by one another app file removed (as at roun
   assert.deepEqual([d.auto, d.reasons], hold('src/a.js, src/b.js'));
 });
 
-const MOVES = 'a named limit since round 13: moved code git does not pair reads as added code, so an untested change merges (follow-up: moved-code pairing)';
-
-// ---- M3: a function split out to a new file with a line edited inside (a named limit: the whole new file counts)
+// ---- M3: a function split out to a new file with a line edited inside (only the edit counts)
 
 const G = "export function f(x) {\n  return x + 1;\n}\nexport function g(u) {\n  return u.admin ? grant(u) : deny(u);\n}\nfunction grant(u) {\n  return 'all';\n}\nfunction grantAll(u) {\n  return 'everything';\n}\nfunction deny(u) {\n  return 'none';\n}\nfunction denyAll(u) {\n  return 'nothing';\n}\n";
 const G_A = 'export function f(x) {\n  return x + 1;\n}\n';
 const G_C = G.replace(G_A, '');
 
-test('limit: M3: g moved to a new file with its untaken arm edited; the test takes the other arm', { todo: MOVES }, async () => {
+test('must hold: M3: g moved to a new file with its untaken arm edited; the test takes the other arm', async () => {
   const d = await decided({ 'src/a.js': G }, { 'src/a.js': G_A, 'src/c.js': G_C.replace('? grant(u)', '? grantAll(u)'), 'test/x.test.js': calls('c.js', 'g', 'g({ admin: false })', "'none'") });
   assert.deepEqual([d.auto, d.reasons], hold('src/a.js, src/c.js'));
 });
@@ -158,7 +158,7 @@ const MG = 'export function g(u) {\n  const a = u.id * 2;\n  return a + 3;\n}\n'
 const MH = "export function h(u) {\n  return u.admin ? 'all' : 'none';\n}\n";
 const MG_T = calls('w.js', 'g', 'g({ id: 1 })', '5');
 
-test('limit: M4b: tested g moved past a 30-function block, an untested arm edited in h', { todo: MOVES }, async () => {
+test('must hold: M4b: tested g moved past a 30-function block, an untested arm edited in h', async () => {
   const d = await decided({ 'src/w.js': MG + BIG + MH }, { 'src/w.js': BIG + MG + MH.replace("'all'", "'everything'"), 'test/x.test.js': MG_T });
   assert.deepEqual([d.auto, d.reasons], hold('src/w.js'));
 });
@@ -168,12 +168,25 @@ test('control: M4b: the same move with a tested edit inside g merges', async () 
   assert.deepEqual([d.auto, d.reasons], [true, []]);
 });
 
+const SIX = 'export function k(x) {\n  const a = x + 1;\n  const b = a * 2;\n  const c = b - 3;\n  return c;\n}\n';
+
+test('must hold: M4b1: tested g moved past one 6-line function, an untested arm edited in h', async () => {
+  const d = await decided({ 'src/w.js': MG + SIX + MH }, { 'src/w.js': SIX + MG + MH.replace("'all'", "'everything'"), 'test/x.test.js': MG_T });
+  assert.deepEqual([d.auto, d.reasons], hold('src/w.js'));
+});
+
+test('control: M4b1: the same move with the edited arm tested merges', async () => {
+  const t = `${H}import { g, h } from '../src/w.js';\ntest('g', () => { assert.equal(g({ id: 1 }), 5); assert.equal(h({ admin: true }), 'everything'); });\n`;
+  const d = await decided({ 'src/w.js': MG + SIX + MH }, { 'src/w.js': SIX + MG + MH.replace("'all'", "'everything'"), 'test/x.test.js': t });
+  assert.deepEqual([d.auto, d.reasons], [true, []]);
+});
+
 // ---- M5b, R3s: moved code re-wrapped into short lines
 
 const S = "export function g(u) {\n  return combine(alpha(u), beta(u));\n}\nexport function h(u) {\n  return u.admin ? 'all' : 'none';\n}\nexport function combine(a, b) {\n  return a + b;\n}\nexport function alpha(u) {\n  return 1;\n}\nexport function beta(u) {\n  return 2;\n}\n";
 const S_G = "export function g(u) {\n  return combine(alpha(u), beta(u));\n}\n";
 
-test('limit: M5b: tested g moved to a new file with its call re-wrapped one argument a line, an untested arm edited in h', { todo: MOVES }, async () => {
+test('must hold: M5b: tested g moved to a new file with its call re-wrapped one argument a line, an untested arm edited in h', async () => {
   const sC = "import { combine, alpha, beta } from './s.js';\nexport function g(u) {\n  return combine(\n    alpha(u),\n    beta(u),\n  );\n}\n";
   const d = await decided({ 'src/s.js': S }, { 'src/s.js': S.replace(S_G, '').replace("'all'", "'everything'"), 'src/c.js': sC, 'test/x.test.js': calls('c.js', 'g', 'g({})', '3') });
   assert.deepEqual([d.auto, d.reasons], hold('src/c.js, src/s.js'));
@@ -185,10 +198,37 @@ test('control: M5b: the same re-wrapped move with a tested argument changed merg
   assert.deepEqual([d.auto, d.reasons], [true, []]);
 });
 
+// ---- M5c, A6 (round 13's last reviews): a tested function moved unchanged, next to an untested edit
+
+const S_C = `import { combine, alpha, beta } from './s.js';\n${S_G}`;
+
+test('must hold: M5c: tested g moved unchanged to a new file, an untested arm edited in h', async () => {
+  const d = await decided({ 'src/s.js': S }, { 'src/s.js': S.replace(S_G, '').replace("'all'", "'everything'"), 'src/c.js': S_C, 'test/x.test.js': calls('c.js', 'g', 'g({})', '3') });
+  assert.deepEqual([d.auto, d.reasons], hold('src/c.js, src/s.js'));
+});
+
+test('control: M5c: the same move with the edited arm tested merges', async () => {
+  const t = `${H}import { g } from '../src/c.js';\nimport { h } from '../src/s.js';\ntest('g', () => { assert.equal(g({}), 3); assert.equal(h({ admin: true }), 'everything'); });\n`;
+  const d = await decided({ 'src/s.js': S }, { 'src/s.js': S.replace(S_G, '').replace("'all'", "'everything'"), 'src/c.js': S_C, 'test/x.test.js': t });
+  assert.deepEqual([d.auto, d.reasons], [true, []]);
+});
+
+const A6_K = 'export const k = 1;\n';
+
+test('must hold: A6: tested g moved into an existing app file, an untested arm edited in h where it came from', async () => {
+  const d = await decided({ 'src/a.js': MG + MH, 'src/b.js': A6_K }, { 'src/a.js': MH.replace("'all'", "'everything'"), 'src/b.js': A6_K + MG, 'test/x.test.js': calls('b.js', 'g', 'g({ id: 1 })', '5') });
+  assert.deepEqual([d.auto, d.reasons], hold('src/a.js, src/b.js'));
+});
+
+test('control: A6: the same move with a tested edit inside g merges', async () => {
+  const d = await decided({ 'src/a.js': MG + MH, 'src/b.js': A6_K }, { 'src/a.js': MH.replace("'all'", "'everything'"), 'src/b.js': A6_K + MG.replace('a + 3', 'a + 4'), 'test/x.test.js': calls('b.js', 'g', 'g({ id: 1 })', '6') });
+  assert.deepEqual([d.auto, d.reasons], [true, []]);
+});
+
 const M_BASE = "export function f(x) {\n  return x + 1;\n}\nexport function g(u) {\n  if (u.guest) {\n    throw new Error('denied');\n  }\n  return 'ok';\n}\nexport function h(x) {\n  return x * 2;\n}\n";
 const M_A = 'export function f(x) {\n  return x + 1;\n}\n';
 
-test('limit: R3s: g (guard removed) and h moved to a new file, h re-wrapped into short pieces', { todo: MOVES }, async () => {
+test('must hold: R3s: g (guard removed) and h moved to a new file, h re-wrapped into short pieces', async () => {
   const wrapped = "export function g(u) {\n  return 'ok';\n}\nexport function h(x) {\n  return (\n    x *\n    2\n  );\n}\n";
   const d = await decided({ 'src/a.js': M_BASE }, { 'src/a.js': M_A, 'src/c.js': wrapped, 'test/x.test.js': calls('c.js', 'h', 'h(2)', '4') });
   assert.deepEqual([d.auto, d.reasons], hold('src/a.js, src/c.js'));
