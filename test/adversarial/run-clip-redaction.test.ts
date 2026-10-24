@@ -11,7 +11,7 @@ import { join } from 'node:path';
 import { redactString } from '../../src/events/redact.js';
 import { readFeed, RunFeed } from '../../src/run-feed.js';
 import { readRun, RunRecorder } from '../../src/run-record.js';
-import { StuckDetector } from '../../src/stuck.js';
+import { StuckDetector, STUCK_STOP_AT, type StuckVerdict } from '../../src/stuck.js';
 import { leaks, SHAPES } from '../token-standins.js';
 
 const assistant = (...content: object[]) => ({ type: 'assistant', message: { content } });
@@ -80,8 +80,8 @@ function across(s: Site, value: string, secret: string, what: string, gaps: Set<
 }
 
 /**
- * Redaction gaps that need no cut: a gap closed fails here until it is taken off. A value with JSON-escaped slashes is
- * escaped again when its tool call's input is written as JSON.
+ * Redaction gaps that need no cut (#1066): a gap closed fails here until it is taken off. A value with JSON-escaped
+ * slashes is escaped again when its tool call's input is written as JSON.
  */
 // check-table: never-grow
 const KNOWN_GAPS: readonly string[] = [
@@ -169,6 +169,7 @@ test('a secret across any clip boundary of a run feed is redacted whole, never s
 test("a secret over several lines, cut by a store's line limit, is not stored as its kept lines (#988)", () => {
   const state = mkdtempSync(join(tmpdir(), 'lines-clip-'));
   const missed: string[] = [];
+  const uncut: string[] = [];
   const multi = SHAPES.filter((s) => s.value.includes('\n'));
   let n = 0;
   assert.ok(multi.length > 0, 'a stand-in over several lines');
@@ -177,7 +178,8 @@ test("a secret over several lines, cut by a store's line limit, is not stored as
     for (let kept = 1; kept < lines.length; kept++) {
       // The record keeps a command's first 6 lines; the feed a tool result's first 60.
       for (const [where, limit] of [['record', 6], ['feed', 60]] as const) {
-        const text = [...Array.from({ length: limit - kept }, (_, i) => `line ${i}`), shape.value, 'after'].join('\n');
+        // Lines after the secret, enough that the limit cuts even when redaction makes the secret one line.
+        const text = [...Array.from({ length: limit - kept }, (_, i) => `line ${i}`), shape.value, ...Array.from({ length: limit }, (_, i) => `after ${i}`)].join('\n');
         let stored: string | undefined;
         if (where === 'record') {
           const r = new RunRecorder(state, { role: 'worker', model: 'm', cwd });
@@ -191,9 +193,36 @@ test("a secret over several lines, cut by a store's line limit, is not stored as
           f.line(results({ type: 'tool_result', tool_use_id: 'c', content: text }));
           stored = (readFeed(state, run)?.items.find((i) => i.kind === 'tool_result') as { output?: string } | undefined)?.output;
         }
-        if (stored === undefined || leaks(stored, shape.secret)) missed.push(`${shape.what}, ${kept} of its lines kept, ${where}`);
+        const got = stored ?? '';
+        if (leaks(got, shape.secret)) missed.push(`${shape.what}, ${kept} of its lines kept, ${where}`);
+        // The line limit cut it: the lines before the secret are kept, the last line is not, and the feed says so.
+        if (!got.startsWith('line 0') || got.includes(`after ${limit - 1}`) || (where === 'feed' && !/\n… \[\d+ more lines\]$/.test(got))) uncut.push(`${shape.what}, ${kept} of its lines kept, ${where}: ${JSON.stringify(got.slice(0, 40))}`);
       }
     }
   }
   assert.deepEqual(missed, []);
+  assert.deepEqual(uncut, []);
+});
+
+test("a secret across the cut of a stuck guard's verdict input is redacted whole: what a stopped run's detail and the verdict report read (#988)", () => {
+  // The verdict's input is the same text, under the same cap, as the record's stuck input.
+  const s = RECORD_SITES.stuck;
+  const missed: string[] = [];
+  const uncut: string[] = [];
+  const gaps = new Set<string>();
+  for (const shape of SHAPES) {
+    for (const text of across(s, shape.value, shape.secret, shape.what, gaps)) {
+      const d = new StuckDetector();
+      const verdicts: StuckVerdict[] = [];
+      for (let i = 0; i < STUCK_STOP_AT; i++) {
+        d.line(assistant({ type: 'tool_use', id: `s${i}`, name: 'Bash', input: { command: text } }));
+        verdicts.push(...d.line(results({ type: 'tool_result', tool_use_id: `s${i}`, is_error: true, content: 'no' })));
+      }
+      assert.deepEqual(verdicts.map((v) => v.kind), ['flag', 'stop'], 'flagged, then stopped');
+      for (const v of verdicts) check(s, v.input, shape.secret, `${shape.what} (${v.kind})`, missed, uncut);
+    }
+  }
+  assert.deepEqual(missed, []);
+  assert.deepEqual(uncut, []);
+  assert.deepEqual([...gaps], known('record').filter((g) => g.endsWith(` in ${s.where}`)));
 });
