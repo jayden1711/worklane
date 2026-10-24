@@ -3,9 +3,9 @@
 // runs, and refuses a checkout where Node could load another copy of one. Round 21's walk looked only at plain
 // directories, so a symlinked dist/node_modules and a dist/test/package.json named yaml got past it (measured by both
 // reviews of dafd6977). Each fixture is a scratch checkout with one such shape; the control has none.
-import { test } from 'node:test';
+import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { cpSync, mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from 'node:fs';
+import { cpSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -17,9 +17,13 @@ const { pinProblems, PINS } = (await import(pathToFileURL(join(repoRoot, 'script
   PINS: Record<string, Pin>;
 };
 
+/** Every scratch checkout is made in here, and the file removes it when its tests end. */
+const scratch = mkdtempSync(join(tmpdir(), 'pins-'));
+after(() => rmSync(scratch, { recursive: true, force: true }));
+
 /** A scratch checkout: a package.json, a lockfile with yaml's pinned entry, the installed yaml copied, an empty dist/test/. */
 function checkout(): string {
-  const root = mkdtempSync(join(tmpdir(), 'pins-'));
+  const root = mkdtempSync(join(scratch, 'c-'));
   writeFileSync(join(root, 'package.json'), JSON.stringify({ name: 'fixture', type: 'module' }));
   writeFileSync(join(root, 'package-lock.json'), JSON.stringify({ packages: { 'node_modules/yaml': { integrity: PINS.yaml!.integrity } } }));
   cpSync(join(repoRoot, 'node_modules', 'yaml'), join(root, 'node_modules', 'yaml'), { recursive: true });
@@ -59,13 +63,18 @@ const PIN_LAYOUT_FIXTURES: [string, (root: string) => void, string][] = [
   }, 'dist/test2: a symbolic link'],
 ];
 
-test('the pin check refuses every place Node could find another yaml first, and passes a clean checkout (round 22)', () => {
-  const pins = { yaml: PINS.yaml! };
+const pins = { yaml: PINS.yaml! };
+
+test('the pin check passes a clean checkout (round 22)', () => {
   assert.deepEqual(pinProblems(checkout(), pins), [], 'the control: a clean checkout');
-  for (const [label, add, word] of PIN_LAYOUT_FIXTURES) {
+});
+
+// One test per fixture, so a regression names every refusal it drops, not only the first.
+for (const [label, add, word] of PIN_LAYOUT_FIXTURES) {
+  test(`the pin check refuses ${label} (round 22)`, () => {
     const root = checkout();
     add(root);
     const problems = pinProblems(root, pins);
     assert.ok(problems.some((p) => p.includes(word)), `${label}: ${JSON.stringify(problems)}`);
-  }
-});
+  });
+}
