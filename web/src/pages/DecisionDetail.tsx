@@ -11,6 +11,7 @@ import { navigate } from '../App';
 import { DotPill, FileChip, Loading, StatusMark, type MarkState } from '../components/patterns';
 import { ago, Badge, Button, Card, cx, Empty } from '../components/ui';
 import { Header } from '../components/Header';
+import { shownPath } from '../path-text';
 import { DecisionLines, FLAG_LABEL, LEVEL_MEANING, proseOf, useAnswer } from './Decisions';
 
 /** Every section, in page order (the render checks render each for every kind); one with nothing recorded isn't drawn. */
@@ -273,7 +274,7 @@ function Findings({ d }: { d: DecisionDetail }) {
                   <div className="mt-1 flex flex-wrap items-center gap-1.5 text-[12px]">
                     {x.file && (
                       <span data-testid="decision-finding-at">
-                        <FileChip file={`${x.file}:${x.line ?? '?'}`} />
+                        <FileChip file={x.file} line={x.line ?? '?'} />
                       </span>
                     )}
                     {x.severity && <Badge>severity {x.severity}</Badge>}
@@ -366,7 +367,7 @@ function Verdict({ d }: { d: DecisionDetail }) {
           {!!v.unread.length && (
             <>
               <div className="mt-2 text-[12px] font-medium text-ink-3">Files it didn't read</div>
-              <Lines items={v.unread} />
+              <Lines items={v.unread.map(shownPath)} />
             </>
           )}
           {!!v.unverifiedClaims.length && (
