@@ -168,8 +168,11 @@ const upstream = new Agent({ keepAlive: true });
 
 const readToken = (i: HubInstance): string | null => {
   try {
-    return readFileSync(i.tokenFile, 'utf8').trim() || null;
-  } catch {
+    const token = readFileSync(i.tokenFile, 'utf8').trim() || null;
+    if (!token) logDetail(`instance ${i.name}'s dashboard token`, `${i.tokenFile} is empty`);
+    return token;
+  } catch (e) {
+    logDetail(`instance ${i.name}'s dashboard token`, e);
     return null;
   }
 };
