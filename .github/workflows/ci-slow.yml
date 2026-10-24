@@ -2370,6 +2370,9 @@ jobs:
           '
           printf 'ci\ndelta\n' | sudo tee -a /var/lib/worklane/claude-account/paused >/dev/null
           for n in ci delta; do printf '{"instance":"%s","pid":999999,"places":[]}\n' "$n" | sudo tee "/var/lib/worklane/agent-slots/discord-claim-$n.json" >/dev/null; done
+          # Each source's claim (#605), and a copy of delta's Slack claim a crash left mid-write.
+          for n in ci delta; do for k in slack linear; do printf '{"instance":"%s","pid":999999,"key":"%s"}\n' "$n" "$k" | sudo tee "/var/lib/worklane/agent-slots/$k-claim-$n.json" >/dev/null; done; done
+          echo '{}' | sudo tee /var/lib/worklane/agent-slots/slack-claim-delta.json.999999.0123456789abcdef.tmp >/dev/null
           sudo install -d -m 0755 /var/lib/worklane/init
           printf '{"version":1,"mode":"server","instance":"delta"}\n' | sudo install -m 0640 -g wl-delta /dev/stdin /var/lib/worklane/init/delta.json
           sudo jq -e '[.users[] | select(.instance=="delta")] | length > 0' /var/lib/worklane/claude-account/status.json
@@ -2392,7 +2395,7 @@ jobs:
             sudo jq -c '[.incidents[] | select(.id=="ciciok01") | {id, kind, key, instance}]' /var/lib/worklane/agent-slots/incidents.json
             sudo jq -c '[.pending[] | select(.instance!="delta")]' /var/lib/worklane/pending-signers.json
             sudo grep -cx ci /var/lib/worklane/claude-account/paused
-            sudo cat /var/lib/worklane/agent-slots/discord-claim-ci.json
+            sudo cat /var/lib/worklane/agent-slots/discord-claim-ci.json /var/lib/worklane/agent-slots/slack-claim-ci.json /var/lib/worklane/agent-slots/linear-claim-ci.json
             # The incident store's owner is whichever coordinator wrote it last: its group and mode only, the mode's
             # group write masked (delta's last write loses it in the removal, #555; the next coordinator's write, a
             # copy renamed over it, is 0660): 640 and 660 both print 6x0, any other mode as it is.
@@ -2423,7 +2426,7 @@ jobs:
           [ "$rc" = 1 ] && grep -q 'worklane-dashboard-delta.service, is active' "$F/rm0b.err"
           sudo systemctl stop worklane-dashboard-delta.service
           sudo bash scripts/setup/instance-remove.sh delta --print | tee "$F/rm-print.txt"
-          for l in 'user     wl-delta ' 'user     wl-delta-agent ' 'group    wl-delta-work' 'unit     worklane-delta.service' 'unit     worklane-dashboard-delta.service' 'sudoers  worklane-delta' 'path     /srv/worklane/delta' 'path     /var/lib/worklane/init/delta.json' 'path     /var/lib/worklane/agent-slots/discord-claim-delta.json' 'run      testrun-gpu.sh disable delta' 'record   claude-profiles in ' 'record   claude-status in ' 'record   claude-paused in ' 'record   canary in ' 'record   incidents in ' 'record   pending-signers in ' 'record   gpu in ' 'record   testrun-net in ' 'run      testrun-network.sh disable delta' 'record   plugin-pending in ' "unit     worklane-mcp@${RM_D}.service" 'user     wl-delta-mcp ' 'group    wl-delta-mcpc' 'group    wl-delta-mcpctl' 'path     /etc/worklane/plugins/delta.json' 'path     /var/lib/worklane/plugins/store/delta' 'path     /var/lib/worklane-mcp-delta' 'export   ' "the machine helper's rule, rewritten for: $(echo "$RM_HELPER" | sed -e 's/wl-//g' -e 's/, / /g') " 'the dashboard hub, rewritten to serve: ci' 'kept     its GitHub App and its repo'; do
+          for l in 'user     wl-delta ' 'user     wl-delta-agent ' 'group    wl-delta-work' 'unit     worklane-delta.service' 'unit     worklane-dashboard-delta.service' 'sudoers  worklane-delta' 'path     /srv/worklane/delta' 'path     /var/lib/worklane/init/delta.json' 'path     /var/lib/worklane/agent-slots/discord-claim-delta.json' 'path     /var/lib/worklane/agent-slots/slack-claim-delta.json' 'path     /var/lib/worklane/agent-slots/linear-claim-delta.json' 'glob     /var/lib/worklane/agent-slots/slack-claim-delta.json.' 'run      testrun-gpu.sh disable delta' 'record   claude-profiles in ' 'record   claude-status in ' 'record   claude-paused in ' 'record   canary in ' 'record   incidents in ' 'record   pending-signers in ' 'record   gpu in ' 'record   testrun-net in ' 'run      testrun-network.sh disable delta' 'record   plugin-pending in ' "unit     worklane-mcp@${RM_D}.service" 'user     wl-delta-mcp ' 'group    wl-delta-mcpc' 'group    wl-delta-mcpctl' 'path     /etc/worklane/plugins/delta.json' 'path     /var/lib/worklane/plugins/store/delta' 'path     /var/lib/worklane-mcp-delta' 'export   ' "the machine helper's rule, rewritten for: $(echo "$RM_HELPER" | sed -e 's/wl-//g' -e 's/, / /g') " 'the dashboard hub, rewritten to serve: ci' 'kept     its GitHub App and its repo'; do
             grep -qF -- "$l" "$F/rm-print.txt" || { echo "--print doesn't list: $l" >&2; exit 1; }
           done
           if grep -qE 'wl-ci|worklane-ci\.service|/srv/worklane/ci|record .*"instance":"ci"' "$F/rm-print.txt"; then echo "--print lists ci's" >&2; exit 1; fi
@@ -2517,7 +2520,7 @@ jobs:
           # Every item of delta's gone.
           for u in wl-delta wl-delta-agent; do if id "$u" 2>/dev/null; then echo "user $u is still there" >&2; exit 1; fi; done
           if getent group wl-delta-work wl-delta wl-delta-agent; then echo "a group of delta's is still there" >&2; exit 1; fi
-          for p in /etc/systemd/system/worklane-delta.service /etc/systemd/system/worklane-delta.service.d /etc/systemd/system/worklane-dashboard-delta.service /etc/systemd/system/worklane-dashboard-delta.service.d /etc/sudoers.d/worklane-delta /srv/worklane/delta /var/lib/worklane/init/delta.json /var/lib/worklane/agent-slots/discord-claim-delta.json /var/lib/systemd/linger/wl-delta; do
+          for p in /etc/systemd/system/worklane-delta.service /etc/systemd/system/worklane-delta.service.d /etc/systemd/system/worklane-dashboard-delta.service /etc/systemd/system/worklane-dashboard-delta.service.d /etc/sudoers.d/worklane-delta /srv/worklane/delta /var/lib/worklane/init/delta.json /var/lib/worklane/agent-slots/discord-claim-delta.json /var/lib/worklane/agent-slots/slack-claim-delta.json /var/lib/worklane/agent-slots/linear-claim-delta.json /var/lib/worklane/agent-slots/slack-claim-delta.json.999999.0123456789abcdef.tmp /var/lib/systemd/linger/wl-delta; do
             if sudo test -e "$p"; then echo "$p is still there" >&2; exit 1; fi
           done
           for h in $RM_HOMES; do if sudo test -e "$h"; then echo "the home $h is still there" >&2; exit 1; fi; done
@@ -2550,7 +2553,7 @@ jobs:
             sudo jq -c '[.incidents[] | select(.id=="ciciok01") | {id, kind, key, instance}]' /var/lib/worklane/agent-slots/incidents.json
             sudo jq -c '[.pending[] | select(.instance!="delta")]' /var/lib/worklane/pending-signers.json
             sudo grep -cx ci /var/lib/worklane/claude-account/paused
-            sudo cat /var/lib/worklane/agent-slots/discord-claim-ci.json
+            sudo cat /var/lib/worklane/agent-slots/discord-claim-ci.json /var/lib/worklane/agent-slots/slack-claim-ci.json /var/lib/worklane/agent-slots/linear-claim-ci.json
             # The incident store's owner is whichever coordinator wrote it last: its group and mode only, the mode's
             # group write masked (delta's last write loses it in the removal, #555; the next coordinator's write, a
             # copy renamed over it, is 0660): 640 and 660 both print 6x0, any other mode as it is.
@@ -2670,7 +2673,7 @@ jobs:
           [ "$(systemctl show -p LoadState --value worklane-ci.service)" = not-found ]
           sleep 10; systemctl is-active worklane-kilo.service worklane-dashboard-kilo.service worklane-dashboard-hub.service
           for u in wl-ci wl-ci-agent; do if id "$u" 2>/dev/null; then echo "$u is still there" >&2; exit 1; fi; done
-          for p in /srv/worklane/ci /etc/sudoers.d/worklane-ci /etc/systemd/system/worklane-dashboard-ci.service "$home" /var/lib/worklane/agent-slots/discord-claim-ci.json /var/lib/worklane/renames/ci-to-kilo.unit; do if sudo test -e "$p"; then echo "$p is still there" >&2; exit 1; fi; done
+          for p in /srv/worklane/ci /etc/sudoers.d/worklane-ci /etc/systemd/system/worklane-dashboard-ci.service "$home" /var/lib/worklane/agent-slots/discord-claim-ci.json /var/lib/worklane/agent-slots/slack-claim-ci.json /var/lib/worklane/agent-slots/linear-claim-ci.json /var/lib/worklane/renames/ci-to-kilo.unit; do if sudo test -e "$p"; then echo "$p is still there" >&2; exit 1; fi; done
           nh="$(getent passwd wl-kilo | cut -d: -f6)"; ni="$nh/.local/state/worklane/instances/kilo"
           # The same App key and agent login, the new users' own.
           [ "$(sudo sha256sum "$nh/.config/kilo-app/private-key.pem" | cut -d' ' -f1)" = "$key_sum" ] && [ "$(sudo stat -c '%U %a' "$nh/.config/kilo-app/private-key.pem")" = "wl-kilo 400" ]
@@ -2701,6 +2704,7 @@ jobs:
           grep -qF "$(printf 'notes/keep-me.txt\t23')" "$F/rn5.out"
           grep -qF "  - experiments.sh remove ci (experiments aren't moved" "$F/rn5.out"
           grep -qF "  - /var/lib/worklane/agent-slots/discord-claim-ci.json (the new name's coordinator writes its own" "$F/rn5.out"
+          for k in slack linear; do grep -qF "  - /var/lib/worklane/agent-slots/$k-claim-ci.json (the new name's coordinator writes its own" "$F/rn5.out"; done
           for u in wl-exp-ci wl-score-ci wl-exp-kilo wl-score-kilo; do if id "$u" 2>/dev/null; then echo "$u is left" >&2; exit 1; fi; done
           for p in /var/lib/worklane-exp/ci /etc/worklane/experiments/ci.json /etc/sudoers.d/worklane-exp-ci /var/lib/worklane-exp/kilo /etc/worklane/experiments/kilo.json; do if sudo test -e "$p"; then echo "$p is left" >&2; exit 1; fi; done
           for u in $exp_uids; do if sudo grep -qx "$u" /etc/worklane/egress.users; then echo "the egress rule still names uid $u" >&2; exit 1; fi; done
