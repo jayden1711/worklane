@@ -10,6 +10,7 @@ import { detectTools, type Mode, type RunResult } from './setup-steps.js';
 import { describeInstall, httpDownload, INSTALLABLE, installPlan, installTool, type Download, type InstallableTool, type ToolInstall } from './tool-install.js';
 import { findTool, toolPrefix, withToolPath } from './tool-path.js';
 import { classicChecks } from './branch-protection.js';
+import { DETAIL_LOGGED } from './user-facing-error.js';
 
 export const ACTION_IDS = ['install-tools', 'local-hooks', 'git-hooks', 'fingerprints', 'protection', 'default-branch'] as const;
 export type ActionId = (typeof ACTION_IDS)[number];
@@ -35,7 +36,6 @@ export interface ActionResult {
   shown?: string;
 }
 
-const LOGGED = "the detail is in the dashboard's log on the machine";
 
 export interface ActionContext {
   mode: Mode;
@@ -100,7 +100,7 @@ export const ACTIONS: Record<ActionId, ActionDef> = {
       for (const { p } of toolPlans(c, d)) {
         const r = await installTool(p!, { download: d.download });
         const before = done.length ? `installed ${done.join(', ')}; then ` : '';
-        if (!r.ok) return { ok: false, detail: `${before}${r.error}`, shown: `${before}installing ${p!.tool} ${p!.version} failed; ${LOGGED}` };
+        if (!r.ok) return { ok: false, detail: `${before}${r.error}`, shown: `${before}installing ${p!.tool} ${p!.version} failed; ${DETAIL_LOGGED}` };
         done.push(`${p!.tool} ${p!.version}`);
       }
       return { ok: true, detail: `installed ${done.join(', ')} in ${join(d.prefix, 'bin')}` };
@@ -156,7 +156,7 @@ export const ACTIONS: Record<ActionId, ActionDef> = {
     run: async (c) => {
       for (const cmd of defaultBranchCommands(c)) {
         const r = spawnSync(cmd[0]!, cmd.slice(1), { cwd: c.root, encoding: 'utf8', timeout: 120_000, env: withToolPath() });
-        if (r.status !== 0) return { ok: false, detail: `${cmd.join(' ')} failed: ${(r.stderr || r.error?.message || '').trim().split('\n')[0]}`, shown: `${cmd.join(' ')} failed; ${LOGGED}` };
+        if (r.status !== 0) return { ok: false, detail: `${cmd.join(' ')} failed: ${(r.stderr || r.error?.message || '').trim().split('\n')[0]}`, shown: `${cmd.join(' ')} failed; ${DETAIL_LOGGED}` };
       }
       return { ok: true, detail: `fetched origin/${c.cfg.project.project.default_branch}; origin/HEAD set` };
     },
@@ -176,7 +176,7 @@ export const ACTIONS: Record<ActionId, ActionDef> = {
       const already = `${c.cfg.project.project.default_branch} is protected already; not replaced`;
       if (now.status === 0) return { ok: false, detail: already, shown: already };
       const r = d.gh(['api', '--method', 'PUT', p.path, '--input', '-'], p.body);
-      if (r.status !== 0) return { ok: false, detail: `GitHub refused: ${(r.stderr.trim() || r.stdout.trim()).split('\n')[0]}`, shown: `GitHub refused to protect ${c.cfg.project.project.default_branch} (only a repo admin may); ${LOGGED}` };
+      if (r.status !== 0) return { ok: false, detail: `GitHub refused: ${(r.stderr.trim() || r.stdout.trim()).split('\n')[0]}`, shown: `GitHub refused to protect ${c.cfg.project.project.default_branch} (only a repo admin may); ${DETAIL_LOGGED}` };
       return { ok: true, detail: `GitHub now requires ${c.cfg.project.required_checks.join(', ')} on ${c.cfg.project.project.default_branch}` };
     },
   },
@@ -197,7 +197,7 @@ export const ACTIONS: Record<ActionId, ActionDef> = {
       const bad = r.filter((x) => !x.ok);
       const line = r.map((x) => (x.ok ? `${x.name}: ${x.count} stored` : `${x.name}: ${x.error}`)).join('; ');
       const shown = r.map((x) => (x.ok ? `${x.name}: ${x.count} stored` : `${x.name}: not fetched`)).join('; ');
-      return { ok: !bad.length, detail: line || 'no fingerprint sets', ...(bad.length ? { shown: `${shown}; ${LOGGED}` } : {}) };
+      return { ok: !bad.length, detail: line || 'no fingerprint sets', ...(bad.length ? { shown: `${shown}; ${DETAIL_LOGGED}` } : {}) };
     },
   },
 };
