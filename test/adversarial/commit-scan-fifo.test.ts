@@ -1,6 +1,6 @@
 // The commit secret scan (#971), round 7: a large-file object path that is a named pipe refuses the commit with its
 // reason, instead of blocking the guard on a read. Kept apart from the other round-7 tests: on a build without the
-// check, this read blocks the whole test process, so it can't be part of a fail-without run. POSIX only (mkfifo).
+// check, this read blocks the whole process that runs the hook. POSIX only (mkfifo).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
@@ -8,7 +8,6 @@ import { cpSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { BRAND } from '../../src/brand.js';
-import { runHook } from '../../src/hook.js';
 import { repoRoot } from '../helpers.js';
 
 // WHY: the host's own git config (system and user) must not change what these tests see.
@@ -23,7 +22,13 @@ const skip = process.platform === 'win32' ? 'named pipes need POSIX' : !hasGitle
 
 const git = (cwd: string, ...a: string[]) => execFileSync('git', ['-C', cwd, ...a], { stdio: 'ignore' });
 
-test('attack: a large-file object that is a named pipe refuses the commit, never blocks the guard', { skip }, async () => {
+// WHY (#1010): a blocking read stops the event loop of the process it runs in, so no in-process test timeout could
+// fire and the CI shard would wait for its job's limit. The hook runs in a child that is killed at this bound.
+const HOOK_TIMEOUT_MS = 30_000;
+const HOOK_CHILD = `const [hook, args] = process.argv.slice(1); const { runHook } = await import(hook);
+const [event, input, env] = JSON.parse(args); console.log(JSON.stringify(await runHook(event, input, env)));`;
+
+test('attack: a large-file object that is a named pipe refuses the commit, never blocks the guard', { skip }, () => {
   const d = join(mkdtempSync(join(tmpdir(), 'fifo-')), 'a');
   mkdirSync(d, { recursive: true });
   cpSync(join(repoRoot, 'examples', 'basic', '.worklane'), join(d, BRAND.configDir), { recursive: true });
@@ -42,11 +47,18 @@ test('attack: a large-file object that is a named pipe refuses the commit, never
   const blob = execFileSync('git', ['-C', d, 'hash-object', '-w', '--stdin'], { input: pointer, encoding: 'utf8' }).trim();
   git(d, 'update-index', '--add', '--cacheinfo', `100644,${blob},a.txt`);
   writeFileSync(join(d, 'a.txt'), pointer);
-  const r = await runHook('pre-tool-use', { hook_event_name: 'PreToolUse', cwd: d, tool_name: 'Bash', tool_input: { command: 'git commit -m x' } }, {
+  const args = JSON.stringify(['pre-tool-use', { hook_event_name: 'PreToolUse', cwd: d, tool_name: 'Bash', tool_input: { command: 'git commit -m x' } }, {
     HOME: mkdtempSync(join(tmpdir(), 'home-')),
     [`${BRAND.envPrefix}_PROJECT_STATE_DIR`]: mkdtempSync(join(tmpdir(), 'state-')),
     [`${BRAND.envPrefix}_AGENT`]: '1',
+  }]);
+  const hook = new URL('../../src/hook.js', import.meta.url).href;
+  const r = spawnSync(process.execPath, ['--import', new URL('../isolate.js', import.meta.url).href, '--input-type=module', '-e', HOOK_CHILD, hook, args], {
+    encoding: 'utf8', timeout: HOOK_TIMEOUT_MS, killSignal: 'SIGKILL', maxBuffer: 1024 * 1024,
   });
-  assert.match(r.stdout ?? '', /"permissionDecision":"deny"/);
-  assert.match(r.stdout ?? '', /not a regular file/);
+  assert.equal(r.signal, null, `the hook did not finish within its ${HOOK_TIMEOUT_MS / 1000} s timeout and was killed (${r.signal}): the guard blocked on the object`);
+  assert.equal(r.status, 0, r.stderr);
+  const out = JSON.parse(r.stdout.trim().split('\n').at(-1) ?? '{}') as { stdout?: string };
+  assert.match(out.stdout ?? '', /"permissionDecision":"deny"/);
+  assert.match(out.stdout ?? '', /not a regular file/);
 });
