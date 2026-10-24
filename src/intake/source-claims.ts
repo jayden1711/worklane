@@ -12,7 +12,9 @@ import { tryLock } from '../locks.js';
 import { pidAlive } from '../os/index.js';
 import { listSlotDir, makeSlotDir, readSlotFile, removeSlotFile, slotFile, slotFileExists, writeSlotFile, type SlotPathLike } from '../slot-file.js';
 
-export type ClaimKind = 'slack' | 'linear';
+/** Each source that claims here; scripts/setup/instance-records.cjs CLAIM_SOURCES lists the same, for an instance's removal. */
+export const CLAIM_KINDS = ['slack', 'linear'] as const;
+export type ClaimKind = (typeof CLAIM_KINDS)[number];
 const INSTANCE_NAME = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/;
 
 /** What a claim holds: a hash of what the source takes (Slack: workspace + bot user; Linear: team + label). */
