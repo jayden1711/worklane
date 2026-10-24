@@ -19,7 +19,10 @@
 //           the tests' own activity triggers (a timer while a test waits, an async_hooks or exit listener); code
 //           after a call that threw (V8 counts a block as run once entered); and where V8 makes no block range (an
 //           optional call's arguments, a default parameter or destructuring default, a logical assignment's right
-//           side, code in a string) or a build's map places code only by line.
+//           side, code in a string) or a build's map places code only by line. And the two limits where an untested
+//           change merges that src/merge-policy-vacuity.ts names: code moved in a way git doesn't pair reads as
+//           added code, so a test that runs it counts; and a deleted app file, or one renamed out of app code, leaves
+//           no app code to measure.
 import { spawn, spawnSync } from './os/child-process.js';
 import { lstatSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
