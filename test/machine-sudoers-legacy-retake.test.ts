@@ -11,7 +11,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { BRAND } from '../src/brand.js';
 import { policyRootChecks } from '../src/doctor-policy-root.js';
-import { LATER_RESERVED } from '../src/instance-name.js';
+import { instanceNameProblem, LATER_RESERVED } from '../src/instance-name.js';
 import { asRoot } from '../src/os/system-paths.js';
 import { readPolicyChecked, retakeClause, setPolicyRootUid } from '../src/policy-gate.js';
 import * as kill from '../src/policy-kill.js';
@@ -114,8 +114,11 @@ function wayOuts(n: string): [what: string, got: string, before: string, retake:
   ];
 }
 
-/** policy own's and policy set's way outs, and the gate's, for `n` once root's file is swapped for a looser one. */
-function swappedWayOuts(n: string): [what: string, got: string, before: string, retake: (n: string) => string][] {
+/**
+ * policy own's and policy set's way outs, and the gate's, for `n` once root's file is swapped for a looser one, then
+ * once root's record of it can't be read; and `retakeLoose`, what `policy own <n> --retake` says of the swapped `file`.
+ */
+function swappedWayOuts(n: string): { wayOuts: [what: string, got: string, before: string, retake: (n: string) => string][]; retakeLoose: string; file: string } {
   const me = process.getuid!();
   const T = realpathSync(mkdtempSync(join(tmpdir(), 'way-out-swap-')));
   const dir = join(T, 'home', `wl-${n}`, '.local', 'state', BRAND.cli, 'instances', n);
@@ -137,12 +140,20 @@ function swappedWayOuts(n: string): [what: string, got: string, before: string, 
     writeFileSync(join(dir, '.x'), 'version: 1\nbudget: { daily_usd: 80 }\nagents: { max_workers: 4 }\nland_mode: direct\nauto_merge: true\n', { mode: 0o600 });
     renameSync(join(dir, '.x'), file);
     const gate = readPolicyChecked(file, join(T, 'markers'), n, me);
+    const ownChanged = msg(() => ownPolicy(n, deps));
+    const setChanged = msg(() => setPolicy(n, 'budget.daily_usd', '10', null, deps));
+    const retakeLoose = msg(() => ownPolicy(n, deps, { retake: true }));
+    const record = join(T, 'markers', n);
+    writeFileSync(record, 'not a record\n');
+    const setUnread = msg(() => setPolicy(n, 'budget.daily_usd', '10', null, deps));
     const own = (n: string) => `sudo ${BRAND.cli} policy own ${n} --retake`;
-    return [
-      ['policy own, a recorded file that changed', msg(() => ownPolicy(n, deps)), `${file} isn't what root last wrote there (its content changed since), so it is left as it is: a process running as its coordinator user may have put it there. An admin checks it at a root shell, then `, (n) => `takes it over as it is with ${own(n)}`],
-      ['policy set, a recorded file that changed', msg(() => setPolicy(n, 'budget.daily_usd', '10', null, deps)), `${file} isn't what root last wrote there (an earlier or other file put back in its place), so nothing is changed: an admin checks it, then `, own],
+    const wayOuts: [string, string, string, (n: string) => string][] = [
+      ['policy own, a recorded file that changed', ownChanged, `${file} isn't what root last wrote there (its content changed since), so it is left as it is: a process running as its coordinator user may have put it there. An admin checks it at a root shell, then `, (n) => `takes it over as it is with ${own(n)}`],
+      ['policy set, a recorded file that changed', setChanged, `${file} isn't what root last wrote there (an earlier or other file put back in its place), so nothing is changed: an admin checks it, then `, own],
       ['the gate, a recorded file that changed', gate && 'refused' in gate ? gate.refused : '(not refused)', `refused: on this machine ${file} is root's and only root changes it, but its content isn't what root last wrote there (an earlier or other file put back in its place), so the coordinator user (or something running as it) may have changed it. An admin checks it, then `, (n) => `makes it root's again: ${own(n)}`],
+      ['policy set, a record it cannot read', setUnread, `${file}: root's record of it (${record}) isn't one this engine reads, so nothing is changed: an admin checks it, then `, own],
     ];
+    return { wayOuts, retakeLoose, file };
   } finally {
     setPolicyRootUid(0);
   }
@@ -156,7 +167,10 @@ test('#985: for a reserved name each way-out message, in full, names the removal
 
 test('#985: policy own\'s, policy set\'s and the gate\'s way outs for a reserved name, in full, name the removal as a removal', { skip: linux }, () => {
   for (const n of [...LATER_RESERVED, ...NEAR_MISSES, 'alpha']) {
-    for (const [what, got, before, retake] of swappedWayOuts(n)) assert.equal(got, `${before}${LATER_RESERVED.includes(n) ? removal(n) : retake(n)}`, `${n}: ${what}`);
+    const { wayOuts, retakeLoose, file } = swappedWayOuts(n);
+    for (const [what, got, before, retake] of wayOuts) assert.equal(got, `${before}${LATER_RESERVED.includes(n) ? removal(n) : retake(n)}`, `${n}: ${what}`);
+    // policy own --retake of a looser file: refused by name for a reserved one, else its way out keeps the retake.
+    assert.equal(retakeLoose, LATER_RESERVED.includes(n) ? `${n} is a name the instance-name rules refuse now (${instanceNameProblem(n)}): its policy is never taken over with --retake, which could loosen what root wrote; it only tightens (policy set)` : `${file} is looser than its coordinator could make it (land_mode: direct; auto_merge: true), so it is left as it is, not root's: a process running as its coordinator user may have written that. An admin checks it at a root shell, then changes it, or takes it over as it is with sudo ${BRAND.cli} policy own ${n} --retake --accept-loose`, `${n}: policy own --retake, a looser file`);
   }
 });
 
@@ -202,5 +216,8 @@ test('#902 round 13: backstop: the message builders name `policy own … --retak
     // A literal "policy own <instance> --retake" in a message, outside the builder itself.
     const literal = [...text.matchAll(/policy own \$\{[^}]+\} --retake/g)].map((m) => m[0]);
     assert.deepEqual(literal, f === 'policy-kill.ts' ? ['policy own ${instance} --retake'] : [], `${f}: ${literal.join(', ')}`);
+    // Nor any other placeholder followed by --retake, such as `${ownCommand(instance)} --retake` (#985).
+    const appended = [...text.matchAll(/\}\s*--retake/g)].length;
+    assert.equal(appended, f === 'policy-kill.ts' ? 1 : 0, `${f}: --retake after a placeholder`);
   }
 });
