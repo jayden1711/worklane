@@ -503,6 +503,31 @@ test('#968: a granted command stopped at its own timeout_s is named so, however 
   assert.match(res.tiers[1]!.summary, /^GPU: yes .*\ntier cuda timed out after 30 min \(its timeout_s in tests\.yaml test_run, 1800\)/);
 });
 
+test('#968: root lowers max_minutes while the run goes on: the helper\'s cap (its own read of root\'s file) is still named as the GPU\'s', { skip: !hasPerl && 'perl' }, async () => {
+  const r = rig(GPU_TIERS);
+  const g = gpuHost(r.host, { ...GRANT, maxS: 600, waitedS: 0 }, { timesOut: true });
+  // 60 when the run starts; 10 by the time the helper reads it for the GPU tier.
+  const reads: number[] = [60, 10];
+  const res = await runTestRun({ ...r.deps, host: g.h, gpuOptIn: () => ({ state: 'on', devices: [0], maxMinutes: reads.length > 1 ? reads.shift()! : reads[0]! }) }, { repo: r.dir, sha: r.sha, kind: 'fast', prs: [] });
+  assert.equal(res.ok, false);
+  assert.match(res.tiers[1]!.summary, /^GPU: yes .*\ntier cuda timed out after 10 min \(the GPU runs' max_minutes in root's testrun-gpu\.json, after 0 s waiting for the GPU, 600\)/);
+});
+
+test('#968: the timeout\'s cap: max_minutes below timeout_s but not what capped the unit, and root\'s file unread (the helper\'s numbers alone)', { skip: !hasPerl && 'perl' }, async () => {
+  const cases: [string, Partial<GpuGrant>, GpuOptIn, RegExp][] = [
+    // 25 min (1500 s) under the tier's 1800 s, but the helper got there 400 s in: 1400 s left was the cap.
+    ['uncapped, max_minutes below timeout_s', { maxS: 1400, waitedS: 0 }, { state: 'on', devices: [0], maxMinutes: 25 }, /\ntier cuda timed out after 30 min \(its timeout_s in tests\.yaml test_run, 1800\)/],
+    ['unknown, under timeout_s with the wait', { maxS: 900, waitedS: 2 }, { state: 'unknown', why: 'EACCES' }, /\ntier cuda timed out after 15 min \(the GPU runs' max_minutes in root's testrun-gpu\.json, after 2 s waiting for the GPU, 900\)/],
+    ['unknown, all of timeout_s with the wait', { maxS: 1798, waitedS: 2 }, { state: 'unknown', why: 'EACCES' }, /\ntier cuda timed out after 30 min \(its timeout_s in tests\.yaml test_run, 1800\)/],
+  ];
+  for (const [what, grant, opt, want] of cases) {
+    const r = rig(GPU_TIERS);
+    const g = gpuHost(r.host, { ...GRANT, ...grant } as GpuGrant, { timesOut: true });
+    const res = await runTestRun({ ...r.deps, host: g.h, gpuOptIn: () => opt }, { repo: r.dir, sha: r.sha, kind: 'fast', prs: [] });
+    assert.match(res.tiers[1]!.summary, want, what);
+  }
+});
+
 // ---------------------------------------------------------- Network (src/testrun/network.ts, docs/test-runs.md "Network")
 
 /** The rig's host, with what the helper would say of a command that asks for the network, and every call in order. */
