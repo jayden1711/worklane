@@ -53,11 +53,16 @@ echo ran`,
   stub('runuser', 'while [ "$1" != -- ]; do shift; done; shift; exec "$@"');
   stub('install', `a=(); while [ "$#" -gt 0 ]; do case "$1" in -o|-g) shift 2 ;; *) a+=("$1"); shift ;; esac; done; exec ${real('install')} "\${a[@]}"`);
   const gnuStat = spawnSync(real('stat')!, ['--version']).status === 0;
-  // A stat of the locks' directories or files takes as long as the file `slowstat` says: a slow lock-file setup.
+  // A stat of the locks' directories or files takes as long as the file `slowstat` says: a slow lock-file setup. Each
+  // stat of a lock file, once done, is a line of the file `stats`.
   stub(
     'stat',
-    `case "\${*: -1}" in '${join(dir, 'run')}'*) sleep "$(cat '${dir}/slowstat' 2>/dev/null || echo 0)" ;; esac
-${gnuStat ? `exec ${real('stat')} "$@"` : `[ "$1" = -c ] || exit 9; f="$2"; f="\${f//%U/%Su}"; f="\${f//%G/%Sg}"; f="\${f//%a/%Lp}"; shift 2; exec ${real('stat')} -f "$f" "$@"`}`,
+    `p="\${*: -1}"
+case "$p" in '${join(dir, 'run')}'*) sleep "$(cat '${dir}/slowstat' 2>/dev/null || echo 0)" ;; esac
+${gnuStat ? `${real('stat')} "$@"` : `[ "$1" = -c ] || exit 9; f="$2"; f="\${f//%U/%Su}"; f="\${f//%G/%Sg}"; f="\${f//%a/%Lp}"; shift 2; ${real('stat')} -f "$f" "$@"`}
+rc=$?
+case "$p" in *.lock) echo "$p" >> '${dir}/stats' ;; esac
+exit $rc`,
   );
   // flock(1): the real one where there is one (Linux); else the same call through perl on the inherited fd.
   if (real('flock')) symlinkSync(real('flock')!, join(bin, 'flock'));
@@ -156,7 +161,10 @@ exec perl -e 'use Fcntl qw(:flock); open(my $f, "<&=", $ARGV[0]) or exit 2; my $
   const call = (id: string) => calls().find((c) => c.argv.some((x) => x.startsWith(`--unit=worklane-test-shop_${id}_`)))!;
   const setGroup = (line: string | null) => (line === null ? rmSync(join(dir, 'group'), { force: true }) : writeFileSync(join(dir, 'group'), `${line.replace('<g>', myGroup)}\n`));
   const setSlowStat = (s: number) => writeFileSync(join(dir, 'slowstat'), String(s));
-  return { dir, dev, file, lockDir, myGroup, setGroup, exec, execAsync, calls, call, nodes, optIn, setSleep: (s: number) => writeFileSync(join(dir, 'sleep'), String(s)), setSlowStat, done: () => rmSync(dir, { recursive: true, force: true }) };
+  /** How many stats of GPU <i>'s lock file have ended since the last clearStats. */
+  const stats = (i: number) => (existsSync(join(dir, 'stats')) ? readFileSync(join(dir, 'stats'), 'utf8').split('\n').filter((l) => l === join(lockDir, `${i}.lock`)).length : 0);
+  const clearStats = () => rmSync(join(dir, 'stats'), { force: true });
+  return { dir, dev, file, lockDir, myGroup, setGroup, exec, execAsync, calls, call, nodes, optIn, setSleep: (s: number) => writeFileSync(join(dir, 'sleep'), String(s)), setSlowStat, stats, clearStats, done: () => rmSync(dir, { recursive: true, force: true }) };
 }
 
 type Call = { argv: string[]; start: number; end: number; lock: string };
@@ -233,22 +241,29 @@ test('#968: "waited" is the wait for the lock alone, never its file\'s setup: a 
   }
 });
 
-test('#968: "waited" sums the waits of every GPU the run locks, not only the last one\'s', { skip: !posix && 'bash' }, async () => {
+test('#968: "waited" sums the waits of every GPU the run locks, not only the last one\'s or the longest', { skip: !posix && 'bash' }, async () => {
   const h = gpuHelper();
   try {
     h.nodes('nvidiactl', 'nvidia-uvm', 'nvidia0', 'nvidia1');
     h.optIn({ shop: [0, 1] });
     assert.equal(h.exec('fast-x-0', 30, true).status, 0, 'the locks made');
-    // GPU 0 (locked first) held for 3 s; GPU 1 free.
-    const held = await holdFlock(join(h.lockDir, '0.lock'), 'exclusive');
+    h.clearStats();
+    // Both held; each let go 3 s after the helper's last check of its file (two stats of it: then it opens and waits),
+    // however long the setup took. The helper takes GPU 0, then GPU 1, so it waits about 3 s on each.
+    const held = [await holdFlock(join(h.lockDir, '0.lock'), 'exclusive'), await holdFlock(join(h.lockDir, '1.lock'), 'exclusive')];
     const run = h.execAsync('fast-a-1', 60, true);
-    await new Promise((r) => setTimeout(r, 3000));
-    await held.release();
+    for (const [i, lock] of held.entries()) {
+      for (let n = 0; n < 600 && h.stats(i) < 2; n++) await new Promise((r) => setTimeout(r, 100));
+      assert.equal(h.stats(i), 2, `the helper checked GPU ${i}'s lock file`);
+      await new Promise((r) => setTimeout(r, 3000));
+      await lock.release();
+    }
     const r = await run;
     assert.equal(r.status, 0, r.stderr);
     const line = r.stderr.split('\n')[0]!;
     assert.match(line, /^worklane-testrun: gpu 0,1 \(devices /);
-    assert.ok(Number(/waited (\d+) s/.exec(line)![1]) >= 2, line);
+    // Each wait is 3 s or 4 s in whole seconds: 6 or more in all, where the last or the longest alone is at most 4.
+    assert.ok(Number(/waited (\d+) s/.exec(line)![1]) >= 5, line);
   } finally {
     h.done();
   }
