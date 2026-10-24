@@ -4,28 +4,34 @@
 // (logDetail), because an error's message can name a path under the instance home or quote GitHub's own text.
 //
 // The lint is an allowlist. In the server's route files (SCANNED), a caught error (a catch clause's binding; the
-// parameter of a `.catch(...)` callback, of `.then(...)`'s second one, or of an `'error'` listener added with on, once
-// or addListener; a parameter named like one, e, err, error, ex, cause or reason, and typed `unknown`, `any` or a type
-// whose name ends in Error or Exception) may appear only as: the left of `instanceof`; the object of a `.code` read (an
-// errno word, cast or not); an argument of logDetail or errorAnswer called by that bare name (not a method of it, and
-// not refusalText, which shows the message); what `throw` throws, `Promise.reject` rejects, or a `new Promise`
-// executor's `reject` rejects; the first argument of a function in the same file, called by its bare name, whose first
-// parameter the lint takes for an error (so it scans that function too). Anywhere it is narrowed to one of the engine's own error classes (`if (e instanceof
-// AskError)`, `e instanceof AskError ? e.message : ...`, `e instanceof AskError && ...`, or after `if (!(e instanceof
-// AskError)) throw e`), whose texts the engine writes, any use is allowed. An engine class is one the file declares or
-// imports from src/ (a relative import): not a built-in, not a name bound to one (`const Raw = Error`), not a package's
-// (`YAMLParseError`). Everything else is reported: `.message`, `.stack`, `.path`, `.stderr`, `.cause` or any other
-// property, `String(e)`, `${e}`, `+ e`, destructuring (`const { message } = e`, `catch ({ message })`), passing it to
-// any other function (JSON.stringify, inspect, format, a helper, a local function named reject), putting it in an
-// object or array, or assigning it to another name.
+// first parameter of a `.catch(...)` callback, of `.then(...)`'s second one, of a listener added with on, once,
+// addListener or prependListener for an event named like an error (`'error'`, `'clientError'`) or whose name isn't a
+// literal, or of any callback whose first parameter is named err or error (Node's style: `pipeline`, `execFile`); a
+// parameter named like one, e, err, error, ex, cause or reason, and typed `unknown`, `any` or a type whose name ends in
+// Error or Exception) may appear only as: the left of `instanceof`; the object of a `.code` read (an errno word, cast or
+// not); an argument of logDetail or errorAnswer called by that bare name (not a method of it, and not refusalText,
+// which shows the message); what `throw` throws, `Promise.reject` rejects, or a `new Promise` executor's `reject`
+// rejects (unless a declaration on the way shadows it); the first argument of a function in the same file, called by
+// its bare name, whose first parameter the lint takes for an error (so it scans that function too). An error
+// callback's `arguments` is reported wherever it is used. Anywhere the error is narrowed to one of the engine's own
+// error classes (`if (e instanceof AskError)`, `e instanceof AskError ? e.message : ...`, `e instanceof AskError &&
+// ...`, or after `if (!(e instanceof AskError)) throw e`), whose texts the engine writes, any use is allowed. An engine
+// class is one the file declares or imports from src/ (a relative import): not a built-in, not a name bound to one
+// (`const Raw = Error`), not a package's (`YAMLParseError`). Everything else is reported: `.message`, `.stack`,
+// `.path`, `.stderr`, `.cause` or any other property, `String(e)`, `${e}`, `+ e`, destructuring (`const { message } =
+// e`, `catch ({ message })`), passing it to any other function (JSON.stringify, inspect, format, a helper, a local
+// function named reject), putting it in an object or array, or assigning it to another name.
 // Not caught: a raw text that never was an error binding (a child's stderr, a field of a result); an engine error
 // class whose message quotes a raw one (each keeps raw text in `cause`, which refusalText logs, but nothing checks a
 // throw's message); an error that reaches a route through a value the lint doesn't know is one (a result's `error`
 // field, a rejected promise awaited without a catch binding); a parameter holding an error under another name (`x`,
-// `failure`) or typed otherwise (a type alias, an object type, `Record<...>`, a generic `T`); a narrowed branch that
-// reads a property of an engine error holding raw text; a module of src/ that exports a built-in class under an engine
-// name; a local function shadowing logDetail or errorAnswer, or one the lint scans that hands its error on through
-// another name; an errno `.code` put in an answer; and text outside these files.
+// `failure`) or typed otherwise (a type alias, an object type, `Record<...>`, a generic `T`), outside the callbacks
+// above, including a named handler passed to `.catch` (`.catch(onFail)`, read where it is declared); a Node-style
+// callback whose error parameter has another name (`(problem, stdout) => ...`); a narrowed branch that reads a property
+// of an engine error holding raw text, its `.cause` included; a module of src/ that exports a built-in class under an
+// engine name; a local function shadowing logDetail or errorAnswer, or one the lint scans that hands its error on
+// through another name; `arguments` in a function that isn't passed as an error callback; an errno `.code` put in an
+// answer; and text outside these files.
 import './helpers.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -50,6 +56,9 @@ const errorTyped = (t: ts.TypeNode | undefined): boolean => {
 };
 /** A typed parameter is taken for an error by its name: an `unknown` request value under another name is not one. */
 const ERROR_NAME = /^(?:e|err|error|ex|cause|reason)$/;
+/** A Node-style callback's error parameter: its first, by these names, typed or not. */
+const NODE_CALLBACK_ERROR = /^(?:err|error)$/;
+const LISTENERS = ['on', 'once', 'addListener', 'prependListener', 'prependOnceListener'];
 
 const strip = (e: ts.Expression): ts.Expression => {
   while (ts.isParenthesizedExpression(e) || ts.isAsExpression(e) || ts.isNonNullExpression(e) || ts.isTypeAssertionExpression(e) || ts.isSatisfiesExpression(e)) e = e.expression;
@@ -109,6 +118,10 @@ function narrowed(n: ts.Node, scope: ts.Node, name: string, engine: ReadonlySet<
  * fixed text. Not refusalText: it shows the message, so it takes only an error narrowed to an engine class.
  */
 const SINKS = new Set(['logDetail', 'errorAnswer']);
+/** Whether a block declares `name` itself: a const, let or var, or a function. */
+const declares = (b: ts.Block | ts.SourceFile, name: string): boolean =>
+  b.statements.some((s) => (ts.isFunctionDeclaration(s) && s.name?.text === name) || (ts.isVariableStatement(s) && s.declarationList.declarations.some((d) => ts.isIdentifier(d.name) && d.name.text === name)));
+
 /**
  * A rejection, which is a throw: `Promise.reject(e)`, or the `reject` a `new Promise((resolve, reject) => ...)`
  * executor binds (a local function of that name is not one).
@@ -118,6 +131,8 @@ function rejects(call: ts.CallExpression): boolean {
   if (ts.isPropertyAccessExpression(c)) return c.name.text === 'reject' && isName(c.expression, 'Promise');
   if (!ts.isIdentifier(c)) return false;
   for (let p: ts.Node | undefined = call.parent; p; p = p.parent) {
+    // A `const reject` (or a function of that name) on the way up shadows the executor's.
+    if ((ts.isBlock(p) || ts.isSourceFile(p)) && declares(p, c.text)) return false;
     if (!ts.isFunctionLike(p)) continue;
     const i = (p as ts.SignatureDeclaration).parameters.findIndex((q) => ts.isIdentifier(q.name) && q.name.text === c.text);
     if (i < 0) continue;
@@ -187,12 +202,17 @@ export function rawErrorReads(path: string, text: string): string[] {
   collect(sf);
   const errorCallback = (f: ts.Node): boolean => {
     const call = f.parent;
-    if (!call || !ts.isCallExpression(call) || !call.arguments.includes(f as ts.Expression) || !ts.isPropertyAccessExpression(call.expression)) return false;
+    if (!call || !ts.isCallExpression(call) || !call.arguments.includes(f as ts.Expression)) return false;
+    // A Node-style callback, whatever it is passed to: its first parameter named err or error (`pipeline(a, b, (err) => ...)`).
+    const q = (f as ts.SignatureDeclaration).parameters[0];
+    if (q && ts.isIdentifier(q.name) && NODE_CALLBACK_ERROR.test(q.name.text)) return true;
+    if (!ts.isPropertyAccessExpression(call.expression)) return false;
     const m = call.expression.name.text;
     if (m === 'catch') return true;
     if (m === 'then') return call.arguments[1] === f;
     const first = call.arguments[0];
-    return ['on', 'once', 'addListener', 'prependListener', 'prependOnceListener'].includes(m) && !!first && ts.isStringLiteralLike(first) && first.text === 'error';
+    // Any event named like an error (`'error'`, `'clientError'`), and an event whose name isn't a literal.
+    return LISTENERS.includes(m) && !!first && first !== f && (!ts.isStringLiteralLike(first) || /error$/i.test(first.text));
   };
   const at = (n: ts.Node) => sf.getLineAndCharacterOfPosition(n.getStart()).line + 1;
   const visit = (n: ts.Node) => {
@@ -208,6 +228,15 @@ export function rawErrorReads(path: string, text: string): string[] {
         if (ts.isIdentifier(q.name)) scan(n, q.name.text, n.body);
         else found.push(`${at(q)}: error parameter destructured`);
       }
+    }
+    // An error callback's `arguments` holds the error under no name: any use is reported.
+    if (ts.isFunctionExpression(n) && errorCallback(n)) {
+      const args = (m: ts.Node): void => {
+        if (m !== n.body && (ts.isFunctionExpression(m) || ts.isFunctionDeclaration(m) || ts.isMethodDeclaration(m))) return;
+        if (ts.isIdentifier(m) && m.text === 'arguments') found.push(`${at(m)}: arguments in an error callback`);
+        ts.forEachChild(m, args);
+      };
+      args(n.body);
     }
     ts.forEachChild(n, visit);
   };
@@ -270,6 +299,14 @@ const BAD_SOURCES: readonly string[] = [
   'try { f(); } catch (e) { h.logDetail(e); }',
   'try { f(); } catch (e) { this.errorAnswer(e); }',
   "try { f(); } catch (e) { return refused(400, refusalText('x', e as Error)); }",
+  // #882 round 5 (R11f): Node-style callbacks, other error events, an event name that isn't a literal, `arguments`,
+  // and a `reject` shadowing the executor's.
+  'pipeline(a, b, (err) => json(res, 500, { error: String(err) }));',
+  "execFile('git', ['x'], (error, stdout, stderr) => json(res, 500, { error: error?.message }));",
+  "server.on('clientError', (e) => json(res, 400, { error: e.message }));",
+  'up.on(kind, (x) => json(res, 502, { error: String(x) }));',
+  'p.catch(function () { return json(res, 500, { error: String(arguments[0]) }); });',
+  'new Promise((resolve, reject) => { f().catch((e) => { const reject = (x: unknown) => json(res, 500, { error: x }); reject(e); }); });',
 ];
 /** Good sources: none reads a raw error as text. */
 // check-table: never-grow
