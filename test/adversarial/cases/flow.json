@@ -220,6 +220,33 @@
       "expect": { "decision": "waits", "reasons": ["auto-merge is stopped: stopped"], "scopes": ["engine", "managed-app"] }
     },
     {
+      "id": "flow-stop-file-empty-reason",
+      "attack": "a small app change while the stop file's reason is an empty string",
+      "source": "merge-flow.ts autoMergeStopped, auto-merge-stop.ts readStopFile (#982: any stop file that is there holds); docs/guardrails.md Hold kinds: auto-merge is stopped",
+      "base": { "web/totals.js": "export const total = 1;\n" },
+      "change": [{ "write": "web/totals.js", "text": "export const total = 2;\n" }],
+      "flow": { "stopFile": "empty-reason" },
+      "expect": { "decision": "waits", "reasons": ["auto-merge is stopped: stopped (the stop file gives no reason)"], "scopes": ["engine", "managed-app"] }
+    },
+    {
+      "id": "flow-stop-file-non-string-reason",
+      "attack": "a small app change while the stop file's reason is not a string",
+      "source": "merge-flow.ts autoMergeStopped, auto-merge-stop.ts readStopFile (#982: any stop file that is there holds); docs/guardrails.md Hold kinds: auto-merge is stopped",
+      "base": { "web/totals.js": "export const total = 1;\n" },
+      "change": [{ "write": "web/totals.js", "text": "export const total = 2;\n" }],
+      "flow": { "stopFile": "non-string-reason" },
+      "expect": { "decision": "waits", "reasons": ["auto-merge is stopped: stopped (the stop file gives no reason)"], "scopes": ["engine", "managed-app"] }
+    },
+    {
+      "id": "flow-stop-file-dangling-link",
+      "attack": "a small app change while the stop file is a symlink to nothing",
+      "source": "merge-flow.ts autoMergeStopped, auto-merge-stop.ts stopFilePresent (#982: a stop file that can't be read holds); docs/guardrails.md Hold kinds: auto-merge is stopped",
+      "base": { "web/totals.js": "export const total = 1;\n" },
+      "change": [{ "write": "web/totals.js", "text": "export const total = 2;\n" }],
+      "flow": { "stopFile": "dangling-link" },
+      "expect": { "decision": "waits", "reasons": ["auto-merge is stopped: the stop file", "is unreadable"], "scopes": ["engine", "managed-app"] }
+    },
+    {
       "id": "flow-outside-plan-auth-not-held",
       "attack": "a planned task whose PR also changes an auth file its plan doesn't list, in a repo whose review.yaml puts auth at L2",
       "source": "merge-flow.ts mergeDecisionFor (outside the plan: the repo's high-risk categories and the engine's own L3 list); docs/guardrails.md Hold kinds: outside the plan",

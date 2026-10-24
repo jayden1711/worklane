@@ -12,14 +12,15 @@
 // For the commits being pushed it scans the added lines and the message with
 // the denylist rules (personal names, internal hosts and addresses, home
 // paths, emails, ntfy topics; scripts/lib/denylist.mjs), the whole tree at
-// each pushed tip, and runs gitleaks over the commits. One allowance: in the
+// each pushed tip (a file holding a NUL byte for the hashed terms only), and
+// runs gitleaks over the commits. One allowance: in the
 // subject of a GitHub merge commit ("Merge pull request #<n> from <owner>/<branch>")
 // the repo's own owner (from GITHUB_REPOSITORY or the origin URL) is not a leak.
 // And a Signed-off-by line whose email is the commit's own author or committer
 // email (a squash merge's DCO trailers) is dropped whole, name included.
 import { execFileSync, spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
-import { loadRules, scanText, SKIP } from './lib/denylist.mjs';
+import { loadRules, scanBinary, scanText, SKIP } from './lib/denylist.mjs';
 
 const ZERO = /^0+$/;
 const git = (...a) => execFileSync('git', a, { encoding: 'utf8', maxBuffer: 256 * 1024 * 1024 });
@@ -128,10 +129,13 @@ function messageShape(sha) {
   return why.length ? [`${sha.slice(0, 8)}: ${why.join('; and ')}\n    line 1: ${lines[0]}`] : [];
 }
 
+// A blob holding a NUL byte is still scanned for the hashed terms, never skipped (#989).
+const scanBlob = (rules, path, text) => (text.includes('\0') ? scanBinary(rules, path, text) : scanText(rules, path, text));
+
 function scanCommit(rules, sha, owner) {
   const short = sha.slice(0, 8);
   const hits = [];
-  for (const [file, text] of addedLines(sha)) if (!text.includes('\0')) hits.push(...scanText(rules, file, text).map((h) => `${short} ${h}`));
+  for (const [file, text] of addedLines(sha)) hits.push(...scanBlob(rules, file, text).map((h) => `${short} ${h}`));
   // A commit's own author and committer identity (and its sign-off) are inherent to it; anything else in the message is scanned.
   const [an, ae, cn, ce] = git('log', '-1', '--format=%an%x00%ae%x00%cn%x00%ce', sha).trim().split('\0');
   const isMerge = git('log', '-1', '--format=%P', sha).trim().split(' ').length > 1;
@@ -173,8 +177,7 @@ function prBodyGate() {
 function scanTree(rules, tip) {
   const hits = [];
   for (const path of git('ls-tree', '-r', '--name-only', tip).split('\n').filter((p) => p && !SKIP.has(p))) {
-    const text = git('show', `${tip}:${path}`);
-    if (!text.includes('\0')) hits.push(...scanText(rules, path, text).map((h) => `${tip.slice(0, 8)} ${h}`));
+    hits.push(...scanBlob(rules, path, git('show', `${tip}:${path}`)).map((h) => `${tip.slice(0, 8)} ${h}`));
   }
   return hits;
 }

@@ -1,0 +1,3 @@
+### Guardrail changes: what each one does
+
+- **The pin check's test names every refusal a regression drops (#1008).** `test/check-pins.test.ts` runs each of its checkout shapes (`PIN_LAYOUT_FIXTURES`) as its own test, named after the shape, and the clean checkout as another, so a change to `scripts/ci/check-pins.mjs` that stops refusing two shapes fails two tests, where the single loop stopped at the first. The fixtures and their assertions are unchanged. Its scratch checkouts now sit under one temporary directory that the file removes when its tests end. Nothing changes for an install: only the test changed.

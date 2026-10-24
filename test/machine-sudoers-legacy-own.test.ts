@@ -1,14 +1,14 @@
 // Issue #902 round 12: under a name reserved since (machine, console), root's first takeover of a loose policy works.
 // `policy own <n> --accept-loose` with no record yet makes the coordinator's file root's (its coordinator can no longer
 // write it), after which root tightens it. Only `--retake` (a recorded file changed since root wrote it) stays refused,
-// and only there do the messages name the instance's removal instead (src/policy-gate.ts ownCommand).
+// and only there do the messages name the instance's removal instead (src/policy-gate.ts retakeClause).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, realpathSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { BRAND } from '../src/brand.js';
-import { ownCommand, setPolicyRootUid } from '../src/policy-gate.js';
+import { ownCommand, retakeClause, setPolicyRootUid } from '../src/policy-gate.js';
 import { ownPolicy, setPolicy, type PolicyRootDeps } from '../src/policy-root.js';
 
 const linux = process.platform !== 'linux' && 'a Linux machine install (POSIX owners, /proc/self/fd)';
@@ -37,12 +37,12 @@ test('#902 round 12: a first takeover of a loose policy under console works with
 });
 
 test('#902 rounds 11, 12: for a name reserved since, the messages name the instance\'s removal only where --retake would be needed', () => {
-  const remove = /instance-remove\.sh console \(/;
-  for (const flags of [['--retake'], ['--retake', '--accept-loose']] as const) {
-    assert.match(ownCommand('console', ...flags), remove, flags.join(' '));
-    assert.doesNotMatch(ownCommand('console', ...flags), /policy own/, flags.join(' '));
+  const remove = /^removes the instance with sudo bash \S*instance-remove\.sh console \(/;
+  for (const flags of [[], ['--accept-loose']] as const) {
+    assert.match(retakeClause('console', (c) => `runs ${c}`, ...flags), remove, flags.join(' '));
+    assert.doesNotMatch(retakeClause('console', (c) => `runs ${c}`, ...flags), /policy own/, flags.join(' '));
   }
   assert.equal(ownCommand('console', '--accept-loose'), `sudo ${BRAND.cli} policy own console --accept-loose`);
   assert.equal(ownCommand('console'), `sudo ${BRAND.cli} policy own console`);
-  assert.equal(ownCommand('alpha', '--retake', '--accept-loose'), `sudo ${BRAND.cli} policy own alpha --retake --accept-loose`);
+  assert.equal(retakeClause('alpha', (c) => `runs ${c}`, '--accept-loose'), `runs sudo ${BRAND.cli} policy own alpha --retake --accept-loose`);
 });

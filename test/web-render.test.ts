@@ -34,6 +34,7 @@ import { firstRunView } from '../src/init.js';
 import { checkSetup } from '../src/setup-steps.js';
 import type { StarterCiView } from '../src/starter-ci.js';
 import { ACCOUNT, ACCOUNT_TEXT, accountDashboard } from './account-fixture.js';
+import { shownPath, shownPaths } from '../src/path-text.js';
 
 type State = { tasks: { issue: number; title: string; status: string }[]; decisions: { id: string; question: string; options: string[]; answer: unknown; canAnswer?: boolean }[]; activity: { summary: string }[]; emergency: unknown };
 interface Render {
@@ -102,6 +103,12 @@ interface Render {
   ackVisibleChars(text: string): number;
   isResumeRequest(answer: unknown): boolean;
   renderPrs(view: unknown): string;
+  renderDecisionDetail(d: unknown, prBody?: unknown, diff?: unknown): string;
+  renderDecisionCard(d: unknown, sending?: string, evidence?: unknown): string;
+  renderRunSteps(run: unknown): string;
+  renderResearchLog(rows: unknown[]): string;
+  shownPath(path: string): string;
+  shownPaths(paths: readonly string[]): string;
   renderLiveFeed(items: unknown[], ended: boolean): string;
   renderConsole(data: unknown): string;
   renderAgents(state: State, live: unknown): string;
@@ -3558,4 +3565,73 @@ test("the Intake page's sources strip: each source's state and counts; an owner'
   const writer = r.renderIntakeSources(sources, false);
   assert.doesNotMatch(writer, /<a /);
   assert.match(writer, /An owner sets this up/);
+});
+
+/** #768: names a changed path can have that text can't show as they are: a bidi override, a zero-width space, a newline, a DEL. */
+const ODD_PATHS = ['src/\u202eexe.txt', 'src/a\u200bb.js', 'src/a\nb.js', 'src/a\x7fb.js'];
+/** No control, format or default-ignorable character: nothing reorders or hides the text around it. */
+const RAW_INVISIBLE = /[\p{Cc}\p{Cf}\p{Default_Ignorable_Code_Point}]/u;
+/** A path as the page's markup holds it: shown (escaped, JSON-quoted), then HTML-escaped. */
+const shownHtml = (p: string) => r.shownPath(p).replace(/&/g, '&amp;').replace(/"/g, '&quot;');
+
+test('the web path display is the engine\'s shownPath: they agree on every kind of name (#768)', () => {
+  const corpus = [...ODD_PATHS, 'src/a.ts', 'docs/naïve.md', 'docs/releasing.md ', '"src/x.ts', 'src/\u0455rc.ts', '\u0455rc/x.ts', 'src/\ufffd.ts', 'src/\u034f.ts', 'src/a, b.ts', 'src/x\u00a0y.ts', 'src/\ufe0f.ts', ''];
+  for (const p of corpus) assert.equal(r.shownPath(p), shownPath(p), JSON.stringify(p));
+  assert.equal(r.shownPaths(ODD_PATHS), shownPaths(ODD_PATHS));
+  for (const p of ODD_PATHS) assert.doesNotMatch(r.shownPath(p), RAW_INVISIBLE, JSON.stringify(p));
+});
+
+test('a changed path with a bidi override, a zero-width, a newline or a DEL shows escaped in every place the dashboard shows one; the data stays raw (#768)', () => {
+  const places: [string, string][] = [];
+  const at = new Date().toISOString();
+  // The decision's page: each section on its own, so each place is checked alone.
+  const detail = { id: 'd-odd', kind: 'land', issue: 7, owner: 'example-owner', question: 'Approve landing #7 (L3)?', options: [], recommendation: 'approve', askedAt: at, answer: null, canAnswer: false, ifNothing: 'No timeout: it waits.', withheld: null };
+  const change = { base: 'b'.repeat(40), head: 'c'.repeat(40), files: ODD_PATHS.map((path) => ({ path, added: 1, removed: 0 })), filesMore: 0, level: 'L3', levelReasons: [], source: 'log' };
+  const verdict = { patch_correct: true, test_correct: true, confidence: 'high', confidenceReason: null, advice: '', unread: ODD_PATHS, unverifiedClaims: [], designChange: null, designReason: null };
+  const impact = { flags: [{ flag: 'money-path', files: ODD_PATHS }, { flag: 'auth', files: [] }, { flag: 'secrets', files: [] }], others: [], note: null };
+  const findings = (file: string) => ({ list: [{ claim: 'rounds down', evidence: 'x', file, line: 3 }], confidence: 'high', unverified: [] });
+  places.push(['decision page: the change\'s file chips', r.renderDecisionDetail({ ...detail, change })]);
+  places.push(['decision page: the files the evaluator did not read', r.renderDecisionDetail({ ...detail, verdict })]);
+  places.push(['decision page: the impact flags\' file chips', r.renderDecisionDetail({ ...detail, impact })]);
+  // The decision card's Details: its findings and impact lines.
+  const card = { id: 'd-odd', kind: 'land', issue: 7, owner: 'example-owner', question: 'Approve landing #7 (L3)?', options: ['approve', 'reject'], recommendation: 'approve', askedAt: at, answer: null };
+  places.push(['decision card: the impact line', r.renderDecisionCard(card, undefined, { ...detail, impact })]);
+  // The PR page: a conflict fix's files, a light check's overlap, a hold's files.
+  const pr = { number: 9, issue: 7, title: 'Change', url: 'https://example.test/pr/9', openedAt: at, head: 'a'.repeat(40), state: 'open', draft: false, status: null, unready: null, fixes: [], gaveUp: null, decision: null, waitReasons: [], merged: null, mergeFailed: null, mainResult: null, conflict: null, lightCheck: null, phase: 'waiting' };
+  const prs = { prs: [], refused: [], stops: [], holds: [], autoMerge: { on: true, policy: true, repo: true, stopped: null, why: 'on' } };
+  places.push(['PR page: a conflict fix\'s files', r.renderPrs({ ...prs, prs: [{ ...pr, conflict: { state: 'done', at, attempt: 1, outcome: 'pushed', files: ODD_PATHS, waitsOwner: false, reasons: [], detail: '' } }] })]);
+  places.push(['PR page: a light check\'s overlap', r.renderPrs({ ...prs, prs: [{ ...pr, phase: 'light_check', lightCheck: { state: 'running', at, mainSha: 'f'.repeat(40), overlap: ODD_PATHS, outcome: null, waitMs: null, detail: '' } }] })]);
+  places.push(['PR page: a hold\'s files', r.renderPrs({ ...prs, holds: [{ issue: 41, title: 'Round', by: 32, files: ODD_PATHS, reason: '', since: at, until: null, waitedMs: null }] })]);
+  // A run's record: its write steps and the files it wrote.
+  const run = { id: 'r1', issue: 7, role: 'worker', model: 'sonnet', startedAt: at, endedAt: at, reason: 'succeeded', costUsd: null, turns: 1, steps: ODD_PATHS.map((what) => ({ kind: 'write', tool: 'Write', what, status: 'ok', exitCode: null, output: '' })), files: ODD_PATHS, otherTools: 0, final: '', truncated: false };
+  places.push(['run record: its write steps and the files it wrote', r.renderRunSteps(run)]);
+  // An experiment's research log: the files a result changed.
+  const row = { n: 1, kind: 'exploit', at, hypothesis: 'h', variable: 'v', stage: 1, stage2: [], seeds: 1, motivation: 'm', change: { commit: null, files: ODD_PATHS }, config: {}, minutes: null, waited_s: null, result: null, decision: 'keep', why: '', step: null, parent: null };
+  places.push(['experiment log: the files a result changed', r.renderResearchLog([row])]);
+  // One path at a time: a finding's file, the health panel's hotspot file, a live diff's file.
+  for (const p of ODD_PATHS) {
+    places.push([`decision page: a finding's file chip (${shownPath(p)})`, r.renderDecisionDetail({ ...detail, kind: 'question', findings: findings(p) })]);
+    places.push([`decision card: a finding's file (${shownPath(p)})`, r.renderDecisionCard(card, undefined, { ...detail, kind: 'question', findings: findings(p) })]);
+    const health = { instance: 'shop', machine: null, cores: 4, checks: { timings: [], slowest: [], regressions: [], rule: '' }, usage: { days: [], quotaNote: 'q' }, merge: { since: at, mergedPrs: 1, conflicts: { count: 0, needOwner: 0, minutesToMerged: [], medianMinutes: null, perMergedPr: 0 }, lightChecks: { count: 0, minutesAdded: 0, perMergedPr: 0, outcomes: {} }, holds: { count: 1, minutesWaited: 5, perMergedPr: 5, byFile: [{ file: p, minutes: 5, count: 1 }] }, flags: [] }, suggestions: [] };
+    places.push([`health panel: the hotspot file (${shownPath(p)})`, r.renderHealth(health)]);
+    places.push([`live run: a diff's file (${shownPath(p)})`, r.renderLiveFeed([{ seq: 1, at, kind: 'diff', id: 't', tool: 'Edit', file: p, diff: '+x' }], false)]);
+  }
+  // Every place checked, each failure named: a raw character, or a path (each of a list's, the one of a single) not shown escaped.
+  const wrong = places.flatMap(([where, html]) => [
+    ...(RAW_INVISIBLE.test(html) ? [`${where}: a raw control, format or invisible character`] : []),
+    ...(where.includes('(') ? ODD_PATHS.filter((p) => where.includes(`(${shownPath(p)})`)) : ODD_PATHS).filter((p) => !html.includes(shownHtml(p))).map((p) => `${where}: ${JSON.stringify(p)} not shown escaped`),
+  ]);
+  assert.deepEqual(wrong, []);
+  assert.equal(places.length, 9 + 4 * ODD_PATHS.length, 'every place rendered');
+  assert.ok(verdict.unread.includes('src/\u202eexe.txt') && change.files[0]!.path === 'src/\u202eexe.txt', 'the data stays raw');
+});
+
+test('a plain ASCII changed path shows as itself in the same places (#768)', () => {
+  const at = new Date().toISOString();
+  const detail = { id: 'd', kind: 'land', issue: 7, owner: 'example-owner', question: 'Q?', options: [], recommendation: 'approve', askedAt: at, answer: null, canAnswer: false, ifNothing: 'No timeout: it waits.', withheld: null };
+  const html = r.renderDecisionDetail({ ...detail, change: { base: null, head: null, files: [{ path: 'src/totals.js', added: 1, removed: 0 }], filesMore: 0, level: 'L1', levelReasons: [], source: 'log' }, verdict: { patch_correct: true, test_correct: true, confidence: 'high', confidenceReason: null, advice: '', unread: ['src/cart.js'], unverifiedClaims: [], designChange: null, designReason: null } });
+  assert.match(html, /title="src\/totals\.js"><span class="min-w-0 truncate">src\/totals\.js<\/span>/, 'a file chip: the name as it is, in its text and its title');
+  assert.match(html, />src\/cart\.js</, 'a file it did not read: as it is');
+  const finding = r.renderDecisionDetail({ ...detail, kind: 'question', findings: { list: [{ claim: 'c', evidence: 'e', file: 'src/totals.js', line: 3 }], confidence: null, unverified: [] } });
+  assert.match(finding, /title="src\/totals\.js:3"><span class="min-w-0 truncate">src\/totals\.js:3<\/span>/, 'a finding\'s chip: the file and its line');
 });

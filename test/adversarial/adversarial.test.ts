@@ -34,7 +34,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { parse } from 'yaml';
@@ -139,12 +139,13 @@ const Flow = z.strictObject({
   /** The instance's auto_merge as the coordinator reads it: on, a read that throws, or no reader at all. */
   autoMerge: z.enum(['on', 'throws', 'absent']).default('on'),
   /**
-   * The stop file: none; one with a reason; one with no reason (written by hand); one that can't be parsed; or deleted
+   * The stop file: none; one with a reason; one with no reason (written by hand); one whose reason is empty, or not a
+   * string; one that can't be parsed; one that is a symlink to nothing; or deleted
    * by hand after a red-main stop, which follows an earlier owner stop and its resume (the last stop event decides);
    * deleted by hand after a stop that names no `by` (an older event: it fails closed); or deleted by hand after a
    * red-main stop and an admin's resume request, before main was measured green.
    */
-  stopFile: z.enum(['none', 'reason', 'no-reason', 'unreadable', 'deleted-by-hand', 'deleted-by-hand-no-by', 'deleted-by-hand-resume-requested']).default('none'),
+  stopFile: z.enum(['none', 'reason', 'no-reason', 'empty-reason', 'non-string-reason', 'unreadable', 'dangling-link', 'deleted-by-hand', 'deleted-by-hand-no-by', 'deleted-by-hand-resume-requested']).default('none'),
   /** The always-PASS verdict, recorded for the PR's head or for another commit (an earlier push). */
   verdictFor: z.enum(['head', 'other-commit']).default('head'),
   /** After the PASS, a later verdict on the same head rejects the patch (the latest verdict decides). */
@@ -489,7 +490,13 @@ function decideInFlow(r: ReturnType<typeof made>, c: Case | Control, f: Flow, cf
     const stopFile = join(stateDir, 'auto-merge-stopped.json');
     if (f.stopFile === 'reason') writeFileSync(stopFile, JSON.stringify({ reason: 'main went red after an auto-merge' }));
     if (f.stopFile === 'no-reason') writeFileSync(stopFile, '{}');
+    if (f.stopFile === 'empty-reason') writeFileSync(stopFile, JSON.stringify({ reason: '', by: 'red_main' }));
+    if (f.stopFile === 'non-string-reason') writeFileSync(stopFile, JSON.stringify({ reason: [], by: 'red_main' }));
     if (f.stopFile === 'unreadable') writeFileSync(stopFile, '{"reason": ');
+    if (f.stopFile === 'dangling-link') {
+      rmSync(stopFile, { force: true });
+      symlinkSync(join(stateDir, 'gone.json'), stopFile);
+    }
     if (f.stopFile === 'deleted-by-hand') {
       // The owner stopped auto-merge and resumed it; later main went red, and that stop's file was deleted by hand.
       log.append('merge.stopped', { reason: 'the owner stopped auto-merge', number: null, sha: null, revert: null, by: 'owner' }, actor);
