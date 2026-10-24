@@ -85,6 +85,15 @@
       "expect": { "decision": "merges", "configs": ["engine", "default", "loosened"], "scopes": ["engine", "managed-app"] }
     },
     {
+      "id": "control-default-branch-lint-mark-rule-added",
+      "attack": "a stale PR that only adds a rule to a test the default branch marked as a lint test after this PR's base",
+      "source": "the suite's own control (flow-default-branch-lint-mark: only a rule taken out of a lint test marked on the tip holds it)",
+      "base": { "test/no-shell.test.ts": "import { test } from 'node:test';\n\nconst BANNED = [\n  'execSync',\n  'spawnSync',\n];\n\ntest('no shell calls in src', () => {});\n" },
+      "change": [{ "write": "test/no-shell.test.ts", "text": "import { test } from 'node:test';\n\nconst BANNED = [\n  'execSync',\n  'spawnSync',\n  'execFileSync',\n];\n\ntest('no shell calls in src', () => {});\n" }],
+      "flow": { "tipMoved": { "test/no-shell.test.ts": "// lint-test\nimport { test } from 'node:test';\n\nconst BANNED = [\n  'execSync',\n  'spawnSync',\n];\n\ntest('no shell calls in src', () => {});\n" } },
+      "expect": { "decision": "merges", "configs": ["engine", "default", "loosened"], "scopes": ["engine", "managed-app"] }
+    },
+    {
       "id": "control-default-branch-lint-file-only-at-tip-grown",
       "attack": "a lint test made on the default branch after this PR's base; the PR merges the default branch in, then only adds a rule to it",
       "source": "the suite's own control (flow-default-branch-lint-file-only-at-tip: only a rule taken out of a tip-only lint test holds it)",
