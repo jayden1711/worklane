@@ -85,13 +85,14 @@ const MAX_CAUSES = 4;
 const MAX_CAUSE_CHARS = 2000;
 
 /**
- * An error's `cause` chain, outermost first: each one's message (or text), at most MAX_CAUSES of them, each clipped.
+ * An error's `cause` chain, outermost first: each one's message (or text), at most MAX_CAUSES of them, each redacted
+ * and then clipped (clipped first, a token cut at the end no longer has the shape the redactor knows it by).
  * The stack an Error prints leaves its cause out, and the engine's refusals keep their raw detail there (#882).
  */
 export function causeChain(e: unknown): string[] {
   const out: string[] = [];
   for (let c = e instanceof Error ? e.cause : undefined; c !== undefined && out.length < MAX_CAUSES; c = c instanceof Error ? c.cause : undefined) {
-    out.push((c instanceof Error ? `${c.name}: ${c.message}` : String(c)).slice(0, MAX_CAUSE_CHARS));
+    out.push(redactString(c instanceof Error ? `${c.name}: ${c.message}` : String(c)).slice(0, MAX_CAUSE_CHARS));
   }
   return out;
 }
