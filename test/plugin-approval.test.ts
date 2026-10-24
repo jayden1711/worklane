@@ -181,6 +181,7 @@ test('a snapshot taken with secrets is valid only for the network it was taken w
 test("#882: a preview that isn't the one asked for is refused by the plugin's id, never the preview file's path", () => {
   previewed('omicron', 'kit');
   const f = join(previewDir('omicron', 'kit'), 'preview.json');
+  onRealMachine(f); // throws unless it is inside this test's system root (#815)
   writeFileSync(f, JSON.stringify({ ...JSON.parse(readFileSync(f, 'utf8')), id: 'other' }));
   assert.throws(() => readPreview('omicron', 'kit'), (e: Error) => {
     assert.equal(e.message, "the preview of kit isn't omicron's kit: fetch it again");
