@@ -184,6 +184,7 @@ export const GUARD_FILES: readonly string[] = [
   `${BRAND.configDir}/checks/**`,
   // Which test files a PR's CI runs (the engine's).
   'scripts/ci/**',
+  'src/testrun/affected.ts',
   'src/merge-policy*',
   'src/coordinator/merge-flow*',
   'src/coordinator/change-files.ts',

@@ -734,6 +734,8 @@ test('weakening: a guard or lint file waits on any line removed or changed, a li
     `${BRAND.configDir}/review.yaml`, `${BRAND.configDir}/config.yaml`, `${BRAND.configDir}/tests.yaml`, '.github/workflows/ci.yml', '.github/actions/setup/action.yml', '.husky/pre-commit',
     'tsconfig.json', 'eslint.config.js', '.eslintrc.json', 'vitest.config.ts', 'jest.config.js', 'cypress.config.ts', '.lintstagedrc.json', '.semgrep.yml', '.rubocop.yml', 'deno.json',
     'mypy.ini', '.pre-commit-config.yaml', '.github/CODEOWNERS', `${BRAND.configDir}/checks/lint.mjs`, 'scripts/ci/affected.mjs', 'src/push-guard.ts', 'test/pipefail.test.ts',
+    // What picks a PR's test files (#1009).
+    'src/testrun/affected.ts',
   ]) {
     // A lint test is one by its mark (#869).
     const lint = path === 'test/pipefail.test.ts' ? '// lint-test\n' : '';
