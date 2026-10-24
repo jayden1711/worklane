@@ -87,15 +87,21 @@ export const SHAPES: readonly StandIn[] = [
   t('Stripe key', 'a Stripe restricted key', j('_', 'rk', 'live', run(24))),
   t('Google API key', 'a Google API key', `AI${'za'}${run(35, 'SyFAKE-fake_9')}`),
   t('JWT', 'a JWT', j('.', `eyJ${'hbGciOiJIUzI1NiJ9'}`, `eyJ${'zdWIiOiJmYWtlLXVzZXIifQ'}`, run(43))),
+  // Standard base64 with padding (#996): `+`, `/` and `=` in every part.
+  t('JWT', 'a JWT in standard base64', j('.', Buffer.from('{"alg":"HS256","x":">>>???"}').toString('base64'), Buffer.from('{"sub":">>>???fake"}').toString('base64'), `${run(20)}+${run(10)}/${run(11)}=`)),
   t('AWS access key', 'an AWS access key id', `AKIA${upper(16)}`),
   t('AWS access key', 'an AWS temporary key id', `ASIA${upper(16)}`),
   t('private key', 'a PEM private key', PEM, PEM_BODY),
   t('bearer token', 'a bearer token', `Bearer ${run(40, 'zY8xW7vU6')}`, run(40, 'zY8xW7vU6')),
+  // JSON-escaped slashes in the token (#996): the secret is the run after the last one.
+  t('bearer token', 'a bearer token with JSON-escaped slashes', `Bearer ${run(14, 'zY8xW7vU6')}\\/${run(14, 'tS5rQ4pO3')}\\/${run(14, 'nM2lK1jI0')}`, run(14, 'nM2lK1jI0')),
   t('Basic credential', 'a Basic credential', `Basic ${BASIC}`, BASIC),
   t('32-byte hex key', 'a 32-byte hex key', `0x${hex(64)}`),
   // Structures around a value, not token shapes.
   { kind: 'password in a URL', what: 'a password in a URL', value: `postgres://app:${URL_PASSWORD}@db.example.test:5432/app`, secret: URL_PASSWORD, token: false },
   { kind: 'secret under a JSON key', what: 'a value under a JSON key', value: JSON.stringify({ id: 3, client_secret: JSON_VALUE }), secret: JSON_VALUE, token: false },
+  // A Python dictionary literal (#996): single quotes.
+  { kind: 'secret under a JSON key', what: 'a value under a single-quoted key', value: `{'id': 3, 'password': '${JSON_VALUE}'}`, secret: JSON_VALUE, token: false },
 ];
 
 /** Whether any 12-character piece of `secret` is still in `out`: a pattern that stops early leaks the rest. */
