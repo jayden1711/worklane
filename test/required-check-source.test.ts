@@ -103,7 +103,7 @@ test("pinning never turns a check that wasn't a pass into one: another App's fai
   assert.deepEqual((await judged(github({ runs: [{ id: 2, name: 'test', app: CI_APP, suite: 11, conclusion: 'failure' }] }), pin)).failed, [{ name: 'test', outcome: 'fail', id: 2, url: 'https://github.example/o/r/runs/2' }]);
 });
 
-test("owner rule: a pinned check is its source's latest run on the head; any non-pass of its name from another source blocks it", async () => {
+test("owner rule (#925): every run of a pinned check's source on the head must pass; any non-pass of its name from another source blocks it", async () => {
   const pin = { test: { app_id: CI_APP } };
   // 3. A passed pinned check plus a failed same-name check from another App, listed after it: blocked.
   const r = await judged(github({ runs: [{ id: 2, name: 'test', app: CI_APP, suite: 11 }, { id: 1, name: 'test', app: SPOOF_APP, suite: 10, conclusion: 'failure' }] }), pin);
@@ -113,22 +113,25 @@ test("owner rule: a pinned check is its source's latest run on the head; any non
   const wfPin = { test: { workflow: '.github/workflows/ci.yml' } };
   const twoRuns = [workflowRun(70, '.github/workflows/ci.yml'), workflowRun(71, '.github/workflows/ci.yml')];
   const wf = async (runs: Run[], workflowRuns: unknown[] = twoRuns) => outcomes(await judged(github({ runs, workflowRuns }), wfPin));
-  // 1. Cancelled, then passed in the later run: ready. 2. Failed, then passed: ready. Whatever the list order.
-  assert.deepEqual(await wf([{ id: 1, name: 'test', app: ACTIONS, suite: 70, conclusion: 'cancelled' }, { id: 2, name: 'test', app: ACTIONS, suite: 71 }]), ['test pass']);
-  assert.deepEqual(await wf([{ id: 2, name: 'test', app: ACTIONS, suite: 71 }, { id: 1, name: 'test', app: ACTIONS, suite: 70, conclusion: 'failure' }]), ['test pass']);
-  // The later run decides, by the runs' own order, not the list's: passed first, cancelled in the later run: not ready.
+  // #925: cancelled or failed in the earlier run, then passed in the later run: not ready, whatever the list order.
+  assert.deepEqual(await wf([{ id: 1, name: 'test', app: ACTIONS, suite: 70, conclusion: 'cancelled' }, { id: 2, name: 'test', app: ACTIONS, suite: 71 }]), ['test cancelled']);
+  assert.deepEqual(await wf([{ id: 2, name: 'test', app: ACTIONS, suite: 71 }, { id: 1, name: 'test', app: ACTIONS, suite: 70, conclusion: 'failure' }]), ['test fail']);
+  assert.deepEqual(await wf([{ id: 2, name: 'test', app: ACTIONS, suite: 71 }, { id: 1, name: 'test', app: ACTIONS, suite: 70, status: 'in_progress', conclusion: null }]), ['test pending']);
+  // Passed first, cancelled in the later run: not ready.
   assert.deepEqual(await wf([{ id: 2, name: 'test', app: ACTIONS, suite: 71, conclusion: 'cancelled' }, { id: 1, name: 'test', app: ACTIONS, suite: 70 }]), ['test cancelled']);
-  // A re-run attempt of a job in the same workflow run (a newer check run, same suite) counts as the newer.
-  assert.deepEqual(await wf([{ id: 9, name: 'test', app: ACTIONS, suite: 70 }, { id: 3, name: 'test', app: ACTIONS, suite: 70, conclusion: 'failure' }]), ['test pass']);
+  // GitHub's filter=latest lists only a job's newest attempt in a suite (measured), so two listed in one suite are
+  // judged as two runs: either one failing blocks.
+  assert.deepEqual(await wf([{ id: 9, name: 'test', app: ACTIONS, suite: 70 }, { id: 3, name: 'test', app: ACTIONS, suite: 70, conclusion: 'failure' }]), ['test fail']);
   assert.deepEqual(await wf([{ id: 3, name: 'test', app: ACTIONS, suite: 70 }, { id: 9, name: 'test', app: ACTIONS, suite: 70, conclusion: 'failure' }]), ['test fail']);
+  assert.deepEqual(await wf([{ id: 1, name: 'test', app: ACTIONS, suite: 70 }, { id: 2, name: 'test', app: ACTIONS, suite: 71 }]), ['test pass'], 'both runs passed');
   // A later run of the pinned file for ANOTHER head never supersedes: it isn't the pinned source here, so it can only block.
   const otherHead = [workflowRun(70, '.github/workflows/ci.yml'), workflowRun(71, '.github/workflows/ci.yml', { sha: OTHER })];
   assert.deepEqual(await wf([{ id: 1, name: 'test', app: ACTIONS, suite: 70, conclusion: 'failure' }, { id: 2, name: 'test', app: ACTIONS, suite: 71 }], otherHead), ['test fail']);
   assert.deepEqual(await wf([{ id: 1, name: 'test', app: ACTIONS, suite: 70 }, { id: 2, name: 'test', app: ACTIONS, suite: 71, conclusion: 'failure' }], otherHead), ['test fail']);
-  // An App pin that isn't Actions (round 8, the owner's decision; round 6 failed these closed across suites): the
-  // App's latest check run of the name decides, in whatever suite. An earlier suite's failure, then a later suite's
-  // pass: ready. A later suite failing, or still running: not. Another App's failure still blocks.
-  assert.deepEqual(outcomes(await judged(github({ runs: [{ id: 1, name: 'test', app: CI_APP, suite: 11, conclusion: 'failure' }, { id: 2, name: 'test', app: CI_APP, suite: 12 }] }), pin)), ['test pass']);
+  // An App pin that isn't Actions (#925; round 8 had the App's latest run decide, across suites): every suite's run of
+  // the App must pass. An earlier suite's failure, then a later suite's pass: not ready. A later suite failing, or
+  // still running: not. Another App's failure still blocks.
+  assert.deepEqual(outcomes(await judged(github({ runs: [{ id: 1, name: 'test', app: CI_APP, suite: 11, conclusion: 'failure' }, { id: 2, name: 'test', app: CI_APP, suite: 12 }] }), pin)), ['test fail']);
   assert.deepEqual(outcomes(await judged(github({ runs: [{ id: 2, name: 'test', app: CI_APP, suite: 12, conclusion: 'failure' }, { id: 1, name: 'test', app: CI_APP, suite: 11 }] }), pin)), ['test fail']);
   assert.deepEqual(outcomes(await judged(github({ runs: [{ id: 1, name: 'test', app: CI_APP, suite: 11 }, { id: 2, name: 'test', app: CI_APP, suite: 12, status: 'in_progress', conclusion: null }] }), pin)), ['test pending']);
   assert.deepEqual(outcomes(await judged(github({ runs: [{ id: 1, name: 'test', app: CI_APP, suite: 11, conclusion: 'failure' }, { id: 2, name: 'test', app: CI_APP, suite: 12 }, { id: 3, name: 'test', app: SPOOF_APP, suite: 13, conclusion: 'failure' }] }), pin)), ['test fail']);
@@ -154,15 +157,15 @@ test('an Actions-App pin never lets one workflow file supersede another: every f
   assert.deepEqual(await verdict([{ id: 1, name: 'test', app: ACTIONS, suite: 70 }, { id: 2, name: 'test', app: ACTIONS, suite: 71 }]), ['test pass']);
 });
 
-test('"latest" fails closed: a re-run of an older workflow run that failed after a newer run passed blocks; the owner\'s cases stay', async () => {
+test('"latest" fails closed: a re-run of an older workflow run that failed after a newer run passed blocks, as an earlier run that failed does (#925)', async () => {
   const wfPin = { test: { workflow: '.github/workflows/ci.yml' } };
   const twoRuns = [workflowRun(70, '.github/workflows/ci.yml'), workflowRun(71, '.github/workflows/ci.yml')];
   const verdict = async (runs: Run[]) => outcomes(await judged(github({ runs, workflowRuns: twoRuns }), wfPin));
   // Run 710 (suite 71) passed with check run 20; then run 700 (suite 70) was re-run, and its newest attempt (check run 30) failed.
   assert.deepEqual(await verdict([{ id: 20, name: 'test', app: ACTIONS, suite: 71 }, { id: 30, name: 'test', app: ACTIONS, suite: 70, conclusion: 'failure' }]), ['test fail']);
-  // The owner's cases: cancelled (or failed) in run 700, then passed in the later run 710, each newer.
-  assert.deepEqual(await verdict([{ id: 10, name: 'test', app: ACTIONS, suite: 70, conclusion: 'cancelled' }, { id: 20, name: 'test', app: ACTIONS, suite: 71 }]), ['test pass']);
-  assert.deepEqual(await verdict([{ id: 10, name: 'test', app: ACTIONS, suite: 70, conclusion: 'failure' }, { id: 20, name: 'test', app: ACTIONS, suite: 71 }]), ['test pass']);
+  // #925: cancelled (or failed) in run 700, then passed in the later run 710: not ready either.
+  assert.deepEqual(await verdict([{ id: 10, name: 'test', app: ACTIONS, suite: 70, conclusion: 'cancelled' }, { id: 20, name: 'test', app: ACTIONS, suite: 71 }]), ['test cancelled']);
+  assert.deepEqual(await verdict([{ id: 10, name: 'test', app: ACTIONS, suite: 70, conclusion: 'failure' }, { id: 20, name: 'test', app: ACTIONS, suite: 71 }]), ['test fail']);
 });
 
 test('the brand holds at run time: a cast, an any, a ts-expect-error value or a mutated judged array throws (fails closed)', async () => {

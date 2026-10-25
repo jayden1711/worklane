@@ -197,22 +197,29 @@ export interface Acceptance {
 export type Outcome = 'pass' | 'fail' | 'pending' | 'missing' | 'unknown';
 
 /**
- * Each required check's outcome on a commit at time `at` (a merge): the check run that had started by then, latest
- * first, passed only if it had completed with success by then; else the commit status set by then. `unknown`: no
- * check run of that name, and the statuses aren't read yet.
+ * Each required check's outcome on a commit at time `at` (a merge), from the check runs that had started by then (the
+ * latest attempt per check suite, as checksAt takes them): a fail when any had finished other than success by then,
+ * else pending when any hadn't finished, else a pass (#925: never the latest-started alone); with none, the commit
+ * status set by then. `unknown`: no check run of that name, and the statuses aren't read yet.
  */
 export function outcomesAt(required: string[], runs: CheckRunAt[], statuses: StatusAt[] | null, at: string): { name: string; outcome: Outcome }[] {
   const t = Date.parse(at);
   return required.map((name) => {
-    const run = runs
-      .filter((r) => r.name === name)
-      .map((r) => ({ r, start: Date.parse(r.startedAt ?? r.completedAt ?? '') }))
-      .filter((x) => Number.isFinite(x.start) && x.start <= t)
-      .sort((a, b) => b.start - a.start)[0]?.r;
-    if (run) {
-      const done = Date.parse(run.completedAt ?? '');
-      if (run.status !== 'completed' || !Number.isFinite(done) || done > t) return { name, outcome: 'pending' as const };
-      return { name, outcome: run.conclusion === 'success' ? ('pass' as const) : ('fail' as const) };
+    const latest = new Map<string, CheckRunAt>();
+    runs.forEach((r, i) => {
+      const start = Date.parse(r.startedAt ?? r.completedAt ?? '');
+      if (r.name !== name || !Number.isFinite(start) || start > t) return;
+      const key = r.suite !== undefined ? `suite ${r.suite}` : `run ${r.id ?? `#${i}`}`;
+      const prev = latest.get(key);
+      if (!prev || (r.id ?? -1) > (prev.id ?? -1)) latest.set(key, r);
+    });
+    if (latest.size) {
+      const states = [...latest.values()].map((run) => {
+        const done = Date.parse(run.completedAt ?? '');
+        if (run.status !== 'completed' || !Number.isFinite(done) || done > t) return 'pending' as const;
+        return run.conclusion === 'success' ? ('pass' as const) : ('fail' as const);
+      });
+      return { name, outcome: states.includes('fail') ? ('fail' as const) : states.includes('pending') ? ('pending' as const) : ('pass' as const) };
     }
     if (!statuses) return { name, outcome: 'unknown' as const };
     const st = statuses

@@ -127,7 +127,7 @@ test("a pin never turns a fail into a pass: another App's newer failing run of a
   assert.match(r.reason ?? '', /check "test \(ubuntu-latest, 22\)" (from another source )?ended failure/);
 });
 
-test("owner rule: a pinned check is its source's latest run on the commit; any non-pass of its name from another source refuses it", async () => {
+test("owner rule (#925): every run of a pinned check's source on the commit must pass; any non-pass of its name from another source refuses it", async () => {
   const name = 'test (ubuntu-latest, 22)';
   // ci.yml ran twice on this commit: run 10 (suite 1) and the later run 30 (suite 3).
   const twice = [...legit, workflowRun(3, '.github/workflows/ci.yml')];
@@ -135,11 +135,11 @@ test("owner rule: a pinned check is its source's latest run on the commit; any n
     const r = await choose({ required_checks: [name] }, gitHub({ runs, workflowRuns }));
     return r.chosen ? 'installs' : (r.reason ?? '');
   };
-  // 1. Cancelled, then passed in the later run: installs. 2. Failed, then passed: installs. List order doesn't matter
-  // (the later run's job has the higher id, as GitHub numbers them).
-  assert.equal(await verdict([{ name, suite: 1, conclusion: 'cancelled' }, { name, suite: 3, started: '2026-10-18T09:00:00Z' }]), 'installs');
-  assert.equal(await verdict([{ name, suite: 3, started: '2026-10-18T09:00:00Z', id: 5 }, { name, suite: 1, conclusion: 'failure', id: 1 }]), 'installs');
-  // Passed, then cancelled in the later run: refused (the later run decides, by the runs' own order).
+  // #925: cancelled or failed, then passed in the later run: refused, whatever the list order.
+  assert.match(await verdict([{ name, suite: 1, conclusion: 'cancelled' }, { name, suite: 3, started: '2026-10-18T09:00:00Z' }]), /ended cancelled/);
+  assert.match(await verdict([{ name, suite: 3, started: '2026-10-18T09:00:00Z', id: 5 }, { name, suite: 1, conclusion: 'failure', id: 1 }]), /ended failure/);
+  assert.equal(await verdict([{ name, suite: 1 }, { name, suite: 3, started: '2026-10-18T09:00:00Z' }]), 'installs', 'both runs passed');
+  // Passed, then cancelled in the later run: refused.
   assert.match(await verdict([{ name, suite: 1, started: '2026-10-18T11:00:00Z' }, { name, suite: 3, conclusion: 'cancelled' }]), /ended cancelled/);
   // 3. The pinned run passed, and another App's same-name run failed: refused.
   assert.match(await verdict([{ name, suite: 3 }, { name, suite: 8, app: 4242, conclusion: 'failure', started: '2026-10-18T09:00:00Z' }]), /from another source ended failure/);
@@ -149,16 +149,18 @@ test("owner rule: a pinned check is its source's latest run on the commit; any n
   assert.match(await verdict([{ name, suite: 1, conclusion: 'failure' }, { name, suite: 3 }], otherHead), /ended failure/);
 });
 
-test('owner rule: a re-run attempt in the same workflow run counts as the newer; an unpinned --add-check name is judged as before', async () => {
+test('two runs of a job listed in one workflow run are judged as two (#925); an unpinned --add-check name: any red run refuses', async () => {
   const name = 'test (ubuntu-latest, 22)';
-  // Both check runs are jobs of run 10 (suite 1): ids 0 (failed) and 1 (the re-run's pass), listed failure last.
-  assert.equal((await choose({ required_checks: [name] }, gitHub({ runs: [{ name, suite: 1 }, { name, suite: 1, conclusion: 'failure', started: '2026-10-18T11:00:00Z' }], workflowRuns: legit }))).chosen, false, 'id 1 is the failure: the newer attempt failed');
-  assert.equal((await choose({ required_checks: [name] }, gitHub({ runs: [{ name, suite: 1, conclusion: 'failure', started: '2026-10-18T11:00:00Z' }, { name, suite: 1 }], workflowRuns: legit }))).chosen, true, 'id 1 is the pass: the newer attempt passed');
-  // Unpinned: the latest run by name decides, from any source, exactly as before pins.
+  // GitHub's filter=latest (the updater's read) lists only a job's newest attempt in a suite (measured), so two check
+  // runs of the name in run 10 (suite 1) are two jobs: either one failing refuses, whatever the ids.
+  assert.equal((await choose({ required_checks: [name] }, gitHub({ runs: [{ name, suite: 1 }, { name, suite: 1, conclusion: 'failure', started: '2026-10-18T11:00:00Z' }], workflowRuns: legit }))).chosen, false, 'id 1 is the failure');
+  assert.equal((await choose({ required_checks: [name] }, gitHub({ runs: [{ name, suite: 1, conclusion: 'failure', started: '2026-10-18T11:00:00Z' }, { name, suite: 1 }], workflowRuns: legit }))).chosen, false, 'id 0 is the failure');
+  // Unpinned: any run of the name that isn't a pass refuses, from any source, never its latest alone.
   const gh = gitHub({ runs: [{ name: 'extra', suite: 5, app: 4242 }, { name: 'extra', suite: 6, app: 5555, conclusion: 'failure', started: '2026-10-18T09:00:00Z' }], workflowRuns: legit });
   const pinned = await choose({ required_checks: ['extra'] }, gh);
   assert.deepEqual(pinned, await choose({ required_checks: ['extra'] }, { ...gh, deps: { ...gh.deps, pinChecks: undefined } }));
-  assert.equal(pinned.chosen, true, 'the older failure is not its latest run: installs, as before');
+  assert.equal(pinned.chosen, false, 'the older failure refuses');
+  assert.match(pinned.reason ?? '', /"extra" ended failure/);
 });
 
 test('an Actions-App pin never lets one workflow file supersede another: every file\'s latest run must pass', async () => {
@@ -176,7 +178,7 @@ test('an Actions-App pin never lets one workflow file supersede another: every f
   assert.equal(await verdict([{ name: 'lint', suite: 1 }, { name: 'lint', suite: 9 }]), 'installs', 'both passed');
 });
 
-test('"latest" fails closed: run 200 passed, then run 100 was re-run and failed: refused; the owner\'s cases stay', async () => {
+test('"latest" fails closed: run 200 passed, then run 100 was re-run and failed: refused, as an earlier run that failed is (#925)', async () => {
   const name = 'test (ubuntu-latest, 22)';
   // ci.yml ran twice on this commit: run 100 (suite 10) and run 200 (suite 20).
   const runs = [...legit, workflowRun(10, '.github/workflows/ci.yml'), workflowRun(20, '.github/workflows/ci.yml')];
@@ -187,9 +189,9 @@ test('"latest" fails closed: run 200 passed, then run 100 was re-run and failed:
   // Check runs 10 (run 100's first attempt, passed), 20 (run 200, passed), 30 (run 100's re-run, failed).
   assert.match(await verdict([{ name, suite: 10, id: 10 }, { name, suite: 20, id: 20 }, { name, suite: 10, id: 30, conclusion: 'failure' }]), /ended failure/);
   assert.match(await verdict([{ name, suite: 20, id: 20 }, { name, suite: 10, id: 30, conclusion: 'cancelled' }]), /ended cancelled/);
-  // The owner's cases: run 100 cancelled or failed, then run 200 passed: installs.
-  assert.equal(await verdict([{ name, suite: 10, id: 10, conclusion: 'cancelled' }, { name, suite: 20, id: 20 }]), 'installs');
-  assert.equal(await verdict([{ name, suite: 20, id: 20 }, { name, suite: 10, id: 10, conclusion: 'failure' }]), 'installs');
+  // #925: run 100 cancelled or failed, then run 200 passed: refused too.
+  assert.match(await verdict([{ name, suite: 10, id: 10, conclusion: 'cancelled' }, { name, suite: 20, id: 20 }]), /ended cancelled/);
+  assert.match(await verdict([{ name, suite: 20, id: 20 }, { name, suite: 10, id: 10, conclusion: 'failure' }]), /ended failure/);
 });
 
 test("a pinned check's same-name commit status that isn't success refuses it (pending waits); no answer for the statuses waits", async () => {
@@ -298,15 +300,16 @@ test('the read cost: a commit where a pinned required check has no run at all re
   assert.deepEqual(all.calls.map((c) => c.replace(/\?.*/, '')), [`/commits/${SHA}/check-runs`, '/actions/runs', `/commits/${SHA}/status`]);
 });
 
-test("a pin to an App that is not Actions: the App's latest run decides, in any suite (the owner's decision, round 8); another App's failure refuses", async () => {
+test("a pin to an App that is not Actions: every suite's run of the App must pass (#925); another App's failure refuses", async () => {
   const pin = { required_checks: ['scan'], required_check_sources: { scan: { app_id: 4242 } } };
   const verdict = async (runs: Run[]) => {
     const r = await choose(pin, gitHub({ runs }));
     return r.chosen ? 'installs' : (r.reason ?? '');
   };
-  // Its earlier suite cancelled or failed, a later suite passed: installs (round 6 refused these, fail closed).
-  assert.equal(await verdict([{ name: 'scan', suite: 11, app: 4242, conclusion: 'cancelled', id: 1 }, { name: 'scan', suite: 12, app: 4242, id: 2 }]), 'installs');
-  assert.equal(await verdict([{ name: 'scan', suite: 12, app: 4242, id: 2 }, { name: 'scan', suite: 11, app: 4242, conclusion: 'failure', id: 1 }]), 'installs');
+  // Its earlier suite cancelled, failed or still running, a later suite passed: refused, or waits (round 8 installed these).
+  assert.match(await verdict([{ name: 'scan', suite: 11, app: 4242, conclusion: 'cancelled', id: 1 }, { name: 'scan', suite: 12, app: 4242, id: 2 }]), /"scan" ended cancelled/);
+  assert.match(await verdict([{ name: 'scan', suite: 12, app: 4242, id: 2 }, { name: 'scan', suite: 11, app: 4242, conclusion: 'failure', id: 1 }]), /"scan" ended failure/);
+  assert.match(await verdict([{ name: 'scan', suite: 12, app: 4242, id: 2 }, { name: 'scan', suite: 11, app: 4242, status: 'in_progress', id: 1 }]), /"scan" is in_progress/);
   // A later suite failed: refused. Another App's failure: refused.
   assert.match(await verdict([{ name: 'scan', suite: 11, app: 4242, id: 1 }, { name: 'scan', suite: 12, app: 4242, conclusion: 'failure', id: 2 }]), /"scan" ended failure/);
   assert.match(await verdict([{ name: 'scan', suite: 11, app: 4242, id: 1 }, { name: 'scan', suite: 13, app: 5555, conclusion: 'failure', id: 3 }]), /from another source ended failure/);
