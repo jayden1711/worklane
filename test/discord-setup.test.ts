@@ -157,11 +157,12 @@ async function withEnv<T>(vars: Record<string, string | undefined>, fn: () => Pr
   }
 }
 
-test('the bot view through the real child process: a failure is the command\'s own line, and bad output is refused', async () => {
+test('the bot view through the real child process: a failure says the listing failed, the command\'s own line is its cause, and bad output is refused', async () => {
   const i = instance();
   // The engine's own CLI, as the dashboard runs it; this instance has no token, so nothing reaches Discord.
+  // #1064: the child's line can name a path or quote Discord's answer, so it is the cause (logged), not the message.
   await withEnv({ [`${BRAND.envPrefix}_INSTANCES_DIR`]: i.dir }, () =>
-    assert.rejects(botView('shop', engineRunCli()), (e: unknown) => e instanceof DiscordSetupError && e.status === 502 && /instance shop has no bot token/.test(e.message)),
+    assert.rejects(botView('shop', engineRunCli()), (e: unknown) => e instanceof DiscordSetupError && e.status === 502 && e.message === "the bot's channel listing failed" && /instance shop has no bot token/.test(String(e.cause))),
   );
   await assert.rejects(botView('shop', async () => ({ status: 0, stdout: '{"application":{"id":"x"},"channels":[]}', stderr: '' })), /could not be read/);
   await assert.rejects(botView('shop', async () => ({ status: 0, stdout: 'not json', stderr: '' })), /could not be read/);
@@ -189,9 +190,10 @@ test("the listing runs this engine's own cli.js by absolute path: PATH, environm
     [`${BRAND.envPrefix}_DISCORD_API`]: 'http://discord.example',
   };
   await withEnv(vars, async () => {
-    // The engine's own CLI answered (its own line for an instance without a token); no decoy ran.
-    await assert.rejects(botView('shop', engineRunCli()), /instance shop has no bot token/);
-    await assert.rejects(botView('shop', listingRunner()), /instance shop has no bot token/);
+    // The engine's own CLI answered (its own line for an instance without a token, the error's cause); no decoy ran.
+    const ownLine = (e: unknown) => e instanceof DiscordSetupError && /instance shop has no bot token/.test(String(e.cause));
+    await assert.rejects(botView('shop', engineRunCli()), ownLine);
+    await assert.rejects(botView('shop', listingRunner()), ownLine);
   });
   assert.equal(existsSync(marks) ? readFileSync(marks, 'utf8') : '', '', 'a decoy ran');
   assert.deepEqual(Object.keys(listingEnv({ PATH: '/x', NODE_OPTIONS: '--require /y', NODE_PATH: '/z', HOME: '/h' })), ['PATH', 'HOME']);

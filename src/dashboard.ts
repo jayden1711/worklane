@@ -2530,7 +2530,7 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
             try {
               return json(res, 200, await botNow(url.searchParams.get('fresh') === '1'));
             } catch (e) {
-              if (e instanceof DiscordSetupError) return json(res, e.status, { error: e.message });
+              if (e instanceof DiscordSetupError) return json(res, e.status, { error: refusalText(`${req.method} ${url.pathname}`, e) });
               throw e;
             }
           }
@@ -2598,7 +2598,7 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
             try {
               return json(res, 200, await viewNow(kind, url.searchParams.get('fresh') === '1'));
             } catch (e) {
-              if (e instanceof DiscordSetupError) return json(res, e.status, { error: e.message });
+              if (e instanceof DiscordSetupError) return json(res, e.status, { error: refusalText(`${req.method} ${url.pathname}`, e) });
               throw e;
             }
           }
