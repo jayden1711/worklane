@@ -12,6 +12,7 @@ import { heldUpdate, RELEASE_HOLD, updateLog, type UpdateEntry } from './updates
 import { batchSummaries, type BatchSummary } from './coordinator/pr-batch.js';
 import type { EventSnapshot, Snapshots } from './events/cache.js';
 import type { StoredEvent } from './events/types.js';
+import { buildInbox, inboxFold, inboxMarkdown, inboxStep, type Inbox, type InboxFold } from './inbox.js';
 import { localDay } from './local-day.js';
 
 interface Ev {
@@ -97,6 +98,8 @@ export interface Digest {
   merged: MergedItem[];
   /** PR batches (PR mode with batching) running now or active since `mergedSince`, oldest first. */
   batches: Pick<BatchSummary, 'id' | 'status' | 'prs' | 'detail' | 'at' | 'last'>[];
+  /** The operator inbox (src/inbox.ts), the digest's first section. */
+  inbox: Inbox;
 }
 
 /** The PR batches running at `now` or with a step after `since`. */
@@ -183,6 +186,8 @@ export interface WaitFold {
   merged: MergedFold;
   /** The PR batch events (and PR closes), in order, for batchesSince. */
   batch: Ev[];
+  /** What the operator inbox reads of the log (src/inbox.ts). */
+  inbox: InboxFold;
 }
 
 export function waitFold(): WaitFold {
@@ -208,6 +213,7 @@ export function waitFold(): WaitFold {
     fixForward: new Set(),
     merged: mergedFold(),
     batch: [],
+    inbox: inboxFold(),
   };
 }
 
@@ -343,6 +349,7 @@ export function waitStep(f: WaitFold, e: Ev): void {
   if ((e.type === 'pr.closed' || e.type === 'merge.done') && typeof p.number === 'number') f.closed.add(p.number);
   if (e.type === 'pr_batch.queued' || e.type === 'pr_batch.step' || e.type === 'pr.closed') f.batch.push(e);
   mergedStep(f.merged, e);
+  inboxStep(f.inbox, e);
 }
 
 /** The list off the fold: every hold open at `now`, by kind, then the longest-waiting first. Reads `f`, never changes it. */
@@ -408,7 +415,8 @@ type DigestOptions = { since?: Date; /** The machine's engine update log (update
 function digestOf(f: WaitFold, tasks: readonly Pick<Task, 'issue' | 'status' | 'lastActivity' | 'blockedReason'>[], now: Date, o: DigestOptions): Digest {
   const items = itemsOf(f, tasks, now, o.updates);
   const since = o.since ?? new Date(now.getTime() - 86_400_000);
-  return { at: now.toISOString(), items, mergedSince: since.toISOString(), merged: mergedOf(f.merged, since, now), batches: batchesSince(f.batch, since, now) };
+  const inbox = buildInbox({ prs: { ok: true, value: f.inbox }, waits: { ok: true, value: items } }, now);
+  return { at: now.toISOString(), items, mergedSince: since.toISOString(), merged: mergedOf(f.merged, since, now), batches: batchesSince(f.batch, since, now), inbox };
 }
 
 /**
@@ -485,13 +493,14 @@ export function waited(since: string, now: Date): string {
 }
 
 /**
- * The digest as Markdown for a GitHub issue comment: a heading with the count, a section per kind, a line per
+ * The digest as Markdown for a GitHub issue comment: a heading with the count, the operator inbox, a section per kind, a line per
  * wait with how long it has waited and its issue or PR (`#n`, which GitHub links). Pure: same input, same text.
  */
 export function digestMarkdown(d: Digest, o: { project?: string } = {}): string {
   const now = new Date(d.at);
   const head = `## Waiting on you${o.project ? `: ${o.project}` : ''}, ${d.at.slice(0, 10)} (${d.items.length})`;
-  const out = [head, ''];
+  // The operator inbox comes first (#1032): one table of what is the operator's, before the holds by kind.
+  const out = [head, '', ...inboxMarkdown(d.inbox), ''];
   out.push(d.items.length ? 'Nothing here times out: each waits until you act on it.' : 'Nothing is waiting on you.');
   for (const kind of WAIT_KINDS) {
     const these = d.items.filter((i) => i.kind === kind);
