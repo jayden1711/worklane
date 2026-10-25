@@ -186,6 +186,8 @@ const Flow = z.strictObject({
   earlierPlan: z.array(z.string().min(1)).optional(),
   /** Another task's approved plan, posted after this task's: the files it lists. */
   planForAnotherIssue: z.array(z.string().min(1)).optional(),
+  /** After this task's issue.seen, another issue's, with these labels. */
+  labelsForAnotherIssue: z.array(z.string()).optional(),
   /** After this task's verdict, another task's verdict on the same head: the always-PASS one, or one rejecting the patch. */
   verdictForAnotherIssue: z.enum(['pass', 'rejected']).optional(),
 });
@@ -476,7 +478,9 @@ function decideInFlow(r: ReturnType<typeof made>, c: Case | Control, f: Flow, cf
   const log = new EventLog(join(at, 'events.db'));
   try {
     const [issue, number, actor] = [7, 9, 'i'];
-    if (c.pr.labels?.length) log.append('issue.seen', { issue, title: 't', labels: c.pr.labels, author: 'example-owner', owner: 'example-owner', actionable: true, why: 'ready' }, actor);
+    const seen = (n: number, labels: string[]) => log.append('issue.seen', { issue: n, title: 't', labels, author: 'example-owner', owner: 'example-owner', actionable: true, why: 'ready' }, actor);
+    if (c.pr.labels?.length) seen(issue, c.pr.labels);
+    if (f.labelsForAnotherIssue) seen(issue + 1, f.labelsForAnotherIssue);
     log.append('issue.claimed', { issue, instance: actor, lease: 'a'.repeat(40), base: r.base, owner: 'example-owner' }, actor);
     const planned = (files: string[]) => log.append('plan.posted', { issue, plan: { approach: 'x', steps: [], files, risks: [], design_change: false }, held: false, reasons: [], comments_at: 0, decision: null }, actor);
     if (f.earlierPlan) planned(f.earlierPlan);
