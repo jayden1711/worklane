@@ -3,12 +3,14 @@
 // and no agent or project command starts with the hatch in its environment.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync } from 'node:fs';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { BRAND } from '../src/brand.js';
 import { GuardrailsConfig, TestsConfig } from '../src/config/schema.js';
 import { exampleContext } from '../src/guardrails/check.js';
+import { liveContext } from '../src/guardrails/context.js';
 import { evaluate } from '../src/guardrails/engine.js';
 import { PUSH_GATE_HATCH_ENV, withoutPushGateHatch } from '../src/guardrails/push-hook.js';
 import { runHook } from '../src/hook.js';
@@ -136,11 +138,124 @@ test('an agent may not skip or swap the pre-push hook', () => {
   }
 });
 
+test('an agent may not skip the pre-push hook in any other spelling git reads (#993)', () => {
+  for (const c of [
+    // Prefixes of --no-verify git's option parser takes (and shorter ones another git version may).
+    'git push --no-verif',
+    'git push --no-veri origin HEAD:refs/heads/x',
+    'git push origin HEAD --no-ver',
+    'git push --no-v',
+    // Config that can carry core.hooksPath, or run a push by another name.
+    'git -c include.path=/tmp/cfg push',
+    'git -c includeIf.gitdir:/.path=/tmp/cfg push origin HEAD',
+    'git --config-env=include.path=CFG push',
+    "git -c alias.p='push --no-verify' p",
+    'git -c alias.p=push p --no-verif',
+    "git -c alias.p='-c core.hooksPath=/dev/null push' p",
+    'git -c help.autocorrect=immediate psuh --no-verify',
+    'git config include.path /tmp/cfg',
+    'git config --global includeIf.gitdir:~/.path /tmp/cfg',
+    "git config alias.p 'push --no-verify'",
+    "git config --global alias.p '!git push --no-verify'",
+    'git config set alias.p push',
+    'git config help.autocorrect immediate',
+    'git config --rename-section x core',
+    'git config --remove-section core',
+    'git config --edit',
+    'git config -e',
+    // Environment that gives a push other config, or another repository's hooks.
+    'HOME=/tmp/h git push',
+    'XDG_CONFIG_HOME=/tmp/x git push origin HEAD',
+    'GIT_CONFIG_NOSYSTEM=1 git push',
+    'GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=include.path GIT_CONFIG_VALUE_0=/tmp/cfg git push',
+    'export GIT_CONFIG_KEY_0=include.path',
+    "GIT_CONFIG_PARAMETERS=\"'alias.p=push --no-verify'\" git p",
+    'GIT_DIR=/tmp/copy.git git push',
+    'GIT_COMMON_DIR=/tmp/copy.git git push',
+    'git --git-dir=/tmp/copy.git push origin HEAD',
+    'unset HOME; git push',
+    'env -i git push',
+    'env -u HOME git push',
+    'env -u X git push --no-verify',
+    // Pushes that never run the hook.
+    'git send-pack ../remote.git HEAD:refs/heads/x',
+    'git http-push https://example.com/r.git HEAD',
+    'git remote-ext origin x',
+    '/usr/lib/git-core/git-send-pack ../remote.git HEAD',
+    // git run by a program the shell matcher doesn't read.
+    'find . -maxdepth 0 -exec git push --no-verify \\;',
+  ]) assert.deepEqual([bash(c).decision, bash(c).rule], ['deny', 'push-hook-bypass'], c);
+});
+
+test('a git name read from config: an alias or a correction to push is judged as the push it runs (#993)', () => {
+  const { dir } = exampleProject();
+  const git = (...a: string[]) => execFileSync('git', a, { cwd: dir, stdio: 'ignore' });
+  git('config', 'alias.p', 'push --no-verify');
+  git('config', 'alias.pp', 'p');
+  git('config', 'alias.r', 'push');
+  git('config', 'alias.s', '-c core.hooksPath=/dev/null push');
+  git('config', 'alias.sh', '!git push');
+  git('config', 'alias.st', 'status -sb');
+  const ctx = { ...exampleContext(cfg, dir, true), git: liveContext(dir).git! };
+  const live = (command: string, cwd = dir) => evaluate({ tool: 'Bash', input: { command }, cwd }, cfg, ctx);
+  for (const c of ['git p', 'git pp origin HEAD', 'git r --no-veri', 'git s', 'git sh', 'git -C . p', `cd ${dir} && git p`, 'HOME=/tmp/h git r', 'git st; HOME=/tmp/h git r']) {
+    assert.deepEqual([live(c).decision, live(c).rule], ['deny', 'push-hook-bypass'], c);
+  }
+  assert.equal(live('git p', join(dir, 'missing')).rule, 'push-hook-bypass', 'a lookup that fails refuses');
+  for (const c of ['git r', 'git r origin HEAD:refs/heads/task', 'git st', 'git lfs ls-files', 'git psuh --no-verify']) assert.equal(live(c).decision, 'none', c);
+  // With help.autocorrect on, git runs the push a misspelt name is closest to.
+  git('config', 'help.autocorrect', 'immediate');
+  assert.equal(live('git psuh --no-verify').rule, 'push-hook-bypass');
+  assert.equal(live('git psuh origin HEAD').decision, 'none', 'a corrected push through the hook');
+});
+
+test('the spellings are real: git skips the pre-push hook for each, and the guard refuses each (#993)', () => {
+  const base = mkdtempSync(join(tmpdir(), 'skip-'));
+  const run = (args: string[], cwd: string, env: Record<string, string> = {}) => spawnSync('git', args, { cwd, encoding: 'utf8', env: { ...process.env, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', ...env } });
+  run(['init', '-q', '--bare', 'remote.git'], base);
+  const work = join(base, 'work');
+  run(['init', '-q', 'work'], base);
+  run(['-c', 'user.name=Ada', '-c', 'user.email=ada@example.com', 'commit', '-q', '--allow-empty', '-m', 'init'], work);
+  run(['remote', 'add', 'origin', '../remote.git'], work);
+  writeFileSync(join(work, '.git', 'hooks', 'pre-push'), '#!/bin/sh\necho HOOK-RAN >&2\nexit 1\n', { mode: 0o755 });
+  writeFileSync(join(base, 'cfg'), '[core]\n\thooksPath = /dev/null\n');
+  const pushed = (args: string[]) => {
+    const r = run(args, work);
+    return r.status === 0 && !r.stderr.includes('HOOK-RAN');
+  };
+  assert.equal(pushed(['push', '-q', 'origin', 'HEAD:refs/heads/control']), false, 'the hook runs and refuses a plain push');
+  const spellings: string[][] = [
+    ['push', '-q', '--no-veri', 'origin', 'HEAD:refs/heads/a'],
+    ['-c', `include.path=${join(base, 'cfg')}`, 'push', '-q', 'origin', 'HEAD:refs/heads/b'],
+    ['-c', 'alias.p=-c core.hooksPath=/dev/null push', 'p', '-q', 'origin', 'HEAD:refs/heads/c'],
+    ['-c', 'help.autocorrect=immediate', 'psuh', '-q', '--no-verify', 'origin', 'HEAD:refs/heads/d'],
+    ['send-pack', '../remote.git', 'HEAD:refs/heads/e'],
+  ];
+  for (const args of spellings) {
+    assert.equal(pushed(args), true, `git ${args.join(' ')} skips the hook`);
+    const line = ['git', ...args.map((a) => (/\s/.test(a) ? `'${a}'` : a))].join(' ');
+    assert.deepEqual([bash(line, true, work).decision, bash(line, true, work).rule], ['deny', 'push-hook-bypass'], line);
+  }
+});
+
 test('what stays frictionless for an agent: plain pushes and commits, reading about the hatch, its own tests and docs', () => {
   for (const c of [
     'git push',
     'git push origin HEAD:refs/heads/task',
     'git push -n origin HEAD',
+    'git push -u origin HEAD',
+    'git push --verbose --force-with-lease origin HEAD:refs/heads/task',
+    'git push --verify origin HEAD',
+    'git status && git push origin HEAD',
+    'cd sub && git push',
+    'git -C sub push origin HEAD',
+    'git config --get alias.p',
+    'git config --get-regexp alias',
+    'git config --get help.autocorrect',
+    'git log --grep=--no-verify',
+    'git lfs ls-files',
+    'echo git push --no-verify',
+    'HOME=/tmp/h npm test',
     'git commit -q -m fix',
     'git commit --no-verify -m fix',
     'git config --get core.hooksPath',

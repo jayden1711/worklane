@@ -1,6 +1,6 @@
 // Runtime inputs for guardrail evaluation: stored fingerprint sets and CLI
 // link resolvers. Fingerprints are stored machine-locally, hashes only.
-import { execFileSync } from '../os/child-process.js';
+import { execFileSync, spawnSync } from '../os/child-process.js';
 import { createHash } from 'node:crypto';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
@@ -83,6 +83,10 @@ export function liveContext(projectRoot: string, env: NodeJS.ProcessEnv = proces
     fingerprints: sets,
     linkedEnvironment(resolver, cwd) {
       return resolver === 'railway' ? railwayLinkedEnvironment(cwd) : null;
+    },
+    git(dir, args) {
+      const r = spawnSync('git', args, { cwd: dir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 5_000 });
+      return { status: r.error ? null : r.status, stdout: r.stdout ?? '' };
     },
   };
 }

@@ -44,6 +44,8 @@ export function exampleContext(cfg: GuardrailsConfig, root: string, agent: boole
       for (const [dir, env] of Object.entries(links)) if (resolve(root, dir) === resolve(cwd)) return env;
       return null;
     },
+    // WHY: the examples run against no repository; every git config key reads as unset (no aliases).
+    git: () => ({ status: 1, stdout: '' }),
   };
 }
 
