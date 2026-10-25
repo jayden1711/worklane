@@ -124,11 +124,17 @@ test('git config in the environment loses every TLS, proxy and URL-rewrite key, 
   assert.deepEqual(env, { GIT_CONFIG_COUNT: '2', GIT_CONFIG_KEY_0: 'credential.helper', GIT_CONFIG_VALUE_0: '', GIT_CONFIG_KEY_1: 'safe.directory', GIT_CONFIG_VALUE_1: '*' });
 });
 
+/** A git with no system or global config, then `env`: what an env-carried setting alone makes git do. */
+const bareGitEnv = (env: Record<string, string | undefined>) => ({ PATH: process.env.PATH, HOME: tmpdir(), GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: devNull, ...env });
+
 /** What git itself reads from `env`'s config pairs: `git config --get` of `key`, or null when git fails or has none. */
-function gitReads(env: Record<string, string | undefined>, key: string): { status: number | null; value: string | null } {
-  const r = spawnSync('git', ['config', '--get', key], { cwd: tmpdir(), encoding: 'utf8', env: { PATH: process.env.PATH, HOME: tmpdir(), GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: devNull, ...env } });
-  return { status: r.status, value: r.status === 0 ? r.stdout.trim() : null };
+function gitReads(env: Record<string, string | undefined>, key: string, cwd = tmpdir()): { status: number | null; value: string | null; stderr: string } {
+  const r = spawnSync('git', ['config', '--get', key], { cwd, encoding: 'utf8', env: bareGitEnv(env) });
+  return { status: r.status, value: r.status === 0 ? r.stdout.trim() : null, stderr: r.stderr };
 }
+
+/** git's answer to a GIT_CONFIG_COUNT it refuses; a missing key exits non-zero too, without it. */
+const BOGUS_COUNT = /bogus count in GIT_CONFIG_COUNT/;
 
 test('a GIT_CONFIG_COUNT that is not a plain decimal is made one git refuses, never rewritten into one it reads (#1001)', () => {
   // git refuses the first five ("bogus count"), and Number() read each as 1, so the pair git would have refused was
@@ -139,11 +145,33 @@ test('a GIT_CONFIG_COUNT that is not a plain decimal is made one git refuses, ne
     assert.notEqual(env.GIT_CONFIG_COUNT, '1', JSON.stringify(count));
     const r = gitReads(env, 'user.name');
     assert.equal(r.value, null, `${JSON.stringify(count)}: git read the pair`);
-    assert.notEqual(r.status, 0, JSON.stringify(count));
+    assert.match(r.stderr, BOGUS_COUNT, `${JSON.stringify(count)}: git ran instead of refusing the count`);
   }
   // The plain counts the engine writes are read as before.
   assert.equal(gitReads(outboundEnv({ GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'user.name', GIT_CONFIG_VALUE_0: 'caller' }, null), 'user.name').value, 'caller');
   assert.deepEqual(outboundEnv({ GIT_CONFIG_COUNT: '0' }, null), { GIT_CONFIG_COUNT: '0' });
+});
+
+test('the boundary counts are read, not refused: 1000 pairs are stripped and kept, and an empty count reads none (#1084)', () => {
+  const n = 1000;
+  const e: Record<string, string> = { GIT_CONFIG_COUNT: String(n) };
+  for (let i = 0; i < n; i++) {
+    e[`GIT_CONFIG_KEY_${i}`] = `x.k${i}`;
+    e[`GIT_CONFIG_VALUE_${i}`] = 'v';
+  }
+  e.GIT_CONFIG_KEY_999 = 'http.sslVerify';
+  e.GIT_CONFIG_VALUE_999 = 'false';
+  const env = outboundEnv(e, null);
+  assert.equal(env.GIT_CONFIG_COUNT, '999');
+  const kept = gitReads(env, 'x.k998');
+  assert.equal(kept.value, 'v', kept.stderr);
+  const tls = gitReads(env, 'http.sslVerify');
+  assert.equal(tls.value, null, 'http.sslVerify=false reached git');
+  assert.doesNotMatch(tls.stderr, BOGUS_COUNT);
+  const empty = outboundEnv({ GIT_CONFIG_COUNT: '', GIT_CONFIG_KEY_0: 'user.name', GIT_CONFIG_VALUE_0: 'caller' }, null);
+  const r = spawnSync('git', ['config', '--list'], { cwd: tmpdir(), encoding: 'utf8', env: bareGitEnv(empty) });
+  assert.equal(r.status, 0, `an empty count made git fail: ${r.stderr}`);
+  assert.doesNotMatch(r.stdout, /user\.name/);
 });
 
 test('a GIT_CONFIG_COUNT over the bound is refused, so its TLS key never reaches git unstripped (#1001)', () => {
@@ -158,7 +186,66 @@ test('a GIT_CONFIG_COUNT over the bound is refused, so its TLS key never reaches
   assert.equal(gitReads(e, 'http.sslVerify').value, 'false', 'git reads every pair of a large count (the setting this test guards)');
   const r = gitReads(outboundEnv(e, null), 'http.sslVerify');
   assert.equal(r.value, null, 'http.sslVerify=false reached git');
-  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, BOGUS_COUNT);
+});
+
+/** A repo for git to reach, and a config file that rewrites `fake://x/` to it and turns TLS verification off. */
+function redirectingConfig(): { file: string; target: string } {
+  const dir = mkdtempSync(join(tmpdir(), 'git-redirect-'));
+  const target = join(dir, 'target');
+  const git = (...a: string[]) => spawnSync('git', a, { cwd: dir, encoding: 'utf8', env: bareGitEnv({}) });
+  assert.equal(git('init', '-q', target).status, 0);
+  assert.equal(git('-C', target, '-c', 'user.name=t', '-c', 'user.email=t@example.com', 'commit', '-q', '--allow-empty', '-m', 't').status, 0);
+  const file = join(dir, 'redirect.cfg');
+  writeFileSync(file, `[url "file://${target}"]\n\tinsteadOf = fake://x/\n[http]\n\tsslVerify = false\n`);
+  return { file, target };
+}
+
+/** Whether git, on `env` in `cwd`, reaches the redirect's target through `fake://x/` (the rewrite applied). */
+const rewrites = (env: Record<string, string | undefined>, cwd = tmpdir()) => spawnSync('git', ['ls-remote', 'fake://x/'], { cwd, encoding: 'utf8', env: bareGitEnv(env) }).status === 0;
+
+test('git config that includes another file (include.path, includeIf.<cond>.path) is stripped, so its rewrite never applies (#1084)', () => {
+  // includeIf's conditions are about a repository: git runs in one, as an agent's does.
+  const { file, target } = redirectingConfig();
+  for (const k of ['include.path', 'includeIf.gitdir:/**.path']) {
+    const raw = { GIT_CONFIG_COUNT: '2', GIT_CONFIG_KEY_0: k, GIT_CONFIG_VALUE_0: file, GIT_CONFIG_KEY_1: 'user.name', GIT_CONFIG_VALUE_1: 'caller' };
+    assert.ok(rewrites(raw, target), `${k}: git applies the included rewrite (the setting this test guards)`);
+    assert.equal(gitReads(raw, 'http.sslVerify', target).value, 'false', k);
+    const env = outboundEnv({ ...raw }, null);
+    assert.equal(rewrites(env, target), false, `${k}: the included url.*.insteadOf rewrite applied`);
+    assert.equal(gitReads(env, 'http.sslVerify', target).value, null, `${k}: the included http.sslVerify=false reached git`);
+    assert.equal(gitReads(env, 'user.name', target).value, 'caller', `${k}: the other pair is kept`);
+  }
+  for (const k of ['include.path', 'INCLUDE.PATH', ' include.path', 'includeIf.gitdir:/**.path', 'includeif.onbranch:main.path', 'includeIf.gitdir/i:/**.path', 'IncludeIf.hasconfig:remote.*.url:**.Path']) assert.ok(isRedirectGitKey(k), k);
+});
+
+test('GIT_CONFIG_GLOBAL and GIT_CONFIG_SYSTEM naming a file become the null device: git reads none of it (#1084)', () => {
+  const { file } = redirectingConfig();
+  for (const name of ['GIT_CONFIG_GLOBAL', 'GIT_CONFIG_SYSTEM']) {
+    const raw = name === 'GIT_CONFIG_SYSTEM' ? { GIT_CONFIG_NOSYSTEM: undefined, GIT_CONFIG_SYSTEM: file } : { GIT_CONFIG_GLOBAL: file };
+    assert.ok(rewrites(raw), `${name}: git applies the named file's rewrite (the setting this test guards)`);
+    const env = outboundEnv({ ...raw }, null) as Record<string, string | undefined>;
+    assert.equal(env[name], '/dev/null', name);
+    assert.equal(rewrites(env), false, `${name}: the named file's url.*.insteadOf rewrite applied`);
+    assert.equal(gitReads(env, 'http.sslVerify').value, null, `${name}: the named file's http.sslVerify=false reached git`);
+    // Every casing goes (Windows reads any); the null device, which names nothing, is kept as it is.
+    assert.deepEqual(outboundEnv({ [name.toLowerCase()]: file }, null), { [name]: '/dev/null' });
+    assert.deepEqual(outboundEnv({ [name]: '/dev/null' }, null), { [name]: '/dev/null' });
+  }
+  assert.deepEqual(outboundEnv({ GIT_CONFIG_NOSYSTEM: '1', PATH: '/bin' }, null), { GIT_CONFIG_NOSYSTEM: '1', PATH: '/bin' });
+});
+
+test('git config naming a remote\'s proxy, URL or push URL, or a git:// proxy command, is stripped (#1084)', () => {
+  const { target } = redirectingConfig();
+  const pushUrl = (env: Record<string, string | undefined>) => spawnSync('git', ['remote', 'get-url', '--push', '--all', 'origin'], { cwd: target, encoding: 'utf8', env: bareGitEnv(env) }).stdout.trim();
+  assert.equal(spawnSync('git', ['remote', 'add', 'origin', 'https://github.invalid/o/r'], { cwd: target, env: bareGitEnv({}) }).status, 0);
+  const raw = { GIT_CONFIG_COUNT: '2', GIT_CONFIG_KEY_0: 'remote.origin.pushurl', GIT_CONFIG_VALUE_0: 'https://elsewhere.invalid/o/r', GIT_CONFIG_KEY_1: 'remote.origin.proxy', GIT_CONFIG_VALUE_1: 'http://127.0.0.1:9' };
+  assert.equal(pushUrl(raw), 'https://elsewhere.invalid/o/r', 'git pushes to an env-carried push URL (the setting this test guards)');
+  const env = outboundEnv({ ...raw }, null);
+  assert.equal(pushUrl(env), 'https://github.invalid/o/r');
+  assert.equal(gitReads(env, 'remote.origin.proxy').value, null);
+  for (const k of ['remote.origin.proxy', 'REMOTE.origin.PROXY', 'remote.my.fork.proxyAuthMethod', 'remote.origin.url', 'remote.origin.pushurl', 'remote.origin.pushURL', 'core.gitProxy', 'CORE.GITPROXY']) assert.ok(isRedirectGitKey(k), k);
+  for (const k of ['remote.origin.fetch', 'remote.origin.tagOpt', 'remote.pushDefault', 'core.sshCommand', 'core.autocrlf']) assert.equal(isRedirectGitKey(k), false, k);
 });
 
 test('a custom CA: a root-owned file of PEM certificates sets exactly NODE_EXTRA_CA_CERTS, SSL_CERT_FILE and GIT_SSL_CAINFO', { skip: posixOnly }, () => {
