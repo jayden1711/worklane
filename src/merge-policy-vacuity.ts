@@ -45,17 +45,20 @@
 // merge-vacuity-r12, M3 to R3s, P1a to P5, E1 to E8, X2, X3 and Z-A1 to Z-N4 in -r13), but only a top-level
 // statement moved whole, paired by its code or its declared name (the closest same-named pair first); one git paired
 // in place with a removed statement of its name (or, unnamed, an unnamed one) whose code it keeps at a similarity of
-// at least 0.8 pairs with nothing (Z-F6 to Z-F11, G1, D1, U1), and one keeping less took its place and pairs as any
-// other (N5, N6: must hold). Only formatting is no change: whitespace,
+// at least 0.8 pairs with nothing (Z-F6 to Z-F11, G1, D1, U1), and one keeping less, or too large to align with it
+// (ALIGN_CELLS, each pair on its own), took its place and pairs as any other (N5, N6, BL1wb, BUDf, B3: must hold).
+// Only formatting is no change: whitespace,
 // semicolons, a comma before a closing bracket, and parentheses around an arrow function's one parameter or around
 // one expression with no `,` or `;` of its own, not starting with `{`, opened right after an assignment's `=`, `=>`,
 // `return`, `throw`, `(`, `[`, `,` or `:`, or after `??` when it holds no `?`, `:`, `|`, `&` or `=` outside brackets,
 // and closed right before `;`, `,`, `)`, `]`, `}` or the end (Q-P, Q-Pq,
 // Q-Pc, R3s). Every other parenthesis counts (Z-F1, Z-F1b, G2, G2e, G5, B16b, PQ2, PQ3: must merge). A statement
 // moved within its file that git pairs with its own old text is measured as git measured it, so its re-formatting
-// counts and a test that runs it merges the PR (W1, W2: todos in -r13; measured); one rewritten in place past that
-// similarity to the text of a copy the PR removes elsewhere is read as moved from there, so a test that runs only it
-// holds the PR (a todo in -r13; measured; main merges it). Still read as added code,
+// counts and a test that runs it merges the PR (W1, W2: todos in -r13; measured); so is one moved over a stale
+// same-named one with the same first line, which git keeps, so it is never wholly added (N5u: a todo in -r13;
+// measured); one rewritten in place with every code line new, past that similarity or too large to align, to the text
+// of a copy the PR removes elsewhere is read as moved from there, so a test that runs only it holds the PR (a todo in
+// -r13; measured; main merges it). Still read as added code,
 // so a test that runs it merges the PR: one re-wrapped with parentheses anywhere else (`(a && b) || c`, `? (y) :`,
 // `}())`; measured in #1014's fifth review, and main merges these too); one renamed as it
 // moved, or moved inside a statement that stays (a method within its class, a statement into another function)

@@ -551,6 +551,57 @@ test('must hold: N6: N5 over a one-line stale g (the removals git measured insid
   assert.deepEqual(await intoStale("export const k = 1;\nexport const g = () => 'stale';\n"), hold('src/c.js, src/s.js'));
 });
 
+// ---- #1014's seventh review: a pair too large to align is not one edited in place, and no other pair spends its cells
+const N5_FILES = (stale: string, moved: string) => [{ 'src/s.js': S.replace(S_G, moved), 'src/c.js': stale }, { 'src/s.js': editH(S_T), 'src/c.js': IMP + 'export const k = 1;\n' + moved, 'test/x.test.js': calls('c.js', 'g', 'g({})', '3') }] as const;
+const n5With = async (before: Record<string, string>, after: Record<string, string>, stale = STALE, moved = S_G) => {
+  const [b, a] = N5_FILES(stale, moved);
+  const d = await decided({ ...b, ...before }, { ...a, ...after });
+  return [d.auto, d.reasons];
+};
+const BUILD = (p: string) => `const defaults = {};\nexport function build(${p}) {\n` + Array.from({ length: 200 }, (_, i) => `  ${p}.field${i} = ${p}.field${i} ?? defaults.field${i};\n`).join('') + `  return ${p};\n}\n`;
+const ROWS = (q: string, wrap: boolean) => `export const TABLE = ${wrap ? 'Object.freeze([' : '['}\n` + Array.from({ length: 120 }, (_, i) => `  [${q}alpha-beta-gamma-${i}${q}, ${q}delta-epsilon-zeta-${i}${q}],\n`).join('') + (wrap ? ']);\n' : '];\n');
+const TABLES = (d: number, n = 10) => Array.from({ length: n }, (_, t) => `export const T${t} = [${Array.from({ length: 500 }, (_, i) => (i * 7 + t + (i === 3 ? d : 0)) % 1000).join(', ')}];\nexport const sep${t} = ${t};\n`).join('');
+
+test('must hold: BUDf: N5 with a 200-line function edited in place on every line in a file that sorts first', async () => {
+  assert.deepEqual(await n5With({ 'src/a.js': BUILD('o') }, { 'src/a.js': BUILD('options') }), hold('src/a.js, src/c.js, src/s.js'));
+});
+
+test('must hold: BUD120: N5 with a 120-row table re-quoted and wrapped in place in a file that sorts first', async () => {
+  assert.deepEqual(await n5With({ 'src/a.js': ROWS("'", false) }, { 'src/a.js': ROWS('"', true) }), hold('src/a.js, src/c.js, src/s.js'));
+});
+
+test('control: BUDz: BUD120 with the table in a file that sorts after the moved g holds', async () => {
+  assert.deepEqual(await n5With({ 'src/z.js': ROWS("'", false) }, { 'src/z.js': ROWS('"', true) }), hold('src/c.js, src/s.js, src/z.js'));
+});
+
+test('must hold: B3: N5 with ten ~1,950-character one-line tables edited in place in a file that sorts first', async () => {
+  assert.deepEqual(await n5With({ 'src/a.js': TABLES(0) }, { 'src/a.js': TABLES(1) }), hold('src/a.js, src/c.js, src/s.js'));
+});
+
+test('control: B3c: B3 with three tables holds', async () => {
+  assert.deepEqual(await n5With({ 'src/a.js': TABLES(0, 3) }, { 'src/a.js': TABLES(1, 3) }), hold('src/a.js, src/c.js, src/s.js'));
+});
+
+const G110 = 'export function g(u) {\n' + Array.from({ length: 110 }, (_, i) => `  const v${i} = alpha(u) + ${i} * beta(u);\n`).join('') + '  return combine(alpha(u), beta(u));\n}\n';
+const STALE_W = 'export const k = 1;\nexport function g(w) {\n' + Array.from({ length: 110 }, (_, i) => `  const v${i} = gamma(w) - ${i} / beta(w);\n`).join('') + '  return combine(alpha(w), alpha(w));\n}\n';
+
+test('must hold: BL1wb: N5 with a 110-line g moved over a 110-line stale g(w) too large to align with it', async () => {
+  assert.deepEqual(await n5With({}, {}, STALE_W, G110), hold('src/c.js, src/s.js'));
+});
+
+test('must merge: D1p: D1 with a 200-line function edited in place in a file that sorts first (each pair aligns on its own)', async () => {
+  await merges({ 'src/0.js': BUILD('o'), 'src/a.js': D1_A('export const f = (x) => x + 1;'), 'src/b.js': 'export const f = (x) => x + 2;\nexport const k = 0;\n' }, { 'src/0.js': BUILD('options'), 'src/a.js': D1_A('export const f = (x) => x + 2;'), 'src/b.js': 'export const k = 0;\n', 'test/x.test.js': calls('a.js', 'f', 'f(1)', '3') });
+});
+
+test('must merge: BIGIN: a tested 110-line function edited in place on its first and last lines', async () => {
+  const f = (a: string) => 'export function f(u) {\n' + Array.from({ length: 110 }, (_, i) => `  u.k${i} = u.k${i} ${i === 0 || i === 109 ? a : '-'} ${i};\n`).join('') + '  return u;\n}\nexport const z = 0;\n';
+  await merges({ 'src/a.js': f('+') }, { 'src/a.js': f('*'), 'test/x.test.js': calls('a.js', 'f', 'f({ k0: 1 }).k0 > -1', 'true') });
+});
+
+test('limit: N5u: N5 over a stale g with the same first line', { todo: 'git keeps `export function g(u) {`, so the moved g is never wholly added and is measured as git measured it: it merges, as at d76d96f0 and on main #1014' }, async () => {
+  assert.deepEqual(await intoStale(STALE.replace('function g()', 'function g(u)')), hold('src/c.js, src/s.js'));
+});
+
 test('limit: a statement rewritten in place past EDITED_IN_PLACE to the text of a copy the PR removes elsewhere', { todo: 'it keeps too little of its old text to count as edited in place, so it pairs with the copy as moved from there and holds, as at d76d96f0; main merges it #1014' }, async () => {
   await merges({ 'src/a.js': D1_A('export const f = (x) => x + 1;'), 'src/b.js': 'export const f = (x) => Math.max(x, 0) * 2;\nexport const k = 0;\n' }, { 'src/a.js': D1_A('export const f = (x) => Math.max(x, 0) * 2;'), 'src/b.js': 'export const k = 0;\n', 'test/x.test.js': calls('a.js', 'f', 'f(1)', '2') });
 });
