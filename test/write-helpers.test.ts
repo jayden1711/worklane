@@ -183,6 +183,49 @@ test('writeGroupOnly keeps a 0600 file 0600 and opens any other to 0660, as grou
   assert.equal(readFileSync(file, 'utf8'), 'NEW\n');
 });
 
+test('writeGroupOnly opens a file it replaces to 0660 whatever the umask, unless it was 0600', { skip: !POSIX && 'POSIX modes' }, () => {
+  const { file } = fixture();
+  for (const [was, umask, want] of [
+    [0o660, 0o077, 0o660],
+    [0o640, 0o077, 0o660],
+    [0o644, 0o277, 0o660],
+    [0o600, 0o077, 0o600],
+    [0o600, 0o022, 0o600],
+    [0o600, 0o000, 0o600],
+  ] as const) {
+    rmSync(file);
+    writeFileSync(file, 'OLD\n', { mode: was });
+    fs.chmodSync(file, was);
+    underUmask(umask, () => writeGroupOnly(file, 'NEW\n'));
+    assert.equal(mode(file), want, `a ${was.toString(8)} file under umask ${umask.toString(8).padStart(3, '0')}`);
+    assert.equal(readFileSync(file, 'utf8'), 'NEW\n');
+  }
+  rmSync(file);
+  underUmask(0o077, () => writeGroupOnly(file, 'NEW\n'));
+  assert.equal(mode(file), 0o600, 'a new file the umask leaves 0600 stays 0600');
+});
+
+test('writeGroupOnly still writes the file where the file system refuses a mode change, as groupOnly did', { skip: !POSIX && 'POSIX modes' }, () => {
+  const { dir, file, victim } = fixture();
+  const real = fs.fchmodSync;
+  let refused = 0;
+  fs.fchmodSync = (() => {
+    refused++;
+    throw Object.assign(new Error('EPERM: operation not permitted, fchmod'), { code: 'EPERM' });
+  }) as typeof fs.fchmodSync;
+  syncBuiltinESMExports();
+  try {
+    underUmask(0o022, () => writeGroupOnly(file, 'NEW\n'));
+  } finally {
+    fs.fchmodSync = real;
+    syncBuiltinESMExports();
+  }
+  assert.ok(refused > 0, 'the mode change was tried');
+  assert.equal(readFileSync(file, 'utf8'), 'NEW\n');
+  assert.ok(lstatSync(file).isFile());
+  assert.deepEqual(readdirSync(dir).sort(), [basename(file), basename(victim)].sort(), 'no staging name left behind');
+});
+
 test('writeAgentReadable gives the file its group through the descriptor', { skip: !POSIX && 'POSIX groups' }, () => {
   const { file } = fixture();
   const gid = process.getgid!();

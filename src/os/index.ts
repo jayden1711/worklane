@@ -452,13 +452,21 @@ export function currentUser(): string {
 }
 
 /**
- * Write a state file readable by the coordinator's user and group only, as writeStaged does: 0660, or 0600 as
- * groupOnly keeps it, when the file it replaces is 0600 or the umask leaves a new file 0600.
+ * Write a state file readable by the coordinator's user and group only, as writeStaged does, with the modes an
+ * in-place write then groupOnly gave (#1062 round 2): a file it replaces stays 0600 if it was 0600, else 0660,
+ * whatever the umask; a new file is 0660, or 0600 when the umask leaves it 0600. A file system that refuses the mode
+ * change (vfat, some FUSE mounts) gets the file with the mode it was made with, as groupOnly's swallowed chmod left it.
  */
 export function writeGroupOnly(file: string, data: string | Uint8Array): void {
   const old = lstatSync(file, { throwIfNoEntry: false });
-  const keepOwnerOnly = old?.isFile() === true && (old.mode & 0o777) === 0o600;
-  writeStaged(file, data, (fd) => fchmodSync(fd, keepOwnerOnly || (fstatSync(fd).mode & 0o777) === 0o600 ? 0o600 : 0o660), 0o660);
+  const was = old?.isFile() ? old.mode & 0o777 : null;
+  writeStaged(file, data, (fd) => {
+    try {
+      fchmodSync(fd, (was ?? fstatSync(fd).mode & 0o777) === 0o600 ? 0o600 : 0o660);
+    } catch {
+      // the file system keeps its own modes
+    }
+  }, 0o660);
 }
 
 export function detectOs(setting: OsSetting = 'auto'): OsKind {
