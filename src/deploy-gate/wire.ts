@@ -16,11 +16,13 @@ import { DEPLOY_GATE_CHECK, HOST_TOKEN_CREDENTIAL, type PostDeployConfig } from 
 import { DeployGate, refUpdateBody, type DeployRefs, type GateGit, type RefResult } from './gate.js';
 import { PostDeploy, type FollowUpTracker } from './post-deploy.js';
 import { githubDeployments, railwayHost, RAILWAY_API } from './railway.js';
+import { gitRemote } from '../git-remote.js';
 
 type Fetch = typeof fetch;
 
 /** The gate's git over the coordinator's clone: both branches fetched (the deploy branch only when it exists). */
 export function gateGit(repo: string, remote: string, main: string, deploy: string): GateGit {
+  gitRemote(remote);
   const git = (...a: string[]) => spawnSync('git', a, { cwd: repo, encoding: 'utf8', timeout: 180_000, maxBuffer: 64 * 1024 * 1024 });
   return {
     fetch: () => {

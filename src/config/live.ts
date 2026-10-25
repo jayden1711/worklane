@@ -6,6 +6,7 @@
 // Merges are still judged by the config at their own parent (main-watch.ts requiredAt): this is for everything else.
 import { spawnSync } from '../os/child-process.js';
 import { BRAND } from '../brand.js';
+import { gitRemote } from '../git-remote.js';
 import { ConfigInvalid, loadConfigAt, type Config, type ConfigError } from './load.js';
 
 /** The incident an invalid config on the default branch raises, by instance (resolved once a valid one is back). */
@@ -107,6 +108,7 @@ export class LiveConfig {
   private readonly ref: string;
 
   constructor(private readonly o: LiveConfigOptions) {
+    gitRemote(o.remote);
     this.ref = `refs/remotes/${o.remote}/${o.branch}`;
     this.good = o.tree !== undefined ? o.tree : configTree(o.repo, 'HEAD');
   }
@@ -158,6 +160,7 @@ export class LiveConfig {
  * otherwise the checkout's (`fallback`), and why. `tree` is what the running config was loaded from.
  */
 export function startConfig(o: { repo: string; remote: string; fallback: Config; check?: (cfg: Config) => ConfigError[] }): { cfg: Config; tree: string | null; note: string | null } {
+  gitRemote(o.remote);
   const branch = o.fallback.project.project.default_branch;
   spawnSync('git', ['fetch', '-q', o.remote, `+refs/heads/${branch}:refs/remotes/${o.remote}/${branch}`], { cwd: o.repo, stdio: 'ignore', timeout: 60_000 });
   const ref = `refs/remotes/${o.remote}/${branch}`;
