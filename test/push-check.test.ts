@@ -176,6 +176,81 @@ test('checkedPush refuses the default branch, however the ref is spelled, record
   assert.deepEqual(checkedPush({ cwd: r.work, remote: 'origin', base: r.baseSha, head, ref: 'refs/heads/main', limits: limits(), guard: guard({ directLand: true }) }), { ok: true });
 });
 
+/**
+ * `fn` with a git stand-in first on PATH that, the first time a git command line contains `when`, runs `change` (a
+ * shell line, in that git's directory) and then the real git: a change to the repo between the push check's git calls,
+ * at a chosen one (#981).
+ */
+function racing<T>(when: string, change: string, fn: () => T): T {
+  const real = execFileSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).trim();
+  const dir = mkdtempSync(join(tmpdir(), 'push-race-'));
+  writeFileSync(join(dir, 'git'), `#!/bin/sh\ncase " $* " in *"$RACE_WHEN"*) [ -e "$RACE_MARK" ] || { : > "$RACE_MARK"; sh -c "$RACE_CHANGE"; } ;; esac\nexec "$RACE_GIT" "$@"\n`, { mode: 0o755 });
+  const saved = { PATH: process.env.PATH, RACE_WHEN: process.env.RACE_WHEN, RACE_CHANGE: process.env.RACE_CHANGE, RACE_MARK: process.env.RACE_MARK, RACE_GIT: process.env.RACE_GIT };
+  Object.assign(process.env, { PATH: `${dir}:${process.env.PATH}`, RACE_WHEN: when, RACE_CHANGE: change, RACE_MARK: join(dir, 'ran'), RACE_GIT: real });
+  try {
+    const out = fn();
+    assert.ok(statSync(join(dir, 'ran'), { throwIfNoEntry: false }), `the change ran (no git call matched ${JSON.stringify(when)})`);
+    return out;
+  } finally {
+    for (const [k, v] of Object.entries(saved)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  }
+}
+
+const unix = { skip: process.platform === 'win32' ? 'the git stand-in is a shell script' : false };
+
+test('a repo config broken between the push check\'s git calls gives a named refusal, never a throw (#981)', unix, () => {
+  const r = repo();
+  const head = r.commit({ 'src/a.js': 'a\n' });
+  // The size check is the last read; its rename pairing reads the repo's config.
+  const p = racing(' -U0 ', `printf '[broken\\n' >> .git/config`, () => pushProblems(r.work, r.baseSha, head, limits()));
+  assert.equal(p.length, 1, p.join('\n'));
+  assert.match(p[0]!, /push limits couldn't read the range .*bad config/);
+  assert.match(p[0]!, /nothing is pushed/);
+});
+
+test('checkedPush refuses, never throws, when git fails mid-check, and pushes nothing (#981)', unix, () => {
+  const r = repo();
+  const head = r.commit({ 'src/a.js': 'a\n' });
+  const res = racing('rev-list --objects', `printf '[broken\\n' >> .git/config`, () => checkedPush({ cwd: r.work, remote: 'origin', base: r.baseSha, head, ref: 'refs/heads/task', limits: limits(), guard: guard(), force: true }));
+  assert.ok(!res.ok && 'refused' in res, JSON.stringify(res));
+  assert.match(res.refused[0]!, /push limits couldn't read the range/);
+  assert.equal(git(r.remote, 'for-each-ref', 'refs/heads/task'), '', 'nothing pushed');
+});
+
+test('a head or base that names no commit is a refusal, not a throw (#981)', () => {
+  const r = repo();
+  const head = r.commit({ 'src/a.js': 'a\n' });
+  for (const [base, h] of [[r.baseSha, 'no-such-branch'], ['no-such-base', head]] as const) {
+    const p = pushProblems(r.work, base, h, limits());
+    assert.equal(p.length, 1, p.join('\n'));
+    assert.match(p[0]!, /push limits couldn't read the range/);
+  }
+});
+
+test('a head branch deleted between the push check\'s git calls changes nothing: the range is read by commit id (#981)', unix, () => {
+  const r = repo();
+  r.commit({ 'data/x': 'b\n' });
+  git(r.work, 'checkout', '-q', '-b', 'topic');
+  git(r.work, 'checkout', '-q', '--detach');
+  const p = racing('rev-list --objects', 'git update-ref -d refs/heads/topic', () => pushProblems(r.work, r.baseSha, 'topic', limits({ refuse_paths: ['data/**'] })));
+  assert.equal(p.length, 1, p.join('\n'));
+  assert.match(p[0]!, /data\/x/);
+});
+
+test('checkedPush pushes the commit it checked, even when the head branch moves before the push (#981)', unix, () => {
+  const r = repo();
+  const good = r.commit({ 'src/a.js': 'a\n' });
+  const bad = r.commit({ 'data/x': 'b\n' });
+  git(r.work, 'branch', 'topic', good);
+  const res = racing(' push ', `git update-ref refs/heads/topic ${bad}`, () => checkedPush({ cwd: r.work, remote: 'origin', base: r.baseSha, head: 'topic', ref: 'refs/heads/task', limits: limits({ refuse_paths: ['data/**'] }), guard: guard(), force: true }));
+  assert.deepEqual(res, { ok: true });
+  assert.equal(git(r.work, 'rev-parse', 'topic'), bad, 'the branch did move');
+  assert.equal(git(r.remote, 'rev-parse', 'refs/heads/task'), good, 'the checked commit was pushed, not the moved branch');
+});
+
 test('the coordinator passes the default branch guard on every push, and only the direct land may push main', () => {
   for (const f of ['src/coordinator/landing.ts', 'src/coordinator/merge-flow.ts', 'src/coordinator/fix-runs.ts', 'src/coordinator/decisions.ts', 'src/tune.ts']) {
     const text = readFileSync(join(repoRoot, f), 'utf8');
