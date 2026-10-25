@@ -637,6 +637,22 @@ export function mergeBaseOf(cwd: string, a: string, b: string): string {
 }
 
 /**
+ * The tree merging `a` and `b` makes (git merge-tree --write-tree, git 2.38 or later: no worktree, no index, no ref
+ * moved; only the merged objects are written to the object store), or null when the merge conflicts. For the merge
+ * decision's check for a weakened test, lint or guard: what merging a PR would make of the default branch (#1069).
+ * Throws when git fails (an older git, no merge base).
+ */
+export function mergedTree(cwd: string, a: string, b: string): string | null {
+  if (a.startsWith('-') || b.startsWith('-')) throw new Error(`mergedTree: ${a} or ${b} is not a revision`);
+  const r = spawnSync('git', withGit(['merge-tree', '--write-tree', '--no-messages', a, b]), { cwd, encoding: 'utf8', maxBuffer: MAX_BUFFER });
+  if (r.error) throw r.error;
+  if (r.status === 1) return null;
+  const tree = (r.stdout ?? '').split('\n')[0]!.trim();
+  if (r.status !== 0 || !/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(tree)) throw new Error(`git merge-tree ${a.slice(0, 40)} ${b.slice(0, 40)} failed: ${(r.stderr || `exit ${r.status}`).trim().slice(0, 500)}`);
+  return tree;
+}
+
+/**
  * The text of each of `paths` that is a file in `rev`'s tree, keyed by path; a path that isn't there is left out. For
  * the merge decision's check for a weakened test, lint or guard (src/merge-policy-weakening.ts), which compares a
  * changed file before and after. Paths are from the top of the repo. A blob over `maxBytes` isn't read: its path is
