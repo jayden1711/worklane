@@ -35,10 +35,14 @@ function standIn() {
   return { bin, put, run: () => runner.run(req) };
 }
 
-/** Where `secret` starts in `value`, and the two cut points in it: one character short of its end, and its middle. */
-function cuts(value: string, secret: string): { at: number; len: number; ks: number[] } {
+/**
+ * Where `secret` starts in `value`, and the two cut points in it: one character short of all of it (its end cut off
+ * for a head cut, its start for a tail cut), and its middle.
+ */
+function cuts(value: string, secret: string, from: 'head' | 'tail' = 'head'): { at: number; len: number; ks: number[] } {
   const at = value.indexOf(secret);
-  return { at, len: secret.length, ks: [...new Set([at + secret.length - 1, at + Math.floor(secret.length / 2)])] };
+  const short = from === 'head' ? at + secret.length - 1 : at + 1;
+  return { at, len: secret.length, ks: [...new Set([short, at + Math.floor(secret.length / 2)])] };
 }
 
 /**
@@ -52,7 +56,7 @@ function acrossHead(cap: number, value: string, secret: string): string[] {
 
 /** Texts that put `value` across a tail cut at `cap`: all of it but its first `k` characters kept. */
 function acrossTail(cap: number, value: string, secret: string, lead = 600): string[] {
-  const { ks } = cuts(value, secret);
+  const { ks } = cuts(value, secret, 'tail');
   return ks.filter((k) => cap - (value.length - k) >= 2).map((k) => `START ${'w'.repeat(lead)} ${value} ${'z'.repeat(cap - (value.length - k) - 1)}`);
 }
 
@@ -129,16 +133,65 @@ test("a secret across the cut of a rate limit's or a result's words is redacted 
   assert.deepEqual([...gaps], []);
 });
 
-test("redactTail's window never shows its raw start, even when redaction shrinks what follows it (#1065)", () => {
-  const token = `ghp_${run(36)}`;
+/**
+ * `value`, then a private key, sized so that a window of the text's last `cap` + CUT_MARGIN characters, started after
+ * its first whitespace, would start at the secret: past the label a space separates it from (`Bearer <token>`). The
+ * key redacts to its marker, so the secret would be in the kept end, without its label (R92b on #1092). `labelled`:
+ * the last whitespace before the secret is inside the value.
+ */
+function afterLabel(cap: number, value: string, secret: string, end = ''): { text: string; labelled: boolean } {
+  const head = `START ${value} `;
+  let ws = head.indexOf(secret) - 1;
+  while (!/\s/.test(head[ws]!)) ws--;
   const line = (w: string) => [`-----${w}`, 'RSA', 'PRIVATE', 'KEY-----'].join(' ');
-  const key = [line('BEGIN'), run(CUT_MARGIN + 200), line('END')].join('\n');
-  const s = `START ${token} ${key} and the end`;
-  // The window (the last max + CUT_MARGIN characters) starts 20 characters into the token.
-  const max = s.length - CUT_MARGIN - (s.indexOf(token) + 20);
-  const got = redactTail(s, max);
-  assert.ok(!leaks(got, token) && !leaks(got, run(CUT_MARGIN + 200)), got.slice(0, 80));
-  assert.match(got, /and the end$/);
+  const after = ` and the end${end}`;
+  const body = ws + cap + CUT_MARGIN - head.length - line('BEGIN').length - line('END').length - 2 - after.length;
+  return { text: `${head}${[line('BEGIN'), run(body), line('END')].join('\n')}${after}`, labelled: ws >= 'START '.length };
+}
+
+test('a secret a space separates from its label stays redacted when a key after it shrinks under redaction, through auth status and stderr (#1065)', { skip: posixOnly }, async () => {
+  const s = standIn();
+  const missed: string[] = [];
+  const labelled: string[] = [];
+  for (const shape of SHAPES) {
+    const auth = afterLabel(500, shape.value, shape.secret);
+    if (auth.labelled) labelled.push(shape.what);
+    s.put({ status: auth.text });
+    const got = claudeAuthStatus({ PATH: process.env.PATH ?? '' }, undefined, s.bin);
+    if (leaks(got.text, shape.secret) || !got.text.endsWith('and the end')) missed.push(`${shape.what} in auth status: ${JSON.stringify(got.text.slice(0, 60))}`);
+    const err = afterLabel(STDERR_KEPT, shape.value, shape.secret, '\n');
+    s.put({ stderr: err.text });
+    const out = await s.run();
+    if (leaks(out.detail, shape.secret) || !out.detail.endsWith('and the end')) missed.push(`${shape.what} in stderr: ${JSON.stringify(out.detail.slice(0, 60))}`);
+  }
+  assert.deepEqual(missed, []);
+  assert.ok(labelled.length >= 4, `shapes with a label a space separates: ${labelled.join(', ')}`);
+});
+
+test('a secret across a cut made while stderr is still being read is redacted whole, never kept as its end (#1065)', () => {
+  const max = 400;
+  const missed: string[] = [];
+  const uncut: string[] = [];
+  for (const shape of SHAPES) {
+    for (const k of cuts(shape.value, shape.secret, 'tail').ks) {
+      // A first chunk over twice the cap, ending in whitespace, whose last `max` characters start `k` into the value.
+      const first = `START ${'w'.repeat(3 * max)} ${shape.value} ${'z'.repeat(max - 2 - (shape.value.length - k))} `;
+      if (!hiddenWhole(first, shape.secret, shape.what, new Set())) continue;
+      const kept = keepStderr(keepStderr('', first, max), 'bye', max);
+      if (leaks(redactTail(kept, max), shape.secret)) missed.push(`${shape.what}, cut ${k - cuts(shape.value, shape.secret).at} into it`);
+      if (kept.includes('START') || !kept.endsWith('z bye')) uncut.push(`${shape.what}: ${JSON.stringify(kept.slice(0, 40))}`);
+    }
+  }
+  assert.deepEqual(missed, []);
+  assert.deepEqual(uncut, []);
+});
+
+test('a run of stderr with no whitespace is still cut to the cap, redacted (#1065)', () => {
+  const max = 100;
+  const kept = keepStderr('w w ', 'a'.repeat(3 * max), max);
+  assert.equal(kept, 'a'.repeat(max));
+  const token = `ghp_${run(36)}`;
+  assert.ok(!leaks(keepStderr('', `${'a'.repeat(3 * max)}:${token}`, max), token), 'a token glued to the run is redacted');
 });
 
 test('stderr read in any chunks is cut with a secret across the cut redacted whole, and a token still being written is kept as it came (#1065)', () => {

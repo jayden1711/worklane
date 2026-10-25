@@ -29,7 +29,7 @@ import { mcpRunArgs, type McpRun } from './mcp/client.js';
 import { limitHit, USAGE_LIMIT_TEXT, type LimitHit, type RateLimitInfo } from './usage-limit.js';
 import { authFailedDetail, isAuthFailure } from './claude-auth-failure.js';
 import { EFFORTS, type Effort } from './roles.js';
-import { CUT_MARGIN, redactCut, redactString } from './events/redact.js';
+import { redactCut, redactString } from './events/redact.js';
 
 export type TerminalReason = 'succeeded' | 'failed' | 'timed_out' | 'stalled' | 'rate_limited' | 'canceled_by_reconciliation' | 'budget_exhausted' | 'auth_mismatch' | 'auth_failed' | 'stopped' | 'stuck';
 
@@ -481,17 +481,12 @@ export function cliArgs(req: RunRequest, settings?: object, systemPromptFile?: s
 }
 
 /**
- * redactCut from the end (#1065): the last `max` characters of `s` once redacted, reading only its last `max` +
- * CUT_MARGIN. That window starts after its first whitespace, as readWindow's ends at its last: the raw start of a
- * window is never shown. A private key whose BEGIN is above the window still fails closed by its END.
+ * The last `max` characters of `s` once redacted (#1065): all of `s` is redacted, never a window of it. A window's
+ * start can fall between a credential's label and its value (`Bearer <token>`), leaving the value unrecognised.
+ * Callers pass bounded text: stderr as keepStderr holds it, or a command's captured output.
  */
 export function redactTail(s: string, max: number): string {
-  let from = 0;
-  if (s.length > max + CUT_MARGIN) {
-    from = s.length - max - CUT_MARGIN;
-    while (from < s.length && !/\s/.test(s[from - 1]!)) from++;
-  }
-  const r = redactString(from ? s.slice(from) : s);
+  const r = redactString(s);
   return r.length <= max ? r : r.slice(-max);
 }
 
