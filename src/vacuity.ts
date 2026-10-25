@@ -24,7 +24,8 @@
 //           side, code in a string) or a build's map places code only by line. And the two limits where an untested
 //           change merges that src/merge-policy-vacuity.ts names: moved code the pairing doesn't find or can't place
 //           (renamed as it moved, moved inside a statement that stays, rewritten too far to align with its source, in
-//           a file whose brackets no reading balances) reads as added code, so a test that runs it counts; and a
+//           a file whose brackets no reading balances and not starting on an `export` or `import` line) reads as
+//           added code, so a test that runs it counts; and a
 //           deleted app file, or one renamed out of app code, leaves no app code to measure.
 import { spawn, spawnSync } from './os/child-process.js';
 import { lstatSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync } from 'node:fs';
@@ -411,16 +412,19 @@ export function codeLines(text: string): { code: boolean[]; inComment: boolean[]
 /**
  * One reading of codeLines: `slashIsRegex`, every `/` that starts no comment starts a regular expression. 'statements'
  * (topUnits' reading, never codeLines'): the first reading, but a `/` right after an `if`, `for`, `while` or `with`
- * condition starts a regular expression and one after a postfix `++` or `--` divides. `top[i]`: line i starts outside
- * every bracket, string, template and comment; `balanced`: the reading ends cleanly with every bracket it opened closed
- * and none closed that it hadn't opened.
+ * condition starts a regular expression and one after a postfix `++` or `--` divides. `fresh[i]`: line i starts outside
+ * every string, template and comment; `top[i]`: and outside every bracket; `syntax[i]`: character i is code outside
+ * every string, template and regular expression (a `}` that closes a template's `${` aside); `balanced`: the reading
+ * ends cleanly with every bracket it opened closed and none closed that it hadn't opened.
  */
-function lexLines(text: string, slashIsRegex: boolean | 'statements'): { code: boolean[]; inComment: boolean[]; mask: Uint8Array; top: boolean[]; settled: boolean; balanced: boolean } {
+function lexLines(text: string, slashIsRegex: boolean | 'statements'): { code: boolean[]; inComment: boolean[]; mask: Uint8Array; syntax: Uint8Array; fresh: boolean[]; top: boolean[]; settled: boolean; balanced: boolean } {
   type State = 'code' | 'line' | 'block' | 'sq' | 'dq' | 'tpl' | 're' | 'class';
   const code: boolean[] = [false];
   const inComment: boolean[] = [];
   const mask = new Uint8Array(text.length);
+  const syntax = new Uint8Array(text.length);
   let s: State = text.startsWith('#!') ? 'line' : 'code';
+  const fresh: boolean[] = [s === 'code'];
   const top: boolean[] = [s === 'code'];
   // For each `${` open: how many `{` its expression has open.
   const braces: number[] = [];
@@ -440,6 +444,7 @@ function lexLines(text: string, slashIsRegex: boolean | 'statements'): { code: b
       // A string or a regular expression ends at a line's end unless a `\` continued it (handled below).
       if (s === 'line' || s === 're' || s === 'class' || s === 'sq' || s === 'dq') s = 'code';
       code[line] = s === 'tpl';
+      fresh[line] = s === 'code';
       top[line] = s === 'code' && depth === 0;
       continue;
     }
@@ -452,6 +457,7 @@ function lexLines(text: string, slashIsRegex: boolean | 'statements'): { code: b
         inComment[line] = false;
         line++;
         code[line] = true;
+        fresh[line] = false;
         top[line] = false;
         i++;
       }
@@ -498,6 +504,7 @@ function lexLines(text: string, slashIsRegex: boolean | 'statements'): { code: b
     }
     code[line] = true;
     mask[i] = 1;
+    syntax[i] = 1;
     if (/[A-Za-z0-9_$]/.test(c)) {
       word = /[A-Za-z0-9_$]/.test(prev === 'a' ? (text[i - 1] ?? '') : '') ? word + c : c;
       prev = 'a';
@@ -506,6 +513,7 @@ function lexLines(text: string, slashIsRegex: boolean | 'statements'): { code: b
     const value = prev === 'a' ? !KEYWORDS_BEFORE_REGEX.has(word) : prev === ')' || prev === ']';
     if (slashIsRegex === 'statements' && value && (c === '+' || c === '-') && text[i + 1] === c) {
       mask[++i] = 1;
+      syntax[i] = 1;
       continue;
     }
     const after = slashIsRegex === true ? 'operator' : value ? 'value' : 'operator';
@@ -525,6 +533,7 @@ function lexLines(text: string, slashIsRegex: boolean | 'statements'): { code: b
       if (braces.length && braces.at(-1) === 0) {
         braces.pop();
         s = 'tpl';
+        syntax[i] = 0;
       } else if (braces.length) braces[braces.length - 1]!--;
       low = Math.min(low, --depth);
       prev = '}';
@@ -537,7 +546,7 @@ function lexLines(text: string, slashIsRegex: boolean | 'statements'): { code: b
   }
   inComment[line] = s === 'block';
   const settled = (s === 'code' || s === 'line') && braces.length === 0;
-  return { code: code.map(Boolean), inComment, mask, top: top.map(Boolean), settled, balanced: settled && depth === 0 && low >= 0 };
+  return { code: code.map(Boolean), inComment, mask, syntax, fresh: fresh.map(Boolean), top: top.map(Boolean), settled, balanced: settled && depth === 0 && low >= 0 };
 }
 
 /**
@@ -714,7 +723,7 @@ function alignHunk(aLines: readonly HunkLine[], rLines: readonly HunkLine[]): st
  *   `default`: V8 keeps no range there). A removal inside a block comment (nothing added) is none.
  * Null: a hunk too large to align, or a removed side it can't place, which the caller holds on.
  * `unplaced` (movedCode's call, #1014): each hunk is a moved unit and its source, from any base file, never joined with
- * the unchanged lines around it, MOVE_NOISE is never code on either side, and a hunk it can't place is left out and
+ * the unchanged lines around it, formatting (quiet) is never code on either side, and a hunk it can't place is left out and
  * its index added to `unplaced` (never null).
  */
 export function codeRanges(text: string, hunks: readonly ChangedHunkSpots[], baseOf?: (path: string) => string | null, unplaced?: number[]): ChangedCode | null {
@@ -730,7 +739,7 @@ export function codeRanges(text: string, hunks: readonly ChangedHunkSpots[], bas
   const baseFile = (p: string) => {
     if (!baseMasks.has(p)) {
       const t = baseOf!(p);
-      baseMasks.set(p, t === null ? null : { text: t, mask: codeLines(t).mask, starts: lineStarts(t) });
+      baseMasks.set(p, t === null ? null : { text: t, mask: moved ? quiet(t, codeLines(t).mask) : codeLines(t).mask, starts: lineStarts(t) });
     }
     return baseMasks.get(p)!;
   };
@@ -852,13 +861,12 @@ export function codeRanges(text: string, hunks: readonly ChangedHunkSpots[], bas
     // The removed side: its characters, and which held code, as lexed in the base file they came from (round 10);
     // without a base reader (a direct call), its own text lexed.
     const rText = h.removed.join('\n');
-    const read = baseOf && h.removed.length ? removedMask(h, rText) : codeLines(rText).mask;
-    if (!read) {
+    const rMask = baseOf && h.removed.length ? removedMask(h, rText) : codeLines(rText).mask;
+    if (!rMask) {
       if (!moved) return null;
       unplaced.push(n);
       continue;
     }
-    const rMask = moved ? quiet(rText, read) : read;
     const rIdx: number[] = [];
     const rLines: HunkLine[] = h.removed.map(() => ({ chars: [], code: [] }));
     for (let i = 0, k = 0; i < rText.length; i++) {
@@ -931,31 +939,90 @@ export function codeRanges(text: string, hunks: readonly ChangedHunkSpots[], bas
   return { chars: out.sort((x, y) => x[0] - y[0]), needs };
 }
 
-/** What a formatter adds or drops when it re-wraps code (parentheses, a trailing comma, a semicolon): in moved code, never a change (#1014: M5b, R3s). */
-const MOVE_NOISE = /[(),;]/;
-
-/** `mask` with every MOVE_NOISE character of `text` taken out of the code. */
+/**
+ * `mask` with what a formatter adds or drops as it re-wraps code taken out of the code (#1014: M5b, R3s): every `;`, a
+ * `,` before a closing bracket, and parentheses that can't change what the code does. Those wrap one expression with no
+ * `,` or `;` of their own and not starting with `{`, opened right after an assignment's `=`, `=>`, `return`, `throw`,
+ * `(`, `[`, `,`, `?` or `:` and closed right before `;`, `,`, `)`, `]`, `}` or the end; or wrap an arrow function's one
+ * parameter. Any other parenthesis is code (Z-F1: `a * (b + c)`, Z-F1b: `!(x instanceof Array)`, Z-F6: `s.open()`), as
+ * is every one when the brackets don't pair up. Read on the statement reading of lexLines, outside strings and templates.
+ */
 function quiet(text: string, mask: Uint8Array): Uint8Array {
   const out = new Uint8Array(mask);
-  for (let i = 0; i < text.length; i++) if (out[i] && MOVE_NOISE.test(text[i]!)) out[i] = 0;
+  const read = lexLines(text, 'statements');
+  if (!read.settled) return out;
+  const at: number[] = [];
+  for (let i = 0; i < text.length; i++) if (read.syntax[i]) at.push(i);
+  const ch = (k: number) => (k >= 0 && k < at.length ? text[at[k]!]! : '');
+  const close = new Map<number, number>();
+  const open: number[] = [];
+  let paired = true;
+  for (let k = 0; k < at.length; k++) {
+    const c = ch(k);
+    if (c === '(' || c === '[' || c === '{') open.push(k);
+    else if (c === ')' || c === ']' || c === '}') {
+      const o = open.pop();
+      if (o === undefined || (c === ')') !== (ch(o) === '(')) paired = false;
+      else if (c === ')') close.set(o, k);
+    }
+  }
+  const drop = (k: number) => {
+    out[at[k]!] = 0;
+  };
+  for (let k = 0; k < at.length; k++) {
+    const c = ch(k);
+    if (c === ';' || (c === ',' && /^[)\]}]$/.test(ch(k + 1)))) drop(k);
+  }
+  if (!paired || open.length) return out;
+  const word = (k: number) => /[\w$]/.test(ch(k));
+  for (const [o, k] of close) {
+    const inner = at.slice(o + 1, k);
+    if (!inner.length) continue;
+    const one = inner.every((_, j) => word(o + 1 + j)) && at[k - 1]! - at[o + 1]! === k - o - 2;
+    if (one && ch(k + 1) === '=' && ch(k + 2) === '>') {
+      drop(o);
+      drop(k);
+      continue;
+    }
+    let depth = 0;
+    let lone = ch(o + 1) !== '{';
+    for (let j = o + 1; j < k && lone; j++) {
+      const x = ch(j);
+      if (x === '(' || x === '[' || x === '{') depth++;
+      else if (x === ')' || x === ']' || x === '}') depth--;
+      else if (depth === 0 && (x === ',' || x === ';')) lone = false;
+    }
+    const [p, pp] = [ch(o - 1), ch(o - 2)];
+    const after = /^[([,?:]$/.test(p) || (p === '=' && !/[=!<>]/.test(pp)) || (p === '>' && pp === '=') || (word(o - 1) && /(?:^|[^\w$.])(?:return|throw)$/.test(text.slice(Math.max(0, at[o - 1]! - 7), at[o - 1]! + 1)));
+    if (lone && after && /^[;,)\]}]?$/.test(ch(k + 1))) {
+      drop(o);
+      drop(k);
+    }
+  }
   return out;
 }
 
-/** A line that starts a declaration (topUnits: a statement starts there unless the code before it goes on). */
-const DECLARATION = /^\s*(?:export|import|function|class|const|let|var|async|enum|namespace|abstract|declare|interface|module\.exports|exports)\b/;
+/** Lines topUnits starts a statement on: always (a module's `export` or `import`, at a line's start), at no bracket
+ * whatever ends the code before (a keyword no expression goes on with: Z-A1, Z-A2, X2, X3), or where that code ended. */
+const ANCHOR = /^(?:export\b|import\b(?!\s*[(.]))/;
+const STATEMENT = /^\s*(?:(?:export|const|let|var|enum|interface|declare|abstract|namespace)\b|import\b(?!\s*[(.]))/;
+const DECLARATION = /^\s*(?:function|class|async|module\.exports|exports)\b/;
 
 /**
  * A text's top-level statements as 1-based line spans [first, last] (`lex`: its codeLines), each to the last line
- * holding code before the next one. A statement starts on a line that holds code and starts outside every bracket,
- * string, template and comment, as the first reading of lexLines that is balanced says: 'statements', then every `/`
- * a regular expression (#1014's reviews: P1, E4, E5); with none balanced, the text has none. And only where the code
- * before it has ended: it ends in `;` or `}`, or the line starts a declaration, and it doesn't end in an operator
- * (`=`, `=>`, `+`: a postfix `++` or `--` ends): E1, E1b, E1f. Code before the first statement is in none.
+ * holding code before the next one. A statement starts on a line outside every string, template and comment that
+ * starts a module's `export` or `import` (ANCHOR: only top-level code can, so no misread bracket moves it: Z-B1, Z-B2),
+ * or on one outside every bracket too, as the first reading of lexLines that is balanced says ('statements', then every
+ * `/` a regular expression: P1, E4, E5, E7), that starts with a keyword no expression goes on with (STATEMENT), or
+ * where the code before it has ended: it ends in `;` or `}` or the line starts a declaration, and it doesn't end in an
+ * operator (`=`, `=>`, `+`: a postfix `++` or `--` ends): E1, E1b, E1f. With no reading balanced, only ANCHOR lines
+ * start one. Code before the first statement is in none.
  */
 function topUnits(text: string, lex: { code: boolean[]; mask: Uint8Array }): [number, number][] {
-  let read = lexLines(text, 'statements');
-  if (!read.balanced) read = lexLines(text, true);
-  if (!read.balanced) return [];
+  const own = lexLines(text, 'statements');
+  const every = own.balanced ? own : lexLines(text, true);
+  const read = own.balanced ? own : every.balanced ? every : null;
+  const fresh = (read ?? own).fresh;
   const starts = lineStarts(text);
   const out: [number, number][] = [];
   // The last two code characters before line i.
@@ -966,14 +1033,15 @@ function topUnits(text: string, lex: { code: boolean[]; mask: Uint8Array }): [nu
     let tail = end;
     for (let o = starts[i]!; o < (starts[i + 1] ?? text.length); o++) if (lex.mask[o] && !/\s/.test(text[o]!)) tail = (tail + text[o]).slice(-2);
     const goesOn = /[=+\-*%&|^!~?:,.<>]$/.test(end) && end !== '++' && end !== '--';
-    if (read.top[i] && (!out.length || (!goesOn && (/[;}]$/.test(end) || DECLARATION.test(line))))) out.push([i + 1, i + 1]);
+    const opens = (fresh[i] && ANCHOR.test(line)) || (read !== null && read.top[i] && (!out.length || STATEMENT.test(line) || (!goesOn && (/[;}]$/.test(end) || DECLARATION.test(line)))));
+    if (opens) out.push([i + 1, i + 1]);
     else if (out.length) out.at(-1)![1] = i + 1;
     end = tail;
   }
   return out;
 }
 
-/** The most cells movedCode's alignments may take, in all, to choose between same-named sources (past it: the first). */
+/** The most cells movedCode's alignments may take, in all, to choose between same-named pairs (past it: path order). */
 const MOVE_PAIR_CELLS = 8 * ALIGN_CELLS;
 
 /**
@@ -983,8 +1051,9 @@ const MOVE_PAIR_CELLS = 8 * ALIGN_CELLS;
  * (topUnits: a function, a class, a declaration, an `exports.x =`) whose lines that hold code are all added, paired
  * with one whose lines that hold code are all removed (either side's closing lines may be unchanged), from any app file
  * at the base (`hunks`' removed lines, and `elsewhere`'s: the removed line spans of app files not measured, a deleted
- * one say): first one with the same code (MOVE_NOISE and whitespace left out), which changed nothing in it (P2x: never
- * aligned), then one with the same declared name, measured against it by codeRanges. Each source pairs once. A unit
+ * one say), never one git already paired it with (same): first one with the same code (formatting, quiet, and
+ * whitespace left out), which changed nothing in it (P2x: never aligned), then one with the same declared name, the
+ * closest pairs first, measured against it by codeRanges. Each source pairs once. A unit
  * paired by name that can't be placed (rewritten too far to align: FH1, FH2) is measured as git paired it, as added
  * code. A statement moved inside a statement that stays (two lines swapped in a function) is in no moved unit:
  * reordering is a change. A file with no moved unit is not in the map: it is measured as git paired it. measureTouched
@@ -1001,10 +1070,13 @@ function movedCode(
     const m = /^\s*(?:(?:module\.)?exports\.([A-Za-z_$][\w$]*)\s*=(?!=)|(?:export\s+)?(?:default\s+)?(?:declare\s+)?(?:abstract\s+)?(?:async\s+)?(?:function\b\s*\*?\s*|class\s+|enum\s+|namespace\s+|(?:const|let|var)\s+(?:enum\s+)?)([A-Za-z_$][\w$]*))/.exec(line);
     return m ? (m[1] ?? m[2])! : null;
   };
-  // The top-level units of a text whose lines that hold code are all `kept`, or hold only closing brackets and
-  // separators (a `}` git keeps between the unit and the code written in its place: E2, E2d).
-  const unitsOf = (path: string, text: string, kept: (l: number) => boolean): Unit[] => {
+  // The top-level units of a text whose lines that hold code are all `kept`, hold only closing brackets and separators
+  // (a `}` git keeps between the unit and the code written in its place: E2, E2d), or are kept into one and the same
+  // place (`kept` gives it: a source's header git keeps for the unit rewritten in its place, Z-N2) with one of them
+  // `kept` itself (K-G: a unit kept whole inside new code is still there, no source).
+  const unitsOf = (path: string, text: string, kept: (l: number) => boolean | string): Unit[] => {
     const lex = codeLines(text);
+    const code = quiet(text, lex.mask);
     const starts = lineStarts(text);
     const closes = (l: number) => {
       for (let i = starts[l - 1]!; i < (starts[l] ?? text.length); i++) if (lex.mask[i] && !/[\s)\]};,]/.test(text[i]!)) return false;
@@ -1013,10 +1085,20 @@ function movedCode(
     const out: Unit[] = [];
     for (const [first, last] of topUnits(text, lex)) {
       let whole = true;
-      for (let l = first; l <= last && whole; l++) if (lex.code[l - 1] && !kept(l) && !closes(l)) whole = false;
-      if (!whole) continue;
+      let into: string | null = null;
+      let gone = false;
+      for (let l = first; l <= last && whole; l++) {
+        if (!lex.code[l - 1]) continue;
+        const k = kept(l);
+        gone ||= k === true;
+        if (typeof k === 'string' && !closes(l)) {
+          whole = into === null || into === k;
+          into = k;
+        } else if (k !== true && !closes(l)) whole = false;
+      }
+      if (!whole || (into !== null && !gone)) continue;
       let key = '';
-      for (let i = starts[first - 1]!; i < starts[last]!; i++) if (lex.mask[i] && !/\s/.test(text[i]!) && !MOVE_NOISE.test(text[i]!)) key += text[i];
+      for (let i = starts[first - 1]!; i < starts[last]!; i++) if (code[i] && !/\s/.test(text[i]!)) key += text[i];
       if (!key) continue;
       const lines: string[] = [];
       for (let l = first; l <= last; l++) lines.push(text.slice(starts[l - 1], starts[l]).replace(/\n$/, ''));
@@ -1029,12 +1111,39 @@ function movedCode(
   const span = (p: string, s: readonly [number, number]) => removed.set(p, [...(removed.get(p) ?? []), [s[0], s[1]]]);
   for (const { hunks } of heads.values()) for (const h of hunks) if (h.removed.length && h.oldPath !== undefined && h.from !== undefined) span(h.oldPath, [h.from, h.from + h.removed.length - 1]);
   for (const [p, spans] of Object.entries(elsewhere)) for (const s of spans) span(p, s);
+  // Where an unchanged base line of `p` is at the head: the head file it went to, and the start of the head unit there
+  // holding it when that unit has code added (rewritten in place); null: anywhere else.
+  const rewritten = new Map<string, [number, number][]>();
+  const rewrittenIn = (f: string) => {
+    if (!rewritten.has(f)) {
+      const { text, hunks } = heads.get(f)!;
+      const lex = codeLines(text);
+      const lines = new Set(hunks.flatMap((h) => h.added));
+      rewritten.set(f, topUnits(text, lex).filter(([a, b]) => Array.from({ length: b - a + 1 }, (_, k) => a + k).some((l) => lex.code[l - 1] && lines.has(l))));
+    }
+    return rewritten.get(f)!;
+  };
+  const keptAt = (p: string, l: number): string | null => {
+    const f = [...heads.keys()].sort().find((x) => heads.get(x)!.hunks.some((h) => h.oldPath === p));
+    if (f === undefined) return null;
+    let at = l;
+    for (const h of [...heads.get(f)!.hunks].sort((x, y) => (x.from ?? 0) - (y.from ?? 0))) {
+      if (h.oldPath !== p || h.from === undefined) return null;
+      const bS = h.removed.length ? h.from : h.from + 1;
+      const hS = h.added.length ? h.added[0]! : h.at + 1;
+      if (l < bS) break;
+      if (l < bS + h.removed.length) return null;
+      at = l - (bS + h.removed.length) + hS + h.added.length;
+    }
+    const unit = rewrittenIn(f).find(([a, b]) => at >= a && at <= b);
+    return unit ? `${f}:${unit[0]}` : null;
+  };
   const sources: (Unit & { used: boolean })[] = [];
   for (const p of [...removed.keys()].sort()) {
     const text = baseOf(p);
     if (text === null) continue;
     const spans = removed.get(p)!;
-    for (const u of unitsOf(p, text, (l) => spans.some(([a, b]) => l >= a && l <= b))) sources.push({ ...u, used: false });
+    for (const u of unitsOf(p, text, (l) => spans.some(([a, b]) => l >= a && l <= b) || (keptAt(p, l) ?? false))) sources.push({ ...u, used: false });
   }
   const out = new Map<string, ChangedCode>();
   if (!sources.length) return out;
@@ -1053,38 +1162,42 @@ function movedCode(
     from.used = true;
     moves.set(f, [...(moves.get(f) ?? []), { unit, from }]);
   };
+  // Whether git already paired them: a hunk of the unit's file removed lines of the source and added lines of the unit
+  // (a statement edited in place is measured as git measured it: Z-F6 to Z-F11).
+  const same = (u: Unit, s: Unit) => heads.get(u.path)!.hunks.some((h) => h.oldPath === s.path && h.from !== undefined && h.removed.length > 0 && h.from <= s.last && h.from + h.removed.length - 1 >= s.first && h.added.some((l) => l >= u.first && l <= u.last));
   const left: [string, Unit][] = [];
   for (const f of files) {
     for (const u of added.get(f)!) {
-      const s = byKey.get(u.key)?.find((x) => !x.used);
+      const s = byKey.get(u.key)?.find((x) => !x.used && !same(u, x));
       if (s) pair(f, u, s);
       else if (u.name !== null) left.push([f, u]);
     }
   }
+  // Then by name, the closest pairs first (Z-N1 to Z-N3: a same-named unit never takes another's source by its path).
+  const named = left.flatMap(([f, u]) => sources.filter((s) => !s.used && s.name === u.name && !same(u, s)).map((s) => ({ f, u, s, score: 0 })));
   let cells = 0;
-  for (const [f, u] of left) {
-    const named = sources.filter((s) => !s.used && s.name === u.name);
-    if (!named.length) continue;
-    let best = named[0]!;
-    let most = -1;
-    for (const s of named.length > 1 ? named : []) {
-      cells += (u.key.length + 1) * (s.key.length + 1);
-      if (cells > MOVE_PAIR_CELLS) break;
-      const kept = alignChars([...u.key], [...s.key])?.filter((x) => x === '=').length ?? -1;
-      if (kept > most) [best, most] = [s, kept];
-    }
-    pair(f, u, best);
+  for (const c of named) {
+    if (named.filter((d) => d.u === c.u || d.s === c.s).length < 2) continue;
+    cells += (c.u.key.length + 1) * (c.s.key.length + 1);
+    const kept = cells > MOVE_PAIR_CELLS ? null : alignChars([...c.u.key], [...c.s.key]);
+    c.score = kept ? kept.filter((x) => x === '=').length * 2 - c.u.key.length - c.s.key.length : -Infinity;
+  }
+  const taken = new Set<Unit>();
+  for (const c of named.map((c, n) => ({ ...c, n })).sort((x, y) => y.score - x.score || x.n - y.n)) {
+    if (c.s.used || taken.has(c.u)) continue;
+    taken.add(c.u);
+    pair(c.f, c.u, c.s);
   }
   for (const [f, ms] of moves) {
     const { text, code } = heads.get(f)!;
     ms.sort((x, y) => x.unit.first - y.unit.first);
     // A unit with its source's code changed nothing: only those paired by name are measured against their source.
-    const named = ms.filter(({ unit, from }) => unit.key !== from.key);
-    const hunks = named.map(({ unit, from }): ChangedHunkSpots => ({ at: unit.first - 1, added: Array.from({ length: unit.last - unit.first + 1 }, (_, k) => unit.first + k), removed: from.lines, from: from.first, oldPath: from.path }));
+    const aligned = ms.filter(({ unit, from }) => unit.key !== from.key);
+    const hunks = aligned.map(({ unit, from }): ChangedHunkSpots => ({ at: unit.first - 1, added: Array.from({ length: unit.last - unit.first + 1 }, (_, k) => unit.first + k), removed: from.lines, from: from.first, oldPath: from.path }));
     const unplaced: number[] = [];
     const m = (hunks.length && codeRanges(text, hunks, baseOf, unplaced)) || { chars: [], needs: [] };
     // One it can't place (rewritten past alignment: FH1, FH2) is measured as added code, as git paired it.
-    const placed = ms.filter((x) => !unplaced.includes(named.indexOf(x)));
+    const placed = ms.filter((x) => !unplaced.includes(aligned.indexOf(x)));
     // The units' lines, as offsets: what codeRanges found there gives way to each unit measured against its source.
     const starts = lineStarts(text);
     const inUnit = (o: number) => placed.some(({ unit }) => o >= starts[unit.first - 1]! && o < starts[unit.last]!);

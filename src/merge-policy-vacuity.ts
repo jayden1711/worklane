@@ -42,12 +42,15 @@
 // Each of these has a todo test (merge-vacuity-r8, -r9-limits; B1 in -r6). And two where an untested change merges:
 // code moved in a way git doesn't pair is measured as if git had paired it (#1014: a file renamed and re-indented or
 // edited, a function moved into another file or within its file, moved code re-wrapped; must-holds R1, R3, R4 in
-// merge-vacuity-r12, M3 to R3s, P1a to P5 and E1 to E7 in -r13), but only a top-level statement moved whole, paired by
-// its code or its declared name. Still read as added code, so a test that runs it merges the PR: one renamed as it
+// merge-vacuity-r12, M3 to R3s, P1a to P5, E1 to E8, X2, X3 and Z-A1 to Z-N4 in -r13), but only a top-level
+// statement moved whole, paired by its code or its declared name (the closest same-named pair first), never with
+// the old text git already paired it with (Z-F6 to Z-F11), and only formatting is no change (parentheses that change
+// precedence count: Z-F1, Z-F1b). Still read as added code, so a test that runs it merges the PR: one renamed as it
 // moved, or moved inside a statement that stays (a method within its class, a statement into another function)
 // (inferred: the pairing's rules); one paired by name but rewritten too far to align with its source (FH1, FH2 in
-// -r13, which must merge; measured); and every statement of a file whose brackets no reading of the lexer balances (a
-// todo in -r13; measured); and deleting an app file, or
+// -r13, which must merge; in a 150-line statement two replaced lines are enough: X1, a todo in -r13; measured); and,
+// in a file whose brackets no reading of the lexer balances, every statement not starting on an `export` or `import`
+// line (a todo in -r13; measured); and deleting an app file, or
 // renaming one out of app code (to a data file, a test path, or out of app_paths), leaves no app code to measure, so
 // it merges with no test and no run (measured for a deletion, a file renamed to .json and one renamed to a test path;
 // inferred for a move out of app_paths, which the same app-code filter drops).

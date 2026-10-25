@@ -1,11 +1,13 @@
 ### Guardrail changes: what each one does
 
 - **Code a PR moves without git pairing it no longer lets a test of the moved code merge the PR (#1014).** Before, a file renamed and re-indented or edited, a function split out into another file or moved within its file, or moved code re-wrapped, read as added code: a test that ran the moved code merged the PR even when its real change was untested.
-  - The vacuity gate now also measures each file with every top-level statement the PR moved whole (a function, a class, a declaration, an `exports.x =`) measured against its source, from any app file at the base, a deleted one included. It pairs a statement first by its code (whitespace, parentheses, commas and semicolons left out), then by its declared name. A file counts only where it counts both ways, so the pairing only ever takes measure away: a dead copy of an edited line's old text still never makes the edit count.
-  - A statement runs to its end, across a line its formatter wrapped. A closing `}` that git keeps between a moved statement and the code written in its place doesn't stop the pairing.
+  - The vacuity gate now also measures each file with every top-level statement the PR moved whole (a function, a class, a declaration, an `exports.x =`) measured against its source, from any app file at the base, a deleted one included. It pairs a statement first by its code, then by its declared name, the closest same-named pair first, so a same-named statement elsewhere never takes another's source. A file counts only where it counts both ways, so the pairing only ever takes measure away: a dead copy of an edited line's old text still never makes the edit count.
+  - Only formatting is no change in a moved statement: whitespace, semicolons, a comma before a closing bracket, and parentheses that can't change what the code does (around a lone arrow parameter, or around a whole value after `=`, `(`, `,`, `return` and the like). Parentheses that change precedence count as code.
+  - A statement git already paired with its old text, edited in place, is measured as git measured it, never paired with that old text again.
+  - A statement runs to its end, across a line its formatter wrapped. A line starting with `export` or `import` always starts a statement, and so does one starting with a keyword no expression goes on with (`const`, `let`, `var`, `enum`, `interface`, `declare`, `abstract`, `namespace`), whatever the line before ends with. A closing `}` that git keeps between a moved statement and the code written in its place doesn't stop the pairing.
   - Lines swapped inside a function that stays are not a move: reordering is a change, and a test that runs it counts as before.
   - **Limit:** these still read as added code, as before:
     - a statement renamed as it moved;
     - a statement moved inside one that stays (a method within its class, a statement into another function);
-    - a statement that keeps its name but is rewritten too far to align with its old text;
-    - every statement in a file whose brackets the gate's lexer can't balance.
+    - a statement that keeps its name but is rewritten too far to align with its old text: in a large statement (150 lines) two replaced lines are enough;
+    - in a file whose brackets the gate's lexer can't balance, every statement that doesn't start on an `export` or `import` line (an `exports.x =` in CommonJS, say).
