@@ -638,18 +638,25 @@ export function mergeBaseOf(cwd: string, a: string, b: string): string {
 
 /**
  * The tree merging `a` and `b` makes (git merge-tree --write-tree, git 2.38 or later: no worktree, no index, no ref
- * moved; only the merged objects are written to the object store), or null when the merge conflicts. For the merge
- * decision's check for a weakened test, lint or guard: what merging a PR would make of the default branch (#1069).
- * Throws when git fails (an older git, no merge base).
+ * moved; only the merged objects are written to the object store), `a`'s side first in a conflict's markers,
+ * and the paths the merge conflicts on (none: it merges cleanly). A merge that conflicts still writes a tree: its
+ * conflicted files hold conflict markers and both sides' lines. Git merges by the attributes of the checkout at `cwd`.
+ * For the merge decision's check for a weakened test, lint or guard: what merging a PR would make of the default
+ * branch (#1069, #1077). Throws when git fails (an older git, no merge base, output it can't read).
  */
-export function mergedTree(cwd: string, a: string, b: string): string | null {
+export function mergedTree(cwd: string, a: string, b: string): { tree: string; conflicts: string[] } {
   if (a.startsWith('-') || b.startsWith('-')) throw new Error(`mergedTree: ${a} or ${b} is not a revision`);
-  const r = spawnSync('git', withGit(['merge-tree', '--write-tree', '--no-messages', a, b]), { cwd, encoding: 'utf8', maxBuffer: MAX_BUFFER });
+  // -z --name-only: the tree, then each conflicted path once, each ended by a NUL.
+  const r = spawnSync('git', withGit(['merge-tree', '--write-tree', '--no-messages', '--name-only', '-z', a, b]), { cwd, encoding: 'buffer', maxBuffer: MAX_BUFFER });
   if (r.error) throw r.error;
-  if (r.status === 1) return null;
-  const tree = (r.stdout ?? '').split('\n')[0]!.trim();
-  if (r.status !== 0 || !/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(tree)) throw new Error(`git merge-tree ${a.slice(0, 40)} ${b.slice(0, 40)} failed: ${(r.stderr || `exit ${r.status}`).trim().slice(0, 500)}`);
-  return tree;
+  const [tree, ...rest] = fields(r.stdout ?? Buffer.alloc(0));
+  const id = tree?.toString('latin1') ?? '';
+  const conflicts = rest.filter((p) => p.length).map(nameOf);
+  // A conflict (exit 1) names what conflicts; a clean merge (exit 0) names nothing.
+  if ((r.status !== 0 && r.status !== 1) || !/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(id) || (r.status === 1) !== conflicts.length > 0) {
+    throw new Error(`git merge-tree ${a.slice(0, 40)} ${b.slice(0, 40)} failed: ${((r.stderr ?? Buffer.alloc(0)).toString('utf8') || `exit ${r.status}`).trim().slice(0, 500)}`);
+  }
+  return { tree: id, conflicts };
 }
 
 /**

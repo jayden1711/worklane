@@ -19,7 +19,8 @@
 // Other pure additions pass: an added assertion, test, rule or guard line never waits.
 //
 // Every change is measured twice (weakeningOf, #1069): from its base, and as what merging it would change on the
-// default branch's tip (a merge that conflicts there is left to the conflict paths; its resolution is measured).
+// default branch's tip (a merge that conflicts there is measured from the tree git writes for it, and waits when it
+// conflicts in a file read strictly, #1077; elsewhere it is left to the conflict paths, and its resolution measured).
 //
 // Bounded and fail closed: one pass over each changed line of the files it checks, with substrings and linear
 // patterns only (no quantifier); over MAX_CHANGED_CHARS of such lines, a diff that doesn't match its line counts (cut short), a file that
@@ -359,11 +360,18 @@ export interface WeakeningInput {
    * mark the head lacks always waits.
    */
   meet?: (path: string) => string | null;
+  /**
+   * The paths a merge into the default branch's tip conflicts on, for the change from the tip to the tree git writes
+   * for that merge (weakeningOf, #1077). One the hold reads strictly waits: GitHub's own merge may complete there, and
+   * what it makes is never read. Absent: the change isn't a merge.
+   */
+  conflicts?: readonly string[];
 }
 
 /** Each kind of weakening, in the words a reason uses, in the order reasons are given. */
 const KINDS = {
   unreadable: "can't read a change to check it, so it may weaken a check",
+  'tip-conflict': "conflicts with the default branch's current tip in a test, lint, guard, allowlist or table file, so what merging it makes there can't be read",
   'test-file-deleted': 'deletes a test file',
   'test-assertion': 'removes or changes a line with an assertion or a test on it',
   'test-lines': "removes or changes a line of a test's expected output or fixture",
@@ -830,14 +838,13 @@ type Found = Map<Kind, { first: string[]; n: number }>;
  * Why a change may weaken a test, lint or guard: one `design:` reason per kind, naming up to three places (a file, and
  * the line). Empty: it removes or loosens none of them. Pure: the caller reads the diff and the files (weakeningOf).
  * With `more`, each is measured too and a reason from any of them counts (weakeningOf's second measurement, #1069):
- * still one reason per kind, its places from all of them (a place named once), its count the largest one's.
+ * still one reason per kind, its places from all of them (a place named once), its count the largest one's. One over
+ * MAX_CHANGED_CHARS gives only the reason that says so, beside the others' reasons (#1077).
  */
 export function weakeningReasons(i: WeakeningInput, ...more: WeakeningInput[]): string[] {
   const all: Found = new Map();
   for (const one of [i, ...more]) {
-    const found = findings(one);
-    if (typeof found === 'string') return [found];
-    for (const [kind, at] of found) {
+    for (const [kind, at] of findings(one)) {
       const into = all.get(kind) ?? all.set(kind, { first: [], n: 0 }).get(kind)!;
       for (const p of at.first) if (into.first.length < 3 && !into.first.includes(p)) into.first.push(p);
       into.n = Math.max(into.n, at.n, into.first.length);
@@ -852,8 +859,8 @@ export function weakeningReasons(i: WeakeningInput, ...more: WeakeningInput[]): 
   return out;
 }
 
-/** One change's findings, by kind; or, over MAX_CHANGED_CHARS, the one reason that says so. */
-function findings(i: WeakeningInput): Found | string {
+/** One change's findings, by kind; over MAX_CHANGED_CHARS, only the finding that says so. */
+function findings(i: WeakeningInput): Found {
   const found: Found = new Map();
   const hit = (kind: Kind, path: string, what?: string) => {
     const at = found.get(kind) ?? found.set(kind, { first: [], n: 0 }).get(kind)!;
@@ -950,7 +957,11 @@ function findings(i: WeakeningInput): Found | string {
   // The bound, before any line is read: over it, one reason and nothing else.
   let chars = 0;
   for (const f of read) for (const ls of [f.addedLines ?? [], f.removedLines ?? []]) for (const l of ls) chars += l.length + 1;
-  if (chars > MAX_CHANGED_CHARS) return `${WEAKENING_REASON}${KINDS.unreadable} (the changed lines pass ${MAX_CHANGED_CHARS} characters)`;
+  if (chars > MAX_CHANGED_CHARS) return new Map([['unreadable', { first: [`the changed lines pass ${MAX_CHANGED_CHARS} characters`], n: 1 }]]);
+
+  // A merge into the tip that conflicts in a file read strictly (or in one whose name it can't match): what GitHub's
+  // merge makes there may not be the tree git wrote, so it waits. A conflict elsewhere is left to the conflict paths.
+  for (const p of i.conflicts ?? []) if (strict(p) || isNonUtf8Path(p) || (MARKABLE.test(p) && holds(p, i.scope) && (!i.marked || i.marked.has(p)))) hit('tip-conflict', p);
 
   for (const f of read) {
     const added = f.addedLines ?? [];
@@ -1113,11 +1124,15 @@ function findings(i: WeakeningInput): Found | string {
  * carries a stale PR's change onto a table or lint test the tip has since renamed or moved and marked (#1056's round
  * 16 review). So the change merging the PR makes to the default branch is measured too, for every PR: from the tip to
  * the tree of the tip merged with the head (git merge-tree, no worktree), and a reason from either measurement holds
- * it. A merge that conflicts adds no reason: the conflict paths take it (the conflict fix, or the combined check's
- * capped wait), and the head that resolves it is measured again, both ways. Not read twice: a merge git conflicts on
- * that GitHub's own merge completes, when the combined check doesn't run for it.
+ * it. A merge that conflicts is measured the same way, from the tip to the tree git writes for it (its conflicted
+ * files with both sides' lines in them, #1077). A conflict in a file the hold reads strictly waits too: GitHub's own
+ * merge may complete there (a file added under a folder the tip renamed), and what it makes is never read. One
+ * anywhere else is left to the conflict paths (the conflict fix, or the combined check's capped wait), and the head
+ * that resolves it is measured again, both ways. When the second measurement can't run, its reason is given beside
+ * the first one's.
  */
 export function weakeningOf(cwd: string, base: string, head: string, files: ChangeFile[], scope: LockScope | undefined, tip: string | null): string[] {
+  const couldNotRun = (e: unknown) => `${WEAKENING_REASON}the check for a removed or weakened test, lint or guard could not run (${escapedPath(String((e as Error).message ?? e).slice(0, 200))})`;
   try {
     // The default branch's current tip, fetched by the caller at decision time: its marks hold whatever the base. One
     // it couldn't read makes the change wait.
@@ -1125,24 +1140,30 @@ export function weakeningOf(cwd: string, base: string, head: string, files: Chan
     // Where the change meets the tip: a tip mark the head lacks was taken out by the change only if it is there.
     const meet = mergeBaseOf(cwd, tip, head);
     const own = measured(cwd, base, head, files, scope, { tip, meet });
-    const merged = mergedTree(cwd, tip, head);
-    if (merged === null) return weakeningReasons(own);
-    return weakeningReasons(own, measured(cwd, tip, merged, changeFiles(cwd, tip, merged), scope));
+    let merged: WeakeningInput | { failed: unknown };
+    try {
+      const { tree, conflicts } = mergedTree(cwd, tip, head);
+      merged = measured(cwd, tip, tree, changeFiles(cwd, tip, tree), scope, undefined, conflicts);
+    } catch (e) {
+      merged = { failed: e };
+    }
+    return 'failed' in merged ? [...weakeningReasons(own), couldNotRun(merged.failed)] : weakeningReasons(own, merged);
   } catch (e) {
-    return [`${WEAKENING_REASON}the check for a removed or weakened test, lint or guard could not run (${escapedPath(String((e as Error).message ?? e).slice(0, 200))})`];
+    return [couldNotRun(e)];
   }
 }
 
 /**
  * The input weakeningReasons reads for the change from..to (commits or trees), read from git; throws when git fails.
- * With `at`, the default branch's tip and where `to` meets it: their marks are read as well as `from`'s (#869).
+ * With `at`, the default branch's tip and where `to` meets it: their marks are read as well as `from`'s (#869). With
+ * `conflicts`, the paths a merge `to` is the tree of conflicts on (their marks at `from` are read too).
  */
-function measured(cwd: string, from: string, to: string, files: ChangeFile[], scope: LockScope | undefined, at?: { tip: string; meet: string }): WeakeningInput {
+function measured(cwd: string, from: string, to: string, files: ChangeFile[], scope: LockScope | undefined, at?: { tip: string; meet: string }, conflicts?: string[]): WeakeningInput {
   const deleted = new Set(changedNames(cwd, ['--diff-filter=D', `${from}..${to}`]));
   const moved = exactMoves(cwd, from, to);
   // The files that hold a mark's text before the change and at the tip (#869): git grep over each whole tree, so a
   // mark is found wherever it is; a git failure makes the change wait.
-  const markable = (set: Set<string>) => new Set(files.map((f) => f.path).filter((p) => set.has(p) && MARKABLE.test(p) && !isNonUtf8Path(p)));
+  const markable = (set: Set<string>) => new Set([...files.map((f) => f.path), ...(conflicts ?? [])].filter((p) => set.has(p) && MARKABLE.test(p) && !isNonUtf8Path(p)));
   const marked = markable(new Set(filesWithText(cwd, from, [TABLE_MARK.trimEnd(), LINT_MARK])));
   const tipMarked = at ? markable(new Set(filesWithText(cwd, at.tip, [TABLE_MARK.trimEnd(), LINT_MARK]))) : new Set<string>();
   const paths = [...new Set([...CHECK_TABLES.map((t) => t.path), ...marked, ...tipMarked])].filter((p) => files.some((f) => f.path === p) && !isNonUtf8Path(p));
@@ -1154,6 +1175,6 @@ function measured(cwd: string, from: string, to: string, files: ChangeFile[], sc
       return texts.get(p) ?? null;
     };
   };
-  const input: WeakeningInput = { files, deleted, moved, before: side(from), after: side(to), scope, marked };
+  const input: WeakeningInput = { files, deleted, moved, before: side(from), after: side(to), scope, marked, ...(conflicts ? { conflicts } : {}) };
   return at ? { ...input, tip: side(at.tip), tipMarked, meet: side(at.meet) } : input;
 }
