@@ -39,11 +39,11 @@ const HOOKLESS_PUSH_PROGRAM = /^git-(send-pack|http-push|remote-.+?)(\.exe)?$/i;
  */
 const NON_PUSH_GIT = new Set(('add am annotate apply archive bisect blame branch bundle cat-file check-attr check-ignore ' +
   'check-mailmap check-ref-format checkout checkout-index cherry cherry-pick clean clone column commit commit-graph commit-tree ' +
-  'config count-objects describe diff diff-files diff-index diff-tree difftool fetch fmt-merge-msg for-each-ref format-patch ' +
-  'fsck gc grep hash-object help init interpret-trailers log ls-files ls-remote ls-tree merge merge-base merge-file mktag mktree ' +
+  'config count-objects describe diff difftool fetch fmt-merge-msg for-each-ref format-patch ' +
+  'fsck gc grep hash-object help init interpret-trailers log ls-remote ls-tree merge merge-base merge-file mktag mktree ' +
   'mv name-rev notes prune pull range-diff read-tree rebase reflog remote repack replace rerere reset restore rev-list rev-parse ' +
   'revert rm shortlog show show-branch show-ref sparse-checkout stash status stripspace submodule switch symbolic-ref tag ' +
-  'update-index update-ref var verify-commit verify-tag version whatchanged worktree write-tree').split(' '));
+  'update-index update-ref var verify-commit verify-tag version worktree write-tree').split(' '));
 /** help.autocorrect values with which git runs no corrected command. */
 const AUTOCORRECT_OFF = /^(0+|never|show)$/i;
 
