@@ -41,7 +41,7 @@ test('#902 round 7 F1: the lock sits in a directory only root can enter; without
   // As lib.sh has it on a machine: a directory of its own under /run, never the world-writable /run/lock.
   const src = readFileSync(join(repoRoot, 'scripts', 'setup', 'lib.sh'), 'utf8');
   assert.match(src, /^MACHINE_SUDOERS_LOCK=\/run\/worklane-machine\/sudoers\.lock /m);
-  assert.match(src, /^MACHINE_SUDOERS_LOCK_UID=0$/m);
+  assert.match(src, /^MACHINE_LOCK_UID=0$/m);
   // It makes that directory its owner's, 0700, and takes the lock.
   const ok = lib(m, 'machine_sudoers_lock; echo locked');
   assert.match(ok.stdout, /locked/, ok.stderr);

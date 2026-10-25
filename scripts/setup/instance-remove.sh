@@ -97,8 +97,7 @@ helper_refuse() {
 if [ -z "$print" ]; then
   # One at a time with add-project and instance-rename: they rewrite the same machine-wide rules. Held from here, so
   # the rule's step is decided under it, before anything changes (#902 round 9).
-  exec 9> "$ADD_PROJECT_LOCK"
-  flock -n 9 || { echo "refused: an add-project, instance-remove or instance-rename is running on this machine; wait for it to finish" >&2; exit 1; }
+  machine_lock 9 "$ADD_PROJECT_LOCK" 0 "refused: an add-project, instance-remove or instance-rename is running on this machine; wait for it to finish" || { echo "$MACHINE_LOCK_WHY" >&2; exit 1; }
   helper_step="$(helper_mode)"
   [ "$helper_step" != refuse ] || helper_refuse
 fi
