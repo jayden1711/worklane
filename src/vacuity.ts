@@ -25,9 +25,11 @@
 //           change merges that src/merge-policy-vacuity.ts names: moved code the pairing doesn't find or can't place
 //           (renamed as it moved, moved inside a statement that stays, re-wrapped with parentheses quiet doesn't name,
 //           rewritten too far to align with its source, in a file whose brackets no reading balances and not starting
-//           on an `export` or `import` line) reads as
-//           added code, so a test that runs it counts; and a
-//           deleted app file, or one renamed out of app code, leaves no app code to measure.
+//           on an `export` or `import` line) reads as added code, and code moved within its file that git pairs with
+//           its own old text (W1, W2) is measured as git measured it; either way a test that runs it counts; and a
+//           deleted app file, or one renamed out of app code, leaves no app code to measure. One limit holds instead:
+//           a statement rewritten in place past EDITED_IN_PLACE to the text of a copy removed elsewhere is read as
+//           moved from there.
 import { spawn, spawnSync } from './os/child-process.js';
 import { lstatSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -944,7 +946,8 @@ export function codeRanges(text: string, hunks: readonly ChangedHunkSpots[], bas
  * `mask` with what a formatter adds or drops as it re-wraps code taken out of the code (#1014: M5b, R3s): every `;`, a
  * `,` before a closing bracket, and parentheses in two positions only: around one expression with no `,` or `;` of
  * its own and not starting with `{` (G5, B16b), opened right after an assignment's `=`, `=>`, `return`, `throw`, `(`,
- * `[`, `,`, `?` (`??`: Q-Pq) or `:` (Q-Pc) and closed right before `;`, `,`, `)`, `]`, `}` or the end (G2, G2e); or
+ * `[`, `,` or `:` (Q-Pc), or after `??` (Q-Pq) when it holds no `?`, `:`, `|`, `&` or `=` outside brackets (PQ2,
+ * PQ3: `u.a ?? (u.b ? 1 : 2)` is not `u.a ?? u.b ? 1 : 2`), and closed right before `;`, `,`, `)`, `]`, `}` or the end (G2, G2e); or
  * around an arrow function's one parameter (Q-P). Any other parenthesis is code, even one a formatter adds
  * (`(a && b) || c`: a limit), as is every one when the brackets don't pair up (Z-F1: `a * (b + c)`, Z-F1b:
  * `!(x instanceof Array)`, Z-F6: `s.open()`). Read on the statement reading of lexLines, outside strings and templates.
@@ -988,14 +991,17 @@ function quiet(text: string, mask: Uint8Array): Uint8Array {
     }
     let depth = 0;
     let lone = ch(o + 1) !== '{';
+    // An operator that binds less tightly than `??` (`?:`, `||`, `&&`, `??`, an assignment, `=>`): PQ2, PQ3.
+    let loose = false;
     for (let j = o + 1; j < k && lone; j++) {
       const x = ch(j);
       if (x === '(' || x === '[' || x === '{') depth++;
       else if (x === ')' || x === ']' || x === '}') depth--;
       else if (depth === 0 && (x === ',' || x === ';')) lone = false;
+      else if (depth === 0 && /[?:|&=]/.test(x)) loose = true;
     }
     const [p, pp] = [ch(o - 1), ch(o - 2)];
-    const after = /^[([,?:]$/.test(p) || (p === '=' && !/[=!<>]/.test(pp)) || (p === '>' && pp === '=') || (word(o - 1) && /(?:^|[^\w$.])(?:return|throw)$/.test(text.slice(Math.max(0, at[o - 1]! - 7), at[o - 1]! + 1)));
+    const after = /^[([,:]$/.test(p) || (p === '?' && !loose) || (p === '=' && !/[=!<>]/.test(pp)) || (p === '>' && pp === '=') || (word(o - 1) && /(?:^|[^\w$.])(?:return|throw)$/.test(text.slice(Math.max(0, at[o - 1]! - 7), at[o - 1]! + 1)));
     if (lone && after && /^[;,)\]}]?$/.test(ch(k + 1))) {
       drop(o);
       drop(k);
@@ -1045,6 +1051,13 @@ function topUnits(text: string, lex: { code: boolean[]; mask: Uint8Array }): [nu
 
 /** The most cells movedCode's alignments may take, in all, to choose between same-named pairs (past it: path order). */
 const MOVE_PAIR_CELLS = 8 * ALIGN_CELLS;
+
+/**
+ * How much of the same-named statement git paired a moved-code unit with in place it must keep to count as that one
+ * edited (movedCode): the code characters both keep are at least 2/5 of the two's code characters together, a
+ * similarity (2 × kept / both) of at least 0.8 (G1, D1, U1: 0.95; N5's stale g: 0.67).
+ */
+const EDITED_IN_PLACE = [2, 5] as const;
 
 /**
  * Code the PR moved in a way git doesn't pair (#1014: a file renamed and re-indented or edited, a function split out
@@ -1165,13 +1178,22 @@ function movedCode(
     moves.set(f, [...(moves.get(f) ?? []), { unit, from }]);
   };
   // Whether git already paired them: a hunk of the unit's file removed lines of the source and added lines of the unit.
-  // A unit git paired so with a removed statement of its own name (or, unnamed, with an unnamed one) was edited in place
-  // and pairs with none: it is measured as git measured it (Z-F6 to Z-F11; G1, D1: not with a copy removed elsewhere).
+  // A unit git paired so with a removed statement of its own name (or, unnamed, with an unnamed one) that it keeps
+  // most of (EDITED_IN_PLACE; past the cells, kept) was edited in place and pairs with none: it is measured as git
+  // measured it (Z-F6 to Z-F11; G1, D1: not with a copy removed elsewhere). One that keeps less took that one's place
+  // (N5: a stale same-named g replaced by the g moved there) and pairs as any other.
   const same = (u: Unit, s: Unit) => heads.get(u.path)!.hunks.some((h) => h.oldPath === s.path && h.from !== undefined && h.removed.length > 0 && h.from <= s.last && h.from + h.removed.length - 1 >= s.first && h.added.some((l) => l >= u.first && l <= u.last));
+  let nearCells = 0;
+  const edited = (u: Unit, s: Unit) => {
+    nearCells += (u.key.length + 1) * (s.key.length + 1);
+    const ops = nearCells > MOVE_PAIR_CELLS ? null : alignChars([...u.key], [...s.key]);
+    return ops === null || ops.filter((x) => x === '=').length * EDITED_IN_PLACE[1] >= EDITED_IN_PLACE[0] * (u.key.length + s.key.length);
+  };
   const left: [string, Unit][] = [];
   for (const f of files) {
     for (const u of added.get(f)!) {
-      if (sources.some((s) => s.name === u.name && same(u, s))) continue;
+      const own = sources.find((s) => s.name === u.name && same(u, s));
+      if (own && edited(u, own)) continue;
       const s = byKey.get(u.key)?.find((x) => !x.used && !same(u, x));
       if (s) pair(f, u, s);
       else if (u.name !== null) left.push([f, u]);
@@ -1204,8 +1226,10 @@ function movedCode(
     const placed = ms.filter((x) => !unplaced.includes(aligned.indexOf(x)));
     // The units' lines, as offsets: what codeRanges found there gives way to each unit measured against its source.
     const starts = lineStarts(text);
-    const inUnit = (o: number) => placed.some(({ unit }) => o >= starts[unit.first - 1]! && o < starts[unit.last]!);
-    out.set(f, { chars: [...code.chars.filter(([a]) => !inUnit(a)), ...m.chars].sort((x, y) => x[0] - y[0]), needs: [...code.needs, ...m.needs] });
+    // So do the removals git measured inside one (N6: a stale one-line g git aligned with the g moved in its place).
+    const inOne = (os: readonly number[]) => placed.some(({ unit }) => os.every((o) => o >= starts[unit.first - 1]! && o < starts[unit.last]!));
+    const inUnit = (o: number) => inOne([o]);
+    out.set(f, { chars: [...code.chars.filter(([a]) => !inUnit(a)), ...m.chars].sort((x, y) => x[0] - y[0]), needs: [...code.needs.filter((n) => !inOne(n)), ...m.needs] });
   }
   return out;
 }

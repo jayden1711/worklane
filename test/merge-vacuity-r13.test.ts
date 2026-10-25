@@ -527,6 +527,57 @@ test('control: D1m: D1 with f on three lines merges', async () => {
   await merges({ 'src/a.js': f('x + 1'), 'src/b.js': 'export function f(x) {\n  return x * 3;\n}\nexport const k = 0;\n' }, { 'src/a.js': f('x * 3'), 'src/b.js': 'export const k = 0;\n', 'test/x.test.js': calls('a.js', 'f', 'f(1)', '3') });
 });
 
+test('must merge: U1: D1 with an unnamed one-line statement', async () => {
+  const t = `${H}import '../src/a.js';\ntest('f', () => { assert.equal(globalThis.f(1), 3); });\n`;
+  await merges({ 'src/a.js': 'export const h = 0;\nglobalThis.f = (x) => x + 1;\n', 'src/b.js': 'globalThis.f = (x) => x + 2;\nexport const k = 0;\n' }, { 'src/a.js': 'export const h = 0;\nglobalThis.f = (x) => x + 2;\n', 'src/b.js': 'export const k = 0;\n', 'test/x.test.js': t });
+});
+
+// ---- #1014's sixth review: a unit git paired with a same-named statement it keeps little of took that one's place
+const STALE = "export const k = 1;\nexport function g() {\n  return 'stale';\n}\n";
+const intoStale = async (stale: string) => {
+  const d = await decided({ 'src/s.js': S, 'src/c.js': stale }, { 'src/s.js': editH(S_T), 'src/c.js': IMP + 'export const k = 1;\n' + S_G, 'test/x.test.js': calls('c.js', 'g', 'g({})', '3') });
+  return [d.auto, d.reasons];
+};
+
+test('must hold: N5: M5c with g moved into a file over a stale same-named g there', async () => {
+  assert.deepEqual(await intoStale(STALE), hold('src/c.js, src/s.js'));
+});
+
+test('control: N5x: the same over a stale differently named function holds', async () => {
+  assert.deepEqual(await intoStale(STALE.replace('function g()', 'function old()')), hold('src/c.js, src/s.js'));
+});
+
+test('must hold: N6: N5 over a one-line stale g (the removals git measured inside the moved g go with it)', async () => {
+  assert.deepEqual(await intoStale("export const k = 1;\nexport const g = () => 'stale';\n"), hold('src/c.js, src/s.js'));
+});
+
+test('limit: a statement rewritten in place past EDITED_IN_PLACE to the text of a copy the PR removes elsewhere', { todo: 'it keeps too little of its old text to count as edited in place, so it pairs with the copy as moved from there and holds, as at d76d96f0; main merges it #1014' }, async () => {
+  await merges({ 'src/a.js': D1_A('export const f = (x) => x + 1;'), 'src/b.js': 'export const f = (x) => Math.max(x, 0) * 2;\nexport const k = 0;\n' }, { 'src/a.js': D1_A('export const f = (x) => Math.max(x, 0) * 2;'), 'src/b.js': 'export const k = 0;\n', 'test/x.test.js': calls('a.js', 'f', 'f(1)', '2') });
+});
+
+const W1_BASE = "export const g = (u) => u.id * 2 + 3;\nexport const h = (u) => u.admin ? 'all' : 'none';\nexport const z = 0;\n";
+test('limit: W1: g moved below h in its file and re-formatted, an untested arm edited in h', { todo: 'git pairs g with its own old text in place, so it is measured as git measured it: its formatting counts and a test that runs it merges the PR, as on main #1014' }, async () => {
+  const d = await decided({ 'src/w.js': W1_BASE }, { 'src/w.js': "export const h = (u) => u.admin ? 'everything' : 'none';\nexport const g = u => u.id * 2 + 3\nexport const z = 0;\n", 'test/x.test.js': calls('w.js', 'g', 'g({ id: 1 })', '5') });
+  assert.deepEqual([d.auto, d.reasons], hold('src/w.js'));
+});
+
+test('limit: W2: W1 with one-line functions, g re-wrapped onto three lines', { todo: 'as W1 #1014' }, async () => {
+  const base = "export function g(u) { return u.id * 2 + 3; }\nexport function h(u) { return u.admin ? 'all' : 'none'; }\nexport const z = 0;\n";
+  const head = "export function h(u) { return u.admin ? 'everything' : 'none'; }\nexport function g(u) {\n  return u.id * 2 + 3;\n}\nexport const z = 0;\n";
+  const d = await decided({ 'src/w.js': base }, { 'src/w.js': head, 'test/x.test.js': calls('w.js', 'g', 'g({ id: 1 })', '5') });
+  assert.deepEqual([d.auto, d.reasons], hold('src/w.js'));
+});
+
+for (const [id, call, want] of [
+  ['PQ2', 'g({ a: 0, b: false })', '2'],
+  ['PQ3', 'g({ a: null, b: true })', '1'],
+] as const) {
+  test(`must merge: ${id}: g moved with a tested \`u.a ?? (u.b ? 1 : 2)\` written \`u.a ?? u.b ? 1 : 2\` (a lower-precedence \`?:\` after \`??\`)`, async () => {
+    const g = (b: string) => (id === 'PQ2' ? `export function g(u) {\n  const v = ${b};\n  return v;\n}\n` : `export function g(u) {\n  return ${b};\n}\n`);
+    await merges({ 'src/s.js': PAD + g('u.a ?? (u.b ? 1 : 2)') }, { 'src/s.js': PAD, 'src/c.js': g('u.a ?? u.b ? 1 : 2'), 'test/x.test.js': calls('c.js', 'g', call, want) });
+  });
+}
+
 test('must merge: G2: g moved with a tested `(a + b) * c` precedence fix after `return`', async () => {
   await merges({ 'src/a.js': PAD + 'export function g(a, b, c) {\n  return a + b * c;\n}\n' }, { 'src/a.js': PAD, 'src/c.js': 'export function g(a, b, c) {\n  return (a + b) * c;\n}\n', 'test/x.test.js': calls('c.js', 'g', 'g(1, 2, 3)', '9') });
 });
