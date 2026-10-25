@@ -184,6 +184,10 @@ const Flow = z.strictObject({
   plan: z.array(z.string().min(1)).optional(),
   /** An earlier plan for the task, which `plan` revised (the latest plan is the approved one). */
   earlierPlan: z.array(z.string().min(1)).optional(),
+  /** Another task's approved plan, posted after this task's: the files it lists. */
+  planForAnotherIssue: z.array(z.string().min(1)).optional(),
+  /** After this task's verdict, another task's verdict on the same head: the always-PASS one, or one rejecting the patch. */
+  verdictForAnotherIssue: z.enum(['pass', 'rejected']).optional(),
 });
 type Flow = z.infer<typeof Flow>;
 
@@ -192,15 +196,21 @@ const Case = z.strictObject({
   attack: z.string().min(1),
   /** Where the attack was measured or the rule it tests (an issue, a PR's adversarial pass). */
   source: z.string().min(1),
-  /** Files on the base branch besides the seeds (README.md and one file in every top-level folder the change names). */
-  base: z.record(z.string(), z.string()).default({}),
+  /**
+   * Files on the base branch besides the seeds (README.md and one file in every top-level folder the change names);
+   * `{ text, repeat }` writes `text` that many times.
+   */
+  base: z.record(z.string(), z.union([z.string(), z.strictObject({ text: z.string(), repeat: z.number().int().positive() })])).default({}),
   /** Base files committed with mode 755. */
   executable: z.array(z.string()).default([]),
   /** false: no seed folders, so a folder the change adds is a new top-level module. */
   seed: z.boolean().default(true),
   change: z.array(Op).min(1),
   pr: Pr,
-  /** Money-path globs (review.yaml money_path_source), when the case needs some. */
+  /**
+   * Money-path globs (review.yaml money_path_source), when the case needs some. A flow case gets them as a list file
+   * (MONEY_LIST) on the base, which review.yaml's money_path_source names; `tipMoved` can rewrite it on the default branch.
+   */
   moneyPaths: z.array(z.string()).default([]),
   /** The gate's other inputs, made hostile (see Inputs); absent: every one at its most permissive. */
   inputs: Inputs.optional(),
@@ -327,6 +337,8 @@ const opPaths = (op: Op): string[] => ('write' in op ? [op.write] : 'rename' in 
  * which the weakening check rightly names among an allowlist file's added lines. Its kind must not change.
  */
 const sizeless = (reason: string) => (reason.startsWith('big: ') ? reason.replace(/\d+/g, 'N') : reason.startsWith(WEAKENING_REASON) ? reason.replace(/ \([^]*$/, '') : reason);
+/** A flow case's money-path list file, on its base: review.yaml's money_path_source in the flow. */
+const MONEY_LIST = 'money-paths.txt';
 const withInjection =(text: string, inject: boolean) => (inject ? `${text}${text.endsWith('\n') || !text ? '' : '\n'}${INJECTION}` : text);
 
 /**
@@ -341,7 +353,8 @@ function made(c: Case | Control, inject: boolean): { dir: string; base: string; 
   for (const [k, v] of [['user.email', 'ada@example.com'], ['user.name', 'Ada'], ['commit.gpgsign', 'false'], ['core.autocrlf', 'false'], ['core.fileMode', 'true']])git(dir, 'config', k!, v!);
   put(dir, 'README.md', 'A project.\n');
   if (c.seed) for (const top of new Set(c.change.flatMap(opPaths).map(topOf).filter((t): t is string => t !== null))) put(dir, `${top}/seed.txt`, 'seed\n');
-  for (const [p, text] of Object.entries(c.base)) put(dir, p, text);
+  for (const [p, v] of Object.entries(c.base)) put(dir, p, typeof v === 'string' ? v : v.text.repeat(v.repeat));
+  if (c.flow && c.moneyPaths.length) put(dir, MONEY_LIST, c.moneyPaths.map((g) => `${g}\n`).join(''));
   for (const p of c.executable) chmodSync(join(dir, p), 0o755);
   git(dir, 'add', '-A');
   git(dir, 'commit', '-q', '-m', 'base');
@@ -449,11 +462,12 @@ let flowStates: string | undefined;
 /**
  * The coordinator's own call (merge-flow.ts mergeDecisionFor) on the case's PR, under one review.yaml and lock scope.
  * Everything it reads is set up as on a live instance that opened the PR: the issue claimed at the base, the PR opened
- * at its head (or at the commit before a CI fix's push or a merge-in), the always-PASS verdict, an auto_merge that reads on, no stop; then the flow's hostile values. Labels
- * and money paths come from the event log and review.yaml there, so a flow case sets neither.
+ * at its head (or at the commit before a CI fix's push or a merge-in), the always-PASS verdict, an auto_merge that reads on, no stop; then the flow's hostile values. The
+ * PR's labels are the issue's, as last seen (issue.seen); its money paths are the list file on the default branch,
+ * which review.yaml's money_path_source names.
  */
 function decideInFlow(r: ReturnType<typeof made>, c: Case | Control, f: Flow, cfg: ConfigName, scope: LockScope, claim: Case['pr']['claim']): MergeDecision {
-  if (c.inputs || c.pr.labels?.length || c.moneyPaths.length) throw new Error(`${c.id}: a flow case sets no inputs, labels or money paths`);
+  if (c.inputs) throw new Error(`${c.id}: a flow case sets no inputs`);
   flowConfig ??= loadConfig(exampleProject().dir);
   flowStates ??= mkdtempSync(join(tmpdir(), 'adversarial-flow-state-'));
   const stateDir = join(flowStates, c.id);
@@ -462,10 +476,12 @@ function decideInFlow(r: ReturnType<typeof made>, c: Case | Control, f: Flow, cf
   const log = new EventLog(join(at, 'events.db'));
   try {
     const [issue, number, actor] = [7, 9, 'i'];
+    if (c.pr.labels?.length) log.append('issue.seen', { issue, title: 't', labels: c.pr.labels, author: 'example-owner', owner: 'example-owner', actionable: true, why: 'ready' }, actor);
     log.append('issue.claimed', { issue, instance: actor, lease: 'a'.repeat(40), base: r.base, owner: 'example-owner' }, actor);
     const planned = (files: string[]) => log.append('plan.posted', { issue, plan: { approach: 'x', steps: [], files, risks: [], design_change: false }, held: false, reasons: [], comments_at: 0, decision: null }, actor);
     if (f.earlierPlan) planned(f.earlierPlan);
     if (f.plan) planned(f.plan);
+    if (f.planForAnotherIssue) log.append('plan.posted', { issue: issue + 1, plan: { approach: 'x', steps: [], files: f.planForAnotherIssue, risks: [], design_change: false }, held: false, reasons: [], comments_at: 0, decision: null }, actor);
     const refusal = () => log.append('push.refused', { issue, head: r.refused!, stage: 'push', reasons: ['over the push limit'] }, actor);
     if (f.pushRefused === 'before-open') refusal();
     if (c.pr.openedByHarness ?? true) log.append('pr.opened', { issue, number, url: 'u', head: f.pushedAfter ? r.base : r.opened, draft: false }, actor);
@@ -482,6 +498,10 @@ function decideInFlow(r: ReturnType<typeof made>, c: Case | Control, f: Flow, cf
     const verdict = f.verdictNoDesignAnswer ? unanswered : answered;
     log.append('eval.verdict', verdict, actor);
     if (f.rejectedAfter) log.append('eval.verdict', { ...verdict, patch_correct: false, advice: 'the patch is wrong' }, actor);
+    if (f.verdictForAnotherIssue) {
+      const theirs = { ...answered, issue: issue + 1, head: judged };
+      log.append('eval.verdict', f.verdictForAnotherIssue === 'pass' ? theirs : { ...theirs, patch_correct: false, advice: 'the patch is wrong' }, actor);
+    }
     if (f.mergedIn) log.append('pr_hygiene.merged_in', { issue, number, from: r.opened, head: r.head, base_sha: r.mergedBase!, base_days: 3 }, actor);
     if (f.evalsForAnotherIssue) {
       const targets = instructionTargets(r.files.map((x) => x.path)).map((t) => t.target);
@@ -511,7 +531,8 @@ function decideInFlow(r: ReturnType<typeof made>, c: Case | Control, f: Flow, cf
       log.append('merge.resume_requested', { stop: 1, file: null, ack: null }, actor);
     }
     const autoMerge = f.autoMerge === 'on' ? { autoMerge: () => true } : f.autoMerge === 'throws' ? { autoMerge: (): boolean => { throw new Error('policy.yaml unreadable'); } } : {};
-    const coordinator = new Coordinator({ cfg: { ...flowConfig, review: CONFIGS[cfg] }, log, backlog: new FileBacklog(join(at, 'backlog.json')), runner: new FakeRunner(() => ({})), repo: r.dir, instance: actor, stateDir, lockScope: () => scope, ...autoMerge });
+    const review = c.moneyPaths.length ? { ...CONFIGS[cfg], money_path_source: { file: MONEY_LIST } } : CONFIGS[cfg];
+    const coordinator = new Coordinator({ cfg: { ...flowConfig, review }, log, backlog: new FileBacklog(join(at, 'backlog.json')), runner: new FakeRunner(() => ({})), repo: r.dir, instance: actor, stateDir, lockScope: () => scope, ...autoMerge });
     const pr: PullRequest = { number, url: 'u', head: (c.pr.branch ?? '{cli}/issue-7').replaceAll('{cli}', BRAND.cli), base: 'main', headSha: r.head, draft: false, state: 'open', title: 't', mergeable: true, mergeableState: 'clean' };
     return coordinator.mergeDecisionFor(issue, number, pr);
   } finally {
