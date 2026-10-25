@@ -7,7 +7,8 @@
 //   - package-lock.json's entry carries the pinned integrity and is no link (npm ci checks the tarball against it);
 //   - the installed directory, node_modules/<name>, is a plain directory whose files hash to the pinned tree hash
 //     (so bytes changed after the install, or by a swapped tarball whose lockfile line was put back, are refused);
-//   - the repo's own package.json isn't named after it (a self-reference resolves first);
+//   - neither the repo's own package.json nor one in ALLOWED_PACKAGE_JSON is named after it (a self-reference
+//     resolves first; #1007);
 //   - Node's resolver, from each place in LOADERS (the top, test/, dist/test/, dist/src/ and its os/, coordinator/
 //     and guardrails/ only), finds it in the top node_modules/<name>/, links resolved; the walk below covers the rest.
 // And for the whole checkout, outside .git and the top node_modules (round 22; a symlinked dist/node_modules and a
@@ -16,6 +17,8 @@
 //   - no symbolic link at all (a linked dist/, dist/test/ or folder can hold either of these);
 //   - no package.json but the top one and ALLOWED_PACKAGE_JSON (a nested one is a package scope, and its name or
 //     exports can answer a bare import first, under conditions require.resolve doesn't try).
+// CI runs it twice (#1007): before tsc, and again once tsc has emitted, before the backstop, since a JSON import of a
+// package.json makes tsc emit a copy of it under dist/, which the second run refuses like any nested one.
 // The integrity strings are the test's PINNED_PACKAGES, which checks they agree. A bump of either package changes
 // both files, and each change waits for the owner.
 import { createHash } from 'node:crypto';
@@ -91,11 +94,27 @@ export function pinProblems(root, pins = PINS) {
     }
   };
   walk(root);
+  // An allowed nested package.json is still a package scope (#1007): its name may not be a pin's.
+  const allowedScopes = [];
+  for (const rel of ALLOWED_PACKAGE_JSON) {
+    let text;
+    try {
+      text = readFileSync(join(root, rel), 'utf8');
+    } catch {
+      continue;
+    }
+    try {
+      allowedScopes.push([rel, JSON.parse(text) ?? {}]);
+    } catch {
+      out.push(`${rel}: not JSON`);
+    }
+  }
   for (const [name, pin] of Object.entries(pins)) {
     const entry = lock.packages?.[`node_modules/${name}`];
     if (entry?.integrity !== pin.integrity) out.push(`${name}: the lockfile's integrity is ${JSON.stringify(entry?.integrity)}`);
     if (entry?.link) out.push(`${name}: the lockfile entry is a link`);
     if (pkg.name === name) out.push(`${name}: package.json is named ${name}`);
+    for (const [rel, nested] of allowedScopes) if (nested.name === name) out.push(`${name}: ${rel} is named ${name}`);
     const dir = join(root, 'node_modules', name);
     let st;
     try {
