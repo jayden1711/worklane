@@ -40,17 +40,20 @@
 'use strict';
 const fs = require('node:fs');
 const path = require('node:path');
-const { execFileSync } = require('node:child_process');
 const helper = require('../machine/worklane-machine.cjs');
 const watch = require('../machine/worklane-update.cjs');
 
-// Fixed paths: none comes from the caller.
+// Fixed paths: none comes from the caller. Each is used through fixed(), which refuses it in a test process when it
+// is outside the test's machine (the helper's testPathRefusal, #905).
 const ETC = '/etc/worklane';
 const LOG = '/var/lib/worklane/machine-changes.jsonl';
 const SIGNERS = 'allowed_signers'; // in ETC
 const PENDING = helper.PENDING;
 const SIGNERS_STATE = watch.SIGNERS_STATE; // the updater's record of the signers file's hash
 const HELD = '/var/lib/worklane/update-held.json'; // the updater's: the rolled-back commit it won't retry
+const fixed = helper.fixedPath;
+/** A file in ETC. */
+const inEtc = (name) => fixed(path.join(ETC, name));
 
 const USAGE = 'usage: updates-root.cjs [check] channel release|main | add-signer <principal> ssh-ed25519 <public key> | confirm-signer SHA256:<fingerprint> | acknowledge-signers | release-hold | add-checks <name> [<name> ...]';
 const UPDATES = 'updates.json'; // in ETC
@@ -60,13 +63,10 @@ const fingerprintShape = (s) => typeof s === 'string' && /^SHA256:[A-Za-z0-9+/]{
 
 function logLine(what, from, to, extra = {}) {
   const by = process.env.SUDO_USER || 'root';
-  fs.mkdirSync(path.dirname(LOG), { recursive: true });
-  fs.appendFileSync(LOG, `${JSON.stringify({ at: new Date().toISOString(), by, what, from, to, ...extra })}\n`, { mode: 0o644 });
-  try {
-    execFileSync('logger', ['-t', 'worklane-updates', `${by} ${what}: ${JSON.stringify(to)}`], { stdio: 'ignore' });
-  } catch {
-    // no journal here (a test, or a machine without logger): the change log still has it
-  }
+  const log = fixed(LOG);
+  fs.mkdirSync(path.dirname(log), { recursive: true });
+  fs.appendFileSync(log, `${JSON.stringify({ at: new Date().toISOString(), by, what, from, to, ...extra })}\n`, { mode: 0o644 });
+  helper.journal('worklane-updates', `${by} ${what}: ${JSON.stringify(to)}`);
 }
 
 /**
@@ -109,7 +109,7 @@ function parse(args) {
  * `how` says which way it came (updates.sh --signer, or a staged signer confirmed), for the log and the alert.
  */
 function addSigner(s, how) {
-  const file = path.join(ETC, SIGNERS);
+  const file = inEtc(SIGNERS);
   const fp = helper.fingerprint(s.key);
   const line = `${s.principal} ssh-ed25519 ${s.key}`;
   let before = '';
@@ -134,12 +134,12 @@ function addSigner(s, how) {
   const next = `${before}${before && !before.endsWith('\n') ? '\n' : ''}${line}\n`;
   // The updater is told the hash the file is about to have, but only when the file is as it last recorded it: a
   // change it hasn't been told about is never covered by this one, and it reports the whole of it on its next run.
-  const expected = watch.expectSigners(file, `sha256:${require('node:crypto').createHash('sha256').update(next).digest('hex')}`, SIGNERS_STATE);
-  const tmp = path.join(ETC, `.${SIGNERS}.tmp-${process.pid}`);
+  const expected = watch.expectSigners(file, `sha256:${require('node:crypto').createHash('sha256').update(next).digest('hex')}`, fixed(SIGNERS_STATE));
+  const tmp = inEtc(`.${SIGNERS}.tmp-${process.pid}`);
   fs.writeFileSync(tmp, next, { mode: 0o644 });
   fs.chmodSync(tmp, 0o644);
   fs.renameSync(tmp, file);
-  if (expected) watch.recordSigners(file, SIGNERS_STATE);
+  if (expected) watch.recordSigners(file, fixed(SIGNERS_STATE));
   else process.stderr.write(`note: ${file} had already changed since the updater last recorded it; the updater will report that on its next run\n`);
   logLine('updates.allowed_signers', null, `added ${line} (${fp})`, { principal: s.principal, fingerprint: fp, how });
   process.stdout.write(`${file}: added ${line} (${fp})\n`);
@@ -196,16 +196,18 @@ function confirmSigner(fingerprint) {
 
 /** Release the updater's hold on a rolled-back commit: shown, moved aside (kept), logged. */
 function releaseHold() {
+  const file = fixed(HELD);
+  const released = fixed(HELD.replace(/\.json$/, '.released.json'));
   let held;
   try {
-    held = JSON.parse(fs.readFileSync(HELD, 'utf8'));
+    held = JSON.parse(fs.readFileSync(file, 'utf8'));
   } catch {
-    process.stdout.write(`nothing is held (no ${HELD})\n`);
+    process.stdout.write(`nothing is held (no ${file})\n`);
     return 0;
   }
   const what = `${String(held.sha || 'unknown').slice(0, 12)}, rolled back at ${held.at}${Array.isArray(held.failed) && held.failed.length ? ` (${held.failed.join('; ')})` : ''}`;
   process.stdout.write(`held: ${what}\n`);
-  fs.renameSync(HELD, HELD.replace(/\.json$/, '.released.json'));
+  fs.renameSync(file, released);
   logLine('updates.hold_released', what, null);
   process.stdout.write(`released: the updater may try ${String(held.sha || 'it').slice(0, 12)} again on its next run\n`);
   return 0;
@@ -213,7 +215,7 @@ function releaseHold() {
 
 /** The channel in an installed updater's config, and nothing else in it. */
 function setChannel(channel) {
-  const file = path.join(ETC, 'updates.json');
+  const file = inEtc('updates.json');
   let cfg;
   try {
     cfg = JSON.parse(fs.readFileSync(file, 'utf8'));
@@ -222,7 +224,7 @@ function setChannel(channel) {
     return 1;
   }
   const from = cfg.channel === undefined ? null : cfg.channel;
-  const tmp = path.join(ETC, `.updates.json.tmp-${process.pid}`);
+  const tmp = inEtc(`.updates.json.tmp-${process.pid}`);
   fs.writeFileSync(tmp, `${JSON.stringify({ ...cfg, channel })}\n`, { mode: 0o644 });
   fs.chmodSync(tmp, 0o644);
   fs.renameSync(tmp, file);
@@ -322,7 +324,7 @@ function withChecks(text, names) {
 
 /** Append these check names to updates.json's required_checks; one already there is said and skipped. */
 function addChecks(names) {
-  const file = path.join(ETC, UPDATES);
+  const file = inEtc(UPDATES);
   let st;
   try {
     st = fs.lstatSync(file);
@@ -368,7 +370,7 @@ function addChecks(names) {
   // The new text in full in a dotted temp file beside it, with the file's own owner and mode, then renamed over it:
   // the updater, reading at any moment, sees the old file or the new one, never part of one. A fresh name each time
   // ('wx': never an existing file), since this script removes nothing: a failed write leaves it, and says where.
-  const tmp = path.join(ETC, `.${UPDATES}.tmp-${process.pid}-${require('node:crypto').randomBytes(4).toString('hex')}`);
+  const tmp = inEtc(`.${UPDATES}.tmp-${process.pid}-${require('node:crypto').randomBytes(4).toString('hex')}`);
   try {
     const fd = fs.openSync(tmp, 'wx', 0o600);
     try {
@@ -393,10 +395,10 @@ function addChecks(names) {
 
 /** An admin has looked at the signers file as it is: it becomes the updater's record, and release installs are no longer held. */
 function acknowledgeSigners() {
-  const file = path.join(ETC, SIGNERS);
+  const file = inEtc(SIGNERS);
   const now = watch.signersDigest(file);
   process.stdout.write(`${file} as it is now: ${now.hash}, ${now.lines} signer line${now.lines === 1 ? '' : 's'}\n${now.fingerprints.map((f) => `  ${f}\n`).join('')}`);
-  const held = watch.acknowledgeSigners(file, SIGNERS_STATE);
+  const held = watch.acknowledgeSigners(file, fixed(SIGNERS_STATE));
   if (!held) {
     process.stdout.write('nothing was held; recorded as it is\n');
     return 0;
