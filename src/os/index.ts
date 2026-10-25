@@ -628,6 +628,27 @@ export function ownedPath(path: string, o: { uid?: number; lstat?: typeof lstatS
   return false;
 }
 
+/**
+ * Why `file` isn't a program only root can change, or null when it is: an executable regular file (its links followed),
+ * root's, writable by no group or other, on a path only root can redirect (ownedPath as root). Native Windows has no
+ * POSIX owners to check, so there it always has a reason: a caller that must know refuses.
+ */
+export function notRootsProgram(file: string): string | null {
+  if (process.platform === 'win32') return "can't be checked on this OS, which has no POSIX file owners";
+  let st;
+  try {
+    st = statSync(file);
+  } catch (e) {
+    return `can't be looked at (${(e as NodeJS.ErrnoException).code ?? 'error'})`;
+  }
+  if (!st.isFile()) return 'is not a regular file';
+  if (!(st.mode & 0o111)) return 'is not executable';
+  if (st.uid !== 0) return `belongs to uid ${st.uid}, not root`;
+  if (st.mode & 0o022) return `may be written by others than root (mode ${(st.mode & 0o777).toString(8)})`;
+  if (!ownedPath(file, { uid: 0 })) return 'is on a path someone other than root can change';
+  return null;
+}
+
 /** Where Homebrew installs itself (`brew --prefix`): Apple silicon and Intel macOS. */
 export const BREW_PREFIXES: readonly string[] = ['/opt/homebrew', '/usr/local'];
 

@@ -2,10 +2,11 @@
 // A scanner that can't run is reported as unavailable, never as "clean".
 import { spawn, spawnSync } from '../os/child-process.js';
 import { createHash } from 'node:crypto';
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { delimiter, dirname, join, resolve as resolvePath } from 'node:path';
+import { delimiter, dirname, isAbsolute, join, resolve as resolvePath } from 'node:path';
 import { presentNames, rawChanges, untrackedNames } from '../coordinator/change-files.js';
+import { notRootsProgram } from '../os/index.js';
 import { findTool } from '../tool-path.js';
 
 export interface Finding {
@@ -369,7 +370,7 @@ export function checkReadPrograms(top: string, scope: CommitScanScope, depth = 0
   // the file's own bytes, which the scan reads (lfsContent). Any other value, or any other filter, still refuses.
   if (filters.has('lfs') && lfsStandard(config)) {
     filters.delete('lfs');
-    lfsProgramIsFile();
+    lfsProgramRootsAlone(top);
   }
   const tracked = filters.size ? [...new Set([...presentNames(top, null), ...untrackedNames(top)])] : [];
   if (tracked.some((p) => p.includes('�'))) throw new Error('a file in this checkout has a name that is not UTF-8, so its attributes can\'t be checked');
@@ -414,20 +415,22 @@ function lfsStandard(config: Map<string, string[]>): boolean {
   return Object.entries(LFS_STANDARD).every(([k, v]) => (config.get(k) ?? []).length > 0 && config.get(k)!.every((x) => x === v));
 }
 
-/** Throws when a `git-lfs` that git would run (the first on PATH) is not a regular file. */
-function lfsProgramIsFile() {
-  for (const dir of (process.env.PATH ?? '').split(delimiter).filter(Boolean)) {
+/**
+ * Throws unless the `git-lfs` git would run is a program only root can change. git looks on its own exec path first,
+ * then on PATH. INVARIANT (#1011): the scan can't verify the program, and it runs after the scan has read the files,
+ * so one the agent's user could replace, one on a path that depends on the folder, or none found refuses the commit.
+ */
+function lfsProgramRootsAlone(top: string) {
+  const execPath = gitOut(top, ['--exec-path']).toString('utf8').trim();
+  for (const dir of [execPath, ...(process.env.PATH ?? '').split(delimiter)]) {
+    if (!isAbsolute(dir)) throw new Error(`the path git looks for git-lfs on has an entry that is not an absolute directory (${JSON.stringify(dir)}), so which git-lfs it runs depends on the folder`);
     const p = join(dir, 'git-lfs');
     if (!existsSync(p) && !isLink(p)) continue;
-    let ok = false;
-    try {
-      ok = statSync(p).isFile();
-    } catch {
-      ok = false;
-    }
-    if (!ok) throw new Error(`the git-lfs git would run (${p}) is not a regular file`);
+    const why = notRootsProgram(p);
+    if (why) throw new Error(`the git-lfs git would run (${p}) ${why}, so it could change what is stored after the scan has read it`);
     return;
   }
+  throw new Error('no git-lfs is on the path the scan can check, so it can\'t tell which program git would run');
 }
 
 const isLink = (p: string) => {
@@ -461,11 +464,12 @@ function lfsContent(top: string, files: Compared[]): Compared[] {
   if (!tracked.size) return files;
   const store = join(resolvePath(top, gitOut(top, ['rev-parse', '--git-common-dir']).toString('utf8').trim()), 'lfs', 'objects');
   const read = (b: Buffer | null): Buffer | null => {
-    if (b === null || b.length > 1024) return b;
-    const m = LFS_POINTER.exec(b.toString('latin1'));
-    // INVARIANT (#971): the large-file program reads more spellings as a pointer than the one form read here; a small
-    // file that names any pointer version and isn't that exact form refuses the commit, never scanned as text alone.
-    if (!m && LFS_MARKER.test(b.toString('latin1'))) throw new Error('a large file in this commit looks like a large-file pointer but is not in its exact form, so the object it may name can\'t be read');
+    if (b === null) return b;
+    const m = b.length > 1024 ? null : LFS_POINTER.exec(b.toString('latin1'));
+    // INVARIANT (#971, #1011): the large-file program reads more spellings as a pointer than the one form read here,
+    // and reads a file of any size as one from its first 1024 bytes (the rest ignored); a file whose first 1024 bytes
+    // name any pointer version and that isn't that exact form refuses the commit, never scanned as text alone.
+    if (!m && LFS_MARKER.test(b.subarray(0, 1024).toString('latin1'))) throw new Error('a large file in this commit looks like a large-file pointer but is not in its exact form, so the object it may name can\'t be read');
     if (!m) return b;
     const oid = m[1]!;
     const at = join(store, oid.slice(0, 2), oid.slice(2, 4), oid);
