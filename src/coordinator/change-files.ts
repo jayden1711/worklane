@@ -636,6 +636,16 @@ export function mergeBaseOf(cwd: string, a: string, b: string): string {
   return must(run(cwd, ['merge-base', a, b])).trim();
 }
 
+/**
+ * Every best merge base of two commits (git merge-base --all): after a criss-cross merge there is more than one, and
+ * mergeBaseOf gives only one of them. Throws when git fails or there is none.
+ */
+export function mergeBasesOf(cwd: string, a: string, b: string): string[] {
+  const all = must(run(cwd, ['merge-base', '--all', a, b])).split('\n').map((l) => l.trim()).filter(Boolean);
+  if (!all.length) throw new Error(`git merge-base --all ${a.slice(0, 40)} ${b.slice(0, 40)}: no merge base`);
+  return all;
+}
+
 /** Whether commit `a` is `b` or an ancestor of it (git merge-base --is-ancestor). Throws when git fails. */
 export function isAncestorOf(cwd: string, a: string, b: string): boolean {
   const r = runStatus(cwd, ['merge-base', '--is-ancestor', a, b]);

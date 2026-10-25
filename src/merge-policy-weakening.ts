@@ -26,7 +26,7 @@
 // isn't text, a table it can't find or a git failure, the change waits. The engine's own source paths (ENGINE_ONLY)
 // stand aside in a managed app's repo, as the locks do there (src/review.ts lockedCategories).
 import { BRAND } from './brand.js';
-import { changedNames, changeFiles, exactMoves, filesAt, filesWithText, isAncestorOf, mergeBaseOf, mergedTree } from './coordinator/change-files.js';
+import { changedNames, changeFiles, exactMoves, filesAt, filesWithText, isAncestorOf, mergeBaseOf, mergeBasesOf, mergedTree } from './coordinator/change-files.js';
 import { globToRegExp } from './guardrails/glob.js';
 import { escapedPath, isNonUtf8Path, shownPath } from './path-text.js';
 import { engineSourceGlob, LOCKED_CATEGORIES, lockedCategories, type ChangeFile, type LockScope } from './review.js';
@@ -1110,8 +1110,9 @@ export const TIP_MERGE_CONFLICTS = `${WEAKENING_REASON}merging it into the defau
  * weakeningReasons for the change base..head of the repo at `cwd`, with `files` from changeFiles. When the change
  * can't be read, one reason says so: the change waits (fail closed).
  *
- * When the head has commits of the default branch that the base hasn't (its branch merged the tip in, or an older
- * commit of the default branch, or was rebased onto one), base..head no longer says what merging it does to the
+ * When the head has commits of the default branch that the base hasn't (any merge base of the tip and the head is
+ * outside the base: its branch merged the tip in, or an older commit of the default branch, also one that reached it
+ * through a merge commit, or was rebased onto one), base..head no longer says what merging it does to the
  * default branch: a line the tip added and the PR took out again is no removed line there, nor a file the tip added
  * and the PR deleted, nor a line the tip took out and the PR put back (#1069). So the change merging the PR makes to
  * the default branch is measured too: from the tip to the tree of the tip merged with the head (git merge-tree, no
@@ -1127,7 +1128,9 @@ export function weakeningOf(cwd: string, base: string, head: string, files: Chan
     // Where the change meets the tip: a tip mark the head lacks was taken out by the change only if it is there.
     const meet = mergeBaseOf(cwd, tip, head);
     const own = measured(cwd, base, head, files, scope, { tip, meet });
-    if (isAncestorOf(cwd, meet, base)) return weakeningReasons(own);
+    // Every merge base, not just one: after a criss-cross merge, the commit of the default branch the head merged in
+    // may be a merge base that `git merge-base` doesn't give (it gives the base).
+    if (mergeBasesOf(cwd, tip, head).every((m) => isAncestorOf(cwd, m, base))) return weakeningReasons(own);
     const merged = mergedTree(cwd, tip, head);
     if (merged === null) return [...weakeningReasons(own), TIP_MERGE_CONFLICTS];
     return weakeningReasons(own, measured(cwd, tip, merged, changeFiles(cwd, tip, merged), scope));

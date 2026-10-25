@@ -142,6 +142,59 @@ test('tip merged in: what genuinely weakens nothing still merges (a stale PR, th
   assert.deepEqual(kinds(r), []);
 });
 
+/**
+ * A criss-cross: commit D forks before the claimed base, and the default branch takes it after the base through a
+ * merge commit (the tip). The PR merges D itself, not the tip, so `git merge-base tip head` is the base alone; `--all`
+ * also gives D. `d` is D's files, `head` the PR's after the merge.
+ */
+function crissCross(o: { root: Files; d: Files; head: Files }): string[] {
+  const dir = exampleProject().dir;
+  const g = (...a: string[]) => execFileSync('git', a, { cwd: dir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+  const commit = (files: Files) => {
+    for (const [p, t] of Object.entries(files)) {
+      mkdirSync(dirname(join(dir, p)), { recursive: true });
+      writeFileSync(join(dir, p), t!);
+    }
+    g('add', '-A');
+    g('commit', '-q', '--allow-empty', '-m', 'step');
+    return g('rev-parse', 'HEAD');
+  };
+  const root = commit(o.root);
+  g('checkout', '-q', '-b', 'other');
+  const d = commit(o.d);
+  g('checkout', '-q', '-b', 'default-tip', root);
+  const base = commit({ README: 'b\n' });
+  g('merge', '-q', '--no-ff', '--no-edit', d);
+  const tip = g('rev-parse', 'HEAD');
+  g('checkout', '-q', '-b', 'pr', base);
+  g('merge', '-q', '--no-edit', d);
+  const head = commit(o.head);
+  assert.equal(g('merge-base', '--all', tip, head).split('\n').length, 2, 'two merge bases');
+  return kinds(weakening.weakeningOf(dir, base, head, changeFiles(dir, base, head), undefined, tip));
+}
+
+test('tip merged in, criss-cross: an older default-branch commit merged in directly, then undone, waits', () => {
+  const kept = asserts(['assert.ok(true);']);
+  const a = crissCross({ root: { [T]: kept, 'web/x.js': '1\n' }, d: { [T]: asserts(['assert.ok(true);', 'assert.equal(1, 1);']) }, head: { [T]: kept, ...WEB } });
+  assert.ok(a.includes(ASSERTION), a.join(' | '));
+  const plain = table('CHECKS', ['a', 'b']);
+  const m = crissCross({ root: { [P]: plain, 'web/x.js': '1\n' }, d: { [P]: table('CHECKS', ['a', 'b'], 'never-shrink') }, head: { [P]: plain, ...WEB } });
+  assert.ok(m.includes(REG_GONE), m.join(' | '));
+  // The control: the same merge, then only an app change.
+  assert.deepEqual(crissCross({ root: { [T]: kept, 'web/x.js': '1\n' }, d: { [T]: asserts(['assert.ok(true);', 'assert.equal(1, 1);']) }, head: WEB }), []);
+});
+
+test("tip merged in: the default branch's own change after the merge-in is never taken for the PR's (it deletes a test)", () => {
+  // Measured from the tip, not from where the head meets it: main deleting a test file since is main's change.
+  const r = heldReasons({
+    base: { [T]: asserts(['assert.ok(true);']), 'test/old.test.ts': asserts(['assert.ok(1);']), 'web/x.js': 'export const x = 1;\n' },
+    tip: [{ README: 'r\n' }, { 'test/old.test.ts': null, [T]: asserts([]) }],
+    head: WEB,
+    mergeAt: 0,
+  });
+  assert.deepEqual(kinds(r), []);
+});
+
 test('tip merged in: a merge into the tip that conflicts waits; a stale PR that conflicts is measured once, as before', () => {
   const v = (n: number) => ({ 'web/x.js': `export const x = ${n};\n` });
   // An older commit of the default branch merged in; the PR and the tip since change the same line.
