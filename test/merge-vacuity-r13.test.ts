@@ -381,6 +381,8 @@ test('must hold: E2d: g moved into an existing file over a function it removes (
 const ARMS = G.replace(G_A, '').replace(/export function g[^}]*\}\n/, '');
 const G_EDIT = (g: string) => g.replace('? grant(u)', '? grantAll(u)');
 const cjs = (head: string) => `${head} = function (u) {\n  return u.admin ? grant(u) : deny(u);\n};\n${ARMS.replaceAll('export function', 'function')}`;
+// A module whose named exports Node can't see from its text (the unbalanced one below), imported whole.
+const viaDefault = `${H}import m from '../src/c.cjs';\ntest('g', () => { assert.deepEqual(m.g({ admin: false }), 'none'); });\n`;
 
 test('must hold: E3: M3 in CommonJS, `exports.g =` moved with its untaken arm edited', async () => {
   const d = await decided({ 'src/a.cjs': cjs('exports.g') }, { 'src/a.cjs': '', 'src/c.cjs': G_EDIT(cjs('exports.g')), 'test/x.test.js': calls('c.cjs', 'g', 'g({ admin: false })', "'none'") });
@@ -431,7 +433,13 @@ test('must hold: E8: M5c with a division right after a function expression insid
 
 test('limit: in a file no reading balances only `export` and `import` lines start statements: E3 with a division right after a function expression above `exports.g =`', { todo: 'neither reading reads this `/` as a division, so `exports.g =` starts no statement and g reads as added code, as before #1014' }, async () => {
   const head = 'exports.n = Math.round(function () { return 4; } / 2);\n' + G_EDIT(cjs('exports.g'));
-  const d = await decided({ 'src/a.cjs': cjs('exports.g') }, { 'src/a.cjs': '', 'src/c.cjs': head, 'test/x.test.js': calls('c.cjs', 'g', 'g({ admin: false })', "'none'") });
+  const d = await decided({ 'src/a.cjs': cjs('exports.g') }, { 'src/a.cjs': '', 'src/c.cjs': head, 'test/x.test.js': viaDefault });
+  assert.deepEqual([d.auto, d.reasons], hold('src/a.cjs, src/c.cjs'));
+});
+
+test('control: the same file balanced (no division) holds', async () => {
+  const head = 'exports.n = Math.round(function () { return 4; }() * 2);\n' + G_EDIT(cjs('exports.g'));
+  const d = await decided({ 'src/a.cjs': cjs('exports.g') }, { 'src/a.cjs': '', 'src/c.cjs': head, 'test/x.test.js': viaDefault });
   assert.deepEqual([d.auto, d.reasons], hold('src/a.cjs, src/c.cjs'));
 });
 
@@ -481,6 +489,76 @@ test('must merge: Z-F10: in place, a tested call fix in a one-line function decl
 test('must merge: Z-F11: in place, a semicolon added to a tested one-line function (git measures it; never paired with its own old line)', async () => {
   const one = 'export function ready(s) { return s.ok }\n';
   await merges({ 'src/o.js': one }, { 'src/o.js': one.replace('s.ok }', 's.ok; }'), 'test/x.test.js': calls('o.js', 'ready', 'ready({ ok: 1 })', '1') });
+});
+
+// ---- #1014's fifth reviews: a statement git paired in place pairs with nothing else, and only the parenthesis
+// positions quiet names are formatting
+const PAD = 'export function pad1(x) {\n  return x;\n}\nexport function pad2(x) {\n  return x;\n}\n';
+
+test('must merge: G1: a tested one-line edit in place, the PR deleting a file that held the new line', async () => {
+  const d = await decided({ 'src/a.js': PAD + 'export const g = (x) => x + 1;\n', 'src/b.js': 'export const g = (x) => x + 2;\n' }, { 'src/a.js': PAD + 'export const g = (x) => x + 2;\n', 'test/x.test.js': calls('a.js', 'g', 'g(1)', '3') }, ['src/b.js']);
+  assert.deepEqual([d.auto, d.reasons], [true, []]);
+});
+
+test('must merge: G1b: G1 with the other file kept and only its copy removed', async () => {
+  const q = PAD.replaceAll('pad', 'q');
+  await merges({ 'src/a.js': PAD + 'export const g = (x) => x + 1;\n', 'src/b.js': q + 'export const g = (x) => x + 2;\n' }, { 'src/a.js': PAD + 'export const g = (x) => x + 2;\n', 'src/b.js': q, 'test/x.test.js': calls('a.js', 'g', 'g(1)', '3') });
+});
+
+test('control: G1c: a 3-line function rewritten in place, the PR deleting a file that held the new version, merges', async () => {
+  const newG = 'export function g(x) {\n  const z = x - 1;\n  return z * 3;\n}\n';
+  const d = await decided({ 'src/a.js': PAD + 'export function g(x) {\n  const y = x + 1;\n  return y * 2;\n}\n', 'src/b.js': newG }, { 'src/a.js': PAD + newG, 'test/x.test.js': calls('a.js', 'g', 'g(2)', '3') }, ['src/b.js']);
+  assert.deepEqual([d.auto, d.reasons], [true, []]);
+});
+
+const D1_A = (f: string) => `${f}\nexport const h = 0;\n`;
+
+test('must merge: D1: a tested one-line edit in place to the text of a copy the PR removes from another file', async () => {
+  await merges({ 'src/a.js': D1_A('export const f = (x) => x + 1;'), 'src/b.js': 'export const f = (x) => x + 2;\nexport const k = 0;\n' }, { 'src/a.js': D1_A('export const f = (x) => x + 2;'), 'src/b.js': 'export const k = 0;\n', 'test/x.test.js': calls('a.js', 'f', 'f(1)', '3') });
+});
+
+test('must merge: D1d: D1 with the other file deleted', async () => {
+  const d = await decided({ 'src/a.js': D1_A('export const f = (x) => x + 1;'), 'src/b.js': 'export const f = (x) => x + 2;\n' }, { 'src/a.js': D1_A('export const f = (x) => x + 2;'), 'test/x.test.js': calls('a.js', 'f', 'f(1)', '3') }, ['src/b.js']);
+  assert.deepEqual([d.auto, d.reasons], [true, []]);
+});
+
+test('control: D1m: D1 with f on three lines merges', async () => {
+  const f = (b: string) => `export function f(x) {\n  return ${b};\n}\nexport const h = 0;\n`;
+  await merges({ 'src/a.js': f('x + 1'), 'src/b.js': 'export function f(x) {\n  return x * 3;\n}\nexport const k = 0;\n' }, { 'src/a.js': f('x * 3'), 'src/b.js': 'export const k = 0;\n', 'test/x.test.js': calls('a.js', 'f', 'f(1)', '3') });
+});
+
+test('must merge: G2: g moved with a tested `(a + b) * c` precedence fix after `return`', async () => {
+  await merges({ 'src/a.js': PAD + 'export function g(a, b, c) {\n  return a + b * c;\n}\n' }, { 'src/a.js': PAD, 'src/c.js': 'export function g(a, b, c) {\n  return (a + b) * c;\n}\n', 'test/x.test.js': calls('c.js', 'g', 'g(1, 2, 3)', '9') });
+});
+
+test('must merge: G2e: G2 after `=`', async () => {
+  const g = (v: string) => `export function g(a, b, c) {\n  const v = ${v};\n  return v;\n}\n`;
+  await merges({ 'src/a.js': PAD + g('a + b * c') }, { 'src/a.js': PAD, 'src/c.js': g('(a + b) * c'), 'test/x.test.js': calls('c.js', 'g', 'g(1, 2, 3)', '9') });
+});
+
+test('must merge: G5: g moved with a tested `=> { a: 1 }` to `=> ({ a: 1 })` fix', async () => {
+  await merges({ 'src/a.js': PAD + 'export const g = () => { a: 1 };\n' }, { 'src/a.js': PAD, 'src/c.js': 'export const g = () => ({ a: 1 });\n', 'test/x.test.js': calls('c.js', 'g', 'g().a', '1') });
+});
+
+test('must merge: B16b: g moved with a tested `(x) => ({ x })` to `(x) => { x }` change', async () => {
+  const g = (b: string) => `export function g(u) {\n  return ${b}(combine(alpha(u), beta(u)));\n}\n`;
+  const d = await decided({ 'src/s.js': S.replace(S_G, g('((x) => ({ x }))')) }, { 'src/s.js': S_T, 'src/c.js': IMP + g('((x) => { x })'), 'test/x.test.js': calls('c.js', 'g', 'g({})', 'undefined') });
+  assert.deepEqual([d.auto, d.reasons], [true, []]);
+});
+
+for (const [id, from, to] of [
+  ['Q-Pq', 'u.a ?? (combine(alpha(u), beta(u)))', 'u.a ?? combine(alpha(u), beta(u))'],
+  ['Q-Pc', 'u.a ? 1 : (combine(alpha(u), beta(u)))', 'u.a ? 1 : combine(alpha(u), beta(u))'],
+] as const) {
+  test(`must hold: ${id}: M5c with g moved and \`${from}\` written \`${to}\` (parentheses after \`${id === 'Q-Pq' ? '??' : ':'}\` are formatting)`, async () => {
+    const g = (b: string) => `export function g(u) {\n  return ${b};\n}\n`;
+    assert.deepEqual(await moveG(g(from), g(to)), hold('src/c.js, src/s.js'));
+  });
+}
+
+test('must hold: Z-T3: M3 with a column-0 `export` line in a template inside g (a template never starts a statement)', async () => {
+  const g = (v: string) => `export function g(u) {\n  if (u.never) return \`\nexport \${u.${v}}\n\`;\n  return combine(alpha(u), beta(u));\n}\n`;
+  assert.deepEqual(await moveG(g('a'), g('b')), hold('src/c.js, src/s.js'));
 });
 
 for (const [id, line] of [

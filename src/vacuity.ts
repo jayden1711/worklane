@@ -23,8 +23,9 @@
 //           optional call's arguments, a default parameter or destructuring default, a logical assignment's right
 //           side, code in a string) or a build's map places code only by line. And the two limits where an untested
 //           change merges that src/merge-policy-vacuity.ts names: moved code the pairing doesn't find or can't place
-//           (renamed as it moved, moved inside a statement that stays, rewritten too far to align with its source, in
-//           a file whose brackets no reading balances and not starting on an `export` or `import` line) reads as
+//           (renamed as it moved, moved inside a statement that stays, re-wrapped with parentheses quiet doesn't name,
+//           rewritten too far to align with its source, in a file whose brackets no reading balances and not starting
+//           on an `export` or `import` line) reads as
 //           added code, so a test that runs it counts; and a
 //           deleted app file, or one renamed out of app code, leaves no app code to measure.
 import { spawn, spawnSync } from './os/child-process.js';
@@ -941,11 +942,12 @@ export function codeRanges(text: string, hunks: readonly ChangedHunkSpots[], bas
 
 /**
  * `mask` with what a formatter adds or drops as it re-wraps code taken out of the code (#1014: M5b, R3s): every `;`, a
- * `,` before a closing bracket, and parentheses that can't change what the code does. Those wrap one expression with no
- * `,` or `;` of their own and not starting with `{`, opened right after an assignment's `=`, `=>`, `return`, `throw`,
- * `(`, `[`, `,`, `?` or `:` and closed right before `;`, `,`, `)`, `]`, `}` or the end; or wrap an arrow function's one
- * parameter. Any other parenthesis is code (Z-F1: `a * (b + c)`, Z-F1b: `!(x instanceof Array)`, Z-F6: `s.open()`), as
- * is every one when the brackets don't pair up. Read on the statement reading of lexLines, outside strings and templates.
+ * `,` before a closing bracket, and parentheses in two positions only: around one expression with no `,` or `;` of
+ * its own and not starting with `{` (G5, B16b), opened right after an assignment's `=`, `=>`, `return`, `throw`, `(`,
+ * `[`, `,`, `?` (`??`: Q-Pq) or `:` (Q-Pc) and closed right before `;`, `,`, `)`, `]`, `}` or the end (G2, G2e); or
+ * around an arrow function's one parameter (Q-P). Any other parenthesis is code, even one a formatter adds
+ * (`(a && b) || c`: a limit), as is every one when the brackets don't pair up (Z-F1: `a * (b + c)`, Z-F1b:
+ * `!(x instanceof Array)`, Z-F6: `s.open()`). Read on the statement reading of lexLines, outside strings and templates.
  */
 function quiet(text: string, mask: Uint8Array): Uint8Array {
   const out = new Uint8Array(mask);
@@ -1162,12 +1164,14 @@ function movedCode(
     from.used = true;
     moves.set(f, [...(moves.get(f) ?? []), { unit, from }]);
   };
-  // Whether git already paired them: a hunk of the unit's file removed lines of the source and added lines of the unit
-  // (a statement edited in place is measured as git measured it: Z-F6 to Z-F11).
+  // Whether git already paired them: a hunk of the unit's file removed lines of the source and added lines of the unit.
+  // A unit git paired so with a removed statement of its own name (or, unnamed, with an unnamed one) was edited in place
+  // and pairs with none: it is measured as git measured it (Z-F6 to Z-F11; G1, D1: not with a copy removed elsewhere).
   const same = (u: Unit, s: Unit) => heads.get(u.path)!.hunks.some((h) => h.oldPath === s.path && h.from !== undefined && h.removed.length > 0 && h.from <= s.last && h.from + h.removed.length - 1 >= s.first && h.added.some((l) => l >= u.first && l <= u.last));
   const left: [string, Unit][] = [];
   for (const f of files) {
     for (const u of added.get(f)!) {
+      if (sources.some((s) => s.name === u.name && same(u, s))) continue;
       const s = byKey.get(u.key)?.find((x) => !x.used && !same(u, x));
       if (s) pair(f, u, s);
       else if (u.name !== null) left.push([f, u]);

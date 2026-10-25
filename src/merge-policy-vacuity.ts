@@ -43,9 +43,14 @@
 // code moved in a way git doesn't pair is measured as if git had paired it (#1014: a file renamed and re-indented or
 // edited, a function moved into another file or within its file, moved code re-wrapped; must-holds R1, R3, R4 in
 // merge-vacuity-r12, M3 to R3s, P1a to P5, E1 to E8, X2, X3 and Z-A1 to Z-N4 in -r13), but only a top-level
-// statement moved whole, paired by its code or its declared name (the closest same-named pair first), never with
-// the old text git already paired it with (Z-F6 to Z-F11), and only formatting is no change (parentheses that change
-// precedence count: Z-F1, Z-F1b). Still read as added code, so a test that runs it merges the PR: one renamed as it
+// statement moved whole, paired by its code or its declared name (the closest same-named pair first); one git paired
+// in place with its old text pairs with nothing (Z-F6 to Z-F11, G1, D1). Only formatting is no change: whitespace,
+// semicolons, a comma before a closing bracket, and parentheses around an arrow function's one parameter or around
+// one expression with no `,` or `;` of its own, not starting with `{`, opened right after an assignment's `=`, `=>`,
+// `return`, `throw`, `(`, `[`, `,`, `?` or `:` and closed right before `;`, `,`, `)`, `]`, `}` or the end (Q-P, Q-Pq,
+// Q-Pc, R3s). Every other parenthesis counts (Z-F1, Z-F1b, G2, G2e, G5, B16b: must merge). Still read as added code,
+// so a test that runs it merges the PR: one re-wrapped with parentheses anywhere else (`(a && b) || c`, `? (y) :`,
+// `}())`; measured in #1014's fifth review, and main merges these too); one renamed as it
 // moved, or moved inside a statement that stays (a method within its class, a statement into another function)
 // (inferred: the pairing's rules); one paired by name but rewritten too far to align with its source (FH1, FH2 in
 // -r13, which must merge; in a 150-line statement two replaced lines are enough: X1, a todo in -r13; measured); and,
