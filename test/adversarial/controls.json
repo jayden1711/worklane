@@ -127,6 +127,90 @@
       "change": [{ "write": "web/totals.js", "text": "export const total = 2;\n" }, { "write": "web/auth/session.js", "text": "export const ttl = 600000;\n" }],
       "flow": { "plan": ["web/totals.js", "web/auth/session.js"] },
       "expect": { "decision": "merges", "configs": ["auth-at-l2"], "scopes": ["engine", "managed-app"] }
+    },
+    {
+      "id": "control-empty-plan-app-change-in-flow",
+      "attack": "a planned task whose approved plan lists no files, and whose PR changes only an ordinary app file",
+      "source": "the suite's own control (flow-outside-plan-empty-plan: only the unplanned auth file holds that case)",
+      "base": { "web/totals.js": "export const total = 1;\n" },
+      "change": [{ "write": "web/totals.js", "text": "export const total = 2;\n" }],
+      "flow": { "plan": [] },
+      "expect": { "decision": "merges", "configs": ["engine", "default", "loosened", "auth-at-l2"], "scopes": ["engine", "managed-app"] }
+    },
+    {
+      "id": "control-planned-auth-change-another-tasks-plan-in-flow",
+      "attack": "a planned task whose own plan lists the auth file it changes, while another task's later plan doesn't, in a repo whose review.yaml puts auth at L2",
+      "source": "the suite's own control (flow-outside-plan-another-tasks-plan: only this task's plan decides)",
+      "base": { "web/totals.js": "export const total = 1;\n", "web/auth/session.js": "export const ttl = 60;\n" },
+      "change": [{ "write": "web/totals.js", "text": "export const total = 2;\n" }, { "write": "web/auth/session.js", "text": "export const ttl = 600000;\n" }],
+      "flow": { "plan": ["web/totals.js", "web/auth/session.js"], "planForAnotherIssue": ["web/totals.js"] },
+      "expect": { "decision": "merges", "configs": ["auth-at-l2"], "scopes": ["engine", "managed-app"] }
+    },
+    {
+      "id": "control-planned-auth-change-file-name-entry-in-flow",
+      "attack": "a planned task whose plan lists the auth file by its path and an ordinary file by its file name only, in a repo whose review.yaml puts auth at L2",
+      "source": "the suite's own control (flow-outside-plan-entry-by-file-name: only the auth file's entry holds that case)",
+      "base": { "web/totals.js": "export const total = 1;\n", "web/auth/session.js": "export const ttl = 60;\n" },
+      "change": [{ "write": "web/totals.js", "text": "export const total = 2;\n" }, { "write": "web/auth/session.js", "text": "export const ttl = 600000;\n" }],
+      "flow": { "plan": ["totals.js", "web/auth/session.js"] },
+      "expect": { "decision": "merges", "configs": ["auth-at-l2"], "scopes": ["engine", "managed-app"] }
+    },
+    {
+      "id": "control-planned-auth-change-glob-entry-in-flow",
+      "attack": "a planned task whose plan lists the auth file by its path and the app folder by a glob, in a repo whose review.yaml puts auth at L2",
+      "source": "the suite's own control (flow-outside-plan-entry-with-glob: only the auth file's entry holds that case)",
+      "base": { "web/totals.js": "export const total = 1;\n", "web/auth/session.js": "export const ttl = 60;\n" },
+      "change": [{ "write": "web/totals.js", "text": "export const total = 2;\n" }, { "write": "web/auth/session.js", "text": "export const ttl = 600000;\n" }],
+      "flow": { "plan": ["web/*", "web/auth/session.js"] },
+      "expect": { "decision": "merges", "configs": ["auth-at-l2"], "scopes": ["engine", "managed-app"] }
+    },
+    {
+      "id": "control-other-label-in-flow",
+      "attack": "a small app change on an issue with a label that names no risk",
+      "source": "the suite's own control (flow-money-path-label: only the money-path label holds that case)",
+      "pr": { "labels": ["enhancement"] },
+      "base": { "web/totals.js": "export const total = 1;\n" },
+      "change": [{ "write": "web/totals.js", "text": "export const total = 2;\n" }],
+      "flow": {},
+      "expect": { "decision": "merges", "configs": ["engine", "default", "loosened"], "scopes": ["engine", "managed-app"] }
+    },
+    {
+      "id": "control-money-path-list-moved-elsewhere-in-flow",
+      "attack": "an app change while the money-path list on the default branch, moved since this PR's base, names other folders only",
+      "source": "the suite's own control (flow-money-path-list-moved-on-default-branch: only a listed path holds that case)",
+      "moneyPaths": ["ledger/**"],
+      "base": { "billing/rates.js": "export const rate = 1;\n" },
+      "change": [{ "write": "billing/rates.js", "text": "export const rate = 0;\n" }],
+      "flow": { "tipMoved": { "money-paths.txt": "ledger/**\nreports/**\n" } },
+      "expect": { "decision": "merges", "configs": ["engine", "default", "loosened"], "scopes": ["engine", "managed-app"] }
+    },
+    {
+      "id": "control-no-seed-existing-folder-in-flow",
+      "attack": "a change in a top-level folder the base already has, with no seed folders",
+      "source": "the suite's own control (flow-new-top-level-module: only a folder the base lacks holds that case)",
+      "seed": false,
+      "base": { "web/totals.js": "export const total = 1;\n" },
+      "change": [{ "write": "web/totals.js", "text": "export const total = 2;\n" }],
+      "flow": {},
+      "expect": { "decision": "merges", "configs": ["engine", "default", "loosened"], "scopes": ["engine", "managed-app"] }
+    },
+    {
+      "id": "control-small-deletion-in-flow",
+      "attack": "a change that deletes a 20-line app file",
+      "source": "the suite's own control (flow-big-deletion: only the size holds that case)",
+      "base": { "web/legacy.js": { "text": "export const total = 1;\n", "repeat": 20 } },
+      "change": [{ "delete": "web/legacy.js" }],
+      "flow": {},
+      "expect": { "decision": "merges", "configs": ["engine", "default", "loosened"], "scopes": ["engine", "managed-app"] }
+    },
+    {
+      "id": "control-another-task-rejects-same-head-in-flow",
+      "attack": "a small app change with this task's always-PASS verdict on its head, then another task's verdict on the same head that rejects the patch",
+      "source": "the suite's own control (flow-verdict-of-another-task: only this task's verdict decides)",
+      "base": { "web/totals.js": "export const total = 1;\n" },
+      "change": [{ "write": "web/totals.js", "text": "export const total = 2;\n" }],
+      "flow": { "verdictForAnotherIssue": "rejected" },
+      "expect": { "decision": "merges", "configs": ["engine", "default", "loosened"], "scopes": ["engine", "managed-app"] }
     }
   ]
 }
