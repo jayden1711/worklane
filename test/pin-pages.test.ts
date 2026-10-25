@@ -297,6 +297,7 @@ test("round 9: ownVerdict never puts an Actions run in the App group: one whose 
   // never a pass, even when every run passed.
   assert.equal(ownVerdict([actions(1, 'failure'), actions(2, 'success')])?.status, 'in_progress');
   assert.equal(ownVerdict([actions(2, 'success')])?.status, 'in_progress', 'waits');
-  // A non-Actions App's runs are its App group: the latest decides (the owner's decision).
-  assert.equal(ownVerdict([{ ...actions(1, 'failure'), app: 1111 }, { ...actions(2, 'success'), app: 1111 }])?.conclusion, 'success');
+  // A non-Actions App's runs: every one must pass (#925), so its earlier failure blocks; all passed, the latest decides.
+  assert.equal(ownVerdict([{ ...actions(1, 'failure'), app: 1111 }, { ...actions(2, 'success'), app: 1111 }])?.conclusion, 'failure');
+  assert.equal(ownVerdict([{ ...actions(1, 'success'), app: 1111 }, { ...actions(2, 'success'), app: 1111 }])?.id, 2);
 });
