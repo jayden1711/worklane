@@ -9,6 +9,20 @@
     { "gap": "a change to .github/CODEOWNERS waits whatever review.yaml says (today only the ci-config category holds it, which a review.yaml can redefine)", "closes": "#860 part 2 (owner decision: join the floor like #707 C1; a lock in src/review.ts, owned by Lane A; no PR yet)" },
     { "gap": "a change to .github/dependabot.yml waits whatever review.yaml says (today only the ci-config category holds it, which a review.yaml can redefine)", "closes": "#860 part 2 (owner decision: join the floor like #707 C1; a lock in src/review.ts, owned by Lane A; no PR yet)" },
     { "gap": "the evaluator's prompt fences the issue body and the worker's claims with a per-run nonce they can't close", "closes": "#707 slice 2 (no PR yet)" },
-    { "gap": "a token-shaped string in a diff or a PR body is refused by the push gate in the push-gate job", "closes": "#707 slice 5 (no PR yet)" }
+    { "gap": "a token-shaped string in a diff or a PR body is refused by the push gate in the push-gate job", "closes": "#707 slice 5 (no PR yet)" },
+    { "gap": "a PR whose branch merged in a check-table mark from the default branch's tip waits when its head no longer has the mark, also when the file's text at its head is its text at the base", "closes": "#1069" },
+    { "gap": "a PR whose branch merged in a lint-test mark from the default branch's tip waits when its head no longer has the mark, also when the file's text at its head is its text at the base", "closes": "#1069" },
+    { "gap": "a PR whose branch merged in a file only the default branch's tip has, holding a marked check table, waits when its head no longer has that file (deleted after the merge)", "closes": "#1069" },
+    { "gap": "a PR whose branch merged in a lint test only the default branch's tip has waits when its head moves that file to another path without its mark", "closes": "#1069" },
+    { "gap": "a PR whose branch merged in a check-table mark from the default branch's tip waits when its head keeps the mark but takes out an entry the tip added to that table", "closes": "#1069" },
+    { "gap": "a PR whose branch merged in a lint-test mark from the default branch's tip waits when its head keeps the mark but takes out a rule the tip added to that test", "closes": "#1069" },
+    { "gap": "a PR whose branch merged in the default branch's tip waits when its head takes out an entry the tip added to a table already marked at the PR's base", "closes": "#1069" },
+    { "gap": "a PR whose branch merged in the default branch's tip waits when its head takes out a rule the tip added to a test already marked as a lint test at the PR's base", "closes": "#1069" },
+    { "gap": "a PR whose branch merged in the default branch's tip waits when its head takes out an assertion the tip added to a test file", "closes": "#1069" },
+    { "gap": "a PR whose branch merged in the default branch's tip waits when its head deletes a test file only the tip has, with an unrelated change elsewhere", "closes": "#1069" },
+    { "gap": "a PR whose branch merged in the default branch's tip waits when its head takes an assertion out of a test file only the tip has", "closes": "#1069" },
+    { "gap": "a PR whose branch merged in the default branch's tip waits when its head puts back an entry the tip took out of an allowlist marked never-grow", "closes": "#1069" },
+    { "gap": "a PR whose branch merged in the default branch's tip waits when its head puts back a skip marker the tip took off a test", "closes": "#1069" },
+    { "gap": "a PR whose branch merged in the default branch's tip waits when its head puts back a line the tip took out of an allowlist file (.gitleaksignore), with an unrelated change elsewhere", "closes": "#1069" }
   ]
 }

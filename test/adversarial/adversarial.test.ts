@@ -168,8 +168,16 @@ const Flow = z.strictObject({
   pushRefused: z.union([z.literal(true), z.literal('before-open')]).optional(),
   /** The default branch's tip can't be fetched (its remote is gone). */
   tipUnreadable: z.literal(true).optional(),
-  /** The default branch moved past the base: these files, committed on it after the base (the PR doesn't have them). */
+  /**
+   * The default branch moved past the base: these files, committed on it after the base from another clone of its
+   * remote (the PR's repo has neither the commit nor a ref to it until the decision fetches the tip).
+   */
   tipMoved: z.record(z.string(), z.string()).optional(),
+  /**
+   * With tipMoved: the PR's own branch merged the moved tip in before its change (an agent's merge, not the harness's
+   * merge-in, so the change is still measured from the claimed base).
+   */
+  tipMergedIn: z.literal(true).optional(),
   /** A passing eval of every instruction target the change makes, recorded for another issue (not this one). */
   evalsForAnotherIssue: z.literal(true).optional(),
   /** A planned task: the files its approved plan lists. */
@@ -343,15 +351,23 @@ function made(c: Case | Control, inject: boolean): { dir: string; base: string; 
   git(origin, 'init', '-q', '--bare');
   git(dir, 'remote', 'add', 'origin', origin);
   git(dir, 'push', '-q', 'origin', `${base}:refs/heads/main`);
-  // A flow case's default branch moved past the base: its own commit on origin's main, which the PR doesn't have.
+  // A flow case's default branch moved past the base: a commit pushed to origin's main from a second clone, as another
+  // PR's merge lands, so only the decision's own fetch brings it (and its remote-tracking ref) into the PR's repo.
+  if (c.flow?.tipMergedIn && !c.flow.tipMoved) throw new Error(`${c.id}: tipMergedIn needs tipMoved`);
   if (c.flow?.tipMoved) {
     if (c.flow.mergedIn) throw new Error(`${c.id}: a flow case sets tipMoved or mergedIn, not both`);
-    git(dir, 'checkout', '-q', '-b', 'default-branch', base);
-    for (const [p, text] of Object.entries(c.flow.tipMoved)) put(dir, p, text);
-    git(dir, 'add', '-A');
-    git(dir, 'commit', '-q', '-m', 'on the default branch after the base');
-    git(dir, 'push', '-q', 'origin', 'HEAD:refs/heads/main');
-    git(dir, 'checkout', '-q', 'main');
+    const other = mkdtempSync(join(tmpdir(), 'adversarial-other-'));
+    git(other, 'clone', '-q', '-b', 'main', origin, '.');
+    for (const [k, v] of [['user.email', 'grace@example.com'], ['user.name', 'Grace'], ['commit.gpgsign', 'false'], ['core.autocrlf', 'false']]) git(other, 'config', k!, v!);
+    for (const [p, text] of Object.entries(c.flow.tipMoved)) put(other, p, text);
+    git(other, 'add', '-A');
+    git(other, 'commit', '-q', '-m', 'on the default branch after the base');
+    git(other, 'push', '-q', 'origin', 'HEAD:refs/heads/main');
+    // Fetched by the remote's path, not its name: the PR's remote-tracking ref stays at the base for the decision to move.
+    if (c.flow.tipMergedIn) {
+      git(dir, 'fetch', '-q', origin, 'refs/heads/main');
+      git(dir, 'merge', '-q', '--no-ff', '--no-edit', 'FETCH_HEAD');
+    }
   }
   for (const op of c.change) {
     if ('write' in op) put(dir, op.write, withInjection(op.text.repeat(op.repeat ?? 1), inject));
