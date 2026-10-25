@@ -195,10 +195,30 @@ test("tip merged in: the default branch's own change after the merge-in is never
   assert.deepEqual(kinds(r), []);
 });
 
-test('tip merged in: a merge into the tip that conflicts waits; a stale PR that conflicts is measured once, as before', () => {
+test('stale PR: a change git carries onto a table or lint test the tip renamed or moved and marked waits', () => {
+  const rows = ['a', 'b', 'c', 'd', 'e'];
+  const fewer = ['a', 'b', 'c', 'e'];
+  // The tip renames LIST to CHECKS and marks it; the PR takes 'd' out of LIST.
+  const renamed = kinds(heldReasons({ base: { [P]: table('LIST', rows) }, tip: [{ [P]: table('CHECKS', rows, 'never-shrink') }], head: { [P]: table('LIST', fewer) } }));
+  assert.ok(renamed.includes(SHRUNK), renamed.join(' | '));
+  // The tip moves the file and marks its table; the PR shrinks the table at the old path.
+  const moved = kinds(heldReasons({ base: { [P]: table('CHECKS', rows) }, tip: [{ [P]: null, 'test/checks/rules.test.ts': table('CHECKS', rows, 'never-shrink') }], head: { [P]: table('CHECKS', fewer) } }));
+  assert.ok(moved.includes(SHRUNK), moved.join(' | '));
+  // The tip moves a test to test/lint/ and marks it a lint test; the PR takes a rule out at the old path.
+  const rules = ['execSync', 'spawnSync', 'exec', 'fork'];
+  const lintMoved = kinds(heldReasons({ base: { [L]: lint(rules, false) }, tip: [{ [L]: null, 'test/lint/no-shell.test.ts': lint(rules) }], head: { [L]: lint(['execSync', 'exec', 'fork'], false) } }));
+  assert.ok(lintMoved.includes(GUARD), lintMoved.join(' | '));
+});
+
+test('stale PR: an unrelated change, while the tip renamed and marked a table, still merges', () => {
+  const rows = ['a', 'b', 'c'];
+  assert.deepEqual(heldReasons({ base: { [P]: table('LIST', rows), 'web/x.js': 'export const x = 1;\n' }, tip: [{ [P]: table('CHECKS', rows, 'never-shrink') }], head: WEB }), []);
+  assert.deepEqual(heldReasons({ base: { [P]: table('CHECKS', rows), 'web/x.js': 'export const x = 1;\n' }, tip: [{ [P]: null, 'test/checks/rules.test.ts': table('CHECKS', rows, 'never-shrink') }], head: WEB }), []);
+});
+
+test('a merge into the tip that conflicts waits, for a stale PR too', () => {
   const v = (n: number) => ({ 'web/x.js': `export const x = ${n};\n` });
   // An older commit of the default branch merged in; the PR and the tip since change the same line.
-  const r = heldReasons({ base: v(1), tip: [{ README: 'x\n' }, v(3)], head: v(2), mergeAt: 0 });
-  assert.deepEqual(r, [weakening.TIP_MERGE_CONFLICTS]);
-  assert.deepEqual(heldReasons({ base: v(1), tip: [v(3)], head: v(2) }), []);
+  assert.deepEqual(heldReasons({ base: v(1), tip: [{ README: 'x\n' }, v(3)], head: v(2), mergeAt: 0 }), [weakening.TIP_MERGE_CONFLICTS]);
+  assert.deepEqual(heldReasons({ base: v(1), tip: [v(3)], head: v(2) }), [weakening.TIP_MERGE_CONFLICTS]);
 });

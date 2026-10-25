@@ -637,24 +637,6 @@ export function mergeBaseOf(cwd: string, a: string, b: string): string {
 }
 
 /**
- * Every best merge base of two commits (git merge-base --all): after a criss-cross merge there is more than one, and
- * mergeBaseOf gives only one of them. Throws when git fails or there is none.
- */
-export function mergeBasesOf(cwd: string, a: string, b: string): string[] {
-  const all = must(run(cwd, ['merge-base', '--all', a, b])).split('\n').map((l) => l.trim()).filter(Boolean);
-  if (!all.length) throw new Error(`git merge-base --all ${a.slice(0, 40)} ${b.slice(0, 40)}: no merge base`);
-  return all;
-}
-
-/** Whether commit `a` is `b` or an ancestor of it (git merge-base --is-ancestor). Throws when git fails. */
-export function isAncestorOf(cwd: string, a: string, b: string): boolean {
-  const r = runStatus(cwd, ['merge-base', '--is-ancestor', a, b]);
-  if (r.status === 0) return true;
-  if (r.status === 1) return false;
-  throw new Error(`git merge-base --is-ancestor ${a.slice(0, 40)} ${b.slice(0, 40)} failed (exit ${r.status})`);
-}
-
-/**
  * The tree merging `a` and `b` makes (git merge-tree --write-tree, git 2.38 or later: no worktree, no index, no ref
  * moved; only the merged objects are written to the object store), or null when the merge conflicts. For the merge
  * decision's check for a weakened test, lint or guard: what merging a PR would make of the default branch (#1069).

@@ -18,15 +18,15 @@
 //   - any file but docs: an added line with a skip, only or suppression marker on it (MARKERS, owner, 2026-10-19).
 // Other pure additions pass: an added assertion, test, rule or guard line never waits.
 //
-// A head that has commits of the default branch its base hasn't is measured twice (weakeningOf, #1069): from its base,
-// and as what merging it would change on the default branch's tip.
+// Every change is measured twice (weakeningOf, #1069): from its base, and as what merging it would change on the
+// default branch's tip.
 //
 // Bounded and fail closed: one pass over each changed line of the files it checks, with substrings and linear
 // patterns only (no quantifier); over MAX_CHANGED_CHARS of such lines, a diff that doesn't match its line counts (cut short), a file that
 // isn't text, a table it can't find or a git failure, the change waits. The engine's own source paths (ENGINE_ONLY)
 // stand aside in a managed app's repo, as the locks do there (src/review.ts lockedCategories).
 import { BRAND } from './brand.js';
-import { changedNames, changeFiles, exactMoves, filesAt, filesWithText, isAncestorOf, mergeBaseOf, mergeBasesOf, mergedTree } from './coordinator/change-files.js';
+import { changedNames, changeFiles, exactMoves, filesAt, filesWithText, mergeBaseOf, mergedTree } from './coordinator/change-files.js';
 import { globToRegExp } from './guardrails/glob.js';
 import { escapedPath, isNonUtf8Path, shownPath } from './path-text.js';
 import { engineSourceGlob, LOCKED_CATEGORIES, lockedCategories, type ChangeFile, type LockScope } from './review.js';
@@ -1110,15 +1110,13 @@ export const TIP_MERGE_CONFLICTS = `${WEAKENING_REASON}merging it into the defau
  * weakeningReasons for the change base..head of the repo at `cwd`, with `files` from changeFiles. When the change
  * can't be read, one reason says so: the change waits (fail closed).
  *
- * When the head has commits of the default branch that the base hasn't (any merge base of the tip and the head is
- * outside the base: its branch merged the tip in, or an older commit of the default branch, also one that reached it
- * through a merge commit, or was rebased onto one), base..head no longer says what merging it does to the
- * default branch: a line the tip added and the PR took out again is no removed line there, nor a file the tip added
- * and the PR deleted, nor a line the tip took out and the PR put back (#1069). So the change merging the PR makes to
- * the default branch is measured too: from the tip to the tree of the tip merged with the head (git merge-tree, no
- * worktree), and a reason from either measurement holds it. That merge conflicting waits too (TIP_MERGE_CONFLICTS).
- * A head with none of the tip's commits past its base (a stale PR) is measured once, as before: the merge keeps what
- * the tip changed.
+ * base..head alone doesn't say what merging the PR does to the default branch (#1069). A head that merged in commits of
+ * the default branch (the tip, or an older one, also one that reached it through a merge commit) can take out again a
+ * line or a file the tip added, or put back a line the tip took out, and no removed or added line shows. And git
+ * carries a stale PR's change onto a table or lint test the tip has since renamed or moved and marked (#1056's round
+ * 16 review). So the change merging the PR makes to the default branch is measured too, for every PR: from the tip to
+ * the tree of the tip merged with the head (git merge-tree, no worktree), and a reason from either measurement holds
+ * it. That merge conflicting waits too (TIP_MERGE_CONFLICTS).
  */
 export function weakeningOf(cwd: string, base: string, head: string, files: ChangeFile[], scope: LockScope | undefined, tip: string | null): string[] {
   try {
@@ -1128,9 +1126,6 @@ export function weakeningOf(cwd: string, base: string, head: string, files: Chan
     // Where the change meets the tip: a tip mark the head lacks was taken out by the change only if it is there.
     const meet = mergeBaseOf(cwd, tip, head);
     const own = measured(cwd, base, head, files, scope, { tip, meet });
-    // Every merge base, not just one: after a criss-cross merge, the commit of the default branch the head merged in
-    // may be a merge base that `git merge-base` doesn't give (it gives the base).
-    if (mergeBasesOf(cwd, tip, head).every((m) => isAncestorOf(cwd, m, base))) return weakeningReasons(own);
     const merged = mergedTree(cwd, tip, head);
     if (merged === null) return [...weakeningReasons(own), TIP_MERGE_CONFLICTS];
     return weakeningReasons(own, measured(cwd, tip, merged, changeFiles(cwd, tip, merged), scope));
