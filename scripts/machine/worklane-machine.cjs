@@ -117,6 +117,82 @@ const ENGINE_CLI = '/opt/worklane/current/dist/src/cli.js';
 const PLUGINS_SH = '/opt/worklane/current/scripts/setup/plugins.sh';
 const PLUGIN_FETCH_UNIT = 'worklane-plugin-fetch';
 
+// A test runs a copy of this file (or of a root script that loads it) with each fixed path above pointed into its
+// own temporary machine (#905). In a test process, a fixed path the copy left real is refused where it is used, never
+// opened, and the journal's logger runs only from inside that machine. The environment can only make a path refused,
+// never move one: outside a test none of these is set (sudo's env_reset drops them too), and the paths are as above.
+// The variables are src/os/system-paths.ts's test-run signs (test/updater-setup.test.ts holds them equal).
+const TEST_MARKS = ['NODE_TEST_CONTEXT', 'WORKLANE_TEST_RUN', 'WORKLANE_TEST_ISOLATION', 'WORKLANE_TEST_MACHINE'];
+const TEST_MACHINE = 'WORKLANE_TEST_MACHINE';
+
+const within = (p, root) => {
+  const r = path.relative(root, p);
+  return r === '' || (!r.startsWith('..') && !path.isAbsolute(r));
+};
+
+/**
+ * Why this process may not use the fixed path `p`, or null when it may: always null outside a test; in a test process,
+ * anything outside its test machine, by name or through a link. A path outside it is refused without being looked at.
+ */
+function testPathRefusal(p, env = process.env) {
+  const mark = TEST_MARKS.find((k) => env[k] !== undefined);
+  if (!mark) return null;
+  const machine = env[TEST_MACHINE];
+  const refused = `refused ${p} in a test process (${mark} is set)`;
+  if (!machine || !path.isAbsolute(machine)) return `${refused}: no test machine (${TEST_MACHINE}) holds it`;
+  const want = path.resolve(p);
+  if (!within(want, path.resolve(machine))) return `${refused}: it is outside the test machine ${machine}; a test runs a copy of this script with every fixed path it uses pointed into its own root`;
+  let real;
+  try {
+    real = fs.realpathSync(machine);
+  } catch {
+    return `${refused}: the test machine ${machine} is missing`;
+  }
+  // The deepest part that exists, resolved: a link inside the machine may not lead out of it.
+  const rest = [];
+  let at = want;
+  while (!fs.existsSync(at)) {
+    rest.unshift(path.basename(at));
+    at = path.dirname(at);
+  }
+  const target = path.join(fs.realpathSync(at), ...rest);
+  return within(target, real) ? null : `${refused}: through a link it is ${target}, outside the test machine ${machine}`;
+}
+
+/** The fixed path `p`, for use here; thrown in a test process that may not use it (testPathRefusal). */
+function fixedPath(p) {
+  const why = testPathRefusal(p);
+  if (why) throw new Error(why);
+  return p;
+}
+
+/**
+ * One line to the system journal (logger -t `tag`), best effort: the change log is the record. In a test process, only
+ * a logger found on PATH inside its test machine is run, by that path; none there, and none is. Whether one ran.
+ */
+function journal(tag, text, env = process.env) {
+  let file = 'logger';
+  if (TEST_MARKS.some((k) => env[k] !== undefined)) {
+    const found = (env.PATH || '').split(path.delimiter).filter((d) => path.isAbsolute(d)).map((d) => path.join(d, 'logger')).find((f) => {
+      try {
+        fs.accessSync(f, fs.constants.X_OK);
+        return fs.statSync(f).isFile();
+      } catch {
+        return false;
+      }
+    });
+    if (!found || testPathRefusal(found, env)) return false;
+    file = found;
+  }
+  try {
+    execFileSync(file, ['-t', tag, text], { stdio: 'ignore', env });
+    return true;
+  } catch {
+    // no journal here (a machine without logger): the change log still has it
+    return false;
+  }
+}
+
 const USAGE = 'usage: worklane-machine set-slots <1..16> | set-updates on|off | set-test-slots <1..8> | add-project <name> <owner/repo> | claude-account status | install-updater | set-update-channel release | stage-update-signer <principal> ssh-ed25519 <public key> | discard-update-signer <principal> ssh-ed25519 <public key> | tailscale install|up|serve|public-url | plugin-fetch <id> <https url> <sha> [<path>] | plugin-stage <id> sha256:<hex> <role+role> | plugin-withdraw <id> | plugin-remove <id> | mcp-fetch <id> <npm package> <x.y.z> | mcp-preview <id> <plugin> <server> | mcp-snapshot <id> | mcp-stage <id> sha256:<hex> <role+role> <host+host|none> <SECRET+SECRET|none> | set-policy <key> <value>';
 
 /**
@@ -175,13 +251,10 @@ function notRootOwned(file) {
 
 function logLine(what, from, to) {
   const by = process.env.SUDO_USER || 'root';
-  fs.mkdirSync(path.dirname(LOG), { recursive: true });
-  fs.appendFileSync(LOG, `${JSON.stringify({ at: new Date().toISOString(), by, what, from, to })}\n`, { mode: 0o644 });
-  try {
-    execFileSync('logger', ['-t', 'worklane-machine', `${by} ${what}: ${JSON.stringify(to)}`], { stdio: 'ignore' });
-  } catch {
-    // no journal here (a test, or a machine without logger): the change log still has it
-  }
+  const log = fixedPath(LOG);
+  fs.mkdirSync(path.dirname(log), { recursive: true });
+  fs.appendFileSync(log, `${JSON.stringify({ at: new Date().toISOString(), by, what, from, to })}\n`, { mode: 0o644 });
+  journal('worklane-machine', `${by} ${what}: ${JSON.stringify(to)}`);
   return by;
 }
 
@@ -300,6 +373,7 @@ function parseSigner(command, args) {
  * staged less than PENDING_TTL_MS ago. Each is { principal, key, fingerprint, by, at }.
  */
 function readPending(file = PENDING, now = Date.now()) {
+  fixedPath(file);
   let list = [];
   try {
     const j = JSON.parse(fs.readFileSync(file, 'utf8'));
@@ -315,6 +389,7 @@ function readPending(file = PENDING, now = Date.now()) {
 
 /** The pending list, whole: a temp file beside it, then a rename. */
 function writePending(list, file = PENDING) {
+  fixedPath(file);
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const tmp = `${file}.tmp-${process.pid}`;
   fs.writeFileSync(tmp, `${JSON.stringify({ pending: list })}\n`, { mode: 0o644 });
@@ -690,7 +765,7 @@ function main(argv) {
     process.stderr.write(`${USAGE}\n`);
     return 2;
   }
-  const file = path.join(ETC, change.file);
+  const file = fixedPath(path.join(ETC, change.file));
   if (change.existing && !fs.existsSync(file)) {
     process.stderr.write(`${file} is missing: install the updater first (install-updater)\n`);
     return 1;
@@ -698,22 +773,19 @@ function main(argv) {
   const current = readJson(file);
   const from = current[change.key] === undefined ? null : current[change.key];
   const next = { ...current, [change.key]: change.value };
-  const tmp = path.join(ETC, `.${change.file}.tmp-${process.pid}`);
+  const tmp = fixedPath(path.join(ETC, `.${change.file}.tmp-${process.pid}`));
+  const log = fixedPath(LOG);
   fs.writeFileSync(tmp, `${JSON.stringify(next)}\n`, { mode: 0o644 });
   fs.chmodSync(tmp, 0o644);
   fs.renameSync(tmp, file);
   const by = process.env.SUDO_USER || 'root';
   const line = { at: new Date().toISOString(), by, what: change.what, from, to: change.value };
-  fs.mkdirSync(path.dirname(LOG), { recursive: true });
-  fs.appendFileSync(LOG, `${JSON.stringify(line)}\n`, { mode: 0o644 });
-  try {
-    execFileSync('logger', ['-t', 'worklane-machine', `${by} set ${change.what} from ${JSON.stringify(from)} to ${JSON.stringify(change.value)}`], { stdio: 'ignore' });
-  } catch {
-    // no journal here (a test, or a machine without logger): the change log still has it
-  }
+  fs.mkdirSync(path.dirname(log), { recursive: true });
+  fs.appendFileSync(log, `${JSON.stringify(line)}\n`, { mode: 0o644 });
+  journal('worklane-machine', `${by} set ${change.what} from ${JSON.stringify(from)} to ${JSON.stringify(change.value)}`);
   process.stdout.write(`${change.what}: ${JSON.stringify(from)} -> ${JSON.stringify(change.value)}\n`);
   return 0;
 }
 
 if (require.main === module) process.exitCode = main(process.argv.slice(2));
-module.exports = { parsePolicySet, POLICY_SET_KEYS, POLICY_ONLY, parsePlugin, pluginHosts, mcpRegistries, pluginUrlProblem, pluginPathProblem, runLogged, needsUnit, unitCommand, IN_UNIT, parse, instanceNameProblem, parseAddProject, parseClaudeAccount, parseClaudeProfile, parseClaudeFailover, parseTailscale, tailscaleCommand, coordinatorInstance, policyInstance, parseSigner, fingerprint, readPending, writePending, PENDING, PENDING_MAX, PENDING_TTL_MS };
+module.exports = { parsePolicySet, POLICY_SET_KEYS, POLICY_ONLY, parsePlugin, pluginHosts, mcpRegistries, pluginUrlProblem, pluginPathProblem, runLogged, needsUnit, unitCommand, IN_UNIT, parse, instanceNameProblem, parseAddProject, parseClaudeAccount, parseClaudeProfile, parseClaudeFailover, parseTailscale, tailscaleCommand, coordinatorInstance, policyInstance, parseSigner, fingerprint, readPending, writePending, PENDING, PENDING_MAX, PENDING_TTL_MS, TEST_MARKS, testPathRefusal, fixedPath, journal };
