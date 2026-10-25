@@ -236,12 +236,24 @@ export const machineNetwork: { file: string; ownerUid: number } = { file: NETWOR
 /** The machine's network settings, read now (a change applies to the next child, no restart). */
 export const machineNetworkConfig = (): NetworkConfig => readNetworkConfig(machineNetwork.file, { ownerUid: machineNetwork.ownerUid });
 
-/** git config pairs in the environment (GIT_CONFIG_COUNT/KEY_n/VALUE_n) without any isRedirectGitKey key, renumbered. */
+/** The only GIT_CONFIG_COUNT read: a plain decimal 0 to 1000 (as the engine writes one), or empty (git reads none). */
+const CANONICAL_CONFIG_COUNT = /^(?:|0|[1-9][0-9]{0,2}|1000)$/;
+/** What any other count becomes: a value git refuses ("bogus count"), so the git fails instead of running. */
+const REFUSED_CONFIG_COUNT = 'refused';
+
+/**
+ * git config pairs in the environment (GIT_CONFIG_COUNT/KEY_n/VALUE_n) without any isRedirectGitKey key, renumbered.
+ * Fails closed (#1001): any other count (`1 `, `0x1`, `1e0`, `+1`, `01`, over 1000) becomes REFUSED_CONFIG_COUNT. Read
+ * with Number(), git-refused counts became ones git reads, and a count over the bound kept its pairs unstripped.
+ */
 function withoutRedirectGitConfig(e: Record<string, string | undefined>): void {
   const raw = e.GIT_CONFIG_COUNT;
   if (raw === undefined) return;
+  if (!CANONICAL_CONFIG_COUNT.test(raw)) {
+    e.GIT_CONFIG_COUNT = REFUSED_CONFIG_COUNT;
+    return;
+  }
   const n = Number(raw);
-  if (!Number.isInteger(n) || n < 0 || n > 1000) return; // git itself refuses a bad count
   const pairs: [string, string][] = [];
   for (let i = 0; i < n; i++) {
     const k = e[`GIT_CONFIG_KEY_${i}`];

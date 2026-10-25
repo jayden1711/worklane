@@ -8,7 +8,7 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { X509Certificate } from 'node:crypto';
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { devNull, tmpdir } from 'node:os';
 import { delimiter, join } from 'node:path';
 import type { Instance } from '../src/instance.js';
 import { CA_VARS, isRedirectGitKey, isRedirectVar, machineNetwork, NETWORK_LIMITS, networkHealth, outboundEnv, readCaFile, readNetworkConfig } from '../src/network.js';
@@ -122,6 +122,43 @@ test('git config in the environment loses every TLS, proxy and URL-rewrite key, 
     null,
   );
   assert.deepEqual(env, { GIT_CONFIG_COUNT: '2', GIT_CONFIG_KEY_0: 'credential.helper', GIT_CONFIG_VALUE_0: '', GIT_CONFIG_KEY_1: 'safe.directory', GIT_CONFIG_VALUE_1: '*' });
+});
+
+/** What git itself reads from `env`'s config pairs: `git config --get` of `key`, or null when git fails or has none. */
+function gitReads(env: Record<string, string | undefined>, key: string): { status: number | null; value: string | null } {
+  const r = spawnSync('git', ['config', '--get', key], { cwd: tmpdir(), encoding: 'utf8', env: { PATH: process.env.PATH, HOME: tmpdir(), GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: devNull, ...env } });
+  return { status: r.status, value: r.status === 0 ? r.stdout.trim() : null };
+}
+
+test('a GIT_CONFIG_COUNT that is not a plain decimal is made one git refuses, never rewritten into one it reads (#1001)', () => {
+  // git refuses the first five ("bogus count"), and Number() read each as 1, so the pair git would have refused was
+  // applied. git reads the others as 1; a parse that tries to match git's is how signs went wrong before (#927), so
+  // they are refused too.
+  for (const count of ['1 ', '0x1', '1e0', '1.0', '1\n', 'abc', ' 1', '+1', '01', '\t1']) {
+    const env = outboundEnv({ GIT_CONFIG_COUNT: count, GIT_CONFIG_KEY_0: 'user.name', GIT_CONFIG_VALUE_0: 'caller' }, null);
+    assert.notEqual(env.GIT_CONFIG_COUNT, '1', JSON.stringify(count));
+    const r = gitReads(env, 'user.name');
+    assert.equal(r.value, null, `${JSON.stringify(count)}: git read the pair`);
+    assert.notEqual(r.status, 0, JSON.stringify(count));
+  }
+  // The plain counts the engine writes are read as before.
+  assert.equal(gitReads(outboundEnv({ GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'user.name', GIT_CONFIG_VALUE_0: 'caller' }, null), 'user.name').value, 'caller');
+  assert.deepEqual(outboundEnv({ GIT_CONFIG_COUNT: '0' }, null), { GIT_CONFIG_COUNT: '0' });
+});
+
+test('a GIT_CONFIG_COUNT over the bound is refused, so its TLS key never reaches git unstripped (#1001)', () => {
+  const n = 1001;
+  const e: Record<string, string> = { GIT_CONFIG_COUNT: String(n) };
+  for (let i = 0; i < n; i++) {
+    e[`GIT_CONFIG_KEY_${i}`] = `x.k${i}`;
+    e[`GIT_CONFIG_VALUE_${i}`] = 'v';
+  }
+  e.GIT_CONFIG_KEY_5 = 'http.sslVerify';
+  e.GIT_CONFIG_VALUE_5 = 'false';
+  assert.equal(gitReads(e, 'http.sslVerify').value, 'false', 'git reads every pair of a large count (the setting this test guards)');
+  const r = gitReads(outboundEnv(e, null), 'http.sslVerify');
+  assert.equal(r.value, null, 'http.sslVerify=false reached git');
+  assert.notEqual(r.status, 0);
 });
 
 test('a custom CA: a root-owned file of PEM certificates sets exactly NODE_EXTRA_CA_CERTS, SSL_CERT_FILE and GIT_SSL_CAINFO', { skip: posixOnly }, () => {
