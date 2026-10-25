@@ -60,6 +60,58 @@
       "change": [{ "write": "test/rules.test.ts", "text": "import { test } from 'node:test';\n// check-table: never-grow\nexport const CHECKS = [\n  'a',\n  'b',\n  'c',\n];\ntest('t', () => {});\n// a note\n" }],
       "flow": { "tipMoved": { "test/rules.test.ts": "import { test } from 'node:test';\n// check-table: never-shrink\nexport const CHECKS = [\n  'a',\n  'b',\n  'c',\n];\ntest('t', () => {});\n" }, "tipMergedIn": true },
       "expect": { "decision": "waits", "reasons": ["design: may weaken a check: removes or changes the mark that registers a check, a check-table or lint-test line (test/rules.test.ts"], "scopes": ["engine"] }
+    },
+    {
+      "id": "flow-default-branch-tip-only-allowlist-grown-after-merge",
+      "attack": "an allowlist, marked never-grow, made on the default branch after this PR's base in a new file; the PR merges the default branch in, then adds an entry to it",
+      "source": "merge-policy-weakening.ts weakeningReasons (#869: a table only the tip has is read at the tip, against the head, both ways); #1056 round 5 review M1; docs/guardrails.md Hold kinds: design (may weaken a check)",
+      "change": [{"write": "test/allow.test.ts", "text": "import { test } from 'node:test';\n// check-table: never-grow\nexport const ALLOWED = [\n  'x',\n  'y',\n];\ntest('t', () => {});\n"}],
+      "flow": {"tipMoved": {"test/allow.test.ts": "import { test } from 'node:test';\n// check-table: never-grow\nexport const ALLOWED = [\n  'x',\n];\ntest('t', () => {});\n"}, "tipMergedIn": true},
+      "expect": {"decision": "waits", "reasons": ["design: may weaken a check: adds or changes an entry in an allowlist, exception or good-fixture list (test/allow.test.ts"], "scopes": ["engine"]}
+    },
+    {
+      "id": "flow-default-branch-mark-kind-changed-at-tip",
+      "attack": "a check table marked never-grow at this PR's base and re-marked never-shrink on the default branch after it; the PR, which never merged the default branch in, takes an entry out",
+      "source": "merge-policy-weakening.ts weakeningReasons (#869: a tip mark of another kind than the base's holds by its own kind); #1056 round 5 review M4; docs/guardrails.md Hold kinds: design (may weaken a check)",
+      "base": {"test/rules.test.ts": "import { test } from 'node:test';\n// check-table: never-grow\nexport const CHECKS = [\n  'a',\n  'b',\n  'c',\n];\ntest('t', () => {});\n"},
+      "change": [{"write": "test/rules.test.ts", "text": "import { test } from 'node:test';\n// check-table: never-grow\nexport const CHECKS = [\n  'a',\n  'b',\n];\ntest('t', () => {});\n"}],
+      "flow": {"tipMoved": {"test/rules.test.ts": "import { test } from 'node:test';\n// check-table: never-shrink\nexport const CHECKS = [\n  'a',\n  'b',\n  'c',\n];\ntest('t', () => {});\n"}},
+      "expect": {"decision": "waits", "reasons": ["design: may weaken a check: removes or changes an entry in a check's rules or a guard's list (test/rules.test.ts"], "scopes": ["engine"]}
+    },
+    {
+      "id": "flow-default-branch-tip-only-table-mark-taken-out-after-merge",
+      "attack": "a check table, marked never-shrink, made on the default branch after this PR's base in a new file; the PR merges the default branch in, then takes the mark out and adds a line elsewhere in the file",
+      "source": "merge-policy-weakening.ts weakeningReasons (#869: a tip mark the head lacks is taken out when the head has merged it in, also for a table only the tip has); #1056 round 5 review M11; docs/guardrails.md Hold kinds: design (may weaken a check)",
+      "change": [{"write": "test/new-rules.test.ts", "text": "import { test } from 'node:test';\nexport const CHECKS = [\n  'x',\n  'y',\n];\ntest('t', () => {});\n// a note\n"}],
+      "flow": {"tipMoved": {"test/new-rules.test.ts": "import { test } from 'node:test';\n// check-table: never-shrink\nexport const CHECKS = [\n  'x',\n  'y',\n];\ntest('t', () => {});\n"}, "tipMergedIn": true},
+      "expect": {"decision": "waits", "reasons": ["design: may weaken a check: removes or changes the mark that registers a check, a check-table or lint-test line (test/new-rules.test.ts"], "scopes": ["engine"]}
+    },
+    {
+      "id": "flow-default-branch-app-path-tip-mark",
+      "attack": "a check table outside the engine's own source, marked never-shrink on the default branch after this PR's base; the PR takes an entry out (a managed app's repo too)",
+      "source": "merge-policy-weakening.ts weakeningReasons (#869: tip marks are read in every scope, only the engine's own source stands aside); #1056 round 5 review M20; docs/guardrails.md Hold kinds: design (may weaken a check)",
+      "base": {"app/rules.test.ts": "import { test } from 'node:test';\nexport const CHECKS = [\n  'a',\n  'b',\n  'c',\n];\ntest('t', () => {});\n"},
+      "change": [{"write": "app/rules.test.ts", "text": "import { test } from 'node:test';\nexport const CHECKS = [\n  'a',\n  'b',\n];\ntest('t', () => {});\n"}],
+      "flow": {"tipMoved": {"app/rules.test.ts": "import { test } from 'node:test';\n// check-table: never-shrink\nexport const CHECKS = [\n  'a',\n  'b',\n  'c',\n];\ntest('t', () => {});\n"}},
+      "expect": {"decision": "waits", "reasons": ["design: may weaken a check: removes or changes an entry in a check's rules or a guard's list (app/rules.test.ts"], "scopes": ["engine", "managed-app"]}
+    },
+    {
+      "id": "flow-default-branch-lint-mark-changed-after-merge",
+      "attack": "a test marked as a lint test on the default branch after this PR's base; the PR merges the default branch in, then changes the mark's text and adds a line elsewhere in the file",
+      "source": "merge-policy-weakening.ts weakeningReasons (#869: a tip lint mark the head lacks is taken out when the head has merged it in); #1056 round 4 review probe; docs/guardrails.md Hold kinds: design (may weaken a check)",
+      "base": {"test/no-shell.test.ts": "import { test } from 'node:test';\n\nconst BANNED = [\n  'execSync',\n  'spawnSync',\n];\n\ntest('no shell calls in src', () => {});\n"},
+      "change": [{"write": "test/no-shell.test.ts", "text": "// lint-tests\nimport { test } from 'node:test';\n\nconst BANNED = [\n  'execSync',\n  'spawnSync',\n];\n\ntest('no shell calls in src', () => {});\n// a note\n"}],
+      "flow": {"tipMoved": {"test/no-shell.test.ts": "// lint-test\nimport { test } from 'node:test';\n\nconst BANNED = [\n  'execSync',\n  'spawnSync',\n];\n\ntest('no shell calls in src', () => {});\n"}, "tipMergedIn": true},
+      "expect": {"decision": "waits", "reasons": ["design: may weaken a check: removes or changes the mark that registers a check, a check-table or lint-test line (test/no-shell.test.ts"], "scopes": ["engine"]}
+    },
+    {
+      "id": "flow-default-branch-lint-mark-moved-out-after-merge",
+      "attack": "a test at this PR's base marked as a lint test on the default branch after it; the PR merges the default branch in, then moves the file to another path without the mark",
+      "source": "merge-policy-weakening.ts weakeningReasons (#869: a file the tip marks as a lint test is a guard file, so its move is a delete and an add); #1056 round 4 review probe; docs/guardrails.md Hold kinds: design (may weaken a check)",
+      "base": {"test/no-shell.test.ts": "import { test } from 'node:test';\n\nconst BANNED = [\n  'execSync',\n  'spawnSync',\n];\n\ntest('no shell calls in src', () => {});\n"},
+      "change": [{"rename": "test/no-shell.test.ts", "to": "test/no-shell2.test.ts", "text": "import { test } from 'node:test';\n\nconst BANNED = [\n  'execSync',\n  'spawnSync',\n];\n\ntest('no shell calls in src', () => {});\n"}],
+      "flow": {"tipMoved": {"test/no-shell.test.ts": "// lint-test\nimport { test } from 'node:test';\n\nconst BANNED = [\n  'execSync',\n  'spawnSync',\n];\n\ntest('no shell calls in src', () => {});\n"}, "tipMergedIn": true},
+      "expect": {"decision": "waits", "reasons": ["design: may weaken a check: removes or changes a line of a guard or lint (test/no-shell.test.ts"], "scopes": ["engine"]}
     }
   ]
 }

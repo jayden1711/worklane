@@ -13,6 +13,13 @@
     { "gap": "a PR whose branch merged in a check-table mark from the default branch's tip waits when its head no longer has the mark, also when the file's text at its head is its text at the base", "closes": "#1069" },
     { "gap": "a PR whose branch merged in a lint-test mark from the default branch's tip waits when its head no longer has the mark, also when the file's text at its head is its text at the base", "closes": "#1069" },
     { "gap": "a PR whose branch merged in a file only the default branch's tip has, holding a marked check table, waits when its head no longer has that file (deleted after the merge)", "closes": "#1069" },
-    { "gap": "a PR whose branch merged in a lint test only the default branch's tip has waits when its head moves that file to another path without its mark", "closes": "#1069" }
+    { "gap": "a PR whose branch merged in a lint test only the default branch's tip has waits when its head moves that file to another path without its mark", "closes": "#1069" },
+    { "gap": "a PR whose branch merged in a check-table mark from the default branch's tip waits when its head keeps the mark but takes out an entry the tip added to that table", "closes": "#1069" },
+    { "gap": "a PR whose branch merged in a lint-test mark from the default branch's tip waits when its head keeps the mark but takes out a rule the tip added to that test", "closes": "#1069" },
+    { "gap": "a PR whose branch merged in the default branch's tip waits when its head takes out an entry the tip added to a table already marked at the PR's base", "closes": "#1069" },
+    { "gap": "a PR whose branch merged in the default branch's tip waits when its head takes out a rule the tip added to a test already marked as a lint test at the PR's base", "closes": "#1069" },
+    { "gap": "a PR whose branch merged in the default branch's tip waits when its head takes out an assertion the tip added to a test file", "closes": "#1069" },
+    { "gap": "a PR whose branch merged in the default branch's tip waits when its head deletes a test file only the tip has, with an unrelated change elsewhere", "closes": "#1069" },
+    { "gap": "a PR whose branch merged in the default branch's tip waits when its head takes an assertion out of a test file only the tip has", "closes": "#1069" }
   ]
 }
