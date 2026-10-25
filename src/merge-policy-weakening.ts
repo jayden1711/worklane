@@ -1113,8 +1113,9 @@ function findings(i: WeakeningInput): Found | string {
  * carries a stale PR's change onto a table or lint test the tip has since renamed or moved and marked (#1056's round
  * 16 review). So the change merging the PR makes to the default branch is measured too, for every PR: from the tip to
  * the tree of the tip merged with the head (git merge-tree, no worktree), and a reason from either measurement holds
- * it. A merge that conflicts adds no reason: it can't land as it is, the conflict paths take it (the conflict fix,
- * or the combined check's capped wait), and the head that resolves it is measured again, both ways.
+ * it. A merge that conflicts adds no reason: the conflict paths take it (the conflict fix, or the combined check's
+ * capped wait), and the head that resolves it is measured again, both ways. Not read twice: a merge git conflicts on
+ * that GitHub's own merge completes, when the combined check doesn't run for it.
  */
 export function weakeningOf(cwd: string, base: string, head: string, files: ChangeFile[], scope: LockScope | undefined, tip: string | null): string[] {
   try {

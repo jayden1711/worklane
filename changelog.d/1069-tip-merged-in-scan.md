@@ -11,7 +11,9 @@
     an ignore-file line);
   - a stale PR's change that git carries onto a table or lint test the tip has since renamed or moved and marked.
 
-  A PR whose merge into the tip conflicts gets no reason from that second reading: it can't land as it is, so it is
-  left to the conflict paths as before (the conflict fix, or the combined check's capped wait while GitHub still
-  reports it mergeable), and the head that resolves the conflict is measured again both ways. The second reading
-  needs git 2.38 or later; with an older git every PR waits.
+  A PR whose merge into the tip conflicts gets no reason from that second reading: it is left to the conflict paths
+  as before (the conflict fix, or the combined check's capped wait while GitHub still reports it mergeable), and the
+  head that resolves the conflict is measured again both ways. One case is not read twice: a merge git conflicts on
+  that GitHub's own merge completes (a file added under a directory the tip renamed, say), when the combined check
+  doesn't run for it; that lands as GitHub merges it, as before this change. The second reading needs git 2.38 or
+  later; with an older git every PR waits.
