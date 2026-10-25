@@ -8,7 +8,7 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { appendFileSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { BRAND } from '../src/brand.js';
 import { systemGit } from '../src/checkout-sync.js';
 import { loadConfig } from '../src/config/load.js';
@@ -236,6 +236,32 @@ test('#468 only the PRs this page opened: an agent-pushed worklane/config-* PR i
     assert.equal(moved.status, 400);
     assert.match(String(moved.body.error), /the commit this page pushed for it: something else was pushed to it/);
     assert.equal(g.calls.some((c) => c[0] === 'pr' && c[1] === 'merge'), false, 'nothing merged');
+  } finally {
+    await s.d.close();
+  }
+});
+
+test("#1064 merged, but git can't fetch origin: the record and the first-run view say what failed, never git's text or origin's path; git's text is in the log", async (t) => {
+  const f = fixture();
+  const g = github(f);
+  g.mergeElsewhere('example-owner');
+  // The checkout's origin points where the bare repo used to be: git's fetch error names that path.
+  const moved = join(dirname(f.bare), 'moved-origin.git');
+  git(f.dir, 'remote', 'set-url', 'origin', moved);
+  const lines: string[] = [];
+  t.mock.method(console, 'error', (...a: unknown[]) => void lines.push(a.map(String).join(' ')));
+  const r = refreshConfigPr(rec(), { repo: REPO, gh: g.gh, git: systemGit(f.dir) });
+  assert.deepEqual([r.state, r.synced, r.retry], ['merged', false, true]);
+  assert.equal(r.why, "couldn't fetch origin's main; the detail is in the dashboard's log on the machine");
+  assert.ok(lines.some((l) => l.includes("couldn't fetch origin's main") && l.includes(moved)), `git's text is logged: ${JSON.stringify(lines)}`);
+  // Through the page, as #1046's review measured it: GET /api/first-run.
+  const s = await dashboard(f.dir, g.gh);
+  try {
+    trackConfigPr(s.stateDir, { number: 7, url: `https://github.com/${REPO}/pull/7`, kind: 'config', base: 'main', head: null });
+    const view = await s.get();
+    assert.equal(view.configPrs[0]!.why, "couldn't fetch origin's main; the detail is in the dashboard's log on the machine");
+    const text = JSON.stringify(view);
+    for (const leak of [moved, dirname(f.bare), 'fatal:', 'does not appear']) assert.ok(!text.includes(leak), `${leak} in the first-run view`);
   } finally {
     await s.d.close();
   }
