@@ -16,7 +16,7 @@ import { doctor as engineDoctor } from '../src/doctor.js';
 import { projectStateDir } from '../src/guardrails/context.js';
 import { CI_CHOICE_EXIT, firstRunView, initCommand, localInitFile, readInitState, serverInitFile, stepsFor, unavailableIn, type InitArgs, type InitIo } from '../src/init.js';
 import { checksumOf, installPlan, PINS, type InstallableTool, type ToolInstall } from '../src/tool-install.js';
-import { launchdUnload, shareReadWithGroup, toolPlatform, which } from '../src/os/index.js';
+import { launchdUnload, toolPlatform, which, writeGroupReadable } from '../src/os/index.js';
 import { srvCheckoutPath } from '../src/os/system-paths.js';
 import { asPerson, engineCli, exampleProject, exampleRoles, repoRoot } from './helpers.js';
 import { HOST_TOOLS, hostToolStandIns, onStandIns, testPath } from './host-tools.js';
@@ -370,13 +370,14 @@ test('init, server mode: the record is the machine\'s, outside root\'s home, so 
   assert.ok(!checks.some((c) => c.level === 'ok' && /not reached yet/.test(c.detail)));
   // Opened to one group, read only, owner kept (Linux): what writeServerInitState does with the coordinator's group.
   const f = join(mkdtempSync(join(tmpdir(), 'init-share-')), 'x.json');
-  writeFileSync(f, '{}', { mode: 0o600 });
   const group = spawnSync('id', ['-gn'], { encoding: 'utf8' }).stdout.trim();
-  assert.equal(shareReadWithGroup(f, group, 'darwin'), false, 'only on Linux');
+  assert.equal(writeGroupReadable(f, '{}', group, 'darwin'), false, 'only on Linux');
+  if (process.platform !== 'win32') assert.equal(statSync(f).mode & 0o777, 0o600, 'not shared: 0600');
   if (process.platform === 'linux') {
-    assert.equal(shareReadWithGroup(f, group), true);
+    assert.equal(writeGroupReadable(f, '{}', group), true);
     assert.equal(statSync(f).mode & 0o777, 0o640);
-    assert.equal(shareReadWithGroup(f, 'no-such-group-here'), false);
+    assert.equal(writeGroupReadable(f, '{}', 'no-such-group-here'), false);
+    assert.equal(statSync(f).mode & 0o777, 0o600);
   }
   // A record there that this user can't read (another user's, closed): one failure saying so.
   if (process.platform !== 'win32' && process.getuid?.() !== 0) {
