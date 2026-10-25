@@ -148,14 +148,25 @@ function testPathRefusal(p, env = process.env) {
   } catch {
     return `${refused}: the test machine ${machine} is missing`;
   }
-  // The deepest part that exists, resolved: a link inside the machine may not lead out of it.
+  // The deepest part that is there (a link counts, dangling or not), resolved: a link inside the machine may not lead
+  // out of it, and one that can't be resolved is refused (it could point anywhere once its target appears).
   const rest = [];
   let at = want;
-  while (!fs.existsSync(at)) {
-    rest.unshift(path.basename(at));
-    at = path.dirname(at);
+  for (;;) {
+    try {
+      fs.lstatSync(at);
+      break;
+    } catch {
+      rest.unshift(path.basename(at));
+      at = path.dirname(at);
+    }
   }
-  const target = path.join(fs.realpathSync(at), ...rest);
+  let target;
+  try {
+    target = path.join(fs.realpathSync(at), ...rest);
+  } catch (e) {
+    return `${refused}: ${at} doesn't resolve (${(e && e.code) || e}), so where it leads can't be checked`;
+  }
   return within(target, real) ? null : `${refused}: through a link it is ${target}, outside the test machine ${machine}`;
 }
 

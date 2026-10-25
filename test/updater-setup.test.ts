@@ -1196,3 +1196,94 @@ test('the system journal is stood in: each change\'s logger line goes to the roo
   assert.equal(guard.journal('t', 'here', envFor(elsewhere, elsewhere)), true);
   assert.equal(readFileSync(outJournal, 'utf8'), '-t t here\n');
 });
+
+test('a dangling link inside the test machine is refused, a file link or a directory link out alike: nothing is created where it points', { skip: !posix && 'symlinks' }, () => {
+  const machine = mkdtempSync(join(tmpdir(), 'machine-'));
+  const outside = mkdtempSync(join(tmpdir(), 'outside-'));
+  const env = { [TEST_MACHINE_VAR]: machine };
+  symlinkSync(join(outside, 'target.json'), join(machine, 'dangling.json'));
+  symlinkSync(join(outside, 'no-dir'), join(machine, 'dangling-dir'));
+  symlinkSync(join(machine, 'nowhere.json'), join(machine, 'dangling-in.json'));
+  for (const p of [join(machine, 'dangling.json'), join(machine, 'dangling-dir'), join(machine, 'dangling-dir', 'x.json'), join(machine, 'dangling-dir', 'a', 'b.json')]) {
+    assert.match(guard.testPathRefusal(p, env)!, /doesn't resolve \(ENOENT\), so where it leads can't be checked/, p);
+  }
+  assert.match(guard.testPathRefusal(join(machine, 'dangling-in.json'), env)!, /doesn't resolve/, 'fail closed: even one that points inside, until its target is there');
+  assert.deepEqual(readdirSync(outside), []);
+  // The copies, for real: the change log a dangling link out, the change refused, and nothing written where it points.
+  const m = rootIn();
+  const escaped = join(outside, 'escaped.jsonl');
+  symlinkSync(escaped, m.log);
+  const r = m.asCoordinator('stage-update-signer', 'owner@example.com', 'ssh-ed25519', ed25519());
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, new RegExp(`refused ${reEscape(m.log)} in a test process .* doesn't resolve`));
+  writeFileSync(join(m.etc, 'updates.json'), '{"enabled":false,"channel":"main"}\n');
+  const set = m.asCoordinator('set-updates', 'on');
+  assert.notEqual(set.status, 0);
+  assert.equal(readFileSync(join(m.etc, 'updates.json'), 'utf8'), '{"enabled":false,"channel":"main"}\n', 'refused before updates.json was written');
+  assert.notEqual(m.asAdmin('add-signer', 'owner@example.com', 'ssh-ed25519', ed25519()).status, 0);
+  assert.ok(!existsSync(escaped), 'nothing created through the link');
+  // The /var directory a dangling link out: the pending list under it refused.
+  const d = rootIn();
+  rmSync(join(d.root, 'var'), { recursive: true });
+  symlinkSync(join(outside, 'var-gone'), join(d.root, 'var'));
+  const s = d.asCoordinator('stage-update-signer', 'owner@example.com', 'ssh-ed25519', ed25519());
+  assert.notEqual(s.status, 0);
+  assert.match(s.stderr, /refused .*pending-signers\.json in a test process .* doesn't resolve/);
+  assert.deepEqual(readdirSync(outside), [], 'still nothing outside');
+});
+
+test('each guarded use refuses on its own: one fixed path outside the test machine, the rest in it, and that command is refused before it writes there', { skip: !posix && 'sh' }, () => {
+  /** One copy's const pointed at `to`; every other fixed path stays in the root. */
+  const moved = (copy: string, name: string, to: string) => {
+    const text = readFileSync(copy, 'utf8');
+    const line = new RegExp(`^const ${name} = "[^"]*";`, 'm');
+    assert.match(text, line, `${copy} declares ${name}`);
+    writeFileSync(copy, text.replace(line, `const ${name} = ${JSON.stringify(to)};`));
+  };
+  const cfg = '{"enabled":false,"channel":"main","required_checks":["test"]}\n';
+  /** A copy run with its own root as the test machine: what is outside the root is outside the machine. */
+  const own = (m: ReturnType<typeof rootIn>, copy: 'helperCopy' | 'rootCopy', user: string, ...args: string[]) => spawnSync(process.execPath, [m[copy], ...args], { encoding: 'utf8', env: m.env(user, { [TEST_MACHINE_VAR]: m.root }) });
+  const fp = (k: string) => signerFingerprint(k);
+  type Case = { what: string; copy: 'helperCopy' | 'rootCopy' | 'updaterCopy'; name: string; at: string; run: (m: ReturnType<typeof rootIn>) => { status: number | null; stdout: unknown; stderr: unknown }; seed?: (m: ReturnType<typeof rootIn>, outside: string) => void };
+  const k = ed25519();
+  const cases: Case[] = [
+    { what: 'helper logLine', copy: 'helperCopy', name: 'LOG', at: 'changes.jsonl', run: (m) => own(m, 'helperCopy', 'wl-alpha', 'stage-update-signer', 'owner@example.com', 'ssh-ed25519', k) },
+    { what: 'helper set-updates log', copy: 'helperCopy', name: 'LOG', at: 'changes.jsonl', seed: (m) => writeFileSync(join(m.etc, 'updates.json'), cfg), run: (m) => own(m, 'helperCopy', 'wl-alpha', 'set-updates', 'on') },
+    { what: 'readPending (check confirm-signer reads only)', copy: 'helperCopy', name: 'PENDING', at: 'pending.json', run: (m) => own(m, 'rootCopy', 'admin', 'check', 'confirm-signer', fp(k)) },
+    { what: 'writePending alone', copy: 'helperCopy', name: 'PENDING', at: 'pending.json', run: (m) => spawnSync(process.execPath, ['-e', `require(${JSON.stringify(m.helperCopy)}).writePending([])`], { encoding: 'utf8', env: m.env('wl-alpha', { [TEST_MACHINE_VAR]: m.root }) }) },
+    { what: 'updates-root logLine', copy: 'rootCopy', name: 'LOG', at: 'changes.jsonl', seed: (m) => writeFileSync(join(m.etc, 'updates.json'), cfg), run: (m) => own(m, 'rootCopy', 'admin', 'channel', 'release') },
+    { what: 'setChannel', copy: 'rootCopy', name: 'ETC', at: 'etc', seed: (_m, o) => (mkdirSync(join(o, 'etc')), writeFileSync(join(o, 'etc', 'updates.json'), cfg, { mode: 0o000 })), run: (m) => own(m, 'rootCopy', 'admin', 'channel', 'release') },
+    { what: 'addChecks', copy: 'rootCopy', name: 'ETC', at: 'etc', seed: (_m, o) => (mkdirSync(join(o, 'etc')), writeFileSync(join(o, 'etc', 'updates.json'), cfg, { mode: 0o000 })), run: (m) => own(m, 'rootCopy', 'admin', 'add-checks', 'lint') },
+    { what: 'acknowledgeSigners file', copy: 'rootCopy', name: 'ETC', at: 'etc', run: (m) => own(m, 'rootCopy', 'admin', 'acknowledge-signers') },
+    { what: 'acknowledgeSigners record', copy: 'updaterCopy', name: 'SIGNERS_STATE', at: 'signers-state.json', run: (m) => own(m, 'rootCopy', 'admin', 'acknowledge-signers') },
+    { what: 'addSigner record', copy: 'updaterCopy', name: 'SIGNERS_STATE', at: 'signers-state.json', run: (m) => own(m, 'rootCopy', 'admin', 'add-signer', 'owner@example.com', 'ssh-ed25519', k) },
+    { what: 'releaseHold', copy: 'rootCopy', name: 'HELD', at: 'update-held.json', seed: (_m, o) => writeFileSync(join(o, 'update-held.json'), '{"sha":"bbbb","at":"x"}\n'), run: (m) => own(m, 'rootCopy', 'admin', 'release-hold') },
+  ];
+  for (const c of cases) {
+    const m = rootIn();
+    const outside = mkdtempSync(join(tmpdir(), 'outside-'));
+    const to = join(outside, c.at);
+    moved(m[c.copy], c.name, to);
+    c.seed?.(m, outside);
+    // The outside updates.json is unreadable (0000): a read of it fails as its own error, so the refusal must come first.
+    const snap = () => readdirSync(outside, { recursive: true }).map(String).sort().map((f) => {
+      const st = statSync(join(outside, f));
+      return [f, !st.isFile() ? 'dir' : st.mode & 0o400 ? readFileSync(join(outside, f), 'utf8') : `unreadable, ${st.size} bytes, ${st.mtimeMs}`];
+    });
+    const before = snap();
+    const r = c.run(m);
+    assert.notEqual(r.status, 0, `${c.what}: refused (${String(r.stdout)})`);
+    assert.match(String(r.stderr), new RegExp(`refused ${reEscape(to)}(/[^ ]*)? in a test process \\(.* is set\\): it is outside the test machine`), c.what);
+    assert.deepEqual(snap(), before, `${c.what}: nothing written outside`);
+  }
+  // The hold's released name a dangling link out: refused, and the hold stays where it is.
+  const m = rootIn();
+  const outside = mkdtempSync(join(tmpdir(), 'outside-'));
+  writeFileSync(join(m.root, 'var', 'update-held.json'), '{"sha":"bbbb","at":"x"}\n');
+  symlinkSync(join(outside, 'released.json'), join(m.root, 'var', 'update-held.released.json'));
+  const r = m.asAdmin('release-hold');
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /refused .*update-held\.released\.json in a test process .* doesn't resolve/);
+  assert.ok(existsSync(join(m.root, 'var', 'update-held.json')), 'the hold stays');
+  assert.deepEqual(readdirSync(outside), []);
+});
