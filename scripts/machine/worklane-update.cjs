@@ -120,6 +120,7 @@ exports.secretKinds = secretKinds;
 exports.fixedPoint = fixedPoint;
 exports.redactString = redactString;
 exports.redactCut = redactCut;
+exports.redactClip = redactClip;
 exports.readWindow = readWindow;
 exports.redactRecords = redactRecords;
 exports.redact = redact;
@@ -528,8 +529,14 @@ function redactOrThrow(s, o) {
 }
 exports.CUT_MARGIN = 16 * 1024;
 function redactCut(s, max, o = {}) {
-    const r = redactString(s.length > max + exports.CUT_MARGIN ? readWindow(s, max + exports.CUT_MARGIN) : s, o);
-    return r.length > max ? r.slice(0, max) : r;
+    return redactClip(s, max, o).text;
+}
+function redactClip(s, max, o = {}) {
+    const windowed = s.length > max + exports.CUT_MARGIN;
+    const r = redactString(windowed ? readWindow(s, max + exports.CUT_MARGIN) : s, o);
+    if (!windowed && r.length <= max)
+        return { text: r, more: 0 };
+    return { text: r.slice(0, max), more: (windowed ? s.length : r.length) - max };
 }
 function readWindow(s, end) {
     if (s.length <= end)

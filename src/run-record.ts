@@ -7,7 +7,7 @@
 import { existsSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
-import { redact } from './events/redact.js';
+import { redact, redactClip } from './events/redact.js';
 import { groupOnlyDir } from './os/index.js';
 
 export const RUNS_DIR = 'runs';
@@ -76,8 +76,16 @@ export interface RunRecord {
 
 export type RunSummary = Pick<RunRecord, 'id' | 'issue' | 'role' | 'model' | 'startedAt' | 'endedAt' | 'reason' | 'costUsd' | 'turns' | 'files' | 'truncated'> & { commands: number; failedCommands: number };
 
-const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n)} …` : s);
-const firstLines = (s: string) => clip(s.trim().split('\n').slice(0, MAX_OUTPUT_LINES).join('\n'), MAX_OUTPUT);
+// Redacted before the cut (#988): a secret across it is never cut short of its rule and kept.
+const clip = (s: string, n: number) => {
+  const r = redactClip(s, n);
+  return r.more ? `${r.text} …` : r.text;
+};
+const firstLines = (s: string) => {
+  const r = redactClip(s.trim(), MAX_OUTPUT);
+  const head = r.text.split('\n').slice(0, MAX_OUTPUT_LINES).join('\n');
+  return r.more && head === r.text ? `${head} …` : head;
+};
 const text = (c: unknown): string => (typeof c === 'string' ? c : Array.isArray(c) ? c.map((x) => (x && typeof x === 'object' && 'text' in x ? String((x as { text: unknown }).text ?? '') : '')).join('') : '');
 
 /** At most this many files read are kept per run. */
