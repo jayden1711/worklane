@@ -127,12 +127,27 @@ const TEST_MACHINE = 'WORKLANE_TEST_MACHINE';
 
 const within = (p, root) => {
   const r = path.relative(root, p);
-  return r === '' || (!r.startsWith('..') && !path.isAbsolute(r));
+  return r === '' || (r !== '..' && !r.startsWith(`..${path.sep}`) && !path.isAbsolute(r));
 };
+
+/** Why the name `at` (there, as lstat finds it) leads out of the machine `real`, or null when it stays in it. */
+function linkRefusal(at, real) {
+  let target;
+  try {
+    target = fs.realpathSync(at);
+  } catch (e) {
+    return `${at} doesn't resolve (${(e && e.code) || e}), so where it leads can't be checked`;
+  }
+  return within(target, real) ? null : `through a link ${at} is ${target}`;
+}
 
 /**
  * Why this process may not use the fixed path `p`, or null when it may: always null outside a test; in a test process,
  * anything outside its test machine, by name or through a link. A path outside it is refused without being looked at.
+ * The check is of `p` exactly as it will be opened: a path that isn't absolute and normalised (a `.` or `..` part, a
+ * doubled or trailing slash) is refused, never normalised, since the kernel resolves `..` after a link, not before it.
+ * And every name beside it that starts with its own (`<name>.tmp`, `<name>.tmp-<pid>`, `.<name>.tmp-…`: a writer's
+ * temp file, renamed over it) is checked as a link too, so no temp name a writer derives from it leads out either.
  */
 function testPathRefusal(p, env = process.env) {
   const mark = TEST_MARKS.find((k) => env[k] !== undefined);
@@ -140,8 +155,10 @@ function testPathRefusal(p, env = process.env) {
   const machine = env[TEST_MACHINE];
   const refused = `refused ${p} in a test process (${mark} is set)`;
   if (!machine || !path.isAbsolute(machine)) return `${refused}: no test machine (${TEST_MACHINE}) holds it`;
+  if (typeof p !== 'string' || !path.isAbsolute(p)) return `${refused}: not an absolute path`;
   const want = path.resolve(p);
   if (!within(want, path.resolve(machine))) return `${refused}: it is outside the test machine ${machine}; a test runs a copy of this script with every fixed path it uses pointed into its own root`;
+  if (path.normalize(p) !== p || (p.length > 1 && p.endsWith(path.sep))) return `${refused}: it isn't written normalised (${want}), and a \`..\` after a link would leave the machine`;
   let real;
   try {
     real = fs.realpathSync(machine);
@@ -167,7 +184,30 @@ function testPathRefusal(p, env = process.env) {
   } catch (e) {
     return `${refused}: ${at} doesn't resolve (${(e && e.code) || e}), so where it leads can't be checked`;
   }
-  return within(target, real) ? null : `${refused}: through a link it is ${target}, outside the test machine ${machine}`;
+  if (!within(target, real)) return `${refused}: through a link it is ${target}, outside the test machine ${machine}`;
+  // Its temp names: each name beside it that starts with its own, there now, may not be a link out or a dangling one.
+  const dir = path.dirname(want);
+  const base = path.basename(want);
+  let names = [];
+  try {
+    names = fs.readdirSync(dir);
+  } catch {
+    // no directory yet: no name in it
+  }
+  for (const n of names) {
+    if (n === base || !(n.startsWith(base) || n.startsWith(`.${base}`))) continue;
+    const beside = path.join(dir, n);
+    let st;
+    try {
+      st = fs.lstatSync(beside);
+    } catch {
+      continue;
+    }
+    if (!st.isSymbolicLink()) continue;
+    const why = linkRefusal(beside, real);
+    if (why) return `${refused}: beside it, ${why}, outside the test machine ${machine} (a writer's temp file for it would go there)`;
+  }
+  return null;
 }
 
 /** The fixed path `p`, for use here; thrown in a test process that may not use it (testPathRefusal). */
@@ -402,7 +442,7 @@ function readPending(file = PENDING, now = Date.now()) {
 function writePending(list, file = PENDING) {
   fixedPath(file);
   fs.mkdirSync(path.dirname(file), { recursive: true });
-  const tmp = `${file}.tmp-${process.pid}`;
+  const tmp = fixedPath(`${file}.tmp-${process.pid}`);
   fs.writeFileSync(tmp, `${JSON.stringify({ pending: list })}\n`, { mode: 0o644 });
   fs.chmodSync(tmp, 0o644);
   fs.renameSync(tmp, file);

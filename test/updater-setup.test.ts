@@ -1287,3 +1287,73 @@ test('each guarded use refuses on its own: one fixed path outside the test machi
   assert.ok(existsSync(join(m.root, 'var', 'update-held.json')), 'the hold stays');
   assert.deepEqual(readdirSync(outside), []);
 });
+
+test('the guard checks a path exactly as it will be opened, and its temp names beside it: a `..` after a link and a temp name that is a link out are refused', { skip: !posix && 'symlinks' }, () => {
+  const machine = mkdtempSync(join(tmpdir(), 'machine-'));
+  const outside = mkdtempSync(join(tmpdir(), 'outside-'));
+  mkdirSync(join(outside, 'sub'));
+  const env = { [TEST_MACHINE_VAR]: machine };
+  // Not normalised: refused as written, never normalised first (the kernel takes `..` after the link, into outside/).
+  symlinkSync(join(outside, 'sub'), join(machine, 'lnk'));
+  for (const p of [`${machine}/lnk/../c.jsonl`, `${machine}/./c.jsonl`, `${machine}//c.jsonl`, `${machine}/var/`, `${machine}/var/..`]) assert.match(guard.testPathRefusal(p, env)!, /it isn't written normalised/, p);
+  assert.match(guard.testPathRefusal('c.jsonl', env)!, /not an absolute path/);
+  assert.equal(guard.testPathRefusal(join(machine, '..name'), env), null, 'a name that starts with two dots is a name');
+  // Temp names beside it: a link out or a dangling one, under a name that starts with its own, refuses it.
+  const state = join(machine, 'signers-state.json');
+  assert.equal(guard.testPathRefusal(state, env), null);
+  writeFileSync(join(machine, 'signers-state.json.old'), 'a file, not a link\n');
+  symlinkSync(join(machine, 'signers-state.json.old'), join(machine, 'signers-state.json.bak'));
+  symlinkSync(join(outside, 'other'), join(machine, 'other.json.tmp'));
+  assert.equal(guard.testPathRefusal(state, env), null, 'a file, a link that stays in, and another name\'s link: none is its temp name out');
+  for (const [n, to] of [['signers-state.json.tmp', join(outside, 'state.json')], ['signers-state.json.tmp-123', join(outside, 'sub')], ['.signers-state.json.tmp-1-ab', join(machine, 'gone')]] as const) {
+    symlinkSync(to, join(machine, n));
+    assert.match(guard.testPathRefusal(state, env)!, new RegExp(`beside it, (through a link ${reEscape(join(machine, n))} is |${reEscape(join(machine, n))} doesn't resolve).*a writer's temp file for it would go there`), n);
+    rmSync(join(machine, n));
+  }
+  assert.deepEqual(readdirSync(outside), ['sub']);
+});
+
+test('the copies, for real: the signers record\'s and the pending list\'s temp files as dangling links out, and a change log written through `..` after a link, are refused and write nothing outside', { skip: !posix && 'symlinks' }, () => {
+  const run = (m: ReturnType<typeof rootIn>, copy: string, user: string, ...args: string[]) => spawnSync(process.execPath, [copy, ...args], { encoding: 'utf8', env: m.env(user, { [TEST_MACHINE_VAR]: m.root }) });
+  const outsideOf = () => {
+    const o = mkdtempSync(join(tmpdir(), 'outside-'));
+    mkdirSync(join(o, 'sub'));
+    return o;
+  };
+  // The updater writes its signers record through `<record>.tmp`, then renames it over the record.
+  for (const args of [['acknowledge-signers'], ['add-signer', 'owner@example.com', 'ssh-ed25519', ed25519()]]) {
+    const m = rootIn();
+    const o = outsideOf();
+    writeFileSync(m.signers, `first@example.com ssh-ed25519 ${ed25519()}\n`);
+    const signers = readFileSync(m.signers, 'utf8');
+    symlinkSync(join(o, 'state.json'), `${m.signersState}.tmp`);
+    const r = run(m, m.rootCopy, 'admin', ...args);
+    assert.notEqual(r.status, 0, `${args[0]}: ${r.stdout}`);
+    assert.match(r.stderr, /refused .*signers-state\.json in a test process .* beside it, .*signers-state\.json\.tmp doesn't resolve/, args[0]);
+    assert.deepEqual(readdirSync(o), ['sub'], `${args[0]}: nothing written outside`);
+    assert.equal(readFileSync(m.signers, 'utf8'), signers, `${args[0]}: the signers file as it was`);
+  }
+  // The pending list, written through `<list>.tmp-<pid>`: the link made at the very name this process will use.
+  const p = rootIn();
+  const po = outsideOf();
+  const script = `const fs = require('node:fs'); fs.symlinkSync(${JSON.stringify(join(po, 'pending.json'))}, ${JSON.stringify(p.pending)} + '.tmp-' + process.pid); require(${JSON.stringify(p.helperCopy)}).writePending([]);`;
+  const w = spawnSync(process.execPath, ['-e', script], { encoding: 'utf8', env: p.env('wl-alpha', { [TEST_MACHINE_VAR]: p.root }) });
+  assert.notEqual(w.status, 0);
+  assert.match(w.stderr, /refused .*pending-signers\.json/);
+  assert.deepEqual(readdirSync(po), ['sub'], 'nothing written outside');
+  // The change log at <root>/var/lnk/../c.jsonl, lnk a link out: the kernel would write outside/c.jsonl.
+  const c = rootIn();
+  const co = outsideOf();
+  symlinkSync(join(co, 'sub'), join(c.root, 'var', 'lnk'));
+  const text = readFileSync(c.helperCopy, 'utf8');
+  const raw = `${c.root}/var/lnk/../c.jsonl`;
+  writeFileSync(c.helperCopy, text.replace(/^const LOG = "[^"]*";/m, `const LOG = ${JSON.stringify(raw)};`));
+  writeFileSync(join(c.etc, 'updates.json'), '{"enabled":false,"channel":"main"}\n');
+  for (const args of [['set-updates', 'on'], ['stage-update-signer', 'owner@example.com', 'ssh-ed25519', ed25519()]]) {
+    const r = run(c, c.helperCopy, 'wl-alpha', ...args);
+    assert.notEqual(r.status, 0, args[0]);
+    assert.match(r.stderr, new RegExp(`refused ${reEscape(raw)} in a test process .*it isn't written normalised`), args[0]);
+  }
+  assert.equal(readFileSync(join(c.etc, 'updates.json'), 'utf8'), '{"enabled":false,"channel":"main"}\n', 'refused before updates.json was written');
+  assert.deepEqual(readdirSync(co), ['sub'], 'nothing written outside');
+});

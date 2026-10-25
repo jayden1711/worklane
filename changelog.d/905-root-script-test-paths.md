@@ -12,7 +12,10 @@
     the test-run signs `src/os/system-paths.ts` reads. A test's copies inherit them from the test process. In such a
     process, a path is used only when it is inside the test machine (`WORKLANE_TEST_MACHINE`), checked by name and
     through links. A link that doesn't resolve (dangling, to a file or a directory) is refused, wherever it points.
-    With no test machine named, every path is refused.
+    The path is checked exactly as it will be opened. One that isn't absolute and normalised (a `.` or `..` part, a
+    doubled or trailing slash) is refused, not normalised first. Each name beside it that starts with its own name
+    (a writer's temp file, `<name>.tmp`, `<name>.tmp-<pid>` or `.<name>.tmp-…`) may not be a link out of the test
+    machine or a dangling link. With no test machine named, every path is refused.
   - In a test, `logger` runs only when the first one on PATH is inside the test machine, and it runs by that path.
   - These variables can only make a path refused. They never move one. Outside a test none of them is set, and
     sudo's `env_reset` drops them.
