@@ -43,16 +43,18 @@ jobs:
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
       - run: npm run build
       - run: npm run build:web
-      # Each run finishes and names what failed: a test that hangs is cancelled after 10 minutes (--test-timeout) and
-      # named in the summary with its file, and a file whose tests are done exits even with a handle left open
-      # (--test-force-exit). A step that still runs too long stops on its own, and the next step runs anyway.
+      # Each run finishes and names what failed: a test that hangs, and a file whose process doesn't exit after its
+      # tests (a handle left open), is cancelled after 10 minutes (--test-timeout) and named in the summary with its
+      # file. A step that still runs too long stops on its own, and the next step runs anyway. No --test-force-exit
+      # (#848): it ended a file's process once the tests it knew of were done, so tests registered after a top-level
+      # await never ran and the step still reported 0 fail. test/clock-shift.test.ts runs these lines on a fixture.
       - name: the tests, 45 days later
         timeout-minutes: 75
         shell: bash
         env:
           CI_REQUIRE_WEB: '1'
           TEST_CLOCK_SHIFT: '+45d'
-        run: NODE_OPTIONS="--import=$PWD/dist/test/clock-shift.js" node --import ./dist/test/isolate.js --test --test-timeout=600000 --test-force-exit "dist/test/**/*.test.js"
+        run: NODE_OPTIONS="--import=$PWD/dist/test/clock-shift.js" node --import ./dist/test/isolate.js --test --test-timeout=600000 "dist/test/**/*.test.js"
       - name: the tests, 400 days later
         if: ${{ !cancelled() }}
         timeout-minutes: 75
@@ -60,4 +62,4 @@ jobs:
         env:
           CI_REQUIRE_WEB: '1'
           TEST_CLOCK_SHIFT: '+400d'
-        run: NODE_OPTIONS="--import=$PWD/dist/test/clock-shift.js" node --import ./dist/test/isolate.js --test --test-timeout=600000 --test-force-exit "dist/test/**/*.test.js"
+        run: NODE_OPTIONS="--import=$PWD/dist/test/clock-shift.js" node --import ./dist/test/isolate.js --test --test-timeout=600000 "dist/test/**/*.test.js"

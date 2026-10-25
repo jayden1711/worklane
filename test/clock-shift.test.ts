@@ -4,10 +4,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { parse } from 'yaml';
 import { parseClockShift } from './clock-shift.js';
 import { repoRoot } from './helpers.js';
 import { TEST_PRELOAD } from './isolate.js';
@@ -122,4 +123,64 @@ test('shifted: a test that mocks Date.now sees its mock, and a mock calling the 
   const r = await node([...TEST_PRELOAD, '--test', '--test-reporter=tap', file], shifted('+45d'), 60_000);
   assert.equal(r.code, 0, r.out);
   assert.match(r.out, /# pass 3/);
+});
+
+type Step = { name?: string; run?: string; env?: Record<string, string> };
+const JOB_GLOB = '"dist/test/**/*.test.js"';
+
+/** The workflow's test steps, one per shift, each with its command line and environment. */
+function jobTestSteps(): Step[] {
+  const wf = parse(readFileSync(join(repoRoot, '.github', 'workflows', 'clock-shift.yml'), 'utf8')) as { jobs: Record<string, { steps: Step[] }> };
+  const steps = Object.values(wf.jobs).flatMap((j) => j.steps).filter((s) => s.env?.TEST_CLOCK_SHIFT !== undefined);
+  assert.deepEqual(steps.map((s) => s.env!.TEST_CLOCK_SHIFT), ['+45d', '+400d']);
+  for (const s of steps) assert.equal(s.run?.split(JOB_GLOB).length, 2, `${s.name}: runs ${JOB_GLOB} once`);
+  return steps;
+}
+
+/** A test step's command line as the job runs it, on these files instead of the suite. */
+async function runStep(s: Step, files: string[], run = s.run!): Promise<{ code: number | null; out: string }> {
+  const p = spawn('bash', ['-c', run.replace(JOB_GLOB, files.map((f) => `'${f}'`).join(' '))], { cwd: repoRoot, env: { ...plain, ...s.env }, stdio: ['ignore', 'pipe', 'pipe'], timeout: 120_000 });
+  let out = '';
+  p.stdout.on('data', (d: Buffer) => (out += d.toString()));
+  p.stderr.on('data', (d: Buffer) => (out += d.toString()));
+  const code = await new Promise<number | null>((ok) => p.on('close', (c) => ok(c)));
+  return { code, out };
+}
+
+test('the job runs every test of a file, one registered after an await too, at both shifts (#848)', async () => {
+  // test/slot-dir-writes.test.ts registers tests after a top-level await. Under --test-force-exit a file's process
+  // ended once the tests it knew of were done, so the later ones never ran, and the step still reported 0 fail.
+  for (const s of jobTestSteps()) {
+    const dir = mkdtempSync(join(tmpdir(), 'clock-job-'));
+    writeFileSync(join(dir, 'package.json'), '{"type":"module"}\n');
+    const marker = join(dir, 'late-ran');
+    const file = join(dir, 'late.test.js');
+    writeFileSync(
+      file,
+      [
+        "import { test } from 'node:test';",
+        "import { writeFileSync } from 'node:fs';",
+        "test('early', () => {});",
+        'await new Promise((ok) => setTimeout(ok, 200));',
+        `test('late', () => writeFileSync(${JSON.stringify(marker)}, 'x'));`,
+        '',
+      ].join('\n'),
+    );
+    const r = await runStep(s, [file]);
+    assert.equal(r.code, 0, `${s.name}: ${r.out}`);
+    assert.ok(existsSync(marker), `${s.name}: the test registered after the await never ran\n${r.out}`);
+  }
+});
+
+test("the job's flags end a file that keeps a handle open after its tests: cancelled at --test-timeout, named, the step fails (#774)", async () => {
+  const [s] = jobTestSteps();
+  assert.match(s!.run!, /--test-timeout=\d+ /);
+  const dir = mkdtempSync(join(tmpdir(), 'clock-job-'));
+  writeFileSync(join(dir, 'package.json'), '{"type":"module"}\n');
+  const file = join(dir, 'open-handle.test.js');
+  writeFileSync(file, "import { test } from 'node:test';\nsetInterval(() => {}, 1000);\ntest('done', () => {});\n");
+  const r = await runStep(s!, [file], s!.run!.replace(/--test-timeout=\d+ /, '--test-timeout=3000 '));
+  assert.equal(r.code, 1, r.out);
+  assert.match(r.out, /open-handle\.test\.js/);
+  assert.match(r.out, /timed out after 3000ms/);
 });
