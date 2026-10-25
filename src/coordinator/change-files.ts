@@ -313,10 +313,32 @@ function attributeMacros(cwd: string, rev: string): string[] {
  */
 const MIN_GIT_FOR_ATTRIBUTE_SOURCE: readonly [number, number] = [2, 40];
 
-/** The running git's major and minor version (`git version 2.43.0`), or null when it can't be read. Asked each time: it's one spawn, only when a .gitattributes changes. */
-function gitVersion(cwd: string): [number, number] | null {
-  const m = /git version (\d+)\.(\d+)/.exec(runStatus(cwd, ['version']).stdout);
+/** `git merge-tree --write-tree` came in git 2.38: an older git can't measure a merge (mergedTree), so every PR waits. */
+const MIN_GIT_FOR_MERGE_TREE: readonly [number, number] = [2, 38];
+
+/** A `git version` line's major and minor version (`git version 2.43.0`), or null when it holds none. */
+const versionOf = (text: string): [number, number] | null => {
+  const m = /git version (\d+)\.(\d+)/.exec(text);
   return m ? [Number(m[1]), Number(m[2])] : null;
+};
+
+/** The running git's major and minor version, or null when it can't be read. Asked each time: it's one spawn, only when a .gitattributes changes. */
+function gitVersion(cwd: string): [number, number] | null {
+  return versionOf(runStatus(cwd, ['version']).stdout);
+}
+
+/**
+ * Why `git version`'s output (`text`) names a git too old for the merge decision's checks, or null when it is new
+ * enough. They need MIN_GIT_FOR_MERGE_TREE and MIN_GIT_FOR_ATTRIBUTE_SOURCE; with an older git they can't run, and
+ * every PR waits for the owner. For the setup checks (doctor), which say so up front.
+ */
+export function gitTooOld(text: string): string | null {
+  const need = [MIN_GIT_FOR_MERGE_TREE, MIN_GIT_FOR_ATTRIBUTE_SOURCE].reduce((a, b) => (b[0] > a[0] || (b[0] === a[0] && b[1] > a[1]) ? b : a));
+  const v = versionOf(text);
+  const older = v === null || v[0] < need[0] || (v[0] === need[0] && v[1] < need[1]);
+  if (!older) return null;
+  const said = v === null ? `can't read git's version (${text.trim().slice(0, 80) || 'no output'})` : `git ${v[0]}.${v[1]}`;
+  return `${said}: the merge decision needs git ${need[0]}.${need[1]} or later (merge-tree --write-tree, check-attr --source); with an older git every PR waits for the owner`;
 }
 
 /**
