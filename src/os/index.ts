@@ -453,9 +453,11 @@ export function currentUser(): string {
 
 /**
  * Write a state file readable by the coordinator's user and group only, as writeStaged does, with the modes an
- * in-place write then groupOnly gave (#1062 round 2): a file it replaces stays 0600 if it was 0600, else 0660,
- * whatever the umask; a new file is 0660, or 0600 when the umask leaves it 0600. A file system that refuses the mode
- * change (vfat, some FUSE mounts) gets the file with the mode it was made with, as groupOnly's swallowed chmod left it.
+ * in-place write then groupOnly gave (#1062 rounds 2 and 3): a regular file it replaces (not a link, nor a FIFO)
+ * stays 0600 if it was 0600, else 0660, whatever the umask; a new file is 0660, or 0600 when the umask leaves it
+ * 0600. The staging file is made with the old file's mode within 0660 (a new one: 0660), less the umask, so where the
+ * file system refuses the mode change (some FUSE mounts) it is never wider than groupOnly's swallowed chmod left it:
+ * the same, unless the umask narrows it. The process umask is never changed to avoid that: other threads create files.
  */
 export function writeGroupOnly(file: string, data: string | Uint8Array): void {
   const old = lstatSync(file, { throwIfNoEntry: false });
@@ -466,7 +468,7 @@ export function writeGroupOnly(file: string, data: string | Uint8Array): void {
     } catch {
       // the file system keeps its own modes
     }
-  }, 0o660);
+  }, (was ?? 0o660) & 0o660);
 }
 
 export function detectOs(setting: OsSetting = 'auto'): OsKind {

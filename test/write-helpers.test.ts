@@ -6,6 +6,7 @@
 // after. Fixture files in temp dirs only; the group comes from a stand-in getent.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { lstatSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createRequire, syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
@@ -156,6 +157,30 @@ for (const w of WRITERS) {
     assert.deepEqual(readdirSync(dir).sort(), [basename(file), basename(victim)].sort(), 'nothing left beside it');
   });
 
+  test(`${w.name} changes nothing by name once the file is published (a link swapped in for it right after the rename)`, { skip: noLinks }, () => {
+    const { dir, file, victim } = fixture();
+    const gid = statSync(victim).gid;
+    const real = fs.renameSync;
+    let swapped = false;
+    fs.renameSync = ((from: string, to: string) => {
+      real(from, to);
+      if (swapped || String(to) !== file) return;
+      swapped = true;
+      rmSync(file);
+      symlinkSync(victim, file);
+    }) as typeof fs.renameSync;
+    syncBuiltinESMExports();
+    try {
+      underUmask(0o022, () => w.write(file, 'NEW\n'));
+    } finally {
+      fs.renameSync = real;
+      syncBuiltinESMExports();
+    }
+    assert.ok(swapped, 'the racer saw the file published');
+    victimUntouched(victim, gid);
+    assert.deepEqual(readdirSync(dir).sort(), [basename(file), basename(victim)].sort(), 'no staging name left behind');
+  });
+
   test(`${w.name} leaves the file exactly its mode, whatever the umask`, { skip: !POSIX && 'POSIX modes' }, () => {
     const { file } = fixture();
     underUmask(0o022, () => w.write(file, 'NEW\n'));
@@ -226,9 +251,74 @@ test('writeGroupOnly still writes the file where the file system refuses a mode 
   assert.deepEqual(readdirSync(dir).sort(), [basename(file), basename(victim)].sort(), 'no staging name left behind');
 });
 
+/**
+ * Where the file system refuses a mode change, an in-place write then groupOnly left a file it replaced at its old
+ * mode, and a new file at 0660 less the umask. writeGroupOnly's file is never wider than that: a new file is the same,
+ * and a file it replaces is made with its old mode within 0660, less the umask (no wider than the old file, nor than
+ * 0660). It equals the old mode wherever the umask doesn't narrow it.
+ */
+test('writeGroupOnly, where the file system refuses a mode change, never publishes a file wider than groupOnly left it', { skip: !POSIX && 'POSIX modes' }, () => {
+  const { dir, file } = fixture();
+  const real = { fchmodSync: fs.fchmodSync, chmodSync: fs.chmodSync };
+  const refuse = () => {
+    throw Object.assign(new Error('EPERM: operation not permitted, chmod'), { code: 'EPERM' });
+  };
+  const cells: [number | null, number][] = [];
+  for (const was of [null, 0o600, 0o640, 0o660]) for (const umask of [0o000, 0o002, 0o007, 0o022, 0o027, 0o077]) cells.push([was, umask]);
+  for (const [was, umask] of cells) {
+    rmSync(file, { force: true });
+    if (was !== null) {
+      writeFileSync(file, 'OLD\n');
+      real.chmodSync(file, was);
+    }
+    fs.fchmodSync = refuse as typeof fs.fchmodSync;
+    fs.chmodSync = refuse as typeof fs.chmodSync;
+    syncBuiltinESMExports();
+    try {
+      underUmask(umask, () => writeGroupOnly(file, 'NEW\n'));
+    } finally {
+      Object.assign(fs, real);
+      syncBuiltinESMExports();
+    }
+    const cell = `${was === null ? 'a new file' : `a ${was.toString(8)} file`} under umask ${umask.toString(8).padStart(3, '0')}`;
+    const main = was ?? 0o660 & ~umask;
+    const got = mode(file);
+    assert.equal(got & ~main, 0, `${cell}: ${got.toString(8)} is wider than groupOnly left it (${main.toString(8)})`);
+    assert.equal(got, (was ?? 0o660) & 0o660 & ~umask, cell);
+    if (((was ?? 0o660) & ~umask) === main) assert.equal(got, main, `${cell}: groupOnly left it ${main.toString(8)}`);
+    assert.equal(readFileSync(file, 'utf8'), 'NEW\n');
+  }
+  assert.deepEqual(readdirSync(dir).sort(), [basename(file), 'victim.key'].sort(), 'no staging name left behind');
+});
+
+test('writeGroupOnly treats a link or a FIFO at the name as no file to replace (its mode is not the old file mode)', { skip: noLinks }, () => {
+  const { dir, file, victim } = fixture();
+  rmSync(file);
+  symlinkSync(victim, file);
+  underUmask(0o007, () => writeGroupOnly(file, 'NEW\n'));
+  assert.equal(mode(file), 0o660, "a link to a 0600 file is not a 0600 file: the new file's rule applies");
+  victimUntouched(victim, statSync(victim).gid);
+  rmSync(file);
+  execFileSync('mkfifo', ['-m', '600', file]);
+  underUmask(0o007, () => writeGroupOnly(file, 'NEW\n'));
+  assert.ok(lstatSync(file).isFile());
+  assert.equal(mode(file), 0o660, "a 0600 FIFO is not a 0600 file: the new file's rule applies");
+  assert.equal(readFileSync(file, 'utf8'), 'NEW\n');
+  assert.deepEqual(readdirSync(dir).sort(), [basename(file), basename(victim)].sort());
+});
+
+/** A group this process is in that isn't its primary one (so a file made here doesn't get it unless given), else null. */
+const otherGroup = () => (POSIX ? (process.getgroups!().find((g) => g !== process.getgid!()) ?? null) : null);
+
 test('writeAgentReadable gives the file its group through the descriptor', { skip: !POSIX && 'POSIX groups' }, () => {
   const { file } = fixture();
   const gid = process.getgid!();
+  const other = otherGroup();
+  if (other !== null) {
+    writeAgentReadable(file, 'NEW\n', other);
+    assert.equal(statSync(file).gid, other, 'the group given, not the one a new file gets');
+    assert.equal(mode(file), 0o640);
+  }
   writeAgentReadable(file, 'NEW\n', gid);
   assert.equal(statSync(file).gid, gid);
   assert.equal(statSync(file).uid, process.getuid!());
@@ -241,12 +331,20 @@ test('writeAgentReadable gives the file its group through the descriptor', { ski
 const INSTANCE = 'shop';
 const STATE = { version: 1, mode: 'server', target: 'example-org/shop', repo: 'example-org/shop', instance: INSTANCE, steps: {}, handoff: {} } as unknown as InitState;
 
-/** A stand-in getent on PATH that knows the coordinator's group as this process's own group, for `fn`. */
-function withCoordinatorGroup<T>(fn: () => T): T {
+/** A stand-in getent on PATH that knows the coordinator's group as `gid` (by default this process's own group), for `fn`. */
+function withCoordinatorGroup<T>(fn: () => T, gid = process.getgid!()): T {
   const bin = mkdtempSync(join(tmpdir(), 'wh-bin-'));
-  hostToolStandIns(bin, { tools: ['getent'], answers: { getent: { [`group ${coordinatorUser(INSTANCE)}`]: `${coordinatorUser(INSTANCE)}:x:${process.getgid!()}:\n` } } });
+  hostToolStandIns(bin, { tools: ['getent'], answers: { getent: { [`group ${coordinatorUser(INSTANCE)}`]: `${coordinatorUser(INSTANCE)}:x:${gid}:\n` } } });
   return onStandIns(bin, fn);
 }
+
+test("writeServerInitState gives the record the coordinator's group, not the one a new file gets", { skip: (process.platform !== 'linux' && 'Linux only') || (otherGroup() === null && 'needs a supplementary group') }, () => {
+  const file = join(mkdtempSync(join(tmpdir(), 'wh-init-')), 'init', `${INSTANCE}.json`);
+  const other = otherGroup()!;
+  withCoordinatorGroup(() => writeServerInitState(file, STATE, INSTANCE), other);
+  assert.equal(statSync(file).gid, other);
+  assert.equal(mode(file), 0o640);
+});
 
 test("writeServerInitState opens the record to the coordinator's group, read only", { skip: process.platform !== 'linux' && 'Linux only' }, () => {
   const file = join(mkdtempSync(join(tmpdir(), 'wh-init-')), 'init', `${INSTANCE}.json`);
