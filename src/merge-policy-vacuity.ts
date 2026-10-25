@@ -43,7 +43,9 @@
 // code moved in a way git doesn't pair is measured as if git had paired it (#1014: a file renamed and re-indented or
 // edited, a function moved into another file or within its file, moved code re-wrapped; must-holds R1, R3, R4 in
 // merge-vacuity-r12, M3 to R3s, P1a to P5, E1 to E8, X2, X3 and Z-A1 to Z-N4 in -r13), but only a top-level
-// statement moved whole, paired by its code or its declared name (the closest same-named pair first); one git paired
+// statement moved whole, paired by its code or its declared name (the closest same-named pair first, each pair
+// compared on its own, by character or by line, and the PR waits when two are too large to compare: ZN1B, ZN4B,
+// ZN1spent, ZN1L must hold); one git paired
 // in place with a removed statement of its name (or, unnamed, an unnamed one) whose code it keeps at a similarity of
 // at least 0.8 pairs with nothing (Z-F6 to Z-F11, G1, D1, U1), and one keeping less, or too large to align with it
 // (ALIGN_CELLS, each pair on its own), took its place and pairs as any other (N5, N6, BL1wb, BUDf, B3: must hold).

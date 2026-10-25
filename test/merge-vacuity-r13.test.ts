@@ -763,6 +763,60 @@ test('must hold: Z-N4: two sources named g, g moved from the second with its unt
   assert.deepEqual([d.auto, d.reasons], hold('src/a.js, src/b.js, src/c.js'));
 });
 
+// ---- #1014's eighth review: each same-named pair is scored on its own, so no other pair's size decides by path order
+const BIGF = (k: number, v: string) => `export function big${k}(u) {\n${lines(64, (i) => `  const v${i} = alpha(u) + ${i} * beta(u) ^ ${k};\n`)}  return ${v};\n}\n`;
+const BIGS = (n: number, v: string) => lines(n, (k) => BIGF(k, v));
+const BIG_T = (n: number, s: number) => {
+  const items: string[] = [];
+  for (let i = 0, len = 0; len < n; i++) {
+    const it = `'${s}${(i * 7919 + s * 104729) % 99991}'`;
+    items.push(it);
+    len += it.length + 1;
+  }
+  return `export function t(u) { return [${items.join(',')}]; }\n`;
+};
+const T_PAIR = (n: number) => [{ 'src/0t.js': 'export const k = 1;\n' + BIG_T(n, 1) }, { 'src/0t.js': 'export const k = 1;\n', 'src/01.js': BIG_T(n, 2), 'src/02.js': BIG_T(n, 3) }] as const;
+
+test('must hold: ZN1spent: Z-N1 with five contested ~2,000-character functions moved into a file that sorts first', async () => {
+  const d = await decided({ 'src/a.js': G, 'src/p.js': BIGS(5, "'p'") + 'export const kp = 1;\n', 'src/q.js': BIGS(5, "'q'") + 'export const kq = 1;\n' }, { 'src/a.js': G_A, 'src/b.js': G_DECOY, 'src/c.js': M3, 'test/x.test.js': M3T, 'src/0.js': BIGS(5, "'zero'"), 'src/p.js': 'export const kp = 1;\n', 'src/q.js': 'export const kq = 1;\n' });
+  assert.deepEqual([d.auto, d.reasons], hold('src/0.js, src/a.js, src/b.js and 3 more'));
+});
+
+for (const [id, n, decoy, app] of [
+  ['ZN1B', 4500, 'src/b.js', 'src/01.js, src/02.js, src/0t.js and 3 more'],
+  ['ZN1Bs', 300, 'src/b.js', 'src/01.js, src/02.js, src/0t.js and 3 more'],
+  ['ZN1Bz', 4500, 'src/z.js', 'src/01.js, src/02.js, src/0t.js and 3 more'],
+  ['M3B', 4500, null, 'src/01.js, src/02.js, src/0t.js and 2 more'],
+] as const) {
+  const what = { ZN1B: 'must hold: ZN1B: Z-N1 with two ~4,500-character one-line `t` statements contesting one removed `t`', ZN1Bs: 'control: ZN1Bs: ZN1B with ~300-character `t` statements holds', ZN1Bz: 'control: ZN1Bz: ZN1B with the decoy in a file that sorts after holds', M3B: 'control: M3B: M3 with the `t` statements of ZN1B holds' }[id];
+  test(what, async () => {
+    const [b, a] = T_PAIR(n);
+    const d = await decided({ 'src/a.js': G, ...b }, { 'src/a.js': G_A, ...(decoy ? { [decoy]: G_DECOY } : {}), 'src/c.js': M3, 'test/x.test.js': M3T, ...a });
+    assert.deepEqual([d.auto, d.reasons], hold(app));
+  });
+}
+
+test('must hold: ZN4B: Z-N4 with the `t` statements of ZN1B', async () => {
+  const other = "export function g(u) {\n  return [u, u, u].map(String).join('-');\n}\n";
+  const [b, a] = T_PAIR(4500);
+  const d = await decided({ 'src/a.js': G_A + other, 'src/b.js': G_C, ...b }, { 'src/a.js': G_A, 'src/b.js': '', 'src/c.js': M3, 'test/x.test.js': M3T, ...a });
+  assert.deepEqual([d.auto, d.reasons], hold('src/01.js, src/02.js, src/0t.js and 3 more'));
+});
+
+test('must hold: ZN1L: Z-N1 with a 120-line g edited at both ends, too large to align by character with either candidate (scored by its lines)', async () => {
+  const ARMS = G_C.slice(G_C.indexOf('function grant')) + 'function alpha(u) {\n  return 1;\n}\nfunction beta(u) {\n  return 2;\n}\n';
+  const g = (first: number, arm: string) => `export function g(u) {\n  if (u.never) return ${first};\n${lines(120, (i) => `  const v${i} = alpha(u) + ${i} * beta(u);\n`)}  return u.admin ? ${arm}(u) : deny(u);\n}\n`;
+  const decoy = `export function g(u) {\n${lines(122, (i) => `  const w${i} = gamma(u) - ${i} / delta(u);\n`)}}\n`;
+  const d = await decided({ 'src/a.js': G_A + g(1, 'grant') + ARMS }, { 'src/a.js': G_A, 'src/b.js': decoy, 'src/c.js': g(2, 'grantAll') + ARMS, 'test/x.test.js': M3T });
+  assert.deepEqual([d.auto, d.reasons], hold('src/a.js, src/b.js, src/c.js'));
+});
+
+test('must merge: D1L: D1 with a ~1,300-character line edited at its start and end (aligned within ALIGN_CELLS)', async () => {
+  const nums = Array.from({ length: 260 }, (_, i) => 1000 + i).join(',');
+  const f = (a: number, tail: string) => `export const f = (x) => x + ${a} + 0 * [${nums}].length${tail};`;
+  await merges({ 'src/a.js': D1_A(f(1, '')), 'src/b.js': f(2, ' * 9') + '\nexport const k = 0;\n' }, { 'src/a.js': D1_A(f(2, ' * 9')), 'src/b.js': 'export const k = 0;\n', 'test/x.test.js': calls('a.js', 'f', 'f(1)', '3') });
+});
+
 test('must merge: K-G: a tested copy of g added in a new file, the g it copies kept where it was, wrapped into new code', async () => {
   const g = 'function g(u) {\n  return u + 1;\n}\n';
   await merges({ 'src/a.js': g + 'export const k = 1;\n' }, { 'src/a.js': `export const all = [\n${g}];\nexport const k = 2;\n`, 'src/c.js': g + 'export { g };\n', 'test/x.test.js': calls('c.js', 'g', 'g(1)', '2') });

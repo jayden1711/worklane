@@ -17,7 +17,8 @@
 //           boundary, holding a sub-statement or nested function, or at a statement list's end; removed lines lexed in
 //           their base file; comment toggles between hunks measured). A file counts only where it also counts with
 //           the top-level statements the PR moved in a way git doesn't pair measured against their source (#1014,
-//           movedCode), so pairing only ever takes away. Not seen: work a module starts as it loads that keeps running and that
+//           movedCode; each same-named pair compared on its own, and two too large to compare make the PR wait), so
+//           pairing only ever takes away. Not seen: work a module starts as it loads that keeps running and that
 //           the tests' own activity triggers (a timer while a test waits, an async_hooks or exit listener); code
 //           after a call that threw (V8 counts a block as run once entered); and where V8 makes no block range (an
 //           optional call's arguments, a default parameter or destructuring default, a logical assignment's right
@@ -1050,9 +1051,6 @@ function topUnits(text: string, lex: { code: boolean[]; mask: Uint8Array }): [nu
   return out;
 }
 
-/** The most cells movedCode's alignments may take, in all, to choose between same-named pairs (past it: path order). */
-const MOVE_PAIR_CELLS = 8 * ALIGN_CELLS;
-
 /**
  * How much of the same-named statement git paired a moved-code unit with in place it must keep to count as that one
  * edited (movedCode): the code characters both keep are at least 2/5 of the two's code characters together, a
@@ -1200,15 +1198,27 @@ function movedCode(
       else if (u.name !== null) left.push([f, u]);
     }
   }
-  // Then by name, the closest pairs first (Z-N1 to Z-N3: a same-named unit never takes another's source by its path).
+  // Then by name, the closest pairs first (Z-N1 to Z-N4: a same-named unit never takes another's source by its path).
+  // Each pair a unit or a source shares with another is scored on its own (ZN1B, ZN4B, ZN1spent: no pair spends
+  // another's cells): by character, or, too large for that (ALIGN_CELLS), by its lines' text; too large for that too,
+  // the PR waits.
   const named = left.flatMap(([f, u]) => sources.filter((s) => !s.used && s.name === u.name && !same(u, s)).map((s) => ({ f, u, s, score: 0 })));
-  let cells = 0;
-  for (const c of named) {
-    if (named.filter((d) => d.u === c.u || d.s === c.s).length < 2) continue;
-    cells += (c.u.key.length + 1) * (c.s.key.length + 1);
-    const kept = cells > MOVE_PAIR_CELLS ? null : alignChars([...c.u.key], [...c.s.key]);
-    c.score = kept ? kept.filter((x) => x === '=').length * 2 - c.u.key.length - c.s.key.length : -Infinity;
-  }
+  const ways = new Map<Unit, number>();
+  for (const { u, s } of named) for (const x of [u, s]) ways.set(x, (ways.get(x) ?? 0) + 1);
+  const closeness = (u: Unit, s: Unit) => {
+    const kept = alignChars([...u.key], [...s.key]);
+    if (kept) return kept.filter((x) => x === '=').length * 2 - u.key.length - s.key.length;
+    const [ul, sl] = [u.lines, s.lines].map((ls) => ls.map((l) => l.replace(/\s/g, '')));
+    const ops = alignChars(ul!, sl!);
+    if (!ops) throw new CoverageUnreadable(`two statements named ${u.name} are too large to tell which one ${u.path}:${u.first} was moved from`);
+    let [i, j, score] = [0, 0, 0];
+    for (const op of ops) {
+      if (op === '=') [i, j] = [i + 1, j + 1];
+      else score -= op === '+' ? ul![i++]!.length : sl![j++]!.length;
+    }
+    return score;
+  };
+  for (const c of named) if (ways.get(c.u)! > 1 || ways.get(c.s)! > 1) c.score = closeness(c.u, c.s);
   const taken = new Set<Unit>();
   for (const c of named.map((c, n) => ({ ...c, n })).sort((x, y) => y.score - x.score || x.n - y.n)) {
     if (c.s.used || taken.has(c.u)) continue;
