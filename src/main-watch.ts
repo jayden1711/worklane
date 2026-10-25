@@ -42,6 +42,7 @@ import type { CommitCheck } from './backlog/types.js';
 import { ACTIONS_APP_ID, pinnedVerdict, pinOf, type CheckPin, type GithubCheckApps, type WorkflowSource } from './check-source.js';
 import { writeGroupOnly } from './os/index.js';
 import type { Role } from './dashboard-auth.js';
+import { gitRemote } from './git-remote.js';
 
 /** At most one GitHub API call per this long. */
 export const MAIN_WATCH_CALL_MS = 60_000;
@@ -615,6 +616,7 @@ export function subjectPrNumber(subject: string): number | null {
 }
 
 export function repoGit(repo: string, remote: string, branch: string): WatchGit {
+  gitRemote(remote);
   const git = (...a: string[]) => spawnSync('git', a, { cwd: repo, encoding: 'utf8' });
   return {
     tip: () => {

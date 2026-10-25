@@ -18,6 +18,7 @@ import type { JudgedChecks } from '../check-source.js';
 import type { EventLog } from '../events/log.js';
 import type { EventPayload, StoredEvent } from '../events/types.js';
 import { requiredOutcomes } from '../pr-watch.js';
+import { gitRemote } from '../git-remote.js';
 
 // ---------------------------------------------------------------- the test-run contract
 
@@ -459,7 +460,9 @@ export class PrBatcher {
   /** The batch whose run is in flight: what drops it, and the signal that cancels its run. */
   private current: { id: string; prs: BatchEntry[]; base: string; controller: AbortController; why: string | null } | null = null;
 
-  constructor(private readonly d: PrBatchDeps) {}
+  constructor(private readonly d: PrBatchDeps) {
+    gitRemote(d.remote);
+  }
 
   /** Cancel the in-flight run: its batch is abandoned and batched again. */
   private cancel(why: string) {
