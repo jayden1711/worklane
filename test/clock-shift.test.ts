@@ -125,39 +125,57 @@ test('shifted: a test that mocks Date.now sees its mock, and a mock calling the 
   assert.match(r.out, /# pass 3/);
 });
 
-type Step = { name?: string; run?: string; env?: Record<string, string> };
-const JOB_GLOB = '"dist/test/**/*.test.js"';
+type Step = { name?: string; run?: string; shell?: string; env?: Record<string, string>; 'continue-on-error'?: unknown };
+type Job = { steps: Step[]; 'continue-on-error'?: unknown };
+/** The whole command line of a test step: nothing before or after it can change what it runs or what it exits with. */
+const JOB_RUN = /^NODE_OPTIONS="--import=\$PWD\/dist\/test\/clock-shift\.js" node scripts\/ci\/clock-shift-run\.mjs --test-timeout=(\d+) --file-timeout=(\d+) dist\/test$/;
 
 /** The workflow's test steps, one per shift, each with its command line and environment. */
 function jobTestSteps(): Step[] {
-  const wf = parse(readFileSync(join(repoRoot, '.github', 'workflows', 'clock-shift.yml'), 'utf8')) as { jobs: Record<string, { steps: Step[] }> };
-  const steps = Object.values(wf.jobs).flatMap((j) => j.steps).filter((s) => s.env?.TEST_CLOCK_SHIFT !== undefined);
+  const wf = parse(readFileSync(join(repoRoot, '.github', 'workflows', 'clock-shift.yml'), 'utf8')) as { jobs: Record<string, Job> };
+  for (const [id, j] of Object.entries(wf.jobs)) assert.equal(j['continue-on-error'], undefined, `job ${id}: continue-on-error`);
+  const all = Object.values(wf.jobs).flatMap((j) => j.steps);
+  for (const s of all) assert.equal(s['continue-on-error'], undefined, `${s.name ?? s.run}: continue-on-error`);
+  const steps = all.filter((s) => s.env?.TEST_CLOCK_SHIFT !== undefined);
   assert.deepEqual(steps.map((s) => s.env!.TEST_CLOCK_SHIFT), ['+45d', '+400d']);
-  for (const s of steps) assert.equal(s.run?.split(JOB_GLOB).length, 2, `${s.name}: runs ${JOB_GLOB} once`);
+  for (const s of steps) {
+    assert.equal(s.shell, 'bash', `${s.name}: shell`);
+    const m = JOB_RUN.exec(s.run ?? '');
+    assert.ok(m, `${s.name}: the run line is exactly the job's command, with no || true or other wrapper: ${s.run}`);
+    assert.ok(Number(m[2]) > Number(m[1]), `${s.name}: a file gets longer than one test`);
+  }
   return steps;
 }
 
-/** A test step's command line as the job runs it, on these files instead of the suite. */
-async function runStep(s: Step, files: string[], run = s.run!): Promise<{ code: number | null; out: string }> {
-  const p = spawn('bash', ['-c', run.replace(JOB_GLOB, files.map((f) => `'${f}'`).join(' '))], { cwd: repoRoot, env: { ...plain, ...s.env }, stdio: ['ignore', 'pipe', 'pipe'], timeout: 120_000 });
+/** A test step's command line as the job runs it, on the test files under `dir` instead of the suite. */
+async function runStep(s: Step, dir: string, timeouts: { test?: number; file?: number } = {}): Promise<{ code: number | null; out: string; ms: number }> {
+  let run = s.run!.replace(/ dist\/test$/, ` '${dir}'`);
+  if (timeouts.test) run = run.replace(/--test-timeout=\d+/, `--test-timeout=${timeouts.test}`);
+  if (timeouts.file) run = run.replace(/--file-timeout=\d+/, `--file-timeout=${timeouts.file}`);
+  const start = performance.now();
+  const p = spawn('bash', ['-c', run], { cwd: repoRoot, env: { ...plain, ...s.env }, stdio: ['ignore', 'pipe', 'pipe'], timeout: 120_000 });
   let out = '';
   p.stdout.on('data', (d: Buffer) => (out += d.toString()));
   p.stderr.on('data', (d: Buffer) => (out += d.toString()));
   const code = await new Promise<number | null>((ok) => p.on('close', (c) => ok(c)));
-  return { code, out };
+  return { code, out, ms: performance.now() - start };
+}
+
+/** A fixture directory of ES module test files. */
+function fixture(files: Record<string, string>): string {
+  const dir = mkdtempSync(join(tmpdir(), 'clock-job-'));
+  writeFileSync(join(dir, 'package.json'), '{"type":"module"}\n');
+  for (const [name, text] of Object.entries(files)) writeFileSync(join(dir, name), text);
+  return dir;
 }
 
 test('the job runs every test of a file, one registered after an await too, at both shifts (#848)', async () => {
   // test/slot-dir-writes.test.ts registers tests after a top-level await. Under --test-force-exit a file's process
   // ended once the tests it knew of were done, so the later ones never ran, and the step still reported 0 fail.
   for (const s of jobTestSteps()) {
-    const dir = mkdtempSync(join(tmpdir(), 'clock-job-'));
-    writeFileSync(join(dir, 'package.json'), '{"type":"module"}\n');
-    const marker = join(dir, 'late-ran');
-    const file = join(dir, 'late.test.js');
-    writeFileSync(
-      file,
-      [
+    const marker = join(mkdtempSync(join(tmpdir(), 'clock-job-')), 'late-ran');
+    const dir = fixture({
+      'late.test.js': [
         "import { test } from 'node:test';",
         "import { writeFileSync } from 'node:fs';",
         "test('early', () => {});",
@@ -165,22 +183,46 @@ test('the job runs every test of a file, one registered after an await too, at b
         `test('late', () => writeFileSync(${JSON.stringify(marker)}, 'x'));`,
         '',
       ].join('\n'),
-    );
-    const r = await runStep(s, [file]);
+    });
+    const r = await runStep(s, dir);
     assert.equal(r.code, 0, `${s.name}: ${r.out}`);
     assert.ok(existsSync(marker), `${s.name}: the test registered after the await never ran\n${r.out}`);
+    assert.match(r.out, /^# clock-shift run: 1 files\n# tests 2\n# pass 2\n# fail 0\n/m, `${s.name}: ${r.out}`);
   }
 });
 
-test("the job's flags end a file that keeps a handle open after its tests: cancelled at --test-timeout, named, the step fails (#774)", async () => {
+test('the job fails a file that keeps a handle open after its tests, named, and still reports the others, at both shifts (#774)', async () => {
+  for (const s of jobTestSteps()) {
+    const dir = fixture({
+      'open-handle.test.js': "import { test } from 'node:test';\nsetInterval(() => {}, 1000);\ntest('done', () => {});\n",
+      'fine.test.js': "import { test } from 'node:test';\ntest('fine', () => {});\n",
+    });
+    const r = await runStep(s, dir, { file: 5000 });
+    assert.equal(r.code, 1, `${s.name}: ${r.out}`);
+    assert.match(r.out, /^# failed files: 1\n# {3}\S*open-handle\.test\.js: still running after --file-timeout=5000 ms: killed$/m, `${s.name}: ${r.out}`);
+    assert.match(r.out, /^# file: \S*fine\.test\.js\n/m, `${s.name}: ${r.out}`);
+    assert.ok(r.ms < 60_000, `${s.name}: took ${r.ms} ms`);
+  }
+});
+
+test('the job fails on a failing test and on a test that hangs, each named, at both shifts', async () => {
+  for (const s of jobTestSteps()) {
+    const dir = fixture({
+      'fails.test.js': "import { test } from 'node:test';\nimport assert from 'node:assert/strict';\ntest('fails', () => assert.equal(1, 2));\n",
+      'hangs.test.js': "import { test } from 'node:test';\ntest('hangs', () => new Promise(() => setInterval(() => {}, 1000)));\n",
+      'fine.test.js': "import { test } from 'node:test';\ntest('fine', () => {});\n",
+    });
+    const r = await runStep(s, dir, { test: 2000, file: 8000 });
+    assert.equal(r.code, 1, `${s.name}: ${r.out}`);
+    assert.match(r.out, /^# failed files: 2\n/m, `${s.name}: ${r.out}`);
+    assert.match(r.out, /^# {3}\S*fails\.test\.js: exit 1$/m, `${s.name}: ${r.out}`);
+    assert.match(r.out, /^# {3}\S*hangs\.test\.js: /m, `${s.name}: ${r.out}`);
+  }
+});
+
+test('the job refuses to pass with no test file to run', async () => {
   const [s] = jobTestSteps();
-  assert.match(s!.run!, /--test-timeout=\d+ /);
-  const dir = mkdtempSync(join(tmpdir(), 'clock-job-'));
-  writeFileSync(join(dir, 'package.json'), '{"type":"module"}\n');
-  const file = join(dir, 'open-handle.test.js');
-  writeFileSync(file, "import { test } from 'node:test';\nsetInterval(() => {}, 1000);\ntest('done', () => {});\n");
-  const r = await runStep(s!, [file], s!.run!.replace(/--test-timeout=\d+ /, '--test-timeout=3000 '));
-  assert.equal(r.code, 1, r.out);
-  assert.match(r.out, /open-handle\.test\.js/);
-  assert.match(r.out, /timed out after 3000ms/);
+  const r = await runStep(s!, fixture({}));
+  assert.equal(r.code, 2, r.out);
+  assert.match(r.out, /no \*\.test\.js file under/);
 });
