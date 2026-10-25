@@ -20,6 +20,9 @@
     { "gap": "a PR whose branch merged in the default branch's tip waits when its head takes out a rule the tip added to a test already marked as a lint test at the PR's base", "closes": "#1069" },
     { "gap": "a PR whose branch merged in the default branch's tip waits when its head takes out an assertion the tip added to a test file", "closes": "#1069" },
     { "gap": "a PR whose branch merged in the default branch's tip waits when its head deletes a test file only the tip has, with an unrelated change elsewhere", "closes": "#1069" },
-    { "gap": "a PR whose branch merged in the default branch's tip waits when its head takes an assertion out of a test file only the tip has", "closes": "#1069" }
+    { "gap": "a PR whose branch merged in the default branch's tip waits when its head takes an assertion out of a test file only the tip has", "closes": "#1069" },
+    { "gap": "a PR whose branch merged in the default branch's tip waits when its head puts back an entry the tip took out of an allowlist marked never-grow", "closes": "#1069" },
+    { "gap": "a PR whose branch merged in the default branch's tip waits when its head puts back a skip marker the tip took off a test", "closes": "#1069" },
+    { "gap": "a PR whose branch merged in the default branch's tip waits when its head puts back a line the tip took out of an allowlist file (.gitleaksignore), with an unrelated change elsewhere", "closes": "#1069" }
   ]
 }

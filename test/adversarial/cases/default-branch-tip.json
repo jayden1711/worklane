@@ -112,6 +112,23 @@
       "change": [{"rename": "test/no-shell.test.ts", "to": "test/no-shell2.test.ts", "text": "import { test } from 'node:test';\n\nconst BANNED = [\n  'execSync',\n  'spawnSync',\n];\n\ntest('no shell calls in src', () => {});\n"}],
       "flow": {"tipMoved": {"test/no-shell.test.ts": "// lint-test\nimport { test } from 'node:test';\n\nconst BANNED = [\n  'execSync',\n  'spawnSync',\n];\n\ntest('no shell calls in src', () => {});\n"}, "tipMergedIn": true},
       "expect": {"decision": "waits", "reasons": ["design: may weaken a check: removes or changes a line of a guard or lint (test/no-shell.test.ts"], "scopes": ["engine"]}
+    },
+    {
+      "id": "flow-default-branch-second-table-marked-at-tip",
+      "attack": "a file whose base marks one table never-shrink; the default branch marks a second table in it never-shrink after this PR's base; the PR, which never merged the default branch in, takes an entry out of the second table",
+      "source": "merge-policy-weakening.ts weakeningReasons (#869: a tip mark is the base's only for the same table and kind); #1056 round 6 review N1; docs/guardrails.md Hold kinds: design (may weaken a check)",
+      "base": {"test/rules.test.ts": "import { test } from 'node:test';\n// check-table: never-shrink\nexport const CHECKS = [\n  'a',\n];\nexport const MORE = [\n  'p',\n  'q',\n];\ntest('t', () => {});\n"},
+      "change": [{"write": "test/rules.test.ts", "text": "import { test } from 'node:test';\n// check-table: never-shrink\nexport const CHECKS = [\n  'a',\n];\nexport const MORE = [\n  'p',\n];\ntest('t', () => {});\n"}],
+      "flow": {"tipMoved": {"test/rules.test.ts": "import { test } from 'node:test';\n// check-table: never-shrink\nexport const CHECKS = [\n  'a',\n];\n// check-table: never-shrink\nexport const MORE = [\n  'p',\n  'q',\n];\ntest('t', () => {});\n"}},
+      "expect": {"decision": "waits", "reasons": ["design: may weaken a check: removes or changes an entry in a check's rules or a guard's list (test/rules.test.ts"], "scopes": ["engine"]}
+    },
+    {
+      "id": "flow-default-branch-app-path-lint-file-only-at-tip",
+      "attack": "a lint test outside the engine's own source made on the default branch after this PR's base; the PR merges the default branch in, then takes one of its rules out (a managed app's repo too)",
+      "source": "merge-policy-weakening.ts weakeningReasons (#869: a lint test only the tip has is read against the head in every scope, only the engine's own source stands aside); #1056 round 6 review N7; docs/guardrails.md Hold kinds: design (may weaken a check)",
+      "change": [{"write": "app/no-shell.test.ts", "text": "// lint-test\nimport { test } from 'node:test';\n\nconst BANNED = [\n  'execSync',\n];\n\ntest('no shell calls in src', () => {});\n"}],
+      "flow": {"tipMoved": {"app/no-shell.test.ts": "// lint-test\nimport { test } from 'node:test';\n\nconst BANNED = [\n  'execSync',\n  'spawnSync',\n];\n\ntest('no shell calls in src', () => {});\n"}, "tipMergedIn": true},
+      "expect": {"decision": "waits", "reasons": ["design: may weaken a check: removes or changes a line of a guard or lint (app/no-shell.test.ts"], "scopes": ["engine", "managed-app"]}
     }
   ]
 }

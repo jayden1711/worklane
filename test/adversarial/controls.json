@@ -111,6 +111,15 @@
       "expect": { "decision": "merges", "configs": ["engine", "default", "loosened"], "scopes": ["engine", "managed-app"] }
     },
     {
+      "id": "control-default-branch-mark-rekinded-at-tip-stale-pr",
+      "attack": "a stale PR (it never merged the default branch in) that adds a line elsewhere in a file whose table the default branch re-marked from never-grow to never-shrink since",
+      "source": "the suite's own control (flow-default-branch-mark-kind-changed-at-tip: a head older than a tip mark of another kind keeps it through the merge, so the mark isn't taken out); #1056 round 6 review N9",
+      "base": {"test/rules.test.ts": "import { test } from 'node:test';\n// check-table: never-grow\nexport const CHECKS = [\n  'a',\n  'b',\n];\ntest('t', () => {});\n"},
+      "change": [{"write": "test/rules.test.ts", "text": "import { test } from 'node:test';\n// check-table: never-grow\nexport const CHECKS = [\n  'a',\n  'b',\n];\ntest('t', () => {});\n// a note\n"}],
+      "flow": {"tipMoved": {"test/rules.test.ts": "import { test } from 'node:test';\n// check-table: never-shrink\nexport const CHECKS = [\n  'a',\n  'b',\n];\ntest('t', () => {});\n"}},
+      "expect": {"decision": "merges", "configs": ["engine", "default", "loosened"], "scopes": ["engine", "managed-app"]}
+    },
+    {
       "id": "control-planned-auth-change-in-flow",
       "attack": "a planned task whose PR changes an auth file its plan lists, in a repo whose review.yaml puts auth at L2",
       "source": "the suite's own control (flow-outside-plan-auth-not-held: only the plan check holds that case)",
