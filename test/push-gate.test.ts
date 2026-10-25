@@ -170,6 +170,67 @@ test('push gate refuses a denied term in a text run inside a binary file: a shor
   }
 });
 
+/** `text` between non-printable bytes that are not NUL, in compressed-looking bytes holding a NUL elsewhere. */
+const unfenced = (text: Buffer) => Buffer.concat([Buffer.from([0]), noise(64), Buffer.from([0xfe]), text, Buffer.from([0xff]), noise(64)]);
+
+test('push gate pins the binary run minimum: a short term in an ASCII run of exactly 8 is refused, of exactly 7 allowed (#1057)', { skip }, () => {
+  const eight = gateBinary('image.png', unfenced(Buffer.from('made zqx')));
+  assert.notEqual(eight.status, 0, 'a run of 8: refused');
+  assert.match(eight.stderr, /image\.png: denied term "zqx" in a binary file/);
+  const seven = gateBinary('image.png', unfenced(Buffer.from('mad zqx')));
+  assert.equal(seven.status, 0, `a run of 7: allowed\n${seven.stderr}`);
+});
+
+test('push gate refuses a short term in a short ASCII run with a NUL on both sides, and allows one with a NUL on one side only (#1057)', { skip }, () => {
+  for (const text of ['zqx', 'a zqx', 'zqx.ok']) {
+    const p = gateBinary('data.bin', Buffer.concat([noise(64), Buffer.from([0xfe, 0]), Buffer.from(text), Buffer.from([0, 0xff]), noise(64)]));
+    assert.notEqual(p.status, 0, `\\0${text}\\0: refused`);
+    assert.match(p.stderr, /data\.bin: denied term "zqx" in a binary file/, text);
+  }
+  for (const [before, after] of [[0, 0x01], [0x01, 0]]) {
+    const p = gateBinary('data.bin', Buffer.concat([noise(64), Buffer.from([0xfe, before!]), Buffer.from('zqx'), Buffer.from([after!, 0xff]), noise(64)]));
+    assert.equal(p.status, 0, `NUL on one side (${before}, ${after}): allowed\n${p.stderr}`);
+  }
+});
+
+test('push gate refuses a denied term in UTF-16BE text inside a binary file, also when no NUL follows its last letter (#1057)', { skip }, () => {
+  const be = (s: string) => Buffer.from(s, 'utf16le').swap16();
+  for (const [text, term] of [['author: secretproject', 'secretproject'], ['built by zqx', 'zqx']] as const) {
+    const p = gateBinary('image.png', unfenced(be(text)));
+    assert.notEqual(p.status, 0, `${text}: refused`);
+    assert.match(p.stderr, new RegExp(`image\\.png: denied term "${term}" in a binary file`), text);
+  }
+});
+
+test('push gate reads an added line starting "++ /dev/null" or "++ b/<path>" as content, in a file deleted again before the push (#1057)', { skip }, () => {
+  for (const header of ['++ /dev/null', '++ b/package-lock.json']) {
+    const r = repo();
+    const base = r.git('rev-parse', 'HEAD');
+    r.commit('notes.md', `intro\n${header}\ndeployed by secretproject\n`, 'add notes');
+    r.git('rm', '-q', 'notes.md');
+    r.git('commit', '-q', '-m', 'drop notes');
+    const p = gateRange(r.dir, base);
+    assert.notEqual(p.status, 0, `${header}: refused`);
+    assert.match(p.stderr, /notes\.md:\d+: denied term "secretproject"/, header);
+  }
+});
+
+test('push gate refuses, by name, a commit diff or a tip file over its read limit rather than failing without one (#1057)', { skip }, () => {
+  const r = repo();
+  const before = r.git('rev-parse', 'HEAD');
+  writeFileSync(join(r.dir, 'big.bin'), Buffer.alloc(257 * 1024 * 1024));
+  r.git('add', 'big.bin');
+  r.git('commit', '-q', '-m', 'add big');
+  const added = r.git('rev-parse', 'HEAD');
+  r.commit('ok.md', 'fine\n', 'clean');
+  const inCommit = gateRange(r.dir, before);
+  assert.notEqual(inCommit.status, 0, 'refused');
+  assert.match(inCommit.stderr, new RegExp(`commit ${added.slice(0, 8)}'s diff is over the gate's 256 MiB read limit`));
+  const inTree = gateRange(r.dir, added);
+  assert.notEqual(inTree.status, 0, 'refused');
+  assert.match(inTree.stderr, /[0-9a-f]{8} big\.bin is over the gate's 256 MiB read limit/);
+});
+
 test('push gate allows a clean push; the author\'s own sign-off is not a leak; placeholders are fine', { skip }, () => {
   const r = repo();
   r.commit('docs.md', 'paths like /home/example/x and /Users/you/x are placeholders; 192.0.2.5 is documentation\n', 'Add docs\n\nSigned-off-by: Ada <ada@example.com>');

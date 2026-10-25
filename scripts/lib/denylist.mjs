@@ -65,26 +65,34 @@ export function scanText(rules, path, text) {
   return hits;
 }
 
-// Binary text runs, as strings(1) finds them: printable ASCII, and the same as UTF-16LE (each character then a NUL).
+// Binary text runs, as strings(1) finds them: printable ASCII, and the same as UTF-16LE (each character then a NUL)
+// and UTF-16BE (a NUL then each character).
 const ASCII_RUN = /[\t\n\r\x20-\x7e]+/g;
 const UTF16LE_RUN = /(?:[\t\n\r\x20-\x7e]\0)+/g;
+const UTF16BE_RUN = /(?:\0[\t\n\r\x20-\x7e])+/g;
 // Compressed bytes hold a short term by chance: about one 3-letter hit per 4 MB of random bytes against this repo's
 // terms, and still one per 150 MB in runs of 8 (#989). A term this long, or in a run this long, is rarely chance.
+// So is an ASCII run with a NUL on both sides (a C string): the two NULs make a chance hit far rarer again (#1057).
 const BINARY_RUN = 8;
 const BINARY_TERM = 6;
 
 /**
- * Every denied hashed term in a blob holding a NUL byte, as "path: why" strings: a term in a text run of at least
- * BINARY_RUN characters, or a term of at least BINARY_TERM characters in any run, token boundaries as in text. The
- * regex patterns are not run: their short shapes (a letter and digits, a dotted quad) match binary data by chance.
+ * Every denied hashed term in a blob holding a NUL byte, as "path: why" strings, token boundaries as in text: a term
+ * of at least BINARY_TERM characters in any run, and any term in a run of at least BINARY_RUN characters or in an
+ * ASCII run with a NUL on both sides. The regex patterns are not run: their short shapes (a letter and digits, a
+ * dotted quad) match binary data by chance. Runs are read one at a time, so memory stays near the blob's size.
  */
 export function scanBinary(rules, path, text) {
   const hits = new Set();
-  const runs = [...text.matchAll(ASCII_RUN)].map((m) => m[0]).concat([...text.matchAll(UTF16LE_RUN)].map((m) => m[0].replaceAll('\0', '')));
-  for (const run of runs) {
-    for (const t of tokens(run)) {
-      if ((run.length < BINARY_RUN && t.length < BINARY_TERM) || !rules.hashed.has(sha(t))) continue;
-      if (!rules.allow.some((a) => a.term === t && a.re.test(path))) hits.add(`${path}: denied term "${t}" in a binary file (it holds a NUL byte)`);
+  for (const [re, wide] of [[ASCII_RUN, false], [UTF16LE_RUN, true], [UTF16BE_RUN, true]]) {
+    for (const m of text.matchAll(re)) {
+      const run = wide ? m[0].replaceAll('\0', '') : m[0];
+      const end = m.index + m[0].length;
+      const anyLength = run.length >= BINARY_RUN || (!wide && text[m.index - 1] === '\0' && text[end] === '\0');
+      for (const t of tokens(run)) {
+        if ((!anyLength && t.length < BINARY_TERM) || !rules.hashed.has(sha(t))) continue;
+        if (!rules.allow.some((a) => a.term === t && a.re.test(path))) hits.add(`${path}: denied term "${t}" in a binary file (it holds a NUL byte)`);
+      }
     }
   }
   return [...hits];
