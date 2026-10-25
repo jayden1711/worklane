@@ -12,6 +12,7 @@ import { BRAND } from './brand.js';
 import { deferUntilFirstPr, detectWriterTask } from './setup-first-pr.js';
 import { AUTH_CHECK, authFailedDetail, isAuthFailure } from './claude-auth-failure.js';
 import { redactString } from './events/redact.js';
+import { DETAIL_LOGGED, logDetail } from './user-facing-error.js';
 import { loadConfig, type Config } from './config/load.js';
 import { hookChecks, type Settings } from './agent-settings.js';
 import { loadFingerprintSets } from './guardrails/context.js';
@@ -336,6 +337,11 @@ function agentLogin(k: Checking): Detected | null {
 const recorded = (k: Checking, step: string, what: string): Detected | null => (k.c.handoff?.[step] === 'done' ? ok(`${what}: done, as init recorded it (add-project: ${step}); not visible to this user to check again`) : null);
 const no = (detail: string): Detected => ({ done: false, detail });
 const firstLine = (s: string) => s.trim().split('\n')[0] ?? '';
+/** A gh call that failed: what failed, in the engine's words; gh's own text (a URL, GitHub's answer) only logged (#1064). */
+const ghSaid = (what: string, r: { stderr: string }): string => {
+  logDetail(`a setup check: ${what}`, r.stderr.trim() || 'gh said nothing');
+  return `${what}; ${DETAIL_LOGGED}`;
+};
 const isErr = <T extends object>(v: T | { error: string }): v is { error: string } => 'error' in v;
 /** Is this source on in the instance's intake.yaml (a file that doesn't load: no)? */
 const intakeOn = (home: string, source: 'slack' | 'linear'): boolean => {
@@ -490,7 +496,7 @@ export function detectGithubLogin(p: Pick<SetupProbe, 'which' | 'run'>, repo: st
   if (p.run('gh', ['auth', 'status']).status !== 0) return no('gh is not signed in, per `gh auth status`');
   if (!repo) return no(`gh is signed in, but the repo has no GitHub origin: add one (git remote add origin https://github.com/<owner>/<name>.git), then run \`${BRAND.cli} init\` again`);
   const r = p.run('gh', ['api', `repos/${repo}`, '--jq', '.permissions.push']);
-  if (r.status !== 0) return no(`gh is signed in, but can't read ${repo}: ${firstLine(r.stderr)}`);
+  if (r.status !== 0) return no(ghSaid(`gh is signed in, but can't read ${repo}`, r));
   if (r.stdout.trim() !== 'true') return no(`gh is signed in, but your login can't push to ${repo}`);
   return ok(`gh signed in; you can push to ${repo}`);
 }
@@ -1289,7 +1295,7 @@ export const SETUP_STEPS: readonly SetupStep[] = [
       }
       if (!k.c.repo || !k.p.which('gh')) return no("can't ask GitHub: no GitHub origin or no gh");
       const r = k.p.run('gh', ['api', `repos/${k.c.repo}/issues?labels=ready&state=all&per_page=1`, '--jq', 'length']);
-      if (r.status !== 0) return no(`couldn't ask GitHub: ${firstLine(r.stderr)}`);
+      if (r.status !== 0) return no(ghSaid("couldn't ask GitHub which issues are labelled ready", r));
       return Number(r.stdout.trim()) > 0 ? ok('an issue is labelled ready: the coordinator picks it up when it runs') : no('no issue is labelled ready yet: the coordinator has nothing to work on');
     },
   },
