@@ -216,9 +216,55 @@ test('stale PR: an unrelated change, while the tip renamed and marked a table, s
   assert.deepEqual(heldReasons({ base: { [P]: table('CHECKS', rows), 'web/x.js': 'export const x = 1;\n' }, tip: [{ [P]: null, 'test/checks/rules.test.ts': table('CHECKS', rows, 'never-shrink') }], head: WEB }), []);
 });
 
-test('a merge into the tip that conflicts waits, for a stale PR too', () => {
-  const v = (n: number) => ({ 'web/x.js': `export const x = ${n};\n` });
-  // An older commit of the default branch merged in; the PR and the tip since change the same line.
-  assert.deepEqual(heldReasons({ base: v(1), tip: [{ README: 'x\n' }, v(3)], head: v(2), mergeAt: 0 }), [weakening.TIP_MERGE_CONFLICTS]);
-  assert.deepEqual(heldReasons({ base: v(1), tip: [v(3)], head: v(2) }), [weakening.TIP_MERGE_CONFLICTS]);
+const v = (n: number) => ({ 'web/x.js': `export const x = ${n};\n` });
+
+test('a merge into the tip that conflicts adds no reason: the conflict paths take it; its own change is still measured', () => {
+  // An older commit of the default branch merged in, or a stale PR; the PR and the tip since change the same line.
+  assert.deepEqual(heldReasons({ base: v(1), tip: [{ README: 'x\n' }, v(3)], head: v(2), mergeAt: 0 }), []);
+  assert.deepEqual(heldReasons({ base: v(1), tip: [v(3)], head: v(2) }), []);
+  // The conflict leaves the change from its base measured: an assertion it takes out still waits.
+  const own = kinds(heldReasons({ base: { ...v(1), [T]: asserts(['assert.ok(true);', 'assert.equal(1, 1);']) }, tip: [v(3)], head: { ...v(2), [T]: asserts(['assert.ok(true);']) } }));
+  assert.deepEqual(own, [ASSERTION]);
+});
+
+/**
+ * A PR whose merge into the tip conflicts, then the head that resolves it: the tip merged in, the conflict resolved
+ * as `resolution` says. The reasons for that head, by kind.
+ */
+function resolvedReasons(o: { base: Files; tip: Files; head: Files; resolution: Files }): string[] {
+  const dir = exampleProject().dir;
+  const g = (...a: string[]) => execFileSync('git', a, { cwd: dir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+  const write = (files: Files) => {
+    for (const [p, t] of Object.entries(files)) {
+      mkdirSync(dirname(join(dir, p)), { recursive: true });
+      writeFileSync(join(dir, p), t!);
+    }
+    g('add', '-A');
+  };
+  write(o.base);
+  g('commit', '-q', '-m', 'base');
+  const base = g('rev-parse', 'HEAD');
+  g('checkout', '-q', '-b', 'default-tip');
+  write(o.tip);
+  g('commit', '-q', '-m', 'tip');
+  const tip = g('rev-parse', 'HEAD');
+  g('checkout', '-q', '-b', 'pr', base);
+  write(o.head);
+  g('commit', '-q', '-m', 'pr');
+  const first = g('rev-parse', 'HEAD');
+  assert.deepEqual(weakening.weakeningOf(dir, base, first, changeFiles(dir, base, first), undefined, tip), [], 'the conflicting head: left to the conflict paths');
+  assert.throws(() => g('merge', '-q', '--no-edit', tip), 'the merge-in conflicts');
+  write(o.resolution);
+  g('commit', '-q', '--no-edit');
+  const head = g('rev-parse', 'HEAD');
+  return kinds(weakening.weakeningOf(dir, base, head, changeFiles(dir, base, head), undefined, tip));
+}
+
+test("the head that resolves a conflict with the tip is measured: taking out an assertion the tip added there waits", () => {
+  const kept = asserts(['assert.ok(true);']);
+  const grown = asserts(['assert.ok(true);', 'assert.equal(1, 1);']);
+  const o = { base: { ...v(1), [T]: kept }, tip: { ...v(3), [T]: grown }, head: v(2) };
+  assert.deepEqual(resolvedReasons({ ...o, resolution: { ...v(4), [T]: kept } }), [ASSERTION]);
+  // The control: the same resolution keeping the tip's assertion merges.
+  assert.deepEqual(resolvedReasons({ ...o, resolution: v(4) }), []);
 });

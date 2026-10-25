@@ -19,7 +19,7 @@
 // Other pure additions pass: an added assertion, test, rule or guard line never waits.
 //
 // Every change is measured twice (weakeningOf, #1069): from its base, and as what merging it would change on the
-// default branch's tip.
+// default branch's tip (a merge that conflicts there is left to the conflict paths; its resolution is measured).
 //
 // Bounded and fail closed: one pass over each changed line of the files it checks, with substrings and linear
 // patterns only (no quantifier); over MAX_CHANGED_CHARS of such lines, a diff that doesn't match its line counts (cut short), a file that
@@ -1103,9 +1103,6 @@ function findings(i: WeakeningInput): Found | string {
   return found;
 }
 
-/** The reason for a PR whose merge into the default branch's tip conflicts: what it would change there can't be read. */
-export const TIP_MERGE_CONFLICTS = `${WEAKENING_REASON}merging it into the default branch's current tip conflicts, so what it would change there can't be checked`;
-
 /**
  * weakeningReasons for the change base..head of the repo at `cwd`, with `files` from changeFiles. When the change
  * can't be read, one reason says so: the change waits (fail closed).
@@ -1116,7 +1113,8 @@ export const TIP_MERGE_CONFLICTS = `${WEAKENING_REASON}merging it into the defau
  * carries a stale PR's change onto a table or lint test the tip has since renamed or moved and marked (#1056's round
  * 16 review). So the change merging the PR makes to the default branch is measured too, for every PR: from the tip to
  * the tree of the tip merged with the head (git merge-tree, no worktree), and a reason from either measurement holds
- * it. That merge conflicting waits too (TIP_MERGE_CONFLICTS).
+ * it. A merge that conflicts adds no reason: it can't land as it is, the conflict paths take it (the conflict fix,
+ * or the combined check's capped wait), and the head that resolves it is measured again, both ways.
  */
 export function weakeningOf(cwd: string, base: string, head: string, files: ChangeFile[], scope: LockScope | undefined, tip: string | null): string[] {
   try {
@@ -1127,7 +1125,7 @@ export function weakeningOf(cwd: string, base: string, head: string, files: Chan
     const meet = mergeBaseOf(cwd, tip, head);
     const own = measured(cwd, base, head, files, scope, { tip, meet });
     const merged = mergedTree(cwd, tip, head);
-    if (merged === null) return [...weakeningReasons(own), TIP_MERGE_CONFLICTS];
+    if (merged === null) return weakeningReasons(own);
     return weakeningReasons(own, measured(cwd, tip, merged, changeFiles(cwd, tip, merged), scope));
   } catch (e) {
     return [`${WEAKENING_REASON}the check for a removed or weakened test, lint or guard could not run (${escapedPath(String((e as Error).message ?? e).slice(0, 200))})`];
