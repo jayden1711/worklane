@@ -4,7 +4,8 @@
 // that route closed. Code moved, edited, re-wrapped or reordered out of git's own pairing (M3, M4b, M5b, R3s) read as
 // added code again at round 13, so an untested change merged. #1014 pairs moved code only to take measure away (a file
 // counts only where it counts both with and without the pairing): each holds, with M4b1, M5c and A6 (round 13's last
-// reviews), and the must-holds above still hold.
+// reviews), and the must-holds above still hold. #1014's reviews add P1-P5 and E1-E7 (where a moved statement starts
+// and ends, and its name), and FH1, FH2: a unit paired by name it can't place reads as added code, never holds the PR.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
@@ -35,9 +36,10 @@ function commit(dir: string, files: Record<string, string>) {
 }
 
 /** A ready PR over the example project with a real remote at its base, decided after its coverage run. */
-async function decided(before: Record<string, string>, after: Record<string, string>) {
+async function decided(before: Record<string, string>, after: Record<string, string>, rm: string[] = []) {
   const dir = exampleProject().dir;
   const base = commit(dir, { 'dist/.keep': '', ...before });
+  for (const p of rm) git(dir, 'rm', '-q', p);
   const head = commit(dir, after);
   const bare = join(dir, '..', 'origin.git');
   git(join(dir, '..'), 'init', '-q', '--bare', bare);
@@ -261,17 +263,37 @@ test('control: P1: the same with a multiplication holds', async () => {
   assert.deepEqual([d.auto, d.reasons], hold('src/c.js, src/s.js'));
 });
 
-// ---- P2: a moved unit that can't be placed holds the PR, never its file measured as added code
+// ---- P2, FH1, FH2: a unit paired by name that can't be placed is measured as added code; the others keep their pairing
 
 const lines = (n: number, line: (i: number) => string) => Array.from({ length: n }, (_, i) => line(i)).join('');
 const BIG_G = `export function g(u) {\n${lines(297, (i) => `  const v${i} = u.a${i} + ${i};\n`)}  return u;\n}\n`;
 const P_H = 'export function h(x) {\n  return x * 2;\n}\n';
-const UNPLACED = "design: vacuity: its coverage run failed: a change too large to align character by character, so where it changed code can't be told";
 
 test('must hold: P2: a 300-line g moved and rewritten untested into 280 lines, beside a tested unchanged h', async () => {
   const rewritten = `export function g(u) {\n${lines(277, (i) => `  const w${i} = u.b${i} * ${i};\n`)}  return u;\n}\n`;
   const d = await decided({ 'src/a.js': M_A + BIG_G + P_H }, { 'src/a.js': M_A, 'src/c.js': rewritten + P_H, 'test/x.test.js': calls('c.js', 'h', 'h(2)', '4') });
-  assert.deepEqual([d.auto, d.reasons], [false, [UNPLACED]]);
+  assert.deepEqual([d.auto, d.reasons], hold('src/a.js, src/c.js'));
+});
+
+test('must hold: P2x: a tested 300-line g moved re-wrapped two statements a line, a comment on each (too large to align, its code the same), an untested arm edited in h', async () => {
+  const body = lines(297, (i) => `  const v${i} = u.a${i} + ${i};${i % 2 ? ` // pair ${i}\n` : ' '}`);
+  const d = await decided({ 'src/a.js': M_A + BIG_G + MH }, { 'src/a.js': M_A + MH.replace("'all'", "'everything'"), 'src/c.js': `export function g(u) {\n${body}\n  return u;\n}\n`, 'test/x.test.js': calls('c.js', 'g', 'g({}).a0', 'undefined') });
+  assert.deepEqual([d.auto, d.reasons], hold('src/a.js, src/c.js'));
+});
+
+const RUN = (swap: (i: number) => string | null) => `export function run(u) {\n${lines(148, (i) => swap(i) ?? `  u.a${i} = u.b${i} + ${i};\n`)}  return u;\n}\n`;
+
+test('must merge: FH1: a tested 150-line run moved to a new file, two of its lines replaced by unrelated ones', async () => {
+  const head = RUN((i) => (i === 5 ? '  globalThis.flag = [1, 2, 3].length;\n' : i === 140 ? "  u.z = typeof u === 'object';\n" : null));
+  const d = await decided({ 'src/a.js': M_A + RUN(() => null) }, { 'src/a.js': M_A, 'src/c.js': head, 'test/x.test.js': calls('c.js', 'run', 'run({}).z', 'true') });
+  assert.deepEqual([d.auto, d.reasons], [true, []]);
+});
+
+test('must merge: FH2: a different same-named 120-line main added and tested, the old one deleted with its file', async () => {
+  const old = `export function main(u) {\n${lines(118, (i) => `  const v${i} = u.a${i} + ${i};\n`)}  return u;\n}\n`;
+  const next = `export function main(u) {\n  let total = 0;\n${lines(96, (i) => `  total += Math.max(u, ${i}) % 7;\n`)}  return total;\n}\n`;
+  const d = await decided({ 'src/old.js': old, 'src/keep.js': A6_K }, { 'src/new.js': next, 'test/x.test.js': calls('new.js', 'main', 'main(1)', '284') }, ['src/old.js']);
+  assert.deepEqual([d.auto, d.reasons], [true, []]);
 });
 
 test('control: P2: the same move with a small untested rewrite of g holds as ran none', async () => {
@@ -302,4 +324,107 @@ test('must hold: P5: R3 through dist/ with an identity map', async () => {
   const c = "export function g(u) {\n  return 'ok';\n}\n" + P_H;
   const d = await decided({ 'src/a.js': M_BASE }, { 'src/a.js': M_A, 'src/c.js': c, 'dist/c.js': c, 'dist/c.js.map': map('c.js', '../src/c.js', 6), 'test/x.test.js': fromDist('c.js', 'h', 'h(2)', '4') });
   assert.deepEqual([d.auto, d.reasons], hold('src/a.js, src/c.js'));
+});
+
+// ---- E1-E6 (#1014's third reviews): M5c's move, with a unit running to its statement's end, a `}` git keeps between
+// a unit and the code written in its place, CommonJS and TypeScript names, and a `/` the first reading misreads
+
+const S_T = S.replace(S_G, '');
+const IMP = "import { combine, alpha, beta } from './s.js';\n";
+const editH = (s: string) => s.replace("'all'", "'everything'");
+const moveG = async (from: string, to: string) => {
+  const d = await decided({ 'src/s.js': from + S_T }, { 'src/s.js': editH(S_T), 'src/c.js': IMP + to, 'test/x.test.js': calls('c.js', 'g', 'g({})', '3') });
+  return [d.auto, d.reasons];
+};
+
+test('must hold: E1: an arrow g moved with its body wrapped onto the next line', async () => {
+  assert.deepEqual(await moveG('export const g = (u) => combine(alpha(u), beta(u));\n', 'export const g = (u) =>\n  combine(alpha(u), beta(u));\n'), hold('src/c.js, src/s.js'));
+});
+
+test('control: E1: the same arrow moved unwrapped holds', async () => {
+  const g = 'export const g = (u) => combine(alpha(u), beta(u));\n';
+  assert.deepEqual(await moveG(g, g), hold('src/c.js, src/s.js'));
+});
+
+test('must hold: E1b: an arrow g whose sum goes on past a line-ending `+`, moved and wrapped again', async () => {
+  assert.deepEqual(await moveG('export const g = (u) => alpha(u) +\n  beta(u);\n', 'export const g = (u) =>\n  alpha(u) +\n  beta(u);\n'), hold('src/c.js, src/s.js'));
+});
+
+test('must hold: E1f: a function expression g moved with it wrapped onto the line after `=`', async () => {
+  const f = (gap: string) => `export const g =${gap}function (u) {\n  return combine(alpha(u), beta(u));\n};\n`;
+  assert.deepEqual(await moveG(f(' '), f('\n  ')), hold('src/c.js, src/s.js'));
+});
+
+test('must hold: E1s: M5c into a file written without semicolons (g starts after an import with none)', async () => {
+  const d = await decided({ 'src/s.js': S }, { 'src/s.js': editH(S_T), 'src/c.js': IMP.replace(';', '') + S_G, 'test/x.test.js': calls('c.js', 'g', 'g({})', '3') });
+  assert.deepEqual([d.auto, d.reasons], hold('src/c.js, src/s.js'));
+});
+
+const S_Q = 'export function q(u) {\n  return u.admin ? beta(u) : alpha(u);\n}\n';
+
+test('must hold: E2: g moved to a new file, an untested q written where it was (git keeps their shared `}`)', async () => {
+  const d = await decided({ 'src/s.js': S }, { 'src/s.js': S_Q + S_T, 'src/c.js': IMP + S_G, 'test/x.test.js': calls('c.js', 'g', 'g({})', '3') });
+  assert.deepEqual([d.auto, d.reasons], hold('src/c.js, src/s.js'));
+});
+
+test('control: E2: the same with q added after h holds', async () => {
+  const d = await decided({ 'src/s.js': S }, { 'src/s.js': S_T + S_Q, 'src/c.js': IMP + S_G, 'test/x.test.js': calls('c.js', 'g', 'g({})', '3') });
+  assert.deepEqual([d.auto, d.reasons], hold('src/c.js, src/s.js'));
+});
+
+test('must hold: E2d: g moved into an existing file over a function it removes (their shared `}`), an untested arm edited in h', async () => {
+  const old = 'export function old(u) {\n  return 0;\n}\n';
+  const d = await decided({ 'src/s.js': S, 'src/b.js': IMP + old }, { 'src/s.js': editH(S_T), 'src/b.js': IMP + S_G, 'test/x.test.js': calls('b.js', 'g', 'g({})', '3') });
+  assert.deepEqual([d.auto, d.reasons], hold('src/b.js, src/s.js'));
+});
+
+const ARMS = G.replace(G_A, '').replace(/export function g[^}]*\}\n/, '');
+const G_EDIT = (g: string) => g.replace('? grant(u)', '? grantAll(u)');
+const cjs = (head: string) => `${head} = function (u) {\n  return u.admin ? grant(u) : deny(u);\n};\n${ARMS.replaceAll('export function', 'function')}`;
+
+test('must hold: E3: M3 in CommonJS, `exports.g =` moved with its untaken arm edited', async () => {
+  const d = await decided({ 'src/a.cjs': cjs('exports.g') }, { 'src/a.cjs': '', 'src/c.cjs': G_EDIT(cjs('exports.g')), 'test/x.test.js': calls('c.cjs', 'g', 'g({ admin: false })', "'none'") });
+  assert.deepEqual([d.auto, d.reasons], hold('src/a.cjs, src/c.cjs'));
+});
+
+test('must hold: E3m: M3 in CommonJS, `module.exports.g =` moved with its untaken arm edited', async () => {
+  const d = await decided({ 'src/a.cjs': cjs('module.exports.g') }, { 'src/a.cjs': '', 'src/c.cjs': G_EDIT(cjs('module.exports.g')), 'test/x.test.js': calls('c.cjs', 'g', 'g({ admin: false })', "'none'") });
+  assert.deepEqual([d.auto, d.reasons], hold('src/a.cjs, src/c.cjs'));
+});
+
+test('must hold: E3a: M3 in TypeScript, an `export abstract class` moved with its untaken arm edited', async () => {
+  const b = 'export abstract class B {\n  static g(u: { admin: boolean }) {\n    return u.admin ? grant(u) : deny(u);\n  }\n}\n';
+  const d = await decided({ 'src/a.ts': G_A + b + ARMS }, { 'src/a.ts': G_A, 'src/c.ts': G_EDIT(b + ARMS), 'test/x.test.js': calls('c.ts', 'B', 'B.g({ admin: false })', "'none'") });
+  assert.deepEqual([d.auto, d.reasons], hold('src/a.ts, src/c.ts'));
+});
+
+test('must hold: E3n: M3 in TypeScript through dist/, an `export namespace` moved with its untaken branch edited', async () => {
+  const ns = (v: string) => `export namespace N {\n  export function g(u) {\n    if (u.admin) {\n      return '${v}';\n    }\n    return 'none';\n  }\n}\n`;
+  const js = "export var N = {};\nN.g = function g(u) {\n    if (u.admin) {\n      return 'everything';\n    }\n    return 'none';\n  };\nvoid 0;\n";
+  const d = await decided({ 'src/a.ts': G_A + ns('all') }, { 'src/a.ts': G_A, 'src/c.ts': ns('everything'), 'dist/c.js': js, 'dist/c.js.map': map('c.js', '../src/c.ts', 8), 'test/x.test.js': fromDist('c.js', 'N', 'N.g({})', "'none'") });
+  assert.deepEqual([d.auto, d.reasons], hold('src/a.ts, src/c.ts'));
+});
+
+test('must hold: E4 (BP1): M5c with a regular expression holding `(` right after an `if` condition above g in the file g moved to', async () => {
+  assert.deepEqual(await moveG(S_G, 'export function paren(s) {\n  if (s) /\\(/.test(s);\n  return s;\n}\n' + S_G), hold('src/c.js, src/s.js'));
+});
+
+test('must hold: E4b: E4 with a division inside a call in the same function (no reading of codeLines balances it)', async () => {
+  assert.deepEqual(await moveG(S_G, 'export function paren(s) {\n  if (s) /\\(/.test(s);\n  return Math.round(s / 2);\n}\n' + S_G), hold('src/c.js, src/s.js'));
+});
+
+test('must hold: E5: M5c with a division after a postfix `++` inside a call above g in the file g moved to', async () => {
+  assert.deepEqual(await moveG(S_G, 'export function mid(n) {\n  let i = n;\n  return Math.floor(i++ / 2);\n}\n' + S_G), hold('src/c.js, src/s.js'));
+});
+
+test('must hold: E7: M5c with a regular expression after `export default` (a `/` the statement reading takes for a division) above g in the file g moved to', async () => {
+  assert.deepEqual(await moveG(S_G, 'export default /\\)/;\n' + S_G), hold('src/c.js, src/s.js'));
+});
+
+test('control: E6: M5c with a template holding a division, an object and a `(` in its text above g holds', async () => {
+  assert.deepEqual(await moveG(S_G, 'export function fmt(a) {\n  return `${Math.round(a / 2)} of ${ {k: 1}.k } (`;\n}\n' + S_G), hold('src/c.js, src/s.js'));
+});
+
+test('limit: a file whose brackets no reading balances pairs nothing: M5c with a division right after a function expression inside a call above g', { todo: 'neither the statement reading nor the every-`/`-a-regex reading reads this `/` as a division, so no line after it starts a statement, and g reads as added code, as before #1014' }, async () => {
+  assert.deepEqual(await moveG(S_G, 'export const n = Math.round(function () { return 4; } / 2);\n' + S_G), hold('src/c.js, src/s.js'));
 });
