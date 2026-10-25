@@ -43,6 +43,23 @@
       "change": [{ "write": "test/new-rules.test.ts", "text": "import { test } from 'node:test';\n// emptied\n" }],
       "flow": { "tipMoved": { "test/new-rules.test.ts": "import { test } from 'node:test';\n// check-table: never-shrink\nexport const CHECKS = [\n  'x',\n  'y',\n];\ntest('t', () => {});\n" }, "tipMergedIn": true },
       "expect": { "decision": "waits", "reasons": ["design: may weaken a check: removes or renames a check's or guard's table (test/new-rules.test.ts"], "scopes": ["engine"] }
+    },
+    {
+      "id": "flow-default-branch-tip-only-table-shrunk-after-merge",
+      "attack": "a check table, marked never-shrink, made on the default branch after this PR's base in a new file; the PR merges the default branch in, then takes an entry out of the table",
+      "source": "merge-policy-weakening.ts weakeningReasons (#869: a table only the tip has is read at the tip, against the head); #1056 round 4 review F; docs/guardrails.md Hold kinds: design (may weaken a check)",
+      "change": [{ "write": "test/new-rules.test.ts", "text": "import { test } from 'node:test';\n// check-table: never-shrink\nexport const CHECKS = [\n  'x',\n];\ntest('t', () => {});\n" }],
+      "flow": { "tipMoved": { "test/new-rules.test.ts": "import { test } from 'node:test';\n// check-table: never-shrink\nexport const CHECKS = [\n  'x',\n  'y',\n];\ntest('t', () => {});\n" }, "tipMergedIn": true },
+      "expect": { "decision": "waits", "reasons": ["design: may weaken a check: removes or changes an entry in a check's rules or a guard's list (test/new-rules.test.ts"], "scopes": ["engine"] }
+    },
+    {
+      "id": "flow-default-branch-mark-kind-changed-after-merge",
+      "attack": "a check table marked never-shrink on the default branch after this PR's base; the PR merges the default branch in, then changes the mark to never-grow and adds a line elsewhere in the file",
+      "source": "merge-policy-weakening.ts weakeningReasons (#869: a tip mark the head no longer has with the same kind is taken out); #1056 round 4 review A; docs/guardrails.md Hold kinds: design (may weaken a check)",
+      "base": { "test/rules.test.ts": "import { test } from 'node:test';\nexport const CHECKS = [\n  'a',\n  'b',\n  'c',\n];\ntest('t', () => {});\n" },
+      "change": [{ "write": "test/rules.test.ts", "text": "import { test } from 'node:test';\n// check-table: never-grow\nexport const CHECKS = [\n  'a',\n  'b',\n  'c',\n];\ntest('t', () => {});\n// a note\n" }],
+      "flow": { "tipMoved": { "test/rules.test.ts": "import { test } from 'node:test';\n// check-table: never-shrink\nexport const CHECKS = [\n  'a',\n  'b',\n  'c',\n];\ntest('t', () => {});\n" }, "tipMergedIn": true },
+      "expect": { "decision": "waits", "reasons": ["design: may weaken a check: removes or changes the mark that registers a check, a check-table or lint-test line (test/rules.test.ts"], "scopes": ["engine"] }
     }
   ]
 }

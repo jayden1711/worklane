@@ -11,6 +11,8 @@
     { "gap": "the evaluator's prompt fences the issue body and the worker's claims with a per-run nonce they can't close", "closes": "#707 slice 2 (no PR yet)" },
     { "gap": "a token-shaped string in a diff or a PR body is refused by the push gate in the push-gate job", "closes": "#707 slice 5 (no PR yet)" },
     { "gap": "a PR whose branch merged in a check-table mark from the default branch's tip waits when its head no longer has the mark, also when the file's text at its head is its text at the base", "closes": "#1069" },
-    { "gap": "a PR whose branch merged in a lint-test mark from the default branch's tip waits when its head no longer has the mark, also when the file's text at its head is its text at the base", "closes": "#1069" }
+    { "gap": "a PR whose branch merged in a lint-test mark from the default branch's tip waits when its head no longer has the mark, also when the file's text at its head is its text at the base", "closes": "#1069" },
+    { "gap": "a PR whose branch merged in a file only the default branch's tip has, holding a marked check table, waits when its head no longer has that file (deleted after the merge)", "closes": "#1069" },
+    { "gap": "a PR whose branch merged in a lint test only the default branch's tip has waits when its head moves that file to another path without its mark", "closes": "#1069" }
   ]
 }
