@@ -1490,11 +1490,15 @@ jobs:
             (umask 077; printf 'authorization: Bearer %s\n' "$(sudo cat "$seam/state-$mode/dashboard-token")" > "$F/seam-auth")
             curl -sS -o "$F/seam-$mode.json" -w '%{http_code}' -H @"$F/seam-auth" "http://127.0.0.1:$port/api/first-run/discord/channels"
           }
-          # 1. No stand-in: the engine's own CLI ran (its own line for a token it can't read), and no decoy did.
+          # 1. No stand-in: the engine's own CLI ran (its own line for a token it can't read, in the unit's journal; the
+          # answer only says the listing failed, #1064), and no decoy did. test/discord-seam-ci.test.ts runs these checks.
           mode=engine port=4791; seam_unit --unit=ci-discord-seam-engine
           code="$(seam_get)"; cat "$F/seam-engine.json"; echo
+          for _ in $(seq 1 10); do sudo journalctl --no-pager -o cat -u ci-discord-seam-engine.service > "$F/seam-engine.log"; grep -q 'bot token file' "$F/seam-engine.log" && break; sleep 1; done
+          cat "$F/seam-engine.log"
           [ "$code" = 502 ]
-          jq -e '.error | test("^instance ci: can.t read its bot token file /var/tmp/ci-discord-seam/unreadable-token \\(EACCES\\)")' "$F/seam-engine.json"
+          jq -e --arg e "the bot's channel listing failed; the detail is in the dashboard's log on the machine" '. == {error: $e}' "$F/seam-engine.json"
+          grep -qF "GET /api/first-run/discord/channels: instance ci: can't read its bot token file $seam/unreadable-token (EACCES)" "$F/seam-engine.log"
           # 2. The stand-in, set in code: it answered, in the dashboard's own process, as wl-ci; still no decoy ran.
           mode=stand-in port=4792; seam_unit --unit=ci-discord-seam-stand-in
           code="$(seam_get)"; cat "$F/seam-stand-in.json"; echo
@@ -1511,7 +1515,7 @@ jobs:
           # Nothing was written by looking: no intake.yaml, and the instance's log has no ask.
           sudo test ! -e "$h/.local/state/worklane/instances/ci/intake.yaml"
           # Never echoed: not in any output, the fake's log, a response, or any unit's journal.
-          if grep -qFf "$F/discord-token" "$F/discord.out" "$F/discord2.out" "$F/channels.json" "$F/channels-agent.err" "$F/discord-requests.log" "$F/fake-discord.log" "$F/discord-step.json" "$F/seam-engine.json" "$F/seam-stand-in.json" "$F/seam-option.out" || sudo journalctl --no-pager | grep -qFf "$F/discord-token"; then echo "the token was echoed" >&2; exit 1; fi
+          if grep -qFf "$F/discord-token" "$F/discord.out" "$F/discord2.out" "$F/channels.json" "$F/channels-agent.err" "$F/discord-requests.log" "$F/fake-discord.log" "$F/discord-step.json" "$F/seam-engine.json" "$F/seam-engine.log" "$F/seam-stand-in.json" "$F/seam-option.out" || sudo journalctl --no-pager | grep -qFf "$F/discord-token"; then echo "the token was echoed" >&2; exit 1; fi
       - name: "claude-account: a stand-in claude, and a second instance (beta, with an eval user) whose coordinator finishes its run on SIGTERM"
         run: |
           # claude auth status as each user: signed in when that user's own login holds a setup token (scripts/ci/).
