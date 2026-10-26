@@ -755,6 +755,20 @@ function looseCommits(loose: SimpleCommand[]): { commits: number; indirect: bool
   return { commits, indirect };
 }
 
+/**
+ * Whether a word, read as a command line, may run a git commit: a commit, git with no subcommand, or a git name that
+ * isn't one of git's commands (an alias). A word with no space in it is a name, never a command line.
+ */
+function mayCommit(text: string): boolean {
+  if (!/\s/.test(text)) return false;
+  const parts = splitCommands(text);
+  return looseCommits(parts).indirect || parts.some((x) => {
+    const g = looseGit(x);
+    return g !== null && (g.sub === undefined || g.sub === 'commit' || !GIT_BUILTINS.has(g.sub));
+  });
+}
+const UNREAD_STRING = 'a git commit in a command string another program may run';
+
 // WHY: programs that never run their arguments as a command, so a word `git` among them is only a word.
 // WHY: the general matcher keeps a shell keyword as a command's first word; the command is the word after it.
 const KEYWORDS = new Set(['if', 'then', 'else', 'elif', 'fi', 'do', 'done', 'while', 'until', '!', 'time', '{', '}', 'case', 'esac', 'for', 'select', 'in', 'function', 'coproc']);
@@ -782,6 +796,7 @@ function unseenInUnread(command: string, raw: SimpleCommand[]): string | null {
       const sub = argv.slice(at + 1).find((t) => !t.startsWith('-'));
       if (sub === undefined || sub === 'commit' || NONLITERAL.test(sub)) return 'git run through another program';
     }
+    if (!NON_EXEC.has(basename(run)) && argv.slice(1).some(mayCommit)) return UNREAD_STRING;
   }
   const sh = String.raw`(?:\S*/)?(?:ba|z|da|k|mk|tc|c|fi|a)?sh|busybox`;
   if (new RegExp(String.raw`\|&?\s*(?:(?:sudo|env|exec|command|nohup|nice|time)\s+)*(?:${sh})(?![\w.-])`).test(command)) return 'text fed to a shell';
@@ -865,6 +880,12 @@ function unseenProgram(list: Cmd[][]): string | null {
           if (!run || !plain(run) || run.text.includes('{}')) return 'a program that builds a command from its input';
         }
       }
+    }
+    // INVARIANT (#983): a word that reads as a command line that may commit is refused, read or not: a program the
+    // guard doesn't know may run it as one (watch, su -c, git rebase -x). A message is only text.
+    if (!NON_EXEC.has(name.text)) {
+      const messages = new Set(messageWords(c));
+      if (c.words.slice(1).some((w) => !messages.has(w) && mayCommit(w.text))) return UNREAD_STRING;
     }
   }
   return null;

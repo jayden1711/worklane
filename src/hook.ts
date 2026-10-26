@@ -20,7 +20,7 @@ import { TaskFile } from './contract.js';
 import { HELD_OUT_ENV, HELD_OUT_GLOB } from './held-out-paths.js';
 import { DASHBOARD_KEY_GLOB } from './dashboard-key-paths.js';
 import { expSecretGlobs } from './experiments/paths.js';
-import { checkReadPrograms, scanCommit, scanIndex, scanPath } from './scan/secrets.js';
+import { checkReadPrograms, commitHookSkipped, scanCommit, scanIndex, scanPath } from './scan/secrets.js';
 import { commitPlan } from './guard/commit.js';
 import { checkWorkingFile, formatFindings } from './comment-policy.js';
 
@@ -176,6 +176,11 @@ function preToolUse(input: HookInput, env: NodeJS.ProcessEnv): HookOutput {
       }
     }
     for (const { top, scope } of plan?.scans ?? []) {
+      const skipped = commitHookSkipped(top);
+      if (skipped) {
+        log(root, 'secrets.jsonl', { source: 'commit', session: input.session_id, status: 'hook-skipped' });
+        return decide('deny', `${skipped}; the pre-commit hook is the secret scan of the index the commit records, and an agent never commits without it`);
+      }
       const r = scanCommit(top, scope);
       if (r.status !== 'clean') {
         log(root, 'secrets.jsonl', { source: 'commit', session: input.session_id, status: r.status });

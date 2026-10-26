@@ -18,9 +18,9 @@ import { githubRepoOf } from './managed-apps.js';
 import { stableNodePath, writeOwnerOnly } from './os/index.js';
 import { toolBin } from './tool-path.js';
 import { installPrePushHook } from './push-guard.js';
+import { GIT_HOOK_MARKER } from './scan/secrets.js';
 
-export { HOOK_MARKER };
-export const GIT_HOOK_MARKER = `# managed by ${BRAND.cli}`;
+export { HOOK_MARKER, GIT_HOOK_MARKER };
 
 /** The engine's packaged templates directory. */
 export function templatesDir(): string {

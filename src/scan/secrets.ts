@@ -2,9 +2,10 @@
 // A scanner that can't run is reported as unavailable, never as "clean".
 import { spawn, spawnSync } from '../os/child-process.js';
 import { createHash } from 'node:crypto';
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, writeFileSync } from 'node:fs';
+import { accessSync, constants, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { delimiter, dirname, isAbsolute, join, resolve as resolvePath } from 'node:path';
+import { BRAND } from '../brand.js';
 import { ignoredNames, presentNames, rawChanges, untrackedNames } from '../coordinator/change-files.js';
 import { notRootsProgram } from '../os/index.js';
 import { findTool } from '../tool-path.js';
@@ -101,6 +102,30 @@ export function scanCommit(top: string, scope: CommitScanScope, binary = findToo
  */
 export function scanIndex(top: string, binary = findTool('gitleaks')): ScanResult {
   return scanComparisons(top, binary, () => [['the index being committed', () => stagedContent(top)]]);
+}
+
+/** The line that marks the engine's pre-commit hook (src/install.ts installGitHook writes it). */
+export const GIT_HOOK_MARKER = `# managed by ${BRAND.cli}`;
+
+/**
+ * Why git would make a commit in checkout `top` without the engine's pre-commit hook (scanIndex, #983); null when it
+ * runs that hook, or when the checkout's hooks dir holds no engine hook. INVARIANT (#983): git itself says which hook
+ * file it runs (`rev-parse --git-path`, which reads core.hooksPath from all the config git reads, includes too), so no
+ * config route to another hooks dir needs modelling; that file must be the engine's, and executable.
+ */
+export function commitHookSkipped(top: string): string | null {
+  const r = spawnSync('git', ['rev-parse', '--path-format=absolute', '--git-common-dir', '--git-path', 'hooks/pre-commit'], { cwd: top, encoding: 'utf8', timeout: 5_000 });
+  const [common, runs] = r.error || r.status !== 0 ? [] : String(r.stdout).split('\n');
+  if (!common || !runs) return "git can't say which pre-commit hook it runs here";
+  const engine = join(common, 'hooks', 'pre-commit');
+  if (!existsSync(engine) || !readFileSync(engine, 'utf8').includes(GIT_HOOK_MARKER)) return null;
+  if (!existsSync(runs) || realpathSync(runs) !== realpathSync(engine)) return `git would run ${runs} as the pre-commit hook, not the engine's (core.hooksPath, set in config or a file it includes, points elsewhere)`;
+  try {
+    accessSync(engine, constants.X_OK);
+  } catch {
+    return `the engine's pre-commit hook ${engine} isn't executable, so git would skip it`;
+  }
+  return null;
 }
 
 function scanComparisons(top: string, binary: string | null | undefined, comparisonsOf: () => [string, () => Compared[]][]): ScanResult {
