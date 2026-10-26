@@ -371,7 +371,7 @@ export interface WeakeningInput {
 /** Each kind of weakening, in the words a reason uses, in the order reasons are given. */
 const KINDS = {
   unreadable: "can't read a change to check it, so it may weaken a check",
-  'tip-conflict': "conflicts with the default branch's current tip in a test, lint, guard, allowlist or table file, so what merging it makes there can't be read",
+  'tip-conflict': "conflicts with the default branch's current tip on where a test, lint, guard, allowlist or table file goes or whether it stays, so what merging it makes there can't be read",
   'test-file-deleted': 'deletes a test file',
   'test-assertion': 'removes or changes a line with an assertion or a test on it',
   'test-lines': "removes or changes a line of a test's expected output or fixture",
@@ -1127,12 +1127,13 @@ function findings(i: WeakeningInput): Found {
  * carries a stale PR's change onto a table or lint test the tip has since renamed or moved and marked (#1056's round
  * 16 review). So the change merging the PR makes to the default branch is measured too, for every PR: from the tip to
  * the tree of the tip merged with the head (git merge-tree, no worktree), and a reason from either measurement holds
- * it. A merge that conflicts is measured the same way, from the tip to the tree git writes for it (its conflicted
- * files with both sides' lines in them, #1077). A conflict in a file the hold reads strictly waits too: GitHub's own
- * merge may complete there (a file added under a folder the tip renamed), and what it makes is never read. One
- * anywhere else is left to the conflict paths (the conflict fix, or the combined check's capped wait), and the head
- * that resolves it is measured again, both ways. When the second measurement can't run, its reason is given beside
- * the first one's.
+ * it. A merge that conflicts is measured the same way, from the tip to the tree git writes for it, its conflicted
+ * files left out (#1077): their markers aren't lines either side wrote. A conflict on where a file goes or whether it
+ * stays (not on its lines) in a file the hold reads strictly waits instead: GitHub's own merge may complete there (a
+ * file added under a folder the tip renamed), and what it makes is never read. A conflict on a file's lines, and any
+ * conflict elsewhere, is left to the conflict paths (GitHub, merging the same commits, reports it; the conflict fix,
+ * or the combined check's capped wait), and the head that resolves it is measured again, both ways. When the second
+ * measurement can't run, its reason is given beside the first one's.
  */
 export function weakeningOf(cwd: string, base: string, head: string, files: ChangeFile[], scope: LockScope | undefined, tip: string | null): string[] {
   const couldNotRun = (e: unknown) => `${WEAKENING_REASON}the check for a removed or weakened test, lint or guard could not run (${escapedPath(String((e as Error).message ?? e).slice(0, 200))})`;
@@ -1145,8 +1146,9 @@ export function weakeningOf(cwd: string, base: string, head: string, files: Chan
     const own = measured(cwd, base, head, files, scope, { tip, meet });
     let merged: WeakeningInput | { failed: unknown };
     try {
-      const { tree, conflicts } = mergedTree(cwd, tip, head);
-      merged = measured(cwd, tip, tree, changeFiles(cwd, tip, tree), scope, undefined, conflicts);
+      const { tree, conflicts, contentOnly } = mergedTree(cwd, tip, head);
+      const conflicted = new Set(conflicts);
+      merged = measured(cwd, tip, tree, changeFiles(cwd, tip, tree).filter((f) => !conflicted.has(f.path)), scope, undefined, conflicts.filter((p) => !contentOnly.has(p)));
     } catch (e) {
       merged = { failed: e };
     }

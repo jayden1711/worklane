@@ -1,7 +1,8 @@
-// #1077: a PR whose merge into the default branch's tip conflicts. The tree git still writes for it (conflict markers
-// in the conflicted files, both sides' lines kept) is measured like a clean one, and a conflict in a file the hold
-// reads strictly (a test, lint, guard, allowlist or table file) waits: GitHub's own merge may complete where git
-// conflicts, and what it makes there is never read. The second measurement over its bound, or failing, keeps the
+// #1077: a PR whose merge into the default branch's tip conflicts. The tree git still writes for it is measured like
+// a clean one, its conflicted files left out (their markers aren't lines either side wrote). A conflict on where a file
+// the hold reads strictly (a test, lint, guard, allowlist or table file) goes, or whether it stays, waits: GitHub's
+// own merge may complete where git conflicts, and what it makes there is never read. A conflict on a file's lines is
+// left to the conflict paths, as on main. The second measurement over its bound, or failing, keeps the
 // first one's reasons beside its own. Real git in scratch repos; no repo file is read or edited.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -16,7 +17,7 @@ import { exampleProject } from './helpers.js';
 const ASSERTION = 'removes or changes a line with an assertion or a test on it';
 const SHRUNK = "removes or changes an entry in a check's rules or a guard's list";
 const MARKER = 'adds a line with a skip, only or lint or type-check suppression mark';
-const CONFLICT = "conflicts with the default branch's current tip in a test, lint, guard, allowlist or table file, so what merging it makes there can't be read";
+const CONFLICT = "conflicts with the default branch's current tip on where a test, lint, guard, allowlist or table file goes or whether it stays, so what merging it makes there can't be read";
 const UNREADABLE = "can't read a change to check it, so it may weaken a check";
 const COULD_NOT_RUN = `${weakening.WEAKENING_REASON}the check for a removed or weakened test, lint or guard could not run`;
 const kinds = (reasons: string[]) => reasons.map((r) => r.slice(weakening.WEAKENING_REASON.length).replace(/ \(.*$/s, ''));
@@ -67,19 +68,37 @@ test('a conflict only in app code is still left to the conflict paths: no reason
   assert.deepEqual(staleReasons({ base: { 'src/unit/a.js': 'export const a = 1;\n' }, tip: { 'src/unit': null, 'src/core/a.js': 'export const a = 1;\n' }, head: { 'src/unit/b.js': 'export const b = 1;\n' } }), []);
 });
 
-test("a conflict's own lines are read from the tree git writes for it: a suppression the tip took out, kept on the PR's side, waits", () => {
+test("a conflict on a file's lines is left to the conflict paths, its markers unread: a word each side adds to one line of a marked table", () => {
+  // R90d: read from the tip, the conflicted table's column-0 markers sat inside it ("line N is at its indent"), a
+  // second reason beside the conflict hold that kept the PR from waiting for GitHub's `dirty`.
+  const words = (w: string[]) => `// check-table: never-shrink\nexport const BAD_WORDS = [\n${w.map((x) => `  '${x}',\n`).join('')}];\n`;
+  assert.deepEqual(staleReasons({ base: { 'src/words.js': words(['alpha']) }, tip: { 'src/words.js': words(['alpha', 'main-word']) }, head: { 'src/words.js': words(['alpha', 'pr-word']) } }), []);
+  // A test file too, and a suppression the tip took out that the PR's side keeps: GitHub, merging the same commits,
+  // reports the conflict, and the head that resolves it is read again.
+  assert.deepEqual(staleReasons({ base: v(1), tip: { ...v(3), 'test/a.test.ts': asserts(['assert.ok(1);']) }, head: { ...v(2), 'test/a.test.ts': asserts(['assert.ok(2);']) } }), []);
   const base = { 'src/a.js': 'export function f() {\n  // eslint-disable-next-line no-console\n  console.log(0);\n}\n' };
   const tip = { 'src/a.js': 'export function f() {\n  return 1;\n}\n' };
   const head = { 'src/a.js': 'export function f() {\n  // eslint-disable-next-line no-console\n  console.log(2);\n}\n' };
-  assert.deepEqual(kinds(staleReasons({ base, tip, head })), [MARKER]);
+  assert.deepEqual(staleReasons({ base, tip, head }), []);
 });
 
-test(".gitattributes merge=union on a PR: where git reads the default branch's attributes the test file conflicts and waits; where it reads the PR's, both sides' lines are kept", () => {
+test("a conflict on another file's lines leaves the other holds: a suppression the PR adds in a clean file waits", () => {
+  const r = staleReasons({ base: v(1), tip: { ...v(3), 'src/b.js': 'export const b = 1;\n' }, head: { ...v(2), 'src/b.js': '// eslint-disable-next-line\nexport const b = 1;\n' } });
+  assert.deepEqual(kinds(r), [MARKER]);
+});
+
+test('a directory the tip split in two, with a file the PR adds there: no conflicted path, read and passed as on main', () => {
+  // R90b F3: merge-tree exits 1 naming only the directory; this used to be "could not run".
+  const r = staleReasons({ base: { 'lib/a.js': 'export const a = 1;\n', 'lib/b.js': 'export const b = 1;\n' }, tip: { 'lib/a.js': null, 'lib/b.js': null, 'one/a.js': 'export const a = 1;\n', 'two/b.js': 'export const b = 1;\n' }, head: { 'lib/c.js': 'export const c = 1;\n' } });
+  assert.deepEqual(r, []);
+});
+
+test(".gitattributes merge=union on a PR: where git reads the default branch's attributes the test file conflicts on its lines (left to the conflict paths); where it reads the PR's, both sides' lines are kept", () => {
   // The coordinator's checkout is the default branch (inferred), so git merges by its attributes, not the PR's.
   const base = { 'test/a.test.ts': asserts(['// a step', 'assert.ok(true);']) };
   const tip = { 'test/a.test.ts': asserts(['assert.equal(1, 1);', 'assert.ok(true);']) };
   const head = { '.gitattributes': 'test/** merge=union\n', 'test/a.test.ts': asserts(['// a step, reworded', 'assert.ok(true);']) };
-  assert.deepEqual(kinds(staleReasons({ base, tip, head })), [CONFLICT]);
+  assert.deepEqual(staleReasons({ base, tip, head }), []);
   // Read with the PR's union: the tip's assertion is kept beside the PR's line, nothing is taken out.
   assert.deepEqual(staleReasons({ base, tip, head, checkout: 'head' }), []);
 });
@@ -178,9 +197,10 @@ test("mergedTree: the tip's side first in a conflict, every conflicted path, and
   const { dir, tip, head, g } = conflicting();
   const m = mergedTree(dir, tip, head);
   assert.deepEqual(m.conflicts, ['web/x.js']);
+  assert.deepEqual([...m.contentOnly], ['web/x.js']);
   assert.equal(g('cat-file', 'blob', `${m.tree}:web/x.js`), `<<<<<<< ${tip}\nexport const x = 3;\n=======\nexport const x = 2;\n>>>>>>> ${head}`);
   const clean = mergedTree(dir, tip, tip);
-  assert.deepEqual(clean, { tree: g('rev-parse', `${tip}^{tree}`), conflicts: [] });
+  assert.deepEqual(clean, { tree: g('rev-parse', `${tip}^{tree}`), conflicts: [], contentOnly: new Set() });
 });
 
 test('mergedTree: refuses a revision that reads as an option, and output that is not a tree and its conflicts', () => {
@@ -191,7 +211,16 @@ test('mergedTree: refuses a revision that reads as an option, and output that is
   for (const [out, code] of [['', 0], ['not a tree\0', 0], [`${tree}\0web/x.js\0`, 0], [`${tree}\0`, 1], ['\0web/x.js\0', 1], [`${tree}\0web/x.js\0`, 2], [`${tree}\0`, 2], [`${tree}\0`, 128]] as const) {
     assert.throws(() => withMergeTreeShim(out, code, () => mergedTree(dir, tip, head)), /merge-tree .* failed/, JSON.stringify([out, code]));
   }
-  assert.deepEqual(withMergeTreeShim(`${tree}\0`, 0, () => mergedTree(dir, tip, head)), { tree, conflicts: [] });
+  assert.deepEqual(withMergeTreeShim(`${tree}\0`, 0, () => mergedTree(dir, tip, head)), { tree, conflicts: [], contentOnly: new Set() });
+  // Messages: a conflict only on a directory names no path; a path with a conflict of another kind beside its lines'
+  // isn't content-only, nor is one no message names; a message git didn't write that way is refused.
+  const msg = (paths: string[], type: string) => `${paths.length}\0${paths.map((p) => `${p}\0`).join('')}${type}\0${type}: text\0`;
+  assert.deepEqual(withMergeTreeShim(`${tree}\0\0${msg(['lib'], 'CONFLICT (directory rename unclear split)')}`, 1, () => mergedTree(dir, tip, head)), { tree, conflicts: [], contentOnly: new Set() });
+  assert.deepEqual(withMergeTreeShim(`${tree}\0a.js\0b.js\0c.js\0\0${msg(['a.js'], 'Auto-merging')}${msg(['a.js'], 'CONFLICT (contents)')}${msg(['b.js'], 'CONFLICT (contents)')}${msg(['b.js', 'x/b.js'], 'CONFLICT (rename/delete)')}`, 1, () => mergedTree(dir, tip, head)), { tree, conflicts: ['a.js', 'b.js', 'c.js'], contentOnly: new Set(['a.js']) });
+  for (const out of [`${tree}\0\0${msg(['lib'], 'Auto-merging')}`, `${tree}\0a.js\0\0x\0a.js\0CONFLICT (contents)\0t\0`, `${tree}\0a.js\0\x001\0a.js\0CONFLICT (contents)\0`]) {
+    assert.throws(() => withMergeTreeShim(out, 1, () => mergedTree(dir, tip, head)), /merge-tree .* failed/, JSON.stringify(out));
+  }
+  assert.throws(() => withMergeTreeShim(`${tree}\0\0${msg(['a.js'], 'CONFLICT (contents)')}`, 0, () => mergedTree(dir, tip, head)), /merge-tree .* failed/);
 });
 
 test("a git that can't write a merged tree (older than 2.38) makes every PR wait, its own change's reasons kept", () => {

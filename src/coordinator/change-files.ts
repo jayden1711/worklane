@@ -669,22 +669,39 @@ export function mergeBaseOf(cwd: string, a: string, b: string): string {
  * moved; only the merged objects are written to the object store), `a`'s side first in a conflict's markers,
  * and the paths the merge conflicts on (none: it merges cleanly). A merge that conflicts still writes a tree: its
  * conflicted files hold conflict markers and both sides' lines. Git merges by the attributes of the checkout at `cwd`.
+ * `contentOnly`: the conflicted paths whose every conflict is on their lines (`CONFLICT (contents)`: both sides
+ * changed the same lines, or both added the file), not on where a file goes or whether it stays. A merge that
+ * conflicts only on a directory (the tip split it in two) names no conflicted path.
  * For the merge decision's check for a weakened test, lint or guard: what merging a PR would make of the default
  * branch (#1069, #1077). Throws when git fails (an older git, no merge base, output it can't read).
  */
-export function mergedTree(cwd: string, a: string, b: string): { tree: string; conflicts: string[] } {
+export function mergedTree(cwd: string, a: string, b: string): { tree: string; conflicts: string[]; contentOnly: Set<string> } {
   if (a.startsWith('-') || b.startsWith('-')) throw new Error(`mergedTree: ${a} or ${b} is not a revision`);
-  // -z --name-only: the tree, then each conflicted path once, each ended by a NUL.
-  const r = spawnSync('git', withGit(['merge-tree', '--write-tree', '--no-messages', '--name-only', '-z', a, b]), { cwd, encoding: 'buffer', maxBuffer: MAX_BUFFER });
+  // -z --name-only: the tree, then each conflicted path once, then an empty field, then each message as its count of
+  // paths, those paths, its type and its text; each field ended by a NUL.
+  const r = spawnSync('git', withGit(['merge-tree', '--write-tree', '--name-only', '-z', a, b]), { cwd, encoding: 'buffer', maxBuffer: MAX_BUFFER });
   if (r.error) throw r.error;
+  const failed = () => new Error(`git merge-tree ${a.slice(0, 40)} ${b.slice(0, 40)} failed: ${((r.stderr ?? Buffer.alloc(0)).toString('utf8') || `exit ${r.status}`).trim().slice(0, 500)}`);
   const [tree, ...rest] = fields(r.stdout ?? Buffer.alloc(0));
   const id = tree?.toString('latin1') ?? '';
-  const conflicts = rest.filter((p) => p.length).map(nameOf);
-  // A conflict (exit 1) names what conflicts; a clean merge (exit 0) names nothing.
-  if ((r.status !== 0 && r.status !== 1) || !/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(id) || (r.status === 1) !== conflicts.length > 0) {
-    throw new Error(`git merge-tree ${a.slice(0, 40)} ${b.slice(0, 40)} failed: ${((r.stderr ?? Buffer.alloc(0)).toString('utf8') || `exit ${r.status}`).trim().slice(0, 500)}`);
+  const end = rest.findIndex((p) => !p.length);
+  const conflicts = (end === -1 ? rest : rest.slice(0, end)).map(nameOf);
+  const kinds = new Map<string, Set<string>>();
+  let conflicted = false;
+  for (let k = end === -1 ? rest.length : end + 1; k < rest.length; ) {
+    const count = rest[k]!.toString('latin1');
+    if (!/^[1-9][0-9]{0,5}$/.test(count) || k + Number(count) + 3 > rest.length) throw failed();
+    const paths = rest.slice(k + 1, k + 1 + Number(count)).map(nameOf);
+    const type = rest[k + 1 + Number(count)]!.toString('utf8');
+    k += Number(count) + 3;
+    if (!type.startsWith('CONFLICT')) continue;
+    conflicted = true;
+    for (const p of paths) kinds.set(p, (kinds.get(p) ?? new Set()).add(type));
   }
-  return { tree: id, conflicts };
+  // A conflict (exit 1) names what conflicts, a path or a message; a clean merge (exit 0) names nothing.
+  if ((r.status !== 0 && r.status !== 1) || !/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(id) || (r.status === 1) !== (conflicts.length > 0 || conflicted)) throw failed();
+  const contentOnly = new Set(conflicts.filter((p) => [...(kinds.get(p) ?? [])].length > 0 && [...kinds.get(p)!].every((t) => t === 'CONFLICT (contents)')));
+  return { tree: id, conflicts, contentOnly };
 }
 
 /**
