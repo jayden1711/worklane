@@ -76,12 +76,35 @@ const UTF16BE_RUN = /(?:\0[\t\n\r\x20-\x7e])+/g;
 const BINARY_RUN = 8;
 const BINARY_TERM = 6;
 const PRINTABLE = /[\t\n\r\x20-\x7e]/;
+// A long run is read in pieces of about this many characters, so the token work per piece stays bounded (#1057).
+const PIECE = 65536;
+const TOKEN_CHAR = /[a-z0-9._@-]/i;
+
+/** A long run's text from text[start, end), wide runs without their NULs, in pieces each cut after a character no token holds. */
+function* pieces(text, start, end, wide) {
+  const step = wide ? 2 * PIECE : PIECE;
+  let carry = '';
+  for (let i = start; i < end; i += step) {
+    const raw = text.slice(i, Math.min(end, i + step));
+    const part = wide ? raw.replaceAll('\0', '') : raw;
+    let cut = part.length;
+    while (cut > 0 && TOKEN_CHAR.test(part[cut - 1])) cut--;
+    if (cut === 0) {
+      carry += part;
+      continue;
+    }
+    yield carry + part.slice(0, cut);
+    carry = part.slice(cut);
+  }
+  if (carry) yield carry;
+}
 
 /**
  * Every denied hashed term in a blob holding a NUL byte, as "path: why" strings, token boundaries as in text: a term
  * of at least BINARY_TERM characters in any run, and any term in a run of at least BINARY_RUN characters or in an
  * ASCII run with a NUL on both sides. The regex patterns are not run: their short shapes (a letter and digits, a
- * dotted quad) match binary data by chance. Runs are read one at a time, so memory stays near the blob's size.
+ * dotted quad) match binary data by chance. Runs are read one at a time and a long run in pieces, so the scan holds
+ * little beyond the blob itself, unless one token fills most of a run.
  */
 export function scanBinary(rules, path, text) {
   const hits = new Set();
@@ -91,11 +114,14 @@ export function scanBinary(rules, path, text) {
       // UTF-16LE text read one byte late is a UTF-16BE run without its first letter. Where the NULs fit the LE reading
       // at both ends (a letter before the run, a NUL after it), it is LE text, read whole above (#1057).
       if (re === UTF16BE_RUN && PRINTABLE.test(text[m.index - 1] ?? '') && text[end] === '\0') continue;
-      const run = wide ? m[0].replaceAll('\0', '') : m[0];
-      const anyLength = run.length >= BINARY_RUN || (!wide && text[m.index - 1] === '\0' && text[end] === '\0');
-      for (const t of tokens(run)) {
-        if ((!anyLength && t.length < BINARY_TERM) || !rules.hashed.has(sha(t))) continue;
-        if (!rules.allow.some((a) => a.term === t && a.re.test(path))) hits.add(`${path}: denied term "${t}" in a binary file (it holds a NUL byte)`);
+      const length = wide ? m[0].length / 2 : m[0].length;
+      const anyLength = length >= BINARY_RUN || (!wide && text[m.index - 1] === '\0' && text[end] === '\0');
+      const whole = length <= PIECE && [wide ? m[0].replaceAll('\0', '') : m[0]];
+      for (const piece of whole || pieces(text, m.index, end, wide)) {
+        for (const t of tokens(piece)) {
+          if ((!anyLength && t.length < BINARY_TERM) || !rules.hashed.has(sha(t))) continue;
+          if (!rules.allow.some((a) => a.term === t && a.re.test(path))) hits.add(`${path}: denied term "${t}" in a binary file (it holds a NUL byte)`);
+        }
       }
     }
   }

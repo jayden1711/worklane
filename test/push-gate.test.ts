@@ -210,6 +210,16 @@ test('push gate does not read UTF-16LE text one byte late as UTF-16BE, which dro
   assert.match(be.stderr, /image\.png: denied term "zqx" in a binary file/);
 });
 
+test('push gate finds a term in a text run far longer than one scan piece, also where it crosses a piece boundary (#1057)', { skip }, () => {
+  const text = `${'x'.repeat(65530)} secretproject ${'made '.repeat(20000)}otherhandle`;
+  for (const [what, bytes] of [['ASCII', Buffer.from(text)], ['UTF-16LE', Buffer.from(text, 'utf16le')]] as const) {
+    const p = gateBinary('data.bin', Buffer.concat([noise(64), Buffer.from([0]), bytes, Buffer.from([0]), noise(64)]));
+    assert.notEqual(p.status, 0, `${what}: refused`);
+    assert.match(p.stderr, /data\.bin: denied term "secretproject" in a binary file/, what);
+    assert.match(p.stderr, /data\.bin: denied term "otherhandle" in a binary file/, what);
+  }
+});
+
 test('push gate reads an added line starting "++ /dev/null" or "++ b/<path>" as content, in a file deleted again before the push (#1057)', { skip }, () => {
   for (const header of ['++ /dev/null', '++ b/package-lock.json']) {
     const r = repo();
