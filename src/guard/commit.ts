@@ -483,14 +483,15 @@ function gitWords(words: Word[]): GitWords {
 
 type Arg = 'flag' | 'value' | 'optional';
 // WHY: git commit's options, by name: whether each takes a value, and whether it makes the commit take working-tree
-// content (w) or rewrite the current commit (amend). A name is matched as git matches it (longOption).
-type Opt = [Arg, ('w' | 'amend' | 'interactive')?];
+// content (w), rewrite the current commit (amend) or skip git's pre-commit hook (skip). A name is matched as git
+// matches it (longOption).
+type Opt = [Arg, ('w' | 'amend' | 'interactive' | 'skip')?];
 const COMMIT_LONG: Record<string, Opt> = {
   all: ['flag', 'w'], include: ['flag', 'w'], only: ['flag', 'w'], patch: ['flag', 'interactive'], interactive: ['flag', 'interactive'],
   'pathspec-from-file': ['value', 'w'], amend: ['flag', 'amend'],
   'pathspec-file-nul': ['flag'], message: ['value'], file: ['value'], 'reuse-message': ['value'], 'reedit-message': ['value'],
   fixup: ['value'], squash: ['value'], author: ['value'], date: ['value'], template: ['value'], cleanup: ['value'], trailer: ['value'],
-  'untracked-files': ['optional'], 'gpg-sign': ['optional'], signoff: ['flag'], verify: ['flag'], 'no-verify': ['flag'],
+  'untracked-files': ['optional'], 'gpg-sign': ['optional'], signoff: ['flag'], verify: ['flag'], 'no-verify': ['flag', 'skip'],
   'allow-empty': ['flag'], 'allow-empty-message': ['flag'], edit: ['flag'], 'no-edit': ['flag'], 'reset-author': ['flag'],
   short: ['flag'], branch: ['flag'], long: ['flag'], null: ['flag'], 'dry-run': ['flag'], status: ['flag'],
   'no-status': ['flag'], verbose: ['flag'], quiet: ['flag'], 'no-post-rewrite': ['flag'],
@@ -500,7 +501,14 @@ const SHORT_OPTIONAL = new Set(['u', 'S']);
 const SHORT_WORKTREE = new Set(['a', 'i', 'o']);
 /** Long options that start interactive staging (any prefix git might take for them). */
 const INTERACTIVE_LONG = /^--(pa(t(c(h)?)?)?|in(t(e(r(a(c(t(i(v(e)?)?)?)?)?)?)?)?)?)(=|$)/;
-const SHORT_FLAG = new Set(['n', 'q', 'v', 's', 'e', 'z']);
+const SHORT_FLAG = new Set(['q', 'v', 's', 'e', 'z']);
+
+/**
+ * A commit that skips git's pre-commit hook, the commit scan's second layer (#983), which scans the index the commit
+ * records whatever this model reads from its line. INVARIANT (#983): refused in any spelling (-n alone or bundled,
+ * --no-verify or a prefix git takes for it), even with a --verify after it.
+ */
+class SkipsHook extends Error {}
 
 /** The long options a (possibly abbreviated, possibly negated) name can mean. */
 function longOption(name: string): Opt[] {
@@ -541,6 +549,7 @@ function commitEffects(rest: Word[]): { worktree: boolean; amend: boolean } {
         if (effect === 'w') worktree = true;
         if (effect === 'interactive') throw new Unmodelled('an interactive commit, which can edit what is committed after the scan');
         if (effect === 'amend') amend = true;
+        if (effect === 'skip') throw new SkipsHook(`--${name}`);
         if (arg === 'value' && eq < 0) i++;
       }
       continue;
@@ -553,6 +562,7 @@ function commitEffects(rest: Word[]): { worktree: boolean; amend: boolean } {
       }
       if (SHORT_OPTIONAL.has(ch)) break;
       if (ch === 'p') throw new Unmodelled('an interactive commit, which can edit what is committed after the scan');
+      if (ch === 'n') throw new SkipsHook(t);
       if (SHORT_WORKTREE.has(ch)) worktree = true;
       else if (!SHORT_FLAG.has(ch)) throw new Unmodelled(ch === EXPANSION ? 'an expansion in a commit option' : `the commit option -${ch}`);
     }
@@ -1046,6 +1056,9 @@ export function commitPlan(command: string, p: PlanEnv): CommitPlan | null {
     return { scans: [...tops].map((t) => ({ top: t, scope })), reads: [...readTops].filter((t) => !tops.has(t)) };
   } catch (e) {
     if (e instanceof Unmodelled) return refuse(e.message);
+    if (e instanceof SkipsHook) {
+      return { refuse: `git commit ${e.message} skips git's pre-commit hook, the secret scan of the index the commit records; an agent never skips it. Commit without -n or --no-verify` };
+    }
     throw e;
   }
 }

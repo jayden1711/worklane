@@ -90,6 +90,6 @@ test("the pre-commit hook finds a gitleaks in the prefix when a commit's PATH la
   execFileSync('git', ['add', 'new.txt'], { cwd: dir });
   const r = spawnSync('git', ['commit', '-q', '-m', 'add'], { cwd: dir, encoding: 'utf8', env: { ...process.env, PATH: m.path } });
   assert.equal(r.status, 0, r.stderr);
-  assert.match(readFileSync(m.calls, 'utf8'), /^git$/m, 'the hook ran the stand-in');
+  assert.match(readFileSync(m.calls, 'utf8'), /^dir$/m, 'the hook ran the stand-in');
   assert.ok(existsSync(join(dir, '.git')));
 });

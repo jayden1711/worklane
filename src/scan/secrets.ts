@@ -81,14 +81,33 @@ interface Compared {
  * nothing the checkout's own settings say about showing one, changes what is found.
  */
 export function scanCommit(top: string, scope: CommitScanScope, binary = findTool('gitleaks')): ScanResult {
-  if (!binary) return { status: 'unavailable', error: 'gitleaks not found on PATH' };
-  const tmp = mkdtempSync(join(tmpdir(), 'scan-commit-'));
-  try {
+  return scanComparisons(top, binary, () => {
     checkReadPrograms(top, scope);
     const comparisons: [string, () => Compared[]][] = [['staged changes', () => stagedContent(top)]];
     if (scope.unstaged || scope.untracked) comparisons.push(['unstaged changes', () => worktreeContent(top)]);
     if (scope.untracked) comparisons.push(['untracked files', () => untrackedContent(top)]);
     if (scope.head) for (const [i, read] of headContent(top).entries()) comparisons.push([`the commit being amended (parent ${i + 1})`, read]);
+    return comparisons;
+  });
+}
+
+/**
+ * Scan the index a commit is recording, against HEAD, from inside the commit: the engine's pre-commit hook (#983), the
+ * second layer under scanCommit's model of the command line. INVARIANT (#983): it reads the index git names for the
+ * commit (GIT_INDEX_FILE, which git sets for its hooks, so a commit of named paths is read in the index git builds for
+ * it), by content as scanCommit does; whatever the command line was, and whatever ran before it in the commit.
+ * The checkout's read programs aren't checked here: the index already holds what git stores, and nothing here renders
+ * a change or reads the working tree.
+ */
+export function scanIndex(top: string, binary = findTool('gitleaks')): ScanResult {
+  return scanComparisons(top, binary, () => [['the index being committed', () => stagedContent(top)]]);
+}
+
+function scanComparisons(top: string, binary: string | null | undefined, comparisonsOf: () => [string, () => Compared[]][]): ScanResult {
+  if (!binary) return { status: 'unavailable', error: 'gitleaks not found on PATH' };
+  const tmp = mkdtempSync(join(tmpdir(), 'scan-commit-'));
+  try {
+    const comparisons = comparisonsOf();
     // WHY: the checkout's own rules, as the scan of its diff read them before; never a rules file the content brings.
     const own = join(top, '.gitleaks.toml');
     const config = join(tmp, 'gitleaks.toml');

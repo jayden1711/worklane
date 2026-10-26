@@ -213,6 +213,6 @@ test('install --git-hooks-only adds the pre-commit secret scan and leaves commit
   const before = existsSync(settings) ? readFileSync(settings, 'utf8') : null;
   const r = spawnSync(process.execPath, [join(repoRoot, 'dist', 'src', 'cli.js'), 'install', '--root', dir, '--git-hooks-only'], { encoding: 'utf8', env: childEnv() });
   assert.equal(r.status, 0, r.stderr);
-  assert.match(readFileSync(join(dir, '.git', 'hooks', 'pre-commit'), 'utf8'), /gitleaks git --pre-commit --staged/);
+  assert.match(readFileSync(join(dir, '.git', 'hooks', 'pre-commit'), 'utf8'), /\/dist\/src\/hook-main\.js'\n[\s\S]*"\$E" pre-commit <\/dev\/null\n$/);
   assert.equal(existsSync(settings) ? readFileSync(settings, 'utf8') : null, before);
 });

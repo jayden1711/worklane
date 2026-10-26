@@ -1,0 +1,7 @@
+### Upgrading (from v0.5.2)
+
+- **The pre-commit secret scan now scans the index the commit records (#983).** The hook `install --git-hooks` (and an instance's `checkout.sh`) writes runs the engine's own guard entry (`hook-main.js pre-commit`) instead of `gitleaks git --pre-commit --staged`. It reads each changed file of the index git is committing as stored, the way the agents' commit scan does, so a diff driver or textconv in the checkout's config no longer changes what it finds. A commit of named paths is scanned in the index git builds for it. A pre-commit hook it replaced (kept as `pre-commit.before-<cli>`) now runs before the scan, not after, so what that hook stages is scanned too. A missing engine or gitleaks fails the commit. Existing checkouts keep the old hook until you run `install --git-hooks` (or `checkout.sh`) again.
+
+### Guardrail changes: what each one does
+
+- **An agent's `git commit -n` or `--no-verify` is refused (#983).** The tool guard refuses any spelling of them (bundled short flags such as `-an`, prefixes git accepts for `--no-verify`, or with a `--verify` before it), because they skip the pre-commit hook, the commit scan's second layer. The other ways to skip the hook were already refused: `core.hooksPath` by `-c`, `--config-env`, `git config` or `GIT_CONFIG_*`, and writes to a git hooks dir or git config file. `test/adversarial/commit-scan-index.test.ts` pins each one.
