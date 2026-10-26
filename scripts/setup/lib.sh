@@ -464,21 +464,54 @@ machine_sudoers_precommit() {
   machine_sudoers_commit_ok "$@"
 }
 
+# Every machine-wide lock the setup scripts take, by this one function (#945; #902 round 7, F1): add-project's (shared
+# with instance-remove and instance-rename), tailscale's and the machine helper's rule's. Each sits in a directory only
+# root can enter (root's, 0700, not a link, in a parent only root can write), so no other user can open, hold or plant
+# it. Never /run/lock: anyone can create a file there, or open one read-only and hold a flock on it.
+# machine_lock <fd 3-9> <lock> <seconds to wait, 0: none> <message when another run holds it>: opens <lock> on <fd>
+# and takes it. 0: locked. 1: another run holds it. 2: refused, nothing locked (no flock, or the directory, its parent
+# or the lock file anything else). On 1 or 2, MACHINE_LOCK_WHY says why. A run never goes on unlocked.
+machine_lock() {
+  local fd="$1" lock="$2" wait="$3" held="$4" d="${2%/*}" up
+  MACHINE_LOCK_WHY=""
+  case "$fd" in [3-9]) ;; *) MACHINE_LOCK_WHY="refused: $lock: lock descriptor $fd is not one of 3 to 9"; return 2 ;; esac
+  command -v flock >/dev/null 2>&1 || { MACHINE_LOCK_WHY="refused: $lock needs flock (util-linux), and there is none"; return 2; }
+  up="${d%/*}"
+  [ -n "$up" ] || up=/
+  if [ -L "$up" ] || ! machine_lock_parent_ok "$up"; then
+    MACHINE_LOCK_WHY="refused: $up is not root's, or someone else can write it; it holds $d, the directory of $lock"
+    return 2
+  fi
+  ( umask 077; mkdir -p -- "$d" ) 2>/dev/null || true
+  if [ -L "$d" ] || [ ! -d "$d" ] || [ "$(command stat -c '%u %a' -- "$d" 2>/dev/null)" != "$MACHINE_LOCK_UID 700" ]; then
+    MACHINE_LOCK_WHY="refused: $d is not root's 0700 directory; it holds the lock $lock"
+    return 2
+  fi
+  if [ -L "$lock" ] || { [ -e "$lock" ] && { [ ! -f "$lock" ] || [ "$(command stat -c %u -- "$lock" 2>/dev/null)" != "$MACHINE_LOCK_UID" ]; }; }; then
+    MACHINE_LOCK_WHY="refused: $lock is not root's regular file"
+    return 2
+  fi
+  eval "exec $fd>>\"\$lock\"" || { MACHINE_LOCK_WHY="refused: couldn't open $lock"; return 2; }
+  if [ "$wait" = 0 ]; then flock -n "$fd"; else flock -w "$wait" "$fd"; fi && return 0
+  eval "exec $fd>&-"
+  MACHINE_LOCK_WHY="$held"
+  return 1
+}
+# Whether directory $1 is MACHINE_LOCK_UID's and no one else can write it (no group or other write bit).
+machine_lock_parent_ok() {
+  local s
+  s="$(command stat -c '%u %a' -- "$1" 2>/dev/null)" || return 1
+  [ "${s%% *}" = "$MACHINE_LOCK_UID" ] && [ $((8#${s##* } & 8#022)) = 0 ]
+}
+
 # The lock every engine writer of the machine helper's rule holds from its check to its write (#902 round 6, 7: F1;
 # machine-helper.sh, its --drop, and instance-remove.sh; instance.sh can't write it, round 8). A root writer outside
-# the engine (a hand edit, visudo or rm, an older release's scripts) takes none. It sits
-# in a directory only root can enter (root's, 0700, not a link), so no other user can open, hold or plant it. Without
-# flock, or with that directory anything else, the run refuses: it never writes the rule unlocked.
+# the engine (a hand edit, visudo or rm, an older release's scripts) takes none. Without flock, or with its directory
+# anything else, the run refuses (machine_lock): it never writes the rule unlocked.
 machine_sudoers_lock() {
-  local d="${MACHINE_SUDOERS_LOCK%/*}"
-  command -v flock >/dev/null 2>&1 || { echo "refused: writing $MACHINE_SUDOERS needs flock (util-linux), and there is none" >&2; exit 1; }
-  ( umask 077; mkdir -p "$d" )
-  if [ ! -d "$d" ] || [ -L "$d" ] || [ "$(command stat -c '%u %a' -- "$d" 2>/dev/null)" != "$MACHINE_SUDOERS_LOCK_UID 700" ]; then
-    echo "refused: $d is not root's 0700 directory; it holds the lock every writer of $MACHINE_SUDOERS takes" >&2
-    exit 1
-  fi
-  exec 8> "$MACHINE_SUDOERS_LOCK"
-  flock -w 120 8 || { echo "another run is writing $MACHINE_SUDOERS; run this again once it is done" >&2; exit 1; }
+  machine_lock 8 "$MACHINE_SUDOERS_LOCK" 120 "another run is writing $MACHINE_SUDOERS; run this again once it is done" && return 0
+  echo "$MACHINE_LOCK_WHY" >&2
+  exit 1
 }
 
 # Whether this machine never had the machine helper set up: no helper and no rules record (machine-helper.sh writes
@@ -505,7 +538,7 @@ OS_RELEASE=/etc/os-release
 # key) and, while `up` waits, login-url (0400, the asking coordinator's user alone: the dashboard shows it to a machine
 # owner and to nobody else).
 TAILSCALE_DIR=/var/lib/worklane/tailscale
-TAILSCALE_LOCK=/run/lock/worklane-tailscale.lock
+TAILSCALE_LOCK=/run/worklane-machine/tailscale.lock   # in a root-only 0700 directory (machine_lock)
 # The hub's sign-in port, the only one tailscale serve may forward to (dashboards.sh; never 4398, the break-glass).
 HUB_PORT=4399
 BREAK_GLASS_PORT=4398
@@ -804,15 +837,16 @@ SRV_ROOT=/srv/worklane
 ENGINE_CLI=/usr/local/bin/worklane
 # add-project's wait for a repo's setup PR to merge: how often it checks, and (empty: its --timeout) for how long.
 SETUP_POLL_SECONDS=20 SETUP_WAIT_SECONDS=""
-ADD_PROJECT_LOCK=/run/lock/worklane-add-project.lock
+ADD_PROJECT_LOCK=/run/worklane-machine/add-project.lock   # in a root-only 0700 directory (machine_lock)
 # instance-remove.sh's PATH once it runs as root, and where it keeps a removed instance's history (#902 round 9, N3:
 # set here, so a test's lib points both into its temp dir and every host tool the script reaches is the test's).
 ROOT_PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 REMOVED_ARCHIVE=/var/lib/worklane/removed
 # Every writer of the machine helper's rule holds this lock from its check to its write: machine-helper.sh, and
 # instance-remove.sh when it takes the rule away (#902 round 6).
-MACHINE_SUDOERS_LOCK=/run/worklane-machine/sudoers.lock   # in a root-only 0700 directory (machine_sudoers_lock)
-MACHINE_SUDOERS_LOCK_UID=0
+MACHINE_SUDOERS_LOCK=/run/worklane-machine/sudoers.lock   # in a root-only 0700 directory (machine_lock)
+# Who owns each machine lock's directory and that directory's parent (machine_lock): root.
+MACHINE_LOCK_UID=0
 # The instances being created: root's list, one name a line, a regular file of root's, 0600, one link (#898).
 #   - A name goes on it where its coordinator user is made: instance.sh, which only root runs. That covers
 #     add-project's instance step, a by-hand instance.sh, and instance-rename.sh's users step.
