@@ -3,7 +3,7 @@
 // change that touches the app's ui_paths runs every flow the app declares; anything else runs none and pays
 // nothing. A project without an app runs none unless asked.
 import type { AppConfig } from '../config/schema.js';
-import { globToRegExp } from '../guardrails/glob.js';
+import { globRegExp } from '../guardrails/glob.js';
 import { BrowserDoneWhenItem } from './check.js';
 
 export interface BrowserGate {
@@ -17,7 +17,7 @@ export interface BrowserGate {
 
 /** Changed files under the app's ui_paths, repo-relative with forward slashes (git's form, on every OS). */
 export function uiFilesTouched(app: AppConfig, changed: readonly string[]): string[] {
-  const res = app.ui_paths.map(globToRegExp);
+  const res = app.ui_paths.map((g) => globRegExp(g, 'deny'));
   return changed.map((f) => f.replace(/\\/g, '/').replace(/^\.\//, '')).filter((f) => res.some((re) => re.test(f)));
 }
 

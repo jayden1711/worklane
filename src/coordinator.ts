@@ -13,7 +13,7 @@ import { CANARY_LABEL, canaryTask, machineCanaryInstance } from './canary.js';
 import { actionable, contractKey, ownerFor, parseContract, type DoneWhenList, type Issue, type PullRequest } from './backlog/types.js';
 import { claim, release, renew, type Lease } from './claims.js';
 import type { EventPayload, EventType } from './events/types.js';
-import { globToRegExp } from './guardrails/glob.js';
+import { globRegExp } from './guardrails/glob.js';
 import { isProtectedPath } from './guardrails/engine.js';
 import { computeLevel, type ChangeFile, type Level } from './review.js';
 import { shownPath, shownPaths } from './path-text.js';
@@ -856,7 +856,7 @@ export class Coordinator extends AutomationRuns {
       return;
     }
     let leaseSha = won.sha;
-    const owner = ownerFor(issue, [], this.d.cfg.project.owners, (g, p) => globToRegExp(g).test(p));
+    const owner = ownerFor(issue, [], this.d.cfg.project.owners, (g, p) => globRegExp(g, 'deny').test(p));
     this.emit('contract.agreed', { issue: n, done_when: doneWhen as Record<string, unknown>[], by: issue.author });
     // The contract as agreed is recorded; what runs here skips the full suite when the test run is the full run.
     doneWhen = localDoneWhen(doneWhen, this.d.cfg.tests);
@@ -1514,7 +1514,7 @@ export class Coordinator extends AutomationRuns {
   protected tamperFlags(path: string, base: string, files: ChangeFile[]): string[] {
     const tampered: string[] = [];
     const pattern = this.d.cfg.tests.vacuity?.assertion_pattern ?? '\\b(assert|expect|check)\\b';
-    const testRes = (this.d.cfg.tests.vacuity?.test_globs ?? FALLBACK_TEST_GLOBS).map((g) => globToRegExp(g));
+    const testRes = (this.d.cfg.tests.vacuity?.test_globs ?? FALLBACK_TEST_GLOBS).map((g) => globRegExp(g, 'deny'));
     for (const f of files.filter((x) => testRes.some((re) => re.test(x.path)))) {
       const after = existsSync(join(path, f.path)) ? readFileSync(join(path, f.path), 'utf8') : null;
       let before: string | null = null;

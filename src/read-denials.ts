@@ -14,6 +14,7 @@ import { BRAND } from './brand.js';
 import { ConfigInvalid, loadConfig, loadConfigAt, readRegular } from './config/load.js';
 import { TaskFile } from './contract.js';
 import { projectStateDir } from './guardrails/context.js';
+import { globMatcher, type GlobStyle } from './guardrails/glob.js';
 import { spawnSync } from './os/child-process.js';
 
 /** Directory entries listed, at most, to expand one pattern that has an exception; past it the pattern is denied whole. */
@@ -164,77 +165,11 @@ const short = (s: string) => (s.length > 200 ? `${s.slice(0, 80)}…${s.slice(-1
 const firstLine = (e: unknown) => short((e as Error).message.split('\n')[0]!);
 /** Why a config didn't load: each of its errors (a ConfigInvalid's first line names none), or the error's first line. */
 const configWhy = (e: unknown) => (e instanceof ConfigInvalid ? e.errors.map((x) => `${x.file}${x.path ? ` at ${x.path}` : ''}: ${x.message}`).join('; ').slice(0, 400) : firstLine(e));
-/** One step of a compiled glob: a character, any one but "/", any run but "/", any run, or a jump (an optional part). */
-type Step = { k: 'char'; c: string } | { k: 'one' } | { k: 'star' } | { k: 'any' } | { k: 'skip'; to: number };
-
 /**
- * A guardrail glob as src/guardrails/glob.ts's globToRegExp reads it (leading "./" dropped; a trailing "/" is "/**";
- * `**` followed by "/" is an optional "anything/"; `**` anything; `*` anything but "/"; `?` one character but "/"),
- * matched in linear time: every state of the pattern is tracked at once (a Thompson automaton), never backtracked.
- * WHY: the patterns come from a config an agent can write, and this runs in the coordinator's own process: as a
- * backtracking regex, "*a*a…*a*b" against a long name took 13 s at 10 pairs and over a minute at 12 (measured,
- * round-7 review), which would hold every run and every stop. Same characters as the regex: UTF-16 code units.
+ * An absolute pattern's matcher, tested against an absolute path without its leading "/", reading the glob as the
+ * guard hook does (src/guardrails/access.ts): a pattern as `deny`, an exception as `allow`.
  */
-export function globMatcher(glob: string): { test: (s: string) => boolean } {
-  let g = glob.replace(/^\.\//, '');
-  if (g.endsWith('/')) g += '**';
-  const steps: Step[] = [];
-  for (let i = 0; i < g.length; i++) {
-    const c = g[i]!;
-    if (c === '*' && g[i + 1] === '*') {
-      i++;
-      if (g[i + 1] === '/') {
-        i++;
-        const at = steps.length;
-        steps.push({ k: 'skip', to: at + 3 }, { k: 'any' }, { k: 'char', c: '/' });
-      } else steps.push({ k: 'any' });
-    } else if (c === '*') steps.push({ k: 'star' });
-    else if (c === '?') steps.push({ k: 'one' });
-    else steps.push({ k: 'char', c });
-  }
-  const end = steps.length;
-  /** `from` and every state reachable from it without reading a character. */
-  const close = (from: number[], into: Uint8Array) => {
-    const todo = [...from];
-    while (todo.length) {
-      const s = todo.pop()!;
-      if (into[s]) continue;
-      into[s] = 1;
-      if (s === end) continue;
-      const st = steps[s]!;
-      if (st.k === 'star' || st.k === 'any') todo.push(s + 1);
-      else if (st.k === 'skip') todo.push(s + 1, st.to);
-    }
-  };
-  return {
-    test(text: string): boolean {
-      let cur = new Uint8Array(end + 1);
-      close([0], cur);
-      for (let i = 0; i < text.length; i++) {
-        const c = text[i]!;
-        const next: number[] = [];
-        for (let s = 0; s < end; s++) {
-          if (!cur[s]) continue;
-          const st = steps[s]!;
-          if (st.k === 'char') {
-            if (c === st.c) next.push(s + 1);
-          } else if (st.k === 'one') {
-            if (c !== '/') next.push(s + 1);
-          } else if (st.k === 'star') {
-            if (c !== '/') next.push(s);
-          } else if (st.k === 'any') next.push(s);
-        }
-        if (!next.length) return false;
-        cur = new Uint8Array(end + 1);
-        close(next, cur);
-      }
-      return cur[end] === 1;
-    },
-  };
-}
-
-/** An absolute pattern's matcher, tested against an absolute path without its leading "/". */
-const absRe = (p: string) => globMatcher(p.slice(1));
+const absRe = (p: string, style: GlobStyle) => globMatcher(p.slice(1), style);
 
 /**
  * The nearest directory at or above `start` holding the config folder, found exactly as the hook finds its project
@@ -523,7 +458,7 @@ function mayMatchBeneath(n: string, dir: string): boolean {
 function overlaps(a: string, neg: string[]): boolean {
   const dir = dirForm(a);
   if (dir !== null) return neg.some((n) => mayMatchBeneath(n, dir));
-  const re = absRe(a);
+  const re = absRe(a, 'deny');
   return neg.some((n) => GLOB.test(n) || re.test(n.slice(1)));
 }
 
@@ -534,7 +469,7 @@ function overlaps(a: string, neg: string[]): boolean {
  * as written, so the whole glob is passed (stricter, never looser).
  */
 function expand(glob: string): string[] | null {
-  const re = absRe(glob);
+  const re = absRe(glob, 'deny');
   const fixed = glob.split(/[*?]/)[0]!;
   const base = fixed.endsWith('/') ? fixed.slice(0, -1) : dirname(fixed);
   const depth = glob.includes('**') ? Infinity : glob.slice(base.length).split('/').length - 1;
@@ -752,7 +687,7 @@ export function runReadDenials(o: { cwd: string; home: string | undefined; taskF
     const neg = anchored(patterns.filter((p) => p.startsWith('!')).map((p) => p.slice(1)));
     if ('error' in pos) return pos;
     if ('error' in neg) return neg;
-    const negRes = neg.map(absRe);
+    const negRes = neg.map((n) => absRe(n, 'allow'));
     const excepted = (p: string) => negRes.some((re) => re.test(p.slice(1)));
     for (const a of pos) {
       const dir = dirForm(a);
@@ -779,7 +714,7 @@ export function runReadDenials(o: { cwd: string; home: string | undefined; taskF
     if ('error' in relNeg) return relNeg;
     const lateNeg = anchored(relNegs, under);
     if ('error' in lateNeg) return lateNeg;
-    const lateNegRes = lateNeg.map(absRe);
+    const lateNegRes = lateNeg.map((n) => absRe(n, 'allow'));
     const exceptedLate = (p: string) => excepted(p) || lateNegRes.some((re) => re.test(p.slice(1)));
     for (const p of patterns.filter((p) => !p.startsWith('!') && relative(p))) {
       const probe = anchored([p], ['/r']);
