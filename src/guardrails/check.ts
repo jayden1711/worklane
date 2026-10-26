@@ -2,8 +2,10 @@
 // must-block / must-ask / must-allow examples before it can go live. A new
 // rule that blocks something that must stay frictionless, or a block rule no
 // example exercises, fails the check.
+import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import type { Example, GuardrailsConfig } from '../config/schema.js';
+import { liveGit } from './context.js';
 import { evaluate, type Decision, type EvalContext, type ToolCall } from './engine.js';
 import { fingerprint } from './fingerprint.js';
 
@@ -44,8 +46,9 @@ export function exampleContext(cfg: GuardrailsConfig, root: string, agent: boole
       for (const [dir, env] of Object.entries(links)) if (resolve(root, dir) === resolve(cwd)) return env;
       return null;
     },
-    // WHY: the examples run against no repository; every git config key reads as unset (no aliases).
-    git: () => ({ status: 1, stdout: '' }),
+    // WHY: the examples run against no repository; every git config key reads as unset (no aliases). git's own
+    // command list needs none, so it is this machine's, as a live check reads it.
+    git: (_dir, args) => (args[0]?.startsWith('--list-cmds=') ? liveGit(tmpdir(), args) : { status: 1, stdout: '' }),
   };
 }
 

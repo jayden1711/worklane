@@ -36,8 +36,9 @@ const HOOKLESS_PUSH_PROGRAM = /^git-(send-pack|http-push|remote-.+?)(\.exe)?$/i;
 /** git's own push and config programs, run by name or path (`$(git --exec-path)/git-push`): git push, git config. */
 const DASHED_GIT = /^git-(push|config)(\.exe)?$/i;
 /**
- * git's own commands that never push. git never lets an alias shadow one of its commands, so only another name is
- * looked up. INVARIANT: only real git commands are listed (an alias named like one that isn't would go unread).
+ * git's own commands that never push, for a guard with no lookup (where one runs, git lists its own). git never
+ * lets an alias shadow one of its commands. INVARIANT: only real git commands are listed (an alias named like one
+ * that isn't would go unread).
  */
 const NON_PUSH_GIT = new Set(('add am annotate apply archive bisect blame branch bundle cat-file check-attr check-ignore ' +
   'check-mailmap check-ref-format checkout checkout-index cherry cherry-pick clean clone column commit commit-graph commit-tree ' +
@@ -141,6 +142,30 @@ interface Lookup {
   dirs: string[] | string;
   /** Why the line's own environment may change what git reads (and a lookup can't), or null. */
   env: string | null;
+  /** Whether git runs `sub` as one of its own commands (so never as an alias), with these global options. */
+  own(sub: string, globals: string[]): boolean;
+}
+
+/**
+ * Which of git's lists names only commands git runs as its own for a line: `others` (git-* on PATH) unless the line
+ * changes PATH, `main` (git's exec path) unless it moves that, and the commands built into git always.
+ */
+function commandLists(commands: SimpleCommand[]): string {
+  if (commands.some((c) => unsets(c) || envOptionsOf(c).length || assigned(c).some(([n]) => /^GIT_EXEC_PATH$/i.test(n)))) return 'builtins';
+  return commands.some((c) => assigned(c).some(([n]) => /^PATH$/i.test(n))) ? 'main' : 'main,others';
+}
+
+/** `own` for a lookup: git's own list, asked once per list; the static list where git can't answer. */
+function ownCommands(git: GitLookup, cwd: string, lists: string): Lookup['own'] {
+  const asked = new Map<string, Set<string> | null>();
+  return (sub, globals) => {
+    const which = globals.some((t) => t.startsWith('--exec-path')) ? 'builtins' : lists;
+    if (!asked.has(which)) {
+      const r = git(cwd, [`--list-cmds=${which}`]);
+      asked.set(which, r.status === 0 ? new Set(r.stdout.split('\n').map((l) => l.trim()).filter(Boolean)) : null);
+    }
+    return asked.get(which)?.has(sub) ?? NON_PUSH_GIT.has(sub);
+  };
 }
 
 /**
@@ -151,7 +176,8 @@ interface Lookup {
 function resolveGit(a: string[], look: Lookup | null, depth = 0): Resolved[] | string {
   const g = parseGit(a);
   const sub = g.sub;
-  if (sub === undefined || sub === 'push' || HOOKLESS_PUSH.test(sub) || NON_PUSH_GIT.has(sub)) return [{ ...g, pushes: sub === 'push' || (sub !== undefined && HOOKLESS_PUSH.test(sub)) }];
+  if (sub === undefined || sub === 'push' || HOOKLESS_PUSH.test(sub)) return [{ ...g, pushes: sub !== undefined }];
+  if (look ? look.own(sub, g.globals) : NON_PUSH_GIT.has(sub)) return [{ ...g, pushes: false }];
   if (!look) return [{ ...g, pushes: true }];
   if (depth > 10) return `git ${sub}: an alias loop`;
   if (typeof look.dirs === 'string') return `git ${sub} ${look.dirs}`;
@@ -262,7 +288,7 @@ export function pushHookShellRefusal(command: string, commands: SimpleCommand[],
 
   // INVARIANT (#993): every git call is judged as git reads it, alias and correction included; one the guard can't
   // read that way is refused.
-  const look = lookup ? { git: lookup.git, dirs: lineDirs(commands, lookup.cwd), env: lineEnv(commands) } : null;
+  const look = lookup ? { git: lookup.git, dirs: lineDirs(commands, lookup.cwd), env: lineEnv(commands), own: ownCommands(lookup.git, lookup.cwd, commandLists(commands)) } : null;
   const calls: Resolved[] = [];
   for (const c of commands) {
     const program = basename(c.argv[0] ?? '');

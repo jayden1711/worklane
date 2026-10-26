@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { delimiter, join } from 'node:path';
 import { BRAND } from '../src/brand.js';
 import { GuardrailsConfig, TestsConfig } from '../src/config/schema.js';
 import { exampleContext } from '../src/guardrails/check.js';
@@ -201,6 +201,40 @@ test("git's own push and config programs, run by name or path, are read as git p
     'git-config --global --edit',
   ]) assert.deepEqual([bash(c).decision, bash(c).rule], ['deny', 'push-hook-bypass'], c);
   for (const c of ['/usr/lib/git-core/git-push origin HEAD', 'git-config --get core.hooksPath']) assert.equal(bash(c).decision, 'none', c);
+});
+
+test("git's own commands are never an alias, so a line that sets git's environment or changes directory may run them (#993)", () => {
+  const { dir } = exampleProject();
+  execFileSync('git', ['config', 'alias.p', 'push --no-verify'], { cwd: dir, stdio: 'ignore' });
+  const ctx = { ...exampleContext(cfg, dir, true), git: liveContext(dir).git! };
+  const live = (command: string) => evaluate({ tool: 'Bash', input: { command }, cwd: dir }, cfg, ctx);
+  for (const c of [
+    'cd "$D" && git ls-files',
+    'GIT_PAGER=cat git ls-files',
+    'GIT_TRACE=1 git diff-index HEAD',
+    'cd ~/x && git diff-tree HEAD',
+    'cd "$(git rev-parse --show-toplevel)" && git ls-files',
+    'cd "$D" && git mergetool --tool-help',
+    'GIT_PAGER=cat git -C sub diff-files',
+  ]) {
+    assert.equal(live(c).decision, 'none', c);
+    assert.equal(bash(c).decision, 'none', `${c} (examples)`);
+  }
+  // A git-<name> program on PATH: git runs it, never an alias of that name.
+  const bin = mkdtempSync(join(tmpdir(), 'bin-'));
+  writeFileSync(join(bin, 'git-frob'), '#!/bin/sh\n', { mode: 0o755 });
+  const path = process.env.PATH;
+  process.env.PATH = `${bin}${delimiter}${path ?? ''}`;
+  try {
+    assert.equal(live('GIT_PAGER=cat git frob ls-files').decision, 'none');
+    // Where the line moves PATH or git's exec path, only what that can't move counts as git's own.
+    for (const c of ['PATH=/tmp/x GIT_TRACE=1 git frob', 'env -u PATH GIT_TRACE=1 git frob', 'GIT_EXEC_PATH=/tmp/x git mergetool', 'cd "$D" && git --exec-path=/tmp/x mergetool']) {
+      assert.equal(live(c).rule, 'push-hook-bypass', c);
+    }
+  } finally {
+    process.env.PATH = path;
+  }
+  for (const c of ['GIT_TRACE=1 git frob', 'cd "$D" && git frob', 'cd "$D" && git p', 'GIT_PAGER=cat git p']) assert.equal(live(c).rule, 'push-hook-bypass', c);
 });
 
 test('text inside a quoted argument is not a command: a commit message may say env -i (#993)', () => {
