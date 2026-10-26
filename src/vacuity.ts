@@ -15,14 +15,23 @@
 //           only where the code on both its sides ran and shares one innermost V8 range in every process (round 12),
 //           never across a block or clause
 //           boundary, holding a sub-statement or nested function, or at a statement list's end; removed lines lexed in
-//           their base file; comment toggles between hunks measured). Not seen: work a module starts as it loads that keeps running and that
+//           their base file; comment toggles between hunks measured). A file counts only where it also counts with
+//           the top-level statements the PR moved in a way git doesn't pair measured against their source (#1014,
+//           movedCode; each same-named pair compared on its own, and two too large to compare make the PR wait), so
+//           pairing only ever takes away. Not seen: work a module starts as it loads that keeps running and that
 //           the tests' own activity triggers (a timer while a test waits, an async_hooks or exit listener); code
 //           after a call that threw (V8 counts a block as run once entered); and where V8 makes no block range (an
 //           optional call's arguments, a default parameter or destructuring default, a logical assignment's right
 //           side, code in a string) or a build's map places code only by line. And the two limits where an untested
-//           change merges that src/merge-policy-vacuity.ts names: code moved in a way git doesn't pair reads as
-//           added code, so a test that runs it counts; and a deleted app file, or one renamed out of app code, leaves
-//           no app code to measure.
+//           change merges that src/merge-policy-vacuity.ts names: moved code the pairing doesn't find or can't place
+//           (renamed as it moved, moved inside a statement that stays, re-wrapped with parentheses quiet doesn't name,
+//           rewritten too far to align with its source, in a file whose brackets no reading balances and not starting
+//           on an `export` or `import` line) reads as added code, and code moved within its file that git pairs with
+//           its own old text (W1, W2), or over a stale same-named statement whose first line git keeps (N5u), is
+//           measured as git measured it; either way a test that runs it counts; and a deleted app file, or one
+//           renamed out of app code, leaves no app code to measure. One limit holds instead: a statement rewritten in
+//           place with every code line new, past EDITED_IN_PLACE or too large to align (ALIGN_CELLS), to the text of a
+//           copy removed elsewhere is read as moved from there.
 import { spawn, spawnSync } from './os/child-process.js';
 import { lstatSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -405,15 +414,30 @@ export function codeLines(text: string): { code: boolean[]; inComment: boolean[]
   return { code: a.code.map((c, i) => c && b.code[i] === true), inComment: a.inComment.map((c, i) => c || b.inComment[i] === true), mask };
 }
 
-/** One reading of codeLines: `slashIsRegex`, every `/` that starts no comment starts a regular expression. */
-function lexLines(text: string, slashIsRegex: boolean): { code: boolean[]; inComment: boolean[]; mask: Uint8Array; settled: boolean } {
+/**
+ * One reading of codeLines: `slashIsRegex`, every `/` that starts no comment starts a regular expression. 'statements'
+ * (topUnits' reading, never codeLines'): the first reading, but a `/` right after an `if`, `for`, `while` or `with`
+ * condition starts a regular expression and one after a postfix `++` or `--` divides. `fresh[i]`: line i starts outside
+ * every string, template and comment; `top[i]`: and outside every bracket; `syntax[i]`: character i is code outside
+ * every string, template and regular expression (a `}` that closes a template's `${` aside); `balanced`: the reading
+ * ends cleanly with every bracket it opened closed and none closed that it hadn't opened.
+ */
+function lexLines(text: string, slashIsRegex: boolean | 'statements'): { code: boolean[]; inComment: boolean[]; mask: Uint8Array; syntax: Uint8Array; fresh: boolean[]; top: boolean[]; settled: boolean; balanced: boolean } {
   type State = 'code' | 'line' | 'block' | 'sq' | 'dq' | 'tpl' | 're' | 'class';
   const code: boolean[] = [false];
   const inComment: boolean[] = [];
   const mask = new Uint8Array(text.length);
+  const syntax = new Uint8Array(text.length);
   let s: State = text.startsWith('#!') ? 'line' : 'code';
+  const fresh: boolean[] = [s === 'code'];
+  const top: boolean[] = [s === 'code'];
   // For each `${` open: how many `{` its expression has open.
   const braces: number[] = [];
+  // Brackets open (`(`, `[`, `{` and `${`), and the fewest ever open.
+  let depth = 0;
+  let low = 0;
+  // For each `(` open: whether it opens an `if`, `for`, `while` or `with` condition.
+  const conds: boolean[] = [];
   let prev = '';
   let word = '';
   let line = 0;
@@ -425,6 +449,8 @@ function lexLines(text: string, slashIsRegex: boolean): { code: boolean[]; inCom
       // A string or a regular expression ends at a line's end unless a `\` continued it (handled below).
       if (s === 'line' || s === 're' || s === 'class' || s === 'sq' || s === 'dq') s = 'code';
       code[line] = s === 'tpl';
+      fresh[line] = s === 'code';
+      top[line] = s === 'code' && depth === 0;
       continue;
     }
     // `\` then a line break: the string or template goes on to the next line.
@@ -436,6 +462,8 @@ function lexLines(text: string, slashIsRegex: boolean): { code: boolean[]; inCom
         inComment[line] = false;
         line++;
         code[line] = true;
+        fresh[line] = false;
+        top[line] = false;
         i++;
       }
     };
@@ -456,6 +484,7 @@ function lexLines(text: string, slashIsRegex: boolean): { code: boolean[]; inCom
       else if (s === 'tpl' && c === '`') [s, prev] = ['code', 'a'];
       else if (s === 'tpl' && c === '$' && text[i + 1] === '{') {
         braces.push(0);
+        depth++;
         [s, prev] = ['code', '('];
         i++;
       } else if (s === 're' && c === '[') s = 'class';
@@ -480,12 +509,20 @@ function lexLines(text: string, slashIsRegex: boolean): { code: boolean[]; inCom
     }
     code[line] = true;
     mask[i] = 1;
+    syntax[i] = 1;
     if (/[A-Za-z0-9_$]/.test(c)) {
       word = /[A-Za-z0-9_$]/.test(prev === 'a' ? (text[i - 1] ?? '') : '') ? word + c : c;
       prev = 'a';
       continue;
     }
-    const after = slashIsRegex ? 'operator' : prev === 'a' && !KEYWORDS_BEFORE_REGEX.has(word) ? 'value' : prev === ')' || prev === ']' ? 'value' : 'operator';
+    const value = prev === 'a' ? !KEYWORDS_BEFORE_REGEX.has(word) : prev === ')' || prev === ']';
+    if (slashIsRegex === 'statements' && value && (c === '+' || c === '-') && text[i + 1] === c) {
+      mask[++i] = 1;
+      syntax[i] = 1;
+      continue;
+    }
+    const after = slashIsRegex === true ? 'operator' : value ? 'value' : 'operator';
+    const cond = prev === 'a' && /^(?:if|for|while|with)$/.test(word);
     word = '';
     if (c === '/') {
       if (after === 'operator') s = 're';
@@ -495,17 +532,26 @@ function lexLines(text: string, slashIsRegex: boolean): { code: boolean[]; inCom
     else if (c === '`') s = 'tpl';
     else if (c === '{') {
       if (braces.length) braces[braces.length - 1]!++;
+      depth++;
       prev = '{';
     } else if (c === '}') {
       if (braces.length && braces.at(-1) === 0) {
         braces.pop();
         s = 'tpl';
+        syntax[i] = 0;
       } else if (braces.length) braces[braces.length - 1]!--;
+      low = Math.min(low, --depth);
       prev = '}';
-    } else prev = c;
+    } else {
+      if (c === '(') conds.push(cond);
+      if (c === '(' || c === '[') depth++;
+      else if (c === ')' || c === ']') low = Math.min(low, --depth);
+      prev = c === ')' && conds.pop() === true && slashIsRegex === 'statements' ? '(' : c;
+    }
   }
   inComment[line] = s === 'block';
-  return { code: code.map(Boolean), inComment, mask, settled: (s === 'code' || s === 'line') && braces.length === 0 };
+  const settled = (s === 'code' || s === 'line') && braces.length === 0;
+  return { code: code.map(Boolean), inComment, mask, syntax, fresh: fresh.map(Boolean), top: top.map(Boolean), settled, balanced: settled && depth === 0 && low >= 0 };
 }
 
 /**
@@ -610,7 +656,9 @@ interface HunkLine {
  * run doesn't align line by line, or any alignment is too large: the change can't be placed, and the caller holds.
  */
 function alignHunk(aLines: readonly HunkLine[], rLines: readonly HunkLine[]): string[] | null {
-  const whole = alignChars(aLines.flatMap((l) => l.chars), rLines.flatMap((l) => l.chars));
+  // Code only ever against code, so a comment edit never pairs a code character with a comment one (ZN1L-cmt, CM1, CM5).
+  const tagged = (l: HunkLine) => l.chars.map((c, k) => (l.code[k] ? 'c' : 'k') + c);
+  const whole = alignChars(aLines.flatMap(tagged), rLines.flatMap(tagged));
   if (whole) return whole;
   const codeOf = (l: HunkLine) => l.chars.filter((_, k) => l.code[k]);
   const ak = aLines.map((l) => codeOf(l).join(''));
@@ -622,11 +670,9 @@ function alignHunk(aLines: readonly HunkLine[], rLines: readonly HunkLine[]): st
     for (let j = rk.length - 1; j >= 0; j--) lcs[i * w + j] = ak[i] === rk[j] ? lcs[(i + 1) * w + j + 1]! + 1 : Math.max(lcs[(i + 1) * w + j]!, lcs[i * w + j + 1]!);
   }
   const ops: string[] = [];
-  // Two lines aligned by character; `same` (their code is the same): code only ever against code, so a comment edit
-  // never pairs a code character with a comment one.
-  const tagged = (l: HunkLine) => l.chars.map((c, k) => (l.code[k] ? 'c' : 'k') + c);
-  const pair = (a: HunkLine, r: HunkLine, same = false): boolean => {
-    const o = same ? alignChars(tagged(a), tagged(r)) : alignChars(a.chars, r.chars);
+  // Two lines aligned by character.
+  const pair = (a: HunkLine, r: HunkLine): boolean => {
+    const o = alignChars(tagged(a), tagged(r));
     if (!o) return false;
     ops.push(...o);
     return true;
@@ -647,7 +693,7 @@ function alignHunk(aLines: readonly HunkLine[], rLines: readonly HunkLine[]): st
     if (ra.length === rr.length) {
       for (let k = 0; k < ra.length; k++) if (!aligns(ra[k]!, rr[k]!) || !pair(ra[k]!, rr[k]!)) return false;
     } else {
-      const o = alignChars(ra.flatMap((l) => l.chars), rr.flatMap((l) => l.chars));
+      const o = alignChars(ra.flatMap(tagged), rr.flatMap(tagged));
       if (!o) return false;
       ops.push(...o);
     }
@@ -659,7 +705,7 @@ function alignHunk(aLines: readonly HunkLine[], rLines: readonly HunkLine[]): st
   let j = 0;
   while (i < ak.length || j < rk.length) {
     if (i < ak.length && j < rk.length && ak[i] === rk[j]) {
-      if (!flush() || !pair(aLines[i]!, rLines[j]!, true)) return null;
+      if (!flush() || !pair(aLines[i]!, rLines[j]!)) return null;
       i++;
       j++;
     } else if (j >= rk.length || (i < ak.length && lcs[(i + 1) * w + j]! >= lcs[i * w + j + 1]!)) ra.push(aLines[i++]!);
@@ -681,9 +727,15 @@ function alignHunk(aLines: readonly HunkLine[], rLines: readonly HunkLine[]): st
  *   sub-statement or nested function (BOUNDARY), or when it ended a statement list (the code after it is `}`, `case` or
  *   `default`: V8 keeps no range there). A removal inside a block comment (nothing added) is none.
  * Null: a hunk too large to align, or a removed side it can't place, which the caller holds on.
+ * `unplaced` (movedCode's call, #1014): each hunk is a moved unit and its source, from any base file, never joined with
+ * the unchanged lines around it, formatting (quiet) is never code on either side, and a hunk it can't place is left out and
+ * its index added to `unplaced` (never null).
  */
-export function codeRanges(text: string, hunks: readonly ChangedHunkSpots[], baseOf?: (path: string) => string | null): ChangedCode | null {
-  const { inComment, mask } = codeLines(text);
+export function codeRanges(text: string, hunks: readonly ChangedHunkSpots[], baseOf?: (path: string) => string | null, unplaced?: number[]): ChangedCode | null {
+  const moved = unplaced !== undefined;
+  const lexed = codeLines(text);
+  const inComment = lexed.inComment;
+  const mask = moved ? quiet(text, lexed.mask) : lexed.mask;
   const starts = lineStarts(text);
   const lines = starts.length - 1;
   const out: CharRanges = [];
@@ -692,7 +744,7 @@ export function codeRanges(text: string, hunks: readonly ChangedHunkSpots[], bas
   const baseFile = (p: string) => {
     if (!baseMasks.has(p)) {
       const t = baseOf!(p);
-      baseMasks.set(p, t === null ? null : { text: t, mask: codeLines(t).mask, starts: lineStarts(t) });
+      baseMasks.set(p, t === null ? null : { text: t, mask: moved ? quiet(t, codeLines(t).mask) : codeLines(t).mask, starts: lineStarts(t) });
     }
     return baseMasks.get(p)!;
   };
@@ -716,7 +768,7 @@ export function codeRanges(text: string, hunks: readonly ChangedHunkSpots[], bas
   // continuation range of a list's last statement, so code removed from a list's end shows nowhere whether it was
   // reached (round 11: J1-J3, a jump just before it).
   const endsList = (q: number) => q >= 0 && (text[q] === '}' || /^(?:case|default)\b/.test(text.slice(q, q + 8)));
-  const spots = baseOf ? joinToggled() : hunks;
+  const spots = baseOf && !moved ? joinToggled() : hunks;
   if (!spots) return null;
   /**
    * The hunks, each run of them joined with the unchanged lines between them where those lines read differently at the
@@ -780,7 +832,23 @@ export function codeRanges(text: string, hunks: readonly ChangedHunkSpots[], bas
       return { at: hS - 1, added, removed, from: bS, oldPath };
     });
   }
-  for (const h of spots) {
+  // The code/comment mask of a hunk's removed text as lexed in its base file; null: that file can't be read, or its
+  // lines there aren't the removed ones.
+  const removedMask = (h: ChangedHunkSpots, rText: string): Uint8Array | null => {
+    const base = h.oldPath !== undefined && h.from !== undefined ? baseFile(h.oldPath) : null;
+    if (!base) return null;
+    const rMask = new Uint8Array(rText.length);
+    let at = 0;
+    for (let k = 0; k < h.removed.length; k++) {
+      const line = h.removed[k]!;
+      const from = base.starts[h.from! - 1 + k];
+      if (from === undefined || base.text.slice(from, from + line.length) !== line) return null;
+      rMask.set(base.mask.subarray(from, from + line.length), at);
+      at += line.length + 1;
+    }
+    return rMask;
+  };
+  for (const [n, h] of spots.entries()) {
     // The added side: its characters at the head, whitespace left out.
     const aOff: number[] = [];
     const aLines: HunkLine[] = [];
@@ -798,20 +866,12 @@ export function codeRanges(text: string, hunks: readonly ChangedHunkSpots[], bas
     // The removed side: its characters, and which held code, as lexed in the base file they came from (round 10);
     // without a base reader (a direct call), its own text lexed.
     const rText = h.removed.join('\n');
-    let rMask: Uint8Array;
-    if (baseOf && h.removed.length) {
-      const base = h.oldPath !== undefined && h.from !== undefined ? baseFile(h.oldPath) : null;
-      if (!base) return null;
-      rMask = new Uint8Array(rText.length);
-      let at = 0;
-      for (let k = 0; k < h.removed.length; k++) {
-        const line = h.removed[k]!;
-        const from = base.starts[h.from! - 1 + k];
-        if (from === undefined || base.text.slice(from, from + line.length) !== line) return null;
-        rMask.set(base.mask.subarray(from, from + line.length), at);
-        at += line.length + 1;
-      }
-    } else rMask = codeLines(rText).mask;
+    const rMask = baseOf && h.removed.length ? removedMask(h, rText) : codeLines(rText).mask;
+    if (!rMask) {
+      if (!moved) return null;
+      unplaced.push(n);
+      continue;
+    }
     const rIdx: number[] = [];
     const rLines: HunkLine[] = h.removed.map(() => ({ chars: [], code: [] }));
     for (let i = 0, k = 0; i < rText.length; i++) {
@@ -823,7 +883,11 @@ export function codeRanges(text: string, hunks: readonly ChangedHunkSpots[], bas
       }
     }
     const ops = alignHunk(aLines, rLines);
-    if (!ops) return null;
+    if (!ops) {
+      if (!moved) return null;
+      unplaced.push(n);
+      continue;
+    }
     // Where the hunk's added text ends at the head (a removal after its last character is measured from there).
     const lastAdded = h.added.filter((l) => l >= 1 && l <= lines).at(-1);
     const after = lastAdded !== undefined ? starts[lastAdded]! : h.at >= lines ? text.length : starts[Math.max(0, h.at)]!;
@@ -878,6 +942,320 @@ export function codeRanges(text: string, hunks: readonly ChangedHunkSpots[], bas
     close();
   }
   return { chars: out.sort((x, y) => x[0] - y[0]), needs };
+}
+
+/**
+ * `mask` with what a formatter adds or drops as it re-wraps code taken out of the code (#1014: M5b, R3s): every `;`, a
+ * `,` before a closing bracket, and parentheses in two positions only: around one expression with no `,` or `;` of
+ * its own and not starting with `{` (G5, B16b), opened right after an assignment's `=`, `=>`, `return`, `throw`, `(`,
+ * `[`, `,` or `:` (Q-Pc), or after `??` (Q-Pq) when it holds no `?`, `:`, `|`, `&` or `=` outside brackets (PQ2,
+ * PQ3: `u.a ?? (u.b ? 1 : 2)` is not `u.a ?? u.b ? 1 : 2`), and closed right before `;`, `,`, `)`, `]`, `}` or the end (G2, G2e); or
+ * around an arrow function's one parameter (Q-P). Any other parenthesis is code, even one a formatter adds
+ * (`(a && b) || c`: a limit), as is every one when the brackets don't pair up (Z-F1: `a * (b + c)`, Z-F1b:
+ * `!(x instanceof Array)`, Z-F6: `s.open()`). Read on the statement reading of lexLines, outside strings and templates.
+ */
+function quiet(text: string, mask: Uint8Array): Uint8Array {
+  const out = new Uint8Array(mask);
+  const read = lexLines(text, 'statements');
+  if (!read.settled) return out;
+  const at: number[] = [];
+  for (let i = 0; i < text.length; i++) if (read.syntax[i]) at.push(i);
+  const ch = (k: number) => (k >= 0 && k < at.length ? text[at[k]!]! : '');
+  const close = new Map<number, number>();
+  const open: number[] = [];
+  let paired = true;
+  for (let k = 0; k < at.length; k++) {
+    const c = ch(k);
+    if (c === '(' || c === '[' || c === '{') open.push(k);
+    else if (c === ')' || c === ']' || c === '}') {
+      const o = open.pop();
+      if (o === undefined || (c === ')') !== (ch(o) === '(')) paired = false;
+      else if (c === ')') close.set(o, k);
+    }
+  }
+  const drop = (k: number) => {
+    out[at[k]!] = 0;
+  };
+  for (let k = 0; k < at.length; k++) {
+    const c = ch(k);
+    if (c === ';' || (c === ',' && /^[)\]}]$/.test(ch(k + 1)))) drop(k);
+  }
+  if (!paired || open.length) return out;
+  const word = (k: number) => /[\w$]/.test(ch(k));
+  for (const [o, k] of close) {
+    const inner = at.slice(o + 1, k);
+    if (!inner.length) continue;
+    const one = inner.every((_, j) => word(o + 1 + j)) && at[k - 1]! - at[o + 1]! === k - o - 2;
+    if (one && ch(k + 1) === '=' && ch(k + 2) === '>') {
+      drop(o);
+      drop(k);
+      continue;
+    }
+    let depth = 0;
+    let lone = ch(o + 1) !== '{';
+    // An operator that binds less tightly than `??` (`?:`, `||`, `&&`, `??`, an assignment, `=>`): PQ2, PQ3.
+    let loose = false;
+    for (let j = o + 1; j < k && lone; j++) {
+      const x = ch(j);
+      if (x === '(' || x === '[' || x === '{') depth++;
+      else if (x === ')' || x === ']' || x === '}') depth--;
+      else if (depth === 0 && (x === ',' || x === ';')) lone = false;
+      else if (depth === 0 && /[?:|&=]/.test(x)) loose = true;
+    }
+    const [p, pp] = [ch(o - 1), ch(o - 2)];
+    const after = /^[([,:]$/.test(p) || (p === '?' && !loose) || (p === '=' && !/[=!<>]/.test(pp)) || (p === '>' && pp === '=') || (word(o - 1) && /(?:^|[^\w$.])(?:return|throw)$/.test(text.slice(Math.max(0, at[o - 1]! - 7), at[o - 1]! + 1)));
+    if (lone && after && /^[;,)\]}]?$/.test(ch(k + 1))) {
+      drop(o);
+      drop(k);
+    }
+  }
+  return out;
+}
+
+/** Lines topUnits starts a statement on: always (a module's `export` or `import`, at a line's start), at no bracket
+ * whatever ends the code before (a keyword no expression goes on with: Z-A1, Z-A2, X2, X3), or where that code ended. */
+const ANCHOR = /^(?:export\b|import\b(?!\s*[(.]))/;
+const STATEMENT = /^\s*(?:(?:export|const|let|var|enum|interface|declare|abstract|namespace)\b|import\b(?!\s*[(.]))/;
+const DECLARATION = /^\s*(?:function|class|async|module\.exports|exports)\b/;
+
+/**
+ * A text's top-level statements as 1-based line spans [first, last] (`lex`: its codeLines), each to the last line
+ * holding code before the next one. A statement starts on a line outside every string, template and comment that
+ * starts a module's `export` or `import` (ANCHOR: only top-level code can, so no misread bracket moves it: Z-B1, Z-B2),
+ * or on one outside every bracket too, as the first reading of lexLines that is balanced says ('statements', then every
+ * `/` a regular expression: P1, E4, E5, E7), that starts with a keyword no expression goes on with (STATEMENT), or
+ * where the code before it has ended: it ends in `;` or `}` or the line starts a declaration, and it doesn't end in an
+ * operator (`=`, `=>`, `+`: a postfix `++` or `--` ends): E1, E1b, E1f. With no reading balanced, only ANCHOR lines
+ * start one. Code before the first statement is in none.
+ */
+function topUnits(text: string, lex: { code: boolean[]; mask: Uint8Array }): [number, number][] {
+  const own = lexLines(text, 'statements');
+  const every = own.balanced ? own : lexLines(text, true);
+  const read = own.balanced ? own : every.balanced ? every : null;
+  const fresh = (read ?? own).fresh;
+  const starts = lineStarts(text);
+  const out: [number, number][] = [];
+  // The last two code characters before line i.
+  let end = '';
+  for (let i = 0; i < lex.code.length; i++) {
+    if (!lex.code[i]) continue;
+    const line = text.slice(starts[i], starts[i + 1]);
+    let tail = end;
+    for (let o = starts[i]!; o < (starts[i + 1] ?? text.length); o++) if (lex.mask[o] && !/\s/.test(text[o]!)) tail = (tail + text[o]).slice(-2);
+    const goesOn = /[=+\-*%&|^!~?:,.<>]$/.test(end) && end !== '++' && end !== '--';
+    const opens = (fresh[i] && ANCHOR.test(line)) || (read !== null && read.top[i] && (!out.length || STATEMENT.test(line) || (!goesOn && (/[;}]$/.test(end) || DECLARATION.test(line)))));
+    if (opens) out.push([i + 1, i + 1]);
+    else if (out.length) out.at(-1)![1] = i + 1;
+    end = tail;
+  }
+  return out;
+}
+
+/**
+ * How much of the same-named statement git paired a moved-code unit with in place it must keep to count as that one
+ * edited (movedCode): the code characters both keep are at least 2/5 of the two's code characters together, a
+ * similarity (2 × kept / both) of at least 0.8 (G1, D1, U1: 0.95; N5's stale g: 0.67). Two too large to align
+ * (ALIGN_CELLS) don't count as one edited.
+ */
+const EDITED_IN_PLACE = [2, 5] as const;
+
+/**
+ * Code the PR moved in a way git doesn't pair (#1014: a file renamed and re-indented or edited, a function split out
+ * into another file or moved within its file, moved code re-wrapped), measured as if git had paired it: by file, the
+ * changed code (codeRanges) with each moved unit measured against its source. A moved unit is a top-level statement
+ * (topUnits: a function, a class, a declaration, an `exports.x =`) whose lines that hold code are all added, paired
+ * with one whose lines that hold code are all removed (either side's closing lines may be unchanged), from any app file
+ * at the base (`hunks`' removed lines, and `elsewhere`'s: the removed line spans of app files not measured, a deleted
+ * one say), never one git already paired it with (same): first one with the same code (formatting, quiet, and
+ * whitespace left out), which changed nothing in it (P2x: never aligned), then one with the same declared name, the
+ * closest pairs first, measured against it by codeRanges. Each source pairs once. A unit
+ * paired by name that can't be placed (rewritten too far to align: FH1, FH2) is measured as git paired it, as added
+ * code. A statement moved inside a statement that stays (two lines swapped in a function) is in no moved unit:
+ * reordering is a change. A file with no moved unit is not in the map: it is measured as git paired it. measureTouched
+ * counts a file only where both this and codeRanges count it, so pairing only ever takes away (M1, D1: a dead copy of
+ * an edited line's old text never makes the edit count).
+ */
+function movedCode(
+  heads: ReadonlyMap<string, { text: string; hunks: readonly ChangedHunkSpots[]; code: ChangedCode }>,
+  elsewhere: Readonly<Record<string, readonly (readonly [number, number])[]>>,
+  baseOf: (path: string) => string | null,
+): Map<string, ChangedCode> {
+  type Unit = { path: string; first: number; last: number; key: string; name: string | null; lines: string[] };
+  const nameOf = (line: string) => {
+    const m = /^\s*(?:(?:module\.)?exports\.([A-Za-z_$][\w$]*)\s*=(?!=)|(?:export\s+)?(?:default\s+)?(?:declare\s+)?(?:abstract\s+)?(?:async\s+)?(?:function\b\s*\*?\s*|class\s+|enum\s+|namespace\s+|(?:const|let|var)\s+(?:enum\s+)?)([A-Za-z_$][\w$]*))/.exec(line);
+    return m ? (m[1] ?? m[2])! : null;
+  };
+  // The top-level units of a text whose lines that hold code are all `kept`, hold only closing brackets and separators
+  // (a `}` git keeps between the unit and the code written in its place: E2, E2d), or are kept into one and the same
+  // place (`kept` gives it: a source's header git keeps for the unit rewritten in its place, Z-N2) with one of them
+  // `kept` itself (K-G: a unit kept whole inside new code is still there, no source).
+  const unitsOf = (path: string, text: string, kept: (l: number) => boolean | string): Unit[] => {
+    const lex = codeLines(text);
+    const code = quiet(text, lex.mask);
+    const starts = lineStarts(text);
+    const closes = (l: number) => {
+      for (let i = starts[l - 1]!; i < (starts[l] ?? text.length); i++) if (lex.mask[i] && !/[\s)\]};,]/.test(text[i]!)) return false;
+      return true;
+    };
+    const out: Unit[] = [];
+    for (const [first, last] of topUnits(text, lex)) {
+      let whole = true;
+      let into: string | null = null;
+      let gone = false;
+      for (let l = first; l <= last && whole; l++) {
+        if (!lex.code[l - 1]) continue;
+        const k = kept(l);
+        gone ||= k === true;
+        if (typeof k === 'string' && !closes(l)) {
+          whole = into === null || into === k;
+          into = k;
+        } else if (k !== true && !closes(l)) whole = false;
+      }
+      if (!whole || (into !== null && !gone)) continue;
+      let key = '';
+      for (let i = starts[first - 1]!; i < starts[last]!; i++) if (code[i] && !/\s/.test(text[i]!)) key += text[i];
+      if (!key) continue;
+      const lines: string[] = [];
+      for (let l = first; l <= last; l++) lines.push(text.slice(starts[l - 1], starts[l]).replace(/\n$/, ''));
+      out.push({ path, first, last, key, name: nameOf(lines[0]!), lines });
+    }
+    return out;
+  };
+  // The removed line spans of each base file, then its units wholly removed.
+  const removed = new Map<string, [number, number][]>();
+  const span = (p: string, s: readonly [number, number]) => removed.set(p, [...(removed.get(p) ?? []), [s[0], s[1]]]);
+  for (const { hunks } of heads.values()) for (const h of hunks) if (h.removed.length && h.oldPath !== undefined && h.from !== undefined) span(h.oldPath, [h.from, h.from + h.removed.length - 1]);
+  for (const [p, spans] of Object.entries(elsewhere)) for (const s of spans) span(p, s);
+  // Where an unchanged base line of `p` is at the head: the head file it went to, and the start of the head unit there
+  // holding it when that unit has code added (rewritten in place); null: anywhere else.
+  const rewritten = new Map<string, [number, number][]>();
+  const rewrittenIn = (f: string) => {
+    if (!rewritten.has(f)) {
+      const { text, hunks } = heads.get(f)!;
+      const lex = codeLines(text);
+      const lines = new Set(hunks.flatMap((h) => h.added));
+      rewritten.set(f, topUnits(text, lex).filter(([a, b]) => Array.from({ length: b - a + 1 }, (_, k) => a + k).some((l) => lex.code[l - 1] && lines.has(l))));
+    }
+    return rewritten.get(f)!;
+  };
+  const keptAt = (p: string, l: number): string | null => {
+    const f = [...heads.keys()].sort().find((x) => heads.get(x)!.hunks.some((h) => h.oldPath === p));
+    if (f === undefined) return null;
+    let at = l;
+    for (const h of [...heads.get(f)!.hunks].sort((x, y) => (x.from ?? 0) - (y.from ?? 0))) {
+      if (h.oldPath !== p || h.from === undefined) return null;
+      const bS = h.removed.length ? h.from : h.from + 1;
+      const hS = h.added.length ? h.added[0]! : h.at + 1;
+      if (l < bS) break;
+      if (l < bS + h.removed.length) return null;
+      at = l - (bS + h.removed.length) + hS + h.added.length;
+    }
+    const unit = rewrittenIn(f).find(([a, b]) => at >= a && at <= b);
+    return unit ? `${f}:${unit[0]}` : null;
+  };
+  const sources: (Unit & { used: boolean })[] = [];
+  for (const p of [...removed.keys()].sort()) {
+    const text = baseOf(p);
+    if (text === null) continue;
+    const spans = removed.get(p)!;
+    for (const u of unitsOf(p, text, (l) => spans.some(([a, b]) => l >= a && l <= b) || (keptAt(p, l) ?? false))) sources.push({ ...u, used: false });
+  }
+  const out = new Map<string, ChangedCode>();
+  if (!sources.length) return out;
+  const byKey = new Map<string, (typeof sources)[number][]>();
+  for (const s of sources) byKey.set(s.key, [...(byKey.get(s.key) ?? []), s]);
+  // Each file's units wholly added, first all of them paired by their code, then the rest by name.
+  const moves = new Map<string, { unit: Unit; from: (typeof sources)[number] }[]>();
+  const files = [...heads.keys()].sort();
+  const added = new Map<string, Unit[]>();
+  for (const f of files) {
+    const { text, hunks } = heads.get(f)!;
+    const lines = new Set(hunks.flatMap((h) => h.added));
+    added.set(f, unitsOf(f, text, (l) => lines.has(l)));
+  }
+  const pair = (f: string, unit: Unit, from: (typeof sources)[number]) => {
+    from.used = true;
+    moves.set(f, [...(moves.get(f) ?? []), { unit, from }]);
+  };
+  // Whether git already paired them: a hunk of the unit's file removed lines of the source and added lines of the unit.
+  // A unit git paired so with a removed statement of its own name (or, unnamed, with an unnamed one) that it keeps
+  // most of (EDITED_IN_PLACE) was edited in place and pairs with none: it is measured as git measured it (Z-F6 to
+  // Z-F11; G1, D1: not with a copy removed elsewhere). One that keeps less took that one's place (N5: a stale
+  // same-named g replaced by the g moved there) and pairs as any other, as does one too large to align with it
+  // (ALIGN_CELLS, each pair on its own as codeRanges aligns each hunk: BL1wb, BUDf, B3), since pairing only takes away.
+  const same = (u: Unit, s: Unit) => heads.get(u.path)!.hunks.some((h) => h.oldPath === s.path && h.from !== undefined && h.removed.length > 0 && h.from <= s.last && h.from + h.removed.length - 1 >= s.first && h.added.some((l) => l >= u.first && l <= u.last));
+  const edited = (u: Unit, s: Unit) => {
+    const ops = alignChars([...u.key], [...s.key]);
+    return ops !== null && ops.filter((x) => x === '=').length * EDITED_IN_PLACE[1] >= EDITED_IN_PLACE[0] * (u.key.length + s.key.length);
+  };
+  const left: [string, Unit][] = [];
+  for (const f of files) {
+    for (const u of added.get(f)!) {
+      const own = sources.find((s) => s.name === u.name && same(u, s));
+      if (own && edited(u, own)) continue;
+      const s = byKey.get(u.key)?.find((x) => !x.used && !same(u, x));
+      if (s) pair(f, u, s);
+      else if (u.name !== null) left.push([f, u]);
+    }
+  }
+  // Then by name, the closest pairs first (Z-N1 to Z-N4: a same-named unit never takes another's source by its path).
+  // Each pair a unit or a source shares with another is scored on its own (ZN1B, ZN4B, ZN1spent: no pair spends
+  // another's cells): by character, or, too large for that (ALIGN_CELLS), by the tokens of `key` (SEMI, CMT,
+  // WRAP-1of2: formatting, comments and line breaks are no change here either), each run of tokens between kept ones
+  // weighing the characters it doesn't keep, aligned by character (UB100: an edited name costs its edit, not its
+  // length); the tokens or one run of them too large for that too, the PR waits (ZN1T, BR220: never weighed by length).
+  const named = left.flatMap(([f, u]) => sources.filter((s) => !s.used && s.name === u.name && !same(u, s)).map((s) => ({ f, u, s, score: 0 })));
+  const ways = new Map<Unit, number>();
+  for (const { u, s } of named) for (const x of [u, s]) ways.set(x, (ways.get(x) ?? 0) + 1);
+  const closeness = (u: Unit, s: Unit) => {
+    const kept = alignChars([...u.key], [...s.key]);
+    if (kept) return kept.filter((x) => x === '=').length * 2 - u.key.length - s.key.length;
+    const [ul, sl] = [u.key, s.key].map((k) => k.match(/[\w$]+|[^\w$]+/g)!);
+    const untold = () => new CoverageUnreadable(`two statements named ${u.name} are too large to tell which one ${u.path}:${u.first} was moved from`);
+    const ops = alignChars(ul!, sl!);
+    if (!ops) throw untold();
+    let [i, j, score, ru, rs] = [0, 0, 0, '', ''];
+    const run = () => {
+      const o = ru || rs ? alignChars([...ru], [...rs]) : [];
+      if (!o) throw untold();
+      score -= o.filter((x) => x !== '=').length;
+      [ru, rs] = ['', ''];
+    };
+    for (const op of ops) {
+      if (op === '=') {
+        run();
+        [i, j] = [i + 1, j + 1];
+      } else if (op === '+') ru += ul![i++]!;
+      else rs += sl![j++]!;
+    }
+    run();
+    return score;
+  };
+  for (const c of named) if (ways.get(c.u)! > 1 || ways.get(c.s)! > 1) c.score = closeness(c.u, c.s);
+  const taken = new Set<Unit>();
+  for (const c of named.map((c, n) => ({ ...c, n })).sort((x, y) => y.score - x.score || x.n - y.n)) {
+    if (c.s.used || taken.has(c.u)) continue;
+    taken.add(c.u);
+    pair(c.f, c.u, c.s);
+  }
+  for (const [f, ms] of moves) {
+    const { text, code } = heads.get(f)!;
+    ms.sort((x, y) => x.unit.first - y.unit.first);
+    // A unit with its source's code changed nothing: only those paired by name are measured against their source.
+    const aligned = ms.filter(({ unit, from }) => unit.key !== from.key);
+    const hunks = aligned.map(({ unit, from }): ChangedHunkSpots => ({ at: unit.first - 1, added: Array.from({ length: unit.last - unit.first + 1 }, (_, k) => unit.first + k), removed: from.lines, from: from.first, oldPath: from.path }));
+    const unplaced: number[] = [];
+    const m = (hunks.length && codeRanges(text, hunks, baseOf, unplaced)) || { chars: [], needs: [] };
+    // One it can't place (rewritten past alignment: FH1, FH2) is measured as added code, as git paired it.
+    const placed = ms.filter((x) => !unplaced.includes(aligned.indexOf(x)));
+    // The units' lines, as offsets: what codeRanges found there gives way to each unit measured against its source.
+    const starts = lineStarts(text);
+    // So do the removals git measured inside one (N6: a stale one-line g git aligned with the g moved in its place).
+    const inOne = (os: readonly number[]) => placed.some(({ unit }) => os.every((o) => o >= starts[unit.first - 1]! && o < starts[unit.last]!));
+    const inUnit = (o: number) => inOne([o]);
+    out.set(f, { chars: [...code.chars.filter(([a]) => !inUnit(a)), ...m.chars].sort((x, y) => x[0] - y[0]), needs: [...code.needs.filter((n) => !inOne(n)), ...m.needs] });
+  }
+  return out;
 }
 
 /** The 1-based lines `ranges` fall on (for a build's sources, which its map places by line). */
@@ -1037,27 +1415,37 @@ export function touchedAppFiles(coverageDir: string, root: string, appPaths: str
  * more times (#784 round 7). The gate loads each on its own and reads again with `loads`, each run's coverage taken
  * away as many times as its script was evaluated more, on top of the test baseline's (ranMore).
  */
-export function measureTouched(coverageDir: string, root: string, appPaths: string[], only?: readonly string[], hunks?: Readonly<Record<string, readonly ChangedHunkSpots[]>>, baselineDir?: string, loads: readonly LoadRun[] = [], baseOf?: (path: string) => string | null): { touched: string[]; loads: { script: string; extra: number }[] } {
+export function measureTouched(coverageDir: string, root: string, appPaths: string[], only?: readonly string[], hunks?: Readonly<Record<string, readonly ChangedHunkSpots[]>>, baselineDir?: string, loads: readonly LoadRun[] = [], baseOf?: (path: string) => string | null, elsewhere: Readonly<Record<string, readonly (readonly [number, number])[]>> = {}): { touched: string[]; loads: { script: string; extra: number }[] } {
   const res = appPaths.map((g) => globToRegExp(g));
   const realRoot = realpathSync.native(root);
   const wanted = hunks ? new Set(Object.keys(hunks)) : only ? new Set(only) : null;
   if (hunks && only) for (const f of [...wanted!]) if (!only.includes(f)) wanted!.delete(f);
   const isApp = (rel: string) => !rel.startsWith('..') && res.some((re) => re.test(rel)) && (!wanted || wanted.has(rel));
   // Each changed file's changed code characters, from its text at the head (the worktree's), and the lines they are on
-  // (a build's map places code by line).
-  const changed = new Map<string, { code: ChangedCode; lines: LineSpans }>();
+  // (a build's map places code by line); `moved`, the same with the code it moved measured against its source
+  // (movedCode, #1014), which must count too.
+  const changed = new Map<string, { code: ChangedCode; lines: LineSpans; moved: { code: ChangedCode; lines: LineSpans } }>();
   if (hunks) {
+    const heads = new Map<string, { text: string; hunks: readonly ChangedHunkSpots[]; code: ChangedCode }>();
     for (const f of wanted!) {
       const text = textOf(join(realRoot, f), SCRIPT_BYTES);
       const code = text === null ? { chars: [], needs: [] } : codeRanges(text, hunks[f]!, baseOf);
       // A change it can't place by character holds the PR: never measured by the whole line instead (#784 round 9).
       if (code === null) throw new CoverageUnreadable(UNPLACEABLE);
-      changed.set(f, { code, lines: linesOf(text === null ? [0] : lineStarts(text), code.chars) });
+      const lines = linesOf(text === null ? [0] : lineStarts(text), code.chars);
+      changed.set(f, { code, lines, moved: { code, lines } });
+      if (text !== null) heads.set(f, { text, hunks: hunks[f]!, code });
     }
     if (![...changed.values()].some((s) => s.code.chars.length || s.code.needs.length)) throw new CoverageUnreadable(NOTHING_TO_MEASURE);
+    if (baseOf) {
+      const others = Object.fromEntries(Object.entries(elsewhere).filter(([p]) => !p.startsWith('..') && res.some((re) => re.test(p))));
+      for (const [f, code] of movedCode(heads, others, baseOf)) changed.get(f)!.moved = { code, lines: linesOf(lineStarts(heads.get(f)!.text), code.chars) };
+    }
   }
   const codeOf = (rel: string): ChangedCode | null => (hunks ? (changed.get(rel)?.code ?? { chars: [], needs: [] }) : null);
+  const movedOf = (rel: string): ChangedCode | null => (hunks ? (changed.get(rel)?.moved.code ?? { chars: [], needs: [] }) : null);
   const spansOf = (rel: string): LineSpans | null => (hunks ? (changed.get(rel)?.lines ?? []) : null);
+  const movedSpansOf = (rel: string): LineSpans | null => (hunks ? (changed.get(rel)?.moved.lines ?? []) : null);
   // Every process's segments of each script under the root: the test runs' summed (`ran`), and what loading accounts
   // for (`loaded`): the test baseline's, plus each load-only run's times how many more times the tests evaluated the
   // script it loaded than the test baseline did (#784 round 7).
@@ -1119,7 +1507,7 @@ export function measureTouched(coverageDir: string, root: string, appPaths: stri
     const ranges = ranMore(ran, [loaded]);
     if (!ranges.length) continue;
     if (isApp(rel)) {
-      if (ranOn(ranges, codeOf(rel), pieces)) touched.add(rel);
+      if (ranOn(ranges, codeOf(rel), pieces) && ranOn(ranges, movedOf(rel), pieces)) touched.add(rel);
       continue;
     }
     for (const [src, lines] of mappedLines(file, ranges, text, realRoot, budget)) {
@@ -1130,8 +1518,8 @@ export function measureTouched(coverageDir: string, root: string, appPaths: stri
   for (const [src, ran] of mappedRan) {
     if (!isApp(src) || touched.has(src)) continue;
     // A build's sources are placed by line only, so a removal there never counts (round 11: no V8 range to test its sides).
-    const s = spansOf(src);
-    if (!s ? ran.size > 0 : s.some(([a, b]) => [...ran].some((l) => l >= a && l <= b))) touched.add(src);
+    const hit = (s: LineSpans | null) => (!s ? ran.size > 0 : s.some(([a, b]) => [...ran].some((l) => l >= a && l <= b)));
+    if (hit(spansOf(src)) && hit(movedSpansOf(src))) touched.add(src);
   }
   // Every script the tests evaluated more often than the test baseline did: what each run as it loaded is still in
   // `ran` until it is loaded on its own (the gate does, then reads again with `loads`).
@@ -1154,6 +1542,8 @@ export interface TouchedRequest {
   appPaths: string[];
   only: string[];
   hunks: Record<string, ChangedHunkSpots[]>;
+  /** By base path, the removed line spans [first, last] of app files `hunks` leaves out (a deleted one): code moved from there is paired (#1014). */
+  elsewhere?: Record<string, [number, number][]>;
   /** The load-only runs (#784 rounds 6, 7), once the scripts to load are known. */
   loads?: LoadRun[];
   /**
