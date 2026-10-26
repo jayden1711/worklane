@@ -210,6 +210,12 @@ test('push gate does not read UTF-16LE text one byte late as UTF-16BE, which dro
   assert.match(be.stderr, /image\.png: denied term "zqx" in a binary file/);
 });
 
+test('push gate refuses a term in UTF-16LE text after a stray letter and before a NUL: only a UTF-16BE run there is LE text read late (#1057)', { skip }, () => {
+  const p = gateBinary('image.png', unfenced(Buffer.concat([Buffer.from('B'), Buffer.from('built by zqx', 'utf16le'), Buffer.from([0, 0])])));
+  assert.notEqual(p.status, 0, 'UTF-16LE "built by zqx" between a stray letter and a NUL: refused');
+  assert.match(p.stderr, /image\.png: denied term "zqx" in a binary file/);
+});
+
 test('push gate finds a term in a text run far longer than one scan piece, also where it crosses a piece boundary (#1057)', { skip }, () => {
   const text = `${'x'.repeat(65530)} secretproject ${'made '.repeat(20000)}otherhandle`;
   for (const [what, bytes] of [['ASCII', Buffer.from(text)], ['UTF-16LE', Buffer.from(text, 'utf16le')]] as const) {
