@@ -23,5 +23,6 @@
   tip can't run or passes 4,000,000 changed characters, its reason is given beside the reasons from the PR's base. The
   PR waited before too, but the owner saw only the one reason.
 - **`doctor` checks git's version (#1077).** It fails on a git older than 2.40. The merge decision's checks need
-  `merge-tree --write-tree` (2.38) and `check-attr --source` (2.40), and with an older git every PR waits for the
-  owner.
+  `merge-tree --write-tree` (2.38) for every PR and `check-attr --source` (2.40) for a PR that changes a
+  `.gitattributes`. Below 2.38 every PR waits for the owner; on 2.38 or 2.39 only a PR that changes a `.gitattributes`
+  does.

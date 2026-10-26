@@ -329,16 +329,22 @@ function gitVersion(cwd: string): [number, number] | null {
 
 /**
  * Why `git version`'s output (`text`) names a git too old for the merge decision's checks, or null when it is new
- * enough. They need MIN_GIT_FOR_MERGE_TREE and MIN_GIT_FOR_ATTRIBUTE_SOURCE; with an older git they can't run, and
- * every PR waits for the owner. For the setup checks (doctor), which say so up front.
+ * enough. They need MIN_GIT_FOR_MERGE_TREE for every PR (mergedTree) and MIN_GIT_FOR_ATTRIBUTE_SOURCE for a PR that
+ * changes a `.gitattributes` (attributeOutcome); a PR whose check can't run waits for the owner. For the setup checks
+ * (doctor), which say so up front.
  */
 export function gitTooOld(text: string): string | null {
-  const need = [MIN_GIT_FOR_MERGE_TREE, MIN_GIT_FOR_ATTRIBUTE_SOURCE].reduce((a, b) => (b[0] > a[0] || (b[0] === a[0] && b[1] > a[1]) ? b : a));
+  const below = (v: readonly [number, number], m: readonly [number, number]) => v[0] < m[0] || (v[0] === m[0] && v[1] < m[1]);
+  const need = [MIN_GIT_FOR_MERGE_TREE, MIN_GIT_FOR_ATTRIBUTE_SOURCE].reduce((a, b) => (below(a, b) ? b : a));
   const v = versionOf(text);
-  const older = v === null || v[0] < need[0] || (v[0] === need[0] && v[1] < need[1]);
-  if (!older) return null;
+  if (v !== null && !below(v, need)) return null;
+  const tree = `${MIN_GIT_FOR_MERGE_TREE[0]}.${MIN_GIT_FOR_MERGE_TREE[1]}`;
+  const attributes = `${MIN_GIT_FOR_ATTRIBUTE_SOURCE[0]}.${MIN_GIT_FOR_ATTRIBUTE_SOURCE[1]}`;
+  const waits = v === null ? `with a git older than ${tree} every PR waits for the owner, and with an older one than ${attributes} every PR that changes a .gitattributes does`
+    : below(v, MIN_GIT_FOR_MERGE_TREE) ? 'with this git every PR waits for the owner'
+    : 'with this git every PR that changes a .gitattributes waits for the owner';
   const said = v === null ? `can't read git's version (${text.trim().slice(0, 80) || 'no output'})` : `git ${v[0]}.${v[1]}`;
-  return `${said}: the merge decision needs git ${need[0]}.${need[1]} or later (merge-tree --write-tree, check-attr --source); with an older git every PR waits for the owner`;
+  return `${said}: the merge decision needs git ${need[0]}.${need[1]} or later (merge-tree --write-tree from ${tree}, check-attr --source from ${attributes}); ${waits}`;
 }
 
 /**

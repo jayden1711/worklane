@@ -1,5 +1,6 @@
 // #1077: the merge decision measures a merge with `git merge-tree --write-tree` (git 2.38) and reads a tree's
-// attributes with `check-attr --source` (git 2.40); with an older git every PR waits. Doctor says so up front.
+// attributes with `check-attr --source` (git 2.40) when a PR changes a `.gitattributes`; a PR whose check can't run
+// waits. Doctor says so up front.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
@@ -11,10 +12,13 @@ import { doctor } from '../src/doctor.js';
 
 test('gitTooOld: 2.40 or later passes; older, or a version it cannot read, says what the merge decision needs', () => {
   for (const ok of ['git version 2.40.0', 'git version 2.43.0\n', 'git version 2.50.1 (Apple Git-155)', 'git version 3.0.0']) assert.equal(gitTooOld(ok), null, ok);
-  for (const [text, said] of [['git version 2.37.3', 'git 2.37'], ['git version 2.39.5', 'git 2.39'], ['git version 1.99.0', 'git 1.99'], ['', "can't read git's version (no output)"], ['hub version 2.40', "can't read git's version (hub version 2.40)"]]) {
-    const r = gitTooOld(text!);
+  const every = /; with this git every PR waits for the owner$/;
+  const attributes = /; with this git every PR that changes a \.gitattributes waits for the owner$/;
+  const unread = /; with a git older than 2\.38 every PR waits for the owner, and with an older one than 2\.40 every PR that changes a \.gitattributes does$/;
+  for (const [text, said, waits] of [['git version 2.37.3', 'git 2.37', every], ['git version 1.99.0', 'git 1.99', every], ['git version 2.38.0', 'git 2.38', attributes], ['git version 2.39.5', 'git 2.39', attributes], ['', "can't read git's version (no output)", unread], ['hub version 2.40', "can't read git's version (hub version 2.40)", unread]] as const) {
+    const r = gitTooOld(text);
     assert.ok(r?.startsWith(`${said}: the merge decision needs git 2.40 or later`), `${text}: ${r}`);
-    assert.match(r!, /every PR waits for the owner/);
+    assert.match(r!, waits);
   }
 });
 
