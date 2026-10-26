@@ -3,13 +3,14 @@
 // and with its budget enforced here from the CLI's own token counts; its change is held after (cliChangeRefusal).
 import { spawn } from './os/child-process.js';
 import { BRAND } from './brand.js';
+import { redactCut } from './events/redact.js';
 import { asUser, killTreeAs, spawnDetached } from './os/index.js';
 import { ownEnv } from './os/own-env.js';
 import { safeProjectEnv } from './project-env.js';
 import { providerRefusal, type CliAgentName } from './providers.js';
 import { RunFeed } from './run-feed.js';
 import { RunRecorder, runIssue } from './run-record.js';
-import { agentEnv, DEFAULT_COMMIT_IDENTITY, identityEnv, redactTail, runAsEnv, stderrTail, withLoginLock, type AgentRunner, type CommitIdentity, type RunAs, type RunRequest, type RunResult, type TerminalReason } from './runner.js';
+import { agentEnv, DEFAULT_COMMIT_IDENTITY, identityEnv, keepStderr, redactTail, runAsEnv, STDERR_KEPT, stderrTail, withLoginLock, type AgentRunner, type CommitIdentity, type RunAs, type RunRequest, type RunResult, type TerminalReason } from './runner.js';
 import { StuckDetector, stuckAction, type StuckVerdict } from './stuck.js';
 import { limitHit, USAGE_LIMIT_TEXT } from './usage-limit.js';
 
@@ -360,11 +361,12 @@ export class CliAgentRunner implements AgentRunner {
         }
       });
       child.stderr.on('data', (d: Buffer) => {
-        stderr = (stderr + d.toString()).slice(-4000);
+        stderr = keepStderr(stderr, d.toString());
       });
       child.on('close', (code) => {
         clearTimeout(stall);
         clearTimeout(overall);
+        stderr = redactTail(stderr, STDERR_KEPT);
         const o = parser.outcome;
         const costUsd = cliCost(o.tokens, prices);
         const base = { costUsd, turns: o.turns, model: o.model ?? req.model, provider: label, tokens: { ...o.tokens }, durationMs: Math.max(0, (this.o.now ?? Date.now)() - started), ...(o.sessionId ? { sessionId: o.sessionId } : {}) };
@@ -380,13 +382,13 @@ export class CliAgentRunner implements AgentRunner {
         const why = o.failed ?? (o.finished ? undefined : o.lastError);
         const text = `${why ?? ''}\n${stderrTail(stderr)}`;
         if ((why !== undefined || code !== 0) && (USAGE_LIMIT_TEXT.test(text) || /\b429\b|rate.?limit|quota/i.test(text))) {
-          return done({ reason: 'rate_limited', detail: `usage or rate limit reached: ${(why ?? stderrTail(stderr)).slice(0, 300)}`, limit: limitHit({ text, now: (this.o.now ?? Date.now)() }), ...base });
+          return done({ reason: 'rate_limited', detail: `usage or rate limit reached: ${redactCut(why ?? stderrTail(stderr), 300)}`, limit: limitHit({ text, now: (this.o.now ?? Date.now)() }), ...base });
         }
-        if (why !== undefined) return done({ reason: 'failed', detail: `${label}: ${why.slice(0, 500)}`, ...base });
+        if (why !== undefined) return done({ reason: 'failed', detail: `${label}: ${redactCut(why, 500)}`, ...base });
         if (!o.finished || code !== 0) return done({ reason: 'failed', detail: `${label} exited ${code} without finishing: ${stderrTail(stderr)}`, ...base });
         const structured = req.jsonSchema ? structuredOutput(o.text) : undefined;
-        if (req.jsonSchema && structured === undefined) return done({ reason: 'failed', detail: `${label} ended without the JSON object its answer must end with: ${o.text.slice(-300)}`, ...base });
-        done({ reason: 'succeeded', detail: o.text.slice(0, 500), ...(structured !== undefined ? { structured } : {}), ...base });
+        if (req.jsonSchema && structured === undefined) return done({ reason: 'failed', detail: `${label} ended without the JSON object its answer must end with: ${redactTail(o.text, 300)}`, ...base });
+        done({ reason: 'succeeded', detail: redactCut(o.text, 500), ...(structured !== undefined ? { structured } : {}), ...base });
       });
     });
   }
