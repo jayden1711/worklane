@@ -2,10 +2,11 @@
 // A scanner that can't run is reported as unavailable, never as "clean".
 import { spawn, spawnSync } from '../os/child-process.js';
 import { createHash } from 'node:crypto';
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { delimiter, dirname, join, resolve as resolvePath } from 'node:path';
-import { presentNames, rawChanges, untrackedNames } from '../coordinator/change-files.js';
+import { delimiter, dirname, isAbsolute, join, resolve as resolvePath } from 'node:path';
+import { ignoredNames, presentNames, rawChanges, untrackedNames } from '../coordinator/change-files.js';
+import { notRootsProgram } from '../os/index.js';
 import { findTool } from '../tool-path.js';
 
 export interface Finding {
@@ -57,6 +58,8 @@ export interface CommitScanScope {
   logReads?: boolean;
   /** The line asks for commits' signatures to be shown. */
   signatureReads?: boolean;
+  /** A git mv before the commit names an attributes file, so a file may become one after the scan has looked. */
+  moves?: boolean;
 }
 
 /** One file of a comparison: its content after the commit, and before it (null: the file is new). */
@@ -367,10 +370,8 @@ export function checkReadPrograms(top: string, scope: CommitScanScope, depth = 0
   if (scope.logReads && signer) throw new Error(`the checkout's config names a program git runs to check signatures (${signer}), and the line shows commits before it commits`);
   // WHY (owner, 2026-10-21): the standard large-file filter, exactly as its installer writes it, is allowed; it stores
   // the file's own bytes, which the scan reads (lfsContent). Any other value, or any other filter, still refuses.
-  if (filters.has('lfs') && lfsStandard(config)) {
-    filters.delete('lfs');
-    lfsProgramIsFile();
-  }
+  const lfs = filters.has('lfs') && lfsStandard(config);
+  if (lfs) filters.delete('lfs');
   const tracked = filters.size ? [...new Set([...presentNames(top, null), ...untrackedNames(top)])] : [];
   if (tracked.some((p) => p.includes('�'))) throw new Error('a file in this checkout has a name that is not UTF-8, so its attributes can\'t be checked');
   if (tracked.length) {
@@ -381,9 +382,72 @@ export function checkReadPrograms(top: string, scope: CommitScanScope, depth = 0
       }
     }
   }
+  // WHY (#1011): git runs git-lfs as a filter only for a file under the filter, and a checkout where no attributes
+  // source names it (the filter set up globally) has none, so the program isn't checked there. git-lfs's own hooks
+  // (post-commit and the others `git lfs install` writes) still run the git-lfs PATH finds; this scan doesn't model
+  // hooks (#1110). Every source counts whether or not a path matches it now, since staging in the line can change
+  // which files match; so does a git mv that may make a file an attributes file.
+  if (lfs) {
+    if (scope.moves) lfsProgramRootsAlone(top, 'a git mv earlier in the line may make a file an attributes file after the scan has looked; run the git mv in a call of its own, then commit');
+    else if (attributesNameLfs(top, config)) lfsProgramRootsAlone(top, 'an attributes source here names the large-file filter');
+  }
   // WHY: a read and the scan's own listing reach into each checked-out submodule under that submodule's own config,
   // and a nested checkout the line stages becomes one.
   for (const sub of submodules(top, scope.untracked)) checkReadPrograms(sub, scope, depth + 1);
+}
+
+/** An attributes file's name in a checkout, as git reads it (any case: a case-insensitive file system matches it). */
+export const ATTRIBUTES_FILE = /(^|\/)\.gitattributes\/*$/i;
+const NAMES_LFS = /filter=lfs/;
+
+/**
+ * Whether any attributes source of the checkout at `top` names the large-file filter, whatever path it matches: an
+ * attributes file in the working tree (tracked, untracked or ignored), the index or HEAD, the repository's own, the
+ * user's and the system's. One that can't be read counts as naming it, and so does a tree the config or the
+ * environment names as the attributes source (attr.tree, GIT_ATTR_SOURCE), which isn't read.
+ */
+function attributesNameLfs(top: string, config: Map<string, string[]>): boolean {
+  if (config.has('attr.tree') || process.env.GIT_ATTR_SOURCE !== undefined) return true;
+  const names = (b: Buffer) => NAMES_LFS.test(b.toString('latin1'));
+  const file = (path: string | null): boolean => {
+    if (!path) return false;
+    try {
+      return names(readFileSync(path));
+    } catch (e) {
+      return (e as NodeJS.ErrnoException).code !== 'ENOENT' && (e as NodeJS.ErrnoException).code !== 'ENOTDIR';
+    }
+  };
+  for (const p of [...presentNames(top, null), ...untrackedNames(top), ...ignoredNames(top)]) if (ATTRIBUTES_FILE.test(p) && file(join(top, p))) return true;
+  const ids: string[] = [];
+  const head = headId(top);
+  for (const [rev, prefix] of [[null, ':'], ...(head ? [[head, `${head}:`]] : [])] as [string | null, string][]) {
+    for (const p of presentNames(top, rev)) {
+      if (!ATTRIBUTES_FILE.test(p)) continue;
+      // WHY: an object is asked for by name, one a line; a name that can't be written so counts as naming the filter.
+      if (/[\n\r]/.test(p) || p.includes('�')) return true;
+      ids.push(`${prefix}${p}`);
+    }
+  }
+  if (objects(top, [...new Set(ids)]).some(names)) return true;
+  const gitDir = resolvePath(top, gitOut(top, ['rev-parse', '--git-common-dir']).toString('utf8').trim());
+  // WHY: git reads a relative attributes file name from the checkout's top level (measured, git 2.43).
+  return [join(gitDir, 'info', 'attributes'), gitVar(top, 'GIT_ATTR_GLOBAL'), gitVar(top, 'GIT_ATTR_SYSTEM')].some((p) => file(p && resolvePath(top, p)));
+}
+
+/** `git var <name>`: the user's or the system's attributes file; null when git names none (GIT_ATTR_NOSYSTEM). */
+function gitVar(top: string, name: string): string | null {
+  const r = spawnSync('git', ['--no-replace-objects', 'var', name], { cwd: top, encoding: 'utf8', timeout: 60_000 });
+  if (r.error) throw r.error;
+  if (r.status === 0) return r.stdout.trim() || null;
+  // WHY: a git that names no such file exits with nothing said (no home, GIT_ATTR_NOSYSTEM); a git older than 2.42
+  // has no such variable and reads the files its defaults name; anything else is a failure, never "no file".
+  if (!r.stderr.trim()) return null;
+  if (!/unknown variable|usage: git var/i.test(r.stderr)) throw new Error(`git var ${name} failed, so the attributes file it names can't be checked`);
+  if (name === 'GIT_ATTR_SYSTEM') return process.env.GIT_ATTR_NOSYSTEM ? null : '/etc/gitattributes';
+  const set = spawnSync('git', ['config', '--path', '--get', 'core.attributesFile'], { cwd: top, encoding: 'utf8', timeout: 60_000 });
+  if (set.status === 0 && set.stdout.trim()) return set.stdout.trim();
+  const xdg = process.env.XDG_CONFIG_HOME || (process.env.HOME ? join(process.env.HOME, '.config') : '');
+  return xdg ? join(xdg, 'git', 'attributes') : null;
 }
 
 /** The large-file filter's config exactly as its standard install writes it (#971, owner 2026-10-21). */
@@ -414,20 +478,22 @@ function lfsStandard(config: Map<string, string[]>): boolean {
   return Object.entries(LFS_STANDARD).every(([k, v]) => (config.get(k) ?? []).length > 0 && config.get(k)!.every((x) => x === v));
 }
 
-/** Throws when a `git-lfs` that git would run (the first on PATH) is not a regular file. */
-function lfsProgramIsFile() {
-  for (const dir of (process.env.PATH ?? '').split(delimiter).filter(Boolean)) {
+/**
+ * Throws unless the `git-lfs` git would run is a program only root can change. git looks on its own exec path first,
+ * then on PATH. INVARIANT (#1011): the scan can't verify the program, and it runs after the scan has read the files,
+ * so one the agent's user could replace, one on a path that depends on the folder, or none found refuses the commit.
+ */
+function lfsProgramRootsAlone(top: string, why: string) {
+  const execPath = gitOut(top, ['--exec-path']).toString('utf8').trim();
+  for (const dir of [execPath, ...(process.env.PATH ?? '').split(delimiter)]) {
+    if (!isAbsolute(dir)) throw new Error(`${why}, and the path git looks for git-lfs on has an entry that is not an absolute directory (${JSON.stringify(dir)}), so which git-lfs it runs depends on the folder`);
     const p = join(dir, 'git-lfs');
     if (!existsSync(p) && !isLink(p)) continue;
-    let ok = false;
-    try {
-      ok = statSync(p).isFile();
-    } catch {
-      ok = false;
-    }
-    if (!ok) throw new Error(`the git-lfs git would run (${p}) is not a regular file`);
+    const bad = notRootsProgram(p);
+    if (bad) throw new Error(`${why}, and the git-lfs git would run (${p}) ${bad}, so it could change what is stored after the scan has read it`);
     return;
   }
+  throw new Error(`${why}, and no git-lfs is on the path the scan can check, so it can't tell which program git would run`);
 }
 
 const isLink = (p: string) => {
@@ -460,12 +526,14 @@ function lfsContent(top: string, files: Compared[]): Compared[] {
   }
   if (!tracked.size) return files;
   const store = join(resolvePath(top, gitOut(top, ['rev-parse', '--git-common-dir']).toString('utf8').trim()), 'lfs', 'objects');
-  const read = (b: Buffer | null): Buffer | null => {
-    if (b === null || b.length > 1024) return b;
-    const m = LFS_POINTER.exec(b.toString('latin1'));
-    // INVARIANT (#971): the large-file program reads more spellings as a pointer than the one form read here; a small
-    // file that names any pointer version and isn't that exact form refuses the commit, never scanned as text alone.
-    if (!m && LFS_MARKER.test(b.toString('latin1'))) throw new Error('a large file in this commit looks like a large-file pointer but is not in its exact form, so the object it may name can\'t be read');
+  const read = (b: Buffer | null, now: boolean): Buffer | null => {
+    if (b === null) return b;
+    const m = b.length > 1024 ? null : LFS_POINTER.exec(b.toString('latin1'));
+    // INVARIANT (#971, #1011): the large-file program reads more spellings as a pointer than the one form read here,
+    // and reads a file of any size as one from its first 1024 bytes (the rest ignored); a file whose first 1024 bytes
+    // name any pointer version and that isn't that exact form refuses the commit, never scanned as text alone. The
+    // side before is only subtracted from what is found, so read as its bytes alone it can only find more.
+    if (!m && now && LFS_MARKER.test(b.subarray(0, 1024).toString('latin1'))) throw new Error('a large file in this commit looks like a large-file pointer but is not in its exact form, so the object it may name can\'t be read');
     if (!m) return b;
     const oid = m[1]!;
     const at = join(store, oid.slice(0, 2), oid.slice(2, 4), oid);
@@ -480,7 +548,7 @@ function lfsContent(top: string, files: Compared[]): Compared[] {
     if (object.length !== Number(m[2]) || createHash('sha256').update(object).digest('hex') !== oid) throw new Error('a large-file pointer in this commit names an object whose content does not match it');
     return Buffer.concat([b, Buffer.from('\n'), object]);
   };
-  return files.map((f) => (tracked.has(f.path) ? { ...f, now: read(f.now)!, before: read(f.before) } : f));
+  return files.map((f) => (tracked.has(f.path) ? { ...f, now: read(f.now, true)!, before: read(f.before, false) } : f));
 }
 
 /**
