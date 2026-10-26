@@ -7,7 +7,7 @@ import type { GuardrailsConfig, Rule } from '../config/schema.js';
 import { basename, splitCommands, type SimpleCommand } from './shell.js';
 import { connectionsIn, fingerprint } from './fingerprint.js';
 import { globToRegExp } from './glob.js';
-import { pushHookFileRefusal, pushHookShellRefusal } from './push-hook.js';
+import { pushHookFileRefusal, pushHookShellRefusal, type GitLookup } from './push-hook.js';
 import { callAccesses, Secrets } from './access.js';
 import { asWritten, hardLinked, Reach } from './reach.js';
 import { BRAND } from '../brand.js';
@@ -67,6 +67,8 @@ export interface EvalContext {
   home?: string;
   /** Linked environment for a CLI in a directory, or null if unknown. */
   linkedEnvironment(resolver: string, cwd: string): string | null;
+  /** A read-only git query, for the names git reads from its config (aliases). Absent: any such name may push. */
+  git?: GitLookup;
 }
 
 export interface Verdict {
@@ -437,7 +439,7 @@ export function evaluate(call: ToolCall, cfg: GuardrailsConfig, ctx: EvalContext
   {
     const abs = (t: string) => (isAbsolute(t) ? t : resolve(call.cwd, t));
     const p = EDIT_TOOLS.has(call.tool) ? filePathOf(call) : null;
-    const refusal = (p ? pushHookFileRefusal(p, abs(p), call.input) : null) ?? (call.tool === 'Bash' && typeof call.input.command === 'string' ? pushHookShellRefusal(call.input.command, commands, abs) : null);
+    const refusal = (p ? pushHookFileRefusal(p, abs(p), call.input) : null) ?? (call.tool === 'Bash' && typeof call.input.command === 'string' ? pushHookShellRefusal(call.input.command, commands, abs, ctx.git ? { cwd: call.cwd, git: ctx.git } : undefined) : null);
     if (refusal) return { decision: 'deny', rule: refusal.rule, reason: refusal.reason };
     // The same files judged by the file each write reaches (#972).
     for (const t of targets) {
