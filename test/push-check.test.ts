@@ -45,6 +45,7 @@ function repo() {
 
 const limits = (over: Partial<PushLimits> = {}): PushLimits => ({ ...DEFAULT_PUSH_LIMITS, ...over });
 
+
 test('a small ordinary change passes the push limits', () => {
   const r = repo();
   const head = r.commit({ 'src/a.js': 'export const a = 1;\n' });
@@ -84,6 +85,16 @@ test('a checkpoint glob with ** matches at any depth', () => {
   const r = repo();
   const head = r.commit({ 'models/deep/m.ckpt': 'w\n' });
   assert.match(pushProblems(r.work, r.baseSha, head, limits({ refuse_paths: ['**/*.ckpt'] })).join(''), /models\/deep\/m\.ckpt/);
+});
+
+test('refuse_paths: a ? stands for one character outside the BMP, as ** does (#966)', () => {
+  const r = repo();
+  const head = r.commit({ 'keys/\u{1F511}.pem': 'k\n' });
+  for (const glob of ['keys/?.pem', 'keys/??.pem', 'keys/**']) {
+    const p = pushProblems(r.work, r.baseSha, head, limits({ refuse_paths: [glob] }));
+    assert.equal(p.length, 1, `${glob}: ${p.join('\n')}`);
+    assert.match(p[0]!, /push\.refuse_paths/);
+  }
 });
 
 test('a CI workflow change is refused with the reason (no Workflows permission), whatever the limits', () => {
