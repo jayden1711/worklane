@@ -925,6 +925,45 @@ test('must merge: UB100t: UB100 with the arm the test takes edited too', async (
   assert.deepEqual([d.auto, d.reasons], [true, []]);
 });
 
+// A g moved with one long expression in a block the test never enters, every token of it edited (`+ alphaqN` to
+// `- alpharN`), so the whole edit is one run of tokens: past ALIGN_CELLS (n of 220, some 2,160 characters a side) it
+// can't be aligned by character, and the PR waits rather than weigh it by its length against the two-line decoy g.
+const BRG = (n: number, edited: boolean, other = 'deny') => `export function g(u) {\n  if (u.never) {\n    return 0\n${lines(n, (i) => (edited ? `      - alphar${i}\n` : `      + alphaq${i}\n`))}  }\n  return u.admin ? grant(u) : ${other}(u);\n}\n`;
+const brMoved = (n: number, decoy: string | null, tested = false) => {
+  const head: Record<string, string> = { 'src/a.js': G_A, 'src/c.js': BRG(n, true, tested ? 'denyAll' : 'deny') + ZN1L_ARMS, 'test/x.test.js': CM_T('c.js', tested ? "'nothing'" : "'none'") };
+  if (decoy) head[decoy] = G_DECOY;
+  return decided({ 'src/a.js': G_A + BRG(n, false) + ZN1L_ARMS }, head);
+};
+const tooLarge = (d: { auto: boolean; reasons: string[] }) => {
+  assert.equal(d.auto, false);
+  assert.match(d.reasons.join('\n'), /two statements named g are too large to tell which one src\/[bcz]\.js:\d+ was moved from/);
+};
+for (const [id, n, decoy, tested] of [['BR220', 220, 'src/b.js', false], ['BR220z', 220, 'src/z.js', false], ['BR300', 300, 'src/b.js', false], ['BR220t', 220, 'src/b.js', true]] as const) {
+  test(`must hold: ${id}: a g moved with one run of ${n} lines edited${tested ? ' and its taken arm edited (tested)' : ''}, too large to align by character, a two-line decoy g in ${decoy.slice(4)}: too large to tell`, async () => {
+    tooLarge(await brMoved(n, decoy, tested));
+  });
+}
+test('control: BR220c: BR220 with no decoy holds on its untested code', async () => {
+  const d = await brMoved(220, null);
+  assert.deepEqual([d.auto, d.reasons], hold('src/a.js, src/c.js'));
+});
+// Many short runs, each a long name edited a little, every run between kept punctuation: each run aligns on its own,
+// so the pair is told apart although its runs together are past ALIGN_CELLS.
+const LNG = (n: number, edited: boolean, other = 'deny') => `export function g(u) {\n  if (u.never) {\n${lines(n, (i) => (edited ? `    u.configurationValueForItemNumberX${i} = lookupConfigurationEntryX(u, ${i});\n` : `    u.configurationValueForItemNumber${i} = lookupConfigurationEntry(u, ${i});\n`))}  }\n  return u.admin ? grant(u) : ${other}(u);\n}\n`;
+const lngMoved = (decoy: string | null, tested = false) => {
+  const head: Record<string, string> = { 'src/a.js': G_A, 'src/c.js': LNG(100, true, tested ? 'denyAll' : 'deny') + ZN1L_ARMS, 'test/x.test.js': CM_T('c.js', tested ? "'nothing'" : "'none'") };
+  if (decoy) head[decoy] = G_DECOY;
+  return decided({ 'src/a.js': G_A + LNG(100, false) + ZN1L_ARMS }, head);
+};
+test('must hold: LNG100: a g moved with a long name in each of 100 lines edited, a two-line decoy g in b.js', async () => {
+  const d = await lngMoved('src/b.js');
+  assert.deepEqual([d.auto, d.reasons], hold('src/a.js, src/b.js, src/c.js'));
+});
+test('must merge: LNG100t: LNG100 with the arm the test takes edited too (each run is aligned on its own)', async () => {
+  const d = await lngMoved('src/b.js', true);
+  assert.deepEqual([d.auto, d.reasons], [true, []]);
+});
+
 // Too large to tell even by token which of two same-named statements was moved: the PR waits, even with its change
 // tested, and never falls back to the closer-looking one.
 test('must hold: ZN1T: M3 with a 204-line g moved and its taken arm edited (tested), a two-line decoy g in b.js, too large to tell apart', async () => {

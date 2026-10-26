@@ -1203,7 +1203,7 @@ function movedCode(
   // another's cells): by character, or, too large for that (ALIGN_CELLS), by the tokens of `key` (SEMI, CMT,
   // WRAP-1of2: formatting, comments and line breaks are no change here either), each run of tokens between kept ones
   // weighing the characters it doesn't keep, aligned by character (UB100: an edited name costs its edit, not its
-  // length); too large for that too, the PR waits (ZN1T).
+  // length); the tokens or one run of them too large for that too, the PR waits (ZN1T, BR220: never weighed by length).
   const named = left.flatMap(([f, u]) => sources.filter((s) => !s.used && s.name === u.name && !same(u, s)).map((s) => ({ f, u, s, score: 0 })));
   const ways = new Map<Unit, number>();
   for (const { u, s } of named) for (const x of [u, s]) ways.set(x, (ways.get(x) ?? 0) + 1);
@@ -1211,12 +1211,14 @@ function movedCode(
     const kept = alignChars([...u.key], [...s.key]);
     if (kept) return kept.filter((x) => x === '=').length * 2 - u.key.length - s.key.length;
     const [ul, sl] = [u.key, s.key].map((k) => k.match(/[\w$]+|[^\w$]+/g)!);
+    const untold = () => new CoverageUnreadable(`two statements named ${u.name} are too large to tell which one ${u.path}:${u.first} was moved from`);
     const ops = alignChars(ul!, sl!);
-    if (!ops) throw new CoverageUnreadable(`two statements named ${u.name} are too large to tell which one ${u.path}:${u.first} was moved from`);
+    if (!ops) throw untold();
     let [i, j, score, ru, rs] = [0, 0, 0, '', ''];
     const run = () => {
       const o = ru || rs ? alignChars([...ru], [...rs]) : [];
-      score -= o ? o.filter((x) => x !== '=').length : ru.length + rs.length;
+      if (!o) throw untold();
+      score -= o.filter((x) => x !== '=').length;
       [ru, rs] = ['', ''];
     };
     for (const op of ops) {
