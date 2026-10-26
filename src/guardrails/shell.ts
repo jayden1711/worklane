@@ -218,9 +218,22 @@ function tokenize(src: string, nested: string[]): Token[] {
 const SEPARATORS = new Set([';', '&&', '||', '|', '|&', '&', '(', ')', '{', '}']);
 const WRITE_REDIRECTS = new Set(['>', '>>', '>|', '&>', '&>>']);
 
+/** A wrapper's options that take the next word as their value, so that word is not the command. */
+const WRAPPER_VALUE_OPTIONS: Record<string, RegExp> = {
+  sudo: /^-[ugCDhprtU]$/,
+  env: /^(-[a-zA-Z0]*[uCS]|--unset|--chdir|--split-string)$/,
+  nice: /^(-n|--adjustment)$/,
+  ionice: /^(-[cnpPu]|--class|--classdata|--pid|--pgid|--uid)$/,
+  exec: /^-[a-z]*a$/,
+  doas: /^-[uC]$/,
+  time: /^(-[fo]|--format|--output)$/,
+};
+/** env's option whose value is a command line, split into words (env -S 'git push'). */
+const ENV_SPLIT = /^(-[a-zA-Z0]*S|--split-string(=|$))/;
+
 /**
  * argv without wrappers; VAR=value given to `env` is recorded in `assignments` (it sets the command's environment),
- * and `env`'s options in `envOptions`.
+ * and `env`'s options, with their values, in `envOptions`.
  */
 function stripWrappers(argv: string[], assignments: Record<string, string> = {}, envOptions: string[] = []): string[] {
   let a = argv;
@@ -228,13 +241,24 @@ function stripWrappers(argv: string[], assignments: Record<string, string> = {},
     const base = basename(a[0]!);
     if (WRAPPERS.has(base)) {
       a = a.slice(1);
-      // sudo/env options and env assignments
+      // Wrapper options (with their values) and env assignments
       while (a.length && (a[0]!.startsWith('-') || (base === 'env' && /^[A-Za-z_][A-Za-z0-9_]*=/.test(a[0]!)))) {
         const opt = a[0]!;
         a = a.slice(1);
-        if (base === 'env' && !opt.startsWith('-')) assignments[opt.slice(0, opt.indexOf('='))] = opt.slice(opt.indexOf('=') + 1);
-        else if (base === 'env') envOptions.push(opt);
-        if (base === 'sudo' && ['-u', '-g', '-C', '-D', '-h', '-p', '-r', '-t', '-U'].includes(opt)) a = a.slice(1);
+        if (base === 'env' && !opt.startsWith('-')) {
+          assignments[opt.slice(0, opt.indexOf('='))] = opt.slice(opt.indexOf('=') + 1);
+          continue;
+        }
+        const takesValue = WRAPPER_VALUE_OPTIONS[base]?.test(opt) && a.length > 0;
+        const value = takesValue ? a[0]! : undefined;
+        if (takesValue) a = a.slice(1);
+        if (base !== 'env') continue;
+        envOptions.push(opt, ...(value === undefined ? [] : [value]));
+        const split = ENV_SPLIT.exec(opt);
+        if (split) {
+          const line = value ?? (opt.includes('=') ? opt.slice(opt.indexOf('=') + 1) : opt.slice(split[0].length));
+          a = [...line.split(/\s+/).filter(Boolean), ...a];
+        }
       }
       continue;
     }
@@ -262,6 +286,16 @@ function stripWrappers(argv: string[], assignments: Record<string, string> = {},
   }
   return a;
 }
+
+/** A command's words with its wrappers removed, as splitCommands reads them (for a program another one runs). */
+export function unwrap(argv: string[]): Pick<SimpleCommand, 'argv' | 'assignments' | 'envOptions'> {
+  const assignments: Record<string, string> = {};
+  const envOptions: string[] = [];
+  return { argv: stripWrappers(argv, assignments, envOptions), assignments, envOptions };
+}
+
+/** Whether a program is a wrapper splitCommands removes (sudo, env, nice, timeout, xargs, ...). */
+export const isWrapper = (name: string) => WRAPPERS.has(name) || ['timeout', 'xargs', 'npx', 'pnpx', 'bunx'].includes(name);
 
 export function basename(p: string): string {
   const parts = p.split(/[\\/]/);

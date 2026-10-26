@@ -5,7 +5,7 @@
 // Like the rest of the shell matcher this is best effort (shell.ts): the runner also drops the variable from every
 // agent's environment (runner.ts agentEnv), and the hook itself refuses the hatch inside an agent run.
 import { resolve as resolvePath } from 'node:path';
-import { basename, splitCommands, type SimpleCommand } from './shell.js';
+import { basename, isWrapper, splitCommands, unwrap, type SimpleCommand } from './shell.js';
 
 /** The hatch: set to 1 in a person's own shell, for one push. */
 export const PUSH_GATE_HATCH_ENV = 'PUSH_GATE_BOOTSTRAP';
@@ -109,27 +109,51 @@ function gitCall(c: SimpleCommand): GitCall | null {
   return isGit(c.argv[0] ?? '') ? parseGit(c.argv) : null;
 }
 
-// WHY: programs that never run their arguments as a command, so a word `git` among them is only a word.
-const NON_EXEC = new Set(['echo', 'printf', 'grep', 'egrep', 'fgrep', 'rg', 'cat', 'head', 'tail', 'wc', 'less', 'more', 'sort', 'uniq', 'cut', 'nl', 'ls', 'man', 'which', 'type', 'whereis', 'test', '[', 'cd', 'pushd', 'mkdir', 'touch', 'stat', 'file']);
-
-/** `git <sub> ...` for git's words from `a[k]` on, a dashed program (git-push) read as its subcommand. */
-function asGit(a: string[], k: number): string[] {
-  const dashed = DASHED_GIT.exec(basename(a[k]!));
-  return dashed ? ['git', dashed[1]!.toLowerCase(), ...a.slice(k + 1)] : a.slice(k);
+/** `git <sub> ...` for a git program's words, a dashed program (git-push) read as its subcommand. */
+function asGit(a: string[]): string[] {
+  const dashed = DASHED_GIT.exec(basename(a[0]!));
+  return dashed ? ['git', dashed[1]!.toLowerCase(), ...a.slice(1)] : a;
 }
 const startsGit = (t: string) => isGit(t) || DASHED_GIT.test(basename(t));
 
+/** Programs that run the rest of their words as a command, after options of their own (setsid git push). */
+const RUNNERS = new Set(['setsid', 'stdbuf', 'strace', 'ltrace', 'chronic', 'unbuffer', 'flock', 'taskset', 'chrt', 'nsenter', 'unshare', 'caffeinate', 'fakeroot', 'firejail', 'systemd-run', 'runuser', 'ssh-agent', 'dbus-run-session']);
+const FIND_EXEC = /^-(exec|execdir|ok|okdir)$/;
+/** A word a runner's command may start with: git or one of its programs, env or another wrapper, a runner, find. */
+const runnable = (t: string) => {
+  const b = basename(t);
+  return startsGit(t) || HOOKLESS_PUSH_PROGRAM.test(b) || isWrapper(b) || RUNNERS.has(b) || b === 'find';
+};
+
+type Program = Pick<SimpleCommand, 'argv' | 'envOptions'>;
+
 /**
- * git's words in a command: run directly, or run by a program the shell matcher doesn't model (a wrapper with an
- * option it doesn't read, find -exec): from the first word `git` (or git-push, git-config) on. null when none.
+ * Every program a command runs, in command position: itself (its wrappers removed by the shell matcher), each
+ * find -exec/-execdir/-ok command, and a runner's command (from its first word `runnable` reads). A word that is
+ * only an argument (rm -rf vendor/git, grep env -i) runs nothing.
  */
-function gitWordsIn(c: SimpleCommand): string[] | null {
+function programsIn(c: Program, depth = 0): Program[] {
+  const out = [c];
   const a = c.argv;
-  if (startsGit(a[0] ?? '')) return asGit(a, 0);
-  if (!a.length || NON_EXEC.has(basename(a[0]!))) return null;
-  const k = a.findIndex((t, i) => i > 0 && startsGit(t));
-  return k > 0 ? asGit(a, k) : null;
+  if (depth > 4 || !a.length) return out;
+  const base = basename(a[0]!);
+  const runs: string[][] = [];
+  if (base === 'find') {
+    for (let i = 1; i < a.length; i++) {
+      if (!FIND_EXEC.test(a[i]!)) continue;
+      const end = a.findIndex((t, j) => j > i && (t === ';' || t === '+'));
+      runs.push(a.slice(i + 1, end < 0 ? a.length : end));
+    }
+  } else if (RUNNERS.has(base)) {
+    const k = a.findIndex((t, i) => i > 0 && runnable(t));
+    if (k > 0) runs.push(a.slice(k));
+  }
+  for (const r of runs) if (r.length) out.push(...programsIn(unwrap(r), depth + 1));
+  return out;
 }
+
+/** git's words (`git` first) for every git program a command runs. */
+const gitWordsIn = (c: SimpleCommand) => programsIn(c).filter((p) => startsGit(p.argv[0] ?? '')).map((p) => asGit(p.argv));
 
 interface Resolved extends GitCall {
   /** Whether git may run a push for this call. */
@@ -221,13 +245,10 @@ function lineDirs(commands: SimpleCommand[], cwd: string): string[] | string {
 }
 
 /**
- * The options a command gives `env` (-i, -u NAME, -), which can take git's config away: as a wrapper, or as a word
- * of a program the shell matcher doesn't model (find -exec env -i ...).
+ * The options (with their values) a command gives `env` (-i, -u NAME, -), which can take git's config away: an env
+ * in command position, as a wrapper or as a program find -exec or a runner runs.
  */
-function envOptionsOf(c: SimpleCommand): string[] {
-  const k = c.argv.findIndex((t, i) => basename(t) === 'env' && c.argv[i + 1]?.startsWith('-'));
-  return k < 0 ? c.envOptions : [...c.envOptions, c.argv[k + 1]!];
-}
+const envOptionsOf = (c: SimpleCommand) => programsIn(c).flatMap((p) => p.envOptions);
 const unsets = (c: SimpleCommand) => basename(c.argv[0] ?? '') === 'unset' || (basename(c.argv[0] ?? '') === 'export' && c.argv.includes('-n'));
 
 /** Why the line's own environment may change what git reads, so a lookup made outside it can't tell; or null. */
@@ -291,13 +312,13 @@ export function pushHookShellRefusal(command: string, commands: SimpleCommand[],
   const look = lookup ? { git: lookup.git, dirs: lineDirs(commands, lookup.cwd), env: lineEnv(commands), own: ownCommands(lookup.git, lookup.cwd, commandLists(commands)) } : null;
   const calls: Resolved[] = [];
   for (const c of commands) {
-    const program = basename(c.argv[0] ?? '');
-    if (HOOKLESS_PUSH_PROGRAM.test(program)) return bypass(`${program} pushes without git's pre-push hook`);
-    const words = gitWordsIn(c);
-    if (!words) continue;
-    const r = resolveGit(words, look);
-    if (typeof r === 'string') return bypass(`${r}, so the guard can't tell whether it pushes without the hook; run git's own command by its name`);
-    calls.push(...r);
+    const hookless = programsIn(c).map((p) => basename(p.argv[0] ?? '')).find((n) => HOOKLESS_PUSH_PROGRAM.test(n));
+    if (hookless) return bypass(`${hookless} pushes without git's pre-push hook`);
+    for (const words of gitWordsIn(c)) {
+      const r = resolveGit(words, look);
+      if (typeof r === 'string') return bypass(`${r}, so the guard can't tell whether it pushes without the hook; run git's own command by its name`);
+      calls.push(...r);
+    }
   }
   const pushes = calls.some((g) => g.pushes);
   for (const c of commands) {

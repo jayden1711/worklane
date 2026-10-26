@@ -242,6 +242,43 @@ test('text inside a quoted argument is not a command: a commit message may say e
   for (const c of ['env -i git push', 'git commit -m x && env -u HOME git push', 'bash -c "env -i git push"', 'find . -maxdepth 0 -exec env -i git push \\;']) assert.equal(bash(c).rule, 'push-hook-bypass', c);
 });
 
+test('git, env and the hookless push programs count only where a command runs them, not as any argument (#993)', () => {
+  // A word that names git or env as an argument runs nothing.
+  for (const c of [
+    'cd "$D" && rm -rf vendor/git build',
+    'cd "$D" && tar czf out.tgz src/git docs',
+    'cd "$D" && sudo apt-get install -y git curl',
+    'GIT_TRACE=1 make -C third_party/git all',
+    'git grep env -- src && git push',
+    'find . -name env -type d && git push',
+    'rg env -i src && git push',
+    'ls env -la && git push',
+    'which env -a && git push',
+    'echo env -i && git push',
+  ]) assert.equal(bash(c).decision, 'none', c);
+  // Where a wrapper or runner the guard models runs them, they are read.
+  for (const c of [
+    'nice -n 15 git push --no-verify',
+    'ionice -c 3 git push --no-verify',
+    'env -u X git push --no-verify',
+    'env -iu X git push',
+    'env --unset X git push --no-verify',
+    'env -C /tmp git push --no-verify',
+    "env -S 'git push --no-verify'",
+    'exec -a x git push --no-verify',
+    'setsid git push --no-verify',
+    'flock /tmp/l git push --no-verify',
+    'strace -f -o /tmp/t git push --no-verify',
+    'setsid env -i git push',
+    'find . -maxdepth 0 -exec /usr/lib/git-core/git-send-pack ../remote.git HEAD:refs/heads/sp \\;',
+    'find . -maxdepth 0 -execdir git-http-push https://example.com/r.git HEAD \\;',
+    'find . -maxdepth 0 -exec git-push --no-verify \\;',
+    'find . -maxdepth 0 -exec true \\; -exec git push --no-verify \\;',
+    'setsid /usr/lib/git-core/git-send-pack ../remote.git HEAD',
+    'xargs -0 /usr/lib/git-core/git-send-pack ../remote.git < /dev/null',
+  ]) assert.deepEqual([bash(c).decision, bash(c).rule], ['deny', 'push-hook-bypass'], c);
+});
+
 test('a git name read from config: an alias or a correction to push is judged as the push it runs (#993)', () => {
   const { dir } = exampleProject();
   const git = (...a: string[]) => execFileSync('git', a, { cwd: dir, stdio: 'ignore' });
