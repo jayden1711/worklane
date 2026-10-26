@@ -127,6 +127,12 @@ test("the second measurement over its bound keeps the first one's reasons beside
   assert.deepEqual(kinds(weakening.weakeningReasons(over, removing(0, 1))), [UNREADABLE, ASSERTION]);
 });
 
+test("a conflict in a file whose name isn't UTF-8 waits: it names no file a check could be read from", () => {
+  const conflicted = (p: string): weakening.WeakeningInput => ({ files: [], deleted: new Set(), before: () => null, after: () => null, scope: undefined, conflicts: [p] });
+  assert.deepEqual(kinds(weakening.weakeningReasons(conflicted('web/x\uFFFD.bin'))), [CONFLICT]);
+  assert.deepEqual(weakening.weakeningReasons(conflicted('web/x.bin')), []);
+});
+
 /**
  * `git` on PATH as a shim: `merge-tree` prints `out` and exits `code`; anything else runs the real git. For a git that
  * can't run `merge-tree --write-tree` (older than 2.38) and for output it doesn't expect.
