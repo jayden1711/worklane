@@ -9,7 +9,7 @@ import { safeProjectEnv } from './project-env.js';
 import { providerRefusal, type CliAgentName } from './providers.js';
 import { RunFeed } from './run-feed.js';
 import { RunRecorder, runIssue } from './run-record.js';
-import { agentEnv, DEFAULT_COMMIT_IDENTITY, identityEnv, runAsEnv, stderrTail, withLoginLock, type AgentRunner, type CommitIdentity, type RunAs, type RunRequest, type RunResult, type TerminalReason } from './runner.js';
+import { agentEnv, DEFAULT_COMMIT_IDENTITY, identityEnv, redactTail, runAsEnv, stderrTail, withLoginLock, type AgentRunner, type CommitIdentity, type RunAs, type RunRequest, type RunResult, type TerminalReason } from './runner.js';
 import { StuckDetector, stuckAction, type StuckVerdict } from './stuck.js';
 import { limitHit, USAGE_LIMIT_TEXT } from './usage-limit.js';
 
@@ -34,7 +34,8 @@ const TOOL_OUTPUT_MAX = 2000;
 const num = (v: unknown): number => (typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : 0);
 const str = (v: unknown): string => (typeof v === 'string' ? v : '');
 const toolUse = (id: string, name: string, input: object) => ({ type: 'assistant', message: { content: [{ type: 'tool_use', id, name, input }] } });
-const toolResult = (id: string, content: string, isError: boolean) => ({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: id, content: content.slice(-TOOL_OUTPUT_MAX), is_error: isError }] } });
+// WHY: redacted before its end is kept (#1065), so a secret across the cut is hidden whole, not passed on as its end.
+const toolResult = (id: string, content: string, isError: boolean) => ({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: id, content: redactTail(content, TOOL_OUTPUT_MAX), is_error: isError }] } });
 const said = (text: string) => ({ type: 'assistant', message: { content: [{ type: 'text', text }] } });
 
 interface CodexItem {
