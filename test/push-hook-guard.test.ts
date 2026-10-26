@@ -187,6 +187,22 @@ test('an agent may not skip the pre-push hook in any other spelling git reads (#
   ]) assert.deepEqual([bash(c).decision, bash(c).rule], ['deny', 'push-hook-bypass'], c);
 });
 
+test("git's own push and config programs, run by name or path, are read as git push and git config (#993)", () => {
+  for (const c of [
+    '/usr/lib/git-core/git-push --no-verify origin HEAD',
+    '$(git --exec-path)/git-push --no-verify origin HEAD',
+    '"$(git --exec-path)/git-push" -q --no-veri origin HEAD',
+    'git-push --no-verify',
+    'C:/Git/mingw64/libexec/git-core/git-push.exe --no-verify',
+    'HOME=/tmp/h /usr/lib/git-core/git-push origin HEAD',
+    'xargs /usr/lib/git-core/git-push --no-verify < /dev/null',
+    "/usr/lib/git-core/git-config alias.p 'push --no-verify'",
+    '$(git --exec-path)/git-config core.hooksPath /tmp/h',
+    'git-config --global --edit',
+  ]) assert.deepEqual([bash(c).decision, bash(c).rule], ['deny', 'push-hook-bypass'], c);
+  for (const c of ['/usr/lib/git-core/git-push origin HEAD', 'git-config --get core.hooksPath']) assert.equal(bash(c).decision, 'none', c);
+});
+
 test('text inside a quoted argument is not a command: a commit message may say env -i (#993)', () => {
   for (const c of ['git commit -m "fix env -i handling" && git push', "git commit -m 'env -u X' && git push origin HEAD"]) assert.equal(bash(c).decision, 'none', c);
   for (const c of ['env -i git push', 'git commit -m x && env -u HOME git push', 'bash -c "env -i git push"']) assert.equal(bash(c).rule, 'push-hook-bypass', c);
@@ -241,6 +257,11 @@ test('the spellings are real: git skips the pre-push hook for each, and the guar
     const line = ['git', ...args.map((a) => (/\s/.test(a) ? `'${a}'` : a))].join(' ');
     assert.deepEqual([bash(line, true, work).decision, bash(line, true, work).rule], ['deny', 'push-hook-bypass'], line);
   }
+  // git's own git-push program, run by path.
+  const program = join(run(['--exec-path'], work).stdout.trim(), 'git-push');
+  const dashed = spawnSync(program, ['-q', '--no-verify', 'origin', 'HEAD:refs/heads/f'], { cwd: work, encoding: 'utf8', env: { ...process.env, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null' } });
+  assert.equal(dashed.status === 0 && !dashed.stderr.includes('HOOK-RAN'), true, `${program} --no-verify skips the hook`);
+  assert.equal(bash(`${program} -q --no-verify origin HEAD:refs/heads/f`, true, work).rule, 'push-hook-bypass');
 });
 
 test('what stays frictionless for an agent: plain pushes and commits, reading about the hatch, its own tests and docs', () => {

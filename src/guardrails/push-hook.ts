@@ -33,6 +33,8 @@ const NO_VERIFY = /^--no-v(e(r(i(f(y)?)?)?)?)?(=|$)/;
 /** git commands that push without running the pre-push hook: the plumbing under push, and the remote helpers. */
 const HOOKLESS_PUSH = /^(send-pack|http-push|remote-.+)$/;
 const HOOKLESS_PUSH_PROGRAM = /^git-(send-pack|http-push|remote-.+?)(\.exe)?$/i;
+/** git's own push and config programs, run by name or path (`$(git --exec-path)/git-push`): git push, git config. */
+const DASHED_GIT = /^git-(push|config)(\.exe)?$/i;
 /**
  * git's own commands that never push. git never lets an alias shadow one of its commands, so only another name is
  * looked up. INVARIANT: only real git commands are listed (an alias named like one that isn't would go unread).
@@ -109,16 +111,23 @@ function gitCall(c: SimpleCommand): GitCall | null {
 // WHY: programs that never run their arguments as a command, so a word `git` among them is only a word.
 const NON_EXEC = new Set(['echo', 'printf', 'grep', 'egrep', 'fgrep', 'rg', 'cat', 'head', 'tail', 'wc', 'less', 'more', 'sort', 'uniq', 'cut', 'nl', 'ls', 'man', 'which', 'type', 'whereis', 'test', '[', 'cd', 'pushd', 'mkdir', 'touch', 'stat', 'file']);
 
+/** `git <sub> ...` for git's words from `a[k]` on, a dashed program (git-push) read as its subcommand. */
+function asGit(a: string[], k: number): string[] {
+  const dashed = DASHED_GIT.exec(basename(a[k]!));
+  return dashed ? ['git', dashed[1]!.toLowerCase(), ...a.slice(k + 1)] : a.slice(k);
+}
+const startsGit = (t: string) => isGit(t) || DASHED_GIT.test(basename(t));
+
 /**
  * git's words in a command: run directly, or run by a program the shell matcher doesn't model (a wrapper with an
- * option it doesn't read, find -exec): from the first word `git` on. null when there is none.
+ * option it doesn't read, find -exec): from the first word `git` (or git-push, git-config) on. null when none.
  */
 function gitWordsIn(c: SimpleCommand): string[] | null {
   const a = c.argv;
-  if (isGit(a[0] ?? '')) return a;
+  if (startsGit(a[0] ?? '')) return asGit(a, 0);
   if (!a.length || NON_EXEC.has(basename(a[0]!))) return null;
-  const k = a.findIndex((t, i) => i > 0 && isGit(t));
-  return k > 0 ? a.slice(k) : null;
+  const k = a.findIndex((t, i) => i > 0 && startsGit(t));
+  return k > 0 ? asGit(a, k) : null;
 }
 
 interface Resolved extends GitCall {
