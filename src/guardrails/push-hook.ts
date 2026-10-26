@@ -185,14 +185,20 @@ function lineDirs(commands: SimpleCommand[], cwd: string): string[] | string {
   return dirs;
 }
 
-/** `env` given an option (-i, -u NAME, -): the shell matcher drops it, and it can take git's config away. */
-const ENV_OPTIONS = /(^|[\s;&|(`'"/])env\s+-/;
+/**
+ * The options a command gives `env` (-i, -u NAME, -), which can take git's config away: as a wrapper, or as a word
+ * of a program the shell matcher doesn't model (find -exec env -i ...).
+ */
+function envOptionsOf(c: SimpleCommand): string[] {
+  const k = c.argv.findIndex((t, i) => basename(t) === 'env' && c.argv[i + 1]?.startsWith('-'));
+  return k < 0 ? c.envOptions : [...c.envOptions, c.argv[k + 1]!];
+}
 const unsets = (c: SimpleCommand) => basename(c.argv[0] ?? '') === 'unset' || (basename(c.argv[0] ?? '') === 'export' && c.argv.includes('-n'));
 
 /** Why the line's own environment may change what git reads, so a lookup made outside it can't tell; or null. */
-function lineEnv(command: string, commands: SimpleCommand[]): string | null {
+function lineEnv(commands: SimpleCommand[]): string | null {
   if (commands.some((c) => assigned(c).some(([n]) => /^GIT_/i.test(n) || PUSH_ENV.test(n)))) return "sets git's environment";
-  if (commands.some(unsets) || ENV_OPTIONS.test(command)) return "changes git's environment";
+  if (commands.some((c) => unsets(c) || envOptionsOf(c).length)) return "changes git's environment";
   return null;
 }
 
@@ -247,7 +253,7 @@ export function pushHookShellRefusal(command: string, commands: SimpleCommand[],
 
   // INVARIANT (#993): every git call is judged as git reads it, alias and correction included; one the guard can't
   // read that way is refused.
-  const look = lookup ? { git: lookup.git, dirs: lineDirs(commands, lookup.cwd), env: lineEnv(command, commands) } : null;
+  const look = lookup ? { git: lookup.git, dirs: lineDirs(commands, lookup.cwd), env: lineEnv(commands) } : null;
   const calls: Resolved[] = [];
   for (const c of commands) {
     const program = basename(c.argv[0] ?? '');
@@ -268,7 +274,7 @@ export function pushHookShellRefusal(command: string, commands: SimpleCommand[],
     const hit = c.writes.find((w) => isGitHooksOrConfigPath(w, resolve(w)));
     if (hit) return bypass(`${hit} is a git hooks dir or config file`);
   }
-  if (pushes && ENV_OPTIONS.test(command)) return bypass("env with an option in a push's line can take git's config away");
+  if (pushes && commands.some((c) => envOptionsOf(c).length)) return bypass("env with an option in a push's line can take git's config away");
   for (const git of calls) {
     if (git.sub && HOOKLESS_PUSH.test(git.sub)) return bypass(`git ${git.sub} pushes without git's pre-push hook`);
     if (git.configs.some((k) => HOOKS_PATH_KEY.test(k))) return bypass('git -c core.hooksPath points git at other hooks');

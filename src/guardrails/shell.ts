@@ -10,6 +10,8 @@ export interface SimpleCommand {
   argv: string[];
   /** VAR=value assignments that prefixed the command. */
   assignments: Record<string, string>;
+  /** Options given to an `env` wrapper (`-i`, `-u`, `-`): removed from argv with the wrapper. */
+  envOptions: string[];
   /**
    * Files written by redirection (>, >>, &>) or tee, or that the command's own arguments name as changed: copied
    * or moved to, moved or removed, edited in place (sed -i, perl -i), created (touch, mkdir), linked, dd of=.
@@ -216,8 +218,11 @@ function tokenize(src: string, nested: string[]): Token[] {
 const SEPARATORS = new Set([';', '&&', '||', '|', '|&', '&', '(', ')', '{', '}']);
 const WRITE_REDIRECTS = new Set(['>', '>>', '>|', '&>', '&>>']);
 
-/** argv without wrappers; VAR=value given to `env` is recorded in `assignments` (it sets the command's environment). */
-function stripWrappers(argv: string[], assignments: Record<string, string> = {}): string[] {
+/**
+ * argv without wrappers; VAR=value given to `env` is recorded in `assignments` (it sets the command's environment),
+ * and `env`'s options in `envOptions`.
+ */
+function stripWrappers(argv: string[], assignments: Record<string, string> = {}, envOptions: string[] = []): string[] {
   let a = argv;
   for (let guard = 0; guard < 10 && a.length; guard++) {
     const base = basename(a[0]!);
@@ -228,6 +233,7 @@ function stripWrappers(argv: string[], assignments: Record<string, string> = {})
         const opt = a[0]!;
         a = a.slice(1);
         if (base === 'env' && !opt.startsWith('-')) assignments[opt.slice(0, opt.indexOf('='))] = opt.slice(opt.indexOf('=') + 1);
+        else if (base === 'env') envOptions.push(opt);
         if (base === 'sudo' && ['-u', '-g', '-C', '-D', '-h', '-p', '-r', '-t', '-U'].includes(opt)) a = a.slice(1);
       }
       continue;
@@ -282,12 +288,13 @@ export function splitCommands(src: string, depth = 0): SimpleCommand[] {
       assignments[w.slice(0, eq)] = w.slice(eq + 1);
       k++;
     }
-    const argv = stripWrappers(words.slice(k), assignments);
-    if (argv.length || Object.keys(assignments).length || writes.length || reads.length) {
+    const envOptions: string[] = [];
+    const argv = stripWrappers(words.slice(k), assignments, envOptions);
+    if (argv.length || Object.keys(assignments).length || writes.length || reads.length || envOptions.length) {
       const base = argv.length ? basename(argv[0]!) : '';
       if (base === 'tee') for (const f of argv.slice(1)) if (!f.startsWith('-')) writes.push(f);
       writes.push(...argumentWrites(base, argv));
-      result.push({ argv, assignments, writes, reads });
+      result.push({ argv, assignments, envOptions, writes, reads });
       // Re-parse the script given to a shell or eval.
       if (SHELLS.has(base)) {
         const ci = argv.findIndex((x, idx) => idx > 0 && /^-[a-z]*c[a-z]*$/.test(x));

@@ -187,6 +187,11 @@ test('an agent may not skip the pre-push hook in any other spelling git reads (#
   ]) assert.deepEqual([bash(c).decision, bash(c).rule], ['deny', 'push-hook-bypass'], c);
 });
 
+test('text inside a quoted argument is not a command: a commit message may say env -i (#993)', () => {
+  for (const c of ['git commit -m "fix env -i handling" && git push', "git commit -m 'env -u X' && git push origin HEAD"]) assert.equal(bash(c).decision, 'none', c);
+  for (const c of ['env -i git push', 'git commit -m x && env -u HOME git push', 'bash -c "env -i git push"']) assert.equal(bash(c).rule, 'push-hook-bypass', c);
+});
+
 test('a git name read from config: an alias or a correction to push is judged as the push it runs (#993)', () => {
   const { dir } = exampleProject();
   const git = (...a: string[]) => execFileSync('git', a, { cwd: dir, stdio: 'ignore' });
