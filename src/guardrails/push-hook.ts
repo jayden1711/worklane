@@ -117,17 +117,17 @@ function asGit(a: string[]): string[] {
 const startsGit = (t: string) => isGit(t) || DASHED_GIT.test(basename(t));
 
 /** Options by their letters (`-x`, clustered) and long names (`--name`). */
-interface Options {
+export interface Options {
   short: string;
   long: string[];
 }
 /**
  * A runner's command line: `[options] [operands] command ...`. `value`: the options that take the next word as
- * their value. `operands`: words before the command (flock's lock file, taskset's mask, chrt's priority). `none`:
+ * their value (test/runner-option-tables.test.ts checks them against each installed program). `operands`: words before the command (flock's lock file, taskset's mask, chrt's priority). `none`:
  * options with which the runner runs no command of these words (flock -c runs a command string, taskset -p).
  * `needs`: an option without which it runs none (runuser -u).
  */
-interface Runner {
+export interface Runner {
   value: Options;
   operands?: number;
   none?: Options;
@@ -139,7 +139,7 @@ const opts = (short: string, ...long: string[]): Options => ({ short, long });
  * INVARIANT: `value` lists exactly the options whose value may be the next word (getopt's `x:`, a long option's
  * required argument), as each program's own option table has them; an optional value (`x::`) is attached only.
  */
-const RUNNERS: Record<string, Runner> = {
+export const RUNNERS: Readonly<Record<string, Runner>> = {
   setsid: { value: opts('') },
   stdbuf: { value: opts('ioe', 'input', 'output', 'error') },
   strace: { value: opts('abeEIoOpPsSuUX', 'output', 'trace', 'signal', 'signals', 'status', 'env', 'user', 'attach', 'trace-path', 'string-limit', 'summary-sort-by', 'columns', 'abbrev', 'verbose', 'raw', 'read', 'write', 'fault', 'inject', 'kvm', 'decode-pids', 'argv0', 'trace-fds', 'detach-on', 'interruptible', 'const-print-style', 'summary-columns', 'summary-syscall-overhead', 'syscall-limit', 'stack-trace-frame-limit') },
