@@ -5,7 +5,8 @@
 //    a GitHub host or repo) or changes what TLS it trusts (a CA bundle or directory, a client certificate, a switch
 //    that loosens or turns off verification), from an environment the engine builds, in every casing, whatever set
 //    it: the inherited environment, an instance config, agents.yaml, tests.yaml or a request. git config carried in
-//    the environment (GIT_CONFIG_COUNT/KEY/VALUE) loses the same settings.
+//    the environment (GIT_CONFIG_COUNT/KEY/VALUE) loses the same settings, and any include of another file; a global or
+//    system git config file the environment names (GIT_CONFIG_GLOBAL/SYSTEM) becomes none.
 // 2. It then sets the proxy and a custom CA from /etc/<cli>/network.json, and only from it: root:root, not writable
 //    by its group or others, written by an admin (docs/network.md):
 //
@@ -69,10 +70,22 @@ export const isRedirectVar = (name: string): boolean => REDIRECTS.some((r) => r.
 
 /**
  * git config keys that change where git connects or what it trusts: http.[<url>.]ssl*, proxy*, schannel*, pinnedPubkey,
- * curloptResolve; url.<base>.insteadOf and pushInsteadOf (another host for the same remote).
+ * curloptResolve; url.<base>.insteadOf and pushInsteadOf (another host for the same remote; an empty base prefixes every
+ * URL); remote.<name>.proxy*, url and pushurl; core.gitProxy (GIT_PROXY_COMMAND's key); remote.pushDefault,
+ * branch.<b>.pushRemote and branch.<b>.remote, whatever they name (a name no remote has is a path to git). And any
+ * include.* or includeIf.* key: include.path and includeIf.<cond>.path read another file, whose keys this can't see (#1084).
  */
-const GIT_KEY = /^(?:http\.(?:.+\.)?(?:ssl[a-z]*|proxy[a-z]*|schannel[a-z]*|pinnedpubkey|curloptresolve)|url\..+\.(?:insteadof|pushinsteadof))$/i;
+const GIT_KEY = /^(?:http\.(?:.+\.)?(?:ssl[a-z]*|proxy[a-z]*|schannel[a-z]*|pinnedpubkey|curloptresolve)|url\..*\.(?:insteadof|pushinsteadof)|remote\..+\.(?:proxy[a-z]*|url|pushurl)|remote\.pushdefault|branch\..+\.(?:pushremote|remote)|core\.gitproxy|include(?:if)?\..+)$/i;
 export const isRedirectGitKey = (key: string): boolean => GIT_KEY.test(key.trim());
+
+/**
+ * Variables that name a git config file in place of the user's (~/.gitconfig) or the system's (/etc/gitconfig). Its keys
+ * can't be stripped as GIT_CONFIG_KEY_n's are, so a file named is replaced with NO_CONFIG_FILE (#1084): git reads no
+ * global or system config, never one the caller didn't ask for (unsetting would read ~/.gitconfig instead).
+ */
+const GIT_CONFIG_FILES = ['GIT_CONFIG_GLOBAL', 'GIT_CONFIG_SYSTEM'] as const;
+/** git reads it as an empty file on every platform (Git for Windows maps it to NUL). */
+const NO_CONFIG_FILE = '/dev/null';
 
 /** Node flags that change what TLS trusts or how it verifies: NODE_OPTIONS carrying one is dropped whole. */
 const NODE_TLS_FLAG = /(?:^|\s)--(?:use-openssl-ca|use-bundled-ca|use-system-ca|openssl-config|openssl-shared-config|openssl-legacy-provider|tls-[\w-]+|insecure-http-parser)\b/i;
@@ -273,14 +286,20 @@ function withoutRedirectGitConfig(e: Record<string, string | undefined>): void {
 export const CA_VARS = ['NODE_EXTRA_CA_CERTS', 'SSL_CERT_FILE', 'GIT_SSL_CAINFO'] as const;
 
 /**
- * `env` without any redirecting or trust-changing variable (isRedirectVar), git config key (isRedirectGitKey) or Node
- * TLS flag, then with the machine's proxy (both casings) and custom CA, when root set them. The same object.
+ * `env` without any redirecting or trust-changing variable (isRedirectVar), git config key (isRedirectGitKey), git
+ * config file (GIT_CONFIG_FILES, made NO_CONFIG_FILE) or Node TLS flag, then with the machine's proxy (both casings)
+ * and custom CA, when root set them. The same object.
  */
 export function outboundEnv<T extends Record<string, string | undefined>>(env: T, net: Pick<NetworkConfig, 'proxy' | 'ca'> | null = machineNetworkConfig()): T {
   const e = env as Record<string, string | undefined>;
   for (const k of Object.keys(e)) {
+    const file = GIT_CONFIG_FILES.find((f) => f === k.toUpperCase());
     if (isRedirectVar(k)) delete e[k];
     else if (k.toUpperCase() === 'NODE_OPTIONS' && NODE_TLS_FLAG.test(e[k] ?? '')) delete e[k];
+    else if (file && e[k] !== undefined) {
+      delete e[k];
+      e[file] = NO_CONFIG_FILE;
+    }
   }
   withoutRedirectGitConfig(e);
   const proxy = net?.proxy;
