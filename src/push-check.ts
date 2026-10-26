@@ -57,6 +57,18 @@ const commitIds = (cwd: string, base: string, head: string): [CommitId, CommitId
   [base, head].map((r) => git(cwd, ['rev-parse', '--verify', '--end-of-options', `${r}^{commit}`]).trim()) as [CommitId, CommitId];
 
 /**
+ * A name's spellings as Unicode can write it: as it is, NFC and NFD (#966). On Linux `café` written either way is two
+ * different files, so a refused path in one form is matched against a glob in the other.
+ */
+const spellings = (s: string): string[] => [...new Set([s, s.normalize('NFC'), s.normalize('NFD')])];
+
+/** A test of a path against globs, true when any spelling of the path matches any spelling of a glob. */
+function matcher(globs: string[]): (path: string) => boolean {
+  const res = globs.flatMap((g) => spellings(g).map((s) => globToRegExp(s)));
+  return (path) => spellings(path).some((p) => res.some((re) => re.test(p)));
+}
+
+/**
  * The range's problems and the head commit they were judged at. Never throws (#981): a git call that fails, as one
  * does when the repo changes under it, is the one refusal, so a caller's tick goes on and nothing is pushed.
  */
@@ -84,8 +96,8 @@ function judge(cwd: string, base: CommitId, head: CommitId, limits: PushLimits):
   const workflows = touched.filter((p) => p.startsWith(WORKFLOWS));
   if (workflows.length) problems.push(`changes CI workflows (${listPaths(workflows)}): the harness's GitHub credential has no Workflows permission, so GitHub refuses this push; a human makes workflow changes`);
 
-  const refuseRes = limits.refuse_paths.map((g) => ({ g, re: globToRegExp(g) }));
-  const refused = touched.filter((p) => refuseRes.some(({ re }) => re.test(p)));
+  const refusedPath = matcher(limits.refuse_paths);
+  const refused = touched.filter(refusedPath);
   if (refused.length) problems.push(`touches paths that are never pushed (${listPaths(refused)}), matching push.refuse_paths; remove them from every commit on the branch, not just the last one`);
 
   // A name no checkout would write: a crafted tree can hold an empty, ".", ".." or ".git" segment, and

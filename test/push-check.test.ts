@@ -45,6 +45,8 @@ function repo() {
 
 const limits = (over: Partial<PushLimits> = {}): PushLimits => ({ ...DEFAULT_PUSH_LIMITS, ...over });
 
+/** The names git records in base..head, as its bytes read in UTF-8. */
+const rangeNamesOf = (cwd: string, base: string, head: string) => execFileSync('git', ['diff', '--name-only', '-z', base, head], { cwd, encoding: 'utf8' }).split('\0').filter(Boolean).join('\n');
 
 test('a small ordinary change passes the push limits', () => {
   const r = repo();
@@ -95,6 +97,25 @@ test('refuse_paths: a ? stands for one character outside the BMP, as ** does (#9
     assert.equal(p.length, 1, `${glob}: ${p.join('\n')}`);
     assert.match(p[0]!, /push\.refuse_paths/);
   }
+});
+
+test('refuse_paths: a name in NFD is refused by a glob in NFC, and the other way round (#966)', () => {
+  const nfc = 'secrets/caf\u00e9.pem';
+  const nfd = 'secrets/cafe\u0301.pem';
+  for (const [name, glob] of [[nfd, nfc], [nfc, nfd], [nfd, 'secrets/caf?.pem'], [nfd, 'secrets/caf\u00e9*']] as const) {
+    const r = repo();
+    const head = r.commit({ [name]: 'k\n' });
+    assert.equal(rangeNamesOf(r.work, r.baseSha, head), name, 'git keeps the name as written');
+    const p = pushProblems(r.work, r.baseSha, head, limits({ refuse_paths: [glob] }));
+    assert.equal(p.length, 1, `${JSON.stringify(name)} against ${JSON.stringify(glob)}: ${p.join('\n')}`);
+    assert.match(p[0]!, /push\.refuse_paths/);
+  }
+});
+
+test('refuse_paths: a name outside the globs in every spelling still passes (#966)', () => {
+  const r = repo();
+  const head = r.commit({ 'docs/caf\u00e9.md': 'a\n', 'keys/\u{1F511}.txt': 'b\n' });
+  assert.deepEqual(pushProblems(r.work, r.baseSha, head, limits({ refuse_paths: ['secrets/**', 'keys/?.pem', 'docs/cafe\u0301.txt'] })), []);
 });
 
 test('a CI workflow change is refused with the reason (no Workflows permission), whatever the limits', () => {
