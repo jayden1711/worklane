@@ -13,11 +13,12 @@
 import { spawn } from 'node:child_process';
 import { readdirSync } from 'node:fs';
 import { availableParallelism } from 'node:os';
-import { join, relative } from 'node:path';
+import { relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = fileURLToPath(new URL('../../', import.meta.url));
-const preload = join(root, 'dist', 'test', 'isolate.js');
+// Relative to `root`, each file's run's working directory, as in npm test.
+const PRELOAD = ['--import', './dist/test/isolate.js'];
 
 function usage(why) {
   process.stderr.write(`clock-shift-run: ${why}\nusage: node scripts/ci/clock-shift-run.mjs --test-timeout=<ms> --file-timeout=<ms> <dir>...\n`);
@@ -39,7 +40,7 @@ if (dirs.length === 0) usage('no directory given');
 function testFiles(dir) {
   return readdirSync(dir, { recursive: true, withFileTypes: true })
     .filter((e) => e.isFile() && e.name.endsWith('.test.js'))
-    .map((e) => join(e.parentPath, e.name))
+    .map((e) => resolve(e.parentPath, e.name))
     .sort();
 }
 
@@ -65,7 +66,8 @@ function summary(out) {
 function runFile(file) {
   return new Promise((done) => {
     const name = relative(process.cwd(), file);
-    const p = spawn(process.execPath, ['--import', preload, '--test', `--test-timeout=${opts['test-timeout']}`, '--test-reporter=tap', file], {
+    const p = spawn(process.execPath, [...PRELOAD, '--test', `--test-timeout=${opts['test-timeout']}`, '--test-reporter=tap', file], {
+      cwd: root,
       detached: true,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
