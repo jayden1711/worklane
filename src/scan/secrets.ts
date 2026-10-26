@@ -58,6 +58,8 @@ export interface CommitScanScope {
   logReads?: boolean;
   /** The line asks for commits' signatures to be shown. */
   signatureReads?: boolean;
+  /** A git mv or rm runs before the commit, so which files there are, and their attributes, can change after the scan. */
+  moves?: boolean;
 }
 
 /** One file of a comparison: its content after the commit, and before it (null: the file is new). */
@@ -379,10 +381,11 @@ export function checkReadPrograms(top: string, scope: CommitScanScope, depth = 0
         throw new Error(`this checkout's files use a filter its config names (${out[i + 2]}), a program git runs while it reads changes, so agent commits here are refused; a person commits here, or the owner removes the filter from this checkout's config`);
       }
     }
-    // WHY (#1011): git runs git-lfs only for a file that carries the filter, from the working tree's attributes or
-    // the index's; a checkout with no such file (the filter set up globally) never runs it, so it isn't checked there.
-    if (lfs && [[], ['--cached']].some((where) => usesFilter(top, tracked, where, 'lfs'))) lfsProgramRootsAlone(top);
   }
+  // WHY (#1011): git runs git-lfs only for a file that carries the filter, from the working tree's attributes or the
+  // index's; a checkout with no such file (the filter set up globally) never runs it, so it isn't checked there. A git
+  // mv or rm earlier in the line can bring a file under the filter after this has looked, so then it is always checked.
+  if (lfs && (scope.moves || [[], ['--cached']].some((where) => usesFilter(top, tracked, where, 'lfs')))) lfsProgramRootsAlone(top);
   // WHY: a read and the scan's own listing reach into each checked-out submodule under that submodule's own config,
   // and a nested checkout the line stages becomes one.
   for (const sub of submodules(top, scope.untracked)) checkReadPrograms(sub, scope, depth + 1);
@@ -390,6 +393,7 @@ export function checkReadPrograms(top: string, scope: CommitScanScope, depth = 0
 
 /** Whether any of `paths` carries `filter=<name>`, from the attributes source `where` gives. */
 function usesFilter(top: string, paths: string[], where: string[], name: string): boolean {
+  if (!paths.length) return false;
   const out = gitOut(top, ['check-attr', '-z', '--stdin', ...where, 'filter'], `${paths.join('\0')}\0`).toString('utf8').split('\0');
   for (let i = 0; i + 2 < out.length; i += 3) if (out[i + 2] === name) return true;
   return false;

@@ -168,6 +168,57 @@ test('a checkout with no file under the large-file filter commits whatever git-l
   });
 });
 
+/** A checkout under the standard filter (no files under it yet) holding `files`, committed without running a filter. */
+function plainCheckout(files: Record<string, string>): string {
+  const d = join(mkdtempSync(join(tmpdir(), 'mv-')), 'a');
+  mkdirSync(d, { recursive: true });
+  cpSync(join(repoRoot, 'examples', 'basic', '.worklane'), join(d, BRAND.configDir), { recursive: true });
+  git(d, 'init', '-q', '-b', 'main');
+  git(d, 'config', 'user.email', 'ada@example.com');
+  git(d, 'config', 'user.name', 'Ada');
+  git(d, 'config', 'commit.gpgsign', 'false');
+  for (const [path, text] of Object.entries(files)) {
+    mkdirSync(join(d, path, '..'), { recursive: true });
+    writeFileSync(join(d, path), text);
+  }
+  git(d, 'add', '-A');
+  git(d, 'commit', '-q', '-m', 'init');
+  for (const [k, v] of STANDARD) git(d, 'config', k, v);
+  return d;
+}
+
+const NOT_ROOT = /git-lfs git would run .* belongs to uid \d+, not root/;
+const MOVES: [string, () => string, string][] = [
+  ['A1: a file moved into the pattern', () => plainCheckout({ '.gitattributes': '*.bin filter=lfs\n', 'a.txt': 'plain\n' }), 'git mv a.txt a.bin && git commit -m x'],
+  ['A2: an attributes file moved into place', () => {
+    const d = plainCheckout({ 'attrs.txt': '*.txt filter=lfs\n', 'b.txt': 'plain\n' });
+    writeFileSync(join(d, 'b.txt'), 'edited\n');
+    return d;
+  }, 'git mv attrs.txt .gitattributes && git commit -a -m x'],
+  ['A3: a negating attributes file removed', () => {
+    const d = plainCheckout({ '.gitattributes': '*.bin filter=lfs\n', 'sub/.gitattributes': '*.bin -filter\n', 'sub/x.bin': 'plain\n' });
+    writeFileSync(join(d, 'sub', 'x.bin'), 'edited\n');
+    return d;
+  }, 'git rm -q sub/.gitattributes && git commit -a -m x'],
+];
+for (const [what, make, line] of MOVES) {
+  test(`attack: a git mv or rm earlier in the line brings a file under the filter, and git-lfs is checked (${what})`, { skip: skipRoot }, async () => {
+    const d = make();
+    await withEnv({ PATH: `${ownLfs()}${delimiter}${process.env.PATH ?? ''}` }, async () => {
+      await refused(d, line, NOT_ROOT, what);
+    });
+  });
+}
+
+test('attack: a file under the filter only by the index\'s attributes checks git-lfs too', { skip: skipRoot }, async () => {
+  const d = plainCheckout({ '.gitattributes': '*.dat filter=lfs\n' });
+  writeFileSync(join(d, '.gitattributes'), '# none\n');
+  writeFileSync(join(d, 'c.dat'), 'plain\n');
+  await withEnv({ PATH: `${ownLfs()}${delimiter}${process.env.PATH ?? ''}` }, async () => {
+    await refused(d, 'git commit -m x', /belongs to uid \d+, not root/, 'the index\'s attributes only');
+  });
+});
+
 test('a side before that begins like a pointer, not in its exact form, doesn\'t refuse the commit', { skip: skipLfs }, async () => {
   const { d } = lfsCheckout();
   const raw = `version https://hawser.github.com/spec/v1\n${'old data\n'.repeat(200)}`;
