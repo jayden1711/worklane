@@ -1080,7 +1080,7 @@ function movedCode(
   elsewhere: Readonly<Record<string, readonly (readonly [number, number])[]>>,
   baseOf: (path: string) => string | null,
 ): Map<string, ChangedCode> {
-  type Unit = { path: string; first: number; last: number; key: string; name: string | null; lines: string[]; rows: string[] };
+  type Unit = { path: string; first: number; last: number; key: string; name: string | null; lines: string[] };
   const nameOf = (line: string) => {
     const m = /^\s*(?:(?:module\.)?exports\.([A-Za-z_$][\w$]*)\s*=(?!=)|(?:export\s+)?(?:default\s+)?(?:declare\s+)?(?:abstract\s+)?(?:async\s+)?(?:function\b\s*\*?\s*|class\s+|enum\s+|namespace\s+|(?:const|let|var)\s+(?:enum\s+)?)([A-Za-z_$][\w$]*))/.exec(line);
     return m ? (m[1] ?? m[2])! : null;
@@ -1112,17 +1112,12 @@ function movedCode(
         } else if (k !== true && !closes(l)) whole = false;
       }
       if (!whole || (into !== null && !gone)) continue;
-      const rows: string[] = [];
-      for (let l = first; l <= last; l++) {
-        let row = '';
-        for (let i = starts[l - 1]!; i < starts[l]!; i++) if (code[i] && !/\s/.test(text[i]!)) row += text[i];
-        rows.push(row);
-      }
-      const key = rows.join('');
+      let key = '';
+      for (let i = starts[first - 1]!; i < starts[last]!; i++) if (code[i] && !/\s/.test(text[i]!)) key += text[i];
       if (!key) continue;
       const lines: string[] = [];
       for (let l = first; l <= last; l++) lines.push(text.slice(starts[l - 1], starts[l]).replace(/\n$/, ''));
-      out.push({ path, first, last, key, name: nameOf(lines[0]!), lines, rows });
+      out.push({ path, first, last, key, name: nameOf(lines[0]!), lines });
     }
     return out;
   };
@@ -1205,15 +1200,16 @@ function movedCode(
   }
   // Then by name, the closest pairs first (Z-N1 to Z-N4: a same-named unit never takes another's source by its path).
   // Each pair a unit or a source shares with another is scored on its own (ZN1B, ZN4B, ZN1spent: no pair spends
-  // another's cells): by character, or, too large for that (ALIGN_CELLS), by its lines' code characters, as `key`
-  // (SEMI, CMT: formatting and comments are no change here either); too large for that too, the PR waits.
+  // another's cells): by character, or, too large for that (ALIGN_CELLS), by the tokens of `key`, each weighing its
+  // characters (SEMI, CMT, WRAP-1of2: formatting, comments and line breaks are no change here either); too large for
+  // that too, the PR waits.
   const named = left.flatMap(([f, u]) => sources.filter((s) => !s.used && s.name === u.name && !same(u, s)).map((s) => ({ f, u, s, score: 0 })));
   const ways = new Map<Unit, number>();
   for (const { u, s } of named) for (const x of [u, s]) ways.set(x, (ways.get(x) ?? 0) + 1);
   const closeness = (u: Unit, s: Unit) => {
     const kept = alignChars([...u.key], [...s.key]);
     if (kept) return kept.filter((x) => x === '=').length * 2 - u.key.length - s.key.length;
-    const [ul, sl] = [u.rows, s.rows].map((rs) => rs.filter(Boolean));
+    const [ul, sl] = [u.key, s.key].map((k) => k.match(/[\w$]+|[^\w$]+/g)!);
     const ops = alignChars(ul!, sl!);
     if (!ops) throw new CoverageUnreadable(`two statements named ${u.name} are too large to tell which one ${u.path}:${u.first} was moved from`);
     let [i, j, score] = [0, 0, 0];

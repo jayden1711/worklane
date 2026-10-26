@@ -882,7 +882,35 @@ test('must hold: ZN4L: ZN1L with a second source g holding half of the moved one
   assert.deepEqual([d.auto, d.reasons], hold('src/a.js, src/b.js, src/c.js'));
 });
 
-for (const [id, moved] of [['SEMI', noSemis], ['SEMI-half', halfSemis], ['CMT', commented]] as const) {
+// ZN4L with a second source g, the moved g with its parameter renamed (`w`, `k` long) at both ends, so the pair is too
+// large to align by character, and `other` applied: both sides' unkept tokens count, each by its characters.
+const renamedAt = (k: number) => (g: string) => g.replace('g(u) {', `g(${'w'.repeat(k)}) {`).replace(': deny(u)', `: deny(${'w'.repeat(k)})`);
+for (const [id, file, k, other, why] of [
+  ['ZN4L-S', 'src/b.js', 1, (g: string) => g.replace(/ {2}const v5\d [^\n]*\n/g, ''), '10 of its lines dropped (the moved g\'s unkept tokens count)'],
+  ['ZN4L-U', 'src/b.js', 1, (g: string) => g.replace('  const v60', `${lines(10, (i) => `  const x${i} = gamma(u) - ${i} / delta(u);\n`)}  const v60`), '10 lines more (the source\'s unkept tokens count)'],
+  ['ZN4L-N', 'src/0.js', 40, (g: string) => g, 'a 40-character parameter, in a file that sorts first (a token weighs its characters)'],
+] as const) {
+  test(`must hold: ${id}: ZN1L with a second source g, the moved one renamed at both ends with ${why}`, async () => {
+    const d = await decided({ 'src/a.js': G_A + ZN1L_G(1, 'grant') + ZN1L_ARMS, [file]: other(renamedAt(k)(ZN1L_G(2, 'grantAll'))) }, { 'src/a.js': G_A, [file]: '', 'src/c.js': ZN1L_G(2, 'grantAll') + ZN1L_ARMS, 'test/x.test.js': M3T });
+    assert.deepEqual([d.auto, d.reasons], hold(file === 'src/b.js' ? 'src/a.js, src/b.js, src/c.js' : 'src/0.js, src/a.js, src/c.js'));
+  });
+}
+
+// Line breaks are formatting too: `keep` of every `of` `const vN =` lines wrapped after their `=`.
+const wrapEvery = (keep: number, of: number) => (g: string) => {
+  let k = 0;
+  return g.replace(/^( {2}const \w+ =) /gm, (m, a: string) => (k++ % of < keep ? `${a}\n    ` : m));
+};
+for (const [id, keep, of] of [['WRAP-1of2', 1, 2], ['WRAP-2of3', 2, 3], ['WRAP-3of4', 3, 4]] as const) {
+  for (const decoy of ['src/b.js', 'src/z.js'] as const) {
+    test(`must hold: ${id}${decoy === 'src/z.js' ? 'z' : ''}: ZN1L's g moved with ${keep} of every ${of} lines wrapped after \`=\`, a two-line decoy g in ${decoy.slice(4)}`, async () => {
+      const d = await zn1lMoved(wrapEvery(keep, of), decoy);
+      assert.deepEqual([d.auto, d.reasons], hold(decoy === 'src/b.js' ? 'src/a.js, src/b.js, src/c.js' : 'src/a.js, src/c.js, src/z.js'));
+    });
+  }
+}
+
+for (const [id, moved] of [['SEMI', noSemis], ['SEMI-half', halfSemis], ['CMT', commented], ['WRAP-1of2', wrapEvery(1, 2)], ['WRAP-2of3', wrapEvery(2, 3)], ['WRAP-3of4', wrapEvery(3, 4)]] as const) {
   test(`control: ${id}c: ${id} with no decoy holds`, async () => {
     const d = await zn1lMoved(moved, null);
     assert.deepEqual([d.auto, d.reasons], hold('src/a.js, src/c.js'));
