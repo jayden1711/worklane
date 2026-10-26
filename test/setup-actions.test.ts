@@ -183,6 +183,25 @@ test('#882: a Fix that throws an OS error answers 500 with a fixed text, never t
   }
 });
 
+test("#1064: a Fix whose plan throws says it can't be planned, never the error; the detail is in the log", async () => {
+  const { dir } = fixture();
+  const prefix = mkdtempSync(join(tmpdir(), 'setup-actions-prefix-'));
+  const tools = new Set(['git', 'gitleaks', 'claude']);
+  const raw = `EACCES: permission denied, open '${prefix}/share/pins.json'`;
+  const s = await dashboard(dir, tools, { setupActions: { which: (c) => (tools.has(c) ? `/stand-in/${c}` : null), prefix, plan: () => { throw new Error(raw); } } });
+  const { result: v, lines } = await logged(() => s.get());
+  try {
+    const plan = v.actions['install-tools']!;
+    assert.equal(plan.available, false);
+    assert.equal(plan.why, "can't plan it; the detail is in the dashboard's log on the machine");
+    const text = JSON.stringify(v);
+    for (const leak of [prefix, 'EACCES', 'pins.json']) assert.ok(!text.includes(leak), `${leak} in the first-run view`);
+    assert.ok(lines.some((l) => l.includes('planning the install-tools action') && l.includes(raw)), `the detail is logged: ${JSON.stringify(lines)}`);
+  } finally {
+    await s.d.close();
+  }
+});
+
 test('one Fix at a time: a second click while one runs is refused', async () => {
   const { dir } = fixture();
   const prefix = mkdtempSync(join(tmpdir(), 'setup-actions-prefix-'));

@@ -120,6 +120,51 @@
       "expect": {"decision": "merges", "configs": ["engine", "default", "loosened"], "scopes": ["engine", "managed-app"]}
     },
     {
+      "id": "control-default-branch-table-added-beside-stale-pr",
+      "attack": "a note added to a test file whose default branch, after the base, adds a second table marked never-shrink to it",
+      "source": "the suite's own control (#1074 O6: a table only the tip has, kept by the merge, holds nothing)",
+      "base": {"test/rules.test.ts":"import { test } from 'node:test';\nexport const CHECKS = [\n  'a',\n];\ntest('t', () => {});\n"},
+      "change": [{"write":"test/rules.test.ts","text":"import { test } from 'node:test';\nexport const CHECKS = [\n  'a',\n];\ntest('t', () => {});\n// a note\n"}],
+      "flow": {"tipMoved":{"test/rules.test.ts":"import { test } from 'node:test';\nexport const CHECKS = [\n  'a',\n];\n// check-table: never-shrink\nexport const MORE = [\n  'p',\n];\ntest('t', () => {});\n"}},
+      "expect": {"decision":"merges","configs":["engine","default","loosened"],"scopes":["engine","managed-app"]}
+    },
+    {
+      "id": "control-default-branch-marked-table-conflicting-pr",
+      "attack": "a comment added to a test file where the default branch, after the base, marked its table never-shrink, so its merge into the default branch conflicts",
+      "source": "the suite's own control (the *-conflicting-pr cases: a conflict with the tip holds nothing in the merge decision, it is left to the conflict paths, so only their change holds them)",
+      "base": {"test/rules.test.ts":"import { test } from 'node:test';\nexport const CHECKS = [\n  'a',\n  'b',\n];\ntest('t', () => {});\n"},
+      "change": [{"write":"test/rules.test.ts","text":"import { test } from 'node:test';\n// the checks\nexport const CHECKS = [\n  'a',\n  'b',\n];\ntest('t', () => {});\n"}],
+      "flow": {"tipMoved":{"test/rules.test.ts":"import { test } from 'node:test';\n// check-table: never-shrink\nexport const CHECKS = [\n  'a',\n  'b',\n];\ntest('t', () => {});\n"}},
+      "expect": {"decision":"merges","configs":["engine","default","loosened"],"scopes":["engine","managed-app"]}
+    },
+    {
+      "id": "control-default-branch-table-moved-and-marked-stale-app-change",
+      "attack": "a small app change while the default branch, after the base, moved a test file and marked its table never-shrink",
+      "source": "the suite's own control (flow-default-branch-table-file-moved-and-marked-stale-pr: only the change carried onto the moved table holds that case)",
+      "base": {"test/rules.test.ts":"import { test } from 'node:test';\nexport const CHECKS = [\n  'a',\n  'b',\n  'c',\n];\ntest('t', () => {});\n","web/x.js":"export const x = 1;\n"},
+      "change": [{"write":"web/x.js","text":"export const x = 2;\n"}],
+      "flow": {"tipMoved":{"test/rules.test.ts":null,"test/checks/rules.test.ts":"import { test } from 'node:test';\n// check-table: never-shrink\nexport const CHECKS = [\n  'a',\n  'b',\n  'c',\n];\ntest('t', () => {});\n"}},
+      "expect": {"decision":"merges","configs":["engine","default","loosened"],"scopes":["engine","managed-app"]}
+    },
+    {
+      "id": "control-default-branch-tip-entry-kept-after-merge",
+      "attack": "the PR merges the default branch in (an entry added to a table marked never-shrink at the base) and adds one more entry",
+      "source": "the suite's own control (flow-default-branch-tip-entry-out-base-marked-after-merge: only taking the tip's entry out holds that case)",
+      "base": {"test/rules.test.ts":"import { test } from 'node:test';\n// check-table: never-shrink\nexport const CHECKS = [\n  'a',\n  'b',\n  'c',\n];\ntest('t', () => {});\n"},
+      "change": [{"write":"test/rules.test.ts","text":"import { test } from 'node:test';\n// check-table: never-shrink\nexport const CHECKS = [\n  'a',\n  'b',\n  'c',\n  'd',\n  'e',\n];\ntest('t', () => {});\n"}],
+      "flow": {"tipMoved":{"test/rules.test.ts":"import { test } from 'node:test';\n// check-table: never-shrink\nexport const CHECKS = [\n  'a',\n  'b',\n  'c',\n  'd',\n];\ntest('t', () => {});\n"},"tipMergedIn":true},
+      "expect": {"decision":"merges","configs":["engine","default","loosened"],"scopes":["engine","managed-app"]}
+    },
+    {
+      "id": "control-default-branch-tip-assertion-kept-after-merge",
+      "attack": "the PR merges the default branch in (an assertion added to a test) and adds an assertion of its own",
+      "source": "the suite's own control (flow-default-branch-tip-assertion-out-after-merge: only taking the tip's assertion out holds that case)",
+      "base": {"test/x.test.ts":"import { test } from 'node:test';\nimport assert from 'node:assert';\ntest('t', () => {\n  assert.ok(true);\n});\n"},
+      "change": [{"write":"test/x.test.ts","text":"import { test } from 'node:test';\nimport assert from 'node:assert';\ntest('t', () => {\n  assert.ok(true);\n  assert.equal(1, 1);\n  assert.equal(2, 2);\n});\n"}],
+      "flow": {"tipMoved":{"test/x.test.ts":"import { test } from 'node:test';\nimport assert from 'node:assert';\ntest('t', () => {\n  assert.ok(true);\n  assert.equal(1, 1);\n});\n"},"tipMergedIn":true},
+      "expect": {"decision":"merges","configs":["engine","default","loosened"],"scopes":["engine","managed-app"]}
+    },
+    {
       "id": "control-planned-auth-change-in-flow",
       "attack": "a planned task whose PR changes an auth file its plan lists, in a repo whose review.yaml puts auth at L2",
       "source": "the suite's own control (flow-outside-plan-auth-not-held: only the plan check holds that case)",

@@ -78,7 +78,9 @@ test('a crafted tree with an empty name stops the push limits: git itself won\'t
   const r = repo();
   const secrets = mktree(r.dir, [nest(r.dir, ['secrets'], ['100644', 'blob', blob(r.dir, 'SECRET\n'), 'x.pem'])]);
   const head = commit(r.dir, rawTree(r.dir, [['40000', '', secrets], ['100644', 'README.md', r.readme]]), [r.base]);
-  assert.throws(() => pushProblems(r.dir, r.base, head, LIMITS), /empty filename in tree entry/);
+  const p = pushProblems(r.dir, r.base, head, LIMITS);
+  assert.equal(p.length, 1, p.join('\n'));
+  assert.match(p[0]!, /push limits couldn't read the range \(.*empty filename in tree entry.*nothing is pushed/);
 });
 
 for (const segment of ['.', '..', '.git', '.GIT']) {

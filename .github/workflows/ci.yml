@@ -49,13 +49,16 @@ jobs:
           cache: npm
       # Before any file the merge hold doesn't cover runs (#746 rounds 20 and 21): install with no package scripts
       # (prepare, postinstall); check the pinned packages' lockfile entries and installed files before either runs;
-      # build with the locked typescript straight from node_modules (no npm script); run the desktop backstop alone,
+      # build with the locked typescript straight from node_modules (no npm script); check the pins again on what tsc
+      # emitted (#1007: a JSON import makes it write a package.json under dist/); run the desktop backstop alone,
       # then the other lint tests. Only after that: npm run build (what prepare did), the dashboard UI, machine.sh and
       # this shard's tests. test/desktop-removed.test.ts holds these first steps and their order.
       - run: npm ci --ignore-scripts
       - name: the pinned packages, before any of them runs
         run: node scripts/ci/check-pins.mjs
       - run: node node_modules/typescript/bin/tsc -p tsconfig.json
+      - name: the pinned packages again, after tsc emits
+        run: node scripts/ci/check-pins.mjs
       - name: the desktop backstop, before anything unheld runs
         run: node --import ./dist/test/isolate.js --test dist/test/desktop-removed.test.js
       - name: the other lint tests, before anything unheld runs

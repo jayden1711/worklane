@@ -392,11 +392,7 @@ if [ "$cmd" = status ]; then
 fi
 
 # One step at a time on a machine; each starts steps.jsonl afresh.
-if command -v flock >/dev/null 2>&1; then
-  install -d -m 0755 "$(dirname "$TAILSCALE_LOCK")"
-  exec 8> "$TAILSCALE_LOCK"
-  flock -n 8 || { echo "another tailscale step is running on this machine; wait for it to finish" >&2; exit 1; }
-fi
+machine_lock 8 "$TAILSCALE_LOCK" 0 "another tailscale step is running on this machine; wait for it to finish" || { echo "$MACHINE_LOCK_WHY" >&2; exit 1; }
 install -d -m 0755 "$TAILSCALE_DIR"
 : | put_file root root 0644 "$TAILSCALE_DIR/steps.jsonl"
 emit started ""

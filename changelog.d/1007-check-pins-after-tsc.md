@@ -1,0 +1,3 @@
+### Guardrail changes: what each one does
+
+- **The pin check runs again after the build, and checks the allowed nested `package.json` (#1007).** CI's test shards run `scripts/ci/check-pins.mjs` a second time, right after the locked `tsc` builds and before the desktop backstop, so a `package.json`, a `node_modules` or a link that `tsc` writes under `dist/` (a JSON import of a `package.json` makes it emit a copy) is refused there too, not only what the checkout held before the build. The check also refuses an allowed nested `package.json` (`examples/basic/package.json`) named after a pinned package, or one that isn't JSON. Nothing changes for an install: only CI and its tests changed.
