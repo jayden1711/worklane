@@ -142,11 +142,11 @@ const opts = (short: string, ...long: string[]): Options => ({ short, long });
 const RUNNERS: Record<string, Runner> = {
   setsid: { value: opts('') },
   stdbuf: { value: opts('ioe', 'input', 'output', 'error') },
-  strace: { value: opts('abeEIoOpPsSuUX', 'output', 'trace', 'signal', 'status', 'env', 'user', 'attach', 'trace-path', 'string-limit', 'summary-sort-by', 'columns', 'abbrev', 'verbose', 'raw', 'read', 'write', 'fault', 'inject', 'kvm', 'silence', 'silent', 'trace-fds', 'detach-on', 'interruptible', 'const-print-style', 'summary-columns', 'summary-syscall-overhead', 'syscall-limit', 'stack-trace-frame-limit') },
+  strace: { value: opts('abeEIoOpPsSuUX', 'output', 'trace', 'signal', 'signals', 'status', 'env', 'user', 'attach', 'trace-path', 'string-limit', 'summary-sort-by', 'columns', 'abbrev', 'verbose', 'raw', 'read', 'write', 'fault', 'inject', 'kvm', 'decode-pids', 'argv0', 'trace-fds', 'detach-on', 'interruptible', 'const-print-style', 'summary-columns', 'summary-syscall-overhead', 'syscall-limit', 'stack-trace-frame-limit') },
   ltrace: { value: opts('aADeFlnopsuwxX', 'output', 'library', 'align', 'indent', 'debug', 'where') },
   chronic: { value: opts('') },
   unbuffer: { value: opts('') },
-  flock: { value: opts('wEc', 'wait', 'timeout', 'conflict-exit-code', 'command'), operands: 1, none: opts('c', 'command') },
+  flock: { value: opts('wE', 'wait', 'timeout', 'conflict-exit-code'), operands: 1, none: opts('c', 'command') },
   taskset: { value: opts(''), operands: 1, none: opts('p', 'pid') },
   chrt: { value: opts('TPD', 'sched-runtime', 'sched-period', 'sched-deadline'), operands: 1, none: opts('pm', 'pid', 'max') },
   nsenter: { value: opts('tSG', 'target', 'setuid', 'setgid') },

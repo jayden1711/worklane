@@ -22,7 +22,8 @@
     (`env -u X`, `nice -n 15`, `exec -a`, `env -S '…'`, `timeout --kill-after 5 60`, `xargs --max-args 1`; env's
     option clusters as getopt reads them, so `env -uCC git push` runs git), as a
     `find -exec` or `-ok` command, or behind a known runner (`setsid`, `flock`, `strace`, `taskset`, …). A runner's
-    options are those of its own option table (`systemd-run -G` is `--collect`, a flag), and its
+    options are those of its own option table (`systemd-run -G` is `--collect`, a flag; strace's `--silent` takes
+    only an attached value), checked by a test against each installed program's own parser, and its
     command is the first word after its own options and operands (`flock /tmp/l git push` runs git; so does
     `flock /tmp/git git push`); a word that is only an argument (`rm -rf vendor/git`, `make -C third_party/git`,
     `grep env -i`) is not read, and a program the guard doesn't know as a runner is not read into;

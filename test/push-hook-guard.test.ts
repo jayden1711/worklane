@@ -508,6 +508,14 @@ test("a runner's and env's options are read by their own option tables: values a
     'ltrace -D 1 git push --no-verify',
     'ltrace -L git push --no-verify',
     'strace --inject read:error=EIO git push --no-verify',
+    // strace's --silent, --silence and --quiet take an optional value, attached only (strace 6.8's longopts).
+    'strace --silent git push --no-verify',
+    'strace --silence git push --no-verify',
+    'strace -f --silent git push origin HEAD --no-verify',
+    'strace --silent=attach git push --no-verify',
+    'strace --argv0 x git push --no-verify',
+    'strace --signals SIGINT git push --no-verify',
+    'strace --decode-pids comm git push --no-verify',
     // env's clusters as getopt reads them (measured: `env -uCC echo` and `env -iuX echo` run echo): the first value
     // letter takes the rest of the word, so the next word is the command.
     'env -uCC git push --no-verify',
@@ -516,7 +524,7 @@ test("a runner's and env's options are read by their own option tables: values a
     'env -iuX git push',
     "env -S'git push --no-verify'",
     "env -vS 'git push --no-verify'",
-  ]) assert.deepEqual([bash(c).decision, bash(c).rule], ['deny', 'push-hook-bypass'], c);
+  ]) for (const line of [c, `${c} && git push origin HEAD`]) assert.deepEqual([bash(line).decision, bash(line).rule], ['deny', 'push-hook-bypass'], line);
 });
 
 test('a git name read from config: an alias or a correction to push is judged as the push it runs (#993)', () => {
