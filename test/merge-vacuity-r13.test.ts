@@ -866,6 +866,15 @@ test('must merge: CM3t: CM3 with the arm the test takes edited too', async () =>
 test('must merge: CM4t: CM4 with the arm the test takes edited too', async () => {
   await merges({ 'src/a.js': G_A + CM_NOTES(5)(CM_G(1, 'grant', 3)) + ZN1L_ARMS }, { 'src/a.js': G_A, 'src/c.js': CM_G(2, 'grantAll', 3, 'denyAll') + ZN1L_ARMS, 'test/x.test.js': CM_T('c.js', "'nothing'") });
 });
+// Too large to align whole, so its lines are paired by code and the edited line aligned on its own, code against code.
+const CM5_BASE = (g: string) => g.replace(/\n/g, ' // checked\n').replace('deny(u); // checked', 'deny(u); // grantAll(u) : deny(u);');
+test('must hold: CM5: CM3 with a comment on every line, the edited line\'s naming its new arm, all dropped', async () => {
+  const d = await decided({ 'src/a.js': G_A + CM5_BASE(CM_G(1, 'grant', 120)) + ZN1L_ARMS }, { 'src/a.js': G_A + CM_G(2, 'grantAll', 120) + ZN1L_ARMS, 'test/x.test.js': CM_T('a.js') });
+  assert.deepEqual([d.auto, d.reasons], hold('src/a.js'));
+});
+test('must merge: CM5t: CM5 with the arm the test takes edited too', async () => {
+  await merges({ 'src/a.js': G_A + CM5_BASE(CM_G(1, 'grant', 120)) + ZN1L_ARMS }, { 'src/a.js': G_A + CM_G(2, 'grantAll', 120, 'denyAll') + ZN1L_ARMS, 'test/x.test.js': CM_T('a.js', "'nothing'") });
+});
 
 test('must hold: ZN4L: ZN1L with a second source g holding half of the moved one\'s lines (the unit\'s unkept lines count too)', async () => {
   const half = `export function g(u) {\n  if (u.never) return 3;\n${lines(60, (i) => `  const v${i} = alpha(u) + ${i} * beta(u);\n`)}  return 0;\n}\n`;

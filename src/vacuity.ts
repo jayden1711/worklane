@@ -656,7 +656,7 @@ interface HunkLine {
  * run doesn't align line by line, or any alignment is too large: the change can't be placed, and the caller holds.
  */
 function alignHunk(aLines: readonly HunkLine[], rLines: readonly HunkLine[]): string[] | null {
-  // Code only ever against code, so a comment edit never pairs a code character with a comment one (ZN1L-cmt, CM1).
+  // Code only ever against code, so a comment edit never pairs a code character with a comment one (ZN1L-cmt, CM1, CM5).
   const tagged = (l: HunkLine) => l.chars.map((c, k) => (l.code[k] ? 'c' : 'k') + c);
   const whole = alignChars(aLines.flatMap(tagged), rLines.flatMap(tagged));
   if (whole) return whole;
