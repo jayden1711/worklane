@@ -813,7 +813,11 @@ export abstract class MergeFlow extends FixRuns {
     // first poll after every merge): a later poll that says `dirty` sends it to the conflict fix, as for any conflict
     // (#1077). Up to the same cap; a GitHub that says clean, or never says, leaves the hold to the owner.
     if (!d.auto && (pr.mergeable === null || pr.mergeableState === 'unknown') && d.reasons.some(isTipConflict) && d.reasons.every((r) => isTipConflict(r) || r === VACUITY_UNMEASURED)) {
-      if (this.waitPolls.bump(`mergeable:${number}:${pr.headSha}`) < MERGEABLE_CAP) return;
+      const polls = this.waitPolls.bump(`mergeable:${number}:${pr.headSha}`);
+      if (polls < MERGEABLE_CAP) return;
+      const why = `GitHub was still computing whether it can merge after ${polls} polls`;
+      this.emit('wait.capped', { issue: n, number, kind: 'mergeable_recheck', detail: why });
+      d.reasons.push(why);
     }
     if (d.auto) {
       // The merge train put it off (behind its base under strict protection, or its base moved mid-merge): not before
