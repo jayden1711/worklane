@@ -43,16 +43,18 @@ jobs:
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
       - run: npm run build
       - run: npm run build:web
-      # Each run finishes and names what failed: a test that hangs is cancelled after 10 minutes (--test-timeout) and
-      # named in the summary with its file, and a file whose tests are done exits even with a handle left open
-      # (--test-force-exit). A step that still runs too long stops on its own, and the next step runs anyway.
+      # Each run finishes and names what failed (scripts/ci/clock-shift-run.mjs, #848): every test file runs in a
+      # `node --test` of its own, without --test-force-exit, so every test it registers runs. A test that hangs is
+      # cancelled after 10 minutes (--test-timeout), and a file still running after 25 minutes (a hang, or a handle
+      # left open after its tests) is killed and named. A step that still runs too long stops on its own, and the next
+      # step runs anyway. test/clock-shift.test.ts runs these lines on fixtures.
       - name: the tests, 45 days later
         timeout-minutes: 75
         shell: bash
         env:
           CI_REQUIRE_WEB: '1'
           TEST_CLOCK_SHIFT: '+45d'
-        run: NODE_OPTIONS="--import=$PWD/dist/test/clock-shift.js" node --import ./dist/test/isolate.js --test --test-timeout=600000 --test-force-exit "dist/test/**/*.test.js"
+        run: NODE_OPTIONS="--import=$PWD/dist/test/clock-shift.js" node scripts/ci/clock-shift-run.mjs --test-timeout=600000 --file-timeout=1500000 dist/test
       - name: the tests, 400 days later
         if: ${{ !cancelled() }}
         timeout-minutes: 75
@@ -60,4 +62,4 @@ jobs:
         env:
           CI_REQUIRE_WEB: '1'
           TEST_CLOCK_SHIFT: '+400d'
-        run: NODE_OPTIONS="--import=$PWD/dist/test/clock-shift.js" node --import ./dist/test/isolate.js --test --test-timeout=600000 --test-force-exit "dist/test/**/*.test.js"
+        run: NODE_OPTIONS="--import=$PWD/dist/test/clock-shift.js" node scripts/ci/clock-shift-run.mjs --test-timeout=600000 --file-timeout=1500000 dist/test
