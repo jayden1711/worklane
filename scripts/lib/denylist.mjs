@@ -75,6 +75,7 @@ const UTF16BE_RUN = /(?:\0[\t\n\r\x20-\x7e])+/g;
 // So is an ASCII run with a NUL on both sides (a C string): the two NULs make a chance hit far rarer again (#1057).
 const BINARY_RUN = 8;
 const BINARY_TERM = 6;
+const PRINTABLE = /[\t\n\r\x20-\x7e]/;
 
 /**
  * Every denied hashed term in a blob holding a NUL byte, as "path: why" strings, token boundaries as in text: a term
@@ -86,8 +87,11 @@ export function scanBinary(rules, path, text) {
   const hits = new Set();
   for (const [re, wide] of [[ASCII_RUN, false], [UTF16LE_RUN, true], [UTF16BE_RUN, true]]) {
     for (const m of text.matchAll(re)) {
-      const run = wide ? m[0].replaceAll('\0', '') : m[0];
       const end = m.index + m[0].length;
+      // UTF-16LE text read one byte late is a UTF-16BE run without its first letter. Where the NULs fit the LE reading
+      // at both ends (a letter before the run, a NUL after it), it is LE text, read whole above (#1057).
+      if (re === UTF16BE_RUN && PRINTABLE.test(text[m.index - 1] ?? '') && text[end] === '\0') continue;
+      const run = wide ? m[0].replaceAll('\0', '') : m[0];
       const anyLength = run.length >= BINARY_RUN || (!wide && text[m.index - 1] === '\0' && text[end] === '\0');
       for (const t of tokens(run)) {
         if ((!anyLength && t.length < BINARY_TERM) || !rules.hashed.has(sha(t))) continue;

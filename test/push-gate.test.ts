@@ -202,6 +202,14 @@ test('push gate refuses a denied term in UTF-16BE text inside a binary file, als
   }
 });
 
+test('push gate does not read UTF-16LE text one byte late as UTF-16BE, which drops its first letter; BE text after a stray letter is still read (#1057)', { skip }, () => {
+  const le = gateBinary('notes.txt', Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from('Azqx made here', 'utf16le'), Buffer.from([0xff]), noise(64)]));
+  assert.equal(le.status, 0, `UTF-16LE "Azqx made here": allowed\n${le.stderr}`);
+  const be = gateBinary('image.png', unfenced(Buffer.concat([Buffer.from('A'), Buffer.from('built by zqx', 'utf16le').swap16()])));
+  assert.notEqual(be.status, 0, 'UTF-16BE "built by zqx" after a stray letter: refused');
+  assert.match(be.stderr, /image\.png: denied term "zqx" in a binary file/);
+});
+
 test('push gate reads an added line starting "++ /dev/null" or "++ b/<path>" as content, in a file deleted again before the push (#1057)', { skip }, () => {
   for (const header of ['++ /dev/null', '++ b/package-lock.json']) {
     const r = repo();
