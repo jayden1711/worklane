@@ -448,7 +448,7 @@ test('lineDiff: a unified diff by line, with context and gaps', () => {
   assert.equal(lineDiff(before, before.replace('l0\n', 'L0\n').replace('l11\n', 'L11\n'), 'f'), '--- f\n+++ f\n-l0\n+L0\n l1\n l2\n l3\n@@\n l8\n l9\n l10\n-l11\n+L11');
 });
 
-test('the dashboard\'s Discord step: looking changes nothing; owners only; the token to a 0400 file and credentials.yaml; intake.yaml only as the confirmed diff', { skip: !posix && 'POSIX modes' }, async () => {
+test('the dashboard\'s Discord step: looking changes nothing; owners only; the token to a 0400 file and credentials.yaml; intake.yaml only as the confirmed diff', { skip: !posix && 'POSIX modes' }, async (t) => {
   const d = await fake.startFakeDiscord({ token: TOKEN });
   const i = instance();
   const { dir: root } = exampleProject();
@@ -459,7 +459,9 @@ test('the dashboard\'s Discord step: looking changes nothing; owners only; the t
   const cli = cliAgainst(d.api, i.dir);
   // The dashboard's cache clock, in the test's hand (#582): advanced, never slept on, so a wall-clock step can't fail it.
   let clock = 0;
-  const dash = await startDashboard({ root, cfg: loadConfig(root), eventsDb, stateDir: join(state, 'state'), user: 'example-owner', roleOf: exampleRoles, instance: 'shop', policyFile: join(i.home, 'policy.yaml'), slotsDir: join(state, 'slots'), secretsHome, webDir: join(state, 'web'), discordListing: discordListingStandIn((args) => (listings++, cli(args))), now: () => clock });
+  // #1064: a listing that fails, with a line naming a path and quoting Discord, while set.
+  let failWith: string | null = null;
+  const dash = await startDashboard({ root, cfg: loadConfig(root), eventsDb, stateDir: join(state, 'state'), user: 'example-owner', roleOf: exampleRoles, instance: 'shop', policyFile: join(i.home, 'policy.yaml'), slotsDir: join(state, 'slots'), secretsHome, webDir: join(state, 'web'), discordListing: discordListingStandIn((args) => (failWith ? Promise.resolve({ status: 1, stdout: '', stderr: `${failWith}\n` }) : (listings++, cli(args)))), now: () => clock });
   const base = dash.url.split('/?')[0]!;
   const bodies: string[] = [];
   const call = async (path: string, login: string, body?: unknown) => {
@@ -529,6 +531,20 @@ test('the dashboard\'s Discord step: looking changes nothing; owners only; the t
     const v1 = await call('/api/first-run/discord', owner);
     assert.deepEqual(v1.json.token, { configured: true, file, present: true, error: null });
     assert.equal(v1.json.ask, null);
+
+    // #1064: a listing that fails says so, on the channels read and on a review that must list first (nothing cached);
+    // the child's own line is only in the log.
+    failWith = `discord: ${i.home}/secrets/intake-discord: Discord answered 401: 401: Unauthorized`;
+    const lines: string[] = [];
+    t.mock.method(console, 'error', (...a: unknown[]) => void lines.push(a.map(String).join(' ')));
+    const failedList = await call('/api/first-run/discord/channels', owner);
+    const coldReview = await call('/api/first-run/discord/intake', owner, { values: { 'discord.enabled': true } });
+    t.mock.restoreAll();
+    const shown = { error: "the bot's channel listing failed; the detail is in the dashboard's log on the machine" };
+    assert.deepEqual([failedList.status, failedList.json], [502, shown]);
+    assert.deepEqual([coldReview.status, coldReview.json], [502, shown]);
+    for (const route of ['GET /api/first-run/discord/channels', 'POST /api/first-run/discord/intake']) assert.ok(lines.some((l) => l.includes(route) && l.includes(failWith!)), `${route}: the detail is logged: ${JSON.stringify(lines)}`);
+    failWith = null;
 
     // The bot's own view: its application, the invite link, its channels. One listing serves the calls that follow.
     const bot = await call('/api/first-run/discord/channels', owner);

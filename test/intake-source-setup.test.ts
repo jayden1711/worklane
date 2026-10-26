@@ -171,6 +171,12 @@ test("the dashboard's Slack and Linear steps: looking changes nothing; owners on
     t.mock.restoreAll();
     assert.deepEqual([failed.status, failed.json], [502, { error: "the Linear view failed; the detail is in the dashboard's log on the machine" }]);
     assert.ok(lines.some((l) => l.includes('GET /api/first-run/linear/view') && l.includes(failWith!)), `the detail is logged: ${JSON.stringify(lines)}`);
+    // A review with no view cached loads it first: the same failure, the same answer, the line logged.
+    t.mock.method(console, 'error', (...a: unknown[]) => void lines.push(a.map(String).join(' ')));
+    const cold = await call('/api/first-run/linear/intake', owner, { values: { 'linear.enabled': true } });
+    t.mock.restoreAll();
+    assert.deepEqual([cold.status, cold.json], [502, { error: "the Linear view failed; the detail is in the dashboard's log on the machine" }]);
+    assert.ok(lines.some((l) => l.includes('POST /api/first-run/linear/intake') && l.includes(failWith!)), `the detail is logged: ${JSON.stringify(lines)}`);
     failWith = null;
     const values = { 'slack.enabled': true, 'slack.team': TEAM, 'slack.channels': [IDEAS] };
     const review = await call('/api/first-run/slack/intake', owner, { values });

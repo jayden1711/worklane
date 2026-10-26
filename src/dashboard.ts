@@ -2566,7 +2566,7 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
               audit(who, 'first_run.discord_intake', { file: plan.file, creates: plan.creates, changes: plan.changes });
               return json(res, 200, { ok: true, confirmed: true, ...plan });
             } catch (e) {
-              if (e instanceof DiscordSetupError) return refused(e.status, e.message);
+              if (e instanceof DiscordSetupError) return refused(e.status, refusalText(`${req.method} ${url.pathname}`, e));
               throw e;
             }
           }
@@ -2635,7 +2635,7 @@ export function startDashboard(opts: DashboardOptions): Promise<{ server: Server
               audit(who, `first_run.${kind}_intake`, { file: plan.file, creates: plan.creates, changes: plan.changes });
               return json(res, 200, { ok: true, confirmed: true, ...plan });
             } catch (e) {
-              if (e instanceof DiscordSetupError) return refused(e.status, e.message);
+              if (e instanceof DiscordSetupError) return refused(e.status, refusalText(`${req.method} ${url.pathname}`, e));
               throw e;
             }
           }
