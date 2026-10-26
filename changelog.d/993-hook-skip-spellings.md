@@ -5,8 +5,12 @@
   - a prefix of `--no-verify` that git's option parser takes;
   - config that can carry the hooks path or run a push by another name, written by `-c`, `--config-env`,
     `git config` or `GIT_CONFIG_*`: an include (`include.path`, `includeIf.*.path`), an alias, `help.autocorrect`;
-    and `git config --edit`, `--rename-section` and `--remove-section`. A `git config` that only reads a name
-    (`git config alias.st`) is allowed; one with an option the guard doesn't know is refused;
+    and `git config --edit`, `--rename-section` and `--remove-section`. A `git config` is read by git's own
+    argument rules: options end at the first word that isn't one, so every word after the name is a value or
+    value-pattern even when it looks like an option (`git config core.hooksPath --global` writes `--global`), and
+    `get` or `list` reads only as the subcommand. One that only reads a name (`git config alias.st`,
+    `git config --get alias.p x`, `git config get alias.p`) is allowed; one with an option the guard doesn't know
+    (an abbreviation such as `--glo` included) is refused;
   - a push in a line that gives it other config or another repository's hooks: `HOME`, `XDG_CONFIG_HOME`, any
     `GIT_CONFIG*`, `GIT_DIR`, `GIT_COMMON_DIR`, `--git-dir`, `env` with an option, `unset`;
   - pushes that run no hook: `git send-pack`, `git http-push`, the remote helpers and their `git-*` programs;
@@ -15,6 +19,7 @@
   - git, `env` and those programs where a command runs them: directly, behind a wrapper the shell matcher removes
     (`env -u X`, `nice -n 15`, `exec -a`, `env -S '…'`, `timeout --kill-after 5 60`, `xargs --max-args 1`), as a
     `find -exec` or `-ok` command, or behind a known runner (`setsid`, `flock`, `strace`, `taskset`, …). A runner's
+    options are those of its own option table (`systemd-run -G` is `--collect`, a flag), and its
     command is the first word after its own options and operands (`flock /tmp/l git push` runs git; so does
     `flock /tmp/git git push`); a word that is only an argument (`rm -rf vendor/git`, `make -C third_party/git`,
     `grep env -i`) is not read, and a program the guard doesn't know as a runner is not read into;
@@ -32,4 +37,6 @@
   a proof that nothing else changed. Known gaps that still let a hook-skipping push through: command strings run
   by `-c` or a shell (`flock /tmp/l -c 'git push --no-verify'`, `setsid bash -c '…'`, `runuser -c '…'`,
   `find -exec sh -c '…'`; #983); a runner the guard doesn't know; a wrapper or runner option its grammar doesn't
-  list; a renamed or linked git binary; `read`-set variables; shell expansions (`git push $X`).
+  list, or a version of a runner whose options differ from the one the grammar follows; an abbreviated long option
+  of a runner (`flock --tim 5`); runners nested deeper than four; a renamed or linked git binary; `read`-set
+  variables; shell expansions (`git push $X`).

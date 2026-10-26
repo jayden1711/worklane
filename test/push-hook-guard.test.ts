@@ -356,27 +356,100 @@ test("a runner's command is the first word after the runner's own options and op
   ]) assert.deepEqual([bash(c).decision, bash(c).rule], ['deny', 'push-hook-bypass'], c);
 });
 
-test('git config reads an alias, include or help.autocorrect; only a write is refused (#993)', () => {
+test("git config is read by git's own argument rules: options end at the first other word, and a second operand is a value (#993)", () => {
+  // Measured with git 2.43 in a scratch repository: each refused line that names a value after the name writes it.
+  const allow = 'none';
+  const deny = 'deny';
+  const table: [string, string][] = [
+    // One name, after options that only choose a file, scope, type or output: a read.
+    ['git config alias.st', allow],
+    ['git config help.autocorrect', allow],
+    ['git config --global alias.lg', allow],
+    ['git config include.path', allow],
+    ['git config core.hooksPath', allow],
+    ['git config --file .gitmodules submodule.x.path', allow],
+    ['git config --type bool help.autocorrect', allow],
+    ['git config --local --show-origin core.hooksPath', allow],
+    ['git config -- alias.st', allow],
+    // A read action, or get/list in the subcommand place: a read, whatever follows.
+    ['git config --get core.hooksPath x', allow],
+    ['git config --get-all alias.p', allow],
+    ['git config --fixed-value --get alias.st x', allow],
+    ['git config --get-regexp alias', allow],
+    ['git config --list', allow],
+    ['git config get core.hooksPath', allow],
+    ['git config --global get alias.p', allow],
+    ['git config list --show-origin', allow],
+    // A word after the name is a value, even one shaped like an option (git stops reading options at the name).
+    ['git config core.hooksPath --global', deny],
+    ['git config core.hooksPath --bool', deny],
+    ['git config --local core.hooksPath --show-origin', deny],
+    ['git config include.path --global', deny],
+    ['git config includeIf.onbranch:main.path --global', deny],
+    ['git config alias.p --global', deny],
+    ['git config help.autocorrect --bool', deny],
+    ['git config core.hooksPath --get', deny],
+    ['git config core.hooksPath --', deny],
+    ['git config -- core.hooksPath /tmp/h', deny],
+    // get or list anywhere but the subcommand place is an operand: here a value-pattern.
+    ['git config core.hooksPath /tmp/nohooks get', deny],
+    ['git config --global core.hooksPath /tmp/nohooks get', deny],
+    ["git config alias.p 'push --no-verify' list", deny],
+    ['git config include.path /tmp/evil.cfg get', deny],
+    // Write actions and subcommands, and options not known to only choose a file (--glo is git's --global: refused).
+    ['git config alias.st status', deny],
+    ['git config --add alias.st status', deny],
+    ['git config --replace-all alias.st status', deny],
+    ['git config --unset alias.st', deny],
+    ['git config --unset-all include.path', deny],
+    ['git config unset alias.st', deny],
+    ['git config set help.autocorrect 1', deny],
+    ['git config --file /tmp/cfg alias.p push', deny],
+    ['git config --type bool help.autocorrect true', deny],
+    ['git config --unknown-option alias.p', deny],
+    ['git config --glo alias.p', deny],
+    ['git config edit', deny],
+    ['git config --global rename-section alias x', deny],
+    // A write of a name that can't carry the hooks or run a command is not the guard's to refuse.
+    ['git config pull.rebase false', allow],
+    ['git config pull.rebase --global', allow],
+  ];
+  for (const [c, want] of table) {
+    for (const line of [c, `${c} && git push origin HEAD`]) {
+      const v = bash(line);
+      assert.deepEqual([v.decision, v.decision === 'deny' ? v.rule : undefined], [want, want === 'deny' ? 'push-hook-bypass' : undefined], line);
+    }
+  }
+});
+
+test("a runner's options are read by its own option table: values attached or next, and a leading -- (#993)", () => {
   for (const c of [
-    'git config alias.st',
-    'git config help.autocorrect',
-    'git config --global alias.lg',
-    'git config include.path',
-    'git config core.hooksPath',
-    'git config --file .gitmodules submodule.x.path',
-    'git config --type bool help.autocorrect',
+    // systemd-run -G is --collect, a flag (measured: systemd-run --help, getopt "+hrH:M:E:p:tPqGdSu:").
+    'systemd-run --user -G make -C vendor/git all',
+    'systemd-run --user --collect make -C vendor/git all',
   ]) assert.equal(bash(c).decision, 'none', c);
   for (const c of [
-    'git config alias.st status',
-    'git config --add alias.st status',
-    'git config --replace-all alias.st status',
-    'git config --unset alias.st',
-    'git config --unset-all include.path',
-    'git config unset alias.st',
-    'git config set help.autocorrect 1',
-    'git config --file /tmp/cfg alias.p push',
-    'git config --type bool help.autocorrect true',
-    'git config --unknown-option alias.p',
+    'systemd-run --user -G git push --no-verify',
+    // nsenter's -W takes an attached value only (measured: getopt "W::"; `nsenter -W /tmp echo` runs /tmp).
+    'nsenter -W git push --no-verify',
+    'systemd-run --user -s git push --no-verify',
+    'systemd-run --user --path-property x git push --no-verify',
+    // An attached value doesn't take the next word.
+    'flock -w5 /tmp/l git push --no-verify',
+    'strace -o/tmp/t git push --no-verify',
+    'flock --timeout=5 /tmp/l git push --no-verify',
+    'strace --output=/tmp/t git push --no-verify',
+    // A leading -- ends the runner's options.
+    'setsid -- git push --no-verify',
+    'flock -- /tmp/l git push --no-verify',
+    // Value options each program's own table lists (fakeroot's getopt; unshare's and ltrace's required values).
+    'fakeroot -f /usr/bin/faked git push --no-verify',
+    'fakeroot -b 3 git push --no-verify',
+    'unshare --map-users 0:1000:1 git push --no-verify',
+    'unshare --monotonic 5 git push --no-verify',
+    'ltrace -D 1 git push --no-verify',
+    'ltrace -L git push --no-verify',
+    'strace --inject read:error=EIO git push --no-verify',
   ]) assert.deepEqual([bash(c).decision, bash(c).rule], ['deny', 'push-hook-bypass'], c);
 });
 

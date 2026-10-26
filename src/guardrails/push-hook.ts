@@ -134,23 +134,27 @@ interface Runner {
   needs?: Options;
 }
 const opts = (short: string, ...long: string[]): Options => ({ short, long });
-/** Programs that run a command from their words, after options and operands of their own (setsid git push). */
+/**
+ * Programs that run a command from their words, after options and operands of their own (setsid git push).
+ * INVARIANT: `value` lists exactly the options whose value may be the next word (getopt's `x:`, a long option's
+ * required argument), as each program's own option table has them; an optional value (`x::`) is attached only.
+ */
 const RUNNERS: Record<string, Runner> = {
   setsid: { value: opts('') },
   stdbuf: { value: opts('ioe', 'input', 'output', 'error') },
-  strace: { value: opts('abeEIoOpPsSuUX', 'output', 'trace', 'signal', 'status', 'env', 'user', 'attach', 'trace-path', 'string-limit', 'summary-sort-by', 'columns') },
-  ltrace: { value: opts('aAeEFlLnopsuwx', 'output', 'library', 'align', 'indent') },
+  strace: { value: opts('abeEIoOpPsSuUX', 'output', 'trace', 'signal', 'status', 'env', 'user', 'attach', 'trace-path', 'string-limit', 'summary-sort-by', 'columns', 'abbrev', 'verbose', 'raw', 'read', 'write', 'fault', 'inject', 'kvm', 'silence', 'silent', 'trace-fds', 'detach-on', 'interruptible', 'const-print-style', 'summary-columns', 'summary-syscall-overhead', 'syscall-limit', 'stack-trace-frame-limit') },
+  ltrace: { value: opts('aADeFlnopsuwxX', 'output', 'library', 'align', 'indent', 'debug', 'where') },
   chronic: { value: opts('') },
   unbuffer: { value: opts('') },
   flock: { value: opts('wEc', 'wait', 'timeout', 'conflict-exit-code', 'command'), operands: 1, none: opts('c', 'command') },
   taskset: { value: opts(''), operands: 1, none: opts('p', 'pid') },
   chrt: { value: opts('TPD', 'sched-runtime', 'sched-period', 'sched-deadline'), operands: 1, none: opts('pm', 'pid', 'max') },
   nsenter: { value: opts('tSG', 'target', 'setuid', 'setgid') },
-  unshare: { value: opts('SGRw', 'setuid', 'setgid', 'root', 'wd', 'map-user', 'map-group', 'propagation', 'setgroups') },
+  unshare: { value: opts('SGRw', 'setuid', 'setgid', 'root', 'wd', 'map-user', 'map-group', 'map-users', 'map-groups', 'propagation', 'setgroups', 'monotonic', 'boottime') },
   caffeinate: { value: opts('tw') },
-  fakeroot: { value: opts('lsi', 'lib', 'faked') },
+  fakeroot: { value: opts('lfisb', 'lib', 'faked', 'fd-base') },
   firejail: { value: opts('') },
-  'systemd-run': { value: opts('upEMHGs', 'unit', 'property', 'setenv', 'description', 'slice', 'uid', 'gid', 'working-directory', 'machine', 'host', 'nice', 'service-type', 'on-active', 'on-boot', 'on-startup', 'on-calendar', 'timer-property') },
+  'systemd-run': { value: opts('HMEpu', 'unit', 'property', 'setenv', 'description', 'slice', 'uid', 'gid', 'working-directory', 'machine', 'host', 'nice', 'service-type', 'expand-environment', 'path-property', 'socket-property', 'on-active', 'on-boot', 'on-startup', 'on-unit-active', 'on-unit-inactive', 'on-calendar', 'timer-property') },
   runuser: { value: opts('ugGcsw', 'user', 'group', 'supp-group', 'command', 'shell', 'session-command', 'whitelist-environment'), none: opts('cl', 'command', 'session-command', 'login'), needs: opts('u', 'user') },
   'ssh-agent': { value: opts('atEPO') },
   'dbus-run-session': { value: opts('', 'config-file', 'dbus-daemon') },
@@ -445,31 +449,55 @@ export function pushHookShellRefusal(command: string, commands: SimpleCommand[],
   return null;
 }
 
-const CONFIG_READ = /^(--get|--get-all|--get-regexp|--list|-l|get|list)$/;
-/** git config words that rewrite config by section or in an editor (any abbreviation git takes). */
-const CONFIG_REWRITE = /^(-[lz]*e|--e(d(i(t)?)?)?|--ren.*|--rem.*|edit|rename-section|remove-section)$/;
+/** git config's read actions, which take a name and an optional pattern, default or URL but never a value. */
+const CONFIG_READ_ACTION = /^(--get|--get-all|--get-regexp|--get-urlmatch|--get-color|--get-colorbool|--list|-l)$/;
+/** git config's subcommands that only read (git 2.46 and later; earlier, a name without a section and an error). */
+const CONFIG_READ_SUB = /^(get|list)$/;
+/**
+ * git config options that rewrite config by section or in an editor (any abbreviation git takes). WHY: refused in
+ * any position, though git reads a word after the name as a value, so a git that read options there is no hole.
+ */
+const CONFIG_REWRITE = /^(-[lz]*e|--e(d(i(t)?)?)?|--ren.*|--rem.*)$/;
+const CONFIG_REWRITE_SUB = /^(edit|rename-section|remove-section)$/;
 
 /** git config options that only choose a file, scope, type or output format; the second list takes a value. */
-const CONFIG_QUIET = /^(--global|--system|--local|--worktree|--includes|--no-includes|--bool|--int|--bool-or-int|--path|--expiry-date|--no-type|--null|-z|--show-origin|--show-scope|--(file|blob|type|default)=.*)$/;
+const CONFIG_QUIET = /^(--global|--system|--local|--worktree|--includes|--no-includes|--bool|--int|--bool-or-int|--path|--expiry-date|--no-type|--null|-z|--show-origin|--show-scope|--fixed-value|--(file|blob|type|default)=.*)$/;
 const CONFIG_QUIET_VALUE = /^(-f|--file|--blob|--type|--default)$/;
 
-/** Whether git config's words may write: an option it doesn't know as quiet, or other than one key (a value). */
-function configWrites(rest: string[]): boolean {
-  let operands = 0;
-  for (let i = 0; i < rest.length; i++) {
+/**
+ * What `git config` does with these words (after `config`), by git's own argument rules: options end at the first
+ * other word or `--` (measured, git 2.43: `git config core.hooksPath --global` writes the value `--global`), and that
+ * word is the subcommand or the name; every word after it is an operand. A read action, or `get`/`list` in that
+ * place, only reads. Otherwise one operand reads the name and a second is a value. An option git config might take
+ * that isn't listed as quiet is a write. `word`: the option or subcommand that rewrites config.
+ */
+function configUse(rest: string[]): { use: 'read' | 'write' | 'rewrite'; word?: string } {
+  const rewrite = rest.find((t) => CONFIG_REWRITE.test(t));
+  if (rewrite) return { use: 'rewrite', word: rewrite };
+  let read = false;
+  let i = 0;
+  for (; i < rest.length; i++) {
     const t = rest[i]!;
-    if (!t.startsWith('-')) operands++;
+    if (t === '--') {
+      i++;
+      break;
+    }
+    if (!t.startsWith('-') || t === '-') break;
+    if (CONFIG_READ_ACTION.test(t)) read = true;
     else if (CONFIG_QUIET_VALUE.test(t)) i++;
-    else if (!CONFIG_QUIET.test(t)) return true;
+    else if (!CONFIG_QUIET.test(t)) return { use: 'write' };
   }
-  return operands !== 1;
+  const first = rest[i];
+  if (first !== undefined && CONFIG_REWRITE_SUB.test(first)) return { use: 'rewrite', word: first };
+  if (read || (first !== undefined && CONFIG_READ_SUB.test(first))) return { use: 'read' };
+  return { use: rest.length - i > 1 ? 'write' : 'read' };
 }
 
 /** Why a `git config` with these words (after the subcommand) may change the hooks or a name git runs; or null. */
 function configRefusal(rest: string[]): string | null {
-  const rewrite = rest.find((t) => CONFIG_REWRITE.test(t));
-  if (rewrite) return `git config ${rewrite} can rewrite core.hooksPath, an include or an alias`;
-  if (rest.some((t) => CONFIG_READ.test(t)) || !configWrites(rest)) return null;
+  const { use, word } = configUse(rest);
+  if (use === 'rewrite') return `git config ${word} can rewrite core.hooksPath, an include or an alias`;
+  if (use === 'read') return null;
   if (rest.some((t) => HOOKS_PATH_KEY.test(t))) return 'git config core.hooksPath points git at other hooks';
   const key = rest.find((t) => NAME_OR_INCLUDE_KEY.test(t));
   return key ? `git config ${key} can make git read other config or run another command` : null;
