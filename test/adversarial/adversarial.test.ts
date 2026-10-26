@@ -170,9 +170,10 @@ const Flow = z.strictObject({
   tipUnreadable: z.literal(true).optional(),
   /**
    * The default branch moved past the base: these files, committed on it after the base from another clone of its
-   * remote (the PR's repo has neither the commit nor a ref to it until the decision fetches the tip).
+   * remote (the PR's repo has neither the commit nor a ref to it until the decision fetches the tip). A file set to
+   * null is deleted there (with a file added elsewhere, a move on the default branch).
    */
-  tipMoved: z.record(z.string(), z.string()).optional(),
+  tipMoved: z.record(z.string(), z.string().nullable()).optional(),
   /**
    * With tipMoved: the PR's own branch merged the moved tip in before its change (an agent's merge, not the harness's
    * merge-in, so the change is still measured from the claimed base).
@@ -374,7 +375,10 @@ function made(c: Case | Control, inject: boolean): { dir: string; base: string; 
     const other = mkdtempSync(join(tmpdir(), 'adversarial-other-'));
     git(other, 'clone', '-q', '-b', 'main', origin, '.');
     for (const [k, v] of [['user.email', 'grace@example.com'], ['user.name', 'Grace'], ['commit.gpgsign', 'false'], ['core.autocrlf', 'false']]) git(other, 'config', k!, v!);
-    for (const [p, text] of Object.entries(c.flow.tipMoved)) put(other, p, text);
+    for (const [p, text] of Object.entries(c.flow.tipMoved)) {
+      if (text === null) unlinkSync(join(other, p));
+      else put(other, p, text);
+    }
     git(other, 'add', '-A');
     git(other, 'commit', '-q', '-m', 'on the default branch after the base');
     git(other, 'push', '-q', 'origin', 'HEAD:refs/heads/main');
