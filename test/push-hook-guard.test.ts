@@ -264,6 +264,7 @@ test('git, env and the hookless push programs count only where a command runs th
     'env -iu X git push',
     'env --unset X git push --no-verify',
     'env -C /tmp git push --no-verify',
+    'env --chdir sub git push --no-verify',
     "env -S 'git push --no-verify'",
     'exec -a x git push --no-verify',
     'setsid git push --no-verify',
@@ -295,6 +296,7 @@ test("git's command list narrows only where the line removes or moves PATH or gi
       'unset FOO; git frob ls-files',
       'export -n FOO; git frob pull',
       'env -u FOO git frob',
+      'env -uFOO git frob',
     ]) assert.equal(live(c).decision, 'none', c);
     for (const c of [
       'unset PATH; git frob',
@@ -305,6 +307,7 @@ test("git's command list narrows only where the line removes or moves PATH or gi
       'unset GIT_EXEC_PATH; git mergetool',
       'env -u GIT_EXEC_PATH git mergetool',
       'env -i git mergetool',
+      'env -iuFOO git mergetool',
       'env - git frob',
     ]) assert.equal(live(c).rule, 'push-hook-bypass', c);
   } finally {
