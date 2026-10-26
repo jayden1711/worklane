@@ -204,6 +204,11 @@ export function untrackedNames(cwd: string): string[] {
   return names(must(runBytes(cwd, ['ls-files', '--others', '--exclude-standard', '-z'])));
 }
 
+/** The ignored untracked files of a worktree (`ls-files --others --ignored --exclude-standard -z`), each read by nameOf. */
+export function ignoredNames(cwd: string): string[] {
+  return names(must(runBytes(cwd, ['ls-files', '--others', '--ignored', '--exclude-standard', '-z'])));
+}
+
 /**
  * Every file in the index (`ls-files --cached -z`, `rev` null) or in a commit's tree (`ls-tree -r -z --name-only`),
  * each read by nameOf: whether a file is there at all, apart from whether its blob can be asked for by name.
