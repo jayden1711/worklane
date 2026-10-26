@@ -45,8 +45,8 @@
 // merge-vacuity-r12, M3 to R3s, P1a to P5, E1 to E8, X2, X3 and Z-A1 to Z-N4 in -r13), but only a top-level
 // statement moved whole, paired by its code or its declared name (the closest same-named pair first, each pair
 // compared on its own, by character or by code token, its code only either way, and the PR waits when two are too
-// large to compare: ZN1B, ZN4B, ZN1spent, ZN1L, ZN1L-cmt, ZN4L to ZN4L-N, SEMI, CMT, WRAP-1of2 to WRAP-3of4z must
-// hold); one git paired
+// large to compare: ZN1B, ZN4B, ZN1spent, ZN1T, ZN1L, ZN1L-cmt, ZN4L to ZN4L-P, SEMI, CMT, WRAP-1of2 to WRAP-3of4z,
+// UB100 and UB100z must hold); one git paired
 // in place with a removed statement of its name (or, unnamed, an unnamed one) whose code it keeps at a similarity of
 // at least 0.8 pairs with nothing (Z-F6 to Z-F11, G1, D1, U1), and one keeping less, or too large to align with it
 // (ALIGN_CELLS, each pair on its own), took its place and pairs as any other (N5, N6, BL1wb, BUDf, B3: must hold).

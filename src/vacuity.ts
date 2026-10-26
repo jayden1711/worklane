@@ -1200,9 +1200,10 @@ function movedCode(
   }
   // Then by name, the closest pairs first (Z-N1 to Z-N4: a same-named unit never takes another's source by its path).
   // Each pair a unit or a source shares with another is scored on its own (ZN1B, ZN4B, ZN1spent: no pair spends
-  // another's cells): by character, or, too large for that (ALIGN_CELLS), by the tokens of `key`, each weighing its
-  // characters (SEMI, CMT, WRAP-1of2: formatting, comments and line breaks are no change here either); too large for
-  // that too, the PR waits.
+  // another's cells): by character, or, too large for that (ALIGN_CELLS), by the tokens of `key` (SEMI, CMT,
+  // WRAP-1of2: formatting, comments and line breaks are no change here either), each run of tokens between kept ones
+  // weighing the characters it doesn't keep, aligned by character (UB100: an edited name costs its edit, not its
+  // length); too large for that too, the PR waits (ZN1T).
   const named = left.flatMap(([f, u]) => sources.filter((s) => !s.used && s.name === u.name && !same(u, s)).map((s) => ({ f, u, s, score: 0 })));
   const ways = new Map<Unit, number>();
   for (const { u, s } of named) for (const x of [u, s]) ways.set(x, (ways.get(x) ?? 0) + 1);
@@ -1212,11 +1213,20 @@ function movedCode(
     const [ul, sl] = [u.key, s.key].map((k) => k.match(/[\w$]+|[^\w$]+/g)!);
     const ops = alignChars(ul!, sl!);
     if (!ops) throw new CoverageUnreadable(`two statements named ${u.name} are too large to tell which one ${u.path}:${u.first} was moved from`);
-    let [i, j, score] = [0, 0, 0];
+    let [i, j, score, ru, rs] = [0, 0, 0, '', ''];
+    const run = () => {
+      const o = ru || rs ? alignChars([...ru], [...rs]) : [];
+      score -= o ? o.filter((x) => x !== '=').length : ru.length + rs.length;
+      [ru, rs] = ['', ''];
+    };
     for (const op of ops) {
-      if (op === '=') [i, j] = [i + 1, j + 1];
-      else score -= op === '+' ? ul![i++]!.length : sl![j++]!.length;
+      if (op === '=') {
+        run();
+        [i, j] = [i + 1, j + 1];
+      } else if (op === '+') ru += ul![i++]!;
+      else rs += sl![j++]!;
     }
+    run();
     return score;
   };
   for (const c of named) if (ways.get(c.u)! > 1 || ways.get(c.s)! > 1) c.score = closeness(c.u, c.s);

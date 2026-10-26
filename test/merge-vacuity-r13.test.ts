@@ -882,19 +882,57 @@ test('must hold: ZN4L: ZN1L with a second source g holding half of the moved one
   assert.deepEqual([d.auto, d.reasons], hold('src/a.js, src/b.js, src/c.js'));
 });
 
-// ZN4L with a second source g, the moved g with its parameter renamed (`w`, `k` long) at both ends, so the pair is too
-// large to align by character, and `other` applied: both sides' unkept tokens count, each by its characters.
-const renamedAt = (k: number) => (g: string) => g.replace('g(u) {', `g(${'w'.repeat(k)}) {`).replace(': deny(u)', `: deny(${'w'.repeat(k)})`);
+// ZN4L with a second source g written by `other` from the moved g (its parameter renamed, `k` characters long, at both
+// ends when `k`), so the pair is too large to align by character: both sides' unkept tokens count, by their characters.
+const renamedAt = (k: number) => (g: string) => !k ? g : g.replace('g(u) {', `g(${'w'.repeat(k)}) {`).replace(': deny(u)', `: deny(${'w'.repeat(k)})`);
 for (const [id, file, k, other, why] of [
-  ['ZN4L-S', 'src/b.js', 1, (g: string) => g.replace(/ {2}const v5\d [^\n]*\n/g, ''), '10 of its lines dropped (the moved g\'s unkept tokens count)'],
+  ['ZN4L-S', 'src/b.js', 0, (g: string) => g.replace(/ {2}(if|return|const v5\d) [^\n]*\n/g, ''), 'its first, last and 10 more lines dropped (the moved g\'s unkept tokens count)'],
   ['ZN4L-U', 'src/b.js', 1, (g: string) => g.replace('  const v60', `${lines(10, (i) => `  const x${i} = gamma(u) - ${i} / delta(u);\n`)}  const v60`), '10 lines more (the source\'s unkept tokens count)'],
   ['ZN4L-N', 'src/0.js', 40, (g: string) => g, 'a 40-character parameter, in a file that sorts first (a token weighs its characters)'],
 ] as const) {
-  test(`must hold: ${id}: ZN1L with a second source g, the moved one renamed at both ends with ${why}`, async () => {
+  test(`must hold: ${id}: ZN1L with a second source g, the moved one ${k ? 'renamed at both ends, with ' : 'with '}${why}`, async () => {
     const d = await decided({ 'src/a.js': G_A + ZN1L_G(1, 'grant') + ZN1L_ARMS, [file]: other(renamedAt(k)(ZN1L_G(2, 'grantAll'))) }, { 'src/a.js': G_A, [file]: '', 'src/c.js': ZN1L_G(2, 'grantAll') + ZN1L_ARMS, 'test/x.test.js': M3T });
     assert.deepEqual([d.auto, d.reasons], hold(file === 'src/b.js' ? 'src/a.js, src/b.js, src/c.js' : 'src/0.js, src/a.js, src/c.js'));
   });
 }
+
+test('must hold: ZN4L-P: ZN1L with a second source g, the moved one renamed at both ends, with every `+` a `-` (punctuation counts too)', async () => {
+  const other = renamedAt(1)(ZN1L_G(2, 'grantAll').replace(/\) \+ /g, ') - '));
+  const d = await decided({ 'src/a.js': G_A + ZN1L_G(1, 'grant') + ZN1L_ARMS, 'src/b.js': other }, { 'src/a.js': G_A, 'src/b.js': '', 'src/c.js': ZN1L_G(2, 'grantAll') + ZN1L_ARMS, 'test/x.test.js': M3T });
+  assert.deepEqual([d.auto, d.reasons], hold('src/a.js, src/b.js, src/c.js'));
+});
+
+// A g moved with every word of its lines edited inside a block the test never enters: scored by token, an edited name
+// costs the characters it changes, so the two-line decoy g never comes closer.
+const UB = (n: number, edited: boolean, other = 'deny') => `export function g(u) {\n  if (u.never) {\n${lines(n, (i) => (edited ? `    const w${i} = alphz(u) + ${i + 1} * betz(u);\n` : `    const v${i} = alpha(u) + ${i} * beta(u);\n`))}  }\n  return u.admin ? grant(u) : ${other}(u);\n}\n`;
+const ubMoved = (decoy: string | null, tested = false) => {
+  const head: Record<string, string> = { 'src/a.js': G_A, 'src/c.js': UB(100, true, tested ? 'denyAll' : 'deny') + ZN1L_ARMS, 'test/x.test.js': CM_T('c.js', tested ? "'nothing'" : "'none'") };
+  if (decoy) head[decoy] = G_DECOY;
+  return decided({ 'src/a.js': G_A + UB(100, false) + ZN1L_ARMS }, head);
+};
+for (const decoy of ['src/b.js', 'src/z.js'] as const) {
+  test(`must hold: UB100${decoy === 'src/z.js' ? 'z' : ''}: a 105-line g moved with every word of 100 lines edited in a block the test never enters, a two-line decoy g in ${decoy.slice(4)}`, async () => {
+    const d = await ubMoved(decoy);
+    assert.deepEqual([d.auto, d.reasons], hold(decoy === 'src/b.js' ? 'src/a.js, src/b.js, src/c.js' : 'src/a.js, src/c.js, src/z.js'));
+  });
+}
+test('control: UB100c: UB100 with no decoy holds', async () => {
+  const d = await ubMoved(null);
+  assert.deepEqual([d.auto, d.reasons], hold('src/a.js, src/c.js'));
+});
+test('must merge: UB100t: UB100 with the arm the test takes edited too', async () => {
+  const d = await ubMoved('src/b.js', true);
+  assert.deepEqual([d.auto, d.reasons], [true, []]);
+});
+
+// Too large to tell even by token which of two same-named statements was moved: the PR waits, even with its change
+// tested, and never falls back to the closer-looking one.
+test('must hold: ZN1T: M3 with a 204-line g moved and its taken arm edited (tested), a two-line decoy g in b.js, too large to tell apart', async () => {
+  const g = (first: number, arm: string, other: string) => CM_G(first, arm, 200, other);
+  const d = await decided({ 'src/a.js': G_A + g(1, 'grant', 'deny') + ZN1L_ARMS }, { 'src/a.js': G_A, 'src/b.js': G_DECOY, 'src/c.js': g(2, 'grantAll', 'denyAll') + ZN1L_ARMS, 'test/x.test.js': CM_T('c.js', "'nothing'") });
+  assert.equal(d.auto, false);
+  assert.match(d.reasons.join('\n'), /two statements named g are too large to tell which one src\/[bc]\.js:\d+ was moved from/);
+});
 
 // Line breaks are formatting too: `keep` of every `of` `const vN =` lines wrapped after their `=`.
 const wrapEvery = (keep: number, of: number) => (g: string) => {
