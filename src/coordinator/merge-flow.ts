@@ -26,7 +26,7 @@ import { readiness, requiredOutcomes, type Readiness } from '../pr-watch.js';
 import { checksFor, effectiveClass, riskClassOf, rulesetHold } from '../pr-rules.js';
 import { instructionEvalReasons, mergeDecision, neverAutoMerge, outsidePlanReasons, REVERT_BRANCH_PREFIX, waitCategoriesOf, type MergeDecision } from '../merge-policy.js';
 import { deferDelay, deferrable, isBehind, mergeDeferral, mergeMessage, MergePass, mergeRefusal, type Deferral } from '../merge-policy-train.js';
-import { weakeningOf } from '../merge-policy-weakening.js';
+import { isTipConflict, weakeningOf } from '../merge-policy-weakening.js';
 import { baselineRunnerOne, coverageRunnerOne, PLAIN_TEST_PATH, VACUITY_UNMEASURED, vacuityCheck, type VacuityCheck } from '../merge-policy-vacuity.js';
 import { CoverageUnreadable, LOAD_BUDGET_MS, readTouchedInChild, type ChangedHunkSpots, type LoadRun } from '../vacuity.js';
 
@@ -809,6 +809,12 @@ export abstract class MergeFlow extends FixRuns {
     // Nothing holds it but its tests' coverage run at this head, still to come (watchPr's startVacuityRun runs it in
     // the background): not merged, and not sent to the owner either; the pass after the run decides (#784).
     if (d.reasons.length === 1 && d.reasons[0] === VACUITY_UNMEASURED) return;
+    // Held only by a conflict with the tip in a check's file while GitHub is still computing whether it can merge (the
+    // first poll after every merge): a later poll that says `dirty` sends it to the conflict fix, as for any conflict
+    // (#1077). Up to the same cap; a GitHub that says clean, or never says, leaves the hold to the owner.
+    if (!d.auto && (pr.mergeable === null || pr.mergeableState === 'unknown') && d.reasons.some(isTipConflict) && d.reasons.every((r) => isTipConflict(r) || r === VACUITY_UNMEASURED)) {
+      if (this.waitPolls.bump(`mergeable:${number}:${pr.headSha}`) < MERGEABLE_CAP) return;
+    }
     if (d.auto) {
       // The merge train put it off (behind its base under strict protection, or its base moved mid-merge): not before
       // its retry time. Behind is never a human's call, and never merged by merging the default branch in.

@@ -391,6 +391,9 @@ type Kind = keyof typeof KINDS;
 /** The reasons' common start: each is a design-level hold. */
 export const WEAKENING_REASON = 'design: may weaken a check: ';
 
+/** Whether a reason is the hold on a conflict with the tip in a check's file (GitHub's own conflict state may send it to the conflict fix first). */
+export const isTipConflict = (reason: string): boolean => reason.startsWith(`${WEAKENING_REASON}${KINDS['tip-conflict']} (`);
+
 /** What `a` has that `b` hasn't (as multisets). */
 const missing = (a: string[], b: string[]): string[] => {
   const left = new Map<string, number>();

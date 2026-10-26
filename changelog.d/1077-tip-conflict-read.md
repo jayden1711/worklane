@@ -7,7 +7,12 @@
   - the tree git still writes for a conflicting merge (both sides' lines in its conflicted files) is measured from
     the tip like a clean one, so a suppression or skip the tip doesn't have waits, on either side of a conflict;
   - a conflict in a test, lint, guard, allowlist or table file waits for the owner (`conflicts with the default
-    branch's current tip in ...`). A conflict anywhere else is left to the conflict paths, as before;
+    branch's current tip in ...`). While GitHub is still computing whether the PR can merge (the first poll after
+    every merge), a PR held only by that reason isn't decided yet: once GitHub says `dirty` it goes to the conflict fix,
+    as before. Only when GitHub says it merges cleanly, or is still computing after 10 polls, does it wait for the
+    owner. A conflict anywhere else is left to the conflict paths, as before, with one exception: a merge that
+    conflicts with no conflicted path (a directory the tip split in two while the PR adds a file there) can't be read
+    from the tip, so that PR waits for the owner, where it used to pass;
   - git output that names no tree, a conflict with no conflicted path, or an exit other than 0 or 1 makes the PR wait.
     Before, any exit 1 counted as a conflict, so a git that couldn't run `merge-tree --write-tree` but exited 1 left
     the PR unread from the tip.
