@@ -313,10 +313,38 @@ function attributeMacros(cwd: string, rev: string): string[] {
  */
 const MIN_GIT_FOR_ATTRIBUTE_SOURCE: readonly [number, number] = [2, 40];
 
-/** The running git's major and minor version (`git version 2.43.0`), or null when it can't be read. Asked each time: it's one spawn, only when a .gitattributes changes. */
-function gitVersion(cwd: string): [number, number] | null {
-  const m = /git version (\d+)\.(\d+)/.exec(runStatus(cwd, ['version']).stdout);
+/** `git merge-tree --write-tree` came in git 2.38: an older git can't measure a merge (mergedTree), so every PR waits. */
+const MIN_GIT_FOR_MERGE_TREE: readonly [number, number] = [2, 38];
+
+/** A `git version` line's major and minor version (`git version 2.43.0`), or null when it holds none. */
+const versionOf = (text: string): [number, number] | null => {
+  const m = /git version (\d+)\.(\d+)/.exec(text);
   return m ? [Number(m[1]), Number(m[2])] : null;
+};
+
+/** The running git's major and minor version, or null when it can't be read. Asked each time: it's one spawn, only when a .gitattributes changes. */
+function gitVersion(cwd: string): [number, number] | null {
+  return versionOf(runStatus(cwd, ['version']).stdout);
+}
+
+/**
+ * Why `git version`'s output (`text`) names a git too old for the merge decision's checks, or null when it is new
+ * enough. They need MIN_GIT_FOR_MERGE_TREE for every PR (mergedTree) and MIN_GIT_FOR_ATTRIBUTE_SOURCE for a PR that
+ * changes a `.gitattributes` (attributeOutcome); a PR whose check can't run waits for the owner. For the setup checks
+ * (doctor), which say so up front.
+ */
+export function gitTooOld(text: string): string | null {
+  const below = (v: readonly [number, number], m: readonly [number, number]) => v[0] < m[0] || (v[0] === m[0] && v[1] < m[1]);
+  const need = [MIN_GIT_FOR_MERGE_TREE, MIN_GIT_FOR_ATTRIBUTE_SOURCE].reduce((a, b) => (below(a, b) ? b : a));
+  const v = versionOf(text);
+  if (v !== null && !below(v, need)) return null;
+  const tree = `${MIN_GIT_FOR_MERGE_TREE[0]}.${MIN_GIT_FOR_MERGE_TREE[1]}`;
+  const attributes = `${MIN_GIT_FOR_ATTRIBUTE_SOURCE[0]}.${MIN_GIT_FOR_ATTRIBUTE_SOURCE[1]}`;
+  const waits = v === null ? `with a git older than ${tree} every PR waits for the owner, and with an older one than ${attributes} every PR that changes a .gitattributes does`
+    : below(v, MIN_GIT_FOR_MERGE_TREE) ? 'with this git every PR waits for the owner'
+    : 'with this git every PR that changes a .gitattributes waits for the owner';
+  const said = v === null ? `can't read git's version (${text.trim().slice(0, 80) || 'no output'})` : `git ${v[0]}.${v[1]}`;
+  return `${said}: the merge decision needs git ${need[0]}.${need[1]} or later (merge-tree --write-tree from ${tree}, check-attr --source from ${attributes}); ${waits}`;
 }
 
 /**
@@ -638,18 +666,42 @@ export function mergeBaseOf(cwd: string, a: string, b: string): string {
 
 /**
  * The tree merging `a` and `b` makes (git merge-tree --write-tree, git 2.38 or later: no worktree, no index, no ref
- * moved; only the merged objects are written to the object store), or null when the merge conflicts. For the merge
- * decision's check for a weakened test, lint or guard: what merging a PR would make of the default branch (#1069).
- * Throws when git fails (an older git, no merge base).
+ * moved; only the merged objects are written to the object store), `a`'s side first in a conflict's markers,
+ * and the paths the merge conflicts on (none: it merges cleanly). A merge that conflicts still writes a tree: its
+ * conflicted files hold conflict markers and both sides' lines. Git merges by the attributes of the checkout at `cwd`.
+ * `contentOnly`: the conflicted paths whose every conflict is on their lines (`CONFLICT (contents)`: both sides
+ * changed the same lines, or both added the file), not on where a file goes or whether it stays. A merge that
+ * conflicts only on a directory (the tip split it in two) names no conflicted path.
+ * For the merge decision's check for a weakened test, lint or guard: what merging a PR would make of the default
+ * branch (#1069, #1077). Throws when git fails (an older git, no merge base, output it can't read).
  */
-export function mergedTree(cwd: string, a: string, b: string): string | null {
+export function mergedTree(cwd: string, a: string, b: string): { tree: string; conflicts: string[]; contentOnly: Set<string> } {
   if (a.startsWith('-') || b.startsWith('-')) throw new Error(`mergedTree: ${a} or ${b} is not a revision`);
-  const r = spawnSync('git', withGit(['merge-tree', '--write-tree', '--no-messages', a, b]), { cwd, encoding: 'utf8', maxBuffer: MAX_BUFFER });
+  // -z --name-only: the tree, then each conflicted path once, then an empty field, then each message as its count of
+  // paths, those paths, its type and its text; each field ended by a NUL.
+  const r = spawnSync('git', withGit(['merge-tree', '--write-tree', '--name-only', '-z', a, b]), { cwd, encoding: 'buffer', maxBuffer: MAX_BUFFER });
   if (r.error) throw r.error;
-  if (r.status === 1) return null;
-  const tree = (r.stdout ?? '').split('\n')[0]!.trim();
-  if (r.status !== 0 || !/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(tree)) throw new Error(`git merge-tree ${a.slice(0, 40)} ${b.slice(0, 40)} failed: ${(r.stderr || `exit ${r.status}`).trim().slice(0, 500)}`);
-  return tree;
+  const failed = () => new Error(`git merge-tree ${a.slice(0, 40)} ${b.slice(0, 40)} failed: ${((r.stderr ?? Buffer.alloc(0)).toString('utf8') || `exit ${r.status}`).trim().slice(0, 500)}`);
+  const [tree, ...rest] = fields(r.stdout ?? Buffer.alloc(0));
+  const id = tree?.toString('latin1') ?? '';
+  const end = rest.findIndex((p) => !p.length);
+  const conflicts = (end === -1 ? rest : rest.slice(0, end)).map(nameOf);
+  const kinds = new Map<string, Set<string>>();
+  let conflicted = false;
+  for (let k = end === -1 ? rest.length : end + 1; k < rest.length; ) {
+    const count = rest[k]!.toString('latin1');
+    if (!/^[1-9][0-9]{0,5}$/.test(count) || k + Number(count) + 3 > rest.length) throw failed();
+    const paths = rest.slice(k + 1, k + 1 + Number(count)).map(nameOf);
+    const type = rest[k + 1 + Number(count)]!.toString('utf8');
+    k += Number(count) + 3;
+    if (!type.startsWith('CONFLICT')) continue;
+    conflicted = true;
+    for (const p of paths) kinds.set(p, (kinds.get(p) ?? new Set()).add(type));
+  }
+  // A conflict (exit 1) names what conflicts, a path or a message; a clean merge (exit 0) names nothing.
+  if ((r.status !== 0 && r.status !== 1) || !/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(id) || (r.status === 1) !== (conflicts.length > 0 || conflicted)) throw failed();
+  const contentOnly = new Set(conflicts.filter((p) => [...(kinds.get(p) ?? [])].length > 0 && [...kinds.get(p)!].every((t) => t === 'CONFLICT (contents)')));
+  return { tree: id, conflicts, contentOnly };
 }
 
 /**
