@@ -65,26 +65,64 @@ export function scanText(rules, path, text) {
   return hits;
 }
 
-// Binary text runs, as strings(1) finds them: printable ASCII, and the same as UTF-16LE (each character then a NUL).
+// Binary text runs, as strings(1) finds them: printable ASCII, and the same as UTF-16LE (each character then a NUL)
+// and UTF-16BE (a NUL then each character).
 const ASCII_RUN = /[\t\n\r\x20-\x7e]+/g;
 const UTF16LE_RUN = /(?:[\t\n\r\x20-\x7e]\0)+/g;
+const UTF16BE_RUN = /(?:\0[\t\n\r\x20-\x7e])+/g;
 // Compressed bytes hold a short term by chance: about one 3-letter hit per 4 MB of random bytes against this repo's
 // terms, and still one per 150 MB in runs of 8 (#989). A term this long, or in a run this long, is rarely chance.
+// So is an ASCII run with a NUL on both sides (a C string): the two NULs make a chance hit far rarer again (#1057).
 const BINARY_RUN = 8;
 const BINARY_TERM = 6;
+const PRINTABLE = /[\t\n\r\x20-\x7e]/;
+// A long run is read in pieces of about this many characters, so the token work per piece stays bounded (#1057).
+const PIECE = 65536;
+const TOKEN_CHAR = /[a-z0-9._@-]/i;
+
+/** A long run's text from text[start, end), wide runs without their NULs, in pieces each cut after a character no token holds. */
+function* pieces(text, start, end, wide) {
+  const step = wide ? 2 * PIECE : PIECE;
+  let carry = '';
+  for (let i = start; i < end; i += step) {
+    const raw = text.slice(i, Math.min(end, i + step));
+    const part = wide ? raw.replaceAll('\0', '') : raw;
+    let cut = part.length;
+    while (cut > 0 && TOKEN_CHAR.test(part[cut - 1])) cut--;
+    if (cut === 0) {
+      carry += part;
+      continue;
+    }
+    yield carry + part.slice(0, cut);
+    carry = part.slice(cut);
+  }
+  if (carry) yield carry;
+}
 
 /**
- * Every denied hashed term in a blob holding a NUL byte, as "path: why" strings: a term in a text run of at least
- * BINARY_RUN characters, or a term of at least BINARY_TERM characters in any run, token boundaries as in text. The
- * regex patterns are not run: their short shapes (a letter and digits, a dotted quad) match binary data by chance.
+ * Every denied hashed term in a blob holding a NUL byte, as "path: why" strings, token boundaries as in text: a term
+ * of at least BINARY_TERM characters in any run, and any term in a run of at least BINARY_RUN characters or in an
+ * ASCII run with a NUL on both sides. The regex patterns are not run: their short shapes (a letter and digits, a
+ * dotted quad) match binary data by chance. Runs are read one at a time and a long run in pieces, so the scan holds
+ * little beyond the blob itself, unless one token fills most of a run.
  */
 export function scanBinary(rules, path, text) {
   const hits = new Set();
-  const runs = [...text.matchAll(ASCII_RUN)].map((m) => m[0]).concat([...text.matchAll(UTF16LE_RUN)].map((m) => m[0].replaceAll('\0', '')));
-  for (const run of runs) {
-    for (const t of tokens(run)) {
-      if ((run.length < BINARY_RUN && t.length < BINARY_TERM) || !rules.hashed.has(sha(t))) continue;
-      if (!rules.allow.some((a) => a.term === t && a.re.test(path))) hits.add(`${path}: denied term "${t}" in a binary file (it holds a NUL byte)`);
+  for (const [re, wide] of [[ASCII_RUN, false], [UTF16LE_RUN, true], [UTF16BE_RUN, true]]) {
+    for (const m of text.matchAll(re)) {
+      const end = m.index + m[0].length;
+      // UTF-16LE text read one byte late is a UTF-16BE run without its first letter. Where the NULs fit the LE reading
+      // at both ends (a letter before the run, a NUL after it), it is LE text, read whole above (#1057).
+      if (re === UTF16BE_RUN && PRINTABLE.test(text[m.index - 1] ?? '') && text[end] === '\0') continue;
+      const length = wide ? m[0].length / 2 : m[0].length;
+      const anyLength = length >= BINARY_RUN || (!wide && text[m.index - 1] === '\0' && text[end] === '\0');
+      const whole = length <= PIECE && [wide ? m[0].replaceAll('\0', '') : m[0]];
+      for (const piece of whole || pieces(text, m.index, end, wide)) {
+        for (const t of tokens(piece)) {
+          if ((!anyLength && t.length < BINARY_TERM) || !rules.hashed.has(sha(t))) continue;
+          if (!rules.allow.some((a) => a.term === t && a.re.test(path))) hits.add(`${path}: denied term "${t}" in a binary file (it holds a NUL byte)`);
+        }
+      }
     }
   }
   return [...hits];

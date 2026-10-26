@@ -23,7 +23,8 @@ import { readFileSync } from 'node:fs';
 import { loadRules, scanBinary, scanText, SKIP } from './lib/denylist.mjs';
 
 const ZERO = /^0+$/;
-const git = (...a) => execFileSync('git', a, { encoding: 'utf8', maxBuffer: 256 * 1024 * 1024 });
+const READ_MAX = 256 * 1024 * 1024;
+const git = (...a) => execFileSync('git', a, { encoding: 'utf8', maxBuffer: READ_MAX });
 
 function fail(why) {
   console.error(`push gate: REFUSED. ${why}`);
@@ -49,14 +50,30 @@ function targets(argv) {
   return out;
 }
 
+/** git's output, or a refusal naming `what` when it is over READ_MAX: it can't be scanned, so it is never skipped (#1057). */
+function readForScan(what, ...args) {
+  try {
+    return git(...args);
+  } catch (e) {
+    if (e.code === 'ENOBUFS') fail(`${what} is over the gate's ${READ_MAX / 1048576} MiB read limit, so it can't be scanned. Keep files that large out of the repo.`);
+    throw e;
+  }
+}
+
 function addedLines(sha) {
   const byFile = new Map();
   let file = null;
+  let inHunk = false;
   // WHY: read as text whatever the attributes say: a `-diff` or `binary` mark in the pushed .gitattributes printed
   // "Binary files differ", so a file added and deleted again within the push was never scanned (#693).
-  for (const l of git('-c', 'core.attributesFile=/dev/null', 'show', '--format=', '-U0', '--no-color', '--no-ext-diff', '--no-textconv', '--text', '--no-renames', sha).split('\n')) {
-    if (l.startsWith('+++ ')) file = l === '+++ /dev/null' ? null : l.slice(6);
-    else if (file && l.startsWith('+') && !SKIP.has(file)) byFile.set(file, `${byFile.get(file) ?? ''}${l.slice(1)}\n`);
+  const diff = readForScan(`commit ${sha.slice(0, 8)}'s diff`, '-c', 'core.attributesFile=/dev/null', 'show', '--format=', '-U0', '--no-color', '--no-ext-diff', '--no-textconv', '--text', '--no-renames', sha);
+  // A file's header runs from its `diff ` line to its first `@@` line. Inside a hunk every line carries a prefix, so
+  // a line there that reads as a new-name header is an added line starting `++` (#1057).
+  for (const l of diff.split('\n')) {
+    if (l.startsWith('diff ')) [file, inHunk] = [null, false];
+    else if (l.startsWith('@@')) inHunk = true;
+    else if (!inHunk && l.startsWith('+++ ')) file = l === '+++ /dev/null' ? null : l.slice(6);
+    else if (inHunk && file && l.startsWith('+') && !SKIP.has(file)) byFile.set(file, `${byFile.get(file) ?? ''}${l.slice(1)}\n`);
   }
   return byFile;
 }
@@ -177,7 +194,7 @@ function prBodyGate() {
 function scanTree(rules, tip) {
   const hits = [];
   for (const path of git('ls-tree', '-r', '--name-only', tip).split('\n').filter((p) => p && !SKIP.has(p))) {
-    hits.push(...scanBlob(rules, path, git('show', `${tip}:${path}`)).map((h) => `${tip.slice(0, 8)} ${h}`));
+    hits.push(...scanBlob(rules, path, readForScan(`${tip.slice(0, 8)} ${path}`, 'show', `${tip}:${path}`)).map((h) => `${tip.slice(0, 8)} ${h}`));
   }
   return hits;
 }
