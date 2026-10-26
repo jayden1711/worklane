@@ -102,7 +102,9 @@ test('refuse_paths: a ? stands for one character outside the BMP, as ** does (#9
 test('refuse_paths: a name in NFD is refused by a glob in NFC, and the other way round (#966)', () => {
   const nfc = 'secrets/caf\u00e9.pem';
   const nfd = 'secrets/cafe\u0301.pem';
-  for (const [name, glob] of [[nfd, nfc], [nfc, nfd], [nfd, 'secrets/caf?.pem'], [nfd, 'secrets/caf\u00e9*']] as const) {
+  // A glob in mixed spellings matches only once it is normalised; `cafe*` matches the NFC name only in NFD.
+  const mixed = ['secrets/caf\u00e9-cafe\u0301.pem', 'secrets/caf\u00e9-caf\u00e9.pem'] as const;
+  for (const [name, glob] of [[nfd, nfc], [nfc, nfd], [nfd, 'secrets/caf?.pem'], [nfd, 'secrets/caf\u00e9*'], [nfc, 'secrets/cafe*'], [mixed[1], mixed[0]]] as const) {
     const r = repo();
     const head = r.commit({ [name]: 'k\n' });
     assert.equal(rangeNamesOf(r.work, r.baseSha, head), name, 'git keeps the name as written');
