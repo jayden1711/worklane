@@ -382,10 +382,11 @@ export function checkReadPrograms(top: string, scope: CommitScanScope, depth = 0
       }
     }
   }
-  // WHY (#1011): git runs git-lfs only for a file under the filter, and a checkout where no attributes source names
-  // it (the filter set up globally) has none, so the program isn't checked there. Every source counts whether or not
-  // a path matches it now, since staging in the line can change which files match; so does a git mv that may make a
-  // file an attributes file.
+  // WHY (#1011): git runs git-lfs as a filter only for a file under the filter, and a checkout where no attributes
+  // source names it (the filter set up globally) has none, so the program isn't checked there. git-lfs's own hooks
+  // (post-commit and the others `git lfs install` writes) still run the git-lfs PATH finds; this scan doesn't model
+  // hooks (#1110). Every source counts whether or not a path matches it now, since staging in the line can change
+  // which files match; so does a git mv that may make a file an attributes file.
   if (lfs) {
     if (scope.moves) lfsProgramRootsAlone(top, 'a git mv earlier in the line may make a file an attributes file after the scan has looked; run the git mv in a call of its own, then commit');
     else if (attributesNameLfs(top, config)) lfsProgramRootsAlone(top, 'an attributes source here names the large-file filter');

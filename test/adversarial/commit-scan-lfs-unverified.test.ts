@@ -88,10 +88,13 @@ async function refused(cwd: string, command: string, why: RegExp, what: string) 
   assert.match(d.reason, why, what);
 }
 
-/** Runs `body` with these variables set in this process (where the hook runs), then puts them back. */
-async function withEnv(vars: Record<string, string>, body: () => Promise<void>) {
+/** Runs `body` with these variables set (undefined: unset) in this process (where the hook runs), then puts them back. */
+async function withEnv(vars: Record<string, string | undefined>, body: () => Promise<void>) {
   const old = Object.fromEntries(Object.keys(vars).map((k) => [k, process.env[k]]));
-  Object.assign(process.env, vars);
+  for (const [k, v] of Object.entries(vars)) {
+    if (v === undefined) delete process.env[k];
+    else process.env[k] = v;
+  }
   try {
     await body();
   } finally {
@@ -277,6 +280,48 @@ for (const [name, make, line] of IGNORED) {
     await withEnv({ PATH: `${ownLfs()}${delimiter}${process.env.PATH ?? ''}` }, () => refused(d, line, NOT_ROOT, name));
   });
 }
+
+const REAL_GIT = execFileSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).trim();
+/** A folder holding a `git` that answers `git var GIT_ATTR_*` with `answer` (shell) and passes everything else on. */
+function gitVarAnswers(answer: string): string {
+  const bin = mkdtempSync(join(tmpdir(), 'gitvar-'));
+  writeFileSync(join(bin, 'git'), `#!/bin/sh\nfor a in "$@"; do case "$a" in GIT_ATTR_*) [ "$prev" = var ] && { ${answer}; } ;; esac; prev=$a; done\nexec '${REAL_GIT}' "$@"\n`);
+  chmodSync(join(bin, 'git'), 0o755);
+  return bin;
+}
+
+const gitVarFirst = (answer: string) => `${gitVarAnswers(answer)}${delimiter}${ownLfs()}${delimiter}${process.env.PATH ?? ''}`;
+
+test('attack: a git var that fails is never read as "no file"', { skip: skipRoot }, async () => {
+  const d = plainCheckout({ 'a.js': 'plain\n' });
+  await withEnv({ PATH: gitVarFirst("echo 'fatal: out of memory' >&2; exit 128") }, () =>
+    refused(d, 'git commit -m x', /git var GIT_ATTR_\w+ failed/, 'a git var failure'));
+});
+
+test('a git var that exits with nothing said names no file, so the commit goes through', { skip: skipRoot }, async () => {
+  const d = plainCheckout({ 'a.js': 'plain\n' });
+  await withEnv({ PATH: gitVarFirst('exit 1') }, async () => {
+    const r = await decide(d, 'git commit -m x');
+    assert.equal(r.decision, 'allow', `a silent git var exit: ${r.reason}`);
+  });
+});
+
+test('with no home and no XDG folder the commit goes through', { skip: skipRoot }, async () => {
+  const d = plainCheckout({ 'a.js': 'plain\n' });
+  await withEnv({ PATH: `${ownLfs()}${delimiter}${process.env.PATH ?? ''}`, HOME: undefined, XDG_CONFIG_HOME: undefined }, async () => {
+    const r = await decide(d, 'git commit -m x');
+    assert.equal(r.decision, 'allow', `no HOME: ${r.reason}`);
+  });
+});
+
+test('attack: a git with no GIT_ATTR_* variable (older than 2.42) still has its default user file read', { skip: skipRoot }, async () => {
+  const d = plainCheckout({ 'a.js': 'plain\n' });
+  const xdg = mkdtempSync(join(tmpdir(), 'xdg-'));
+  mkdirSync(join(xdg, 'git'));
+  writeFileSync(join(xdg, 'git', 'attributes'), '*.bin filter=lfs\n');
+  await withEnv({ PATH: gitVarFirst("echo 'usage: git var (-l | <variable>)' >&2; exit 129"), XDG_CONFIG_HOME: xdg }, () =>
+    refused(d, 'git commit -m x', NOT_ROOT, 'an old git\'s XDG attributes file'));
+});
 
 test('attack: GIT_ATTR_SOURCE in the hook\'s environment checks git-lfs too', { skip: skipRoot }, async () => {
   const d = plainCheckout({ 'a.js': 'plain\n' });
