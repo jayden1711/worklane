@@ -229,15 +229,17 @@ const WRAPPER_VALUE_OPTIONS: Record<string, RegExp> = {
   time: /^(-[fo]|--format|--output)$/,
 };
 /**
- * The option of an env short-option cluster that takes a value, as getopt reads it (GNU env: "+C:iS:u:v0"): the
- * first such letter takes the rest of the word (`-uCC` unsets CC), or the next word when it ends the word. `flags`:
- * the letters before it. null for a word that isn't a short-option cluster.
+ * A short-option cluster as getopt and git's parse-options read it, given the letters that take a value: every
+ * other letter is a flag and continues the cluster; the first value letter takes the rest of the word, or the next
+ * word when it ends the word. `flags`: the letters before it. null for a word that isn't a short-option cluster.
  */
-export function envShort(opt: string): { flags: string; letter?: string; attached: string } | null {
+export function shortCluster(opt: string, valueLetters: string): { flags: string; letter?: string; attached: string } | null {
   if (!/^-[^-]/.test(opt)) return null;
-  const j = [...opt].findIndex((ch, k) => k > 0 && 'CSu'.includes(ch));
+  const j = [...opt].findIndex((ch, k) => k > 0 && valueLetters.includes(ch));
   return j < 0 ? { flags: opt.slice(1), attached: '' } : { flags: opt.slice(1, j), letter: opt[j]!, attached: opt.slice(j + 1) };
 }
+/** An env short-option cluster (GNU env's getopt string: "+C:iS:u:v0"); `-uCC` unsets CC. */
+export const envShort = (opt: string) => shortCluster(opt, 'CSu');
 /** Whether env option `opt` takes the next word as its value. */
 export function envTakesNext(opt: string): boolean {
   const short = envShort(opt);

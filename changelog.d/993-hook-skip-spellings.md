@@ -6,7 +6,9 @@
   - config that can carry the hooks path or run a push by another name, written by `-c`, `--config-env`,
     `git config` or `GIT_CONFIG_*`: an include (`include.path`, `includeIf.*.path`), an alias, `help.autocorrect`;
     and `git config --edit`, `--rename-section` and `--remove-section`. A `git config` is read by git's own
-    argument rules: options end at the first word that isn't one, so every word after the name is a value or
+    argument rules: its short options cluster as git's option parser reads them (`-f` and `-t` take the rest of
+    the word or the next one; `-e`, `-l` and `-z` are flags), so `-ez`, `-zef FILE` and `-et bool` edit and are
+    refused, and `-t bool --get NAME` reads; options end at the first word that isn't one, so every word after the name is a value or
     value-pattern even when it looks like an option (`git config core.hooksPath --global` writes `--global`), and
     `get` or `list` reads only as the subcommand. One that only reads a name (`git config alias.st`,
     `git config --get alias.p x`, `git config get alias.p`) is allowed; one with an option the guard doesn't know
@@ -30,7 +32,8 @@
     sets git's environment or changes directory where the guard can't follow), the line is refused.
 
   Ordinary work measured as newly refused in an agent run (allowed on main): defining a git alias, include or
-  `help.autocorrect`; `git config --edit`; a `git config` read with an option the guard doesn't know; an alias in a
+  `help.autocorrect`; `git config --edit`, and any `git config` with a word such as `-eve` whose short-option flags
+  include `e`, even as a value; a `git config` read with an option the guard doesn't know; an alias in a
   line that sets `HOME` or `XDG_CONFIG_HOME`, runs `unset` or gives `env` an option; a push in a line with `unset`,
   `env` with an option (`env -u FOO git push`, `env -C sub git push`), `HOME`, `XDG_CONFIG_HOME`, `GIT_DIR` or
   `--git-dir`; git's exec-path commands (`mergetool`) and PATH programs (`lfs`) in a line that removes PATH, sets
@@ -39,5 +42,5 @@
   by `-c` or a shell (`flock /tmp/l -c 'git push --no-verify'`, `setsid bash -c '…'`, `runuser -c '…'`,
   `find -exec sh -c '…'`; #983); a runner the guard doesn't know; a wrapper or runner option its grammar doesn't
   list, or a version of a runner whose options differ from the one the grammar follows; an abbreviated long option
-  of a runner (`flock --tim 5`); runners nested deeper than four; a renamed or linked git binary; `read`-set
+  of a runner or of `env` (`flock --tim 5`, `env --uns X`); runners nested deeper than four; a renamed or linked git binary; `read`-set
   variables; shell expansions (`git push $X`).

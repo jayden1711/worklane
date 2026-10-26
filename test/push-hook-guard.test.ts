@@ -422,6 +422,61 @@ test("git config is read by git's own argument rules: options end at the first o
   }
 });
 
+test("git config's short options are read as git's parse-options reads them: -e anywhere in a cluster edits (#993)", () => {
+  // Measured with git 2.43 in a scratch repository (`git config -h`: -f <file> and -t <type> take a value; -e, -l
+  // and -z are flags). A flag letter continues the cluster; a value letter takes the rest of it or the next word.
+  const allow = 'none';
+  const deny = 'deny';
+  const table: [string, string][] = [
+    // Each opens $EDITOR on the config file.
+    ['git config -ez', deny],
+    ['git config -zez', deny],
+    ['git config -ezz', deny],
+    ['git config --global -ez', deny],
+    ['git config --global -ezz', deny],
+    ['git config -ef .git/config', deny],
+    ['git config -ezf .git/config', deny],
+    ['git config -ezf.git/config', deny],
+    ['git config -zef .git/config', deny],
+    ['git config -et bool', deny],
+    ['git config -etbool', deny],
+    ['git config -ze -t bool', deny],
+    ['EDITOR=/tmp/ed.sh git config -ez', deny],
+    ['git config -e', deny],
+    ['git config -ze', deny],
+    // Only one action at a time: git refuses, and so does the guard.
+    ['git config -le', deny],
+    ['git config -el', deny],
+    // After a value letter, e is the value (a file named e, a type e): git edits nothing.
+    ['git config -fe', allow],
+    ['git config -te', allow],
+    ['git config -tez', allow],
+    // -t is --type: its value is not the name.
+    ['git config -t bool --get help.autocorrect', allow],
+    ['git config -tbool --get help.autocorrect', allow],
+    ['git config -zt bool --get help.autocorrect', allow],
+    ['git config -t bool help.autocorrect', allow],
+    ['git config -lt bool', allow],
+    ['git config -lf .git/config', allow],
+    ['git config -f.git/config -l', allow],
+    ['git config -lz', allow],
+    ['git config -lz core.hooksPath /x', allow],
+    // A letter git config doesn't list, like an unknown long option, is not known to only read.
+    ['git config -x alias.p', deny],
+    ['git config -t bool core.hooksPath true', deny],
+    ['git config -tbool core.hooksPath true', deny],
+    ["git config -zt bool alias.p 'push --no-verify'", deny],
+    ['git config -f --get core.hooksPath /x', deny],
+    ['git config -fz core.hooksPath /x', deny],
+  ];
+  for (const [c, want] of table) {
+    for (const line of [c, `${c} && git push origin HEAD`]) {
+      const v = bash(line);
+      assert.deepEqual([v.decision, v.decision === 'deny' ? v.rule : undefined], [want, want === 'deny' ? 'push-hook-bypass' : undefined], line);
+    }
+  }
+});
+
 test("a runner's and env's options are read by their own option tables: values attached or next, and a leading -- (#993)", () => {
   for (const c of [
     // systemd-run -G is --collect, a flag (measured: systemd-run --help, getopt "+hrH:M:E:p:tPqGdSu:").

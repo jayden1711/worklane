@@ -5,7 +5,7 @@
 // Like the rest of the shell matcher this is best effort (shell.ts): the runner also drops the variable from every
 // agent's environment (runner.ts agentEnv), and the hook itself refuses the hatch inside an agent run.
 import { resolve as resolvePath } from 'node:path';
-import { basename, envShort, envTakesNext, splitCommands, unwrap, type SimpleCommand } from './shell.js';
+import { basename, envShort, envTakesNext, shortCluster, splitCommands, unwrap, type SimpleCommand } from './shell.js';
 
 /** The hatch: set to 1 in a person's own shell, for one push. */
 export const PUSH_GATE_HATCH_ENV = 'PUSH_GATE_BOOTSTRAP';
@@ -444,19 +444,26 @@ export function pushHookShellRefusal(command: string, commands: SimpleCommand[],
 }
 
 /** git config's read actions, which take a name and an optional pattern, default or URL but never a value. */
-const CONFIG_READ_ACTION = /^(--get|--get-all|--get-regexp|--get-urlmatch|--get-color|--get-colorbool|--list|-l)$/;
+const CONFIG_READ_ACTION = /^(--get|--get-all|--get-regexp|--get-urlmatch|--get-color|--get-colorbool|--list)$/;
 /** git config's subcommands that only read (git 2.46 and later; earlier, a name without a section and an error). */
 const CONFIG_READ_SUB = /^(get|list)$/;
 /**
- * git config options that rewrite config by section or in an editor (any abbreviation git takes). WHY: refused in
- * any position, though git reads a word after the name as a value, so a git that read options there is no hole.
+ * git config's long options that rewrite config by section or in an editor (any abbreviation git takes). WHY: these,
+ * and a short cluster with -e among its flags, are refused in any position, though git reads a word after the name
+ * as a value, so a git that read options there is no hole.
  */
-const CONFIG_REWRITE = /^(-[lz]*e|--e(d(i(t)?)?)?|--ren.*|--rem.*)$/;
+const CONFIG_REWRITE = /^(--e(d(i(t)?)?)?|--ren.*|--rem.*)$/;
 const CONFIG_REWRITE_SUB = /^(edit|rename-section|remove-section)$/;
 
-/** git config options that only choose a file, scope, type or output format; the second list takes a value. */
-const CONFIG_QUIET = /^(--global|--system|--local|--worktree|--includes|--no-includes|--bool|--int|--bool-or-int|--path|--expiry-date|--no-type|--null|-z|--show-origin|--show-scope|--fixed-value|--(file|blob|type|default)=.*)$/;
-const CONFIG_QUIET_VALUE = /^(-f|--file|--blob|--type|--default)$/;
+/** git config long options that only choose a file, scope, type or output format; the second list takes a value. */
+const CONFIG_QUIET = /^(--global|--system|--local|--worktree|--includes|--no-includes|--bool|--int|--bool-or-int|--path|--expiry-date|--no-type|--null|--show-origin|--show-scope|--fixed-value|--(file|blob|type|default)=.*)$/;
+const CONFIG_QUIET_VALUE = /^(--file|--blob|--type|--default)$/;
+/**
+ * git config's short options, read by git's parse-options (measured: `git config -h`, git 2.43): -f <file> and
+ * -t <type> take a value; -e (edit), -l (list) and -z (NUL output) are flags. Any other letter is a write.
+ */
+const configShort = (t: string) => shortCluster(t, 'ft');
+const configRewrites = (t: string) => CONFIG_REWRITE.test(t) || !!configShort(t)?.flags.includes('e');
 
 /**
  * What `git config` does with these words (after `config`), by git's own argument rules: options end at the first
@@ -466,7 +473,7 @@ const CONFIG_QUIET_VALUE = /^(-f|--file|--blob|--type|--default)$/;
  * that isn't listed as quiet is a write. `word`: the option or subcommand that rewrites config.
  */
 function configUse(rest: string[]): { use: 'read' | 'write' | 'rewrite'; word?: string } {
-  const rewrite = rest.find((t) => CONFIG_REWRITE.test(t));
+  const rewrite = rest.find(configRewrites);
   if (rewrite) return { use: 'rewrite', word: rewrite };
   let read = false;
   let i = 0;
@@ -477,7 +484,12 @@ function configUse(rest: string[]): { use: 'read' | 'write' | 'rewrite'; word?: 
       break;
     }
     if (!t.startsWith('-') || t === '-') break;
-    if (CONFIG_READ_ACTION.test(t)) read = true;
+    const short = configShort(t);
+    if (short) {
+      if ([...short.flags].some((ch) => ch !== 'l' && ch !== 'z')) return { use: 'write' };
+      if (short.flags.includes('l')) read = true;
+      if (short.letter !== undefined && short.attached === '') i++;
+    } else if (CONFIG_READ_ACTION.test(t)) read = true;
     else if (CONFIG_QUIET_VALUE.test(t)) i++;
     else if (!CONFIG_QUIET.test(t)) return { use: 'write' };
   }
