@@ -1,6 +1,6 @@
 // Runtime inputs for guardrail evaluation: stored fingerprint sets and CLI
 // link resolvers. Fingerprints are stored machine-locally, hashes only.
-import { execFileSync } from '../os/child-process.js';
+import { execFileSync, spawnSync } from '../os/child-process.js';
 import { createHash } from 'node:crypto';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
@@ -10,6 +10,7 @@ import { homeDir, shellCommand, stateDir } from '../os/index.js';
 import { railwayLinkedEnvironment } from '../adapters/railway.js';
 import type { EvalContext } from './engine.js';
 import { findConnections, fingerprint } from './fingerprint.js';
+import type { GitLookup } from './push-hook.js';
 
 interface StoredSets {
   sets: Record<string, { hashes: string[]; fetchedAt: string }>;
@@ -84,5 +85,12 @@ export function liveContext(projectRoot: string, env: NodeJS.ProcessEnv = proces
     linkedEnvironment(resolver, cwd) {
       return resolver === 'railway' ? railwayLinkedEnvironment(cwd) : null;
     },
+    git: liveGit,
   };
 }
+
+/** A read-only git query in a directory: its exit status (null when it didn't run) and its output. */
+export const liveGit: GitLookup = (dir, args) => {
+  const r = spawnSync('git', args, { cwd: dir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 5_000 });
+  return { status: r.error ? null : r.status, stdout: r.stdout ?? '' };
+};
