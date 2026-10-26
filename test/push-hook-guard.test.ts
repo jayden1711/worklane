@@ -239,7 +239,7 @@ test("git's own commands are never an alias, so a line that sets git's environme
 
 test('text inside a quoted argument is not a command: a commit message may say env -i (#993)', () => {
   for (const c of ['git commit -m "fix env -i handling" && git push', "git commit -m 'env -u X' && git push origin HEAD"]) assert.equal(bash(c).decision, 'none', c);
-  for (const c of ['env -i git push', 'git commit -m x && env -u HOME git push', 'bash -c "env -i git push"']) assert.equal(bash(c).rule, 'push-hook-bypass', c);
+  for (const c of ['env -i git push', 'git commit -m x && env -u HOME git push', 'bash -c "env -i git push"', 'find . -maxdepth 0 -exec env -i git push \\;']) assert.equal(bash(c).rule, 'push-hook-bypass', c);
 });
 
 test('a git name read from config: an alias or a correction to push is judged as the push it runs (#993)', () => {
