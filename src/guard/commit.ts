@@ -21,7 +21,7 @@ export interface CommitScope {
   logReads?: boolean;
   /** The line asks for signatures to be shown. */
   signatureReads?: boolean;
-  /** A git mv or rm runs before the commit, so which files there are, and their attributes, can change after the scan. */
+  /** A git mv before the commit names an attributes file, so a file may become one after the scan has looked. */
   moves?: boolean;
 }
 
@@ -1000,8 +1000,8 @@ export function commitPlan(command: string, p: PlanEnv): CommitPlan | null {
         if (!isGitName(name)) continue;
         const read = gitWords(c.words);
         if (STAGING.has(read.sub ?? '')) staging = true;
-        if (read.sub === 'mv' || read.sub === 'rm') reads.moves = true;
         const words = read.rest.map((w) => w.text);
+        if (read.sub === 'mv' && words.some((t) => /gitattributes/i.test(t))) reads.moves = true;
         // WHY: an interactive staging step shows each change as a diff (through any filter the config names) first.
         const interactive = read.sub === 'add' && words.some((t) => /^-[a-zA-Z]*[pi]/.test(t) || /^--(p|pa|pat|patc|patch|i|in|int|inte|inter|intera|interac|interact|interacti|interactiv|interactive)$/.test(t));
         if (interactive || read.sub === 'diff' || read.sub === 'show' || (read.sub === 'log' && logShowsDiffs(words)) || (read.sub === 'status' && words.some((t) => t.startsWith('-') && !STATUS_NO_DIFF.test(t)))) reads.diffReads = true;

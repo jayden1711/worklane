@@ -7,7 +7,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { chmodSync, cpSync, mkdirSync, mkdtempSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, cpSync, mkdirSync, mkdtempSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { delimiter, join } from 'node:path';
 import { BRAND } from '../../src/brand.js';
@@ -160,11 +160,16 @@ test('a checkout with no file under the large-file filter commits whatever git-l
   git(d, 'add', '-A');
   git(d, 'commit', '-q', '-m', 'init');
   writeFileSync(join(d, 'b.js'), 'export const b = 1;\n');
+  writeFileSync(join(d, 'c.js'), 'export const c = 1;\n');
+  git(d, 'add', 'c.js');
+  git(d, 'commit', '-q', '-m', 'c');
   const global = join(mkdtempSync(join(tmpdir(), 'gitconfig-')), 'config');
   writeFileSync(global, STANDARD.map(([k, v]) => `[filter "lfs"]\n\t${k.split('.')[2]} = ${v}\n`).join(''));
-  await withEnv({ GIT_CONFIG_GLOBAL: global, PATH: `${ownLfs()}${delimiter}${process.env.PATH ?? ''}` }, async () => {
-    const r = await decide(d, 'git add b.js && git commit -m x');
-    assert.equal(r.decision, 'allow', r.reason);
+  await withEnv({ GIT_CONFIG_GLOBAL: global, XDG_CONFIG_HOME: mkdtempSync(join(tmpdir(), 'xdg-')), PATH: `${ownLfs()}${delimiter}${process.env.PATH ?? ''}` }, async () => {
+    for (const line of ['git add b.js && git commit -m x', 'git mv c.js d.js && git commit -m x', 'git rm -q c.js && git commit -m x', 'git add -A && git commit -m x']) {
+      const r = await decide(d, line);
+      assert.equal(r.decision, 'allow', `${line}: ${r.reason}`);
+    }
   });
 });
 
@@ -201,8 +206,19 @@ const MOVES: [string, () => string, string][] = [
     return d;
   }, 'git rm -q sub/.gitattributes && git commit -a -m x'],
 ];
+/** A3's checkout with the negating attributes file already deleted on disk, and the file under it edited (R97f). */
+const deletedNegation = () => {
+  const d = MOVES[2]![1]();
+  rmSync(join(d, 'sub', '.gitattributes'));
+  return d;
+};
+MOVES.push(
+  ['D2: a deleted negating attributes file staged', deletedNegation, 'git add sub/.gitattributes && git commit -a -m x'],
+  ['D5: a deleted negating attributes file staged with its folder', deletedNegation, 'git add --all sub && git commit -m x'],
+  ['D7: a deleted negating attributes file committed with -a', deletedNegation, 'git commit -a -m x'],
+);
 for (const [what, make, line] of MOVES) {
-  test(`attack: a git mv or rm earlier in the line brings a file under the filter, and git-lfs is checked (${what})`, { skip: skipRoot }, async () => {
+  test(`attack: staging earlier in the line brings a file under the filter, and git-lfs is checked (${what})`, { skip: skipRoot }, async () => {
     const d = make();
     await withEnv({ PATH: `${ownLfs()}${delimiter}${process.env.PATH ?? ''}` }, async () => {
       await refused(d, line, NOT_ROOT, what);
@@ -216,6 +232,23 @@ test('attack: a file under the filter only by the index\'s attributes checks git
   writeFileSync(join(d, 'c.dat'), 'plain\n');
   await withEnv({ PATH: `${ownLfs()}${delimiter}${process.env.PATH ?? ''}` }, async () => {
     await refused(d, 'git commit -m x', /belongs to uid \d+, not root/, 'the index\'s attributes only');
+  });
+});
+
+test('attack: an attributes source no file matches yet, in any place git reads one, checks git-lfs too', { skip: skipRoot }, async () => {
+  const info = plainCheckout({ 'a.js': 'plain\n' });
+  writeFileSync(join(info, '.git', 'info', 'attributes'), '*.bin filter=lfs\n');
+  const user = plainCheckout({ 'a.js': 'plain\n' });
+  const xdg = mkdtempSync(join(tmpdir(), 'xdg-'));
+  mkdirSync(join(xdg, 'git'));
+  writeFileSync(join(xdg, 'git', 'attributes'), '[attr]big filter=lfs\n');
+  const head = plainCheckout({ 'a.js': 'plain\n', 'sub/.gitattributes': '*.bin filter=lfs\n' });
+  rmSync(join(head, 'sub', '.gitattributes'));
+  git(head, 'rm', '-q', '--cached', 'sub/.gitattributes');
+  await withEnv({ PATH: `${ownLfs()}${delimiter}${process.env.PATH ?? ''}` }, async () => {
+    await refused(info, 'git commit -m x', NOT_ROOT, 'the repository\'s own attributes file');
+    await refused(head, 'git commit -m x', NOT_ROOT, 'an attributes file only in HEAD');
+    await withEnv({ XDG_CONFIG_HOME: xdg }, () => refused(user, 'git commit -m x', NOT_ROOT, 'the user\'s attributes file, through a macro'));
   });
 });
 

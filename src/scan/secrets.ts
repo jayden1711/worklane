@@ -58,7 +58,7 @@ export interface CommitScanScope {
   logReads?: boolean;
   /** The line asks for commits' signatures to be shown. */
   signatureReads?: boolean;
-  /** A git mv or rm runs before the commit, so which files there are, and their attributes, can change after the scan. */
+  /** A git mv before the commit names an attributes file, so a file may become one after the scan has looked. */
   moves?: boolean;
 }
 
@@ -372,7 +372,7 @@ export function checkReadPrograms(top: string, scope: CommitScanScope, depth = 0
   // the file's own bytes, which the scan reads (lfsContent). Any other value, or any other filter, still refuses.
   const lfs = filters.has('lfs') && lfsStandard(config);
   if (lfs) filters.delete('lfs');
-  const tracked = filters.size || lfs ? [...new Set([...presentNames(top, null), ...untrackedNames(top)])] : [];
+  const tracked = filters.size ? [...new Set([...presentNames(top, null), ...untrackedNames(top)])] : [];
   if (tracked.some((p) => p.includes('�'))) throw new Error('a file in this checkout has a name that is not UTF-8, so its attributes can\'t be checked');
   if (tracked.length) {
     const out = gitOut(top, ['check-attr', '-z', '--stdin', 'filter'], `${tracked.join('\0')}\0`).toString('utf8').split('\0');
@@ -382,21 +382,66 @@ export function checkReadPrograms(top: string, scope: CommitScanScope, depth = 0
       }
     }
   }
-  // WHY (#1011): git runs git-lfs only for a file that carries the filter, from the working tree's attributes or the
-  // index's; a checkout with no such file (the filter set up globally) never runs it, so it isn't checked there. A git
-  // mv or rm earlier in the line can bring a file under the filter after this has looked, so then it is always checked.
-  if (lfs && (scope.moves || [[], ['--cached']].some((where) => usesFilter(top, tracked, where, 'lfs')))) lfsProgramRootsAlone(top);
+  // WHY (#1011): git runs git-lfs only for a file under the filter, and a checkout where no attributes source names
+  // it (the filter set up globally) has none, so the program isn't checked there. Every source counts whether or not
+  // a path matches it now, since staging in the line can change which files match; so does a git mv that may make a
+  // file an attributes file.
+  if (lfs) {
+    if (scope.moves) lfsProgramRootsAlone(top, 'a git mv earlier in the line may make a file an attributes file after the scan has looked; run the git mv in a call of its own, then commit');
+    else if (attributesNameLfs(top)) lfsProgramRootsAlone(top, 'an attributes source here names the large-file filter');
+  }
   // WHY: a read and the scan's own listing reach into each checked-out submodule under that submodule's own config,
   // and a nested checkout the line stages becomes one.
   for (const sub of submodules(top, scope.untracked)) checkReadPrograms(sub, scope, depth + 1);
 }
 
-/** Whether any of `paths` carries `filter=<name>`, from the attributes source `where` gives. */
-function usesFilter(top: string, paths: string[], where: string[], name: string): boolean {
-  if (!paths.length) return false;
-  const out = gitOut(top, ['check-attr', '-z', '--stdin', ...where, 'filter'], `${paths.join('\0')}\0`).toString('utf8').split('\0');
-  for (let i = 0; i + 2 < out.length; i += 3) if (out[i + 2] === name) return true;
-  return false;
+/** An attributes file's name in a checkout, as git reads it (any case: a case-insensitive file system matches it). */
+const ATTRIBUTES_FILE = /(^|\/)\.gitattributes$/i;
+const NAMES_LFS = /filter=lfs/;
+
+/**
+ * Whether any attributes source of the checkout at `top` names the large-file filter, whatever path it matches: an
+ * attributes file in the working tree (tracked or not), the index or HEAD, the repository's own, the user's and the
+ * system's. One that can't be read counts as naming it.
+ */
+function attributesNameLfs(top: string): boolean {
+  const names = (b: Buffer) => NAMES_LFS.test(b.toString('latin1'));
+  const file = (path: string | null): boolean => {
+    if (!path) return false;
+    try {
+      return names(readFileSync(path));
+    } catch (e) {
+      return (e as NodeJS.ErrnoException).code !== 'ENOENT' && (e as NodeJS.ErrnoException).code !== 'ENOTDIR';
+    }
+  };
+  for (const p of [...presentNames(top, null), ...untrackedNames(top)]) if (ATTRIBUTES_FILE.test(p) && file(join(top, p))) return true;
+  const ids: string[] = [];
+  const head = headId(top);
+  for (const [rev, prefix] of [[null, ':'], ...(head ? [[head, `${head}:`]] : [])] as [string | null, string][]) {
+    for (const p of presentNames(top, rev)) {
+      if (!ATTRIBUTES_FILE.test(p)) continue;
+      // WHY: an object is asked for by name, one a line; a name that can't be written so counts as naming the filter.
+      if (/[\n\r]/.test(p) || p.includes('�')) return true;
+      ids.push(`${prefix}${p}`);
+    }
+  }
+  if (objects(top, [...new Set(ids)]).some(names)) return true;
+  const gitDir = resolvePath(top, gitOut(top, ['rev-parse', '--git-common-dir']).toString('utf8').trim());
+  return [join(gitDir, 'info', 'attributes'), gitVar(top, 'GIT_ATTR_GLOBAL'), gitVar(top, 'GIT_ATTR_SYSTEM')].some(file);
+}
+
+/** `git var <name>`: the user's or the system's attributes file; null when git names none (GIT_ATTR_NOSYSTEM). */
+function gitVar(top: string, name: string): string | null {
+  const r = spawnSync('git', ['--no-replace-objects', 'var', name], { cwd: top, encoding: 'utf8', timeout: 60_000 });
+  if (r.error) throw r.error;
+  if (r.status === 0) return r.stdout.trim() || null;
+  // WHY: a git older than 2.42 has no such variable; it then reads the files its defaults name.
+  if (!/unknown variable/i.test(r.stderr)) return null;
+  if (name === 'GIT_ATTR_SYSTEM') return process.env.GIT_ATTR_NOSYSTEM ? null : '/etc/gitattributes';
+  const set = spawnSync('git', ['config', '--path', '--get', 'core.attributesFile'], { cwd: top, encoding: 'utf8', timeout: 60_000 });
+  if (set.status === 0 && set.stdout.trim()) return set.stdout.trim();
+  const xdg = process.env.XDG_CONFIG_HOME || (process.env.HOME ? join(process.env.HOME, '.config') : '');
+  return xdg ? join(xdg, 'git', 'attributes') : null;
 }
 
 /** The large-file filter's config exactly as its standard install writes it (#971, owner 2026-10-21). */
@@ -432,17 +477,17 @@ function lfsStandard(config: Map<string, string[]>): boolean {
  * then on PATH. INVARIANT (#1011): the scan can't verify the program, and it runs after the scan has read the files,
  * so one the agent's user could replace, one on a path that depends on the folder, or none found refuses the commit.
  */
-function lfsProgramRootsAlone(top: string) {
+function lfsProgramRootsAlone(top: string, why: string) {
   const execPath = gitOut(top, ['--exec-path']).toString('utf8').trim();
   for (const dir of [execPath, ...(process.env.PATH ?? '').split(delimiter)]) {
-    if (!isAbsolute(dir)) throw new Error(`the path git looks for git-lfs on has an entry that is not an absolute directory (${JSON.stringify(dir)}), so which git-lfs it runs depends on the folder`);
+    if (!isAbsolute(dir)) throw new Error(`${why}, and the path git looks for git-lfs on has an entry that is not an absolute directory (${JSON.stringify(dir)}), so which git-lfs it runs depends on the folder`);
     const p = join(dir, 'git-lfs');
     if (!existsSync(p) && !isLink(p)) continue;
-    const why = notRootsProgram(p);
-    if (why) throw new Error(`the git-lfs git would run (${p}) ${why}, so it could change what is stored after the scan has read it`);
+    const bad = notRootsProgram(p);
+    if (bad) throw new Error(`${why}, and the git-lfs git would run (${p}) ${bad}, so it could change what is stored after the scan has read it`);
     return;
   }
-  throw new Error('no git-lfs is on the path the scan can check, so it can\'t tell which program git would run');
+  throw new Error(`${why}, and no git-lfs is on the path the scan can check, so it can't tell which program git would run`);
 }
 
 const isLink = (p: string) => {
