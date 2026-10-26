@@ -656,7 +656,9 @@ interface HunkLine {
  * run doesn't align line by line, or any alignment is too large: the change can't be placed, and the caller holds.
  */
 function alignHunk(aLines: readonly HunkLine[], rLines: readonly HunkLine[]): string[] | null {
-  const whole = alignChars(aLines.flatMap((l) => l.chars), rLines.flatMap((l) => l.chars));
+  // Code only ever against code, so a comment edit never pairs a code character with a comment one (ZN1L-cmt, CM1).
+  const tagged = (l: HunkLine) => l.chars.map((c, k) => (l.code[k] ? 'c' : 'k') + c);
+  const whole = alignChars(aLines.flatMap(tagged), rLines.flatMap(tagged));
   if (whole) return whole;
   const codeOf = (l: HunkLine) => l.chars.filter((_, k) => l.code[k]);
   const ak = aLines.map((l) => codeOf(l).join(''));
@@ -668,11 +670,9 @@ function alignHunk(aLines: readonly HunkLine[], rLines: readonly HunkLine[]): st
     for (let j = rk.length - 1; j >= 0; j--) lcs[i * w + j] = ak[i] === rk[j] ? lcs[(i + 1) * w + j + 1]! + 1 : Math.max(lcs[(i + 1) * w + j]!, lcs[i * w + j + 1]!);
   }
   const ops: string[] = [];
-  // Two lines aligned by character; `same` (their code is the same): code only ever against code, so a comment edit
-  // never pairs a code character with a comment one.
-  const tagged = (l: HunkLine) => l.chars.map((c, k) => (l.code[k] ? 'c' : 'k') + c);
-  const pair = (a: HunkLine, r: HunkLine, same = false): boolean => {
-    const o = same ? alignChars(tagged(a), tagged(r)) : alignChars(a.chars, r.chars);
+  // Two lines aligned by character.
+  const pair = (a: HunkLine, r: HunkLine): boolean => {
+    const o = alignChars(tagged(a), tagged(r));
     if (!o) return false;
     ops.push(...o);
     return true;
@@ -693,7 +693,7 @@ function alignHunk(aLines: readonly HunkLine[], rLines: readonly HunkLine[]): st
     if (ra.length === rr.length) {
       for (let k = 0; k < ra.length; k++) if (!aligns(ra[k]!, rr[k]!) || !pair(ra[k]!, rr[k]!)) return false;
     } else {
-      const o = alignChars(ra.flatMap((l) => l.chars), rr.flatMap((l) => l.chars));
+      const o = alignChars(ra.flatMap(tagged), rr.flatMap(tagged));
       if (!o) return false;
       ops.push(...o);
     }
@@ -705,7 +705,7 @@ function alignHunk(aLines: readonly HunkLine[], rLines: readonly HunkLine[]): st
   let j = 0;
   while (i < ak.length || j < rk.length) {
     if (i < ak.length && j < rk.length && ak[i] === rk[j]) {
-      if (!flush() || !pair(aLines[i]!, rLines[j]!, true)) return null;
+      if (!flush() || !pair(aLines[i]!, rLines[j]!)) return null;
       i++;
       j++;
     } else if (j >= rk.length || (i < ak.length && lcs[(i + 1) * w + j]! >= lcs[i * w + j + 1]!)) ra.push(aLines[i++]!);
@@ -1080,7 +1080,7 @@ function movedCode(
   elsewhere: Readonly<Record<string, readonly (readonly [number, number])[]>>,
   baseOf: (path: string) => string | null,
 ): Map<string, ChangedCode> {
-  type Unit = { path: string; first: number; last: number; key: string; name: string | null; lines: string[] };
+  type Unit = { path: string; first: number; last: number; key: string; name: string | null; lines: string[]; rows: string[] };
   const nameOf = (line: string) => {
     const m = /^\s*(?:(?:module\.)?exports\.([A-Za-z_$][\w$]*)\s*=(?!=)|(?:export\s+)?(?:default\s+)?(?:declare\s+)?(?:abstract\s+)?(?:async\s+)?(?:function\b\s*\*?\s*|class\s+|enum\s+|namespace\s+|(?:const|let|var)\s+(?:enum\s+)?)([A-Za-z_$][\w$]*))/.exec(line);
     return m ? (m[1] ?? m[2])! : null;
@@ -1112,12 +1112,17 @@ function movedCode(
         } else if (k !== true && !closes(l)) whole = false;
       }
       if (!whole || (into !== null && !gone)) continue;
-      let key = '';
-      for (let i = starts[first - 1]!; i < starts[last]!; i++) if (code[i] && !/\s/.test(text[i]!)) key += text[i];
+      const rows: string[] = [];
+      for (let l = first; l <= last; l++) {
+        let row = '';
+        for (let i = starts[l - 1]!; i < starts[l]!; i++) if (code[i] && !/\s/.test(text[i]!)) row += text[i];
+        rows.push(row);
+      }
+      const key = rows.join('');
       if (!key) continue;
       const lines: string[] = [];
       for (let l = first; l <= last; l++) lines.push(text.slice(starts[l - 1], starts[l]).replace(/\n$/, ''));
-      out.push({ path, first, last, key, name: nameOf(lines[0]!), lines });
+      out.push({ path, first, last, key, name: nameOf(lines[0]!), lines, rows });
     }
     return out;
   };
@@ -1200,15 +1205,15 @@ function movedCode(
   }
   // Then by name, the closest pairs first (Z-N1 to Z-N4: a same-named unit never takes another's source by its path).
   // Each pair a unit or a source shares with another is scored on its own (ZN1B, ZN4B, ZN1spent: no pair spends
-  // another's cells): by character, or, too large for that (ALIGN_CELLS), by its lines' text; too large for that too,
-  // the PR waits.
+  // another's cells): by character, or, too large for that (ALIGN_CELLS), by its lines' code characters, as `key`
+  // (SEMI, CMT: formatting and comments are no change here either); too large for that too, the PR waits.
   const named = left.flatMap(([f, u]) => sources.filter((s) => !s.used && s.name === u.name && !same(u, s)).map((s) => ({ f, u, s, score: 0 })));
   const ways = new Map<Unit, number>();
   for (const { u, s } of named) for (const x of [u, s]) ways.set(x, (ways.get(x) ?? 0) + 1);
   const closeness = (u: Unit, s: Unit) => {
     const kept = alignChars([...u.key], [...s.key]);
     if (kept) return kept.filter((x) => x === '=').length * 2 - u.key.length - s.key.length;
-    const [ul, sl] = [u.lines, s.lines].map((ls) => ls.map((l) => l.replace(/\s/g, '')));
+    const [ul, sl] = [u.rows, s.rows].map((rs) => rs.filter(Boolean));
     const ops = alignChars(ul!, sl!);
     if (!ops) throw new CoverageUnreadable(`two statements named ${u.name} are too large to tell which one ${u.path}:${u.first} was moved from`);
     let [i, j, score] = [0, 0, 0];

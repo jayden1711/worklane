@@ -803,13 +803,82 @@ test('must hold: ZN4B: Z-N4 with the `t` statements of ZN1B', async () => {
   assert.deepEqual([d.auto, d.reasons], hold('src/01.js, src/02.js, src/0t.js and 3 more'));
 });
 
+const ZN1L_ARMS = G_C.slice(G_C.indexOf('function grant')) + 'function alpha(u) {\n  return 1;\n}\nfunction beta(u) {\n  return 2;\n}\n';
+const ZN1L_G = (first: number, arm: string) => `export function g(u) {\n  if (u.never) return ${first};\n${lines(120, (i) => `  const v${i} = alpha(u) + ${i} * beta(u);\n`)}  return u.admin ? ${arm}(u) : deny(u);\n}\n`;
+const ZN1L_DECOY = `export function g(u) {\n${lines(122, (i) => `  const w${i} = gamma(u) - ${i} / delta(u);\n`)}}\n`;
+// ZN1L's g moved into c.js written as `moved` writes it, with `decoy` (a path to a two-line g, or none) added too.
+const zn1lMoved = (moved: (g: string) => string, decoy: string | null) => {
+  const head: Record<string, string> = { 'src/a.js': G_A, 'src/c.js': moved(ZN1L_G(2, 'grantAll')) + ZN1L_ARMS, 'test/x.test.js': M3T };
+  if (decoy) head[decoy] = G_DECOY;
+  return decided({ 'src/a.js': G_A + ZN1L_G(1, 'grant') + ZN1L_ARMS }, head);
+};
+const noSemis = (g: string) => g.replace(/;\n/g, '\n');
+const halfSemis = (g: string) => g.split('\n').map((l, i) => (i % 2 ? l.replace(/;$/, '') : l)).join('\n');
+const commented = (g: string) => g.replace(/\n/g, ' // checked\n');
+
 test('must hold: ZN1L: Z-N1 with a 120-line g edited at both ends, too large to align by character with either candidate (scored by its lines)', async () => {
-  const ARMS = G_C.slice(G_C.indexOf('function grant')) + 'function alpha(u) {\n  return 1;\n}\nfunction beta(u) {\n  return 2;\n}\n';
-  const g = (first: number, arm: string) => `export function g(u) {\n  if (u.never) return ${first};\n${lines(120, (i) => `  const v${i} = alpha(u) + ${i} * beta(u);\n`)}  return u.admin ? ${arm}(u) : deny(u);\n}\n`;
-  const decoy = `export function g(u) {\n${lines(122, (i) => `  const w${i} = gamma(u) - ${i} / delta(u);\n`)}}\n`;
-  const d = await decided({ 'src/a.js': G_A + g(1, 'grant') + ARMS }, { 'src/a.js': G_A, 'src/b.js': decoy, 'src/c.js': g(2, 'grantAll') + ARMS, 'test/x.test.js': M3T });
+  const d = await decided({ 'src/a.js': G_A + ZN1L_G(1, 'grant') + ZN1L_ARMS }, { 'src/a.js': G_A, 'src/b.js': ZN1L_DECOY, 'src/c.js': ZN1L_G(2, 'grantAll') + ZN1L_ARMS, 'test/x.test.js': M3T });
   assert.deepEqual([d.auto, d.reasons], hold('src/a.js, src/b.js, src/c.js'));
 });
+
+// Scored by line, a line is its code characters as `key` reads them: dropped semicolons and added comments are no
+// change there either, so a small decoy g never wins over the moved g by them.
+for (const [id, moved, decoy, why] of [
+  ['SEMI', noSemis, 'src/b.js', 'its semicolons dropped, a two-line decoy g in b.js'],
+  ['SEMI-z', noSemis, 'src/z.js', 'its semicolons dropped, a two-line decoy g in z.js (sorts after c.js)'],
+  ['SEMI-half', halfSemis, 'src/b.js', 'semicolons dropped on every other line, a two-line decoy g in b.js'],
+  ['CMT', commented, 'src/b.js', 'a comment on every line, a two-line decoy g in b.js'],
+] as const) {
+  test(`must hold: ${id}: ZN1L's g moved with ${why}`, async () => {
+    const d = await zn1lMoved(moved, decoy);
+    const others = decoy === 'src/b.js' ? 'src/a.js, src/b.js, src/c.js' : 'src/a.js, src/c.js, src/z.js';
+    assert.deepEqual([d.auto, d.reasons], hold(others));
+  });
+}
+test('must hold: ZN1L-cmt: ZN1L with 300 comment lines atop the source g, kept by a two-line decoy g and dropped by the moved one', async () => {
+  const notes = lines(300, (i) => `  // note ${i}: how g weighs alpha against beta\n`);
+  const withNotes = (g: string) => g.replace('{\n', `{\n${notes}`);
+  const d = await decided({ 'src/a.js': G_A + withNotes(ZN1L_G(1, 'grant')) + ZN1L_ARMS }, { 'src/a.js': G_A, 'src/b.js': withNotes(G_DECOY), 'src/c.js': ZN1L_G(2, 'grantAll') + ZN1L_ARMS, 'test/x.test.js': M3T });
+  assert.deepEqual([d.auto, d.reasons], hold('src/a.js, src/b.js, src/c.js'));
+});
+
+// A hunk is aligned code against code and comment against comment, at any size: comments a statement drops never
+// stand in for its code, so its untaken branch edited is not made to count by their removal.
+const CM_G = (first: number, arm: string, n: number, other = 'deny') => `export function g(u) {\n  if (u.never) return ${first};\n${lines(n, (i) => `  const v${i} = alpha(u) + ${i} * beta(u);\n`)}  return u.admin ? ${arm}(u) : ${other}(u);\n}\n`;
+const CM_NOTES = (k: number) => (g: string) => g.replace('{\n', `{\n${lines(k, (i) => `  // note ${i}: how g weighs alpha against beta\n`)}`);
+const CM_T = (file: string, want = "'none'") => calls(file, 'g', 'g({ admin: false })', want);
+for (const [id, n, k] of [['CM1', 3, 5], ['CM2', 20, 60], ['CM3', 120, 300]] as const) {
+  test(`must hold: ${id}: a ${n + 4}-line g edited in place in branches the test never takes, its ${k} comment lines dropped`, async () => {
+    const d = await decided({ 'src/a.js': G_A + CM_NOTES(k)(CM_G(1, 'grant', n)) + ZN1L_ARMS }, { 'src/a.js': G_A + CM_G(2, 'grantAll', n) + ZN1L_ARMS, 'test/x.test.js': CM_T('a.js') });
+    assert.deepEqual([d.auto, d.reasons], hold('src/a.js'));
+  });
+}
+test('must hold: CM4: CM1 with g moved into a new file', async () => {
+  const d = await decided({ 'src/a.js': G_A + CM_NOTES(5)(CM_G(1, 'grant', 3)) + ZN1L_ARMS }, { 'src/a.js': G_A, 'src/c.js': CM_G(2, 'grantAll', 3) + ZN1L_ARMS, 'test/x.test.js': CM_T('c.js') });
+  assert.deepEqual([d.auto, d.reasons], hold('src/a.js, src/c.js'));
+});
+test('must merge: CM1t: CM1 with the arm the test takes edited too', async () => {
+  await merges({ 'src/a.js': G_A + CM_NOTES(5)(CM_G(1, 'grant', 3)) + ZN1L_ARMS }, { 'src/a.js': G_A + CM_G(2, 'grantAll', 3, 'denyAll') + ZN1L_ARMS, 'test/x.test.js': CM_T('a.js', "'nothing'") });
+});
+test('must merge: CM3t: CM3 with the arm the test takes edited too', async () => {
+  await merges({ 'src/a.js': G_A + CM_NOTES(300)(CM_G(1, 'grant', 120)) + ZN1L_ARMS }, { 'src/a.js': G_A + CM_G(2, 'grantAll', 120, 'denyAll') + ZN1L_ARMS, 'test/x.test.js': CM_T('a.js', "'nothing'") });
+});
+test('must merge: CM4t: CM4 with the arm the test takes edited too', async () => {
+  await merges({ 'src/a.js': G_A + CM_NOTES(5)(CM_G(1, 'grant', 3)) + ZN1L_ARMS }, { 'src/a.js': G_A, 'src/c.js': CM_G(2, 'grantAll', 3, 'denyAll') + ZN1L_ARMS, 'test/x.test.js': CM_T('c.js', "'nothing'") });
+});
+
+test('must hold: ZN4L: ZN1L with a second source g holding half of the moved one\'s lines (the unit\'s unkept lines count too)', async () => {
+  const half = `export function g(u) {\n  if (u.never) return 3;\n${lines(60, (i) => `  const v${i} = alpha(u) + ${i} * beta(u);\n`)}  return 0;\n}\n`;
+  const d = await decided({ 'src/a.js': G_A + ZN1L_G(1, 'grant') + ZN1L_ARMS, 'src/b.js': half }, { 'src/a.js': G_A, 'src/b.js': '', 'src/c.js': ZN1L_G(2, 'grantAll') + ZN1L_ARMS, 'test/x.test.js': M3T });
+  assert.deepEqual([d.auto, d.reasons], hold('src/a.js, src/b.js, src/c.js'));
+});
+
+for (const [id, moved] of [['SEMI', noSemis], ['SEMI-half', halfSemis], ['CMT', commented]] as const) {
+  test(`control: ${id}c: ${id} with no decoy holds`, async () => {
+    const d = await zn1lMoved(moved, null);
+    assert.deepEqual([d.auto, d.reasons], hold('src/a.js, src/c.js'));
+  });
+}
 
 test('must merge: D1L: D1 with a ~1,300-character line edited at its start and end (aligned within ALIGN_CELLS)', async () => {
   const nums = Array.from({ length: 260 }, (_, i) => 1000 + i).join(',');
