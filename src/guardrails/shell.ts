@@ -14,7 +14,7 @@ export interface SimpleCommand {
   envOptions: string[];
   /**
    * Files written by redirection (>, >>, &>) or tee, or that the command's own arguments name as changed: copied
-   * or moved to, moved or removed, edited in place (sed -i, perl -i), created (touch, mkdir), linked, dd of=.
+   * or moved to, moved or removed, edited in place (sed -i, perl -i), created (touch, mkdir), linked, chmod-ed, dd of=.
    * A copy or move into what may be a directory is also listed with the file's name in it, so `cp x .claude`
    * counts as a write to `.claude/x`.
    */
@@ -25,6 +25,8 @@ export interface SimpleCommand {
 
 const COPY_LIKE = new Set(['cp', 'ln', 'install', 'rsync']);
 const CHANGES_EACH = new Set(['rm', 'rmdir', 'unlink', 'touch', 'truncate', 'mkdir', 'shred']);
+/** A chmod mode operand (octal, or symbolic such as u+x,go-w), not a file it changes. */
+const CHMOD_MODE = /^([0-7]{1,4}|[ugoa]*([-+=][rwxXstugo]*)+(,[ugoa]*([-+=][rwxXstugo]*)+)*)$/;
 
 /** Every operand of a command that it writes, moves or removes (see SimpleCommand.writes). */
 function argumentWrites(base: string, argv: string[]): string[] {
@@ -35,6 +37,8 @@ function argumentWrites(base: string, argv: string[]): string[] {
   if (base === 'mv') return operands.length < 2 ? [] : [...operands.slice(0, -1), ...into(operands.at(-1)!, operands.slice(0, -1))];
   if (COPY_LIKE.has(base)) return operands.length < 2 ? [] : into(operands.at(-1)!, operands.slice(0, -1));
   if (CHANGES_EACH.has(base)) return operands;
+  // WHY: a mode can make a file a program stops running (a hook git skips once it isn't executable).
+  if (base === 'chmod') return operands.filter((o) => !CHMOD_MODE.test(o));
   if (base === 'dd') return args.filter((a) => a.startsWith('of=')).map((a) => a.slice(3));
   if (base === 'sed' || base === 'perl') {
     if (!args.some((a) => (base === 'sed' && a.startsWith('--in-place')) || /^-[a-zA-Z]*i/.test(a))) return [];
@@ -314,6 +318,165 @@ export function basename(p: string): string {
   return parts[parts.length - 1] ?? p;
 }
 
+/** Options by their letters (`-x`, clustered) and long names (`--name`). */
+export interface Options {
+  short: string;
+  long: string[];
+}
+/**
+ * A runner's command line: `[options] [operands] command ...`. `value`: the options that take the next word as
+ * their value (test/runner-option-tables.test.ts checks them against each installed program). `operands`: words before the command (flock's lock file, taskset's mask, chrt's priority). `none`:
+ * options with which the runner runs no command of these words (flock -c runs a command string, taskset -p).
+ * `needs`: an option without which it runs none (runuser -u). `script`: options whose value is a command string the
+ * runner gives a shell (flock -c, runuser -c).
+ */
+export interface Runner {
+  value: Options;
+  operands?: number;
+  none?: Options;
+  needs?: Options;
+  script?: Options;
+}
+const opts = (short: string, ...long: string[]): Options => ({ short, long });
+/**
+ * Programs that run a command from their words, after options and operands of their own (setsid git push).
+ * INVARIANT: `value` lists exactly the options whose value may be the next word (getopt's `x:`, a long option's
+ * required argument), as each program's own option table has them; an optional value (`x::`) is attached only.
+ */
+export const RUNNERS: Readonly<Record<string, Runner>> = {
+  setsid: { value: opts('') },
+  stdbuf: { value: opts('ioe', 'input', 'output', 'error') },
+  strace: { value: opts('abeEIoOpPsSuUX', 'output', 'trace', 'signal', 'signals', 'status', 'env', 'user', 'attach', 'trace-path', 'string-limit', 'summary-sort-by', 'columns', 'abbrev', 'verbose', 'raw', 'read', 'write', 'fault', 'inject', 'kvm', 'decode-pids', 'argv0', 'trace-fds', 'detach-on', 'interruptible', 'const-print-style', 'summary-columns', 'summary-syscall-overhead', 'syscall-limit', 'stack-trace-frame-limit') },
+  ltrace: { value: opts('aADeFlnopsuwxX', 'output', 'library', 'align', 'indent', 'debug', 'where') },
+  chronic: { value: opts('') },
+  unbuffer: { value: opts('') },
+  flock: { value: opts('wE', 'wait', 'timeout', 'conflict-exit-code'), operands: 1, none: opts('c', 'command'), script: opts('c', 'command') },
+  taskset: { value: opts(''), operands: 1, none: opts('p', 'pid') },
+  chrt: { value: opts('TPD', 'sched-runtime', 'sched-period', 'sched-deadline'), operands: 1, none: opts('pm', 'pid', 'max') },
+  nsenter: { value: opts('tSG', 'target', 'setuid', 'setgid') },
+  unshare: { value: opts('SGRw', 'setuid', 'setgid', 'root', 'wd', 'map-user', 'map-group', 'map-users', 'map-groups', 'propagation', 'setgroups', 'monotonic', 'boottime') },
+  caffeinate: { value: opts('tw') },
+  fakeroot: { value: opts('lfisb', 'lib', 'faked', 'fd-base') },
+  firejail: { value: opts('') },
+  'systemd-run': { value: opts('HMEpu', 'unit', 'property', 'setenv', 'description', 'slice', 'uid', 'gid', 'working-directory', 'machine', 'host', 'nice', 'service-type', 'expand-environment', 'path-property', 'socket-property', 'on-active', 'on-boot', 'on-startup', 'on-unit-active', 'on-unit-inactive', 'on-calendar', 'timer-property') },
+  runuser: { value: opts('ugGcsw', 'user', 'group', 'supp-group', 'command', 'shell', 'session-command', 'whitelist-environment'), none: opts('cl', 'command', 'session-command', 'login'), needs: opts('u', 'user'), script: opts('c', 'command', 'session-command') },
+  'ssh-agent': { value: opts('atEPO') },
+  'dbus-run-session': { value: opts('', 'config-file', 'dbus-daemon') },
+};
+
+/** Whether option word `t` names one of `which`; in a cluster, only before the first letter that takes a value. */
+function names(t: string, which: Options, value: Options): boolean {
+  if (t.startsWith('--')) return which.long.includes(t.slice(2).split('=')[0]!);
+  for (const ch of t.slice(1)) {
+    if (which.short.includes(ch)) return true;
+    if (value.short.includes(ch)) return false;
+  }
+  return false;
+}
+
+/** Whether option word `t` takes the next word as its value (a cluster: only when its last letter does). */
+function takesValue(t: string, value: Options): boolean {
+  if (t.startsWith('--')) return !t.includes('=') && value.long.includes(t.slice(2));
+  for (let j = 1; j < t.length; j++) if (value.short.includes(t[j]!)) return j === t.length - 1;
+  return false;
+}
+
+/** Where a runner's command starts in its words, or -1 when it runs none of them. */
+function runnerCommand(r: Runner, a: string[]): number {
+  let i = 1;
+  let needed = !r.needs;
+  for (; i < a.length; i++) {
+    const t = a[i]!;
+    if (t === '--') {
+      i++;
+      break;
+    }
+    if (!t.startsWith('-') || t === '-') break;
+    if (r.none && names(t, r.none, r.value)) return -1;
+    if (r.needs && names(t, r.needs, r.value)) needed = true;
+    if (takesValue(t, r.value)) i++;
+  }
+  if (!needed) return -1;
+  i += r.operands ?? 0;
+  if (a[i] === '--') i++;
+  if (r.none && a[i]?.startsWith('-') && names(a[i]!, r.none, r.value)) return -1;
+  return i < a.length ? i : -1;
+}
+
+/**
+ * The command strings a runner's own options give a shell (flock F -c 'S', runuser -c 'S'), read from every word
+ * before the command it runs. WHY: over-reading a word as a string can only add commands to judge.
+ */
+function runnerScripts(r: Runner, a: string[]): string[] {
+  if (!r.script) return [];
+  const k = runnerCommand(r, a);
+  const out: string[] = [];
+  const letters = r.value.short + r.script.short;
+  for (let i = 1; i < (k > 0 ? k : a.length); i++) {
+    const t = a[i]!;
+    if (t.startsWith('--')) {
+      const [name, ...v] = t.slice(2).split('=');
+      if (!r.script.long.includes(name!)) continue;
+      const value = v.length ? v.join('=') : a[i + 1];
+      if (value !== undefined) out.push(value);
+      continue;
+    }
+    const short = shortCluster(t, letters);
+    if (!short?.letter || !r.script.short.includes(short.letter)) continue;
+    const value = short.attached || a[i + 1];
+    if (value !== undefined) out.push(value);
+  }
+  return out;
+}
+
+const FIND_EXEC = /^-(exec|execdir|ok|okdir)$/;
+
+type Program = Pick<SimpleCommand, 'argv' | 'envOptions'>;
+
+/**
+ * Every program a command runs, in command position: itself (its wrappers removed by the shell matcher), each
+ * find -exec/-execdir/-ok command, and a known runner's command (the first word after its options and operands).
+ * A word that is only an argument (rm -rf vendor/git, grep env -i, setsid make -C vendor/git) runs nothing, and an
+ * unknown program's words are not read.
+ */
+export function programsIn(c: Program, depth = 0): Program[] {
+  const out = [c];
+  const a = c.argv;
+  if (depth > 4 || !a.length) return out;
+  const base = basename(a[0]!);
+  const runs: string[][] = [];
+  if (base === 'find') {
+    for (let i = 1; i < a.length; i++) {
+      if (!FIND_EXEC.test(a[i]!)) continue;
+      const end = a.findIndex((t, j) => j > i && (t === ';' || t === '+'));
+      runs.push(a.slice(i + 1, end < 0 ? a.length : end));
+    }
+  } else if (Object.hasOwn(RUNNERS, base)) {
+    const k = runnerCommand(RUNNERS[base]!, a);
+    if (k > 0) runs.push(a.slice(k));
+  }
+  for (const r of runs) if (r.length) out.push(...programsIn(unwrap(r), depth + 1));
+  return out;
+}
+
+/**
+ * Every command string a command runs as a command line: a shell's -c script, for the command itself and for each
+ * program it runs (programsIn: behind a runner, as a find -exec command), and a runner's own command string.
+ * INVARIANT (#983): each is read as a command line and judged like the line around it.
+ */
+function commandStrings(c: Program): string[] {
+  const out: string[] = [];
+  for (const p of programsIn(c)) {
+    const base = basename(p.argv[0] ?? '');
+    if (SHELLS.has(base)) {
+      const ci = p.argv.findIndex((x, idx) => idx > 0 && /^-[a-z]*c[a-z]*$/.test(x));
+      const script = ci > 0 ? p.argv[ci + 1] : undefined;
+      if (script !== undefined) out.push(script);
+    } else if (Object.hasOwn(RUNNERS, base)) out.push(...runnerScripts(RUNNERS[base]!, p.argv));
+  }
+  return out;
+}
+
 /** Every simple command in a shell command line, recursively. */
 export function splitCommands(src: string, depth = 0): SimpleCommand[] {
   if (depth > MAX_DEPTH) return [];
@@ -341,12 +504,9 @@ export function splitCommands(src: string, depth = 0): SimpleCommand[] {
       if (base === 'tee') for (const f of argv.slice(1)) if (!f.startsWith('-')) writes.push(f);
       writes.push(...argumentWrites(base, argv));
       result.push({ argv, assignments, envOptions, writes, reads });
-      // Re-parse the script given to a shell or eval.
-      if (SHELLS.has(base)) {
-        const ci = argv.findIndex((x, idx) => idx > 0 && /^-[a-z]*c[a-z]*$/.test(x));
-        const script = ci > 0 ? argv[ci + 1] : undefined;
-        if (script !== undefined) result.push(...splitCommands(script, depth + 1));
-      } else if (base === 'eval' && argv.length > 1) {
+      // Re-parse the script given to a shell (itself, behind a runner or find -exec), a runner, or eval.
+      for (const script of commandStrings({ argv, envOptions })) result.push(...splitCommands(script, depth + 1));
+      if (base === 'eval' && argv.length > 1) {
         result.push(...splitCommands(argv.slice(1).join(' '), depth + 1));
       }
     }
