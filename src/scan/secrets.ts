@@ -368,11 +368,9 @@ export function checkReadPrograms(top: string, scope: CommitScanScope, depth = 0
   if (scope.logReads && signer) throw new Error(`the checkout's config names a program git runs to check signatures (${signer}), and the line shows commits before it commits`);
   // WHY (owner, 2026-10-21): the standard large-file filter, exactly as its installer writes it, is allowed; it stores
   // the file's own bytes, which the scan reads (lfsContent). Any other value, or any other filter, still refuses.
-  if (filters.has('lfs') && lfsStandard(config)) {
-    filters.delete('lfs');
-    lfsProgramRootsAlone(top);
-  }
-  const tracked = filters.size ? [...new Set([...presentNames(top, null), ...untrackedNames(top)])] : [];
+  const lfs = filters.has('lfs') && lfsStandard(config);
+  if (lfs) filters.delete('lfs');
+  const tracked = filters.size || lfs ? [...new Set([...presentNames(top, null), ...untrackedNames(top)])] : [];
   if (tracked.some((p) => p.includes('�'))) throw new Error('a file in this checkout has a name that is not UTF-8, so its attributes can\'t be checked');
   if (tracked.length) {
     const out = gitOut(top, ['check-attr', '-z', '--stdin', 'filter'], `${tracked.join('\0')}\0`).toString('utf8').split('\0');
@@ -381,10 +379,20 @@ export function checkReadPrograms(top: string, scope: CommitScanScope, depth = 0
         throw new Error(`this checkout's files use a filter its config names (${out[i + 2]}), a program git runs while it reads changes, so agent commits here are refused; a person commits here, or the owner removes the filter from this checkout's config`);
       }
     }
+    // WHY (#1011): git runs git-lfs only for a file that carries the filter, from the working tree's attributes or
+    // the index's; a checkout with no such file (the filter set up globally) never runs it, so it isn't checked there.
+    if (lfs && [[], ['--cached']].some((where) => usesFilter(top, tracked, where, 'lfs'))) lfsProgramRootsAlone(top);
   }
   // WHY: a read and the scan's own listing reach into each checked-out submodule under that submodule's own config,
   // and a nested checkout the line stages becomes one.
   for (const sub of submodules(top, scope.untracked)) checkReadPrograms(sub, scope, depth + 1);
+}
+
+/** Whether any of `paths` carries `filter=<name>`, from the attributes source `where` gives. */
+function usesFilter(top: string, paths: string[], where: string[], name: string): boolean {
+  const out = gitOut(top, ['check-attr', '-z', '--stdin', ...where, 'filter'], `${paths.join('\0')}\0`).toString('utf8').split('\0');
+  for (let i = 0; i + 2 < out.length; i += 3) if (out[i + 2] === name) return true;
+  return false;
 }
 
 /** The large-file filter's config exactly as its standard install writes it (#971, owner 2026-10-21). */
@@ -463,13 +471,14 @@ function lfsContent(top: string, files: Compared[]): Compared[] {
   }
   if (!tracked.size) return files;
   const store = join(resolvePath(top, gitOut(top, ['rev-parse', '--git-common-dir']).toString('utf8').trim()), 'lfs', 'objects');
-  const read = (b: Buffer | null): Buffer | null => {
+  const read = (b: Buffer | null, now: boolean): Buffer | null => {
     if (b === null) return b;
     const m = b.length > 1024 ? null : LFS_POINTER.exec(b.toString('latin1'));
     // INVARIANT (#971, #1011): the large-file program reads more spellings as a pointer than the one form read here,
     // and reads a file of any size as one from its first 1024 bytes (the rest ignored); a file whose first 1024 bytes
-    // name any pointer version and that isn't that exact form refuses the commit, never scanned as text alone.
-    if (!m && LFS_MARKER.test(b.subarray(0, 1024).toString('latin1'))) throw new Error('a large file in this commit looks like a large-file pointer but is not in its exact form, so the object it may name can\'t be read');
+    // name any pointer version and that isn't that exact form refuses the commit, never scanned as text alone. The
+    // side before is only subtracted from what is found, so read as its bytes alone it can only find more.
+    if (!m && now && LFS_MARKER.test(b.subarray(0, 1024).toString('latin1'))) throw new Error('a large file in this commit looks like a large-file pointer but is not in its exact form, so the object it may name can\'t be read');
     if (!m) return b;
     const oid = m[1]!;
     const at = join(store, oid.slice(0, 2), oid.slice(2, 4), oid);
@@ -484,7 +493,7 @@ function lfsContent(top: string, files: Compared[]): Compared[] {
     if (object.length !== Number(m[2]) || createHash('sha256').update(object).digest('hex') !== oid) throw new Error('a large-file pointer in this commit names an object whose content does not match it');
     return Buffer.concat([b, Buffer.from('\n'), object]);
   };
-  return files.map((f) => (tracked.has(f.path) ? { ...f, now: read(f.now)!, before: read(f.before) } : f));
+  return files.map((f) => (tracked.has(f.path) ? { ...f, now: read(f.now, true)!, before: read(f.before, false) } : f));
 }
 
 /**

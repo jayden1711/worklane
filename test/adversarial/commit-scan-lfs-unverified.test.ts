@@ -60,6 +60,8 @@ function lfsCheckout(): { d: string; pointer: string } {
   const dir = join(d, '.git', 'lfs', 'objects', oid.slice(0, 2), oid.slice(2, 4));
   mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, oid), SECRET);
+  // A file that carries the filter, so git would run git-lfs here (untracked: staging it would run the real one).
+  writeFileSync(join(d, 'plain.txt'), 'plain data\n');
   return { d, pointer: `version https://git-lfs.github.com/spec/v1\noid sha256:${oid}\nsize ${Buffer.byteLength(SECRET)}\n` };
 }
 
@@ -145,6 +147,35 @@ test('attack: a git-lfs on git\'s own exec path, which git looks on first, is ch
   await withEnv({ GIT_EXEC_PATH: ownLfs() }, async () => {
     await refused(lfsCheckout().d, 'git commit -m x', /belongs to uid \d+, not root/, 'a script of this user\'s on the exec path');
   });
+});
+
+test('a checkout with no file under the large-file filter commits whatever git-lfs is on the path (the filter set up globally)', { skip: skipRoot }, async () => {
+  const d = join(mkdtempSync(join(tmpdir(), 'nolfs-')), 'a');
+  mkdirSync(d, { recursive: true });
+  cpSync(join(repoRoot, 'examples', 'basic', '.worklane'), join(d, BRAND.configDir), { recursive: true });
+  git(d, 'init', '-q', '-b', 'main');
+  git(d, 'config', 'user.email', 'ada@example.com');
+  git(d, 'config', 'user.name', 'Ada');
+  git(d, 'config', 'commit.gpgsign', 'false');
+  git(d, 'add', '-A');
+  git(d, 'commit', '-q', '-m', 'init');
+  writeFileSync(join(d, 'b.js'), 'export const b = 1;\n');
+  const global = join(mkdtempSync(join(tmpdir(), 'gitconfig-')), 'config');
+  writeFileSync(global, STANDARD.map(([k, v]) => `[filter "lfs"]\n\t${k.split('.')[2]} = ${v}\n`).join(''));
+  await withEnv({ GIT_CONFIG_GLOBAL: global, PATH: `${ownLfs()}${delimiter}${process.env.PATH ?? ''}` }, async () => {
+    const r = await decide(d, 'git add b.js && git commit -m x');
+    assert.equal(r.decision, 'allow', r.reason);
+  });
+});
+
+test('a side before that begins like a pointer, not in its exact form, doesn\'t refuse the commit', { skip: skipLfs }, async () => {
+  const { d } = lfsCheckout();
+  const raw = `version https://hawser.github.com/spec/v1\n${'old data\n'.repeat(200)}`;
+  stageRaw(d, 'old.txt', raw);
+  git(d, 'commit', '-q', '-m', 'raw, as committed without git-lfs');
+  stageRaw(d, 'old.txt', 'plain data\n');
+  const r = await decide(d, 'git commit -m x');
+  assert.equal(r.decision, 'allow', r.reason);
 });
 
 test('attack: a path entry that depends on the folder, or no git-lfs at all, refuses', { skip }, async () => {
