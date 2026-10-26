@@ -5,7 +5,7 @@
 // Like the rest of the shell matcher this is best effort (shell.ts): the runner also drops the variable from every
 // agent's environment (runner.ts agentEnv), and the hook itself refuses the hatch inside an agent run.
 import { resolve as resolvePath } from 'node:path';
-import { basename, splitCommands, unwrap, type SimpleCommand } from './shell.js';
+import { basename, envShort, envTakesNext, splitCommands, unwrap, type SimpleCommand } from './shell.js';
 
 /** The hatch: set to 1 in a person's own shell, for one push. */
 export const PUSH_GATE_HATCH_ENV = 'PUSH_GATE_BOOTSTRAP';
@@ -258,10 +258,6 @@ function commandLists(commands: SimpleCommand[]): string {
   return moved(/^PATH$/i) ? 'main' : 'main,others';
 }
 
-const ENV_CLEARS = /^(-|--ignore-environment|-[a-zA-Z0]*i[a-zA-Z0]*)$/;
-const ENV_UNSET = /^(-[a-zA-Z0]*u|--unset)$/;
-const ENV_VALUE = /^(-[a-zA-Z0]*[uCS]|--unset|--chdir|--split-string)$/;
-
 /** Names a command takes out of the environment (unset, export -n, env -u); `*` for all of it (env -i, env -). */
 function removedNames(c: SimpleCommand): string[] {
   const out: string[] = [];
@@ -269,13 +265,11 @@ function removedNames(c: SimpleCommand): string[] {
   for (const p of programsIn(c)) {
     for (let i = 0; i < p.envOptions.length; i++) {
       const o = p.envOptions[i]!;
-      if (ENV_CLEARS.test(o)) out.push('*');
+      const short = envShort(o);
+      if (o === '-' || o === '--ignore-environment' || short?.flags.includes('i')) out.push('*');
       if (o.startsWith('--unset=')) out.push(o.slice('--unset='.length));
-      else if (/^-u./.test(o)) out.push(o.slice(2));
-      if (ENV_VALUE.test(o)) {
-        const value = p.envOptions[++i];
-        if (ENV_UNSET.test(o)) out.push(value ?? '*');
-      }
+      const value = envTakesNext(o) ? p.envOptions[++i] : undefined;
+      if (o === '--unset' || short?.letter === 'u') out.push(short?.attached || (value ?? '*'));
     }
   }
   return out;

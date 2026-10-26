@@ -422,7 +422,7 @@ test("git config is read by git's own argument rules: options end at the first o
   }
 });
 
-test("a runner's options are read by its own option table: values attached or next, and a leading -- (#993)", () => {
+test("a runner's and env's options are read by their own option tables: values attached or next, and a leading -- (#993)", () => {
   for (const c of [
     // systemd-run -G is --collect, a flag (measured: systemd-run --help, getopt "+hrH:M:E:p:tPqGdSu:").
     'systemd-run --user -G make -C vendor/git all',
@@ -450,6 +450,14 @@ test("a runner's options are read by its own option table: values attached or ne
     'ltrace -D 1 git push --no-verify',
     'ltrace -L git push --no-verify',
     'strace --inject read:error=EIO git push --no-verify',
+    // env's clusters as getopt reads them (measured: `env -uCC echo` and `env -iuX echo` run echo): the first value
+    // letter takes the rest of the word, so the next word is the command.
+    'env -uCC git push --no-verify',
+    'env -uPROC git push --no-verify',
+    'env -uSSH_AUTH_SOCK git push --no-verify',
+    'env -iuX git push',
+    "env -S'git push --no-verify'",
+    "env -vS 'git push --no-verify'",
   ]) assert.deepEqual([bash(c).decision, bash(c).rule], ['deny', 'push-hook-bypass'], c);
 });
 

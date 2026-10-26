@@ -221,15 +221,28 @@ const WRITE_REDIRECTS = new Set(['>', '>>', '>|', '&>', '&>>']);
 /** A wrapper's options that take the next word as their value, so that word is not the command. */
 const WRAPPER_VALUE_OPTIONS: Record<string, RegExp> = {
   sudo: /^-[ugCDhprtU]$/,
-  env: /^(-[a-zA-Z0]*[uCS]|--unset|--chdir|--split-string)$/,
+  env: /^--(unset|chdir|split-string)$/,
   nice: /^(-n|--adjustment)$/,
   ionice: /^(-[cnpPu]|--class|--classdata|--pid|--pgid|--uid)$/,
   exec: /^-[a-z]*a$/,
   doas: /^-[uC]$/,
   time: /^(-[fo]|--format|--output)$/,
 };
-/** env's option whose value is a command line, split into words (env -S 'git push'). */
-const ENV_SPLIT = /^(-[a-zA-Z0]*S|--split-string(=|$))/;
+/**
+ * The option of an env short-option cluster that takes a value, as getopt reads it (GNU env: "+C:iS:u:v0"): the
+ * first such letter takes the rest of the word (`-uCC` unsets CC), or the next word when it ends the word. `flags`:
+ * the letters before it. null for a word that isn't a short-option cluster.
+ */
+export function envShort(opt: string): { flags: string; letter?: string; attached: string } | null {
+  if (!/^-[^-]/.test(opt)) return null;
+  const j = [...opt].findIndex((ch, k) => k > 0 && 'CSu'.includes(ch));
+  return j < 0 ? { flags: opt.slice(1), attached: '' } : { flags: opt.slice(1, j), letter: opt[j]!, attached: opt.slice(j + 1) };
+}
+/** Whether env option `opt` takes the next word as its value. */
+export function envTakesNext(opt: string): boolean {
+  const short = envShort(opt);
+  return WRAPPER_VALUE_OPTIONS.env!.test(opt) || (short?.letter !== undefined && short.attached === '');
+}
 
 /**
  * argv without wrappers; VAR=value given to `env` is recorded in `assignments` (it sets the command's environment),
@@ -249,14 +262,14 @@ function stripWrappers(argv: string[], assignments: Record<string, string> = {},
           assignments[opt.slice(0, opt.indexOf('='))] = opt.slice(opt.indexOf('=') + 1);
           continue;
         }
-        const takesValue = WRAPPER_VALUE_OPTIONS[base]?.test(opt) && a.length > 0;
+        const takesValue = (base === 'env' ? envTakesNext(opt) : WRAPPER_VALUE_OPTIONS[base]?.test(opt)) && a.length > 0;
         const value = takesValue ? a[0]! : undefined;
         if (takesValue) a = a.slice(1);
         if (base !== 'env') continue;
         envOptions.push(opt, ...(value === undefined ? [] : [value]));
-        const split = ENV_SPLIT.exec(opt);
-        if (split) {
-          const line = value ?? (opt.includes('=') ? opt.slice(opt.indexOf('=') + 1) : opt.slice(split[0].length));
+        const short = envShort(opt);
+        if (short?.letter === 'S' || /^--split-string(=|$)/.test(opt)) {
+          const line = value ?? (short ? short.attached : opt.includes('=') ? opt.slice(opt.indexOf('=') + 1) : '');
           a = [...line.split(/\s+/).filter(Boolean), ...a];
         }
       }

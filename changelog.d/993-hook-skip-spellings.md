@@ -17,7 +17,8 @@
   - git's own `git-push` and `git-config` programs run by name or path (`$(git --exec-path)/git-push`), read as
     `git push` and `git config`;
   - git, `env` and those programs where a command runs them: directly, behind a wrapper the shell matcher removes
-    (`env -u X`, `nice -n 15`, `exec -a`, `env -S '…'`, `timeout --kill-after 5 60`, `xargs --max-args 1`), as a
+    (`env -u X`, `nice -n 15`, `exec -a`, `env -S '…'`, `timeout --kill-after 5 60`, `xargs --max-args 1`; env's
+    option clusters as getopt reads them, so `env -uCC git push` runs git), as a
     `find -exec` or `-ok` command, or behind a known runner (`setsid`, `flock`, `strace`, `taskset`, …). A runner's
     options are those of its own option table (`systemd-run -G` is `--collect`, a flag), and its
     command is the first word after its own options and operands (`flock /tmp/l git push` runs git; so does
