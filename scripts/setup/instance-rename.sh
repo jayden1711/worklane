@@ -140,8 +140,7 @@ if done_step done; then echo "$old was renamed to $new already ($progress)"; exi
 if [ -n "$abort" ]; then
   [ -n "$started" ] || refuse "no rename of $old to $new under way ($progress)"
   done_step services && refuse "$new has started already: rename it back instead (instance-rename.sh $new $old)"
-  exec 9> "$ADD_PROJECT_LOCK"
-  flock -n 9 || refuse "an add-project, instance-remove or instance-rename is running on this machine; wait for it to finish"
+  machine_lock 9 "$ADD_PROJECT_LOCK" 0 "refused: an add-project, instance-remove or instance-rename is running on this machine; wait for it to finish" || { echo "$MACHINE_LOCK_WHY" >&2; exit 1; }
   say "abort: $new goes, $old's records and unit come back"
   # Root's auto_merge switches need nothing: both names share one id (instance_alias), so an OFF given to either during
   # the rename is the old name's already. <new>'s pointer goes with <new> (instance-remove.sh, which refuses while it
@@ -195,8 +194,7 @@ if [ -n "$print" ]; then
   exit 0
 fi
 
-exec 9> "$ADD_PROJECT_LOCK"
-flock -n 9 || refuse "an add-project, instance-remove or instance-rename is running on this machine; wait for it to finish"
+machine_lock 9 "$ADD_PROJECT_LOCK" 0 "refused: an add-project, instance-remove or instance-rename is running on this machine; wait for it to finish" || { echo "$MACHINE_LOCK_WHY" >&2; exit 1; }
 if ! done_step remove; then
   busy="$(instance_in_flight "$old"; mounted)"
   [ -z "$busy" ] || { echo "refused: $old has work in flight; nothing changed:" >&2; printf '%s\n' "$busy" | sed 's/^/  /' >&2; exit 1; }
