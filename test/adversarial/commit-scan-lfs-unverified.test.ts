@@ -161,12 +161,14 @@ test('a checkout with no file under the large-file filter commits whatever git-l
   git(d, 'commit', '-q', '-m', 'init');
   writeFileSync(join(d, 'b.js'), 'export const b = 1;\n');
   writeFileSync(join(d, 'c.js'), 'export const c = 1;\n');
-  git(d, 'add', 'c.js');
+  mkdirSync(join(d, 'docs'));
+  writeFileSync(join(d, 'docs', 'gitattributes-notes.md'), 'notes\n');
+  git(d, 'add', 'c.js', 'docs');
   git(d, 'commit', '-q', '-m', 'c');
   const global = join(mkdtempSync(join(tmpdir(), 'gitconfig-')), 'config');
   writeFileSync(global, STANDARD.map(([k, v]) => `[filter "lfs"]\n\t${k.split('.')[2]} = ${v}\n`).join(''));
   await withEnv({ GIT_CONFIG_GLOBAL: global, XDG_CONFIG_HOME: mkdtempSync(join(tmpdir(), 'xdg-')), PATH: `${ownLfs()}${delimiter}${process.env.PATH ?? ''}` }, async () => {
-    for (const line of ['git add b.js && git commit -m x', 'git mv c.js d.js && git commit -m x', 'git rm -q c.js && git commit -m x', 'git add -A && git commit -m x']) {
+    for (const line of ['git add b.js && git commit -m x', 'git mv c.js d.js && git commit -m x', 'git rm -q c.js && git commit -m x', 'git add -A && git commit -m x', 'git mv docs/gitattributes-notes.md docs/notes.md && git commit -m x']) {
       const r = await decide(d, line);
       assert.equal(r.decision, 'allow', `${line}: ${r.reason}`);
     }
@@ -227,12 +229,58 @@ for (const [what, make, line] of MOVES) {
 }
 
 test('attack: a file under the filter only by the index\'s attributes checks git-lfs too', { skip: skipRoot }, async () => {
-  const d = plainCheckout({ '.gitattributes': '*.dat filter=lfs\n' });
+  const d = plainCheckout({ 'a.js': 'plain\n' });
+  writeFileSync(join(d, '.gitattributes'), '*.dat filter=lfs\n');
+  git(d, 'add', '.gitattributes');
   writeFileSync(join(d, '.gitattributes'), '# none\n');
   writeFileSync(join(d, 'c.dat'), 'plain\n');
   await withEnv({ PATH: `${ownLfs()}${delimiter}${process.env.PATH ?? ''}` }, async () => {
-    await refused(d, 'git commit -m x', /belongs to uid \d+, not root/, 'the index\'s attributes only');
+    await refused(d, 'git commit -m x', NOT_ROOT, 'the index\'s attributes only (not in HEAD, not on disk)');
   });
+});
+
+test('attack: an attributes file only in the working tree, tracked by nothing, checks git-lfs too', { skip: skipRoot }, async () => {
+  const d = plainCheckout({ 'a.js': 'plain\n' });
+  writeFileSync(join(d, '.gitattributes'), '*.dat filter=lfs\n');
+  await withEnv({ PATH: `${ownLfs()}${delimiter}${process.env.PATH ?? ''}` }, () => refused(d, 'git commit -m x', NOT_ROOT, 'an untracked attributes file'));
+});
+
+const IGNORED: [string, () => string, string][] = [
+  ['H1: an attributes file .gitignore ignores', () => {
+    const d = plainCheckout({ '.gitignore': 'sub/.gitattributes\n', 'sub/x.bin': 'plain\n' });
+    writeFileSync(join(d, 'sub', '.gitattributes'), '*.bin filter=lfs\n');
+    writeFileSync(join(d, 'sub', 'x.bin'), 'edited\n');
+    return d;
+  }, 'git commit -a -m x'],
+  ['H2: an attributes file info/exclude ignores', () => {
+    const d = plainCheckout({ 'a.js': 'plain\n' });
+    writeFileSync(join(d, '.git', 'info', 'exclude'), '.gitattributes\n');
+    writeFileSync(join(d, '.gitattributes'), '*.bin filter=lfs\n');
+    writeFileSync(join(d, 'x.bin'), 'plain\n');
+    return d;
+  }, 'git add x.bin && git commit -m x'],
+  ['H3: a relative core.attributesFile, which git reads from the checkout\'s top', () => {
+    const d = plainCheckout({ 'a.js': 'plain\n' });
+    writeFileSync(join(d, 'attrs-rel'), '*.bin filter=lfs\n');
+    git(d, 'config', 'core.attributesFile', 'attrs-rel');
+    return d;
+  }, 'git commit -m x'],
+  ['attr.tree in the config', () => {
+    const d = plainCheckout({ 'a.js': 'plain\n' });
+    git(d, 'config', 'attr.tree', 'side');
+    return d;
+  }, 'git commit -m x'],
+];
+for (const [name, make, line] of IGNORED) {
+  test(`attack: ${name} checks git-lfs too`, { skip: skipRoot }, async () => {
+    const d = make();
+    await withEnv({ PATH: `${ownLfs()}${delimiter}${process.env.PATH ?? ''}` }, () => refused(d, line, NOT_ROOT, name));
+  });
+}
+
+test('attack: GIT_ATTR_SOURCE in the hook\'s environment checks git-lfs too', { skip: skipRoot }, async () => {
+  const d = plainCheckout({ 'a.js': 'plain\n' });
+  await withEnv({ PATH: `${ownLfs()}${delimiter}${process.env.PATH ?? ''}`, GIT_ATTR_SOURCE: 'HEAD' }, () => refused(d, 'git commit -m x', NOT_ROOT, 'GIT_ATTR_SOURCE'));
 });
 
 test('attack: an attributes source no file matches yet, in any place git reads one, checks git-lfs too', { skip: skipRoot }, async () => {

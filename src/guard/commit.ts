@@ -6,6 +6,7 @@
 import { lstatSync } from 'node:fs';
 import { isAbsolute, join } from 'node:path';
 import { basename, splitCommands, type SimpleCommand } from '../guardrails/shell.js';
+import { ATTRIBUTES_FILE } from '../scan/secrets.js';
 
 /** What one scan of a checkout covers, on top of the staged changes it always covers. */
 export interface CommitScope {
@@ -1001,7 +1002,7 @@ export function commitPlan(command: string, p: PlanEnv): CommitPlan | null {
         const read = gitWords(c.words);
         if (STAGING.has(read.sub ?? '')) staging = true;
         const words = read.rest.map((w) => w.text);
-        if (read.sub === 'mv' && words.some((t) => /gitattributes/i.test(t))) reads.moves = true;
+        if (read.sub === 'mv' && words.some((t) => ATTRIBUTES_FILE.test(t))) reads.moves = true;
         // WHY: an interactive staging step shows each change as a diff (through any filter the config names) first.
         const interactive = read.sub === 'add' && words.some((t) => /^-[a-zA-Z]*[pi]/.test(t) || /^--(p|pa|pat|patc|patch|i|in|int|inte|inter|intera|interac|interact|interacti|interactiv|interactive)$/.test(t));
         if (interactive || read.sub === 'diff' || read.sub === 'show' || (read.sub === 'log' && logShowsDiffs(words)) || (read.sub === 'status' && words.some((t) => t.startsWith('-') && !STATUS_NO_DIFF.test(t)))) reads.diffReads = true;

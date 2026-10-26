@@ -5,7 +5,7 @@ import { createHash } from 'node:crypto';
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { delimiter, dirname, isAbsolute, join, resolve as resolvePath } from 'node:path';
-import { presentNames, rawChanges, untrackedNames } from '../coordinator/change-files.js';
+import { ignoredNames, presentNames, rawChanges, untrackedNames } from '../coordinator/change-files.js';
 import { notRootsProgram } from '../os/index.js';
 import { findTool } from '../tool-path.js';
 
@@ -388,7 +388,7 @@ export function checkReadPrograms(top: string, scope: CommitScanScope, depth = 0
   // file an attributes file.
   if (lfs) {
     if (scope.moves) lfsProgramRootsAlone(top, 'a git mv earlier in the line may make a file an attributes file after the scan has looked; run the git mv in a call of its own, then commit');
-    else if (attributesNameLfs(top)) lfsProgramRootsAlone(top, 'an attributes source here names the large-file filter');
+    else if (attributesNameLfs(top, config)) lfsProgramRootsAlone(top, 'an attributes source here names the large-file filter');
   }
   // WHY: a read and the scan's own listing reach into each checked-out submodule under that submodule's own config,
   // and a nested checkout the line stages becomes one.
@@ -396,15 +396,17 @@ export function checkReadPrograms(top: string, scope: CommitScanScope, depth = 0
 }
 
 /** An attributes file's name in a checkout, as git reads it (any case: a case-insensitive file system matches it). */
-const ATTRIBUTES_FILE = /(^|\/)\.gitattributes$/i;
+export const ATTRIBUTES_FILE = /(^|\/)\.gitattributes\/*$/i;
 const NAMES_LFS = /filter=lfs/;
 
 /**
  * Whether any attributes source of the checkout at `top` names the large-file filter, whatever path it matches: an
- * attributes file in the working tree (tracked or not), the index or HEAD, the repository's own, the user's and the
- * system's. One that can't be read counts as naming it.
+ * attributes file in the working tree (tracked, untracked or ignored), the index or HEAD, the repository's own, the
+ * user's and the system's. One that can't be read counts as naming it, and so does a tree the config or the
+ * environment names as the attributes source (attr.tree, GIT_ATTR_SOURCE), which isn't read.
  */
-function attributesNameLfs(top: string): boolean {
+function attributesNameLfs(top: string, config: Map<string, string[]>): boolean {
+  if (config.has('attr.tree') || process.env.GIT_ATTR_SOURCE !== undefined) return true;
   const names = (b: Buffer) => NAMES_LFS.test(b.toString('latin1'));
   const file = (path: string | null): boolean => {
     if (!path) return false;
@@ -414,7 +416,7 @@ function attributesNameLfs(top: string): boolean {
       return (e as NodeJS.ErrnoException).code !== 'ENOENT' && (e as NodeJS.ErrnoException).code !== 'ENOTDIR';
     }
   };
-  for (const p of [...presentNames(top, null), ...untrackedNames(top)]) if (ATTRIBUTES_FILE.test(p) && file(join(top, p))) return true;
+  for (const p of [...presentNames(top, null), ...untrackedNames(top), ...ignoredNames(top)]) if (ATTRIBUTES_FILE.test(p) && file(join(top, p))) return true;
   const ids: string[] = [];
   const head = headId(top);
   for (const [rev, prefix] of [[null, ':'], ...(head ? [[head, `${head}:`]] : [])] as [string | null, string][]) {
@@ -427,7 +429,8 @@ function attributesNameLfs(top: string): boolean {
   }
   if (objects(top, [...new Set(ids)]).some(names)) return true;
   const gitDir = resolvePath(top, gitOut(top, ['rev-parse', '--git-common-dir']).toString('utf8').trim());
-  return [join(gitDir, 'info', 'attributes'), gitVar(top, 'GIT_ATTR_GLOBAL'), gitVar(top, 'GIT_ATTR_SYSTEM')].some(file);
+  // WHY: git reads a relative attributes file name from the checkout's top level (measured, git 2.43).
+  return [join(gitDir, 'info', 'attributes'), gitVar(top, 'GIT_ATTR_GLOBAL'), gitVar(top, 'GIT_ATTR_SYSTEM')].some((p) => file(p && resolvePath(top, p)));
 }
 
 /** `git var <name>`: the user's or the system's attributes file; null when git names none (GIT_ATTR_NOSYSTEM). */
@@ -435,8 +438,10 @@ function gitVar(top: string, name: string): string | null {
   const r = spawnSync('git', ['--no-replace-objects', 'var', name], { cwd: top, encoding: 'utf8', timeout: 60_000 });
   if (r.error) throw r.error;
   if (r.status === 0) return r.stdout.trim() || null;
-  // WHY: a git older than 2.42 has no such variable; it then reads the files its defaults name.
-  if (!/unknown variable/i.test(r.stderr)) return null;
+  // WHY: a git that names no such file exits with nothing said (no home, GIT_ATTR_NOSYSTEM); a git older than 2.42
+  // has no such variable and reads the files its defaults name; anything else is a failure, never "no file".
+  if (!r.stderr.trim()) return null;
+  if (!/unknown variable|usage: git var/i.test(r.stderr)) throw new Error(`git var ${name} failed, so the attributes file it names can't be checked`);
   if (name === 'GIT_ATTR_SYSTEM') return process.env.GIT_ATTR_NOSYSTEM ? null : '/etc/gitattributes';
   const set = spawnSync('git', ['config', '--path', '--get', 'core.attributesFile'], { cwd: top, encoding: 'utf8', timeout: 60_000 });
   if (set.status === 0 && set.stdout.trim()) return set.stdout.trim();
