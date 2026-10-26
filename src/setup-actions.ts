@@ -10,7 +10,7 @@ import { detectTools, type Mode, type RunResult } from './setup-steps.js';
 import { describeInstall, httpDownload, INSTALLABLE, installPlan, installTool, type Download, type InstallableTool, type ToolInstall } from './tool-install.js';
 import { findTool, toolPrefix, withToolPath } from './tool-path.js';
 import { classicChecks } from './branch-protection.js';
-import { DETAIL_LOGGED } from './user-facing-error.js';
+import { DETAIL_LOGGED, logDetail } from './user-facing-error.js';
 
 export const ACTION_IDS = ['install-tools', 'local-hooks', 'git-hooks', 'fingerprints', 'protection', 'default-branch'] as const;
 export type ActionId = (typeof ACTION_IDS)[number];
@@ -239,6 +239,8 @@ export function actionPlan(id: ActionId, c: ActionContext, d: ActionDeps): Actio
   try {
     return { id, step: a.step, label: a.label, ...a.plan(c, d) };
   } catch (e) {
-    return { id, step: a.step, label: a.label, available: false, why: `can't plan it: ${(e as Error).message.split('\n')[0]}`, changes: [], commands: [] };
+    // A plan reads files and runs tools: its error can name a path or quote a tool's output (#1064).
+    logDetail(`planning the ${id} action`, e);
+    return { id, step: a.step, label: a.label, available: false, why: `can't plan it; ${DETAIL_LOGGED}`, changes: [], commands: [] };
   }
 }
