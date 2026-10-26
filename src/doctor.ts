@@ -36,6 +36,7 @@ import { vacuityDoctor } from './merge-policy-vacuity.js';
 import { HUB_UNIT_AS_ROOT, OWNER_TERMINAL_RERUN, ownerTerminalNotice, ownerTerminalRerun, type TerminalPaths } from './console/owner-terminal-removed.js';
 import { voiceSiriLeftoverCheck } from './doctor-voice-removed.js';
 import { moneyListCheck } from './review.js';
+import { gitTooOld } from './coordinator/change-files.js';
 import { DASHBOARD_KEY_PREFIX, isDashboardKey } from './events/redact.js';
 
 /** off: not available in this setup's mode (said why; never a failure). */
@@ -75,6 +76,10 @@ export function doctor(rootArg: string, opts: { agentshield?: boolean; /** A pol
   // The engine's requirement (package.json engines): every part, hooks and coordinator alike, runs on it.
   if (maj < 22 || (maj === 22 && min < 13)) add('node', 'fail', `Node ${process.versions.node}; the engine needs >= 22.13`);
   else add('node', 'ok', `Node ${process.versions.node}`);
+  // The merge decision's checks need a git new enough to measure a merge; with an older one every PR waits (#1077).
+  const git = spawnSync('git', ['version'], { encoding: 'utf8', timeout: 20_000 });
+  const gitProblem = git.status === 0 ? gitTooOld(git.stdout) : `git can't run (${(git.error?.message ?? git.stderr ?? `exit ${git.status}`).trim().slice(0, 200)})`;
+  add('git', gitProblem ? 'fail' : 'ok', gitProblem ?? git.stdout.trim());
 
   let cfg: Config | null = null;
   try {
