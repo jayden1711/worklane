@@ -1,7 +1,7 @@
 // OS adapter layer. This is the only module allowed to branch on the
 // platform (test/os-boundary.test.ts enforces it).
 import { execFileSync, spawn, spawnSync } from './child-process.js';
-import { chmodSync, chownSync, closeSync, constants as fsConstants, existsSync, fchmodSync, fstatSync, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, readSync, realpathSync, renameSync, rmSync, statSync, statfsSync, writeFileSync } from 'node:fs';
+import { chmodSync, chownSync, closeSync, constants as fsConstants, existsSync, fchmodSync, fchownSync, fstatSync, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, readSync, realpathSync, renameSync, rmSync, statSync, statfsSync, writeFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { testRunSign } from './system-paths.js';
 import { availableParallelism, homedir, hostname, loadavg, userInfo } from 'node:os';
@@ -73,12 +73,12 @@ function agentDir(dir: string, gid: number, mode: number, what: string): void {
   chmodSync(dir, mode);
 }
 
-/** A file the agent user can read but not write: owner this user, group `gid`, 0640. */
+/** A file the agent user can read but not write: owner this user, group `gid`, 0640, written as writeStaged does. */
 export function writeAgentReadable(file: string, data: string | Buffer, gid: number): void {
-  writeFileSync(file, data, { mode: 0o640 });
-  if (process.platform === 'win32') return;
-  chownSync(file, process.getuid!(), gid);
-  chmodSync(file, 0o640);
+  writeStaged(file, data, (fd) => {
+    fchownSync(fd, process.getuid!(), gid);
+    fchmodSync(fd, 0o640);
+  });
 }
 
 /**
@@ -119,7 +119,6 @@ export function groupOnlyDir(dir: string): void {
   groupOnly(dir);
 }
 
-/** Write a state file readable by the coordinator's user and group only. */
 /** A directory only this user can enter (0700): for data no group member may read, such as raw intake reports. */
 export function ownerOnlyDir(dir: string): void {
   mkdirSync(dir, { recursive: true, mode: 0o700 });
@@ -130,21 +129,22 @@ export function ownerOnlyDir(dir: string): void {
 const NEW_FILE = fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | (fsConstants.O_NOFOLLOW ?? 0);
 
 /**
- * Write a file only this user can read (0600), atomically, never through anything planted beside it (#950; #918
- * round 4, A11). The data goes to a new file at a staging name no one can know beforehand (stagingName), created
- * exclusively without following a link (NEW_FILE); its mode is set and its data written through that one
- * descriptor, never by name. Then rename(2) moves it over `file`: a rename replaces whatever is at `file`, a link
- * included, and never follows it. A staging name that is no longer the file written (a link swapped in for it
- * meanwhile) is refused, not published. The staging name is removed on any failure; a kill leaves it (stagingName).
+ * Write `file` atomically, never through anything planted beside it (#950, #1062; #918 round 4, A11). The data goes
+ * to a new file at a staging name no one can know beforehand (stagingName), created exclusively without following a
+ * link (NEW_FILE), `created` less the umask at first; `own` (POSIX only) sets its group and mode, and the data is
+ * written, through that one descriptor, never by name. Then rename(2) moves it over `file`: a rename replaces whatever
+ * is at `file`, a link included, and never follows it. A staging name that is no longer the file written (a link
+ * swapped in for it meanwhile) is refused, not published. The staging name is removed on any failure; a kill leaves
+ * it (stagingName).
  */
-export function writeOwnerOnly(file: string, data: string): void {
+function writeStaged(file: string, data: string | Uint8Array, own: (fd: number) => void, created = 0o600): void {
   const staged = stagingName(file);
-  // INVARIANT: one exclusive open; the mode and the data only through its descriptor, never by name (a name can be swapped).
-  const fd = openSync(staged, NEW_FILE, 0o600);
+  // INVARIANT: one exclusive open; the group, the mode and the data only through its descriptor, never by name (a name can be swapped).
+  const fd = openSync(staged, NEW_FILE, created);
   try {
     let made;
     try {
-      if (process.platform !== 'win32') fchmodSync(fd, 0o600);
+      if (process.platform !== 'win32') own(fd);
       writeFileSync(fd, data);
       made = fstatSync(fd);
     } finally {
@@ -158,10 +158,38 @@ export function writeOwnerOnly(file: string, data: string): void {
   }
 }
 
+/** Write a file only this user can read (0600), atomically, never through anything planted beside it (writeStaged). */
+export function writeOwnerOnly(file: string, data: string): void {
+  writeStaged(file, data, (fd) => fchmodSync(fd, 0o600));
+}
+
+/**
+ * Write `file` as writeOwnerOnly does, opened to one group, read only (0640): on Linux, when the group exists and this
+ * process may hand the file to it (root, or a member). The group and mode are set through the staging file's
+ * descriptor before it is published, never by name after (#1062). Anywhere else, or when it can't, the file is 0600:
+ * false.
+ */
+export function writeGroupReadable(file: string, data: string, group: string, platform: NodeJS.Platform = process.platform): boolean {
+  const gid = platform === 'linux' ? groupId(group) : null;
+  let shared = false;
+  writeStaged(file, data, (fd) => {
+    fchmodSync(fd, 0o600);
+    if (gid === null) return;
+    try {
+      fchownSync(fd, process.getuid!(), gid);
+      fchmodSync(fd, 0o640);
+      shared = true;
+    } catch {
+      // not this process's to hand over: it stays 0600
+    }
+  });
+  return shared;
+}
+
 /**
  * A staging name beside `file` that no one else can know beforehand: `.<name>.<16 random hex>.new`. A process
- * killed between staging and publishing leaves it behind (0600, holding the data): nothing removes it but the next
- * call's own, which has another name.
+ * killed between staging and publishing leaves it behind (this user's, holding the data, with the mode the file
+ * would have had, or 0600): nothing removes it but the next call's own, which has another name.
  */
 function stagingName(file: string): string {
   return join(dirname(file), `.${basename(file)}.${randomBytes(8).toString('hex')}.new`);
@@ -249,12 +277,9 @@ export function notOwnerOnlyDir(dir: string): string | null {
   return null;
 }
 
-/** Write an executable file (a git hook) atomically, with exactly `mode` (0700: this user's only; or 0755). */
+/** Write an executable file (a git hook) atomically, with exactly `mode` (0700: this user's only; or 0755), as writeStaged does. */
 export function writeExecutable(file: string, data: string, mode: 0o700 | 0o755): void {
-  const tmp = `${file}.${process.pid}.tmp`;
-  writeFileSync(tmp, data, { mode });
-  if (process.platform !== 'win32') chmodSync(tmp, mode);
-  renameSync(tmp, file);
+  writeStaged(file, data, (fd) => fchmodSync(fd, mode));
 }
 
 /**
@@ -426,9 +451,24 @@ export function currentUser(): string {
   }
 }
 
+/**
+ * Write a state file readable by the coordinator's user and group only, as writeStaged does, with the modes an
+ * in-place write then groupOnly gave (#1062 rounds 2 and 3): a regular file it replaces (not a link, nor a FIFO)
+ * stays 0600 if it was 0600, else 0660, whatever the umask; a new file is 0660, or 0600 when the umask leaves it
+ * 0600. The staging file is made with the old file's mode within 0660 (a new one: 0660), less the umask, so where the
+ * file system refuses the mode change (some FUSE mounts) it is never wider than groupOnly's swallowed chmod left it:
+ * the same, unless the umask narrows it. The process umask is never changed to avoid that: other threads create files.
+ */
 export function writeGroupOnly(file: string, data: string | Uint8Array): void {
-  writeFileSync(file, data, { mode: 0o660 });
-  groupOnly(file);
+  const old = lstatSync(file, { throwIfNoEntry: false });
+  const was = old?.isFile() ? old.mode & 0o777 : null;
+  writeStaged(file, data, (fd) => {
+    try {
+      fchmodSync(fd, (was ?? fstatSync(fd).mode & 0o777) === 0o600 ? 0o600 : 0o660);
+    } catch {
+      // the file system keeps its own modes
+    }
+  }, (was ?? 0o660) & 0o660);
 }
 
 export function detectOs(setting: OsSetting = 'auto'): OsKind {
@@ -860,20 +900,14 @@ export function homesRoot(platform: NodeJS.Platform = process.platform): string 
   return platform === 'darwin' ? '/Users' : '/home';
 }
 
-/**
- * Open a file to one group, read only (0640), keeping its owner: on Linux, when the group exists and this process may
- * hand the file to it (root, or a member). Anywhere else, or when it can't, it stays as it was: false.
- */
-export function shareReadWithGroup(file: string, group: string, platform: NodeJS.Platform = process.platform): boolean {
-  if (platform !== 'linux' || !/^[a-z_][a-z0-9_-]{0,31}$/.test(group) || typeof process.getuid !== 'function') return false;
+/** A group's id from the user database (getent, Linux), or null when it isn't there or the name isn't one. */
+function groupId(group: string): number | null {
+  if (!/^[a-z_][a-z0-9_-]{0,31}$/.test(group) || typeof process.getuid !== 'function') return null;
   try {
     const gid = Number(execFileSync('getent', ['group', group], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 10_000 }).split(':')[2]);
-    if (!Number.isInteger(gid)) return false;
-    chownSync(file, statSync(file).uid, gid);
-    chmodSync(file, 0o640);
-    return true;
+    return Number.isInteger(gid) ? gid : null;
   } catch {
-    return false;
+    return null;
   }
 }
 

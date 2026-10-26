@@ -120,11 +120,8 @@ const REVIEWED: Record<string, Review> = {
     kind: 'mixed',
     why: 'defines the slot-dir paths',
     elsewhere: {
-      'writeAgentReadable: writeFileSync(file)': [1, "its caller's file (a task file, in the state dir)"],
-      'writeGroupOnly: writeFileSync(file)': [1, "its caller's file (in the state dir)"],
-      'writeOwnerOnly: openSync(staged)': [1, "its caller's file, through a new staging file (exclusive, no link followed)"],
-      'writeOwnerOnly: writeFileSync(fd)': [1, 'that staging file, through its own descriptor'],
-      'writeExecutable: writeFileSync(tmp)': [1, 'a git hook or a launcher, through a temp file'],
+      'writeStaged: openSync(staged)': [1, "its caller's file (writeOwnerOnly, writeGroupOnly, writeAgentReadable, writeExecutable), through a new staging file (exclusive, no link followed)"],
+      'writeStaged: writeFileSync(fd)': [1, 'that staging file, through its own descriptor'],
       'installOwnerOnlySecret: writeFileSync(tmp)': [1, "a secret in the user's own 0700 dir"],
       'installSecretFor: writeFileSync(tmp)': [1, "a secret in a user's 0700 dir"],
       'installService: writeFileSync(path)': [2, 'a launchd plist, or a systemd user unit'],
