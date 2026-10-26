@@ -2,9 +2,10 @@
 // A scanner that can't run is reported as unavailable, never as "clean".
 import { spawn, spawnSync } from '../os/child-process.js';
 import { createHash } from 'node:crypto';
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, writeFileSync } from 'node:fs';
+import { accessSync, constants, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { delimiter, dirname, isAbsolute, join, resolve as resolvePath } from 'node:path';
+import { BRAND } from '../brand.js';
 import { ignoredNames, presentNames, rawChanges, untrackedNames } from '../coordinator/change-files.js';
 import { notRootsProgram } from '../os/index.js';
 import { findTool } from '../tool-path.js';
@@ -81,14 +82,57 @@ interface Compared {
  * nothing the checkout's own settings say about showing one, changes what is found.
  */
 export function scanCommit(top: string, scope: CommitScanScope, binary = findTool('gitleaks')): ScanResult {
-  if (!binary) return { status: 'unavailable', error: 'gitleaks not found on PATH' };
-  const tmp = mkdtempSync(join(tmpdir(), 'scan-commit-'));
-  try {
+  return scanComparisons(top, binary, () => {
     checkReadPrograms(top, scope);
     const comparisons: [string, () => Compared[]][] = [['staged changes', () => stagedContent(top)]];
     if (scope.unstaged || scope.untracked) comparisons.push(['unstaged changes', () => worktreeContent(top)]);
     if (scope.untracked) comparisons.push(['untracked files', () => untrackedContent(top)]);
     if (scope.head) for (const [i, read] of headContent(top).entries()) comparisons.push([`the commit being amended (parent ${i + 1})`, read]);
+    return comparisons;
+  });
+}
+
+/**
+ * Scan the index a commit is recording, against HEAD, from inside the commit: the engine's pre-commit hook (#983), the
+ * second layer under scanCommit's model of the command line. INVARIANT (#983): it reads the index git names for the
+ * commit (GIT_INDEX_FILE, which git sets for its hooks, so a commit of named paths is read in the index git builds for
+ * it), by content as scanCommit does; whatever the command line was, and whatever ran before it in the commit.
+ * The checkout's read programs aren't checked here: the index already holds what git stores, and nothing here renders
+ * a change or reads the working tree.
+ */
+export function scanIndex(top: string, binary = findTool('gitleaks')): ScanResult {
+  return scanComparisons(top, binary, () => [['the index being committed', () => stagedContent(top)]]);
+}
+
+/** The line that marks the engine's pre-commit hook (src/install.ts installGitHook writes it). */
+export const GIT_HOOK_MARKER = `# managed by ${BRAND.cli}`;
+
+/**
+ * Why git would make a commit in checkout `top` without the engine's pre-commit hook (scanIndex, #983); null when it
+ * runs that hook, or when the checkout's hooks dir holds no engine hook. INVARIANT (#983): git itself says which hook
+ * file it runs (`rev-parse --git-path`, which reads core.hooksPath from all the config git reads, includes too), so no
+ * config route to another hooks dir needs modelling; that file must be the engine's, and executable.
+ */
+export function commitHookSkipped(top: string): string | null {
+  const r = spawnSync('git', ['rev-parse', '--path-format=absolute', '--git-common-dir', '--git-path', 'hooks/pre-commit'], { cwd: top, encoding: 'utf8', timeout: 5_000 });
+  const [common, runs] = r.error || r.status !== 0 ? [] : String(r.stdout).split('\n');
+  if (!common || !runs) return "git can't say which pre-commit hook it runs here";
+  const engine = join(common, 'hooks', 'pre-commit');
+  if (!existsSync(engine) || !readFileSync(engine, 'utf8').includes(GIT_HOOK_MARKER)) return null;
+  if (!existsSync(runs) || realpathSync(runs) !== realpathSync(engine)) return `git would run ${runs} as the pre-commit hook, not the engine's (core.hooksPath, set in config or a file it includes, points elsewhere)`;
+  try {
+    accessSync(engine, constants.X_OK);
+  } catch {
+    return `the engine's pre-commit hook ${engine} isn't executable, so git would skip it`;
+  }
+  return null;
+}
+
+function scanComparisons(top: string, binary: string | null | undefined, comparisonsOf: () => [string, () => Compared[]][]): ScanResult {
+  if (!binary) return { status: 'unavailable', error: 'gitleaks not found on PATH' };
+  const tmp = mkdtempSync(join(tmpdir(), 'scan-commit-'));
+  try {
+    const comparisons = comparisonsOf();
     // WHY: the checkout's own rules, as the scan of its diff read them before; never a rules file the content brings.
     const own = join(top, '.gitleaks.toml');
     const config = join(tmp, 'gitleaks.toml');

@@ -348,7 +348,7 @@ async function main(argv: string[]): Promise<number> {
     case 'install': {
       // Only the pre-commit secret scan, e.g. in a checkout whose settings are already committed.
       if (flag(args, '--git-hooks-only')) {
-        console.log(`pre-commit secret scan: ${installGitHook(root)}`);
+        console.log(`pre-commit secret scan: ${installGitHook(root, invokedEngine())}`);
         // An instance's checkout (checkout.sh): never a push of the default branch from it, by anyone. The config's
         // branch when the repo has its config yet; origin/HEAD's at push time either way.
         let branches: string[] = [];

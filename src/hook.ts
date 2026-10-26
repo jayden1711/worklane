@@ -20,7 +20,7 @@ import { TaskFile } from './contract.js';
 import { HELD_OUT_ENV, HELD_OUT_GLOB } from './held-out-paths.js';
 import { DASHBOARD_KEY_GLOB } from './dashboard-key-paths.js';
 import { expSecretGlobs } from './experiments/paths.js';
-import { checkReadPrograms, scanCommit, scanPath } from './scan/secrets.js';
+import { checkReadPrograms, commitHookSkipped, scanCommit, scanIndex, scanPath } from './scan/secrets.js';
 import { commitPlan } from './guard/commit.js';
 import { checkWorkingFile, formatFindings } from './comment-policy.js';
 
@@ -176,6 +176,11 @@ function preToolUse(input: HookInput, env: NodeJS.ProcessEnv): HookOutput {
       }
     }
     for (const { top, scope } of plan?.scans ?? []) {
+      const skipped = commitHookSkipped(top);
+      if (skipped) {
+        log(root, 'secrets.jsonl', { source: 'commit', session: input.session_id, status: 'hook-skipped' });
+        return decide('deny', `${skipped}; the pre-commit hook is the secret scan of the index the commit records, and an agent never commits without it`);
+      }
       const r = scanCommit(top, scope);
       if (r.status !== 'clean') {
         log(root, 'secrets.jsonl', { source: 'commit', session: input.session_id, status: r.status });
@@ -192,6 +197,24 @@ function preToolUse(input: HookInput, env: NodeJS.ProcessEnv): HookOutput {
 function gitQuery(dir: string, args: string[]): { status: number | null; stdout: string } {
   const r = spawnSync('git', args, { cwd: dir, encoding: 'utf8', timeout: 5_000 });
   return { status: r.error ? null : r.status, stdout: r.stdout ?? '' };
+}
+
+/**
+ * git's pre-commit hook, as the engine installs it (src/install.ts installGitHook): the second layer of the commit scan
+ * (#983), for agents and people alike. It scans the index the commit records, so what the guard's model of the command
+ * line missed is still refused here. Exit 1 refuses the commit; so does a scan that can't run.
+ */
+function preCommit(): HookOutput {
+  const at = spawnSync('git', ['rev-parse', '--show-toplevel'], { encoding: 'utf8', timeout: 5_000 });
+  const top = !at.error && at.status === 0 ? at.stdout.trim() : '';
+  if (!top) return { stderr: `[${BRAND.cli}] pre-commit secret scan: no checkout found here; not committing unscanned\n`, exitCode: 1 };
+  const r = scanIndex(top);
+  const root = findProjectRoot(top);
+  if (root) log(root, 'secrets.jsonl', { source: 'pre-commit', status: r.status });
+  if (r.status === 'clean') return { exitCode: 0 };
+  if (r.status === 'unavailable') return { stderr: `[${BRAND.cli}] pre-commit secret scan could not run (${r.error}); not committing unscanned\n`, exitCode: 1 };
+  const lines = r.findings.map((f) => `  ${f.rule} in ${f.file}`).join('\n');
+  return { stderr: `[${BRAND.cli}] gitleaks found a secret in this commit:\n${lines}\nRemove it (and rotate it if real) before committing.\n`, exitCode: 1 };
 }
 
 function sessionEnd(input: HookInput): HookOutput {
@@ -287,6 +310,7 @@ export async function runHook(event: string, input: HookInput, env: NodeJS.Proce
     if (event === 'stop') return { exitCode: 0 };
     if (event === 'session-end') return sessionEnd(input);
     if (event === 'session-start') return { exitCode: 0 };
+    if (event === 'pre-commit') return preCommit();
     return { stderr: `unknown hook event ${event}\n`, exitCode: 2 };
   } catch (e) {
     // Fail closed with a reason Claude can show.
