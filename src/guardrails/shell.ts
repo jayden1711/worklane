@@ -264,7 +264,7 @@ function stripWrappers(argv: string[], assignments: Record<string, string> = {},
     }
     if (base === 'timeout') {
       a = a.slice(1);
-      while (a.length && a[0]!.startsWith('-')) a = a.slice(a[0] === '-s' || a[0] === '-k' ? 2 : 1);
+      while (a.length && a[0]!.startsWith('-')) a = a.slice(/^(-[sk]|--signal|--kill-after)$/.test(a[0]!) ? 2 : 1);
       a = a.slice(1); // duration
       continue;
     }
@@ -273,7 +273,7 @@ function stripWrappers(argv: string[], assignments: Record<string, string> = {},
       while (a.length && a[0]!.startsWith('-')) {
         const opt = a[0]!;
         a = a.slice(1);
-        if (['-I', '-n', '-P', '-L', '-s', '-d', '-E', '-a'].includes(opt)) a = a.slice(1);
+        if (/^(-[InPLsdEa]|--(max-args|max-procs|max-chars|delimiter|arg-file|process-slot-var))$/.test(opt)) a = a.slice(1);
       }
       continue;
     }
@@ -293,9 +293,6 @@ export function unwrap(argv: string[]): Pick<SimpleCommand, 'argv' | 'assignment
   const envOptions: string[] = [];
   return { argv: stripWrappers(argv, assignments, envOptions), assignments, envOptions };
 }
-
-/** Whether a program is a wrapper splitCommands removes (sudo, env, nice, timeout, xargs, ...). */
-export const isWrapper = (name: string) => WRAPPERS.has(name) || ['timeout', 'xargs', 'npx', 'pnpx', 'bunx'].includes(name);
 
 export function basename(p: string): string {
   const parts = p.split(/[\\/]/);

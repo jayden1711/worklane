@@ -5,7 +5,7 @@
 // Like the rest of the shell matcher this is best effort (shell.ts): the runner also drops the variable from every
 // agent's environment (runner.ts agentEnv), and the hook itself refuses the hatch inside an agent run.
 import { resolve as resolvePath } from 'node:path';
-import { basename, isWrapper, splitCommands, unwrap, type SimpleCommand } from './shell.js';
+import { basename, splitCommands, unwrap, type SimpleCommand } from './shell.js';
 
 /** The hatch: set to 1 in a person's own shell, for one push. */
 export const PUSH_GATE_HATCH_ENV = 'PUSH_GATE_BOOTSTRAP';
@@ -116,21 +116,94 @@ function asGit(a: string[]): string[] {
 }
 const startsGit = (t: string) => isGit(t) || DASHED_GIT.test(basename(t));
 
-/** Programs that run the rest of their words as a command, after options of their own (setsid git push). */
-const RUNNERS = new Set(['setsid', 'stdbuf', 'strace', 'ltrace', 'chronic', 'unbuffer', 'flock', 'taskset', 'chrt', 'nsenter', 'unshare', 'caffeinate', 'fakeroot', 'firejail', 'systemd-run', 'runuser', 'ssh-agent', 'dbus-run-session']);
-const FIND_EXEC = /^-(exec|execdir|ok|okdir)$/;
-/** A word a runner's command may start with: git or one of its programs, env or another wrapper, a runner, find. */
-const runnable = (t: string) => {
-  const b = basename(t);
-  return startsGit(t) || HOOKLESS_PUSH_PROGRAM.test(b) || isWrapper(b) || RUNNERS.has(b) || b === 'find';
+/** Options by their letters (`-x`, clustered) and long names (`--name`). */
+interface Options {
+  short: string;
+  long: string[];
+}
+/**
+ * A runner's command line: `[options] [operands] command ...`. `value`: the options that take the next word as
+ * their value. `operands`: words before the command (flock's lock file, taskset's mask, chrt's priority). `none`:
+ * options with which the runner runs no command of these words (flock -c runs a command string, taskset -p).
+ * `needs`: an option without which it runs none (runuser -u).
+ */
+interface Runner {
+  value: Options;
+  operands?: number;
+  none?: Options;
+  needs?: Options;
+}
+const opts = (short: string, ...long: string[]): Options => ({ short, long });
+/** Programs that run a command from their words, after options and operands of their own (setsid git push). */
+const RUNNERS: Record<string, Runner> = {
+  setsid: { value: opts('') },
+  stdbuf: { value: opts('ioe', 'input', 'output', 'error') },
+  strace: { value: opts('abeEIoOpPsSuUX', 'output', 'trace', 'signal', 'status', 'env', 'user', 'attach', 'trace-path', 'string-limit', 'summary-sort-by', 'columns') },
+  ltrace: { value: opts('aAeEFlLnopsuwx', 'output', 'library', 'align', 'indent') },
+  chronic: { value: opts('') },
+  unbuffer: { value: opts('') },
+  flock: { value: opts('wEc', 'wait', 'timeout', 'conflict-exit-code', 'command'), operands: 1, none: opts('c', 'command') },
+  taskset: { value: opts(''), operands: 1, none: opts('p', 'pid') },
+  chrt: { value: opts('TPD', 'sched-runtime', 'sched-period', 'sched-deadline'), operands: 1, none: opts('pm', 'pid', 'max') },
+  nsenter: { value: opts('tSG', 'target', 'setuid', 'setgid') },
+  unshare: { value: opts('SGRw', 'setuid', 'setgid', 'root', 'wd', 'map-user', 'map-group', 'propagation', 'setgroups') },
+  caffeinate: { value: opts('tw') },
+  fakeroot: { value: opts('lsi', 'lib', 'faked') },
+  firejail: { value: opts('') },
+  'systemd-run': { value: opts('upEMHGs', 'unit', 'property', 'setenv', 'description', 'slice', 'uid', 'gid', 'working-directory', 'machine', 'host', 'nice', 'service-type', 'on-active', 'on-boot', 'on-startup', 'on-calendar', 'timer-property') },
+  runuser: { value: opts('ugGcsw', 'user', 'group', 'supp-group', 'command', 'shell', 'session-command', 'whitelist-environment'), none: opts('cl', 'command', 'session-command', 'login'), needs: opts('u', 'user') },
+  'ssh-agent': { value: opts('atEPO') },
+  'dbus-run-session': { value: opts('', 'config-file', 'dbus-daemon') },
 };
+
+/** Whether option word `t` names one of `which`; in a cluster, only before the first letter that takes a value. */
+function names(t: string, which: Options, value: Options): boolean {
+  if (t.startsWith('--')) return which.long.includes(t.slice(2).split('=')[0]!);
+  for (const ch of t.slice(1)) {
+    if (which.short.includes(ch)) return true;
+    if (value.short.includes(ch)) return false;
+  }
+  return false;
+}
+
+/** Whether option word `t` takes the next word as its value (a cluster: only when its last letter does). */
+function takesValue(t: string, value: Options): boolean {
+  if (t.startsWith('--')) return !t.includes('=') && value.long.includes(t.slice(2));
+  for (let j = 1; j < t.length; j++) if (value.short.includes(t[j]!)) return j === t.length - 1;
+  return false;
+}
+
+/** Where a runner's command starts in its words, or -1 when it runs none of them. */
+function runnerCommand(r: Runner, a: string[]): number {
+  let i = 1;
+  let needed = !r.needs;
+  for (; i < a.length; i++) {
+    const t = a[i]!;
+    if (t === '--') {
+      i++;
+      break;
+    }
+    if (!t.startsWith('-') || t === '-') break;
+    if (r.none && names(t, r.none, r.value)) return -1;
+    if (r.needs && names(t, r.needs, r.value)) needed = true;
+    if (takesValue(t, r.value)) i++;
+  }
+  if (!needed) return -1;
+  i += r.operands ?? 0;
+  if (a[i] === '--') i++;
+  if (r.none && a[i]?.startsWith('-') && names(a[i]!, r.none, r.value)) return -1;
+  return i < a.length ? i : -1;
+}
+
+const FIND_EXEC = /^-(exec|execdir|ok|okdir)$/;
 
 type Program = Pick<SimpleCommand, 'argv' | 'envOptions'>;
 
 /**
  * Every program a command runs, in command position: itself (its wrappers removed by the shell matcher), each
- * find -exec/-execdir/-ok command, and a runner's command (from its first word `runnable` reads). A word that is
- * only an argument (rm -rf vendor/git, grep env -i) runs nothing.
+ * find -exec/-execdir/-ok command, and a known runner's command (the first word after its options and operands).
+ * A word that is only an argument (rm -rf vendor/git, grep env -i, setsid make -C vendor/git) runs nothing, and an
+ * unknown program's words are not read.
  */
 function programsIn(c: Program, depth = 0): Program[] {
   const out = [c];
@@ -144,8 +217,8 @@ function programsIn(c: Program, depth = 0): Program[] {
       const end = a.findIndex((t, j) => j > i && (t === ';' || t === '+'));
       runs.push(a.slice(i + 1, end < 0 ? a.length : end));
     }
-  } else if (RUNNERS.has(base)) {
-    const k = a.findIndex((t, i) => i > 0 && runnable(t));
+  } else if (Object.hasOwn(RUNNERS, base)) {
+    const k = runnerCommand(RUNNERS[base]!, a);
     if (k > 0) runs.push(a.slice(k));
   }
   for (const r of runs) if (r.length) out.push(...programsIn(unwrap(r), depth + 1));
@@ -375,6 +448,8 @@ export function pushHookShellRefusal(command: string, commands: SimpleCommand[],
 const CONFIG_READ = /^(--get|--get-all|--get-regexp|--list|-l|get|list)$/;
 /** git config words that rewrite config by section or in an editor (any abbreviation git takes). */
 const CONFIG_REWRITE = /^(-[lz]*e|--e(d(i(t)?)?)?|--ren.*|--rem.*|edit|rename-section|remove-section)$/;
+
+/** git config options that only choose a file, scope, type or output format; the second list takes a value. */
 
 /** Why a `git config` with these words (after the subcommand) may change the hooks or a name git runs; or null. */
 function configRefusal(rest: string[]): string | null {

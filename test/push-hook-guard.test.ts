@@ -301,6 +301,7 @@ test("git's command list narrows only where the line removes or moves PATH or gi
       'export -n PATH; git frob',
       'env -u PATH git frob',
       'env --unset=PATH git frob',
+      'env -uPATH git frob',
       'unset GIT_EXEC_PATH; git mergetool',
       'env -u GIT_EXEC_PATH git mergetool',
       'env -i git mergetool',
@@ -309,6 +310,50 @@ test("git's command list narrows only where the line removes or moves PATH or gi
   } finally {
     process.env.PATH = path;
   }
+});
+
+test("a runner's command is the first word after the runner's own options and operands, and nothing later (#993)", () => {
+  for (const c of [
+    'GIT_TRACE=1 strace -f make -C third_party/git all',
+    'cd "$D" && flock /tmp/l rm -rf vendor/git build',
+    'setsid make -C vendor/git all',
+    'chronic rg env -i src && git push',
+    'setsid ls env -la && git push',
+    'cd "$D" && chronic apt-get install -y git curl',
+    'GIT_TRACE=1 flock /tmp/l make -C third_party/git all',
+    'flock /tmp/l grep -r env -i src && git push',
+    'strace -f npm run env -- -i && git push',
+    'taskset -c 0 make -C vendor/git all',
+    'GIT_TRACE=1 someprogram --run git frob',
+  ]) assert.equal(bash(c).decision, 'none', c);
+  for (const c of [
+    'flock /tmp/git git push --no-verify',
+    'flock /tmp/find git push --no-verify',
+    'flock -w 5 /tmp/l git push --no-verify',
+    'flock -x /tmp/l -- git push --no-verify',
+    'strace -o /tmp/git git push --no-verify',
+    'strace -f -e trace=execve git push --no-verify',
+    'taskset 0x1 git push --no-verify',
+    'taskset -c 0 git push --no-verify',
+    'chrt -f 10 git push --no-verify',
+    'nsenter -t 1 -m git push --no-verify',
+    'unshare -r git push --no-verify',
+    'systemd-run --user --unit x git push --no-verify',
+    'ssh-agent -t 60 git push --no-verify',
+    'setsid -w env -i git push',
+    'chronic -e flock /tmp/l git push --no-verify',
+    'stdbuf -o 0 /usr/lib/git-core/git-send-pack ../remote.git HEAD',
+    // Values of wrapper options, and find's -ok forms.
+    'doas -u root git push --no-verify',
+    'time -o /tmp/t git push --no-verify',
+    "env --split-string='git push --no-verify'",
+    'timeout --kill-after 5 60 git push --no-verify',
+    'timeout --signal KILL 60 git push --no-verify',
+    'xargs --max-args 1 git push --no-verify < /dev/null',
+    'xargs --delimiter x git push --no-verify < /dev/null',
+    'find . -maxdepth 0 -ok git push --no-verify \\;',
+    'find . -maxdepth 0 -okdir git push --no-verify \\;',
+  ]) assert.deepEqual([bash(c).decision, bash(c).rule], ['deny', 'push-hook-bypass'], c);
 });
 
 test('a git name read from config: an alias or a correction to push is judged as the push it runs (#993)', () => {
