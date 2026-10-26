@@ -241,6 +241,22 @@ test('a head or base that names no commit is a refusal, not a throw (#981)', () 
   }
 });
 
+test('a head or base that is a tree, a blob or a tag of a tree is refused, never read as a range with no names (#966)', () => {
+  const r = repo();
+  const head = r.commit({ 'data/x': 'b\n' });
+  const tree = git(r.work, 'rev-parse', `${head}^{tree}`);
+  const blob = git(r.work, 'rev-parse', `${head}:data/x`);
+  git(r.work, 'tag', 'a-tree', tree);
+  const res = checkedPush({ cwd: r.work, remote: 'origin', base: r.baseSha, head: tree, ref: 'refs/heads/task', limits: limits({ refuse_paths: ['data/**'] }), guard: guard(), force: true });
+  assert.ok(!res.ok && 'refused' in res, JSON.stringify(res));
+  assert.equal(git(r.remote, 'for-each-ref', 'refs/heads/task'), '', 'nothing pushed');
+  for (const [base, h] of [[r.baseSha, tree], [r.baseSha, blob], [r.baseSha, 'a-tree'], [tree, head], [blob, head]] as const) {
+    const p = pushProblems(r.work, base, h, limits());
+    assert.equal(p.length, 1, `${base}..${h}: ${p.join('\n')}`);
+    assert.match(p[0]!, /push limits couldn't read the range .*nothing is pushed/);
+  }
+});
+
 test('a head branch deleted between the push check\'s git calls changes nothing: the range is read by commit id (#981)', unix, () => {
   const r = repo();
   r.commit({ 'data/x': 'b\n' });

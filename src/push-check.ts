@@ -44,12 +44,17 @@ function whyFailed(e: unknown): string {
 const unreadRefusal = (e: unknown) =>
   `the push limits couldn't read the range (${whyFailed(e)}): nothing is judged clean, so nothing is pushed. If something changed the repository while they ran, the next try reads it again`;
 
+declare const COMMIT: unique symbol;
+/** A commit's id as commitIds read it: judge takes only these, never a name or a tree's id (#966). */
+type CommitId = string & { readonly [COMMIT]: true };
+
 /**
  * The range's ends as commit ids, read once (#981): every later call reads these, never the names, so a branch moved
- * or deleted between the check's git calls, or before the push, changes nothing. Throws as git does on a bad name.
+ * or deleted between the check's git calls, or before the push, changes nothing. Throws as git does on a bad name,
+ * and on an end that is no commit (a tree, a blob, a tag of either), whose range would list no names (#966).
  */
-const commitIds = (cwd: string, base: string, head: string): [string, string] =>
-  [base, head].map((r) => git(cwd, ['rev-parse', '--verify', '--end-of-options', `${r}^{commit}`]).trim()) as [string, string];
+const commitIds = (cwd: string, base: string, head: string): [CommitId, CommitId] =>
+  [base, head].map((r) => git(cwd, ['rev-parse', '--verify', '--end-of-options', `${r}^{commit}`]).trim()) as [CommitId, CommitId];
 
 /**
  * The range's problems and the head commit they were judged at. Never throws (#981): a git call that fails, as one
@@ -69,7 +74,7 @@ export function pushProblems(cwd: string, base: string, head: string, limits: Pu
   return checkRange(cwd, base, head, limits).problems;
 }
 
-function judge(cwd: string, base: string, head: string, limits: PushLimits): string[] {
+function judge(cwd: string, base: CommitId, head: CommitId, limits: PushLimits): string[] {
   const range = `${base}..${head}`;
   const problems: string[] = [];
   // Paths touched by any commit in the range, not just the net diff, each as itself (#724): a name git would quote
