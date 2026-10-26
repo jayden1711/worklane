@@ -245,7 +245,40 @@ test('git config naming a remote\'s proxy, URL or push URL, or a git:// proxy co
   assert.equal(pushUrl(env), 'https://github.invalid/o/r');
   assert.equal(gitReads(env, 'remote.origin.proxy').value, null);
   for (const k of ['remote.origin.proxy', 'REMOTE.origin.PROXY', 'remote.my.fork.proxyAuthMethod', 'remote.origin.url', 'remote.origin.pushurl', 'remote.origin.pushURL', 'core.gitProxy', 'CORE.GITPROXY']) assert.ok(isRedirectGitKey(k), k);
-  for (const k of ['remote.origin.fetch', 'remote.origin.tagOpt', 'remote.pushDefault', 'core.sshCommand', 'core.autocrlf']) assert.equal(isRedirectGitKey(k), false, k);
+  for (const k of ['remote.origin.fetch', 'remote.origin.tagOpt', 'push.default', 'branch.main.merge', 'core.sshCommand', 'core.autocrlf']) assert.equal(isRedirectGitKey(k), false, k);
+});
+
+test('a url.<base>.insteadOf or pushInsteadOf with an empty base is stripped: it prefixes every URL git uses (#1084)', () => {
+  const { target } = redirectingConfig();
+  assert.equal(spawnSync('git', ['remote', 'add', 'origin', 'https://github.invalid/o/r'], { cwd: target, env: bareGitEnv({}) }).status, 0);
+  const url = (env: Record<string, string | undefined>, push: boolean) => spawnSync('git', ['remote', 'get-url', ...(push ? ['--push'] : []), 'origin'], { cwd: target, encoding: 'utf8', env: bareGitEnv(env) }).stdout.trim();
+  for (const [k, push] of [['url..insteadOf', false], ['url..pushInsteadOf', true]] as const) {
+    const raw = { GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: k, GIT_CONFIG_VALUE_0: 'https://github.invalid/' };
+    assert.equal(url(raw, push), 'o/r', `${k}: git rewrites origin to a local path (the setting this test guards)`);
+    assert.equal(url(outboundEnv({ ...raw }, null), push), 'https://github.invalid/o/r', `${k}: the empty-base rewrite applied`);
+  }
+  for (const k of ['url..insteadOf', 'URL..PUSHINSTEADOF']) assert.ok(isRedirectGitKey(k), k);
+});
+
+test('remote.pushDefault, branch.<b>.pushRemote and branch.<b>.remote are stripped whatever they name: a name git has no remote for is a path (#1084)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'git-push-target-'));
+  const git = (cwd: string, env: Record<string, string | undefined>, ...a: string[]) => spawnSync('git', a, { cwd, encoding: 'utf8', env: bareGitEnv(env) });
+  for (const r of ['good.git', 'evil.git']) assert.equal(git(dir, {}, 'init', '-q', '--bare', r).status, 0);
+  assert.equal(git(dir, {}, 'init', '-q', '-b', 'main', 'work').status, 0);
+  const work = join(dir, 'work');
+  assert.equal(git(work, {}, '-c', 'user.name=t', '-c', 'user.email=t@example.com', 'commit', '-q', '--allow-empty', '-m', 't').status, 0);
+  assert.equal(git(work, {}, 'remote', 'add', 'origin', '../good.git').status, 0);
+  const pushedTo = (env: Record<string, string | undefined>) => {
+    const r = git(work, env, 'push', '--dry-run', '--porcelain');
+    return /^To (.+)$/m.exec(`${r.stdout}${r.stderr}`)?.[1] ?? `(none: ${r.stderr.trim()})`;
+  };
+  for (const k of ['remote.pushDefault', 'branch.main.pushRemote', 'branch.main.remote']) {
+    // branch.<b>.remote picks a push's remote under push.default=current; the engine never sets push.default.
+    const raw = { GIT_CONFIG_COUNT: '2', GIT_CONFIG_KEY_0: k, GIT_CONFIG_VALUE_0: '../evil.git', GIT_CONFIG_KEY_1: 'push.default', GIT_CONFIG_VALUE_1: 'current' };
+    assert.equal(pushedTo(raw), '../evil.git', `${k}: git pushes to the named path (the setting this test guards)`);
+    assert.equal(pushedTo(outboundEnv({ ...raw }, null)), '../good.git', `${k}: a push that names no remote went elsewhere`);
+  }
+  for (const k of ['remote.pushDefault', 'REMOTE.PUSHDEFAULT', 'branch.main.pushRemote', 'branch.feature/x.remote', 'BRANCH.main.REMOTE']) assert.ok(isRedirectGitKey(k), k);
 });
 
 test('a custom CA: a root-owned file of PEM certificates sets exactly NODE_EXTRA_CA_CERTS, SSL_CERT_FILE and GIT_SSL_CAINFO', { skip: posixOnly }, () => {

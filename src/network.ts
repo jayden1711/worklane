@@ -70,11 +70,12 @@ export const isRedirectVar = (name: string): boolean => REDIRECTS.some((r) => r.
 
 /**
  * git config keys that change where git connects or what it trusts: http.[<url>.]ssl*, proxy*, schannel*, pinnedPubkey,
- * curloptResolve; url.<base>.insteadOf and pushInsteadOf (another host for the same remote); remote.<name>.proxy*, url
- * and pushurl; core.gitProxy (GIT_PROXY_COMMAND's key). And any include.* or includeIf.* key: include.path and
- * includeIf.<cond>.path read another file, whose keys this can't see (#1084).
+ * curloptResolve; url.<base>.insteadOf and pushInsteadOf (another host for the same remote; an empty base prefixes every
+ * URL); remote.<name>.proxy*, url and pushurl; core.gitProxy (GIT_PROXY_COMMAND's key); remote.pushDefault,
+ * branch.<b>.pushRemote and branch.<b>.remote, whatever they name (a name no remote has is a path to git). And any
+ * include.* or includeIf.* key: include.path and includeIf.<cond>.path read another file, whose keys this can't see (#1084).
  */
-const GIT_KEY = /^(?:http\.(?:.+\.)?(?:ssl[a-z]*|proxy[a-z]*|schannel[a-z]*|pinnedpubkey|curloptresolve)|url\..+\.(?:insteadof|pushinsteadof)|remote\..+\.(?:proxy[a-z]*|url|pushurl)|core\.gitproxy|include(?:if)?\..+)$/i;
+const GIT_KEY = /^(?:http\.(?:.+\.)?(?:ssl[a-z]*|proxy[a-z]*|schannel[a-z]*|pinnedpubkey|curloptresolve)|url\..*\.(?:insteadof|pushinsteadof)|remote\..+\.(?:proxy[a-z]*|url|pushurl)|remote\.pushdefault|branch\..+\.(?:pushremote|remote)|core\.gitproxy|include(?:if)?\..+)$/i;
 export const isRedirectGitKey = (key: string): boolean => GIT_KEY.test(key.trim());
 
 /**
