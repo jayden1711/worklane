@@ -4,9 +4,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { chmodSync, cpSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, cpSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { BRAND } from '../../src/brand.js';
 import { runHook } from '../../src/hook.js';
 import { childEnv } from '../../src/os/index.js';
@@ -30,8 +30,11 @@ const head = (d: string) => git(d, 'rev-parse', 'HEAD').trim();
 
 const agentEnv = () => ({ HOME: mkdtempSync(join(tmpdir(), 'home-')), [`${BRAND.envPrefix}_PROJECT_STATE_DIR`]: mkdtempSync(join(tmpdir(), 'state-')), [`${BRAND.envPrefix}_AGENT`]: '1' });
 
-/** A checkout with the project's config and a tracked config.js; `before` is a pre-commit hook it had before install. */
-function checkout(before?: string): string {
+/**
+ * A checkout with the project's config and a tracked config.js; `before` is a pre-commit hook it had before install,
+ * `env` the environment install runs in.
+ */
+function checkout(before?: string, env: NodeJS.ProcessEnv = childEnv()): string {
   const d = join(mkdtempSync(join(tmpdir(), 'index-scan-')), 'w');
   mkdirSync(d, { recursive: true });
   cpSync(join(repoRoot, 'examples', 'basic', '.worklane'), join(d, BRAND.configDir), { recursive: true });
@@ -46,7 +49,7 @@ function checkout(before?: string): string {
     writeFileSync(join(d, '.git', 'hooks', 'pre-commit'), before);
     chmodSync(join(d, '.git', 'hooks', 'pre-commit'), 0o755);
   }
-  const r = spawnSync(process.execPath, [cli, 'install', '--root', d, '--git-hooks-only'], { encoding: 'utf8', env: childEnv() });
+  const r = spawnSync(process.execPath, [cli, 'install', '--root', d, '--git-hooks-only'], { encoding: 'utf8', env });
   assert.equal(r.status, 0, r.stderr);
   return d;
 }
@@ -121,7 +124,7 @@ test('an existing secret already in HEAD is not refused again when an unrelated 
   assert.equal(r.status, 0, r.stderr);
 });
 
-test('each way a line could skip the pre-commit hook is refused by the tool guard', { skip }, async () => {
+test('the skip forms the tool guard models are refused: the skip flags, hooks-path config, includes and hook-file changes', { skip }, async () => {
   const d = checkout();
   for (const command of [
     'git commit -n -m x',
@@ -145,7 +148,11 @@ test('each way a line could skip the pre-commit hook is refused by the tool guar
     'git config core.hooksPath /dev/null',
     'git config --worktree core.hooksPath /tmp/h',
     'git config --local core.hooksPath /tmp/h',
+    'git config include.path /tmp/other',
+    'git config --global includeIf.onbranch:main.path /tmp/other',
     'echo exit 0 > .git/hooks/pre-commit',
+    'chmod -x .git/hooks/pre-commit',
+    'chmod 644 .git/hooks/pre-commit',
     'printf x >> .git/hooks/pre-commit.before-' + BRAND.cli,
   ]) assert.equal(await decide(d, 'Bash', { command }), 'deny', command);
   for (const file_path of [join(d, '.git', 'hooks', 'pre-commit'), join(d, '.git', 'config')]) {
@@ -155,4 +162,79 @@ test('each way a line could skip the pre-commit hook is refused by the tool guar
   for (const command of ['git commit -m x', 'git commit --verify -m x', 'git commit -m "use --no-verify never"', 'git commit -s -m x']) {
     assert.notEqual(await decide(d, 'Bash', { command }), 'deny', command);
   }
+});
+
+test('a commit or push in a command string a runner or shell runs is judged as a command line, and refused when unread', { skip }, async () => {
+  const d = checkout();
+  for (const command of [
+    "setsid bash -c 'git commit -q -n -m x'",
+    "flock /tmp/l -c 'git commit -q --no-verify -m x'",
+    "flock -w 5 /tmp/l --command 'git commit -n -m x'",
+    "find . -maxdepth 0 -exec sh -c 'git commit -n -m x' \\;",
+    "runuser -u nobody -- bash -c 'git commit -n -m x'",
+    "nice -n 5 setsid sh -c 'git commit -n -m x'",
+    'setsid bash -c "$X"',
+    "watch -n1 'git commit -n -m x'",
+    "su -c 'git commit -n -m x'",
+    "git rebase -x 'git commit --amend -n --no-edit' HEAD~1",
+    "setsid bash -c 'git push --no-verify'",
+  ]) assert.equal(await decide(d, 'Bash', { command }), 'deny', command);
+  // WHY: the controls: a runner's ordinary command, and git named only in a message, stay allowed.
+  for (const command of [
+    'setsid true',
+    "flock /tmp/l -c 'npm test'",
+    "setsid bash -c 'git status'",
+    "find . -name '*.ts' -exec sh -c 'wc -l \"$1\"' _ {} \\;",
+    'git commit -m "fix: git commit -n handling"',
+    "gh pr create --title t --body 'never run git commit -n'",
+  ]) assert.notEqual(await decide(d, 'Bash', { command }), 'deny', command);
+});
+
+test('a commit git would make without the engine\'s pre-commit hook is refused: an include that moves the hooks, or a hook not executable', { skip }, async () => {
+  const d = checkout();
+  writeFileSync(join(d, 'ok.js'), 'export const y = 2;\n');
+  git(d, 'add', 'ok.js');
+  assert.notEqual(await decide(d, 'Bash', { command: 'git commit -m x' }), 'deny', 'control: the engine hook is the one git runs');
+  const included = join(mkdtempSync(join(tmpdir(), 'include-')), 'hooks.inc');
+  writeFileSync(included, `[core]\n\thooksPath = ${mkdtempSync(join(tmpdir(), 'no-hooks-'))}\n`);
+  for (const key of ['include.path', 'includeIf.onbranch:main.path']) {
+    git(d, 'config', key, included);
+    assert.equal(await decide(d, 'Bash', { command: 'git commit -m x' }), 'deny', key);
+    git(d, 'config', '--unset', key);
+  }
+  const hook = join(d, '.git', 'hooks', 'pre-commit');
+  chmodSync(hook, 0o644);
+  assert.equal(await decide(d, 'Bash', { command: 'git commit -m x' }), 'deny', 'a hook git would skip');
+  chmodSync(hook, 0o755);
+  assert.notEqual(await decide(d, 'Bash', { command: 'git commit -m x' }), 'deny', 'control: executable again');
+});
+
+test('the hook fails the commit when its scan can\'t run, when the hook it chains fails, and outside a checkout', { skip }, () => {
+  // A scan that can't run: no gitleaks on the commit's PATH nor in the engine's tools dir.
+  const prefix = mkdtempSync(join(tmpdir(), 'prefix-'));
+  const d = checkout(undefined, { ...childEnv(), [`${BRAND.envPrefix}_PREFIX`]: prefix });
+  writeFileSync(join(d, 'ok.js'), 'export const y = 2;\n');
+  git(d, 'add', 'ok.js');
+  const bin = mkdtempSync(join(tmpdir(), 'bin-'));
+  const gitBin = execFileSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).trim();
+  symlinkSync(gitBin, join(bin, 'git'));
+  const was = head(d);
+  const r = spawnSync(gitBin, ['-C', d, 'commit', '-q', '-m', 'unscanned'], { encoding: 'utf8', env: { ...process.env, ...agentEnv(), PATH: bin, [`${BRAND.envPrefix}_PREFIX`]: prefix } });
+  assert.notEqual(r.status, 0, 'a commit whose scan could not run is refused');
+  assert.match(r.stderr, /could not run/);
+  assert.equal(head(d), was, 'nothing was committed');
+
+  // A chained hook that fails fails the commit, though the scan would pass.
+  const c = checkout('#!/bin/sh\nexit 3\n');
+  writeFileSync(join(c, 'ok.js'), 'export const y = 2;\n');
+  git(c, 'add', 'ok.js');
+  const before = head(c);
+  assert.notEqual(commit(c, '-m', 'chained fails').status, 0, 'the chained hook\'s failure fails the commit');
+  assert.equal(head(c), before, 'nothing was committed');
+
+  // No checkout where the hook runs: refused, never passed.
+  const outside = mkdtempSync(join(tmpdir(), 'no-checkout-'));
+  const h = spawnSync(process.execPath, [join(repoRoot, 'dist', 'src', 'hook-main.js'), 'pre-commit'], { cwd: outside, input: '', encoding: 'utf8', env: { ...process.env, GIT_CEILING_DIRECTORIES: dirname(outside) } });
+  assert.equal(h.status, 1, h.stderr);
+  assert.match(h.stderr, /no checkout found/);
 });
