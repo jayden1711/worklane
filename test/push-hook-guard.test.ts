@@ -356,6 +356,30 @@ test("a runner's command is the first word after the runner's own options and op
   ]) assert.deepEqual([bash(c).decision, bash(c).rule], ['deny', 'push-hook-bypass'], c);
 });
 
+test('git config reads an alias, include or help.autocorrect; only a write is refused (#993)', () => {
+  for (const c of [
+    'git config alias.st',
+    'git config help.autocorrect',
+    'git config --global alias.lg',
+    'git config include.path',
+    'git config core.hooksPath',
+    'git config --file .gitmodules submodule.x.path',
+    'git config --type bool help.autocorrect',
+  ]) assert.equal(bash(c).decision, 'none', c);
+  for (const c of [
+    'git config alias.st status',
+    'git config --add alias.st status',
+    'git config --replace-all alias.st status',
+    'git config --unset alias.st',
+    'git config --unset-all include.path',
+    'git config unset alias.st',
+    'git config set help.autocorrect 1',
+    'git config --file /tmp/cfg alias.p push',
+    'git config --type bool help.autocorrect true',
+    'git config --unknown-option alias.p',
+  ]) assert.deepEqual([bash(c).decision, bash(c).rule], ['deny', 'push-hook-bypass'], c);
+});
+
 test('a git name read from config: an alias or a correction to push is judged as the push it runs (#993)', () => {
   const { dir } = exampleProject();
   const git = (...a: string[]) => execFileSync('git', a, { cwd: dir, stdio: 'ignore' });

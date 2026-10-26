@@ -450,12 +450,26 @@ const CONFIG_READ = /^(--get|--get-all|--get-regexp|--list|-l|get|list)$/;
 const CONFIG_REWRITE = /^(-[lz]*e|--e(d(i(t)?)?)?|--ren.*|--rem.*|edit|rename-section|remove-section)$/;
 
 /** git config options that only choose a file, scope, type or output format; the second list takes a value. */
+const CONFIG_QUIET = /^(--global|--system|--local|--worktree|--includes|--no-includes|--bool|--int|--bool-or-int|--path|--expiry-date|--no-type|--null|-z|--show-origin|--show-scope|--(file|blob|type|default)=.*)$/;
+const CONFIG_QUIET_VALUE = /^(-f|--file|--blob|--type|--default)$/;
+
+/** Whether git config's words may write: an option it doesn't know as quiet, or other than one key (a value). */
+function configWrites(rest: string[]): boolean {
+  let operands = 0;
+  for (let i = 0; i < rest.length; i++) {
+    const t = rest[i]!;
+    if (!t.startsWith('-')) operands++;
+    else if (CONFIG_QUIET_VALUE.test(t)) i++;
+    else if (!CONFIG_QUIET.test(t)) return true;
+  }
+  return operands !== 1;
+}
 
 /** Why a `git config` with these words (after the subcommand) may change the hooks or a name git runs; or null. */
 function configRefusal(rest: string[]): string | null {
   const rewrite = rest.find((t) => CONFIG_REWRITE.test(t));
   if (rewrite) return `git config ${rewrite} can rewrite core.hooksPath, an include or an alias`;
-  if (rest.some((t) => CONFIG_READ.test(t))) return null;
+  if (rest.some((t) => CONFIG_READ.test(t)) || !configWrites(rest)) return null;
   if (rest.some((t) => HOOKS_PATH_KEY.test(t))) return 'git config core.hooksPath points git at other hooks';
   const key = rest.find((t) => NAME_OR_INCLUDE_KEY.test(t));
   return key ? `git config ${key} can make git read other config or run another command` : null;
