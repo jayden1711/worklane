@@ -20,7 +20,7 @@ import { hostname } from 'node:os';
 import { checkGuardrails } from './guardrails/check.js';
 import { liveContext, refreshFingerprints } from './guardrails/context.js';
 import { evaluate } from './guardrails/engine.js';
-import { globToRegExp } from './guardrails/glob.js';
+import { globRegExp } from './guardrails/glob.js';
 import { findProjectRoot, hookProcess, readStdin } from './hook.js';
 import { agentSettingsPath, guardrailSettings } from './agent-settings.js';
 import { install, installCheckoutPrePush, installGitHook, invokedEngine, migrateLegacyHooks } from './install.js';
@@ -313,7 +313,7 @@ function changedTestFiles(root: string, globs: string[], branch: string): string
   const base = execFileSync('git', ['merge-base', `origin/${branch}`, 'HEAD'], { cwd: root, encoding: 'utf8' }).trim();
   // A renamed test file is an added one, and is checked (with renames on it was R, and skipped); a valid UTF-8 path as itself (#683).
   const files = changedNames(root, ['--diff-filter=AM', base]);
-  const res = globs.map((g) => globToRegExp(g));
+  const res = globs.map((g) => globRegExp(g, 'deny'));
   return files.filter((f) => res.some((re) => re.test(f)) && existsSync(join(root, f)));
 }
 

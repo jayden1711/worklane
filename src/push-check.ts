@@ -7,7 +7,7 @@
 // so a doomed change is caught before a long test run.
 import { execFileSync, spawnSync } from './os/child-process.js';
 import { blobsByName, rangeNames, sizeFiles } from './coordinator/change-files.js';
-import { globToRegExp } from './guardrails/glob.js';
+import { globRegExp } from './guardrails/glob.js';
 import { shownPath } from './path-text.js';
 import { lintSkill, SKILL_SECTIONS } from './skill-lint.js';
 import { defaultBranchRefusal, type PushGuard } from './push-guard.js';
@@ -64,7 +64,7 @@ const spellings = (s: string): string[] => [...new Set([s, s.normalize('NFC'), s
 
 /** A test of a path against globs, true when any spelling of the path matches any spelling of a glob. */
 function matcher(globs: string[]): (path: string) => boolean {
-  const res = globs.flatMap((g) => spellings(g).map((s) => globToRegExp(s)));
+  const res = globs.flatMap((g) => spellings(g).map((s) => globRegExp(s, 'deny')));
   return (path) => spellings(path).some((p) => res.some((re) => re.test(p)));
 }
 

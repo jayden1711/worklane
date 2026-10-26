@@ -3,7 +3,7 @@
 // to start, watch or wait for a job. The change is the worktree's diff, which must stay inside the study's editable
 // paths: anything else (the eval, the harness's config, a symlink, a mode change) is refused and logged, never run.
 import { redactString } from '../events/redact.js';
-import { globToRegExp } from '../guardrails/glob.js';
+import { globRegExp } from '../guardrails/glob.js';
 import { shownPath } from '../path-text.js';
 import { configRefusal, type Study } from './study.js';
 
@@ -84,7 +84,7 @@ const plainChange = (o: string, n: string) => (o === '000000' ? n === '100644' :
  */
 export function checkChange(changes: readonly Change[], study: Study): { ok: true; files: string[]; lockfile: boolean } | { ok: false; why: string } {
   if (!changes.length) return { ok: false, why: 'no change' };
-  const editable = study.editable.map(globToRegExp);
+  const editable = study.editable.map((g) => globRegExp(g, 'allow'));
   const evalFiles = [...study.eval.files, ...study.eval.predict_files];
   for (const c of changes) {
     if (evalFiles.includes(c.path)) return { ok: false, why: `changed the eval file ${shownPath(c.path)}` };
