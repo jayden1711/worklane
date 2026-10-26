@@ -5,7 +5,7 @@
 import { lstatSync, opendirSync, realpathSync, statSync } from 'node:fs';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { performance } from 'node:perf_hooks';
-import { globToRegExp } from './glob.js';
+import { globRegExp, type GlobStyle } from './glob.js';
 import type { SimpleCommand } from './shell.js';
 
 /**
@@ -213,7 +213,7 @@ export interface SecretContext {
 
 /** A glob's segments, each as a pattern for one name; null for `**` (any number of them). */
 type Segs = (RegExp | null)[];
-const segsOf = (segs: string[]): Segs => segs.map((s) => (s.includes('**') ? null : globToRegExp(s)));
+const segsOf = (segs: string[], style: GlobStyle): Segs => segs.map((s) => (s.includes('**') ? null : globRegExp(s, style)));
 
 /** Could a path strictly under `rel` (segments) match the glob segments `pat`? */
 function reachesUnder(pat: Segs, rel: string[]): boolean {
@@ -233,10 +233,10 @@ interface Filter {
 /** A filter glob; `shell`: as the shell expands a word (no `**`, and a wildcard never starts a dot-name). */
 function filterOf(glob: string, shell: boolean): Filter {
   const parts = glob.split('/').filter(Boolean);
-  if (!shell) return { re: globToRegExp(glob), segs: segsOf(parts) };
+  if (!shell) return { re: globRegExp(glob, 'deny'), segs: segsOf(parts, 'deny') };
   const flat = parts.map((s) => s.replace(/\*\*+/g, '*'));
-  const res = flat.map((s) => `${/^[*?]/.test(s) ? '(?!\\.)' : ''}${globToRegExp(s).source.slice(1, -1)}`);
-  return { re: new RegExp(`^${res.join('/')}$`, 's'), segs: segsOf(flat) };
+  const res = flat.map((s) => `${/^[*?]/.test(s) ? '(?!\\.)' : ''}${globRegExp(s, 'deny').source.slice(1, -1)}`);
+  return { re: new RegExp(`^${res.join('/')}$`, 's'), segs: segsOf(flat, 'deny') };
 }
 
 const posixRel = (from: string, to: string) => relative(from, to).split('\\').join('/');
@@ -324,7 +324,8 @@ interface Glob {
   fromRoot: boolean;
 }
 
-function parseGlob(g: string, ctx: SecretContext): Glob | null {
+/** `style`: a secret glob is `deny`, an exception (a leading "!") `allow`. */
+function parseGlob(g: string, ctx: SecretContext, style: GlobStyle): Glob | null {
   const home = g.startsWith('~/');
   const base = home ? ctx.home : isAbsolute(g) ? '/' : ctx.projectRoot;
   if (base === undefined) return null;
@@ -332,7 +333,7 @@ function parseGlob(g: string, ctx: SecretContext): Glob | null {
   if (rest.endsWith('/')) rest += '**';
   const s = split(rest);
   const anywhere = !home && !s.literal.length && (s.rest[0] ?? '').includes('**');
-  return { base, homeOnly: home, re: globToRegExp(rest), at: anywhere ? '/' : resolve(base, ...s.literal), rest: segsOf(s.rest), literalStart: s.literal.length > 0, fromRoot: !home && isAbsolute(g) };
+  return { base, homeOnly: home, re: globRegExp(rest, style), at: anywhere ? '/' : resolve(base, ...s.literal), rest: segsOf(s.rest, style), literalStart: s.literal.length > 0, fromRoot: !home && isAbsolute(g) };
 }
 
 /**
@@ -355,12 +356,12 @@ export class Secrets {
   constructor(globs: string[], private readonly ctx: SecretContext, limits: { ms?: number; now?: () => number } = {}) {
     this.now = limits.now ?? (() => performance.now());
     this.deadline = this.now() + (limits.ms ?? WALK_MS);
-    const parse = (g: string) => {
-      const p = parseGlob(g, ctx);
+    const parse = (g: string, style: GlobStyle) => {
+      const p = parseGlob(g, ctx, style);
       return p ? [p] : [];
     };
-    this.pos = globs.filter((g) => !g.startsWith('!')).flatMap(parse);
-    this.neg = globs.filter((g) => g.startsWith('!')).flatMap((g) => parse(g.slice(1)));
+    this.pos = globs.filter((g) => !g.startsWith('!')).flatMap((g) => parse(g, 'deny'));
+    this.neg = globs.filter((g) => g.startsWith('!')).flatMap((g) => parse(g.slice(1), 'allow'));
   }
 
   /** `written`: the path as the call wrote it (Secrets.written), which an absolute glob is tested on instead of `abs`. */

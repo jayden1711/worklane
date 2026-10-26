@@ -4,7 +4,7 @@
 import { existsSync, readdirSync, realpathSync, statSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { BRAND } from '../brand.js';
-import { globToRegExp } from '../guardrails/glob.js';
+import { globRegExp } from '../guardrails/glob.js';
 
 export const CHAT_ROLE = 'channel-chat';
 /** The env the chat lane's settings pin for its hooks: the checkout, the only place it may read. */
@@ -57,7 +57,7 @@ function globPatterns(glob: string): RegExp[] | null {
   if (/[[\]!]/.test(glob)) return null;
   const m = glob.match(/^([^{}]*)\{([^{}]*)\}([^{}]*)$/);
   const alts = m ? m[2]!.split(',').map((a) => `${m[1]}${a}${m[3]}`) : /[{}]/.test(glob) ? null : [glob];
-  return alts ? alts.map((g) => globToRegExp(g.includes('/') ? g : `**/${g}`)) : null;
+  return alts ? alts.map((g) => globRegExp(g.includes('/') ? g : `**/${g}`, 'deny')) : null;
 }
 
 /** Names a secret file could have, for telling whether a Grep glob could reach one. */

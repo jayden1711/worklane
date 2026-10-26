@@ -4,7 +4,7 @@
 import { spawnSync } from './os/child-process.js';
 import { posix } from 'node:path';
 import type { ReviewConfig } from './config/schema.js';
-import { globToRegExp } from './guardrails/glob.js';
+import { globRegExp, globToRegExp } from './guardrails/glob.js';
 import { BRAND } from './brand.js';
 import { HOOK_IMPORTS } from './hook-imports.js';
 import { escapedPath, hasControlCharacter, hasInvisibleCharacter, hasNonAsciiTopLevel, isNonUtf8Path, shownPath, shownPaths } from './path-text.js';
@@ -556,7 +556,7 @@ const ALWAYS_L3 = [SELF_MODIFICATION, HARNESS_CONFIG];
 /** What a change to this path changes, in plain words (the self-modification part it falls in, in this scope), or null. */
 export function selfModificationPart(path: string, scope?: LockScope): string | null {
   const holds = (g: string) => scope !== 'managed-app' || !engineSourceGlob(g);
-  return SELF_MODIFICATION_PARTS.find((p) => p.globs.some((g) => holds(g) && globToRegExp(g).test(path)))?.what ?? null;
+  return SELF_MODIFICATION_PARTS.find((p) => p.globs.some((g) => holds(g) && globRegExp(g, 'deny').test(path)))?.what ?? null;
 }
 
 /** Built-in categories; review.yaml `categories` adds to them or replaces one by name. */
@@ -765,7 +765,7 @@ export function moneyListLines(text: string): MoneyLine[] {
     const entry = !valid
       ? new RefusedMoneyLine(token, "it isn't a valid regex (the list failed to load before this version)", writableGlob('glob' in r ? r.glob : r.suggestion))
       : 'glob' in r
-        ? new MoneyGlob(globToRegExp(r.glob), r.glob)
+        ? new MoneyGlob(globRegExp(r.glob, 'deny'), r.glob)
         : new RefusedMoneyLine(token, r.why, r.suggestion);
     entry.before = mainHad(body, flags);
     regexes.set(key, entry);
@@ -782,10 +782,14 @@ export function moneyListLines(text: string): MoneyLine[] {
   };
   const glob = (g: string, line: string): MoneyGlob => {
     let entry = globs.get(g);
-    if (!entry) globs.set(g, (entry = new MoneyGlob(globToRegExp(g), g)));
+    if (!entry) globs.set(g, (entry = new MoneyGlob(globRegExp(g, 'deny'), g)));
     // Main read this very glob when the text held no /.../: it counted these paths too. Set for each line, not only
-    // the glob's first (round 9: `billing/** # card data` then `billing/**` lost the second line's reading).
-    if (!fragments.length && g === line) entry.before = entry;
+    // the glob's first (round 9: `billing/** # card data` then `billing/**` lost the second line's reading). What main
+    // counted is its own reading, `?` one UTF-16 unit (#966), never this version's wider one.
+    if (!fragments.length && g === line) {
+      const main = globToRegExp(g);
+      entry.before = main.source === entry.source ? entry : main;
+    }
     return entry;
   };
   /** One line's outcome. INVARIANT (round 11): every branch returns one; none skips a line. */
@@ -829,7 +833,7 @@ export function moneyListLines(text: string): MoneyLine[] {
     // covers both readings; if it isn't (`docs/x # [legacy]`, any `<glob> // note`), the line is refused, as the cut
     // can't be checked. "Covers" reads the line as a path, so a comment that itself holds `*` or `?`
     // (`billing* # card**`) can read narrower than the line as written read as a glob (a follow-up).
-    if (rest !== line && unquoted(rest) === rest && !globToRegExp(g.glob).test(line)) {
+    if (rest !== line && unquoted(rest) === rest && !globRegExp(g.glob, 'allow').test(line)) {
       if (globLineProblem(line)) return refuse(line, 'its # or // may be part of the name, and the line as written isn\'t a valid glob: quote the glob before the comment', writableGlob(`${g.glob}**`));
       return { kind: 'read', line, entries: [glob(`${g.glob}**`.replace(/\*{3,}$/, '**'), line)] };
     }
@@ -1186,12 +1190,19 @@ export function moneyListCheck(repo: string, src: ReviewConfig['money_path_sourc
   };
 }
 
+/** The categories whose paths are left out of the app code: a match there lowers a level. */
+const EXEMPTING_CATEGORIES = ['docs', 'tests', HARNESS_CONFIG] as const;
+
 export function computeLevel(input: LevelInput, cfg: ReviewConfig, extraCategories: Record<string, string[]> = {}): LevelResult {
   const own = { ...DEFAULT_CATEGORIES, ...cfg.categories, ...extraCategories };
   const locked = lockedCategories(input.scope);
   // harness-config's built-in globs always hold, beside whatever a repo adds to it (#798): never fewer.
   const defs = { ...own, ...locked, [HARNESS_CONFIG]: [...new Set([...(locked[HARNESS_CONFIG] ?? HARNESS_CONFIG_GLOBS), ...(own[HARNESS_CONFIG] ?? [])])] };
-  const res = Object.fromEntries(Object.entries(defs).map(([k, globs]) => [k, globs.map((g) => globToRegExp(g))]));
+  const res = Object.fromEntries(Object.entries(defs).map(([k, globs]) => [k, globs.map((g) => globRegExp(g, 'deny'))]));
+  // A path in docs, tests or harness-config is left out of the app code (docs and tests alone can be L0): that lowers,
+  // so it reads the globs as `allow` (#966), while membership, which raises, reads them as `deny`.
+  const exempting = new Map(EXEMPTING_CATEGORIES.map((k) => [k, ((defs as Record<string, string[]>)[k] ?? []).map((g) => globRegExp(g, 'allow'))]));
+  const exempt = (cat: (typeof EXEMPTING_CATEGORIES)[number], path: string) => exempting.get(cat)!.some((re) => re.test(path));
   const categories: Record<string, string[]> = {};
   const add = (cat: string, path: string) => (categories[cat] ??= []).push(path);
 
@@ -1241,7 +1252,7 @@ export function computeLevel(input: LevelInput, cfg: ReviewConfig, extraCategori
     ...input.moneyPaths
       .filter((re) => !(re instanceof KeptMoneyReading))
       .map((re): Protected =>
-        re instanceof RefusedMoneyLine ? { refused: re.reason, what: 'a money path' } : re instanceof MoneyGlob ? { glob: re.glob, ...(re.source === globToRegExp(re.glob).source ? {} : { own: re }), what: 'a money path' } : { re, what: 'a money path' },
+        re instanceof RefusedMoneyLine ? { refused: re.reason, what: 'a money path' } : re instanceof MoneyGlob ? { glob: re.glob, ...(re.source === globRegExp(re.glob, 'deny').source ? {} : { own: re }), what: 'a money path' } : { re, what: 'a money path' },
       ),
   ];
   // A path another odd-path category holds already (an invisible character, a top-level name outside ASCII, ...) waits
@@ -1259,8 +1270,8 @@ export function computeLevel(input: LevelInput, cfg: ReviewConfig, extraCategori
     }
   }
   const lines = input.files.reduce((n, f) => n + f.added + f.removed, 0);
-  const isDocOrTest = (p: string) => (categories.docs ?? []).includes(p) || (categories.tests ?? []).includes(p);
-  const app = input.files.filter((f) => !isDocOrTest(f.path) && !(categories['harness-config'] ?? []).includes(f.path));
+  const isDocOrTest = (p: string) => exempt('docs', p) || exempt('tests', p);
+  const app = input.files.filter((f) => !isDocOrTest(f.path) && !exempt(HARNESS_CONFIG, f.path));
   // INVARIANT (no level below main, #763 round 8): app-non-money, and so the large-change L2, reads what earlier
   // versions counted as money (moneyBefore), not this version's wider reading: a path only this version counts as
   // money gets money-path, which only raises, and stays app-non-money. Measured by the round-7 delta check: a glob line

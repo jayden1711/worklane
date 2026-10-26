@@ -19,7 +19,7 @@
 // check is green.
 import type { EventPayload, StoredEvent } from './events/types.js';
 import type { RequiredCheck } from './pr-watch.js';
-import { globToRegExp } from './guardrails/glob.js';
+import { globRegExp } from './guardrails/glob.js';
 import { shownPaths } from './path-text.js';
 
 export const FIX_FORWARD_EVENTS = ['fix_forward.started', 'fix_forward.tested', 'fix_forward.culprit', 'fix_forward.attempt', 'fix_forward.attempt_failed', 'fix_forward.finished', 'fix_forward.green'] as const;
@@ -102,7 +102,7 @@ export function candidateVerdict(outcomes: RequiredCheck[]): 'good' | 'bad' | 'p
  */
 export function revertFirstReasons(o: { files: string[]; globs: string[]; categories: Record<string, string[]> }): string[] {
   const out: string[] = [];
-  const res = o.globs.map((g) => ({ g, re: globToRegExp(g) }));
+  const res = o.globs.map((g) => ({ g, re: globRegExp(g, 'deny') }));
   const hit = o.files.filter((f) => res.some((r) => r.re.test(f)));
   if (hit.length) out.push(`touches fix_forward.revert_first_paths: ${shownPaths(hit.slice(0, 3))}`);
   for (const c of REVERT_FIRST_CATEGORIES) if (o.categories[c]?.length) out.push(`touches ${c}: ${shownPaths(o.categories[c]!.slice(0, 3))}`);

@@ -45,6 +45,9 @@ function repo() {
 
 const limits = (over: Partial<PushLimits> = {}): PushLimits => ({ ...DEFAULT_PUSH_LIMITS, ...over });
 
+/** The names git records in base..head, as its bytes read in UTF-8. */
+const rangeNamesOf = (cwd: string, base: string, head: string) => execFileSync('git', ['diff', '--name-only', '-z', base, head], { cwd, encoding: 'utf8' }).split('\0').filter(Boolean).join('\n');
+
 test('a small ordinary change passes the push limits', () => {
   const r = repo();
   const head = r.commit({ 'src/a.js': 'export const a = 1;\n' });
@@ -84,6 +87,37 @@ test('a checkpoint glob with ** matches at any depth', () => {
   const r = repo();
   const head = r.commit({ 'models/deep/m.ckpt': 'w\n' });
   assert.match(pushProblems(r.work, r.baseSha, head, limits({ refuse_paths: ['**/*.ckpt'] })).join(''), /models\/deep\/m\.ckpt/);
+});
+
+test('refuse_paths: a ? stands for one character outside the BMP, as ** does (#966)', () => {
+  const r = repo();
+  const head = r.commit({ 'keys/\u{1F511}.pem': 'k\n' });
+  for (const glob of ['keys/?.pem', 'keys/??.pem', 'keys/**']) {
+    const p = pushProblems(r.work, r.baseSha, head, limits({ refuse_paths: [glob] }));
+    assert.equal(p.length, 1, `${glob}: ${p.join('\n')}`);
+    assert.match(p[0]!, /push\.refuse_paths/);
+  }
+});
+
+test('refuse_paths: a name in NFD is refused by a glob in NFC, and the other way round (#966)', () => {
+  const nfc = 'secrets/caf\u00e9.pem';
+  const nfd = 'secrets/cafe\u0301.pem';
+  // A glob in mixed spellings matches only once it is normalised; `cafe*` matches the NFC name only in NFD.
+  const mixed = ['secrets/caf\u00e9-cafe\u0301.pem', 'secrets/caf\u00e9-caf\u00e9.pem'] as const;
+  for (const [name, glob] of [[nfd, nfc], [nfc, nfd], [nfd, 'secrets/caf?.pem'], [nfd, 'secrets/caf\u00e9*'], [nfc, 'secrets/cafe*'], [mixed[1], mixed[0]]] as const) {
+    const r = repo();
+    const head = r.commit({ [name]: 'k\n' });
+    assert.equal(rangeNamesOf(r.work, r.baseSha, head), name, 'git keeps the name as written');
+    const p = pushProblems(r.work, r.baseSha, head, limits({ refuse_paths: [glob] }));
+    assert.equal(p.length, 1, `${JSON.stringify(name)} against ${JSON.stringify(glob)}: ${p.join('\n')}`);
+    assert.match(p[0]!, /push\.refuse_paths/);
+  }
+});
+
+test('refuse_paths: a name outside the globs in every spelling still passes (#966)', () => {
+  const r = repo();
+  const head = r.commit({ 'docs/caf\u00e9.md': 'a\n', 'keys/\u{1F511}.txt': 'b\n' });
+  assert.deepEqual(pushProblems(r.work, r.baseSha, head, limits({ refuse_paths: ['secrets/**', 'keys/?.pem', 'docs/cafe\u0301.txt'] })), []);
 });
 
 test('a CI workflow change is refused with the reason (no Workflows permission), whatever the limits', () => {
@@ -227,6 +261,22 @@ test('a head or base that names no commit is a refusal, not a throw (#981)', () 
     const p = pushProblems(r.work, base, h, limits());
     assert.equal(p.length, 1, p.join('\n'));
     assert.match(p[0]!, /push limits couldn't read the range/);
+  }
+});
+
+test('a head or base that is a tree, a blob or a tag of a tree is refused, never read as a range with no names (#966)', () => {
+  const r = repo();
+  const head = r.commit({ 'data/x': 'b\n' });
+  const tree = git(r.work, 'rev-parse', `${head}^{tree}`);
+  const blob = git(r.work, 'rev-parse', `${head}:data/x`);
+  git(r.work, 'tag', 'a-tree', tree);
+  const res = checkedPush({ cwd: r.work, remote: 'origin', base: r.baseSha, head: tree, ref: 'refs/heads/task', limits: limits({ refuse_paths: ['data/**'] }), guard: guard(), force: true });
+  assert.ok(!res.ok && 'refused' in res, JSON.stringify(res));
+  assert.equal(git(r.remote, 'for-each-ref', 'refs/heads/task'), '', 'nothing pushed');
+  for (const [base, h] of [[r.baseSha, tree], [r.baseSha, blob], [r.baseSha, 'a-tree'], [tree, head], [blob, head]] as const) {
+    const p = pushProblems(r.work, base, h, limits());
+    assert.equal(p.length, 1, `${base}..${h}: ${p.join('\n')}`);
+    assert.match(p[0]!, /push limits couldn't read the range .*nothing is pushed/);
   }
 });
 
