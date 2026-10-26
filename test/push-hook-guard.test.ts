@@ -279,6 +279,38 @@ test('git, env and the hookless push programs count only where a command runs th
   ]) assert.deepEqual([bash(c).decision, bash(c).rule], ['deny', 'push-hook-bypass'], c);
 });
 
+test("git's command list narrows only where the line removes or moves PATH or git's exec path (#993)", () => {
+  const { dir } = exampleProject();
+  const ctx = { ...exampleContext(cfg, dir, true), git: liveContext(dir).git! };
+  const live = (command: string) => evaluate({ tool: 'Bash', input: { command }, cwd: dir }, cfg, ctx);
+  const bin = mkdtempSync(join(tmpdir(), 'bin-'));
+  writeFileSync(join(bin, 'git-frob'), '#!/bin/sh\n', { mode: 0o755 });
+  const path = process.env.PATH;
+  process.env.PATH = `${bin}${delimiter}${path ?? ''}`;
+  try {
+    for (const c of [
+      'unset GIT_DIR; git submodule update --init',
+      'unset FOO; git mergetool --tool-help',
+      'env -u GIT_INDEX_FILE git submodule status',
+      'unset FOO; git frob ls-files',
+      'export -n FOO; git frob pull',
+      'env -u FOO git frob',
+    ]) assert.equal(live(c).decision, 'none', c);
+    for (const c of [
+      'unset PATH; git frob',
+      'export -n PATH; git frob',
+      'env -u PATH git frob',
+      'env --unset=PATH git frob',
+      'unset GIT_EXEC_PATH; git mergetool',
+      'env -u GIT_EXEC_PATH git mergetool',
+      'env -i git mergetool',
+      'env - git frob',
+    ]) assert.equal(live(c).rule, 'push-hook-bypass', c);
+  } finally {
+    process.env.PATH = path;
+  }
+});
+
 test('a git name read from config: an alias or a correction to push is judged as the push it runs (#993)', () => {
   const { dir } = exampleProject();
   const git = (...a: string[]) => execFileSync('git', a, { cwd: dir, stdio: 'ignore' });

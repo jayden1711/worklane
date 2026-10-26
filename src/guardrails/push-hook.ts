@@ -172,11 +172,36 @@ interface Lookup {
 
 /**
  * Which of git's lists names only commands git runs as its own for a line: `others` (git-* on PATH) unless the line
- * changes PATH, `main` (git's exec path) unless it moves that, and the commands built into git always.
+ * sets or removes PATH, `main` (git's exec path) unless it sets or removes GIT_EXEC_PATH or clears the environment,
+ * and the commands built into git always.
  */
 function commandLists(commands: SimpleCommand[]): string {
-  if (commands.some((c) => unsets(c) || envOptionsOf(c).length || assigned(c).some(([n]) => /^GIT_EXEC_PATH$/i.test(n)))) return 'builtins';
-  return commands.some((c) => assigned(c).some(([n]) => /^PATH$/i.test(n))) ? 'main' : 'main,others';
+  const moved = (name: RegExp) => commands.some((c) => assigned(c).some(([n]) => name.test(n)) || removedNames(c).some((n) => n === '*' || name.test(n)));
+  if (moved(/^GIT_EXEC_PATH$/i)) return 'builtins';
+  return moved(/^PATH$/i) ? 'main' : 'main,others';
+}
+
+const ENV_CLEARS = /^(-|--ignore-environment|-[a-zA-Z0]*i[a-zA-Z0]*)$/;
+const ENV_UNSET = /^(-[a-zA-Z0]*u|--unset)$/;
+const ENV_VALUE = /^(-[a-zA-Z0]*[uCS]|--unset|--chdir|--split-string)$/;
+
+/** Names a command takes out of the environment (unset, export -n, env -u); `*` for all of it (env -i, env -). */
+function removedNames(c: SimpleCommand): string[] {
+  const out: string[] = [];
+  if (unsets(c)) out.push(...c.argv.slice(1).filter((t) => !t.startsWith('-')));
+  for (const p of programsIn(c)) {
+    for (let i = 0; i < p.envOptions.length; i++) {
+      const o = p.envOptions[i]!;
+      if (ENV_CLEARS.test(o)) out.push('*');
+      if (o.startsWith('--unset=')) out.push(o.slice('--unset='.length));
+      else if (/^-u./.test(o)) out.push(o.slice(2));
+      if (ENV_VALUE.test(o)) {
+        const value = p.envOptions[++i];
+        if (ENV_UNSET.test(o)) out.push(value ?? '*');
+      }
+    }
+  }
+  return out;
 }
 
 /** `own` for a lookup: git's own list, asked once per list; the static list where git can't answer. */
