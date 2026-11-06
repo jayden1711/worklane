@@ -1,3 +1,4 @@
+// lint-test
 // #959: a lane's sandbox settings turned each denyRead entry into a directory-shaped Read rule only (`Read(//x/**)`).
 // A denied entry may be one file (a credential, a config), which a directory rule may not match, so the Read tool
 // could read it. Every denied path becomes both forms, through the one function that writes them.
