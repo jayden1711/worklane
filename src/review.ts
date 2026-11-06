@@ -1201,7 +1201,7 @@ export function computeLevel(input: LevelInput, cfg: ReviewConfig, extraCategori
   const defs = { ...own, ...locked, [HARNESS_CONFIG]: [...new Set([...(locked[HARNESS_CONFIG] ?? HARNESS_CONFIG_GLOBS), ...(own[HARNESS_CONFIG] ?? [])])] };
   const res = Object.fromEntries(Object.entries(defs).map(([k, globs]) => [k, globs.map((g) => globRegExp(g, 'deny'))]));
   // A locked category's membership is case folded too (#953): on a case-insensitive checkout `Docs/adr/x.md` or
-  // `Decisions.md` is the record the planners read, and `.Worklane/review.yaml` the config. Raising only: a folded
+  // `Decisions.md` is the record the planners read, and the config folder in another case is the config. Raising only: a folded
   // match never lowers a level (exempting stays as written).
   const folded = Object.fromEntries(Object.keys(locked).map((k) => [k, (defs as Record<string, string[]>)[k]!.map((g) => globRegExp(g.toLowerCase(), 'deny'))]));
   const inCategory = (cat: string, path: string) => res[cat]!.some((re) => re.test(path)) || (folded[cat]?.some((re) => re.test(path.toLowerCase())) ?? false);
