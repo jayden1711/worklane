@@ -49,9 +49,10 @@ function decide(change: Record<string, string>, o: { unreachable?: boolean } = {
   g('fetch', '-q', 'origin');
   g('checkout', '-q', '-b', 'tip');
   const tip = commit({ [LIST]: 'web/billing/**\nweb/pay/**\n' });
-  // By the remote's path, not its name: the clone's remote-tracking main stays at the base, as after a last fetch
-  // made before the default branch moved.
+  // The clone's remote-tracking main stays at the base, as after a last fetch made before the default branch moved.
+  // WHY: set by hand, since git 2.56 updates it even on a push by the remote's path (the CI runner image of 2026-11-01).
   g('push', '-q', origin, `${tip}:refs/heads/main`);
+  g('update-ref', 'refs/remotes/origin/main', base);
   assert.equal(g('rev-parse', 'refs/remotes/origin/main'), base, 'fixture: the clone has not fetched the new list');
   g('checkout', '-q', '-b', 'pr', base);
   const head = commit(change);
