@@ -1,0 +1,143 @@
+# TEMPORARY: proves the self-hosted tests container on a GitHub runner; removed before review.
+name: proof (temporary)
+on:
+  pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
+permissions:
+  contents: read
+jobs:
+  proof-shard:
+    name: proof shard ${{ matrix.shard }}/4 in the tests container
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+        node:
+          - "24"
+        shard:
+          - 1
+          - 2
+          - 3
+          - 4
+    runs-on: ubuntu-24.04
+    container:
+      image: buildpack-deps:noble-scm@sha256:94ed690dd634b8b2f531eaa742fde9b1264077cd8ea695a3b960bd104ae4c481
+      options: --privileged --shm-size=2g
+      env:
+        WORKLANE_CI_CONTAINER: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 2
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - name: the pinned packages, before any of them runs
+        run: node scripts/ci/check-pins.mjs
+      - run: node node_modules/typescript/bin/tsc -p tsconfig.json
+      - name: the pinned packages again, after tsc emits
+        run: node scripts/ci/check-pins.mjs
+      - name: the self-hosted container's own setup (nothing on GitHub's runners)
+        shell: bash
+        env:
+          CHROME_VERSION: 157.0.8103.38
+          CHROME_SHA256: 8cdeb344e9b2cefe59f4aea8d1d93d5d93054c03cde217665c16fc1f62e72a66
+        run: |
+          [ "${WORKLANE_CI_CONTAINER:-}" = 1 ] || { echo "GitHub's runner: nothing to set up"; exit 0; }
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update -q
+          apt-get install -y -q --no-install-recommends sudo unzip uidmap
+          id runner > /dev/null 2>&1 || useradd -m -u 1001 -s /bin/bash runner
+          printf 'runner ALL=(ALL) NOPASSWD:ALL\n' > /etc/sudoers.d/.runner.tmp
+          chmod 0440 /etc/sudoers.d/.runner.tmp
+          visudo -cf /etc/sudoers.d/.runner.tmp
+          mv /etc/sudoers.d/.runner.tmp /etc/sudoers.d/runner
+          # The container's uids are 0 to 65536 (rootless Docker's range): nested user namespaces map from inside it.
+          for u in root runner; do
+            grep -q "^$u:" /etc/subuid || usermod --add-subuids 2000-59999 "$u"
+            grep -q "^$u:" /etc/subgid || usermod --add-subgids 2000-59999 "$u"
+          done
+          f=chrome-linux64.zip
+          curl -sSfL -o "/tmp/$f" "https://storage.googleapis.com/chrome-for-testing-public/${CHROME_VERSION}/linux64/$f"
+          echo "${CHROME_SHA256}  /tmp/$f" | sha256sum -c -
+          unzip -q "/tmp/$f" -d /opt && rm -f "/tmp/$f"
+          sed -e 's/[[:space:]]*(.*//' /opt/chrome-linux64/deb.deps | grep -v '^$' | xargs apt-get install -y -q --no-install-recommends
+          ln -sf /opt/chrome-linux64/chrome /usr/local/bin/google-chrome
+          google-chrome --version
+      - name: install gitleaks
+        shell: bash
+        env:
+          GITLEAKS_VERSION: 8.30.1
+        run: |
+          case "$RUNNER_OS" in
+            Linux)   f="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz";   sum=551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb ;;
+            macOS)   f="gitleaks_${GITLEAKS_VERSION}_darwin_arm64.tar.gz"; sum=b40ab0ae55c505963e365f271a8d3846efbc170aa17f2607f13df610a9aeb6a5 ;;
+            Windows) f="gitleaks_${GITLEAKS_VERSION}_windows_x64.zip";     sum=d29144deff3a68aa93ced33dddf84b7fdc26070add4aa0f4513094c8332afc4e ;;
+          esac
+          mkdir -p "$RUNNER_TEMP/bin" && cd "$RUNNER_TEMP/bin"
+          curl -sSfL -o "$f" "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/${f}"
+          echo "${sum}  ${f}" | sha256sum -c -
+          case "$f" in *.zip) unzip -q "$f" gitleaks.exe ;; *) tar -xzf "$f" gitleaks ;; esac
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - run: npm run typecheck
+        if: matrix.shard == 4
+      - run: npm run build
+      - name: comment policy (new comments in this PR)
+        if: matrix.shard == 4 && github.event_name == 'pull_request'
+        run: node scripts/check-comments.mjs --base HEAD^1 --head HEAD
+      - name: build the dashboard UI
+        run: npm run build:web
+      - name: bubblewrap (machine.sh), startable by another user; user namespaces for the stand-in tests
+        shell: bash
+        run: |
+          if [ "${WORKLANE_CI_CONTAINER:-}" = 1 ]; then
+            # The self-hosted runner's container: machine.sh's roots and packages. Its AppArmor half is the host's
+            # (no container can load a profile); the checks below show whether what the tests need works in here.
+            sudo install -d -o root -g root -m 0755 /srv/worklane /var/lib/worklane /etc/worklane
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends bubblewrap socat
+            sudo -n -u nobody /usr/bin/bwrap --dev-bind / / --unshare-user --unshare-pid --die-with-parent --proc /proc -- /bin/sh -c :
+            sudo -n -u runner unshare --user --map-root-user --map-auto --mount /bin/sh -c 'mount -t tmpfs none /mnt && echo "user namespace (runner): ok"'
+            exit 0
+          fi
+          sudo apt-get update -q && sudo bash scripts/setup/machine.sh
+          sudo -n -u nobody /usr/bin/bwrap --dev-bind / / --unshare-user --unshare-pid --die-with-parent --proc /proc -- /bin/sh -c :
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends uidmap
+          me="$(id -un)"
+          grep -q "^$me:" /etc/subuid || sudo usermod --add-subuids 1000000-1065535 "$me"
+          grep -q "^$me:" /etc/subgid || sudo usermod --add-subgids 1000000-1065535 "$me"
+          if [ "$(sysctl -n kernel.apparmor_restrict_unprivileged_userns 2>/dev/null || echo 0)" = 1 ]; then
+            printf '%s\n' 'abi <abi/4.0>,' 'include <tunables/global>' 'profile ci-unshare /usr/bin/unshare flags=(unconfined) {' '  userns,' '}' | sudo tee /etc/apparmor.d/ci-unshare > /dev/null
+            sudo apparmor_parser -r /etc/apparmor.d/ci-unshare
+          fi
+          unshare --user --map-root-user --map-auto --mount /bin/sh -c 'mount -t tmpfs none /mnt && echo "user namespace: ok"'
+      - name: this shard's tests
+        shell: bash
+        env:
+          PROJECT_SANDBOX_REQUIRED: "1"
+          CI_REQUIRE_WEB: "1"
+          SHARD: ${{ matrix.shard }}
+          EVENT: ${{ github.event_name }}
+          FULL_CI: "true"
+        run: |
+          # In the self-hosted runner's container, as the runner user (above), never root, with this same script.
+          if [ "${WORKLANE_CI_CONTAINER:-}" = 1 ] && [ "$(id -u)" = 0 ]; then
+            chown -R runner:runner "$GITHUB_WORKSPACE" "$RUNNER_TEMP"
+            HOME=/home/runner exec runuser -p -u runner -- bash --noprofile --norc -eo pipefail "$0"
+          fi
+          # The full-ci label runs everything here too.
+          if [ "$FULL_CI" = true ]; then EVENT=full-ci; fi
+          node scripts/ci/affected.mjs --event "$EVENT" --base HEAD^1 --explain > "$RUNNER_TEMP/selected"
+          node scripts/ci/shard.mjs --plan 4 --only "$RUNNER_TEMP/selected"
+          mapfile -t files < <(node scripts/ci/shard.mjs "$SHARD/4" --only "$RUNNER_TEMP/selected")
+          if [ "${#files[@]}" -eq 0 ]; then
+            [ "$EVENT" = pull_request ] || { echo "shard $SHARD/4 has no test files" >&2; exit 1; }
+            echo "shard $SHARD/4: none of the selected test files"
+            exit 0
+          fi
+          node --import ./dist/test/isolate.js --test "${files[@]}"
