@@ -1,36 +1,137 @@
-# TEMPORARY: probes whether the host's AppArmor profiles reach a privileged container's bwrap and unshare; removed
-# before review.
+# TEMPORARY: the shard steps in the tests container on a GitHub VM; removed before review.
 name: proof (temporary)
 on:
   pull_request:
-    types: [opened, synchronize, reopened]
+    types:
+      - opened
+      - synchronize
+      - reopened
 permissions:
   contents: read
 jobs:
-  probe:
+  proof-suite:
+    name: proof suite ${{ matrix.shard }}/4 in the tests container (host profiles C)
+    strategy:
+      fail-fast: false
+      matrix:
+        shard:
+          - 1
+          - 2
+          - 3
+          - 4
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: probe
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 2
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: "24"
+      - name: the shard, in the container
         shell: bash
+        env:
+          SHARD: ${{ matrix.shard }}
         run: |
-          img=buildpack-deps:noble-scm@sha256:94ed690dd634b8b2f531eaa742fde9b1264077cd8ea695a3b960bd104ae4c481
-          docker pull -q "$img"
-          cat > "$RUNNER_TEMP/in.sh" <<'EOF'
-          set -u
+          S="$RUNNER_TEMP/s"; mkdir -p "$S"
+          cat > "$S/setup.sh" <<'EOF_setup_sh'
+          [ "${WORKLANE_CI_CONTAINER:-}" = 1 ] || { echo "GitHub's runner: nothing to set up"; exit 0; }
           export DEBIAN_FRONTEND=noninteractive
-          apt-get update -qq >/dev/null && apt-get install -y -qq --no-install-recommends sudo uidmap bubblewrap >/dev/null
-          useradd -m -u 1001 runner
-          usermod --add-subuids 2000-59999 --add-subgids 2000-59999 runner
-          if sudo -n -u nobody /usr/bin/bwrap --dev-bind / / --unshare-user --unshare-pid --die-with-parent --proc /proc -- /bin/sh -c : 2>&1; then echo "RESULT bwrap(nobody): ok"; else echo "RESULT bwrap(nobody): FAIL"; fi
-          if sudo -n -u runner unshare --user --map-root-user --map-auto --mount /bin/sh -c 'mount -t tmpfs none /mnt' 2>&1; then echo "RESULT unshare(runner): ok"; else echo "RESULT unshare(runner): FAIL"; fi
-          EOF
-          run() { echo "== $1"; docker run --rm --privileged -v "$RUNNER_TEMP/in.sh:/in.sh:ro" "$img" bash /in.sh 2>&1 | grep RESULT; }
-          echo "restrict=$(sysctl -n kernel.apparmor_restrict_unprivileged_userns)"
-          run "A: no host profiles"
-          sudo apt-get update -q >/dev/null && sudo bash scripts/setup/machine.sh > /dev/null
-          sudo aa-status 2>/dev/null | grep -i -E 'bwrap|unshare' || true
-          run "B: host machine.sh (bwrap profile)"
+          apt-get update -q
+          apt-get install -y -q --no-install-recommends sudo unzip uidmap
+          id runner > /dev/null 2>&1 || useradd -m -u 1001 -s /bin/bash runner
+          printf 'runner ALL=(ALL) NOPASSWD:ALL\n' > /etc/sudoers.d/.runner.tmp
+          chmod 0440 /etc/sudoers.d/.runner.tmp
+          visudo -cf /etc/sudoers.d/.runner.tmp
+          mv /etc/sudoers.d/.runner.tmp /etc/sudoers.d/runner
+          # The container's uids are 0 to 65536 (rootless Docker's range): nested user namespaces map from inside it.
+          for u in root runner; do
+            grep -q "^$u:" /etc/subuid || usermod --add-subuids 2000-59999 "$u"
+            grep -q "^$u:" /etc/subgid || usermod --add-subgids 2000-59999 "$u"
+          done
+          f=chrome-linux64.zip
+          curl -sSfL -o "/tmp/$f" "https://storage.googleapis.com/chrome-for-testing-public/${CHROME_VERSION}/linux64/$f"
+          echo "${CHROME_SHA256}  /tmp/$f" | sha256sum -c -
+          unzip -q "/tmp/$f" -d /opt && rm -f "/tmp/$f"
+          # Each deb.deps line is "a (>= v) | b | c": the first alternative this release can install, or its t64
+          # rename (libasound2 is libasound2t64 on 24.04); a line with none fails the step.
+          pkgs=()
+          while IFS= read -r line; do
+            [ -n "${line//[[:space:]]/}" ] || continue
+            pick=""
+            IFS='|' read -ra alts <<< "$line"
+            for a in "${alts[@]}"; do
+              a="$(sed -e 's/(.*)//' -e 's/[[:space:]]//g' <<< "$a")"
+              for c in "$a" "${a}t64"; do
+                # Read whole, not piped to grep -q: under pipefail an early grep exit fails the pipeline.
+                policy="$(apt-cache policy "$c" 2>/dev/null || true)"
+                if [[ "$policy" =~ $'\n'"  Candidate: "[^\(] ]]; then pick="$c"; break 2; fi
+              done
+            done
+            [ -n "$pick" ] || { echo "Chrome's deb.deps: nothing installable for: $line" >&2; exit 1; }
+            pkgs+=("$pick")
+          done < /opt/chrome-linux64/deb.deps
+          apt-get install -y -q --no-install-recommends "${pkgs[@]}"
+          ln -sf /opt/chrome-linux64/chrome /usr/local/bin/google-chrome
+          google-chrome --version
+          EOF_setup_sh
+          cat > "$S/bwrap.sh" <<'EOF_bwrap_sh'
+          if [ "${WORKLANE_CI_CONTAINER:-}" = 1 ]; then
+            # The self-hosted runner's container: machine.sh's roots and packages. Its AppArmor half is the host's
+            # (no container can load a profile); the checks below show whether what the tests need works in here.
+            sudo install -d -o root -g root -m 0755 /srv/worklane /var/lib/worklane /etc/worklane
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends bubblewrap socat
+            sudo -n -u nobody /usr/bin/bwrap --dev-bind / / --unshare-user --unshare-pid --die-with-parent --proc /proc -- /bin/sh -c :
+            sudo -n -u runner unshare --user --map-root-user --map-auto --mount /bin/sh -c 'mount -t tmpfs none /mnt && echo "user namespace (runner): ok"'
+            exit 0
+          fi
+          sudo apt-get update -q && sudo bash scripts/setup/machine.sh
+          sudo -n -u nobody /usr/bin/bwrap --dev-bind / / --unshare-user --unshare-pid --die-with-parent --proc /proc -- /bin/sh -c :
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends uidmap
+          me="$(id -un)"
+          grep -q "^$me:" /etc/subuid || sudo usermod --add-subuids 1000000-1065535 "$me"
+          grep -q "^$me:" /etc/subgid || sudo usermod --add-subgids 1000000-1065535 "$me"
+          if [ "$(sysctl -n kernel.apparmor_restrict_unprivileged_userns 2>/dev/null || echo 0)" = 1 ]; then
+            printf '%s\n' 'abi <abi/4.0>,' 'include <tunables/global>' 'profile ci-unshare /usr/bin/unshare flags=(unconfined) {' '  userns,' '}' | sudo tee /etc/apparmor.d/ci-unshare > /dev/null
+            sudo apparmor_parser -r /etc/apparmor.d/ci-unshare
+          fi
+          unshare --user --map-root-user --map-auto --mount /bin/sh -c 'mount -t tmpfs none /mnt && echo "user namespace: ok"'
+          EOF_bwrap_sh
+          cat > "$S/tests.sh" <<'EOF_tests_sh'
+          # In the self-hosted runner's container, as the runner user (above), never root, with this same script.
+          if [ "${WORKLANE_CI_CONTAINER:-}" = 1 ] && [ "$(id -u)" = 0 ]; then
+            chown -R runner:runner "$GITHUB_WORKSPACE" "$RUNNER_TEMP"
+            HOME=/home/runner exec runuser -p -u runner -- bash --noprofile --norc -eo pipefail "$0"
+          fi
+          # The full-ci label runs everything here too.
+          if [ "$FULL_CI" = true ]; then EVENT=full-ci; fi
+          node scripts/ci/affected.mjs --event "$EVENT" --base HEAD^1 --explain > "$RUNNER_TEMP/selected"
+          node scripts/ci/shard.mjs --plan 4 --only "$RUNNER_TEMP/selected"
+          mapfile -t files < <(node scripts/ci/shard.mjs "$SHARD/4" --only "$RUNNER_TEMP/selected")
+          if [ "${#files[@]}" -eq 0 ]; then
+            [ "$EVENT" = pull_request ] || { echo "shard $SHARD/4 has no test files" >&2; exit 1; }
+            echo "shard $SHARD/4: none of the selected test files"
+            exit 0
+          fi
+          node --import ./dist/test/isolate.js --test "${files[@]}"
+          EOF_tests_sh
+          cat > "$S/driver.sh" <<'EOF_driver_sh'
+          set -euo pipefail
+          export PATH="/opt/node/bin:$PATH"
+          git config --global --add safe.directory '*'
+          cd /w
+          npm ci --ignore-scripts
+          node node_modules/typescript/bin/tsc -p tsconfig.json
+          env CHROME_VERSION=157.0.8103.38 CHROME_SHA256=8cdeb344e9b2cefe59f4aea8d1d93d5d93054c03cde217665c16fc1f62e72a66 bash --noprofile --norc -eo pipefail /s/setup.sh
+          sudo -u runner git config --global --add safe.directory '*'
+          npm run build
+          npm run build:web
+          bash --noprofile --norc -eo pipefail /s/bwrap.sh
+          mkdir -p /rt
+          env PROJECT_SANDBOX_REQUIRED=1 CI_REQUIRE_WEB=1 SHARD="$SHARD" EVENT=push FULL_CI=true RUNNER_TEMP=/rt GITHUB_WORKSPACE=/w bash --noprofile --norc -eo pipefail /s/tests.sh
+          EOF_driver_sh
+          chmod -R a+rX "$S"
+          sudo apt-get update -q > /dev/null && sudo bash scripts/setup/machine.sh > /dev/null
           printf '%s\n' 'abi <abi/4.0>,' 'include <tunables/global>' 'profile ci-unshare /usr/bin/unshare flags=(unconfined) {' '  userns,' '}' | sudo tee /etc/apparmor.d/ci-unshare > /dev/null
           sudo apparmor_parser -r /etc/apparmor.d/ci-unshare
-          run "C: plus a host profile for /usr/bin/unshare"
+          node_dir="$(dirname "$(dirname "$(readlink -f "$(command -v node)")")")"
+          docker run --rm --privileged --shm-size=2g -e WORKLANE_CI_CONTAINER=1 -e SHARD="$SHARD" -v "$GITHUB_WORKSPACE:/w" -v "$node_dir:/opt/node:ro" -v "$S:/s:ro" "buildpack-deps:noble-scm@sha256:94ed690dd634b8b2f531eaa742fde9b1264077cd8ea695a3b960bd104ae4c481" bash /s/driver.sh
