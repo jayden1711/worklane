@@ -59,7 +59,7 @@ test('the decisions index: decisions made (answered only), each heading of the d
   assert.equal(resolveRef(index, 'd-7-abc')?.ref, 'decision d-7-abc');
   assert.equal(resolveRef(index, 'docs/decisions/0003')?.ref, 'docs/decisions/0003-no-new-db.md');
   assert.match(decisionsMade(index).join('\n'), /Decisions already made on this project[^\n]*\n- \[decision d-7-abc\] Retry uploads with backoff\? -> yes \(#7\)/);
-  assert.match(decisionsMade(index).join('\n'), /Decision records in this checkout[^\n]*\n(- .*\n)*- \[decisions\.md § D-1: Exports are CSV\]/);
+  assert.match(decisionsMade(index).join('\n'), /Decision records committed at the plan's base[^\n]*\n(- .*\n)*- \[decisions\.md § D-1: Exports are CSV\]/);
 });
 
 test('the contract check refuses a plan with no Decisions section', () => {
