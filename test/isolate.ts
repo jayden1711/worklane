@@ -23,12 +23,19 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { BRAND } from '../src/brand.js';
 import { SYSTEMD_MARKERS, SYSTEM_ROOT_VAR, TEST_MACHINE_VAR, TEST_MARK_FILE, TEST_TOKEN_VAR } from '../src/os/system-paths.js';
+import { INHERITED_CREDENTIAL_VARS } from '../src/credential-env.js';
 
 /** Engine settings that only tune speed, kept from the shell (a slow CI runner scales the browser's timeouts). */
 const KEEP = new Set([`${BRAND.envPrefix}_BROWSER_TIMEOUT_SCALE`]);
 for (const k of Object.keys(process.env)) {
   if ((k.startsWith(`${BRAND.envPrefix}_`) && !KEEP.has(k)) || k.startsWith('AGENT_SLOTS_')) delete process.env[k];
 }
+/**
+ * WHY (#838): a GitHub token or a Claude credential exported in the shell reached every real `gh` or `claude` a test
+ * ran. None is ever a test's own: a test that needs one gives its own stand-in a fake.
+ */
+export const DROPPED_CREDENTIALS: readonly string[] = [...INHERITED_CREDENTIAL_VARS, 'CLAUDE_CODE_OAUTH_TOKEN'];
+for (const k of DROPPED_CREDENTIALS) delete process.env[k];
 
 /**
  * This test process's machine: everything below is inside it, the temporary directory too. A test process a test
