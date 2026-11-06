@@ -52,13 +52,25 @@ export interface HookEntry {
 export const GUARD_ON_FAILURE = 'block' as const;
 
 /**
- * These hooks with every PreToolUse command hook failing closed (GUARD_ON_FAILURE). WHY at each run (runSettings), not
- * only at install: an instance's agent settings written before this keep working, and get it with the engine update.
+ * The tools the guard's PreToolUse hook is asked about: every one (#937). WHY: a list of names let every other tool
+ * (`mcp__*`, NotebookRead, LS, …) skip the guard, so its own refusal of tools it doesn't know never ran. `*` is Claude
+ * Code's match-all (its hooks reference; 2.1.319's hook code reads "*", "" and no matcher alike).
+ */
+export const GUARD_MATCHER = '*';
+
+/**
+ * These hooks with every PreToolUse command hook failing closed (GUARD_ON_FAILURE), and the guard's own entry asked
+ * about every tool (GUARD_MATCHER, #937). WHY at each run (runSettings), not only at install: an instance's agent
+ * settings written before this keep working, and get both with the engine update.
  */
 export function guardsFailClosed(hooks: Record<string, HookEntry[]>): Record<string, HookEntry[]> {
   const pre = hooks.PreToolUse;
   if (!pre) return hooks;
-  return { ...hooks, PreToolUse: pre.map((e) => (Array.isArray(e?.hooks) ? { ...e, hooks: e.hooks.map((h) => (h?.type === 'command' ? { ...h, onFailure: GUARD_ON_FAILURE } : h)) } : e)) };
+  const ours = (e: HookEntry) => e.hooks.some((h) => typeof h?.command === 'string' && h.command.includes(HOOK_MARKER));
+  return {
+    ...hooks,
+    PreToolUse: pre.map((e) => (Array.isArray(e?.hooks) ? { ...e, ...(ours(e) ? { matcher: GUARD_MATCHER } : {}), hooks: e.hooks.map((h) => (h?.type === 'command' ? { ...h, onFailure: GUARD_ON_FAILURE } : h)) } : e)),
+  };
 }
 export type Settings = Record<string, unknown> & {
   hooks?: Record<string, HookEntry[]>;
