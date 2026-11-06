@@ -253,6 +253,11 @@ export const MACHINE_TOOLS_ON_PURPOSE: readonly string[] = Object.freeze([
 
 const POSIX = process.platform !== 'win32';
 const SELF = fileURLToPath(import.meta.url);
+/**
+ * The shifted-clock preload beside this one (test/clock-shift.ts, #687), which the clock-shift job loads through
+ * NODE_OPTIONS into every process (#1107): by this exact path only, it moves the clock and runs nothing else first.
+ */
+const CLOCK_SHIFT = join(dirname(SELF), `clock-shift${SELF.endsWith('.ts') ? '.ts' : '.js'}`);
 /** The repo: this file runs as <repo>/dist/test/isolate.js (or <repo>/test/isolate.ts). */
 const REPO = (() => {
   const up = dirname(dirname(SELF));
@@ -296,7 +301,8 @@ export function testFileFor(execArgv: readonly string[], nodeOptions: string, ar
       const target = inline ?? flags[++i] ?? '';
       const asPath = /^(\.{1,2}\/|\/)/.test(target) ? resolve(cwd, target) : target.startsWith('file:') ? fileURLToPath(target) : null;
       // Node 24's test runner hands its children this preload twice (--import=x and --import x): the same module.
-      if (name !== '--import' || asPath !== SELF) return null;
+      // The clock-shift job's preload, by its exact path, keys the file too (#1107): it runs nothing but the clock.
+      if (name !== '--import' || (asPath !== SELF && asPath !== CLOCK_SHIFT)) return null;
     }
   }
   const rel = relative(REPO, resolve(cwd, argv1)).split(sep).join('/');
