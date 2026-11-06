@@ -7,11 +7,17 @@
 import { lstatSync, readdirSync, realpathSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { readRegular } from '../config/load.js';
-import { WORKTREE_NAME_PREFIX } from '../worktrees.js';
+import { BRAND } from '../brand.js';
 import { projectStateDir } from './context.js';
 
 /** Directories listed, at most, in one place for a search of a directory above it; past it the search is refused. */
 export const PLACE_LIST_LIMIT = 1000;
+
+/**
+ * The name the engine gives its worktrees (src/worktrees.ts WORKTREE_NAME_PREFIX; a test holds the two equal). WHY:
+ * spelled here, not imported: worktrees.ts would bring its own imports into the tool guard's import tree (HOOK_IMPORTS).
+ */
+export const ENGINE_WORKTREE_PREFIX = `${BRAND.cli}-`;
 
 export interface OtherCheckouts {
   /** The other checkout `abs` lies in (the deepest one holding it); null when it lies in none, or in the run's own. */
@@ -90,7 +96,7 @@ export function otherCheckouts(root: string, worktreeRoot: string): OtherCheckou
   const places = [...new Set([resolve(base, worktreeRoot), join(projectStateDir(base), 'worktrees'), join(base, '.claude', 'worktrees')].flatMap(forms))];
   const mains = main ? forms(main) : [];
   const holdsMain = (place: string) => mains.some((m) => within(place, m));
-  const counts = (place: string, name: string) => !holdsMain(place) || name.startsWith(WORKTREE_NAME_PREFIX);
+  const counts = (place: string, name: string) => !holdsMain(place) || name.startsWith(ENGINE_WORKTREE_PREFIX);
   const isOwn = (c: string) => own.includes(c);
 
   return {

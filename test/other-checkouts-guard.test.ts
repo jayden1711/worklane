@@ -8,7 +8,7 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { BRAND } from '../src/brand.js';
 import { runHook } from '../src/hook.js';
-import { otherCheckouts } from '../src/guardrails/checkouts.js';
+import { ENGINE_WORKTREE_PREFIX, otherCheckouts } from '../src/guardrails/checkouts.js';
 import { WORKTREE_NAME_PREFIX } from '../src/worktrees.js';
 import { exampleProject } from './helpers.js';
 
@@ -87,4 +87,8 @@ test('#939: in a place that holds the main checkout, only the engine\'s own work
   assert.equal(found.of(join(project, '.env.local')), null);
   const under = found.under(parent);
   assert.ok(Array.isArray(under) && under.includes(engine) && !under.includes(project), JSON.stringify(under));
+});
+
+test('#939: the guard names the engine\'s worktrees as the engine does', () => {
+  assert.equal(ENGINE_WORKTREE_PREFIX, WORKTREE_NAME_PREFIX);
 });
