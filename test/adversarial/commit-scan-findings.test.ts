@@ -170,6 +170,8 @@ test('attack: the checkout\'s own path rules see each file at its own path, as o
     writeFileSync(join(a, '.gitleaks.toml'), `[extend]\nuseDefault = true\n\n[allowlist]\npaths = ['''${re}''']\n`);
     git(a, 'add', '.gitleaks.toml');
     git(a, 'commit', '-q', '-m', 'rules');
+    // The scan reads the rules committed on origin's default branch (#1128), never the checkout's: they are there.
+    git(a, 'update-ref', 'refs/remotes/origin/main', 'HEAD');
     mkdirSync(join(a, path, '..'), { recursive: true });
     writeFileSync(join(a, path), SECRET);
     git(a, 'add', path);
@@ -180,6 +182,7 @@ test('attack: the checkout\'s own path rules see each file at its own path, as o
   writeFileSync(join(r, '.gitleaks.toml'), `[extend]\nuseDefault = true\n\n[[rules]]\nid = "docs-marker"\nregex = '''zzmarker[0-9]{6}'''\npath = '''^docs/'''\n`);
   git(r, 'add', '.gitleaks.toml');
   git(r, 'commit', '-q', '-m', 'rules');
+  git(r, 'update-ref', 'refs/remotes/origin/main', 'HEAD');
   mkdirSync(join(r, 'docs'), { recursive: true });
   writeFileSync(join(r, 'docs', 'x.txt'), 'value zzmarker123456\n');
   git(r, 'add', 'docs/x.txt');

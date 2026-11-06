@@ -89,16 +89,11 @@ export function scanCommit(top: string, scope: CommitScanScope, binary = findToo
     if (scope.unstaged || scope.untracked) comparisons.push(['unstaged changes', () => worktreeContent(top)]);
     if (scope.untracked) comparisons.push(['untracked files', () => untrackedContent(top)]);
     if (scope.head) for (const [i, read] of headContent(top).entries()) comparisons.push([`the commit being amended (parent ${i + 1})`, read]);
-    // WHY (#1128): never rules the agent can write. The scanner's built-in rules always, and the project's own rules
-    // as committed on origin's default branch, each its own scan with the findings of both counted: a working-tree or
-    // index `.gitleaks.toml` (the agent's to write) is never read, and no rules file can drop what the built-in find.
-    const configs = [join(tmp, 'gitleaks-default.toml')];
-    writeFileSync(configs[0]!, BUILT_IN_RULES);
-    const committed = committedRules(top);
-    if (committed) {
-      configs.push(join(tmp, 'gitleaks-project.toml'));
-      writeFileSync(configs[1]!, committed);
-    }
+    // WHY (#1128): never rules the agent can write. The project's own rules as committed on origin's default branch
+    // (its allowlists among them, which the owner merged), else the scanner's built-in rules; a working-tree or index
+    // `.gitleaks.toml` (the agent's to write) is never read.
+    const configs = [join(tmp, 'gitleaks.toml')];
+    writeFileSync(configs[0]!, committedRules(top) ?? BUILT_IN_RULES);
     // WHY (#971): never an ignore list: not one on disk, and not one the commit itself brings (see SCANNER_NAMES).
     const noIgnores = join(tmp, 'no-ignores');
     writeFileSync(noIgnores, '');
@@ -113,7 +108,6 @@ export function scanCommit(top: string, scope: CommitScanScope, binary = findToo
         if (r.status === 0) continue;
         if (r.status !== LEAKS_EXIT) throw new Error(`gitleaks exited ${r.status}: ${(r.stderr || '').trim().split('\n').pop()}`);
         try {
-          // Each rules set's findings are its own keys (`n`), so a secret both find counts once per set on each side.
           for (const f of JSON.parse(readFileSync(report, 'utf8')) as { RuleID: string; File: string; Secret: string }[]) {
             let file = f.File.replace(/^\.\//, '');
             if (scannerNamed) file = file.slice(SCANNER_DIR.length + 1);
