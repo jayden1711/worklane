@@ -113,7 +113,9 @@ jobs:
             for a in "${alts[@]}"; do
               a="$(sed -e 's/(.*)//' -e 's/[[:space:]]//g' <<< "$a")"
               for c in "$a" "${a}t64"; do
-                if apt-cache policy "$c" 2>/dev/null | grep -q '^  Candidate: [^(]'; then pick="$c"; break 2; fi
+                # Read whole, not piped to grep -q: under pipefail an early grep exit fails the pipeline.
+                policy="$(apt-cache policy "$c" 2>/dev/null || true)"
+                if [[ "$policy" =~ $'\n'"  Candidate: "[^\(] ]]; then pick="$c"; break 2; fi
               done
             done
             [ -n "$pick" ] || { echo "Chrome's deb.deps: nothing installable for: $line" >&2; exit 1; }
