@@ -177,26 +177,6 @@ jobs:
           echo "test shard 1..4/4 (ubuntu-latest, 24): $RESULT"
           [ "$RESULT" = success ]
 
-  security-fixed:
-    # docs/security.md lists a guard gap as fixed only with its fix PR merged, as the merge commit it names (#859): each
-    # row's commit is an ancestor of HEAD and its PR is merged as it. The whole history (the shards fetch 2 commits);
-    # GitHub is only read. scripts/ci/security-fixed.mjs; test/security-fixed.test.ts holds the job's shape.
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      pull-requests: read
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: '24'
-      - name: every fixed gap's PR merged, as the commit the page names
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: node scripts/ci/security-fixed.mjs
-
   # Kept for one release after #744 removed what it tested, as a job that only succeeds: same job id, same check
   # name. An install whose updater is v0.5.2's or older requires a successful "desktop" run on every commit it
   # installs (it has no retired-check rule), and so does the release channel's check of a release's base commit.

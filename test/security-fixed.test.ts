@@ -1,5 +1,5 @@
 // #859: docs/security.md lists a gap as fixed only with its fix PR merged, as the merge commit it names. CI's
-// `security-fixed` job checks that on the whole history (scripts/ci/security-fixed.mjs); this checks the script's
+// security-fixed workflow checks that on the whole history (scripts/ci/security-fixed.mjs); this checks the script's
 // reading of the table and its judgement, with readers of its own, and that the job is wired as it must be.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -53,11 +53,13 @@ test('#859: on a checkout with the whole history, each merge commit the table na
   for (const r of s.fixedRows(page)) assert.doesNotThrow(() => git('merge-base', '--is-ancestor', `${r.commit}^{commit}`, 'HEAD'), `#${r.pr} ${r.commit}`);
 });
 
-test("#859: CI's security-fixed job runs the script on the whole history, reading GitHub only", () => {
-  const ci = parseYaml(readFileSync(join(repoRoot, '.github', 'workflows', 'ci.yml'), 'utf8')) as { jobs: Record<string, { permissions?: Record<string, string>; steps: { uses?: string; with?: Record<string, unknown>; run?: string; env?: Record<string, string> }[] }> };
-  const job = ci.jobs['security-fixed'];
+test("#859: the security-fixed workflow runs the script on the whole history, reading GitHub only, on every PR that changes the page or the check", () => {
+  const wf = parseYaml(readFileSync(join(repoRoot, '.github', 'workflows', 'security-fixed.yml'), 'utf8')) as { on: { pull_request?: { paths?: string[] }; push?: unknown }; permissions?: Record<string, string>; jobs: Record<string, { steps: { uses?: string; with?: Record<string, unknown>; run?: string; env?: Record<string, string> }[] }> };
+  assert.deepEqual(Object.keys(wf.on), ['pull_request'], 'pull requests only: on main the table changes only through one');
+  assert.deepEqual(wf.on.pull_request?.paths, ['docs/security.md', 'scripts/ci/security-fixed.mjs', '.github/workflows/security-fixed.yml']);
+  assert.deepEqual(wf.permissions, { contents: 'read', 'pull-requests': 'read' });
+  const job = wf.jobs['security-fixed'];
   assert.ok(job, 'the job');
-  assert.deepEqual(job.permissions, { contents: 'read', 'pull-requests': 'read' });
   const checkout = job.steps.find((x) => x.uses?.startsWith('actions/checkout@'));
   assert.equal(checkout?.with?.['fetch-depth'], 0, 'the whole history');
   const run = job.steps.find((x) => x.run?.includes('scripts/ci/security-fixed.mjs'));
