@@ -92,6 +92,17 @@ export function hookChecks(s: Settings, enginePath: (p: string) => string = (p) 
   });
 }
 
+/**
+ * Whether every PreToolUse command hook of ours in these settings fails closed (onFailure "block"). WHY (#930): a
+ * checkout's own settings are used as written (people's sessions, local runs), unlike an instance's, which every run
+ * gets with it (runSettings, guardsFailClosed); an agent running as the same user can stop the hook, and without it
+ * Claude Code runs the call after the timeout.
+ */
+export function guardBlocksOnFailure(s: Settings): boolean {
+  const ours = (s.hooks?.PreToolUse ?? []).flatMap((e) => e?.hooks ?? []).filter((h) => typeof h?.command === 'string' && h.command.includes(HOOK_MARKER));
+  return ours.length > 0 && ours.every((h) => h.onFailure === GUARD_ON_FAILURE);
+}
+
 function readSettings(file: string): Settings {
   const v = JSON.parse(readFileSync(file, 'utf8')) as unknown;
   if (!v || typeof v !== 'object' || Array.isArray(v)) throw new Error('not a JSON object');
