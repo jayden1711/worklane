@@ -259,7 +259,7 @@ const GOLDEN: Record<string, unknown> = {
         '--settings',
         {
           sandbox: { enabled: true, failIfUnavailable: true, allowUnsandboxedCommands: false, autoAllowBashIfSandboxed: true, network: { allowedDomains: ['registry.npmjs.org', 'example.org'] }, filesystem: { denyRead: ['/srv/coordinator'] } },
-          permissions: { allow: ['Bash(npm test)'], deny: ['Read(//srv/secrets/**)', 'Read(//srv/coordinator/**)'] },
+          permissions: { allow: ['Bash(npm test)'], deny: ['Read(//srv/secrets/**)', 'Read(//srv/coordinator/**)', 'Read(//srv/coordinator)'] },
           disableAllHooks: false,
           hooks: HOOKS,
           env: FULL_REQUEST_SETTINGS_ENV,
