@@ -37,7 +37,9 @@ jobs:
         os: [ubuntu-latest]
         node: ['22']
         shard: [1, 2, 3, 4]
-    runs-on: ${{ matrix.os }}
+    # WHY: ubuntu-latest became ubuntu-26.04 (image 20261101), where visudo, nested user namespaces and git fetch
+    # fixtures fail the suite; pinned to 24.04 until the suite is ported. matrix.os stays the check name's label.
+    runs-on: ubuntu-24.04
     steps: &test-shard-steps
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -145,7 +147,9 @@ jobs:
         os: [ubuntu-latest]
         node: ['24']
         shard: [1, 2, 3, 4]
-    runs-on: ${{ matrix.os }}
+    # WHY: ubuntu-latest became ubuntu-26.04 (image 20261101), where visudo, nested user namespaces and git fetch
+    # fixtures fail the suite; pinned to 24.04 until the suite is ported. matrix.os stays the check name's label.
+    runs-on: ubuntu-24.04
     steps: *test-shard-steps
 
   # The required checks, under the names they have always had: green only when every shard of that Node version
