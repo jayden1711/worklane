@@ -67,7 +67,23 @@ jobs:
           curl -sSfL -o "/tmp/$f" "https://storage.googleapis.com/chrome-for-testing-public/${CHROME_VERSION}/linux64/$f"
           echo "${CHROME_SHA256}  /tmp/$f" | sha256sum -c -
           unzip -q "/tmp/$f" -d /opt && rm -f "/tmp/$f"
-          sed -e 's/[[:space:]]*(.*//' /opt/chrome-linux64/deb.deps | grep -v '^$' | xargs apt-get install -y -q --no-install-recommends
+          # Each deb.deps line is "a (>= v) | b | c": the first alternative this release can install, or its t64
+          # rename (libasound2 is libasound2t64 on 24.04); a line with none fails the step.
+          pkgs=()
+          while IFS= read -r line; do
+            [ -n "${line//[[:space:]]/}" ] || continue
+            pick=""
+            IFS='|' read -ra alts <<< "$line"
+            for a in "${alts[@]}"; do
+              a="$(sed -e 's/(.*)//' -e 's/[[:space:]]//g' <<< "$a")"
+              for c in "$a" "${a}t64"; do
+                if apt-cache policy "$c" 2>/dev/null | grep -q '^  Candidate: [^(]'; then pick="$c"; break 2; fi
+              done
+            done
+            [ -n "$pick" ] || { echo "Chrome's deb.deps: nothing installable for: $line" >&2; exit 1; }
+            pkgs+=("$pick")
+          done < /opt/chrome-linux64/deb.deps
+          apt-get install -y -q --no-install-recommends "${pkgs[@]}"
           ln -sf /opt/chrome-linux64/chrome /usr/local/bin/google-chrome
           google-chrome --version
       - name: install gitleaks
