@@ -20,6 +20,16 @@ export interface SandboxInput {
 const abs = (p: string) => (p.startsWith('/') ? p : `/${p}`);
 
 /**
+ * The Read tool's deny rules for denied paths: every one in both forms, the directory (`/**`) and the exact path
+ * (#959). WHY: a denied entry may be one file (a credential, a config); gitignore-style matching may not take
+ * `<file>/**` as the file itself, so the Read tool could read it. The only place a denied path becomes a Read rule.
+ */
+export function readDenyRules(paths: readonly string[]): string[] {
+  const all = paths.map(abs);
+  return [...new Set([...all.map((p) => `Read(/${p}/**)`), ...all.map((p) => `Read(/${p})`)])];
+}
+
+/**
  * Settings passed to each agent run with --settings. Fail closed: if the
  * sandbox can't start (a missing dependency, an unsupported platform), the
  * run exits instead of running unsandboxed, and a blocked command can't be
@@ -38,7 +48,7 @@ export function sandboxSettings(s: SandboxInput) {
     },
     permissions: {
       // The Read tool runs outside the sandbox: deny it the same paths.
-      deny: deny.map((p) => `Read(/${p}/**)`),
+      deny: readDenyRules(deny),
     },
   };
 }
@@ -61,7 +71,7 @@ export function withDeniedReads<T extends object>(settings: T, paths: readonly s
   const add = paths.map(abs);
   if (!add.length) return settings;
   const s = settings as T & { sandbox?: { filesystem?: { denyRead?: string[] } }; permissions?: { deny?: string[] } };
-  const deny = [...new Set([...(s.permissions?.deny ?? []), ...add.map((p) => `Read(/${p}/**)`), ...add.map((p) => `Read(/${p})`)])];
+  const deny = [...new Set([...(s.permissions?.deny ?? []), ...readDenyRules(add)])];
   return {
     ...s,
     ...(s.sandbox ? { sandbox: { ...s.sandbox, filesystem: { ...s.sandbox.filesystem, denyRead: [...new Set([...(s.sandbox.filesystem?.denyRead ?? []), ...add])] } } } : {}),
