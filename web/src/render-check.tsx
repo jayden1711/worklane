@@ -199,7 +199,7 @@ export const renderAudit = (entries: AuditEntry[]) => renderToStaticMarkup(<Audi
 export { probeMe } from './api';
 export const renderBoard = (boards: InstanceBoard[], now?: number) => renderToStaticMarkup(<BoardView boards={boards} {...(now !== undefined ? { now } : {})} />);
 export const renderBoardTestRuns = (boards: InstanceBoard[]) => renderToStaticMarkup(<BoardTestRuns boards={boards} />);
-export { loadBoards } from './pages/Board';
+export { keepShown, loadBoards } from './pages/Board';
 export { onInstance, scopeOf } from './api';
 export const renderMachineSlots = (slots: State['slots']) => renderToStaticMarkup(<MachineSlots slots={slots} />);
 export const renderTestRuns = (data: TestRunsData, compact = false) => renderToStaticMarkup(<TestRunsView data={data} compact={compact} />);
