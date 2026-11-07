@@ -89,30 +89,33 @@ export function scanCommit(top: string, scope: CommitScanScope, binary = findToo
     if (scope.unstaged || scope.untracked) comparisons.push(['unstaged changes', () => worktreeContent(top)]);
     if (scope.untracked) comparisons.push(['untracked files', () => untrackedContent(top)]);
     if (scope.head) for (const [i, read] of headContent(top).entries()) comparisons.push([`the commit being amended (parent ${i + 1})`, read]);
-    // WHY: the checkout's own rules, as the scan of its diff read them before; never a rules file the content brings.
-    const own = join(top, '.gitleaks.toml');
-    const config = join(tmp, 'gitleaks.toml');
-    writeFileSync(config, existsSync(own) ? readFileSync(own) : '[extend]\nuseDefault = true\n');
+    // WHY (#1128): never rules the agent can write. The project's own rules as committed on origin's default branch
+    // (its allowlists among them, which the owner merged), else the scanner's built-in rules; a working-tree or index
+    // `.gitleaks.toml` (the agent's to write) is never read.
+    const configs = [join(tmp, 'gitleaks.toml')];
+    writeFileSync(configs[0]!, committedRules(top) ?? BUILT_IN_RULES);
     // WHY (#971): never an ignore list: not one on disk, and not one the commit itself brings (see SCANNER_NAMES).
     const noIgnores = join(tmp, 'no-ignores');
     writeFileSync(noIgnores, '');
     // WHY: the report holds the secrets themselves (they are compared), so it lives in the scan's own temporary folder
     // and is deleted as soon as it is read; only rule names and paths leave this function.
     const scan = (root: string, scannerNamed: boolean): Map<string, string[]> => {
-      const report = `${root}.json`;
-      const r = spawnSync(binary, ['dir', '.', '--config', config, '--gitleaks-ignore-path', noIgnores, '--no-banner', '--report-format', 'json', '--report-path', report, '--exit-code', String(LEAKS_EXIT)], { cwd: root, encoding: 'utf8', timeout: 120_000 });
-      if (r.error) throw r.error;
       const keys = new Map<string, string[]>();
-      if (r.status === 0) return keys;
-      if (r.status !== LEAKS_EXIT) throw new Error(`gitleaks exited ${r.status}: ${(r.stderr || '').trim().split('\n').pop()}`);
-      try {
-        for (const f of JSON.parse(readFileSync(report, 'utf8')) as { RuleID: string; File: string; Secret: string }[]) {
-          let file = f.File.replace(/^\.\//, '');
-          if (scannerNamed) file = file.slice(SCANNER_DIR.length + 1);
-          keys.set(file, [...(keys.get(file) ?? []), `${f.RuleID}\0${f.Secret}`]);
+      for (const [n, config] of configs.entries()) {
+        const report = `${root}-${n}.json`;
+        const r = spawnSync(binary, ['dir', '.', '--config', config, '--gitleaks-ignore-path', noIgnores, '--no-banner', '--report-format', 'json', '--report-path', report, '--exit-code', String(LEAKS_EXIT)], { cwd: root, encoding: 'utf8', timeout: 120_000 });
+        if (r.error) throw r.error;
+        if (r.status === 0) continue;
+        if (r.status !== LEAKS_EXIT) throw new Error(`gitleaks exited ${r.status}: ${(r.stderr || '').trim().split('\n').pop()}`);
+        try {
+          for (const f of JSON.parse(readFileSync(report, 'utf8')) as { RuleID: string; File: string; Secret: string }[]) {
+            let file = f.File.replace(/^\.\//, '');
+            if (scannerNamed) file = file.slice(SCANNER_DIR.length + 1);
+            keys.set(file, [...(keys.get(file) ?? []), `${f.RuleID}\0${f.Secret}\0${n}`]);
+          }
+        } finally {
+          rmSync(report, { force: true });
         }
-      } finally {
-        rmSync(report, { force: true });
       }
       return keys;
     };
@@ -173,6 +176,27 @@ const ZERO = /^0+$/;
  * whether the scanner reads the file.
  */
 const TEXT_PREFIX = Buffer.alloc(65_536, 0x0a);
+/** The scanner's own rules, which no project file changes (#1128). */
+const BUILT_IN_RULES = '[extend]\nuseDefault = true\n';
+
+/** The most of a committed rules file the commit scan reads. */
+const RULES_MAX_BYTES = 1024 * 1024;
+
+/**
+ * The project's `.gitleaks.toml` as committed on origin's default branch (#1128): what `refs/remotes/origin/HEAD`
+ * names, else `main`, as the push gate reads its rules (scripts/push-gate-hook.mjs). Null when there is none, or it
+ * can't be read: the built-in rules still apply. Never the working tree's or the index's copy, which the agent writes.
+ */
+export function committedRules(top: string): Buffer | null {
+  const git = (args: string[]) => spawnSync('git', ['--no-replace-objects', ...args], { cwd: top, encoding: 'buffer', maxBuffer: RULES_MAX_BYTES + 1, timeout: 60_000 });
+  const head = git(['symbolic-ref', '--quiet', '--short', 'refs/remotes/origin/HEAD']);
+  const branch = head.status === 0 && head.stdout.toString('utf8').trim() ? head.stdout.toString('utf8').trim() : 'origin/main';
+  if (!/^origin\/[A-Za-z0-9._/-]+$/.test(branch)) return null;
+  const r = git(['cat-file', 'blob', `refs/remotes/${branch}:.gitleaks.toml`]);
+  if (r.error || r.status !== 0 || r.stdout.length > RULES_MAX_BYTES) return null;
+  return r.stdout;
+}
+
 /** Names the scanner reads as its own settings at the root of what it scans; such a file of the commit goes lower. */
 const SCANNER_NAMES = new Set(['.gitleaksignore', '.gitleaks.toml', '.gitleaksbaseline']);
 const SCANNER_DIR = 'scanner-named';
