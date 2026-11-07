@@ -51,14 +51,14 @@ test('the file: root\'s, not writable by its group or others, not a symlink, bou
   refused(hostsFile(JSON.stringify({ hosts: ['a.test'], pad: 'x'.repeat(PROVIDER_HOSTS_LIMITS.fileBytes) })), /over 8192 bytes/);
   refused(hostsFile('{not json'), /not JSON/);
   refused(hostsFile(['api.provider.test']), /expected \{"hosts"/);
-  refused(hostsFile({ hosts: ['api.provider.test'], insecure: true }), /unknown key "insecure"/);
+  refused(hostsFile({ hosts: ['api.provider.test'], insecure: true }), /unknown key 2 of the file's keys, not shown \(only "hosts"\)/);
   refused(hostsFile({ hosts: 'api.provider.test' }), /expected \{"hosts"/);
   refused(hostsFile({ hosts: Array.from({ length: 65 }, (_, i) => `h${i}.test`) }), /more than 64 hosts/);
   refused(hostsFile({ hosts: ['*.provider.test'] }), /no wildcards/);
   refused(hostsFile({ hosts: ['https://api.provider.test'] }), /host or host:port/);
   refused(hostsFile({ hosts: ['user@example.com'] }), /host or host:port/);
-  refused(hostsFile({ hosts: ['API.Provider.test'] }), /as a URL normalises it: "api\.provider\.test"/);
-  refused(hostsFile({ hosts: ['127.1'] }), /"127\.0\.0\.1"/);
+  refused(hostsFile({ hosts: ['API.Provider.test'] }), /hosts entry 1 must be written as a URL normalises it \(lower case/);
+  refused(hostsFile({ hosts: ['127.1'] }), /hosts entry 1 must be written as a URL normalises it \(lower case; an IPv4 address as four decimal numbers\); not shown/);
   refused(hostsFile({ hosts: ['api.provider.test:0'] }), /bad port/);
   refused(hostsFile({ hosts: ['api.provider.test:080'] }), /bad port/);
   refused(hostsFile({ hosts: [7] }), /non-empty string/);
@@ -332,12 +332,27 @@ test('a refused entry is named by its position, never quoted while it could hold
     assert.match(r.error!, /hosts entry 2\b/, entry);
     assert.doesNotMatch(providerHostsAtStart(agents, r).join('\n'), /s3cret/, entry);
   }
-  // A key that isn't a plain word isn't quoted either; one that is, still is.
-  const key = readProviderHosts(hostsFile({ hosts: ['ok.example.com'], 'https://alice:s3cret@h/': true }), { ownerUid: me });
-  assert.match(key.error!, /an unknown key, not shown/);
-  assert.doesNotMatch(key.error!, /s3cret/);
-  // Only the host WHATWG URL parsed from an entry is shown, to say what to write instead; never the entry as written.
-  assert.match(readProviderHosts(hostsFile({ hosts: ['API.example.com'] }), { ownerUid: me }).error!, /: hosts entry 1 must be written as a URL normalises it: "api\.example\.com"; no provider host/);
+  // #714: an unknown key is named by its position only, a plain word too (`sk_live_…` is one).
+  for (const k of ['https://alice:s3cret@h/', 'sk_live_s3cret', 'insecure_s3cret']) {
+    const key = readProviderHosts(hostsFile({ hosts: ['ok.example.com'], [k]: true }), { ownerUid: me });
+    assert.match(key.error!, /: unknown key 2 of the file's keys, not shown \(only "hosts"\); no provider host/, k);
+    assert.doesNotMatch(key.error!, /s3cret/, k);
+  }
+  // #714: nor a not-normalised entry's host, even lower-cased.
+  const upper = readProviderHosts(hostsFile({ hosts: ['S3CRET.example.com'] }), { ownerUid: me }).error!;
+  assert.match(upper, /: hosts entry 1 must be written as a URL normalises it \(lower case; an IPv4 address as four decimal numbers\); not shown, as it may hold a credential; no provider host/);
+  assert.doesNotMatch(upper, /s3cret/i);
+});
+
+test('#714: an entry is an IP address or a dotted name with a top-level domain, so a lower-case token is refused and shows nothing; real provider hosts still pass', () => {
+  for (const token of ['sk-ant-api03-s3cret0123456789abcdef', 'ghp-s3cret0123456789', 's3cret']) {
+    const e = providerHostEntry(token);
+    assert.deepEqual(e, { refused: 'not-a-host', host: null }, token);
+  }
+  for (const host of ['api.provider.test', 'api.provider.example', 'api.anthropic.com', 'a-b.c-d.example.com', 'xn--bcher-kva.example', '192.0.2.10', '192.0.2.10:8443', '127.0.0.1:8080', '[::1]:11434', `${'a'.repeat(63)}.example.com`]) {
+    const e = providerHostEntry(host);
+    assert.ok(!('refused' in e), `${host}: ${JSON.stringify(e)}`);
+  }
 });
 
 /** Entries that reach each way an entry is refused, most with a credential-like marker; typed so a new way needs entries here. */
@@ -346,7 +361,7 @@ const BY_REFUSAL: Record<EntryRefusal, unknown[]> = {
   'too-long': [`s3cret${'a'.repeat(300)}`, `alice:s3cret@${'a'.repeat(250)}`],
   wildcard: ['*.h?token=s3cret', 'alice:s3cret@*.example.com'],
   'not-host-port': ['alice:s3cret@api.example.com', 'https://alice:s3cret@h/', 'api.example.com?key=s3cret', 'api.example.com#s3cret', 'api.example.com/s3cret', '[alice:s3cret@::1]', 'api.example.com:8080@s3cret', 'api.example.com\u0000@s3cret'],
-  'not-a-host': ['alice%3As3cret%40api.example.com', 'api.example.com%3Fkey%3Ds3cret', 'alice：s3cret＠api.example.com', 'alice＠api.example.com？key＝s3cret', 'alice﹫s3cret.example.com', 'api.example.com\u0000s3cret', 'api.example.com^s3cret', 'api.example.com%2Fs3cret', 'api.example.com%26key%3Ds3cret', 'api.example.com＆key＝s3cret', 'api.example.com&key=s3cret', 'ghp_S3cretT0ken', 'sk_live_s3cret'],
+  'not-a-host': ['alice%3As3cret%40api.example.com', 'api.example.com%3Fkey%3Ds3cret', 'alice：s3cret＠api.example.com', 'alice＠api.example.com？key＝s3cret', 'alice﹫s3cret.example.com', 'api.example.com\u0000s3cret', 'api.example.com^s3cret', 'api.example.com%2Fs3cret', 'api.example.com%26key%3Ds3cret', 'api.example.com＆key＝s3cret', 'api.example.com&key=s3cret', 'ghp_S3cretT0ken', 'sk_live_s3cret', 'sk-ant-api03-s3cret0123456789abcdef', 'sk-ant-api03-s3cret0123456789abcdef:8443', 's3cret', 'api..s3cret.com', '.s3cret', 's3cret.', 's3cret.example.c0m', 's3cret.example.c', '-s3cret.example.com', 's3cret-.example.com', `${'s'.repeat(64)}3cret.example.com`],
   'not-normalised': ['S3CRET.example.com', 'ｓ３ｃｒｅｔ.example.com', '%73%33cret.example.com', 'API.Example.COM:8443', '127.1'],
   'bad-port': ['s3cret.example.com:0', 's3cret.example.com:080', 'api.example.com:99999', '[::1]:65536'],
 };

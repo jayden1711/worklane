@@ -9,6 +9,7 @@ import { projectStateDir } from '../guardrails/context.js';
 import { loadInstance } from '../instance.js';
 import { CliRunner } from '../runner.js';
 import { instanceId } from '../service.js';
+import { HELD_OUT_ENV } from '../held-out-paths.js';
 import { HELD_OUT_FROM_STATE_FLAG, HELD_OUT_NOT_ASKED, heldOutAllowed, SPEND_FLAG, spendFromArgs, spendRefusal, SPEND_REFUSED } from '../spend-gate.js';
 import { publicAllowed, saveTask, taskFromPr } from './add-task.js';
 import { runSuite } from './replay.js';
@@ -42,8 +43,15 @@ export async function harnessEvalCommand(root: string, sub: string | undefined, 
     const [repo, prArg] = rest.filter((a) => !a.startsWith('--'));
     const id = h.option(rest, '--id');
     const pub = h.flag(rest, '--public');
+    // WHY (#673, as #612 for reads): the held-out store is written only when the caller named one on purpose.
+    const heldOut = heldOutAllowed(rest);
+    h.flag(rest, HELD_OUT_FROM_STATE_FLAG);
     if (!repo || !prArg || !/^\d+$/.test(prArg)) {
       console.error(h.usage);
+      return 2;
+    }
+    if (!pub && !heldOut) {
+      console.error(`not written: add-task writes into a held-out store only when one is named. Set ${HELD_OUT_ENV} to a held-out store, pass ${HELD_OUT_FROM_STATE_FLAG} for the one in this machine's state, or pass --public`);
       return 2;
     }
     const t = taskFromPr(repo, Number(prArg), id ? { id } : {});
