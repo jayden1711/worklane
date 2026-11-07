@@ -12,7 +12,7 @@ import { checkSourceDoctor, workflowsAt, type Tip } from './check-pin-block.js';
 import { ConfigInvalid, loadConfig, type Config } from './config/load.js';
 import { checkGuardrails } from './guardrails/check.js';
 import { loadFingerprintSets } from './guardrails/context.js';
-import { agentSettingsPath, hookChecks, installCommand, legacyProjectHooks, projectSettingsRefusal, type Settings } from './agent-settings.js';
+import { agentSettingsPath, guardBlocksOnFailure, hookChecks, installCommand, legacyProjectHooks, projectSettingsRefusal, type Settings } from './agent-settings.js';
 import { GIT_HOOK_MARKER, legacyHookChecks } from './install.js';
 import { instancesDir, loadInstance, policiesForRepo, policyViolations, readPolicy } from './instance.js';
 import { instanceTargets, planMigrations, projectConfigFiles, type Targets } from './migrations.js';
@@ -205,6 +205,10 @@ export function doctor(rootArg: string, opts: { agentshield?: boolean; /** A pol
         // Without an instance, these are the hooks local runs rely on; with one, they're only for people's sessions.
         if (!c.ok && c.detail === 'not installed' && instances.length) continue;
         add(`hook ${c.event}`, c.ok ? 'ok' : 'fail', `${c.detail}${where}`);
+      }
+      // #930: the guard there must fail closed too; an install from before onFailure "block" doesn't.
+      if (hookChecks(s, (p) => p.replace('$CLAUDE_PROJECT_DIR', root)).find((c) => c.event === 'PreToolUse')?.ok && !guardBlocksOnFailure(s)) {
+        add('hook PreToolUse onFailure', 'fail', `the guard's hook in .claude/settings.json lacks onFailure "block": a hook stopped or timed out lets the tool call run${where}. Run \`${BRAND.cli} install\` again to rewrite it`);
       }
     } catch (e) {
       add('hooks', 'fail', `.claude/settings.json unreadable: ${(e as Error).message}`);

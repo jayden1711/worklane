@@ -69,7 +69,8 @@ export const REASON_END_CHARS = 300;
 /**
  * A deny or ask reason as the guard sends it. WHY (#894 review): a reason quotes the word it matched (a path, a
  * pattern, a host), and the agent picks the word: padded (`./` 40,000 times before `.env`), it made an 80 KB deny.
- * Every reason the guard sends goes through here, so a deny stays about 1 KB whatever the call: a reason over twice
+ * Every reason the guard sends goes through here, so a deny stays under 4 KiB whatever the call (#930 measured 3,527
+ * bytes; test/hook-deadline-delivery.test.ts asserts the bound, control characters included): a reason over twice
  * REASON_END_CHARS keeps its start (the word's) and its end (why it was refused), with the cut named.
  */
 export function shownReason(reason: string): string {

@@ -22,7 +22,7 @@ import { computeLevel, type LockScope } from './review.js';
 // Each file the plan names as text shows it (#763): a look-alike of a locked file escaped, never raw.
 import { shownPath } from './path-text.js';
 import { defaultRolePrompt } from './roles.js';
-import { checkDecisions, decisionsLines, DECISIONS_FORMAT, indexLines, NOTHING_RECORDED, resolveRef, type DecisionEntry, type DecisionsSection } from './plan-decisions.js';
+import { checkDecisions, decisionsLines, DECISIONS_FORMAT, indexLines, NOTHING_RECORDED, recordTexts, resolveRef, type DecisionEntry, type DecisionsSection } from './plan-decisions.js';
 
 /** Labels that ask for a plan before building. */
 export const PLAN_LABELS = ['size:M', 'size:L'];
@@ -130,7 +130,8 @@ export function planExtra(): string[] {
 
 /**
  * The decisions index in the planner's brief: the decisions already made (each question with the answer that
- * stands, the newest `max`), then the decision records in the checkout, each with how to cite it. What they
+ * stands, the newest `max`), then the decision records committed at the plan's base, each with how to cite it, and
+ * their committed text (#970: never the checkout copy, which setup steps may have changed). What they
  * settle, the planner doesn't ask again; what bears on the plan, it cites in its Decisions section.
  */
 export function decisionsMade(index: readonly DecisionEntry[], max = 30): string[] {
@@ -140,8 +141,9 @@ export function decisionsMade(index: readonly DecisionEntry[], max = 30): string
     ...(made.length ? ['', 'Decisions already made on this project (each stands; plan within them and do not ask them again):', ...made.slice(-max).map((e) => `- [${e.ref}] ${e.title}`)] : []),
     '',
     ...(records.length
-      ? ['Decision records in this checkout (cite a section exactly as bracketed; read the ones the plan touches):', ...indexLines(records).slice(1)]
-      : [made.length ? 'Decision records in this checkout: none (no decisions file or folder, no docs/design.md).' : indexLines([])[0]!]),
+      ? ["Decision records committed at the plan's base (cite a section exactly as bracketed; read the ones the plan touches below):", ...indexLines(records).slice(1)]
+      : [made.length ? "Decision records committed at the plan's base: none (no decisions file or folder, no docs/design.md)." : indexLines([])[0]!]),
+    ...recordTexts(records),
   ];
 }
 
@@ -293,6 +295,7 @@ export function planReviewExtra(plan: Plan, index: readonly DecisionEntry[]): st
     ...(cited.length ? ['', 'The entries it cites, in full:', ...cited.flatMap((e) => [`### [${e.ref}]`, e.text || e.title])] : []),
     '',
     ...indexLines(index),
+    ...recordTexts(index.filter((e) => !e.ref.startsWith('decision '))),
   ];
 }
 

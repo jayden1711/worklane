@@ -319,11 +319,39 @@ export function resolveRef(index: readonly DecisionEntry[], ref: string): Decisi
   return index.find((e) => e.aliases.includes(n)) ?? null;
 }
 
+/**
+ * The most of the records' committed text one brief carries (#970). Past it, an entry is listed without its text,
+ * and the brief says so: the agent is never sent to the checkout copy, which setup steps may have changed.
+ */
+export const RECORD_TEXT_BUDGET = 60_000;
+
+/**
+ * Each decision record's text as committed at the plan's base (#970), the newest first within RECORD_TEXT_BUDGET:
+ * what the planner and plan reviewer read, instead of the record files in their checkout, where setup steps have run.
+ */
+export function recordTexts(records: readonly DecisionEntry[], budget = RECORD_TEXT_BUDGET): string[] {
+  if (!records.length) return [];
+  const out = ['', "The decision records' text, as committed at the plan's base (read these, never the record files in the checkout: setup steps run there, so that copy may differ):"];
+  let left = budget;
+  const omitted: string[] = [];
+  for (const e of records) {
+    const text = e.text || e.title;
+    if (text.length > left) {
+      omitted.push(e.ref);
+      continue;
+    }
+    left -= text.length;
+    out.push(`### [${e.ref}]`, text);
+  }
+  if (omitted.length) out.push('', `Not included, past this brief's size (${omitted.length}): ${omitted.map((r) => `[${r}]`).join(', ')}. Their committed text isn't in this brief; rely on nothing in them but their headings, and say so as a risk if one bears on the plan.`);
+  return out;
+}
+
 /** The index as the planner and the plan reviewer see it: one line per entry, each with the exact way to cite it. */
 export function indexLines(index: readonly DecisionEntry[], max = 200): string[] {
-  if (!index.length) return ['Decisions index: nothing is recorded (no decisions made yet, and no decision records or docs/design.md in this checkout).'];
+  if (!index.length) return ['Decisions index: nothing is recorded (no decisions made yet, and no decision records or docs/design.md committed at the plan\'s base).'];
   const lines = index.slice(0, max).map((e) => (e.ref.startsWith('decision ') ? `- [${e.ref}] ${e.title}` : e.ref.endsWith(` § ${e.title}`) ? `- [${e.ref}]` : `- [${e.ref}] ${e.title}`));
-  return ['Decisions index (cite an entry exactly as it appears in brackets; the files are in this checkout):', ...lines, ...(index.length > max ? [`- … and ${index.length - max} more sections in the same files`] : [])];
+  return ['Decisions index (cite an entry exactly as it appears in brackets):', ...lines, ...(index.length > max ? [`- … and ${index.length - max} more sections in the same files`] : [])];
 }
 
 export interface Citation {
