@@ -1378,10 +1378,12 @@ test(`adversarial guards / redact.before-store (${doc('Secrets in event payloads
   assert.ok(stored('an ordinary line').every((s) => s.raw.includes('an ordinary line')), 'control: ordinary text is stored as it is');
 });
 
-knownHole(`adversarial guards / redact.before-store (${doc('Secrets in event payloads and transcripts are redacted before they are stored')}): a Discord bot token is redacted before it is stored`, 'PR #921 (#889)', {}, () => {
+// Closed by PR #921 (#889): once a known hole, now a normal case.
+test(`adversarial guards / redact.before-store (${doc('Secrets in event payloads and transcripts are redacted before they are stored')}): a Discord bot token is redacted before it is stored`, () => {
   const token = [`M${alnum(23)}`, alnum(6), alnum(27)].join('.');
   const stores = stored(`bot token=${token} in a log line`);
-  return { attacks: stores.map((s) => `a Discord bot token kept by ${s.where}`), open: stores.filter((s) => s.raw.includes(token)).map((s) => `a Discord bot token kept by ${s.where}`) };
+  assert.equal(stores.length, 4, 'the event log, held while full, the run record and the run feed');
+  assert.deepEqual(stores.filter((s) => s.raw.includes(token) || s.raw === '(no record written)').map((s) => `a Discord bot token kept by ${s.where}`), [], 'a Discord bot token stored as it was');
 });
 
 // ---- What "covered" means: the mutant list (test/adversarial/mutants.json, run by run-mutants.mjs). ----
