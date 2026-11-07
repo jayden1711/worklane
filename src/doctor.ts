@@ -3,7 +3,7 @@
 // that can't run reports why, and a feature the setup's mode can't have is
 // listed as off, with why.
 import { execFileSync, spawnSync } from './os/child-process.js';
-import { gitExecFileSync } from './os/git.js';
+import { gitExecFileSync, gitSpawnSync } from './os/git.js';
 import { existsSync, lstatSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { agentRecordWarning } from './setup-steps.js';
@@ -78,7 +78,7 @@ export function doctor(rootArg: string, opts: { agentshield?: boolean; /** A pol
   if (maj < 22 || (maj === 22 && min < 13)) add('node', 'fail', `Node ${process.versions.node}; the engine needs >= 22.13`);
   else add('node', 'ok', `Node ${process.versions.node}`);
   // The merge decision's checks need a git new enough to measure a merge; with an older one every PR waits (#1077).
-  const git = spawnSync('git', ['version'], { encoding: 'utf8', timeout: 20_000 });
+  const git = gitSpawnSync(['version'], { encoding: 'utf8', timeout: 20_000 });
   const gitProblem = git.status === 0 ? gitTooOld(git.stdout) : `git can't run (${(git.error?.message ?? git.stderr ?? `exit ${git.status}`).trim().slice(0, 200)})`;
   add('git', gitProblem ? 'fail' : 'ok', gitProblem ?? git.stdout.trim());
 

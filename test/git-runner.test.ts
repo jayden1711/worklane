@@ -217,7 +217,9 @@ const OUTSIDE_THE_RUNNER: Record<string, { n: number; why: string; must?: RegExp
   'src/starter-ci.ts': { n: 3, why: "`run('git', ...)`: realRun, here, spawns through commandSpawnSync", must: BY_NAME('commandSpawnSync', 'cmd, args, ') },
   'src/testrun/host.ts': { n: 1, why: "`run('git', gitArgs(...), { env: gitEnv(...) })`: the async runner, given the settings by hand", must: [/run\('git', gitArgs\(\[/, /env: gitEnv\(\{ PATH/] },
   // Text that names git without starting it.
-  'src/scan/secrets.ts': { n: 1, why: "gitleaks' `git` subcommand (scanRange); gitleaks runs git itself, so it gets gitEnv() over the snapshot's env. The commit scan's own gitleaks call went with #979 (it scans files, not git)", must: [/\['git', '--redact', '--no-banner', '--log-opts', ids,/, /stdio: \['ignore', 'ignore', 'pipe'\], env: gitEnv\(env\) \}/] },
+  'src/scan/secrets.ts': { n: 2, why: "gitleaks' `git` subcommand (scanRange); gitleaks runs git itself, so it gets gitEnv() over the snapshot's env. The commit scan's own gitleaks call went with #979 (it scans files, not git). And `join(xdg, 'git', 'attributes')` in gitVar: a path's parts", must: [/\['git', '--redact', '--no-banner', '--log-opts', ids,/, /stdio: \['ignore', 'ignore', 'pipe'\], env: gitEnv\(env\) \}/] },
+  'src/doctor.ts': { n: 1, why: "`add('git', ...)`: the name of doctor's git check (its `git version` runs through gitSpawnSync)" },
+  'src/guardrails/push-hook.ts': { n: 4, why: "the push hook reads a command line, it starts no git: two comments quoting `git`, and the `['git', ...]` words it rebuilds to read a dashed program (asGit) and an alias (resolveGit)" },
   'src/review.ts': { n: 2, why: "`'git'`: the name of a way to read a .gitattributes line" },
   'src/plugins/approval.ts': { n: 1, why: "`z.literal('git')`: a plugin source's type" },
   'src/updater-setup.ts': { n: 1, why: 'a comment quoting an allowed-signers line (namespaces="git")' },
