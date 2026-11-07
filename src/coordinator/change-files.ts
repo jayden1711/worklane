@@ -193,6 +193,30 @@ export function blobsByName(cwd: string, rev: string, names: string[], maxBytes 
   return out;
 }
 
+/**
+ * The tree mode of each entry of `rev`'s tree whose name, as nameOf reads it, is one of `names` (#951): `120000` a
+ * symlink, `160000` a submodule link, `100644`/`100755` a regular file. Nothing is read but the tree. A name with no
+ * entry at `rev` isn't in the map. Throws when the tree can't be listed.
+ */
+export function treeModes(cwd: string, rev: string, names: string[]): Map<string, string[]> {
+  const out = new Map<string, string[]>();
+  const wanted = new Set(names);
+  if (!wanted.size) return out;
+  if (rev.startsWith('-')) throw new Error(`treeModes: ${rev} is not a revision`);
+  // -r -t -z: every file, and every tree on the way to one, as "mode SP type SP object TAB path NUL".
+  for (const rec of fields(must(runBytes(cwd, ['ls-tree', '-r', '-t', '-z', '--full-tree', rev])))) {
+    const tab = rec.indexOf(9);
+    if (tab === -1) continue;
+    const name = nameOf(rec.subarray(tab + 1));
+    if (!wanted.has(name)) continue;
+    out.set(name, [...(out.get(name) ?? []), rec.subarray(0, tab).toString('latin1').split(' ')[0]!]);
+  }
+  return out;
+}
+
+/** True for a tree mode that is a regular file. */
+export const isRegularFileMode = (mode: string): boolean => REGULAR_FILE.has(mode);
+
 /** changedNames, or null when git fails (an unknown commit, no repo). */
 export function changedNamesOrNull(cwd: string, args: string[], o: NameListOptions = {}): string[] | null {
   const out = nameList(cwd, args, o);
