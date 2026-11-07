@@ -8,6 +8,7 @@ import { EventLog } from '../src/events/log.js';
 import { PolicyFile } from '../src/instance.js';
 import { buildReport } from '../src/reports.js';
 import { applySettings, changeSetting, inRunWindow, loadLimits, settingsProblems, settingsReader, SettingsError } from '../src/settings.js';
+import { DETAIL_LOGGED } from '../src/user-facing-error.js';
 import { parse as parseYaml } from 'yaml';
 import { exampleProject } from './helpers.js';
 
@@ -79,6 +80,32 @@ test('run windows: inside, outside, across midnight, and none means always', () 
   assert.equal(inRunWindow([{ from: '22:00', to: '06:00' }], at(2, 0)), true);
   assert.equal(inRunWindow([{ from: '22:00', to: '06:00' }], at(12, 0)), false);
   assert.equal(inRunWindow([{ from: '08:00', to: '09:00' }, { from: '20:00', to: '21:00' }], at(20, 30)), true);
+});
+
+test("#1064: an unreadable or unusable policy's error is the engine's words; the path and the parser's text are logged, once per change", () => {
+  const i = instance(`${POLICY}settings: { workers: 2 }\n`);
+  writeFileSync(i.limitsPath, '{not json');
+  const lines: string[] = [];
+  const read = settingsReader(i.policyPath, i.limitsPath, (l) => lines.push(l));
+  const r = read();
+  assert.deepEqual(r, { settings: {}, error: `policy settings unusable (${DETAIL_LOGGED})` });
+  assert.ok(!r.error!.includes(i.d) && !/JSON/.test(r.error!), r.error!);
+  assert.equal(lines.length, 1, JSON.stringify(lines));
+  assert.ok(lines[0]!.startsWith('the instance policy settings unusable: ') && lines[0]!.includes(i.limitsPath) && /JSON/.test(lines[0]!), lines[0]);
+  read();
+  read();
+  assert.equal(lines.length, 1, 'logged once, not on every tick');
+  // Unreadable (gone): the same, its errno text and path in the log only, once however many ticks read it.
+  const gone = join(i.d, 'missing', 'policy.yaml');
+  const none = settingsReader(gone, i.limitsPath, (l) => lines.push(l));
+  for (let n = 0; n < 3; n++) assert.deepEqual(none(), { settings: {}, error: `policy unreadable (${DETAIL_LOGGED})` });
+  assert.equal(lines.length, 2, JSON.stringify(lines));
+  assert.ok(lines[1]!.startsWith('the instance policy unreadable: ') && lines[1]!.includes(gone) && lines[1]!.includes('ENOENT'), lines[1]);
+  // A different detail is logged again.
+  writeFileSync(i.limitsPath, '[[');
+  writeFileSync(i.policyPath, `${POLICY}settings: { workers: 3 }\n`);
+  assert.equal(read().error, `policy settings unusable (${DETAIL_LOGGED})`);
+  assert.equal(lines.length, 3, JSON.stringify(lines));
 });
 
 test("a policy without settings is still valid (they're optional)", () => {

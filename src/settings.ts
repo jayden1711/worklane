@@ -23,7 +23,7 @@ import type { StuckMode } from './stuck.js';
 import { etcPath } from './os/system-paths.js';
 import { adminRoute, decodePolicyValue, encodePolicyValue, policyHelperMissing, policyInstance, policyRootUid, policySetCommand, policySetOk, readPolicyChecked, tightenProblem } from './policy-gate.js';
 import { MACHINE_HELPER } from './machine.js';
-import { causeChain } from './user-facing-error.js';
+import { causeChain, DETAIL_LOGGED, logDetail } from './user-facing-error.js';
 
 /** The machine's bounds on instance settings: root-owned, outside every instance's home. */
 export const LIMITS_PATH = etcPath('limits.json');
@@ -143,10 +143,21 @@ export function inRunWindow(windows: { from: string; to: string }[], now = new D
  * text of it (or of the limits file) changed. Compared by content, not mtime and size: an edit of the same length
  * within one timestamp tick (workers 2 -> 3) would otherwise go unseen. Both files are a few hundred bytes. An unreadable or invalid file, or settings out of bounds: the error, and no
  * settings (the repo's values apply) until it's fixed.
+ *
+ * The error is the engine's own words (#1064): it goes into the settings.applied event, which /api/events shows. An
+ * unreadable or unparsable file's own text (its absolute path, the parser's words, which quote the file) goes to the
+ * log, once for each different detail rather than on every tick.
  */
-export function settingsReader(policyPath: string, limitsPath = LIMITS_PATH): () => { settings: InstanceSettings; error: string | null } {
+export function settingsReader(policyPath: string, limitsPath = LIMITS_PATH, log?: (line: string) => void): () => { settings: InstanceSettings; error: string | null } {
   let key = '';
   let last: { settings: InstanceSettings; error: string | null } = { settings: {}, error: null };
+  let logged = '';
+  const logOnce = (what: string, e: unknown) => {
+    const seen = [what, e instanceof Error ? e.message : String(e), ...causeChain(e)].join('\0');
+    if (seen === logged) return;
+    logged = seen;
+    logDetail(what, e, log);
+  };
   return () => {
     let stamp = '';
     let text: string;
@@ -157,7 +168,8 @@ export function settingsReader(policyPath: string, limitsPath = LIMITS_PATH): ()
       text = checked ? checked.text : readFileSync(policyPath, 'utf8');
       stamp = `${text}\0${existsSync(limitsPath) ? readFileSync(limitsPath, 'utf8') : ''}`;
     } catch (e) {
-      return { settings: {}, error: `policy unreadable: ${(e as Error).message}` };
+      logOnce('the instance policy unreadable', e);
+      return { settings: {}, error: `policy unreadable (${DETAIL_LOGGED})` };
     }
     if (stamp === key) return last;
     key = stamp;
@@ -166,7 +178,8 @@ export function settingsReader(policyPath: string, limitsPath = LIMITS_PATH): ()
       const problems = settingsProblems(policy.settings, loadLimits(limitsPath), policy);
       last = problems.length ? { settings: {}, error: `settings refused: ${problems.join('; ')}` } : { settings: policy.settings, error: null };
     } catch (e) {
-      last = { settings: {}, error: `policy settings unusable: ${[(e as Error).message.split('\n')[0], ...causeChain(e)].join(': ')}` };
+      logOnce('the instance policy settings unusable', e);
+      last = { settings: {}, error: `policy settings unusable (${DETAIL_LOGGED})` };
     }
     return last;
   };
