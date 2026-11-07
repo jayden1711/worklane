@@ -136,6 +136,8 @@ interface Render {
   loadIncidents(hub: unknown, get: (name: string | null, path: string) => Promise<unknown>): Promise<unknown[]>;
   scopeOf(hub: unknown, saved: string | null, all: boolean): { current: string | null; all: boolean; instances: (string | null)[] };
   loadBoards(scope: unknown, get: (instance: string | null, path: string) => Promise<unknown>): Promise<{ name: string | null; data: unknown; error: string | null }[]>;
+  keepShown(shown: { name: string | null; data: unknown; error: string | null }[] | null, fresh: { name: string | null; data: unknown; error: string | null }[]): { name: string | null; data: unknown; error: string | null; refused?: boolean }[];
+  ApiError: new (message: string, status: number) => Error;
   onInstance(instance: string | null, path: string, init: unknown, scope: Promise<unknown>): Promise<unknown>;
   renderMachineSlots(slots: unknown): string;
   elapsed(since: string, now?: number): string;
@@ -2176,6 +2178,38 @@ test('the Board renders for the owner, a writer and a viewer without errors: fiv
   assert.match(onlyB, /data-testid="board-scope" data-scope="b"/);
   assert.equal((onlyB.match(/data-testid="board-card"/g) ?? []).length, boards.viewer.cards.length);
   assert.doesNotMatch(onlyB, /data-testid="board-card-instance"/);
+});
+
+test('#639: a fresh read that fails keeps the board already shown, marked as not refreshed; a refusal, or nothing shown yet, says it can\'t load', async () => {
+  const busy = { ...boards.owner, instance: 'busy', cards: boards.owner.cards.map((c) => ({ ...c, instance: 'busy' })) };
+  const scope = { current: 'busy', all: false, instances: ['busy'] };
+  const shown = await r.loadBoards(scope, async () => busy);
+  const failing = (e: Error) => r.loadBoards(scope, async () => Promise.reject(e));
+  // A blip (ECONNRESET on a loaded machine): the cards stay, with a line saying the refresh failed.
+  const kept = r.keepShown(shown, await failing(new Error("isn't answering (read ECONNRESET)")));
+  assert.equal(kept[0]!.data, busy, 'the board already shown is kept');
+  const html = clean(() => r.renderBoard(kept));
+  assert.equal((html.match(/data-testid="board-card"/g) ?? []).length, busy.cards.length, 'every card still shown');
+  assert.match(html, /data-testid="board-instance-stale"[^>]*>busy: couldn&#x27;t refresh its board: isn&#x27;t answering \(read ECONNRESET\), showing the last one, retrying/);
+  assert.doesNotMatch(html, /data-testid="board-instance-error"/);
+  assert.doesNotMatch(html, /Nothing in flight/);
+  // The next good answer replaces it, and the line goes.
+  const fresh = r.keepShown(kept, shown);
+  assert.doesNotMatch(clean(() => r.renderBoard(fresh)), /data-testid="board-instance-stale"/);
+  // A refusal is an answer: nothing kept under it.
+  const refused = r.keepShown(shown, await failing(new r.ApiError('not allowed', 403)));
+  assert.equal(refused[0]!.data, null);
+  assert.match(clean(() => r.renderBoard(refused)), /data-testid="board-instance-error"[^>]*>busy: can&#x27;t load its board: not allowed/);
+  // Nothing shown yet: the error, as before.
+  const none = r.keepShown(null, await failing(new Error('answered 502')));
+  assert.equal(none[0]!.data, null);
+  assert.match(clean(() => r.renderBoard(none)), /data-testid="board-instance-error"[^>]*>busy: can&#x27;t load its board: answered 502/);
+  // All instances: only the one that failed keeps its last board; another's is never put under it.
+  const two = { current: 'a', all: true, instances: ['a', 'b'] };
+  const before = await r.loadBoards(two, async (n) => ({ ...busy, instance: n, cards: busy.cards.map((c) => ({ ...c, instance: n })) }));
+  const after = r.keepShown([before[0]!], await r.loadBoards(two, async () => Promise.reject(new Error('reset'))));
+  assert.equal(after[0]!.data, before[0]!.data, "a's last board kept");
+  assert.equal(after[1]!.data, null, 'b had none shown: nothing put there');
 });
 
 test("the Board's Landing column shows the PR batches, and a card where its PR stands with them; a viewer's without what happened", () => {
