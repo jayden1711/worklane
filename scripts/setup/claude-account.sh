@@ -177,17 +177,19 @@ if (api) {
 process.stdout.write(JSON.stringify(r));
 ' "$@"
 }
-# The real call as this user, as account_record takes it: ok, or Claude's message.
-api_result() { local said; if said="$(claude_api_check "$1")"; then echo ok; else echo "${said:-the API call failed}"; fi; }
+# The real call as this user (<user> <claude config dir>), as account_record takes it: ok, or Claude's message.
+api_result() { local said; if said="$(claude_api_check "$1" "$2")"; then echo ok; else echo "${said:-the API call failed}"; fi; }
 # Every agent user's record, as a JSON array; written to status.json (root's, 0644) for the dashboard. Each user claude
 # auth status calls signed in is also checked with one minimal real call.
+# WHY (#822): both with the CLAUDE_CONFIG_DIR the instance's runs get (src/runner.ts agentUserEnv: its
+# claude_config_dir, else <home>/.claude; users_of gives the same), so the record names the login runs use.
 collect_status() {
   local n kind user cfg recs="" rec auth api
   for n in $(instances); do
     while read -r kind user cfg; do
       [ -n "$user" ] || continue
-      auth="$(claude_status_json "$user")" api=""
-      if printf '%s' "$auth" | grep -q '"loggedIn": *true'; then api="$(api_result "$user")"; fi
+      auth="$(claude_status_json "$user" "$cfg")" api=""
+      if printf '%s' "$auth" | grep -q '"loggedIn": *true'; then api="$(api_result "$user" "$cfg")"; fi
       rec="$(account_record "$n" "$kind" "$user" "$cfg/.credentials.json" "$auth" "$api")"
       recs="${recs:+$recs,}$rec"
     done < <(users_of "$n")
