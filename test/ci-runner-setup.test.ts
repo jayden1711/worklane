@@ -233,6 +233,91 @@ test('the job-started hook runs only trusted jobs: this repo\'s pushes, dispatch
   }
 });
 
+test('a runner installed with --pull-requests same-repo also takes pull requests into its branch from the repo\'s own branches, never a fork\'s', { skip: !posix && 'bash' }, () => {
+  const h = hooks();
+  try {
+    const event = (pr: unknown) => {
+      const f = join(h.d, `event-${Math.random().toString(36).slice(2)}.json`);
+      writeFileSync(f, typeof pr === 'string' ? pr : JSON.stringify(pr));
+      return f;
+    };
+    const repo = { full_name: 'example-org/example-shop' };
+    const same = event({ pull_request: { number: 7, head: { repo }, base: { repo } } });
+    const pr = (vars: Record<string, string> = {}) => ({
+      WORKLANE_CI_PULL_REQUESTS: 'same-repo', GITHUB_EVENT_NAME: 'pull_request', GITHUB_REF: 'refs/pull/7/merge', GITHUB_HEAD_REF: 'feature', GITHUB_BASE_REF: 'main',
+      GITHUB_WORKFLOW_REF: 'example-org/example-shop/.github/workflows/ci.yml@refs/pull/7/merge', GITHUB_EVENT_PATH: same, ...vars,
+    });
+    const ok = h.run('job-started.sh', 'verdict', pr());
+    assert.equal(ok.status, 0, ok.stderr);
+    assert.match(ok.stdout, /^ci-trust: pull_request #7 from example-org\/example-shop's branch feature into main, .*: trusted \(same repo\)$/m);
+    // Pushes, dispatches and schedules on the branch still run, and the rest of the rules still hold for them.
+    for (const vars of [{ GITHUB_EVENT_NAME: 'push' }, { GITHUB_EVENT_NAME: 'schedule' }]) assert.equal(h.run('job-started.sh', 'verdict', { WORKLANE_CI_PULL_REQUESTS: 'same-repo', ...vars }).status, 0);
+    assert.equal(h.run('job-started.sh', 'verdict', { WORKLANE_CI_PULL_REQUESTS: 'same-repo', GITHUB_EVENT_NAME: 'push', GITHUB_REF: 'refs/heads/feature' }).status, 1);
+    for (const [vars, why] of [
+      // A fork's pull request: GITHUB_REPOSITORY is the base repo's, so only the event file tells it apart.
+      [{ GITHUB_EVENT_PATH: event({ pull_request: { number: 7, head: { repo: { full_name: 'someone/example-shop' } }, base: { repo } } }) }, /head is in someone\/example-shop, not example-org\/example-shop \(a fork's pull request never runs here\)/],
+      [{ GITHUB_EVENT_PATH: event({ pull_request: { number: 7, head: { repo: null }, base: { repo } } }) }, /head is in no repo/],
+      [{ GITHUB_EVENT_PATH: event({ pull_request: { number: 7, head: { repo: { full_name: 'Example-Org/example-shop' } }, base: { repo } } }) }, /head is in Example-Org\/example-shop/],
+      [{ GITHUB_EVENT_PATH: event({ pull_request: { number: 7, head: { repo: { full_name: 'example-org/example-shop\nexample-org/example-shop' } }, base: { repo } } }) }, /head is in example-org\/example-shop example-org/],
+      [{ GITHUB_EVENT_PATH: event({ pull_request: { number: 7, head: { repo }, base: { repo: { full_name: 'someone/example-shop' } } } }) }, /base is in someone\/example-shop/],
+      [{ GITHUB_EVENT_PATH: event({ pull_request: { number: 8, head: { repo }, base: { repo } } }) }, /pull request #8's, not #7's/],
+      [{ GITHUB_EVENT_PATH: event({ head: { repo } }) }, /head is in no repo/],
+      [{ GITHUB_EVENT_PATH: event('not json') }, /the event file isn't a pull request's JSON/],
+      [{ GITHUB_EVENT_PATH: join(h.d, 'missing.json') }, /no event file/],
+      [{ GITHUB_EVENT_PATH: '' }, /no event file/],
+      [{ GITHUB_BASE_REF: 'release' }, /a pull request into release, not main/],
+      [{ GITHUB_HEAD_REF: '' }, /no head ref/],
+      [{ GITHUB_REF: 'refs/heads/main' }, /not a pull request's refs\/pull\/<n>\/merge/],
+      [{ GITHUB_REF: 'refs/pull/7/head' }, /not a pull request's/],
+      [{ GITHUB_WORKFLOW_REF: 'example-org/example-shop/.github/workflows/ci.yml@refs/pull/8/merge' }, /not one of example-org\/example-shop's workflows on refs\/pull\/7\/merge/],
+      [{ GITHUB_WORKFLOW_REF: 'someone/example-shop/.github/workflows/ci.yml@refs/pull/7/merge' }, /workflow someone\//],
+      [{ GITHUB_REPOSITORY: 'someone/example-shop' }, /repository someone\/example-shop/],
+      [{ GITHUB_EVENT_NAME: 'pull_request_target' }, /event pull_request_target/],
+      // The same pull request, to a runner without the mode (the default, or anything but same-repo).
+      [{ WORKLANE_CI_PULL_REQUESTS: 'none' }, /event pull_request \(only push/],
+      [{ WORKLANE_CI_PULL_REQUESTS: '' }, /event pull_request \(only push/],
+      [{ WORKLANE_CI_PULL_REQUESTS: 'any' }, /event pull_request \(only push/],
+    ] as const) {
+      const r = h.run('job-started.sh', 'verdict', pr(vars));
+      assert.equal(r.status, 1, `${JSON.stringify(vars)} must be refused: ${r.stdout}`);
+      assert.match(r.stderr, /^ci-trust: not running this job here: /m);
+      assert.match(r.stderr, why, JSON.stringify(vars));
+      assert.doesNotMatch(r.stdout, /ci-lock|trusted/, 'refused before anything else');
+    }
+    // Without node, the head repo can't be read: refused, never assumed. PATH holds basename (the hook's name) only.
+    const bin = join(h.d, 'bin');
+    mkdirSync(bin);
+    const basename = spawnSync('bash', ['-c', 'command -v basename'], { encoding: 'utf8' }).stdout.trim();
+    symlinkSync(basename, join(bin, 'basename'));
+    const bash = spawnSync('bash', ['-c', 'command -v bash'], { encoding: 'utf8' }).stdout.trim();
+    const r = spawnSync(bash, [join(h.d, 'job-started.sh')], {
+      encoding: 'utf8',
+      env: { PATH: bin, WORKLANE_CI_REPO: 'example-org/example-shop', WORKLANE_CI_BRANCH: 'main', WORKLANE_CI_LOCK: h.lock, WORKLANE_CI_LOCK_WAIT_MIN: '1', WORKLANE_CI_NO_LOCK_JOBS: 'verdict', WORKLANE_CI_STATE: h.state, GITHUB_JOB: 'verdict', GITHUB_REPOSITORY: 'example-org/example-shop', ...pr() },
+    });
+    assert.equal(r.status, 1, r.stdout + r.stderr);
+    assert.match(r.stderr, /node isn't installed/);
+  } finally {
+    h.done();
+  }
+});
+
+test('ci-runner.sh --pull-requests and --nice: the hook\'s mode and the niceness reach the units, and bad values are refused', { skip: !posix && 'bash' }, () => {
+  const tests = (...a: string[]) => print('1', '--name', 'shop-tests', '--cpus', '0-1', ...a);
+  const def = tests();
+  assert.equal(def.status, 0, def.stderr);
+  assert.match(def.stdout, /^Environment=WORKLANE_CI_PULL_REQUESTS=none$/m, 'a main-only runner by default');
+  assert.equal((def.stdout.match(/^Nice=0$/gm) ?? []).length, 2, 'the runner and its Docker');
+  const t = tests('--pull-requests', 'same-repo', '--nice', '10', '--label', 'trusted-tests');
+  assert.equal(t.status, 0, t.stderr);
+  assert.match(t.stdout, /^Environment=WORKLANE_CI_PULL_REQUESTS=same-repo$/m);
+  assert.equal((t.stdout.match(/^Nice=10$/gm) ?? []).length, 2, 'the runner and its Docker (so its containers)');
+  assert.match(t.stdout, /--labels trusted-tests /);
+  for (const bad of [['--pull-requests', 'all'], ['--pull-requests', 'forks'], ['--nice', '-5'], ['--nice', '20'], ['--nice', '05'], ['--nice', 'x']]) {
+    const r = tests(...bad);
+    assert.equal(r.status, 2, `${bad.join(' ')}: ${r.stdout}`);
+  }
+});
+
 test('the lock hooks: a job holds the full-run lock shared from start to end, waits out an agent\'s exclusive run, and skips it only when named', { skip: !hasFlock && 'needs flock(1) (util-linux)' }, async () => {
   const h = hooks();
   const tryLock = (mode: '-x' | '-s') => spawnSync('flock', ['-n', mode, h.lock, 'true']).status;
@@ -279,7 +364,10 @@ test('the reset removes the last job\'s containers before it remakes the runner,
   const at = (s: string) => sh.indexOf(s);
   assert.ok(at('rm -f -v $ids') > 0 && at('rm -f -v $ids') < at('rm -rf "$base/runner" "$base/work" "$base/home"'));
   assert.ok(at('builder prune -af') > 0 && at('builder prune -af') < at('rm -rf "$base/runner"'));
-  assert.match(sh, /bin \| externals\) install -d -o root -g root -m 0755/, 'binaries come only from the read-only binds of the pinned release');
+  assert.match(sh, /bin\) install -d -o root -g root -m 0755 "\$base\/runner\/bin"/, 'binaries come only from the read-only bind of the pinned release');
+  // externals: a root-owned, not group- or world-writable copy, so a container job's /__e has the runner's Node and
+  // the runner user can't change it for the next job.
+  assert.match(sh, /externals\) cp -a --reflink=auto "\$f" "\$base\/runner\/externals"; chown -R root:root "\$base\/runner\/externals"; chmod -R go-w "\$base\/runner\/externals" ;;/);
   assert.match(sh, /install -o "\$user" -g "\$user" -m 0600 "\$reg\/\$f"/);
   assert.match(sh, /_tool\/node\/\$v/);
   // Only node.sh's own release is seeded: on a machine whose /usr/local/bin/node is a plain file, its prefix would be
