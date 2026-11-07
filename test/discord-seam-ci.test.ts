@@ -106,4 +106,23 @@ test("the Discord seam's engine case (ci-slow.yml): the workflow's checks hold f
   }
   assert.ok(lines.some((l) => l.startsWith('jq -e') && l.includes('"$F/seam-engine.json"')), 'the workflow checks the answer');
   assert.ok(lines.some((l) => l.startsWith('grep -q') && l.includes('"$F/seam-engine.log"') && l.includes("can't read its bot token file $seam/unreadable-token (EACCES)")), "the workflow finds the engine CLI's own line in the unit's log");
+
+  // #1120 item 1 (R116b): a check that keeps its shape can still be weakened (`jq -e '.error'`, `|| true`, another
+  // file in the grep). So the checks are pinned exactly, and each must fail on a wrong answer, not only pass on this one.
+  assert.deepEqual(lines, ENGINE_CHECKS, "case 1's checks in ci-slow.yml are exactly these");
+  const wrong = join(seam, 'wrong');
+  mkdirSync(wrong);
+  writeFileSync(join(wrong, 'seam-engine.json'), JSON.stringify({ error: 'something else' }));
+  writeFileSync(join(wrong, 'seam-engine.log'), `${stdout}GET /api/first-run/discord/channels: instance ci: listed\n`);
+  for (const line of lines) {
+    const check = spawnSync('bash', ['-euo', 'pipefail', '-c', line], { encoding: 'utf8', env: { ...process.env, F: wrong, seam, code: '200' } });
+    assert.notEqual(check.status, 0, `the workflow's check passed on a wrong answer or log: ${line}`);
+  }
 });
+
+/** Case 1's checks, as ci-slow.yml must write them: the status, the answer whole, and the engine CLI's own line. */
+const ENGINE_CHECKS = [
+  '[ "$code" = 502 ]',
+  `jq -e --arg e "the bot's channel listing failed; the detail is in the dashboard's log on the machine" '. == {error: $e}' "$F/seam-engine.json"`,
+  `grep -qF "GET /api/first-run/discord/channels: instance ci: can't read its bot token file $seam/unreadable-token (EACCES)" "$F/seam-engine.log"`,
+];
