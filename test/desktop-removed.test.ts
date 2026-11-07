@@ -1247,19 +1247,36 @@ test('the packages this backstop runs are the locked ones, from the repo\'s own 
  * path) now checks their lockfile entries and installed files right after the install; and the other lint tests
  * are held at step 7, before anything unheld. #1007: tsc can emit a package.json under dist/ (a JSON import of one)
  * after the pin check, so the same check runs again once tsc has emitted, before this backstop; the other lint tests
- * are now step 8. [step, as parsed]
+ * are now step 8. The self-hosted tests container (#1160) runs its own setup first, as step 3: it runs only
+ * ci.yml's own commands, never a file from the checkout, and makes the user every later step that runs a test file
+ * switches to there (as GitHub's runners run them, never as root); so the other lint tests are step 9. On GitHub's
+ * runners the setup and that switch do nothing. [step, as parsed]
  */
 // check-table: never-shrink
 const SHARD_FIRST_STEPS: [string, (s: Record<string, unknown>) => boolean][] = [
   ['checkout, the merge commit and its base', (s) => String(s.uses).startsWith('actions/checkout@') && same(Object.keys(s).sort(), ['uses', 'with']) && same(s.with, { 'fetch-depth': 2 })],
   ['setup-node, the matrix version, the npm cache', (s) => String(s.uses).startsWith('actions/setup-node@') && same(Object.keys(s).sort(), ['uses', 'with']) && same(s.with, { 'node-version': '${{ matrix.node }}', cache: 'npm' })],
+  ['the self-hosted container\'s own setup, ci.yml\'s commands only', (s) => s.name === CONTAINER_SETUP && same(Object.keys(s).sort(), ['env', 'name', 'run', 'shell']) && String(s.run).startsWith(CONTAINER_ONLY) && !RUNS_CHECKOUT.test(String(s.run))],
   ['npm ci with no package scripts', (s) => same(s, { run: 'npm ci --ignore-scripts' })],
   ['the pins, checked before any pinned package runs', (s) => same(s, { name: 'the pinned packages, before any of them runs', run: 'node scripts/ci/check-pins.mjs' })],
   ['the locked tsc, no npm script', (s) => same(s, { run: 'node node_modules/typescript/bin/tsc -p tsconfig.json' })],
   ['the pins again, on what tsc emitted', (s) => same(s, { name: 'the pinned packages again, after tsc emits', run: 'node scripts/ci/check-pins.mjs' })],
-  ['this backstop, alone', (s) => same(s, { name: 'the desktop backstop, before anything unheld runs', run: 'node --import ./dist/test/isolate.js --test dist/test/desktop-removed.test.js' })],
-  ['the other lint tests', (s) => same(s, { name: 'the other lint tests, before anything unheld runs', shell: 'bash', run: OTHER_LINT_TESTS })],
+  ['this backstop, alone', (s) => same(s, { name: 'the desktop backstop, before anything unheld runs', shell: 'bash', run: `${AS_RUNNER}node --import ./dist/test/isolate.js --test dist/test/desktop-removed.test.js\n` })],
+  ['the other lint tests', (s) => same(s, { name: 'the other lint tests, before anything unheld runs', shell: 'bash', run: AS_RUNNER + OTHER_LINT_TESTS })],
 ];
+
+const CONTAINER_SETUP = "the self-hosted container's own setup (nothing on GitHub's runners)";
+/** The setup's first line: on GitHub's runners it stops there. */
+const CONTAINER_ONLY = '[ "${WORKLANE_CI_CONTAINER:-}" = 1 ] || { echo "GitHub\'s runner: nothing to set up"; exit 0; }\n';
+/** What would run a file from the checkout: node, npm, a script by path, anything under the repo's own folders. */
+const RUNS_CHECKOUT = /\b(node|npm|npx|tsc|make)\b|\.\/|\b(scripts|dist|test|src|web)\/|\$GITHUB_WORKSPACE|\bsource\b|(^|\s)\.\s/;
+/** Each step that runs a test file opens with this: in the container, as the runner user, never root. */
+const AS_RUNNER = `# In the self-hosted runner's container, as the runner user (above), never root, with this same script.
+if [ "\${WORKLANE_CI_CONTAINER:-}" = 1 ] && [ "$(id -u)" = 0 ]; then
+  chown -R runner:runner "$GITHUB_WORKSPACE" "$RUNNER_TEMP"
+  HOME=/home/runner exec runuser -p -u runner -- bash --noprofile --norc -eo pipefail "$0"
+fi
+`;
 
 /** Step 8's script, exactly: every other `// lint-test` file, built, preloaded with the isolation; none found fails. */
 const OTHER_LINT_TESTS = "mapfile -t files < <(grep -lx '// lint-test' test/*.test.ts | grep -vx 'test/desktop-removed.test.ts' | sed -e 's#^test/#dist/test/#' -e 's#\\.ts$#.js#')\n[ \"${#files[@]}\" -gt 0 ] || { echo \"no lint tests found\" >&2; exit 1; }\nnode --import ./dist/test/isolate.js --test \"${files[@]}\"\n";
@@ -1280,8 +1297,10 @@ test('ci.yml runs the pin check, then this backstop, then the other lint tests f
     const container = String(job.container);
     assert.match(container, /\|\| '' \}\}$/, `${id}: no container on GitHub's runners`);
     for (const [, json] of container.matchAll(/fromJSON\('(\{[^']*\})'\)/g)) {
-      const c = JSON.parse(json!) as { image: string; options: string; env: Record<string, string> };
-      assert.deepEqual(Object.keys(c).sort(), ['env', 'image', 'options'], id);
+      const c = JSON.parse(json!) as { image: string; options: string; env: Record<string, string>; volumes: string[] };
+      assert.deepEqual(Object.keys(c).sort(), ['env', 'image', 'options', 'volumes'], id);
+      // One anonymous volume, at /tmp (native file locks fail closed on the image's overlay root); no host path.
+      assert.deepEqual(c.volumes, ['/tmp'], `${id}: the container's only volume is its own /tmp`);
       assert.match(c.image, /^[a-z0-9-]+:[a-z0-9.-]+@sha256:[0-9a-f]{64}$/, `${id}: the image pinned by digest`);
       assert.deepEqual(c.env, { WORKLANE_CI_CONTAINER: '1' }, `${id}: no NODE_OPTIONS or anything else in the container's env`);
       assert.doesNotMatch(c.options, /-e\b|--env|--volume|-v\b|--mount|--network|--add-host|--pid|--ipc|--userns|--cgroupns|--device/, `${id}: options add no env, mounts, host namespaces or devices`);
@@ -1294,12 +1313,23 @@ test('ci.yml runs the pin check, then this backstop, then the other lint tests f
   // A reorder is caught: the old order (npm ci with scripts, first) fails.
   const old = shards[0]![1].steps as Record<string, unknown>[];
   const fails = (steps: Record<string, unknown>[]) => !SHARD_FIRST_STEPS.every(([, ok], i) => ok(steps[i] ?? {}));
-  assert.ok(fails([old[0]!, old[1]!, { run: 'npm ci' }, ...old.slice(3)]), 'npm ci with scripts first fails');
-  assert.ok(fails([old[0]!, old[1]!, old[2]!, old[4]!, old[3]!, ...old.slice(5)]), 'tsc before the pin check fails');
-  assert.ok(fails([...old.slice(0, 4), old[6]!, old[4]!, old[5]!, ...old.slice(7)]), 'the backstop before its build fails');
-  assert.ok(fails([...old.slice(0, 7), { run: 'npm run build:web' }, ...old.slice(7)]), 'an unheld step before the other lint tests fails');
-  assert.ok(fails([...old.slice(0, 7), ...old.slice(8), old[7]!]), 'the other lint tests moved last fails');
-  assert.ok(fails([...old.slice(0, 3), ...old.slice(4)]), 'the pin check removed fails');
-  assert.ok(fails([...old.slice(0, 5), ...old.slice(6)]), 'the pin check after tsc removed fails (#1007)');
-  assert.ok(fails([...old.slice(0, 4), old[5]!, old[4]!, ...old.slice(6)]), 'the pin check after tsc moved before it fails (#1007)');
+  assert.ok(fails([...old.slice(0, 3), { run: 'npm ci' }, ...old.slice(4)]), 'npm ci with scripts first fails');
+  assert.ok(fails([...old.slice(0, 4), old[5]!, old[4]!, ...old.slice(6)]), 'tsc before the pin check fails');
+  assert.ok(fails([...old.slice(0, 5), old[7]!, old[5]!, old[6]!, ...old.slice(8)]), 'the backstop before its build fails');
+  assert.ok(fails([...old.slice(0, 8), { run: 'npm run build:web' }, ...old.slice(8)]), 'an unheld step before the other lint tests fails');
+  assert.ok(fails([...old.slice(0, 8), ...old.slice(9), old[8]!]), 'the other lint tests moved last fails');
+  assert.ok(fails([...old.slice(0, 4), ...old.slice(5)]), 'the pin check removed fails');
+  assert.ok(fails([...old.slice(0, 6), ...old.slice(7)]), 'the pin check after tsc removed fails (#1007)');
+  assert.ok(fails([...old.slice(0, 5), old[6]!, old[5]!, ...old.slice(7)]), 'the pin check after tsc moved before it fails (#1007)');
+  // The tests container (#1160): its setup after the install, a setup that runs a checkout file, or a test step
+  // without the switch to the runner user (so as root in the container) fails.
+  assert.ok(fails([old[0]!, old[1]!, old[3]!, old[2]!, ...old.slice(4)]), 'the container setup after npm ci fails');
+  for (const add of ['node scripts/x.mjs', 'bash scripts/setup/machine.sh', 'npm run build', './x.sh', '. ./x', 'cat "$GITHUB_WORKSPACE/x" | sh']) {
+    const setup = { ...old[2]!, run: `${String(old[2]!.run)}${add}\n` };
+    assert.ok(fails([old[0]!, old[1]!, setup, ...old.slice(3)]), `a container setup that runs ${add} fails`);
+  }
+  for (const i of [7, 8]) {
+    const noSwitch = { ...old[i]!, run: String(old[i]!.run).replace(AS_RUNNER, '') };
+    assert.ok(fails([...old.slice(0, i), noSwitch, ...old.slice(i + 1)]), `step ${i + 1} without the switch to the runner user fails`);
+  }
 });
