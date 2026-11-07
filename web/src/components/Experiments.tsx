@@ -6,6 +6,7 @@ import { useState } from 'react';
 import { changeExperiment, useView, type ExpAction, type ExpLogRow, type ExpPlan, type ExperimentsView, type ExpStudy, type State } from '../api';
 import { navigate } from '../App';
 import { ago, Badge, Button, Card, cx, usd } from './ui';
+import { shownPaths } from '../path-text';
 
 const ACTION_LABEL: Record<ExpAction, string> = { start: 'Start', pause: 'Pause', resume: 'Resume', stop_job: 'Stop job', approve: 'Approve job', decline: 'Decline job', archive: 'Archive' };
 type Started = Extract<ExpStudy, { started: true }>;
@@ -327,7 +328,7 @@ function BestChart({ points, direction }: { points: { n: number; value: number |
 
 const DECISION_TONE: Record<string, 'ok' | 'neutral' | 'danger' | 'info' | 'warn'> = { keep: 'ok', discard: 'neutral', screened_out: 'neutral', crash: 'danger', refused: 'danger', stopped: 'warn', running: 'info', stage2: 'info', ladder: 'info', seed: 'info', winner: 'ok', held: 'warn', waiting: 'warn', queued: 'info', session: 'info' };
 
-function ResearchLog({ rows }: { rows: ExpLogRow[] }) {
+export function ResearchLog({ rows }: { rows: ExpLogRow[] }) {
   if (!rows.length) return null;
   return (
     <section data-testid="experiment-log">
@@ -355,7 +356,7 @@ function ResearchLog({ rows }: { rows: ExpLogRow[] }) {
                   {r.hypothesis}
                 </td>
                 <td className="px-2 py-1.5 font-mono text-[11.5px]">
-                  {r.change.files.join(', ') || '–'} {r.change.commit?.slice(0, 7)}
+                  {shownPaths(r.change.files) || '–'} {r.change.commit?.slice(0, 7)}
                 </td>
                 <td className="px-2 py-1.5 font-mono text-[11.5px]">{Object.entries(r.config).map(([k, v]) => `${k} ${v}`).join(', ') || '–'}</td>
                 <td className="px-2 py-1.5 tabular-nums">

@@ -62,7 +62,7 @@ policy_root_ok() { [ -e "$T/owned-$1" ]; }
 POLICY_ROOT_DIR="$T/policy-root"
 # #902's machine-wide files (unused before it lands): into the temp dir, never /var/lib or /etc.
 ADD_PROJECT_NEW="$T/add-project-new" ADD_PROJECT_NEW_UID=${process.getuid?.() ?? 0} HELPER_RULES="$T/helper-rules.json"
-SRV_ROOT="$T/srv" ENGINE_CLI="$T/bin/worklane" MACHINE_HELPER="$T/helper" MACHINE_SUDOERS="$T/sudoers-machine" HUB_UNIT="$T/hub.service" ADD_PROJECT_LOCK="$T/lock"
+SRV_ROOT="$T/srv" ENGINE_CLI="$T/bin/worklane" MACHINE_HELPER="$T/helper" MACHINE_SUDOERS="$T/sudoers-machine" HUB_UNIT="$T/hub.service" ADD_PROJECT_LOCK="$T/locks/add-project.lock" MACHINE_LOCK_UID=${process.getuid?.() ?? 0}
 SETUP_POLL_SECONDS=0 SETUP_WAIT_SECONDS=0
 `,
   );

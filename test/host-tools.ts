@@ -5,6 +5,7 @@ import { accessSync, chmodSync, constants as fsConstants, readFileSync, statSync
 import { delimiter, dirname, join } from 'node:path';
 
 /** The host tools the engine's probes and doctor can run, besides git and the tools a test stands in for itself. */
+// check-table: never-shrink
 export const HOST_TOOLS = ['systemctl', 'launchctl', 'loginctl', 'gh', 'docker', 'tailscale', 'gitleaks'] as const;
 
 /**

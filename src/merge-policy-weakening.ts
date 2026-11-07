@@ -18,13 +18,17 @@
 //   - any file but docs: an added line with a skip, only or suppression marker on it (MARKERS, owner, 2026-10-19).
 // Other pure additions pass: an added assertion, test, rule or guard line never waits.
 //
+// Every change is measured twice (weakeningOf, #1069): from its base, and as what merging it would change on the
+// default branch's tip (a merge that conflicts there is measured from the tree git writes for it, and waits when it
+// conflicts in a file read strictly, #1077; elsewhere it is left to the conflict paths, and its resolution measured).
+//
 // Bounded and fail closed: one pass over each changed line of the files it checks, with substrings and linear
 // patterns only (no quantifier); over MAX_CHANGED_CHARS of such lines, a diff that doesn't match its line counts (cut short), a file that
 // isn't text, a table it can't find or a git failure, the change waits. The engine's own source paths (ENGINE_ONLY)
 // stand aside in a managed app's repo, as the locks do there (src/review.ts lockedCategories).
 import { BRAND } from './brand.js';
-import { changedNames, exactMoves, filesAt, filesWithText, mergeBaseOf } from './coordinator/change-files.js';
-import { globToRegExp } from './guardrails/glob.js';
+import { changedNames, changeFiles, exactMoves, filesAt, filesWithText, mergeBaseOf, mergedTree } from './coordinator/change-files.js';
+import { globRegExp } from './guardrails/glob.js';
 import { escapedPath, isNonUtf8Path, shownPath } from './path-text.js';
 import { engineSourceGlob, LOCKED_CATEGORIES, lockedCategories, type ChangeFile, type LockScope } from './review.js';
 
@@ -184,6 +188,7 @@ export const GUARD_FILES: readonly string[] = [
   `${BRAND.configDir}/checks/**`,
   // Which test files a PR's CI runs (the engine's).
   'scripts/ci/**',
+  'src/testrun/affected.ts',
   'src/merge-policy*',
   'src/coordinator/merge-flow*',
   'src/coordinator/change-files.ts',
@@ -192,6 +197,12 @@ export const GUARD_FILES: readonly string[] = [
   'src/push-guard*',
   'src/push-check*',
   'src/review.ts',
+  // The look-alike check src/review.ts imports, and its table (#763): they run in the weakening backstop's process.
+  'src/confusables.ts',
+  'src/confusables-data.ts',
+  // What the planners' decisions index reads, and what it leaves out (#920): records committed at the base, never
+  // docs/process.md; known routes it doesn't close are under "Open routes into the decisions index" there (#975).
+  'src/plan-decisions.ts',
   'src/path-text.ts',
   'src/guardrails/**',
   'src/hook*',
@@ -204,6 +215,12 @@ export const GUARD_FILES: readonly string[] = [
   'scripts/lib/denylist.mjs',
   'scripts/verify-release-tag*',
   'test/isolate.ts',
+  // What else runs in a lint test's process through test/isolate.ts and the weakening module (#746 round 19): one
+  // changed line here could make a backstop read another tree, or hide a file from it.
+  'src/brand.ts',
+  'src/os/system-paths.ts',
+  'src/os/own-env.ts',
+  'src/os/child-process.ts',
 ];
 
 /** A package manager's settings: every one changes what install and each script run under (`script-shell=`, `ignore-scripts=`). */
@@ -309,7 +326,7 @@ const allHold = (scope: LockScope | undefined) => lockedCategories(scope) === LO
 const holds = (glob: string, scope: LockScope | undefined) => allHold(scope) || !ENGINE_ONLY(glob);
 
 const matcher = (globs: readonly string[], scope: LockScope | undefined) => {
-  const res = globs.filter((g) => holds(g, scope)).map((g) => globToRegExp(g));
+  const res = globs.filter((g) => holds(g, scope)).map((g) => globRegExp(g, 'deny'));
   return (p: string) => res.some((re) => re.test(p));
 };
 
@@ -343,11 +360,18 @@ export interface WeakeningInput {
    * mark the head lacks always waits.
    */
   meet?: (path: string) => string | null;
+  /**
+   * The paths a merge into the default branch's tip conflicts on, for the change from the tip to the tree git writes
+   * for that merge (weakeningOf, #1077). One the hold reads strictly waits: GitHub's own merge may complete there, and
+   * what it makes is never read. Absent: the change isn't a merge.
+   */
+  conflicts?: readonly string[];
 }
 
 /** Each kind of weakening, in the words a reason uses, in the order reasons are given. */
 const KINDS = {
   unreadable: "can't read a change to check it, so it may weaken a check",
+  'tip-conflict': "conflicts with the default branch's current tip on where a test, lint, guard, allowlist or table file goes or whether it stays, so what merging it makes there can't be read",
   'test-file-deleted': 'deletes a test file',
   'test-assertion': 'removes or changes a line with an assertion or a test on it',
   'test-lines': "removes or changes a line of a test's expected output or fixture",
@@ -366,6 +390,9 @@ type Kind = keyof typeof KINDS;
 
 /** The reasons' common start: each is a design-level hold. */
 export const WEAKENING_REASON = 'design: may weaken a check: ';
+
+/** Whether a reason is the hold on a conflict with the tip in a check's file (GitHub's own conflict state may send it to the conflict fix first). */
+export const isTipConflict = (reason: string): boolean => reason.startsWith(`${WEAKENING_REASON}${KINDS['tip-conflict']} (`);
 
 /** What `a` has that `b` hasn't (as multisets). */
 const missing = (a: string[], b: string[]): string[] => {
@@ -807,13 +834,37 @@ export function tableSpan(text: string, table: string): [number, number] | null 
   throw new Error(`${table} never closes`);
 }
 
+/** Each kind's first three places and how many there are: nothing kept per line. */
+type Found = Map<Kind, { first: string[]; n: number }>;
+
 /**
  * Why a change may weaken a test, lint or guard: one `design:` reason per kind, naming up to three places (a file, and
  * the line). Empty: it removes or loosens none of them. Pure: the caller reads the diff and the files (weakeningOf).
+ * With `more`, each is measured too and a reason from any of them counts (weakeningOf's second measurement, #1069):
+ * still one reason per kind, its places from all of them (a place named once), its count the largest one's. One over
+ * MAX_CHANGED_CHARS gives only the reason that says so, beside the others' reasons (#1077).
  */
-export function weakeningReasons(i: WeakeningInput): string[] {
-  // Each kind's first three places and how many there are: nothing kept per line.
-  const found = new Map<Kind, { first: string[]; n: number }>();
+export function weakeningReasons(i: WeakeningInput, ...more: WeakeningInput[]): string[] {
+  const all: Found = new Map();
+  for (const one of [i, ...more]) {
+    for (const [kind, at] of findings(one)) {
+      const into = all.get(kind) ?? all.set(kind, { first: [], n: 0 }).get(kind)!;
+      for (const p of at.first) if (into.first.length < 3 && !into.first.includes(p)) into.first.push(p);
+      into.n = Math.max(into.n, at.n, into.first.length);
+    }
+  }
+  const out: string[] = [];
+  for (const kind of Object.keys(KINDS) as Kind[]) {
+    const at = all.get(kind);
+    if (!at?.n) continue;
+    out.push(`${WEAKENING_REASON}${KINDS[kind]} (${at.first.join('; ')}${at.n > at.first.length ? `; and ${at.n - at.first.length} more` : ''})`);
+  }
+  return out;
+}
+
+/** One change's findings, by kind; over MAX_CHANGED_CHARS, only the finding that says so. */
+function findings(i: WeakeningInput): Found {
+  const found: Found = new Map();
   const hit = (kind: Kind, path: string, what?: string) => {
     const at = found.get(kind) ?? found.set(kind, { first: [], n: 0 }).get(kind)!;
     at.n++;
@@ -909,7 +960,11 @@ export function weakeningReasons(i: WeakeningInput): string[] {
   // The bound, before any line is read: over it, one reason and nothing else.
   let chars = 0;
   for (const f of read) for (const ls of [f.addedLines ?? [], f.removedLines ?? []]) for (const l of ls) chars += l.length + 1;
-  if (chars > MAX_CHANGED_CHARS) return [`${WEAKENING_REASON}${KINDS.unreadable} (the changed lines pass ${MAX_CHANGED_CHARS} characters)`];
+  if (chars > MAX_CHANGED_CHARS) return new Map([['unreadable', { first: [`the changed lines pass ${MAX_CHANGED_CHARS} characters`], n: 1 }]]);
+
+  // A merge into the tip that conflicts in a file read strictly (or in one whose name it can't match): what GitHub's
+  // merge makes there may not be the tree git wrote, so it waits. A conflict elsewhere is left to the conflict paths.
+  for (const p of i.conflicts ?? []) if (strict(p) || isNonUtf8Path(p) || (MARKABLE.test(p) && holds(p, i.scope) && (!i.marked || i.marked.has(p)))) hit('tip-conflict', p);
 
   for (const f of read) {
     const added = f.addedLines ?? [];
@@ -1059,45 +1114,72 @@ export function weakeningReasons(i: WeakeningInput): string[] {
       if (c.trim()) previous = c.trimEnd();
     });
   }
-
-  const out: string[] = [];
-  for (const kind of Object.keys(KINDS) as Kind[]) {
-    const at = found.get(kind);
-    if (!at?.n) continue;
-    out.push(`${WEAKENING_REASON}${KINDS[kind]} (${at.first.join('; ')}${at.n > at.first.length ? `; and ${at.n - at.first.length} more` : ''})`);
-  }
-  return out;
+  return found;
 }
 
 /**
  * weakeningReasons for the change base..head of the repo at `cwd`, with `files` from changeFiles. When the change
  * can't be read, one reason says so: the change waits (fail closed).
+ *
+ * base..head alone doesn't say what merging the PR does to the default branch (#1069). A head that merged in commits of
+ * the default branch (the tip, or an older one, also one that reached it through a merge commit) can take out again a
+ * line or a file the tip added, or put back a line the tip took out, and no removed or added line shows. And git
+ * carries a stale PR's change onto a table or lint test the tip has since renamed or moved and marked (#1056's round
+ * 16 review). So the change merging the PR makes to the default branch is measured too, for every PR: from the tip to
+ * the tree of the tip merged with the head (git merge-tree, no worktree), and a reason from either measurement holds
+ * it. A merge that conflicts is measured the same way, from the tip to the tree git writes for it, its conflicted
+ * files left out (#1077): their markers aren't lines either side wrote. A conflict on where a file goes or whether it
+ * stays (not on its lines) in a file the hold reads strictly waits instead: GitHub's own merge may complete there (a
+ * file added under a folder the tip renamed), and what it makes is never read. A conflict on a file's lines, and any
+ * conflict elsewhere, is left to the conflict paths (GitHub, merging the same commits, reports it; the conflict fix,
+ * or the combined check's capped wait), and the head that resolves it is measured again, both ways. When the second
+ * measurement can't run, its reason is given beside the first one's.
  */
 export function weakeningOf(cwd: string, base: string, head: string, files: ChangeFile[], scope: LockScope | undefined, tip: string | null): string[] {
+  const couldNotRun = (e: unknown) => `${WEAKENING_REASON}the check for a removed or weakened test, lint or guard could not run (${escapedPath(String((e as Error).message ?? e).slice(0, 200))})`;
   try {
     // The default branch's current tip, fetched by the caller at decision time: its marks hold whatever the base. One
     // it couldn't read makes the change wait.
     if (tip === null) throw new Error(`the default branch's current tip couldn't be read, so its registered checks can't be`);
-    const deleted = new Set(changedNames(cwd, ['--diff-filter=D', `${base}..${head}`]));
-    const moved = exactMoves(cwd, base, head);
-    // The files that hold a mark's text before the change and at the tip (#869): git grep over each whole tree, so a
-    // mark is found wherever it is; a git failure makes the change wait.
-    const markable = (set: Set<string>) => new Set(files.map((f) => f.path).filter((p) => set.has(p) && MARKABLE.test(p) && !isNonUtf8Path(p)));
-    const marked = markable(new Set(filesWithText(cwd, base, [TABLE_MARK.trimEnd(), LINT_MARK])));
-    const tipMarked = markable(new Set(filesWithText(cwd, tip, [TABLE_MARK.trimEnd(), LINT_MARK])));
     // Where the change meets the tip: a tip mark the head lacks was taken out by the change only if it is there.
     const meet = mergeBaseOf(cwd, tip, head);
-    const paths = [...new Set([...CHECK_TABLES.map((t) => t.path), ...marked, ...tipMarked])].filter((p) => files.some((f) => f.path === p) && !isNonUtf8Path(p));
-    // A file over the cap isn't read at all: the change waits.
-    const side = (rev: string) => {
-      const { texts, tooBig } = filesAt(cwd, rev, paths, MAX_TABLE_FILE);
-      return (p: string) => {
-        if (tooBig.has(p)) throw new Error(`${tooBig.get(p)} bytes, over ${MAX_TABLE_FILE}: not read`);
-        return texts.get(p) ?? null;
-      };
-    };
-    return weakeningReasons({ files, deleted, moved, before: side(base), after: side(head), scope, marked, tip: side(tip), tipMarked, meet: side(meet) });
+    const own = measured(cwd, base, head, files, scope, { tip, meet });
+    let merged: WeakeningInput | { failed: unknown };
+    try {
+      const { tree, conflicts, contentOnly } = mergedTree(cwd, tip, head);
+      const conflicted = new Set(conflicts);
+      merged = measured(cwd, tip, tree, changeFiles(cwd, tip, tree).filter((f) => !conflicted.has(f.path)), scope, undefined, conflicts.filter((p) => !contentOnly.has(p)));
+    } catch (e) {
+      merged = { failed: e };
+    }
+    return 'failed' in merged ? [...weakeningReasons(own), couldNotRun(merged.failed)] : weakeningReasons(own, merged);
   } catch (e) {
-    return [`${WEAKENING_REASON}the check for a removed or weakened test, lint or guard could not run (${escapedPath(String((e as Error).message ?? e).slice(0, 200))})`];
+    return [couldNotRun(e)];
   }
+}
+
+/**
+ * The input weakeningReasons reads for the change from..to (commits or trees), read from git; throws when git fails.
+ * With `at`, the default branch's tip and where `to` meets it: their marks are read as well as `from`'s (#869). With
+ * `conflicts`, the paths a merge `to` is the tree of conflicts on (their marks at `from` are read too).
+ */
+function measured(cwd: string, from: string, to: string, files: ChangeFile[], scope: LockScope | undefined, at?: { tip: string; meet: string }, conflicts?: string[]): WeakeningInput {
+  const deleted = new Set(changedNames(cwd, ['--diff-filter=D', `${from}..${to}`]));
+  const moved = exactMoves(cwd, from, to);
+  // The files that hold a mark's text before the change and at the tip (#869): git grep over each whole tree, so a
+  // mark is found wherever it is; a git failure makes the change wait.
+  const markable = (set: Set<string>) => new Set([...files.map((f) => f.path), ...(conflicts ?? [])].filter((p) => set.has(p) && MARKABLE.test(p) && !isNonUtf8Path(p)));
+  const marked = markable(new Set(filesWithText(cwd, from, [TABLE_MARK.trimEnd(), LINT_MARK])));
+  const tipMarked = at ? markable(new Set(filesWithText(cwd, at.tip, [TABLE_MARK.trimEnd(), LINT_MARK]))) : new Set<string>();
+  const paths = [...new Set([...CHECK_TABLES.map((t) => t.path), ...marked, ...tipMarked])].filter((p) => files.some((f) => f.path === p) && !isNonUtf8Path(p));
+  // A file over the cap isn't read at all: the change waits.
+  const side = (rev: string) => {
+    const { texts, tooBig } = filesAt(cwd, rev, paths, MAX_TABLE_FILE);
+    return (p: string) => {
+      if (tooBig.has(p)) throw new Error(`${tooBig.get(p)} bytes, over ${MAX_TABLE_FILE}: not read`);
+      return texts.get(p) ?? null;
+    };
+  };
+  const input: WeakeningInput = { files, deleted, moved, before: side(from), after: side(to), scope, marked, ...(conflicts ? { conflicts } : {}) };
+  return at ? { ...input, tip: side(at.tip), tipMarked, meet: side(at.meet) } : input;
 }

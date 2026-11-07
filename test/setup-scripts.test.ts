@@ -202,6 +202,18 @@ test('gitleaks is installed at a pinned version only when its download matches a
 // Creates OS users and runs systemd units: only on disposable CI runners (GitHub's Linux runners have systemd and passwordless sudo).
 const systemCi = process.platform === 'linux' && process.env.GITHUB_ACTIONS === 'true' && spawnSync('sudo', ['-n', 'systemctl', '--version']).status === 0;
 
+// #991: the other tests of machine_sudoers stand in sudo_version (the machine's own `sudo -V` is a host tool); here,
+// where the real sudo is reached on purpose, lib.sh's sudo_version reads the runner's real `sudo -V`.
+test("acceptance: lib.sh's sudo_version reads the runner's real sudo -V, as 1.9.10 or later (the pattern rules' minimum)", { skip: !systemCi && 'needs a disposable Linux CI runner with systemd' }, () => {
+  const r = spawnSync('bash', ['-c', 'source "$1"; sudo_version; sudo_regex_ok && echo regex-ok', '_', join(dir, 'lib.sh')], { encoding: 'utf8' });
+  assert.equal(r.status, 0, r.stderr);
+  const [version, ok] = r.stdout.trim().split('\n');
+  assert.match(version ?? '', /^\d+\.\d+\.\d+$/, 'sudo_version reads one x.y.z from the real sudo -V');
+  const [a, b, c] = version!.split('.').map(Number) as [number, number, number];
+  assert.ok(a > 1 || (a === 1 && (b > 9 || (b === 9 && c >= 10))), `${version}: 1.9.10 or later`);
+  assert.equal(ok, 'regex-ok', 'sudo_regex_ok agrees');
+});
+
 test('acceptance: two instances\' agent users each get their own /tmp, so a fixed path like /tmp/cc-socks locks neither out', { skip: !systemCi && 'needs a disposable Linux CI runner with systemd' }, () => {
   const sudo = (...a: string[]) => spawnSync('sudo', ['-n', ...a], { encoding: 'utf8' });
   const unit = spawnSync('bash', [join(dir, 'service.sh'), 'site', '--print'], { encoding: 'utf8' }).stdout;

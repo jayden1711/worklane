@@ -86,13 +86,16 @@ exit 0`,
   stub('id', `[ "$1" = -un ] && { echo '${me}'; exit 0; }; exit 0`);
   stub('runuser', 'while [ "$1" != -- ]; do shift; done; shift; exec "$@"');
   stub('install', `a=(); while [ "$#" -gt 0 ]; do case "$1" in -o|-g) shift 2 ;; *) a+=("$1"); shift ;; esac; done; exec ${real('install')} "\${a[@]}"`);
-  stub('flock', 'exit 0');
+  // flock: free at once; a wait for it (-w) takes as long as the file `flockwait` says, a lock held that long.
+  stub('flock', `[ "$2" = -w ] && sleep "$(cat '${dir}/flockwait' 2>/dev/null || echo 0)"; exit 0`);
   // stat: the real one, but every file is root's group as the helper expects (only root can chgrp here).
   // stat: the real one, with the group each path would have on a server (only root can chgrp here): the GPU locks'
-  // group for the locks, the scorer's for the labels, the job user's (and the coordinator's) for the rest.
+  // group for the locks, the scorer's for the labels, the job user's (and the coordinator's) for the rest. A stat of the
+  // GPU locks' directories or files takes as long as the file `slowstat` says.
   stub(
     'stat',
-    `out="$(${real('stat')} "$@")" || exit $?; p="\${@: -1}"
+    `case "\${@: -1}" in '${join(dir, 'run')}'*) sleep "$(cat '${dir}/slowstat' 2>/dev/null || echo 0)" ;; esac
+out="$(${real('stat')} "$@")" || exit $?; p="\${@: -1}"
 case "$p" in *gpu*) g=worklane-gpu ;; *eval-labels*) g=GRPS ;; *) g=GRP ;; esac
 printf '%s\\n' "$out" | sed -e "s/^\\([^ ]*\\) [^ ]* \\([0-7][0-7][0-7]\\)$/\\1 $g \\2/"`,
   );
@@ -162,7 +165,7 @@ printf '%s\\n' "$out" | sed -e "s/^\\([^ ]*\\) [^ ]* \\([0-7][0-7][0-7]\\)$/\\1 
   const clear = () => {
     for (const f of readdirSync(sd)) spawnSync('rm', ['-f', join(sd, f)]);
   };
-  return { dir, base, helper, job, calls, clear, writeRoot, score: (s: string) => writeFileSync(join(dir, 'score'), s) };
+  return { dir, base, helper, job, calls, clear, writeRoot, score: (s: string) => writeFileSync(join(dir, 'score'), s), setSlowStat: (s: number) => writeFileSync(join(dir, 'slowstat'), String(s)), setFlockWait: (s: number) => writeFileSync(join(dir, 'flockwait'), String(s)) };
 }
 
 const unitOf = (argv: string[]) => argv.find((a) => a.startsWith('--unit='))!.replace(/^--unit=worklane-exp-ex_[a-z0-9-]+_(build|preflight|train|predict|gate|score)_\d+$/, '$1');
@@ -204,6 +207,29 @@ test('a job: every step its own unit with no network; the scorer gets the labels
     assert.equal(gpu, s === 'train' || s === 'predict', `${s}: the GPU only on train and predict`);
     assert.equal(p.includes('SupplementaryGroups=worklane-gpu-dev'), gpu, `${s}: the device group only on a granted unit`);
   }
+});
+
+test('#968: the record\'s waited_s is the wait for the GPU lock alone, never its file\'s setup: a slow setup of a free lock waits 0 s', { skip: !linuxBash && 'needs bash 4 and GNU tools (Linux)' }, () => {
+  const h = expHelper();
+  h.score('score=1\n');
+  // The lock's five stats take 3 s in all; nobody holds it.
+  h.setSlowStat(0.6);
+  const r = h.job('example-speed-1');
+  assert.equal(r.status, 0, r.stderr);
+  const rec = readRecord(r.stdout);
+  assert.equal(rec?.outcome, 'scored', r.stdout);
+  assert.ok(rec!.waited_s <= 1, `waited_s ${rec!.waited_s}`);
+});
+
+test('#968: the record\'s waited_s counts a GPU lock that was held: about 3 s of waiting for it', { skip: !linuxBash && 'needs bash 4 and GNU tools (Linux)' }, () => {
+  const h = expHelper();
+  h.score('score=1\n');
+  h.setFlockWait(3);
+  const r = h.job('example-speed-1');
+  assert.equal(r.status, 0, r.stderr);
+  const rec = readRecord(r.stdout);
+  assert.equal(rec?.outcome, 'scored', r.stdout);
+  assert.ok(rec!.waited_s >= 2, `waited_s ${rec!.waited_s}`);
 });
 
 test('root\'s file decides: a job above its minutes, an unapproved source, the labels as job data, a scorer that prints no score', { skip: !linuxBash && 'needs bash 4 and GNU tools (Linux)' }, () => {

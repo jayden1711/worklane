@@ -117,7 +117,11 @@ test('batching: nothing merges without both checks, even if the merge step is re
   const { t } = await batched({ wired: false });
   t.f.backlog.setChecks(t.pr().headSha, [...passing, full]); // both checks green on GitHub, but no batch ever tested this head
   const w = t.f.log.read(0, ['pr.opened']).at(-1)!.payload as EventPayload<'pr.opened'>;
-  await (t.c as unknown as { mergeOrWait(w: unknown, pr: unknown): Promise<void> }).mergeOrWait(w, await t.f.backlog.pullRequest(t.opened.number));
+  // The PR watch measures the head's vacuity coverage (#784, in the background) before the merge step decides: so here.
+  const gate = t.c as unknown as { startVacuityRun(w: unknown, pr: unknown): void; vacuityIdle(): Promise<void>; mergeOrWait(w: unknown, pr: unknown): Promise<void> };
+  gate.startVacuityRun(w, await t.f.backlog.pullRequest(t.opened.number));
+  await gate.vacuityIdle();
+  await gate.mergeOrWait(w, await t.f.backlog.pullRequest(t.opened.number));
   assert.ok(!t.pr().merged);
   assert.match((lastOf(t.f.log, 'merge.failed') as { why: string }).why, /not merged untested: no passing full run from a batch/);
 });

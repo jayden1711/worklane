@@ -13,6 +13,7 @@ import { ChecksPermissionMissing, type TestRunRequest, type TestRunResult } from
 import { SANDBOX_STEP } from '../testrun/run.js';
 import { startRefusal, TestRunHeld } from '../testrun/gate.js';
 import { GPU_NO_REPEAT, GPU_STEP, gpuCutOffLine, gpuRunsNotToRepeat } from '../testrun/gpu.js';
+import { gitRemote } from '../git-remote.js';
 
 /** A PR as the test runs need it. */
 export interface OpenPr {
@@ -100,6 +101,7 @@ export class PrTestRuns {
   readonly stopped = new AbortController();
 
   constructor(private d: PrTestRunDeps) {
+    gitRemote(d.remote);
     const queued = new Map<string, EventPayload<'testrun.queued'>>();
     const events = d.log.read(0, ['testrun.queued', 'testrun.started', 'testrun.finished']);
     // INVARIANT: a GPU run cut off (the coordinator or the machine stopped) or stopped at its cap is never run again by

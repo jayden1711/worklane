@@ -6,7 +6,7 @@
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { loadRules, scanText, sha, SKIP } from './lib/denylist.mjs';
+import { loadRules, scanBinary, scanText, sha, SKIP } from './lib/denylist.mjs';
 
 const args = process.argv.slice(2);
 if (args[0] === '--hash') {
@@ -27,8 +27,8 @@ for (const file of files) {
   } catch {
     continue;
   }
-  if (text.includes('\0')) continue;
-  hits.push(...scanText(rules, file, text));
+  // A file holding a NUL byte is scanned for the hashed terms, as the push gate does (#1057).
+  hits.push(...(text.includes('\0') ? scanBinary(rules, file, text) : scanText(rules, file, text)));
 }
 
 if (hits.length) {

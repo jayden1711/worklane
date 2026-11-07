@@ -734,6 +734,13 @@ export const EventSchemas = {
   'light_check.started': z.strictObject({ issue, number: z.number().int().positive(), head: sha, main_sha: sha, overlap: z.array(z.string()) }),
   /** merge: the fast tier passed on the combination; hold: it failed (a human decides); conflict: they don't merge. */
   'light_check.finished': z.strictObject({ issue, number: z.number().int().positive(), head: sha, main_sha: sha, overlap: z.array(z.string()), outcome: z.enum(['merge', 'hold', 'conflict']), wait_ms: z.number().int().nonnegative(), detail: z.string() }),
+  /**
+   * The merge gate's coverage run of a PR's own tests at a head started (#784, src/merge-policy-vacuity.ts). `base`:
+   * where the PR's change was measured from (round 8: a run is used only while that is still the base).
+   */
+  'vacuity.started': z.strictObject({ issue, number: z.number().int().positive(), head: sha, tests: z.array(z.string()), base: sha.optional() }),
+  /** It finished: the app files in which a function ran (touched), or why it couldn't measure (error: the PR waits). */
+  'vacuity.measured': z.strictObject({ issue, number: z.number().int().positive(), head: sha, tests: z.array(z.string()), touched: z.array(z.string()), error: z.string().nullable(), base: sha.optional() }),
   /** GitHub reports a harness PR as conflicting with its base (recorded once per head). */
   'conflict_fix.detected': z.strictObject({ issue, number: z.number().int().positive(), head: sha, base_sha: sha }),
   'conflict_fix.started': z.strictObject({ issue, number: z.number().int().positive(), head: sha, base_sha: sha, strategy: z.literal('merge'), attempt: z.number().int().positive(), lease: sha }),

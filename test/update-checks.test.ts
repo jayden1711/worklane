@@ -245,7 +245,8 @@ test('each Node version\'s 4 test shards gate through a summary job under the re
     assert.match(run, /node --import \.\/dist\/test\/isolate\.js --test "\$\{files\[@\]\}"/, `${shard}: every shard runs isolated (test/isolate.ts)`);
     // The selection: affected.mjs, told the event (a push to main gets every file), diffing the PR's merge commit
     // against its base; a shard with no selected file passes only on a pull request.
-    const tests = steps.find((s) => /node --import \.\/dist\/test\/isolate\.js --test/.test(s.run ?? ''))!;
+    // The shard's own test step, by its name as well (#746: the lint tests run isolated in earlier steps).
+    const tests = steps.find((s) => (s as { name?: string }).name === "this shard's tests" && /node --import \.\/dist\/test\/isolate\.js --test/.test(s.run ?? ''))!;
     assert.equal(tests.env?.EVENT, '${{ github.event_name }}', `${shard}: the selection knows the event`);
     assert.match(tests.run!, /if \[ "\$FULL_CI" = true \]; then EVENT=full-ci; fi/, `${shard}: the full-ci label runs every file`);
     assert.equal(tests.env?.FULL_CI, "${{ contains(github.event.pull_request.labels.*.name, 'full-ci') }}");

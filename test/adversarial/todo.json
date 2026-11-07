@@ -1,8 +1,6 @@
 {
   "todo": [
-    { "gap": "a PR that weakens a test, lint or guard outside the locked lists (an assertion changed or removed, a skip or disable mark added, a lint's allowlist grown, a test moved out of the runner, a test config's excludes widened) waits for the owner", "closes": "#820" },
-    { "gap": "a required check counts as green only when it comes from the App or workflow pinned for its name", "closes": "#788" },
-    { "gap": "a new file under the tool guard's own folder is locked as the guard before anything imports it, under a review.yaml that lists no src/**", "closes": "#839" },
+    { "gap": "a required check counts as green only when it comes from the App or workflow pinned for its name", "closes": "#788 (merged; the suite doesn't drive the readiness check yet, so this needs a readiness case)" },
     { "gap": "a change to .claude/settings.json or .claude/hooks/* waits whatever review.yaml says (today only the harness-config category holds it, which a review.yaml can redefine)", "closes": "#707 C1 (a lock in src/review.ts, owned by Lane A; no PR yet)" },
     { "gap": "a change to .worklane/config.yaml waits whatever review.yaml says (today only the harness-config category holds it, which a review.yaml can redefine)", "closes": "#860 part 2 (owner decision: join the floor like #707 C1; a lock in src/review.ts, owned by Lane A; no PR yet)" },
     { "gap": "a change to .worklane/tests.yaml waits whatever review.yaml says (today only the harness-config category holds it, which a review.yaml can redefine)", "closes": "#860 part 2 (owner decision: join the floor like #707 C1; a lock in src/review.ts, owned by Lane A; no PR yet)" },

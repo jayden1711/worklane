@@ -57,6 +57,7 @@ test('emergency stop: once lifted, the queued land lands and the ready PR auto-m
   await green(t);
   assert.equal(t.f.log.read(0, ['merge.done']).length, 0);
   resumeAll(t.f.slotsDir);
-  await t.c.tick();
+  // The poll after the stop: its checks were green all along; #784's coverage run (none under the stop) runs first.
+  await green(t);
   assert.equal(t.f.log.read(0, ['merge.done']).length, 1, 'auto-merges after the stop is lifted');
 });

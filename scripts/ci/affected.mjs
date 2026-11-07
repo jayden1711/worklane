@@ -21,6 +21,8 @@ export const FORCE_ALL = [
   [/(^|\/)tsconfig[^/]*\.json$/, 'the compiler settings'],
   [/^\.nvmrc$/, 'the Node version'],
   [/^test\/helpers\.ts$/, 'the helpers every test uses'],
+  // Every test process runs it first (--import), and it wraps how each one starts its children (#991).
+  [/^test\/isolate\.ts$/, 'the preload every test process runs'],
   [/^scripts\/ci\//, 'the CI scripts'],
   [/^\.github\//, 'the workflows'],
 ];

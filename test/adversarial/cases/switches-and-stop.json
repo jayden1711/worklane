@@ -1,0 +1,32 @@
+{
+  "group": "auto-merge switches and the stop",
+  "cases": [
+    {
+      "id": "instance-kill-switch-off",
+      "attack": "a small app change while the instance's auto_merge kill switch is off",
+      "source": "merge-policy.ts mergeDecision; docs/guardrails.md Hold kinds: auto-merge is off",
+      "base": { "web/totals.js": "export const total = 1;\n" },
+      "change": [{ "write": "web/totals.js", "text": "export const total = 2;\n" }],
+      "inputs": { "policyOn": false },
+      "expect": { "decision": "waits", "reasons": ["auto-merge is off for this instance"], "scopes": ["engine", "managed-app"] }
+    },
+    {
+      "id": "repo-auto-merge-off",
+      "attack": "a small app change while the repo's review.yaml says merge.auto false",
+      "source": "merge-policy.ts mergeDecision; docs/guardrails.md Hold kinds: auto-merge is off",
+      "base": { "web/totals.js": "export const total = 1;\n" },
+      "change": [{ "write": "web/totals.js", "text": "export const total = 2;\n" }],
+      "inputs": { "repoOn": false },
+      "expect": { "decision": "waits", "reasons": ["auto-merge is off for this repo"], "scopes": ["engine", "managed-app"] }
+    },
+    {
+      "id": "auto-merge-stopped",
+      "attack": "a small app change while auto-merge is stopped (main went red after one)",
+      "source": "merge-policy.ts mergeDecision; docs/guardrails.md Hold kinds: auto-merge is stopped",
+      "base": { "web/totals.js": "export const total = 1;\n" },
+      "change": [{ "write": "web/totals.js", "text": "export const total = 2;\n" }],
+      "inputs": { "stopped": "main went red after #12 merged" },
+      "expect": { "decision": "waits", "reasons": ["auto-merge is stopped: main went red after #12 merged"], "scopes": ["engine", "managed-app"] }
+    }
+  ]
+}

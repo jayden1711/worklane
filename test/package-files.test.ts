@@ -112,7 +112,7 @@ test('the scan finds the paths the engine reads relative to itself', () => {
  * purpose: in the PR that grows the package, with the new `npm pack --dry-run --json` numbers and why in its body.
  * Never to get a PR green without looking at what grew.
  */
-const PACKAGE_BUDGET = { size: 2_050_000, unpackedSize: 6_400_000 };
+const PACKAGE_BUDGET = { size: 2_290_000, unpackedSize: 7_120_000 };
 
 /** Whether a pack's sizes fit the budget; the reasons when not, each saying how to raise it on purpose. */
 function overBudget(p: { size: number; unpackedSize: number }, budget = PACKAGE_BUDGET): string[] {

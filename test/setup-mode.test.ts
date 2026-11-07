@@ -310,10 +310,20 @@ test("#468 the preview's Confirm when GitHub's protection refuses the merge: the
   const s = await setupDashboard(p.root, g);
   try {
     await toHeld(s);
-    const r = await s.post('/api/first-run/setup/propose', { confirm: true });
+    const lines: string[] = [];
+    const was = console.error;
+    console.error = (...a: unknown[]) => void lines.push(a.map(String).join(' '));
+    let r: Awaited<ReturnType<typeof s.post>>;
+    try {
+      r = await s.post('/api/first-run/setup/propose', { confirm: true });
+    } finally {
+      console.error = was;
+    }
     assert.equal(r.status, 200, JSON.stringify(r.body));
     assert.deepEqual([r.body.merged, r.body.url], [false, 'https://github.com/example-org/example-shop/pull/7']);
-    assert.match(r.body.why, /PR #7 opened: merge it on GitHub \(GitHub didn't merge PR #7: GraphQL: Base branch policy prohibits the merge/);
+    // #882: GitHub's own text is in the dashboard's log, not on the page.
+    assert.equal(r.body.why, "PR #7 opened: merge it on GitHub (GitHub didn't merge PR #7; the detail is in the dashboard's log on the machine)");
+    assert.ok(lines.some((l) => l.includes('merging config PR #7') && l.includes('GraphQL: Base branch policy prohibits the merge')), `GitHub's text is logged: ${JSON.stringify(lines)}`);
     assert.equal(g.pr.state, 'OPEN');
     assert.equal(existsSync(join(p.root, BRAND.configDir)), false);
     // Merged on GitHub, outside the page: the next look sees it, fast-forwards, and the step is done.
@@ -345,6 +355,34 @@ test('setup mode, the origin: the repos this login can push to; Review shows the
     assert.equal(again.status, 400);
     assert.match(again.body.error, /origin is example-org\/example-shop already/);
   } finally {
+    await s.d.close();
+  }
+});
+
+test("#882 setup mode, the origin: git's or gh's failure answers the engine's own words; their text, which can name the checkout's path, is in the dashboard's log only", async () => {
+  const p = project(false);
+  const g = ghStandIn(p.bare);
+  const fetchSaid = `fatal: '${join(p.root, 'gone.git')}' does not appear to be a git repository`;
+  const run = (cmd: string, args: string[], o: { cwd?: string } = {}): RunResult => {
+    if (cmd === 'git' && args[0] === 'fetch') return { status: 128, stdout: '', stderr: `${fetchSaid}\n` };
+    if (cmd === 'gh' && args[0] === 'api' && args[1]!.startsWith('user/repos')) return { status: 1, stdout: '', stderr: 'HTTP 401: Bad credentials (https://api.github.com/user/repos)\n' };
+    return g.run(cmd, args, o);
+  };
+  const s = await setupDashboard(p.root, { ...g, run });
+  const lines: string[] = [];
+  const was = console.error;
+  console.error = (...a: unknown[]) => void lines.push(a.map(String).join(' '));
+  try {
+    const repos = await s.get('/api/first-run/setup/repos');
+    const r = await s.post('/api/first-run/setup/origin', { repo: 'example-org/example-shop', confirm: true });
+    console.error = was;
+    assert.deepEqual(repos, { repos: [], error: "gh couldn't list your repos; the detail is in the dashboard's log on the machine" });
+    assert.equal(r.status, 500, JSON.stringify(r.body));
+    assert.deepEqual(r.body, { error: "git fetch -q origin failed; the detail is in the dashboard's log on the machine" });
+    assert.ok(lines.some((l) => l.includes('POST /api/first-run/setup/origin') && l.includes(fetchSaid)), `git's text is logged: ${JSON.stringify(lines)}`);
+    assert.ok(lines.some((l) => l.includes('Bad credentials')), `gh's text is logged: ${JSON.stringify(lines)}`);
+  } finally {
+    console.error = was;
     await s.d.close();
   }
 });

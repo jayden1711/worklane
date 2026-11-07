@@ -17,6 +17,7 @@ import type { RunResult } from './setup-steps.js';
 import { toolPrefix } from './tool-path.js';
 import { keyLines, wizardUrl } from './dashboard-detach.js';
 import { projectStateDir } from './guardrails/context.js';
+import { DETAIL_LOGGED, logDetail } from './user-facing-error.js';
 
 export const needsSetupMode = (root: string, instance?: string | null) => !instance && !existsSync(join(root, BRAND.configDir));
 
@@ -41,12 +42,14 @@ export function setupModeConfig(root: string, owner?: string): Config {
   }
 }
 
+/** A refusal the page shows as it is: the engine's words. A child's stderr goes in `cause`, logged only (#882). */
 export class SetupModeError extends Error {
   constructor(
     message: string,
     readonly status = 400,
+    options?: ErrorOptions,
   ) {
-    super(message);
+    super(message, options);
   }
 }
 
@@ -94,7 +97,7 @@ export function setOrigin(root: string, repo: unknown, run: Run): string {
   const p = originPlan(root, repo);
   for (const [cmd, ...args] of p.commands) {
     const r = run(cmd!, args, { cwd: root });
-    if (r.status !== 0) throw new SetupModeError(`${[cmd, ...args].join(' ')} failed: ${r.stderr.trim().split('\n')[0] ?? ''}`, 500);
+    if (r.status !== 0) throw new SetupModeError(`${[cmd, ...args].join(' ')} failed`, 500, { cause: r.stderr.trim() });
   }
   return p.repo;
 }
@@ -102,7 +105,10 @@ export function setOrigin(root: string, repo: unknown, run: Run): string {
 /** The repos this gh login may push to, newest first: the origin picker's choices. */
 export function pushableRepos(run: Run): { repos: string[]; error?: string } {
   const r = run('gh', ['api', 'user/repos?per_page=100&sort=pushed', '--jq', '.[] | select(.permissions.push) | .full_name']);
-  if (r.status !== 0) return { repos: [], error: `gh couldn't list your repos: ${r.stderr.trim().split('\n')[0] ?? ''}` };
+  if (r.status !== 0) {
+    logDetail("setup mode: listing the gh login's repos", r.stderr.trim());
+    return { repos: [], error: `gh couldn't list your repos; ${DETAIL_LOGGED}` };
+  }
   return { repos: r.stdout.split('\n').map((s) => s.trim()).filter(addProjectRepoOk) };
 }
 
@@ -140,8 +146,9 @@ export function startDraft(o: { root: string; file: string; job: DraftJob; io?: 
     .then((r) => {
       j.result = r ?? { status: 'merged', detail: 'the config is on the default branch and in this checkout' };
     })
-    .catch((e: Error) => {
-      j.result = { status: 'failed', detail: e.message.split('\n')[0] ?? 'failed' };
+    .catch((e: unknown) => {
+      logDetail('setup mode: auto-config', e);
+      j.result = { status: 'failed', detail: `auto-config stopped; ${DETAIL_LOGGED}` };
     })
     .finally(() => {
       save();
@@ -217,8 +224,8 @@ export function editDraft(file: string, root: string, values: Record<string, unk
     e = applyConfigValues((f) => d.yaml[f] ?? null, repoConfigValues(draftConfig(root, d)), values, 'the draft');
     configFrom(root, (f) => e.texts[f] ?? d.yaml[f] ?? null);
   } catch (err) {
-    if (err instanceof ConfigChangeError) throw new SetupModeError(err.message);
-    throw new SetupModeError(`refused: ${(err as Error).message.split('\n').slice(1).map((l) => l.trim()).join('; ') || (err as Error).message}`);
+    if (err instanceof ConfigChangeError) throw new SetupModeError(err.message, 400, { cause: err.cause });
+    throw new SetupModeError(`refused: ${(err as Error).message.split('\n').slice(1).map((l) => l.trim()).join('; ') || (err as Error).message}`, 400, { cause: err });
   }
   if (confirm) {
     s.autoConfig!.draft = { ...d, yaml: { ...d.yaml, ...e.texts } };
@@ -244,7 +251,7 @@ export async function proposeDraft(o: { file: string; root: string; io?: InitIo 
       writeInitState(o.file, s);
     },
   });
-  if (r.kind !== 'proposed' || !s.autoConfig?.pr?.number) throw new SetupModeError(r.kind === 'proposed' ? 'the PR was opened, but its number could not be read' : 'detail' in r ? r.detail : `not proposed (${r.kind})`, 502);
+  if (r.kind !== 'proposed' || !s.autoConfig?.pr?.number) throw new SetupModeError(r.kind === 'proposed' ? 'the PR was opened, but its number could not be read' : `the setup PR wasn't proposed (${r.kind})`, 502, 'detail' in r ? { cause: r.detail } : undefined);
   return { number: s.autoConfig.pr.number, url: s.autoConfig.pr.url, head: s.autoConfig.pr.head ?? null };
 }
 

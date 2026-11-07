@@ -10,13 +10,14 @@ import { BRAND } from './brand.js';
 import { pinNewConfig } from './check-pin-block.js';
 import { loadConfig } from './config/load.js';
 import { TestsConfig } from './config/schema.js';
+import { coverageRunnerOne, vacuitySnippet } from './merge-policy-vacuity.js';
 import { sh } from './coordinator/shared.js';
 import type { Config } from './config/load.js';
 import type { ProjectRunAs } from './os/index.js';
 import { projectStateDir } from './guardrails/context.js';
 import { scaffoldConfig } from './install.js';
 import { defaultBranchRefusal } from './push-guard.js';
-import { createWorktree, removeWorktree, type WorktreeOptions } from './worktrees.js';
+import { createWorktree, removeWorktree, worktreeOptions, type WorktreeOptions } from './worktrees.js';
 
 export type Slot = 'setup' | 'full' | 'changed' | 'one';
 export const SLOTS: readonly Slot[] = ['setup', 'full', 'changed', 'one'];
@@ -483,10 +484,14 @@ const verifiedLine = (v: Verification | undefined) => (!v ? 'not run' : v.passed
 export function draftTests(p: Plan, verified: Verification[]): string {
   const d = p.detection;
   const c = p.commands;
+  const vacuity = d.testGlobs.length && d.assertion && d.appPaths.length ? { test_globs: d.testGlobs, assertion_pattern: d.assertion, app_paths: d.appPaths, dynamic: coverageRunnerOne(c.one) } : null;
+  const vacuityNote = vacuity && !vacuity.dynamic ? [`# note: vacuity.dynamic is false (runner.one isn't node --test on one file, the one form whose coverage the merge gate can measure), so every PR that changes app code waits for you. To let the harness merge them, set:`, ...vacuitySnippet(vacuity, c.one ?? undefined).split('\n').map((l) => `#   ${l}`)] : [];
   const doc = {
     version: 1,
     runner: { kind: 'command', changed: c.changed ?? NO_TESTS, full: c.full ?? NO_TESTS, ...(c.one ? { one: c.one } : {}) },
-    ...(d.testGlobs.length && d.assertion && d.appPaths.length ? { vacuity: { test_globs: d.testGlobs, assertion_pattern: d.assertion, app_paths: d.appPaths, dynamic: false } } : {}),
+    // #784: the coverage run on (dynamic) where runner.one is node --test on one file; elsewhere off, with a note saying
+    // that PRs changing app code then wait for the owner, and the lines that turn it on.
+    ...(vacuity ? { vacuity } : {}),
     worktree: { root: '.claude/worktrees', setup: c.setup ? c.setup.split(' && ') : [] },
     env: {},
     checks: [],
@@ -500,6 +505,7 @@ export function draftTests(p: Plan, verified: Verification[]): string {
     `# each command run on the default branch first. Review it before merging; every line can be changed.`,
     ...(['setup', 'full', 'changed', 'one'] as const).filter((s) => c[s]).map((s) => `#   ${s === 'setup' ? 'worktree.setup' : `runner.${s}`}: ${c[s]}  -> ${c[s] === NO_TESTS ? 'no tests yet, as answered' : verifiedLine(find(s, c[s]))}`),
     ...p.notes.map((n) => `# note: ${n}`),
+    ...vacuityNote,
   ];
   return `${head.join('\n')}\n${stringify(doc, { lineWidth: 0 })}`;
 }
@@ -631,7 +637,7 @@ export async function autoConfigure(o: AutoConfigOptions): Promise<AutoConfigRes
   }
   const base = git(['rev-parse', `origin/${branch}`]).stdout.trim();
   s.base = base;
-  const wt: WorktreeOptions = { repo: o.root, root: o.worktreeRoot ?? join(projectStateDir(o.root), 'worktrees'), stateDir: o.worktreeStateDir ?? projectStateDir(o.root), setup: [] };
+  const wt = setupWorktreeOptions(o.root, o.worktreeRoot, o.worktreeStateDir);
   let path: string;
   try {
     path = createWorktree(wt, 'setup', SETUP_BRANCH, base).path;
@@ -803,11 +809,19 @@ function prBody(p: Plan, s: AutoConfigState, branch: string, base: string, owner
  * WHY (#468): Confirm on the preview: the held draft is committed on a scratch worktree of its base, pushed to the
  * setup branch and opened as the setup PR. Nothing is pushed to the default branch.
  */
+/**
+ * The setup worktree's options (#890 round 20): through worktreeOptions, so the root is resolved once, here, and a link
+ * that appears on the way afterwards refuses the worktree. No task file is written for it (taskDir null).
+ */
+export function setupWorktreeOptions(root: string, worktreeRoot?: string, worktreeStateDir?: string): WorktreeOptions {
+  return worktreeOptions({ repo: root, root: worktreeRoot ?? join(projectStateDir(root), 'worktrees'), stateDir: worktreeStateDir ?? projectStateDir(root), setup: [], taskDir: null });
+}
+
 export async function proposeHeldDraft(o: Pick<AutoConfigOptions, 'io' | 'repo' | 'root' | 'state' | 'save' | 'worktreeRoot' | 'worktreeStateDir'>): Promise<AutoConfigResult> {
   const d = o.state.draft;
   if (!d) return { kind: 'failed', detail: 'nothing drafted to propose: draft the config first' };
   if (o.state.pr?.number) return { kind: 'failed', detail: `already proposed in PR #${o.state.pr.number}` };
-  const wt: WorktreeOptions = { repo: o.root, root: o.worktreeRoot ?? join(projectStateDir(o.root), 'worktrees'), stateDir: o.worktreeStateDir ?? projectStateDir(o.root), setup: [] };
+  const wt = setupWorktreeOptions(o.root, o.worktreeRoot, o.worktreeStateDir);
   let path: string;
   try {
     path = createWorktree(wt, 'setup', SETUP_BRANCH, d.base).path;

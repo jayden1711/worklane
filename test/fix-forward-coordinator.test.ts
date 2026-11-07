@@ -26,6 +26,8 @@ const worker = (rename: number, report: number) => (req: RunRequest) => {
   const issue = Number(/issue-(\d+)/.exec(req.cwd)?.[1]);
   if (issue !== rename && issue !== report) {
     writeFileSync(at('src/report.js'), readFileSync(at('src/report.js'), 'utf8').replaceAll('totalCents', 'totalInCents'));
+    // With a test of its own that calls the fixed code: a fix with no test waits for the owner (#784's vacuity gate).
+    writeFileSync(at('test/report-renamed.test.js'), "import { test } from 'node:test';\nimport assert from 'node:assert/strict';\nimport { orderLine } from '../src/report.js';\ntest('order line after the rename', () => { assert.equal(orderLine([{ cents: 3, qty: 3 }]), 'total: 9'); });\n");
     commitAll(req.cwd, 'Call totalInCents in the report');
     return { summary: 'the report calls the renamed function' };
   }

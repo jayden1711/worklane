@@ -3,9 +3,10 @@
 // big or in doubt waits for a human; so does everything while the instance's
 // kill switch is off or auto-merge is stopped. "Ready" (required checks green
 // on the exact evaluated commit, evaluator approved) is decided before this.
+import { STOP_NO_REASON } from './auto-merge-stop.js';
 import { BRAND } from './brand.js';
 import { shownPath } from './path-text.js';
-import { AGENT_INSTRUCTIONS, CONTROL_CHARACTER_PATH, DIFF_HIDING_ATTRIBUTES, INVISIBLE_CHARACTER_PATH, LOCKED_CATEGORIES, NON_ASCII_TOP_LEVEL_PATH, NON_UTF8_PATH, ODD_PATH_CATEGORIES, SELF_MODIFICATION, selfModificationPart, type LevelResult } from './review.js';
+import { AGENT_INSTRUCTIONS, CONFUSABLE_PATH, CONTROL_CHARACTER_PATH, DIFF_HIDING_ATTRIBUTES, INVISIBLE_CHARACTER_PATH, LOCKED_CATEGORIES, NON_ASCII_TOP_LEVEL_PATH, NON_UTF8_PATH, ODD_PATH_CATEGORIES, SELF_MODIFICATION, selfModificationPart, type LevelResult } from './review.js';
 
 export interface MergeVerdict {
   patch_correct: boolean;
@@ -47,7 +48,7 @@ export interface MergeInput {
   policyOn: boolean;
   /** review.yaml merge.auto. */
   repoOn: boolean;
-  /** Why auto-merge is stopped for this instance (main went red after one), or null. */
+  /** Why auto-merge is stopped for this instance (main went red after one), or null. Any string holds, even an empty one. */
   stopped: string | null;
   /** Review categories of the whole change, with the paths in each (computeLevel). */
   level: LevelResult;
@@ -73,6 +74,10 @@ export interface MergeInput {
   claimedProtected?: boolean;
   /** Why the change may remove or weaken a test, a lint or a guard (src/merge-policy-weakening.ts weakeningOf); empty: it doesn't. */
   weakening?: string[];
+  /** Why the PR's own tests aren't shown to run the app code it changes (src/merge-policy-vacuity.ts vacuityCheck); empty: they are. */
+  vacuity?: string[];
+  /** Their coverage run at this head is still to come (vacuityCheck's `run`): it holds when nothing else does. */
+  vacuityPending?: boolean;
 }
 
 export interface InstructionEvalResult {
@@ -154,6 +159,7 @@ const CATEGORY_WORDS: Record<string, string> = {
   [NON_UTF8_PATH]: "has a path that isn't valid UTF-8",
   [INVISIBLE_CHARACTER_PATH]: 'has a path with an invisible or format character',
   [NON_ASCII_TOP_LEVEL_PATH]: "has a top-level name that isn't ASCII",
+  [CONFUSABLE_PATH]: 'has a path that looks like a protected one',
   [DIFF_HIDING_ATTRIBUTES]: 'changes a .gitattributes or .gitmodules in a way that can hide what a review sees (-diff, binary, linguist-generated, a filter, an encoding, a diff driver, a macro, a submodule ignore)',
 };
 
@@ -240,7 +246,7 @@ export function mergeDecision(i: MergeInput): MergeDecision {
   const reasons: string[] = [...neverAutoMerge({ branch: i.branch, openedByHarness: i.openedByHarness })];
   if (!i.policyOn) reasons.push('auto-merge is off for this instance (policy.yaml auto_merge)');
   if (!i.repoOn) reasons.push("auto-merge is off for this repo (review.yaml merge.auto)");
-  if (i.stopped) reasons.push(`auto-merge is stopped: ${i.stopped}`);
+  if (typeof i.stopped === 'string') reasons.push(`auto-merge is stopped: ${i.stopped.trim() ? i.stopped : STOP_NO_REASON}`);
 
   // High-risk paths or categories, and design-level: the evaluator's flag is binding; new dependencies and new
   // top-level modules are seen in code too.
@@ -248,6 +254,8 @@ export function mergeDecision(i: MergeInput): MergeDecision {
   if (i.claimedProtected) reasons.push(`${HIGH_RISK_REASON}the worker marked the change protected (a risk class can be raised, never lowered)`);
   // A test, lint or guard removed or loosened: the owner decides, whatever the level (#783).
   reasons.push(...(i.weakening ?? []));
+  // Tests that run none of the app code the change touches, or that nothing measured (#784).
+  reasons.push(...(i.vacuity ?? []));
 
   // Big.
   if (i.lines > i.limits.max_lines) reasons.push(`big: ${i.lines} changed lines (over ${i.limits.max_lines})`);
@@ -270,5 +278,8 @@ export function mergeDecision(i: MergeInput): MergeDecision {
   if (i.pushLimitHit) reasons.push('doubt: the change hit a push limit');
   reasons.push(...(i.instructionEvals ?? []));
   reasons.push(...(i.outsidePlan ?? []));
+  // Its tests' coverage run is still to come (#784): the one thing that holds it when nothing else does, so the PR
+  // watch makes the run and decides again; beside another reason it adds nothing, as that reason holds it already.
+  if (i.vacuityPending && !reasons.length) reasons.push('design: vacuity: its tests have not yet been run under coverage at this head');
   return { auto: reasons.length === 0, reasons, why: whyHighRisk({ level: i.level, waitCategories: i.waitCategories }), ...(advice ? { advice } : {}) };
 }

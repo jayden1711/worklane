@@ -22,6 +22,7 @@ import { Worker, type WorkerOptions } from 'node:worker_threads';
 import { childEnvOf, execFile, execFileSync, spawn, spawnSync, startSetupWorker } from '../src/os/child-process.js';
 import { ownEnv } from '../src/os/own-env.js';
 import { repoRoot } from './helpers.js';
+import { withHostStandIns } from './isolate.js';
 
 const CANARY = 'WL846_CANARY_NEVER_SET';
 const NODE = process.execPath;
@@ -106,12 +107,15 @@ test('#846: an `env` only on Object.prototype is not read as the options\' env',
 const digest = (env: Record<string, string | undefined>) => createHash('sha256').update(JSON.stringify(Object.keys(env).filter((k) => env[k] !== undefined).sort().map((k) => [k, env[k]]))).digest('hex');
 const CHILD_DIGEST = `const e = process.env; process.stdout.write(require('node:crypto').createHash('sha256').update(JSON.stringify(Object.keys(e).sort().map((k) => [k, e[k]]))).digest('hex'))`;
 
+/** An environment as a test process's child gets it: PATH with the host-tool stand-ins first (test/isolate.ts, #991). */
+const asChild = (env: Record<string, string | undefined>) => ({ ...env, PATH: withHostStandIns(env.PATH, process.cwd()) });
+
 test('#846: with a clean prototype a child gets exactly what it got before: every own variable, no more, no less', () => {
   const omitted = spawnSync(NODE, ['-e', CHILD_DIGEST], { encoding: 'utf8' }).stdout;
   assert.equal(omitted, nodeCp.spawnSync(NODE, ['-e', CHILD_DIGEST], { encoding: 'utf8' }).stdout, 'no env: the same as Node gives');
-  assert.equal(omitted, digest(process.env), 'no env: the engine\'s own environment');
+  assert.equal(omitted, digest(asChild(process.env)), 'no env: the engine\'s own environment');
   const given = { ...process.env, WL846_KEEP: 'k', WL846_DROP: undefined };
-  assert.equal(spawnSync(NODE, ['-e', CHILD_DIGEST], { encoding: 'utf8', env: given }).stdout, digest(given), 'a given env: its own set variables');
+  assert.equal(spawnSync(NODE, ['-e', CHILD_DIGEST], { encoding: 'utf8', env: given }).stdout, digest(asChild(given)), 'a given env: its own set variables');
 });
 
 test('#846: the other options reach Node as given (cwd, encoding, input), and a bad options value is still refused', () => {

@@ -25,6 +25,10 @@ these, in any letter case, whatever set them (the inherited environment, an inst
 | `CLAUDE_CODE_PROXY_RESOLVES_HOSTS`, `CLAUDE_CODE_IDE_HOST_OVERRIDE` | claude | Proxy DNS and the IDE host. |
 | `BETA_TRACING_ENDPOINT`, `OTEL_EXPORTER_OTLP_*ENDPOINT` | claude | Telemetry and tracing destinations. |
 | `GH_HOST`, `GH_REPO`, `GITHUB_HOST`, `GITHUB_API_URL`, `GITHUB_SERVER_URL`, `GITHUB_GRAPHQL_URL` | gh, Actions tooling | Name another GitHub host (gh then uses a login or token for it). |
+| `GIT_CONFIG_KEY_n`/`VALUE_n` pairs for `url.<base>.insteadOf` and `url.<base>.pushInsteadOf` (an empty base too, which prefixes every URL), `remote.<name>.url`, `remote.<name>.pushurl`, `remote.<name>.proxy*`, `core.gitProxy` | git | Another host, path or proxy for a remote git already knows. Those pairs are removed and the rest renumbered. |
+| `GIT_CONFIG_KEY_n`/`VALUE_n` pairs for `remote.pushDefault`, `branch.<b>.pushRemote`, `branch.<b>.remote` | git | Which remote a fetch or push that names none uses. They go whatever they name: a name no remote has is read as a path or URL. |
+| `GIT_CONFIG_KEY_n`/`VALUE_n` pairs for any `include.*` or `includeIf.*` key | git | `include.path` and `includeIf.<cond>.path` read another config file, whose keys can't be stripped. |
+| `GIT_CONFIG_GLOBAL`, `GIT_CONFIG_SYSTEM` (any casing) naming a file | git | Not removed but set to `/dev/null`: a named file's keys can't be stripped, and unsetting would make git read `~/.gitconfig` or `/etc/gitconfig` in its place. Git reads no global or system config, as for an empty file. `/dev/null` itself is kept; `GIT_CONFIG_NOSYSTEM` is untouched. |
 
 ### What TLS trusts
 
@@ -41,7 +45,7 @@ these, in any letter case, whatever set them (the inherited environment, an inst
 | `SSLKEYLOGFILE` | libcurl (git), curl | Writes TLS session keys to a file: whoever reads it decrypts the traffic. |
 | `GIT_SSL_*` (`GIT_SSL_NO_VERIFY`, `_CAINFO`, `_CAPATH`, `_CERT`, `_KEY`, `_CERT_PASSWORD_PROTECTED`, `_VERSION`, `_CIPHER_LIST`, `_PINNEDPUBKEY`) and `GIT_PROXY_SSL_*` | git | Verification off, another CA, a client certificate, weaker TLS, for the remote and for a proxy. |
 | `GIT_CONFIG_PARAMETERS` | git | `git -c` config passed to child gits; it can carry `http.sslVerify=false`. |
-| `GIT_CONFIG_KEY_n`/`VALUE_n` pairs for `http.[<url>.]ssl*`, `http.*proxy*`, `http.*schannel*`, `http.*pinnedPubkey`, `http.*curloptResolve`, `url.*.insteadOf`, `url.*.pushInsteadOf` | git | The same settings as environment config. Those pairs are removed and the rest renumbered. The engine's own pairs (credential helper, hooks path, safe.directory) stay. |
+| `GIT_CONFIG_KEY_n`/`VALUE_n` pairs for `http.[<url>.]ssl*`, `http.*proxy*`, `http.*schannel*`, `http.*pinnedPubkey`, `http.*curloptResolve` | git | The same settings as environment config. Those pairs are removed and the rest renumbered. The engine's own pairs (credential helper, hooks path, fsmonitor, safe.directory) stay. |
 | `CLAUDE_CODE_CERT_STORE`, `CLAUDE_CODE_CLIENT_CERT`, `CLAUDE_CODE_CLIENT_KEY`, `CLAUDE_CODE_CLIENT_KEY_PASSPHRASE` | claude | Which CA sources claude trusts, and a client certificate for mTLS. |
 
 Tokens (`GH_TOKEN`, `GITHUB_TOKEN`, the enterprise tokens, `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`) were already

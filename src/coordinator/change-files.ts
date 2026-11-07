@@ -27,7 +27,6 @@
 // GitHub and a checkout still honour it.
 import { Buffer, isUtf8 } from 'node:buffer';
 import { spawnSync } from '../os/child-process.js';
-import type { SizeFile } from '../pr-rules.js';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { attributeTransitionHides, isGitattributesPath, isGitmodulesPath, macrosDefined, OUTCOME_ATTRIBUTES, type ChangeFile } from '../review.js';
@@ -205,6 +204,11 @@ export function untrackedNames(cwd: string): string[] {
   return names(must(runBytes(cwd, ['ls-files', '--others', '--exclude-standard', '-z'])));
 }
 
+/** The ignored untracked files of a worktree (`ls-files --others --ignored --exclude-standard -z`), each read by nameOf. */
+export function ignoredNames(cwd: string): string[] {
+  return names(must(runBytes(cwd, ['ls-files', '--others', '--ignored', '--exclude-standard', '-z'])));
+}
+
 /**
  * Every file in the index (`ls-files --cached -z`, `rev` null) or in a commit's tree (`ls-tree -r -z --name-only`),
  * each read by nameOf: whether a file is there at all, apart from whether its blob can be asked for by name.
@@ -314,10 +318,38 @@ function attributeMacros(cwd: string, rev: string): string[] {
  */
 const MIN_GIT_FOR_ATTRIBUTE_SOURCE: readonly [number, number] = [2, 40];
 
-/** The running git's major and minor version (`git version 2.43.0`), or null when it can't be read. Asked each time: it's one spawn, only when a .gitattributes changes. */
-function gitVersion(cwd: string): [number, number] | null {
-  const m = /git version (\d+)\.(\d+)/.exec(runStatus(cwd, ['version']).stdout);
+/** `git merge-tree --write-tree` came in git 2.38: an older git can't measure a merge (mergedTree), so every PR waits. */
+const MIN_GIT_FOR_MERGE_TREE: readonly [number, number] = [2, 38];
+
+/** A `git version` line's major and minor version (`git version 2.43.0`), or null when it holds none. */
+const versionOf = (text: string): [number, number] | null => {
+  const m = /git version (\d+)\.(\d+)/.exec(text);
   return m ? [Number(m[1]), Number(m[2])] : null;
+};
+
+/** The running git's major and minor version, or null when it can't be read. Asked each time: it's one spawn, only when a .gitattributes changes. */
+function gitVersion(cwd: string): [number, number] | null {
+  return versionOf(runStatus(cwd, ['version']).stdout);
+}
+
+/**
+ * Why `git version`'s output (`text`) names a git too old for the merge decision's checks, or null when it is new
+ * enough. They need MIN_GIT_FOR_MERGE_TREE for every PR (mergedTree) and MIN_GIT_FOR_ATTRIBUTE_SOURCE for a PR that
+ * changes a `.gitattributes` (attributeOutcome); a PR whose check can't run waits for the owner. For the setup checks
+ * (doctor), which say so up front.
+ */
+export function gitTooOld(text: string): string | null {
+  const below = (v: readonly [number, number], m: readonly [number, number]) => v[0] < m[0] || (v[0] === m[0] && v[1] < m[1]);
+  const need = [MIN_GIT_FOR_MERGE_TREE, MIN_GIT_FOR_ATTRIBUTE_SOURCE].reduce((a, b) => (below(a, b) ? b : a));
+  const v = versionOf(text);
+  if (v !== null && !below(v, need)) return null;
+  const tree = `${MIN_GIT_FOR_MERGE_TREE[0]}.${MIN_GIT_FOR_MERGE_TREE[1]}`;
+  const attributes = `${MIN_GIT_FOR_ATTRIBUTE_SOURCE[0]}.${MIN_GIT_FOR_ATTRIBUTE_SOURCE[1]}`;
+  const waits = v === null ? `with a git older than ${tree} every PR waits for the owner, and with an older one than ${attributes} every PR that changes a .gitattributes does`
+    : below(v, MIN_GIT_FOR_MERGE_TREE) ? 'with this git every PR waits for the owner'
+    : 'with this git every PR that changes a .gitattributes waits for the owner';
+  const said = v === null ? `can't read git's version (${text.trim().slice(0, 80) || 'no output'})` : `git ${v[0]}.${v[1]}`;
+  return `${said}: the merge decision needs git ${need[0]}.${need[1]} or later (merge-tree --write-tree from ${tree}, check-attr --source from ${attributes}); ${waits}`;
 }
 
 /**
@@ -462,6 +494,15 @@ function changeFileLines(cwd: string, base: string, head: string): ChangeFile[] 
     });
 }
 
+/** One file of a change (git diff -M): its added and removed lines. A pure rename has none; a binary file its lines read as text (#693). */
+export interface SizeFile {
+  path: string;
+  /** A rename's old path. */
+  from?: string;
+  added: string[];
+  removed: string[];
+}
+
 /**
  * The change base..head as the size limit reads it (pr-rules.ts sizeVerdict): one `git diff -M -U0`, each file under
  * its new path, a rename's old path in `from`. Rename detection is on here on purpose: a pure rename counts 0 lines.
@@ -490,6 +531,76 @@ export function sizeFiles(cwd: string, base: string, head: string, o: { renames?
     else if (!inHunk && l.startsWith('rename from ')) cur.from = l.slice('rename from '.length);
     else if (!inHunk && l.startsWith('rename to ')) cur.path = l.slice('rename to '.length);
     else if (!inHunk && l.startsWith('+++ b/')) cur.path = l.slice('+++ b/'.length);
+  }
+  return out;
+}
+
+/**
+ * The git command for the merge gate's changed lines (#784): base..head with renames paired (-M: a renamed file's lines
+ * are only the ones it edited), no context (-U0), whitespace-only and blank-line changes left out (-w
+ * --ignore-blank-lines), hunks never joined across unchanged lines (diff.interHunkContext=0, as comment-policy.ts pins
+ * it, whatever the config says), the histogram algorithm pinned (diff.algorithm=histogram, #784 round 11: the default
+ * one can slide a removed function's lines onto a kept one's, so the kept code reads as changed and an added copy as
+ * kept), read as text (AS_TEXT) with this module's guards (withGit). merge-flow.ts runs it as a child the coordinator
+ * awaits; changedLineNumbers reads its output.
+ */
+export function changedLinesCommand(base: string, head: string): string[] {
+  return withGit(['-c', 'core.quotePath=false', '-c', 'diff.interHunkContext=0', '-c', 'diff.algorithm=histogram', 'diff', '-M', '-U0', '-w', '--ignore-blank-lines', '--no-color', ...AS_TEXT, '--src-prefix=a/', '--dst-prefix=b/', `${base}..${head}`]);
+}
+
+/**
+ * One hunk of a file's changes as changedLineNumbers reads them: `at`, the line at the head its removed lines followed
+ * (0: the file's start); `added`, the lines it added (1-based, at the head); `removed`, the text it removed, from line
+ * `from` (1-based) of the file at the base, `oldPath` (a rename's old path).
+ */
+export interface ChangedHunk {
+  at: number;
+  added: number[];
+  removed: string[];
+  from: number;
+  oldPath: string;
+}
+
+/**
+ * changedLinesCommand's output, by file at the head (a rename under its new path, its hunks from the rename pair): every
+ * hunk. A name git still quotes doesn't match any path asked about, so that file has no hunks (it fails closed: none of
+ * its code counts). A hunk header it can't read ends that file's hunks the same way.
+ */
+export function changedLineNumbers(diff: string): Map<string, ChangedHunk[]> {
+  const out = new Map<string, ChangedHunk[]>();
+  let cur: ChangedHunk[] | null = null;
+  let hunk: ChangedHunk | null = null;
+  let path = '';
+  let oldPath = '';
+  let next = 0;
+  for (const l of diff.split('\n')) {
+    if (l.startsWith('diff --git ')) {
+      const header = /^diff --git a\/(.*) b\/(.*)$/.exec(l);
+      path = header ? header[2]! : l;
+      oldPath = header ? header[1]! : l;
+      cur = null;
+      hunk = null;
+    } else if (l.startsWith('rename from ') && !cur) oldPath = l.slice('rename from '.length);
+    else if (l.startsWith('rename to ') && !cur) path = l.slice('rename to '.length);
+    // A name with a space ends in a TAB git adds on these two lines (round 11: N4); a TAB of the name itself is quoted.
+    else if (l.startsWith('--- ') && !cur) {
+      if (l.startsWith('--- a/')) oldPath = l.slice('--- a/'.length).replace(/\t$/, '');
+    } else if (l.startsWith('+++ ') && !cur) {
+      if (l.startsWith('+++ b/')) path = l.slice('+++ b/'.length).replace(/\t$/, '');
+    } else if (l.startsWith('@@')) {
+      const m = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,(\d+))? @@/.exec(l);
+      cur = out.get(path) ?? [];
+      out.set(path, cur);
+      if (!m) {
+        hunk = null;
+        continue;
+      }
+      next = Number(m[2]);
+      // `+c,0`: nothing added, the removed lines followed line c; otherwise they stood where line c now is.
+      hunk = { at: m[3] === '0' ? next : next - 1, added: [], removed: [], from: Number(m[1]), oldPath };
+      cur.push(hunk);
+    } else if (hunk && l.startsWith('+')) hunk.added.push(next++);
+    else if (hunk && l.startsWith('-')) hunk.removed.push(l.slice(1));
   }
   return out;
 }
@@ -556,6 +667,46 @@ export function filesWithText(cwd: string, rev: string, needles: string[]): stri
  */
 export function mergeBaseOf(cwd: string, a: string, b: string): string {
   return must(run(cwd, ['merge-base', a, b])).trim();
+}
+
+/**
+ * The tree merging `a` and `b` makes (git merge-tree --write-tree, git 2.38 or later: no worktree, no index, no ref
+ * moved; only the merged objects are written to the object store), `a`'s side first in a conflict's markers,
+ * and the paths the merge conflicts on (none: it merges cleanly). A merge that conflicts still writes a tree: its
+ * conflicted files hold conflict markers and both sides' lines. Git merges by the attributes of the checkout at `cwd`.
+ * `contentOnly`: the conflicted paths whose every conflict is on their lines (`CONFLICT (contents)`: both sides
+ * changed the same lines, or both added the file), not on where a file goes or whether it stays. A merge that
+ * conflicts only on a directory (the tip split it in two) names no conflicted path.
+ * For the merge decision's check for a weakened test, lint or guard: what merging a PR would make of the default
+ * branch (#1069, #1077). Throws when git fails (an older git, no merge base, output it can't read).
+ */
+export function mergedTree(cwd: string, a: string, b: string): { tree: string; conflicts: string[]; contentOnly: Set<string> } {
+  if (a.startsWith('-') || b.startsWith('-')) throw new Error(`mergedTree: ${a} or ${b} is not a revision`);
+  // -z --name-only: the tree, then each conflicted path once, then an empty field, then each message as its count of
+  // paths, those paths, its type and its text; each field ended by a NUL.
+  const r = spawnSync('git', withGit(['merge-tree', '--write-tree', '--name-only', '-z', a, b]), { cwd, encoding: 'buffer', maxBuffer: MAX_BUFFER });
+  if (r.error) throw r.error;
+  const failed = () => new Error(`git merge-tree ${a.slice(0, 40)} ${b.slice(0, 40)} failed: ${((r.stderr ?? Buffer.alloc(0)).toString('utf8') || `exit ${r.status}`).trim().slice(0, 500)}`);
+  const [tree, ...rest] = fields(r.stdout ?? Buffer.alloc(0));
+  const id = tree?.toString('latin1') ?? '';
+  const end = rest.findIndex((p) => !p.length);
+  const conflicts = (end === -1 ? rest : rest.slice(0, end)).map(nameOf);
+  const kinds = new Map<string, Set<string>>();
+  let conflicted = false;
+  for (let k = end === -1 ? rest.length : end + 1; k < rest.length; ) {
+    const count = rest[k]!.toString('latin1');
+    if (!/^[1-9][0-9]{0,5}$/.test(count) || k + Number(count) + 3 > rest.length) throw failed();
+    const paths = rest.slice(k + 1, k + 1 + Number(count)).map(nameOf);
+    const type = rest[k + 1 + Number(count)]!.toString('utf8');
+    k += Number(count) + 3;
+    if (!type.startsWith('CONFLICT')) continue;
+    conflicted = true;
+    for (const p of paths) kinds.set(p, (kinds.get(p) ?? new Set()).add(type));
+  }
+  // A conflict (exit 1) names what conflicts, a path or a message; a clean merge (exit 0) names nothing.
+  if ((r.status !== 0 && r.status !== 1) || !/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(id) || (r.status === 1) !== (conflicts.length > 0 || conflicted)) throw failed();
+  const contentOnly = new Set(conflicts.filter((p) => [...(kinds.get(p) ?? [])].length > 0 && [...kinds.get(p)!].every((t) => t === 'CONFLICT (contents)')));
+  return { tree: id, conflicts, contentOnly };
 }
 
 /**

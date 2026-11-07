@@ -23,6 +23,9 @@ async function world() {
   const f = fixture();
   f.cfg.project.land_mode = 'pr';
   f.cfg.project.required_checks = ['ci'];
+  // Its PRs each add a module with no test, and these cases are about main's checks after a merge, not the vacuity
+  // gate (#784, test/merge-vacuity-*.test.ts cover it): its app code is somewhere these PRs never touch.
+  f.cfg.tests.vacuity = { ...f.cfg.tests.vacuity!, app_paths: ['app/**'] };
   mkdirSync(f.stateDir, { recursive: true });
   const a = f.backlog.open({ title: 'Add the order notes', body: body('Add src/notes-a.js'), author: 'example-owner', labels: ['ready'] });
   const b = f.backlog.open({ title: 'Add the refund notes', body: body('Add src/notes-b.js'), author: 'example-owner', labels: ['ready'] });
@@ -270,4 +273,15 @@ test("#731: a stop already in force that waits for green main is kept as it is (
   assert.equal(said.length, 1);
   assert.doesNotMatch(said[0]!, /Auto-merge goes on/);
   assert.match(said[0]!, /Auto-merge stays stopped on this instance/);
+});
+
+test('#982: a stop file in force that can not be parsed names no cause, so it waits for green main and is kept as it is', { skip }, async () => {
+  const w = await world();
+  writeFileSync(stopFile(w.f), '{"reason": ');
+  await polls(w, MAIN_CHECKS_MIN_POLLS + 1);
+  assert.equal(readFileSync(stopFile(w.f), 'utf8'), '{"reason": ', 'the stop in force is untouched');
+  assert.equal(of(w.f, 'merge.stopped').length, 0, 'no new stop replaces it');
+  const said = commentsOn(w.f, w.prA.number).filter((c) => /never reported on the merge commit/.test(c));
+  assert.equal(said.length, 1);
+  assert.match(said[0]!, /Auto-merge stays stopped on this instance \(the stop file .* is unreadable\)/);
 });

@@ -8,7 +8,7 @@ import { TestsConfig } from '../src/config/schema.js';
 import { CACHE_VARS, depCacheDir, depCacheEnv, prepareDepCache } from '../src/dep-cache.js';
 import { sparsePatterns } from '../src/checkout.js';
 import { poolFits, readPool, refillPool, setupKey, takeFromPool } from '../src/worktree-pool.js';
-import { createWorktree, ownedWorktrees, type WorktreeOptions } from '../src/worktrees.js';
+import { createWorktree, ownedWorktrees, worktreeOptions, type WorktreeOptions } from '../src/worktrees.js';
 
 const posix = process.platform !== 'win32';
 
@@ -24,7 +24,7 @@ function repo() {
   git('commit', '-q', '-m', 'one');
   return { dir, git, head: () => git('rev-parse', 'HEAD') };
 }
-const opts = (dir: string, extra: Partial<WorktreeOptions> = {}): WorktreeOptions => ({ repo: dir, root: '.claude/worktrees', stateDir: join(dir, '..', `state-${Math.random().toString(36).slice(2)}`), setup: [], ...extra });
+const opts = (dir: string, extra: Partial<WorktreeOptions> = {}): WorktreeOptions => worktreeOptions({ repo: dir, root: '.claude/worktrees', stateDir: join(dir, '..', `state-${Math.random().toString(36).slice(2)}`), setup: [], taskDir: null, ...extra });
 
 test('each instance gets its own dependency cache under its root, shared by its agents\' group (2770)', { skip: !posix && 'POSIX modes' }, () => {
   const a = join(mkdtempSync(join(tmpdir(), 'srv-')), 'one');

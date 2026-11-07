@@ -1,0 +1,109 @@
+{
+  "group": "the inputs mergeDecisionFor assembles itself (plans, labels, money paths, new modules, size, the verdict's task)",
+  "cases": [
+    {
+      "id": "flow-outside-plan-empty-plan",
+      "attack": "a planned task whose approved plan lists no files, and whose PR changes an auth file, in a repo whose review.yaml puts auth at L2",
+      "source": "merge-flow.ts mergeDecisionFor (a plan with no files is still a plan); #957 second review Q4; docs/guardrails.md Hold kinds: outside the plan",
+      "base": { "web/totals.js": "export const total = 1;\n", "web/auth/session.js": "export const ttl = 60;\n" },
+      "change": [{ "write": "web/totals.js", "text": "export const total = 2;\n" }, { "write": "web/auth/session.js", "text": "export const ttl = 600000;\n" }],
+      "flow": { "plan": [] },
+      "expect": { "decision": "waits", "reasons": ["not in the approved plan: high-risk: auth (web/auth/session.js)"], "configs": ["engine", "default", "auth-at-l2"], "scopes": ["engine", "managed-app"] }
+    },
+    {
+      "id": "flow-outside-plan-another-tasks-plan",
+      "attack": "a planned task whose PR changes an auth file its own plan doesn't list, while another task's later plan lists it, in a repo whose review.yaml puts auth at L2",
+      "source": "merge-flow.ts mergeDecisionFor (this task's plan only); #957 second review Q5; docs/guardrails.md Hold kinds: outside the plan",
+      "base": { "web/totals.js": "export const total = 1;\n", "web/auth/session.js": "export const ttl = 60;\n" },
+      "change": [{ "write": "web/totals.js", "text": "export const total = 2;\n" }, { "write": "web/auth/session.js", "text": "export const ttl = 600000;\n" }],
+      "flow": { "plan": ["web/totals.js"], "planForAnotherIssue": ["web/totals.js", "web/auth/session.js"] },
+      "expect": { "decision": "waits", "reasons": ["not in the approved plan: high-risk: auth (web/auth/session.js)"], "configs": ["engine", "default", "auth-at-l2"], "scopes": ["engine", "managed-app"] }
+    },
+    {
+      "id": "flow-outside-plan-entry-by-file-name",
+      "attack": "a planned task whose plan names the auth file by its file name only, in a repo whose review.yaml puts auth at L2",
+      "source": "merge-policy.ts outsidePlanReasons (a plan entry covers its exact path only); #957 second review Q6; docs/guardrails.md Hold kinds: outside the plan",
+      "base": { "web/totals.js": "export const total = 1;\n", "web/auth/session.js": "export const ttl = 60;\n" },
+      "change": [{ "write": "web/totals.js", "text": "export const total = 2;\n" }, { "write": "web/auth/session.js", "text": "export const ttl = 600000;\n" }],
+      "flow": { "plan": ["web/totals.js", "session.js"] },
+      "expect": { "decision": "waits", "reasons": ["not in the approved plan: high-risk: auth (web/auth/session.js)"], "configs": ["engine", "default", "auth-at-l2"], "scopes": ["engine", "managed-app"] }
+    },
+    {
+      "id": "flow-outside-plan-entry-with-glob",
+      "attack": "a planned task whose plan lists the auth folder by a glob, in a repo whose review.yaml puts auth at L2",
+      "source": "merge-policy.ts outsidePlanReasons (a plan entry is a path, never a pattern); #957 second review Q7; docs/guardrails.md Hold kinds: outside the plan",
+      "base": { "web/totals.js": "export const total = 1;\n", "web/auth/session.js": "export const ttl = 60;\n" },
+      "change": [{ "write": "web/totals.js", "text": "export const total = 2;\n" }, { "write": "web/auth/session.js", "text": "export const ttl = 600000;\n" }],
+      "flow": { "plan": ["web/totals.js", "web/auth/*"] },
+      "expect": { "decision": "waits", "reasons": ["not in the approved plan: high-risk: auth (web/auth/session.js)"], "configs": ["engine", "default", "auth-at-l2"], "scopes": ["engine", "managed-app"] }
+    },
+    {
+      "id": "flow-money-path-label",
+      "attack": "a small app change on an issue the owner labelled money-path (the label read from the event log)",
+      "source": "merge-flow.ts mergeDecisionFor (the labels issue.seen last recorded) and review.ts computeLevel; #957 second review Q8; docs/guardrails.md Hold kinds: high-risk",
+      "pr": { "labels": ["money-path"] },
+      "base": { "web/totals.js": "export const total = 1;\n" },
+      "change": [{ "write": "web/totals.js", "text": "export const total = 2;\n" }],
+      "flow": {},
+      "expect": { "decision": "waits", "reasons": ["high-risk: money-path (web/totals.js)"], "configs": ["engine", "default"], "scopes": ["engine", "managed-app"] }
+    },
+    {
+      "id": "flow-money-path-list",
+      "attack": "a change to a file the money-path list on the default branch names",
+      "source": "merge-flow.ts policyAtTipNow (review.yaml money_path_source, read with git); docs/guardrails.md Hold kinds: high-risk",
+      "moneyPaths": ["billing/**"],
+      "base": { "billing/rates.js": "export const rate = 1;\n" },
+      "change": [{ "write": "billing/rates.js", "text": "export const rate = 0;\n" }],
+      "flow": {},
+      "expect": { "decision": "waits", "reasons": ["high-risk: money-path (billing/rates.js)"], "configs": ["engine", "default"], "scopes": ["engine", "managed-app"] }
+    },
+    {
+      "id": "flow-money-path-list-moved-on-default-branch",
+      "attack": "a change to a file the money-path list names only on the default branch's tip, added there after this PR's base",
+      "source": "merge-flow.ts policyAtTipNow (the list read at the default branch's tip, never the PR's head: #715, #1005); #957 second review Q9; docs/guardrails.md Hold kinds: high-risk",
+      "moneyPaths": ["ledger/**"],
+      "base": { "billing/rates.js": "export const rate = 1;\n" },
+      "change": [{ "write": "billing/rates.js", "text": "export const rate = 0;\n" }],
+      "flow": { "tipMoved": { "money-paths.txt": "ledger/**\nbilling/**\n" } },
+      "expect": { "decision": "waits", "reasons": ["high-risk: money-path (billing/rates.js)"], "configs": ["engine", "default"], "scopes": ["engine", "managed-app"] }
+    },
+    {
+      "id": "flow-new-top-level-module",
+      "attack": "a change that adds a top-level folder the base doesn't have",
+      "source": "merge-flow.ts mergeDecisionFor (newTopLevel, read at the change's base); #957 second review Q12; docs/guardrails.md Hold kinds: design",
+      "seed": false,
+      "change": [{ "write": "billing/rates.js", "text": "export const rate = 1;\n" }],
+      "flow": {},
+      "expect": { "decision": "waits", "reasons": ["design: new top-level module (billing/)"], "scopes": ["engine", "managed-app"] }
+    },
+    {
+      "id": "flow-big-addition",
+      "attack": "an app change of 900 added lines (and one removed), over review.yaml's max_lines",
+      "source": "merge-flow.ts mergeDecisionFor (lines: added and removed); docs/guardrails.md Hold kinds: big",
+      "base": { "web/totals.js": "export const total = 1;\n" },
+      "change": [{ "write": "web/totals.js", "text": "export const total = 2;\n", "repeat": 900 }],
+      "flow": {},
+      "expect": { "decision": "waits", "reasons": ["big: 901 changed lines (over 800)"], "configs": ["engine", "default"], "scopes": ["engine", "managed-app"] }
+    },
+    {
+      "id": "flow-big-deletion",
+      "attack": "a change that deletes a 900-line app file, over review.yaml's max_lines",
+      "source": "merge-flow.ts mergeDecisionFor (lines: removed lines count too); #957 second review Q13; docs/guardrails.md Hold kinds: big",
+      "base": { "web/legacy.js": { "text": "export const total = 1;\n", "repeat": 900 } },
+      "change": [{ "delete": "web/legacy.js" }],
+      "flow": {},
+      "expect": { "decision": "waits", "reasons": ["big: 900 changed lines (over 800)"], "configs": ["engine", "default"], "scopes": ["engine", "managed-app"] }
+    },
+    {
+      "id": "flow-verdict-of-another-task",
+      "attack": "a PR whose own verdict names an earlier commit, while another task's always-PASS verdict names this PR's head",
+      "source": "merge-flow.ts mergeDecisionFor (this task's verdict on this head only); #957 second review Q19; docs/guardrails.md inputs",
+      "base": { "web/totals.js": "export const total = 1;\n" },
+      "change": [{ "write": "web/totals.js", "text": "export const total = 2;\n" }],
+      "flow": { "verdictFor": "other-commit", "verdictForAnotherIssue": "pass" },
+      "expect": { "decision": "waits", "reasons": ["doubt: no evaluator verdict"], "scopes": ["engine", "managed-app"] }
+    },
+    {"id": "flow-too-many-files", "attack": "a change that adds 21 small app files, over review.yaml's max_files", "source": "merge-flow.ts mergeDecisionFor (files: the files the change touches); #1076 second review F1; docs/guardrails.md Hold kinds: big", "change": [{"write": "web/part01.js", "text": "export const part = 1;\n"}, {"write": "web/part02.js", "text": "export const part = 2;\n"}, {"write": "web/part03.js", "text": "export const part = 3;\n"}, {"write": "web/part04.js", "text": "export const part = 4;\n"}, {"write": "web/part05.js", "text": "export const part = 5;\n"}, {"write": "web/part06.js", "text": "export const part = 6;\n"}, {"write": "web/part07.js", "text": "export const part = 7;\n"}, {"write": "web/part08.js", "text": "export const part = 8;\n"}, {"write": "web/part09.js", "text": "export const part = 9;\n"}, {"write": "web/part10.js", "text": "export const part = 10;\n"}, {"write": "web/part11.js", "text": "export const part = 11;\n"}, {"write": "web/part12.js", "text": "export const part = 12;\n"}, {"write": "web/part13.js", "text": "export const part = 13;\n"}, {"write": "web/part14.js", "text": "export const part = 14;\n"}, {"write": "web/part15.js", "text": "export const part = 15;\n"}, {"write": "web/part16.js", "text": "export const part = 16;\n"}, {"write": "web/part17.js", "text": "export const part = 17;\n"}, {"write": "web/part18.js", "text": "export const part = 18;\n"}, {"write": "web/part19.js", "text": "export const part = 19;\n"}, {"write": "web/part20.js", "text": "export const part = 20;\n"}, {"write": "web/part21.js", "text": "export const part = 21;\n"}], "flow": {}, "expect": {"decision": "waits", "reasons": ["big: 21 files (over 20)"], "configs": ["engine", "default"], "scopes": ["engine", "managed-app"]}},
+    {"id": "flow-money-path-label-another-issue-seen-later", "attack": "a small app change on an issue labelled money-path, while another issue is seen later with no labels", "source": "merge-flow.ts mergeDecisionFor (this issue's issue.seen only); #1076 second review N2; docs/guardrails.md Hold kinds: high-risk", "pr": {"labels": ["money-path"]}, "base": {"web/totals.js": "export const total = 1;\n"}, "change": [{"write": "web/totals.js", "text": "export const total = 2;\n"}], "flow": {"labelsForAnotherIssue": []}, "expect": {"decision": "waits", "reasons": ["high-risk: money-path (web/totals.js)"], "configs": ["engine", "default"], "scopes": ["engine", "managed-app"]}}
+  ]
+}

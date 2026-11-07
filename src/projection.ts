@@ -7,6 +7,8 @@ import { hygieneLine, type HygieneCounts } from './pr-hygiene.js';
 import { DIRECT_LAND_REFUSED } from './direct-land.js';
 import { localDay } from './local-day.js';
 import { holdBanner, holdReason, type HoldBanner, type HoldFacts } from './governor-holds.js';
+// A path in a summary line as every reason shows it (#763): a look-alike escaped, never raw.
+import { shownPath } from './path-text.js';
 
 export type TaskStatus =
   | 'triage'
@@ -227,7 +229,7 @@ export function summarize(e: StoredEvent): string {
     case 'run.cost':
       return `${p.role} cost $${Number(p.usd).toFixed(2)}`;
     case 'repro.frozen':
-      return `reproduction test frozen: ${p.path}`;
+      return `reproduction test frozen: ${shownPath(String(p.path))}`;
     case 'repro.unavailable':
       return `no reproduction: ${p.why}`;
     case 'change.proposed':

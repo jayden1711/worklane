@@ -4,7 +4,7 @@
 // session. And it turns itself off once the sign-in secret exists: at start, while running, and after it made the App.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { spawn, spawnSync } from 'node:child_process';
 import { request } from 'node:http';
 import { tmpdir } from 'node:os';
@@ -194,6 +194,35 @@ test('the sign-in App through the manifest flow: the secrets stored for this use
     assert.equal(s.h.server.listening, false, 'setup mode is off: nothing answers');
     await assert.rejects(startSetupHub({ stateDir: s.stateDir, signinDir: s.signinDir, publicUrl: ORIGIN }), SetupOver, 'and it will not start again');
   } finally {
+    await s.h.close();
+    await gh.close();
+  }
+});
+
+test("#882: storing the App's secrets failing on an OS error naming the sign-in directory answers 500 with a fixed text; the detail is in the hub's log", { skip: !posix && 'POSIX modes' }, async () => {
+  const gh = await fakeGitHub({ repo: 'example/alpha', permissions: {} });
+  const s = await hub({}, { api: gh.url, web: gh.url });
+  // The sign-in directory is a symlink: installing a secret there refuses with an error that names the directory.
+  symlinkSync(mkdtempSync(join(tmpdir(), 'hub-setup-elsewhere-')), s.signinDir);
+  const lines: string[] = [];
+  const was = console.error;
+  try {
+    const { cookie } = await s.unlock();
+    const page = await s.call('GET', '/', { cookie: cookie!, origin: null });
+    const csrf = /name="csrf" value="([^"]+)"/.exec(page.body)![1]!;
+    const go = await s.call('POST', '/setup/signin-app', { body: `csrf=${encodeURIComponent(csrf)}&owner=example`, cookie: cookie! });
+    const start = await s.call('GET', String(go.headers.location), { cookie: cookie!, origin: null });
+    const state = new URL(/<form method="post" action="([^"]+)"/.exec(start.body)![1]!.replace(/&amp;/g, '&')).searchParams.get('state')!;
+    gh.codes.set('code1', { slug: 'box-signin', id: 92 });
+    console.error = (...a: unknown[]) => void lines.push(a.map(String).join(' '));
+    const back = await s.call('GET', `/setup/app-manifest/callback?state=${encodeURIComponent(state)}&code=code1`, { cookie: cookie!, origin: null });
+    console.error = was;
+    assert.equal(back.status, 500, back.body);
+    assert.match(back.body, /the dashboard hit an internal error; the detail is in its log on the machine/);
+    for (const leak of [s.signinDir, tmpdir(), 'symlink', 'refusing']) assert.ok(!back.body.includes(leak), `${leak} in the page`);
+    assert.ok(lines.some((l) => l.includes('GET /setup/app-manifest/callback failed') && l.includes(`${s.signinDir} is a symlink`)), `the detail is logged: ${JSON.stringify(lines)}`);
+  } finally {
+    console.error = was;
     await s.h.close();
     await gh.close();
   }

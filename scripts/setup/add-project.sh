@@ -455,10 +455,7 @@ detail_dashboards() { echo "the hub serves $(dash_names 2>/dev/null | one_line)"
 alone_dashboards() { echo "sudo bash $here/dashboards.sh $(dash_args 2>/dev/null | one_line) $(dash_names 2>/dev/null | one_line)"; }
 
 # One add-project at a time on a machine: they rewrite the same machine-wide rules.
-if command -v flock >/dev/null 2>&1; then
-  exec 9> "$ADD_PROJECT_LOCK"
-  flock -n 9 || { emit instance failed "another add-project is running on this machine; wait for it to finish" "" "$again"; exit 1; }
-fi
+machine_lock 9 "$ADD_PROJECT_LOCK" 0 "another add-project is running on this machine; wait for it to finish" || { emit instance failed "$MACHINE_LOCK_WHY" "" "$again"; exit 1; }
 
 # An instance by this name for another repo is another project: never reuse it.
 if [ -f "$(inst_dir)/instance.yaml" ] && ! grep -Eq "^ *repo: *$repo *$" "$(inst_dir)/instance.yaml"; then

@@ -158,7 +158,7 @@ test('the login link is read only when it is exactly Tailscale\'s login page, an
   writeFileSync(join(dir, 'steps.jsonl'), `${readFileSync(join(dir, 'steps.jsonl'), 'utf8')}{"at":"2026-10-13T00:00:00Z","step":"logout","state":"done","detail":"x"}\n{"at":"2026-10-13T0`);
   const lines = readStepLines(dir);
   assert.equal(lines.length, 2);
-  assert.equal(lines[1]!.detail, 'open [the login link] with [a key]');
+  assert.equal(lines[1]!.detail, 'open [the login link] with tskey-[REDACTED]');
   const run = stepRun(lines)!;
   assert.deepEqual([run.step, run.status], ['up', 'waiting']);
   assert.equal(stepRun(lines, Date.now() + 3600_000)!.status, 'stalled');

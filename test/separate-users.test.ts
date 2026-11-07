@@ -12,6 +12,7 @@ import { agentEnv, claudeAuthStatus, claudeAuthStatusJson, cliArgs, CliRunner, r
 import { sandboxSettings } from '../src/sandbox.js';
 import { instanceEnv } from '../src/service.js';
 import { exampleProject } from './helpers.js';
+import { machineTool } from './isolate.js';
 
 function instance(extraInstance = '', policy = 'version: 1\nbudget: { daily_usd: 40 }\nagents: { max_workers: 4 }\n') {
   const dir = mkdtempSync(join(tmpdir(), 'instances-'));
@@ -265,9 +266,11 @@ test('project commands (checks, gates, setup, full runs) run as the agent user w
 // A real other user, which passwordless sudo can switch to (CI runners; skipped where sudo asks for a password), and
 // that can start a project command's sandbox (#713: bubblewrap, which machine.sh installs; ci-slow's real-users job
 // runs a check that runs git there). CI's test shards and ci-slow's real-users job install it and set
-// PROJECT_SANDBOX_REQUIRED=1, so there this test can't skip for it.
-const canSudoNobody = process.platform !== 'win32' && spawnSync('sudo', ['-n', '-u', 'nobody', 'true']).status === 0;
-const nobodySandbox = canSudoNobody && (process.platform !== 'linux' || process.env.PROJECT_SANDBOX_REQUIRED === '1' || spawnSync('sudo', ['-n', '-u', 'nobody', '/usr/bin/bwrap', '--dev-bind', '/', '/', '--unshare-user', '--unshare-pid', '--proc', '/proc', '--', '/bin/sh', '-c', ':']).status === 0);
+// PROJECT_SANDBOX_REQUIRED=1, so there this test can't skip for it. The machine's own sudo, on purpose (#991,
+// machineTool): elsewhere every child's sudo is a stand-in.
+const SUDO = machineTool('sudo');
+const canSudoNobody = process.platform !== 'win32' && spawnSync(SUDO, ['-n', '-u', 'nobody', 'true']).status === 0;
+const nobodySandbox = canSudoNobody && (process.platform !== 'linux' || process.env.PROJECT_SANDBOX_REQUIRED === '1' || spawnSync(SUDO, ['-n', '-u', 'nobody', '/usr/bin/bwrap', '--dev-bind', '/', '/', '--unshare-user', '--unshare-pid', '--proc', '/proc', '--', '/bin/sh', '-c', ':']).status === 0);
 
 test('regression: a check that runs git, run as the agent user in the coordinator\'s checkout, gets git\'s answer (not "dubious ownership")', { skip: !nobodySandbox && 'needs passwordless sudo to another user that can start bubblewrap' }, () => {
   // The checkout belongs to the coordinator user; checks run as the agent user. Git refuses a repository owned by
@@ -285,7 +288,7 @@ test('regression: a check that runs git, run as the agent user in the coordinato
   chmodSync(home, 0o755);
   try {
     const { file, args, env } = projectCommand('git diff --exit-code', { user: 'nobody', home, hide: [] });
-    const r = spawnSync(file, args, { cwd: repo, env, encoding: 'utf8' });
+    const r = spawnSync(file === 'sudo' ? SUDO : file, args, { cwd: repo, env, encoding: 'utf8' });
     assert.equal(r.status, 0, r.stderr);
   } finally {
     rmSync(repo, { recursive: true, force: true });

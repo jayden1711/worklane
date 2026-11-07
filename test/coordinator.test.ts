@@ -1925,10 +1925,19 @@ const harmless = () => COMPROMISED_ACTORS.map(([actor]) => ({ actor, can_do: 'no
  */
 const approve = (design = false) => (req: RunRequest) => ({ patch_correct: true, test_correct: true, confidence: 'high', advice: '', claims: [{ claim: 'read the diff in full', label: 'measured', basis: 'git diff' }], files_reviewed: readAll(req), design_change: design, ...(design ? { design_reason: 'adds a public option' } : {}), ...(/PROTECTED SURFACE/.test(req.prompt) ? { compromised_component: harmless() } : {}) });
 
-/** Required check green on the PR's head, then one poll. */
+/**
+ * Required check green on the PR's head, then one poll. When that poll started the merge gate's coverage run (#784: it
+ * runs off the coordinator's tick, and the PR waits for it), once it ends one more poll, which decides the PR as the one
+ * poll did before.
+ */
 async function green(t: Awaited<ReturnType<typeof openPr>>) {
   t.f.backlog.setChecks(t.pr().headSha, passing);
+  const runs = t.f.log.read(0, ['vacuity.started']).length;
   await t.c.tick();
+  if (t.f.log.read(0, ['vacuity.started']).length > runs) {
+    await (t.c as unknown as { vacuityIdle(): Promise<void> }).vacuityIdle();
+    await t.c.tick();
+  }
 }
 
 /** Merges for real on the test remote (a --no-ff merge commit of the PR head), as GitHub would. */
@@ -2511,6 +2520,10 @@ test('conflict fix: right after an auto-merge, the other open PRs are looked at 
   t.inner.tipCheckedAt = Date.now(); // only the merge itself may bring PR 2 back here
   t.inner.prPolled.set(t.prA.number, 0);
   t.f.backlog.setChecks(t.prA.head, passing);
+  await t.c.tick();
+  // #784: that poll started the merge gate's coverage run (off the tick); the poll after it ends decides PR 1.
+  await (t.c as unknown as { vacuityIdle(): Promise<void> }).vacuityIdle();
+  t.inner.tipCheckedAt = Date.now();
   await t.c.tick();
   assert.ok(t.f.log.read(0, ['merge.done']).some((e) => (e.payload as { number: number }).number === t.prA.number), 'PR 1 auto-merged');
   // GitHub now reports PR 2 as conflicting with the new main.

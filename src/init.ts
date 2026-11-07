@@ -26,7 +26,7 @@ import { gitRemoteRepo, install } from './install.js';
 import { readWatchState } from './main-watch.js';
 import { handOffFromNpx, type HandOff } from './npx-engine.js';
 import { findTool, withToolPath } from './tool-path.js';
-import { detectOs, fileAccess, isRoot, serviceManagerEnv, shareReadWithGroup, stateDir, which, writeOwnerOnly } from './os/index.js';
+import { detectOs, fileAccess, isRoot, serviceManagerEnv, stateDir, which, writeGroupReadable, writeOwnerOnly } from './os/index.js';
 import { coordinatorUser } from './setup/app-manifest.js';
 import { instanceNameProblem } from './instance-name.js';
 import { agentRuntimeOf, checkSetup, checkSetupOffThread, detectClaudeLogin, detectGithubLogin, detectRepoConfig, detectTailscale, detectTools, GROUPS, MAIN_WATCH_GUARDS, MANAGER_LOGIN_VARS, MODES, probeEnv, protectionAnswer, RUNTIME_CHOICE_LABEL, type DetectCache, type Detected, type ManagerEnv, type Mode, type ProbeRunOptions, type RunResult, type RuntimeChoice, type SetupContext, type SetupProbe, type SetupView } from './setup-steps.js';
@@ -126,11 +126,10 @@ export function writeInitState(file: string, s: InitState): void {
   writeOwnerOnly(file, JSON.stringify(s, null, 2) + '\n');
 }
 
-/** Server mode: write the state, then open it to the instance's coordinator group (read only). */
+/** Server mode: write the state, opened to the instance's coordinator group (read only) before it is published. */
 export function writeServerInitState(file: string, s: InitState, instance: string): void {
   mkdirSync(dirname(file), { recursive: true, mode: 0o755 });
-  writeOwnerOnly(file, JSON.stringify(s, null, 2) + '\n');
-  shareReadWithGroup(file, coordinatorUser(instance));
+  writeGroupReadable(file, JSON.stringify(s, null, 2) + '\n', coordinatorUser(instance));
 }
 
 export interface Unavailable {

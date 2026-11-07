@@ -40,6 +40,7 @@
 import { realpathSync } from 'node:fs';
 import { userInfo } from 'node:os';
 import { fileURLToPath } from 'node:url';
+import { redactString } from '../../src/events/redact.js';
 import { currentUser } from '../../src/os/index.js';
 import { benchLane, runtimeDir } from './agent.js';
 import { LOGIN_SWITCH_VAR, requireBenchUser, requireClaudePin, requireSubscription } from './auth.js';
@@ -88,10 +89,11 @@ export interface Check {
 
 /** A variable whose value may be a credential (container.ts SECRET_NAME without the daemon's names, which are paths). */
 const SECRET_VAR = /KEY|TOKEN|SECRET|PASSW|CREDENTIAL|AUTH|COOKIE|SESSION/i;
-/** Token shapes: Anthropic keys and OAuth tokens, GitHub tokens, Slack tokens, AWS key ids, JWTs. */
-const TOKEN_SHAPE = /sk-ant-[\w-]+|\bgh[opsur]_\w{16,}|\bgithub_pat_\w{16,}|\bxox[abprs]-[\w-]+|\bAKIA[0-9A-Z]{16}\b|\beyJ[\w-]{8,}\.[\w-]{8,}\.[\w-]+/g;
-/** An email address: its domain ends in a letters-only label, so a package spec such as `name@0.0.79` is not one. */
-const EMAIL = /[\w.+-]+@[\w-]+(?:\.[\w-]+)*\.[A-Za-z]{2,}\b/g;
+/**
+ * An email address: its domain ends in a letters-only label, so a package spec such as `name@0.0.79` is not one. Read
+ * after the token masks, so a mask may stand in a label (`x@wld_[redacted].com`): the address is still found.
+ */
+const EMAIL = /(?:[\w.+-]|\[redacted\])+@(?:[\w-]|\[redacted\])+(?:\.(?:[\w-]|\[redacted\])+)*\.[A-Za-z]{2,}\b/g;
 /** What scrub() keeps of one detail, and of one printed line. */
 export const DETAIL_MAX = 400;
 const LINE_MAX = 1000;
@@ -105,7 +107,8 @@ const PATH_VALUE = /^(\/|unix:)/;
  * or switch the login (PIECE_MIN characters or more), and every piece of such a value of PIECE_MIN or more that starts
  * or ends it (#851 round 2: a message cut short upstream, as the driver's checks cut a child's stderr, ends in a
  * prefix of the value; this redacts it whatever cut it); every token-shaped string. Email addresses become [email];
- * control and format characters (an ANSI escape's ESC, a bell, a bidi override) a space. Cut to at most `max`
+ * every control character (an ANSI escape's ESC, a bell, a line break) a space; a format character (a zero-width
+ * space, a bidi override) is dropped, before the token shapes are looked for. Cut to at most `max`
  * characters only after all of that.
  *
  * INVARIANT (#884 round 2): first of all, every word shaped like a task is withheld (withholdTasks), on the text as it
@@ -126,7 +129,11 @@ export function scrub(text: string, env: NodeJS.ProcessEnv, max = DETAIL_MAX): s
       for (const piece of [v.slice(0, n), v.slice(v.length - n)]) if (s.includes(piece)) s = s.split(piece).join('[redacted]');
     }
   }
-  s = s.replace(TOKEN_SHAPE, '[redacted]').replace(EMAIL, '[email]').replace(/[\p{Cc}\p{Cf}]/gu, ' ');
+  // A format character (a zero-width space, a bidi override) is dropped before the token shapes are looked for, so it
+  // can't split one (#889 round 3). Then the shared redactor, its broad rules too (a token cut short, a value after a
+  // secret's name); it finds a token right after an ANSI escape itself (its glue points). Then emails, as before, and
+  // every control character becomes a space.
+  s = redactString(s.replace(/\p{Cf}/gu, ''), { broad: true, mask: '[redacted]' }).replace(EMAIL, '[email]').replace(/\p{Cc}/gu, ' ');
   return s.length > max ? `${s.slice(0, max - 3)}...` : s;
 }
 

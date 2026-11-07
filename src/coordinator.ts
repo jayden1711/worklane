@@ -13,7 +13,7 @@ import { CANARY_LABEL, canaryTask, machineCanaryInstance } from './canary.js';
 import { actionable, contractKey, ownerFor, parseContract, type DoneWhenList, type Issue, type PullRequest } from './backlog/types.js';
 import { claim, release, renew, type Lease } from './claims.js';
 import type { EventPayload, EventType } from './events/types.js';
-import { globToRegExp } from './guardrails/glob.js';
+import { globRegExp } from './guardrails/glob.js';
 import { isProtectedPath } from './guardrails/engine.js';
 import { computeLevel, type ChangeFile, type Level } from './review.js';
 import { shownPath, shownPaths } from './path-text.js';
@@ -59,7 +59,7 @@ import { nightlyDue, queueNightly } from './nightly.js';
 import { buildReport, dueSlot, recentRunRecords, weeklyDue } from './reports.js';
 import { readTuneProfile, tuningInput, tuningProposals } from './tuning.js';
 import { baselineGate, latestBaseline } from './baseline.js';
-import { countAssertions } from './vacuity.js';
+import { ASSERTION_COUNT_CHARS, countAssertions, FALLBACK_TEST_GLOBS } from './vacuity.js';
 import { createWorktree, removeSandboxPlaceholders, removeWorktree } from './worktrees.js';
 import { refillPool, setupKey, takeFromPool } from './worktree-pool.js';
 import { seen } from './intake/store.js';
@@ -186,6 +186,7 @@ export class Coordinator extends AutomationRuns {
     await this.harnessEvalRun;
     await this.expLoop?.idle();
     await this.prBatchIdle();
+    await this.vacuityIdle();
   }
 
   private ciMeter: CiMetrics | null = null;
@@ -276,6 +277,7 @@ export class Coordinator extends AutomationRuns {
       ...(this.inStep ? [`tick step: ${this.inStep}`] : []),
       ...[...this.active.keys()].map((n) => `task #${n}`),
       ...[...this.live.values()].map((l) => `${l.role} run${l.issue !== null ? ` for #${l.issue}` : ''}`),
+      ...[...this.vacuityRuns.keys()].map((pr) => `vacuity coverage run for PR #${pr}`),
       ...(this.poolBusy ? ['worktree pool refill'] : []),
     ];
   }
@@ -361,7 +363,8 @@ export class Coordinator extends AutomationRuns {
   private maybeNightly() {
     const last = this.d.log.read(0, ['nightly.queued']).at(-1)?.payload as { day: string } | undefined;
     if (!nightlyDue(this.d.cfg.tests.nightly_at, last?.day ?? null)) return;
-    const jobs = (this.d.nightly ?? queueNightly)(this.d.repo, this.d.cfg, this.d.log.path, this.d.instance, this.d.commandsAs);
+    // The coordinator's own options (#890 round 20): the root resolved at the start and the task directory kept.
+    const jobs = (this.d.nightly ?? queueNightly)(this.d.repo, this.d.cfg, this.d.log.path, this.d.instance, this.d.commandsAs, this.wt);
     this.emit('nightly.queued', { day: new Date().toLocaleDateString('en-CA'), jobs: jobs.map((j) => j.id) });
   }
 
@@ -853,7 +856,7 @@ export class Coordinator extends AutomationRuns {
       return;
     }
     let leaseSha = won.sha;
-    const owner = ownerFor(issue, [], this.d.cfg.project.owners, (g, p) => globToRegExp(g).test(p));
+    const owner = ownerFor(issue, [], this.d.cfg.project.owners, (g, p) => globRegExp(g, 'deny').test(p));
     this.emit('contract.agreed', { issue: n, done_when: doneWhen as Record<string, unknown>[], by: issue.author });
     // The contract as agreed is recorded; what runs here skips the full suite when the test run is the full run.
     doneWhen = localDoneWhen(doneWhen, this.d.cfg.tests);
@@ -1499,28 +1502,40 @@ export class Coordinator extends AutomationRuns {
     const size = sizeVerdict(sizeFiles(path, base, head), { maxLines: review.max_pr_lines, generated: review.generated });
     if (!size.ok) return { rejected: `${size.why}. Make this change one self-contained part under ${review.max_pr_lines} lines, and say in your summary what is left for follow-up issues` };
     const files = this.changeFiles(path, base, head);
-    // Tamper guard: tests deleted, skipped, focused, or with fewer assertions.
-    const tampered: string[] = [];
-    const pattern = this.d.cfg.tests.vacuity?.assertion_pattern ?? '\\b(assert|expect|check)\\b';
-    const testRes = (this.d.cfg.tests.vacuity?.test_globs ?? ['test/**', '**/*.test.*']).map((g) => globToRegExp(g));
-    for (const f of files.filter((x) => testRes.some((re) => re.test(x.path)))) {
-      const after = existsSync(join(path, f.path)) ? readFileSync(join(path, f.path), 'utf8') : null;
-      let before: string | null = null;
-      try {
-        before = this.git(path, 'show', `${base}:${f.path}`);
-      } catch {
-        // new file
-      }
-      // Text for the owner, events and the evaluator: the path as shownPath shows it (#683).
-      if (before !== null && after === null) tampered.push(`deleted test ${shownPath(f.path)}`);
-      if (after !== null && /\.(skip|only|todo)\s*\(|\bxit\s*\(|\bxdescribe\s*\(/.test((f.addedLines ?? []).join('\n'))) tampered.push(`skipped/focused tests in ${shownPath(f.path)}`);
-      if (before !== null && after !== null && countAssertions(after, pattern) < countAssertions(before, pattern)) tampered.push(`fewer assertions in ${shownPath(f.path)}`);
-    }
+    const tampered = this.tamperFlags(path, base, files);
     const added = files.reduce((s, f) => s + f.added, 0);
     const removed = files.reduce((s, f) => s + f.removed, 0);
     const patchHash = createHash('sha256').update(this.git(path, 'diff', `${base}..${head}`)).digest('hex');
     this.emit('change.proposed', { issue: n, branch: this.paths(n).branch, base, head, files: names, lines: added + removed, added, removed, patch_hash: patchHash });
     return { files, tampered, patchHash };
+  }
+
+  /** Tamper guard: tests deleted, skipped, focused, with fewer assertions, or too large to count them in. */
+  protected tamperFlags(path: string, base: string, files: ChangeFile[]): string[] {
+    const tampered: string[] = [];
+    const pattern = this.d.cfg.tests.vacuity?.assertion_pattern ?? '\\b(assert|expect|check)\\b';
+    const testRes = (this.d.cfg.tests.vacuity?.test_globs ?? FALLBACK_TEST_GLOBS).map((g) => globRegExp(g, 'deny'));
+    for (const f of files.filter((x) => testRes.some((re) => re.test(x.path)))) {
+      const after = existsSync(join(path, f.path)) ? readFileSync(join(path, f.path), 'utf8') : null;
+      let before: string | null = null;
+      let tooLarge = false;
+      try {
+        // A code unit takes at most 3 UTF-8 bytes, so a base text over this many bytes is over ASSERTION_COUNT_CHARS too.
+        before = execFileSync('git', ['show', `${base}:${f.path}`], { cwd: path, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 3 * ASSERTION_COUNT_CHARS }).trim();
+      } catch (e) {
+        // ENOBUFS: there at the base, too large to read; anything else, a new file.
+        tooLarge = (e as NodeJS.ErrnoException).code === 'ENOBUFS';
+      }
+      // Text for the owner, events and the evaluator: the path as shownPath shows it (#683).
+      if ((before !== null || tooLarge) && after === null) tampered.push(`deleted test ${shownPath(f.path)}`);
+      if (after !== null && /\.(skip|only|todo)\s*\(|\bxit\s*\(|\bxdescribe\s*\(/.test((f.addedLines ?? []).join('\n'))) tampered.push(`skipped/focused tests in ${shownPath(f.path)}`);
+      if ((before !== null || tooLarge) && after !== null) {
+        const [b, a] = [before === null ? null : countAssertions(before, pattern), countAssertions(after, pattern)];
+        if (b === null || a === null) tampered.push(`assertions not counted in ${shownPath(f.path)}: over ${ASSERTION_COUNT_CHARS} characters before or after the change`);
+        else if (a < b) tampered.push(`fewer assertions in ${shownPath(f.path)}`);
+      }
+    }
+    return tampered;
   }
 
   /** Browser baselines per (base, flow), kept across a task's attempts (src/coordinator/browser.ts). */

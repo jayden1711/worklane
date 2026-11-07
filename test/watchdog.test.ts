@@ -31,6 +31,7 @@ import { VIEWER_INCIDENT_FIELDS } from '../src/viewer-events.js';
 import { IntakeConfig } from '../src/intake/report.js';
 import { asPerson, exampleProject, exampleRoles } from './helpers.js';
 import { refusedPort } from './held-port.js';
+import { machineTool } from './isolate.js';
 
 const DASH = 'https://dash.example.test';
 // Planted fakes, in a Discord bot token's shape: assembled at run time so no token-shaped literal is committed.
@@ -385,7 +386,8 @@ test('unit states parse from systemctl show; an unknown restart count is null, n
 });
 
 test('unit states from the real systemctl (Linux CI): a running unit is active, one not installed is not-found, so it is never reported down', { skip: process.platform !== 'linux' || !which('systemctl') ? 'needs systemd' : false }, () => {
-  const states = unitStates(['systemd-journald.service', `${BRAND.cli}-no-such-instance.service`]);
+  // The machine's own systemctl, on purpose (#991, machineTool): elsewhere a child's systemctl is a stand-in.
+  const states = machineTool('systemctl', () => unitStates(['systemd-journald.service', `${BRAND.cli}-no-such-instance.service`]));
   if (!states || !states.length || states[0]!.activeState === null) return; // no systemd running here (a container)
   const journald = states.find((s) => s.unit === 'systemd-journald.service')!;
   assert.equal(journald.loadState, 'loaded');

@@ -203,6 +203,8 @@ test('config and shared files mean all: the manifest, tsconfig, the Node version
       assert.ok(ci.forceAll(file), file);
     }
     for (const file of ['package-lock.json', 'web/tsconfig.json', 'scripts/ci/affected.mjs']) assert.ok(ci.forceAll(file), file);
+    // The test preload: every test process runs it, and it wraps how each starts its children (#991).
+    assert.ok(ci.forceAll('test/isolate.ts'), 'test/isolate.ts');
     assert.equal(ci.forceAll('src/a.ts'), null);
   } finally {
     rmSync(f.dir, { recursive: true, force: true });

@@ -22,7 +22,7 @@ import { basename, dirname, join, resolve } from 'node:path';
 import { BRAND } from './brand.js';
 import { HELPER_RULES, helperRules } from './machine.js';
 import { readRootFile } from './os/root-file.js';
-import { POLICY_ROOT_DIR, retakeCommand } from './policy-kill.js';
+import { POLICY_ROOT_DIR, retakeWayOut } from './policy-kill.js';
 
 /** Root's record of the instances whose policy.yaml is root's: one file per instance (policyRecord). */
 export { POLICY_ROOT_DIR };
@@ -77,15 +77,18 @@ export const policyRootUid = (): number => rootUid;
  * The root shell command that makes an instance's policy.yaml root's, keeping its content and showing its keys. A
  * flag says what an admin checked first (policyCommand): `--retake`, a recorded file that changed since root wrote
  * it; `--accept-loose`, a policy looser than a coordinator could make it. Setup never passes either. For an instance
- * made before its name was reserved (machine, console), `policy own` refuses `--retake` (#902 rounds 10, 12), so where
- * that is needed the command named instead is its removal (policy-kill.ts retakeCommand, the one builder of that way
- * out, #902 rounds 11, 13), never one that would be refused. `--accept-loose` alone (a first takeover) works for such
- * a name, and is named as for any other.
+ * made before its name was reserved (machine, console), `policy own` refuses `--retake` (#902 rounds 10, 12), so a
+ * command with it is named only through retakeClause. `--accept-loose` alone (a first takeover) works for such a name,
+ * and is named as for any other.
  */
-export const ownCommand = (instance: string, ...flags: ('--retake' | '--accept-loose')[]) => {
-  const own = `sudo ${BRAND.cli} policy own ${instance}${flags.map((f) => ` ${f}`).join('')}`;
-  return flags.includes('--retake') ? retakeCommand(instance, own) : own;
-};
+const own = (instance: string, flags: readonly string[]) => `sudo ${BRAND.cli} policy own ${instance}${flags.map((f) => ` ${f}`).join('')}`;
+export const ownCommand = (instance: string, ...flags: '--accept-loose'[]) => own(instance, flags);
+/**
+ * A message's way out through `policy own <instance> --retake` (with `flags`), as the words after "an admin": `clause`
+ * of that command, or for an instance made before its name was reserved, its removal worded as one (policy-kill.ts
+ * retakeWayOut, the one builder of that way out, #902 rounds 11, 13, #985), never a command that would be refused.
+ */
+export const retakeClause = (instance: string, clause: (own: string) => string, ...flags: '--accept-loose'[]) => retakeWayOut(instance, own(instance, ['--retake', ...flags]), clause);
 
 /** Whether root's record covers this instance (any answer but "none" does: an unreadable record refuses, never skips). */
 export function policyRootRequired(instance: string, dir = POLICY_ROOT_DIR): boolean {
@@ -112,7 +115,7 @@ export function recordMismatch(rec: PolicyRecord, opened: { text: string; at: st
 export function readPolicyChecked(file: string, dir = POLICY_ROOT_DIR, instance = policyInstance(file), uid = rootUid): { text: string } | { refused: string } | null {
   const rec = policyRecord(instance, dir);
   if (rec === null) return null;
-  const refused = (why: string) => ({ refused: `refused: on this machine ${file} is root's and only root changes it, but ${why}, so the coordinator user (or something running as it) may have changed it. An admin checks it, then makes it root's again: ${ownCommand(instance, '--retake')}` });
+  const refused = (why: string) => ({ refused: `refused: on this machine ${file} is root's and only root changes it, but ${why}, so the coordinator user (or something running as it) may have changed it. An admin checks it, then ${retakeClause(instance, (c) => `makes it root's again: ${c}`)}` });
   if ('problem' in rec) return refused(rec.problem);
   const r = readRootFile(resolve(file), uid);
   if ('problem' in r) return refused(r.problem.replace(`${resolve(file)} `, 'it '));

@@ -11,6 +11,7 @@ import { hookEntry, install, invokedEngine } from '../src/install.js';
 // #747's functions through the namespace: on an engine without them, only the test that uses them fails.
 import * as installer from '../src/install.js';
 import { childEnv } from '../src/os/index.js';
+import { projectStateDir } from '../src/guardrails/context.js';
 import { CliRunner } from '../src/runner.js';
 import { engineCli, exampleProject, STDIN_LINE } from './helpers.js';
 
@@ -162,7 +163,13 @@ test("acceptance: an instance's agent run gets the hooks with --settings; withou
   assert.equal(s.disableAllHooks, false);
   assert.equal(s.env![`${BRAND.envPrefix}_AGENT`], '1', 'pinned above any project env');
   assert.equal(s.env![`${BRAND.envPrefix}_ROLE`], 'worker');
-  assert.deepEqual(s.sandbox, { enabled: true }, "the lane's sandbox is kept");
+  // The lane's sandbox is kept, with the project's secret paths denied to its commands (#890): the template's list,
+  // "./.env.*" left out while nothing matches it, as its exception "!./.env.example" can't be passed as written.
+  const h = childEnv().HOME!;
+  // Then "./.env" in a worktree made after the run starts: under the project's worktree root and the engine's own.
+  const late = [join(dir, '.claude', 'worktrees', '*', '.env'), join(projectStateDir(dir), 'worktrees', '*', '.env')];
+  const secrets = [join(dir, '.env'), ...['.ssh', '.aws', '.config/gh', '.railway', '.npmrc', '.claude/.credentials.json'].map((p) => join(h, p)), ...late];
+  assert.deepEqual(s.sandbox, { enabled: true, filesystem: { denyRead: secrets } }, "the lane's sandbox is kept");
   assert.ok(s.permissions!.deny!.includes('Read(//x/**)') && s.permissions!.deny!.includes('Read(~/.ssh/**)'));
   attributionOff(s);
 

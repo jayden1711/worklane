@@ -7,7 +7,7 @@
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import { BRAND } from '../brand.js';
-import { globToRegExp } from '../guardrails/glob.js';
+import { globRegExp } from '../guardrails/glob.js';
 
 export const STUDIES_FILE = 'experiments.yaml';
 /** A study's or a data source's id: also a path segment, a ref segment and an event key. */
@@ -123,7 +123,7 @@ export const Study = z
     // WHY: labels are what the score is computed against. A job that can read them can learn them.
     if (s.eval.labels === s.eval.inputs || s.train.data.includes(s.eval.labels)) ctx.addIssue({ code: 'custom', path: ['eval', 'labels'], message: 'the labels are the scorer\'s alone: never the eval inputs or a training source' });
     // WHY: an editable glob that covers the eval would let a job change what scores it.
-    const res = s.editable.map(globToRegExp);
+    const res = s.editable.map((g) => globRegExp(g, 'deny'));
     for (const f of [...s.eval.files, ...s.eval.predict_files]) if (res.some((r) => r.test(f))) ctx.addIssue({ code: 'custom', path: ['editable'], message: `covers the eval file ${f}` });
     for (const f of s.eval.predict_files) if (s.eval.files.includes(f)) ctx.addIssue({ code: 'custom', path: ['eval', 'predict_files'], message: `${f} is the scorer's: a job never gets the scorer's files` });
   });

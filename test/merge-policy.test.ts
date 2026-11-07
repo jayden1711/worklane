@@ -77,6 +77,14 @@ test('merge policy: the kill switch, the repo switch and a stop each make every 
   assert.match(mergeDecision(clean({ stopped: 'main went red after #4' })).reasons.join(), /auto-merge is stopped: main went red after #4/);
 });
 
+test('regression (#982): a stop with an empty or blank reason still makes every PR wait, and says it gives no reason', () => {
+  for (const stopped of ['', '  \n']) {
+    const d = mergeDecision(clean({ stopped }));
+    assert.equal(d.auto, false, JSON.stringify(stopped));
+    assert.deepEqual(d.reasons, ['auto-merge is stopped: stopped (the stop file gives no reason)']);
+  }
+});
+
 test("regression: a change to the agents' role prompts, skills, AGENTS.md or any CLAUDE.md never auto-merges, whatever review.yaml tries", () => {
   // A review.yaml that tries to drop it: the category redefined to nothing, no harness-config at L3, no waits.
   const loose = {
@@ -105,7 +113,11 @@ const engineFiles = execFileSync('git', ['ls-files'], { cwd: repoRoot, encoding:
  * match no file, so the first file under it takes the entry out and its glob is checked like the others.
  */
 // check-table: never-grow
-const NOT_YET_FILES = [`${BRAND.configDir}/experiments.yaml`, 'deploy/**', 'deploy', 'compose.*', 'docker-compose.*', 'dockerfile*', 'Containerfile*'];
+const NOT_YET_FILES = [`${BRAND.configDir}/experiments.yaml`, 'deploy/**', 'deploy', 'compose.*', 'docker-compose.*', 'dockerfile*', 'Containerfile*',
+  // The planners' decision records other than docs/design.md, locked before the first one lands (#920).
+  'decisions.md', 'DECISIONS.md', 'docs/decisions.md', 'docs/DECISIONS.md', `${BRAND.configDir}/decisions.md`,
+  'decisions', 'decisions/**', 'docs/decisions', 'docs/decisions/**', 'docs/adr', 'docs/adr/**', `${BRAND.configDir}/decisions`, `${BRAND.configDir}/decisions/**`,
+];
 
 test('self-modification: every glob names real engine files (none dead), and the list is the one the owner approved', () => {
   for (const part of SELF_MODIFICATION_PARTS) {
@@ -121,6 +133,9 @@ test('self-modification: every glob names real engine files (none dead), and the
     ['src/merge-policy.ts', 'the merge policy'],
     ['src/coordinator/merge-flow.ts', 'the merge policy'],
     ['src/pr-rules.ts', 'the merge policy'],
+    ['src/merge-policy-vacuity.ts', 'the merge policy'],
+    ['src/vacuity.ts', 'the merge policy'],
+    ['src/vacuity-read.ts', 'the merge policy'],
     ['src/main-watch.ts', 'the main watch'],
     ['src/push-guard.ts', 'the push guard'],
     ['src/updates.ts', 'the updater'],
@@ -184,6 +199,12 @@ test('self-modification: every glob names real engine files (none dead), and the
     ['test/push-names-plumbing.test.ts', 'the tests of the harness controls'],
     ['docs/releasing.md', 'the release procedure and the design rules'],
     ['docs/design.md', 'the release procedure and the design rules'],
+    ['docs/process.md', "the engine repo's merge process"],
+    ['decisions.md', "the planners' decision records"],
+    ['docs/decisions.md', "the planners' decision records"],
+    ['docs/adr', "the planners' decision records"],
+    [`${BRAND.configDir}/decisions.md`, "the planners' decision records"],
+    ['src/plan-decisions.ts', "the planners' decisions index"],
     ['src/coordinator/base.ts', 'the coordinator'],
     ['src/coordinator/decisions.ts', 'the coordinator'],
     ['src/coordinator/merge-flow.ts', 'the merge policy'],
@@ -250,6 +271,11 @@ test('regression: a change to the evaluator, the sandbox, the denylist, a guard 
   waits('.gitleaks.toml', 'the push gate, denylist and secret scan');
   waits('docs/releasing.md', 'the release procedure and the design rules');
   waits('docs/design.md', 'the release procedure and the design rules');
+  // How the engine repo's own PRs are merged (owner, 2026-10-21): a docs-only rewrite of it waits like the design rules.
+  waits('docs/process.md', "the engine repo's merge process");
+  // A decision record the planners read, and the code that builds their index (#920): a copy of the process there waits too.
+  waits('docs/decisions/0001-merges.md', "the planners' decision records");
+  waits('src/plan-decisions.ts', "the planners' decisions index");
   // The rest of the coordinator, and a study's definition (a file the repo doesn't have until a study is set up).
   waits('src/coordinator/decisions.ts', 'the coordinator');
   waits('src/coordinator/fix-runs.ts', 'the coordinator');
@@ -716,6 +742,8 @@ test('weakening: a guard or lint file waits on any line removed or changed, a li
     `${BRAND.configDir}/review.yaml`, `${BRAND.configDir}/config.yaml`, `${BRAND.configDir}/tests.yaml`, '.github/workflows/ci.yml', '.github/actions/setup/action.yml', '.husky/pre-commit',
     'tsconfig.json', 'eslint.config.js', '.eslintrc.json', 'vitest.config.ts', 'jest.config.js', 'cypress.config.ts', '.lintstagedrc.json', '.semgrep.yml', '.rubocop.yml', 'deno.json',
     'mypy.ini', '.pre-commit-config.yaml', '.github/CODEOWNERS', `${BRAND.configDir}/checks/lint.mjs`, 'scripts/ci/affected.mjs', 'src/push-guard.ts', 'test/pipefail.test.ts',
+    // What picks a PR's test files (#1009).
+    'src/testrun/affected.ts',
   ]) {
     // A lint test is one by its mark (#869).
     const lint = path === 'test/pipefail.test.ts' ? '// lint-test\n' : '';
@@ -1176,7 +1204,8 @@ const reasonFor = (kind: string, path: string, line: string) => `${weakening.WEA
 test('acceptance (#783): a PR that deletes an assertion waits for the owner, with its code change or without one', () => {
   const head = MATH_TEST.replace('  assert.equal(add(1, 2), 3);\n', '');
   const why = reasonFor(ASSERTION, 'test/math.test.ts', 'assert.equal(add(1, 2), 3);');
-  assert.deepEqual(decideChange({ 'src/math.ts': MATH, 'test/math.test.ts': MATH_TEST }, { 'src/math.ts': MATH_CHANGED, 'test/math.test.ts': head }), { auto: false, reasons: [why], why: [] });
+  // With the code change, #784's hold too: the example project's test globs (test/**/*.test.js) match no test here.
+  assert.deepEqual(decideChange({ 'src/math.ts': MATH, 'test/math.test.ts': MATH_TEST }, { 'src/math.ts': MATH_CHANGED, 'test/math.test.ts': head }), { auto: false, reasons: [why, "design: vacuity: it changes app code (src/math.ts) and no test: it adds or changes none, and its task's done_when names none"], why: [] });
   assert.deepEqual(decideChange({ 'test/math.test.ts': MATH_TEST }, { 'test/math.test.ts': head }), { auto: false, reasons: [why], why: [] });
 });
 

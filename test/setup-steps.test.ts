@@ -237,6 +237,26 @@ test("#468: the protection step says what GitHub's answer means, for each answer
   }
 });
 
+test("#1064: a gh call a step makes that fails says what failed, never gh's text; gh's text is in the log", (t) => {
+  const f = fixture();
+  const said = `HTTP 404: Not Found (https://api.github.com/repos/example-org/example-shop) at ${f.home}/gh/hosts.yml`;
+  const base = probeFor(world());
+  const p: SetupProbe = { ...base, run: (cmd, args, o) => (cmd === 'gh' && args[0] === 'api' && !args.some((a) => a.includes('/protection')) ? { status: 1, stdout: '', stderr: `${said}\n` } : base.run(cmd, args, o)) };
+  const lines: string[] = [];
+  t.mock.method(console, 'error', (...a: unknown[]) => void lines.push(a.map(String).join(' ')));
+  const v = checkSetup(f.ctx('local'), p);
+  const github = stepIn(v, 'gh-login')!;
+  assert.equal(github.done, false);
+  assert.equal(github.detail, "gh is signed in, but can't read example-org/example-shop; the detail is in the dashboard's log on the machine");
+  const ready = stepIn(v, 'first-task')!;
+  assert.equal(ready.done, false);
+  assert.equal(ready.detail, "couldn't ask GitHub which issues are labelled ready; the detail is in the dashboard's log on the machine");
+  const text = JSON.stringify(v);
+  for (const leak of ['HTTP 404', 'api.github.com', f.home, 'hosts.yml']) assert.ok(!text.includes(leak), `${leak} in the setup view`);
+  assert.ok(lines.some((l) => l.includes("can't read example-org/example-shop") && l.includes(said)), `the detail is logged: ${JSON.stringify(lines)}`);
+  assert.ok(lines.some((l) => l.includes('labelled ready') && l.includes(said)), `the detail is logged: ${JSON.stringify(lines)}`);
+});
+
 for (const [id, c] of Object.entries(CASES)) {
   test(`detector ${id}: done from the real state, not done without it`, () => {
     for (const want of [true, false]) {

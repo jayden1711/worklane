@@ -8,7 +8,7 @@ import { backup, dirStore } from '../src/events/backup.js';
 import { EventLog } from '../src/events/log.js';
 import { RunRecorder } from '../src/run-record.js';
 import { INSTANCE_UMASK } from '../src/service.js';
-import { createWorktree, removeWorktree } from '../src/worktrees.js';
+import { createWorktree, removeWorktree, worktreeOptions } from '../src/worktrees.js';
 import { repoRoot } from './helpers.js';
 
 // Mode bits are POSIX; on Windows access is by ACL and these helpers do nothing.
@@ -69,7 +69,7 @@ test('worktrees.json and the runs/ directory are closed to others', { skip }, ()
   git('init', '-q', '-b', 'main');
   git('-c', 'user.name=t', '-c', 'user.email=t@example.com', 'commit', '-q', '--allow-empty', '-m', 'init');
   const stateDir = join(mkdtempSync(join(tmpdir(), 'state-')), 'state');
-  const o = { repo, root: '.claude/worktrees', stateDir, setup: [] };
+  const o = worktreeOptions({ repo, root: '.claude/worktrees', stateDir, setup: [], taskDir: null });
   underUmask(0o022, () => createWorktree(o, 'issue-1', 'b1', 'HEAD'));
   assert.equal(others(join(stateDir, 'worktrees.json')), 0, `worktrees.json is ${mode(join(stateDir, 'worktrees.json')).toString(8)}`);
   removeWorktree(o, 'issue-1');

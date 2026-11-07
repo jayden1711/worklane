@@ -11,6 +11,7 @@
 import { spawn, spawnSync } from './os/child-process.js';
 import { findTool, withToolPath } from './tool-path.js';
 import { outboundEnv } from './network.js';
+import { redactString } from './events/redact.js';
 
 export const GH_DEVICE_URL = 'https://github.com/login/device';
 /** What runs: the web (device) flow for github.com, git over https, so gh asks nothing else. */
@@ -21,7 +22,6 @@ export const GH_LOGIN_TIMEOUT_MS = 15 * 60_000;
 export const GH_STATUS_EVERY_MS = 3_000;
 
 const CODE = /one-time code:\s*([A-Z0-9]{4}-[A-Z0-9]{4})\b/;
-const TOKENISH = /\b(gh[opusr]_[A-Za-z0-9_]{8,}|github_pat_[A-Za-z0-9_]{8,})/g;
 
 /** The child gh process, as this module uses it (tests stand in for it). */
 export interface LoginChild {
@@ -85,7 +85,8 @@ export function safeLine(text: string): string {
       .map((l) => l.trim())
       .filter((l) => l && !CODE.test(l) && !l.includes(GH_DEVICE_URL))
       .at(-1) ?? '';
-  return line.replace(TOKENISH, '[hidden]').slice(0, 200);
+  // The shared redactor's broad rules (a GitHub token from 8 characters: gh's output may cut one short), as [hidden].
+  return redactString(line, { broad: true, mask: '[hidden]' }).slice(0, 200);
 }
 
 /** The relay: one login at a time, per dashboard. */

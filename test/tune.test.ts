@@ -11,6 +11,7 @@ import { TestsConfig } from '../src/config/schema.js';
 import { peakMemoryMb, withPeakMemory } from '../src/os/index.js';
 import { DEFAULT_PUSH_LIMITS } from '../src/push-check.js';
 import { applyTuning, profileCounts, settingsFor, tune, workerSetting, type SuiteRunner } from '../src/tune.js';
+import { worktreeOptions } from '../src/worktrees.js';
 
 const tests = (env: Record<string, string>, runner = { kind: 'command' as const, changed: 'make test-fast', full: 'make test-full' }) => TestsConfig.parse({ version: 1, runner, env });
 
@@ -81,7 +82,7 @@ test('tune profiles the suite in a fresh worktree and opens a PR with the recomm
   const seen: string[] = [];
   const cfg = tests({ XDIST_AUTO_NUM_WORKERS: '6' });
   const r = await tune({
-    wt: { repo: p.dir, root: '.claude/worktrees', stateDir: state, setup: [] },
+    wt: worktreeOptions({ repo: p.dir, root: '.claude/worktrees', stateDir: state, setup: [], taskDir: null }),
     tests: cfg,
     base: p.head,
     mainBranch: 'main',
@@ -113,7 +114,7 @@ test('tune profiles the suite in a fresh worktree and opens a PR with the recomm
 test('tune refuses a project with no worker setting, and a dry run pushes nothing', async () => {
   const p = project();
   const state = mkdtempSync(join(tmpdir(), 'state-'));
-  const base = { wt: { repo: p.dir, root: '.claude/worktrees', stateDir: state, setup: [] }, base: p.head, mainBranch: 'main', limits: DEFAULT_PUSH_LIMITS, identity: { name: 'h', email: 'h@example.com' }, stateDir: state, cores: 4, run: fakeSuite([]) };
+  const base = { wt: worktreeOptions({ repo: p.dir, root: '.claude/worktrees', stateDir: state, setup: [], taskDir: null }), base: p.head, mainBranch: 'main', limits: DEFAULT_PUSH_LIMITS, identity: { name: 'h', email: 'h@example.com' }, stateDir: state, cores: 4, run: fakeSuite([]) };
   await assert.rejects(tune({ ...base, tests: tests({}) }), /no test worker setting to tune/);
   const backlog = new FileBacklog(join(state, 'backlog.json'));
   const r = await tune({ ...base, tests: tests({ XDIST_AUTO_NUM_WORKERS: '6' }), backlog, dryRun: true });

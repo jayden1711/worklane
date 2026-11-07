@@ -8,7 +8,7 @@ import type { DoctorCheck } from './doctor.js';
 import { instancesDir, listInstances } from './instance.js';
 import { MACHINE_HELPER } from './machine.js';
 import { readRootFile } from './os/root-file.js';
-import { ownCommand, POLICY_ROOT_DIR, policyRootRequired, readPolicyChecked } from './policy-gate.js';
+import { ownCommand, POLICY_ROOT_DIR, policyRootRequired, readPolicyChecked, retakeClause } from './policy-gate.js';
 import { idDir, idPointerPath, instanceId, sharedWith } from './policy-kill.js';
 
 export function policyRootChecks(dir = instancesDir(), o: { machine?: boolean; markers?: string } = {}): DoctorCheck[] {
@@ -32,9 +32,9 @@ export function policyRootChecks(dir = instancesDir(), o: { machine?: boolean; m
     const id = instanceId(name, markers);
     const ptr = idPointerPath(name, markers);
     const idCheck = (level: DoctorCheck['level'], detail: string) => out.push({ name: `auto_merge id ${name}`, level, detail });
-    if (id && 'problem' in id) idCheck('fail', `root's ${ptr} can't be used (${id.problem}): auto_merge reads off until an admin runs ${ownCommand(name, '--retake')} (a new id, auto_merge kept off)`);
-    else if (!id && policyRootRequired(name, markers)) idCheck('fail', `no ${ptr} for a policy root took over: auto_merge reads off until an admin runs ${ownCommand(name, '--retake')}`);
-    else if (id && !existsSync(idDir(id.id, markers))) idCheck('fail', `root's ${idDir(id.id, markers)} is gone: auto_merge reads off, and root's writers but OFF refuse, until an admin runs ${ownCommand(name, '--retake')} (it puts it back with auto_merge kept off)`);
+    if (id && 'problem' in id) idCheck('fail', `root's ${ptr} can't be used (${id.problem}): auto_merge reads off until an admin ${retakeClause(name, (c) => `runs ${c} (a new id, auto_merge kept off)`)}`);
+    else if (!id && policyRootRequired(name, markers)) idCheck('fail', `no ${ptr} for a policy root took over: auto_merge reads off until an admin ${retakeClause(name, (c) => `runs ${c}`)}`);
+    else if (id && !existsSync(idDir(id.id, markers))) idCheck('fail', `root's ${idDir(id.id, markers)} is gone: auto_merge reads off, and root's writers but OFF refuse, until an admin ${retakeClause(name, (c) => `runs ${c} (it puts it back with auto_merge kept off)`)}`);
     else if (id) {
       const shared = sharedWith(name, markers);
       if (shared.length) idCheck('warn', `${shared.join(', ')} shares ${name}'s id: auto_merge off for either turns both off, and root's set on is refused. Expected while a rename runs: an admin finishes it or undoes it (instance-rename.sh --yes or --abort). With no rename under way (a removal that stopped before its pointer went): an admin reruns instance-remove.sh for the name that is gone, or removes its pointer (${markers}/<that name>.id)`);

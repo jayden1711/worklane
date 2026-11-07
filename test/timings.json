@@ -69,7 +69,6 @@
   "test/denylist.test.ts": 547,
   "test/deploy-gate.test.ts": 16261,
   "test/deploy-issue.test.ts": 1967,
-  "test/desktop.test.ts": 1,
   "test/dev-children.test.ts": 183,
   "test/digest-post.test.ts": 229,
   "test/digest.test.ts": 16,

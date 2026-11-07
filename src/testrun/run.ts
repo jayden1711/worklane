@@ -119,8 +119,9 @@ export interface TestRunDeps {
   /** Directories left out of the workspace (tests.yaml checkout.sparse_exclude), unless a tier of the run sets full_checkout. */
   sparseExclude?: readonly string[];
   /**
-   * Root's GPU opt-in for this instance (./gpu.ts gpuOptIn), read when a run with a GPU tier starts: for planning and
-   * the record only, never as the permission (the helper reads root's file itself). Absent: never planned.
+   * Root's GPU opt-in for this instance (./gpu.ts gpuOptIn), read when a run with a GPU tier starts and again when a
+   * granted GPU command times out: for planning, the record and naming the cap only, never as the permission (the
+   * helper reads root's file itself). Absent: never planned.
    */
   gpuOptIn?: () => GpuOptIn;
   /** The instance, for the root command a tier denied the network is shown (absent: "<name>"). */
@@ -242,6 +243,7 @@ export async function runTestRun(d: TestRunDeps, req: TestRunRequest, o: { signa
   let detail = '';
   let setup: SetupFailure | undefined;
   let gpuRun = false;
+  let gpuOpt: GpuOptIn | null = null;
   let stoppedGpu = false;
   // The step in progress, for a failure that doesn't name its own.
   let stage = 'slot';
@@ -251,7 +253,8 @@ export async function runTestRun(d: TestRunDeps, req: TestRunRequest, o: { signa
     lock = await (d.lock ?? ((p, s) => holdFlock(p, 'shared', s)))(d.lockPath ?? FULL_RUN_LOCK, o.signal);
     // INVARIANT: a run that may use the GPU says so before any command of it runs (./gpu.ts: never run again by itself
     // once cut off). A file that can't be read counts as on.
-    gpuRun = tiers.some((t) => t.gpu) && !!d.gpuOptIn && gpuPlanned(d.gpuOptIn());
+    gpuOpt = tiers.some((t) => t.gpu) && d.gpuOptIn ? d.gpuOptIn() : null;
+    gpuRun = !!gpuOpt && gpuPlanned(gpuOpt);
     emit('testrun.started', { id, slot: slotFileName(slot.path).replace('.lock', ''), lock_wait_ms: Math.max(0, now() - waitFrom), ...(gpuRun ? { gpu: 'planned' as const } : {}) });
     created = true;
     stage = 'create';
@@ -345,9 +348,13 @@ export async function runTestRun(d: TestRunDeps, req: TestRunRequest, o: { signa
       const gpu = gpuRecord(t.gpu, r.gpu ?? null);
       if (gpuStopped(r.gpu ?? null, r, !!o.signal?.aborted)) stoppedGpu = true;
       // WHY: the sandbox's unit stopped at its RuntimeMaxSec exits non-zero like any failure; only systemd-run's result
-      // says it was the tier's own cap, and the check names the tier and that cap (a GPU command's may be the GPU's).
-      const g = r.gpu?.granted ? r.gpu : null;
-      const cap = g && g.maxS + g.waitedS < t.timeout_s ? timedOutLine(`tier ${t.name}`, g.maxS, `the GPU runs' max_minutes in root's testrun-gpu.json, after ${g.waitedS} s waiting for the GPU`) : timedOutLine(`tier ${t.name}`, t.timeout_s, 'its timeout_s in tests.yaml test_run');
+      // says it was the tier's own cap, and the check names the tier and that cap (a GPU command's may be the GPU's: its
+      // max is root's max_minutes exactly, else what was left of timeout_s once the helper got the lock). The helper reads
+      // root's file itself for each GPU command, so it may have changed since the run started: read again, either counts.
+      const g = r.timedOut && r.gpu?.granted ? r.gpu : null;
+      const rootMaxS = g ? [gpuOpt, d.gpuOptIn?.()].flatMap((x) => (x?.state === 'on' ? [x.maxMinutes * 60] : [])) : [];
+      const gpuCapped = g && (rootMaxS.length ? rootMaxS.includes(g.maxS) && g.maxS < t.timeout_s : g.maxS + g.waitedS < t.timeout_s);
+      const cap = g && gpuCapped ? timedOutLine(`tier ${t.name}`, g.maxS, `the GPU runs' max_minutes in root's testrun-gpu.json, after ${g.waitedS} s waiting for the GPU`) : timedOutLine(`tier ${t.name}`, t.timeout_s, 'its timeout_s in tests.yaml test_run');
       const out = r.timedOut ? `${cap}\n${lastLines(r.out)}` : r.code === null ? `cancelled\n${lastLines(r.out)}` : lastLines(r.out);
       const net = networkRecord(t.network, r.network ?? null);
       const said = [...(selects ? [selection.line] : []), ...(gpu ? [gpuSummaryLine(gpu)] : []), ...(t.network ? [networkSummaryLine(net, d.instance ?? '<name>', t.name)] : [])];

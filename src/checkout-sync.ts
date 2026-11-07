@@ -4,6 +4,7 @@
 // what to run instead.
 import { spawnSync } from './os/child-process.js';
 import { withToolPath } from './tool-path.js';
+import { DETAIL_LOGGED, logDetail } from './user-facing-error.js';
 
 export interface GitRun {
   (args: string[]): { status: number | null; stdout: string; stderr: string };
@@ -22,7 +23,15 @@ export const systemGit = (root: string): GitRun => (args) => {
 export type Refusal = 'dirty' | 'diverged' | 'branch' | 'git';
 export type FastForward = { ok: true; detail: string; from: string; to: string } | { ok: false; detail: string; reason: Refusal; files?: string[]; ahead?: number; behind?: number; command: string };
 
-const first = (s: string) => s.trim().split('\n')[0] ?? '';
+/**
+ * git's own words about a step that failed go to the dashboard's log only: they can name a path (origin's, the
+ * checkout's) or a remote's text (#1064). The detail, which the first-run page shows and the config PR's record keeps,
+ * says what failed in the engine's words.
+ */
+const failed = (what: string, r: { stderr: string }): string => {
+  logDetail(`the checkout's fast-forward: ${what}`, r.stderr.trim() || 'git said nothing');
+  return `${what}; ${DETAIL_LOGGED}`;
+};
 
 /**
  * Fetch origin's `branch` and fast-forward this checkout to it. Refused (nothing changed): the checkout isn't on
@@ -32,12 +41,12 @@ export function fastForwardCheckout(branch: string, git: GitRun): FastForward {
   if (!/^[A-Za-z0-9._/-]{1,200}$/.test(branch) || branch.startsWith('-')) return { ok: false, reason: 'git', detail: `not a branch name: ${branch.slice(0, 60)}`, command: '' };
   const pull = `git pull --ff-only origin ${branch}`;
   const on = git(['rev-parse', '--abbrev-ref', 'HEAD']);
-  if (on.status !== 0) return { ok: false, reason: 'git', detail: `can't tell which branch this checkout is on (${first(on.stderr)})`, command: pull };
+  if (on.status !== 0) return { ok: false, reason: 'git', detail: failed("can't tell which branch this checkout is on", on), command: pull };
   if (on.stdout.trim() !== branch) return { ok: false, reason: 'branch', detail: `this checkout is on ${on.stdout.trim()}, not ${branch}: switch to ${branch} and run \`${pull}\``, command: `git switch ${branch} && ${pull}` };
   const fetched = git(['fetch', '-q', 'origin', `+refs/heads/${branch}:refs/remotes/origin/${branch}`]);
-  if (fetched.status !== 0) return { ok: false, reason: 'git', detail: `couldn't fetch origin's ${branch} (${first(fetched.stderr)})`, command: pull };
+  if (fetched.status !== 0) return { ok: false, reason: 'git', detail: failed(`couldn't fetch origin's ${branch}`, fetched), command: pull };
   const dirty = git(['status', '--porcelain', '--untracked-files=no']);
-  if (dirty.status !== 0) return { ok: false, reason: 'git', detail: `can't read this checkout's status (${first(dirty.stderr)})`, command: pull };
+  if (dirty.status !== 0) return { ok: false, reason: 'git', detail: failed("can't read this checkout's status", dirty), command: pull };
   if (dirty.stdout.trim()) {
     // WHY (#468): which files, so the person knows exactly what is in the way.
     const all = dirty.stdout.split('\n').filter((l) => l.trim()).map((l) => l.slice(3).trim());
@@ -55,6 +64,6 @@ export function fastForwardCheckout(branch: string, git: GitRun): FastForward {
     return { ok: false, reason: 'diverged', ...(counts ? { ahead: ahead!, behind: back! } : {}), detail: `this checkout's ${branch} has commits origin's doesn't (it diverged${counts}); nothing was changed: reconcile it yourself (\`git log origin/${branch}..${branch}\` shows them)`, command: `git log origin/${branch}..${branch}` };
   }
   const ff = git(['merge', '--ff-only', '-q', `refs/remotes/origin/${branch}`]);
-  if (ff.status !== 0) return { ok: false, reason: 'git', detail: `${branch} couldn't fast-forward (${first(ff.stderr)}); run \`${pull}\``, command: pull };
+  if (ff.status !== 0) return { ok: false, reason: 'git', detail: `${failed(`${branch} couldn't fast-forward`, ff)}; run \`${pull}\``, command: pull };
   return { ok: true, detail: `fast-forwarded ${branch} from ${from.slice(0, 7)} to ${to.slice(0, 7)}`, from, to };
 }

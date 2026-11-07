@@ -37,8 +37,12 @@ export abstract class Decisions extends Recovery {
       return { plan: posted.plan as unknown as Plan, commentsAt: (await this.d.backlog.comments(n)).length };
     }
     const note = decided?.answer === 'revise' ? decided.note : null;
-    // The decisions index: the decisions made and the decision records in this checkout (the plan's base).
-    const index = decisionIndex(path, this.d.log.read(0, ['decision.asked', 'decision.answered']));
+    // The decisions index: the decisions made and the decision records committed at the plan's base (#920: read at the
+    // base commit itself, from the instance's own clone with every object's id checked, so nothing a setup step writes
+    // or commits in the worktree, or points the worktree's .git at, is a record).
+    // Which commit `base` is, is not checked here: who picks the base is an open route (#962), listed with other known ones
+    // under "Open routes into the decisions index" in docs/process.md.
+    const index = decisionIndex(path, this.d.log.read(0, ['decision.asked', 'decision.answered']), base, this.d.repo);
     let sentBack: string[] = [];
     let plan: Plan | null = null;
     for (let round = 0; !plan; round++) {

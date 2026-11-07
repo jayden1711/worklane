@@ -2,7 +2,8 @@
 // its place on the Health page. Machine-wide at most RATE.max posts per RATE.windowMs; the rest wait for the next
 // pass, oldest first. An incident resolved before its first post was ever sent is not posted at all (it came and
 // went inside the limit). Every post is redacted again here, and the bot's own token is never in one.
-import { readIncidents, redactIncidentText, withIncidents, type Incident } from './incidents.js';
+import { readIncidents, withIncidents, type Incident } from './incidents.js';
+import { redactString } from '../events/redact.js';
 import type { SlotPathLike } from '../slot-file.js';
 
 /** At most this many posts per window, machine-wide. */
@@ -15,7 +16,7 @@ export type Poster = (content: string) => Promise<boolean>;
 
 /** A text with every secret-shaped string, and each of `secrets` (the bot token), taken out. */
 export function scrub(text: string, secrets: string[] = []): string {
-  let out = redactIncidentText(text);
+  let out = redactString(text);
   for (const s of secrets) if (s && s.length >= 8) out = out.split(s).join('[REDACTED]');
   return out;
 }

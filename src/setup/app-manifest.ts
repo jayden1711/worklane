@@ -35,6 +35,7 @@ import { setGithubApp } from '../instance.js';
 import { instanceNameProblem } from '../instance-name.js';
 import { asUser, currentUser, homeOf, installSecretFor } from '../os/index.js';
 import { ownEnv } from '../os/own-env.js';
+import { errorAnswer, logDetail } from '../user-facing-error.js';
 
 type Fetch = typeof fetch;
 export type AppKind = 'agent' | 'signin';
@@ -340,8 +341,11 @@ export class ManifestFlows {
     try {
       f.app = await convertManifest(code, { ...(this.o.api ? { api: this.o.api } : {}), ...(this.o.fetch ? { fetch: this.o.fetch } : {}) });
     } catch (e) {
-      this.settle(f, 'refused', (e as Error).message);
-      return { status: 502, body: `${(e as Error).message}; start the App setup again` };
+      // GitHub's answer, or a network error: the hub's log has it; the page and the waiting runner a fixed text (#882).
+      logDetail(`the App setup ${f.id}: converting the manifest`, e);
+      const why = "GitHub didn't create the App from its manifest; the detail is in the hub's log on the machine";
+      this.settle(f, 'refused', why);
+      return { status: 502, body: `${why}; start the App setup again` };
     }
     this.settle(f, 'done');
     return { status: 200, body: `GitHub created the App ${f.app.slug}. You can close this tab: setup continues where it started${f.kind === 'agent' ? ', and asks you to install the App on ' + f.repo + ' next' : ''}.` };
@@ -441,7 +445,11 @@ export async function handleManifestBreakGlass(req: IncomingMessage, res: Server
     }
     sendJson(res, 404, { error: 'not found' });
   } catch (e) {
-    sendJson(res, e instanceof FlowError ? 400 : 500, { error: String((e as Error).message).slice(0, 300) });
+    if (e instanceof FlowError) sendJson(res, 400, { error: e.message.slice(0, 300) });
+    else {
+      const answer = errorAnswer(e, req, url.pathname);
+      sendJson(res, answer.status, answer.body);
+    }
   }
   return true;
 }

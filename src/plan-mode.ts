@@ -19,6 +19,8 @@ import type { DoneWhenList } from './backlog/types.js';
 import type { ReviewConfig } from './config/schema.js';
 import { riskAndDesignReasons, waitCategoriesOf } from './merge-policy.js';
 import { computeLevel, type LockScope } from './review.js';
+// Each file the plan names as text shows it (#763): a look-alike of a locked file escaped, never raw.
+import { shownPath } from './path-text.js';
 import { defaultRolePrompt } from './roles.js';
 import { checkDecisions, decisionsLines, DECISIONS_FORMAT, indexLines, NOTHING_RECORDED, resolveRef, type DecisionEntry, type DecisionsSection } from './plan-decisions.js';
 
@@ -158,7 +160,7 @@ export function planComment(plan: Plan, owner: string, held: string[] = []): str
     '**Steps**',
     plan.steps.map((s, i) => `${i + 1}. ${s}`).join('\n'),
     ...(plan.acceptance?.length ? ['', '**Acceptance criteria**', bullets(plan.acceptance)] : []),
-    ...(plan.files.length ? ['', '**Files it expects to change**', bullets(plan.files.map((f) => `\`${f}\``))] : []),
+    ...(plan.files.length ? ['', '**Files it expects to change**', bullets(plan.files.map((f) => `\`${shownPath(f)}\``))] : []),
     ...(plan.risks.length ? ['', '**Risks**', bullets(plan.risks)] : []),
     ...(plan.questions?.length ? ['', '**Open questions** (the build goes ahead with the approach above; answer to change it)', bullets(plan.questions)] : []),
     '',

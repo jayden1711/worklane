@@ -89,6 +89,7 @@ function helperCopy(o: { user?: string; helperUser?: string; tmpBase?: 'absent' 
     [/^export PATH=\S+$/m, `export PATH=${bin}`],
     [/^BASE=\S+$/m, `BASE=${base}`],
     [/^TMP_BASE=\S+$/m, `TMP_BASE=${tmpBase}`],
+    [/^ENV_DIR=\S+$/m, `ENV_DIR=${join(dir, 'env')}`],
     [/^user="wl-test-\$name"$/m, `user=${user}`],
   ] as const) {
     assert.match(src, re);

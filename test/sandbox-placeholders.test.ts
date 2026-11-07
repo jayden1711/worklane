@@ -4,7 +4,7 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createWorktree, excludeSandboxPlaceholders, removeSandboxPlaceholders } from '../src/worktrees.js';
+import { createWorktree, excludeSandboxPlaceholders, removeSandboxPlaceholders, worktreeOptions } from '../src/worktrees.js';
 import { BRAND } from '../src/brand.js';
 import { exampleProject } from './helpers.js';
 
@@ -18,7 +18,7 @@ test('regression: the sandbox\'s empty mount points in a worktree are never comm
   writeFileSync(join(dir, '.claude', 'hooks', 'guard.py'), 'print(1)\n');
   git(dir, 'add', '.gitmodules', '.claude/hooks/guard.py');
   git(dir, '-c', 'user.name=a', '-c', 'user.email=a@example.com', 'commit', '-q', '-m', 'project files');
-  const o = { repo: dir, root: '.claude/worktrees', stateDir: mkdtempSync(join(tmpdir(), 'wt-state-')), setup: [] };
+  const o = worktreeOptions({ repo: dir, root: '.claude/worktrees', stateDir: mkdtempSync(join(tmpdir(), 'wt-state-')), setup: [], taskDir: null });
   const { path } = createWorktree(o, 'issue-14', 'worklane/issue-14', 'HEAD');
   // What Claude Code's sandbox left on Linux in real runs: empty files and directories.
   const files = ['.bash_profile', '.bashrc', '.claude/launch.json', '.claude/loop.md', '.claude/scheduled_tasks.json'];

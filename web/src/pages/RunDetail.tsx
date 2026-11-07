@@ -6,6 +6,7 @@ import { FileChip, Loading, StatusMark, TaskRow, ToolRow, type MarkState } from 
 import { ago, Badge, Card, Empty, EST_NOTE, estUsd } from '../components/ui';
 import { LiveRun } from '../components/LiveRun';
 import { Header } from '../components/Header';
+import { shownPath } from '../path-text';
 
 const markFor = (reason: string | null): MarkState => (reason === null ? 'running' : reason === 'succeeded' ? 'done' : 'failed');
 
@@ -88,6 +89,43 @@ export function RunWhy({ detail }: { detail?: string | undefined }) {
   );
 }
 
+/** A run's commands and writes as tool rows, then the files it wrote; a written file's path as shownPath shows it. */
+export function RunSteps({ run }: { run: RunRecord }) {
+  const commands = run.steps.filter((s) => s.kind === 'command').length;
+  return (
+    <Card className="primitive-card-pad">
+      <div className="flex items-center gap-1.5 text-[12.5px] text-ink-2">
+        <span className="tabular-nums">
+          {commands} command(s), {run.files.length} file(s) written
+        </span>
+      </div>
+      {run.steps.length ? (
+        <div className="mt-2 flex flex-col gap-1" data-testid="run-steps">
+          {run.steps.map((s, i) => (
+            <ToolRow
+              key={i}
+              icon={s.kind === 'write' ? 'write' : 'run'}
+              label={s.kind === 'write' ? s.tool : 'Run'}
+              chip={s.kind === 'write' ? shownPath(s.what) : s.what}
+              detail={s.kind === 'command' && s.output ? s.output : undefined}
+              end={s.kind === 'command' ? <Badge tone={s.status === 'ok' ? 'ok' : s.status === 'error' ? 'danger' : 'neutral'}>{s.exitCode !== null ? `exit ${s.exitCode}` : s.status}</Badge> : undefined}
+            />
+          ))}
+        </div>
+      ) : (
+        <div className="mt-2 text-[13px] text-ink-3">No commands or writes.</div>
+      )}
+      {!!run.files.length && (
+        <div className="mt-2.5 flex max-w-full flex-wrap gap-1.5 border-t border-line pt-2.5" aria-label="Files written">
+          {run.files.map((f) => (
+            <FileChip key={f} file={f} />
+          ))}
+        </div>
+      )}
+    </Card>
+  );
+}
+
 /** One agent run as tool chips (Beautiful UI's tool chips): every command and write, then the files and the final message. */
 export function RunDetail({ id, refused: known = null }: { id: string; refused?: string | null }) {
   const [run, setRun] = useState<RunRecord | null | undefined>(known ? null : undefined);
@@ -110,7 +148,6 @@ export function RunDetail({ id, refused: known = null }: { id: string; refused?:
   const refused = known ?? fromServer;
   const showLive = live === true && !run;
   const back = run?.issue ? `/issues/${run.issue}` : '/agents';
-  const commands = run?.steps.filter((s) => s.kind === 'command').length ?? 0;
   return (
     <div data-testid="page-run-detail">
       <Header title={run ? `${run.role} run` : showLive ? 'Live run' : 'Agent run'} sub={run ? `${run.issue ? `#${run.issue} · ` : ''}${run.model} · started ${ago(run.startedAt)}` : showLive ? 'live: what the agent does, as it does it' : ''}>
@@ -132,36 +169,7 @@ export function RunDetail({ id, refused: known = null }: { id: string; refused?:
               {run.otherTools > 0 && <span>{run.otherTools} read/search call(s) not listed</span>}
               {run.truncated && <Badge tone="warn">long run: later steps not recorded</Badge>}
             </div>
-            <Card className="primitive-card-pad">
-              <div className="flex items-center gap-1.5 text-[12.5px] text-ink-2">
-                <span className="tabular-nums">
-                  {commands} command(s), {run.files.length} file(s) written
-                </span>
-              </div>
-              {run.steps.length ? (
-                <div className="mt-2 flex flex-col gap-1" data-testid="run-steps">
-                  {run.steps.map((s, i) => (
-                    <ToolRow
-                      key={i}
-                      icon={s.kind === 'write' ? 'write' : 'run'}
-                      label={s.kind === 'write' ? s.tool : 'Run'}
-                      chip={s.what}
-                      detail={s.kind === 'command' && s.output ? s.output : undefined}
-                      end={s.kind === 'command' ? <Badge tone={s.status === 'ok' ? 'ok' : s.status === 'error' ? 'danger' : 'neutral'}>{s.exitCode !== null ? `exit ${s.exitCode}` : s.status}</Badge> : undefined}
-                    />
-                  ))}
-                </div>
-              ) : (
-                <div className="mt-2 text-[13px] text-ink-3">No commands or writes.</div>
-              )}
-              {!!run.files.length && (
-                <div className="mt-2.5 flex max-w-full flex-wrap gap-1.5 border-t border-line pt-2.5" aria-label="Files written">
-                  {run.files.map((f) => (
-                    <FileChip key={f} file={f} />
-                  ))}
-                </div>
-              )}
-            </Card>
+            <RunSteps run={run} />
             {run.role === 'researcher' && <RunResearch id={run.id} />}
             <RunWhy detail={run.detail} />
             {run.loaded && (

@@ -378,6 +378,8 @@ const REGIONS: [string, string][] = [
   ['src/conflicts.ts', 'export function conflictWaitReasons('],
   ['src/coordinator/fix-runs.ts', 'private async giveUpConflict('],
   ['src/coordinator/fix-runs.ts', 'private async conflictRun('],
+  // #784: the vacuity reasons mergeDecision takes in (i.vacuity), its fail-closed one among them.
+  ['src/merge-policy-vacuity.ts', 'export function vacuityCheck('],
 ];
 /** Literal substitutions a reason starts with. */
 const SUBST: Record<string, string> = { '${HIGH_RISK_REASON}': HIGH_RISK_REASON };
@@ -395,6 +397,7 @@ const TRACED: [string, string | null][] = [
   ['...(i.instructionEvals ?? [])', 'export function instructionEvalReasons('],
   ['...(i.outsidePlan ?? [])', 'export function outsidePlanReasons('],
   ['...(i.weakening ?? [])', null], // #783: `design: may weaken a check: ...`, built in src/merge-policy-weakening.ts
+  ['...(i.vacuity ?? [])', 'export function vacuityCheck('], // #784: `design: vacuity: ...`, scanned in its own region
   ['...d.reasons', 'export function mergeDecision('],
   ['d.reasons', '  mergeDecisionFor(n: number'], // the emitter's own value: mergeDecisionFor's, then mergeOrWait's pushes
   ['...fix.reasons', 'private async conflictRun('],

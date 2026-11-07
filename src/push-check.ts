@@ -7,7 +7,7 @@
 // so a doomed change is caught before a long test run.
 import { execFileSync, spawnSync } from './os/child-process.js';
 import { blobsByName, rangeNames, sizeFiles } from './coordinator/change-files.js';
-import { globToRegExp } from './guardrails/glob.js';
+import { globRegExp } from './guardrails/glob.js';
 import { shownPath } from './path-text.js';
 import { lintSkill, SKILL_SECTIONS } from './skill-lint.js';
 import { defaultBranchRefusal, type PushGuard } from './push-guard.js';
@@ -31,8 +31,62 @@ const list = (paths: string[], n = 10) => `${paths.slice(0, n).join(', ')}${path
 /** Changed paths in a problem's text, each as shownPath shows it (#683): `rev-list --objects` prints a name as it is. */
 const listPaths = (paths: string[], n = 10) => list(paths.map(shownPath), n);
 
-/** Every reason the range base..head may not be pushed; empty means it may. */
+/** git's own complaint in a failed call's error, on one line: its `fatal:` or `error:` line when there is one. */
+function whyFailed(e: unknown): string {
+  const err = e as { stderr?: unknown; message?: unknown };
+  const text = typeof err.stderr === 'string' && err.stderr.trim() ? err.stderr : String(err.message ?? e);
+  const lines = text.split('\n').map((l) => l.trim()).filter(Boolean);
+  const said = lines.map((l) => /\b(?:fatal|error): .*/.exec(l)?.[0]).find(Boolean) ?? lines[0] ?? 'no reason given';
+  return said.replace(/[\u0000-\u001f\u007f]/g, ' ').slice(0, 300);
+}
+
+/** The refusal when a read of the range fails (#981): nothing half-read is judged clean. */
+const unreadRefusal = (e: unknown) =>
+  `the push limits couldn't read the range (${whyFailed(e)}): nothing is judged clean, so nothing is pushed. If something changed the repository while they ran, the next try reads it again`;
+
+declare const COMMIT: unique symbol;
+/** A commit's id as commitIds read it: judge takes only these, never a name or a tree's id (#966). */
+type CommitId = string & { readonly [COMMIT]: true };
+
+/**
+ * The range's ends as commit ids, read once (#981): every later call reads these, never the names, so a branch moved
+ * or deleted between the check's git calls, or before the push, changes nothing. Throws as git does on a bad name,
+ * and on an end that is no commit (a tree, a blob, a tag of either), whose range would list no names (#966).
+ */
+const commitIds = (cwd: string, base: string, head: string): [CommitId, CommitId] =>
+  [base, head].map((r) => git(cwd, ['rev-parse', '--verify', '--end-of-options', `${r}^{commit}`]).trim()) as [CommitId, CommitId];
+
+/**
+ * A name's spellings as Unicode can write it: as it is, NFC and NFD (#966). On Linux `café` written either way is two
+ * different files, so a refused path in one form is matched against a glob in the other.
+ */
+const spellings = (s: string): string[] => [...new Set([s, s.normalize('NFC'), s.normalize('NFD')])];
+
+/** A test of a path against globs, true when any spelling of the path matches any spelling of a glob. */
+function matcher(globs: string[]): (path: string) => boolean {
+  const res = globs.flatMap((g) => spellings(g).map((s) => globRegExp(s, 'deny')));
+  return (path) => spellings(path).some((p) => res.some((re) => re.test(p)));
+}
+
+/**
+ * The range's problems and the head commit they were judged at. Never throws (#981): a git call that fails, as one
+ * does when the repo changes under it, is the one refusal, so a caller's tick goes on and nothing is pushed.
+ */
+function checkRange(cwd: string, base: string, head: string, limits: PushLimits): { problems: string[]; head: string | null } {
+  try {
+    const [b, h] = commitIds(cwd, base, head);
+    return { problems: judge(cwd, b, h, limits), head: h };
+  } catch (e) {
+    return { problems: [unreadRefusal(e)], head: null };
+  }
+}
+
+/** Every reason the range base..head may not be pushed; empty means it may. Never throws: a failed read is a reason. */
 export function pushProblems(cwd: string, base: string, head: string, limits: PushLimits): string[] {
+  return checkRange(cwd, base, head, limits).problems;
+}
+
+function judge(cwd: string, base: CommitId, head: CommitId, limits: PushLimits): string[] {
   const range = `${base}..${head}`;
   const problems: string[] = [];
   // Paths touched by any commit in the range, not just the net diff, each as itself (#724): a name git would quote
@@ -42,8 +96,8 @@ export function pushProblems(cwd: string, base: string, head: string, limits: Pu
   const workflows = touched.filter((p) => p.startsWith(WORKFLOWS));
   if (workflows.length) problems.push(`changes CI workflows (${listPaths(workflows)}): the harness's GitHub credential has no Workflows permission, so GitHub refuses this push; a human makes workflow changes`);
 
-  const refuseRes = limits.refuse_paths.map((g) => ({ g, re: globToRegExp(g) }));
-  const refused = touched.filter((p) => refuseRes.some(({ re }) => re.test(p)));
+  const refusedPath = matcher(limits.refuse_paths);
+  const refused = touched.filter(refusedPath);
   if (refused.length) problems.push(`touches paths that are never pushed (${listPaths(refused)}), matching push.refuse_paths; remove them from every commit on the branch, not just the last one`);
 
   // A name no checkout would write: a crafted tree can hold an empty, ".", ".." or ".git" segment, and
@@ -101,14 +155,16 @@ export type PushResult = { ok: true } | { ok: false; refused: string[] } | { ok:
  * else's push); with neither, the push succeeds only as a fast-forward.
  * `guard`: the default branch is never pushed (push-guard.ts), except as the direct land (land_mode direct); a push
  * to it is refused before anything else and recorded through the guard.
+ * What is pushed is the head commit the limits judged, by id (#981).
  */
 export function checkedPush(o: { cwd: string; remote: string; base: string; head: string; ref: string; limits: PushLimits; guard: PushGuard; force?: boolean; expect?: string }): PushResult {
   const main = defaultBranchRefusal(o.guard, o.ref, o.head);
   if (main) return { ok: false, refused: [main] };
-  const refused = pushProblems(o.cwd, o.base, o.head, o.limits);
-  if (refused.length) return { ok: false, refused };
+  const checked = checkRange(o.cwd, o.base, o.head, o.limits);
+  if (checked.problems.length || !checked.head) return { ok: false, refused: checked.problems };
   const lease = o.expect ? [`--force-with-lease=${o.ref}:${o.expect}`] : [];
-  const push = spawnSync('git', ['push', ...lease, o.remote, `${o.force ? '+' : ''}${o.head}:${o.ref}`], { cwd: o.cwd, encoding: 'utf8' });
+  // The commit the limits judged, by id: never o.head's name, which may point elsewhere by now.
+  const push = spawnSync('git', ['push', ...lease, o.remote, `${o.force ? '+' : ''}${checked.head}:${o.ref}`], { cwd: o.cwd, encoding: 'utf8' });
   if (push.status !== 0) return { ok: false, error: (push.stderr || '').trim() };
   return { ok: true };
 }
