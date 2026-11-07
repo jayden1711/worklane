@@ -5,7 +5,7 @@ import { createHash } from 'node:crypto';
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { delimiter, dirname, join, resolve as resolvePath } from 'node:path';
-import { gitEnv, gitExecFileSync, gitSnapshot, gitSpawnSync, type GitSnapshot } from '../os/git.js';
+import { gitConfigRefusal, gitEnv, gitExecFileSync, gitSnapshot, gitSpawnSync, type GitSnapshot } from '../os/git.js';
 import { presentNames, rawChanges, untrackedNames } from '../coordinator/change-files.js';
 import { findTool } from '../tool-path.js';
 
@@ -80,6 +80,9 @@ interface Compared {
  */
 export function scanCommit(top: string, scope: CommitScanScope, binary = findTool('gitleaks')): ScanResult {
   if (!binary) return { status: 'unavailable', error: 'gitleaks not found on PATH' };
+  // Refuse an instance checkout's planted programs before any content reads (#926).
+  const refused = gitConfigRefusal(top);
+  if (refused) return { status: 'unavailable', error: refused };
   const tmp = mkdtempSync(join(tmpdir(), 'scan-commit-'));
   try {
     checkReadPrograms(top, scope);
@@ -518,6 +521,9 @@ function headContent(top: string): (() => Compared[])[] {
  */
 export function scanRange(cwd: string, range: string, binary = findTool('gitleaks')): Promise<ScanResult> {
   if (!binary) return Promise.resolve({ status: 'unavailable', error: 'gitleaks not found on PATH' });
+  // As scanCommit: no gitleaks (and so no git) on a config the guard refuses (#926).
+  const refused = gitConfigRefusal(cwd);
+  if (refused) return Promise.resolve({ status: 'unavailable', error: refused });
   // gitleaks walks the range with git: through one gitSnapshot whose shallow file was checked, so a cut written or
   // removed while it runs changes nothing, and a cut inside the range is never "clean" (#927). Commit ids only there.
   let snap: GitSnapshot;
