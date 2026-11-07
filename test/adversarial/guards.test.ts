@@ -1200,16 +1200,21 @@ test(`adversarial guards / commit.scan-before (${doc('Agent commits are scanned 
     run(g.dir, 'add', 'config.txt');
   };
   const unstagedOnly = () => spawnSync('git', ['reset', '-q', 'config.txt'], { cwd: g.dir });
-  const commits = [
+  // The refusal each commit must get: the scan's finding, unless the line is one the scan can't place.
+  const SCANNED = /gitleaks found a secret/;
+  const UNPLACED = /the commit secret scan can't (tell what this command line commits|read this command line).*isn't (let through|run) unscanned/;
+  const commits: { what: string; command: string; stage: boolean; refusal?: RegExp }[] = [
     { what: 'git commit', command: 'git commit -m x', stage: true },
     { what: 'git commit -q', command: 'git commit -qm x', stage: true },
     { what: 'git -C naming the checkout', command: `git -C ${g.dir} commit -m x`, stage: true },
     { what: 'git -C naming a folder in the checkout', command: 'git -C src commit -m x', stage: true },
-    { what: 'git -c', command: 'git -c core.quotepath=off commit -m x', stage: true },
+    // Since #971 (ba9fc212) a line the scan can't place is refused before it runs, unscanned: the commit is still
+    // refused before it happens, by that refusal and no other.
+    { what: 'git -c', command: 'git -c core.quotepath=off commit -m x', stage: true, refusal: UNPLACED },
     { what: 'commit --no-verify', command: 'git commit --no-verify -m x', stage: true },
-    { what: 'in a nested shell', command: 'bash -c "git commit -m x"', stage: true },
+    { what: 'in a nested shell', command: 'bash -c "git commit -m x"', stage: true, refusal: UNPLACED },
     { what: 'after &&', command: 'true && git commit -m x', stage: true },
-    { what: 'through env', command: 'env git commit -m x', stage: true },
+    { what: 'through env', command: 'env git commit -m x', stage: true, refusal: UNPLACED },
     { what: 'commit -a with the secret unstaged', command: 'git commit -am x', stage: false },
     { what: 'commit -a -m with the secret unstaged', command: 'git commit -a -m x', stage: false },
     { what: 'commit --all with the secret unstaged', command: 'git commit --all -m x', stage: false },
@@ -1219,7 +1224,7 @@ test(`adversarial guards / commit.scan-before (${doc('Agent commits are scanned 
       if (c.stage) staged();
       else unstagedOnly();
       const v = await g.call('Bash', { command: c.command }, { task: null });
-      return v.decision === 'deny' && /gitleaks found a secret/.test(v.reason) ? null : `${v.decision} ${v.reason}`.trim();
+      return v.decision === 'deny' && (c.refusal ?? SCANNED).test(v.reason) ? null : `${v.decision} ${v.reason}`.trim();
     }),
     [],
     'commits carrying a secret the guard let through',
