@@ -2245,7 +2245,8 @@ jobs:
           wait_status() { for _ in $(seq 90); do [ "$(sudo jq -r '.id + " " + .state' "$st" 2>/dev/null)" = "$1 running" ] || [ "$(sudo jq -r .id "$st" 2>/dev/null)" != "$1" ] || break; sleep 2; done; sudo jq -c . "$st"; }
           digest() { (cd / && sudo -u wl-ci /usr/local/bin/node --input-type=module -e "import {approvalDigest} from '$E/plugins/approval.js'; import {readPreview, recordOf} from '$E/plugins/root-ops.js'; const p = readPreview('ci', process.argv[1]); const m = process.argv[3] ? {network: process.argv[3] === 'none' ? [] : process.argv[3].split('+'), secrets: process.argv[4] === 'none' ? [] : process.argv[4].split('+')} : undefined; console.log(approvalDigest(recordOf(p, process.argv[2].split('+'), m)))" "$@"); }
           confirm() { printf '%s\n' "$1" | sudo script -qec "bash /opt/worklane/current/scripts/setup/plugins.sh confirm ci $1 $2" /dev/null | tail -n 1; }
-          # preview_done: a failed preview stops right after its wait, with its unit's journal and status (#677).
+          # preview_done: a failed preview stops right after its wait, with its unit's journal and status (#677);
+          # snapshot_done: the same after a snapshot, waiting for its own mark, not the preview's "done" (#679).
           . scripts/ci/preview-done.sh
           # The broker: its user, groups and unit.
           sudo bash scripts/setup/mcp-broker.sh ci | tee "$F/mcp-setup.log"
@@ -2291,7 +2292,8 @@ jobs:
           [ "$(sudo stat -c '%U %a' "$sf")" = "wl-ci-mcp 400" ]
           for u in wl-ci wl-ci-agent; do if sudo -u "$u" cat "$sf" > /dev/null 2>&1; then echo "$u read the MCP secret" >&2; exit 1; fi; done
           # The second snapshot of the APPROVED server: the broker's, with its secret (Q3); root keeps it as a preview.
-          sudo -u wl-ci sudo -n "$HELPER" mcp-snapshot kit-notes && wait_status kit-notes
+          sudo -u wl-ci sudo -n "$HELPER" mcp-snapshot kit-notes
+          snapshot_done ci kit-notes /var/lib/worklane/plugins/previews/ci/kit-notes/preview.json
           # The broker's own start of a server: its error and the broker's journal (the server's stderr) first, so a
           # failure below carries bubblewrap's words.
           jq -c '{snapshotError}' /var/lib/worklane/plugins/previews/ci/kit-notes/preview.json
