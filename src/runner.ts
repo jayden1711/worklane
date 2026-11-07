@@ -463,8 +463,16 @@ const EFFORT_FLAGS = new Set<string>(EFFORTS);
  * on the machine and sudo logs them to the journal, so the prompt goes on
  * stdin and the role's system prompt in a file (`systemPromptFile`).
  */
+/**
+ * Roles that load no setting source at all (#973): no project instructions (CLAUDE.md), settings or hooks from the
+ * checkout, only the engine's role prompt and its --settings. WHY: a planner's or plan reviewer's checkout is one
+ * setup steps have run in, and its instruction files need one review, not two: text there reached every planner.
+ */
+export const NO_PROJECT_SOURCE_ROLES: readonly string[] = ['planner', 'plan-reviewer'];
+
 export function cliArgs(req: RunRequest, settings?: object, systemPromptFile?: string, pluginDirs: readonly string[] = [], mcpConfigFile?: string): string[] {
-  const args = [...(settings ? ['--settings', JSON.stringify(settings)] : []), '-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose', '--model', req.model, '--setting-sources', 'project', '--strict-mcp-config', '--permission-mode', 'dontAsk', '--max-turns', String(req.maxTurns), '--max-budget-usd', String(req.maxBudgetUsd)];
+  const sources = NO_PROJECT_SOURCE_ROLES.includes(req.role) ? '' : 'project';
+  const args = [...(settings ? ['--settings', JSON.stringify(settings)] : []), '-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose', '--model', req.model, '--setting-sources', sources, '--strict-mcp-config', '--permission-mode', 'dontAsk', '--max-turns', String(req.maxTurns), '--max-budget-usd', String(req.maxBudgetUsd)];
   // WHY: not on a provider run: whether an open model's endpoint takes the effort parameter is unknown (#579).
   if (req.effort && EFFORT_FLAGS.has(req.effort) && !req.provider) args.push('--effort', req.effort);
   if (req.allowedTools.length) args.push('--allowedTools', ...req.allowedTools);
