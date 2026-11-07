@@ -43,6 +43,7 @@ import { ACTIONS_APP_ID, pinnedVerdict, pinOf, type CheckPin, type GithubCheckAp
 import { writeGroupOnly } from './os/index.js';
 import type { Role } from './dashboard-auth.js';
 import { gitRemote } from './git-remote.js';
+import { readWorkflowText } from './workflow-read.js';
 
 /** At most one GitHub API call per this long. */
 export const MAIN_WATCH_CALL_MS = 60_000;
@@ -559,8 +560,9 @@ function globMatch(parts: string[], check: string): boolean {
 function jobChecks(text: string | null): ((check: string) => boolean)[] {
   if (text === null || text.length > WORKFLOW_FILE_MAX) return [];
   try {
-    const doc = parseDocument(text);
-    const raw: unknown = doc.errors.length ? null : doc.toJS();
+    // A file GitHub may read otherwise (src/workflow-read.ts) says nothing, like one that doesn't parse (#948).
+    const read = readWorkflowText(text);
+    const raw: unknown = read.unsure ? null : read.value;
     const jobs = raw && typeof raw === 'object' ? (raw as Record<string, unknown>).jobs : null;
     if (!jobs || typeof jobs !== 'object') return [];
     return Object.entries(jobs as Record<string, unknown>).map(([id, job]) => {
