@@ -1,0 +1,3 @@
+### Guardrail changes: what each one does
+
+- Every engine and CI path that reads a GitHub Actions workflow file (the required-check pin block, the main watch's disabled-workflow reading, the self-hosted runner guard) now reads it through one fail-closed reader (#948). A file the `yaml` package may read otherwise than GitHub (a character other than TAB, LF and printable ASCII, such as a hidden line break; a `%YAML` or `%TAG` directive; a merge key; an explicit tag; a number not in plain decimal; an anchor defined twice; a non-string key) is treated as one that can't be read: no check names come from it, and the runner guard reports it as a problem.
