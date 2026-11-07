@@ -44,8 +44,10 @@ jobs:
     # as before, for those and for everything else). There the shard runs in a container of its own (the runner's
     # rootless Docker): root inside it for the setup steps below, and a loopback of its own for the tests' servers,
     # none of the machine's. Same check names either way. test/self-hosted-guard.test.ts holds both expressions.
+    # The container's /tmp is a volume of its own (one per job; the runner's reset prunes it), on the daemon's own
+    # file system: the image's root is overlay, where native file locks fail closed (src/os/index.ts).
     runs-on: ${{ vars.CI_SELF_HOSTED_TESTS == 'on' && github.repository_id == '1409507019' && github.ref == 'refs/heads/main' && github.event_name == 'push' && fromJSON('["self-hosted","trusted-tests"]') || vars.CI_SELF_HOSTED_TESTS == 'on' && github.repository_id == '1409507019' && github.event_name == 'pull_request' && github.base_ref == 'main' && github.event.pull_request.head.repo.full_name == github.repository && fromJSON('["self-hosted","trusted-tests"]') || 'ubuntu-24.04' }}
-    container: ${{ vars.CI_SELF_HOSTED_TESTS == 'on' && github.repository_id == '1409507019' && github.ref == 'refs/heads/main' && github.event_name == 'push' && fromJSON('{"image":"buildpack-deps:noble-scm@sha256:94ed690dd634b8b2f531eaa742fde9b1264077cd8ea695a3b960bd104ae4c481","options":"--privileged --shm-size=2g","env":{"WORKLANE_CI_CONTAINER":"1"}}') || vars.CI_SELF_HOSTED_TESTS == 'on' && github.repository_id == '1409507019' && github.event_name == 'pull_request' && github.base_ref == 'main' && github.event.pull_request.head.repo.full_name == github.repository && fromJSON('{"image":"buildpack-deps:noble-scm@sha256:94ed690dd634b8b2f531eaa742fde9b1264077cd8ea695a3b960bd104ae4c481","options":"--privileged --shm-size=2g","env":{"WORKLANE_CI_CONTAINER":"1"}}') || '' }}
+    container: ${{ vars.CI_SELF_HOSTED_TESTS == 'on' && github.repository_id == '1409507019' && github.ref == 'refs/heads/main' && github.event_name == 'push' && fromJSON('{"image":"buildpack-deps:noble-scm@sha256:94ed690dd634b8b2f531eaa742fde9b1264077cd8ea695a3b960bd104ae4c481","options":"--privileged --shm-size=2g","env":{"WORKLANE_CI_CONTAINER":"1"},"volumes":["/tmp"]}') || vars.CI_SELF_HOSTED_TESTS == 'on' && github.repository_id == '1409507019' && github.event_name == 'pull_request' && github.base_ref == 'main' && github.event.pull_request.head.repo.full_name == github.repository && fromJSON('{"image":"buildpack-deps:noble-scm@sha256:94ed690dd634b8b2f531eaa742fde9b1264077cd8ea695a3b960bd104ae4c481","options":"--privileged --shm-size=2g","env":{"WORKLANE_CI_CONTAINER":"1"},"volumes":["/tmp"]}') || '' }}
     steps: &test-shard-steps
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -55,30 +57,12 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
           cache: npm
-      # Before any file the merge hold doesn't cover runs (#746 rounds 20 and 21): install with no package scripts
-      # (prepare, postinstall); check the pinned packages' lockfile entries and installed files before either runs;
-      # build with the locked typescript straight from node_modules (no npm script); check the pins again on what tsc
-      # emitted (#1007: a JSON import makes it write a package.json under dist/); run the desktop backstop alone,
-      # then the other lint tests. Only after that: npm run build (what prepare did), the dashboard UI, machine.sh and
-      # this shard's tests. test/desktop-removed.test.ts holds these first steps and their order.
-      - run: npm ci --ignore-scripts
-      - name: the pinned packages, before any of them runs
-        run: node scripts/ci/check-pins.mjs
-      - run: node node_modules/typescript/bin/tsc -p tsconfig.json
-      - name: the pinned packages again, after tsc emits
-        run: node scripts/ci/check-pins.mjs
-      - name: the desktop backstop, before anything unheld runs
-        run: node --import ./dist/test/isolate.js --test dist/test/desktop-removed.test.js
-      - name: the other lint tests, before anything unheld runs
-        shell: bash
-        run: |
-          mapfile -t files < <(grep -lx '// lint-test' test/*.test.ts | grep -vx 'test/desktop-removed.test.ts' | sed -e 's#^test/#dist/test/#' -e 's#\.ts$#.js#')
-          [ "${#files[@]}" -gt 0 ] || { echo "no lint tests found" >&2; exit 1; }
-          node --import ./dist/test/isolate.js --test "${files[@]}"
       # In the self-hosted runner's container only (WORKLANE_CI_CONTAINER, the container's own env): what GitHub's
       # image has and this one lacks. sudo; a user like GitHub's runner (uid 1001, passwordless sudo, subordinate ids
       # inside the container's own range), whom the tests run as, never root; Chrome for Testing, pinned and checked,
       # as google-chrome, with the libraries its deb.deps names. On GitHub's runners it does nothing.
+      # It comes first, before the install: it runs only this file's own commands, no file from the checkout, and every
+      # step after it that runs a test file (the backstop and the lint tests too) runs it as that user, never as root.
       - name: the self-hosted container's own setup (nothing on GitHub's runners)
         shell: bash
         env:
@@ -124,6 +108,38 @@ jobs:
           apt-get install -y -q --no-install-recommends "${pkgs[@]}"
           ln -sf /opt/chrome-linux64/chrome /usr/local/bin/google-chrome
           google-chrome --version
+      # Before any file the merge hold doesn't cover runs (#746 rounds 20 and 21): install with no package scripts
+      # (prepare, postinstall); check the pinned packages' lockfile entries and installed files before either runs;
+      # build with the locked typescript straight from node_modules (no npm script); check the pins again on what tsc
+      # emitted (#1007: a JSON import makes it write a package.json under dist/); run the desktop backstop alone,
+      # then the other lint tests. Only after that: npm run build (what prepare did), the dashboard UI, machine.sh and
+      # this shard's tests. test/desktop-removed.test.ts holds these first steps and their order.
+      - run: npm ci --ignore-scripts
+      - name: the pinned packages, before any of them runs
+        run: node scripts/ci/check-pins.mjs
+      - run: node node_modules/typescript/bin/tsc -p tsconfig.json
+      - name: the pinned packages again, after tsc emits
+        run: node scripts/ci/check-pins.mjs
+      - name: the desktop backstop, before anything unheld runs
+        shell: bash
+        run: |
+          # In the self-hosted runner's container, as the runner user (above), never root, with this same script.
+          if [ "${WORKLANE_CI_CONTAINER:-}" = 1 ] && [ "$(id -u)" = 0 ]; then
+            chown -R runner:runner "$GITHUB_WORKSPACE" "$RUNNER_TEMP"
+            HOME=/home/runner exec runuser -p -u runner -- bash --noprofile --norc -eo pipefail "$0"
+          fi
+          node --import ./dist/test/isolate.js --test dist/test/desktop-removed.test.js
+      - name: the other lint tests, before anything unheld runs
+        shell: bash
+        run: |
+          # In the self-hosted runner's container, as the runner user (above), never root, with this same script.
+          if [ "${WORKLANE_CI_CONTAINER:-}" = 1 ] && [ "$(id -u)" = 0 ]; then
+            chown -R runner:runner "$GITHUB_WORKSPACE" "$RUNNER_TEMP"
+            HOME=/home/runner exec runuser -p -u runner -- bash --noprofile --norc -eo pipefail "$0"
+          fi
+          mapfile -t files < <(grep -lx '// lint-test' test/*.test.ts | grep -vx 'test/desktop-removed.test.ts' | sed -e 's#^test/#dist/test/#' -e 's#\.ts$#.js#')
+          [ "${#files[@]}" -gt 0 ] || { echo "no lint tests found" >&2; exit 1; }
+          node --import ./dist/test/isolate.js --test "${files[@]}"
       - name: install gitleaks
         shell: bash
         env:
@@ -224,7 +240,7 @@ jobs:
     # rootless Docker): root inside it for the setup steps below, and a loopback of its own for the tests' servers,
     # none of the machine's. Same check names either way. test/self-hosted-guard.test.ts holds both expressions.
     runs-on: ${{ vars.CI_SELF_HOSTED_TESTS == 'on' && github.repository_id == '1409507019' && github.ref == 'refs/heads/main' && github.event_name == 'push' && fromJSON('["self-hosted","trusted-tests"]') || vars.CI_SELF_HOSTED_TESTS == 'on' && github.repository_id == '1409507019' && github.event_name == 'pull_request' && github.base_ref == 'main' && github.event.pull_request.head.repo.full_name == github.repository && fromJSON('["self-hosted","trusted-tests"]') || 'ubuntu-24.04' }}
-    container: ${{ vars.CI_SELF_HOSTED_TESTS == 'on' && github.repository_id == '1409507019' && github.ref == 'refs/heads/main' && github.event_name == 'push' && fromJSON('{"image":"buildpack-deps:noble-scm@sha256:94ed690dd634b8b2f531eaa742fde9b1264077cd8ea695a3b960bd104ae4c481","options":"--privileged --shm-size=2g","env":{"WORKLANE_CI_CONTAINER":"1"}}') || vars.CI_SELF_HOSTED_TESTS == 'on' && github.repository_id == '1409507019' && github.event_name == 'pull_request' && github.base_ref == 'main' && github.event.pull_request.head.repo.full_name == github.repository && fromJSON('{"image":"buildpack-deps:noble-scm@sha256:94ed690dd634b8b2f531eaa742fde9b1264077cd8ea695a3b960bd104ae4c481","options":"--privileged --shm-size=2g","env":{"WORKLANE_CI_CONTAINER":"1"}}') || '' }}
+    container: ${{ vars.CI_SELF_HOSTED_TESTS == 'on' && github.repository_id == '1409507019' && github.ref == 'refs/heads/main' && github.event_name == 'push' && fromJSON('{"image":"buildpack-deps:noble-scm@sha256:94ed690dd634b8b2f531eaa742fde9b1264077cd8ea695a3b960bd104ae4c481","options":"--privileged --shm-size=2g","env":{"WORKLANE_CI_CONTAINER":"1"},"volumes":["/tmp"]}') || vars.CI_SELF_HOSTED_TESTS == 'on' && github.repository_id == '1409507019' && github.event_name == 'pull_request' && github.base_ref == 'main' && github.event.pull_request.head.repo.full_name == github.repository && fromJSON('{"image":"buildpack-deps:noble-scm@sha256:94ed690dd634b8b2f531eaa742fde9b1264077cd8ea695a3b960bd104ae4c481","options":"--privileged --shm-size=2g","env":{"WORKLANE_CI_CONTAINER":"1"},"volumes":["/tmp"]}') || '' }}
     steps: *test-shard-steps
 
   # The required checks, under the names they have always had: green only when every shard of that Node version
