@@ -45,9 +45,11 @@ jobs:
     # rootless Docker): root inside it for the setup steps below, and a loopback of its own for the tests' servers,
     # none of the machine's. Same check names either way. test/self-hosted-guard.test.ts holds both expressions.
     # The container's /tmp is a volume of its own (one per job; the runner's reset prunes it), on the daemon's own
-    # file system: the image's root is overlay, where native file locks fail closed (src/os/index.ts).
+    # file system: the image's root is overlay, where native file locks fail closed (src/os/index.ts). --init: the
+    # runner makes `tail -f /dev/null` its process 1, which reaps no orphan, so a stopped process tree's children
+    # would stay as zombies the tests see as still running; Docker's init reaps them, as systemd does on a VM.
     runs-on: ${{ vars.CI_SELF_HOSTED_TESTS == 'on' && github.repository_id == '1409507019' && github.ref == 'refs/heads/main' && github.event_name == 'push' && fromJSON('["self-hosted","trusted-tests"]') || vars.CI_SELF_HOSTED_TESTS == 'on' && github.repository_id == '1409507019' && github.event_name == 'pull_request' && github.base_ref == 'main' && github.event.pull_request.head.repo.full_name == github.repository && fromJSON('["self-hosted","trusted-tests"]') || 'ubuntu-24.04' }}
-    container: ${{ vars.CI_SELF_HOSTED_TESTS == 'on' && github.repository_id == '1409507019' && github.ref == 'refs/heads/main' && github.event_name == 'push' && fromJSON('{"image":"buildpack-deps:noble-scm@sha256:94ed690dd634b8b2f531eaa742fde9b1264077cd8ea695a3b960bd104ae4c481","options":"--privileged --shm-size=2g","env":{"WORKLANE_CI_CONTAINER":"1"},"volumes":["/tmp"]}') || vars.CI_SELF_HOSTED_TESTS == 'on' && github.repository_id == '1409507019' && github.event_name == 'pull_request' && github.base_ref == 'main' && github.event.pull_request.head.repo.full_name == github.repository && fromJSON('{"image":"buildpack-deps:noble-scm@sha256:94ed690dd634b8b2f531eaa742fde9b1264077cd8ea695a3b960bd104ae4c481","options":"--privileged --shm-size=2g","env":{"WORKLANE_CI_CONTAINER":"1"},"volumes":["/tmp"]}') || '' }}
+    container: ${{ vars.CI_SELF_HOSTED_TESTS == 'on' && github.repository_id == '1409507019' && github.ref == 'refs/heads/main' && github.event_name == 'push' && fromJSON('{"image":"buildpack-deps:noble-scm@sha256:94ed690dd634b8b2f531eaa742fde9b1264077cd8ea695a3b960bd104ae4c481","options":"--privileged --init --shm-size=2g","env":{"WORKLANE_CI_CONTAINER":"1"},"volumes":["/tmp"]}') || vars.CI_SELF_HOSTED_TESTS == 'on' && github.repository_id == '1409507019' && github.event_name == 'pull_request' && github.base_ref == 'main' && github.event.pull_request.head.repo.full_name == github.repository && fromJSON('{"image":"buildpack-deps:noble-scm@sha256:94ed690dd634b8b2f531eaa742fde9b1264077cd8ea695a3b960bd104ae4c481","options":"--privileged --init --shm-size=2g","env":{"WORKLANE_CI_CONTAINER":"1"},"volumes":["/tmp"]}') || '' }}
     steps: &test-shard-steps
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -72,8 +74,12 @@ jobs:
           [ "${WORKLANE_CI_CONTAINER:-}" = 1 ] || { echo "GitHub's runner: nothing to set up"; exit 0; }
           export DEBIAN_FRONTEND=noninteractive
           apt-get update -q
-          apt-get install -y -q --no-install-recommends sudo unzip uidmap
-          id runner > /dev/null 2>&1 || useradd -m -u 1001 -s /bin/bash runner
+          # jq and git-lfs: GitHub's image has both, and tests use them (the Discord seam's checks, the commit scan's
+          # large-file cases).
+          apt-get install -y -q --no-install-recommends sudo unzip uidmap jq git-lfs
+          # No subordinate ids from useradd: it would give 165536 and up, outside the container's own ids (rootless
+          # Docker maps 0 to 65536), where newuidmap is refused. The range below is inside them.
+          id runner > /dev/null 2>&1 || useradd -m -u 1001 -s /bin/bash -K SUB_UID_COUNT=0 -K SUB_GID_COUNT=0 runner
           printf 'runner ALL=(ALL) NOPASSWD:ALL\n' > /etc/sudoers.d/.runner.tmp
           chmod 0440 /etc/sudoers.d/.runner.tmp
           visudo -cf /etc/sudoers.d/.runner.tmp
@@ -240,7 +246,7 @@ jobs:
     # rootless Docker): root inside it for the setup steps below, and a loopback of its own for the tests' servers,
     # none of the machine's. Same check names either way. test/self-hosted-guard.test.ts holds both expressions.
     runs-on: ${{ vars.CI_SELF_HOSTED_TESTS == 'on' && github.repository_id == '1409507019' && github.ref == 'refs/heads/main' && github.event_name == 'push' && fromJSON('["self-hosted","trusted-tests"]') || vars.CI_SELF_HOSTED_TESTS == 'on' && github.repository_id == '1409507019' && github.event_name == 'pull_request' && github.base_ref == 'main' && github.event.pull_request.head.repo.full_name == github.repository && fromJSON('["self-hosted","trusted-tests"]') || 'ubuntu-24.04' }}
-    container: ${{ vars.CI_SELF_HOSTED_TESTS == 'on' && github.repository_id == '1409507019' && github.ref == 'refs/heads/main' && github.event_name == 'push' && fromJSON('{"image":"buildpack-deps:noble-scm@sha256:94ed690dd634b8b2f531eaa742fde9b1264077cd8ea695a3b960bd104ae4c481","options":"--privileged --shm-size=2g","env":{"WORKLANE_CI_CONTAINER":"1"},"volumes":["/tmp"]}') || vars.CI_SELF_HOSTED_TESTS == 'on' && github.repository_id == '1409507019' && github.event_name == 'pull_request' && github.base_ref == 'main' && github.event.pull_request.head.repo.full_name == github.repository && fromJSON('{"image":"buildpack-deps:noble-scm@sha256:94ed690dd634b8b2f531eaa742fde9b1264077cd8ea695a3b960bd104ae4c481","options":"--privileged --shm-size=2g","env":{"WORKLANE_CI_CONTAINER":"1"},"volumes":["/tmp"]}') || '' }}
+    container: ${{ vars.CI_SELF_HOSTED_TESTS == 'on' && github.repository_id == '1409507019' && github.ref == 'refs/heads/main' && github.event_name == 'push' && fromJSON('{"image":"buildpack-deps:noble-scm@sha256:94ed690dd634b8b2f531eaa742fde9b1264077cd8ea695a3b960bd104ae4c481","options":"--privileged --init --shm-size=2g","env":{"WORKLANE_CI_CONTAINER":"1"},"volumes":["/tmp"]}') || vars.CI_SELF_HOSTED_TESTS == 'on' && github.repository_id == '1409507019' && github.event_name == 'pull_request' && github.base_ref == 'main' && github.event.pull_request.head.repo.full_name == github.repository && fromJSON('{"image":"buildpack-deps:noble-scm@sha256:94ed690dd634b8b2f531eaa742fde9b1264077cd8ea695a3b960bd104ae4c481","options":"--privileged --init --shm-size=2g","env":{"WORKLANE_CI_CONTAINER":"1"},"volumes":["/tmp"]}') || '' }}
     steps: *test-shard-steps
 
   # The required checks, under the names they have always had: green only when every shard of that Node version
