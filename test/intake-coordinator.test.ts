@@ -177,7 +177,8 @@ test('intake (#333): a bug already fixed on main is answered naming the fixing c
   onMain = git(t.repo, 'rev-parse', 'HEAD');
   git(t.repo, 'update-ref', 'refs/remotes/origin/main', onMain);
   const spawned = await spawnsDuring(() => t.c.checkIntake());
-  const check = (id: string) => `execFileSync git merge-base --is-ancestor ${id} refs/remotes/origin/main`;
+  // Through the git runner (#807): replace refs off.
+  const check = (id: string) => `execFileSync git --no-replace-objects -c core.commitGraph=false merge-base --is-ancestor ${id} refs/remotes/origin/main`;
   assert.deepEqual(spawned, [check(onMain), check('0a1b2c3d4e5f')], 'the only process: one read-only git check per fixing commit, on the trusted checkout');
   assert.equal(t.discord.replies.length, 3);
   assert.match(t.discord.replies[0]!.text, new RegExp(`already fixed.*\\b${onMain}\\b`), 'confirmed on main: named');

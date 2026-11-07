@@ -32,7 +32,7 @@
 //                               [--fix-cap 10]
 //   --write-held-out: write a held-out set for each role that has none (one case-writer run per role, from its
 //                     contract only); --score: score the current prompts once, no base (no --runs, no --fix).
-import { execFileSync } from 'node:child_process';
+import { gitExecFileSync } from './lib/git.cjs';
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -92,7 +92,7 @@ let noBase = false;
 if (!o.scoreOnly) {
   let baseSource;
   try {
-    baseSource = execFileSync('git', ['show', `${o.base}:src/roles.ts`], { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+    baseSource = gitExecFileSync(['show', `${o.base}:src/roles.ts`], { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
   } catch {
     console.error(`no src/roles.ts at ${o.base}`);
     // Without --spend the plan still prints (and the run stops there anyway).

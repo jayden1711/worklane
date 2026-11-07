@@ -7,9 +7,9 @@
 //
 // The graph is read from the coordinator's clone at the run's commit (git ls-tree, git cat-file), never from the
 // workspace: the sandboxed test user owns that.
-import { spawnSync } from '../os/child-process.js';
 import { builtinModules } from 'node:module';
 import { BRAND } from '../brand.js';
+import { gitSpawnSync } from '../os/git.js';
 import { buildGraph, CODE_EXT, selectTests, type Plan } from './affected.js';
 import type { TestRunConfig } from './config.js';
 
@@ -52,7 +52,7 @@ function packageCheck(pkgJson: string | null): (spec: string) => boolean {
   };
 }
 
-const git = (repo: string, args: string[], input?: string) => spawnSync('git', ['-C', repo, ...args], { input, maxBuffer: 512 * 1024 * 1024, timeout: 120_000 });
+const git = (repo: string, args: string[], input?: string) => gitSpawnSync(['-C', repo, ...args], { input, maxBuffer: 512 * 1024 * 1024, timeout: 120_000 });
 
 /** Each file's contents at `sha`, through one git cat-file --batch. A file over 1 MB reads as empty (built output). */
 export function readAt(repo: string, sha: string, files: readonly string[]): Map<string, string> {

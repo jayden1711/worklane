@@ -22,6 +22,7 @@
 // Pushing the tag runs .github/workflows/release.yml, which only STAGES the version on npm (after checking the tag's
 // signature against main's .github/release-signers); it goes live when the owner approves it on npmjs.com with 2FA.
 import { execFileSync } from 'node:child_process';
+import { gitExecFileSync } from './lib/git.cjs';
 import { existsSync, mkdtempSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -42,7 +43,7 @@ const fail = (msg) => {
   process.exit(1);
 };
 if (!/^\d+\.\d+\.\d+$/.test(version ?? '')) fail('usage: release.mjs X.Y.Z | release.mjs changelog X.Y.Z [--repo owner/repo]');
-const git = (...a) => execFileSync('git', a, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+const git = (...a) => gitExecFileSync(a, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 const gitConfig = (key) => {
   try {
     return git('config', '--get', key);
