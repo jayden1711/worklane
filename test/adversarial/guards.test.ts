@@ -853,7 +853,8 @@ knownHole(`adversarial guards / sandbox.read-tool-same-deny (${doc('The Read too
   return { attacks, open };
 });
 
-knownHole(`adversarial guards / tool.no-read-secrets (${doc('- read secret files;')}): a task's hidden paths and the project's secret files are denied by the sandbox and the Read rules too, not only by the hook`, 'PR #893 (#890)', { skip: !posix && 'POSIX stand-in claude' }, async () => {
+// Closed by PR #893 (#890): once a known hole, now a normal case.
+test(`adversarial guards / tool.no-read-secrets (${doc('- read secret files;')}): a task's hidden paths and the project's secret files are denied by the sandbox and the Read rules too, not only by the hook`, { skip: !posix && 'POSIX stand-in claude' }, async () => {
   const { dir } = exampleProject();
   writeFileSync(join(dir, '.env'), 'TOKEN=stand-in\n');
   mkdirSync(join(dir, 'evals-secret'));
@@ -869,7 +870,8 @@ knownHole(`adversarial guards / tool.no-read-secrets (${doc('- read secret files
     { what: `a command reads ${what} (the sandbox doesn't hide it)`, open: !sandboxHides(denyRead, target!) },
     { what: `the Read tool reads ${what} (no Read rule denies it)`, open: !readRuleDenies(readRules, target!) },
   ]);
-  return { attacks: checks.map((c) => c.what), open: checks.filter((c) => c.open).map((c) => c.what) };
+  assert.equal(checks.length, 4, 'each target, by a command and by the Read tool');
+  assert.deepEqual(checks.filter((c) => c.open).map((c) => c.what), [], 'hidden or secret paths only the hook denies');
 });
 
 test(`adversarial guards / tool.unreadable-task-file-denies (${doc("A task file the guard can't read denies the call")}): a guard hook that fails rather than answers (a timeout, a crash) blocks the call`, { skip: !posix && 'POSIX stand-in claude' }, async () => {
