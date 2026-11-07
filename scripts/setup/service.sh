@@ -27,24 +27,48 @@
 #   --cpu-weight <1-10000>   [100]    (among instances)
 #   --tasks-max <N>          [2048]
 #   --slice-cpu-weight <1-10000> [20] --slice-io-weight <1-10000> [20]   (all instances)
+# A re-run keeps what the installed unit and slice have for every option it isn't given (#710): never back to a default.
 source "$(dirname "$0")/lib.sh"
 all_args=("$@")
 name="${1:?usage: service.sh <name> [options] [--print]}"; shift
 coord="wl-$name"
 unit_name="worklane-$name.service"
-memory_high=infinity memory_max=35% cpu_weight=100 tasks_max=2048 slice_cpu=20 slice_io=20 print=
+memory_high=infinity memory_max=35% cpu_weight=100 tasks_max=2048 slice_cpu=20 slice_io=20 print= given=" "
 while [ $# -gt 0 ]; do
   case "$1" in
-    --memory-high) memory_high="${2:?}"; shift 2 ;;
-    --memory-max) memory_max="${2:?}"; shift 2 ;;
-    --cpu-weight) cpu_weight="${2:?}"; shift 2 ;;
-    --tasks-max) tasks_max="${2:?}"; shift 2 ;;
-    --slice-cpu-weight) slice_cpu="${2:?}"; shift 2 ;;
-    --slice-io-weight) slice_io="${2:?}"; shift 2 ;;
+    --memory-high) memory_high="${2:?}"; given+="memory_high "; shift 2 ;;
+    --memory-max) memory_max="${2:?}"; given+="memory_max "; shift 2 ;;
+    --cpu-weight) cpu_weight="${2:?}"; given+="cpu_weight "; shift 2 ;;
+    --tasks-max) tasks_max="${2:?}"; given+="tasks_max "; shift 2 ;;
+    --slice-cpu-weight) slice_cpu="${2:?}"; given+="slice_cpu "; shift 2 ;;
+    --slice-io-weight) slice_io="${2:?}"; given+="slice_io "; shift 2 ;;
     --print) print=1; shift ;;
     *) echo "unknown option $1" >&2; exit 2 ;;
   esac
 done
+# WHY (#710): a limit set by an earlier run is the floor; a re-run without its option never resets it to the default.
+# The installed files are the record (root's; --print may read a test's own through SERVICE_UNIT_DIR_PRINT). A value
+# passed again that differs from the installed one is said, so a loosening is always on purpose and visible.
+units=/etc/systemd/system
+[ -z "$print" ] || units="${SERVICE_UNIT_DIR_PRINT:-$units}"
+keep_limit() {
+  local var="$1" file="$2" key="$3" flag="$4" was
+  [ -f "$file" ] || return 0
+  was="$(sed -n "s/^$key=//p" "$file" | tail -n 1)"
+  [ -n "$was" ] || return 0
+  if [[ "$given" == *" $var "* ]]; then
+    [ "${!var}" = "$was" ] || echo "note: $key changes from $was (the installed $file) to ${!var} ($flag)" >&2
+  else
+    printf -v "$var" '%s' "$was"
+    echo "note: $key stays $was, as the installed $file has it (pass $flag to change it)" >&2
+  fi
+}
+keep_limit memory_high "$units/$unit_name" MemoryHigh --memory-high
+keep_limit memory_max "$units/$unit_name" MemoryMax --memory-max
+keep_limit cpu_weight "$units/$unit_name" CPUWeight --cpu-weight
+keep_limit tasks_max "$units/$unit_name" TasksMax --tasks-max
+keep_limit slice_cpu "$units/worklane.slice" CPUWeight --slice-cpu-weight
+keep_limit slice_io "$units/worklane.slice" IOWeight --slice-io-weight
 size() { [[ "$2" =~ ^[0-9]+[KMGT]?$|^([1-9][0-9]?|100)%$ ]] || { echo "$1: a size (e.g. 8G) or a percentage of RAM (e.g. 30%), got $2" >&2; exit 2; }; }
 weight() { [[ "$2" =~ ^[0-9]+$ ]] && [ "$2" -ge 1 ] && [ "$2" -le 10000 ] || { echo "$1: a weight from 1 to 10000, got $2" >&2; exit 2; }; }
 [ "$memory_high" = infinity ] || size --memory-high "$memory_high"; size --memory-max "$memory_max"

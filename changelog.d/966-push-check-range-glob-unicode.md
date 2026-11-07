@@ -12,7 +12,8 @@
     secret globs' `!` exceptions (in the hook and the sandbox entries alike), docs, tests and harness-config when they
     leave a path out of the app code, the docs-only class, the lockfile and `generated` size skips, an experiment's
     editable paths, and the money list's test of whether a cut comment's glob covers its line.
-  - **Unchanged.** A glob with no `?` reads exactly as before, as does what an earlier version counted as money (a
+  - **Unchanged.** A glob with no `?` reads as before (but for one written with a lone surrogate, half a surrogate pair alone: in
+    allow style it no longer matches half of a pair in a path, the stricter way; #1129), as does what an earlier version counted as money (a
     money glob's earlier reading, and main's kept readings). Still read as before, as follow-ups: the protected,
     agent-editable and AGENTS.md paths (`src/guardrails/engine.ts`), the vacuity test and app globs
     (`src/merge-policy-vacuity.ts`, `src/vacuity.ts`), and the look-alike check's own glob matcher
