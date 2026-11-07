@@ -57,8 +57,11 @@ sudo install -o root -g root -m 0644 providers.json /etc/worklane/providers.json
 - **Exact match:** a `base_url`'s host and port must equal an entry: the same host name or address, and the same
   port. An entry without a port means the scheme's default port (443 for `https://`), so `api.provider.example`
   doesn't allow `https://api.provider.example:8443`. No wildcards, no suffixes. Write each entry the way a URL
-  normalises it: lowercase, `127.0.0.1` rather than `127.1`, IPv6 in brackets (`[::1]:11434`). A name is letters,
-  digits, dots and hyphens only (no `_`, `&`, `=` or other punctuation), so a refusal never shows a mistyped `key=value`.
+  normalises it: lowercase, `127.0.0.1` rather than `127.1`, IPv6 in brackets (`[::1]:11434`). An entry is an IP
+  address or a dotted name: letters, digits and hyphens in each label (no `_`, `&`, `=` or other punctuation), no
+  empty label, and a last label shaped like a top-level domain (`example`, `com`, or an `xn--` one). A single word,
+  such as a token pasted where a host belongs, is refused. A refusal names the entry by its position and kind only,
+  and an unknown key by its position, never showing what root wrote.
 - **The URL's shape, whatever the list says:**
   - `https://`. Plain `http://` is allowed only to a loopback address (`127.x.x.x`, `[::1]`), never to a name: not
     even `localhost`, so it doesn't depend on name resolution.
