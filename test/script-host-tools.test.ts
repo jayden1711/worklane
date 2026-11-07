@@ -353,6 +353,22 @@ test('#991 round 5: only a path or file: URL to this preload counts as the prelo
   assert.equal(g.testFileFor(['--import', self, '--require', './x.cjs'], '', pinned, repoRoot), null);
 });
 
+test('#1107: the clock-shift job\'s preload in NODE_OPTIONS, by its exact path, still keys the test file; any other does not', { skip: !posix && 'POSIX' }, () => {
+  const g = guard();
+  const pinned = 'dist/test/setup-scripts.test.js';
+  const self = './dist/test/isolate.js';
+  const shift = join(repoRoot, 'dist', 'test', 'clock-shift.js');
+  // As clock-shift.yml runs it: NODE_OPTIONS="--import=$PWD/dist/test/clock-shift.js".
+  assert.equal(g.testFileFor(['--import', self], `--import=${shift}`, pinned, repoRoot), 'test/setup-scripts.test.ts');
+  assert.equal(g.testFileFor(['--import', self], `--import ${shift}`, pinned, repoRoot), 'test/setup-scripts.test.ts');
+  assert.equal(g.testFileFor(['--import', self], `--import=${pathToFileURL(shift).href}`, pinned, repoRoot), 'test/setup-scripts.test.ts');
+  // Any other preload still keys nothing: a neighbour, a bare specifier, a copy elsewhere, or code after it.
+  for (const other of [join(repoRoot, 'dist', 'test', 'clock-shift-x.js'), 'dist/test/clock-shift.js', join(tmpdir(), 'clock-shift.js'), join(repoRoot, 'dist', 'test', 'helpers.js')]) {
+    assert.equal(g.testFileFor(['--import', self], `--import=${other}`, pinned, repoRoot), null, other);
+  }
+  assert.equal(g.testFileFor(['--import', self], `--import=${shift} --require ./x.cjs`, pinned, repoRoot), null);
+});
+
 test("#991 round 6: an inline PATH= in a command line gets the stand-ins ahead of the machine's directories; one the guard can't read is refused", { skip: !posix && 'POSIX' }, () => {
   const g = guard();
   const refused = (f: () => unknown, what: string) => assert.throws(f, /#991: /, what);

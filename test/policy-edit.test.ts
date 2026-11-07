@@ -1106,8 +1106,11 @@ test("#882: an unreadable limits file: root's `policy set` prints its path and t
   assert.ok(lines.some((l) => l.startsWith("the machine's limits file is unreadable: limits file ") && l.includes(m.deps.limitsPath!) && l.includes('JSON')), JSON.stringify(lines));
   const plain = machineInstance('limits-cause-reader');
   writeFileSync(plain.deps.limitsPath!, '{not json');
-  const r = settingsReader(plain.file, plain.deps.limitsPath!)();
-  assert.match(r.error ?? '', new RegExp(`^policy settings unusable: the machine's limits file is unreadable: limits file ${plain.deps.limitsPath!.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}: .*JSON`));
+  // The coordinator's reader (#1064): the cause in its log, the engine's words in the event.
+  const logged: string[] = [];
+  const r = settingsReader(plain.file, plain.deps.limitsPath!, (l) => logged.push(l))();
+  assert.equal(r.error, `policy settings unusable (${DETAIL_LOGGED})`);
+  assert.ok(logged.some((l) => l.includes("the machine's limits file is unreadable") && l.includes(plain.deps.limitsPath!) && l.includes('JSON')), JSON.stringify(logged));
 });
 
 test("#882: root's `policy check` prints an error's cause after its message", () => {
