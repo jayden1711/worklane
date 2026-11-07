@@ -114,9 +114,9 @@ export function watchdogForInstance(o: {
 export function incidentSink(instance: string, dir?: SlotPathLike): IncidentSink {
   const o = { instance, ...(dir ? { dir } : {}) };
   return {
-    raiseIncident: (kind, key, detail, fix) => {
+    raiseIncident: (kind, key, detail, fix, ownerDetail) => {
       try {
-        raiseIncident(kind, key, detail, fix, o);
+        raiseIncident(kind, key, detail, fix, { ...o, ...(ownerDetail !== undefined ? { ownerDetail } : {}) });
       } catch {
         // the pause still shows on the dashboard and in its events
       }

@@ -16,6 +16,7 @@ import { INTAKE_ROLE, INTAKE_TOOLS } from './guard/intake.js';
 import { CHAT_ROLE, CHAT_ROOT_ENV, chatModeRefusal } from './guard/chat.js';
 import { evaluate } from './guardrails/engine.js';
 import { liveContext, projectStateDir } from './guardrails/context.js';
+import { otherCheckouts } from './guardrails/checkouts.js';
 import { TaskFile } from './contract.js';
 import { HELD_OUT_ENV, HELD_OUT_GLOB } from './held-out-paths.js';
 import { DASHBOARD_KEY_GLOB } from './dashboard-key-paths.js';
@@ -156,7 +157,10 @@ function preToolUse(input: HookInput, env: NodeJS.ProcessEnv): HookOutput {
     const host = env[`${BRAND.envPrefix}_ROLE`] === 'researcher' && input.tool_name === 'WebFetch' ? hostOf(String(input.tool_input?.url ?? '')) : null;
     if (host) guardrails = { ...guardrails, network: { ...guardrails.network, allow: [...guardrails.network.allow, host] } };
   }
-  const v = evaluate({ tool: input.tool_name ?? '', input: input.tool_input ?? {}, cwd }, guardrails, liveContext(root, env));
+  // An agent's secret and hidden patterns hold in the repository's other checkouts too, a worktree made after the run
+  // started among them (#939), each with its exceptions relative to its own root.
+  const ctx = { ...liveContext(root, env), ...(isAgent(env) ? { checkouts: otherCheckouts(root, cfg.tests.worktree.root) } : {}) };
+  const v = evaluate({ tool: input.tool_name ?? '', input: input.tool_input ?? {}, cwd }, guardrails, ctx);
   if (v.decision === 'none') {
     // Agents: every commit is secret-scanned first. Humans opt in with a git pre-commit hook.
     // INVARIANT (#971): what is scanned is what the commit records, in every checkout it can land in; a command line
