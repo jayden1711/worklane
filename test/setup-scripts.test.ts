@@ -189,6 +189,38 @@ test('the service yields to other work: a low-weight top-level slice, a hard mem
   assert.match(readFileSync(join(dir, 'service.sh'), 'utf8'), /all_args=\("\$@"\)[\s\S]*as_root "\$\{all_args\[@\]\}"/);
 });
 
+test('#710: a service.sh re-run keeps every limit the installed unit and slice have for an option it is not given; a value passed again is said when it changes one', { skip: process.platform === 'win32' && 'bash scripts' }, () => {
+  const units = mkdtempSync(join(tmpdir(), 'service-units-'));
+  const print = (...opts: string[]) => spawnSync('bash', [join(dir, 'service.sh'), 'site', ...opts, '--print'], { encoding: 'utf8', env: { ...process.env, SERVICE_UNIT_DIR_PRINT: units } });
+  // Nothing installed yet: the defaults, and nothing said.
+  const first = print();
+  assert.equal(first.status, 0, first.stderr);
+  for (const line of ['MemoryMax=35%', 'MemoryHigh=infinity', 'TasksMax=2048']) assert.match(first.stdout, new RegExp(`^${line}$`, 'm'), line);
+  assert.doesNotMatch(first.stderr, /note: /);
+  // The earlier run's files, as it wrote them: its own printed slice and unit.
+  const earlier = print('--memory-max', '16G', '--memory-high', '12G', '--cpu-weight', '50', '--tasks-max', '512', '--slice-cpu-weight', '10', '--slice-io-weight', '5').stdout;
+  const [slice, unit] = earlier.split(/^# \/etc\/systemd\/system\/\S+\n/m).slice(1);
+  writeFileSync(join(units, 'worklane.slice'), slice!);
+  writeFileSync(join(units, 'worklane-site.service'), unit!);
+  // A plain re-run: every limit kept, each said.
+  const again = print();
+  assert.equal(again.status, 0, again.stderr);
+  for (const line of ['MemoryMax=16G', 'MemoryHigh=12G', 'CPUWeight=50', 'TasksMax=512', 'CPUWeight=10', 'IOWeight=5']) assert.match(again.stdout, new RegExp(`^${line}$`, 'm'), line);
+  assert.doesNotMatch(again.stdout, /^MemoryMax=35%$|^TasksMax=2048$/m, 'never back to a default');
+  assert.match(again.stderr, /note: MemoryMax stays 16G, as the installed \S+worklane-site\.service has it \(pass --memory-max to change it\)/);
+  assert.match(again.stderr, /note: IOWeight stays 5, as the installed \S+worklane\.slice has it \(pass --slice-io-weight to change it\)/);
+  // Passed again: that value, said when it changes the installed one; the others still kept.
+  const raised = print('--memory-max', '24G');
+  assert.equal(raised.status, 0, raised.stderr);
+  assert.match(raised.stdout, /^MemoryMax=24G$/m);
+  assert.match(raised.stdout, /^TasksMax=512$/m);
+  assert.match(raised.stderr, /note: MemoryMax changes from 16G \(the installed \S+worklane-site\.service\) to 24G \(--memory-max\)/);
+  // A kept value is checked like a passed one: MemoryHigh 12G kept above a MemoryMax passed as 8G is refused.
+  const below = print('--memory-max', '8G');
+  assert.equal(below.status, 2, below.stdout);
+  assert.match(below.stderr, /--memory-high \(12G\) must not exceed --memory-max \(8G\)/);
+});
+
 test('gitleaks is installed at a pinned version only when its download matches a pinned sha256', () => {
   const tools = readFileSync(join(dir, 'tools.sh'), 'utf8');
   assert.match(tools, /^gitleaks_version=\d+\.\d+\.\d+$/m);

@@ -72,6 +72,19 @@ for (const name of Object.keys(RUNNERS)) {
   test(`${name}: every option the guard reads as taking the next word takes one in the installed program (#993)`, { skip: bin ? false : `${name} is not installed` }, () => {
     const check = CHECKS[name];
     if (check) check(bin!);
-    else assertRequiresValue(name, bin!, valueWords(name));
+    else {
+      assertRequiresValue(name, bin!, valueWords(name));
+      // #1126 item 1: each listed option is checked above, which a dropped one escapes (flock -w, nsenter -S). So the
+      // program's own getopt string must give a required value to exactly the table's letters, none more.
+      const { short } = RUNNERS[name]!.value;
+      if (short) assert.ok(getoptStringIn(bin!, short), `${name}: no getopt string in ${bin} with required values exactly ${short}`);
+    }
   });
 }
+
+test('#1126: a getopt string with one more required-value letter than the table (a dropped entry) is not a match', () => {
+  const required = requiredLetters('+sexnoucE:w:hV');
+  assert.equal(required, 'Ew');
+  assert.notEqual(requiredLetters('+sexnoucE:w:hV'), sorted('E'), 'flock without -w in its table');
+  assert.equal(requiredLetters('+ahVt:m::u::S:G:r::w::'), 'GSt', "nsenter's optional values (x::) are not required ones");
+});

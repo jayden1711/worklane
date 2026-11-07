@@ -186,3 +186,88 @@ test("every MCP preview in the add-project job is checked right after its wait, 
   const digest = sh.indexOf('d="$(digest)"');
   assert.ok(call > 0 && digest > call, 'before the digest reads the preview');
 });
+
+/**
+ * snapshot_done ci <id> <preview> from the shared script (#679), right after mcp-snapshot: the status file starts at
+ * the preview's "<id> done" and the preview at snapshotWithSecrets false. A stand-in `sleep` counts the waits and, at
+ * the `at`-th, writes `then`: the snapshot's mark into the preview, or "<id> failed" into the status.
+ */
+function snapshotDone(o: { at?: number; then?: 'mark' | 'failed'; tries?: number; journal?: string[]; secrets?: Record<string, string> }): { code: number | null; stdout: string; stderr: string; sleeps: number } {
+  const dir = mkdtempSync(join(tmpdir(), 'snapshot-done-'));
+  const home = join(dir, 'mcp-home');
+  try {
+    const bin = join(dir, 'bin');
+    mkdirSync(bin);
+    for (const [rel, value] of Object.entries(o.secrets ?? {})) {
+      mkdirSync(join(home, 'secrets', rel, '..'), { recursive: true });
+      writeFileSync(join(home, 'secrets', rel), value);
+    }
+    writeFileSync(join(dir, 'journal.txt'), (o.journal ?? []).map((l) => `${l}\n`).join(''));
+    const status = join(dir, 'status');
+    mkdirSync(status);
+    const st = join(status, 'ci.json');
+    const preview = join(dir, 'preview.json');
+    writeFileSync(st, statusOf('kit-notes', 'done'));
+    writeFileSync(preview, JSON.stringify({ snapshot: { tools: [{ name: 'echo' }] }, snapshotWithSecrets: false, snapshotError: null }));
+    const count = join(dir, 'sleeps');
+    const then = o.then === 'mark' ? `printf '%s' '${JSON.stringify({ snapshot: { tools: [{ name: 'echo' }] }, snapshotWithSecrets: true, snapshotError: null })}' > '${preview}'` : o.then === 'failed' ? `printf '%s' '${statusOf('kit-notes', 'failed', 'the snapshot could not be made').trim()}' > '${st}'` : ':';
+    writeFileSync(join(bin, 'sleep'), `#!/bin/sh\nn=$(( $(cat '${count}' 2>/dev/null || echo 0) + 1 ))\necho $n > '${count}'\n[ "$n" = "${o.at ?? 0}" ] && { ${then}; }\nexit 0\n`);
+    writeFileSync(join(bin, 'sudo'), '#!/bin/sh\nexec "$@"\n');
+    writeFileSync(join(bin, 'journalctl'), `#!/bin/sh\necho "journal: $*"\ncat '${join(dir, 'journal.txt')}'\n`);
+    writeFileSync(join(bin, 'getent'), `#!/bin/sh\n[ "$1 $2" = "passwd wl-ci-mcp" ] && echo "wl-ci-mcp:x:990:990::${home}:/usr/sbin/nologin" || exit 2\n`);
+    for (const f of ['sleep', 'sudo', 'journalctl', 'getent']) chmodSync(join(bin, f), 0o755);
+    const script = `set -euo pipefail\n. "$1"\nsnapshot_done ci kit-notes "$2"\necho reached`;
+    const env: NodeJS.ProcessEnv = { PATH: `${bin}${delimiter}${process.env.PATH ?? '/usr/bin:/bin'}`, LANG: 'C', FETCH_STATUS_DIR: status };
+    if (o.tries !== undefined) env.SNAPSHOT_WAIT_TRIES = String(o.tries);
+    const r = spawnSync('bash', ['-c', script, 'step', SHARED, preview], { encoding: 'utf8', env });
+    const sleeps = Number((() => { try { return readFileSync(count, 'utf8'); } catch { return '0'; } })());
+    return { code: r.status, stdout: r.stdout, stderr: r.stderr, sleeps };
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+test('#679 snapshot_done waits past the preview\'s stale "done" for the snapshot\'s own mark', { skip: !hasJq && 'bash and jq' }, () => {
+  const r = snapshotDone({ at: 3, then: 'mark', journal: ['should not print'] });
+  assert.equal(r.code, 0, r.stderr);
+  assert.equal(r.sleeps, 3, 'it kept waiting while the status said "kit-notes done" and the preview had no mark');
+  assert.match(r.stdout, /"id":"kit-notes","state":"done"[\s\S]*reached/, 'the status, then on');
+  assert.doesNotMatch(r.stderr, /journal:|should not print/);
+});
+
+test('#679 snapshot_done stops a failed or timed-out snapshot with the fetch unit\'s journal (secrets left out) and the status', { skip: !hasJq && 'bash and jq' }, () => {
+  const tok = 'tok-0123456789abcdef';
+  const journal = ['broker: server kit-notes exited 1', `env NOTES_TOKEN=${tok}`];
+  const failed = snapshotDone({ at: 2, then: 'failed', journal, secrets: { 'kit-notes/NOTES_TOKEN': `${tok}\n` } });
+  assert.notEqual(failed.code, 0);
+  assert.equal(failed.sleeps, 2, 'it stops at the failure, without waiting out the rest');
+  assert.doesNotMatch(failed.stdout, /reached/);
+  assert.match(failed.stderr, /^journal: -u worklane-plugin-fetch-ci\.service --no-pager$/m);
+  assert.match(failed.stderr, /^broker: server kit-notes exited 1$/m, 'the real reason');
+  assert.ok(!failed.stderr.includes(tok), 'never a line holding the secret');
+  assert.match(failed.stderr, /\(1 journal lines holding an MCP secret left out\)/);
+  assert.match(failed.stderr, /the snapshot of kit-notes didn't finish: \{"id":"kit-notes","state":"failed"/);
+  const timedOut = snapshotDone({ tries: 4, journal: ['still starting'] });
+  assert.notEqual(timedOut.code, 0);
+  assert.equal(timedOut.sleeps, 4);
+  assert.match(timedOut.stderr, /^still starting$/m);
+  assert.match(timedOut.stderr, /the snapshot of kit-notes didn't finish: \{"id":"kit-notes","state":"done"/, 'the stale status, said as it is');
+});
+
+test('#679 every mcp-snapshot, in the broker step and in the kernel probe, is followed by the one shared snapshot_done; neither keeps a wait of its own', () => {
+  const yml = read('.github', 'workflows', 'ci-slow.yml');
+  const at = yml.indexOf('      - name: "MCP broker: ');
+  const step = yml.slice(at, yml.indexOf('\n      - name:', at + 1));
+  const sh = read('scripts', 'ci', 'mcp-broker-kernel.sh');
+  for (const [text, call] of [[step, /mcp-snapshot (\S+)\n\s*snapshot_done ci \1 \/var\/lib\/worklane\/plugins\/previews\/ci\/\1\/preview\.json\n/g], [sh, /mcp-snapshot "\$id"\n(?:#[^\n]*\n)*snapshot_done "\$name" "\$id" "\$p"\n/g]] as const) {
+    const snapshots = text.split('\n').filter((l) => /\bmcp-snapshot\b/.test(l) && !/^\s*#/.test(l)).length;
+    assert.ok(snapshots > 0);
+    assert.equal([...text.matchAll(call)].length, snapshots, 'each snapshot, waited for by snapshot_done');
+    assert.doesNotMatch(text, /mcp-snapshot[^\n]*wait_status/, 'never the status-only wait');
+    assert.doesNotMatch(text, /snapshotWithSecrets == true' "\$p" > \/dev\/null 2>&1 && break/, 'no loop of its own');
+  }
+  assert.doesNotMatch(sh, /^snapshot_done\(\)/m, 'no copy of its own');
+  // What the step checks once the snapshot is done is unchanged.
+  assert.ok(step.includes(`jq -e '.snapshotWithSecrets == true and (.snapshot.tools | map(.name)) == ["echo"]' /var/lib/worklane/plugins/previews/ci/kit-notes/preview.json`));
+  assert.ok(sh.includes(`if ! jq -e '.snapshotWithSecrets == true and .snapshot != null' "$p" > /dev/null; then`));
+});
