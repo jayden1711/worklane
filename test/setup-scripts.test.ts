@@ -232,7 +232,8 @@ test('gitleaks is installed at a pinned version only when its download matches a
 });
 
 // Creates OS users and runs systemd units: only on disposable CI runners (GitHub's Linux runners have systemd and passwordless sudo).
-const systemCi = process.platform === 'linux' && process.env.GITHUB_ACTIONS === 'true' && spawnSync('sudo', ['-n', 'systemctl', '--version']).status === 0;
+// A booted systemd (sd_booted: /run/systemd/system), not only its programs: a container has systemctl and no systemd.
+const systemCi = process.platform === 'linux' && process.env.GITHUB_ACTIONS === 'true' && existsSync('/run/systemd/system') && spawnSync('sudo', ['-n', 'systemctl', '--version']).status === 0;
 
 // #991: the other tests of machine_sudoers stand in sudo_version (the machine's own `sudo -V` is a host tool); here,
 // where the real sudo is reached on purpose, lib.sh's sudo_version reads the runner's real `sudo -V`.
