@@ -1270,12 +1270,14 @@ const CONTAINER_SETUP = "the self-hosted container's own setup (nothing on GitHu
 const CONTAINER_ONLY = '[ "${WORKLANE_CI_CONTAINER:-}" = 1 ] || { echo "GitHub\'s runner: nothing to set up"; exit 0; }\n';
 /** What would run a file from the checkout: node, npm, a script by path, anything under the repo's own folders. */
 const RUNS_CHECKOUT = /\b(node|npm|npx|tsc|make)\b|\.\/|\b(scripts|dist|test|src|web)\/|\$GITHUB_WORKSPACE|\bsource\b|(^|\s)\.\s/;
-/** Each step that runs a test file opens with this: in the container, as the runner user, never root. */
+/** Each step that runs a test file opens with this: in the container, as the runner user, never root, with umask 022. */
 const AS_RUNNER = `# In the self-hosted runner's container, as the runner user (above), never root, with this same script.
 if [ "\${WORKLANE_CI_CONTAINER:-}" = 1 ] && [ "$(id -u)" = 0 ]; then
   chown -R runner:runner "$GITHUB_WORKSPACE" "$RUNNER_TEMP"
   HOME=/home/runner exec runuser -p -u runner -- bash --noprofile --norc -eo pipefail "$0"
 fi
+# As GitHub's runners run each step (the container's docker exec gives 0, the runner user's login 002).
+umask 0022
 `;
 
 /** Step 8's script, exactly: every other `// lint-test` file, built, preloaded with the isolation; none found fails. */
