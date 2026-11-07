@@ -21,14 +21,20 @@ function seed(b: GitHubBudget, remaining: number): void {
   b.observe('core', { 'x-ratelimit-limit': '5000', 'x-ratelimit-remaining': String(remaining), 'x-ratelimit-reset': String(inAnHour()) });
 }
 
-/** Run `n` processes that each take from one budget until it refuses; resolves with each one's count of granted calls. */
+/**
+ * Each racer stops after this many grants even if the budget never refuses: a budget that grants without end (its
+ * seed lost, say, on a file system where its lock fails) then fails the test on the count, never hangs the shard.
+ */
+const RACER_CAP = 200;
+
+/** Run `n` processes that each take from one budget until it refuses (or RACER_CAP); resolves with each one's count of granted calls. */
 function racers(dir: string, key: string, n: number): Promise<number[]> {
   const one = (k: number) =>
     new Promise<number>((resolve, reject) => {
       const code = `const { GitHubBudget } = await import(${JSON.stringify(budgetModule)});
         const b = new GitHubBudget(${JSON.stringify(key)}, ${JSON.stringify(dir)}, { maxWaitMs: 0 });
         let got = 0;
-        for (;;) { try { await b.take('racer-${k}'); got++; } catch { break; } }
+        while (got < ${RACER_CAP}) { try { await b.take('racer-${k}'); got++; } catch { break; } }
         console.log(got);`;
       const p = spawn(process.execPath, ['--input-type=module', '-e', code]);
       let out = '';
@@ -49,6 +55,14 @@ test('two processes sharing a budget never exceed it, and use all of it', async 
   const s = new GitHubBudget(key, dir).read();
   assert.equal(s.resources.core?.remaining, 0);
   assert.equal((s.resources.core?.used['racer-0'] ?? 0) + (s.resources.core?.used['racer-1'] ?? 0), 60, 'each grant is counted against its consumer');
+});
+
+test('a budget that never refuses stops each racer at RACER_CAP: the test above then fails on its count, never hangs', { timeout: 120_000 }, async () => {
+  // No seed: nothing is known of the window, so every take is granted.
+  const dir = fresh();
+  const counts = await racers(dir, credentialKey('token-unbounded'), 2);
+  assert.deepEqual(counts, [RACER_CAP, RACER_CAP]);
+  assert.notEqual(counts[0]! + counts[1]!, 60, 'the sharing test would fail on this, not wait');
 });
 
 test('a GitHub response lowers the budget, never raises it within a window; a new window replaces it', () => {
