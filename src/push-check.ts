@@ -6,11 +6,13 @@
 // The coordinator also runs pushProblems on each change before verifying it,
 // so a doomed change is caught before a long test run.
 import { execFileSync, spawnSync } from './os/child-process.js';
-import { blobsByName, rangeNames, sizeFiles } from './coordinator/change-files.js';
+import { BRAND } from './brand.js';
+import { blobsByName, isRegularFileMode, rangeNames, sizeFiles, treeModes } from './coordinator/change-files.js';
 import { globRegExp } from './guardrails/glob.js';
 import { shownPath } from './path-text.js';
 import { lintSkill, SKILL_SECTIONS } from './skill-lint.js';
 import { defaultBranchRefusal, type PushGuard } from './push-guard.js';
+import { AGENT_INSTRUCTIONS, LOCKED_CATEGORIES } from './review.js';
 
 export interface PushLimits {
   max_file_mb: number;
@@ -62,11 +64,23 @@ const commitIds = (cwd: string, base: string, head: string): [CommitId, CommitId
  */
 const spellings = (s: string): string[] => [...new Set([s, s.normalize('NFC'), s.normalize('NFD')])];
 
-/** A test of a path against globs, true when any spelling of the path matches any spelling of a glob. */
+/**
+ * A test of a path against globs, true when any spelling of the path matches any spelling of a glob, case folded too
+ * (#951): `SECRETS/k.key` is `secrets/k.key` on a case-insensitive checkout and to any reader that folds case.
+ */
 function matcher(globs: string[]): (path: string) => boolean {
-  const res = globs.flatMap((g) => spellings(g).map((s) => globRegExp(s, 'deny')));
-  return (path) => spellings(path).some((p) => res.some((re) => re.test(p)));
+  const folded = (s: string) => [...new Set(spellings(s).flatMap((x) => [x, x.toLowerCase()]))];
+  const res = globs.flatMap((g) => folded(g).map((s) => globRegExp(s, 'deny')));
+  return (path) => folded(path).some((p) => res.some((re) => re.test(p)));
 }
+
+/**
+ * Where the agents' instructions are read from: skills, roles, AGENTS.md and CLAUDE.md (review.ts's agent-instructions
+ * category), every SKILL.md, and Claude Code's own skills, commands and agents.
+ */
+const INSTRUCTION_GLOBS = [...LOCKED_CATEGORIES[AGENT_INSTRUCTIONS]!, '**/AGENTS.md', '**/SKILL.md', '.claude/skills/**', '.claude/commands/**', '.claude/agents/**'];
+/** The directories above those places: a link there brings a whole place in from elsewhere. */
+const INSTRUCTION_PARENTS = new Set(['.claude', BRAND.configDir, '.claude/skills', '.claude/commands', '.claude/agents', `${BRAND.configDir}/skills`, `${BRAND.configDir}/roles`]);
 
 /**
  * The range's problems and the head commit they were judged at. Never throws (#981): a git call that fails, as one
@@ -93,7 +107,8 @@ function judge(cwd: string, base: CommitId, head: CommitId, limits: PushLimits):
   // (a non-ASCII byte, a newline, a quote) is matched by its own bytes, not its quoted text.
   const touched = rangeNames(cwd, range);
 
-  const workflows = touched.filter((p) => p.startsWith(WORKFLOWS));
+  // Case folded (#951): `.GitHub/Workflows/x.yml` is the workflows directory on a case-insensitive checkout.
+  const workflows = touched.filter((p) => spellings(p).some((s) => s.toLowerCase().startsWith(WORKFLOWS)));
   if (workflows.length) problems.push(`changes CI workflows (${listPaths(workflows)}): the harness's GitHub credential has no Workflows permission, so GitHub refuses this push; a human makes workflow changes`);
 
   const refusedPath = matcher(limits.refuse_paths);
@@ -143,6 +158,16 @@ function judge(cwd: string, base: CommitId, head: CommitId, limits: PushLimits):
     }
   }
   if (badSkills.length) problems.push(`has skills that fail the skill lint: ${list(badSkills, 5)}. Every SKILL.md needs these sections, none empty: ${SKILL_SECTIONS.join(', ')}`);
+
+  // A link where the agents' instructions are read (#951): `.claude/skills/x -> <dir>` adds no SKILL.md name, so a
+  // skill that fails the lint came in unlinted (measured, #928's round-3 review). Anything there but a regular file
+  // (a symlink, a submodule link) is refused, at a place or above one, case folded; fails closed.
+  const instruction = matcher(INSTRUCTION_GLOBS);
+  const inPlace = (p: string) => instruction(p) || spellings(p).some((s) => INSTRUCTION_PARENTS.has(s.toLowerCase()));
+  const places = touched.filter(inPlace);
+  const modes = treeModes(cwd, head, places);
+  const links = places.filter((p) => (modes.get(p) ?? []).some((m) => !isRegularFileMode(m)));
+  if (links.length) problems.push(`has links where the agents' instructions are read (${listPaths(links)}): a symlink or submodule there brings in files no lint has read; commit the files themselves`);
   return problems;
 }
 

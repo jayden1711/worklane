@@ -52,13 +52,25 @@ export interface HookEntry {
 export const GUARD_ON_FAILURE = 'block' as const;
 
 /**
- * These hooks with every PreToolUse command hook failing closed (GUARD_ON_FAILURE). WHY at each run (runSettings), not
- * only at install: an instance's agent settings written before this keep working, and get it with the engine update.
+ * The tools the guard's PreToolUse hook is asked about: every one (#937). WHY: a list of names let every other tool
+ * (`mcp__*`, NotebookRead, LS, …) skip the guard, so its own refusal of tools it doesn't know never ran. `*` is Claude
+ * Code's match-all (its hooks reference; 2.1.319's hook code reads "*", "" and no matcher alike).
+ */
+export const GUARD_MATCHER = '*';
+
+/**
+ * These hooks with every PreToolUse command hook failing closed (GUARD_ON_FAILURE), and the guard's own entry asked
+ * about every tool (GUARD_MATCHER, #937). WHY at each run (runSettings), not only at install: an instance's agent
+ * settings written before this keep working, and get both with the engine update.
  */
 export function guardsFailClosed(hooks: Record<string, HookEntry[]>): Record<string, HookEntry[]> {
   const pre = hooks.PreToolUse;
   if (!pre) return hooks;
-  return { ...hooks, PreToolUse: pre.map((e) => (Array.isArray(e?.hooks) ? { ...e, hooks: e.hooks.map((h) => (h?.type === 'command' ? { ...h, onFailure: GUARD_ON_FAILURE } : h)) } : e)) };
+  const ours = (e: HookEntry) => e.hooks.some((h) => typeof h?.command === 'string' && h.command.includes(HOOK_MARKER));
+  return {
+    ...hooks,
+    PreToolUse: pre.map((e) => (Array.isArray(e?.hooks) ? { ...e, ...(ours(e) ? { matcher: GUARD_MATCHER } : {}), hooks: e.hooks.map((h) => (h?.type === 'command' ? { ...h, onFailure: GUARD_ON_FAILURE } : h)) } : e)),
+  };
 }
 export type Settings = Record<string, unknown> & {
   hooks?: Record<string, HookEntry[]>;
@@ -90,6 +102,17 @@ export function hookChecks(s: Settings, enginePath: (p: string) => string = (p) 
     if (!path || !existsSync(path)) return { event, ok: false, detail: `engine not found at ${path ?? '(unparsed)'}` };
     return { event, ok: true, detail: 'installed, fails closed' };
   });
+}
+
+/**
+ * Whether every PreToolUse command hook of ours in these settings fails closed (onFailure "block"). WHY (#930): a
+ * checkout's own settings are used as written (people's sessions, local runs), unlike an instance's, which every run
+ * gets with it (runSettings, guardsFailClosed); an agent running as the same user can stop the hook, and without it
+ * Claude Code runs the call after the timeout.
+ */
+export function guardBlocksOnFailure(s: Settings): boolean {
+  const ours = (s.hooks?.PreToolUse ?? []).flatMap((e) => e?.hooks ?? []).filter((h) => typeof h?.command === 'string' && h.command.includes(HOOK_MARKER));
+  return ours.length > 0 && ours.every((h) => h.onFailure === GUARD_ON_FAILURE);
 }
 
 function readSettings(file: string): Settings {
@@ -237,6 +260,12 @@ export const SETTINGS_CHECK_KEY = 'outputStyle';
 
 /** A fresh check value for one run's --settings. */
 export const settingsCheckValue = (): string => `${BRAND.cli}-settings-check-${randomBytes(8).toString('hex')}`;
+
+/**
+ * A run's --settings: its own, attribution off (#576), and its check value spread last. INVARIANT (#626, #697): the
+ * one place the order is decided, so nothing spread before it (NO_ATTRIBUTION included) can replace the check value.
+ */
+export const withRunCheck = <T extends object>(settings: T, check: string) => ({ ...settings, ...NO_ATTRIBUTION, [SETTINGS_CHECK_KEY]: check });
 
 /**
  * Why a run must stop because claude's init event doesn't show this run's --settings applied, or null.
