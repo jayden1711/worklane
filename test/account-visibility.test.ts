@@ -21,6 +21,12 @@ import { loadConfig } from '../src/config/load.js';
 import type { StoredEvent } from '../src/events/types.js';
 import { ACCOUNT, ACCOUNT_LOCAL, ACCOUNT_TEXT, accountDashboard, apiPaths, STRANGER } from './account-fixture.js';
 import { asPerson, exampleProject } from './helpers.js';
+import { FakeRunner, type RunRequest } from '../src/runner.js';
+import { raiseIncident, readIncidents, resolveIncident } from '../src/watchdog/incidents.js';
+import { incidentSink } from '../src/watchdog/wire.js';
+import { prsView } from '../src/projection.js';
+import { prsForViewer } from '../src/prs-viewer.js';
+import { coordinator, easyIssue, fixture, skip } from './repro-state-graph/harness.js';
 
 const { accountSet } = account;
 const { authHoldsOf, signinFailedView } = authFailure;
@@ -220,4 +226,63 @@ test('#567: an account is set when the agent user was last found signed in; not 
   assert.equal(accountSet('shop', dir(work, [agent(false)])), false, 'only what status found for the agent user counts');
   const staged = { profiles: { work: { kind: 'setup-token', users: {}, staged: true } }, active: { shop: { profile: 'work', since: 'x' } } };
   assert.equal(accountSet('shop', dir(staged, [agent(false)])), false, 'a staged profile is never in use: the default login is');
+});
+
+// #695: the machine owners' claude_auth detail is never staler than the writers'; a viewer's /api/prs names no login.
+
+test('#695: a raise with a new detail and no owner detail drops the stored one (the owner reads the newer detail); one that gives it, or keeps the detail, keeps it', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'incidents-695-'));
+  const one = `Claude refused a login this instance's runs use: ${ACCOUNT.email} (default lane, …)`;
+  raiseIncident('claude_auth', 'alice:refused', 'a login was refused', 'fix', { dir, instance: 'alice', ownerDetail: one });
+  const get = () => readIncidents(dir).incidents.find((x) => x.key === 'alice:refused')!;
+  assert.equal(get().ownerDetail, one);
+  raiseIncident('claude_auth', 'alice:refused', 'a login was refused', 'fix', { dir, instance: 'alice' });
+  assert.equal(get().ownerDetail, one, 'the same detail: the owner detail stays');
+  raiseIncident('claude_auth', 'alice:refused', '2 logins were refused', 'fix', { dir, instance: 'alice' });
+  assert.equal(get().ownerDetail, undefined, 'a newer detail without one: never the older owner detail beside it');
+  assert.equal(get().detail, '2 logins were refused');
+  const two = `Claude refused 2 logins this instance's runs use: ${ACCOUNT.email} …; second@example.com …`;
+  raiseIncident('claude_auth', 'alice:refused', '2 logins were refused', 'fix', { dir, instance: 'alice', ownerDetail: two });
+  assert.equal(get().ownerDetail, two);
+  // Reopened within REOPEN_MS with a new detail and none of its own: the same.
+  resolveIncident('claude_auth', 'alice:refused', { dir });
+  raiseIncident('claude_auth', 'alice:refused', 'a login was refused again', 'fix', { dir, instance: 'alice' });
+  assert.equal(get().ownerDetail, undefined);
+});
+
+test("#695: the coordinator's own claude_auth raise carries the machine owners' detail, naming every held login, through the incident sink", { skip }, async () => {
+  const f = fixture();
+  f.backlog.open(easyIssue('Add a.js', 'a.js'));
+  const SECOND = 'second@example.com';
+  const runner = new FakeRunner((r: RunRequest) =>
+    r.role === 'worker' ? { reason: 'auth_failed', detail: "claude's login was refused (HTTP 401) · Please run /login", turns: 0, costUsd: 0, login: { key: 'claude', account: ACCOUNT.email } } : { costUsd: 0 },
+  );
+  const dir = mkdtempSync(join(tmpdir(), 'incidents-695-'));
+  const c = coordinator(f, runner, { settings: () => ({ settings: {}, error: null }), incidents: incidentSink('alice', dir) });
+  await c.tick();
+  await c.idle();
+  const open = () => readIncidents(dir).incidents.find((x) => x.kind === 'claude_auth' && !x.resolvedAt)!;
+  assert.ok(open(), 'raised');
+  assert.ok(open().ownerDetail?.includes(ACCOUNT.email), `the first raise names the login for the owners: ${open().ownerDetail}`);
+  assert.ok(!open().detail.includes(ACCOUNT.email), "the writers' detail doesn't");
+  // A second login refused (another config dir) re-raises: both logins in the owners' detail at once, from the same
+  // helpers the coordinator raises with.
+  f.log.append('claude_auth.failed', { key: '/home/example/.claude-2', login: SECOND, lane: 'research', issue: null, role: 'researcher', detail: 'refused' }, 'alice');
+  const held = authHoldsOf(f.log.read());
+  incidentSink('alice', dir).raiseIncident('claude_auth', open().key, authFailure.authIncidentText(held).detail, 'fix', authFailure.authIncidentOwnerDetail(held));
+  assert.match(open().ownerDetail ?? '', new RegExp(`2 logins[\\s\\S]*${ACCOUNT.email.replace(/[.]/g, '\\.')}[\\s\\S]*${SECOND.replace(/[.]/g, '\\.')}`));
+});
+
+test("#695: a viewer's /api/prs names no login, even when a conflict fix gave up on a held login's words", () => {
+  const events = [
+    ev(1, 'pr.opened', { issue: 4, number: 9, url: 'https://github.com/example-org/example-shop/pull/9', head: 'a'.repeat(40), draft: false, title: 't' }),
+    ev(2, 'conflict_fix.detected', { issue: 4, number: 9 }),
+    ev(3, 'conflict_fix.finished', { issue: 4, number: 9, base_sha: 'b'.repeat(40), strategy: 'merge', outcome: 'gave_up', head: null, files: ['a.js'], waits_owner: true, reasons: [], detail: `Claude sign-in failed (${ACCOUNT.email}, ${ACCOUNT.org}): no new runs until a call on that login succeeds` }),
+  ];
+  const writers = JSON.stringify(prsView(events));
+  assert.ok(writers.includes(ACCOUNT.email), 'fixture: the writers\' view has it');
+  const viewer = JSON.stringify(prsForViewer(prsView(events)));
+  assert.ok(viewer.includes('"number":9'), 'the PR is there');
+  assert.doesNotMatch(viewer, ACCOUNT_TEXT);
+  assert.doesNotMatch(viewer, ACCOUNT_LOCAL);
 });

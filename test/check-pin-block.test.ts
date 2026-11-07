@@ -14,7 +14,8 @@ import { ghTipRuns, NAME_MAX, pinBlock, pinNewConfig, pinPlan, TIP_PAGES_MAX, va
 
 const git = (cwd: string, ...a: string[]) => execFileSync('git', a, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 const ident = ['-c', 'user.email=ada@example.com', '-c', 'user.name=Ada', '-c', 'commit.gpgsign=false'];
-const job = (name: string) => `  ${JSON.stringify(name)}:\n    runs-on: ubuntu-latest\n`;
+/** A job keyed by `name`, written in YAML escapes past printable ASCII, as a workflow file must be to read surely (#948). */
+const job = (name: string) => `  ${JSON.stringify(name).replace(/[^\x20-\x7e]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`)}:\n    runs-on: ubuntu-latest\n`;
 const wf = (...names: string[]) => `on: [push, pull_request]\njobs:\n${names.map(job).join('')}`;
 const files = (f: Record<string, string>, skipped: Workflows['skipped'] = []): Workflows => ({ at: 'c'.repeat(40), files: f, skipped });
 const tip = (runs: TipRun[], partial = false): Tip => ({ sha: 'c'.repeat(40), runs, partial });
@@ -152,6 +153,11 @@ test("the block is always valid: duplicates once, names the schema or YAML can't
   assert.deepEqual(plan.manual.map((m) => m.why.split(' (')[0]), ["can't be a key in required_check_sources", "can't be a key in required_check_sources", `its pin ${JSON.stringify({ workflow: evil })} isn't one the engine's schema takes`]);
   // Comments carry no control or format character: no terminal escape, bidi override or line break.
   for (const line of block.split('\n').filter((l) => l.startsWith('#'))) assert.doesNotMatch(line, /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u, JSON.stringify(line));
+  // The same names written raw (a bidi override, a Cyrillic letter) make a file GitHub may read otherwise: no pins
+  // from it, the file listed (#948).
+  const raw = files({ '.github/workflows/ci.yml': `on: push\njobs:\n  "bidi${ch(0x202e)}x":\n    runs-on: x\n` });
+  const rawPlan = pinPlan({ names: [`bidi${ch(0x202e)}x`], workflows: raw, tip: null });
+  assert.deepEqual([rawPlan.pins, rawPlan.unmapped], [[], [{ where: '.github/workflows/ci.yml', why: 'a character outside TAB, LF and printable ASCII' }]]);
 });
 
 test('the tip is read page by page; past the cap it is partial and says so', () => {
