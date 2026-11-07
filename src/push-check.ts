@@ -139,7 +139,7 @@ function judge(cwd: string, snap: GitSnapshot, base: CommitId, head: CommitId, l
   if (cut) return [cut];
   const range = `${base}..${head}`;
   // The range's walks, through the snapshot.
-  const walk = (args: string[], input?: string) => gitExecFileSync(args, { env: snap.env, encoding: 'utf8', maxBuffer: 256 * MB, stdio: ['pipe', 'pipe', 'pipe'], ...(input !== undefined ? { input } : {}) });
+  const walk = (args: string[], input?: string) => gitExecFileSync(args, { cwd, env: snap.env, encoding: 'utf8', maxBuffer: 256 * MB, stdio: ['pipe', 'pipe', 'pipe'], ...(input !== undefined ? { input } : {}) });
   const problems: string[] = [];
   // Paths touched by any commit in the range, not just the net diff, each as itself (#724): a name git would quote
   // (a non-ASCII byte, a newline, a quote) is matched by its own bytes, not its quoted text. Through the snapshot.
