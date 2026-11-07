@@ -239,6 +239,12 @@ export const SETTINGS_CHECK_KEY = 'outputStyle';
 export const settingsCheckValue = (): string => `${BRAND.cli}-settings-check-${randomBytes(8).toString('hex')}`;
 
 /**
+ * A run's --settings: its own, attribution off (#576), and its check value spread last. INVARIANT (#626, #697): the
+ * one place the order is decided, so nothing spread before it (NO_ATTRIBUTION included) can replace the check value.
+ */
+export const withRunCheck = <T extends object>(settings: T, check: string) => ({ ...settings, ...NO_ATTRIBUTION, [SETTINGS_CHECK_KEY]: check });
+
+/**
  * Why a run must stop because claude's init event doesn't show this run's --settings applied, or null.
  * `what` names the settings (the instance's agent settings file, when they came from one).
  */
