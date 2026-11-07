@@ -305,7 +305,9 @@ jobs:
     name: test-run sandbox (real systemd)
     needs: scope
     if: ${{ !cancelled() && contains(needs.scope.outputs.run, ' testrun-real-systemd ') }}
-    runs-on: ubuntu-latest
+    # WHY: ubuntu-26.04 (ubuntu-latest from image 20261101) refuses unprivileged user namespaces, which this job's
+    # sandboxes need; pinned with ci.yml's test shards until #1137 ports the suite.
+    runs-on: ubuntu-24.04
     timeout-minutes: 24
     defaults:
       run:
@@ -783,7 +785,9 @@ jobs:
     name: add-project (real systemd)
     needs: scope
     if: ${{ !cancelled() && contains(needs.scope.outputs.run, ' add-project-real-systemd ') }}
-    runs-on: ubuntu-latest
+    # WHY: ubuntu-26.04 (ubuntu-latest from image 20261101) refuses unprivileged user namespaces, which this job's
+    # sandboxes need; pinned with ci.yml's test shards until #1137 ports the suite.
+    runs-on: ubuntu-24.04
     timeout-minutes: 46
     defaults:
       run:
@@ -2764,7 +2768,9 @@ jobs:
     name: Claude sign-in probe (real users)
     needs: scope
     if: ${{ !cancelled() && contains(needs.scope.outputs.run, ' auth-probe-real-users ') }}
-    runs-on: ubuntu-latest
+    # WHY: ubuntu-26.04 (ubuntu-latest from image 20261101) refuses unprivileged user namespaces, which this job's
+    # sandboxes need; pinned with ci.yml's test shards until #1137 ports the suite.
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     defaults:
       run:
@@ -2883,7 +2889,9 @@ jobs:
     name: wizard end to end (real systemd)
     needs: scope
     if: ${{ !cancelled() && contains(needs.scope.outputs.run, ' wizard-e2e-real-systemd ') }}
-    runs-on: ubuntu-latest
+    # WHY: ubuntu-26.04 (ubuntu-latest from image 20261101) refuses unprivileged user namespaces, which this job's
+    # sandboxes need; pinned with ci.yml's test shards until #1137 ports the suite.
+    runs-on: ubuntu-24.04
     timeout-minutes: 35
     defaults:
       run:
@@ -3247,7 +3255,9 @@ jobs:
     name: egress firewall (real systemd)
     needs: scope
     if: ${{ !cancelled() && contains(needs.scope.outputs.run, ' egress-real-systemd ') }}
-    runs-on: ubuntu-latest
+    # WHY: ubuntu-26.04 (ubuntu-latest from image 20261101) refuses unprivileged user namespaces, which this job's
+    # sandboxes need; pinned with ci.yml's test shards until #1137 ports the suite.
+    runs-on: ubuntu-24.04
     timeout-minutes: 25
     defaults:
       run:

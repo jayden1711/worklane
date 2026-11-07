@@ -314,7 +314,7 @@ export type BoardSnapshot = {
   notShown: string[];
   /** The text of each switcher row marked aria-current. */
   current: string[];
-  /** The text of each board-instance-error ("can't load its board"). */
+  /** The text of each board-instance-error ("can't load its board") and board-instance-stale ("couldn't refresh its board"). */
   errors: string[];
   /** The "updating…" mark (a view shown from what was kept, its fresh answer still on the way). */
   updating: boolean;
@@ -333,7 +333,7 @@ export const BOARD_SNAPSHOT = `(() => {
     shown: whys.filter((w) => w === '').length,
     notShown: [...new Set(whys.filter((w) => w !== ''))].slice(0, 3),
     current: [...document.querySelectorAll(${JSON.stringify(CURRENT_ROWS)})].map((e) => e.textContent.trim()),
-    errors: [...document.querySelectorAll('[data-testid="board-instance-error"]')].map((e) => e.textContent.trim().slice(0, 200)),
+    errors: [...document.querySelectorAll('[data-testid="board-instance-error"], [data-testid="board-instance-stale"]')].map((e) => e.textContent.trim().slice(0, 200)),
     updating: !!document.querySelector('[data-testid="updating"]'),
   };
 })()`;
