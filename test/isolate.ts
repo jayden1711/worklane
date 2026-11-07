@@ -29,6 +29,14 @@ const KEEP = new Set([`${BRAND.envPrefix}_BROWSER_TIMEOUT_SCALE`]);
 for (const k of Object.keys(process.env)) {
   if ((k.startsWith(`${BRAND.envPrefix}_`) && !KEEP.has(k)) || k.startsWith('AGENT_SLOTS_')) delete process.env[k];
 }
+/**
+ * WHY (#838): a GitHub token or a Claude credential exported in the shell reached every real `gh` or `claude` a test
+ * ran. None is ever a test's own: a test that needs one gives its own stand-in a fake.
+ */
+// INVARIANT: every name src/credential-env.ts drops is here (test/isolate.test.ts checks it). Not imported: each
+// module this preload loads runs in the lint backstops' process and must be a guard file (test/desktop-removed.test.ts).
+export const DROPPED_CREDENTIALS: readonly string[] = ['GH_TOKEN', 'GITHUB_TOKEN', 'GH_ENTERPRISE_TOKEN', 'GITHUB_ENTERPRISE_TOKEN', 'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'CLAUDE_CODE_OAUTH_TOKEN'];
+for (const k of DROPPED_CREDENTIALS) delete process.env[k];
 
 /**
  * This test process's machine: everything below is inside it, the temporary directory too. A test process a test

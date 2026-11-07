@@ -65,6 +65,43 @@ interface Token {
   op?: boolean;
 }
 
+/** A $'...' string's text as bash decodes it, from just after `$'`, and the index after its closing quote. */
+export function ansiC(src: string, from: number): [string, number] {
+  const simple: Record<string, string> = { a: '\x07', b: '\b', e: '\x1b', E: '\x1b', f: '\f', n: '\n', r: '\r', t: '\t', v: '\v', '\\': '\\', "'": "'", '"': '"', '?': '?' };
+  let out = '';
+  let j = from;
+  while (j < src.length && src[j] !== "'") {
+    if (src[j] !== '\\' || j + 1 >= src.length) {
+      out += src[j++];
+      continue;
+    }
+    const e = src[j + 1]!;
+    const rest = src.slice(j + 2);
+    let m: RegExpExecArray | null;
+    if (e in simple) {
+      out += simple[e];
+      j += 2;
+    } else if ((m = /^[0-7]{0,2}/.exec(rest)) && /[0-7]/.test(e)) {
+      out += String.fromCharCode(parseInt(e + m[0], 8) & 0xff);
+      j += 2 + m[0].length;
+    } else if (e === 'x' && (m = /^[0-9a-fA-F]{1,2}/.exec(rest))) {
+      out += String.fromCharCode(parseInt(m[0], 16));
+      j += 2 + m[0].length;
+    } else if ((e === 'u' || e === 'U') && (m = (e === 'u' ? /^[0-9a-fA-F]{1,4}/ : /^[0-9a-fA-F]{1,8}/).exec(rest))) {
+      const cp = parseInt(m[0], 16);
+      out += cp <= 0x10ffff ? String.fromCodePoint(cp) : '';
+      j += 2 + m[0].length;
+    } else if (e === 'c' && rest.length) {
+      out += String.fromCharCode(rest.charCodeAt(0) & 0x1f);
+      j += 3;
+    } else {
+      out += '\\' + e;
+      j += 2;
+    }
+  }
+  return [out, j < src.length ? j + 1 : src.length];
+}
+
 /** Tokenize one level; $(...) and backtick bodies are returned for recursion. */
 function tokenize(src: string, nested: string[]): Token[] {
   const out: Token[] = [];
@@ -103,6 +140,19 @@ function tokenize(src: string, nested: string[]): Token[] {
       cur += src[i + 1] ?? '';
       has = true;
       i += 2;
+      continue;
+    }
+    // WHY (#924): bash decodes $'...' (`$'\x2eenv'` is .env) and reads $"..." as "..." (a translation that is the
+    // same text here); left as written, the word kept a `$` and the escapes, and named no secret file.
+    if (c === '$' && src[i + 1] === "'") {
+      const [text, next] = ansiC(src, i + 2);
+      cur += text;
+      has = true;
+      i = next;
+      continue;
+    }
+    if (c === '$' && src[i + 1] === '"') {
+      i++;
       continue;
     }
     if (c === "'") {

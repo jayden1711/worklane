@@ -51,10 +51,12 @@ test('ci-slow proves it on real systemd: the probe runs after the MCP broker ste
   ]) assert.ok(sh.includes(s), `probe: ${s}`);
   // The snapshot's wait is on its own result: the status file still says the same id is done from its preview.
   assert.ok(!sh.includes('mcp-snapshot "$id" && wait_status'), "wait_status returns at once on the preview's done");
-  assert.ok(sh.includes(`sudo jq -e '.snapshotWithSecrets == true' "$p" > /dev/null 2>&1 && break`));
+  // #679: through the shared snapshot_done (scripts/ci/preview-done.sh; test/ci-preview-done.test.ts), on the mark.
+  assert.ok(sh.includes('mcp-snapshot "$id"\n# The shared wait for the snapshot\'s own mark, never the preview\'s "done" (#679; preview-done.sh).\nsnapshot_done "$name" "$id" "$p"\n'));
   // The broker's own start of a server prints its error and the broker's journal before the step's checks, and the job's
   // failure dump has the broker's journal: a failure carries bubblewrap's words.
-  const step = job.slice(job.indexOf('mcp-snapshot kit-notes && wait_status kit-notes'));
+  const step = job.slice(job.indexOf('mcp-snapshot kit-notes\n          snapshot_done ci kit-notes'));
+  assert.ok(step.length < job.length, 'the second snapshot, waited for by snapshot_done');
   const journal = step.indexOf('sudo journalctl -u "worklane-mcp@ci" --no-pager | tail -n 30');
   assert.ok(journal > 0 && journal < step.indexOf("jq -e '.snapshotWithSecrets == true"), 'the journal before the check');
   assert.ok(step.indexOf("jq -c '{snapshotError}'") < journal);
