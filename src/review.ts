@@ -561,7 +561,8 @@ const ALWAYS_L3 = [SELF_MODIFICATION, HARNESS_CONFIG];
 /** What a change to this path changes, in plain words (the self-modification part it falls in, in this scope), or null. */
 export function selfModificationPart(path: string, scope?: LockScope): string | null {
   const holds = (g: string) => scope !== 'managed-app' || !engineSourceGlob(g);
-  return SELF_MODIFICATION_PARTS.find((p) => p.globs.some((g) => holds(g) && globRegExp(g, 'deny').test(path)))?.what ?? null;
+  // Case folded, as computeLevel's locked categories are (#953).
+  return SELF_MODIFICATION_PARTS.find((p) => p.globs.some((g) => holds(g) && (globRegExp(g, 'deny').test(path) || globRegExp(g.toLowerCase(), 'deny').test(path.toLowerCase()))))?.what ?? null;
 }
 
 /** Built-in categories; review.yaml `categories` adds to them or replaces one by name. */
@@ -1204,6 +1205,11 @@ export function computeLevel(input: LevelInput, cfg: ReviewConfig, extraCategori
   // harness-config's built-in globs always hold, beside whatever a repo adds to it (#798): never fewer.
   const defs = { ...own, ...locked, [HARNESS_CONFIG]: [...new Set([...(locked[HARNESS_CONFIG] ?? HARNESS_CONFIG_GLOBS), ...(own[HARNESS_CONFIG] ?? [])])] };
   const res = Object.fromEntries(Object.entries(defs).map(([k, globs]) => [k, globs.map((g) => globRegExp(g, 'deny'))]));
+  // A locked category's membership is case folded too (#953): on a case-insensitive checkout `Docs/adr/x.md` or
+  // `Decisions.md` is the record the planners read, and the config folder in another case is the config. Raising only: a folded
+  // match never lowers a level (exempting stays as written).
+  const folded = Object.fromEntries(Object.keys(locked).map((k) => [k, (defs as Record<string, string[]>)[k]!.map((g) => globRegExp(g.toLowerCase(), 'deny'))]));
+  const inCategory = (cat: string, path: string) => res[cat]!.some((re) => re.test(path)) || (folded[cat]?.some((re) => re.test(path.toLowerCase())) ?? false);
   // A path in docs, tests or harness-config is left out of the app code (docs and tests alone can be L0): that lowers,
   // so it reads the globs as `allow` (#966), while membership, which raises, reads them as `deny`.
   const exempting = new Map(EXEMPTING_CATEGORIES.map((k) => [k, ((defs as Record<string, string[]>)[k] ?? []).map((g) => globRegExp(g, 'allow'))]));
@@ -1217,7 +1223,7 @@ export function computeLevel(input: LevelInput, cfg: ReviewConfig, extraCategori
   const beforeOf = (re: RegExp): RegExp | null => (re instanceof MoneyGlob || re instanceof RefusedMoneyLine ? re.before : re);
   const countedBefore = new Set<string>();
   for (const f of input.files) {
-    for (const [cat, list] of Object.entries(res)) if (list.some((re) => re.test(f.path))) add(cat, f.path);
+    for (const cat of Object.keys(res)) if (inCategory(cat, f.path)) add(cat, f.path);
     let money = false;
     let was = false;
     for (const re of input.moneyPaths) {
