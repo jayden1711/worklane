@@ -7,7 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { lstatSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chownSync, lstatSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createRequire, syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
@@ -159,6 +159,10 @@ for (const w of WRITERS) {
 
   test(`${w.name} changes nothing by name once the file is published (a link swapped in for it right after the rename)`, { skip: noLinks }, () => {
     const { dir, file, victim } = fixture();
+    // #1114: the victim's group isn't the one a writer gives (this process's), so a by-name chown after the publish
+    // would show (R89f: with the same group, an added chown survived the test).
+    const other = otherGroup();
+    if (POSIX && other !== null && statSync(victim).gid === process.getgid!()) chownSync(victim, process.getuid!(), other);
     const gid = statSync(victim).gid;
     const real = fs.renameSync;
     let swapped = false;
@@ -289,6 +293,31 @@ test('writeGroupOnly, where the file system refuses a mode change, never publish
     assert.equal(readFileSync(file, 'utf8'), 'NEW\n');
   }
   assert.deepEqual(readdirSync(dir).sort(), [basename(file), 'victim.key'].sort(), 'no staging name left behind');
+});
+
+test('#1114: where the file system refuses a mode change, a 0644 or 0666 file writeGroupOnly replaces is made within 0660, never at its old mode', { skip: !POSIX && 'POSIX modes' }, () => {
+  const { file } = fixture();
+  const real = { fchmodSync: fs.fchmodSync, chmodSync: fs.chmodSync };
+  const refuse = () => {
+    throw Object.assign(new Error('EPERM: operation not permitted, chmod'), { code: 'EPERM' });
+  };
+  for (const was of [0o644, 0o666, 0o664]) {
+    rmSync(file, { force: true });
+    writeFileSync(file, 'OLD\n');
+    real.chmodSync(file, was);
+    fs.fchmodSync = refuse as typeof fs.fchmodSync;
+    fs.chmodSync = refuse as typeof fs.chmodSync;
+    syncBuiltinESMExports();
+    try {
+      underUmask(0o000, () => writeGroupOnly(file, 'NEW\n'));
+    } finally {
+      Object.assign(fs, real);
+      syncBuiltinESMExports();
+    }
+    // R89f: without the create mode's `& 0o660` cap, the file came back at its old, other-readable mode.
+    assert.equal(mode(file), was & 0o660, `a ${was.toString(8)} file`);
+    assert.equal(readFileSync(file, 'utf8'), 'NEW\n');
+  }
 });
 
 test('writeGroupOnly treats a link or a FIFO at the name as no file to replace (its mode is not the old file mode)', { skip: noLinks }, () => {
