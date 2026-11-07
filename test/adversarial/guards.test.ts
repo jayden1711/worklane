@@ -28,7 +28,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -464,6 +464,19 @@ test(`adversarial guards / tool.unreadable-task-file-denies (${doc("A task file 
   }
 });
 
+/**
+ * A checkout for one stand-in agent run: a project (the example's config folder), as every guarded run's cwd is. A
+ * guarded run with no config folder at or above its cwd doesn't start, as its hook would deny every call (#890), so a
+ * bare directory would refuse each attack for that reason, not the one under test. Its secret_paths are empty, so the
+ * run's denials are the engine's own (the agent home's stores), each of which the sandbox fixture makes.
+ */
+function runCwd(): string {
+  const cwd = mkdtempSync(join(tmpdir(), 'adv-cwd-'));
+  cpSync(join(repoRoot, 'examples', 'basic', C), join(cwd, C), { recursive: true });
+  writeFileSync(join(cwd, C, 'guardrails.yaml'), JSON.stringify({ version: 1, rules: [], protected_paths: [], secret_paths: [], examples: { must_block: [], must_ask: [], must_allow: [] } }));
+  return cwd;
+}
+
 /** The tools src/guardrails/engine.ts decides on: its EDIT_TOOLS and its file-reading READ_TOOLS, Bash and WebFetch. */
 const guardedTools = ['Bash', 'Edit', 'Write', 'MultiEdit', 'NotebookEdit', 'WebFetch', 'Read', 'Grep', 'Glob'];
 /** The guarded tools a set of PreToolUse entries never sends to the guard (its one entry's matcher). */
@@ -484,7 +497,7 @@ test(`adversarial guards / tool.hook-covers-tools (${doc('A hook runs before eve
   // lanes, and in the sandboxed lanes every instance has.
   const missed: string[] = [];
   for (const lanes of [false, true]) {
-    const cwd = mkdtempSync(join(tmpdir(), 'adv-cwd-'));
+    const cwd = runCwd();
     const { r, s } = await agentRun({ guardrails: instanceHome(JSON.stringify(goodSettings()), cwd).guardrails, cwd, ...(lanes ? { lanes: sandboxLanes(cwd).lanes } : {}) });
     assert.ok(s.ran(), `${r.reason}: ${r.detail}`);
     const atRun = (s.log().settings as { hooks?: Record<string, { matcher?: string; hooks: { command: string }[] }[]> }).hooks?.PreToolUse ?? [];
@@ -559,7 +572,7 @@ const request = (cwd: string, more: Partial<RunRequest> = {}): RunRequest => ({ 
 /** One agent run through the real runner with a stand-in claude; settled, so work a killed run would have done shows. */
 async function agentRun(o: { guardrails?: () => Settings; lanes?: Lanes; base?: NodeJS.ProcessEnv; mode?: Mode; staleFrom?: string; cwd?: string; req?: Partial<RunRequest> }) {
   const s = standIn(o.mode, o.staleFrom);
-  const cwd = o.cwd ?? mkdtempSync(join(tmpdir(), 'adv-cwd-'));
+  const cwd = o.cwd ?? runCwd();
   const r = await new CliRunner('cli', o.base ?? { PATH: process.env.PATH, HOME: fixtureHome() }, s.bin, undefined, o.lanes, undefined, {}, o.guardrails).run(request(cwd, o.req));
   await settle();
   return { r, s, cwd };
@@ -591,32 +604,32 @@ test(`adversarial guards / settings.required (${doc("An agent run starts only wi
   ];
   // Each with no lanes, and with the sandboxed lanes every instance has.
   const left = await letThrough(bothLaneKinds(files), async (f) => {
-    const cwd = mkdtempSync(join(tmpdir(), 'adv-cwd-'));
+    const cwd = runCwd();
     const { r, s } = await agentRun({ guardrails: instanceHome(f.content, cwd).guardrails, cwd, ...(f.lanes ? { lanes: sandboxLanes(cwd).lanes } : {}) });
     return r.reason === 'failed' && /not starting/.test(r.detail) && !s.ran() ? null : `${r.reason}: ${r.detail.slice(0, 200)}${s.ran() ? ' (claude ran)' : ''}`;
   });
   if (!asRoot) {
-    const cwd = mkdtempSync(join(tmpdir(), 'adv-cwd-'));
+    const cwd = runCwd();
     const i = instanceHome(JSON.stringify(good), cwd);
     chmodSync(agentSettingsPath(i.home), 0o000);
     const { r, s } = await agentRun({ guardrails: i.guardrails, cwd });
     if (!(r.reason === 'failed' && !s.ran())) left.push(`an unreadable file: ${r.reason}`);
   }
   assert.deepEqual(left, [], 'agent settings a run started with anyway');
-  const cwd = mkdtempSync(join(tmpdir(), 'adv-cwd-'));
+  const cwd = runCwd();
   const { r, s } = await agentRun({ guardrails: instanceHome(JSON.stringify(good), cwd).guardrails, cwd });
   assert.ok(r.reason === 'succeeded' && s.worked(), `control: complete agent settings start the run (${r.reason}: ${r.detail})`);
   // And what the run really got: the --settings claude was given hold the same checks the agent settings file must
   // pass (every guarded hook, failing closed, its engine present; disableAllHooks pinned off), not only the file. The
   // same for a run in the sandboxed lanes every instance has.
   assert.deepEqual(agentSettingsProblems(s.log().settings as Settings), [], "the run's --settings fall short of the agent settings checks");
-  const laneCwd = mkdtempSync(join(tmpdir(), 'adv-cwd-'));
+  const laneCwd = runCwd();
   const inLane = await agentRun({ guardrails: instanceHome(JSON.stringify(good), laneCwd).guardrails, cwd: laneCwd, lanes: sandboxLanes(laneCwd).lanes });
   assert.ok(inLane.r.reason === 'succeeded' && inLane.s.worked(), `control: a run in a sandboxed lane starts (${inLane.r.reason}: ${inLane.r.detail})`);
   assert.deepEqual(agentSettingsProblems(inLane.s.log().settings as Settings), [], "a sandboxed run's --settings fall short of the agent settings checks");
   // The chat lane runs under the instance's hooks too (only the no-repo research lane brings its own): no agent
   // settings, no chat run.
-  const chatCwd = mkdtempSync(join(tmpdir(), 'adv-cwd-'));
+  const chatCwd = runCwd();
   const chat = await agentRun({ guardrails: instanceHome(null, chatCwd).guardrails, cwd: chatCwd, lanes: sandboxLanes(chatCwd).lanes, req: { lane: CHAT_LANE } });
   assert.ok(chat.r.reason === 'failed' && /not starting/.test(chat.r.detail) && !chat.s.ran(), `a chat-lane run without agent settings: ${chat.r.reason}: ${chat.r.detail.slice(0, 200)}${chat.s.ran() ? ' (claude ran)' : ''}`);
 });
@@ -643,7 +656,7 @@ test(`adversarial guards / settings.project-loosen-refused (${doc('A project `.c
   ];
   // Each with no lanes, and with the sandboxed lanes every instance has.
   const left = await letThrough(bothLaneKinds(files), async (f) => {
-    const cwd = mkdtempSync(join(tmpdir(), 'adv-cwd-'));
+    const cwd = runCwd();
     mkdirSync(join(cwd, '.claude'));
     writeFileSync(join(cwd, '.claude', 'settings.json'), typeof f.content === 'string' ? f.content : JSON.stringify(f.content));
     const { r, s } = await agentRun({ guardrails: instanceHome(JSON.stringify(goodSettings()), cwd).guardrails, cwd, ...(f.lanes ? { lanes: sandboxLanes(cwd).lanes } : {}) });
@@ -652,14 +665,14 @@ test(`adversarial guards / settings.project-loosen-refused (${doc('A project `.c
   assert.deepEqual(left, [], 'project settings a run started with anyway');
   // The chat lane too: it runs under the instance's hooks, so a checkout's loosening settings refuse it as well.
   {
-    const cwd = mkdtempSync(join(tmpdir(), 'adv-cwd-'));
+    const cwd = runCwd();
     mkdirSync(join(cwd, '.claude'));
     writeFileSync(join(cwd, '.claude', 'settings.json'), JSON.stringify({ permissions: { allow: ['Bash(*)'] } }));
     const { r, s } = await agentRun({ guardrails: instanceHome(JSON.stringify(goodSettings()), cwd).guardrails, cwd, lanes: sandboxLanes(cwd).lanes, req: { lane: CHAT_LANE } });
     assert.ok(r.reason === 'failed' && /could loosen agent runs/.test(r.detail) && !s.ran(), `a chat-lane run with loosening project settings: ${r.reason}: ${r.detail.slice(0, 200)}${s.ran() ? ' (claude ran)' : ''}`);
   }
   // Control: hooks and tightening rules are fine; a settings.local.json beside them is never loaded (project only).
-  const cwd = mkdtempSync(join(tmpdir(), 'adv-cwd-'));
+  const cwd = runCwd();
   mkdirSync(join(cwd, '.claude'));
   writeFileSync(join(cwd, '.claude', 'settings.json'), JSON.stringify({ hooks: { PreToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command: 'true' }] }] }, permissions: { deny: ['Read(./secret)'], ask: ['Bash(rm:*)'] } }));
   writeFileSync(join(cwd, '.claude', 'settings.local.json'), JSON.stringify({ permissions: { allow: ['Bash(*)'], defaultMode: 'bypassPermissions' } }));
@@ -670,7 +683,7 @@ test(`adversarial guards / settings.project-loosen-refused (${doc('A project `.c
 });
 
 test(`adversarial guards / settings.applied-echo (${doc("Every run's `--settings` carries a fresh check value")}): a run stops before any work unless claude's first event echoes this run's own check value`, { skip: !posix && 'POSIX stand-in claude' }, async () => {
-  const cwd = mkdtempSync(join(tmpdir(), 'adv-cwd-'));
+  const cwd = runCwd();
   const guardrails = instanceHome(JSON.stringify(goodSettings()), cwd).guardrails;
   const first = await agentRun({ guardrails, cwd });
   assert.ok(first.r.reason === 'succeeded' && first.s.worked(), `control: a run whose settings claude applied does its work (${first.r.reason}: ${first.r.detail})`);
@@ -746,7 +759,7 @@ const sandboxed = () =>
     const out: { what: string; settings: SandboxSettings; home: string; run: boolean }[] = [];
     const variants: [string, Partial<RunRequest>][] = [['a run', {}], ['a run with an allow-once host', { allowOnce: ['example.org'] }]];
     for (const [what, req] of variants) {
-      const cwd = mkdtempSync(join(tmpdir(), 'adv-cwd-'));
+      const cwd = runCwd();
       const { lanes, base } = sandboxLanes(cwd);
       const { r, s } = await agentRun({ guardrails: goodSettings, lanes, cwd, req });
       assert.ok(r.reason === 'succeeded' && s.ran(), `${what}: ${r.reason}: ${r.detail}`);
@@ -757,7 +770,7 @@ const sandboxed = () =>
     }
     // A run as its own user: the runner denies that user's login files too (src/runner.ts, withDeniedReads on the
     // lane's settings). Worked out here as the runner does, since a run as another user needs that user.
-    const cwd = mkdtempSync(join(tmpdir(), 'adv-cwd-'));
+    const cwd = runCwd();
     const { lanes, base } = sandboxLanes(cwd);
     const home = join(base, 'agent-home');
     const lane = lanes.default!.settings as object;
@@ -778,7 +791,7 @@ test(`adversarial guards / sandbox.no-unsandboxed-retry (${doc("A blocked comman
 
 /** Every lane but the default one, as its own settings (no run): the research and chat lanes, and an eval lane. */
 function otherLanes(): { what: string; settings: SandboxSettings }[] {
-  const { lanes } = sandboxLanes(mkdtempSync(join(tmpdir(), 'adv-cwd-')), { evalLane: true });
+  const { lanes } = sandboxLanes(runCwd(), { evalLane: true });
   const out = Object.entries(lanes).filter(([name]) => name !== 'default').map(([name, lane]) => ({ what: `the ${name} lane's own settings`, settings: (lane.settings ?? {}) as SandboxSettings }));
   assert.ok(out.some((x) => x.what.includes(' eval ')) && out.length >= 4, `the other lanes: ${out.map((x) => x.what).join(', ')}`);
   return out;
@@ -862,7 +875,7 @@ knownHole(`adversarial guards / tool.no-read-secrets (${doc('- read secret files
 test(`adversarial guards / tool.unreadable-task-file-denies (${doc("A task file the guard can't read denies the call")}): a guard hook that fails rather than answers (a timeout, a crash) blocks the call`, { skip: !posix && 'POSIX stand-in claude' }, async () => {
   // With no lanes, and in the sandboxed lanes every instance has.
   for (const lanes of [false, true]) {
-    const cwd = mkdtempSync(join(tmpdir(), 'adv-cwd-'));
+    const cwd = runCwd();
     const { r, s } = await agentRun({ guardrails: instanceHome(JSON.stringify(goodSettings()), cwd).guardrails, cwd, ...(lanes ? { lanes: sandboxLanes(cwd).lanes } : {}) });
     assert.ok(s.ran(), `${r.reason}: ${r.detail}`);
     const pre = ((s.log().settings as SandboxSettings).hooks?.PreToolUse ?? []).flatMap((e) => e.hooks).filter((h) => h.type === 'command');
@@ -872,7 +885,7 @@ test(`adversarial guards / tool.unreadable-task-file-denies (${doc("A task file 
 });
 
 test(`adversarial guards / pushgate.no-hatch-in-env (${doc('No agent starts with the hatch in its environment')}): the hatch reaches no agent run, from the coordinator's environment or a project's`, { skip: !posix && 'POSIX stand-in claude' }, async () => {
-  const cwd = mkdtempSync(join(tmpdir(), 'adv-cwd-'));
+  const cwd = runCwd();
   const base = { PATH: process.env.PATH, HOME: fixtureHome(), [HATCH]: '1', [HATCH.toLowerCase()]: '1', Push_Gate_Bootstrap: '1' };
   const { r, s } = await agentRun({ guardrails: instanceHome(JSON.stringify(goodSettings()), cwd).guardrails, cwd, base, req: { env: { [HATCH]: '1' } } });
   assert.ok(r.reason === 'succeeded' && s.ran(), `control: the run started (${r.reason}: ${r.detail})`);
