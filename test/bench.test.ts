@@ -838,8 +838,10 @@ test('acceptance: the sandbox probe refuses the run unless every attempt from in
     ['read', '~/u/.pypirc', 'opened char-device', true],
   ]);
   assert.deepEqual(report.results.filter((r) => !r.on_host && r.kind === 'read').map((r) => [r.target.replace(home, '~'), r.deny_rule]), [['~/.netrc', true], ['~/.npmrc', true], ['~/.pypirc', true]], 'a missing file counts as refused only with its deny rule in place');
-  // A lane whose Read rules lack the files' exact form (sandboxSettings alone): no deny rule, refused.
-  const loose = sandboxSettings({ lane: { allowedDomains: [] }, denyRead: benchDenied(o) });
+  // A lane whose Read rules lack the files' exact form (directory rules only, as sandboxSettings wrote before #959):
+  // no deny rule, refused.
+  const lane0 = sandboxSettings({ lane: { allowedDomains: [] }, denyRead: benchDenied(o) });
+  const loose = { ...lane0, permissions: { ...lane0.permissions, deny: lane0.permissions.deny.filter((r) => r.endsWith('/**)')) } };
   assert.throws(() => sandboxProbe({ ...o, settings: loose, srt: fakeSrt('honors') }), (e: Error & { report?: ProbeReport }) => /read .*\.claude\.json: no deny rule/.test(e.message) && e.report?.ok === false);
   // No sandbox at all: the login file opens and the daemon's socket answers. Refused, naming both.
   const { createServer } = await import('node:net');

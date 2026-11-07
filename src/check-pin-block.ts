@@ -13,9 +13,10 @@
 import { execFileSync } from './os/child-process.js';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { parse, parseDocument } from 'yaml';
+import { parseDocument } from 'yaml';
 import { isJobOfRun, unrecorded, type CheckPin } from './check-source.js';
 import { ProjectConfig } from './config/schema.js';
+import { readWorkflowText } from './workflow-read.js';
 
 /** The largest workflow file read (as the main watch reads committed files). */
 export const WORKFLOW_MAX_BYTES = 256 * 1024;
@@ -96,12 +97,11 @@ type Job = { name?: unknown; uses?: unknown; strategy?: { matrix?: unknown } };
 
 /** The check names one workflow file's jobs post, as GitHub names them, and each job it can't name surely, with why. */
 function namesOf(text: string): { names: string[]; unknown: string[] } {
-  let wf: { jobs?: unknown } | null;
-  try {
-    wf = parse(text) as { jobs?: unknown } | null;
-  } catch {
-    return { names: [], unknown: ["the file doesn't parse"] };
-  }
+  // A file GitHub may read otherwise (a hidden line break, %YAML, a merge key: src/workflow-read.ts) is read as one
+  // that doesn't parse: none of its names, the reason listed (#948).
+  const read = readWorkflowText(text);
+  if (read.unsure) return { names: [], unknown: [read.unsure] };
+  const wf = read.value as { jobs?: unknown } | null;
   const jobs = wf && typeof wf === 'object' ? wf.jobs : undefined;
   if (jobs === undefined || jobs === null) return { names: [], unknown: [] };
   if (typeof jobs !== 'object' || Array.isArray(jobs)) return { names: [], unknown: ['its jobs are not a mapping'] };

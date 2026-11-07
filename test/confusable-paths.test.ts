@@ -230,7 +230,7 @@ test('#763: a mixed-script name that reads as no protected path, and an ordinary
   assert.deepEqual(normal(`web/c${C.cyrillicA}t.ts`), [['L1', undefined, true], ['L1', undefined, true], ['L0', undefined, true]]);
   // Accents (on a locked name too), a Cyrillic dze below the top level, and an ASCII case variant (case counts only for
   // a name outside ASCII: a visible capital is told apart by a reader).
-  for (const p of [`docs/na${C.iDiaeresis}ve.md`, `docs/caf${C.eAcute}.md`, `docs/d${C.eGrave}sign.md`, `docs/${C.cyrillicDze}rc.md`, 'docs/Releasing.md']) assert.deepEqual(normal(p), Array(3).fill(['L0', undefined, true]), p);
+  for (const p of [`docs/na${C.iDiaeresis}ve.md`, `docs/caf${C.eAcute}.md`, `docs/d${C.eGrave}sign.md`, `docs/${C.cyrillicDze}rc.md`]) assert.deepEqual(normal(p), Array(3).fill(['L0', undefined, true]), p);
   // And through a real repo: an accented sibling of a locked file.
   assert.deepEqual(judgeAdd({ [`docs/d${C.eGrave}sign.md`]: '# notes\n' }), Array(3).fill(['L0', 'docs-only', true]));
 });

@@ -28,7 +28,7 @@
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { parse } from 'yaml';
+import { readWorkflowText } from '../../src/workflow-read.ts';
 
 const HOSTED = /^(ubuntu|windows|macos)-[a-z0-9.-]+$/;
 const TERM = /^([a-z_][a-z0-9_]*(?:\.[a-z0-9_-]+)*)\s*(==|!=)\s*'([^']*)'$/i;
@@ -149,7 +149,9 @@ export function jobProblems(job) {
 
 /** Every problem in a workflow file's text, as "<job>: <problem>". */
 export function workflowProblems(text) {
-  const wf = parse(text);
+  // A file GitHub may read otherwise than `yaml` (a hidden line break, %YAML, a merge key) is a problem itself (#948).
+  const { value: wf, unsure } = readWorkflowText(text);
+  if (unsure) return [`(file): ${unsure}; GitHub may read it otherwise than this check`];
   const out = [];
   for (const [key, job] of Object.entries(wf?.jobs ?? {})) for (const p of jobProblems(job)) out.push(`${key}: ${p}`);
   return out;
