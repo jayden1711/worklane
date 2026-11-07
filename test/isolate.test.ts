@@ -59,7 +59,8 @@ import { ENGINE_CURRENT, UPDATES_CONFIG, UPDATES_LOG } from '../src/updates.js';
 import { WATCHDOG_CONFIG } from '../src/watchdog/config.js';
 import { ephemeralStart, refusedPort } from './held-port.js';
 import { exampleProject, MARKS, repoRoot } from './helpers.js';
-import { homeMoved, isolatedEnv, onRealMachine, restoreIsolated, TEST_PRELOAD, testMachine } from './isolate.js';
+import { DROPPED_CREDENTIALS, homeMoved, isolatedEnv, onRealMachine, restoreIsolated, TEST_PRELOAD, testMachine } from './isolate.js';
+import { INHERITED_CREDENTIAL_VARS } from '../src/credential-env.js';
 
 const testDir = join(repoRoot, 'test');
 const walk = (d: string): string[] => readdirSync(d).flatMap((f) => (statSync(join(d, f)).isDirectory() ? walk(join(d, f)) : [join(d, f)]));
@@ -953,4 +954,14 @@ else console.log(JSON.stringify({ type: 'result', subtype: 'success', is_error: 
   const leaks = seen.flatMap((c) => Object.entries(c.env).filter(([, v]) => v.startsWith(CANARY)).map(([k]) => `${c.probe ? 'probe' : 'run'}: ${k}`));
   assert.deepEqual(leaks, [], 'no variable from Object.prototype crosses the user switch');
   assert.deepEqual([...new Set(seen.map((c) => c.sudoPath))], [dir], "sudo's own PATH is the coordinator's own");
+});
+test('#838: no test process carries a GitHub token or a Claude credential from the shell; the preload drops the names the coordinator drops, and the OAuth token', () => {
+  assert.deepEqual([...INHERITED_CREDENTIAL_VARS].filter((k) => !DROPPED_CREDENTIALS.includes(k)), [], "every name the coordinator's environment drops");
+  assert.ok(DROPPED_CREDENTIALS.includes('CLAUDE_CODE_OAUTH_TOKEN'));
+  for (const k of DROPPED_CREDENTIALS) assert.equal(process.env[k], undefined, `${k} in this test process`);
+  // A preloaded process started from a shell that exported every one of them, as a test run's children are.
+  const shell = Object.fromEntries(DROPPED_CREDENTIALS.map((k) => [k, `leaked-${k.toLowerCase()}`]));
+  const r = spawnSync(process.execPath, [...TEST_PRELOAD, '-e', `console.log(JSON.stringify(${JSON.stringify(DROPPED_CREDENTIALS)}.filter((k) => process.env[k] !== undefined)))`], { cwd: repoRoot, env: { ...process.env, ...shell }, encoding: 'utf8' });
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(JSON.parse(r.stdout), [], 'none reaches a test process');
 });
