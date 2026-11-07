@@ -810,7 +810,7 @@ Setting variables or deploying directly in **production** is **ask** (soft-deny)
 
 | Where | How | When |
 |---|---|---|
-| Commits | gitleaks `--staged` pre-commit hook in every worktree; **re-scanned in the land queue** (the hook can be skipped with `SKIP=`) | every commit, every land |
+| Commits | the engine's pre-commit hook in every worktree (`install --git-hooks`; an instance's checkout always has it): it scans, by content, the index the commit records, after any hook it chains, whatever the command line was (#983). For agents it is a second layer under the guard's scan of the command line, which refuses the ways to skip the hook it can see: `git commit -n`/`--no-verify`, hooks-path and include config, hook-file changes, a commit git would make without the engine's hook, and a commit in a command string. A commit run by a script, Makefile or interpreter is out of its sight (changelog.d/983); **re-scanned in the land queue** | every commit, every land |
 | Agent transcripts and logs | `gitleaks stdin --max-decode-depth 2 --redact` on each transcript chunk and every event payload; matches are redacted before storage and raise `secret.detected` | streaming, during runs |
 | Hooks, MCP config, permissions | AgentShield (`ecc-agentshield`, MIT) | `install`, `doctor`, CI |
 
