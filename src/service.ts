@@ -1,6 +1,7 @@
 // The coordinator as a service: one per project per machine (a pid lock), never tied to a Claude session.
 // It recovers on start, ticks, and backs up the log hourly with verified read-back.
 import { PINS_FILE } from './experiments/store.js';
+import { INHERITED_CREDENTIAL_VARS } from './credential-env.js';
 import { AUTOMATIONS_FILE, AutomationsPolicy } from './automations/schema.js';
 import { githubGet } from './automations/github.js';
 import { execFileSync } from './os/child-process.js';
@@ -139,7 +140,7 @@ export const instanceServiceLabel = (name: string) => `dev.${BRAND.cli}.instance
  */
 export function instanceEnv(i: Instance, base: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...base };
-  for (const k of ['GH_TOKEN', 'GITHUB_TOKEN', 'GH_ENTERPRISE_TOKEN', 'GITHUB_ENTERPRISE_TOKEN', 'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN']) delete env[k];
+  for (const k of INHERITED_CREDENTIAL_VARS) delete env[k];
   // The coordinator's git runs in checkouts agents can write to: none of the repo's hooks and no fsmonitor command,
   // whatever its config says. Its hooks are its own (writeCoordinatorHooks, in its instance home, this user's only):
   // the pre-push hook that refuses the default branch, and nothing else. Not written yet: no hooks at all.

@@ -104,6 +104,17 @@ export function hookChecks(s: Settings, enginePath: (p: string) => string = (p) 
   });
 }
 
+/**
+ * Whether every PreToolUse command hook of ours in these settings fails closed (onFailure "block"). WHY (#930): a
+ * checkout's own settings are used as written (people's sessions, local runs), unlike an instance's, which every run
+ * gets with it (runSettings, guardsFailClosed); an agent running as the same user can stop the hook, and without it
+ * Claude Code runs the call after the timeout.
+ */
+export function guardBlocksOnFailure(s: Settings): boolean {
+  const ours = (s.hooks?.PreToolUse ?? []).flatMap((e) => e?.hooks ?? []).filter((h) => typeof h?.command === 'string' && h.command.includes(HOOK_MARKER));
+  return ours.length > 0 && ours.every((h) => h.onFailure === GUARD_ON_FAILURE);
+}
+
 function readSettings(file: string): Settings {
   const v = JSON.parse(readFileSync(file, 'utf8')) as unknown;
   if (!v || typeof v !== 'object' || Array.isArray(v)) throw new Error('not a JSON object');
@@ -249,6 +260,12 @@ export const SETTINGS_CHECK_KEY = 'outputStyle';
 
 /** A fresh check value for one run's --settings. */
 export const settingsCheckValue = (): string => `${BRAND.cli}-settings-check-${randomBytes(8).toString('hex')}`;
+
+/**
+ * A run's --settings: its own, attribution off (#576), and its check value spread last. INVARIANT (#626, #697): the
+ * one place the order is decided, so nothing spread before it (NO_ATTRIBUTION included) can replace the check value.
+ */
+export const withRunCheck = <T extends object>(settings: T, check: string) => ({ ...settings, ...NO_ATTRIBUTION, [SETTINGS_CHECK_KEY]: check });
 
 /**
  * Why a run must stop because claude's init event doesn't show this run's --settings applied, or null.
