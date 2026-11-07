@@ -1273,8 +1273,19 @@ test('ci.yml runs the pin check, then this backstop, then the other lint tests f
   // Every job that runs the test suite is a shard, so none runs it otherwise.
   for (const [id, job] of Object.entries(wf.jobs)) if (JSON.stringify(job).includes('dist/test/isolate.js')) assert.ok(id.startsWith('test-shard-'), `${id} runs tests: only the shards may`);
   for (const [id, job] of shards) {
-    // No job-wide env (a NODE_OPTIONS there would load code into every step), defaults, container or services.
-    assert.deepEqual(Object.keys(job).sort(), ['name', 'runs-on', 'steps', 'strategy'], `${id}: no env, defaults, container or services`);
+    // No job-wide env (a NODE_OPTIONS there would load code into every step), defaults or services. A container
+    // only on the self-hosted tests runner, and only the one test/self-hosted-guard.test.ts holds: its image pinned
+    // by digest, its env WORKLANE_CI_CONTAINER alone, and none at all on GitHub's runners.
+    assert.deepEqual(Object.keys(job).sort(), ['container', 'name', 'runs-on', 'steps', 'strategy'], `${id}: no env, defaults or services`);
+    const container = String(job.container);
+    assert.match(container, /\|\| '' \}\}$/, `${id}: no container on GitHub's runners`);
+    for (const [, json] of container.matchAll(/fromJSON\('(\{[^']*\})'\)/g)) {
+      const c = JSON.parse(json!) as { image: string; options: string; env: Record<string, string> };
+      assert.deepEqual(Object.keys(c).sort(), ['env', 'image', 'options'], id);
+      assert.match(c.image, /^[a-z0-9-]+:[a-z0-9.-]+@sha256:[0-9a-f]{64}$/, `${id}: the image pinned by digest`);
+      assert.deepEqual(c.env, { WORKLANE_CI_CONTAINER: '1' }, `${id}: no NODE_OPTIONS or anything else in the container's env`);
+      assert.doesNotMatch(c.options, /-e\b|--env|--volume|-v\b|--mount|--network|--add-host|--pid|--ipc|--userns|--cgroupns|--device/, `${id}: options add no env, mounts, host namespaces or devices`);
+    }
     const steps = job.steps as Record<string, unknown>[];
     SHARD_FIRST_STEPS.forEach(([label, ok], i) => assert.ok(ok(steps[i] ?? {}), `${id} step ${i + 1} must be ${label}: ${JSON.stringify(steps[i])}`));
     // A later install runs no package scripts either.
