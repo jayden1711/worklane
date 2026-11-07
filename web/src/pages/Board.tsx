@@ -7,7 +7,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { Eye, GitMerge, MessageSquare, Send, Vote } from 'lucide-react';
 import { HoldStrip } from '../components/HoldBanner';
-import { instanceStream, liveStream, onInstance, scopeNowOrNull, viewUrl, type BoardBatch, type InstanceScope, type BoardCard, type BoardColumn, type BoardData, type State } from '../api';
+import { instanceStream, isRefusal, liveStream, onInstance, scopeNowOrNull, viewUrl, type BoardBatch, type InstanceScope, type BoardCard, type BoardColumn, type BoardData, type State } from '../api';
 import { navigate } from '../App';
 import type { Stream } from '../sse';
 import { markUpdating, peek } from '../cache';
@@ -22,6 +22,8 @@ export interface InstanceBoard {
   name: string | null;
   data: BoardData | null;
   error: string | null;
+  /** The error was a refusal (401, 403, 404): an answer, so nothing kept is shown under it (#639). */
+  refused?: boolean;
 }
 
 const COLUMNS: { id: BoardColumn; label: string }[] = [
@@ -334,7 +336,8 @@ export function BoardView({ boards, now = Date.now(), onChanged = () => {} }: { 
   const several = boards.length > 1;
   const cards = boards.flatMap((b) => (b.data ? b.data.cards.map((c) => ({ card: c, instance: b.name })) : []));
   const batches = boards.flatMap((b) => b.data?.batches ?? []);
-  const failed = boards.filter((b) => b.error);
+  const failed = boards.filter((b) => b.error && !b.data);
+  const stale = boards.filter((b) => b.error && b.data);
   const slots = boards.find((b) => b.data)?.data?.slots;
   // Columns shown whole (the rest show their first COLUMN_CARDS: a busy instance's hundreds of waiting cards made
   // every switch to the Board build them all, about 200 ms).
@@ -362,6 +365,11 @@ export function BoardView({ boards, now = Date.now(), onChanged = () => {} }: { 
       {failed.map((b) => (
         <div key={b.name ?? ''} className="text-[12.5px] text-red" data-testid="board-instance-error">
           {b.name ? `${b.name}: ` : ''}can't load its board: {b.error}
+        </div>
+      ))}
+      {stale.map((b) => (
+        <div key={b.name ?? ''} role="status" className="text-[12px] text-ink-3" data-testid="board-instance-stale">
+          {b.name ? `${b.name}: ` : ''}couldn't refresh its board: {b.error}, showing the last one, retrying
         </div>
       ))}
       <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-5">
@@ -399,7 +407,27 @@ export function BoardView({ boards, now = Date.now(), onChanged = () => {} }: { 
 
 /** The boards in a scope: the selected instance's only, or each instance's when "All instances" is chosen; never any other. */
 export function loadBoards(scope: InstanceScope, get: <T>(instance: string | null, path: string) => Promise<T> = onInstance): Promise<InstanceBoard[]> {
-  return Promise.all(scope.instances.map((n) => get<BoardData>(n, '/api/board').then((data) => ({ name: n, data, error: null }), (e: Error) => ({ name: n, data: null, error: e.message }))));
+  return Promise.all(
+    scope.instances.map((n) =>
+      get<BoardData>(n, '/api/board').then(
+        (data): InstanceBoard => ({ name: n, data, error: null }),
+        (e: Error): InstanceBoard => ({ name: n, data: null, error: e.message, ...(isRefusal(e) ? { refused: true } : {}) }),
+      ),
+    ),
+  );
+}
+
+/**
+ * The boards to show after a fresh read: a board whose read failed keeps what was already shown for it, with the
+ * error (as useView does). WHY (#639): one failed read (ECONNRESET on a loaded machine) emptied a shown board until
+ * the 15 s tick. A refusal is an answer, so it drops what was shown.
+ */
+export function keepShown(shown: InstanceBoard[] | null, fresh: InstanceBoard[]): InstanceBoard[] {
+  return fresh.map((b) => {
+    if (b.data || b.refused) return b;
+    const was = shown?.find((s) => s.name === b.name)?.data;
+    return was ? { ...b, data: was } : b;
+  });
 }
 
 /** What was kept of each board in this scope (web/src/cache.ts), when every one of them was; else null (never half a scope). */
@@ -430,7 +458,7 @@ export function BoardPage({ state, pulse }: { state: State; pulse: number }) {
     const unmark = fromKept.current ? markUpdating() : () => {};
     fromKept.current = false;
     void loadBoards(scope)
-      .then((b) => live && setBoards(b))
+      .then((b) => live && setBoards((shown) => keepShown(shown, b)))
       .finally(unmark);
     return () => {
       live = false;
