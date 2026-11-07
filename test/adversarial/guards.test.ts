@@ -1239,8 +1239,8 @@ test(`adversarial guards / commit.scanner-unavailable-not-clean (${doc("A scanne
     { what: 'found nowhere', path: null },
   ];
   const results = async (path: string | null) => ({
-    commit: scanCommit(r.dir, false, path),
-    commitAll: scanCommit(r.dir, true, path),
+    commit: scanCommit(r.dir, { unstaged: false, untracked: false, head: false }, path),
+    commitAll: scanCommit(r.dir, { unstaged: true, untracked: true, head: false }, path),
     path: scanPath(join(r.dir, 'a.txt'), path),
     range: await scanRange(r.dir, `${r.base}..HEAD`, path),
     file: await scanFile(join(r.dir, 'a.txt'), path),
