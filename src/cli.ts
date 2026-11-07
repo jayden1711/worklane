@@ -132,9 +132,10 @@ usage: ${BRAND.cli} <command> [options]
                                    interventions. --record: into the log. --spend: the most it may spend
                                    (it bounds the budget); without it, prints the plan and exits 2. Held-out
                                    tasks only with ${HELD_OUT_ENV} set or --held-out-from-state
-  harness-eval add-task <owner/repo> <pr> [--id id] [--public]
+  harness-eval add-task <owner/repo> <pr> [--id id] [--public | --held-out-from-state]
                                    a merged PR as a past task (read-only gh calls); kept in the held-out
-                                   store, or with --public in templates/evals/tasks (the engine's own
+                                   store named by ${HELD_OUT_ENV} or --held-out-from-state (refused with
+                                   neither), or with --public in templates/evals/tasks (the engine's own
                                    public repository only)
   queue full-run [--max-load n] [-- <command>]
                                    queue the full test run; starts by itself when the machine-wide

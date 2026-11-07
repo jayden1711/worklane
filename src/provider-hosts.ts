@@ -81,15 +81,12 @@ export type EntryRefusal = (typeof ENTRY_REFUSALS)[number];
 /**
  * What a refusal of entry `at` (its position in "hosts", from 1) says.
  *
- * INVARIANT (#392): it is given the position, the kind and at most a host WHATWG URL parsed from the entry, never the
- * entry as written. That host is only letters, digits, dots and hyphens, or a bracketed address (providerHostEntry
- * refuses the rest), so it can't hold a user, password, query, fragment or `key=value` pair, however the entry encoded
- * them (`%40`, a fullwidth `＠`, `%26`, `＝`). It can still be a word root wrote as a host name, such as
- * `secret.example.com`: a refusal shows that host, lower-cased. The refusal reaches the start-up log and writers
- * on the Health page, and a mistyped entry (`user:secret@host`, `host?key=secret`, `user%3Asecret%40host`) may hold a
- * credential. As src/network.ts does for the proxy.
+ * INVARIANT (#392, #714): it is given the position and the kind, never the entry or anything parsed from it. The
+ * refusal reaches the start-up log and writers on the Health page, and a mistyped entry (`user:secret@host`,
+ * `host?key=secret`, a token pasted where a host belongs, in any case) may hold a credential. As src/network.ts does
+ * for the proxy.
  */
-function refusalText(at: number, why: EntryRefusal, host: ParsedHost | null): string {
+function refusalText(at: number, why: EntryRefusal): string {
   const name = `hosts entry ${at}`;
   const notShown = 'not shown, as it may hold a credential';
   switch (why) {
@@ -97,9 +94,9 @@ function refusalText(at: number, why: EntryRefusal, host: ParsedHost | null): st
     case 'too-long': return `${name} is longer than ${PROVIDER_HOSTS_LIMITS.entry} characters`;
     case 'wildcard': return `${name}: no wildcards; name each host`;
     case 'not-host-port': return `${name} must be host or host:port (no scheme, user, path, query or fragment); ${notShown}`;
-    case 'not-a-host': return `${name} is not a host name or address; ${notShown}`;
-    case 'not-normalised': return `${name} must be written as a URL normalises it: ${JSON.stringify(host)}`;
-    case 'bad-port': return `${name} (${JSON.stringify(host)}) has a bad port`;
+    case 'not-a-host': return `${name} is not a host name (dotted, ending in a top-level domain) or an IP address; ${notShown}`;
+    case 'not-normalised': return `${name} must be written as a URL normalises it (lower case; an IPv4 address as four decimal numbers); ${notShown}`;
+    case 'bad-port': return `${name} has a bad port (1 to 65535, no leading zero); ${notShown}`;
   }
 }
 
@@ -123,6 +120,9 @@ export function providerHostEntry(raw: unknown): { host: string; port: string | 
   // No `_`: no host name has one (RFC 1123), a public CA may not certify one (and a name is https only), but tokens
   // do (`ghp_…`, `sk_live_…`), and the not-normalised refusal would show one lower-cased.
   if (!/^(\[[0-9a-f:.]+\]|[a-z0-9.-]+)$/.test(canonical)) return no('not-a-host');
+  // WHY (#714): a token can be a valid host-name shape (`sk-ant-api03-…`, all lower case), and would be listed whole on
+  // Health. Only an address, or a dotted name with no empty label and a top-level-domain-shaped last label, goes on.
+  if (!canonical.startsWith('[') && !IPV4.test(canonical) && !dottedName(canonical)) return no('not-a-host');
   // WHY: matched exactly against what WHATWG URL makes of a base_url, so the entry must already be in that form.
   if (canonical !== host) return no('not-normalised', canonical);
   if (port !== undefined && (String(Number(port)) !== port || Number(port) < 1 || Number(port) > 65535)) return no('bad-port', canonical);
@@ -132,8 +132,19 @@ export function providerHostEntry(raw: unknown): { host: string; port: string | 
 /** providerHostEntry, with a refusal as its text (refusalText). */
 function entryOf(raw: unknown, at: number): { host: string; port: string | null } | string {
   const e = providerHostEntry(raw);
-  return 'refused' in e ? refusalText(at, e.refused, e.host) : e;
+  return 'refused' in e ? refusalText(at, e.refused) : e;
 }
+
+/** An IPv4 address as WHATWG URL writes one. */
+const IPV4 = /^\d{1,3}(\.\d{1,3}){3}$/;
+const LABEL = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
+/** A top-level domain's shape: letters, or an internationalised one's xn-- form. */
+const TLD = /^(?:[a-z]{2,63}|xn--[a-z0-9-]{1,59})$/;
+/** A dotted host name: at least two labels, none empty or over 63 characters, the last one a top-level domain's shape. */
+const dottedName = (h: string): boolean => {
+  const labels = h.split('.');
+  return h.length <= 253 && labels.length >= 2 && labels.every((l) => LABEL.test(l)) && TLD.test(labels[labels.length - 1]!);
+};
 
 /**
  * Root's provider hosts. No file: none (`missing`, not an error). Refused (none, and why): a file anyone but root
@@ -155,8 +166,8 @@ export function readProviderHosts(file = PROVIDER_HOSTS_FILE, o: { ownerUid?: nu
   }
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return no('expected {"hosts": ["<host>", "<host>:<port>", ...]}');
   const extra = Object.keys(raw).filter((k) => k !== 'hosts');
-  // WHY (#392): a key is quoted only when it is a plain word, which can't hold a user, password, query or fragment.
-  if (extra.length) return no(/^[A-Za-z_][A-Za-z0-9_-]{0,31}$/.test(extra[0]!) ? `unknown key ${JSON.stringify(extra[0])} (only "hosts")` : 'an unknown key, not shown (only "hosts")');
+  // WHY (#392, #714): a key is named by its position only; a plain word can be a token too (`sk_live_…`).
+  if (extra.length) return no(`unknown key ${Object.keys(raw).indexOf(extra[0]!) + 1} of the file's keys, not shown (only "hosts")`);
   const list = (raw as { hosts?: unknown }).hosts;
   if (!Array.isArray(list)) return no('expected {"hosts": ["<host>", "<host>:<port>", ...]}');
   if (list.length > PROVIDER_HOSTS_LIMITS.hosts) return no(`more than ${PROVIDER_HOSTS_LIMITS.hosts} hosts`);

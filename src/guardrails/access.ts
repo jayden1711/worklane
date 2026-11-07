@@ -164,8 +164,46 @@ function grepAccesses(input: Record<string, unknown>, cwd: string): Access[] {
   return out;
 }
 
+/** A parameter expansion in a word: `${...}` (no nesting), `$NAME`, or a special or positional parameter. */
+const PARAM = /\$(?:\{([^{}$`]*)\}|[A-Za-z_][A-Za-z0-9_]*|[0-9@*#?$!-])/g;
+
+/**
+ * The words a word with parameter expansions could be (#924): each expansion empty (an unset variable), each a name
+ * with no leading dot (as `*` reads, the shell's default), each `${X:-word}`-style expansion its word, and `$HOME` as
+ * `~`; null when it has none. An expansion the guard can't read (a `${` left open, or one holding `${`, `$(` or a
+ * backquote) is refused: it can't be checked.
+ */
+function paramWords(w: string): string[] | Access | null {
+  if (!w.includes('$')) return null;
+  const opened = (w.match(/\$\{/g) ?? []).length;
+  if (opened !== [...w.matchAll(PARAM)].filter((m) => m[0].startsWith('${')).length) {
+    return { kind: 'unchecked', why: `the shell word ${w} holds a parameter expansion the guard can't read, so it can't be checked for secret files` };
+  }
+  const word = (inner: string | undefined) => (inner === undefined ? null : (/^[A-Za-z_][A-Za-z0-9_]*:?[-=+?](.*)$/s.exec(inner)?.[1] ?? null));
+  const home = (m: string) => m === '$HOME' || m === '${HOME}';
+  const out = new Set<string>([
+    w.replace(PARAM, () => ''),
+    w.replace(PARAM, () => '*'),
+    w.replace(PARAM, (m, inner?: string) => word(inner) ?? ''),
+    w.replace(PARAM, (m) => (home(m) ? '~' : '')),
+  ]);
+  out.delete(w);
+  out.delete('');
+  return [...out];
+}
+
 /** A shell word as the places it names: itself, and what the shell would expand it to (braces, wildcards, classes). */
-function wordAccesses(w: string): Access[] {
+function wordAccesses(w: string, depth = 0): Access[] {
+  const params = paramWords(w);
+  if (params && !Array.isArray(params)) return [params];
+  // A default word may itself hold an expansion: one level more, then refused.
+  if (params?.some((p) => p.includes('$')) && depth > 0) return [{ kind: 'unchecked', why: `the shell word ${w} nests parameter expansions too deep to check for secret files` }];
+  const fromParams = (params ?? []).flatMap((p) => wordAccesses(p, depth + 1));
+  return [...fromParams, ...plainWordAccesses(w)];
+}
+
+/** wordAccesses for the word as written: itself, and its braces, wildcards and classes. */
+function plainWordAccesses(w: string): Access[] {
   const expands = /[*?[{]/.test(w);
   // WHY (#887 review): a long word the shell would expand can't be bounded cheaply, so it is refused before any work.
   // A long plain word is still checked: as a path once resolved (`././…` collapses), see Secrets.reached.

@@ -307,3 +307,110 @@ test('spend gate: a call that fails after spending counts; the runner and the re
   assert.equal(failedCost(err), 0.3, "runnerAsk's failure carries the run's cost");
   assert.deepEqual(recorded, [0.3], 'and the failed call is recorded as run.cost');
 });
+
+// #673: the spend gate's follow-ups.
+
+test('#673 eval-roles.mjs: a model call that fails still prints the total, and the run still fails', posix, () => {
+  const m = machine(0.05);
+  const r = run(evalRoles, ['--score', '--roles', 'feedback-checks', '--samples', '1', '--spend', '1'], m.env);
+  assert.ok(m.calls().length > 0, `the run reached the model: ${r.out}`);
+  assert.notEqual(r.status, 0, r.out);
+  assert.match(r.out, /total: ~\$0\.\d\d \(the CLI's estimate;[^\n]*--spend \$1;/, r.out);
+  const total = Number(/total: ~\$(\d+\.\d\d)/.exec(r.out)![1]);
+  assert.ok(total >= 0.05, `the failed call's cost is in the total: ${total}`);
+});
+
+test('#673 harness-eval add-task: with no store named it writes nothing and asks GitHub nothing', async (t) => {
+  t.mock.method(console, 'log', () => {});
+  const errors: string[] = [];
+  t.mock.method(console, 'error', (s: string) => errors.push(s));
+  const root = mkdtempSync(join(tmpdir(), 'he-root-'));
+  // A recording gh first on PATH: the refusal comes before any GitHub read.
+  const bin = join(root, 'bin');
+  mkdirSync(bin);
+  const ghLog = join(root, 'gh.log');
+  writeFileSync(join(bin, 'gh'), `#!/bin/sh\necho "$*" >> ${JSON.stringify(ghLog)}\nexit 1\n`);
+  chmodSync(join(bin, 'gh'), 0o755);
+  const prev = { path: process.env.PATH, held: process.env[HELD_OUT_ENV] };
+  process.env.PATH = `${bin}:${prev.path}`;
+  delete process.env[HELD_OUT_ENV];
+  try {
+    assert.equal(await harnessEvalCommand(root, 'add-task', ['example/repo', '12'], helpers(recordingSuite().suite)), 2);
+    assert.match(errors.join('\n'), /not written: add-task writes into a held-out store only when one is named/);
+    assert.match(errors.join('\n'), new RegExp(`${HELD_OUT_ENV}[^\\n]*--held-out-from-state[^\\n]*--public`));
+    assert.ok(!existsSync(join(projectStateDir(root), 'evals')), 'nothing under the state dir');
+    assert.ok(!existsSync(ghLog), 'no gh call');
+  } finally {
+    process.env.PATH = prev.path;
+    if (prev.held !== undefined) process.env[HELD_OUT_ENV] = prev.held;
+  }
+});
+
+const spikesDir = join(repoRoot, 'scripts', 'spikes');
+const spikes = readdirSync(spikesDir).filter((f) => f.endsWith('.sh') && f !== 'spend.sh');
+
+/** A spike run with recording stand-ins for claude and sudo first on PATH; what each was asked. */
+function runSpike(file: string, args: string[]) {
+  const base = mkdtempSync(join(tmpdir(), 'spike-'));
+  const bin = join(base, 'bin');
+  mkdirSync(bin);
+  const log = join(base, 'calls.log');
+  for (const tool of ['claude', 'sudo']) {
+    writeFileSync(join(bin, tool), `#!/bin/sh\necho "${tool} $*" >> ${JSON.stringify(log)}\nexit 0\n`);
+    chmodSync(join(bin, tool), 0o755);
+  }
+  const r = spawnSync('bash', [join(spikesDir, file), ...args], { env: { ...process.env, PATH: `${bin}:${process.env.PATH}` }, encoding: 'utf8', timeout: 60_000 });
+  return { status: r.status, out: `${r.stdout}\n${r.stderr}`, calls: existsSync(log) ? readFileSync(log, 'utf8').trim().split('\n') : [] };
+}
+
+test('#673 every spike that calls claude is spend-gated: the gate comes before sudo, and each call carries its share as --max-budget-usd', posix, () => {
+  assert.ok(spikes.length > 0);
+  for (const f of spikes) {
+    const src = readFileSync(join(spikesDir, f), 'utf8');
+    const calls = src.match(/\bclaude -p\b[^\n]*/g) ?? [];
+    if (!calls.length) continue;
+    const gate = /^spend_gate (\d+) "\$@"$/m.exec(src);
+    assert.ok(gate, `${f}: calls claude, so it runs spend_gate`);
+    assert.equal(Number(gate[1]), calls.length, `${f}: spend_gate splits --spend over its ${calls.length} claude call(s)`);
+    assert.ok(src.indexOf('source "$(dirname "$0")/spend.sh"') < gate.index && gate.index < src.indexOf('as_root'), `${f}: the gate comes before as_root's sudo`);
+    for (const c of calls) assert.match(c, /^claude -p --max-budget-usd "\$SPIKE_CALL_BUDGET" /, `${f}: ${c}`);
+  }
+  // Nothing runs a spike: no test (but this one), CI workflow or doc names one.
+  const named: string[] = [];
+  for (const dir of ['test', '.github/workflows', 'docs']) {
+    for (const e of readdirSync(join(repoRoot, dir), { recursive: true, withFileTypes: true })) {
+      if (!e.isFile() || e.name === 'eval-spend-gate.test.ts') continue;
+      const p = join(e.parentPath, e.name);
+      if (/\.(png|jpe?g|gif|webp|ico)$/.test(e.name)) continue;
+      if (readFileSync(p, 'utf8').includes('scripts/spikes/')) named.push(p);
+    }
+  }
+  assert.deepEqual(named, [], 'a spike is run by hand only');
+});
+
+test('#673 a spike without a positive --spend exits 2 before sudo or claude; with one it goes on, its arguments intact', posix, () => {
+  for (const f of spikes) {
+    for (const args of [['demo'], ['demo', '--spend'], ['demo', '--spend', '0'], ['demo', '--spend', 'abc'], ['demo', '--spend', '-1'], ['demo', '--spend=']]) {
+      const r = runSpike(f, args);
+      assert.equal(r.status, 2, `${f} ${args.join(' ')}: ${r.out}`);
+      assert.match(r.out, /not run: this spike makes \d+ paid claude call\(s\)\. Run it with --spend <usd>/);
+      assert.deepEqual(r.calls, [], `${f} ${args.join(' ')}: no sudo, no claude`);
+    }
+  }
+  // Past the gate, as_root re-runs the spike through sudo with every argument; as root it would go on to real work,
+  // so this half runs only as an ordinary user.
+  if (process.getuid?.() === 0) return;
+  for (const f of spikes) {
+    const r = runSpike(f, ['demo', '--spend', '0.5']);
+    assert.equal(r.status, 0, `${f}: ${r.out}`);
+    assert.deepEqual(r.calls, [`sudo -- bash ${join(spikesDir, f)} demo --spend 0.5`], `${f}: on to as_root, nothing else`);
+  }
+});
+
+test('#673 spend_gate: --spend is split evenly over the calls; the other arguments are kept in order', posix, () => {
+  const out = (args: string) => spawnSync('bash', ['-c', `source ${JSON.stringify(join(spikesDir, 'spend.sh'))}; spend_gate ${args}; echo "$SPIKE_CALL_BUDGET|\${SPIKE_ARGS[*]-}"`], { encoding: 'utf8' });
+  assert.equal(out('3 a --spend 1 b').stdout.trim(), '0.3333|a b');
+  assert.equal(out('1 --spend=2.5 x').stdout.trim(), '2.5000|x');
+  assert.equal(out('2 --spend .5').stdout.trim(), '0.2500|');
+  assert.equal(out('1 x').status, 2);
+});
