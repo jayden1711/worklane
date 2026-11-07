@@ -74,12 +74,14 @@ jobs:
           [ "${WORKLANE_CI_CONTAINER:-}" = 1 ] || { echo "GitHub's runner: nothing to set up"; exit 0; }
           export DEBIAN_FRONTEND=noninteractive
           apt-get update -q
-          # jq and git-lfs: GitHub's image has both, and tests use them (the Discord seam's checks, the commit scan's
-          # large-file cases).
-          apt-get install -y -q --no-install-recommends sudo unzip uidmap jq git-lfs
+          # The rest is what GitHub's image has and tests use, so none of them skips here: jq (the Discord seam's
+          # checks), git-lfs (the commit scan's large-file cases), python3 with pip (the pip fetch), strace and
+          # fakeroot (the guard's runner tables).
+          apt-get install -y -q --no-install-recommends sudo unzip uidmap jq git-lfs python3 python3-pip strace fakeroot
           # No subordinate ids from useradd: it would give 165536 and up, outside the container's own ids (rootless
-          # Docker maps 0 to 65536), where newuidmap is refused. The range below is inside them.
-          id runner > /dev/null 2>&1 || useradd -m -u 1001 -s /bin/bash -K SUB_UID_COUNT=0 -K SUB_GID_COUNT=0 runner
+          # Docker maps 0 to 65536), where newuidmap is refused. The range below is inside them. Supplementary groups,
+          # as GitHub's runner user has (adm, users): the write helpers' group cases need one.
+          id runner > /dev/null 2>&1 || useradd -m -u 1001 -s /bin/bash -G adm,users -K SUB_UID_COUNT=0 -K SUB_GID_COUNT=0 runner
           printf 'runner ALL=(ALL) NOPASSWD:ALL\n' > /etc/sudoers.d/.runner.tmp
           chmod 0440 /etc/sudoers.d/.runner.tmp
           visudo -cf /etc/sudoers.d/.runner.tmp
