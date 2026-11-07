@@ -13,7 +13,8 @@ import { asRoot, varLibPath } from '../os/system-paths.js';
 import { MachineRequestError, MACHINE_EVENTS, machineRequests, requestPluginStep } from '../machine-requests.js';
 import { revealInvisible } from '../mcp/snapshot.js';
 import { approvalDigest, readAllowlist, livePending, pendingPath, previewDir, type AllowlistEntry, type ApprovalRecord, type PendingEntry } from './approval.js';
-import { readPreview, recordOf, type Preview } from './root-ops.js';
+import { DETAIL_LOGGED, logDetail } from '../user-facing-error.js';
+import { PluginOpError, readPreview, recordOf, type Preview } from './root-ops.js';
 import { pluginsOff, PLUGINS_OFF_FILE } from './run.js';
 import { pluginStepOk } from './steps.js';
 import { cachedUpdates, previewDiff } from './updates.js';
@@ -24,6 +25,9 @@ export interface PluginsWho {
   role: Role | null;
   breakGlass?: boolean;
 }
+
+/** What the owner is shown of an allowlist that can't be read: its error names the file under root's directory (#882). */
+const ALLOWLIST_UNREADABLE = `the allowlist could not be read; agents get no plugins until it is fixed; ${DETAIL_LOGGED}`;
 
 /** One approved entry as a writer may see it: an allowlist of fields, so a field added later stays an owner's. */
 export const WRITER_FIELDS = ['id', 'kind', 'label', 'roles', 'on', 'reach'] as const;
@@ -118,7 +122,8 @@ export async function pluginsView(ctx: PluginsContext, role: Role | null): Promi
   try {
     entries = readAllowlist(ctx.instance, ctx.allowlistOwnerUid === undefined ? {} : { ownerUid: ctx.allowlistOwnerUid }).entries;
   } catch (e) {
-    problem = (e as Error).message;
+    logDetail("the plugins page: the instance's allowlist", e);
+    problem = ALLOWLIST_UNREADABLE;
   }
   const off = pluginsOff(ctx.instanceHome);
   const pending = (() => {
@@ -241,13 +246,17 @@ export async function handlePluginsRoute(req: IncomingMessage, res: ServerRespon
       try {
         preview = readPreview(ctx.instance, id);
       } catch (e) {
-        return refused(404, (e as Error).message);
+        if (e instanceof PluginOpError) return refused(404, e.message);
+        logDetail(`${req.method} ${url.pathname}: the preview of ${id.slice(0, 40)}`, e);
+        return refused(404, `the preview of ${id.slice(0, 40)} can't be read; fetch it again; ${DETAIL_LOGGED}`);
       }
       let record: ApprovalRecord;
       try {
         record = recordOf(preview, roles, preview.kind === 'mcp' ? mcpInputs() : undefined);
       } catch (e) {
-        return refused(400, (e as Error).message);
+        if (e instanceof PluginOpError) return refused(400, e.message);
+        logDetail(`${req.method} ${url.pathname}: the record of ${id.slice(0, 40)}`, e);
+        return refused(400, `the preview of ${id.slice(0, 40)} makes no record; fetch it again; ${DETAIL_LOGGED}`);
       }
       const digest = approvalDigest(record);
       const current = (() => {
@@ -284,7 +293,8 @@ export async function handlePluginsRoute(req: IncomingMessage, res: ServerRespon
       try {
         entry = readAllowlist(ctx.instance, ctx.allowlistOwnerUid === undefined ? {} : { ownerUid: ctx.allowlistOwnerUid }).entries.find((e) => e.record.id === id);
       } catch (e) {
-        return refused(409, (e as Error).message);
+        logDetail(`${req.method} ${url.pathname}: the instance's allowlist`, e);
+        return refused(409, ALLOWLIST_UNREADABLE);
       }
       if (!entry) return refused(404, `${id} is not approved for this instance`);
       const changes = toggleChanges(entry, on);

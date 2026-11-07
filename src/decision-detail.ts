@@ -16,6 +16,7 @@ import { isOwner, isWriter, mayAnswerKind, type Role } from './dashboard-auth.js
 import type { DecisionContext } from './decision-context.js';
 import { happened, isInvestigation, optionEffects, type DetailKind } from './decision-effects.js';
 import { redactCut } from './events/redact.js';
+import { shownPath } from './path-text.js';
 import type { EventPayload, StoredEvent } from './events/types.js';
 import type { PrView } from './projection.js';
 import { computeLevel, loadMoneyPaths, selfModificationPart } from './review.js';
@@ -310,11 +311,15 @@ export function decisionDetail(id: string, d: DetailDeps): DecisionDetail | null
     // Categorised now, plus what the level's reasons recorded then ("money-path: a.js, b.js"): a later review.yaml or
     // money-path change can't hide what the change was held for.
     const now = categoriesNow(files, { root: d.root, mainRef: d.mainRef, review: d.review });
+    // A reason shows each path as shownPath does (escaped when odd, #688), so a file is found by how it shows (#768),
+    // in the reason's order; a name holding ", " is found whole.
     for (const r of change?.levelReasons ?? []) {
       const m = /^([a-z][a-z-]*): (.+)$/.exec(r);
       if (!m) continue;
       const list = (now.categories[m[1]!] ??= []);
-      for (const f of m[2]!.split(', ')) if (files.includes(f) && !list.includes(f)) list.push(f);
+      const named = `, ${m[2]!}, `;
+      const found = files.map((f) => ({ f, at: named.indexOf(`, ${shownPath(f)}, `) })).filter((x) => x.at >= 0);
+      for (const { f } of found.sort((a, b) => a.at - b.at)) if (!list.includes(f)) list.push(f);
     }
     impact = impactOf(now.categories, files, now.note);
   } else impact = impactOf(null, null, null);

@@ -8,8 +8,11 @@ import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-/** Every fixed name the instance-name rules refuse, and one of each pattern they refuse (src/instance-name.ts). */
-export const REFUSED_NAMES = ['dash', 'hub', 'hub-setup', 'update', 'tailscale', 'claude-account', 'egress', 'agent', 'eval', 'work', 'mcp', 'mcpc', 'mcpctl', 'test-x', 'ci-x', 'exp-x', 'score-x', 'dashboard-x', 'plugin-fetch-x', 'x-agent', 'x-eval', 'x-work', 'x-mcp', 'x-mcpc', 'x-mcpctl'];
+/**
+ * Every fixed name the instance-name rules refuse, and one of each pattern they refuse (src/instance-name.ts), and
+ * refused names built on the kept ones, so a kept case widened to a glob (`ma*`, `*console`) is caught too.
+ */
+export const REFUSED_NAMES = ['dash', 'hub', 'hub-setup', 'update', 'tailscale', 'claude-account', 'egress', 'agent', 'eval', 'work', 'mcp', 'mcpc', 'mcpctl', 'test-x', 'ci-x', 'exp-x', 'score-x', 'dashboard-x', 'plugin-fetch-x', 'x-agent', 'x-eval', 'x-work', 'x-mcp', 'x-mcpc', 'x-mcpctl', 'machine-agent', 'console-eval', 'test-console', 'exp-machine'];
 /** The verbs each helper takes a name reserved since for: its OFF, cleanup and read-only verbs. */
 export const KEPT_VERBS = { exp: ['stop', 'wipe', 'prune', 'check', 'version'], testrun: ['wipe', 'check', 'version'] } as const;
 /** The verbs that make or run something: never under a refused name, a kept one included. */

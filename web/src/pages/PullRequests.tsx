@@ -5,6 +5,7 @@ import { DotPill, Loading, RecordsTable, StatusMark, TaskRow, useEntrance, type 
 import { ago, Badge, Card, cx, Empty } from '../components/ui';
 import { Header } from '../components/Header';
 import { CiNote } from '../components/CiNote';
+import { shownPaths } from '../path-text';
 
 const OUTCOME_DOT: Record<string, 'green' | 'red' | 'orange' | 'ink'> = { pass: 'green', fail: 'red', cancelled: 'red', pending: 'orange', missing: 'orange', skipped: 'ink' };
 const PHASE: Record<PrView['phase'], { label: string; tone: 'ok' | 'warn' | 'danger' | 'info' | 'neutral'; mark: MarkState }> = {
@@ -40,7 +41,7 @@ function MergeFlow({ pr }: { pr: PrView }) {
             {c.state === 'detected' ? 'conflict with main' : c.state === 'running' ? `resolving (attempt ${c.attempt})` : `conflict fix: ${c.outcome?.replace('_', ' ')}`}
           </Badge>
           <span className="text-ink-2">
-            {c.state === 'done' ? `${c.files.length ? c.files.join(', ') : 'no files'}${c.detail ? ` · ${c.detail}` : ''}` : `for ${sinceNow(c.at)}`}
+            {c.state === 'done' ? `${c.files.length ? shownPaths(c.files) : 'no files'}${c.detail ? ` · ${c.detail}` : ''}` : `for ${sinceNow(c.at)}`}
           </span>
         </div>
       )}
@@ -49,7 +50,7 @@ function MergeFlow({ pr }: { pr: PrView }) {
           <Badge tone={l.state === 'running' ? 'info' : l.outcome === 'merge' ? 'ok' : 'warn'}>{l.state === 'running' ? 'light check running' : `light check: ${l.outcome}`}</Badge>
           <span className="text-ink-2">
             {l.state === 'running' ? `waiting ${sinceNow(l.at)} on main ${short(l.mainSha)}` : `waited ${howLong(l.waitMs ?? 0)} on main ${short(l.mainSha)}`}
-            {l.overlap.length ? ` · overlap: ${l.overlap.join(', ')}` : ''}
+            {l.overlap.length ? ` · overlap: ${shownPaths(l.overlap)}` : ''}
           </span>
         </div>
       )}
@@ -384,7 +385,7 @@ export function PullRequestsView({ view }: { view: ServedPrs }) {
                   </td>
                 ) : (
                   <td className="primitive-table-cell font-mono text-[12px] text-ink-2" title={h.reason}>
-                    {h.files.join(', ')}
+                    {shownPaths(h.files)}
                   </td>
                 )}
                 <td className="primitive-table-cell">{h.until ? <span className="text-[12.5px] tabular-nums text-ink-2">waited {howLong(h.waitedMs ?? 0)}</span> : <DotPill tone="orange">held {sinceNow(h.since)}</DotPill>}</td>

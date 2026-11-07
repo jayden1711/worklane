@@ -4,7 +4,7 @@
 // alone (no agent run, no checkout scan beyond a file list), and never runs
 // two tasks at once that touch the same hotspot. The second one waits; other
 // ready work takes the free slot meanwhile. Everything else runs in parallel.
-import { globToRegExp } from './guardrails/glob.js';
+import { globRegExp } from './guardrails/glob.js';
 
 /** Used when a repo lists none: lockfiles, registries and changelogs, shared test helpers. */
 export const DEFAULT_HOTSPOTS = [
@@ -42,7 +42,7 @@ const DEPENDENCY_WORK = /\b(add|adds|adding|install|bump|bumps|upgrade|upgrades|
 const matchers = new Map<string, RegExp>();
 const re = (g: string) => {
   let r = matchers.get(g);
-  if (!r) matchers.set(g, (r = globToRegExp(g)));
+  if (!r) matchers.set(g, (r = globRegExp(g, 'deny')));
   return r;
 };
 

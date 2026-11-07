@@ -279,6 +279,9 @@ test('every pattern runs in linear time on 100 KB of hostile input', () => {
     ['a.Internal ', run('a.Internal ')], ['aB.local ', run('aB.local ')], ['this.a.internal', run('a.', 'this.', 'internal')],
     // Long runs of letters with `.`, `-` or `+` (a URL scheme's characters), and with `://` at the end (#889 round 4).
     ['ab.', run('ab.')], ['ab-', run('ab-')], ['ab+', run('ab+')], ['ab. + ://', run('ab.', '', '://x:y@')], ['a.b-c+', run('a.b-c+')],
+    // Single-quoted and `=>` dictionary literals, escaped slashes, and standard base64 in a JWT (#996).
+    ["'token':'", run("'token':'")], ["'key' => '", run("'key' => '")], ["' + a", run('a', "'")], ["'a", run("'a")],
+    ['Bearer \\/', run('\\/', 'Bearer ')], ['Basic \\/', run('\\/', 'Basic ')], ['eyJ/', run('eyJ/')], ['eyJ+', run('eyJ+')], ['eyJ=.', run('eyJ=.')], ['a/ + eyJ', run('a/', '', 'eyJ')],
   ];
   // None: the URL-password pattern, quadratic on these shapes before, takes a bounded scheme since #889 round 4.
   const KNOWN_SLOW = new Set<string>([]);

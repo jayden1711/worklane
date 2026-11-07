@@ -2,6 +2,7 @@
 // redact. It decides who may file `ready` issues, so only its owner may change it: refused when its group or others
 // can write it, or when it belongs to another user. Absent: intake is off.
 import { existsSync, readFileSync, statSync } from 'node:fs';
+import { basename } from 'node:path';
 import { parse } from 'yaml';
 import { IntakeConfig, intakeWarnings } from './report.js';
 
@@ -13,6 +14,9 @@ export const INTAKE_FILE = 'intake.yaml';
  * as "<path>: <message>" (`intake check` prints them). `warnings`: valid but probably not meant (Discord on,
  * nobody allowed).
  */
+/** A load error naming the file by its name, not its path under the instance home: the dashboard shows it (#882). */
+export const intakeErrorByName = (path: string, error: string): string => (error.startsWith(`${path} `) ? `${basename(path)}${error.slice(path.length)}` : error);
+
 export function loadIntakeConfig(path: string): { config: IntakeConfig; warnings: string[] } | { error: string; errors: string[] } | null {
   if (!existsSync(path)) return null;
   const refuse = (why: string) => ({ error: `${path} ${why}`, errors: [why] });

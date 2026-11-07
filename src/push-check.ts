@@ -6,7 +6,7 @@
 // The coordinator also runs pushProblems on each change before verifying it,
 // so a doomed change is caught before a long test run.
 import { blobsByName, rangeNames, sizeFiles } from './coordinator/change-files.js';
-import { globToRegExp } from './guardrails/glob.js';
+import { globRegExp } from './guardrails/glob.js';
 import { gitExecFileSync, gitSnapshot, gitSpawnSync, type GitSnapshot } from './os/git.js';
 import { shownPath } from './path-text.js';
 import { lintSkill, SKILL_SECTIONS } from './skill-lint.js';
@@ -31,13 +31,47 @@ const list = (paths: string[], n = 10) => `${paths.slice(0, n).join(', ')}${path
 /** Changed paths in a problem's text, each as shownPath shows it (#683): `rev-list --objects` prints a name as it is. */
 const listPaths = (paths: string[], n = 10) => list(paths.map(shownPath), n);
 
+/** git's own complaint in a failed call's error, on one line: its `fatal:` or `error:` line when there is one. */
+function whyFailed(e: unknown): string {
+  const err = e as { stderr?: unknown; message?: unknown };
+  const text = typeof err.stderr === 'string' && err.stderr.trim() ? err.stderr : String(err.message ?? e);
+  const lines = text.split('\n').map((l) => l.trim()).filter(Boolean);
+  const said = lines.map((l) => /\b(?:fatal|error): .*/.exec(l)?.[0]).find(Boolean) ?? lines[0] ?? 'no reason given';
+  return said.replace(/[\u0000-\u001f\u007f]/g, ' ').slice(0, 300);
+}
+
+/** The refusal when a read of the range fails (#981): nothing half-read is judged clean. */
+const unreadRefusal = (e: unknown) =>
+  `the push limits couldn't read the range (${whyFailed(e)}): nothing is judged clean, so nothing is pushed. If something changed the repository while they ran, the next try reads it again`;
+
 /** The refusal for a range the push limits can't read whole (#807). */
 const cutRefusal = (why: string) =>
   `this repo's history is cut inside the range (${why}): the push limits can't read it whole, so nothing is pushed. A shallow clone pushes only changes above its cut; fetch the rest (git fetch --unshallow), or remove a .git/shallow file nobody meant to write`;
 
-/** base and head as commit ids, read in the repo (the snapshot has no refs). Throws as git does on a bad name. */
-const commitIds = (cwd: string, base: string, head: string): [string, string] =>
-  [base, head].map((r) => git(cwd, ['rev-parse', '--verify', '--end-of-options', `${r}^{commit}`]).trim()) as [string, string];
+declare const COMMIT: unique symbol;
+/** A commit's id as commitIds read it: judge takes only these, never a name or a tree's id (#966). */
+type CommitId = string & { readonly [COMMIT]: true };
+
+/**
+ * The range's ends as commit ids, read once (#981): every later call reads these, never the names, so a branch moved
+ * or deleted between the check's git calls, or before the push, changes nothing. Throws as git does on a bad name,
+ * and on an end that is no commit (a tree, a blob, a tag of either), whose range would list no names (#966).
+ * Read in the repo (the snapshot has no refs).
+ */
+const commitIds = (cwd: string, base: string, head: string): [CommitId, CommitId] =>
+  [base, head].map((r) => git(cwd, ['rev-parse', '--verify', '--end-of-options', `${r}^{commit}`]).trim()) as [CommitId, CommitId];
+
+/**
+ * A name's spellings as Unicode can write it: as it is, NFC and NFD (#966). On Linux `café` written either way is two
+ * different files, so a refused path in one form is matched against a glob in the other.
+ */
+const spellings = (s: string): string[] => [...new Set([s, s.normalize('NFC'), s.normalize('NFD')])];
+
+/** A test of a path against globs, true when any spelling of the path matches any spelling of a glob. */
+function matcher(globs: string[]): (path: string) => boolean {
+  const res = globs.flatMap((g) => spellings(g).map((s) => globRegExp(s, 'deny')));
+  return (path) => spellings(path).some((p) => res.some((re) => re.test(p)));
+}
 
 /**
  * Why base..head can't be read whole in `snap`, or null (#807). A shallow repo's `shallow` file lists commits whose
@@ -61,7 +95,7 @@ function snapshotOf(cwd: string): GitSnapshot | string {
 
 /**
  * Why `cwd`'s history is cut inside base..head right now, or null: the check checkedPush makes once more right before
- * the push. Fails closed.
+ * the push. Fails closed, and never throws (#981): a failed read is the refusal.
  */
 export function shallowCut(cwd: string, base: string, head: string): string | null {
   const snap = snapshotOf(cwd);
@@ -69,27 +103,38 @@ export function shallowCut(cwd: string, base: string, head: string): string | nu
   try {
     const [b, h] = commitIds(cwd, base, head);
     return cutIn(snap, b, h);
+  } catch (e) {
+    return unreadRefusal(e);
   } finally {
     snap.dispose();
   }
 }
 
 /**
- * Every reason the range base..head may not be pushed; empty means it may. Every walk of the range reads one
- * gitSnapshot, the one whose shallow file was checked, so a cut written or removed while they run changes nothing
- * (#927: toggling it every ~3 ms beat the old before-and-after checks in 23 of 150 runs, measured).
+ * The range's problems and the commits they were judged at. Never throws (#981): a git call that fails, as one does
+ * when the repo changes under it, is the one refusal, so a caller's tick goes on and nothing is pushed. Every walk of
+ * the range reads one gitSnapshot, the one whose shallow file was checked, so a cut written or removed while they run
+ * changes nothing (#927: toggling it every ~3 ms beat the old before-and-after checks in 23 of 150 runs, measured).
  */
-export function pushProblems(cwd: string, base: string, head: string, limits: PushLimits): string[] {
+function checkRange(cwd: string, base: string, head: string, limits: PushLimits): { problems: string[]; base: CommitId | null; head: CommitId | null } {
   const snap = snapshotOf(cwd);
-  if (typeof snap === 'string') return [snap];
+  if (typeof snap === 'string') return { problems: [snap], base: null, head: null };
   try {
-    return judge(cwd, snap, ...commitIds(cwd, base, head), limits);
+    const [b, h] = commitIds(cwd, base, head);
+    return { problems: judge(cwd, snap, b, h, limits), base: b, head: h };
+  } catch (e) {
+    return { problems: [unreadRefusal(e)], base: null, head: null };
   } finally {
     snap.dispose();
   }
 }
 
-function judge(cwd: string, snap: GitSnapshot, base: string, head: string, limits: PushLimits): string[] {
+/** Every reason the range base..head may not be pushed; empty means it may. Never throws: a failed read is a reason. */
+export function pushProblems(cwd: string, base: string, head: string, limits: PushLimits): string[] {
+  return checkRange(cwd, base, head, limits).problems;
+}
+
+function judge(cwd: string, snap: GitSnapshot, base: CommitId, head: CommitId, limits: PushLimits): string[] {
   const cut = cutIn(snap, base, head);
   if (cut) return [cut];
   const range = `${base}..${head}`;
@@ -103,8 +148,8 @@ function judge(cwd: string, snap: GitSnapshot, base: string, head: string, limit
   const workflows = touched.filter((p) => p.startsWith(WORKFLOWS));
   if (workflows.length) problems.push(`changes CI workflows (${listPaths(workflows)}): the harness's GitHub credential has no Workflows permission, so GitHub refuses this push; a human makes workflow changes`);
 
-  const refuseRes = limits.refuse_paths.map((g) => ({ g, re: globToRegExp(g) }));
-  const refused = touched.filter((p) => refuseRes.some(({ re }) => re.test(p)));
+  const refusedPath = matcher(limits.refuse_paths);
+  const refused = touched.filter(refusedPath);
   if (refused.length) problems.push(`touches paths that are never pushed (${listPaths(refused)}), matching push.refuse_paths; remove them from every commit on the branch, not just the last one`);
 
   // A name no checkout would write: a crafted tree can hold an empty, ".", ".." or ".git" segment, and
@@ -162,17 +207,19 @@ export type PushResult = { ok: true } | { ok: false; refused: string[] } | { ok:
  * else's push); with neither, the push succeeds only as a fast-forward.
  * `guard`: the default branch is never pushed (push-guard.ts), except as the direct land (land_mode direct); a push
  * to it is refused before anything else and recorded through the guard.
+ * What is pushed is the head commit the limits judged, by id (#981).
  */
 export function checkedPush(o: { cwd: string; remote: string; base: string; head: string; ref: string; limits: PushLimits; guard: PushGuard; force?: boolean; expect?: string }): PushResult {
   const main = defaultBranchRefusal(o.guard, o.ref, o.head);
   if (main) return { ok: false, refused: [main] };
-  const refused = pushProblems(o.cwd, o.base, o.head, o.limits);
-  if (refused.length) return { ok: false, refused };
+  const checked = checkRange(o.cwd, o.base, o.head, o.limits);
+  if (checked.problems.length || !checked.base || !checked.head) return { ok: false, refused: checked.problems };
   // Once more right before the push, in this process: a cut written since the limits ran (#807).
-  const late = shallowCut(o.cwd, o.base, o.head);
+  const late = shallowCut(o.cwd, checked.base, checked.head);
   if (late) return { ok: false, refused: [late] };
   const lease = o.expect ? [`--force-with-lease=${o.ref}:${o.expect}`] : [];
-  const push = gitSpawnSync(['push',...lease, o.remote, `${o.force ? '+' : ''}${o.head}:${o.ref}`], { cwd: o.cwd, encoding: 'utf8' });
+  // The commit the limits judged, by id: never o.head's name, which may point elsewhere by now.
+  const push = gitSpawnSync(['push', ...lease, o.remote, `${o.force ? '+' : ''}${checked.head}:${o.ref}`], { cwd: o.cwd, encoding: 'utf8' });
   if (push.status !== 0) return { ok: false, error: (push.stderr || '').trim() };
   return { ok: true };
 }

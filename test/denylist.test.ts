@@ -44,6 +44,14 @@ test('catches pattern matches: decision ids and non-example emails', () => {
   assert.equal(repo({ 'a.md': 'postgres://app:pw@db.internal:5432/app' }).status, 0, 'credentials in a URL are not an email');
 });
 
+test('scans a file holding a NUL byte for the hashed terms, not the patterns, as the push gate does (#1057)', () => {
+  const r = repo({ 'logo.png': '\x01PNG\0\0author: acmecorp\0\x02' });
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /logo\.png: denied term "acmecorp" in a binary file/);
+  assert.equal(repo({ 'data.bin': `\0\x01 ${['D', '123'].join('')} bob@corp.dev \0` }).status, 0, 'pattern-shaped bytes in a binary pass');
+  assert.equal(repo({ 'logo.png': '\0author: acmecorp\0' }, 'logo.png acmecorp\n').status, 0, '.denylist-allow applies');
+});
+
 test('allowlist permits a term only in the listed path', () => {
   const allow = 'README.md acmecorp\n';
   assert.equal(repo({ 'README.md': 'acmecorp' }, allow).status, 0);

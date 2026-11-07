@@ -286,17 +286,19 @@ A minimal image for a cloud VM or a quick trial. It runs the same bootstrap for 
 
 ```sh
 docker build -t worklane .
-docker run --rm -it -v "$PWD:/repo" worklane worklane install --root /repo
-docker run --rm -it -v "$PWD:/repo" worklane worklane doctor --root /repo
+docker volume create worklane-state
+docker volume create worklane-slots
+docker run --rm -it -v "$PWD:/repo" -v worklane-state:/home/user/.local/state -v worklane-slots:/home/user/.agent-slots worklane worklane install --root /repo
+docker run --rm -it -v "$PWD:/repo" -v worklane-state:/home/user/.local/state -v worklane-slots:/home/user/.agent-slots worklane worklane doctor --root /repo
 ```
 
 There is no launchd or systemd in a container, so run the coordinator in the foreground:
 
 ```sh
-docker run -it -v "$PWD:/repo" -v "$HOME/.claude:/home/user/.claude" worklane worklane coordinator run --root /repo
+docker run -it -v "$PWD:/repo" -v "$HOME/.claude:/home/user/.claude" -v worklane-state:/home/user/.local/state -v worklane-slots:/home/user/.agent-slots worklane worklane coordinator run --root /repo
 ```
 
-That command mounts your Claude login.
+That command mounts your Claude login. State and slot locks use the same named local volumes across invocations, including on Docker Desktop; the image also declares these volume paths. Keep these volumes on a supported local filesystem (see [slots.md](slots.md)), with every container sharing a resource using the same volumes. A host bind or a remote volume driver is not assumed to provide native locking; unsupported filesystems refuse acquisition. Do not copy or remove guard inodes while any client runs. A recreated container normally has a different PID namespace/hostname: records left by a crash then remain foreign and busy, rather than being judged dead. Stop all clients and independently establish abandonment before removing those JSON records; retain guard inodes. Graceful shutdown releases records normally.
 
 ### Setting up a project by hand
 

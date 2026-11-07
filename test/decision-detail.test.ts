@@ -8,7 +8,9 @@ import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { ifNothing, optionEffect, prSections } from '../src/decision-detail.js';
+import { decisionDetail, ifNothing, optionEffect, prSections } from '../src/decision-detail.js';
+import type { StoredEvent } from '../src/events/types.js';
+import { shownPath, shownPaths } from '../src/path-text.js';
 import { asPerson, repoRoot } from './helpers.js';
 import { decisionFixture, KINDS, OWNER_ONLY, PR_BODY, WRITERS_ONLY } from './decision-fixture.js';
 
@@ -167,4 +169,21 @@ test('options say what they do and can\'t; nothing picked never times out', () =
     assert.ok(e.does.length > 10 && e.cannot.length > 10, `${kind}: a does and a can't`);
   }
   assert.match(optionEffect('domain', 'allow-once').cannot, /Later runs may not/);
+});
+
+test('the log fallback still lists an odd-named file its level reason names: a reason shows it escaped (#688), and it is matched as shown (#768)', () => {
+  const head = 'c'.repeat(40);
+  const odd = ['src/pay\u202emoc.js', 'src/a\u200bb.js', 'src/x, y.js'];
+  const ev = (id: number, type: StoredEvent['type'], payload: unknown) => ({ id, ts: new Date(id * 1000).toISOString(), type, actor: 'c', source: 'coordinator', payload }) as StoredEvent;
+  const events = [
+    ev(1, 'change.proposed', { issue: 7, branch: 'b', base: 'b'.repeat(40), head, files: [...odd, 'docs/readme.md'], lines: 4, patch_hash: 'x' }),
+    ev(2, 'review.level_set', { issue: 7, head, level: 'L3', reasons: [`money-path: ${shownPaths(odd)}`, `auth: ${shownPath(odd[1]!)}`] }),
+    ev(3, 'decision.asked', { id: 'd-odd', kind: 'land', issue: 7, owner: 'example-owner', question: 'Approve landing #7 (L3)?', options: ['approve', 'reject'], recommendation: 'approve', receipts: [] }),
+  ];
+  const d = decisionDetail('d-odd', { events, role: 'owner', prs: [], root: mkdtempSync(join(tmpdir(), 'decision-odd-')), mainRef: 'origin/main', approvals: undefined, review: undefined, runs: () => [] })!;
+  assert.equal(d.change?.source, 'log');
+  assert.match(d.change!.levelReasons[0]!, /\\u202e/, 'the reason holds the name escaped, not raw');
+  const flag = (f: string) => d.impact!.flags.find((x) => x.flag === f)!.files;
+  assert.deepEqual(flag('money-path'), odd, 'each file the money-path reason names, in its order');
+  assert.deepEqual(flag('auth'), [odd[1]], 'and the auth reason');
 });

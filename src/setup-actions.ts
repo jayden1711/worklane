@@ -11,6 +11,7 @@ import { detectTools, type Mode, type RunResult } from './setup-steps.js';
 import { describeInstall, httpDownload, INSTALLABLE, installPlan, installTool, type Download, type InstallableTool, type ToolInstall } from './tool-install.js';
 import { findTool, toolPrefix, withToolPath } from './tool-path.js';
 import { classicChecks } from './branch-protection.js';
+import { DETAIL_LOGGED, logDetail } from './user-facing-error.js';
 
 export const ACTION_IDS = ['install-tools', 'local-hooks', 'git-hooks', 'fingerprints', 'protection', 'default-branch'] as const;
 export type ActionId = (typeof ACTION_IDS)[number];
@@ -29,6 +30,11 @@ export interface ActionPlan {
 export interface ActionResult {
   ok: boolean;
   detail: string;
+  /**
+   * A failure's text for the page, in the engine's own words: never a tool's output, GitHub's text or a path (#882).
+   * The detail goes to the dashboard's log. Unset: the page says the fix wasn't done.
+   */
+  shown?: string;
 }
 
 export interface ActionContext {
@@ -89,11 +95,12 @@ export const ACTIONS: Record<ActionId, ActionDef> = {
     },
     run: async (c, d) => {
       const plan = ACTIONS['install-tools'].plan(c, d);
-      if (!plan.available) return { ok: false, detail: plan.why ?? 'not available' };
+      if (!plan.available) return { ok: false, detail: plan.why ?? 'not available', shown: plan.why ?? 'not available' };
       const done: string[] = [];
       for (const { p } of toolPlans(c, d)) {
         const r = await installTool(p!, { download: d.download });
-        if (!r.ok) return { ok: false, detail: `${done.length ? `installed ${done.join(', ')}; then ` : ''}${r.error}` };
+        const before = done.length ? `installed ${done.join(', ')}; then ` : '';
+        if (!r.ok) return { ok: false, detail: `${before}${r.error}`, shown: `${before}installing ${p!.tool} ${p!.version} failed; ${DETAIL_LOGGED}` };
         done.push(`${p!.tool} ${p!.version}`);
       }
       return { ok: true, detail: `installed ${done.join(', ')} in ${join(d.prefix, 'bin')}` };
@@ -150,7 +157,7 @@ export const ACTIONS: Record<ActionId, ActionDef> = {
       for (const cmd of defaultBranchCommands(c)) {
         // The git commands below (defaultBranchCommands) through the git runner (#807).
         const r = commandSpawnSync(cmd[0]!, cmd.slice(1), { cwd: c.root, encoding: 'utf8', timeout: 120_000, env: withToolPath() });
-        if (r.status !== 0) return { ok: false, detail: `${cmd.join(' ')} failed: ${(r.stderr || r.error?.message || '').trim().split('\n')[0]}` };
+        if (r.status !== 0) return { ok: false, detail: `${cmd.join(' ')} failed: ${(r.stderr || r.error?.message || '').trim().split('\n')[0]}`, shown: `${cmd.join(' ')} failed; ${DETAIL_LOGGED}` };
       }
       return { ok: true, detail: `fetched origin/${c.cfg.project.project.default_branch}; origin/HEAD set` };
     },
@@ -164,12 +171,13 @@ export const ACTIONS: Record<ActionId, ActionDef> = {
     },
     run: async (c, d) => {
       const p = protectionPlan(c);
-      if (!p.available || !p.path || !p.body) return { ok: false, detail: p.why ?? 'not available' };
+      if (!p.available || !p.path || !p.body) return { ok: false, detail: p.why ?? 'not available', shown: p.why ?? 'not available' };
       // INVARIANT: never replaces protection that exists (PUT would overwrite it whole).
       const now = d.gh(['api', p.path, '--silent']);
-      if (now.status === 0) return { ok: false, detail: `${c.cfg.project.project.default_branch} is protected already; not replaced` };
+      const already = `${c.cfg.project.project.default_branch} is protected already; not replaced`;
+      if (now.status === 0) return { ok: false, detail: already, shown: already };
       const r = d.gh(['api', '--method', 'PUT', p.path, '--input', '-'], p.body);
-      if (r.status !== 0) return { ok: false, detail: `GitHub refused: ${(r.stderr.trim() || r.stdout.trim()).split('\n')[0]}` };
+      if (r.status !== 0) return { ok: false, detail: `GitHub refused: ${(r.stderr.trim() || r.stdout.trim()).split('\n')[0]}`, shown: `GitHub refused to protect ${c.cfg.project.project.default_branch} (only a repo admin may); ${DETAIL_LOGGED}` };
       return { ok: true, detail: `GitHub now requires ${c.cfg.project.required_checks.join(', ')} on ${c.cfg.project.project.default_branch}` };
     },
   },
@@ -189,7 +197,8 @@ export const ACTIONS: Record<ActionId, ActionDef> = {
       const r = d.refresh(c.root, c.cfg.guardrails);
       const bad = r.filter((x) => !x.ok);
       const line = r.map((x) => (x.ok ? `${x.name}: ${x.count} stored` : `${x.name}: ${x.error}`)).join('; ');
-      return { ok: !bad.length, detail: line || 'no fingerprint sets' };
+      const shown = r.map((x) => (x.ok ? `${x.name}: ${x.count} stored` : `${x.name}: not fetched`)).join('; ');
+      return { ok: !bad.length, detail: line || 'no fingerprint sets', ...(bad.length ? { shown: `${shown}; ${DETAIL_LOGGED}` } : {}) };
     },
   },
 };
@@ -232,6 +241,8 @@ export function actionPlan(id: ActionId, c: ActionContext, d: ActionDeps): Actio
   try {
     return { id, step: a.step, label: a.label, ...a.plan(c, d) };
   } catch (e) {
-    return { id, step: a.step, label: a.label, available: false, why: `can't plan it: ${(e as Error).message.split('\n')[0]}`, changes: [], commands: [] };
+    // A plan reads files and runs tools: its error can name a path or quote a tool's output (#1064).
+    logDetail(`planning the ${id} action`, e);
+    return { id, step: a.step, label: a.label, available: false, why: `can't plan it; ${DETAIL_LOGGED}`, changes: [], commands: [] };
   }
 }

@@ -33,6 +33,7 @@ import { GITHUB_WEB } from './github-hosts.js';
 import { assertLoopbackHost, breakGlassAllowed, parseCookies } from './dashboard-auth.js';
 import { fileAccess, installOwnerOnlySecret, ownerOnlyDir, writeOwnerOnly } from './os/index.js';
 import { FlowError, GITHUB_LOGIN, INSTANCE_NAME, MANIFEST_CALLBACK_PATH, MANIFEST_START_PATH, ManifestFlows } from './setup/app-manifest.js';
+import { errorAnswer, logDetail } from './user-facing-error.js';
 
 export const SETUP_TOKEN_FILE = 'setup-token';
 /** The file whose existence ends setup mode: the sign-in App's client secret (credentials.sh dashboard-signin's too). */
@@ -314,7 +315,9 @@ sudo bash ${esc(ts)} serve</pre>
           pending = { id: r.id, owner };
           return seeOther(res, `${MANIFEST_START_PATH}/${r.id}`);
         } catch (e) {
-          return appPage(res, `GitHub's App setup couldn't start: ${(e as Error).message.slice(0, 200)}`);
+          if (e instanceof FlowError) return appPage(res, `GitHub's App setup couldn't start: ${e.message.slice(0, 200)}`);
+          logDetail(`${req.method} ${url.pathname}: registering the App setup`, e);
+          return appPage(res, "GitHub's App setup couldn't start; the detail is in the hub's log on the machine");
         }
       }
       const start = url.pathname.match(/^\/setup\/app-manifest\/start\/(amf-[0-9a-f]{24})$/);
@@ -351,7 +354,13 @@ sudo bash ${esc(ts)} serve</pre>
       }
       send(res, 404, 'Not found', '<p><a href="/">Back</a></p>');
     } catch (e) {
-      if (!res.headersSent) send(res, e instanceof FlowError ? 400 : 500, 'Error', `<p class="bad">${esc(String((e as Error).message).split('\n')[0]!.slice(0, 200))}</p>`);
+      if (e instanceof FlowError) {
+        if (!res.headersSent) send(res, 400, 'Error', `<p class="bad">${esc(e.message.split('\n')[0]!.slice(0, 200))}</p>`);
+        return;
+      }
+      // Anything else (an OS error naming a path under the sign-in directory, say): its detail to the log only (#882).
+      const answer = errorAnswer(e, req, url.pathname);
+      if (!res.headersSent) send(res, answer.status, 'Error', `<p class="bad">${esc(answer.body.error)}</p>`);
     }
   });
 

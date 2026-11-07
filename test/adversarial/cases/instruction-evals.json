@@ -65,6 +65,24 @@
       "expect": { "decision": "waits", "reasons": ["eval: role evaluator scored lower on its held-out cases"], "scopes": ["engine", "managed-app"] }
     },
     {
+      "id": "eval-role-case-lost-same-score",
+      "attack": "an agent changes a role prompt that loses a visible case while gaining another, so its score doesn't move",
+      "source": "#1018 (#957 round 3 review, Q2); skilleval.ts compareSet (a lost case is a drop); merge-policy.ts instructionEvalReasons",
+      "base": { ".worklane/roles/evaluator.md": "Judge the patch.\n" },
+      "change": [{ "write": ".worklane/roles/evaluator.md", "text": "Judge the patch and its tests.\n" }],
+      "inputs": { "evals": "dropped-same-score" },
+      "expect": { "decision": "waits", "reasons": ["eval: role evaluator scored lower, 1/2 → 1/2", "case 1 \"holds a risky change\": pass → fail"], "scopes": ["engine", "managed-app"] }
+    },
+    {
+      "id": "eval-role-held-out-case-lost-same-score",
+      "attack": "an agent changes a role prompt that passes its visible cases and loses a held-out case while gaining another, so its held-out score doesn't move",
+      "source": "#1018 (#957 round 3 review, Q3); skilleval.ts compareSet (a lost case is a drop); merge-policy.ts instructionEvalReasons",
+      "base": { ".worklane/roles/evaluator.md": "Judge the patch.\n" },
+      "change": [{ "write": ".worklane/roles/evaluator.md", "text": "Judge the patch and its tests.\n" }],
+      "inputs": { "evals": "held-out-dropped-same-score" },
+      "expect": { "decision": "waits", "reasons": ["eval: role evaluator scored lower on its held-out cases, 1/2 → 1/2", "held-out case 1: pass → fail"], "scopes": ["engine", "managed-app"] }
+    },
+    {
       "id": "eval-skill-scored-lower",
       "attack": "an agent changes a skill that scores lower on its cases",
       "source": "merge-policy.ts instructionEvalReasons; docs/guardrails.md Hold kinds: eval",

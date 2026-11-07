@@ -12,7 +12,8 @@
 // For the commits being pushed it scans the added lines and the message with
 // the denylist rules (personal names, internal hosts and addresses, home
 // paths, emails, ntfy topics; scripts/lib/denylist.mjs), the whole tree at
-// each pushed tip, and runs gitleaks over the commits. One allowance: in the
+// each pushed tip (a file holding a NUL byte for the hashed terms only), and
+// runs gitleaks over the commits. One allowance: in the
 // subject of a GitHub merge commit ("Merge pull request #<n> from <owner>/<branch>")
 // the repo's own owner (from GITHUB_REPOSITORY or the origin URL) is not a leak.
 // And a Signed-off-by line whose email is the commit's own author or committer
@@ -21,9 +22,10 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { devNull } from 'node:os';
 import { join } from 'node:path';
-import { loadRules, scanText, SKIP } from './lib/denylist.mjs';
+import { loadRules, scanBinary, scanText, SKIP } from './lib/denylist.mjs';
 
 const ZERO = /^0+$/;
+const READ_MAX = 256 * 1024 * 1024;
 // The git runner's settings (#807; src/os/git.ts, scripts/lib/git.cjs): replace refs off and no graft file, so a
 // `git replace` or a graft in the repo can't swap the commits, trees or blobs scanned here. Written out here because
 // the hook runs this file alone, fetched from origin (scripts/push-gate-hook.mjs GATE_CODE), so it imports nothing
@@ -43,7 +45,7 @@ const graphOff = (e) => {
 };
 const GIT_ENV = graphOff({ ...process.env, GIT_NO_REPLACE_OBJECTS: '1', GIT_GRAFT_FILE: join(devNull, 'no-grafts') });
 const runGit = (args, opts) => execFileSync('git', [...GIT_FIXED_ARGS, ...args], { ...opts, env: GIT_ENV });
-const git = (...a) => runGit(a, { encoding: 'utf8', maxBuffer: 256 * 1024 * 1024 });
+const git = (...a) => runGit(a, { encoding: 'utf8', maxBuffer: READ_MAX });
 
 function fail(why) {
   console.error(`push gate: REFUSED. ${why}`);
@@ -69,14 +71,30 @@ function targets(argv) {
   return out;
 }
 
+/** git's output, or a refusal naming `what` when it is over READ_MAX: it can't be scanned, so it is never skipped (#1057). */
+function readForScan(what, ...args) {
+  try {
+    return git(...args);
+  } catch (e) {
+    if (e.code === 'ENOBUFS') fail(`${what} is over the gate's ${READ_MAX / 1048576} MiB read limit, so it can't be scanned. Keep files that large out of the repo.`);
+    throw e;
+  }
+}
+
 function addedLines(sha) {
   const byFile = new Map();
   let file = null;
+  let inHunk = false;
   // WHY: read as text whatever the attributes say: a `-diff` or `binary` mark in the pushed .gitattributes printed
   // "Binary files differ", so a file added and deleted again within the push was never scanned (#693).
-  for (const l of git('-c', 'core.attributesFile=/dev/null', 'show', '--format=', '-U0', '--no-color', '--no-ext-diff', '--no-textconv', '--text', '--no-renames', sha).split('\n')) {
-    if (l.startsWith('+++ ')) file = l === '+++ /dev/null' ? null : l.slice(6);
-    else if (file && l.startsWith('+') && !SKIP.has(file)) byFile.set(file, `${byFile.get(file) ?? ''}${l.slice(1)}\n`);
+  const diff = readForScan(`commit ${sha.slice(0, 8)}'s diff`, '-c', 'core.attributesFile=/dev/null', 'show', '--format=', '-U0', '--no-color', '--no-ext-diff', '--no-textconv', '--text', '--no-renames', sha);
+  // A file's header runs from its `diff ` line to its first `@@` line. Inside a hunk every line carries a prefix, so
+  // a line there that reads as a new-name header is an added line starting `++` (#1057).
+  for (const l of diff.split('\n')) {
+    if (l.startsWith('diff ')) [file, inHunk] = [null, false];
+    else if (l.startsWith('@@')) inHunk = true;
+    else if (!inHunk && l.startsWith('+++ ')) file = l === '+++ /dev/null' ? null : l.slice(6);
+    else if (inHunk && file && l.startsWith('+') && !SKIP.has(file)) byFile.set(file, `${byFile.get(file) ?? ''}${l.slice(1)}\n`);
   }
   return byFile;
 }
@@ -149,10 +167,13 @@ function messageShape(sha) {
   return why.length ? [`${sha.slice(0, 8)}: ${why.join('; and ')}\n    line 1: ${lines[0]}`] : [];
 }
 
+// A blob holding a NUL byte is still scanned for the hashed terms, never skipped (#989).
+const scanBlob = (rules, path, text) => (text.includes('\0') ? scanBinary(rules, path, text) : scanText(rules, path, text));
+
 function scanCommit(rules, sha, owner) {
   const short = sha.slice(0, 8);
   const hits = [];
-  for (const [file, text] of addedLines(sha)) if (!text.includes('\0')) hits.push(...scanText(rules, file, text).map((h) => `${short} ${h}`));
+  for (const [file, text] of addedLines(sha)) hits.push(...scanBlob(rules, file, text).map((h) => `${short} ${h}`));
   // A commit's own author and committer identity (and its sign-off) are inherent to it; anything else in the message is scanned.
   const [an, ae, cn, ce] = git('log', '-1', '--format=%an%x00%ae%x00%cn%x00%ce', sha).trim().split('\0');
   const isMerge = git('log', '-1', '--format=%P', sha).trim().split(' ').length > 1;
@@ -194,8 +215,7 @@ function prBodyGate() {
 function scanTree(rules, tip) {
   const hits = [];
   for (const path of git('ls-tree', '-r', '--name-only', tip).split('\n').filter((p) => p && !SKIP.has(p))) {
-    const text = git('show', `${tip}:${path}`);
-    if (!text.includes('\0')) hits.push(...scanText(rules, path, text).map((h) => `${tip.slice(0, 8)} ${h}`));
+    hits.push(...scanBlob(rules, path, readForScan(`${tip.slice(0, 8)} ${path}`, 'show', `${tip}:${path}`)).map((h) => `${tip.slice(0, 8)} ${h}`));
   }
   return hits;
 }

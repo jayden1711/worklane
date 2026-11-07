@@ -4,6 +4,8 @@
 // real state as it is, with no staged animation beyond a row's entrance.
 import { createContext, useContext, useEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import { CHIP, cx } from './ui';
+import { shownPath } from '../path-text';
+import type { ChangedPath } from '../api';
 
 /** The longest a row's entrance runs (owner's rule: a short fade, only for data that is new on the page). */
 export const ENTRANCE_MS = 150;
@@ -164,11 +166,12 @@ export function ToolRow({ icon, label, chip, end, detail }: { icon: 'run' | 'wri
   );
 }
 
-/** A file chip (the files a run wrote). */
-export function FileChip({ file }: { file: string }) {
+/** A file chip (the files a run wrote, a change's files): the raw path, shown as shownPath shows it, and a line if given. */
+export function FileChip({ file, line }: { file: ChangedPath; line?: number | string }) {
+  const text = line === undefined ? shownPath(file) : `${shownPath(file)}:${line}`;
   return (
-    <span className="inline-flex h-7 max-w-full items-center gap-2 rounded-chip bg-surface px-2 font-mono text-[11.5px] text-ink shadow-btn" title={file}>
-      <span className="min-w-0 truncate">{file}</span>
+    <span className="inline-flex h-7 max-w-full items-center gap-2 rounded-chip bg-surface px-2 font-mono text-[11.5px] text-ink shadow-btn" title={text}>
+      <span className="min-w-0 truncate">{text}</span>
     </span>
   );
 }

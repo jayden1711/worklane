@@ -57,7 +57,7 @@ interface PrView {
 
 export function readPr(gh: Gh, repo: string, n: number): PrView {
   const v = gh(['pr', 'view', String(n), '--repo', repo, '--json', 'state,headRefName,headRefOid,baseRefName,url,title,mergedAt,mergedBy']);
-  if (v.status !== 0) throw new ConfigChangeError(`can't read PR #${n} on ${repo}: ${v.stderr.trim().split('\n')[0] ?? ''}`);
+  if (v.status !== 0) throw new ConfigChangeError(`can't read PR #${n} on ${repo}`, { cause: v.stderr.trim() });
   try {
     return JSON.parse(v.stdout) as PrView;
   } catch {
@@ -133,7 +133,7 @@ export function saveConfigPr(stateDir: string, r: ConfigPrRecord): void {
 /** The repo's first allowed merge method gh can use, of merge, squash, rebase. */
 export function mergeMethodOf(gh: Gh, repo: string): 'merge' | 'squash' | 'rebase' {
   const methods = gh(['api', `repos/${repo}`, '--jq', '[.allow_merge_commit, .allow_squash_merge, .allow_rebase_merge] | @csv']);
-  if (methods.status !== 0) throw new ConfigChangeError(`can't read ${repo}'s merge settings: ${methods.stderr.trim().split('\n')[0] ?? ''}`);
+  if (methods.status !== 0) throw new ConfigChangeError(`can't read ${repo}'s merge settings`, { cause: methods.stderr.trim() });
   const i = methods.stdout.trim().split(',').findIndex((x) => x === 'true');
   if (i < 0) throw new ConfigChangeError(`${repo} allows no merge method gh can use`);
   return (['merge', 'squash', 'rebase'] as const)[i]!;

@@ -47,6 +47,18 @@ const NAME = /^[a-z][a-z0-9-]{0,20}$/;
 //   move    the file itself moves to the new name (`rekey` here)
 //   drop    the old one goes, and the new name gets none until it makes its own: instance-rename.sh says so, with the
 //           item's `note` (every drop has one)
+// Each source that claims what it takes, machine-wide, in the slot directory: <kind>-claim-<name>.json, written by
+// <by>; and a copy of one a crash left mid-write (src/slot-file.ts: <file>.<pid>.<hex>.tmp). Discord's, then the
+// kinds src/intake/source-claims.ts CLAIM_KINDS lists, in its order (test/instance-records.test.ts holds them equal).
+const CLAIM_SOURCES = {
+  discord: { by: 'the coordinator (src/intake/discord-claims.ts)', writes: 'its chat bot connects' },
+  slack: { by: "the coordinator's Slack source (src/intake/source-claims.ts)", writes: 'its Slack source starts' },
+  linear: { by: "the coordinator's Linear source (src/intake/source-claims.ts)", writes: 'its Linear source starts' },
+};
+const CLAIM_ITEMS = Object.entries(CLAIM_SOURCES).flatMap(([k, s]) => [
+  { kind: 'path', rename: 'drop', note: `the new name's coordinator writes its own when ${s.writes}`, what: `/var/lib/worklane/agent-slots/${k}-claim-<name>.json`, by: s.by },
+  { kind: 'glob', rename: 'drop', note: 'a copy a crash left mid-write: none outlives its write', what: `/var/lib/worklane/agent-slots/${k}-claim-<name>.json.`, by: `${s.by}, a write cut off` },
+]);
 const ITEMS = [
   { kind: 'via', rename: 'new', what: 'test-user.sh remove <name>', when: ['user:wl-test-<name>', 'path:/var/lib/worklane-test/<name>', 'unit:worklane-test-<name>-docker.service', 'sudoers:worklane-test-<name>'], by: 'test-user.sh install' },
   { kind: 'via', rename: 'drop', note: "experiments aren't moved: install them for the new name (experiments.sh install, set, data add); the old jobs' records are archived first", what: 'experiments.sh remove <name>', when: ['user:wl-exp-<name>', 'user:wl-score-<name>', 'path:/var/lib/worklane-exp/<name>', 'path:/etc/worklane/experiments/<name>.json', 'sudoers:worklane-exp-<name>'], by: 'experiments.sh install' },
@@ -67,7 +79,7 @@ const ITEMS = [
   { kind: 'shared', rename: 'drop', note: "staged plugin approvals aren't moved: stage them again for the new name", what: 'plugin-pending', by: "the machine helper's plugin-stage" },
   { kind: 'shared', rename: 'drop', note: 'the new name is no instance add-project is creating: the rename adds its coordinator to the machine helper\'s rule itself', what: 'add-project-new', by: 'instance.sh, as it makes the coordinator (#898); machine-helper.sh takes it off' },
   { kind: 'shared', rename: 'drop', note: "root's word that its repo is a managed app isn't moved: every self-modification lock applies to the new name until root runs managed-apps.sh add <new> <owner/repo>", what: 'managed-apps', by: 'managed-apps.sh add' },
-  { kind: 'path', rename: 'drop', note: "the new name's coordinator writes its own when its chat bot connects", what: '/var/lib/worklane/agent-slots/discord-claim-<name>.json', by: 'the coordinator (src/intake/discord-claims.ts)' },
+  ...CLAIM_ITEMS,
   { kind: 'path', rename: 'drop', note: "plugins aren't moved: approve them again for the new name (plugins.sh confirm); its MCP broker and secrets aren't either (mcp-broker.sh <new>, then its secrets)", what: '/etc/worklane/plugins/<name>.json', by: 'plugins.sh confirm (the allowlist)' },
   { kind: 'path', rename: 'drop', note: "plugins aren't moved: approve them again for the new name (plugins.sh confirm); its MCP broker and secrets aren't either (mcp-broker.sh <new>, then its secrets)", what: '/var/lib/worklane/plugins/previews/<name>', by: "the machine helper's plugin-fetch" },
   { kind: 'path', rename: 'drop', note: "plugins aren't moved: approve them again for the new name (plugins.sh confirm); its MCP broker and secrets aren't either (mcp-broker.sh <new>, then its secrets)", what: '/var/lib/worklane/plugins/store/<name>', by: 'plugins.sh confirm (approved plugins, and the empty root)' },
@@ -125,7 +137,7 @@ const SHARED_FILES = [
   { at: '/etc/worklane/testrun-network.json', item: 'testrun-net' },
   { at: '/etc/worklane/updates.json', item: 'canary' },
   { at: '/var/lib/worklane/claude-account', item: 'claude-profiles, claude-status, claude-paused (switch.jsonl, profile-ops.jsonl: logs, kept)' },
-  { at: '/var/lib/worklane/agent-slots', item: 'incidents, discord-claim-<name>.json (the slot locks name no instance)' },
+  { at: '/var/lib/worklane/agent-slots', item: 'incidents, <kind>-claim-<name>.json for each of CLAIM_SOURCES (the slot locks name no instance)' },
   { at: '/var/lib/worklane/pending-signers.json', item: 'pending-signers' },
   { at: '/var/lib/worklane/add-project-new', item: 'add-project-new' },
   { at: '/var/lib/worklane/init', item: '/var/lib/worklane/init/<name>.json' },
@@ -782,8 +794,8 @@ function remove(name, archive, prefix = '') {
 
 /**
  * Move <old>'s records in the shared files to <new> (never the GPU grant: testrun-gpu.sh's own disable and enable do
- * that, in its strict form), its init record to <new>.json, and drop its Discord claim (<new>'s coordinator makes its
- * own). What <old> had is kept in <archive> first.
+ * that, in its strict form), its init record to <new>.json, and drop its claim of each of CLAIM_SOURCES (<new>'s
+ * coordinator makes its own). What <old> had is kept in <archive> first.
  */
 function rekey(old, nu, archive, prefix = '') {
   if (!NAME.test(old) || !NAME.test(nu) || old === nu) throw new Error('rekey: two different instance names');
@@ -803,7 +815,7 @@ function rekey(old, nu, archive, prefix = '') {
     fs.renameSync(init(old), init(nu));
     moved.push('init');
   }
-  fs.rmSync(at(prefix, `${P.slots}/discord-claim-${old}.json`), { force: true });
+  for (const k of Object.keys(CLAIM_SOURCES)) fs.rmSync(at(prefix, `${P.slots}/${k}-claim-${old}.json`), { force: true });
   return moved;
 }
 
@@ -960,7 +972,7 @@ function main(argv) {
   return 2;
 }
 
-module.exports = { holdSlot, releaseSlot, updaterQuiet, ENGINE_OWNED, ITEMS, NOT_RECORDS, SHARED_FILES, SHARED, REKEY, ARCHIVE_DIR, items, plan, remove, rekey, carry, moveText, withLock, writeKeeping };
+module.exports = { holdSlot, releaseSlot, updaterQuiet, ENGINE_OWNED, CLAIM_SOURCES, ITEMS, NOT_RECORDS, SHARED_FILES, SHARED, REKEY, ARCHIVE_DIR, items, plan, remove, rekey, carry, moveText, withLock, writeKeeping };
 
 if (require.main === module) {
   try {

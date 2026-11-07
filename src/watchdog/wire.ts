@@ -3,6 +3,7 @@
 // intake.yaml's discord.ops_channel, else the machine's watchdog.json) with its own Discord bot token.
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { readStopFile, stopFilePath } from '../auto-merge-stop.js';
 import type { StoredEvent } from '../events/types.js';
 import { instancesDir } from '../instance.js';
 import type { IntakeConfig } from '../intake/report.js';
@@ -53,14 +54,8 @@ export function machineInstances(dir = instancesDir()): string[] {
 
 /** The auto-merge stop file in an instance's state dir, when there is one. */
 export function readStop(stateDir: string): { reason: string; by: string | null } | null {
-  const file = join(stateDir, 'auto-merge-stopped.json');
-  if (!existsSync(file)) return null;
-  try {
-    const j = JSON.parse(readFileSync(file, 'utf8')) as { reason?: unknown; by?: unknown };
-    return { reason: String(j.reason ?? 'stopped'), by: typeof j.by === 'string' ? j.by : null };
-  } catch {
-    return { reason: 'the stop file is unreadable', by: null };
-  }
+  const stop = readStopFile(stopFilePath(stateDir));
+  return stop ? { reason: stop.reason, by: stop.by } : null;
 }
 
 export function watchdogForInstance(o: {

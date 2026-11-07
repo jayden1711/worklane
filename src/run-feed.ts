@@ -8,7 +8,7 @@
 // never affects the run.
 import { appendFileSync, existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { redact } from './events/redact.js';
+import { redact, redactClip } from './events/redact.js';
 import { groupOnlyDir } from './os/index.js';
 import { RUNS_DIR } from './run-record.js';
 
@@ -39,11 +39,13 @@ export type FeedItem = { seq: number; at: string } & (
 
 type Body = FeedItem extends infer F ? (F extends { seq: number; at: string } ? Omit<F, 'seq' | 'at'> : never) : never;
 
-const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n)} … [${s.length - n} more chars]` : s);
+// Redacted before the cut (#988): a secret across it is never cut short of its rule and kept.
+const marked = (r: { text: string; more: number }) => (r.more ? `${r.text} … [${r.more} more chars]` : r.text);
+const clip = (s: string, n: number) => marked(redactClip(s, n));
 const clipLines = (s: string, lines: number, chars: number) => {
-  const all = s.split('\n');
-  const head = all.slice(0, lines).join('\n');
-  return clip(all.length > lines ? `${head}\n… [${all.length - lines} more lines]` : head, chars);
+  const r = redactClip(s, chars);
+  const shown = r.text.split('\n');
+  return shown.length > lines ? `${shown.slice(0, lines).join('\n')}\n… [${s.split('\n').length - lines} more lines]` : marked(r);
 };
 const textOf = (c: unknown): string => (typeof c === 'string' ? c : Array.isArray(c) ? c.map((x) => (x && typeof x === 'object' && 'text' in x ? String((x as { text: unknown }).text ?? '') : '')).join('') : '');
 const lines = (s: string, mark: '-' | '+') => (s === '' ? [] : s.replace(/\n$/, '').split('\n').map((l) => `${mark}${l}`));

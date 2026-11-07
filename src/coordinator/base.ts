@@ -40,6 +40,7 @@ import { limitHit, pauseOf, resetWords, USAGE_INCIDENT, type LimitHit, type Usag
 import { cappedModel } from './model-routing.js';
 import { resolveProvider } from './providers.js';
 import { providerCost, providerOf } from '../providers.js';
+import { gitRemote } from '../git-remote.js';
 
 export abstract class CoordinatorBase {
   /** Defined in a later part (or in Coordinator); declared here for the calls in this one. */
@@ -239,7 +240,7 @@ export abstract class CoordinatorBase {
       },
     };
     this.repoCfg = d.cfg;
-    this.remote = d.remote ?? 'origin';
+    this.remote = gitRemote(d.remote ?? 'origin');
     // The worktree root resolved to its real path once, here, from the start config (#890 round 19): a root that is a
     // link works as on main, and a link that appears on the way later refuses an add (WorktreeOptions.rootResolved).
     // The task directory is one of the paths a worktree place must never hide (keptPaths).

@@ -29,6 +29,7 @@ import { mcpRunArgs, type McpRun } from './mcp/client.js';
 import { limitHit, USAGE_LIMIT_TEXT, type LimitHit, type RateLimitInfo } from './usage-limit.js';
 import { authFailedDetail, isAuthFailure } from './claude-auth-failure.js';
 import { EFFORTS, type Effort } from './roles.js';
+import { redactCut, redactString } from './events/redact.js';
 
 export type TerminalReason = 'succeeded' | 'failed' | 'timed_out' | 'stalled' | 'rate_limited' | 'canceled_by_reconciliation' | 'budget_exhausted' | 'auth_mismatch' | 'auth_failed' | 'stopped' | 'stuck';
 
@@ -337,7 +338,7 @@ export function claudeAuthStatus(env: NodeJS.ProcessEnv, runAs?: RunAs, bin = 'c
     const account = typeof j.email === 'string' && j.email ? j.email : typeof j.orgName === 'string' && j.orgName ? j.orgName : null;
     return { method: loginMethod(j), text: '', account: account?.slice(0, 200) ?? null };
   } catch {
-    return { method: 'unknown', text: `${r.stdout ?? ''}\n${r.stderr ?? ''}`.trim().slice(-500) };
+    return { method: 'unknown', text: redactTail(`${r.stdout ?? ''}\n${r.stderr ?? ''}`.trim(), 500) };
   }
 }
 
@@ -477,6 +478,34 @@ export function cliArgs(req: RunRequest, settings?: object, systemPromptFile?: s
   // claude --help: "-r, --resume [value]  Resume a conversation by session ID". runOnce refuses an id that isn't one.
   if (req.resume && SESSION_ID.test(req.resume)) args.push('--resume', req.resume);
   return args;
+}
+
+/**
+ * The last `max` characters of `s` once redacted (#1065): all of `s` is redacted, never a window of it. A window's
+ * start can fall between a credential's label and its value (`Bearer <token>`), leaving the value unrecognised.
+ * Callers pass bounded text: stderr as keepStderr holds it, or a command's captured output.
+ */
+export function redactTail(s: string, max: number): string {
+  const r = redactString(s);
+  return r.length <= max ? r : r.slice(-max);
+}
+
+/** How much of claude's stderr a run keeps: its end. */
+export const STDERR_KEPT = 4000;
+
+/**
+ * claude's stderr so far with `chunk` added, cut to its last `max` characters once it holds twice that. A cut redacts
+ * first (#1065), so a secret across it is hidden whole, never kept as its end. The run after the last whitespace is
+ * left out of the redaction and kept as it came (unless it outgrew `max`): a token there may be only part-written,
+ * and hiding its start would leave the rest, still to come, shown.
+ */
+export function keepStderr(kept: string, chunk: string, max = STDERR_KEPT): string {
+  const s = kept + chunk;
+  if (s.length <= 2 * max) return s;
+  let end = s.length;
+  while (end > 0 && !/\s/.test(s[end - 1]!)) end--;
+  if (s.length - end > max) return redactTail(s, max);
+  return redactTail(s.slice(0, end), max) + s.slice(end);
 }
 
 /** The end of claude's stderr, for a failure report: its last few non-empty lines. */
@@ -905,10 +934,11 @@ export class CliRunner implements AgentRunner {
         }
       });
       child.stderr.on('data', (d: Buffer) => {
-        stderr = (stderr + d.toString()).slice(-4000);
+        stderr = keepStderr(stderr, d.toString());
       });
       child.on('close', (code) => {
         cleanup();
+        stderr = redactTail(stderr, STDERR_KEPT);
         inputOpen = false;
         // Messages still held when the session ended were never delivered.
         for (const m of held.splice(0)) {
@@ -941,7 +971,7 @@ export class CliRunner implements AgentRunner {
         // or its own words for the limit in an error result. Its text is kept: it may name the reset time.
         const said = `${r?.is_error || r?.subtype !== 'success' ? (r?.result ?? '') : ''}\n${stderrTail(stderr)}`;
         if (rateLimited || r?.api_error_status === 429 || ((!r || r.is_error || r.subtype !== 'success') && USAGE_LIMIT_TEXT.test(said))) {
-          const text = (r?.is_error ? (r.result ?? '') : '').trim().slice(0, 300);
+          const text = redactCut((r?.is_error ? (r.result ?? '') : '').trim(), 300);
           return done({ reason: 'rate_limited', detail: `usage or rate limit reached${text ? `: ${text}` : ''}`, limit: limitHit({ info: rateLimited, text: said, now: (this.retry.now ?? Date.now)() }), ...base });
         }
         // The API refused the login (401/403, an invalid or expired key or token): its own reason, never an ordinary
@@ -956,8 +986,8 @@ export class CliRunner implements AgentRunner {
         if (!r) return done({ reason: 'failed', detail: `claude exited ${code} without a result: ${stderrTail(stderr)}`, ...base });
         if (r.subtype === 'error_max_budget_usd') return done({ reason: 'budget_exhausted', detail: 'per-run budget reached', ...base });
         // An error result often carries no text of its own; claude's stderr then says what went wrong.
-        if (r.subtype !== 'success' || r.is_error) return done({ reason: 'failed', detail: `${r.subtype}: ${(r.result ?? '').trim().slice(0, 500) || stderrTail(stderr)}`, ...base });
-        done({ reason: 'succeeded', detail: (r.result ?? '').slice(0, 500), ...(r.structured_output !== undefined ? { structured: r.structured_output } : {}), ...base });
+        if (r.subtype !== 'success' || r.is_error) return done({ reason: 'failed', detail: `${r.subtype}: ${redactCut((r.result ?? '').trim(), 500) || stderrTail(stderr)}`, ...base });
+        done({ reason: 'succeeded', detail: redactCut(r.result ?? '', 500), ...(r.structured_output !== undefined ? { structured: r.structured_output } : {}), ...base });
       });
     });
   }

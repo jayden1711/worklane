@@ -3,8 +3,39 @@
 // convenience on top; test/user-facing-error-probes.test.ts drives the ways around the type.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { USER_FACING_TEXTS, UserFacingError, userFacing } from '../src/user-facing-error.js';
+import { spawnSync } from 'node:child_process';
+import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
+import { USER_FACING_TEXTS, UserFacingError, causeChain, logDetail, userFacing } from '../src/user-facing-error.js';
 import { CREDENTIAL_REFUSED } from '../src/claude-credential-guard.js';
+import { repoRoot } from './helpers.js';
+
+test('#882: a token a cause carries across the clip at 2000 characters is redacted, never logged in part', () => {
+  const body = 'A1b2C3d4'.repeat(5);
+  // The cause reads `Error: x…xghp_…`: the token starts at character 1977 and runs past 2000.
+  const e = new Error('outer', { cause: new Error(`${'x'.repeat(1970)}ghp_${body}`) });
+  const lines: string[] = [];
+  logDetail('GET /x failed', e, (l) => lines.push(l));
+  assert.equal(lines.length, 1);
+  assert.ok(!lines[0]!.includes(body.slice(0, 12)), 'part of the token reached the log');
+  assert.ok(lines[0]!.includes('gh*_[REDACTED]'), lines[0]!.slice(-80));
+});
+
+test('#882: a cause chain that loops ends after 4 causes', () => {
+  // In a child with a timeout: a chain walked without its bound never returns.
+  const probe = "const { causeChain } = await import(process.argv[1]); const e = new Error('loop'); e.cause = e; console.log(JSON.stringify(causeChain(e)));";
+  const r = spawnSync(process.execPath, ['--input-type=module', '-e', probe, pathToFileURL(join(repoRoot, 'dist', 'src', 'user-facing-error.js')).href], { encoding: 'utf8', timeout: 20_000, killSignal: 'SIGKILL' });
+  assert.equal(r.status, 0, `${r.signal ?? ''} ${r.stderr.slice(0, 500)}`);
+  assert.deepEqual(JSON.parse(r.stdout), ['Error: loop', 'Error: loop', 'Error: loop', 'Error: loop']);
+});
+
+test('#882: an oversized cause is clipped to 2000 characters in the log', () => {
+  const e = new Error('outer', { cause: 'y'.repeat(50_000) });
+  assert.deepEqual(causeChain(e), ['y'.repeat(2000)]);
+  const lines: string[] = [];
+  logDetail('GET /x failed', e, (l) => lines.push(l));
+  assert.ok(lines[0]!.endsWith(`\n  cause: ${'y'.repeat(2000)}`) && !lines[0]!.includes('y'.repeat(2001)), String(lines[0]!.length));
+});
 
 test('#864: userFacing makes an error the outer catch shows: its status and its vetted text', () => {
   const e = userFacing(413, 'body too large');

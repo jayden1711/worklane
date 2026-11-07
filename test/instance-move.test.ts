@@ -3,7 +3,7 @@ import { restoreIsolated } from './isolate.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { gzipSync } from 'node:zlib';
@@ -11,9 +11,44 @@ import { BRAND } from '../src/brand.js';
 import { EventLog } from '../src/events/log.js';
 import { projectStateDir } from '../src/guardrails/context.js';
 import { exportBundle, importBundle, readBundle } from '../src/instance-move.js';
+import { tryLock } from '../src/locks.js';
 import { engineCli, exampleProject } from './helpers.js';
 
 const posix = process.platform === 'win32' && 'POSIX file modes';
+
+test('native lock guard inodes never travel in exports or imports, even while the target owns a lock', () => {
+  const state = mkdtempSync(join(tmpdir(), 'move-native-'));
+  const { dir: root } = exampleProject();
+  const guard = join(state, '.coordinator.lock.flock');
+  const cfgGuard = join(root, BRAND.configDir, '.config.lock.flock');
+  writeFileSync(guard, '', { mode: 0o444 });
+  const orphanName = '.coordinator.lock.flock.123.0123456789abcdef.tmp';
+  linkSync(guard, join(state, orphanName));
+  writeFileSync(cfgGuard, '', { mode: 0o444 });
+  const out = join(state, 'out.bundle');
+  const exported = exportBundle({ stateDir: state, root, repo: null, host: 'fixture', out });
+  const excluded = ['state/.coordinator.lock.flock', `state/${orphanName}`, 'config/.config.lock.flock'];
+  for (const path of excluded) {
+    assert.ok(!exported.files.includes(path));
+    assert.ok(exported.left.some((entry) => entry.path === path && /native lock guard/.test(entry.why)));
+  }
+  const b = readBundle(out);
+  b.files = excluded.map((path) => ({ path, data: Buffer.from('must not replace an inode').toString('base64') }));
+  writeFileSync(out, gzipSync(JSON.stringify(b)).toString('base64'));
+  const target = mkdtempSync(join(tmpdir(), 'move-native-target-'));
+  const owned = tryLock(join(target, 'coordinator.lock'), 'import target');
+  assert.ok('lock' in owned);
+  linkSync(join(target, '.coordinator.lock.flock'), join(target, orphanName));
+  try {
+    const before = statSync(join(target, '.coordinator.lock.flock'));
+    const imported = importBundle({ file: out, stateDir: target, root, instance: false });
+    assert.equal(imported.skipped.length, 3);
+    assert.deepEqual([statSync(join(target, '.coordinator.lock.flock')).dev, statSync(join(target, '.coordinator.lock.flock')).ino], [before.dev, before.ino]);
+    assert.equal(statSync(join(target, '.coordinator.lock.flock')).mode & 0o777, 0o444);
+    assert.equal(readFileSync(cfgGuard, 'utf8'), '');
+    assert.ok(!('lock' in tryLock(join(target, 'coordinator.lock'), 'contender')));
+  } finally { owned.lock.release(); }
+});
 
 /** A laptop's state: history, init's checklist, findings, and what must never travel. */
 function laptop() {
@@ -46,6 +81,26 @@ test('export: one file with the history (a whole snapshot), the checklist and th
   const b = readBundle(out);
   assert.equal(b.from.repo, 'example-org/example-shop');
   assert.ok(!b.files.some((f) => /token|lock|\.log$|worktrees/.test(f.path)));
+});
+
+test("export: a killed owner-only write's staging file (.<name>.<16 hex>.new) is left out as a temporary file", () => {
+  const { dir: root } = exampleProject();
+  const l = laptop();
+  l.log.close();
+  writeFileSync(join(l.stateDir, '.init.json.0123456789abcdef.new'), '{"version":1,"mode":"half-written"}');
+  mkdirSync(join(l.stateDir, 'intake'), { recursive: true });
+  writeFileSync(join(l.stateDir, 'intake', '.alerts.json.fedcba9876543210.new'), '{}');
+  // Not staging names: not hidden, or no 16 hex digits.
+  writeFileSync(join(l.stateDir, 'notes.v2.0123456789abcdef.new'), 'kept');
+  writeFileSync(join(l.stateDir, 'intake', 'notes.new'), 'kept');
+  const out = join(mkdtempSync(join(tmpdir(), 'move-out-')), 'b.bundle');
+  const r = exportBundle({ stateDir: l.stateDir, root, repo: null, host: 'laptop', out });
+  for (const path of ['state/.init.json.0123456789abcdef.new', 'state/intake/.alerts.json.fedcba9876543210.new']) {
+    assert.ok(!r.files.includes(path), `${path} travelled`);
+    assert.ok(r.left.some((x) => x.path === path && x.why === 'a temporary file'), `${path} isn't listed as left out`);
+  }
+  assert.ok(r.files.includes('state/init.json'), 'the file itself still travels');
+  for (const path of ['state/notes.v2.0123456789abcdef.new', 'state/intake/notes.new']) assert.ok(r.files.includes(path), `${path} was left out`);
 });
 
 test('import: the history and checklist into a fresh state dir, readable there; history of its own refused unless --force', { skip: posix }, () => {

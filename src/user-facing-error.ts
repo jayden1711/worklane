@@ -78,6 +78,52 @@ export function userFacing<const T extends UserFacingText>(status: number, text:
 /** What an error answer says when the error isn't one meant for the page: never its message. */
 export const INTERNAL_ERROR_TEXT = 'the dashboard hit an internal error; the detail is in its log on the machine';
 
+/** The end of a fixed text whose detail went to logDetail (issue #882). */
+export const DETAIL_LOGGED = "the detail is in the dashboard's log on the machine";
+
+const MAX_CAUSES = 4;
+const MAX_CAUSE_CHARS = 2000;
+
+/**
+ * An error's `cause` chain, outermost first: each one's message (or text), at most MAX_CAUSES of them, each redacted
+ * and then clipped (clipped first, a token cut at the end no longer has the shape the redactor knows it by).
+ * The stack an Error prints leaves its cause out, and the engine's refusals keep their raw detail there (#882).
+ */
+export function causeChain(e: unknown): string[] {
+  const out: string[] = [];
+  for (let c = e instanceof Error ? e.cause : undefined; c !== undefined && out.length < MAX_CAUSES; c = c instanceof Error ? c.cause : undefined) {
+    out.push(redactString(c instanceof Error ? `${c.name}: ${c.message}` : String(c)).slice(0, MAX_CAUSE_CHARS));
+  }
+  return out;
+}
+
+/** An error's message and its causes, for a terminal (a root shell's CLI), where the detail is the admin's to see. */
+export const messageWithCauses = (e: unknown): string => [e instanceof Error ? e.message : String(e), ...causeChain(e)].join(': ');
+
+/**
+ * An error's detail, or a raw text (a child's stderr, GitHub's answer), to the server's own log on the machine only,
+ * through the shared redactor, after `what` (which names the route, never its query). The page gets a fixed text.
+ */
+export function logDetail(what: string, e: unknown, log: (line: string) => void = (l) => console.error(l)): void {
+  try {
+    const causes = causeChain(e).map((c) => `\n  cause: ${c}`).join('');
+    log(redactString(`${what}: ${e instanceof Error ? (e.stack ?? `${e.name}: ${e.message}`) : String(e)}${causes}`));
+  } catch {
+    // A log (or a thrown value's own stack or toString) that throws never turns the fixed answer into a crash.
+  }
+}
+
+/**
+ * An engine refusal's own text for the page (ConfigChangeError, SettingsError, SetupModeError, PolicyEditError: the
+ * engine's words). Its `cause`, where the refusal has one (a child's stderr, GitHub's answer, a path), goes to the log
+ * only, after `what`, and the text says so.
+ */
+export function refusalText(what: string, e: Error, log: (line: string) => void = (l) => console.error(l)): string {
+  if (e.cause === undefined) return e.message;
+  logDetail(what, e.cause, log);
+  return `${e.message}; ${DETAIL_LOGGED}`;
+}
+
 /**
  * A server's last answer to an error (the dashboard's and the hub's request handlers): a UserFacingError's status and
  * vetted text, and for anything else a 500 with INTERNAL_ERROR_TEXT. The detail (which may name a path under the
@@ -87,10 +133,6 @@ export const INTERNAL_ERROR_TEXT = 'the dashboard hit an internal error; the det
 export function errorAnswer(e: unknown, req: { method?: string | undefined }, pathname: string, log: (line: string) => void = (l) => console.error(l)): { status: number; body: { error: string } } {
   const shown = UserFacingError.shown(e);
   if (shown) return { status: shown.status, body: { error: shown.text } };
-  try {
-    log(redactString(`${req.method ?? '?'} ${pathname} failed: ${e instanceof Error ? (e.stack ?? `${e.name}: ${e.message}`) : String(e)}`));
-  } catch {
-    // A log (or a thrown value's own stack or toString) that throws never turns the fixed answer into a crash.
-  }
+  logDetail(`${req.method ?? '?'} ${pathname} failed`, e, log);
   return { status: 500, body: { error: INTERNAL_ERROR_TEXT } };
 }

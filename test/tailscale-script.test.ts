@@ -47,7 +47,7 @@ as_root() { :; }
 user_exists() { [ -e "$T/users/$1" ]; }
 # No root here: the file and its mode as the script asked, and who it asked to own it, recorded.
 put_file() { cat > "$4.tmp"; chmod "$3" "$4.tmp"; echo "$1 $2 $3" > "$T/owners/$(basename "$4")"; mv -f "$4.tmp" "$4"; }
-TAILSCALE_BIN="$T/sbin/tailscale" TAILSCALE_DIR="$T/var" TAILSCALE_LOCK="$T/lock" TAILSCALE_KEYRING="$T/keyring.gpg" TAILSCALE_LIST="$T/tailscale.list"
+TAILSCALE_BIN="$T/sbin/tailscale" TAILSCALE_DIR="$T/var" TAILSCALE_LOCK="$T/locks/tailscale.lock" MACHINE_LOCK_UID=${process.getuid?.() ?? 0} TAILSCALE_KEYRING="$T/keyring.gpg" TAILSCALE_LIST="$T/tailscale.list"
 OS_RELEASE="$T/os-release" HUB_UNIT="$T/hub.service"
 TAILSCALE_UP_SECONDS="\${TEST_UP_SECONDS:-20}" TAILSCALE_SERVE_SECONDS=5
 export TAILSCALE_STAND_IN_DIR="$T/ts"

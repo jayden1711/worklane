@@ -1,7 +1,7 @@
 // OS adapter layer. This is the only module allowed to branch on the
 // platform (test/os-boundary.test.ts enforces it).
-import { execFileSync, spawn } from './child-process.js';
-import { chmodSync, chownSync, closeSync, constants as fsConstants, existsSync, fstatSync, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, readSync, realpathSync, renameSync, rmSync, statSync, statfsSync, writeFileSync } from 'node:fs';
+import { execFileSync, spawn, spawnSync } from './child-process.js';
+import { chmodSync, chownSync, closeSync, constants as fsConstants, existsSync, fchmodSync, fchownSync, fstatSync, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readlinkSync, readSync, realpathSync, renameSync, rmSync, statSync, statfsSync, writeFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { testRunSign } from './system-paths.js';
 import { availableParallelism, homedir, hostname, loadavg, userInfo } from 'node:os';
@@ -73,12 +73,12 @@ function agentDir(dir: string, gid: number, mode: number, what: string): void {
   chmodSync(dir, mode);
 }
 
-/** A file the agent user can read but not write: owner this user, group `gid`, 0640. */
+/** A file the agent user can read but not write: owner this user, group `gid`, 0640, written as writeStaged does. */
 export function writeAgentReadable(file: string, data: string | Buffer, gid: number): void {
-  writeFileSync(file, data, { mode: 0o640 });
-  if (process.platform === 'win32') return;
-  chownSync(file, process.getuid!(), gid);
-  chmodSync(file, 0o640);
+  writeStaged(file, data, (fd) => {
+    fchownSync(fd, process.getuid!(), gid);
+    fchmodSync(fd, 0o640);
+  });
 }
 
 /**
@@ -119,52 +119,90 @@ export function groupOnlyDir(dir: string): void {
   groupOnly(dir);
 }
 
-/** Write a state file readable by the coordinator's user and group only. */
 /** A directory only this user can enter (0700): for data no group member may read, such as raw intake reports. */
 export function ownerOnlyDir(dir: string): void {
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   if (process.platform !== 'win32') chmodSync(dir, 0o700);
 }
 
-/** Write a file only this user can read (0600), atomically (a temp file in the same directory, then a rename). */
+/** A new file only: created exclusively, never through a link (O_NOFOLLOW where the OS has it; O_EXCL refuses one anyway). */
+const NEW_FILE = fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | (fsConstants.O_NOFOLLOW ?? 0);
+
+/**
+ * Write `file` atomically, never through anything planted beside it (#950, #1062; #918 round 4, A11). The data goes
+ * to a new file at a staging name no one can know beforehand (stagingName), created exclusively without following a
+ * link (NEW_FILE), `created` less the umask at first; `own` (POSIX only) sets its group and mode, and the data is
+ * written, through that one descriptor, never by name. Then rename(2) moves it over `file`: a rename replaces whatever
+ * is at `file`, a link included, and never follows it. A staging name that is no longer the file written (a link
+ * swapped in for it meanwhile) is refused, not published. The staging name is removed on any failure; a kill leaves
+ * it (stagingName).
+ */
+function writeStaged(file: string, data: string | Uint8Array, own: (fd: number) => void, created = 0o600): void {
+  const staged = stagingName(file);
+  // INVARIANT: one exclusive open; the group, the mode and the data only through its descriptor, never by name (a name can be swapped).
+  const fd = openSync(staged, NEW_FILE, created);
+  try {
+    let made;
+    try {
+      if (process.platform !== 'win32') own(fd);
+      writeFileSync(fd, data);
+      made = fstatSync(fd);
+    } finally {
+      closeSync(fd);
+    }
+    const now = lstatSync(staged, { throwIfNoEntry: false });
+    if (!now?.isFile() || now.ino !== made.ino || now.dev !== made.dev) throw new Error(`${staged} was replaced while ${file} was written; refusing to publish it`);
+    renameSync(staged, file);
+  } finally {
+    dropStaged(staged);
+  }
+}
+
+/** Write a file only this user can read (0600), atomically, never through anything planted beside it (writeStaged). */
 export function writeOwnerOnly(file: string, data: string): void {
-  const tmp = `${file}.${process.pid}.tmp`;
-  writeFileSync(tmp, data, { mode: 0o600 });
-  if (process.platform !== 'win32') chmodSync(tmp, 0o600);
-  renameSync(tmp, file);
+  writeStaged(file, data, (fd) => fchmodSync(fd, 0o600));
 }
 
 /**
- * A staging name beside `file` that no one else can know beforehand: `.<name>.<16 random hex>.new`. writeOwnerOnly
- * writes it through its own `<staged>.<pid>.tmp`, so that name is unpredictable too. A process killed between
- * staging and publishing leaves these names behind (0600, holding the data): nothing removes them but the next
- * call's own, which has another name.
+ * Write `file` as writeOwnerOnly does, opened to one group, read only (0640): on Linux, when the group exists and this
+ * process may hand the file to it (root, or a member). The group and mode are set through the staging file's
+ * descriptor before it is published, never by name after (#1062). Anywhere else, or when it can't, the file is 0600:
+ * false.
+ */
+export function writeGroupReadable(file: string, data: string, group: string, platform: NodeJS.Platform = process.platform): boolean {
+  const gid = platform === 'linux' ? groupId(group) : null;
+  let shared = false;
+  writeStaged(file, data, (fd) => {
+    fchmodSync(fd, 0o600);
+    if (gid === null) return;
+    try {
+      fchownSync(fd, process.getuid!(), gid);
+      fchmodSync(fd, 0o640);
+      shared = true;
+    } catch {
+      // not this process's to hand over: it stays 0600
+    }
+  });
+  return shared;
+}
+
+/**
+ * A staging name beside `file` that no one else can know beforehand: `.<name>.<16 random hex>.new`. A process
+ * killed between staging and publishing leaves it behind (this user's, holding the data, with the mode the file
+ * would have had, or 0600): nothing removes it but the next call's own, which has another name.
  */
 function stagingName(file: string): string {
   return join(dirname(file), `.${basename(file)}.${randomBytes(8).toString('hex')}.new`);
 }
 
-/** Remove a staging name and writeOwnerOnly's temp name for it, whatever is there (a link is removed, not followed). */
+/** Remove a staging name, whatever is there (a link is removed, not followed). */
 function dropStaged(staged: string): void {
   rmSync(staged, { force: true });
-  rmSync(`${staged}.${process.pid}.tmp`, { force: true });
 }
 
-/**
- * Replace `file` with `data`, this user's only (0600), never writing through anything planted beside it (#918 round
- * 4, A11: writeOwnerOnly's temp name `<file>.<pid>.tmp` can be guessed, and a link planted there was written through
- * and chmod-ed). The data goes through writeOwnerOnly (the reviewed writer) to an unpredictable staging name
- * (stagingName), which rename(2) then moves over `file`: a rename replaces whatever is at `file`, a link included,
- * and never follows it. The staging names are removed on any failure.
- */
+/** Replace `file` with `data`, this user's only (0600): writeOwnerOnly, under the name the receipts store calls it by (#918). */
 export function replaceOwnerOnly(file: string, data: string): void {
-  const staged = stagingName(file);
-  try {
-    writeOwnerOnly(staged, data);
-    renameSync(staged, file);
-  } finally {
-    dropStaged(staged);
-  }
+  writeOwnerOnly(file, data);
 }
 
 /**
@@ -192,10 +230,10 @@ export function syncToDisk(file: string): void {
  * Create `file` holding `data`, this user's only (0600), never replacing anything and never writing through a link:
  * for a secret made once, such as a receipt key (#717). The data goes through writeOwnerOnly (the reviewed writer)
  * to a staging name beside it (stagingName), then is published with linkSync(staged, file): link(2) fails with
- * EEXIST when anything is at `file`, a dangling link included, and never follows one there. The staging name (and
- * writeOwnerOnly's own temp name, after a failed write) is removed whatever happens, but a kill leaves it (see
- * stagingName). Throws EEXIST when `file` was taken. The published file is checked: it must be the very file staged
- * (same inode), a regular file with exactly two names (staged and `file`), and, on POSIX, mode 0600 and this user's,
+ * EEXIST when anything is at `file`, a dangling link included, and never follows one there. The staging name is
+ * removed whatever happens, but a kill leaves it (see stagingName). Throws EEXIST when `file` was taken. The
+ * published file is checked: it must be the very file staged (same inode), a regular file with exactly two names
+ * (staged and `file`), and, on POSIX, mode 0600 and this user's,
  * holding `data`. Anything else (the staging name swapped meanwhile, for another file or a hard link to one: #918
  * round 3 advisory) is removed and refused.
  */
@@ -239,12 +277,9 @@ export function notOwnerOnlyDir(dir: string): string | null {
   return null;
 }
 
-/** Write an executable file (a git hook) atomically, with exactly `mode` (0700: this user's only; or 0755). */
+/** Write an executable file (a git hook) atomically, with exactly `mode` (0700: this user's only; or 0755), as writeStaged does. */
 export function writeExecutable(file: string, data: string, mode: 0o700 | 0o755): void {
-  const tmp = `${file}.${process.pid}.tmp`;
-  writeFileSync(tmp, data, { mode });
-  if (process.platform !== 'win32') chmodSync(tmp, mode);
-  renameSync(tmp, file);
+  writeStaged(file, data, (fd) => fchmodSync(fd, mode));
 }
 
 /**
@@ -416,9 +451,24 @@ export function currentUser(): string {
   }
 }
 
+/**
+ * Write a state file readable by the coordinator's user and group only, as writeStaged does, with the modes an
+ * in-place write then groupOnly gave (#1062 rounds 2 and 3): a regular file it replaces (not a link, nor a FIFO)
+ * stays 0600 if it was 0600, else 0660, whatever the umask; a new file is 0660, or 0600 when the umask leaves it
+ * 0600. The staging file is made with the old file's mode within 0660 (a new one: 0660), less the umask, so where the
+ * file system refuses the mode change (some FUSE mounts) it is never wider than groupOnly's swallowed chmod left it:
+ * the same, unless the umask narrows it. The process umask is never changed to avoid that: other threads create files.
+ */
 export function writeGroupOnly(file: string, data: string | Uint8Array): void {
-  writeFileSync(file, data, { mode: 0o660 });
-  groupOnly(file);
+  const old = lstatSync(file, { throwIfNoEntry: false });
+  const was = old?.isFile() ? old.mode & 0o777 : null;
+  writeStaged(file, data, (fd) => {
+    try {
+      fchmodSync(fd, (was ?? fstatSync(fd).mode & 0o777) === 0o600 ? 0o600 : 0o660);
+    } catch {
+      // the file system keeps its own modes
+    }
+  }, (was ?? 0o660) & 0o660);
 }
 
 export function detectOs(setting: OsSetting = 'auto'): OsKind {
@@ -618,6 +668,27 @@ export function ownedPath(path: string, o: { uid?: number; lstat?: typeof lstatS
   return false;
 }
 
+/**
+ * Why `file` isn't a program only root can change, or null when it is: an executable regular file (its links followed),
+ * root's, writable by no group or other, on a path only root can redirect (ownedPath as root). Native Windows has no
+ * POSIX owners to check, so there it always has a reason: a caller that must know refuses.
+ */
+export function notRootsProgram(file: string): string | null {
+  if (process.platform === 'win32') return "can't be checked on this OS, which has no POSIX file owners";
+  let st;
+  try {
+    st = statSync(file);
+  } catch (e) {
+    return `can't be looked at (${(e as NodeJS.ErrnoException).code ?? 'error'})`;
+  }
+  if (!st.isFile()) return 'is not a regular file';
+  if (!(st.mode & 0o111)) return 'is not executable';
+  if (st.uid !== 0) return `belongs to uid ${st.uid}, not root`;
+  if (st.mode & 0o022) return `may be written by others than root (mode ${(st.mode & 0o777).toString(8)})`;
+  if (!ownedPath(file, { uid: 0 })) return 'is on a path someone other than root can change';
+  return null;
+}
+
 /** Where Homebrew installs itself (`brew --prefix`): Apple silicon and Intel macOS. */
 export const BREW_PREFIXES: readonly string[] = ['/opt/homebrew', '/usr/local'];
 
@@ -688,7 +759,7 @@ export function pidAlive(pid: number): boolean {
 
 /**
  * Where this process's pid means something: its pid namespace (Linux: /proc/self/ns/pid), this boot (Linux:
- * /proc/sys/kernel/random/boot_id) and the host name. A pid recorded under one place can be checked with pidAlive only
+ * /proc/sys/kernel/random/boot_id; Darwin: kern.bootsessionuuid) and the host name. A pid recorded under one place can be checked with pidAlive only
  * from the same place. Null where it can't be read, or this OS has no such answer: a caller that must know refuses
  * (#918 round 6: a lock taken in another pid namespace looked dead from here, and was taken over while its holder ran).
  */
@@ -700,6 +771,7 @@ export function processPlace(): { pidns: string | null; boot: string | null; hos
       return null;
     }
   };
+  if (process.platform === 'darwin') return { pidns: 'darwin-host', boot: read(darwinBoot), host: hostname() };
   if (process.platform !== 'linux') return { pidns: null, boot: null, host: hostname() };
   return { pidns: read(() => readlinkSync('/proc/self/ns/pid')), boot: read(() => readFileSync('/proc/sys/kernel/random/boot_id', 'utf8')), host: hostname() };
 }
@@ -707,14 +779,27 @@ export function processPlace(): { pidns: string | null; boot: string | null; hos
 /** processIdentity of a process that answers signal 0 but whose identity can't be read: running, as far as anyone can tell. */
 export const UNKNOWN_IDENTITY = 'unknown';
 
+/** Whether a recorded identity has this OS's known start-identity format for the recorded place. */
+export function processIdentityInPlace(identity: unknown, place: ReturnType<typeof processPlace>): identity is string {
+  if (!['linux', 'darwin'].includes(process.platform) || !place.host || !place.boot || !place.pidns || typeof identity !== 'string') return false;
+  return identity.startsWith(`${place.boot}:`) && /^\d+$/.test(identity.slice(place.boot.length + 1));
+}
+
 /**
  * Who `pid` is beyond its number, or null when no such process runs. On Linux: this boot's id and the process's start
  * time (/proc/sys/kernel/random/boot_id, field 22 of /proc/<pid>/stat), so a pid reused after its process died, or
- * after a reboot, reads as someone else. Elsewhere: its number alone, while it runs. A running process whose /proc
+ * after a reboot, reads as someone else. Darwin uses the boot session UUID and stored start time read by ps (seconds, so a collision stays busy). Elsewhere: its number alone, while it runs. A running process whose /proc
  * entry can't be read is UNKNOWN_IDENTITY (never "gone").
  */
 export function processIdentity(pid: number): string | null {
   if (!pidAlive(pid)) return null;
+  if (process.platform === 'darwin') {
+    try {
+      const boot = darwinBoot();
+      const output = execFileSync('/bin/ps', ['-o', 'stat=', '-o', 'lstart=', '-p', String(pid)], { encoding: 'utf8', env: NATIVE_ENV, timeout: 1000, stdio: ['ignore', 'pipe', 'ignore'] });
+      return darwinProcessIdentity(output, boot);
+    } catch { return pidAlive(pid) ? UNKNOWN_IDENTITY : null; }
+  }
   if (process.platform !== 'linux') return `pid-${pid}`;
   try {
     const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
@@ -726,9 +811,30 @@ export function processIdentity(pid: number): string | null {
     const boot = readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim();
     return start && /^\d+$/.test(start) ? `${boot}:${start}` : UNKNOWN_IDENTITY;
   } catch (e) {
-    // Gone between the signal and the read: no such process. Anything else: it runs, unread.
-    return (e as NodeJS.ErrnoException).code === 'ENOENT' || (e as NodeJS.ErrnoException).code === 'ESRCH' ? null : UNKNOWN_IDENTITY;
+    // A hidden /proc entry (for example hidepid=2) can be missing while the process still answers signal 0.
+    // Only a second liveness check can distinguish that from a process gone since the first check.
+    return ((e as NodeJS.ErrnoException).code === 'ENOENT' || (e as NodeJS.ErrnoException).code === 'ESRCH') && !pidAlive(pid) ? null : UNKNOWN_IDENTITY;
   }
+}
+
+/** Fixed locale/timezone and no injected loader or tool search path for native identity/locking helpers. */
+const NATIVE_ENV = { PATH: '/usr/bin:/bin', LC_ALL: 'C', TZ: 'UTC' };
+
+function darwinBoot(): string {
+  const boot = execFileSync('/usr/sbin/sysctl', ['-n', 'kern.bootsessionuuid'], { encoding: 'utf8', env: NATIVE_ENV, timeout: 1000, stdio: ['ignore', 'pipe', 'ignore'] }).trim().toLowerCase();
+  if (!/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(boot)) throw new Error('unreadable boot session identity');
+  return boot;
+}
+
+/** Darwin ps reads the stored start time. Second-resolution collisions stay busy; they never prove death. */
+export function darwinProcessIdentity(output: string, boot: string): string | null {
+  const match = /^\s*([A-Z][^\s]*)\s+([^\n]+)\s*$/.exec(output);
+  if (!match) return UNKNOWN_IDENTITY;
+  if (match[1]![0] === 'Z') return null;
+  const start = match[2]!.trim();
+  if (!/^(Mon|Tue|Wed|Thu|Fri|Sat|Sun) (Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) +\d{1,2} \d{2}:\d{2}:\d{2} \d{4}$/.test(start)) return UNKNOWN_IDENTITY;
+  const time = Date.parse(start + ' GMT');
+  return Number.isFinite(time) && time >= 0 ? `${boot}:${time}` : UNKNOWN_IDENTITY;
 }
 
 export function wslAvailable(): boolean {
@@ -815,20 +921,14 @@ export function homesRoot(platform: NodeJS.Platform = process.platform): string 
   return platform === 'darwin' ? '/Users' : '/home';
 }
 
-/**
- * Open a file to one group, read only (0640), keeping its owner: on Linux, when the group exists and this process may
- * hand the file to it (root, or a member). Anywhere else, or when it can't, it stays as it was: false.
- */
-export function shareReadWithGroup(file: string, group: string, platform: NodeJS.Platform = process.platform): boolean {
-  if (platform !== 'linux' || !/^[a-z_][a-z0-9_-]{0,31}$/.test(group) || typeof process.getuid !== 'function') return false;
+/** A group's id from the user database (getent, Linux), or null when it isn't there or the name isn't one. */
+function groupId(group: string): number | null {
+  if (!/^[a-z_][a-z0-9_-]{0,31}$/.test(group) || typeof process.getuid !== 'function') return null;
   try {
     const gid = Number(execFileSync('getent', ['group', group], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 10_000 }).split(':')[2]);
-    if (!Number.isInteger(gid)) return false;
-    chownSync(file, statSync(file).uid, gid);
-    chmodSync(file, 0o640);
-    return true;
+    return Number.isInteger(gid) ? gid : null;
   } catch {
-    return false;
+    return null;
   }
 }
 
@@ -1722,6 +1822,63 @@ export function flockHeld(path: string): boolean | null {
   } catch (e) {
     return (e as { status?: number }).status === 1 ? true : null;
   }
+}
+
+/** Supported native Linux local filesystem families. Network, overlay, FUSE and unknown semantics fail closed. */
+export function nativeFlockSupported(type: number, platform: NodeJS.Platform = process.platform): boolean {
+  if (platform !== 'linux') return false;
+  switch (type) {
+    case 0xef53: // ext2/3/4
+    case 0x58465342: // XFS
+    case 0x9123683e: // Btrfs
+    case 0x01021994: // tmpfs
+      return true;
+    default: return false;
+  }
+}
+
+/** A fixed-size subset of Darwin fstatfs64: little-endian flags followed by its 16-byte filesystem name. */
+export function darwinFlockFilesystemSupported(record: Buffer): boolean {
+  if (record.length !== 20 || !(record.readUInt32LE(0) & 0x1000)) return false; // MNT_LOCAL
+  const name = record.subarray(4);
+  const nul = name.indexOf(0);
+  return nul > 0 && name.subarray(nul).every((value) => value === 0) && ['apfs', 'hfs'].includes(name.subarray(0, nul).toString('utf8'));
+}
+
+/** Inspectable helper invocation: neither backend reopens a pathname or explicitly unlocks the shared description. */
+export function nativeFlockInvocation(platform: NodeJS.Platform): { command: string; args: string[] } {
+  if (platform === 'linux') return { command: '/usr/bin/flock', args: ['--exclusive', '--nonblock', '--conflict-exit-code', '75', '3'] };
+  if (platform === 'darwin') return { command: '/usr/bin/perl', args: ['-e', 'use Config; use Fcntl qw(LOCK_EX LOCK_NB); use Errno qw(EAGAIN EWOULDBLOCK); exit 70 unless $Config{d_flock} eq "define"; open(my $f, "<&=3") or exit 71; exit 0 if flock($f, LOCK_EX|LOCK_NB); exit(($! == EWOULDBLOCK || $! == EAGAIN) ? 75 : 72);'] };
+  throw new Error('native file locks require a supported POSIX backend');
+}
+
+/**
+ * Nonblocking exclusive flock on fd. The caller owns/closes fd; it must be a CLOEXEC descriptor.
+ * Native flock belongs to the open file description. Explicit stdio fd 3 shares that description with this helper;
+ * helper exit closes its duplicate but MUST NOT issue LOCK_UN. The parent's descriptor keeps the lock alive.
+ * Missing tooling, unsupported filesystems and helper failures refuse acquisition, never fall back to file leases.
+ */
+export function tryNativeFlock(fd: number): boolean {
+  if (process.platform === 'linux') {
+    // Node has no fstatfs API. Linux's self-fd reference resolves the descriptor's actual filesystem.
+    if (!nativeFlockSupported(statfsSync(`/proc/self/fd/${fd}`).type)) throw new Error('native file locks require a supported local filesystem');
+  } else if (process.platform === 'darwin') {
+    if (!['x64', 'arm64'].includes(process.arch)) throw new Error('unsupported Darwin native-lock ABI');
+    // XNU SYS_fstatfs64=346; struct statfs64 is 2168 bytes on both supported 64-bit little-endian ABIs.
+    // A canary catches unexpected structure writes; only flags/name leave the helper, never mount paths.
+    const probe = spawnSync('/usr/bin/perl', ['-e', 'use Config; exit 70 unless $^O eq "darwin" && $Config{ptrsize} == 8 && $Config{longsize} == 8 && $Config{byteorder} eq "12345678"; my $tail="G" x (4096-2168); my $b=("\\0" x 2168).$tail; syscall(346,3,$b)==0 or exit 71; substr($b,2168) eq $tail or exit 72; print substr($b,64,4),substr($b,72,16);'], {
+      stdio: ['ignore', 'pipe', 'pipe', fd], env: NATIVE_ENV, timeout: 1000, killSignal: 'SIGKILL', maxBuffer: 4096,
+    });
+    if (probe.error || probe.signal || probe.status !== 0 || !darwinFlockFilesystemSupported(probe.stdout)) throw new Error('native filesystem helper failed; requires local APFS or HFS');
+  } else throw new Error('native file locks require a supported POSIX backend');
+  const helper = nativeFlockInvocation(process.platform);
+  const r = spawnSync(helper.command, helper.args, {
+    stdio: ['ignore', 'ignore', 'pipe', fd],
+    env: NATIVE_ENV,
+    timeout: 5000, killSignal: 'SIGKILL', maxBuffer: 4096,
+  });
+  if (r.error || r.signal || (r.status !== 0 && r.status !== 75)) throw new Error('native file lock helper failed; refusing unlocked operation');
+  return r.status === 0;
 }
 
 /** A held flock(2) lock, kept by a small holder process until released (or this process exits: its stdin closes). */

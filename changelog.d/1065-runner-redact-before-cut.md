@@ -1,0 +1,3 @@
+### Guardrail changes: what each one does
+
+- **The runner redacts before it cuts (#1065).** The texts the runner cuts short before a run record or the event log sees them (the end of claude's stderr, the end of a `claude auth status` it couldn't read, and the start of a rate limit's or a result's words) are redacted whole first, then cut. A secret across the cut was cut short of its rule and passed on as the part that was kept; now it is hidden whole. While claude's stderr is still being read, a cut redacts what came before the last whitespace and keeps the run after it as it came, since a token there may be only part-written; the whole kept end is redacted again when the run ends.

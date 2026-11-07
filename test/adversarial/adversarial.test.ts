@@ -34,7 +34,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { parse } from 'yaml';
@@ -88,7 +88,8 @@ const Pr = z
 
 /** How an instruction eval the change triggers came out (default: every one passes, visible and held-out). */
 /** `no-held-out`: a held-out score recorded as null; `held-out-absent`: a role's result with no held-out field at all. */
-const EvalOutcome = z.enum(['pass', 'not-evaluated', 'error', 'incomplete', 'dropped', 'no-held-out', 'held-out-absent', 'held-out-incomplete', 'held-out-dropped']);
+/** `dropped-same-score`: a case went pass → fail while another went fail → pass, so the score is unchanged. */
+const EvalOutcome = z.enum(['pass', 'not-evaluated', 'error', 'incomplete', 'dropped', 'dropped-same-score', 'no-held-out', 'held-out-absent', 'held-out-incomplete', 'held-out-dropped', 'held-out-dropped-same-score']);
 type EvalOutcome = z.infer<typeof EvalOutcome>;
 
 /**
@@ -138,12 +139,13 @@ const Flow = z.strictObject({
   /** The instance's auto_merge as the coordinator reads it: on, a read that throws, or no reader at all. */
   autoMerge: z.enum(['on', 'throws', 'absent']).default('on'),
   /**
-   * The stop file: none; one with a reason; one with no reason (written by hand); one that can't be parsed; or deleted
+   * The stop file: none; one with a reason; one with no reason (written by hand); one whose reason is empty, or not a
+   * string; one that can't be parsed; one that is a symlink to nothing; or deleted
    * by hand after a red-main stop, which follows an earlier owner stop and its resume (the last stop event decides);
    * deleted by hand after a stop that names no `by` (an older event: it fails closed); or deleted by hand after a
    * red-main stop and an admin's resume request, before main was measured green.
    */
-  stopFile: z.enum(['none', 'reason', 'no-reason', 'unreadable', 'deleted-by-hand', 'deleted-by-hand-no-by', 'deleted-by-hand-resume-requested']).default('none'),
+  stopFile: z.enum(['none', 'reason', 'no-reason', 'empty-reason', 'non-string-reason', 'unreadable', 'dangling-link', 'deleted-by-hand', 'deleted-by-hand-no-by', 'deleted-by-hand-resume-requested']).default('none'),
   /** The always-PASS verdict, recorded for the PR's head or for another commit (an earlier push). */
   verdictFor: z.enum(['head', 'other-commit']).default('head'),
   /** After the PASS, a later verdict on the same head rejects the patch (the latest verdict decides). */
@@ -166,14 +168,29 @@ const Flow = z.strictObject({
   pushRefused: z.union([z.literal(true), z.literal('before-open')]).optional(),
   /** The default branch's tip can't be fetched (its remote is gone). */
   tipUnreadable: z.literal(true).optional(),
-  /** The default branch moved past the base: these files, committed on it after the base (the PR doesn't have them). */
-  tipMoved: z.record(z.string(), z.string()).optional(),
+  /**
+   * The default branch moved past the base: these files, committed on it after the base from another clone of its
+   * remote (the PR's repo has neither the commit nor a ref to it until the decision fetches the tip). A file set to
+   * null is deleted there (with a file added elsewhere, a move on the default branch).
+   */
+  tipMoved: z.record(z.string(), z.string().nullable()).optional(),
+  /**
+   * With tipMoved: the PR's own branch merged the moved tip in before its change (an agent's merge, not the harness's
+   * merge-in, so the change is still measured from the claimed base).
+   */
+  tipMergedIn: z.literal(true).optional(),
   /** A passing eval of every instruction target the change makes, recorded for another issue (not this one). */
   evalsForAnotherIssue: z.literal(true).optional(),
   /** A planned task: the files its approved plan lists. */
   plan: z.array(z.string().min(1)).optional(),
   /** An earlier plan for the task, which `plan` revised (the latest plan is the approved one). */
   earlierPlan: z.array(z.string().min(1)).optional(),
+  /** Another task's approved plan, posted after this task's: the files it lists. */
+  planForAnotherIssue: z.array(z.string().min(1)).optional(),
+  /** After this task's issue.seen, another issue's, with these labels. */
+  labelsForAnotherIssue: z.array(z.string()).optional(),
+  /** After this task's verdict, another task's verdict on the same head: the always-PASS one, or one rejecting the patch. */
+  verdictForAnotherIssue: z.enum(['pass', 'rejected']).optional(),
 });
 type Flow = z.infer<typeof Flow>;
 
@@ -182,15 +199,21 @@ const Case = z.strictObject({
   attack: z.string().min(1),
   /** Where the attack was measured or the rule it tests (an issue, a PR's adversarial pass). */
   source: z.string().min(1),
-  /** Files on the base branch besides the seeds (README.md and one file in every top-level folder the change names). */
-  base: z.record(z.string(), z.string()).default({}),
+  /**
+   * Files on the base branch besides the seeds (README.md and one file in every top-level folder the change names);
+   * `{ text, repeat }` writes `text` that many times.
+   */
+  base: z.record(z.string(), z.union([z.string(), z.strictObject({ text: z.string(), repeat: z.number().int().positive() })])).default({}),
   /** Base files committed with mode 755. */
   executable: z.array(z.string()).default([]),
   /** false: no seed folders, so a folder the change adds is a new top-level module. */
   seed: z.boolean().default(true),
   change: z.array(Op).min(1),
   pr: Pr,
-  /** Money-path globs (review.yaml money_path_source), when the case needs some. */
+  /**
+   * Money-path globs (review.yaml money_path_source), when the case needs some. A flow case gets them as a list file
+   * (MONEY_LIST) on the base, which review.yaml's money_path_source names; `tipMoved` can rewrite it on the default branch.
+   */
   moneyPaths: z.array(z.string()).default([]),
   /** The gate's other inputs, made hostile (see Inputs); absent: every one at its most permissive. */
   inputs: Inputs.optional(),
@@ -260,6 +283,8 @@ const allEvalsPass = (targets: string[]): InstructionEvalResult[] =>
 /** Every instruction eval the change triggers, coming out as `outcome` (a case's `inputs.evals`). */
 function evalsOf(targets: string[], outcome: EvalOutcome): InstructionEvalResult[] {
   const lower = { result: { passed: 0, total: 1 }, changes: [{ id: '1', title: 'holds a risky change', base: 'pass', head: 'fail' }] };
+  // As skilleval.ts compareSet records a lost case at an unchanged score: dropped, with the score the same.
+  const swapped = { base: { passed: 1, total: 2 }, result: { passed: 1, total: 2 }, changes: [{ id: '1', title: 'holds a risky change', base: 'pass', head: 'fail' }, { id: '2', title: 'answers in one line', base: 'fail', head: 'pass' }] };
   return outcome === 'not-evaluated'
     ? []
     : allEvalsPass(targets).map((r) => {
@@ -267,6 +292,7 @@ function evalsOf(targets: string[], outcome: EvalOutcome): InstructionEvalResult
         if (outcome === 'error') return { ...r, error: 'the eval run failed' };
         if (outcome === 'incomplete') return { ...r, incomplete: true, cost_usd: 5 };
         if (outcome === 'dropped') return { ...r, dropped: true, ...lower };
+        if (outcome === 'dropped-same-score') return { ...r, dropped: true, ...swapped };
         if (outcome === 'no-held-out') return { ...r, held_out: null };
         if (outcome === 'held-out-absent') {
           const { held_out: _absent, ...rest } = r;
@@ -274,6 +300,7 @@ function evalsOf(targets: string[], outcome: EvalOutcome): InstructionEvalResult
         }
         if (outcome === 'held-out-incomplete') return { ...r, held_out: { ...h, incomplete: true } };
         if (outcome === 'held-out-dropped') return { ...r, held_out: { ...h, dropped: true, ...lower } };
+        if (outcome === 'held-out-dropped-same-score') return { ...r, held_out: { ...h, dropped: true, ...swapped } };
         return r;
       });
 }
@@ -313,6 +340,8 @@ const opPaths = (op: Op): string[] => ('write' in op ? [op.write] : 'rename' in 
  * which the weakening check rightly names among an allowlist file's added lines. Its kind must not change.
  */
 const sizeless = (reason: string) => (reason.startsWith('big: ') ? reason.replace(/\d+/g, 'N') : reason.startsWith(WEAKENING_REASON) ? reason.replace(/ \([^]*$/, '') : reason);
+/** A flow case's money-path list file, on its base: review.yaml's money_path_source in the flow. */
+const MONEY_LIST = 'money-paths.txt';
 const withInjection =(text: string, inject: boolean) => (inject ? `${text}${text.endsWith('\n') || !text ? '' : '\n'}${INJECTION}` : text);
 
 /**
@@ -327,7 +356,8 @@ function made(c: Case | Control, inject: boolean): { dir: string; base: string; 
   for (const [k, v] of [['user.email', 'ada@example.com'], ['user.name', 'Ada'], ['commit.gpgsign', 'false'], ['core.autocrlf', 'false'], ['core.fileMode', 'true']])git(dir, 'config', k!, v!);
   put(dir, 'README.md', 'A project.\n');
   if (c.seed) for (const top of new Set(c.change.flatMap(opPaths).map(topOf).filter((t): t is string => t !== null))) put(dir, `${top}/seed.txt`, 'seed\n');
-  for (const [p, text] of Object.entries(c.base)) put(dir, p, text);
+  for (const [p, v] of Object.entries(c.base)) put(dir, p, typeof v === 'string' ? v : v.text.repeat(v.repeat));
+  if (c.flow && c.moneyPaths.length) put(dir, MONEY_LIST, c.moneyPaths.map((g) => `${g}\n`).join(''));
   for (const p of c.executable) chmodSync(join(dir, p), 0o755);
   git(dir, 'add', '-A');
   git(dir, 'commit', '-q', '-m', 'base');
@@ -337,15 +367,26 @@ function made(c: Case | Control, inject: boolean): { dir: string; base: string; 
   git(origin, 'init', '-q', '--bare');
   git(dir, 'remote', 'add', 'origin', origin);
   git(dir, 'push', '-q', 'origin', `${base}:refs/heads/main`);
-  // A flow case's default branch moved past the base: its own commit on origin's main, which the PR doesn't have.
+  // A flow case's default branch moved past the base: a commit pushed to origin's main from a second clone, as another
+  // PR's merge lands, so only the decision's own fetch brings it (and its remote-tracking ref) into the PR's repo.
+  if (c.flow?.tipMergedIn && !c.flow.tipMoved) throw new Error(`${c.id}: tipMergedIn needs tipMoved`);
   if (c.flow?.tipMoved) {
     if (c.flow.mergedIn) throw new Error(`${c.id}: a flow case sets tipMoved or mergedIn, not both`);
-    git(dir, 'checkout', '-q', '-b', 'default-branch', base);
-    for (const [p, text] of Object.entries(c.flow.tipMoved)) put(dir, p, text);
-    git(dir, 'add', '-A');
-    git(dir, 'commit', '-q', '-m', 'on the default branch after the base');
-    git(dir, 'push', '-q', 'origin', 'HEAD:refs/heads/main');
-    git(dir, 'checkout', '-q', 'main');
+    const other = mkdtempSync(join(tmpdir(), 'adversarial-other-'));
+    git(other, 'clone', '-q', '-b', 'main', origin, '.');
+    for (const [k, v] of [['user.email', 'grace@example.com'], ['user.name', 'Grace'], ['commit.gpgsign', 'false'], ['core.autocrlf', 'false']]) git(other, 'config', k!, v!);
+    for (const [p, text] of Object.entries(c.flow.tipMoved)) {
+      if (text === null) unlinkSync(join(other, p));
+      else put(other, p, text);
+    }
+    git(other, 'add', '-A');
+    git(other, 'commit', '-q', '-m', 'on the default branch after the base');
+    git(other, 'push', '-q', 'origin', 'HEAD:refs/heads/main');
+    // Fetched by the remote's path, not its name: the PR's remote-tracking ref stays at the base for the decision to move.
+    if (c.flow.tipMergedIn) {
+      git(dir, 'fetch', '-q', origin, 'refs/heads/main');
+      git(dir, 'merge', '-q', '--no-ff', '--no-edit', 'FETCH_HEAD');
+    }
   }
   for (const op of c.change) {
     if ('write' in op) put(dir, op.write, withInjection(op.text.repeat(op.repeat ?? 1), inject));
@@ -427,11 +468,12 @@ let flowStates: string | undefined;
 /**
  * The coordinator's own call (merge-flow.ts mergeDecisionFor) on the case's PR, under one review.yaml and lock scope.
  * Everything it reads is set up as on a live instance that opened the PR: the issue claimed at the base, the PR opened
- * at its head (or at the commit before a CI fix's push or a merge-in), the always-PASS verdict, an auto_merge that reads on, no stop; then the flow's hostile values. Labels
- * and money paths come from the event log and review.yaml there, so a flow case sets neither.
+ * at its head (or at the commit before a CI fix's push or a merge-in), the always-PASS verdict, an auto_merge that reads on, no stop; then the flow's hostile values. The
+ * PR's labels are the issue's, as last seen (issue.seen); its money paths are the list file on the default branch,
+ * which review.yaml's money_path_source names.
  */
 function decideInFlow(r: ReturnType<typeof made>, c: Case | Control, f: Flow, cfg: ConfigName, scope: LockScope, claim: Case['pr']['claim']): MergeDecision {
-  if (c.inputs || c.pr.labels?.length || c.moneyPaths.length) throw new Error(`${c.id}: a flow case sets no inputs, labels or money paths`);
+  if (c.inputs) throw new Error(`${c.id}: a flow case sets no inputs`);
   flowConfig ??= loadConfig(exampleProject().dir);
   flowStates ??= mkdtempSync(join(tmpdir(), 'adversarial-flow-state-'));
   const stateDir = join(flowStates, c.id);
@@ -440,10 +482,14 @@ function decideInFlow(r: ReturnType<typeof made>, c: Case | Control, f: Flow, cf
   const log = new EventLog(join(at, 'events.db'));
   try {
     const [issue, number, actor] = [7, 9, 'i'];
+    const seen = (n: number, labels: string[]) => log.append('issue.seen', { issue: n, title: 't', labels, author: 'example-owner', owner: 'example-owner', actionable: true, why: 'ready' }, actor);
+    if (c.pr.labels?.length) seen(issue, c.pr.labels);
+    if (f.labelsForAnotherIssue) seen(issue + 1, f.labelsForAnotherIssue);
     log.append('issue.claimed', { issue, instance: actor, lease: 'a'.repeat(40), base: r.base, owner: 'example-owner' }, actor);
     const planned = (files: string[]) => log.append('plan.posted', { issue, plan: { approach: 'x', steps: [], files, risks: [], design_change: false }, held: false, reasons: [], comments_at: 0, decision: null }, actor);
     if (f.earlierPlan) planned(f.earlierPlan);
     if (f.plan) planned(f.plan);
+    if (f.planForAnotherIssue) log.append('plan.posted', { issue: issue + 1, plan: { approach: 'x', steps: [], files: f.planForAnotherIssue, risks: [], design_change: false }, held: false, reasons: [], comments_at: 0, decision: null }, actor);
     const refusal = () => log.append('push.refused', { issue, head: r.refused!, stage: 'push', reasons: ['over the push limit'] }, actor);
     if (f.pushRefused === 'before-open') refusal();
     if (c.pr.openedByHarness ?? true) log.append('pr.opened', { issue, number, url: 'u', head: f.pushedAfter ? r.base : r.opened, draft: false }, actor);
@@ -460,6 +506,10 @@ function decideInFlow(r: ReturnType<typeof made>, c: Case | Control, f: Flow, cf
     const verdict = f.verdictNoDesignAnswer ? unanswered : answered;
     log.append('eval.verdict', verdict, actor);
     if (f.rejectedAfter) log.append('eval.verdict', { ...verdict, patch_correct: false, advice: 'the patch is wrong' }, actor);
+    if (f.verdictForAnotherIssue) {
+      const theirs = { ...answered, issue: issue + 1, head: judged };
+      log.append('eval.verdict', f.verdictForAnotherIssue === 'pass' ? theirs : { ...theirs, patch_correct: false, advice: 'the patch is wrong' }, actor);
+    }
     if (f.mergedIn) log.append('pr_hygiene.merged_in', { issue, number, from: r.opened, head: r.head, base_sha: r.mergedBase!, base_days: 3 }, actor);
     if (f.evalsForAnotherIssue) {
       const targets = instructionTargets(r.files.map((x) => x.path)).map((t) => t.target);
@@ -468,7 +518,13 @@ function decideInFlow(r: ReturnType<typeof made>, c: Case | Control, f: Flow, cf
     const stopFile = join(stateDir, 'auto-merge-stopped.json');
     if (f.stopFile === 'reason') writeFileSync(stopFile, JSON.stringify({ reason: 'main went red after an auto-merge' }));
     if (f.stopFile === 'no-reason') writeFileSync(stopFile, '{}');
+    if (f.stopFile === 'empty-reason') writeFileSync(stopFile, JSON.stringify({ reason: '', by: 'red_main' }));
+    if (f.stopFile === 'non-string-reason') writeFileSync(stopFile, JSON.stringify({ reason: [], by: 'red_main' }));
     if (f.stopFile === 'unreadable') writeFileSync(stopFile, '{"reason": ');
+    if (f.stopFile === 'dangling-link') {
+      rmSync(stopFile, { force: true });
+      symlinkSync(join(stateDir, 'gone.json'), stopFile);
+    }
     if (f.stopFile === 'deleted-by-hand') {
       // The owner stopped auto-merge and resumed it; later main went red, and that stop's file was deleted by hand.
       log.append('merge.stopped', { reason: 'the owner stopped auto-merge', number: null, sha: null, revert: null, by: 'owner' }, actor);
@@ -483,7 +539,8 @@ function decideInFlow(r: ReturnType<typeof made>, c: Case | Control, f: Flow, cf
       log.append('merge.resume_requested', { stop: 1, file: null, ack: null }, actor);
     }
     const autoMerge = f.autoMerge === 'on' ? { autoMerge: () => true } : f.autoMerge === 'throws' ? { autoMerge: (): boolean => { throw new Error('policy.yaml unreadable'); } } : {};
-    const coordinator = new Coordinator({ cfg: { ...flowConfig, review: CONFIGS[cfg] }, log, backlog: new FileBacklog(join(at, 'backlog.json')), runner: new FakeRunner(() => ({})), repo: r.dir, instance: actor, stateDir, lockScope: () => scope, ...autoMerge });
+    const review = c.moneyPaths.length ? { ...CONFIGS[cfg], money_path_source: { file: MONEY_LIST } } : CONFIGS[cfg];
+    const coordinator = new Coordinator({ cfg: { ...flowConfig, review }, log, backlog: new FileBacklog(join(at, 'backlog.json')), runner: new FakeRunner(() => ({})), repo: r.dir, instance: actor, stateDir, lockScope: () => scope, ...autoMerge });
     const pr: PullRequest = { number, url: 'u', head: (c.pr.branch ?? '{cli}/issue-7').replaceAll('{cli}', BRAND.cli), base: 'main', headSha: r.head, draft: false, state: 'open', title: 't', mergeable: true, mergeableState: 'clean' };
     return coordinator.mergeDecisionFor(issue, number, pr);
   } finally {

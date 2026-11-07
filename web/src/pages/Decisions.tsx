@@ -5,6 +5,7 @@ import { useEntrance } from '../components/patterns';
 import { ago, Avatar, Badge, Button, cx, decisionWork, Empty, Kbd, Why } from '../components/ui';
 import { Header } from '../components/Header';
 import { useArrivalOrder } from '../arrival-order';
+import { shownPath, shownPaths } from '../path-text';
 
 /** The detail line that carries a recommendation's reasoning: src/decision-ask.ts writes it (a test keeps the two equal). */
 export const RECOMMENDATION_PREFIX = 'Recommendation: ';
@@ -203,7 +204,7 @@ function Evidence({ d }: { d: DecisionDetail }) {
             {f.list.map((x, i) => (
               <li key={i} className="break-words">
                 {x.claim}
-                {x.file && <code className="ml-1.5 font-mono text-[11.5px] text-ink-3">{`${x.file}:${x.line ?? '?'}`}</code>}
+                {x.file && <code className="ml-1.5 font-mono text-[11.5px] text-ink-3">{`${shownPath(x.file)}:${x.line ?? '?'}`}</code>}
               </li>
             ))}
           </ul>
@@ -223,7 +224,7 @@ function Evidence({ d }: { d: DecisionDetail }) {
           <ul className="space-y-0.5">
             {flags.map((x) => (
               <li key={x.flag} className="break-words" data-flag={x.flag}>
-                {FLAG_LABEL[x.flag]}: {x.files!.length ? <>touches it ({x.files!.join(', ')})</> : "doesn't touch it"}
+                {FLAG_LABEL[x.flag]}: {x.files!.length ? <>touches it ({shownPaths(x.files!)})</> : "doesn't touch it"}
               </li>
             ))}
           </ul>

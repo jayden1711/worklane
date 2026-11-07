@@ -9,11 +9,13 @@ import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { dirname, join, relative } from 'node:path';
 import { BRAND } from '../src/brand.js';
+import { CLAIM_KINDS } from '../src/intake/source-claims.js';
 import { repoRoot } from './helpers.js';
 
 interface Item { kind: string; what: string; when?: string[]; by: string; rename: string }
 const reg = createRequire(import.meta.url)(join(repoRoot, 'scripts', 'setup', 'instance-records.cjs')) as {
   ITEMS: Item[];
+  CLAIM_SOURCES: Record<string, unknown>;
   NOT_RECORDS: { what: string; why: string }[];
   SHARED_FILES: { at: string; item?: string; why?: string }[];
   plan: (name: string, prefix?: string) => Record<string, unknown>;
@@ -94,6 +96,58 @@ function known(t: string): boolean {
   return whats.some((w) => w.includes(t) || t.startsWith(`${w}/`)) || reg.NOT_RECORDS.some((n) => t.startsWith(n.what));
 }
 
+/**
+ * Each file in the machine's slot directory a src/ file names from an instance's name (`slotFile(<dir>, \`…${instance}…\`)`),
+ * as /var/lib/<cli>/agent-slots/<file> with <name> for the name. The template's other parts are read from the same
+ * file: a string constant, or a one-parameter name builder (`const prefix = (kind: Kind) => \`${kind}-claim-\``) over a
+ * union of string literals or an `as const` list, once for each. A part it can't read stays `<unread …>`, which no item
+ * is: such a name fails the check until it is written so it can be read.
+ */
+function slotNames(text: string): string[] {
+  const strings = (s: string) => [...s.matchAll(/'([^']*)'|"([^"]*)"/g)].map((x) => x[1] ?? x[2]!);
+  const consts = new Map<string, string>();
+  for (const m of text.matchAll(/\bconst\s+([A-Za-z_$][\w$]*)\s*=\s*(?:'([^'\\]*)'|"([^"\\]*)"|`([^`$\\]*)`)/g)) consts.set(m[1]!, m[2] ?? m[3] ?? m[4]!);
+  const lists = new Map<string, string[]>();
+  for (const m of text.matchAll(/\bconst\s+([A-Za-z_$][\w$]*)\s*=\s*\[([^\]]*)\]\s*as\s+const/g)) lists.set(m[1]!, strings(m[2]!));
+  const unions = new Map<string, string[]>();
+  for (const m of text.matchAll(/\btype\s+(\w+)\s*=\s*([^;\n]+)/g)) {
+    const body = m[2]!.trim();
+    const of = /^\(?\s*typeof\s+(\w+)\s*\)?\[number\]$/.exec(body);
+    if (of && lists.has(of[1]!)) unions.set(m[1]!, lists.get(of[1]!)!);
+    else if (/^\|?\s*(?:'[^']*'|"[^"]*")(?:\s*\|\s*(?:'[^']*'|"[^"]*"))*$/.test(body)) unions.set(m[1]!, strings(body));
+  }
+  const builders = new Map<string, { param: string; values: string[]; body: string }>();
+  for (const m of text.matchAll(/\bconst\s+(\w+)\s*=\s*\(\s*(\w+)\s*:\s*(\w+)\s*\)\s*(?::\s*\w+\s*)?=>\s*`([^`]*)`/g)) {
+    if (unions.has(m[3]!)) builders.set(m[1]!, { param: m[2]!, values: unions.get(m[3]!)!, body: m[4]! });
+  }
+  const isInstance = (x: string) => !x.includes('(') && INSTANCE_VARS.has(/(\w+)$/.exec(x)?.[1] ?? '');
+  const expand = (tpl: string, bound: Record<string, string>): string[] => {
+    let outs = [''];
+    for (const part of tpl.split(/(\$\{[^}]*\})/)) {
+      const e = /^\$\{\s*(.*?)\s*\}$/.exec(part);
+      let opts = [part];
+      if (e) {
+        const x = e[1]!;
+        const call = /^(\w+)\(.*\)$/.exec(x);
+        const b = call ? builders.get(call[1]!) : undefined;
+        if (x in bound) opts = [bound[x]!];
+        else if (isInstance(x)) opts = ['<name>'];
+        else if (consts.has(x)) opts = [consts.get(x)!];
+        else if (b) opts = b.values.flatMap((v) => expand(b.body, { [b.param]: v }));
+        else opts = [`<unread ${x}>`];
+      }
+      outs = outs.flatMap((o) => opts.map((v) => o + v));
+    }
+    return outs;
+  };
+  const out: string[] = [];
+  for (const m of text.matchAll(/\bslotFile\(\s*[^,()]+(?:\([^()]*\))?\s*,\s*`([^`]*)`\s*\)/g)) {
+    if (![...m[1]!.matchAll(/\$\{([^}]*)\}/g)].some((e) => isInstance(e[1]!.trim()))) continue;
+    out.push(...expand(m[1]!, {}).map((f) => `/var/lib/${cli}/agent-slots/${f}`));
+  }
+  return out;
+}
+
 test('every per-instance root path or name the scripts and the engine use is in the registry, as an item or as no record of its own', () => {
   const unknown: string[] = [];
   for (const f of scanned()) {
@@ -136,6 +190,42 @@ test('the registry check sees a new feature\'s per-instance root records, in a s
   assert.ok(instanceNames('install_sudoers "worklane-test-$name" "$(sudoers_rule)"').every(known));
   assert.ok(instanceNames('root="/var/lib/worklane-test/$name"').every(known));
   assert.ok(instanceNames('unit="worklane-test-$name-$id-$$"').every(known));
+});
+
+test('issue #605: every file src/ names in the slot directory from an instance\'s name, a prefix and the name included, is in the registry', () => {
+  const unknown: string[] = [];
+  const seen = new Set<string>();
+  for (const f of files(join(repoRoot, 'src'), (p) => p.endsWith('.ts'))) {
+    for (const p of slotNames(readFileSync(f, 'utf8'))) {
+      seen.add(p);
+      if (!known(p)) unknown.push(`${relative(repoRoot, f)}: ${p}`);
+    }
+  }
+  // The check reads the claims' prefixes: each source's claim file is among what it sees.
+  for (const k of ['discord', ...CLAIM_KINDS]) assert.ok(seen.has(`/var/lib/${cli}/agent-slots/${k}-claim-<name>.json`), `${k}: ${[...seen].join(' ')}`);
+  assert.deepEqual(unknown, [], `files in the slot directory named from an instance that scripts/setup/instance-records.cjs doesn't list; add each to ITEMS:\n${unknown.join('\n')}`);
+});
+
+test("issue #605: the slot-directory check sees a new source's claim, by a constant prefix, a prefix builder, or a part it can't read", () => {
+  const unk = (src: string) => slotNames(src).filter((p) => !known(p));
+  assert.deepEqual(unk("const P = 'teams-claim-';\nwriteSlotFile(slotFile(o.claimsDir, `${P}${o.instance}.json`), x);"), [`/var/lib/${cli}/agent-slots/teams-claim-<name>.json`]);
+  assert.deepEqual(unk("const KINDS = ['linear', 'teams'] as const;\ntype Kind = (typeof KINDS)[number];\nconst prefix = (kind: Kind) => `${kind}-claim-`;\nconst f = slotFile(o.claimsDir, `${prefix(o.kind)}${o.instance}.json`);"), [`/var/lib/${cli}/agent-slots/teams-claim-<name>.json`]);
+  assert.deepEqual(unk("type Kind = 'slack' | 'teams';\nconst prefix = (kind: Kind) => `${kind}-claim-`;\nconst f = slotFile(dir, `${prefix(o.kind)}${name}.json`);"), [`/var/lib/${cli}/agent-slots/teams-claim-<name>.json`]);
+  assert.deepEqual(unk('const f = slotFile(dir, `${other(o.kind)}-${instance}.json`);'), [`/var/lib/${cli}/agent-slots/<unread other(o.kind)>-<name>.json`]);
+  // A slot file named by no instance is none of the registry's.
+  assert.deepEqual(slotNames('tryLock(slotFile(dir, `agent-${i}.lock`), owner); slotFile(o.claimsDir, `${o.kind}-claims.lock`);'), []);
+});
+
+test("issue #605: the registry lists every source's claim of the instance, by exact path, and its copies a crash left, from the same list of sources src/ claims with", () => {
+  assert.deepEqual(Object.keys(reg.CLAIM_SOURCES), ['discord', ...CLAIM_KINDS], "scripts/setup/instance-records.cjs CLAIM_SOURCES: discord's, then src/intake/source-claims.ts CLAIM_KINDS");
+  const r = spawnSync(process.execPath, [join(repoRoot, 'scripts', 'setup', 'instance-records.cjs'), 'items', 'alpha'], { encoding: 'utf8' });
+  assert.equal(r.status, 0, r.stderr);
+  const lines = r.stdout.split('\n').map((l) => l.split('\t'));
+  for (const k of ['discord', 'slack', 'linear']) {
+    const file = `/var/lib/${cli}/agent-slots/${k}-claim-alpha.json`;
+    assert.ok(lines.some(([kind, what, , rename]) => kind === 'path' && what === file && rename === 'drop'), `${file}: a path item a rename drops\n${r.stdout}`);
+    assert.ok(lines.some(([kind, what, , rename]) => kind === 'glob' && what === `${file}.` && rename === 'drop'), `${file}.<pid>.<hex>.tmp: a glob item a rename drops\n${r.stdout}`);
+  }
 });
 
 test('instance-remove.sh and the registry are reachable from no sudoers rule and no machine helper command', () => {
@@ -301,8 +391,8 @@ test("rekey moves exactly alpha's records to bravo, never alpha-2's or beta's; a
   const init = (n: string) => join(root, `/var/lib/${cli}/init/${n}.json`);
   mkdirSync(dirname(init('alpha')), { recursive: true });
   writeFileSync(init('alpha'), JSON.stringify({ version: 1, mode: 'server', instance: 'alpha' }));
-  writeFileSync(join(root, `/var/lib/${cli}/agent-slots/discord-claim-alpha.json`), '{}');
-  writeFileSync(join(root, `/var/lib/${cli}/agent-slots/discord-claim-alpha-2.json`), '{}');
+  const claim = (k: string, n: string) => join(root, `/var/lib/${cli}/agent-slots/${k}-claim-${n}.json`);
+  for (const k of ['discord', 'slack', 'linear']) for (const n of ['alpha', 'alpha-2']) writeFileSync(claim(k, n), '{}');
   const moved = reg.rekey('alpha', 'bravo', join(root, 'archive', 'r.json'), root);
   assert.deepEqual(moved.sort(), ['canary', 'claude-paused', 'claude-profiles', 'claude-status', 'incidents', 'init', 'pending-signers']);
 
@@ -324,7 +414,11 @@ test("rekey moves exactly alpha's records to bravo, never alpha-2's or beta's; a
   assert.deepEqual(read(root, `/var/lib/${cli}/pending-signers.json`).pending.map((x: { instance: string }) => x.instance), ['bravo', 'beta']);
   assert.ok(!existsSync(init('alpha')));
   assert.equal(read(root, `/var/lib/${cli}/init/bravo.json`).instance, 'bravo');
-  assert.ok(!existsSync(join(root, `/var/lib/${cli}/agent-slots/discord-claim-alpha.json`)) && existsSync(join(root, `/var/lib/${cli}/agent-slots/discord-claim-alpha-2.json`)));
+  for (const k of ['discord', 'slack', 'linear']) {
+    assert.ok(!existsSync(claim(k, 'alpha')), `alpha's ${k} claim is dropped (issue #605)`);
+    assert.ok(existsSync(claim(k, 'alpha-2')), `alpha-2's ${k} claim stays`);
+    assert.ok(!existsSync(claim(k, 'bravo')), `no ${k} claim for bravo until its coordinator writes one`);
+  }
   assert.deepEqual(read(root, `/etc/${cli}/testrun-gpu.json`).instances.alpha, { devices: [0] }, "the GPU grant is testrun-gpu.sh's to move");
   assert.equal(JSON.parse(readFileSync(join(root, 'archive', 'r.json'), 'utf8')).records.canary.canary.instance, 'alpha', 'what alpha had, kept first');
 

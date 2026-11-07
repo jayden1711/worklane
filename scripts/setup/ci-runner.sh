@@ -18,7 +18,8 @@
 #     path by path, before anything is registered and again after the runners start; any failure stops there.
 #   - Trusted jobs only. The job-started hook (ci-runner/job-hook.sh) fails every job before its first step unless
 #     it is this repo's, from a push, a dispatch or a schedule on <branch>, with the workflow file read from
-#     <branch>: never a pull request (a fork's or a branch's), never a branch's own copy of a workflow.
+#     <branch>: never a pull request (a fork's or a branch's), never a branch's own copy of a workflow. With
+#     --pull-requests same-repo, also pull requests into <branch> from this repo's own branches, never a fork's.
 #   - Its network: a firewall table for the runner user's uid (nftables, loaded by its own unit; the runners and
 #     their Docker are bound to it, so neither runs without it). Public addresses only: nothing on this machine's
 #     loopback (the instances' dashboards and test databases) but the DNS stub, nothing on the LAN, link-local,
@@ -52,6 +53,11 @@
 #   --cpu-weight <1-10000>    [10]  must stay below worklane.slice's (20 by default)
 #   --io-weight <1-10000>     [10]
 #   --deny-interface <a,b>    [tailscale0]  interfaces the runner user may not send on
+#   --pull-requests <mode>    [none]  same-repo: also take pull requests into <branch> whose head branch is in this
+#                             repo itself (never a fork's; the hook reads the head repo from the event GitHub sent).
+#                             Give such a runner a name and label of its own, apart from a main-only runner.
+#   --nice <0-19>             [0]  Nice= of the runner and its Docker (so of every job's processes and containers),
+#                             under the slice's CPU weight
 # To undo: remove (above), which deregisters the runners (with a removal token; without one, delete them in the
 # repo's Settings > Actions > Runners), and removes the units, the firewall table, the user, its files and the ACLs.
 source "$(dirname "$0")/lib.sh"
@@ -72,7 +78,7 @@ docker_sha256_x64=995d1ef289677f74fd58d8d2c35727b6a4ee389c69db8638a3e42d0487aa5b
 docker_rootless_sha256_x64=707ebf6a5afd88104086e7b6749997b2366e816aeaf2c3ef2305b08fde9ee007
 
 usage="usage: ci-runner.sh [--print] install <owner/repo> <count> [options] | check <owner/repo> [--name <name>] | remove <owner/repo> [--name <name>]"
-print="" name="" label="" branch=main lock=/run/lock/worklane-full-run.lock wait_min=45 no_lock="" cpus="" memory_max=5G cpu_weight=10 io_weight=10 deny_if=tailscale0
+print="" name="" label="" branch=main lock=/run/lock/worklane-full-run.lock wait_min=45 no_lock="" cpus="" memory_max=5G cpu_weight=10 io_weight=10 deny_if=tailscale0 prs=none nice=0
 pos=()
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -88,6 +94,8 @@ while [ "$#" -gt 0 ]; do
     --cpu-weight) cpu_weight="${2:?--cpu-weight needs a weight}"; shift 2 ;;
     --io-weight) io_weight="${2:?--io-weight needs a weight}"; shift 2 ;;
     --deny-interface) deny_if="${2?--deny-interface needs a value}"; shift 2 ;;
+    --pull-requests) prs="${2:?--pull-requests needs none or same-repo}"; shift 2 ;;
+    --nice) nice="${2:?--nice needs a value}"; shift 2 ;;
     -*) echo "unknown option $1" >&2; echo "$usage" >&2; exit 2 ;;
     *) pos+=("$1"); shift ;;
   esac
@@ -116,6 +124,8 @@ for j in $deny_if; do [[ "$j" =~ ^[A-Za-z0-9_.-]{1,15}$ ]] || { echo "--deny-int
 [[ "$lock" =~ ^/[A-Za-z0-9/._-]+$ ]] || { echo "--lock: an absolute path" >&2; exit 2; }
 [[ "$wait_min" =~ ^[1-9][0-9]{0,3}$ ]] || { echo "--lock-wait-min: minutes, got $wait_min" >&2; exit 2; }
 [[ "$memory_max" =~ ^[1-9][0-9]*[KMGT]$ ]] || { echo "--memory-max: a size such as 5G, got $memory_max" >&2; exit 2; }
+case "$prs" in none | same-repo) ;; *) echo "--pull-requests: none or same-repo, got $prs" >&2; exit 2 ;; esac
+[[ "$nice" =~ ^(0|1[0-9]?|[2-9])$ ]] || { echo "--nice: 0 to 19 (lower priority only), got $nice" >&2; exit 2; }
 for w in "$cpu_weight" "$io_weight"; do [[ "$w" =~ ^[0-9]+$ ]] && [ "$w" -ge 1 ] && [ "$w" -le 10000 ] || { echo "weights are 1 to 10000, got $w" >&2; exit 2; }; done
 if [ -z "$cpus" ]; then n="$(getconf _NPROCESSORS_ONLN)"; if [ "$n" -gt 4 ]; then cpus="$((n - 4))-$((n - 1))"; else cpus="0-$((n - 1))"; fi; fi
 # The CPUs in a list like 0-3,8,10-11: CPUQuota is that many cores, so the cap and what the jobs see agree
@@ -238,6 +248,8 @@ Environment=PATH=$docker_dir:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/
 Environment=DOCKERD_ROOTLESS_ROOTLESSKIT_NET=slirp4netns
 Environment=DOCKERD_ROOTLESS_ROOTLESSKIT_PORT_DRIVER=builtin
 Environment=DOCKERD_ROOTLESS_ROOTLESSKIT_DISABLE_HOST_LOOPBACK=true
+# Containers inherit it from the daemon, so a container job's processes run at this niceness too.
+Nice=$nice
 RuntimeDirectory=worklane-ci-$name-docker-%i
 RuntimeDirectoryMode=0700
 UMask=0077
@@ -297,6 +309,7 @@ Environment=ACTIONS_RUNNER_HOOK_JOB_STARTED=$libexec/job-started.sh
 Environment=ACTIONS_RUNNER_HOOK_JOB_COMPLETED=$libexec/job-completed.sh
 Environment=WORKLANE_CI_REPO=$repo
 Environment=WORKLANE_CI_BRANCH=$branch
+Environment=WORKLANE_CI_PULL_REQUESTS=$prs
 Environment=WORKLANE_CI_LOCK=$lock
 Environment=WORKLANE_CI_LOCK_WAIT_MIN=$wait_min
 Environment="WORKLANE_CI_NO_LOCK_JOBS=$no_lock"
@@ -304,6 +317,7 @@ Environment=WORKLANE_CI_STATE=/run/worklane-ci-$name-%i
 RuntimeDirectory=worklane-ci-$name-%i
 RuntimeDirectoryMode=0700
 UMask=0077
+Nice=$nice
 ExecStart=/bin/bash $root/%i/runner/run.sh --once
 # One job, then exit: start again (after worklane-ci-$name-reset@%i, as root) for the next.
 Restart=always

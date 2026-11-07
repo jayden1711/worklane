@@ -27,12 +27,12 @@ const re = (s: string) => new RegExp(s.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&'));
 /** Homebrew as it lays node out under a prefix: bin/brew, the versioned binary in the Cellar, bin/node a symlink to it. */
 function brew(real?: string) {
   const prefix = realpathSync(mkdtempSync(join(tmpdir(), 'brew-')));
-  mkdirSync(join(prefix, 'bin'));
+  mkdirSync(join(prefix, 'bin'), { mode: 0o755 });
   writeFileSync(join(prefix, 'bin', 'brew'), '#!/bin/sh\n');
   let node = real;
   if (!node) {
     const cellar = join(prefix, 'Cellar', 'node', '26.7.0', 'bin');
-    mkdirSync(cellar, { recursive: true });
+    mkdirSync(cellar, { recursive: true, mode: 0o755 });
     node = join(cellar, 'node');
     writeFileSync(node, '#!/bin/sh\n');
     chmodSync(node, 0o755);
