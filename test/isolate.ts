@@ -29,6 +29,14 @@ const KEEP = new Set([`${BRAND.envPrefix}_BROWSER_TIMEOUT_SCALE`]);
 for (const k of Object.keys(process.env)) {
   if ((k.startsWith(`${BRAND.envPrefix}_`) && !KEEP.has(k)) || k.startsWith('AGENT_SLOTS_')) delete process.env[k];
 }
+/**
+ * WHY (#838): a GitHub token or a Claude credential exported in the shell reached every real `gh` or `claude` a test
+ * ran. None is ever a test's own: a test that needs one gives its own stand-in a fake.
+ */
+// INVARIANT: every name src/credential-env.ts drops is here (test/isolate.test.ts checks it). Not imported: each
+// module this preload loads runs in the lint backstops' process and must be a guard file (test/desktop-removed.test.ts).
+export const DROPPED_CREDENTIALS: readonly string[] = ['GH_TOKEN', 'GITHUB_TOKEN', 'GH_ENTERPRISE_TOKEN', 'GITHUB_ENTERPRISE_TOKEN', 'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'CLAUDE_CODE_OAUTH_TOKEN'];
+for (const k of DROPPED_CREDENTIALS) delete process.env[k];
 
 /**
  * This test process's machine: everything below is inside it, the temporary directory too. A test process a test
@@ -253,6 +261,11 @@ export const MACHINE_TOOLS_ON_PURPOSE: readonly string[] = Object.freeze([
 
 const POSIX = process.platform !== 'win32';
 const SELF = fileURLToPath(import.meta.url);
+/**
+ * The shifted-clock preload beside this one (test/clock-shift.ts, #687), which the clock-shift job loads through
+ * NODE_OPTIONS into every process (#1107): by this exact path only, it moves the clock and runs nothing else first.
+ */
+const CLOCK_SHIFT = join(dirname(SELF), `clock-shift${SELF.endsWith('.ts') ? '.ts' : '.js'}`);
 /** The repo: this file runs as <repo>/dist/test/isolate.js (or <repo>/test/isolate.ts). */
 const REPO = (() => {
   const up = dirname(dirname(SELF));
@@ -296,7 +309,8 @@ export function testFileFor(execArgv: readonly string[], nodeOptions: string, ar
       const target = inline ?? flags[++i] ?? '';
       const asPath = /^(\.{1,2}\/|\/)/.test(target) ? resolve(cwd, target) : target.startsWith('file:') ? fileURLToPath(target) : null;
       // Node 24's test runner hands its children this preload twice (--import=x and --import x): the same module.
-      if (name !== '--import' || asPath !== SELF) return null;
+      // The clock-shift job's preload, by its exact path, keys the file too (#1107): it runs nothing but the clock.
+      if (name !== '--import' || (asPath !== SELF && asPath !== CLOCK_SHIFT)) return null;
     }
   }
   const rel = relative(REPO, resolve(cwd, argv1)).split(sep).join('/');

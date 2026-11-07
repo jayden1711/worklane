@@ -5,7 +5,9 @@
  *
  * `?` has two readings (#966): one UTF-16 unit, as before #966, and one character, so `keys/?.pem` also matches a
  * one-emoji name (a character outside the BMP is two units). Which one a caller gets depends on what a match does
- * there, and every matcher says so (GlobStyle). A glob with no `?` reads the same either way.
+ * there, and every matcher says so (GlobStyle). A glob with no `?` reads the same
+ * either way, but for one written with a lone surrogate (half a pair, alone), which the character reading never
+ * matches as half of a pair in a path: `allow` matches less (stricter), `deny` still matches all it did (#1129).
  */
 
 /**
@@ -66,8 +68,10 @@ function body(glob: string, reading: Reading): string {
 }
 
 /**
- * The glob as a RegExp, read as `style` says. A glob both readings read alike compiles exactly as before #966; the
- * pattern is always `^...$`, so its source without the first and last character is a pattern of its own.
+ * The glob as a RegExp, read as `style` says. A glob both readings read alike compiles exactly as before #966. The
+ * pattern is always `^...$`. A `deny` pattern's source without its first and last character is a pattern of its own,
+ * which a caller may splice into a larger one (access.ts does). An `allow` pattern's isn't: when the readings differ
+ * its lookahead holds an end anchor of its own (#1129), so it is only ever used whole.
  */
 export function globRegExp(glob: string, style: GlobStyle): RegExp {
   const unit = body(glob, 'unit');
