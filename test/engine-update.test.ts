@@ -69,8 +69,11 @@ test('checks: every one complete and green, every required one present and succe
     assert.equal(r.final, final, why.source);
     assert.match(r.reason!, why);
   }
-  // A rerun that passed supersedes the earlier failure of the same check.
-  assert.equal(u.evaluateChecks([ok('test', { conclusion: 'failure', started_at: '2026-01-01T00:00:00Z' }), ok('test', { started_at: '2026-01-01T01:00:00Z', id: 2 }), ok('lint')], req).ok, true);
+  // #925: a later pass never hides an earlier failure of a required check (GitHub's filter=latest already drops a re-run
+  // job's earlier attempts, measured), nor one still running; a required name's runs all passing install.
+  assert.deepEqual(u.evaluateChecks([ok('test', { conclusion: 'failure', started_at: '2026-01-01T00:00:00Z' }), ok('test', { started_at: '2026-01-01T01:00:00Z', id: 2 }), ok('lint')], req), { ok: false, final: true, reason: 'required check "test" ended failure' });
+  assert.deepEqual(u.evaluateChecks([ok('test', { status: 'in_progress', conclusion: null, started_at: '2026-01-01T00:00:00Z' }), ok('test', { started_at: '2026-01-01T01:00:00Z', id: 2 }), ok('lint')], req), { ok: false, final: false, reason: 'required check "test" is in_progress' });
+  assert.deepEqual(u.evaluateChecks([ok('test'), ok('test', { started_at: '2026-01-01T01:00:00Z', id: 2 }), ok('lint')], req), { ok: true });
   assert.deepEqual(u.evaluateChecks([ok('test')], []), { ok: false, final: true, reason: 'no required checks configured in updates.json' });
 });
 

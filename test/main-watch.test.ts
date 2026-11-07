@@ -234,7 +234,7 @@ test("main watch (#727): pinning never turns a check that wasn't a pass into one
   assert.match(s.unaccounted[0]?.reason ?? '', /: ci fail$/);
 });
 
-test("main watch (#727, owner rule): a pinned check is its source's latest run on the head; any non-pass of its name from another source blocks it", async () => {
+test("main watch (#727, owner rule; #925): every run of a pinned check's source on the head must pass; any non-pass of its name from another source blocks it", async () => {
   const repo = 'example-org/example-shop';
   const pins = { sources: () => ({}), github: async () => ({}), repo };
   const config = 'required_checks: [ci]\nrequired_check_sources:\n  ci: { workflow: .github/workflows/ci.yml }\n';
@@ -254,10 +254,12 @@ test("main watch (#727, owner rule): a pinned check is its source's latest run o
   };
   // Started later in time but in the earlier run: ordering is by the runs' own order, not by start time or list order.
   const early = { startedAt: iso(T - 20 * 60_000), completedAt: iso(T - 15 * 60_000) };
-  // 1. Cancelled, then passed in the later run: accounted. 2. Failed, then passed: accounted.
-  assert.equal(await verdict([ci({ ...job(1, 11), conclusion: 'cancelled' }), ci({ ...job(2, 21), ...early })]), 'accounted');
-  assert.equal(await verdict([ci({ ...job(2, 21), ...early }), ci({ ...job(1, 11), conclusion: 'failure' })]), 'accounted');
-  // Passed, then cancelled in the later run: the later run decides.
+  // #925: cancelled or failed in the earlier run, then passed in the later run: the earlier run still blocks.
+  assert.equal(await verdict([ci({ ...job(1, 11), conclusion: 'cancelled' }), ci({ ...job(2, 21), ...early })]), 'ci fail');
+  assert.equal(await verdict([ci({ ...job(2, 21), ...early }), ci({ ...job(1, 11), conclusion: 'failure' })]), 'ci fail');
+  assert.equal(await verdict([ci({ ...job(2, 21), ...early }), ci({ ...job(1, 11), status: 'in_progress', conclusion: null, completedAt: null })]), 'ci pending');
+  assert.equal(await verdict([ci(job(1, 11)), ci({ ...job(2, 21), ...early })]), 'accounted', 'both runs passed');
+  // Passed, then cancelled in the later run: blocks.
   assert.equal(await verdict([ci(job(1, 11)), ci({ ...job(2, 21), conclusion: 'cancelled', ...early })]), 'ci fail');
   // A re-run attempt in the same workflow run (a newer check run, same suite) counts as the newer.
   assert.equal(await verdict([ci({ ...job(1, 19), ...early }), ci({ ...job(1, 11), conclusion: 'failure' })]), 'accounted');
@@ -295,7 +297,7 @@ test('main watch (#727): an Actions-App pin never lets one workflow file superse
   // A workflow pin: run 200 passed (check run 21), then run 100 was re-run and its newest attempt (check run 31) failed.
   const wf = { github: {}, config: 'required_checks: [ci]\nrequired_check_sources:\n  ci: { workflow: .github/workflows/ci.yml }\n', files: { '1': '.github/workflows/ci.yml', '2': '.github/workflows/ci.yml' } };
   assert.equal(await verdict({ ...wf, runs: [ci(job(2, 21)), ci({ ...job(1, 31), conclusion: 'failure' })] }), 'ci fail');
-  assert.equal(await verdict({ ...wf, runs: [ci({ ...job(1, 11), conclusion: 'cancelled' }), ci(job(2, 21))] }), 'accounted', "the owner's case 1 stays");
+  assert.equal(await verdict({ ...wf, runs: [ci({ ...job(1, 11), conclusion: 'cancelled' }), ci(job(2, 21))] }), 'ci fail', '#925: an earlier cancelled run blocks too');
 });
 
 test("main watch (#727): while GitHub's rules have never answered, a merge waits to be judged: never by name, never unaccounted", async () => {
@@ -1189,19 +1191,20 @@ async function watchVerdict(c: Case, pin: { config: string; github: Record<strin
 test('readiness and the main watch agree on every pinned case, under a workflow pin, an Actions-App pin and a non-Actions App pin (#727 round 6)', async () => {
   const ciYml = '.github/workflows/ci.yml';
   const actions: Case[] = [
-    { what: "owner 1: run 100 cancelled, then run 200 passed", jobs: [{ id: 10, suite: 1, conclusion: 'cancelled' }, { id: 20, suite: 2 }], files: { 1: ciYml, 2: ciYml }, expect: 'pass' },
-    { what: 'owner 2: run 100 failed, then run 200 passed', jobs: [{ id: 10, suite: 1, conclusion: 'failure' }, { id: 20, suite: 2 }], files: { 1: ciYml, 2: ciYml }, expect: 'pass' },
+    // #925: an earlier run of the pinned file that didn't pass blocks (it used to be superseded: the owner's cases 1 and 2).
+    { what: 'run 100 cancelled, then run 200 passed', jobs: [{ id: 10, suite: 1, conclusion: 'cancelled' }, { id: 20, suite: 2 }], files: { 1: ciYml, 2: ciYml }, expect: 'fail' },
+    { what: 'run 100 failed, then run 200 passed', jobs: [{ id: 10, suite: 1, conclusion: 'failure' }, { id: 20, suite: 2 }], files: { 1: ciYml, 2: ciYml }, expect: 'fail' },
     { what: "owner 3: the pinned pass, and another App's same-name failure", jobs: [{ id: 20, suite: 2 }, { id: 30, suite: 9, app: OTHER_APP, conclusion: 'failure' }], files: { 2: ciYml }, expect: 'fail' },
     { what: 'tightening: run 200 passed, then run 100 re-run and failed', jobs: [{ id: 10, suite: 1 }, { id: 20, suite: 2 }, { id: 30, suite: 1, conclusion: 'failure' }], files: { 1: ciYml, 2: ciYml }, expect: 'fail' },
-    { what: 'a normal re-run: run 100 cancelled, run 200 failed then its re-run attempt passed', jobs: [{ id: 10, suite: 1, conclusion: 'cancelled' }, { id: 20, suite: 2, conclusion: 'failure' }, { id: 30, suite: 2 }], files: { 1: ciYml, 2: ciYml }, expect: 'pass' },
+    { what: 'a normal re-run: run 100 passed, run 200 failed then its re-run attempt passed', jobs: [{ id: 10, suite: 1 }, { id: 20, suite: 2, conclusion: 'failure' }, { id: 30, suite: 2 }], files: { 1: ciYml, 2: ciYml }, expect: 'pass' },
     { what: 'a re-run attempt of the latest run still running', jobs: [{ id: 20, suite: 2, conclusion: 'failure' }, { id: 30, suite: 2, status: 'in_progress' }], files: { 2: ciYml }, expect: 'pending' },
     { what: 'ci.yml failed, then a PR-added evil.yml passed later', jobs: [{ id: 10, suite: 1, conclusion: 'failure' }, { id: 20, suite: 3 }], files: { 1: ciYml, 3: '.github/workflows/evil.yml' }, expect: 'fail' },
     { what: "the pinned pass, and the name's failing commit status", jobs: [{ id: 20, suite: 2 }], files: { 2: ciYml }, statuses: [{ context: 'ci', state: 'failure' }], expect: 'fail' },
   ];
   const app: Case[] = [
-    // Round 8, the owner's decision: the App's latest run decides, across suites (round 6 had these fail).
-    { what: 'owner 1 under a non-Actions App: suite 11 cancelled, then suite 12 passed', jobs: [{ id: 10, suite: 11, app: NON_ACTIONS_APP, conclusion: 'cancelled' }, { id: 20, suite: 12, app: NON_ACTIONS_APP }], expect: 'pass' },
-    { what: 'owner 2 under a non-Actions App: suite 11 failed, then suite 12 passed', jobs: [{ id: 10, suite: 11, app: NON_ACTIONS_APP, conclusion: 'failure' }, { id: 20, suite: 12, app: NON_ACTIONS_APP }], expect: 'pass' },
+    // #925: every suite's run of the App must pass (round 8 had the App's latest run decide, across suites).
+    { what: 'a non-Actions App: suite 11 cancelled, then suite 12 passed', jobs: [{ id: 10, suite: 11, app: NON_ACTIONS_APP, conclusion: 'cancelled' }, { id: 20, suite: 12, app: NON_ACTIONS_APP }], expect: 'fail' },
+    { what: 'a non-Actions App: suite 11 failed, then suite 12 passed', jobs: [{ id: 10, suite: 11, app: NON_ACTIONS_APP, conclusion: 'failure' }, { id: 20, suite: 12, app: NON_ACTIONS_APP }], expect: 'fail' },
     { what: 'a non-Actions App: suite 11 passed, then a later suite 12 failed', jobs: [{ id: 10, suite: 11, app: NON_ACTIONS_APP }, { id: 20, suite: 12, app: NON_ACTIONS_APP, conclusion: 'failure' }], expect: 'fail' },
     { what: 'a re-run in the same suite passed over its failure', jobs: [{ id: 10, suite: 11, app: NON_ACTIONS_APP, conclusion: 'failure' }, { id: 20, suite: 11, app: NON_ACTIONS_APP }], expect: 'pass' },
     { what: "owner 3 under a non-Actions App: its pass, and another App's failure", jobs: [{ id: 20, suite: 12, app: NON_ACTIONS_APP }, { id: 30, suite: 9, app: OTHER_APP, conclusion: 'failure' }], expect: 'fail' },
