@@ -266,6 +266,22 @@ function tokenize(src: string, nested: string[]): Token[] {
 }
 
 const SEPARATORS = new Set([';', '&&', '||', '|', '|&', '&', '(', ')', '{', '}']);
+
+/**
+ * Reserved words that start a command and put another command after them (#1125): `if <cmd>`, `then <cmd>`,
+ * `do <cmd>`, `! <cmd>`, `coproc <cmd>`. The shell reads a reserved word only at the start of a command, before any
+ * assignment, so only there is it dropped and the next word read as the program. Words that end or head a compound
+ * command (`fi`, `done`, `esac`, `for x in …`, `case …`) run nothing themselves. `time` is left to the runner table,
+ * which reads it as the time program, its options included (#993).
+ */
+const LEADING_RESERVED = new Set(['!', 'if', 'then', 'elif', 'else', 'do', 'while', 'until', 'coproc']);
+
+/** `words` from where its program starts: past every reserved word that leads it. */
+function pastReserved(words: string[]): string[] {
+  let k = 0;
+  while (k < words.length && LEADING_RESERVED.has(words[k]!)) k++;
+  return k ? words.slice(k) : words;
+}
 const WRITE_REDIRECTS = new Set(['>', '>>', '>|', '&>', '&>>']);
 
 /** A wrapper's options that take the next word as their value, so that word is not the command. */
@@ -376,6 +392,7 @@ export function splitCommands(src: string, depth = 0): SimpleCommand[] {
   let pendingRedirect: string | null = null;
 
   const flush = () => {
+    words = pastReserved(words);
     const assignments: Record<string, string> = {};
     let k = 0;
     while (k < words.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(words[k]!)) {

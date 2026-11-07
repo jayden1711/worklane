@@ -8,7 +8,7 @@ import { spawn } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { Readable } from 'node:stream';
-import { guardsFailClosed, runSettings, type HookEntry, type Settings } from '../src/agent-settings.js';
+import { guardsFailClosed, HOOK_MARKER, runSettings, type HookEntry, type Settings } from '../src/agent-settings.js';
 import { BRAND } from '../src/brand.js';
 import { EVALUATE_ARG, GUARD_BUDGET_MS, OUTPUT_CAP, underDeadline, VERDICT_FD, type GuardAnswer } from '../src/hook-deadline.js';
 import type { HookInput, HookOutput } from '../src/hook.js';
@@ -127,4 +127,20 @@ test("the guard's process answers every corpus call exactly as recorded, through
   const at = (q: number) => Math.round(times[Math.min(times.length - 1, Math.floor(q * times.length))]!);
   t.diagnostic(`${times.length} PreToolUse calls through the guard's process: p50 ${at(0.5)} ms, p95 ${at(0.95)} ms, max ${at(1)} ms`);
   assert.ok(at(0.95) < GUARD_BUDGET_MS / 5, `ordinary calls stay far inside the budget (p95 ${at(0.95)} ms)`);
+});
+
+test("#937: the guard's PreToolUse hook is asked about every tool: install writes `*`, and a run on settings written with a list of names gets `*`", () => {
+  for (const s of [agentSettings('/opt/e/dist/src/cli.js', [], [], []), mergeSettings({}, '/opt/e/dist/src/cli.js', [], [])]) {
+    const ours = s.hooks!.PreToolUse!.filter((e) => e.hooks.some((h) => h.command.includes(HOOK_MARKER)));
+    assert.deepEqual(ours.map((e) => e.matcher), ['*']);
+    // The post-edit check stays on the editing tools.
+    assert.deepEqual(s.hooks!.PostToolUse!.map((e) => e.matcher), ['Edit|Write|MultiEdit']);
+  }
+  // Agent settings an earlier install wrote: our entry named 9 tools, so mcp__* and NotebookRead skipped the guard.
+  const command = `E="/opt/e/dist/src/hook-main.js"; ${HOOK_MARKER} pre-tool-use`;
+  const old: Settings = { disableAllHooks: false, hooks: { PreToolUse: [{ matcher: 'Bash|Edit|Write|MultiEdit|NotebookEdit|WebFetch|Read|Grep|Glob', hooks: [{ type: 'command', command, timeout: 30 }] }] } };
+  const lane = { hooks: { PreToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command: 'lane' }] }] } };
+  const run = runSettings(old, lane, {});
+  assert.deepEqual(run.hooks!.PreToolUse!.map((e) => e.matcher), ['*', 'Bash'], "ours asked about every tool; the lane's own hook keeps its matcher");
+  assert.equal(old.hooks!.PreToolUse![0]!.matcher, 'Bash|Edit|Write|MultiEdit|NotebookEdit|WebFetch|Read|Grep|Glob', 'the instance settings object is not changed');
 });
