@@ -10,6 +10,12 @@
 #               pull request (a fork's, or a branch's in the repo itself), never a dispatch on another branch, and
 #               never a branch's own edited copy of a workflow: only code that went through the branch's review.
 #               The runner sets these variables itself, and a workflow can't override GITHUB_* ones.
+#               A runner installed with --pull-requests same-repo (WORKLANE_CI_PULL_REQUESTS=same-repo) also takes a
+#               pull_request into WORKLANE_CI_BRANCH whose head branch is in WORKLANE_CI_REPO itself, never a fork's:
+#               the event file the runner writes before this hook (GITHUB_EVENT_PATH) must name the repo as both
+#               the head's and the base's. Only people who can push to the repo can open one. Its workflow is the
+#               pull request's own copy (refs/pull/<n>/merge), so for those jobs the runner's sandbox, firewall and
+#               per-job reset are what hold, not the workflow. pull_request_target is never taken.
 #            2. Takes the machine-wide full-run lock SHARED for the job: agents' full runs take it exclusively, so a
 #               CI job never overlaps one, and CI jobs never serialize each other. A background holder keeps it
 #               until the completed hook (or the runner's service stopping, which kills the holder with the rest of
@@ -22,6 +28,7 @@
 # From the runner's service unit (ci-runner.sh writes them):
 #   WORKLANE_CI_REPO            owner/repo, the only repo whose jobs run here
 #   WORKLANE_CI_BRANCH          the only branch whose pushes, dispatches and schedules run here
+#   WORKLANE_CI_PULL_REQUESTS   none (or unset), or same-repo: pull requests into that branch from the repo's own branches
 #   WORKLANE_CI_LOCK            the lock file (root-owned, opened read-only: flock needs only a read fd)
 #   WORKLANE_CI_LOCK_WAIT_MIN   how long to wait for it
 #   WORKLANE_CI_NO_LOCK_JOBS    space-separated job ids that don't take it
@@ -34,7 +41,9 @@ held_file="$state/lock-held"
 
 refuse() {
   echo "ci-trust: not running this job here: $1" >&2
-  echo "ci-trust: this runner takes only $WORKLANE_CI_REPO's pushes, dispatches and schedules on $WORKLANE_CI_BRANCH, from workflows on $WORKLANE_CI_BRANCH (docs/ci-runners.md); give the job a GitHub-hosted runs-on for anything else" >&2
+  local prs=""
+  if [ "${WORKLANE_CI_PULL_REQUESTS:-}" = same-repo ]; then prs=", and pull requests into it from $WORKLANE_CI_REPO's own branches"; fi
+  echo "ci-trust: this runner takes only $WORKLANE_CI_REPO's pushes, dispatches and schedules on $WORKLANE_CI_BRANCH, from workflows on $WORKLANE_CI_BRANCH$prs (docs/ci-runners.md); give the job a GitHub-hosted runs-on for anything else" >&2
   exit 1
 }
 
@@ -45,6 +54,9 @@ trusted() {
   [ "${GITHUB_REPOSITORY:-}" = "$repo" ] || refuse "repository ${GITHUB_REPOSITORY:-unset}, not $repo"
   case "${GITHUB_EVENT_NAME:-}" in
     push | workflow_dispatch | schedule) ;;
+    pull_request)
+      if [ "${WORKLANE_CI_PULL_REQUESTS:-none}" = same-repo ]; then same_repo_pr "$repo" "$branch"; return 0; fi
+      refuse "event pull_request (only push, workflow_dispatch and schedule)" ;;
     *) refuse "event ${GITHUB_EVENT_NAME:-unset} (only push, workflow_dispatch and schedule)" ;;
   esac
   [ "${GITHUB_REF:-}" = "refs/heads/$branch" ] || refuse "ref ${GITHUB_REF:-unset}, not refs/heads/$branch"
@@ -54,6 +66,36 @@ trusted() {
     *) refuse "workflow ${GITHUB_WORKFLOW_REF:-unset}, not one of $repo's workflows on refs/heads/$branch" ;;
   esac
   echo "ci-trust: $GITHUB_EVENT_NAME on $GITHUB_REF of $GITHUB_REPOSITORY, workflow ${GITHUB_WORKFLOW_REF#"$repo/"}: trusted"
+}
+
+# A pull request into <branch> whose head is a branch of <repo> itself (WORKLANE_CI_PULL_REQUESTS=same-repo only).
+# Every condition must hold; the first one that doesn't names itself.
+same_repo_pr() {
+  local repo="$1" branch="$2" n js head base num
+  [ "${WORKLANE_CI_PULL_REQUESTS:-}" = same-repo ] || refuse "event pull_request (this runner takes no pull requests)"
+  [[ "${GITHUB_REF:-}" =~ ^refs/pull/([1-9][0-9]{0,9})/merge$ ]] || refuse "ref ${GITHUB_REF:-unset}, not a pull request's refs/pull/<n>/merge"
+  n="${BASH_REMATCH[1]}"
+  [ "${GITHUB_BASE_REF:-}" = "$branch" ] || refuse "a pull request into ${GITHUB_BASE_REF:-unset}, not $branch"
+  [ -n "${GITHUB_HEAD_REF:-}" ] || refuse "a pull request with no head ref"
+  case "${GITHUB_WORKFLOW_REF:-}" in
+    "$repo/.github/workflows/"*"@refs/pull/$n/merge") ;;
+    *) refuse "workflow ${GITHUB_WORKFLOW_REF:-unset}, not one of $repo's workflows on refs/pull/$n/merge" ;;
+  esac
+  [ -n "${GITHUB_EVENT_PATH:-}" ] && [ -f "$GITHUB_EVENT_PATH" ] && [ -r "$GITHUB_EVENT_PATH" ] || refuse "no event file to read the pull request's head repo from"
+  command -v node > /dev/null || refuse "node isn't installed (scripts/setup/node.sh), so the pull request's head repo can't be read"
+  # Three lines, as GitHub sent them: the head's repo, the base's repo, the number. Empty when missing (a deleted
+  # fork's head has no repo).
+  # shellcheck disable=SC2016
+  js='const e = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
+    const p = (e && e.pull_request) || {};
+    const name = (side) => (p[side] && p[side].repo && typeof p[side].repo.full_name === "string" ? p[side].repo.full_name.replace(/\n/g, " ") : "");
+    process.stdout.write([name("head"), name("base"), typeof p.number === "number" ? String(p.number) : ""].join("\n") + "\n");'
+  { IFS= read -r head && IFS= read -r base && IFS= read -r num; } < <(node -e "$js" "$GITHUB_EVENT_PATH" 2>/dev/null || true) \
+    || refuse "the event file isn't a pull request's JSON"
+  [ "$head" = "$repo" ] || refuse "pull request #$n's head is in ${head:-no repo}, not $repo (a fork's pull request never runs here)"
+  [ "$base" = "$repo" ] || refuse "pull request #$n's base is in ${base:-no repo}, not $repo"
+  [ "$num" = "$n" ] || refuse "the event file is pull request #${num:-?}'s, not #$n's"
+  echo "ci-trust: pull_request #$n from $repo's branch $GITHUB_HEAD_REF into $branch, workflow ${GITHUB_WORKFLOW_REF#"$repo/"}: trusted (same repo)"
 }
 
 started() {
