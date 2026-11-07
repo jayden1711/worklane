@@ -138,7 +138,7 @@ test('#639 BOARD_SNAPSHOT reads each part of the check from the page in one go',
   const all: Record<string, El[]> = {
     [BOARD_CARDS]: [shown, faded, bare],
     [CURRENT_ROWS]: [el({ textContent: '  b \n' })],
-    '[data-testid="board-instance-error"]': [el({ textContent: " busy: can't load its board " })],
+    '[data-testid="board-instance-error"], [data-testid="board-instance-stale"]': [el({ textContent: " busy: can't load its board " }), el({ textContent: "b: couldn't refresh its board: reset, showing the last one, retrying" })],
   };
   const one: Record<string, El | null> = { '[data-testid="page-board"]': board, '[data-testid="updating"]': el() };
   const document = {
@@ -155,7 +155,7 @@ test('#639 BOARD_SNAPSHOT reads each part of the check from the page in one go',
     shown: 1,
     notShown: ['opacity 0.4 on article[data-testid=board-card]', 'an empty box 0x0 at 0,0'],
     current: ['b'],
-    errors: ["busy: can't load its board"],
+    errors: ["busy: can't load its board", "b: couldn't refresh its board: reset, showing the last one, retrying"],
     updating: true,
   });
   one['[data-testid="updating"]'] = null;

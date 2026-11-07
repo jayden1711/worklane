@@ -4,8 +4,9 @@
 # runner takes one job per start (run.sh --once), so this gives every job what an ephemeral runner gets:
 #   1. no container, image build cache, volume or network the last job left (removed through the runner's own
 #      rootless daemon, first, so nothing still running can write into what is made next);
-#   2. a new runner directory: the pinned release's scripts and this runner's registration, with bin/ and
-#      externals/ as empty mount points for the unit's read-only binds of the pinned release;
+#   2. a new runner directory: the pinned release's scripts and this runner's registration, with bin/ an empty
+#      mount point for the unit's read-only bind of the pinned release, and externals/ a root-owned copy of it
+#      (under the same bind) that the rootless daemon can mount into a container job;
 #   3. a new, empty workspace and home, with the machine's pinned Node as a tool-cache entry, so
 #      actions/setup-node uses it instead of downloading one.
 # Pulled images stay, as a cache: a job names what it runs.
@@ -40,7 +41,11 @@ install -d -o "$user" -g "$user" -m 0700 "$base/runner" "$base/work" "$base/home
 for f in "$pristine"/* "$pristine"/.[!.]*; do
   [ -e "$f" ] || continue
   case "$(basename "$f")" in
-    bin | externals) install -d -o root -g root -m 0755 "$base/runner/$(basename "$f")" ;;
+    bin) install -d -o root -g root -m 0755 "$base/runner/bin" ;;
+    # A root-owned copy under the read-only bind, not an empty mount point: a container job's /__e (the runner's
+    # Node for JavaScript actions) is mounted from this path by the rootless daemon, which runs outside the runner's
+    # sandbox and so never sees the bind. The runner user can't change it; the next reset copies it again.
+    externals) cp -a --reflink=auto "$f" "$base/runner/externals"; chown -R root:root "$base/runner/externals"; chmod -R go-w "$base/runner/externals" ;;
     *) cp -a "$f" "$base/runner/" ;;
   esac
 done
