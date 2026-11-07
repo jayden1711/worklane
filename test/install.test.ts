@@ -216,3 +216,20 @@ test('install --git-hooks-only adds the pre-commit secret scan and leaves commit
   assert.match(readFileSync(join(dir, '.git', 'hooks', 'pre-commit'), 'utf8'), /gitleaks git --pre-commit --staged/);
   assert.equal(existsSync(settings) ? readFileSync(settings, 'utf8') : null, before);
 });
+
+test('#930: doctor fails a checkout whose guard hook lacks onFailure "block" (an older install), and install fixes it', () => {
+  const { dir } = exampleProject();
+  install({ root: dir, engineCli });
+  const flag = () => doctor(dir).find((c) => c.name === 'hook PreToolUse onFailure');
+  assert.equal(flag(), undefined, 'a fresh install fails closed');
+  // As an install from before onFailure "block" wrote it.
+  const file = join(dir, '.claude', 'settings.json');
+  const s = JSON.parse(readFileSync(file, 'utf8')) as { hooks: { PreToolUse: { hooks: { onFailure?: string }[] }[] } };
+  for (const e of s.hooks.PreToolUse) for (const h of e.hooks) delete h.onFailure;
+  writeFileSync(file, JSON.stringify(s, null, 2));
+  assert.equal(doctor(dir).find((c) => c.name === 'hook PreToolUse')?.level, 'ok', 'the hook itself is still installed');
+  assert.equal(flag()?.level, 'fail');
+  assert.match(flag()!.detail, /lacks onFailure "block": a hook stopped or timed out lets the tool call run[\s\S]*Run `\S+ install` again/);
+  install({ root: dir, engineCli });
+  assert.equal(flag(), undefined, 'install rewrites it');
+});

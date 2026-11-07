@@ -1,0 +1,32 @@
+# docs/security.md lists a guard gap as fixed only with its fix PR merged, as the merge commit it names (#859): each
+# row's commit is an ancestor of HEAD and its PR is merged as it. On a pull request that changes the page, the check or
+# this file only (a paths filter): the table changes only through pull requests, and a check on every PR and push would
+# be one more required check, which is the owner's to add. The whole history (the test shards fetch 2 commits); GitHub
+# is only read. scripts/ci/security-fixed.mjs; test/security-fixed.test.ts holds this file's shape.
+name: security-fixed
+
+on:
+  pull_request:
+    paths:
+      - docs/security.md
+      - scripts/ci/security-fixed.mjs
+      - .github/workflows/security-fixed.yml
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  security-fixed:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+      - name: every fixed gap's PR merged, as the commit the page names
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/ci/security-fixed.mjs

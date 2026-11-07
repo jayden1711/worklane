@@ -9,7 +9,7 @@ import { makePlace } from './worktrees.js';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 import { join, posix } from 'node:path';
-import { agentSettingsFileOf, NO_ATTRIBUTION, projectSettingsRefusal, runSettings, SETTINGS_CHECK_KEY, settingsAppliedProblem, settingsCheckValue, type Settings } from './agent-settings.js';
+import { agentSettingsFileOf, projectSettingsRefusal, runSettings, settingsAppliedProblem, settingsCheckValue, type Settings, withRunCheck } from './agent-settings.js';
 import { BRAND } from './brand.js';
 import type { CliAgentName } from './providers.js';
 import { logRefusalOnce, providerHostRefusal } from './provider-hosts.js';
@@ -800,10 +800,10 @@ export class CliRunner implements AgentRunner {
     // Attribution off in every --settings a run gets, with or without instance guardrails (#576); a run passed none gets none.
     // INVARIANT (#626): every --settings carries a fresh check value, and the run stops unless claude's init event
     // reports it before any line but a system one, and never succeeds without it: claude drops a whole --settings
-    // over one invalid value, silently. The check key is spread last, so nothing above (NO_ATTRIBUTION included) can
-    // replace it.
+    // over one invalid value, silently. withRunCheck spreads the check key last, so nothing above (NO_ATTRIBUTION
+    // included) can replace it.
     const check = locked ? settingsCheckValue() : null;
-    const settings = locked && check ? { ...locked, ...NO_ATTRIBUTION, [SETTINGS_CHECK_KEY]: check } : undefined;
+    const settings = locked && check ? withRunCheck(locked, check) : undefined;
     const agentFile = guard ? agentSettingsFileOf(guard) : undefined;
     const settingsName = guard ? `the instance's agent settings${agentFile ? ` ${agentFile}` : ''}${withLogins ? ", with the lane's" : ''}` : laneSettings ? "the lane's settings" : "the run's own settings";
     // Requests refused for the network, from the same stream the record and the feed read.
