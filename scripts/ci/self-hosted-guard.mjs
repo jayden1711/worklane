@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // Which workflow jobs may reach a self-hosted runner, checked from the workflow files (test/self-hosted-guard.test.ts
 // runs it over .github/workflows on every PR). A self-hosted runner runs a job's code on a machine of ours, so it may
-// take only trusted jobs: never a pull request's (a fork's, or a branch's), and never one with secrets. The runner
+// take only trusted jobs: never a fork's pull request, a branch's only on a runner set up for them (below), and never
+// one with secrets. The runner
 // enforces this itself before a job's first step (scripts/setup/ci-runner/job-hook.sh); this keeps the workflows
 // from even asking for it.
 //
@@ -14,7 +15,12 @@
 //   github.ref == 'refs/heads/<branch>'
 //   github.event_name == 'push' | 'workflow_dispatch' | 'schedule'
 //   1. runs-on: ${{ <guard> && fromJSON('<labels JSON array>') || <fallback> }}, the fallback a GitHub-hosted
-//      label in quotes or matrix.<key> whose values are all GitHub-hosted labels;
+//      label in quotes or matrix.<key> whose values are all GitHub-hosted labels; or several alternatives,
+//      ${{ <guard> && fromJSON(..) || <guard> && fromJSON(..) || <fallback> }}, each guard checked on its own. In
+//      this form only, a guard may instead take a same-repo pull request: the repo term, github.event_name ==
+//      'pull_request', github.base_ref == '<branch>' and
+//      github.event.pull_request.head.repo.full_name == github.repository (a fork's head never matches). Only a
+//      runner installed with --pull-requests same-repo runs those; every other runner's hook refuses them;
 //   2. runs-on: a literal (string, list, or {group, labels}), with the job's own if: being the guard.
 // A matrix value that isn't a GitHub-hosted label, an expression of any other shape, or `secrets.` anywhere in a
 // self-hosted job is a problem.
@@ -33,18 +39,35 @@ const unwrap = (s) => {
   return m ? m[1].trim() : null;
 };
 
-/** Why `expr` (no ${{ }}) is not a trusted-only guard, or null when it is one. */
-export function guardProblem(expr) {
+// The one term that compares two contexts: a pull request whose head branch is in this repo itself, never a fork's.
+const SAME_REPO_HEAD = 'github.event.pull_request.head.repo.full_name == github.repository';
+
+/**
+ * Why `expr` (no ${{ }}) is not a trusted-only guard, or null when it is one. With { pullRequests: true } (the
+ * runs-on form only), a guard may instead take a same-repo pull request: github.event_name == 'pull_request',
+ * github.base_ref == '<branch>' and the SAME_REPO_HEAD term, beside the repo term. Such a job runs only on a runner
+ * installed with --pull-requests same-repo; any other runner's hook refuses it before its first step.
+ */
+export function guardProblem(expr, { pullRequests = false } = {}) {
   if (/\|\||[()!](?!=)/.test(expr)) return 'a guard is a conjunction of == / != terms: no ||, no !, no parentheses';
   const terms = expr.split('&&').map((t) => t.trim());
   const eq = new Map();
+  let sameRepoHead = false;
   for (const t of terms) {
+    if (pullRequests && t.replace(/\s+/g, ' ') === SAME_REPO_HEAD) { sameRepoHead = true; continue; }
     const m = TERM.exec(t);
     if (!m) return `"${t}" is not a <context.path> == '<literal>' term`;
     if (m[2] === '==') eq.set(m[1], [...(eq.get(m[1]) ?? []), m[3]]);
   }
   const one = (k) => (eq.get(k)?.length === 1 ? eq.get(k)[0] : null);
   if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(one('github.repository') ?? '') && !/^[1-9][0-9]*$/.test(one('github.repository_id') ?? '')) return "the guard needs github.repository == '<owner>/<repo>' or github.repository_id == '<the repo's id>'";
+  if (pullRequests && one('github.event_name') === 'pull_request') {
+    if (!sameRepoHead) return `a pull request guard needs ${SAME_REPO_HEAD} (never a fork's pull request)`;
+    if (!/^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(one('github.base_ref') ?? '')) return "a pull request guard needs github.base_ref == '<branch>'";
+    if (eq.has('github.ref')) return 'a pull request guard names its branch by github.base_ref, not github.ref';
+    return null;
+  }
+  if (sameRepoHead) return `${SAME_REPO_HEAD} belongs in a pull request guard (github.event_name == 'pull_request')`;
   if (!/^refs\/heads\/[A-Za-z0-9._/-]+$/.test(one('github.ref') ?? '')) return "the guard needs github.ref == 'refs/heads/<branch>'";
   if (!EVENTS.has(one('github.event_name') ?? '')) return "the guard needs github.event_name == 'push', 'workflow_dispatch' or 'schedule'";
   return null;
@@ -81,16 +104,21 @@ export function jobProblems(job) {
       const vals = matrixValues(job, matrixOnly[1]);
       if (!vals || !vals.every((v) => hostedOnly(literalLabels(v)))) out.push(`runs-on: matrix.${matrixOnly[1]} has a value that isn't a GitHub-hosted label; name self-hosted labels only in the guarded form`);
     } else {
-      const m = /^([\s\S]+?)\s*&&\s*fromJSON\('(\[[^']*\])'\)\s*\|\|\s*([\s\S]+)$/.exec(expr);
-      if (!m) {
+      // One or more `<guard> && fromJSON('<labels>')` alternatives, then the fallback: `a && x || b && y || z`.
+      // No parentheses are allowed in a guard, so every || here is one of these separators.
+      const parts = expr.split('||').map((p) => p.trim());
+      const alts = parts.slice(0, -1).map((p) => /^([\s\S]+?)\s*&&\s*fromJSON\('(\[[^']*\])'\)$/.exec(p));
+      if (parts.length < 2 || alts.some((a) => !a)) {
         out.push(`runs-on: an expression this check can't prove reaches GitHub-hosted runners only: \${{ ${expr} }}`);
       } else {
-        const g = guardProblem(m[1]);
-        if (g) out.push(`runs-on: ${g}`);
-        let labels = null;
-        try { labels = JSON.parse(m[2]); } catch { /* reported below */ }
-        if (!Array.isArray(labels) || !labels.includes('self-hosted')) out.push("runs-on: fromJSON('[...]') must name the self-hosted label");
-        const fb = m[3].trim();
+        for (const m of alts) {
+          const g = guardProblem(m[1], { pullRequests: true });
+          if (g) out.push(`runs-on: ${g}`);
+          let labels = null;
+          try { labels = JSON.parse(m[2]); } catch { /* reported below */ }
+          if (!Array.isArray(labels) || !labels.includes('self-hosted')) out.push("runs-on: fromJSON('[...]') must name the self-hosted label");
+        }
+        const fb = parts[parts.length - 1];
         const fq = /^'([^']*)'$/.exec(fb);
         const fm = /^matrix\.([A-Za-z0-9_-]+)$/.exec(fb);
         const fmVals = fm ? matrixValues(job, fm[1]) : null;
