@@ -101,3 +101,26 @@ test("the deadline's holder delivers an answer of any size whole before it exits
   assert.equal(stuck.status, 2, `undeliverable: exit 2 (got ${stuck.status}, ${stuck.stdout.length} bytes read)`);
   assert.ok(stuck.ms < 8_000, `within the delivery bound (${Math.round(stuck.ms)} ms)`);
 });
+
+test('#930: a deny padded with control characters (6 bytes each as JSON) is still whole and under 4 KiB', async () => {
+  const { dir: project, stateDir } = exampleProject();
+  const env = { ...process.env, [`${P}_AGENT`]: '1', [`${P}_STATE_DIR`]: stateDir };
+  // Control characters on both sides of the secret name: the start and the end the reason keeps are both escaped.
+  const pad = '\u0001\u001f'.repeat(20_000);
+  for (const [name, input] of [
+    ['Read', { hook_event_name: 'PreToolUse', cwd: project, tool_name: 'Read', tool_input: { file_path: `${pad}/../.env` } }],
+    ['Read, padded after', { hook_event_name: 'PreToolUse', cwd: project, tool_name: 'Read', tool_input: { file_path: `.env${pad}` } }],
+    ['Bash', { hook_event_name: 'PreToolUse', cwd: project, tool_name: 'Bash', tool_input: { command: `cat '${pad}'/../.env` } }],
+  ] as const) {
+    const r = await run([HOOK_MAIN, 'pre-tool-use'], { input: JSON.stringify({ ...input, session_id: 's' }), env, reader: 'cat' });
+    blocksOrIsWhole(r, name);
+    assert.ok(r.stdout.length < 4096, `${name}: ${r.stdout.length} bytes`);
+  }
+});
+
+test('#930: a reader that closes early (EPIPE) gets exit 2 from the holder, never exit 0 with an answer cut short', async () => {
+  const url = pathToFileURL(join(repoRoot, 'dist', 'src', 'hook-deadline.js')).href;
+  const r = await run(['--input-type=module', '-e', `const { deliver } = await import(${JSON.stringify(url)}); deliver({ stdout: 'x'.repeat(2_000_000), stderr: 'why\\n', exitCode: 0 });`], { reader: 'head -c 10 > /dev/null' });
+  assert.equal(r.signal, null);
+  assert.equal(r.status, 2, `a broken pipe blocks (${r.stderr.slice(0, 300)})`);
+});
