@@ -3,13 +3,17 @@
 // readFragments, which reads the changelog.d folder: the hand-written notes of the next release, one file per change.
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { regExpsOf, tablesOf } from './check-tables.mjs';
 
-/**
- * Files whose change is a guardrail change: the rules, the hooks that apply them, the sandbox and the scanners. Data in
- * scripts/lib/changelog.tables.json (#941); these RegExps are this module's own, made from it.
- */
-const GUARDRAIL_PATHS = regExpsOf(tablesOf(import.meta.url).get('GUARDRAIL_PATHS'));
+// GUARDRAIL_PATHS: the files whose change is a guardrail change: the rules, the hooks that apply them, the sandbox and
+// the scanners. Data in scripts/lib/changelog.tables.json (#941); the release check loads this file from its text (a
+// data: URL, with no file beside it), so it carries it (scripts/lib/table-copies.mjs), and the RegExps are its own.
+// BEGIN tables from changelog.tables.json: generated, do not edit (node scripts/gen-table-copies.mjs --write)
+// This script runs on its own, so it carries its tables as frozen literals of the data in
+// scripts/lib/changelog.tables.json, which the weakening hold compares parsed (#941).
+// test/table-copies.test.ts fails when this block is not what that file makes.
+const GUARDRAIL_PATHS = Object.freeze([Object.freeze({ source: "^src\\/guardrails\\/", flags: "" }), Object.freeze({ source: "^src\\/hook\\.ts$", flags: "" }), Object.freeze({ source: "^src\\/sandbox\\.ts$", flags: "" }), Object.freeze({ source: "^src\\/scan\\/", flags: "" }), Object.freeze({ source: "^src\\/push-check\\.ts$", flags: "" }), Object.freeze({ source: "^templates\\/project\\/guardrails", flags: "" })]);
+// END tables from changelog.tables.json
+const GUARDRAIL_RES = Object.freeze(GUARDRAIL_PATHS.map((p) => new RegExp(p.source, p.flags)));
 
 /**
  * The PR numbers in first-parent commit subjects, oldest first: a squash merge ends "(#N)"; a merge commit names
@@ -79,7 +83,7 @@ export function revertsOf(pr, repo) {
   return [...new Set(named)].filter((n) => n !== pr.number);
 }
 
-const isGuardrail = (pr) => (pr.files ?? []).some((f) => GUARDRAIL_PATHS.some((re) => re.test(f)));
+const isGuardrail = (pr) => (pr.files ?? []).some((f) => GUARDRAIL_RES.some((re) => re.test(f)));
 const labelled = (pr, ...names) => (pr.labels ?? []).some((l) => names.includes(String(l).toLowerCase()));
 
 /** Which group a PR goes in: security and guardrails, fixes, or features. */
@@ -116,7 +120,7 @@ export function changelogSection(version, date, prs, repo) {
   const guard = listed.filter(isGuardrail);
   out.push('### Guardrail changes', '');
   if (!guard.length) out.push('- none in this release', '');
-  for (const pr of guard) out.push(`${line(pr)}: ${(pr.files ?? []).filter((f) => GUARDRAIL_PATHS.some((re) => re.test(f))).join(', ')}`);
+  for (const pr of guard) out.push(`${line(pr)}: ${(pr.files ?? []).filter((f) => GUARDRAIL_RES.some((re) => re.test(f))).join(', ')}`);
   if (guard.length) out.push('');
   if (!prs.length) out.splice(2, 0, '- no merged PRs since the previous release', '');
   return out.join('\n');

@@ -23,7 +23,7 @@ const lib = (await import(pathToFileURL(join(repoRoot, 'scripts', 'lib', 'table-
 const copies = lib.COPIES.map((c) => lib.resolved(repoRoot, c));
 
 test("each script that runs on its own carries exactly what the generator makes of its tables file (#941)", () => {
-  assert.equal(copies.length, 6);
+  assert.equal(copies.length, 7);
   for (const c of copies) {
     const block = lib.blockIn(readFileSync(join(repoRoot, c.script), 'utf8'), c);
     assert.ok(block, `${c.script} has its generated block`);

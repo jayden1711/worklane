@@ -6,6 +6,7 @@
 //     the push, with nothing but GATE_CODE (an installed hook lists those two files only);
 //   - scripts/setup/app-permissions.mjs: the setup script pipes it to node on stdin;
 //   - scripts/ci/check-pins.mjs: CI runs it right after `npm ci`, before anything is built, and it loads built-ins only;
+//   - scripts/lib/changelog.mjs: the release step's check loads it from its text (a data: URL, nothing beside it);
 //   - scripts/machine/<cli>-machine.cjs: installed alone, as root, in /usr/local/libexec.
 // So each carries a copy between two marker lines, written by `node scripts/gen-table-copies.mjs --write` from its
 // tables file with the loader's own parser (scripts/lib/check-tables.mjs) and nothing else: a frozen literal of each
@@ -23,6 +24,7 @@ export const COPIES = [
   { script: 'scripts/lib/denylist.mjs', exported: ['SKIP'] },
   { script: 'scripts/setup/app-permissions.mjs', exported: ['ALLOWED_UP_TO'] },
   { script: 'scripts/ci/check-pins.mjs', exported: ['ALLOWED_PACKAGE_JSON'] },
+  { script: 'scripts/lib/changelog.mjs', exported: [] },
   // The machine helper's file name is the product's (`<cli>-machine.cjs`): found by its ending, as the updater is.
   { script: 'scripts/machine/*-machine.cjs', exported: [] },
 ];
