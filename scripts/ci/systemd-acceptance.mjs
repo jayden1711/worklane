@@ -8,8 +8,9 @@
 // stops the job.
 //
 // A test gated on systemd under another name is found by systemd's sign, not by the name (R1169k, signProblems):
-// in every file the build compiles (tsconfig.json's include), the sign (`systemd` as a word, `systemctl`, `/proc/1/`,
-// `is-system-running`, `sd_booted`, INVOCATION_ID, NOTIFY_SOCKET), read by typescript's parser in every string,
+// in every file the build compiles (tsconfig.json's include), the sign (`systemd` or `systemd1` as a word, a name
+// starting `systemd_`/`SYSTEMD_`, `systemctl`, `journalctl`, `loginctl`, `/proc/1/`, `is-system-running`, `sd_booted`,
+// INVOCATION_ID, NOTIFY_SOCKET), read by typescript's parser in every string,
 // template, regex and identifier, may be only in systemCi's declaration, a gate's reason, a test's name or a test's
 // own function that skips nothing. Anywhere else it must be data scripts/ci/systemd-acceptance-allow.json names, by
 // file, count and why; and a skip may read a binding from src/ or from such a file only as that list names it. So
@@ -135,13 +136,14 @@ const unquoted = (e) => e.replace(/(['"`])(?:\\.|(?!\1)[^\\])*\1/g, "''");
 export const gateLikeCount = (text) => skipExprs(text).filter((e) => /(?<![\w$])[A-Za-z_$]*system[\w$]*ci(?![\w$])/i.test(unquoted(e))).length;
 
 /**
- * systemd's sign (R1169k): what code that asks "is systemd here?" has to read. The program and folder name (`systemd`,
- * as a whole word: `/run/systemd`, `'systemd'`, `systemd-run`), `systemctl`, `/proc/1/` (process 1: comm, exe,
+ * systemd's sign (R1169k, R1169m): what code that asks "is systemd here?" has to read. The program and folder name
+ * (`systemd` as a whole word: `/run/systemd`, `'systemd'`, `systemd-run`; and `systemd1`, its D-Bus name), a name
+ * that starts `systemd_` or `SYSTEMD_`, `systemctl`, `journalctl`, `loginctl`, `/proc/1/` (process 1: comm, exe,
  * cmdline), `is-system-running`, `sd_booted`, and the variables systemd sets (INVOCATION_ID, NOTIFY_SOCKET). Read in
  * every string, template, regex and identifier the parser sees, so a path built from parts (`'/run' + '/systemd'`)
  * still holds one. Comments don't count.
  */
-const SIGN = /(?<![\w$])(?:systemd|systemctl|is-system-running|sd_booted|INVOCATION_ID|NOTIFY_SOCKET)(?![\w$])|\/proc\/1\//;
+const SIGN = /(?<![\w$])(?:systemd1?|systemctl|journalctl|loginctl|is-system-running|sd_booted|INVOCATION_ID|NOTIFY_SOCKET)(?![\w$])|(?<![\w$])(?:systemd|SYSTEMD)_|\/proc\/1\//;
 
 /** Where the sign may be, as the only places a skip can't read it from (signUses). */
 function allowedSpans(ts, sf, testFile) {

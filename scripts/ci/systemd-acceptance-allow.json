@@ -1,21 +1,25 @@
 {
   "//": "systemd's sign outside a systemCi declaration, a gate's reason or a test's own function, where it is data no skip reads (scripts/ci/systemd-acceptance.mjs, signProblems, R1169k). Each file with its count of uses and why: a use added or removed stops the job until this names it again. Print a file's uses with `node scripts/ci/systemd-acceptance.mjs --signs`.",
   "uses": {
+    "scripts/bench/container.ts": {
+      "n": 1,
+      "why": "the bench's setup message (systemd Delegate= drop-in)"
+    },
     "src/cli.ts": {
       "n": 1,
       "why": "product code: help text"
     },
-    "src/init.ts": {
-      "n": 1,
-      "why": "product code: a message"
-    },
-    "src/setup-steps.ts": {
-      "n": 2,
-      "why": "product code: messages when no systemd answers"
+    "src/dashboard.ts": {
+      "n": 4,
+      "why": "product code: reads a unit's journal with journalctl"
     },
     "src/guardrails/push-hook.ts": {
       "n": 1,
       "why": "product code: systemd-run's option table"
+    },
+    "src/init.ts": {
+      "n": 1,
+      "why": "product code: a message"
     },
     "src/intake/discord-setup.ts": {
       "n": 1,
@@ -30,7 +34,7 @@
       "why": "product code: runs systemd-run"
     },
     "src/os/index.ts": {
-      "n": 14,
+      "n": 15,
       "why": "product code: the Linux service manager (user units, systemctl calls)"
     },
     "src/os/stats.ts": {
@@ -38,15 +42,19 @@
       "why": "product code: systemctl show for unit stats"
     },
     "src/os/system-paths.ts": {
+      "n": 8,
+      "why": "product code: its machine-path guard reads INVOCATION_ID and JOURNAL_STREAM (SYSTEMD_MARKERS: started by systemd) and names /etc/systemd/system; no test skip imports it (skipImports)"
+    },
+    "src/setup-steps.ts": {
       "n": 4,
-      "why": "product code: its machine-path guard reads INVOCATION_ID (started by systemd) and names /etc/systemd/system; no test skip imports it (skipImports)"
+      "why": "product code: messages when no systemd answers; loginctl enable-linger"
     },
     "src/testrun/helper.ts": {
       "n": 1,
       "why": "product code: a restart command in a message"
     },
     "src/watchdog/probes.ts": {
-      "n": 4,
+      "n": 5,
       "why": "product code: findings that name systemctl and the unit state"
     },
     "test/agent-api-key-r6.test.ts": {
@@ -54,15 +62,15 @@
       "why": "stand-in programs a test puts on PATH (systemctl, systemd-run), by name"
     },
     "test/agent-api-key-r7.test.ts": {
-      "n": 1,
+      "n": 2,
       "why": "stand-in programs a test puts on PATH (systemctl, systemd-run), by name"
     },
     "test/agent-api-key-setup.test.ts": {
-      "n": 1,
+      "n": 2,
       "why": "stand-in programs a test puts on PATH (systemctl, systemd-run), by name"
     },
     "test/api-key-fixtures.ts": {
-      "n": 1,
+      "n": 2,
       "why": "stand-in programs a test puts on PATH (systemctl, systemd-run), by name"
     },
     "test/change-files-renames.test.ts": {
@@ -73,8 +81,12 @@
       "n": 1,
       "why": "a CI check's name ('add-project (real systemd)')"
     },
-    "test/claude-account-script.test.ts": {
+    "test/ci-preview-done.test.ts": {
       "n": 4,
+      "why": "a stand-in journalctl put on PATH, by name"
+    },
+    "test/claude-account-script.test.ts": {
+      "n": 5,
       "why": "stand-in programs a test puts on PATH (systemctl, systemd-run), by name"
     },
     "test/dashboards-root.ts": {
@@ -86,7 +98,7 @@
       "why": "stand-in systemctl and a unit file's text; a systemd version number as a parameter; the CI script's file name"
     },
     "test/engine-update.test.ts": {
-      "n": 4,
+      "n": 5,
       "why": "a fake exec's answers for systemctl and systemd-run calls the code under test makes"
     },
     "test/experiments-helper.test.ts": {
@@ -102,20 +114,24 @@
       "why": "stand-in programs a test puts on PATH (systemctl, systemd-run), by name"
     },
     "test/host-tools.ts": {
-      "n": 1,
+      "n": 2,
       "why": "the host programs the test isolation hides (systemctl), by name"
     },
     "test/instance-records.test.ts": {
-      "n": 6,
+      "n": 8,
       "why": "unit paths and stand-in systemctl functions in records and scripts; a process name in a fake /proc"
     },
     "test/isolate.ts": {
-      "n": 3,
-      "why": "the host programs the test isolation hides, by name"
+      "n": 7,
+      "why": "the host programs the test isolation hides, by name; it clears SYSTEMD_MARKERS from the test env"
     },
     "test/machine-sudoers-legacy.test.ts": {
-      "n": 2,
+      "n": 4,
       "why": "stand-in programs a test puts on PATH (systemctl, systemd-run), by name"
+    },
+    "test/machine-sudoers-removal.test.ts": {
+      "n": 1,
+      "why": "a stand-in program (loginctl) put on PATH, by name"
     },
     "test/owner-terminal-rerun.test.ts": {
       "n": 1,
@@ -138,7 +154,7 @@
       "why": "a table entry's reason (a systemd user unit)"
     },
     "test/sudoers-machine-fixture.ts": {
-      "n": 2,
+      "n": 4,
       "why": "stand-in programs a test puts on PATH (systemctl, systemd-run), by name"
     },
     "test/systemd-acceptance.test.ts": {
@@ -186,7 +202,7 @@
       "why": "stand-in programs a test puts on PATH (systemctl, systemd-run), by name"
     },
     "test/update-canary.test.ts": {
-      "n": 10,
+      "n": 11,
       "why": "a fake exec's answers for systemctl and systemd-run calls the code under test makes"
     },
     "test/update-checks.test.ts": {
@@ -202,7 +218,7 @@
       "why": "a fake exec's answers for systemctl and systemd-run calls the code under test makes"
     },
     "test/update-migrate.test.ts": {
-      "n": 8,
+      "n": 9,
       "why": "a fake exec's answers for systemctl and systemd-run calls the code under test makes"
     },
     "test/update-redact.test.ts": {
@@ -226,20 +242,12 @@
       "why": "a fake exec's answers for systemctl and systemd-run calls the code under test makes"
     },
     "test/value-report.test.ts": {
-      "n": 1,
+      "n": 3,
       "why": "stand-in programs a test puts on PATH (systemctl, systemd-run), by name"
-    },
-    "test/watchdog.test.ts": {
-      "n": 2,
-      "why": "its real-systemctl test's skip: it needs the systemctl program (which), not a booted systemd, and runs in the Linux shards"
-    },
-    "scripts/bench/container.ts": {
-      "n": 1,
-      "why": "the bench's setup message (systemd Delegate= drop-in)"
     }
   },
   "skipImports": {
-    "src/os/index.ts: which": "a program on PATH (gitleaks; systemctl in watchdog.test.ts, the program not a booted systemd)",
+    "src/os/index.ts: which": "a program on PATH (gitleaks)",
     "src/os/index.ts: isRoot": "runs as root",
     "src/os/index.ts: toolPlatform": "a pinned tool platform",
     "src/tool-path.ts: findTool": "a program on PATH (gitleaks, ssh-keygen)",

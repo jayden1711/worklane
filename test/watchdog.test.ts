@@ -4,7 +4,8 @@
 import { test, type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { generateKeyPairSync } from 'node:crypto';
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -12,7 +13,6 @@ import { BRAND } from '../src/brand.js';
 import type { StoredEvent } from '../src/events/types.js';
 import type { UnitState } from '../src/os/stats.js';
 import { parseUnitState, unitStates } from '../src/os/stats.js';
-import { which } from '../src/os/index.js';
 import { GITHUB_UNREACHABLE_PASSES, unitFindings } from '../src/watchdog/probes.js';
 import { mintInstallationToken } from '../src/github-app.js';
 import { isNetworkFailure } from '../src/github/errors.js';
@@ -385,10 +385,15 @@ test('unit states parse from systemctl show; an unknown restart count is null, n
   assert.equal(parseUnitState('u.service', 'ActiveState=active\nNRestarts=\n').restarts, null);
 });
 
-test('unit states from the real systemctl (Linux CI): a running unit is active, one not installed is not-found, so it is never reported down', { skip: process.platform !== 'linux' || !which('systemctl') ? 'needs systemd' : false }, () => {
+// A disposable Linux CI runner with a booted systemd (scripts/ci/systemd-acceptance.mjs runs this file's gated test
+// there, on GitHub's VM, on each push to main): a container's systemctl has no systemd to ask.
+const systemCi = process.platform === 'linux' && process.env.GITHUB_ACTIONS === 'true' && existsSync('/run/systemd/system') && spawnSync('sudo', ['-n', 'systemctl', '--version']).status === 0;
+
+test('unit states from the real systemctl (Linux CI): a running unit is active, one not installed is not-found, so it is never reported down', { skip: !systemCi && 'needs a disposable Linux CI runner with systemd' }, () => {
   // The machine's own systemctl, on purpose (#991, machineTool): elsewhere a child's systemctl is a stand-in.
   const states = machineTool('systemctl', () => unitStates(['systemd-journald.service', `${BRAND.cli}-no-such-instance.service`]));
-  if (!states || !states.length || states[0]!.activeState === null) return; // no systemd running here (a container)
+  // Where it's gated to run, systemd answers: no answer is a failure, never a pass with nothing checked.
+  assert.ok(states && states.length && states[0]!.activeState !== null, 'systemd answers for its units here');
   const journald = states.find((s) => s.unit === 'systemd-journald.service')!;
   assert.equal(journald.loadState, 'loaded');
   assert.equal(journald.activeState, 'active');

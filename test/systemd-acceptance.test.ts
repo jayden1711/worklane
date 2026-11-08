@@ -52,6 +52,8 @@ test('every test gated on the systemd CI flag is found by its gate, and the 3 fr
     "acceptance: built as a DynamicUser and installed, the engine is readable by and starts as other users, exec'd through a symlink like the services do",
     "acceptance: lib.sh's sudo_version reads the runner's real sudo -V, as 1.9.10 or later (the pattern rules' minimum)",
     "acceptance: two instances' agent users each get their own /tmp, so a fixed path like /tmp/cc-socks locks neither out",
+    // R1169m: it asserts journald is active, so it needs a booted systemd, which the self-hosted container lacks.
+    'unit states from the real systemctl (Linux CI): a running unit is active, one not installed is not-found, so it is never reported down',
   ]) assert.ok(names.includes(want), want);
   assert.equal(new Set(names).size, names.length, 'each name once: the run selects tests by name');
 });
@@ -334,6 +336,8 @@ test("systemd's sign may be only in the flag's declaration, a gate's reason, a t
     ['a regex', `const r = /\\/run\\/${sd}/;`, ['1: systemd']],
     ['process 1', `const c = readFileSync('/proc/1/exe');`, ['1: /proc/1/']],
     ['systemctl', `const ok = spawnSync('${sd.slice(0, 6)}ctl', ['is-system-running']);`, ['1: systemctl', '1: is-system-running']],
+    ['its D-Bus name, journalctl, loginctl', `const x = ['org.freedesktop.${sd}1', 'journalctl', 'loginctl'];`, ['1: systemd1', '1: journalctl', '1: loginctl']],
+    ['a name starting with it and _', `const x = SYSTEMD_MARKERS ?? ${sd}_booted;`, ['1: SYSTEMD_', '1: systemd_']],
     ['the variables systemd sets', `const sd = process.env.INVOCATION_ID ?? process.env['NOTIFY_SOCKET'];`, ['1: INVOCATION_ID', '1: NOTIFY_SOCKET']],
     ['a non-gate skip', `test('n', { skip: !ok && 'needs ${sd}' }, () => {});`, ['1: systemd']],
     ["a test's function that skips", `test('n', (t) => { if (!existsSync('/run/${sd}')) t.skip(); });`, ['1: systemd']],
