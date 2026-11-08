@@ -199,7 +199,9 @@ const HOOKS = {
 };
 const NO_ATTRIBUTION_PIN = { attribution: { commit: '', pr: '', sessionUrl: false }, includeCoAuthoredBy: false };
 const STREAM_FLAGS = ['-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose'];
-const FIXED_FLAGS = ['--setting-sources', 'project', '--strict-mcp-config', '--permission-mode', 'dontAsk'];
+// Every case here is a guarded run (the instance's guardrails): it loads no setting source, --setting-sources '' (#958,
+// the owner's decision, 2026-11-08; was 'project'). An unguarded run's 'project' is held in test/planner-no-project-sources.test.ts.
+const FIXED_FLAGS = ['--setting-sources', '', '--strict-mcp-config', '--permission-mode', 'dontAsk'];
 const PROMPT_LINE = '{"type":"user","message":{"role":"user","content":"do the task"}}';
 /** What every agent's environment starts from: the allowed variables of the engine's, then the fixed agent ones. */
 const AGENT_ENV = {
