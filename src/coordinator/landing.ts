@@ -25,6 +25,9 @@ import { redactString } from '../events/redact.js';
 import { slotDeferringSince } from './wait-caps.js';
 import { optimizePrLines } from '../optimize.js';
 
+/** How a reason the landing floor held is recorded on the entry's level (and found again in an approval of it). */
+const LANDING_FLOOR = ": held for the owner (direct land's merge-policy floor, checked again at landing)";
+
 export abstract class Landing extends Decisions {
   // ---------------------------------------------------------------- landing
 
@@ -240,22 +243,24 @@ export abstract class Landing extends Decisions {
         return;
       }
       const head = this.git(path, 'rev-parse', 'HEAD');
-      // R1182f (#716): direct land's merge-policy floor again, on what this push would put on the branch (tip..HEAD:
-      // the pre-land steps' output included), under the review config and land mode in force now. Every entry the owner
-      // hasn't approved is held for the owner, and nothing is pushed.
+      // R1182f, R1182h (#716): direct land's merge-policy floor again, on what this push would put on the branch
+      // (tip..HEAD: the pre-land steps' and gates' output included), under the review config and land mode in force now.
+      // Any reason the owner hasn't approved: nothing is pushed, and the entries it needs (landFloor's `ask`) go to them.
       const floor = this.landFloor(path, tip, head, applied);
       if (floor.held.length) {
         const why = `not pushed: what this land would push is below direct land's merge-policy floor (${floor.held.join('; ')})`;
+        const reasons = floor.held.map((r) => `${r}${LANDING_FLOOR}`);
         for (const q of applied) {
-          if (!floor.unapproved.includes(q)) {
+          if (!floor.ask.includes(q)) {
             result(q.issue, 'deferred', null, `${why}; lands once the others in its batch are decided`);
             continue;
           }
-          result(q.issue, 'rejected', null, why);
-          const reasons = floor.held.map((r) => `${r}: held for the owner (direct land's merge-policy floor, checked again at landing)`);
+          // R1182h 3: the question first, then the final result. A failure before the question leaves the entry queued,
+          // so the next pass asks again; after it, the owner has a question to answer whatever else fails.
           this.emit('review.level_set', { issue: q.issue, head: q.head, level: 'L3', reasons });
+          await this.ask('land', q.issue, ownerOf(q.issue), `Approve landing #${q.issue} (L3)?`, ['approve', 'reject'], floor.seen ? 'approve' : 'reject', [`head ${q.head.slice(0, 8)}`, ...reasons, ...(floor.seen ? [] : ["the land commit holds files no entry's own change has as they are (a pre-land step or gate wrote them)"])]);
+          result(q.issue, 'rejected', null, why);
           await this.d.backlog.addLabels(q.issue, ['in-review', 'review:L3']);
-          await this.ask('land', q.issue, ownerOf(q.issue), `Approve landing #${q.issue} (L3)?`, ['approve', 'reject'], floor.seen ? 'approve' : 'reject', [`head ${q.head.slice(0, 8)}`, ...reasons, ...(floor.seen ? [] : ['the land commit holds files the evaluator never saw (a pre-land step wrote them)'])]);
         }
         this.emit('land.batch', { id, issues: applied.map((q) => q.issue), tip, outcome: 'deferred', detail: why.slice(0, 500) });
         return;
@@ -316,32 +321,50 @@ export abstract class Landing extends Decisions {
     });
   }
 
+  /** The reasons the owner approved at landing for this entry (a question the landing floor asked), as held. */
+  private landingApproved(q: EventPayload<'land.queued'>): string[] {
+    if (!this.landApproved(q)) return [];
+    const set = this.events(q.issue).filter((e) => e.type === 'review.level_set' && (e.payload as EventPayload<'review.level_set'>).head === q.head).at(-1)!;
+    return (set.payload as EventPayload<'review.level_set'>).reasons.filter((r) => r.endsWith(LANDING_FLOOR)).map((r) => r.slice(0, -LANDING_FLOOR.length));
+  }
+
   /**
-   * R1182f: direct land's merge-policy floor (riskAndDesignReasons, as at review.level_set in src/coordinator.ts) on
-   * the land commit's own diff, tip..head, for the entries the owner hasn't approved. A file an approved entry changed
-   * counts as approved only while it is exactly as at that entry's head (a pre-land step may rewrite it). `seen`: every
-   * judged file is in an unapproved entry's own diff, which its evaluator read.
+   * R1182f, R1182h: direct land's merge-policy floor (riskAndDesignReasons, as at review.level_set in src/coordinator.ts)
+   * on the land commit's own diff, tip..head, always. A file is an entry's own while it is exactly as at that entry's
+   * head: the same object, mode and type (`git ls-tree`); one changed by an approved entry is judged approved. Any other
+   * file (a pre-land step's or a gate's output, or an own file they rewrote) is output, which no review-time approval
+   * covers. `ask`: the entries the owner must decide: every unapproved one; with none, every entry, unless each output
+   * reason is one the owner approved at landing (on one of them). `seen`: no output (every judged file is an entry's own).
    */
-  private landFloor(path: string, tip: string, head: string, applied: EventPayload<'land.queued'>[]): { held: string[]; unapproved: EventPayload<'land.queued'>[]; seen: boolean } {
-    const unapproved = applied.filter((q) => !this.landApproved(q));
-    if (!unapproved.length) return { held: [], unapproved, seen: true };
-    const blob = (rev: string, p: string) => {
-      const r = gitSpawnSync(['rev-parse', '-q', '--verify', `${rev}:${p}`], { cwd: path, encoding: 'utf8' });
-      return r.status === 0 ? r.stdout.trim() : null;
+  private landFloor(path: string, tip: string, head: string, applied: EventPayload<'land.queued'>[]): { held: string[]; ask: EventPayload<'land.queued'>[]; seen: boolean } {
+    const approved = applied.filter((q) => this.landApproved(q));
+    const unapproved = applied.filter((q) => !approved.includes(q));
+    const entry = (rev: string, p: string) => {
+      const r = gitSpawnSync(['ls-tree', '-z', '--full-tree', rev, '--', p], { cwd: path, encoding: 'utf8' });
+      if (r.status !== 0) throw new Error(`git ls-tree ${rev.slice(0, 8)} -- ${p} failed: ${r.stderr.trim()}`);
+      return r.stdout;
     };
-    const approvedAt = new Map<string, string>();
-    for (const q of applied) if (!unapproved.includes(q)) for (const f of this.filesOf(q.issue, q.head)) approvedAt.set(f, q.head);
-    const files = this.changeFiles(path, tip, head).filter((f) => {
-      const at = approvedAt.get(f.path);
-      return at === undefined || blob(head, f.path) !== blob(at, f.path);
+    const ownerOfPath = new Map<string, EventPayload<'land.queued'>>();
+    for (const q of applied) for (const f of this.filesOf(q.issue, q.head)) ownerOfPath.set(f, q);
+    const files = this.changeFiles(path, tip, head);
+    const own = (f: { path: string }) => {
+      const q = ownerOfPath.get(f.path);
+      return q && entry(head, f.path) === entry(q.head, f.path) ? q : undefined;
+    };
+    const judged = files.filter((f) => {
+      const q = own(f);
+      return q === undefined || !approved.includes(q);
     });
-    const own = new Set(unapproved.flatMap((q) => this.filesOf(q.issue, q.head)));
-    const seen = files.every((f) => own.has(f.path));
-    if (!files.length) return { held: [], unapproved, seen };
+    const output = files.filter((f) => own(f) === undefined);
     const review: ReviewConfig = this.d.cfg.review ?? DEFAULT_REVIEW;
-    const labels = [...new Set(unapproved.flatMap((q) => this.events(q.issue).filter((e) => e.type === 'issue.seen').flatMap((e) => (e.payload as { labels: string[] }).labels)))];
-    const level = computeLevel({ files, labels, moneyPaths: this.moneyPaths(review.money_path_source), scope: lockScopeOf(this.d) }, review);
-    return { held: riskAndDesignReasons({ level, waitCategories: waitCategoriesOf(review), newTopLevel: [] }), unapproved, seen };
+    const labels = [...new Set(applied.flatMap((q) => this.events(q.issue).filter((e) => e.type === 'issue.seen').flatMap((e) => (e.payload as { labels: string[] }).labels)))];
+    const reasons = (fs: typeof files) => (fs.length ? riskAndDesignReasons({ level: computeLevel({ files: fs, labels, moneyPaths: this.moneyPaths(review.money_path_source), scope: lockScopeOf(this.d) }, review), waitCategories: waitCategoriesOf(review), newTopLevel: [] }) : []);
+    const held = reasons(judged);
+    if (!held.length) return { held: [], ask: [], seen: true };
+    const fromOutput = reasons(output);
+    const covered = fromOutput.every((r) => approved.some((q) => this.landingApproved(q).includes(r)));
+    const ask = unapproved.length ? unapproved : covered ? [] : approved;
+    return ask.length ? { held, ask, seen: output.length === 0 } : { held: [], ask: [], seen: true };
   }
 
   /**
