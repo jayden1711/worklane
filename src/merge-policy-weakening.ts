@@ -844,8 +844,8 @@ export function tableSpan(text: string, table: string): [number, number] | null 
   throw new Error(`${table} never closes`);
 }
 
-/** A line's code that goes on to the next line: it ends with an operator, `=`, `(`, `,`, `?` or `:`. */
-const CONTINUES = /(?:[=(,?:+\-*/%|&^<>!~]|=>|\?\?)\s*$/;
+/** A line's code that goes on to the next line: it ends with an operator, `=`, `(`, `,`, `?`, `:` or an import's `from` (R1184g). */
+const CONTINUES = /(?:[=(,?:+\-*/%|&^<>!~]|=>|\?\?|\bfrom)\s*$/;
 /** A line's code that goes on from the line before: it starts with `.`, `?`, `:`, `)`, `,`, a binary operator, or an import's `from` (R1184f). */
 const CONTINUED = /^\s*(?:[.?:),+\-*/%|&^<>=]|\]|\?\.|from\b)/;
 const IDENT = /[A-Za-z_$][\w$]*/g;
@@ -883,6 +883,55 @@ function readStatements(text: string): { code: string[]; raw: string[]; span: (k
   const end = new Array<number>(n);
   for (let k = n - 1; k >= 0; k--) end[k] = k + 1 < n && start[k + 1] === start[k] ? end[k + 1]! : k;
   return { code, raw: text.split('\n'), span: (k) => [start[k]!, end[k]!] };
+}
+
+/** A line's code for plainUse: comments and the text of strings left out (their quotes kept). */
+function codeOfLine(l: string): string {
+  return withoutComments(l.replace(/\/\*.*?\*\//g, ' ')).replace(/(['"`])(?:\\.|(?!\1)[^\\])*\1/g, "''");
+}
+/** A one-line import or require of something (its specifier on the same line). */
+const IMPORT_LINE = /^\s*import\b[^;]*\bfrom\s*''|\brequire\s*\(\s*''\s*\)/;
+/** A statement that brings names in from a module: import, a re-export from one, require, import(). */
+const IMPORTISH_STMT = /^\s*(?:import\b|export\s*(?:type\s*)?(?:\{[^}]*\}|\*(?:\s*as\s+[\w$]+)?)\s*from\b)|\brequire\s*\(|\bimport\s*\(/;
+/** A member a plain read calls or reads: none of them changes the array or set it is on. */
+const READ_MEMBERS = /^(?:length|size|includes|some|every|find|findIndex|findLast|findLastIndex|indexOf|lastIndexOf|has|get|keys|values|entries|join|at|map|flatMap|flat|reduce|reduceRight|concat|toString|toSorted|toReversed|toSpliced)$/;
+/** A built-in call that only reads its first argument, just before it: `Object.keys(`, `new Set(`, `Array.from(`, ... */
+const READ_CALL = /(?:\bObject\.(?:keys|values|entries|getOwnPropertyNames|getOwnPropertySymbols)|\bArray\.(?:from|isArray)|\bnew\s+(?:Set|Map|WeakSet|WeakMap)|\bJSON\.stringify|\bstructuredClone|\bString|\bBoolean)\s*\($/;
+/** An assignment or update right after an expression: `=`, `+=`, `*=`, `**=`, `||=`, `++`, ... (not `==`, `=>`). */
+const WRITES = /^\s*(?:(?:\*\*|<<|>>>|>>|&&|\|\||\?\?|[-+*/%&|^])?=(?![=>])|\+\+|--)/;
+
+/**
+ * Whether every use of `name` on `line` (its code, codeOfLine) is a plain read (R1184h): a read member (READ_MEMBERS)
+ * that isn't assigned, an index read that isn't assigned or called, `for (... of name)`, `...name`, `k in name`,
+ * `typeof name`, a comparison, a call of it (a derived function), or its whole value handed to a built-in that only
+ * reads it (READ_CALL) (an import line is its caller's: brought in from a table's file, it is a read).
+ * Anything else, a bare name as an argument, an assignment's left side, a declaration, `(name).x`, a computed
+ * member call or a member not on the list, is not.
+ */
+function plainUse(line: string, name: string): boolean {
+  const re = new RegExp(`(?<![\\w$.])${name.replace(/\$/g, '\\$')}(?![\\w$])`, 'g');
+  for (const m of line.matchAll(re)) {
+    const before = line.slice(0, m.index).trimEnd();
+    const after = line.slice(m.index! + name.length);
+    if (/(?:\bof|\.\.\.|\bin|\btypeof)$/.test(before) && !/^\s*(?:\.|\[|\()/.test(after)) continue;
+    // A call of it (an alias that is a function derived from the table, `holds(g)`): it reads what it was made from.
+    if (/^\s*(?:\?\.)?\(/.test(after)) continue;
+    // Its whole value handed to a built-in that only reads it (`Object.keys(T)`, `new Set(T)`, `[...]` copies).
+    if (READ_CALL.test(before) && /^\s*[,)]/.test(after)) continue;
+    const member = /^\s*\??\.\s*([A-Za-z_$][\w$]*)/.exec(after);
+    if (member) {
+      if (READ_MEMBERS.test(member[1]!) && !WRITES.test(after.slice(member[0].length))) continue;
+      return false;
+    }
+    const index = /^\s*\[[^\]]*\]/.exec(after);
+    if (index) {
+      if (!WRITES.test(after.slice(index[0].length)) && !/^\s*(?:\?\.)?\(/.test(after.slice(index[0].length))) continue;
+      return false;
+    }
+    if (/^\s*(?:===|!==|==|!=)/.test(after) || /(?:===|!==|==|!=)$/.test(before)) continue;
+    return false;
+  }
+  return true;
 }
 
 /**
@@ -1057,6 +1106,9 @@ function useRemovedIn(i: WeakeningInput, inChange: readonly (CheckTable & { mark
   const reach = ctx?.reached;
   const names = useNames(reach ? new Map([...texts].filter(([p]) => reach.has(p) || i.files.some((f) => f.path === p))) : texts, [...new Set([...all.values()].map((t) => t.table))]);
   const word = (n: string) => new RegExp(`(?<![\\w$])${n.replace(/\$/g, '\\$')}(?![\\w$])`);
+  // The files a table lives in, and the files that bind a name to one: an import of either brings the table in.
+  const tableFiles = new Set([...all.values()].map((t) => t.path));
+  const tableish = (p: string) => tableFiles.has(p) || [...all.values()].some((t) => names.get(t.table)!.in(p).size > 1);
   // Each changed file's removed lines and, once, where each stood before the change (by its trimmed text).
   const changed = i.files.filter((f) => !f.path.endsWith('.json') && (f.removedLines ?? []).some((l) => l.trim())).map((f) => {
     const before = texts.get(f.path) ?? null;
@@ -1096,28 +1148,59 @@ function useRemovedIn(i: WeakeningInput, inChange: readonly (CheckTable & { mark
         if (use) hit('table-use-removed', f.path, `${t.table}: ${l.trim()}`);
       }
     }
-    // Added lines (R1184f): a declaration of one of its names (a local `const CHECKS = ['a']` above a use shadows it,
-    // and no line is removed), and, outside its own file (where any added line naming it already waits, table-used), a
-    // line that changes it through one of its names (`CHECKS.splice(0)`, `Object.assign(CHECKS, ...)`, `rules.length = 0`).
-    const usedBefore = (path: string, n: string) => word(n).test(texts.get(path) ?? '');
+    // Added lines (R1184f, R1184h): in a file where one of its names stands for the table (an alias valid there, or the
+    // table's own name where the file imported it before or imports it now), an added line naming it waits unless every
+    // use of it on that line is a plain read (plainUse). A write, a shadowing declaration in any form, a call through
+    // a computed member, the name passed anywhere: each could empty the table or stand a decoy in for it, and listing
+    // write shapes keeps missing some. In the table's own file its own name is the table checks' (any added line naming
+    // it there already waits as table-used); its aliases there are read here. Comments and strings are left out first.
     for (const f of i.files) {
       if (f.path.endsWith('.json')) continue;
-      const added = (f.addedLines ?? []).filter((l) => l.trim());
+      const rawAdded = (f.addedLines ?? []).filter((l) => l.trim());
+      const added = rawAdded.map(codeOfLine);
       if (!added.length) continue;
-      const mine = [...names.get(t.table)!.in(f.path)];
-      if (!mine.some((n) => added.some((l) => l.includes(n)))) continue;
-      for (const n of mine) {
-        const e = n.replace(/\$/g, '\\$');
-        const declares = new RegExp(`\\b(?:const|let|var|function\\*?|class)\\s+${e}(?![\\w$])|\\b(?:const|let|var)\\s*[{[][^=]*(?<![\\w$.])${e}(?![\\w$])[^=]*[}\\]]\\s*=|\\bimport\\b[^;]*\\bas\\s+${e}(?![\\w$])`);
-        const mutates = new RegExp(`(?<![\\w$.])${e}\\s*(?:\\.\\s*(?:push|pop|shift|unshift|splice|sort|reverse|fill|copyWithin|add|delete|clear|set)\\s*\\(|\\.\\s*length\\s*=(?!=)|\\[[^\\]]*\\]\\s*=(?!=)|=(?![=>]))|\\b(?:Object\\.(?:assign|defineProperty|defineProperties|setPrototypeOf)|Reflect\\.(?:set|defineProperty|deleteProperty))\\s*\\(\\s*${e}(?![\\w$])|\\bdelete\\s+${e}\\s*[.[]`);
-        for (const l of added) {
-          // The table's own name in its own file is the table checks' (its declaring line changed, or declared twice,
-          // waits there; any other added line naming it there waits as table-used).
-          if (f.path === t.path && n === t.table) continue;
-          // A declaration shadows only where the file used the name before (a new file's own `FLOOR` is no use of it).
-          if (declares.test(l)) {
-            if (usedBefore(f.path, n)) hit('table-use-removed', f.path, `${t.table}: ${l.trim()}`);
-          } else if (f.path !== t.path && mutates.test(l)) hit('table-used', f.path, `${t.table}: ${l.trim()}`);
+      const mine = [...names.get(t.table)!.in(f.path)].filter((n) => {
+        if (f.path === t.path) return n !== t.table;
+        if (n !== t.table) return true;
+        return word(n).test(texts.get(f.path) ?? '') || added.some((l) => IMPORT_LINE.test(l) && word(n).test(l));
+      });
+      if (!mine.length) continue;
+      added.forEach((l, k) => {
+        const raw = rawAdded[k]!;
+        const named = mine.filter((n) => word(n).test(l));
+        // An import line naming it: a read when every specifier on it is a table's file (or binds a name to one).
+        if (named.length && IMPORT_LINE.test(l)) {
+          const specs = [...raw.matchAll(/(?:\bfrom\s*|\brequire\s*\(\s*)(['"])([^'"\n]{1,300})\1/g)].map((m) => m[2]!);
+          if (!specs.length || !specs.every((spec) => specifierPaths(f.path, spec).some(tableish))) hit('table-used', f.path, `${t.table}: ${raw.trim()}`);
+          return;
+        }
+        // A module-level declaration of one of its names (column 0): the old one must be gone too (a name declared
+        // twice in a module doesn't compile), and its removed line waits above.
+        const top = TOP_BINDS.exec(l);
+        const declared = top ? (top[1]!.match(IDENT) ?? ([] as string[])) : [];
+        if (named.some((n) => !declared.includes(n) && !plainUse(l, n))) hit('table-used', f.path, `${t.table}: ${raw.trim()}`);
+        // A `with` statement brings names in from an object at run time: in a file that uses the table, it waits.
+        else if (/(?<![\w$.])with\s*\(/.test(l)) hit('table-used', f.path, `${t.table}: ${raw.trim()}`);
+      });
+    }
+  }
+  // An import or re-export taken away or changed whose specifier named a table's file, or a file that binds a name to
+  // one (R1184h: `import * as M from` the table's own file, `const M = require(...)`, `import M = require(...)`,
+  // `export * from`, a barrel), re-pointed or not: what it brings in may no longer be the table. Its whole statement
+  // is read (a specifier on a line of its own included), from the raw lines, where strings aren't blanked.
+  for (const { f, before, at } of changed) {
+    if (before === null) continue;
+    const st = statementsOf(before);
+    for (const l of f.removedLines ?? []) {
+      for (const k of at.get(l.trim()) ?? []) {
+        const [a, b] = st.span(k);
+        const code = st.code.slice(a, b + 1).join('\n');
+        if (!IMPORTISH_STMT.test(code)) continue;
+        const raw = st.raw.slice(a, b + 1).join('\n');
+        const specs = [...raw.matchAll(/(?:\bfrom\s*|\brequire\s*\(\s*|\bimport\s*\(\s*)(['"])([^'"\n]{1,300})\1/g)].map((m) => m[2]!);
+        if (specs.some((spec) => specifierPaths(f.path, spec).some(tableish))) {
+          hit('table-use-removed', f.path, `an import of a table's file: ${l.trim()}`);
+          break;
         }
       }
     }

@@ -256,7 +256,7 @@ test('decoy (#941, R1184f): shadowing, a split import, a namespace import of an 
   const has = (r: string[], k: string, what: string) => assert.ok(r.includes(k), `${what}: ${JSON.stringify(r)}`);
   // 1. A local `const CHECKS` added above an existing use: no line removed.
   const user = "import { CHECKS } from '../test/x-rules.test.js';\nexport function run() {\n  return CHECKS.length;\n}\n";
-  has(weakensChanged({ [F]: BASE, 'src/x-user.ts': user }, { [F]: BASE, 'src/x-user.ts': user.replace('export function run() {\n', "export function run() {\n  const CHECKS = ['a'];\n") }), USE_REMOVED, 'shadowing');
+  has(weakensChanged({ [F]: BASE, 'src/x-user.ts': user }, { [F]: BASE, 'src/x-user.ts': user.replace('export function run() {\n', "export function run() {\n  const CHECKS = ['a'];\n") }), TABLE_USED, 'shadowing (R1184h: any use of it but a plain read)');
   // 2. `from` on its own line, re-pointed at a decoy that exports the same name.
   for (const split of ["import { CHECKS }\n  from '../test/x-rules.test.js';\n", "import {\n  CHECKS,\n}\n  from '../test/x-rules.test.js';\n"]) {
     const u = `${split}export const run = () => CHECKS.length;\n`;
@@ -284,6 +284,37 @@ test('decoy (#941, R1184f): shadowing, a split import, a namespace import of an 
   assert.deepEqual(weakensChanged(viaHash, { ...viaHash, 'package.json': viaHash['package.json'].replace('"name": "x"', '"name": "y"') }), [], 'package.json without its imports changed');
   // A new file's own local of the same name (as test/guard-auth-fuzz.test.ts's FLOOR in #1171) shadows no use of it.
   assert.deepEqual(weakensChanged({ [F]: BASE }, { [F]: BASE, 'test/x-new.test.ts': "const CHECKS = ['mine'];\nexport const n = CHECKS.length;\n" }), [], "a new file's own same-named local");
+});
+
+test('decoy (#941, R1184g, R1184h): outside its own file, any use of the table but a plain read waits, and so does an import of its file taken away or changed', () => {
+  const TABLE_USED = "changes a check's or guard's table outside its own list";
+  const held = (b: Record<string, string>, a: Record<string, string>, what: string) => {
+    const r = weakensChanged(b, a);
+    assert.ok(r.includes(TABLE_USED) || r.includes(USE_REMOVED), `${what}: ${JSON.stringify(r)}`);
+  };
+  const live = { 'src/x-live.ts': "export const LIVE = ['a'];\n" };
+  // An import of the table's own file, re-pointed: a namespace, CommonJS, TS import-equals, a split specifier.
+  for (const u of ["import * as M from '../test/x-rules.test.js';\nexport const run = () => M.CHECKS.length;\n", "const M = require('../test/x-rules.test.js');\nexports.run = () => M.CHECKS.length;\n", "import M = require('../test/x-rules.test.js');\nexport const run = () => M.CHECKS.length;\n", "import { CHECKS } from\n  '../test/x-rules.test.js';\nexport const run = () => CHECKS.length;\n"]) {
+    held({ [F]: BASE, ...live, 'src/x-user.ts': u }, { [F]: BASE, ...live, 'src/x-user.ts': u.replace('../test/x-rules.test.js', './x-live.js') }, `re-pointed: ${JSON.stringify(u.split('\n')[0])}`);
+  }
+  // An `export *` barrel re-pointed; its user isn't in the diff.
+  const barrel = { [F]: BASE, ...live, 'src/x-barrel.ts': "export * from '../test/x-rules.test.js';\n", 'src/x-user.ts': "import { CHECKS } from './x-barrel.js';\nexport const run = () => CHECKS.length;\n" };
+  held(barrel, { ...barrel, 'src/x-barrel.ts': "export * from './x-live.js';\n" }, 'a barrel re-pointed');
+  // Shadows and emptying in a file that imports it: only lines added.
+  const fn = "import { CHECKS } from '../test/x-rules.test.js';\nimport { LIVE } from './x-live.js';\nexport function run() {\n  return CHECKS.length;\n}\n";
+  for (const line of ['  for (const [CHECKS] of [[LIVE]]) void CHECKS;', '  const x = 0, [CHECKS] = [LIVE]; void x;', '  const /**/ CHECKS /**/ = LIVE;', '  [CHECKS] = [LIVE];', '  var x, CHECKS;', '  enum CHECKS { a }', "  CHECKS['splice'](0);", '  CHECKS.length *= 0;', '  Array.prototype.splice.call(CHECKS, 0, 9);', '  CHECKS.splice?.(0);', '  CHECKS?.splice(0);', '  (CHECKS).splice(0);', '  CHECKS.forEach(() => CHECKS.pop());', '  const all = CHECKS; all.length = 0;']) {
+    held({ [F]: BASE, ...live, 'src/x-user.ts': fn }, { [F]: BASE, ...live, 'src/x-user.ts': fn.replace('  return CHECKS.length;', `${line}\n  return CHECKS.length;`) }, line.trim());
+  }
+  // A brand-new file that imports and empties it.
+  held({ [F]: BASE }, { [F]: BASE, 'src/x-new.ts': "import { CHECKS } from '../test/x-rules.test.js';\nCHECKS.length *= 0;\n" }, 'a new file emptying it');
+  // In its own file, an alias of it shadowed.
+  const own = `${BASE}const rules = CHECKS;\nexport function run() {\n  return rules.length;\n}\n`;
+  held({ [F]: own }, { [F]: own.replace('  return rules.length;', "  const x = 0, [rules] = [['a']]; void x;\n  return rules.length;") }, 'an alias shadowed in its own file');
+  // Controls: plain reads added, in a file that imports it, wait for nothing; nor does a new file's import and read.
+  for (const line of ['  if (CHECKS.includes("x")) return 1;', '  for (const c of CHECKS) void c;', '  const n = CHECKS.length + CHECKS[0]!.length;', '  const s = new Set(CHECKS); const k = Object.keys(CHECKS); void s; void k;', '  const copy = [...CHECKS]; void copy; // CHECKS.splice(0) in a comment', "  const msg = 'CHECKS.length = 0'; void msg;"]) {
+    assert.deepEqual(weakensChanged({ [F]: BASE, ...live, 'src/x-user.ts': fn }, { [F]: BASE, ...live, 'src/x-user.ts': fn.replace('  return CHECKS.length;', `${line}\n  return CHECKS.length;`) }), [], `a read: ${line.trim()}`);
+  }
+  assert.deepEqual(weakensChanged({ [F]: BASE }, { [F]: BASE, 'src/x-new.ts': "import { CHECKS } from '../test/x-rules.test.js';\nexport const n = CHECKS.length;\n" }), [], 'a new file that imports it and reads it');
 });
 
 test('decoy (#941), control: adding a use of the table, changing a line that never named it, or another file\'s own name like an alias, adds no such reason', () => {
