@@ -26,7 +26,8 @@ const approved = { head: HEAD, approved: true };
 // makes it); `page` overrides that, e.g. for a check run made through the API.
 type Run = { id: number; name: string; app: number; suite: number; status?: string; conclusion?: string | null; page?: string };
 const checkRun = (r: Run) => ({ id: r.id, name: r.name, status: r.status ?? 'completed', conclusion: r.conclusion === undefined ? 'success' : r.conclusion, html_url: r.page ?? (r.app === ACTIONS ? `https://github.com/o/r/actions/runs/${r.suite * 10}/job/${r.id}` : `https://github.example/o/r/runs/${r.id}`), app: { id: r.app, slug: r.app === ACTIONS ? 'github-actions' : `app-${r.app}` }, check_suite: { id: r.suite } });
-const workflowRun = (suite: number, path: string, o: { repo?: string; sha?: string } = {}) => ({ id: suite * 10, html_url: `https://github.com/${o.repo ?? 'o/r'}/actions/runs/${suite * 10}`, check_suite_id: suite, path, head_sha: o.sha ?? HEAD, repository: { full_name: o.repo ?? 'o/r' } });
+// A PR head's run as GitHub lists it: a pull_request for a PR into main (#943), unless `o` says otherwise.
+const workflowRun = (suite: number, path: string, o: { repo?: string; sha?: string; event?: string; branch?: string | null; bases?: string[] } = {}) => ({ id: suite * 10, html_url: `https://github.com/${o.repo ?? 'o/r'}/actions/runs/${suite * 10}`, check_suite_id: suite, path, head_sha: o.sha ?? HEAD, repository: { full_name: o.repo ?? 'o/r' }, event: o.event ?? 'pull_request', head_branch: o.branch === undefined ? 'feature' : o.branch, pull_requests: (o.bases ?? ['main']).map((ref) => ({ base: { ref } })) });
 
 /** A stand-in GitHub REST API for repo o/r, branch main: check runs, statuses, workflow runs, protection and rules. */
 function github(o: { runs: Run[]; statuses?: { context: string; state: string }[]; workflowRuns?: unknown[] | number; branch?: unknown; rules?: unknown[] | number }) {
@@ -75,6 +76,29 @@ test('a check pinned to a workflow file and posted by another workflow (or a run
   assert.deepEqual(outcomes(await from([])), ['test missing'], 'a suite with no workflow run (a check run made through the API)');
   assert.deepEqual(outcomes(await from(403)), ['test missing'], 'Actions unreadable: no source, fail closed');
   assert.deepEqual(outcomes(await from([workflowRun(70, '.github/workflows/ci.yml')])), ['test pass']);
+  // #943: the run must have started on main. A PR into another base reads that base's workflow but posts its checks
+  // on the head: a commit already on main, or this PR's own head.
+  const notFromMain: [string, Parameters<typeof workflowRun>[2]][] = [
+    ['a pull_request into another base (its workflow is that base\'s)', { bases: ['evil'] }],
+    ['a pull_request into main and into another base at once', { bases: ['main', 'evil'] }],
+    ['a pull_request GitHub lists no PR for (a fork\'s)', { bases: [] }],
+    ['a pull_request whose PR has no readable base', { bases: [''] }],
+    ['a push to another branch', { event: 'push', branch: 'evil', bases: [] }],
+    ['a dispatch on another branch', { event: 'workflow_dispatch', branch: 'evil', bases: [] }],
+    ['a pull_request_target run', { event: 'pull_request_target', bases: ['main'] }],
+    ['a workflow_run run', { event: 'workflow_run', branch: 'main', bases: [] }],
+    ['no event at all', { event: '', branch: 'main', bases: ['main'] }],
+  ];
+  for (const [what, o] of notFromMain) assert.deepEqual(outcomes(await from([workflowRun(70, '.github/workflows/ci.yml', o)])), ['test missing'], what);
+  const fromMain: [string, Parameters<typeof workflowRun>[2]][] = [
+    ['a push to main', { event: 'push', branch: 'main', bases: [] }],
+    ['a dispatch on main (a batch)', { event: 'workflow_dispatch', branch: 'main', bases: [] }],
+    ['a schedule on main', { event: 'schedule', branch: 'main', bases: [] }],
+  ];
+  for (const [what, o] of fromMain) assert.deepEqual(outcomes(await from([workflowRun(70, '.github/workflows/ci.yml', o)])), ['test pass'], what);
+  // The spoof's green never hides the real run's red (#943 with #925's rule: a run from elsewhere that isn't a pass blocks).
+  const both = judged(github({ runs: [{ id: 1, name: 'test', app: ACTIONS, suite: 70, conclusion: 'failure' }, { id: 2, name: 'test', app: ACTIONS, suite: 71 }], workflowRuns: [workflowRun(70, '.github/workflows/ci.yml'), workflowRun(71, '.github/workflows/ci.yml', { bases: ['evil'] })] }), pin);
+  assert.deepEqual(outcomes(await both), ['test fail']);
   // A check run in the pinned workflow's own suite that isn't one of its run's jobs (made through the API with the
   // run's token, guess: its page is /o/r/runs/<id>, not .../actions/runs/700/job/<id>) doesn't count.
   // Adversarial pass: the right path on another host, or over plain http, isn't the run's job page either.
@@ -152,6 +176,11 @@ test('an Actions-App pin never lets one workflow file supersede another: every f
   assert.deepEqual(await verdict([{ id: 1, name: 'test', app: ACTIONS, suite: 70 }, { id: 2, name: 'test', app: ACTIONS, suite: 71, conclusion: 'failure' }]), ['test fail']);
   // Both files pass: ready.
   assert.deepEqual(await verdict([{ id: 1, name: 'test', app: ACTIONS, suite: 70 }, { id: 2, name: 'test', app: ACTIONS, suite: 71 }]), ['test pass']);
+  // #943: the only green run of the name came from a PR into another base: GitHub Actions posted it, but it never counts.
+  const spoof = async (o: Parameters<typeof workflowRun>[2]) => outcomes(await judged(github({ runs: [{ id: 1, name: 'test', app: ACTIONS, suite: 70 }], workflowRuns: [workflowRun(70, '.github/workflows/ci.yml', o)], rules }), {}));
+  assert.deepEqual(await spoof({ bases: ['evil'] }), ['test missing'], 'a pull_request into another base');
+  assert.deepEqual(await spoof({ event: 'push', branch: 'evil', bases: [] }), ['test missing'], 'a push to another branch');
+  assert.deepEqual(await spoof({}), ['test pass'], 'a pull_request into main');
 });
 
 test('"latest" fails closed: a re-run of an older workflow run that failed after a newer run passed blocks; the owner\'s cases stay', async () => {
@@ -326,7 +355,7 @@ test('GitHub checks carry who posted each check run, and the workflow run behind
   assert.deepEqual(
     checks.map((c) => ({ name: c.name, app: c.app, workflow: c.workflow })),
     [
-      { name: 'test', app: ACTIONS, workflow: { run: 700, url: 'https://github.com/o/r/actions/runs/700', path: '.github/workflows/ci.yml', repo: 'o/r', sha: HEAD } },
+      { name: 'test', app: ACTIONS, workflow: { run: 700, url: 'https://github.com/o/r/actions/runs/700', path: '.github/workflows/ci.yml', repo: 'o/r', sha: HEAD, event: 'pull_request', branch: 'feature', bases: ['main'] } },
       { name: 'lint', app: CI_APP, workflow: undefined },
     ],
   );
@@ -343,7 +372,7 @@ test("the main watch's GitHub calls carry each run's App and suite, and the work
   }) as typeof fetch;
   const api = new GitHubMainWatchApi('o/r', async () => 't', f);
   assert.deepEqual((await api.checkRuns(HEAD)).map((r) => [r.app, r.suite, r.id, r.url]), [[ACTIONS, 70, 1, 'https://github.com/o/r/actions/runs/700/job/1']]);
-  assert.deepEqual(await api.runSources(HEAD), { '70': { run: 700, url: 'https://github.com/o/r/actions/runs/700', path: '.github/workflows/ci.yml', repo: 'o/r', sha: HEAD } });
+  assert.deepEqual(await api.runSources(HEAD), { '70': { run: 700, url: 'https://github.com/o/r/actions/runs/700', path: '.github/workflows/ci.yml', repo: 'o/r', sha: HEAD, event: 'pull_request', branch: 'feature', bases: ['main'] } });
   const denied = new GitHubMainWatchApi('o/r', async () => 't', (async () => new Response('{}', { status: 403 })) as typeof fetch);
   assert.equal(await denied.runSources(HEAD), null);
 });

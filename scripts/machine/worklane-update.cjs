@@ -983,15 +983,41 @@ function ruleApps(branch, rules) {
   return out;
 }
 
+/** What started workflow run `w` (GitHub's JSON), as fromBranch reads it (#943; src/check-source.ts workflowSourceOf). */
+function startedBy(w) {
+  const prs = Array.isArray(w.pull_requests) ? w.pull_requests : [];
+  return {
+    event: typeof w.event === 'string' ? w.event : '',
+    branch: typeof w.head_branch === 'string' ? w.head_branch : null,
+    // A pull request with no readable base counts as one based elsewhere: never trusted.
+    bases: prs.map((p) => (p && p.base && typeof p.base.ref === 'string' ? p.base.ref : '')),
+  };
+}
+
+/**
+ * Did workflow run `w` read its workflow file from `branch`'s own history (#943)? A pull_request run reads it from the
+ * PR's merge ref but posts its checks on the head, so a PR whose head is a commit already on `branch` and whose base
+ * is another branch, with its own workflow, would post green runs of the file's name on that commit. Only a push,
+ * dispatch or schedule run on `branch`, or a pull_request run whose every pull request (at least one) is based on
+ * `branch`. The same rule as src/check-source.ts fromBranch (test/check-run-branch.test.ts holds both).
+ */
+function fromBranch(w, branch) {
+  if (w.event === 'push' || w.event === 'workflow_dispatch' || w.event === 'schedule') return w.branch === branch;
+  if (w.event === 'pull_request') return Array.isArray(w.bases) && w.bases.length > 0 && w.bases.every((b) => b === branch);
+  return false;
+}
+
 /**
  * Did check run `r` on `o.sha` come from `pin`? A workflow pin needs GitHub Actions to have posted it, from its
- * suite's workflow run in `o.repo` and for `o.sha`.
+ * suite's workflow run in `o.repo`, for `o.sha` and started on `o.branch` (fromBranch).
  */
 function fromPinnedSource(r, pin, o) {
   if (pin.invalid) return false;
-  if ('app_id' in pin) return !!r.app && r.app.id === pin.app_id;
   const w = isActions(r) && r.check_suite && o.suites.get(r.check_suite.id);
-  return !!w && w.path === pin.workflow && w.repo.toLowerCase() === o.repo.toLowerCase() && w.sha === o.sha && isJobOfRun(r.html_url, r.id, w);
+  const started = !!w && w.sha === o.sha && typeof o.branch === 'string' && fromBranch(w, o.branch);
+  // GitHub Actions as the App posts a spoofed PR run too (#943): its run must also have started on the branch.
+  if ('app_id' in pin) return !!r.app && r.app.id === pin.app_id && (pin.app_id !== ACTIONS_APP_ID || started);
+  return started && w.path === pin.workflow && w.repo.toLowerCase() === o.repo.toLowerCase() && isJobOfRun(r.html_url, r.id, w);
 }
 
 /**
@@ -1023,6 +1049,8 @@ async function checkPins(deps, cfg, api) {
   const own = cfg.required_check_sources;
   const required = Array.isArray(cfg.required_checks) ? cfg.required_checks : [];
   const repo = api.slice(api.indexOf('/repos/') + '/repos/'.length);
+  // The branch whose commits are judged: a pinned run counts only if it started there (fromBranch, #943).
+  const pinBranch = cfg.branch || 'main';
   let rules = {};
   // WHY: an unanswered rules read (a rate limit, say) waits; read as "no App named", it would judge by name a check
   // the rules may pin.
@@ -1058,14 +1086,14 @@ async function checkPins(deps, cfg, api) {
      */
     forSha: async (sha, runs) => {
       // No required check pinned: nothing to read, and no shortcut either (evaluateChecks judges every name as before).
-      if (!pinned) return { pinOf, suites: new Map(), repo, sha, statuses: [] };
+      if (!pinned) return { pinOf, branch: pinBranch, suites: new Map(), repo, sha, statuses: [] };
       const list = (runs || []).filter((r) => r && typeof r.name === 'string');
       const passedOnce = (n) => list.some((r) => r.name === n && r.status === 'completed' && r.conclusion === 'success');
       const ran = (n) => list.some((r) => r.name === n);
       // A pinned required check with no passing run of its name at all can't pass from any source (a retired one only
       // counts when it ran), so the commit can't be installed: its verdict comes from the check runs alone.
       const hopeless = required.find((n) => pinOf(n) && !pinOf(n).invalid && (!RETIRED_CHECKS.includes(n) || ran(n)) && !passedOnce(n));
-      if (hopeless !== undefined) return { pinOf, suites: new Map(), repo, sha, statuses: [], hopeless };
+      if (hopeless !== undefined) return { pinOf, branch: pinBranch, suites: new Map(), repo, sha, statuses: [], hopeless };
       // Likewise a check judged by name (not a pinned required one) whose latest run finished red, or is still running,
       // holds the commit whatever the pinned ones say.
       const byName = new Map();
@@ -1075,15 +1103,15 @@ async function checkPins(deps, cfg, api) {
         if (!prev || (r.started_at || '') > (prev.started_at || '') || ((r.started_at || '') === (prev.started_at || '') && r.id > prev.id)) byName.set(r.name, r);
       }
       const red = [...byName.values()].find((r) => r.status === 'completed' && !GREEN.has(r.conclusion));
-      if (red) return { pinOf, suites: new Map(), repo, sha, statuses: [], red: { name: red.name, conclusion: red.conclusion } };
+      if (red) return { pinOf, branch: pinBranch, suites: new Map(), repo, sha, statuses: [], red: { name: red.name, conclusion: red.conclusion } };
       const running = [...byName.values()].find((r) => r.status !== 'completed');
-      if (running) return { pinOf, suites: new Map(), repo, sha, statuses: [], running: { name: running.name, status: running.status } };
+      if (running) return { pinOf, branch: pinBranch, suites: new Map(), repo, sha, statuses: [], running: { name: running.name, status: running.status } };
       const suites = new Map();
       if (needRuns) {
         const list = await pagesOf(deps, (page) => `${api}/actions/runs?head_sha=${sha}&per_page=100${page > 1 ? `&page=${page}` : ''}`, 'workflow_runs');
         if (!list) return { noAnswer: 'its workflow runs' };
         for (const w of list) {
-          if (w && typeof w.id === 'number' && typeof w.html_url === 'string' && typeof w.check_suite_id === 'number' && typeof w.path === 'string' && typeof w.head_sha === 'string' && w.repository && typeof w.repository.full_name === 'string') suites.set(w.check_suite_id, { run: w.id, url: w.html_url, path: w.path, repo: w.repository.full_name, sha: w.head_sha });
+          if (w && typeof w.id === 'number' && typeof w.html_url === 'string' && typeof w.check_suite_id === 'number' && typeof w.path === 'string' && typeof w.head_sha === 'string' && w.repository && typeof w.repository.full_name === 'string') suites.set(w.check_suite_id, { run: w.id, url: w.html_url, path: w.path, repo: w.repository.full_name, sha: w.head_sha, ...startedBy(w) });
         }
       }
       // The commit's statuses: a same-name status that isn't success refuses a pinned check (the owner's rule).
@@ -1093,7 +1121,7 @@ async function checkPins(deps, cfg, api) {
         if (!list) return { noAnswer: 'its commit statuses' };
         statuses = list.filter((s) => s && typeof s.context === 'string');
       }
-      return { pinOf, suites, repo, sha, statuses };
+      return { pinOf, branch: pinBranch, suites, repo, sha, statuses };
     },
   };
 }

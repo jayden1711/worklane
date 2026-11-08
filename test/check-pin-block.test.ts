@@ -170,7 +170,7 @@ test('the tip is read page by page; past the cap it is partial and says so', () 
       if (path === 'repos/o/r/commits/main') return { sha: 'c'.repeat(40) };
       const page = Number(/[?&]page=(\d+)/.exec(path)![1]);
       if (path.includes('/check-runs')) return { ...(withTotal ? { total_count: total } : {}), check_runs: runs.slice((page - 1) * 100, page * 100) };
-      return { total_count: 1, workflow_runs: [{ id: 700, html_url: 'https://github.com/o/r/actions/runs/700', check_suite_id: 70, path: '.github/workflows/ci.yml', head_sha: 'c'.repeat(40), repository: { full_name: 'o/r' } }] };
+      return { total_count: 1, workflow_runs: [{ id: 700, html_url: 'https://github.com/o/r/actions/runs/700', check_suite_id: 70, path: '.github/workflows/ci.yml', head_sha: 'c'.repeat(40), repository: { full_name: 'o/r' }, event: 'push', head_branch: 'main', pull_requests: [] }] };
     };
     return { f, asked };
   };

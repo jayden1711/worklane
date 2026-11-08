@@ -181,7 +181,7 @@ test("round 9: an Actions-App pin whose workflow runs weren't read never passes:
   // into one App group and evil.yml's later pass decided.
   const ruleset = () => json([{ type: 'required_status_checks', parameters: { required_status_checks: [{ context: 'ci', integration_id: 15368 }] } }]);
   const actions = (id: number, suite: number, conclusion: string) => ({ id, name: 'ci', status: 'completed', conclusion, html_url: `https://github.com/o/r/actions/runs/${suite * 10}/job/${id}`, app: { id: 15368, slug: 'github-actions' }, check_suite: { id: suite } });
-  const wf = (suite: number, path: string) => ({ id: suite * 10, html_url: `https://github.com/o/r/actions/runs/${suite * 10}`, check_suite_id: suite, path, head_sha: HEAD, repository: { full_name: 'o/r' } });
+  const wf = (suite: number, path: string) => ({ id: suite * 10, html_url: `https://github.com/o/r/actions/runs/${suite * 10}`, check_suite_id: suite, path, head_sha: HEAD, repository: { full_name: 'o/r' }, event: 'pull_request', head_branch: 'feature', pull_requests: [{ base: { ref: 'main' } }] });
   const f = (async (url: string) => {
     const u = new URL(url);
     if (u.pathname === `/repos/o/r/commits/${HEAD}/check-runs`) return json({ check_runs: [actions(1, 10, 'failure'), actions(2, 20, 'success')] });

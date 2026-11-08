@@ -379,7 +379,7 @@ export function judge(sha: string, f: Facts, o: { branch: string; required: stri
     out = out.map((byName) => {
       const pin = pinned(byName.name);
       if (pin === null) return byName;
-      return { name: byName.name, outcome: outcomeOf(pinnedVerdict(checksAt(byName.name, f.runs!, f.statuses ?? [], at, f.sources), pin, { repo: pins.repo, sha: head })) };
+      return { name: byName.name, outcome: outcomeOf(pinnedVerdict(checksAt(byName.name, f.runs!, f.statuses ?? [], at, f.sources), pin, { repo: pins.repo, sha: head, branch: o.branch })) };
     });
   }
   const bad = out.filter((c) => c.outcome !== 'pass');
