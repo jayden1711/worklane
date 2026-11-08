@@ -8,6 +8,7 @@ import { gitExecFileSync, gitSpawnSync } from './os/git.js';
 import { createHash, randomBytes } from 'node:crypto';
 import { cpSync, mkdirSync, readFileSync, existsSync, rmSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+import { CHECKPOINT_EVERY_MS, chainFileFor, checkpoint } from './audit-chain.js';
 import { BRAND } from './brand.js';
 import { RECOMMENDATION_PREFIX } from './decision-ask.js';
 import { CANARY_LABEL, canaryTask, machineCanaryInstance } from './canary.js';
@@ -165,6 +166,8 @@ export class Coordinator extends AutomationRuns {
     await step('superfan', () => this.checkSuperfan(), undefined);
     const dispatched = await step('dispatch', () => this.dispatch(), 0);
     await step('pool', () => this.maybeRefillPool(), undefined);
+    // The audit chain's checkpoint (src/audit-chain.ts, docs/audit-log.md): at most every 10 minutes.
+    await step('audit chain', () => this.checkpointAudit(), undefined);
     if (this.stopped) return;
     this.emit('coordinator.tick', { instance: this.d.instance, dispatched, reconciled });
   }
@@ -536,6 +539,16 @@ export class Coordinator extends AutomationRuns {
     this.emit('config.applied', { sha: r.sha, changed: r.changed, restart_needed: r.restart });
     this.configLoads();
     if (r.restart.length) console.error(`restart needed: ${r.restart.map((s) => s.path).join(', ')} changed on ${this.branch}; running with the old values until a restart`);
+  }
+
+  private auditCheckpointAt = 0;
+
+  /** A checkpoint of the audit chain over the event log (src/audit-chain.ts), at most every CHECKPOINT_EVERY_MS. */
+  checkpointAudit(now = Date.now()): void {
+    // The time is kept before the write, so a write the disk refuses is tried again in 10 minutes, not every tick.
+    if (this.d.log.path === ':memory:' || now - this.auditCheckpointAt < CHECKPOINT_EVERY_MS) return;
+    this.auditCheckpointAt = now;
+    checkpoint({ db: this.d.log.db, file: chainFileFor(this.d.log.path), now: () => new Date(now) });
   }
 
   private attachmentsSweptAt = 0;
